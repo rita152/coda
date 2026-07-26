@@ -7,5 +7,6 @@ export { runLoop, streamAssistantResponse } from './loop.js';
 export type { LoopConfig, LoopQueues, LoopSeed } from './loop.js';
 export { PendingMessageQueue } from './queue.js';
 export type { DrainMode } from './queue.js';
-export { convertContext } from './transform.js';
+export { convertContext, isSameModel, INTERRUPTED_RESULT_TEXT } from './transform.js';
+export type { ConvertOptions } from './transform.js';
 export { renderToolSchemas } from './tool-schemas.js';

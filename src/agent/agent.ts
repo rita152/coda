@@ -95,14 +95,20 @@ export class Agent {
     return this.#run('prompt', { initialPending: [message], skipInitialPoll: false });
   }
 
-  /** 随时可调:入 steering 队列,turn 边界注入(完整语义矩阵与 queue_update 在 M4)。 */
+  /** 随时可调:入 steering 队列,turn 边界注入。空文本 no-op(docs/06 边界 11)。 */
   steer(msg: UserMessage | string): void {
-    this.#steering.enqueue(typeof msg === 'string' ? toUserMessage(msg, 'steering') : msg);
+    const message = normalizeQueuedMessage(msg, 'steering');
+    if (message === undefined) return;
+    this.#steering.enqueue(message);
+    this.#emitQueueUpdate();
   }
 
-  /** 随时可调:入 follow-up 队列,任务将结束时消费(完整语义矩阵与 queue_update 在 M4)。 */
+  /** 随时可调:入 follow-up 队列,任务将结束时消费。空文本 no-op。 */
   followUp(msg: UserMessage | string): void {
-    this.#followUp.enqueue(typeof msg === 'string' ? toUserMessage(msg, 'follow_up') : msg);
+    const message = normalizeQueuedMessage(msg, 'follow_up');
+    if (message === undefined) return;
+    this.#followUp.enqueue(message);
+    this.#emitQueueUpdate();
   }
 
   /** 硬中断请求:队列不清空(清空是 clearQueues() 的显式动作)。idle 时 no-op。 */
@@ -120,10 +126,12 @@ export class Agent {
     }
     const steered = this.#steering.drain(this.steeringMode);
     if (steered.length > 0) {
+      this.#emitQueueUpdate();   // emit 链 FIFO:queue_update 先于 agent_start 到达 listener
       return this.#run('follow_up', { initialPending: steered, skipInitialPoll: true });
     }
     const followUps = this.#followUp.drain(this.followUpMode);
     if (followUps.length > 0) {
+      this.#emitQueueUpdate();
       return this.#run('follow_up', { initialPending: followUps, skipInitialPoll: true });
     }
     if (hasResidue(this.#transcript)) {
@@ -144,6 +152,15 @@ export class Agent {
   clearQueues(): void {
     this.#steering.clear();
     this.#followUp.clear();
+    this.#emitQueueUpdate();   // 空快照(docs/06 §8.1)
+  }
+
+  #emitQueueUpdate(): void {
+    void this.#emitter.emit({
+      type: 'queue_update',
+      steering: this.#steering.snapshot(),
+      followUp: this.#followUp.snapshot(),
+    });
   }
 
   #run(reason: 'prompt' | 'follow_up' | 'continue', seed: LoopSeed): Promise<void> {
@@ -183,27 +200,38 @@ function toUserMessage(text: string, source: NonNullable<UserMessage['source']>)
 }
 
 /**
- * 转录残局判定(continue() 第 3 路,含崩溃恢复):末条 assistant 为 aborted/error、
- * 存在未配对 toolCall、或末条消息非完结态(user / tool_result 收尾)。
+ * 入队消息归一:string 便利重载包装成 UserMessage;对象重载同样受空文本守卫
+ * (纯空白文本且无图片 → no-op)并强制盖上队列对应的 source——队列 kind 与注入后
+ * source 永不分叉(docs/03 UserMessage.source 语义,UI 徽标与统计都靠它)。
+ */
+function normalizeQueuedMessage(
+  msg: UserMessage | string,
+  source: 'steering' | 'follow_up',
+): UserMessage | undefined {
+  if (typeof msg === 'string') {
+    if (msg.trim().length === 0) return undefined;
+    return toUserMessage(msg, source);
+  }
+  const hasText = msg.content.some((p) => p.type === 'text' && p.text.trim().length > 0);
+  const hasImage = msg.content.some((p) => p.type === 'image');
+  if (!hasText && !hasImage) return undefined;
+  return msg.source === source ? msg : { ...msg, source };
+}
+
+/**
+ * 转录残局判定(continue() 第 3 路,含崩溃恢复):判据限定在**转录尾部**——
+ * 末条消息非完结态(user / tool_result 收尾)、末条 assistant 为 aborted/error、
+ * 或末条 assistant 自己的 toolCall 未配对(崩溃形态:stopReason 'tool_calls' 收尾)。
+ * 不做全转录扫描:历史中段的孤儿(abort 留下、已由 transform 出站修复)是既成事实,
+ * 不该让之后每次 continue() 都误判为「有残局」而重采样(核查发现的过宽判定)。
  * 导出仅为直接单测(崩溃恢复形态难以从公共 API 构造);非 Agent 公共 API。
  */
 export function hasResidue(transcript: readonly AgentMessage[]): boolean {
   if (transcript.length === 0) return false;
   const last = transcript[transcript.length - 1] as AgentMessage;
   if (last.role === 'user' || last.role === 'tool_result') return true;
-  if (last.role === 'assistant' && (last.stopReason === 'aborted' || last.stopReason === 'error')) {
-    return true;
-  }
-  // 未配对 toolCall:任何 assistant 的 tool_call 无对应 tool_result
-  const answered = new Set<string>();
-  for (const m of transcript) {
-    if (m.role === 'tool_result') answered.add(m.toolCallId);
-  }
-  for (const m of transcript) {
-    if (m.role !== 'assistant') continue;
-    for (const part of m.content) {
-      if (part.type === 'tool_call' && !answered.has(part.id)) return true;
-    }
-  }
-  return false;
+  if (last.role !== 'assistant') return false;
+  if (last.stopReason === 'aborted' || last.stopReason === 'error') return true;
+  // 末条 assistant 的 toolCall 未配对(其结果只可能出现在它之后——即没有)
+  return last.content.some((p) => p.type === 'tool_call');
 }

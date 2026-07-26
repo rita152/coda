@@ -372,6 +372,16 @@ export function convertContext(ctx: Context, target: ModelRef): Context {
   // 4. 非视觉模型:ImagePart 降级为占位文本 '[image omitted: <mimeType>]'
   return cleaned;
 }
+// 实现纪律(核查追加):
+// a. 配对匹配必须按「assistant 块」归属——每条 tool_result 只归属其前方最近一条声明了
+//    该 id 的 assistant。provider 跨 turn 复用 id(vLLM/llama.cpp 的 call_0 之类确定性 id)
+//    时,全局 id 集合会把后 turn 的真实结果错配给前 turn 的孤儿/被滤块;
+// b. 补合成结果按该 assistant 的 tool_calls 声明序输出(与 §3.3 的顺序断言一致);
+// c. 不属于任何 kept assistant 的 dangling tool_result 一并丢弃(转录事实层不会自产,
+//    但 transformContext 钩子可能产出;convertContext 是出站合法性的最后一道);
+// d. 步骤 4 只在显式 supportsImageParts:false 时触发(agent 层读不到 baseURL 自动推断的
+//    resolved profile);自动推断为非视觉的端点由 adapter 兜底——tool 消息里的图片
+//    以 '[image omitted: <mime>]' 并入文本,user 消息同样占位,均不无声丢弃。
 export const isSameModel = (a: ModelRef, b: ModelRef) =>
   a.provider === b.provider && a.api === b.api && a.model === b.model;
 ```

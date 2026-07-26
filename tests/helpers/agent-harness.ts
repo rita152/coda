@@ -5,19 +5,19 @@
 import { z } from 'zod';
 import { Agent } from '../../src/agent/index.js';
 import type { AgentConfig } from '../../src/agent/index.js';
-import type { AgentEvent, ModelConfig } from '../../src/protocol/index.js';
+import type { AgentEvent, AgentMessage, ModelConfig } from '../../src/protocol/index.js';
 import { createFauxStreamFn } from '../../src/providers/faux/index.js';
 import type { FauxScript } from '../../src/providers/faux/index.js';
-import type { ToolDefinition, ToolOutput } from '../../src/tools/types.js';
+import type { ToolContext, ToolDefinition, ToolOutput } from '../../src/tools/types.js';
 
 export const TEST_MODEL: ModelConfig = {
   ref: { provider: 'faux', api: 'faux', model: 'test' },
 };
 
-/** 极简测试工具:单 value 字段 schema,execute 可注入。 */
+/** 极简测试工具:单 value 字段 schema,execute 可注入(第 2 参拿 ToolContext,可观测 signal)。 */
 export function makeTool(
   name: string,
-  execute: (args: { value?: string }) => Promise<ToolOutput>,
+  execute: (args: { value?: string }, ctx: ToolContext) => Promise<ToolOutput>,
   opts?: { executionMode?: 'sequential' },
 ): ToolDefinition {
   return {
@@ -27,8 +27,24 @@ export function makeTool(
       value: z.string().optional().describe('test value'),
     }),
     executionMode: opts?.executionMode,
-    execute: async (call) => execute(call.args as { value?: string }),
+    execute: async (call, ctx) => execute(call.args as { value?: string }, ctx),
   };
+}
+
+/**
+ * 内部消息 → wire 形状(assistant.tool_calls / tool.tool_call_id)的最小映射,
+ * 供复用 M2 的配对断言 assertToolCallPairing 直接验 transform 产物(docs/11 M4 验收 3)。
+ * 真正的 wire 渲染在 adapter(tests zone 禁 import openai-chat),此映射只保留配对结构。
+ */
+export function toWireShape(messages: readonly AgentMessage[]): unknown[] {
+  return messages.map((m) => {
+    if (m.role === 'assistant') {
+      const toolCalls = m.content.filter((p) => p.type === 'tool_call').map((p) => ({ id: p.id }));
+      return toolCalls.length > 0 ? { role: 'assistant', tool_calls: toolCalls } : { role: 'assistant' };
+    }
+    if (m.role === 'tool_result') return { role: 'tool', tool_call_id: m.toolCallId };
+    return { role: m.role };
+  });
 }
 
 export function textOutput(text: string): ToolOutput {

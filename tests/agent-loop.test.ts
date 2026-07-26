@@ -312,11 +312,16 @@ describe('runLoop:一路到完成路径(M3)', () => {
     expect(steered?.role === 'user' && steered.content[0]?.type === 'text' && steered.content[0].text).toBe(
       'mid-run steer',
     );
-    // 事件序:turn_end 之后紧跟 turn_start → message_start(user)(turn 边界注入,非流中插入)
+    // 事件序:turn_end 之后 queue_update(drain 快照,M4)→ turn_start → message_start(user)
+    // (turn 边界注入,非流中插入)
     const seq = typeSequence(h.events);
     const firstTurnEnd = seq.indexOf('turn_end');
     expect(firstTurnEnd).toBeGreaterThan(-1);
-    expect(seq.slice(firstTurnEnd + 1, firstTurnEnd + 3)).toEqual(['turn_start', 'message_start(user)']);
+    expect(seq.slice(firstTurnEnd + 1, firstTurnEnd + 4)).toEqual([
+      'queue_update',
+      'turn_start',
+      'message_start(user)',
+    ]);
     // steering「续命」后正常完结:单次 agent_end(completed)
     const ends = h.events.filter((e) => e.type === 'agent_end');
     expect(ends).toHaveLength(1);

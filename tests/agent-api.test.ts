@@ -292,9 +292,12 @@ describe('continue() 三路启动(docs/05 §1.2)', () => {
     const asstAborted: AgentMessage = { ...asstStop, id: 'a3', content: [], stopReason: 'aborted' };
 
     expect(hasResidue([user, asstToolCall, toolResult])).toBe(true);            // 末条 tool_result
-    expect(hasResidue([user, asstToolCall, asstStop])).toBe(true);              // c1 未配对(崩溃恢复形态,末条本身完结)
+    expect(hasResidue([user, asstToolCall])).toBe(true);                        // 末条 assistant 自己的 toolCall 未配对(崩溃形态)
     expect(hasResidue([user, asstToolCall, toolResult, asstAborted])).toBe(true); // 末条 aborted assistant
     expect(hasResidue([user, asstToolCall, toolResult, asstStop])).toBe(false); // 完整完结
+    // 判据限定尾部:历史中段的孤儿(abort 既成事实,transform 出站已修复)不算残局——
+    // 否则之后每次 continue() 都被误判为「有残局」而重采样(M4 核查发现)
+    expect(hasResidue([user, asstToolCall, asstStop])).toBe(false);
     expect(hasResidue([])).toBe(false);                                         // 空转录
   });
 });

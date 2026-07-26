@@ -109,8 +109,17 @@ function pushAssistant(out: ChatCompletionMessageParam[], m: AssistantMessage): 
 
 function pushToolResult(out: ChatCompletionMessageParam[], m: ToolResultMessage, compat: ResolvedCompat): void {
   // tool 消息装不下图片:由 convertMessages 在批次结束后抽出补 user 消息。details 永不出站。
+  // 非视觉端点的图片兜底:transform 层只在显式 supportsImageParts:false 时降级,
+  // baseURL 自动推断出的非视觉 profile 走到这里——占位并入 tool 文本,不无声丢弃。
+  const textOnly = m.content.filter((p) => p.type === 'text').map((p) => p.text).join('');
+  const placeholders = compat.supportsImageParts
+    ? ''
+    : m.content
+        .filter((p): p is ImagePart => p.type === 'image')
+        .map((p) => `[image omitted: ${p.mimeType}]`)
+        .join(' ');
   const text =
-    m.content.filter((p) => p.type === 'text').map((p) => p.text).join('') ||
+    [textOnly, placeholders].filter((s) => s.length > 0).join(' ') ||
     (m.isError ? 'Error (no output)' : '(no output)');
   out.push({
     role: 'tool',

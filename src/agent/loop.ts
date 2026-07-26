@@ -66,11 +66,19 @@ export async function runLoop(
 ): Promise<void> {
   const newMessages: AgentMessage[] = []; // 本 run 新增消息,agent_end 携带
 
+  // queue_update:drain 消费时机的快照发射(docs/06 §8.1——注入消息的 message_start 之前)
+  const emitQueueUpdate = (): Promise<void> =>
+    emit({
+      type: 'queue_update',
+      steering: queues.steering.snapshot(),
+      followUp: queues.followUp.snapshot(),
+    });
+
   // [A] 起跑前 poll 一次 steering:用户在上一个回答期间就可能已输入。
   //     seed.initialPending(prompt 消息 / continue 预 drain)排在最前。
-  let pendingMessages: UserMessage[] = seed.skipInitialPoll
-    ? [...seed.initialPending]
-    : [...seed.initialPending, ...queues.steering.drain(cfg.steeringMode())];
+  const initialDrained = seed.skipInitialPoll ? [] : queues.steering.drain(cfg.steeringMode());
+  let pendingMessages: UserMessage[] = [...seed.initialPending, ...initialDrained];
+  if (initialDrained.length > 0) await emitQueueUpdate();
 
   outer: while (true) {                  // ── 外层:follow-up 续命 ──
     let hasMoreToolCalls = true;         // 初始 true:即使无 pending 也要采样一次
@@ -156,11 +164,13 @@ export async function runLoop(
       // [I] ★ steering 注入点:每个 turn 结束后。队列非空即「续命」——
       //     即使 assistant 没发工具调用,内层循环也继续。
       pendingMessages = queues.steering.drain(cfg.steeringMode());
+      if (pendingMessages.length > 0) await emitQueueUpdate();
     }
 
     // [J] ★ follow-up 注入点:agent 本来要停止时(无 toolCall、无 steering)才 poll。
     const followUps = queues.followUp.drain(cfg.followUpMode());
     if (followUps.length > 0) {
+      await emitQueueUpdate();
       pendingMessages = followUps;
       continue outer;
     }
@@ -189,7 +199,10 @@ export async function streamAssistantResponse(
     let ctx: Context = currentContext(cfg, transcript);
     if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
     stage = 'convertContext';
-    ctx = convertContext(ctx, cfg.model.ref);
+    // 视觉能力取 compat.supportsImageParts(CompatFlags 是开放袋,此处只认布尔 false)
+    ctx = convertContext(ctx, cfg.model.ref, {
+      supportsImages: cfg.model.compat?.['supportsImageParts'] !== false,
+    });
 
     // 每次模型调用取 child signal(AbortController 树,docs/05 §6):
     // 未来单调用级取消不牵连整个 run,也避免向 taskSignal 反复 addEventListener 泄漏。
