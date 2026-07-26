@@ -155,4 +155,44 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     );
     expect(rules).toContain('import/no-restricted-paths');
   });
+
+  it('src/agent 内 import @anthropic-ai/sdk 报错(M7:SDK 仅限 anthropic-messages,type-only 同拦)', async () => {
+    const { rules } = await lintProbe(
+      'src/agent/anthropic.probe.ts',
+      "import type Anthropic from '@anthropic-ai/sdk';\nexport type X = Anthropic;\n",
+    );
+    expect(rules).toContain('no-restricted-imports');
+  });
+
+  it('src/agent 内 import() 类型引用 @anthropic-ai 报错(type-only 渗漏通道)', async () => {
+    const { rules } = await lintProbe(
+      'src/agent/anthropic-import-type.probe.ts',
+      "export type P = import('@anthropic-ai/sdk').Anthropic;\n",
+    );
+    expect(rules).toContain('no-restricted-syntax');
+  });
+
+  it('anthropic-messages 内 import @anthropic-ai/sdk 放行(合法方向零违例)', async () => {
+    const { errorCount } = await lintProbe(
+      'src/providers/anthropic-messages/legal.probe.ts',
+      "import '@anthropic-ai/sdk';\n",
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('anthropic-messages 内 import openai 报错(跨 provider 隔离)', async () => {
+    const { rules } = await lintProbe(
+      'src/providers/anthropic-messages/cross.probe.ts',
+      "import type { ChatCompletion } from 'openai/resources';\nexport type X = ChatCompletion;\n",
+    );
+    expect(rules).toContain('no-restricted-imports');
+  });
+
+  it('tests 内 import providers/anthropic-messages 报错(测试不得触碰真实 adapter)', async () => {
+    const { rules } = await lintProbe(
+      'tests/anthropic-online.probe.ts',
+      "import '../src/providers/anthropic-messages/index.js';\n",
+    );
+    expect(rules).toContain('import/no-restricted-paths');
+  });
 });

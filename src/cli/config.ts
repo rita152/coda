@@ -32,7 +32,7 @@ export interface CliFlags {
   model?: string;
   baseUrl?: string;
   apiKey?: string;
-  provider?: 'openai-chat' | 'faux';
+  provider?: 'openai-chat' | 'anthropic-messages' | 'faux';
   fauxScript?: string;         // --faux-script <path>(FauxScript 的可序列化子集)
   cwd?: string;
   sessionDir?: string;         // 测试/e2e 隔离用
@@ -72,7 +72,9 @@ export function parseFlags(argv: string[]): CliFlags {
       case '--api-key': flags.apiKey = take(); break;
       case '--provider': {
         const v = take();
-        if (v !== 'openai-chat' && v !== 'faux') throw new Error(`unknown provider: ${v}`);
+        if (v !== 'openai-chat' && v !== 'anthropic-messages' && v !== 'faux') {
+          throw new Error(`unknown provider: ${v}`);
+        }
         flags.provider = v;
         break;
       }
@@ -99,7 +101,7 @@ export function parseFlags(argv: string[]): CliFlags {
 
 export interface ResolvedConfig {
   modelConfig: ModelConfig;
-  provider: 'openai-chat' | 'faux';
+  provider: 'openai-chat' | 'anthropic-messages' | 'faux';
   fauxScript?: string;
 }
 
@@ -137,17 +139,21 @@ export function resolveConfig(
     };
   }
 
-  const model = flags.model ?? env['CODA_MODEL'] ?? file.model ?? 'gpt-5.2';
+  const isAnthropic = provider === 'anthropic-messages';
+  const model =
+    flags.model ?? env['CODA_MODEL'] ?? file.model ?? (isAnthropic ? 'claude-opus-5' : 'gpt-5.2');
   const baseURL = flags.baseUrl ?? env['CODA_BASE_URL'] ?? file.baseURL ?? undefined;
+  // anthropic 侧优先接受 ANTHROPIC_API_KEY;两 provider 都尊重 CODA_API_KEY 与 config 文件
   const apiKey =
     flags.apiKey ??
     env['CODA_API_KEY'] ??
-    env['OPENAI_API_KEY'] ??
+    (isAnthropic ? env['ANTHROPIC_API_KEY'] : env['OPENAI_API_KEY']) ??
     (file.apiKeyEnv !== undefined ? env[file.apiKeyEnv] : file.apiKey) ??
     undefined;
   if (apiKey === undefined) {
+    const keyVar = isAnthropic ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
     throw new Error(
-      '未找到 API key:设置环境变量 OPENAI_API_KEY(或 CODA_API_KEY),' +
+      `未找到 API key:设置环境变量 ${keyVar}(或 CODA_API_KEY),` +
         '或在 ~/.coda/config.json 写入 { "apiKeyEnv": "MY_KEY_VAR" }',
     );
   }
@@ -157,7 +163,9 @@ export function resolveConfig(
   return {
     provider,
     modelConfig: {
-      ref: { provider: 'openai', api: 'openai-chat', model },
+      ref: isAnthropic
+        ? { provider: 'anthropic', api: 'anthropic-messages', model }
+        : { provider: 'openai', api: 'openai-chat', model },
       baseURL,
       apiKey,
       compat: file.compat,

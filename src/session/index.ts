@@ -1,4 +1,4 @@
-// session 层出口:JSONL 会话存储、恢复、usage 聚合;retry/compaction 在 M7。
+// session 层出口:JSONL 会话存储、恢复、usage 聚合、auto-retry(M7)、compaction(M7)。
 // 规格见 docs/08-session-persistence.md。只依赖 protocol/shared/agent(ESLint zone)。
 export { Session } from './session.js';
 export type {
@@ -8,6 +8,9 @@ export type {
   SessionListener,
   SessionOptions,
 } from './session.js';
+export { decideRetry, sleepWithAbort } from './retry.js';
+export type { RetryDecision } from './retry.js';
+export { selectTailStart, summarize, SUMMARIZE_PROMPT, HARD_TRUNCATION_SUMMARY } from './compactor.js';
 export {
   defaultSessionDir,
   listSessions,

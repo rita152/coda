@@ -228,9 +228,11 @@ export function decideRetry(msg: AssistantMessage, attempt: number, opts: Requir
   // if (!classifyRetryable(msg.errorDetails, msg.errorMessage)) return no(kind)
   // if (attempt >= opts.maxAttempts) return no('max attempts')
   // base = msg.errorDetails?.retryAfterMs ?? opts.baseDelayMs * 2 ** attempt
-  // return { retry: true, delayMs: min(opts.maxDelayMs, base) * (0.5 + random()) }  // full jitter
+  // return { retry: true, delayMs: min(opts.maxDelayMs, base) * (0.5 + random()) }  // equal-jitter 变体
 }
 ```
+
+`maxDelayMs` 封顶的是**乘 jitter 之前的 base**,不是最终值——最终 `delayMs` 系数 ∈ [0.5, 1.5),可达 `1.5 × maxDelayMs`。这是有意的 equal-jitter(不是 AWS full-jitter `random()*cap`),避免所有客户端在退避末端同时重试的 thundering herd。若某场景要求 `maxDelayMs` 是最终硬上限,应在此处改公式(对最终值再 clamp),而非默认行为。
 
 纯函数、无 IO、无计时器——RetryPolicy 单测只喂消息和 attempt 数即可,这是从 pi 的教训里直接换来的形态(重试逻辑一旦和循环控制缠在一起就再也测不动了)。
 
@@ -352,6 +354,8 @@ export interface SessionUsage {
 
 UsageTracker 监听 `message_end`(role assistant)累加;可选字段(cacheRead/reasoning/costUSD)按「出现过才累加,从未出现保持 undefined」处理,避免把「provider 不上报」渲染成 0。恢复会话时从 initialMessages 重建累计值——统计与转录同源,无独立状态文件。每次更新发 `usage_update` 事件,CLI 状态栏据此渲染(见 [09](./09-cli.md))。
 
+`cumulative` 的口径是**活动上下文**而非全量历史:恢复一个已压缩会话时 `initialMessages` 是折叠后的 `active`(synthetic summary + 尾部),被摘要掉的前缀 turn 的成本不再计入。这是刻意取舍——cumulative 反映的是「当前活着的上下文花了多少」,与运行中压缩时 `contextTokens` 只覆盖活动窗口一致;要审计一个会话的全生命周期总成本,读全量 JSONL 逐条 assistant 求和(历史 record 永不删除,§3.2)。
+
 注意 error/aborted 的 assistant 消息也可能带部分 usage(流断在中途),照常累加——钱已经花了。
 
 ### 7.3 成本
@@ -376,7 +380,7 @@ export interface ModelPricing {   // 每百万 token 美元价
 - compaction record 的 tailStartId 指向不存在的消息:忽略该 record,告警,用全量转录。
 - 会话目录不存在:create 时 `mkdir -p`;磁盘满导致 append 失败:发 fatal:false 的 error 事件,会话降级为「内存模式」继续跑,退出码非 0。
 - 重试等待期间进程被杀:恢复后转录里有 stopReason 'error' 的尾消息,`--continue` 即等价重试——无需持久化重试状态。
-- 连续 overflow → compaction → 又 overflow:压缩后 contextTokens 仍超限(尾部单 turn 过大)时,最多再硬截断一次;仍失败则放弃并报 fatal 错误,提示用户换更大上下文的模型。
+- 连续 overflow → compaction → 又 overflow:压缩后 contextTokens 仍超限(尾部单 turn 过大)时,最多再硬截断一次;仍失败则放弃并报 fatal 错误,提示用户换更大上下文的模型。实现用 `#overflowCompactions` 计数(任何成功 turn 归零):第 1 次 overflow 走正常 summarize 压缩,第 2 次强制硬截断(不再 summarize——否则又吃一次超限上下文),第 3 次直接 `error{fatal:true}` 停。护栏必需:overflow 的 error assistant 不更新 `contextTokens`,若无计数,切点与 dropped 前缀每轮不变 → 无限重压缩 + 无限 summarize 调用(核查实证)。
 
 ## 9. 验收清单
 

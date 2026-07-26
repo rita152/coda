@@ -1,0 +1,92 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`convertMessages(出站快照) > 综合 Context:逐 role 映射、空 assistant 跳过、图片原生进 tool_result、连续同 role 合并 1`] = `
+[
+  {
+    "content": [
+      {
+        "text": "看看这张图,再读两个文件",
+        "type": "text",
+      },
+      {
+        "source": {
+          "data": "aW1n",
+          "media_type": "image/png",
+          "type": "base64",
+        },
+        "type": "image",
+      },
+    ],
+    "role": "user",
+  },
+  {
+    "content": [
+      {
+        "signature": "SIG_abc",
+        "thinking": "让我想想。",
+        "type": "thinking",
+      },
+      {
+        "text": "好的,我来处理。",
+        "type": "text",
+      },
+      {
+        "id": "toolu_1",
+        "input": {
+          "path": "a.png",
+        },
+        "name": "read",
+        "type": "tool_use",
+      },
+      {
+        "id": "toolu_2",
+        "input": {
+          "path": "b.ts",
+        },
+        "name": "read",
+        "type": "tool_use",
+      },
+    ],
+    "role": "assistant",
+  },
+  {
+    "content": [
+      {
+        "content": [
+          {
+            "text": "(image file)",
+            "type": "text",
+          },
+          {
+            "source": {
+              "data": "cGljMQ==",
+              "media_type": "image/png",
+              "type": "base64",
+            },
+            "type": "image",
+          },
+        ],
+        "is_error": false,
+        "tool_use_id": "toolu_1",
+        "type": "tool_result",
+      },
+      {
+        "content": [
+          {
+            "text": "file contents here",
+            "type": "text",
+          },
+        ],
+        "is_error": false,
+        "tool_use_id": "toolu_2",
+        "type": "tool_result",
+      },
+      {
+        "text": "继续",
+        "type": "text",
+      },
+    ],
+    "role": "user",
+  },
+]
+`;

@@ -18,7 +18,9 @@
     "check": "npm run lint && npm run typecheck && npm run build && npm run test",
     "demo:m1": "tsx scripts/demo-m1.ts",
     "smoke": "tsx scripts/smoke-stream.ts",
-    "record:fixture": "tsx scripts/record-fixture.ts"
+    "smoke:anthropic": "tsx scripts/smoke-anthropic.ts",
+    "record:fixture": "tsx scripts/record-fixture.ts",
+    "record:anthropic": "tsx scripts/record-fixture-anthropic.ts"
   },
   "devDependencies": {
     "@types/diff": "^7.0.2",
@@ -40,6 +42,7 @@
     "@vscode/ripgrep-linux-x64": "^1.18.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@vscode/ripgrep": "^1.18.0",
     "diff": "^9.0.0",
     "openai": "^6.49.0",
