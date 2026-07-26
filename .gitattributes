@@ -1,0 +1,6 @@
+# 强制 LF——风险 R3(Windows CRLF)的第一道防线,见 docs/11-roadmap.md 风险清单。
+# edit 工具的 fixture、会话 JSONL、SSE fixture 都依赖跨平台一致的行尾。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary

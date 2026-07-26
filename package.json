@@ -1,0 +1,35 @@
+{
+  "name": "coda",
+  "version": "0.0.1",
+  "private": true,
+  "description": "TypeScript terminal coding agent — internal protocol core with provider adapters (see docs/)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "coda": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run lint && npm run typecheck && npm run build && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "eslint": "^9.39.5",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import": "^2.32.0",
+    "rollup": "^4.62.3",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "^4.62.3",
+    "@rollup/rollup-linux-x64-gnu": "^4.62.3"
+  }
+}

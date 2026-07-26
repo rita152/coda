@@ -1,0 +1,487 @@
+[← 返回地图](./README.md)
+
+# 05 · Agent 核心:双层循环、turn 生命周期、工具执行与中断语义
+
+本文是 `src/agent/` 的实施规格:Agent 类对外 API 与状态机、runLoop 双层循环的完整语义、streamAssistantResponse 的流水线、工具执行三阶段、parallel/sequential 调度、abort 语义、事件发射规则、错误分类。队列(steering/follow-up)的精确注入语义与转录修复细节见 [06](./06-steering-following.md),工具本体规格见 [07](./07-tools.md),provider 契约见 [04](./04-provider-adapter.md)。
+
+Agent 核心只依赖 `src/protocol/`:provider 以 `StreamFn` 注入,工具以 `ToolDefinition[]` 注入,UI 以 `subscribe(listener)` 挂接。这层的全部复杂度都围绕一个目标:**转录(`AgentMessage[]`)在任何时刻——包括 abort、length 截断、工具失败、provider 出错——都保持完整且可重放**。pi-mono 的 agent-loop.ts 是本设计的直接蓝本;codex、gemini-cli 的对应机制用于交叉验证取舍。
+
+## 1. Agent 类对外 API
+
+本项目设计约定的对外 API 如下(canonical,不得偏离):
+
+```ts
+class Agent {
+  constructor(config: AgentConfig)
+  prompt(text: string, opts?): Promise<void>     // 仅空闲时;运行中调用 throw(强制走 steer/followUp)
+  steer(msg: UserMessage | string): void         // 随时可调,入 steering 队列
+  followUp(msg: UserMessage | string): void      // 随时可调,入 follow-up 队列
+  abort(): void                                  // 硬中断
+  continue(): Promise<void>                      // abort/重试后续跑:优先 drain steering,否则 follow-up
+  waitForIdle(): Promise<void>
+  subscribe(listener: (e: AgentEvent) => void | Promise<void>): () => void
+  steeringMode / followUpMode: 'all' | 'one-at-a-time'   // 默认 one-at-a-time
+  clearQueues(): void
+  readonly state: 'idle' | 'running'
+}
+interface AgentConfig {
+  streamFn: StreamFn; model: ModelConfig; tools: ToolDefinition[];
+  systemPrompt: string | (() => string);
+  transformContext?: (ctx: Context) => Promise<Context>;        // 压缩/裁剪钩子
+  beforeToolCall?: (call: ToolCallPart) => Promise<{ block: true; reason: string } | { block?: false }>;
+  afterToolCall?:  (call: ToolCallPart, result: ToolResultMessage) => Promise<ToolResultMessage>;
+  shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
+  toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
+}
+```
+
+补充字段(本文档新增,不改上述 API 语义):`AgentConfig.cwd?: string`(工具执行工作目录,默认 `process.cwd()`,填充 `ToolContext.cwd`)。Agent 实例另持有一个会话级 `FileTracker`(read-before-edit 约束的登记表,见 [07](./07-tools.md)),随 `ToolContext` 传给每次工具执行。
+
+### 1.1 状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> running: "prompt() / continue()"
+    running --> running: "steer() / followUp() / abort()(仅请求中止)"
+    running --> idle: "agent_end 发出且全部 listener settle"
+    idle --> idle: "steer() / followUp()(入队,等下一次 run)"
+```
+
+只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 发出且所有 listener settle,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
+
+### 1.2 逐方法语义与合法调用时机
+
+| 方法 | `idle` 时 | `running` 时 |
+|---|---|---|
+| `prompt(text)` | 构造 `UserMessage{source:'prompt'}` 追加进转录,发 `agent_start{reason:'prompt'}`,启动 runLoop;返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
+| `steer(msg)` | 入 steering 队列(下次 run 的起跑 poll 会吃到,见 2.1 注释 A) | 入 steering 队列,turn 边界注入 |
+| `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
+| `abort()` | no-op | `taskAbort.abort()`,请求中止;队列**不清空** |
+| `continue()` | 见下文;返回 Promise 同 prompt | **throw** |
+| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 及全部 listener settle 后 resolve |
+| `subscribe` / `clearQueues` / `steeringMode=` | 任意时刻合法 | 任意时刻合法 |
+
+**为什么 `prompt()` 在运行中 throw 而不是自动排队**:pi 的原话是"入口强制二选一,没有第三种模糊状态"。"运行中的新输入"存在两种截然不同的意图——引导当前任务(steer)与追加下一个任务(followUp),API 层面替调用者猜意图必然猜错一半。codex 走了另一条路:同一个 `Op::UserInput` 由 core 按当前状态自动分派(有 active turn 即 steering)——那是**跨进程外协议**的正确选择,因为客户端无法可靠感知 core 状态;而我们的 Agent 是进程内对象,`state` 就在手边,让调用方(CLI 键位层:Enter=steer,Alt+Enter=followUp)显式选择,错误立即暴露。
+
+**`continue()` 的精确语义**(pi `Agent.continue()` 的移植):仅 `idle` 可调,依次尝试三种启动方式:
+
+1. steering 队列非空 → 按 `steeringMode` drain 出初始 `pendingMessages`,`agent_start{reason:'follow_up'}` 启动(并跳过 runLoop 的起跑 poll,防止双重 drain);
+2. 否则 follow-up 队列非空 → 同上,drain follow-up;
+3. 否则,若转录末尾存在残局——末条 assistant 消息的 stopReason 是 `aborted`/`error`,**或**转录末尾存在未配对的 toolCall / 末条消息不是完结态(崩溃恢复场景:工具执行中被杀的会话,末条是 `stopReason:'tool_calls'` 的 assistant 或 tool_result,见 [08](./08-session-persistence.md) §4.3)→ 以空 `pendingMessages` 启动,`agent_start{reason:'continue'}`——即**重采样**:残缺的 assistant 会被 transform 层过滤、孤儿 toolCall 会被补上合成结果(见第 3 节 convertContext 与 [06](./06-steering-following.md)),模型看到的是干净转录,等价于"重试上一轮"。session 层的 auto-retry(M7)与崩溃恢复都建立在这条路径上;
+4. 三者皆无 → throw(`"Nothing to continue"`)。
+
+`agent_start.reason` 的分配规则由此确定:`prompt()` → `'prompt'`;`continue()` 消费了排队消息 → `'follow_up'`;`continue()` 纯重采样 → `'continue'`。
+
+## 2. runLoop:双层循环
+
+### 2.1 turn 的精确定义
+
+**一个 turn = (0..n 条注入的排队 user 消息)+ 恰好一次 assistant 采样 + 该 assistant 的全部工具执行**(length 截断时的"全批合成失败"也算工具执行阶段)。`turn_start`/`turn_end` 括住整个区间,`turn_end` 携带 `{message, toolResults}`。stopReason 为 `error`/`aborted` 的采样同样构成一个(短)turn——错误也是转录的一部分。
+
+术语对齐:我们的 run(`agent_start`..`agent_end`)≈ codex 的 task(一次用户请求驱动的完整运行);我们的 turn ≈ codex task 内的一次采样迭代;gemini-cli 的 `Turn.run()` 恰好等于我们的一次 streamAssistantResponse(它只管一次模型请求,工具执行在外层)。
+
+### 2.2 完整伪码(runLoop 骨架展开)
+
+```ts
+// src/agent/loop.ts —— 独立于 Agent 类的纯函数,faux provider 下全离线可测(见 10 文档)
+async function runLoop(
+  cfg: AgentConfig,
+  transcript: AgentMessage[],                    // 权威转录,就地追加
+  queues: { steering: Queue; followUp: Queue },
+  taskSignal: AbortSignal,
+  emit: (e: AgentEvent) => Promise<void>,
+  seed: { initialPending: UserMessage[]; skipInitialPoll: boolean },
+): Promise<void> {
+  const newMessages: AgentMessage[] = [];        // 本 run 新增消息,agent_end 携带
+
+  // [A] 起跑前 poll 一次 steering:用户在上一个回答期间就可能已输入(pi 的注释原话)。
+  //     continue() 已自行 drain 时跳过,防止双重消费。
+  let pendingMessages = seed.skipInitialPoll ? seed.initialPending : queues.steering.drain();
+
+  outer: while (true) {                          // ── 外层:follow-up 续命 ──
+    let hasMoreToolCalls = true;                 // 初始 true:即使无 pending 也要采样一次
+    while (hasMoreToolCalls || pendingMessages.length > 0) {   // ── 内层:工具循环 + steering ──
+      await emit({ type: 'turn_start' });
+
+      // [B] 注入排队消息:逐条走 message_start/end 生命周期,追加进转录。
+      //     注入形态 = 排在上一批 toolResults 之后的 user 消息(source:'steering'|'follow_up')。
+      for (const m of pendingMessages) {
+        await emit({ type: 'message_start', message: m });
+        transcript.push(m); newMessages.push(m);
+        await emit({ type: 'message_end', message: m });
+      }
+      pendingMessages = [];
+
+      // [C] 采样:transformContext → convertContext → StreamFn → 消费事件流(见第 3 节)
+      const assistant = await streamAssistantResponse(cfg, transcript, taskSignal, emit);
+      transcript.push(assistant); newMessages.push(assistant);
+
+      // [D] error/aborted → 直接收尾(理由见 2.3)
+      if (assistant.stopReason === 'error' || assistant.stopReason === 'aborted') {
+        await emit({ type: 'turn_end', message: assistant, toolResults: [] });
+        await emit({ type: 'agent_end',
+                     reason: assistant.stopReason === 'aborted' ? 'aborted' : 'error',
+                     messages: newMessages });
+        return;
+      }
+
+      // [E] 工具执行
+      const toolCalls = assistant.content.filter((p): p is ToolCallPart => p.type === 'tool_call');
+      let toolResults: ToolResultMessage[] = [];
+      if (toolCalls.length > 0) {
+        let terminate = false;
+        if (assistant.stopReason === 'length') {
+          // [E1] length 截断 ⇒ 参数可能不完整,全批合成 isError 结果,不执行(理由见 2.4)
+          toolResults = failTruncatedToolCalls(toolCalls);
+        } else {
+          // [E2] 三阶段执行,sequential/parallel 由 cfg 与工具声明共同决定(见第 5 节)
+          ({ toolResults, terminate } = await executeToolCalls(cfg, toolCalls, taskSignal, emit));
+        }
+        // [F] 回填:严格按 assistant 内 toolCall 的源顺序,每条走 message_start/end
+        for (const r of toolResults) {
+          await emit({ type: 'message_start', message: r });
+          transcript.push(r); newMessages.push(r);
+          await emit({ type: 'message_end', message: r });
+        }
+        // terminate:批内全部结果都 terminate 才停(见 4.3);length 合成批永远不 terminate
+        hasMoreToolCalls = !terminate;
+      } else {
+        hasMoreToolCalls = false;                // 纯文本回复:内层是否继续取决于 steering
+      }
+
+      await emit({ type: 'turn_end', message: assistant, toolResults });
+
+      // [G] abort 检查:工具批次执行中被 abort(流采样中的 abort 已在 [D] 收尾)。
+      //     pi 不做此检查,靠下一次 StreamFn 立即返回 aborted 消息收尾——行为等价,
+      //     但转录会多一条空的 aborted assistant(虽会被 transform 过滤)。我们选显式检查,转录更干净。
+      if (taskSignal.aborted) {
+        await emit({ type: 'agent_end', reason: 'aborted', messages: newMessages });
+        return;
+      }
+
+      // [H] 优雅停:shouldStopAfterTurn 优先级高于两个队列——返回 true 直接结束,不 poll。
+      //     队列残留保留,由 session 层检查后决定是否 continue()(见 06 的 steering 语义第 7 条)。
+      if (await cfg.shouldStopAfterTurn?.(currentContext())) {
+        await emit({ type: 'agent_end', reason: 'completed', messages: newMessages });
+        return;
+      }
+
+      // [I] ★ steering 注入点:每个 turn 结束后。队列非空即"续命"——
+      //     即使 assistant 没发工具调用(hasMoreToolCalls=false),内层循环也继续。
+      pendingMessages = queues.steering.drain();
+    }
+
+    // [J] ★ follow-up 注入点:agent 本来要停止时(无 toolCall、无 steering)才 poll。
+    const followUps = queues.followUp.drain();
+    if (followUps.length > 0) { pendingMessages = followUps.map(toUserMessage); continue outer; }
+    break;
+  }
+  await emit({ type: 'agent_end', reason: 'completed', messages: newMessages });
+}
+```
+
+Agent 类是这个纯函数的薄封装:管理 state 翻转(`running` → finally 中回 `idle` 并 resolve waitForIdle)、持有两个 `PendingMessageQueue` 与 `taskAbort`、把 `subscribe` 的 listener 接到 `emit`。pi 同样把 Agent(agent.ts)与 loop(agent-loop.ts)分成两个文件,loop 以 config 钩子(`getSteeringMessages` 等)与队列解耦——这个切分让 loop 的每一个分支都能用脚本化 faux provider 单测,不需要构造真实 Agent。
+
+```mermaid
+flowchart TD
+    A["agent_start"] --> B["pending = drainSteering(起跑 poll)"]
+    B --> C{"内层: hasMoreToolCalls 或 pending 非空?"}
+    C -- 是 --> D["turn_start; 注入 pending 为 user 消息"]
+    D --> E["streamAssistantResponse"]
+    E --> F{"stopReason?"}
+    F -- "error / aborted" --> Z["turn_end → agent_end, return"]
+    F -- 其余 --> G{"有 toolCalls?"}
+    G -- 否 --> H["hasMoreToolCalls = false"]
+    G -- "是且 stopReason=length" --> G1["全批合成 isError, 不执行"]
+    G -- 是 --> G2["三阶段执行, 结果按源顺序回填"]
+    G1 --> T["turn_end"]
+    G2 --> T
+    H --> T
+    T --> I{"aborted? 或 shouldStopAfterTurn?"}
+    I -- 是 --> Z2["agent_end, return(不 poll 队列)"]
+    I -- 否 --> K["pending = drainSteering ★"]
+    K --> C
+    C -- 否 --> J["followUps = drainFollowUp ★"]
+    J -- 非空 --> M["pending = followUps; 外层 continue"]
+    M --> C
+    J -- 空 --> N["agent_end(completed)"]
+```
+
+### 2.3 为什么 error/aborted 直接结束,不在 loop 内重试
+
+1. **abort 是用户意图**,唯一正确的响应是尽快停下并保留现场(队列不清、转录完整),把"接下来做什么"还给用户/session 层。
+2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——全是 session 层关心的语境。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——我们照做,loop 保持哑。
+3. **结束是无损的**:错误已编码为带 `errorMessage` 的合法 AssistantMessage 留在转录里(可持久化、可诊断),transform 层重放时会过滤它,所以 `continue()` 的重采样在语义上与"loop 内重试"完全等价,只是控制权交还了一层。
+4. 备选方案:codex 在 turn 内做流断线重试并发 `StreamError` 事件通知 UI("不终止 turn")。这个体验更平滑,但需要 loop 感知"可重试性"。v1 走"结束 + session continue()"的简单路线,M7 若引入 in-loop 流重试,`AgentEvent.error{fatal:false}` 可承担 StreamError 的通知角色。
+
+### 2.4 为什么 stopReason 为 length 时全批工具失败、不执行
+
+`length` 意味着模型输出在生成中途被 maxOutputTokens 掐断,最后一个 toolCall 的 arguments JSON 大概率不完整。危险在于:adapter 的流式容错解析(每个 delta 用 partial-JSON 解析刷新 `arguments`,见 [04](./04-provider-adapter.md))会自动补闭括号,产出**语法合法、甚至能通过 zod 校验、但语义被截断**的参数——比如 write 工具的 `content` 字符串停在一半仍是合法 string。执行它等于写半个文件、跑半条命令。pi 明确把这条列为"很多 agent 忽略的坑"(`failToolCallsFromTruncatedMessage`)。
+
+为什么是**全批**失败而不是只失败最后一个?按内容序只有最后一个 toolCall 可能被截断,前面的已完整。但:(a) 模型的原始意图可能是更长的批次,后续调用根本没生成出来,执行前半批会造成"部分生效 + 提示截断"的含糊状态,模型重试时难以推断哪些已执行;(b) 全批失败是确定性的、幂等可重试的。合成的 isError 文案要**可执行**:说明"你的输出被 length 截断,参数可能不完整,请缩小单次输出或分多次调用后重发完整参数"。责任划分:adapter 只报告事实(照常产出 toolCall + stopReason),安全策略由 loop 统一执行——这样每个新 adapter 不必各自重新发明这条规则。
+
+## 3. streamAssistantResponse
+
+职责:把"当前转录"变成"一条完整落地的 AssistantMessage",途中把 provider 流事件转发为 `message_update`。流水线五步:
+
+```ts
+async function streamAssistantResponse(
+  cfg: AgentConfig, transcript: AgentMessage[], taskSignal: AbortSignal,
+  emit: (e: AgentEvent) => Promise<void>,
+): Promise<AssistantMessage> {
+  // (1) 组装 Context:systemPrompt 每 turn 重新求值(函数形式支持动态内容:
+  //     工具 promptSnippet 拼接、当前时间/cwd 等);tools 在 Agent 构造时经
+  //     z.toJSONSchema() 预渲染为 ToolSchema[] 并缓存,这里直接引用。
+  let ctx: Context = {
+    systemPrompt: typeof cfg.systemPrompt === 'function' ? cfg.systemPrompt() : cfg.systemPrompt,
+    messages: transcript,
+    tools: cachedToolSchemas,
+  };
+
+  // (2) 用户钩子 transformContext:压缩/裁剪。session 层的 compaction(M7)挂在这里。
+  if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
+
+  // (3) 固定清洗 convertContext(transform 层的 agent 侧入口):
+  //     产出出站副本,绝不改写权威转录。规则:
+  //     a. stopReason error/aborted 的 assistant 消息跳过不重放;
+  //     b. 孤儿 toolCall(有 tool_call 无对应 tool_result)补合成
+  //        "[Tool execution was interrupted]" isError 结果——保证 tool_calls/tool 配对合法;
+  //     c. 跨模型(ModelRef 三元组不同)时 reasoning 降级为文本/剥离 signature、toolCallId 归一化;
+  //     d. 非视觉模型图片降占位文本。规则表与实现细节见 04/06。
+  ctx = convertContext(ctx, cfg.model.ref);
+
+  // (4) 每次模型调用取 child signal(AbortController 树,见第 6 节)
+  const signal = AbortSignal.any([taskSignal]);
+
+  // (5) StreamFn 铁律:绝不 throw、绝不 reject,一切错误在流内。
+  //     外层 try/catch 只是协议 bug 的最后防线(见第 8 节),不是错误处理路径。
+  const stream = cfg.streamFn(cfg.model, ctx, { signal, ...cfg.model.defaults });
+
+  for await (const ev of stream) {
+    if (ev.type === 'start') {
+      await emit({ type: 'message_start', message: ev.partial });   // 首个事件宣布 assistant 消息诞生
+      continue;
+    }
+    if (ev.type === 'done' || ev.type === 'error') continue;        // 终态不走 message_update,由下方 message_end 承载
+    // 仅转发三段式块事件(text/reasoning/tool_call 的 start/delta/end):
+    // UI 既可消费 delta 增量渲染,也可只看 partial 快照
+    await emit({ type: 'message_update', messageId: messageIdOf(ev), event: ev });
+  }
+
+  // (6) 收尾:EventStream.result() 对 done 与 error 一视同仁地返回最终 AssistantMessage
+  //     (stopReason 已定,usage 已填)。message_end 发完整消息。
+  const message = await stream.result();
+  await emit({ type: 'message_end', message });
+  return message;
+}
+```
+
+两个刻意的顺序决策:
+
+- **transformContext 在 convertContext 之前**。用户钩子(压缩)应当看到权威转录的原貌并自由改写;而 convertContext 是**合法性保证**,必须是出站前的最后一道——即使用户钩子有 bug 产出了非法配对,固定清洗也会修复,adapter 永远收到合法 Context。反过来排则一个错误的 transformContext 就能让 Chat Completions 400。
+- **convertContext 产出副本、不落盘**。权威转录永远保留 error/aborted 消息与孤儿 toolCall 的"事实"([03](./03-internal-protocol.md) 的消息模型约定:错误也是合法消息);清洗只发生在每次出站的视图上。pi 的 transform-messages 就是这样一层"垫层",它是 abort/steering/换模型不产生非法请求的核心,我们照搬结构。
+
+## 4. 工具执行三阶段
+
+每个 toolCall 依次经过 prepare → execute → finalize。pi 的对应物是 `prepareToolCall / executePreparedToolCall / finalizeExecutedToolCall`。
+
+```ts
+type Prepared =
+  | { kind: 'ok'; call: ToolCallPart; tool: ToolDefinition; args: unknown }
+  | { kind: 'reject'; call: ToolCallPart; result: ToolResultMessage };  // 直接就是回喂结果
+
+// —— 阶段 1:prepare(查找 → 校验 → 拦截)——
+async function prepareToolCall(cfg: AgentConfig, call: ToolCallPart): Promise<Prepared> {
+  const tool = cfg.tools.find(t => t.name === call.name);
+  if (!tool) return reject(call,
+    `Unknown tool "${call.name}". Available tools: ${cfg.tools.map(t => t.name).join(', ')}`);
+
+  const parsed = tool.parameters.safeParse(call.arguments);         // zod v4
+  if (!parsed.success) return reject(call,
+    `Invalid arguments for "${call.name}": ${prettyZodError(parsed.error)}. ` +
+    `Fix the arguments and call the tool again.`);
+
+  if (cfg.beforeToolCall) {
+    const d = await cfg.beforeToolCall(call);
+    if (d.block) return reject(call, d.reason);   // M6 审批的 deny 决策也从这条路回喂
+  }
+  return { kind: 'ok', call, tool, args: parsed.data };
+}
+
+// —— 阶段 2:execute(throw = 失败)——
+async function executePrepared(p, ctx: ToolContext, emit): Promise<{ result: ToolResultMessage; terminate: boolean }> {
+  await emit({ type: 'tool_execution_start', toolCallId: p.call.id, toolName: p.call.name, args: p.args });
+  let output: ToolOutput | undefined;
+  let result: ToolResultMessage;
+  try {
+    output = await p.tool.execute({ id: p.call.id, args: p.args }, ctx);
+    result = toToolResultMessage(p.call, output);       // isError:false;框架级截断 post-hook
+                                                        // (2000 行/50KB,超限落盘)在此应用,见 07
+  } catch (e) {
+    result = errorToolResult(p.call, formatToolError(e));  // AbortError → "Tool execution was interrupted"
+  }
+  return { result, terminate: output?.terminate === true };
+}
+
+// —— 阶段 3:finalize(改写 → 收尾事件)——
+async function finalizeToolCall(cfg, call, r, emit) {
+  if (cfg.afterToolCall) r.result = await cfg.afterToolCall(call, r.result);
+  await emit({ type: 'tool_execution_end', toolCallId: call.id, result: r.result });
+  return r;
+}
+```
+
+关键决策:
+
+- **校验失败与未知工具名回喂模型,而不是抛异常**。幻觉工具名、漏参数、类型错都是模型的常规失误,属于对话内容而非程序错误;合成 isError ToolResultMessage(附可用工具列表 / 美化后的 zod 错误 + "请修正后重试")让模型自我修正,任务继续。抛异常会把一次可自愈的失误升级成整个 run 的失败。gemini-cli 把这类失败建模为工具状态机的 `Error` 终态、同样回喂——业界一致。注意 reject 出的结果**不发 `tool_execution_start/end`**?不——为了 UI 一致性,reject 结果同样走 finalize 发 `tool_execution_end`(start 可省;实现时统一发 start/end 对更简单,args 用原始 `call.arguments`)。
+- **`beforeToolCall` 是权限系统的挂载点**(M6):approval 流程整个藏在这个钩子里(发 `approval_request` 事件 + Promise resolver 注册表,等用户决策),loop 对审批零感知。codex 的 `Denied`(拒绝但任务继续,理由给模型)与 `Abort`(停任务)之分,在我们这里映射为:deny → `{block:true, reason}` 回喂;abort → 钩子内部调 `agent.abort()` 后返回 block。
+- **`afterToolCall` 可整体改写结果**:脱敏、追加提示、改 isError——pi 用它做结果注入,我们同样开放整条 ToolResultMessage 的替换权。
+- **terminate 语义:批内全部 terminate 才提前停**(`hasMoreToolCalls = !terminate`)。单个工具说"停"不算数:同批其他工具的结果模型还没看到,提前停会留下模型认知外的状态。全批一致才表达了"这轮工具集体认为任务该收尾"。terminate 停下时走的是内层循环自然退出 → follow-up poll → `agent_end('completed')` 的正常路径,不是异常路径。plan 类工具是 terminate 的预期用户。
+
+## 5. parallel vs sequential
+
+```ts
+async function executeToolCalls(cfg, toolCalls, taskSignal, emit) {
+  // preflight:prepare(含 before 钩子)一律按源顺序串行——审批 UI 必须逐个弹出,
+  // 且 FileTracker 等校验依赖确定顺序。pi 在 parallel 模式下同样串行 preflight。
+  const prepared: Prepared[] = [];
+  for (const call of toolCalls) prepared.push(await prepareToolCall(cfg, call));
+
+  // 模式判定:任一被调用工具声明 executionMode:'sequential' ⇒ 整批退化为顺序执行
+  const sequential = cfg.toolExecution === 'sequential'
+    || prepared.some(p => p.kind === 'ok' && p.tool.executionMode === 'sequential');
+
+  const results = new Map<string, ToolResultMessage>();
+  let allTerminate = true;
+
+  if (sequential) {
+    for (const p of prepared) {
+      const r = await runOne(p);                    // 三阶段
+      results.set(p.call.id, r.result); allTerminate &&= r.terminate;
+      if (taskSignal.aborted) break;                // ★ 每个工具后检查;剩余成为孤儿(见第 6 节)
+    }
+  } else {
+    await Promise.all(prepared.map(async p => {     // 并发执行;tool_execution_end 按完成顺序发出
+      const r = await runOne(p);
+      results.set(p.call.id, r.result); allTerminate &&= r.terminate;
+    }));
+  }
+
+  // ★ 回填按 assistant 源顺序,不按完成顺序——转录顺序必须确定,重放与测试才可复现
+  const ordered = toolCalls.map(c => results.get(c.id)).filter(Boolean);
+  return { toolResults: ordered,
+           terminate: allTerminate && ordered.length === toolCalls.length };
+}
+```
+
+- **默认 parallel**:read/grep/glob/ls 是典型的只读并发受益者,模型经常一次发 3-5 个读操作。
+- **声明退化是整批的,不是逐个的**:批内混合并行会产生"read A 与 edit A 竞速"这类模型无法预知的交错——模型按源顺序生成调用,心智模型就是顺序语义;只要批内出现一个 bash/edit/write(它们都声明 `executionMode:'sequential'`,见 [07](./07-tools.md)),整批退化,保住这个心智模型。gemini-cli 同样以"一次模型回复的全部 tool calls"为批调度单元。
+- **同路径写操作串行化是第二道防线**:工具层的 per-path mutation queue(pi 的 `withFileMutationQueue`)保护跨批次、以及未来放开并行写配置时的竞争。移植时注意 pi 的细节:**不在 abort 事件回调里 reject,只在每个 await 后检查 `signal.aborted`**——否则队列锁会被提前释放,后续写操作在前一个未完成时闯入。
+- 事件顺序约定:`tool_execution_start` 按源顺序(preflight 串行保证)、`tool_execution_end` 按完成顺序、toolResult 的 `message_start/end` 按源顺序在批后统一发出。UI 用 toolCallId 关联,不依赖到达顺序。
+
+## 6. abort 语义:AbortController 树
+
+```
+Agent.abort() ──> taskAbort: AbortController            // 每次 run(prompt/continue)新建一个
+                    ├─ 模型调用 child signal              // 每次 streamAssistantResponse 一个
+                    └─ 工具执行 child signal × N          // 每个 tool.execute 一个(ToolContext.signal)
+```
+
+用 child(`AbortSignal.any([taskSignal])`,Node ≥ 20.3;或手动 link 并在 finally 里 removeEventListener)而不是全员共享一个 signal,理由:(a) 未来的单工具级取消(per-tool timeout、doom-loop 强杀单个调用)不必牵连整个 run;(b) 长 run 中数百次执行往同一个 signal 上 addEventListener 会泄漏与告警,child 随执行结束解除挂接;(c) codex 的 cancellation token 树(task token → 采样/工具 child token)是同构验证。
+
+abort 发生在不同时点的行为:
+
+| 时点 | 行为 |
+|---|---|
+| 模型流式中 | child signal 触发 → adapter 以 `error` 事件收尾(stopReason `'aborted'`,**已生成的 partial 内容保留在消息里**)→ loop 走 [D] 分支 → `turn_end` + `agent_end('aborted')` |
+| sequential 工具批次中 | 当前工具通过 `ToolContext.signal` 观察到中止,尽快返回或 throw AbortError(转 isError 结果);批循环在**每个工具完成后检查 signal 直接 break**——剩余 toolCall 不执行、**也不伪造结果**,成为转录中的孤儿;[G] 检查 → `agent_end('aborted')` |
+| parallel 工具批次中 | 全部 child signal 同时触发,各工具自行了断(已 settle 的结果保留);批后 [G] 检查收尾 |
+| turn 边界间隙 | [G] 检查或下一次 StreamFn 立即返回 aborted 消息,殊途同归 |
+| idle | no-op |
+
+**孤儿 toolCall 交给 transform 层,不在 abort 现场修补**:被中断批次留下的"有 tool_call 无 tool_result"配对,由 convertContext 在**下一次出站前**补合成 `"[Tool execution was interrupted]"` 的 isError 结果(仅出站视图,权威转录保持事实)。为什么不当场往转录里写合成结果?因为 abort 现场写入会把"没执行"伪造成"执行失败"落进持久化转录,而出站时修补则让事实与合法性各归其位。Chat Completions 对悬空 tool_call 直接 400,这层修补是硬需求(codex/gemini 各自有等价处理)。
+
+其余要点:`abort()` 不清队列(pi 的 UX:Esc = abort 后,已排队输入保留可再编辑;清空是 `clearQueues()` 的显式动作);aborted 的 assistant 消息保留在转录、重放时被 transform 过滤,所以 abort → `continue()` 是无损续跑。M6 前瞻(codex 教训):abort 时要**先让工具/流观察到 cancellation,再以 abort 决议清空 pending approvals**——顺序反了,悬着的审批会先以"拒绝"形态漏给模型。
+
+## 7. 事件发射规则
+
+```ts
+// src/agent/events.ts —— 单一 promise 链把全部发射串行化
+class Emitter {
+  private chain = Promise.resolve();
+  private listeners = new Set<Listener>();
+  emit(e: AgentEvent): Promise<void> {
+    this.chain = this.chain.then(async () => {
+      for (const l of [...this.listeners]) {          // 快照:emit 期间退订安全
+        try { await l(e); }                            // ★ 逐个 await,订阅序
+        catch (err) { reportListenerError(err); }      // 吞掉并诊断,绝不打断 loop
+      }
+    });
+    return this.chain;
+  }
+}
+```
+
+规则与取舍:
+
+1. **listener 逐个 await、订阅序串行**。这是 pi 的选择,我们采纳同一权衡:代价是慢 listener 拖慢 loop(delta 是热路径),换来的是**确定性**——事件到达每个 listener 的顺序与产生顺序严格一致;session 层的 JSONL 追加 listener 在下一个事件前完成落盘;`agent_end` 的 emit settle 之后才翻回 `idle`,因此 **`waitForIdle()` resolve 时一切副作用(持久化、渲染)已经尘埃落定**——测试与 headless 模式依赖这条性质。
+2. 由此对 listener 的纪律:必须廉价。渲染器不要在 listener 里做 O(内容长度) 的重绘,收 delta 进缓冲、用自己的帧定时器合并绘制(见 [09 CLI](./09-cli.md) 的渲染策略);重活(网络上报等)自行排队,listener 只入队即返回。
+3. **listener 异常吞掉并诊断**(console/诊断钩子),绝不让 UI 的 bug 打断 loop、污染转录。不要在这里再 emit `error` 事件——会递归。
+4. **所有发射走同一条 promise 链**:loop 主路径 `await emit(...)` 获得背压;工具的 `onUpdate` 回调(bash 100ms 节流输出)用 `void emit(...)` 火后不理,但仍进链,保证 parallel 工具的 update 事件不会与其他事件交错穿插到 listener 内部。
+5. `subscribe` 返回退订函数;快照遍历保证 emit 中途退订/订阅不炸迭代器。
+
+## 8. 错误分类与处理策略
+
+loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转录后结束,永远不裸 throw**(唯一例外是协议 bug 的防御路径)。可重试性判定不在 loop——errorMessage 里带 adapter 附的 status/requestID,session 层解析分类(M7 auto-retry)。
+
+| 类别 | 典型触发 | 编码形态 | loop 行为 | 恢复责任方 |
+|---|---|---|---|---|
+| 用户中止 | `abort()` / Esc | AssistantMessage `stopReason:'aborted'`(或工具批孤儿) | `turn_end` + `agent_end('aborted')`,队列保留 | CLI/session 决定是否 `continue()` |
+| 可重试 provider 错误 | 429、5xx、ECONNRESET、流中断(无 finish_reason)、超时 | `stopReason:'error'` + errorMessage(status/requestID) | `agent_end('error')` | session 层 auto-retry(M7):指数退避 + `continue()` 重采样(error 消息被 transform 过滤) |
+| 不可重试请求错误 | 400 参数/schema、401/403、404 model | 同上 | 同上 | 呈现用户,人工处理;禁止 retry(重试只会烧钱) |
+| 上下文超限 | 400 context_length_exceeded | 同上 | 同上 | session 层 compaction(M7)后 `continue()` |
+| content_filter | 提供商内容拦截 | `stopReason:'content_filter'`(**done 分支,不是 error**) | 正常 turn 完结;无 toolCalls 则自然走向结束 | 用户改写请求。响应本身完整合法(可能含部分文本),按错误处理会丢内容 |
+| length 截断 + toolCalls | maxOutputTokens 耗尽 | toolCall 照常产出 | 全批合成 isError 回喂,**不执行**,loop 继续 | 模型重发;session 可调大 maxOutputTokens |
+| 未知工具 / 参数校验失败 | 幻觉工具名、漏参数 | 合成 isError ToolResultMessage | 回喂,loop 继续 | 模型自我修正 |
+| 工具执行 throw | 文件不存在、命令非零退出已是正常输出,这里指真异常:权限、超时 | isError ToolResultMessage | 回喂,loop 继续 | 模型改道 |
+| `beforeToolCall` 拦截 | 权限 deny(M6) | isError ToolResultMessage(附 reason) | 回喂,loop 继续 | 模型换方案(codex `Denied` 语义) |
+| 协议 bug | StreamFn throw/reject、流无终止事件、`done` 后继续推事件 | 防御 catch → 合成 `stopReason:'error'` assistant + `AgentEvent error{fatal:true}` | `agent_end('error')` | 修 adapter。faux/fixture 测试中直接 assert(见 [10 测试](./10-testing.md));生产防御路径只求不丢转录 |
+
+## 9. 验收清单
+
+状态机与 API:
+
+- [ ] 运行中调 `prompt()` throw;`steer/followUp` 在 idle 与 running 均入队不 throw
+- [ ] `continue()` 三路启动:steering 优先 → follow-up → 末条 assistant 为 aborted/error、或转录末尾存在未配对 toolCall / 末条消息非完结态(崩溃恢复)时重采样;三者皆无 throw;`agent_start.reason` 分别为 `'follow_up'/'follow_up'/'continue'`
+- [ ] `waitForIdle()`:挂一个人为延迟 50ms 的 async listener,resolve 时该 listener 已处理完 `agent_end`
+
+runLoop(全部用 faux provider 离线验证):
+
+- [ ] 纯文本回复 + 空队列:恰好 1 个 turn,`agent_end('completed')`,事件序 `agent_start → turn_start → message_start(assistant) → message_update* → message_end → turn_end → agent_end`
+- [ ] assistant 带 2 个 toolCall:结果按源顺序回填(故意让第 1 个工具慢于第 2 个),toolResult 的 message_* 在 turn_end 前发出
+- [ ] `stopReason:'length'` + toolCalls:工具 execute 未被调用(spy 断言),转录出现全批 isError 结果,loop 继续采样
+- [ ] 未知工具名/校验失败:不 throw,isError 结果含可用工具列表/zod 错误文案
+- [ ] terminate:全批 terminate → run 结束;2 个中 1 个 terminate → 继续
+- [ ] `shouldStopAfterTurn` 返回 true:不 poll 队列,队列残留可被随后的 `continue()` 消费
+
+调度与 abort:
+
+- [ ] 批内含声明 `executionMode:'sequential'` 的工具 → 整批顺序执行(用时间戳断言无并发)
+- [ ] parallel 批:`tool_execution_end` 按完成顺序,toolResult 消息按源顺序
+- [ ] 流式中 abort:assistant `stopReason:'aborted'` 且保留 partial 文本,`agent_end('aborted')`,队列未清
+- [ ] sequential 批第 1 个工具执行中 abort:第 2 个不执行、转录无伪造结果;下一次出站 Context 中孤儿 toolCall 已补 `"[Tool execution was interrupted]"` isError 结果(检查 convertContext 输出而非转录)
+- [ ] abort → `continue()`:重采样请求的出站消息里不含 aborted assistant
+
+错误路径:
+
+- [ ] faux provider 推 `error` 事件(模拟 500):转录含 `stopReason:'error'` + errorMessage 的 assistant,`agent_end('error')`,后续 `continue()` 出站不含该消息
+- [ ] 故意让 StreamFn throw(违约 provider):loop 不崩,产出协议 bug 防御路径的 error assistant + `fatal:true` 事件
+- [ ] listener throw:loop 不受影响,后续 listener 仍收到事件
+
+## 相关文档
+
+- [03 内部协议](./03-internal-protocol.md) —— AgentMessage/ProviderEvent/AgentEvent/EventStream 的 canonical 定义
+- [04 Provider 与 Chat Completions adapter](./04-provider-adapter.md) —— StreamFn 铁律、流解析、compat 开关
+- [06 steering 与 follow-up](./06-steering-following.md) —— 队列语义、注入点、abort 交互、transform 层转录修复全表
+- [07 工具集](./07-tools.md) —— ToolDefinition/ToolContext、各工具规格、截断策略、文件互斥队列

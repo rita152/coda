@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # lint + typecheck + build + test 三件套(M0 验收,docs/11-roadmap.md)
+      - run: npm run check
+      # openai import 第二道防线(ESLint 之外的机械 grep,docs/02-architecture.md 第 8 节)
+      - name: openai import boundary (second line of defense)
+        run: |
+          ! grep -rn "from ['\"]openai" src --include='*.ts' | grep -v providers/openai-chat

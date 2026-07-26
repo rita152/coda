@@ -1,0 +1,80 @@
+// 分层依赖规则的机械保障(规格见 docs/02-architecture.md 第 3 节)。
+// 规则 A:import/no-restricted-paths 管项目内目录间依赖方向;
+// 规则 B:no-restricted-imports 管 npm 包级封锁(openai 仅允许 providers/openai-chat);
+// 规则 C:protocol 层零依赖(禁止一切 bare import,含 node: 内置模块)。
+// 三条规则的自证测试在 tests/boundaries.test.ts——改动本文件必须让该测试仍然通过。
+import tseslint from 'typescript-eslint';
+import importPlugin from 'eslint-plugin-import';
+
+export default tseslint.config(
+  { ignores: ['dist/**', 'node_modules/**', 'docs/**', 'coverage/**'] },
+  ...tseslint.configs.recommended,
+
+  // ---- 规则 A:目录间依赖方向(zone 语义:target 内的文件不得 import from 内的模块)----
+  {
+    files: ['src/**/*.ts', 'tests/**/*.ts'],
+    plugins: { import: importPlugin },
+    settings: {
+      'import/resolver': {
+        typescript: { project: './tsconfig.json' },
+      },
+    },
+    rules: {
+      'import/no-restricted-paths': ['error', {
+        zones: [
+          // protocol、shared 是叶子:不得 import src 下任何其他目录
+          { target: './src/protocol', from: './src', except: ['./protocol'] },
+          { target: './src/shared', from: './src', except: ['./shared'] },
+          // providers 只向下看 protocol/shared
+          { target: './src/providers', from: './src/agent' },
+          { target: './src/providers', from: './src/tools' },
+          { target: './src/providers', from: './src/session' },
+          { target: './src/providers', from: './src/cli' },
+          // agent 不认识 providers/session/cli;对 tools 仅放行框架类型文件
+          { target: './src/agent', from: './src/providers' },
+          { target: './src/agent', from: './src/session' },
+          { target: './src/agent', from: './src/cli' },
+          { target: './src/agent', from: './src/tools', except: ['./types.ts'] },
+          // tools 不认识上层与 providers
+          { target: './src/tools', from: './src/providers' },
+          { target: './src/tools', from: './src/agent' },
+          { target: './src/tools', from: './src/session' },
+          { target: './src/tools', from: './src/cli' },
+          // session 不得反向依赖 cli
+          { target: './src/session', from: './src/cli' },
+          // 测试只允许用 faux provider,不得触碰 openai-chat(防止测试悄悄变在线测试)
+          { target: './tests', from: './src/providers/openai-chat' },
+        ],
+      }],
+    },
+  },
+
+  // ---- 规则 B:openai 包只允许出现在 providers/openai-chat 内(需求 1 的机械保障)----
+  {
+    files: ['src/**/*.ts', 'tests/**/*.ts'],
+    ignores: ['src/providers/openai-chat/**'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [{
+          group: ['openai', 'openai/*'],
+          message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(协议隔离,见 docs/02-architecture.md)',
+        }],
+      }],
+    },
+  },
+
+  // ---- 规则 C:protocol 层零运行时依赖(纯类型 + EventStream,连 node: 内置模块也不引)----
+  // regex 而非 group:gitignore 语义下 '*' 会连相对导入一起封死(protocol 内部 import './x.js' 也报错)。
+  // '^[^.]' 只拦 bare specifier(npm 包与 node: 内置);'../' 越出 protocol 由规则 A 的 zone 兜底。
+  {
+    files: ['src/protocol/**/*.ts'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [{
+          regex: '^[^.]',
+          message: 'src/protocol 零依赖:只允许 protocol 内部的相对导入(见 docs/02-architecture.md)',
+        }],
+      }],
+    },
+  },
+);
