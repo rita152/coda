@@ -15,7 +15,8 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run lint && npm run typecheck && npm run build && npm run test"
+    "check": "npm run lint && npm run typecheck && npm run build && npm run test",
+    "demo:m1": "tsx scripts/demo-m1.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
@@ -24,6 +25,7 @@
     "eslint-plugin-import": "^2.32.0",
     "rollup": "^4.62.3",
     "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.65.0",
     "vitest": "^4.1.10"
