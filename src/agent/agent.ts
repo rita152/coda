@@ -35,6 +35,7 @@ export interface AgentConfig {
   shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
   toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
   cwd?: string;                                                  // 工具执行工作目录,默认 process.cwd()
+  initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §3.1;仅初始数据,agent 不感知恢复)
 }
 
 export class Agent {
@@ -44,13 +45,14 @@ export class Agent {
   readonly #emitter = new Emitter();
   readonly #steering = new PendingMessageQueue('steering');
   readonly #followUp = new PendingMessageQueue('follow_up');
-  readonly #transcript: AgentMessage[] = [];
+  readonly #transcript: AgentMessage[];
   readonly #loopConfig: LoopConfig;
   #state: 'idle' | 'running' = 'idle';
   #taskAbort: AbortController | undefined;
   #runPromise: Promise<void> = Promise.resolve();
 
   constructor(config: AgentConfig) {
+    this.#transcript = [...(config.initialMessages ?? [])];
     this.#loopConfig = {
       streamFn: config.streamFn,
       model: config.model,

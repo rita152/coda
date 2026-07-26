@@ -12,7 +12,7 @@ export default tseslint.config(
 
   // ---- 规则 A:目录间依赖方向(zone 语义:target 内的文件不得 import from 内的模块)----
   {
-    files: ['src/**/*.ts', 'tests/**/*.ts'],
+    files: ['src/**/*.ts', 'tests/**/*.ts', 'e2e/**/*.ts'],
     plugins: { import: importPlugin },
     settings: {
       'import/resolver': {
@@ -58,7 +58,7 @@ export default tseslint.config(
   // scripts/ 同样受约束;record-fixture.ts(录制原始 wire 本就需要 SDK)以显式
   // eslint-disable 注释豁免——例外必须可见、可审。
   {
-    files: ['src/**/*.ts', 'tests/**/*.ts', 'scripts/**/*.ts'],
+    files: ['src/**/*.ts', 'tests/**/*.ts', 'scripts/**/*.ts', 'e2e/**/*.ts'],
     ignores: ['src/providers/openai-chat/**'],
     rules: {
       'no-restricted-imports': ['error', {

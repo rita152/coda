@@ -110,10 +110,10 @@ export interface Renderer {
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
 | `tool_execution_start` | 转录区一行工具头:`● bash: npm test`(按工具定制单行摘要,见下表);动态区 spinner 挂上该工具 |
-| `tool_execution_update` | 动态区显示 `update.output` 的**尾部 5 行**(bash 流式输出;100ms 节流已由工具层保证) |
+| `tool_execution_update` | 动态区显示 `update.output` 的尾部(bash 流式输出;100ms 节流已由工具层保证)。v1 动态区总高 ≤4 行(§1.3),工具输出取**尾部 1 行**并入活动行;尾部多行展示随富 TUI 升级 |
 | `tool_execution_end` | 工具头行补状态与摘要:成功 `✓ read src/a.ts (120 lines)` / 失败 `✗ edit: oldText not found`;`details` 中的 diff 以 ±着色渲染(上限 40 行,超出提示行数) |
 | `queue_update` | 刷新底部队列徽标:`[steer 1 · follow-up 2]`;两队列皆空时不显示 |
-| `plan_update` | 以清单重绘 plan 块:`✔ 已完成` / `▶ in_progress` / `○ pending`(整表替换语义,直接覆盖上一次 plan 块) |
+| `plan_update` | 以清单渲染 plan 块:`✔ 已完成` / `▶ in_progress` / `○ pending`。事件语义是整表替换;v1 转录区 append-only(§1.3),每次**追加**完整新表,覆盖式原地重绘随富 TUI 升级 |
 | `approval_request` | (M6)动态区变审批提示:`Allow bash: rm -rf dist? [y=once / a=always / n=deny / Esc=abort]`,期间键位表切换为审批模式 |
 | `error` | `fatal: false` 打印警告行;`fatal: true` 打印错误并进入退出流程 |
 
