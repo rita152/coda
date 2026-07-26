@@ -54,7 +54,7 @@ stateDiagram-v2
 
 | 方法 | `idle` 时 | `running` 时 |
 |---|---|---|
-| `prompt(text)` | 构造 `UserMessage{source:'prompt'}` 追加进转录,发 `agent_start{reason:'prompt'}`,启动 runLoop;返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
+| `prompt(text)` | 构造 `UserMessage{source:'prompt'}`,发 `agent_start{reason:'prompt'}` 后以 `seed.initialPending` 交给 runLoop——消息在首 turn 经注入路径([B])落转录,走完整 `message_start/end` 生命周期(session 层与 UI 因此不需要为 prompt 消息开特例);返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
 | `steer(msg)` | 入 steering 队列(下次 run 的起跑 poll 会吃到,见 2.1 注释 A) | 入 steering 队列,turn 边界注入 |
 | `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
 | `abort()` | no-op | `taskAbort.abort()`,请求中止;队列**不清空** |
@@ -96,8 +96,11 @@ async function runLoop(
   const newMessages: AgentMessage[] = [];        // 本 run 新增消息,agent_end 携带
 
   // [A] 起跑前 poll 一次 steering:用户在上一个回答期间就可能已输入(pi 的注释原话)。
-  //     continue() 已自行 drain 时跳过,防止双重消费。
-  let pendingMessages = seed.skipInitialPoll ? seed.initialPending : queues.steering.drain();
+  //     seed.initialPending(prompt 的 user 消息 / continue() 预 drain 的队列消息)排在最前;
+  //     continue() 已自行 drain 时跳过 poll,防止双重消费。
+  let pendingMessages = seed.skipInitialPoll
+    ? [...seed.initialPending]
+    : [...seed.initialPending, ...queues.steering.drain()];
 
   outer: while (true) {                          // ── 外层:follow-up 续命 ──
     let hasMoreToolCalls = true;                 // 初始 true:即使无 pending 也要采样一次

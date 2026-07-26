@@ -110,7 +110,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 ### M3 agent loop + 工具框架 + 7 工具
 
 - **目标**:双层循环(先只做「一路到完成」路径)+ 工具执行三阶段 + read/ls/glob/grep/bash/edit/write 全部可用;真实模型第一次改动真实文件。
-- **交付物**:`src/agent/`(Agent 类外壳、runLoop 内层循环、streamAssistantResponse、工具调度 prepare/execute/finalize、zod 校验失败与未知工具的 isError 合成回喂、`length` 全批不执行、parallel/sequential 调度)、`src/tools/`(ToolDefinition 框架、`z.toJSONSchema()` 渲染、2000 行/50KB 框架级截断 post-hook、7 个工具)、`src/shared/`(truncate、killProcessTree、FileTracker)。本里程碑 steering/follow-up 队列仅有接口占位(`steer()` 入队但注入点未接线),abort 未接线。
+- **交付物**:`src/agent/`(Agent 类外壳、runLoop 内层循环、streamAssistantResponse、工具调度 prepare/execute/finalize、zod 校验失败与未知工具的 isError 合成回喂、`length` 全批不执行、parallel/sequential 调度)、`src/tools/`(ToolDefinition 框架、`z.toJSONSchema()` 渲染、2000 行/50KB 框架级截断 post-hook、7 个工具)、`src/shared/`(truncate、killProcessTree、FileTracker)。本里程碑 runLoop 骨架照 05 文档 §2.2 伪码完整实现(含 [A]/[I]/[J] 注入点与 abort 检查的结构性接线——伪码是 canonical,骨架不做阉割版),但 steering/follow-up 的语义验收矩阵、`queue_update` 事件与 abort 全链路测试都在 M4;M3 只交付注入点的最小冒烟。
 - **里程碑内顺序**:框架 + read/ls/glob 先行(无副作用、最快让 loop 转起来)→ grep(引入 ripgrep 二进制依赖)→ bash(进程管理)→ write/edit 最后(edit 的 fuzzy 匹配是工具集中最精细的算法,且依赖 FileTracker 的 read-before-edit 约束已被 read 落地)。7 个工具彼此独立,是全路线图最适合并行分工的一段。
 - **前置**:M1(全部单测跑 faux);M2 仅联调需要。
 - **验收**:

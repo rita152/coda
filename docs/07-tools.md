@@ -33,7 +33,9 @@ export interface ToolDefinition<P = any, D = unknown> {
   prepareArguments?: (raw: unknown) => unknown;              // zod 校验前的宽容修补(见 1.4)
 }
 
-// src/tools/file-tracker.ts —— read-before-edit 硬约束的载体
+// src/shared/file-tracker.ts —— read-before-edit 硬约束的载体。
+// 宿主在 shared 而非 tools:Agent 实例持有会话级 FileTracker(05 文档第 1 节),
+// 而 ESLint zone 只放行 agent → tools/types.ts,类的构造必须落在双方都可见的 shared。
 export class FileTracker {
   markRead(path: string, mtimeMs: number): void;             // read 成功、edit/write 成功后登记
   assertFresh(path: string, currentMtimeMs: number):
@@ -210,7 +212,7 @@ const GrepParams = z.object({
 行为规格与实现要点:
 
 - **调 ripgrep 二进制,不自实现**。五个参考项目无一例外依赖 rg,自实现 JS 搜索只出现在 gemini-cli 的三级兜底链末端。我们用 `@vscode/ripgrep` 内嵌平台二进制,免去 pi-mono 式运行时下载。
-- spawn 参数:`rg --json --line-number --color=never --hidden [--ignore-case] [--fixed-strings] [--glob G] pattern path`,用 `--json` 流式解析拿结构化 `path / line_number / lines.text`。
+- spawn 参数:`rg --json --line-number --color=never --hidden --no-require-git --glob '!.git/**' [--ignore-case] [--fixed-strings] [--glob G] pattern path`,用 `--json` 流式解析拿结构化 `path / line_number / lines.text`。`--hidden` 让 dotfiles 可搜,但会连带解除 rg 对 `.git/` 的默认跳过,必须显式排除(opencode 同款处理);`--no-require-git` 让 `.gitignore` 在非 git 目录同样生效(与 glob 一致)。
 - **match 数达到 limit 即 kill rg 进程**(pi-mono 做法):大仓库上全量搜完再截断浪费数秒;kill 后结果注明 `(more matches available — refine pattern or path)`。
 - context 行不用 rg 的 `-C`(会让 limit 数到 context 行),而是命中后自行读文件切片(带文件缓存),limit 只数 match。
 - 单行截到 500 字符;exit code 1 = 无匹配**不是错误**,返回 `No matches found`(空串会让模型困惑);exit code ≥ 2 才是 rg 报错。

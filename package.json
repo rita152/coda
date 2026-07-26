@@ -21,6 +21,7 @@
     "record:fixture": "tsx scripts/record-fixture.ts"
   },
   "devDependencies": {
+    "@types/diff": "^7.0.2",
     "@types/node": "^26.1.1",
     "eslint": "^9.39.5",
     "eslint-import-resolver-typescript": "^4.4.5",
@@ -34,9 +35,14 @@
   },
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.62.3",
-    "@rollup/rollup-linux-x64-gnu": "^4.62.3"
+    "@rollup/rollup-linux-x64-gnu": "^4.62.3",
+    "@vscode/ripgrep-darwin-arm64": "^1.18.0",
+    "@vscode/ripgrep-linux-x64": "^1.18.0"
   },
   "dependencies": {
-    "openai": "^6.49.0"
+    "@vscode/ripgrep": "^1.18.0",
+    "diff": "^9.0.0",
+    "openai": "^6.49.0",
+    "zod": "^4.4.3"
   }
 }

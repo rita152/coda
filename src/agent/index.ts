@@ -1,4 +1,11 @@
-// M3/M4:Agent 类、runLoop 双层循环、steering/follow-up 队列、工具执行调度、
-// 出站前 transform 层(convertContext)。规格见 docs/05-agent-loop.md 与 docs/06-steering-following.md。
-// 本目录不 import 任何 provider(经 StreamFn 注入)、不 import 具体工具实现(仅允许 tools/types.ts)。
-export {};
+// Agent 核心的公共出口。本目录不 import 任何 provider(经 StreamFn 注入)、
+// 不 import 具体工具实现(仅 tools/types.ts)。规格:docs/05-agent-loop.md、docs/06-steering-following.md。
+export { Agent } from './agent.js';
+export type { AgentConfig } from './agent.js';
+export type { AgentEventListener } from './events.js';
+export { runLoop, streamAssistantResponse } from './loop.js';
+export type { LoopConfig, LoopQueues, LoopSeed } from './loop.js';
+export { PendingMessageQueue } from './queue.js';
+export type { DrainMode } from './queue.js';
+export { convertContext } from './transform.js';
+export { renderToolSchemas } from './tool-schemas.js';
