@@ -83,8 +83,8 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 ### M1 内部协议 + EventStream + faux provider
 
 - **目标**:冻结 [03-internal-protocol](./03-internal-protocol.md) 的全部类型;交付可脚本化的测试 provider,让此后一切开发离线。
-- **交付物**:`src/protocol/messages.ts`(AgentMessage 族、Usage、Context)、`provider.ts`(ProviderEvent、StreamFn、ModelConfig、EventStream/ProviderEventStream)、`agent-events.ts`(AgentEvent、QueuedMessage、PlanStep);`src/providers/faux/`(接受事件脚本,按序回放为 ProviderEventStream,支持人为延迟与中途 error/abort 剧本);EventStream 单测。
-- **实现要点**:faux provider 的脚本格式设计值得多花半天——它是此后每个里程碑测试的通用语言,应支持:逐事件 `delay` 毫秒、按调用次数切换剧本(第 1 次调用回 tool_calls、第 2 次回 stop,模拟多 turn)、`onAbort` 剧本(收到 signal 后回 aborted 消息)、以及记录每次收到的 `Context` 供断言(M4 验证出站转录、M7 验证 compaction 都靠它)。EventStream 注意 push 在无消费者时的缓冲语义与 end 后迭代器的收尾,这两处 bug 会以「测试偶发挂起」的形态折磨所有后续里程碑。
+- **交付物**:`src/protocol/messages.ts`(AgentMessage 族、Usage、Context)、`provider.ts`(ProviderEvent、StreamFn、ModelConfig、EventStream/ProviderEventStream)、`agent-events.ts`(AgentEvent、QueuedMessage、PlanStep);`src/providers/faux/`(接受事件脚本,按序回放为 ProviderEventStream,支持 gate 受控暂停与中途 error/abort 剧本);EventStream 单测。
+- **实现要点**:faux provider 的脚本格式设计值得多花半天——它是此后每个里程碑测试的通用语言,应支持:`gate` 受控暂停(不用计时器,与 [10-testing](./10-testing.md) §3.2 的零时间依赖原则一致)、按调用次数切换剧本(第 1 次调用回 tool_calls、第 2 次回 stop,模拟多 turn)、abort 感知(每个发射间隙与 gate 等待中检查 signal,以 aborted 消息收尾)、以及记录每次收到的 `Context` 供断言(M4 验证出站转录、M7 验证 compaction 都靠它)。EventStream 注意 push 在无消费者时的缓冲语义与 end 后迭代器的收尾,这两处 bug 会以「测试偶发挂起」的形态折磨所有后续里程碑。
 - **前置**:M0。
 - **验收**:
   1. EventStream 语义测试全绿:异步迭代收到 push 的全部事件;`end()` 后迭代终止且 `result()` resolve;先迭代后 push、先 push 后迭代两种时序都正确;end 后再 push 被忽略并产生开发警告。

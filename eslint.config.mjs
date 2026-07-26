@@ -40,8 +40,13 @@ export default tseslint.config(
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
-          // session 不得反向依赖 cli
+          // session 只依赖 protocol/shared/agent(见 docs/02 §7),不得触碰 providers/tools/cli
           { target: './src/session', from: './src/cli' },
+          { target: './src/session', from: './src/providers' },
+          { target: './src/session', from: './src/tools' },
+          // provider 之间互相隔离(跨 provider import 是设计异味)
+          { target: './src/providers/openai-chat', from: './src/providers/faux' },
+          { target: './src/providers/faux', from: './src/providers/openai-chat' },
           // 测试只允许用 faux provider,不得触碰 openai-chat(防止测试悄悄变在线测试)
           { target: './tests', from: './src/providers/openai-chat' },
         ],
@@ -60,6 +65,18 @@ export default tseslint.config(
           message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(协议隔离,见 docs/02-architecture.md)',
         }],
       }],
+      // no-restricted-imports 只管静态 import 声明;动态 import() 与内联类型导入
+      // import('openai').X 是另外两条渗漏通道(opencode 教训:类型渗漏最易被放过),用语法选择器堵死。
+      'no-restricted-syntax': ['error',
+        {
+          selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`,
+          message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(动态 import 同样受限)',
+        },
+        {
+          selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`,
+          message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(import() 类型引用同样受限)',
+        },
+      ],
     },
   },
 
@@ -68,6 +85,9 @@ export default tseslint.config(
   // '^[^.]' 只拦 bare specifier(npm 包与 node: 内置);'../' 越出 protocol 由规则 A 的 zone 兜底。
   {
     files: ['src/protocol/**/*.ts'],
+    // 测试文件豁免(需要 import vitest);运行时代码零依赖的约束不变。
+    // 测试仍受规则 A/B 约束(不得 import 其他 src 目录与 openai)。
+    ignores: ['src/protocol/**/*.test.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{
@@ -75,6 +95,17 @@ export default tseslint.config(
           message: 'src/protocol 零依赖:只允许 protocol 内部的相对导入(见 docs/02-architecture.md)',
         }],
       }],
+      // 动态 import 与 import() 类型引用同样封死(含 node: 内置模块)
+      'no-restricted-syntax': ['error',
+        {
+          selector: 'ImportExpression > Literal[value=/^[^.]/]',
+          message: 'src/protocol 零依赖:禁止动态 import 外部模块',
+        },
+        {
+          selector: 'TSImportType Literal[value=/^[^.]/]',
+          message: 'src/protocol 零依赖:禁止 import() 类型引用外部模块',
+        },
+      ],
     },
   },
 );

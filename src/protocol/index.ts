@@ -1,4 +1,6 @@
-// M1:内部协议——消息模型(messages.ts)、ProviderEvent/StreamFn(provider.ts)、
-// AgentEvent(agent-events.ts)、EventStream(event-stream.ts)。规格见 docs/03-internal-protocol.md。
-// 本目录零运行时依赖(ESLint 规则 C 强制),是全项目唯一的公共依赖。
-export {};
+// 内部协议:全项目的唯一公共语言(规格见 docs/03-internal-protocol.md)。
+// 零运行时依赖(ESLint 规则 C 强制);禁止 import 任何 provider SDK。
+export * from './messages.js';
+export * from './provider.js';
+export * from './agent-events.js';
+export * from './event-stream.js';

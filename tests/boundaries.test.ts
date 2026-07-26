@@ -123,4 +123,36 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     );
     expect(errorCount).toBe(0);
   });
+
+  it('src/protocol 内动态 import 外部模块报错(静态封锁的绕过通道 1)', async () => {
+    const { rules } = await lintProbe(
+      'src/protocol/dynamic.probe.ts',
+      "export const p = import('node:fs/promises');\n",
+    );
+    expect(rules).toContain('no-restricted-syntax');
+  });
+
+  it('src/protocol 内 import() 类型引用外部模块报错(绕过通道 2)', async () => {
+    const { rules } = await lintProbe(
+      'src/protocol/import-type.probe.ts',
+      "export type P = typeof import('node:path');\n",
+    );
+    expect(rules).toContain('no-restricted-syntax');
+  });
+
+  it('src/agent 内 import() 类型引用 openai 报错(type-only 渗漏通道)', async () => {
+    const { rules } = await lintProbe(
+      'src/agent/openai-import-type.probe.ts',
+      "export type P = import('openai/resources').ChatCompletion;\n",
+    );
+    expect(rules).toContain('no-restricted-syntax');
+  });
+
+  it('src/session 内 import providers 报错(session 只依赖 protocol/shared/agent)', async () => {
+    const { rules } = await lintProbe(
+      'src/session/provider-dep.probe.ts',
+      "import '../providers/faux/index.js';\n",
+    );
+    expect(rules).toContain('import/no-restricted-paths');
+  });
 });

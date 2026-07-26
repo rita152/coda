@@ -59,7 +59,17 @@ export interface AssistantMessage {
   content: (TextPart | ReasoningPart | ToolCallPart)[];
   model: ModelRef;
   stopReason: StopReason; errorMessage?: string;   // error/aborted 也是一条合法消息,保留在转录中
+  errorDetails?: ProviderErrorDetails;             // adapter 填写的结构化错误分类(M7 retry 消费,见 08 §5.1)
   usage: Usage;
+}
+
+export interface ProviderErrorDetails {
+  status?: number;            // HTTP 状态码
+  code?: string;              // provider 错误码
+  requestId?: string;
+  kind: 'network' | 'http' | 'overflow' | 'auth' | 'rate_limit' | 'aborted' | 'unknown';
+  retryable: boolean;         // adapter 的初判,session 可覆盖
+  retryAfterMs?: number;      // 来自 Retry-After / ratelimit 头
 }
 export interface ToolResultMessage {
   role: 'tool_result'; id: string; timestamp: number;
@@ -203,12 +213,14 @@ export class EventStream<TEvent, TResult> implements AsyncIterable<TEvent> {
   [Symbol.asyncIterator](): AsyncIterator<TEvent>;
 }
 export class ProviderEventStream extends EventStream<ProviderEvent, AssistantMessage> {}
+// 注:ProviderEventStream 实际定义于 provider.ts(event-stream.ts 若引用 ProviderEvent
+// 会与 provider.ts 构成循环导入);EventStream 泛型本体在 event-stream.ts。
 ```
 
 实现形态照抄 pi 的 `event-stream.ts`(手写 push 队列 + waiting resolver),等价于 Claude Code 社区分析中的 h2A 队列:**有消费者正在 `await` 时,push 直接 resolve 其 Promise(零延迟路径);否则事件进内部 FIFO buffer**。行为规格:
 
 1. **push**:非阻塞,永不 throw。`end()` 之后的 push 被忽略(开发模式 `console.warn`)——宽容而非抛错,与"永不 throw"铁律一致。
-2. **end**:只生效一次,第二次调用忽略 + 警告。`end(result)` 使所有进行中与后续的迭代收到 `{done: true}`,并 resolve `result()`。对 `ProviderEventStream`,adapter 的义务是:push 终止事件(done/error)后**立即**以同一条 AssistantMessage 调用 `end(message)`——"以 done|error 为完成信号"指的是事件文法层面,`end()` 是它的机械对应。
+2. **end**:只生效一次,第二次调用忽略 + 警告。`end(result)` 使所有进行中与后续的迭代收到 `{done: true}`,并 resolve `result()`;**end 前已 push 进 buffer 的事件仍会先于 `{done: true}` 被迭代到(排空后才 done)**——否则"push 终止事件后立即 end"的 adapter 义务会使慢消费者永远看不到 done/error 事件,破坏事件文法。对 `ProviderEventStream`,adapter 的义务是:push 终止事件(done/error)后**立即**以同一条 AssistantMessage 调用 `end(message)`——"以 done|error 为完成信号"指的是事件文法层面,`end()` 是它的机械对应。
 3. **result()**:任意时刻可调、可多次调(返回缓存的同一 Promise);在 `end()` 前调用则挂起直到 end。它**永不 reject**——错误场景下 resolve 的是 stopReason 为 error/aborted 的消息。典型用法:不关心流式过程的调用方 `const msg = await stream.result()` 一把拿最终值。
 4. **迭代语义**:单消费者。多个迭代器会互相"偷"事件(共享同一队列),这是刻意不支持的场景——需要广播时在消费侧分发(agent 的 `message_update` 就是广播层)。消费者 `break` 提前退出迭代不影响 `result()`,但生产者不会因此停止(取消要走 AbortSignal,不走迭代器 return)。
 5. **迭代器永不 throw**:for await 循环体外不需要 try/catch,错误以 error 事件形态从循环体内经过。
@@ -219,6 +231,11 @@ export class ProviderEventStream extends EventStream<ProviderEvent, AssistantMes
 ### 6.1 类型全文(canonical)
 
 ```ts
+// CompatFlags 在 protocol 层是开放袋:精确形状是各 adapter 的私有契约(openai-chat 的
+// 完整字段见 04 §5,由 adapter 导出精确类型并在入口 resolveCompat 处收窄)。protocol
+// 零依赖,不得引用 adapter 类型,故此处只承载"透传给 adapter 的配置袋"。
+export type CompatFlags = { [key: string]: unknown };
+
 export interface ModelConfig {
   ref: ModelRef;
   baseURL?: string; apiKey?: string; headers?: Record<string, string>;
@@ -402,7 +419,7 @@ tool-phase := (tool_execution_start (approval_request | tool_execution_update)* 
 
 - [ ] `src/protocol/` 零运行时依赖;ESLint 边界规则就位,`import "openai"` 出现在 protocol/agent/tools 下会报错
 - [ ] 全部类型与本文 2.1/4.1/6.1/7.1 逐字一致;`tsc --noEmit` strict 通过
-- [ ] EventStream 单测:push→迭代 FIFO 顺序;先 await 后 push 的零延迟路径;end 后 push 被忽略;result() 先于/后于 end 调用均正确;多次 result() 同一 Promise;消费者 break 后 result() 仍可用
+- [ ] EventStream 单测:push→迭代 FIFO 顺序;先 await 后 push 的零延迟路径;end 后 push 被忽略;end 前已 buffer 的事件先于 done 排空;result() 先于/后于 end 调用均正确;多次 result() 同一 Promise;消费者 break 后 result() 仍可用且被放弃的 pending waiter 被清理(事件不被吞)
 - [ ] ProviderEvent 文法校验器(测试辅助):对 faux provider 与真实 adapter 的事件流断言「start 开头、恰好一个终止事件、done 前块全闭合、contentIndex 与 partial.content 对齐、done/error 的 stopReason 划分正确」
 - [ ] StreamFn 铁律测试:faux provider 脚本化 setup 同步异常、流中异常、abort 三种场景,断言调用方拿到的是流(不 throw)且以 error 事件 + 对应 stopReason 收尾、已流出内容保留在 message 中
 - [ ] Usage 不变量测试:`input >= cacheRead + cacheWrite`、`output >= reasoning`;usage chunk 缺失时 input/output 为 0 而非 undefined

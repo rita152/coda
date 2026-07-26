@@ -130,8 +130,15 @@ export default tseslint.config(
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
-          // session 不得反向依赖 cli
+          // session 只依赖 protocol/shared/agent,不得触碰 providers/tools/cli
           { target: './src/session', from: './src/cli' },
+          { target: './src/session', from: './src/providers' },
+          { target: './src/session', from: './src/tools' },
+          // provider 之间互相隔离(跨 provider import 是设计异味)
+          { target: './src/providers/openai-chat', from: './src/providers/faux' },
+          { target: './src/providers/faux', from: './src/providers/openai-chat' },
+          // 测试只允许用 faux provider(防止测试悄悄变在线测试)
+          { target: './tests', from: './src/providers/openai-chat' },
         ],
       }],
     },
@@ -151,6 +158,11 @@ export default tseslint.config(
   },
 );
 ```
+
+上述代码块为示意;**权威版本是仓库根的 `eslint.config.mjs`**(M1 起随实现演进),它在规则 A/B 之外还包含:
+
+- **规则 C:protocol 零依赖**——`src/protocol/**` 禁止一切 bare import(含 `node:` 内置模块),用 `no-restricted-imports` 的 `regex: '^[^.]'` 形式(gitignore 语义的 `group: ['*']` 会连内部相对导入一起误伤);`*.test.ts` 豁免(需要 vitest),但仍受规则 A/B 约束。
+- **`no-restricted-syntax` 堵两条静默渗漏通道**——`no-restricted-imports` 只管静态 import 声明,动态 `import('openai')` 与内联类型引用 `import('openai/resources').X` 都能绕过;对 protocol(全部 bare specifier)与 openai 封锁(全 src/tests)各加 `ImportExpression`/`TSImportType` 语法选择器规则,tests/boundaries.test.ts 有对应探针。
 
 实施要点与边界情况:
 
@@ -313,8 +325,8 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 | 模块 | 关键导出 | 允许依赖 | 主要消费者 |
 |---|---|---|---|
 | `protocol/` | `AgentMessage`、`Context`、`Usage`、`ModelRef`、`ProviderEvent`、`ProviderEventStream`、`EventStream`、`StreamFn`、`ModelConfig`、`StreamOptions`、`AgentEvent`、`QueuedMessage`、`PlanStep`、`ToolSchema`、`StopReason` | (无) | 所有模块 |
-| `providers/openai-chat/` | `streamOpenAIChat: StreamFn`、`detectCompat`、`CompatFlags` | `protocol`、`openai` | `cli`(组装)、自身测试 |
-| `providers/faux/` | `createFauxStreamFn(script): StreamFn` | `protocol` | 测试、`cli`(离线演示) |
+| `providers/openai-chat/` | `streamOpenAIChat: StreamFn`、`detectCompat`、`CompatFlags` | `protocol`、`shared`、`openai` | `cli`(组装)、自身测试 |
+| `providers/faux/` | `createFauxStreamFn(script): StreamFn`、`createGate` | `protocol`、`shared` | 测试、`cli`(离线演示) |
 | `agent/` | `Agent` 类、`AgentConfig`、transform 层函数 | `protocol`、`shared`、`tools/types.ts`(仅类型) | `cli`、`session`、测试 |
 | `tools/` | `ToolDefinition`、`ToolContext`、`ToolOutput`、`FileTracker`、`createCodingTools(): ToolDefinition[]` | `protocol`、`shared`、zod、`@vscode/ripgrep` | `cli`(组装)、`agent`(仅 types.ts) |
 | `session/` | `SessionStore`(append/load/list)、compaction、usage 聚合 | `protocol`、`shared`、`agent`(Session 内部组装并持有 Agent,见 [08](./08-session-persistence.md)) | `cli` |
