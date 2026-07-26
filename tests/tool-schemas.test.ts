@@ -27,11 +27,11 @@ function collectProperties(
   return out;
 }
 
-describe('renderToolSchemas × createCodingTools(7 工具聚合验收)', () => {
-  it('恰好 7 个工具,渲染不 throw,名称与形态齐全', () => {
+describe('renderToolSchemas × createCodingTools(8 工具聚合验收)', () => {
+  it('恰好 8 个工具(M6 起含 plan),渲染不 throw,名称与形态齐全', () => {
     const schemas = renderToolSchemas(createCodingTools());   // unrepresentable 类型在此会 throw
     expect(schemas.map((s) => s.name).sort()).toEqual(
-      ['bash', 'edit', 'glob', 'grep', 'ls', 'read', 'write'],
+      ['bash', 'edit', 'glob', 'grep', 'ls', 'plan', 'read', 'write'],
     );
     for (const s of schemas) {
       expect(s.description.length, `${s.name} description`).toBeGreaterThan(0);

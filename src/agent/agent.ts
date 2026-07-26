@@ -36,6 +36,7 @@ export interface AgentConfig {
   toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
   cwd?: string;                                                  // 工具执行工作目录,默认 process.cwd()
   initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §3.1;仅初始数据,agent 不感知恢复)
+  truncationScope?: string;                                      // 截断落盘目录 scope(session 注入 sessionId,docs/07 §1.6)
 }
 
 export class Agent {
@@ -61,7 +62,7 @@ export class Agent {
       systemPrompt: config.systemPrompt,
       cwd: config.cwd ?? process.cwd(),
       fileTracker: new FileTracker(),                 // 会话级 read-before-edit 登记表
-      spillDir: truncationDir(`agent-${randomUUID().slice(0, 8)}`),  // M5 起接 sessionId
+      spillDir: truncationDir(config.truncationScope ?? `agent-${randomUUID().slice(0, 8)}`),
       transformContext: config.transformContext,
       beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,

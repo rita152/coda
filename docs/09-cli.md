@@ -213,7 +213,7 @@ stdout: {"type":"agent_end","reason":"completed","messages":[…]}
 stdin : {"type":"shutdown"}
 ```
 
-M6 引入 approval 后,此协议将增补 `{ type: 'approval'; approvalId: string; decision: … }` 命令(codex 把审批应答也做成 Op 的同构做法),v1 headless 模式下 approval 默认策略为全 deny 或按 flag 预设,不阻塞管道。
+M6 起本协议增补 `{ type: 'approval'; approvalId: string; decision: 'allow_once' | 'allow_always' | 'deny' | 'abort' }` 命令(codex 把审批应答也做成 Op 的同构做法)。审批策略由 `--approval-mode <interactive|allow|deny>` 控制:交互 REPL 默认 `interactive`;headless 与 `-p` 默认 `allow`(机器驱动的管道是调用方自决的信任边界,默认 deny 会让每个脚本都得先学一个 flag;需要审批流的客户端显式开 `interactive` 并应答 approval 命令),不阻塞管道。
 
 ## 7. 配置:模型 / baseURL / apiKey
 

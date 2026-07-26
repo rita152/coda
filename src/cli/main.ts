@@ -6,12 +6,17 @@
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import type { StreamFn } from '../protocol/index.js';
+import { ApprovalBroker } from '../agent/index.js';
+import type { AgentConfig } from '../agent/index.js';
+import type { ToolDefinition } from '../tools/types.js';
 import { createCodingTools } from '../tools/index.js';
 import { streamOpenAIChat } from '../providers/openai-chat/index.js';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
-import type { SessionOptions } from '../session/index.js';
+import type { SessionEvent, SessionOptions } from '../session/index.js';
 import { Session } from '../session/index.js';
+import { createApprovalPolicy } from './approval-policy.js';
+import { cleanupTruncated } from './cleanup.js';
 import { parseFlags, readConfigFile, resolveConfig } from './config.js';
 import type { CliFlags } from './config.js';
 import { startHeadless } from './headless.js';
@@ -27,6 +32,9 @@ async function main(): Promise<number> {
     console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
     return 2;
   }
+
+  // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
+  void cleanupTruncated();
 
   let resolved;
   try {
@@ -50,13 +58,69 @@ async function main(): Promise<number> {
 
   const cwd = flags.cwd ?? process.cwd();
   const streamFn = makeStreamFn(resolved.provider, resolved.fauxScript);
+  const tools = createCodingTools();
+
+  // 审批模式默认(docs/09 §6.5 修订):交互 REPL → interactive;headless(--json)与 -p
+  // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
+  // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
+  const approvalMode =
+    flags.approvalMode ?? (flags.json || flags.prompt !== undefined ? 'allow' : 'interactive');
+  // -p(非 --json)没有键位面也没有 approval 命令面,interactive 审批只会挂死在等待上:
+  // 显式给出该组合按配置错误 fail-fast(headless --json + interactive 是合法的,有命令面)。
+  if (approvalMode === 'interactive' && flags.prompt !== undefined && !flags.json) {
+    console.error('[coda] --approval-mode interactive 与 -p 一次性模式不兼容(无审批应答面);用 --json 或改用 allow/deny');
+    return 2;
+  }
+
+  // 审批装配(docs/07 §3.1):allow 不挂钩子;interactive 组装 ApprovalBroker +
+  // createApprovalPolicy;deny 直接静态 beforeToolCall(block edit/execute,不建 broker)。
+  // broker 的 approval_request 不经 agent Emitter,由这里的 listeners 旁路通道送达
+  // renderer / headless / repl;requestAbort 晚绑定 session(policy 先于 session 创建)。
+  const sessionRef: { current?: Session } = {};
+  const approvalListeners = new Set<(e: SessionEvent) => void>();
+  let beforeToolCall: AgentConfig['beforeToolCall'];
+  let approval:
+    | {
+        broker: ApprovalBroker;
+        onAbort: () => void;
+        subscribe: (l: (e: SessionEvent) => void) => () => void;
+      }
+    | undefined;
+  if (approvalMode === 'interactive') {
+    const broker = new ApprovalBroker((e) => {
+      for (const l of [...approvalListeners]) l(e);
+    });
+    const policy = createApprovalPolicy({
+      broker,
+      projectRoot: cwd,
+      tools,
+      requestAbort: () => sessionRef.current?.abort(),
+    });
+    beforeToolCall = policy.beforeToolCall;
+    approval = {
+      broker,
+      onAbort: () => {
+        policy.onAbort();
+      },
+      subscribe: (l) => {
+        approvalListeners.add(l);
+        return () => {
+          approvalListeners.delete(l);
+        };
+      },
+    };
+  } else if (approvalMode === 'deny') {
+    beforeToolCall = createDenyHook(tools);
+  }
+
   const sessionOptions: SessionOptions = {
     agentConfig: {
       streamFn,
       model: resolved.modelConfig,
-      tools: createCodingTools(),
+      tools,
       cwd,
       systemPrompt: () => buildSystemPrompt(cwd),
+      ...(beforeToolCall !== undefined && { beforeToolCall }),
     },
     ...(flags.sessionDir !== undefined && { dir: flags.sessionDir }),
   };
@@ -75,6 +139,7 @@ async function main(): Promise<number> {
   } else {
     session = await Session.create(sessionOptions);
   }
+  sessionRef.current = session; // 审批 abort 决策的晚绑定目标(policy 的 requestAbort)
 
   if (flags.json) {
     // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,agent_end 后自动退出
@@ -82,6 +147,7 @@ async function main(): Promise<number> {
       stdin: process.stdin,
       stdout: process.stdout,
       ...(flags.prompt !== undefined && { initialPrompt: flags.prompt }),
+      ...(approval !== undefined && { approval }),
     });
   }
 
@@ -92,6 +158,10 @@ async function main(): Promise<number> {
     interactive: process.stdout.isTTY === true && flags.prompt === undefined,
   });
   session.subscribe((e) => {
+    renderer.render(e);
+  });
+  // 审批旁路事件同样进 renderer(approval_request 的转录留痕 + 动态区提示)
+  approval?.subscribe((e) => {
     renderer.render(e);
   });
   if (resumed) renderer.replayTranscript(session.messages);
@@ -109,7 +179,7 @@ async function main(): Promise<number> {
     return exitCode;
   }
 
-  return startRepl(session, renderer);
+  return startRepl(session, renderer, approval);
 }
 
 function makeStreamFn(provider: 'openai-chat' | 'faux', fauxScriptPath?: string): StreamFn {
@@ -122,6 +192,25 @@ function makeStreamFn(provider: 'openai-chat' | 'faux', fauxScriptPath?: string)
     return createFauxStreamFn(script);
   }
   return streamOpenAIChat;
+}
+
+/**
+ * --approval-mode deny 的静态 beforeToolCall(M6 分工约定;kind 直通同 docs/07 §3.1):
+ * read/search/plan 放行,edit/execute(含缺省 kind)直接 block——不建 broker、无审批事件,
+ * 任务继续(deny 是引导不是终止,docs/07 §3.2)。
+ */
+function createDenyHook(tools: ToolDefinition[]): NonNullable<AgentConfig['beforeToolCall']> {
+  const kinds = new Map(tools.map((t) => [t.name, t.kind ?? 'execute']));
+  return async (call) => {
+    const kind = kinds.get(call.name) ?? 'execute';
+    if (kind === 'read' || kind === 'search' || kind === 'plan') return {};
+    return {
+      block: true,
+      reason:
+        `Tool "${call.name}" requires approval, but approvals are disabled ` +
+        '(--approval-mode deny). Use read-only tools, or ask the user to rerun without deny mode.',
+    };
+  };
 }
 
 function buildSystemPrompt(cwd: string): string {

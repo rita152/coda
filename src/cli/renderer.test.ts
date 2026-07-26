@@ -478,3 +478,47 @@ describe('简化 wcwidth(docs/09 §8:CJK/emoji 宽度)', () => {
     expect(displayWidth(t)).toBeLessThanOrEqual(5);
   });
 });
+
+describe('approval_request 渲染(M6,docs/09 §4:动态区审批提示)', () => {
+  it('plain:转录留痕一行(headless/-p 可读),无审批提示行', () => {
+    const { out, r } = makePlain();
+    r.render({
+      type: 'approval_request',
+      approvalId: 'ap_1',
+      toolCallId: 'c1',
+      description: 'bash: rm -rf dist',
+    });
+    expect(out.text).toContain('? approval required: bash: rm -rf dist');
+    expect(out.text).not.toContain('[y=once');
+  });
+
+  it('ansi:动态区出现完整审批提示;决议后(tool_execution_start)撤下', () => {
+    const { out, r } = makeAnsi();
+    r.render({
+      type: 'approval_request',
+      approvalId: 'ap_1',
+      toolCallId: 'c1',
+      description: 'bash: rm -rf dist',
+    });
+    // 规格文案逐字(docs/09 §4):Allow <description>? [y=once / a=always / n=deny / Esc=abort]
+    expect(out.text).toContain('Allow bash: rm -rf dist? [y=once / a=always / n=deny / Esc=abort]');
+
+    out.chunks.length = 0;
+    r.render({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'rm -rf dist' } });
+    expect(out.text).not.toContain('Allow bash: rm -rf dist?'); // 审批已决议,提示不再重绘
+  });
+
+  it('ansi:agent_end 兜底撤下审批提示(abort 收尾场景)', () => {
+    const { out, r } = makeAnsi();
+    r.render({
+      type: 'approval_request',
+      approvalId: 'ap_2',
+      toolCallId: 'c2',
+      description: 'write /etc/hosts',
+    });
+    expect(out.text).toContain('Allow write /etc/hosts?');
+    out.chunks.length = 0;
+    r.render({ type: 'agent_end', reason: 'aborted', messages: [] });
+    expect(out.text).not.toContain('Allow write /etc/hosts?');
+  });
+});

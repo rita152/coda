@@ -54,6 +54,10 @@ export interface StartOptions {
   prompt?: string;
   /** 默认 true(--json headless);false 走人类可读输出——此时 stdout 行不是 NDJSON,勿断言 parseErrors。 */
   json?: boolean;
+  /** 额外 CLI flags(如 ['--approval-mode', 'interactive'],M6 审批用例)。 */
+  extraArgs?: string[];
+  /** 环境变量覆盖(如 HOME 指到临时目录,验证启动清理;在 process.env 之上合并)。 */
+  env?: Record<string, string>;
 }
 
 export interface CodaProc {
@@ -94,7 +98,11 @@ export function startCoda(opts: StartOptions): CodaProc {
   );
   if (opts.prompt !== undefined) args.push('-p', opts.prompt);
   if (opts.resume !== undefined) args.push('--resume', opts.resume);
-  const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  if (opts.extraArgs !== undefined) args.push(...opts.extraArgs);
+  const child = spawn(process.execPath, args, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(opts.env !== undefined && { env: { ...process.env, ...opts.env } }),
+  });
   if (child.stdout === null || child.stderr === null || child.stdin === null) {
     throw new Error('spawn did not provide stdio pipes');
   }

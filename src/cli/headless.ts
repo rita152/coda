@@ -7,16 +7,33 @@
 
 import { createInterface } from 'node:readline';
 import process from 'node:process';
+import type { ApprovalDecision } from '../agent/index.js';
 import type { Session, SessionEvent } from '../session/index.js';
 import { PROTOCOL_VERSION } from '../session/index.js';
 
-/** stdin 命令(docs/09 §6.2):命名对齐内部协议,snake_case 贯穿 wire 面。 */
+/** stdin 命令(docs/09 §6.2/§6.5):命名对齐内部协议,snake_case 贯穿 wire 面。 */
 export type CliCommand =
   | { type: 'prompt'; text: string }     // 空闲时开新任务;运行中返回 error 事件(non-fatal)
   | { type: 'steer'; text: string }      // 入 steering 队列(随时)
   | { type: 'follow_up'; text: string }  // 入 follow-up 队列(随时)
   | { type: 'abort' }                    // agent.abort();idle 时 no-op
-  | { type: 'shutdown' };
+  | { type: 'shutdown' }
+  // M6 审批应答(docs/09 §6.5,codex 把审批应答也做成 Op 的同构):--approval-mode
+  // interactive 时经 broker.resolve 决议;其他模式返回 non-fatal error。
+  | { type: 'approval'; approvalId: string; decision: ApprovalDecision };
+
+/**
+ * 审批接线(main.ts 装配后传入;docs/07 §3.1):broker 的 approval_request 不经 agent
+ * Emitter,经 subscribe 的旁路通道汇入同一条 NDJSON 流。
+ */
+export interface HeadlessApproval {
+  /** interactive 才有(deny 模式不建 broker):approval 命令的决议入口。 */
+  broker?: { resolve: (approvalId: string, decision: ApprovalDecision) => void };
+  /** abort 收尾;调用纪律(R7):必须在 session.abort() 之后。 */
+  onAbort: () => void;
+  /** approval_request 旁路事件订阅;返回退订函数。 */
+  subscribe: (listener: (e: SessionEvent) => void) => () => void;
+}
 
 export async function startHeadless(
   session: Session,
@@ -25,6 +42,8 @@ export async function startHeadless(
     stdout: NodeJS.WritableStream;
     /** --json -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,agent_end 后自动 shutdown。 */
     initialPrompt?: string;
+    /** M6 审批接线(--approval-mode 非 allow 时由 main.ts 传入)。 */
+    approval?: HeadlessApproval;
   },
 ): Promise<number> {
   const writeLine = (obj: unknown): void => {
@@ -48,8 +67,11 @@ export async function startHeadless(
     if (shuttingDown || settled) return;
     shuttingDown = true;
     try {
-      session.abort();        // 运行中先硬中断(idle 时 no-op)
-      await session.close();  // waitForIdle → flush 落盘,之后进程可安全退出
+      session.abort();              // 运行中先硬中断(idle 时 no-op)
+      // R7 时序:任务观察到 cancellation 之后才决议 pending 审批——顺序反了,悬着的
+      // 审批会以「拒绝」形态先漏给模型。不清 pending 则 waitForIdle 永远挂死。
+      opts.approval?.onAbort();
+      await session.close();        // waitForIdle → flush 落盘,之后进程可安全退出
       finish(code);
     } catch (err) {
       writeLine({ type: 'error', fatal: true, message: `shutdown failed: ${String(err)}` });
@@ -76,6 +98,11 @@ export async function startHeadless(
       void shutdown(e.reason === 'error' ? 1 : 0);
     }
   });
+  // 审批旁路通道:approval_request 与主事件流汇入同一条 NDJSON(docs/07 §3.1)。
+  // 同步直写:broker emit 发生在 beforeToolCall 内,彼时 loop 已 await 完先行事件,顺序正确。
+  const unsubApproval = opts.approval?.subscribe((e: SessionEvent) => {
+    writeLine(e);
+  });
 
   const dispatch = (cmd: CliCommand): void => {
     switch (cmd.type) {
@@ -99,8 +126,26 @@ export async function startHeadless(
         session.followUp(cmd.text);
         return;
       case 'abort':
+        // R7 时序:session.abort() 在前(任务观察到 cancellation),pending 审批才以
+        // 'abort' 决议——审批中被 abort 的工具结果必须是中断形态,绝非「拒绝」形态。
         session.abort();
+        opts.approval?.onAbort();
         return;
+      case 'approval': {
+        const broker = opts.approval?.broker;
+        if (broker === undefined) {
+          // 非 interactive 模式没有 broker:容错回报,不退出(docs/09 §6.3 容错纪律)
+          writeLine({
+            type: 'error',
+            fatal: false,
+            message: 'approval not available: run with --approval-mode interactive',
+          });
+          return;
+        }
+        // decision 'abort' 同样走 resolve:policy 内部先 requestAbort() 再以中断形态回喂(R7)
+        broker.resolve(cmd.approvalId, cmd.decision);
+        return;
+      }
       case 'shutdown':
         void shutdown();
         return;
@@ -156,6 +201,7 @@ export async function startHeadless(
   process.removeListener('SIGINT', onSignal);
   process.removeListener('SIGTERM', onSignal);
   unsubscribe();
+  unsubApproval?.();
   rl.close();
   releaseStdin(opts.stdin);
   return code;
@@ -172,7 +218,7 @@ function parseCommand(line: string): CliCommand {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`expected a JSON object: ${truncate(line)}`);
   }
-  const cmd = parsed as { type?: unknown; text?: unknown };
+  const cmd = parsed as { type?: unknown; text?: unknown; approvalId?: unknown; decision?: unknown };
   switch (cmd.type) {
     case 'prompt':
     case 'steer':
@@ -184,6 +230,16 @@ function parseCommand(line: string): CliCommand {
     case 'abort':
     case 'shutdown':
       return { type: cmd.type };
+    case 'approval': {
+      if (typeof cmd.approvalId !== 'string') {
+        throw new Error('"approval" requires a string "approvalId" field');
+      }
+      const d = cmd.decision;
+      if (d !== 'allow_once' && d !== 'allow_always' && d !== 'deny' && d !== 'abort') {
+        throw new Error('"approval" requires decision allow_once|allow_always|deny|abort');
+      }
+      return { type: 'approval', approvalId: cmd.approvalId, decision: d };
+    }
     default:
       throw new Error(`unknown command type: ${truncate(String(cmd.type))}`);
   }

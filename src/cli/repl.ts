@@ -10,11 +10,14 @@
 //     assistant 消息以 [aborted] 收尾
 // [ ] Alt+Enter 与 /f 前缀均能入 follow-up 队列(至少各在一种终端验证)
 // [ ] coda --continue 重放转录后,新输入接在原上下文继续
+// [ ] (M6)bash 调用弹出审批提示行,y 放行 / n 拒绝后任务继续,期间普通字符不进输入行;
+//     审批中 Esc 一次即整体中止(assistant 以 [aborted] 收尾),决议后键位恢复正常
 
 import * as readline from 'node:readline';
 import process from 'node:process';
+import type { ApprovalDecision } from '../agent/index.js';
 import type { AgentMessage, QueuedMessage } from '../protocol/index.js';
-import type { Session, SessionUsage } from '../session/index.js';
+import type { Session, SessionEvent, SessionUsage } from '../session/index.js';
 import type { Renderer } from './renderer.js';
 
 export const ESC_TIMEOUT_MS = 50; // Esc 消歧窗口(docs/09 §3.2)
@@ -77,6 +80,40 @@ export function decideEnter(state: 'idle' | 'running', meta: boolean, raw: strin
   if (state === 'running') return { kind: 'steer', text };
   if (slash !== undefined) return { kind: 'command', command: slash };
   return { kind: 'prompt', text };
+}
+
+// ---- 纯逻辑:审批模式键位映射(M6,docs/09 §4)----
+
+/**
+ * 审批模式键位:y=allow_once / a=allow_always / n=deny / Esc=abort;其余键无审批动作。
+ * Esc 在审批模式的语义 = 决议 abort(session.abort() → policy.onAbort(),时序纪律 R7),
+ * 由调用侧执行——本函数只做映射,保持可测。
+ */
+export function approvalKeyDecision(keyName: string): ApprovalDecision | undefined {
+  switch (keyName) {
+    case 'y':
+      return 'allow_once';
+    case 'a':
+      return 'allow_always';
+    case 'n':
+      return 'deny';
+    case 'escape':
+      return 'abort';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 审批接线(main.ts 装配;结构同 headless 的 HeadlessApproval):broker 决议入口 +
+ * approval_request 旁路订阅。preflight 串行(docs/05 §5)保证同一时刻至多一个 pending,
+ * 队列只是防御形态。
+ */
+export interface ReplApproval {
+  broker?: { resolve: (approvalId: string, decision: ApprovalDecision) => void };
+  /** 调用纪律(R7):必须在 session.abort() 之后。 */
+  onAbort: () => void;
+  subscribe: (listener: (e: SessionEvent) => void) => () => void;
 }
 
 // ---- 纯逻辑:本会话输入历史(↑/↓)----
@@ -180,10 +217,15 @@ function lastModelName(messages: readonly AgentMessage[]): string | undefined {
 
 // ---- REPL 主体 ----
 
-export async function startRepl(session: Session, renderer: Renderer): Promise<number> {
+export async function startRepl(
+  session: Session,
+  renderer: Renderer,
+  approval?: ReplApproval,
+): Promise<number> {
   const stdin = process.stdin;
   let input = '';
   let cursor = 0;
+  const approvalQueue: string[] = []; // pending approvalId FIFO(非空 = 审批键位模式)
   const history = new InputHistory();
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
@@ -221,6 +263,11 @@ export async function startRepl(session: Session, renderer: Renderer): Promise<n
         void shutdown(1); // 致命错误进入退出流程(docs/09 §4)
       }
     });
+    // 审批旁路通道:approval_request 入队即切审批键位(渲染提示由 renderer 的
+    // approval_request 分支负责——main.ts 已把同一通道接到 renderer.render)。
+    const unsubApproval = approval?.subscribe((e) => {
+      if (e.type === 'approval_request') approvalQueue.push(e.approvalId);
+    });
 
     const onResize = (): void => {
       renderer.redraw?.();
@@ -234,6 +281,7 @@ export async function startRepl(session: Session, renderer: Renderer): Promise<n
       process.removeListener('SIGWINCH', onResize);
       process.removeListener('SIGTERM', onSignal);
       unsub();
+      unsubApproval?.();
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       renderer.unmount?.();
@@ -244,7 +292,12 @@ export async function startRepl(session: Session, renderer: Renderer): Promise<n
       if (closing) return;
       closing = true;
       try {
-        if (running()) session.abort();
+        if (running()) {
+          session.abort();
+          // R7 时序:abort 在前;pending 审批以 'abort' 决议,否则 waitForIdle 挂死
+          approvalQueue.length = 0;
+          approval?.onAbort();
+        }
         await session.close();
       } finally {
         cleanup();
@@ -346,6 +399,32 @@ export async function startRepl(session: Session, renderer: Renderer): Promise<n
       if (name !== 'escape') escExit.reset();
       if (!(k.ctrl === true && name === 'c')) ctrlCExit.reset();
       clearStatusHint();
+
+      // 审批模式(M6,docs/09 §4):approval_request 期间键位表切换为
+      // y=once / a=always / n=deny / Esc=abort;Ctrl+C / Ctrl+D 的退出组合仍然有效
+      //(fall through 到下方正常处理),其余键位吞掉;决议后恢复正常键位。
+      if (approvalQueue.length > 0 && approval?.broker !== undefined && k.ctrl !== true) {
+        const decision = approvalKeyDecision(name);
+        if (decision === 'abort') {
+          if (escExit.hit(Date.now())) {
+            void shutdown(0); // Esc Esc 快速退出仍可用(docs/09 §3)
+            return;
+          }
+          // Esc 在审批模式的语义 = 决议 abort;时序纪律(R7):先 session.abort()
+          //(任务观察到 cancellation),再 policy.onAbort()(pending 以 'abort' 决议)——
+          // 顺序反了,审批结果会以「拒绝」形态漏给模型。
+          approvalQueue.length = 0;
+          session.abort();
+          approval.onAbort();
+          return;
+        }
+        if (decision !== undefined) {
+          const id = approvalQueue.shift();
+          if (id !== undefined) approval.broker.resolve(id, decision);
+          return;
+        }
+        return; // 审批模式吞掉其余非 Ctrl 键位(输入行冻结,防误触)
+      }
 
       if (k.ctrl === true && name === 'c') {
         if (input !== '') {

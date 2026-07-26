@@ -16,6 +16,14 @@ export interface CodaConfigFile {
   compat?: CompatFlags;
 }
 
+/**
+ * 审批模式(docs/07-tools.md §3、docs/09-cli.md §6.5):
+ * interactive = beforeToolCall 挂 broker,edit/execute 弹审批;
+ * allow = 不挂钩子全放行(headless/-p 默认——机器驱动场景由调用方自决信任边界);
+ * deny = 静态拦截 edit/execute(只读探索),不建 broker。
+ */
+export type ApprovalMode = 'interactive' | 'allow' | 'deny';
+
 export interface CliFlags {
   json: boolean;
   prompt?: string;             // -p 一次性模式
@@ -29,6 +37,7 @@ export interface CliFlags {
   cwd?: string;
   sessionDir?: string;         // 测试/e2e 隔离用
   noColor: boolean;
+  approvalMode?: ApprovalMode; // 缺省按形态定:交互 REPL → interactive,headless/-p → allow
 }
 
 /** 会话 id 形状(session/store.ts newSessionId:时间戳前缀 + 随机尾)。 */
@@ -68,6 +77,14 @@ export function parseFlags(argv: string[]): CliFlags {
         break;
       }
       case '--faux-script': flags.fauxScript = take(); break;
+      case '--approval-mode': {
+        const v = take();
+        if (v !== 'interactive' && v !== 'allow' && v !== 'deny') {
+          throw new Error(`unknown approval mode: ${v} (expected interactive|allow|deny)`);
+        }
+        flags.approvalMode = v;
+        break;
+      }
       case '--cwd': flags.cwd = take(); break;
       case '--session-dir': flags.sessionDir = take(); break;
       case '--no-color': flags.noColor = true; break;

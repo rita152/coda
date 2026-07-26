@@ -363,7 +363,26 @@ async function runOne(
     }
   }
   await emit({ type: 'tool_execution_end', toolCallId: p.call.id, result });
+  // plan_update 旁路事件:loop 在 finalize 识别 plan 形态的 details 后发出(docs/07 §2.8,
+  // 工具不依赖事件总线,保持 tools → protocol 的依赖方向)。整表替换语义,快照即全量。
+  const planSteps = extractPlanSteps(result);
+  if (planSteps !== undefined) await emit({ type: 'plan_update', steps: planSteps });
   return { result, terminate };
+}
+
+/** plan 工具 details 的鸭子识别:非 isError 且 details.steps 是 PlanStep 数组形态。 */
+function extractPlanSteps(result: ToolResultMessage): { step: string; status: 'pending' | 'in_progress' | 'completed' }[] | undefined {
+  if (result.isError) return undefined;
+  const details = result.details as { steps?: unknown } | undefined;
+  if (details === undefined || !Array.isArray(details.steps)) return undefined;
+  const ok = details.steps.every(
+    (s: unknown) =>
+      typeof s === 'object' &&
+      s !== null &&
+      typeof (s as { step?: unknown }).step === 'string' &&
+      ['pending', 'in_progress', 'completed'].includes((s as { status?: string }).status ?? ''),
+  );
+  return ok ? (details.steps as { step: string; status: 'pending' | 'in_progress' | 'completed' }[]) : undefined;
 }
 
 /**
@@ -378,7 +397,13 @@ async function executeToolCalls(
   emit: Emit,
 ): Promise<{ toolResults: ToolResultMessage[]; terminate: boolean }> {
   const prepared: Prepared[] = [];
-  for (const call of toolCalls) prepared.push(await prepareToolCall(cfg, call));
+  for (const call of toolCalls) {
+    // ★ preflight 也要查 abort:beforeToolCall 是审批挂载点,abort 后再 prepare 下一个 call
+    //   会向已清空的 broker 发起新审批请求 → 永不 resolve → waitForIdle 挂死(R7 死锁)。
+    //   已 abort 则停止 prepare 剩余 call,它们成为孤儿由 transform 层补合成中断结果。
+    if (taskSignal.aborted) break;
+    prepared.push(await prepareToolCall(cfg, call));
+  }
 
   const sequential =
     cfg.toolExecution === 'sequential' ||

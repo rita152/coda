@@ -64,3 +64,21 @@ describe('readConfigFile(docs/09 §7)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
+  it('解析三个合法值', () => {
+    expect(parseFlags(['--approval-mode', 'interactive']).approvalMode).toBe('interactive');
+    expect(parseFlags(['--approval-mode', 'allow']).approvalMode).toBe('allow');
+    expect(parseFlags(['--approval-mode', 'deny']).approvalMode).toBe('deny');
+  });
+
+  it('缺省不设值——默认由 main 按形态定(交互 REPL → interactive,headless/-p → allow)', () => {
+    expect(parseFlags([]).approvalMode).toBeUndefined();
+    expect(parseFlags(['--json']).approvalMode).toBeUndefined();
+  });
+
+  it('非法值与缺值报错(fail-fast,不静默降级)', () => {
+    expect(() => parseFlags(['--approval-mode', 'yolo'])).toThrow(/unknown approval mode: yolo/);
+    expect(() => parseFlags(['--approval-mode'])).toThrow(/requires a value/);
+  });
+});

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { QueuedMessage } from '../protocol/index.js';
 import type { SessionUsage } from '../session/index.js';
 import {
+  approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
   decideEnter,
   DoublePress,
@@ -169,5 +170,21 @@ describe('/status 与 /queue 输出格式', () => {
     expect(lines[1]).toContain('…'); // 60 字符截断
     expect(lines).toContain('follow-up (1):');
     expect(lines).toContain('  1. short'); // 序号按各自队列内计
+  });
+});
+
+describe('approvalKeyDecision:审批模式键位映射(M6,docs/09 §4)', () => {
+  it('y=allow_once / a=allow_always / n=deny / Esc=abort', () => {
+    expect(approvalKeyDecision('y')).toBe('allow_once');
+    expect(approvalKeyDecision('a')).toBe('allow_always');
+    expect(approvalKeyDecision('n')).toBe('deny');
+    expect(approvalKeyDecision('escape')).toBe('abort');
+  });
+
+  it('其余键无审批动作(吞键由 repl 键位层负责,本映射只认四键)', () => {
+    expect(approvalKeyDecision('return')).toBeUndefined();
+    expect(approvalKeyDecision('q')).toBeUndefined();
+    expect(approvalKeyDecision('')).toBeUndefined();
+    expect(approvalKeyDecision('space')).toBeUndefined();
   });
 });

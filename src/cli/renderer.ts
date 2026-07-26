@@ -189,6 +189,7 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
   let dynRows = 0;
   let input: string | undefined; // undefined = repl 未接管(-p 模式无输入行)
   let status: string | undefined;
+  let approvalPrompt: string | undefined; // M6 审批提示(docs/09 §4:动态区变审批提示行)
   let activity: string | undefined;
   let activityTail: string | undefined; // 工具流式输出尾行
   let steerCount = 0;
@@ -227,8 +228,12 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
     // 活动行 + 队列徽标(docs/09 §5:同一行,两队列皆空时徽标不显示)
     const glyph = running ? (SPINNER_FRAMES[spin % SPINNER_FRAMES.length] ?? '⠋') : '·';
     spin++;
-    let act = status ?? (running ? (activity ?? 'streaming…') : 'idle');
-    if (status === undefined && activityTail !== undefined) act += `  ${activityTail}`;
+    // 优先级:临时状态提示 > 审批提示(键位已切审批模式,提示必须在场)> 常规活动行
+    const approval = approvalPrompt !== undefined ? paint(approvalPrompt, YELLOW) : undefined;
+    let act = status ?? approval ?? (running ? (activity ?? 'streaming…') : 'idle');
+    if (status === undefined && approval === undefined && activityTail !== undefined) {
+      act += `  ${activityTail}`;
+    }
     let line = `${glyph} ${sanitizeDynText(act)}`;
     if (steerCount > 0 || followCount > 0) {
       line += `  ${paint(`[steer ${steerCount} · follow-up ${followCount}]`, CYAN)}`;
@@ -433,6 +438,7 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
         running = false;
         activity = undefined;
         activityTail = undefined;
+        approvalPrompt = undefined; // abort 收尾等场景兜底撤下审批提示
         if (e.reason === 'error') appendLine(paint('✖ agent run failed', RED));
         appendLine(paint(usageSummary(e.reason), DIM));
         break;
@@ -460,6 +466,7 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
         }
         break; // tool_result 由 tool_execution_end 渲染,此处去重(docs/09 §4)
       case 'tool_execution_start': {
+        approvalPrompt = undefined; // 审批已决议(放行或拒绝都会走到 start),提示撤下
         const headline = toolHeadline(e.toolName, e.args);
         if (headline !== undefined) appendLine(`${paint('●', CYAN)} ${headline}`);
         activity = `${e.toolName} running…`;
@@ -497,8 +504,12 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
           appendLine(`${glyph} ${s.step}`);
         }
         break;
-      case 'approval_request': // M6:占位渲染,键位切换到审批模式时再扩
+      case 'approval_request':
+        // M6(docs/09 §4):转录区一行留痕(plain/headless 可读),动态区切审批提示;
+        // 键位表由 repl 同步切审批模式,提示与键位来自同一事件,不会失配。
         appendLine(paint(`? approval required: ${e.description}`, YELLOW));
+        approvalPrompt = `Allow ${e.description}? [y=once / a=always / n=deny / Esc=abort]`;
+        redrawDyn();
         break;
       case 'error':
         appendLine(e.fatal ? paint(`✖ fatal: ${e.message}`, RED) : paint(`⚠ ${e.message}`, YELLOW));

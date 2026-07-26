@@ -92,7 +92,7 @@ export class Session {
       cwd: opts.agentConfig.cwd ?? process.cwd(),
       model: opts.agentConfig.model.ref,
     });
-    const agent = new Agent(opts.agentConfig);
+    const agent = new Agent({ ...opts.agentConfig, truncationScope: id });   // 落盘 scope = sessionId(docs/07 §1.6)
     return new Session(id, store, agent, new UsageTracker(opts.pricing));
   }
 
@@ -107,7 +107,7 @@ export class Session {
     if (loaded.lastCompaction !== undefined && loaded.active === loaded.messages) {
       console.error(`[session] ${id}: compaction record ignored (tailStartId not found)`);
     }
-    const agent = new Agent({ ...opts.agentConfig, initialMessages: loaded.active });
+    const agent = new Agent({ ...opts.agentConfig, initialMessages: loaded.active, truncationScope: id });
     const usage = new UsageTracker(opts.pricing);
     usage.seed(loaded.active);       // 统计与转录同源
     return new Session(id, store, agent, usage);
