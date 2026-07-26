@@ -1,0 +1,4 @@
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_i0","type":"function","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_i1","type":"function","function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.ts\"}"}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}

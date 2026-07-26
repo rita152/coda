@@ -211,7 +211,8 @@ adapter 最了解错误来源(APIError 的 status/code、fetch 网络错误、in
 | network | 无 status 的连接/超时错误 | 是 |
 | rate_limit | 429 | 是(优先用 retryAfterMs) |
 | http 5xx / 408 / 409 | status | 是 |
-| overflow | context length exceeded 类错误码/文案 | 否 → 转交 compaction(6.5) |
+| in-band(SSE data 行带 error 对象,无 status) | error 体的 type/code:`server_error`/`internal_error` → http 可重试;其余 → unknown 不重试 | 视分类 |
+| overflow | context length exceeded 类错误码/文案(仅 400/in-band 时按文案判定;429 的 "too many tokens" 是限流不是 overflow) | 否 → 转交 compaction(6.5) |
 | auth 401/403、400、404 | status | 否(重试无意义) |
 
 ### 5.2 退避与决策纯函数

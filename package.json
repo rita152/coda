@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run lint && npm run typecheck && npm run build && npm run test",
-    "demo:m1": "tsx scripts/demo-m1.ts"
+    "demo:m1": "tsx scripts/demo-m1.ts",
+    "smoke": "tsx scripts/smoke-stream.ts",
+    "record:fixture": "tsx scripts/record-fixture.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
@@ -33,5 +35,8 @@
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.62.3",
     "@rollup/rollup-linux-x64-gnu": "^4.62.3"
+  },
+  "dependencies": {
+    "openai": "^6.49.0"
   }
 }

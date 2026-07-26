@@ -1,0 +1,2 @@
+{"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

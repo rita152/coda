@@ -45,6 +45,22 @@ export function assertValidProviderEventSequence(events: ProviderEvent[]): void 
         fail(`done with unclosed block(s): index ${[...open.keys()].join(',')}`, i, event);
       }
       assertUsageInvariants(event.message.usage);
+      // 最终消息不变量:每个 tool_call part 的 arguments 必须等于 parse(rawArguments)
+      // (raw 可解析为对象时;length 截断等不可解析场景豁免)——抓「迟到分片使二者脱节」类缺陷
+      for (const part of event.message.content) {
+        if (part.type === 'tool_call' && part.rawArguments !== undefined) {
+          try {
+            const parsed: unknown = JSON.parse(part.rawArguments);
+            if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+              if (JSON.stringify(part.arguments) !== JSON.stringify(parsed)) {
+                fail(`tool_call '${part.id}' arguments != parse(rawArguments)`, i, event);
+              }
+            }
+          } catch {
+            // 不可解析:豁免
+          }
+        }
+      }
       return;
     }
     if (event.type === 'start') return;
@@ -88,12 +104,14 @@ export function assertValidProviderEventSequence(events: ProviderEvent[]): void 
           }
         }
         if (event.type === 'tool_call_end') {
-          if (event.toolCall.rawArguments !== undefined && event.toolCall.rawArguments !== folded) {
-            fail(`tool_call_end.toolCall.rawArguments != folded deltas`, i, event);
+          // event.toolCall 是活引用,本校验发生在流结束后:交错 index 方言下已关闭槽位
+          // 可能收到「迟到分片」(并入 raw 但不再发事件),因此不变量是前缀关系而非相等
+          // ——每个 delta 都必须体现在 raw 中,raw 允许多出未发事件的尾部。
+          if (event.toolCall.rawArguments !== undefined && !event.toolCall.rawArguments.startsWith(folded)) {
+            fail(`tool_call_end: folded deltas not a prefix of rawArguments`, i, event);
           }
-          if (JSON.stringify(event.toolCall) !== JSON.stringify(part)) {
-            fail(`tool_call_end.toolCall != partial.content[${contentIndex}]`, i, event);
-          }
+          // 自比较(toolCall vs partial.content[i])恒真无探测力,不做;
+          // arguments 与 rawArguments 的最终一致性由终态检查承担。
         }
       }
     }

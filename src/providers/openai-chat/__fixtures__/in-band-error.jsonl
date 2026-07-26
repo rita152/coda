@@ -1,0 +1,2 @@
+{"id":"c1","choices":[{"index":0,"delta":{"content":"part"},"finish_reason":null}]}
+{"error":{"message":"The server had an error processing your request","type":"server_error","code":"internal_error"}}

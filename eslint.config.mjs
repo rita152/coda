@@ -55,8 +55,10 @@ export default tseslint.config(
   },
 
   // ---- 规则 B:openai 包只允许出现在 providers/openai-chat 内(需求 1 的机械保障)----
+  // scripts/ 同样受约束;record-fixture.ts(录制原始 wire 本就需要 SDK)以显式
+  // eslint-disable 注释豁免——例外必须可见、可审。
   {
-    files: ['src/**/*.ts', 'tests/**/*.ts'],
+    files: ['src/**/*.ts', 'tests/**/*.ts', 'scripts/**/*.ts'],
     ignores: ['src/providers/openai-chat/**'],
     rules: {
       'no-restricted-imports': ['error', {

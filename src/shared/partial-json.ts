@@ -26,8 +26,20 @@ export function parsePartialJson(raw: string): Record<string, unknown> {
   if (escape) repaired = repaired.slice(0, -1);
   if (inString) repaired += '"';
   repaired = repaired.replace(/,\s*$/, '').replace(/:\s*$/, ':null');
-  for (let i = closers.length - 1; i >= 0; i--) repaired += closers[i];
-  return tryParseObject(repaired) ?? {};
+  let closed = repaired;
+  for (let i = closers.length - 1; i >= 0; i--) closed += closers[i];
+  const parsed = tryParseObject(closed);
+  if (parsed !== undefined) return parsed;
+  // 仍失败:截断点落在 key 内或裸字面量内(如 '{"a":1,"old' / '{"flag":tr')。
+  // 剥掉尾部悬空的 key/字面量片段后重试一次,保住已完成的前缀。
+  const stripped = repaired.replace(/,?\s*"[^"]*"?\s*:?\s*[^",{}[\]]*$/, '');
+  if (stripped !== repaired) {
+    let retry = stripped.replace(/,\s*$/, '');
+    for (let i = closers.length - 1; i >= 0; i--) retry += closers[i];
+    const second = tryParseObject(retry);
+    if (second !== undefined) return second;
+  }
+  return {};
 }
 
 function tryParseObject(text: string): Record<string, unknown> | undefined {

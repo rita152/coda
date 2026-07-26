@@ -1,0 +1,140 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`convertMessages(出站快照) > 综合 Context:逐 role 映射、空 assistant 跳过、图片工具结果批后抽出、配对紧邻序一致 1`] = `
+[
+  {
+    "content": "You are coda.",
+    "role": "developer",
+  },
+  {
+    "content": [
+      {
+        "text": "看看这张图,再读两个文件",
+        "type": "text",
+      },
+      {
+        "image_url": {
+          "url": "data:image/png;base64,aW1n",
+        },
+        "type": "image_url",
+      },
+    ],
+    "role": "user",
+  },
+  {
+    "content": "好的,我来处理。",
+    "role": "assistant",
+    "tool_calls": [
+      {
+        "function": {
+          "arguments": "{"path":"a.png"}",
+          "name": "read",
+        },
+        "id": "tc1",
+        "type": "function",
+      },
+      {
+        "function": {
+          "arguments": "{"path":"b.ts"}",
+          "name": "read",
+        },
+        "id": "tc2",
+        "type": "function",
+      },
+    ],
+  },
+  {
+    "content": "(image file)",
+    "role": "tool",
+    "tool_call_id": "tc1",
+  },
+  {
+    "content": "file contents here",
+    "role": "tool",
+    "tool_call_id": "tc2",
+  },
+  {
+    "content": [
+      {
+        "text": "Attached image(s) from tool result:",
+        "type": "text",
+      },
+      {
+        "image_url": {
+          "url": "data:image/png;base64,cGljMQ==",
+        },
+        "type": "image_url",
+      },
+    ],
+    "role": "user",
+  },
+  {
+    "content": "继续",
+    "role": "user",
+  },
+]
+`;
+
+exports[`toStrictSchema(strict 子集清洗快照) > additionalProperties:false、全属性入 required、可选属性 type 加 null、递归嵌套 1`] = `
+{
+  "additionalProperties": false,
+  "properties": {
+    "list": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "type": [
+              "string",
+              "null",
+            ],
+          },
+        },
+        "required": [
+          "x",
+        ],
+        "type": "object",
+      },
+      "type": [
+        "array",
+        "null",
+      ],
+    },
+    "nested": {
+      "additionalProperties": false,
+      "properties": {
+        "flag": {
+          "type": [
+            "boolean",
+            "null",
+          ],
+        },
+      },
+      "required": [
+        "flag",
+      ],
+      "type": [
+        "object",
+        "null",
+      ],
+    },
+    "offset": {
+      "type": [
+        "number",
+        "null",
+      ],
+    },
+    "path": {
+      "description": "file path",
+      "type": "string",
+    },
+  },
+  "required": [
+    "path",
+    "offset",
+    "nested",
+    "list",
+  ],
+  "type": "object",
+}
+`;

@@ -1,0 +1,6 @@
+{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.ts\"}"}},{"index":1,"id":"call_b","type":"function","function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}]},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"c1","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":31,"total_tokens":151}}

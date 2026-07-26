@@ -18,12 +18,12 @@ import type {
   Usage,
 } from '../../protocol/index.js';
 import { ProviderEventStream } from '../../protocol/index.js';
-import { parsePartialJson } from './partial-json.js';
+import { parsePartialJson } from '../../shared/partial-json.js';
 import type { FauxCall, FauxEventSpec, FauxScript, FauxTurn, Gate } from './types.js';
 
 export { createGate } from './types.js';
 export type { FauxCall, FauxEventSpec, FauxScript, FauxTurn, Gate } from './types.js';
-export { parsePartialJson } from './partial-json.js';
+export { parsePartialJson } from '../../shared/partial-json.js';
 
 const DEFAULT_CHUNK_SIZE = 8;
 

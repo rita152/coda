@@ -1,0 +1,3 @@
+{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"c1","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":250,"total_tokens":1250,"prompt_tokens_details":{"cached_tokens":800,"cache_write_tokens":100},"completion_tokens_details":{"reasoning_tokens":200}}}

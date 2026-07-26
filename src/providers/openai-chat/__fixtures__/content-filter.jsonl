@@ -1,0 +1,2 @@
+{"id":"c1","choices":[{"index":0,"delta":{"content":"这个请求"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}

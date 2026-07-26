@@ -1,0 +1,4 @@
+{"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"先想"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"一想"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{"content":"答案是 42"},"finish_reason":null}]}
+{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

@@ -136,15 +136,13 @@ function pushToolResult(out, m: ToolResultMessage, compat): void {
   const text = renderTextParts(m.content) || (m.isError ? 'Error (no output)' : '(no output)');
   out.push({ role: 'tool', tool_call_id: m.toolCallId, content: text,
              ...(compat.requiresToolResultName && { name: m.toolName }) });
-  const images = m.content.filter(p => p.type === 'image');
-  if (images.length > 0 && compat.supportsImageParts) {
-    out.push({ role: 'user', content: [
-      { type: 'text', text: 'Attached image(s) from tool result:' },
-      ...images.map(toImageUrlPart),
-    ]});
-  }
-  // compat.requiresAssistantAfterToolResult:个别方言要求 tool 结果后必须是 assistant,
-  // 在「本批最后一条 toolResult 且下一条是 user」时插入合成 assistant 占位(内容 "Continuing.")
+  // 图片在批内收集,「整批 tool 消息结束后」统一补一条 user 消息:
+  //   { role:'user', content: [ {type:'text', text:'Attached image(s) from tool result:'}, ...images ] }
+  // 不得逐条 toolResult 立即插入——多工具批次会被 user 消息从中间劈开,违反 §3.3 配对纪律(400)。
+  // compat.requiresAssistantAfterToolResult:插入决策基于 wire 相邻关系而非转录相邻——
+  // push 任何 user 消息(含图片合成消息)前,若 out 末尾是 role:'tool',先插合成
+  // assistant 占位(内容 "Continuing.")。空/仅 reasoning 的 assistant 在 wire 上被跳过,
+  // 「转录里的下一条」不等于「wire 上的下一条」,按转录判断会被绕过。
 }
 ```
 
@@ -245,6 +243,8 @@ handleChunk 规则(照抄 openai-node `ChatCompletionStream.ts` 的 `#accumulate
 - reasoning 扩展字段(§4.5)同理走 reasoning 三段式;
 - `delta.tool_calls[]`:对每个条目,**按 `index` 定位槽位**(`index` 缺失回退 0——部分第三方从不给 index);新 index → 关闭当前 text/reasoning 块、为**上一个** tool slot 发 `tool_call_end`(openai-node helper 的 `arguments.done` 触发时机:新 index 出现或 finish_reason 到来),再建槽发 `tool_call_start`;`id`/`type`/`function.name` 仅首个分片携带,**name 覆盖不拼接**;`function.arguments` **字符串拼接**——它是任意切割的 JSON 分片;
 - **每个 arguments delta 后用容错 JSON 解析刷新 `ToolCallPart.arguments`**(pi 的 `parseStreamingJson` 模式,partial-json 解析器):UI 可以实时看到半成品参数;`rawArguments` 始终保留原始串;`tool_call_end` 时做最终 `JSON.parse`,失败则保留容错解析结果并在 rawArguments 留现场(loop 层依据 stopReason 决定是否执行);
+- `delta.refusal`(structured outputs 的拒绝路径,官方累积器单独拼接)→ 并入 text 通道,保证拒绝文本进转录(「转录永远完整」不变量);
+- `delta.function_call`(deprecated 旧方言)→ 按官方累积器语义折算为单一 tool slot(伪 index),与 `finish_reason:'function_call'` 的映射保持一致——声称兼容就必须产出 ToolCallPart,不许空转录;
 - `finish_reason` 非 null → 记录到 state,**不立即收尾**(include_usage 时其后还有一个 `choices:[]` 的 usage chunk);
 - usage chunk → 按 §4.4 映射进 `partial.usage`。
 
@@ -262,6 +262,7 @@ handleChunk 规则(照抄 openai-node `ChatCompletionStream.ts` 的 `#accumulate
 | `content_filter` | `content_filter` | 作为一等 StopReason 保留(pi 映成 error,我们不采纳——它是合法终态,转录应如实记录) |
 | `function_call`(deprecated) | `tool_calls` | 兼容旧方言 |
 | 流结束仍为 null | `error` | 「stream ended without finish_reason」,pi 同款处理 |
+| 其它未知值 | `stop` | 保守当作干净收尾,console.warn 留现场(第三方方言的 'eos'/'max_tokens' 等) |
 
 usage 映射(`CompletionUsage` → 内部 `Usage`,注意内部语义是 **inclusive**):
 
@@ -314,7 +315,7 @@ function pushErrorEvent(err, state, stream, signal): void {
 | `BadRequestError`(400) | `error` | 大概率是我们的协议 bug,log 完整出站 messages 现场 |
 | 其余 `APIError`(401/403/404/422…) | `error` | 不可重试,带 status/requestID |
 
-abort 的传导链:`options.signal` 透传给 `create(body, { signal })` → SDK 中断底层请求 → for-await throw `APIUserAbortError` → 上表映射。被中断的 AssistantMessage(stopReason `'aborted'`)**保留已流出的部分内容进转录**,重放时由 transform 层过滤(§6)——这保证「转录永远完整」与「出站永远合法」两个不变量同时成立。
+abort 的传导链有**两条路径**(openai v6 实测):请求建立阶段(响应头返回前)abort → SDK throw `APIUserAbortError` → catch 分支映射;**SSE 流中途** abort → SDK 的流迭代器捕获 AbortError 后 **clean return,不 throw**(core/streaming.js 显式吞掉)→ for-await 正常结束——adapter 必须在收尾前检查 `signal.aborted && finishReason == null`,命中即按 aborted 收尾,否则用户打断会被误编码为「残缺流」类可重试 network 错误,M7 session 层会自动重发用户明确取消的请求。被中断的 AssistantMessage(stopReason `'aborted'`)**保留已流出的部分内容进转录**,重放时由 transform 层过滤(§6)——这保证「转录永远完整」与「出站永远合法」两个不变量同时成立。
 
 ## 5. CompatFlags:方言开关与 baseURL 自动推断
 
