@@ -6,7 +6,7 @@
 
 ## 1. 项目是什么
 
-在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI:交互式 REPL 为主,附带 headless `--json` 模式;能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
+在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI:交互式全屏 TUI 为主,附带 classic/plain 保底与 headless `--json` 模式;能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
 
 一次典型会话的样子:
 
@@ -96,7 +96,7 @@ $ coda
 | D15 | bash 每次 spawn 新进程(detached 进程组 + killProcessTree),v1 无持久 shell | 持久 shell 的状态泄漏与清理复杂度远超收益;`workdir` 参数替代 cd | 四个参考项目全部如此;codex 式交互长任务留作 v2 |
 | D16 | 单线程单主循环、扁平消息列表;v1 无多 agent | 简单性是可调试性的来源;子 agent 未来可作为一个工具补入,不影响核心 | Claude Code 单主循环佐证;pi-mono AgentSession 单类 3300 行的职责失控反例 |
 | D17 | session = JSONL 追加(一行一条 AgentMessage),恢复 = 重放 | append-only 天然崩溃安全;与协议消息模型同构,无需第二套存储 schema | opencode Part 独立存储的简化版;codex 可序列化边界的精神延续 |
-| D18 | CLI v1 运行于 Bun 1.3.14,用 readline/raw TTY compatibility 边界 + ANSI 自绘,不引 TUI 框架;headless `--json` 吐 NDJSON AgentEvent | TUI 框架是重依赖且与流式渲染模型强耦合;Bun 暂无覆盖现有 keypress/raw TTY 语义的等价高层接口;headless 模式即「内部协议对外暴露」的持续验证器 | codex 的 submit/next_event 可序列化边界;pi-mono 事件监听 await 串行拖慢 loop 的教训 |
+| D18 | CLI v1 运行于 Bun 1.3.14;eligible 双 TTY(`TERM != dumb`)默认用 `@opentui/core` 全屏渲染；初始化失败时,已配置 key 才回退 classic,缺 key 的延迟校验会话关闭后退出 2；plain 保底继续存在;headless `--json` 吐 NDJSON SessionEvent | OpenTUI 提供 native buffer、Yoga 布局、Textarea/Markdown 与可测 renderer,适合固定 header/footer + 流式中区;懒加载隔离 native 依赖,headless 仍是「内部协议对外暴露」的持续验证器 | codex 的 submit/next_event 可序列化边界;Claude Code 固定 composer;pi 的双队列键位语义 |
 | D19 | Usage 口径 inclusive:`input` 含 cacheRead/cacheWrite,`output` 含 reasoning;换算由各 adapter 完成 | 消费方永不做减法;跨 provider 口径统一收敛在一处 | opencode 从第一天定双轨口径的经验(nonCached+cacheRead+cacheWrite=input 恒等式) |
 | D20 | `stopReason === 'length'` 且有 toolCall 时,全批合成错误结果、一律不执行 | 截断的 arguments 可能是恰好通过 schema 校验的非法参数,执行等于按脏数据办事 | openai-node:length 时 arguments 禁止盲目 parse;pi-mono 同款分支 |
 
@@ -134,19 +134,24 @@ steering 只在两次 provider 请求之间落地,而 Chat Completions 无服务
 
 整个系统的类型分层与转换链(canonical,02/03 文档展开):
 
-**UI 输入/命令(CLI 层)→ AgentEvent(agent↔UI)→ AgentMessage/Context(会话数据)→ ProviderEvent/StreamFn(agent↔provider)→ wire 协议(adapter 内部,如 ChatCompletionMessageParam)**
+命令下行是 **UI → Session 门面 → Agent**；事件上行是 **AgentEvent → Session → SessionEvent → UI**。会话与 provider 的数据转换链仍是 **AgentMessage/Context → ProviderEvent/StreamFn → wire 协议(adapter 内部,如 ChatCompletionMessageParam)**。
 
 ```mermaid
 graph TD
   UI["UI 输入 / 命令(CLI 层)<br/>prompt · steer · followUp · abort · 键位"]
-  AE["AgentEvent(agent ↔ UI)<br/>agent/turn/message/tool_execution 生命周期<br/>queue_update · plan_update · approval_request"]
+  SE["Session 门面 / SessionEvent<br/>持久化 · usage · retry · compaction"]
+  AG["Agent 核心"]
+  AE["AgentEvent(agent → session)<br/>agent/turn/message/tool_execution 生命周期<br/>queue_update · plan_update · approval_request"]
   AM["AgentMessage / Context(会话数据层)<br/>UserMessage · AssistantMessage · ToolResultMessage<br/>Part 化 content · Usage · StopReason"]
   PE["ProviderEvent / StreamFn(agent ↔ provider)<br/>start/delta/end 三段式 · partial 快照 · never-throw"]
   WIRE["wire 协议(adapter 内部)<br/>ChatCompletionMessageParam · ChatCompletionChunk<br/>只存在于 src/providers/openai-chat/"]
 
-  UI -- "命令下行" --> AE
-  AE -- "事件上行(订阅)" --> UI
-  AE --- AM
+  UI -- "Session API" --> SE
+  SE -- "转发命令" --> AG
+  AG -- "AgentEvent" --> AE
+  AE -- "持久化/注解" --> SE
+  SE -- "SessionEvent" --> UI
+  AG --- AM
   AM -- "transform 层清洗后出站" --> PE
   PE -- "累积为 AssistantMessage 入站" --> AM
   PE --- WIRE
@@ -156,7 +161,7 @@ graph TD
 
 - **wire 类型不上行**:`ChatCompletion*` 只存在于最底层,向上只暴露 ProviderEvent 与 AssistantMessage(D1/D2)。
 - **会话数据层是持久化与重放的唯一事实**:JSONL 存的是 AgentMessage,恢复即重放;AgentEvent 与 ProviderEvent 都是瞬态流,不落盘(D17)。
-- **每层转换都可独立测试**:CLI ↔ AgentEvent 用 faux provider 测,AgentMessage ↔ wire 用 SSE fixture 测(见 [10 测试策略](./10-testing.md))。
+- **每层转换都可独立测试**:CLI ↔ SessionEvent 用 faux provider 测,AgentMessage ↔ wire 用 SSE fixture 测(见 [10 测试策略](./10-testing.md))。
 
 其中 provider 接口的 canonical 形态(逐字引用,完整定义见 [03](./03-internal-protocol.md)):
 
@@ -177,19 +182,19 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
 | ripgrep | `@vscode/ripgrep` | 安装期自带平台二进制,免自实现下载逻辑;grep 工具直接 spawn 它(D11) |
 | ESLint | flat config + `import/no-restricted-paths` | D1 决策的机械化执行者:依赖方向违规 = CI 红灯 |
-| CLI 渲染 | Bun 运行时 + readline/raw TTY compatibility + ANSI 转义自绘 | 见 D18;不引 Ink 等 TUI 框架 |
+| CLI 渲染 | `@opentui/core` 0.4.x;classic readline/ANSI + plain 保底 | 见 D18;eligible 双 TTY 的全屏分支用 alternate screen、ScrollBox、Textarea、Markdown;脚本分支不加载 native 包 |
 
 目录结构与依赖方向的完整规则(`protocol` ← 所有人;`agent` 只依赖 `protocol`;等等)是 [02 架构与分层](./02-architecture.md) 的主题,此处不重复。
 
 ### Bun-native compatibility 边界
 
-项目命令、依赖安装、测试、构建与进程启动统一使用 Bun 1.3.14；普通文件内容 I/O、哈希、进程与流默认使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Bun 官方暂未提供覆盖现有语义的等价接口时，允许以下受控 compatibility 边界：`node:fs` / `node:os` 用于目录、元数据、临时目录、符号链接，以及要求同步顺序或耐久性的配置/会话/审批 append、fsync、truncate 与落盘操作；路径处理使用 `node:path`；交互输入保留 readline/raw TTY；工作目录、TTY 探测、进程退出、信号与 POSIX 进程组收尾保留 `process` compatibility API。除此之外不得新增 Node 专属依赖。这里的 “Bun-native” 指 Bun 是唯一要求安装的运行时，不表示代码必须做到零 Node API。
+项目命令、依赖安装、测试、构建与进程启动统一使用 Bun 1.3.14；普通文件内容 I/O、哈希、进程与流默认使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Bun 官方暂未提供覆盖现有语义的等价接口时，允许以下受控 compatibility 边界：`node:fs` / `node:os` 用于目录、元数据、临时目录、符号链接，以及要求同步顺序或耐久性的配置/会话/审批 append、fsync、truncate 与落盘操作；路径处理使用 `node:path`；classic 保底输入保留 readline/raw TTY；工作目录、TTY 探测、进程退出、信号与 POSIX 进程组收尾保留 `process` compatibility API。eligible 双 TTY 的默认交互面由 OpenTUI 管理 raw TTY；初始化失败先清理终端,已配置 key 时回退 classic,缺 key 的延迟校验会话则关闭并退出 2。除此之外不得新增 Node 专属依赖。这里的 “Bun-native” 指 Bun 是唯一要求安装的运行时，不表示代码必须做到零 Node API。
 
 同样重要的是**明确不引入的依赖**,每条都对应一次别人踩过的坑:
 
 - **Vercel AI SDK(运行时依赖)**:只当参考实现读,不 import——opencode V1 的 1832 行返工是直接反例;
 - **zod-to-json-schema**:zod v4 原生 `z.toJSONSchema()` 已覆盖,少一个随 zod 大版本漂移的桥接件;
-- **Ink / React 系 TUI**:渲染模型与 AgentEvent 流式订阅不匹配,且拖入整个 React 依赖树(D18);
+- **Ink / React 系 TUI**:不引 React reconciler;当前 OpenTUI imperative renderable 直接消费 SessionEvent,避免第二套应用状态(D18);
 - **execa / shelljs 类包装**:bash 工具由 `Bun.spawn` 建 detached 进程组并精确控制 killProcessTree；仅信号/PGID 收尾落在上述 compatibility 边界;
 - **自研 SSE 解析**:`openai` 包的流解析与错误分类已经过实战,adapter 站在它上面做事件翻译即可(D8 只是不用它的高层 helper,不是不用它的传输层)。
 
@@ -213,7 +218,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | 非目标 | 说明 | 去向 |
 |---|---|---|
 | 多 agent / 子 agent 编排 | 单线程单主循环 + 扁平消息列表(D16);子 agent 未来以「一个工具」的形态补入,结果以工具结果汇合 | v2 |
-| TUI 框架(Ink / pi-tui 类) | v1 用 readline + ANSI 自绘;渲染与 loop 通过 AgentEvent 解耦,将来换渲染器不动核心 | v2 |
+| 独立 TUI client / server 化 | v1 的 OpenTUI 与 Session 同进程;headless NDJSON 已保留未来拆进程的稳定边界 | v2 |
 | 持久 shell / 交互式长任务 | bash 每次 spawn 新进程(D15);codex 式 `exec_command` + `write_stdin`(session_id + yield_time_ms)另立工具 | v2 |
 | plan mode(权限层模式标志 gate 写工具) | 机制已定型:保留写工具、执行时报 plan-mode 错误、exit_plan 批准结果注入 synthetic user message;依赖权限层先落地 | v2(依赖 M6) |
 | 权限 / approval 系统 | `beforeToolCall` + `approval_request` 事件 + Promise resolver 注册表;bash 命令结构解析与 `$()` / 反引号强制升级确认 | M6 |
@@ -240,11 +245,11 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 - [ ] follow-up:仅在无 toolCall 且 steering 队列为空时被消费;run 内消费是外层循环续跑,不发新 `agent_start`(转录中出现 `source: 'follow_up'` 的 user 消息且其间无 `agent_end`);仅 session 层 `continue()` 消费残留 follow-up 队列时,新 run 的 `agent_start.reason` 为 `follow_up`。
 - [ ] abort 后转录合法:任意时刻 Esc,下一次请求 Chat Completions 不出现 400(tool 配对由 transform 层修复);aborted 消息保留在 JSONL 中。
 - [ ] 八个工具全部通过各自验收清单([07](./07-tools.md)),包括 edit 的 read-before-edit 硬约束与 fuzzy 零风险层。
-- [ ] headless 模式:`--json` 下 stdin 注入 {prompt|steer|follow_up|abort} 四类命令,stdout 的 NDJSON AgentEvent 可被外部程序完整驱动一次多 turn 会话。
+- [ ] headless 模式:`--json` 下 stdin 注入 {prompt|steer|follow_up|abort} 四类命令,stdout 的 NDJSON SessionEvent 可被外部程序完整驱动一次多 turn 会话。
 - [ ] 全部 loop / steering / 工具测试不依赖网络(faux provider + fixture 回放)。
 - [ ] 错误模型闭环:kill 掉网络 / 塞入 in-band error fixture / 任意时刻 abort,agent 进程不崩溃,转录中出现对应 stopReason 的 AssistantMessage,且 `continue()` 可恢复。
 - [ ] `stopReason === 'length'` 且含 toolCall 的响应,批内工具零执行、全部收到合成错误结果(D20 的可观测验证)。
-- [ ] 发布形态:`bun add -g coda`(或 `bunx coda`)后 `coda` 可直接启动 REPL;`Bun.build` 产物含 Bun shebang 的 bin,运行时基线固定为 Bun 1.3.14。
+- [ ] 发布形态:`bun add -g coda`(或 `bunx coda`)后 `coda` 可直接启动全屏 TUI;`Bun.build` 产物含 Bun shebang 的 bin,运行时基线固定为 Bun 1.3.14,并随安装解析当前平台 OpenTUI native optional package。
 
 ## 相关文档
 

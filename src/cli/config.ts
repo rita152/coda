@@ -1,6 +1,6 @@
 // 配置解析(规格见 docs/09-cli.md §7):flags > 环境变量 > ~/.coda/config.json > 内置默认,
-// 逐字段独立合并。缺 key 的报错必须给出可执行的修复提示。
-// 密钥永远不进会话 JSONL、不出现在任何 AgentEvent(ModelConfig 不随事件外发)。
+// 逐字段独立合并。全屏 TUI 可把缺 key 保留为待配置状态；其他启动面仍给可执行提示。
+// 密钥永远不进会话 JSONL、不出现在任何 SessionEvent(ModelConfig 不随事件外发)。
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -37,7 +37,7 @@ export interface CliFlags {
   cwd?: string;
   sessionDir?: string;         // 测试/e2e 隔离用
   noColor: boolean;
-  approvalMode?: ApprovalMode; // 缺省按形态定:交互 REPL → interactive,headless/-p → allow
+  approvalMode?: ApprovalMode; // 缺省按形态定:交互 TUI/classic → interactive,headless/-p → allow
 }
 
 /** 会话 id 形状(session/store.ts newSessionId:时间戳前缀 + 随机尾)。 */
@@ -105,6 +105,50 @@ export interface ResolvedConfig {
   fauxScript?: string;
 }
 
+export interface ResolveConfigOptions {
+  /** 只供 eligible 全屏 TUI 使用；其他启动面仍在创建 Session 前拒绝缺 key。 */
+  allowMissingApiKey?: boolean;
+}
+
+export interface TuiTerminalState {
+  stdinIsTTY: boolean;
+  stdoutIsTTY: boolean;
+  term?: string;
+}
+
+/** API key 边界统一去掉误带空白；全空白与未配置同义，不能遮蔽低优先级来源。 */
+function normalizeApiKey(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized === '' ? undefined : normalized;
+}
+
+/** 与 main.ts 的实际分派共用同一个纯判定，避免缺 key 策略和 UI 路由漂移。 */
+export function isFullScreenTuiEligible(
+  flags: Pick<CliFlags, 'json' | 'prompt'>,
+  terminal: TuiTerminalState,
+): boolean {
+  return (
+    !flags.json &&
+    flags.prompt === undefined &&
+    terminal.stdinIsTTY &&
+    terminal.stdoutIsTTY &&
+    terminal.term !== 'dumb'
+  );
+}
+
+/** 缺 key 的可执行提示；undefined 表示当前 provider 已可启动请求。 */
+export function getMissingApiKeyMessage(config: ResolvedConfig): string | undefined {
+  if (config.provider === 'faux' || normalizeApiKey(config.modelConfig.apiKey) !== undefined) {
+    return undefined;
+  }
+  const keyVar =
+    config.provider === 'anthropic-messages' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+  return (
+    `未找到 API key:设置环境变量 ${keyVar}(或 CODA_API_KEY),` +
+    '或在 ~/.coda/config.json 写入 { "apiKeyEnv": "MY_KEY_VAR" }'
+  );
+}
+
 export function readConfigFile(file = path.join(runtimeHomeDir(), '.coda', 'config.json')): CodaConfigFile {
   let raw: string;
   try {
@@ -128,6 +172,7 @@ export function resolveConfig(
   flags: CliFlags,
   env: Readonly<Record<string, string | undefined>>,
   file: CodaConfigFile,
+  options: ResolveConfigOptions = {},
 ): ResolvedConfig {
   const provider = flags.provider ?? 'openai-chat';
   if (provider === 'faux') {
@@ -144,23 +189,17 @@ export function resolveConfig(
     flags.model ?? env['CODA_MODEL'] ?? file.model ?? (isAnthropic ? 'claude-opus-5' : 'gpt-5.2');
   const baseURL = flags.baseUrl ?? env['CODA_BASE_URL'] ?? file.baseURL ?? undefined;
   // anthropic 侧优先接受 ANTHROPIC_API_KEY;两 provider 都尊重 CODA_API_KEY 与 config 文件
+  const apiKeyEnv = file.apiKeyEnv?.trim();
+  const fileApiKey =
+    apiKeyEnv === undefined || apiKeyEnv === ''
+      ? normalizeApiKey(file.apiKey)
+      : normalizeApiKey(env[apiKeyEnv]);
   const apiKey =
-    flags.apiKey ??
-    env['CODA_API_KEY'] ??
-    (isAnthropic ? env['ANTHROPIC_API_KEY'] : env['OPENAI_API_KEY']) ??
-    (file.apiKeyEnv !== undefined ? env[file.apiKeyEnv] : file.apiKey) ??
-    undefined;
-  if (apiKey === undefined) {
-    const keyVar = isAnthropic ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
-    throw new Error(
-      `未找到 API key:设置环境变量 ${keyVar}(或 CODA_API_KEY),` +
-        '或在 ~/.coda/config.json 写入 { "apiKeyEnv": "MY_KEY_VAR" }',
-    );
-  }
-  if (file.apiKey !== undefined) {
-    console.error('[coda] warning: ~/.coda/config.json 中存在明文 apiKey,建议改用 apiKeyEnv');
-  }
-  return {
+    normalizeApiKey(flags.apiKey) ??
+    normalizeApiKey(env['CODA_API_KEY']) ??
+    normalizeApiKey(isAnthropic ? env['ANTHROPIC_API_KEY'] : env['OPENAI_API_KEY']) ??
+    fileApiKey;
+  const resolved: ResolvedConfig = {
     provider,
     modelConfig: {
       ref: isAnthropic
@@ -172,4 +211,12 @@ export function resolveConfig(
       defaults: file.defaults,
     },
   };
+  const missingApiKey = getMissingApiKeyMessage(resolved);
+  if (missingApiKey !== undefined && options.allowMissingApiKey !== true) {
+    throw new Error(missingApiKey);
+  }
+  if (normalizeApiKey(file.apiKey) !== undefined) {
+    console.error('[coda] warning: ~/.coda/config.json 中存在明文 apiKey,建议改用 apiKeyEnv');
+  }
+  return resolved;
 }

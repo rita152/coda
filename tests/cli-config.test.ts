@@ -6,7 +6,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'bun:test';
 import type { CliFlags, CodaConfigFile } from '../src/cli/config.js';
-import { parseFlags, resolveConfig } from '../src/cli/config.js';
+import {
+  getMissingApiKeyMessage,
+  isFullScreenTuiEligible,
+  parseFlags,
+  resolveConfig,
+} from '../src/cli/config.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -75,17 +80,83 @@ describe('resolveConfig:flag > env > file > 默认,逐字段独立合并(docs/09
     expect(r.modelConfig.apiKey).toBe('openai-env-key');
   });
 
+  it('空白 key 等同缺失：高优先级空值不遮蔽 provider 环境变量，生效值去掉首尾空白', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const openai = resolveConfig(
+      flags({ apiKey: ' \t ' }),
+      { CODA_API_KEY: '\n', OPENAI_API_KEY: '  openai-env-key  ' },
+      { apiKey: 'file-key' },
+    );
+    const anthropic = resolveConfig(
+      flags({ provider: 'anthropic-messages', apiKey: '' }),
+      { CODA_API_KEY: '  ', ANTHROPIC_API_KEY: '\tanthropic-env-key\n' },
+      { apiKey: 'file-key' },
+    );
+    const fileFallback = resolveConfig(
+      flags(),
+      { CODA_API_KEY: ' ', OPENAI_API_KEY: '\n' },
+      { apiKey: '  file-key  ' },
+    );
+
+    expect(openai.modelConfig.apiKey).toBe('openai-env-key');
+    expect(anthropic.modelConfig.apiKey).toBe('anthropic-env-key');
+    expect(fileFallback.modelConfig.apiKey).toBe('file-key');
+  });
+
+  it('所有 key 来源均为空白时仍视为缺失，允许延迟时不把空串传给 provider', () => {
+    const blankSources = {
+      CODA_API_KEY: '',
+      OPENAI_API_KEY: ' \t ',
+      BLANK_KEY: '\n',
+    };
+    const blankFile = { apiKeyEnv: 'BLANK_KEY', apiKey: '  ' };
+
+    expect(() => resolveConfig(flags({ apiKey: ' ' }), blankSources, blankFile)).toThrow(
+      /OPENAI_API_KEY/,
+    );
+    const deferred = resolveConfig(
+      flags({ apiKey: ' ' }),
+      blankSources,
+      blankFile,
+      { allowMissingApiKey: true },
+    );
+    expect(deferred.modelConfig.apiKey).toBeUndefined();
+    expect(getMissingApiKeyMessage(deferred)).toContain('OPENAI_API_KEY');
+  });
+
   it('apiKeyEnv 间接引用:key 取 env[file.apiKeyEnv];指向的变量未设置时不回退明文 apiKey(§7.2 伪码)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const hit = resolveConfig(flags(), { MY_KEY_VAR: 'indirect-key' }, { apiKeyEnv: 'MY_KEY_VAR', apiKey: 'plain' });
     expect(hit.modelConfig.apiKey).toBe('indirect-key');
     expect(() => resolveConfig(flags(), {}, { apiKeyEnv: 'UNSET_VAR', apiKey: 'plain' })).toThrow();
+    const deferred = resolveConfig(
+      flags(),
+      {},
+      { apiKeyEnv: 'UNSET_VAR', apiKey: 'plain' },
+      { allowMissingApiKey: true },
+    );
+    expect(deferred.modelConfig.apiKey).toBeUndefined();
   });
 
   it('缺 key:throw 且文案含可执行提示(设哪个变量、改哪个文件——CLI 第一印象)', () => {
     expect(() => resolveConfig(flags(), {}, {})).toThrow(/OPENAI_API_KEY/);
     expect(() => resolveConfig(flags(), {}, {})).toThrow(/apiKeyEnv/);
     expect(() => resolveConfig(flags(), {}, {})).toThrow(/config\.json/);
+  });
+
+  it('eligible TUI 可把缺 key 保留为待配置状态，OpenAI/Anthropic 均不在解析期阻断', () => {
+    const openai = resolveConfig(flags(), {}, {}, { allowMissingApiKey: true });
+    const anthropic = resolveConfig(
+      flags({ provider: 'anthropic-messages' }),
+      {},
+      {},
+      { allowMissingApiKey: true },
+    );
+
+    expect(openai.modelConfig.apiKey).toBeUndefined();
+    expect(getMissingApiKeyMessage(openai)).toContain('OPENAI_API_KEY');
+    expect(anthropic.modelConfig.apiKey).toBeUndefined();
+    expect(getMissingApiKeyMessage(anthropic)).toContain('ANTHROPIC_API_KEY');
   });
 
   it('file.apiKey 明文在场:console.error 警告(stderr 纪律,不进 stdout)', () => {
@@ -113,6 +184,19 @@ describe('resolveConfig:flag > env > file > 默认,逐字段独立合并(docs/09
 
     const named = resolveConfig(flags({ provider: 'faux', model: 'faux-2' }), {}, {});
     expect(named.modelConfig.ref.model).toBe('faux-2');
+  });
+});
+
+describe('全屏 TUI eligibility 与缺 key 延迟策略共用同一判定', () => {
+  const terminal = { stdinIsTTY: true, stdoutIsTTY: true, term: 'xterm-256color' };
+
+  it('只有无 prompt 的双 TTY 非 dumb 交互启动 eligible', () => {
+    expect(isFullScreenTuiEligible(flags(), terminal)).toBe(true);
+    expect(isFullScreenTuiEligible(flags({ json: true }), terminal)).toBe(false);
+    expect(isFullScreenTuiEligible(flags({ prompt: 'hello' }), terminal)).toBe(false);
+    expect(isFullScreenTuiEligible(flags(), { ...terminal, stdinIsTTY: false })).toBe(false);
+    expect(isFullScreenTuiEligible(flags(), { ...terminal, stdoutIsTTY: false })).toBe(false);
+    expect(isFullScreenTuiEligible(flags(), { ...terminal, term: 'dumb' })).toBe(false);
   });
 });
 

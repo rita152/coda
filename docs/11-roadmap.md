@@ -26,7 +26,7 @@ graph LR
 | M2 | Chat Completions adapter,SSE fixture 回放全绿 | ~10 文件 / 1500 行 |
 | M3 | agent loop + 工具框架 + 7 个工具,真实模型能改文件 | ~25 文件 / 3500 行 |
 | M4 | steering / follow-up / abort / transform 层 | ~8 文件 / 1200 行 |
-| M5 | 可日用的 REPL + headless `--json` + JSONL 会话 | ~15 文件 / 2500 行 |
+| M5 | 可日用的全屏 TUI + classic/plain + headless `--json` + JSONL 会话 | ~17 文件 / 3200 行 |
 | M6 | plan 工具 + 权限/approval + 截断落盘完善 | ~10 文件 / 1500 行 |
 | M7 | compaction + auto-retry + 成本统计 + Anthropic adapter | ~12 文件 / 2000 行 |
 
@@ -59,7 +59,7 @@ steering 不是 loop 的一个 feature flag,而是一组跨层的精密约定:�
 
 ### 1.4 为什么 CLI 在 loop 与 steering 之后(M5)
 
-CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定时写 UI 就是在流沙上盖楼——opencode V1 的教训正是 UI 与核心互相渗透后无法拆分,最终付出整体重写的代价。`queue_update`、abort 收尾语义都在 M4 才定形,M5 开工时渲染对应表(09 文档第 4 节)已经是一张不会再变的表。headless `--json` 与交互 REPL 同期交付,互为验证:headless 是 e2e 测试面,REPL 是体验面。
+CLI 是 `SessionEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定时写 UI 就是在流沙上盖楼——opencode V1 的教训正是 UI 与核心互相渗透后无法拆分,最终付出整体重写的代价。`queue_update`、abort 收尾语义都在 M4 才定形,M5 开工时渲染对应表(09 文档第 4 节)已经是一张不会再变的表。headless `--json` 与交互 TUI 同期演进,互为验证:headless 是 e2e 协议面,OpenTUI TestRenderer 是视觉回归面,TUI 是体验面。
 
 ### 1.5 为什么 approval 与 compaction 垫后(M6/M7)
 
@@ -71,7 +71,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 
 - **目标**:空仓库变成有纪律的仓库——所有后续 PR 的机械检查就位。
 - **交付物**:`package.json`(Bun 1.3.14、ESM、bin 占位 `coda`)、`bun.lock`、`tsconfig.json`(strict、Bundler resolution)、`Bun.build` 构建脚本、`bun:test` 配置、ESLint(含 `import/no-restricted-paths`:`openai` 包仅允许 `src/providers/openai-chat/`;`agent`/`tools`/`protocol` 禁止 import `providers/*`、`cli/*`)、`.gitattributes`(强制 LF,风险 R3 的第一道防线)、CI(lint + build + test 三件套)、`src/` 空目录骨架。
-- **实现要点**:统一入口脚本 `bun run check` = lint + typecheck + build + test,后续所有里程碑的验收第一条都是它;ESLint 边界规则本身要配一个「故意违例」的注释样例文件放在 `eslint` 测试里,防止规则被后人静默删除后无人察觉。项目工具链与运行时统一固定 Bun 1.3.14；`node:fs` 的目录操作及 append/fsync/truncate、`node:path`、readline/raw TTY、`process` signal/PGID 是 Bun 暂无等价语义时的受控 compatibility 边界,不宣称零 Node API。
+- **实现要点**:统一入口脚本 `bun run check` = lint + typecheck + build + test,后续所有里程碑的验收第一条都是它;ESLint 边界规则本身要配一个「故意违例」的注释样例文件放在 `eslint` 测试里,防止规则被后人静默删除后无人察觉。项目工具链与运行时统一固定 Bun 1.3.14；`node:fs` 的目录操作及 append/fsync/truncate、`node:path`、classic readline/raw TTY、`process` signal/PGID 是 Bun 暂无等价语义时的受控 compatibility 边界,不宣称零 Node API。eligible 双 TTY 默认由 OpenTUI 管理 raw TTY；初始化失败先清理终端,已配置 key 时回退 classic,缺 key 的延迟校验会话关闭后退出 2。
 - **前置**:无。
 - **验收**(可执行):
   1. `bun run build && bun run lint && bun test` 全绿(允许 0 test)。
@@ -159,19 +159,19 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 - **规模**:~8 文件 / 约 1200 行(新增代码少,测试占大头——这正是单独成里程碑的意义)。
 - **Demo 剧本**:「脚本运行中注入一条 steering,模型下个 turn 改变方向;Esc 等价的 abort() 之后 continue(),对话无缝续上且不炸 400。」
 
-### M5 CLI REPL + headless + session 持久化
+### M5 CLI TUI + headless + session 持久化
 
 - **目标**:[09-cli](./09-cli.md) 与 [08-session-persistence](./08-session-persistence.md) 的 v1 范围全部交付;从这里开始项目自举(用 coda 开发 coda)。
-- **交付物**:`src/cli/`(Bun 1.3.14 + readline/raw TTY compatibility REPL、Renderer 与 AgentEvent 对应表全量实现、键位表含 Esc 消歧与 Alt+Enter、队列徽标、`--json` headless、`-p` 一次性模式、配置解析 flags>env>config.json)、`src/session/`(JSONL 追加、meta 头行、`--continue`/`--resume` 恢复重放)。
-- **里程碑内顺序**:headless 先于交互 REPL——headless 只有百来行且立即可被 CI e2e 覆盖,交互 REPL 的 Renderer 随后按同一张事件对应表实现,等于「先写协议消费的裁判,再写花哨的选手」。session 层与 CLI 并行不冲突(靠 `subscribe` 各自挂监听)。
+- **交付物**:`src/cli/`(Bun 1.3.14 + `@opentui/core` 全屏 TUI、readline/ANSI classic 与 plain 保底、SessionEvent 对应表、Enter/Shift+Enter/Alt+Enter/Esc/PageUp 键位、顶部向下 transcript、固定两行 footer、`--json`、`-p`、配置解析 flags>env>config.json)、`src/session/`(JSONL 追加、meta 头行、`--continue`/`--resume` 恢复重放)。
+- **里程碑内顺序**:headless 先于交互前端——headless 立即被 CI e2e 覆盖；先保留 classic 作为语义基线,再让 OpenTUI 复用同一组纯键位决策并按同一张事件表实现。session 层与 CLI 并行不冲突(靠 `subscribe` 各自挂监听)。
 - **前置**:M4(需要 `queue_update` 与 abort 语义定形)。
 - **验收**:
   1. headless e2e(CI,faux provider):spawn `coda --json --provider faux`,stdin 写入 prompt/steer/abort/shutdown 剧本,断言 stdout NDJSON 事件序列与 exit code;每行可被 JSON.parse。
   2. session 往返测试:跑一段对话 → 进程退出 → `--continue` 启动 → 断言重放消息与原转录深等;JSONL 尾行截断(模拟 crash)时恢复能跳过坏行并告警。
-  3. 交互冒烟清单(人工,含 09 文档验收清单前四条):流式中打字不花屏、Enter=steer 徽标、Esc abort、`--resume` 列表选择。
+  3. OpenTUI TestRenderer + 真实 TTY 冒烟:header/footer 固定、短输出从顶部起排、长输出滚动、resize、Enter=steer、Shift+Enter 换行、Esc abort、`--resume`。
   4. 配置优先级自动化测试:flag/env/file 三处冲突时按序生效。
 - **规模**:~15 文件 / 约 2500 行。
-- **Demo 剧本**:「打开 coda 流式对话,运行中 Enter 注入 steering,退出后 --continue 原地恢复;同一套动作用 echo | coda --json 全部重演一遍。」
+- **Demo 剧本**:「打开 coda 全屏 TUI,观察输出从 header 下方向下增长；运行中 Enter 注入 steering,退出后 --continue 原地恢复;同一套动作用 echo | coda --json 全部重演一遍。」
 
 ### M6 plan 工具 + 权限/approval + 截断落盘完善
 
@@ -208,11 +208,11 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 | R1 | **第三方兼容 endpoint 方言**:max_tokens 字段名、developer role、streaming usage、strict tools、`reasoning_content`、tool 结果后必须跟 assistant 等差异,任何一个都可能 400 或静默降质 | 换 baseURL 后偶发报错或行为异常 | `CompatFlags` 声明化(pi `OpenAICompletionsCompat` 十余项开关即现成 checklist)+ baseURL 自动推断 + 显式覆盖;每种方言录 fixture 进 M2 回归;新端点问题的修复动作固定为「加一个 flag + 一个 fixture」,不改核心 |
 | R2 | **流式 JSON 解析**:tool_calls 按 index 分片、arguments 逐片拼接、id 可能缺失、`length` 时 arguments 是非法/截断 JSON、usage chunk 可能缺失、错误 in-band 出现 | 参数错乱、盲 parse 抛异常、悬空 toolCall | 累积算法照抄 openai-node `ChatCompletionStream.ts`(index 定位、id 兜底 `call_<uuid>`);容错 JSON 解析仅用于流式期间刷新展示,**执行只信 `tool_call_end` 的完整 parse**;`length` 全批不执行是硬规则(pi 同款);全部路径有 fixture |
 | R3 | **Windows CRLF**:模型输出 LF、文件是 CRLF 时 edit 匹配失败;JSONL/fixture 被 git 转换;compatibility readline 收 `\r\n` | edit 大面积「oldText not found」、fixture 平台间不一致 | edit 工具「剥离-匹配-还原」策略(M3 单测强制覆盖 CRLF+BOM 用例);`.gitattributes` 强制 LF(M0 落地);会话 JSONL 显式 `\n`;CI 加 Windows job 后置到 M5 |
-| R4 | **readline/raw TTY compatibility 流式期间输入处理**:delta 写 stdout 与用户键入竞争同一屏幕;Esc 是转义序列前缀;Alt+Enter 编码因终端而异;粘贴多行误触发 | 输入行被冲花、方向键误触 abort、粘贴即发送 | Bun 1.3.14 下保留受控 compatibility 边界；单写入者纪律(Renderer 独占 stdout,先清动态区再追加再重绘);`escapeCodeTimeout` 消歧;斜杠命令 `/f` 作为全终端兜底;bracketed paste;非 TTY 降级 plain 模式(详见 [09-cli](./09-cli.md) 第 3、8 节) |
+| R4 | **全屏 TTY 输入/布局**:Esc/Alt/Shift 修饰键编码因终端而异;resize 可能覆盖审批提示;native 初始化失败可能残留 alternate screen | 方向键误 abort、键位文案与行为不符、fallback 双重抢 stdin | OpenTUI Kitty keyboard + 全局 handler;footer 文案从状态/宽度纯派生;初始化到 replay 全段失败清理后才降级;`/f` 兜底;TestRenderer 覆盖宽↔窄与审批;classic/plain 保底(详见 [09-cli](./09-cli.md) 第 3、8 节) |
 | R5 | **单体膨胀**:session/压缩/重试/队列全揉进一个类 | 后期不可测、不可拆(pi `AgentSession` 3300 行返工的直接教训) | 目录边界 + ESLint 规则(M0)机械阻止;compaction/retry 一律以 `transformContext`/session 钩子形态存在;M5 起每个里程碑验收含「新能力不得修改 `src/agent` 既有语义」的 diff 审查 |
 | R6 | **zod v4 `z.toJSONSchema()` 与 strict 模式的兼容**:strict:true 要求根 object、全层 `additionalProperties:false`、可选字段进 required + null | OpenAI 端 400 或 schema 静默不生效 | 工具 schema 保持扁平简单(v1 工具全部满足子集);`supportsStrictTools` compat 开关按端点关闭;M2 fixture 含 strict 与非 strict 两种出站快照 |
 | R7 | **审批与中断的时序竞争**:abort 时 pending approval 以「拒绝」形态漏给模型 | 转录中出现幽灵拒绝,模型行为异常 | 照 codex:interrupt 先让任务观察到 cancellation,再清 approvals(M6 验收第 1 条显式覆盖) |
-| R8 | **事件监听 await 串行拖慢热路径**:`subscribe` 监听器逐个 await(pi 为落盘确定性的取舍),慢监听器直接卡住 text_delta | 流式输出肉眼卡顿 | 普通监听器必须快;session 落盘用同步 append,Renderer 状态变换只排队。唯一有意的 IO 等待是每个输出事件后的 stdout `drain`,用背压换取不丢输出与可观察错误;CI 吞吐基准使用无阻塞 sink。 |
+| R8 | **事件监听 await 串行拖慢热路径**:`subscribe` 监听器逐个 await(pi 为落盘确定性的取舍),慢监听器直接卡住 text_delta | 流式输出肉眼卡顿 | TUI listener 只同步更新 renderable,OpenTUI 用 30 FPS 合帧;session 落盘用同步 append。只有 plain/classic 的 stdout 事件边界等待 `drain`,用背压换取不丢输出与可观察错误;CI 吞吐基准使用无阻塞 sink。 |
 | R9 | **ripgrep 二进制分发**:`@vscode/ripgrep` 通过平台 optional dependency 提供二进制,不同 `os` / `cpu` 的解析与路径可能不同 | grep 工具在部分环境不可用 | 由 Bun 1.3.14 安装并按平台过滤 optional dependency；启动时探测二进制存在,缺失时 grep 工具降级为明确报错(附安装提示)而非静默失效；CI 在 macOS 与 Linux 验证路径解析与实际执行 |
 
 ## 4. 机动指南:可并行、可裁剪、不可动摇
@@ -231,7 +231,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 - **持久 shell**——bash v1 每次新 spawn;持久 shell 是新的 `ToolDefinition` 实现,不动框架。
 - **plan mode(写工具 gate)**——权限层已留模式标志位,是 `beforeToolCall` 的一种策略。
 - **子 agent / MCP**——分别是新工具与新工具来源,挂在工具框架之下。
-- **富 TUI 框架化**——`Renderer` 接口之后的替换,或 headless 之上的独立客户端(09 文档升级路径)。
+- **独立 TUI client / server 化**——当前 OpenTUI 与 Session 同进程;未来可把它移到 headless 协议之外作为独立客户端。
 
 判据统一:如果某项将来加不进来、非要动 `src/agent` 或 `src/protocol` 不可,说明分层出了问题,应先修架构再加功能。
 

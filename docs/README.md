@@ -33,7 +33,7 @@ graph TD
   end
   subgraph 外围
     S8[08 会话持久化]
-    C9[09 CLI / REPL]
+    C9[09 CLI / TUI]
   end
   subgraph 质量与计划
     TE10[10 测试策略]
@@ -69,7 +69,7 @@ graph TD
 6. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
 7. [07 工具集](./07-tools.md) —— 八个工具的规格
 8. [08 会话持久化](./08-session-persistence.md) —— JSONL 与 compaction
-9. [09 CLI / REPL](./09-cli.md) —— 交互与 headless
+9. [09 CLI / TUI](./09-cli.md) —— 全屏交互、保底模式与 headless
 10. [10 测试策略](./10-testing.md) —— faux provider 与 fixture
 11. [11 路线图](./11-roadmap.md) —— M0–M7 与风险
 
@@ -107,13 +107,13 @@ ToolDefinition 框架(zod 参数、executionMode、promptSnippet)与统一截断
 
 JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LLM 摘要 + 保留尾部,M7)、token / 成本统计口径、auto-retry 策略。session 层与 agent 层的职责边界——谁决定 `continue()`、谁持有重试策略——在此划清。
 
-### [09 CLI / REPL](./09-cli.md)
+### [09 CLI / TUI](./09-cli.md)
 
-交互模式:Bun 1.3.14 运行时 + readline/raw TTY compatibility 边界 + ANSI 自绘的流式渲染、`queue_update` 队列徽标、键位约定(流式期间 Enter = steer、Alt+Enter = followUp、Esc = abort);headless `--json` 模式的命令与事件格式(stdin JSON 命令、stdout NDJSON AgentEvent)。headless 模式同时是「内部协议对外暴露」的持续验证器。
+交互模式:Bun 1.3.14 + `@opentui/core` 全屏布局；stdin/stdout 均为 TTY 且 `TERM != dumb` 时启用。初始化失败先清理终端；已配置 key 时回退 classic,缺 key 的延迟校验会话关闭后退出 2。界面固定 header/prompt/footer,中间 Markdown 转录从顶部向下增长并在溢出后滚动；窄屏响应式收起 tips/Logo。classic readline/ANSI 与 plain 继续作为保底。键位保持 Enter=steer、Alt+Enter=followUp、Esc=abort；headless `--json` 的 stdin JSON / stdout NDJSON 协议不变,继续作为「内部协议对外暴露」的持续验证器。
 
 ### [10 测试策略](./10-testing.md)
 
-分层测试:faux provider(脚本化 ProviderEventStream 回放)让 loop / steering 语义全离线可测;adapter 用录制的 SSE chunk fixture 回放(覆盖 tool_calls 分片、usage chunk、length 截断、in-band error、第三方方言);edit 用真实文件 fixture;e2e 用 faux provider 驱动完整 REPL。
+分层测试:faux provider(脚本化 ProviderEventStream 回放)让 loop / steering 语义全离线可测;adapter 用录制的 SSE chunk fixture 回放(覆盖 tool_calls 分片、usage chunk、length 截断、in-band error、第三方方言);edit 用真实文件 fixture;OpenTUI 用内存 TestRenderer 做布局/键位回归;e2e 用 faux provider 驱动 CLI/headless。
 
 ### [11 路线图](./11-roadmap.md)
 
@@ -166,7 +166,9 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 **partial 快照** —— 每个 ProviderEvent 上附带的、到当前时刻为止的完整 AssistantMessage:消费端既可用 delta 增量渲染,也可只看快照,两种消费模式统一。
 
-**AgentEvent** —— agent → UI/客户端的事件:agent / turn / message / tool_execution 各级生命周期 + queue_update / plan_update / approval_request 等。headless 模式将其序列化为 NDJSON。
+**AgentEvent** —— agent → session 的核心事件:agent / turn / message / tool_execution 各级生命周期 + queue_update / plan_update / approval_request 等。
+
+**SessionEvent** —— session → UI/客户端的事件:透传并可注解 AgentEvent，再叠加 retry_scheduled / compaction_* / usage_update。headless 模式逐行序列化的正是这一联合。
 
 **StreamFn** —— Agent 唯一认识的 provider 形态:`(model, context, options) => ProviderEventStream`。铁律:一旦被调用绝不 throw、绝不 reject,一切错误编码为流内 error 事件。
 
@@ -206,7 +208,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 **compaction** —— 上下文接近上限时的压缩:LLM 摘要 + 保留尾部消息(M7)。
 
-**headless 模式** —— CLI 的 `--json` 形态:stdin 收 JSON 命令({prompt | steer | follow_up | abort}),stdout 吐 NDJSON AgentEvent——内部协议对外暴露的验证器。
+**headless 模式** —— CLI 的 `--json` 形态:stdin 收 JSON 命令({prompt | steer | follow_up | abort}),stdout 吐 NDJSON SessionEvent——内部协议对外暴露的验证器。
 
 **approval / doom-loop** —— M6 权限层:`beforeToolCall` 钩子 + `approval_request` 事件 + Promise resolver 注册表;同工具同参数连续 3 次触发 doom-loop 强制审批。
 
@@ -234,7 +236,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 | M2 | Chat Completions adapter | 04、10 |
 | M3 | agent loop + 工具框架 + 七个工具 | 05、07 |
 | M4 | steering / follow-up + abort + transform 层 | 06 |
-| M5 | CLI REPL + session 持久化 | 09、08 |
+| M5 | CLI TUI/headless + session 持久化 | 09、08 |
 | M6 | plan 工具 + 权限 / approval + 截断落盘完善 | 07、05 |
 | M7 | compaction + auto-retry + 成本统计 + 第二 provider | 08、04 |
 

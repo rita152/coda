@@ -2,7 +2,7 @@
 
 # 10 测试策略(Testing)
 
-本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。
+本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、OpenTUI 内存渲染回归、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。
 
 ## 1. 测试哲学
 
@@ -17,11 +17,14 @@
 ```mermaid
 flowchart TB
   E2E["L5 CLI e2e:built 产物 + --json headless(个位数用例)"]
+  TUI["L4 UI:@opentui/core TestRenderer(布局/键位)"]
   LOOP["L4 loop 集成:agent + faux provider + 测试工具(数十)"]
   TOOLS["L3 工具:真实 fs / rg / 子进程,tmpdir 隔离(上百)"]
   ADPT["L2 adapter:SSE chunk fixture 回放(数十)"]
   PROTO["L1 protocol:EventStream / 类型不变量(数十)"]
-  E2E --> LOOP --> TOOLS --> ADPT --> PROTO
+  E2E --> TUI
+  E2E --> LOOP
+  TUI --> LOOP --> TOOLS --> ADPT --> PROTO
 ```
 
 | 层 | 位置 | 依赖 | 速度目标 |
@@ -30,6 +33,7 @@ flowchart TB
 | L2 adapter | `src/providers/openai-chat/*.test.ts` + `__fixtures__/` | fixture 文件 | 毫秒级 |
 | L3 tools | `src/tools/*.test.ts` | tmpdir、rg 二进制、`Bun.spawn` | 秒级 |
 | L4 loop | `src/agent/*.test.ts`、`src/session/*.test.ts` | faux provider | 毫秒级 |
+| L4 UI | `src/cli/tui.test.ts` | `@opentui/core/testing` 内存 renderer + mock highlighter | 亚秒级 |
 | L5 e2e | `e2e/*.test.ts`(`bun run test:e2e`) | `Bun.build` 构建产物 | 数秒 |
 
 L1 要点(不展开):`EventStream` 的 push/end/result 语义(end 后 push 被忽略并产生开发模式警告(console.warn)、迭代器收尾、result 在 end 前 pending)、单消费者迭代顺序、`partial` 快照与 delta 累积一致性的属性测试(随机事件序列折叠后等于 done 消息——对应 opencode `LLMResponse.reduce` 的 reducer 思路)。
@@ -213,9 +217,27 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 - grep:大 fixture 下 `limit=100` 达到即 kill rg(断言结果条数与进程退出);literal 与正则模式;行长 500 截断。
 - glob:touch 控制 mtime,断言 24h 内修改的文件排最前。
 
-## 7. e2e(L5):headless --json 驱动完整会话
+## 7. CLI 测试:OpenTUI 内存帧 + headless e2e
 
-headless 模式(stdin JSON 命令、stdout NDJSON AgentEvent,见 [09](./09-cli.md))本身就是「内部协议对外暴露」的验证,e2e 直接以它为接口驱动 **`Bun.build` 构建产物**——codex 的 `exec` 模式同思路,机器可驱动的入口让 e2e 不需要 PTY 仿真。
+### 7.1 OpenTUI TestRenderer(L4 UI)
+
+`src/cli/tui.test.ts` 用 `createTestRenderer({width,height,kittyKeyboard:true})` 构建内存终端，不写真实 stdout。覆盖:
+
+1. header 含版本、Unicode 像素 Logo 与 tips；prompt 下只有 workspace、context/model 两行；整帧背景 alpha 必须为 255，header 为 `#fafafa` 且 intent/slot 固定为 indexed/255，transcript 空白与两行 footer 精确为 `#ffffff` 且固定为 indexed/231。发布前在不设置 `COLORTERM` 的双 TTY 中确认首帧包含 `48;5;255m` 与 `48;5;231m`（或等价 RGB 浅灰/白底），主区域不能使用主题可重定义的槽 15，也不能只出现 SGR 49。
+2. 短 transcript 的第一条消息紧跟 header,assistant 在 user 下方,二者与 prompt 之间保留空白——直接钉死“从顶部向下增长”。
+3. `usage_update` 使用 `contextTokens`,不误用 cumulative；无 limit 的纯函数测试显示 `limit unknown`。
+4. 100→54→100 resize 时 tips/Logo 响应式隐藏并恢复完整快捷键；审批期间 compact 布局不得覆盖 y/a/n/Esc。
+5. mock keys 验证 Enter/Return/keypad Enter submit、Shift+Enter newline；CJK 与 ZWJ emoji 的程序化赋值后光标位于 buffer 末尾。
+6. 所有事件来源与恢复转录都注入 CSI/OSC/DCS/C0/C1,断言帧中不存在 ESC/BEL；多 text/reasoning part 在 streaming 与 final 两条路径保持相同分块。
+7. 恢复转录断言 tool call 参数生成原摘要、plan tool result 恢复最新步骤、plan error 可见,且畸形 plan details 回退为普通工具结果。
+8. 以真实 `Session` + faux stream 驱动 TUI controller,验证 retry backoff 的 Enter=steer、Esc=cancel,compaction 状态投影,以及审批时只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。
+9. CLI 配置纯函数用与生产相同的 eligibility 判定钉死缺 key 策略：只有无 prompt 的双 TTY、非 `TERM=dumb` 启动可延迟校验；headless、一次性、管道与 classic 路径仍 fail-fast；空白 flag/env/file key 不得遮蔽低优先级有效来源。
+
+Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlighting；销毁前等待 visual idle，再按 renderer → SyntaxStyle/highlighter 顺序清理，禁止用真实 timeout 猜异步高亮时机。真实 TTY 只保留一条人工冒烟:alternate screen 进入/退出、resize、长输出滚动与 raw mode 恢复。
+
+### 7.2 Headless e2e(L5)
+
+headless 模式(stdin JSON 命令、stdout NDJSON SessionEvent,见 [09](./09-cli.md))本身就是「内部协议对外暴露」的验证,e2e 直接以它为接口驱动 **`Bun.build` 构建产物**——codex 的 `exec` 模式同思路,机器可驱动的入口让 e2e 不需要 PTY 仿真。
 
 ```
 harness:
@@ -235,12 +257,12 @@ harness:
 
 ## 8. CI 建议
 
-- **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 的平台 optional dependency。
+- **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
 - **步骤**:`bun install --frozen-lockfile` → `bun run lint` → `bun run typecheck` → `bun run test`。测试编排器依次运行 L1–L4、`Bun.build`、L5，因而在无 `dist/` 的干净检出中也自包含；`bun run test:unit` 只跑 L1–L4，`bun run test:e2e` 会先重建再跑 L5。编排器和 e2e harness 都显式净化继承环境中的 API key、base URL、token 与常见凭证，以 `--no-env-file` 启动子 Bun，并固定 `NODE_ENV=test`；每个 e2e 子进程还使用临时 HOME，不能读取或清理用户的真实 Coda 配置与数据。统一交付入口为 `bun run check`,总预算 < 5 分钟,L1–L4 < 60 秒。
 - **边界规则自检**:lint 步骤跑 `import/no-restricted-paths`(`openai` 只准出现在 `src/providers/openai-chat/`);另加一个「守卫的守卫」测试——程序化调用 ESLint 检查一段违规 import 片段,断言规则确实报错。opencode V1 的 `tools: Record<string, ai.Tool>` 类型泄漏说明:边界靠自觉必失守,必须机械强制且强制本身要有测试。
 - **无密钥**:CI 环境不配置任何 API key;`record-fixture.ts` 只在开发者本机手动跑。可选:manual-dispatch 的 nightly workflow 用 secret 对真实 API 做一次冒烟(basic-text + tool call),失败只告警不 block。
-- **flake 政策**:只有 §7 用例 3 允许 `retry: 1`;其余任何测试出现 flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
-- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent`、`src/providers/openai-chat` 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设阈值(渲染逻辑靠 e2e 冒烟)。
+- **flake 政策**:只有 §7.2 headless e2e 用例 3 允许 `retry: 1`;其余任何测试出现 flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
+- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent`、`src/providers/openai-chat` 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设统一阈值,但 TUI 的纯格式函数和关键布局/键位必须由 TestRenderer 回归。
 - **确定性守则**(写进 CONTRIBUTING):测试内禁用裸 `setTimeout` 等待(用 gate 或事件等待);id/timestamp 经注入的 idgen/clock 或快照归一化;快照只对「事件 type 序列」做,不对含时间戳的完整对象做。
 
 ## 9. 验收清单
@@ -249,7 +271,7 @@ harness:
 - [ ] M2:§4.2 全部 11 个 fixture 入库且断言通过;两个错误路径单测(reject 不外抛、abort 映射)通过;`record-fixture.ts` 可用。
 - [ ] M3:工具矩阵(§6)全绿,macOS 与 Linux 双平台;bash kill tree 用例验证无孤儿进程。
 - [ ] M4:§5 用例 1–8 全绿,steering/follow-up/abort/transform 的断言全部基于 `calls` 与事件序列,无一处依赖真实时间。
-- [ ] M5:session 持久化集成测试(kill/resume/尾行截断)与 e2e 用例 1–5 全绿。
+- [ ] M5:session 持久化集成测试、OpenTUI 顶部起排/固定 footer/resize 与 Enter/Shift+Enter 回归、共享纯键位逻辑测试，以及 headless e2e 用例 1–5 全绿。
 - [ ] M7:§5 用例 9(retry/compaction)全绿。
 - [ ] CI:双 OS × Bun 1.3.14 矩阵稳定通过,总时长 < 5 分钟;边界规则自检在位。
 

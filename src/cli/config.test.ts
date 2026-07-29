@@ -72,7 +72,7 @@ describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
     expect(parseFlags(['--approval-mode', 'deny']).approvalMode).toBe('deny');
   });
 
-  it('缺省不设值——默认由 main 按形态定(交互 REPL → interactive,headless/-p → allow)', () => {
+  it('缺省不设值——默认由 main 按形态定(交互 TUI/classic → interactive,headless/-p → allow)', () => {
     expect(parseFlags([]).approvalMode).toBeUndefined();
     expect(parseFlags(['--json']).approvalMode).toBeUndefined();
   });

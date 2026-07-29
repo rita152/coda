@@ -181,8 +181,8 @@ assistant   ...                                          ← 模型带着新指�
 要点:
 
 1. **位置固定在 toolResults 之后**。这保证 wire 层的 `assistant(tool_calls) → tool → tool` 配对完整,steering 消息只是其后的一条普通 user 消息——任何 OpenAI 兼容 provider 都合法。
-2. **模型看到的就是一条 user 消息**。`source: 'steering'` 是内部协议字段,adapter 出站时不产生任何 wire 差异(Chat Completions 没有对应概念);它服务于 UI 渲染(排队徽标、消息角标)、持久化统计与测试断言。不用 system 消息或特殊前缀包装——pi 与 codex 均验证裸 user 消息效果最好,模型天然把"工具结果之后的用户发言"理解为即时指令。
-3. **注入走完整的消息生命周期**:每条注入消息发 `message_start` / `message_end`(`message: UserMessage`),UI 借此把排队中的消息"转正"为转录消息(配合第 8 节的 id 关联)。
+2. **模型看到的就是一条 user 消息**。`source: 'steering'` 是内部协议字段,adapter 出站时不产生任何 wire 差异(Chat Completions 没有对应概念);它服务于 UI 的队列计数/转录来源标记、持久化统计与测试断言。不用 system 消息或特殊前缀包装——pi 与 codex 均验证裸 user 消息效果最好,模型天然把"工具结果之后的用户发言"理解为即时指令。
+3. **注入走完整的消息生命周期**:每条注入消息发 `message_start` / `message_end`(`message: UserMessage`),UI 因而能在队列快照移除该 id 后把同一条消息显示进转录(配合第 8 节的 id 关联)。
 4. follow-up 的注入形态完全相同,只是 `source: 'follow_up'`、注入点在 ③;对模型而言它开启的是"上一任务收尾之后的新指令"。
 
 ## 6. steering vs abort:两档打断的分工
@@ -262,14 +262,14 @@ transform 层的其余职责(跨模型 reasoning 降级、toolCallId 归一化�
 
 pi 的 coding-agent 层在 Agent 队列之外镜像了一份字符串数组(`_steeringMessages`)用于 UI 展示,消息注入时靠**文本匹配**(`indexOf(messageText)`)从镜像中移除——用户连发两条相同文本的 steering 时会误删错位。这是我们源码调研中明确标记"应避免"的缺陷。
 
-我们的修正:`QueuedMessage` 携带 `id`,且该 id 就是注入后 `UserMessage.id`(2.2 节约定)。UI 的关联链条:
+我们的修正:`QueuedMessage` 携带 `id`,且该 id 就是注入后 `UserMessage.id`(2.2 节约定)。协议提供的关联链条:
 
 ```
 steer("...") → queue_update(快照含 {id: 'u_42', kind: 'steering'})   → 渲染排队徽标
 turn 边界注入 → queue_update(快照不含 u_42)+ message_start(id: 'u_42') → 徽标消失,转录出现该消息
 ```
 
-全程 id 精确匹配,零文本比较;重复文本、用户撤回重发都不会错乱。CLI 渲染约定(细节在 [09](./09-cli.md)):steering 排队显示为 `» 待注入`、follow-up 显示为 `⋯ 排队中`,附队列序号。headless `--json` 模式下 `queue_update` 原样输出 NDJSON,外部客户端获得同等能力。
+全程可按 id 精确匹配,零文本比较;重复文本也不会错乱。当前 TUI 对完整快照只投影 `steer N · follow-up N` 计数，`/queue` 才打印明细；消息注入后按 `source` 在转录显示 `» steering` / `» follow-up`。需要逐项动画或撤回能力的未来客户端可使用上述 id 关联。headless `--json` 原样输出 `queue_update`,外部客户端获得同等能力。
 
 ## 9. 边界情况清单
 
@@ -322,5 +322,5 @@ codex 的外协议只有一个用户输入入口:`Op::UserInput`。core 收到�
 
 - [05 · Agent 核心循环](./05-agent-loop.md) —— runLoop 骨架、turn 生命周期、工具执行三阶段与 abort 传播
 - [04 · Provider 接口与 Chat Completions adapter](./04-provider-adapter.md) —— transform 层完整四步规格、wire 层配对规则
-- [09 · CLI 与 REPL](./09-cli.md) —— Enter/Alt+Enter/Esc 键位实现、排队徽标渲染、headless JSON 命令面
+- [09 · CLI 与 TUI](./09-cli.md) —— Enter/Alt+Enter/Esc 键位实现、队列状态渲染、headless JSON 命令面
 - [03 · 内部协议](./03-internal-protocol.md) —— UserMessage.source、QueuedMessage、AgentEvent 全集

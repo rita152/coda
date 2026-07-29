@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 // CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → 配置解析 → Session 组装 → 分派
-// headless / 一次性 / 交互 REPL。CLI 是最薄的一层:把输入翻译成 Agent 方法调用,
+// headless / 一次性 / 全屏 TUI（必要时降级 classic REPL）。CLI 是最薄的一层:
+// 把输入翻译成 Agent 方法调用,
 // 把事件翻译成像素;不持有会话状态副本。
 
+import packageJson from '../../package.json';
 import type { StreamFn } from '../protocol/index.js';
 import { ApprovalBroker } from '../agent/index.js';
 import type { AgentConfig } from '../agent/index.js';
@@ -17,7 +19,13 @@ import { Session } from '../session/index.js';
 import { createStdoutOutput } from '../shared/index.js';
 import { createApprovalPolicy } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
-import { parseFlags, readConfigFile, resolveConfig } from './config.js';
+import {
+  getMissingApiKeyMessage,
+  isFullScreenTuiEligible,
+  parseFlags,
+  readConfigFile,
+  resolveConfig,
+} from './config.js';
 import type { CliFlags } from './config.js';
 import { startHeadless } from './headless.js';
 import { createRenderer } from './renderer.js';
@@ -33,12 +41,22 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // 缺 key 是全屏 TUI 的合法启动状态：未来由 TUI 配置面补齐；当前只移除入口门禁。
+  // 同一个判定也驱动后面的实际路由，禁止配置策略与前端选择各写一份近似条件。
+  const tuiEligible = isFullScreenTuiEligible(flags, {
+    stdinIsTTY: process.stdin.isTTY === true,
+    stdoutIsTTY: process.stdout.isTTY === true,
+    term: Bun.env.TERM,
+  });
+
   // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
   void cleanupTruncated();
 
   let resolved;
   try {
-    resolved = resolveConfig(flags, Bun.env, readConfigFile());
+    resolved = resolveConfig(flags, Bun.env, readConfigFile(), {
+      allowMissingApiKey: tuiEligible,
+    });
   } catch (err) {
     console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -60,7 +78,7 @@ async function main(): Promise<number> {
   const streamFn = await makeStreamFn(resolved.provider, resolved.fauxScript);
   const tools = createCodingTools();
 
-  // 审批模式默认(docs/09 §6.5 修订):交互 REPL → interactive;headless(--json)与 -p
+  // 审批模式默认(docs/09 §6.5 修订):交互 TUI/classic → interactive;headless(--json)与 -p
   // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
   // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
   const approvalMode =
@@ -141,6 +159,43 @@ async function main(): Promise<number> {
   }
   sessionRef.current = session; // 审批 abort 决策的晚绑定目标(policy 的 requestAbort)
 
+  // 默认交互面:双 TTY 且终端具备全屏能力时懒加载 OpenTUI。这里必须早于 stdout
+  // FileSink/legacy renderer 的创建——两套渲染器不能同时拥有 raw stdin/stdout。
+  // 初始化失败时 createCliRenderer 会恢复终端，随后可安全降级 classic REPL；
+  // 已进入运行期的错误由 startTui 自己收尾并返回 exit code，不从中途切换 UI。
+  if (tuiEligible) {
+    try {
+      const { startTui } = await import('./tui.js');
+      return await startTui(session, approval, {
+        cwd,
+        model: resolved.modelConfig.ref,
+        version: packageJson.version,
+        color: !flags.noColor && Bun.env.NO_COLOR === undefined,
+        ...(resolved.modelConfig.limits?.context !== undefined && {
+          contextLimit: resolved.modelConfig.limits.context,
+        }),
+        resumed,
+      });
+    } catch (err) {
+      const missingApiKey = getMissingApiKeyMessage(resolved);
+      if (missingApiKey !== undefined) {
+        console.error(
+          `[coda] full-screen TUI unavailable: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        console.error(`[coda] ${missingApiKey}`);
+        await session.close();
+        return 2;
+      }
+      console.error(
+        `[coda] full-screen TUI unavailable, using classic mode: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   // 输出走有序 Bun FileSink 队列；TTY 能力探测仍由 compatibility 边界的 process.stdout 提供。
   // Session listener 在每个事件后 drain，给流式输出施加背压；退出路径再做最终 drain。
   const output = createStdoutOutput();
@@ -197,7 +252,7 @@ async function main(): Promise<number> {
   }
 
   if (flags.prompt !== undefined) {
-    // -p 一次性模式:headless 内核的特例(人类可读输出)。退出码同 --json 特例规则
+    // -p 一次性模式:与 headless 共享 one-shot 收尾语义，但使用人类可读输出。退出码同 --json 特例规则
     // (docs/09 §6.4):willRetry:true 是中间边界；只按最终 agent_end 决定退出码。
     let resolveFinalExit!: (code: number) => void;
     const finalExit = new Promise<number>((resolve) => {

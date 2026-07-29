@@ -8,18 +8,20 @@
 
 ```mermaid
 graph LR
-  CLI["UI 输入/命令<br/>(CLI 层)"] -->|"prompt / steer / followUp / abort"| Agent["Agent 核心"]
-  Agent -->|"AgentEvent(3.4)"| CLI
+  CLI["UI 输入/命令<br/>(CLI 层)"] -->|"prompt / steer / followUp / abort"| Session["Session 门面"]
+  Session -->|"转发调用"| Agent["Agent 核心"]
+  Agent -->|"AgentEvent(3.4)"| Session
+  Session -->|"SessionEvent<br/>(AgentEvent + 会话级事件)"| CLI
   Agent -->|"Context + StreamFn 调用"| Adapter["Provider adapter"]
   Adapter -->|"ProviderEvent(3.2)"| Agent
   Adapter <-->|"wire 协议<br/>(ChatCompletionMessageParam 等)"| API[("LLM API")]
 ```
 
-四层从外到内:**UI 输入/命令 → AgentEvent(agent↔UI)→ AgentMessage/Context(会话数据)→ ProviderEvent/StreamFn(agent↔provider)→ wire 协议(adapter 内部)**。本文规格化中间三样东西:消息模型(数据层)、ProviderEvent(provider 边界)、AgentEvent(UI 边界),以及承载流事件的 `EventStream` 类。
+核心四层从外到内仍是:**UI 输入/命令 → AgentMessage/Context(会话数据)→ ProviderEvent/StreamFn(agent↔provider)→ wire 协议(adapter 内部)**。Session 是 agent 与 UI 之间的外围门面:下行转发命令,上行把 AgentEvent 与 retry/compaction/usage 联合成 SessionEvent。本文规格化消息模型(数据层)、ProviderEvent(provider 边界)、AgentEvent(agent→session 边界),以及承载流事件的 `EventStream` 类；SessionEvent 见 [08-session-persistence](./08-session-persistence.md)。
 
 这个分层直接取自两个被验证过的先例:
 
-- pi-mono 把协议分为 `Message/Context`(数据)、`AssistantMessageEvent`(provider→agent)、`AgentEvent`(agent→UI)三层,agent-core 完全不依赖 provider catalog,只认一个 `StreamFn` 函数类型——我们照搬这个结构;
+- pi-mono 把协议分为 `Message/Context`(数据)、`AssistantMessageEvent`(provider→agent)、`AgentEvent`(agent→外围消费者)三层,agent-core 完全不依赖 provider catalog,只认一个 `StreamFn` 函数类型——我们保留这个核心结构,由 Session 作为外围消费者再扇出;
 - codex 用 `UserInput → TurnItem → ResponseItem` 三层表示,adapter 在层间转换,证明了"UI 表示、会话条目、模型 wire 格式必须是三种类型"的必要性。gemini-cli 是反例:core 直接用 `@google/genai` 的 `Content` 类型当内部表示,导致 core 与 SDK 耦合——这正是我们需求 1 明令禁止的。
 
 `src/protocol/` 的纪律:**零运行时依赖**(仅类型 + `EventStream` 一个纯数据结构类),禁止 import 任何 provider SDK,ESLint 边界规则强制(见 [02-architecture](./02-architecture.md))。
@@ -199,7 +201,7 @@ terminal := done | error                             (恰好一个,且是最后�
 
 **partial 快照(pi 独有,Vercel 没有)是我们最看重的机制**:每个事件携带完整的中间态 AssistantMessage,消费端可以二选一——做精细增量渲染(消费 delta),或者无脑重渲快照(只看 partial)。这带来两个杠杆:
 
-1. **消费端可降级**:headless JSON 模式、测试断言、简易 UI 只看 partial/最终 message 就够;只有 REPL 的流式渲染消费 delta。
+1. **消费端可降级**:headless JSON 模式、测试断言、简易 UI 只看 partial/最终 message 就够;只有需要逐 token 展示的交互前端（当前为 OpenTUI，classic 为保底）消费 delta。
 2. **协议演进缓冲**(见第 9 节):将来新增块类型时,不认识新事件的旧消费者仍能从 partial 中渲染它认识的 part,未知 part 显示占位——不会白屏。
 
 代价是每个事件多携带一个引用(不是拷贝),几乎免费。
@@ -392,14 +394,14 @@ tool-phase := (tool_execution_start (approval_request | tool_execution_update)* 
 
 ## 9. 协议演进与兼容策略
 
-内部协议同时是对外协议:headless 模式把 AgentEvent 以 NDJSON 吐给外部进程(见 [09-cli](./09-cli.md)),session JSONL 持久化 AgentMessage。演进规则必须从第一天写死:
+内部协议同时是对外协议:headless 模式把 `SessionEvent`（`AgentEvent` 核心事件加会话级事件）以 NDJSON 吐给外部进程(见 [09-cli](./09-cli.md)),session JSONL 持久化 AgentMessage。演进规则必须从第一天写死:
 
 ### 9.1 规则
 
 | 变更 | 级别 | 说明 |
 |---|---|---|
 | 新增事件类型(AgentEvent/ProviderEvent 联合新成员) | 允许(minor) | 消费者必须容忍未知 `type`(见下) |
-| 新增可选字段 | 允许(minor) | 如 `agent_end` 未来加 `willRetry?` |
+| 新增可选字段 | 允许(minor) | 如 Session 已在 `agent_end` 上采用的 `willRetry?` |
 | 新增消息 part 类型 | 允许(minor) | partial 快照保证旧消费者可降级渲染 |
 | 改名、改字段必填性、复用 type 名改语义 | 禁止 | 等同新协议,必须走新 type 名 |
 | 改事件文法不变量(4.2/7.2 的顺序与嵌套规则) | 禁止 | 文法本身是契约的一部分 |
@@ -407,7 +409,7 @@ tool-phase := (tool_execution_start (approval_request | tool_execution_update)* 
 
 ### 9.2 机制
 
-1. **Tolerant reader 写进消费端规范**:所有 AgentEvent/ProviderEvent 消费者(CLI 渲染器、headless 客户端、测试断言辅助函数)对未知 `type` 的事件**静默忽略**(可 debug 日志),对已知事件的未知字段忽略。codex 的 `EventMsg` 约 60 个变体且 `#[non_exhaustive]`,靠的就是同一纪律;我们在 TS 里没有编译器强制,用 lint 约定 + 测试(fixture 里混入伪造的未知事件,断言消费者不崩)兜底。
+1. **Tolerant reader 写进消费端规范**:所有 SessionEvent/AgentEvent/ProviderEvent 消费者(CLI 渲染器、headless 客户端、测试断言辅助函数)对未知 `type` 的事件**静默忽略**(可 debug 日志),对已知事件的未知字段忽略。codex 的 `EventMsg` 约 60 个变体且 `#[non_exhaustive]`,靠的就是同一纪律;我们在 TS 里没有编译器强制,用 lint 约定 + 测试(fixture 里混入伪造的未知事件,断言消费者不崩)兜底。
 2. **版本号显式化**:session JSONL 头部 meta 行与 headless NDJSON 首行携带 `protocolVersion`(semver)。参考 Vercel 的 `specificationVersion: 'v3'`——它让 provider 接口 v2/v3/v4 三版并存平滑迁移;我们单一实现不需要并存,但版本字段让旧 session 文件与新版本 CLI 的兼容判断有据可依。
 3. **新能力优先走旁路事件**:生命周期文法(agent/turn/message/tool 四层嵌套)保持冻结,新信息(token 计数、重试通知、压缩通知)一律做成可忽略的旁路事件——codex 的 `TokenCount/StreamError/ContextCompacted` 全是这个形态,UI 不订阅也不影响正确性。
 4. **partial 快照是演进缓冲**(4.3 节):新增块类型时旧 UI 从 partial 渲染已知 part;新增事件时快照式事件(`queue_update`/`plan_update`/`tool_execution_update` 均为全量快照)让消费者永远可以"丢掉历史、以最新快照为准"地自愈。

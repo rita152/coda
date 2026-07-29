@@ -76,7 +76,7 @@ export class Session {
 }
 
 export type SessionEvent =
-  | AgentEvent                                          // 透传
+  | (AgentEvent & { willRetry?: boolean })              // 透传；重试中的 agent_end 带注解
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
   | { type: 'compaction_start'; reason: 'threshold' | 'overflow' }
   | { type: 'compaction_end'; ok: boolean; droppedMessages: number }
@@ -177,7 +177,7 @@ resume(id):
 恢复完成后 session 不自动跑,由 CLI 决定:
 
 - 用户直接输入新内容 → `session.prompt(text)`,正常开新一轮;
-- 用户要求「接着刚才的干」(`--resume --continue` 或 REPL 命令)→ `agent.continue()`:按 [05](./05-agent-loop.md) 第 1 节的 Agent API 语义,continue 优先 drain steering、否则 follow-up;两队列皆空时(恢复场景必然如此,队列不持久化)强制执行至少一个 turn——模型看到 transform 修复后的转录(含合成的中断结果),自然接续任务。`agent_start.reason` 为 `'continue'`。
+- session 内部要求「接着刚才的干」(恢复后的续跑、auto-retry 或 compaction 后续跑)→ `agent.continue()`:按 [05](./05-agent-loop.md) 第 1 节的 Agent API 语义,continue 优先 drain steering、否则 follow-up;两队列皆空时强制执行至少一个 turn——模型看到 transform 修复后的转录(含合成的中断结果),自然接续任务。`agent_start.reason` 为 `'continue'`。CLI 的 `--resume` / `--continue` 负责选择并重放既有会话；用户的新 prompt 则按正常 `prompt()` 路径继续。
 
 边界情况:
 

@@ -27,7 +27,7 @@ src/
   agent/           # Agent 类、runLoop、队列、工具执行调度
   tools/           # read/ls/grep/glob/bash/edit/write/plan + 框架
   session/         # 持久化、恢复、compaction、usage 统计
-  cli/             # REPL、渲染器、键位、headless 模式
+  cli/             # OpenTUI、classic/plain 渲染、键位、headless 模式
   shared/          # truncate、fs 工具、进程树 kill 等无状态工具函数
 ```
 
@@ -41,7 +41,7 @@ src/
 | `agent/` | `Agent` 类(prompt/steer/followUp/abort/subscribe)、runLoop 双层循环、steering/follow-up 队列、工具执行三阶段调度、出站前 transform 层 | `agent.ts`、`run-loop.ts`、`queues.ts`、`tool-executor.ts`、`transform.ts` | 不 import 任何 provider(经 `StreamFn` 注入);不 import 具体工具实现(经 `AgentConfig.tools` 注入);不做持久化 |
 | `tools/` | 工具框架(`ToolDefinition`、统一截断 post-hook、FileTracker)+ 八个内置工具 | `types.ts`(框架类型)、`framework.ts`、`file-tracker.ts`、`read.ts` 等每工具一文件、`index.ts`(`createCodingTools()`) | 不感知 agent loop;不直接发 AgentEvent(经 `ToolContext.onUpdate` 回调) |
 | `session/` | JSONL 追加持久化、会话恢复、compaction、usage/成本聚合、auto-retry 策略 | `store.ts`、`compaction.ts`、`usage.ts` | 不渲染;不实现协议转换 |
-| `cli/` | 组装根(composition root):读配置、实例化 adapter/tools/Agent/session,REPL 渲染循环、键位、headless `--json` 模式 | `main.ts`、`repl.ts`、`renderer.ts`、`headless.ts` | 不实现业务逻辑,只组装与渲染 |
+| `cli/` | 组装根(composition root):读配置、实例化 adapter/tools/Agent/session,全屏 TUI、classic/plain 保底、键位、headless `--json` | `main.ts`、`tui.ts`、`repl.ts`、`renderer.ts`、`headless.ts` | 不实现业务逻辑;TUI 只保留事件派生的 view state |
 | `shared/` | 无状态纯函数:截断、fs 辅助、`killProcessTree` 等 | `truncate.ts`、`proc.ts`、`fs.ts` | 不持有状态、不 import 其他 src 目录 |
 
 两个容易放错位置的东西:
@@ -62,7 +62,7 @@ flowchart BT
   agent["src/agent"]
   tools["src/tools\n(zod、@vscode/ripgrep)"]
   session["src/session"]
-  cli["src/cli\n组装根"]
+  cli["src/cli\n组装根 + OpenTUI"]
 
   openai_chat --> protocol
   faux --> protocol
@@ -171,32 +171,35 @@ export default tseslint.config(
 - **测试文件同样受约束**:`test/` 里 loop/steering 的测试只允许用 `providers/faux`,不得 import openai——否则测试会悄悄变成在线测试。adapter 自己的测试(SSE fixture 回放)放 `src/providers/openai-chat/*.test.ts`,天然在白名单目录内。
 - CI 中 `eslint --max-warnings 0` 作为 M0 验收项;可选叠加 dependency-cruiser 生成依赖图并断言无环,作为第二道保险(不是必需,ESLint 两条规则已覆盖全部硬约束)。
 
-## 4. 四层类型体系
+## 4. 四层核心类型 + Session 外围事件
 
-系统有四个类型边界,每个边界一组类型;wire 类型被压在最底层的 adapter 内部,永不上浮。一句话总结:**UI 输入/命令(CLI 层)→ AgentEvent(agent↔UI)→ AgentMessage/Context(会话数据)→ ProviderEvent/StreamFn(agent↔provider)→ wire 协议(adapter 内部,如 ChatCompletionMessageParam)**。
+核心仍有四个类型边界；`SessionEvent` 是 AgentEvent 外围的会话级联合，不复制核心协议。wire 类型被压在最底层的 adapter 内部,永不上浮。一句话总结:**UI 输入/命令(CLI 层)→ Session 门面→ AgentMessage/Context(会话数据)→ ProviderEvent/StreamFn(agent↔provider)→ wire 协议(adapter 内部)**；返回方向是 **AgentEvent → Session 持久化/注解 → SessionEvent → UI**。
 
 ```mermaid
 flowchart TB
   UI["UI 输入/命令(cli/)\n按键、斜杠命令、headless JSON 命令\n{prompt | steer | followUp | abort}"]
+  SE["Session 门面 + SessionEvent(session/)\nprompt/steer/followUp/abort\nAgentEvent + retry/compaction/usage"]
   AE["AgentEvent(protocol/agent-events.ts)\nagent_start/turn_*/message_*/tool_execution_*/queue_update/plan_update/..."]
   MSG["AgentMessage / Context(protocol/messages.ts)\nUserMessage | AssistantMessage | ToolResultMessage\n会话数据层:持久化与重放的对象"]
   PE["ProviderEvent / StreamFn(protocol/provider.ts)\nstart/delta/end 三段式 + done/error,每事件携带 partial 快照"]
   WIRE["wire 协议(providers/openai-chat/ 内部)\nChatCompletionMessageParam / ChatCompletionChunk / SSE"]
 
-  UI -->|"Agent API 调用"| MSG
+  UI -->|"Session API 调用"| SE
+  SE -->|"转发 Agent API"| MSG
   MSG -->|"convertContext 清洗后经 StreamFn 出站"| PE
   PE -->|"adapter 出站转换 convert.ts"| WIRE
   WIRE -->|"SSE 入站状态机 stream.ts"| PE
   PE -->|"partial 定稿为 AssistantMessage 追加进转录"| MSG
   MSG -->|"message_* / turn_* 生命周期事件"| AE
-  AE -->|"subscribe 回流,CLI 渲染"| UI
+  AE -->|"持久化、重试注解与会话级事件"| SE
+  SE -->|"subscribe 回流,CLI 渲染"| UI
 ```
 
 ### 逐层说明
 
-**第 1 层:UI 输入/命令(cli/ 内部,不进 protocol)。**终端按键与斜杠命令被 REPL 翻译成对 `Agent` 公开方法的调用:流式期间 Enter = `steer()`,Alt+Enter = `followUp()`,Esc = `abort()`;空闲时 Enter = `prompt()`。headless 模式下这一层显形为 stdin 上的 JSON 命令 `{prompt|steer|follow_up|abort}`——它就是 codex `Op` 的进程内极简版(对比见第 6 节)。v1 刻意不给这层定义正式的 `ClientOp` 类型:方法调用即协议。
+**第 1 层:UI 输入/命令(cli/ 内部,不进 protocol)。**OpenTUI Textarea/全局 key handler(或 classic REPL)把按键与斜杠命令翻译成 `Session` 门面调用:流式期间 Enter = `steer()`,Alt+Enter = `followUp()`,Esc = `abort()`;空闲时 Enter = `prompt()`。headless 模式下这一层显形为 stdin 上的 JSON 命令 `{prompt|steer|follow_up|abort}`——它就是 codex `Op` 的进程内极简版(对比见第 6 节)。v1 刻意不给这层定义正式的 `ClientOp` 类型:方法调用即协议。OpenTUI 的 renderable tree 只是 `SessionEvent` 投影,不得成为权威会话状态。
 
-**第 2 层:AgentEvent(agent → UI/客户端)。**agent 的全部可观测行为:agent/turn 生命周期、消息生命周期(`message_start` / `message_update` / `message_end`)、工具执行三事件、队列快照(`queue_update`)、计划(`plan_update`)、审批请求。注意 `message_update` 的定义:
+**第 2 层:AgentEvent(agent → session)。**agent 的全部可观测行为:agent/turn 生命周期、消息生命周期(`message_start` / `message_update` / `message_end`)、工具执行三事件、队列快照(`queue_update`)、计划(`plan_update`)、审批请求。Session 先消费这些事件完成持久化，再把它们与 retry/compaction/usage 事件联合为 `SessionEvent` 扇出给 UI/headless 客户端。注意 `message_update` 的定义:
 
 ```ts
 | { type: 'message_update'; messageId: string; event: ProviderEvent }    // 仅 assistant 流式期间
@@ -233,37 +236,42 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 ```mermaid
 sequenceDiagram
   participant U as 用户(终端)
-  participant CLI as cli/(REPL + 渲染器)
+  participant CLI as cli/(OpenTUI / classic / headless)
+  participant S as session/
   participant AG as agent/(runLoop)
   participant AD as providers/openai-chat
   participant API as OpenAI /chat/completions
   participant T as tools/
 
   U->>CLI: 输入文本 + Enter
-  CLI->>AG: agent.prompt(text)
-  AG-->>CLI: agent_start(prompt) / message_start+end(UserMessage)
+  CLI->>S: session.prompt(text)
+  S->>AG: agent.prompt(text)
+  AG-->>S: agent_start(prompt) / message_start+end(UserMessage)
+  S-->>CLI: 持久化后扇出 SessionEvent
   loop 内层循环:直到无 toolCall 且 steering 队列空
-    AG-->>CLI: turn_start
+    AG-->>S: turn_start
     AG->>AG: convertContext(ctx):过滤 aborted 消息、修补孤儿 toolCall
     AG->>AD: streamFn(model, ctx, { signal })
     AD->>API: POST stream:true(Context → wire 消息 + 工具 JSON Schema)
     API-->>AD: SSE chunks(delta.content / delta.tool_calls / usage)
     AD-->>AG: ProviderEvent(start / text_delta / tool_call_end / done)
-    AG-->>CLI: message_update(逐事件包装转发)→ 增量渲染
-    AG-->>CLI: message_end(AssistantMessage 定稿,追加进转录)
+    AG-->>S: message_update / message_end(AssistantMessage 定稿)
+    S-->>CLI: SessionEvent → 增量渲染
     alt assistant 含 tool_call
-      AG-->>CLI: tool_execution_start
+      AG-->>S: tool_execution_start
       AG->>T: tool.execute(call, { cwd, signal, onUpdate, fileTracker })
       T-->>AG: onUpdate(节流的中间输出)
-      AG-->>CLI: tool_execution_update
+      AG-->>S: tool_execution_update
       T-->>AG: ToolOutput(或 throw → isError 结果)
-      AG-->>CLI: tool_execution_end + message_start+end(ToolResultMessage)
+      AG-->>S: tool_execution_end + message_start+end(ToolResultMessage)
+      S-->>CLI: 持久化后扇出 SessionEvent
     end
-    AG-->>CLI: turn_end
+    AG-->>S: turn_end
     AG->>AG: drainSteering() → pendingMessages(注入点)
   end
   AG->>AG: drainFollowUp()(空)
-  AG-->>CLI: agent_end(completed)
+  AG-->>S: agent_end(completed)
+  S-->>CLI: agent_end + usage_update
   CLI->>U: 恢复输入提示符
 ```
 
@@ -274,7 +282,7 @@ sequenceDiagram
 1. **入口分流**:`prompt()` 仅空闲可调,运行中 throw——强制调用方在 `steer` / `followUp` 之间二选一,消灭"运行中又开新任务"的未定义行为(codex 用 `abort_all_tasks(Replaced)` 解决同一问题,我们选择更保守的显式拒绝)。
 2. **每次采样前先 transform**:清洗发生在"出站前"而非"写入转录时"——转录保留全部历史(含 aborted),wire 层看到的永远是修复过的合法序列。这是 opencode 中断收尾纪律的落地:悬空 tool_call 不补 error 结果,重放时 Anthropic 类协议直接 400。
 3. **SSE → ProviderEvent 是纯状态机**:按 chunk 的 `index` 聚合 tool_calls 分片、容错 JSON 持续刷新 `arguments`、finish_reason 映射 StopReason——结构直接参照 Vercel AI SDK openai-compatible 包的 `doStream` TransformStream 实现。
-4. **事件回流是同步扇出**:`subscribe` 的 listener 逐个 await(保序),CLI 渲染器和 session 持久化是两个平级订阅者——持久化不是 loop 的内置步骤,而是事件的消费者,这让 headless 模式、测试断言、未来的 SSE 推送共用同一订阅面。
+4. **事件回流经 Session 保序扇出**:Session 是 AgentEvent 的持久化消费者，先完成消息落盘与 usage/retry/compaction 派生，再把 `SessionEvent` 逐个 await listener 扇出给 CLI。持久化不是 loop 的内置步骤；OpenTUI、classic、headless 与测试共用 Session 的同一订阅面。
 5. **工具执行期间 abort 随时生效**:`AbortSignal` 从 `agent.abort()` 贯穿 provider 流(HTTP 断开)与工具执行(进程树 kill),被中断的现场由 transform 层在下一次请求前修复。
 6. **再采样**:工具结果按 assistant 消息中的源顺序回填转录后,内层循环回到步骤 1 重新采样;模型不再发起 toolCall 且 steering 队列为空时内层退出,poll follow-up 队列决定续跑或 `agent_end`。
 
@@ -294,7 +302,7 @@ sequenceDiagram
 
 codex 的 SQ/EQ 是为"多前端、跨进程"设计的:TUI、MCP server、app-server 都是独立进程,必须有可序列化的 `Submission{id, op}` / `Event{id, msg}` 协议,core 内 `submission_loop` 串行消费保证顺序,approval 应答也是一条 `Op`(与 UserInput 同队列,天然有序、可重放)。这套机制的成本:每个交互都要定义 Op/Event 对、维护 id 关联、处理断线与重放。
 
-v1 只有一个前端(自己的 REPL)且同进程,队列协议的收益为零、成本全在。所以裁剪为:`prompt/steer/followUp/abort` 直接方法调用,事件经 `subscribe` 回调扇出。但我们**保留了 codex 语义层的全部结论**,只删掉了传输层:
+v1 只有一个本地 CLI 产品（eligible 终端使用 OpenTUI，否则使用 classic/plain 渲染面）且同进程,队列传输协议的收益为零、成本全在。所以裁剪为:`prompt/steer/followUp/abort` 直接方法调用,事件经 `subscribe` 回调扇出。但我们**保留了 codex 语义层的全部结论**,只删掉了传输层:
 
 - steering 的"采样间隙 drain pending input"语义照抄(codex `run_turn` 的 `get_pending_input`,我们的 `drainSteering()` 注入点);
 - approval 用"事件 + resolver 注册表"(codex 的 oneshot channel 注册表的 TS 等价物),`approvalId` 索引天然可跨进程化;
@@ -312,10 +320,10 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 
 ### 6.5 未来演进到 server 化的路径
 
-本项目设计约定把 headless 模式定义为"内部协议对外暴露的验证",这句话就是演进路线图。所有 AgentEvent 已经 JSON 可序列化、所有命令已经收敛为四个动词,server 化是传输层替换而非架构重构:
+本项目设计约定把 headless 模式定义为"内部协议对外暴露的验证",这句话就是演进路线图。所有 SessionEvent 已经 JSON 可序列化、所有命令已经收敛为四个动词,server 化是传输层替换而非架构重构:
 
-1. **M5 已就位**:headless `--json` 模式 = stdin JSON 命令(≈ codex `Op`)+ stdout NDJSON AgentEvent(≈ codex `EventMsg`)。这已经是一个完整的、可被任何语言客户端消费的外协议,只是传输是管道。
-2. **加事件信封**:AgentEvent 外包一层 `{ sessionId, seq, event }`(单调 `seq` 供断线重连与重放,protocols.md 的建议)。内部类型零改动。
+1. **M5 已就位**:headless `--json` 模式 = stdin JSON 命令(≈ codex `Op`)+ stdout NDJSON SessionEvent(AgentEvent + 会话级事件,≈ codex `EventMsg`)。这已经是一个完整的、可被任何语言客户端消费的外协议,只是传输是管道。
+2. **加事件信封**:SessionEvent 外包一层 `{ sessionId, seq, event }`(单调 `seq` 供断线重连与重放,protocols.md 的建议)。内部类型零改动。
 3. **换传输**:stdin/stdout 换成 HTTP POST(命令)+ SSE(事件),`cli/headless.ts` 换成 `server/`。`Agent`、`protocol`、`tools`、`providers` 一行不改。
 4. **审批跨进程化**:`approval_request` 事件已带 `approvalId`,应答从进程内方法调用改为一条 POST(即 codex 的 `Op::ExecApproval` 形态);resolver 注册表实现不变。
 5. **队列 durable 化**(可选):steering/follow-up 队列从内存数组升级为 opencode V2 式的 durable inbox,获得崩溃恢复能力。
@@ -330,7 +338,7 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 | `agent/` | `Agent` 类、`AgentConfig`、transform 层函数 | `protocol`、`shared`、`tools/types.ts`(仅类型) | `cli`、`session`、测试 |
 | `tools/` | `ToolDefinition`、`ToolContext`、`ToolOutput`、`FileTracker`、`createCodingTools(): ToolDefinition[]` | `protocol`、`shared`、zod、`@vscode/ripgrep` | `cli`(组装)、`agent`(仅 types.ts) |
 | `session/` | `SessionStore`(append/load/list)、compaction、usage 聚合 | `protocol`、`shared`、`agent`(Session 内部组装并持有 Agent,见 [08](./08-session-persistence.md)) | `cli` |
-| `cli/` | `main()`(bin 入口)、REPL、renderer、headless | 一切 | 终端用户 / 外部进程 |
+| `cli/` | `main()`、`startTui()`、classic REPL/renderer、headless | 一切(含 `@opentui/core`,仅交互分支动态加载) | 终端用户 / 外部进程 |
 | `shared/` | `truncate`、`killProcessTree`、fs 辅助 | (无) | `agent`、`tools`、`session`、`cli` |
 
 接口契约的三条不变量(所有模块 PR 审查时对照):
@@ -349,7 +357,7 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 - [ ] 在 `src/tools/` 下 import `src/agent` 报错(反向依赖被拦)。
 - [ ] `tsc --noEmit`(strict)通过;依赖图无环(dependency-cruiser/madge,按 3.3 节为可选的第二道保险,非必需项)。
 - [ ] 用 `providers/faux` 替换 `streamFn` 后,`agent/` 全部测试离线通过且零代码改动(证明 StreamFn 注入边界成立)。
-- [ ] headless 模式 stdout 每行可被 `JSON.parse`,事件序列能完整重建会话渲染(证明 AgentEvent 全 JSON 可序列化,server 化前提成立)。
+- [ ] headless 模式 stdout 每行可被 `JSON.parse`,事件序列能完整重建会话渲染(证明 SessionEvent 全 JSON 可序列化,server 化前提成立)。
 - [ ] `grep -r "from 'openai'" src --include='*.ts' | grep -v providers/openai-chat` 输出为空(CI 里作为 ESLint 之外的第二道防线)。
 
 ## 相关文档
