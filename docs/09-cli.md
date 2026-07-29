@@ -31,21 +31,21 @@ root column (100% × 100%)
 ├── header:版本 + Unicode 像素 Logo + tips
 ├── transcript:ScrollBox(flexGrow:1)
 └── composer
-    ├── prompt box
+    ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
     ├── workspace
     └── context usage                         provider/model
 ```
 
 - **header**:从 `package.json.version` 取当前版本;Logo 是 ImageGen 参考图
-  `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻,运行时不读 PNG、不依赖终端图片协议。
+  `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻,运行时不读 PNG、不依赖终端图片协议。header、brand、Logo 与 tips 都不绘制背景色,直接透出终端背景。
 - **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部;用户手动上滚时暂停跟尾。
-- **composer**:固定在屏幕底部。prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
-- **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model;版本、prompt、workspace/context 始终保留。
-- **主题**:默认主画布与 transcript 使用纯白 `#ffffff`,header/prompt 使用轻微灰阶分层；正文、muted 与各语义状态色都按白底重新取值。OpenTUI 0.4.5 的运行时构造器不读取 `backgroundColor` 配置,所以生产初始化还必须调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer。主画布白色必须构造成 `RGBA.fromIndex(231, '#ffffff')`,header 浅灰构造成 `RGBA.fromIndex(255, '#fafafa')`,不能让高亮 RGB 在非 truecolor 环境量化为主题可重定义的 ANSI 亮白槽 15。该 setter 不能替代视图绘制:页面、header 子层、ScrollBox 的 root/wrapper/viewport/content、转录内容和 footer 仍必须显式绘制对应不透明底色,让首帧在没有 `COLORTERM=truecolor` 时也保持白色/浅灰背景,而不是通过 SGR 49 露出用户的深色终端背景。`NO_COLOR` / `--no-color` 时不设置这些自定义底色,回到终端默认配色。
+- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；光标跟随终端默认前景色,是不闪烁的 block。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,第一条 footer 暂时从 workspace 切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
+- **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
+- **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和两行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文、输入与光标使用终端默认前景色以适配明暗主题,accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 只移除这些自定义前景色,背景仍保持透明。
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先执行 `abort → approval.onAbort → Session.close()`;`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 自定义调色,但不改变布局和键位。
 
-所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。进入 Text/Markdown、状态栏、工具摘要、diff 或终端标题前统一经过 `sanitizeTerminalText`:剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列,移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。
+所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。进入 Text/Markdown、状态栏、工具摘要或 diff 前统一经过 `sanitizeTerminalText`:剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列,移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。终端标题再经过 `sanitizeTerminalTitle` 把 tab/newline 折成单行；不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。
 
 ### 1.3 classic / plain 保底
 
@@ -149,7 +149,7 @@ export interface Renderer {
 
 | SessionEvent | TUI 渲染行为 |
 |---|---|
-| `agent_start` | prompt title 进入 working;`reason:'follow_up'` 追加 `↪ follow-up` |
+| `agent_start` | 空输入时 prompt placeholder 进入 working;`reason:'follow_up'` 追加 `↪ follow-up` |
 | `agent_end` | 最终边界追加 done/aborted/error;`willRetry:true` 保持 retrying,不误报完成 |
 | `turn_start` | 无可见输出(内部计数) |
 | `turn_end` | 无额外分隔组件 |
@@ -159,9 +159,9 @@ export interface Renderer {
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
 | `tool_execution_start/update/end` | 原位更新同一工具块:`●` → 尾行 → `✓/✗`;diff 以语义颜色追加(上限 24 行) |
-| `queue_update` | 完整替换计数;running 时显示在 prompt bottom title |
+| `queue_update` | 完整替换计数;running/retrying 时附在 prompt placeholder |
 | `plan_update` | 原位替换同一 plan 块:`✓` / `▶` / `○`,不重复追加整表 |
-| `approval_request` | transcript 留痕,prompt box 切黄色审批标题与专用键位 |
+| `approval_request` | transcript 留痕,prompt 横线切黄色,第一条 footer 始终显示专用键位；已有 draft 保留但冻结 |
 | `usage_update` | 用 `contextTokens` 刷新 footer;不使用 cumulative 伪装当前上下文 |
 | `retry_scheduled` / `compaction_*` | 追加 notice 并更新 activity；controller 与 view 共享同一个 SessionEvent 状态投影,不得分别读取瞬时的 `agent.state`；取消重试后的 error 与 compaction_end 都回到 idle |
 | `error` | `fatal: false` 打印警告行;`fatal: true` 打印错误并进入退出流程 |
@@ -190,14 +190,14 @@ export interface Renderer {
 
                  （剩余空间；内容继续向下增长）
 
-╭─ coda · working ──────────────────────────────────────────╮
-│ 顺便把颜色常量也挪过去_                                  │
-╰─ Enter steer · Alt+Enter follow-up · Esc abort ──────────╯
+────────────────────────────────────────────────────────────
+顺便把颜色常量也挪过去▌
+────────────────────────────────────────────────────────────
  ~/Desktop/openai/openai-sdk-ts  (main)
  context 2.4k / 128k · 1.9%                    openai/gpt-5.2
 ```
 
-中间转录短时锚定顶部;只有填满后才滚动并跟随最新内容。用户此刻按 `Enter`,输入文本进 steering 队列;prompt 和两行 footer 的屏幕位置不动。
+中间转录短时锚定顶部;只有填满后才滚动并跟随最新内容。用户此刻按 `Enter`,输入文本进 steering 队列；两行 footer 固定在屏幕底部,多行 prompt 从其上方向上扩展。
 
 ## 6. Headless JSON 模式(`--json`)
 
@@ -336,9 +336,9 @@ function resolveConfig(flags, env, file, { allowMissingApiKey = false } = {}): R
 
 - **非 TTY stdin**(`echo "..." | coda`):自动等价 `-p` 模式读完 stdin 作为 prompt;`--json` 显式给出时按 headless 协议解析。
 - **粘贴多行文本**:OpenTUI Textarea 与 classic 都启用 bracketed paste,粘贴换行不发送;审批期间整段 paste 被输入边界拦截,不能把首字符误判为 `y` / `a` / `n`;不支持 bracketed paste 时是终端自身的已知限制。
-- **窗口 resize**:OpenTUI 重跑 Yoga 布局;宽度不足依次收起 tips、Logo、model。transcript 内容重排但顺序不变,composer 始终在底部。
+- **窗口 resize**:OpenTUI 重跑 Yoga 布局;宽度不足依次收起 tips、Logo、model。prompt 按新宽度重测软换行并增高或缩回；transcript 内容重排但顺序不变,composer 始终在底部。
 - **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽;程序化设置输入历史后调用 Textarea 的 buffer-end API,不能用 JavaScript UTF-16 `string.length` 猜光标列。classic 动态区继续用仓库的 `displayWidth`/截断实现。
-- **过小终端**:header/composer 先进入 compact 高度,中区至少保留 1 行;无法容纳时由终端裁切,不改变事件或输入语义。
+- **过小终端**:低于 10 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标,审批则隐藏输入并只显示决议键位。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
 - **Windows**:OpenTUI 依赖对应 win32 native optional package;classic/plain 仍是 `TERM=dumb` 或初始化失败时的保底。只承诺现代 Windows Terminal。
 - **恢复转录**:`--continue` / `--resume` 在显示 TUI 前用最终 `AgentMessage` hydrate,不伪造生命周期事件。assistant 的多 text/reasoning part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要；plan tool result 从 `details.steps` 恢复最新 plan,失败结果仍可见。初始化/重放失败必须 destroy OpenTUI 后才允许降级 classic。
 
@@ -346,14 +346,17 @@ function resolveConfig(flags, env, file, { allowMissingApiKey = false } = {}): R
 
 - [ ] 100×30 下 header 含版本/Logo/tips;首条 user/assistant 紧跟中区顶部,短内容下方留白而不是贴 footer
 - [ ] 长输出填满中区后自动跟尾;PageUp 手动上滚后不抢回,PageDown 可回到最新内容
-- [ ] prompt 下恰有 workspace 与 context/model 两行;resize 窄→宽后完整快捷键恢复,审批提示不被 compact 文案覆盖
+- [ ] native framebuffer 与整个视图树都保持 alpha 0,header、transcript、Markdown、prompt 与 footer 不绘制任何实色背景
+- [ ] prompt 为透明双横线,没有左右边/圆角/title；默认 1 行并随显式/软换行增高(空间允许时最多 8 行),内容缩短后缩回；跟随终端默认前景色的 block 光标不闪烁；正常高度下其后恰有 workspace 与 context/model 两行
+- [ ] resize 宽→窄→宽后 prompt 按软换行增高再缩回,Logo/tips 正确隐藏并恢复；非空多行 draft 下审批 footer 与黄色横线仍可见,决议后恢复 workspace/洋红横线
+- [ ] 9→7→5→3→2→1 行的 ultra-compact 降级中光标不越界；1 行审批优先显示 y/a/n/Esc 并隐藏输入光标
 - [ ] 流式输出期间输入框稳定;Enter 后出现 steering 回显,Shift+Enter 只插入换行
 - [ ] retry backoff 期间 Enter 入 steering 队列、Esc 取消重试；compacting 期间 Enter 的 prompt 在压缩完成后启动
 - [ ] `Esc` 不与方向键冲突;流式中裸 Esc 一次 abort,assistant 以 `[aborted]` 收尾
 - [ ] `Alt+Enter` 与 `/f ` 前缀均能入 follow-up 队列(至少各在一种终端验证)
 - [ ] `coda --continue` 重放转录后,tool 摘要、最新 plan 与 plan error 都保留,新输入接在原上下文继续
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
-- [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用白色槽 231,不依赖主题槽 15
+- [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景
 - [ ] TUI 正常退出、fatal、审批中 abort 与初始化失败四条路径都恢复主屏/raw mode；初始化失败后 classic 无双重输入
 - [ ] `coda --json` 下:乱输入一行非 JSON 不退出;`prompt`-running 冲突返回 non-fatal error 事件;`shutdown` 在运行中先 abort 再 flush 退出,exit code 0
 - [ ] `--json` 的 stdout 每一行都能被 `jq .` 解析(管道纪律)

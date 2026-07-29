@@ -52,15 +52,22 @@ const HELP_LINES = [
 ];
 
 const DIFF_MAX_LINES = 24;
+const COMPOSER_PADDING_X = 1;
+const PROMPT_MAX_VISIBLE_ROWS = 8;
+const PROMPT_MEASURE_HEIGHT = 65_535;
+const PROMPT_RULE_ROWS = 2;
+const COMPOSER_FOOTER_ROWS = 2;
+const TRANSCRIPT_PADDING_Y = 1;
+const TRANSCRIPT_MIN_CONTENT_ROWS = 1;
+const TRANSCRIPT_PADDED_MIN_ROWS =
+  TRANSCRIPT_MIN_CONTENT_ROWS + TRANSCRIPT_PADDING_Y * 2;
+const MIN_HEADER_VIEWPORT_ROWS = 10;
 
 type Tone = 'normal' | 'muted' | 'accent' | 'success' | 'warning' | 'danger' | 'cyan';
 
 interface Palette {
-  background: string;
-  surface: string;
-  elevated: string;
   border: string;
-  foreground: string;
+  promptBorder: string;
   muted: string;
   accent: string;
   success: string;
@@ -70,11 +77,8 @@ interface Palette {
 }
 
 const PALETTE: Palette = {
-  background: '#ffffff',
-  surface: '#fafafa',
-  elevated: '#f5f5f2',
   border: '#c9ccd3',
-  foreground: '#1e2025',
+  promptBorder: '#a0205e',
   muted: '#636873',
   accent: '#c94740',
   success: '#2f7647',
@@ -198,6 +202,11 @@ export function sanitizeTerminalText(text: string): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 }
 
+/** OSC terminal title 必须保持单行；普通视图文本仍可保留 tab/newline。 */
+export function sanitizeTerminalTitle(text: string): string {
+  return sanitizeTerminalText(text).replace(/[\t\n]+/g, ' ').trim();
+}
+
 /** 1000 制 token 短格式，status/footer 共用。 */
 export function formatTokenCount(value: number): string {
   const safe = Math.max(0, Math.round(value));
@@ -259,18 +268,17 @@ export async function createTuiScreen(
     TextareaRenderable: Textarea,
   } = await import('@opentui/core');
 
-  // ANSI 基础色 15 会被终端主题重定义；xterm cube 231 固定表示纯白。
-  const background = RGBA.fromIndex(231, PALETTE.background);
-  // #fafafa 会被 OpenTUI 量化到主题槽 15；固定到 xterm 灰阶槽 255，
-  // 保证没有 COLORTERM 时 header 仍是浅色。
-  const surface = RGBA.fromIndex(255, PALETTE.surface);
+  // 透明背景让终端自身的背景色/透明度透出；前景与语义色仍由 coda 控制。
+  const transparentBackground = RGBA.fromValues(0, 0, 0, 0);
+  // 正文和光标跟随终端默认前景，确保透明背景在明暗主题下都可读。
+  const terminalForeground = RGBA.defaultForeground();
   const interaction = opts.interaction ?? new TuiInteractionState();
   let approvalPending = false;
   let submitHandler = opts.onSubmit ?? (() => {});
   const colored = <T extends object>(value: T): T | Record<string, never> =>
     opts.color ? value : {};
-  const toneColor = (tone: Tone): string | undefined => {
-    if (!opts.color) return undefined;
+  const toneColor = (tone: Tone): ColorInput => {
+    if (!opts.color) return terminalForeground;
     switch (tone) {
       case 'muted': return PALETTE.muted;
       case 'accent': return PALETTE.accent;
@@ -278,12 +286,12 @@ export async function createTuiScreen(
       case 'warning': return PALETTE.warning;
       case 'danger': return PALETTE.danger;
       case 'cyan': return PALETTE.cyan;
-      default: return PALETTE.foreground;
+      default: return terminalForeground;
     }
   };
 
   const syntaxStyle = Syntax.fromStyles({
-    default: opts.color ? { fg: PALETTE.foreground } : {},
+    default: { fg: terminalForeground },
     'markup.heading.1': { ...(opts.color && { fg: PALETTE.accent }), bold: true },
     'markup.heading.2': { ...(opts.color && { fg: PALETTE.accent }), bold: true },
     'markup.heading.3': { ...(opts.color && { fg: PALETTE.warning }), bold: true },
@@ -303,7 +311,7 @@ export async function createTuiScreen(
       height: '100%',
       flexDirection: 'column',
       shouldFill: true,
-      ...colored({ backgroundColor: background }),
+      backgroundColor: transparentBackground,
     });
 
     const header = new Box(renderer, {
@@ -317,8 +325,10 @@ export async function createTuiScreen(
       title: ` coda v${sanitizeTerminalText(opts.version)} `,
       paddingX: 2,
       columnGap: 2,
+      backgroundColor: transparentBackground,
+      borderColor: terminalForeground,
+      titleColor: terminalForeground,
       ...colored({
-        backgroundColor: surface,
         borderColor: PALETTE.border,
         titleColor: PALETTE.accent,
       }),
@@ -332,7 +342,7 @@ export async function createTuiScreen(
       alignItems: 'center',
       columnGap: 2,
       flexShrink: 0,
-      ...colored({ backgroundColor: surface }),
+      backgroundColor: transparentBackground,
     });
     const logo = new Text(renderer, {
       id: 'coda-logo',
@@ -340,7 +350,9 @@ export async function createTuiScreen(
       height: 6,
       content: PIXEL_LOGO,
       selectable: false,
-      ...colored({ fg: PALETTE.accent, bg: surface }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.accent }),
     });
     const brandCopy = new Text(renderer, {
       id: 'coda-brand-copy',
@@ -349,7 +361,8 @@ export async function createTuiScreen(
       content: 'Welcome back!\n\nA coding agent\nfor your workspace',
       wrapMode: 'word',
       selectable: false,
-      ...colored({ fg: PALETTE.foreground, bg: surface }),
+      bg: transparentBackground,
+      fg: terminalForeground,
     });
     brand.add(logo);
     brand.add(brandCopy);
@@ -362,18 +375,23 @@ export async function createTuiScreen(
       border: ['left'],
       paddingLeft: 2,
       flexShrink: 1,
+      backgroundColor: transparentBackground,
+      borderColor: terminalForeground,
       ...colored({
-        backgroundColor: surface,
         borderColor: PALETTE.border,
       }),
     });
     const tipsTitle = new Text(renderer, {
+      id: 'coda-tips-title',
       height: 1,
       content: 'Tips for getting started',
       selectable: false,
-      ...colored({ fg: PALETTE.accent, bg: surface }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.accent }),
     });
     const tipsBody = new Text(renderer, {
+      id: 'coda-tips-body',
       flexGrow: 1,
       content:
         'Enter sends · Shift+Enter adds a line\n' +
@@ -381,7 +399,9 @@ export async function createTuiScreen(
         '/help shows every shortcut',
       wrapMode: 'word',
       selectable: false,
-      ...colored({ fg: PALETTE.muted, bg: surface }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.muted }),
     });
     tips.add(tipsTitle);
     tips.add(tipsBody);
@@ -398,22 +418,22 @@ export async function createTuiScreen(
       stickyScroll: true,
       stickyStart: 'bottom',
       viewportCulling: true,
-      ...colored({ backgroundColor: background }),
+      backgroundColor: transparentBackground,
       wrapperOptions: {
-        ...colored({ backgroundColor: background }),
+        backgroundColor: transparentBackground,
       },
       viewportOptions: {
-        ...colored({ backgroundColor: background }),
+        backgroundColor: transparentBackground,
       },
       contentOptions: {
         flexDirection: 'column',
         justifyContent: 'flex-start',
         minHeight: 'auto',
         paddingX: 2,
-        paddingTop: 1,
-        paddingBottom: 1,
+        paddingTop: TRANSCRIPT_PADDING_Y,
+        paddingBottom: TRANSCRIPT_PADDING_Y,
         rowGap: 1,
-        ...colored({ backgroundColor: background }),
+        backgroundColor: transparentBackground,
       },
       verticalScrollbarOptions: {
         visible: false,
@@ -424,35 +444,34 @@ export async function createTuiScreen(
     const composer = new Box(renderer, {
       id: 'coda-composer',
       width: '100%',
-      height: 7,
+      height: 1 + PROMPT_RULE_ROWS + COMPOSER_FOOTER_ROWS,
       flexShrink: 0,
       flexDirection: 'column',
-      paddingX: 1,
-      ...colored({ backgroundColor: background }),
+      paddingX: COMPOSER_PADDING_X,
+      backgroundColor: transparentBackground,
     });
     const promptBox = new Box(renderer, {
       id: 'coda-prompt-box',
       width: '100%',
-      height: 5,
+      height: 1 + PROMPT_RULE_ROWS,
       flexShrink: 0,
-      border: true,
-      borderStyle: 'rounded',
-      title: ' coda · ready ',
-      bottomTitle: ' Enter send · Shift+Enter newline ',
-      paddingX: 1,
+      border: ['top', 'bottom'],
+      borderStyle: 'single',
+      backgroundColor: transparentBackground,
+      borderColor: terminalForeground,
+      focusedBorderColor: terminalForeground,
       ...colored({
-        backgroundColor: PALETTE.elevated,
-        borderColor: PALETTE.accent,
-        focusedBorderColor: PALETTE.accent,
-        titleColor: PALETTE.accent,
+        borderColor: PALETTE.promptBorder,
+        focusedBorderColor: PALETTE.promptBorder,
       }),
     });
     const input = new Textarea(renderer, {
       id: 'coda-input',
       width: '100%',
       height: '100%',
-      placeholder: 'Ask coda anything…',
+      placeholder: '',
       wrapMode: 'word',
+      cursorStyle: { style: 'block', blinking: false },
       keyBindings: [
         { name: 'enter', action: 'submit' },
         { name: 'return', action: 'submit' },
@@ -466,13 +485,14 @@ export async function createTuiScreen(
       onSubmit: () => {
         submitHandler();
       },
+      backgroundColor: transparentBackground,
+      focusedBackgroundColor: transparentBackground,
+      textColor: terminalForeground,
+      focusedTextColor: terminalForeground,
+      placeholderColor: terminalForeground,
+      cursorColor: terminalForeground,
       ...colored({
-        backgroundColor: PALETTE.elevated,
-        focusedBackgroundColor: PALETTE.elevated,
-        textColor: PALETTE.foreground,
-        focusedTextColor: PALETTE.foreground,
         placeholderColor: PALETTE.muted,
-        cursorColor: PALETTE.accent,
       }),
     });
     promptBox.add(input);
@@ -483,7 +503,9 @@ export async function createTuiScreen(
       height: 1,
       truncate: true,
       selectable: false,
-      ...colored({ fg: PALETTE.muted, bg: background }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.muted }),
     });
     const runtimeRow = new Box(renderer, {
       id: 'coda-runtime-row',
@@ -491,7 +513,7 @@ export async function createTuiScreen(
       height: 1,
       flexDirection: 'row',
       justifyContent: 'space-between',
-      ...colored({ backgroundColor: background }),
+      backgroundColor: transparentBackground,
     });
     const contextText = new Text(renderer, {
       id: 'coda-context',
@@ -499,7 +521,9 @@ export async function createTuiScreen(
       height: 1,
       truncate: true,
       selectable: false,
-      ...colored({ fg: PALETTE.muted, bg: background }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.muted }),
     });
     const modelText = new Text(renderer, {
       id: 'coda-model',
@@ -507,7 +531,9 @@ export async function createTuiScreen(
       content: sanitizeTerminalText(`${opts.model.provider}/${opts.model.model}`),
       truncate: true,
       selectable: false,
-      ...colored({ fg: PALETTE.muted, bg: background }),
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.muted }),
     });
     runtimeRow.add(contextText);
     runtimeRow.add(modelText);
@@ -523,6 +549,8 @@ export async function createTuiScreen(
     let activity: string | undefined;
     let transientStatus: string | undefined;
     let layoutWidth = renderer.width;
+    let layoutHeight = renderer.height;
+    let headerRows = 9;
     let branch = opts.branch;
     let usage: SessionUsage = {
       cumulative: { input: 0, output: 0 },
@@ -538,15 +566,93 @@ export async function createTuiScreen(
     const workspace = formatWorkspacePath(opts.cwd, runtimeHomeDir());
 
     const textOptions = (tone: Tone): { fg?: ColorInput; bg?: ColorInput } => {
-      const value = toneColor(tone);
-      return value === undefined ? {} : { fg: value, bg: background };
+      return { fg: toneColor(tone), bg: transparentBackground };
     };
 
     const refreshWorkspace = (): void => {
+      if (approvalPending) {
+        workspaceText.content =
+          layoutWidth < 68
+            ? 'Approval · y/a/n/Esc'
+            : 'Approval required · y once · a always · n deny · Esc abort';
+        return;
+      }
       workspaceText.content = sanitizeTerminalText(
         branch === undefined ? workspace : `${workspace}  (${branch})`,
       );
     };
+
+    const promptContentWidth = (): number =>
+      Math.max(1, layoutWidth - COMPOSER_PADDING_X * 2);
+
+    const setPromptPlaceholder = (value: string): void => {
+      input.placeholder = truncateToWidth(firstLine(value), promptContentWidth());
+    };
+
+    const refreshComposerLayout = (): void => {
+      const workspaceVisible = layoutHeight >= 4 || approvalPending;
+      const runtimeVisible = layoutHeight >= 5;
+      workspaceText.visible = workspaceVisible;
+      runtimeRow.visible = runtimeVisible;
+      const footerRows = Number(workspaceVisible) + Number(runtimeVisible);
+
+      const rowsAfterHeaderAndFooter = Math.max(
+        0,
+        layoutHeight - headerRows - footerRows,
+      );
+      const promptVisible = rowsAfterHeaderAndFooter >= 1;
+      const ruleRows = promptVisible
+        ? Math.min(PROMPT_RULE_ROWS, Math.max(0, rowsAfterHeaderAndFooter - 1))
+        : 0;
+      promptBox.border =
+        ruleRows === 2 ? ['top', 'bottom'] : ruleRows === 1 ? ['top'] : [];
+      promptBox.visible = promptVisible;
+      input.visible = promptVisible;
+      // 审批时 draft 被刻意冻结；隐藏光标，避免误导用户以为仍可编辑。
+      input.showCursor = promptVisible && !approvalPending;
+
+      const inputAndTranscriptRows = Math.max(
+        0,
+        rowsAfterHeaderAndFooter - ruleRows,
+      );
+      const transcriptRows =
+        inputAndTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS + 1
+          ? TRANSCRIPT_PADDED_MIN_ROWS
+          : inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
+            ? TRANSCRIPT_MIN_CONTENT_ROWS
+            : 0;
+      const transcriptPadding =
+        transcriptRows >= TRANSCRIPT_PADDED_MIN_ROWS ? TRANSCRIPT_PADDING_Y : 0;
+      transcript.visible = transcriptRows > 0;
+      transcript.minHeight = transcriptRows;
+      transcript.content.paddingTop = transcriptPadding;
+      transcript.content.paddingBottom = transcriptPadding;
+
+      if (!promptVisible) {
+        promptBox.height = 0;
+        composer.height = footerRows;
+        return;
+      }
+
+      // resize 回调中 input.width 仍是上一帧；显式按新宽度测量。
+      // virtualLineCount 又会被当前 viewport 截断，不能用于自然高度。
+      const measurement = input.editorView.measureForDimensions(
+        promptContentWidth(),
+        PROMPT_MEASURE_HEIGHT,
+      );
+      const naturalRows = Math.max(1, measurement?.lineCount ?? input.lineCount);
+      const viewportRows = Math.max(
+        1,
+        Math.min(
+          PROMPT_MAX_VISIBLE_ROWS,
+          inputAndTranscriptRows - transcriptRows,
+        ),
+      );
+      const visibleRows = Math.min(naturalRows, viewportRows);
+      promptBox.height = visibleRows + ruleRows;
+      composer.height = visibleRows + ruleRows + footerRows;
+    };
+    input.onContentChange = refreshComposerLayout;
 
     const defaultActivity = (phase: TuiPhase): string | undefined => {
       switch (phase) {
@@ -568,38 +674,43 @@ export async function createTuiScreen(
         steerCount > 0 || followUpCount > 0
           ? ` · steer ${steerCount} · follow-up ${followUpCount}`
           : '';
+      const compact = layoutWidth < 68;
       if (approvalPending) {
-        promptBox.title = ' approval required ';
-        promptBox.bottomTitle = ' y once · a always · n deny · Esc abort ';
-        input.placeholder = 'Approval pending…';
-        if (opts.color) promptBox.borderColor = PALETTE.warning;
+        setPromptPlaceholder('');
+        if (opts.color) {
+          input.placeholderColor = PALETTE.warning;
+          promptBox.borderColor = PALETTE.warning;
+          promptBox.focusedBorderColor = PALETTE.warning;
+        }
+        refreshWorkspace();
+        refreshComposerLayout();
         return;
       }
       if (transientStatus !== undefined) {
-        promptBox.title = ` ${truncateToWidth(transientStatus, 48)} `;
-      } else if (phase !== 'idle') {
-        promptBox.title = ` coda · ${truncateToWidth(activity ?? 'working', 38)} `;
-      } else {
-        promptBox.title = ' coda · ready ';
-      }
-      const compact = layoutWidth < 68;
-      if (phase === 'compacting') {
-        promptBox.bottomTitle = compact
-          ? ' Enter queue · Esc abort '
-          : ` Enter queue · Alt+Enter follow-up · Esc abort${queue} `;
+        setPromptPlaceholder(transientStatus);
+      } else if (phase === 'compacting') {
+        setPromptPlaceholder(
+          compact
+            ? 'Compacting · Enter queue · Esc abort'
+            : `Compacting context · Enter queue · Alt+Enter follow-up · Esc abort${queue}`,
+        );
       } else if (phase === 'running' || phase === 'retrying') {
-        promptBox.bottomTitle = compact
-          ? ' Enter steer · Esc abort '
-          : ` Enter steer · Alt+Enter follow-up · Esc abort${queue} `;
+        const label = activity ?? (phase === 'retrying' ? 'retrying' : 'working');
+        setPromptPlaceholder(
+          compact
+            ? `${label} · Enter steer · Esc abort`
+            : `${label} · Enter steer · Alt+Enter follow-up · Esc abort${queue}`,
+        );
       } else {
-        promptBox.bottomTitle = compact
-          ? ' Enter send · Shift+Enter line '
-          : ' Enter send · Shift+Enter newline ';
+        setPromptPlaceholder('');
       }
-      input.placeholder = 'Ask coda anything…';
       if (opts.color) {
-        promptBox.borderColor = phase === 'idle' ? PALETTE.accent : PALETTE.cyan;
+        input.placeholderColor = PALETTE.muted;
+        promptBox.borderColor = PALETTE.promptBorder;
+        promptBox.focusedBorderColor = PALETTE.promptBorder;
       }
+      refreshWorkspace();
+      refreshComposerLayout();
     };
 
     const addText = (content: string, tone: Tone = 'normal'): TextRenderable => {
@@ -643,7 +754,7 @@ export async function createTuiScreen(
         flexShrink: 0,
         flexDirection: 'column',
         rowGap: 0,
-        ...colored({ backgroundColor: background }),
+        backgroundColor: transparentBackground,
       });
       const label = new Text(renderer, {
         width: '100%',
@@ -675,7 +786,8 @@ export async function createTuiScreen(
         ...(opts.treeSitterClient !== undefined && {
           treeSitterClient: opts.treeSitterClient,
         }),
-        ...colored({ fg: PALETTE.foreground, bg: background }),
+        bg: transparentBackground,
+        fg: terminalForeground,
       });
       box.add(label);
       box.add(reasoning);
@@ -748,7 +860,7 @@ export async function createTuiScreen(
       toolName: string,
       args: unknown,
     ): void => {
-      const safeToolName = sanitizeTerminalText(toolName);
+      const safeToolName = firstLine(sanitizeTerminalText(toolName));
       const rawHeadline = toolHeadline(toolName, args);
       const headline =
         rawHeadline === undefined ? undefined : sanitizeTerminalText(rawHeadline);
@@ -886,7 +998,7 @@ export async function createTuiScreen(
         case 'tool_call_start': {
           const part = event.partial.content[event.contentIndex];
           const name = part?.type === 'tool_call' ? part.name : 'tool';
-          activity = `preparing ${sanitizeTerminalText(name)}`;
+          activity = `preparing ${firstLine(sanitizeTerminalText(name))}`;
           refreshStatus();
           break;
         }
@@ -1040,18 +1152,20 @@ export async function createTuiScreen(
 
     const applyResponsiveLayout = (width: number, height: number): void => {
       layoutWidth = width;
-      const showTips = width >= 78 && height >= 22;
-      const showLogo = width >= 58 && height >= 18;
+      layoutHeight = height;
+      const showHeader = height >= MIN_HEADER_VIEWPORT_ROWS;
+      const showTips = showHeader && width >= 78 && height >= 22;
+      const showLogo = showHeader && width >= 58 && height >= 18;
+      header.visible = showHeader;
       tips.visible = showTips;
       logo.visible = showLogo;
-      header.height = showTips ? 9 : showLogo ? 8 : 4;
+      headerRows = showHeader ? (showTips ? 9 : showLogo ? 8 : 4) : 0;
+      header.height = headerRows;
       brand.width = showTips ? (width < 100 ? 38 : 43) : '100%';
       brandCopy.content = showLogo
         ? 'Welcome back!\n\nA coding agent\nfor your workspace'
         : `coda v${sanitizeTerminalText(opts.version)}\nA focused coding agent`;
       brandCopy.height = showLogo ? 5 : 2;
-      promptBox.height = height < 18 ? 4 : 5;
-      composer.height = promptBox.height + 2;
       modelText.visible = width >= 52;
       refreshStatus();
     };
@@ -1061,8 +1175,6 @@ export async function createTuiScreen(
     };
     renderer.on('resize', onResize);
     applyResponsiveLayout(renderer.width, renderer.height);
-    refreshWorkspace();
-    refreshStatus();
 
     return {
       render,
@@ -1125,7 +1237,7 @@ export async function startTui(
   const openTui = await import('@opentui/core');
   const branch = opts.branch ?? (await detectGitBranch(opts.cwd));
   const interaction = new TuiInteractionState();
-  const background = openTui.RGBA.fromIndex(231, PALETTE.background);
+  const transparentBackground = openTui.RGBA.fromValues(0, 0, 0, 0);
   const renderer = await openTui.createCliRenderer({
     screenMode: 'alternate-screen',
     clearOnShutdown: true,
@@ -1139,15 +1251,15 @@ export async function startTui(
     useMouse: true,
     useKittyKeyboard: {},
     // 0.4.5 的运行时构造器尚未读取该字段；保留它以兼容修复后的版本。
-    ...(opts.color && { backgroundColor: background }),
+    backgroundColor: transparentBackground,
   });
 
   let initializingScreen: TuiScreen | undefined;
   try {
-    // 0.4.5 必须通过 setter 同步 native framebuffer；视图树仍需逐层不透明填充，
-    // ANSI 基础色 15 受主题影响，因此强制使用固定的 xterm cube 231 白色。
-    if (opts.color) renderer.setBackgroundColor(background);
-    renderer.setTerminalTitle(sanitizeTerminalText(`coda · ${opts.model.model}`));
+    // 0.4.5 必须通过 setter 同步 native framebuffer；背景透明与 NO_COLOR 无关。
+    // 视图树也逐层使用 alpha=0，避免任何子组件重新画出不透明色块。
+    renderer.setBackgroundColor(transparentBackground);
+    renderer.setTerminalTitle(sanitizeTerminalTitle(`coda · ${opts.model.model}`));
     initializingScreen = await createTuiScreen(renderer, {
       ...opts,
       branch,

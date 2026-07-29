@@ -2,6 +2,13 @@
 // 固定底部状态、响应式降级与 Enter/Shift+Enter。无需真实 TTY 或网络。
 
 import { afterEach, describe, expect, it } from 'bun:test';
+import {
+  BoxRenderable,
+  type KeyEvent,
+  RGBA,
+  ScrollBoxRenderable,
+  TextareaRenderable,
+} from '@opentui/core';
 import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +31,7 @@ import {
   formatWorkspacePath,
   runTuiController,
   sanitizeTerminalText,
+  sanitizeTerminalTitle,
   TuiInteractionState,
   tuiCanAbort,
   tuiEnterState,
@@ -106,10 +114,37 @@ function textDelta(delta: string): ProviderEvent {
   };
 }
 
+type TestRenderer = Awaited<ReturnType<typeof createTestRenderer>>['renderer'];
+
+function promptRuleIndexes(view: { renderer: TestRenderer }): [number, number] {
+  const prompt = view.renderer.root.findDescendantById('coda-prompt-box');
+  if (
+    !(prompt instanceof BoxRenderable) ||
+    !Array.isArray(prompt.border) ||
+    !prompt.border.includes('top') ||
+    !prompt.border.includes('bottom')
+  ) {
+    throw new Error('prompt box with horizontal rules not found');
+  }
+  return [prompt.screenY, prompt.screenY + prompt.height - 1];
+}
+
+function cursorFrameRow(view: { renderer: TestRenderer }): number {
+  // CliRenderer 对外暴露的是终端的 1-based 光标行；captureCharFrame 是 0-based 行数组。
+  return view.renderer.getCursorState().y - 1;
+}
+
+function frameLines(frame: string): string[] {
+  const lines = frame.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
 async function setup(
   width = 100,
   height = 30,
   onSubmit: () => void = () => {},
+  color = true,
 ): Promise<{
   screen: TuiScreen;
   flush: () => Promise<void>;
@@ -130,7 +165,7 @@ async function setup(
     cwd: '/Users/test/work/coda',
     model: MODEL,
     version: '0.0.1',
-    color: true,
+    color,
     contextLimit: 128_000,
     onSubmit,
     interaction,
@@ -194,7 +229,7 @@ describe('全屏 OpenTUI 布局', () => {
       expect(frame).toContain('coda v0.0.1');
       expect(frame).toContain('▄█▄');
       expect(frame).toContain('Tips for getting started');
-      expect(frame).toContain('Ask coda anything…');
+      expect(frame).not.toContain('Ask coda anything…');
       expect(frame).toContain('/Users/test/work/coda');
       expect(frame).toContain('context 0 / 128k · 0%');
       expect(frame).toContain('openai/gpt-5.2');
@@ -203,41 +238,236 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
-  it('默认主题让整帧不透明，并把主画布与转录空白区渲染为纯白', async () => {
+  it('prompt 使用透明双横线、无侧边/圆角/标题，并显示块光标', async () => {
     const view = await setup();
     try {
+      view.screen.focusInput();
       await view.flush();
-      const lines = view.spans().lines;
-      const allSpans = lines.flatMap((line) => line.spans);
-      expect(allSpans.length).toBeGreaterThan(0);
-      for (const span of allSpans) {
-        expect(span.bg.toInts()[3]).toBe(255);
-      }
+      const frame = view.frame();
+      const lines = frameLines(frame);
+      const [top, bottom] = promptRuleIndexes(view);
 
-      const headerLine = lines[4];
-      expect(headerLine).toBeDefined();
-      for (const span of headerLine?.spans ?? []) {
-        expect(span.bg.toInts().slice(0, 3)).toEqual([250, 250, 250]);
-        expect(span.bg.intent).toBe('indexed');
-        expect(span.bg.slot).toBe(255);
-      }
+      expect(bottom - top).toBe(2);
+      expect(lines[top]?.trim()).toMatch(/^─+$/);
+      expect(lines[bottom]?.trim()).toMatch(/^─+$/);
+      expect(lines.slice(top + 1, bottom).join('')).not.toMatch(/[│╭╮╰╯┌┐└┘]/);
+      expect(frame).not.toContain('coda · ready');
+      expect(frame).not.toContain('Enter send · Shift+Enter newline');
 
-      const transcriptLine = lines[10];
-      expect(transcriptLine).toBeDefined();
-      expect(transcriptLine?.spans.length).toBeGreaterThan(0);
-      for (const span of transcriptLine?.spans ?? []) {
-        expect(span.bg.toInts().slice(0, 3)).toEqual([255, 255, 255]);
-        expect(span.bg.intent).toBe('indexed');
-        expect(span.bg.slot).toBe(231);
-      }
-
-      for (const line of lines.slice(-2)) {
-        for (const span of line.spans) {
-          expect(span.bg.toInts().slice(0, 3)).toEqual([255, 255, 255]);
+      for (const ruleRow of [top, bottom]) {
+        const ruleSpans = view.spans().lines[ruleRow]?.spans.filter((span) =>
+          span.text.includes('─'),
+        );
+        expect(ruleSpans?.length).toBeGreaterThan(0);
+        for (const span of ruleSpans ?? []) {
+          expect(span.fg.toInts()).toEqual([160, 32, 94, 255]);
+          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
         }
       }
+
+      const cursor = view.renderer.getCursorState();
+      expect(cursor).toMatchObject({
+        visible: true,
+        style: 'block',
+        blinking: false,
+      });
+      const input = view.renderer.root.findDescendantById('coda-input');
+      expect(input).toBeInstanceOf(TextareaRenderable);
+      if (!(input instanceof TextareaRenderable)) throw new Error('Textarea not found');
+      expect(input.cursorColor.intent).toBe('default');
     } finally {
       await view.destroy();
+    }
+  });
+
+  it('prompt 默认一行，随显式/软换行增高，并在内容变短或终端变宽时缩回', async () => {
+    const view = await setup(100, 24);
+    try {
+      view.screen.focusInput();
+      await view.flush();
+      expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
+
+      await view.mockInput.typeText('first');
+      view.mockInput.pressEnter({ shift: true });
+      await view.mockInput.typeText('second');
+      await view.flush();
+      expect(view.screen.getInput()).toBe('first\nsecond');
+      expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(3);
+
+      view.screen.clearInput();
+      await view.flush();
+      expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
+
+      const softWrapped =
+        'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi';
+      await view.mockInput.typeText(softWrapped);
+      await view.flush();
+      expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
+      expect(view.frame()).toContain('Tips for getting started');
+      expect(view.frame()).toContain('▄█▄');
+
+      view.resize(54, 24);
+      await view.flush();
+      const narrowFrame = view.frame();
+      const [narrowTop, narrowBottom] = promptRuleIndexes(view);
+      const narrowLines = frameLines(narrowFrame);
+      expect(narrowBottom - narrowTop).toBe(3);
+      expect(narrowBottom).toBe(narrowLines.length - 3);
+      expect(narrowLines[narrowBottom + 1]).toContain('/Users/test/work/coda');
+      expect(narrowLines[narrowBottom + 2]).toContain('context 0 / 128k');
+      expect(narrowFrame).not.toContain('Tips for getting started');
+      expect(narrowFrame).not.toContain('▄█▄');
+
+      view.resize(100, 24);
+      await view.flush();
+      const wideFrame = view.frame();
+      const [wideTop, wideBottom] = promptRuleIndexes(view);
+      const wideLines = frameLines(wideFrame);
+      expect(wideBottom - wideTop).toBe(2);
+      expect(wideBottom).toBe(view.spans().lines.length - 3);
+      expect(wideLines[wideBottom + 1]).toContain('/Users/test/work/coda');
+      expect(wideLines[wideBottom + 2]).toContain('context 0 / 128k');
+      expect(wideFrame).toContain('Tips for getting started');
+      expect(wideFrame).toContain('▄█▄');
+
+      view.screen.println('output remains visible');
+      view.screen.setInput(Array.from({ length: 12 }, (_, index) => `line ${index}`).join('\n'));
+      await view.flush();
+      const cappedFrame = view.frame();
+      const [cappedTop, cappedBottom] = promptRuleIndexes(view);
+      const cappedLines = frameLines(cappedFrame);
+      expect(cappedBottom - cappedTop).toBe(9);
+      expect(cappedBottom).toBe(view.spans().lines.length - 3);
+      expect(cappedLines[cappedBottom + 1]).toContain('/Users/test/work/coda');
+      expect(cappedLines[cappedBottom + 2]).toContain('context 0 / 128k');
+      expect(cappedFrame).toContain('output remains visible');
+      expect(cappedFrame).toContain('line 11');
+      expect(cappedFrame).not.toContain('line 0');
+
+      const input = view.renderer.root.findDescendantById('coda-input');
+      expect(input).toBeInstanceOf(TextareaRenderable);
+      if (!(input instanceof TextareaRenderable)) throw new Error('Textarea not found');
+      expect(input.height).toBe(8);
+      expect(input.scrollY).toBeGreaterThan(0);
+      const cursor = view.renderer.getCursorState();
+      expect(cursor.visible).toBe(true);
+      expect(cursorFrameRow(view)).toBeGreaterThan(cappedTop);
+      expect(cursorFrameRow(view)).toBeLessThan(cappedBottom);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('整棵视图树与动态内容保持 alpha=0，NO_COLOR 也不恢复实色背景', async () => {
+    for (const color of [true, false]) {
+      const view = await setup(100, 50, () => {}, color);
+      try {
+        view.screen.focusInput();
+        view.screen.setInput('terminal foreground');
+        view.screen.render({
+          type: 'message_start',
+          message: user('inspect transparent rendering'),
+        });
+        view.screen.render({ type: 'message_start', message: assistant() });
+        view.screen.render({
+          type: 'message_end',
+          message: assistant({
+            content: [
+              {
+                type: 'text',
+                text:
+                  '# Transparent\n\n> quote\n\n' +
+                  '| key | value |\n| --- | --- |\n| alpha | zero |\n\n' +
+                  '```ts\nconst alpha = 0;\n```',
+              },
+            ],
+          }),
+        });
+        view.screen.render({
+          type: 'approval_request',
+          approvalId: 'approval-transparent',
+          toolCallId: 'call-transparent',
+          description: 'verify transparent background',
+        });
+        await view.flush();
+        await view.resolveHighlights();
+
+        for (const id of [
+          'coda-page',
+          'coda-header',
+          'coda-brand',
+          'coda-logo',
+          'coda-brand-copy',
+          'coda-tips',
+          'coda-tips-title',
+          'coda-tips-body',
+          'coda-transcript',
+          'coda-composer',
+          'coda-prompt-box',
+          'coda-input',
+          'coda-workspace',
+          'coda-runtime-row',
+          'coda-context',
+          'coda-model',
+        ]) {
+          const renderable = view.renderer.root.findDescendantById(id);
+          const transparent =
+            renderable !== undefined && 'backgroundColor' in renderable
+              ? renderable.backgroundColor
+              : renderable !== undefined && 'bg' in renderable
+                ? renderable.bg
+                : undefined;
+          if (!(transparent instanceof RGBA)) {
+            throw new Error(`${id} does not expose a background color`);
+          }
+          expect(transparent.toInts()).toEqual([0, 0, 0, 0]);
+        }
+
+        const transcript = view.renderer.root.findDescendantById('coda-transcript');
+        if (!(transcript instanceof ScrollBoxRenderable)) {
+          throw new Error('transcript ScrollBox not found');
+        }
+        for (const layer of [
+          transcript.wrapper,
+          transcript.viewport,
+          transcript.content,
+        ]) {
+          expect(layer.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
+        }
+
+        const allSpans = view.spans().lines.flatMap((line) => line.spans);
+        expect(allSpans.length).toBeGreaterThan(0);
+        for (const span of allSpans) {
+          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
+        }
+
+        const input = view.renderer.root.findDescendantById('coda-input');
+        if (!(input instanceof TextareaRenderable)) {
+          throw new Error('prompt Textarea not found');
+        }
+        expect(input.textColor.intent).toBe('default');
+        expect(input.cursorColor.intent).toBe('default');
+        const [promptTop, promptBottom] = promptRuleIndexes(view);
+        const inputSpans = view.spans().lines
+          .slice(promptTop + 1, promptBottom)
+          .flatMap((line) => line.spans)
+          .filter((span) => span.text.trim() !== '');
+        expect(inputSpans.some((span) => span.text.includes('terminal foreground'))).toBe(true);
+        for (const span of inputSpans) {
+          expect(span.fg.intent).toBe('default');
+        }
+
+        if (!color) {
+          for (const span of allSpans.filter((candidate) => candidate.text.trim() !== '')) {
+            expect(
+              span.fg.intent,
+              `NO_COLOR span ${JSON.stringify(span.text)} used ${span.fg.toString()}`,
+            ).toBe('default');
+          }
+        }
+      } finally {
+        await view.destroy();
+      }
     }
   });
 
@@ -260,18 +490,52 @@ describe('全屏 OpenTUI 布局', () => {
       await view.flush();
       await view.resolveHighlights();
 
-      const lines = view.frame().split('\n');
+      const lines = frameLines(view.frame());
       const headerBottom = lines.findIndex((line) => line.startsWith('└'));
       const userRow = lines.findIndex((line) => line.trim() === 'you');
       const assistantRow = lines.findIndex((line) => line.includes('I will start at the top'));
-      const promptRow = lines.findIndex((line) => line.includes('coda · ready'));
+      const workspaceRow = lines.findIndex((line) => line.includes('/Users/test/work/coda'));
 
       expect(headerBottom).toBeGreaterThanOrEqual(0);
       expect(userRow).toBeGreaterThan(headerBottom);
       expect(userRow - headerBottom).toBeLessThanOrEqual(3);
       expect(assistantRow).toBeGreaterThan(userRow);
-      expect(assistantRow).toBeLessThan(promptRow);
-      expect(promptRow - assistantRow).toBeGreaterThan(4);
+      expect(assistantRow).toBeLessThan(workspaceRow);
+      expect(workspaceRow - assistantRow).toBeGreaterThan(5);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('手动上滚后动态增高 prompt 不抢回跟尾，向下滚动可回到最新输出', async () => {
+    const view = await setup(80, 20);
+    try {
+      view.screen.focusInput();
+      for (let index = 0; index < 20; index++) {
+        view.screen.println(`row-${String(index).padStart(2, '0')}`);
+      }
+      await view.flush();
+      expect(view.frame()).toContain('row-19');
+
+      view.screen.scrollPage(-1);
+      await view.flush();
+      const scrolledFrame = view.frame();
+      expect(scrolledFrame).toMatch(/row-(?:0\d|1[0-8])/);
+      expect(scrolledFrame).not.toContain('row-19');
+
+      view.screen.setInput('one\ntwo\nthree\nfour');
+      view.screen.println('row-20');
+      await view.flush();
+      const heldFrame = view.frame();
+      expect(heldFrame).toMatch(/row-(?:0\d|1\d)/);
+      expect(heldFrame).not.toContain('row-20');
+
+      for (let index = 0; index < 10; index++) view.screen.scrollPage(1);
+      await view.flush();
+      const latestFrame = view.frame();
+      const [, promptBottom] = promptRuleIndexes(view);
+      expect(latestFrame).toContain('row-20');
+      expect(promptBottom).toBe(view.spans().lines.length - 3);
     } finally {
       await view.destroy();
     }
@@ -304,31 +568,116 @@ describe('全屏 OpenTUI 布局', () => {
       expect(frame).toContain('coda v0.0.1');
       expect(frame).not.toContain('Tips for getting started');
       expect(frame).not.toContain('▄█▄');
-      expect(frame).toContain('Ask coda anything…');
+      const [, promptBottom] = promptRuleIndexes(view);
+      const lines = frameLines(frame);
+      expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
+      expect(promptBottom).toBe(lines.length - 3);
+      expect(lines[promptBottom + 1]).toContain('/Users/test/work/coda');
+      expect(lines[promptBottom + 2]).toContain('context 0 / 128k');
       expect(frame).toContain('context 0 / 128k');
     } finally {
       await view.destroy();
     }
   });
 
-  it('resize 可恢复完整快捷键，且不会覆盖审批键位', async () => {
-    const view = await setup();
+  it('ultra-compact 高度逐级隐藏装饰，光标不越界且审批优先可见', async () => {
+    const longDraft = Array.from({ length: 12 }, (_, index) => `draft-${index}`).join('\n');
+    for (const height of [9, 7, 5, 3, 2, 1]) {
+      const view = await setup(54, height);
+      try {
+        view.screen.setInput(longDraft);
+        view.screen.focusInput();
+        await view.flush();
+        const cursor = view.renderer.getCursorState();
+        expect(cursor.visible).toBe(true);
+        expect(cursor.y).toBeGreaterThanOrEqual(1);
+        expect(cursor.y).toBeLessThanOrEqual(height);
+        expect(view.screen.getInput()).toBe(longDraft);
+        expect(view.frame()).toContain('draft-11');
+        expect(view.frame()).not.toContain('coda v0.0.1');
+        if (height >= 5) {
+          expect(view.frame()).toContain('/Users/test/work/coda');
+          expect(view.frame()).toContain('context 0 / 128k');
+        }
+      } finally {
+        await view.destroy();
+      }
+    }
+
+    const approvalView = await setup(54, 1);
     try {
+      approvalView.screen.focusInput();
+      approvalView.screen.setInput('draft');
+      approvalView.screen.render({
+        type: 'approval_request',
+        approvalId: 'approval-tiny',
+        toolCallId: 'call-tiny',
+        description: 'run command',
+      });
+      await approvalView.flush();
+      const approvalLines = frameLines(approvalView.frame());
+      expect(approvalLines).toHaveLength(1);
+      expect(approvalLines[0]?.trim()).toBe('Approval · y/a/n/Esc');
+      expect(approvalView.renderer.getCursorState().visible).toBe(false);
+      expect(approvalView.screen.getInput()).toBe('draft');
+    } finally {
+      await approvalView.destroy();
+    }
+  });
+
+  it('审批在非空多行 draft 下仍显示持久键位，决议后恢复 workspace 与洋红横线', async () => {
+    const view = await setup(60, 18);
+    try {
+      view.screen.focusInput();
+      view.screen.setInput(
+        Array.from({ length: 8 }, (_, index) => `draft ${index}`).join('\n'),
+      );
       view.screen.render({
         type: 'approval_request',
         approvalId: 'approval-1',
         toolCallId: 'call-1',
         description: 'run bun test',
       });
-      view.resize(54, 18);
       await view.flush();
-      expect(view.frame()).toContain('y once · a always · n deny · Esc abort');
+      const approvalFrame = view.frame();
+      const [approvalTop, approvalBottom] = promptRuleIndexes(view);
+      const approvalLines = frameLines(approvalFrame);
+      expect(approvalFrame).toContain('Approval · y/a/n/Esc');
+      expect(approvalFrame).toContain('run bun test');
+      expect(approvalFrame).toContain('draft 7');
+      expect(approvalFrame).not.toContain('/Users/test/work/coda');
+      expect(approvalLines.at(-2)).toContain('Approval · y/a/n/Esc');
+      expect(approvalLines.at(-1)).toContain('context 0 / 128k');
+      expect(view.renderer.getCursorState().visible).toBe(false);
+      for (const ruleRow of [approvalTop, approvalBottom]) {
+        const ruleSpans = view.spans().lines[ruleRow]?.spans.filter((span) =>
+          span.text.includes('─'),
+        );
+        expect(ruleSpans?.length).toBeGreaterThan(0);
+        for (const span of ruleSpans ?? []) {
+          expect(span.fg.toInts()).toEqual([138, 90, 10, 255]);
+          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
+        }
+      }
 
       view.screen.resolveApproval();
-      view.resize(100, 30);
       await view.flush();
-      expect(view.frame()).toContain('Enter send · Shift+Enter newline');
-      expect(view.frame()).not.toContain('Enter send · Shift+Enter line ');
+      const resolvedFrame = view.frame();
+      const [resolvedTop, resolvedBottom] = promptRuleIndexes(view);
+      expect(resolvedFrame).not.toContain('Approval · y/a/n/Esc');
+      expect(resolvedFrame).toContain('/Users/test/work/coda');
+      expect(view.screen.getInput()).toContain('draft 7');
+      expect(view.renderer.getCursorState().visible).toBe(true);
+      for (const ruleRow of [resolvedTop, resolvedBottom]) {
+        const ruleSpans = view.spans().lines[ruleRow]?.spans.filter((span) =>
+          span.text.includes('─'),
+        );
+        expect(ruleSpans?.length).toBeGreaterThan(0);
+        for (const span of ruleSpans ?? []) {
+          expect(span.fg.toInts()).toEqual([160, 32, 94, 255]);
+          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
+        }
+      }
     } finally {
       await view.destroy();
     }
@@ -403,6 +752,14 @@ describe('TUI 安全渲染与转录恢复', () => {
     expect(clean).toBe('甲\t乙\nred');
     expect(clean).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
     expect(sanitizeTerminalText(clean)).toBe(clean);
+  });
+
+  it('terminal title 额外折叠 tab/newline，不能把模型名写成多行控制输出', () => {
+    const title = sanitizeTerminalTitle(
+      ' coda · model\tvariant\nnext\x1b]0;INJECTED\x07 ',
+    );
+    expect(title).toBe('coda · model variant next');
+    expect(title).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   });
 
   it('所有事件来源进入 Text/Markdown 前都清除终端控制序列', async () => {
@@ -663,19 +1020,19 @@ describe('TUI 交互状态投影', () => {
       view.screen.render({ type: 'error', fatal: false, message: 'retry cancelled by abort' });
       await view.flush();
       expect(view.interaction.phase).toBe('idle');
-      expect(view.frame()).toContain('coda · ready');
+      expect(view.frame()).not.toContain('coda · ready');
 
       view.screen.render({ type: 'compaction_start', reason: 'threshold' });
       await view.flush();
       expect(view.interaction.phase).toBe('compacting');
       expect(tuiEnterState(view.interaction.phase)).toBe('idle');
       expect(tuiCanAbort(view.interaction.phase)).toBe(true);
-      expect(view.frame()).toContain('coda · compacting context');
+      expect(view.frame()).toContain('Compacting context · Enter queue');
 
       view.screen.render({ type: 'compaction_end', ok: false, droppedMessages: 0 });
       await view.flush();
       expect(view.interaction.phase).toBe('idle');
-      expect(view.frame()).toContain('coda · ready');
+      expect(view.frame()).not.toContain('Compacting context · Enter queue');
     } finally {
       await view.destroy();
     }
@@ -699,6 +1056,75 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('真实 PageUp/PageDown 按键滚动转录，消费事件且不夺走输入焦点', async () => {
+    const session = await Session.create({
+      dir: makeTempDir(),
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [] }),
+        model: { ref: MODEL },
+        tools: [],
+        systemPrompt: 'test',
+      },
+    });
+    const view = await setup(80, 20);
+    view.screen.focusInput();
+    const pageKeyEvents: KeyEvent[] = [];
+    view.renderer.keyInput.on('keypress', (key) => {
+      if (key.name === 'pageup' || key.name === 'pagedown') pageKeyEvents.push(key);
+    });
+    const controller = runTuiController(
+      session,
+      undefined,
+      view.screen,
+      view.renderer,
+      {
+        model: MODEL,
+        interaction: view.interaction,
+        installSignalHandlers: false,
+      },
+    );
+
+    view.screen.setInput('draft');
+    for (let index = 0; index < 20; index++) {
+      view.screen.println(`key-row-${String(index).padStart(2, '0')}`);
+    }
+    await view.flush();
+    expect(view.frame()).toContain('key-row-19');
+
+    await view.mockInput.pressKeys(['\x1b[5~']);
+    await view.flush();
+    const scrolledFrame = view.frame();
+    expect(scrolledFrame).toMatch(/key-row-(?:0\d|1[0-8])/);
+    expect(scrolledFrame).not.toContain('key-row-19');
+    expect(view.screen.getInput()).toBe('draft');
+    expect(view.renderer.getCursorState().visible).toBe(true);
+    expect(pageKeyEvents).toHaveLength(1);
+    expect(pageKeyEvents[0]).toMatchObject({
+      name: 'pageup',
+      defaultPrevented: true,
+      propagationStopped: true,
+    });
+
+    view.screen.setInput('one\ntwo\nthree\nfour');
+    view.screen.println('key-row-20');
+    await view.mockInput.pressKeys(Array.from({ length: 10 }, () => '\x1b[6~'));
+    await view.flush();
+    expect(view.frame()).toContain('key-row-20');
+    expect(view.screen.getInput()).toBe('one\ntwo\nthree\nfour');
+    expect(view.renderer.getCursorState().visible).toBe(true);
+    expect(pageKeyEvents).toHaveLength(11);
+    for (const key of pageKeyEvents) {
+      expect(key.defaultPrevented).toBe(true);
+      expect(key.propagationStopped).toBe(true);
+    }
+
+    view.screen.clearInput();
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
   it('审批期间冻结修饰键和 bracketed paste，决议后恢复输入', async () => {
     const session = await Session.create({
       dir: makeTempDir(),
@@ -747,6 +1173,10 @@ describe('TUI 控制器接线', () => {
     });
     await view.flush();
     expect(broker.pendingCount).toBe(1);
+    expect(view.screen.getInput()).toBe('seed');
+    expect(view.frame()).toContain(
+      'Approval required · y once · a always · n deny · Esc abort',
+    );
 
     await view.mockInput.pasteBracketedText('PASTED\nTEXT');
     view.mockInput.pressKey('a', { meta: true });
@@ -944,7 +1374,7 @@ describe('TUI 控制器接线', () => {
     await view.flush();
     expect(streamFn.calls).toHaveLength(1);
     expect(view.interaction.phase).toBe('idle');
-    expect(view.frame()).toContain('coda · ready');
+    expect(view.frame()).not.toContain('aborting…');
 
     await view.resolveHighlights();
     await view.mockInput.typeText('/quit');
