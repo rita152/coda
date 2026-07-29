@@ -68,6 +68,7 @@ type Tone = 'normal' | 'muted' | 'accent' | 'success' | 'warning' | 'danger' | '
 interface Palette {
   border: string;
   promptBorder: string;
+  cursor: string;
   muted: string;
   accent: string;
   success: string;
@@ -79,6 +80,7 @@ interface Palette {
 const PALETTE: Palette = {
   border: '#c9ccd3',
   promptBorder: '#a0205e',
+  cursor: '#c94740',
   muted: '#636873',
   accent: '#c94740',
   success: '#2f7647',
@@ -270,8 +272,10 @@ export async function createTuiScreen(
 
   // 透明背景让终端自身的背景色/透明度透出；前景与语义色仍由 coda 控制。
   const transparentBackground = RGBA.fromValues(0, 0, 0, 0);
-  // 正文和光标跟随终端默认前景，确保透明背景在明暗主题下都可读。
+  // 正文跟随终端默认前景；OpenTUI 0.4.5 的硬件光标路径会丢失 default
+  // intent 并退化为白色 OSC 12，因此光标使用兼顾明暗背景的固定品牌色。
   const terminalForeground = RGBA.defaultForeground();
+  const cursorForeground = RGBA.fromHex(PALETTE.cursor);
   const interaction = opts.interaction ?? new TuiInteractionState();
   let approvalPending = false;
   let submitHandler = opts.onSubmit ?? (() => {});
@@ -471,7 +475,7 @@ export async function createTuiScreen(
       height: '100%',
       placeholder: '',
       wrapMode: 'word',
-      cursorStyle: { style: 'block', blinking: false },
+      cursorStyle: { style: 'line', blinking: true },
       keyBindings: [
         { name: 'enter', action: 'submit' },
         { name: 'return', action: 'submit' },
@@ -485,17 +489,25 @@ export async function createTuiScreen(
       onSubmit: () => {
         submitHandler();
       },
+      onMouseDown() {
+        // 全局 autoFocus 保持关闭，把鼠标聚焦行为明确限定在 prompt。
+        this.focus();
+      },
       backgroundColor: transparentBackground,
       focusedBackgroundColor: transparentBackground,
       textColor: terminalForeground,
       focusedTextColor: terminalForeground,
       placeholderColor: terminalForeground,
-      cursorColor: terminalForeground,
+      cursorColor: cursorForeground,
       ...colored({
         placeholderColor: PALETTE.muted,
       }),
     });
     promptBox.add(input);
+
+    const refreshCursorVisibility = (): void => {
+      input.showCursor = input.visible && !approvalPending;
+    };
 
     const workspaceText = new Text(renderer, {
       id: 'coda-workspace',
@@ -609,7 +621,7 @@ export async function createTuiScreen(
       promptBox.visible = promptVisible;
       input.visible = promptVisible;
       // 审批时 draft 被刻意冻结；隐藏光标，避免误导用户以为仍可编辑。
-      input.showCursor = promptVisible && !approvalPending;
+      refreshCursorVisibility();
 
       const inputAndTranscriptRows = Math.max(
         0,

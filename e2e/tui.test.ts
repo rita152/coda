@@ -163,6 +163,9 @@ test.skipIf(process.platform !== 'darwin')(
       expect(stdout).toContain('\x1b[38;5;125m');
       expect(stdout).toContain('─');
       expect(stdout).not.toMatch(/\x1b\[[0-9;]*48;(?:2|5);/);
+      expect(stdout).toContain('\x1b]12;#c94740\x07');
+      expect(stdout).not.toContain('\x1b]12;#ffffff\x07');
+      expect(stdout).toContain('\x1b[5 q');
       expect(stdout).toContain('\x1b]0;coda · ');
 
       const promptTopMatch = stdout.match(

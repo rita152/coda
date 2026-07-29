@@ -221,13 +221,13 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 
 ### 7.1 OpenTUI TestRenderer(L4 UI)
 
-`src/cli/tui.test.ts` 用 `createTestRenderer({width,height,kittyKeyboard:true})` 构建内存终端，不写真实 stdout。覆盖:
+`src/cli/tui.test.ts` 用 `createTestRenderer({width,height,kittyKeyboard:true,autoFocus:false})` 构建内存终端，不写真实 stdout；`autoFocus` 显式匹配生产配置,避免测试默认值掩盖组件级鼠标聚焦缺陷。覆盖:
 
-1. header 含版本、Unicode 像素 Logo 与 tips；page、header、ScrollBox 四层、动态 Text/Markdown、composer、Textarea 普通/聚焦态和 footer 的背景全部保持 alpha 0。prompt 是两条纯 `─` 洋红横线,中间没有侧边/圆角/title；聚焦输入文字与光标固定使用终端默认前景 intent,光标状态为 visible/block/non-blinking。测试同时渲染 user、Markdown heading/quote/table/code 与 approval,并在 color/`NO_COLOR` 两条路径逐 span 断言背景 `[0,0,0,0]`；`NO_COLOR` 下所有非空 span 的前景 intent 也必须为 default,上下两条 rule 则钉死透明背景及对应语义前景。构建产物还由 `e2e/tui.test.ts` 在不设置 `COLORTERM` 的双 TTY 中检查启动 ANSI 输出必须包含 SGR 49,且不能出现任何 `48;2` / `48;5` 实色背景。
+1. header 含版本、Unicode 像素 Logo 与 tips；page、header、ScrollBox 四层、动态 Text/Markdown、composer、Textarea 普通/聚焦态和 footer 的背景全部保持 alpha 0。prompt 是两条纯 `─` 洋红横线,中间没有侧边/圆角/title；聚焦输入文字使用终端默认前景 intent,硬件光标固定为 `[201,71,64,255]` 且状态为 visible/line/blinking。测试同时渲染 user、Markdown heading/quote/table/code 与 approval,并在 color/`NO_COLOR` 两条路径逐 span 断言背景 `[0,0,0,0]`；`NO_COLOR` 下所有非空 span 的前景 intent 也必须为 default,但保留高对比硬件光标作为焦点提示,上下两条 rule 则钉死透明背景及对应语义前景。构建产物还由 `e2e/tui.test.ts` 在不设置 `COLORTERM` 的双 TTY 中检查启动 ANSI 输出必须包含 SGR 49、OSC 12 `#c94740` 与 blinking-bar DECSCUSR,不能出现白色光标或任何 `48;2` / `48;5` 实色背景。
 2. 短 transcript 的第一条消息紧跟 header,assistant 在 user 下方,二者与 prompt 之间保留空白——直接钉死“从顶部向下增长”；长 transcript 上滚后,动态增高 prompt 和新增输出不得抢回跟尾,PageDown 可回到最新内容。
 3. `usage_update` 使用 `contextTokens`,不误用 cumulative；无 limit 的纯函数测试显示 `limit unknown`。
 4. prompt 空输入默认 1 行；Shift+Enter 显式换行增高,100→54→100 resize 时软换行按 1→2→1 行变化且 tips/Logo 隐藏后恢复。12 行输入封顶 8 行时末行与光标仍可见、Textarea 已内部滚动、窄/宽 footer 都锚定最后两行,transcript 至少保留 1 行真实内容。审批使用非空多行 draft + 60×18 compact 布局,断言持久 footer 键位的倒数第二行锚点、黄色双横线和冻结光标,决议后恢复 workspace、可见光标与洋红双横线。9/7/5/3/2/1 行分别带长 draft 验证 ultra-compact 光标不越界且末行可见,1 行审批只显示键位并隐藏光标。
-5. mock keys 验证常规 Return(作为 Enter)与 Kitty keypad Enter submit、Shift+Enter newline；CJK 与 ZWJ emoji 的程序化赋值后光标位于 buffer 末尾。
+5. mock keys 验证常规 Return(作为 Enter)与 Kitty keypad Enter submit、Shift+Enter newline；CJK 与 ZWJ emoji 的程序化赋值后光标位于 buffer 末尾。mock mouse 先使 Textarea 失焦再点击输入区,验证其自行恢复焦点,且 visible/line/blinking 硬件光标重新落在 prompt 边界和输入列范围内。终端窗口失焦后的空心 inactive cursor 由终端模拟器绘制,不属于 TestRenderer 的 framebuffer 状态。
 6. sanitizer 纯函数注入 CSI/OSC/DCS/C0/C1；live user/assistant/tool/plan/approval/error 路径分别注入 OSC,断言帧中不存在 ESC/BEL。terminal title 额外折叠 tab/newline 并移除 OSC；多 text/reasoning part 在 streaming 与 final 两条路径保持相同分块。
 7. 恢复转录断言 tool call 参数生成原摘要、plan tool result 恢复最新步骤、plan error 可见,且畸形 plan details 回退为普通工具结果。
 8. 以真实 `Session` + faux stream 驱动 TUI controller,通过 mock input 的真实 ANSI PageUp/PageDown 序列验证按键被消费、转录滚动且输入焦点/内容不丢；同时覆盖 retry backoff 的 Enter=steer、Esc=cancel,以及审批时非空 draft 下持久键位先可见、只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。compaction 在本文件用 SessionEvent 投影 + 纯键位决策覆盖；真实摘要 gate、暂存 prompt 与 abort 生命周期由 session 层测试负责,不得把它表述成 controller 集成覆盖。
@@ -237,7 +237,7 @@ Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlightin
 
 ### 7.2 构建产物 e2e(L5)
 
-`e2e/tui.test.ts` 在 macOS 用系统 `/usr/bin/script` 为 **`Bun.build` 构建产物**提供真实双 TTY,显式移除 `COLORTERM` 后启动 faux TUI 并输入 `/quit`。它定位 prompt 顶线,直接断言 native ANSI 输出对透明单元格使用 SGR 49、横线使用 indexed/125 前景,且全程不包含任何 `48;2` / `48;5` 实色背景；同时验证终端标题、退出码和 15 秒进程看门狗。非 macOS 跳过这条平台专属探针,由 TestRenderer 的逐 span 断言继续提供跨平台覆盖。
+`e2e/tui.test.ts` 在 macOS 用系统 `/usr/bin/script` 为 **`Bun.build` 构建产物**提供真实双 TTY,显式移除 `COLORTERM` 后启动 faux TUI 并输入 `/quit`。它定位 prompt 顶线,直接断言 native ANSI 输出对透明单元格使用 SGR 49、横线使用 indexed/125 前景、硬件光标使用 OSC 12 `#c94740` 而非 `#ffffff`、DECSCUSR 为 blinking bar,且全程不能包含任何 `48;2` / `48;5` 实色背景。同时验证终端标题、退出码和 15 秒进程看门狗。`/usr/bin/script` 不是图形终端模拟器,不能验证窗口失焦时的 inactive cursor 外观。非 macOS 跳过这条平台专属探针,由 TestRenderer 的逐 span 断言继续提供跨平台覆盖。
 
 其余 e2e 主要使用 headless 模式(stdin JSON 命令、stdout NDJSON SessionEvent,见 [09](./09-cli.md))验证「内部协议对外暴露」；codex 的 `exec` 模式同思路,机器可驱动的入口让会话行为测试无需 PTY 仿真。
 

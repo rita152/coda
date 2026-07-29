@@ -152,13 +152,20 @@ async function setup(
   spans: Awaited<ReturnType<typeof createTestRenderer>>['captureSpans'];
   resize: (width: number, height: number) => void;
   mockInput: Awaited<ReturnType<typeof createTestRenderer>>['mockInput'];
+  mockMouse: Awaited<ReturnType<typeof createTestRenderer>>['mockMouse'];
   renderer: Awaited<ReturnType<typeof createTestRenderer>>['renderer'];
   interaction: TuiInteractionState;
   resolveHighlights: () => Promise<void>;
   destroyHighlighter: () => Promise<void>;
   destroy: () => Promise<void>;
 }> {
-  const testRenderer = await createTestRenderer({ width, height, kittyKeyboard: true });
+  const testRenderer = await createTestRenderer({
+    width,
+    height,
+    kittyKeyboard: true,
+    // 与生产配置一致；input 必须自行处理鼠标聚焦。
+    autoFocus: false,
+  });
   const treeSitterClient = new MockTreeSitterClient();
   const interaction = new TuiInteractionState();
   const screen = await createTuiScreen(testRenderer.renderer, {
@@ -178,6 +185,7 @@ async function setup(
     spans: testRenderer.captureSpans,
     resize: testRenderer.resize,
     mockInput: testRenderer.mockInput,
+    mockMouse: testRenderer.mockMouse,
     renderer: testRenderer.renderer,
     interaction,
     resolveHighlights: async () => {
@@ -238,7 +246,7 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
-  it('prompt 使用透明双横线、无侧边/圆角/标题，并显示块光标', async () => {
+  it('prompt 使用透明双横线、无侧边/圆角/标题，并显示高对比品牌色竖线光标', async () => {
     const view = await setup();
     try {
       view.screen.focusInput();
@@ -265,16 +273,57 @@ describe('全屏 OpenTUI 布局', () => {
         }
       }
 
-      const cursor = view.renderer.getCursorState();
-      expect(cursor).toMatchObject({
-        visible: true,
-        style: 'block',
-        blinking: false,
-      });
       const input = view.renderer.root.findDescendantById('coda-input');
       expect(input).toBeInstanceOf(TextareaRenderable);
       if (!(input instanceof TextareaRenderable)) throw new Error('Textarea not found');
-      expect(input.cursorColor.intent).toBe('default');
+      expect(input.cursorColor.intent).toBe('rgb');
+      expect(input.cursorColor.toInts()).toEqual([201, 71, 64, 255]);
+      const cursor = view.renderer.getCursorState();
+      expect(cursor).toMatchObject({
+        visible: true,
+        style: 'line',
+        blinking: true,
+      });
+      expect(cursor.color.toInts()).toEqual([201, 71, 64, 255]);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('鼠标点击失焦的 prompt 后重新聚焦并显示闪烁竖线光标', async () => {
+    const view = await setup(80, 24);
+    try {
+      view.screen.setInput('click to focus');
+      view.screen.focusInput();
+      await view.flush();
+      const input = view.renderer.root.findDescendantById('coda-input');
+      expect(input).toBeInstanceOf(TextareaRenderable);
+      if (!(input instanceof TextareaRenderable)) throw new Error('Textarea not found');
+
+      input.blur();
+      await view.flush();
+      expect(input.focused).toBe(false);
+      expect(view.renderer.getCursorState().visible).toBe(false);
+
+      const clickX = input.screenX + 1;
+      const clickY = input.screenY;
+      await view.mockMouse.click(clickX, clickY, 0, { delayMs: 0 });
+      await view.flush();
+
+      expect(input.focused).toBe(true);
+      expect(view.screen.getInput()).toBe('click to focus');
+      const cursor = view.renderer.getCursorState();
+      expect(cursor).toMatchObject({
+        visible: true,
+        style: 'line',
+        blinking: true,
+      });
+      const [top, bottom] = promptRuleIndexes(view);
+      expect(cursorFrameRow(view)).toBeGreaterThan(top);
+      expect(cursorFrameRow(view)).toBeLessThan(bottom);
+      const cursorColumn = cursor.x - 1;
+      expect(cursorColumn).toBeGreaterThanOrEqual(input.screenX);
+      expect(cursorColumn).toBeLessThan(input.screenX + input.width);
     } finally {
       await view.destroy();
     }
@@ -446,7 +495,14 @@ describe('全屏 OpenTUI 布局', () => {
           throw new Error('prompt Textarea not found');
         }
         expect(input.textColor.intent).toBe('default');
-        expect(input.cursorColor.intent).toBe('default');
+        expect(input.cursorColor.intent).toBe('rgb');
+        expect(input.cursorColor.toInts()).toEqual([201, 71, 64, 255]);
+        expect(view.renderer.getCursorState().color.toInts()).toEqual([
+          201,
+          71,
+          64,
+          255,
+        ]);
         const [promptTop, promptBottom] = promptRuleIndexes(view);
         const inputSpans = view.spans().lines
           .slice(promptTop + 1, promptBottom)
