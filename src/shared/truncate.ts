@@ -5,6 +5,11 @@
 
 export const MAX_OUTPUT_LINES = 2000;
 export const MAX_OUTPUT_BYTES = 48 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+
+function utf8Bytes(text: string): number {
+  return UTF8_ENCODER.encode(text).byteLength;
+}
 
 export interface ClipResult {
   text: string;          // 截断后的文本(未截断时即原文)
@@ -33,13 +38,13 @@ export function clipHead(text: string, limits?: ClipLimits): ClipResult {
   const maxLines = limits?.maxLines ?? MAX_OUTPUT_LINES;
   const maxBytes = limits?.maxBytes ?? MAX_OUTPUT_BYTES;
   const lines = splitLines(text);
-  const totalBytes = Buffer.byteLength(text, 'utf8');
+  const totalBytes = utf8Bytes(text);
 
   const kept: string[] = [];
   let bytes = 0;
   for (const line of lines) {
     if (kept.length >= maxLines) break;
-    const lineBytes = Buffer.byteLength(line, 'utf8') + 1; // + '\n'
+    const lineBytes = utf8Bytes(line) + 1; // + '\n'
     if (kept.length > 0 && bytes + lineBytes > maxBytes) break;
     kept.push(line);
     bytes += lineBytes;
@@ -62,14 +67,14 @@ export function clipTail(text: string, limits?: ClipLimits): ClipResult {
   const maxLines = limits?.maxLines ?? MAX_OUTPUT_LINES;
   const maxBytes = limits?.maxBytes ?? MAX_OUTPUT_BYTES;
   const lines = splitLines(text);
-  const totalBytes = Buffer.byteLength(text, 'utf8');
+  const totalBytes = utf8Bytes(text);
 
   const kept: string[] = [];
   let bytes = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (kept.length >= maxLines) break;
     const line = lines[i] as string;
-    const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+    const lineBytes = utf8Bytes(line) + 1;
     if (kept.length > 0 && bytes + lineBytes > maxBytes) break;
     kept.unshift(line);
     bytes += lineBytes;

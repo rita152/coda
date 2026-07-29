@@ -5,11 +5,11 @@
 // 绝不以「拒绝」形态漏给模型;onAbort() 的调用时机必须在 session.abort() 之后(调用方纪律)。
 
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import type { AgentConfig, ApprovalBroker } from '../agent/index.js';
 import { INTERRUPTED_RESULT_TEXT } from '../agent/index.js';
 import type { ToolCallPart } from '../protocol/index.js';
+import { runtimeHomeDir } from '../shared/index.js';
 import type { ToolDefinition } from '../tools/types.js';
 import { analyzeBashCommand } from './bash-analyze.js';
 
@@ -35,7 +35,7 @@ export const DOOM_LOOP_THRESHOLD = 3;
 export const DOOM_LOOP_NOTE = 'This exact call has been attempted 3 times in a row — possible loop.';
 
 export function defaultRulesFile(): string {
-  return path.join(homedir(), '.coda', 'approvals.json');
+  return path.join(runtimeHomeDir(), '.coda', 'approvals.json');
 }
 
 /**
@@ -125,7 +125,7 @@ function extractPathCandidates(command: string): string[] {
 
   // ~ 展开为 home(path.resolve 不认 ~,不展开会把 ~/.zshrc 误判为根内);再剔除丢弃目标
   return raws
-    .map((t) => (t === '~' || t.startsWith('~/') ? path.join(homedir(), t.slice(1)) : t))
+    .map((t) => (t === '~' || t.startsWith('~/') ? path.join(runtimeHomeDir(), t.slice(1)) : t))
     .filter((t) => !DISCARD_TARGETS.has(t));
 }
 

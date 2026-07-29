@@ -1,5 +1,5 @@
 // detectCompat 规则表单测(docs/04 §5、§10 验收:四类 baseURL 各返回预期 profile,覆盖生效)。
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { detectCompat, resolveCompat } from './compat.js';
 
 describe('detectCompat', () => {

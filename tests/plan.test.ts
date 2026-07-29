@@ -7,7 +7,7 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { AgentEvent, PlanStep, ToolResultMessage } from '../src/protocol/index.js';
 import { createFauxStreamFn } from '../src/providers/faux/index.js';
 import { Session } from '../src/session/index.js';

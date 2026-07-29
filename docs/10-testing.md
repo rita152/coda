@@ -2,7 +2,7 @@
 
 # 10 测试策略(Testing)
 
-本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、headless e2e 与 CI 建议。测试框架统一用 vitest。
+本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。
 
 ## 1. 测试哲学
 
@@ -28,9 +28,9 @@ flowchart TB
 |---|---|---|---|
 | L1 protocol | `src/protocol/*.test.ts` | 无(零运行时依赖是该目录的架构约束) | 毫秒级 |
 | L2 adapter | `src/providers/openai-chat/*.test.ts` + `__fixtures__/` | fixture 文件 | 毫秒级 |
-| L3 tools | `src/tools/*.test.ts` | tmpdir、rg 二进制、child_process | 秒级 |
+| L3 tools | `src/tools/*.test.ts` | tmpdir、rg 二进制、`Bun.spawn` | 秒级 |
 | L4 loop | `src/agent/*.test.ts`、`src/session/*.test.ts` | faux provider | 毫秒级 |
-| L5 e2e | `e2e/*.test.ts`(独立 vitest project) | tsup 构建产物 | 数秒 |
+| L5 e2e | `e2e/*.test.ts`(`bun run test:e2e`) | `Bun.build` 构建产物 | 数秒 |
 
 L1 要点(不展开):`EventStream` 的 push/end/result 语义(end 后 push 被忽略并产生开发模式警告(console.warn)、迭代器收尾、result 在 end 前 pending)、单消费者迭代顺序、`partial` 快照与 delta 累积一致性的属性测试(随机事件序列折叠后等于 done 消息——对应 opencode `LLMResponse.reduce` 的 reducer 思路)。
 
@@ -161,7 +161,7 @@ fixture 之外的两个错误路径用单测直接构造(无法录成 chunk):SDK
 6. **length + toolCalls 不执行**:faux turn stopReason 'length' 带 truncatedRaw → 断言工具 execute 从未被调用(spy)、全批合成错误结果回喂、loop 继续。
 7. **校验失败回喂不终止**:faux 发未知工具名 / 非法参数的 tool_call → 断言合成 isError 结果内容含「可用工具列表 / 请修正参数」文案且下一 turn 照常发起(opencode 的 `invalid` 工具与「请按 schema 重写输入」文案是该行为的出处)。
 8. **parallel 与 sequential**:两个 gate 工具并行批次,断言并发执行、结果按源顺序回填;批内含 `executionMode:'sequential'` 工具(bash)时整批顺序。
-9. **retry / compaction(M7,session 层)**:faux turn1 `error{ details: { kind:'http', status:500, retryable:true } }`、turn2 成功 → vitest fake timers 断言退避时长、`agent_end.willRetry === true`、`retry_scheduled` 事件、`calls[1]` 与 `calls[0]` 出站一致(失败消息被过滤);overflow kind → 断言走 compaction 而非退避。compaction 用「faux usage 报高 input」触发阈值,断言 shouldStopAfterTurn 停跑、摘要请求(也是一次 faux call)、续跑后出站消息数骤减且首条为 synthetic summary。
+9. **retry / compaction(M7,session 层)**:faux turn1 `error{ details: { kind:'http', status:500,retryable:true } }`、turn2 成功 → 通过 `RetryOptions.sleep` 注入可控 gate,由测试观察 `delayMs` 后主动 resolve,断言退避时长、`agent_end.willRetry === true`、`retry_scheduled` 事件、`calls[1]` 与 `calls[0]` 出站一致(失败消息被过滤);overflow kind → 断言走 compaction 而非退避。不能依赖测试运行器推进真实 timer——Bun 1.3.14 的 fake timer 不等价覆盖这些异步退避语义。compaction 用「faux usage 报高 input」触发阈值,断言 shouldStopAfterTurn 停跑、摘要请求(也是一次 faux call)、续跑后出站消息数骤减且首条为 synthetic summary。
 
 Session 持久化集成测试同层:真实 tmpdir 下 create → 跑脚本 → 直接丢弃 Session 对象(模拟 kill)→ resume → 断言转录/usage/compaction 状态复原;尾行截断文件的恢复(手工 truncate 文件尾)。
 
@@ -215,12 +215,12 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 
 ## 7. e2e(L5):headless --json 驱动完整会话
 
-headless 模式(stdin JSON 命令、stdout NDJSON AgentEvent,见 [09](./09-cli.md))本身就是「内部协议对外暴露」的验证,e2e 直接以它为接口驱动 **tsup 构建产物**——codex 的 `exec` 模式同思路,机器可驱动的入口让 e2e 不需要 PTY 仿真。
+headless 模式(stdin JSON 命令、stdout NDJSON AgentEvent,见 [09](./09-cli.md))本身就是「内部协议对外暴露」的验证,e2e 直接以它为接口驱动 **`Bun.build` 构建产物**——codex 的 `exec` 模式同思路,机器可驱动的入口让 e2e 不需要 PTY 仿真。
 
 ```
 harness:
-  child = spawn('node', ['dist/coda.js', '--json', '--provider', 'faux',
-                         '--faux-script', 'e2e/scripts/<case>.json', '--cwd', tmpdir])
+  child = Bun.spawn(['bun', 'dist/main.js', '--json', '--provider', 'faux',
+                     '--faux-script', 'e2e/scripts/<case>.json', '--cwd', tmpdir])
   写 stdin: {"type":"prompt","text":"..."}\n
   逐行读 stdout NDJSON → 事件断言(带 30s 看门狗)
 ```
@@ -235,12 +235,12 @@ harness:
 
 ## 8. CI 建议
 
-- **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × node: [20, 22]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面。
-- **步骤**:`npm ci` → lint → `tsc --noEmit` → vitest(L1–L4)→ `tsup` 构建 → e2e(L5)。总预算 < 5 分钟,L1–L4 < 60 秒。
+- **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 的平台 optional dependency。
+- **步骤**:`bun install --frozen-lockfile` → `bun run lint` → `bun run typecheck` → `bun run test`。测试编排器依次运行 L1–L4、`Bun.build`、L5，因而在无 `dist/` 的干净检出中也自包含；`bun run test:unit` 只跑 L1–L4，`bun run test:e2e` 会先重建再跑 L5。编排器和 e2e harness 都显式净化继承环境中的 API key、base URL、token 与常见凭证，以 `--no-env-file` 启动子 Bun，并固定 `NODE_ENV=test`；每个 e2e 子进程还使用临时 HOME，不能读取或清理用户的真实 Coda 配置与数据。统一交付入口为 `bun run check`,总预算 < 5 分钟,L1–L4 < 60 秒。
 - **边界规则自检**:lint 步骤跑 `import/no-restricted-paths`(`openai` 只准出现在 `src/providers/openai-chat/`);另加一个「守卫的守卫」测试——程序化调用 ESLint 检查一段违规 import 片段,断言规则确实报错。opencode V1 的 `tools: Record<string, ai.Tool>` 类型泄漏说明:边界靠自觉必失守,必须机械强制且强制本身要有测试。
 - **无密钥**:CI 环境不配置任何 API key;`record-fixture.ts` 只在开发者本机手动跑。可选:manual-dispatch 的 nightly workflow 用 secret 对真实 API 做一次冒烟(basic-text + tool call),失败只告警不 block。
 - **flake 政策**:只有 §7 用例 3 允许 `retry: 1`;其余任何测试出现 flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
-- **覆盖率**:v8 provider;对 `src/protocol`、`src/agent`、`src/providers/openai-chat` 设行覆盖阈值 90%,`src/cli` 不设(渲染逻辑靠 e2e 冒烟)。
+- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent`、`src/providers/openai-chat` 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设阈值(渲染逻辑靠 e2e 冒烟)。
 - **确定性守则**(写进 CONTRIBUTING):测试内禁用裸 `setTimeout` 等待(用 gate 或事件等待);id/timestamp 经注入的 idgen/clock 或快照归一化;快照只对「事件 type 序列」做,不对含时间戳的完整对象做。
 
 ## 9. 验收清单
@@ -251,7 +251,7 @@ harness:
 - [ ] M4:§5 用例 1–8 全绿,steering/follow-up/abort/transform 的断言全部基于 `calls` 与事件序列,无一处依赖真实时间。
 - [ ] M5:session 持久化集成测试(kill/resume/尾行截断)与 e2e 用例 1–5 全绿。
 - [ ] M7:§5 用例 9(retry/compaction)全绿。
-- [ ] CI:双 OS × 双 Node 矩阵稳定通过,总时长 < 5 分钟;边界规则自检在位。
+- [ ] CI:双 OS × Bun 1.3.14 矩阵稳定通过,总时长 < 5 分钟;边界规则自检在位。
 
 ## 相关文档
 

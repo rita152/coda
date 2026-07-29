@@ -4,7 +4,7 @@
 // 失败语义:throw 即失败(§1.1),错误文案面向模型、告知下一步动作。
 
 import type { Stats } from 'node:fs';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { z } from 'zod';
@@ -279,7 +279,9 @@ function countNewlines(s: string): number {
 
 // ---- 工具本体 ----
 
-const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
+const UTF8_DECODER = new TextDecoder();
+const UTF8_ENCODER = new TextEncoder();
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new Error(MSG_ABORTED);
@@ -343,7 +345,7 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
       try {
         st = await stat(absPath);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        if ((err as { code?: string }).code === 'ENOENT') {
           throw new Error(`File not found: ${args.path}. Use the write tool to create a new file.`);
         }
         throw err;
@@ -355,13 +357,13 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
       const fresh = ctx.fileTracker.assertFresh(absPath, st.mtimeMs);
       if (!fresh.ok) throw new Error(fresh.reason === 'never_read' ? MSG_NEVER_READ : MSG_STALE);
 
-      const buf = await readFile(absPath);
+      const buf = await Bun.file(absPath).bytes();
       throwIfAborted(ctx.signal);
 
       // BOM/CRLF 三步之一:剥 BOM + CRLF→LF,匹配替换全在 LF 空间进行;
       // 同时记录 CRLF 位置,写回时把 work 区间映射回 raw 区间(混合行尾安全)
       const hadBom = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
-      const raw = buf.toString('utf8', hadBom ? 3 : 0);
+      const raw = UTF8_DECODER.decode(buf.subarray(hadBom ? 3 : 0));
       const { work, crlfNewlines } = buildWorkSpace(raw);
 
       // 多 edit 语义:所有 oldText 对原始内容匹配 → 重叠报错 → 按 offset 逆序应用;
@@ -398,11 +400,10 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
           text +
           patched.slice(workToRawOffset(r.end, crlfNewlines));
       }
-      const outBuf = hadBom
-        ? Buffer.concat([BOM, Buffer.from(patched, 'utf8')])
-        : Buffer.from(patched, 'utf8');
+      const encoded = UTF8_ENCODER.encode(patched);
+      const outBuf = hadBom ? concatBytes(BOM, encoded) : encoded;
       throwIfAborted(ctx.signal);
-      await writeFile(absPath, outBuf);
+      await Bun.write(absPath, outBuf);
 
       // 成功后刷新登记:自己的写不算外部修改
       const st2 = await stat(absPath);
@@ -418,3 +419,10 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
     });
   },
 };
+
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const out = new Uint8Array(left.length + right.length);
+  out.set(left);
+  out.set(right, left.length);
+  return out;
+}

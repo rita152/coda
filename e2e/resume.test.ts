@@ -9,7 +9,7 @@
 
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, beforeAll, expect, test } from 'vitest';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { CodaProc } from './harness.js';
 import { CASE_TIMEOUT_MS, msgRole, msgText, readJsonl, requireDist, startCoda } from './harness.js';
 
@@ -26,7 +26,7 @@ function track(p: CodaProc): CodaProc {
   return p;
 }
 
-test('case 5: resume — session 2 replays session 1 transcript (JSONL prefix + seeded usage)', { timeout: CASE_TIMEOUT_MS }, async () => {
+test('case 5: resume — session 2 replays session 1 transcript (JSONL prefix + seeded usage)', async () => {
   // ---- 会话 1:一问一答后 shutdown ----
   const s1 = track(
     startCoda({
@@ -103,4 +103,4 @@ test('case 5: resume — session 2 replays session 1 transcript (JSONL prefix + 
   expect(msgText(aEnd)).toBe('answer two');
   expect(s1.parseErrors).toEqual([]);
   expect(s2.parseErrors).toEqual([]);
-});
+}, { timeout: CASE_TIMEOUT_MS });

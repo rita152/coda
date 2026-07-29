@@ -7,7 +7,7 @@
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 import { ApprovalBroker } from '../agent/index.js';
 import type { AgentEvent, ToolCallPart } from '../protocol/index.js';

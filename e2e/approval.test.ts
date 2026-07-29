@@ -7,7 +7,7 @@
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeAll, expect, test } from 'vitest';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { CodaProc } from './harness.js';
 import {
   assertSubsequence,
@@ -45,7 +45,7 @@ function freshHome(): { HOME: string } {
   return { HOME: mkdtempSync(path.join(tmpdir(), 'coda-approval-home-')) };
 }
 
-test('deny — isError "User denied" 回喂,任务继续产出替代 turn(引导不是终止)', T, async () => {
+test('deny — isError "User denied" 回喂,任务继续产出替代 turn(引导不是终止)', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -99,9 +99,9 @@ test('deny — isError "User denied" 回喂,任务继续产出替代 turn(引导
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('allow_once — 放行执行,输出回喂;不记忆(同类调用再次弹审批)', T, async () => {
+test('allow_once — 放行执行,输出回喂;不记忆(同类调用再次弹审批)', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -138,9 +138,9 @@ test('allow_once — 放行执行,输出回喂;不记忆(同类调用再次弹�
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('allow_always — 记忆 pattern,同前缀命令不再弹审批', T, async () => {
+test('allow_always — 记忆 pattern,同前缀命令不再弹审批', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -172,9 +172,9 @@ test('allow_always — 记忆 pattern,同前缀命令不再弹审批', T, async 
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('approval 决议 abort — 结果是中断形态而非拒绝形态(R7),run 以 aborted 收尾', T, async () => {
+test('approval 决议 abort — 结果是中断形态而非拒绝形态(R7),run 以 aborted 收尾', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -202,9 +202,9 @@ test('approval 决议 abort — 结果是中断形态而非拒绝形态(R7),run 
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('审批悬挂中收到 abort 命令 — session.abort 先行、pending 以中断形态决议,不挂死', T, async () => {
+test('审批悬挂中收到 abort 命令 — session.abort 先行、pending 以中断形态决议,不挂死', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -231,9 +231,9 @@ test('审批悬挂中收到 abort 命令 — session.abort 先行、pending 以�
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('默认(不带 flag)= allow:不产生 approval_request,工具直接执行;approval 命令报不可用', T, async () => {
+test('默认(不带 flag)= allow:不产生 approval_request,工具直接执行;approval 命令报不可用', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -264,9 +264,9 @@ test('默认(不带 flag)= allow:不产生 approval_request,工具直接执行;a
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('审批悬挂中收到 shutdown — pending 决议后落盘退出,不挂死(exit 0)', T, async () => {
+test('审批悬挂中收到 shutdown — pending 决议后落盘退出,不挂死(exit 0)', async () => {
   const proc = track(
     startCoda({
       extraArgs: INTERACTIVE,
@@ -285,9 +285,9 @@ test('审批悬挂中收到 shutdown — pending 决议后落盘退出,不挂死
   expect(await proc.waitForExit()).toBe(0); // 挂死即看门狗失败——这是 waitForIdle 不悬挂的直接证明
   expect(existsSync(path.join(proc.cwd, 'shutdown-marker.txt'))).toBe(false);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('--approval-mode deny — 静态拦截 edit/execute(无 approval_request),read 直通,任务继续', T, async () => {
+test('--approval-mode deny — 静态拦截 edit/execute(无 approval_request),read 直通,任务继续', async () => {
   const proc = track(
     startCoda({
       extraArgs: ['--approval-mode', 'deny'],
@@ -324,4 +324,4 @@ test('--approval-mode deny — 静态拦截 edit/execute(无 approval_request),r
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);

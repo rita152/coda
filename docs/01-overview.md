@@ -96,7 +96,7 @@ $ coda
 | D15 | bash 每次 spawn 新进程(detached 进程组 + killProcessTree),v1 无持久 shell | 持久 shell 的状态泄漏与清理复杂度远超收益;`workdir` 参数替代 cd | 四个参考项目全部如此;codex 式交互长任务留作 v2 |
 | D16 | 单线程单主循环、扁平消息列表;v1 无多 agent | 简单性是可调试性的来源;子 agent 未来可作为一个工具补入,不影响核心 | Claude Code 单主循环佐证;pi-mono AgentSession 单类 3300 行的职责失控反例 |
 | D17 | session = JSONL 追加(一行一条 AgentMessage),恢复 = 重放 | append-only 天然崩溃安全;与协议消息模型同构,无需第二套存储 schema | opencode Part 独立存储的简化版;codex 可序列化边界的精神延续 |
-| D18 | CLI v1 用 Node readline + ANSI 自绘,不引 TUI 框架;headless `--json` 吐 NDJSON AgentEvent | TUI 框架是重依赖且与流式渲染模型强耦合;headless 模式即「内部协议对外暴露」的持续验证器 | codex 的 submit/next_event 可序列化边界;pi-mono 事件监听 await 串行拖慢 loop 的教训 |
+| D18 | CLI v1 运行于 Bun 1.3.14,用 readline/raw TTY compatibility 边界 + ANSI 自绘,不引 TUI 框架;headless `--json` 吐 NDJSON AgentEvent | TUI 框架是重依赖且与流式渲染模型强耦合;Bun 暂无覆盖现有 keypress/raw TTY 语义的等价高层接口;headless 模式即「内部协议对外暴露」的持续验证器 | codex 的 submit/next_event 可序列化边界;pi-mono 事件监听 await 串行拖慢 loop 的教训 |
 | D19 | Usage 口径 inclusive:`input` 含 cacheRead/cacheWrite,`output` 含 reasoning;换算由各 adapter 完成 | 消费方永不做减法;跨 provider 口径统一收敛在一处 | opencode 从第一天定双轨口径的经验(nonCached+cacheRead+cacheWrite=input 恒等式) |
 | D20 | `stopReason === 'length'` 且有 toolCall 时,全批合成错误结果、一律不执行 | 截断的 arguments 可能是恰好通过 schema 校验的非法参数,执行等于按脏数据办事 | openai-node:length 时 arguments 禁止盲目 parse;pi-mono 同款分支 |
 
@@ -168,25 +168,29 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 
 | 选型 | 版本/形态 | 理由 |
 |---|---|---|
-| TypeScript | 5.x,strict 全开 | discriminated union 是整套协议(ProviderEvent / AgentEvent / StopReason)的载体;strict 下的 narrowing 即文档 |
-| Node.js | ≥ 20 | 原生 fetch / AbortSignal / AbortController 稳定;`openai` v6 的运行时基线 |
-| 模块格式 | ESM | 生态方向;tsup 需要时可补 CJS 产物,不反向妥协 |
+| TypeScript | 6.x,strict 全开 | discriminated union 是整套协议(ProviderEvent / AgentEvent / StopReason)的载体;strict 下的 narrowing 即文档 |
+| Bun | 1.3.14 | 项目唯一运行时与包管理器;原生 TypeScript、fetch、Web Streams、AbortSignal、测试与构建工具链统一 |
+| 模块格式 | ESM | 生态方向;`Bun.build` 直接产出 Bun-targeted ESM,不反向补 CJS |
 | `openai` | ^6(仅 `src/providers/openai-chat/` 内) | Chat Completions 类型自 v5 起稳定,v6 的 breaking change 集中在 Responses API,不影响 CC adapter;复用其 SSE 解析、错误分类与网络层重试(`maxRetries` 交给 SDK 默认,整轮重发策略在 session 层) |
 | zod | v4 | 工具参数的单一事实源:运行时校验 + `z.toJSONSchema()` 原生生成 JSON Schema,免去 zod-to-json-schema 桥接依赖;OpenAI strict:true 的 schema 子集约束在此层保证 |
-| vitest | 最新 | ESM 原生、fixture 回放友好、watch 快;测试策略重度依赖异步迭代器断言 |
-| tsup | 最新 | 零配置产出 lib + bin,避免手写 rollup 配置 |
+| `bun:test` | 1.3.14 内置 | 与运行时同版本、fixture 回放与异步迭代器断言无需额外测试运行器 |
+| `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
 | ripgrep | `@vscode/ripgrep` | 安装期自带平台二进制,免自实现下载逻辑;grep 工具直接 spawn 它(D11) |
 | ESLint | flat config + `import/no-restricted-paths` | D1 决策的机械化执行者:依赖方向违规 = CI 红灯 |
-| CLI 渲染 | Node readline + ANSI 转义自绘 | 见 D18;不引 Ink 等 TUI 框架 |
+| CLI 渲染 | Bun 运行时 + readline/raw TTY compatibility + ANSI 转义自绘 | 见 D18;不引 Ink 等 TUI 框架 |
 
 目录结构与依赖方向的完整规则(`protocol` ← 所有人;`agent` 只依赖 `protocol`;等等)是 [02 架构与分层](./02-architecture.md) 的主题,此处不重复。
+
+### Bun-native compatibility 边界
+
+项目命令、依赖安装、测试、构建与进程启动统一使用 Bun 1.3.14；普通文件内容 I/O、哈希、进程与流默认使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Bun 官方暂未提供覆盖现有语义的等价接口时，允许以下受控 compatibility 边界：`node:fs` / `node:os` 用于目录、元数据、临时目录、符号链接，以及要求同步顺序或耐久性的配置/会话/审批 append、fsync、truncate 与落盘操作；路径处理使用 `node:path`；交互输入保留 readline/raw TTY；工作目录、TTY 探测、进程退出、信号与 POSIX 进程组收尾保留 `process` compatibility API。除此之外不得新增 Node 专属依赖。这里的 “Bun-native” 指 Bun 是唯一要求安装的运行时，不表示代码必须做到零 Node API。
 
 同样重要的是**明确不引入的依赖**,每条都对应一次别人踩过的坑:
 
 - **Vercel AI SDK(运行时依赖)**:只当参考实现读,不 import——opencode V1 的 1832 行返工是直接反例;
 - **zod-to-json-schema**:zod v4 原生 `z.toJSONSchema()` 已覆盖,少一个随 zod 大版本漂移的桥接件;
 - **Ink / React 系 TUI**:渲染模型与 AgentEvent 流式订阅不匹配,且拖入整个 React 依赖树(D18);
-- **execa / shelljs 类包装**:bash 工具需要 detached 进程组与 killProcessTree 的精确控制,原生 `child_process.spawn` 反而更直接;
+- **execa / shelljs 类包装**:bash 工具由 `Bun.spawn` 建 detached 进程组并精确控制 killProcessTree；仅信号/PGID 收尾落在上述 compatibility 边界;
 - **自研 SSE 解析**:`openai` 包的流解析与错误分类已经过实战,adapter 站在它上面做事件翻译即可(D8 只是不用它的高层 helper,不是不用它的传输层)。
 
 ## 6. 从参考项目「取」与「不取」
@@ -240,7 +244,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 - [ ] 全部 loop / steering / 工具测试不依赖网络(faux provider + fixture 回放)。
 - [ ] 错误模型闭环:kill 掉网络 / 塞入 in-band error fixture / 任意时刻 abort,agent 进程不崩溃,转录中出现对应 stopReason 的 AssistantMessage,且 `continue()` 可恢复。
 - [ ] `stopReason === 'length'` 且含 toolCall 的响应,批内工具零执行、全部收到合成错误结果(D20 的可观测验证)。
-- [ ] 发布形态:`npm i -g coda`(或 `npx coda`)后 `coda` 可直接启动 REPL;tsup 产物含 bin,`engines.node >= 20`。
+- [ ] 发布形态:`bun add -g coda`(或 `bunx coda`)后 `coda` 可直接启动 REPL;`Bun.build` 产物含 Bun shebang 的 bin,运行时基线固定为 Bun 1.3.14。
 
 ## 相关文档
 

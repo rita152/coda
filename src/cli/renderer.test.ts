@@ -2,7 +2,7 @@
 // plain 模式断言关键内容(文本 delta 拼接、工具头、steering 回显、aborted 标记、徽标文案、
 // 零 ANSI);ANSI 模式断言不炸 + 含清区序列 \x1b[<n>F\x1b[J 与 bracketed paste 开关。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type {
   AgentMessage,
   AssistantMessage,
@@ -26,10 +26,11 @@ import type { Renderer } from './renderer.js';
 class FakeOut {
   chunks: string[] = [];
   columns = 80;
-  isTTY = true;
-  write(s: string): boolean {
+  enqueue(s: string): void {
     this.chunks.push(s);
-    return true;
+  }
+  drain(): Promise<void> {
+    return Promise.resolve();
   }
   get text(): string {
     return this.chunks.join('');
@@ -38,13 +39,13 @@ class FakeOut {
 
 function makePlain(): { out: FakeOut; r: Renderer } {
   const out = new FakeOut();
-  const r = createRenderer(out as unknown as NodeJS.WriteStream, { color: false, interactive: false });
+  const r = createRenderer(out, { color: false, interactive: false });
   return { out, r };
 }
 
 function makeAnsi(): { out: FakeOut; r: Renderer } {
   const out = new FakeOut();
-  const r = createRenderer(out as unknown as NodeJS.WriteStream, { color: true, interactive: true });
+  const r = createRenderer(out, { color: true, interactive: true });
   return { out, r };
 }
 
@@ -427,7 +428,7 @@ describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {
 describe('interactive 与 color 解耦(NO_COLOR 只禁 SGR,不禁光标控制)', () => {
   it('interactive+无color:动态区仍用 \\x1b[F/\\x1b[J 重绘、输入行可见,零 SGR 着色', () => {
     const out = new FakeOut();
-    const r = createRenderer(out as unknown as NodeJS.WriteStream, { color: false, interactive: true });
+    const r = createRenderer(out, { color: false, interactive: true });
     r.mount?.();
     r.setInputLine?.('hello world');
     r.render({ type: 'agent_start', reason: 'prompt' });
@@ -443,7 +444,7 @@ describe('interactive 与 color 解耦(NO_COLOR 只禁 SGR,不禁光标控制)',
 
   it('非交互+有color(-p 于 TTY):plain 追加带色,无光标控制', () => {
     const out = new FakeOut();
-    const r = createRenderer(out as unknown as NodeJS.WriteStream, { color: true, interactive: false });
+    const r = createRenderer(out, { color: true, interactive: false });
     r.render({ type: 'message_start', message: am() });
     r.render({
       type: 'message_update',

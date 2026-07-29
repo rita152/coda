@@ -3,9 +3,8 @@
 // 流式逐行读取并同时计数行与字节,命中字节上限即中断上游文件流,
 // 不整读大文件进内存(opencode 做法)。>20MB 直接拒读(gemini-cli 保险)。
 
-import { closeSync, createReadStream, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import { MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES } from '../shared/index.js';
 import type { ToolDefinition } from './types.js';
@@ -29,6 +28,8 @@ const MAX_LINE_CHARS = 2000;                 // 单行字符上限(docs/07 §2.1
 const MAX_FILE_BYTES = 20 * 1024 * 1024;     // gemini-cli 的 20MB 文件上限保险
 const SAMPLE_BYTES = 4096;                   // 二进制采样窗口
 const NON_PRINTABLE_RATIO = 0.3;             // 不可打印占比阈值
+const UTF8_ENCODER = new TextEncoder();
+const ABORTED_MESSAGE = 'User aborted the read operation.';
 
 // 图片走 ImagePart 返回,不算二进制拒读(docs/07 §2.1)
 const IMAGE_MIME: Record<string, string> = {
@@ -52,21 +53,44 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 /** 4KB 采样:含 NUL 即二进制;控制字符占比 > 30% 即二进制(≥0x80 视为 UTF-8 多字节,不算)。 */
-function sampleLooksBinary(absPath: string): boolean {
-  const fd = openSync(absPath, 'r');
+async function sampleLooksBinary(absPath: string): Promise<boolean> {
+  const buf = new Uint8Array(await Bun.file(absPath).slice(0, SAMPLE_BYTES).arrayBuffer());
+  if (buf.length === 0) return false;
+  let nonPrintable = 0;
+  for (const b of buf) {
+    if (b === 0) return true;
+    if ((b < 32 && b !== 9 && b !== 10 && b !== 13) || b === 127) nonPrintable++;
+  }
+  return nonPrintable / buf.length > NON_PRINTABLE_RATIO;
+}
+
+/** Bun.file Web stream → readline 等价的物理行;提前 break 时取消上游读取。 */
+async function* streamLines(file: Bun.BunFile): AsyncGenerator<string> {
+  const reader = file.stream().getReader();
+  const decoder = new TextDecoder();
+  let pending = '';
+  let complete = false;
   try {
-    const buf = Buffer.alloc(SAMPLE_BYTES);
-    const n = readSync(fd, buf, 0, SAMPLE_BYTES, 0);
-    if (n === 0) return false;
-    let nonPrintable = 0;
-    for (let i = 0; i < n; i++) {
-      const b = buf[i] as number;
-      if (b === 0) return true;
-      if ((b < 32 && b !== 9 && b !== 10 && b !== 13) || b === 127) nonPrintable++;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        complete = true;
+        break;
+      }
+      pending += decoder.decode(value, { stream: true });
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        const raw = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        yield raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+        newline = pending.indexOf('\n');
+      }
     }
-    return nonPrintable / n > NON_PRINTABLE_RATIO;
+    pending += decoder.decode();
+    if (pending.length > 0) yield pending.endsWith('\r') ? pending.slice(0, -1) : pending;
   } finally {
-    closeSync(fd);
+    if (!complete) await reader.cancel();
+    reader.releaseLock();
   }
 }
 
@@ -77,6 +101,10 @@ function clipLongLine(raw: string): string {
   const code = raw.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--; // 末位是高位代理:整个字符留到截断线外
   return `${raw.slice(0, end)}...`;
+}
+
+function assertNotAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new Error(ABORTED_MESSAGE);
 }
 
 /** 同目录下与 basename 互为子串(不区分大小写)的最多 3 个候选,展示为相对 cwd 的路径。 */
@@ -120,12 +148,13 @@ export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
 
   async execute({ args }, ctx) {
     const resolved = path.resolve(ctx.cwd, args.path);
+    assertNotAborted(ctx.signal);
 
     let stat;
     try {
       stat = statSync(resolved);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if ((err as { code?: string }).code === 'ENOENT') {
         const candidates = findSimilarNames(resolved, ctx.cwd);
         let msg = `File not found: ${args.path}`;
         if (candidates.length > 0) {
@@ -151,7 +180,8 @@ export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
     const ext = path.extname(resolved).toLowerCase();
     const imageMime = IMAGE_MIME[ext];
     if (imageMime !== undefined) {
-      const data = readFileSync(resolved).toString('base64');
+      const data = (await Bun.file(resolved).bytes()).toBase64();
+      assertNotAborted(ctx.signal);
       ctx.fileTracker.markRead(resolved, stat.mtimeMs);
       return {
         content: [{ type: 'image', data, mimeType: imageMime }],
@@ -159,9 +189,12 @@ export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
       };
     }
 
-    if (BINARY_EXTENSIONS.has(ext) || sampleLooksBinary(resolved)) {
+    if (BINARY_EXTENSIONS.has(ext)) {
       throw new Error(`Cannot read binary file: ${args.path}`);
     }
+    const looksBinary = await sampleLooksBinary(resolved);
+    assertNotAborted(ctx.signal);
+    if (looksBinary) throw new Error(`Cannot read binary file: ${args.path}`);
 
     const offset = args.offset ?? 1;
     const limit = args.limit ?? MAX_OUTPUT_LINES;
@@ -174,35 +207,29 @@ export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
     let byteCapped = false;
     let hasMoreAfterLimit = false;
 
-    const stream = createReadStream(resolved, { encoding: 'utf8' });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-    try {
-      for await (const raw of rl) {
-        // 纯 fs 工具:关键 await 后检查 signal(docs/07 §4)
-        if (ctx.signal.aborted) throw new Error('User aborted the read operation.');
-        lineNo++;
-        if (lineNo < offset) continue;
-        if (kept.length >= limit) {
-          hasMoreAfterLimit = true;
-          continue; // 不再收集,只数完总行数(行数截断文案需要 of N)
-        }
-        const line = clipLongLine(raw);
-        const lineBytes = Buffer.byteLength(line, 'utf8') + 1; // + '\n'
-        if (kept.length > 0 && bytes + lineBytes > MAX_OUTPUT_BYTES) {
-          byteCapped = true;
-          break;
-        }
-        kept.push(line);
-        bytes += lineBytes;
-        if (bytes > MAX_OUTPUT_BYTES) {
-          byteCapped = true; // 首行即超限:保留该行后停(与 clipHead 一致,至少产出一行)
-          break;
-        }
+    for await (const raw of streamLines(Bun.file(resolved))) {
+      // 纯 fs 工具:关键 await 后检查 signal(docs/07 §4)
+      assertNotAborted(ctx.signal);
+      lineNo++;
+      if (lineNo < offset) continue;
+      if (kept.length >= limit) {
+        hasMoreAfterLimit = true;
+        continue; // 不再收集,只数完总行数(行数截断文案需要 of N)
       }
-    } finally {
-      rl.close();
-      stream.destroy();
+      const line = clipLongLine(raw);
+      const lineBytes = UTF8_ENCODER.encode(line).byteLength + 1; // + '\n'
+      if (kept.length > 0 && bytes + lineBytes > MAX_OUTPUT_BYTES) {
+        byteCapped = true;
+        break;
+      }
+      kept.push(line);
+      bytes += lineBytes;
+      if (bytes > MAX_OUTPUT_BYTES) {
+        byteCapped = true; // 首行即超限:保留该行后停(与 clipHead 一致,至少产出一行)
+        break;
+      }
     }
+    assertNotAborted(ctx.signal);
 
     // offset 越界:显式 offset 超出总行数(流已读完,lineNo 即总行数)。
     // 空文件的 offset=1 与省略 offset 等价:同样返回读完态而非报错

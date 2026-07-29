@@ -3,9 +3,9 @@
 // 存储 append-only、视图靠折叠;崩溃容忍:尾行半截 JSON 丢弃,中部损坏拒绝加载。
 
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, truncateSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, ModelRef, UserMessage } from '../protocol/index.js';
+import { runtimeHomeDir } from '../shared/index.js';
 
 export const STORE_VERSION = 1;
 export const PROTOCOL_VERSION = '1.0.0';
@@ -42,7 +42,7 @@ export interface LoadedSession {
 }
 
 export function defaultSessionDir(): string {
-  return path.join(homedir(), '.coda', 'sessions');
+  return path.join(runtimeHomeDir(), '.coda', 'sessions');
 }
 
 export function newSessionId(now = new Date()): string {
@@ -95,7 +95,7 @@ export class SessionStore {
       JSON.parse(fragment);
       appendFileSync(this.file, '\n', 'utf8');   // 恰在 \n 前崩溃:记录完整,补行尾
     } catch {
-      truncateSync(this.file, Buffer.byteLength(raw.slice(0, lastNewline + 1), 'utf8'));
+      truncateSync(this.file, new TextEncoder().encode(raw.slice(0, lastNewline + 1)).byteLength);
     }
   }
 

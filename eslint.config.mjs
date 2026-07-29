@@ -115,7 +115,7 @@ export default tseslint.config(
   // '^[^.]' 只拦 bare specifier(npm 包与 node: 内置);'../' 越出 protocol 由规则 A 的 zone 兜底。
   {
     files: ['src/protocol/**/*.ts'],
-    // 测试文件豁免(需要 import vitest);运行时代码零依赖的约束不变。
+    // 测试文件豁免(需要 import bun:test);运行时代码零依赖的约束不变。
     // 测试仍受规则 A/B 约束(不得 import 其他 src 目录与 openai)。
     ignores: ['src/protocol/**/*.test.ts'],
     rules: {

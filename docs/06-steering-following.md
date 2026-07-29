@@ -273,7 +273,7 @@ turn 边界注入 → queue_update(快照不含 u_42)+ message_start(id: 'u_42')
 
 ## 9. 边界情况清单
 
-逐条为可测试断言,vitest 用 faux provider 全离线覆盖(见 [测试策略](./10-testing.md)):
+逐条为可测试断言,`bun:test` 用 faux provider 全离线覆盖(见 [测试策略](./10-testing.md)):
 
 1. **运行中调用 `prompt()`**:同步 throw,错误文案含 "Use steer() or followUp()" 指引;agent 状态不受影响。
 2. **idle 时调用 `steer()`**:合法,消息静置队列;下一次 `prompt()` 起跑前的 poll(注入点 ①)会捎上它。CLI 正常情况下不会走到这条(键位仅流式期间映射为 steer),但 API 用户会。

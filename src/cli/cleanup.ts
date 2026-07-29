@@ -4,14 +4,14 @@
 // (禁计时器——测试用 utimes 造旧文件 + 注入 now,零真实等待)。
 
 import { readdir, rmdir, stat, unlink } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import path from 'node:path';
+import { runtimeHomeDir } from '../shared/index.js';
 
 /** 7 天保留(docs/07 §1.6);mtime 严格早于 now - RETENTION 才删(「超 7 天」)。 */
 export const TRUNCATED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function defaultTruncatedRoot(): string {
-  return path.join(homedir(), '.coda', 'truncated');
+  return path.join(runtimeHomeDir(), '.coda', 'truncated');
 }
 
 /**

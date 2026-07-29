@@ -1,15 +1,16 @@
 // M2 冒烟(docs/11-roadmap.md M2 验收 4,手动、不进 CI):经 streamOpenAIChat 完整管线
 // 对真实 endpoint 跑 (1) 带工具调用的流式往返 (2) 可选视觉测试。
-// 用法:npm run smoke -- [--model kimi-k3] [--vision]
+// 用法:bun run smoke -- [--model kimi-k3] [--vision]
 import type { AgentMessage, Context, ModelConfig } from '../src/protocol/index.js';
 import { streamOpenAIChat } from '../src/providers/openai-chat/index.js';
+import { createStdoutOutput } from '../src/shared/index.js';
 import { loadEndpointEnv } from './env.js';
 
 const modelName = ((): string => {
-  const i = process.argv.indexOf('--model');
-  return i >= 0 && process.argv[i + 1] ? (process.argv[i + 1] as string) : 'kimi-k3';
+  const i = Bun.argv.indexOf('--model');
+  return i >= 0 && Bun.argv[i + 1] ? (Bun.argv[i + 1] as string) : 'kimi-k3';
 })();
-const vision = process.argv.includes('--vision');
+const vision = Bun.argv.includes('--vision');
 
 const { baseURL, apiKey } = loadEndpointEnv();
 if (!apiKey) {
@@ -25,17 +26,20 @@ const model: ModelConfig = {
   compat: { supportsImageParts: true, supportsUsageInStreaming: true },
   defaults: { maxOutputTokens: 2048 },
 };
+const stdout = createStdoutOutput();
 
 async function runTurn(label: string, ctx: Context): Promise<AgentMessage> {
   console.log(`\n===== ${label} =====`);
   const stream = streamOpenAIChat(model, ctx);
   for await (const e of stream) {
-    if (e.type === 'reasoning_start') process.stdout.write('\x1b[2m[thinking] ');
-    if (e.type === 'reasoning_delta') process.stdout.write(e.delta);
-    if (e.type === 'reasoning_end') process.stdout.write('\x1b[0m\n');
-    if (e.type === 'text_delta') process.stdout.write(e.delta);
+    if (e.type === 'reasoning_start') await stdout.write('\x1b[2m[thinking] ');
+    if (e.type === 'reasoning_delta') await stdout.write(e.delta);
+    if (e.type === 'reasoning_end') await stdout.write('\x1b[0m\n');
+    if (e.type === 'text_delta') await stdout.write(e.delta);
     if (e.type === 'tool_call_end') {
-      process.stdout.write(`\n[tool_call] ${e.toolCall.name}(${JSON.stringify(e.toolCall.arguments)}) id=${e.toolCall.id}`);
+      await stdout.write(
+        `\n[tool_call] ${e.toolCall.name}(${JSON.stringify(e.toolCall.arguments)}) id=${e.toolCall.id}`,
+      );
     }
   }
   const msg = await stream.result();
@@ -114,3 +118,4 @@ if (vision) {
 }
 
 console.log('\n[smoke] all scenarios passed');
+await stdout.drain();

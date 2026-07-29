@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { cleanupTruncated, TRUNCATED_RETENTION_MS } from './cleanup.js';
 
 /** 固定 now(整毫秒),边界数学不受时钟影响。 */

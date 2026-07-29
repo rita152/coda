@@ -54,7 +54,7 @@ export interface SessionOptions {
   agentConfig: AgentConfig;          // streamFn/model/tools/systemPrompt 由 CLI 组装后传入
   dir?: string;                      // 默认 ~/.coda/sessions
   pricing?: ModelPricing;            // 成本计算,见第 7 节;缺省则 costUSD 不计算
-  retry?: RetryOptions;              // M7,见第 5 节
+  retry?: RetryOptions;              // M7,见第 5 节;sleep 可注入以确定性测试退避
   compaction?: CompactionOptions;    // M7,见第 6 节
 }
 
@@ -139,6 +139,7 @@ export type SessionRecord = MetaRecord | MessageRecord | CompactionRecord;
 - 落盘确定性:pi 的经验是事件监听 await 串行虽拖慢 loop,但换来 `waitForIdle()` 返回即全部落盘的确定性。我们采纳同一取舍:Agent 对 subscribe 的 async listener 串行 await(见 [05](./05-agent-loop.md)),因此 `session.close()` = `agent.waitForIdle()` + flush,之后进程可安全退出。listener 内部必须 try/catch,持久化失败发 `error` 事件(fatal: false)而不是打断 loop。
 - 崩溃截断:进程在写半行时被杀,文件尾部会出现不完整 JSON。加载时**最后一行 parse 失败则静默丢弃**;非最后一行损坏则拒绝加载并报错(文件真的坏了,不能装作没事)。
 - fsync 策略:默认依赖 OS 缓冲(appendFile 即返回);`agent_end` 时做一次 fsync。单机 CLI 场景足够,不为每条消息付 fsync 代价。
+- Bun-native 边界:运行时固定为 Bun 1.3.14；`Bun.file` / `Bun.write` 覆盖普通文件读写，Bun 暂无等价系统语义的目录操作及 append/fsync/truncate 允许使用 `node:fs` compatibility API。迁移不得以“纯 Bun API”为由削弱本节的 append-only、flush 与 crash-recovery 保证；路径处理统一落在允许的 `node:path` 边界。
 
 ## 4. 恢复语义
 
@@ -219,10 +220,18 @@ adapter 最了解错误来源(APIError 的 status/code、fetch 网络错误、in
 
 ```ts
 // src/session/retry.ts
-export interface RetryOptions { maxAttempts?: number /*5*/; baseDelayMs?: number /*1000*/; maxDelayMs?: number /*32000*/ }
+export type RetrySleep = (delayMs: number, signal: AbortSignal) => Promise<boolean>;
+export interface RetryOptions {
+  maxAttempts?: number /*5*/;
+  baseDelayMs?: number /*1000*/;
+  maxDelayMs?: number /*32000*/;
+  jitter?: () => number /*Math.random*/;
+  sleep?: RetrySleep /*sleepWithAbort*/;
+}
+export type ResolvedRetryPolicyOptions = Required<Omit<RetryOptions, 'sleep'>>;
 export type RetryDecision = { retry: false; reason: string } | { retry: true; delayMs: number };
 
-export function decideRetry(msg: AssistantMessage, attempt: number, opts: Required<RetryOptions>): RetryDecision {
+export function decideRetry(msg: AssistantMessage, attempt: number, opts: ResolvedRetryPolicyOptions): RetryDecision {
   // 伪码:
   // if (msg.stopReason !== 'error') return no('not an error')
   // if (!classifyRetryable(msg.errorDetails, msg.errorMessage)) return no(kind)
@@ -234,7 +243,9 @@ export function decideRetry(msg: AssistantMessage, attempt: number, opts: Requir
 
 `maxDelayMs` 封顶的是**乘 jitter 之前的 base**,不是最终值——最终 `delayMs` 系数 ∈ [0.5, 1.5),可达 `1.5 × maxDelayMs`。这是有意的 equal-jitter(不是 AWS full-jitter `random()*cap`),避免所有客户端在退避末端同时重试的 thundering herd。若某场景要求 `maxDelayMs` 是最终硬上限,应在此处改公式(对最终值再 clamp),而非默认行为。
 
-纯函数、无 IO、无计时器——RetryPolicy 单测只喂消息和 attempt 数即可,这是从 pi 的教训里直接换来的形态(重试逻辑一旦和循环控制缠在一起就再也测不动了)。
+`sleep` 是 Session 编排层的依赖,不进入 `ResolvedRetryPolicyOptions`;因此 `decideRetry` 仍是无 IO、无计时器的纯函数。生产默认使用可取消的 `sleepWithAbort`,集成测试注入受控 gate,观察 `delayMs` 后主动 resolve,不依赖真实时间或 Bun fake timer。RetryPolicy 单测只喂消息和 attempt 数即可,这是从 pi 的教训里直接换来的形态(重试逻辑一旦和循环控制缠在一起就再也测不动了)。
+
+自定义 `RetrySleep` 必须及时观察传入的 `AbortSignal`,并以 `true` 表示取消、`false` 表示等待完成。reject 表示重试基础设施本身失效：Session 会发出 `fatal:true` 的 error 事件并停止续跑；一次性 CLI 据此以 1 退出，不能把已经声明 `willRetry:true` 的会话静默留在悬空状态。
 
 ### 5.3 与 agent_end 的关系
 
@@ -248,7 +259,7 @@ session.onAgentEvent(e):
     attempt++
     透传 { ...e, willRetry: true }                                    // UI 显示「重试中」而非「已结束」
     emit retry_scheduled { attempt, delayMs }
-    await sleepWithAbort(d.delayMs, sessionAbortSignal)               // abort() 取消等待并放行真正的 agent_end
+    await retry.sleep(d.delayMs, sessionAbortSignal)                  // 默认 sleepWithAbort;abort() 取消等待
     agent.continue()                                                  // 见下
 ```
 

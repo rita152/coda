@@ -1,7 +1,7 @@
 // transform 层单测(M4;规格 docs/04 §6 四步 + docs/06 §7)。
 // convertContext 是纯函数视图变换:不落盘、幂等、绝不改写输入。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { convertContext, INTERRUPTED_RESULT_TEXT, isSameModel } from '../src/agent/index.js';
 import type {
   AgentMessage,

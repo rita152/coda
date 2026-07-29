@@ -1,6 +1,6 @@
 // ProviderEvent 文法校验器(docs/03-internal-protocol.md 4.2 的可执行形态)。
 // 对 faux provider 与真实 adapter(M2 起)的事件流做同一套断言——
-// faux 自己违反事件文法时,这里全线报警。校验失败直接 throw(vitest 报为测试失败)。
+// faux 自己违反事件文法时,这里全线报警。校验失败直接 throw(bun:test 报为测试失败)。
 
 import type { AssistantMessage, ProviderEvent, Usage } from '../../src/protocol/index.js';
 

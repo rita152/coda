@@ -4,22 +4,22 @@
 
 CLI 是整个系统里**最薄**的一层:它只做两件事——把用户输入翻译成对 `Agent` 的方法调用(`prompt` / `steer` / `followUp` / `abort`),把 `AgentEvent` 流翻译成终端上的像素。所有智能都在 agent 核心;CLI 不持有任何会话状态副本,不理解 provider,不解析工具参数。这一「哑终端」定位是 opencode V1→V2 最重要的教训:V1 把状态揉进 UI 后无法演化,V2 被迫重写为 client/server;我们从第一天起就把 CLI 当成内部协议的一个普通消费者来写,headless JSON 模式(见第 6 节)就是这条纪律的机械验证——**交互 REPL 能做的每一件事,都必须能用一行 JSON 命令表达**。
 
-## 1. v1 形态:Node readline + ANSI 自绘
+## 1. v1 形态:Bun 运行时 + readline/raw TTY compatibility + ANSI 自绘
 
 ### 1.1 决策:不引 TUI 框架
 
-v1 不使用 Ink/React、blessed、SolidJS-terminal 等任何 TUI 框架,用 Node 内置 `readline`(raw keypress 事件)加手写 ANSI 控制序列。理由:
+v1 不使用 Ink/React、blessed、SolidJS-terminal 等任何 TUI 框架,运行时固定为 Bun 1.3.14,用 readline/raw TTY compatibility API 提供 keypress 事件,加手写 ANSI 控制序列。Bun 暂无覆盖这些交互语义的等价高层接口,所以这是明确允许的 compatibility 边界,而不是对 Node 运行时的依赖。理由:
 
 1. **项目的验证目标在 agent 核心,不在 UI。** 本项目的三条核心需求(协议隔离、双队列、工具集)全部位于 CLI 之下;UI 每多一层抽象,调试流式渲染问题时就多一层不可控的重绘时机。pi-mono 的 TUI 同样是自研组件而非通用框架,其经验是:coding agent 的渲染模式非常固定(追加式转录 + 底部少量动态区),用不到通用 TUI 框架的布局/组件树能力。
-2. **React 式重绘模型与流式输出天然冲突。** Ink 按帧 diff 重绘整屏,`text_delta` 每秒可达上百次,要么节流(引入延迟感)要么闪烁;而 append-only 的 `process.stdout.write(delta)` 是零成本的。gemini-cli(Ink)在长输出场景的性能问题是公开的反面案例。
-3. **依赖重量与启动时间。** v1 的 CLI 依赖清单目标为零(readline、tty、process 全部是 Node 内置);这对一个要求 Node ≥ 20、ESM、tsup 单文件产物的 CLI 意义直接。
+2. **React 式重绘模型与流式输出天然冲突。** Ink 按帧 diff 重绘整屏,`text_delta` 每秒可达上百次,要么节流(引入延迟感)要么闪烁;而 append-only 的 `Bun.stdout.writer()` 写入是直接路径。gemini-cli(Ink)在长输出场景的性能问题是公开的反面案例。
+3. **依赖重量与启动时间。** v1 不引入第三方 TTY/TUI 包；Bun 1.3.14、ESM 与 `Bun.build` 统一运行和交付,readline/raw TTY 仅作为 Bun compatibility API 使用。
 
 ### 1.2 升级路径
 
 不引框架不等于放弃升级。两条已铺好的路:
 
 - **渲染器接口隔离**:所有 ANSI 细节收敛在 `Renderer` 接口(第 4 节)之后,`cli/` 内没有第二处直接写 stdout。将来若换 Ink 或自研组件系统,只替换 `Renderer` 实现,键位层与命令层不动。
-- **headless 模式即 server 雏形**:更彻底的升级是把富 TUI 做成 headless 模式的独立客户端(TUI 进程 spawn `coda --json`,走 NDJSON 管道),这正是 codex `submit(Op)` / `next_event()` 与 opencode V2 client/server 的架构。届时 v1 的 readline REPL 保留为轻量默认前端。
+- **headless 模式即 server 雏形**:更彻底的升级是把富 TUI 做成 headless 模式的独立客户端(TUI 进程用 `Bun.spawn` 启动 `coda --json`,走 NDJSON 管道),这正是 codex `submit(Op)` / `next_event()` 与 opencode V2 client/server 的架构。届时 v1 的 readline/raw TTY REPL 保留为轻量默认前端。
 
 ### 1.3 渲染模型:append-only 转录区 + 底部动态区
 
@@ -28,7 +28,7 @@ v1 不使用 Ink/React、blessed、SolidJS-terminal 等任何 TUI 框架,用 Nod
 - **转录区**:只追加、永不回改。assistant 文本、工具结果摘要、注入的 steering 消息按发生顺序写入。
 - **底部动态区**(最多 3–4 行):当前活动(spinner + 工具进度 tail)、队列徽标、输入行。每次更新用 `\x1b[<n>F\x1b[J`(光标上移 n 行 + 清屏到底)整体重绘。
 
-关键纪律:**stdout 只有 Renderer 一个写入者**。流式 delta 到来时,先清底部动态区 → 追加 delta 到转录区 → 重绘动态区。这是 readline 与流式输出共存的唯一稳妥办法(风险详见 [11-roadmap](./11-roadmap.md) 风险清单)。非 TTY(`!process.stdout.isTTY`)或 `NO_COLOR`/`--no-color` 时降级为纯追加、无 ANSI 的 plain 模式。
+关键纪律:**stdout 只有 Renderer 一个写入者**。流式 delta 到来时,先清底部动态区 → 追加 delta 到转录区 → 重绘动态区。这是 readline 与流式输出共存的唯一稳妥办法(风险详见 [11-roadmap](./11-roadmap.md) 风险清单)。输出经 `Bun.stdout.writer()` 的有序队列集中提交：底层 `write` / `flush` 串行等待，每个 Session 事件完成渲染后 `drain`，退出前再做最终 `drain`；慢管道因此向 agent loop 施加背压，写入错误也会沿 `drain` 暴露。有些交互重绘不位于 Session 事件边界，因此有序队列还用首个写入失败信号通知 REPL；REPL 随即 abort 会话与待决审批、关闭 Session、恢复 raw TTY 并以 1 退出。TTY 探测/raw mode 与 signal 属于允许的 compatibility 边界。非 TTY 才降级为纯追加模式；`NO_COLOR` / `--no-color` 只关闭 SGR 颜色，TTY 下仍保留光标控制与动态区。
 
 ## 2. 启动流程与会话选择
 
@@ -49,13 +49,21 @@ const agentConfig = { streamFn: openaiChatStream, model, tools: builtinTools, sy
 const session     = resuming
   ? await Session.resume(sessionId, { agentConfig })   // 加载 JSONL,内部组装 Agent 并注入 initialMessages
   : await Session.create({ agentConfig });             // 见 08 文档第 2 节
-const renderer = createRenderer(process.stdout, { color, width });
-session.subscribe(e => renderer.render(e));            // SessionEvent = AgentEvent 透传 + retry/compaction 等叠加事件
+const output = createStdoutOutput();
+const renderer = createRenderer({
+  enqueue: output.enqueue,
+  drain: output.drain,
+  columns: process.stdout.columns,
+}, { color, interactive });
+session.subscribe(async e => {                         // SessionEvent = AgentEvent 透传 + retry/compaction 等叠加事件
+  renderer.render(e);
+  await renderer.drain();
+});
 if (resuming) renderer.replayTranscript(session.messages);   // 重放 session 恢复出的转录
 startRepl(session, renderer);   // 或 startHeadless(session)
 ```
 
-Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-session-persistence.md) 第 1–2 节),CLI 订阅的是 Session 而非 Agent——这样 `retry_scheduled` / `compaction_start` 等 SessionEvent 才能透传到 UI。注意 `subscribe` 的监听器是 await 串行的(pi 的取舍:换取 `waitForIdle()` 后落盘确定的语义),落盘由 session 内部的监听完成、在透传渲染之前,且两者都必须快——渲染器内部不做任何 IO 等待。
+Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-session-persistence.md) 第 1–2 节),CLI 订阅的是 Session 而非 Agent——这样 `retry_scheduled` / `compaction_start` 等 SessionEvent 才能透传到 UI。注意 `subscribe` 的监听器是 await 串行的(pi 的取舍:换取 `waitForIdle()` 后落盘确定的语义),落盘由 session 内部的监听完成、在透传渲染之前。Renderer 的状态变换和排队保持同步；监听器只在事件边界等待 stdout `drain`，把慢消费者的背压限制在唯一输出边界。
 
 ## 3. 键位表
 
@@ -80,7 +88,7 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 
 ### 3.2 Esc 与 Alt+Enter 的终端现实
 
-- `Esc` 是所有 ANSI 转义序列的前缀。用 readline `keypress` 事件 + `escapeCodeTimeout`(设 50ms)消歧:超时内无后续字节才认定为裸 Esc。方向键等序列不会被误判为 abort。
+- `Esc` 是所有 ANSI 转义序列的前缀。用 compatibility 层的 readline `keypress` 事件 + `escapeCodeTimeout`(设 50ms)消歧:超时内无后续字节才认定为裸 Esc。方向键等序列不会被误判为 abort。
 - `Alt+Enter` 在多数终端编码为 `ESC CR`,但 macOS Terminal.app 默认 Option 输入特殊字符、部分终端发 `M-Enter` meta 位。检测 `key.meta && key.name === 'return'` 为主,同时提供**斜杠命令兜底**:流式中输入以 `/f `(或 `/followup `)开头再 Enter,等价于 follow-up。斜杠命令保证任何终端都有全功能路径。
 - 其余斜杠命令(空闲时):`/quit`、`/queue`(打印两队列内容)、`/status`(模型、token/成本累计)、`/help`。v1 不做更多。
 
@@ -93,6 +101,7 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 export interface Renderer {
   render(e: AgentEvent): void;
   replayTranscript(messages: AgentMessage[]): void;   // --continue/--resume 启动时
+  drain(): Promise<void>;                             // 等待此前排队的 stdout 内容
 }
 ```
 
@@ -109,7 +118,7 @@ export interface Renderer {
 | `message_update` | 解包内层 `ProviderEvent`:`text_delta` 直接 `stdout.write(delta)`;`reasoning_delta` 暗色斜体输出(可 `--no-reasoning` 折叠为一行 `thinking…`);`tool_call_start/delta` 不渲染参数流,只在动态区显示 `preparing <name>…`;`text_end`/`reasoning_end` 补换行 |
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
-| `tool_execution_start` | 转录区一行工具头:`● bash: npm test`(按工具定制单行摘要,见下表);动态区 spinner 挂上该工具 |
+| `tool_execution_start` | 转录区一行工具头:`● bash: bun test`(按工具定制单行摘要,见下表);动态区 spinner 挂上该工具 |
 | `tool_execution_update` | 动态区显示 `update.output` 的尾部(bash 流式输出;100ms 节流已由工具层保证)。v1 动态区总高 ≤4 行(§1.3),工具输出取**尾部 1 行**并入活动行;尾部多行展示随富 TUI 升级 |
 | `tool_execution_end` | 工具头行补状态与摘要:成功 `✓ read src/a.ts (120 lines)` / 失败 `✗ edit: oldText not found`;`details` 中的 diff 以 ±着色渲染(上限 40 行,超出提示行数) |
 | `queue_update` | 刷新底部队列徽标:`[steer 1 · follow-up 2]`;两队列皆空时不显示 |
@@ -180,8 +189,9 @@ export type CliCommand =
 ### 6.3 输出规格(stdout,NDJSON)
 
 - 启动时 stdout 先输出一条旁路事件 `{"type":"protocol","protocolVersion":"<semver>"}`(见 [03](./03-internal-protocol.md) §9.2),声明事件流的协议版本;tolerant reader 可忽略未知事件类型。
-- 其后每行一个 JSON 序列化的 `AgentEvent`,原样外发、不包裹信封,`AgentEvent` 行不加任何自定义字段——事件类型本身自带判别。消费者据 `agent_end` 判断任务边界,据 `message_update` 内层 `ProviderEvent` 做流式渲染,与交互 Renderer 用同一张对应表(第 4 节)。
+- 其后每行一个 JSON 序列化的 `AgentEvent`,原样外发、不包裹信封,`AgentEvent` 行不加任何自定义字段——事件类型本身自带判别。消费者据 `agent_end` 判断任务边界；其中 `willRetry:true` 表示 Session 已安排自动重试，是中间边界，只有不带该标记的 `agent_end` 才是最终边界。据 `message_update` 内层 `ProviderEvent` 做流式渲染,与交互 Renderer 用同一张对应表(第 4 节)。
 - **stdout 纪律:除 NDJSON 外零输出。** 日志、警告一律走 stderr。这条不守住,下游 `| jq` 直接坏。
+- Session 事件监听器在每条 NDJSON 后等待同一有序输出队列 `drain`；命令错误与审批旁路事件也进入该队列，保持全局顺序并观察写入失败。
 - 无法解析的 stdin 行:输出 `{type:'error', fatal:false, message:'invalid command: …'}`,继续读下一行(容错,不退出)。
 - `partial` 快照会让 `message_update` 事件体较大;v1 照发(简单正确优先),`--json-compact`(剥离 partial 只留 delta)留作后续 flag,不进 v1。
 
@@ -189,13 +199,13 @@ export type CliCommand =
 
 ```
 stdin EOF        → 视同 shutdown
-shutdown(空闲)  → flush 会话,exit 0
-shutdown(运行中)→ agent.abort() → waitForIdle() → flush → exit 0
+shutdown(空闲)  → flush 会话 → drain stdout → exit 0
+shutdown(运行中)→ agent.abort() → waitForIdle() → flush → drain stdout → exit 0
 SIGINT / SIGTERM → 同 shutdown(运行中)
-致命错误         → 输出 {type:'error', fatal:true} 后 exit 1
+致命错误         → 输出 {type:'error', fatal:true} → drain stdout → exit 1
 ```
 
-`-p "..."` 一次性模式即 headless 内核的特例:注入一条 `prompt`,`agent_end` 后自动 `shutdown`,人类可读输出(或加 `--json` 输出事件流)。
+`-p "..."` 一次性模式即 headless 内核的特例:注入一条 `prompt`,忽略带 `willRetry:true` 的中间 `agent_end`,等待最终 `agent_end` 后自动 `shutdown`,人类可读输出(或加 `--json` 输出事件流)。初次 `prompt()` 返回只代表首轮 agent run 已落定,不能据此提前关闭 Session；自动重试属于 Session 的 detached follow-up,必须一并等待。若等待期间收到 `fatal:true` error（例如注入的 retry sleep 失效），则立即按致命错误路径收尾并以 1 退出。
 
 ### 6.5 headless 会话示例
 

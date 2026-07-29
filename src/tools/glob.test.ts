@@ -2,7 +2,7 @@
 // 覆盖:递归匹配与相对路径显示、24h recency 排序(fs.utimesSync 控制 mtime)、
 // 0 结果与 limit 截断文案、.gitignore(非 git tmpdir)、path 参数、错误路径、abort。
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

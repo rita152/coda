@@ -1,6 +1,6 @@
-// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`convertMessages(出站快照) > 综合 Context:逐 role 映射、空 assistant 跳过、图片原生进 tool_result、连续同 role 合并 1`] = `
+exports[`convertMessages(出站快照) 综合 Context:逐 role 映射、空 assistant 跳过、图片原生进 tool_result、连续同 role 合并 1`] = `
 [
   {
     "content": [

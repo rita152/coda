@@ -5,7 +5,9 @@
 
 const POLL_INTERVAL_MS = 50;
 
-function signalGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+type ProcessGroupSignal = 'SIGTERM' | 'SIGKILL' | 0;
+
+function signalGroup(pid: number, signal: ProcessGroupSignal): boolean {
   try {
     process.kill(-pid, signal);
     return true;

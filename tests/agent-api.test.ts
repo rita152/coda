@@ -4,7 +4,7 @@
 import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { PendingMessageQueue, runLoop } from '../src/agent/index.js';
 import type { LoopConfig } from '../src/agent/index.js';
 import { hasResidue } from '../src/agent/agent.js';

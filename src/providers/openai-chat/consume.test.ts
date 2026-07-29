@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import OpenAI from 'openai';
 import type { AssistantMessage, ModelRef, ProviderEvent, ToolCallPart } from '../../protocol/index.js';
 import { assertValidProviderEventSequence, collectStream } from '../../../tests/helpers/provider-events.js';

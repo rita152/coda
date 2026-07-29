@@ -7,16 +7,18 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # lint + typecheck + build + test 三件套(M0 验收,docs/11-roadmap.md)
-      - run: npm run check
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      # lint + typecheck + build + test 统一检查(M0 验收,docs/11-roadmap.md)
+      - run: bun run check
       # openai import 第二道防线(ESLint 之外的机械 grep,docs/02-architecture.md 第 8 节)
       - name: openai import boundary (second line of defense)
         run: |

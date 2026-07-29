@@ -1,7 +1,7 @@
 // M3 runLoop 语义测试(L4,全离线,faux provider;规格出处 docs/05-agent-loop.md、docs/11 M3 验收)。
 // 时序控制只用 gate 与事件等待;出站断言用 faux 的 calls。
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'bun:test';
 import type {
   AgentEvent,
   AssistantMessage,

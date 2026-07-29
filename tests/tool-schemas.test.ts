@@ -2,7 +2,7 @@
 // 不 throw、每个参数字段带非空 description(模型可读性验收);重名与 unrepresentable
 // 类型在构造期即 throw(工具作者的错误不许活到第一次请求)。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { renderToolSchemas } from '../src/agent/index.js';
 import { createCodingTools } from '../src/tools/index.js';

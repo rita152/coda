@@ -3,7 +3,7 @@
 //   agent_end reason 'error' → exit 1、completed → exit 0(-p 人类可读模式同规则);
 // - `coda </dev/null`(非 TTY 空 stdin 且无 -p):不落入 REPL 挂起,stderr 用法提示,exit 2。
 
-import { afterEach, beforeAll, expect, test } from 'vitest';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { CodaProc } from './harness.js';
 import {
   assertSubsequence,
@@ -30,7 +30,7 @@ function track(p: CodaProc): CodaProc {
 
 const T = { timeout: CASE_TIMEOUT_MS };
 
-test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot)', T, async () => {
+test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot)', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -61,9 +61,9 @@ test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot
   const user = proc.events.find((e) => e.type === 'message_start' && msgRole(e) === 'user');
   expect(msgText(user)).toBe('say it once');
   expect(proc.parseErrors).toEqual([]); // 管道纪律不因 -p 特例松动
-});
+}, T);
 
-test('--json -p: agent_end reason error → exit 1 (script-observable)', T, async () => {
+test('--json -p: agent_end reason error → exit 1 (script-observable)', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -78,9 +78,9 @@ test('--json -p: agent_end reason error → exit 1 (script-observable)', T, asyn
   expect(end['reason']).toBe('error');
   expect(await proc.waitForExit()).toBe(1);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('-p (human-readable): completed → exit 0, error turn → exit 1', T, async () => {
+test('-p (human-readable): completed → exit 0, error turn → exit 1', async () => {
   const ok = track(
     startCoda({
       script: { turns: [{ events: [{ kind: 'text', text: 'fine' }] }], onExhausted: 'emptyStop' },
@@ -98,9 +98,65 @@ test('-p (human-readable): completed → exit 0, error turn → exit 1', T, asyn
     }),
   );
   expect(await bad.waitForExit()).toBe(1);
-});
+}, T);
 
-test('empty non-TTY stdin without -p: usage hint on stderr, exit 2 (no REPL hang)', T, async () => {
+test('--json -p: retrying agent_end is intermediate; exits after recovered final agent_end', async () => {
+  const proc = track(
+    startCoda({
+      script: {
+        turns: [
+          {
+            error: {
+              message: 'temporary outage',
+              details: { kind: 'http', status: 503, retryable: true, retryAfterMs: 0 },
+            },
+          },
+          { events: [{ kind: 'text', text: 'recovered after retry' }] },
+        ],
+        onExhausted: 'emptyStop',
+      },
+      prompt: 'retry once',
+    }),
+  );
+
+  expect(await proc.waitForExit()).toBe(0);
+  const ends = proc.events.filter((e) => e.type === 'agent_end');
+  expect(ends).toHaveLength(2);
+  expect(ends[0]).toMatchObject({ reason: 'error', willRetry: true });
+  expect(ends[1]?.['reason']).toBe('completed');
+  expect(ends[1]?.['willRetry']).toBeUndefined();
+  const recovered = proc.events.find(
+    (e) => e.type === 'message_end' && msgRole(e) === 'assistant' && msgText(e) === 'recovered after retry',
+  );
+  expect(recovered).toBeDefined();
+  expect(proc.parseErrors).toEqual([]);
+}, T);
+
+test('-p (human-readable): prompt return does not close the scheduled retry', async () => {
+  const proc = track(
+    startCoda({
+      script: {
+        turns: [
+          {
+            error: {
+              message: 'temporary outage',
+              details: { kind: 'http', status: 503, retryable: true, retryAfterMs: 0 },
+            },
+          },
+          { events: [{ kind: 'text', text: 'plain output recovered' }] },
+        ],
+        onExhausted: 'emptyStop',
+      },
+      prompt: 'retry once',
+      json: false,
+    }),
+  );
+
+  expect(await proc.waitForExit()).toBe(0);
+  expect(proc.lines.join('\n')).toContain('plain output recovered');
+}, T);
+
+test('empty non-TTY stdin without -p: usage hint on stderr, exit 2 (no REPL hang)', async () => {
   const proc = track(
     startCoda({
       script: { turns: [], onExhausted: 'emptyStop' },
@@ -112,4 +168,4 @@ test('empty non-TTY stdin without -p: usage hint on stderr, exit 2 (no REPL hang
   expect(await proc.waitForExit()).toBe(2);
   expect(proc.stderr()).toContain('empty stdin');
   expect(proc.lines).toEqual([]); // 错误只走 stderr,stdout 零输出
-});
+}, T);

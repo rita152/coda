@@ -1,7 +1,7 @@
 // M4 abort 全链路(docs/11 M4 验收 3/4——本里程碑核心验收;docs/06 §6/§7/§9)。
 // 断言链:aborted 入转录(事实)→ 出站视图修复(transform)→ wire 配对合法(复用 M2 断言)。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { AssistantMessage, ToolResultMessage, UserMessage } from '../src/protocol/index.js';
 import { INTERRUPTED_RESULT_TEXT } from '../src/agent/index.js';
 import { createGate } from '../src/providers/faux/index.js';

@@ -1,7 +1,7 @@
 // M0:ESLint 边界规则的自证测试(docs/11-roadmap.md M0 实现要点、docs/02-architecture.md 第 8 节)。
 // 原理:向 src/ 写入带故意违例的探针文件,断言 ESLint 报出预期规则,再清理。
 // 若有人静默删除 eslint.config.mjs 里的边界规则,本测试立即变红。
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'bun:test';
 import { ESLint } from 'eslint';
 import { writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';

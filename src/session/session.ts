@@ -30,7 +30,7 @@ import {
 import type { ModelPricing, SessionUsage } from './usage.js';
 import { UsageTracker } from './usage.js';
 import type { RetryOptions, ResolvedRetryOptions } from './retry.js';
-import { decideRetry, resolveRetryOptions, sleepWithAbort } from './retry.js';
+import { decideRetry, resolveRetryOptions } from './retry.js';
 import type { CompactionOptions, ResolvedCompactionOptions } from './compactor.js';
 import { HARD_TRUNCATION_SUMMARY, resolveCompactionOptions, selectTailStart, summarize } from './compactor.js';
 
@@ -383,7 +383,7 @@ export class Session {
     const prev = this.#opChain;
     this.#opChain = (async () => {
       await prev.catch(() => undefined);          // 串行:上一个 op 收束后再动作
-      // 只在 closed 时早退;aborted 不早退——交给 fn 处理(#runRetry 的 sleepWithAbort 会立即
+      // 只在 closed 时早退;aborted 不早退——交给 fn 处理(#runRetry 的 sleep 会立即
       // 返回 aborted 并补发「retry cancelled」error 事件,docs/08 §5.3;早退会漏发该事件,
       // 让监听 willRetry 的 UI 永久停在「重试中」)。
       if (this.#closed) return;
@@ -399,7 +399,17 @@ export class Session {
 
   /** 退避睡眠后 continue(重试 = continue,docs/08 §5.3);退避期间 abort → 补发 error 事件说明重试已取消。 */
   async #runRetry(delayMs: number, signal: AbortSignal): Promise<void> {
-    const aborted = await sleepWithAbort(delayMs, signal);
+    let aborted: boolean;
+    try {
+      aborted = await this.#retry.sleep(delayMs, signal);
+    } catch (err) {
+      await this.#fanout({
+        type: 'error',
+        message: `retry sleep failed: ${String(err)}`,
+        fatal: true,
+      });
+      return;
+    }
     if (aborted) {
       if (!this.#closed) {
         await this.#fanout({ type: 'error', message: 'retry cancelled by abort', fatal: false });

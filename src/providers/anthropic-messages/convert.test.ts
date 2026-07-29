@@ -1,6 +1,6 @@
 // 出站转换测试:逐 role 映射、system 顶层参数、图片原生进 tool_result、thinking 回传、
 // 连续同 role 合并、参数裁剪(docs/04 §8)。
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { Context, ModelConfig } from '../../protocol/index.js';
 import { detectCompat } from './compat.js';
 import { buildParams, convertMessages } from './convert.js';

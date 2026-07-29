@@ -4,33 +4,32 @@
 // 写成临时 JSON 文件经 --faux-script 传入。
 // 计时纪律:本文件的 setTimeout 只用于单事件 15s 看门狗(挂起时快速失败并倾倒已收事件),
 // 不用于等待条件;唯一允许宽松时序的是 steer 用例(docs/10 §7 用例 3 + §8 flake 政策)。
-// vitest 用例超时统一 60s(慢 CI 余量):单事件看门狗先于用例超时触发,失败信息更有用。
+// bun:test 用例超时统一 60s(慢 CI 余量):单事件看门狗先于用例超时触发,失败信息更有用。
 
-import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import {
+  assertSanitizedTestEnvironment,
+  sanitizedTestEnvironment,
+} from '../scripts/test-environment.js';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = path.resolve(import.meta.dir, '..');
 export const DIST_MAIN = path.join(ROOT, 'dist', 'main.js');
 export const WATCHDOG_MS = 15_000;
-/** vitest 用例超时(慢 CI 余量;单事件看门狗 15s 先触发,给出事件倾倒)。 */
+/** bun:test 用例超时(慢 CI 余量;单事件看门狗 15s 先触发,给出事件倾倒)。 */
 export const CASE_TIMEOUT_MS = 60_000;
 
 /**
- * e2e 依赖 tsup 构建产物:缺失时给出可执行的修复提示,而不是含糊的 spawn 失败。
- * 已知限制:只检查存在性,不检查新旧——`npm run check` 的顺序(build 先于 test)保证
- * dist 与 src 同步;本地裸跑 `npx vitest run e2e` 时若 src 已改而未重新 build,
- * e2e 驱动的是**陈旧 dist**,结果可能与源码不符。
+ * e2e 依赖 Bun.build 构建产物:缺失时给出可执行的修复提示,而不是含糊的 spawn 失败。
+ * 已知限制:只检查存在性,不检查新旧——规范入口 `bun run test:e2e` 会先重建,
+ * 裸跑 `bun test e2e` 则可能驱动陈旧 dist。
  */
 export function requireDist(): void {
   if (!existsSync(DIST_MAIN)) {
     throw new Error(
-      `e2e requires the built CLI at ${DIST_MAIN} — run \`npm run build\` first ` +
-        '(docs/10-testing.md §2: L5 drives the tsup build output).',
+      `e2e requires the built CLI at ${DIST_MAIN} — run \`bun run test:e2e\` ` +
+        '(docs/10-testing.md §2: L5 drives the Bun.build output).',
     );
   }
 }
@@ -56,12 +55,12 @@ export interface StartOptions {
   json?: boolean;
   /** 额外 CLI flags(如 ['--approval-mode', 'interactive'],M6 审批用例)。 */
   extraArgs?: string[];
-  /** 环境变量覆盖(如 HOME 指到临时目录,验证启动清理;在 process.env 之上合并)。 */
+  /** 安全环境变量覆盖;HOME 默认隔离到本次临时 cwd，继承环境会先移除凭证与 endpoint。 */
   env?: Record<string, string>;
 }
 
 export interface CodaProc {
-  child: ChildProcess;
+  child: ReturnType<typeof Bun.spawn>;
   cwd: string;
   sessionDir: string;
   /** stdout 原始行(管道纪律断言用:每行必须可 JSON.parse)。 */
@@ -83,7 +82,9 @@ export interface CodaProc {
 export function startCoda(opts: StartOptions): CodaProc {
   const cwd = opts.cwd ?? mkdtempSync(path.join(tmpdir(), 'coda-e2e-'));
   const sessionDir = opts.sessionDir ?? path.join(cwd, 'sessions');
+  const isolatedHome = path.join(cwd, '.home');
   mkdirSync(sessionDir, { recursive: true });
+  mkdirSync(isolatedHome, { recursive: true });
   for (const [name, content] of Object.entries(opts.files ?? {})) {
     writeFileSync(path.join(cwd, name), content, 'utf8');
   }
@@ -99,13 +100,13 @@ export function startCoda(opts: StartOptions): CodaProc {
   if (opts.prompt !== undefined) args.push('-p', opts.prompt);
   if (opts.resume !== undefined) args.push('--resume', opts.resume);
   if (opts.extraArgs !== undefined) args.push(...opts.extraArgs);
-  const child = spawn(process.execPath, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    ...(opts.env !== undefined && { env: { ...process.env, ...opts.env } }),
+  const childEnv = buildE2eEnvironment(Bun.env, isolatedHome, opts.env);
+  const child = Bun.spawn([Bun.argv[0] as string, '--no-env-file', ...args], {
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: childEnv,
   });
-  if (child.stdout === null || child.stderr === null || child.stdin === null) {
-    throw new Error('spawn did not provide stdio pipes');
-  }
 
   const lines: string[] = [];
   const events: Ev[] = [];
@@ -114,12 +115,7 @@ export function startCoda(opts: StartOptions): CodaProc {
   type Waiter = { pred: (e: Ev) => boolean; resolve: (e: Ev) => void };
   const waiters: Waiter[] = [];
 
-  child.stderr.on('data', (d: Buffer) => {
-    stderrBuf += d.toString('utf8');
-  });
-
-  const rl = createInterface({ input: child.stdout, terminal: false });
-  rl.on('line', (line) => {
+  const onLine = (line: string): void => {
     lines.push(line);
     let ev: Ev;
     try {
@@ -141,14 +137,39 @@ export function startCoda(opts: StartOptions): CodaProc {
         w.resolve(ev);
       }
     }
+  };
+
+  let stdoutBuf = '';
+  const stdoutDone = pumpText(child.stdout, (chunk) => {
+    stdoutBuf += chunk;
+    let newline = stdoutBuf.indexOf('\n');
+    while (newline >= 0) {
+      const raw = stdoutBuf.slice(0, newline);
+      stdoutBuf = stdoutBuf.slice(newline + 1);
+      onLine(raw.endsWith('\r') ? raw.slice(0, -1) : raw);
+      newline = stdoutBuf.indexOf('\n');
+    }
+  }).then(() => {
+    if (stdoutBuf.length > 0) onLine(stdoutBuf.endsWith('\r') ? stdoutBuf.slice(0, -1) : stdoutBuf);
+  });
+  const stderrDone = pumpText(child.stderr, (chunk) => {
+    stderrBuf += chunk;
   });
 
-  let exited: number | null = null;
-  const exitWaiters: ((code: number) => void)[] = [];
-  child.on('exit', (code) => {
-    exited = code ?? -1; // 被信号杀死映射为 -1(断言 0 的用例自然失败)
-    for (const w of exitWaiters.splice(0)) w(exited);
-  });
+  let processExited = false;
+  const childExit = child.exited.then(
+    (code) => {
+      processExited = true;
+      return code;
+    },
+    (error: unknown) => {
+      processExited = true;
+      throw error;
+    },
+  );
+  const completion = combineProcessCompletion(childExit, stdoutDone, stderrDone);
+  // waitForExit 会观察同一个 rejection；提前挂 handler 避免调用者尚未等待时触发 unhandled rejection。
+  void completion.catch(() => undefined);
 
   const watchdogMessage = (label: string): string =>
     `watchdog: timed out waiting for ${label}\n` +
@@ -164,13 +185,15 @@ export function startCoda(opts: StartOptions): CodaProc {
     parseErrors,
     stderr: () => stderrBuf,
     send: (cmd) => {
-      child.stdin?.write(`${JSON.stringify(cmd)}\n`);
+      child.stdin.write(`${JSON.stringify(cmd)}\n`);
+      child.stdin.flush();
     },
     sendRaw: (text) => {
-      child.stdin?.write(text);
+      child.stdin.write(text);
+      child.stdin.flush();
     },
     endStdin: () => {
-      child.stdin?.end();
+      child.stdin.end();
     },
     waitForEvent: (pred, label, timeoutMs = WATCHDOG_MS) => {
       const found = events.find(pred);
@@ -192,23 +215,77 @@ export function startCoda(opts: StartOptions): CodaProc {
         waiters.push(entry);
       });
     },
-    waitForExit: (timeoutMs = WATCHDOG_MS) => {
-      if (exited !== null) return Promise.resolve(exited);
-      return new Promise<number>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error(watchdogMessage('process exit')));
-        }, timeoutMs);
-        timer.unref();
-        exitWaiters.push((code) => {
-          clearTimeout(timer);
-          resolve(code);
-        });
-      });
-    },
+    waitForExit: (timeoutMs = WATCHDOG_MS) =>
+      waitWithWatchdog(completion, timeoutMs, () => watchdogMessage('process exit')),
     kill: () => {
-      if (exited === null) child.kill('SIGKILL');
+      if (!processExited) child.kill(9);
     },
   };
+}
+
+/** E2E 子进程只继承非敏感变量，并默认使用测试拥有的 HOME。 */
+export function buildE2eEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
+  isolatedHome: string,
+  overrides?: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const env = {
+    ...sanitizedTestEnvironment(source),
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    ...overrides,
+  };
+  assertSanitizedTestEnvironment(env);
+  return env;
+}
+
+/** 进程退出与两个输出 pump 共同构成 completion；任一失败都原样传播给 waitForExit。 */
+export async function combineProcessCompletion(
+  childExit: Promise<number>,
+  stdoutDone: Promise<void>,
+  stderrDone: Promise<void>,
+): Promise<number> {
+  const [code] = await Promise.all([childExit, stdoutDone, stderrDone]);
+  return code;
+}
+
+function waitWithWatchdog<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: () => string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(timeoutMessage()));
+    }, timeoutMs);
+    timer.unref();
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function pumpText(stream: ReadableStream<Uint8Array>, onChunk: (text: string) => void): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      onChunk(decoder.decode(value, { stream: true }));
+    }
+    const tail = decoder.decode();
+    if (tail.length > 0) onChunk(tail);
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // ---------- 事件断言辅助 ----------

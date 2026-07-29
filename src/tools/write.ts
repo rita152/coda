@@ -3,7 +3,7 @@
 // 覆盖时保留原文件 BOM 与行尾风格(模型永远输出 LF,这层负责翻译,§2.6 BOM/CRLF 三步)。
 // 写入经 per-path 串行队列(path-lock);abort 只在每个 await 后检查 signal(§4)。
 
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { z } from 'zod';
@@ -25,6 +25,7 @@ export interface WriteDetails {
 }
 
 const BOM = '\uFEFF';
+const UTF8_DECODER = new TextDecoder();
 
 /** abort 检查:纯 fs 工具在关键 await 之后调用(docs/07 §4)。 */
 function checkAborted(signal: AbortSignal): void {
@@ -67,7 +68,7 @@ async function executeWrite(args: WriteArgs, ctx: ToolContext): Promise<ToolOutp
 
     // 现状探测:存在 → 覆盖路径(freshness + 风格保留);ENOENT → 新建路径
     const oldStat = await stat(absPath).catch((err: unknown) => {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if ((err as { code?: string }).code === 'ENOENT') return undefined;
       throw err;
     });
     checkAborted(ctx.signal);
@@ -89,10 +90,14 @@ async function executeWrite(args: WriteArgs, ctx: ToolContext): Promise<ToolOutp
             : 'File has been modified since it was last read. Re-read it to see the current content.',
         );
       }
-      const oldRaw = await readFile(absPath, 'utf8');
+      const oldBytes = await Bun.file(absPath).bytes();
       checkAborted(ctx.signal);
-      hasBom = oldRaw.startsWith(BOM);
-      const stripped = hasBom ? oldRaw.slice(BOM.length) : oldRaw;
+      hasBom =
+        oldBytes.length >= 3 &&
+        oldBytes[0] === 0xef &&
+        oldBytes[1] === 0xbb &&
+        oldBytes[2] === 0xbf;
+      const stripped = UTF8_DECODER.decode(oldBytes.subarray(hasBom ? 3 : 0));
       isCrlf = stripped.includes('\r\n');
       oldText = stripped.replaceAll('\r\n', '\n');
     }
@@ -109,15 +114,15 @@ async function executeWrite(args: WriteArgs, ctx: ToolContext): Promise<ToolOutp
     await mkdir(path.dirname(absPath), { recursive: true });
     checkAborted(ctx.signal);
 
-    // writeFile 是不可回退点,之后不再做 abort 检查——副作用已发生,
+    // Bun.write 是不可回退点,之后不再做 abort 检查——副作用已发生,
     // 报成功比报错更如实(abort 语义只保证「不写入」,不保证「写入后装没写」)。
-    await writeFile(absPath, finalText, 'utf8');
+    await Bun.write(absPath, finalText);
     const newStat = await stat(absPath);
     // 成功后登记:自己的写不算外部修改(§2.6),后续 edit/write 无需重新 read
     ctx.fileTracker.markRead(absPath, newStat.mtimeMs);
 
     const lines = countLines(args.content);
-    const kb = (Buffer.byteLength(finalText, 'utf8') / 1024).toFixed(1);
+    const kb = (new TextEncoder().encode(finalText).byteLength / 1024).toFixed(1);
     return {
       content: [{ type: 'text', text: `Wrote ${lines} lines (${kb} KB) to ${args.path}` }],
       details: { diff, additions, deletions },

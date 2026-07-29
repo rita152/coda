@@ -3,8 +3,6 @@
 // context 不用 rg 的 -C(会让 limit 数到 context 行),命中后自行读文件切片,limit 只数 match;
 // exit 1 = 无匹配不是错误;exit ≥ 2 才 throw(附 stderr);ToolContext.signal 触发时 kill rg。
 
-import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
@@ -49,6 +47,7 @@ interface RgRun {
   matches: RgMatch[];
   limitReached: boolean;
   code: number | null;    // 被 signal kill 时为 null
+  signal: number | null;
   stderr: string;
 }
 
@@ -76,7 +75,9 @@ function decodeJsonText(v: unknown): string | undefined {
   if (typeof v !== 'object' || v === null) return undefined;
   const o = v as { text?: unknown; bytes?: unknown };
   if (typeof o.text === 'string') return o.text;
-  if (typeof o.bytes === 'string') return Buffer.from(o.bytes, 'base64').toString('utf8');
+  if (typeof o.bytes === 'string') {
+    return new TextDecoder().decode(Uint8Array.fromBase64(o.bytes));
+  }
   return undefined;
 }
 
@@ -101,70 +102,92 @@ function extractMatch(evt: unknown): RgMatch | undefined {
  * spawn rg 并流式解析 --json 输出;match 数达 limit 即 kill(不等全仓搜完),
  * signal 触发同样 kill。resolve 于进程 close(即 rg 确已退出)。
  */
-function runRipgrep(
+async function runRipgrep(
   rgPath: string,
   rgArgs: string[],
   cwd: string,
   limit: number,
   signal: AbortSignal,
 ): Promise<RgRun> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(rgPath, rgArgs, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    const matches: RgMatch[] = [];
-    let limitReached = false;
-    let stderr = '';
-    let leftover = '';
+  if (signal.aborted) throw new Error(GREP_ABORTED_MESSAGE);
 
-    const onAbort = (): void => {
+  const matches: RgMatch[] = [];
+  let limitReached = false;
+  let resolveExit!: (value: { code: number | null; signal: number | null }) => void;
+  let rejectExit!: (reason: unknown) => void;
+  const exit = new Promise<{ code: number | null; signal: number | null }>((resolve, reject) => {
+    resolveExit = resolve;
+    rejectExit = reject;
+  });
+
+  const child = Bun.spawn({
+    cmd: [rgPath, ...rgArgs],
+    cwd,
+    signal,
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'pipe',
+    killSignal: 'SIGTERM',
+    onExit(_proc, code, signalCode, err) {
+      if (err !== undefined) rejectExit(err);
+      else resolveExit({ code, signal: signalCode });
+    },
+  });
+
+  const handleLine = (line: string): void => {
+    if (limitReached || line === '') return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return; // 非 JSON 行(不应出现),忽略
+    }
+    const m = extractMatch(parsed);
+    if (m === undefined) return;
+    matches.push(m);
+    if (matches.length >= limit) {
+      limitReached = true;
       child.kill('SIGTERM');
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
+    }
+  };
 
-    const handleLine = (line: string): void => {
-      if (limitReached || line === '') return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        return; // 非 JSON 行(不应出现),忽略
-      }
-      const m = extractMatch(parsed);
-      if (m === undefined) return;
-      matches.push(m);
-      if (matches.length >= limit) {
-        limitReached = true;
-        child.kill('SIGTERM');
-      }
-    };
+  const stdout = consumeLines(child.stdout, handleLine, () => limitReached);
+  const stderr = new Response(child.stderr).text();
+  const [status, stderrText] = await Promise.all([exit, stderr, stdout]);
+  return { matches, limitReached, code: status.code, signal: status.signal, stderr: stderrText };
+}
 
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      leftover += chunk;
+/** Web ReadableStream 增量解码为行;stop 后取消读端,避免 limit 早停仍继续缓冲 rg 输出。 */
+async function consumeLines(
+  stream: ReadableStream<Uint8Array>,
+  onLine: (line: string) => void,
+  stop: () => boolean,
+): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let leftover = '';
+  try {
+    while (!stop()) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      leftover += decoder.decode(value, { stream: true });
       let idx: number;
       while ((idx = leftover.indexOf('\n')) !== -1) {
-        handleLine(leftover.slice(0, idx));
+        onLine(leftover.slice(0, idx));
         leftover = leftover.slice(idx + 1);
-        if (limitReached) {
-          leftover = '';
-          break;
-        }
+        if (stop()) break;
       }
-    });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
-
-    child.once('error', (err) => {
-      signal.removeEventListener('abort', onAbort);
-      reject(err);
-    });
-    child.once('close', (code) => {
-      signal.removeEventListener('abort', onAbort);
-      if (leftover !== '') handleLine(leftover);
-      resolve({ matches, limitReached, code, stderr });
-    });
-  });
+    }
+    if (stop()) {
+      await reader.cancel();
+      leftover = '';
+      return;
+    }
+    leftover += decoder.decode();
+    if (leftover !== '') onLine(leftover);
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /** 带缓存读文件行(context 切片用);读不到(已删/二进制读失败)返回 undefined,降级为无 context。 */
@@ -176,7 +199,7 @@ async function readFileLines(
   if (hit !== undefined) return hit ?? undefined;
   let lines: string[] | null;
   try {
-    const content = await readFile(absPath, 'utf8');
+    const content = await Bun.file(absPath).text();
     lines = content.split('\n');
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop(); // 结尾换行不算一行
   } catch {
@@ -243,7 +266,7 @@ export const grepTool: ToolDefinition<GrepArgs, GrepDetails> = {
   parameters: GrepParams,
 
   async execute({ args }, ctx: ToolContext): Promise<ToolOutput<GrepDetails>> {
-    const rgPath = resolveRgPath();
+    const rgPath = await resolveRgPath();
     if (rgPath === undefined) throw new Error(RG_MISSING_MESSAGE);
     if (ctx.signal.aborted) throw new Error(GREP_ABORTED_MESSAGE);
 
@@ -279,7 +302,7 @@ export const grepTool: ToolDefinition<GrepArgs, GrepDetails> = {
     }
     const details: GrepDetails = {
       limitReached: run.limitReached,
-      rgKilled: run.limitReached && run.code === null,
+      rgKilled: run.limitReached && (run.code === null || run.signal !== null),
     };
     if (run.matches.length === 0) {
       // exit 1(无匹配)不是错误:空串会让模型困惑,给明确文案

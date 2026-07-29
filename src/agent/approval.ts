@@ -3,7 +3,6 @@
 // 时序纪律(codex 教训,风险 R7):abort 时先让任务观察到 cancellation,再以 abort
 // 决议清空 pending——顺序反了,悬着的审批会以「拒绝」形态先漏给模型。
 
-import { randomUUID } from 'node:crypto';
 import type { AgentEvent } from '../protocol/index.js';
 
 export type ApprovalDecision = 'allow_once' | 'allow_always' | 'deny' | 'abort';
@@ -46,7 +45,7 @@ export class ApprovalBroker {
     ) {
       return { decision: 'allow_once' };
     }
-    const approvalId = `ap_${randomUUID().slice(0, 8)}`;
+    const approvalId = `ap_${crypto.randomUUID().slice(0, 8)}`;
     const decision = await new Promise<ApprovalDecision>((resolve) => {
       this.#pending.set(approvalId, resolve);
       this.#emit({ type: 'approval_request', approvalId, toolCallId: req.toolCallId, description: req.description });

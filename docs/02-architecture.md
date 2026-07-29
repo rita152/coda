@@ -161,7 +161,7 @@ export default tseslint.config(
 
 上述代码块为示意;**权威版本是仓库根的 `eslint.config.mjs`**(M1 起随实现演进),它在规则 A/B 之外还包含:
 
-- **规则 C:protocol 零依赖**——`src/protocol/**` 禁止一切 bare import(含 `node:` 内置模块),用 `no-restricted-imports` 的 `regex: '^[^.]'` 形式(gitignore 语义的 `group: ['*']` 会连内部相对导入一起误伤);`*.test.ts` 豁免(需要 vitest),但仍受规则 A/B 约束。
+- **规则 C:protocol 零依赖**——`src/protocol/**` 禁止一切 bare import(含 `node:`、`bun:` 与 `bun` 运行时模块),用 `no-restricted-imports` 的 `regex: '^[^.]'` 形式(gitignore 语义的 `group: ['*']` 会连内部相对导入一起误伤);`*.test.ts` 豁免(需要 `bun:test`),但仍受规则 A/B 约束。
 - **`no-restricted-syntax` 堵两条静默渗漏通道**——`no-restricted-imports` 只管静态 import 声明,动态 `import('openai')` 与内联类型引用 `import('openai/resources').X` 都能绕过;对 protocol(全部 bare specifier)与 openai 封锁(全 src/tests)各加 `ImportExpression`/`TSImportType` 语法选择器规则,tests/boundaries.test.ts 有对应探针。
 
 实施要点与边界情况:

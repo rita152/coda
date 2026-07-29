@@ -49,7 +49,7 @@ export interface FauxScript {
   /**
    * 断言层失败通道(测试仪器,规格外的可选扩展):脚本耗尽('throw' 模式)或
    * onRequest 钩子抛异常时经此上报。缺省 queueMicrotask(() => { throw err })——
-   * 未捕获异常使 vitest 判当前测试失败;流本身始终以协议合法的 error 事件收尾(铁律)。
+   * 未捕获异常使 bun:test 判当前测试失败;流本身始终以协议合法的 error 事件收尾(铁律)。
    */
   failFn?: (err: Error) => void;
 }

@@ -3,9 +3,9 @@
 // 密钥永远不进会话 JSONL、不出现在任何 AgentEvent(ModelConfig 不随事件外发)。
 
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import type { CompatFlags, ModelConfig } from '../protocol/index.js';
+import { runtimeHomeDir } from '../shared/index.js';
 
 export interface CodaConfigFile {
   model?: string;
@@ -105,7 +105,7 @@ export interface ResolvedConfig {
   fauxScript?: string;
 }
 
-export function readConfigFile(file = path.join(homedir(), '.coda', 'config.json')): CodaConfigFile {
+export function readConfigFile(file = path.join(runtimeHomeDir(), '.coda', 'config.json')): CodaConfigFile {
   let raw: string;
   try {
     raw = readFileSync(file, 'utf8');
@@ -126,7 +126,7 @@ export function readConfigFile(file = path.join(homedir(), '.coda', 'config.json
 
 export function resolveConfig(
   flags: CliFlags,
-  env: NodeJS.ProcessEnv,
+  env: Readonly<Record<string, string | undefined>>,
   file: CodaConfigFile,
 ): ResolvedConfig {
   const provider = flags.provider ?? 'openai-chat';

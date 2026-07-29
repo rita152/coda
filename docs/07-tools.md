@@ -242,7 +242,7 @@ const BashParams = z.object({
 
 行为规格:
 
-- `spawn(shell, ['-c', command], { detached: true, cwd: workdir ?? ctx.cwd })` 建**进程组**;timeout / abort 时调 `killProcessTree`(SIGTERM → 3s 后 SIGKILL 整棵树)。只 kill 直接子进程会漏掉 `npm run dev` 起的孙进程,这是 detached 进程组的全部意义。
+- `Bun.spawn([shell, '-c', command], { detached: true, cwd: workdir ?? ctx.cwd })` 建**进程组**;timeout / abort 时调 `killProcessTree`(SIGTERM → 3s 后 SIGKILL 整棵树)。只 kill 直接子进程会漏掉 `bun run dev` 起的孙进程,这是 detached 进程组的全部意义。Bun 负责 spawn 与流式 stdout/stderr；POSIX signal/PGID 收尾属于受控 `process` compatibility 边界。
 - stdout + stderr 合并收集进 rolling buffer(只保留 2 × 上限的滚动窗口,防长命令吃内存);**尾部截断**保留末尾 2000 行 / 50KB——命令输出的错误几乎总在尾部,与 read 的头部截断方向相反;超限全文落盘,输出头部注明 `...output truncated...\nFull output saved to: <path>`。details 打 `truncated` 标记跳过框架 post-hook(见 1.6)。
 - `onUpdate` 以 100ms 节流推送增量输出(`tool_execution_update` 事件),CLI 据此渲染实时进度——用户看得见卡在哪,才知道该不该 Esc。
 - 输出显式带退出状态:末尾附 `exit code N`;非 0 → isError: true 但**仍附完整输出**(模型需要 stderr 判断怎么修)。

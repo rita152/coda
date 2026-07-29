@@ -4,7 +4,7 @@
 // 用 mutation 实证过:优先级反转时原有测试全绿,故此矩阵按「同时给出多来源不同值」
 // 构造,任何一层被跳过或反转都必红。另覆盖 parseFlags 的边界文法。
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
 import type { CliFlags, CodaConfigFile } from '../src/cli/config.js';
 import { parseFlags, resolveConfig } from '../src/cli/config.js';
 

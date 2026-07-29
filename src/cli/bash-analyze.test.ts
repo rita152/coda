@@ -2,7 +2,7 @@
 // denylist 各条。关键验收:echo $(rm -rf /) 必 forceConfirm(而非 denied)且理由可见;
 // 'npm test && npm run build' → ['bash:npm *','bash:npm *']。
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test } from 'bun:test';
 import type { BashAnalysis } from './bash-analyze.js';
 import { analyzeBashCommand } from './bash-analyze.js';
 

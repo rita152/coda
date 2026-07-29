@@ -217,7 +217,7 @@ function runExhausted(
     return;
   }
   // 'throw':脚本耗尽即测试 bug。铁律禁止 StreamFn 抛异常,所以在断言层面让测试
-  // 失败:微任务里抛出未捕获异常(vitest 会将其归因到当前测试),流本身仍以
+  // 失败:微任务里抛出未捕获异常(bun:test 会将其归因到当前测试),流本身仍以
   // 协议合法的 error 事件收尾。
   const message = `[faux] script exhausted: unexpected call #${n + 1} (script has ${script.turns.length} turn(s))`;
   reportFailure(script, new Error(message));
@@ -319,7 +319,7 @@ function safeClone<T>(value: T): T {
   }
 }
 
-/** 断言层失败上报:缺省 queueMicrotask 抛未捕获异常(vitest 归因当前测试);可经 failFn 注入拦截。 */
+/** 断言层失败上报:缺省 queueMicrotask 抛未捕获异常(bun:test 归因当前测试);可经 failFn 注入拦截。 */
 function reportFailure(script: FauxScript, err: unknown): void {
   const error = err instanceof Error ? err : new Error(String(err));
   if (script.failFn) {

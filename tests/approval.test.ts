@@ -9,7 +9,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import type {
   AgentEvent,
@@ -264,7 +264,7 @@ describe('★ 审批等待中 abort()(M6 验收 1 后半,R7 时序)', () => {
 
     h.agent.abort();
     broker.abortAll();
-    // 30ms 看门狗:preflight 未修则 run 永不 resolve,这里会超时(vitest 用例超时兜底)
+    // 30ms 看门狗:preflight 未修则 run 永不 resolve,这里会超时(bun:test 用例超时兜底)
     await run;                           // 不死锁——若挂起测试超时即回归
 
     // c2 没有被发起第二次审批(preflight 在 abort 后停止 prepare 剩余 call)
@@ -516,7 +516,7 @@ describe('approval-policy:kind 直通 / doom-loop / bash 升级 / 泛化(docs/07
     );
     const run = h.agent.prompt('go');
     // 正向断言钉死阈值(off-by-one 立即失败,不依赖超时):阈值高方向下三连全直通、run 直接完成
-    // 而从未弹审批 → race 命中 run 分支,expect 立即失败,而非 nextRequest 永久挂起等 vitest 超时。
+    // 而从未弹审批 → race 命中 run 分支,expect 立即失败,而非 nextRequest 永久挂起等 bun:test 超时。
     const raced = await Promise.race([
       nextRequest().then((req) => ({ kind: 'request' as const, req })),
       run.then(() => ({ kind: 'completed' as const })),

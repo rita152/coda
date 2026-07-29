@@ -1,5 +1,5 @@
 // 出站转换测试:逐 role 映射、配对纪律、strict 清洗、参数裁剪(docs/04 §3 + §10 验收)。
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { Context, ModelConfig } from '../../protocol/index.js';
 import { assertToolCallPairing } from '../../../tests/helpers/wire-pairing.js';
 import { detectCompat } from './compat.js';

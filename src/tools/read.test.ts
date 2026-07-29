@@ -4,7 +4,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { FileTracker, MAX_OUTPUT_LINES } from '../shared/index.js';
 import { readTool } from './read.js';
@@ -240,6 +240,29 @@ describe('read:错误路径', () => {
     await expect(readTool.execute({ id: 'call_1', args: { path: 'a.txt' } }, aborted)).rejects.toThrow(
       /aborted/i,
     );
+  });
+
+  it('异步读取期间 abort:图片与空文件均不返回、不登记 FileTracker', async () => {
+    const cases: [string, string | Buffer][] = [
+      ['empty.txt', ''],
+      [
+        'pixel.png',
+        Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      ],
+    ];
+
+    for (const [name, content] of cases) {
+      const abs = write(name, content);
+      const ac = new AbortController();
+      const aborting: ToolContext = { cwd: tmpdir, signal: ac.signal, fileTracker };
+      queueMicrotask(() => ac.abort());
+
+      await expect(readTool.execute({ id: 'call_1', args: { path: name } }, aborting)).rejects.toThrow(/aborted/i);
+      expect(fileTracker.hasRead(abs)).toBe(false);
+    }
   });
 });
 

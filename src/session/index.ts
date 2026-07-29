@@ -9,7 +9,7 @@ export type {
   SessionOptions,
 } from './session.js';
 export { decideRetry, sleepWithAbort } from './retry.js';
-export type { RetryDecision } from './retry.js';
+export type { ResolvedRetryPolicyOptions, RetryDecision, RetrySleep } from './retry.js';
 export { selectTailStart, summarize, SUMMARIZE_PROMPT, HARD_TRUNCATION_SUMMARY } from './compactor.js';
 export {
   defaultSessionDir,

@@ -2,9 +2,17 @@
 // /status //queue 格式化。键位接线依赖真实 TTY,由 repl.ts 头部人工冒烟清单覆盖。
 // 双击消歧用注入时间戳,零真实计时器(docs/10 §8 确定性守则)。
 
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { describe, expect, it } from 'bun:test';
 import type { QueuedMessage } from '../protocol/index.js';
-import type { SessionUsage } from '../session/index.js';
+import { createFauxStreamFn } from '../providers/faux/index.js';
+import { Session } from '../session/index.js';
+import type { SessionEvent, SessionUsage } from '../session/index.js';
+import { createOrderedOutput } from '../shared/index.js';
+import type { Renderer } from './renderer.js';
 import {
   approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
@@ -16,7 +24,18 @@ import {
   formatStatusLines,
   InputHistory,
   parseSlashCommand,
+  startRepl,
 } from './repl.js';
+import type { ReplApproval, ReplInput } from './repl.js';
+
+class TestTtyInput extends PassThrough implements ReplInput {
+  readonly isTTY = true;
+  readonly rawModeChanges: boolean[] = [];
+
+  setRawMode(enabled: boolean): void {
+    this.rawModeChanges.push(enabled);
+  }
+}
 
 describe('parseSlashCommand(docs/09 §3.2)', () => {
   it('识别 /quit /queue /status /help', () => {
@@ -186,5 +205,91 @@ describe('approvalKeyDecision:审批模式键位映射(M6,docs/09 §4)', () => {
     expect(approvalKeyDecision('q')).toBeUndefined();
     expect(approvalKeyDecision('')).toBeUndefined();
     expect(approvalKeyDecision('space')).toBeUndefined();
+  });
+});
+
+describe('REPL 致命输出失败生命周期(docs/09 §1.3/§3)', () => {
+  it('stdout 首次失败会 abort 会话与审批、清理 raw TTY 并 exit 1', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'coda-repl-output-failure-'));
+    const session = await Session.create({
+      dir,
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [], onExhausted: 'emptyStop' }),
+        model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
+        tools: [],
+        systemPrompt: 'test',
+        cwd: dir,
+      },
+    });
+    const stdin = new TestTtyInput();
+    const failure = new Error('broken stdout');
+    const output = createOrderedOutput({
+      write: () => {
+        throw failure;
+      },
+      flush: () => 0,
+    });
+    let approvalListener: ((event: SessionEvent) => void) | undefined;
+    let approvalAborts = 0;
+    let approvalUnsubscribed = false;
+    let approvalResolutions = 0;
+    const approval: ReplApproval = {
+      broker: {
+        resolve: () => {
+          approvalResolutions++;
+        },
+      },
+      onAbort: () => {
+        approvalAborts++;
+      },
+      subscribe: (listener) => {
+        approvalListener = listener;
+        return () => {
+          approvalUnsubscribed = true;
+        };
+      },
+    };
+    let mounts = 0;
+    let unmounts = 0;
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: () => Promise.resolve(),
+      mount: () => {
+        mounts++;
+      },
+      unmount: () => {
+        unmounts++;
+      },
+    };
+
+    try {
+      const exit = startRepl(session, renderer, approval, {
+        stdin,
+        fatalSignal: output.failureSignal,
+      });
+      expect(stdin.rawModeChanges).toEqual([true]);
+      expect(mounts).toBe(1);
+
+      const emitApproval = approvalListener;
+      if (emitApproval === undefined) throw new Error('approval listener was not registered');
+      emitApproval({
+        type: 'approval_request',
+        approvalId: 'approval-1',
+        toolCallId: 'call-1',
+        description: 'bash: risky command',
+      });
+
+      await expect(output.write('trigger failure')).rejects.toBe(failure);
+      await expect(exit).resolves.toBe(1);
+      expect(approvalAborts).toBe(1);
+      expect(approvalUnsubscribed).toBe(true);
+      expect(approvalResolutions).toBe(0);
+      expect(stdin.rawModeChanges).toEqual([true, false]);
+      expect(stdin.listenerCount('keypress')).toBe(0);
+      expect(unmounts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

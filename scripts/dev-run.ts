@@ -1,25 +1,26 @@
 // M3 集成脚本(docs/11-roadmap.md M3 验收 3,手动、不进 CI):真实模型驱动完整 agent loop,
 // 对真实文件执行工具往返。用法:
-//   npx tsx scripts/dev-run.ts "把 fixtures/a.txt 里的 foo 改成 bar" [--model kimi-k3] [--cwd DIR]
+//   bun scripts/dev-run.ts "把 fixtures/a.txt 里的 foo 改成 bar" [--model kimi-k3] [--cwd DIR]
 import { Agent } from '../src/agent/index.js';
 import type { ModelConfig } from '../src/protocol/index.js';
 import { streamOpenAIChat } from '../src/providers/openai-chat/index.js';
+import { createStdoutOutput } from '../src/shared/index.js';
 import { createCodingTools } from '../src/tools/index.js';
 import { loadEndpointEnv } from './env.js';
 
 function flag(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+  const i = Bun.argv.indexOf(`--${name}`);
+  return i >= 0 ? Bun.argv[i + 1] : undefined;
 }
 const modelName = flag('model') ?? 'kimi-k3';
 const cwd = flag('cwd') ?? process.cwd();
-const promptText = process.argv
+const promptText = Bun.argv
   .slice(2)
   .filter((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--model' && arr[i - 1] !== '--cwd')
   .join(' ');
 
 if (promptText.length === 0) {
-  console.error('usage: npx tsx scripts/dev-run.ts "<task>" [--model m] [--cwd dir]');
+  console.error('usage: bun scripts/dev-run.ts "<task>" [--model m] [--cwd dir]');
   process.exit(1);
 }
 const { baseURL, apiKey } = loadEndpointEnv();
@@ -49,14 +50,15 @@ const agent = new Agent({
 
 const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
+const stdout = createStdoutOutput();
 
-agent.subscribe((e) => {
+agent.subscribe(async (e) => {
   switch (e.type) {
     case 'message_update': {
       const ev = e.event;
-      if (ev.type === 'text_delta') process.stdout.write(ev.delta);
-      if (ev.type === 'reasoning_delta') process.stdout.write(dim(ev.delta));
-      if (ev.type === 'reasoning_end' || ev.type === 'text_end') process.stdout.write('\n');
+      if (ev.type === 'text_delta') await stdout.write(ev.delta);
+      if (ev.type === 'reasoning_delta') await stdout.write(dim(ev.delta));
+      if (ev.type === 'reasoning_end' || ev.type === 'text_end') await stdout.write('\n');
       break;
     }
     case 'tool_execution_start':
@@ -86,3 +88,4 @@ agent.subscribe((e) => {
 });
 
 await agent.prompt(promptText);
+await stdout.drain();

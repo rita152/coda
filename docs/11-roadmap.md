@@ -70,15 +70,15 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 ### M0 脚手架
 
 - **目标**:空仓库变成有纪律的仓库——所有后续 PR 的机械检查就位。
-- **交付物**:`package.json`(ESM、bin 占位 `coda`)、`tsconfig.json`(strict、NodeNext)、tsup 构建、vitest 配置、ESLint(含 `import/no-restricted-paths`:`openai` 包仅允许 `src/providers/openai-chat/`;`agent`/`tools`/`protocol` 禁止 import `providers/*`、`cli/*`)、`.gitattributes`(强制 LF,风险 R3 的第一道防线)、CI(lint + build + test 三件套)、`src/` 空目录骨架。
-- **实现要点**:统一入口脚本 `npm run check` = lint + typecheck + build + test,后续所有里程碑的验收第一条都是它;ESLint 边界规则本身要配一个「故意违例」的注释样例文件放在 `eslint` 测试里,防止规则被后人静默删除后无人察觉。
+- **交付物**:`package.json`(Bun 1.3.14、ESM、bin 占位 `coda`)、`bun.lock`、`tsconfig.json`(strict、Bundler resolution)、`Bun.build` 构建脚本、`bun:test` 配置、ESLint(含 `import/no-restricted-paths`:`openai` 包仅允许 `src/providers/openai-chat/`;`agent`/`tools`/`protocol` 禁止 import `providers/*`、`cli/*`)、`.gitattributes`(强制 LF,风险 R3 的第一道防线)、CI(lint + build + test 三件套)、`src/` 空目录骨架。
+- **实现要点**:统一入口脚本 `bun run check` = lint + typecheck + build + test,后续所有里程碑的验收第一条都是它;ESLint 边界规则本身要配一个「故意违例」的注释样例文件放在 `eslint` 测试里,防止规则被后人静默删除后无人察觉。项目工具链与运行时统一固定 Bun 1.3.14；`node:fs` 的目录操作及 append/fsync/truncate、`node:path`、readline/raw TTY、`process` signal/PGID 是 Bun 暂无等价语义时的受控 compatibility 边界,不宣称零 Node API。
 - **前置**:无。
 - **验收**(可执行):
-  1. `npm run build && npm run lint && npm test` 全绿(允许 0 test)。
-  2. 边界规则自证:临时在 `src/agent/x.ts` 写 `import 'openai'`,`npm run lint` 必须报错;删除后恢复绿。对 `src/protocol/` import `openai` 同理。
+  1. `bun run build && bun run lint && bun test` 全绿(允许 0 test)。
+  2. 边界规则自证:临时在 `src/agent/x.ts` 写 `import 'openai'`,`bun run lint` 必须报错;删除后恢复绿。对 `src/protocol/` import `openai` 同理。
   3. CI 在干净 clone 上跑通同样三件套。
 - **规模**:~10 个配置文件,数百行。
-- **Demo 剧本**:「克隆仓库,一条 `npm ci && npm run check` 全绿;故意越界 import,lint 当场拦下。」
+- **Demo 剧本**:「克隆仓库,一条 `bun install --frozen-lockfile && bun run check` 全绿;故意越界 import,lint 当场拦下。」
 
 ### M1 内部协议 + EventStream + faux provider
 
@@ -97,13 +97,13 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 
 - **目标**:[04-provider-adapter](./04-provider-adapter.md) 全量落地;用录制 fixture 把方言差异钉死在测试里。
 - **交付物**:`src/providers/openai-chat/`——出站转换(Context → ChatCompletionMessageParam[],含 system/developer 切换、toolResult 图片拆 user 消息、空 assistant 跳过)、流消费器(手写 `for await`,tool_calls 按 index 累积、容错 JSON 持续刷新 arguments、id 缺失补 `call_<uuid>`、finish_reason 映射、usage 尾 chunk、in-band error)、`CompatFlags` 推断与覆盖、错误映射(APIUserAbortError → aborted,其余 → error + status/requestID);SSE fixture 录制脚本 + fixture 集(纯文本流、tool_calls 分片、并行多 toolcall、length 截断、content_filter、in-band error、无 usage chunk、`reasoning_content` 方言)。
-- **实现要点**:先写录制脚本(`scripts/record-sse.mjs`,把真实 endpoint 的原始 chunk 存为 JSONL fixture),再写消费器——测试驱动的顺序在这里是字面意义的:每个 fixture 就是一条真实世界的方言证词。内部结构照 Vercel AI SDK `openai-compatible` 的两段式:纯函数消息转换 + 带块状态机(isActiveText/当前 toolCall 槽位)的流转换,两段各自可测。
+- **实现要点**:先写录制脚本(`bun scripts/record-fixture.ts`,把真实 endpoint 的原始 chunk 存为 JSONL fixture),再写消费器——测试驱动的顺序在这里是字面意义的:每个 fixture 就是一条真实世界的方言证词。内部结构照 Vercel AI SDK `openai-compatible` 的两段式:纯函数消息转换 + 带块状态机(isActiveText/当前 toolCall 槽位)的流转换,两段各自可测。
 - **前置**:M1。
 - **验收**:
-  1. `npm test -- providers/openai-chat` 全绿,覆盖上述全部 fixture;每个 fixture 断言完整 ProviderEvent 序列 + 最终 AssistantMessage(含 usage、stopReason)。
+  1. `bun test providers/openai-chat` 全绿,覆盖上述全部 fixture;每个 fixture 断言完整 ProviderEvent 序列 + 最终 AssistantMessage(含 usage、stopReason)。
   2. length fixture:产出的 ToolCallPart 带 `rawArguments` 原文,stopReason 为 `length`(不执行的决策在 loop 层,adapter 不隐藏)。
   3. 配对回归:出站转换对「assistant(tool_calls) 后每个 id 都有 role:'tool'」做断言工具函数,供 M4 复用。
-  4. 手动 smoke(不进 CI):`node scripts/smoke-stream.mjs` 对真实 endpoint(OpenAI + 至少一个第三方兼容端点)跑一轮带工具调用的流式请求。
+  4. 手动 smoke(不进 CI):`bun run smoke` 对真实 endpoint(OpenAI + 至少一个第三方兼容端点)跑一轮带工具调用的流式请求。
 - **规模**:~10 文件 / 约 1500 行(fixture 文本另计)。
 - **Demo 剧本**:「一条命令向真实 endpoint 发起带工具 schema 的流式请求,终端逐字打印 delta,结尾打印 stopReason 与 usage;换 baseURL 指向第三方端点同样工作。」
 
@@ -116,7 +116,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 - **验收**:
   1. loop 单测(faux):`tool_calls → 执行 → 回喂 → stop` 两 turn 剧本事件序列正确;toolResult 按 assistant 源顺序回填;`length`+toolCalls 剧本全批合成错误不执行;未知工具名/参数校验失败合成 isError 且任务继续。
   2. 每个工具独立单测:edit 的精确/fuzzy/唯一性/CRLF-BOM 用例;bash 的超时 kill 进程树用例(spawn `sleep 999` 子孙进程,断言全灭);read 的 offset/行号/二进制检测/截断提示;grep 达 limit 时 rg 被 kill。
-  3. 集成脚本(真实模型):`node scripts/dev-run.mjs "把 fixtures/a.txt 里的 foo 改成 bar"`,结束后文件内容变更、终端可见 diff。
+  3. 集成脚本(真实模型):`bun scripts/dev-run.ts "把 fixtures/a.txt 里的 foo 改成 bar"`,结束后文件内容变更、终端可见 diff。
 - **规模**:最大的里程碑,~25 文件 / 约 3500 行。
 - **Demo 剧本**:「对真实模型说一句话,看它 read → edit 完成一次真实文件修改,diff 打在终端上。」
 
@@ -162,7 +162,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 ### M5 CLI REPL + headless + session 持久化
 
 - **目标**:[09-cli](./09-cli.md) 与 [08-session-persistence](./08-session-persistence.md) 的 v1 范围全部交付;从这里开始项目自举(用 coda 开发 coda)。
-- **交付物**:`src/cli/`(readline REPL、Renderer 与 AgentEvent 对应表全量实现、键位表含 Esc 消歧与 Alt+Enter、队列徽标、`--json` headless、`-p` 一次性模式、配置解析 flags>env>config.json)、`src/session/`(JSONL 追加、meta 头行、`--continue`/`--resume` 恢复重放)。
+- **交付物**:`src/cli/`(Bun 1.3.14 + readline/raw TTY compatibility REPL、Renderer 与 AgentEvent 对应表全量实现、键位表含 Esc 消歧与 Alt+Enter、队列徽标、`--json` headless、`-p` 一次性模式、配置解析 flags>env>config.json)、`src/session/`(JSONL 追加、meta 头行、`--continue`/`--resume` 恢复重放)。
 - **里程碑内顺序**:headless 先于交互 REPL——headless 只有百来行且立即可被 CI e2e 覆盖,交互 REPL 的 Renderer 随后按同一张事件对应表实现,等于「先写协议消费的裁判,再写花哨的选手」。session 层与 CLI 并行不冲突(靠 `subscribe` 各自挂监听)。
 - **前置**:M4(需要 `queue_update` 与 abort 语义定形)。
 - **验收**:
@@ -207,13 +207,13 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 |---|---|---|---|
 | R1 | **第三方兼容 endpoint 方言**:max_tokens 字段名、developer role、streaming usage、strict tools、`reasoning_content`、tool 结果后必须跟 assistant 等差异,任何一个都可能 400 或静默降质 | 换 baseURL 后偶发报错或行为异常 | `CompatFlags` 声明化(pi `OpenAICompletionsCompat` 十余项开关即现成 checklist)+ baseURL 自动推断 + 显式覆盖;每种方言录 fixture 进 M2 回归;新端点问题的修复动作固定为「加一个 flag + 一个 fixture」,不改核心 |
 | R2 | **流式 JSON 解析**:tool_calls 按 index 分片、arguments 逐片拼接、id 可能缺失、`length` 时 arguments 是非法/截断 JSON、usage chunk 可能缺失、错误 in-band 出现 | 参数错乱、盲 parse 抛异常、悬空 toolCall | 累积算法照抄 openai-node `ChatCompletionStream.ts`(index 定位、id 兜底 `call_<uuid>`);容错 JSON 解析仅用于流式期间刷新展示,**执行只信 `tool_call_end` 的完整 parse**;`length` 全批不执行是硬规则(pi 同款);全部路径有 fixture |
-| R3 | **Windows CRLF**:模型输出 LF、文件是 CRLF 时 edit 匹配失败;JSONL/fixture 被 git 转换;readline 收 `\r\n` | edit 大面积「oldText not found」、fixture 平台间不一致 | edit 工具「剥离-匹配-还原」策略(M3 单测强制覆盖 CRLF+BOM 用例);`.gitattributes` 强制 LF(M0 落地);会话 JSONL 显式 `\n`;CI 加 Windows job 后置到 M5 |
-| R4 | **readline 流式期间输入处理**:delta 写 stdout 与用户键入竞争同一屏幕;Esc 是转义序列前缀;Alt+Enter 编码因终端而异;粘贴多行误触发 | 输入行被冲花、方向键误触 abort、粘贴即发送 | 单写入者纪律(Renderer 独占 stdout,先清动态区再追加再重绘);`escapeCodeTimeout` 消歧;斜杠命令 `/f` 作为全终端兜底;bracketed paste;非 TTY 降级 plain 模式(详见 [09-cli](./09-cli.md) 第 3、8 节) |
+| R3 | **Windows CRLF**:模型输出 LF、文件是 CRLF 时 edit 匹配失败;JSONL/fixture 被 git 转换;compatibility readline 收 `\r\n` | edit 大面积「oldText not found」、fixture 平台间不一致 | edit 工具「剥离-匹配-还原」策略(M3 单测强制覆盖 CRLF+BOM 用例);`.gitattributes` 强制 LF(M0 落地);会话 JSONL 显式 `\n`;CI 加 Windows job 后置到 M5 |
+| R4 | **readline/raw TTY compatibility 流式期间输入处理**:delta 写 stdout 与用户键入竞争同一屏幕;Esc 是转义序列前缀;Alt+Enter 编码因终端而异;粘贴多行误触发 | 输入行被冲花、方向键误触 abort、粘贴即发送 | Bun 1.3.14 下保留受控 compatibility 边界；单写入者纪律(Renderer 独占 stdout,先清动态区再追加再重绘);`escapeCodeTimeout` 消歧;斜杠命令 `/f` 作为全终端兜底;bracketed paste;非 TTY 降级 plain 模式(详见 [09-cli](./09-cli.md) 第 3、8 节) |
 | R5 | **单体膨胀**:session/压缩/重试/队列全揉进一个类 | 后期不可测、不可拆(pi `AgentSession` 3300 行返工的直接教训) | 目录边界 + ESLint 规则(M0)机械阻止;compaction/retry 一律以 `transformContext`/session 钩子形态存在;M5 起每个里程碑验收含「新能力不得修改 `src/agent` 既有语义」的 diff 审查 |
 | R6 | **zod v4 `z.toJSONSchema()` 与 strict 模式的兼容**:strict:true 要求根 object、全层 `additionalProperties:false`、可选字段进 required + null | OpenAI 端 400 或 schema 静默不生效 | 工具 schema 保持扁平简单(v1 工具全部满足子集);`supportsStrictTools` compat 开关按端点关闭;M2 fixture 含 strict 与非 strict 两种出站快照 |
 | R7 | **审批与中断的时序竞争**:abort 时 pending approval 以「拒绝」形态漏给模型 | 转录中出现幽灵拒绝,模型行为异常 | 照 codex:interrupt 先让任务观察到 cancellation,再清 approvals(M6 验收第 1 条显式覆盖) |
-| R8 | **事件监听 await 串行拖慢热路径**:`subscribe` 监听器逐个 await(pi 为落盘确定性的取舍),慢监听器直接卡住 text_delta | 流式输出肉眼卡顿 | 监听器契约写明「必须快、不做 IO 等待」;session 落盘用同步 append 缓冲、渲染器纯内存;CI 加事件吞吐基准(faux 高频 delta 剧本下的耗时上限) |
-| R9 | **ripgrep 二进制分发**:`@vscode/ripgrep` postinstall 下载在离线/代理环境失败;平台二进制路径差异 | grep 工具在部分环境不可用 | 启动时探测二进制存在,缺失时 grep 工具降级为明确报错(附安装提示)而非静默失效;CI 三平台矩阵验证路径解析 |
+| R8 | **事件监听 await 串行拖慢热路径**:`subscribe` 监听器逐个 await(pi 为落盘确定性的取舍),慢监听器直接卡住 text_delta | 流式输出肉眼卡顿 | 普通监听器必须快;session 落盘用同步 append,Renderer 状态变换只排队。唯一有意的 IO 等待是每个输出事件后的 stdout `drain`,用背压换取不丢输出与可观察错误;CI 吞吐基准使用无阻塞 sink。 |
+| R9 | **ripgrep 二进制分发**:`@vscode/ripgrep` 通过平台 optional dependency 提供二进制,不同 `os` / `cpu` 的解析与路径可能不同 | grep 工具在部分环境不可用 | 由 Bun 1.3.14 安装并按平台过滤 optional dependency；启动时探测二进制存在,缺失时 grep 工具降级为明确报错(附安装提示)而非静默失效；CI 在 macOS 与 Linux 验证路径解析与实际执行 |
 
 ## 4. 机动指南:可并行、可裁剪、不可动摇
 
@@ -237,7 +237,7 @@ CLI 是 `AgentEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定�
 
 ## 6. 里程碑通用完成定义(Definition of Done)
 
-- `npm run check`(lint + typecheck + build + test)全绿;新增代码有对应测试,faux 可测的不上真网。
+- `bun run check`(lint + typecheck + 自包含 test；test 内依次跑 unit、build、e2e)全绿;新增代码有对应测试,faux 可测的不上真网。
 - import 边界零违例(lint 强制,M0 起持续生效);新目录出现时同步补边界规则。
 - 对应设计文档若与实现有出入,同 PR 内更新文档(文档是 canonical,改动需先在文档层想清楚)。
 - 每个里程碑收尾录一次 demo 剧本的实际操作记录(命令 + 输出片段),贴进 PR 描述——demo 跑不通就不算完成。

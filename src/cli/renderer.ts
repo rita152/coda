@@ -24,6 +24,8 @@ export interface RendererOptions {
 export interface Renderer {
   render(e: SessionEvent): void;
   replayTranscript(messages: readonly AgentMessage[]): void;
+  /** 等待此前渲染排队的 stdout 内容；Session listener 用它施加有序背压。 */
+  drain(): Promise<void>;
   // ---- 以下为 repl 专用扩展(main.ts 不感知;plain 模式下多为 no-op)----
   /** 输入行内容进动态区(repl 管键位与输入状态,渲染归这里)。 */
   setInputLine?(text: string): void;
@@ -178,7 +180,13 @@ export function toolHeadline(name: string, args: unknown): string | undefined {
 
 // ---- Renderer 实现 ----
 
-export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): Renderer {
+export interface RendererOutput {
+  enqueue(chunk: string): void;
+  drain(): Promise<void>;
+  columns?: number;
+}
+
+export function createRenderer(out: RendererOutput, opts: RendererOptions): Renderer {
   const color = opts.color;
   // interactive(光标控制/动态区重绘)与 color(SGR 着色)解耦:\x1b[F/\x1b[J 是光标
   // 控制不是着色,NO_COLOR 规范只禁 SGR——无 color 的交互终端仍需动态区,否则 raw mode
@@ -204,7 +212,7 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
   let usage: SessionUsage | undefined;
 
   const write = (s: string): void => {
-    out.write(s);
+    out.enqueue(s);
   };
   const paint = (s: string, code: string): string => (color ? `\x1b[${code}m${s}${RESET}` : s);
   const width = (): number => (typeof out.columns === 'number' && out.columns > 0 ? out.columns : 80);
@@ -559,6 +567,7 @@ export function createRenderer(out: NodeJS.WriteStream, opts: RendererOptions): 
   return {
     render,
     replayTranscript,
+    drain: () => out.drain(),
     setInputLine(text: string): void {
       input = text;
       redrawDyn();

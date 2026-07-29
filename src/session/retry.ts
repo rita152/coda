@@ -1,7 +1,7 @@
 // auto-retry 决策纯函数(规格见 docs/08-session-persistence.md §5.2)。
 // 无 IO、无计时器:只吃「一条 error assistant 消息 + 当前已重试次数」,吐退避决策。
 // 这是从 pi 3300 行教训里换来的形态——重试逻辑一旦与循环控制缠在一起就再也测不动。
-// 退避实际睡眠(sleepWithAbort)是 session 层的副作用,不在本文件。
+// 退避实际睡眠由 session 层调用 RetrySleep;生产默认 sleepWithAbort,测试可注入 gate。
 
 import type { AssistantMessage, ProviderErrorDetails } from '../protocol/index.js';
 
@@ -10,15 +10,23 @@ export interface RetryOptions {
   baseDelayMs?: number; // 默认 1000:指数退避基数
   maxDelayMs?: number; // 默认 32000:单次退避封顶(乘 jitter 前)
   jitter?: () => number; // 默认 Math.random;测试注入确定值以断言退避序列
+  sleep?: RetrySleep; // 默认 sleepWithAbort;测试注入 gate,不推进运行时计时器
 }
 
-export type ResolvedRetryOptions = Required<RetryOptions>;
+/** 可取消的退避等待;实现必须及时观察 signal。true = 已取消,false = 等待完成。 */
+export type RetrySleep = (delayMs: number, signal: AbortSignal) => Promise<boolean>;
+
+/** decideRetry 的完整输入;刻意排除 sleep,保持决策层纯净。 */
+export type ResolvedRetryPolicyOptions = Required<Omit<RetryOptions, 'sleep'>>;
+
+export type ResolvedRetryOptions = ResolvedRetryPolicyOptions & { sleep: RetrySleep };
 
 export const DEFAULT_RETRY_OPTIONS: ResolvedRetryOptions = {
   maxAttempts: 5,
   baseDelayMs: 1000,
   maxDelayMs: 32000,
   jitter: Math.random,
+  sleep: sleepWithAbort,
 };
 
 export function resolveRetryOptions(opts?: RetryOptions): ResolvedRetryOptions {
@@ -33,12 +41,12 @@ export type RetryDecision = { retry: false; reason: string } | { retry: true; de
  *   分类不可重试 / retryable:false → 不重试(理由带 kind)
  *   attempt >= maxAttempts         → 不重试(上限)
  * 否则 base = errorDetails.retryAfterMs ?? baseDelayMs * 2**attempt,
- *     delayMs = min(maxDelayMs, base) * (0.5 + jitter())  —— full jitter。
+ *     delayMs = min(maxDelayMs, base) * (0.5 + jitter())  —— equal jitter。
  */
 export function decideRetry(
   msg: AssistantMessage,
   attempt: number,
-  opts: ResolvedRetryOptions,
+  opts: ResolvedRetryPolicyOptions,
 ): RetryDecision {
   if (msg.stopReason !== 'error') return { retry: false, reason: `stopReason is '${msg.stopReason}', not an error` };
 
@@ -87,7 +95,7 @@ function classifyRetryable(
 /**
  * 可被 abort 取消的退避睡眠(session 层唯一的计时器用法)。
  * resolve(true) = 被 signal 取消(计时器已 clear);resolve(false) = 睡满。绝不 reject。
- * 测试用 vitest fake timers 驱动;abort 路径不依赖计时器,同步生效。
+ * Session 测试注入 gate,不依赖测试运行器的 fake timer;abort 路径同步生效。
  */
 export function sleepWithAbort(ms: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(true);

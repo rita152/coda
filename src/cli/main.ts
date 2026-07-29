@@ -1,10 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → 配置解析 → Session 组装 → 分派
 // headless / 一次性 / 交互 REPL。CLI 是最薄的一层:把输入翻译成 Agent 方法调用,
 // 把事件翻译成像素;不持有会话状态副本。
 
-import { readFileSync } from 'node:fs';
-import process from 'node:process';
 import type { StreamFn } from '../protocol/index.js';
 import { ApprovalBroker } from '../agent/index.js';
 import type { AgentConfig } from '../agent/index.js';
@@ -16,6 +14,7 @@ import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import type { SessionEvent, SessionOptions } from '../session/index.js';
 import { Session } from '../session/index.js';
+import { createStdoutOutput } from '../shared/index.js';
 import { createApprovalPolicy } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
 import { parseFlags, readConfigFile, resolveConfig } from './config.js';
@@ -28,7 +27,7 @@ import { pickSessionInteractive } from './resume-picker.js';
 async function main(): Promise<number> {
   let flags: CliFlags;
   try {
-    flags = parseFlags(process.argv.slice(2));
+    flags = parseFlags(Bun.argv.slice(2));
   } catch (err) {
     console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -39,7 +38,7 @@ async function main(): Promise<number> {
 
   let resolved;
   try {
-    resolved = resolveConfig(flags, process.env, readConfigFile());
+    resolved = resolveConfig(flags, Bun.env, readConfigFile());
   } catch (err) {
     console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -49,7 +48,7 @@ async function main(): Promise<number> {
   // 读空(coda </dev/null 且无 -p):交互 REPL 需要 TTY,进 startRepl 只会无限挂起——
   // 提示用法并 exit 2(放在 Session 创建之前,不为错误路径留下空会话文件)。
   if (!flags.json && flags.prompt === undefined && !process.stdin.isTTY) {
-    const text = readFileSync(0, 'utf8').trim();
+    const text = (await Bun.stdin.text()).trim();
     if (text.length === 0) {
       console.error('[coda] empty stdin and no prompt; usage: coda -p "..."  or  echo "..." | coda');
       return 2;
@@ -58,7 +57,7 @@ async function main(): Promise<number> {
   }
 
   const cwd = flags.cwd ?? process.cwd();
-  const streamFn = makeStreamFn(resolved.provider, resolved.fauxScript);
+  const streamFn = await makeStreamFn(resolved.provider, resolved.fauxScript);
   const tools = createCodingTools();
 
   // 审批模式默认(docs/09 §6.5 修订):交互 REPL → interactive;headless(--json)与 -p
@@ -142,11 +141,22 @@ async function main(): Promise<number> {
   }
   sessionRef.current = session; // 审批 abort 决策的晚绑定目标(policy 的 requestAbort)
 
+  // 输出走有序 Bun FileSink 队列；TTY 能力探测仍由 compatibility 边界的 process.stdout 提供。
+  // Session listener 在每个事件后 drain，给流式输出施加背压；退出路径再做最终 drain。
+  const output = createStdoutOutput();
+  const stdout = {
+    get columns(): number | undefined {
+      return process.stdout.columns;
+    },
+    enqueue: output.enqueue,
+    drain: output.drain,
+  };
+
   if (flags.json) {
-    // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,agent_end 后自动退出
+    // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动退出
     return startHeadless(session, {
       stdin: process.stdin,
-      stdout: process.stdout,
+      stdout,
       ...(flags.prompt !== undefined && { initialPrompt: flags.prompt }),
       ...(approval !== undefined && { approval }),
     });
@@ -154,43 +164,78 @@ async function main(): Promise<number> {
 
   // interactive 由 TTY(且非一次性)决定;color 独立(NO_COLOR/--no-color 只禁 SGR 着色,
   // 不禁动态区光标控制,docs/09 §1.3)
-  const renderer = createRenderer(process.stdout, {
-    color: !flags.noColor && process.stdout.isTTY === true && process.env['NO_COLOR'] === undefined,
+  const renderer = createRenderer(stdout, {
+    color: !flags.noColor && process.stdout.isTTY === true && Bun.env.NO_COLOR === undefined,
     interactive: process.stdout.isTTY === true && flags.prompt === undefined,
   });
+  output.failureSignal.addEventListener(
+    'abort',
+    () => {
+      console.error('[coda] stdout write failed:', output.failureSignal.reason);
+      // -p 没有 REPL 生命周期接管；交互模式由 startRepl 的 fatalSignal 路径统一清理。
+      if (flags.prompt !== undefined) {
+        session.abort();
+        approval?.onAbort();
+      }
+    },
+    { once: true },
+  );
   session.subscribe((e) => {
     renderer.render(e);
+    return renderer.drain();
   });
   // 审批旁路事件同样进 renderer(approval_request 的转录留痕 + 动态区提示)
   approval?.subscribe((e) => {
     renderer.render(e);
+    // ApprovalBroker 是同步边界，无法 await listener；显式消费 rejection，避免审批时
+    // stdout 已失败却无人观察、任务永久悬在 broker.request()。
+    renderer.drain().catch(() => {});
   });
-  if (resumed) renderer.replayTranscript(session.messages);
+  if (resumed) {
+    renderer.replayTranscript(session.messages);
+    await renderer.drain();
+  }
 
   if (flags.prompt !== undefined) {
     // -p 一次性模式:headless 内核的特例(人类可读输出)。退出码同 --json 特例规则
-    // (docs/09 §6.4):agent_end reason 'error' → exit 1(脚本可感知);completed → 0。
-    let exitCode = 0;
-    const unsub = session.subscribe((e) => {
-      if (e.type === 'agent_end' && e.reason === 'error') exitCode = 1;
+    // (docs/09 §6.4):willRetry:true 是中间边界；只按最终 agent_end 决定退出码。
+    let resolveFinalExit!: (code: number) => void;
+    const finalExit = new Promise<number>((resolve) => {
+      resolveFinalExit = resolve;
     });
-    await session.prompt(flags.prompt);
-    await session.close();
-    unsub();
-    return exitCode;
+    const unsub = session.subscribe((e) => {
+      if (e.type === 'error' && e.fatal) {
+        resolveFinalExit(1);
+      } else if (e.type === 'agent_end' && e.willRetry !== true) {
+        resolveFinalExit(e.reason === 'error' ? 1 : 0);
+      }
+    });
+    try {
+      await session.prompt(flags.prompt);
+      const exitCode = await finalExit;
+      await session.close();
+      await renderer.drain();
+      return exitCode;
+    } finally {
+      unsub();
+    }
   }
 
-  return startRepl(session, renderer, approval);
+  const exitCode = await startRepl(session, renderer, approval, {
+    fatalSignal: output.failureSignal,
+  });
+  if (!output.failureSignal.aborted) await renderer.drain();
+  return exitCode;
 }
 
-function makeStreamFn(
+async function makeStreamFn(
   provider: 'openai-chat' | 'anthropic-messages' | 'faux',
   fauxScriptPath?: string,
-): StreamFn {
+): Promise<StreamFn> {
   if (provider === 'faux') {
     const script: FauxScript =
       fauxScriptPath !== undefined
-        ? (JSON.parse(readFileSync(fauxScriptPath, 'utf8')) as FauxScript)
+        ? ((await Bun.file(fauxScriptPath).json()) as FauxScript)
         : { turns: [], onExhausted: 'emptyStop' };
     script.onExhausted = script.onExhausted ?? 'emptyStop';
     return createFauxStreamFn(script);

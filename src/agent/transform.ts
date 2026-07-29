@@ -14,7 +14,6 @@
 // 块归属是唯一正确的匹配维度。不属于任何块的 dangling tool_result 一并丢弃
 // (转录事实层不会自产,但 transformContext 钩子可能产出;本层是出站合法性的最后一道)。
 
-import { createHash } from 'node:crypto';
 import type {
   AgentMessage,
   AssistantMessage,
@@ -176,5 +175,6 @@ function imagePlaceholder(mimeType: string): TextPart {
 
 /** 超长 id 压到 ≤40 字符:'call_' + 内容哈希前 35 位,确定性映射(同 id 恒同像)。 */
 function normalizeToolCallId(id: string): string {
-  return `call_${createHash('sha256').update(id).digest('hex').slice(0, 35)}`;
+  const digest = new Bun.CryptoHasher('sha256').update(id).digest('hex');
+  return `call_${digest.slice(0, 35)}`;
 }

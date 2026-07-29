@@ -1,6 +1,6 @@
-// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`convertMessages(出站快照) > 综合 Context:逐 role 映射、空 assistant 跳过、图片工具结果批后抽出、配对紧邻序一致 1`] = `
+exports[`convertMessages(出站快照) 综合 Context:逐 role 映射、空 assistant 跳过、图片工具结果批后抽出、配对紧邻序一致 1`] = `
 [
   {
     "content": "You are coda.",
@@ -75,7 +75,7 @@ exports[`convertMessages(出站快照) > 综合 Context:逐 role 映射、空 as
 ]
 `;
 
-exports[`toStrictSchema(strict 子集清洗快照) > additionalProperties:false、全属性入 required、可选属性 type 加 null、递归嵌套 1`] = `
+exports[`toStrictSchema(strict 子集清洗快照) additionalProperties:false、全属性入 required、可选属性 type 加 null、递归嵌套 1`] = `
 {
   "additionalProperties": false,
   "properties": {

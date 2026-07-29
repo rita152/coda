@@ -3,10 +3,9 @@
 // Promise(零延迟路径),否则事件进内部 FIFO buffer。无背压(buffer 无上界,上游
 // 天然有界——单条 LLM 流式响应)。
 
-// 惰性求值(每次调用时判定),点号访问以便打包器(esbuild define / DefinePlugin)替换;
-// 无 process 的环境(浏览器)默认视为开发模式。
+// 惰性求值(每次调用时判定);非 Bun 环境默认视为开发模式。
 function warnDev(message: string): void {
-  if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'production') {
+  if (typeof Bun !== 'undefined' && Bun.env.NODE_ENV === 'production') {
     return;
   }
   console.warn(message);

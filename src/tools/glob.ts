@@ -3,8 +3,6 @@
 // --no-require-git 让非 git 目录同样生效);排序抄 gemini-cli sortFileEntries:
 // 24 小时内修改过的文件按 mtime 新→旧排最前,其余按字母序。
 
-import { spawn } from 'node:child_process';
-import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { RG_MISSING_MESSAGE, resolveRgPath } from './rg.js';
@@ -45,36 +43,42 @@ function sortFileEntries(entries: FileEntry[], nowMs: number): FileEntry[] {
 }
 
 /** spawn rg --files 并收集 stdout 行;exit 0/1 均为正常(1 = 无匹配),≥2 才是报错。 */
-function runRgFiles(
+async function runRgFiles(
   rgPath: string,
   pattern: string,
   searchDir: string,
   signal: AbortSignal,
 ): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    // { signal }:abort 时 node 自动 kill 子进程并以 AbortError 走 error 事件
-    const child = spawn(rgPath, ['--files', '--no-require-git', '--glob', pattern], {
-      cwd: searchDir,
-      signal,
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr.on('data', (chunk: string) => (stderr += chunk));
-    child.on('error', (err) => {
-      reject(signal.aborted ? new Error(MSG_ABORTED) : err);
-    });
-    child.on('close', (code) => {
-      if (signal.aborted) return reject(new Error(MSG_ABORTED));
-      if (code !== 0 && code !== 1) {
-        // 典型:glob 语法错误。rg 的 stderr 文案本身面向人可读,转述给模型即可
-        return reject(new Error(`Glob search failed: ${stderr.trim() || `rg exited with code ${String(code)}`}`));
-      }
-      resolve(stdout.split('\n').filter((line) => line.length > 0));
-    });
-  });
+  if (signal.aborted) throw new Error(MSG_ABORTED);
+
+  const child = (() => {
+    try {
+      return Bun.spawn({
+        cmd: [rgPath, '--files', '--no-require-git', '--glob', pattern],
+        cwd: searchDir,
+        signal,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        killSignal: 'SIGTERM',
+      });
+    } catch (err) {
+      if (signal.aborted) throw new Error(MSG_ABORTED);
+      throw err;
+    }
+  })();
+
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (signal.aborted) throw new Error(MSG_ABORTED);
+  if (code !== 0 && code !== 1) {
+    // 典型:glob 语法错误。rg 的 stderr 文案本身面向人可读,转述给模型即可
+    throw new Error(`Glob search failed: ${stderr.trim() || `rg exited with code ${String(code)}`}`);
+  }
+  return stdout.split('\n').filter((line) => line.length > 0);
 }
 
 export const globTool: ToolDefinition<GlobArgs> = {
@@ -92,16 +96,16 @@ export const globTool: ToolDefinition<GlobArgs> = {
     const { pattern } = call.args;
 
     try {
-      const st = await stat(searchDir);
+      const st = await Bun.file(searchDir).stat();
       if (!st.isDirectory()) throw new Error(`Not a directory: ${shownDir}`);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (errorCode(err) === 'ENOENT') {
         throw new Error(`Directory not found: ${shownDir}`);
       }
       throw err;
     }
 
-    const rgPath = resolveRgPath();
+    const rgPath = await resolveRgPath();
     if (rgPath === undefined) throw new Error(RG_MISSING_MESSAGE);
 
     const relPaths = await runRgFiles(rgPath, pattern, searchDir, ctx.signal);
@@ -116,7 +120,7 @@ export const globTool: ToolDefinition<GlobArgs> = {
         const relToCwd = path.relative(ctx.cwd, abs);
         const display = relToCwd === '' || relToCwd.startsWith('..') ? abs : relToCwd;
         try {
-          return { display, mtimeMs: (await stat(abs)).mtimeMs };
+          return { display, mtimeMs: (await Bun.file(abs).stat()).mtimeMs };
         } catch {
           return { display, mtimeMs: 0 };
         }
@@ -136,3 +140,8 @@ export const globTool: ToolDefinition<GlobArgs> = {
     return { content: [{ type: 'text', text }] };
   },
 };
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err)) return undefined;
+  return typeof err.code === 'string' ? err.code : undefined;
+}

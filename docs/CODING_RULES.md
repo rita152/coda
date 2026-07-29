@@ -4,10 +4,11 @@
 
 ## 1. 技术基线
 
-- 使用 Node.js 20+、npm、ESM 和严格 TypeScript；不要引入 CommonJS 写法。
+- 使用 Bun 1.3.14、`bun.lock`、ESM 和严格 TypeScript；不要引入 CommonJS 写法。项目命令统一经 `bun` / `bun run` 执行。
+- Bun API 是默认运行时接口；普通文件内容 I/O、哈希、子进程与流优先使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Node compatibility 仅限 Bun 暂无等价能力的系统边界：`node:fs` / `node:os` 的目录、元数据、临时目录、符号链接和同步耐久性操作，`node:path`，readline/raw TTY，以及 `process` 的 cwd、TTY、退出、signal/PGID 控制。新增或扩大例外必须同步维护对应设计契约；本项目是 Bun-native，但不宣称零 Node API。
 - 相对导入必须写编译后的 `.js` 后缀；纯类型依赖使用 `import type`。
 - 遵守 `strict`、`noUncheckedIndexedAccess`、`verbatimModuleSyntax` 等现有检查；优先用 `unknown` 加收窄，禁止无说明的 `any`、双重断言和规则豁免。
-- 不手改 `dist/`、`node_modules/`、快照或录制 fixture；快照和 fixture 只能通过对应测试/录制流程更新。依赖变更通过 npm 同步更新 `package-lock.json`，禁止提交密钥与 `.env`。
+- 不手改 `dist/`、`node_modules/`、快照或录制 fixture；快照和 fixture 只能通过对应测试/录制流程更新。依赖变更通过 Bun 同步更新 `bun.lock`，禁止提交密钥与 `.env`。
 
 ## 2. 分层与依赖
 
@@ -47,7 +48,7 @@
 
 - 模块单测与实现共置为 `src/**/*.test.ts`；跨模块 agent/session 测试放 `tests/`；构建产物和进程级验证放 `e2e/`。
 - 默认测试必须离线：核心测试使用 faux provider，adapter 使用已录制 JSONL fixture；不得依赖真实 API、密钥或网络。
-- 异步时序优先使用 gate、事件等待和 fake timers，禁止用裸 `setTimeout` 猜时机；只有 e2e 可使用有宽松边界的真实时间。
+- 异步时序优先使用 gate、事件等待和注入式 `sleep` / clock，禁止用裸 `setTimeout` 猜时机；只有 e2e 可使用有宽松边界的真实时间。
 - 文件工具测试使用独立临时目录并清理；断言事件序列、转录内容和副作用，不读取私有状态猜行为。
 - 行为或协议变化必须补回归测试并同步相关 `docs/`；修改架构边界或 ESLint 规则时同步扩展 `tests/boundaries.test.ts`。
-- 开发时可先跑定向 Vitest；交付前必须运行 `npm run check`（lint、typecheck、build、全部测试）。
+- 开发时可先跑定向 `bun test`；交付前必须运行 `bun run check`（lint、typecheck、build、全部测试）。

@@ -1,17 +1,18 @@
 // SSE chunk fixture 录制(docs/10-testing.md §4.3):对真实 endpoint 发起流式请求,
 // 把每条原始 chunk 存为 JSONL。手动运行、fixture 入库;CI 永不联网。
-// 用法:npm run record:fixture -- --model kimi-k3 --scenario text --out src/providers/openai-chat/__fixtures__/kimi-text.jsonl
-import { mkdirSync, writeFileSync } from 'node:fs';
+// 用法:bun run record:fixture -- --model kimi-k3 --scenario text --out src/providers/openai-chat/__fixtures__/kimi-text.jsonl
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line no-restricted-imports -- 录制脚本直接消费原始 wire chunk,是 openai 封锁的显式豁免点
 import OpenAI from 'openai';
 // eslint-disable-next-line no-restricted-imports -- 同上
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions';
+import { createStdoutOutput } from '../src/shared/index.js';
 import { loadEndpointEnv } from './env.js';
 
 function arg(name: string, fallback?: string): string {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i >= 0 && process.argv[i + 1]) return process.argv[i + 1] as string;
+  const i = Bun.argv.indexOf(`--${name}`);
+  if (i >= 0 && Bun.argv[i + 1]) return Bun.argv[i + 1] as string;
   if (fallback !== undefined) return fallback;
   console.error(`missing --${name}`);
   process.exit(1);
@@ -66,10 +67,11 @@ const stream = await client.chat.completions.create({
 } as ChatCompletionCreateParamsStreaming);
 
 const lines: string[] = [];
+const stdout = createStdoutOutput();
 for await (const chunk of stream) {
   lines.push(JSON.stringify(chunk));   // 原样入库(无 headers,无需脱敏;request id 可保留)
-  process.stdout.write('.');
+  await stdout.write('.');
 }
 mkdirSync(path.dirname(out), { recursive: true });
-writeFileSync(out, lines.join('\n') + '\n', 'utf8');
+await Bun.write(out, lines.join('\n') + '\n');
 console.log(`\nrecorded ${lines.length} chunks → ${out}`);

@@ -109,7 +109,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 ### [09 CLI / REPL](./09-cli.md)
 
-交互模式:readline + ANSI 自绘的流式渲染、`queue_update` 队列徽标、键位约定(流式期间 Enter = steer、Alt+Enter = followUp、Esc = abort);headless `--json` 模式的命令与事件格式(stdin JSON 命令、stdout NDJSON AgentEvent)。headless 模式同时是「内部协议对外暴露」的持续验证器。
+交互模式:Bun 1.3.14 运行时 + readline/raw TTY compatibility 边界 + ANSI 自绘的流式渲染、`queue_update` 队列徽标、键位约定(流式期间 Enter = steer、Alt+Enter = followUp、Esc = abort);headless `--json` 模式的命令与事件格式(stdin JSON 命令、stdout NDJSON AgentEvent)。headless 模式同时是「内部协议对外暴露」的持续验证器。
 
 ### [10 测试策略](./10-testing.md)
 
@@ -229,7 +229,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 | 里程碑 | 主要交付 | 动工前精读 |
 |---|---|---|
-| M0 | 脚手架:tsconfig / ESLint 边界 / vitest / CI | 02 |
+| M0 | 脚手架:Bun tsconfig / ESLint 边界 / `bun:test` / CI | 02 |
 | M1 | protocol 类型 + EventStream + faux provider | 03、10 |
 | M2 | Chat Completions adapter | 04、10 |
 | M3 | agent loop + 工具框架 + 七个工具 | 05、07 |

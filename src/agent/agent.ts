@@ -3,7 +3,6 @@
 // 把 subscribe 的 listener 接到 emit。只有 idle/running 两个状态——abort 是
 // 「请求」不是「瞬时动作」,想等中止真正完成用 waitForIdle()。
 
-import { randomUUID } from 'node:crypto';
 import type {
   AgentMessage,
   Context,
@@ -62,7 +61,7 @@ export class Agent {
       systemPrompt: config.systemPrompt,
       cwd: config.cwd ?? process.cwd(),
       fileTracker: new FileTracker(),                 // 会话级 read-before-edit 登记表
-      spillDir: truncationDir(config.truncationScope ?? `agent-${randomUUID().slice(0, 8)}`),
+      spillDir: truncationDir(config.truncationScope ?? `agent-${crypto.randomUUID().slice(0, 8)}`),
       transformContext: config.transformContext,
       beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,

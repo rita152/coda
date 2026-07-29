@@ -116,6 +116,18 @@ export interface ReplApproval {
   subscribe: (listener: (e: SessionEvent) => void) => () => void;
 }
 
+export interface ReplInput extends NodeJS.ReadableStream {
+  readonly isTTY?: boolean;
+  setRawMode(enabled: boolean): void;
+}
+
+export interface ReplOptions {
+  /** 注入仅用于测试；生产默认 process.stdin。 */
+  stdin?: ReplInput;
+  /** stdout 等外部致命边界失败时，由 REPL 自己完成 abort、TTY 清理并 exit 1。 */
+  fatalSignal?: AbortSignal;
+}
+
 // ---- 纯逻辑:本会话输入历史(↑/↓)----
 
 export class InputHistory {
@@ -221,8 +233,9 @@ export async function startRepl(
   session: Session,
   renderer: Renderer,
   approval?: ReplApproval,
+  opts: ReplOptions = {},
 ): Promise<number> {
-  const stdin = process.stdin;
+  const stdin: ReplInput = opts.stdin ?? process.stdin;
   let input = '';
   let cursor = 0;
   const approvalQueue: string[] = []; // pending approvalId FIFO(非空 = 审批键位模式)
@@ -280,29 +293,38 @@ export async function startRepl(
       stdin.removeListener('keypress', onKeypress);
       process.removeListener('SIGWINCH', onResize);
       process.removeListener('SIGTERM', onSignal);
+      opts.fatalSignal?.removeEventListener('abort', onFatalSignal);
       unsub();
       unsubApproval?.();
+      approvalQueue.length = 0;
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       renderer.unmount?.();
     };
 
     /** 退出前:流式中先 abort,session.close() = waitForIdle + flush 落盘(docs/09 §3)。 */
-    const shutdown = async (code: number): Promise<void> => {
+    const shutdown = async (code: number, forceAbort = false): Promise<void> => {
       if (closing) return;
       closing = true;
       try {
-        if (running()) {
+        if (forceAbort || running()) {
           session.abort();
           // R7 时序:abort 在前;pending 审批以 'abort' 决议,否则 waitForIdle 挂死
           approvalQueue.length = 0;
           approval?.onAbort();
         }
         await session.close();
+      } catch (err) {
+        code = 1;
+        console.error('[coda] REPL shutdown failed:', err);
       } finally {
         cleanup();
         resolve(code);
       }
+    };
+
+    const onFatalSignal = (): void => {
+      void shutdown(1, true);
     };
 
     const printErr = (err: unknown): void => {
@@ -521,5 +543,7 @@ export async function startRepl(
 
     renderer.mount?.();
     renderer.setInputLine?.('');
+    opts.fatalSignal?.addEventListener('abort', onFatalSignal, { once: true });
+    if (opts.fatalSignal?.aborted === true) onFatalSignal();
   });
 }

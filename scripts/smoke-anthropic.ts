@@ -1,16 +1,17 @@
 // M7 Anthropic 冒烟(docs/11 M7,手动、不进 CI):经 streamAnthropicMessages 完整管线对真实
 // Messages 端点跑一轮带工具调用的流式往返(claude-opus-5)。tool_result block 原生支持图片,
 // 不需要 openai-chat 的抽出补丁——这是协议表达力的验证点。
-// 用法:npm run smoke:anthropic -- [--model claude-opus-5] [--vision]
+// 用法:bun run smoke:anthropic -- [--model claude-opus-5] [--vision]
 import type { AgentMessage, Context, ModelConfig } from '../src/protocol/index.js';
 import { streamAnthropicMessages } from '../src/providers/anthropic-messages/index.js';
+import { createStdoutOutput } from '../src/shared/index.js';
 import { loadAnthropicEnv } from './env.js';
 
 const modelName = ((): string => {
-  const i = process.argv.indexOf('--model');
-  return i >= 0 && process.argv[i + 1] ? (process.argv[i + 1] as string) : 'claude-opus-5';
+  const i = Bun.argv.indexOf('--model');
+  return i >= 0 && Bun.argv[i + 1] ? (Bun.argv[i + 1] as string) : 'claude-opus-5';
 })();
-const vision = process.argv.includes('--vision');
+const vision = Bun.argv.includes('--vision');
 
 const { baseURL, apiKey } = loadAnthropicEnv();
 if (!apiKey) {
@@ -24,15 +25,18 @@ const model: ModelConfig = {
   apiKey,
   defaults: { maxOutputTokens: 2048 },
 };
+const stdout = createStdoutOutput();
 
 async function runTurn(label: string, ctx: Context): Promise<AgentMessage> {
   console.log(`\n===== ${label} =====`);
   const stream = streamAnthropicMessages(model, ctx);
   for await (const e of stream) {
-    if (e.type === 'reasoning_delta') process.stdout.write(`\x1b[2m${e.delta}\x1b[0m`);
-    if (e.type === 'text_delta') process.stdout.write(e.delta);
+    if (e.type === 'reasoning_delta') await stdout.write(`\x1b[2m${e.delta}\x1b[0m`);
+    if (e.type === 'text_delta') await stdout.write(e.delta);
     if (e.type === 'tool_call_end') {
-      process.stdout.write(`\n[tool_call] ${e.toolCall.name}(${JSON.stringify(e.toolCall.arguments)}) id=${e.toolCall.id}`);
+      await stdout.write(
+        `\n[tool_call] ${e.toolCall.name}(${JSON.stringify(e.toolCall.arguments)}) id=${e.toolCall.id}`,
+      );
     }
   }
   const msg = await stream.result();
@@ -120,3 +124,4 @@ if (vision) {
   const text = vmsg.role === 'assistant' ? vmsg.content.filter((p) => p.type === 'text').map((p) => p.text).join('') : '';
   console.log(`\n[smoke] vision answer: ${text.trim()}`);
 }
+await stdout.drain();

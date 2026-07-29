@@ -1,18 +1,18 @@
 // M7 auto-retry(docs/08-session-persistence.md §5,docs/10 §5 用例 9):
 // faux provider + 真实 tmpdir。纯函数 decideRetry 单测 + session 集成(退避序列、willRetry、
 // retry_scheduled、失败消息被 transform 过滤、成功 turn 重置计数、429 retryAfterMs、退避期 abort)。
-// 计时器纪律:退避真实用 setTimeout,测试一律 vitest fake timers 驱动(唯一允许的计时器用法)。
+// 计时器纪律:生产默认 sleepWithAbort;测试注入受控 sleep gate 并主动放行,不碰真实/fake timer。
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { AssistantMessage, ProviderErrorDetails } from '../src/protocol/index.js';
 import { createFauxStreamFn } from '../src/providers/faux/index.js';
 import type { FauxScript } from '../src/providers/faux/index.js';
-import type { SessionEvent } from '../src/session/index.js';
+import type { RetryOptions, RetrySleep, SessionEvent } from '../src/session/index.js';
 import { decideRetry, Session } from '../src/session/index.js';
-import { DEFAULT_RETRY_OPTIONS } from '../src/session/retry.js';
+import { DEFAULT_RETRY_OPTIONS, sleepWithAbort } from '../src/session/retry.js';
 import { TEST_MODEL } from './helpers/agent-harness.js';
 
 let tmpdir: string;
@@ -20,10 +20,52 @@ beforeEach(() => {
   tmpdir = mkdtempSync(path.join(os.tmpdir(), 'coda-retry-'));
 });
 afterEach(() => {
-  vi.useRealTimers();
-  vi.restoreAllMocks();
   rmSync(tmpdir, { recursive: true, force: true });
 });
+
+interface SleepRequest {
+  delayMs: number;
+  release: () => void;
+}
+
+interface ControlledSleep {
+  sleep: RetrySleep;
+  next: () => Promise<SleepRequest>;
+}
+
+/** 将每次退避暴露为 gate:测试观察 delayMs 后主动 release;abort 则返回 true。 */
+function createControlledSleep(): ControlledSleep {
+  const requests: SleepRequest[] = [];
+  const waiters: Array<(request: SleepRequest) => void> = [];
+
+  const publish = (request: SleepRequest): void => {
+    const waiter = waiters.shift();
+    if (waiter) waiter(request);
+    else requests.push(request);
+  };
+
+  return {
+    sleep: (delayMs, signal) => {
+      if (signal.aborted) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (aborted: boolean): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          resolve(aborted);
+        };
+        const onAbort = (): void => finish(true);
+        signal.addEventListener('abort', onAbort, { once: true });
+        publish({ delayMs, release: () => finish(false) });
+      });
+    },
+    next: () => {
+      const request = requests.shift();
+      return request ? Promise.resolve(request) : new Promise<SleepRequest>((resolve) => waiters.push(resolve));
+    },
+  };
+}
 
 // ---------- harness ----------
 
@@ -31,10 +73,15 @@ interface Harness {
   session: Session;
   events: SessionEvent[];
   streamFn: ReturnType<typeof createFauxStreamFn>;
+  sleep: ControlledSleep;
   waitForEvent: (pred: (e: SessionEvent) => boolean) => Promise<SessionEvent>;
 }
 
-function instrument(session: Session, streamFn: ReturnType<typeof createFauxStreamFn>): Harness {
+function instrument(
+  session: Session,
+  streamFn: ReturnType<typeof createFauxStreamFn>,
+  sleep: ControlledSleep,
+): Harness {
   const events: SessionEvent[] = [];
   const waiters: { pred: (e: SessionEvent) => boolean; resolve: (e: SessionEvent) => void }[] = [];
   session.subscribe((e) => {
@@ -51,6 +98,7 @@ function instrument(session: Session, streamFn: ReturnType<typeof createFauxStre
     session,
     events,
     streamFn,
+    sleep,
     waitForEvent: (pred) =>
       new Promise<SessionEvent>((resolve) => {
         const hit = events.find(pred);
@@ -62,17 +110,18 @@ function instrument(session: Session, streamFn: ReturnType<typeof createFauxStre
 
 async function makeSession(
   script: FauxScript,
-  retry?: Parameters<typeof Session.create>[0]['retry'],
+  retry?: RetryOptions,
 ): Promise<Harness> {
   const streamFn = createFauxStreamFn(script);
+  const sleep = createControlledSleep();
   const session = await Session.create({
     dir: tmpdir,
-    retry,
+    retry: { ...retry, sleep: retry?.sleep ?? sleep.sleep },
     // 关闭 compaction 干扰(无 limits 本就不触发,这里显式)
     compaction: { enabled: false },
     agentConfig: { streamFn, model: TEST_MODEL, tools: [], systemPrompt: 'test', cwd: tmpdir },
   });
-  return instrument(session, streamFn);
+  return instrument(session, streamFn, sleep);
 }
 
 // 确定 jitter:factor = 0.5 + 0.5 = 1.0 → delayMs 恰为 min(maxDelayMs, base)
@@ -155,16 +204,16 @@ describe('decideRetry 纯函数(docs/08 §5.2)', () => {
     expect(DEFAULT_RETRY_OPTIONS.maxAttempts).toBe(5);
     expect(DEFAULT_RETRY_OPTIONS.baseDelayMs).toBe(1000);
     expect(DEFAULT_RETRY_OPTIONS.maxDelayMs).toBe(32000);
+    expect(DEFAULT_RETRY_OPTIONS.sleep).toBe(sleepWithAbort);
   });
 });
 
 // ==================================================================
-// B. session 集成(fake timers)
+// B. session 集成(受控 sleep gate)
 // ==================================================================
 
 describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => {
   it('turn1 error(500) → 退避 → turn2 成功:willRetry/retry_scheduled/出站一致', async () => {
-    vi.useFakeTimers();
     const h = await makeSession(
       {
         turns: [
@@ -185,10 +234,11 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     const annotated = h.events.find((e) => e.type === 'agent_end');
     expect(annotated?.type === 'agent_end' && (annotated as { willRetry?: boolean }).willRetry).toBe(true);
 
-    // 退避时长:advance 不足不续跑,advance 到点才续跑
-    await vi.advanceTimersByTimeAsync(999);
+    // sleep gate 未放行时不续跑;主动放行后才 continue
+    const waiting = await h.sleep.next();
+    expect(waiting.delayMs).toBe(1000);
     expect(h.streamFn.calls).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1);
+    waiting.release();
     await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry);
 
     expect(h.streamFn.calls).toHaveLength(2);
@@ -205,7 +255,6 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
   });
 
   it('退避序列(500 连续失败):1000,2000,4000,8000,16000 后到上限透传 agent_end', async () => {
-    vi.useFakeTimers();
     const errTurn = err({ kind: 'http', status: 500, retryable: true });
     const h = await makeSession(
       { turns: [errTurn, errTurn, errTurn, errTurn, errTurn, errTurn] },   // 6 次全失败
@@ -216,11 +265,12 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     const expected = [1000, 2000, 4000, 8000, 16000];
     for (const delay of expected) {
       await h.waitForEvent((e) => e.type === 'retry_scheduled' && e.delayMs === delay);
-      await vi.advanceTimersByTimeAsync(delay);
+      const waiting = await h.sleep.next();
+      expect(waiting.delayMs).toBe(delay);
+      waiting.release();
     }
     // 第 6 次失败:attempt 5 >= maxAttempts 5 → 不再调度重试,透传终态 agent_end
-    await vi.advanceTimersByTimeAsync(1);
-    for (let i = 0; i < 16; i++) await Promise.resolve();
+    await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry);
 
     const scheduled = h.events.filter((e) => e.type === 'retry_scheduled');
     expect(scheduled.map((e) => (e as { delayMs: number }).delayMs)).toEqual(expected);
@@ -235,7 +285,6 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
   });
 
   it('不可重试(400 参数错)不退避,直接透传 agent_end', async () => {
-    vi.useFakeTimers();
     const h = await makeSession(
       { turns: [err({ kind: 'http', status: 400, retryable: false }, 'invalid param')] },
       FIXED_JITTER,
@@ -250,7 +299,6 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
   });
 
   it('429 采用 retryAfterMs 作为退避', async () => {
-    vi.useFakeTimers();
     const h = await makeSession(
       {
         turns: [
@@ -263,14 +311,15 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     void h.session.prompt('go');
     const scheduled = await h.waitForEvent((e) => e.type === 'retry_scheduled');
     expect((scheduled as { delayMs: number }).delayMs).toBe(5000);   // retryAfterMs,非 base*2**0
-    await vi.advanceTimersByTimeAsync(5000);
+    const waiting = await h.sleep.next();
+    expect(waiting.delayMs).toBe(5000);
+    waiting.release();
     await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry);
     expect(h.streamFn.calls).toHaveLength(2);
     await h.session.close();
   });
 
   it('成功 turn 重置 attempt:先失败一次重试成功,再次失败仍从 base 起算', async () => {
-    vi.useFakeTimers();
     const errTurn = err({ kind: 'http', status: 500, retryable: true });
     const h = await makeSession(
       {
@@ -286,23 +335,34 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
 
     void h.session.prompt('go');
     await h.waitForEvent((e) => e.type === 'retry_scheduled' && e.delayMs === 1000);
-    await vi.advanceTimersByTimeAsync(1000);
+    const firstWaiting = await h.sleep.next();
+    expect(firstWaiting.delayMs).toBe(1000);
+    firstWaiting.release();
     await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry);
+    await h.session.agent.waitForIdle();
 
     // 第二轮:因为成功 turn 已把 attempt 归零,退避序号从 0(delay 1000)重新开始
     const before = h.events.filter((e) => e.type === 'retry_scheduled').length;
     void h.session.prompt('again');
-    await h.waitForEvent((e) => e.type === 'retry_scheduled' && h.events.filter((x) => x.type === 'retry_scheduled').length > before);
+    const secondWaiting = await h.sleep.next();
     const second = h.events.filter((e) => e.type === 'retry_scheduled');
+    expect(second).toHaveLength(before + 1);
     expect((second[second.length - 1] as { delayMs: number }).delayMs).toBe(1000);   // 未累积到 2000
-    await vi.advanceTimersByTimeAsync(1000);
-    await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry && (e as { messages: unknown[] }).messages.length > 0);
+    expect(secondWaiting.delayMs).toBe(1000);
+    const beforeEnds = h.events.filter((e) => e.type === 'agent_end').length;
+    const secondDone = h.waitForEvent(
+      (e) =>
+        e.type === 'agent_end' &&
+        !(e as { willRetry?: boolean }).willRetry &&
+        h.events.filter((x) => x.type === 'agent_end').length > beforeEnds,
+    );
+    secondWaiting.release();
+    await secondDone;
     await h.session.close();
     expect(h.streamFn.calls).toHaveLength(4);
   });
 
   it('退避等待期间 abort 立即生效:取消续跑,补发 error 事件', async () => {
-    vi.useFakeTimers();
     const h = await makeSession(
       {
         turns: [
@@ -314,24 +374,50 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     );
     void h.session.prompt('go');
     await h.waitForEvent((e) => e.type === 'retry_scheduled');
+    const waiting = await h.sleep.next();
+    expect(waiting.delayMs).toBe(1000);
 
     h.session.abort();                          // 退避睡眠中途取消
     await h.waitForEvent((e) => e.type === 'error');
 
-    // 不再续跑(即便把时钟推到底)
-    await vi.advanceTimersByTimeAsync(60000);
-    await Promise.resolve();
+    // signal 取消 gate 后不再续跑
     expect(h.streamFn.calls).toHaveLength(1);
     const cancelled = h.events.find((e) => e.type === 'error');
     expect(cancelled?.type === 'error' && /cancel/i.test(cancelled.message)).toBe(true);
     await h.session.close();
   });
 
+  it('自定义 RetrySleep reject:升级为 fatal error,不再续跑', async () => {
+    const sleepError = new Error('injected sleep failure');
+    const h = await makeSession(
+      {
+        turns: [
+          err({ kind: 'http', status: 500, retryable: true }),
+          { events: [{ kind: 'text', text: 'should not run' }] },
+        ],
+      },
+      {
+        ...FIXED_JITTER,
+        sleep: () => Promise.reject(sleepError),
+      },
+    );
+
+    void h.session.prompt('go');
+    const fatal = await h.waitForEvent((e) => e.type === 'error' && e.fatal);
+
+    expect(fatal).toMatchObject({
+      type: 'error',
+      fatal: true,
+      message: expect.stringContaining('injected sleep failure'),
+    });
+    expect(h.streamFn.calls).toHaveLength(1);
+    await h.session.close();
+  });
+
   it('收到 willRetry 的 agent_end 时同步 abort:仍补发 cancel error,不悬空(docs/08 §5.3)', async () => {
     // 核查发现:UI 把 willRetry 映射成「可取消的重试中」,收到该 agent_end 即同步 abort 是合理设计。
     // 此刻 op 已登记但 IIFE 续体尚未运行,controller 被同步置 aborted——早退分支若不补发 cancel error,
-    // UI 永久停在「重试中」。修复后:op 不因 aborted 早退,交给 #runRetry 的 sleepWithAbort 补发。
-    vi.useFakeTimers();
+    // UI 永久停在「重试中」。修复后:op 不因 aborted 早退,交给 #runRetry 的 sleep 补发。
     const h = await makeSession(
       {
         turns: [
@@ -352,8 +438,6 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     void h.session.prompt('go');
     await h.waitForEvent((e) => e.type === 'error' && /cancel/i.test((e as { message: string }).message));
 
-    await vi.advanceTimersByTimeAsync(60000);
-    await Promise.resolve();
     expect(abortedOnWillRetry).toBe(true);
     expect(h.streamFn.calls).toHaveLength(1);     // 未续跑
     const cancelled = h.events.find((e) => e.type === 'error');

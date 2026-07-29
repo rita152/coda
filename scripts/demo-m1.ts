@@ -1,6 +1,7 @@
 // M1 demo(docs/11-roadmap.md):faux provider 在终端逐字打印一条流式 assistant 消息,全程无网络。
-// 运行:npm run demo:m1
+// 运行:bun run demo:m1
 import { createFauxStreamFn } from '../src/providers/faux/index.js';
+import { createStdoutOutput } from '../src/shared/index.js';
 
 const streamFn = createFauxStreamFn({
   turns: [{
@@ -13,13 +14,14 @@ const streamFn = createFauxStreamFn({
 });
 
 const stream = streamFn({ ref: { provider: 'faux', api: 'faux', model: 'demo' } }, { messages: [] });
+const stdout = createStdoutOutput();
 
 for await (const event of stream) {
-  if (event.type === 'reasoning_start') process.stdout.write('\x1b[2m[thinking] ');
-  if (event.type === 'reasoning_delta' || event.type === 'text_delta') process.stdout.write(event.delta);
-  if (event.type === 'reasoning_end') process.stdout.write('\x1b[0m\n');
+  if (event.type === 'reasoning_start') await stdout.write('\x1b[2m[thinking] ');
+  if (event.type === 'reasoning_delta' || event.type === 'text_delta') await stdout.write(event.delta);
+  if (event.type === 'reasoning_end') await stdout.write('\x1b[0m\n');
   if (event.type === 'done') {
     const { stopReason, usage } = event.message;
-    process.stdout.write(`\n\n[done] stopReason=${stopReason} usage=${JSON.stringify(usage)}\n`);
+    await stdout.write(`\n\n[done] stopReason=${stopReason} usage=${JSON.stringify(usage)}\n`);
   }
 }

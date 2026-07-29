@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2023"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "types": ["node"],
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "types": ["bun"],
 
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -17,5 +18,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "scripts", "e2e", "tsup.config.ts", "vitest.config.ts"]
+  "include": ["src", "tests", "scripts", "e2e"]
 }

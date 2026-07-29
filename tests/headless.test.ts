@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { createInterface } from 'node:readline';
-import { expect, test } from 'vitest';
+import { expect, test } from 'bun:test';
 import { startHeadless } from '../src/cli/headless.js';
 import { Session } from '../src/session/index.js';
 import { PROTOCOL_VERSION } from '../src/session/index.js';
@@ -29,7 +29,7 @@ interface HeadlessRun {
   sendRaw: (text: string) => void;
   /** faux 调用留档:出站转录断言用(docs/10 §5——不猜内部状态,只看 wire 面)。 */
   streamFn: ReturnType<typeof createFauxStreamFn>;
-  /** 等待谓词命中的事件(先查历史再等未来;看门狗是 vitest 用例超时,无裸计时器)。 */
+  /** 等待谓词命中的事件(先查历史再等未来;看门狗是 bun:test 用例超时,无裸计时器)。 */
   waitForEvent: (pred: (e: Ev) => boolean) => Promise<Ev>;
 }
 
@@ -66,7 +66,15 @@ async function startRun(script: FauxScript): Promise<HeadlessRun> {
     }
   });
 
-  const exit = startHeadless(session, { stdin, stdout });
+  const exit = startHeadless(session, {
+    stdin,
+    stdout: {
+      enqueue: (chunk) => {
+        stdout.write(chunk);
+      },
+      drain: () => Promise.resolve(),
+    },
+  });
   return {
     stdin,
     lines,

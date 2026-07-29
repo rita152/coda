@@ -2,7 +2,7 @@
 // 返回 undefined,列表打到 stderr(stdout 是内容通道,选择器绝不污染)。
 
 import { PassThrough } from 'node:stream';
-import { expect, test } from 'vitest';
+import { expect, test } from 'bun:test';
 import { pickSessionInteractive } from '../src/cli/resume-picker.js';
 import type { SessionListItem } from '../src/session/index.js';
 

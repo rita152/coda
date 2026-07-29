@@ -35,7 +35,7 @@ interface AgentConfig {
 }
 ```
 
-补充字段(本文档新增,不改上述 API 语义):`AgentConfig.cwd?: string`(工具执行工作目录,默认 `process.cwd()`,填充 `ToolContext.cwd`)。Agent 实例另持有一个会话级 `FileTracker`(read-before-edit 约束的登记表,见 [07](./07-tools.md)),随 `ToolContext` 传给每次工具执行。
+补充字段(本文档新增,不改上述 API 语义):`AgentConfig.cwd?: string`(工具执行工作目录,由 Bun CLI 启动层解析并显式注入,填充 `ToolContext.cwd`)。Agent 实例另持有一个会话级 `FileTracker`(read-before-edit 约束的登记表,见 [07](./07-tools.md)),随 `ToolContext` 传给每次工具执行。
 
 ### 1.1 状态机
 
@@ -391,7 +391,7 @@ Agent.abort() ──> taskAbort: AbortController            // 每次 run(prompt
                     └─ 工具执行 child signal × N          // 每个 tool.execute 一个(ToolContext.signal)
 ```
 
-用 child(`AbortSignal.any([taskSignal])`,Node ≥ 20.3;或手动 link 并在 finally 里 removeEventListener)而不是全员共享一个 signal,理由:(a) 未来的单工具级取消(per-tool timeout、doom-loop 强杀单个调用)不必牵连整个 run;(b) 长 run 中数百次执行往同一个 signal 上 addEventListener 会泄漏与告警,child 随执行结束解除挂接;(c) codex 的 cancellation token 树(task token → 采样/工具 child token)是同构验证。
+用 child(`AbortSignal.any([taskSignal])`,由 Bun 1.3.14 运行时基线保证;或手动 link 并在 finally 里 removeEventListener)而不是全员共享一个 signal,理由:(a) 未来的单工具级取消(per-tool timeout、doom-loop 强杀单个调用)不必牵连整个 run;(b) 长 run 中数百次执行往同一个 signal 上 addEventListener 会泄漏与告警,child 随执行结束解除挂接;(c) codex 的 cancellation token 树(task token → 采样/工具 child token)是同构验证。
 
 abort 发生在不同时点的行为:
 

@@ -11,10 +11,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { createInterface } from 'node:readline';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'bun:test';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
+import type { RetryOptions } from '../session/index.js';
 import { startHeadless } from './headless.js';
 
 interface Ev {
@@ -27,6 +28,7 @@ interface RunOptions {
   initialPrompt?: string;
   /** 覆盖 systemPrompt(函数 throw 可触发 loop 防御路径的 fatal 事件)。 */
   systemPrompt?: string | (() => string);
+  retry?: RetryOptions;
 }
 
 interface HeadlessRun {
@@ -37,10 +39,19 @@ interface HeadlessRun {
   waitForEvent: (pred: (e: Ev) => boolean) => Promise<Ev>;
 }
 
+function signal(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
 async function startRun(opts: RunOptions): Promise<HeadlessRun> {
   const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-cli-'));
   const session = await Session.create({
     dir,
+    ...(opts.retry !== undefined && { retry: opts.retry }),
     agentConfig: {
       streamFn: createFauxStreamFn(opts.script),
       model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
@@ -69,7 +80,12 @@ async function startRun(opts: RunOptions): Promise<HeadlessRun> {
 
   const exit = startHeadless(session, {
     stdin,
-    stdout,
+    stdout: {
+      enqueue: (chunk) => {
+        stdout.write(chunk);
+      },
+      drain: () => Promise.resolve(),
+    },
     ...(opts.initialPrompt !== undefined && { initialPrompt: opts.initialPrompt }),
   });
   return {
@@ -136,4 +152,119 @@ test('initialPrompt 一次性特例:agent_end reason error → exit 1(脚本可�
   await expect(run.exit).resolves.toBe(1);
   const end = run.events.find((e) => e.type === 'agent_end');
   expect(end?.['reason']).toBe('error');
+});
+
+test('initialPrompt 一次性特例:RetrySleep reject 发 fatal error 并 exit 1', async () => {
+  const run = await startRun({
+    script: {
+      turns: [
+        {
+          error: {
+            message: 'temporary outage',
+            details: { kind: 'http', status: 503, retryable: true },
+          },
+        },
+      ],
+    },
+    initialPrompt: 'retry once',
+    retry: {
+      jitter: () => 0.5,
+      sleep: () => Promise.reject(new Error('injected sleep failure')),
+    },
+  });
+
+  await expect(run.exit).resolves.toBe(1);
+  const fatal = run.events.find((e) => e.type === 'error' && e['fatal'] === true);
+  expect(String(fatal?.['message'])).toContain('injected sleep failure');
+  const ends = run.events.filter((e) => e.type === 'agent_end');
+  expect(ends).toHaveLength(1);
+  expect(ends[0]?.['willRetry']).toBe(true);
+});
+
+test('protocol stdout 失败会关闭 Session、只诊断一次并 exit 1', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-output-failure-'));
+  const session = await Session.create({
+    dir,
+    agentConfig: {
+      streamFn: createFauxStreamFn({ turns: [], onExhausted: 'emptyStop' }),
+      model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
+      tools: [],
+      systemPrompt: 'test',
+      cwd: dir,
+    },
+  });
+  const failure = new Error('broken stdout');
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  try {
+    await expect(
+      startHeadless(session, {
+        stdin: new PassThrough(),
+        stdout: {
+          enqueue: () => undefined,
+          drain: () => Promise.reject(failure),
+        },
+      }),
+    ).resolves.toBe(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    await expect(session.prompt('after close')).rejects.toThrow(/closed/i);
+  } finally {
+    errorSpy.mockRestore();
+  }
+});
+
+test('Session listener 等待每条 NDJSON drain 后才放行下一事件', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-backpressure-'));
+  const session = await Session.create({
+    dir,
+    agentConfig: {
+      streamFn: createFauxStreamFn({
+        turns: [{ events: [{ kind: 'text', text: 'answer' }] }],
+        onExhausted: 'emptyStop',
+      }),
+      model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
+      tools: [],
+      systemPrompt: 'test',
+      cwd: dir,
+    },
+  });
+  const stdin = new PassThrough();
+  const protocolDrain = signal();
+  const firstEventDrain = signal();
+  const firstEventBlocked = signal();
+  const agentEnded = signal();
+  const events: Ev[] = [];
+  let drainCalls = 0;
+
+  const exit = startHeadless(session, {
+    stdin,
+    stdout: {
+      enqueue(chunk) {
+        const event = JSON.parse(chunk) as Ev;
+        events.push(event);
+        if (event.type === 'agent_end') agentEnded.open();
+      },
+      drain() {
+        drainCalls++;
+        if (drainCalls === 1) return protocolDrain.promise;
+        if (drainCalls === 2) {
+          firstEventBlocked.open();
+          return firstEventDrain.promise;
+        }
+        return Promise.resolve();
+      },
+    },
+  });
+
+  expect(events.map((e) => e.type)).toEqual(['protocol']);
+  protocolDrain.open();
+  stdin.write(`${JSON.stringify({ type: 'prompt', text: 'go' })}\n`);
+
+  await firstEventBlocked.promise;
+  expect(events.map((e) => e.type)).toEqual(['protocol', 'agent_start']);
+
+  firstEventDrain.open();
+  await agentEnded.promise;
+  stdin.end();
+  await expect(exit).resolves.toBe(0);
 });

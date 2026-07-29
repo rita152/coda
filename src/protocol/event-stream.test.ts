@@ -1,5 +1,5 @@
 // EventStream 语义测试(docs/03-internal-protocol.md 第 5 节 + 第 10 节验收清单)。
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
 import { EventStream } from './event-stream.js';
 
 async function collect<T, R>(stream: EventStream<T, R>): Promise<T[]> {

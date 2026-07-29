@@ -2,7 +2,7 @@
 // 每个用例断言管道纪律:stdout 每一行都可 JSON.parse(parseErrors 为空)。
 // 除标注的 steer 宽松时序用例(retry: 1)外,一切等待都是事件驱动 + 30s 看门狗。
 
-import { afterEach, beforeAll, expect, test } from 'vitest';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { CodaProc } from './harness.js';
 import {
   assertSubsequence,
@@ -31,7 +31,7 @@ function track(p: CodaProc): CodaProc {
 
 const T = { timeout: CASE_TIMEOUT_MS };
 
-test('case 1: pure text conversation — protocol header, event order, exit 0', T, async () => {
+test('case 1: pure text conversation — protocol header, event order, exit 0', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -70,9 +70,9 @@ test('case 1: pure text conversation — protocol header, event order, exit 0', 
   // 管道纪律:stdout 每一行都可 JSON.parse,且除 NDJSON 外零输出
   expect(proc.parseErrors).toEqual([]);
   expect(proc.lines.length).toBe(proc.events.length);
-});
+}, T);
 
-test('case 2: tool loop — read preset file, tool_execution_* events and tool_result content', T, async () => {
+test('case 2: tool loop — read preset file, tool_execution_* events and tool_result content', async () => {
   const proc = track(
     startCoda({
       files: { 'data.txt': 'e2e read payload\nsecond line\n' },
@@ -116,12 +116,12 @@ test('case 2: tool loop — read preset file, tool_execution_* events and tool_r
   const toolResultEnd = proc.events.find((e) => e.type === 'message_end' && msgRole(e) === 'tool_result');
   expect(msgText(toolResultEnd)).toContain('e2e read payload');
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
 // 宽松时序用例(docs/10 §7 用例 3):文件脚本无 gate,依赖 bash `sleep 0.5` 的执行窗口
 // 在工具运行期间注入命令——e2e 是唯一允许这种宽松时序的层,按 §8 flake 政策标 retry: 1。
 // 其精确版本已在 L4 用 gate 钉死,此处只验「管道通」。prompt-running 冲突共用同一窗口。
-test('case 3: steer during tool run — steering injected at turn boundary; prompt conflict is non-fatal', { timeout: CASE_TIMEOUT_MS, retry: 1 }, async () => {
+test('case 3: steer during tool run — steering injected at turn boundary; prompt conflict is non-fatal', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -166,9 +166,9 @@ test('case 3: steer during tool run — steering injected at turn boundary; prom
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, { timeout: CASE_TIMEOUT_MS, retry: 1 });
 
-test('case 4: abort — agent_end(aborted) and clean exit', T, async () => {
+test('case 4: abort — agent_end(aborted) and clean exit', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -187,9 +187,9 @@ test('case 4: abort — agent_end(aborted) and clean exit', T, async () => {
   proc.send({ type: 'shutdown' });
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('shutdown while running — abort → waitForIdle → flush → exit 0', T, async () => {
+test('shutdown while running — abort → waitForIdle → flush → exit 0', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -206,9 +206,9 @@ test('shutdown while running — abort → waitForIdle → flush → exit 0', T,
   expect(end['reason']).toBe('aborted');
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);
 
-test('invalid stdin lines — non-fatal error, pipe continues; EOF acts as shutdown', T, async () => {
+test('invalid stdin lines — non-fatal error, pipe continues; EOF acts as shutdown', async () => {
   const proc = track(
     startCoda({
       script: {
@@ -240,4 +240,4 @@ test('invalid stdin lines — non-fatal error, pipe continues; EOF acts as shutd
   proc.endStdin(); // stdin EOF 视同 shutdown(docs/09 §6.4)
   expect(await proc.waitForExit()).toBe(0);
   expect(proc.parseErrors).toEqual([]);
-});
+}, T);

@@ -1,7 +1,7 @@
 // M4 steering / follow-up 语义矩阵(docs/06 七条语义 + §11 验收清单 + docs/11 M4 测试矩阵)。
 // 时序控制只用 gate 与事件等待;出站断言用 faux 的 calls(docs/10 §5)。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { AgentEvent, UserMessage } from '../src/protocol/index.js';
 import { createGate } from '../src/providers/faux/index.js';
 import { makeHarness, makeTool, textOutput } from './helpers/agent-harness.js';
@@ -357,7 +357,7 @@ describe('起跑前 poll(注入点 ①)', () => {
     const ups = queueUpdates(h.events);
     expect(ups).toHaveLength(4);                                     // 入队 ×2 + [A] drain + [I] drain
     const ids = ups[1]?.steering.map((q) => q.id) ?? [];
-    expect(ups[2]?.steering.map((q) => q.id)).toEqual([ids[1]]);     // 第 1 条已出队,快照只剩第 2 条
+    expect(ups[2]?.steering.map((q) => q.id)).toEqual([ids[1] as string]);     // 第 1 条已出队,快照只剩第 2 条
     expect(ups[3]?.steering).toEqual([]);
     const drainIdx = h.events.indexOf(ups[2] as AgentEvent);
     const firstInjectIdx = h.events.findIndex((e) => e.type === 'message_start');
@@ -394,7 +394,7 @@ describe('queue_update 事件(docs/06 §8)', () => {
     // 注入时机的 queue_update:快照按序缩减,且注入消息的 message_start.id 与出队 id 对应
     const updates = queueUpdates(h.events);
     const injectionUpdates = updates.slice(2);
-    expect(injectionUpdates[0]?.steering.map((q) => q.id)).toEqual([ids[1]]);   // 第 1 条已出队
+    expect(injectionUpdates[0]?.steering.map((q) => q.id)).toEqual([ids[1] as string]);   // 第 1 条已出队
     expect(injectionUpdates[1]?.steering).toEqual([]);                          // 第 2 条已出队
     const injectedIds = h.events
       .filter((e): e is Extract<AgentEvent, { type: 'message_start' }> => e.type === 'message_start')

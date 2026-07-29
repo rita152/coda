@@ -3,7 +3,8 @@
 // 日志一律走 stderr。生命周期(§6.4):EOF 视同 shutdown;SIGINT/SIGTERM 同 shutdown;
 // shutdown 运行中先 abort → waitForIdle → flush 落盘 → exit 0;致命错误输出
 // {type:'error',fatal:true} 后 exit 1。一次性特例(§6.4):initialPrompt(--json -p)
-// 启动即注入一条 prompt,对应 agent_end 后自动 shutdown——reason 'error' → exit 1。
+// 启动即注入一条 prompt,不带 willRetry 的最终 agent_end 后自动 shutdown——
+// reason 'error' → exit 1。
 
 import { createInterface } from 'node:readline';
 import process from 'node:process';
@@ -35,19 +36,24 @@ export interface HeadlessApproval {
   subscribe: (listener: (e: SessionEvent) => void) => () => void;
 }
 
+export interface HeadlessOutput {
+  enqueue(chunk: string): void;
+  drain(): Promise<void>;
+}
+
 export async function startHeadless(
   session: Session,
   opts: {
     stdin: NodeJS.ReadableStream;
-    stdout: NodeJS.WritableStream;
-    /** --json -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,agent_end 后自动 shutdown。 */
+    stdout: HeadlessOutput;
+    /** --json -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动 shutdown。 */
     initialPrompt?: string;
     /** M6 审批接线(--approval-mode 非 allow 时由 main.ts 传入)。 */
     approval?: HeadlessApproval;
   },
 ): Promise<number> {
   const writeLine = (obj: unknown): void => {
-    opts.stdout.write(`${JSON.stringify(obj)}\n`);
+    opts.stdout.enqueue(`${JSON.stringify(obj)}\n`);
   };
 
   let settled = false;
@@ -63,6 +69,7 @@ export async function startHeadless(
   };
 
   let shuttingDown = false;
+  let outputFailureReported = false;
   const shutdown = async (code = 0): Promise<void> => {
     if (shuttingDown || settled) return;
     shuttingDown = true;
@@ -72,36 +79,70 @@ export async function startHeadless(
       // 审批会以「拒绝」形态先漏给模型。不清 pending 则 waitForIdle 永远挂死。
       opts.approval?.onAbort();
       await session.close();        // waitForIdle → flush 落盘,之后进程可安全退出
+      await opts.stdout.drain();     // 最后一条事件真实写出后才能向调用方报告退出
       finish(code);
     } catch (err) {
-      writeLine({ type: 'error', fatal: true, message: `shutdown failed: ${String(err)}` });
+      try {
+        writeLine({ type: 'error', fatal: true, message: `shutdown failed: ${String(err)}` });
+        await opts.stdout.drain();
+      } catch (outputErr) {
+        if (!outputFailureReported) {
+          outputFailureReported = true;
+          console.error('[coda] stdout write failed during shutdown:', outputErr);
+        }
+      }
       finish(1);
     }
+  };
+
+  const onOutputFailure = (err: unknown): void => {
+    if (outputFailureReported) return;
+    outputFailureReported = true;
+    console.error('[coda] stdout write failed:', err);
+    void shutdown(1);
+  };
+
+  /** readline/broker 回调不能返回 Promise；显式观察 drain，失败统一进入 shutdown。 */
+  const writeObserved = (obj: unknown): void => {
+    writeLine(obj);
+    opts.stdout.drain().catch(onOutputFailure);
   };
 
   const oneShot = opts.initialPrompt !== undefined;
 
   // 启动首行:协议版本旁路事件(docs/09 §6.3;版本号取自 session 层 PROTOCOL_VERSION)
   writeLine({ type: 'protocol', protocolVersion: PROTOCOL_VERSION });
+  try {
+    await opts.stdout.drain();
+  } catch (err) {
+    onOutputFailure(err);
+    return exit;
+  }
   // SessionEvent 原样外发:不加任何自定义字段,事件类型本身自带判别
-  const unsubscribe = session.subscribe((e: SessionEvent) => {
+  const unsubscribe = session.subscribe(async (e: SessionEvent) => {
     writeLine(e);
+    try {
+      await opts.stdout.drain();
+    } catch (err) {
+      onOutputFailure(err);
+      return;
+    }
     // 致命错误(docs/09 §6.4「致命错误 → exit 1」):事件照常外发后走 shutdown 路径
     // (abort + close 落盘)并以 1 退出;不能只写事件不退——headless 管道对端无人善后。
     if (e.type === 'error' && e.fatal) {
       void shutdown(1);
       return;
     }
-    // 一次性特例:注入 prompt 对应的 agent_end 后自动 shutdown;reason 'error' → exit 1
-    // (脚本可感知),其余(completed/aborted)按 §6.4 正常 shutdown 语义 exit 0。
-    if (oneShot && e.type === 'agent_end') {
+    // willRetry:true 是重试前的中间边界；一次性模式必须等到不再重试的最终 agent_end，
+    // 否则 shutdown 会 abort Session 刚排入的 retry op。
+    if (oneShot && e.type === 'agent_end' && e.willRetry !== true) {
       void shutdown(e.reason === 'error' ? 1 : 0);
     }
   });
   // 审批旁路通道:approval_request 与主事件流汇入同一条 NDJSON(docs/07 §3.1)。
-  // 同步直写:broker emit 发生在 beforeToolCall 内,彼时 loop 已 await 完先行事件,顺序正确。
+  // broker emit 是同步边界；ordered output 保序，drain rejection 由 writeObserved 观察。
   const unsubApproval = opts.approval?.subscribe((e: SessionEvent) => {
-    writeLine(e);
+    writeObserved(e);
   });
 
   const dispatch = (cmd: CliCommand): void => {
@@ -109,13 +150,13 @@ export async function startHeadless(
       case 'prompt': {
         // running 时不 throw 到进程:输出 non-fatal error 事件(docs/09 §6.2 映射表)
         if (session.agent.state === 'running') {
-          writeLine({ type: 'error', fatal: false, message: 'agent is running; use steer or follow_up' });
+          writeObserved({ type: 'error', fatal: false, message: 'agent is running; use steer or follow_up' });
           return;
         }
         session.prompt(cmd.text).catch((err: unknown) => {
           // StreamFn 铁律下 run 不应 reject;真发生即致命(docs/09 §6.4)
-          writeLine({ type: 'error', fatal: true, message: `prompt failed: ${String(err)}` });
-          finish(1);
+          writeObserved({ type: 'error', fatal: true, message: `prompt failed: ${String(err)}` });
+          void shutdown(1);
         });
         return;
       }
@@ -135,7 +176,7 @@ export async function startHeadless(
         const broker = opts.approval?.broker;
         if (broker === undefined) {
           // 非 interactive 模式没有 broker:容错回报,不退出(docs/09 §6.3 容错纪律)
-          writeLine({
+          writeObserved({
             type: 'error',
             fatal: false,
             message: 'approval not available: run with --approval-mode interactive',
@@ -161,7 +202,7 @@ export async function startHeadless(
       cmd = parseCommand(trimmed);
     } catch (err) {
       // 无法解析的行:non-fatal error,继续读下一行(容错,不退出)
-      writeLine({
+      writeObserved({
         type: 'error',
         fatal: false,
         message: `invalid command: ${err instanceof Error ? err.message : String(err)}`,
@@ -171,8 +212,8 @@ export async function startHeadless(
     try {
       dispatch(cmd);
     } catch (err) {
-      writeLine({ type: 'error', fatal: true, message: err instanceof Error ? err.message : String(err) });
-      finish(1);
+      writeObserved({ type: 'error', fatal: true, message: err instanceof Error ? err.message : String(err) });
+      void shutdown(1);
     }
   };
 

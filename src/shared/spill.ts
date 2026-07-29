@@ -3,11 +3,11 @@
 // session 后为 sessionId,当前为 Agent 实例 id。7 天保留与启动清理在 M6 完善。
 
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
+import { runtimeHomeDir } from './home.js';
 
 export function truncationDir(scope: string): string {
-  return path.join(homedir(), '.coda', 'truncated', scope);
+  return path.join(runtimeHomeDir(), '.coda', 'truncated', scope);
 }
 
 /** 全文落盘,返回绝对路径;失败(磁盘满/权限)返回 undefined——截断提示降级,不炸工具结果。 */

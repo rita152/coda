@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeAll, expect, test } from 'vitest';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { CodaProc } from './harness.js';
 import { CASE_TIMEOUT_MS, requireDist, startCoda } from './harness.js';
 
@@ -21,7 +21,7 @@ afterEach(() => {
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-test('启动时清理 $HOME/.coda/truncated 的过期落盘;新文件保留', { timeout: CASE_TIMEOUT_MS }, async () => {
+test('启动时清理 $HOME/.coda/truncated 的过期落盘;新文件保留', async () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coda-home-'));
   const scope = path.join(home, '.coda', 'truncated', 's-old');
   mkdirSync(scope, { recursive: true });
@@ -46,4 +46,4 @@ test('启动时清理 $HOME/.coda/truncated 的过期落盘;新文件保留', { 
   expect(existsSync(old)).toBe(false); // 过期文件被启动清理删除(main.ts 接线的直接证明)
   expect(existsSync(fresh)).toBe(true); // 7 天内的保留
   expect(proc.parseErrors).toEqual([]);
-});
+}, { timeout: CASE_TIMEOUT_MS });

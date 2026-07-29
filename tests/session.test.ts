@@ -7,7 +7,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
 import type { AgentMessage, AssistantMessage, ToolResultMessage, UserMessage } from '../src/protocol/index.js';
 import { INTERRUPTED_RESULT_TEXT } from '../src/agent/index.js';
 import { createFauxStreamFn, createGate } from '../src/providers/faux/index.js';

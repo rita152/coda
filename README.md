@@ -6,12 +6,14 @@ TypeScript 终端 coding agent:核心只认自研内部协议,OpenAI Chat Comple
 
 ## 开发
 
+运行时与包管理器固定为 **Bun 1.3.14**。
+
 ```bash
-npm ci
-npm run check   # lint + typecheck + build + test
+bun install --frozen-lockfile
+bun run check   # lint + typecheck + build + test
 ```
 
-注:`package.json` 的 `optionalDependencies` 里显式声明了 rollup 的平台二进制(darwin-arm64 / linux-x64-gnu),这是 npm 对嵌套 optional 平台依赖解析 bug(npm/cli#4828 一族)的通用 workaround;其它平台(如 Windows)首次开发时按需追加对应条目即可,os/cpu 不匹配的条目会被 npm 自动跳过。
+`bun.lock` 是唯一依赖锁文件；Bun 按 `os` / `cpu` 解析 `@vscode/ripgrep` 的平台 optional dependency，CI 会在 Linux 与 macOS 上验证二进制可用。
 
 当前进度:M0 脚手架(见 [docs/11-roadmap.md](docs/11-roadmap.md) 里程碑详表)。
 
