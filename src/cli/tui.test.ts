@@ -29,6 +29,7 @@ import {
   formatContextUsage,
   formatTokenCount,
   formatWorkspacePath,
+  matchingSlashCommands,
   runTuiController,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
@@ -290,6 +291,99 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
+  it('斜杠命令以上拉列表显示，按前缀过滤并用 Tab 补全', async () => {
+    const view = await setup(100, 24);
+    try {
+      view.screen.focusInput();
+      await view.mockInput.typeText('/');
+      await view.flush();
+
+      const menu = view.renderer.root.findDescendantById('coda-slash-menu');
+      const prompt = view.renderer.root.findDescendantById('coda-prompt-box');
+      if (!(menu instanceof BoxRenderable) || !(prompt instanceof BoxRenderable)) {
+        throw new Error('slash menu or prompt box not found');
+      }
+      expect(menu.visible).toBe(true);
+      expect(menu.height).toBe(5);
+      expect(menu.screenY + menu.height).toBe(prompt.screenY);
+      expect(view.frame()).toContain('→ /help');
+      expect(view.frame()).toContain('/followup <text>');
+      expect(view.frame()).not.toContain('/f <text>');
+      expect(view.frame()).not.toContain('/q ');
+      expect(view.frame()).toContain('Show model, usage, and token status');
+      const selectedSpans = view.spans().lines[menu.screenY]?.spans.filter(
+        (span) => span.text.trim() !== '',
+      );
+      expect(
+        selectedSpans?.some(
+          (span) =>
+            span.text.includes('/help') &&
+            span.fg.toInts().join(',') === '201,71,64,255',
+        ),
+      ).toBe(true);
+
+      await view.mockInput.typeText('st');
+      await view.flush();
+      expect(menu.height).toBe(1);
+      expect(view.frame()).toContain('→ /status');
+      expect(view.frame()).not.toContain('/queue');
+
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/status ');
+      expect(menu.visible).toBe(false);
+
+      view.screen.clearInput();
+      await view.mockInput.typeText('/');
+      view.mockInput.pressArrow('down');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/queue ');
+
+      view.screen.clearInput();
+      await view.mockInput.typeText('/');
+      view.mockInput.pressEscape();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/');
+      expect(menu.visible).toBe(false);
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/help ');
+
+      view.screen.clearInput();
+      await view.mockInput.typeText('/f');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/followup ');
+
+      view.screen.clearInput();
+      await view.mockInput.typeText('/q');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/quit ');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('候选打开时 Enter 先采用当前前缀候选再提交', async () => {
+    let submissions = 0;
+    const view = await setup(80, 24, () => {
+      submissions++;
+    });
+    try {
+      view.screen.focusInput();
+      await view.mockInput.typeText('/he');
+      view.mockInput.pressEnter();
+      await view.flush();
+      expect(submissions).toBe(1);
+      expect(view.screen.getInput()).toBe('/help ');
+      expect(view.frame()).not.toContain('Show shortcuts and slash commands');
+    } finally {
+      await view.destroy();
+    }
+  });
+
   it('鼠标点击失焦的 prompt 后重新聚焦并显示闪烁竖线光标', async () => {
     const view = await setup(80, 24);
     try {
@@ -452,6 +546,11 @@ describe('全屏 OpenTUI 布局', () => {
           'coda-tips-body',
           'coda-transcript',
           'coda-composer',
+          'coda-slash-menu',
+          'coda-slash-row-0',
+          'coda-slash-prefix-0',
+          'coda-slash-command-0',
+          'coda-slash-description-0',
           'coda-prompt-box',
           'coda-input',
           'coda-workspace',
@@ -1053,6 +1152,20 @@ describe('TUI 安全渲染与转录恢复', () => {
 });
 
 describe('TUI 交互状态投影', () => {
+  it('命令前缀匹配只返回当前 phase 真正可分派的命令', () => {
+    expect(matchingSlashCommands('/ST', 'idle').map((command) => command.name)).toEqual([
+      'status',
+    ]);
+    expect(matchingSlashCommands('/', 'running').map((command) => command.name)).toEqual([
+      'followup',
+    ]);
+    expect(matchingSlashCommands('/f', 'idle').map((command) => command.name)).toEqual([
+      'followup',
+    ]);
+    expect(matchingSlashCommands('/status ', 'idle')).toEqual([]);
+    expect(matchingSlashCommands('ask /status', 'idle')).toEqual([]);
+  });
+
   it('retry 取消和 compaction 结束都回到 idle，Enter/Esc 语义按 phase 区分', async () => {
     const view = await setup();
     try {
@@ -1173,6 +1286,16 @@ describe('TUI 控制器接线', () => {
       expect(key.defaultPrevented).toBe(true);
       expect(key.propagationStopped).toBe(true);
     }
+
+    view.screen.clearInput();
+    await view.mockInput.typeText('/st');
+    view.mockInput.pressTab();
+    await view.flush();
+    expect(view.screen.getInput()).toBe('/status ');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(view.screen.getInput()).toBe('');
+    expect(view.frame()).toContain('turns: 0');
 
     view.screen.clearInput();
     await view.mockInput.typeText('/quit');

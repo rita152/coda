@@ -31,6 +31,7 @@ root column (100% × 100%)
 ├── header:版本 + Unicode 像素 Logo + tips
 ├── transcript:ScrollBox(flexGrow:1)
 └── composer
+    ├── slash menu:命令候选(仅 `/prefix` 时可见,从 prompt 向上展开)
     ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
     ├── workspace
     └── context usage                         provider/model
@@ -40,6 +41,7 @@ root column (100% × 100%)
   `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻,运行时不读 PNG、不依赖终端图片协议。header、brand、Logo 与 tips 都不绘制背景色,直接透出终端背景。
 - **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部;用户手动上滚时暂停跟尾。
 - **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,第一条 footer 暂时从 workspace 切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
+- **slash menu**:输入内容严格处于 `/prefix`(首字符是 `/`、命令名内尚无空白/换行)时,在 prompt 上方展开透明候选层。候选视觉对齐 pi 的 SelectList：`→ ` 标出当前项,命令名和可选参数提示占左列,说明占右侧 muted 列；窄屏隐藏说明但保留完整键盘能力。匹配是大小写无关的命令名/别名前缀；空闲/compacting 只显示 canonical `/help`、`/queue`、`/status`、`/followup`、`/quit`,running/retrying 只显示仍会被 Enter 分派为命令的 `/followup`,不得展示实际会作为 steering 发送的伪候选。兼容别名 `/f`、`/q` 继续可输入,但不重复占候选行；对别名按 `Tab` 会展开成 `/followup `、`/quit `。`↑`/`↓` 循环选项,`Tab` 采用当前项并补一个空格但不发送,`Enter` 采用当前项后在同一次按键中继续正常提交,`Esc` 仅收起候选且保留 draft。候选占用 composer 上方空间,正常高度可一次显示完整目录；空间不足时围绕当前项裁切,同时仍优先保留 1 行输入与可用时 1 行 transcript。审批期间候选必须隐藏。
 - **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
 - **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和两行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色以适配明暗主题；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 移除文本和边框的自定义前景色,但保留这一个用于焦点可见性的光标色,背景始终保持透明。
 
@@ -106,6 +108,10 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 | 任意 | `Ctrl+C` | 输入非空:清空输入行;输入为空:提示「再按一次退出」,1.5s 内再按退出 |
 | 空闲 | `Ctrl+D` | 输入为空时退出 |
 | 任意 | `Meta+↑` / `Meta+↓` | 输入历史(普通方向键留给多行编辑) |
+| slash menu | `↑` / `↓` | 循环选择前缀匹配的命令 |
+| slash menu | `Tab` | 补全当前命令并追加空格,不发送 |
+| slash menu | `Enter` | 采用当前命令并立即按当前 phase 的 Enter 语义发送 |
+| slash menu | `Esc` | 关闭候选,保留输入；后续 Esc 才进入 abort/退出语义 |
 | 流式中 | `Enter` | 当前输入入 **steering** 队列(`session.steer(text)`) |
 | retry backoff | `Enter` | 当前输入入 **steering** 队列,等待重试 turn 消费 |
 | compacting | `Enter` | 按空闲语义调用 `session.prompt(text)`;Session 在 compaction 完成后启动 |
@@ -129,7 +135,7 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 - OpenTUI 默认启用 Kitty keyboard disambiguation;支持该协议的终端能可靠区分 `Esc`、`Alt+Enter` 与 `Shift+Enter`。不支持时由解析器降级;classic 仍用 readline `escapeCodeTimeout=50ms`。
 - `Alt+Enter` 以 `key.meta && return` 为主。始终保留 `/f ` / `/followup ` 兜底,保证不能发送 Meta+Enter 的终端仍有完整功能。
 - Shift+Enter 在不报告修饰键的旧终端可能退化成普通 Enter;可用 bracketed paste 输入多行。
-- 其余空闲斜杠命令:`/quit`、`/queue`、`/status`、`/help`。
+- 其余空闲斜杠命令:`/quit`(兼容 `/q`)、`/queue`、`/status`、`/help`。TUI 的 canonical 目录与隐藏别名都由 `repl.ts` 中的 `SLASH_COMMAND_SPECS` 驱动；别名参与匹配和补全,但不单独渲染。
 
 ## 4. 渲染器与 SessionEvent 对应表
 
@@ -190,14 +196,15 @@ export interface Renderer {
 
                  （剩余空间；内容继续向下增长）
 
+→ /status               Show model, usage, and token status
 ────────────────────────────────────────────────────────────
-顺便把颜色常量也挪过去▌
+/st▌
 ────────────────────────────────────────────────────────────
  ~/Desktop/openai/openai-sdk-ts  (main)
  context 2.4k / 128k · 1.9%                    openai/gpt-5.2
 ```
 
-中间转录短时锚定顶部;只有填满后才滚动并跟随最新内容。用户此刻按 `Enter`,输入文本进 steering 队列；两行 footer 固定在屏幕底部,多行 prompt 从其上方向上扩展。
+中间转录短时锚定顶部;只有填满后才滚动并跟随最新内容。图中用户输入 `/st` 后候选从 prompt 向上展开；按 `Tab` 只补成 `/status `,按 `Enter` 则补全并执行。两行 footer 固定在屏幕底部,多行 prompt 与 slash menu 都从其上方向上扩展。
 
 ## 6. Headless JSON 模式(`--json`)
 
@@ -348,6 +355,8 @@ function resolveConfig(flags, env, file, { allowMissingApiKey = false } = {}): R
 - [ ] 长输出填满中区后自动跟尾;PageUp 手动上滚后不抢回,PageDown 可回到最新内容
 - [ ] native framebuffer 与整个视图树都保持 alpha 0,header、transcript、Markdown、prompt 与 footer 不绘制任何实色背景
 - [ ] prompt 为透明双横线,没有左右边/圆角/title；默认 1 行并随显式/软换行增高(空间允许时最多 8 行),内容缩短后缩回；Textarea 聚焦时显示高对比品牌红色闪烁原生竖线,组件失焦时隐藏,终端窗口失焦时允许模拟器显示空心 inactive cursor；点击输入区可恢复组件焦点；正常高度下其后恰有 workspace 与 context/model 两行
+- [ ] 输入 `/` 时 slash menu 在 prompt 正上方完整显示命令、参数提示与说明,当前项有 `→` 和 accent；前缀过滤大小写无关,窄屏可隐藏说明但不丢候选
+- [ ] slash menu 中 `↑/↓` 循环选择,`Tab` 补全但不发送,`Enter` 补全后发送,`Esc` 只收起列表；running/retrying 不展示会被当作 steering 的空闲命令
 - [ ] resize 宽→窄→宽后 prompt 按软换行增高再缩回,Logo/tips 正确隐藏并恢复；非空多行 draft 下审批 footer 与黄色横线仍可见,决议后恢复 workspace/洋红横线
 - [ ] 9→7→5→3→2→1 行的 ultra-compact 降级中光标不越界；1 行审批优先显示 y/a/n/Esc 并隐藏输入光标
 - [ ] 流式输出期间输入框稳定;Enter 后出现 steering 回显,Shift+Enter 只插入换行

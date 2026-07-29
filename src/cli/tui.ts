@@ -23,8 +23,9 @@ import {
   formatQueueLines,
   formatStatusLines,
   InputHistory,
+  SLASH_COMMAND_SPECS,
 } from './repl.js';
-import type { ReplApproval, SlashCommand } from './repl.js';
+import type { ReplApproval, SlashCommand, SlashCommandSpec } from './repl.js';
 import type {
   CliRenderer,
   ColorInput,
@@ -57,6 +58,7 @@ const PROMPT_MAX_VISIBLE_ROWS = 8;
 const PROMPT_MEASURE_HEIGHT = 65_535;
 const PROMPT_RULE_ROWS = 2;
 const COMPOSER_FOOTER_ROWS = 2;
+const SLASH_COMMAND_COLUMN_WIDTH = 24;
 const TRANSCRIPT_PADDING_Y = 1;
 const TRANSCRIPT_MIN_CONTENT_ROWS = 1;
 const TRANSCRIPT_PADDED_MIN_ROWS =
@@ -118,6 +120,7 @@ export interface TuiScreen {
   setInput(text: string): void;
   clearInput(): void;
   focusInput(): void;
+  handleSlashMenuKey(key: KeyEvent): boolean;
   setSubmitHandler(handler: () => void): void;
   scrollPage(direction: -1 | 1): void;
   destroy(): void;
@@ -250,6 +253,26 @@ export async function detectGitBranch(cwd: string): Promise<string | undefined> 
   } catch {
     return undefined;
   }
+}
+
+/** 斜杠命令只在首行、命令名尚未出现空白时补全；命令名和隐藏别名都参与前缀匹配。 */
+export function matchingSlashCommands(
+  text: string,
+  phase: TuiPhase,
+): readonly SlashCommandSpec[] {
+  if (!/^\/[^\s/]*$/u.test(text)) return [];
+  const prefix = text.slice(1).toLowerCase();
+  const running = phase === 'running' || phase === 'retrying';
+  return SLASH_COMMAND_SPECS.filter(
+    (command) =>
+      (!running || command.availableWhileRunning) &&
+      (
+        command.name.toLowerCase().startsWith(prefix) ||
+        command.aliases?.some((alias) =>
+          alias.toLowerCase().startsWith(prefix),
+        ) === true
+      ),
+  );
 }
 
 /**
@@ -454,6 +477,59 @@ export async function createTuiScreen(
       paddingX: COMPOSER_PADDING_X,
       backgroundColor: transparentBackground,
     });
+    const slashMenu = new Box(renderer, {
+      id: 'coda-slash-menu',
+      width: '100%',
+      height: 0,
+      visible: false,
+      flexShrink: 0,
+      flexDirection: 'column',
+      backgroundColor: transparentBackground,
+    });
+    const slashRows = SLASH_COMMAND_SPECS.map((_, index) => {
+      const row = new Box(renderer, {
+        id: `coda-slash-row-${index}`,
+        width: '100%',
+        height: 1,
+        visible: false,
+        flexShrink: 0,
+        flexDirection: 'row',
+        backgroundColor: transparentBackground,
+      });
+      const prefix = new Text(renderer, {
+        id: `coda-slash-prefix-${index}`,
+        width: 2,
+        height: 1,
+        content: '  ',
+        selectable: false,
+        bg: transparentBackground,
+        fg: terminalForeground,
+      });
+      const command = new Text(renderer, {
+        id: `coda-slash-command-${index}`,
+        width: SLASH_COMMAND_COLUMN_WIDTH,
+        height: 1,
+        truncate: true,
+        selectable: false,
+        bg: transparentBackground,
+        fg: terminalForeground,
+      });
+      const description = new Text(renderer, {
+        id: `coda-slash-description-${index}`,
+        flexGrow: 1,
+        height: 1,
+        truncate: true,
+        selectable: false,
+        bg: transparentBackground,
+        fg: terminalForeground,
+        ...colored({ fg: PALETTE.muted }),
+      });
+      row.add(prefix);
+      row.add(command);
+      row.add(description);
+      slashMenu.add(row);
+      return { row, prefix, command, description };
+    });
     const promptBox = new Box(renderer, {
       id: 'coda-prompt-box',
       width: '100%',
@@ -486,9 +562,6 @@ export async function createTuiScreen(
         { name: 'kpenter', shift: true, action: 'newline' },
         { name: 'linefeed', shift: true, action: 'newline' },
       ],
-      onSubmit: () => {
-        submitHandler();
-      },
       onMouseDown() {
         // 全局 autoFocus 保持关闭，把鼠标聚焦行为明确限定在 prompt。
         this.focus();
@@ -549,6 +622,7 @@ export async function createTuiScreen(
     });
     runtimeRow.add(contextText);
     runtimeRow.add(modelText);
+    composer.add(slashMenu);
     composer.add(promptBox);
     composer.add(workspaceText);
     composer.add(runtimeRow);
@@ -574,6 +648,10 @@ export async function createTuiScreen(
     let currentAssistant: AssistantView | undefined;
     let planText: TextRenderable | undefined;
     const toolViews = new Map<string, ToolView>();
+    let slashMatches: readonly SlashCommandSpec[] = [];
+    let slashSelectedIndex = 0;
+    let slashMatchKey = '';
+    let slashMenuDismissedInput: string | undefined;
 
     const workspace = formatWorkspacePath(opts.cwd, runtimeHomeDir());
 
@@ -601,7 +679,70 @@ export async function createTuiScreen(
       input.placeholder = truncateToWidth(firstLine(value), promptContentWidth());
     };
 
+    const refreshSlashMatches = (): void => {
+      const source = input.plainText;
+      const nextMatches =
+        approvalPending || slashMenuDismissedInput === source
+          ? []
+          : matchingSlashCommands(source, interaction.phase);
+      const nextKey = `${interaction.phase}\0${source}\0${nextMatches
+        .map((command) => command.name)
+        .join('\0')}`;
+      if (nextKey !== slashMatchKey) {
+        const query = source.slice(1).toLowerCase();
+        const exact = nextMatches.findIndex(
+          (command) =>
+            command.name.toLowerCase() === query ||
+            command.aliases?.some(
+              (alias) => alias.toLowerCase() === query,
+            ) === true,
+        );
+        slashSelectedIndex = exact === -1 ? 0 : exact;
+        slashMatchKey = nextKey;
+      } else if (slashSelectedIndex >= nextMatches.length) {
+        slashSelectedIndex = Math.max(0, nextMatches.length - 1);
+      }
+      slashMatches = nextMatches;
+    };
+
+    const renderSlashRows = (visibleRows: number): void => {
+      slashMenu.visible = visibleRows > 0;
+      slashMenu.height = visibleRows;
+      const descriptionVisible = layoutWidth >= 52;
+      const startIndex = Math.max(
+        0,
+        Math.min(
+          slashSelectedIndex - Math.floor(visibleRows / 2),
+          slashMatches.length - visibleRows,
+        ),
+      );
+      for (const [rowIndex, parts] of slashRows.entries()) {
+        const commandIndex = startIndex + rowIndex;
+        const spec =
+          rowIndex < visibleRows ? slashMatches[commandIndex] : undefined;
+        parts.row.visible = spec !== undefined;
+        if (spec === undefined) continue;
+        const selected = commandIndex === slashSelectedIndex;
+        const selectedColor: ColorInput =
+          opts.color ? PALETTE.accent : terminalForeground;
+        parts.prefix.content = selected ? '→ ' : '  ';
+        parts.command.content =
+          `/${spec.name}${spec.argumentHint === undefined ? '' : ` ${spec.argumentHint}`}`;
+        parts.description.content = spec.description;
+        parts.command.width = descriptionVisible
+          ? SLASH_COMMAND_COLUMN_WIDTH
+          : Math.max(1, promptContentWidth() - 2);
+        parts.description.visible = descriptionVisible;
+        parts.prefix.fg = selected ? selectedColor : terminalForeground;
+        parts.command.fg = selected ? selectedColor : terminalForeground;
+        parts.description.fg = selected
+          ? selectedColor
+          : toneColor('muted');
+      }
+    };
+
     const refreshComposerLayout = (): void => {
+      refreshSlashMatches();
       const workspaceVisible = layoutHeight >= 4 || approvalPending;
       const runtimeVisible = layoutHeight >= 5;
       workspaceText.visible = workspaceVisible;
@@ -628,11 +769,15 @@ export async function createTuiScreen(
         rowsAfterHeaderAndFooter - ruleRows,
       );
       const transcriptRows =
-        inputAndTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS + 1
-          ? TRANSCRIPT_PADDED_MIN_ROWS
-          : inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
+        slashMatches.length > 0
+          ? inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
             ? TRANSCRIPT_MIN_CONTENT_ROWS
-            : 0;
+            : 0
+          : inputAndTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS + 1
+            ? TRANSCRIPT_PADDED_MIN_ROWS
+            : inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
+              ? TRANSCRIPT_MIN_CONTENT_ROWS
+              : 0;
       const transcriptPadding =
         transcriptRows >= TRANSCRIPT_PADDED_MIN_ROWS ? TRANSCRIPT_PADDING_Y : 0;
       transcript.visible = transcriptRows > 0;
@@ -641,6 +786,7 @@ export async function createTuiScreen(
       transcript.content.paddingBottom = transcriptPadding;
 
       if (!promptVisible) {
+        renderSlashRows(0);
         promptBox.height = 0;
         composer.height = footerRows;
         return;
@@ -653,18 +799,79 @@ export async function createTuiScreen(
         PROMPT_MEASURE_HEIGHT,
       );
       const naturalRows = Math.max(1, measurement?.lineCount ?? input.lineCount);
+      const menuRows = Math.min(
+        slashMatches.length,
+        Math.max(
+          0,
+          inputAndTranscriptRows - transcriptRows - 1,
+        ),
+      );
+      renderSlashRows(menuRows);
       const viewportRows = Math.max(
         1,
         Math.min(
           PROMPT_MAX_VISIBLE_ROWS,
-          inputAndTranscriptRows - transcriptRows,
+          inputAndTranscriptRows - transcriptRows - menuRows,
         ),
       );
       const visibleRows = Math.min(naturalRows, viewportRows);
       promptBox.height = visibleRows + ruleRows;
-      composer.height = visibleRows + ruleRows + footerRows;
+      composer.height = menuRows + visibleRows + ruleRows + footerRows;
     };
-    input.onContentChange = refreshComposerLayout;
+
+    const completeSelectedSlashCommand = (): boolean => {
+      const selected = slashMatches[slashSelectedIndex];
+      if (selected === undefined || !slashMenu.visible) return false;
+      slashMenuDismissedInput = undefined;
+      input.setText(`/${selected.name} `);
+      input.gotoBufferEnd();
+      return true;
+    };
+
+    const handleSlashMenuKey = (key: KeyEvent): boolean => {
+      if (key.ctrl || key.meta || key.shift || key.option || key.super || key.hyper) {
+        return false;
+      }
+      if (key.name === 'tab') {
+        const source = input.plainText;
+        if (!/^\/[^\s/]*$/u.test(source)) return false;
+        slashMenuDismissedInput = undefined;
+        refreshComposerLayout();
+        completeSelectedSlashCommand();
+        return true;
+      }
+      if (!slashMenu.visible || slashMatches.length === 0) return false;
+      if (key.name === 'up' || key.name === 'down') {
+        const delta = key.name === 'up' ? -1 : 1;
+        slashSelectedIndex =
+          (slashSelectedIndex + delta + slashMatches.length) %
+          slashMatches.length;
+        renderSlashRows(slashMenu.height);
+        return true;
+      }
+      if (key.name === 'escape') {
+        slashMenuDismissedInput = input.plainText;
+        refreshComposerLayout();
+        return true;
+      }
+      return false;
+    };
+
+    input.onSubmit = () => {
+      completeSelectedSlashCommand();
+      submitHandler();
+    };
+    input.onKeyDown = (key) => {
+      if (!handleSlashMenuKey(key)) return;
+      key.preventDefault();
+      key.stopPropagation();
+    };
+    input.onContentChange = () => {
+      if (slashMenuDismissedInput !== input.plainText) {
+        slashMenuDismissedInput = undefined;
+      }
+      refreshComposerLayout();
+    };
 
     const defaultActivity = (phase: TuiPhase): string | undefined => {
       switch (phase) {
@@ -1220,6 +1427,7 @@ export async function createTuiScreen(
       focusInput(): void {
         input.focus();
       },
+      handleSlashMenuKey,
       setSubmitHandler(handler: () => void): void {
         submitHandler = handler;
       },
@@ -1428,6 +1636,11 @@ export function runTuiController(
           return;
         }
         // 审批中其余键（含所有修饰键组合）全部冻结，不能编辑 prompt。
+        consume(key);
+        return;
+      }
+
+      if (screen.handleSlashMenuKey(key)) {
         consume(key);
         return;
       }

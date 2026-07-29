@@ -24,6 +24,7 @@ import {
   formatStatusLines,
   InputHistory,
   parseSlashCommand,
+  SLASH_COMMAND_SPECS,
   startRepl,
 } from './repl.js';
 import type { ReplApproval, ReplInput } from './repl.js';
@@ -38,8 +39,9 @@ class TestTtyInput extends PassThrough implements ReplInput {
 }
 
 describe('parseSlashCommand(docs/09 §3.2)', () => {
-  it('识别 /quit /queue /status /help', () => {
+  it('识别 canonical 命令及 /q 短别名', () => {
     expect(parseSlashCommand('/quit')).toEqual({ cmd: 'quit' });
+    expect(parseSlashCommand('/q')).toEqual({ cmd: 'quit' });
     expect(parseSlashCommand('/queue')).toEqual({ cmd: 'queue' });
     expect(parseSlashCommand('/status')).toEqual({ cmd: 'status' });
     expect(parseSlashCommand('/help')).toEqual({ cmd: 'help' });
@@ -54,6 +56,16 @@ describe('parseSlashCommand(docs/09 §3.2)', () => {
   it('非斜杠返回 undefined;未知斜杠返回 unknown', () => {
     expect(parseSlashCommand('hello')).toBeUndefined();
     expect(parseSlashCommand('/wat now')).toEqual({ cmd: 'unknown', input: '/wat now' });
+  });
+
+  it('补全目录中的 canonical 命令与隐藏别名都由解析器识别', () => {
+    for (const command of SLASH_COMMAND_SPECS) {
+      const suffix = command.argumentHint === undefined ? '' : ' example';
+      expect(parseSlashCommand(`/${command.name}${suffix}`)?.cmd).not.toBe('unknown');
+      for (const alias of command.aliases ?? []) {
+        expect(parseSlashCommand(`/${alias}${suffix}`)?.cmd).not.toBe('unknown');
+      }
+    }
   });
 });
 

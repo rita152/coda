@@ -26,6 +26,47 @@ export const CTRL_C_EXIT_WINDOW_MS = 1500; // 双 Ctrl+C 退出窗口
 
 // ---- 纯逻辑:斜杠命令 ----
 
+export interface SlashCommandSpec {
+  readonly name: string;
+  readonly aliases?: readonly string[];
+  readonly description: string;
+  readonly argumentHint?: string;
+  /** running/retrying 时仅 follow-up 命令仍由 Enter 当作命令分派。 */
+  readonly availableWhileRunning: boolean;
+}
+
+/** TUI 只展示 canonical 命令；短别名参与匹配但不重复占据候选行。 */
+export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = [
+  {
+    name: 'help',
+    description: 'Show shortcuts and slash commands',
+    availableWhileRunning: false,
+  },
+  {
+    name: 'queue',
+    description: 'Show steering and follow-up queues',
+    availableWhileRunning: false,
+  },
+  {
+    name: 'status',
+    description: 'Show model, usage, and token status',
+    availableWhileRunning: false,
+  },
+  {
+    name: 'followup',
+    aliases: ['f'],
+    argumentHint: '<text>',
+    description: 'Queue a follow-up after the current task',
+    availableWhileRunning: true,
+  },
+  {
+    name: 'quit',
+    aliases: ['q'],
+    description: 'Exit coda',
+    availableWhileRunning: false,
+  },
+];
+
 export type SlashCommand =
   | { cmd: 'quit' | 'queue' | 'status' | 'help' }
   | { cmd: 'follow_up'; text: string }
