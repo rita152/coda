@@ -108,6 +108,14 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(rules).toContain('import/no-restricted-paths');
   });
 
+  it('tests 内 import providers/openai-responses 报错(测试不得悄悄变在线测试)', async () => {
+    const { rules } = await lintProbe(
+      'tests/responses-online.probe.ts',
+      "import '../src/providers/openai-responses/index.js';\n",
+    );
+    expect(rules).toContain('import/no-restricted-paths');
+  });
+
   it('合法方向零违例:providers/faux import protocol 通过', async () => {
     const { errorCount } = await lintProbe(
       'src/providers/faux/legal.probe.ts',
@@ -186,6 +194,20 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
       "import type { ChatCompletion } from 'openai/resources';\nexport type X = ChatCompletion;\n",
     );
     expect(rules).toContain('no-restricted-imports');
+  });
+
+  it('openai-responses 内 import openai 放行,import sibling adapter 报错', async () => {
+    const { errorCount } = await lintProbe(
+      'src/providers/openai-responses/legal.probe.ts',
+      "import type OpenAI from 'openai';\nexport type X = OpenAI;\n",
+    );
+    expect(errorCount).toBe(0);
+
+    const { rules } = await lintProbe(
+      'src/providers/openai-responses/cross.probe.ts',
+      "import '../openai-chat/index.js';\n",
+    );
+    expect(rules).toContain('import/no-restricted-paths');
   });
 
   it('tests 内 import providers/anthropic-messages 报错(测试不得触碰真实 adapter)', async () => {

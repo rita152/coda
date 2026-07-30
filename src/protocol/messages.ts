@@ -12,7 +12,15 @@ export interface ToolCallPart  {
   rawArguments?: string;                // 原始 JSON 字符串(截断诊断用)
 }
 
-export interface ModelRef { provider: string; api: string; model: string }  // api 如 'openai-chat'
+/** 内置 adapter 名可自动补全；开放尾项保留第三方 adapter 的扩展能力。 */
+export type ModelApi =
+  | 'openai-chat'
+  | 'openai-responses'
+  | 'anthropic-messages'
+  | 'faux'
+  | (string & {});
+
+export interface ModelRef { provider: string; api: ModelApi; model: string }
 
 export interface Usage {
   input: number;          // inclusive:含 cacheRead/cacheWrite

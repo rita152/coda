@@ -11,6 +11,7 @@ import type { AgentConfig } from '../agent/index.js';
 import type { ToolDefinition } from '../tools/types.js';
 import { createCodingTools } from '../tools/index.js';
 import { streamOpenAIChat } from '../providers/openai-chat/index.js';
+import { streamOpenAIResponses } from '../providers/openai-responses/index.js';
 import { streamAnthropicMessages } from '../providers/anthropic-messages/index.js';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
@@ -26,7 +27,7 @@ import {
   readConfigFile,
   resolveConfig,
 } from './config.js';
-import type { CliFlags } from './config.js';
+import type { CliFlags, CliProvider } from './config.js';
 import { startHeadless } from './headless.js';
 import { createRenderer } from './renderer.js';
 import { startRepl } from './repl.js';
@@ -284,7 +285,7 @@ async function main(): Promise<number> {
 }
 
 async function makeStreamFn(
-  provider: 'openai-chat' | 'anthropic-messages' | 'faux',
+  provider: CliProvider,
   fauxScriptPath?: string,
 ): Promise<StreamFn> {
   if (provider === 'faux') {
@@ -297,6 +298,7 @@ async function makeStreamFn(
   }
   // 新增 provider = 新增 adapter 分发项(docs/04 §8:CLI 只注册 ModelRef 与 StreamFn)
   if (provider === 'anthropic-messages') return streamAnthropicMessages;
+  if (provider === 'openai-responses') return streamOpenAIResponses;
   return streamOpenAIChat;
 }
 

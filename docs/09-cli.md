@@ -61,7 +61,12 @@ coda -p "..."           # 一次性:发送 prompt,跑完以 plain 输出退出
 coda --continue         # 恢复最近一个会话
 coda --resume [id]      # 无 id 时列出 ~/.coda/sessions/ 供选择(编号 + 首条 prompt 摘要 + 时间)
 coda --json             # headless JSON 模式(第 6 节)
+coda --provider openai-responses  # 使用 OpenAI Responses adapter
 ```
+
+`--provider` 的内置值为 `openai-chat | openai-responses | anthropic-messages | faux`。两个 OpenAI
+值都读取 OpenAI key，但产生不同的 `ModelRef.api` 并分发到不同 `StreamFn`；CLI 不读取或转换
+任何 Responses wire 事件。
 
 启动组装顺序(伪码):
 
@@ -71,7 +76,8 @@ const config      = resolveConfig(flags, env, readConfigFile(), {  // 第 7 节
   allowMissingApiKey: tuiEligible,
 });
 const model       = toModelConfig(config);                         // ModelRef + baseURL/apiKey/compat
-const agentConfig = { streamFn: openaiChatStream, model, tools: builtinTools, systemPrompt };
+const streamFn    = makeStreamFn(config.provider);                  // 只做 adapter 注册/分发
+const agentConfig = { streamFn, model, tools: builtinTools, systemPrompt };
 const session     = resuming
   ? await Session.resume(sessionId, { agentConfig })   // 加载 JSONL,内部组装 Agent 并注入 initialMessages
   : await Session.create({ agentConfig });             // 见 08 文档第 2 节
@@ -290,7 +296,7 @@ M6 起本协议增补 `{ type: 'approval'; approvalId: string; decision: 'allow_
 |---|---|---|---|
 | 模型 | `--model` | `CODA_MODEL` | `model` |
 | baseURL | `--base-url` | `CODA_BASE_URL` | `baseURL` |
-| apiKey | `--api-key`(不推荐,进程列表可见) | `CODA_API_KEY`;OpenAI 回退 `OPENAI_API_KEY`;Anthropic 回退 `ANTHROPIC_API_KEY` | `apiKeyEnv`(推荐)/ `apiKey`(明文,警告) |
+| apiKey | `--api-key`(不推荐,进程列表可见) | `CODA_API_KEY`;两个 OpenAI adapter 回退 `OPENAI_API_KEY`;Anthropic 回退 `ANTHROPIC_API_KEY` | `apiKeyEnv`(推荐)/ `apiKey`(明文,警告) |
 
 ```ts
 // ~/.coda/config.json
@@ -330,6 +336,16 @@ function resolveConfig(flags, env, file, { allowMissingApiKey = false } = {}): R
                           defaults: file.defaults } };
 }
 ```
+
+`toModelRef` 的 OpenAI 分支是显式映射:
+
+```ts
+openai-chat      → { provider: 'openai', api: 'openai-chat', model }
+openai-responses → { provider: 'openai', api: 'openai-responses', model }
+```
+
+`main.ts` 随后把 `openai-responses` 分发到 `streamOpenAIResponses`。该注册是 CLI composition root
+唯一需要知道的新 adapter 细节；agent/session 不按 provider 分支。
 
 要点:
 

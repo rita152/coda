@@ -32,13 +32,15 @@ export interface CliFlags {
   model?: string;
   baseUrl?: string;
   apiKey?: string;
-  provider?: 'openai-chat' | 'anthropic-messages' | 'faux';
+  provider?: CliProvider;
   fauxScript?: string;         // --faux-script <path>(FauxScript 的可序列化子集)
   cwd?: string;
   sessionDir?: string;         // 测试/e2e 隔离用
   noColor: boolean;
   approvalMode?: ApprovalMode; // 缺省按形态定:交互 TUI/classic → interactive,headless/-p → allow
 }
+
+export type CliProvider = 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'faux';
 
 /** 会话 id 形状(session/store.ts newSessionId:时间戳前缀 + 随机尾)。 */
 const SESSION_ID_RE = /^\d{8}-\d{6}-/;
@@ -72,7 +74,12 @@ export function parseFlags(argv: string[]): CliFlags {
       case '--api-key': flags.apiKey = take(); break;
       case '--provider': {
         const v = take();
-        if (v !== 'openai-chat' && v !== 'anthropic-messages' && v !== 'faux') {
+        if (
+          v !== 'openai-chat' &&
+          v !== 'openai-responses' &&
+          v !== 'anthropic-messages' &&
+          v !== 'faux'
+        ) {
           throw new Error(`unknown provider: ${v}`);
         }
         flags.provider = v;
@@ -101,7 +108,7 @@ export function parseFlags(argv: string[]): CliFlags {
 
 export interface ResolvedConfig {
   modelConfig: ModelConfig;
-  provider: 'openai-chat' | 'anthropic-messages' | 'faux';
+  provider: CliProvider;
   fauxScript?: string;
 }
 
@@ -204,7 +211,11 @@ export function resolveConfig(
     modelConfig: {
       ref: isAnthropic
         ? { provider: 'anthropic', api: 'anthropic-messages', model }
-        : { provider: 'openai', api: 'openai-chat', model },
+        : {
+            provider: 'openai',
+            api: provider === 'openai-responses' ? 'openai-responses' : 'openai-chat',
+            model,
+          },
       baseURL,
       apiKey,
       compat: file.compat,

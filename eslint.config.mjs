@@ -1,6 +1,6 @@
 // 分层依赖规则的机械保障(规格见 docs/02-architecture.md 第 3 节)。
 // 规则 A:import/no-restricted-paths 管项目内目录间依赖方向;
-// 规则 B:no-restricted-imports 管 npm 包级封锁(openai 仅允许 providers/openai-chat);
+// 规则 B:no-restricted-imports 管 npm 包级封锁(openai 仅允许两个 OpenAI adapter);
 // 规则 C:protocol 层零依赖(禁止一切 bare import,含 node: 内置模块)。
 // 三条规则的自证测试在 tests/boundaries.test.ts——改动本文件必须让该测试仍然通过。
 import tseslint from 'typescript-eslint';
@@ -47,12 +47,19 @@ export default tseslint.config(
           // provider 之间互相隔离(跨 provider import 是设计异味)
           { target: './src/providers/openai-chat', from: './src/providers/faux' },
           { target: './src/providers/faux', from: './src/providers/openai-chat' },
+          { target: './src/providers/openai-responses', from: './src/providers/faux' },
+          { target: './src/providers/faux', from: './src/providers/openai-responses' },
           { target: './src/providers/anthropic-messages', from: './src/providers/faux' },
           { target: './src/providers/anthropic-messages', from: './src/providers/openai-chat' },
           { target: './src/providers/openai-chat', from: './src/providers/anthropic-messages' },
           { target: './src/providers/faux', from: './src/providers/anthropic-messages' },
+          { target: './src/providers/anthropic-messages', from: './src/providers/openai-responses' },
+          { target: './src/providers/openai-responses', from: './src/providers/anthropic-messages' },
+          { target: './src/providers/openai-chat', from: './src/providers/openai-responses' },
+          { target: './src/providers/openai-responses', from: './src/providers/openai-chat' },
           // 测试只允许用 faux provider,不得触碰真实 adapter(防止测试悄悄变在线测试)
           { target: './tests', from: './src/providers/openai-chat' },
+          { target: './tests', from: './src/providers/openai-responses' },
           { target: './tests', from: './src/providers/anthropic-messages' },
         ],
       }],
@@ -60,7 +67,8 @@ export default tseslint.config(
   },
 
   // ---- 规则 B:SDK 包按 provider 目录隔离(需求 1 的机械保障)----
-  // openai 仅 providers/openai-chat;@anthropic-ai/sdk 仅 providers/anthropic-messages。
+  // openai 仅 providers/openai-chat 与 providers/openai-responses;
+  // @anthropic-ai/sdk 仅 providers/anthropic-messages。
   // flat config 同 ruleId 后者整体覆盖前者(不合并 options),故不能用两个各自 ignore 的并列块
   // ——那样第二块的 no-restricted-imports 会把第一块的 openai 规则整个吃掉。改用「基线全禁 +
   // 各 provider 目录 override 放行自己那一个」结构。scripts/ 同受约束;record-fixture*.ts
@@ -70,22 +78,22 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
-          { group: ['openai', 'openai/*'], message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(协议隔离,见 docs/02-architecture.md)' },
+          { group: ['openai', 'openai/*'], message: 'openai SDK 只允许在 src/providers/openai-chat/ 或 openai-responses/ 内使用(协议隔离,见 docs/02-architecture.md)' },
           { group: ['@anthropic-ai/sdk', '@anthropic-ai/sdk/*'], message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(协议隔离,见 docs/04 §8)' },
         ],
       }],
       // 动态 import() 与内联 import() 类型引用是另外两条渗漏通道,用语法选择器一并堵死。
       'no-restricted-syntax': ['error',
-        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(动态 import 同样受限)' },
-        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(import() 类型引用同样受限)' },
+        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(动态 import 同样受限)' },
+        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(import() 类型引用同样受限)' },
         { selector: String.raw`ImportExpression > Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(动态 import 同样受限)' },
         { selector: String.raw`TSImportType Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(import() 类型引用同样受限)' },
       ],
     },
   },
-  // openai-chat override:放行 openai,仍禁 @anthropic-ai(跨 provider 隔离)
+  // 两个 OpenAI adapter override:放行 openai,仍禁 @anthropic-ai(跨 provider 隔离)
   {
-    files: ['src/providers/openai-chat/**/*.ts'],
+    files: ['src/providers/openai-chat/**/*.ts', 'src/providers/openai-responses/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{ group: ['@anthropic-ai/sdk', '@anthropic-ai/sdk/*'], message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(跨 provider 隔离)' }],
@@ -101,11 +109,11 @@ export default tseslint.config(
     files: ['src/providers/anthropic-messages/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', {
-        patterns: [{ group: ['openai', 'openai/*'], message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(跨 provider 隔离)' }],
+        patterns: [{ group: ['openai', 'openai/*'], message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(跨 provider 隔离)' }],
       }],
       'no-restricted-syntax': ['error',
-        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(跨 provider 隔离)' },
-        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(跨 provider 隔离)' },
+        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(跨 provider 隔离)' },
+        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(跨 provider 隔离)' },
       ],
     },
   },

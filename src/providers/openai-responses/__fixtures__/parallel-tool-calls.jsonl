@@ -1,0 +1,11 @@
+{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"fc_first","type":"function_call","status":"in_progress","call_id":"call_first","name":"read","arguments":""}}
+{"type":"response.output_item.added","sequence_number":1,"output_index":1,"item":{"id":"fc_second","type":"function_call","status":"in_progress","call_id":"call_second","name":"read","arguments":""}}
+{"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_first","output_index":0,"delta":"{\"path\":"}
+{"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_second","output_index":1,"delta":"{\"path\":"}
+{"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_first","output_index":0,"delta":"\"a.ts\"}"}
+{"type":"response.function_call_arguments.delta","sequence_number":5,"item_id":"fc_second","output_index":1,"delta":"\"b.ts\"}"}
+{"type":"response.function_call_arguments.done","sequence_number":6,"item_id":"fc_second","output_index":1,"name":"read","arguments":"{\"path\":\"b.ts\"}"}
+{"type":"response.function_call_arguments.done","sequence_number":7,"item_id":"fc_first","output_index":0,"name":"read","arguments":"{\"path\":\"a.ts\"}"}
+{"type":"response.output_item.done","sequence_number":8,"output_index":0,"item":{"id":"fc_first","type":"function_call","status":"completed","call_id":"call_first","name":"read","arguments":"{\"path\":\"a.ts\"}"}}
+{"type":"response.output_item.done","sequence_number":9,"output_index":1,"item":{"id":"fc_second","type":"function_call","status":"completed","call_id":"call_second","name":"read","arguments":"{\"path\":\"b.ts\"}"}}
+{"type":"response.completed","sequence_number":10,"response":{"id":"resp_completed","object":"response","status":"completed","output":[{"id":"fc_first","type":"function_call","status":"completed","call_id":"call_first","name":"read","arguments":"{\"path\":\"a.ts\"}"},{"id":"fc_second","type":"function_call","status":"completed","call_id":"call_second","name":"read","arguments":"{\"path\":\"b.ts\"}"}],"error":null,"incomplete_details":null,"usage":{"input_tokens":18,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":14,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":32}}}

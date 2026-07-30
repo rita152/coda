@@ -1,5 +1,5 @@
 // Chat Completions adapter(规格见 docs/04-provider-adapter.md)。
-// src/ 内唯一允许 import "openai" 的目录(scripts/record-fixture.ts 有显式豁免)。
+// src/ 内两个允许 import "openai" 的 adapter 目录之一(另一个是 openai-responses)。
 // 对外只导出 streamOpenAIChat 与 detectCompat。
 // 铁律:一旦被调用绝不 throw、绝不 reject;一切错误编码为流内 error 事件。
 

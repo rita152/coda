@@ -1,8 +1,8 @@
 [← 返回地图](./README.md)
 
-# 04 · Provider 接口契约与 Chat Completions Adapter 全细节
+# 04 · Provider 接口契约与 OpenAI Adapters
 
-本文是 provider 层的完整规格:先回顾 agent 唯一认识的 provider 形态(`StreamFn`),然后逐节展开 `ChatCompletionsAdapter` 的出站转换、入站解析状态机、错误映射、`CompatFlags` 方言系统、transform 转录清洗层,最后给出「新增一个 provider 的步骤清单」与测试用 faux provider 规格。协议隔离(需求 1)的全部落点都在本文:**`openai` 包只允许出现在 `src/providers/openai-chat/` 内,ESLint 边界规则违者报错**。
+本文是 provider 层的完整规格:先回顾 agent 唯一认识的 provider 形态(`StreamFn`),然后逐节展开 Chat Completions adapter 的出站转换、入站解析状态机、错误映射、`CompatFlags` 方言系统与 transform 转录清洗层；第 11 节定义 OpenAI Responses adapter 的独立 wire 契约。协议隔离(需求 1)的全部落点都在本文:**`openai` 包及类型只允许出现在 `src/providers/openai-chat/` 与 `src/providers/openai-responses/` 内,两个 adapter 互相隔离,ESLint 边界规则违者报错**。
 
 ## 1. StreamFn 契约回顾
 
@@ -27,7 +27,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 2. **同步返回流。**`StreamFn` 不是 async 函数:先构造 `ProviderEventStream` 返回,内部再启动 async 工作(参考 pi 的 `lazyStream` 模式,setup 失败也 push `error` 事件而不是 reject)。
 3. **事件序列合法。**`start` 首发;每个内容块严格三段式 `*_start → *_delta* → *_end`,`contentIndex` 对应 `partial.content` 下标;终止事件恰好一个(`done` 或 `error`);每个事件携带同一个逐步生长的 `partial` 快照;`stream.end(message)` 在终止事件后调用,使 `result()` resolve。
 
-Adapter 的责任边界:**wire 协议(`ChatCompletionMessageParam`、`ChatCompletionChunk`)只存在于 adapter 内部**,进出都是内部协议类型。这是四层类型体系的最后一层(见 [架构](./02-architecture.md))。
+Adapter 的责任边界:**wire 协议(`ChatCompletionMessageParam`、`ChatCompletionChunk`、Responses input/stream event)只存在于对应 adapter 内部**,进出都是内部协议类型。这是四层类型体系的最后一层(见 [架构](./02-architecture.md))。
 
 ## 2. ChatCompletionsAdapter 总体结构
 
@@ -440,6 +440,105 @@ adapter 本体的测试不用 faux,用**录制的 SSE chunk fixture 回放**(moc
 - [ ] transform 层单测:aborted 消息(含其 toolResult)滤除、孤儿补结果、跨模型 reasoning 降级、非视觉图片降占位;
 - [ ] faux provider 通过与 openai-chat 相同的 StreamFn 契约测试套件;
 - [ ] 真实 OpenAI 端点冒烟(手动/CI 可选):一次带工具调用的完整 turn 往返无 400。
+
+## 11. OpenAI Responses Adapter
+
+`src/providers/openai-responses/` 是与 `openai-chat` 并列、互不依赖的 adapter。对外唯一运行时入口是
+`streamOpenAIResponses: StreamFn`；OpenAI SDK、Responses 请求类型与流事件类型不得出现在
+`protocol/`、`agent/`、`session/` 或 CLI 的函数签名里。CLI 只用
+`ModelRef{provider:'openai', api:'openai-responses', model}` 选择该入口。
+
+### 11.1 出站：Context → instructions / input / tools
+
+生产调用等价于:
+
+```ts
+client.responses.create({
+  model: model.ref.model,
+  instructions: context.systemPrompt,
+  input: convertInput(context.messages),
+  tools: convertTools(context.tools),
+  stream: true,
+  include: ['reasoning.encrypted_content'],
+  // options/defaults 按需映射 max_output_tokens、temperature、reasoning
+}, { signal });
+```
+
+逐项映射:
+
+| 内部形态 | Responses wire |
+|---|---|
+| `systemPrompt` | 顶层 `instructions` |
+| `UserMessage` 文本/图片 | `input` 中 user message；图片为 data URI `input_image` |
+| assistant `TextPart` | assistant input message |
+| assistant `ReasoningPart` | 仅当 `signature` 是本 adapter 的 replay 信封时恢复为 `reasoning` item；信封保存 item id、item/summary/content kind、index 与可选 `encrypted_content` |
+| `ToolCallPart` | `{type:'function_call', call_id: part.id, name, arguments}`，优先使用 `rawArguments` |
+| `ToolResultMessage` | `{type:'function_call_output', call_id: toolCallId, output}`；文本/图片均可回传，`details` 永不出站 |
+| `ToolSchema` | Responses 的扁平 function tool `{type:'function', name, description, parameters, strict:false}` |
+
+`ToolCallPart.id` 在本 adapter 中明确等于 Responses `call_id`，不是 output item 的 `id`。
+这是本地工具结果与 `function_call_output.call_id` 配对的唯一键。adapter 只做转换，**不得执行工具**；
+工具发现、审批、调度与执行继续完全属于 agent loop。
+
+### 11.2 transcript 是唯一事实源
+
+每次请求都从传入的本地 `Context.messages` 完整重建 `input`。当前实现**不发送
+`previous_response_id`**，也不依赖服务端 conversation/store 状态；因此进程恢复、自动重试和
+compaction 后的请求仍由本地 JSONL transcript 决定。未来允许把 `previous_response_id` 加成
+可选性能优化，但必须同时保留完整本地转录，并满足以下约束:
+
+1. 缺失、过期或服务端拒绝该 id 时可立即退回全量 replay；
+2. retry/恢复不得只持有 response id；
+3. 任何优化都不得改变 `Context` 的消息顺序、工具配对或 reasoning replay 内容。
+
+### 11.3 入站事件与并行状态机
+
+Responses 流的 item/content index 是 wire 定位键；内部 `contentIndex` 仍按首次观察到块的顺序
+append-only 分配。状态机允许多个块同时打开，尤其允许多个 function call 的 arguments 交错分片:
+
+| Responses 事件 | ProviderEvent |
+|---|---|
+| `response.output_text.delta/done`、`response.refusal.delta/done` | `text_start/delta/end` |
+| `response.reasoning_summary_text.delta/done`、`response.reasoning_text.delta/done` | `reasoning_start/delta/end` |
+| `response.output_item.added` 的 `function_call` | 建立 `ToolCallPart` 并发 `tool_call_start` |
+| `response.function_call_arguments.delta/done` | 按 `item_id`/`output_index` 独立拼接并发 `tool_call_delta/end` |
+| terminal response 的 `usage` | 覆盖映射内部 inclusive `Usage` |
+
+arguments 分片只做字符串拼接；每个 delta 后用容错 JSON 解析刷新 `arguments`，done/terminal 时
+再以完整字符串做最终解析。`response.output_item.done` 与 terminal response 的完整 output 是
+reconciliation 快照：只允许补上已流式前缀的缺失后缀；若完整值与已收到前缀矛盾，编码为流内
+非重试协议错误，而不是静默改写 transcript。两个并行 call 各有独立槽位，任何时候都不能用
+“最后一个块”推断当前目标。
+
+reasoning summary/content 分别成为现有 `ReasoningPart`。output item 完成时若得到
+`encrypted_content`，adapter 更新该 part 的私有 signature 信封，使同一
+`ModelRef` 的下一轮全量 replay 可以恢复原 Responses reasoning item；跨模型时既有 transform
+规则会将它降级为文本并剥离信封。若 reasoning item 没有任何可见 summary/content，仍必须生成
+一个空文本 `ReasoningPart`，用 `kind:'item'` 信封保留 id/encrypted content；这不是 UI 内容，
+而是 function-call 后续回合所需的 stateless replay 项。
+
+### 11.4 终态、usage、abort 与错误
+
+- `response.completed` → `done`；只要最终内容含 function call，stopReason 为 `tool_calls`，否则为 `stop`；
+- `response.incomplete` 的 `max_output_tokens` / `content_filter` 分别映射为 `length` /
+  `content_filter`，都是合法 `done`；未知 incomplete reason 编码为 `error`；
+- `response.failed`、流内 `type:'error'`、SDK 抛出的 SSE/HTTP/网络错误都关闭已打开块并产出唯一
+  `error` 终态；`StreamFn` 本身和 `result()` 不 reject；
+- SDK v6 在流中 abort 时可能让异步迭代器 clean return；若 signal 已 aborted 且尚无 terminal，
+  必须映射为 `stopReason:'aborted'`，保留半截内容且不设置 `errorMessage`；
+- 正常迭代结束却没有任何 Responses terminal 事件是可重试 network error；
+- usage 使用 Responses 的 `input_tokens` / `output_tokens` 作为 inclusive 总量，
+  `input_tokens_details.cached_tokens/cache_write_tokens` 与
+  `output_tokens_details.reasoning_tokens` 仅在满足协议不变量时落入可选拆分字段。
+
+该 adapter 不访问 `Agent`、`Session`、steering/follow-up 队列或持久化，不修改 agent loop，也不
+持有跨请求会话状态。离线 fixture 与错误注入覆盖见 [测试文档 §4.4](./10-testing.md)。
+
+上游事实依据以 OpenAI 官方文档为准:
+[streaming Responses](https://developers.openai.com/api/docs/guides/streaming-responses)、
+[streaming function calls](https://developers.openai.com/api/docs/guides/function-calling#streaming)、
+[Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与
+[streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
 
 ## 相关文档
 

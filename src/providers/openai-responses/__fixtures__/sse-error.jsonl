@@ -1,0 +1,2 @@
+{"type":"response.output_text.delta","sequence_number":0,"item_id":"msg_error","output_index":0,"content_index":0,"delta":"before failure","logprobs":[]}
+{"type":"error","sequence_number":1,"code":"server_error","message":"temporary stream failure","param":null}

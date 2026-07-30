@@ -8,7 +8,7 @@
 
 整个架构由三条原则推导而来,后文所有结构都是这三条的机械展开:
 
-1. **协议隔离(需求 1)**:`openai` 包及其一切类型只存在于 `src/providers/openai-chat/` 内。agent 核心只认识内部协议(`AgentMessage` / `ProviderEvent` / `StreamFn`)。这不是口头约定,而是 ESLint 规则——违规直接 lint 失败(见第 3 节)。
+1. **协议隔离(需求 1)**:`openai` 包及其一切类型只存在于 `src/providers/openai-chat/` 与 `src/providers/openai-responses/` 内；两个 adapter 也不得互相依赖。agent 核心只认识内部协议(`AgentMessage` / `ProviderEvent` / `StreamFn`)。这不是口头约定,而是 ESLint 规则——违规直接 lint 失败(见第 3 节)。
 2. **事件驱动、单向数据流**:所有跨层通信都是 discriminated union 事件(`ProviderEvent`、`AgentEvent`),全部 JSON 可序列化。UI 从不直接读 agent 内部状态,只消费事件;agent 从不感知 UI 存在,只广播事件。
 3. **单进程、单 Agent、单 active run**:v1 不做跨进程协议、不做 server/client 分离、不做多 agent 并发。这是刻意裁剪(理由见第 6 节),但所有类型设计都为未来 server 化留了门。
 
@@ -22,7 +22,9 @@
 src/
   protocol/        # 内部协议类型 + EventStream。零运行时依赖;禁止 import 任何 provider SDK
   providers/
-    openai-chat/   # Chat Completions adapter(唯一允许 import "openai" 的目录)
+    openai-chat/       # Chat Completions adapter(允许 import "openai")
+    openai-responses/  # Responses adapter(允许 import "openai"，与 chat 隔离)
+    anthropic-messages/# Anthropic Messages adapter
     faux/          # 脚本化测试 provider
   agent/           # Agent 类、runLoop、队列、工具执行调度
   tools/           # read/ls/grep/glob/bash/edit/write/plan + 框架
@@ -37,6 +39,8 @@ src/
 |---|---|---|---|
 | `protocol/` | 定义全项目通用语言:消息模型、Provider 流事件、Agent 事件、`EventStream` 泛型实现。是唯一"所有人都可以依赖"的目录 | `messages.ts`(AgentMessage/Context/Usage)、`provider.ts`(ProviderEvent/StreamFn/ModelConfig)、`agent-events.ts`(AgentEvent)、`event-stream.ts` | 不 import 任何 npm 运行时依赖、任何其他 src 目录;不包含业务逻辑 |
 | `providers/openai-chat/` | Chat Completions adapter:出站把 `Context` 翻译成 wire 消息,入站把 SSE chunk 状态机化为 `ProviderEvent`;`CompatFlags` 方言处理 | `index.ts`(导出 StreamFn)、`convert.ts`(出站转换)、`stream.ts`(入站状态机)、`compat.ts`(方言推断) | 不感知 agent 存在;不处理重试策略(整轮重发在 session 层);不 throw(铁律见 [03](./03-internal-protocol.md)) |
+| `providers/openai-responses/` | Responses adapter:把完整本地 transcript 翻译成 `instructions/input/tools`，把 Responses item/delta/terminal 事件翻译成 `ProviderEvent` | `index.ts`、`convert.ts`、`consume.ts`、`errors.ts`、`reasoning.ts` | 不执行工具;不依赖服务端 response id 维持正确性;不访问 agent/session/队列;不与 sibling adapter 共享 wire 类型 |
+| `providers/anthropic-messages/` | Anthropic Messages adapter | `index.ts`、`convert.ts`、`consume.ts`、`errors.ts`、`compat.ts` | 与其它 provider 隔离；SDK 类型不外泄 |
 | `providers/faux/` | 脚本化回放 `ProviderEvent` 的测试 provider,让 loop/steering/CLI 全离线可测 | `index.ts` | 不依赖网络、不依赖 openai 包 |
 | `agent/` | `Agent` 类(prompt/steer/followUp/abort/subscribe)、runLoop 双层循环、steering/follow-up 队列、工具执行三阶段调度、出站前 transform 层 | `agent.ts`、`run-loop.ts`、`queues.ts`、`tool-executor.ts`、`transform.ts` | 不 import 任何 provider(经 `StreamFn` 注入);不 import 具体工具实现(经 `AgentConfig.tools` 注入);不做持久化 |
 | `tools/` | 工具框架(`ToolDefinition`、统一截断 post-hook、FileTracker)+ 八个内置工具 | `types.ts`(框架类型)、`framework.ts`、`file-tracker.ts`、`read.ts` 等每工具一文件、`index.ts`(`createCodingTools()`) | 不感知 agent loop;不直接发 AgentEvent(经 `ToolContext.onUpdate` 回调) |
@@ -57,7 +61,9 @@ src/
 flowchart BT
   protocol["src/protocol\n类型 + EventStream(零依赖)"]
   shared["src/shared\n无状态工具函数(零依赖)"]
-  openai_chat["src/providers/openai-chat\n(唯一允许 import 'openai')"]
+  openai_chat["src/providers/openai-chat\nChat Completions"]
+  openai_responses["src/providers/openai-responses\nResponses"]
+  anthropic["src/providers/anthropic-messages\nMessages"]
   faux["src/providers/faux"]
   agent["src/agent"]
   tools["src/tools\n(zod、@vscode/ripgrep)"]
@@ -65,6 +71,8 @@ flowchart BT
   cli["src/cli\n组装根 + OpenTUI"]
 
   openai_chat --> protocol
+  openai_responses --> protocol
+  anthropic --> protocol
   faux --> protocol
   agent --> protocol
   tools --> protocol
@@ -75,6 +83,8 @@ flowchart BT
   session --> agent
   cli --> agent
   cli --> openai_chat
+  cli --> openai_responses
+  cli --> anthropic
   cli --> faux
   cli --> tools
   cli --> session
@@ -143,15 +153,15 @@ export default tseslint.config(
       }],
     },
   },
-  // ---- 规则 B:openai 包只允许出现在 providers/openai-chat 内(需求 1 的机械保障)----
+  // ---- 规则 B:openai 包只允许出现在两个 OpenAI adapter 内(机械保障)----
   {
     files: ['src/**/*.ts'],
-    ignores: ['src/providers/openai-chat/**'],
+    ignores: ['src/providers/openai-chat/**', 'src/providers/openai-responses/**'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{
           group: ['openai', 'openai/*'],
-          message: 'openai SDK 只允许在 src/providers/openai-chat/ 内使用(协议隔离,见 docs/02-architecture.md)',
+          message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(协议隔离)',
         }],
       }],
     },
@@ -168,7 +178,7 @@ export default tseslint.config(
 
 - **`import type` 同样被拦截**。`no-restricted-imports` 默认对 type-only import 一并报错;若切换到 `@typescript-eslint/no-restricted-imports`,其 `allowTypeImports` 选项必须保持 `false`——opencode 的教训里,类型渗漏才是主要祸害。
 - **zone 的 `except` 路径相对于 `from`**(eslint-plugin-import 的语义),所以 agent→tools 的白名单写 `'./types.ts'` 而不是完整路径。
-- **测试文件同样受约束**:`test/` 里 loop/steering 的测试只允许用 `providers/faux`,不得 import openai——否则测试会悄悄变成在线测试。adapter 自己的测试(SSE fixture 回放)放 `src/providers/openai-chat/*.test.ts`,天然在白名单目录内。
+- **测试文件同样受约束**:`tests/` 里 loop/steering 的测试只允许用 `providers/faux`,不得 import 真实 adapter——否则测试会悄悄变成在线测试。adapter 自己的 fixture 回放测试放在各自 `src/providers/<adapter>/*.test.ts`,天然位于 SDK 白名单目录内。
 - CI 中 `eslint --max-warnings 0` 作为 M0 验收项;可选叠加 dependency-cruiser 生成依赖图并断言无环,作为第二道保险(不是必需,ESLint 两条规则已覆盖全部硬约束)。
 
 ## 4. 四层核心类型 + Session 外围事件
@@ -182,7 +192,7 @@ flowchart TB
   AE["AgentEvent(protocol/agent-events.ts)\nagent_start/turn_*/message_*/tool_execution_*/queue_update/plan_update/..."]
   MSG["AgentMessage / Context(protocol/messages.ts)\nUserMessage | AssistantMessage | ToolResultMessage\n会话数据层:持久化与重放的对象"]
   PE["ProviderEvent / StreamFn(protocol/provider.ts)\nstart/delta/end 三段式 + done/error,每事件携带 partial 快照"]
-  WIRE["wire 协议(providers/openai-chat/ 内部)\nChatCompletionMessageParam / ChatCompletionChunk / SSE"]
+  WIRE["wire 协议(对应 adapter 内部)\nChatCompletion / Responses / Messages SSE"]
 
   UI -->|"Session API 调用"| SE
   SE -->|"转发 Agent API"| MSG
@@ -217,7 +227,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 
 铁律:StreamFn 一旦被调用绝不 throw、绝不 reject,一切错误编码为流内 `error` 事件。这条铁律是 Vercel AI SDK 的 `LanguageModelV3` 极小接口("do" 前缀、错误也是 stream part)与 opencode 16 元 LLMEvent 归一化的共同结论:错误进流,loop 层才能零 try/catch 地统一处理所有 provider。接口详情见 [03 内部协议](./03-internal-protocol.md) 与 [04 Provider 接口](./04-provider-adapter.md)。
 
-**wire 层(adapter 内部,不算"我们的类型")。**`ChatCompletionMessageParam`、`ChatCompletionChunk`、SSE 帧格式,以及未来 Anthropic/Gemini 的等价物。它们是外部世界的方言,adapter 的职责就是让方言止步于此。
+**wire 层(adapter 内部,不算"我们的类型")。**`ChatCompletionMessageParam`、Responses input/stream event、Anthropic Messages event 与 SSE 帧格式都是外部世界的方言；adapter 的职责就是让方言止步于各自目录。
 
 ### 与 codex 三层表示的对照
 
@@ -239,8 +249,8 @@ sequenceDiagram
   participant CLI as cli/(OpenTUI / classic / headless)
   participant S as session/
   participant AG as agent/(runLoop)
-  participant AD as providers/openai-chat
-  participant API as OpenAI /chat/completions
+  participant AD as providers/<selected-adapter>
+  participant API as selected provider API
   participant T as tools/
 
   U->>CLI: 输入文本 + Enter
@@ -253,7 +263,7 @@ sequenceDiagram
     AG->>AG: convertContext(ctx):过滤 aborted 消息、修补孤儿 toolCall
     AG->>AD: streamFn(model, ctx, { signal })
     AD->>API: POST stream:true(Context → wire 消息 + 工具 JSON Schema)
-    API-->>AD: SSE chunks(delta.content / delta.tool_calls / usage)
+    API-->>AD: SSE wire events(text / reasoning / tool calls / usage)
     AD-->>AG: ProviderEvent(start / text_delta / tool_call_end / done)
     AG-->>S: message_update / message_end(AssistantMessage 定稿)
     S-->>CLI: SessionEvent → 增量渲染
@@ -334,6 +344,8 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 |---|---|---|---|
 | `protocol/` | `AgentMessage`、`Context`、`Usage`、`ModelRef`、`ProviderEvent`、`ProviderEventStream`、`EventStream`、`StreamFn`、`ModelConfig`、`StreamOptions`、`AgentEvent`、`QueuedMessage`、`PlanStep`、`ToolSchema`、`StopReason` | (无) | 所有模块 |
 | `providers/openai-chat/` | `streamOpenAIChat: StreamFn`、`detectCompat`、`CompatFlags` | `protocol`、`shared`、`openai` | `cli`(组装)、自身测试 |
+| `providers/openai-responses/` | `streamOpenAIResponses: StreamFn` | `protocol`、`shared`、`openai` | `cli`(组装)、自身测试 |
+| `providers/anthropic-messages/` | `streamAnthropicMessages: StreamFn` | `protocol`、`shared`、`@anthropic-ai/sdk` | `cli`(组装)、自身测试 |
 | `providers/faux/` | `createFauxStreamFn(script): StreamFn`、`createGate` | `protocol`、`shared` | 测试、`cli`(离线演示) |
 | `agent/` | `Agent` 类、`AgentConfig`、transform 层函数 | `protocol`、`shared`、`tools/types.ts`(仅类型) | `cli`、`session`、测试 |
 | `tools/` | `ToolDefinition`、`ToolContext`、`ToolOutput`、`FileTracker`、`createCodingTools(): ToolDefinition[]` | `protocol`、`shared`、zod、`@vscode/ripgrep` | `cli`(组装)、`agent`(仅 types.ts) |
@@ -358,11 +370,11 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 - [ ] `tsc --noEmit`(strict)通过;依赖图无环(dependency-cruiser/madge,按 3.3 节为可选的第二道保险,非必需项)。
 - [ ] 用 `providers/faux` 替换 `streamFn` 后,`agent/` 全部测试离线通过且零代码改动(证明 StreamFn 注入边界成立)。
 - [ ] headless 模式 stdout 每行可被 `JSON.parse`,事件序列能完整重建会话渲染(证明 SessionEvent 全 JSON 可序列化,server 化前提成立)。
-- [ ] `grep -r "from 'openai'" src --include='*.ts' | grep -v providers/openai-chat` 输出为空(CI 里作为 ESLint 之外的第二道防线)。
+- [ ] OpenAI SDK import 只出现在 `providers/openai-chat` / `providers/openai-responses`；`tests/boundaries.test.ts` 同时验证 core 封锁、两个白名单与 provider 互相隔离。
 
 ## 相关文档
 
 - [03 内部协议](./03-internal-protocol.md) —— 第 3、4 层类型(AgentMessage/ProviderEvent/AgentEvent)的完整定义与语义
-- [04 Provider 接口与 Chat Completions adapter](./04-provider-adapter.md) —— wire 层转换全细节、CompatFlags、新增 provider 指南
+- [04 Provider 接口与 OpenAI adapters](./04-provider-adapter.md) —— wire 层转换全细节、CompatFlags、Responses 契约与新增 provider 指南
 - [05 Agent 循环](./05-agent-loop.md) —— 第 5 节时序图中 runLoop 每一步的精确语义
 - [09 CLI](./09-cli.md) —— 第 1 层 UI 命令的键位映射与 headless NDJSON 外协议

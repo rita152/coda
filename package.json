@@ -23,7 +23,8 @@
     "smoke": "bun run scripts/smoke-stream.ts",
     "smoke:anthropic": "bun run scripts/smoke-anthropic.ts",
     "record:fixture": "bun run scripts/record-fixture.ts",
-    "record:anthropic": "bun run scripts/record-fixture-anthropic.ts"
+    "record:anthropic": "bun run scripts/record-fixture-anthropic.ts",
+    "fixtures:openai-responses": "bun run scripts/generate-openai-responses-fixtures.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

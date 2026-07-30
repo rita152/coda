@@ -2,7 +2,7 @@
 
 # 03 内部协议完整规格
 
-本文是全项目的核心契约文档。`src/protocol/` 下的类型是所有其他模块的唯一共同语言:agent 核心、工具、session、CLI 全部只认这里定义的类型;OpenAI Chat Completions 的 wire 类型被隔离在 adapter 内部,永远不出现在本文所述的任何接口上。本文定义的每一条不变量都是可测试的验收项(见文末清单)。
+本文是全项目的核心契约文档。`src/protocol/` 下的类型是所有其他模块的唯一共同语言:agent 核心、工具、session、CLI 全部只认这里定义的类型;OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 的 wire 类型均被隔离在各自 adapter 内部,永远不出现在本文所述的任何接口上。本文定义的每一条不变量都是可测试的验收项(见文末清单)。
 
 ## 1. 定位:四层类型体系中的中间两层
 
@@ -42,7 +42,13 @@ export interface ToolCallPart  {
   rawArguments?: string;                // 原始 JSON 字符串(截断诊断用)
 }
 
-export interface ModelRef { provider: string; api: string; model: string }  // api 如 'openai-chat'
+export type ModelApi =
+  | 'openai-chat'
+  | 'openai-responses'
+  | 'anthropic-messages'
+  | 'faux'
+  | (string & {});  // 开放尾项允许第三方 adapter
+export interface ModelRef { provider: string; api: ModelApi; model: string }
 
 export interface Usage {
   input: number;          // inclusive:含 cacheRead/cacheWrite
@@ -92,7 +98,7 @@ export interface Context {
 ### 2.2 Part 类型逐一说明
 
 - **TextPart**:普通文本。assistant 出站到 Chat Completions 时会被合并为纯字符串 content(pi 的 openai-completions adapter 注释明确指出:数组形式 `[{type:"text"}]` 会诱发 DeepSeek 等模型模仿结构输出),但内部协议保留数组形态——这是"内部表达力 ≥ 任意 wire 格式"原则的体现,降级永远发生在 adapter。
-- **ReasoningPart**:思维链文本。`signature` 承载 provider 的加密签名(Anthropic thinking signature、第三方 `reasoning_content` 的伴随字段),跨模型 replay 时由 transform 层剥离或整块降级为文本(见 [04-provider-adapter](./04-provider-adapter.md))。
+- **ReasoningPart**:推理文本或摘要。`signature` 承载 provider 私有 replay 元数据:Anthropic thinking signature，或 OpenAI Responses adapter 的版本化信封(item id、item/summary/content kind、index、可选 `encrypted_content`)。Responses 的无可见文本 reasoning item 用空 `text` + item-only 信封表示，以免工具后续回合丢失 stateless replay 项。protocol 不解析该字段；同模型由所属 adapter 原样恢复，跨模型 replay 时由 transform 层剥离并把整块降级为文本(见 [04-provider-adapter](./04-provider-adapter.md))。
 - **ImagePart**:base64 + mimeType,不做 URL 形态(避免生命周期/鉴权问题)。出现在 user 输入与工具结果中(read 工具读图片文件时);Chat Completions 的 tool 消息不能携带图片,adapter 会把它抽出补一条 user 消息——这是 pi 验证过的降级手法。
 - **ToolCallPart**:`arguments` 是**解析后的对象**。流式期间 adapter 用容错 JSON 解析(partial-json)在每个 delta 后刷新它,所以 UI 随时能渲染"参数正在生长"的预览;`rawArguments` 保留原始字符串,专供 `stopReason === 'length'` 截断场景的诊断(此时 `arguments` 可能"能解析但不完整",loop 层一律不执行,见 [05-agent-loop](./05-agent-loop.md))。
 
@@ -114,7 +120,7 @@ export interface Context {
 
 - **跨模型迁移的判定基础**:会话中途换模型(或恢复会话后换 provider)时,transform 层对每条历史 assistant 消息做 `isSameModel(msg.model, currentModel)` 判断——同模型的 reasoning/signature 原样回放,异模型的 reasoning 降级为文本、剥离 signature、toolCallId 归一化(Responses API 的超长 id 压缩)。没有 per-message ModelRef,这个判断无从做起。
 - **成本与统计按模型聚合**:session 层的 token/成本统计直接从消息流折叠,不需要额外记账结构。
-- `api` 字段(如 `'openai-chat'`)与 `provider` 分离,因为同一 provider 可能有多个 API 形态(OpenAI 有 chat 与 responses),兼容性判断以 `api` 为准。
+- `api` 字段(`'openai-chat'` / `'openai-responses'`)与 `provider` 分离,因为同一 provider 可以有多个 wire 形态；兼容性判断以 `api` 为准。`ModelApi` 列出内置值并保留开放尾项，不把 provider catalog 变成 protocol 的封闭注册表。
 
 ### 2.5 ToolResultMessage.details:UI 专用,不发给模型
 
@@ -153,6 +159,7 @@ output = 全部输出 token(含 reasoning)
 我们的对策:**口径归一是 adapter 的出站责任,协议层只有一种含义**。
 
 - openai-chat adapter:`input = prompt_tokens`(原生已 inclusive),`cacheRead = prompt_tokens_details.cached_tokens`,`output = completion_tokens`,`reasoning = completion_tokens_details.reasoning_tokens`;
+- openai-responses adapter:`input = input_tokens`、`output = output_tokens`(两者原生已 inclusive)，拆分来自 `input_tokens_details.cached_tokens/cache_write_tokens` 与 `output_tokens_details.reasoning_tokens`;
 - 未来的 Anthropic adapter(M7):`input = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,拆分字段照录;
 - usage 缺失容忍:流式 usage chunk 可能不出现(`supportsUsageInStreaming` 关闭或 provider 不发),此时 `input/output` 填 0,可选字段留 undefined——`Usage` 的必填字段永远存在,消费端无需判空。
 - `costUSD` 由 adapter(知道模型费率时)或 session 层计算写入,协议只承载结果,不承载费率表。

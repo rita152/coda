@@ -30,7 +30,7 @@ flowchart TB
 | 层 | 位置 | 依赖 | 速度目标 |
 |---|---|---|---|
 | L1 protocol | `src/protocol/*.test.ts` | 无(零运行时依赖是该目录的架构约束) | 毫秒级 |
-| L2 adapter | `src/providers/openai-chat/*.test.ts` + `__fixtures__/` | fixture 文件 | 毫秒级 |
+| L2 adapter | `src/providers/<adapter>/*.test.ts` + `__fixtures__/` | fixture 文件 | 毫秒级 |
 | L3 tools | `src/tools/*.test.ts` | tmpdir、rg 二进制、`Bun.spawn` | 秒级 |
 | L4 loop | `src/agent/*.test.ts`、`src/session/*.test.ts` | faux provider | 毫秒级 |
 | L4 UI | `src/cli/tui.test.ts` | `@opentui/core/testing` 内存 renderer + mock highlighter | 亚秒级 |
@@ -151,6 +151,40 @@ fixture 之外的两个错误路径用单测直接构造(无法录成 chunk):SDK
 
 `scripts/record-fixture.ts`:读 `OPENAI_API_KEY` 环境变量,对真实 endpoint 发起带 `stream:true` 的请求,把每条 chunk 原样写 JSONL(脱敏:去 headers、request id 可保留)。**手动运行、fixture 入库**;CI 永不联网。第三方方言(DeepSeek 等的 `reasoning_content`)同法录制。fixture 一经断言固化,升级 `openai` 包大版本时先跑回放——SDK 变更影响一目了然。
 
+### 4.4 OpenAI Responses 离线 fixtures
+
+Responses adapter 的测试住在 `src/providers/openai-responses/`，通过
+`consumeResponsesStreamForTest` 注入 `AsyncIterable<unknown>`，生产与测试走同一条
+`runResponsesStream` 管线。fixture 由
+`scripts/generate-openai-responses-fixtures.ts` 确定性生成；修改场景后运行:
+
+```bash
+bun run fixtures:openai-responses
+```
+
+生成器是这些 JSONL 的维护入口，禁止直接手改 fixture。所有用例离线运行，不读取 `.env`、不访问
+网络、不 mock agent loop:
+
+| fixture | 场景 | 关键断言 |
+|---|---|---|
+| `text.jsonl` | `response.output_text.delta/done` + completed | TextPart 三段式、stop、terminal usage |
+| `reasoning.jsonl` | reasoning summary 分片 + encrypted content + text | ReasoningPart、私有 replay signature、reasoning usage、下一轮 reasoning item 重建 |
+| `tool-call.jsonl` | function call arguments 任意分片 | `call_id === ToolCallPart.id`、raw/parsed arguments 一致、工具结果成为同 call_id 的 `function_call_output` |
+| `parallel-tool-calls.jsonl` | 两个 call 的 arguments 交错 | 两个开放槽位互不串包、contentIndex append-only、声明序保留 |
+| `usage.jsonl` | cached/cache-write/reasoning 明细 | inclusive Usage 及两条不变量 |
+| `abort.jsonl` | 有半截文本但无 terminal | SDK v6 clean-return 形态 + aborted signal → `aborted`，半截内容保留 |
+| `incomplete.jsonl` | `max_output_tokens` | done/length；另用内联事件覆盖 content_filter 与未知 reason |
+| `sse-error.jsonl` | Responses `type:'error'` | 唯一 error terminal、server_error 可重试、已流内容保留 |
+| `failed.jsonl` | `response.failed` | response error code/message/usage 映射 |
+
+HTTP 401/429/500、`Retry-After`、factory reject、原生迭代中断与“干净结束但无 terminal”无法表示为
+正常 SSE payload，测试以 SDK error/拒绝的 factory 直接注入；断言 `StreamFn` 同步返回，
+`for await` 与 `result()` 都正常完成，错误只出现在 `ProviderEvent.error` 中。
+
+出站测试额外锁定 `instructions/input/tools`、`strict:false`、options/defaults 与
+`include:['reasoning.encrypted_content']`，并明确断言请求对象不存在 `previous_response_id`。
+这条断言保证 fixture replay、恢复与 retry 始终由本地 transcript 驱动。
+
 ## 5. loop 集成测试(L4):steering / follow-up / abort 的确定性方法
 
 全部用 faux provider + 测试工具(`ToolDefinition` 的极简实现,execute 可挂 gate)。事件序列断言用「归一化快照」:收集 AgentEvent 流,剥掉 timestamp/id/usage 后 snapshot 事件 type 序列——gemini-cli 的工具状态机思路,状态迁移序列本身就是规格。
@@ -261,16 +295,17 @@ harness:
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
 - **步骤**:`bun install --frozen-lockfile` → `bun run lint` → `bun run typecheck` → `bun run test`。测试编排器依次运行 L1–L4、`Bun.build`、L5，因而在无 `dist/` 的干净检出中也自包含；`bun run test:unit` 只跑 L1–L4，`bun run test:e2e` 会先重建再跑 L5。编排器和 e2e harness 都显式净化继承环境中的 API key、base URL、token 与常见凭证，以 `--no-env-file` 启动子 Bun，并固定 `NODE_ENV=test`；每个 e2e 子进程还使用临时 HOME，不能读取或清理用户的真实 Coda 配置与数据。统一交付入口为 `bun run check`,总预算 < 5 分钟,L1–L4 < 60 秒。
-- **边界规则自检**:lint 步骤跑 `import/no-restricted-paths`(`openai` 只准出现在 `src/providers/openai-chat/`);另加一个「守卫的守卫」测试——程序化调用 ESLint 检查一段违规 import 片段,断言规则确实报错。opencode V1 的 `tools: Record<string, ai.Tool>` 类型泄漏说明:边界靠自觉必失守,必须机械强制且强制本身要有测试。
+- **边界规则自检**:lint 步骤跑 `import/no-restricted-paths` 与 `no-restricted-imports`(`openai` 只准出现在两个 OpenAI adapter，且所有 provider 互相隔离);另加一个「守卫的守卫」测试——程序化调用 ESLint 检查违规 import 与合法 Responses 白名单片段,断言规则确实报错/放行。opencode V1 的 `tools: Record<string, ai.Tool>` 类型泄漏说明:边界靠自觉必失守,必须机械强制且强制本身要有测试。
 - **无密钥**:CI 环境不配置任何 API key;`record-fixture.ts` 只在开发者本机手动跑。可选:manual-dispatch 的 nightly workflow 用 secret 对真实 API 做一次冒烟(basic-text + tool call),失败只告警不 block。
 - **flake 政策**:只有 §7.2 headless e2e 用例 3 允许 `retry: 1`;其余任何测试出现 flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
-- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent`、`src/providers/openai-chat` 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设统一阈值,但 TUI 的纯格式函数和关键布局/键位必须由 TestRenderer 回归。
+- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent` 与真实 adapter 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设统一阈值,但 TUI 的纯格式函数和关键布局/键位必须由 TestRenderer 回归。
 - **确定性守则**(写进 CONTRIBUTING):测试内禁用裸 `setTimeout` 等待(用 gate 或事件等待);id/timestamp 经注入的 idgen/clock 或快照归一化;快照只对「事件 type 序列」做,不对含时间戳的完整对象做。
 
 ## 9. 验收清单
 
 - [ ] M1:L1 全绿;faux provider 通过「事件语法自检」用例集(每种 FauxTurn 形态产出的事件序列合法、铁律成立)。
 - [ ] M2:§4.2 全部 11 个 fixture 入库且断言通过;两个错误路径单测(reject 不外抛、abort 映射)通过;`record-fixture.ts` 可用。
+- [ ] OpenAI Responses:§4.4 九个生成式 fixture、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。
 - [ ] M3:工具矩阵(§6)全绿,macOS 与 Linux 双平台;bash kill tree 用例验证无孤儿进程。
 - [ ] M4:§5 用例 1–8 全绿,steering/follow-up/abort/transform 的断言全部基于 `calls` 与事件序列,无一处依赖真实时间。
 - [ ] M5:session 持久化集成测试、OpenTUI 顶部起排/固定 footer/resize 与 Enter/Shift+Enter 回归、共享纯键位逻辑测试，以及 headless e2e 用例 1–5 全绿。

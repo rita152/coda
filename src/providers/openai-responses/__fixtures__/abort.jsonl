@@ -1,0 +1,2 @@
+{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"msg_text","type":"message","role":"assistant","status":"in_progress","content":[]}}
+{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_text","output_index":0,"content_index":0,"delta":"partial","logprobs":[]}

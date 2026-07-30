@@ -33,11 +33,11 @@ $ coda
 
 工程化表述:
 
-- OpenAI Chat Completions 协议(`ChatCompletionMessageParam`、`ChatCompletionChunk` 等一切 wire 类型)**只允许出现在 `src/providers/openai-chat/` 目录内**;`openai` 包在其他任何目录被 import 都是 ESLint 错误(`import/no-restricted-paths` 强制,CI 红灯)。
+- OpenAI Chat Completions 与 Responses 协议的一切 wire 类型**只允许出现在各自的 `src/providers/openai-chat/` / `src/providers/openai-responses/` 目录内**；两个 adapter 互相隔离，`openai` 包在其它目录被 import 都是 ESLint 错误。
 - agent 核心只认内部协议:`AgentMessage` / `Context` / `ProviderEvent` / `StreamFn`(见 [03 内部协议](./03-internal-protocol.md))。Agent 通过构造参数注入 `StreamFn`,自身不 import 任何 providers 目录。
 - **新增 provider = 新增一个 adapter 目录,核心零改动。**
 
-验收方式:`grep -r "from 'openai'" src/ | grep -v providers/openai-chat` 恒为空;M7 接入 Anthropic adapter 时,`src/agent`、`src/protocol`、`src/tools` 三个目录零 diff。
+验收方式:`tests/boundaries.test.ts` 用 ESLint 探针同时验证 core 禁止 SDK、两个 OpenAI adapter 白名单、provider 互相隔离；接入新 adapter 时 `src/agent` 与工具执行逻辑零 diff。
 
 为什么要机械强制而不是靠纪律:opencode V1 依赖 Vercel AI SDK,第三方类型渗入核心签名后,积累出 1832 行 per-provider 的 ProviderTransform 补丁;SDK 大版本改 usage 口径时全链路返工,最终被迫自建 `@opencode-ai/llm`。教训是:**第三方 SDK 类型一旦出现在 core 签名中,隔离就已经失败**,必须从第一天起用 lint 规则封死,而不是等重构时再补。
 
@@ -79,7 +79,7 @@ $ coda
 
 | # | 决策 | 为什么 | 佐证 |
 |---|---|---|---|
-| D1 | `openai` 包只允许出现在 `src/providers/openai-chat/`,ESLint 边界规则机械强制 | 协议隔离靠工具链而非纪律;类型渗入核心签名后返工成本随代码量线性增长 | opencode V1 → 1832 行 ProviderTransform 的返工史 |
+| D1 | provider SDK 只允许出现在所属 adapter；`openai` 白名单为 `openai-chat` / `openai-responses`，ESLint 机械强制且 provider 互相隔离 | 协议隔离靠工具链而非纪律;类型渗入核心签名后返工成本随代码量线性增长 | opencode V1 → 1832 行 ProviderTransform 的返工史 |
 | D2 | Provider 接口 = 单个函数类型 `StreamFn`,注入给 Agent,核心不 import providers | 最小接口面;新增 provider 零核心改动;测试注入 faux provider 即可离线跑全部 loop 逻辑 | pi-mono 的 agent-core 只依赖 StreamFn;vercel/ai 的 `doStream` 同构 |
 | D3 | **StreamFn never-throw 铁律**:一切失败编码为流内 `error` 事件 + `stopReason: 'error' \| 'aborted'` 的 AssistantMessage | agent loop 零 try/catch 处理 provider 差异;错误路径与正常路径共用同一数据形状 | pi-mono 的 StreamFunction 铁律 |
 | D4 | 错误 / 中止是转录的一等公民:aborted / error 的 AssistantMessage 保留在会话中 | 转录永远完整可回放;重试、UI、统计共享同一事实源 | pi-mono;opencode 的中断收尾纪律(悬空 tool_use 必补 result) |
@@ -144,7 +144,7 @@ graph TD
   AE["AgentEvent(agent → session)<br/>agent/turn/message/tool_execution 生命周期<br/>queue_update · plan_update · approval_request"]
   AM["AgentMessage / Context(会话数据层)<br/>UserMessage · AssistantMessage · ToolResultMessage<br/>Part 化 content · Usage · StopReason"]
   PE["ProviderEvent / StreamFn(agent ↔ provider)<br/>start/delta/end 三段式 · partial 快照 · never-throw"]
-  WIRE["wire 协议(adapter 内部)<br/>ChatCompletionMessageParam · ChatCompletionChunk<br/>只存在于 src/providers/openai-chat/"]
+  WIRE["wire 协议(adapter 内部)<br/>Chat Completions · Responses · Messages<br/>只存在于所属 provider 目录"]
 
   UI -- "Session API" --> SE
   SE -- "转发命令" --> AG
@@ -176,7 +176,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | TypeScript | 6.x,strict 全开 | discriminated union 是整套协议(ProviderEvent / AgentEvent / StopReason)的载体;strict 下的 narrowing 即文档 |
 | Bun | 1.3.14 | 项目唯一运行时与包管理器;原生 TypeScript、fetch、Web Streams、AbortSignal、测试与构建工具链统一 |
 | 模块格式 | ESM | 生态方向;`Bun.build` 直接产出 Bun-targeted ESM,不反向补 CJS |
-| `openai` | ^6(仅 `src/providers/openai-chat/` 内) | Chat Completions 类型自 v5 起稳定,v6 的 breaking change 集中在 Responses API,不影响 CC adapter;复用其 SSE 解析、错误分类与网络层重试(`maxRetries` 交给 SDK 默认,整轮重发策略在 session 层) |
+| `openai` | ^6(仅两个 OpenAI adapter 内) | Chat Completions 与 Responses 各自使用 SDK 的请求/SSE/错误层；两套 wire 类型不跨 adapter，`maxRetries` 交给 SDK 默认，整轮重发仍在 session 层 |
 | zod | v4 | 工具参数的单一事实源:运行时校验 + `z.toJSONSchema()` 原生生成 JSON Schema,免去 zod-to-json-schema 桥接依赖;OpenAI strict:true 的 schema 子集约束在此层保证 |
 | `bun:test` | 1.3.14 内置 | 与运行时同版本、fixture 回放与异步迭代器断言无需额外测试运行器 |
 | `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
@@ -227,7 +227,6 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | auto-retry(可重试错误指数退避) | 整轮重发策略在 session 层,`agent_end.willRetry` 语义可后置;SDK 网络层重试 v1 即有 | M7 |
 | 成本统计(`costUSD`) | Usage 字段已预留,定价表与换算 M7 补 | M7 |
 | 第二 provider(Anthropic) | 定位是 adapter 边界的验收测试,而非功能目标 | M7 |
-| OpenAI Responses API adapter | 与 Chat Completions 是两种 wire 协议;内部协议已为其留好位置(`ModelRef.api`) | v2 |
 | server / client 分离(HTTP API 多客户端) | opencode 的方向;v1 的 headless `--json` NDJSON 已覆盖「协议可对外」的验证需求 | v2 |
 | MCP 工具接入 | ToolDefinition 框架不排斥外部工具源,但 v1 只做八个内置工具 | v2 |
 | 结构化输出(强制 StructuredOutput 工具注入) | opencode 的跨协议做法,依赖工具框架成熟 | v2 |
@@ -240,7 +239,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 
 细化的验收标准按里程碑列在 [11 路线图](./11-roadmap.md),此处是三条核心需求的最终验收:
 
-- [ ] 协议隔离:`grep -r "from 'openai'" src/ | grep -v providers/openai-chat` 为空;ESLint 边界规则在 CI 强制;M7 的 Anthropic adapter 落地时 `src/agent`、`src/protocol`、`src/tools` 零 diff。
+- [ ] 协议隔离:OpenAI SDK 只出现在两个 OpenAI adapter，Anthropic SDK 只出现在 Messages adapter；ESLint 边界规则与探针测试在 CI 强制，wire 类型不进入 protocol/agent。
 - [ ] steering:流式期间 Enter 注入的消息在当前 turn 的工具全部执行完后进入 context(转录中可见 `source: 'steering'` 且位于 toolResults 之后);正在执行的工具从未被跳过;steering 使无 toolCall 的 assistant 之后循环继续。
 - [ ] follow-up:仅在无 toolCall 且 steering 队列为空时被消费;run 内消费是外层循环续跑,不发新 `agent_start`(转录中出现 `source: 'follow_up'` 的 user 消息且其间无 `agent_end`);仅 session 层 `continue()` 消费残留 follow-up 队列时,新 run 的 `agent_start.reason` 为 `follow_up`。
 - [ ] abort 后转录合法:任意时刻 Esc,下一次请求 Chat Completions 不出现 400(tool 配对由 transform 层修复);aborted 消息保留在 JSONL 中。

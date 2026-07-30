@@ -1,0 +1,1 @@
+{"type":"response.completed","sequence_number":0,"response":{"id":"resp_completed","object":"response","status":"completed","output":[],"error":null,"incomplete_details":null,"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":10},"output_tokens":31,"output_tokens_details":{"reasoning_tokens":7},"total_tokens":151}}}

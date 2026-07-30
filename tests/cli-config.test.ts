@@ -80,6 +80,21 @@ describe('resolveConfig:flag > env > file > 默认,逐字段独立合并(docs/09
     expect(r.modelConfig.apiKey).toBe('openai-env-key');
   });
 
+  it('openai-responses provider 生成对应 ModelRef，并复用 OpenAI key 来源', () => {
+    const r = resolveConfig(
+      flags({ provider: 'openai-responses', model: 'gpt-responses' }),
+      { OPENAI_API_KEY: 'responses-key' },
+      {},
+    );
+    expect(r.provider).toBe('openai-responses');
+    expect(r.modelConfig.ref).toEqual({
+      provider: 'openai',
+      api: 'openai-responses',
+      model: 'gpt-responses',
+    });
+    expect(r.modelConfig.apiKey).toBe('responses-key');
+  });
+
   it('空白 key 等同缺失：高优先级空值不遮蔽 provider 环境变量，生效值去掉首尾空白', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const openai = resolveConfig(
@@ -225,5 +240,9 @@ describe('parseFlags 边界(docs/09 §2 flag 文法)', () => {
   it('组合:布尔 flag 与取值 flag 混排互不干扰', () => {
     const f = parseFlags(['--json', '--model', 'm1', '--no-color', '-p', 'do it', '--session-dir', '/tmp/x']);
     expect(f).toMatchObject({ json: true, noColor: true, model: 'm1', prompt: 'do it', sessionDir: '/tmp/x' });
+  });
+
+  it('--provider openai-responses 是合法 provider 值', () => {
+    expect(parseFlags(['--provider', 'openai-responses']).provider).toBe('openai-responses');
   });
 });

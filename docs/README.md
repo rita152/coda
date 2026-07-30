@@ -1,6 +1,6 @@
 # coda 实施计划文档地图
 
-**coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions 被严格隔离在一个 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
+**coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 被严格隔离在各自 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
 
 本目录是该项目的完整实施计划,共 12 篇文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。
 
@@ -64,7 +64,7 @@ graph TD
 1. [01 目标与总览](./01-overview.md) —— 需求、决策、非目标
 2. [02 架构与分层](./02-architecture.md) —— 目录与依赖规则
 3. [03 内部协议](./03-internal-protocol.md) —— canonical 类型
-4. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn 与 Chat Completions
+4. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn、Chat Completions 与 Responses
 5. [05 Agent 循环](./05-agent-loop.md) —— runLoop 与工具执行
 6. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
 7. [07 工具集](./07-tools.md) —— 八个工具的规格
@@ -81,7 +81,7 @@ graph TD
 
 ### [02 架构与分层](./02-architecture.md)
 
-canonical 目录结构(`protocol` / `providers` / `agent` / `tools` / `session` / `cli` / `shared`)与 ESLint 机械强制的依赖方向,以及一次 prompt 从键盘到 wire 协议再回到屏幕的端到端数据流。「`openai` 包只允许出现在 `src/providers/openai-chat/`」这条铁律的执行细节在此定义。
+canonical 目录结构(`protocol` / `providers` / `agent` / `tools` / `session` / `cli` / `shared`)与 ESLint 机械强制的依赖方向,以及一次 prompt 从键盘到 wire 协议再回到屏幕的端到端数据流。「SDK 只允许出现在所属 adapter，provider 互相隔离」这条铁律的执行细节在此定义。
 
 ### [03 内部协议](./03-internal-protocol.md)
 
@@ -89,7 +89,7 @@ canonical 目录结构(`protocol` / `providers` / `agent` / `tools` / `session` 
 
 ### [04 Provider 与 adapter](./04-provider-adapter.md)
 
-StreamFn 接口契约(never-throw 铁律)与 Chat Completions adapter 的全部细节:出站消息转换、入站 chunk 累积算法、finish_reason 映射、CompatFlags 方言开关清单、错误编码策略。结尾附「新增一个 provider」的操作指南,是 M7 接入 Anthropic 的施工图。
+StreamFn 接口契约(never-throw 铁律)、Chat Completions adapter 细节，以及 Responses 的 transcript replay、reasoning/function-call/terminal 事件转换契约。结尾附「新增一个 provider」的操作指南。
 
 ### [05 Agent 循环](./05-agent-loop.md)
 
@@ -182,7 +182,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 ### Provider 与 adapter
 
-**adapter / provider** —— 把某家 API 的 wire 协议翻译为内部协议的模块,住在 `src/providers/<name>/`;Chat Completions adapter 是第一个,也是唯一允许 `import "openai"` 的地方。
+**adapter / provider** —— 把某家 API 的 wire 协议翻译为内部协议的模块,住在 `src/providers/<name>/`;两个 OpenAI adapter 允许 `import "openai"`，但彼此不得导入。
 
 **wire 协议** —— 各家 API 的原始类型(如 `ChatCompletionMessageParam`、`ChatCompletionChunk`),只存在于 adapter 内部,严禁出现在其他层的签名中。
 
@@ -223,7 +223,7 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 | `openai/codex` | submit(Op) / next_event() 可序列化边界、pending_input 双语义队列、approval 决策语义(Denied vs Abort)、update_plan 工具形态、TurnAbortReason 分类。 |
 | `vercel/ai` | LanguageModelV3 provider 接口范式、providerOptions 逃生舱、openai-compatible adapter 的既成流式状态机实现。 |
 | `google-gemini/gemini-cli` | 工具调用显式状态机(pending → awaiting_approval → executing → …)、tree-sitter-bash 命令结构解析、grep 匹配少时自动附 context。 |
-| `openai/openai-node` | Chat Completions wire 协议的事实细节:tool_calls 按 index 累积算法、id 缺失兜底、finish_reason 语义、错误体系与重试策略、strict schema 子集。 |
+| `openai/openai-node` | Chat Completions 与 Responses wire 的事实细节:流式文本/reasoning/function-call 事件、tool call 累积与配对、terminal/usage/error 语义、SDK 错误体系。 |
 
 ## 里程碑与文档对照
 
