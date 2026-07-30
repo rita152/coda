@@ -122,6 +122,14 @@ describe('bash:workdir(§6.2 workdir 行)', () => {
     expect(text.split('\n')[0]).toBe(realpathSync(sub));
   });
 
+  it('相对 workdir 始终相对 ctx.cwd，而不是启动进程 cwd', async () => {
+    const sub = path.join(dir, 'sub');
+    mkdirSync(sub);
+    const out = await run({ command: 'pwd', workdir: 'sub' });
+    const text = (out.content[0] as { text: string }).text;
+    expect(text.split('\n')[0]).toBe(realpathSync(sub));
+  });
+
   it('省略 workdir → ctx.cwd', async () => {
     const out = await run({ command: 'pwd' });
     const text = (out.content[0] as { text: string }).text;

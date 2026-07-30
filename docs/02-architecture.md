@@ -45,8 +45,8 @@ src/
 | `agent/` | `Agent` 类(prompt/steer/followUp/abort/subscribe)、runLoop 双层循环、steering/follow-up 队列、工具执行三阶段调度、出站前 transform 层 | `agent.ts`、`run-loop.ts`、`queues.ts`、`tool-executor.ts`、`transform.ts` | 不 import 任何 provider(经 `StreamFn` 注入);不 import 具体工具实现(经 `AgentConfig.tools` 注入);不做持久化 |
 | `tools/` | 工具框架(`ToolDefinition`、统一截断 post-hook、FileTracker)+ 八个内置工具 | `types.ts`(框架类型)、`framework.ts`、`file-tracker.ts`、`read.ts` 等每工具一文件、`index.ts`(`createCodingTools()`) | 不感知 agent loop;不直接发 AgentEvent(经 `ToolContext.onUpdate` 回调) |
 | `session/` | JSONL 追加持久化、会话恢复、compaction、usage/成本聚合、auto-retry 策略 | `store.ts`、`compaction.ts`、`usage.ts` | 不渲染;不实现协议转换 |
-| `cli/` | 组装根(composition root):provider/credential/model registry、按 `ModelRef.api` 分发 adapter、无模型冷启动的可空 Session 门面、全屏 TUI、classic/plain、headless `--json` | `main.ts`、`provider-registry.ts`、`provider-commands.ts`、`provider-stream.ts`、`interactive-runtime.ts`、`tui.ts`、`repl.ts`、`renderer.ts`、`headless.ts` | 不实现 wire 转换或 agent 业务逻辑；秘密不进入 renderer/event/transcript；TUI 只保留事件派生的 view state |
-| `shared/` | 无状态纯函数:截断、fs 辅助、`killProcessTree` 等 | `truncate.ts`、`proc.ts`、`fs.ts` | 不持有状态、不 import 其他 src 目录 |
+| `cli/` | 组装根(composition root):provider/credential/model registry、按 `ModelRef.api` 分发 adapter、分层项目规则、无模型冷启动的可空 Session 门面、全屏 TUI、classic/plain、headless `--json` | `main.ts`、`project-rules.ts`、`provider-registry.ts`、`provider-commands.ts`、`provider-stream.ts`、`interactive-runtime.ts`、`tui.ts`、`repl.ts`、`renderer.ts`、`headless.ts` | 不实现 wire 转换或 agent 业务逻辑；项目规则只增强出站 system prompt，不进入 transcript；秘密不进入 renderer/event/transcript；TUI 只保留事件派生的 view state |
+| `shared/` | 无状态纯函数:截断、dangling-aware 路径规范化、`killProcessTree` 等 | `truncate.ts`、`fs-path.ts`、`kill-process-tree.ts` | 不持有状态、不 import 其他 src 目录 |
 
 两个容易放错位置的东西:
 
@@ -357,7 +357,7 @@ gemini-cli 的 `Turn.run(): AsyncGenerator<Event>` 把事件流做成返回值,�
 | `agent/` | `Agent` 类、`AgentConfig`、transform 层函数 | `protocol`、`shared`、`tools/types.ts`(仅类型) | `cli`、`session`、测试 |
 | `tools/` | `ToolDefinition`、`ToolContext`、`ToolOutput`、`FileTracker`、`createCodingTools(): ToolDefinition[]` | `protocol`、`shared`、zod、`@vscode/ripgrep` | `cli`(组装)、`agent`(仅 types.ts) |
 | `session/` | `SessionStore`(append/load/list)、compaction、usage 聚合 | `protocol`、`shared`、`agent`(Session 内部组装并持有 Agent,见 [08](./08-session-persistence.md)) | `cli` |
-| `cli/` | `main()`、`ProviderRegistry`、`ProviderCommandController`、`InteractiveRuntime`、动态 provider dispatcher、`startTui()`、classic REPL/renderer、headless | 一切(含 `@opentui/core`,仅交互分支动态加载) | 终端用户 / 外部进程 |
+| `cli/` | `main()`、`ProjectRules`、`ProviderRegistry`、`ProviderCommandController`、`InteractiveRuntime`、动态 provider dispatcher、`startTui()`、classic REPL/renderer、headless | 一切(含 `@opentui/core`,仅交互分支动态加载) | 终端用户 / 外部进程 |
 | `shared/` | `truncate`、`killProcessTree`、fs 辅助 | (无) | `agent`、`tools`、`session`、`cli` |
 
 接口契约的四条不变量(所有模块 PR 审查时对照):

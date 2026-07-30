@@ -5,6 +5,7 @@
 // 且不许 allow_always 泛化;明确危险的模式(rm -rf / 等)直接 denied,不进 approval。
 
 import path from 'node:path';
+import { resolveToolWorkdir, runtimeHomeDir } from '../shared/index.js';
 
 export type BashAnalysis =
   | { denied: true; reason: string }
@@ -19,6 +20,18 @@ export type BashAnalysis =
       reasons: string[];
     };
 
+export interface BashPathTarget {
+  path: string;
+  kind: 'file' | 'directory' | 'unknown';
+  source: 'workdir' | 'cd' | 'directory-option' | 'redirect' | 'argument';
+}
+
+export interface BashPathAnalysis {
+  targets: BashPathTarget[];
+  complete: boolean;
+  reasons: string[];
+}
+
 /** 重定向进这些前缀 → forceConfirm(">/etc、>/usr 等",docs/07 §3.3)。 */
 const SYSTEM_PATH_PREFIXES = [
   '/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/sys', '/proc',
@@ -26,7 +39,13 @@ const SYSTEM_PATH_PREFIXES = [
 ];
 
 /** 例外:写向丢弃/终端设备是无害且高频的(npm test > /dev/null),不升级。 */
-const SYSTEM_PATH_EXEMPT = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty']);
+const SYSTEM_PATH_EXEMPT = new Set([
+  '/dev/null',
+  '/dev/stdout',
+  '/dev/stderr',
+  '/dev/tty',
+  '/dev/zero',
+]);
 
 /** 以这些 root 起头的子命令,执行语义整体转交给参数,静态分析失效 → forceConfirm。'.' 是 source 的别名。 */
 const OPAQUE_ROOTS = new Set(['eval', 'exec', 'source', '.']);
@@ -38,6 +57,7 @@ interface Segment {
   text: string;
   /** 该子命令与前一个子命令之间的分隔符('' 表示首段;'|' 用于 curl|sh 检测)。 */
   sep: string;
+  redirects: string[];
 }
 
 interface ScanResult {
@@ -45,28 +65,32 @@ interface ScanResult {
   hasCmdSubst: boolean;      // $( … )(双引号内同样生效)
   hasBacktick: boolean;      // ` … `(双引号内同样生效)
   hasProcSubst: boolean;     // <( … ) / >( … )
-  systemRedirects: string[]; // 重定向目标中落在系统路径前缀内的
+  hasExpansion: boolean;     // unquoted glob/brace or parameter expansion
+  hasGrouping: boolean;      // subshell / group / function / arithmetic syntax
   unclosedQuote: boolean;
 }
 
 /** 顶层扫描:拆分复合命令(&& ; | & 与换行),引号内不拆;同时标记嵌套结构。 */
 function scan(command: string): ScanResult {
   const segments: Segment[] = [];
-  const systemRedirects = new Set<string>();   // Set:同一目标多次触发只记一条理由
   let hasCmdSubst = false;
   let hasBacktick = false;
   let hasProcSubst = false;
+  let hasExpansion = false;
+  let hasGrouping = false;
   let inSingle = false;
   let inDouble = false;
   let buf = '';
   let pendingSep = '';
+  let redirects = new Set<string>();
 
   const flush = (sep: string): void => {
     const text = buf.trim();
-    if (text !== '') segments.push({ text, sep: pendingSep });
+    if (text !== '') segments.push({ text, sep: pendingSep, redirects: [...redirects] });
     // 空段(如 '||' 被 '|'+'|' 消费后的间隙)不产生子命令,但分隔符要传递给下一个非空段
     pendingSep = sep;
     buf = '';
+    redirects = new Set();
   };
 
   /** 从 from 起窥探重定向目标(跳过空白与包裹引号),只读不消费——主循环照常逐字符扫描。 */
@@ -88,10 +112,7 @@ function scan(command: string): ScanResult {
 
   const checkRedirect = (from: number): void => {
     const target = peekRedirectTarget(from);
-    if (SYSTEM_PATH_EXEMPT.has(target)) return;
-    if (SYSTEM_PATH_PREFIXES.some((p) => target === p || target.startsWith(`${p}/`))) {
-      systemRedirects.add(target);
-    }
+    if (target !== '' && !target.startsWith('&')) redirects.add(target);
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -112,6 +133,7 @@ function scan(command: string): ScanResult {
     if (inDouble) {
       if (ch === '"') inDouble = false;
       else if (ch === '$' && next === '(') hasCmdSubst = true;   // "$(…)" 在双引号内仍会执行
+      else if (ch === '$') hasExpansion = true;
       else if (ch === '`') hasBacktick = true;
       buf += ch;
       continue;
@@ -123,10 +145,39 @@ function scan(command: string): ScanResult {
       case '`': hasBacktick = true; buf += ch; continue;
       case '$':
         if (next === '(') hasCmdSubst = true;
+        else hasExpansion = true;
+        buf += ch;
+        continue;
+      case '*':
+      case '?':
+      case '[':
+        hasExpansion = true;
         buf += ch;
         continue;
       case '<':
-        if (next === '(') hasProcSubst = true;
+        if (next === '(') {
+          hasProcSubst = true;
+        } else if (next === '<') {
+          // heredoc / here-string 的后续 token 不是文件路径。
+          buf += '<<';
+          i++;
+          if (command[i + 1] === '<') {
+            buf += '<';
+            i++;
+          }
+          continue;
+        } else if (next === '>') {
+          checkRedirect(i + 2);
+          buf += '<>';
+          i++;
+          continue;
+        } else if (next === '&') {
+          buf += '<&';
+          i++;
+          continue;
+        } else {
+          checkRedirect(i + 1);
+        }
         buf += ch;
         continue;
       case '>':
@@ -148,13 +199,23 @@ function scan(command: string): ScanResult {
         continue;
       case ';': flush(';'); continue;
       case '\n': flush('\n'); continue;
+      case '(':
+      case ')':
+      case '{':
+        hasExpansion = true;
+        hasGrouping = true;
+        buf += ch;
+        continue;
+      case '}':
+        hasGrouping = true;
+        buf += ch;
+        continue;
       default: buf += ch; continue;
     }
   }
   flush('');
   return {
-    segments, hasCmdSubst, hasBacktick, hasProcSubst,
-    systemRedirects: [...systemRedirects],
+    segments, hasCmdSubst, hasBacktick, hasProcSubst, hasExpansion, hasGrouping,
     unclosedQuote: inSingle || inDouble,
   };
 }
@@ -329,6 +390,221 @@ function checkDenylist(segments: Segment[], tokenized: string[][]): string | und
   return undefined;
 }
 
+const AMBIGUOUS_LITERAL_PATH_RE = /\\/;
+const URL_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+const DIRECTORY_OPTION_RE = /^--directory=(.+)$/;
+const ATTACHED_C_RE = /^-C(.+)$/;
+const DIRECTORY_OPTION_ROOTS = new Set(['git', 'make', 'gmake', 'ninja', 'tar', 'pnpm']);
+const CONTROL_ROOTS = new Set([
+  '!',
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'for',
+  'while',
+  'until',
+  'do',
+  'done',
+  'case',
+  'esac',
+  'select',
+  'function',
+  'command',
+  'builtin',
+  'popd',
+]);
+const SCRIPT_PATH_RE = /\.(?:ba|z|k)?sh$/i;
+
+function resolveShellPath(cwd: string, value: string): string {
+  if (value === '~' || value.startsWith('~/')) {
+    return path.resolve(runtimeHomeDir(), value.slice(2));
+  }
+  return path.resolve(cwd, value);
+}
+
+function pathLikeArgument(value: string): string | undefined {
+  const equals = value.indexOf('=');
+  let candidate =
+    equals > 0 && !value.startsWith('/') ? value.slice(equals + 1) : value;
+  if (candidate.startsWith('@') && candidate.length > 1) candidate = candidate.slice(1);
+  if (
+    candidate === '' ||
+    candidate === '-' ||
+    candidate === '--' ||
+    /^[><&|;]/.test(candidate) ||
+    URL_RE.test(candidate)
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function pathAnalysisReason(
+  reasons: Set<string>,
+  value: string,
+  context: string,
+): boolean {
+  const namedHome = value.startsWith('~') && value !== '~' && !value.startsWith('~/');
+  if (!AMBIGUOUS_LITERAL_PATH_RE.test(value) && !namedHome) return false;
+  reasons.add(`${context} contains shell expansion or globbing that hides its exact path`);
+  return true;
+}
+
+/**
+ * 提取 bash 中静态可见的作用域：执行 cwd、literal cd/-C、重定向和路径样参数。
+ * 任意程序的运行时 I/O 无法由 shell 文本完备推导；complete=false 时调用方应保守处理。
+ */
+export function analyzeBashPaths(
+  command: string,
+  baseCwd: string,
+  workdir?: string,
+): BashPathAnalysis {
+  const executionCwd = resolveToolWorkdir(baseCwd, workdir);
+  const scanned = scan(command);
+  const reasons = new Set<string>();
+  const targets = new Map<string, BashPathTarget>();
+  let shellCwds = new Set([executionCwd]);
+
+  const add = (
+    targetPath: string,
+    kind: BashPathTarget['kind'],
+    source: BashPathTarget['source'],
+  ): void => {
+    if (SYSTEM_PATH_EXEMPT.has(targetPath)) return;
+    const existing = targets.get(targetPath);
+    if (existing?.kind === 'directory' && kind !== 'directory') return;
+    targets.set(targetPath, { path: targetPath, kind, source });
+  };
+  add(executionCwd, 'directory', 'workdir');
+
+  if (scanned.hasCmdSubst) reasons.add('command substitution hides nested filesystem paths');
+  if (scanned.hasBacktick) reasons.add('backtick substitution hides nested filesystem paths');
+  if (scanned.hasProcSubst) reasons.add('process substitution hides nested filesystem paths');
+  if (scanned.hasExpansion) reasons.add('shell expansion or globbing hides exact filesystem paths');
+  if (scanned.hasGrouping) reasons.add('shell grouping or control syntax has path-dependent scope');
+  if (scanned.unclosedQuote) reasons.add('unclosed quote makes filesystem paths ambiguous');
+
+  for (let index = 0; index < scanned.segments.length; index++) {
+    const segment = scanned.segments[index] as Segment;
+    const cleanTokens = stripGroupDelims(tokenize(segment.text));
+    const words = skipAssignments(cleanTokens);
+    const root = commandName(words[0] ?? '');
+    const args = words.slice(1);
+    const runnerView = DENYLIST_RUNNERS.has(root) ? denyView(cleanTokens) : [];
+    const runnerRoot = commandName(runnerView[0] ?? '');
+    const runnerArgs = runnerView.slice(1);
+    const wrappedShellCommand =
+      DENYLIST_RUNNERS.has(root) &&
+      ((SHELL_ROOTS.has(runnerRoot) && runnerArgs.includes('-c')) ||
+        args.some(
+          (arg, argIndex) =>
+            SHELL_ROOTS.has(commandName(arg)) && args.slice(argIndex + 1).includes('-c'),
+        ));
+    const wrappedScript = SCRIPT_PATH_RE.test(runnerView[0] ?? '');
+    const nextSep = scanned.segments[index + 1]?.sep ?? '';
+    const nextCwds = new Set(shellCwds);
+
+    if (
+      CONTROL_ROOTS.has(root) ||
+      OPAQUE_ROOTS.has(root) ||
+      (SHELL_ROOTS.has(root) &&
+        (args.includes('-c') || args.some((arg) => !arg.startsWith('-')))) ||
+      root === 'xargs' ||
+      (root === 'find' && args.some((arg) => arg === '-exec' || arg === '-execdir')) ||
+      ((root === 'git' && args.includes('apply')) || root === 'patch') ||
+      SCRIPT_PATH_RE.test(words[0] ?? '') ||
+      wrappedShellCommand ||
+      wrappedScript
+    ) {
+      reasons.add(`'${root}' can hide filesystem paths from static analysis`);
+    }
+
+    for (const cwd of shellCwds) {
+      for (const redirect of segment.redirects) {
+        if (pathAnalysisReason(reasons, redirect, 'redirection')) continue;
+        add(resolveShellPath(cwd, redirect), 'file', 'redirect');
+      }
+
+      let commandCwd = cwd;
+      const possibleCommandCwds = new Set([cwd]);
+      const consumed = new Set<number>();
+      if (DIRECTORY_OPTION_ROOTS.has(root)) {
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i] as string;
+          let directory: string | undefined;
+          if (arg === '-C' || arg === '--directory') {
+            directory = args[i + 1];
+            consumed.add(i);
+            consumed.add(i + 1);
+            i++;
+          } else {
+            directory = DIRECTORY_OPTION_RE.exec(arg)?.[1] ?? ATTACHED_C_RE.exec(arg)?.[1];
+            if (directory !== undefined) consumed.add(i);
+          }
+          if (directory === undefined) continue;
+          if (pathAnalysisReason(reasons, directory, 'directory option')) continue;
+          commandCwd = resolveShellPath(commandCwd, directory);
+          possibleCommandCwds.add(commandCwd);
+          add(commandCwd, 'directory', 'directory-option');
+        }
+      }
+
+      if (root === 'cd' || root === 'pushd') {
+        const directory = args.find((arg) => arg !== '--' && !arg.startsWith('-'));
+        if (
+          directory === undefined ||
+          directory === '-' ||
+          pathAnalysisReason(reasons, directory, root)
+        ) {
+          reasons.add(`'${root}' does not name one deterministic literal directory`);
+        } else {
+          const changed = resolveShellPath(cwd, directory);
+          add(changed, 'directory', 'cd');
+          if (nextSep !== '|' && nextSep !== '&') nextCwds.add(changed);
+          if (nextSep === '&&') nextCwds.delete(cwd);
+        }
+      }
+
+      const commandWord = words[0] ?? '';
+      const commandPath =
+        commandWord.includes('/') ||
+        commandWord.startsWith('.') ||
+        commandWord.startsWith('~')
+          ? pathLikeArgument(commandWord)
+          : undefined;
+      if (
+        commandPath !== undefined &&
+        !pathAnalysisReason(reasons, commandPath, 'command path')
+      ) {
+        add(resolveShellPath(cwd, commandPath), 'unknown', 'argument');
+      }
+      for (let i = 0; i < args.length; i++) {
+        if (consumed.has(i)) continue;
+        const candidate = pathLikeArgument(args[i] as string);
+        if (
+          candidate === undefined ||
+          segment.redirects.includes(candidate) ||
+          pathAnalysisReason(reasons, candidate, 'path argument')
+        ) {
+          continue;
+        }
+        for (const possibleCwd of possibleCommandCwds) {
+          add(resolveShellPath(possibleCwd, candidate), 'unknown', 'argument');
+        }
+      }
+    }
+    shellCwds = nextCwds;
+  }
+
+  return {
+    targets: [...targets.values()],
+    complete: reasons.size === 0,
+    reasons: [...reasons],
+  };
+}
+
 /**
  * analyzeBashCommand:拆分复合命令并产出审批 patterns 与 forceConfirm 判定。
  * denylist 命中 → { denied: true },调用方直接 deny 不进 approval(docs/07 §3.3)。
@@ -348,7 +624,12 @@ export function analyzeBashCommand(command: string): BashAnalysis {
   if (scanned.hasCmdSubst) reasons.push('command substitution $( … ) hides a nested command from static analysis');
   if (scanned.hasBacktick) reasons.push('backtick substitution ` … ` hides a nested command from static analysis');
   if (scanned.hasProcSubst) reasons.push('process substitution <( … ) / >( … ) hides a nested command from static analysis');
-  for (const target of scanned.systemRedirects) {
+  const redirects = scanned.segments.flatMap((segment) => segment.redirects);
+  for (const target of redirects) {
+    if (SYSTEM_PATH_EXEMPT.has(target)) continue;
+    if (!SYSTEM_PATH_PREFIXES.some((prefix) => target === prefix || target.startsWith(`${prefix}/`))) {
+      continue;
+    }
     reasons.push(`redirects output into system path '${target}'`);
   }
   for (const root of roots) {

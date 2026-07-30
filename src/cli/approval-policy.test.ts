@@ -262,7 +262,7 @@ describe('bash', () => {
 
   test('命令里的路径参数越出项目根 → external-directory 强制确认(即使前缀已放行,docs/07 §3.3)', async () => {
     // analyzeBashCommand 只查 workdir 与系统前缀,漏掉「重定向到非系统前缀的根外目标」与
-    // 「位置路径参数逃逸」。策略层用 extractPathCandidates 兜住:任一候选 resolve 后落根外 → 强制确认。
+    // 「位置路径参数逃逸」；共享 path analyzer 的任一候选落根外都必须强制确认。
     const h = setup({ persisted: ['bash:echo *', 'bash:cp *'] });
 
     // broker.request 的 emit 同步:launch 后审批计数即时可读,故用正向计数断言钉死(逆向修复时
@@ -312,6 +312,15 @@ describe('符号链接绕过 external-directory(docs/07 §3.3 realpath 解引用
     h.broker.resolve(ev2.approvalId, 'allow_always');
     await expect(p2).resolves.toEqual({});
     expect([...h.broker.rules]).toEqual([`edit:${h.root}/**`]);
+
+    // dangling leaf 也必须沿 readlink 目标判断；不能因目标尚未创建而退回词法 inside。
+    const danglingTarget = path.join(outside, 'not-created.ts');
+    symlinkSync(danglingTarget, path.join(h.root, 'dangling.ts'));
+    const p3 = h.policy.beforeToolCall(tc('edit', { path: 'dangling.ts', edits: [] }));
+    const ev3 = await h.waitApproval(3);
+    expect(ev3.description).toContain('(outside project root)');
+    h.broker.resolve(ev3.approvalId, 'deny');
+    await expect(p3).resolves.toMatchObject({ block: true });
   });
 });
 

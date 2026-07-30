@@ -85,10 +85,17 @@ const initialModel =
     ? (hasRequiredKey(legacy) ? legacy.modelConfig : undefined)
     : registry?.resolveSelectedModel();
 const streamFn = createProviderStreamFn();              // 按每次调用的 model.ref.api 分发
+const projectRules = new ProjectRules({ cwd });
 const createSession = (model: ModelConfig) =>
   resuming
-    ? Session.resume(sessionId, { agentConfig: { streamFn, model, tools, systemPrompt } })
-    : Session.create({ agentConfig: { streamFn, model, tools, systemPrompt } });
+    ? Session.resume(sessionId, {
+        agentConfig: {
+          streamFn, model, tools, systemPrompt,
+          transformContext: (ctx) => projectRules.inject(ctx),
+          beforeToolCall: composeRuleGateBeforeApproval(projectRules, approval),
+        },
+      })
+    : Session.create(/* 同一份 options */);
 
 if (!interactive) {
   if (!initialModel) exitWithLoginAndModelHint();       // Session 创建前 fail-fast
@@ -121,6 +128,62 @@ return startRepl(runtime, createClassicRenderer(...), approval, {
 结果，Session 一旦提交则直接关闭，不能反向等待可能在 attach callback 内调用 `close()` 的
 同一通知链。Session 事件与 attach callback 均逐个隔离失败。Provider command 的 submit
 Promise 也必须先发布再进入 view/registry 回调，退出只等待这份已发布任务。
+
+### 2.1 项目规则感知(`AGENTS.md`)
+
+项目规则属于 CLI 组装层的文件系统策略，不新增 `Context` / `AgentMessage` /
+`SessionEvent` 字段，也不改变 headless 外协议。`ProjectRules` 从物理 `cwd` 向上查找最近的
+`.git` 文件或目录作为仓库根；不在 Git 仓库时以 `cwd` 自身为根。首次出站自动发现
+`仓库根 → cwd` 每一级的 `AGENTS.md`，之后把本轮实际触达的目标目录带到下一次出站；
+未继续使用的历史 sibling 不永久占据 prompt 或预算。每个有效文件以
+下列区块追加到 **system prompt**，按 root → target 排列；后出现的窄作用域规则在冲突时
+优先：
+
+```text
+<project_rule source="/repo/packages/app/AGENTS.md" scope="/repo/packages/app/**">
+...规则正文...
+</project_rule>
+```
+
+注入挂在异步 `transformContext`，只改当次出站 `Context.systemPrompt` 的副本；规则正文绝不
+变成 user/tool 消息，因此不会进入 transcript、session JSONL、恢复回显或 compaction
+摘要。每次模型采样都重新扫描文件，不依赖启动期缓存；文件新增、修改或删除后，下一 turn
+看到新结果。
+
+执行前门禁复用既有 `beforeToolCall`，且顺序固定为 **项目规则 gate → approval policy**：
+
+- `edit` / `write` 的目标作用域是 `path` 所在目录；
+- `bash` 的基础作用域是最终执行 `workdir`，缺省为启动 `cwd`；CLI cwd 与 workdir 先物理化，
+  相对 workdir 在规则分析、approval 与真实 `Bun.spawn` 三处都以同一 cwd 为基准。分析器
+  还跟踪 literal `cd`、`git` / `make` / `ninja` / `tar` / `pnpm` 等确有目录语义的 `-C`、
+  输入输出重定向、显式路径和现存裸目录参数；失败的 `cd` 后保留旧/新 cwd 并集。动态展开、
+  shell group/control flow、脚本、`eval` / `source` / `sh -c`（含 `env` / `sudo` /
+  `nohup` / `timeout` 等 runner 包装）、`git apply` 等无法确定目标的命令由规则 gate
+  回喂可恢复错误，要求改用明确 workdir/literal path 或拆成 `edit` / `write`；
+- 首次触达更深目录，或规则在本次模型请求之后发生变化时，本次调用先返回一条可恢复的
+  isError tool result，不执行副作用；紧接的下一 turn 注入完整新规则，模型审阅后重试；
+- loop 会先串行 preflight 整批调用，因此三个工具在真正 `execute` 边界再做同一检查；同批
+  较早的命令若改写 `AGENTS.md`，后续写操作不会在旧规则上下文中漏执行；
+- 若目标没有新增有效规则，调用直接进入原审批/执行路径，不额外消耗 turn。
+
+资源护栏为单文件 **32 KiB**、最终规则区块估算 **16K tokens**；预算包含标题、source /
+scope 与标签，不只计算正文。ASCII 按 `length / 4`，CJK/emoji 按 UTF-16 code unit
+保守计数。总预算不足时先保留窄作用域规则，再按 root → target 渲染；某个 sibling 因预算
+未进入最近 prompt 时，其工具调用仍会被 gate，不能因全局 section 未变化而放行。
+
+`AGENTS.md` 与目标路径共用 dangling-aware canonicalizer。文件 leaf 或父目录软链越界时，
+规则扫描停在链接前的最深安全祖先并 warning；仓库外规则正文绝不读取。规则文件按
+`O_NOFOLLOW` fd 打开，以 `fstat` / inode 复核绑定解析结果，只读取 `maxBytes + 1` 后再次
+核对纳秒级 metadata，关闭“先 stat 小文件、再整文件读入”的资源竞态。Node/Bun 没有
+`openat2`，中间目录的对抗性纳秒级替换仍是 OS 能力边界；execute 前的第二次复检把普通
+同批竞态窗口压到工具调用边界。
+
+读取/元数据失败（含指向仓库内缺失目标的 dangling 规则链接）、越界符号链接、单文件或
+总预算超限经 CLI-local warning 旁路报告；同一 turn 的 preflight / execute 复检去重，
+故障恢复后再次出现仍会重新报告：
+OpenTUI 走 `TuiScreen.println`，TTY classic 走 renderer，plain / headless / 一次性走清洗后的 stderr。
+所有文本先移除 ANSI/OSC/C0/C1，warning 不伪造 `SessionEvent`，因此不进入 stdout
+NDJSON、transcript 或 session JSONL，也不会把任务升级为 fatal。
 
 ## 3. 键位表
 

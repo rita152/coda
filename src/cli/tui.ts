@@ -26,6 +26,11 @@ import {
   type ProviderCommandChoice,
 } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
+import {
+  sanitizeTerminalText,
+  sanitizeTerminalTitle,
+} from './terminal-sanitize.js';
+export { sanitizeTerminalText, sanitizeTerminalTitle };
 import { toolHeadline, truncateToWidth } from './renderer.js';
 import {
   approvalKeyDecision,
@@ -119,6 +124,11 @@ export interface TuiOptions {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
   };
+  projectRuleWarnings?: ProjectRuleWarningSource;
+}
+
+interface ProjectRuleWarningSource {
+  subscribeWarnings(listener: (message: string) => void): () => void;
 }
 
 interface TuiScreenOptions extends TuiOptions {
@@ -229,21 +239,6 @@ export function approvalDecisionForKey(
 ): ReturnType<typeof approvalKeyDecision> {
   if (key.ctrl || key.meta || key.shift || key.option || key.super || key.hyper) return undefined;
   return approvalKeyDecision(key.name);
-}
-
-/**
- * 所有不可信内容进入 OpenTUI 组件前的统一边界。Bun.stripANSI 处理 CSI/OSC/DCS
- * 等完整与未闭合序列；第二步移除其保留的 C0/C1，仅保留 tab/newline。
- */
-export function sanitizeTerminalText(text: string): string {
-  return Bun.stripANSI(text)
-    .replace(/\r\n?/g, '\n')
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
-}
-
-/** OSC terminal title 必须保持单行；普通视图文本仍可保留 tab/newline。 */
-export function sanitizeTerminalTitle(text: string): string {
-  return sanitizeTerminalText(text).replace(/[\t\n]+/g, ' ').trim();
 }
 
 /** 1000 制 token 短格式，status/footer 共用。 */
@@ -1714,6 +1709,9 @@ export async function startTui(
 
   return runTuiController(session, approval, screen, renderer, {
     interaction,
+    ...(opts.projectRuleWarnings !== undefined && {
+      projectRuleWarnings: opts.projectRuleWarnings,
+    }),
     ...(opts.providerCommands !== undefined && {
       providerCommands: opts.providerCommands,
     }),
@@ -1726,6 +1724,7 @@ interface TuiControllerOptions {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
   };
+  projectRuleWarnings?: ProjectRuleWarningSource;
   /** 内存测试禁用 process signal 接线，避免并行用例互相影响。 */
   installSignalHandlers?: boolean;
 }
@@ -1779,6 +1778,14 @@ export function runTuiController(
               },
             },
           );
+
+    const unsubscribeProjectWarnings = opts.projectRuleWarnings?.subscribeWarnings((message) => {
+      try {
+        screen.println(`⚠ project rules · ${message}`, 'warning');
+      } catch {
+        // warning 是非致命旁路；视图失败不能打断或悬挂 session 生命周期。
+      }
+    });
 
     const runCommand = (command: SlashCommand): void => {
       switch (command.cmd) {
@@ -2037,6 +2044,7 @@ export function runTuiController(
         code = 1;
         console.error('[coda] TUI shutdown failed:', error);
       } finally {
+        unsubscribeProjectWarnings?.();
         renderer.destroy();
         screen.destroy();
         resolve(code);

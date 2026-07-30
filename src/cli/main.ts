@@ -29,9 +29,11 @@ import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import { createProviderStreamFn } from './provider-stream.js';
+import { guardProjectRuleExecutions, ProjectRules } from './project-rules.js';
 import { createRenderer } from './renderer.js';
 import { startRepl } from './repl.js';
 import { pickSessionInteractive } from './resume-picker.js';
+import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
 async function main(): Promise<number> {
   let flags: CliFlags;
@@ -100,7 +102,10 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const cwd = flags.cwd ?? process.cwd();
+  const requestedCwd = flags.cwd ?? process.cwd();
+  const projectRules = new ProjectRules({ cwd: requestedCwd });
+  // 工具与规则分析共用物理 cwd；否则 symlink cwd 下的相对 workdir 会产生两套路径语义。
+  const cwd = projectRules.cwd;
   let fauxScript: FauxScript | undefined;
   try {
     fauxScript =
@@ -112,7 +117,7 @@ async function main(): Promise<number> {
     return 2;
   }
   const streamFn = createProviderStreamFn(fauxScript);
-  const tools = createCodingTools();
+  const tools = guardProjectRuleExecutions(createCodingTools(), projectRules);
 
   // 审批模式默认(docs/09 §6.5 修订):交互 TUI/classic → interactive;headless(--json)与 -p
   // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
@@ -132,7 +137,7 @@ async function main(): Promise<number> {
   // renderer / headless / repl;requestAbort 晚绑定 session(policy 先于 session 创建)。
   const sessionRef: { current?: { abort(): void } } = {};
   const approvalListeners = new Set<(e: SessionEvent) => void>();
-  let beforeToolCall: AgentConfig['beforeToolCall'];
+  let approvalBeforeToolCall: AgentConfig['beforeToolCall'];
   let approval:
     | {
         broker: ApprovalBroker;
@@ -150,7 +155,7 @@ async function main(): Promise<number> {
       tools,
       requestAbort: () => sessionRef.current?.abort(),
     });
-    beforeToolCall = policy.beforeToolCall;
+    approvalBeforeToolCall = policy.beforeToolCall;
     approval = {
       broker,
       onAbort: () => {
@@ -164,8 +169,15 @@ async function main(): Promise<number> {
       },
     };
   } else if (approvalMode === 'deny') {
-    beforeToolCall = createDenyHook(tools);
+    approvalBeforeToolCall = createDenyHook(tools);
   }
+  // 项目规则 gate 先于审批：若新作用域尚未进入模型上下文，先让模型在下一 turn
+  // 看到规则再重试，避免为本轮注定不执行的调用弹审批。
+  const beforeToolCall: NonNullable<AgentConfig['beforeToolCall']> = async (call) => {
+    const rulesDecision = await projectRules.beforeToolCall(call);
+    if (rulesDecision.block) return rulesDecision;
+    return approvalBeforeToolCall?.(call) ?? {};
+  };
 
   // 恢复目标可在没有模型时先选定，但真正 load/create 必须等到已有有效 ModelConfig。
   let resumeId: string | undefined;
@@ -184,7 +196,8 @@ async function main(): Promise<number> {
       tools,
       cwd,
       systemPrompt: () => buildSystemPrompt(cwd),
-      ...(beforeToolCall !== undefined && { beforeToolCall }),
+      transformContext: (ctx) => projectRules.inject(ctx),
+      beforeToolCall,
     },
     ...(flags.sessionDir !== undefined && { dir: flags.sessionDir }),
   });
@@ -223,6 +236,7 @@ async function main(): Promise<number> {
       const { startTui } = await import('./tui.js');
       return await startTui(session, approval, {
         cwd,
+        projectRuleWarnings: projectRules,
         ...(session.currentModel() !== undefined && {
           model: session.currentModel(),
         }),
@@ -260,6 +274,9 @@ async function main(): Promise<number> {
   };
 
   if (flags.json) {
+    projectRules.subscribeWarnings((message) => {
+      console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
+    });
     // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动退出
     return startHeadless(concreteSession as Session, {
       stdin: process.stdin,
@@ -275,6 +292,15 @@ async function main(): Promise<number> {
     color: !flags.noColor && process.stdout.isTTY === true && Bun.env.NO_COLOR === undefined,
     interactive: process.stdout.isTTY === true && flags.prompt === undefined,
   });
+  if (flags.prompt === undefined && process.stdout.isTTY === true) {
+    projectRules.subscribeWarnings((message) => {
+      renderer.println?.(`⚠ project rules · ${sanitizeTerminalLine(message)}`);
+    });
+  } else {
+    projectRules.subscribeWarnings((message) => {
+      console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
+    });
+  }
   output.failureSignal.addEventListener(
     'abort',
     () => {

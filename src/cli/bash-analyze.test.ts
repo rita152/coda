@@ -4,7 +4,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { BashAnalysis } from './bash-analyze.js';
-import { analyzeBashCommand } from './bash-analyze.js';
+import { analyzeBashCommand, analyzeBashPaths } from './bash-analyze.js';
 
 /** 收窄到非 denied 分支(denied 时报出 reason,便于诊断)。 */
 function ok(a: BashAnalysis): Extract<BashAnalysis, { denied: false }> {
@@ -16,6 +16,120 @@ function denied(a: BashAnalysis): Extract<BashAnalysis, { denied: true }> {
   if (!a.denied) throw new Error(`expected denied analysis, got: ${JSON.stringify(a)}`);
   return a;
 }
+
+describe('项目规则路径提取', () => {
+  test('相对 workdir、重定向与 literal cd 使用同一条 cwd 链', () => {
+    const a = analyzeBashPaths(
+      'cd app && printf x > src/out.ts',
+      '/repo',
+      'packages',
+    );
+    expect(a.complete).toBe(true);
+    expect(a.targets.map((target) => target.path)).toEqual(
+      expect.arrayContaining([
+        '/repo/packages',
+        '/repo/packages/app',
+        '/repo/packages/app/src/out.ts',
+      ]),
+    );
+  });
+
+  test('连续 -C 按前一个目录累计，quoted 重定向保留空格', () => {
+    const a = analyzeBashPaths(
+      'git -C packages -C app status 2>> "logs/a b.txt"',
+      '/repo',
+    );
+    expect(a.complete).toBe(true);
+    expect(a.targets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: '/repo/packages',
+          kind: 'directory',
+          source: 'directory-option',
+        }),
+        expect.objectContaining({
+          path: '/repo/packages/app',
+          kind: 'directory',
+          source: 'directory-option',
+        }),
+        expect.objectContaining({
+          path: '/repo/logs/a b.txt',
+          kind: 'file',
+          source: 'redirect',
+        }),
+      ]),
+    );
+  });
+
+  test('fd 复制和 heredoc 不伪装成路径，动态/opaque 命令标记不完整', () => {
+    const redirects = analyzeBashPaths('cat <<EOF > out 2>&1\ntext\nEOF', '/repo');
+    expect(redirects.targets.some((target) => target.path.endsWith('/EOF'))).toBe(false);
+    expect(redirects.targets.some((target) => target.path === '/repo/out')).toBe(true);
+
+    for (const command of ['cd "$DIR" && touch x', 'git apply patch.diff', 'sh -c "touch nested/x"']) {
+      const a = analyzeBashPaths(command, '/repo');
+      expect(a.complete).toBe(false);
+      expect(a.reasons).not.toHaveLength(0);
+    }
+  });
+
+  test('cd 在分号后可能失败，后续路径同时覆盖旧 cwd 与新 cwd', () => {
+    const a = analyzeBashPaths('cd missing; printf x > nested/out.txt', '/repo');
+    expect(a.complete).toBe(true);
+    expect(a.targets.map((target) => target.path)).toEqual(
+      expect.arrayContaining([
+        '/repo/nested/out.txt',
+        '/repo/missing/nested/out.txt',
+      ]),
+    );
+  });
+
+  test('裸目录参数进入候选，变量/glob 与未建模控制结构一律不完整', () => {
+    const literal = analyzeBashPaths('cp source.txt 123 -- -dir', '/repo');
+    expect(literal.complete).toBe(true);
+    expect(literal.targets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: '/repo/123', kind: 'unknown' }),
+        expect.objectContaining({ path: '/repo/-dir', kind: 'unknown' }),
+      ]),
+    );
+
+    for (const command of [
+      'cp source.txt "$DIR"',
+      'touch *',
+      '(cd app); touch nested/out',
+      'if cd app; then touch out; fi',
+    ]) {
+      expect(analyzeBashPaths(command, '/repo').complete).toBe(false);
+    }
+  });
+
+  test('-C 只对确有目录语义的命令生效', () => {
+    const curl = analyzeBashPaths('curl -C 100 -o nested/out https://example.test', '/repo');
+    expect(curl.complete).toBe(true);
+    expect(curl.targets.some((target) => target.path === '/repo/nested/out')).toBe(true);
+    expect(curl.targets.some((target) => target.path.startsWith('/repo/100/'))).toBe(false);
+
+    const git = analyzeBashPaths('git -C packages status', '/repo');
+    expect(git.targets.some((target) => target.path === '/repo/packages')).toBe(true);
+  });
+
+  test('安全设备路径不参与仓库 scope 或 external-directory 判定', () => {
+    const a = analyzeBashPaths('cat /dev/null > /dev/zero', '/repo');
+    expect(a.targets.some((target) => target.path.startsWith('/dev/'))).toBe(false);
+  });
+
+  test('runner 包装的 shell -c 与脚本仍标记为不完整', () => {
+    for (const command of [
+      'env sh -c "touch nested/out.txt"',
+      'sudo -u root bash -c "touch nested/out.txt"',
+      'nohup ./script.sh',
+      'timeout 5 ./script.sh',
+    ]) {
+      expect(analyzeBashPaths(command, '/repo').complete).toBe(false);
+    }
+  });
+});
 
 describe('拆分与引号/转义', () => {
   test("'npm test && npm run build' → 两个子命令,patterns ['bash:npm *','bash:npm *']", () => {

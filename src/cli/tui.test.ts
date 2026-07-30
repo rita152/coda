@@ -1305,6 +1305,63 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('项目规则 warning 经 TUI 单写入者清洗展示，并在关闭后退订', async () => {
+    const session = await Session.create({
+      dir: makeTempDir(),
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [] }),
+        model: { ref: MODEL },
+        tools: [],
+        systemPrompt: 'test',
+      },
+    });
+    const view = await setup(80, 20);
+    view.screen.focusInput();
+    const println = view.screen.println.bind(view.screen);
+    let replayFailureIsolated = false;
+    view.screen.println = (text, tone) => {
+      if (!replayFailureIsolated && text.includes('REPLAY_WARNING')) {
+        replayFailureIsolated = true;
+        throw new Error('view not ready');
+      }
+      println(text, tone);
+    };
+    let warningListener: ((message: string) => void) | undefined;
+    let unsubscribed = false;
+    const controller = runTuiController(
+      session,
+      undefined,
+      view.screen,
+      view.renderer,
+      {
+        interaction: view.interaction,
+        installSignalHandlers: false,
+        projectRuleWarnings: {
+          subscribeWarnings(listener) {
+            warningListener = listener;
+            listener('REPLAY_WARNING');
+            return () => {
+              unsubscribed = true;
+              warningListener = undefined;
+            };
+          },
+        },
+      },
+    );
+
+    expect(replayFailureIsolated).toBe(true);
+    warningListener?.('unsafe\x1b]52;c;clipboard\x07\nSAFE_WARNING');
+    await view.flush();
+    expect(view.frame()).toContain('SAFE_WARNING');
+    expect(view.frame()).not.toContain('clipboard');
+
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    expect(unsubscribed).toBe(true);
+    await view.destroyHighlighter();
+  });
+
   it('冷启动复用 provider 命令状态机；OAuth 安全返回且 API key 全程只显示掩码', async () => {
     const dir = makeTempDir();
     const registry = new ProviderRegistry({

@@ -9,3 +9,4 @@ export { safeBasename, spillToFile, truncationDir } from './spill.js';
 export { parsePartialJson } from './partial-json.js';
 export { createOrderedOutput, createStdoutOutput } from './ordered-output.js';
 export type { OrderedOutput, OutputSink } from './ordered-output.js';
+export { canonicalizePath, isPathInside, resolveToolWorkdir } from './fs-path.js';

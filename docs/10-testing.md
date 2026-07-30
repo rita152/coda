@@ -268,6 +268,35 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 - grep:大 fixture 下 `limit=100` 达到即 kill rg(断言结果条数与进程退出);literal 与正则模式;行长 500 截断。
 - glob:touch 控制 mtime,断言 24h 内修改的文件排最前。
 
+### 6.4 分层项目规则
+
+`src/cli/project-rules.test.ts` 使用每用例独立 Git 形状 tmpdir，覆盖：
+
+1. 嵌套 cwd 向上定位 `.git` 根，`根/AGENTS.md → … → 目标目录/AGENTS.md` 的区块顺序、
+   source/scope 元数据与子目录优先；
+2. 完全没有规则时 system prompt 对象不变，`edit` / `write` / `bash` 不产生额外 gate；
+3. 三种副作用工具首次触达新作用域均先 block，下一 turn prompt 已含规则后才放行；真实
+   `write` 集成用 faux 三 turn 剧本断言首次不落盘、第二次才写入；同批 `bash` 先改规则、
+   `write` 后写文件的剧本再钉死 execute 边界复检；
+4. 单文件字节上限与最终渲染区块 token 上限分别触发 warning，总预算不足时窄作用域仍被
+   保留；历史 sibling 占满预算也不能放行未注入当前规则的工具调用；
+5. `AGENTS.md` 软链、目标父目录及 dangling leaf 软链指向仓库外时不读取外部正文、保留
+   链接前安全祖先并发非致命 warning；规则链接指向仓库内 missing 目标也必须 warning；
+   共享 canonicalizer 另测普通 missing、内链、循环与 workdir 物理化；
+6. 两次真实 `Agent.prompt()` 之间直接修改规则文件，第二次 faux call 看到新正文，且两版
+   正文都不出现在 `agent.transcript`；
+7. bash 相对 workdir 的真实 `pwd` 与规则/approval 解析一致，literal `cd` / 合法 `-C`、
+   重定向及现存裸目录参数（含纯数字与 `-` 开头目录）进入规则链；失败 `cd` 保留两条 cwd，
+   `curl -C` 不误改 cwd，动态展开、group/control flow、runner 包装的 `sh -c` 或 opaque
+   路径返回可恢复 block；
+8. warning 在前端订阅前缓冲，TUI 经 `println` 清洗展示并在关闭后退订；同步 replay 的
+   渲染失败保持非致命，故障恢复后同类 warning 再现；
+9. 构建产物 `--json -p` 触发超限规则时，warning 只进 stderr，stdout 每行仍可解析为
+   NDJSON。
+
+所有规则断言读 faux 的 `calls[n].context.systemPrompt`，不读取 Agent 私有状态；文件修改不
+依赖 mtime 等待，因为生产逻辑每 turn 重读正文。
+
 ## 7. CLI 测试:OpenTUI 内存帧 + PTY / headless e2e
 
 ### 7.1 OpenTUI TestRenderer(L4 UI)

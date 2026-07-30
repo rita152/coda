@@ -11,6 +11,7 @@ import {
   MAX_OUTPUT_BYTES,
   clipTail,
   killProcessTree,
+  resolveToolWorkdir,
   safeBasename,
   spillToFile,
   truncationDir,
@@ -24,6 +25,15 @@ const WINDOW_BYTES = 2 * MAX_OUTPUT_BYTES;
 const UPDATE_THROTTLE_MS = 100;
 /** 'exit' 后收尾输出的 drain 窗口:流 'end' 先到则提前结束(见 execute 内注释)。 */
 const DRAIN_WINDOW_MS = 300;
+
+function withoutShellPathOverrides(
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const clean = { ...env };
+  delete clean.BASH_ENV;
+  delete clean.CDPATH;
+  return clean;
+}
 
 interface StreamPump {
   done: Promise<void>;
@@ -131,7 +141,7 @@ export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
   async execute(call, ctx: ToolContext): Promise<ToolOutput<BashDetails>> {
     const { command, workdir } = call.args;
     const timeoutMs = call.args.timeout ?? DEFAULT_TIMEOUT_MS;
-    const cwd = workdir ?? ctx.cwd;
+    const cwd = resolveToolWorkdir(ctx.cwd, workdir);
 
     // workdir 预检:spawn 对不存在 cwd 的报错(ENOENT)对模型不可读,前置成明确文案
     if (workdir !== undefined) {
@@ -160,6 +170,9 @@ export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
           cmd: ['bash', '-c', command],
           detached: true,
           cwd,
+          // 非交互 bash 会执行继承的 BASH_ENV，cd 还会受 CDPATH 改写；清掉二者，
+          // 让静态路径分析与真正执行使用同一套可观察语义。
+          env: withoutShellPathOverrides(Bun.env),
           stdin: 'ignore',
           stdout: 'pipe',
           stderr: 'pipe',

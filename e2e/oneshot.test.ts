@@ -66,6 +66,24 @@ test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot
   expect(proc.parseErrors).toEqual([]); // 管道纪律不因 -p 特例松动
 }, T);
 
+test('--json -p: project-rule warning only uses stderr and never corrupts stdout NDJSON', async () => {
+  const proc = track(
+    startCoda({
+      files: { 'AGENTS.md': 'x'.repeat(32 * 1024 + 1) },
+      script: {
+        turns: [{ events: [{ kind: 'text', text: 'warning stayed out of stdout' }] }],
+        onExhausted: 'emptyStop',
+      },
+      prompt: 'trigger project-rule loading',
+    }),
+  );
+
+  expect(await proc.waitForExit()).toBe(0);
+  expect(proc.stderr()).toContain('[coda] warning: project rules');
+  expect(proc.stderr()).toContain('exceeds per-file limit');
+  expect(proc.parseErrors).toEqual([]);
+}, T);
+
 test('完整旧式非交互配置不读取损坏的 provider registry', async () => {
   const cwd = mkdtempSync(path.join(tmpdir(), 'coda-e2e-legacy-'));
   const registryDir = path.join(cwd, '.home', '.coda');

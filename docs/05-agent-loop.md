@@ -244,7 +244,8 @@ async function streamAssistantResponse(
     tools: cachedToolSchemas,
   };
 
-  // (2) 用户钩子 transformContext:压缩/裁剪。session 层的 compaction(M7)挂在这里。
+  // (2) 用户钩子 transformContext:压缩/裁剪与 system prompt 增强。session 层的
+  //     compaction(M7)及 CLI 的分层 AGENTS.md 注入都挂在这里；只改出站副本。
   if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
 
   // (3) 固定清洗 convertContext(transform 层的 agent 侧入口):
@@ -341,6 +342,15 @@ async function finalizeToolCall(cfg, call, r, emit) {
 
 - **校验失败与未知工具名回喂模型,而不是抛异常**。幻觉工具名、漏参数、类型错都是模型的常规失误,属于对话内容而非程序错误;合成 isError ToolResultMessage(附可用工具列表 / 美化后的 zod 错误 + "请修正后重试")让模型自我修正,任务继续。抛异常会把一次可自愈的失误升级成整个 run 的失败。gemini-cli 把这类失败建模为工具状态机的 `Error` 终态、同样回喂——业界一致。注意 reject 出的结果**不发 `tool_execution_start/end`**?不——为了 UI 一致性,reject 结果同样走 finalize 发 `tool_execution_end`(start 可省;实现时统一发 start/end 对更简单,args 用原始 `call.arguments`)。
 - **`beforeToolCall` 是权限系统的挂载点**(M6):approval 流程整个藏在这个钩子里(发 `approval_request` 事件 + Promise resolver 注册表,等用户决策),loop 对审批零感知。codex 的 `Denied`(拒绝但任务继续,理由给模型)与 `Abort`(停任务)之分,在我们这里映射为:deny → `{block:true, reason}` 回喂;abort → 钩子内部调 `agent.abort()` 后返回 block。
+- **CLI 可组合多个 `beforeToolCall` gate 而无需扩展 loop**：项目规则感知先检查 `edit` /
+  `write` 目标目录，以及 bash 最终 workdir / literal `cd` / 具备目录语义的 `-C` /
+  重定向 / 显式路径 / 现存裸目录的分层 `AGENTS.md` 是否已出现在最近一次模型上下文；
+  动态展开、shell 控制结构等无法静态确定路径的 bash 调用回喂可恢复错误，要求模型改写
+  成明确作用域；
+  未出现则 block 一轮，让下一 turn 经 `transformContext` 注入后重试。随后才进入 approval，
+  避免为本轮不会执行的调用请求授权。由于 batch preflight 早于整批 execute，CLI 包装三个
+  工具在真正副作用边界复检一次，覆盖同批前序命令改写规则的竞态。两种 block 都沿用既有
+  isError tool result，核心协议与事件文法不变。
 - **`afterToolCall` 可整体改写结果**:脱敏、追加提示、改 isError——pi 用它做结果注入,我们同样开放整条 ToolResultMessage 的替换权。
 - **terminate 语义:批内全部 terminate 才提前停**(`hasMoreToolCalls = !terminate`)。单个工具说"停"不算数:同批其他工具的结果模型还没看到,提前停会留下模型认知外的状态。全批一致才表达了"这轮工具集体认为任务该收尾"。terminate 停下时走的是内层循环自然退出 → follow-up poll → `agent_end('completed')` 的正常路径,不是异常路径。plan 类工具是 terminate 的预期用户。
 

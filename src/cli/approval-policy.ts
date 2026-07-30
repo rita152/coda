@@ -4,14 +4,19 @@
 // 时序纪律(风险 R7):abort 决议的工具结果必须是中断形态('[Tool execution was interrupted]'),
 // 绝不以「拒绝」形态漏给模型;onAbort() 的调用时机必须在 session.abort() 之后(调用方纪律)。
 
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { AgentConfig, ApprovalBroker } from '../agent/index.js';
 import { INTERRUPTED_RESULT_TEXT } from '../agent/index.js';
 import type { ToolCallPart } from '../protocol/index.js';
-import { runtimeHomeDir } from '../shared/index.js';
+import {
+  canonicalizePath,
+  isPathInside,
+  resolveToolWorkdir,
+  runtimeHomeDir,
+} from '../shared/index.js';
 import type { ToolDefinition } from '../tools/types.js';
-import { analyzeBashCommand } from './bash-analyze.js';
+import { analyzeBashCommand, analyzeBashPaths } from './bash-analyze.js';
 
 export interface ApprovalPolicyOptions {
   broker: ApprovalBroker;
@@ -69,72 +74,12 @@ function deniedReason(detail: string): string {
   return `User denied permission: ${detail}. Do not retry the same call; ask the user or take a different approach.`;
 }
 
-/**
- * realpath 尽力解引用(docs/07 §3.3「resolve 后」):纯词法 path.relative 会被项目根内
- * 指向根外的符号链接绕过(link→/etc 时 edit link/passwd 词法判 inside)。此处对路径成分
- * 做 realpath 解引用后再交给 isInsideRoot。不存在的路径(新建文件)不能 throw:逐级向上
- * 取最近存在祖先的 realpath,再拼回未解引用的剩余成分。macOS 上 /var→/private/var 之类
- * 的根本身软链也一并归一(projectRoot 与目标都过这层,比较基底一致)。
- */
-function realpathBestEffort(abs: string): string {
-  const trailing: string[] = [];
-  let current = abs;
-  for (;;) {
-    try {
-      const real = realpathSync(current);
-      return trailing.length === 0 ? real : path.join(real, ...trailing);
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return path.join(current, ...trailing); // 触底(理论不可达)
-      trailing.unshift(path.basename(current));
-      current = parent;
-    }
-  }
-}
-
-/** 重定向进这些丢弃/终端设备的目标即使落根外也不升级(与 bash-analyze 的 SYSTEM_PATH_EXEMPT 同义)。 */
-const DISCARD_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty', '/dev/zero']);
-
-/**
- * 从 bash command 提取需做 external-directory 判定的路径候选(docs/07 §3.3「解析出的路径参数」)。
- * 与 bash-analyze 解耦——策略层自带正则兜底,不依赖其导出:
- *   ① 重定向目标:> >> 2> &> 等操作符后的目标 token(2>&1 之类 fd 复制不算路径);
- *   ② 位置路径参数:含 '/' 或以 '~' 起头的 token(cp a ../../../etc/x 的目的地也要盯)。
- * 剥引号、~ 展开为 home;丢弃目标(/dev/null 等)剔除。产出「疑似文件系统路径」的 token 交给
- * isInsideRoot,宁多勿漏(根内 token resolve 后仍 inside,不会误升级;根外才触发确认)。
- */
-function extractPathCandidates(command: string): string[] {
-  const raws: string[] = [];
-  const unquote = (t: string): string =>
-    t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
-      ? t.slice(1, -1)
-      : t;
-
-  // ① 重定向目标:操作符(可选前导 fd 数字)= > / >> / &> / &>>;其后目标不得以 & 起头(fd 复制,如 2>&1)
-  const redirectRe = /(?:\d*>>?|&>>?)\s*(?!&)("[^"]*"|'[^']*'|[^\s;|&<>()]+)/g;
-  for (let m = redirectRe.exec(command); m !== null; m = redirectRe.exec(command)) {
-    raws.push(unquote(m[1] as string));
-  }
-
-  // ② 位置路径参数:粗按空白拆,剥可能粘连的前导重定向操作符,取路径样 token
-  for (const raw of command.split(/\s+/)) {
-    if (raw === '') continue;
-    const tok = unquote(raw.replace(/^(?:\d*>>?|&>>?|<)/, ''));
-    if (tok !== '' && (tok.includes('/') || tok.startsWith('~'))) raws.push(tok);
-  }
-
-  // ~ 展开为 home(path.resolve 不认 ~,不展开会把 ~/.zshrc 误判为根内);再剔除丢弃目标
-  return raws
-    .map((t) => (t === '~' || t.startsWith('~/') ? path.join(runtimeHomeDir(), t.slice(1)) : t))
-    .filter((t) => !DISCARD_TARGETS.has(t));
-}
-
 export function createApprovalPolicy(opts: ApprovalPolicyOptions): ApprovalPolicy {
   const { broker, requestAbort } = opts;
   const projectRoot = path.resolve(opts.projectRoot);
   // 比较基底同样过 realpath:项目根本身可能在软链下(macOS 的 /var→/private/var),
   // 只解引用目标却不解引用根会把根内一切误判为根外。
-  const projectRootReal = realpathBestEffort(projectRoot);
+  const projectRootReal = canonicalizePath(projectRoot);
   const rulesFile = opts.rulesFile ?? defaultRulesFile();
   // ApprovalBroker 的 alwaysRules 构造后不可注入,持久规则由策略层持有;
   // 直通判定取 persisted ∪ broker.rules 并集(并集 ⊇ broker 内部检查,行为一致)。
@@ -153,9 +98,11 @@ export function createApprovalPolicy(opts: ApprovalPolicyOptions): ApprovalPolic
 
   const isInsideRoot = (p: string): boolean => {
     // 先 realpath 解引用再做词法 relative:堵住「根内软链指向根外」的绕过(docs/07 §3.3)。
-    const real = realpathBestEffort(path.resolve(projectRoot, p));
-    const rel = path.relative(projectRootReal, real);
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    try {
+      return isPathInside(projectRootReal, canonicalizePath(path.resolve(projectRoot, p)));
+    } catch {
+      return false;
+    }
   };
 
   /** 审批公共路径:并集直通 → broker.request → 四值决议映射。 */
@@ -204,20 +151,29 @@ export function createApprovalPolicy(opts: ApprovalPolicyOptions): ApprovalPolic
       const command = typeof args.command === 'string' ? args.command : String(args.command ?? '');
       const analysis = analyzeBashCommand(command);
       if (analysis.denied) return { block: true, reason: deniedReason(analysis.reason) };
-      // 路径约束(docs/07 §3.3):workdir 与命令里解析出的路径参数 resolve 后落项目根外
-      // → external-directory 强制确认(不可 allow_always 泛化)。命令的相对路径按 workdir(缺省
-      // 项目根)为 cwd 解析;analyzeBashCommand 只查 workdir 与系统前缀,漏掉 echo x >> ~/.zshrc /
-      // cp a ../../../etc/x 这类根外目标,故在策略层用 extractPathCandidates 兜住。
-      const externalWorkdir = typeof args.workdir === 'string' && !isInsideRoot(args.workdir);
-      const cwd = typeof args.workdir === 'string' ? path.resolve(projectRoot, args.workdir) : projectRoot;
-      const externalPath = extractPathCandidates(command).some((t) => !isInsideRoot(path.resolve(cwd, t)));
-      const external = externalWorkdir || externalPath;
+      // 路径约束(docs/07 §3.3):workdir 与共享 path analyzer 产出的静态目标落项目根外
+      // → external-directory 强制确认；不完整分析同样禁止 allow_always。
+      const workdir =
+        typeof args.workdir === 'string'
+          ? resolveToolWorkdir(projectRoot, args.workdir)
+          : projectRoot;
+      const pathAnalysis = analyzeBashPaths(
+        command,
+        projectRoot,
+        typeof args.workdir === 'string' ? args.workdir : undefined,
+      );
+      const external = !isInsideRoot(workdir) ||
+        pathAnalysis.targets.some((target) => !isInsideRoot(target.path));
       const modelNote = typeof args.description === 'string' && args.description !== '' ? ` — ${args.description}` : '';
       return requestApproval(
         call,
-        withLoopNote(`bash: ${command}${modelNote}${external ? ' (accesses paths outside project root)' : ''}`),
+        withLoopNote(
+          `bash: ${command}${modelNote}` +
+          `${external ? ' (accesses paths outside project root)' : ''}` +
+          `${pathAnalysis.complete ? '' : ' (contains paths that could not be fully analyzed)'}`,
+        ),
         analysis.patterns,
-        analysis.forceConfirm || external || doomLoop,
+        analysis.forceConfirm || !pathAnalysis.complete || external || doomLoop,
       );
     }
 
