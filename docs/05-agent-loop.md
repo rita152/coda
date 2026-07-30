@@ -13,6 +13,7 @@ Agent 核心只依赖 `src/protocol/`:provider 以 `StreamFn` 注入,工具以 `
 ```ts
 class Agent {
   constructor(config: AgentConfig)
+  setModel(model: ModelConfig): void               // 仅 idle；只改变下一次采样
   prompt(text: string, opts?): Promise<void>     // 仅空闲时;运行中调用 throw(强制走 steer/followUp)
   steer(msg: UserMessage | string): void         // 随时可调,入 steering 队列
   followUp(msg: UserMessage | string): void      // 随时可调,入 follow-up 队列
@@ -54,6 +55,7 @@ stateDiagram-v2
 
 | 方法 | `idle` 时 | `running` 时 |
 |---|---|---|
+| `setModel(model)` | 更新下一次采样使用的完整 `ModelConfig`，不改 transcript | **throw** |
 | `prompt(text)` | 构造 `UserMessage{source:'prompt'}`,发 `agent_start{reason:'prompt'}` 后以 `seed.initialPending` 交给 runLoop——消息在首 turn 经注入路径([B])落转录,走完整 `message_start/end` 生命周期(session 层与 UI 因此不需要为 prompt 消息开特例);返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
 | `steer(msg)` | 入 steering 队列(下次 run 的起跑 poll 会吃到,见 2.1 注释 A) | 入 steering 队列,turn 边界注入 |
 | `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
@@ -455,6 +457,7 @@ loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转�
 
 状态机与 API:
 
+- [ ] `setModel()` 仅 idle 成功，既有 transcript 不变；running 时 throw
 - [ ] 运行中调 `prompt()` throw;`steer/followUp` 在 idle 与 running 均入队不 throw
 - [ ] `continue()` 三路启动:steering 优先 → follow-up → 末条 assistant 为 aborted/error、或转录末尾存在未配对 toolCall / 末条消息非完结态(崩溃恢复)时重采样;三者皆无 throw;`agent_start.reason` 分别为 `'follow_up'/'follow_up'/'continue'`
 - [ ] `waitForIdle()`:挂一个人为延迟 50ms 的 async listener,resolve 时该 listener 已处理完 `agent_end`

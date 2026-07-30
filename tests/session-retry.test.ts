@@ -254,6 +254,41 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     await h.session.close();
   });
 
+  it('retry backoff 拒绝第二个 prompt，waitForIdle 等到 detached 重试落定', async () => {
+    const h = await makeSession(
+      {
+        turns: [
+          err({ kind: 'http', status: 500, retryable: true }),
+          err({ kind: 'http', status: 500, retryable: true }),
+          { events: [{ kind: 'text', text: 'recovered' }] },
+        ],
+      },
+      FIXED_JITTER,
+    );
+
+    void h.session.prompt('first');
+    const waiting = await h.sleep.next();
+    expect(h.session.interactionState()).toBe('retrying');
+    let idleSettled = false;
+    const idle = h.session.waitForIdle().finally(() => {
+      idleSettled = true;
+    });
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(idleSettled).toBe(false);
+    await expect(h.session.prompt('second')).rejects.toThrow(/正在重试/);
+    expect(h.streamFn.calls).toHaveLength(1);
+
+    waiting.release();
+    const secondWaiting = await h.sleep.next();
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(idleSettled).toBe(false);
+    secondWaiting.release();
+    await idle;
+    expect(h.session.interactionState()).toBe('idle');
+    expect(h.streamFn.calls).toHaveLength(3);
+    await h.session.close();
+  });
+
   it('退避序列(500 连续失败):1000,2000,4000,8000,16000 后到上限透传 agent_end', async () => {
     const errTurn = err({ kind: 'http', status: 500, retryable: true });
     const h = await makeSession(
@@ -339,7 +374,7 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     expect(firstWaiting.delayMs).toBe(1000);
     firstWaiting.release();
     await h.waitForEvent((e) => e.type === 'agent_end' && !(e as { willRetry?: boolean }).willRetry);
-    await h.session.agent.waitForIdle();
+    await h.session.waitForIdle();
 
     // 第二轮:因为成功 turn 已把 attempt 归零,退避序号从 0(delay 1000)重新开始
     const before = h.events.filter((e) => e.type === 'retry_scheduled').length;
@@ -443,5 +478,36 @@ describe('session auto-retry 集成(docs/08 §5.3,docs/10 §5 用例 9)', () => 
     const cancelled = h.events.find((e) => e.type === 'error');
     expect(cancelled?.type === 'error' && /cancel/i.test(cancelled.message)).toBe(true);
     await h.session.close();
+  });
+
+  it('收到 willRetry 的 agent_end 时同步 close:仍清理 retrying 状态', async () => {
+    const h = await makeSession(
+      {
+        turns: [
+          err({ kind: 'http', status: 500, retryable: true }),
+          { events: [{ kind: 'text', text: 'should not run' }] },
+        ],
+      },
+      FIXED_JITTER,
+    );
+    let closePromise: Promise<void> | undefined;
+    let signalCloseStarted: () => void;
+    const closeStarted = new Promise<void>((resolve) => {
+      signalCloseStarted = resolve;
+    });
+    h.session.subscribe((e) => {
+      if (e.type === 'agent_end' && e.willRetry === true && closePromise === undefined) {
+        closePromise = h.session.close();
+        signalCloseStarted();
+      }
+    });
+
+    const prompt = h.session.prompt('go');
+    await closeStarted;
+    await Promise.all([prompt, closePromise]);
+
+    expect(h.session.interactionState()).toBe('idle');
+    await h.session.waitForIdle();
+    expect(h.streamFn.calls).toHaveLength(1);
   });
 });

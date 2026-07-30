@@ -2,7 +2,7 @@
 
 # 09 CLI / TUI:交互模式、流式渲染、键位与 headless JSON 模式
 
-CLI 是整个系统里**最薄**的一层:它只做两件事——把用户输入翻译成对 `Session` 门面的调用(`prompt` / `steer` / `followUp` / `abort`),把 `SessionEvent` 流翻译成终端像素。所有智能都在 agent/session 核心;CLI 的局部视图状态只是事件投影,不是新的事实源,也不理解 provider wire 或执行工具。headless JSON 模式(见第 6 节)继续机械验证这条纪律——**交互 TUI 能做的每件事,都必须能由同一组方法或一行 JSON 命令表达**。
+CLI 是整个系统里**最薄**的一层:运行期把用户输入翻译成 `Session` 门面调用(`prompt` / `steer` / `followUp` / `abort`),把 `SessionEvent` 流翻译成终端像素；交互配置期则用同一个 provider 命令状态机驱动 TUI/classic。所有智能都在 agent/session 核心；provider registry 只持久化认证配置、模型发现缓存和最近一次显式选择，不进入会话事实流，也不理解 provider wire。headless JSON 模式(见第 6 节)继续机械验证运行期纪律——**已有 `Session` 的交互都由同一组方法或一行 JSON 命令表达**。
 
 ## 1. 交互形态:Bun + `@opentui/core`
 
@@ -16,11 +16,10 @@ CLI 是整个系统里**最薄**的一层:它只做两件事——把用户输�
 | `-p`、裸 prompt、非 TTY stdin | plain `Renderer`;跑完退出 |
 | stdin/stdout 都是 TTY 且 `TERM != dumb` | `startTui()`;alternate screen |
 | 双 TTY + `TERM=dumb` | classic readline/raw TTY + ANSI `Renderer` |
-| OpenTUI 初始化失败，且 API key 已配置 | 清理 OpenTUI 后降级 classic |
-| OpenTUI 初始化失败，且 API key 因 eligible TUI 延迟校验 | 关闭 Session，打印缺 key 提示并退出 2 |
+| OpenTUI 初始化失败 | 清理 OpenTUI 后降级 classic；provider 命令仍完整可用 |
 | stdin 是 TTY、stdout 非 TTY | classic 输入 + plain 追加输出 |
 
-OpenTUI 与 classic REPL 不能同时存在:二者都会接管 raw stdin/stdout。`main.ts` 因此必须在创建 stdout FileSink/legacy renderer **之前**选择 TUI。没有额外的 `--classic` 开关；初始化失败时先完整销毁 OpenTUI，已配置 key 的会话再自动进入 classic。唯一例外是缺 key 只因 eligible TUI 配置面而延迟校验的会话:classic 没有密钥配置面，不能把它降级到一个必然认证失败的界面，必须关闭 Session、给出 provider 对应提示并退出 2。生产构建保持 `Bun.build({ packages: 'external' })`;运行时安装当前平台的 OpenTUI optional native package。`--json`、`-p` 和管道协议不因 TUI 发生任何变化。
+OpenTUI 与 classic REPL 不能同时存在:二者都会接管 raw stdin/stdout。`main.ts` 因此必须在创建 stdout FileSink/legacy renderer **之前**选择 TUI。没有额外的 `--classic` 开关；初始化失败时先完整销毁 OpenTUI，再自动进入 classic。二者共用 `ProviderCommandController`，所以没有 API key 或模型也能在任一交互面完成 `/login` → `/model`。生产构建保持 `Bun.build({ packages: 'external' })`;运行时安装当前平台的 OpenTUI optional native package。`--json`、`-p` 和管道协议不因 TUI 发生任何变化。
 
 ### 1.2 全屏布局与顶部起排不变量
 
@@ -31,7 +30,7 @@ root column (100% × 100%)
 ├── header:版本 + Unicode 像素 Logo + tips
 ├── transcript:ScrollBox(flexGrow:1)
 └── composer
-    ├── slash menu:命令候选(仅 `/prefix` 时可见,从 prompt 向上展开)
+    ├── candidate menu:slash/provider 候选(从 prompt 向上展开)
     ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
     ├── workspace
     └── context usage                         provider/model
@@ -40,8 +39,10 @@ root column (100% × 100%)
 - **header**:从 `package.json.version` 取当前版本;Logo 是 ImageGen 参考图
   `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻,运行时不读 PNG、不依赖终端图片协议。header、brand、Logo 与 tips 都不绘制背景色,直接透出终端背景。
 - **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部;用户手动上滚时暂停跟尾。
-- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,第一条 footer 暂时从 workspace 切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
-- **slash menu**:输入内容严格处于 `/prefix`(首字符是 `/`、命令名内尚无空白/换行)时,在 prompt 上方展开透明候选层。候选视觉对齐 pi 的 SelectList：`→ ` 标出当前项,命令名和可选参数提示占左列,说明占右侧 muted 列；窄屏隐藏说明但保留完整键盘能力。匹配是大小写无关的命令名/别名前缀；空闲/compacting 只显示 canonical `/help`、`/queue`、`/status`、`/followup`、`/quit`,running/retrying 只显示仍会被 Enter 分派为命令的 `/followup`,不得展示实际会作为 steering 发送的伪候选。兼容别名 `/f`、`/q` 继续可输入,但不重复占候选行；对别名按 `Tab` 会展开成 `/followup `、`/quit `。`↑`/`↓` 循环选项,`Tab` 采用当前项并补一个空格但不发送,`Enter` 采用当前项后在同一次按键中继续正常提交,`Esc` 仅收起候选且保留 draft。候选占用 composer 上方空间,正常高度可一次显示完整目录；空间不足时围绕当前项裁切,同时仍优先保留 1 行输入与可用时 1 行 transcript。审批期间候选必须隐藏。
+- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,第一条 footer 暂时从 workspace 切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`；冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
+- **candidate menu**:slash 命令和 provider 枚举步骤复用 prompt 正上方的同一个透明候选层，视觉对齐 pi 的 SelectList：`→ ` 标出当前项，名称占左列，说明占右侧 muted 列；窄屏隐藏说明但保留完整键盘能力。输入内容严格处于 `/prefix`(首字符是 `/`、命令名内尚无空白/换行)时，候选按大小写无关的命令名/别名前缀匹配；空闲/compacting 显示 canonical `/help`、`/queue`、`/status`、`/login`、`/model`、`/logout`、`/followup`、`/quit`，running/retrying 只显示 `/followup`。运行中手工提交三条 provider 管理命令仍会进入控制器并给出“先完成或 abort”的提示，不会作为 steering 发给模型；其他空闲命令仍按普通 steering 处理。兼容别名 `/f`、`/q` 继续可输入，但不重复占候选行；对别名按 `Tab` 会展开成 `/followup `、`/quit `。slash 候选中 `↑`/`↓` 循环选项，`Tab` 采用当前项并补一个空格但不发送，`Enter` 采用当前项后在同一次按键中继续正常提交，`Esc` 仅收起候选且保留 draft。
+- **provider 候选**:`/login` 的登录方式和 provider、Custom 协议、`/model` 模型、`/logout` provider 都由共用状态机把结构化 `value/label/description` 交给同一 candidate menu；空输入显示候选，输入文本可按 label/value/description 大小写无关过滤，`↑`/`↓` 循环选择，`Enter` 直接确认当前项，不要求输入数字。`Tab` 不确认 provider 选项；`Esc` 静默回到上一步，例如 provider 列表回到 OAuth/API key，Custom 协议回到 API key。离开秘密步骤时必须先清空 UI 秘密缓冲；协议步骤中已经暂存在 controller 的 key 也要在回退时清空。到达 `/login`、`/model` 或 `/logout` 的根步骤后再按 `Esc` 才静默退出流程，不打印“已取消”。秘密输入和 name/base URL 等自由文本步骤不显示候选。审批期间所有候选隐藏。
+- **候选布局**:候选占用 composer 上方空间，一次最多显示 8 项；项目更多或空间不足时围绕当前项裁切，同时仍优先保留 1 行输入与可用时 1 行 transcript。
 - **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
 - **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和两行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色以适配明暗主题；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 移除文本和边框的自定义前景色,但保留这一个用于焦点可见性的光标色,背景始终保持透明。
 
@@ -51,7 +52,7 @@ OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitO
 
 ### 1.3 classic / plain 保底
 
-`renderer.ts` 与 `repl.ts` 仍是受支持的降级面:classic 用 readline/raw TTY compatibility + ANSI 动态区;plain 是纯追加输出。它们同时服务 `TERM=dumb`、非 TTY 与一次性路径,不能删除。classic 的单写入者、stdout 有序 FileSink、动态区宽度清洗与写失败收尾契约保持不变;TUI 则由 OpenTUI 自己调度帧,不经过这个 FileSink。
+`renderer.ts` 与 `repl.ts` 仍是受支持的降级面:classic 用 readline/raw TTY compatibility + ANSI 动态区;plain 是纯追加输出。它们同时服务 `TERM=dumb`、非 TTY 与一次性路径,不能删除。classic 与 TUI 共用 provider 命令状态机；controller 提供同一份结构化候选，TUI 渲染 candidate menu，classic 则把它们打印成编号列表并接受编号或名称。秘密步骤只把等长 `•` 掩码交给 renderer，真实 key 不进入输入历史、transcript、`SessionEvent` 或日志。classic 的单写入者、stdout 有序 FileSink、动态区宽度清洗与写失败收尾契约保持不变;TUI 则由 OpenTUI 自己调度帧,不经过这个 FileSink。
 
 ## 2. 启动流程与会话选择
 
@@ -68,42 +69,58 @@ coda --provider openai-responses  # 使用 OpenAI Responses adapter
 值都读取 OpenAI key，但产生不同的 `ModelRef.api` 并分发到不同 `StreamFn`；CLI 不读取或转换
 任何 Responses wire 事件。
 
-启动组装顺序(伪码):
+旧式 flags/env/config 仍作为显式非交互配置入口；交互主路径另读 provider registry。启动组装顺序(伪码):
 
 ```ts
-const tuiEligible = isFullScreenTuiEligible(flags, terminal);
-const config      = resolveConfig(flags, env, readConfigFile(), {  // 第 7 节
-  allowMissingApiKey: tuiEligible,
+const interactive = stdin.isTTY && !flags.json && flags.prompt === undefined;
+const legacy = resolveConfig(flags, env, readConfigFile(), {
+  allowMissingApiKey: interactive,
 });
-const model       = toModelConfig(config);                         // ModelRef + baseURL/apiKey/compat
-const streamFn    = makeStreamFn(config.provider);                  // 只做 adapter 注册/分发
-const agentConfig = { streamFn, model, tools: builtinTools, systemPrompt };
-const session     = resuming
-  ? await Session.resume(sessionId, { agentConfig })   // 加载 JSONL,内部组装 Agent 并注入 initialMessages
-  : await Session.create({ agentConfig });             // 见 08 文档第 2 节
-if (flags.json) return startHeadless(session, ...);
-if (flags.prompt !== undefined) return runOneShotWithPlainRenderer(session, ...);
+const registry =
+  interactive || legacy.modelConfig === undefined
+    ? new ProviderRegistry()                            // providers.json + credentials.json
+    : undefined;                                       // 完整旧式非交互配置不依赖 registry
+const initialModel =
+  legacy.modelConfig !== undefined
+    ? (hasRequiredKey(legacy) ? legacy.modelConfig : undefined)
+    : registry?.resolveSelectedModel();
+const streamFn = createProviderStreamFn();              // 按每次调用的 model.ref.api 分发
+const createSession = (model: ModelConfig) =>
+  resuming
+    ? Session.resume(sessionId, { agentConfig: { streamFn, model, tools, systemPrompt } })
+    : Session.create({ agentConfig: { streamFn, model, tools, systemPrompt } });
+
+if (!interactive) {
+  if (!initialModel) exitWithLoginAndModelHint();       // Session 创建前 fail-fast
+  const session = await createSession(initialModel);
+  if (flags.json) return startHeadless(session, ...);
+  return runOneShotWithPlainRenderer(session, ...);
+}
+
+const runtime = new InteractiveRuntime({ initialModel, createSession });
+await runtime.initialize();                             // 无模型时保持零 Session
 if (stdinIsTty && stdoutIsTty && TERM !== 'dumb') {
   try {
     const { startTui } = await import('./tui.js');     // native 依赖只在这里加载
-    return await startTui(session, approval, {
-      cwd, model: model.ref, version: packageJson.version,
-      contextLimit: model.limits?.context,
+    return await startTui(runtime, approval, {
+      cwd, model: runtime.currentModel(), version: packageJson.version,
+      providerCommands: { registry, runtime },
     });
   } catch (error) {
-    if (getMissingApiKeyMessage(config)) {
-      logTuiUnavailable(error);
-      logMissingApiKey(config);
-      await session.close();
-      return 2;                                       // classic 没有 key 配置面
-    }
     logTuiFallback(error);                             // startTui 已恢复终端
   }
 }
-return startRepl(session, createClassicRenderer(...), approval);
+return startRepl(runtime, createClassicRenderer(...), approval, {
+  providerCommands: { registry, runtime },
+});
 ```
 
-Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-session-persistence.md) 第 1–2 节),CLI 订阅的是 Session 而非 Agent——这样 `retry_scheduled` / `compaction_start` 等 SessionEvent 才能透传到 UI。落盘监听在 UI 监听之前。TUI 监听器只同步更新组件树,OpenTUI 按 `maxFps:30` 合并绘制;plain/classic 监听器继续在每个事件后等待 stdout `drain` 施加背压。审批事件由 `ApprovalBroker` 的旁路订阅送进同一前端。
+`InteractiveRuntime` 是可空 Session 门面：没有有效选择时 `messages=[]`、usage 为零，prompt 给出 `/login` → `/model` 的可执行提示；只有 `/model` 成功或最近一次**用户显式选择**仍有效时，才调用工厂 create/resume。Agent 仍由 Session 内部组装并持有(见 [08-session-persistence](./08-session-persistence.md) 第 1–2 节),CLI 订阅的是 Runtime/Session 而非 Agent——这样 `retry_scheduled` / `compaction_start` 等 SessionEvent 才能透传到 UI。延迟 attach 时先建立事件转发，再向前端重放恢复转录。落盘监听在 UI 监听之前。TUI 监听器只同步更新组件树,OpenTUI 按 `maxFps:30` 合并绘制;plain/classic 监听器继续在每个事件后等待 stdout `drain` 施加背压。审批事件由 `ApprovalBroker` 的旁路订阅送进同一前端。
+
+并发的首次模型选择复用同一个 Session 创建 Promise；工厂尚未返回时 `close()` 等待并关闭其
+结果，Session 一旦提交则直接关闭，不能反向等待可能在 attach callback 内调用 `close()` 的
+同一通知链。Session 事件与 attach callback 均逐个隔离失败。Provider command 的 submit
+Promise 也必须先发布再进入 view/registry 回调，退出只等待这份已发布任务。
 
 ## 3. 键位表
 
@@ -118,9 +135,14 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 | slash menu | `Tab` | 补全当前命令并追加空格,不发送 |
 | slash menu | `Enter` | 采用当前命令并立即按当前 phase 的 Enter 语义发送 |
 | slash menu | `Esc` | 关闭候选,保留输入；后续 Esc 才进入 abort/退出语义 |
+| provider candidate menu | `↑` / `↓` | 循环选择当前 provider 步骤的候选 |
+| provider candidate menu | `Enter` | 确认当前候选；不要求输入编号 |
+| provider 子流程 | `Esc` | 静默返回上一步；离开秘密步骤时清空 key |
+| provider 根步骤 | `Esc` | 静默退出流程，不打印取消提示 |
 | 流式中 | `Enter` | 当前输入入 **steering** 队列(`session.steer(text)`) |
 | retry backoff | `Enter` | 当前输入入 **steering** 队列,等待重试 turn 消费 |
 | compacting | `Enter` | 按空闲语义调用 `session.prompt(text)`;Session 在 compaction 完成后启动 |
+| running / retrying / compacting | `/login`、`/model`、`/logout` + `Enter` | 不进入模型上下文；提示先完成或 abort，保持原状态 |
 | 任意 | `Alt+Enter` | 当前输入入 **follow-up** 队列(`session.followUp(text)`；空闲时只排队) |
 | 流式中 | `Esc` | `session.abort()`(硬中断) |
 | retry backoff / compacting | `Esc` | `session.abort()`;取消待重试或压缩 |
@@ -141,7 +163,7 @@ Agent 由 Session 内部组装并持有(见 [08-session-persistence](./08-sessio
 - OpenTUI 默认启用 Kitty keyboard disambiguation;支持该协议的终端能可靠区分 `Esc`、`Alt+Enter` 与 `Shift+Enter`。不支持时由解析器降级;classic 仍用 readline `escapeCodeTimeout=50ms`。
 - `Alt+Enter` 以 `key.meta && return` 为主。始终保留 `/f ` / `/followup ` 兜底,保证不能发送 Meta+Enter 的终端仍有完整功能。
 - Shift+Enter 在不报告修饰键的旧终端可能退化成普通 Enter;可用 bracketed paste 输入多行。
-- 其余空闲斜杠命令:`/quit`(兼容 `/q`)、`/queue`、`/status`、`/help`。TUI 的 canonical 目录与隐藏别名都由 `repl.ts` 中的 `SLASH_COMMAND_SPECS` 驱动；别名参与匹配和补全,但不单独渲染。
+- 其余空闲斜杠命令:`/login`、`/model`、`/logout`、`/quit`(兼容 `/q`)、`/queue`、`/status`、`/help`。TUI 的 canonical 目录与隐藏别名都由 `repl.ts` 中的 `SLASH_COMMAND_SPECS` 驱动；别名参与匹配和补全,但不单独渲染。
 
 ## 4. 渲染器与 SessionEvent 对应表
 
@@ -241,7 +263,7 @@ export type CliCommand =
 
 | 命令 | Agent API | 运行中语义 |
 |---|---|---|
-| `prompt` | `agent.prompt(text)` | running 时 **不 throw 到进程**,输出 `{type:'error', fatal:false, message:'agent is running; use steer or follow_up'}` |
+| `prompt` | `session.prompt(text)` | running/retrying 时 **不 throw 到进程**,输出 `{type:'error', fatal:false, message:'agent is running; use steer or follow_up'}`；compacting 时暂存 |
 | `steer` | `agent.steer(text)` | 随时合法;idle 时消息滞留队列,由下一次 prompt/continue 消费(与 pi 「启动前 poll 一次 steering」语义一致) |
 | `follow_up` | `agent.followUp(text)` | 随时合法 |
 | `abort` | `agent.abort()` | idle 时为 no-op |
@@ -266,6 +288,10 @@ SIGINT / SIGTERM → 同 shutdown(运行中)
 致命错误         → 输出 {type:'error', fatal:true} → drain stdout → exit 1
 ```
 
+交互 TUI/classic 退出时必须先关闭 `ProviderCommandController`：通过外部
+`AbortSignal` 取消在途的 `/login` 模型刷新并等待提交收束，再销毁视图。Registry 自身的
+15 秒网络超时仅作为兜底。
+
 `-p "..."` 一次性模式与 headless 共用同一套 one-shot 生命周期语义:注入一条 `prompt`,忽略带 `willRetry:true` 的中间 `agent_end`,等待最终 `agent_end` 后自动 `shutdown`,默认用 plain 人类可读输出(加 `--json` 时改为事件流)。它不调用 `startHeadless()`。初次 `prompt()` 返回只代表首轮 agent run 已落定,不能据此提前关闭 Session；自动重试属于 Session 的 detached follow-up,必须一并等待。若等待期间收到 `fatal:true` error（例如注入的 retry sleep 失效），则立即按致命错误路径收尾并以 1 退出。
 
 ### 6.5 headless 会话示例
@@ -286,74 +312,89 @@ stdin : {"type":"shutdown"}
 
 M6 起本协议增补 `{ type: 'approval'; approvalId: string; decision: 'allow_once' | 'allow_always' | 'deny' | 'abort' }` 命令(codex 把审批应答也做成 Op 的同构做法)。审批策略由 `--approval-mode <interactive|allow|deny>` 控制:交互 TUI/classic 默认 `interactive`;headless 与 `-p` 默认 `allow`(机器驱动的管道是调用方自决的信任边界,默认 deny 会让每个脚本都得先学一个 flag;需要审批流的客户端显式开 `interactive` 并应答 approval 命令),不阻塞管道。
 
-## 7. 配置:模型 / baseURL / apiKey
+## 7. Provider 认证、模型发现与选择
 
-### 7.1 来源与优先级
+### 7.1 `/login`:只新增或更新认证
 
-**flags > 环境变量 > `~/.coda/config.json` > 内置默认**。逐字段独立合并(flag 只给了 `--model` 时,baseURL 仍可来自配置文件)。
+`/login` 在 TUI/classic 中走同一个状态机，第一层固定显示 `OAuth` 与 `API key`。TUI 必须用
+§1.2 的 candidate menu 在输入框上方展示两项，以 `↑`/`↓` 选择、`Enter` 确认，不能要求用户
+输入数字；随后 provider 与协议等固定选项也复用该层。classic 使用同一份结构化候选打印编号
+列表，作为低能力终端的兼容输入面。两种前端的 `Esc` 都由状态机逐级返回；根步骤静默退出，
+不得追加取消消息。OAuth 入口只打印 `OAuth 尚未实现` 后回到普通输入，不创建 Session、不写
+配置。API key 的首期 provider 固定为:
+
+- **OpenCode Go**:`provider id = opencode-go`，`baseURL =
+  https://opencode.ai/zen/go/v1`，用户只秘密输入 key。保存后立即 GET
+  `https://opencode.ai/zen/go/v1/models`；实时结果只决定可用 id，实际协议必须再与
+  [04 文档](./04-provider-adapter.md)中维护的显式 `model → api + limits` 目录相交。表外模型
+  会列入 ignored 提示，绝不能猜测协议或 limits，也不能进入 `/model`；表内模型解析出的
+  `ModelConfig.limits` 同时供 footer 百分比与 Session compaction 使用。
+- **Custom**:严格按 provider name → base URL → API key → protocol 输入。协议只能从
+  `OpenAI Chat Completions`、`OpenAI Responses`、`Anthropic Messages` 三项中选择，不接受自由
+  文本。name 经 NFKC、首尾/连续空白归一化后做大小写不敏感 canonical 化，稳定 id 为
+  `custom:<percent-encoded-name>`；同名再次登录就是更新，大小写不同不产生第二份 provider。
+  不同 name 可并存。OpenAI 两种协议请求 `<baseURL>/models`；Anthropic 在 baseURL 尚未以
+  `/v1` 结尾时请求 `<baseURL>/v1/models`，并使用对应认证 header。
+
+非秘密配置、模型缓存和最近显式选择写入 `~/.coda/providers.json`；key 单独写入
+`~/.coda/credentials.json`。每次写入先在短跨进程锁内重新读取并合并最新状态，再采用同目录
+临时文件 + fsync + 原子 rename，目录权限收紧为
+`0700`、文件为 `0600`，凭据目标若是符号链接则拒绝读取。秘密输入只在控制器内短暂存在，
+TUI/classic renderer 始终只收到等长掩码；key 不进入输入历史、transcript、Session JSONL、
+`SessionEvent` 或日志。
+
+每次 `/login` / `/logout` 还会更新该 provider 的非秘密 revision。远端模型请求完成后只能在
+短锁内以 revision、endpoint 与协议做 CAS；若期间已有更新，迟到结果必须丢弃，不能把旧
+endpoint/models 与新 key 拼成撕裂状态。
+
+配置和 key 必须先落盘再刷新模型。网络、HTTP 或 payload 失败时保留它们并显示包含 endpoint、
+HTTP status 和重试动作的错误，但不得回显响应正文或底层异常文本。相同 endpoint/protocol 的更新
+失败保留旧缓存；endpoint/protocol 改变时先清空不再可信的缓存。`/login` 本身从不选择新模型。
+
+### 7.2 `/model`、动态分发与 `/logout`
+
+`/model` 只在 candidate menu 列出“存在凭据且模型发现缓存有效”的 provider 模型，每项以
+`provider-id/model-id` 唯一标识，同时显示其 `ModelRef.api`。选择后才按顺序完成:
+
+1. 从 registry 解析完整 `ModelConfig`，包含真实 `ModelRef.api`、baseURL、key，以及目录中
+   明确存在的 limits；Custom 的标准 `/models` 没有可信 limits 时继续显示 `limit unknown`；
+2. 创建第一份 Session，或在现有 Session 空闲时调用 `Session.setModel()`；
+3. 成功后记住这次用户显式选择并静默更新 footer；当前模型已经由右下角持续显示，不得再向
+   transcript/普通输出追加“已选择 …”成功消息。若只持久化最近选择失败，当前切换仍有效并
+   明确警告下次启动可能无法恢复。
+
+后续每次 provider 调用都由 CLI composition root **按当次 `model.ref.api`** 分发到现有
+`openai-chat`、`openai-responses`、`anthropic-messages` adapter，不能按 provider id 或上次选择
+缓存 adapter。切换不改写 `MetaRecord` 或历史消息；每条 assistant 继续记录实际采样所用
+`ModelRef`，transform 层据此处理跨模型 reasoning。
+
+`/login` 更新当前 provider 的 key 时，只要当前模型的 endpoint/api 仍相同且刷新后仍可用，就把
+新凭据换入活动配置但不改变显式选择；否则清除当前选择并要求重新 `/model`。`/logout` 按名称或
+编号删除目标 provider 的 key，保留非秘密配置和模型缓存；若它是当前 provider，同时回到未选择
+状态。三条管理命令只允许在 `idle` 执行，running/retrying/compacting 时统一提示先完成或
+abort。
+
+启动只恢复 `providers.json` 中最近一次**用户显式选择**，且必须仍能由当前配置、凭据与缓存完整
+解析；失效就保持未选择，不回退任何硬编码默认模型。无选择的交互冷启动不创建带占位
+`ModelRef` 的 Session，普通 prompt 会提示先 `/login` 再 `/model`。
+
+### 7.3 旧式 flags / env / config 兼容入口
+
+脚本和已有配置仍支持逐字段优先级
+**flags > 环境变量 > `~/.coda/config.json`**，但末尾不再有内置默认模型:
 
 | 配置项 | flag | 环境变量 | config.json 字段 |
 |---|---|---|---|
 | 模型 | `--model` | `CODA_MODEL` | `model` |
 | baseURL | `--base-url` | `CODA_BASE_URL` | `baseURL` |
-| apiKey | `--api-key`(不推荐,进程列表可见) | `CODA_API_KEY`;两个 OpenAI adapter 回退 `OPENAI_API_KEY`;Anthropic 回退 `ANTHROPIC_API_KEY` | `apiKeyEnv`(推荐)/ `apiKey`(明文,警告) |
+| apiKey | `--api-key`(不推荐,进程列表可见) | `CODA_API_KEY`;OpenAI 回退 `OPENAI_API_KEY`;Anthropic 回退 `ANTHROPIC_API_KEY` | `apiKeyEnv`(推荐)/ `apiKey`(明文,警告) |
 
-```ts
-// ~/.coda/config.json
-interface CodaConfig {
-  model?: string;              // 如 "gpt-5.2";带斜杠时解析为 provider/model
-  baseURL?: string;
-  apiKeyEnv?: string;          // 指向环境变量名,避免密钥落盘
-  apiKey?: string;             // 明文兜底;存在时启动打印警告
-  defaults?: { temperature?: number; reasoningEffort?: string; maxOutputTokens?: number };
-  compat?: CompatFlags;        // 显式方言覆盖,見 04 文档;省缺按 baseURL 自动推断
-}
-```
-
-### 7.2 解析伪码
-
-```ts
-function resolveConfig(flags, env, file, { allowMissingApiKey = false } = {}): ResolvedConfig {
-  const provider = flags.provider ?? 'openai-chat';
-  const pick = <K>(f?: K, e?: K, c?: K, d?: K) => f ?? e ?? c ?? d;
-  const nonBlank = (value?: string) => value?.trim() || undefined;
-  const model   = pick(flags.model, env.CODA_MODEL, file.model, 'gpt-5.2');
-  const baseURL = pick(flags.baseUrl, env.CODA_BASE_URL, file.baseURL, undefined);
-  const providerKeyEnv =
-    provider === 'anthropic-messages' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
-  const apiKeyEnv = file.apiKeyEnv?.trim();
-  const fileKey = apiKeyEnv ? nonBlank(env[apiKeyEnv]) : nonBlank(file.apiKey);
-  const apiKey =
-    nonBlank(flags.apiKey) ??
-    nonBlank(env.CODA_API_KEY) ??
-    nonBlank(env[providerKeyEnv]) ??
-    fileKey;
-  if (provider !== 'faux' && !apiKey && !allowMissingApiKey) {
-    exitWithHint(`未找到 API key:设置 ${providerKeyEnv},或 ~/.coda/config.json 的 apiKeyEnv`);
-  }
-  return { modelConfig: { ref: toModelRef(provider, model),
-                          baseURL, apiKey, compat: file.compat,
-                          defaults: file.defaults } };
-}
-```
-
-`toModelRef` 的 OpenAI 分支是显式映射:
-
-```ts
-openai-chat      → { provider: 'openai', api: 'openai-chat', model }
-openai-responses → { provider: 'openai', api: 'openai-responses', model }
-```
-
-`main.ts` 随后把 `openai-responses` 分发到 `streamOpenAIResponses`。该注册是 CLI composition root
-唯一需要知道的新 adapter 细节；agent/session 不按 provider 分支。
-
-要点:
-
-- key 值在来源边界去除首尾空白；空串或全空白等同缺失，不得遮蔽下一级来源。`apiKeyEnv` 一旦指向非空变量名，该变量就是 config 层的唯一 key 来源，不再静默回退同文件中的明文 `apiKey`。
-- 缺 key 是 eligible 全屏 TUI 的合法启动状态,不得阻拦页面打开；本阶段尚不实现 TUI 内密钥输入或持久化,用户在配置能力完成前提交 prompt 会得到 provider 的认证错误事件。
-- `--json`、`-p`、裸 prompt、管道输入、非双 TTY 与 `TERM=dumb` 没有 TUI 配置面,仍在创建 Session 前 fail-fast,并给出**可执行的 provider 对应提示**(OpenAI 设置 `OPENAI_API_KEY`,Anthropic 设置 `ANTHROPIC_API_KEY`;两者都可设置 `CODA_API_KEY` 或配置文件 `apiKeyEnv`)。OpenTUI 初始化失败时也不得把缺 key 会话降级进 classic。
-- 密钥永远不进 `~/.coda/sessions/` 的 JSONL,也不出现在任何 `SessionEvent` 里(`ModelConfig` 不随事件外发)。
-- v1 单 profile;多 profile(`profiles: Record<string, …>` + `--profile`)是纯增量扩展,结构上已预留。
+只有显式 model 才产生旧式 `ModelConfig`；只写 `--provider` 不会生成占位 model。`faux` 是测试
+例外，显式 `--provider faux` 可使用其确定性 `faux` model。key 在来源边界去除首尾空白；
+`apiKeyEnv` 一旦非空，就是 config 层唯一 key 来源。交互 TTY 可以在旧式配置缺 key/模型时进入
+无选择状态；`--json`、`-p`、裸 prompt 与管道模式没有配置对话，必须在 Session 创建前
+fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对应环境变量。非交互调用已经由
+旧式入口解析出完整 `ModelConfig` 时不读取 provider registry，损坏的交互配置不能阻断脚本。
 
 ## 8. 边界情况
 
@@ -363,7 +404,7 @@ openai-responses → { provider: 'openai', api: 'openai-responses', model }
 - **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽;程序化设置输入历史后调用 Textarea 的 buffer-end API,不能用 JavaScript UTF-16 `string.length` 猜光标列。classic 动态区继续用仓库的 `displayWidth`/截断实现。
 - **过小终端**:低于 10 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标,审批则隐藏输入并只显示决议键位。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
 - **Windows**:OpenTUI 依赖对应 win32 native optional package;classic/plain 仍是 `TERM=dumb` 或初始化失败时的保底。只承诺现代 Windows Terminal。
-- **恢复转录**:`--continue` / `--resume` 在显示 TUI 前用最终 `AgentMessage` hydrate,不伪造生命周期事件。assistant 的多 text/reasoning part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要；plan tool result 从 `details.steps` 恢复最新 plan,失败结果仍可见。初始化/重放失败必须 destroy OpenTUI 后才允许降级 classic。
+- **恢复转录**:`--continue` / `--resume` 可以先记住目标 session id；有有效模型时在显示 UI 前恢复，没有模型时延迟到 `/model` 后 attach，再用最终 `AgentMessage` hydrate，不伪造生命周期事件。assistant 的多 text/reasoning part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要；plan tool result 从 `details.steps` 恢复最新 plan,失败结果仍可见。初始化/重放失败必须 destroy OpenTUI 后才允许降级 classic。
 
 ## 9. 验收清单
 
@@ -383,9 +424,15 @@ openai-responses → { provider: 'openai', api: 'openai-responses', model }
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
 - [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景
 - [ ] TUI 正常退出、fatal、审批中 abort 与初始化失败四条路径都恢复主屏/raw mode；初始化失败后 classic 无双重输入
+- [ ] TUI/classic 的 `/login` 都先显示 OAuth/API key；TUI 与 slash command 复用输入框上方的 `→` candidate menu，以 `↑/↓` 选择、`Enter` 确认且不要求数字输入，classic 保留编号/名称兼容；`Esc` 逐级静默返回、根步骤静默退出且秘密回退先清 key；OAuth 占位安全返回，秘密输入只显示掩码且不进输入历史、事件、转录或日志
+- [ ] OpenCode Go 的实时 models 与显式协议表取交集；表外 id 不可选；多个 custom provider 可按大小写不敏感名称更新并分别 `/logout`
+- [ ] `/login` 不切模型；`/model` 以 provider/model 选择并按 `ModelRef.api` 动态分发；运行中三条管理命令只提示完成或 abort
+- [ ] 同一 provider 的旧模型刷新迟到时因 revision CAS 被丢弃，不回滚新 endpoint/key
+- [ ] `/login` 模型刷新中退出会取消请求，并等待 controller 收束后再销毁前端
+- [ ] 零配置冷启动没有 Session；失效的最近选择保持未选择，不恢复硬编码默认；`/model` 后才 create/resume 并重放历史
 - [ ] `coda --json` 下:乱输入一行非 JSON 不退出;`prompt`-running 冲突返回 non-fatal error 事件;`shutdown` 在运行中先 abort 再 flush 退出,exit code 0
 - [ ] `--json` 的 stdout 每一行都能被 `jq .` 解析(管道纪律)
-- [ ] 配置优先级:同时给 flag/env/config 三处不同 model,生效的是 flag;去掉 flag 生效 env
+- [ ] 旧式配置优先级:同时给 flag/env/config 三处不同 model,生效的是 flag;全部去掉后不产生默认模型
 - [ ] 非 TTY 管道输入自动走一次性模式;`NO_COLOR` 下不出现 coda 自定义调色
 
 ## 相关文档

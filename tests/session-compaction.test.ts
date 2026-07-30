@@ -228,6 +228,27 @@ describe('threshold 主动压缩(docs/08 §6.1/§6.2,docs/10 §5 用例 9)', () 
     expect(h.events.some((e) => e.type === 'compaction_start')).toBe(false);
     expect(h.streamFn.calls).toHaveLength(1);
   });
+
+  it('未配置 maxOutputTokens 时不把理论 output 上限当作预留量', async () => {
+    const streamFn = createFauxStreamFn({
+      turns: [{ events: [{ kind: 'text', text: 'done' }], usage: { input: 10, output: 5 } }],
+    });
+    const session = await Session.create({
+      dir: tmpdir,
+      agentConfig: {
+        streamFn,
+        model: { ...TEST_MODEL, limits: { context: 200, output: 200 } },
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+    const h = instrument(session, streamFn);
+    await h.session.prompt('go');
+    await h.session.close();
+    expect(h.events.some((e) => e.type === 'compaction_start')).toBe(false);
+    expect(h.streamFn.calls).toHaveLength(1);
+  });
 });
 
 // ==================================================================
@@ -381,6 +402,12 @@ describe('压缩期间用户输入:prompt 暂存重放、steer 不丢(docs/08 §
 
     await h.session.prompt('第三件事');                  // 触发压缩
     await h.waitForEvent((e) => e.type === 'compaction_start');
+    let idleSettled = false;
+    const idle = h.session.waitForIdle().finally(() => {
+      idleSettled = true;
+    });
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(idleSettled).toBe(false);
     // 此刻压缩 op 正卡在摘要 gate:暂存 prompt、透传 steer
     await h.session.prompt('压缩期间的新输入');            // 应被暂存
     h.session.steer('顺便这个也办了');                     // 直接入 agent 队列
@@ -389,6 +416,7 @@ describe('压缩期间用户输入:prompt 暂存重放、steer 不丢(docs/08 §
     await h.waitForEvent(
       (e) => e.type === 'agent_end' && e.reason === 'completed' && h.events.filter((x) => x.type === 'agent_end').length >= 2,
     );
+    await idle;
     await h.session.close();
 
     // 摘要是 call #1;重放 prompt 的 run 是 call #2
@@ -399,5 +427,64 @@ describe('压缩期间用户输入:prompt 暂存重放、steer 不丢(docs/08 §
     expect(texts.some((t) => t.includes('顺便这个也办了'))).toBe(true);     // steer 未丢
     // 首条仍是折叠后的 synthetic summary
     expect((replay[0] as UserMessage).source).toBe('synthetic');
+  });
+
+  it('compaction_end listener 的 prompt 仍先暂存，不与内部 continue 抢跑', async () => {
+    const id = '20260101-000000-end-prompt';
+    seedTranscript(id, [
+      user('u1', 'A', 'prompt'), assistant('a1', 'ok', 190),
+      user('u2', 'B', 'prompt'), assistant('a2', 'ok', 190),
+    ]);
+    const h = await resume(
+      id,
+      {
+        turns: [
+          { events: [{ kind: 'text', text: '热' }], usage: { input: 190, output: 10 } },
+          { events: [{ kind: 'text', text: '摘要' }] },
+          { events: [{ kind: 'text', text: '新任务答复' }] },
+        ],
+      },
+      [],
+      { keepRatio: 0.05 },
+    );
+    let replay: Promise<void> | undefined;
+    h.session.subscribe((event) => {
+      if (event.type !== 'compaction_end') return;
+      replay = h.session.prompt('end 事件中的新任务');
+      void replay.catch(() => undefined);
+    });
+
+    await h.session.prompt('触发压缩');
+    await h.waitForEvent(
+      (event) =>
+        event.type === 'agent_end' &&
+        event.reason === 'completed' &&
+        h.events.filter((candidate) => candidate.type === 'agent_end').length >= 2,
+    );
+    const replayed = replay;
+    if (replayed === undefined) throw new Error('expected compaction_end prompt');
+    await replayed;
+    await h.session.waitForIdle();
+
+    expect(
+      h.events.some(
+        (event) =>
+          event.type === 'error' &&
+          event.message.includes('session follow-up failed'),
+      ),
+    ).toBe(false);
+    const outbound = h.streamFn.calls[2]?.context.messages ?? [];
+    expect(
+      outbound.some(
+        (message) =>
+          message.role === 'user' &&
+          message.content.some(
+            (part) =>
+              part.type === 'text' &&
+              part.text === 'end 事件中的新任务',
+          ),
+      ),
+    ).toBe(true);
+    await h.session.close();
   });
 });

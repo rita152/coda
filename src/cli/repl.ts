@@ -16,13 +16,34 @@
 import * as readline from 'node:readline';
 import process from 'node:process';
 import type { ApprovalDecision } from '../agent/index.js';
-import type { AgentMessage, QueuedMessage } from '../protocol/index.js';
-import type { Session, SessionEvent, SessionUsage } from '../session/index.js';
+import type { QueuedMessage } from '../protocol/index.js';
+import type {
+  SessionEvent,
+  SessionInteractionState,
+  SessionUsage,
+} from '../session/index.js';
+import type {
+  CliSession,
+  InteractiveSession,
+} from './interactive-runtime.js';
+import { ProviderCommandController } from './provider-commands.js';
+import type { ProviderRegistry } from './provider-registry.js';
 import type { Renderer } from './renderer.js';
 
 export const ESC_TIMEOUT_MS = 50; // Esc 消歧窗口(docs/09 §3.2)
 export const ESC_EXIT_WINDOW_MS = 500; // 双 Esc 退出窗口
 export const CTRL_C_EXIT_WINDOW_MS = 1500; // 双 Ctrl+C 退出窗口
+
+/** retrying 的 Enter 仍是 steering；compacting 的 prompt 交给 Session 暂存。 */
+export function interactionEnterState(
+  state: SessionInteractionState,
+): 'idle' | 'running' {
+  return state === 'running' || state === 'retrying' ? 'running' : 'idle';
+}
+
+export function interactionCanAbort(state: SessionInteractionState): boolean {
+  return state !== 'idle';
+}
 
 // ---- 纯逻辑:斜杠命令 ----
 
@@ -53,6 +74,21 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = [
     availableWhileRunning: false,
   },
   {
+    name: 'login',
+    description: 'Add or update provider API-key authentication',
+    availableWhileRunning: false,
+  },
+  {
+    name: 'model',
+    description: 'Choose a model from configured providers',
+    availableWhileRunning: false,
+  },
+  {
+    name: 'logout',
+    description: 'Remove a saved provider API key',
+    availableWhileRunning: false,
+  },
+  {
     name: 'followup',
     aliases: ['f'],
     argumentHint: '<text>',
@@ -68,7 +104,16 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = [
 ];
 
 export type SlashCommand =
-  | { cmd: 'quit' | 'queue' | 'status' | 'help' }
+  | {
+      cmd:
+        | 'quit'
+        | 'queue'
+        | 'status'
+        | 'help'
+        | 'login'
+        | 'model'
+        | 'logout';
+    }
   | { cmd: 'follow_up'; text: string }
   | { cmd: 'unknown'; input: string };
 
@@ -88,6 +133,12 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'status' };
     case '/help':
       return { cmd: 'help' };
+    case '/login':
+      return { cmd: 'login' };
+    case '/model':
+      return { cmd: 'model' };
+    case '/logout':
+      return { cmd: 'logout' };
     case '/f':
     case '/followup':
       return { cmd: 'follow_up', text: rest };
@@ -117,6 +168,12 @@ export function decideEnter(state: 'idle' | 'running', meta: boolean, raw: strin
   const slash = parseSlashCommand(text);
   if (slash !== undefined && slash.cmd === 'follow_up') {
     return slash.text === '' ? { kind: 'none' } : { kind: 'follow_up', text: slash.text };
+  }
+  if (
+    slash !== undefined &&
+    (slash.cmd === 'login' || slash.cmd === 'model' || slash.cmd === 'logout')
+  ) {
+    return { kind: 'command', command: slash };
   }
   if (state === 'running') return { kind: 'steer', text };
   if (slash !== undefined) return { kind: 'command', command: slash };
@@ -167,6 +224,10 @@ export interface ReplOptions {
   stdin?: ReplInput;
   /** stdout 等外部致命边界失败时，由 REPL 自己完成 abort、TTY 清理并 exit 1。 */
   fatalSignal?: AbortSignal;
+  providerCommands?: {
+    registry: ProviderRegistry;
+    runtime: InteractiveSession;
+  };
 }
 
 // ---- 纯逻辑:本会话输入历史(↑/↓)----
@@ -257,21 +318,21 @@ export function formatQueueLines(
 const HELP_LINES = [
   'Enter: send (idle) / steer (running)   Alt+Enter or /f <text>: follow-up',
   'Esc: abort (running)   Esc Esc / Ctrl+C Ctrl+C: quit   Ctrl+D: quit (empty input)',
-  '/quit  /queue  /status  /help',
+  '/login  /model  /logout  /quit  /queue  /status  /help',
 ];
 
-function lastModelName(messages: readonly AgentMessage[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m !== undefined && m.role === 'assistant') return m.model.model;
-  }
-  return undefined;
+function formatModelRef(
+  model: { provider: string; model: string } | undefined,
+): string {
+  return model === undefined
+    ? 'no model selected'
+    : `${model.provider}/${model.model}`;
 }
 
 // ---- REPL 主体 ----
 
 export async function startRepl(
-  session: Session,
+  session: CliSession,
   renderer: Renderer,
   approval?: ReplApproval,
   opts: ReplOptions = {},
@@ -292,10 +353,14 @@ export async function startRepl(
   let closing = false;
 
   return await new Promise<number>((resolve) => {
+    let secretInput = false;
+    const renderInput = (): void => {
+      renderer.setInputLine?.(secretInput ? '•'.repeat(input.length) : input);
+    };
     const setInput = (text: string, cur = text.length): void => {
       input = text;
       cursor = cur;
-      renderer.setInputLine?.(input);
+      renderInput();
     };
 
     const setStatusHint = (text: string): void => {
@@ -308,7 +373,48 @@ export async function startRepl(
       renderer.setStatus?.(undefined);
     };
 
-    const running = (): boolean => session.agent.state === 'running';
+    const canAbort = (): boolean => interactionCanAbort(session.interactionState());
+
+    const providerController =
+      opts.providerCommands === undefined
+        ? undefined
+        : new ProviderCommandController(
+            opts.providerCommands.registry,
+            opts.providerCommands.runtime,
+            {
+              println: (text) => {
+                renderer.println?.(text);
+              },
+              setCommandPrompt: (prompt, secret, choices) => {
+                // Esc 离开秘密步骤时 controller 会先切换 prompt；必须在撤下掩码前
+                // 清掉真实输入，否则 renderInput() 会把 key 短暂交给 renderer。
+                if (secretInput && !secret) {
+                  input = '';
+                  cursor = 0;
+                }
+                secretInput = secret;
+                if (choices !== undefined) {
+                  choices.forEach((choice, index) => {
+                    renderer.println?.(
+                      `  ${index + 1}. ${choice.label}` +
+                        (choice.description === undefined
+                          ? ''
+                          : ` · ${choice.description}`),
+                    );
+                  });
+                }
+                renderer.setStatus?.(
+                  prompt === undefined || choices === undefined
+                    ? prompt
+                    : `${prompt} · 输入编号或名称`,
+                );
+                renderInput();
+              },
+              setModel: () => {
+                // classic /status 每次从 runtime 读取；无需维护第二份模型状态。
+              },
+            },
+          );
 
     const unsub = session.subscribe((e) => {
       if (e.type === 'queue_update') {
@@ -322,6 +428,11 @@ export async function startRepl(
     const unsubApproval = approval?.subscribe((e) => {
       if (e.type === 'approval_request') approvalQueue.push(e.approvalId);
     });
+    const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
+      (messages) => {
+        if (messages.length > 0) renderer.replayTranscript(messages);
+      },
+    );
 
     const onResize = (): void => {
       renderer.redraw?.();
@@ -337,6 +448,7 @@ export async function startRepl(
       opts.fatalSignal?.removeEventListener('abort', onFatalSignal);
       unsub();
       unsubApproval?.();
+      unsubAttached?.();
       approvalQueue.length = 0;
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
@@ -348,12 +460,13 @@ export async function startRepl(
       if (closing) return;
       closing = true;
       try {
-        if (forceAbort || running()) {
+        if (forceAbort || canAbort()) {
           session.abort();
           // R7 时序:abort 在前;pending 审批以 'abort' 决议,否则 waitForIdle 挂死
           approvalQueue.length = 0;
           approval?.onAbort();
         }
+        await providerController?.close();
         await session.close();
       } catch (err) {
         code = 1;
@@ -388,8 +501,20 @@ export async function startRepl(
           for (const l of HELP_LINES) renderer.println?.(l);
           break;
         case 'status':
-          for (const l of formatStatusLines(session.usage(), lastModelName(session.messages))) {
+          for (const l of formatStatusLines(
+            session.usage(),
+            formatModelRef(session.currentModel()),
+          )) {
             renderer.println?.(l);
+          }
+          break;
+        case 'login':
+        case 'model':
+        case 'logout':
+          if (providerController === undefined) {
+            renderer.println?.(`/${c.cmd} is unavailable in this mode`);
+          } else {
+            providerController.begin(c.cmd);
           }
           break;
         case 'queue':
@@ -407,33 +532,44 @@ export async function startRepl(
     };
 
     const submit = (meta: boolean): void => {
-      const action = decideEnter(running() ? 'running' : 'idle', meta, input);
+      if (providerController?.active === true) {
+        const value = input;
+        setInput('');
+        void providerController.submit(value);
+        return;
+      }
+      const action = decideEnter(interactionEnterState(session.interactionState()), meta, input);
       if (action.kind === 'none') {
         setInput('');
         return;
       }
       history.push(input);
-      switch (action.kind) {
-        case 'prompt':
-          runPrompt(action.text);
-          break;
-        case 'steer':
-          session.steer(action.text);
-          break;
-        case 'follow_up':
-          session.followUp(action.text);
-          break;
-        case 'command':
-          runCommand(action.command);
-          break;
+      try {
+        switch (action.kind) {
+          case 'prompt':
+            runPrompt(action.text);
+            break;
+          case 'steer':
+            session.steer(action.text);
+            break;
+          case 'follow_up':
+            session.followUp(action.text);
+            break;
+          case 'command':
+            runCommand(action.command);
+            break;
+        }
+      } catch (err) {
+        printErr(err);
+      } finally {
+        setInput('');
       }
-      setInput('');
     };
 
     const insert = (s: string): void => {
       input = input.slice(0, cursor) + s + input.slice(cursor);
       cursor += s.length;
-      renderer.setInputLine?.(input);
+      renderInput();
     };
 
     const onKeypress = (str: string | undefined, key: readline.Key | undefined): void => {
@@ -449,7 +585,7 @@ export async function startRepl(
       }
       if (name === 'paste-end') {
         pasting = false;
-        renderer.setInputLine?.(input);
+        renderInput();
         return;
       }
       if (pasting) {
@@ -489,6 +625,13 @@ export async function startRepl(
         return; // 审批模式吞掉其余非 Ctrl 键位(输入行冻结,防误触)
       }
 
+      if (name === 'escape' && providerController?.active === true) {
+        providerController.back();
+        setInput('');
+        escExit.reset();
+        return;
+      }
+
       if (k.ctrl === true && name === 'c') {
         if (input !== '') {
           setInput(''); // 输入非空:清空输入行(docs/09 §3)
@@ -503,7 +646,7 @@ export async function startRepl(
         return;
       }
       if (k.ctrl === true && name === 'd') {
-        if (input === '' && !running()) void shutdown(0);
+        if (input === '' && !canAbort()) void shutdown(0);
         return;
       }
       if (name === 'escape') {
@@ -511,7 +654,7 @@ export async function startRepl(
           void shutdown(0);
           return;
         }
-        if (running()) session.abort(); // Esc 不消费输入框文本(docs/09 §3.1)
+        if (canAbort()) session.abort(); // Esc 不消费输入框文本(docs/09 §3.1)
         return;
       }
       if (name === 'return' || name === 'enter') {
@@ -519,10 +662,12 @@ export async function startRepl(
         return;
       }
       if (name === 'up') {
+        if (providerController?.active === true) return;
         setInput(history.up(input));
         return;
       }
       if (name === 'down') {
+        if (providerController?.active === true) return;
         setInput(history.down());
         return;
       }
@@ -546,14 +691,14 @@ export async function startRepl(
         if (cursor > 0) {
           input = input.slice(0, cursor - 1) + input.slice(cursor);
           cursor--;
-          renderer.setInputLine?.(input);
+          renderInput();
         }
         return;
       }
       if (name === 'delete') {
         if (cursor < input.length) {
           input = input.slice(0, cursor) + input.slice(cursor + 1);
-          renderer.setInputLine?.(input);
+          renderInput();
         }
         return;
       }
@@ -583,7 +728,7 @@ export async function startRepl(
     process.once('SIGTERM', onSignal);
 
     renderer.mount?.();
-    renderer.setInputLine?.('');
+    renderInput();
     opts.fatalSignal?.addEventListener('abort', onFatalSignal, { once: true });
     if (opts.fatalSignal?.aborted === true) onFatalSignal();
   });

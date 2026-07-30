@@ -11,8 +11,21 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
-import type { Session, SessionEvent, SessionUsage } from '../session/index.js';
+import type {
+  SessionEvent,
+  SessionInteractionState,
+  SessionUsage,
+} from '../session/index.js';
 import { runtimeHomeDir } from '../shared/index.js';
+import type {
+  CliSession,
+  InteractiveSession,
+} from './interactive-runtime.js';
+import {
+  ProviderCommandController,
+  type ProviderCommandChoice,
+} from './provider-commands.js';
+import type { ProviderRegistry } from './provider-registry.js';
 import { toolHeadline, truncateToWidth } from './renderer.js';
 import {
   approvalKeyDecision,
@@ -23,6 +36,8 @@ import {
   formatQueueLines,
   formatStatusLines,
   InputHistory,
+  interactionCanAbort,
+  interactionEnterState,
   SLASH_COMMAND_SPECS,
 } from './repl.js';
 import type { ReplApproval, SlashCommand, SlashCommandSpec } from './repl.js';
@@ -49,7 +64,7 @@ const HELP_LINES = [
   'Enter: send (idle) / steer (running) · Shift+Enter: newline',
   'Alt+Enter or /f <text>: follow-up · PageUp/PageDown: scroll output',
   'Esc: abort · Esc Esc / Ctrl+C Ctrl+C: quit · Ctrl+D: quit when idle',
-  '/quit  /queue  /status  /help',
+  '/login  /model  /logout  /quit  /queue  /status  /help',
 ];
 
 const DIFF_MAX_LINES = 24;
@@ -58,6 +73,7 @@ const PROMPT_MAX_VISIBLE_ROWS = 8;
 const PROMPT_MEASURE_HEIGHT = 65_535;
 const PROMPT_RULE_ROWS = 2;
 const COMPOSER_FOOTER_ROWS = 2;
+const PROMPT_MENU_MAX_ROWS = 8;
 const SLASH_COMMAND_COLUMN_WIDTH = 24;
 const TRANSCRIPT_PADDING_Y = 1;
 const TRANSCRIPT_MIN_CONTENT_ROWS = 1;
@@ -93,12 +109,16 @@ const PALETTE: Palette = {
 
 export interface TuiOptions {
   cwd: string;
-  model: ModelRef;
+  model?: ModelRef;
   version: string;
   color: boolean;
   contextLimit?: number;
   resumed?: boolean;
   branch?: string;
+  providerCommands?: {
+    registry: ProviderRegistry;
+    runtime: InteractiveSession;
+  };
 }
 
 interface TuiScreenOptions extends TuiOptions {
@@ -115,6 +135,12 @@ export interface TuiScreen {
   setUsage(usage: SessionUsage): void;
   setBranch(branch: string | undefined): void;
   setTransientStatus(status: string | undefined): void;
+  setCommandPrompt(
+    prompt: string | undefined,
+    secret: boolean,
+    choices?: readonly ProviderCommandChoice[],
+  ): void;
+  setModel(model: ModelRef | undefined, contextLimit?: number): void;
   resolveApproval(): void;
   getInput(): string;
   setInput(text: string): void;
@@ -140,7 +166,15 @@ interface ToolView {
   text: TextRenderable;
 }
 
-export type TuiPhase = 'idle' | 'running' | 'retrying' | 'compacting';
+interface PromptMenuItem {
+  kind: 'slash' | 'command';
+  key: string;
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export type TuiPhase = SessionInteractionState;
 
 /**
  * TUI 唯一的交互状态投影。它只由 SessionEvent 推导，可随时丢弃重建；
@@ -182,11 +216,11 @@ export class TuiInteractionState {
 
 /** running/retrying 的 Enter 是 steering；compacting 的 prompt 由 Session 暂存。 */
 export function tuiEnterState(phase: TuiPhase): 'idle' | 'running' {
-  return phase === 'running' || phase === 'retrying' ? 'running' : 'idle';
+  return interactionEnterState(phase);
 }
 
 export function tuiCanAbort(phase: TuiPhase): boolean {
-  return phase !== 'idle';
+  return interactionCanAbort(phase);
 }
 
 /** 审批决议必须来自完全无修饰键的 y/a/n/Esc。 */
@@ -301,6 +335,11 @@ export async function createTuiScreen(
   const cursorForeground = RGBA.fromHex(PALETTE.cursor);
   const interaction = opts.interaction ?? new TuiInteractionState();
   let approvalPending = false;
+  let commandPrompt: string | undefined;
+  let commandChoices: readonly ProviderCommandChoice[] = [];
+  let secretInput = false;
+  let secretValue = '';
+  let rewritingSecret = false;
   let submitHandler = opts.onSubmit ?? (() => {});
   const colored = <T extends object>(value: T): T | Record<string, never> =>
     opts.color ? value : {};
@@ -486,7 +525,7 @@ export async function createTuiScreen(
       flexDirection: 'column',
       backgroundColor: transparentBackground,
     });
-    const slashRows = SLASH_COMMAND_SPECS.map((_, index) => {
+    const slashRows = Array.from({ length: PROMPT_MENU_MAX_ROWS }, (_, index) => {
       const row = new Box(renderer, {
         id: `coda-slash-row-${index}`,
         width: '100%',
@@ -613,7 +652,7 @@ export async function createTuiScreen(
     const modelText = new Text(renderer, {
       id: 'coda-model',
       height: 1,
-      content: sanitizeTerminalText(`${opts.model.provider}/${opts.model.model}`),
+      content: sanitizeTerminalText(formatModelRef(opts.model)),
       truncate: true,
       selectable: false,
       bg: transparentBackground,
@@ -638,6 +677,8 @@ export async function createTuiScreen(
     let layoutHeight = renderer.height;
     let headerRows = 9;
     let branch = opts.branch;
+    let selectedModel = opts.model;
+    let selectedContextLimit = opts.contextLimit;
     let usage: SessionUsage = {
       cumulative: { input: 0, output: 0 },
       turns: 0,
@@ -648,9 +689,10 @@ export async function createTuiScreen(
     let currentAssistant: AssistantView | undefined;
     let planText: TextRenderable | undefined;
     const toolViews = new Map<string, ToolView>();
-    let slashMatches: readonly SlashCommandSpec[] = [];
-    let slashSelectedIndex = 0;
-    let slashMatchKey = '';
+    let promptMenuMode: 'none' | 'slash' | 'command' = 'none';
+    let promptMenuItems: readonly PromptMenuItem[] = [];
+    let promptMenuSelectedIndex = 0;
+    let promptMenuKey = '';
     let slashMenuDismissedInput: string | undefined;
 
     const workspace = formatWorkspacePath(opts.cwd, runtimeHomeDir());
@@ -679,30 +721,87 @@ export async function createTuiScreen(
       input.placeholder = truncateToWidth(firstLine(value), promptContentWidth());
     };
 
-    const refreshSlashMatches = (): void => {
+    const refreshPromptMenu = (): void => {
       const source = input.plainText;
-      const nextMatches =
-        approvalPending || slashMenuDismissedInput === source
-          ? []
-          : matchingSlashCommands(source, interaction.phase);
-      const nextKey = `${interaction.phase}\0${source}\0${nextMatches
-        .map((command) => command.name)
-        .join('\0')}`;
-      if (nextKey !== slashMatchKey) {
-        const query = source.slice(1).toLowerCase();
-        const exact = nextMatches.findIndex(
-          (command) =>
-            command.name.toLowerCase() === query ||
-            command.aliases?.some(
-              (alias) => alias.toLowerCase() === query,
-            ) === true,
-        );
-        slashSelectedIndex = exact === -1 ? 0 : exact;
-        slashMatchKey = nextKey;
-      } else if (slashSelectedIndex >= nextMatches.length) {
-        slashSelectedIndex = Math.max(0, nextMatches.length - 1);
+      let nextMode: typeof promptMenuMode = 'none';
+      let nextItems: readonly PromptMenuItem[] = [];
+      if (!approvalPending && !secretInput) {
+        if (commandPrompt !== undefined && commandChoices.length > 0) {
+          const query = source.trim().toLocaleLowerCase('en-US');
+          nextMode = 'command';
+          nextItems = commandChoices
+            .filter((choice) => {
+              if (query === '') return true;
+              return [choice.label, choice.value, choice.description]
+                .filter((part): part is string => part !== undefined)
+                .some((part) =>
+                  part.toLocaleLowerCase('en-US').includes(query),
+                );
+            })
+            .map((choice) => ({
+              kind: 'command',
+              key: `${choice.value}\0${choice.label}`,
+              value: choice.value,
+              label: choice.label,
+              ...(choice.description !== undefined && {
+                description: choice.description,
+              }),
+            }));
+        } else if (
+          commandPrompt === undefined &&
+          slashMenuDismissedInput !== source
+        ) {
+          nextMode = 'slash';
+          nextItems = matchingSlashCommands(source, interaction.phase).map(
+            (command) => ({
+              kind: 'slash',
+              key: command.name,
+              value: command.name,
+              label:
+                `/${command.name}` +
+                (command.argumentHint === undefined
+                  ? ''
+                  : ` ${command.argumentHint}`),
+              description: command.description,
+            }),
+          );
+        }
       }
-      slashMatches = nextMatches;
+      if (nextItems.length === 0) nextMode = 'none';
+      const nextKey = `${nextMode}\0${interaction.phase}\0${source}\0${nextItems
+        .map((item) => item.key)
+        .join('\0')}`;
+      if (nextKey !== promptMenuKey) {
+        const query =
+          nextMode === 'slash'
+            ? source.slice(1).toLocaleLowerCase('en-US')
+            : source.trim().toLocaleLowerCase('en-US');
+        const exact =
+          nextMode === 'slash'
+            ? nextItems.findIndex((item) => {
+                const command = SLASH_COMMAND_SPECS.find(
+                  (candidate) => candidate.name === item.value,
+                );
+                return (
+                  item.value.toLocaleLowerCase('en-US') === query ||
+                  command?.aliases?.some(
+                    (alias) =>
+                      alias.toLocaleLowerCase('en-US') === query,
+                  ) === true
+                );
+              })
+            : nextItems.findIndex(
+                (item) =>
+                  item.value.toLocaleLowerCase('en-US') === query ||
+                  item.label.toLocaleLowerCase('en-US') === query,
+              );
+        promptMenuSelectedIndex = exact === -1 ? 0 : exact;
+        promptMenuKey = nextKey;
+      } else if (promptMenuSelectedIndex >= nextItems.length) {
+        promptMenuSelectedIndex = Math.max(0, nextItems.length - 1);
+      }
+      promptMenuMode = nextMode;
+      promptMenuItems = nextItems;
     };
 
     const renderSlashRows = (visibleRows: number): void => {
@@ -712,27 +811,27 @@ export async function createTuiScreen(
       const startIndex = Math.max(
         0,
         Math.min(
-          slashSelectedIndex - Math.floor(visibleRows / 2),
-          slashMatches.length - visibleRows,
+          promptMenuSelectedIndex - Math.floor(visibleRows / 2),
+          promptMenuItems.length - visibleRows,
         ),
       );
       for (const [rowIndex, parts] of slashRows.entries()) {
-        const commandIndex = startIndex + rowIndex;
-        const spec =
-          rowIndex < visibleRows ? slashMatches[commandIndex] : undefined;
-        parts.row.visible = spec !== undefined;
-        if (spec === undefined) continue;
-        const selected = commandIndex === slashSelectedIndex;
+        const itemIndex = startIndex + rowIndex;
+        const item =
+          rowIndex < visibleRows ? promptMenuItems[itemIndex] : undefined;
+        parts.row.visible = item !== undefined;
+        if (item === undefined) continue;
+        const selected = itemIndex === promptMenuSelectedIndex;
         const selectedColor: ColorInput =
           opts.color ? PALETTE.accent : terminalForeground;
         parts.prefix.content = selected ? '→ ' : '  ';
-        parts.command.content =
-          `/${spec.name}${spec.argumentHint === undefined ? '' : ` ${spec.argumentHint}`}`;
-        parts.description.content = spec.description;
+        parts.command.content = item.label;
+        parts.description.content = item.description ?? '';
         parts.command.width = descriptionVisible
           ? SLASH_COMMAND_COLUMN_WIDTH
           : Math.max(1, promptContentWidth() - 2);
-        parts.description.visible = descriptionVisible;
+        parts.description.visible =
+          descriptionVisible && item.description !== undefined;
         parts.prefix.fg = selected ? selectedColor : terminalForeground;
         parts.command.fg = selected ? selectedColor : terminalForeground;
         parts.description.fg = selected
@@ -742,7 +841,7 @@ export async function createTuiScreen(
     };
 
     const refreshComposerLayout = (): void => {
-      refreshSlashMatches();
+      refreshPromptMenu();
       const workspaceVisible = layoutHeight >= 4 || approvalPending;
       const runtimeVisible = layoutHeight >= 5;
       workspaceText.visible = workspaceVisible;
@@ -769,7 +868,7 @@ export async function createTuiScreen(
         rowsAfterHeaderAndFooter - ruleRows,
       );
       const transcriptRows =
-        slashMatches.length > 0
+        promptMenuItems.length > 0
           ? inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
             ? TRANSCRIPT_MIN_CONTENT_ROWS
             : 0
@@ -800,7 +899,8 @@ export async function createTuiScreen(
       );
       const naturalRows = Math.max(1, measurement?.lineCount ?? input.lineCount);
       const menuRows = Math.min(
-        slashMatches.length,
+        promptMenuItems.length,
+        slashRows.length,
         Math.max(
           0,
           inputAndTranscriptRows - transcriptRows - 1,
@@ -820,12 +920,27 @@ export async function createTuiScreen(
     };
 
     const completeSelectedSlashCommand = (): boolean => {
-      const selected = slashMatches[slashSelectedIndex];
-      if (selected === undefined || !slashMenu.visible) return false;
+      const selected = promptMenuItems[promptMenuSelectedIndex];
+      if (
+        selected?.kind !== 'slash' ||
+        promptMenuMode !== 'slash' ||
+        !slashMenu.visible
+      ) {
+        return false;
+      }
       slashMenuDismissedInput = undefined;
-      input.setText(`/${selected.name} `);
+      input.setText(`/${selected.value} `);
       input.gotoBufferEnd();
       return true;
+    };
+
+    const selectedCommandChoice = (): string | undefined => {
+      const selected = promptMenuItems[promptMenuSelectedIndex];
+      return selected?.kind === 'command' &&
+        promptMenuMode === 'command' &&
+        slashMenu.visible
+        ? selected.value
+        : undefined;
     };
 
     const handleSlashMenuKey = (key: KeyEvent): boolean => {
@@ -833,6 +948,7 @@ export async function createTuiScreen(
         return false;
       }
       if (key.name === 'tab') {
+        if (promptMenuMode === 'command' && slashMenu.visible) return true;
         const source = input.plainText;
         if (!/^\/[^\s/]*$/u.test(source)) return false;
         slashMenuDismissedInput = undefined;
@@ -840,16 +956,16 @@ export async function createTuiScreen(
         completeSelectedSlashCommand();
         return true;
       }
-      if (!slashMenu.visible || slashMatches.length === 0) return false;
+      if (!slashMenu.visible || promptMenuItems.length === 0) return false;
       if (key.name === 'up' || key.name === 'down') {
         const delta = key.name === 'up' ? -1 : 1;
-        slashSelectedIndex =
-          (slashSelectedIndex + delta + slashMatches.length) %
-          slashMatches.length;
+        promptMenuSelectedIndex =
+          (promptMenuSelectedIndex + delta + promptMenuItems.length) %
+          promptMenuItems.length;
         renderSlashRows(slashMenu.height);
         return true;
       }
-      if (key.name === 'escape') {
+      if (key.name === 'escape' && promptMenuMode === 'slash') {
         slashMenuDismissedInput = input.plainText;
         refreshComposerLayout();
         return true;
@@ -857,16 +973,64 @@ export async function createTuiScreen(
       return false;
     };
 
+    const synchronizeSecretInput = (): void => {
+      if (!secretInput || rewritingSecret) return;
+      const rendered = input.plainText;
+      const cursorAfter = input.cursorOffset;
+      const old = secretValue;
+      const mask = '•';
+      let start = cursorAfter;
+      let inserted = '';
+      let removed = 0;
+
+      const firstRaw = [...rendered].findIndex((character) => character !== mask);
+      if (firstRaw >= 0) {
+        let endRaw = firstRaw;
+        while (endRaw < rendered.length && rendered[endRaw] !== mask) endRaw++;
+        start = firstRaw;
+        inserted = rendered.slice(firstRaw, endRaw);
+        removed = Math.max(0, old.length + inserted.length - rendered.length);
+      } else if (rendered.length < old.length) {
+        start = cursorAfter;
+        removed = old.length - rendered.length;
+      } else if (rendered.length > old.length) {
+        const insertedLength = rendered.length - old.length;
+        start = Math.max(0, cursorAfter - insertedLength);
+        inserted = rendered.slice(start, start + insertedLength);
+      } else {
+        return;
+      }
+
+      start = Math.max(0, Math.min(start, old.length));
+      removed = Math.max(0, Math.min(removed, old.length - start));
+      secretValue =
+        old.slice(0, start) + inserted + old.slice(start + removed);
+      rewritingSecret = true;
+      input.setText(mask.repeat(secretValue.length));
+      input.cursorOffset = start + inserted.length;
+      rewritingSecret = false;
+    };
+
     input.onSubmit = () => {
       completeSelectedSlashCommand();
       submitHandler();
     };
     input.onKeyDown = (key) => {
+      if (
+        secretInput &&
+        key.ctrl &&
+        (key.name === 'z' || key.name === 'y')
+      ) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
       if (!handleSlashMenuKey(key)) return;
       key.preventDefault();
       key.stopPropagation();
     };
     input.onContentChange = () => {
+      synchronizeSecretInput();
       if (slashMenuDismissedInput !== input.plainText) {
         slashMenuDismissedInput = undefined;
       }
@@ -888,7 +1052,7 @@ export async function createTuiScreen(
 
     const refreshStatus = (): void => {
       const phase = interaction.phase;
-      contextText.content = formatContextUsage(usage.contextTokens, opts.contextLimit);
+      contextText.content = formatContextUsage(usage.contextTokens, selectedContextLimit);
       const queue =
         steerCount > 0 || followUpCount > 0
           ? ` · steer ${steerCount} · follow-up ${followUpCount}`
@@ -905,7 +1069,9 @@ export async function createTuiScreen(
         refreshComposerLayout();
         return;
       }
-      if (transientStatus !== undefined) {
+      if (commandPrompt !== undefined) {
+        setPromptPlaceholder(commandPrompt);
+      } else if (transientStatus !== undefined) {
         setPromptPlaceholder(transientStatus);
       } else if (phase === 'compacting') {
         setPromptPlaceholder(
@@ -1412,17 +1578,64 @@ export async function createTuiScreen(
           status === undefined ? undefined : sanitizeTerminalText(status);
         refreshStatus();
       },
+      setCommandPrompt(
+        prompt: string | undefined,
+        secret: boolean,
+        choices?: readonly ProviderCommandChoice[],
+      ): void {
+        commandPrompt =
+          prompt === undefined ? undefined : sanitizeTerminalText(prompt);
+        commandChoices = (choices ?? []).map((choice) => ({
+          value: choice.value,
+          label: sanitizeTerminalText(choice.label),
+          ...(choice.description !== undefined && {
+            description: sanitizeTerminalText(choice.description),
+          }),
+        }));
+        secretInput = secret;
+        secretValue = '';
+        rewritingSecret = true;
+        input.clear();
+        rewritingSecret = false;
+        refreshStatus();
+      },
+      setModel(model: ModelRef | undefined, contextLimit?: number): void {
+        selectedModel = model;
+        selectedContextLimit = contextLimit;
+        modelText.content = sanitizeTerminalText(formatModelRef(selectedModel));
+        renderer.setTerminalTitle(
+          sanitizeTerminalTitle(
+            selectedModel === undefined
+              ? 'coda · no model'
+              : `coda · ${selectedModel.model}`,
+          ),
+        );
+        refreshStatus();
+      },
       resolveApproval(): void {
         approvalPending = false;
         refreshStatus();
       },
-      getInput: () => input.plainText,
+      getInput: () =>
+        secretInput
+          ? secretValue
+          : (selectedCommandChoice() ?? input.plainText),
       setInput(text: string): void {
-        input.setText(text);
+        if (secretInput) {
+          secretValue = text;
+          rewritingSecret = true;
+          input.setText('•'.repeat(text.length));
+          rewritingSecret = false;
+        } else {
+          input.setText(text);
+        }
         input.gotoBufferEnd();
       },
       clearInput(): void {
+        secretValue = '';
+        rewritingSecret = true;
         input.clear();
+        rewritingSecret = false;
       },
       focusInput(): void {
         input.focus();
@@ -1450,7 +1663,7 @@ export async function createTuiScreen(
  * 生产入口只负责 native renderer 与视图初始化；交互控制器单独导出供内存终端测试。
  */
 export async function startTui(
-  session: Session,
+  session: CliSession,
   approval: ReplApproval | undefined,
   opts: TuiOptions,
 ): Promise<number> {
@@ -1479,7 +1692,11 @@ export async function startTui(
     // 0.4.5 必须通过 setter 同步 native framebuffer；背景透明与 NO_COLOR 无关。
     // 视图树也逐层使用 alpha=0，避免任何子组件重新画出不透明色块。
     renderer.setBackgroundColor(transparentBackground);
-    renderer.setTerminalTitle(sanitizeTerminalTitle(`coda · ${opts.model.model}`));
+    renderer.setTerminalTitle(
+      sanitizeTerminalTitle(
+        opts.model === undefined ? 'coda · no model' : `coda · ${opts.model.model}`,
+      ),
+    );
     initializingScreen = await createTuiScreen(renderer, {
       ...opts,
       branch,
@@ -1496,14 +1713,19 @@ export async function startTui(
   const screen = initializingScreen;
 
   return runTuiController(session, approval, screen, renderer, {
-    model: opts.model,
     interaction,
+    ...(opts.providerCommands !== undefined && {
+      providerCommands: opts.providerCommands,
+    }),
   });
 }
 
 interface TuiControllerOptions {
-  model: ModelRef;
   interaction: TuiInteractionState;
+  providerCommands?: {
+    registry: ProviderRegistry;
+    runtime: InteractiveSession;
+  };
   /** 内存测试禁用 process signal 接线，避免并行用例互相影响。 */
   installSignalHandlers?: boolean;
 }
@@ -1515,7 +1737,7 @@ type TuiControllerRenderer = Pick<CliRenderer, 'keyInput' | 'idle' | 'destroy'>;
  * 不因换渲染框架而分叉。返回前总是关闭 Session 并恢复 renderer。
  */
 export function runTuiController(
-  session: Session,
+  session: CliSession,
   approval: ReplApproval | undefined,
   screen: TuiScreen,
   renderer: TuiControllerRenderer,
@@ -1539,6 +1761,25 @@ export function runTuiController(
       );
     };
 
+    const providerController =
+      opts.providerCommands === undefined
+        ? undefined
+        : new ProviderCommandController(
+            opts.providerCommands.registry,
+            opts.providerCommands.runtime,
+            {
+              println: (text, tone) => {
+                screen.println(text, tone);
+              },
+              setCommandPrompt: (prompt, secret, choices) => {
+                screen.setCommandPrompt(prompt, secret, choices);
+              },
+              setModel: (model, contextLimit) => {
+                screen.setModel(model, contextLimit);
+              },
+            },
+          );
+
     const runCommand = (command: SlashCommand): void => {
       switch (command.cmd) {
         case 'quit':
@@ -1548,8 +1789,20 @@ export function runTuiController(
           for (const line of HELP_LINES) screen.println(line, 'muted');
           break;
         case 'status':
-          for (const line of formatStatusLines(session.usage(), opts.model.model)) {
+          for (const line of formatStatusLines(
+            session.usage(),
+            formatModelRef(session.currentModel()),
+          )) {
             screen.println(line, 'muted');
+          }
+          break;
+        case 'login':
+        case 'model':
+        case 'logout':
+          if (providerController === undefined) {
+            screen.println(`/${command.cmd} is unavailable in this mode`, 'warning');
+          } else {
+            providerController.begin(command.cmd);
           }
           break;
         case 'queue':
@@ -1569,6 +1822,11 @@ export function runTuiController(
     function submit(meta: boolean): void {
       if (closing || approvalQueue.length > 0) return;
       const raw = screen.getInput();
+      if (providerController?.active === true) {
+        screen.clearInput();
+        void providerController.submit(raw);
+        return;
+      }
       const action = decideEnter(tuiEnterState(opts.interaction.phase), meta, raw);
       if (action.kind === 'none') {
         screen.clearInput();
@@ -1640,6 +1898,14 @@ export function runTuiController(
         return;
       }
 
+      if (key.name === 'escape' && providerController?.active === true) {
+        providerController.back();
+        screen.clearInput();
+        escExit.reset();
+        consume(key);
+        return;
+      }
+
       if (screen.handleSlashMenuKey(key)) {
         consume(key);
         return;
@@ -1651,11 +1917,19 @@ export function runTuiController(
         return;
       }
       if (key.meta && key.name === 'up') {
+        if (providerController?.active === true) {
+          consume(key);
+          return;
+        }
         screen.setInput(history.up(screen.getInput()));
         consume(key);
         return;
       }
       if (key.meta && key.name === 'down') {
+        if (providerController?.active === true) {
+          consume(key);
+          return;
+        }
         screen.setInput(history.down());
         consume(key);
         return;
@@ -1721,6 +1995,12 @@ export function runTuiController(
       approvalQueue.push(event.approvalId);
       screen.render(event);
     });
+    const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
+      (messages) => {
+        if (messages.length > 0) screen.replayTranscript(messages);
+        screen.setUsage(session.usage());
+      },
+    );
 
     const onSignal = (): void => {
       void shutdown(0, true);
@@ -1737,6 +2017,7 @@ export function runTuiController(
       }
       unsubSession();
       unsubApproval?.();
+      unsubAttached?.();
       approvalQueue.length = 0;
     };
 
@@ -1749,6 +2030,7 @@ export function runTuiController(
           session.abort();
           approval?.onAbort();
         }
+        await providerController?.close();
         await session.close();
         await renderer.idle();
       } catch (error) {
@@ -1774,6 +2056,12 @@ export function runTuiController(
 function compactNumber(value: number, suffix: string): string {
   const digits = value < 10 ? 1 : 0;
   return `${value.toFixed(digits).replace(/\.0$/, '')}${suffix}`;
+}
+
+function formatModelRef(model: ModelRef | undefined): string {
+  return model === undefined
+    ? 'no model selected'
+    : `${model.provider}/${model.model}`;
 }
 
 function firstLine(text: string): string {

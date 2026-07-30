@@ -5,6 +5,7 @@ export type {
   CompactionOptions,
   RetryOptions,
   SessionEvent,
+  SessionInteractionState,
   SessionListener,
   SessionOptions,
 } from './session.js';

@@ -1,0 +1,34 @@
+{
+  "openCodeGoMixed": {
+    "data": [
+      {
+        "id": "kimi-k3",
+        "object": "model"
+      },
+      {
+        "id": "minimax-m3",
+        "object": "model"
+      },
+      {
+        "id": "deepseek-v4-flash",
+        "object": "model"
+      },
+      {
+        "id": "unknown-future-model",
+        "object": "model"
+      }
+    ]
+  },
+  "custom": {
+    "data": [
+      {
+        "id": "custom-alpha",
+        "object": "model"
+      },
+      {
+        "id": "org/custom-beta",
+        "object": "model"
+      }
+    ]
+  }
+}

@@ -10,8 +10,11 @@ import { PassThrough } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { expect, test } from 'bun:test';
 import { startHeadless } from '../src/cli/headless.js';
-import { Session } from '../src/session/index.js';
-import { PROTOCOL_VERSION } from '../src/session/index.js';
+import {
+  PROTOCOL_VERSION,
+  type RetryOptions,
+  Session,
+} from '../src/session/index.js';
 import { createFauxStreamFn, createGate } from '../src/providers/faux/index.js';
 import type { FauxScript } from '../src/providers/faux/index.js';
 
@@ -33,7 +36,10 @@ interface HeadlessRun {
   waitForEvent: (pred: (e: Ev) => boolean) => Promise<Ev>;
 }
 
-async function startRun(script: FauxScript): Promise<HeadlessRun> {
+async function startRun(
+  script: FauxScript,
+  retry?: RetryOptions,
+): Promise<HeadlessRun> {
   const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-'));
   const streamFn = createFauxStreamFn(script);
   const session = await Session.create({
@@ -45,6 +51,7 @@ async function startRun(script: FauxScript): Promise<HeadlessRun> {
       systemPrompt: 'test',
       cwd: dir,
     },
+    ...(retry !== undefined && { retry }),
   });
 
   const stdin = new PassThrough();
@@ -163,6 +170,50 @@ test('prompt-running 冲突:non-fatal error,不 throw 到进程(gate 钉死时�
   const end = await run.waitForEvent((e) => e.type === 'agent_end');
   expect(end['reason']).toBe('completed');
 
+  run.send({ type: 'shutdown' });
+  await expect(run.exit).resolves.toBe(0);
+});
+
+test('retry backoff 期间 prompt 仍按 running 冲突处理', async () => {
+  const waiting = createGate();
+  const release = createGate();
+  const run = await startRun(
+    {
+      turns: [
+        {
+          error: {
+            message: 'temporary',
+            details: { kind: 'http', status: 500, retryable: true },
+          },
+        },
+        { events: [{ kind: 'text', text: 'recovered' }] },
+      ],
+    },
+    {
+      maxAttempts: 1,
+      sleep: async () => {
+        waiting.open();
+        await release.opened;
+        return false;
+      },
+    },
+  );
+
+  run.send({ type: 'prompt', text: 'first' });
+  await waiting.opened;
+  run.send({ type: 'prompt', text: 'must not start a second run' });
+  const error = await run.waitForEvent(
+    (event) =>
+      event.type === 'error' &&
+      event['fatal'] === false,
+  );
+  expect(error['message']).toBe('agent is running; use steer or follow_up');
+  expect(run.streamFn.calls).toHaveLength(1);
+
+  release.open();
+  await run.waitForEvent(
+    (event) => event.type === 'agent_end' && event['willRetry'] !== true,
+  );
   run.send({ type: 'shutdown' });
   await expect(run.exit).resolves.toBe(0);
 });

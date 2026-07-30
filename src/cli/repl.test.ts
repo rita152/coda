@@ -12,6 +12,8 @@ import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
 import { createOrderedOutput } from '../shared/index.js';
+import { InteractiveRuntime } from './interactive-runtime.js';
+import { ProviderRegistry } from './provider-registry.js';
 import type { Renderer } from './renderer.js';
 import {
   approvalKeyDecision,
@@ -23,6 +25,8 @@ import {
   formatQueueLines,
   formatStatusLines,
   InputHistory,
+  interactionCanAbort,
+  interactionEnterState,
   parseSlashCommand,
   SLASH_COMMAND_SPECS,
   startRepl,
@@ -45,6 +49,9 @@ describe('parseSlashCommand(docs/09 §3.2)', () => {
     expect(parseSlashCommand('/queue')).toEqual({ cmd: 'queue' });
     expect(parseSlashCommand('/status')).toEqual({ cmd: 'status' });
     expect(parseSlashCommand('/help')).toEqual({ cmd: 'help' });
+    expect(parseSlashCommand('/login')).toEqual({ cmd: 'login' });
+    expect(parseSlashCommand('/model')).toEqual({ cmd: 'model' });
+    expect(parseSlashCommand('/logout')).toEqual({ cmd: 'logout' });
   });
 
   it('/f 与 /followup 携带文本(任何终端的全功能兜底路径)', () => {
@@ -100,12 +107,32 @@ describe('decideEnter:键位表分派(docs/09 §3)', () => {
     expect(decideEnter('running', false, '/f')).toEqual({ kind: 'none' });
   });
 
-  it('斜杠命令仅空闲时生效;运行中 /status 按普通文本 steer', () => {
+  it('普通斜杠命令仅空闲时生效；provider 管理命令运行中仍进入控制器并给出安全提示', () => {
     expect(decideEnter('idle', false, '/status')).toEqual({
       kind: 'command',
       command: { cmd: 'status' },
     });
     expect(decideEnter('running', false, '/status')).toEqual({ kind: 'steer', text: '/status' });
+    for (const cmd of ['login', 'model', 'logout'] as const) {
+      expect(decideEnter('running', false, `/${cmd}`)).toEqual({
+        kind: 'command',
+        command: { cmd },
+      });
+    }
+  });
+
+  it('compacting 的 Enter 走 prompt/命令，但 Esc 仍可 abort', () => {
+    const state = interactionEnterState('compacting');
+    expect(state).toBe('idle');
+    expect(interactionCanAbort('compacting')).toBe(true);
+    expect(decideEnter(state, false, '压缩后继续')).toEqual({
+      kind: 'prompt',
+      text: '压缩后继续',
+    });
+    expect(decideEnter(state, false, '/quit')).toEqual({
+      kind: 'command',
+      command: { cmd: 'quit' },
+    });
   });
 });
 
@@ -301,6 +328,154 @@ describe('REPL 致命输出失败生命周期(docs/09 §1.3/§3)', () => {
       expect(stdin.listenerCount('keypress')).toBe(0);
       expect(unmounts).toBe(1);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('classic REPL 输入错误边界', () => {
+  it('未选择模型时 Alt+Enter 与 /followup 只显示错误，不击穿 keypress listener', async () => {
+    const runtime = new InteractiveRuntime({
+      createSession: async () => {
+        throw new Error('不应创建 Session');
+      },
+    });
+    const stdin = new TestTtyInput();
+    const printed: string[] = [];
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: () => Promise.resolve(),
+      println: (text) => printed.push(text),
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+    const enter = (meta = false): void => {
+      stdin.emit('keypress', undefined, { name: 'return', meta });
+    };
+
+    const exit = startRepl(runtime, renderer, undefined, { stdin });
+    type('/followup first');
+    enter();
+    type('second');
+    enter(true);
+    expect(printed.filter((line) => line.includes('尚未选择模型'))).toHaveLength(2);
+    expect(stdin.listenerCount('keypress')).toBe(1);
+    type('/quit');
+    enter();
+    await expect(exit).resolves.toBe(0);
+  });
+});
+
+describe('classic REPL provider 命令与秘密输入', () => {
+  it('复用 /login 状态机，API key 只以掩码进入 renderer', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'coda-repl-provider-login-'));
+    const registry = new ProviderRegistry({
+      configPath: path.join(dir, 'providers.json'),
+      credentialsPath: path.join(dir, 'credentials.json'),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: 'grok-4.5' },
+              { id: 'minimax-m3' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    });
+    const runtime = new InteractiveRuntime({
+      createSession: async () => {
+        throw new Error('/login 不得创建 Session');
+      },
+    });
+    const stdin = new TestTtyInput();
+    const inputLines: string[] = [];
+    const statuses: Array<string | undefined> = [];
+    const printed: string[] = [];
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: () => Promise.resolve(),
+      setInputLine: (text) => inputLines.push(text),
+      setStatus: (text) => statuses.push(text),
+      println: (text) => printed.push(text),
+    };
+    const emitText = (text: string): void => {
+      for (const character of text) {
+        stdin.emit('keypress', character, { name: character });
+      }
+    };
+    const enter = (): void => {
+      stdin.emit('keypress', undefined, { name: 'return' });
+    };
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (predicate()) return;
+        await Promise.resolve();
+      }
+      throw new Error('provider command did not settle');
+    };
+    const escape = (): void => {
+      stdin.emit('keypress', undefined, { name: 'escape' });
+    };
+    const cancelledSecret = 'sk-cancel-never-render';
+    const secret = 'sk-classic-never-render';
+
+    try {
+      const exit = startRepl(runtime, renderer, undefined, {
+        stdin,
+        providerCommands: { registry, runtime },
+      });
+
+      emitText('/login');
+      enter();
+      await waitFor(() => statuses.at(-1)?.startsWith('选择登录方式') === true);
+      emitText('2');
+      enter();
+      await waitFor(() =>
+        statuses.at(-1)?.startsWith('选择 API key provider') === true,
+      );
+      emitText('1');
+      enter();
+      await waitFor(() => statuses.at(-1)?.startsWith('OpenCode Go API key') === true);
+
+      emitText(cancelledSecret);
+      escape();
+      await waitFor(() =>
+        statuses.at(-1)?.startsWith('选择 API key provider') === true,
+      );
+      expect([...inputLines, ...printed, ...statuses].join('\n')).not.toContain(cancelledSecret);
+      expect(printed).not.toContain('已取消');
+
+      escape();
+      await waitFor(() => statuses.at(-1)?.startsWith('选择登录方式') === true);
+      emitText('2');
+      enter();
+      await waitFor(() =>
+        statuses.at(-1)?.startsWith('选择 API key provider') === true,
+      );
+      emitText('1');
+      enter();
+      await waitFor(() => statuses.at(-1)?.startsWith('OpenCode Go API key') === true);
+
+      emitText(secret);
+      expect(inputLines.at(-1)).toBe('•'.repeat(secret.length));
+      expect([...inputLines, ...printed, ...statuses].join('\n')).not.toContain(secret);
+
+      enter();
+      await waitFor(() =>
+        printed.some((line) => line.includes('已保存 OpenCode Go 的认证配置')),
+      );
+      expect([...inputLines, ...printed, ...statuses].join('\n')).not.toContain(secret);
+
+      emitText('/quit');
+      enter();
+      await expect(exit).resolves.toBe(0);
+      expect(stdin.rawModeChanges).toEqual([true, false]);
+    } finally {
+      await runtime.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

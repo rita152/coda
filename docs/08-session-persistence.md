@@ -64,13 +64,17 @@ export class Session {
   static list(dir?: string): Promise<SessionListItem[]>;   // 读各文件首行 meta + 首条 user 消息作标题
 
   readonly id: string;
-  readonly agent: Agent;             // 暴露给需要直接访问的场景(测试);CLI 正常只用下面的门面
 
   prompt(text: string): Promise<void>;   // 门面:compaction 期间暂存,其余透传 agent.prompt
+  continue(): Promise<void>;             // 仅 idle；恢复残局时经 Session 门面续跑
   steer(text: string): void;             // 透传 agent.steer
   followUp(text: string): void;          // 透传 agent.followUp
   abort(): void;                         // 透传,同时取消退避等待/压缩请求
+  interactionState(): 'idle' | 'running' | 'retrying' | 'compacting';
+  currentModel(): ModelRef;
+  setModel(model: ModelConfig): void;     // 仅 idle；切换下一次采样使用的完整配置
   usage(): SessionUsage;
+  waitForIdle(): Promise<void>;          // 等 Agent 与 detached retry/compaction 链共同稳定
   subscribe(listener: (e: SessionEvent) => void | Promise<void>): () => void;
   close(): Promise<void>;                // flush 落盘 + 关闭文件句柄
 }
@@ -84,6 +88,20 @@ export type SessionEvent =
 ```
 
 `prompt/steer/followUp` 的队列语义、注入点完全由 agent 决定(见 [06](./06-steering-following.md)),session 不复制这套逻辑——唯一的例外是 compaction 进行期间对 `prompt()` 的暂存(见 6.4)。
+
+`interactionState()` 是模型/provider 管理命令的权威门禁。retry backoff 与 compaction 中 Agent
+可能短暂报告 idle，Session 必须继续分别报告 `retrying` / `compacting`；只有四层状态都落到
+`idle` 才允许 `setModel()`。切换同时更新 Agent 与 Session 持有的完整 `ModelConfig`，并重置
+旧模型的 retry/overflow 计数，但绝不清空或重写 transcript。
+
+同理，retry backoff 中 `prompt()` 必须拒绝第二个任务，调用方改用 `steer()` / `followUp()`；
+`waitForIdle()` 必须循环等待可能被续接的 detached op 与其启动的 Agent run，直到
+`interactionState()` 确认回到 `idle`，不能只观察 Agent 的瞬时状态；即使在 detached op
+交接期间关闭 Session，也必须经过同一清理路径复位交互状态。
+
+Session 本身始终要求真实 `ModelConfig`。允许“没有模型”的冷启动是 CLI
+`InteractiveRuntime` 的职责：它在有效的最近显式选择恢复或 `/model` 成功前不调用
+`Session.create/resume`，因此不会产生空 JSONL、占位 `MetaRecord` 或伪造 `ModelRef`。
 
 ## 3. JSONL 存储格式
 
@@ -109,6 +127,11 @@ export interface CompactionRecord {
 }
 export type SessionRecord = MetaRecord | MessageRecord | CompactionRecord;
 ```
+
+`MetaRecord.model` 记录**创建会话时**的模型，是审计元数据而不是可变的当前配置。运行中
+`setModel()` 不回写首行，也不改历史 assistant；每条 `AssistantMessage.model` 已记录实际采样
+所用的完整 `ModelRef`，这是跨模型历史的权威事实。恢复时由 CLI 的当前显式选择提供新的
+`ModelConfig`，旧转录原样注入，后续 assistant 再记录新选择。
 
 补充字段声明(相对本项目既有设计约定的新增,不改任何既有语义):
 
@@ -275,8 +298,11 @@ session.onAgentEvent(e):
 
 ```
 contextTokens > threshold * (model.limits.context - reserveOutput)
-  threshold 默认 0.8;reserveOutput = maxOutputTokens(给下一次输出留位)
+  threshold 默认 0.8;reserveOutput = model.defaults.maxOutputTokens ?? 0
 ```
+
+`limits.output` 是 provider 声明的理论能力上限，不代表 adapter 实际请求的输出预算；只有显式
+配置并传给 adapter 的 `maxOutputTokens` 才能作为预留量，避免两者相等时把阈值错误降为零。
 
 检测点在 `turn_end`。检测为真时**不打断当前 run**——session 的 `shouldStopAfterTurn` 钩子返回 true,让 agent 在 turn 边界体面停下([05](./05-agent-loop.md) 第 2 节:shouldStopAfterTurn 提前停不 poll 队列),然后 session 执行压缩,完毕后 `continue()` 续跑。这样 compaction 永远发生在「无进行中工具、无流式响应」的静止点,不需要任何并发控制。
 
@@ -322,7 +348,7 @@ export interface CompactionOptions {
 压缩执行时 agent 处于 idle(被 shouldStopAfterTurn 停下或 overflow 出错后),但用户不知道也不该关心:
 
 - `steer()` / `followUp()`:直接透传。agent 队列本身就是暂存区,runLoop 起跑前会 poll 一次 steering([05](./05-agent-loop.md) 第 2 节 runLoop 骨架第一行),`continue()` 后自然消费——**不需要 session 再做一层队列**。
-- `prompt()`:agent 空闲时 prompt 会立刻开新 run,与压缩并发——所以 session 门面在 `compacting` 状态下把 prompt 文本暂存,`compaction_end` 后重放(先重放 prompt,若压缩后还有 continue 需求则 prompt 已隐含开跑)。
+- `prompt()`:agent 空闲时 prompt 会立刻开新 run,与压缩并发——所以 session 门面在 `compacting` 状态下把 prompt 文本暂存；`compaction_end` 通知期间门禁仍保持，通知收束后再原子领取暂存输入并重放(先重放 prompt,若压缩后还有 continue 需求则 prompt 已隐含开跑)。
 - `abort()`:取消摘要请求,放弃本次压缩(状态回滚,不写 record),会话保持原样。
 
 ```mermaid
@@ -399,7 +425,10 @@ export interface ModelPricing {   // 每百万 token 美元价
 - [ ] M5:恢复「工具执行中被杀」的会话后 `--continue`,出站请求里悬空 toolCall 已被 transform 补上合成结果(用 faux provider 断言出站 Context,见 [10](./10-testing.md))。
 - [ ] M5:尾行半截 JSON 的文件可正常恢复;中部损坏拒绝加载。
 - [ ] M5:`usage()` 的 cumulative 与逐条 assistant 手工求和一致;恢复后统计不丢。
+- [ ] 无模型的 `InteractiveRuntime` 不调用 create/resume、不产生 Session 文件；首次 `/model` 后才 attach 并重放恢复消息。
+- [ ] `setModel()` 仅 idle 成功；running/retrying/compacting 全部拒绝。切换后旧消息与 meta 逐字不变，新 assistant 记录新 `ModelRef`。
 - [ ] M7:5xx/429/network 错误自动退避重试,attempt 达上限后透传 agent_end;成功 turn 重置计数;429 的 retryAfterMs 被采用;退避期间 abort 立即生效。
+- [ ] retry backoff 拒绝第二个 prompt；`waitForIdle()` 不在 Agent 瞬时 idle 时提前返回，而是等 detached 重试/压缩完全落定；交接期间 `close()` 也会复位交互状态。
 - [ ] M7:构造超阈值会话触发 compaction:agent 在 turn 边界停下、摘要生成、CompactionRecord 落盘、continue 续跑,期间的 prompt 暂存重放、steer 不丢。
 - [ ] M7:overflow 错误走被动压缩;摘要失败降级硬截断;压缩后出站消息数与 token 显著下降且首条为 synthetic summary。
 - [ ] 成本:给定 pricing 与含 cache 字段的 usage,costUSD 与手算一致;无 pricing 时为 undefined。

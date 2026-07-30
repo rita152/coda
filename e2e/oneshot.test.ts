@@ -4,6 +4,9 @@
 // - `coda </dev/null`(非 TTY 空 stdin 且无 -p):不落入 REPL 挂起,stderr 用法提示,exit 2。
 
 import { afterEach, beforeAll, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { CodaProc } from './harness.js';
 import {
   assertSubsequence,
@@ -61,6 +64,27 @@ test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot
   const user = proc.events.find((e) => e.type === 'message_start' && msgRole(e) === 'user');
   expect(msgText(user)).toBe('say it once');
   expect(proc.parseErrors).toEqual([]); // 管道纪律不因 -p 特例松动
+}, T);
+
+test('完整旧式非交互配置不读取损坏的 provider registry', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'coda-e2e-legacy-'));
+  const registryDir = path.join(cwd, '.home', '.coda');
+  mkdirSync(registryDir, { recursive: true });
+  writeFileSync(path.join(registryDir, 'providers.json'), '{broken', 'utf8');
+  const proc = track(
+    startCoda({
+      cwd,
+      script: {
+        turns: [{ events: [{ kind: 'text', text: 'legacy still works' }] }],
+        onExhausted: 'emptyStop',
+      },
+      prompt: 'use explicit faux config',
+    }),
+  );
+
+  expect(await proc.waitForExit()).toBe(0);
+  expect(proc.stderr()).not.toContain('provider 配置文件损坏');
+  expect(proc.parseErrors).toEqual([]);
 }, T);
 
 test('--json -p: agent_end reason error → exit 1 (script-observable)', async () => {

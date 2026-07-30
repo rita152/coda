@@ -5,7 +5,7 @@
 ## 1. 技术基线
 
 - 使用 Bun 1.3.14、`bun.lock`、ESM 和严格 TypeScript；不要引入 CommonJS 写法。项目命令统一经 `bun` / `bun run` 执行。
-- Bun API 是默认运行时接口；普通文件内容 I/O、哈希、子进程与流优先使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Node compatibility 仅限 Bun 暂无等价能力的系统边界：`node:fs` / `node:os` 的目录、元数据、临时目录、符号链接和同步耐久性操作，`node:path`，classic 保底的 readline/raw TTY，以及 `process` 的 cwd、TTY、退出、signal/PGID 控制。eligible 双 TTY（stdin/stdout 均为 TTY 且 `TERM != dumb`）默认由 `@opentui/core` 管理；必须在交互分支动态加载，headless/一次性模式不得初始化 native TUI。初始化失败必须先清理 OpenTUI，API key 已配置时才回退 classic；若缺 key 仅因 eligible TUI 而延迟校验，则关闭 Session、打印 provider 对应提示并退出，不得进入没有配置面的 classic。新增或扩大例外必须同步维护对应设计契约；本项目是 Bun-native，但不宣称零 Node API。
+- Bun API 是默认运行时接口；普通文件内容 I/O、哈希、子进程与流优先使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Node compatibility 仅限 Bun 暂无等价能力的系统边界：`node:fs` / `node:os` 的目录、元数据、临时目录、符号链接和同步耐久性操作，`node:path`，classic 保底的 readline/raw TTY，以及 `process` 的 cwd、TTY、退出、signal/PGID 控制。eligible 双 TTY（stdin/stdout 均为 TTY 且 `TERM != dumb`）默认由 `@opentui/core` 管理；必须在交互分支动态加载，headless/一次性模式不得初始化 native TUI。初始化失败必须先清理 OpenTUI，再回退到同样支持 `/login`、`/model`、`/logout` 的 classic。交互冷启动允许没有 provider/model，且在恢复了有效的用户显式选择或 `/model` 选定模型前不得创建 `Session`；headless/一次性模式仍必须在创建 `Session` 前取得完整 `ModelConfig`。新增或扩大例外必须同步维护对应设计契约；本项目是 Bun-native，但不宣称零 Node API。
 - 相对导入必须写编译后的 `.js` 后缀；纯类型依赖使用 `import type`。
 - 遵守 `strict`、`noUncheckedIndexedAccess`、`verbatimModuleSyntax` 等现有检查；优先用 `unknown` 加收窄，禁止无说明的 `any`、双重断言和规则豁免。
 - 不手改 `dist/`、`node_modules/`、快照或录制 fixture；快照和 fixture 只能通过对应测试/录制流程更新。依赖变更通过 Bun 同步更新 `bun.lock`，禁止提交密钥与 `.env`。

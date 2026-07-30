@@ -23,6 +23,8 @@ import type {
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
+import { InteractiveRuntime } from './interactive-runtime.js';
+import { ProviderRegistry } from './provider-registry.js';
 import {
   approvalDecisionForKey,
   createTuiScreen,
@@ -146,6 +148,10 @@ async function setup(
   height = 30,
   onSubmit: () => void = () => {},
   color = true,
+  modelOptions: {
+    model?: typeof MODEL;
+    contextLimit?: number;
+  } = { model: MODEL, contextLimit: 128_000 },
 ): Promise<{
   screen: TuiScreen;
   flush: () => Promise<void>;
@@ -171,10 +177,12 @@ async function setup(
   const interaction = new TuiInteractionState();
   const screen = await createTuiScreen(testRenderer.renderer, {
     cwd: '/Users/test/work/coda',
-    model: MODEL,
     version: '0.0.1',
     color,
-    contextLimit: 128_000,
+    ...(modelOptions.model !== undefined && { model: modelOptions.model }),
+    ...(modelOptions.contextLimit !== undefined && {
+      contextLimit: modelOptions.contextLimit,
+    }),
     onSubmit,
     interaction,
     treeSitterClient,
@@ -304,13 +312,14 @@ describe('全屏 OpenTUI 布局', () => {
         throw new Error('slash menu or prompt box not found');
       }
       expect(menu.visible).toBe(true);
-      expect(menu.height).toBe(5);
+      expect(menu.height).toBe(8);
       expect(menu.screenY + menu.height).toBe(prompt.screenY);
       expect(view.frame()).toContain('→ /help');
       expect(view.frame()).toContain('/followup <text>');
       expect(view.frame()).not.toContain('/f <text>');
       expect(view.frame()).not.toContain('/q ');
       expect(view.frame()).toContain('Show model, usage, and token status');
+      expect(view.frame()).toContain('Add or update provider API-key authentication');
       const selectedSpans = view.spans().lines[menu.screenY]?.spans.filter(
         (span) => span.text.trim() !== '',
       );
@@ -361,6 +370,54 @@ describe('全屏 OpenTUI 布局', () => {
       view.mockInput.pressTab();
       await view.flush();
       expect(view.screen.getInput()).toBe('/quit ');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('provider 选项复用斜杠命令上拉列表，并用方向键选择', async () => {
+    const view = await setup(100, 24);
+    try {
+      view.screen.focusInput();
+      view.screen.setCommandPrompt('选择登录方式（Esc 退出）', false, [
+        { value: 'OAuth', label: 'OAuth', description: '尚未实现' },
+        {
+          value: 'API key',
+          label: 'API key',
+          description: '使用 provider API key',
+        },
+      ]);
+      await view.flush();
+
+      const menu = view.renderer.root.findDescendantById('coda-slash-menu');
+      const prompt = view.renderer.root.findDescendantById('coda-prompt-box');
+      if (!(menu instanceof BoxRenderable) || !(prompt instanceof BoxRenderable)) {
+        throw new Error('prompt menu or prompt box not found');
+      }
+      expect(menu.visible).toBe(true);
+      expect(menu.height).toBe(2);
+      expect(menu.screenY + menu.height).toBe(prompt.screenY);
+      expect(view.frame()).toContain('→ OAuth');
+      expect(view.frame()).toContain('尚未实现');
+      expect(view.frame()).toContain('API key');
+      expect(view.frame()).not.toContain('1. OAuth');
+      expect(view.frame()).not.toContain('2. API key');
+      expect(view.screen.getInput()).toBe('OAuth');
+
+      view.mockInput.pressArrow('down');
+      await view.flush();
+      expect(view.frame()).toContain('→ API key');
+      expect(view.screen.getInput()).toBe('API key');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('API key');
+
+      await view.mockInput.typeText('oau');
+      await view.flush();
+      expect(menu.height).toBe(1);
+      expect(view.frame()).toContain('→ OAuth');
+      expect(view.frame()).not.toContain('使用 provider API key');
+      expect(view.screen.getInput()).toBe('OAuth');
     } finally {
       await view.destroy();
     }
@@ -892,6 +949,29 @@ describe('全屏 OpenTUI 布局', () => {
       await view.destroy();
     }
   });
+
+  it('秘密输入只在内存缓冲保存，任何 TUI 帧都只显示遮罩', async () => {
+    const view = await setup();
+    const secret = 'sk-never-render-this';
+    try {
+      view.screen.setCommandPrompt('API key（秘密输入）', true);
+      view.screen.focusInput();
+      await view.mockInput.typeText(secret);
+      await view.flush();
+
+      expect(view.screen.getInput()).toBe(secret);
+      expect(view.frame()).not.toContain(secret);
+      expect(view.frame()).toContain('•'.repeat(secret.length));
+
+      view.screen.clearInput();
+      view.screen.setCommandPrompt(undefined, false);
+      await view.flush();
+      expect(view.screen.getInput()).toBe('');
+      expect(view.frame()).not.toContain(secret);
+    } finally {
+      await view.destroy();
+    }
+  });
 });
 
 describe('TUI 安全渲染与转录恢复', () => {
@@ -1225,6 +1305,110 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('冷启动复用 provider 命令状态机；OAuth 安全返回且 API key 全程只显示掩码', async () => {
+    const dir = makeTempDir();
+    const registry = new ProviderRegistry({
+      configPath: path.join(dir, 'providers.json'),
+      credentialsPath: path.join(dir, 'credentials.json'),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: 'kimi-k3' },
+              { id: 'minimax-m3' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    });
+    let createCalls = 0;
+    const runtime = new InteractiveRuntime({
+      createSession: async () => {
+        createCalls++;
+        throw new Error('/login 不得创建 Session');
+      },
+    });
+    const view = await setup(80, 24, () => {}, true, {});
+    view.screen.focusInput();
+    const controller = runTuiController(
+      runtime,
+      undefined,
+      view.screen,
+      view.renderer,
+      {
+        interaction: view.interaction,
+        providerCommands: { registry, runtime },
+        installSignalHandlers: false,
+      },
+    );
+    await view.flush();
+    expect(view.frame()).toContain('no model selected');
+    const waitForFrame = async (text: string): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await Promise.resolve();
+        await view.flush();
+        if (view.frame().includes(text)) return;
+      }
+      throw new Error(`TUI frame did not contain ${text}`);
+    };
+    const submit = async (text: string, expected: string): Promise<void> => {
+      await view.mockInput.typeText(text);
+      view.mockInput.pressEnter();
+      await waitForFrame(expected);
+    };
+
+    await submit('/login', '选择登录方式');
+    expect(view.frame()).toContain('→ OAuth');
+    expect(view.frame()).toContain('API key');
+    expect(view.frame()).not.toContain('1. OAuth');
+    expect(view.frame()).not.toContain('2. API key');
+    view.mockInput.pressEnter();
+    await waitForFrame('OAuth 尚未实现');
+
+    await submit('/login', '选择登录方式');
+    view.mockInput.pressArrow('down');
+    view.mockInput.pressEnter();
+    await waitForFrame('选择 API key provider');
+    expect(view.frame()).toContain('→ OpenCode Go');
+    expect(view.frame()).toContain('Custom');
+    view.mockInput.pressEscape();
+    await waitForFrame('选择登录方式');
+    expect(view.frame()).toContain('→ OAuth');
+    expect(view.frame()).not.toContain('已取消');
+
+    view.mockInput.pressArrow('down');
+    view.mockInput.pressEnter();
+    await waitForFrame('选择 API key provider');
+    view.mockInput.pressEnter();
+    await waitForFrame('OpenCode Go API key');
+    const backedOutSecret = 'sk-tui-back-never-render';
+    await view.mockInput.typeText(backedOutSecret);
+    view.mockInput.pressEscape();
+    await waitForFrame('选择 API key provider');
+    expect(view.frame()).not.toContain(backedOutSecret);
+    expect(view.frame()).not.toContain('已取消');
+
+    view.mockInput.pressEnter();
+    await waitForFrame('OpenCode Go API key');
+    const secret = 'sk-tui-controller-never-render';
+    await view.mockInput.typeText(secret);
+    await view.flush();
+    expect(view.screen.getInput()).toBe(secret);
+    expect(view.frame()).not.toContain(secret);
+    expect(view.frame()).toContain('•'.repeat(secret.length));
+
+    view.mockInput.pressEnter();
+    await waitForFrame('已保存 OpenCode Go 的认证配置');
+    expect(view.frame()).not.toContain(secret);
+    expect(createCalls).toBe(0);
+    expect(runtime.currentModel()).toBeUndefined();
+
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
   it('真实 PageUp/PageDown 按键滚动转录，消费事件且不夺走输入焦点', async () => {
     const session = await Session.create({
       dir: makeTempDir(),
@@ -1247,7 +1431,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        model: MODEL,
         interaction: view.interaction,
         installSignalHandlers: false,
       },
@@ -1338,7 +1521,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        model: MODEL,
         interaction: view.interaction,
         installSignalHandlers: false,
       },
@@ -1435,7 +1617,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        model: MODEL,
         interaction: view.interaction,
         installSignalHandlers: false,
       },
@@ -1530,7 +1711,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        model: MODEL,
         interaction: view.interaction,
         installSignalHandlers: false,
       },

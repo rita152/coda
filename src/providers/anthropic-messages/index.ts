@@ -75,19 +75,29 @@ function consumeAnthropicStreamForTest(
 const clientCache = new Map<string, Anthropic>();
 
 function getClient(model: ModelConfig): Anthropic {
+  const baseURL = anthropicSdkBaseURL(model.baseURL);
   const key = JSON.stringify([
-    model.baseURL ?? null,
+    baseURL ?? null,
     model.apiKey ?? null,
     Object.entries(model.headers ?? {}).sort(),
   ]);
   let client = clientCache.get(key);
   if (!client) {
     client = new Anthropic({
-      baseURL: model.baseURL,
+      baseURL,
       apiKey: model.apiKey ?? 'missing-api-key',   // 本地/网关端点也要占位值,SDK 缺 key 直接 throw
       ...(model.headers && { defaultHeaders: model.headers }),
     });
     clientCache.set(key, client);
   }
   return client;
+}
+
+/**
+ * Coda 的 provider base URL 与 OpenAI 风格一致，指向版本根（通常以 /v1
+ * 结尾）；Anthropic SDK 自己会追加 /v1/messages，故只在该精确尾段存在时剥离。
+ * 这让 OpenCode Go 的固定 .../v1 根可由两种 adapter 共用而不产生 /v1/v1。
+ */
+export function anthropicSdkBaseURL(baseURL: string | undefined): string | undefined {
+  return baseURL?.replace(/\/v1\/?$/u, '');
 }

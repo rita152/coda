@@ -540,6 +540,76 @@ reasoning summary/content 分别成为现有 `ReasoningPart`。output item 完�
 [Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与
 [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
 
+## 12. CLI model directory 与按 `ModelRef.api` 动态分发
+
+provider registry 属于 CLI composition root，不是第四个 wire adapter。它把
+`provider id / model id / api / baseURL / credential` 解析成完整 `ModelConfig`；唯一的生产
+dispatcher 每次调用都只看当次 `model.ref.api`:
+
+```ts
+switch (model.ref.api) {
+  case 'openai-chat':         return streamOpenAIChat(model, context, options);
+  case 'openai-responses':    return streamOpenAIResponses(model, context, options);
+  case 'anthropic-messages':  return streamAnthropicMessages(model, context, options);
+}
+```
+
+不能按 `ModelRef.provider` 分发。一个 provider 可以同时承载多种 wire 协议，provider/model
+切换也不能把上一次 adapter 缓存在 Session 外。未知 `api` 必须返回符合 `StreamFn` 铁律的流内
+error，而不是 throw 或猜测协议。
+
+### 12.1 OpenCode Go 是显式混合协议 provider
+
+OpenCode Go 固定为:
+
+```ts
+{
+  providerId: 'opencode-go',
+  baseURL: 'https://opencode.ai/zen/go/v1'
+}
+```
+
+其官方 endpoint 目录同时提供 OpenAI-compatible Chat Completions 与 Anthropic Messages。
+registry 维护以下显式表；`api` 以官方 endpoint 目录为事实源，limits 以 OpenCode 自身使用的
+models.dev provider 目录为事实源，不能从模型名、厂商前缀或 `/models` 响应猜测:
+
+| model id | `ModelRef.api` | context | max output |
+|---|---|---:|---:|
+| `grok-4.5` | `openai-chat` | 500,000 | 500,000 |
+| `glm-5.2` | `openai-chat` | 1,000,000 | 131,072 |
+| `glm-5.1` | `openai-chat` | 202,752 | 32,768 |
+| `kimi-k3` | `openai-chat` | 1,048,576 | 131,072 |
+| `kimi-k2.7-code` | `openai-chat` | 262,144 | 262,144 |
+| `kimi-k2.6` | `openai-chat` | 262,144 | 65,536 |
+| `deepseek-v4-pro` | `openai-chat` | 1,000,000 | 384,000 |
+| `deepseek-v4-flash` | `openai-chat` | 1,000,000 | 384,000 |
+| `mimo-v2.5` | `openai-chat` | 1,000,000 | 128,000 |
+| `mimo-v2.5-pro` | `openai-chat` | 1,048,576 | 128,000 |
+| `minimax-m3` | `anthropic-messages` | 1,000,000 | 131,072 |
+| `minimax-m2.7` | `anthropic-messages` | 204,800 | 131,072 |
+| `minimax-m2.5` | `anthropic-messages` | 204,800 | 65,536 |
+| `qwen3.7-max` | `anthropic-messages` | 1,000,000 | 65,536 |
+| `qwen3.7-plus` | `anthropic-messages` | 1,000,000 | 65,536 |
+| `qwen3.6-plus` | `anthropic-messages` | 1,000,000 | 65,536 |
+| `hy3` | `openai-chat` | 256,000 | 64,000 |
+
+保存 key 后 GET `/models`，对响应的标准 `{data:[{id}]}` 去重，再与上表求交集作为可选模型。
+OpenCode Go 当前的该 endpoint 只给标准 id 元数据，因此完整 `ModelConfig.limits` 从显式表复制；
+实时返回但不在表内的 id 只进入 ignored 列表，表内但实时未返回的 id 也不可选。更新表必须依据
+[OpenCode Go 官方 endpoint 目录](https://opencode.ai/docs/go#endpoints)和 models.dev 的
+`opencode-go` 目录，并同步更新生成式离线 fixture，禁止只改测试期望。
+
+OpenCode 的 Anthropic endpoint 已包含 `/v1`。`ModelConfig.baseURL` 保留原值供 registry 与日志
+定位；Anthropic SDK adapter 构造 client 时只剥掉**末尾恰好一个** `/v1`，避免 SDK 再追加
+`/v1/messages` 形成 `/v1/v1/messages`。其他路径不做广义裁剪。
+
+### 12.2 Custom provider
+
+Custom provider 在登录时绑定一个固定 `api`，且只能是
+`openai-chat | openai-responses | anthropic-messages`。`/models` 返回的每个合法 id 都带该
+固定 api 进入缓存；切换协议等价于 endpoint 语义变化，旧缓存必须清空后重新发现。Custom 的
+provider name 只负责形成稳定、大小写不敏感的 id，不参与 wire 分发。
+
 ## 相关文档
 
 - [03 · 内部协议](./03-internal-protocol.md) —— 本文所有出入类型(ProviderEvent、EventStream、消息模型)的定义

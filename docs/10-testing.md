@@ -185,6 +185,23 @@ HTTP 401/429/500、`Retry-After`、factory reject、原生迭代中断与“干�
 `include:['reasoning.encrypted_content']`，并明确断言请求对象不存在 `previous_response_id`。
 这条断言保证 fixture replay、恢复与 retry 始终由本地 transcript 驱动。
 
+### 4.5 Provider models 离线 fixture
+
+`src/cli/__fixtures__/provider-models.json` 由
+`scripts/generate-provider-model-fixtures.ts` 确定性生成:
+
+```bash
+bun run fixtures:provider-models
+```
+
+fixture 同时包含 OpenCode Go 的 `openai-chat` 已知 id（含 `deepseek-v4-flash`）、
+`anthropic-messages` 已知 id、实时目录中的未知 id，以及 Custom 的标准 model ids。
+`ProviderRegistry` 测试注入内存 `fetch` 返回该 fixture，CI 不访问 OpenCode、models.dev 或任何
+custom endpoint。测试必须断言已知 id 的显式协议与 limits、未知 id 被忽略且不可 resolve、
+`/models` URL 与 OpenAI bearer / Anthropic `x-api-key` headers，并确认 `/model` 把 context limit
+传给 footer、成功切换不再追加“已选择 …”消息；Custom 无可信元数据时仍不生成 limits。fixture
+只能经生成脚本更新，不能手改以掩盖 mapping 漂移。
+
 ## 5. loop 集成测试(L4):steering / follow-up / abort 的确定性方法
 
 全部用 faux provider + 测试工具(`ToolDefinition` 的极简实现,execute 可挂 gate)。事件序列断言用「归一化快照」:收集 AgentEvent 流,剥掉 timestamp/id/usage 后 snapshot 事件 type 序列——gemini-cli 的工具状态机思路,状态迁移序列本身就是规格。
@@ -265,7 +282,24 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 6. sanitizer 纯函数注入 CSI/OSC/DCS/C0/C1；live user/assistant/tool/plan/approval/error 路径分别注入 OSC,断言帧中不存在 ESC/BEL。terminal title 额外折叠 tab/newline 并移除 OSC；多 text/reasoning part 在 streaming 与 final 两条路径保持相同分块。
 7. 恢复转录断言 tool call 参数生成原摘要、plan tool result 恢复最新步骤、plan error 可见,且畸形 plan details 回退为普通工具结果。
 8. 以真实 `Session` + faux stream 驱动 TUI controller,通过 mock input 的真实 ANSI PageUp/PageDown 序列验证按键被消费、转录滚动且输入焦点/内容不丢；同时覆盖 retry backoff 的 Enter=steer、Esc=cancel,以及审批时非空 draft 下持久键位先可见、只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。compaction 在本文件用 SessionEvent 投影 + 纯键位决策覆盖；真实摘要 gate、暂存 prompt 与 abort 生命周期由 session 层测试负责,不得把它表述成 controller 集成覆盖。
-9. CLI 配置纯函数用与生产相同的 eligibility 判定钉死缺 key 策略：只有无 prompt 的双 TTY、非 `TERM=dumb` 启动可延迟校验；headless、一次性、管道与 classic 路径仍 fail-fast；空白 flag/env/file key 不得遮蔽低优先级有效来源。
+9. CLI 配置纯函数钉死“无硬编码默认模型”：TTY 交互无 key/model 可进入未选择状态，headless、
+   一次性与管道在 Session 创建前 fail-fast；空白 flag/env/file key 不得遮蔽低优先级有效来源。
+10. `ProviderCommandController` 以 fake view + 离线 registry 覆盖 OAuth 占位、OpenCode 混合协议、
+    Custom 固定协议选项/多名称更新、刷新失败保留配置、`/model` 与 `/logout`、运行中门禁；
+    gate 还要覆盖退出取消在途 fetch、view 回调重入 close，以及两个 registry 中旧 refresh
+    迟到时不能越过 revision CAS。
+    fake view 还要断言每个枚举步骤输出结构化 `value/label/description`，不由 controller 打印
+    UI 专属编号。TUI/classic 都只接这一个控制器：TUI 用 TestRenderer 断言 `/login` 后 OAuth /
+    API key 复用 slash command 的上拉候选层、没有编号、`↑/↓` 改变当前项且 `Enter` 确认；
+    classic 用真实 raw-keypress harness 断言编号/名称兼容输入。两边还要断言 `Esc` 从 secret →
+    provider → OAuth/API key 逐级静默返回、根步骤静默退出，且 API key 永不进入 renderer
+    frame/动态行。
+11. `InteractiveRuntime` + 真实 faux Session 覆盖零模型不 create、首次选择才 create/resume、同一
+    Session 内跨 provider/model 切换、meta/历史不改写、assistant 保留实际 `ModelRef`、失效选择
+    不恢复，以及 running/retrying/compacting 拒绝切换。创建/关闭用 gate 固定 single-flight
+    时序，并验证 attach listener 内重入 close 不自锁。
+12. provider dispatcher 用 adapter identity 注入覆盖三个 `ModelRef.api`，确保选择仅由 api 决定；
+    未知 api 仍返回合法 start → error 流，Anthropic baseURL 的末尾 `/v1` 归一化另有回归。
 
 Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlighting；销毁前等待 visual idle，再按 renderer → SyntaxStyle/highlighter 顺序清理，禁止用真实 timeout 猜异步高亮时机。真实人工终端仍保留一条冒烟:alternate screen 进入/退出、resize、长输出滚动与 raw mode 恢复。
 
@@ -306,6 +340,7 @@ harness:
 - [ ] M1:L1 全绿;faux provider 通过「事件语法自检」用例集(每种 FauxTurn 形态产出的事件序列合法、铁律成立)。
 - [ ] M2:§4.2 全部 11 个 fixture 入库且断言通过;两个错误路径单测(reject 不外抛、abort 映射)通过;`record-fixture.ts` 可用。
 - [ ] OpenAI Responses:§4.4 九个生成式 fixture、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。
+- [ ] Provider 登录/模型目录:§4.5 生成式 fixture、OAuth 占位、OpenCode 混合 mapping、多个 Custom、刷新失败、恢复/切换/logout 与 TUI/classic 密钥不泄漏回归全部通过。
 - [ ] M3:工具矩阵(§6)全绿,macOS 与 Linux 双平台;bash kill tree 用例验证无孤儿进程。
 - [ ] M4:§5 用例 1–8 全绿,steering/follow-up/abort/transform 的断言全部基于 `calls` 与事件序列,无一处依赖真实时间。
 - [ ] M5:session 持久化集成测试、OpenTUI 顶部起排/固定 footer/resize 与 Enter/Shift+Enter 回归、共享纯键位逻辑测试，以及 headless e2e 用例 1–5 全绿。

@@ -148,8 +148,9 @@ export async function startHeadless(
   const dispatch = (cmd: CliCommand): void => {
     switch (cmd.type) {
       case 'prompt': {
-        // running 时不 throw 到进程:输出 non-fatal error 事件(docs/09 §6.2 映射表)
-        if (session.agent.state === 'running') {
+        // running/retrying 时不启动第二个任务；compacting 仍由 Session 暂存 prompt。
+        const state = session.interactionState();
+        if (state === 'running' || state === 'retrying') {
           writeObserved({ type: 'error', fatal: false, message: 'agent is running; use steer or follow_up' });
           return;
         }

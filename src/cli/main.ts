@@ -5,15 +5,11 @@
 // 把事件翻译成像素;不持有会话状态副本。
 
 import packageJson from '../../package.json';
-import type { StreamFn } from '../protocol/index.js';
+import type { ModelConfig } from '../protocol/index.js';
 import { ApprovalBroker } from '../agent/index.js';
 import type { AgentConfig } from '../agent/index.js';
 import type { ToolDefinition } from '../tools/types.js';
 import { createCodingTools } from '../tools/index.js';
-import { streamOpenAIChat } from '../providers/openai-chat/index.js';
-import { streamOpenAIResponses } from '../providers/openai-responses/index.js';
-import { streamAnthropicMessages } from '../providers/anthropic-messages/index.js';
-import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import type { SessionEvent, SessionOptions } from '../session/index.js';
 import { Session } from '../session/index.js';
@@ -27,8 +23,12 @@ import {
   readConfigFile,
   resolveConfig,
 } from './config.js';
-import type { CliFlags, CliProvider } from './config.js';
+import type { CliFlags } from './config.js';
 import { startHeadless } from './headless.js';
+import { InteractiveRuntime } from './interactive-runtime.js';
+import type { CliSession } from './interactive-runtime.js';
+import { ProviderRegistry } from './provider-registry.js';
+import { createProviderStreamFn } from './provider-stream.js';
 import { createRenderer } from './renderer.js';
 import { startRepl } from './repl.js';
 import { pickSessionInteractive } from './resume-picker.js';
@@ -42,26 +42,8 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  // 缺 key 是全屏 TUI 的合法启动状态：未来由 TUI 配置面补齐；当前只移除入口门禁。
-  // 同一个判定也驱动后面的实际路由，禁止配置策略与前端选择各写一份近似条件。
-  const tuiEligible = isFullScreenTuiEligible(flags, {
-    stdinIsTTY: process.stdin.isTTY === true,
-    stdoutIsTTY: process.stdout.isTTY === true,
-    term: Bun.env.TERM,
-  });
-
   // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
   void cleanupTruncated();
-
-  let resolved;
-  try {
-    resolved = resolveConfig(flags, Bun.env, readConfigFile(), {
-      allowMissingApiKey: tuiEligible,
-    });
-  } catch (err) {
-    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
-    return 2;
-  }
 
   // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §8)。
   // 读空(coda </dev/null 且无 -p):交互 REPL 需要 TTY,进 startRepl 只会无限挂起——
@@ -75,8 +57,61 @@ async function main(): Promise<number> {
     flags.prompt = text;
   }
 
+  const interactiveMode =
+    !flags.json &&
+    flags.prompt === undefined &&
+    process.stdin.isTTY === true;
+  const tuiEligible = isFullScreenTuiEligible(flags, {
+    stdinIsTTY: process.stdin.isTTY === true,
+    stdoutIsTTY: process.stdout.isTTY === true,
+    term: Bun.env.TERM,
+  });
+
+  let resolved;
+  let registry: ProviderRegistry | undefined;
+  try {
+    resolved = resolveConfig(flags, Bun.env, readConfigFile(), {
+      allowMissingApiKey: interactiveMode,
+    });
+    if (interactiveMode || resolved.modelConfig === undefined) {
+      registry = new ProviderRegistry();
+    }
+  } catch (err) {
+    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+
+  const legacyMissingKey = getMissingApiKeyMessage(resolved);
+  let initialModel: ModelConfig | undefined;
+  if (resolved.modelConfig !== undefined) {
+    // 旧式显式 model 配置若缺 key，交互面退回未选择状态；绝不拿占位配置创建 Session。
+    initialModel =
+      legacyMissingKey === undefined ? resolved.modelConfig : undefined;
+  } else {
+    initialModel = registry?.resolveSelectedModel();
+  }
+  if (initialModel === undefined && !interactiveMode) {
+    console.error(
+      `[coda] ${
+        legacyMissingKey ??
+        '尚未选择模型；请先在交互终端运行 /login 配置 API key，再运行 /model'
+      }`,
+    );
+    return 2;
+  }
+
   const cwd = flags.cwd ?? process.cwd();
-  const streamFn = await makeStreamFn(resolved.provider, resolved.fauxScript);
+  let fauxScript: FauxScript | undefined;
+  try {
+    fauxScript =
+      resolved.provider === 'faux'
+        ? await readFauxScript(resolved.fauxScript)
+        : undefined;
+  } catch (err) {
+    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+  const streamFn = createProviderStreamFn(fauxScript);
   const tools = createCodingTools();
 
   // 审批模式默认(docs/09 §6.5 修订):交互 TUI/classic → interactive;headless(--json)与 -p
@@ -95,7 +130,7 @@ async function main(): Promise<number> {
   // createApprovalPolicy;deny 直接静态 beforeToolCall(block edit/execute,不建 broker)。
   // broker 的 approval_request 不经 agent Emitter,由这里的 listeners 旁路通道送达
   // renderer / headless / repl;requestAbort 晚绑定 session(policy 先于 session 创建)。
-  const sessionRef: { current?: Session } = {};
+  const sessionRef: { current?: { abort(): void } } = {};
   const approvalListeners = new Set<(e: SessionEvent) => void>();
   let beforeToolCall: AgentConfig['beforeToolCall'];
   let approval:
@@ -132,33 +167,52 @@ async function main(): Promise<number> {
     beforeToolCall = createDenyHook(tools);
   }
 
-  const sessionOptions: SessionOptions = {
+  // 恢复目标可在没有模型时先选定，但真正 load/create 必须等到已有有效 ModelConfig。
+  let resumeId: string | undefined;
+  if (flags.continue_ || flags.resume !== undefined) {
+    resumeId = await resolveSessionId(flags, flags.sessionDir);
+    if (resumeId === undefined) {
+      console.error('[coda] no session to resume');
+      return 2;
+    }
+  }
+  const resumed = resumeId !== undefined;
+  const sessionOptions = (model: ModelConfig): SessionOptions => ({
     agentConfig: {
       streamFn,
-      model: resolved.modelConfig,
+      model,
       tools,
       cwd,
       systemPrompt: () => buildSystemPrompt(cwd),
       ...(beforeToolCall !== undefined && { beforeToolCall }),
     },
     ...(flags.sessionDir !== undefined && { dir: flags.sessionDir }),
-  };
+  });
+  const createSession = (model: ModelConfig): Promise<Session> =>
+    resumeId === undefined
+      ? Session.create(sessionOptions(model))
+      : Session.resume(resumeId, sessionOptions(model));
 
-  // 会话选择:--continue 恢复最近一个;--resume [id] 指定或列表选择;否则新会话
-  let session: Session;
-  let resumed = false;
-  if (flags.continue_ || flags.resume !== undefined) {
-    const id = await resolveSessionId(flags, sessionOptions.dir);
-    if (id === undefined) {
-      console.error('[coda] no session to resume');
-      return 2;
+  let interactiveRuntime: InteractiveRuntime | undefined;
+  let concreteSession: Session | undefined;
+  let session: CliSession;
+  try {
+    if (interactiveMode) {
+      interactiveRuntime = new InteractiveRuntime({
+        ...(initialModel !== undefined && { initialModel }),
+        createSession,
+      });
+      await interactiveRuntime.initialize();
+      session = interactiveRuntime;
+    } else {
+      concreteSession = await createSession(initialModel as ModelConfig);
+      session = concreteSession;
     }
-    session = await Session.resume(id, sessionOptions);
-    resumed = true;
-  } else {
-    session = await Session.create(sessionOptions);
+  } catch (err) {
+    console.error(`[coda] session initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
   }
-  sessionRef.current = session; // 审批 abort 决策的晚绑定目标(policy 的 requestAbort)
+  sessionRef.current = session;
 
   // 默认交互面:双 TTY 且终端具备全屏能力时懒加载 OpenTUI。这里必须早于 stdout
   // FileSink/legacy renderer 的创建——两套渲染器不能同时拥有 raw stdin/stdout。
@@ -169,26 +223,23 @@ async function main(): Promise<number> {
       const { startTui } = await import('./tui.js');
       return await startTui(session, approval, {
         cwd,
-        model: resolved.modelConfig.ref,
+        ...(session.currentModel() !== undefined && {
+          model: session.currentModel(),
+        }),
         version: packageJson.version,
         color: !flags.noColor && Bun.env.NO_COLOR === undefined,
-        ...(resolved.modelConfig.limits?.context !== undefined && {
-          contextLimit: resolved.modelConfig.limits.context,
+        ...(initialModel?.limits?.context !== undefined && {
+          contextLimit: initialModel.limits.context,
         }),
         resumed,
+        ...(interactiveRuntime !== undefined && registry !== undefined && {
+          providerCommands: {
+            registry,
+            runtime: interactiveRuntime,
+          },
+        }),
       });
     } catch (err) {
-      const missingApiKey = getMissingApiKeyMessage(resolved);
-      if (missingApiKey !== undefined) {
-        console.error(
-          `[coda] full-screen TUI unavailable: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        console.error(`[coda] ${missingApiKey}`);
-        await session.close();
-        return 2;
-      }
       console.error(
         `[coda] full-screen TUI unavailable, using classic mode: ${
           err instanceof Error ? err.message : String(err)
@@ -210,7 +261,7 @@ async function main(): Promise<number> {
 
   if (flags.json) {
     // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动退出
-    return startHeadless(session, {
+    return startHeadless(concreteSession as Session, {
       stdin: process.stdin,
       stdout,
       ...(flags.prompt !== undefined && { initialPrompt: flags.prompt }),
@@ -247,7 +298,7 @@ async function main(): Promise<number> {
     // stdout 已失败却无人观察、任务永久悬在 broker.request()。
     renderer.drain().catch(() => {});
   });
-  if (resumed) {
+  if (resumed && session.messages.length > 0) {
     renderer.replayTranscript(session.messages);
     await renderer.drain();
   }
@@ -279,27 +330,24 @@ async function main(): Promise<number> {
 
   const exitCode = await startRepl(session, renderer, approval, {
     fatalSignal: output.failureSignal,
+    ...(interactiveRuntime !== undefined && registry !== undefined && {
+      providerCommands: {
+        registry,
+        runtime: interactiveRuntime,
+      },
+    }),
   });
   if (!output.failureSignal.aborted) await renderer.drain();
   return exitCode;
 }
 
-async function makeStreamFn(
-  provider: CliProvider,
-  fauxScriptPath?: string,
-): Promise<StreamFn> {
-  if (provider === 'faux') {
-    const script: FauxScript =
-      fauxScriptPath !== undefined
-        ? ((await Bun.file(fauxScriptPath).json()) as FauxScript)
-        : { turns: [], onExhausted: 'emptyStop' };
-    script.onExhausted = script.onExhausted ?? 'emptyStop';
-    return createFauxStreamFn(script);
-  }
-  // 新增 provider = 新增 adapter 分发项(docs/04 §8:CLI 只注册 ModelRef 与 StreamFn)
-  if (provider === 'anthropic-messages') return streamAnthropicMessages;
-  if (provider === 'openai-responses') return streamOpenAIResponses;
-  return streamOpenAIChat;
+async function readFauxScript(path: string | undefined): Promise<FauxScript> {
+  const script: FauxScript =
+    path === undefined
+      ? { turns: [], onExhausted: 'emptyStop' }
+      : ((await Bun.file(path).json()) as FauxScript);
+  script.onExhausted = script.onExhausted ?? 'emptyStop';
+  return script;
 }
 
 /**

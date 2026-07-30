@@ -243,7 +243,7 @@ describe('kill → resume(docs/08 §9 M5 验收 1/4)', () => {
 // ---------- 3. 恢复「工具执行中被杀」+ continue(核心验收) ----------
 
 describe('恢复「工具执行中被杀」的会话(docs/08 §9 M5 第 2 条——核心验收)', () => {
-  it('resume → agent.continue():出站 Context 中悬空 toolCall 已被 transform 补合成中断结果', async () => {
+  it('resume → session.continue():出站 Context 中悬空 toolCall 已被 transform 补合成中断结果', async () => {
     // 手工构造现场:meta + user + assistant(tool_calls) 半途,tool_result 缺失
     const id = '20260101-000000-dead';
     const meta: MetaRecord = {
@@ -267,7 +267,7 @@ describe('恢复「工具执行中被杀」的会话(docs/08 §9 M5 第 2 条—
     const r = await resumeSession(id, { turns: [{ events: [{ kind: 'text', text: '接着做' }] }] });
     expect(r.session.usage().turns).toBe(1);                      // 半途 assistant 的 usage 已 seed
 
-    await r.session.agent.continue();
+    await r.session.continue();
     const start = r.events.find((e) => e.type === 'agent_start');
     expect(start?.type === 'agent_start' && start.reason).toBe('continue');
 

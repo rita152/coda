@@ -1,5 +1,6 @@
-// 配置解析(规格见 docs/09-cli.md §7):flags > 环境变量 > ~/.coda/config.json > 内置默认,
-// 逐字段独立合并。全屏 TUI 可把缺 key 保留为待配置状态；其他启动面仍给可执行提示。
+// 旧式 CLI 配置解析(规格见 docs/09-cli.md §7):flags > 环境变量 > ~/.coda/config.json,
+// 逐字段独立合并。这里不再提供任何默认模型；交互启动的主路径由 provider registry
+// 恢复最近一次用户显式选择，或保持未选择状态等待 /model。
 // 密钥永远不进会话 JSONL、不出现在任何 SessionEvent(ModelConfig 不随事件外发)。
 
 import { readFileSync } from 'node:fs';
@@ -107,13 +108,13 @@ export function parseFlags(argv: string[]): CliFlags {
 }
 
 export interface ResolvedConfig {
-  modelConfig: ModelConfig;
-  provider: CliProvider;
+  modelConfig?: ModelConfig;
+  provider?: CliProvider;
   fauxScript?: string;
 }
 
 export interface ResolveConfigOptions {
-  /** 只供 eligible 全屏 TUI 使用；其他启动面仍在创建 Session 前拒绝缺 key。 */
+  /** 只供 TTY 交互模式使用；TUI/classic 都可在无模型状态下通过 /login 配置。 */
   allowMissingApiKey?: boolean;
 }
 
@@ -145,7 +146,11 @@ export function isFullScreenTuiEligible(
 
 /** 缺 key 的可执行提示；undefined 表示当前 provider 已可启动请求。 */
 export function getMissingApiKeyMessage(config: ResolvedConfig): string | undefined {
-  if (config.provider === 'faux' || normalizeApiKey(config.modelConfig.apiKey) !== undefined) {
+  if (
+    config.modelConfig === undefined ||
+    config.provider === 'faux' ||
+    normalizeApiKey(config.modelConfig.apiKey) !== undefined
+  ) {
     return undefined;
   }
   const keyVar =
@@ -192,8 +197,13 @@ export function resolveConfig(
   }
 
   const isAnthropic = provider === 'anthropic-messages';
-  const model =
-    flags.model ?? env['CODA_MODEL'] ?? file.model ?? (isAnthropic ? 'claude-opus-5' : 'gpt-5.2');
+  const model = flags.model ?? env['CODA_MODEL'] ?? file.model;
+  if (model === undefined || model.trim() === '') {
+    if (normalizeApiKey(file.apiKey) !== undefined) {
+      console.error('[coda] warning: ~/.coda/config.json 中存在明文 apiKey,建议改用 apiKeyEnv');
+    }
+    return flags.provider === undefined ? {} : { provider };
+  }
   const baseURL = flags.baseUrl ?? env['CODA_BASE_URL'] ?? file.baseURL ?? undefined;
   // anthropic 侧优先接受 ANTHROPIC_API_KEY;两 provider 都尊重 CODA_API_KEY 与 config 文件
   const apiKeyEnv = file.apiKeyEnv?.trim();

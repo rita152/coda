@@ -53,6 +53,7 @@ export type SessionEvent =
   | { type: 'usage_update'; usage: SessionUsage };
 
 export type SessionListener = (e: SessionEvent) => void | Promise<void>;
+export type SessionInteractionState = 'idle' | 'running' | 'retrying' | 'compacting';
 
 /** session 安装到 Agent 的钩子宿主:create/resume 先建 Agent(钩子委托到这里),再由 Session 构造时回填。 */
 interface HookHost {
@@ -82,11 +83,10 @@ interface SessionInit {
 
 export class Session {
   readonly id: string;
-  readonly agent: Agent;             // 暴露给需要直接访问的场景(测试);CLI 正常只用门面
-
+  readonly #agent: Agent;
   readonly #store: SessionStore;
   readonly #usage: UsageTracker;
-  readonly #model: ModelConfig;
+  #model: ModelConfig;
   readonly #streamFn: StreamFn;
   readonly #retry: ResolvedRetryOptions;
   readonly #compaction: ResolvedCompactionOptions;
@@ -110,10 +110,11 @@ export class Session {
   // ---- detached op 链(退避睡眠 / 摘要 + 续跑)----
   #opChain: Promise<void> = Promise.resolve();
   #opController: AbortController | undefined;
+  #followUpState: 'idle' | 'retrying' | 'compacting' = 'idle';
 
   private constructor(init: SessionInit) {
     this.id = init.id;
-    this.agent = init.agent;
+    this.#agent = init.agent;
     this.#store = init.store;
     this.#usage = init.usage;
     this.#model = init.model;
@@ -128,7 +129,7 @@ export class Session {
     init.hooks.shouldStop = (ctx) => this.#shouldStopAfterTurn(ctx);
 
     // 落盘监听在透传渲染之前注册:agent 的 listener 串行 await,waitForIdle() 返回即全部落盘。
-    this.agent.subscribe(async (e) => {
+    this.#agent.subscribe(async (e) => {
       const extras = this.#persist(e);
       await this.#onAgentEvent(e, extras);
     });
@@ -193,15 +194,27 @@ export class Session {
       this.#stashedPrompts.push(text);   // 压缩完成后重放(先 prompt,隐含开跑)
       return;
     }
-    return this.agent.prompt(text);
+    if (this.#followUpState === 'retrying') {
+      throw new Error('任务正在重试；请使用 steer() 或 followUp()');
+    }
+    return this.#agent.prompt(text);
   }
+
+  async continue(): Promise<void> {
+    this.#assertOpen();
+    if (this.interactionState() !== 'idle') {
+      throw new Error('任务仍在运行；请先完成或 abort，再继续');
+    }
+    return this.#agent.continue();
+  }
+
   steer(text: string | UserMessage): void {
     this.#assertOpen();
-    this.agent.steer(text);            // 压缩期间直接透传:agent 队列即暂存区,continue 后自然消费
+    this.#agent.steer(text);            // 压缩期间直接透传:agent 队列即暂存区,continue 后自然消费
   }
   followUp(text: string | UserMessage): void {
     this.#assertOpen();
-    this.agent.followUp(text);
+    this.#agent.followUp(text);
   }
 
   #assertOpen(): void {
@@ -209,11 +222,36 @@ export class Session {
   }
   abort(): void {
     this.#opController?.abort();        // 取消退避等待 / 摘要请求
-    this.agent.abort();
+    this.#agent.abort();
   }
 
   usage(): SessionUsage {
     return this.#usage.snapshot();
+  }
+
+  /** CLI 命令门禁的权威状态；retry/compaction 期间 Agent 可能短暂为 idle。 */
+  interactionState(): SessionInteractionState {
+    if (this.#agent.state === 'running') return 'running';
+    return this.#followUpState;
+  }
+
+  currentModel(): ModelRef {
+    return { ...this.#model.ref };
+  }
+
+  /**
+   * 仅空闲时切换完整 ModelConfig。meta 与历史消息保持原样；下一条 assistant
+   * 由实际 adapter 写入新的 ModelRef，因此恢复与审计不会丢失跨模型边界。
+   */
+  setModel(model: ModelConfig): void {
+    this.#assertOpen();
+    if (this.interactionState() !== 'idle') {
+      throw new Error('任务仍在运行；请先完成或 abort，再切换模型');
+    }
+    this.#agent.setModel(model);
+    this.#model = model;
+    this.#attempt = 0;
+    this.#overflowCompactions = 0;
   }
 
   /** CLI /status 渲染用(docs/08 §7):累计成本 + input/output/cacheRead 都在 usage 里。 */
@@ -222,7 +260,7 @@ export class Session {
   }
 
   get messages(): readonly AgentMessage[] {
-    return this.agent.transcript;
+    return this.#agent.transcript;
   }
 
   subscribe(listener: SessionListener): () => void {
@@ -238,8 +276,16 @@ export class Session {
     this.#closed = true;
     this.#opController?.abort();        // 唤醒退避睡眠 / 取消摘要,让 op 链尽快收束
     await this.#opChain.catch(() => undefined);
-    await this.agent.waitForIdle();
+    await this.#agent.waitForIdle();
     this.#store.fsync();
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (true) {
+      const op = this.#opChain;
+      await Promise.all([op, this.#agent.waitForIdle()]);
+      if (op === this.#opChain && this.interactionState() === 'idle') return;
+    }
   }
 
   // ---------- 钩子(session 安装到 Agent)----------
@@ -264,7 +310,7 @@ export class Session {
     if (!this.#compaction.enabled) return false;
     const limits = this.#model.limits;
     if (!limits || !limits.context) return false;   // 无 context 上限:threshold 无从计算(M7 默认不触发)
-    const reserveOutput = this.#model.defaults?.maxOutputTokens ?? limits.output ?? 0;
+    const reserveOutput = this.#model.defaults?.maxOutputTokens ?? 0;
     const budget = this.#compaction.threshold * (limits.context - reserveOutput);
     const contextTokens = this.#usage.snapshot().contextTokens;
     if (contextTokens > budget) {
@@ -298,11 +344,14 @@ export class Session {
     // 先同步登记 op(设 #opController)再 fanout:否则监听 willRetry/retry_scheduled 的 UI 一旦
     // 立即 abort,会在 #opController 尚未赋值的窗口里落空(op 已排队但 sleep 停在 waitForIdle 后)。
     if (decision.kind === 'retry') {
-      this.#scheduleOp((signal) => this.#runRetry(decision.delayMs, signal));
+      this.#scheduleOp('retrying', (signal) => this.#runRetry(decision.delayMs, signal));
     } else if (decision.kind === 'compaction') {
       this.#compacting = true;
       const hard = decision.hardTruncate === true;
-      this.#scheduleOp((signal) => this.#runCompaction(decision.reason, signal, hard));
+      this.#scheduleOp(
+        'compacting',
+        (signal) => this.#runCompaction(decision.reason, signal, hard),
+      );
     } else if (decision.kind === 'fatal') {
       // overflow 无限循环护栏(docs/08 §8):压缩+硬截断后仍 overflow → 报 fatal 停,
       // 透传原 agent_end(error)后追一条 fatal error 事件说明不可恢复。
@@ -377,22 +426,31 @@ export class Session {
 
   // ---------- detached op(脱离 emit 链,避免与 continue() 死锁)----------
 
-  #scheduleOp(fn: (signal: AbortSignal) => Promise<void>): void {
+  #scheduleOp(
+    state: 'retrying' | 'compacting',
+    fn: (signal: AbortSignal) => Promise<void>,
+  ): void {
     const controller = new AbortController();
     this.#opController = controller;
+    this.#followUpState = state;
     const prev = this.#opChain;
     this.#opChain = (async () => {
       await prev.catch(() => undefined);          // 串行:上一个 op 收束后再动作
-      // 只在 closed 时早退;aborted 不早退——交给 fn 处理(#runRetry 的 sleep 会立即
-      // 返回 aborted 并补发「retry cancelled」error 事件,docs/08 §5.3;早退会漏发该事件,
-      // 让监听 willRetry 的 UI 永久停在「重试中」)。
-      if (this.#closed) return;
       try {
-        await this.agent.waitForIdle();           // 触发本 op 的那次 run 落定 → idle
+        // 只在 closed 时早退;aborted 不早退——交给 fn 处理(#runRetry 的 sleep 会立即
+        // 返回 aborted 并补发「retry cancelled」error 事件,docs/08 §5.3;早退会漏发该事件,
+        // 让监听 willRetry 的 UI 永久停在「重试中」)。
+        if (this.#closed) return;
+        await this.#agent.waitForIdle();           // 触发本 op 的那次 run 落定 → idle
         if (this.#closed) return;
         await fn(controller.signal);
       } catch (err) {
         await this.#fanout({ type: 'error', message: `session follow-up failed: ${String(err)}`, fatal: false });
+      } finally {
+        if (this.#opController === controller) {
+          this.#opController = undefined;
+          this.#followUpState = 'idle';
+        }
       }
     })();
   }
@@ -417,7 +475,7 @@ export class Session {
       return;
     }
     if (this.#closed) return;
-    await this.agent.continue();
+    await this.#agent.continue();
   }
 
   /** 摘要 → 追加 CompactionRecord + 设 compactionState → 续跑(docs/08 §6.3/§6.5)。
@@ -425,7 +483,7 @@ export class Session {
   async #runCompaction(reason: 'threshold' | 'overflow', signal: AbortSignal, hardTruncate = false): Promise<void> {
     await this.#fanout({ type: 'compaction_start', reason });
 
-    const transcript = [...this.agent.transcript];
+    const transcript = [...this.#agent.transcript];
     const contextTokens = this.#usage.snapshot().contextTokens;
     const keepBudget = contextTokens * this.#compaction.keepRatio;
     const tailStart = selectTailStart(transcript, keepBudget);
@@ -445,16 +503,17 @@ export class Session {
       } catch (err) {
         if (signal.aborted) {
           // abort:放弃本次压缩,状态回滚不写 record(docs/08 §6.4)
-          this.#compacting = false;
           this.#stashedPrompts = [];
           await this.#fanout({ type: 'compaction_end', ok: false, droppedMessages: 0 });
+          this.#compacting = false;
+          await this.#resumeAfterCompaction(false);
           return;
         }
         if (reason === 'threshold') {
           // 主动触发失败:放弃,原上下文继续(docs/08 §6.5),下次 turn_end 会再触发
           console.error(`[compaction] threshold summarize failed, abandoning: ${String(err)}`);
-          this.#compacting = false;
           await this.#fanout({ type: 'compaction_end', ok: false, droppedMessages: 0 });
+          this.#compacting = false;
           await this.#resumeAfterCompaction();
           return;
         }
@@ -466,8 +525,8 @@ export class Session {
 
     if (tailMsg === undefined) {
       // 空转录极端:无可折叠,放弃
-      this.#compacting = false;
       await this.#fanout({ type: 'compaction_end', ok: false, droppedMessages: 0 });
+      this.#compacting = false;
       await this.#resumeAfterCompaction();
       return;
     }
@@ -482,26 +541,26 @@ export class Session {
     };
     const persistExtras = this.#append(record);
     this.#compactionState = { tailStartId: tailMsg.id, synthetic: syntheticSummaryMessage(summary) };
-    this.#compacting = false;
     for (const x of persistExtras) await this.#fanout(x);
     await this.#fanout({ type: 'compaction_end', ok: true, droppedMessages: dropped.length });
+    this.#compacting = false;
     await this.#resumeAfterCompaction();
   }
 
   /** 压缩收尾:优先重放暂存 prompt,否则 continue 续跑(自然结束的 turn 则无需续跑)。 */
-  async #resumeAfterCompaction(): Promise<void> {
+  async #resumeAfterCompaction(continueIfEmpty = true): Promise<void> {
     const stashed = this.#stashedPrompts;
     this.#stashedPrompts = [];
     if (stashed.length > 0) {
       for (const text of stashed) {
         if (this.#closed) return;
-        await this.agent.prompt(text);
+        await this.#agent.prompt(text);
       }
       return;
     }
-    if (this.#closed) return;
+    if (this.#closed || !continueIfEmpty) return;
     try {
-      await this.agent.continue();
+      await this.#agent.continue();
     } catch (err) {
       if (!/nothing to continue/i.test(String(err))) throw err;
       // 压缩发生在自然结束的 turn 之后:无残局可续,折叠对下一次输入生效

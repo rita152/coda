@@ -76,6 +76,17 @@ export class Agent {
     return this.#state;
   }
 
+  /**
+   * 切换下一次采样使用的完整模型配置。运行中的 loop 已经持有当前请求语义，
+   * 因此只允许 idle 更新；既有 transcript（含每条 assistant 的 ModelRef）不改写。
+   */
+  setModel(model: ModelConfig): void {
+    if (this.#state !== 'idle') {
+      throw new Error('Agent is running; finish or abort before switching model');
+    }
+    this.#loopConfig.model = model;
+  }
+
   /** 权威转录(只读视图;错误与中止也是一等消息,永远完整)。 */
   get transcript(): readonly AgentMessage[] {
     return this.#transcript;
