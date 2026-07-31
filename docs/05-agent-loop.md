@@ -4,7 +4,20 @@
 
 本文是 `src/agent/` 的实施规格:Agent 类对外 API 与状态机、runLoop 双层循环的完整语义、streamAssistantResponse 的流水线、工具执行三阶段、parallel/sequential 调度、abort 语义、事件发射规则、错误分类。队列(steering/follow-up)的精确注入语义与转录修复细节见 [06](./06-steering-following.md),工具本体规格见 [07](./07-tools.md),provider 契约见 [04](./04-provider-adapter.md)。
 
-Agent 核心只依赖 `src/protocol/`:provider 以 `StreamFn` 注入,工具以 `ToolDefinition[]` 注入,UI 以 `subscribe(listener)` 挂接。这层的全部复杂度都围绕一个目标:**转录(`AgentMessage[]`)在任何时刻——包括 abort、length 截断、工具失败、provider 出错——都保持完整且可重放**。pi-mono 的 agent-loop.ts 是本设计的直接蓝本;codex、gemini-cli 的对应机制用于交叉验证取舍。
+阶段 0 起，Agent 的架构身份被收窄为**单个 ThreadRuntime 内的 run/turn 执行引擎**。每个 thread
+至多一个 active run；不同 ThreadRuntime 各有自己的 Agent、转录、mailbox 与 cancellation root，
+可以并发运行。Supervisor 管理 thread 生命周期与父子拓扑，Agent 不持有全局 thread map；子 Agent
+是独立 child thread，不是 `ToolDefinition`，也不共享父 Agent 的可变状态。canonical 边界见
+[12 · Supervisor Runtime](./12-supervisor-runtime.md)。
+
+阶段 0 的 Agent 核心依赖 `protocol/shared`，并通过唯一的迁移期类型边
+`tools/types.ts` 接收 `ToolDefinition[]`；provider 以 `StreamFn` 注入，既有
+`subscribe(listener)` 行为保持不变。阶段 2 的 runtime-managed Agent 通过独立、awaited 的 internal
+`authoritativeEventSink` 直连唯一 EventCommitter，绝不把 committer 注册成会吞错的 public subscriber；
+普通 UI 由 EventHub 异步订阅。阶段 3 的 ThreadRuntime 改用只消费不可变 catalog/adapter snapshot 的
+runtime engine；exported legacy Agent 仍保留 `AgentConfig.tools/StreamFn` surface，由精确的兼容 facade
+文件持有唯一 `tools/types.ts` type-import。这层的全部复杂度都围绕一个目标:**转录(`AgentMessage[]`)在任何时刻——
+包括 abort、length 截断、工具失败、provider 出错——都保持完整且可重放**。
 
 ## 1. Agent 类对外 API
 
@@ -36,6 +49,11 @@ interface AgentConfig {
 }
 ```
 
+这是保留的 library/legacy API，不是多线程 RuntimePort。ThreadRuntime 在调用它之前建立
+`WorkspaceId/ThreadId/RunId`，在每次 assistant 采样前建立 `TurnId`；AgentEvent 保持无身份的内层
+payload，由 EventCommitter 统一包装成 EventEnvelope。每次 `prompt()` / `continue()`（包括 retry
+与 compaction 后续跑）都得到新的 RunId；后续 run 只用 `predecessorRunId` 关联，不能复用旧 id。
+
 补充字段(本文档新增,不改上述 API 语义):`AgentConfig.cwd?: string`(工具执行工作目录,由 Bun CLI 启动层解析并显式注入,填充 `ToolContext.cwd`)。Agent 实例另持有一个会话级 `FileTracker`(read-before-edit 约束的登记表,见 [07](./07-tools.md)),随 `ToolContext` 传给每次工具执行。
 
 ### 1.1 状态机
@@ -45,23 +63,23 @@ stateDiagram-v2
     [*] --> idle
     idle --> running: "prompt() / continue()"
     running --> running: "steer() / followUp() / abort()(仅请求中止)"
-    running --> idle: "agent_end 发出且全部 listener settle"
+    running --> idle: "agent_end 完成权威提交"
     idle --> idle: "steer() / followUp()(入队,等下一次 run)"
 ```
 
-只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 发出且所有 listener settle,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
+只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 完成权威提交,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。直接使用 legacy `Agent` 时始终等待其全部 subscribe listener，行为冻结；阶段 2 的 ThreadRuntime 内部 Agent 使用独立 awaited `authoritativeEventSink`，普通 observer 改订阅 EventHub，因而 runtime run 只等待权威提交。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
 
 ### 1.2 逐方法语义与合法调用时机
 
 | 方法 | `idle` 时 | `running` 时 |
 |---|---|---|
 | `setModel(model)` | 更新下一次采样使用的完整 `ModelConfig`，不改 transcript | **throw** |
-| `prompt(text)` | 构造 `UserMessage{source:'prompt'}`,发 `agent_start{reason:'prompt'}` 后以 `seed.initialPending` 交给 runLoop——消息在首 turn 经注入路径([B])落转录,走完整 `message_start/end` 生命周期(session 层与 UI 因此不需要为 prompt 消息开特例);返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
+| `prompt(text)` | 构造 `UserMessage{source:'prompt'}`,发 `agent_start{reason:'prompt'}` 后以 `seed.initialPending` 交给 runLoop——消息在首 turn 经注入路径([B])落转录,走完整 `message_start/end` 生命周期(TranscriptRepository 与 UI 因此不需要为 prompt 消息开特例);返回的 Promise 在 `agent_end` 后 resolve | **throw**(`"Agent is running; use steer() or followUp()"`) |
 | `steer(msg)` | 入 steering 队列(下次 run 的起跑 poll 会吃到,见 2.1 注释 A) | 入 steering 队列,turn 边界注入 |
 | `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
 | `abort()` | no-op | `taskAbort.abort()`,请求中止;队列**不清空** |
 | `continue()` | 见下文;返回 Promise 同 prompt | **throw** |
-| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 及全部 listener settle 后 resolve |
+| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 权威提交后 resolve；阶段 0 legacy 实现仍额外等待全部 listener |
 | `subscribe` / `clearQueues` / `steeringMode=` | 任意时刻合法 | 任意时刻合法 |
 
 **为什么 `prompt()` 在运行中 throw 而不是自动排队**:pi 的原话是"入口强制二选一,没有第三种模糊状态"。"运行中的新输入"存在两种截然不同的意图——引导当前任务(steer)与追加下一个任务(followUp),API 层面替调用者猜意图必然猜错一半。codex 走了另一条路:同一个 `Op::UserInput` 由 core 按当前状态自动分派(有 active turn 即 steering)——那是**跨进程外协议**的正确选择,因为客户端无法可靠感知 core 状态;而我们的 Agent 是进程内对象,`state` 就在手边,让调用方(CLI 键位层:Enter=steer,Alt+Enter=followUp)显式选择,错误立即暴露。
@@ -70,7 +88,7 @@ stateDiagram-v2
 
 1. steering 队列非空 → 按 `steeringMode` drain 出初始 `pendingMessages`,`agent_start{reason:'follow_up'}` 启动(并跳过 runLoop 的起跑 poll,防止双重 drain);
 2. 否则 follow-up 队列非空 → 同上,drain follow-up;
-3. 否则,若转录末尾存在残局——末条 assistant 消息的 stopReason 是 `aborted`/`error`,**或**转录末尾存在未配对的 toolCall / 末条消息不是完结态(崩溃恢复场景:工具执行中被杀的会话,末条是 `stopReason:'tool_calls'` 的 assistant 或 tool_result,见 [08](./08-session-persistence.md) §4.3)→ 以空 `pendingMessages` 启动,`agent_start{reason:'continue'}`——即**重采样**:残缺的 assistant 会被 transform 层过滤、孤儿 toolCall 会被补上合成结果(见第 3 节 convertContext 与 [06](./06-steering-following.md)),模型看到的是干净转录,等价于"重试上一轮"。session 层的 auto-retry(M7)与崩溃恢复都建立在这条路径上;
+3. 否则,若转录末尾存在残局——末条 assistant 消息的 stopReason 是 `aborted`/`error`,**或**转录末尾存在未配对的 toolCall / 末条消息不是完结态(崩溃恢复场景:工具执行中被杀的会话,末条是 `stopReason:'tool_calls'` 的 assistant 或 tool_result,见 [08](./08-session-persistence.md) §4.3)→ 以空 `pendingMessages` 启动,`agent_start{reason:'continue'}`——即**重采样**:残缺的 assistant 会被 transform 层过滤、孤儿 toolCall 会被补上合成结果(见第 3 节 convertContext 与 [06](./06-steering-following.md)),模型看到的是干净转录,等价于"重试上一轮"。RetryCoordinator 与崩溃恢复都建立在这条路径上，且每次续跑创建新的 RunId;
 4. 三者皆无 → throw(`"Nothing to continue"`)。
 
 `agent_start.reason` 的分配规则由此确定:`prompt()` → `'prompt'`;`continue()` 消费了排队消息 → `'follow_up'`;`continue()` 纯重采样 → `'continue'`。
@@ -166,7 +184,7 @@ async function runLoop(
       }
 
       // [H] 优雅停:shouldStopAfterTurn 优先级高于两个队列——返回 true 直接结束,不 poll。
-      //     队列残留保留,由 session 层检查后决定是否 continue()(见 06 的 steering 语义第 7 条)。
+      //     队列残留保留,由 ThreadRuntime 检查后决定是否 continue()(见 06 的 steering 语义第 7 条)。
       if (await cfg.shouldStopAfterTurn?.(currentContext())) {
         await emit({ type: 'agent_end', reason: 'completed', messages: newMessages });
         return;
@@ -215,8 +233,8 @@ flowchart TD
 
 ### 2.3 为什么 error/aborted 直接结束,不在 loop 内重试
 
-1. **abort 是用户意图**,唯一正确的响应是尽快停下并保留现场(队列不清、转录完整),把"接下来做什么"还给用户/session 层。
-2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——全是 session 层关心的语境。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——我们照做,loop 保持哑。
+1. **abort 是用户意图**,唯一正确的响应是尽快停下并保留现场(队列不清、转录完整),把"接下来做什么"还给 ThreadRuntime/调用方。
+2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——属于 RetryCoordinator/CompactionCoordinator。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——目标架构把它们拆成独立协作者,loop 保持哑。
 3. **结束是无损的**:错误已编码为带 `errorMessage` 的合法 AssistantMessage 留在转录里(可持久化、可诊断),transform 层重放时会过滤它,所以 `continue()` 的重采样在语义上与"loop 内重试"完全等价,只是控制权交还了一层。
 4. 备选方案:codex 在 turn 内做流断线重试并发 `StreamError` 事件通知 UI("不终止 turn")。这个体验更平滑,但需要 loop 感知"可重试性"。v1 走"结束 + session continue()"的简单路线,M7 若引入 in-loop 流重试,`AgentEvent.error{fatal:false}` 可承担 StreamError 的通知角色。
 
@@ -228,24 +246,26 @@ flowchart TD
 
 ## 3. streamAssistantResponse
 
-职责:把"当前转录"变成"一条完整落地的 AssistantMessage",途中把 provider 流事件转发为 `message_update`。流水线五步:
+职责:把"当前转录"变成"一条完整落地的 AssistantMessage",途中把 provider 流事件转发为
+`message_update`。下列伪码保留阶段 0 的直接注入形态；阶段 3 的 snapshot/PromptAssembler 替换点见
+§3.1，流式生命周期不变。流水线五步:
 
 ```ts
 async function streamAssistantResponse(
   cfg: AgentConfig, transcript: AgentMessage[], taskSignal: AbortSignal,
   emit: (e: AgentEvent) => Promise<void>,
 ): Promise<AssistantMessage> {
-  // (1) 组装 Context:systemPrompt 每 turn 重新求值(函数形式支持动态内容:
-  //     工具 promptSnippet 拼接、当前时间/cwd 等);tools 在 Agent 构造时经
-  //     z.toJSONSchema() 预渲染为 ToolSchema[] 并缓存,这里直接引用。
+  // (1) 阶段 0 legacy 组装 Context:systemPrompt 每 turn 重新求值；tools 在 Agent
+  //     构造时经 z.toJSONSchema() 预渲染。阶段 3 改由 §3.1 的 PromptAssembler
+  //     使用该 turn 捕获的 catalog snapshot 组装。
   let ctx: Context = {
     systemPrompt: typeof cfg.systemPrompt === 'function' ? cfg.systemPrompt() : cfg.systemPrompt,
     messages: transcript,
     tools: cachedToolSchemas,
   };
 
-  // (2) 用户钩子 transformContext:压缩/裁剪与 system prompt 增强。session 层的
-  //     compaction(M7)及 CLI 的分层 AGENTS.md 注入都挂在这里；只改出站副本。
+  // (2) 用户钩子 transformContext:压缩/裁剪与 system prompt 增强。CompactionCoordinator
+  //     与 PromptAssembler 通过明确依赖组装出站视图；只改出站副本。
   if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
 
   // (3) 固定清洗 convertContext(transform 层的 agent 侧入口):
@@ -288,9 +308,34 @@ async function streamAssistantResponse(
 - **transformContext 在 convertContext 之前**。用户钩子(压缩)应当看到权威转录的原貌并自由改写;而 convertContext 是**合法性保证**,必须是出站前的最后一道——即使用户钩子有 bug 产出了非法配对,固定清洗也会修复,adapter 永远收到合法 Context。反过来排则一个错误的 transformContext 就能让 Chat Completions 400。
 - **convertContext 产出副本、不落盘**。权威转录永远保留 error/aborted 消息与孤儿 toolCall 的"事实"([03](./03-internal-protocol.md) 的消息模型约定:错误也是合法消息);清洗只发生在每次出站的视图上。pi 的 transform-messages 就是这样一层"垫层",它是 abort/steering/换模型不产生非法请求的核心,我们照搬结构。
 
+### 3.1 turn 身份与不可变依赖快照
+
+阶段 3 后，ThreadRuntime 开始一次 assistant 采样时必须原子完成以下准备，再发
+`turn_start`：
+
+1. 创建 `TurnId`，捕获一次 `ToolCatalogSnapshot{revision, entries}` 与一次
+   `ProviderAdapterSnapshot`；再用同一 TurnPolicyContext 捕获 BasePromptSnapshot、RuleSnapshot、
+   PolicyGrantSnapshot、workspace/run ceiling，并由 PolicyEngine 产生含 context/
+   policyBasisRevision/grantRevision 的 EffectivePolicySnapshot；任一步 identity/revision 错配都在采样前
+   fail closed；
+2. PromptAssembler 仅用 base prompt、`effectivePolicy.rules`、该 catalog snapshot 的 JSON Schema/
+   description/prompt snippet、model view 及 TranscriptRepository 的出站视图构造深冻结 Context；它不
+   接受另一份 rules，也不读取 mutable store；
+3. 该 turn 所有 tool call 的查找、参数规范化/资源解析、PolicyEngine 判定和 executor 都只来自同一 catalog
+   snapshot；
+4. registry/rules/grants/provider 在流式期间的更新只影响下一 turn；当前 turn 不回查“最新”版本。
+
+这样模型看到的 schema 与实际执行的 executor 机械同版。阶段 0 的 `ToolDefinition[]` 和固定
+`StreamFn` 由 legacy adapter 形成 revision 固定的 snapshot，保持既有 Agent API；Agent 自身不拥有
+动态 registry，也不决定 workspace/thread 权限。
+
 ## 4. 工具执行三阶段
 
-每个 toolCall 依次经过 prepare → execute → finalize。pi 的对应物是 `prepareToolCall / executePreparedToolCall / finalizeExecutedToolCall`。
+每个 toolCall 依次经过 prepare → execute → finalize。下列 `Prepared` 是阶段 0 的 legacy
+`ToolDefinition[]` 形态；阶段 3 的 canonical `PreparedInvocation` 直接持有 catalog revision、固定
+validator/executor 引用、深冻结 parsed args 与 identity-bearing InvocationContext，execute 阶段禁止
+再按 name 回查 registry。pi 的对应物是
+`prepareToolCall / executePreparedToolCall / finalizeExecutedToolCall`。
 
 ```ts
 type Prepared =
@@ -341,7 +386,12 @@ async function finalizeToolCall(cfg, call, r, emit) {
 关键决策:
 
 - **校验失败与未知工具名回喂模型,而不是抛异常**。幻觉工具名、漏参数、类型错都是模型的常规失误,属于对话内容而非程序错误;合成 isError ToolResultMessage(附可用工具列表 / 美化后的 zod 错误 + "请修正后重试")让模型自我修正,任务继续。抛异常会把一次可自愈的失误升级成整个 run 的失败。gemini-cli 把这类失败建模为工具状态机的 `Error` 终态、同样回喂——业界一致。注意 reject 出的结果**不发 `tool_execution_start/end`**?不——为了 UI 一致性,reject 结果同样走 finalize 发 `tool_execution_end`(start 可省;实现时统一发 start/end 对更简单,args 用原始 `call.arguments`)。
-- **`beforeToolCall` 是权限系统的挂载点**(M6):approval 流程整个藏在这个钩子里(发 `approval_request` 事件 + Promise resolver 注册表,等用户决策),loop 对审批零感知。codex 的 `Denied`(拒绝但任务继续,理由给模型)与 `Abort`(停任务)之分,在我们这里映射为:deny → `{block:true, reason}` 回喂;abort → 钩子内部调 `agent.abort()` 后返回 block。
+- **`beforeToolCall` 是阶段 0 的权限兼容挂载点**:既有 approval 流程仍通过
+  `approval_request` + Promise resolver 保持行为。阶段 2 后 approval 统一为先经 EventCommitter
+  提交的 `control_request{kind:'approval'}` 与 `control_response` op；阶段 3 由 PolicyEngine 读取
+  唯一 `PreparedInvocation`（身份只取其 frozen context）返回 `allow | deny | ask`。legacy hook 只做适配，不能绕过
+  thread/run 作用域、跨 thread resolve，或在等待期间偷换 executor。deny 仍合成 isError 结果回喂，
+  abort 则先传播 cancellation 再以 aborted 结案 pending control。
 - **CLI 可组合多个 `beforeToolCall` gate 而无需扩展 loop**：项目规则感知先检查 `edit` /
   `write` 目标目录，以及 bash 最终 workdir / literal `cd` / 具备目录语义的 `-C` /
   重定向 / 显式路径 / 现存裸目录的分层 `AGENTS.md` 是否已出现在最近一次模型上下文；
@@ -405,6 +455,12 @@ Agent.abort() ──> taskAbort: AbortController            // 每次 run(prompt
 
 用 child(`AbortSignal.any([taskSignal])`,由 Bun 1.3.14 运行时基线保证;或手动 link 并在 finally 里 removeEventListener)而不是全员共享一个 signal,理由:(a) 未来的单工具级取消(per-tool timeout、doom-loop 强杀单个调用)不必牵连整个 run;(b) 长 run 中数百次执行往同一个 signal 上 addEventListener 会泄漏与告警,child 随执行结束解除挂接;(c) codex 的 cancellation token 树(task token → 采样/工具 child token)是同构验证。
 
+这棵树的根属于一个 `(ThreadId, RunId)`，不是进程全局 signal。Runtime 的
+`abort{threadId, expectedRunId?}` 先由 Supervisor 路由到目标 ThreadRuntime；给出 expectedRunId 时
+必须匹配当前 active run，避免迟到命令误杀 retry/compaction 创建的 successor run。abort 默认不
+级联 parent/child thread；只有 Supervisor 的显式 subtree scope 才按拓扑快照并行下发。一个 thread
+的 abort、清理失败或慢 observer 都不得改变其他 thread 的 cancellation tree。
+
 abort 发生在不同时点的行为:
 
 | 时点 | 行为 |
@@ -419,45 +475,73 @@ abort 发生在不同时点的行为:
 
 其余要点:`abort()` 不清队列(pi 的 UX:Esc = abort 后,已排队输入保留可再编辑;清空是 `clearQueues()` 的显式动作);aborted 的 assistant 消息保留在转录、重放时被 transform 过滤,所以 abort → `continue()` 是无损续跑。M6 前瞻(codex 教训):abort 时要**先让工具/流观察到 cancellation,再以 abort 决议清空 pending approvals**——顺序反了,悬着的审批会先以"拒绝"形态漏给模型。
 
-## 7. 事件发射规则
+## 7. 权威提交与观察者通道
 
-```ts
-// src/agent/events.ts —— 单一 promise 链把全部发射串行化
-class Emitter {
-  private chain = Promise.resolve();
-  private listeners = new Set<Listener>();
-  emit(e: AgentEvent): Promise<void> {
-    this.chain = this.chain.then(async () => {
-      for (const l of [...this.listeners]) {          // 快照:emit 期间退订安全
-        try { await l(e); }                            // ★ 逐个 await,订阅序
-        catch (err) { reportListenerError(err); }      // 吞掉并诊断,绝不打断 loop
-      }
-    });
-    return this.chain;
-  }
-}
+### 7.1 阶段 0 characterization
+
+阶段 0 的既有 `Emitter` 用单一 promise chain 串行全部 listener：每个 listener 逐个 await，异常被
+吞掉并诊断，`waitForIdle()` 要等它们全部 settle。这是**冻结现状，不是目标背压模型**；阶段 0 不
+改变该行为，避免文档重写夹带生产语义变化。
+
+### 7.2 阶段 2 canonical 路径
+
+```text
+AgentEvent / control event
+  → await EventCommitter.commit(identity, event)
+      ├─ TranscriptRepository / control / seq high-water 权威写入
+      └─ 返回 EventEnvelope 或连续原子 batch（per-thread seq）
+  → EventHub.publish(envelope)        // 非阻塞入各订阅者队列
+      ├─ Session legacy projector
+      ├─ headless output pump
+      ├─ TUI
+      └─ telemetry / tests
 ```
 
 规则与取舍:
 
-1. **listener 逐个 await、订阅序串行**。这是 pi 的选择,我们采纳同一权衡:代价是慢 listener 拖慢 loop(delta 是热路径),换来的是**确定性**——事件到达每个 listener 的顺序与产生顺序严格一致;session 层的 JSONL 追加 listener 在下一个事件前完成落盘;`agent_end` 的 emit settle 之后才翻回 `idle`,因此 **`waitForIdle()` resolve 时一切副作用(持久化、渲染)已经尘埃落定**——测试与 headless 模式依赖这条性质。
-2. 由此对 listener 的纪律:必须廉价。渲染器不要在 listener 里做 O(内容长度) 的重绘,收 delta 进缓冲、用自己的帧定时器合并绘制(见 [09 CLI](./09-cli.md) 的渲染策略);重活(网络上报等)自行排队,listener 只入队即返回。
-3. **listener 异常吞掉并诊断**(console/诊断钩子),绝不让 UI 的 bug 打断 loop、污染转录。不要在这里再 emit `error` 事件——会递归。
-4. **所有发射走同一条 promise 链**:loop 主路径 `await emit(...)` 获得背压;工具的 `onUpdate` 回调(bash 100ms 节流输出)用 `void emit(...)` 火后不理,但仍进链,保证 parallel 工具的 update 事件不会与其他事件交错穿插到 listener 内部。
-5. `subscribe` 返回退订函数;快照遍历保证 emit 中途退订/订阅不炸迭代器。
+1. **只有 EventCommitter 背压 Agent。**runtime-managed 构造路径把它接到独立 awaited
+   `authoritativeEventSink`，不经过 `subscribe`/Emitter 的 catch-and-diagnose fan-out。它是该 thread 的
+   唯一事件序列化点，负责 transcript/control 的权威提交、分配 seq 和推进持久化 high-water mark；
+   sink reject 直接失败并中止该 thread，提交失败时不得先向观察者发布。Agent 在 `agent_end` commit
+   完成后才 idle，因此 `waitForIdle()` 仍保证转录与事件事实已落定。
+2. **普通 observer 异步且隔离。**EventHub.publish 只把 envelope 入各自 FIFO，不 await UI、stdout、
+   telemetry 或 legacy subscriber 的回调。一个订阅者变慢、throw 或退订不影响 Agent，也不影响
+   同 thread 的其他订阅者或别的 thread。每个订阅者内部仍按 seq 保序。
+3. **溢出不得静默。**observer 队列必须选择“断开并报告 seq gap”或“以 durable cursor 补读”；
+   `queue_update` 等快照事件能帮助渲染自愈，但不能冒充丢失的权威事件。
+4. **前端自行 drain。**headless stdout 的 drain 只背压自己的 output pump；Runtime close/shutdown
+   显式等待该 pump 收束，绝不能把 stdout 压力反传到 Agent。TUI 同理把 delta 合帧后渲染。
+5. **兼容面的等待边界分开。**直接构造的 standalone `Agent.subscribe` 继续按阶段 0 逐 listener
+   await，并保持 listener reject 只诊断的既有语义；它没有 TranscriptRepository，也不承诺 durable replay。
+   ThreadRuntime 不把 EventCommitter 或普通 observer 挂到这个入口，而使用上述独立 authoritative sink。
+   `Session.subscribe` 在阶段 2 作为 EventHub 上的 legacy facade
+   保持 payload/顺序，但不再反向延迟 run；需要“前端已显示/写完”时等前端自己的 drain。
+6. **无 gap channel 的 Session subscriber 必须 cursor-backed。**Session facade 不得把有限
+   EventHub queue 的 disconnect/gap 隐藏起来；每个 listener 维护 last-delivered `(threadId,seq)`，queue
+   满时暂停 live drain、从 durable journal 补读 `seq > lastDelivered`，再无缝回到 live。subscription
+   存活期间 repository 保留/钉住所需 cursor floor，所以无论 listener 多慢，显式 unsubscribe/Session
+   close 前都不丢、不重排、不重复 legacy event；资源占用随 unsubscribe/close 释放。listener reject
+   只诊断，并把该次尝试视为已消费后继续向同一 listener 投递后续事件；它不自动退订、不成为 run
+   error，也不影响其他 listener。只有显式 unsubscribe/close 才移除 listener。只有原生
+   RuntimePort AsyncIterable 有 typed gap terminal channel，可选择 disconnect 策略。
+7. **非 awaited update 也不能漏掉 writer fatal。**legacy 工具的 `onUpdate` 可能以 `void emit(...)`
+   发出 `tool_execution_update`；runtime sink 必须把 commit rejection 原子 latch 为 writer fatal，立即
+   abort 当前 run 与 tool child signal。所有后续 awaited emit、启动下一工具/provider 与其他 side-effect
+   gate 都先检查该 latch 并失败；不能只留下 rejected Promise/unhandled rejection 后继续执行。普通
+   subscriber rejection 不设置这个 latch。
 
 ## 8. 错误分类与处理策略
 
-loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转录后结束,永远不裸 throw**(唯一例外是协议 bug 的防御路径)。可重试性判定不在 loop——errorMessage 里带 adapter 附的 status/requestID,session 层解析分类(M7 auto-retry)。
+loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转录后结束,永远不裸 throw**(唯一例外是协议 bug 的防御路径)。可重试性判定不在 loop——errorMessage 里带 adapter 附的 status/requestID，RetryCoordinator 解析分类。
 
 | 类别 | 典型触发 | 编码形态 | loop 行为 | 恢复责任方 |
 |---|---|---|---|---|
-| 用户中止 | `abort()` / Esc | AssistantMessage `stopReason:'aborted'`(或工具批孤儿) | `turn_end` + `agent_end('aborted')`,队列保留 | CLI/session 决定是否 `continue()` |
-| 可重试 provider 错误 | 429、5xx、ECONNRESET、流中断(无 finish_reason)、超时 | `stopReason:'error'` + errorMessage(status/requestID) | `agent_end('error')` | session 层 auto-retry(M7):指数退避 + `continue()` 重采样(error 消息被 transform 过滤) |
+| 用户中止 | `abort()` / Esc | AssistantMessage `stopReason:'aborted'`(或工具批孤儿) | `turn_end` + `agent_end('aborted')`,队列保留 | ThreadRuntime/调用方决定是否 `continue()` |
+| 可重试 provider 错误 | 429、5xx、ECONNRESET、流中断(无 finish_reason)、超时 | `stopReason:'error'` + errorMessage(status/requestID) | `agent_end('error')` | RetryCoordinator:指数退避 + 新 RunId 的 `continue()` 重采样(error 消息被 transform 过滤) |
 | 不可重试请求错误 | 400 参数/schema、401/403、404 model | 同上 | 同上 | 呈现用户,人工处理;禁止 retry(重试只会烧钱) |
-| 上下文超限 | 400 context_length_exceeded | 同上 | 同上 | session 层 compaction(M7)后 `continue()` |
+| 上下文超限 | 400 context_length_exceeded | 同上 | 同上 | CompactionCoordinator 后以 successor RunId `continue()` |
 | content_filter | 提供商内容拦截 | `stopReason:'content_filter'`(**done 分支,不是 error**) | 正常 turn 完结;无 toolCalls 则自然走向结束 | 用户改写请求。响应本身完整合法(可能含部分文本),按错误处理会丢内容 |
-| length 截断 + toolCalls | maxOutputTokens 耗尽 | toolCall 照常产出 | 全批合成 isError 回喂,**不执行**,loop 继续 | 模型重发;session 可调大 maxOutputTokens |
+| length 截断 + toolCalls | maxOutputTokens 耗尽 | toolCall 照常产出 | 全批合成 isError 回喂,**不执行**,loop 继续 | 模型重发;Runtime 可调大 maxOutputTokens |
 | 未知工具 / 参数校验失败 | 幻觉工具名、漏参数 | 合成 isError ToolResultMessage | 回喂,loop 继续 | 模型自我修正 |
 | 工具执行 throw | 文件不存在、命令非零退出已是正常输出,这里指真异常:权限、超时 | isError ToolResultMessage | 回喂,loop 继续 | 模型改道 |
 | `beforeToolCall` 拦截 | 权限 deny(M6) | isError ToolResultMessage(附 reason) | 回喂,loop 继续 | 模型换方案(codex `Denied` 语义) |
@@ -470,7 +554,7 @@ loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转�
 - [ ] `setModel()` 仅 idle 成功，既有 transcript 不变；running 时 throw
 - [ ] 运行中调 `prompt()` throw;`steer/followUp` 在 idle 与 running 均入队不 throw
 - [ ] `continue()` 三路启动:steering 优先 → follow-up → 末条 assistant 为 aborted/error、或转录末尾存在未配对 toolCall / 末条消息非完结态(崩溃恢复)时重采样;三者皆无 throw;`agent_start.reason` 分别为 `'follow_up'/'follow_up'/'continue'`
-- [ ] `waitForIdle()`:挂一个人为延迟 50ms 的 async listener,resolve 时该 listener 已处理完 `agent_end`
+- [ ] 阶段 0 characterization:`waitForIdle()` 仍等待人为 gate 住的 legacy listener；阶段 2 迁移测试改为只等待 EventCommitter，不等待普通 observer
 
 runLoop(全部用 faux provider 离线验证):
 
@@ -494,6 +578,11 @@ runLoop(全部用 faux provider 离线验证):
 - [ ] faux provider 推 `error` 事件(模拟 500):转录含 `stopReason:'error'` + errorMessage 的 assistant,`agent_end('error')`,后续 `continue()` 出站不含该消息
 - [ ] 故意让 StreamFn throw(违约 provider):loop 不崩,产出协议 bug 防御路径的 error assistant + `fatal:true` 事件
 - [ ] listener throw:loop 不受影响,后续 listener 仍收到事件
+- [ ] 每个 ThreadRuntime 只允许一个 active run；两个 thread 可同时卡在 provider gate，任一 abort/释放不影响另一方
+- [ ] EventCommitter 通过独立 authoritative sink 背压 Agent；public subscribe listener reject 仍隔离，普通 observer gate 不背压 run，且 observer 内 envelope.seq 顺序不乱
+- [ ] `tool_execution_update` commit reject 会 latch writer fatal 并 abort run/tool signal，后续采样、工具与 side-effect gate 均不越过
+- [ ] retry/compaction 续跑创建新的 RunId 并关联 predecessor；旧 expectedRunId 的 abort 不影响 successor
+- [ ] turn 中热更新 capability/provider registration：当前 turn 的 schema、validator 与 executor/StreamFn 仍来自同一旧 snapshot，下一 turn 才见新版本
 
 ## 相关文档
 
@@ -501,3 +590,4 @@ runLoop(全部用 faux provider 离线验证):
 - [04 Provider 与 Chat Completions adapter](./04-provider-adapter.md) —— StreamFn 铁律、流解析、compat 开关
 - [06 steering 与 follow-up](./06-steering-following.md) —— 队列语义、注入点、abort 交互、transform 层转录修复全表
 - [07 工具集](./07-tools.md) —— ToolDefinition/ToolContext、各工具规格、截断策略、文件互斥队列
+- [12 Supervisor Runtime](./12-supervisor-runtime.md) —— per-thread active run、identity、EventCommitter/EventHub 与 snapshot 契约

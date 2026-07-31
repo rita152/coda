@@ -4,6 +4,8 @@
 
 本篇回答四个问题:我们在做什么(需求的工程化表述)、为什么这样做(关键决策与参考项目的经验教训)、用什么做(技术选型)、明确不做什么(非目标)。后续所有文档的设计都能回溯到本篇的某条决策;反过来,如果某篇文档的设计无法回溯到这里,说明其中一边需要修订。
 
+> **阶段 0 基线更新：**进程级“单 Agent”约束已由[12 · Supervisor、多线程 Runtime](./12-supervisor-runtime.md)取代。当前 CLI 的单 Session 是兼容投影；canonical 运行时允许多个独立 thread 并发，但每个 thread 仍至多一个 active run。
+
 ## 1. 项目是什么
 
 在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI:交互式全屏 TUI 为主,附带 classic/plain 保底与 headless `--json` 模式;能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
@@ -61,7 +63,9 @@ $ coda
 
 > 用户原话意图:read、ls、grep、glob、bash、edit、write、plan 一个不少,每个都要达到可日常使用的质量。
 
-工程化表述:八个工具全部实现为统一的 `ToolDefinition`(zod 参数 schema,`z.toJSONSchema()` 渲染进 `Context.tools`),行为规格逐一写死在 [07 工具集](./07-tools.md):
+工程化表述：八个工具的既有实现保留 `ToolDefinition`（zod 校验）；阶段 3 由 legacy adapter 在注册
+时一次性生成 JSON Schema，并把 schema/validator/executor 原子放进 CapabilityRegistry。模型看到
+与执行期使用的是同一 turn snapshot。行为规格逐一写死在 [07 工具集](./07-tools.md)：
 
 - read:offset/limit(1-indexed)、行号前缀、二进制检测、图片走 ImagePart、登记 FileTracker;
 - grep:调 ripgrep 二进制,达 limit 即 kill;glob:mtime 排序,24h 内修改的排最前;
@@ -94,9 +98,9 @@ $ coda
 | D13 | read-before-edit 做成**硬约束**:FileTracker 登记 `{path → mtime}`,edit/write 覆盖时未读过或磁盘变新即报错 | 消除「覆盖用户手改」这一整类事故;prompt 层声明被证明不可靠 | Claude Code 是唯一真正强制的项目;opencode / gemini-cli 的弱形态是反面参照 |
 | D14 | 统一截断(2000 行 / 50KB 双上限 + 超限落盘 + 可执行续读提示)是框架级 post-hook | 各工具自行截断必然口径漂移;落盘 + `Use offset=N to continue` 让模型可自主续读 | opencode / pi-mono 同款常量与落盘策略 |
 | D15 | bash 每次 spawn 新进程(detached 进程组 + killProcessTree),v1 无持久 shell | 持久 shell 的状态泄漏与清理复杂度远超收益;`workdir` 参数替代 cd | 四个参考项目全部如此;codex 式交互长任务留作 v2 |
-| D16 | 单线程单主循环、扁平消息列表;v1 无多 agent | 简单性是可调试性的来源;子 agent 未来可作为一个工具补入,不影响核心 | Claude Code 单主循环佐证;pi-mono AgentSession 单类 3300 行的职责失控反例 |
-| D17 | session = JSONL 追加(一行一条 AgentMessage),恢复 = 重放 | append-only 天然崩溃安全;与协议消息模型同构,无需第二套存储 schema | opencode Part 独立存储的简化版;codex 可序列化边界的精神延续 |
-| D18 | CLI v1 运行于 Bun 1.3.14;eligible 双 TTY(`TERM != dumb`)默认用 `@opentui/core` 全屏渲染；初始化失败时,已配置 key 才回退 classic,缺 key 的延迟校验会话关闭后退出 2；plain 保底继续存在;headless `--json` 吐 NDJSON SessionEvent | OpenTUI 提供 native buffer、Yoga 布局、Textarea/Markdown 与可测 renderer,适合固定 header/footer + 流式中区;懒加载隔离 native 依赖,headless 仍是「内部协议对外暴露」的持续验证器 | codex 的 submit/next_event 可序列化边界;Claude Code 固定 composer;pi 的双队列键位语义 |
+| D16 | **每线程单 active run，Supervisor 管理独立线程；子 Agent 是 thread，不是工具** | 保留单转录/单循环的可调试性，同时把并发隔离在 thread 边界；父子线程不共享可变状态，结果走 durable `thread_result` event（宿主可显式汇入摘要），不是 mailbox/control | codex 的任务隔离与可序列化边界；pi-mono AgentSession 巨类说明编排必须外移 |
+| D17 | thread 存储采用追加式 JSONL：转录、compaction、mailbox/control 与 event seq high-water 同属一个恢复边界；旧 v1 message-only 文件继续可读 | append-only 天然崩溃安全；恢复可同时守住事实转录和 per-thread 顺序，且不破坏已有会话 | opencode durable inbox；codex 可序列化边界 |
+| D18 | CLI 运行于 Bun 1.3.14，作为 RuntimePort 的参数/configuration 与前端 adapter；默认 headless 继续吐裸 NDJSON SessionEvent，显式模式输出 envelope/receipt transport frames | public Runtime 可无 TTY 嵌入；OpenTUI 懒加载，legacy 外协议不被静默击穿 | codex 的 submit/next_event 边界；Claude Code 固定 composer；pi 的双队列键位语义 |
 | D19 | Usage 口径 inclusive:`input` 含 cacheRead/cacheWrite,`output` 含 reasoning;换算由各 adapter 完成 | 消费方永不做减法;跨 provider 口径统一收敛在一处 | opencode 从第一天定双轨口径的经验(nonCached+cacheRead+cacheWrite=input 恒等式) |
 | D20 | `stopReason === 'length'` 且有 toolCall 时,全批合成错误结果、一律不执行 | 截断的 arguments 可能是恰好通过 schema 校验的非法参数,执行等于按脏数据办事 | openai-node:length 时 arguments 禁止盲目 parse;pi-mono 同款分支 |
 
@@ -134,23 +138,34 @@ steering 只在两次 provider 请求之间落地,而 Chat Completions 无服务
 
 整个系统的类型分层与转换链(canonical,02/03 文档展开):
 
-命令下行是 **UI → Session 门面 → Agent**；事件上行是 **AgentEvent → Session → SessionEvent → UI**。会话与 provider 的数据转换链仍是 **AgentMessage/Context → ProviderEvent/StreamFn → wire 协议(adapter 内部,如 ChatCompletionMessageParam)**。
+兼容命令下行仍可观察为 **UI → Session 门面 → Agent**，但 canonical 下行是
+**UI/host → RuntimePort → Supervisor → ThreadRuntime → Agent**；事件上行先由每线程
+`EventCommitter` 包成 `EventEnvelope`，再经 `EventHub` 异步广播。旧
+`AgentEvent → SessionEvent → UI` 是默认 thread 的兼容投影。会话与 provider 的数据转换链仍是
+**AgentMessage/Context → ProviderEvent/StreamFn → wire 协议(adapter 内部)**，且每次调用只属于
+一个 Workspace/Thread/Run/Turn。完整身份与依赖图见 [12](./12-supervisor-runtime.md)。
 
 ```mermaid
 graph TD
-  UI["UI 输入 / 命令(CLI 层)<br/>prompt · steer · followUp · abort · 键位"]
-  SE["Session 门面 / SessionEvent<br/>持久化 · usage · retry · compaction"]
+  UI["UI / host<br/>identity-bearing RuntimeOp"]
+  RP["RuntimePort + Supervisor"]
+  TR["ThreadRuntime<br/>每 thread ≤ 1 active run"]
   AG["Agent 核心"]
-  AE["AgentEvent(agent → session)<br/>agent/turn/message/tool_execution 生命周期<br/>queue_update · plan_update · approval_request"]
+  EC["EventCommitter<br/>权威提交 + per-thread seq"]
+  EH["EventHub<br/>EventEnvelope 异步广播"]
+  LEG["legacy Session / SessionEvent 投影"]
   AM["AgentMessage / Context(会话数据层)<br/>UserMessage · AssistantMessage · ToolResultMessage<br/>Part 化 content · Usage · StopReason"]
   PE["ProviderEvent / StreamFn(agent ↔ provider)<br/>start/delta/end 三段式 · partial 快照 · never-throw"]
   WIRE["wire 协议(adapter 内部)<br/>Chat Completions · Responses · Messages<br/>只存在于所属 provider 目录"]
 
-  UI -- "Session API" --> SE
-  SE -- "转发命令" --> AG
-  AG -- "AgentEvent" --> AE
-  AE -- "持久化/注解" --> SE
-  SE -- "SessionEvent" --> UI
+  UI --> RP
+  RP --> TR
+  TR --> AG
+  AG -- "AgentEvent" --> EC
+  EC --> EH
+  EH -- "EventEnvelope" --> UI
+  EH -. "默认 thread 投影" .-> LEG
+  LEG -. "兼容 API" .-> UI
   AG --- AM
   AM -- "transform 层清洗后出站" --> PE
   PE -- "累积为 AssistantMessage 入站" --> AM
@@ -160,8 +175,10 @@ graph TD
 阅读方式:上三层是「agent 的世界」,最底层是「某家 API 的世界」,两个世界只在 adapter 内部相遇。三条核心不变式:
 
 - **wire 类型不上行**:`ChatCompletion*` 只存在于最底层,向上只暴露 ProviderEvent 与 AssistantMessage(D1/D2)。
-- **会话数据层是持久化与重放的唯一事实**:JSONL 存的是 AgentMessage,恢复即重放;AgentEvent 与 ProviderEvent 都是瞬态流,不落盘(D17)。
-- **每层转换都可独立测试**:CLI ↔ SessionEvent 用 faux provider 测,AgentMessage ↔ wire 用 SSE fixture 测(见 [10 测试策略](./10-testing.md))。
+- **thread journal 是恢复事实边界**：AgentMessage 是转录事实；mailbox/control 与 seq high-water
+  作为独立记录同属该 thread，EventHub/UI 只是可重建投影(D17)。
+- **每层转换都可独立测试**：RuntimeOp ↔ EventEnvelope 用 faux/gate 测，legacy projector 与
+  SessionEvent 做黄金对比，AgentMessage ↔ wire 用 SSE fixture 测(见 [10 测试策略](./10-testing.md))。
 
 其中 provider 接口的 canonical 形态(逐字引用,完整定义见 [03](./03-internal-protocol.md)):
 
@@ -177,14 +194,15 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | Bun | 1.3.14 | 项目唯一运行时与包管理器;原生 TypeScript、fetch、Web Streams、AbortSignal、测试与构建工具链统一 |
 | 模块格式 | ESM | 生态方向;`Bun.build` 直接产出 Bun-targeted ESM,不反向补 CJS |
 | `openai` | ^6(仅两个 OpenAI adapter 内) | Chat Completions 与 Responses 各自使用 SDK 的请求/SSE/错误层；两套 wire 类型不跨 adapter，`maxRetries` 交给 SDK 默认，整轮重发仍在 session 层 |
-| zod | v4 | 工具参数的单一事实源:运行时校验 + `z.toJSONSchema()` 原生生成 JSON Schema,免去 zod-to-json-schema 桥接依赖;OpenAI strict:true 的 schema 子集约束在此层保证 |
+| zod | v4 | legacy 工具 validator；注册时一次性 `z.toJSONSchema()`，随后 canonical 事实源是同一 registration/snapshot 中绑定的 JSON Schema、validator 与 executor |
 | `bun:test` | 1.3.14 内置 | 与运行时同版本、fixture 回放与异步迭代器断言无需额外测试运行器 |
 | `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
 | ripgrep | `@vscode/ripgrep` | 安装期自带平台二进制,免自实现下载逻辑;grep 工具直接 spawn 它(D11) |
 | ESLint | flat config + `import/no-restricted-paths` | D1 决策的机械化执行者:依赖方向违规 = CI 红灯 |
 | CLI 渲染 | `@opentui/core` 0.4.x;classic readline/ANSI + plain 保底 | 见 D18;eligible 双 TTY 的全屏分支用 alternate screen、ScrollBox、Textarea、Markdown;脚本分支不加载 native 包 |
 
-目录结构与依赖方向的完整规则(`protocol` ← 所有人;`agent` 只依赖 `protocol`;等等)是 [02 架构与分层](./02-architecture.md) 的主题,此处不重复。
+目录结构与依赖方向的完整规则（`protocol/shared` 为叶子，`agent` 消费 capability snapshot，
+`runtime` 管理 Supervisor，CLI 只走 RuntimePort）是 [02 架构与分层](./02-architecture.md) 的主题。
 
 ### Bun-native compatibility 边界
 
@@ -205,39 +223,34 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | 项目 | 取 | 不取 |
 |---|---|---|
 | pi-mono | agent loop 双层循环、StreamFn 与 never-throw、注入点语义、compat 声明化、edit 归一化 overlay、截断常量 | AgentSession 单类 3300 行的揉合(我们把 session / loop / 队列分层);事件监听 await 串行阻塞 loop(我们让渲染订阅不背压 loop) |
-| opencode | 权限系统形态(M6)、截断落盘、usage inclusive 口径、中断收尾纪律、todo 行为规范 | server/client 分离与 SSE 双通道(v1 单进程 subscribe 已够);依赖第三方 SDK 类型(其 V1 教训正是 D1 的来源) |
+| opencode | 权限系统形态、durable inbox、截断落盘、usage inclusive 口径、中断收尾纪律、todo 行为规范 | 把 server/client 作为 core 前提；依赖第三方 SDK 类型(其 V1 教训正是 D1 的来源) |
 | codex | 可序列化命令/事件边界(headless 模式的精神来源)、pending_input 双语义、approval 决策语义、update_plan 工具形态 | 极小工具面 + apply_patch freeform grammar——该路线依赖 Responses API 的 custom tool grammar,走 Chat Completions 普通 function calling 时 patch 语法错误率上升 |
 | vercel/ai | LanguageModelV3 接口范式(佐证 D2)、openai-compatible 的流式状态机与消息折叠实现(adapter 施工参考) | 作为运行时依赖引入(见 opencode V1 教训) |
-| gemini-cli | 工具显式状态机(M6 approval 建模参考)、tree-sitter-bash 命令解析(M6)、grep 少量命中自动附 context、glob 的 24h mtime 置顶 | 其框架与配置体系整体 |
+| gemini-cli | 工具显式状态机（approval 建模参考）、tree-sitter-bash 命令解析、grep 少量命中自动附 context、glob 的 24h mtime 置顶 | 其框架与配置体系整体 |
 | openai-node | tool_calls 按 index 累积算法、id 缺失兜底 `call_<uuid>`、finish_reason 语义表、错误分类与网络重试、strict schema 子集、回放白名单渲染 | `.stream()` helper 与 Runner 抽象(事件粒度与错误策略同 D3/D8 冲突) |
 
 ## 7. 非目标:v1 明确不做的事
 
-「不做」与「做」同等重要——参考项目里最贵的教训(opencode 的 SDK 返工、pi-mono 的巨类)都来自范围失控。下表每项标注去向:M6 / M7 表示在 v1 路线图内但靠后的里程碑([11 路线图](./11-roadmap.md)),v2 表示不在本轮范围:
+「不做」与「做」同等重要——参考项目里最贵的教训(opencode 的 SDK 返工、pi-mono 的巨类)都来自范围失控。原 M0–M7 已是历史实现基线；当前阶段 0–3 的 active roadmap 见
+[11](./11-roadmap.md)。下表只列本轮明确不交付的产品能力：
 
 | 非目标 | 说明 | 去向 |
 |---|---|---|
-| 多 agent / 子 agent 编排 | 单线程单主循环 + 扁平消息列表(D16);子 agent 未来以「一个工具」的形态补入,结果以工具结果汇合 | v2 |
+| 单一前端中的多线程可视化与调度 UX | core 以 Supervisor/ThreadRuntime 支持独立线程；当前 TUI 仍默认只附着一个 thread，后续再提供线程列表/切换/并排视图 | v2 UI |
 | 独立 TUI client / server 化 | v1 的 OpenTUI 与 Session 同进程;headless NDJSON 已保留未来拆进程的稳定边界 | v2 |
 | 持久 shell / 交互式长任务 | bash 每次 spawn 新进程(D15);codex 式 `exec_command` + `write_stdin`(session_id + yield_time_ms)另立工具 | v2 |
-| plan mode(权限层模式标志 gate 写工具) | 机制已定型:保留写工具、执行时报 plan-mode 错误、exit_plan 批准结果注入 synthetic user message;依赖权限层先落地 | v2(依赖 M6) |
-| 权限 / approval 系统 | `beforeToolCall` + `approval_request` 事件 + Promise resolver 注册表;bash 命令结构解析与 `$()` / 反引号强制升级确认 | M6 |
-| doom-loop 检测 | 同工具同参数连续 3 次强制审批,随权限层一起交付 | M6 |
-| 上下文 compaction | LLM 摘要 + 保留尾部;在此之前上下文超限表现为 provider 报错(编码为 error 消息,不崩溃,可 continue) | M7 |
-| auto-retry(可重试错误指数退避) | 整轮重发策略在 session 层,`agent_end.willRetry` 语义可后置;SDK 网络层重试 v1 即有 | M7 |
-| 成本统计(`costUSD`) | Usage 字段已预留,定价表与换算 M7 补 | M7 |
-| 第二 provider(Anthropic) | 定位是 adapter 边界的验收测试,而非功能目标 | M7 |
 | server / client 分离(HTTP API 多客户端) | opencode 的方向;v1 的 headless `--json` NDJSON 已覆盖「协议可对外」的验证需求 | v2 |
-| MCP 工具接入 | ToolDefinition 框架不排斥外部工具源,但 v1 只做八个内置工具 | v2 |
+| MCP capability 接入 | CapabilityRegistry 允许外部来源，但阶段 3 只迁移现有内置工具/provider adapter | 后续 |
 | 结构化输出(强制 StructuredOutput 工具注入) | opencode 的跨协议做法,依赖工具框架成熟 | v2 |
 | 会话检查点 / undo | JSONL 追加已保留完整历史,交互式回滚是另一层产品功能 | v2 |
 | Windows 全面验证 | edit 的 CRLF / BOM 剥离-匹配-还原 v1 即有(硬需求),但 CI 矩阵与全工具链验证推后 | v2 |
 
-划界原则:**凡是「机制已想清楚、只是排期靠后」的(M6/M7 项),在对应文档里写清接口预留——如 AgentEvent 里的 `approval_request`、Usage 里的 `costUSD`、`UserMessage.source` 里的 `synthetic`;凡是 v2 项,只保证现有设计不堵死它的路,不为它增加当前复杂度。**
+划界原则：阶段 0–3 只建立可嵌入 Runtime、线程隔离、事件权威提交与版本一致的 registry/policy；
+表中后续产品能力只要求边界不堵死，不提前增加实现复杂度。
 
 ## 8. 全项目验收清单(总纲)
 
-细化的验收标准按里程碑列在 [11 路线图](./11-roadmap.md),此处是三条核心需求的最终验收:
+细化的验收标准按阶段列在 [11 路线图](./11-roadmap.md),此处是三条核心需求的最终验收:
 
 - [ ] 协议隔离:OpenAI SDK 只出现在两个 OpenAI adapter，Anthropic SDK 只出现在 Messages adapter；ESLint 边界规则与探针测试在 CI 强制，wire 类型不进入 protocol/agent。
 - [ ] steering:流式期间 Enter 注入的消息在当前 turn 的工具全部执行完后进入 context(转录中可见 `source: 'steering'` 且位于 toolResults 之后);正在执行的工具从未被跳过;steering 使无 toolCall 的 assistant 之后循环继续。
@@ -249,10 +262,13 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 - [ ] 错误模型闭环:kill 掉网络 / 塞入 in-band error fixture / 任意时刻 abort,agent 进程不崩溃,转录中出现对应 stopReason 的 AssistantMessage,且 `continue()` 可恢复。
 - [ ] `stopReason === 'length'` 且含 toolCall 的响应,批内工具零执行、全部收到合成错误结果(D20 的可观测验证)。
 - [ ] 发布形态:`bun add -g coda`(或 `bunx coda`)后 `coda` 可直接启动全屏 TUI;`Bun.build` 产物含 Bun shebang 的 bin,运行时基线固定为 Bun 1.3.14,并随安装解析当前平台 OpenTUI native optional package。
+- [ ] Runtime 隔离:同一 thread 不得并发两个 run；不同 thread 可并发，任一 thread 的 mailbox、取消、审批、转录与事件 seq 不影响其他 thread；子 Agent 以独立 thread 存在而非工具结果。
+- [ ] 兼容投影:旧 `Session` 与默认 headless raw `SessionEvent` 行为保持；canonical public Runtime 输出带 Workspace/Thread/Run/Turn/Op 身份和 per-thread seq 的 `EventEnvelope`。
 
 ## 相关文档
 
 - [02 架构与分层](./02-architecture.md) —— 目录结构与依赖规则如何机械化落实 D1/D2
 - [03 内部协议](./03-internal-protocol.md) —— 四层类型体系中间三层的 canonical 定义
 - [06 Steering / Follow-up](./06-steering-following.md) —— 需求 2 的精确语义与边界情况
-- [11 路线图](./11-roadmap.md) —— 非目标表中 M6/M7 项的排期与验收
+- [11 路线图](./11-roadmap.md) —— 阶段 0–3 的串行门禁、交付与验收
+- [12 Supervisor、多线程 Runtime](./12-supervisor-runtime.md) —— D16 新基线、身份、mailbox、权限与兼容矩阵

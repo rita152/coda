@@ -2,7 +2,7 @@
 
 **coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 被严格隔离在各自 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
 
-本目录是该项目的完整实施计划,共 12 篇文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。
+本目录是该项目的完整实施计划,共 12 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，01–11 各专题已按其阶段 0 基线同步；阶段实施与兼容时限以 11/12 为准。
 
 ## 文档性质与约定
 
@@ -14,7 +14,7 @@
 
 ## 阅读顺序与依赖关系
 
-推荐首次通读按编号顺序(01 → 11)。各篇之间的依赖关系如下,箭头由「先读」指向「后读」:
+推荐首次先读总览与新基线（01 → 12），再按 02 → 10 的专题顺序通读，并以 11 的阶段门禁收束。各篇之间的依赖关系如下,箭头由「先读」指向「后读」:
 
 ```mermaid
 graph TD
@@ -38,9 +38,11 @@ graph TD
   subgraph 质量与计划
     TE10[10 测试策略]
     RM11[11 路线图]
+    SR12[12 Supervisor / Runtime]
   end
 
-  O1 --> A2
+  O1 --> SR12
+  SR12 --> A2
   A2 --> P3
   P3 --> PA4
   P3 --> AL5
@@ -54,24 +56,26 @@ graph TD
   PA4 --> TE10
   T7 --> TE10
   SF6 --> TE10
-  O1 --> RM11
+  SR12 --> RM11
+  SR12 --> TE10
 ```
 
-两点补充:11(路线图)只需读过 01 即可看懂,但要评审其排期合理性需要通读全部;10(测试)是横切篇,faux provider 与 fixture 的设计会反过来影响 adapter 与 loop 的代码形态,建议在动手写 M1 代码之前就扫一遍。
+两点补充:11(路线图)读过 01/12 即可看懂,但要评审其排期合理性需要通读全部;10(测试)是横切篇,faux provider、并发 gate 与热更新剧本会反过来影响 runtime/agent 的代码形态，进入任何阶段实现前都应先读。
 
 首次通读的编号顺序,供直接照做:
 
 1. [01 目标与总览](./01-overview.md) —— 需求、决策、非目标
-2. [02 架构与分层](./02-architecture.md) —— 目录与依赖规则
-3. [03 内部协议](./03-internal-protocol.md) —— canonical 类型
-4. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn、Chat Completions 与 Responses
-5. [05 Agent 循环](./05-agent-loop.md) —— runLoop 与工具执行
-6. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
-7. [07 工具集](./07-tools.md) —— 八个工具的规格
-8. [08 会话持久化](./08-session-persistence.md) —— JSONL 与 compaction
-9. [09 CLI / TUI](./09-cli.md) —— 全屏交互、保底模式与 headless
-10. [10 测试策略](./10-testing.md) —— faux provider 与 fixture
-11. [11 路线图](./11-roadmap.md) —— M0–M7 与风险
+2. [12 Supervisor、多线程 Runtime 与能力快照](./12-supervisor-runtime.md) —— 新基线、身份、mailbox、取消、恢复、权限与兼容矩阵
+3. [02 架构与分层](./02-architecture.md) —— 目录与依赖规则
+4. [03 内部协议](./03-internal-protocol.md) —— canonical 类型
+5. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn、Chat Completions 与 Responses
+6. [05 Agent 循环](./05-agent-loop.md) —— runLoop 与工具执行
+7. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
+8. [07 工具集](./07-tools.md) —— 八个工具的规格
+9. [08 会话持久化](./08-session-persistence.md) —— JSONL 与 compaction
+10. [09 CLI / TUI](./09-cli.md) —— 全屏交互、保底模式与 headless
+11. [10 测试策略](./10-testing.md) —— faux provider 与 fixture
+12. [11 路线图](./11-roadmap.md) —— 阶段 0–3、review 门禁与风险
 
 ## 文档摘要
 
@@ -81,11 +85,11 @@ graph TD
 
 ### [02 架构与分层](./02-architecture.md)
 
-canonical 目录结构(`protocol` / `providers` / `agent` / `tools` / `session` / `cli` / `shared`)与 ESLint 机械强制的依赖方向,以及一次 prompt 从键盘到 wire 协议再回到屏幕的端到端数据流。「SDK 只允许出现在所属 adapter，provider 互相隔离」这条铁律的执行细节在此定义。
+canonical 目录结构（含 `protocol` / `capabilities` / `agent` / `session` / `runtime` / `cli`）与 ESLint 机械强制的依赖方向,以及一次 op 从 RuntimePort 到 wire 再以 envelope 回到前端的端到端数据流。「SDK 只允许出现在所属 adapter，provider 互相隔离」这条铁律的执行细节在此定义。
 
 ### [03 内部协议](./03-internal-protocol.md)
 
-全项目的类型基石:AgentMessage 消息模型(Part 化 content,错误与中止也是一等消息)、ProviderEvent 三段式流事件与 partial 快照、AgentEvent 事件面、Usage 统计口径、EventStream 载体类。其余所有文档引用的类型以本篇为准,是全套文档中唯一「不可协商」的一篇。
+全项目的类型基石：五类 opaque identity、RuntimeOp/OpReceipt、per-thread seq EventEnvelope、AgentMessage、ProviderEvent、AgentEvent、Usage 与 EventStream。其余所有文档引用的协议类型以本篇和 12 为准。
 
 ### [04 Provider 与 adapter](./04-provider-adapter.md)
 
@@ -101,15 +105,15 @@ Agent 类对外 API 与 runLoop 双层循环骨架:turn 生命周期、工具执
 
 ### [07 工具集](./07-tools.md)
 
-ToolDefinition 框架(zod 参数、executionMode、promptSnippet)与统一截断落盘策略,然后逐一给出 read / ls / grep / glob / bash / edit / write / plan 八个工具的参数 schema、行为规格、边界情况与验收清单。edit(fuzzy 匹配层、read-before-edit 硬约束)与 bash(进程组、尾部截断)是篇幅最大的两节。
+JSON-Schema-first CapabilityRegistry、不可变 snapshot、PreparedInvocation 与 PolicyEngine 的目标契约，以及 legacy ToolDefinition adapter 和八个内置工具的行为规格。edit/read-before-edit 与 bash/进程组仍是风险最高的实现边界。
 
 ### [08 会话持久化](./08-session-persistence.md)
 
-JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LLM 摘要 + 保留尾部,M7)、token / 成本统计口径、auto-retry 策略。session 层与 agent 层的职责边界——谁决定 `continue()`、谁持有重试策略——在此划清。
+ThreadRuntime、TranscriptRepository、RetryCoordinator、CompactionCoordinator、EventCommitter、EventHub 六个协作者，以及 thread journal、seq high-water、mailbox/control、恢复 lease、legacy JSONL 的兼容规则。
 
 ### [09 CLI / TUI](./09-cli.md)
 
-交互模式:Bun 1.3.14 + `@opentui/core` 全屏布局；stdin/stdout 均为 TTY 且 `TERM != dumb` 时启用。初始化失败先清理终端；已配置 key 时回退 classic,缺 key 的延迟校验会话关闭后退出 2。界面固定 header/prompt/footer,中间 Markdown 转录从顶部向下增长并在溢出后滚动；窄屏响应式收起 tips/Logo。classic readline/ANSI 与 plain 继续作为保底。键位保持 Enter=steer、Alt+Enter=followUp、Esc=abort；headless `--json` 的 stdin JSON / stdout NDJSON 协议不变,继续作为「内部协议对外暴露」的持续验证器。
+CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI/classic/plain 布局与键位保持，默认 headless 继续裸 SessionEvent，显式 envelope 模式输出 identity/seq。stdout drain 只约束前端输出泵，不反向背压 Agent。
 
 ### [10 测试策略](./10-testing.md)
 
@@ -117,15 +121,19 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 ### [11 路线图](./11-roadmap.md)
 
-里程碑 M0–M7 各自的交付物、验收标准与依赖顺序,以及风险清单。M0 脚手架 → M1 协议 + EventStream + faux provider → M2 Chat Completions adapter → M3 loop + 七个工具 → M4 steering / abort / transform → M5 CLI + session → M6 plan 工具 + 权限 → M7 compaction + 第二 provider。
+阶段 0–3 的严格串行路线：契约与 characterization → identity/envelope/RuntimePort → Session 六协作者与事件通道 → registry/snapshot/prompt/policy。每阶段都必须 review 清零、全量检查、提交并推送后才能进入下一阶段；M0–M7 仅保留为历史实现索引。
+
+### [12 Supervisor、多线程 Runtime 与能力快照](./12-supervisor-runtime.md)
+
+阶段 0–3 的权威演进契约：从进程级单 Agent 改为每线程单 active run，由 Supervisor 管理可并发的独立线程；冻结五类身份、per-thread seq 信封、mailbox、取消/恢复、权威提交与异步观察者、权限降权、JSON-Schema-first registry/snapshot，以及旧 Session/headless 的兼容矩阵。
 
 ## 按角色的阅读路径
 
 **我想尽快把代码跑起来(实现者)。**
-01 → 02 → 11(知道先做哪块)→ 03 → 05 → 07,然后按里程碑回读对应篇:做 M2 精读 04,做 M4 精读 06,做 M5 精读 08、09。10(测试)在写第一行 protocol 代码前扫一遍——faux provider 与 fixture 的形态决定你怎么组织代码。
+01 → 12 → 11（确认当前阶段）→ 02 → 03 → 10，再按阶段回读专题：阶段 1 精读 03/09，阶段 2 精读 05/06/08，阶段 3 精读 04/07。
 
 **我想搞懂协议设计(架构评审)。**
-03 → 04 → 06 是核心三篇:内部协议长什么样、wire 协议如何被隔离、转录如何在打断后保持合法。再回看 01 的决策表,核对每条决策的出处与理由是否站得住。
+12 → 03 → 04 → 06：先看 identity/envelope 总契约，再看内部协议、wire 隔离和 thread-local mailbox/取消。
 
 **我负责工具实现。**
 07 → 05(工具执行三阶段与调度语义)→ 03(ToolResultMessage / ImagePart / details 字段的确切含义)。edit 与 bash 是两块难啃的骨头,注意 07 中它们的边界情况清单。
@@ -142,7 +150,14 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 **turn** —— 一次 assistant 响应 + 其全部工具执行。是 runLoop 内层循环的一次迭代,也是 steering 注入的边界单位。
 
-**task(一次运行)** —— 从 `prompt()` / `continue()` 触发 `agent_start` 到 `agent_end` 的一次完整运行,含一个或多个 turn;follow-up 可在任务将结束时将其「续命」为更多 turn。
+**workspace** —— Supervisor 的资源、provider 配置与权限上限边界。
+
+**thread** —— transcript、mailbox、取消、恢复、权限状态与 per-thread seq 的隔离边界；每个 thread 至多一个 active run。
+
+**run** —— 从 `prompt()` / `continue()` 触发 `agent_start` 到 `agent_end` 的一次执行，具有唯一 RunId；retry/compaction 续跑创建 successor RunId。旧文档中的 task 通常指 run。
+
+**op** —— 调用方提交给 RuntimePort 的身份化操作，具有幂等 OpId；thread op 只目标一个 thread，
+workspace scope op 则在接收时冻结多个 thread/run 目标快照。
 
 **steering** —— 运行期间注入的用户消息:不打断当前 turn(正在执行的工具跑完),在 turn 边界作为 `source: 'steering'` 的 UserMessage 追加进 context,并使内层循环继续。
 
@@ -167,6 +182,8 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 **partial 快照** —— 每个 ProviderEvent 上附带的、到当前时刻为止的完整 AssistantMessage:消费端既可用 delta 增量渲染,也可只看快照,两种消费模式统一。
 
 **AgentEvent** —— agent → session 的核心事件:agent / turn / message / tool_execution 各级生命周期 + queue_update / plan_update / approval_request 等。
+
+**EventEnvelope** —— Runtime 的 canonical 外部事件：携带 WorkspaceId/ThreadId、可选 RunId/TurnId/OpId 与严格递增的 per-thread seq；SessionEvent 是其 legacy 投影。
 
 **SessionEvent** —— session → UI/客户端的事件:透传并可注解 AgentEvent，再叠加 retry_scheduled / compaction_* / usage_update。headless 模式逐行序列化的正是这一联合。
 
@@ -194,7 +211,11 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 ### 工具与外围
 
-**ToolDefinition** —— 工具的统一契约:name、description、zod `parameters`、可选 `executionMode` / `promptSnippet`、`execute(call, ctx)`。八个内置工具与未来的外部工具都实现它。
+**ToolDefinition** —— 八个既有工具的 legacy 契约；阶段 3 由 adapter 注册为 JSON-Schema-first
+capability。新的 core 消费 ToolCatalogSnapshot/PreparedInvocation，不直接查 ToolDefinition。
+
+**CapabilityRegistration / ToolCatalogSnapshot** —— schema、validator、executor、prompt metadata 的
+原子版本与每 turn 不可变快照；registry 更新只影响后续 turn。
 
 **executionMode: 'sequential'** —— 工具声明式的调度降级:批内任一工具声明它,整批 tool calls 退化为顺序执行(bash / edit / write 声明)。默认 parallel:preflight 顺序、执行并发、结果按源顺序回填。
 
@@ -206,13 +227,15 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 **截断落盘** —— 框架级 post-hook:工具输出超 2000 行 / 50KB 双上限时全文落盘临时目录,给模型的预览尾部附可执行续读提示(`Use offset=N to continue` 等)。
 
-**compaction** —— 上下文接近上限时的压缩:LLM 摘要 + 保留尾部消息(M7)。
+**compaction** —— 上下文接近上限时的压缩：LLM 摘要 + 保留尾部消息；successor run 使用新 RunId。
 
-**headless 模式** —— CLI 的 `--json` 形态:stdin 收 JSON 命令({prompt | steer | follow_up | abort}),stdout 吐 NDJSON SessionEvent——内部协议对外暴露的验证器。
+**headless 模式** —— RuntimePort 的 stdin/stdout adapter；默认格式保留裸 NDJSON SessionEvent，
+显式 envelope 格式暴露 identity/per-thread seq。
 
-**approval / doom-loop** —— M6 权限层:`beforeToolCall` 钩子 + `approval_request` 事件 + Promise resolver 注册表;同工具同参数连续 3 次触发 doom-loop 强制审批。
+**approval / doom-loop** —— 当前兼容层使用 beforeToolCall/broker；阶段 2 统一为 control op/event，
+阶段 3 由 PolicyEngine 基于 PreparedInvocation 与身份上下文决策。
 
-**plan mode** —— 权限层的模式标志:写工具保留在工具列表但执行时报错(v2,依赖 M6 权限层)。与 plan 工具(todo 型,v1 / M6)是两回事。
+**plan mode** —— 后续产品模式；与现有 plan capability（todo 列表）是两回事，不属于阶段 0–3。
 
 ## 参考仓库
 
@@ -225,26 +248,25 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 | `google-gemini/gemini-cli` | 工具调用显式状态机(pending → awaiting_approval → executing → …)、tree-sitter-bash 命令结构解析、grep 匹配少时自动附 context。 |
 | `openai/openai-node` | Chat Completions 与 Responses wire 的事实细节:流式文本/reasoning/function-call 事件、tool call 累积与配对、terminal/usage/error 语义、SDK 错误体系。 |
 
-## 里程碑与文档对照
+## 阶段与文档对照
 
-按 [11 路线图](./11-roadmap.md) 施工时,每个里程碑动工前应精读的文档:
+按 [11 路线图](./11-roadmap.md) 严格串行施工时，每个阶段动工前应精读：
 
-| 里程碑 | 主要交付 | 动工前精读 |
+| 阶段 | 主要交付 | 动工前精读 |
 |---|---|---|
-| M0 | 脚手架:Bun tsconfig / ESLint 边界 / `bun:test` / CI | 02 |
-| M1 | protocol 类型 + EventStream + faux provider | 03、10 |
-| M2 | Chat Completions adapter | 04、10 |
-| M3 | agent loop + 工具框架 + 七个工具 | 05、07 |
-| M4 | steering / follow-up + abort + transform 层 | 06 |
-| M5 | CLI TUI/headless + session 持久化 | 09、08 |
-| M6 | plan 工具 + 权限 / approval + 截断落盘完善 | 07、05 |
-| M7 | compaction + auto-retry + 成本统计 + 第二 provider | 08、04 |
+| 0 | 设计契约 + characterization baseline | 01、10、11、12 |
+| 1 | identity/envelope + RuntimePort/Supervisor + legacy projection | 02、03、09、12 |
+| 2 | Session 六协作者 + commit/hub + control 统一 | 05、06、08、10、12 |
+| 3 | capability/provider registry + prompt + policy | 04、07、10、12 |
+
+旧 M0–M7 只用于解释现有测试/注释来源，历史对照见 [11 §6](./11-roadmap.md)。
 
 ## canonical 类型的变更流程
 
 实现过程中发现类型需要调整时(一定会发生),按以下流程走,避免文档间悄悄失配:
 
-1. **加字段 / 加联合分支**:直接改类型的宿主篇(多数在 03,ToolDefinition 在 07,CompatFlags 在 04),同一次修改里 grep 全部文档,把引用了该类型的代码块同步;新增可选字段不算破坏性变更。
+1. **加字段 / 加联合分支**：先改宿主契约（identity/op/envelope/Supervisor 在 12 与 03，
+   capability/policy 在 07，provider adapter 在 04），同一次修改里检索并同步全部引用。
 2. **改名 / 改语义**:视为设计变更,先回 [01 目标与总览](./01-overview.md) 检查是否推翻了某条决策,再改宿主篇,再同步引用处;涉及 wire 边界(需求 1)或注入点语义(需求 2)的改动必须同步更新 01 的验收清单。
 3. **文档与代码冲突时**:以文档为准先行修订,代码跟随——反向「代码先改、文档后补」是 pi-mono AgentSession 失控路径的第一步,禁止。
 
@@ -252,4 +274,5 @@ JSONL 追加式会话存储的行格式与恢复流程、上下文 compaction(LL
 
 - [01 目标与总览](./01-overview.md) —— 从这里开始通读
 - [02 架构与分层](./02-architecture.md) —— 目录结构与依赖规则
-- [11 路线图](./11-roadmap.md) —— 里程碑与验收标准
+- [11 路线图](./11-roadmap.md) —— 阶段门禁与验收标准
+- [12 Supervisor Runtime](./12-supervisor-runtime.md) —— identity、线程、事件与兼容总契约

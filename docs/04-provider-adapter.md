@@ -2,7 +2,20 @@
 
 # 04 · Provider 接口契约与 OpenAI Adapters
 
-本文是 provider 层的完整规格:先回顾 agent 唯一认识的 provider 形态(`StreamFn`),然后逐节展开 Chat Completions adapter 的出站转换、入站解析状态机、错误映射、`CompatFlags` 方言系统与 transform 转录清洗层；第 11 节定义 OpenAI Responses adapter 的独立 wire 契约。协议隔离(需求 1)的全部落点都在本文:**`openai` 包及类型只允许出现在 `src/providers/openai-chat/` 与 `src/providers/openai-responses/` 内,两个 adapter 互相隔离,ESLint 边界规则违者报错**。
+本文是 provider 层的完整规格:先回顾 agent 执行引擎唯一消费的 provider 形态(`StreamFn`),然后
+逐节展开 Chat Completions adapter 的出站转换、入站解析状态机、错误映射、`CompatFlags` 方言系统
+与 transform 转录清洗层；第 11 节定义 OpenAI Responses adapter 的独立 wire 契约。协议隔离
+(需求 1)的全部落点都在本文:**`openai` 包及类型只允许出现在
+`src/providers/openai-chat/` 与 `src/providers/openai-responses/` 内,两个 adapter 互相隔离,ESLint
+边界规则违者报错**。
+
+阶段 0 冻结的目标基线补充一条外层约束：最终结构禁止 CLI 以静态 switch 为每次采样选择
+adapter；阶段 0 的既有 switch 只作为未改行为保留到阶段 3。届时 `ProviderAdapterRegistry` 原子
+注册版本化 StreamFn，并在每个 turn 开始时捕获不可变 snapshot；ThreadRuntime/Agent 只消费该
+snapshot 解析出的函数；这里的 Agent 指 ThreadRuntime 使用的 runtime snapshot engine。exported legacy
+Agent/Session 继续直接注入 `StreamFn`，不以破坏其 AgentConfig 来消除依赖。
+registry 与同 turn 一致性的 canonical 定义见
+[12 · Supervisor Runtime](./12-supervisor-runtime.md)。
 
 ## 1. StreamFn 契约回顾
 
@@ -28,6 +41,11 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 3. **事件序列合法。**`start` 首发;每个内容块严格三段式 `*_start → *_delta* → *_end`,`contentIndex` 对应 `partial.content` 下标;终止事件恰好一个(`done` 或 `error`);每个事件携带同一个逐步生长的 `partial` 快照;`stream.end(message)` 在终止事件后调用,使 `result()` resolve。
 
 Adapter 的责任边界:**wire 协议(`ChatCompletionMessageParam`、`ChatCompletionChunk`、Responses input/stream event)只存在于对应 adapter 内部**,进出都是内部协议类型。这是四层类型体系的最后一层(见 [架构](./02-architecture.md))。
+
+`StreamFn` 仍是一次 turn 内的值依赖，而不是让 Agent 持有或回查可变 registry。阶段 0 的
+`AgentConfig.streamFn` 直接注入保持不变；阶段 3 由 ThreadRuntime 从 turn 起点捕获的 provider
+snapshot 解析并注入。registry 在流式期间 register/unregister 不得替换正在执行的函数，也不得让
+未知 api fallback 到另一个协议。
 
 ## 2. ChatCompletionsAdapter 总体结构
 
@@ -56,7 +74,7 @@ export const streamOpenAIChat: StreamFn;           // 唯一入口
 export function detectCompat(baseURL: string | undefined): Required<CompatFlags>;  // §5
 ```
 
-SDK client 按 `(baseURL, apiKey)` 惰性构造并缓存;`maxRetries` 保留 SDK 默认(2 次,覆盖网络层瞬时错误),**整轮重发策略放在 session 层**——openai-node 的重试只到响应头返回为止,SSE 流中途断开 SDK 不会续传,这类恢复必须由持有完整转录的上层决定。
+SDK client 按 `(baseURL, apiKey)` 惰性构造并缓存;`maxRetries` 保留 SDK 默认(2 次,覆盖网络层瞬时错误),**整轮重发策略放在 RetryCoordinator**——openai-node 的重试只到响应头返回为止,SSE 流中途断开 SDK 不会续传,这类恢复必须由持有完整转录的 ThreadRuntime 决定。
 
 ## 3. 出站转换:Context → ChatCompletionMessageParam[]
 
@@ -183,7 +201,7 @@ function buildParams(model, ctx, options, compat): ChatCompletionCreateParamsStr
 }
 ```
 
-给推理模型设太小的 `max_completion_tokens` 会出现「token 全烧在 reasoning、content 为空、finish_reason:'length'」,这不是 adapter 能救的,session 层的 limits 配置负责给足预算。
+给推理模型设太小的 `max_completion_tokens` 会出现「token 全烧在 reasoning、content 为空、finish_reason:'length'」,这不是 adapter 能救的,Runtime 的 model limits 配置负责给足预算。
 
 ## 4. 入站解析:chunk 累积状态机
 
@@ -311,11 +329,11 @@ function pushErrorEvent(err, state, stream, signal): void {
 | openai-node 错误类 | stopReason | 备注 |
 |---|---|---|
 | `APIUserAbortError`(或 catch 时 signal 已 aborted) | `aborted` | steering 硬打断 / Esc 的正常路径 |
-| `RateLimitError` / `InternalServerError` / `APIConnectionTimeoutError` / `APIConnectionError` | `error` | errorMessage 保留类名,session 层据此判定可重试(见 [会话文档](./08-session-persistence.md)) |
+| `RateLimitError` / `InternalServerError` / `APIConnectionTimeoutError` / `APIConnectionError` | `error` | errorMessage 保留类名,RetryCoordinator 据此判定可重试(见 [会话文档](./08-session-persistence.md)) |
 | `BadRequestError`(400) | `error` | 大概率是我们的协议 bug,log 完整出站 messages 现场 |
 | 其余 `APIError`(401/403/404/422…) | `error` | 不可重试,带 status/requestID |
 
-abort 的传导链有**两条路径**(openai v6 实测):请求建立阶段(响应头返回前)abort → SDK throw `APIUserAbortError` → catch 分支映射;**SSE 流中途** abort → SDK 的流迭代器捕获 AbortError 后 **clean return,不 throw**(core/streaming.js 显式吞掉)→ for-await 正常结束——adapter 必须在收尾前检查 `signal.aborted && finishReason == null`,命中即按 aborted 收尾,否则用户打断会被误编码为「残缺流」类可重试 network 错误,M7 session 层会自动重发用户明确取消的请求。被中断的 AssistantMessage(stopReason `'aborted'`)**保留已流出的部分内容进转录**,重放时由 transform 层过滤(§6)——这保证「转录永远完整」与「出站永远合法」两个不变量同时成立。
+abort 的传导链有**两条路径**(openai v6 实测):请求建立阶段(响应头返回前)abort → SDK throw `APIUserAbortError` → catch 分支映射;**SSE 流中途** abort → SDK 的流迭代器捕获 AbortError 后 **clean return,不 throw**(core/streaming.js 显式吞掉)→ for-await 正常结束——adapter 必须在收尾前检查 `signal.aborted && finishReason == null`,命中即按 aborted 收尾,否则用户打断会被误编码为「残缺流」类可重试 network 错误,RetryCoordinator 可能错误地重发用户明确取消的请求。被中断的 AssistantMessage(stopReason `'aborted'`)**保留已流出的部分内容进转录**,重放时由 transform 层过滤(§6)——这保证「转录永远完整」与「出站永远合法」两个不变量同时成立。
 
 ## 5. CompatFlags:方言开关与 baseURL 自动推断
 
@@ -411,9 +429,11 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
    - stop_reason 映射:`end_turn→'stop'`、`max_tokens→'length'`、`tool_use→'tool_calls'`、`refusal→'content_filter'`;
    - 错误映射:Anthropic SDK 错误家族 → 同 §4.6 的 stopReason 编码,铁律不变;
 3. 如有方言(第三方 Anthropic 兼容端点),建该 adapter 自己的 compat 结构——CompatFlags 是 openai-chat 的私有类型,不跨 adapter 复用;
-4. 测试:录制 Messages SSE fixture 回放(见 [测试文档](./10-testing.md)),用与 openai-chat 相同的契约测试套件(事件序列合法性、永不 throw、abort 编码)跑一遍。
+4. 在 composition root 把 `{api:'anthropic-messages', version, streamFn}` 原子注册到
+   `ProviderAdapterRegistry`；不得给 Agent、Session 或 CLI 事件循环新增协议 switch；
+5. 测试:录制 Messages SSE fixture 回放(见 [测试文档](./10-testing.md)),用与 openai-chat 相同的契约测试套件(事件序列合法性、永不 throw、abort 编码)跑一遍，并覆盖 snapshot 热更新只影响下一 turn。
 
-**不需要动的:**`src/protocol/`、`src/agent/`(含 transform 层——它操作内部协议,规则 3 的跨模型降级自动生效)、`src/tools/`、`src/session/` 全部零改动;`src/cli/` 只在模型目录/配置里注册新的 `ModelRef` 与 StreamFn 分发项。**如果发现新增 provider 需要改 protocol 或 agent,说明内部协议抽象漏了,先修协议再写 adapter**——这是需求 1 的验收方式,也是 pi「agent-core 只认 StreamFn」结构被反复验证的地方。
+**不需要动的:**`src/protocol/`、`src/agent/`(含 transform 层——它操作内部协议,规则 3 的跨模型降级自动生效)、`src/tools/` 与 ThreadRuntime 执行循环全部零改动；CLI 的配置层可新增模型元数据，但不承担每次请求的 adapter 分发。**如果发现新增 provider 需要改 protocol 或 agent,说明内部协议抽象漏了,先修协议再写 adapter**——这是需求 1 的验收方式,也是 pi「agent-core 只认 StreamFn」结构被反复验证的地方。
 
 ## 9. faux provider 规格(脚本化回放,测试专用)
 
@@ -440,13 +460,16 @@ adapter 本体的测试不用 faux,用**录制的 SSE chunk fixture 回放**(moc
 - [ ] transform 层单测:aborted 消息(含其 toolResult)滤除、孤儿补结果、跨模型 reasoning 降级、非视觉图片降占位;
 - [ ] faux provider 通过与 openai-chat 相同的 StreamFn 契约测试套件;
 - [ ] 真实 OpenAI 端点冒烟(手动/CI 可选):一次带工具调用的完整 turn 往返无 400。
+- [ ] ProviderAdapterRegistry snapshot 冻结 revision/entries；同名 adapter 热更新时当前 turn 继续使用旧 StreamFn，下一 turn 才使用新版本；
+- [ ] 未知 `ModelRef.api` 产生合法 start→error 流，不 throw、fallback 或按 provider 猜协议。
 
 ## 11. OpenAI Responses Adapter
 
 `src/providers/openai-responses/` 是与 `openai-chat` 并列、互不依赖的 adapter。对外唯一运行时入口是
 `streamOpenAIResponses: StreamFn`；OpenAI SDK、Responses 请求类型与流事件类型不得出现在
-`protocol/`、`agent/`、`session/` 或 CLI 的函数签名里。CLI 只用
-`ModelRef{provider:'openai', api:'openai-responses', model}` 选择该入口。
+`protocol/`、`agent/`、`session/`、`runtime/` 或 CLI 的函数签名里。模型配置只携带
+`ModelRef{provider:'openai', api:'openai-responses', model}`；阶段 3 由 turn 捕获的
+ProviderAdapterRegistry snapshot 按 `api` 选择该入口，CLI 不直接分发。
 
 ### 11.1 出站：Context → instructions / input / tools
 
@@ -540,23 +563,80 @@ reasoning summary/content 分别成为现有 `ReasoningPart`。output item 完�
 [Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与
 [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
 
-## 12. CLI model directory 与按 `ModelRef.api` 动态分发
+## 12. Model directory 与 ProviderAdapterRegistry
 
-provider registry 属于 CLI composition root，不是第四个 wire adapter。它把
-`provider id / model id / api / baseURL / credential` 解析成完整 `ModelConfig`；唯一的生产
-dispatcher 每次调用都只看当次 `model.ref.api`:
+Model directory 把 `provider id / model id / api / baseURL / credential` 解析成完整
+`ModelConfig`；它描述“调用哪个模型”，不保存 executor。阶段 0 既有 CLI static switch 继续作为
+行为兼容实现，阶段 3 必须迁移为可嵌入 runtime 的 `ProviderAdapterRegistry`：
 
 ```ts
-switch (model.ref.api) {
-  case 'openai-chat':         return streamOpenAIChat(model, context, options);
-  case 'openai-responses':    return streamOpenAIResponses(model, context, options);
-  case 'anthropic-messages':  return streamAnthropicMessages(model, context, options);
+export interface ProviderAdapterRegistration {
+  readonly api: ModelApi;
+  readonly version: string;
+  readonly implementationDigest: string;
+  readonly stream: StreamFn;
 }
+
+export type ProviderAdapterEntry = Readonly<ProviderAdapterRegistration> & {
+  readonly registrationDigest: string;
+};
+
+export type ProviderRegistryMutationResult =
+  | { readonly ok: true; readonly revision: number }
+  | { readonly ok: false;
+      readonly code: 'duplicate_provider_adapter' | 'provider_adapter_not_found' |
+        'revision_conflict' | 'invalid_provider_adapter';
+      readonly message: string; readonly revision: number };
+
+export interface ProviderAdapterSnapshot {
+  readonly revision: number;
+  readonly entries: readonly ProviderAdapterEntry[];
+  resolve(api: ModelApi): ProviderAdapterEntry | undefined;
+}
+
+export interface ProviderAdapterRegistry {
+  register(registration: ProviderAdapterRegistration): ProviderRegistryMutationResult;
+  update(api: ModelApi, registration: ProviderAdapterRegistration,
+    options?: { readonly expectedRevision?: number }): ProviderRegistryMutationResult;
+  unregister(api: ModelApi,
+    options?: { readonly expectedRevision?: number }): ProviderRegistryMutationResult;
+  snapshot(): ProviderAdapterSnapshot;
+}
+
+export interface ProviderAdapterRegistryReader {
+  snapshot(): ProviderAdapterSnapshot;
+}
+
+export function createProviderAdapterRegistry(): ProviderAdapterRegistry;
 ```
 
+CLI 或其他宿主持有 mutable registry 并注册 built-in/第三方 adapter；RuntimeCapabilityServices 只接收
+`ProviderAdapterRegistryReader` snapshot-only view。提交 prompt 后 CLI 只与 RuntimePort
+交互，不参与 turn 的 adapter 选择。ThreadRuntime 在**每个 turn 开始时恰好捕获一次** snapshot，
+按当次 `model.ref.api` 得到 registration，并把其中的 StreamFn 作为不可变值传给 Agent。流式期间的
+register/unregister 只影响下一 turn，不能替换正在运行的 executor；snapshot 必须冻结 entries，
+不得暴露 registry 的可变 Map。registry 在 register 时复制并冻结 registration，snapshot 的 entries、
+查找索引与 `resolve()` 返回值都深冻结；调用方改写原注册对象或 resolve 结果不能改变当前/后续 snapshot。
+
+revision 从 0 开始，只在成功 mutation 后增加。duplicate register、missing update/unregister、
+`registration.api !== api` 或 expectedRevision conflict 返回稳定 failure 且不改状态。register 追加稳定
+槽位，update 保留槽位，unregister 删除；删除后重新 register 追加末尾。turn 只使用捕获 entry 的
+registrationDigest/StreamFn，绝不回查 live registry。
+
+`implementationDigest` 格式与 capability registry 相同：`impl_sha256_` + 64 个小写 hex，由 adapter
+release 唯一代表 StreamFn 行为，不能用 `Function#toString`。registrationDigest 的 payload 仅为规范化
+strict JSON `{api,version,implementationDigest}`，用 [12](./12-supervisor-runtime.md) §3.4 canonical
+serializer；计算 `SHA-256(UTF8('coda.runtime.provider-adapter-registration.v1') || 0x00 ||
+canonicalBytes)` 并加 `providerreg_v1_`。golden payload
+`{api:'openai-chat',version:'1',implementationDigest:'impl_sha256_'+64×'0'}` 得到
+`providerreg_v1_ef4b8b6c776430d60fdf3706175bd47c0b49f7c0b8f3fa8097dc3ff26ad3398d`。
+同一 `(api,version)` 在一个 registry history 内不得换 digest；跨部署的宿主也必须升级 version，且
+审计/grant 若引用 provider generation 必须同时绑定 digest，不能只信 version 字符串。
+
 不能按 `ModelRef.provider` 分发。一个 provider 可以同时承载多种 wire 协议，provider/model
-切换也不能把上一次 adapter 缓存在 Session 外。未知 `api` 必须返回符合 `StreamFn` 铁律的流内
-error，而不是 throw 或猜测协议。
+切换也不能沿用上一个 turn 的 registration。未知 `api` 或已从新 snapshot 移除的 api 必须返回
+符合 `StreamFn` 铁律的流内 error，而不是 throw、fallback 或猜测协议。legacy `AgentConfig.streamFn`
+可视为只有一个 registration 的固定 snapshot。
 
 ### 12.1 OpenCode Go 是显式混合协议 provider
 
@@ -570,7 +650,7 @@ OpenCode Go 固定为:
 ```
 
 其官方 endpoint 目录同时提供 OpenAI-compatible Chat Completions 与 Anthropic Messages。
-registry 维护以下显式表；`api` 以官方 endpoint 目录为事实源，limits 以 OpenCode 自身使用的
+model directory 维护以下显式表；`api` 以官方 endpoint 目录为事实源，limits 以 OpenCode 自身使用的
 models.dev provider 目录为事实源，不能从模型名、厂商前缀或 `/models` 响应猜测:
 
 | model id | `ModelRef.api` | context | max output |
@@ -599,7 +679,7 @@ OpenCode Go 当前的该 endpoint 只给标准 id 元数据，因此完整 `Mode
 [OpenCode Go 官方 endpoint 目录](https://opencode.ai/docs/go#endpoints)和 models.dev 的
 `opencode-go` 目录，并同步更新生成式离线 fixture，禁止只改测试期望。
 
-OpenCode 的 Anthropic endpoint 已包含 `/v1`。`ModelConfig.baseURL` 保留原值供 registry 与日志
+OpenCode 的 Anthropic endpoint 已包含 `/v1`。`ModelConfig.baseURL` 保留原值供 model directory 与日志
 定位；Anthropic SDK adapter 构造 client 时只剥掉**末尾恰好一个** `/v1`，避免 SDK 再追加
 `/v1/messages` 形成 `/v1/v1/messages`。其他路径不做广义裁剪。
 
@@ -616,3 +696,4 @@ provider name 只负责形成稳定、大小写不敏感的 id，不参与 wire 
 - [05 · Agent 核心](./05-agent-loop.md) —— StreamFn 的消费方:length 全批失败、abort 传导、turn 生命周期
 - [06 · steering / follow-up](./06-steering-following.md) —— transform 层与 abort/steering 交互的完整语义
 - [10 · 测试策略](./10-testing.md) —— SSE fixture 录制/回放机制与 StreamFn 契约测试套件
+- [12 · Supervisor Runtime](./12-supervisor-runtime.md) —— ProviderAdapterRegistry、turn snapshot 与 public Runtime 边界

@@ -1,251 +1,505 @@
 [← 返回地图](./README.md)
 
-# 11 实施路线图:里程碑 M0–M7、验收标准与风险清单
+# 11 实施路线图：Supervisor Runtime 阶段 0–3
 
-本文把 [01-overview](./01-overview.md) 的目标与 [02-architecture](./02-architecture.md) 的分层拆成 8 个可独立验收的里程碑。每个里程碑给出:目标、交付物、前置依赖、**可执行的验收步骤**、预估规模、以及结束时的 demo 剧本(一句话说清「这周能演示什么」)。规模估算含测试代码,量级仅用于排期感知,不作为 KPI。
+本文规定从当前单 `Session` 实现迁移到可嵌入多线程 Runtime 的唯一 active roadmap。目标语义以
+[12-supervisor-runtime](./12-supervisor-runtime.md) 为 canonical 契约；原 M0–M7 已经形成的
+protocol、provider、agent、工具、CLI、持久化、approval、retry 与 compaction 能力是**历史实现
+基线**，不再是待执行路线，也不得覆盖阶段 0–3 的新约束。
 
-## 0. 总览
+## 0. 总览与硬门禁
 
 ```mermaid
-graph LR
-  M0[M0 脚手架] --> M1[M1 protocol + faux]
-  M1 --> M2[M2 CC adapter]
-  M1 --> M3[M3 loop + tools]
-  M2 -.真实模型联调.-> M3
-  M3 --> M4[M4 steering/abort/transform]
-  M4 --> M5[M5 CLI + session]
-  M5 --> M6[M6 plan + approval]
-  M5 --> M7[M7 compaction/retry/第二 provider]
-  M6 --> M7
+flowchart LR
+  P0["阶段 0\n重写设计契约\n冻结 characterization 基线"]
+  G0["review 清零\ncheck 通过\ncommit + push"]
+  P1["阶段 1\n协议身份化\n可嵌入 Runtime"]
+  G1["review 清零\ncheck 通过\ncommit + push"]
+  P2["阶段 2\n拆分 Session\n事件提交/广播分离"]
+  G2["review 清零\ncheck 通过\ncommit + push"]
+  P3["阶段 3\n动态注册表\n上下文与权限"]
+  G3["review 清零\ncheck 通过\ncommit + push"]
+  P0 --> G0 --> P1 --> G1 --> P2 --> G2 --> P3 --> G3
 ```
 
-| 里程碑 | 一句话 | 规模量级 |
+| 阶段 | 结果 | 允许改变生产行为 |
 |---|---|---|
-| M0 | 仓库能 build/lint/test 空跑,import 边界已被 lint 武装 | ~10 文件 / 数百行 |
-| M1 | 内部协议类型 + EventStream + faux provider,全离线 | ~8 文件 / 1000 行 |
-| M2 | Chat Completions adapter,SSE fixture 回放全绿 | ~10 文件 / 1500 行 |
-| M3 | agent loop + 工具框架 + 7 个工具,真实模型能改文件 | ~25 文件 / 3500 行 |
-| M4 | steering / follow-up / abort / transform 层 | ~8 文件 / 1200 行 |
-| M5 | 可日用的全屏 TUI + classic/plain + headless `--json` + JSONL 会话 | ~17 文件 / 3200 行 |
-| M6 | plan 工具 + 权限/approval + 截断落盘完善 | ~10 文件 / 1500 行 |
-| M7 | compaction + auto-retry + 成本统计 + Anthropic adapter | ~12 文件 / 2000 行 |
+| 0 | 新设计契约 + characterization tests | 否 |
+| 1 | identity/envelope + `RuntimePort`/Supervisor + legacy 投影 | 只新增 canonical/public surface；旧 surface 保持 |
+| 2 | `Session` 六协作者 + authoritative commit/async observers + control 统一 | 内部结构改变；现有单 Agent 行为保持 |
+| 3 | capability/provider registry + snapshot + prompt/policy | 注册方式改变；现有工具/provider 行为保持 |
 
-节奏感知:M3 是体量高峰(工具集是纯粹的体力活,但每个工具彼此独立,易并行);M4 是**难度**高峰(代码量小、语义密度最高);M5 之后项目自举,迭代速度会明显加快。若按单人全职估算,M0–M5 约 4–6 周,M6–M7 约 2–3 周;数字仅供节奏参考,验收标准才是完成的唯一定义。
+四个阶段必须严格串行，不把后一阶段的实现“顺手”塞入当前提交。每一阶段执行同一闭环：
 
-## 1. 实施顺序的理由
+1. 对照本文件、[12](./12-supervisor-runtime.md) 与对应专题设计文档确认范围；先补测试，再实现。
+2. 运行阶段定向测试和受影响的既有回归；对架构、协议、恢复、并发和兼容投影做独立 review。
+3. review 发现任何问题时直接修复，重新运行定向测试并再次 review；问题未清零不得进入下一步。
+4. 运行 `bun run check`，检查文档、public exports、依赖边界和 worktree scope。
+5. 只提交当前阶段的变更并推送；commit/push 成功后才开始下一阶段。
 
-### 1.1 为什么 protocol 先行(M1)
+review 清零表示没有已知 correctness、并发、恢复、权限、兼容或边界问题；不是只看格式，也不能用
+“留到下一阶段”掩盖当前阶段已承诺的验收项。
 
-`src/protocol/` 是所有其他目录的唯一公共依赖(见 02 文档依赖图),它冻结得越早,后续里程碑越能并行:M2(adapter)与 M3(loop)都只依赖 M1,理论上可以两个人同时开工。更深一层的理由来自参考项目的共同经验:
+## 1. 阶段 0：重写设计契约，冻结基线
 
-- agent 系统的质量上限由事件协议决定——pi 的 13 种流事件、codex 的 `submit(Op)/next_event()` 都是先有协议、后有实现;协议是这类系统里最难事后更换的部件。
-- 协议层零运行时依赖(纯类型 + 一个 EventStream 类),写它的成本极低,但它固化了「AssistantMessage 携带 stopReason/usage/ModelRef、错误也是一条合法消息、每个事件带 partial 快照」这些关键决策——决策在此刻翻案的成本最低,越晚越贵。
-- faux provider 与协议同期交付,意味着「测试基建先于被测系统」:M3 起的每一条 loop 测试都不碰网络。
+### 1.1 目标
 
-### 1.2 为什么 adapter 在 loop 之前(M2 → M3)
+把“进程内全局单 Agent、子 Agent 是工具”的旧假设替换为：一个 workspace 由 Supervisor 管理多个
+独立 thread，每个 thread 至多一个 active run，不同 thread 可并发；子 Agent 是有独立身份、转录、
+mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterization tests，不改变生产行为。
 
-表面看反直觉——loop 用 faux provider 就能开发,似乎该先写 loop。排序的真正依据有两条:
+### 1.2 交付物
 
-- **协议要先被现实砸实。** 内部协议在接触真实 wire 格式之前只是一个假设:`ProviderEvent` 能否无损表达 Chat Completions 的流(tool_calls 按 index 分片、usage 尾 chunk、in-band error、`finish_reason: 'length'` 的截断参数)?openai-node 的 `ChatCompletionStream.ts` 累积算法、id 缺失兜底这些细节,任何一个塞不进 `ProviderEvent` 都意味着协议要改——协议返工的代价随其上层建筑数量线性增长,所以要赶在 loop 建起来之前用最难缠的真实方言验证它。
-- **风险对冲。** adapter 是全项目风险密度最高的模块(第 3 节 R1/R2 全部落在这里),把最不确定的部分前置,暴雷早、返工面小。faux provider 保证这个顺序不阻塞任何人:M3 的全部单测跑 faux,adapter 只在联调时介入。
+- [12](./12-supervisor-runtime.md) 冻结 Workspace/Thread/Run/Turn/Op 身份、per-thread seq、
+  EventEnvelope、Supervisor/ThreadRuntime 职责和目标依赖图。
+- 对应专题文档同步 identity、mailbox、steering/follow-up、取消、恢复、lease、权限、approval/control、
+  observer 背压与 legacy projection 语义；冲突时不再保留模糊的“双重 canonical”。
+- 兼容矩阵明确阶段 0–3 对 `Agent`、`Session`、默认 headless、envelope headless、JSONL v1、
+  `ToolDefinition` 与 provider switch 的承诺。
+- characterization tests 固定当前可观察事实：同 Session 拒绝第二个 prompt，两个 Session 可并发
+  卡在不同 gate，abort/mailbox/transcript 相互隔离，默认 headless 仍输出裸 `SessionEvent`。
 
-### 1.3 为什么 steering 单独一个里程碑(M4)
+### 1.3 禁止事项
 
-steering 不是 loop 的一个 feature flag,而是一组跨层的精密约定:注入点只在 turn 边界、abort 的孤儿 toolCall 要在下次请求前补合成结果、aborted 消息重放时过滤。这三件事分别落在 agent、transform、adapter 三层,错任何一处的表现都是「偶发 400」——Chat Completions 对 tool_calls/tool 配对缺一条即 400(openai-node 调研确认),而偶发意味着难排查。
+- 不增加 identity/envelope/runtime 生产类型，不重排事件，不改变 listener 背压或 JSONL 格式。
+- 不提前拆 `Session`，不迁移工具/provider，不把测试写成阶段 1–3 的理想行为。
+- 不把“CLI 当前只打开一个 Session”重新表述成全局运行时互斥。
 
-- pi 把 transform-messages 做成独立垫层、codex 把 pending_input 的 drain 时机写进核心状态机,都证明这块值得一等公民待遇。
-- 单独里程碑意味着单独的测试矩阵(见 M4 详表),而不是揉在 M3 里「顺便测测」。
-- M3 因此先交付一个**只会一路跑到完成**的 loop:语义简单、测试面小;M4 在其上叠加中断与注入,每条测试都有明确的前置状态。
+### 1.4 验收与 review
 
-### 1.4 为什么 CLI 在 loop 与 steering 之后(M5)
+1. `rg` 检查所有设计文档，不再把“子 Agent 是工具”或“全局只有一个 Agent/run”作为目标架构。
+2. characterization tests 用 gate 而非 timer，断言只观察 public event/transcript/provider calls。
+3. reviewer 逐项核对依赖图、身份生命周期、mailbox 顺序、取消 scope、恢复 high-water mark、权限
+   继承与兼容矩阵，确认术语在各文档一致。
+4. 定向测试与 `bun run check` 全绿；diff 只含 `docs/` 与 characterization tests。
 
-CLI 是 `SessionEvent` 的纯消费者([09-cli](./09-cli.md)),事件集不稳定时写 UI 就是在流沙上盖楼——opencode V1 的教训正是 UI 与核心互相渗透后无法拆分,最终付出整体重写的代价。`queue_update`、abort 收尾语义都在 M4 才定形,M5 开工时渲染对应表(09 文档第 4 节)已经是一张不会再变的表。headless `--json` 与交互 TUI 同期演进,互为验证:headless 是 e2e 协议面,OpenTUI TestRenderer 是视觉回归面,TUI 是体验面。
+完成 review 循环后提交并推送阶段 0，才允许创建阶段 1 的生产文件。
 
-### 1.5 为什么 approval 与 compaction 垫后(M6/M7)
+## 2. 阶段 1：协议身份化与可嵌入 Runtime
 
-两者都是在稳定内核上的纯增量:approval 只是 `beforeToolCall` 钩子的一种实现 + 一个事件/命令对;compaction 只是 `transformContext` 钩子的一种实现。钩子在 M3 就已存在,后置不产生返工;反而能在日用(M5 起自举开发)中积累真实需求——哪些 bash 命令该免审、compaction 该保留多长的尾部,这些参数靠拍脑袋不如靠两周的真实使用。
+### 2.1 目标
 
-## 2. 里程碑详表
+让 identity 和 envelope 成为 canonical protocol，并提供无 UI、无隐式副作用、可由 CLI 或未来
+宿主嵌入的 Runtime。旧 `SessionEvent` 与默认 headless 通过显式 projector 兼容。
 
-### M0 脚手架
+### 2.2 交付物
 
-- **目标**:空仓库变成有纪律的仓库——所有后续 PR 的机械检查就位。
-- **交付物**:`package.json`(Bun 1.3.14、ESM、bin 占位 `coda`)、`bun.lock`、`tsconfig.json`(strict、Bundler resolution)、`Bun.build` 构建脚本、`bun:test` 配置、ESLint(含 `import/no-restricted-paths`:`openai` 包仅允许 `src/providers/openai-chat/`;`agent`/`tools`/`protocol` 禁止 import `providers/*`、`cli/*`)、`.gitattributes`(强制 LF,风险 R3 的第一道防线)、CI(lint + build + test 三件套)、`src/` 空目录骨架。
-- **实现要点**:统一入口脚本 `bun run check` = lint + typecheck + build + test,后续所有里程碑的验收第一条都是它;ESLint 边界规则本身要配一个「故意违例」的注释样例文件放在 `eslint` 测试里,防止规则被后人静默删除后无人察觉。项目工具链与运行时统一固定 Bun 1.3.14；`node:fs` 的目录操作及 append/fsync/truncate、`node:path`、classic readline/raw TTY、`process` signal/PGID 是 Bun 暂无等价语义时的受控 compatibility 边界,不宣称零 Node API。eligible 双 TTY 默认由 OpenTUI 管理 raw TTY；初始化失败先清理终端,已配置 key 时回退 classic,缺 key 的延迟校验会话关闭后退出 2。
-- **前置**:无。
-- **验收**(可执行):
-  1. `bun run build && bun run lint && bun test` 全绿(允许 0 test)。
-  2. 边界规则自证:临时在 `src/agent/x.ts` 写 `import 'openai'`,`bun run lint` 必须报错;删除后恢复绿。对 `src/protocol/` import `openai` 同理。
-  3. CI 在干净 clone 上跑通同样三件套。
-- **规模**:~10 个配置文件,数百行。
-- **Demo 剧本**:「克隆仓库,一条 `bun install --frozen-lockfile && bun run check` 全绿;故意越界 import,lint 当场拦下。」
+- `src/protocol/` 增加 opaque `WorkspaceId`、`ThreadId`、`RunId`、`TurnId`、`OpId`、
+  `RuntimeOp`、`OpReceipt`、`RuntimeEvent`、`EventEnvelope`、JSON-safe PermissionCeilingSnapshot 与
+  per-create/run PermissionNarrowing；相对导入保持 `.js`。
+- envelope 使用目标 thread 的独立 `seq`；阶段 1 由 runtime 内部的临时 event journal/writer 持久化
+  high-water mark，close/resume 后继续递增；阶段 2 将其原样提取进 EventCommitter/Repository。
+- 同一临时 thread journal 在 accepted receipt 前保存完整 RuntimeOp payload、resolved abort target、
+  run reservation 与 op lifecycle；dispatcher cache 可在内存，crash 后从 journal 重建 suspended FIFO。
+- `src/runtime/` 提供 `Supervisor`、`RuntimePort` 与显式 factory；一个 Supervisor 只服务一个
+  workspace，负责 thread 生命周期、op 路由、幂等和 parent/child 元数据；port 暴露稳定 workspaceId
+  与可注入的 newThreadId/newOpId bootstrap helpers，调用方无需重复生成 identity。
+- 阶段 1–2 只落 `CreateRuntimeBaseOptions` 的 `capabilityMode?:'static'` 构造分支，并拒绝
+  `capabilityServices`；阶段 3 才以向后兼容的类型扩展加入 `capabilityMode:'registry'` 与
+  `RuntimeCapabilityServices`。阶段 1 不为尚未实现的 registry 建占位业务类型或部分 service bundle。
+- 注入式 `RuntimeStoragePort/RuntimeWorkspaceStoragePort/ThreadJournalPort` 提供 catalog、完整 op ledger、
+  atomic append+flush/lease、安全 storage key 与 v1 import；core 不读 HOME/env/默认目录。CLI 把默认
+  legacy/runtime roots 或 `--session-dir` 的固定映射显式交给同一 file adapter，测试可换 tmp/in-memory port。
+  workspace storage 首次原子绑定 immutable workspaceId+recordedCwd，mismatch 在 lease/recovery 前 typed
+  reject。
+- `getThreadSnapshot()` 原子返回 transcript/usage 与完整当前 frontend reducer projection，再用
+  highWaterSeq 与 hot subscription 无缝拼接；CLI 不绕过 RuntimePort 读 repository，v1 历史不伪造事件。
+- create/resume/set_model 以 JSON-safe model_selected mutation 原子维护 current ModelRef；resolver 的
+  ModelConfig/秘密不落盘，失败不改变 checkpoint。
+- 阶段 1 临时 writer 在首次 attach 时持久 seed，此后原子 fold committed envelope 与 compaction
+  mutation→frontend/execution checkpoint+highwater；snapshot 禁止回读已先 mutation 的 Session 内存。
+  重启把 committed checkpoint（含 `{tailStartId,summary}`）传回 driver 初始化，只有首次纯 v1 import
+  才从 legacy 文件建 seed。
+- Supervisor core 只依赖注入的 `ThreadDriverFactory/ThreadDriverPort`。阶段 1 的独立 legacy adapter
+  为每个 ThreadId 驱动一个现有 Session，并把 SessionEvent/ApprovalBroker 映射到 canonical event/op；
+  阶段 2 在不改 RuntimePort 的前提下用 ThreadRuntime 替换它。阶段 1 factory 接收
+  per-attachment config factory：无状态 StreamFn/ToolDefinition 可共享，ApprovalBroker、pending map、
+  FileTracker 与 rule/policy/doom-loop 状态必须每 thread 新建；不提前要求阶段 3 registry。
+- legacy Session 的内部 retry/compaction 必须经 Supervisor 注入的 `reserveSuccessor` 权威 hook 取得
+  并在 predecessor agent_end 可见前持久登记/激活新的 RunId+permission ceiling；turn 经异步
+  `reserveTurn` 先登记 TurnId，
+  全部事件经 `commitEvent`。它不是
+  会吞 listener reject 的普通 Session.subscribe；hook 失败必须阻止后续副作用。driver 不得在事件
+  到达后补猜 identity。
+- driver 的 activity completion 以 per-op 因果链为边界，覆盖 detached retry/compaction successor，
+  返回最终 status/terminalRunId；不能把当前 Session.prompt 的早期 resolve 或全局 waitForIdle 直接
+  当成完成，也不能吞并 compacting 期间另行 accepted 的 prompt。
+- Supervisor 只向 driver 传 discriminated PreparedThreadDriverCommand：run/model/abort target 均在类型上
+  必填且来自 durable/trusted resolution；prompt/continue 还携带同 RunMutation 的 permission ceiling
+  与 resolved prompt-input/residue seed，
+  legacy driver 不得二次读取 current activity/空 Session 猜输入。
+- legacy factory 的 create 返回实际 Session backend 的 durableRef；Supervisor 持久绑定
+  ThreadId→driverRef。create 使用基于 workspace/thread/create-op 的幂等安全 creationKey，任意
+  ThreadId 不得直接成为文件名；resume 只用已验证 ref。
+- child terminal commit 写稳定 resultOpId 的 durable outbox；父未 attach 时延迟，resume 后向父 journal
+  恰好一次提交 `thread_result`，crash 重投由父 journal/result ledger 去重。
+- public runtime package export 可独立 import；import 不读取环境/配置、不创建目录、不注册 signal、
+  不加载 TTY/provider SDK、不发网络请求。consumer specifier 固定为 `coda/runtime`，exports 的 import/
+  types 分别指向 dist/runtime/index.js 与 .d.ts；package root 不承诺 library import。
+- createRuntime 只接受调用方预解析的 current-host non-empty absolute cwd，empty/relative/NUL 在任何
+  storage/lease 前 `invalid_workspace_cwd`；Runtime 不读取 ambient cwd、不 resolve/realpath。legacy ID
+  pure hash 仍覆盖 arbitrary well-formed raw cwd，v1 invalid executable cwd 只读列出并禁止 mutable attach。
+- Runtime 可在没有模型且零 attached thread/journal 时提供只读 workspace catalog；`listThreads()`
+  枚举未 attach canonical/v1 索引的 createdAt/title，选择模型后 `thread_resume` 显式携带 ModelRef。
+- PermissionPolicyPort 显式 snapshot 当前 workspace ceiling，再以同一 snapshot、persisted thread/
+  predecessor ceiling 与 RuntimeOp narrowing 派生 effective ceiling；Supervisor 不暗读/解释策略。
+- CLI 收敛为参数/配置/composition 与前端适配：输入映射为 op，canonical envelope 映射为 UI；
+  legacy `Session`/headless 使用 projector，默认输出保持旧形态，显式 flag 才输出 envelope。
+- exported Session 类在阶段 1 保持现有 promise/sync throw 与 awaited listener 实现；runtime driver 的
+  完整 causal completion 不泄漏给旧 prompt promise，阶段 2 才把 Session 改为 facade。
+- 旧 JSONL v1 确定性映射到默认 workspace/thread；恢复不自动启动 run。retry/continue 创建新
+  `RunId`，用 `predecessorRunId` 关联。
 
-### M1 内部协议 + EventStream + faux provider
+### 2.3 必测不变量
 
-- **目标**:冻结 [03-internal-protocol](./03-internal-protocol.md) 的全部类型;交付可脚本化的测试 provider,让此后一切开发离线。
-- **交付物**:`src/protocol/messages.ts`(AgentMessage 族、Usage、Context)、`provider.ts`(ProviderEvent、StreamFn、ModelConfig、EventStream/ProviderEventStream)、`agent-events.ts`(AgentEvent、QueuedMessage、PlanStep);`src/providers/faux/`(接受事件脚本,按序回放为 ProviderEventStream,支持 gate 受控暂停与中途 error/abort 剧本);EventStream 单测。
-- **实现要点**:faux provider 的脚本格式设计值得多花半天——它是此后每个里程碑测试的通用语言,应支持:`gate` 受控暂停(不用计时器,与 [10-testing](./10-testing.md) §3.2 的零时间依赖原则一致)、按调用次数切换剧本(第 1 次调用回 tool_calls、第 2 次回 stop,模拟多 turn)、abort 感知(每个发射间隙与 gate 等待中检查 signal,以 aborted 消息收尾)、以及记录每次收到的 `Context` 供断言(M4 验证出站转录、M7 验证 compaction 都靠它)。EventStream 注意 push 在无消费者时的缓冲语义与 end 后迭代器的收尾,这两处 bug 会以「测试偶发挂起」的形态折磨所有后续里程碑。
-- **前置**:M0。
-- **验收**:
-  1. EventStream 语义测试全绿:异步迭代收到 push 的全部事件;`end()` 后迭代终止且 `result()` resolve;先迭代后 push、先 push 后迭代两种时序都正确;end 后再 push 被忽略并产生开发警告。
-  2. faux provider 回放剧本:`text_start/delta/end + done` 剧本产出的最终 AssistantMessage 与逐事件 partial 快照一致(最后一个 partial 深等于 done.message)。
-  3. faux 的 error 剧本验证 StreamFn 铁律:调用方零 try/catch 收到 `error` 事件,stopReason 为 `error`。
-- **规模**:~8 文件 / 约 1000 行(含测试)。
-- **Demo 剧本**:「一个 20 行脚本用 faux provider 在终端逐字打印一条流式 assistant 消息,全程无网络。」
+1. 同 thread 仍只有一个 active run；两个 thread 可并发，mailbox/abort/事件互不影响。
+2. A/B 事件交错时各自 seq 从 1 严格递增；恢复后续接，绝不声明全局总序。
+3. 重复 `OpId` 返回 duplicate receipt，不重复 provider 调用、工具副作用或 transcript append；旧
+   `expectedRunId` abort 不误杀 successor run。
+   legacy driver 的 retry/compaction 在 coordinator event/内部续跑前已通过 host gate 登记 successor
+   RunId；在 gate 前后取消均不产生未知或复用的 run identity。
+4. envelope identity 归属正确；不适用的 `runId/turnId/opId` 字段直接缺失。
+5. 旧 `Session` API、默认 headless NDJSON 和 JSONL v1 回归全绿；同一 canonical event 的 legacy
+   投影与阶段 0 黄金序列深等。
+6. package export smoke test 证明 runtime import 无副作用，构建产物可被 ESM 消费。
+7. `events()` 返回即原子建立订阅；先订阅尚未 create 的 ThreadId、延迟首次 `next()` 也不丢 lifecycle/
+   op envelope。envelope headless 对每个可解析 op 只输出一个 receipt，覆盖 duplicate/rejected 与
+   transport error；legacy 模式不新增 frame。
+8. 在 legacy backend create 成功与 driverRef ledger 绑定之间注入 crash；相同 create OpId 重投取得
+   同一 Session id，重启 resume 精确打开它，且任意/path-like ThreadId 从不进入文件路径。
+9. 两个 attachment 的 approval/rule/FileTracker 状态互不串线；control decision 按 request kind 校验，
+   legacy approval-abort 从 pending record 固定 owningRunId/expectedRunId，迟到命令不杀 successor。
+10. compaction event/mutation/checkpoint 同 gate，crash/resume 后出站仍为 committed summary+tail；
+    event-family identity presence/matching 矩阵逐项覆盖；reserveTurn gate 未放行时 next-turn queue drain
+    不得 mutation/发布，放行后 drain 与随后整 turn 复用该 TurnId。
+11. queue/control/partial-tool/retry/compaction 各 crash 点经 resume barrier 后，driver queue/context 与
+    snapshot/ledger 一致；旧 activity/control 已确定性结案，显式 continue 才以新 RunId 接续；child
+    interrupted 同 commit 写 status:error outbox，parent unloaded/resume 路径仍 exactly once。
+12. 未 apply 的 steer/follow_up 在 recovery 按 accepted FIFO 恰好一次 enqueue+complete；旧 pending/
+    started set_model 由本次 resume ModelRef supersede，同 commit 更新 model_selected，已完成 mutation 不重放。
+13. 所有 public identity surface 在 IO/lookup 前按各自 typed error 拒绝 identity empty/lone-surrogate；Workspace/
+    Thread/Run/Turn 的 NUL 与合法 Unicode 保持 opaque，OpId/LegacyWorkspaceId 仍服从固定 alphabet。
+    legacy ID golden、LegacyWorkspaceId/thread framing、v1 invalid identity quarantine、
+    strict JSON key/value 与 Run/Turn/derived 双向 collision 都覆盖。legacyWorkspaceId pure raw 可含
+    empty/relative/NUL，但 executable workspace cwd 必须 current-host absolute/no-NUL；v1 不合格项只读 quarantine。
+14. thread create/attach claim 的 definitely-pre-side-effect failure 释放可重试 claim，unknown outcome
+    保留 creationKey；resume/import checkpoint mismatch 仅在 quarantined close 明确成功且零 host/mirror
+    effect 时释放 attach claim，close unknown 保留，fresh create backend 已存在时无论 close 成功都保留
+    create claim+creationKey；recovery 缺 credentials 时原 accepted lifecycle 结为 recovery_interrupted/unloaded，
+    新 ModelRef/OpId resume 可恢复。parent 必须同 workspace 已存在且非 self，createdByRunId 必须是父
+    acceptance 点当前 active reservation；subtree root 与 empty workspace scope 语义逐项覆盖。
+15. raw approval requestId `x/x~1` 的永久 used-set、map-before-commit/publish、同步 response 与 crash window
+    全部确定；Runtime.close 与所有 in-flight token 竞态、resolver signal、cohort 重算和 post-close method
+    table 全绿，已登记 token 不事后抛 RuntimeClosedError，永久 Op/Run/Turn identity 不释放。
+16. `reserveSuccessor`/`reserveTurn` 同 reservation key idempotent、不同 key collision/fork fatal；turnOrdinal
+    正确，workspaceCeiling/runCeiling 两个输入逐对象原样传给 resolve，返回的 turnCeiling 与
+    turn_prepare/PreparedThreadDriverCommand/policyRevision 逐字段一致。默认 headless busy error/unknown approval silent no-op
+    逐字匹配阶段 0 golden。
 
-### M2 Chat Completions adapter
+### 2.4 review 焦点
 
-- **目标**:[04-provider-adapter](./04-provider-adapter.md) 全量落地;用录制 fixture 把方言差异钉死在测试里。
-- **交付物**:`src/providers/openai-chat/`——出站转换(Context → ChatCompletionMessageParam[],含 system/developer 切换、toolResult 图片拆 user 消息、空 assistant 跳过)、流消费器(手写 `for await`,tool_calls 按 index 累积、容错 JSON 持续刷新 arguments、id 缺失补 `call_<uuid>`、finish_reason 映射、usage 尾 chunk、in-band error)、`CompatFlags` 推断与覆盖、错误映射(APIUserAbortError → aborted,其余 → error + status/requestID);SSE fixture 录制脚本 + fixture 集(纯文本流、tool_calls 分片、并行多 toolcall、length 截断、content_filter、in-band error、无 usage chunk、`reasoning_content` 方言)。
-- **实现要点**:先写录制脚本(`bun scripts/record-fixture.ts`,把真实 endpoint 的原始 chunk 存为 JSONL fixture),再写消费器——测试驱动的顺序在这里是字面意义的:每个 fixture 就是一条真实世界的方言证词。内部结构照 Vercel AI SDK `openai-compatible` 的两段式:纯函数消息转换 + 带块状态机(isActiveText/当前 toolCall 槽位)的流转换,两段各自可测。
-- **前置**:M1。
-- **验收**:
-  1. `bun test providers/openai-chat` 全绿,覆盖上述全部 fixture;每个 fixture 断言完整 ProviderEvent 序列 + 最终 AssistantMessage(含 usage、stopReason)。
-  2. length fixture:产出的 ToolCallPart 带 `rawArguments` 原文,stopReason 为 `length`(不执行的决策在 loop 层,adapter 不隐藏)。
-  3. 配对回归:出站转换对「assistant(tool_calls) 后每个 id 都有 role:'tool'」做断言工具函数,供 M4 复用。
-  4. 手动 smoke(不进 CI):`bun run smoke` 对真实 endpoint(OpenAI + 至少一个第三方兼容端点)跑一轮带工具调用的流式请求。
-- **规模**:~10 文件 / 约 1500 行(fixture 文本另计)。
-- **Demo 剧本**:「一条命令向真实 endpoint 发起带工具 schema 的流式请求,终端逐字打印 delta,结尾打印 stopReason 与 usage;换 baseURL 指向第三方端点同样工作。」
+- identity 是否从入口贯穿存储/事件，而不是靠可变 current id 猜归属；seq 是否只在权威点分配并
+  持久化。
+- Supervisor 是否仅管理 thread，未吸收 Agent loop、transcript merge、provider 或工具执行。
+- CLI 是否仍藏有 run/retry/approval 状态机；public entry 是否意外 import `src/cli/main.ts`。
+- projector 是否是单向兼容边界，canonical core 是否反向依赖 legacy `SessionEvent`。
+- Supervisor 是否只依赖窄 driver port，Session/ApprovalBroker import 是否被隔离在 legacy adapter，
+  从而既能阶段 1 多 thread，又没有提前拆 Session 或实现 registry。
 
-### M3 agent loop + 工具框架 + 7 工具
+review 清零、`bun run check` 全绿并完成阶段 1 commit/push 后，才能拆分 Session。
 
-- **目标**:双层循环(先只做「一路到完成」路径)+ 工具执行三阶段 + read/ls/glob/grep/bash/edit/write 全部可用;真实模型第一次改动真实文件。
-- **交付物**:`src/agent/`(Agent 类外壳、runLoop 内层循环、streamAssistantResponse、工具调度 prepare/execute/finalize、zod 校验失败与未知工具的 isError 合成回喂、`length` 全批不执行、parallel/sequential 调度)、`src/tools/`(ToolDefinition 框架、`z.toJSONSchema()` 渲染、2000 行/50KB 框架级截断 post-hook、7 个工具)、`src/shared/`(truncate、killProcessTree、FileTracker)。本里程碑 runLoop 骨架照 05 文档 §2.2 伪码完整实现(含 [A]/[I]/[J] 注入点与 abort 检查的结构性接线——伪码是 canonical,骨架不做阉割版),但 steering/follow-up 的语义验收矩阵、`queue_update` 事件与 abort 全链路测试都在 M4;M3 只交付注入点的最小冒烟。
-- **里程碑内顺序**:框架 + read/ls/glob 先行(无副作用、最快让 loop 转起来)→ grep(引入 ripgrep 二进制依赖)→ bash(进程管理)→ write/edit 最后(edit 的 fuzzy 匹配是工具集中最精细的算法,且依赖 FileTracker 的 read-before-edit 约束已被 read 落地)。7 个工具彼此独立,是全路线图最适合并行分工的一段。
-- **前置**:M1(全部单测跑 faux);M2 仅联调需要。
-- **验收**:
-  1. loop 单测(faux):`tool_calls → 执行 → 回喂 → stop` 两 turn 剧本事件序列正确;toolResult 按 assistant 源顺序回填;`length`+toolCalls 剧本全批合成错误不执行;未知工具名/参数校验失败合成 isError 且任务继续。
-  2. 每个工具独立单测:edit 的精确/fuzzy/唯一性/CRLF-BOM 用例;bash 的超时 kill 进程树用例(spawn `sleep 999` 子孙进程,断言全灭);read 的 offset/行号/二进制检测/截断提示;grep 达 limit 时 rg 被 kill。
-  3. 集成脚本(真实模型):`bun scripts/dev-run.ts "把 fixtures/a.txt 里的 foo 改成 bar"`,结束后文件内容变更、终端可见 diff。
-- **规模**:最大的里程碑,~25 文件 / 约 3500 行。
-- **Demo 剧本**:「对真实模型说一句话,看它 read → edit 完成一次真实文件修改,diff 打在终端上。」
+## 3. 阶段 2：拆分 Session 与事件通道
 
-### M4 steering / follow-up + abort + transform 层
+### 3.1 目标
 
-- **目标**:[06-steering-following](./06-steering-following.md) 的七条 canonical 语义全部成立;转录在任何中断路径下重放合法。
-- **交付物**:双队列 drain 接线(turn 边界 poll steering、收尾 poll follow-up、启动前 poll 一次、one-at-a-time/all 两模式)、`abort()`(AbortSignal 贯穿 provider 流与工具执行、`continue()` 续跑)、transform 层(aborted/error assistant 重放过滤、孤儿 toolCall 补 `"[Tool execution was interrupted]"` isError 结果、跨模型 reasoning 降级/toolCallId 归一化、非视觉模型图片降占位)、`queue_update` 事件接线、`prompt()` 运行中 throw。
-- **测试矩阵**(faux 定时剧本逐格覆盖,这张表就是本里程碑的工作清单):
+把当前 Session 的执行编排、持久化、retry、compaction 与广播职责拆成窄协作者，同时保持现有
+单 Agent 生命周期和 legacy 投影不变。只有权威提交背压 Agent，普通观察者异步消费。
 
-  | 事件时机 \ 队列状态 | 两队列空 | 仅 steering | 仅 follow-up | 两者都有 |
-  |---|---|---|---|---|
-  | assistant 无 toolCall 收尾 | agent_end | 内层续命注入 | 外层再开 turn | steering 先,follow-up 留待收尾 |
-  | 工具执行中 steer() | — | turn 边界注入,不打断工具 | — | 同左 |
-  | 流式中 abort() | aborted 收尾 | 队列保留,continue() 时 drain | 同左 | 同左 |
-  | 工具执行中 abort() | 孤儿 toolCall 补合成结果 | 同左 + 队列保留 | 同左 | 同左 |
+### 3.2 交付物与职责
 
-  abort 后转录修复的关键路径(M4 验收第 3、4 条对应的时序):
+| 组件 | 阶段 2 职责 |
+|---|---|
+| `ThreadRuntime` | 单 thread active-run 门禁、mailbox dispatcher、六组件编排 |
+| `TranscriptRepository` | 提供完整 thread journal 的 append/load/fold IO 与 transcript view（含 identity/mailbox/control/event/run/compaction records）；不分配 seq、不决定 control 状态 |
+| `RetryCoordinator` | 错误分类、可取消退避、创建 successor run |
+| `CompactionCoordinator` | 阈值、摘要、合法切点与 successor run 协调 |
+| `EventCommitter` | 唯一权威 writer：由 runtime-only awaited authoritative sink 调用 repository append port，分配 per-thread seq、提交 transcript/seq/control 并返回 envelope 或连续原子 batch；不注册为 public subscriber |
+| `EventHub` | Runtime-owned、每 workspace 一个；汇聚 per-thread committer，支持 future-thread filter、每订阅者 FIFO、cursor/gap/退订与错误隔离 |
 
-  ```mermaid
-  sequenceDiagram
-    participant U as 用户
-    participant A as Agent(loop)
-    participant T as transform 层
-    participant P as provider(faux/真实)
-    U->>A: abort()
-    A->>P: AbortSignal 触发
-    P-->>A: error 事件(stopReason: aborted)
-    A-->>A: aborted assistant + 未执行 toolCall 留在转录
-    U->>A: continue()
-    A->>T: 出站前清洗 messages
-    T-->>T: 过滤 aborted assistant;孤儿 toolCall 补 isError 结果
-    T->>P: 配对合法的 messages(每个 tool_call 都有 tool 结果)
-  ```
-- **前置**:M3。
-- **验收**:
-  1. steering 时机测试(faux 定时剧本):工具执行中注入 steer,断言注入发生在该批工具全部完成之后的 turn 边界,且以 `source:'steering'` user 消息形态落转录。
-  2. 续命/收尾矩阵:无 toolCall + steering 非空 → 内层继续;无 toolCall + 仅 follow-up → 再开 turn;两队列皆空 → `agent_end`。
-  3. abort 矩阵:流式中 / 工具执行中 abort,断言 assistant stopReason 为 `aborted`、未执行 toolCall 在下次出站请求中均有合成结果——复用 M2 的配对断言函数直接验 wire 消息数组,**这是本里程碑的核心验收**。
-  4. `continue()` 后转录追加合法,faux 端收到的 messages 不含 aborted assistant 原文。
-- **规模**:~8 文件 / 约 1200 行(新增代码少,测试占大头——这正是单独成里程碑的意义)。
-- **Demo 剧本**:「脚本运行中注入一条 steering,模型下个 turn 改变方向;Esc 等价的 abort() 之后 continue(),对话无缝续上且不炸 400。」
+`Session` 保留为一个默认 thread 的 facade，只委托 `ThreadRuntime` 并投影事件；不允许在 facade
+重新实现 retry、compaction、approval 或 fan-out。需要调用方决议的 approval/resource confirmation
+统一为 `control_request/control_resolved`，request 和 response 都走 EventCommitter；child
+`thread_result` 是无需应答的通知事件。legacy projector 把 approval 分支恢复为旧事件。
 
-### M5 CLI TUI + headless + session 持久化
+exported direct `Session.create/resume` 使用 internal `StandaloneSessionHost`，不各自创建 Runtime 或争抢
+workspace SupervisorLease：每个不同 session id 有自己的 ThreadRuntime、per-instance AgentConfig、private
+EventHub 与 backend/sidecar `StandaloneSessionLease`。standalone approval repository 用该 lease 的私有
+outbox + `(workspace,thread,responseOpId)` receipt key，再走共享 approvals lock/CAS；ThreadRuntime 仍只见
+同一 LegacyApprovalPatternRepositoryPort/control 链。不同 session id 同 cwd 可并行且配置互不串；同一
+backend 双 resume 阶段 2 起 `session_in_use`。direct Session 与 Runtime 共写 claimed backend 仍 unsupported。
 
-- **目标**:[09-cli](./09-cli.md) 与 [08-session-persistence](./08-session-persistence.md) 的 v1 范围全部交付;从这里开始项目自举(用 coda 开发 coda)。
-- **交付物**:`src/cli/`(Bun 1.3.14 + `@opentui/core` 全屏 TUI、readline/ANSI classic 与 plain 保底、SessionEvent 对应表、Enter/Shift+Enter/Alt+Enter/Esc/PageUp 键位、顶部向下 transcript、固定两行 footer、`--json`、`-p`、配置解析 flags>env>config.json)、`src/session/`(JSONL 追加、meta 头行、`--continue`/`--resume` 恢复重放)。
-- **里程碑内顺序**:headless 先于交互前端——headless 立即被 CI e2e 覆盖；先保留 classic 作为语义基线,再让 OpenTUI 复用同一组纯键位决策并按同一张事件表实现。session 层与 CLI 并行不冲突(靠 `subscribe` 各自挂监听)。
-- **前置**:M4(需要 `queue_update` 与 abort 语义定形)。
-- **验收**:
-  1. headless e2e(CI,faux provider):spawn `coda --json --provider faux`,stdin 写入 prompt/steer/abort/shutdown 剧本,断言 stdout NDJSON 事件序列与 exit code;每行可被 JSON.parse。
-  2. session 往返测试:跑一段对话 → 进程退出 → `--continue` 启动 → 断言重放消息与原转录深等;JSONL 尾行截断(模拟 crash)时恢复能跳过坏行并告警。
-  3. OpenTUI TestRenderer + 真实 TTY 冒烟:header/footer 固定、短输出从顶部起排、长输出滚动、resize、Enter=steer、Shift+Enter 换行、Esc abort、`--resume`。
-  4. 配置优先级自动化测试:flag/env/file 三处冲突时按序生效。
-- **规模**:~15 文件 / 约 2500 行。
-- **Demo 剧本**:「打开 coda 全屏 TUI,观察输出从 header 下方向下增长；运行中 Enter 注入 steering,退出后 --continue 原地恢复;同一套动作用 echo | coda --json 全部重演一遍。」
+facade 保持 prompt/continue 在 root Agent run boundary settle、waitForIdle 等全部 causal successor；
+同步 void/guard 方法经本地 admission shim 进入同一 mailbox。唯一有意改变的旧 timing 是普通
+Session.subscribe listener 不再延迟 run，这正是本阶段 observer 背压目标。
 
-### M6 plan 工具 + 权限/approval + 截断落盘完善
+事件路径固定为：
 
-- **目标**:第 8 个工具与安全层;工具输出超限落盘全面接通。
-- **交付物**:plan 工具(整表替换、`plan_update` 旁路事件、promptSnippet 行为规范)+ CLI plan 渲染;approval 层(`beforeToolCall` 实现、`approval_request` 事件 + `Map<approvalId, resolver>`、决策 `allow_once | allow_always | deny | abort`、deny 理由合成 isError 回喂任务继续、bash 保守前缀解析 + `$()`/反引号强制升级、doom-loop 同参数三连强制审批)、headless 增补 `{type:'approval'}` 命令、CLI 审批键位模式;截断落盘(超限全文写 temp + 结果尾部附路径与 `offset=N` 提示)统一验收。
-- **实现要点**:approval 完整实现在权限层与 CLI,agent 核心只认识 `beforeToolCall` 的返回值——这是 gemini-cli 工具状态机(pending → awaiting_approval → executing → …)在我们分层下的落位;deny 与 abort 必须是两种类型(codex ReviewDecision 的区分):deny 合成拒绝理由回喂、任务继续,abort 停任务。`allow_always` 的记忆持久化到 `~/.coda/`(按命令前缀),v1 不做项目级配置。
-- **前置**:M5(approval 需要 UI 面呈现)。
-- **验收**:
-  1. approval 单测:deny → 合成拒绝结果回喂、任务继续产出替代方案;abort 决策 → 任务停止;审批等待中 `abort()` → 先观察 cancellation 再清 resolver,不以「拒绝」形态漏给模型(codex 的时序教训)。
-  2. doom-loop 测试:faux 剧本让同工具同参数连发 3 次,第 3 次必弹审批。
-  3. plan 测试:两个 in_progress 不被拒绝,工具输出含提醒文案;`plan_update` 快照为整表替换。
-  4. 交互验收:bash 危险命令弹审批,`a`(always)后同前缀命令不再弹。
-- **规模**:~10 文件 / 约 1500 行。
-- **Demo 剧本**:「让模型执行 rm -rf,CLI 弹出审批;拒绝后模型收到理由改走安全路径,plan 面板同步勾进度。」
+```text
+Agent/control event
+  → internal authoritativeEventSink → EventCommitter（Agent await：权威 transcript/seq/control）
+  → EventHub.publish（非阻塞入订阅者队列）
+  → UI/headless/telemetry/tests（各自异步消费）
+```
 
-### M7 compaction + auto-retry + 成本统计 + 第二 provider
+headless stdout `drain` 只背压该前端的输出泵，不能反向卡住 Agent；shutdown 必须等待输出泵排空。
 
-- **目标**:长会话可持续;用 Anthropic adapter 实证「新增 provider = 新增 adapter,核心零改动」。
-- **交付物**:compaction(`transformContext` 钩子实现:接近 `limits.context` 时 LLM 摘要 + 保留尾部,摘要落 JSONL 可恢复)、auto-retry(可重试错误指数退避,尊重 retry-after,整轮重发在 session 层)、成本统计(Usage 累计 × 模型价格表 → `/status` 与 `agent_end` 小结)、`src/providers/anthropic/`(Messages API adapter,复用 M2 的测试形态)。
-- **实现要点**:重试判据以 stopReason + errorMessage 中的结构化信息(status)为准,网络层单请求重试仍留给 SDK 默认 `maxRetries`,session 层只做**整轮**重发(openai-node 的分工结论:流一旦开始 SDK 不续传);compaction 的截断点必须落在 turn 边界(不能把 assistant(tool_calls) 与其 tool_result 切开,否则重放即 400,与 M4 同一条配对铁律)。Anthropic adapter 是文化验收:开发过程中每一次想改 `src/agent` 的冲动,都是协议设计缺陷的信号,记录下来比改掉更有价值。
-- **前置**:M5(compaction/retry 挂 session 层);M6 非硬依赖。
-- **验收**:
-  1. compaction 测试:faux 剧本把上下文推过阈值,断言下次出站 messages 为「摘要 + 尾部」且总 token 低于阈值;压缩后继续对话工具调用配对仍合法。
-  2. retry 测试:faux 脚本先回放 429 类错误再成功,断言退避序列与最终成功;不可重试错误(4xx 参数错)不重试直接 `agent_end`。
-  3. **边界实证(本里程碑的灵魂)**:接入 Anthropic 后,`git diff --stat M5..HEAD -- src/agent src/protocol src/tools` 除新增可选字段外为空;M3–M5 的全部测试在 faux 与两个真实 provider 配置下语义一致。
-  4. `/status` 显示累计 input/output/cacheRead/cost。
-- **规模**:~12 文件 / 约 2000 行。
-- **Demo 剧本**:「一个超长会话触发自动压缩后继续正常干活;`--model` 切到 Claude,全部功能(steering、工具、审批)原样工作,agent 目录零改动。」
+阶段 1 已在 legacy driver **边缘**完成 `approval_request ↔ control_request` 与
+`control_response ↔ ApprovalBroker` 的 wire 映射，以保持 RuntimeEvent 联合单一；阶段 2 的新增语义
+是把 request/response、等待者状态与 abort 结案移入同一 durable EventCommitter 链，并删除 core 对
+legacy broker 的依赖，不是再次改变 public wire。registry/PolicyEngine 尚未进入本阶段，因此 static
+ThreadRuntime 必须使用 [12 §6.2](./12-supervisor-runtime.md) 的 `LegacyApprovalAdapter` 窄 bridge：CLI
+注入 factory，Runtime 取得 SupervisorLease 后由 workspace storage 打开 fence-bound
+LegacyApprovalPatternRepository，per-thread adapter 只做 preflight/applyResponse，不发事件或持 waiter。
+ask 的 `{patterns,forceConfirm}` 随 control_request 持久化；allow_always 先以
+`(workspaceId,responseOpId)` 幂等、fenced outbox + global CAS 保存全部旧 patterns，再提交 resolved/
+释放 waiter。force/空 patterns 按旧行为规范化 allow_once。crash 可补 pattern/control，但 executor
+绝不重放；阶段 3 原 wire 替换为 PreparedInvocation/PolicyEngine/grant repository。
 
-## 3. 风险清单与缓解
+### 3.3 必测不变量
 
-| # | 风险 | 表现 | 缓解 |
-|---|---|---|---|
-| R1 | **第三方兼容 endpoint 方言**:max_tokens 字段名、developer role、streaming usage、strict tools、`reasoning_content`、tool 结果后必须跟 assistant 等差异,任何一个都可能 400 或静默降质 | 换 baseURL 后偶发报错或行为异常 | `CompatFlags` 声明化(pi `OpenAICompletionsCompat` 十余项开关即现成 checklist)+ baseURL 自动推断 + 显式覆盖;每种方言录 fixture 进 M2 回归;新端点问题的修复动作固定为「加一个 flag + 一个 fixture」,不改核心 |
-| R2 | **流式 JSON 解析**:tool_calls 按 index 分片、arguments 逐片拼接、id 可能缺失、`length` 时 arguments 是非法/截断 JSON、usage chunk 可能缺失、错误 in-band 出现 | 参数错乱、盲 parse 抛异常、悬空 toolCall | 累积算法照抄 openai-node `ChatCompletionStream.ts`(index 定位、id 兜底 `call_<uuid>`);容错 JSON 解析仅用于流式期间刷新展示,**执行只信 `tool_call_end` 的完整 parse**;`length` 全批不执行是硬规则(pi 同款);全部路径有 fixture |
-| R3 | **Windows CRLF**:模型输出 LF、文件是 CRLF 时 edit 匹配失败;JSONL/fixture 被 git 转换;compatibility readline 收 `\r\n` | edit 大面积「oldText not found」、fixture 平台间不一致 | edit 工具「剥离-匹配-还原」策略(M3 单测强制覆盖 CRLF+BOM 用例);`.gitattributes` 强制 LF(M0 落地);会话 JSONL 显式 `\n`;CI 加 Windows job 后置到 M5 |
-| R4 | **全屏 TTY 输入/布局**:Esc/Alt/Shift 修饰键编码因终端而异;resize 可能覆盖审批提示;native 初始化失败可能残留 alternate screen | 方向键误 abort、键位文案与行为不符、fallback 双重抢 stdin | OpenTUI Kitty keyboard + 全局 handler;footer 文案从状态/宽度纯派生;初始化到 replay 全段失败清理后才降级;`/f` 兜底;TestRenderer 覆盖宽↔窄与审批;classic/plain 保底(详见 [09-cli](./09-cli.md) 第 3、8 节) |
-| R5 | **单体膨胀**:session/压缩/重试/队列全揉进一个类 | 后期不可测、不可拆(pi `AgentSession` 3300 行返工的直接教训) | 目录边界 + ESLint 规则(M0)机械阻止;compaction/retry 一律以 `transformContext`/session 钩子形态存在;M5 起每个里程碑验收含「新能力不得修改 `src/agent` 既有语义」的 diff 审查 |
-| R6 | **zod v4 `z.toJSONSchema()` 与 strict 模式的兼容**:strict:true 要求根 object、全层 `additionalProperties:false`、可选字段进 required + null | OpenAI 端 400 或 schema 静默不生效 | 工具 schema 保持扁平简单(v1 工具全部满足子集);`supportsStrictTools` compat 开关按端点关闭;M2 fixture 含 strict 与非 strict 两种出站快照 |
-| R7 | **审批与中断的时序竞争**:abort 时 pending approval 以「拒绝」形态漏给模型 | 转录中出现幽灵拒绝,模型行为异常 | 照 codex:interrupt 先让任务观察到 cancellation,再清 approvals(M6 验收第 1 条显式覆盖) |
-| R8 | **事件监听 await 串行拖慢热路径**:`subscribe` 监听器逐个 await(pi 为落盘确定性的取舍),慢监听器直接卡住 text_delta | 流式输出肉眼卡顿 | TUI listener 只同步更新 renderable,OpenTUI 用 30 FPS 合帧;session 落盘用同步 append。只有 plain/classic 的 stdout 事件边界等待 `drain`,用背压换取不丢输出与可观察错误;CI 吞吐基准使用无阻塞 sink。 |
-| R9 | **ripgrep 二进制分发**:`@vscode/ripgrep` 通过平台 optional dependency 提供二进制,不同 `os` / `cpu` 的解析与路径可能不同 | grep 工具在部分环境不可用 | 由 Bun 1.3.14 安装并按平台过滤 optional dependency；启动时探测二进制存在,缺失时 grep 工具降级为明确报错(附安装提示)而非静默失效；CI 在 macOS 与 Linux 验证路径解析与实际执行 |
+1. repository/committer gate 未开或 reject 时 Agent 不能越过提交；该 gate 使用独立 awaited
+   authoritative sink，不能借用会吞 listener reject 的 public subscribe。任意 observer gate 未开、throw
+   或退订时，当前 run 和另一 thread 都可完成。
+   另构造同 cwd/root 的两个 direct Session（不同 id、不同 streamFn/tools gate）：二者不取得
+   SupervisorLease、可并行且 abort/model/approval/hub 不串；同一 id 双 resume 稳定 `session_in_use`。
+2. 每个 observer 内 envelope 顺序不变；溢出明确 disconnect/gap，不静默丢关键事件。
+   无 gap channel 的 Session/Agent facade 例外使用 durable cursor-backed pump：把 listener gate 卡到
+   超过 EventHub capacity，run/其他 thread 仍完成，放行后 listener 收到完整、不重复、严格有序序列；
+   listener reject 只诊断并继续后续事件，不自动退订；unsubscribe/close 才释放 retention pin。
+3. control request 先权威提交再等待，response 先提交再 resolve；first-wins response claim 拒绝第二 OpId，
+   同 OpId duplicate 回原 receipt。approval 等待中 abort 先传播
+   cancellation，结案为 aborted 而非 denied。
+   kind/proposal invalid_decision 在 op_accepted/claim 前 rejected，request 仍 pending且 valid 新 OpId 可答。
+4. retry/compaction/usage/resume/尾行截断与 tool-call 配对回归保持；successor run identity 正确。
+5. facade 与默认 headless 的 legacy 事件相对顺序、内容和退出纪律保持。
+6. `ThreadRuntime`、repository、coordinator、committer、hub 均有窄单测，集成测试不读取私有状态。
+   另以 fire-and-forget `tool_execution_update` commit reject 断言 writer-fatal latch 会 abort run/tool
+   signal，后续 awaited emit、provider/tool 与 side-effect gate 均不越过；普通 listener reject 不触发 latch。
+7. legacy approval request/response 只走一条 durable control 链；multi-pattern allow_always 在 flush 前
+   不 resolve/执行，forceConfirm/空 pattern 降级 once 且不记忆。pattern→control crash 恢复不重复写
+   Set/seq/executor，stale/wrong workspace writer 不能 reserve 新 outbox。
+8. response accepted_pending 在 effect 前 durable started；`definitely_not_applied` 使 response interrupted+
+   release claim，request 保持 live且仅新 OpId 可重试。conflict/fenced/unknown 保留 claim并停止整个
+   workspace 新 admission/capability execution；R→A 与 A→R 按同一 thread 跨 op-type 的统一 accepted FIFO
+   得到相反但确定的
+   effect/control 结果。
+9. 阶段 2→3 upgrade barrier 先按 FIFO inventory；只有 live effect obligation/reserved outbox 才打开
+   recovery-only legacy extension。缺 extension typed failure，纯可 abort control 不要求，且不 preflight/
+   migrate grant/replay executor。corrupt approvals.json 仍 tolerant-load empty + stable diagnostic。
+10. Runtime 只拥有一个 workspace EventHub，future-thread/global filter、thread-fatal isolation 与 cursor
+    replay 全绿；Session pump 超 capacity 后 durable 补读完整。六协作者任一不得偷偷创建第二 hub/writer。
+11. facade trusted `setModel(ModelConfig):void` 保持同步 guard、立即 currentModel/prompt exact config，
+    canonical FIFO 只落 ModelRef；public set_model 仍走 resolver，sidecar 不恢复/不静默 rollback。
 
-## 4. 机动指南:可并行、可裁剪、不可动摇
+### 3.4 review 焦点
 
-进度不可能完全按表走,提前约定三类机动空间,避免临场决策破坏架构:
+- 是否仍存在第二个 event writer/seq allocator，committer 是否误挂进会吞错的 public subscribe，或普通 listener 被 await 回热路径。
+- transcript、seq 和 control 的原子边界在崩溃点是否可恢复；EventHub 是否被误当事实源。
+- abort/close 是否覆盖 provider、工具、sleep、compaction、pending control 和输出泵，且默认不跨 thread。
+- 是否仍有 ApprovalBroker core 旁路；LegacyApprovalAdapter 是否只消费 frozen request/current run
+  ceiling，并把 persistence 置于 control_resolved/waiter/executor 之前。
+- 拆分类是否只是把大类字段机械搬家，仍通过互相访问内部状态形成隐式巨类。
 
-- **可并行**:M2 与 M3 只共享 M1(loop 全程跑 faux);M3 内 7 个工具彼此独立;M5 内 headless / 交互 Renderer / session 三线可并行。多人协作时这是天然的分工线。
-- **可裁剪**(排期告急时的降级顺序,从后往前砍):M7 的第二 provider → M7 的 compaction(先用「上下文将满」的硬报错顶住)→ M6 的 doom-loop 检测与 `allow_always` 持久化 → M5 的 `--resume` 列表交互(保留 `--continue`)。被裁项全部是钩子/客户端形态,后补零返工。
-- **不可动摇**(任何压力下不得简化,否则是在给未来埋返工):StreamFn 不 throw 铁律、`length` 全批不执行、abort 后的转录修复(R2 的教训:悬空 toolCall 是必炸的 400)、stdout NDJSON 纪律、import 边界。这五条被砍任何一条,后续里程碑的验收都会连锁失效。
+review 清零、`bun run check` 全绿并完成阶段 2 commit/push 后，才能迁移注册表。
 
-## 5. 非目标与刻意后置
+## 4. 阶段 3：动态注册表、上下文与权限
 
-以下明确不在 M0–M7 范围,且每一项都已在架构上留好增量入口:
+### 4.1 目标
 
-- **server/daemon 模式**——headless NDJSON 协议已为其铺路,届时只需把 stdin/stdout 换成传输层。
-- **持久 shell**——bash v1 每次新 spawn;持久 shell 是新的 `ToolDefinition` 实现,不动框架。
-- **plan mode(写工具 gate)**——权限层已留模式标志位,是 `beforeToolCall` 的一种策略。
-- **子 agent / MCP**——分别是新工具与新工具来源,挂在工具框架之下。
-- **独立 TUI client / server 化**——当前 OpenTUI 与 Session 同进程;未来可把它移到 headless 协议之外作为独立客户端。
+让 capability/provider 的 schema、选择、校验、权限和执行基于同一个不可变 turn snapshot，消除
+静态 switch 和“模型看到 v1 schema、实际执行 v2 executor”的版本撕裂。
 
-判据统一:如果某项将来加不进来、非要动 `src/agent` 或 `src/protocol` 不可,说明分层出了问题,应先修架构再加功能。
+### 4.2 交付物
 
-## 6. 里程碑通用完成定义(Definition of Done)
+- JSON-Schema-first `CapabilityRegistry` 实现 [12 §10](./12-supervisor-runtime.md) 的正式 mutation/snapshot
+  surface：registration 原子包含 id/version、deployment-stable `implementationDigest`、schema/metadata/
+  policy、prepare/validator/resource-resolver/executor、prompt metadata 与 executionMode；成功 mutation 才
+  推进 revision，register/update/unregister 的 duplicate/missing/id/expectedRevision 失败不改状态，
+  update 保留槽位、删除后重注册追加末尾。规范化 JSON 与 implementation release 共同产生
+  `registrationDigest`，不能用 `Function#toString` 代替。
+- `ToolCatalogSnapshot.resolve/prepare` 只使用冻结索引与函数引用。prepare 固定执行 strict JSON copy、
+  参数修补/校验、规范化 args 冻结、同 revision 的 capability-specific resource resolution，再生成
+  带 registrationDigest 的 `PreparedInvocation`；未知 capability、参数/资源歧义、非法 JSON 或
+  InvocationContext/EffectivePolicySnapshot context 不匹配都返回 typed recoverable failure，executor
+  为零调用。prepare 后禁止按名字回查 live registry 或 mutable policy store。
+- `ProviderAdapterRegistry` 同样提供 register/update/unregister/snapshot、success-only revision、稳定槽位、
+  expectedRevision 与 implementation/registration digest 语义；turn snapshot 只按 `ModelRef.api` 解析
+  adapter，未知 api 产生合法流内 error，不 fallback，旧 snapshot 不受 live update/unregister 影响。
+- Runtime construction 以 `capabilityMode:'registry'` 一次性注入完整 `RuntimeCapabilityServices`：
+  capability/provider snapshot-only reader ports、`BasePromptProvider`、`RuleSnapshotProvider` 与四维
+  `RuleSnapshotBudget`、`PromptAssembler`、
+  `PolicyEngine`、`RuleFreshnessPort` 和 `grantMode`；不允许部分 service bundle。
+  Runtime 取得 SupervisorLease 后才用 workspace storage 的 `openPolicyGrantRepository(lease,grantMode)`
+  打开 bound repository，open/fence 失败在
+  recovery/attach/provider 前关闭构造。ThreadRuntime 在 provider sampling 前只捕获一次 catalog/provider/
+  grant/base-prompt/rule snapshots；mutable registry 只由 composition host 持有，Runtime/attachment 的
+  类型面看不到 mutation methods；CLI 只注册实现与注入 budget，不暗读或拼装业务规则。
+- Stage 3 package exports additive 提供 `coda/runtime` 的 registry option/service port types、
+  `coda/capabilities` 的四个 concrete `create*` factory + registration/snapshot/prompt/policy/legacy-adapter
+  surface，以及 `coda/legacy-coding-tools` 的八项 binding factory；外部 embedding 不得 deep-import src。
+  环境相关 base/rule/freshness/storage ports 只导出接口并显式注入，runtime entry 不 eager-load zod/tool/SDK。
+- `RuleSnapshotProvider` 以冻结的 `TurnPolicyContext`、canonical known scopes 与 files/单文件字节/
+  总字节/prompt token budget 捕获正文、digest、root→narrow 稳定顺序和 diagnostics；owner/context
+  错配或 capture failure 均 fail closed。`ThreadPolicyEngine.capture()` 只解释显式 ceilings/rules/grants，
+  产出带唯一 context 的 `EffectivePolicySnapshot`：`ceilingRevision` 标识有效 ceiling，
+  `policyBasisRevision` 覆盖 engine/constraints/ceiling/rules 但排除 grants/turn identity，
+  `grantRevision` 单独标记授权集，combined revision 再绑定两者与 turn context。
+- `PromptAssembler` 只接收同一 turn 的 BasePromptSnapshot、outbound message view、
+  EffectivePolicySnapshot、PromptModelView 与 ToolCatalogSnapshot；规则只能取
+  `effectivePolicy.rules`，不能另传第二份 RuleSnapshot。它验证 base-prompt/rules/policy owner 与 model
+  ref，纯组装深冻结 Context；错配返回 typed `invalid_prompt_context`，不调用 provider，也不读/改
+  transcript、filesystem/env、live registry 或 ModelConfig secret。
+- `ThreadPolicyEngine.evaluate()` 唯一输入是 frozen PreparedInvocation，返回 allow/deny/ask；ask 的
+  `grantProposal?: PolicyGrantScope` 是唯一可持久化泛化方案。`allow_once` 只释放本 invocation；
+  `allow_always` 必须把 frozen proposal、workspace/capability version+registrationDigest 与
+  policyBasisRevision 以 response ExternalOpId/accepted timestamp 幂等写入 grant repository，flush 后才
+  提交 control_resolved、释放 waiter 或执行。grant→control crash 恢复先 duplicate-complete grant 再补
+  control；旧 waiter 已消失时也绝不重放 executor。canonical workspace mode 中无 proposal 的
+  allow_always 是 invalid_decision；legacy-global mode 则按正式兼容规则规范化为 allow_once，不能由
+  ThreadRuntime/UI 猜 pattern。
+- 注入式只读 `RuleFreshnessPort` 在 preflight 与 executor 副作用前核对 PreparedInvocation 中冻结的
+  RuleSnapshot/resources；它只能把 allow/ask 收窄为 recoverable deny，不能替换 args、policy、schema
+  或 executor。workspace 给权限上限，thread/run 只能收窄，child ceiling 仍取父有效 ceiling 与当前
+  workspace 上限的交集。
+- 现有 `ToolDefinition`、内置工具、全局 approvals 与 provider switch 经 legacy adapter 注册；每个
+  legacy tool 必须提供显式、版本化的 binding（policy + selector/resource resolver），adapter 不按 name/
+  kind 猜权限。八个内置工具的 binding 表与 bash command analyzer 按 [07 §1.2](./07-tools.md) 落地；
+  通用 adapter 留在 capabilities，仅窄依赖 tools/types；认识具体工具的 binding 工厂落在
+  `integrations/legacy-coding-tools/` 并由 ESLint 固定只依赖 capabilities+tools。zod 只留在
+  adapter/validator 边界，FileTracker 等 execution services 仍 per-thread，canonical registry/
+  schema/grant 数据保持 JSON-safe。
 
-- `bun run check`(lint + typecheck + 自包含 test；test 内依次跑 unit、build、e2e)全绿;新增代码有对应测试,faux 可测的不上真网。
-- import 边界零违例(lint 强制,M0 起持续生效);新目录出现时同步补边界规则。
-- 对应设计文档若与实现有出入,同 PR 内更新文档(文档是 canonical,改动需先在文档层想清楚)。
-- 每个里程碑收尾录一次 demo 剧本的实际操作记录(命令 + 输出片段),贴进 PR 描述——demo 跑不通就不算完成。
-- 涉及 wire 出站的改动(adapter、transform、compaction)必须通过 M2 引入的配对断言(每个 tool_call 有 tool 结果),该断言从 M2 起挂在共享测试工具里,是贯穿全路线图的不变量。
+### 4.3 必测不变量
+
+1. turn 捕获 catalog/provider revision 1 后 gate 暂停，分别 update/unregister live registry，再让当前
+   turn 发出 tool call：prompt schema、registrationDigest、validator/resource resolver、policy 输入、
+   executor 与 StreamFn 全用 revision 1，下一 turn 才整体看到 revision 2/移除结果。
+   另有 package-external consumer smoke 只经三个正式 specifier 构造 registry Runtime 并验证 ESM/声明；
+   任一所需 service/binding/factory 若只能 deep import 才取得即失败。
+2. capability/provider mutation table 覆盖 duplicate、missing、id/api mismatch 与 expectedRevision
+   conflict 均不推进 revision；register append、update 原槽、unregister+register 末尾顺序稳定。
+   implementationDigest/registrationDigest golden 与“同 semantic version 换实现”拒绝用例齐全；旧
+   snapshot 的 resolve/prepare 不因调用方或 live registry mutation 漂移。
+3. raw args、validator value、resource result、entries/schema/metadata/policy/effective-policy 与 prepared
+   args 全部深冻结。prepare/validate/resolver throw、required resource 缺失、额外/歧义资源、非法 JSON、
+   catalog/context/policy identity 错配都返回对应 typed failure，executor 零调用；
+   PreparedInvocation 固定 executionMode、原 provider toolCallId、registrationDigest 与同 entry executor。
+   generic adapter 缺 binding 拒绝；integration 工厂恰好提供八项及固定 selector 表，同 type/access 的
+   不同 selectorId 仍精确区分，同 selector 多 target 合法且完整 tuple 才去重。
+4. RuleSnapshot capture 的 owner、四维 budget、正文/digest、canonical path、root→narrow order 与
+   diagnostics 可重复；capture failure 不采样。PromptAssembler 只能看到传入的 outbound messages、
+   base prompt、effectivePolicy.rules、model 与 catalog，返回深冻结 Context；basePrompt/rules/policy 的
+   workspace/thread/run/turn/cwd 或 model ref 任一错配稳定 `invalid_prompt_context` 且 provider 零调用。
+5. `ThreadPolicyEngine.capture()` 的 context 与所有输入逐字段一致；policyBasisRevision 在 engine/constraint/
+   ceiling/rule 改变时变化，但 grant 新增只推进 grantRevision/combined revision，不能让新 grant自失效。
+   evaluate 只读取 PreparedInvocation，缺失/未知约束或 context mismatch fail closed，不读 mutable
+   rule/grant store，也不执行 capability。纯 owner run/turn 变化不改变 basis/ceiling revision，combined
+   revision 仍绑定 context；`openThread` 的 doom-loop state 在 A/B 隔离，只在 attachment lifecycle 重置。
+6. ask 的 grantProposal 随 pending control 冻结；canonical workspace mode 中无 proposal 的
+   allow_always 保持 request pending 并返回 invalid_decision，legacy-global mode 则记录 requested/effective
+   decision、只执行一次且不写 pattern。合法 allow_always 的匹配 key 完整绑定 workspace、capability
+   id/version、registrationDigest、frozen PolicyGrantScope 与 policyBasisRevision，**不使用会因本次 grant 改变的
+   grantRevision/combined revision**。grant flush gate 未开时不得 control_resolved/释放 waiter/执行；
+   grant 成功而 control commit 前 crash 后以同 response OpId duplicate grant 并恰好一次补 control，旧
+   waiter/run 消失时 executor 仍为零调用；allow_once 不写 repository，后续 turn 才捕获新 grantRevision。
+   `definitely_not_applied` interrupted+release claim、仅新 OpId 重试；conflict/fenced/unknown retain claim
+   并分别 quarantine/stop/degrade workspace。workspace storage/bound repository 还覆盖 wrong-workspace/
+   stale-fence、open/commit failure 和 close；
+   legacy compatibility proposal 的 pattern 组必须原子保存，不能丢复合 bash 中的任一项。
+7. PolicyEngine/approval 从同一 PreparedInvocation 收到完整 workspace/thread/run/turn/capability/
+   catalog identity、规范化 args/resources 与 policy basis；跨 thread response 拒绝，allow_once 不越过
+   invocation。child 创建时的 parent-run ceiling/provenance 必须持久化，parent 后续放宽/收紧、workspace
+   放宽及 crash/resume 均不能改写；workspace 收紧从下一 run/turn snapshot 生效，已 prepare turn 只经
+   cancel/reprepare 撤销。
+8. RuleFreshnessPort 在 preflight 与真实 execute 前只读取 frozen RuleSnapshot/resources；同批前序工具
+   改写 AGENTS.md 后，后序工具得到 recoverable stale deny、零副作用，下一 turn 才重捕获/assemble；
+   freshness 不能升级为 allow/ask 或替换 PreparedInvocation；missingScopes 严格 non-empty/dedup/UTF-8
+   order 且逐字持久化，不从 target 猜 scope。
+9. 两个 thread 共用 catalog entry 时 FileTracker/services、abort 与 policy/control 仍隔离；legacy
+   sequential 批/call.id、全局 approvals scope、现有工具/provider fixture、Session facade、headless 与
+   TUI 黄金回归全绿。同 assistant duplicate toolCallId 在 final commit 前变 nonretryable error、零执行；
+   不同 turn 复用 raw id 合法且 invocationId/TurnId 不同。
+
+### 4.4 review 焦点
+
+- JSON Schema 是否真是 registry canonical 数据，implementation/registration digest 是否同时绑定数据
+  与实现 release；mutation failure、update 槽位和旧 snapshot 是否仍有隐藏的 live-map 回查。
+- `capabilityMode:'registry'` 是否强制完整 RuntimeCapabilityServices，workspace storage 是否只在取得
+  SupervisorLease 后打开 fence-bound grant repository；RuleSnapshot/BasePrompt/budget/grant 是否仍
+  由 CLI、PromptAssembler 或 PolicyEngine 暗读 filesystem/env/singleton，所有 owner/context mismatch
+  是否在 provider/executor 前 typed fail closed。
+- ToolCatalogSnapshot.prepare 是否使用同 entry 的 prepare/validator/resource resolver/executor，且
+  PreparedInvocation 是否持有该 entry 的 schema/metadata/policy/validator/executor、registrationDigest、
+  已解析 resources 与同 turn EffectivePolicySnapshot；是否只做浅冻结或在 approval wait 后偷换
+  args/resources/executor。
+- policyBasisRevision、grantRevision 与 combined revision 是否被混用；allow_always scope/key 是否漏绑
+  workspace/implementation/policy basis，grant→control crash 是否可能丢 grant、重复 executor 或用已消失
+  waiter 回放副作用。
+- PromptAssembler、PolicyEngine、registry/grant repository 和 adapter 的依赖方向是否符合
+  [02](./02-architecture.md)，CLI 是否只负责 registration/composition；热更新、unregister、approval、
+  grant flush、parallel tool calls、freshness 与 abort 的交错是否都有 deterministic gate，而非 timer。
+
+review 清零、`bun run check` 全绿并完成阶段 3 commit/push 后，本路线图完成。
+
+## 5. 跨阶段风险与缓解
+
+| 风险 | 失败形态 | 硬性缓解 |
+|---|---|---|
+| identity 依赖 mutable current state | 并发事件串 thread/run | identity 随 op/record/envelope 显式传递；交错 gate 测试 |
+| seq 只存在内存 | resume 后重复/倒退 | high-water mark 与 thread 权威记录同边界持久化；恢复测试 |
+| legacy 与 canonical 双写 | 顺序漂移、恢复事实分叉 | canonical journal 是唯一事实源；v1 mirror 仅 best-effort/可重建且不得反向 fold，按 driverRef/creationKey claim 去重；direct Session 与 Runtime 共写同 claimed backend 明确 unsupported，fingerprint mismatch 后 quarantine/重建私有 backend；headless 只做纯投影；黄金序列对比 |
+| observer await 热路径 | delta 卡顿、跨 thread 连坐 | 只有 EventCommitter 可背压；observer 独立队列和故障测试 |
+| 取消 scope 过宽 | abort 父线程误杀无关/子线程 | `(threadId, expectedRunId?)` 定位；subtree 必须显式 |
+| registry 版本撕裂 | schema v1 + executor v2 | turn snapshot + PreparedInvocation 直接持有引用；热更新对抗 |
+| 权限变成进程全局记忆 | child/thread 越权 | identity 化 policy context；workspace 上限与最小权限交集 |
+| CLI 继续拥有业务状态机 | runtime 无法嵌入、两套真相 | public RuntimePort smoke + 依赖边界 lint/test |
+
+## 6. 历史 M0–M7 基线（非 active roadmap）
+
+下表只解释当前仓库能力来自哪里，便于定位旧测试和文档中的 `M*` 标记；这些项视为阶段 0 的
+兼容基线，不应重新执行，也不能作为推迟阶段 0–3 契约的理由。
+
+| 历史里程碑 | 已形成的基线 |
+|---|---|
+| M0 | Bun/TypeScript/ESM、build/lint/test 与 import boundary |
+| M1 | canonical messages/provider/agent events、EventStream、faux provider |
+| M2 | OpenAI Chat Completions adapter 与离线 SSE fixtures |
+| M3 | Agent loop、工具执行框架与内置工具 |
+| M4 | steering/follow-up/abort/transform 与 tool-call 配对修复 |
+| M5 | TUI/classic/plain/headless、Session JSONL create/resume |
+| M6 | plan、approval、截断输出与前端交互 |
+| M7 | retry、compaction、usage/cost 与多 provider adapter |
+
+旧实现中的 `SessionEvent`、`ToolDefinition`、静态 provider dispatch 和单默认 Session 都是兼容
+输入，而非目标架构。子 Agent/MCP 也不再归入“新增工具”：MCP capability 可注册进 registry；子
+Agent 必须由 Supervisor 创建独立 thread。server/daemon、持久 shell、独立 TUI client 等仍不属于
+阶段 0–3 的产品交付，但 RuntimePort、mailbox 和 envelope 必须让它们未来无需改写 Agent core。
+
+## 7. 通用完成定义（Definition of Done）
+
+- 当前阶段全部验收项、受影响回归与 `bun run check` 全绿；默认测试离线、确定性，无裸 timer。
+- 新增/改变行为有测试；协议、架构、恢复或权限语义同步维护 canonical `docs/`。
+- import 边界零违例；新增 `runtime/capabilities` 目录的阶段同步扩展 ESLint zone 和
+  `tests/boundaries.test.ts`。
+- public/legacy surface 的 package exports、类型与构建产物均有消费测试；不手改 `dist/`。
+- review 没有未解决问题；修复后已重新 review 和复跑门禁。
+- 当前阶段 commit scope 纯净、提交成功并已推送；下一阶段尚未混入当前 diff。
 
 ## 相关文档
 
-- [01-overview.md](./01-overview.md) —— 目标、需求与关键决策摘要
-- [02-architecture.md](./02-architecture.md) —— 本路线图各里程碑落位的目录与依赖规则
-- [10-testing.md](./10-testing.md) —— 各里程碑验收所依赖的测试基建(faux provider、SSE fixture、e2e)
-- [04-provider-adapter.md](./04-provider-adapter.md) —— M2 与 M7 第二 provider 的契约细节
+- [01-overview.md](./01-overview.md) —— 产品目标与新执行模型摘要
+- [02-architecture.md](./02-architecture.md) —— 阶段 1–3 目录与依赖规则
+- [03-internal-protocol.md](./03-internal-protocol.md) —— identity、op、envelope 与兼容投影
+- [08-session-persistence.md](./08-session-persistence.md) —— 阶段 2 协作者与恢复边界
+- [10-testing.md](./10-testing.md) —— 各阶段可执行测试门禁
+- [12-supervisor-runtime.md](./12-supervisor-runtime.md) —— 本路线图的 canonical 设计契约

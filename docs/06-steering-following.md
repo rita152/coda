@@ -2,7 +2,16 @@
 
 # 06 · Steering 与 Follow-up:双队列完整规格
 
-本篇是核心需求 2(steering / following 双队列)的唯一规格文档,本篇给出七条精确语义的权威定义,逐条展开并给出"为什么这样设计"的论证;实现落点在 `src/agent/`(队列与注入点)与 `src/protocol/`(事件类型);转录修复与 transform 层的分工:规格在 [04-provider-adapter.md](./04-provider-adapter.md),实现落点在 `src/agent/`;键位与 UI 反馈在 [CLI 文档](./09-cli.md)。
+本篇是 steering / follow-up 双队列的唯一语义规格，给出七条精确语义并逐条展开。阶段 0 起，
+这两个队列属于**一个 ThreadRuntime 的 mailbox/Agent**，不是进程全局队列：每个 op 由 Supervisor
+按 `WorkspaceId + ThreadId` 路由，同一 thread FIFO 接收，不同 thread 可并发且不能互读、互相
+背压或互相取消。父/子 Agent 也是两个独立 thread，各自拥有 mailbox；子 Agent 不再作为父 Agent
+的工具调用。身份、幂等与恢复的完整契约见
+[12 · Supervisor Runtime](./12-supervisor-runtime.md)。
+
+双队列的注入机制落点在 `src/agent/`，外部 op mailbox/dispatcher 落点在 `src/session/`/
+`src/runtime/`，事件类型落点在 `src/protocol/`；转录修复与 transform 层的分工见
+[04-provider-adapter.md](./04-provider-adapter.md)，键位与 UI 反馈见 [CLI 文档](./09-cli.md)。
 
 ## 1. 动机与用户场景
 
@@ -22,7 +31,7 @@
 
 ## 2. 数据结构与 API
 
-### 2.1 Agent 对外 API([05 · Agent 核心循环](./05-agent-loop.md) 第 1 节的队列相关子集)
+### 2.1 Agent legacy API([05 · Agent 核心循环](./05-agent-loop.md) 第 1 节的队列相关子集)
 
 ```ts
 class Agent {
@@ -39,10 +48,15 @@ class Agent {
 
 `steer` / `followUp` 接受 `string` 是便利重载:内部包装成 `UserMessage`,并打上对应的 `source` 标记(`'steering'` / `'follow_up'`,见 [内部协议](./03-internal-protocol.md) 的 `UserMessage.source` 字段)。两个方法都是同步 `void`——入队即返回,不等待消费;排队状态通过 `queue_update` 事件观察(第 8 节)。
 
+这些方法是单 Agent 的保留 API。public Runtime 调用方使用 identity-bearing `RuntimeOp`：
+`prompt/steer/follow_up/abort` 都携带 `opId/workspaceId/threadId`，`submit()` resolve 只表示 op 已验证
+并进入目标 mailbox，不表示消息已注入 turn 或 run 已完成。运行中的 prompt 返回确定的拒绝 receipt，
+不靠跨进程 throw；steer/follow_up 的语义仍由显式 type 决定，不因到达时刻猜测。
+
 ### 2.2 内部队列(补充类型,不进 protocol 层)
 
 ```ts
-// src/agent/queue.ts
+// src/agent/queue.ts —— 每个 ThreadRuntime 各自持有两个实例
 export class PendingMessageQueue {
   constructor(public kind: 'steering' | 'follow_up') {}
   mode: 'all' | 'one-at-a-time' = 'one-at-a-time';
@@ -70,6 +84,26 @@ export interface QueuedMessage { id: string; text: string; kind: 'steering' | 'f
 ```
 
 `agent_start.reason: 'follow_up'` 让 UI 能区分"用户显式发起的任务"与"follow-up 队列续命的任务"。
+
+### 2.4 Runtime mailbox、幂等与隔离
+
+Supervisor 只验证身份并路由；每个 ThreadRuntime 的 dispatcher 按成功接收顺序处理自己的 FIFO
+mailbox。它与 active run 并行，因此 run 中仍能收到 steer/follow_up/abort/control_response。没有
+跨 thread 总锁，也没有一个共享 steering/follow-up 数组。
+
+- `OpId` 是幂等键：同一 op 重投返回原 receipt，不重复入队或启动 run；
+- `prompt` 只在目标 thread idle 时启动新的 RunId；running/retrying 时拒绝；
+- `abort{expectedRunId?}` 一出队就触发目标 run cancellation，不等待 turn 边界；expectedRunId 不
+  匹配时拒绝，防止迟到 op 误杀 successor run；
+- `control_response` 只能结案同一 ThreadId 的 pending request；跨 thread response 拒绝；
+- 已 accepted op 在 crash 后必须可恢复。阶段 1 的临时 per-thread journal 已在 receipt 前持久化完整
+  payload、resolved abort target、RunId reservation、input ownership 与 event seq high-water；内存只作
+  dispatcher/cache。阶段 2 把同一语义提取为 TranscriptRepository/EventCommitter，不延后 durability。
+
+父线程 abort 默认不级联 child thread；只有显式 subtree scope 才由 Supervisor 按拓扑快照下发。
+child 完成结果由 Supervisor 投递给父 thread 的 EventCommitter，产生无需应答的 `thread_result`
+RuntimeEvent；它不是 RuntimeOp、mailbox control 或父线程 tool result，pending/delivered outbox 保证
+父未 attach 与 crash 窗口仍 exactly-once。
 
 ## 3. 七条精确语义(逐条展开)
 
@@ -115,13 +149,15 @@ assistant 未再发起工具调用(本来内层循环该退出)时,只要 steeri
 
 **为什么:** 若 `prompt()` 在运行中自动降级为 steer 或 followUp,调用者拿到的语义取决于毫秒级竞态(消息到达时任务是否恰好刚结束)——这正是 codex 单 Op 方案的固有问题(第 10 节)。pi 在两层都强制显式:`Agent.prompt()` 运行中直接 throw("Use steer() or followUp() to queue messages"),上层 `AgentSession.prompt()` 在流式期间必须显式传 `streamingBehavior: "steer" | "followUp"` 否则同样 throw。入口强制二选一,没有第三种模糊状态。键位分配的依据:steering 是流式期间最高频的动作,给成本最低的 Enter;follow-up 次之给 Alt+Enter;Esc 是终端用户对"停下"的肌肉记忆(键位实现细节见 [CLI 文档](./09-cli.md))。
 
-### 语义 7:agent_end 后的残留队列由 session 层决定
+### 语义 7:agent_end 后的残留队列由 ThreadRuntime 决定
 
-`shouldStopAfterTurn()` 返回 true 时直接 `agent_end`,**不 poll 任何队列**;队列内容保留。是否用 `continue()` 续跑残留队列,由 session 层(或任何宿主)在收到 `agent_end` 后自行决定。
+`shouldStopAfterTurn()` 返回 true 时直接 `agent_end`,**不 poll 任何队列**;队列内容保留。是否用
+`continue()` 续跑残留队列,由所属 ThreadRuntime 的策略协作者在收到 `agent_end` 后决定；其他
+thread 与 Supervisor 不得代为 drain。
 
-**为什么:** `shouldStopAfterTurn` 是宿主的"优雅停"钩子(token 预算耗尽、审批被拒终止等),此时"要不要继续消费队列"是**策略**问题而非**机制**问题——loop 若自作主张续跑,宿主刚下达的"停"就被队列复活了。pi 的分工完全相同:loop 层不 poll 直接退出,coding-agent 层在 `_handlePostAgentRun` 里检查 `agent.hasQueuedMessages()` 再决定 `agent.continue()`。codex 则选择自动续(`on_task_finished` 把残余 pending input 记为下一 turn 的输入)——我们不采纳,显式交给 session 层更可控。
+**为什么:** `shouldStopAfterTurn` 是宿主的"优雅停"钩子(token 预算耗尽、审批被拒终止等),此时"要不要继续消费队列"是**策略**问题而非**机制**问题——loop 若自作主张续跑,宿主刚下达的"停"就被队列复活了。pi 的分工完全相同:loop 层不 poll 直接退出,coding-agent 层在 `_handlePostAgentRun` 里检查 `agent.hasQueuedMessages()` 再决定 `agent.continue()`。codex 则选择自动续(`on_task_finished` 把残余 pending input 记为下一 turn 的输入)——我们不采纳,显式交给该 thread 的 ThreadRuntime 更可控。
 
-`continue()` 的消费顺序(与 [05](./05-agent-loop.md) 第 1 节的 Agent API 一致):**优先 drain steering,否则 follow-up**。典型场景是 abort 之后——最后一条消息是 aborted 的 assistant,`continue()` 把 steering 队列里的消息当作新 prompt 启动,并跳过起跑前的那次 steering poll(pi 的 `skipInitialSteeringPoll`,防止同一条消息被 drain 两次);两个队列皆空时 `continue()` throw。
+`continue()` 的消费顺序(与 [05](./05-agent-loop.md) 第 1 节的 Agent API 一致):**优先 drain steering,否则 follow-up**。典型场景是 abort 之后——最后一条消息是 aborted 的 assistant,`continue()` 把 steering 队列里的消息当作新 prompt 启动,并跳过起跑前的那次 steering poll(pi 的 `skipInitialSteeringPoll`,防止同一条消息被 drain 两次)。两个队列皆空但存在 aborted/error assistant、未配对 toolCall 或未 materialized prompt input 等残局时允许纯重采样；只有 clean completed transcript 才 throw `Nothing to continue`。
 
 ## 4. 注入点时序
 
@@ -258,6 +294,12 @@ transform 层的其余职责(跨模型 reasoning 降级、toolCallId 归一化�
 
 快照式载荷让 UI 无需维护本地状态机:收到事件,整个徽标区重画,完毕。乱序、重连、丢事件都不会造成 UI 与真实队列漂移。
 
+在 canonical Runtime 中，`queue_update` 是 EventEnvelope 的内层 payload。该 thread 的
+EventCommitter 先把 mailbox 变化与 per-thread seq 权威提交，再由 EventHub 异步广播；普通 UI
+observer 不能背压 Agent 或 mailbox dispatcher。快照允许 UI 以最新状态重建，但订阅者仍必须检查
+seq gap：发生溢出时断开/补读，不得把“下一张快照看起来合理”当作从未丢事件。阶段 0 的
+Session/headless 继续收到剥离信封的裸 queue_update，阶段 1 envelope 模式则保留完整 identity/seq。
+
 ### 8.2 pi 的教训:必须携带 id
 
 pi 的 coding-agent 层在 Agent 队列之外镜像了一份字符串数组(`_steeringMessages`)用于 UI 展示,消息注入时靠**文本匹配**(`indexOf(messageText)`)从镜像中移除——用户连发两条相同文本的 steering 时会误删错位。这是我们源码调研中明确标记"应避免"的缺陷。
@@ -269,7 +311,7 @@ steer("...") → queue_update(快照含 {id: 'u_42', kind: 'steering'})   → �
 turn 边界注入 → queue_update(快照不含 u_42)+ message_start(id: 'u_42') → 徽标消失,转录出现该消息
 ```
 
-全程可按 id 精确匹配,零文本比较;重复文本也不会错乱。当前 TUI 对完整快照只投影 `steer N · follow-up N` 计数，`/queue` 才打印明细；消息注入后按 `source` 在转录显示 `» steering` / `» follow-up`。需要逐项动画或撤回能力的未来客户端可使用上述 id 关联。headless `--json` 原样输出 `queue_update`,外部客户端获得同等能力。
+全程可按 id 精确匹配,零文本比较;重复文本也不会错乱。当前 TUI 对完整快照只投影 `steer N · follow-up N` 计数，`/queue` 才打印明细；消息注入后按 `source` 在转录显示 `» steering` / `» follow-up`。需要逐项动画或撤回能力的未来客户端可使用上述 id 关联。legacy headless `--json` 输出裸 `queue_update`；envelope 模式输出带 ThreadId/seq 的同一 payload，外部客户端可安全复用多个 thread 的订阅。
 
 ## 9. 边界情况清单
 
@@ -277,9 +319,9 @@ turn 边界注入 → queue_update(快照不含 u_42)+ message_start(id: 'u_42')
 
 1. **运行中调用 `prompt()`**:同步 throw,错误文案含 "Use steer() or followUp()" 指引;agent 状态不受影响。
 2. **idle 时调用 `steer()`**:合法,消息静置队列;下一次 `prompt()` 起跑前的 poll(注入点 ①)会捎上它。CLI 正常情况下不会走到这条(键位仅流式期间映射为 steer),但 API 用户会。
-3. **agent_end 后队列有残留**(`shouldStopAfterTurn` 提前停、abort、one-at-a-time 未消费完等):loop 不自动续;session 层在 `agent_end` 处理器里检查队列非空并按策略调用 `continue()`(语义 7)。
-4. **abort 后 `continue()`**:最后一条消息是 aborted assistant → 优先 drain steering 作为新起点(跳过起跑 poll 防双重 drain),否则 drain follow-up,两者皆空 throw。消费了队列消息时 `agent_start.reason` 为 `'follow_up'`;两队列皆空的纯重采样才是 `'continue'`(以 [05](./05-agent-loop.md) §1.2 与 [03](./03-internal-protocol.md) §7.2 为准)。
-5. **compaction 期间的输入暂存**:compaction(M7,见 [session 文档](./08-session-persistence.md))运行期间转录正在被摘要重写,此时注入 steering 可能落在即将被丢弃的尾部或被摘要吞掉。照 pi 的做法:session 层在 compaction 进行中把用户输入暂存到第三个临时缓冲,compaction settle 后按原语义(steer/followUp)重放入队。Agent 核心对此无感知——这是 session 层的编排责任。
+3. **agent_end 后队列有残留**(`shouldStopAfterTurn` 提前停、abort、one-at-a-time 未消费完等):loop 不自动续;ThreadRuntime 在 `agent_end` 处理器里检查本 thread 队列并按策略调用 `continue()`(语义 7)。
+4. **abort 后 `continue()`**:最后一条消息是 aborted assistant → 优先 drain steering 作为新起点(跳过起跑 poll 防双重 drain),否则 drain follow-up；两者皆空时因 aborted 残局走纯重采样。消费了队列消息时 `agent_start.reason` 为 `'follow_up'`;空队列残局的纯重采样才是 `'continue'`，clean completed transcript 则 throw(以 [05](./05-agent-loop.md) §1.2 与 [03](./03-internal-protocol.md) §7.2 为准)。
+5. **compaction 期间的输入暂存**:CompactionCoordinator(见 [session 文档](./08-session-persistence.md))运行期间转录正在生成摘要视图,此时注入 steering 可能落在即将被替换的出站窗口。ThreadRuntime 在 compaction 期间把该 thread 的输入暂存到第三个缓冲,compaction settle 后按已接受顺序与原语义(steer/followUp)重放入队；accepted op 的 durable 记录不能丢。Agent 核心对此无感知。
 6. **steering 消息本身触发长任务**:注入的 steering 让模型又发起了大量工具调用——这是语义 2 的正常形态,内层循环继续,follow-up 队列继续等待"真正的结束"。不存在"steering 只能小修小补"的隐含假设,测试需覆盖 steering 后再跑 10+ turn 的场景。
 7. **一个 turn 内连发多条 steering(one-at-a-time)**:每个 turn 边界消费一条;若模型不再发工具调用,靠语义 2 逐 turn 续命逐条消费,顺序 = 入队顺序。
 8. **`stopReason: 'length'` 的 turn 与 steering**:length 不属于 error/aborted,内层循环不退出;该批 toolCall 全批合成失败结果后照常走 turn_end → steering 注入点。steering 与"参数截断重试"在同一个下轮请求中共存,合法。
@@ -296,11 +338,17 @@ codex 的外协议只有一个用户输入入口:`Op::UserInput`。core 收到�
 
 1. **codex 表达不了 follow-up。** 任务运行中到达的消息一律按 steering 处理,"排队等当前任务结束再做"这个意图在 codex 协议里不存在(残余 pending input 在 task 结束时自动变成下一任务的输入,但那是"没消费完的 steering",不是用户可选择的投递方式)。我们的核心需求 2 明确要求两种意图都可表达——这一条就否决了单 Op 方案。
 2. **语义取决于竞态。** 单 Op 下,同一条消息在 agent_end 前 1ms 到达是 steering、后 1ms 到达是新任务——用户按下 Enter 时无法预知会得到哪种语义。显式双队列下 `steer()` / `followUp()` 任何时刻调用语义恒定:steer 在 idle 时静置等下次起跑捎带(边界 2),followUp 永远等"结束"点。可预测性是本地交互工具的第一优先级。
-3. **场景不同。** codex 的双队列(Submission Queue / Event Queue)解决的是 **UI 与 core 跨进程解耦**,单 Op 是那个约束下的最优解;我们是进程内 library + 薄 CLI,`steer()` / `followUp()` 就是两个方法调用,没有协议面积压力。
+3. **我们的 public Runtime 必须承载可恢复意图。**可嵌入 Runtime 同样要跨异步边界，但它需要
+   durable mailbox、OpId 幂等和多 ThreadId 路由。把 delivery 明确编码为 `steer` / `follow_up`
+   可让重投、恢复与审计都保留原意；若只提交“用户输入”，恢复时已无法可靠重建接收瞬间的
+   active-run 状态，也就无法确定原语义。
 
 旁证是 opencode 的演化终点:V1 事实上等价于 codex 的"运行中一律 steering"(写历史 + step 边界拾取),V2 重做时引入的正是显式的 `delivery: "steer" | "queue"` 双投递——与我们的双队列同构。pi 则从第一天就是双队列。三个项目、两条路径、一个终点。
 
-我们同时吸收 codex 方案的合理内核:**headless `--json` 模式**的命令面保留显式的 `{"type":"steer"}` / `{"type":"follow_up"}`(而非单一 user_input),把"显式表达意图"的原则贯穿到外协议;`abort` 对应 codex 的 `Op::Interrupt`,`agent_end.reason` 对应其 `TurnAborted.reason` 的简化版。
+我们同时吸收 codex 方案的合理内核：RuntimeOp 保留显式 `steer` / `follow_up`（而非单一
+user_input），并附 `opId/workspaceId/threadId`；legacy headless `--json` 继续接受既有无身份命令并
+映射到默认 thread，envelope 模式使用完整 op identity。`abort` 对应 codex 的 `Op::Interrupt`，但
+额外支持 expectedRunId 防止迟到取消。
 
 ## 11. 验收清单
 
@@ -313,10 +361,14 @@ codex 的外协议只有一个用户输入入口:`Op::UserInput`。core 收到�
 - [ ] 起跑前 poll:idle 时 `steer()` 两条 → `prompt()` → 首个 turn 注入(one-at-a-time 注入 1 条)。
 - [ ] abort:provider 流以 `stopReason:'aborted'` 收尾;aborted assistant 落转录;下一次请求(经 transform)不含该消息、孤儿 toolCall 均有 `"[Tool execution was interrupted]"` isError 配对结果。
 - [ ] abort 不清队列;`clearQueues()` 清空并发空快照 `queue_update`。
-- [ ] `continue()`:abort 后优先消费 steering 且不双重 drain;皆空 throw;消费了队列消息时 `agent_start.reason === 'follow_up'`,两队列皆空的纯重采样才是 `'continue'`。
+- [ ] `continue()`:abort 后优先消费 steering 且不双重 drain；空队列但有 aborted/error/孤儿残局时纯重采样且 `agent_start.reason === 'continue'`；消费队列消息时 reason 为 `'follow_up'`；仅 clean completed transcript 皆空才 throw。
 - [ ] `queue_update`:入队、注入、清空三个时机各发一次;快照 id 与注入后 `UserMessage.id` 一致;重复文本消息不错乱(pi 教训的回归测试)。
 - [ ] `shouldStopAfterTurn` 返回 true → `agent_end` 且两队列保持原样未被 poll。
 - [ ] 边界清单第 5-12 条各有对应测试用例。
+- [ ] 两个 thread 各自卡在 gate 时 mailbox 与 queue_update 完全隔离；任一 thread 的 steer/abort/慢 observer 不改变另一方。
+- [ ] 相同 OpId 重投不重复入队；同一 thread 的 accepted op 按 FIFO 处理，不声明跨 thread 全局顺序。
+- [ ] expectedRunId 不匹配的迟到 abort 被拒绝；父 thread abort 默认不取消 child thread，显式 subtree 才级联。
+- [ ] close/resume 后 accepted mailbox 记录与 per-thread event seq high-water 均恢复，resume 本身不自动启动 run。
 
 ## 相关文档
 
@@ -324,3 +376,4 @@ codex 的外协议只有一个用户输入入口:`Op::UserInput`。core 收到�
 - [04 · Provider 接口与 Chat Completions adapter](./04-provider-adapter.md) —— transform 层完整四步规格、wire 层配对规则
 - [09 · CLI 与 TUI](./09-cli.md) —— Enter/Alt+Enter/Esc 键位实现、队列状态渲染、headless JSON 命令面
 - [03 · 内部协议](./03-internal-protocol.md) —— UserMessage.source、QueuedMessage、AgentEvent 全集
+- [12 · Supervisor Runtime](./12-supervisor-runtime.md) —— RuntimeOp、per-thread mailbox、取消作用域与恢复契约
