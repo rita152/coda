@@ -1,6 +1,6 @@
 [← 返回地图](./README.md)
 
-# 11 实施路线图与当前基线：Supervisor Runtime 阶段 0–3
+# 11 实施路线图与当前基线：Runtime 阶段 0–3 与 CLI UX0–UX4
 
 本文记录从原单 `Session` 实现迁移到可嵌入多线程 Runtime 的路线与当前落地基线。目标语义以
 [12-supervisor-runtime](./12-supervisor-runtime.md) 为 canonical 契约；原 M0–M7 已经形成的
@@ -8,6 +8,10 @@ protocol、provider、agent、工具、CLI、持久化、approval、retry 与 co
 基线**，不再是待执行路线，也不得覆盖阶段 0–3 的新约束。阶段 0–2 已提交；阶段 3 的 registry、
 Runtime mode、turn snapshot、policy/grant 与 package surface 已进入当前实现，本章第 4 节同时记录
 static/legacy compatibility 边界，不能再把它读成“阶段 3 待实现”清单。
+
+Runtime 阶段 0–3 完成后，产品工作的 active roadmap 转为本文第 8 节的 CLI UX0–UX4。其用户旅程、
+surface parity、终端环境与性能基线以 [13 CLI/TUI UX](./13-cli-ux.md) 为 canonical 契约；09 记录
+生产行为，10 记录机械化门禁。UX 阶段不得借产品化之名扩张 Agent、Runtime、权限或 provider 协议。
 
 ## 0. 总览与硬门禁
 
@@ -567,6 +571,102 @@ Agent 必须由 Supervisor 创建独立 thread。server/daemon、持久 shell、
   定向门禁与最终 check。
 - 当前阶段 commit scope 纯净、提交成功并已推送；下一阶段尚未混入当前 diff。
 
+## 8. Active roadmap：CLI UX0–UX4
+
+### 8.1 串行门禁与状态
+
+```mermaid
+flowchart LR
+  U0["UX0\n冻结用户体验基线"] --> UG0["两轮 review\ncheck + commit + push"]
+  UG0 --> U1["UX1\nCLI 产品化与首次使用"]
+  U1 --> UG1["两轮 review\ncheck + commit + push"]
+  UG1 --> U2["UX2\n信息层级与输入效率"]
+  U2 --> UG2["两轮 review\ncheck + commit + push"]
+  UG2 --> U3["UX3\n审阅与恢复工作流"]
+  U3 --> UG3["两轮 review\ncheck + commit + push"]
+  UG3 --> U4["UX4\n可访问性、性能与自动化"]
+  U4 --> UG4["两轮 review\ncheck + commit + push"]
+```
+
+| UX 阶段 | 当前状态 | 生产行为 | 结果 |
+|---|---|---|---|
+| UX0 | 已完成（两轮 review） | 不得改变 | UX 契约、旅程/parity matrix、环境与性能 characterization |
+| UX1 | 待开始 | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
+| UX2 | 待开始 | 保持 Runtime 语义 | 紧凑状态区、command palette、composer 与 transcript 导航 |
+| UX3 | 待开始 | 业务动作只经 RuntimePort | review/diff/approval/session picker 与每 thread presentation state |
+| UX4 | 待开始 | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/窗口化与自动化输出 |
+
+每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
+本阶段 diff 覆盖行为、恢复、终端安全、兼容与测试；发现问题立即修复并跑定向测试。第二轮重新覆盖
+完整范围并验证第一轮修复；第二轮发现的问题也立即修复，但此后只做定向验证和最终门禁，不再启动
+第三轮完整 review。随后必须运行 `bun run check` 与 `git diff --check`，确认文档、测试、公共出口和
+worktree 范围，只提交并推送本阶段；成功后才允许开始下一阶段。
+
+### 8.2 UX0：冻结用户体验基线
+
+- 新增 13，定义六条核心旅程：首次成功 prompt、登录/模型选择、长任务观察/steer、工具/diff 审阅、
+  中止/失败/退出恢复、脚本/CI headless。
+- 同时冻结 TUI、classic、plain、headless 的现状与 UX4 目标 parity；目标列不能伪装成当前实现。
+- characterization 覆盖 `40×10`、`80×24`、`120×40`、CJK、emoji、`NO_COLOR`、`TERM=dumb`、
+  tmux/SSH，以及冷启动、首帧、输入反馈、10000 delta 与 1000 条 transcript 回放基线。
+- 本阶段 diff 只允许文档与 characterization tests，不修复测试揭示的生产缺口。
+
+### 8.3 UX1：CLI 产品化与首次使用体验
+
+- `-h/--help` 与 `-V/--version` 在配置、目录、signal、provider/OpenTUI、网络之前纯解析并退出；
+  public Runtime import 继续零副作用。
+- 由统一 `CommandCatalog` 生成 help、completion、错误建议、slash/palette 候选；新增
+  `doctor [--json]`、`completion <bash|zsh|fish|powershell>`、`auth login|logout|status`、`models`、
+  `sessions`、`exec` 与 `--ui=auto|tui|classic|accessible|plain`，保留全部旧入口和 wire。`exec` 去掉动作
+  token 后与现有 one-shot 使用同一解析和 RuntimePort 路径；models 的目录读取保持零 thread，只有用户
+  明确确认选择后才沿现有 RuntimePort create/resume/set-model 路径 attachment。
+- onboarding 显示“登录 → 选择模型 → 输入任务”；保留既有 OpenCode Go，并新增明确的 OpenAI、
+  Anthropic、Custom API-key preset；未实现 OAuth 必须标记 disabled/coming soon；secret 永不进入持久
+  状态或输出。UX1 的 accessible 最低即 append-only、无 alternate screen/动画/鼠标依赖。
+- 统一所有 surface 的终端净化，修复 classic 多行、光标、bracketed paste 与键位说明；README 覆盖
+  安装到恢复/headless 的完整路径。
+
+### 8.4 UX2：TUI 信息层级与输入效率
+
+- 第一次交互后把品牌首屏收缩为持久任务栏；run phase、model、permission、context、Git、queue 始终可见。
+- command palette 支持分类、模糊搜索、参数/快捷键提示，并按 runtime/provider/control 状态禁用命令。
+- composer 增加历史搜索、外部编辑、stash/restore、`@` 补全、per-thread draft 与可选 Vim；secret 路径
+  不得进入 history/draft/frame/transcript/log/error。
+- transcript 增加搜索、上下项、latest/new-output、copy/raw/export；手动上滚时不得被新事件抢回。
+  classic/accesssible 通过文本命令达到功能等价。
+
+### 8.5 UX3：以审阅和恢复为中心
+
+- reasoning 与工具调用以摘要卡片默认折叠并可展开；diff viewer 支持文件、滚动、分组及 turn/workspace 切换。
+- `/diff`、`/review`、`/copy`、`/export`、`/compact`、`/permissions` 以及 `/new`、`/sessions`、
+  `/resume`、`/switch`、`/rename`、`/archive` 逐项进入 13 §3.1 的统一目录。
+- picker 支持搜索/状态/时间/workspace/cwd/摘要；切换 thread 保留各自 draft、滚动与未读，后台 run 继续，
+  abort/control 必须显式目标当前 thread/run。
+- 先扩展并同步维护 03/12 的 control event/snapshot：Runtime 从同一 PreparedInvocation/PolicyDecision
+  提交 identity-bound、JSON-safe `ApprovalPresentation`。卡片只消费该 snapshot/envelope projection 中的
+  capability、规范化 command/file resource、risk、allow-once invocation scope、allow-always frozen
+  grantProposal scope、catalogRevision 与 effective policy revisions；UI 不直读 capability/policy internals，
+  也不推导授权范围。优先交付 conversation retry/fork 与诚实恢复，不承诺虚假文件全量撤销。
+
+### 8.6 UX4：可访问性、性能与自动化
+
+- 在 UX1 已冻结的 append-only/no-alternate-screen/no-animation/no-mouse 最低语义上，为 accessible 增加
+  ASCII fallback 与 PTY 加固；light、dark、high-contrast、mono 的状态都有非颜色标识。
+- delta 按帧合并，长 transcript 窗口化/分段，昂贵内容延迟渲染；普通 observer、慢 UI 和 thread 切换
+  不得背压 Runtime。
+- 在默认 legacy `--json` 逐字节兼容前提下增加 output/final-only/ephemeral/timeout；progress 写 stderr，
+  final 写 stdout，机器格式具有稳定终态与失败码。
+- 真实 PTY 覆盖所有退出/降级/resize/paste/TERM/NO_COLOR 路径并验证终端模式复原；1000 条历史首帧、
+  10000 delta 限帧、输入反馈 `<100ms`，最终内容不得丢失或重排。
+
+### 8.7 跨 UX 阶段不变量
+
+- 默认 Agent、工具、Runtime、approval 与 Enter/steer/follow-up/abort 语义不变；选模型前零 thread/journal。
+- UI 只消费 RuntimePort snapshot 与 EventEnvelope；thread/run/control/usage/permission 不得有第二事实源。
+- CLI、TUI、classic、accessible、plain、headless 的业务动作共享语义规格，且全部有机械化 parity 测试。
+- legacy NDJSON/envelope/一次性/管道/continue/resume golden 始终通过；所有新增业务动作经 RuntimePort。
+- 不实现多 Agent、子 Agent 页面、云任务、远程控制、插件市场或新 provider 协议。
+
 ## 相关文档
 
 - [01-overview.md](./01-overview.md) —— 产品目标与新执行模型摘要
@@ -575,3 +675,4 @@ Agent 必须由 Supervisor 创建独立 thread。server/daemon、持久 shell、
 - [08-session-persistence.md](./08-session-persistence.md) —— 阶段 2 协作者与恢复边界
 - [10-testing.md](./10-testing.md) —— 各阶段可执行测试门禁
 - [12-supervisor-runtime.md](./12-supervisor-runtime.md) —— 本路线图的 canonical 设计契约
+- [13-cli-ux.md](./13-cli-ux.md) —— UX0–UX4 的用户旅程、parity 与恢复/性能契约

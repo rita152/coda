@@ -2,7 +2,7 @@
 
 # 10 测试策略(Testing)
 
-本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、OpenTUI 内存渲染回归、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。Supervisor、identity、EventEnvelope、事件提交和能力快照的新增用例以 [12](./12-supervisor-runtime.md) 为 canonical 契约；旧 M0–M7 标签仅用于定位既有测试族。
+本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、OpenTUI 内存渲染回归、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。Supervisor、identity、EventEnvelope、事件提交和能力快照的新增用例以 [12](./12-supervisor-runtime.md) 为 canonical 契约；CLI 产品化的用户旅程、surface parity、presentation state、环境与性能门禁以 [13](./13-cli-ux.md) 为 canonical 契约；旧 M0–M7 标签仅用于定位既有测试族。
 
 ## 1. 测试哲学
 
@@ -821,6 +821,46 @@ harness:
 7. control(阶段 2):approval request/response 在阶段 1 wire 映射基础上进入同一 durable commit/replay
    链；慢 stdout 触发 drain 时 run 已可完成，但 shutdown 等输出泵排空后才退出。
 
+### 7.3 UX0–UX4 产品体验门禁
+
+产品化阶段沿用本章的离线、确定性原则，但 review gate 统一为：每阶段实现完成后**恰好两轮完整
+Agent review**。第一轮覆盖全部阶段范围，修复后复跑定向测试；第二轮重新覆盖完整范围并验证修复，
+第二轮新问题仍直接修复并定向验证，但不得启动第三轮完整 review。最终再跑 `bun run check` 与
+`git diff --check`，单独 commit/push 后进入下一阶段。
+
+| 阶段 | 新增机械门禁 | 必须保持的兼容面 |
+|---|---|---|
+| UX0 | `src/cli/ux-characterization.test.ts` 冻结 40×10/80×24/120×40、CJK/emoji、NO_COLOR、TERM=dumb、tmux/SSH 路由和性能数量级；文档记录六旅程/parity | 生产文件零变化；现有 CLI/TUI/headless tests 原样通过 |
+| UX1 | help/version 进程级零副作用探针；command catalog 生成 parser/help/completion/palette；unknown suggestion/互斥/exit/stdout-stderr；onboarding；全 human renderer sanitizer；classic raw-key harness；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 所有旧 flags、裸 prompt、`-p`、continue/resume、默认 legacy NDJSON 与 envelope golden |
+| UX2 | compact header/status、palette availability/fuzzy search；Ctrl+R/editor/stash/`@`/per-thread draft；scroll/search/unread/copy/export；secret taint tests；resize/switch/recovery presentation state | Enter/steer/follow-up/abort/control identity；UI 只读 snapshot/envelope |
+| UX3 | reasoning/tool cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
+| UX4 | accessible ASCII/theme/PTY 加固；frame coalescing/virtualization；output/final-only/ephemeral/timeout；真实 PTY 全退出矩阵；1000 history/10k delta/100ms input | 默认 `--json` 逐字节兼容，普通 observer/慢 UI 不背压 Runtime |
+
+UX0 characterization 的精确职责：
+
+1. 三个 viewport 都必须保留 task 文本、draft、workspace、context 和 viewport 内光标；40×10 隐藏
+   Logo/tips/model，80×24 与 120×40 保留完整层级。
+2. CJK、ZWJ emoji 和宽字符不以 UTF-16 length 计算光标列；characterization 断言 composer 的精确显示
+   列，classic 的简化 wcwidth 另有纯函数覆盖。
+3. `TERM=dumb` 双 TTY 让 main 共用的 routing predicate 返回 false；`screen-256color`、
+   `tmux-256color` 与带 `SSH_CONNECTION` 的常见 `xterm-256color` 在双 TTY 下仍 eligible。动态
+   OpenTUI module 确实未加载由 UX1 的构建产物进程 probe 证明，UX0 不把纯 predicate 测试冒充该证据。
+4. UX0 分别冻结 `--no-color` parser surface 与 NO_COLOR-equivalent 的无语义色透明 renderer 结果，不把
+   test 注入的 `color:false` 冒充 production env wiring。UX1 构建产物进程 probe 才证明 `NO_COLOR` 与
+   `--no-color` 都经真实 main 路径选择该结果；plain append-only 不输出 coda 生成的 cursor control。
+5. UX0 对 classic/plain 控制序列透传的断言刻意标为 sanitizer debt；UX1 必须翻转为所有 human
+   surface 都清洗，不能把 characterization 当成永久兼容承诺。
+6. 性能测试用相互独立的 view 和宽上限防止 CI flake；10,000 delta 精确比较完整 patterned 内容，
+   1,000 transcript 精确比较 child count 与首/中/末顺序，不能让丢失/重排靠 wall-clock 通过。精确本机
+   观察值记录在 [13 §9](./13-cli-ux.md)。UX4 额外用 invalidation/frame 次数的确定性断言证明
+   coalescing，而不是只依赖 wall-clock。
+
+UX1 的 help/version 零副作用必须由构建产物子进程探针证明：在临时 HOME 下比较前后目录、signal
+listener、provider/OpenTUI module probe 和网络 spy；`-h/--help/-V/--version` 在任何 config read、
+cleanup directory、Runtime storage、signal 或动态 native import 前退出。UX4 的真实 PTY 至少覆盖正常
+退出、运行中 abort、fatal、审批 abort、provider 请求中退出、初始化失败 fallback、resize、多行 paste、
+TERM=dumb 和 NO_COLOR，并逐项断言 raw mode、mouse、bracketed paste、title 与 alternate screen 恢复。
+
 ## 8. CI 建议
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
@@ -837,6 +877,8 @@ harness:
 - [x] 阶段 1:identity/envelope/RuntimePort/Supervisor、per-thread seq resume、OpId 幂等、无副作用 import 与 legacy 投影门禁全绿。
 - [x] 阶段 2:六个协作者边界、权威 committer 背压、observer 隔离、control 同链与 headless 自有 drain 门禁全绿。
 - [x] 阶段 3:registry/snapshot/prepared invocation/provider/prompt/policy、registry Runtime、grant repository 与 package exports 定向矩阵全绿；既有 static 工具/provider 兼容 fixture 保持全绿。
+- [x] UX0:六条旅程、surface/key parity、极端终端环境与性能 baseline 已冻结；完整两轮 Agent review
+  后生产文件零变化，characterization、`bun run check` 与 `git diff --check` 全绿。
 
 下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
 而推断未在当前环境重跑的双 OS CI 等外部结果。

@@ -2,11 +2,11 @@
 
 **coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 被严格隔离在各自 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
 
-本目录是该项目的完整实施计划,共 12 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，01–11 各专题已按其阶段 0 基线同步；阶段实施与兼容时限以 11/12 为准。
+本目录是该项目的完整实施计划,共 13 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，第 13 篇冻结 CLI/TUI UX0–UX4 的用户旅程、surface parity、恢复与性能契约；阶段实施与兼容时限以 11 为准。
 
 ## 文档性质与约定
 
-三条使用约定,适用于全部 12 篇:
+三条使用约定,适用于全部 13 篇:
 
 1. **类型是 canonical 的。**文档中出现的 TS 类型定义(`AgentMessage`、`ProviderEvent`、`StreamFn`、`ToolDefinition` 等)在各篇之间逐字一致,以 [03 内部协议](./03-internal-protocol.md) 与各自宿主篇为准。实现时可以补充新字段、新类型,但不得改名、改语义。
 2. **每篇独立可读,交叉引用用相对链接。**每篇开头一行面包屑回到本地图,结尾「相关文档」小节指向最相关的 2–4 篇。
@@ -14,7 +14,7 @@
 
 ## 阅读顺序与依赖关系
 
-推荐首次先读总览与新基线（01 → 12），再按 02 → 10 的专题顺序通读，并以 11 的阶段门禁收束。各篇之间的依赖关系如下,箭头由「先读」指向「后读」:
+推荐首次先读总览与 Runtime 基线（01 → 12），再按 02 → 09 的专题顺序通读；进行终端产品工作时接着读 13，并以 10/11 的测试和阶段门禁收束。各篇之间的依赖关系如下,箭头由「先读」指向「后读」:
 
 ```mermaid
 graph TD
@@ -39,6 +39,7 @@ graph TD
     TE10[10 测试策略]
     RM11[11 路线图]
     SR12[12 Supervisor / Runtime]
+    UX13[13 CLI / TUI UX]
   end
 
   O1 --> SR12
@@ -58,6 +59,10 @@ graph TD
   SF6 --> TE10
   SR12 --> RM11
   SR12 --> TE10
+  C9 --> UX13
+  SR12 --> UX13
+  UX13 --> TE10
+  UX13 --> RM11
 ```
 
 两点补充:11(路线图)读过 01/12 即可看懂,但要评审其排期合理性需要通读全部;10(测试)是横切篇,faux provider、并发 gate 与热更新剧本会反过来影响 runtime/agent 的代码形态，进入任何阶段实现前都应先读。
@@ -74,8 +79,9 @@ graph TD
 8. [07 工具集](./07-tools.md) —— 八个工具的规格
 9. [08 会话持久化](./08-session-persistence.md) —— JSONL 与 compaction
 10. [09 CLI / TUI](./09-cli.md) —— 全屏交互、保底模式与 headless
-11. [10 测试策略](./10-testing.md) —— faux provider 与 fixture
-12. [11 路线图](./11-roadmap.md) —— 阶段 0–3、review 门禁与风险
+11. [13 CLI / TUI UX](./13-cli-ux.md) —— 用户旅程、surface parity、恢复、安全与性能
+12. [10 测试策略](./10-testing.md) —— faux provider、fixture 与 UX characterization
+13. [11 路线图](./11-roadmap.md) —— Runtime 阶段 0–3、CLI UX0–UX4 与 review 门禁
 
 ## 文档摘要
 
@@ -127,10 +133,14 @@ CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI/class
 
 阶段 0–3 的权威演进契约：从进程级单 Agent 改为每线程单 active run，由 Supervisor 管理可并发的独立线程；冻结五类身份、per-thread seq 信封、mailbox、取消/恢复、权威提交与异步观察者、权限降权、JSON-Schema-first registry/snapshot，以及旧 Session/headless 的兼容矩阵。
 
+### [13 CLI / TUI UX](./13-cli-ux.md)
+
+UX0–UX4 的权威产品契约：六条核心用户旅程，TUI/classic/accessible/plain/headless 的现状与目标 parity，统一命令规格、每 thread presentation state、终端 sanitizer、极端终端环境和性能 characterization，以及恰好两轮 review 的阶段门禁。
+
 ## 按角色的阅读路径
 
 **我想尽快把代码跑起来(实现者)。**
-01 → 12 → 11（确认当前阶段）→ 02 → 03 → 10，再按阶段回读专题：阶段 1 精读 03/09，阶段 2 精读 05/06/08，阶段 3 精读 04/07。
+01 → 12 → 11（确认当前阶段）→ 02 → 03 → 10；进行终端产品阶段时再精读 09/13，并按 UX0–UX4 的门禁执行。
 
 **我想搞懂协议设计(架构评审)。**
 12 → 03 → 04 → 06：先看 identity/envelope 总契约，再看内部协议、wire 隔离和 thread-local mailbox/取消。
@@ -139,10 +149,10 @@ CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI/class
 07 → 05(工具执行三阶段与调度语义)→ 03(ToolResultMessage / ImagePart / details 字段的确切含义)。edit 与 bash 是两块难啃的骨头,注意 07 中它们的边界情况清单。
 
 **我负责测试与质量。**
-10 → 03(EventStream 语义与迭代器契约)→ 04(SSE fixture 需要覆盖哪些方言分支)→ 06(steering 时序断言怎么写)。
+10 → 13(终端环境、parity 与性能门禁)→ 03(EventStream 语义与迭代器契约)→ 04(SSE fixture 需要覆盖哪些方言分支)→ 06(steering 时序断言怎么写)。
 
 **我只想知道做什么、不做什么(干系人)。**
-01(目标、决策、非目标)→ 11(什么时候能看到什么)。共约 20 分钟。
+01(目标、决策、非目标)→ 11(什么时候能看到什么)→ 13(终端产品会怎样工作)。共约 25 分钟。
 
 ## 术语表
 
@@ -258,6 +268,11 @@ capability。新的 core 消费 ToolCatalogSnapshot/PreparedInvocation，不直�
 | 1 | identity/envelope + RuntimePort/Supervisor + legacy projection | 02、03、09、12 |
 | 2 | Session 六协作者 + commit/hub + control 统一 | 05、06、08、10、12 |
 | 3 | capability/provider registry + prompt + policy | 04、07、10、12 |
+| UX0 | 终端产品契约 + characterization baseline | 09、10、11、12、13 |
+| UX1 | CLI/onboarding/sanitizer/classic | 09、10、13 |
+| UX2 | TUI hierarchy/composer/transcript | 09、10、13 |
+| UX3 | review/diff/session recovery | 08、09、10、12、13 |
+| UX4 | accessibility/performance/automation/PTY | 09、10、13 |
 
 旧 M0–M7 只用于解释现有测试/注释来源，历史对照见 [11 §6](./11-roadmap.md)。
 

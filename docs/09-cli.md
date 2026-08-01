@@ -12,6 +12,29 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
+> **UX0 产品化基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
+> 基线以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。本文件第 1–8 节同时包含已经落地的
+> Runtime 前端行为和 UX1–UX4 目标；不能仅凭目标文字推断当前实现。UX0 的实际差距包括：尚无统一
+> CLI command catalog/help/version/subcommands/`--ui`，尚无 accessible 模式与 thread 页面切换，
+> classic 多行/光标仍不完整，classic/plain transcript sanitizer 尚未与 OpenTUI 收口，长 transcript
+> 未窗口化且 delta 仍逐事件更新 Markdown。这些差距分别由 UX1–UX4 关闭，UX0 不改变生产行为。
+
+## 0. 产品 surface 与事实来源
+
+CLI 产品化阶段不改变“CLI 是最薄的一层”：会话、run、approval、usage、queue、model 与权限只来自
+`RuntimePort` snapshot/query 和 `EventEnvelope`。draft、滚动锚点、未读位置、搜索、主题和打开的 panel
+是允许单独持久化的 presentation state，但不得被当作 Runtime 事实。切换 thread 只切换前端 attachment，
+不 abort/close 后台 run。滚动锚点必须使用 snapshot 中可恢复的 message/part/tool stable key，不能只存
+envelope seq：v1 snapshot-only 历史没有对应历史 envelope；seq 只用于 live unread high-water。
+
+UX1 起 help、completion、错误建议、CLI 子命令和 slash/palette 候选由同一个 command catalog 生成。
+UX2 起 TUI/classic/accessibility 恢复 per-thread presentation state。UX3 的 diff、session 与 approval UI
+只能展示 Runtime 提交进 snapshot/envelope 的权威 identity/resource/scope。当前 control payload 尚缺完整
+审批详情，因此 UX3 先把由同一 `PreparedInvocation`/`PolicyDecision` 生成的 JSON-safe
+`ApprovalPresentation` 纳入 canonical event/snapshot；UI 不得直接读取 capability/policy internals，也不得
+从命令字符串或自由文本自行推导权限。工作区 diff 同样必须经新增的 RuntimePort read-only query，底层
+Git adapter 不能直接暴露给 CLI/UI。
+
 ## 1. 交互形态:Bun + `@opentui/core`
 
 ### 1.1 模式分派与依赖边界
@@ -56,7 +79,7 @@ root column (100% × 100%)
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先提交目标 thread 的 `abort`、等待 control/权威提交收束并调用 `RuntimePort.close()`；阶段 0 legacy 路径等价执行 `approval.onAbort → Session.close()`。`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 的内容与边框语义色,但保留用于焦点可见性的硬件光标色,且不改变布局和键位。
 
-所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。进入 Text/Markdown、状态栏、工具摘要或 diff 前统一经过 `sanitizeTerminalText`:剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列,移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。终端标题再经过 `sanitizeTerminalTitle` 把 tab/newline 折成单行；不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。
+所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。进入 Text/Markdown、状态栏、工具摘要或 diff 前统一经过 `sanitizeTerminalText`:剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列,移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。终端标题再经过 `sanitizeTerminalTitle` 把 tab/newline 折成单行；不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。UX0 实现审计确认 OpenTUI 已覆盖该边界，但 classic/plain renderer 的 transcript append 仍可透传控制序列；这是 [13 §7](./13-cli-ux.md) 冻结的 UX1 阻断缺口，不是允许继续保留的兼容行为。headless JSON 为保持 wire 兼容不删改 payload，只依赖 JSON escaping 并确保日志不泄密。
 
 ### 1.3 classic / plain 保底
 
@@ -361,7 +384,7 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | 任意输入 | `Shift+Enter` | 插入换行,不发送 |
 | 任意 | `Ctrl+C` | 输入非空:清空输入行;输入为空:提示「再按一次退出」,1.5s 内再按退出 |
 | 空闲 | `Ctrl+D` | 输入为空时退出 |
-| 任意 | `Meta+↑` / `Meta+↓` | 输入历史(普通方向键留给多行编辑) |
+| 任意 | `Meta+↑` / `Meta+↓` | 输入历史；UX0 OpenTUI 已如此，classic 实际仍用裸 `↑` / `↓`，UX1 随多行光标修复统一 |
 | slash menu | `↑` / `↓` | 循环选择前缀匹配的命令 |
 | slash menu | `Tab` | 补全当前命令并追加空格,不发送 |
 | slash menu | `Enter` | 采用当前命令并立即按当前 phase 的 Enter 语义发送 |
