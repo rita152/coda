@@ -2,7 +2,7 @@
 // and never reads provider credentials, HOME, cwd, or approval flags on its own.
 
 import path from 'node:path';
-import type { ModelConfig, ModelRef } from '../protocol/index.js';
+import type { ModelConfig, ModelRef, RuntimePermissionMode } from '../protocol/index.js';
 import { canonicalJsonSha256, strictJsonSnapshot } from '../protocol/index.js';
 import type {
   ModelResolution,
@@ -75,11 +75,20 @@ export function createCliRuntimeModelResolver(
   };
 }
 
-export function createLegacyPermissionPolicy(): PermissionPolicyPort {
+export function createLegacyPermissionPolicy(
+  mode: Exclude<RuntimePermissionMode, 'custom'> = 'interactive',
+): PermissionPolicyPort {
   const workspace = ceiling('workspace', [], []);
   return {
     async snapshotWorkspaceCeiling(): Promise<PermissionCeilingSnapshot> {
       return workspace;
+    },
+
+    async snapshotWorkspacePermissionStatus() {
+      return {
+        mode,
+        policyRevision: `legacy-cli-${mode}-v2`,
+      };
     },
 
     async resolveCeiling(input): Promise<PermissionCeilingSnapshot> {

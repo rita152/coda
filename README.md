@@ -48,7 +48,8 @@ coda --version
    coda exec "检查并修复失败的测试"
    ```
 
-交互界面中可用 `/login`、`/model`、`/status`、`/queue`、`/followup <text>` 和 `/help`。
+交互界面中可用 `/login`、`/model`、`/auth`、`/doctor`、`/status`、`/queue`、
+`/followup <text>` 和 `/help`。
 Enter 在 idle 时发送新任务、运行中发送 steering；Alt+Enter 排队 follow-up；Esc 中止当前 run。
 以 `/help` 为准，它会按当前 TUI、classic 或文本界面只显示真实可用的键位。
 
@@ -65,6 +66,25 @@ coda --ui=plain        # append-only 文本交互面
 `auto` 中 OpenTUI 初始化失败会在恢复终端后降级到 classic；显式 `--ui=tui` 不会静默换界面。
 `NO_COLOR=1` 或 `--no-color` 禁用语义色，不改变业务状态和键位。
 
+OpenTUI 首屏显示 onboarding；开始输入后收缩成紧凑任务栏，底部持续显示 phase、thread、权限、队列、
+workspace/Git、context 和 model；其中权限模式来自 Runtime workspace snapshot。常用生产力入口：
+
+- `Ctrl+K` 打开分类模糊 command palette，`Ctrl+R` 搜索当前 thread 的 prompt 历史。
+- `Ctrl+O` 用 `$VISUAL`/`$EDITOR` 编辑长 prompt，`Meta+S` stash 当前 draft。
+- 输入 `@路径` 后按 `Tab` 补全 workspace 文件或目录；可用 `/files [query]` 列出候选。
+- `Ctrl+F` 或 `/search <query>` 搜索 transcript，`/next`、`/previous` 切换，`End` 或 `/latest` 回到最新输出。
+- `/copy [latest|raw]` 复制内容；`/export [text|raw|latest] [path]` 以 0600 新文件安全导出且不覆盖已有文件。
+- `/vim on|off` 可选启用最小 Vim composer；默认关闭，不改变现有键位。
+
+draft、stash、搜索、Vim preference 和 OpenTUI stable scroll anchor 按 `(workspace, thread)` 保存。provider
+表单拥有独立的临时输入缓冲：name/base URL 等普通字段不会覆盖任务 draft，API key 等秘密输入也不会进入
+该存储、history、frame、transcript 或日志。显式 stash/restore 写盘失败时，界面保留当前 draft 并显示
+错误；退出 flush 失败会报告错误并返回非零，不会伪报保存成功。classic 支持相同快捷键/斜杠动作；
+accessible/plain 用 `/history`、`/edit`、`/stash`、`/restore`、`/draft`、`/search`、`/copy`、`/export`
+等 append-only 文本命令提供语义等价入口。
+尚未选模型时，draft 使用 workspace 内稳定的 pending presentation key 跨启动恢复，但不会创建 Runtime
+thread 或 journal；模型选择并成功 attachment 后才迁移到真实 thread。外部编辑器运行期间原 draft 仍保留。
+
 ## 恢复会话
 
 ```bash
@@ -76,6 +96,7 @@ coda --workspace=<workspace-id> --resume=<thread-id>
 
 `sessions` 只通过 RuntimePort 列出当前 workspace 的 snapshot，不会创建 thread。
 `--continue` 恢复最近会话；跨 workspace 或同名 thread 使用显式 locator。
+恢复同一 thread 时还会恢复未发送 draft 与稳定滚动位置；`Ctrl+R` 历史从 canonical transcript 重建。
 
 ## 脚本与 CI
 

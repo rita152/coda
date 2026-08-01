@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   CliUsageError,
   COMMAND_SPECS,
+  commandPaletteEntries,
   OPTION_SPECS,
   parseCliInvocation,
   renderCliHelp,
@@ -114,18 +115,63 @@ describe('canonical command catalog', () => {
       expect(completion).toContain('login');
     }
     expect(SLASH_COMMAND_SPECS.map((command) => command.name)).toEqual([
-      'help', 'queue', 'status', 'login', 'model', 'logout', 'followup', 'quit',
+      'help', 'queue', 'status', 'login', 'model', 'logout', 'auth', 'followup', 'abort',
+      'search', 'next', 'previous', 'latest', 'copy', 'export', 'history', 'edit',
+      'files', 'stash', 'restore', 'draft', 'vim', 'quit', 'doctor',
     ]);
     expect(renderInteractiveHelp('tui').join('\n')).toContain('PageUp/PageDown: scroll output');
     expect(renderInteractiveHelp('tui').join('\n')).toContain('Alt+Up/Down: browse prompt history');
+    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+K: open command palette');
+    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+R: search prompt history');
+    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+O: edit draft in $EDITOR');
+    expect(renderInteractiveHelp('tui').join('\n')).toContain('Meta+S: stash this thread draft');
     expect(renderInteractiveHelp('classic').join('\n')).toContain('Up/Down: move vertically');
     expect(renderInteractiveHelp('text').join('\n')).not.toContain('Shift+Enter');
+    expect(renderInteractiveHelp('text').join('\n')).not.toContain('Ctrl+K');
     expect(renderInteractiveHelp('text').join('\n')).toContain('Ctrl+C: abort a run or exit while idle');
     expect(loginHelp).toContain('--preset <name>');
     expect(loginHelp).toContain('--api-key <key>');
     expect(loginHelp).not.toContain('--select');
     expect(doctorHelp).toContain('--json');
     expect(doctorHelp).not.toContain('--cwd');
+  });
+
+  it('builds categorized fuzzy palette entries with state-derived availability', () => {
+    const base = {
+      phase: 'idle' as const,
+      approvalPending: false,
+      providerPromptActive: false,
+      providerCommandsAvailable: true,
+      hasModel: true,
+      hasTranscript: true,
+      hasStash: false,
+    };
+    expect(commandPaletteEntries('srch', base)[0]?.command.name).toBe('search');
+    expect(commandPaletteEntries('doctor', base)[0]?.command.actionId).toBe('doctor.run');
+    expect(commandPaletteEntries('auth', base)[0]?.command.actionId).toBe('auth.status');
+    expect(commandPaletteEntries('review', base).some(
+      (entry) => entry.command.category === 'review',
+    )).toBe(true);
+    expect(commandPaletteEntries('restore', base)[0]?.availability).toEqual({
+      kind: 'disabled',
+      reason: 'no stashed draft for this thread',
+    });
+    expect(commandPaletteEntries('quit', { ...base, phase: 'running' })[0]?.availability)
+      .toEqual({
+        kind: 'disabled',
+        reason: 'finish or abort the current run first',
+      });
+    expect(commandPaletteEntries('model', { ...base, phase: 'compacting' })[0]?.availability)
+      .toEqual({
+        kind: 'disabled',
+        reason: 'finish or abort the current run first',
+      });
+    expect(commandPaletteEntries('auth', { ...base, providerCommandsAvailable: false })[0]?.availability)
+      .toEqual({
+        kind: 'disabled',
+        reason: 'provider management is unavailable on this surface',
+      });
+    expect(commandPaletteEntries('', { ...base, providerPromptActive: true })).toEqual([]);
   });
 
   it('bash completion returns argv-level hierarchical tokens and option values', () => {

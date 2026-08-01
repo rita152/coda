@@ -243,7 +243,7 @@ export class ProviderCommandController {
 
   #beginCustomBaseURL(): void {
     this.#setStep(
-      `Custom · name=${this.#draft?.name ?? ''} · [步骤 3] base URL（Esc 返回 name）`,
+      `[步骤 3] base URL（Esc 返回 name） · Custom · name=${this.#draft?.name ?? ''}`,
       false,
       async (baseURL) => {
         if (baseURL.trim() === '') {
@@ -260,8 +260,8 @@ export class ProviderCommandController {
 
   #beginCustomApiKey(): void {
     this.#setStep(
-      `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''} · ` +
-        '[步骤 4] API key（秘密输入 · Esc 返回 base URL）',
+      '[步骤 4] API key（秘密输入 · Esc 返回 base URL） · ' +
+        `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''}`,
       true,
       async (apiKey) => {
         if (apiKey.trim() === '') {
@@ -283,8 +283,8 @@ export class ProviderCommandController {
       description: choice.api,
     }));
     this.#setStep(
-      `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''} · ` +
-        '[步骤 5] 选择协议（Esc 返回 API key）',
+      '[步骤 5] 选择协议（Esc 返回 API key） · ' +
+        `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''}`,
       false,
       async (value) => {
       const selected = selectChoice(

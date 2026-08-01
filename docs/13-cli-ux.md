@@ -10,8 +10,9 @@
 
 本文的“UX0 基线”只描述 2026-08-01 在阶段提交中实际观察到的行为，不把目标误写成现状。
 UX1 的 command catalog、产品子命令、UI routing、onboarding、sanitizer、classic 编辑修复与最低
-accessible/plain 文本面已经完成两轮 review 并进入当前实现；UX2–UX4 仍是后续产品承诺。
-UX0 历史矩阵继续保留，便于区分“当时观察值”“UX1 当前值”和最终目标。
+accessible/plain 文本面已经完成两轮 review；UX2 的信息层级、palette、composer、per-thread
+presentation state 与 transcript 导航也已完成恰好两轮 review。UX3–UX4 仍是后续产品承诺。
+UX0/UX1 历史矩阵继续保留，便于区分阶段观察值、已交付行为和最终目标。
 
 ## 1. 产品不变量与事实边界
 
@@ -33,7 +34,7 @@ UX0 历史矩阵继续保留，便于区分“当时观察值”“UX1 当前值
 flowchart LR
   C["Command catalog\nhelp / completion / palette"] --> A["Frontend action"]
   A --> R["RuntimePort op/query"]
-  R --> S["ThreadSnapshot"]
+  R --> S["Workspace / Thread Snapshot"]
   R --> E["EventEnvelope stream"]
   S --> V["Disposable view projection"]
   E --> V
@@ -44,6 +45,8 @@ flowchart LR
 UI 可以缓存由 snapshot/envelope fold 得到的 projection 以便绘制，但该缓存必须可丢弃并从
 `snapshot.highWaterSeq + live events` 重建。UI 不得因缓存里的 `running`、pending approval 或 usage
 值自行执行权限决策、取消另一个 thread，或跳过 Runtime validation。
+冷启动状态栏中的 permission mode 也只读取 `RuntimePort.getWorkspaceSnapshot()`；CLI flag 只配置注入
+Runtime 的 `PermissionPolicyPort`，不能直接传给 view 形成平行事实。
 
 ## 2. 六条核心用户旅程
 
@@ -92,6 +95,10 @@ steering/follow-up 队列数量。正文按 turn 展示 assistant 流、reasonin
 
 完成标准：任何等待超过一帧的状态都显示原因，例如 provider、tool、approval、retry backoff、
 compaction、output drain 或 recovery，而不是只显示无上下文 spinner。
+
+`EventEnvelope.op_completed(prompt|continue)` 是 root activity 的最终权威边界。若 legacy 投影因 abort /
+provider 异常竞态缺失最终 `agent_end`，前端 facade 必须据此恢复 idle，并向兼容 surface 提供一次性 terminal
+fallback；同一 `expectedRunId` 的迟到 abort 返回 `stale_run` 时视为幂等完成，不制造 warning 或第二事实源。
 
 ### 2.4 检查工具调用和代码 diff
 
@@ -168,11 +175,11 @@ Agent/Session private state。
 |---|---|---|---|
 | `help.show` | `coda -h`、`coda --help` | `/help`、palette | 总是；纯 `CommandCatalog`，零副作用 |
 | `version.show` | `coda -V`、`coda --version` | help/about | 总是；package build metadata，零副作用 |
-| `doctor.run` | `coda doctor [--json]` | UX2 palette | 无 run 也可；CLI-edge 只读诊断，`--json` 只写机器 stdout |
+| `doctor.run` | `coda doctor [--json]` | `/doctor`、palette | 无 run 也可；CLI-edge 只读诊断，`--json` 只写机器 stdout |
 | `completion.generate` | `coda completion <bash\|zsh\|fish\|powershell>` | help link | 总是；纯 catalog generator，未知 shell 退出 2 |
 | `auth.login` | `coda auth login` | `/login` | idle/no-model；provider configuration controller |
 | `auth.logout` | `coda auth logout` | `/logout` | 已配置 provider；provider configuration controller |
-| `auth.status` | `coda auth status` | UX2 palette/status | 总是；只返回无秘密 provider 状态 |
+| `auth.status` | `coda auth status` | `/auth`（alias `/auth-status`）、palette | 总是；只返回无秘密 provider 状态 |
 | `models.list` | `coda models` | `/model` 的目录步骤 | 已认证；只列 provider catalog，不创建 thread |
 | `models.select` | `coda models --select <ref>` | `/model` 的确认步骤 | CLI 只保存已验证的默认选择且保持零 thread/journal；首次任务/resume 才由 composition root attach，已 attach `/model` 才经 RuntimePort 模型配置适配 |
 | `task.exec` | `coda exec [现有 flags] [prompt]` | prompt composer | root 裸 prompt/`-p` 的增量别名；同一 RuntimePort prompt、退出码和 wire |
@@ -288,7 +295,7 @@ registrationDigest、frozen scope 与 policyBasisRevision。Runtime 只投影 Po
 headless 都经 RuntimePort。classic/plain renderer 在 UX0 仍存在未统一 sanitizer 的已知债务，已由
 `ux-characterization.test.ts` 安全地在内存字符串中冻结，UX1 必须有意翻转该断言。
 
-### 4.2 UX1 当前功能矩阵
+### 4.2 UX1 历史功能矩阵
 
 | 动作 | OpenTUI | classic | accessible | plain | headless / CLI |
 |---|---:|---:|---:|---:|---:|
@@ -302,7 +309,26 @@ headless 都经 RuntimePort。classic/plain renderer 在 UX0 仍存在未统一 
 UX1 尚未实现 session switch/picker、transcript search/copy/export、完整 diff/review 或 persistent
 presentation state；这些仍按 UX2/UX3 分阶段交付。
 
-### 4.3 UX4 目标语义矩阵
+### 4.3 UX2 已交付功能矩阵
+
+| 动作 | OpenTUI | classic | accessible / plain interactive | headless / CLI |
+|---|---:|---:|---:|---:|
+| persistent status | phase/thread/permissions/queue/unread + cwd/branch* + context/model 三行 | renderer status/事件行 | append-only status/queue | canonical events / stderr |
+| command discovery | Ctrl+K categorized fuzzy palette，参数/快捷键/disabled 原因；`/doctor`、`/auth` | `/help` + Ctrl+K 文本入口；`/doctor`、`/auth` | catalog `/help` 与诊断文本命令 | CLI help/completion |
+| prompt history | Alt+↑/↓；Ctrl+R；resume transcript seed | ↑/↓；Ctrl+R；resume transcript seed | `/history [query]` | — |
+| long draft | Ctrl+O `$EDITOR`；stash/restore；per-thread draft；optional Vim | 同语义 raw-key 入口 | `/edit`、`/stash`、`/restore`、`/draft`、`/vim` | — |
+| workspace completion | `@query` candidate + Tab | `@query` + Tab；`/files` | `/files [query]` | — |
+| transcript navigation | `/search`、next/previous、End/latest、PageUp/Down、mouse wheel unread | 文本匹配；终端 scrollback | 文本匹配；终端 scrollback | downstream processing |
+| copy/export | `/copy latest\|raw`，OSC52/system clipboard；exclusive 0600 export | system clipboard；exclusive export | 文本命令同语义 | shell redirection remains compatible |
+| presentation recovery | draft/stash/search/Vim/stable anchor/unread 按 workspace/thread 恢复 | draft/stash/search/Vim | durable draft/stash/search/Vim | 不创建 presentation file |
+
+UX2 没有实现 thread picker/switch、完整 diff viewer、reasoning/tool cards 或 approval card；这些仍属于
+UX3。当前一次只 attach 一个启动目标 thread；未选模型的 create 路径先使用稳定、frontend-only 的
+workspace pending identity，仍保持零 Runtime thread/journal，attachment 成功后再把 state durable migrate
+到真实 `ThreadId`。其余路径和 schema 按 `(workspaceId,threadId)` 隔离，因此 UX3 switch 不需要把
+presentation state 混入 Runtime journal。
+
+### 4.4 UX4 目标语义矩阵
 
 | 语义 | TUI | classic | accessible | plain | headless |
 |---|---|---|---|---|---|
@@ -335,7 +361,7 @@ presentation state；这些仍按 UX2/UX3 分阶段交付。
 UX1 修复 classic 多行输入、光标、bracketed paste 与 help 文案；UX2 增加 Ctrl+R、`$EDITOR`、stash、
 `@` completion 和可选 Vim。默认键位不得破坏上表已有 Enter/steer/follow-up/abort 语义。
 
-### 5.2 UX1 当前值
+### 5.2 UX1 历史值
 
 | 动作 | OpenTUI | classic | accessible / plain |
 |---|---|---|---|
@@ -349,6 +375,23 @@ UX1 修复 classic 多行输入、光标、bracketed paste 与 help 文案；UX2
 `/help` 按当前 surface 从同一 shortcut spec 过滤；因此文本面不会显示 Shift+Enter/PageUp，classic 不会
 显示 TUI 的 Alt+↑/Alt+↓ history。
 
+### 5.3 UX2 当前值
+
+| 动作 | OpenTUI | classic | accessible / plain |
+|---|---|---|---|
+| palette | Ctrl+K；分类模糊搜索；↑/↓/Tab/Enter/Esc | Ctrl+K 打开 slash 入口；`/help` 展示目录 | `/help` 与完整文本命令 |
+| history | Alt+↑/↓；Ctrl+R query/repeat | ↑/↓；Ctrl+R query/repeat | `/history [query]` |
+| editor | Ctrl+O / `/edit`；编辑器返回前保留原 draft | 同左 | `/edit` 编辑 durable draft |
+| stash/draft | Meta+S；`/stash`、`/restore`、`/draft` | 同左 | `/stash <text>`、`/restore`、`/draft show\|send\|clear` |
+| files | `@query` 候选 + Tab；`/files` | `@query` Tab；`/files` | `/files [query]` |
+| transcript | Ctrl+F；`/search`、`/next`、`/previous`、End/`/latest` | Ctrl+F；同名文本命令 | 同名文本命令 |
+| copy/export | `/copy [latest\|raw]`；`/export [text\|raw\|latest] [path]` | 同左 | 同左 |
+| Vim | `/vim on\|off`，默认 off | 同左，默认 off | 持久化 preference，下一次 TUI/classic 生效 |
+| diagnostics | `/doctor`；`/auth`/`/auth-status` | 同左 | 同名文本命令；无 provider port 时明确 unavailable |
+
+所有快捷键都是 ordinary draft 路径；provider secret prompt 和 approval freeze 会先截断这些入口。
+Enter、Alt+Enter、Esc 的 prompt/steer/follow-up/abort 语义保持 UX1 值。
+
 ## 6. Presentation state 与恢复
 
 允许持久化的最小结构如下；这是 frontend-private schema，不进入 Runtime journal：
@@ -356,7 +399,7 @@ UX1 修复 classic 多行输入、光标、bracketed paste 与 help 文案；UX2
 ```ts
 interface ThreadPresentationState {
   readonly workspaceId: WorkspaceId;
-  readonly threadId: ThreadId;
+  readonly threadId: ThreadId | typeof PENDING_PRESENTATION_THREAD_ID;
   readonly draft: string;
   readonly stashedDraft?: string;
   readonly scrollAnchor?: {
@@ -369,14 +412,25 @@ interface ThreadPresentationState {
   readonly search?: { readonly query: string; readonly matchOrdinal: number };
   readonly expandedBlocks: readonly string[];
   readonly activePanel?: 'transcript' | 'tool' | 'diff' | 'sessions' | 'permissions';
+  readonly vimEnabled: boolean;
   readonly updatedAt: number;
 }
 ```
 
-- 写入采用同目录临时文件 + flush + atomic rename，损坏时 quarantine 并回到安全空状态；不阻断 Runtime
-  resume。
-- draft/stash 在写入前剔除 provider secret steps；秘密 buffer 必须使用单独的 ephemeral 类型，不能传给
-  通用 history/persistence API。
+- 当前 schema v1 写入 `<runtimeRoot>/presentation-v1/<workspace hash>/<thread hash>.json`，身份不直接成为
+  路径段；采用 0600 同目录临时文件 + file fsync + atomic rename + directory fsync，损坏/身份错配时
+  quarantine 并回到安全空状态，不阻断 Runtime resume。ordinary draft 以 200ms 合并，显式
+  stash/restore、Vim preference、flush/dispose 是同步 durability barrier。barrier 先写候选状态再替换内存；
+  写盘失败必须抛出并保留原 draft/stash，surface 不清 composer、不打印成功，shutdown 返回非零。
+- create 冷启动使用固定的 `PENDING_PRESENTATION_THREAD_ID` 作为 frontend-only key；它绝不提交给
+  Runtime。store 在 attachment 前载入该 key，真实 thread attachment listener 先写目标 thread 文件，再
+  durable 清空 pending 源，最后切换内存 owner；迁移 barrier 失败则仍由 pending 源持有可恢复 draft。
+  显式 resume 从一开始使用目标 `ThreadId`，不得把无关 cold draft 搬进旧会话。
+- Ctrl+O 与 palette/slash `/edit` 共用同一异步 ownership：暂停 raw mode 后、编辑器返回前 composer 和
+  store 继续保存原 draft；只有成功返回才替换，失败或信号退出仍恢复原 draft。
+- provider 表单从进入流程到根步骤退出都使用与任务 composer 隔离的 ephemeral buffer；普通 name/base URL
+  也不能覆盖任务 draft、进入 prompt history 或传给 presentation API，流程结束后原样恢复任务 draft。
+  secret buffer 在此基础上还不得进入 frame/transcript/log/error。
 - transcript block key 来自 snapshot 可恢复的稳定 identity：message 用 `message:<AgentMessage.id>`，
   part/tool block 再附 content index 或 toolCallId；不得只用 envelope seq，因为 v1 snapshot-only 历史没有
   历史 envelope。`fallbackBlockKeys` 以距离从近到远保存一个有界邻居链。
@@ -386,8 +440,10 @@ interface ThreadPresentationState {
   第一个 surviving block，并明确显示“锚点内容已压缩”；这是内容已被权威 compaction 删除后的诚实 fallback，
   不能把 envelope seq 伪装成仍可定位的 transcript identity。`observedHighWaterSeq`/`unreadAfterSeq` 只用于
   live event 未读计算，不参与 snapshot block 定位。
-- thread switch 保存当前 presentation state，先为目标建立 hot subscription，再读取 snapshot/cursor，
-  最后恢复目标 presentation state。切换不关闭源 thread、不影响后台 run。
+- UX2 启动/恢复同一目标 thread 时先 replay canonical messages，再按 stable anchor 恢复 presentation；
+  Ctrl+R 历史也从同一 canonical user transcript 重建。UX3 的 thread switch 必须先保存当前 presentation
+  state，为目标建立 hot subscription，再读取 snapshot/cursor，最后恢复目标 presentation state；切换不
+  关闭源 thread、不影响后台 run。
 - UI cache 的 approval/activity/usage 永不写入该结构；这些字段只从新 snapshot/envelope 恢复。
 
 ## 7. 终端安全
@@ -424,6 +480,10 @@ JSON escaping；任何伴随的人类诊断仍先清洗。
 | stdin TTY、stdout 非 TTY | UX1 auto 使用 append-only accessible；不初始化 OpenTUI/classic raw 模式 |
 | stdin 非 TTY | 无 `--json` 时读为 one-shot prompt；`--json` 时 NDJSON |
 
+UX2 characterization 在写入 ordinary draft/user message 后视为“首次交互已发生”：40×10、80×24 与
+120×40 都不再显示 Logo/tips；40 列可裁掉完整 model 字符串，80/120 列保留紧凑 taskbar 与 model。
+首次交互前的 onboarding frame 仍按表中的 UX0 尺寸层级显示，resize 不会让已收缩的装饰重新出现。
+
 UX4 的真实 PTY 矩阵在此基础上增加 resize、多行 paste、fatal、approval abort、provider 初始化失败、
 terminal title/mouse/bracketed paste/alternate screen 全路径恢复。
 
@@ -452,7 +512,7 @@ wall-clock。
 |---|---|---|
 | UX0 | 本文、09/10/11/地图与 characterization tests | 生产行为零变化；环境/性能/旅程/parity 有证据 |
 | UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 已完成恰好两轮 review；help/version 零副作用且 legacy flags/wire 全绿 |
-| UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | draft/scroll/unread 跨 resize/switch/recovery；秘密零泄漏 |
+| UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | 已完成恰好两轮 review；cold pending draft 可恢复并迁移，permission 只读 Runtime workspace snapshot；provider 全表单隔离；durability failure 可见且不清 draft |
 | UX3 | reasoning/tool/diff/review、session workflow、approval cards、retry/fork | UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
 | UX4 | accessible ASCII/theme/PTY 加固、帧合并/窗口化、自动化输出、真实 PTY | 10k delta 限帧；输入 <100ms；终端模式全路径恢复 |
 

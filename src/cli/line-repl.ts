@@ -7,16 +7,36 @@ import { renderInteractiveHelp } from './command-catalog.js';
 import type { InteractiveSession } from './interactive-runtime.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import { applyProviderModelSelection } from './provider-actions.js';
+import {
+  collectDoctorReport,
+  formatAuthStatusLines,
+  formatDoctorReportLines,
+} from './product-commands.js';
 import type { Renderer } from './renderer.js';
 import {
   decideEnter,
   formatQueueLines,
   formatStatusLines,
+  InputHistory,
   interactionCanAbort,
   interactionEnterState,
 } from './repl.js';
 import type { ReplApproval } from './repl.js';
 import { sanitizeTerminalLine } from './terminal-sanitize.js';
+import {
+  copyTextToClipboard,
+  editDraftWithExternalEditor,
+  exportTranscript,
+  latestAssistantText,
+  MessageTranscriptSearch,
+  promptHistoryEntries,
+  transcriptContent,
+  workspacePathCandidates,
+} from './presentation-actions.js';
+import {
+  persistableDraft,
+  type ThreadPresentationStore,
+} from './presentation-state.js';
 
 export interface LineReplOptions {
   readonly stdin?: NodeJS.ReadStream;
@@ -28,6 +48,13 @@ export interface LineReplOptions {
   };
   readonly fatalSignal?: AbortSignal;
   readonly mode: 'accessible' | 'plain';
+  readonly version?: string;
+  readonly presentation?: {
+    readonly store: ThreadPresentationStore;
+    readonly cwd: string;
+    readonly editDraft?: (draft: string) => Promise<string>;
+    readonly copyText?: (text: string) => Promise<void>;
+  };
 }
 
 export async function startLineRepl(
@@ -44,6 +71,9 @@ export async function startLineRepl(
   };
   let closing = false;
   let commandChain = Promise.resolve();
+  const history = new InputHistory();
+  for (const prompt of promptHistoryEntries(session.messages)) history.push(prompt);
+  const transcriptSearch = new MessageTranscriptSearch(() => session.messages);
   const rl = readline.createInterface({ input: stdin, terminal: false, crlfDelay: Infinity });
 
   renderer.println?.(
@@ -53,6 +83,9 @@ export async function startLineRepl(
   );
   if (session.currentModel() === undefined) {
     renderer.println?.('Get started: 1) coda auth login  2) coda models --select <provider/model>  3) enter a task');
+  }
+  if (options.presentation?.store.snapshot().draft !== '') {
+    renderer.println?.('A draft was restored for this thread. Use /draft show or /draft send.');
   }
   stderr.write('> ');
 
@@ -96,6 +129,12 @@ export async function startLineRepl(
         code = 1;
       } finally {
         cleanup();
+        try {
+          options.presentation?.store.dispose();
+        } catch (error) {
+          renderer.println?.(`presentation save failed: ${safeError(error)}`);
+          code = 1;
+        }
         resolve(code);
       }
     };
@@ -209,6 +248,99 @@ export async function startLineRepl(
       return false;
     };
 
+    const printSearchMatch = (
+      match: ReturnType<MessageTranscriptSearch['move']>,
+    ): void => {
+      if (match === undefined) {
+        renderer.println?.('No transcript matches. Start with /search <query>.');
+        return;
+      }
+      renderer.println?.(
+        `match ${match.ordinal + 1}/${match.total} · ${match.label} · ${match.snippet}`,
+      );
+      options.presentation?.store.setSearch({
+        query: transcriptSearch.query,
+        matchOrdinal: match.ordinal,
+      });
+    };
+
+    const editSavedDraft = async (): Promise<void> => {
+      const presentation = options.presentation;
+      if (presentation === undefined) {
+        renderer.println?.('/edit is unavailable without presentation storage.');
+        return;
+      }
+      const draft = presentation.store.snapshot().draft;
+      rl.pause();
+      stdin.pause();
+      try {
+        const edited = await (
+          presentation.editDraft?.(draft) ??
+          editDraftWithExternalEditor(draft, { cwd: presentation.cwd })
+        );
+        presentation.store.setDraft(persistableDraft(edited));
+        presentation.store.flush();
+        renderer.println?.('Draft returned from $EDITOR. Use /draft show or /draft send.');
+      } catch (error) {
+        renderer.println?.(`editor failed: ${safeError(error)}`);
+      } finally {
+        if (!closing) {
+          stdin.resume();
+          rl.resume();
+        }
+      }
+    };
+
+    const copyTranscript = async (mode: string): Promise<void> => {
+      const normalized = mode === '' ? 'latest' : mode;
+      if (normalized !== 'latest' && normalized !== 'raw') {
+        renderer.println?.('usage: /copy [latest|raw]');
+        return;
+      }
+      const content = transcriptContent(session.messages, normalized);
+      if (content === '') {
+        renderer.println?.('Nothing to copy.');
+        return;
+      }
+      try {
+        await (options.presentation?.copyText?.(content) ?? copyTextToClipboard(content));
+        renderer.println?.(
+          normalized === 'raw' ? 'Raw transcript copied.' : 'Latest response copied.',
+        );
+      } catch (error) {
+        renderer.println?.(`copy failed: ${safeError(error)}`);
+      }
+    };
+
+    const sendSavedDraft = (): void => {
+      const presentation = options.presentation;
+      if (presentation === undefined) {
+        renderer.println?.('/draft is unavailable without presentation storage.');
+        return;
+      }
+      const draft = presentation.store.snapshot().draft;
+      if (draft === '') {
+        renderer.println?.('No saved draft to send.');
+        return;
+      }
+      try {
+        if (interactionEnterState(session.interactionState()) === 'running') {
+          session.steer(draft);
+          presentation.store.setDraft(persistableDraft(''));
+        } else {
+          const pending = session.prompt(draft);
+          presentation.store.setDraft(persistableDraft(''));
+          void pending.catch((error) => {
+            if (closing) return;
+            presentation.store.setDraft(persistableDraft(draft));
+            renderer.println?.(`prompt failed: ${safeError(error)}`);
+          });
+        }
+      } catch (error) {
+        renderer.println?.(`prompt failed: ${safeError(error)}`);
+      }
+    };
+
     const handleLine = async (line: string): Promise<void> => {
       if (closing) return;
       if (respondToApproval(line)) return;
@@ -224,18 +356,28 @@ export async function startLineRepl(
           case 'none':
             return;
           case 'prompt':
-            void session.prompt(action.text).catch((error) => renderer.println?.(`prompt failed: ${safeError(error)}`));
+            history.push(action.text);
+            void session.prompt(action.text).catch((error) => {
+              options.presentation?.store.setDraft(persistableDraft(action.text));
+              renderer.println?.(`prompt failed: ${safeError(error)}`);
+            });
             return;
           case 'steer':
+            history.push(action.text);
             session.steer(action.text);
             return;
           case 'follow_up':
+            history.push(action.text);
             session.followUp(action.text);
             return;
           case 'command':
             switch (action.command.cmd) {
               case 'quit':
                 void shutdown(0, false, false);
+                return;
+              case 'abort':
+                if (interactionCanAbort(session.interactionState())) session.abort();
+                else renderer.println?.('No active run to abort.');
                 return;
               case 'help':
                 renderInteractiveHelp('text').forEach((help) => renderer.println?.(help));
@@ -244,11 +386,140 @@ export async function startLineRepl(
               case 'status':
                 formatStatusLines(session.usage(), formatModel(session)).forEach((item) => renderer.println?.(item));
                 return;
+              case 'doctor': {
+                const report = collectDoctorReport(options.version ?? 'unknown');
+                formatDoctorReportLines(report).forEach((item) => renderer.println?.(item));
+                return;
+              }
+              case 'auth_status':
+                if (options.providerCommands === undefined) {
+                  renderer.println?.('/auth is unavailable in this mode.');
+                } else {
+                  formatAuthStatusLines(options.providerCommands.registry)
+                    .forEach((item) => renderer.println?.(item));
+                }
+                return;
               case 'queue':
                 formatQueueLines(queues.steering, queues.followUp).forEach((item) => renderer.println?.(item));
                 return;
               case 'follow_up':
                 if (action.command.text !== '') session.followUp(action.command.text);
+                return;
+              case 'history_search': {
+                const match = history.reverseSearch(action.command.query);
+                renderer.println?.(
+                  match === undefined
+                    ? 'No matching prompt history.'
+                    : `history match\n${sanitizeTerminalLine(match)}`,
+                );
+                return;
+              }
+              case 'edit':
+                await editSavedDraft();
+                return;
+              case 'file_complete': {
+                const presentation = options.presentation;
+                if (presentation === undefined) {
+                  renderer.println?.('/files is unavailable without a workspace presentation.');
+                  return;
+                }
+                const candidates = workspacePathCandidates(
+                  presentation.cwd,
+                  action.command.query,
+                  50,
+                );
+                if (candidates.length === 0) renderer.println?.('No matching workspace paths.');
+                else candidates.forEach((candidate) => renderer.println?.(`@${candidate}`));
+                return;
+              }
+              case 'stash': {
+                const presentation = options.presentation;
+                if (presentation === undefined) {
+                  renderer.println?.('/stash is unavailable without presentation storage.');
+                } else if (action.command.text === '') {
+                  renderer.println?.('usage: /stash <text>');
+                } else {
+                  presentation.store.stash(persistableDraft(action.command.text));
+                  renderer.println?.('Draft stashed for this thread.');
+                }
+                return;
+              }
+              case 'restore': {
+                const restored = options.presentation?.store.restoreStash();
+                renderer.println?.(
+                  restored === undefined
+                    ? 'No stashed draft for this thread.'
+                    : `Draft restored. Use /draft send, or review it below:\n${sanitizeTerminalLine(restored.text)}`,
+                );
+                return;
+              }
+              case 'draft': {
+                const presentation = options.presentation;
+                if (presentation === undefined) {
+                  renderer.println?.('/draft is unavailable without presentation storage.');
+                  return;
+                }
+                if (action.command.action === 'send') {
+                  sendSavedDraft();
+                } else if (action.command.action === 'show') {
+                  const draft = presentation.store.snapshot().draft;
+                  renderer.println?.(draft === '' ? 'No saved draft.' : `saved draft\n${sanitizeTerminalLine(draft)}`);
+                } else if (action.command.action === 'clear') {
+                  presentation.store.setDraft(persistableDraft(''));
+                  renderer.println?.('Saved draft cleared.');
+                } else {
+                  renderer.println?.('usage: /draft <show|send|clear>');
+                }
+                return;
+              }
+              case 'transcript_search':
+                if (action.command.query === '') renderer.println?.('usage: /search <query>');
+                else printSearchMatch(transcriptSearch.setQuery(action.command.query));
+                return;
+              case 'search_next':
+                printSearchMatch(transcriptSearch.move(1));
+                return;
+              case 'search_previous':
+                printSearchMatch(transcriptSearch.move(-1));
+                return;
+              case 'latest': {
+                const latest = latestAssistantText(session.messages);
+                renderer.println?.(latest === undefined ? 'No assistant response yet.' : `latest response\n${latest}`);
+                return;
+              }
+              case 'copy':
+                await copyTranscript(action.command.mode);
+                return;
+              case 'export': {
+                const presentation = options.presentation;
+                if (presentation === undefined) {
+                  renderer.println?.('/export is unavailable without presentation storage.');
+                  return;
+                }
+                try {
+                  const destination = exportTranscript(session.messages, {
+                    cwd: presentation.cwd,
+                    mode: action.command.mode === 'raw' || action.command.mode === 'latest'
+                      ? action.command.mode
+                      : 'text',
+                    ...(action.command.path === '' ? {} : { destination: action.command.path }),
+                  });
+                  renderer.println?.(`Exported transcript to ${sanitizeTerminalLine(destination)}.`);
+                } catch (error) {
+                  renderer.println?.(`export failed: ${safeError(error)}`);
+                }
+                return;
+              }
+              case 'vim':
+                if (action.command.mode !== 'on' && action.command.mode !== 'off') {
+                  renderer.println?.('usage: /vim <on|off>');
+                } else {
+                  options.presentation?.store.setVimEnabled(action.command.mode === 'on');
+                  renderer.println?.(
+                    `Vim preference ${action.command.mode === 'on' ? 'enabled' : 'disabled'}; ` +
+                    'it applies when this thread opens in TUI/classic.',
+                  );
+                }
                 return;
               case 'login':
               case 'model':

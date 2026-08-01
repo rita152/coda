@@ -24,11 +24,13 @@ import type {
   PermissionCeilingSnapshot,
   RunId,
   RuntimeOp,
+  RuntimePermissionMode,
   RuntimeEvent,
   ThreadId,
   ThreadSnapshot,
   ThreadSummary,
   WorkspaceId,
+  WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import type { EventSubscriptionOptions } from '../session/event-hub.js';
 import { EventHub } from '../session/event-hub.js';
@@ -92,6 +94,7 @@ export interface RuntimePort {
   submit(op: RuntimeOp): Promise<OpReceipt>;
   events(options?: EventSubscriptionOptions): AsyncIterable<Readonly<EventEnvelope>>;
   listThreads(): Promise<readonly ThreadSummary[]>;
+  getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>>;
   getThreadSnapshot(threadId: ThreadId): Promise<Readonly<ThreadSnapshot> | undefined>;
   close(): Promise<void>;
 }
@@ -455,6 +458,28 @@ class Supervisor implements RuntimePort {
       ?? recoverySummary(this.#unloaded.get(item.summary.threadId))
       ?? item.summary);
     return snapshot(result);
+  }
+
+  async getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>> {
+    this.#assertOpen();
+    const ceiling = await this.#workspaceCeiling();
+    const described = this.#permissionPolicy.snapshotWorkspacePermissionStatus === undefined
+      ? { mode: 'custom' as const, policyRevision: ceiling.revision }
+      : validateWorkspacePermissionStatus(
+          await this.#permissionPolicy.snapshotWorkspacePermissionStatus({
+            workspaceId: this.workspaceId,
+            cwd: this.#cwd,
+            workspaceCeiling: ceiling,
+          }),
+        );
+    return snapshot({
+      workspaceId: this.workspaceId,
+      permissions: {
+        mode: described.mode,
+        policyRevision: described.policyRevision,
+        ceiling,
+      },
+    });
   }
 
   async getThreadSnapshot(threadId: ThreadId): Promise<Readonly<ThreadSnapshot> | undefined> {
@@ -3082,6 +3107,35 @@ function rejected(
 
 function snapshot<T>(value: T): T {
   return strictJsonSnapshot(value) as T;
+}
+
+function validateWorkspacePermissionStatus(value: unknown): {
+  readonly mode: RuntimePermissionMode;
+  readonly policyRevision: string;
+} {
+  const copied = strictJsonSnapshot(value);
+  if (typeof copied !== 'object' || copied === null || Array.isArray(copied)) {
+    throw new Error('PermissionPolicyPort returned an invalid workspace permission status');
+  }
+  const keys = Object.keys(copied).sort();
+  if (keys.length !== 2 || keys[0] !== 'mode' || keys[1] !== 'policyRevision') {
+    throw new Error('PermissionPolicyPort returned an invalid workspace permission status');
+  }
+  const status = copied as Readonly<Record<string, unknown>>;
+  const mode = status['mode'];
+  const policyRevision = status['policyRevision'];
+  if (
+    mode !== 'interactive' &&
+    mode !== 'allow' &&
+    mode !== 'deny' &&
+    mode !== 'custom'
+  ) {
+    throw new Error('PermissionPolicyPort returned an invalid workspace permission mode');
+  }
+  if (typeof policyRevision !== 'string' || policyRevision.length === 0) {
+    throw new Error('PermissionPolicyPort returned an invalid workspace policy revision');
+  }
+  return { mode, policyRevision };
 }
 
 function formatError(error: unknown): string {

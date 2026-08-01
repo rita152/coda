@@ -12,12 +12,12 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
-> **UX1 实现基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
+> **UX2 完成基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
 > 契约以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。统一 command catalog、薄
 > bootstrap/help/version/completion、产品子命令、`--ui`、最低 accessible/plain 文本面、共享
-> terminal sanitizer 与 classic 多行/光标/paste 已落地。thread 页面切换、per-thread presentation
-> state、完整 review/diff 工作流、长 transcript 窗口化与 delta 限帧仍属 UX2–UX4，不得把后续目标
-> 推测为当前行为。
+> terminal sanitizer 与 classic 多行/光标/paste 已落地；UX2 的紧凑任务栏、palette、composer、
+> per-thread presentation state 与 transcript 导航已完成恰好两轮 review。thread 页面切换、完整
+> review/diff 工作流、长 transcript 窗口化与 delta 限帧仍属 UX3–UX4，不得把后续目标推测为当前行为。
 
 ## 0. 产品 surface 与事实来源
 
@@ -26,9 +26,12 @@ CLI 产品化阶段不改变“CLI 是最薄的一层”：会话、run、approv
 是允许单独持久化的 presentation state，但不得被当作 Runtime 事实。切换 thread 只切换前端 attachment，
 不 abort/close 后台 run。滚动锚点必须使用 snapshot 中可恢复的 message/part/tool stable key，不能只存
 envelope seq：v1 snapshot-only 历史没有对应历史 envelope；seq 只用于 live unread high-water。
+尚无 thread 时，TUI permission mode 来自 `RuntimePort.getWorkspaceSnapshot()` 的冻结 permissions；
+CLI `approvalMode` 只进入注入的 permission policy/approval adapter，不直接进入 view options。
 
-UX1 的 help、completion、错误建议、CLI 子命令和 slash 候选已由同一个 command catalog 生成。
-UX2 起 TUI/classic/accessibility 恢复 per-thread presentation state。UX3 的 diff、session 与 approval UI
+UX1 的 help、completion、错误建议和 CLI 子命令与 UX2 的 categorized fuzzy palette、slash/text
+commands、参数提示和快捷键都由同一个 command catalog 生成。TUI/classic/accessibility 共享
+per-thread presentation state 与 presentation-only actions。UX3 的 diff、session 与 approval UI
 只能展示 Runtime 提交进 snapshot/envelope 的权威 identity/resource/scope。当前 control payload 尚缺完整
 审批详情，因此 UX3 先把由同一 `PreparedInvocation`/`PolicyDecision` 生成的 JSON-safe
 `ApprovalPresentation` 纳入 canonical event/snapshot；UI 不得直接读取 capability/policy internals，也不得
@@ -65,24 +68,28 @@ TUI 进入 alternate screen，组件树固定为:
 
 ```text
 root column (100% × 100%)
-├── header:版本 + Unicode 像素 Logo + tips
+├── header:首次显示版本 + Unicode 像素 Logo + tips；交互后收缩为紧凑任务栏
 ├── transcript:ScrollBox(flexGrow:1)
 └── composer
-    ├── candidate menu:slash/provider 候选(从 prompt 向上展开)
+    ├── candidate menu:categorized fuzzy slash/provider/@path 候选
     ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
+    ├── task:phase/thread/permissions/queue/unread/Vim
     ├── workspace
     └── context usage                         provider/model
 ```
 
-- **header**:从 `package.json.version` 取当前版本;Logo 是 ImageGen 参考图
-  `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻,运行时不读 PNG、不依赖终端图片协议。header、brand、Logo 与 tips 都不绘制背景色,直接透出终端背景。
-- **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部;用户手动上滚时暂停跟尾。
-- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,第一条 footer 暂时从 workspace 切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格两行:第一行 workspace(可带 Git branch),第二行左侧当前 `usage.contextTokens`、右侧当前 `ModelRef`；冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比;缺上限显示 `limit unknown`,不得按模型名猜窗口大小。
-- **candidate menu**:slash 命令和 provider 枚举步骤复用 prompt 正上方的同一个透明候选层，视觉对齐 pi 的 SelectList：`→ ` 标出当前项，名称占左列，说明占右侧 muted 列；窄屏隐藏说明但保留完整键盘能力。输入内容严格处于 `/prefix`(首字符是 `/`、命令名内尚无空白/换行)时，候选按大小写无关的命令名/别名前缀匹配；空闲/compacting 显示 canonical `/help`、`/queue`、`/status`、`/login`、`/model`、`/logout`、`/followup`、`/quit`，running/retrying 只显示 `/followup`。运行中手工提交三条 provider 管理命令仍会进入控制器并给出“先完成或 abort”的提示，不会作为 steering 发给模型；其他空闲命令仍按普通 steering 处理。兼容别名 `/f`、`/q` 继续可输入，但不重复占候选行；对别名按 `Tab` 会展开成 `/followup `、`/quit `。slash 候选中 `↑`/`↓` 循环选项，`Tab` 采用当前项并补一个空格但不发送，`Enter` 采用当前项后在同一次按键中继续正常提交，`Esc` 仅收起候选且保留 draft。
+- **header**:从 `package.json.version` 取当前版本；Logo 是 ImageGen 参考图
+  `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻，运行时不读 PNG、不依赖终端
+  图片协议。首次输入非空 draft、提交消息或恢复已有 draft/thread 后，9 行 onboarding header 永久收缩为
+  3 行紧凑任务栏；resize 不会把已完成 onboarding 的 Logo/tips 重新弹回。低于 10 行时连紧凑 header
+  也隐藏。header、brand、Logo 与 tips 都不绘制背景色，直接透出终端背景。
+- **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部；PageUp 或鼠标滚轮上滚后暂停跟尾，按 stable message/tool anchor 保存位置并累计 `N new`。PageDown 回到底部、`End` 或 `/latest` 才清 unread。`/search`、`/next`、`/previous` 定位匹配项但不移动 composer 焦点。
+- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,workspace 行暂时切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格三行：task 行持续显示 phase、thread、permissions、queue、unread 与可选 Vim mode；workspace 行显示 cwd 与 Git `branch*`；runtime 行左侧显示 `usage.contextTokens`、右侧显示当前 `ModelRef`。这些状态不因 draft 非空而消失。冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比；缺上限显示 `limit unknown`，不得按模型名猜窗口大小。
+- **candidate menu**:slash 命令、provider 枚举和 `@` path completion 复用 prompt 正上方的同一个透明候选层。slash 项显示 `[category] /name <argument>`、首个快捷键、说明和 disabled 原因；name/alias 的 exact/prefix/substring/subsequence 优先于 description/category 的模糊命中。可执行性统一由 phase、approval、provider prompt、provider availability、model、transcript 与 stash 状态计算；不可执行项保留以解释原因，provider 自由/秘密输入与审批状态则隐藏无关命令。`Ctrl+K` 从任意普通 draft 打开 palette，`Esc` 恢复原 draft。兼容别名 `/f`、`/q`、`/prev` 继续可输入但不重复占候选行。`↑`/`↓` 循环，`Tab` 采用但不发送，`Enter` 采用后执行；`@query` 的 Tab 插入当前 workspace 相对路径。运行中 read-only/presentation 命令仍可执行，provider 管理命令明确 disabled，普通文本 Enter 继续是 steering。
 - **provider 候选**:`/login` 的 preset、Custom 协议、`/model` 模型、`/logout` provider 都由共用状态机把结构化 `value/label/description` 交给同一 candidate menu；空输入显示候选，输入文本可按 label/value/description 大小写无关过滤，`↑`/`↓` 循环选择，`Enter` 直接确认当前项，不要求输入数字。`Tab` 不确认 provider 选项；`Esc` 静默回到上一步，例如 Custom 协议回到 API key、Custom name 回到 preset。离开秘密步骤时必须先清空 UI 秘密缓冲；协议步骤中已经暂存在 controller 的 key 也要在回退时清空。到达 `/login`、`/model` 或 `/logout` 的根步骤后再按 `Esc` 才静默退出流程，不打印“已取消”。秘密输入和 name/base URL 等自由文本步骤不显示候选。审批期间所有候选隐藏。
 - **候选布局**:候选占用 composer 上方空间，一次最多显示 8 项；项目更多或空间不足时围绕当前项裁切，同时仍优先保留 1 行输入与可用时 1 行 transcript。
 - **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
-- **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和两行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色以适配明暗主题；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 移除文本和边框的自定义前景色,但保留这一个用于焦点可见性的光标色,背景始终保持透明。
+- **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和三行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色以适配明暗主题；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 移除文本和边框的自定义前景色,但保留这一个用于焦点可见性的光标色,背景始终保持透明。
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先提交目标 thread 的 `abort`、等待 control/权威提交收束并调用 `RuntimePort.close()`；阶段 0 legacy 路径等价执行 `approval.onAbort → Session.close()`。`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 的内容与边框语义色,但保留用于焦点可见性的硬件光标色,且不改变布局和键位。
 
@@ -93,12 +100,16 @@ OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitO
 `renderer.ts` 与 `repl.ts` 是受支持的 classic 面：readline/raw TTY compatibility + ANSI 动态区。
 composer 使用 grapheme 边界移动/删除 CJK 和 ZWJ emoji，`Shift+Enter` 插入换行，多行上下保持
 grapheme 列，最多窗口化显示 8 行；bracketed paste 的整块与分段 marker 都不触发发送。
-classic 与 TUI 共用 `ProviderCommandController`、`provider-actions` 和统一 command catalog；候选以
-编号/名称接受。秘密步骤只把等长 `•` 掩码交给 renderer。
+classic 与 TUI 共用 `ProviderCommandController`、`provider-actions`、presentation actions 和统一 command
+catalog；候选以编号/名称接受。classic 支持 Ctrl+R、Ctrl+O、stash/restore、`@` Tab、copy/export 与
+可选 Vim，恢复同一 `(workspaceId, threadId)` draft。秘密步骤只把等长 `•` 掩码交给 renderer，且不调用
+history/presentation API。
 
 `line-repl.ts` 是 accessible/plain 的最低交互面：只读完整行、append-only，不开 raw mode、
 alternate screen、bracketed-paste mode、鼠标或动画。它以文本命令提供 prompt/steer/follow-up/
-abort/approval/status/queue/model/logout parity；`/login` 明确引导到受保护的 `coda auth login`。输出
+abort/approval/status/queue/model/logout 以及 `/history`、`/edit`、`/files`、`/stash`、`/restore`、
+`/draft`、`/search`、`/next`、`/previous`、`/latest`、`/copy`、`/export`、`/vim` parity；`/login`
+明确引导到受保护的 `coda auth login`。输出
 失败会 abort 当前 run、关闭 Runtime 并返回 1。classic 和文本面的真实 key 都不进入历史、
 transcript、event、journal 或日志。
 
@@ -419,9 +430,16 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | TUI / classic 输入 | `Shift+Enter` | 插入换行,不发送 |
 | 任意 | `Ctrl+C` | 输入非空:清空输入行;输入为空:提示「再按一次退出」,1.5s 内再按退出 |
 | 空闲 | `Ctrl+D` | 输入为空时退出 |
-| TUI | `Alt+↑` / `Alt+↓` | 浏览输入历史 |
+| TUI | `Alt+↑` / `Alt+↓` | 顺序浏览输入历史 |
 | classic | `↑` / `↓` | 多行内上下移动；单行边界处浏览历史 |
-| slash menu | `↑` / `↓` | 循环选择前缀匹配的命令 |
+| TUI / classic | `Ctrl+R` | 以当前 draft 为 query 反向搜索当前 thread 的 prompt 历史；恢复会话时从 canonical transcript 重建 |
+| TUI / classic | `Ctrl+O` | 暂停终端控制，用 `$VISUAL`/`$EDITOR` 编辑当前 draft，返回后恢复原 surface |
+| TUI / classic | `Ctrl+K` | 打开统一 command palette；`Esc` 返回打开前的 draft |
+| TUI / classic | `Ctrl+F` | 进入 `/search `；classic 以文本结果显示匹配 |
+| TUI / classic | `Meta+S` | 为当前 thread 同步 durable stash 并清空 composer |
+| TUI / classic | `Tab`（cursor 位于 `@query` 后） | 补全 workspace 内文件/目录，不跟随符号链接且有界扫描 |
+| TUI | `End` | 跳到最新输出并清 unread；文本等价命令是 `/latest` |
+| slash menu | `↑` / `↓` | 循环选择分类、模糊匹配的命令 |
 | slash menu | `Tab` | 补全当前命令并追加空格,不发送 |
 | slash menu | `Enter` | 采用当前命令并立即按当前 phase 的 Enter 语义发送 |
 | slash menu | `Esc` | 关闭候选,保留输入；后续 Esc 才进入 abort/退出语义 |
@@ -455,7 +473,11 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 - OpenTUI 默认启用 Kitty keyboard disambiguation;支持该协议的终端能可靠区分 `Esc`、`Alt+Enter` 与 `Shift+Enter`。不支持时由解析器降级;classic 仍用 readline `escapeCodeTimeout=50ms`。
 - `Alt+Enter` 以 `key.meta && return` 为主。始终保留 `/f ` / `/followup ` 兜底,保证不能发送 Meta+Enter 的终端仍有完整功能。
 - Shift+Enter 在不报告修饰键的旧终端可能退化成普通 Enter;可用 bracketed paste 输入多行。
-- 其余空闲斜杠命令:`/login`、`/model`、`/logout`、`/quit`(兼容 `/q`)、`/queue`、`/status`、`/help`。
+- 斜杠命令除 `/login`、`/model`、`/logout`、`/auth`（兼容 `/auth-status`）、`/doctor`、
+  `/quit`（兼容 `/q`）、`/queue`、`/status`、`/help`
+  外，还包括 `/abort`、`/history`、`/edit`、`/files`、`/stash`、`/restore`、`/draft`、`/vim`、
+  `/search`、`/next`、`/previous`（兼容 `/prev`）、`/latest`、`/copy`、`/export` 与 `/followup`
+  （兼容 `/f`）。运行中 read-only/presentation 命令继续执行；provider/quit 按状态显示 disabled 原因。
   CLI help/completion、TUI/classic slash 候选和三种 surface 的 `/help` 都由
   `command-catalog.ts` 的 `COMMAND_SPECS` 派生；别名参与匹配和补全但不单独渲染。帮助按 surface
   过滤键位，不把 TUI 的 PageUp/history 或 classic 的多行键位冒充 accessible/plain 能力。
@@ -522,15 +544,19 @@ TUI 渲染行为：
 
                  （剩余空间；内容继续向下增长）
 
-→ /status               Show model, usage, and token status
+[task] /status          Show model, usage, and token status
 ────────────────────────────────────────────────────────────
 /st▌
 ────────────────────────────────────────────────────────────
- ~/Desktop/openai/openai-sdk-ts  (main)
+ idle · thread …0123456789 · permissions interactive · queue 0/0
+ ~/Desktop/openai/openai-sdk-ts  (main*)
  context 2.4k / 128k · 1.9%                    openai/gpt-5.2
 ```
 
-中间转录短时锚定顶部;只有填满后才滚动并跟随最新内容。图中用户输入 `/st` 后候选从 prompt 向上展开；按 `Tab` 只补成 `/status `,按 `Enter` 则补全并执行。两行 footer 固定在屏幕底部,多行 prompt 与 slash menu 都从其上方向上扩展。
+中间转录短时锚定顶部；只有填满后才滚动并跟随最新内容。图中已完成首次交互，真实 header 收缩为
+3 行紧凑任务栏；为节省示意篇幅未重复画出。用户输入 `/st` 后 fuzzy 候选从 prompt 向上展开；按 `Tab`
+只补成 `/status `，按 `Enter` 则补全并执行。三行 footer 固定在屏幕底部，多行 prompt 与 palette 都从
+其上方向上扩展。
 
 ## 6. Headless JSON 模式(`--json`)
 
@@ -714,8 +740,11 @@ headless 与 `-p` 默认 `allow`；需要审批流的客户端显式开 `interac
 OAuth；OAuth 显示 `coming soon · disabled`，选择它只返回明确错误，不创建 Runtime/thread、不写配置，
 不得伪装成可用流程。TUI 使用 §1.2 的 candidate menu，以 `↑`/`↓` 选择、`Enter` 确认；classic 使用
 同一份结构化候选打印编号/名称；CLI 子命令使用 `--preset` 或带当前步骤的交互 prompt。TUI/classic 的
-`Esc` 逐级静默返回，根步骤静默退出；CLI 的 `Ctrl+C`/`Ctrl+D` 以 130 退出。所有秘密输入只进入临时
-secret buffer，CLI 走 raw、无 history 的输入，不把 key 回显到 stdout/stderr。
+`Esc` 逐级静默返回，根步骤静默退出；CLI 的 `Ctrl+C`/`Ctrl+D` 以 130 退出。TUI/classic 的整个
+provider 表单使用独立临时输入缓冲；name/base URL 等非秘密字段也不得覆盖、提交或持久化 composer
+中的任务 draft，流程结束或从根步骤返回时恢复原 draft。所有秘密输入只进入临时 secret buffer，CLI
+走 raw、无 history 的输入，不把 key 回显到 stdout/stderr。窄屏 prompt 把 `[步骤 n]`、当前字段名与
+`Esc 返回 …` 放在已确认值之前，保证当前步骤和返回方式不会被右侧截断。
 
 API-key preset 固定为:
 
@@ -810,7 +839,9 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 
 - **非 TTY stdin**(`echo "..." | coda`):自动等价 `-p` 模式读完 stdin 作为 prompt;`--json` 显式给出时按 headless 协议解析。
 - **粘贴多行文本**:OpenTUI Textarea 与 classic 都启用 bracketed paste,粘贴换行不发送;审批期间整段 paste 被输入边界拦截,不能把首字符误判为 `y` / `a` / `n`;不支持 bracketed paste 时是终端自身的已知限制。
-- **窗口 resize**:OpenTUI 重跑 Yoga 布局;宽度不足依次收起 tips、Logo、model。prompt 按新宽度重测软换行并增高或缩回；transcript 内容重排但顺序不变,composer 始终在底部。
+- **窗口 resize**:OpenTUI 重跑 Yoga 布局；首次交互前宽度不足依次收起 tips、Logo、model，首次交互后
+  始终使用紧凑 header，resize 不恢复 onboarding 装饰。prompt 按新宽度重测软换行并增高或缩回；
+  transcript 用 stable block anchor 恢复相同逻辑位置，内容顺序不变，composer 始终在底部。
 - **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽;程序化设置输入历史后调用 Textarea 的 buffer-end API,不能用 JavaScript UTF-16 `string.length` 猜光标列。classic 动态区继续用仓库的 `displayWidth`/截断实现。
 - **过小终端**:低于 10 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标,审批则隐藏输入并只显示决议键位。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
 - **Windows**:OpenTUI 依赖对应 win32 native optional package；`TERM=dumb`/非 TTY auto 路由到
@@ -822,6 +853,21 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   不伪造生命周期事件且不自动启动 run。assistant 的多 text/reasoning
   part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要；plan tool result 从 `details.steps`
   恢复最新 plan,失败结果仍可见。初始化/重放失败必须 destroy OpenTUI 后才允许降级 classic。
+- **终态兜底**：`prompt` / `continue` 的 canonical `op_completed` 是 root activity 已收束的权威边界。
+  若 abort、provider 异常或 legacy adapter 竞态导致其前面没有可投影的最终 `agent_end`，
+  `RuntimeFrontendSession` 必须由该 envelope 清除 active phase，并仅为旧 TUI/classic/plain surface 投影
+  一次 terminal fallback；不得继续显示 running。已带 `expectedRunId` 的 abort 若恰好在此边界后返回
+  `stale_run`，按幂等成功静默收束，不能显示误导性的 warning。
+- **presentation state**：create 交互路径在 attachment 前打开稳定 frontend-only pending key，显式
+  resume 则直接打开目标 `ThreadId` 的
+  `<runtimeRoot>/presentation-v1/<sha256(workspaceId)>/<sha256(threadId)>.json`。ordinary draft 最多
+  200ms 合并写；stash/restore、Vim preference 与正常退出同步 flush；同目录 0600 临时文件经 fsync、rename
+  和目录 fsync 提交。身份只作 hash，不成为路径段；损坏/错配文件 quarantine 后以空状态恢复。该文件只含
+  draft/stash/scroll/unread/search/expanded/panel/Vim，不含 thread/run/approval/usage/permission 或任何
+  provider 表单字段。durability barrier 失败时不得先改内存状态或清 composer；必须显示清洗后的错误，
+  保留可重试 draft/stash，并让退出返回非零。pending key 绝不提交给 Runtime，因而未选模型仍为零
+  thread/journal；attachment listener 将它先写入真实 thread 文件、清空源后再切换 owner。Ctrl+O 与
+  palette/slash `/edit` 在外部编辑器返回前都保留原 composer/store draft，只有成功结果才能替换。
 
 ## 9. 验收清单
 
@@ -841,17 +887,25 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] envelope 模式可交错驱动两个 thread，renderer 用 `(threadId, seq)` 保序去重，任一 thread abort 不改变另一个 thread
 - [ ] headless stdout gate 只阻塞自身输出泵，不拖慢 Runtime；shutdown 仍等待队列 drain 后退出
 - [ ] 100×30 下 header 含版本/Logo/tips;首条 user/assistant 紧跟中区顶部,短内容下方留白而不是贴 footer
-- [ ] 长输出填满中区后自动跟尾;PageUp 手动上滚后不抢回,PageDown 可回到最新内容
+- [ ] 长输出填满中区后自动跟尾；PageUp 或鼠标滚轮上滚后不抢回并累积 unread，PageDown 到底、End 或
+  `/latest` 可回到最新内容并清 unread
 - [ ] native framebuffer 与整个视图树都保持 alpha 0,header、transcript、Markdown、prompt 与 footer 不绘制任何实色背景
-- [ ] prompt 为透明双横线,没有左右边/圆角/title；默认 1 行并随显式/软换行增高(空间允许时最多 8 行),内容缩短后缩回；Textarea 聚焦时显示高对比品牌红色闪烁原生竖线,组件失焦时隐藏,终端窗口失焦时允许模拟器显示空心 inactive cursor；点击输入区可恢复组件焦点；正常高度下其后恰有 workspace 与 context/model 两行
-- [ ] 输入 `/` 时 slash menu 在 prompt 正上方完整显示命令、参数提示与说明,当前项有 `→` 和 accent；前缀过滤大小写无关,窄屏可隐藏说明但不丢候选
-- [ ] slash menu 中 `↑/↓` 循环选择,`Tab` 补全但不发送,`Enter` 补全后发送,`Esc` 只收起列表；running/retrying 不展示会被当作 steering 的空闲命令
-- [ ] resize 宽→窄→宽后 prompt 按软换行增高再缩回,Logo/tips 正确隐藏并恢复；非空多行 draft 下审批 footer 与黄色横线仍可见,决议后恢复 workspace/洋红横线
+- [ ] prompt 为透明双横线,没有左右边/圆角/title；默认 1 行并随显式/软换行增高(空间允许时最多 8 行),内容缩短后缩回；Textarea 聚焦时显示高对比品牌红色闪烁原生竖线,组件失焦时隐藏,终端窗口失焦时允许模拟器显示空心 inactive cursor；点击输入区可恢复组件焦点；正常高度下其后恰有 task、workspace 与 context/model 三行
+- [ ] 输入 `/` 或 Ctrl+K 时 palette 在 prompt 正上方显示 category、命令、参数、快捷键、说明/disabled 原因；name/alias/description/category 模糊搜索大小写无关，窄屏可隐藏说明但不丢候选
+- [ ] palette 中 `↑/↓` 循环选择,`Tab` 补全但不发送,`Enter` 补全后执行,`Esc` 返回原 draft；running/retrying 的 read-only/presentation 命令可执行，provider/quit 保留 disabled 解释且不作为 steering
+- [ ] 首次输入/提交后 9 行 onboarding header 收缩为 3 行 taskbar；resize 宽→窄→宽后 prompt 按软换行增高再缩回，Logo/tips 不重新弹回；非空多行 draft 下审批 footer 与黄色横线仍可见,决议后恢复 workspace/洋红横线
 - [ ] 9→7→5→3→2→1 行的 ultra-compact 降级中光标不越界；1 行审批优先显示 y/a/n/Esc 并隐藏输入光标
 - [ ] 流式输出期间输入框稳定;Enter 后出现 steering 回显,Shift+Enter 只插入换行
 - [ ] retry backoff 期间 Enter 入 steering 队列、Esc 取消重试；compacting 期间 Enter 的 prompt 在压缩完成后启动
 - [ ] `Esc` 不与方向键冲突;流式中裸 Esc 一次 abort,assistant 以 `[aborted]` 收尾
 - [ ] `Alt+Enter` 与 `/f ` 前缀均能入 follow-up 队列(至少各在一种终端验证)
+- [x] Ctrl+R 从恢复 transcript 搜索当前 thread 历史；Ctrl+O 外部编辑、Meta+S stash、`@` Tab、
+  `/draft`、`/vim` 在 TUI/classic 可用，accessible/plain 有同语义文本命令
+- [x] presentation v1 按 workspace/thread 隔离并使用 0600 atomic file；draft/scroll/search/Vim 跨
+  resize/reopen 恢复，显式 stash durable；故障注入下 stash/restore/flush/dispose 不清输入、不伪报成功；
+  provider 的普通字段与 secret 对 task draft/store/history/frame/transcript/log 都保持隔离
+- [x] `/search`/next/previous/latest、`/copy latest|raw` 与 exclusive `/export` 在 TUI/classic/text 共享
+  parser/actions；导出不覆盖已有文件，终端控制序列不能借 copy 状态或错误回到 human surface
 - [ ] `coda --continue` 重放转录后,tool 摘要、最新 plan 与 plan error 都保留,新输入接在原上下文继续
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
 - [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景
@@ -859,7 +913,8 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] CLI/TUI/classic 的登录入口都显示 OpenCode Go、OpenAI、Anthropic、Custom 与 disabled OAuth；
   TUI 与 slash command 复用输入框上方的 `→` candidate menu，以 `↑/↓` 选择、`Enter` 确认且不要求
   数字输入，classic 保留编号/名称兼容；`Esc` 逐级静默返回、根步骤静默退出且秘密回退先清 key；
-  CLI 表单持续显示字段/步骤/返回方式；秘密输入只显示掩码且不进 history、draft、frame、事件、转录或日志
+  CLI/TUI/classic 表单持续显示字段/步骤/返回方式；普通 provider 字段不覆盖任务 draft，秘密输入只显示
+  掩码且不进 history、draft、frame、事件、转录或日志
 - [ ] OpenCode Go 的实时 models 与显式协议表取交集；表外 id 不可选；多个 custom provider 可按大小写不敏感名称更新并分别 `/logout`
 - [ ] `/login` 不切模型；`/model` 以 provider/model 选择并由 `ProviderAdapterRegistry` snapshot 按 `ModelRef.api` 动态分发；运行中三条管理命令只提示完成或 abort
 - [ ] 同一 provider 的旧模型刷新迟到时因 revision CAS 被丢弃，不回滚新 endpoint/key

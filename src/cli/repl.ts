@@ -29,8 +29,29 @@ import type {
 } from './interactive-runtime.js';
 import { ProviderCommandController } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
+import {
+  collectDoctorReport,
+  formatAuthStatusLines,
+  formatDoctorReportLines,
+} from './product-commands.js';
 import type { Renderer } from './renderer.js';
 import { sanitizeTerminalError, sanitizeTerminalText } from './terminal-sanitize.js';
+import {
+  applyWorkspaceCompletion,
+  copyTextToClipboard,
+  editDraftWithExternalEditor,
+  exportTranscript,
+  latestAssistantText,
+  MessageTranscriptSearch,
+  promptHistoryEntries,
+  transcriptContent,
+  workspaceCompletionAtCursor,
+  workspacePathCandidates,
+} from './presentation-actions.js';
+import {
+  persistableDraft,
+  type ThreadPresentationStore,
+} from './presentation-state.js';
 import {
   findSlashCommand,
   renderInteractiveHelp,
@@ -59,14 +80,30 @@ export type SlashCommand =
   | {
       cmd:
         | 'quit'
+        | 'abort'
         | 'queue'
         | 'status'
+        | 'doctor'
+        | 'auth_status'
         | 'help'
         | 'login'
         | 'model'
-        | 'logout';
+        | 'logout'
+        | 'edit'
+        | 'restore'
+        | 'search_next'
+        | 'search_previous'
+        | 'latest';
     }
   | { cmd: 'follow_up'; text: string }
+  | { cmd: 'history_search'; query: string }
+  | { cmd: 'stash'; text: string }
+  | { cmd: 'file_complete'; query: string }
+  | { cmd: 'transcript_search'; query: string }
+  | { cmd: 'copy'; mode: string }
+  | { cmd: 'export'; mode: string; path: string }
+  | { cmd: 'vim'; mode: string }
+  | { cmd: 'draft'; action: string }
   | { cmd: 'unknown'; input: string };
 
 /** 非斜杠输入返回 undefined。空闲命令表:/quit /queue /status /help;/f|/followup 随时合法。 */
@@ -82,6 +119,10 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'queue' };
     case 'task.status':
       return { cmd: 'status' };
+    case 'doctor.run':
+      return { cmd: 'doctor' };
+    case 'auth.status':
+      return { cmd: 'auth_status' };
     case 'help.show':
       return { cmd: 'help' };
     case 'auth.login':
@@ -92,6 +133,45 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'logout' };
     case 'task.follow-up':
       return { cmd: 'follow_up', text: rest };
+    case 'task.abort':
+      return { cmd: 'abort' };
+    case 'history.search':
+      return { cmd: 'history_search', query: rest };
+    case 'draft.edit':
+      return { cmd: 'edit' };
+    case 'draft.files':
+      return { cmd: 'file_complete', query: rest };
+    case 'draft.stash':
+      return { cmd: 'stash', text: rest };
+    case 'draft.restore':
+      return { cmd: 'restore' };
+    case 'settings.vim':
+      return { cmd: 'vim', mode: rest.toLocaleLowerCase('en-US') };
+    case 'draft.manage':
+      return { cmd: 'draft', action: rest.toLocaleLowerCase('en-US') };
+    case 'transcript.search':
+      return { cmd: 'transcript_search', query: rest };
+    case 'transcript.next':
+      return { cmd: 'search_next' };
+    case 'transcript.previous':
+      return { cmd: 'search_previous' };
+    case 'transcript.latest':
+      return { cmd: 'latest' };
+    case 'content.copy':
+      return { cmd: 'copy', mode: rest.toLocaleLowerCase('en-US') };
+    case 'content.export': {
+      const firstSpace = rest.indexOf(' ');
+      const first = (firstSpace < 0 ? rest : rest.slice(0, firstSpace))
+        .toLocaleLowerCase('en-US');
+      if (first === 'text' || first === 'raw' || first === 'latest') {
+        return {
+          cmd: 'export',
+          mode: first,
+          path: firstSpace < 0 ? '' : rest.slice(firstSpace + 1).trim(),
+        };
+      }
+      return { cmd: 'export', mode: 'text', path: rest };
+    }
     default:
       return { cmd: 'unknown', input: text };
   }
@@ -122,6 +202,17 @@ export function decideEnter(state: 'idle' | 'running', meta: boolean, raw: strin
   if (
     slash !== undefined &&
     (slash.cmd === 'login' || slash.cmd === 'model' || slash.cmd === 'logout')
+  ) {
+    return { kind: 'command', command: slash };
+  }
+  const slashName = text.startsWith('/')
+    ? text.slice(1).split(/\s/u, 1)[0]?.toLocaleLowerCase('en-US')
+    : undefined;
+  if (
+    state === 'running' &&
+    slash !== undefined &&
+    slashName !== undefined &&
+    findSlashCommand(slashName)?.availableWhileRunning === true
   ) {
     return { kind: 'command', command: slash };
   }
@@ -174,9 +265,16 @@ export interface ReplOptions {
   stdin?: ReplInput;
   /** stdout 等外部致命边界失败时，由 REPL 自己完成 abort、TTY 清理并 exit 1。 */
   fatalSignal?: AbortSignal;
+  version?: string;
   providerCommands?: {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
+  };
+  presentation?: {
+    readonly store: ThreadPresentationStore;
+    readonly cwd: string;
+    readonly editDraft?: (draft: string) => Promise<string>;
+    readonly copyText?: (text: string) => Promise<void>;
   };
 }
 
@@ -186,16 +284,20 @@ export class InputHistory {
   #items: string[] = [];
   #index = 0; // === items.length 表示「草稿位」
   #draft = '';
+  #searchQuery: string | undefined;
+  #searchIndex = 0;
 
   push(text: string): void {
     if (text.trim() === '') return;
     if (this.#items[this.#items.length - 1] !== text) this.#items.push(text);
     this.#index = this.#items.length;
     this.#draft = '';
+    this.resetSearch();
   }
 
   /** ↑:首次上翻保存当前草稿;到顶后停在最旧一条。 */
   up(current: string): string {
+    this.resetSearch();
     if (this.#items.length === 0) return current;
     if (this.#index === this.#items.length) this.#draft = current;
     if (this.#index > 0) this.#index--;
@@ -204,9 +306,34 @@ export class InputHistory {
 
   /** ↓:翻回草稿位时还原草稿。 */
   down(): string {
+    this.resetSearch();
     if (this.#index < this.#items.length) this.#index++;
     if (this.#index === this.#items.length) return this.#draft;
     return this.#items[this.#index] ?? this.#draft;
+  }
+
+  /** Ctrl+R: repeated calls with the same query walk older matching entries. */
+  reverseSearch(query: string): string | undefined {
+    if (query !== this.#searchQuery) {
+      this.#searchQuery = query;
+      this.#searchIndex = this.#items.length;
+    }
+    for (let index = this.#searchIndex - 1; index >= 0; index--) {
+      const candidate = this.#items[index];
+      if (candidate?.toLocaleLowerCase('en-US').includes(
+        query.toLocaleLowerCase('en-US'),
+      ) !== true) {
+        continue;
+      }
+      this.#searchIndex = index;
+      return candidate;
+    }
+    return undefined;
+  }
+
+  resetSearch(): void {
+    this.#searchQuery = undefined;
+    this.#searchIndex = this.#items.length;
   }
 }
 
@@ -348,6 +475,7 @@ export async function startRepl(
   let cursor = 0;
   const approvalQueue: string[] = []; // pending approvalId FIFO(非空 = 审批键位模式)
   const history = new InputHistory();
+  for (const prompt of promptHistoryEntries(session.messages)) history.push(prompt);
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
   let lastQueues: { steering: QueuedMessage[]; followUp: QueuedMessage[] } = {
@@ -357,6 +485,16 @@ export async function startRepl(
   let pasting = false;
   let statusShown = false;
   let closing = false;
+  let editing = false;
+  let vimEnabled = opts.presentation?.store.snapshot().vimEnabled ?? false;
+  let vimInsertMode = !vimEnabled;
+  let paletteReturnDraft: string | undefined;
+  let latestPromptDraft = opts.presentation?.store.snapshot().draft ?? '';
+  let providerTaskDraft: string | undefined;
+  let providerInputActive = false;
+  let providerBeginning = false;
+  let reverseSearchQuery: string | undefined;
+  const transcriptSearch = new MessageTranscriptSearch(() => session.messages);
   const enqueueApproval = (approvalId: string): void => {
     if (!approvalQueue.includes(approvalId)) approvalQueue.push(approvalId);
   };
@@ -372,10 +510,25 @@ export async function startRepl(
         renderer.setInputLine?.(input, cursor);
       }
     };
-    const setInput = (text: string, cur = text.length): void => {
+    const persistInput = (): void => {
+      if (
+        secretInput ||
+        providerInputActive ||
+        opts.presentation === undefined ||
+        input.startsWith('/')
+      ) return;
+      latestPromptDraft = input;
+      opts.presentation.store.setDraft(persistableDraft(input));
+    };
+    const setInput = (
+      text: string,
+      cur = text.length,
+      persist = true,
+    ): void => {
       input = text;
       cursor = cur;
       renderInput();
+      if (persist) persistInput();
     };
 
     const setStatusHint = (text: string): void => {
@@ -389,6 +542,15 @@ export async function startRepl(
     };
 
     const canAbort = (): boolean => interactionCanAbort(session.interactionState());
+
+    const restoreProviderTaskDraft = (): string => {
+      const draft = providerTaskDraft ?? latestPromptDraft;
+      providerTaskDraft = undefined;
+      providerInputActive = false;
+      latestPromptDraft = draft;
+      if (!closing) setInput(draft);
+      return draft;
+    };
 
     const providerController =
       opts.providerCommands === undefined
@@ -408,6 +570,10 @@ export async function startRepl(
                   cursor = 0;
                 }
                 secretInput = secret;
+                if (prompt !== undefined) {
+                  input = '';
+                  cursor = 0;
+                }
                 if (choices !== undefined) {
                   choices.forEach((choice, index) => {
                     renderer.println?.(
@@ -424,12 +590,29 @@ export async function startRepl(
                     : `${prompt} · 输入编号或名称`,
                 );
                 renderInput();
+                if (prompt === undefined && !providerBeginning) {
+                  restoreProviderTaskDraft();
+                }
               },
               setModel: () => {
                 // classic /status 每次从 runtime 读取；无需维护第二份模型状态。
               },
             },
           );
+
+    const beginProviderCommand = (
+      command: 'login' | 'model' | 'logout',
+    ): string => {
+      if (providerController === undefined) return latestPromptDraft;
+      providerTaskDraft ??= paletteReturnDraft ?? latestPromptDraft;
+      paletteReturnDraft = undefined;
+      providerInputActive = true;
+      providerBeginning = true;
+      providerController.begin(command);
+      providerBeginning = false;
+      providerInputActive = providerController.active;
+      return providerController.active ? '' : restoreProviderTaskDraft();
+    };
 
     const unsub = session.subscribe((e) => {
       if (e.type === 'queue_update') {
@@ -492,6 +675,12 @@ export async function startRepl(
         console.error(`[coda] REPL shutdown failed: ${sanitizeTerminalError(err)}`);
       } finally {
         cleanup();
+        try {
+          opts.presentation?.store.dispose();
+        } catch (error) {
+          code = 1;
+          console.error(`[coda] REPL presentation save failed: ${sanitizeTerminalError(error)}`);
+        }
         resolve(code);
       }
     };
@@ -503,22 +692,92 @@ export async function startRepl(
     const printErr = (err: unknown): void => {
       renderer.println?.(`prompt failed: ${err instanceof Error ? err.message : String(err)}`);
     };
-    const runPrompt = (text: string): void => {
+    const printSearchMatch = (
+      match: ReturnType<MessageTranscriptSearch['move']>,
+    ): void => {
+      if (match === undefined) {
+        renderer.println?.('No transcript matches. Start with /search <query>.');
+        return;
+      }
+      renderer.println?.(
+        `match ${match.ordinal + 1}/${match.total} · ${match.label} · ${match.snippet}`,
+      );
+      opts.presentation?.store.setSearch({
+        query: transcriptSearch.query,
+        matchOrdinal: match.ordinal,
+      });
+    };
+
+    const editComposerDraft = async (draft: string): Promise<void> => {
+      if (opts.presentation === undefined || editing) {
+        if (opts.presentation === undefined) {
+          renderer.println?.('/edit is unavailable without presentation storage.');
+        }
+        return;
+      }
+      editing = true;
+      clearStatusHint();
+      renderer.setStatus?.('editing draft in $EDITOR…');
+      stdin.removeListener('keypress', onKeypress);
+      if (stdin.isTTY) stdin.setRawMode(false);
       try {
-        session.prompt(text).catch(printErr);
-      } catch (err) {
-        printErr(err); // state 竞争兜底:running 时 prompt 同步 throw,被键位表吸收
+        const edited = await (
+          opts.presentation.editDraft?.(draft) ??
+          editDraftWithExternalEditor(draft, { cwd: opts.presentation.cwd })
+        );
+        if (!closing) {
+          setInput(edited);
+          renderer.println?.('Draft returned from $EDITOR.');
+        }
+      } catch (error) {
+        if (!closing) {
+          setInput(draft);
+          renderer.println?.(`editor failed: ${sanitizeTerminalError(error)}`);
+        }
+      } finally {
+        renderer.setStatus?.(undefined);
+        if (!closing) {
+          if (stdin.isTTY) stdin.setRawMode(true);
+          stdin.on('keypress', onKeypress);
+        }
+        editing = false;
       }
     };
 
-    const runCommand = (c: SlashCommand): void => {
+    const copyTranscript = async (mode: string): Promise<void> => {
+      const normalized = mode === '' ? 'latest' : mode;
+      if (normalized !== 'latest' && normalized !== 'raw') {
+        renderer.println?.('usage: /copy [latest|raw]');
+        return;
+      }
+      const content = transcriptContent(session.messages, normalized);
+      if (content === '') {
+        renderer.println?.('Nothing to copy.');
+        return;
+      }
+      try {
+        await (opts.presentation?.copyText?.(content) ?? copyTextToClipboard(content));
+        renderer.println?.(
+          normalized === 'raw' ? 'Raw transcript copied.' : 'Latest response copied.',
+        );
+      } catch (error) {
+        renderer.println?.(`copy failed: ${sanitizeTerminalError(error)}`);
+      }
+    };
+
+    /** null = clear command text; string = replace composer with returned draft. */
+    const runCommand = (c: SlashCommand): string | null => {
       switch (c.cmd) {
         case 'quit':
           void shutdown(0);
-          break;
+          return null;
+        case 'abort':
+          if (canAbort()) session.abort();
+          else renderer.println?.('No active run to abort.');
+          return null;
         case 'help':
           for (const line of renderInteractiveHelp('classic')) renderer.println?.(line);
-          break;
+          return null;
         case 'status':
           for (const l of formatStatusLines(
             session.usage(),
@@ -526,27 +785,187 @@ export async function startRepl(
           )) {
             renderer.println?.(l);
           }
-          break;
+          return null;
+        case 'doctor': {
+          const report = collectDoctorReport(opts.version ?? 'unknown');
+          for (const line of formatDoctorReportLines(report)) renderer.println?.(line);
+          return paletteReturnDraft ?? null;
+        }
+        case 'auth_status':
+          if (opts.providerCommands === undefined) {
+            renderer.println?.('/auth is unavailable in this mode');
+          } else {
+            for (const line of formatAuthStatusLines(opts.providerCommands.registry)) {
+              renderer.println?.(line);
+            }
+          }
+          return paletteReturnDraft ?? null;
         case 'login':
         case 'model':
         case 'logout':
           if (providerController === undefined) {
             renderer.println?.(`/${c.cmd} is unavailable in this mode`);
-          } else {
-            providerController.begin(c.cmd);
+            return paletteReturnDraft ?? latestPromptDraft;
           }
-          break;
+          return beginProviderCommand(c.cmd);
         case 'queue':
           for (const l of formatQueueLines(lastQueues.steering, lastQueues.followUp)) {
             renderer.println?.(l);
           }
-          break;
+          return null;
         case 'follow_up':
           if (c.text !== '') session.followUp(c.text);
-          break;
+          return null;
+        case 'history_search': {
+          const query = c.query === '' ? latestPromptDraft : c.query;
+          const match = history.reverseSearch(query);
+          if (match === undefined) {
+            renderer.println?.(`No prompt history match for ${JSON.stringify(query)}.`);
+            return paletteReturnDraft ?? null;
+          }
+          setStatusHint(`history match · Ctrl+R for older · ${query}`);
+          return match;
+        }
+        case 'edit':
+          void editComposerDraft(paletteReturnDraft ?? latestPromptDraft);
+          return paletteReturnDraft ?? latestPromptDraft;
+        case 'file_complete': {
+          const candidates = opts.presentation === undefined
+            ? []
+            : workspacePathCandidates(opts.presentation.cwd, c.query, 20);
+          if (candidates.length === 0) renderer.println?.('No matching workspace paths.');
+          else candidates.forEach((candidate) => renderer.println?.(`  @${candidate}`));
+          return candidates.length === 1 ? `@${candidates[0]}` : (paletteReturnDraft ?? null);
+        }
+        case 'stash': {
+          if (opts.presentation === undefined) {
+            renderer.println?.('/stash is unavailable without presentation storage.');
+            return paletteReturnDraft ?? null;
+          }
+          const draft = c.text || paletteReturnDraft || latestPromptDraft;
+          if (draft === '') {
+            renderer.println?.('No draft to stash.');
+            return null;
+          }
+          try {
+            opts.presentation.store.stash(persistableDraft(draft));
+            latestPromptDraft = '';
+            renderer.println?.('Draft stashed for this thread.');
+            return '';
+          } catch (error) {
+            renderer.println?.(`stash failed: ${sanitizeTerminalError(error)}`);
+            return draft;
+          }
+        }
+        case 'restore': {
+          try {
+            const restored = opts.presentation?.store.restoreStash();
+            if (restored === undefined) {
+              renderer.println?.('No stashed draft for this thread.');
+              return paletteReturnDraft ?? null;
+            }
+            latestPromptDraft = restored.text;
+            renderer.println?.('Draft restored.');
+            return restored.text;
+          } catch (error) {
+            renderer.println?.(`restore failed: ${sanitizeTerminalError(error)}`);
+            return paletteReturnDraft ?? latestPromptDraft;
+          }
+        }
+        case 'transcript_search': {
+          if (c.query === '') {
+            renderer.println?.('usage: /search <query>');
+            return paletteReturnDraft ?? null;
+          }
+          printSearchMatch(transcriptSearch.setQuery(c.query));
+          return paletteReturnDraft ?? null;
+        }
+        case 'search_next':
+          printSearchMatch(transcriptSearch.move(1));
+          return paletteReturnDraft ?? null;
+        case 'search_previous':
+          printSearchMatch(transcriptSearch.move(-1));
+          return paletteReturnDraft ?? null;
+        case 'latest': {
+          const latest = latestAssistantText(session.messages);
+          renderer.println?.(latest === undefined ? 'No assistant response yet.' : `latest response\n${latest}`);
+          return paletteReturnDraft ?? null;
+        }
+        case 'copy':
+          void copyTranscript(c.mode);
+          return paletteReturnDraft ?? null;
+        case 'export': {
+          if (opts.presentation === undefined) {
+            renderer.println?.('/export is unavailable without presentation storage.');
+            return paletteReturnDraft ?? null;
+          }
+          try {
+            const destination = exportTranscript(session.messages, {
+              cwd: opts.presentation.cwd,
+              mode: c.mode === 'raw' || c.mode === 'latest' ? c.mode : 'text',
+              ...(c.path === '' ? {} : { destination: c.path }),
+            });
+            renderer.println?.(`Exported transcript to ${sanitizeTerminalText(destination)}.`);
+          } catch (error) {
+            renderer.println?.(`export failed: ${sanitizeTerminalError(error)}`);
+          }
+          return paletteReturnDraft ?? null;
+        }
+        case 'vim':
+          if (c.mode !== 'on' && c.mode !== 'off') {
+            renderer.println?.('usage: /vim <on|off>');
+            return paletteReturnDraft ?? null;
+          }
+          opts.presentation?.store.setVimEnabled(c.mode === 'on');
+          vimEnabled = c.mode === 'on';
+          vimInsertMode = !vimEnabled;
+          renderer.println?.(`Vim composer keys ${vimEnabled ? 'enabled (NORMAL)' : 'disabled'}.`);
+          return paletteReturnDraft ?? null;
+        case 'draft': {
+          if (opts.presentation === undefined) {
+            renderer.println?.('/draft is unavailable without presentation storage.');
+            return paletteReturnDraft ?? null;
+          }
+          const draft = opts.presentation.store.snapshot().draft;
+          if (c.action === 'show') {
+            renderer.println?.(draft === '' ? 'No saved draft.' : `saved draft\n${draft}`);
+            return paletteReturnDraft ?? null;
+          }
+          if (c.action === 'clear') {
+            opts.presentation.store.setDraft(persistableDraft(''));
+            latestPromptDraft = '';
+            renderer.println?.('Saved draft cleared.');
+            return '';
+          }
+          if (c.action === 'send') {
+            if (draft === '') {
+              renderer.println?.('No saved draft to send.');
+              return paletteReturnDraft ?? null;
+            }
+            try {
+              if (interactionEnterState(session.interactionState()) === 'running') {
+                session.steer(draft);
+              } else {
+                session.prompt(draft).catch((error) => {
+                  printErr(error);
+                  opts.presentation?.store.setDraft(persistableDraft(draft));
+                  if (input === '') setInput(draft);
+                });
+              }
+              opts.presentation.store.setDraft(persistableDraft(''));
+              latestPromptDraft = '';
+              return '';
+            } catch (error) {
+              printErr(error);
+              return draft;
+            }
+          }
+          renderer.println?.('usage: /draft <show|send|clear>');
+          return paletteReturnDraft ?? null;
+        }
         case 'unknown':
           renderer.println?.(`unknown command: ${c.input} (try /help)`);
-          break;
+          return null;
       }
     };
 
@@ -562,27 +981,36 @@ export async function startRepl(
         setInput('');
         return;
       }
-      history.push(input);
+      const submitted = input;
+      let nextInput = '';
+      if (action.kind !== 'command') history.push(input);
       try {
         switch (action.kind) {
           case 'prompt':
-            runPrompt(action.text);
+            latestPromptDraft = '';
+            session.prompt(action.text).catch((error) => {
+              printErr(error);
+              if (input === '') setInput(action.text);
+            });
             break;
           case 'steer':
             session.steer(action.text);
+            latestPromptDraft = '';
             break;
           case 'follow_up':
             session.followUp(action.text);
+            latestPromptDraft = '';
             break;
           case 'command':
-            runCommand(action.command);
+            nextInput = runCommand(action.command) ?? paletteReturnDraft ?? '';
             break;
         }
       } catch (err) {
         printErr(err);
-      } finally {
-        setInput('');
+        nextInput = submitted;
       }
+      paletteReturnDraft = undefined;
+      setInput(nextInput);
     };
 
     const insert = (s: string): void => {
@@ -590,10 +1018,11 @@ export async function startRepl(
       input = input.slice(0, cursor) + clean + input.slice(cursor);
       cursor += clean.length;
       renderInput();
+      persistInput();
     };
 
     const onKeypress = (str: string | undefined, key: readline.Key | undefined): void => {
-      if (closing) return;
+      if (closing || editing) return;
       const k = key ?? {};
       const name = k.name ?? '';
       const pasteStart = '\x1b[200~';
@@ -636,6 +1065,10 @@ export async function startRepl(
       // 双击窗口:被其他按键打断即失效
       if (name !== 'escape') escExit.reset();
       if (!(k.ctrl === true && name === 'c')) ctrlCExit.reset();
+      if (!(k.ctrl === true && name === 'r')) {
+        reverseSearchQuery = undefined;
+        history.resetSearch();
+      }
       clearStatusHint();
 
       // 审批模式(M6,docs/09 §4):approval_request 期间键位表切换为
@@ -666,8 +1099,131 @@ export async function startRepl(
 
       if (name === 'escape' && providerController?.active === true) {
         providerController.back();
-        setInput('');
         escExit.reset();
+        return;
+      }
+
+      if (vimEnabled && providerController?.active !== true) {
+        if (name === 'escape' && vimInsertMode) {
+          vimInsertMode = false;
+          setStatusHint('VIM NORMAL · i insert · Esc abort/exit');
+          return;
+        }
+        if (!vimInsertMode && k.ctrl !== true && k.meta !== true) {
+          if (name === 'i' || str === 'i') {
+            vimInsertMode = true;
+            setStatusHint('VIM INSERT · Esc normal');
+            return;
+          }
+          if (name === 'a' || str === 'a') {
+            cursor = nextGraphemeBoundary(input, cursor);
+            vimInsertMode = true;
+            renderInput();
+            setStatusHint('VIM INSERT · Esc normal');
+            return;
+          }
+          if (name === 'h' || str === 'h') {
+            cursor = previousGraphemeBoundary(input, cursor);
+            renderInput();
+            return;
+          }
+          if (name === 'l' || str === 'l') {
+            cursor = nextGraphemeBoundary(input, cursor);
+            renderInput();
+            return;
+          }
+          if (name === 'j' || str === 'j' || name === 'down') {
+            cursor = moveMultilineCursor(input, cursor, 1);
+            renderInput();
+            return;
+          }
+          if (name === 'k' || str === 'k' || name === 'up') {
+            cursor = moveMultilineCursor(input, cursor, -1);
+            renderInput();
+            return;
+          }
+          if (str === '0' || name === 'home') {
+            cursor = input.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1;
+            renderInput();
+            return;
+          }
+          if (str === '$' || name === 'end') {
+            const end = input.indexOf('\n', cursor);
+            cursor = end === -1 ? input.length : end;
+            renderInput();
+            return;
+          }
+          if (name === 'x' || str === 'x' || name === 'delete') {
+            if (cursor < input.length) {
+              input = input.slice(0, cursor) + input.slice(nextGraphemeBoundary(input, cursor));
+              renderInput();
+              persistInput();
+            }
+            return;
+          }
+          if (name !== 'escape') return;
+        }
+      }
+
+      if (k.ctrl === true && name === 'k' && providerController?.active !== true) {
+        paletteReturnDraft = input;
+        setInput('/', 1, false);
+        setStatusHint('command palette · type to fuzzy-search · Esc returns to draft');
+        return;
+      }
+      if (k.ctrl === true && name === 'f' && providerController?.active !== true) {
+        paletteReturnDraft = input;
+        setInput('/search ', '/search '.length, false);
+        setStatusHint('transcript search · enter a query');
+        return;
+      }
+      if (k.ctrl === true && name === 'r' && providerController?.active !== true) {
+        reverseSearchQuery ??= input;
+        const match = history.reverseSearch(reverseSearchQuery);
+        if (match === undefined) {
+          setStatusHint(`no older history match · ${reverseSearchQuery}`);
+        } else {
+          setInput(match);
+          setStatusHint(`history match · Ctrl+R older · ${reverseSearchQuery}`);
+        }
+        return;
+      }
+      if (k.ctrl === true && name === 'o' && providerController?.active !== true) {
+        void editComposerDraft(input);
+        return;
+      }
+      if (k.meta === true && name === 's' && providerController?.active !== true) {
+        if (opts.presentation === undefined || input === '') {
+          renderer.println?.(input === '' ? 'No draft to stash.' : 'Draft storage unavailable.');
+        } else {
+          try {
+            opts.presentation.store.stash(persistableDraft(input));
+            latestPromptDraft = '';
+            setInput('');
+            renderer.println?.('Draft stashed for this thread.');
+          } catch (error) {
+            renderer.println?.(`stash failed: ${sanitizeTerminalError(error)}`);
+          }
+        }
+        return;
+      }
+      if (name === 'tab' && providerController?.active !== true && opts.presentation !== undefined) {
+        const completion = workspaceCompletionAtCursor(
+          input,
+          cursor,
+          opts.presentation.cwd,
+          20,
+        );
+        if (completion !== undefined && completion.candidates.length > 0) {
+          const [selected] = completion.candidates;
+          if (selected !== undefined) {
+            const applied = applyWorkspaceCompletion(input, completion, selected);
+            setInput(applied.text, applied.cursor);
+          }
+          if (completion.candidates.length > 1) {
+            completion.candidates.forEach((candidate) => renderer.println?.(`  @${candidate}`));
+          }
+        }
         return;
       }
 
@@ -689,6 +1245,13 @@ export async function startRepl(
         return;
       }
       if (name === 'escape') {
+        if (paletteReturnDraft !== undefined) {
+          const draft = paletteReturnDraft;
+          paletteReturnDraft = undefined;
+          setInput(draft);
+          escExit.reset();
+          return;
+        }
         if (escExit.hit(Date.now())) {
           void shutdown(0);
           return;
@@ -751,6 +1314,7 @@ export async function startRepl(
           input = input.slice(0, previous) + input.slice(cursor);
           cursor = previous;
           renderInput();
+          persistInput();
         }
         return;
       }
@@ -758,6 +1322,7 @@ export async function startRepl(
         if (cursor < input.length) {
           input = input.slice(0, cursor) + input.slice(nextGraphemeBoundary(input, cursor));
           renderInput();
+          persistInput();
         }
         return;
       }
@@ -787,7 +1352,10 @@ export async function startRepl(
     process.once('SIGTERM', onSignal);
 
     renderer.mount?.();
-    renderInput();
+    const restoredDraft = opts.presentation?.store.snapshot().draft ?? '';
+    setInput(restoredDraft, restoredDraft.length, false);
+    if (restoredDraft !== '') renderer.println?.('Restored this thread’s draft.');
+    if (vimEnabled) setStatusHint('VIM NORMAL · i insert · Esc abort/exit');
     opts.fatalSignal?.addEventListener('abort', onFatalSignal, { once: true });
     if (opts.fatalSignal?.aborted === true) onFatalSignal();
   });

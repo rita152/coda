@@ -11,7 +11,12 @@ import {
   TextRenderable,
 } from '@opentui/core';
 import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing';
-import type { AssistantMessage, UserMessage } from '../protocol/index.js';
+import type {
+  AssistantMessage,
+  UserMessage,
+  WorkspaceId,
+  WorkspaceRuntimeSnapshot,
+} from '../protocol/index.js';
 import { isFullScreenTuiEligible, parseFlags } from './config.js';
 import { createRenderer } from './renderer.js';
 import { createTuiScreen } from './tui.js';
@@ -22,6 +27,14 @@ const MODEL = {
   api: 'openai-chat',
   model: 'deepseek-v4-flash',
 } as const;
+const WORKSPACE_SNAPSHOT = {
+  workspaceId: 'ws_ux_characterization' as WorkspaceId,
+  permissions: {
+    mode: 'interactive',
+    policyRevision: 'characterization-policy-v1',
+    ceiling: { revision: 'characterization-ceiling-v1', constraints: [] },
+  },
+} as const satisfies WorkspaceRuntimeSnapshot;
 
 type TestRenderer = Awaited<ReturnType<typeof createTestRenderer>>;
 
@@ -45,6 +58,7 @@ async function createView(width: number, height: number, color = true): Promise<
     version: '0.0.1',
     color,
     model: MODEL,
+    workspaceSnapshot: WORKSPACE_SNAPSHOT,
     contextLimit: 128_000,
     treeSitterClient: highlighter,
   });
@@ -125,13 +139,11 @@ describe('UX0 terminal environment characterization', () => {
         // 0-based cursor column = input origin + 草(2) + 稿(2) + 👩‍💻(2) + 🙂(2).
         expect(cursor.x - 1).toBe(input.screenX + 8);
 
+        expect(frame).not.toContain('▄█▄');
+        expect(frame).not.toContain('Tips for getting started');
         if (width === 40) {
-          expect(frame).not.toContain('▄█▄');
-          expect(frame).not.toContain('Tips for getting started');
           expect(frame).not.toContain('opencode-go/deepseek-v4-flash');
         } else {
-          expect(frame).toContain('▄█▄');
-          expect(frame).toContain('Tips for getting started');
           expect(frame).toContain('opencode-go/deepseek-v4-flash');
         }
       } finally {

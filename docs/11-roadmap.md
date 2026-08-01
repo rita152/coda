@@ -592,8 +592,8 @@ flowchart LR
 |---|---|---|---|
 | UX0 | 已完成（两轮 review） | 不得改变 | UX 契约、旅程/parity matrix、环境与性能 characterization |
 | UX1 | 已完成（两轮 review） | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
-| UX2 | 待开始 | 保持 Runtime 语义 | 紧凑状态区、command palette、composer 与 transcript 导航 |
-| UX3 | 待开始 | 业务动作只经 RuntimePort | review/diff/approval/session picker 与每 thread presentation state |
+| UX2 | 已完成（两轮 review） | 保持 Runtime 语义 | 紧凑状态区、command palette、per-thread presentation 与 transcript 导航 |
+| UX3 | 待开始 | 业务动作只经 RuntimePort | review/diff/approval/session picker 与跨 thread attachment 恢复 |
 | UX4 | 待开始 | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/窗口化与自动化输出 |
 
 每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
@@ -635,6 +635,13 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   不得进入 history/draft/frame/transcript/log/error。
 - transcript 增加搜索、上下项、latest/new-output、copy/raw/export；手动上滚时不得被新事件抢回。
   classic/accesssible 通过文本命令达到功能等价。
+- frontend-private store 以 `(workspaceId,threadId)` hash 路径、0600 原子文件保存 draft/stash/stable
+  scroll anchor/unread/search/Vim；ordinary draft 200ms 合并，显式 stash/restore/退出是 durability barrier，
+  barrier 失败保留原 composer/in-memory state 并让 shutdown 非零；provider 的普通表单字段和 secret 都走
+  独立临时缓冲，永不覆盖任务 draft 或构造 persistable draft。create 冷启动先以稳定 frontend-only
+  pending identity 恢复 draft，保持零 Runtime thread/journal，attachment 后 durable migrate 到真实
+  `ThreadId`；显式 resume 不采用 pending draft。permission 状态只读 Runtime workspace snapshot；picker/
+  switch 与后台 attachment 页面生命周期留给 UX3。
 
 ### 8.5 UX3：以审阅和恢复为中心
 

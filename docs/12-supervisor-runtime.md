@@ -176,6 +176,8 @@ import 候选中排除；不得先 replacement 再生成可能碰撞的 workspac
 ### 3.1 RuntimePort
 
 Runtime 的可嵌入边界是无 UI、无环境读取、无进程 signal 注册的端口：
+`getWorkspaceSnapshot()` 在零 thread 时也可提供权限的权威只读状态，不创建 catalog entry、journal 或
+driver；它与 thread snapshot 一样只返回 validated、detached、deep-readonly 数据。
 
 ```ts
 export interface RuntimePort {
@@ -185,8 +187,20 @@ export interface RuntimePort {
   submit(op: RuntimeOp): Promise<OpReceipt>;
   events(options?: EventSubscriptionOptions): AsyncIterable<Readonly<EventEnvelope>>;
   listThreads(): Promise<readonly ThreadSummary[]>;
+  getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>>;
   getThreadSnapshot(threadId: ThreadId): Promise<ThreadSnapshot | undefined>;
   close(): Promise<void>;
+}
+
+export type RuntimePermissionMode = 'interactive' | 'allow' | 'deny' | 'custom';
+
+export interface WorkspaceRuntimeSnapshot {
+  readonly workspaceId: WorkspaceId;
+  readonly permissions: {
+    readonly mode: RuntimePermissionMode;
+    readonly policyRevision: string;
+    readonly ceiling: Readonly<PermissionCeilingSnapshot>;
+  };
 }
 
 export interface RuntimeClock {
@@ -1878,6 +1892,14 @@ export interface PermissionPolicyPort {
     workspaceId: WorkspaceId;
     cwd: string;
   }): Promise<PermissionCeilingSnapshot>;
+  snapshotWorkspacePermissionStatus?(input: {
+    workspaceId: WorkspaceId;
+    cwd: string;
+    workspaceCeiling: PermissionCeilingSnapshot;
+  }): Promise<{
+    mode: RuntimePermissionMode;
+    policyRevision: string;
+  }>;
   resolveCeiling(input:
     | { kind: 'root_thread'; workspaceId: WorkspaceId; threadId: ThreadId;
         workspaceCeiling: PermissionCeilingSnapshot;
@@ -1898,6 +1920,10 @@ export interface PermissionPolicyPort {
         runCeiling: PermissionCeilingSnapshot }
   ): Promise<PermissionCeilingSnapshot>;
 }
+
+// getWorkspaceSnapshot() 是 thread-independent 的只读权威查询。Runtime 对上述可选 status 的
+// exact JSON shape、mode/revision 与 workspace ceiling 做验证并返回深冻结副本；查询不创建
+// thread、journal 或 driver。未实现 status 的旧 policy 得到 mode:'custom' + ceiling revision。
 
 export interface InvocationContext {
   readonly workspaceId: WorkspaceId;

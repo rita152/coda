@@ -20,6 +20,7 @@ import type {
   ResolvedRunInput,
   RunId,
   RuntimeEvent,
+  RuntimePermissionMode,
   RuntimeOp,
   ThreadDriverRef,
   ThreadId,
@@ -50,6 +51,15 @@ export interface PermissionPolicyPort {
     readonly workspaceId: WorkspaceId;
     readonly cwd: string;
   }): Promise<PermissionCeilingSnapshot>;
+  /** Optional additive status projection for user-facing Runtime snapshots. */
+  snapshotWorkspacePermissionStatus?(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly cwd: string;
+    readonly workspaceCeiling: PermissionCeilingSnapshot;
+  }): Promise<{
+    readonly mode: RuntimePermissionMode;
+    readonly policyRevision: string;
+  }>;
   resolveCeiling(input:
     | {
         readonly kind: 'root_thread';

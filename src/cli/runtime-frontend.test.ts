@@ -65,6 +65,37 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
+  it('uses canonical prompt completion as a terminal fallback and silences abort races', async () => {
+    const runtime = new FakeRuntime();
+    runtime.abortCompletesPromptAsStale = true;
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    const events: string[] = [];
+    session.subscribe((event) => {
+      events.push(event.type === 'agent_end' ? `agent_end:${event.reason}` : event.type);
+    });
+
+    const prompt = session.prompt('abort race');
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('running');
+    session.abort();
+    await prompt;
+    await flushMicrotasks();
+
+    expect(session.interactionState()).toBe('idle');
+    expect(events).toEqual(['agent_start', 'agent_end:aborted']);
+    expect(runtime.ops.at(-1)).toMatchObject({
+      type: 'abort',
+      expectedRunId: RUN_ID,
+    });
+    await session.close();
+  });
+
   it('projects approval requests and maps decisions back to identity-bearing ops', async () => {
     const runtime = new FakeRuntime();
     const session = new RuntimeFrontendSession({
@@ -151,10 +182,12 @@ describe('RuntimeFrontendSession', () => {
       registerModel: (model) => registered.push(model),
     });
     await session.initialize();
+    expect(session.isAttached()).toBe(false);
     expect(runtime.ops).toEqual([]);
     await expect(session.prompt('not yet')).rejects.toThrow(/尚未选择模型/);
 
     await session.setModel(MODEL);
+    expect(session.isAttached()).toBe(true);
     expect(registered).toEqual([MODEL]);
     expect(runtime.ops[0]?.type).toBe('thread_create');
     session.clearModel();
@@ -307,6 +340,7 @@ class FakeRuntime implements RuntimeFrontendPort {
   #pendingApprovals = new Map<string, { runId: RunId; turnId: TurnId }>();
   eventsFailure: Error | undefined;
   controlRejectionReason: string | undefined;
+  abortCompletesPromptAsStale = false;
   gapDuringAttach = false;
   autoAttached = false;
   closed = false;
@@ -391,6 +425,18 @@ class FakeRuntime implements RuntimeFrontendPort {
         return { accepted: true, opId: op.opId, duplicate: false, threadId: THREAD_ID };
       }
       case 'abort':
+        if (this.abortCompletesPromptAsStale) {
+          this.interruptPromptWithoutAgentEnd();
+          return {
+            accepted: false,
+            opId: op.opId,
+            duplicate: false,
+            reason: 'stale_run',
+            threadId: THREAD_ID,
+          };
+        }
+        this.#push({ type: 'op_completed', opType: op.type, outcome: 'applied' }, { opId: op.opId });
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: THREAD_ID };
       case 'steer':
       case 'follow_up':
       case 'thread_close':
@@ -472,6 +518,18 @@ class FakeRuntime implements RuntimeFrontendPort {
       opType: 'prompt',
       terminalRunId: RUN_ID,
       outcome: 'applied',
+    }, { opId: op.opId, runId: RUN_ID });
+  }
+
+  interruptPromptWithoutAgentEnd(): void {
+    const op = this.#pendingPrompt;
+    if (op === undefined) throw new Error('no pending prompt');
+    this.#pendingPrompt = undefined;
+    this.#push({
+      type: 'op_completed',
+      opType: 'prompt',
+      terminalRunId: RUN_ID,
+      outcome: 'interrupted',
     }, { opId: op.opId, runId: RUN_ID });
   }
 

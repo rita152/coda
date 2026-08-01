@@ -96,6 +96,27 @@ export interface CommandSpec {
   }[];
 }
 
+export interface InteractiveCommandContext {
+  readonly phase: 'idle' | 'running' | 'retrying' | 'compacting';
+  readonly approvalPending: boolean;
+  readonly providerPromptActive: boolean;
+  readonly providerCommandsAvailable: boolean;
+  readonly hasModel: boolean;
+  readonly hasTranscript: boolean;
+  readonly hasStash: boolean;
+}
+
+export type CommandAvailability =
+  | { readonly kind: 'enabled' }
+  | { readonly kind: 'disabled'; readonly reason: string }
+  | { readonly kind: 'hidden' };
+
+export interface CommandPaletteEntry {
+  readonly command: SlashCommandSpec;
+  readonly availability: CommandAvailability;
+  readonly score: number;
+}
+
 export const OPTION_SPECS: readonly OptionSpec[] = [
   { id: 'help', flags: ['-h', '--help'], summary: 'Show help and exit' },
   { id: 'version', flags: ['-V', '--version'], summary: 'Show version and exit' },
@@ -144,7 +165,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'help.show', category: 'help', summary: 'Show commands, options, and shortcuts',
     cli: { path: ['help'], usage: '[command]' },
-    slash: { name: 'help', availableWhileRunning: false, order: 0 },
+    slash: { name: 'help', availableWhileRunning: true, order: 0 },
   },
   {
     id: 'version.show', category: 'help', summary: 'Show the coda version',
@@ -153,6 +174,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'doctor.run', category: 'help', summary: 'Diagnose the local terminal and configuration',
     cli: { path: ['doctor'], usage: '[--json]', optionIds: ['json'] },
+    slash: { name: 'doctor', availableWhileRunning: true, order: 22 },
   },
   {
     id: 'completion.generate', category: 'help', summary: 'Generate shell completion',
@@ -175,6 +197,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'auth.status', category: 'provider', summary: 'Show saved authentication without secrets',
     cli: { path: ['auth', 'status'], optionIds: ['json'] },
+    slash: { name: 'auth', aliases: ['auth-status'], availableWhileRunning: true, order: 6 },
   },
   {
     id: 'models.list', category: 'provider', summary: 'List cached models or explicitly select one',
@@ -208,12 +231,74 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [{ keys: 'PageUp/PageDown', summary: 'scroll output', surfaces: ['tui'] }],
   },
   {
+    id: 'palette.open', category: 'help', summary: 'Open the searchable command palette',
+    shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'history.search', category: 'task', summary: 'Search this thread prompt history',
+    slash: { name: 'history', argumentHint: '[query]', availableWhileRunning: true, order: 14 },
+    shortcuts: [{ keys: 'Ctrl+R', summary: 'search prompt history', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'draft.edit', category: 'task', summary: 'Edit the current draft with $VISUAL or $EDITOR',
+    slash: { name: 'edit', availableWhileRunning: true, order: 15 },
+    shortcuts: [{ keys: 'Ctrl+O', summary: 'edit draft in $EDITOR', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'draft.files', category: 'task', summary: 'Complete workspace files and directories',
+    slash: { name: 'files', argumentHint: '[query]', availableWhileRunning: true, order: 16 },
+    shortcuts: [{ keys: 'Tab after @', summary: 'complete workspace path', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'draft.stash', category: 'task', summary: 'Stash the current thread draft durably',
+    slash: { name: 'stash', argumentHint: '[text]', availableWhileRunning: true, order: 17 },
+    shortcuts: [{ keys: 'Meta+S', summary: 'stash this thread draft', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'draft.restore', category: 'task', summary: 'Restore this thread’s stashed draft',
+    slash: { name: 'restore', availableWhileRunning: true, order: 18 },
+  },
+  {
+    id: 'settings.vim', category: 'settings', summary: 'Enable or disable optional Vim composer keys',
+    slash: { name: 'vim', argumentHint: '<on|off>', availableWhileRunning: true, order: 20 },
+  },
+  {
+    id: 'draft.manage', category: 'task', summary: 'Show, send, or clear this thread’s durable draft',
+    slash: { name: 'draft', argumentHint: '<show|send|clear>', availableWhileRunning: true, order: 19 },
+  },
+  {
+    id: 'transcript.search', category: 'review', summary: 'Search the current transcript',
+    slash: { name: 'search', argumentHint: '<query>', availableWhileRunning: true, order: 8 },
+    shortcuts: [{ keys: 'Ctrl+F', summary: 'search transcript', surfaces: ['tui', 'classic'] }],
+  },
+  {
+    id: 'transcript.next', category: 'review', summary: 'Jump to the next transcript search match',
+    slash: { name: 'next', availableWhileRunning: true, order: 9 },
+  },
+  {
+    id: 'transcript.previous', category: 'review', summary: 'Jump to the previous transcript search match',
+    slash: { name: 'previous', aliases: ['prev'], availableWhileRunning: true, order: 10 },
+  },
+  {
+    id: 'transcript.latest', category: 'review', summary: 'Jump to the latest output and clear unread',
+    slash: { name: 'latest', availableWhileRunning: true, order: 11 },
+    shortcuts: [{ keys: 'End', summary: 'jump to latest output', surfaces: ['tui'] }],
+  },
+  {
+    id: 'content.copy', category: 'review', summary: 'Copy the latest response or raw transcript',
+    slash: { name: 'copy', argumentHint: '[latest|raw]', availableWhileRunning: true, order: 12 },
+  },
+  {
+    id: 'content.export', category: 'review', summary: 'Safely export transcript content without overwriting',
+    slash: { name: 'export', argumentHint: '[text|raw|latest] [path]', availableWhileRunning: true, order: 13 },
+  },
+  {
     id: 'task.queue', category: 'task', summary: 'Show steering and follow-up queues',
-    slash: { name: 'queue', availableWhileRunning: false, order: 1 },
+    slash: { name: 'queue', availableWhileRunning: true, order: 1 },
   },
   {
     id: 'task.status', category: 'task', summary: 'Show model, usage, and token status',
-    slash: { name: 'status', availableWhileRunning: false, order: 2 },
+    slash: { name: 'status', availableWhileRunning: true, order: 2 },
   },
   {
     id: 'task.follow-up', category: 'task', summary: 'Queue a follow-up after the current task',
@@ -226,11 +311,12 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   },
   {
     id: 'task.abort', category: 'task', summary: 'Abort only the current run',
+    slash: { name: 'abort', availableWhileRunning: true, order: 7 },
     shortcuts: [{ keys: 'Esc', summary: 'abort the current run', surfaces: ['tui', 'classic'] }],
   },
   {
     id: 'app.quit', category: 'help', summary: 'Exit coda cleanly',
-    slash: { name: 'quit', aliases: ['q'], availableWhileRunning: false, order: 7 },
+    slash: { name: 'quit', aliases: ['q'], availableWhileRunning: false, order: 21 },
     shortcuts: [
       { keys: 'Esc Esc', summary: 'exit', surfaces: ['tui', 'classic'] },
       { keys: 'Ctrl+C Ctrl+C', summary: 'exit', surfaces: ['tui', 'classic'] },
@@ -764,9 +850,11 @@ export interface SlashCommandSpec {
   readonly name: string;
   readonly aliases?: readonly string[];
   readonly description: string;
+  readonly category: CommandCategory;
   readonly argumentHint?: string;
   readonly availableWhileRunning: boolean;
   readonly actionId: string;
+  readonly shortcuts: readonly string[];
 }
 
 export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
@@ -775,9 +863,11 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
       name: command.slash.name,
       ...(command.slash.aliases === undefined ? {} : { aliases: command.slash.aliases }),
       description: command.summary,
+      category: command.category,
       ...(command.slash.argumentHint === undefined ? {} : { argumentHint: command.slash.argumentHint }),
       availableWhileRunning: command.slash.availableWhileRunning,
       actionId: command.id,
+      shortcuts: (command.shortcuts ?? []).map((shortcut) => shortcut.keys),
       order: command.slash.order,
     }])
   .sort((left, right) => left.order - right.order)
@@ -785,9 +875,11 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
     name: command.name,
     ...(command.aliases === undefined ? {} : { aliases: command.aliases }),
     description: command.description,
+    category: command.category,
     ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
     availableWhileRunning: command.availableWhileRunning,
     actionId: command.actionId,
+    shortcuts: command.shortcuts,
   }));
 
 export function findSlashCommand(name: string): SlashCommandSpec | undefined {
@@ -795,6 +887,105 @@ export function findSlashCommand(name: string): SlashCommandSpec | undefined {
   return SLASH_COMMAND_SPECS.find(
     (command) => command.name === folded || command.aliases?.includes(folded) === true,
   );
+}
+
+/** One availability function feeds palette rendering and controller admission hints. */
+export function interactiveCommandAvailability(
+  command: SlashCommandSpec,
+  context: InteractiveCommandContext,
+): CommandAvailability {
+  if (context.providerPromptActive) return { kind: 'hidden' };
+  if (context.approvalPending) {
+    return command.actionId === 'task.abort'
+      ? { kind: 'enabled' }
+      : { kind: 'disabled', reason: 'approval is waiting; answer or abort first' };
+  }
+  const busy = context.phase !== 'idle';
+  if (busy && !command.availableWhileRunning) {
+    return { kind: 'disabled', reason: 'finish or abort the current run first' };
+  }
+  if (
+    (command.actionId === 'auth.login' ||
+      command.actionId === 'auth.status' ||
+      command.actionId === 'auth.logout' ||
+      command.actionId === 'models.list') &&
+    !context.providerCommandsAvailable
+  ) {
+    return { kind: 'disabled', reason: 'provider management is unavailable on this surface' };
+  }
+  if (command.actionId === 'task.follow-up' && !context.hasModel) {
+    return { kind: 'disabled', reason: 'select a model first' };
+  }
+  if (command.actionId === 'task.abort' && context.phase === 'idle') {
+    return { kind: 'disabled', reason: 'no active run' };
+  }
+  if (
+    (command.actionId === 'transcript.search' ||
+      command.actionId === 'transcript.next' ||
+      command.actionId === 'transcript.previous' ||
+      command.actionId === 'transcript.latest' ||
+      command.actionId === 'content.copy' ||
+      command.actionId === 'content.export') &&
+    !context.hasTranscript
+  ) {
+    return { kind: 'disabled', reason: 'the transcript is empty' };
+  }
+  if (command.actionId === 'draft.restore' && !context.hasStash) {
+    return { kind: 'disabled', reason: 'no stashed draft for this thread' };
+  }
+  return { kind: 'enabled' };
+}
+
+/** Categorized fuzzy palette. Name/alias matches outrank description/category subsequences. */
+export function commandPaletteEntries(
+  query: string,
+  context: InteractiveCommandContext,
+): readonly CommandPaletteEntry[] {
+  const folded = query.replace(/^\//u, '').toLocaleLowerCase('en-US');
+  return SLASH_COMMAND_SPECS.flatMap((command): CommandPaletteEntry[] => {
+    const availability = interactiveCommandAvailability(command, context);
+    if (availability.kind === 'hidden') return [];
+    const score = fuzzyCommandScore(command, folded);
+    return score === undefined ? [] : [{ command, availability, score }];
+  }).sort((left, right) => left.score - right.score ||
+    left.command.name.localeCompare(right.command.name, 'en'));
+}
+
+export function fuzzyCommandScore(
+  command: SlashCommandSpec,
+  query: string,
+): number | undefined {
+  if (query === '') return SLASH_COMMAND_SPECS.indexOf(command) * 10;
+  const names = [command.name, ...(command.aliases ?? [])];
+  const catalogOrder = Math.max(0, SLASH_COMMAND_SPECS.indexOf(command));
+  let best = Number.POSITIVE_INFINITY;
+  for (const name of names) {
+    if (name === query) best = Math.min(best, 0);
+    else if (name.startsWith(query)) best = Math.min(best, 10 + catalogOrder);
+    const direct = name.indexOf(query);
+    if (direct >= 0) best = Math.min(best, 40 + direct * 5 + name.length);
+    const subsequence = subsequenceScore(name, query);
+    if (subsequence !== undefined) best = Math.min(best, 50 + subsequence);
+  }
+  for (const text of [command.description, command.category]) {
+    const subsequence = subsequenceScore(text.toLocaleLowerCase('en-US'), query);
+    if (subsequence !== undefined) best = Math.min(best, 200 + subsequence);
+  }
+  return Number.isFinite(best) ? best : undefined;
+}
+
+function subsequenceScore(candidate: string, query: string): number | undefined {
+  let cursor = 0;
+  let score = candidate.length;
+  let previous = -2;
+  for (const character of query) {
+    const found = candidate.indexOf(character, cursor);
+    if (found < 0) return undefined;
+    score += found === previous + 1 ? 0 : found + 4;
+    previous = found;
+    cursor = found + 1;
+  }
+  return score;
 }
 
 export function renderInteractiveHelp(

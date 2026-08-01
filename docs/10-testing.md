@@ -762,9 +762,9 @@ CLI/Agent 的既有行为 fixture。
 `src/cli/tui.test.ts` 用 `createTestRenderer({width,height,kittyKeyboard:true,autoFocus:false})` 构建内存终端，不写真实 stdout；`autoFocus` 显式匹配生产配置,避免测试默认值掩盖组件级鼠标聚焦缺陷。覆盖:
 
 1. header 含版本、Unicode 像素 Logo 与 tips；page、header、ScrollBox 四层、动态 Text/Markdown、composer、Textarea 普通/聚焦态和 footer 的背景全部保持 alpha 0。prompt 是两条纯 `─` 洋红横线,中间没有侧边/圆角/title；聚焦输入文字使用终端默认前景 intent,硬件光标固定为 `[201,71,64,255]` 且状态为 visible/line/blinking。测试同时渲染 user、Markdown heading/quote/table/code 与 approval,并在 color/`NO_COLOR` 两条路径逐 span 断言背景 `[0,0,0,0]`；`NO_COLOR` 下所有非空 span 的前景 intent 也必须为 default,但保留高对比硬件光标作为焦点提示,上下两条 rule 则钉死透明背景及对应语义前景。构建产物还由 `e2e/tui.test.ts` 在不设置 `COLORTERM` 的双 TTY 中检查启动 ANSI 输出必须包含 SGR 49、OSC 12 `#c94740` 与 blinking-bar DECSCUSR,不能出现白色光标或任何 `48;2` / `48;5` 实色背景。
-2. 短 transcript 的第一条消息紧跟 header,assistant 在 user 下方,二者与 prompt 之间保留空白——直接钉死“从顶部向下增长”；长 transcript 上滚后,动态增高 prompt 和新增输出不得抢回跟尾,PageDown 可回到最新内容。
+2. 短 transcript 的第一条消息紧跟 header,assistant 在 user 下方,二者与 prompt 之间保留空白——直接钉死“从顶部向下增长”；长 transcript 用 PageUp 或鼠标滚轮上滚后，动态增高 prompt 和新增输出不得抢回跟尾，footer 累积 `N new`；PageDown 到底、End 或 `/latest` 才清 unread。
 3. `usage_update` 使用 `contextTokens`,不误用 cumulative；无 limit 的纯函数测试显示 `limit unknown`。
-4. prompt 空输入默认 1 行；Shift+Enter 显式换行增高,100→54→100 resize 时软换行按 1→2→1 行变化且 tips/Logo 隐藏后恢复。12 行输入封顶 8 行时末行与光标仍可见、Textarea 已内部滚动、窄/宽 footer 都锚定最后两行,transcript 至少保留 1 行真实内容。审批使用非空多行 draft + 60×18 compact 布局,断言持久 footer 键位的倒数第二行锚点、黄色双横线和冻结光标,决议后恢复 workspace、可见光标与洋红双横线。9/7/5/3/2/1 行分别带长 draft 验证 ultra-compact 光标不越界且末行可见,1 行审批只显示键位并隐藏光标。
+4. prompt 空输入默认 1 行；Shift+Enter 显式换行增高，首次输入后 header 从 onboarding 收缩为 3 行任务栏，100→54→100 resize 时软换行按 1→2→1 行变化且 tips/Logo 不再弹回。12 行输入封顶 8 行时末行与光标仍可见、Textarea 已内部滚动，窄/宽 footer 都锚定 task/workspace/runtime 三行，transcript 至少保留 1 行真实内容。审批使用非空多行 draft + 60×18 compact 布局，断言持久 footer 键位、黄色双横线和冻结光标，决议后恢复 workspace、可见光标与洋红双横线。9/7/5/3/2/1 行分别带长 draft 验证 ultra-compact 光标不越界且末行可见，1 行审批只显示键位并隐藏光标。
 5. mock keys 验证常规 Return(作为 Enter)与 Kitty keypad Enter submit、Shift+Enter newline；CJK 与 ZWJ emoji 的程序化赋值后光标位于 buffer 末尾。mock mouse 先使 Textarea 失焦再点击输入区,验证其自行恢复焦点,且 visible/line/blinking 硬件光标重新落在 prompt 边界和输入列范围内。终端窗口失焦后的空心 inactive cursor 由终端模拟器绘制,不属于 TestRenderer 的 framebuffer 状态。
 6. sanitizer 纯函数注入 CSI/OSC/DCS/C0/C1；live user/assistant/tool/plan/approval/error 路径分别注入 OSC,断言帧中不存在 ESC/BEL。terminal title 额外折叠 tab/newline 并移除 OSC；多 text/reasoning part 在 streaming 与 final 两条路径保持相同分块。
 7. 恢复转录断言 tool call 参数生成原摘要、plan tool result 恢复最新步骤、plan error 可见,且畸形 plan details 回退为普通工具结果。
@@ -780,14 +780,27 @@ CLI/Agent 的既有行为 fixture。
     UI 专属编号。TUI/classic 都只接这一个控制器：TUI 用 TestRenderer 断言 `/login` 后 OAuth /
     API key 复用 slash command 的上拉候选层、没有编号、`↑/↓` 改变当前项且 `Enter` 确认；
     classic 用真实 raw-keypress harness 断言编号/名称兼容输入。两边还要断言 `Esc` 从 Custom protocol →
-    secret → base URL → name → preset 逐级静默返回、根步骤静默退出，且 API key 永不进入 renderer
-    frame/动态行。
+    secret → base URL → name → preset 逐级静默返回、根步骤静默退出；palette 打开前的任务 draft 在整个
+    provider 流程后原样恢复，普通 name/base URL 不进入 presentation store，API key 永不进入 renderer
+    frame/动态行。80 列 frame 必须在长 name/base URL 下仍显示当前 `[步骤 n]`、字段名和返回方式。
 11. `InteractiveRuntime` + 真实 faux Session 覆盖零模型不 create、首次选择才 create/resume、同一
     Session 内跨 provider/model 切换、meta/历史不改写、assistant 保留实际 `ModelRef`、失效选择
     不恢复，以及 running/retrying/compacting 拒绝切换。创建/关闭用 gate 固定 single-flight
     时序，并验证 attach listener 内重入 close 不自锁。
 12. provider dispatcher 用 adapter identity 注入覆盖三个 `ModelRef.api`，确保选择仅由 api 决定；
     未知 api 仍返回合法 start → error 流，Anthropic baseURL 的末尾 `/v1` 归一化另有回归。
+13. UX2 presentation gate 分散在 `presentation-state.test.ts`、`presentation-actions.test.ts`、
+    `command-catalog.test.ts`、`repl.test.ts`、`line-repl.test.ts` 与 `tui.test.ts`：验证
+    `(workspaceId,threadId)` 文件隔离、0600/atomic/quarantine、200ms 合并与同步 stash barrier；以普通文件
+    阻塞目标目录的故障注入证明 stash/restore/flush/dispose 抛出、内存 draft/composer 不清空、surface 不打印
+    成功且 shutdown 非零；恢复 transcript 初始化 Ctrl+R；categorized fuzzy palette 的参数/快捷键/
+    availability；`@` completion 不跟随
+    symlink；外部 editor/clipboard/export；secret 零持久化；stable anchor 跨 resize/reopen；PageUp 与鼠标
+    wheel 的 unread/no-snap；classic/append-only 文本命令 parity。presentation state 只使用
+    `RuntimeFrontendSession` 暴露的 identity/high-water 与 canonical messages，不读取 thread repository；
+    facade 另以定向测试覆盖缺失最终 `agent_end` 时由 canonical `op_completed` 收束 phase，以及 abort
+    `stale_run` 竞态不产生误导 warning。统一目录还要覆盖 `/doctor`、`/auth`/`/auth-status` 的 parser、
+    palette availability 及 TUI/classic/append-only 实际 handler，不能只断言候选字符串存在。
 
 Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlighting；销毁前等待 visual idle，再按 renderer → SyntaxStyle/highlighter 顺序清理，禁止用真实 timeout 猜异步高亮时机。真实人工终端仍保留一条冒烟:alternate screen 进入/退出、resize、长输出滚动与 raw mode 恢复。
 
@@ -833,7 +846,7 @@ Agent review**。第一轮覆盖全部阶段范围，修复后复跑定向测试
 |---|---|---|
 | UX0 | `src/cli/ux-characterization.test.ts` 冻结 40×10/80×24/120×40、CJK/emoji、NO_COLOR、TERM=dumb、tmux/SSH 路由和性能数量级；文档记录六旅程/parity | 生产文件零变化；现有 CLI/TUI/headless tests 原样通过 |
 | UX1 | `e2e/product-cli.test.ts` 对构建产物验证 help/version/completion 零副作用、usage stdout/stderr/exit、doctor/auth/models/sessions/exec；`command-catalog.test.ts` 验证统一 parser/help/completion/slash/shortcut；`renderer.test.ts`、`repl.test.ts`、`line-repl.test.ts`、`provider-commands.test.ts`、`tui.test.ts` 覆盖 sanitizer、classic 多行/cursor/paste、accessible 最低模式与 onboarding | 所有旧 flags、裸 prompt、`-p`、continue/resume、默认 legacy NDJSON 与 envelope golden |
-| UX2 | compact header/status、palette availability/fuzzy search；Ctrl+R/editor/stash/`@`/per-thread draft；scroll/search/unread/copy/export；secret taint tests；resize/switch/recovery presentation state | Enter/steer/follow-up/abort/control identity；UI 只读 snapshot/envelope |
+| UX2 | compact header/status、palette availability/fuzzy search；Ctrl+R/editor/stash/`@`/per-thread draft；scroll/search/unread/copy/export；provider 全表单 taint 隔离与 durability fault injection；cold pending→attached migration；workspace permission snapshot | Enter/steer/follow-up/abort/control identity；UI 只读 snapshot/envelope |
 | UX3 | reasoning/tool cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
 | UX4 | accessible ASCII/theme/PTY 加固；frame coalescing/virtualization；output/final-only/ephemeral/timeout；真实 PTY 全退出矩阵；1000 history/10k delta/100ms input | 默认 `--json` 逐字节兼容，普通 observer/慢 UI 不背压 Runtime |
 
@@ -873,6 +886,15 @@ retention 删除。`ux-characterization.test.ts` 中 UX0 的 classic/plain sanit
 macOS 的 `e2e/tui.test.ts` 还用真实 PTY/Expect 在看到 accessible 首行后输入 `/help`/`/quit`，断言
 `TERM=dumb` 全程无 ESC 且帮助不虚报 Shift+Enter/PageUp；同一 PTY 中显式 TUI 以 2 退出而不降级。
 
+UX2 已交付门禁机械证明：第一次 ordinary input 即收缩 header，task/model/permission/context/
+Git/queue 不因 draft 非空消失；运行中 read-only/presentation 命令仍执行而 provider/quit 显示 disabled 原因；
+持久化失败保留 composer/stash 且退出非零，provider 普通字段与 secret 都不触达 task history/store/frame；
+同一 thread 重开恢复 draft、search、Vim 和 stable scroll anchor，不同 workspace/thread 状态隔离；
+`/doctor`、`/auth` 与其 alias 从 catalog 到各 handler 可执行；classic/accessible 通过同一 parser/actions
+提供文本等价入口；未选模型的 stable pending draft 跨进程恢复且不创建 Runtime thread/journal，attachment
+后迁移到真实 thread；palette `/edit` 等待期间 composer/store 不清空；permission mode 由经过 exact-shape
+校验的冻结 `WorkspaceRuntimeSnapshot` 提供，snapshot query 本身保持零 thread。
+
 ## 8. CI 建议
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
@@ -893,6 +915,8 @@ macOS 的 `e2e/tui.test.ts` 还用真实 PTY/Expect 在看到 accessible 首行�
   后生产文件零变化，characterization、`bun run check` 与 `git diff --check` 全绿。
 - [x] UX1:零副作用 bootstrap、统一 command catalog、产品子命令/onboarding/UI routing、全 human
   sanitizer、classic 与 accessible 门禁完成；恰好两轮 Agent review 及第二轮修复后的定向门禁全绿。
+- [x] UX2:紧凑信息层级、统一 palette、composer/presentation/transcript 工作流完成；恰好两轮 Agent
+  review，第二轮的 pending draft、异步 editor ownership 与 Runtime permission snapshot 修复均经定向门禁。
 
 下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
 而推断未在当前环境重跑的双 OS CI 等外部结果。

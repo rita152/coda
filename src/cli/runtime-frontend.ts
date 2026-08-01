@@ -103,6 +103,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
     (messages: readonly AgentMessage[]) => void | Promise<void>
   >();
   readonly #pendingControls = new Map<string, RunId>();
+  readonly #abortRequestedRuns = new Set<RunId>();
   readonly #opWaiters = new Map<OpId, (outcome: OpOutcome) => void>();
 
   #model: ModelConfig | undefined;
@@ -133,6 +134,16 @@ export class RuntimeFrontendSession implements InteractiveSession {
 
   get threadId(): ThreadId {
     return this.#threadId;
+  }
+
+  /** Runtime owns no thread or journal until attachment succeeds. */
+  isAttached(): boolean {
+    return this.#attached;
+  }
+
+  /** Frontends use the canonical Runtime cursor only for unread presentation bookkeeping. */
+  eventHighWaterSeq(): number {
+    return this.#highWaterSeq;
   }
 
   async initialize(): Promise<void> {
@@ -417,14 +428,22 @@ export class RuntimeFrontendSession implements InteractiveSession {
       );
     }
     this.#highWaterSeq = envelope.seq;
-    this.#applyCanonicalEvent(envelope.event, envelope.runId, envelope.opId);
+    const terminalFallback = this.#applyCanonicalEvent(
+      envelope.event,
+      envelope.runId,
+      envelope.opId,
+    );
     const projected = projectLegacySessionEvent(envelope, {
       targetThreadId: this.#threadId,
-    });
+    }) ?? terminalFallback;
     if (projected !== undefined) this.#enqueueFanout(projected);
   }
 
-  #applyCanonicalEvent(event: RuntimeEvent, runId: RunId | undefined, opId: OpId | undefined): void {
+  #applyCanonicalEvent(
+    event: RuntimeEvent,
+    runId: RunId | undefined,
+    opId: OpId | undefined,
+  ): CliSessionEvent | undefined {
     switch (event.type) {
       case 'agent_start':
         this.#state = 'running';
@@ -468,9 +487,27 @@ export class RuntimeFrontendSession implements InteractiveSession {
         this.#state = 'idle';
         this.#activeRunId = undefined;
         break;
-      case 'op_completed':
+      case 'op_completed': {
+        let terminalFallback: CliSessionEvent | undefined;
+        if (event.opType === 'prompt' || event.opType === 'continue') {
+          const needsTerminalFallback = this.#state !== 'idle';
+          const wasAbortRequested = this.#abortRequestedRuns.delete(event.terminalRunId);
+          this.#state = 'idle';
+          this.#activeRunId = undefined;
+          if (needsTerminalFallback) {
+            terminalFallback = {
+              type: 'agent_end',
+              reason:
+                event.outcome === 'applied'
+                  ? 'completed'
+                  : wasAbortRequested ? 'aborted' : 'error',
+              messages: [...copyMessages(this.#messages)],
+            };
+          }
+        }
         if (opId !== undefined) this.#settleOp(opId, { accepted: true });
-        break;
+        return terminalFallback;
+      }
       case 'op_rejected':
         if (opId !== undefined) {
           this.#settleOp(opId, { accepted: false, reason: event.reason });
@@ -479,6 +516,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
       default:
         break;
     }
+    return undefined;
   }
 
   #upsertMessage(message: AgentMessage): void {
@@ -510,6 +548,10 @@ export class RuntimeFrontendSession implements InteractiveSession {
     void this.#runtime.submit(op).then(
       (receipt) => {
         if (!receipt.accepted) {
+          if (op.type === 'abort') {
+            if (op.expectedRunId !== undefined) this.#abortRequestedRuns.delete(op.expectedRunId);
+            if (receipt.reason === 'stale_run') return;
+          }
           if (
             op.type === 'control_response' &&
             isSilentLegacyControlRejection(receipt.reason)
@@ -521,6 +563,9 @@ export class RuntimeFrontendSession implements InteractiveSession {
         }
       },
       (error: unknown) => {
+        if (op.type === 'abort' && op.expectedRunId !== undefined) {
+          this.#abortRequestedRuns.delete(op.expectedRunId);
+        }
         this.#enqueueFanout({
           type: 'error',
           fatal: true,
@@ -531,6 +576,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
   }
 
   #submitAbort(expectedRunId?: RunId): void {
+    if (expectedRunId !== undefined) this.#abortRequestedRuns.add(expectedRunId);
     this.#submitDetached({
       type: 'abort',
       opId: this.#runtime.newOpId(),

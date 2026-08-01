@@ -2,12 +2,17 @@
 // /status //queue 格式化。键位接线依赖真实 TTY,由 repl.ts 头部人工冒烟清单覆盖。
 // 双击消歧用注入时间戳,零真实计时器(docs/10 §8 确定性守则)。
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'bun:test';
-import type { QueuedMessage } from '../protocol/index.js';
+import type {
+  AssistantMessage,
+  QueuedMessage,
+  ThreadId,
+  WorkspaceId,
+} from '../protocol/index.js';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
@@ -15,6 +20,10 @@ import { createOrderedOutput } from '../shared/index.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
+import {
+  persistableDraft,
+  ThreadPresentationStore,
+} from './presentation-state.js';
 import type { Renderer } from './renderer.js';
 import {
   approvalKeyDecision,
@@ -56,12 +65,36 @@ describe('parseSlashCommand(docs/09 §3.2)', () => {
     expect(parseSlashCommand('/login')).toEqual({ cmd: 'login' });
     expect(parseSlashCommand('/model')).toEqual({ cmd: 'model' });
     expect(parseSlashCommand('/logout')).toEqual({ cmd: 'logout' });
+    expect(parseSlashCommand('/auth')).toEqual({ cmd: 'auth_status' });
+    expect(parseSlashCommand('/auth-status')).toEqual({ cmd: 'auth_status' });
+    expect(parseSlashCommand('/doctor')).toEqual({ cmd: 'doctor' });
   });
 
   it('/f 与 /followup 携带文本(任何终端的全功能兜底路径)', () => {
     expect(parseSlashCommand('/f 顺便改下颜色')).toEqual({ cmd: 'follow_up', text: '顺便改下颜色' });
     expect(parseSlashCommand('/followup run tests')).toEqual({ cmd: 'follow_up', text: 'run tests' });
     expect(parseSlashCommand('/f')).toEqual({ cmd: 'follow_up', text: '' });
+  });
+
+  it('解析 UX2 presentation、搜索、copy/export 与 Vim 命令', () => {
+    expect(parseSlashCommand('/search tool call')).toEqual({
+      cmd: 'transcript_search',
+      query: 'tool call',
+    });
+    expect(parseSlashCommand('/prev')).toEqual({ cmd: 'search_previous' });
+    expect(parseSlashCommand('/copy raw')).toEqual({ cmd: 'copy', mode: 'raw' });
+    expect(parseSlashCommand('/export raw report.jsonl')).toEqual({
+      cmd: 'export',
+      mode: 'raw',
+      path: 'report.jsonl',
+    });
+    expect(parseSlashCommand('/export report with spaces.txt')).toEqual({
+      cmd: 'export',
+      mode: 'text',
+      path: 'report with spaces.txt',
+    });
+    expect(parseSlashCommand('/vim on')).toEqual({ cmd: 'vim', mode: 'on' });
+    expect(parseSlashCommand('/files src')).toEqual({ cmd: 'file_complete', query: 'src' });
   });
 
   it('非斜杠返回 undefined;未知斜杠返回 unknown', () => {
@@ -111,12 +144,19 @@ describe('decideEnter:键位表分派(docs/09 §3)', () => {
     expect(decideEnter('running', false, '/f')).toEqual({ kind: 'none' });
   });
 
-  it('普通斜杠命令仅空闲时生效；provider 管理命令运行中仍进入控制器并给出安全提示', () => {
+  it('只读/前端斜杠命令运行中仍执行；provider 管理命令进入控制器给出安全提示', () => {
     expect(decideEnter('idle', false, '/status')).toEqual({
       kind: 'command',
       command: { cmd: 'status' },
     });
-    expect(decideEnter('running', false, '/status')).toEqual({ kind: 'steer', text: '/status' });
+    expect(decideEnter('running', false, '/status')).toEqual({
+      kind: 'command',
+      command: { cmd: 'status' },
+    });
+    expect(decideEnter('running', false, '/search error')).toEqual({
+      kind: 'command',
+      command: { cmd: 'transcript_search', query: 'error' },
+    });
     for (const cmd of ['login', 'model', 'logout'] as const) {
       expect(decideEnter('running', false, `/${cmd}`)).toEqual({
         kind: 'command',
@@ -172,6 +212,18 @@ describe('InputHistory:本会话输入历史环(↑/↓)', () => {
     h.up('');
     h.push('c');
     expect(h.up('')).toBe('c');
+  });
+
+  it('Ctrl+R 以当前 query 反向循环旧 prompt，编辑后可重置', () => {
+    const history = new InputHistory();
+    history.push('fix parser');
+    history.push('run tests');
+    history.push('fix renderer');
+    expect(history.reverseSearch('fix')).toBe('fix renderer');
+    expect(history.reverseSearch('fix')).toBe('fix parser');
+    expect(history.reverseSearch('fix')).toBeUndefined();
+    history.resetSearch();
+    expect(history.reverseSearch('tests')).toBe('run tests');
   });
 });
 
@@ -445,10 +497,12 @@ describe('classic REPL 输入错误边界', () => {
     const exit = startRepl(runtime, renderer, undefined, { stdin });
     type('/followup first');
     enter();
+    stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
     type('second');
     enter(true);
     expect(printed.filter((line) => line.includes('尚未选择模型'))).toHaveLength(2);
     expect(stdin.listenerCount('keypress')).toBe(1);
+    stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
     type('/quit');
     enter();
     await expect(exit).resolves.toBe(0);
@@ -518,9 +572,216 @@ describe('classic REPL 输入错误边界', () => {
   });
 });
 
+describe('UX2 classic presentation workflow', () => {
+  it('恢复 draft，支持 Ctrl+R/editor/stash/restore/copy/export，且失败不丢输入', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'coda-repl-presentation-'));
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_repl_presentation' as WorkspaceId,
+      threadId: 'thr_repl_presentation' as ThreadId,
+    });
+    store.setDraft(persistableDraft('restored draft'));
+    store.flush();
+    const stdin = new TestTtyInput();
+    const inputLines: string[] = [];
+    const printed: string[] = [];
+    const prompts: string[] = [];
+    const copied: string[] = [];
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      id: 'a-copy',
+      timestamp: 1,
+      model: { provider: 'faux', api: 'faux', model: 'test' },
+      content: [{ type: 'text', text: 'copy me' }],
+      stopReason: 'stop',
+      usage: { input: 1, output: 2 },
+    };
+    let rejectNextPrompt = false;
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [assistantMessage],
+      subscribe: () => () => undefined,
+      prompt: async (text) => {
+        if (rejectNextPrompt) {
+          rejectNextPrompt = false;
+          throw new Error('rejected prompt');
+        }
+        prompts.push(text);
+      },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => undefined,
+      setInputLine: (text) => inputLines.push(text),
+      println: (text) => printed.push(text),
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+    const enter = (): void => { stdin.emit('keypress', undefined, { name: 'return' }); };
+    const clear = (): void => { stdin.emit('keypress', undefined, { name: 'u', ctrl: true }); };
+    const settle = async (): Promise<void> => {
+      for (let index = 0; index < 5; index++) await Promise.resolve();
+    };
+    let resolvePaletteEdit!: (value: string) => void;
+    const pendingPaletteEdit = new Promise<string>((resolve) => {
+      resolvePaletteEdit = resolve;
+    });
+    let editCalls = 0;
+
+    try {
+      const running = startRepl(session, renderer, undefined, {
+        stdin,
+        presentation: {
+          store,
+          cwd: dir,
+          editDraft: async (draft) => {
+            editCalls++;
+            return editCalls === 1 ? pendingPaletteEdit : `${draft}\nedited`;
+          },
+          copyText: async (text) => { copied.push(text); },
+        },
+      });
+      expect(inputLines.at(-1)).toBe('restored draft');
+
+      clear();
+      type('first prompt');
+      enter();
+      type('second prompt');
+      enter();
+      stdin.emit('keypress', undefined, { name: 'r', ctrl: true });
+      expect(inputLines.at(-1)).toBe('second prompt');
+      stdin.emit('keypress', undefined, { name: 'r', ctrl: true });
+      expect(inputLines.at(-1)).toBe('first prompt');
+
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      type('edit');
+      enter();
+      expect(inputLines.at(-1)).toBe('first prompt');
+      expect(store.snapshot().draft).toBe('first prompt');
+      resolvePaletteEdit('first prompt\npalette edited');
+      await settle();
+      expect(inputLines.at(-1)).toBe('first prompt\npalette edited');
+
+      stdin.emit('keypress', undefined, { name: 'o', ctrl: true });
+      await settle();
+      expect(inputLines.at(-1)).toBe('first prompt\npalette edited\nedited');
+      expect(stdin.rawModeChanges).toEqual([true, false, true, false, true]);
+
+      stdin.emit('keypress', undefined, { name: 's', meta: true });
+      expect(store.snapshot().stashedDraft).toBe('first prompt\npalette edited\nedited');
+      type('/restore');
+      enter();
+      expect(inputLines.at(-1)).toBe('first prompt\npalette edited\nedited');
+
+      clear();
+      type('/copy latest');
+      enter();
+      await settle();
+      expect(copied).toEqual(['copy me']);
+
+      type('/export text transcript.txt');
+      enter();
+      expect(readFileSync(path.join(dir, 'transcript.txt'), 'utf8')).toContain('copy me');
+
+      rejectNextPrompt = true;
+      type('will fail');
+      enter();
+      await settle();
+      expect(inputLines.at(-1)).toBe('will fail');
+      expect(store.snapshot().draft).toBe('will fail');
+      expect(printed.join('\n')).toContain('rejected prompt');
+
+      clear();
+      type('/quit');
+      enter();
+      await expect(running).resolves.toBe(0);
+      expect(prompts).toEqual(['first prompt', 'second prompt']);
+      expect(stdin.rawModeChanges.at(-1)).toBe(false);
+    } finally {
+      store.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stash 写盘失败时保留多行 composer，并让 shutdown 返回非零', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'coda-repl-stash-failure-'));
+    const blockedRoot = path.join(dir, 'not-a-directory');
+    writeFileSync(blockedRoot, 'blocked');
+    const store = new ThreadPresentationStore({
+      root: blockedRoot,
+      workspaceId: 'ws_repl_stash_failure' as WorkspaceId,
+      threadId: 'thr_repl_stash_failure' as ThreadId,
+    });
+    const stdin = new TestTtyInput();
+    const inputs: string[] = [];
+    const printed: string[] = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => undefined,
+      setInputLine: (text) => inputs.push(text),
+      println: (text) => printed.push(text),
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+
+    try {
+      const running = startRepl(session, renderer, undefined, {
+        stdin,
+        presentation: { store, cwd: dir },
+      });
+      type('draft line one');
+      stdin.emit('keypress', undefined, { name: 'return', shift: true });
+      type('draft line two');
+      stdin.emit('keypress', undefined, { name: 's', meta: true });
+      expect(inputs.at(-1)).toBe('draft line one\ndraft line two');
+      expect(store.snapshot().draft).toBe('draft line one\ndraft line two');
+      expect(printed.join('\n')).toContain('stash failed');
+      expect(printed.join('\n')).not.toContain('Draft stashed for this thread.');
+
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      type('quit');
+      stdin.emit('keypress', undefined, { name: 'return' });
+      await expect(running).resolves.toBe(1);
+      expect(stdin.rawModeChanges.at(-1)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('classic REPL provider 命令与秘密输入', () => {
-  it('复用 /login 状态机，API key 只以掩码进入 renderer', async () => {
+  it('复用 palette/provider 状态机，普通字段不污染任务 draft，API key 只进入掩码', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'coda-repl-provider-login-'));
+    const taskDraft = 'classic task draft survives provider';
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_repl_provider' as WorkspaceId,
+      threadId: 'thr_repl_provider' as ThreadId,
+    });
+    store.setDraft(persistableDraft(taskDraft));
+    store.flush();
     const registry = new ProviderRegistry({
       configPath: path.join(dir, 'providers.json'),
       credentialsPath: path.join(dir, 'credentials.json'),
@@ -570,6 +831,12 @@ describe('classic REPL provider 命令与秘密输入', () => {
     const escape = (): void => {
       stdin.emit('keypress', undefined, { name: 'escape' });
     };
+    const openLogin = async (): Promise<void> => {
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      emitText('login');
+      enter();
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 1]') === true);
+    };
     const cancelledSecret = 'sk-cancel-never-render';
     const secret = 'sk-classic-never-render';
 
@@ -577,11 +844,33 @@ describe('classic REPL provider 命令与秘密输入', () => {
       const exit = startRepl(runtime, renderer, undefined, {
         stdin,
         providerCommands: { registry, runtime },
+        presentation: { store, cwd: dir },
       });
 
-      emitText('/login');
+      expect(inputLines.at(-1)).toBe(taskDraft);
+      await openLogin();
+      emitText('4');
       enter();
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 2] Custom provider name') === true);
+      emitText('Draft Safe Provider');
+      enter();
+      await waitFor(() => statuses.at(-1)?.includes('[步骤 3] base URL') === true);
+      expect(store.snapshot().draft).toBe(taskDraft);
+      emitText('https://draft-safe.invalid/v1');
+      enter();
+      await waitFor(() => statuses.at(-1)?.includes('[步骤 4] API key') === true);
+      expect(store.snapshot().draft).toBe(taskDraft);
+      escape();
+      await waitFor(() => statuses.at(-1)?.includes('[步骤 3] base URL') === true);
+      escape();
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 2] Custom provider name') === true);
+      escape();
       await waitFor(() => statuses.at(-1)?.startsWith('[步骤 1]') === true);
+      escape();
+      await waitFor(() => inputLines.at(-1) === taskDraft && statuses.at(-1) === undefined);
+      expect(store.snapshot().draft).toBe(taskDraft);
+
+      await openLogin();
       emitText('1');
       enter();
       await waitFor(() => statuses.at(-1)?.startsWith('[步骤 2] OpenCode Go API key') === true);
@@ -605,8 +894,21 @@ describe('classic REPL provider 命令与秘密输入', () => {
         printed.some((line) => line.includes('已保存 OpenCode Go 的认证配置')),
       );
       expect([...inputLines, ...printed, ...statuses].join('\n')).not.toContain(secret);
+      await waitFor(() => inputLines.at(-1) === taskDraft);
+      expect(store.snapshot().draft).toBe(taskDraft);
 
-      emitText('/quit');
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      emitText('auth');
+      enter();
+      await waitFor(() => printed.some((line) => line.includes('[authenticated] OpenCode Go')));
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      emitText('doctor');
+      enter();
+      await waitFor(() => printed.includes('doctor: ready'));
+      expect(inputLines.at(-1)).toBe(taskDraft);
+
+      stdin.emit('keypress', undefined, { name: 'k', ctrl: true });
+      emitText('quit');
       enter();
       await expect(exit).resolves.toBe(0);
       expect(stdin.rawModeChanges).toEqual([true, false]);

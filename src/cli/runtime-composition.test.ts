@@ -55,11 +55,16 @@ describe('runtime CLI composition adapters', () => {
   });
 
   it('keeps permission derivation monotone across thread, run, and turn', async () => {
-    const policy = createLegacyPermissionPolicy();
+    const policy = createLegacyPermissionPolicy('deny');
     const workspace = await policy.snapshotWorkspaceCeiling({
       workspaceId: WORKSPACE_ID,
       cwd: '/workspace',
     });
+    expect(await policy.snapshotWorkspacePermissionStatus?.({
+      workspaceId: WORKSPACE_ID,
+      cwd: '/workspace',
+      workspaceCeiling: workspace,
+    })).toEqual({ mode: 'deny', policyRevision: 'legacy-cli-deny-v2' });
     const thread = await policy.resolveCeiling({
       kind: 'root_thread',
       workspaceId: WORKSPACE_ID,

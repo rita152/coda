@@ -350,7 +350,7 @@ describe('/login', () => {
     await controller.submit('custom-key');
 
     expect(view.prompts.at(-1)).toEqual({
-      prompt: 'Custom · name=Example · baseURL=https://example.test/v1 · [步骤 5] 选择协议（Esc 返回 API key）',
+      prompt: '[步骤 5] 选择协议（Esc 返回 API key） · Custom · name=Example · baseURL=https://example.test/v1',
       secret: false,
       choices: [
         {

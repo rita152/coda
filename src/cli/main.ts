@@ -5,6 +5,7 @@
 // 把事件翻译成像素;不持有会话状态副本。
 
 import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
+import path from 'node:path';
 import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
 import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
@@ -41,6 +42,10 @@ import { RuntimeFrontendSession } from './runtime-frontend.js';
 import { createStaticLegacyApprovalAdapterFactory } from './legacy-approval-adapter.js';
 import { isRuntimeResumeRequest, selectCliResumeTarget } from './runtime-resume.js';
 import { sanitizeTerminalError, sanitizeTerminalLine } from './terminal-sanitize.js';
+import {
+  PENDING_PRESENTATION_THREAD_ID,
+  ThreadPresentationStore,
+} from './presentation-state.js';
 
 export async function runCli(invocation: CliInvocation, version: string): Promise<number> {
   const flags: CliFlags = { ...invocation.flags };
@@ -238,7 +243,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       },
       storage,
       modelResolver,
-      permissionPolicy: createLegacyPermissionPolicy(),
+      permissionPolicy: createLegacyPermissionPolicy(approvalMode),
       threadDriverFactory: driverFactory,
     });
   } catch (err) {
@@ -288,6 +293,17 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     });
   }
 
+  let tuiWorkspaceSnapshot;
+  if (tuiEligible && interactiveSurface === 'tui') {
+    try {
+      tuiWorkspaceSnapshot = await runtime.getWorkspaceSnapshot();
+    } catch (err) {
+      console.error(`[coda] runtime snapshot failed: ${sanitizeTerminalError(err)}`);
+      await runtime.close().catch(() => undefined);
+      return 2;
+    }
+  }
+
   const runtimeSession = new RuntimeFrontendSession({
     runtime,
     attachment: resumed ? 'resume' : 'create',
@@ -295,12 +311,35 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     ...(initialModel !== undefined && { initialModel }),
     registerModel: (model) => modelResolver.register(model),
   });
+  const presentationStore = interactiveMode
+    ? new ThreadPresentationStore({
+        root: path.join(roots.runtimeRoot, 'presentation-v1'),
+        workspaceId: runtime.workspaceId,
+        // A create path first owns the stable workspace-pending draft, even when a model is
+        // already selected. Attachment migrates it to the reserved Runtime ThreadId. Explicit
+        // resume starts with its known target identity and never adopts an unrelated cold draft.
+        threadId: resumed
+          ? runtimeSession.threadId
+          : PENDING_PRESENTATION_THREAD_ID,
+        onWarning: (message) => console.error(`[coda] ${sanitizeTerminalLine(message)}`),
+      })
+    : undefined;
+  if (presentationStore !== undefined && !resumed) {
+    runtimeSession.subscribeSessionAttached(() => {
+      presentationStore.migrateToThread(runtimeSession.threadId);
+    });
+  }
   let session: CliSession;
   try {
     await runtimeSession.initialize();
     session = runtimeSession;
   } catch (err) {
     console.error(`[coda] session initialization failed: ${sanitizeTerminalError(err)}`);
+    try {
+      presentationStore?.dispose();
+    } catch (saveError) {
+      console.error(`[coda] presentation save failed: ${sanitizeTerminalError(saveError)}`);
+    }
     return 2;
   }
   // Approval requests are already canonical Runtime events projected through `session.subscribe`;
@@ -319,6 +358,16 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   // 初始化失败时 createCliRenderer 会恢复终端，随后可安全降级 classic REPL；
   // 已进入运行期的错误由 startTui 自己收尾并返回 exit code，不从中途切换 UI。
   if (tuiEligible && interactiveSurface === 'tui') {
+    if (tuiWorkspaceSnapshot === undefined) {
+      console.error('[coda] Runtime did not provide the required workspace snapshot');
+      await session.close().catch(() => undefined);
+      try {
+        presentationStore?.dispose();
+      } catch (saveError) {
+        console.error(`[coda] presentation save failed: ${sanitizeTerminalError(saveError)}`);
+      }
+      return 2;
+    }
     try {
       const { startTui } = await import('./tui.js');
       return await startTui(session, approval, {
@@ -329,6 +378,12 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
         }),
         version,
         color: !flags.noColor && Bun.env.NO_COLOR === undefined,
+        threadId: runtimeSession.threadId,
+        workspaceSnapshot: tuiWorkspaceSnapshot,
+        eventHighWaterSeq: () => runtimeSession.eventHighWaterSeq(),
+        ...(presentationStore !== undefined && {
+          presentation: { store: presentationStore },
+        }),
         ...(initialModel?.limits?.context !== undefined && {
           contextLimit: initialModel.limits.context,
         }),
@@ -344,6 +399,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       if (flags.ui === 'tui') {
         console.error(`[coda] full-screen TUI unavailable: ${sanitizeTerminalError(err)}`);
         await session.close().catch(() => undefined);
+        try {
+          presentationStore?.dispose();
+        } catch (saveError) {
+          console.error(`[coda] presentation save failed: ${sanitizeTerminalError(saveError)}`);
+        }
         return 1;
       }
       console.error(
@@ -450,7 +510,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   if (interactiveSurface === 'accessible' || interactiveSurface === 'plain') {
     const exitCode = await startLineRepl(runtimeSession, renderer, {
       mode: interactiveSurface,
+      version,
       fatalSignal: output.failureSignal,
+      ...(presentationStore !== undefined && {
+        presentation: { store: presentationStore, cwd },
+      }),
       ...(approval !== undefined && { approval }),
       ...(registry !== undefined && {
         providerCommands: {
@@ -464,7 +528,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   }
 
   const exitCode = await startRepl(session, renderer, approval, {
+    version,
     fatalSignal: output.failureSignal,
+    ...(presentationStore !== undefined && {
+      presentation: { store: presentationStore, cwd },
+    }),
     ...(registry !== undefined && {
       providerCommands: {
         registry,

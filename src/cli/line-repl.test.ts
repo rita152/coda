@@ -2,12 +2,24 @@
 // 输出 append-only，不开 raw mode/鼠标/bracketed paste/alternate screen。
 
 import { PassThrough } from 'node:stream';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'bun:test';
-import type { ModelConfig } from '../protocol/index.js';
+import type {
+  AssistantMessage,
+  ModelConfig,
+  ThreadId,
+  WorkspaceId,
+} from '../protocol/index.js';
 import type { InteractiveSession } from './interactive-runtime.js';
 import { startLineRepl } from './line-repl.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import { createRenderer } from './renderer.js';
+import {
+  persistableDraft,
+  ThreadPresentationStore,
+} from './presentation-state.js';
 
 describe('accessible/plain append-only line REPL', () => {
   it('提供文本命令 parity，不控制终端模式或泄漏控制序列', async () => {
@@ -54,9 +66,12 @@ describe('accessible/plain append-only line REPL', () => {
       stdin: stdin as unknown as NodeJS.ReadStream,
       stderr: stderr as unknown as NodeJS.WriteStream,
       mode: 'accessible',
+      version: 'test-version',
     });
     stdin.write('/help\n');
     stdin.write('/status\n');
+    stdin.write('/doctor\n');
+    stdin.write('/auth\n');
     stdin.write('/followup verify later\n');
     stdin.write('first task\n');
     stdin.write('/wat\x1b]52;c;hidden\x07\n');
@@ -69,6 +84,8 @@ describe('accessible/plain append-only line REPL', () => {
     expect(stdout).toContain('Get started: 1) coda auth login');
     expect(stdout).toContain('/help: Show commands, options, and shortcuts');
     expect(stdout).toContain('tokens: 4 in / 2 out');
+    expect(stdout).toContain('[ok] runtime: coda test-version');
+    expect(stdout).toContain('/auth is unavailable in this mode.');
     expect(stdout).toContain('Unknown command: /wat');
     expect(stdout).not.toContain('hidden');
     expect(prompts).toEqual(['first task']);
@@ -257,5 +274,100 @@ describe('accessible/plain append-only line REPL', () => {
     expect(output).toContain('Model changed, but the recent selection could not be saved');
     expect(output).toContain('disk full');
     expect(output).not.toContain('test-only-secret');
+  });
+
+  it('accessible 文本命令提供 draft/editor/files/search/copy/export 等价入口', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-line-presentation-'));
+    const store = new ThreadPresentationStore({
+      root: path.join(root, 'state'),
+      workspaceId: 'ws_line_presentation' as WorkspaceId,
+      threadId: 'thr_line_presentation' as ThreadId,
+    });
+    store.setDraft(persistableDraft('restored accessible draft'));
+    store.flush();
+    writeFileSync(path.join(root, 'feature.ts'), 'export {};\n');
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const stdoutChunks: string[] = [];
+    const copied: string[] = [];
+    const prompts: string[] = [];
+    const assistantMessage: AssistantMessage = {
+      role: 'assistant',
+      id: 'a-line-copy',
+      timestamp: 1,
+      model: { provider: 'faux', api: 'faux', model: 'test' },
+      content: [{ type: 'text', text: 'copy accessible response' }],
+      stopReason: 'stop',
+      usage: { input: 1, output: 2 },
+    };
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [assistantMessage],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    let editorResolved: (() => void) | undefined;
+    const editorDone = new Promise<void>((resolve) => { editorResolved = resolve; });
+    const renderer = createRenderer(
+      {
+        enqueue: (text) => {
+          stdoutChunks.push(text);
+          if (text.includes('Draft returned from $EDITOR')) editorResolved?.();
+        },
+        drain: async () => undefined,
+      },
+      { color: false, interactive: false },
+    );
+
+    try {
+      const running = startLineRepl(session, renderer, {
+        stdin: stdin as unknown as NodeJS.ReadStream,
+        stderr: stderr as unknown as NodeJS.WriteStream,
+        mode: 'accessible',
+        presentation: {
+          store,
+          cwd: root,
+          editDraft: async (draft) => `${draft}\nedited accessibly`,
+          copyText: async (text) => { copied.push(text); },
+        },
+      });
+      stdin.write('/draft show\n');
+      stdin.write('/stash text mode draft\n');
+      stdin.write('/restore\n');
+      stdin.write('/draft send\n');
+      stdin.write('/search accessible\n');
+      stdin.write('/copy raw\n');
+      stdin.write('/files feature\n');
+      stdin.write('/edit\n');
+      await editorDone;
+      stdin.write('/draft show\n');
+      stdin.write('/export raw transcript.jsonl\n');
+      stdin.write('/vim on\n');
+      stdin.write('/quit\n');
+
+      await expect(running).resolves.toBe(0);
+      const output = stdoutChunks.join('');
+      expect(output).toContain('A draft was restored for this thread.');
+      expect(output).toContain('restored accessible draft');
+      expect(output).toContain('match 1/1');
+      expect(output).toContain('@feature.ts');
+      expect(output).toContain('edited accessibly');
+      expect(output).toContain('Vim preference enabled');
+      expect(prompts).toEqual(['text mode draft']);
+      expect(copied[0]).toContain('copy accessible response');
+      expect(readFileSync(path.join(root, 'transcript.jsonl'), 'utf8')).toContain('a-line-copy');
+    } finally {
+      store.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

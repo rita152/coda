@@ -21,10 +21,15 @@ import {
 import { configureBuiltInProvider } from './provider-actions.js';
 import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
-interface DoctorCheck {
+export interface DoctorCheck {
   readonly id: string;
   readonly status: 'ok' | 'warning' | 'error';
   readonly message: string;
+}
+
+export interface DoctorReport {
+  readonly ok: boolean;
+  readonly checks: readonly DoctorCheck[];
 }
 
 interface ProductIo {
@@ -64,6 +69,22 @@ export async function runStandaloneProductCommand(
 }
 
 function runDoctor(json: boolean, version: string, io: ProductIo): number {
+  const report = collectDoctorReport(version, io);
+  if (json) {
+    writeJson(io.stdout, { type: 'doctor', ...report });
+  } else {
+    for (const line of formatDoctorReportLines(report)) writeHuman(io.stdout, line);
+  }
+  return report.ok ? 0 : 1;
+}
+
+export function collectDoctorReport(
+  version: string,
+  io: Pick<ProductIo, 'stdin' | 'stdout'> = {
+    stdin: process.stdin,
+    stdout: process.stdout,
+  },
+): DoctorReport {
   const home = runtimeHomeDir();
   const codaDir = path.join(home, '.coda');
   const checks: DoctorCheck[] = [
@@ -79,16 +100,34 @@ function runDoctor(json: boolean, version: string, io: ProductIo): number {
     inspectPath('runtime-storage', path.join(codaDir, 'runtime-v2')),
   ];
   const ok = checks.every((check) => check.status !== 'error');
-  if (json) {
-    writeJson(io.stdout, { type: 'doctor', ok, checks });
-  } else {
-    for (const check of checks) {
-      const marker = check.status === 'ok' ? '[ok]' : check.status === 'warning' ? '[warn]' : '[error]';
-      writeHuman(io.stdout, `${marker} ${check.id}: ${check.message}`);
-    }
-    writeHuman(io.stdout, ok ? 'doctor: ready' : 'doctor: action required');
+  return { ok, checks };
+}
+
+export function formatDoctorReportLines(report: DoctorReport): readonly string[] {
+  return [
+    ...report.checks.map((check) => {
+      const marker = check.status === 'ok'
+        ? '[ok]'
+        : check.status === 'warning' ? '[warn]' : '[error]';
+      return `${marker} ${check.id}: ${check.message}`;
+    }),
+    report.ok ? 'doctor: ready' : 'doctor: action required',
+  ];
+}
+
+export function formatAuthStatusLines(registry: ProviderRegistry): readonly string[] {
+  const credentials = registry.listCredentials();
+  const selected = registry.selectedModel();
+  if (credentials.length === 0) {
+    return ['No saved provider credentials. Next: coda auth login'];
   }
-  return ok ? 0 : 1;
+  return [
+    ...credentials.map((credential) =>
+      `[authenticated] ${credential.providerName} (${credential.providerId})`),
+    selected === undefined
+      ? 'Selected model: none · next: coda models --select <provider/model>'
+      : `Selected model: ${selected.providerId}/${selected.model}`,
+  ];
 }
 
 function inspectJsonFile(id: string, file: string, credentials: boolean): DoctorCheck {
@@ -128,7 +167,7 @@ function inspectPath(id: string, target: string): DoctorCheck {
   }
 }
 
-function terminalDescription(io: ProductIo): string {
+function terminalDescription(io: Pick<ProductIo, 'stdin' | 'stdout'>): string {
   const term = Bun.env.TERM ?? 'unset';
   const noColor = Bun.env.NO_COLOR === undefined ? 'off' : 'on';
   return `stdin=${io.stdin.isTTY === true ? 'tty' : 'pipe'} ` +
@@ -153,18 +192,8 @@ async function runAuth(invocation: CliInvocation, io: ProductIo): Promise<number
           authenticated: credentials,
           selectedModel: selected === undefined ? null : `${selected.providerId}/${selected.model}`,
         });
-      } else if (credentials.length === 0) {
-        writeHuman(io.stdout, 'No saved provider credentials. Next: coda auth login');
       } else {
-        for (const credential of credentials) {
-          writeHuman(io.stdout, `[authenticated] ${credential.providerName} (${credential.providerId})`);
-        }
-        writeHuman(
-          io.stdout,
-          selected === undefined
-            ? 'Selected model: none · next: coda models --select <provider/model>'
-            : `Selected model: ${selected.providerId}/${selected.model}`,
-        );
+        for (const line of formatAuthStatusLines(registry)) writeHuman(io.stdout, line);
       }
       return 0;
     }

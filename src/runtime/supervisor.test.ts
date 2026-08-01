@@ -155,6 +155,100 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
+  test('exposes a frozen workspace permission snapshot without creating a thread', async () => {
+    const policy: PermissionPolicyPort = {
+      async snapshotWorkspaceCeiling() {
+        return CEILING;
+      },
+      async snapshotWorkspacePermissionStatus() {
+        return { mode: 'deny', policyRevision: 'test-policy-deny-v1' };
+      },
+      async resolveCeiling() {
+        return CEILING;
+      },
+    };
+    const runtime = await createRuntime({
+      workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
+      storage: createMemoryRuntimeStorage(),
+      modelResolver: { async resolve(ref) { return { ok: true as const, model: { ...MODEL, ref } }; } },
+      permissionPolicy: policy,
+      threadDriverFactory: new RecordingDriverFactory(),
+      identityFactory: new TestIdentityFactory(),
+    });
+    try {
+      const workspace = await runtime.getWorkspaceSnapshot();
+      expect(workspace).toEqual({
+        workspaceId: WORKSPACE_ID,
+        permissions: {
+          mode: 'deny',
+          policyRevision: 'test-policy-deny-v1',
+          ceiling: CEILING,
+        },
+      });
+      expect(Object.isFrozen(workspace)).toBe(true);
+      expect(Object.isFrozen(workspace.permissions.ceiling)).toBe(true);
+      expect(await runtime.listThreads()).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  test('keeps older permission ports compatible with an authoritative custom snapshot', async () => {
+    const runtime = await createRuntime({
+      workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
+      storage: createMemoryRuntimeStorage(),
+      modelResolver: { async resolve(ref) { return { ok: true as const, model: { ...MODEL, ref } }; } },
+      permissionPolicy: new FixedPolicy(),
+      threadDriverFactory: new RecordingDriverFactory(),
+      identityFactory: new TestIdentityFactory(),
+    });
+    try {
+      expect(await runtime.getWorkspaceSnapshot()).toMatchObject({
+        workspaceId: WORKSPACE_ID,
+        permissions: {
+          mode: 'custom',
+          policyRevision: CEILING.revision,
+          ceiling: CEILING,
+        },
+      });
+      expect(await runtime.listThreads()).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  test.each([
+    ['unknown mode', { mode: 'sometimes', policyRevision: 'revision' }],
+    ['empty revision', { mode: 'allow', policyRevision: '' }],
+    ['extra field', { mode: 'allow', policyRevision: 'revision', extra: true }],
+  ] as const)('rejects an invalid workspace permission status: %s', async (_name, status) => {
+    const policy: PermissionPolicyPort = {
+      async snapshotWorkspaceCeiling() {
+        return CEILING;
+      },
+      async snapshotWorkspacePermissionStatus() {
+        return status as never;
+      },
+      async resolveCeiling() {
+        return CEILING;
+      },
+    };
+    const runtime = await createRuntime({
+      workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
+      storage: createMemoryRuntimeStorage(),
+      modelResolver: { async resolve(ref) { return { ok: true as const, model: { ...MODEL, ref } }; } },
+      permissionPolicy: policy,
+      threadDriverFactory: new RecordingDriverFactory(),
+      identityFactory: new TestIdentityFactory(),
+    });
+    try {
+      await expect(runtime.getWorkspaceSnapshot()).rejects.toBeInstanceOf(Error);
+      expect(await runtime.listThreads()).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   test.each([
     ['thread', '', 'invalid_thread_id'],
     ['op', '', 'invalid_legacy_identity_input'],
@@ -1152,6 +1246,7 @@ describe('Supervisor recovery and idempotency', () => {
     expect(() => runtime.newOpId()).toThrow(expect.objectContaining({ code: 'runtime_closed' }));
     expect(() => runtime.events()).toThrow(expect.objectContaining({ code: 'runtime_closed' }));
     await expect(runtime.listThreads()).rejects.toMatchObject({ code: 'runtime_closed' });
+    await expect(runtime.getWorkspaceSnapshot()).rejects.toMatchObject({ code: 'runtime_closed' });
     await expect(runtime.getThreadSnapshot(threadId)).rejects.toMatchObject({ code: 'runtime_closed' });
 
     resolverRelease.resolve();

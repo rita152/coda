@@ -22,6 +22,7 @@ import type {
 } from './identity.js';
 import type {
   ApprovalControlDecision,
+  PermissionCeilingSnapshot,
   ResourceConfirmationDecision,
   RuntimeOp,
 } from './runtime-ops.js';
@@ -175,6 +176,20 @@ export interface ThreadSnapshot {
     readonly compaction?: Readonly<Extract<RuntimeCoordinatorEvent, { type: 'compaction_start' }>>;
   };
   readonly highWaterSeq: number;
+}
+
+export type RuntimePermissionMode = 'interactive' | 'allow' | 'deny' | 'custom';
+
+export interface RuntimePermissionSnapshot {
+  readonly mode: RuntimePermissionMode;
+  readonly policyRevision: string;
+  readonly ceiling: Readonly<PermissionCeilingSnapshot>;
+}
+
+/** Thread-independent Runtime truth consumed by cold-start frontends. */
+export interface WorkspaceRuntimeSnapshot {
+  readonly workspaceId: WorkspaceId;
+  readonly permissions: Readonly<RuntimePermissionSnapshot>;
 }
 
 export type RuntimeLifecycleEvent =

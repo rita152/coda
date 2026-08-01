@@ -10,15 +10,18 @@ import {
   TextareaRenderable,
 } from '@opentui/core';
 import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ApprovalBroker } from '../agent/index.js';
 import type {
   AssistantMessage,
   ProviderEvent,
+  ThreadId,
   ToolResultMessage,
   UserMessage,
+  WorkspaceRuntimeSnapshot,
+  WorkspaceId,
 } from '../protocol/index.js';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
@@ -27,12 +30,17 @@ import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import {
+  persistableDraft,
+  ThreadPresentationStore,
+} from './presentation-state.js';
+import {
   approvalDecisionForKey,
   createTuiScreen,
   formatContextUsage,
   formatTokenCount,
   formatWorkspacePath,
   matchingSlashCommands,
+  parseGitStatusOutput,
   runTuiController,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
@@ -40,9 +48,17 @@ import {
   tuiCanAbort,
   tuiEnterState,
 } from './tui.js';
-import type { TuiScreen } from './tui.js';
+import type { TuiOptions, TuiScreen } from './tui.js';
 
 const MODEL = { provider: 'openai', api: 'openai-chat', model: 'gpt-5.2' };
+const WORKSPACE_SNAPSHOT = {
+  workspaceId: 'ws_tui_test' as WorkspaceId,
+  permissions: {
+    mode: 'interactive',
+    policyRevision: 'test-policy-v1',
+    ceiling: { revision: 'test-ceiling-v1', constraints: [] },
+  },
+} as const satisfies WorkspaceRuntimeSnapshot;
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -153,6 +169,7 @@ async function setup(
     model?: typeof MODEL;
     contextLimit?: number;
   } = { model: MODEL, contextLimit: 128_000 },
+  overrides: Partial<TuiOptions> = {},
 ): Promise<{
   screen: TuiScreen;
   flush: () => Promise<void>;
@@ -184,6 +201,8 @@ async function setup(
     ...(modelOptions.contextLimit !== undefined && {
       contextLimit: modelOptions.contextLimit,
     }),
+    ...overrides,
+    workspaceSnapshot: overrides.workspaceSnapshot ?? WORKSPACE_SNAPSHOT,
     onSubmit,
     interaction,
     treeSitterClient,
@@ -236,10 +255,24 @@ describe('TUI footer 格式', () => {
     expect(formatWorkspacePath('/Users/test/work/coda', '/Users/test')).toBe('~/work/coda');
     expect(formatWorkspacePath('/Users/tester/work', '/Users/test')).toBe('/Users/tester/work');
   });
+
+  it('git porcelain 同时投影 branch 与 dirty，detached HEAD 不伪造分支', () => {
+    expect(parseGitStatusOutput('## main...origin/main [ahead 1]\n M src/a.ts\n')).toEqual({
+      branch: 'main',
+      dirty: true,
+    });
+    expect(parseGitStatusOutput('## No commits yet on feature\n')).toEqual({
+      branch: 'feature',
+      dirty: false,
+    });
+    expect(parseGitStatusOutput('## HEAD (no branch)\n?? scratch.txt\n')).toEqual({
+      dirty: true,
+    });
+  });
 });
 
 describe('全屏 OpenTUI 布局', () => {
-  it('顶部显示版本、像素 Logo 和 tips，底部固定 prompt 与两行状态', async () => {
+  it('顶部显示版本、像素 Logo 和 tips，底部固定 prompt 与三行状态', async () => {
     const view = await setup();
     try {
       await view.flush();
@@ -315,7 +348,7 @@ describe('全屏 OpenTUI 布局', () => {
       expect(menu.visible).toBe(true);
       expect(menu.height).toBe(8);
       expect(menu.screenY + menu.height).toBe(prompt.screenY);
-      expect(view.frame()).toContain('→ /help');
+      expect(view.frame()).toContain('→ [help] /help');
       expect(view.frame()).toContain('/followup <text>');
       expect(view.frame()).not.toContain('/f <text>');
       expect(view.frame()).not.toContain('/q ');
@@ -332,10 +365,10 @@ describe('全屏 OpenTUI 布局', () => {
         ),
       ).toBe(true);
 
-      await view.mockInput.typeText('st');
+      await view.mockInput.typeText('stat');
       await view.flush();
-      expect(menu.height).toBe(1);
-      expect(view.frame()).toContain('→ /status');
+      expect(menu.height).toBeGreaterThanOrEqual(2);
+      expect(view.frame()).toContain('→ [task] /status');
       expect(view.frame()).not.toContain('/queue');
 
       view.mockInput.pressTab();
@@ -504,8 +537,8 @@ describe('全屏 OpenTUI 布局', () => {
       await view.mockInput.typeText(softWrapped);
       await view.flush();
       expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
-      expect(view.frame()).toContain('Tips for getting started');
-      expect(view.frame()).toContain('▄█▄');
+      expect(view.frame()).not.toContain('Tips for getting started');
+      expect(view.frame()).not.toContain('▄█▄');
 
       view.resize(54, 24);
       await view.flush();
@@ -513,9 +546,10 @@ describe('全屏 OpenTUI 布局', () => {
       const [narrowTop, narrowBottom] = promptRuleIndexes(view);
       const narrowLines = frameLines(narrowFrame);
       expect(narrowBottom - narrowTop).toBe(3);
-      expect(narrowBottom).toBe(narrowLines.length - 3);
-      expect(narrowLines[narrowBottom + 1]).toContain('/Users/test/work/coda');
-      expect(narrowLines[narrowBottom + 2]).toContain('context 0 / 128k');
+      expect(narrowBottom).toBe(narrowLines.length - 4);
+      expect(narrowLines[narrowBottom + 1]).toContain('idle');
+      expect(narrowLines[narrowBottom + 2]).toContain('/Users/test/work/coda');
+      expect(narrowLines[narrowBottom + 3]).toContain('context 0 / 128k');
       expect(narrowFrame).not.toContain('Tips for getting started');
       expect(narrowFrame).not.toContain('▄█▄');
 
@@ -525,11 +559,12 @@ describe('全屏 OpenTUI 布局', () => {
       const [wideTop, wideBottom] = promptRuleIndexes(view);
       const wideLines = frameLines(wideFrame);
       expect(wideBottom - wideTop).toBe(2);
-      expect(wideBottom).toBe(view.spans().lines.length - 3);
-      expect(wideLines[wideBottom + 1]).toContain('/Users/test/work/coda');
-      expect(wideLines[wideBottom + 2]).toContain('context 0 / 128k');
-      expect(wideFrame).toContain('Tips for getting started');
-      expect(wideFrame).toContain('▄█▄');
+      expect(wideBottom).toBe(view.spans().lines.length - 4);
+      expect(wideLines[wideBottom + 1]).toContain('idle');
+      expect(wideLines[wideBottom + 2]).toContain('/Users/test/work/coda');
+      expect(wideLines[wideBottom + 3]).toContain('context 0 / 128k');
+      expect(wideFrame).not.toContain('Tips for getting started');
+      expect(wideFrame).not.toContain('▄█▄');
 
       view.screen.println('output remains visible');
       view.screen.setInput(Array.from({ length: 12 }, (_, index) => `line ${index}`).join('\n'));
@@ -538,9 +573,10 @@ describe('全屏 OpenTUI 布局', () => {
       const [cappedTop, cappedBottom] = promptRuleIndexes(view);
       const cappedLines = frameLines(cappedFrame);
       expect(cappedBottom - cappedTop).toBe(9);
-      expect(cappedBottom).toBe(view.spans().lines.length - 3);
-      expect(cappedLines[cappedBottom + 1]).toContain('/Users/test/work/coda');
-      expect(cappedLines[cappedBottom + 2]).toContain('context 0 / 128k');
+      expect(cappedBottom).toBe(view.spans().lines.length - 4);
+      expect(cappedLines[cappedBottom + 1]).toContain('idle');
+      expect(cappedLines[cappedBottom + 2]).toContain('/Users/test/work/coda');
+      expect(cappedLines[cappedBottom + 3]).toContain('context 0 / 128k');
       expect(cappedFrame).toContain('output remains visible');
       expect(cappedFrame).toContain('line 11');
       expect(cappedFrame).not.toContain('line 0');
@@ -748,7 +784,7 @@ describe('全屏 OpenTUI 布局', () => {
       const latestFrame = view.frame();
       const [, promptBottom] = promptRuleIndexes(view);
       expect(latestFrame).toContain('row-20');
-      expect(promptBottom).toBe(view.spans().lines.length - 3);
+      expect(promptBottom).toBe(view.spans().lines.length - 4);
     } finally {
       await view.destroy();
     }
@@ -784,9 +820,10 @@ describe('全屏 OpenTUI 布局', () => {
       const [, promptBottom] = promptRuleIndexes(view);
       const lines = frameLines(frame);
       expect(promptRuleIndexes(view)[1] - promptRuleIndexes(view)[0]).toBe(2);
-      expect(promptBottom).toBe(lines.length - 3);
-      expect(lines[promptBottom + 1]).toContain('/Users/test/work/coda');
-      expect(lines[promptBottom + 2]).toContain('context 0 / 128k');
+      expect(promptBottom).toBe(lines.length - 4);
+      expect(lines[promptBottom + 1]).toContain('idle');
+      expect(lines[promptBottom + 2]).toContain('/Users/test/work/coda');
+      expect(lines[promptBottom + 3]).toContain('context 0 / 128k');
       expect(frame).toContain('context 0 / 128k');
     } finally {
       await view.destroy();
@@ -971,6 +1008,243 @@ describe('全屏 OpenTUI 布局', () => {
       expect(view.frame()).not.toContain(secret);
     } finally {
       await view.destroy();
+    }
+  });
+});
+
+describe('UX2 TUI presentation workflow', () => {
+  it('第一次用户交互后收缩 header，持久状态不因非空 draft 消失', async () => {
+    const view = await setup(100, 30, () => {}, true, undefined, {
+      threadId: 'thr_1234567890abcdef',
+      workspaceSnapshot: {
+        ...WORKSPACE_SNAPSHOT,
+        permissions: { ...WORKSPACE_SNAPSHOT.permissions, mode: 'deny' },
+      },
+      branch: 'main',
+      gitDirty: true,
+    });
+    try {
+      view.screen.setInput('a long working draft');
+      await view.flush();
+      expect(view.frame()).not.toContain('Tips for getting started');
+      expect(view.frame()).not.toContain('▄█▄');
+      expect(view.frame()).toContain('permissions deny');
+      expect(view.frame()).toContain('queue 0/0');
+      expect(view.frame()).toContain('(main*)');
+
+      view.screen.render({ type: 'message_start', message: user('first task') });
+      view.screen.render({ type: 'agent_start', reason: 'prompt' });
+      view.screen.render({
+        type: 'queue_update',
+        steering: [{ id: 's1', text: 'steer', kind: 'steering' }],
+        followUp: [{ id: 'f1', text: 'later', kind: 'follow_up' }],
+      });
+      await view.flush();
+      const frame = view.frame();
+      expect(frame).not.toContain('Tips for getting started');
+      expect(frame).not.toContain('▄█▄');
+      expect(frame).toContain('running:working');
+      expect(frame).toContain('queue 1/1');
+      expect(frame).toContain('…7890abcdef');
+      expect(frame).toContain('openai/gpt-5.2');
+      expect(frame).toContain('a long working draft');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('palette 显示分类、模糊命中、参数/快捷键和 disabled 原因', async () => {
+    const view = await setup(100, 24);
+    try {
+      view.screen.focusInput();
+      view.screen.openCommandPalette();
+      await view.mockInput.typeText('srch');
+      await view.flush();
+      const frame = view.frame();
+      expect(frame).toContain('[review] /search <query>');
+      expect(frame).toContain('Ctrl+F');
+      expect(frame).toContain('unavailable: the transcr');
+
+      view.screen.render({ type: 'message_start', message: user('searchable text') });
+      view.screen.openCommandPalette();
+      await view.mockInput.typeText('srch');
+      await view.flush();
+      expect(view.frame()).not.toContain('unavailable: the transcr');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('@ completion includes files/directories and inserts the selected workspace path', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-completion-'));
+    tempDirs.push(root);
+    mkdirSync(path.join(root, 'src', 'feature'), { recursive: true });
+    writeFileSync(path.join(root, 'src', 'feature.ts'), 'export {};\n');
+    const view = await setup(100, 24, () => {}, true, undefined, { cwd: root });
+    try {
+      view.screen.focusInput();
+      view.screen.setInput('inspect @src/fe');
+      await view.flush();
+      expect(view.frame()).toContain('@src/feature.ts');
+      expect(view.frame()).toContain('@src/feature/');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('inspect @src/feature/');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('手动上滚后累积 unread，不抢滚动；搜索和 latest 恢复可见位置', async () => {
+    let highWater = 10;
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      eventHighWaterSeq: () => highWater,
+    });
+    try {
+      for (let index = 0; index < 24; index++) view.screen.println(`row-${index}`);
+      await view.flush();
+      for (let index = 0; index < 4; index++) view.screen.scrollPage(-1);
+      await view.flush();
+      const held = view.frame();
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      const heldTop = transcript.scrollTop;
+
+      highWater++;
+      view.screen.render({ type: 'message_start', message: user('new output') });
+      await view.flush();
+      expect(view.frame()).toContain('1 new');
+      expect(view.frame()).not.toContain('new output');
+      expect(transcript.scrollTop).toBe(heldTop);
+      expect(view.frame()).toContain(held.split('\n').find((line) => line.includes('row-'))?.trim() ?? 'row-');
+
+      expect(view.screen.searchTranscript('row-3')).toBe(true);
+      await view.flush();
+      expect(view.frame()).toContain('match 1/');
+      view.screen.jumpToLatest();
+      await view.flush();
+      expect(view.frame()).toContain('new output');
+      expect(view.frame()).not.toContain('1 new');
+
+      const beforeWheel = transcript.scrollTop;
+      for (let index = 0; index < 4; index++) {
+        await view.mockMouse.scroll(
+          transcript.screenX + 1,
+          transcript.screenY + 1,
+          'up',
+          { delayMs: 0 },
+        );
+      }
+      await view.flush();
+      const wheelTop = transcript.scrollTop;
+      expect(wheelTop).toBeLessThan(beforeWheel);
+      highWater++;
+      view.screen.render({
+        type: 'message_start',
+        message: { ...user('mouse wheel output'), id: 'u-wheel' },
+      });
+      await view.flush();
+      expect(view.frame()).toContain('1 new');
+      expect(view.frame()).not.toContain('mouse wheel output');
+      expect(transcript.scrollTop).toBe(wheelTop);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('resize 与重新打开同一 thread 都按稳定 message anchor 恢复 draft/滚动', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-anchor-state-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_tui_anchor' as WorkspaceId,
+      threadId: 'thr_tui_anchor' as ThreadId,
+    });
+    store.setDraft(persistableDraft('draft survives reopen'));
+    store.flush();
+    const messages = Array.from({ length: 30 }, (_, index): UserMessage => ({
+      ...user(`anchored row ${index}`),
+      id: `u-anchor-${index}`,
+    }));
+    const first = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 30,
+    });
+    try {
+      first.screen.replayTranscript(messages);
+      await first.flush();
+      for (let index = 0; index < 10; index++) first.screen.scrollPage(-1);
+      await first.flush();
+      store.flush();
+      const before = store.snapshot().scrollAnchor;
+      expect(before?.blockKey).toStartWith('message:u-anchor-');
+
+      first.resize(54, 20);
+      await first.flush();
+      expect(first.frame()).toContain('anchored row');
+      expect(store.snapshot().scrollAnchor?.blockKey).toBe(before?.blockKey);
+    } finally {
+      await first.destroy();
+    }
+
+    const reopened = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 30,
+    });
+    try {
+      reopened.screen.replayTranscript(messages);
+      reopened.screen.restorePresentation(store.snapshot());
+      await reopened.flush();
+      expect(reopened.screen.getInput()).toBe('draft survives reopen');
+      const anchorId = store.snapshot().scrollAnchor?.blockKey.split(':')[1];
+      const anchorIndex = anchorId?.split('-').at(-1);
+      expect(reopened.frame()).toContain(`anchored row ${anchorIndex}`);
+      expect(reopened.frame()).not.toContain('anchored row 29');
+    } finally {
+      await reopened.destroy();
+      store.dispose();
+    }
+  });
+
+  it('secret buffer never reaches presentation callbacks and optional Vim mode is modal', async () => {
+    const captured: string[] = [];
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-secret-state-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_tui_secret' as WorkspaceId,
+      threadId: 'thr_tui_secret' as ThreadId,
+    });
+    const view = await setup(80, 24, () => {}, true, undefined, {
+      presentation: { store },
+    });
+    try {
+      view.screen.focusInput();
+      view.screen.setInputChangeHandler((draft) => {
+        captured.push(draft);
+        store.setDraft(persistableDraft(draft));
+      });
+      await view.mockInput.typeText('public draft');
+      view.screen.setCommandPrompt('API key', true);
+      view.screen.setInput('sk-never-persist');
+      await view.flush();
+      expect(captured.join('\n')).toContain('public draft');
+      expect(captured.join('\n')).not.toContain('sk-never-persist');
+      store.flush();
+      expect(store.snapshot().draft).toBe('public draft');
+
+      view.screen.setCommandPrompt(undefined, false);
+      view.screen.setVimEnabled(true);
+      view.screen.setInput('abc');
+      await view.mockInput.typeText('hxiZ');
+      await view.flush();
+      expect(view.screen.getInput()).toBe('abZ');
+      expect(view.frame()).toContain('VIM INSERT');
+    } finally {
+      await view.destroy();
+      store.dispose();
     }
   });
 });
@@ -1241,16 +1515,18 @@ describe('TUI 安全渲染与转录恢复', () => {
 });
 
 describe('TUI 交互状态投影', () => {
-  it('命令前缀匹配只返回当前 phase 真正可分派的命令', () => {
-    expect(matchingSlashCommands('/ST', 'idle').map((command) => command.name)).toEqual([
+  it('命令模糊匹配只返回当前 phase 可执行项，并保留 canonical 排序', () => {
+    expect(matchingSlashCommands('/ST', 'idle').map((command) => command.name)[0]).toBe(
       'status',
-    ]);
-    expect(matchingSlashCommands('/', 'running').map((command) => command.name)).toEqual([
+    );
+    const running = matchingSlashCommands('/', 'running').map((command) => command.name);
+    expect(running).toContain('followup');
+    expect(running).toContain('status');
+    expect(running).toContain('search');
+    expect(running).not.toContain('quit');
+    expect(matchingSlashCommands('/f', 'idle').map((command) => command.name)[0]).toBe(
       'followup',
-    ]);
-    expect(matchingSlashCommands('/f', 'idle').map((command) => command.name)).toEqual([
-      'followup',
-    ]);
+    );
     expect(matchingSlashCommands('/status ', 'idle')).toEqual([]);
     expect(matchingSlashCommands('ask /status', 'idle')).toEqual([]);
   });
@@ -1314,6 +1590,140 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('Ctrl+K/Ctrl+R/Ctrl+O 与 stash/restore 共用 per-thread presentation state', async () => {
+    const dir = makeTempDir();
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_tui_controller' as WorkspaceId,
+      threadId: 'thr_tui_controller' as ThreadId,
+    });
+    store.setDraft(persistableDraft('restored controller draft'));
+    store.flush();
+    const prompts: string[] = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const view = await setup(100, 24, () => {}, true, undefined, {
+      cwd: dir,
+      presentation: { store },
+    });
+    view.screen.restorePresentation(store.snapshot());
+    view.screen.focusInput();
+    let resolvePaletteEdit!: (value: string) => void;
+    const pendingPaletteEdit = new Promise<string>((resolve) => {
+      resolvePaletteEdit = resolve;
+    });
+    let editCalls = 0;
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      interaction: view.interaction,
+      cwd: dir,
+      presentation: {
+        store,
+        editDraft: async (draft) => {
+          editCalls++;
+          return editCalls === 1 ? pendingPaletteEdit : `${draft}\nedited`;
+        },
+      },
+      installSignalHandlers: false,
+    });
+
+    expect(view.screen.getInput()).toBe('restored controller draft');
+    view.screen.clearInput();
+    await view.mockInput.typeText('first prompt');
+    view.mockInput.pressEnter();
+    await view.mockInput.typeText('second prompt');
+    view.mockInput.pressEnter();
+    view.mockInput.pressKey('r', { ctrl: true });
+    expect(view.screen.getInput()).toBe('second prompt');
+
+    view.screen.clearInput();
+    await view.mockInput.typeText('palette survives');
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.mockInput.typeText('help');
+    view.mockInput.pressEnter();
+    expect(view.screen.getInput()).toBe('palette survives');
+
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.mockInput.typeText('edit');
+    view.mockInput.pressEnter();
+    expect(view.screen.getInput()).toBe('palette survives');
+    expect(store.snapshot().draft).toBe('palette survives');
+    resolvePaletteEdit('palette survives\npalette edited');
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(view.screen.getInput()).toBe('palette survives\npalette edited');
+
+    view.mockInput.pressKey('o', { ctrl: true });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(view.screen.getInput()).toBe('palette survives\npalette edited\nedited');
+    view.mockInput.pressKey('s', { meta: true });
+    expect(store.snapshot().stashedDraft).toBe('palette survives\npalette edited\nedited');
+    await view.mockInput.typeText('/restore');
+    view.mockInput.pressEnter();
+    expect(view.screen.getInput()).toBe('palette survives\npalette edited\nedited');
+
+    view.screen.clearInput();
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    expect(prompts).toEqual(['first prompt', 'second prompt']);
+    await view.destroyHighlighter();
+  });
+
+  it('stash 持久化失败时保留 composer，并让退出返回非零', async () => {
+    const dir = makeTempDir();
+    const blockedRoot = path.join(dir, 'not-a-directory');
+    writeFileSync(blockedRoot, 'blocked');
+    const store = new ThreadPresentationStore({
+      root: blockedRoot,
+      workspaceId: 'ws_tui_stash_failure' as WorkspaceId,
+      threadId: 'thr_tui_stash_failure' as ThreadId,
+    });
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      presentation: { store },
+    });
+    view.screen.focusInput();
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      interaction: view.interaction,
+      presentation: { store },
+      installSignalHandlers: false,
+    });
+
+    await view.mockInput.typeText('draft must remain visible');
+    view.mockInput.pressKey('s', { meta: true });
+    await view.flush();
+    expect(view.screen.getInput()).toBe('draft must remain visible');
+    expect(store.snapshot().draft).toBe('draft must remain visible');
+    expect(view.frame()).toContain('stash failed');
+    expect(view.frame()).not.toContain('Draft stashed for this thread.');
+
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.mockInput.typeText('quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(1);
+    await view.destroyHighlighter();
+  });
+
   it('项目规则 warning 经 TUI 单写入者清洗展示，并在关闭后退订', async () => {
     const session = await Session.create({
       dir: makeTempDir(),
@@ -1371,8 +1781,16 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
-  it('冷启动复用 provider 命令状态机；OAuth 安全返回且 API key 全程只显示掩码', async () => {
+  it('冷启动复用 provider 状态机；palette/普通字段不污染任务 draft，秘密始终掩码', async () => {
     const dir = makeTempDir();
+    const taskDraft = 'keep this task draft';
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_tui_provider' as WorkspaceId,
+      threadId: 'thr_tui_provider' as ThreadId,
+    });
+    store.setDraft(persistableDraft(taskDraft));
+    store.flush();
     const registry = new ProviderRegistry({
       configPath: path.join(dir, 'providers.json'),
       credentialsPath: path.join(dir, 'credentials.json'),
@@ -1394,7 +1812,10 @@ describe('TUI 控制器接线', () => {
         throw new Error('/login 不得创建 Session');
       },
     });
-    const view = await setup(80, 24, () => {}, true, {});
+    const view = await setup(80, 24, () => {}, true, {}, {
+      presentation: { store },
+    });
+    view.screen.restorePresentation(store.snapshot());
     view.screen.focusInput();
     const controller = runTuiController(
       runtime,
@@ -1404,6 +1825,7 @@ describe('TUI 控制器接线', () => {
       {
         interaction: view.interaction,
         providerCommands: { registry, runtime },
+        presentation: { store },
         installSignalHandlers: false,
       },
     );
@@ -1417,24 +1839,57 @@ describe('TUI 控制器接线', () => {
       }
       throw new Error(`TUI frame did not contain ${text}`);
     };
-    const submit = async (text: string, expected: string): Promise<void> => {
-      await view.mockInput.typeText(text);
+    const submitPalette = async (command: string, expected: string): Promise<void> => {
+      view.mockInput.pressKey('k', { ctrl: true });
+      await view.mockInput.typeText(command);
       view.mockInput.pressEnter();
       await waitForFrame(expected);
     };
+    const waitForInput = async (expected: string): Promise<void> => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await Promise.resolve();
+        await view.flush();
+        if (view.screen.getInput() === expected) return;
+      }
+      throw new Error(`TUI input did not equal ${expected}`);
+    };
 
-    await submit('/login', '[步骤 1]');
+    expect(view.screen.getInput()).toBe(taskDraft);
+    await submitPalette('login', '[步骤 1]');
     expect(view.frame()).toContain('→ OpenCode Go');
     expect(view.frame()).toContain('OpenAI');
     expect(view.frame()).toContain('Anthropic');
     expect(view.frame()).toContain('Custom');
     expect(view.frame()).toContain('OAuth');
     expect(view.frame()).toContain('disabled');
+    await view.mockInput.typeText('Custom');
+    view.mockInput.pressEnter();
+    await waitForFrame('[步骤 2] Custom provider name');
+    await view.mockInput.typeText('Draft Safe Provider');
+    view.mockInput.pressEnter();
+    await waitForFrame('[步骤 3] base URL');
+    expect(store.snapshot().draft).toBe(taskDraft);
+    await view.mockInput.typeText('https://draft-safe.invalid/v1');
+    view.mockInput.pressEnter();
+    await waitForFrame('[步骤 4] API key');
+    expect(store.snapshot().draft).toBe(taskDraft);
+    view.mockInput.pressEscape();
+    await waitForFrame('[步骤 3] base URL');
+    view.mockInput.pressEscape();
+    await waitForFrame('[步骤 2] Custom provider name');
+    view.mockInput.pressEscape();
+    await waitForFrame('[步骤 1]');
+    view.mockInput.pressEscape();
+    await waitForInput(taskDraft);
+    expect(store.snapshot().draft).toBe(taskDraft);
+
+    await submitPalette('login', '[步骤 1]');
     await view.mockInput.typeText('OAuth');
     view.mockInput.pressEnter();
     await waitForFrame('coming soon');
+    await waitForInput(taskDraft);
 
-    await submit('/login', '[步骤 1]');
+    await submitPalette('login', '[步骤 1]');
     expect(view.frame()).toContain('→ OpenCode Go');
     expect(view.frame()).toContain('Custom');
     await view.mockInput.typeText('OpenCode Go');
@@ -1462,8 +1917,16 @@ describe('TUI 控制器接线', () => {
     expect(view.frame()).not.toContain(secret);
     expect(createCalls).toBe(0);
     expect(runtime.currentModel()).toBeUndefined();
+    await waitForInput(taskDraft);
+    expect(store.snapshot().draft).toBe(taskDraft);
 
-    await view.mockInput.typeText('/quit');
+    await submitPalette('auth', '[authenticated] OpenCode Go');
+    expect(view.screen.getInput()).toBe(taskDraft);
+    await submitPalette('doctor', 'doctor: ready');
+    expect(view.screen.getInput()).toBe(taskDraft);
+
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.mockInput.typeText('quit');
     view.mockInput.pressEnter();
     expect(await controller).toBe(0);
     await view.destroyHighlighter();
