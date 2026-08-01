@@ -200,7 +200,7 @@ describe('UX0 terminal environment characterization', () => {
     }
   });
 
-  test('plain output is append-only but currently exposes the sanitizer debt frozen for UX1', async () => {
+  test('plain output is append-only and strips terminal-control injection at the shared boundary', async () => {
     let output = '';
     const renderer = createRenderer(
       {
@@ -218,9 +218,9 @@ describe('UX0 terminal environment characterization', () => {
     });
     await renderer.drain();
 
-    // This is a characterization, not the target contract. UX1 replaces it with a
-    // shared sanitizer assertion for classic/plain and records the intentional change.
-    expect(output).toContain('\x1b]52;c;UX0_BASELINE_SECRET\x07');
+    // UX1 migration: classic/plain now consume the same sanitizer contract as OpenTUI.
+    expect(output).not.toContain('\x1b]52;c;UX0_BASELINE_SECRET\x07');
+    expect(output).not.toContain('UX0_BASELINE_SECRET');
     expect(output).toContain('visible');
     expect(output).not.toContain('\x1b[?1049h');
   });

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'bun:test';
 import type { StoredThreadLocator, ThreadId, WorkspaceId } from '../runtime/index.js';
 import {
   CliResumeSelectionError,
+  pickRuntimeThreadInteractive,
   selectCliResumeTarget,
 } from './runtime-resume.js';
+import { PassThrough } from 'node:stream';
 
 const THREAD_ID = 'same-thread' as ThreadId;
 
@@ -61,6 +63,34 @@ describe('runtime global resume selection', () => {
         resume: 'legacy-session',
       }),
     ).rejects.toMatchObject({ code: 'invalid_legacy_workspace_cwd' });
+  });
+
+  it('sanitizes every persisted locator field before rendering the interactive picker', async () => {
+    const attack = '\x1b]52;c;RECOVERY_SECRET\x07\x1b[31mvisible\x1b[0m\x1bPpayload\x1b\\';
+    const base = locator('workspace-a', 'thread-a', 10, 'legacy-session');
+    const unsafe: StoredThreadLocator = {
+      ...base,
+      sourceSessionId: `session-${attack}`,
+      ownerWorkspaceId: `workspace-${attack}` as WorkspaceId,
+      ownerRecordedCwd: `/work/${attack}`,
+      catalog: {
+        ...base.catalog,
+        summary: { ...base.catalog.summary, title: `title-${attack}` },
+      },
+    };
+    const input = new PassThrough() as PassThrough & { isTTY?: boolean };
+    input.isTTY = false;
+    const output = new PassThrough();
+    let written = '';
+    output.on('data', (chunk: Buffer) => {
+      written += chunk.toString('utf8');
+    });
+
+    await expect(pickRuntimeThreadInteractive([unsafe], { input, output })).resolves.toBeUndefined();
+    expect(written).toContain('visible');
+    expect(written).not.toContain('RECOVERY_SECRET');
+    expect(written).not.toContain('\x1b');
+    expect(written).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
   });
 });
 

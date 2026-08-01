@@ -4,7 +4,6 @@
 // 把输入翻译成 Agent 方法调用,
 // 把事件翻译成像素;不持有会话状态副本。
 
-import packageJson from '../../package.json';
 import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
 import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
 import { createCodingTools } from '../tools/index.js';
@@ -16,15 +15,18 @@ import { cleanupTruncated } from './cleanup.js';
 import {
   getMissingApiKeyMessage,
   isFullScreenTuiEligible,
-  parseFlags,
   readConfigFile,
+  resolveInteractiveUi,
   resolveConfig,
 } from './config.js';
-import type { CliFlags } from './config.js';
+import type { ResolvedConfig } from './config.js';
+import type { CliFlags, CliInvocation } from './command-catalog.js';
 import { startEnvelopeHeadless } from './envelope-headless.js';
 import { startHeadless } from './headless.js';
 import type { CliSession } from './interactive-runtime.js';
+import { startLineRepl } from './line-repl.js';
 import { ProviderRegistry } from './provider-registry.js';
+import { runStandaloneProductCommand } from './product-commands.js';
 import { createProviderStreamFn } from './provider-stream.js';
 import { guardProjectRuleExecutions, ProjectRules } from './project-rules.js';
 import { createRenderer } from './renderer.js';
@@ -38,24 +40,27 @@ import {
 import { RuntimeFrontendSession } from './runtime-frontend.js';
 import { createStaticLegacyApprovalAdapterFactory } from './legacy-approval-adapter.js';
 import { isRuntimeResumeRequest, selectCliResumeTarget } from './runtime-resume.js';
-import { sanitizeTerminalLine } from './terminal-sanitize.js';
+import { sanitizeTerminalError, sanitizeTerminalLine } from './terminal-sanitize.js';
 
-async function main(): Promise<number> {
-  let flags: CliFlags;
-  try {
-    flags = parseFlags(Bun.argv.slice(2));
-  } catch (err) {
-    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
-    return 2;
-  }
+export async function runCli(invocation: CliInvocation, version: string): Promise<number> {
+  const flags: CliFlags = { ...invocation.flags };
+  const standaloneExit = await runStandaloneProductCommand(invocation, version);
+  if (standaloneExit !== undefined) return standaloneExit;
+  const sessionsCommand = invocation.command.kind === 'sessions';
 
   // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
-  void cleanupTruncated();
+  if (!sessionsCommand) void cleanupTruncated();
 
   // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §8)。
   // 读空(coda </dev/null 且无 -p):交互 REPL 需要 TTY,进 startRepl 只会无限挂起——
   // 提示用法并 exit 2(放在 Session 创建之前,不为错误路径留下空会话文件)。
-  if (flags.eventFormat !== 'envelope' && !flags.json && flags.prompt === undefined && !process.stdin.isTTY) {
+  if (
+    !sessionsCommand &&
+    flags.eventFormat !== 'envelope' &&
+    !flags.json &&
+    flags.prompt === undefined &&
+    !process.stdin.isTTY
+  ) {
     const text = (await Bun.stdin.text()).trim();
     if (text.length === 0) {
       console.error('[coda] empty stdin and no prompt; usage: coda -p "..."  or  echo "..." | coda');
@@ -63,30 +68,46 @@ async function main(): Promise<number> {
     }
     flags.prompt = text;
   }
+  if (flags.ui === 'tui' && flags.prompt !== undefined) {
+    console.error('[coda] --ui=tui cannot be combined with one-shot input; remove --ui or start an interactive TTY');
+    return 2;
+  }
 
   const interactiveMode =
+    !sessionsCommand &&
     flags.eventFormat !== 'envelope' &&
     !flags.json &&
     flags.prompt === undefined &&
     process.stdin.isTTY === true;
-  const tuiEligible = isFullScreenTuiEligible(flags, {
+  const terminalState = {
     stdinIsTTY: process.stdin.isTTY === true,
     stdoutIsTTY: process.stdout.isTTY === true,
     term: Bun.env.TERM,
-  });
-
-  let resolved;
-  let registry: ProviderRegistry | undefined;
-  try {
-    resolved = resolveConfig(flags, Bun.env, readConfigFile(), {
-      allowMissingApiKey: interactiveMode,
-    });
-    if (interactiveMode || resolved.modelConfig === undefined) {
-      registry = new ProviderRegistry();
-    }
-  } catch (err) {
-    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+  };
+  const tuiEligible = isFullScreenTuiEligible(flags, terminalState);
+  const uiResolution = interactiveMode
+    ? resolveInteractiveUi(flags.ui, terminalState)
+    : undefined;
+  if (uiResolution?.ok === false) {
+    console.error(`[coda] ${uiResolution.message}`);
     return 2;
+  }
+  const interactiveSurface = uiResolution?.ok === true ? uiResolution.surface : undefined;
+
+  let resolved: ResolvedConfig = {};
+  let registry: ProviderRegistry | undefined;
+  if (!sessionsCommand) {
+    try {
+      resolved = resolveConfig(flags, Bun.env, readConfigFile(), {
+        allowMissingApiKey: interactiveMode,
+      });
+      if (interactiveMode || resolved.modelConfig === undefined) {
+        registry = new ProviderRegistry();
+      }
+    } catch (err) {
+      console.error(`[coda] ${sanitizeTerminalError(err)}`);
+      return 2;
+    }
   }
 
   const legacyMissingKey = getMissingApiKeyMessage(resolved);
@@ -98,7 +119,12 @@ async function main(): Promise<number> {
   } else {
     initialModel = registry?.resolveSelectedModel();
   }
-  if (initialModel === undefined && !interactiveMode && flags.eventFormat !== 'envelope') {
+  if (
+    !sessionsCommand &&
+    initialModel === undefined &&
+    !interactiveMode &&
+    flags.eventFormat !== 'envelope'
+  ) {
     console.error(
       `[coda] ${
         legacyMissingKey ??
@@ -143,7 +169,7 @@ async function main(): Promise<number> {
       }
     }
   } catch (err) {
-    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[coda] ${sanitizeTerminalError(err)}`);
     return 2;
   }
   const resumed = resumeTarget !== undefined;
@@ -162,7 +188,7 @@ async function main(): Promise<number> {
         ? await readFauxScript(resolved.fauxScript)
         : undefined;
   } catch (err) {
-    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[coda] ${sanitizeTerminalError(err)}`);
     return 2;
   }
 
@@ -216,8 +242,41 @@ async function main(): Promise<number> {
       threadDriverFactory: driverFactory,
     });
   } catch (err) {
-    console.error(`[coda] runtime initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[coda] runtime initialization failed: ${sanitizeTerminalError(err)}`);
     return 2;
+  }
+
+  if (sessionsCommand) {
+    try {
+      const sessions = [...await runtime.listThreads()].sort(
+        (left, right) => right.createdAt - left.createdAt,
+      );
+      if (flags.json) {
+        process.stdout.write(`${JSON.stringify({
+          type: 'sessions',
+          workspaceId: runtime.workspaceId,
+          cwd,
+          sessions,
+        })}\n`);
+      } else if (sessions.length === 0) {
+        process.stdout.write('No sessions in this workspace.\n');
+      } else {
+        for (const item of sessions) {
+          const title = item.title === undefined ? '(untitled)' : sanitizeTerminalLine(item.title);
+          process.stdout.write(
+            `${sanitizeTerminalLine(item.threadId)}  ${new Date(item.createdAt).toISOString()}  ` +
+            `${sanitizeTerminalLine(item.state)}  ${title}\n`,
+          );
+        }
+        process.stdout.write('Resume: coda --resume=<thread-id>\n');
+      }
+      return 0;
+    } catch (err) {
+      console.error(`[coda] sessions failed: ${sanitizeTerminalError(err)}`);
+      return 1;
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
   }
 
   if (flags.eventFormat === 'envelope') {
@@ -241,7 +300,7 @@ async function main(): Promise<number> {
     await runtimeSession.initialize();
     session = runtimeSession;
   } catch (err) {
-    console.error(`[coda] session initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[coda] session initialization failed: ${sanitizeTerminalError(err)}`);
     return 2;
   }
   // Approval requests are already canonical Runtime events projected through `session.subscribe`;
@@ -253,12 +312,13 @@ async function main(): Promise<number> {
         subscribe: () => () => {},
       }
     : undefined;
+  let classicSurface = interactiveSurface === 'classic';
 
   // 默认交互面:双 TTY 且终端具备全屏能力时懒加载 OpenTUI。这里必须早于 stdout
   // FileSink/legacy renderer 的创建——两套渲染器不能同时拥有 raw stdin/stdout。
   // 初始化失败时 createCliRenderer 会恢复终端，随后可安全降级 classic REPL；
   // 已进入运行期的错误由 startTui 自己收尾并返回 exit code，不从中途切换 UI。
-  if (tuiEligible) {
+  if (tuiEligible && interactiveSurface === 'tui') {
     try {
       const { startTui } = await import('./tui.js');
       return await startTui(session, approval, {
@@ -267,7 +327,7 @@ async function main(): Promise<number> {
         ...(session.currentModel() !== undefined && {
           model: session.currentModel(),
         }),
-        version: packageJson.version,
+        version,
         color: !flags.noColor && Bun.env.NO_COLOR === undefined,
         ...(initialModel?.limits?.context !== undefined && {
           contextLimit: initialModel.limits.context,
@@ -281,11 +341,15 @@ async function main(): Promise<number> {
         }),
       });
     } catch (err) {
+      if (flags.ui === 'tui') {
+        console.error(`[coda] full-screen TUI unavailable: ${sanitizeTerminalError(err)}`);
+        await session.close().catch(() => undefined);
+        return 1;
+      }
       console.error(
-        `[coda] full-screen TUI unavailable, using classic mode: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[coda] full-screen TUI unavailable, using classic mode: ${sanitizeTerminalError(err)}`,
       );
+      classicSurface = true;
     }
   }
 
@@ -315,7 +379,7 @@ async function main(): Promise<number> {
   // 不禁动态区光标控制,docs/09 §1.3)
   const renderer = createRenderer(stdout, {
     color: !flags.noColor && process.stdout.isTTY === true && Bun.env.NO_COLOR === undefined,
-    interactive: process.stdout.isTTY === true && flags.prompt === undefined,
+    interactive: classicSurface,
   });
   if (flags.prompt === undefined && process.stdout.isTTY === true) {
     projectRuleWarnings.subscribeWarnings((message) => {
@@ -327,7 +391,7 @@ async function main(): Promise<number> {
   output.failureSignal.addEventListener(
     'abort',
     () => {
-      console.error('[coda] stdout write failed:', output.failureSignal.reason);
+      console.error(`[coda] stdout write failed: ${sanitizeTerminalError(output.failureSignal.reason)}`);
       // -p 没有 REPL 生命周期接管；交互模式由 startRepl 的 fatalSignal 路径统一清理。
       if (flags.prompt !== undefined) {
         session.abort();
@@ -350,6 +414,12 @@ async function main(): Promise<number> {
   if (resumed && session.messages.length > 0) {
     renderer.replayTranscript(session.messages);
     await renderer.drain();
+  }
+  if (flags.prompt === undefined && classicSurface && session.currentModel() === undefined) {
+    renderer.println?.(
+      'Get started: 1) /login — save an API key  2) /model — choose a model  3) enter a task ' +
+        '· OAuth coming soon (disabled)',
+    );
   }
 
   if (flags.prompt !== undefined) {
@@ -375,6 +445,22 @@ async function main(): Promise<number> {
     } finally {
       unsub();
     }
+  }
+
+  if (interactiveSurface === 'accessible' || interactiveSurface === 'plain') {
+    const exitCode = await startLineRepl(runtimeSession, renderer, {
+      mode: interactiveSurface,
+      fatalSignal: output.failureSignal,
+      ...(approval !== undefined && { approval }),
+      ...(registry !== undefined && {
+        providerCommands: {
+          registry,
+          runtime: runtimeSession,
+        },
+      }),
+    });
+    if (!output.failureSignal.aborted) await renderer.drain();
+    return exitCode;
   }
 
   const exitCode = await startRepl(session, renderer, approval, {
@@ -431,13 +517,3 @@ function createWarningHub(): WarningHub {
 function logProjectRuleWarning(message: string): void {
   console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
 }
-
-main().then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (err: unknown) => {
-    console.error('[coda] fatal:', err);
-    process.exitCode = 1;
-  },
-);

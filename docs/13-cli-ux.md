@@ -8,9 +8,10 @@
 [12](./12-supervisor-runtime.md) 为上位契约，headless wire 的逐字段定义仍以
 [09](./09-cli.md) 为准。
 
-本文的“UX0 基线”只描述 2026-08-01 在当前源码和测试中实际观察到的行为，不把目标误写成现状。
-“UX1–UX4 目标”才是后续阶段的产品承诺。UX0 只允许更新文档和 characterization tests，不改变生产
-行为。
+本文的“UX0 基线”只描述 2026-08-01 在阶段提交中实际观察到的行为，不把目标误写成现状。
+UX1 的 command catalog、产品子命令、UI routing、onboarding、sanitizer、classic 编辑修复与最低
+accessible/plain 文本面已经完成两轮 review 并进入当前实现；UX2–UX4 仍是后续产品承诺。
+UX0 历史矩阵继续保留，便于区分“当时观察值”“UX1 当前值”和最终目标。
 
 ## 1. 产品不变量与事实边界
 
@@ -58,8 +59,9 @@ UI 可以缓存由 snapshot/envelope fold 得到的 projection 以便绘制，�
 
 用户可从 onboarding action、`/login` 或 `coda auth login` 进入同一认证规格。现有 OpenCode Go preset
 必须保留；UX1 在它旁边新增 OpenAI、Anthropic 与 Custom API-key preset，不得用新入口替换或迁移掉
-已保存的 OpenCode Go 配置。认证成功只保存 provider，不偷偷选择模型；`/model` 或 `coda models` 明确
-选择后才可创建/resume thread。首次 prompt accepted 后，
+已保存的 OpenCode Go 配置。认证成功只保存 provider，不偷偷选择模型；CLI-edge
+`coda models --select <provider/model>` 选择后仍保持零 thread/journal，交互 `/model` 则经 RuntimePort
+按既有语义 create/attach 或更新当前 thread。首次 prompt accepted 后，
 界面展示 thread、run phase、模型和权限模式。失败必须保留原 draft，错误包含失败步骤和可执行的重试
 动作。
 
@@ -75,7 +77,8 @@ OpenAI/Anthropic 是带预填协议/endpoint 的新增 preset，Custom 再选择
 header、key 或底层可能含秘密的异常。
 
 完成标准：`auth status`、`models`、`/login`、`/model` 和 classic/accessibility 等价命令共享 provider
-controller/catalog；用户能区分“已保存认证”“模型目录刷新成功”“已选择模型”三个状态。
+preset/action/catalog 语义；TUI/classic 共用交互 controller，CLI 使用受保护的 secret prompt；用户能
+区分“已保存认证”“模型目录刷新成功”“已选择模型”三个状态。
 
 ### 2.3 启动长任务、观察进度并中途 steer
 
@@ -127,32 +130,33 @@ legacy golden、一次性、pipe、continue/resume 全绿；CI 可用 timeout �
 
 ## 3. 统一命令规格
 
-UX1 起建立唯一 `CommandCatalog`。规格至少包含：
+UX1 已建立唯一 `CommandCatalog`。当前最小规格为：
 
 ```ts
 interface CommandSpec {
   readonly id: string;
   readonly category: 'task' | 'session' | 'review' | 'provider' | 'settings' | 'help';
   readonly summary: string;
-  readonly cli?: { readonly path: readonly string[]; readonly options: readonly OptionSpec[] };
+  readonly cli?: { readonly path: readonly string[]; readonly usage?: string;
+    readonly optionIds?: readonly string[] };
   readonly slash?: { readonly name: string; readonly aliases?: readonly string[];
-    readonly argumentHint?: string };
+    readonly argumentHint?: string; readonly availableWhileRunning: boolean; readonly order: number };
   readonly shortcuts?: readonly ShortcutSpec[];
-  readonly availability: (context: Readonly<CommandContext>) => CommandAvailability;
-  readonly action: CommandActionId;
 }
 ```
 
-- parser、`-h/--help`、shell completion、unknown-option suggestion、palette、classic `/help` 和参数提示只读
-  这个 catalog；不得维护平行字符串数组。
-- `availability` 只消费 Runtime snapshot/event projection 与明确的 frontend capabilities，返回
+- parser、`-h/--help`、shell completion、unknown-option suggestion、slash 候选与 TUI/classic/accessibility
+  `/help` 只读 `COMMAND_SPECS`/`OPTION_SPECS`；不得维护平行字符串数组。UX2 palette 同样扩展这份规格，
+  不另建目录。
+- UX1 只需要 `availableWhileRunning` 保持既有 slash 门禁；UX2 把它扩展成统一 `availability(context)`，
+  只消费 Runtime snapshot/event projection 与明确的 frontend capabilities，返回
   `enabled | disabled(reason) | hidden`。它不读取 Agent/Session private state。
 - command handler 只把动作映射到 `RuntimePort` op/query、provider config port 或纯前端 action。会话列表
   只用 `RuntimePort.listThreads()`；不得让 CLI 直读 repository。
 - headless canonical action 仍是 `RuntimeOp`；catalog 只生成说明/completion 或显式 edge adapter，不改变
   wire discriminator。
 - 所有互斥和缺参错误包含稳定 error code、问题说明和一条可复制的修复命令。unknown flag 使用编辑距离
-  给出至多三个候选，但不自动执行。
+  给出至多一个最接近候选，但不自动执行。
 
 ### 3.1 Canonical action inventory
 
@@ -164,19 +168,19 @@ Agent/Session private state。
 |---|---|---|---|
 | `help.show` | `coda -h`、`coda --help` | `/help`、palette | 总是；纯 `CommandCatalog`，零副作用 |
 | `version.show` | `coda -V`、`coda --version` | help/about | 总是；package build metadata，零副作用 |
-| `doctor.run` | `coda doctor [--json]` | `/doctor`、palette | 无 run 也可；诊断端口，`--json` 只写机器 stdout |
+| `doctor.run` | `coda doctor [--json]` | UX2 palette | 无 run 也可；CLI-edge 只读诊断，`--json` 只写机器 stdout |
 | `completion.generate` | `coda completion <bash\|zsh\|fish\|powershell>` | help link | 总是；纯 catalog generator，未知 shell 退出 2 |
 | `auth.login` | `coda auth login` | `/login` | idle/no-model；provider configuration controller |
 | `auth.logout` | `coda auth logout` | `/logout` | 已配置 provider；provider configuration controller |
-| `auth.status` | `coda auth status` | `/auth status` | 总是；只返回无秘密 provider 状态 |
+| `auth.status` | `coda auth status` | UX2 palette/status | 总是；只返回无秘密 provider 状态 |
 | `models.list` | `coda models` | `/model` 的目录步骤 | 已认证；只列 provider catalog，不创建 thread |
-| `models.select` | `coda models --select <ref>` | `/model` 的确认步骤 | 显式确认后经 RuntimePort create/resume 或 set-model；此前保持零 thread/journal |
+| `models.select` | `coda models --select <ref>` | `/model` 的确认步骤 | CLI 只保存已验证的默认选择且保持零 thread/journal；首次任务/resume 才由 composition root attach，已 attach `/model` 才经 RuntimePort 模型配置适配 |
 | `task.exec` | `coda exec [现有 flags] [prompt]` | prompt composer | root 裸 prompt/`-p` 的增量别名；同一 RuntimePort prompt、退出码和 wire |
 | `task.steer` | headless op | Enter / `/steer` | 当前目标 run 可 steer；RuntimePort identity op |
 | `task.follow_up` | headless op | Alt+Enter / `/followup` | 已选模型；RuntimePort identity op |
 | `task.abort` | signal/headless op | Esc / `/abort` | 仅当前 `(threadId, expectedRunId)`；RuntimePort op |
 | `task.status_queue` | — | `/status`、`/queue` | attachment 存在；只读 RuntimePort snapshot |
-| `sessions.list` | `coda sessions` | `/sessions` | 零 attached thread 也可；`RuntimePort.listThreads()` |
+| `sessions.list` | `coda sessions` | UX3 `/sessions` | 零 attached thread 也可；`RuntimePort.listThreads()` |
 | `sessions.new` | — | `/new` | idle 或显式后台切换；RuntimePort thread create |
 | `sessions.resume` | 保留 `--resume` | `/resume [thread]` | catalog 中可恢复；RuntimePort resume |
 | `sessions.switch` | — | `/switch [thread]` | 目标存在；只切 attachment/query，不 abort 源 run |
@@ -194,7 +198,9 @@ Agent/Session private state。
 
 `coda exec` 只在 argv 最前增加显式动作名：去掉 `exec` 后必须与当前一次性模式使用相同 flags、裸 prompt、
 pipe、`--json`、continue/resume 解析、stdout/stderr 和退出码；不能另建执行状态机。`coda completion` 只接受
-表中四个 shell。`doctor --json`、auth 三分支及所有 slash/text alias 都从本表对应的 `CommandSpec` 生成。
+表中四个 shell。`doctor --json`、auth 三分支及所有 slash/text alias 都映射到本表对应的 action id；
+命令名、usage、help、completion 与 slash 候选从 `CommandSpec` 生成，provider controller/runtime handler
+实现动作本身。
 
 统一全局 option 至少冻结：`--ui=auto|tui|classic|accessible|plain`（默认 `auto`）、现有全部 flags，及
 UX4 的显式 output options。UX1 的 `accessible` 最低语义是 append-only、无 alternate screen、无动画、
@@ -282,7 +288,21 @@ registrationDigest、frozen scope 与 policyBasisRevision。Runtime 只投影 Po
 headless 都经 RuntimePort。classic/plain renderer 在 UX0 仍存在未统一 sanitizer 的已知债务，已由
 `ux-characterization.test.ts` 安全地在内存字符串中冻结，UX1 必须有意翻转该断言。
 
-### 4.2 UX4 目标语义矩阵
+### 4.2 UX1 当前功能矩阵
+
+| 动作 | OpenTUI | classic | accessible | plain | headless / CLI |
+|---|---:|---:|---:|---:|---:|
+| prompt / steer / follow-up / abort | keys + slash | keys + slash | 行与文本命令 | one-shot | legacy/canonical op；`exec` 别名 |
+| help / command discovery | catalog slash help | catalog slash help | catalog 文本 help | `--help` | `--help`/completion，薄 bootstrap |
+| provider auth/model/logout | preset candidate | preset 编号/名称 | `/login` 引导安全 CLI；model/logout 文本命令 | CLI 子命令 | `auth`/`models`，零 thread |
+| session inventory/resume | 启动期 continue/resume | 同左 | 同左 | `sessions`/resume | `sessions` 只经 RuntimePort |
+| sanitizer | 共享 sanitizer | 共享 sanitizer | 共享 sanitizer | 共享 sanitizer | human stderr 清洗；JSON payload 不改 wire |
+| terminal mode | alternate screen | raw + ANSI 动态区 | append-only、无 raw/alternate/mouse/animation | 同 accessible | stdout/stderr/NDJSON |
+
+UX1 尚未实现 session switch/picker、transcript search/copy/export、完整 diff/review 或 persistent
+presentation state；这些仍按 UX2/UX3 分阶段交付。
+
+### 4.3 UX4 目标语义矩阵
 
 | 语义 | TUI | classic | accessible | plain | headless |
 |---|---|---|---|---|---|
@@ -314,6 +334,20 @@ headless 都经 RuntimePort。classic/plain renderer 在 UX0 仍存在未统一 
 
 UX1 修复 classic 多行输入、光标、bracketed paste 与 help 文案；UX2 增加 Ctrl+R、`$EDITOR`、stash、
 `@` completion 和可选 Vim。默认键位不得破坏上表已有 Enter/steer/follow-up/abort 语义。
+
+### 5.2 UX1 当前值
+
+| 动作 | OpenTUI | classic | accessible / plain |
+|---|---|---|---|
+| send / steer | Enter | Enter | 输入整行；running 时 steer |
+| newline | Shift+Enter | Shift+Enter；多行 cursor-aware | 由完整行/管道承载，无 raw 修饰键声明 |
+| follow-up | Alt+Enter / `/followup` | Alt+Enter / `/followup` | `/followup <text>` |
+| history | Alt+↑ / Alt+↓ | ↑/↓ 在多行内移动、单行边界浏览历史 | 不声明交互 history |
+| transcript scroll | PageUp / PageDown | 终端 scrollback | 终端 scrollback |
+| abort / quit | Esc；双 Esc/Ctrl+C | 同左 | `/abort`；Ctrl+C 或 EOF 收束退出 |
+
+`/help` 按当前 surface 从同一 shortcut spec 过滤；因此文本面不会显示 Shift+Enter/PageUp，classic 不会
+显示 TUI 的 Alt+↑/Alt+↓ history。
 
 ## 6. Presentation state 与恢复
 
@@ -368,7 +402,9 @@ interface ThreadPresentationState {
 6. headless JSON 不做内容删改以保持 wire 兼容，但 JSON serializer 必须保证控制字符转义，日志仍不得回显
    秘密。
 
-UX0 已观察：OpenTUI 使用 `sanitizeTerminalText`，plain/classic transcript 尚未统一，属于 UX1 阻断项。
+UX0 观察到的 plain/classic 缺口已在 UX1 关闭：OpenTUI、classic、accessible、plain、产品命令和 human
+stderr 统一经过 `terminal-sanitize.ts`。legacy/canonical JSON payload 为 wire 兼容不改变内容，只依赖
+JSON escaping；任何伴随的人类诊断仍先清洗。
 
 ## 8. 环境 characterization baseline
 
@@ -381,11 +417,11 @@ UX0 已观察：OpenTUI 使用 `sanitizeTerminalText`，plain/classic transcript
 | 80×24 | 完整 9 行 header、Logo/tips、transcript、prompt、workspace、context/model |
 | 120×40 | 与 80×24 同层级，更多 transcript 空间；不把短内容贴到底部 |
 | CJK / emoji | TestRenderer 保留 CJK/ZWJ emoji，并精确断言 composer 光标显示列；classic 使用简化 wcwidth |
-| `NO_COLOR` / `--no-color` | 源码审计的 main 映射目标是 `color:false`；UX0 测试分别冻结 flag parser 与该等价 renderer（alpha 0/default foreground/品牌 cursor），不声称已做 production wiring probe；该 probe 属于 UX1 |
-| `TERM=dumb` + 双 TTY | shared main routing predicate 返回 false，源码分支不执行动态 OpenTUI import，进入 classic fallback；UX1 用进程级 module probe 固化副作用边界 |
+| `NO_COLOR` / `--no-color` | UX0 冻结等价 renderer；UX1 由实际 parser/main wiring 与 renderer 回归验证 `color:false`，append-only 面不生成 cursor 控制 |
+| `TERM=dumb` + 双 TTY | UX0 进入 classic；UX1 `auto` 改为 append-only accessible，显式 `--ui=tui` 稳定拒绝且不静默换面 |
 | tmux (`screen-256color`/`tmux-256color`) | 双 TTY 时仍可进入 OpenTUI |
 | SSH (`xterm-256color`) | 双 TTY时仍可进入 OpenTUI；SSH 环境变量本身不改变语义 |
-| stdin TTY、stdout 非 TTY | classic 输入 + plain append-only 输出 |
+| stdin TTY、stdout 非 TTY | UX1 auto 使用 append-only accessible；不初始化 OpenTUI/classic raw 模式 |
 | stdin 非 TTY | 无 `--json` 时读为 one-shot prompt；`--json` 时 NDJSON |
 
 UX4 的真实 PTY 矩阵在此基础上增加 resize、多行 paste、fatal、approval abort、provider 初始化失败、
@@ -415,7 +451,7 @@ wall-clock。
 | 阶段 | 允许范围 | 明确完成条件 |
 |---|---|---|
 | UX0 | 本文、09/10/11/地图与 characterization tests | 生产行为零变化；环境/性能/旅程/parity 有证据 |
-| UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | help/version 零副作用；legacy flags/wire 全绿 |
+| UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 已完成恰好两轮 review；help/version 零副作用且 legacy flags/wire 全绿 |
 | UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | draft/scroll/unread 跨 resize/switch/recovery；秘密零泄漏 |
 | UX3 | reasoning/tool/diff/review、session workflow、approval cards、retry/fork | UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
 | UX4 | accessible ASCII/theme/PTY 加固、帧合并/窗口化、自动化输出、真实 PTY | 10k delta 限帧；输入 <100ms；终端模式全路径恢复 |

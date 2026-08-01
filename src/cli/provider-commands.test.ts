@@ -194,7 +194,6 @@ async function loginOpenCode(
   apiKey: string,
 ): Promise<void> {
   controller.begin('login');
-  await controller.submit('2');
   await controller.submit('1');
   await controller.submit(apiKey);
 }
@@ -209,8 +208,7 @@ async function loginCustom(
   },
 ): Promise<void> {
   controller.begin('login');
-  await controller.submit('2');
-  await controller.submit('2');
+  await controller.submit('4');
   await controller.submit(values.name);
   await controller.submit(values.baseURL);
   await controller.submit(values.apiKey);
@@ -218,27 +216,21 @@ async function loginCustom(
 }
 
 describe('/login', () => {
-  it('先显示 OAuth/API key；OAuth 仅提示尚未实现并安全返回', async () => {
+  it('展示四个 API-key preset；OAuth 明确 disabled/coming soon 并安全返回', async () => {
     const { controller, registry, view } = setup();
 
     controller.begin('login');
     expect(view.lines).toEqual([]);
-    expect(view.prompts.at(-1)).toEqual({
-      prompt: '选择登录方式（Esc 退出）',
-      secret: false,
-      choices: [
-        { value: 'OAuth', label: 'OAuth', description: '尚未实现' },
-        {
-          value: 'API key',
-          label: 'API key',
-          description: '使用 provider API key',
-        },
-      ],
-    });
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 1]');
+    expect(view.prompts.at(-1)?.choices?.map((choice) => choice.label)).toEqual([
+      'OpenCode Go', 'OpenAI', 'Anthropic', 'Custom', 'OAuth',
+    ]);
+    expect(view.prompts.at(-1)?.choices?.at(-1)?.description).toContain('disabled');
     await controller.submit('OAuth');
 
     expect(controller.active).toBe(false);
-    expect(view.lines.at(-1)?.text).toBe('OAuth 尚未实现');
+    expect(view.lines.at(-1)?.text).toContain('coming soon');
+    expect(view.lines.at(-1)?.text).toContain('disabled');
     expect(registry.listProviders()).toEqual([]);
     expect(registry.listCredentials()).toEqual([]);
   });
@@ -265,6 +257,59 @@ describe('/login', () => {
     expect(JSON.stringify({ lines: view.lines, prompts: view.prompts })).not.toContain(secret);
     expect(readFileSync(configPath, 'utf8')).not.toContain(secret);
     expect(readFileSync(credentialsPath, 'utf8')).toContain(secret);
+  });
+
+  it('OpenAI/Anthropic preset 固定正确 endpoint、协议与认证 header', async () => {
+    const requests: Array<{ url: string; headers: Headers }> = [];
+    const {
+      controller,
+      registry,
+      view,
+      configPath,
+    } = setup(fixture.custom, async (input, init) => {
+      requests.push({
+        url: String(input),
+        headers: new Headers(init?.headers),
+      });
+      return new Response(JSON.stringify(fixture.custom), { status: 200 });
+    });
+    const openAiSecret = 'openai-secret-never-render';
+    const anthropicSecret = 'anthropic-secret-never-render';
+
+    controller.begin('login');
+    await controller.submit('OpenAI');
+    await controller.submit(openAiSecret);
+    controller.begin('login');
+    await controller.submit('Anthropic');
+    await controller.submit(anthropicSecret);
+
+    expect(registry.listProviders()).toMatchObject([
+      {
+        id: 'custom:anthropic',
+        name: 'Anthropic',
+        baseURL: 'https://api.anthropic.com',
+        api: 'anthropic-messages',
+      },
+      {
+        id: 'custom:openai',
+        name: 'OpenAI',
+        baseURL: 'https://api.openai.com/v1',
+        api: 'openai-responses',
+      },
+    ]);
+    expect(requests.map((request) => request.url)).toEqual([
+      'https://api.openai.com/v1/models',
+      'https://api.anthropic.com/v1/models',
+    ]);
+    expect(requests[0]?.headers.get('authorization')).toBe(`Bearer ${openAiSecret}`);
+    expect(requests[0]?.headers.get('x-api-key')).toBeNull();
+    expect(requests[1]?.headers.get('authorization')).toBeNull();
+    expect(requests[1]?.headers.get('x-api-key')).toBe(anthropicSecret);
+    expect(requests[1]?.headers.get('anthropic-version')).toBe('2023-06-01');
+    expect(readFileSync(configPath, 'utf8')).not.toContain(openAiSecret);
+    expect(readFileSync(configPath, 'utf8')).not.toContain(anthropicSecret);
+    expect(JSON.stringify({ lines: view.lines, prompts: view.prompts })).not.toContain(openAiSecret);
+    expect(JSON.stringify({ lines: view.lines, prompts: view.prompts })).not.toContain(anthropicSecret);
   });
 
   it('模型刷新失败仍保留配置与 key，并把可执行错误显示给用户且不回显秘密', async () => {
@@ -299,14 +344,13 @@ describe('/login', () => {
       view,
     } = setup();
     controller.begin('login');
-    await controller.submit('API key');
     await controller.submit('Custom');
     await controller.submit('Example');
     await controller.submit('https://example.test/v1');
     await controller.submit('custom-key');
 
     expect(view.prompts.at(-1)).toEqual({
-      prompt: '选择 Custom provider 协议（Esc 返回）',
+      prompt: 'Custom · name=Example · baseURL=https://example.test/v1 · [步骤 5] 选择协议（Esc 返回 API key）',
       secret: false,
       choices: [
         {
@@ -358,12 +402,10 @@ describe('/login', () => {
     const { controller, runtime, view } = setup();
 
     controller.begin('login');
-    await controller.submit('2');
-    expect(view.prompts.at(-1)?.prompt).toBe(
-      '选择 API key provider（Esc 返回）',
-    );
+    await controller.submit('OpenAI');
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 2] OpenAI API key');
     expect(controller.back()).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe('选择登录方式（Esc 退出）');
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 1]');
     expect(controller.active).toBe(true);
     expect(controller.back()).toBe(true);
     expect(controller.active).toBe(false);
@@ -371,31 +413,20 @@ describe('/login', () => {
     expect(view.lines.some((line) => line.text === '已取消')).toBe(false);
 
     controller.begin('login');
-    await controller.submit('2');
-    await controller.submit('2');
+    await controller.submit('Custom');
     await controller.submit('Example');
     await controller.submit('https://example.test/v1');
     await controller.submit('custom-secret-to-clear');
-    expect(view.prompts.at(-1)?.prompt).toBe(
-      '选择 Custom provider 协议（Esc 返回）',
-    );
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 5] 选择协议');
     expect(controller.back()).toBe(true);
     expect(controller.secret).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe(
-      'Custom API key（秘密输入 · Esc 返回）',
-    );
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 4] API key');
     expect(controller.back()).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe('Custom base URL（Esc 返回）');
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 3] base URL');
     expect(controller.back()).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe(
-      'Custom provider name（Esc 返回）',
-    );
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 2] Custom provider name');
     expect(controller.back()).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe(
-      '选择 API key provider（Esc 返回）',
-    );
-    expect(controller.back()).toBe(true);
-    expect(view.prompts.at(-1)?.prompt).toBe('选择登录方式（Esc 退出）');
+    expect(view.prompts.at(-1)?.prompt).toContain('[步骤 1]');
     expect(controller.back()).toBe(true);
     expect(controller.active).toBe(false);
     expect(view.prompts.at(-1)).toEqual({ secret: false });
@@ -432,7 +463,6 @@ describe('/login', () => {
       },
     );
     controller.begin('login');
-    await controller.submit('2');
     await controller.submit('1');
     const saving = controller.submit('busy-secret');
     await fetchStarted;
@@ -467,7 +497,6 @@ describe('/login', () => {
         }),
     );
     controller.begin('login');
-    await controller.submit('2');
     await controller.submit('1');
     const saving = controller.submit('busy-secret');
     await fetchStarted;
@@ -496,7 +525,6 @@ describe('/login', () => {
       },
     );
     controller.begin('login');
-    await controller.submit('2');
     await controller.submit('1');
 
     let closing: Promise<void> | undefined;

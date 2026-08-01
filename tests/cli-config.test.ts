@@ -11,6 +11,7 @@ import {
   getMissingApiKeyMessage,
   isFullScreenTuiEligible,
   parseFlags,
+  resolveInteractiveUi,
   resolveConfig,
 } from '../src/cli/config.js';
 
@@ -20,7 +21,7 @@ afterEach(() => {
 
 /** 便捷构造:必填布尔字段兜底,测试只声明关心的字段。 */
 function flags(o: Partial<CliFlags> = {}): CliFlags {
-  return { json: false, eventFormat: 'legacy', continue_: false, noColor: false, ...o };
+  return { json: false, eventFormat: 'legacy', continue_: false, noColor: false, ui: 'auto', ...o };
 }
 
 function modelConfig(value: { modelConfig?: ModelConfig }): ModelConfig {
@@ -238,6 +239,32 @@ describe('全屏 TUI eligibility 只决定渲染面', () => {
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdinIsTTY: false })).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdoutIsTTY: false })).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, term: 'dumb' })).toBe(false);
+  });
+});
+
+describe('--ui 纯路由', () => {
+  const tty = { stdinIsTTY: true, stdoutIsTTY: true, term: 'xterm-256color' };
+
+  it('auto 优先 TUI，dumb/非 stdout TTY 退到 append-only accessible', () => {
+    expect(resolveInteractiveUi('auto', tty)).toEqual({ ok: true, surface: 'tui' });
+    expect(resolveInteractiveUi('auto', { ...tty, term: 'dumb' })).toEqual({
+      ok: true,
+      surface: 'accessible',
+    });
+    expect(resolveInteractiveUi('auto', { ...tty, stdoutIsTTY: false })).toEqual({
+      ok: true,
+      surface: 'accessible',
+    });
+  });
+
+  it('显式 surface 不静默换面，错误给出可执行 accessible 修复', () => {
+    expect(resolveInteractiveUi('classic', tty)).toEqual({ ok: true, surface: 'classic' });
+    expect(resolveInteractiveUi('plain', tty)).toEqual({ ok: true, surface: 'plain' });
+    expect(resolveInteractiveUi('accessible', tty)).toEqual({ ok: true, surface: 'accessible' });
+    expect(resolveInteractiveUi('tui', { ...tty, term: 'dumb' })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining('--ui=accessible'),
+    });
   });
 });
 

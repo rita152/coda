@@ -7,6 +7,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { CompatFlags, ModelConfig } from '../protocol/index.js';
 import { runtimeHomeDir } from '../shared/index.js';
+import { parseCliInvocation } from './command-catalog.js';
+import type { CliFlags, CliProvider, CliUiMode } from './command-catalog.js';
+import { sanitizeTerminalError, sanitizeTerminalLine } from './terminal-sanitize.js';
+export type { ApprovalMode, CliFlags, CliProvider, CliUiMode } from './command-catalog.js';
 
 export interface CodaConfigFile {
   model?: string;
@@ -17,129 +21,8 @@ export interface CodaConfigFile {
   compat?: CompatFlags;
 }
 
-/**
- * 审批模式(docs/07-tools.md §3、docs/09-cli.md §6.5):
- * interactive = beforeToolCall 挂 broker,edit/execute 弹审批;
- * allow = 不挂钩子全放行(headless/-p 默认——机器驱动场景由调用方自决信任边界);
- * deny = 静态拦截 edit/execute(只读探索),不建 broker。
- */
-export type ApprovalMode = 'interactive' | 'allow' | 'deny';
-
-export interface CliFlags {
-  json: boolean;
-  eventFormat: 'legacy' | 'envelope';
-  prompt?: string;             // -p 一次性模式
-  continue_: boolean;          // --continue
-  resume?: string | true;      // --resume [id](true = 列表选择)
-  workspace?: string;          // canonical global locator disambiguation
-  model?: string;
-  baseUrl?: string;
-  apiKey?: string;
-  provider?: CliProvider;
-  fauxScript?: string;         // --faux-script <path>(FauxScript 的可序列化子集)
-  cwd?: string;
-  sessionDir?: string;         // 测试/e2e 隔离用
-  noColor: boolean;
-  approvalMode?: ApprovalMode; // 缺省按形态定:交互 TUI/classic → interactive,headless/-p → allow
-}
-
-export type CliProvider = 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'faux';
-
-/** v1 public id 与 Runtime 私有 legacy mirror id；任意 opaque ThreadId 仍只走 equals form。 */
-const SESSION_ID_RE = /^(?:\d{8}-\d{6}-|runtime-[0-9a-f]{40}$)/;
-
 export function parseFlags(argv: string[]): CliFlags {
-  const flags: CliFlags = {
-    json: false,
-    eventFormat: 'legacy',
-    continue_: false,
-    noColor: false,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i] as string;
-    const next = (): string | undefined => argv[i + 1];
-    const take = (): string => {
-      const v = next();
-      if (v === undefined || v.startsWith('--')) throw new Error(`flag ${a} requires a value`);
-      i++;
-      return v;
-    };
-    if (a.startsWith('--event-format=')) {
-      flags.eventFormat = parseEventFormat(a.slice('--event-format='.length));
-      continue;
-    }
-    if (a.startsWith('--resume=')) {
-      const value = a.slice('--resume='.length);
-      if (value.length === 0) throw new Error('flag --resume requires a non-empty value after =');
-      flags.resume = value;
-      continue;
-    }
-    if (a.startsWith('--workspace=')) {
-      const value = a.slice('--workspace='.length);
-      if (value.length === 0) throw new Error('flag --workspace requires a non-empty value after =');
-      flags.workspace = value;
-      continue;
-    }
-    switch (a) {
-      case '--json': flags.json = true; break;
-      case '--event-format': flags.eventFormat = parseEventFormat(take()); break;
-      case '-p': case '--prompt': flags.prompt = take(); break;
-      case '--continue': flags.continue_ = true; break;
-      case '--resume': {
-        // --resume 的可选值必须形如旧会话 id 或 Runtime legacy mirror id；
-        // 否则视为无 id 的 --resume(列表选择),该值不吞——留在 argv 按裸 prompt 处理
-        // (coda --resume "改个 bug" 的 "改个 bug" 是 prompt,不是 id)。
-        const v = next();
-        if (v !== undefined && SESSION_ID_RE.test(v)) { flags.resume = v; i++; }
-        else flags.resume = true;
-        break;
-      }
-      case '--workspace': flags.workspace = take(); break;
-      case '--model': flags.model = take(); break;
-      case '--base-url': flags.baseUrl = take(); break;
-      case '--api-key': flags.apiKey = take(); break;
-      case '--provider': {
-        const v = take();
-        if (
-          v !== 'openai-chat' &&
-          v !== 'openai-responses' &&
-          v !== 'anthropic-messages' &&
-          v !== 'faux'
-        ) {
-          throw new Error(`unknown provider: ${v}`);
-        }
-        flags.provider = v;
-        break;
-      }
-      case '--faux-script': flags.fauxScript = take(); break;
-      case '--approval-mode': {
-        const v = take();
-        if (v !== 'interactive' && v !== 'allow' && v !== 'deny') {
-          throw new Error(`unknown approval mode: ${v} (expected interactive|allow|deny)`);
-        }
-        flags.approvalMode = v;
-        break;
-      }
-      case '--cwd': flags.cwd = take(); break;
-      case '--session-dir': flags.sessionDir = take(); break;
-      case '--no-color': flags.noColor = true; break;
-      default:
-        if (a.startsWith('-')) throw new Error(`unknown flag: ${a}`);
-        // 裸参数视为 -p 文本(便利:coda "做点什么")
-        flags.prompt = flags.prompt === undefined ? a : `${flags.prompt} ${a}`;
-    }
-  }
-  if (flags.eventFormat === 'envelope' && !flags.json) {
-    throw new Error('--event-format=envelope requires --json');
-  }
-  return flags;
-}
-
-function parseEventFormat(value: string): CliFlags['eventFormat'] {
-  if (value !== 'legacy' && value !== 'envelope') {
-    throw new Error(`unknown event format: ${value} (expected legacy|envelope)`);
-  }
-  return value;
+  return parseCliInvocation(argv).flags;
 }
 
 export interface ResolvedConfig {
@@ -159,6 +42,46 @@ export interface TuiTerminalState {
   term?: string;
 }
 
+export type InteractiveCliSurface = 'tui' | 'classic' | 'accessible' | 'plain';
+
+export type InteractiveUiResolution =
+  | { readonly ok: true; readonly surface: InteractiveCliSurface }
+  | { readonly ok: false; readonly message: string };
+
+/** 显式 --ui 与 auto 共用的纯路由；只选择前端，不读取或改变 Runtime 状态。 */
+export function resolveInteractiveUi(
+  mode: CliUiMode,
+  terminal: TuiTerminalState,
+): InteractiveUiResolution {
+  const fullTerminal = terminal.stdinIsTTY && terminal.stdoutIsTTY && terminal.term !== 'dumb';
+  switch (mode) {
+    case 'auto':
+      return { ok: true, surface: fullTerminal ? 'tui' : 'accessible' };
+    case 'tui':
+      return fullTerminal
+        ? { ok: true, surface: 'tui' }
+        : {
+            ok: false,
+            message: '--ui=tui requires TTY stdin/stdout and TERM other than dumb; use --ui=accessible',
+          };
+    case 'classic':
+      return fullTerminal
+        ? { ok: true, surface: 'classic' }
+        : {
+            ok: false,
+            message: '--ui=classic requires TTY stdin/stdout and TERM other than dumb; use --ui=accessible',
+          };
+    case 'accessible':
+      return terminal.stdinIsTTY
+        ? { ok: true, surface: 'accessible' }
+        : { ok: false, message: '--ui=accessible requires TTY stdin; use a prompt or pipe for one-shot mode' };
+    case 'plain':
+      return terminal.stdinIsTTY
+        ? { ok: true, surface: 'plain' }
+        : { ok: false, message: '--ui=plain requires TTY stdin; use a prompt or pipe for one-shot mode' };
+  }
+}
+
 /** API key 边界统一去掉误带空白；全空白与未配置同义，不能遮蔽低优先级来源。 */
 function normalizeApiKey(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -167,13 +90,14 @@ function normalizeApiKey(value: string | undefined): string | undefined {
 
 /** 与 main.ts 的实际分派共用同一个纯判定，避免缺 key 策略和 UI 路由漂移。 */
 export function isFullScreenTuiEligible(
-  flags: Pick<CliFlags, 'json' | 'eventFormat' | 'prompt'>,
+  flags: Pick<CliFlags, 'json' | 'eventFormat' | 'prompt'> & { readonly ui?: CliUiMode },
   terminal: TuiTerminalState,
 ): boolean {
   return (
     !flags.json &&
     flags.eventFormat !== 'envelope' &&
     flags.prompt === undefined &&
+    (flags.ui === undefined || flags.ui === 'auto' || flags.ui === 'tui') &&
     terminal.stdinIsTTY &&
     terminal.stdoutIsTTY &&
     terminal.term !== 'dumb'
@@ -210,7 +134,7 @@ export function readConfigFile(file = path.join(runtimeHomeDir(), '.coda', 'conf
     // 损坏的 config 不静默吞:用户改错一行会以为配置生效(docs/09 §7 缺 key 报错要可执行,
     // 同理坏文件要可见)。stderr 一行警告后按无配置继续,不阻断启动。
     console.error(
-      `[coda] warning: ignoring invalid JSON in ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      `[coda] warning: ignoring invalid JSON in ${sanitizeTerminalLine(file)}: ${sanitizeTerminalError(err)}`,
     );
     return {};
   }

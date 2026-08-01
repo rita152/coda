@@ -13,3 +13,7 @@ export function sanitizeTerminalLine(text: string): string {
 }
 
 export const sanitizeTerminalTitle = sanitizeTerminalLine;
+
+export function sanitizeTerminalError(error: unknown): string {
+  return sanitizeTerminalLine(error instanceof Error ? error.message : String(error));
+}

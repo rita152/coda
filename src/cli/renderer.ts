@@ -18,6 +18,7 @@ import type {
   CliSessionEvent as SessionEvent,
   CliSessionUsage as SessionUsage,
 } from './frontend-types.js';
+import { sanitizeTerminalLine, sanitizeTerminalText } from './terminal-sanitize.js';
 
 export interface RendererOptions {
   color: boolean;
@@ -31,7 +32,7 @@ export interface Renderer {
   drain(): Promise<void>;
   // ---- 以下为 repl 专用扩展(main.ts 不感知;plain 模式下多为 no-op)----
   /** 输入行内容进动态区(repl 管键位与输入状态,渲染归这里)。 */
-  setInputLine?(text: string): void;
+  setInputLine?(text: string, cursor?: number): void;
   /** 临时状态提示(如「再按一次 Ctrl+C 退出」);undefined 清除。 */
   setStatus?(text: string | undefined): void;
   /** 转录区追加一行(斜杠命令 /status /queue /help 的输出)。 */
@@ -83,7 +84,7 @@ export function charWidth(cp: number): number {
 
 export function displayWidth(s: string): number {
   let w = 0;
-  for (const ch of s) w += charWidth(ch.codePointAt(0) ?? 0);
+  for (const grapheme of graphemes(s)) w += graphemeWidth(grapheme);
   return w;
 }
 
@@ -92,8 +93,8 @@ export function truncateToWidth(s: string, max: number): string {
   if (displayWidth(s) <= max) return s;
   let w = 0;
   let out = '';
-  for (const ch of s) {
-    const cw = charWidth(ch.codePointAt(0) ?? 0);
+  for (const ch of graphemes(s)) {
+    const cw = graphemeWidth(ch);
     if (w + cw > max - 1) break; // 给 … 留 1 列
     out += ch;
     w += cw;
@@ -114,16 +115,113 @@ export function sanitizeDynText(s: string): string {
 /** 尾部截断:保留末端(流式尾行/输入行要看最新内容)。 */
 export function tailToWidth(s: string, max: number): string {
   if (displayWidth(s) <= max) return s;
-  const chars = [...s];
+  const chars = graphemes(s);
   let w = 0;
   let start = chars.length;
   for (let i = chars.length - 1; i >= 0; i--) {
-    const cw = charWidth(chars[i]?.codePointAt(0) ?? 0);
+    const cw = graphemeWidth(chars[i] ?? '');
     if (w + cw > max - 1) break;
     w += cw;
     start = i;
   }
   return `…${chars.slice(start).join('')}`;
+}
+
+export interface ClassicInputLayout {
+  readonly lines: readonly string[];
+  readonly cursorRow: number;
+  readonly cursorColumn: number;
+}
+
+/** Multiline classic composer layout with a cursor-bearing window around the active row. */
+export function layoutClassicInput(
+  text: string,
+  cursor: number,
+  width: number,
+  maxRows = 8,
+): ClassicInputLayout {
+  // Render and measure the exact same representation. A tab occupies two cells in the
+  // classic dynamic area, so expand it before wrapping and cursor-offset mapping.
+  const normalize = (value: string): string => sanitizeTerminalText(value).replaceAll('\t', '  ');
+  const clean = normalize(text);
+  const cleanCursor = normalize(text.slice(0, Math.max(0, cursor))).length;
+  const terminalWidth = Math.max(4, width);
+  const lines: string[] = [];
+  const prefixes: string[] = [];
+  let content = '';
+  let contentWidth = 0;
+  let sourceOffset = 0;
+  let cursorRow = 0;
+  let cursorColumn = 2;
+
+  const startLine = (): void => {
+    prefixes.push(lines.length === 0 ? '> ' : '  ');
+    content = '';
+    contentWidth = 0;
+  };
+  const finishLine = (): void => {
+    const prefix = prefixes[lines.length] ?? (lines.length === 0 ? '> ' : '  ');
+    lines.push(`${prefix}${content}`);
+  };
+  const captureCursor = (): void => {
+    cursorRow = lines.length;
+    const prefix = prefixes[lines.length] ?? (lines.length === 0 ? '> ' : '  ');
+    cursorColumn = displayWidth(prefix) + contentWidth;
+  };
+
+  startLine();
+  if (cleanCursor === 0) captureCursor();
+  for (const token of graphemes(clean)) {
+    if (sourceOffset === cleanCursor) captureCursor();
+    if (token === '\n') {
+      finishLine();
+      sourceOffset += token.length;
+      startLine();
+      if (sourceOffset === cleanCursor) captureCursor();
+      continue;
+    }
+    const tokenWidth = graphemeWidth(token);
+    const available = terminalWidth - 2;
+    if (content !== '' && contentWidth + tokenWidth > available) {
+      finishLine();
+      startLine();
+      if (sourceOffset === cleanCursor) captureCursor();
+    }
+    content += token;
+    contentWidth += tokenWidth;
+    sourceOffset += token.length;
+    if (sourceOffset === cleanCursor) captureCursor();
+  }
+  finishLine();
+
+  const visibleRows = Math.max(1, maxRows);
+  if (lines.length <= visibleRows) return { lines, cursorRow, cursorColumn };
+  const start = Math.min(
+    Math.max(0, cursorRow - Math.floor(visibleRows / 2)),
+    lines.length - visibleRows,
+  );
+  return {
+    lines: lines.slice(start, start + visibleRows),
+    cursorRow: cursorRow - start,
+    cursorColumn,
+  };
+}
+
+const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+  : undefined;
+
+function graphemes(value: string): string[] {
+  return GRAPHEME_SEGMENTER === undefined
+    ? [...value]
+    : [...GRAPHEME_SEGMENTER.segment(value)].map((segment) => segment.segment);
+}
+
+function graphemeWidth(value: string): number {
+  if (/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(value)) return 2;
+  let width = 0;
+  for (const character of value) width += charWidth(character.codePointAt(0) ?? 0);
+  return width;
 }
 
 // ---- 工具头单行摘要(docs/09 §4 表:用 args 生成,不等结果)----
@@ -199,6 +297,9 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   // 动态区状态
   let dynRows = 0;
   let input: string | undefined; // undefined = repl 未接管(-p 模式无输入行)
+  let inputCursor = 0;
+  let cursorPlacement: { row: number; column: number } | undefined;
+  let cursorRowsAboveBottom = 0;
   let status: string | undefined;
   let approvalPrompt: string | undefined; // M6 审批提示(docs/09 §4:动态区变审批提示行)
   let activity: string | undefined;
@@ -221,6 +322,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   const width = (): number => (typeof out.columns === 'number' && out.columns > 0 ? out.columns : 80);
 
   function clearDyn(): void {
+    if (cursorRowsAboveBottom > 0) {
+      write(`\x1b[${cursorRowsAboveBottom}B\r`);
+      cursorRowsAboveBottom = 0;
+    }
     if (dynRows > 0) {
       write(`\x1b[${dynRows}F\x1b[J`);
       dynRows = 0;
@@ -253,7 +358,16 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       line += `  ${paint(`${usage.cumulative.input + usage.cumulative.output} tok`, DIM)}`;
     }
     lines.push(truncVisible(line, w - 1));
-    if (input !== undefined) lines.push(tailToWidth(sanitizeDynText(`> ${input}`), w - 1));
+    cursorPlacement = undefined;
+    if (input !== undefined) {
+      const layout = layoutClassicInput(input, inputCursor, w - 1);
+      const startRow = lines.length;
+      lines.push(...layout.lines);
+      cursorPlacement = {
+        row: startRow + layout.cursorRow,
+        column: layout.cursorColumn,
+      };
+    }
     return lines;
   }
 
@@ -269,6 +383,13 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     const lines = composeDynLines();
     write(`${lines.join('\n')}\n`);
     dynRows = lines.length;
+    if (cursorPlacement !== undefined) {
+      cursorRowsAboveBottom = dynRows - cursorPlacement.row;
+      write(
+        `\x1b[${cursorRowsAboveBottom}A\r` +
+          (cursorPlacement.column > 0 ? `\x1b[${cursorPlacement.column}C` : ''),
+      );
+    }
   }
 
   function redrawDyn(): void {
@@ -299,6 +420,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   // ---- 流式文本 ----
 
   function streamAppend(delta: string, kind: 'text' | 'reasoning'): void {
+    delta = sanitizeTerminalText(delta);
     if (!ansi) {
       write(kind === 'reasoning' ? paint(delta, DIM_ITALIC) : delta);
       midLine = !delta.endsWith('\n');
@@ -347,7 +469,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         // 不渲染参数流,动态区提示 preparing <name>…(docs/09 §4)
         const part = ev.partial.content[ev.contentIndex];
         const name = part !== undefined && part.type === 'tool_call' ? part.name : 'tool';
-        activity = `preparing ${name}…`;
+        activity = `preparing ${sanitizeTerminalLine(name)}…`;
         redrawDyn();
         break;
       }
@@ -357,10 +479,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   }
 
   function userEcho(m: UserMessage): void {
-    const text = m.content
+    const text = sanitizeTerminalText(m.content
       .map((p) => (p.type === 'text' ? p.text : '[image]'))
       .join('\n')
-      .trimEnd();
+      .trimEnd());
     switch (m.source) {
       case 'steering':
         appendLines(paint(`» steering: ${text}`, CYAN));
@@ -380,7 +502,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     if (m.stopReason === 'length') appendLine(paint('[output truncated by model limit]', YELLOW));
     else if (m.stopReason === 'aborted') appendLine(paint('[aborted]', YELLOW));
     else if (m.stopReason === 'error') {
-      appendLine(paint(`[error] ${m.errorMessage ?? 'provider error'}`, RED));
+      appendLine(paint(`[error] ${sanitizeTerminalLine(m.errorMessage ?? 'provider error')}`, RED));
     }
   }
 
@@ -388,7 +510,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     const d = asRecord(result.details);
     const parts: string[] = [];
     const p = str(d['path']);
-    if (p !== undefined) parts.push(shortenPath(p));
+    if (p !== undefined) parts.push(shortenPath(sanitizeTerminalLine(p)));
     if (typeof d['totalLines'] === 'number') parts.push(`(${d['totalLines']} lines)`);
     if (typeof d['additions'] === 'number' && typeof d['deletions'] === 'number') {
       parts.push(`+${d['additions']} -${d['deletions']}`);
@@ -397,14 +519,15 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   }
 
   function onToolEnd(result: ToolResultMessage): void {
-    const head = firstLine(
+    const head = sanitizeTerminalLine(firstLine(
       result.content.find((p): p is { type: 'text'; text: string } => p.type === 'text')?.text ?? '',
-    );
+    ));
+    const toolName = sanitizeTerminalLine(result.toolName);
     if (result.isError) {
-      appendLine(paint(`  ✗ ${result.toolName}: ${truncateToWidth(head, 100)}`, RED));
+      appendLine(paint(`  ✗ ${toolName}: ${truncateToWidth(head, 100)}`, RED));
     } else {
       const suffix = detailsSuffix(result) ?? (head !== '' ? `· ${truncateToWidth(head, 80)}` : '');
-      appendLine(`  ${paint('✓', GREEN)} ${result.toolName}${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`);
+      appendLine(`  ${paint('✓', GREEN)} ${toolName}${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`);
     }
     renderDiff(result.details);
   }
@@ -413,7 +536,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   function renderDiff(details: unknown): void {
     const diff = str(asRecord(details)['diff']);
     if (diff === undefined || diff === '') return;
-    const lines = diff.replace(/\n$/, '').split('\n');
+    const lines = sanitizeTerminalText(diff).replace(/\n$/, '').split('\n');
     for (const line of lines.slice(0, DIFF_MAX_LINES)) {
       let code: string | undefined;
       if (line.startsWith('+') && !line.startsWith('+++')) code = GREEN;
@@ -479,8 +602,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'tool_execution_start': {
         approvalPrompt = undefined; // 审批已决议(放行或拒绝都会走到 start),提示撤下
         const headline = toolHeadline(e.toolName, e.args);
-        if (headline !== undefined) appendLine(`${paint('●', CYAN)} ${headline}`);
-        activity = `${e.toolName} running…`;
+        if (headline !== undefined) appendLine(`${paint('●', CYAN)} ${sanitizeTerminalLine(headline)}`);
+        activity = `${sanitizeTerminalLine(e.toolName)} running…`;
         activityTail = undefined;
         redrawDyn();
         break;
@@ -489,7 +612,9 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         const output = e.update.output;
         if (typeof output === 'string') {
           // 工具流式输出(bash 等)常含 \t/\r,同样先清洗再按显示宽度截断
-          const tail = sanitizeDynText(output.trimEnd().split('\n').pop() ?? '');
+          const tail = sanitizeDynText(
+            sanitizeTerminalText(output).trimEnd().split('\n').pop() ?? '',
+          );
           activityTail = truncateToWidth(tail, 60);
           redrawDyn();
         }
@@ -512,18 +637,22 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'plan_update':
         for (const s of e.steps) {
           const glyph = s.status === 'completed' ? '✔' : s.status === 'in_progress' ? '▶' : '○';
-          appendLine(`${glyph} ${s.step}`);
+          appendLine(`${glyph} ${sanitizeTerminalLine(s.step)}`);
         }
         break;
       case 'approval_request':
         // M6(docs/09 §4):转录区一行留痕(plain/headless 可读),动态区切审批提示;
         // 键位表由 repl 同步切审批模式,提示与键位来自同一事件,不会失配。
-        appendLine(paint(`? approval required: ${e.description}`, YELLOW));
-        approvalPrompt = `Allow ${e.description}? [y=once / a=always / n=deny / Esc=abort]`;
+        appendLine(paint(`? approval required: ${sanitizeTerminalLine(e.description)}`, YELLOW));
+        approvalPrompt = `Allow ${sanitizeTerminalLine(e.description)}? [y=once / a=always / n=deny / Esc=abort]`;
         redrawDyn();
         break;
       case 'error':
-        appendLine(e.fatal ? paint(`✖ fatal: ${e.message}`, RED) : paint(`⚠ ${e.message}`, YELLOW));
+        appendLine(
+          e.fatal
+            ? paint(`✖ fatal: ${sanitizeTerminalLine(e.message)}`, RED)
+            : paint(`⚠ ${sanitizeTerminalLine(e.message)}`, YELLOW),
+        );
         break;
       case 'usage_update':
         usage = e.usage;
@@ -531,7 +660,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         break;
       case 'retry_scheduled':
         appendLine(
-          paint(`↻ retry ${e.attempt}/${e.maxAttempts} in ${e.delayMs}ms: ${e.errorMessage}`, YELLOW),
+          paint(
+            `↻ retry ${e.attempt}/${e.maxAttempts} in ${e.delayMs}ms: ${sanitizeTerminalLine(e.errorMessage)}`,
+            YELLOW,
+          ),
         );
         break;
       case 'compaction_start':
@@ -555,9 +687,14 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         userEcho(m);
       } else if (m.role === 'assistant') {
         for (const part of m.content) {
-          if (part.type === 'text') appendLines(part.text.trimEnd());
-          else if (part.type === 'reasoning') appendLines(paint(part.text.trimEnd(), DIM_ITALIC));
-          else appendLine(`${paint('●', CYAN)} ${toolHeadline(part.name, part.arguments) ?? part.name}`);
+          if (part.type === 'text') appendLines(sanitizeTerminalText(part.text).trimEnd());
+          else if (part.type === 'reasoning') {
+            appendLines(paint(sanitizeTerminalText(part.text).trimEnd(), DIM_ITALIC));
+          } else {
+            appendLine(
+              `${paint('●', CYAN)} ${sanitizeTerminalLine(toolHeadline(part.name, part.arguments) ?? part.name)}`,
+            );
+          }
         }
         assistantEndWarnings(m);
       } else {
@@ -571,16 +708,19 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     render,
     replayTranscript,
     drain: () => out.drain(),
-    setInputLine(text: string): void {
+    setInputLine(text: string, cursor = text.length): void {
+      // layoutClassicInput sanitizes the original text and its original cursor prefix together;
+      // retaining the source here keeps CRLF/control-sequence length changes cursor-safe.
       input = text;
+      inputCursor = Math.max(0, Math.min(cursor, text.length));
       redrawDyn();
     },
     setStatus(text: string | undefined): void {
-      status = text;
+      status = text === undefined ? undefined : sanitizeTerminalLine(text);
       redrawDyn();
     },
     println(text: string): void {
-      appendLine(text);
+      appendLines(sanitizeTerminalText(text));
     },
     mount(): void {
       if (!ansi) return;

@@ -2616,6 +2616,27 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
 无论选择哪条 composition，canonical wire 仍是同一 RuntimeOp/EventEnvelope/control 协议；差别只在
 turn 的 capability/provider/policy 来源。static 与 registry service 不得在同一 attachment 中部分混用。
 
+### 11.2 UX1 CLI product edge
+
+UX1 增加的可发现性入口不改变 Runtime 的事实边界：
+
+| 入口 | 允许依赖/副作用 | 禁止行为 |
+|---|---|---|
+| `-h/--help`、`-V/--version`、completion、usage error | 纯 command catalog、build metadata、终端错误清洗 | 读 env/config/HOME，创建目录，注册 signal，加载 provider/OpenTUI，网络 |
+| `doctor`、`auth status`、`models` | CLI edge 的只读 config/provider catalog；显式 login/logout/select 才可更新对应 edge 配置 | 创建/attach thread，写 runtime journal，把 provider 默认选择冒充 thread model |
+| `sessions` | 构造 RuntimePort 后只调用 `listThreads()`，随后 close | 直读 repository/storage private state，创建/resume thread，触发 truncated retention 删除 |
+| `exec`、裸 prompt、`-p`、交互 frontend | 同一个 CLI composition root 与 RuntimePort op/query | 另建 Agent/Session 执行状态机或改变 legacy wire |
+
+`ProviderRegistry.selected` 是“下一次 CLI composition 的用户默认值”，不是任何已存在 thread 的权威
+model。`coda models --select` 因此可保持零 thread/journal；真正 prompt/resume 时 composition root 才把解析
+出的完整 `ModelConfig` 交给 Runtime。已有 attachment 的 `/model` 仍须经
+`InteractiveRuntime`/RuntimePort 模型配置适配，UI 不得只改 footer 或本地字段后宣称切换成功。
+
+OpenTUI、classic、accessible/plain 都只消费 `RuntimeFrontendSession` 从 RuntimePort snapshot/query 与
+EventEnvelope 折叠出的 projection；其 renderer 可以维护 draft/cursor/scroll 等 presentation state，但
+不得拥有第二份 thread/run/control/usage/permission 状态。CLI-edge provider 配置不是 Runtime 业务状态的
+旁路：它只在 attach 之前提供 composition 输入，attach 之后的业务动作仍以 RuntimePort 为唯一入口。
+
 CLI session 选择另有一个显式安全收紧：阶段 0 的 `Session.list`、`--continue` 和 `--resume` 使用整个
 session dir，跨 cwd resume 后却在**本次 invocation cwd** 执行。阶段 1 仍以 global legacy catalog
 选择同一项，但打开 `MetaRecord.cwd` 所属 workspace，并在该 recorded cwd 执行/计算权限；cwd 不同会

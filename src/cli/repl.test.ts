@@ -28,7 +28,10 @@ import {
   InputHistory,
   interactionCanAbort,
   interactionEnterState,
+  moveMultilineCursor,
+  nextGraphemeBoundary,
   parseSlashCommand,
+  previousGraphemeBoundary,
   SLASH_COMMAND_SPECS,
   startRepl,
 } from './repl.js';
@@ -169,6 +172,25 @@ describe('InputHistory:本会话输入历史环(↑/↓)', () => {
     h.up('');
     h.push('c');
     expect(h.up('')).toBe('c');
+  });
+});
+
+describe('classic composer grapheme 光标与多行纵向移动', () => {
+  it('left/right 永远落在 ZWJ emoji 与 CJK 的 grapheme 边界', () => {
+    const text = 'A👩‍💻中B';
+    const afterEmoji = 'A👩‍💻'.length;
+    expect(previousGraphemeBoundary(text, afterEmoji)).toBe(1);
+    expect(nextGraphemeBoundary(text, 1)).toBe(afterEmoji);
+    expect(nextGraphemeBoundary(text, afterEmoji)).toBe(afterEmoji + 1);
+  });
+
+  it('上下移动保持 grapheme 列，目标行较短时落在行尾', () => {
+    const text = 'A👩‍💻B\n中\n12🙂x';
+    const firstLineCursor = 'A👩‍💻'.length;
+    const secondLineEnd = text.indexOf('\n', text.indexOf('\n') + 1);
+    expect(moveMultilineCursor(text, firstLineCursor, 1)).toBe(secondLineEnd);
+    expect(moveMultilineCursor(text, secondLineEnd, 1)).toBe(text.indexOf('2'));
+    expect(moveMultilineCursor(text, text.indexOf('🙂'), -1)).toBe(secondLineEnd);
   });
 });
 
@@ -431,6 +453,69 @@ describe('classic REPL 输入错误边界', () => {
     enter();
     await expect(exit).resolves.toBe(0);
   });
+
+  it('Shift+Enter 换行、光标插入与 bracketed paste 全程不误发送', async () => {
+    const stdin = new TestTtyInput();
+    const prompts: string[] = [];
+    const inputs: Array<{ text: string; cursor: number | undefined }> = [];
+    let closed = 0;
+    let mounts = 0;
+    let unmounts = 0;
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async (text) => {
+        prompts.push(text);
+      },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => {
+        closed++;
+      },
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => undefined,
+      setInputLine: (text, cursor) => inputs.push({ text, cursor }),
+      mount: () => {
+        mounts++;
+      },
+      unmount: () => {
+        unmounts++;
+      },
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+
+    const running = startRepl(session, renderer, undefined, { stdin });
+    type('first');
+    stdin.emit('keypress', undefined, { name: 'return', shift: true });
+    type('A👩‍💻B');
+    stdin.emit('keypress', undefined, { name: 'left' });
+
+    stdin.emit('keypress', '\x1b[200~', { name: 'paste-start' });
+    stdin.emit('keypress', 'X\n中\x1b[201~', {});
+
+    const expected = 'first\nA👩‍💻X\n中B';
+    expect(prompts).toEqual([]);
+    expect(inputs.at(-1)).toEqual({ text: expected, cursor: expected.length - 1 });
+
+    stdin.emit('keypress', undefined, { name: 'return' });
+    expect(prompts).toEqual([expected]);
+    expect(inputs.at(-1)).toEqual({ text: '', cursor: 0 });
+
+    type('/quit');
+    stdin.emit('keypress', undefined, { name: 'return' });
+    await expect(running).resolves.toBe(0);
+    expect(stdin.rawModeChanges).toEqual([true, false]);
+    expect({ closed, mounts, unmounts }).toEqual({ closed: 1, mounts: 1, unmounts: 1 });
+  });
 });
 
 describe('classic REPL provider 命令与秘密输入', () => {
@@ -496,34 +581,20 @@ describe('classic REPL provider 命令与秘密输入', () => {
 
       emitText('/login');
       enter();
-      await waitFor(() => statuses.at(-1)?.startsWith('选择登录方式') === true);
-      emitText('2');
-      enter();
-      await waitFor(() =>
-        statuses.at(-1)?.startsWith('选择 API key provider') === true,
-      );
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 1]') === true);
       emitText('1');
       enter();
-      await waitFor(() => statuses.at(-1)?.startsWith('OpenCode Go API key') === true);
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 2] OpenCode Go API key') === true);
 
       emitText(cancelledSecret);
       escape();
-      await waitFor(() =>
-        statuses.at(-1)?.startsWith('选择 API key provider') === true,
-      );
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 1]') === true);
       expect([...inputLines, ...printed, ...statuses].join('\n')).not.toContain(cancelledSecret);
       expect(printed).not.toContain('已取消');
 
-      escape();
-      await waitFor(() => statuses.at(-1)?.startsWith('选择登录方式') === true);
-      emitText('2');
-      enter();
-      await waitFor(() =>
-        statuses.at(-1)?.startsWith('选择 API key provider') === true,
-      );
       emitText('1');
       enter();
-      await waitFor(() => statuses.at(-1)?.startsWith('OpenCode Go API key') === true);
+      await waitFor(() => statuses.at(-1)?.startsWith('[步骤 2] OpenCode Go API key') === true);
 
       emitText(secret);
       expect(inputLines.at(-1)).toBe('•'.repeat(secret.length));

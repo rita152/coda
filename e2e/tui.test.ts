@@ -81,9 +81,115 @@ function waitForPtyExit(
   });
 }
 
+async function runPty(
+  root: string,
+  env: Record<string, string>,
+  args: readonly string[],
+  input: string,
+  readyMarker?: string,
+): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+  const driverPath = path.join(root, `expect-${crypto.randomUUID()}.tcl`);
+  writeFileSync(driverPath, [
+    'set timeout 15',
+    'set ready [lindex $argv 0]',
+    'set payload [lindex $argv 1]',
+    'set command [lrange $argv 2 end]',
+    'spawn -noecho {*}$command',
+    'if {$ready ne ""} {',
+    '  expect {',
+    '    -exact $ready { send -- $payload }',
+    '    timeout { exit 124 }',
+    '    eof {}',
+    '  }',
+    '} elseif {$payload ne ""} {',
+    '  send -- $payload',
+    '}',
+    'expect eof',
+    'set status [wait]',
+    'exit [lindex $status 3]',
+    '',
+  ].join('\n'), 'utf8');
+  const child = Bun.spawn(
+    [
+      '/usr/bin/expect',
+      '-f',
+      driverPath,
+      readyMarker ?? '',
+      input,
+      Bun.argv[0] as string,
+      '--no-env-file',
+      DIST_MAIN,
+      ...args,
+    ],
+    {
+      cwd: root,
+      env,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
+
+  let stdout = '';
+  let stderr = '';
+  const stdoutDone = pumpText(child.stdout, (chunk) => {
+    stdout += chunk;
+  });
+  const stderrDone = pumpText(child.stderr, (chunk) => {
+    stderr += chunk;
+  });
+  const completion = Promise.all([child.exited, stdoutDone, stderrDone]).then(
+    ([exitCode]) => exitCode,
+  );
+  void completion.catch(() => undefined);
+  try {
+    const code = await waitForPtyExit(
+      completion,
+      child,
+      () => `stdout=${JSON.stringify(stdout)}\nstderr=${JSON.stringify(stderr)}`,
+    );
+    return { code, stdout, stderr };
+  } finally {
+    child.kill();
+  }
+}
+
 beforeAll(() => {
   requireDist();
 });
+
+test.skipIf(process.platform !== 'darwin')(
+  'auth login 的 preset、普通字段和秘密字段都可用 Ctrl+D 取消并返回 130',
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-auth-eof-'));
+    const home = path.join(root, '.home');
+    const env: Record<string, string> = {
+      ...sanitizedTestEnvironment(Bun.env),
+      HOME: home,
+      USERPROFILE: home,
+      TERM: 'xterm-256color',
+      NO_COLOR: '1',
+    };
+    assertSanitizedTestEnvironment(env);
+
+    try {
+      const cases = [
+        { args: ['auth', 'login'], marker: 'Preset number or name' },
+        { args: ['auth', 'login', '--preset', 'custom'], marker: 'Provider name' },
+        { args: ['auth', 'login', '--preset', 'openai'], marker: 'API key' },
+      ] as const;
+      for (const item of cases) {
+        const result = await runPty(root, env, item.args, '\x04', item.marker);
+        expect(result.code, JSON.stringify(result)).toBe(130);
+        expect(result.stderr).toBe('');
+        expect(result.stdout).toContain('[coda] login cancelled');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  { timeout: CASE_TIMEOUT_MS },
+);
 
 test.skipIf(process.platform !== 'darwin')(
   '无 COLORTERM 的真实 PTY 使用 SGR 49 透明背景',
@@ -176,6 +282,77 @@ test.skipIf(process.platform !== 'darwin')(
       expect(promptTop).toBeGreaterThan(1);
     } finally {
       child.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  { timeout: CASE_TIMEOUT_MS },
+);
+
+test.skipIf(process.platform !== 'darwin')(
+  'TERM=dumb auto 使用无控制序列的 append-only accessible 面',
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-accessible-pty-'));
+    const home = path.join(root, '.home');
+    const env: Record<string, string> = {
+      ...sanitizedTestEnvironment(Bun.env),
+      HOME: home,
+      USERPROFILE: home,
+      TERM: 'dumb',
+      NO_COLOR: '1',
+      COLUMNS: '80',
+      LINES: '24',
+    };
+    assertSanitizedTestEnvironment(env);
+
+    try {
+      const result = await runPty(
+        root,
+        env,
+        [
+          '--provider', 'faux',
+          '--approval-mode', 'allow',
+          '--cwd', root,
+          '--session-dir', path.join(root, 'sessions'),
+        ],
+        '/help\r/quit\r',
+        'Accessible mode:',
+      );
+      expect(result.code, JSON.stringify(result)).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(result.stdout).toContain('Accessible mode: append-only output.');
+      expect(result.stdout).toContain('Ctrl+C: abort a run or exit while idle');
+      expect(result.stdout).not.toContain('Shift+Enter');
+      expect(result.stdout).not.toContain('PageUp/PageDown');
+      expect(result.stdout).not.toContain('\x1b');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  { timeout: CASE_TIMEOUT_MS },
+);
+
+test.skipIf(process.platform !== 'darwin')(
+  '显式 --ui=tui 在 TERM=dumb 下明确失败且不静默降级',
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-explicit-tui-pty-'));
+    const home = path.join(root, '.home');
+    const env: Record<string, string> = {
+      ...sanitizedTestEnvironment(Bun.env),
+      HOME: home,
+      USERPROFILE: home,
+      TERM: 'dumb',
+      NO_COLOR: '1',
+    };
+    assertSanitizedTestEnvironment(env);
+
+    try {
+      const result = await runPty(root, env, ['--ui=tui'], '');
+      expect(result.code, JSON.stringify(result)).toBe(2);
+      expect(result.stderr).toBe('');
+      expect(result.stdout).toContain('--ui=tui requires TTY stdin/stdout and TERM other than dumb');
+      expect(result.stdout).not.toContain('Accessible mode:');
+      expect(result.stdout).not.toContain('\x1b');
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   },

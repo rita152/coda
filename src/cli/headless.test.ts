@@ -143,6 +143,43 @@ test('initialPrompt 一次性特例:注入 prompt → agent_end(completed) 自�
   expect((user?.['message'] as { content: { text?: string }[] }).content[0]?.text).toBe('say it once');
 });
 
+test('initialPrompt 一次性特例:stdin EOF 不会中止仍在等待的真实异步任务', async () => {
+  const retryGate = signal();
+  const run = await startRun({
+    script: {
+      turns: [
+        {
+          error: {
+            message: 'retry after EOF',
+            details: { kind: 'http', status: 503, retryable: true },
+          },
+        },
+        { events: [{ kind: 'text', text: 'answer after EOF' }] },
+      ],
+      onExhausted: 'emptyStop',
+    },
+    initialPrompt: 'keep running',
+    retry: {
+      jitter: () => 0.5,
+      sleep: async () => {
+        await retryGate.promise;
+        return false;
+      },
+    },
+  });
+
+  await run.waitForEvent((event) =>
+    event.type === 'agent_end' && event['willRetry'] === true);
+  run.stdin.end();
+  retryGate.open();
+
+  await expect(run.exit).resolves.toBe(0);
+  const ends = run.events.filter((event) => event.type === 'agent_end');
+  expect(ends).toHaveLength(2);
+  expect(ends.at(-1)?.['reason']).toBe('completed');
+  expect(JSON.stringify(run.events)).toContain('answer after EOF');
+});
+
 test('initialPrompt 一次性特例:agent_end reason error → exit 1(脚本可感知)', async () => {
   const run = await startRun({
     script: { turns: [{ error: { message: 'provider blew up' } }], onExhausted: 'emptyStop' },

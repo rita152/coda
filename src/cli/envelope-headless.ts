@@ -13,6 +13,7 @@ import type {
 } from '../protocol/index.js';
 import type { RuntimePort } from '../runtime/index.js';
 import type { HeadlessOutput } from './headless.js';
+import { sanitizeTerminalError } from './terminal-sanitize.js';
 
 export type EnvelopeHeadlessOutput =
   | Readonly<EventEnvelope>
@@ -107,7 +108,9 @@ export async function startEnvelopeHeadless(
           });
           await options.stdout.drain();
         } catch (outputError) {
-          console.error('[coda] stdout write failed during envelope shutdown:', outputError);
+          console.error(
+            `[coda] stdout write failed during envelope shutdown: ${sanitizeTerminalError(outputError)}`,
+          );
         }
         finish(1);
       }
@@ -125,7 +128,9 @@ export async function startEnvelopeHeadless(
       try {
         await options.stdout.drain();
       } catch (outputError) {
-        console.error('[coda] stdout write failed after runtime stream failure:', outputError);
+        console.error(
+          `[coda] stdout write failed after runtime stream failure: ${sanitizeTerminalError(outputError)}`,
+        );
       }
       beginShutdown(1, 'event_stream');
     }

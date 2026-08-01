@@ -982,6 +982,14 @@ describe('TUI 安全渲染与转录恢复', () => {
       '\x1b]52;c;U0VDUkVU\x07' +
       '\x1b[31mred\x1b[0m' +
       '\x1bP1;2|DCS_SECRET\x1b\\' +
+      '\x1b_APC_SECRET\x1b\\' +
+      '\x1b^PM_SECRET\x1b\\' +
+      '\x1bXSOS_SECRET\x1b\\' +
+      '\x9d52;c;C1_OSC_SECRET\x9c' +
+      '\x90C1_DCS_SECRET\x9c' +
+      '\x9fC1_APC_SECRET\x9c' +
+      '\x9eC1_PM_SECRET\x9c' +
+      '\x98C1_SOS_SECRET\x9c' +
       '\x00\x08\x0b\x7f\x9f';
     const clean = sanitizeTerminalText(raw);
 
@@ -1415,39 +1423,33 @@ describe('TUI 控制器接线', () => {
       await waitForFrame(expected);
     };
 
-    await submit('/login', '选择登录方式');
-    expect(view.frame()).toContain('→ OAuth');
-    expect(view.frame()).toContain('API key');
-    expect(view.frame()).not.toContain('1. OAuth');
-    expect(view.frame()).not.toContain('2. API key');
+    await submit('/login', '[步骤 1]');
+    expect(view.frame()).toContain('→ OpenCode Go');
+    expect(view.frame()).toContain('OpenAI');
+    expect(view.frame()).toContain('Anthropic');
+    expect(view.frame()).toContain('Custom');
+    expect(view.frame()).toContain('OAuth');
+    expect(view.frame()).toContain('disabled');
+    await view.mockInput.typeText('OAuth');
     view.mockInput.pressEnter();
-    await waitForFrame('OAuth 尚未实现');
+    await waitForFrame('coming soon');
 
-    await submit('/login', '选择登录方式');
-    view.mockInput.pressArrow('down');
-    view.mockInput.pressEnter();
-    await waitForFrame('选择 API key provider');
+    await submit('/login', '[步骤 1]');
     expect(view.frame()).toContain('→ OpenCode Go');
     expect(view.frame()).toContain('Custom');
-    view.mockInput.pressEscape();
-    await waitForFrame('选择登录方式');
-    expect(view.frame()).toContain('→ OAuth');
-    expect(view.frame()).not.toContain('已取消');
-
-    view.mockInput.pressArrow('down');
+    await view.mockInput.typeText('OpenCode Go');
     view.mockInput.pressEnter();
-    await waitForFrame('选择 API key provider');
-    view.mockInput.pressEnter();
-    await waitForFrame('OpenCode Go API key');
+    await waitForFrame('[步骤 2] OpenCode Go API key');
     const backedOutSecret = 'sk-tui-back-never-render';
     await view.mockInput.typeText(backedOutSecret);
     view.mockInput.pressEscape();
-    await waitForFrame('选择 API key provider');
+    await waitForFrame('[步骤 1]');
     expect(view.frame()).not.toContain(backedOutSecret);
     expect(view.frame()).not.toContain('已取消');
 
+    await view.mockInput.typeText('OpenCode Go');
     view.mockInput.pressEnter();
-    await waitForFrame('OpenCode Go API key');
+    await waitForFrame('[步骤 2] OpenCode Go API key');
     const secret = 'sk-tui-controller-never-render';
     await view.mockInput.typeText(secret);
     await view.flush();

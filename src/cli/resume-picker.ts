@@ -6,6 +6,7 @@
 import { createInterface } from 'node:readline/promises';
 import process from 'node:process';
 import type { SessionListItem } from '../session/index.js';
+import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
 /** 测试注入口:缺省用 process.stdin / process.stderr。 */
 export interface ResumePickerIO {
@@ -26,7 +27,9 @@ export async function pickSessionInteractive(
   }
 
   const listing = sessions
-    .map((s, i) => `  [${i + 1}] ${s.id}  ${formatTime(s.createdAt)}  ${s.title}`)
+    .map((s, i) =>
+      `  [${i + 1}] ${sanitizeTerminalLine(s.id)}  ${formatTime(s.createdAt)}  ` +
+      sanitizeTerminalLine(s.title))
     .join('\n');
   output.write(`[coda] sessions:\n${listing}\n`);
 

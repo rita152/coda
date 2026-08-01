@@ -50,6 +50,21 @@ test('非 TTY:打印列表后返回 undefined,不等待输入', async () => {
   expect(out).toContain('first session');
 });
 
+test('持久化 session id/title 在写入终端前剥离 CSI/OSC/DCS/C0/C1', async () => {
+  const io = fakeIO({ tty: false });
+  const attack = '\x1b]52;c;PICKER_SECRET\x07\x1b[31mvisible\x1b[0m\x1bPpayload\x1b\\\x00\x9f';
+  const list = items(`title-${attack}`);
+  const first = list[0] as SessionListItem;
+  list[0] = { ...first, id: `id-${attack}` };
+
+  await expect(pickSessionInteractive(list, io)).resolves.toBeUndefined();
+  const out = io.written();
+  expect(out).toContain('visible');
+  expect(out).not.toContain('PICKER_SECRET');
+  expect(out).not.toContain('\x1b');
+  expect(out).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+});
+
 test('TTY:编号选择返回对应会话 id;列表含 id + 标题 + 时间', async () => {
   const io = fakeIO({ tty: true });
   const list = items('first session', 'second session');

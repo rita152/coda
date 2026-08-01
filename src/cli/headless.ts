@@ -1,6 +1,7 @@
 // Headless JSON 模式(规格见 docs/09-cli.md §6):stdin 一行一条命令,stdout 一行一条
 // SessionEvent(NDJSON,原样外发、不包裹信封)。stdout 纪律:除 NDJSON 外零输出,
-// 日志一律走 stderr。生命周期(§6.4):EOF 视同 shutdown;SIGINT/SIGTERM 同 shutdown;
+// 日志一律走 stderr。生命周期(§6.4):普通 headless 的 EOF 视同 shutdown；一次性
+// --json -p 的 EOF 只关闭控制输入，继续等待最终 agent_end。SIGINT/SIGTERM 同 shutdown;
 // shutdown 运行中先 abort → waitForIdle → flush 落盘 → exit 0;致命错误输出
 // {type:'error',fatal:true} 后 exit 1。一次性特例(§6.4):initialPrompt(--json -p)
 // 启动即注入一条 prompt,不带 willRetry 的最终 agent_end 后自动 shutdown——
@@ -14,6 +15,7 @@ import type {
   CliSessionEvent as SessionEvent,
 } from './frontend-types.js';
 import type { CliSession } from './interactive-runtime.js';
+import { sanitizeTerminalError } from './terminal-sanitize.js';
 
 /** stdin 命令(docs/09 §6.2/§6.5):命名对齐内部协议,snake_case 贯穿 wire 面。 */
 export type CliCommand =
@@ -91,7 +93,7 @@ export async function startHeadless(
       } catch (outputErr) {
         if (!outputFailureReported) {
           outputFailureReported = true;
-          console.error('[coda] stdout write failed during shutdown:', outputErr);
+          console.error(`[coda] stdout write failed during shutdown: ${sanitizeTerminalError(outputErr)}`);
         }
       }
       finish(1);
@@ -101,7 +103,7 @@ export async function startHeadless(
   const onOutputFailure = (err: unknown): void => {
     if (outputFailureReported) return;
     outputFailureReported = true;
-    console.error('[coda] stdout write failed:', err);
+    console.error(`[coda] stdout write failed: ${sanitizeTerminalError(err)}`);
     void shutdown(1);
   };
 
@@ -232,7 +234,10 @@ export async function startHeadless(
   const rl = createInterface({ input: opts.stdin, terminal: false });
   rl.on('line', onLine);
   rl.on('close', () => {
-    void shutdown(); // stdin EOF 视同 shutdown
+    // 管道调用通常从一开始就是 EOF。one-shot 已有自身的最终 agent_end 收束条件，
+    // 若在真实 provider 尚未返回时把 EOF 当 shutdown，会把一次性任务竞态 abort。
+    // 非 one-shot 仍保持 legacy EOF=shutdown wire 语义。
+    if (!oneShot) void shutdown();
   });
   opts.stdin.on('error', () => {
     void shutdown();

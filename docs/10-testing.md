@@ -771,15 +771,16 @@ CLI/Agent 的既有行为 fixture。
 8. 以真实 `Session` + faux stream 驱动 TUI controller,通过 mock input 的真实 ANSI PageUp/PageDown 序列验证按键被消费、转录滚动且输入焦点/内容不丢；同时覆盖 retry backoff 的 Enter=steer、Esc=cancel,以及审批时非空 draft 下持久键位先可见、只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。compaction 在本文件用 SessionEvent 投影 + 纯键位决策覆盖；真实摘要 gate、暂存 prompt 与 abort 生命周期由 session 层测试负责,不得把它表述成 controller 集成覆盖。
 9. CLI 配置纯函数钉死“无硬编码默认模型”：TTY 交互无 key/model 可进入未选择状态，headless、
    一次性与管道在 Session 创建前 fail-fast；空白 flag/env/file key 不得遮蔽低优先级有效来源。
-10. `ProviderCommandController` 以 fake view + 离线 registry 覆盖 OAuth 占位、OpenCode 混合协议、
-    Custom 固定协议选项/多名称更新、刷新失败保留配置、`/model` 与 `/logout`、运行中门禁；
+10. `ProviderCommandController` 以 fake view + 离线 registry 覆盖 OpenCode Go/OpenAI/Anthropic/Custom
+    一级 preset、disabled OAuth、OpenCode 混合协议、Custom 固定协议选项/多名称更新、刷新失败保留
+    配置、`/model` 与 `/logout`、运行中门禁；
     gate 还要覆盖退出取消在途 fetch、view 回调重入 close，以及两个 registry 中旧 refresh
     迟到时不能越过 revision CAS。
     fake view 还要断言每个枚举步骤输出结构化 `value/label/description`，不由 controller 打印
     UI 专属编号。TUI/classic 都只接这一个控制器：TUI 用 TestRenderer 断言 `/login` 后 OAuth /
     API key 复用 slash command 的上拉候选层、没有编号、`↑/↓` 改变当前项且 `Enter` 确认；
-    classic 用真实 raw-keypress harness 断言编号/名称兼容输入。两边还要断言 `Esc` 从 secret →
-    provider → OAuth/API key 逐级静默返回、根步骤静默退出，且 API key 永不进入 renderer
+    classic 用真实 raw-keypress harness 断言编号/名称兼容输入。两边还要断言 `Esc` 从 Custom protocol →
+    secret → base URL → name → preset 逐级静默返回、根步骤静默退出，且 API key 永不进入 renderer
     frame/动态行。
 11. `InteractiveRuntime` + 真实 faux Session 覆盖零模型不 create、首次选择才 create/resume、同一
     Session 内跨 provider/model 切换、meta/历史不改写、assistant 保留实际 `ModelRef`、失效选择
@@ -831,7 +832,7 @@ Agent review**。第一轮覆盖全部阶段范围，修复后复跑定向测试
 | 阶段 | 新增机械门禁 | 必须保持的兼容面 |
 |---|---|---|
 | UX0 | `src/cli/ux-characterization.test.ts` 冻结 40×10/80×24/120×40、CJK/emoji、NO_COLOR、TERM=dumb、tmux/SSH 路由和性能数量级；文档记录六旅程/parity | 生产文件零变化；现有 CLI/TUI/headless tests 原样通过 |
-| UX1 | help/version 进程级零副作用探针；command catalog 生成 parser/help/completion/palette；unknown suggestion/互斥/exit/stdout-stderr；onboarding；全 human renderer sanitizer；classic raw-key harness；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 所有旧 flags、裸 prompt、`-p`、continue/resume、默认 legacy NDJSON 与 envelope golden |
+| UX1 | `e2e/product-cli.test.ts` 对构建产物验证 help/version/completion 零副作用、usage stdout/stderr/exit、doctor/auth/models/sessions/exec；`command-catalog.test.ts` 验证统一 parser/help/completion/slash/shortcut；`renderer.test.ts`、`repl.test.ts`、`line-repl.test.ts`、`provider-commands.test.ts`、`tui.test.ts` 覆盖 sanitizer、classic 多行/cursor/paste、accessible 最低模式与 onboarding | 所有旧 flags、裸 prompt、`-p`、continue/resume、默认 legacy NDJSON 与 envelope golden |
 | UX2 | compact header/status、palette availability/fuzzy search；Ctrl+R/editor/stash/`@`/per-thread draft；scroll/search/unread/copy/export；secret taint tests；resize/switch/recovery presentation state | Enter/steer/follow-up/abort/control identity；UI 只读 snapshot/envelope |
 | UX3 | reasoning/tool cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
 | UX4 | accessible ASCII/theme/PTY 加固；frame coalescing/virtualization；output/final-only/ephemeral/timeout；真实 PTY 全退出矩阵；1000 history/10k delta/100ms input | 默认 `--json` 逐字节兼容，普通 observer/慢 UI 不背压 Runtime |
@@ -861,6 +862,17 @@ cleanup directory、Runtime storage、signal 或动态 native import 前退出�
 退出、运行中 abort、fatal、审批 abort、provider 请求中退出、初始化失败 fallback、resize、多行 paste、
 TERM=dumb 和 NO_COLOR，并逐项断言 raw mode、mouse、bracketed paste、title 与 alternate screen 恢复。
 
+UX1 当前门禁还必须机械证明：`sessions` 只经 `RuntimePort.listThreads()` 且不创建 thread/journal；
+`models --select` 只更新 CLI-edge 默认选择且不 attach；`exec` 与旧 one-shot legacy NDJSON 等价；
+真实异步 one-shot 在 stdin 已 EOF 时仍等最终 `agent_end`，构建入口以 top-level await 保持进程存活；
+`TERM=dumb` 的 auto 路由为 append-only accessible，显式 `--ui=tui` 不静默降级；TUI/classic/text
+`/help` 只显示各自真实快捷键。bash/zsh completion 必须以真实 shell 执行，证明 `auth` 与
+`login|logout|status` 是不同 argv 层级，不把 `auth login` 作为单 token；`sessions` 不触发 truncated
+retention 删除。`ux-characterization.test.ts` 中 UX0 的 classic/plain sanitizer debt
+断言在 UX1 翻转为安全断言，旧控制序列透传不再视为兼容行为。
+macOS 的 `e2e/tui.test.ts` 还用真实 PTY/Expect 在看到 accessible 首行后输入 `/help`/`/quit`，断言
+`TERM=dumb` 全程无 ESC 且帮助不虚报 Shift+Enter/PageUp；同一 PTY 中显式 TUI 以 2 退出而不降级。
+
 ## 8. CI 建议
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
@@ -879,6 +891,8 @@ TERM=dumb 和 NO_COLOR，并逐项断言 raw mode、mouse、bracketed paste、ti
 - [x] 阶段 3:registry/snapshot/prepared invocation/provider/prompt/policy、registry Runtime、grant repository 与 package exports 定向矩阵全绿；既有 static 工具/provider 兼容 fixture 保持全绿。
 - [x] UX0:六条旅程、surface/key parity、极端终端环境与性能 baseline 已冻结；完整两轮 Agent review
   后生产文件零变化，characterization、`bun run check` 与 `git diff --check` 全绿。
+- [x] UX1:零副作用 bootstrap、统一 command catalog、产品子命令/onboarding/UI routing、全 human
+  sanitizer、classic 与 accessible 门禁完成；恰好两轮 Agent review 及第二轮修复后的定向门禁全绿。
 
 下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
 而推断未在当前环境重跑的双 OS CI 等外部结果。

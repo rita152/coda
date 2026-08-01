@@ -27,9 +27,11 @@ import {
 } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import {
+  sanitizeTerminalError,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
 } from './terminal-sanitize.js';
+import { renderInteractiveHelp } from './command-catalog.js';
 export { sanitizeTerminalText, sanitizeTerminalTitle };
 import { toolHeadline, truncateToWidth } from './renderer.js';
 import {
@@ -64,13 +66,6 @@ const PIXEL_LOGO = [
   '  ▀███▄▄▄▄███▀',
   '    ▀█▀  ▀█▀',
 ].join('\n');
-
-const HELP_LINES = [
-  'Enter: send (idle) / steer (running) · Shift+Enter: newline',
-  'Alt+Enter or /f <text>: follow-up · PageUp/PageDown: scroll output',
-  'Esc: abort · Esc Esc / Ctrl+C Ctrl+C: quit · Ctrl+D: quit when idle',
-  '/login  /model  /logout  /quit  /queue  /status  /help',
-];
 
 const DIFF_MAX_LINES = 24;
 const COMPOSER_PADDING_X = 1;
@@ -419,7 +414,9 @@ export async function createTuiScreen(
       id: 'coda-brand-copy',
       flexGrow: 1,
       height: 5,
-      content: 'Welcome back!\n\nA coding agent\nfor your workspace',
+      content: opts.model === undefined
+        ? 'Welcome!\n\nConnect a model\nto start coding'
+        : 'Welcome back!\n\nA coding agent\nfor your workspace',
       wrapMode: 'word',
       selectable: false,
       bg: transparentBackground,
@@ -454,10 +451,13 @@ export async function createTuiScreen(
     const tipsBody = new Text(renderer, {
       id: 'coda-tips-body',
       flexGrow: 1,
-      content:
-        'Enter sends · Shift+Enter adds a line\n' +
-        'Esc aborts the current run · PageUp/PageDown scroll\n' +
-        '/help shows every shortcut',
+      content: opts.model === undefined
+        ? '1. /login — save an API key\n' +
+          '2. /model — choose a model\n' +
+          '3. Enter a task · OAuth coming soon (disabled)'
+        : 'Enter sends · Shift+Enter adds a line\n' +
+          'Esc aborts the current run · PageUp/PageDown scroll\n' +
+          '/help shows every shortcut',
       wrapMode: 'word',
       selectable: false,
       bg: transparentBackground,
@@ -1798,7 +1798,7 @@ export function runTuiController(
           void shutdown(0);
           break;
         case 'help':
-          for (const line of HELP_LINES) screen.println(line, 'muted');
+          for (const line of renderInteractiveHelp('tui')) screen.println(line, 'muted');
           break;
         case 'status':
           for (const line of formatStatusLines(
@@ -2053,7 +2053,7 @@ export function runTuiController(
         await renderer.idle();
       } catch (error) {
         code = 1;
-        console.error('[coda] TUI shutdown failed:', error);
+        console.error(`[coda] TUI shutdown failed: ${sanitizeTerminalError(error)}`);
       } finally {
         unsubscribeProjectWarnings?.();
         renderer.destroy();

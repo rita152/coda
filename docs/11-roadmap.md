@@ -591,7 +591,7 @@ flowchart LR
 | UX 阶段 | 当前状态 | 生产行为 | 结果 |
 |---|---|---|---|
 | UX0 | 已完成（两轮 review） | 不得改变 | UX 契约、旅程/parity matrix、环境与性能 characterization |
-| UX1 | 待开始 | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
+| UX1 | 已完成（两轮 review） | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
 | UX2 | 待开始 | 保持 Runtime 语义 | 紧凑状态区、command palette、composer 与 transcript 导航 |
 | UX3 | 待开始 | 业务动作只经 RuntimePort | review/diff/approval/session picker 与每 thread presentation state |
 | UX4 | 待开始 | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/窗口化与自动化输出 |
@@ -615,11 +615,12 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 
 - `-h/--help` 与 `-V/--version` 在配置、目录、signal、provider/OpenTUI、网络之前纯解析并退出；
   public Runtime import 继续零副作用。
-- 由统一 `CommandCatalog` 生成 help、completion、错误建议、slash/palette 候选；新增
+- 由统一 `CommandCatalog` 生成 help、completion、错误建议与 slash 候选；UX2 palette 继续扩展同一规格；新增
   `doctor [--json]`、`completion <bash|zsh|fish|powershell>`、`auth login|logout|status`、`models`、
   `sessions`、`exec` 与 `--ui=auto|tui|classic|accessible|plain`，保留全部旧入口和 wire。`exec` 去掉动作
-  token 后与现有 one-shot 使用同一解析和 RuntimePort 路径；models 的目录读取保持零 thread，只有用户
-  明确确认选择后才沿现有 RuntimePort create/resume/set-model 路径 attachment。
+  token 后与现有 one-shot 使用同一解析和 RuntimePort 路径；models 的目录读取与 CLI-edge 默认选择
+  保持零 thread/journal，首次任务或 resume 才由 composition root attach；交互面的 `/model` 经
+  RuntimePort 模型配置适配改变下一次采样，尚未 attach 时按既有 runtime 行为立即 create/attach。
 - onboarding 显示“登录 → 选择模型 → 输入任务”；保留既有 OpenCode Go，并新增明确的 OpenAI、
   Anthropic、Custom API-key preset；未实现 OAuth 必须标记 disabled/coming soon；secret 永不进入持久
   状态或输出。UX1 的 accessible 最低即 append-only、无 alternate screen/动画/鼠标依赖。

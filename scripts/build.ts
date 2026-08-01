@@ -7,13 +7,17 @@ const OUT_DIR = `${PROJECT_ROOT}/dist`;
 await $`rm -rf ${OUT_DIR}`.quiet();
 
 const cliResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/cli/main.ts`],
+  entrypoints: [`${PROJECT_ROOT}/src/cli/bootstrap.ts`],
   outdir: OUT_DIR,
   target: 'bun',
   format: 'esm',
   packages: 'external',
+  splitting: true,
   sourcemap: 'external',
-  naming: 'main.js',
+  naming: {
+    entry: 'main.js',
+    chunk: 'chunks/[name]-[hash].js',
+  },
 });
 
 const runtimeResult = await Bun.build({

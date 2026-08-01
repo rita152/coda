@@ -14,6 +14,7 @@ import type {
   CliSessionUsage as SessionUsage,
 } from './frontend-types.js';
 import type { Session } from '../session/index.js';
+import { sanitizeTerminalError } from './terminal-sanitize.js';
 
 export interface InteractiveSession {
   interactionState(): SessionInteractionState;
@@ -244,8 +245,7 @@ export class InteractiveRuntime implements InteractiveSession {
         await listener(messages);
       } catch (error) {
         console.error(
-          '[interactive runtime] attachment listener threw (ignored):',
-          error,
+          `[interactive runtime] attachment listener threw (ignored): ${sanitizeTerminalError(error)}`,
         );
       }
     }
@@ -259,8 +259,7 @@ export class InteractiveRuntime implements InteractiveSession {
         await listener(event);
       } catch (error) {
         console.error(
-          '[interactive runtime] session listener threw (ignored):',
-          error,
+          `[interactive runtime] session listener threw (ignored): ${sanitizeTerminalError(error)}`,
         );
       }
     }

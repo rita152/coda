@@ -30,6 +30,7 @@ import type {
   CliSessionListener,
 } from './frontend-types.js';
 import type { InteractiveSession } from './interactive-runtime.js';
+import { sanitizeTerminalError } from './terminal-sanitize.js';
 
 /** Narrow view used by the default-thread adapter; derived from the public RuntimePort contract. */
 export type RuntimeFrontendPort = Pick<
@@ -345,7 +346,9 @@ export class RuntimeFrontendSession implements InteractiveSession {
       try {
         await listener(copyMessages(this.#messages));
       } catch (error) {
-        console.error('[runtime frontend] attachment listener threw (ignored):', error);
+        console.error(
+          `[runtime frontend] attachment listener threw (ignored): ${sanitizeTerminalError(error)}`,
+        );
       }
     }
   }
@@ -573,7 +576,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
       try {
         await listener(event);
       } catch (error) {
-        console.error('[runtime frontend] listener threw (ignored):', error);
+        console.error(`[runtime frontend] listener threw (ignored): ${sanitizeTerminalError(error)}`);
       }
     }
   }

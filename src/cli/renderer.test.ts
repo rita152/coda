@@ -16,6 +16,7 @@ import {
   charWidth,
   createRenderer,
   displayWidth,
+  layoutClassicInput,
   sanitizeDynText,
   tailToWidth,
   toolHeadline,
@@ -94,6 +95,61 @@ function textDelta(delta: string): ProviderEvent {
 const qm = (id: string, kind: QueuedMessage['kind']): QueuedMessage => ({ id, text: `msg ${id}`, kind });
 
 describe('plain 模式渲染(docs/09 §4)', () => {
+  it('统一清洗模型、工具、diff、plan、provider 错误与恢复数据的终端控制序列', () => {
+    const { out, r } = makePlain();
+    const attack =
+      '\x1b]52;c;OSC_SECRET\x07' +
+      '\x1b[31mvisible\x1b[0m' +
+      '\x1bP1;2|DCS_SECRET\x1b\\' +
+      '\x00\x08\x0b\x7f\x9f';
+    r.render({ type: 'message_start', message: um(attack) });
+    r.render({ type: 'message_start', message: am() });
+    r.render({ type: 'message_update', messageId: 'a1', event: textDelta(attack) });
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'c1',
+      toolName: `bash${attack}`,
+      args: { command: attack },
+    });
+    r.render({ type: 'tool_execution_update', toolCallId: 'c1', update: { output: attack } });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'c1',
+      result: tr({
+        toolName: `read${attack}`,
+        content: [{ type: 'text', text: attack }],
+        details: { path: attack, diff: `+${attack}` },
+      }),
+    });
+    r.render({ type: 'plan_update', steps: [{ step: attack, status: 'in_progress' }] });
+    r.render({
+      type: 'approval_request',
+      approvalId: 'approval-1',
+      toolCallId: 'call-approval',
+      description: attack,
+    });
+    r.render({ type: 'error', fatal: false, message: attack });
+    r.render({
+      type: 'retry_scheduled',
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 1,
+      errorMessage: attack,
+    });
+    r.replayTranscript([
+      um(attack),
+      am({ content: [{ type: 'text', text: attack }] }),
+      tr({ content: [{ type: 'text', text: attack }], details: { diff: attack } }),
+    ]);
+    r.println?.(attack);
+
+    expect(out.text).toContain('visible');
+    expect(out.text).not.toContain('OSC_SECRET');
+    expect(out.text).not.toContain('DCS_SECRET');
+    expect(out.text).not.toContain('\x1b');
+    expect(out.text).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+  });
+
   it('text_delta 直写拼接,text_end 补换行', () => {
     const { out, r } = makePlain();
     r.render({ type: 'message_start', message: am() });
@@ -105,6 +161,19 @@ describe('plain 模式渲染(docs/09 §4)', () => {
       event: { type: 'text_end', contentIndex: 0, content: 'Hello', partial: am() },
     });
     expect(out.text).toContain('Hello\n');
+  });
+
+  it('text_delta 将 CRLF 与裸 CR 统一为换行，不吞掉行边界', () => {
+    const { out, r } = makePlain();
+    r.render({ type: 'message_start', message: am() });
+    r.render({ type: 'message_update', messageId: 'a1', event: textDelta('a\r\nb\rc') });
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
+      event: { type: 'text_end', contentIndex: 0, content: 'a\nb\nc', partial: am() },
+    });
+    expect(out.text).toContain('a\nb\nc\n');
+    expect(out.text).not.toContain('\r');
   });
 
   it('reasoning_delta 无 color 时按原文输出', () => {
@@ -364,22 +433,28 @@ describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {
 
   /** 最后一次动态区重绘的行(drawDyn 单次 write:lines.join('\n') + '\n')。 */
   function lastDynDraw(out: FakeOut): string {
-    return out.chunks[out.chunks.length - 1] ?? '';
+    return [...out.chunks].reverse().find((chunk) => chunk.endsWith('\n')) ?? '';
   }
   const SGR_RE = /\x1b\[[0-9;]*m/g;
 
-  it('pending 含 \\t/\\r:清洗先于截断,动态行零 \\t/\\r 且行宽不超列宽', () => {
+  it('ANSI 流式输出将 CRLF 与裸 CR 统一为换行，尾行仍满足宽度上限', () => {
     const { out, r } = makeAnsi();
     r.render({ type: 'message_start', message: am() });
-    r.render({ type: 'message_update', messageId: 'a1', event: textDelta('col1\tcol2\rX') });
+    r.render({ type: 'message_update', messageId: 'a1', event: textDelta('a\r\nb\rc') });
+    expect(out.chunks).toContain('a\n');
+    expect(out.chunks).toContain('b\n');
     const draw = lastDynDraw(out);
-    expect(draw).toContain('col1  col2X'); // \t → 固定 2 空格;\r 剥除
-    expect(draw).not.toContain('\t');
+    expect(draw).toContain('c');
     expect(draw).not.toContain('\r');
-    // 行数不变式:每个动态行剥色后显示宽度 ≤ 列宽-1(物理不换行 ⇒ 清区上移行数恒等)
     for (const line of draw.replace(/\n$/, '').split('\n')) {
       expect(displayWidth(line.replace(SGR_RE, ''))).toBeLessThanOrEqual(out.columns - 1);
     }
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
+      event: { type: 'text_end', contentIndex: 0, content: 'a\nb\nc', partial: am() },
+    });
+    expect(out.chunks).toContain('c\n');
   });
 
   it('含 \\t 的超长流式尾行:tab 展开后再截断,宽度上限仍成立', () => {
@@ -405,18 +480,33 @@ describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {
     expect(clear).toBe(`\x1b[${drawnRows}F\x1b[J`);
   });
 
-  it('输入行/工具尾行同样清洗;转录区 append 保留原文不清洗', () => {
+  it('输入行/工具尾行清洗为单行；转录区保留 sanitizer 允许的 tab/newline', () => {
     const { out, r } = makeAnsi();
     r.setInputLine?.('git log\t--oneline');
     expect(lastDynDraw(out)).toContain('> git log  --oneline');
     expect(lastDynDraw(out)).not.toContain('\t');
     r.render({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'make' } });
     r.render({ type: 'tool_execution_update', toolCallId: 'c1', update: { output: 'a\tb\rdone' } });
-    expect(lastDynDraw(out)).toContain('a  bdone');
-    // 转录区:含 \t 的完整流式行原文落盘(清洗只作用于动态区)
+    expect(lastDynDraw(out)).toContain('done');
+    expect(lastDynDraw(out)).not.toContain('a  bdone');
+    // 正文 sanitizer 明确保留 tab/newline；动态区为了稳定量宽才额外把 tab 展开。
     r.render({ type: 'message_start', message: am() });
     r.render({ type: 'message_update', messageId: 'a1', event: textDelta('name\tvalue\n') });
     expect(out.chunks).toContain('name\tvalue\n');
+  });
+
+  it('工具流 CRLF/裸 CR 先规范化为行边界，再选择真实尾行', () => {
+    const { out, r } = makeAnsi();
+    r.render({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: {} });
+    r.render({
+      type: 'tool_execution_update',
+      toolCallId: 'c1',
+      update: { output: 'first\r\nsecond\rthird' },
+    });
+    const draw = lastDynDraw(out);
+    expect(draw).toContain('third');
+    expect(draw).not.toContain('firstsecondthird');
+    expect(draw).not.toContain('\r');
   });
 
   it('sanitizeDynText:\\t → 2 空格、\\r 剥除', () => {
@@ -477,6 +567,57 @@ describe('简化 wcwidth(docs/09 §8:CJK/emoji 宽度)', () => {
     expect(t.startsWith('…')).toBe(true);
     expect(t.endsWith('j')).toBe(true);
     expect(displayWidth(t)).toBeLessThanOrEqual(5);
+  });
+
+  it('ZWJ emoji 作为一个双列 grapheme，classic 多行布局保留真实光标行列', () => {
+    expect(displayWidth('A👩‍💻B')).toBe(4);
+    const layout = layoutClassicInput('中文\nA👩‍💻B', '中文\nA👩‍💻'.length, 20);
+    expect(layout.lines).toEqual(['> 中文', '  A👩‍💻B']);
+    expect(layout.cursorRow).toBe(1);
+    expect(layout.cursorColumn).toBe(5);
+  });
+
+  it('classic 长 prompt 以光标为中心窗口化，不丢失输入数据', () => {
+    const text = Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n');
+    const cursor = text.indexOf('line-10') + 'line-10'.length;
+    const layout = layoutClassicInput(text, cursor, 20, 5);
+    expect(layout.lines).toHaveLength(5);
+    expect(layout.lines.join('\n')).toContain('line-10');
+    expect(layout.cursorRow).toBeGreaterThanOrEqual(0);
+    expect(layout.cursorRow).toBeLessThan(5);
+  });
+
+  it('classic 输入先展开多个 tab，再用同一文本计算光标列', () => {
+    const layout = layoutClassicInput('\t\tX', 2, 10);
+    expect(layout.lines).toEqual(['>     X']);
+    expect(layout.cursorRow).toBe(0);
+    expect(layout.cursorColumn).toBe(6);
+    expect(layout.lines.join('')).not.toContain('\t');
+  });
+
+  it('classic tab 位于换行边界时，光标前后移动与实际渲染行列一致', () => {
+    const before = layoutClassicInput('12345\tZ', 6, 9);
+    expect(before.lines).toEqual(['> 12345  ', '  Z']);
+    expect(before.cursorRow).toBe(1);
+    expect(before.cursorColumn).toBe(2);
+
+    const after = layoutClassicInput('12345\tZ', 7, 9);
+    expect(after.lines).toEqual(before.lines);
+    expect(after.cursorRow).toBe(1);
+    expect(after.cursorColumn).toBe(3);
+    for (const line of after.lines) expect(displayWidth(line)).toBeLessThanOrEqual(9);
+  });
+
+  it('classic 输入保留 CRLF/裸 CR 的换行语义并按原始 cursor offset 定位', () => {
+    const crlf = layoutClassicInput('a\r\nb', 3, 20);
+    expect(crlf.lines).toEqual(['> a', '  b']);
+    expect(crlf.cursorRow).toBe(1);
+    expect(crlf.cursorColumn).toBe(2);
+
+    const bare = layoutClassicInput('a\rb', 3, 20);
+    expect(bare.lines).toEqual(['> a', '  b']);
+    expect(bare.cursorRow).toBe(1);
+    expect(bare.cursorColumn).toBe(3);
   });
 });
 

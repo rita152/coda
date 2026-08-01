@@ -2,7 +2,12 @@
 // 所有步骤、回退语义、provider 解析和持久化动作都只定义一次。
 
 import type { ModelConfig, ModelRef } from '../protocol/index.js';
+import { AUTH_PRESET_SPECS } from './command-catalog.js';
 import type { InteractiveSession } from './interactive-runtime.js';
+import {
+  applyProviderModelSelection,
+  configureBuiltInProvider,
+} from './provider-actions.js';
 import {
   type AvailableProviderModel,
   type ConfigureProviderResult,
@@ -56,31 +61,11 @@ const PROTOCOL_CHOICES: readonly {
   { label: 'Anthropic Messages', api: 'anthropic-messages' },
 ];
 
-const LOGIN_CHOICES: readonly ProviderCommandChoice[] = [
-  {
-    value: 'OAuth',
-    label: 'OAuth',
-    description: '尚未实现',
-  },
-  {
-    value: 'API key',
-    label: 'API key',
-    description: '使用 provider API key',
-  },
-];
-
-const API_KEY_PROVIDER_CHOICES: readonly ProviderCommandChoice[] = [
-  {
-    value: 'OpenCode Go',
-    label: 'OpenCode Go',
-    description: 'opencode-go · mixed protocol',
-  },
-  {
-    value: 'Custom',
-    label: 'Custom',
-    description: '自定义 endpoint 与协议',
-  },
-];
+const LOGIN_CHOICES: readonly ProviderCommandChoice[] = AUTH_PRESET_SPECS.map((preset) => ({
+  value: preset.id,
+  label: preset.label,
+  description: preset.enabled ? preset.description : `${preset.description} [disabled]`,
+}));
 
 export class ProviderCommandController {
   readonly #registry: ProviderRegistry;
@@ -180,62 +165,64 @@ export class ProviderCommandController {
   }
 
   #beginLogin(): void {
-    this.#setStep('选择登录方式（Esc 退出）', false, async (value) => {
+    this.#setStep('[步骤 1] 选择 API-key preset（Esc 退出）', false, async (value) => {
       const selected = selectChoice(
         value,
         LOGIN_CHOICES.map((choice) => choice.label),
+        LOGIN_CHOICES.map((choice) => choice.value),
       );
       if (selected === undefined) {
         this.#invalidChoice(LOGIN_CHOICES.length);
         return;
       }
-      if (selected === 0) {
+      const preset = AUTH_PRESET_SPECS[selected];
+      if (preset === undefined) return;
+      if (!preset.enabled) {
         this.#finish();
-        this.#view.println('OAuth 尚未实现', 'warning');
+        this.#view.println('OAuth 即将推出（coming soon），当前 disabled', 'warning');
         return;
       }
-      this.#beginApiKeyProvider();
+      switch (preset.id) {
+        case 'opencode-go':
+        case 'openai':
+        case 'anthropic':
+          this.#beginPresetApiKey(preset.id);
+          return;
+        case 'custom':
+          this.#draft = {};
+          this.#beginCustomName();
+          return;
+      }
     }, LOGIN_CHOICES);
   }
 
-  #beginApiKeyProvider(): void {
-    this.#setStep('选择 API key provider（Esc 返回）', false, async (value) => {
-      const selected = selectChoice(
-        value,
-        API_KEY_PROVIDER_CHOICES.map((choice) => choice.label),
-      );
-      if (selected === undefined) {
-        this.#invalidChoice(API_KEY_PROVIDER_CHOICES.length);
-        return;
-      }
-      if (selected === 0) {
-        this.#setStep(
-          'OpenCode Go API key（秘密输入 · Esc 返回）',
-          true,
-          async (apiKey) => {
-            await this.#configure(
-              this.#runtime.currentModel(),
-              () =>
-                this.#registry.configureOpenCodeGo(
-                  apiKey,
-                  this.#abort.signal,
-                ),
-            );
-          },
-          undefined,
-          () => this.#beginApiKeyProvider(),
+  #beginPresetApiKey(presetId: 'opencode-go' | 'openai' | 'anthropic'): void {
+    const preset = AUTH_PRESET_SPECS.find((candidate) => candidate.id === presetId);
+    if (preset === undefined) return;
+    this.#setStep(
+      `[步骤 2] ${preset.label} API key（秘密输入 · Esc 返回 preset）`,
+      true,
+      async (apiKey) => {
+        await this.#configure(
+          this.#runtime.currentModel(),
+          () => configureBuiltInProvider(
+            this.#registry,
+            presetId,
+            apiKey,
+            this.#abort.signal,
+          ),
+          () => this.#beginPresetApiKey(presetId),
         );
-        return;
-      }
-      this.#draft = {};
-      this.#beginCustomName();
-    }, API_KEY_PROVIDER_CHOICES, () => this.#beginLogin());
+      },
+      undefined,
+      () => this.#beginLogin(),
+    );
   }
 
   #beginCustomName(): void {
     this.#draft ??= {};
     this.#setStep(
-      'Custom provider name（Esc 返回）',
+      '[步骤 2] Custom provider name（Esc 返回 preset）',
       false,
       async (name) => {
         const normalized = name.trim();
@@ -249,14 +236,14 @@ export class ProviderCommandController {
       undefined,
       () => {
         this.#clearDraft();
-        this.#beginApiKeyProvider();
+        this.#beginLogin();
       },
     );
   }
 
   #beginCustomBaseURL(): void {
     this.#setStep(
-      'Custom base URL（Esc 返回）',
+      `Custom · name=${this.#draft?.name ?? ''} · [步骤 3] base URL（Esc 返回 name）`,
       false,
       async (baseURL) => {
         if (baseURL.trim() === '') {
@@ -273,7 +260,8 @@ export class ProviderCommandController {
 
   #beginCustomApiKey(): void {
     this.#setStep(
-      'Custom API key（秘密输入 · Esc 返回）',
+      `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''} · ` +
+        '[步骤 4] API key（秘密输入 · Esc 返回 base URL）',
       true,
       async (apiKey) => {
         if (apiKey.trim() === '') {
@@ -294,7 +282,11 @@ export class ProviderCommandController {
       label: choice.label,
       description: choice.api,
     }));
-    this.#setStep('选择 Custom provider 协议（Esc 返回）', false, async (value) => {
+    this.#setStep(
+      `Custom · name=${this.#draft?.name ?? ''} · baseURL=${this.#draft?.baseURL ?? ''} · ` +
+        '[步骤 5] 选择协议（Esc 返回 API key）',
+      false,
+      async (value) => {
       const selected = selectChoice(
         value,
         PROTOCOL_CHOICES.map((choice) => choice.label),
@@ -327,16 +319,24 @@ export class ProviderCommandController {
             choice.api,
             this.#abort.signal,
           ),
+        () => {
+          if (this.#draft?.apiKey !== undefined) this.#draft.apiKey = '';
+          this.#beginCustomApiKey();
+        },
       );
-    }, choices, () => {
-      if (this.#draft?.apiKey !== undefined) this.#draft.apiKey = '';
-      this.#beginCustomApiKey();
-    });
+      },
+      choices,
+      () => {
+        if (this.#draft?.apiKey !== undefined) this.#draft.apiKey = '';
+        this.#beginCustomApiKey();
+      },
+    );
   }
 
   async #configure(
     previousModelRef: ModelRef | undefined,
     configure: () => Promise<ConfigureProviderResult>,
+    restoreAfterFailure: () => void,
   ): Promise<void> {
     const previousModel =
       previousModelRef === undefined
@@ -350,7 +350,7 @@ export class ProviderCommandController {
     try {
       result = await configure();
     } catch (error) {
-      this.#finish();
+      restoreAfterFailure();
       throw error;
     }
     this.#finish();
@@ -421,19 +421,17 @@ export class ProviderCommandController {
         this.#finish();
         return;
       }
-      await this.#runtime.setModel(config);
-      let rememberError: unknown;
-      try {
-        this.#registry.rememberSelection(model.providerId, model.model);
-      } catch (error) {
-        rememberError = error;
-      }
+      const { persistenceError } = await applyProviderModelSelection(
+        this.#runtime,
+        this.#registry,
+        config,
+      );
       this.#finish();
       this.#view.setModel(config.ref, config.limits?.context);
-      if (rememberError !== undefined) {
+      if (persistenceError !== undefined) {
         this.#view.println(
           `模型已切换，但未能持久化最近选择；下次启动可能不会恢复本次选择：` +
-            safeErrorMessage(rememberError),
+            safeErrorMessage(persistenceError),
           'warning',
         );
       }
@@ -507,14 +505,20 @@ export class ProviderCommandController {
   }
 }
 
-function selectChoice(value: string, labels: readonly string[]): number | undefined {
+function selectChoice(
+  value: string,
+  labels: readonly string[],
+  values: readonly string[] = labels,
+): number | undefined {
   const normalized = value.trim().toLocaleLowerCase('en-US');
   const number = Number(normalized);
   if (Number.isInteger(number) && number >= 1 && number <= labels.length) {
     return number - 1;
   }
   const index = labels.findIndex(
-    (label) => label.toLocaleLowerCase('en-US') === normalized,
+    (label, candidate) =>
+      label.toLocaleLowerCase('en-US') === normalized ||
+      values[candidate]?.toLocaleLowerCase('en-US') === normalized,
   );
   return index === -1 ? undefined : index;
 }

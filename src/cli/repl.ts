@@ -1,7 +1,8 @@
 // 交互 REPL(规格见 docs/09-cli.md §3):readline raw keypress + escapeCodeTimeout 50ms。
 // 分工:repl 管键位与输入行状态,渲染(输入行/状态提示/转录)全部经 Renderer——
 // stdout 单写入者纪律(docs/09 §1.3)。可测部分(历史环、斜杠命令、双击消歧、Enter 分派)
-// 拆为纯函数/纯类导出,由 repl.test.ts 覆盖;键位接线本身依赖真实 TTY,无法全自动测试。
+// 拆为纯函数/纯类导出,由 repl.test.ts 覆盖;关键键位接线使用伪 TTY 发送
+// keypress 事件作 characterization，真实 PTY 退出/恢复仍由 e2e 覆盖。
 //
 // 人工冒烟清单(docs/09 §9 前四条,发布前真实终端过一遍):
 // [ ] 流式输出期间打字,输入行内容不被 delta 冲花;Enter 后徽标出现 steer 1,
@@ -29,6 +30,13 @@ import type {
 import { ProviderCommandController } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import type { Renderer } from './renderer.js';
+import { sanitizeTerminalError, sanitizeTerminalText } from './terminal-sanitize.js';
+import {
+  findSlashCommand,
+  renderInteractiveHelp,
+} from './command-catalog.js';
+export { SLASH_COMMAND_SPECS } from './command-catalog.js';
+export type { SlashCommandSpec } from './command-catalog.js';
 
 export const ESC_TIMEOUT_MS = 50; // Esc 消歧窗口(docs/09 §3.2)
 export const ESC_EXIT_WINDOW_MS = 500; // 双 Esc 退出窗口
@@ -46,62 +54,6 @@ export function interactionCanAbort(state: SessionInteractionState): boolean {
 }
 
 // ---- 纯逻辑:斜杠命令 ----
-
-export interface SlashCommandSpec {
-  readonly name: string;
-  readonly aliases?: readonly string[];
-  readonly description: string;
-  readonly argumentHint?: string;
-  /** running/retrying 时仅 follow-up 命令仍由 Enter 当作命令分派。 */
-  readonly availableWhileRunning: boolean;
-}
-
-/** TUI 只展示 canonical 命令；短别名参与匹配但不重复占据候选行。 */
-export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = [
-  {
-    name: 'help',
-    description: 'Show shortcuts and slash commands',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'queue',
-    description: 'Show steering and follow-up queues',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'status',
-    description: 'Show model, usage, and token status',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'login',
-    description: 'Add or update provider API-key authentication',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'model',
-    description: 'Choose a model from configured providers',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'logout',
-    description: 'Remove a saved provider API key',
-    availableWhileRunning: false,
-  },
-  {
-    name: 'followup',
-    aliases: ['f'],
-    argumentHint: '<text>',
-    description: 'Queue a follow-up after the current task',
-    availableWhileRunning: true,
-  },
-  {
-    name: 'quit',
-    aliases: ['q'],
-    description: 'Exit coda',
-    availableWhileRunning: false,
-  },
-];
 
 export type SlashCommand =
   | {
@@ -121,26 +73,24 @@ export type SlashCommand =
 export function parseSlashCommand(text: string): SlashCommand | undefined {
   if (!text.startsWith('/')) return undefined;
   const space = text.indexOf(' ');
-  const head = (space === -1 ? text : text.slice(0, space)).toLowerCase();
+  const head = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
   const rest = space === -1 ? '' : text.slice(space + 1).trim();
-  switch (head) {
-    case '/quit':
-    case '/q':
+  switch (findSlashCommand(head)?.actionId) {
+    case 'app.quit':
       return { cmd: 'quit' };
-    case '/queue':
+    case 'task.queue':
       return { cmd: 'queue' };
-    case '/status':
+    case 'task.status':
       return { cmd: 'status' };
-    case '/help':
+    case 'help.show':
       return { cmd: 'help' };
-    case '/login':
+    case 'auth.login':
       return { cmd: 'login' };
-    case '/model':
+    case 'models.list':
       return { cmd: 'model' };
-    case '/logout':
+    case 'auth.logout':
       return { cmd: 'logout' };
-    case '/f':
-    case '/followup':
+    case 'task.follow-up':
       return { cmd: 'follow_up', text: rest };
     default:
       return { cmd: 'unknown', input: text };
@@ -260,6 +210,68 @@ export class InputHistory {
   }
 }
 
+const INPUT_SEGMENTER = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+  : undefined;
+
+export function previousGraphemeBoundary(text: string, cursor: number): number {
+  const boundaries = inputBoundaries(text);
+  let previous = 0;
+  for (const boundary of boundaries) {
+    if (boundary >= cursor) return previous;
+    previous = boundary;
+  }
+  return previous;
+}
+
+export function nextGraphemeBoundary(text: string, cursor: number): number {
+  return inputBoundaries(text).find((boundary) => boundary > cursor) ?? text.length;
+}
+
+export function moveMultilineCursor(text: string, cursor: number, direction: -1 | 1): number {
+  const lineStart = text.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1;
+  const lineEndIndex = text.indexOf('\n', cursor);
+  const lineEnd = lineEndIndex === -1 ? text.length : lineEndIndex;
+  const column = inputBoundaries(text.slice(lineStart, cursor)).length - 1;
+  if (direction < 0) {
+    if (lineStart === 0) return cursor;
+    const previousEnd = lineStart - 1;
+    const previousStart = text.lastIndexOf('\n', Math.max(0, previousEnd - 1)) + 1;
+    return boundaryAtColumn(text, previousStart, previousEnd, column);
+  }
+  if (lineEnd === text.length) return cursor;
+  const nextStart = lineEnd + 1;
+  const nextEndIndex = text.indexOf('\n', nextStart);
+  const nextEnd = nextEndIndex === -1 ? text.length : nextEndIndex;
+  return boundaryAtColumn(text, nextStart, nextEnd, column);
+}
+
+function inputBoundaries(text: string): number[] {
+  if (INPUT_SEGMENTER === undefined) {
+    const boundaries = [0];
+    let offset = 0;
+    for (const item of text) {
+      offset += item.length;
+      boundaries.push(offset);
+    }
+    return boundaries;
+  }
+  const boundaries = [...INPUT_SEGMENTER.segment(text)].map((item) => item.index);
+  if (boundaries[0] !== 0) boundaries.unshift(0);
+  if (boundaries.at(-1) !== text.length) boundaries.push(text.length);
+  return boundaries;
+}
+
+function boundaryAtColumn(
+  text: string,
+  start: number,
+  end: number,
+  column: number,
+): number {
+  const local = inputBoundaries(text.slice(start, end));
+  return start + (local[Math.min(column, local.length - 1)] ?? 0);
+}
+
 // ---- 纯逻辑:双击消歧(Esc Esc / Ctrl+C Ctrl+C,时钟注入可测)----
 
 export class DoublePress {
@@ -315,12 +327,6 @@ export function formatQueueLines(
   return lines;
 }
 
-const HELP_LINES = [
-  'Enter: send (idle) / steer (running)   Alt+Enter or /f <text>: follow-up',
-  'Esc: abort (running)   Esc Esc / Ctrl+C Ctrl+C: quit   Ctrl+D: quit (empty input)',
-  '/login  /model  /logout  /quit  /queue  /status  /help',
-];
-
 function formatModelRef(
   model: { provider: string; model: string } | undefined,
 ): string {
@@ -358,7 +364,13 @@ export async function startRepl(
   return await new Promise<number>((resolve) => {
     let secretInput = false;
     const renderInput = (): void => {
-      renderer.setInputLine?.(secretInput ? '•'.repeat(input.length) : input);
+      if (secretInput) {
+        const total = inputBoundaries(input).length - 1;
+        const maskedCursor = inputBoundaries(input.slice(0, cursor)).length - 1;
+        renderer.setInputLine?.('•'.repeat(total), maskedCursor);
+      } else {
+        renderer.setInputLine?.(input, cursor);
+      }
     };
     const setInput = (text: string, cur = text.length): void => {
       input = text;
@@ -477,7 +489,7 @@ export async function startRepl(
         await session.close();
       } catch (err) {
         code = 1;
-        console.error('[coda] REPL shutdown failed:', err);
+        console.error(`[coda] REPL shutdown failed: ${sanitizeTerminalError(err)}`);
       } finally {
         cleanup();
         resolve(code);
@@ -505,7 +517,7 @@ export async function startRepl(
           void shutdown(0);
           break;
         case 'help':
-          for (const l of HELP_LINES) renderer.println?.(l);
+          for (const line of renderInteractiveHelp('classic')) renderer.println?.(line);
           break;
         case 'status':
           for (const l of formatStatusLines(
@@ -574,8 +586,9 @@ export async function startRepl(
     };
 
     const insert = (s: string): void => {
-      input = input.slice(0, cursor) + s + input.slice(cursor);
-      cursor += s.length;
+      const clean = sanitizeTerminalText(s);
+      input = input.slice(0, cursor) + clean + input.slice(cursor);
+      cursor += clean.length;
       renderInput();
     };
 
@@ -583,16 +596,35 @@ export async function startRepl(
       if (closing) return;
       const k = key ?? {};
       const name = k.name ?? '';
+      const pasteStart = '\x1b[200~';
+      const pasteEnd = '\x1b[201~';
 
       // bracketed paste:粘贴换行不触发发送(docs/09 §8;Node 20+ keypress 解码
       // paste-start/paste-end,不支持的终端退化为逐行——已知限制)
-      if (name === 'paste-start') {
+      if (name === 'paste-start' || str === pasteStart) {
         pasting = true;
         return;
       }
-      if (name === 'paste-end') {
+      if (name === 'paste-end' || str === pasteEnd) {
         pasting = false;
         renderInput();
+        return;
+      }
+      if (str?.includes(pasteStart) === true) {
+        const marker = str.indexOf(pasteStart);
+        const start = marker + pasteStart.length;
+        const end = str.indexOf(pasteEnd, start);
+        const before = str.slice(0, marker);
+        const content = str.slice(start, end === -1 ? undefined : end);
+        const after = end === -1 ? '' : str.slice(end + pasteEnd.length);
+        insert(before + content + after);
+        pasting = end === -1;
+        return;
+      }
+      if (pasting && str?.includes(pasteEnd) === true) {
+        const end = str.indexOf(pasteEnd);
+        insert(str.slice(0, end) + str.slice(end + pasteEnd.length));
+        pasting = false;
         return;
       }
       if (pasting) {
@@ -665,46 +697,66 @@ export async function startRepl(
         return;
       }
       if (name === 'return' || name === 'enter') {
+        if (k.shift === true) {
+          insert('\n');
+          return;
+        }
         submit(k.meta === true); // Alt+Enter → key.meta && name==='return'(docs/09 §3.2)
         return;
       }
       if (name === 'up') {
         if (providerController?.active === true) return;
-        setInput(history.up(input));
+        if (input.includes('\n') && k.meta !== true) {
+          cursor = moveMultilineCursor(input, cursor, -1);
+          renderInput();
+        } else {
+          setInput(history.up(input));
+        }
         return;
       }
       if (name === 'down') {
         if (providerController?.active === true) return;
-        setInput(history.down());
+        if (input.includes('\n') && k.meta !== true) {
+          cursor = moveMultilineCursor(input, cursor, 1);
+          renderInput();
+        } else {
+          setInput(history.down());
+        }
         return;
       }
       if (name === 'left') {
-        if (cursor > 0) cursor--;
+        cursor = previousGraphemeBoundary(input, cursor);
+        renderInput();
         return;
       }
       if (name === 'right') {
-        if (cursor < input.length) cursor++;
+        cursor = nextGraphemeBoundary(input, cursor);
+        renderInput();
         return;
       }
       if (name === 'home' || (k.ctrl === true && name === 'a')) {
-        cursor = 0;
+        cursor = input.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1;
+        renderInput();
         return;
       }
       if (name === 'end' || (k.ctrl === true && name === 'e')) {
-        cursor = input.length;
+        const end = input.indexOf('\n', cursor);
+        cursor = end === -1 ? input.length : end;
+        renderInput();
         return;
       }
       if (name === 'backspace') {
         if (cursor > 0) {
-          input = input.slice(0, cursor - 1) + input.slice(cursor);
-          cursor--;
+          const previous = previousGraphemeBoundary(input, cursor);
+          input = input.slice(0, previous) + input.slice(cursor);
+          cursor = previous;
           renderInput();
         }
         return;
       }
       if (name === 'delete') {
         if (cursor < input.length) {
-          input = input.slice(0, cursor) + input.slice(cursor + 1);
+          input = input.slice(0, cursor) + input.slice(nextGraphemeBoundary(input, cursor));
           renderInput();
         }
         return;
@@ -718,7 +770,7 @@ export async function startRepl(
         // 剥控制字符,\t 保留在数据层(提交的文本含真实 tab);显示层由 renderer 的
         // sanitizeDynText 统一清洗(\t → 2 空格、\r 剥除),动态区行宽数学不受影响。
         // 非 paste 路径的裸换行不入输入行。
-        const clean = str.replace(/[\x00-\x08\x0a-\x1f\x7f]/g, '');
+        const clean = sanitizeTerminalText(str).replaceAll('\n', '');
         if (clean !== '') insert(clean);
       }
     };

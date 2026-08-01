@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import process from 'node:process';
 import type { StoredThreadLocator } from '../runtime/index.js';
 import type { CliFlags } from './config.js';
+import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
 export type CliResumeSelectionCode =
   | 'ambiguous_thread_id'
@@ -74,13 +75,15 @@ export async function pickRuntimeThreadInteractive(
   const listing = candidates
     .map((item, index) => {
       const summary = item.catalog.summary;
-      const id = item.sourceSessionId ?? item.threadId;
+      const id = sanitizeTerminalLine(item.sourceSessionId ?? item.threadId);
       const eligibility = item.executionEligibility.kind === 'mutable'
         ? ''
-        : `  [${item.executionEligibility.code}]`;
+        : `  [${sanitizeTerminalLine(item.executionEligibility.code)}]`;
       return (
         `  [${index + 1}] ${id}  ${formatTime(summary.createdAt)}  ` +
-        `${summary.title ?? ''}\n      workspace=${item.ownerWorkspaceId} cwd=${item.ownerRecordedCwd}` +
+        `${sanitizeTerminalLine(summary.title ?? '')}\n      ` +
+        `workspace=${sanitizeTerminalLine(item.ownerWorkspaceId)} ` +
+        `cwd=${sanitizeTerminalLine(item.ownerRecordedCwd)}` +
         eligibility
       );
     })
