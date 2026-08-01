@@ -178,6 +178,15 @@ describe('decideRetry 纯函数(docs/08 §5.2)', () => {
     expect(decideRetry(mk({ errorDetails: details }), 6, { ...opts, maxAttempts: 100 })).toEqual({ retry: true, delayMs: 32000 });
   });
 
+  it('fractional jitter 在协议边界归一为整数毫秒', () => {
+    const details: ProviderErrorDetails = { kind: 'http', status: 503, retryable: true };
+    const fractional = { ...opts, jitter: () => 0.12345 };
+    expect(decideRetry(mk({ errorDetails: details }), 0, fractional)).toEqual({
+      retry: true,
+      delayMs: 623,
+    });
+  });
+
   it('attempt >= maxAttempts 不重试', () => {
     const d = decideRetry(mk({ errorDetails: { kind: 'http', status: 500, retryable: true } }), 5, opts);
     expect(d.retry).toBe(false);

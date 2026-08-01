@@ -173,41 +173,67 @@ describe('每条 message_end 即时追加 JSONL(docs/08 §3.3)', () => {
   });
 });
 
-// ---------- 2. kill(不 close)→ resume ----------
+// ---------- 2. process exit(不 close) → resume ----------
 
-describe('kill → resume(docs/08 §9 M5 验收 1/4)', () => {
-  it('直接丢弃 Session 不 close:resume 后转录深等、usage cumulative 与手工求和一致', async () => {
-    const lookup = makeTool('lookup', async () => textOutput('found'));
-    const h = await makeSession(
-      {
-        turns: [
-          { events: [{ kind: 'tool_call', name: 'lookup', args: { value: 'q' }, id: 'call_1' }], usage: { input: 120, output: 15, cacheRead: 20 } },
-          { events: [{ kind: 'text', text: 'answer' }], usage: { input: 240, output: 30, reasoning: 5 } },
-        ],
-      },
-      [lookup],
-    );
-    await h.session.prompt('question');
-    const origMessages = [...h.session.messages];
-    const origUsage = h.session.usage();
-    // 不调 close 直接丢弃对象——append 是同步落盘,等价 kill -9 后的文件现场
+describe('process exit → resume(docs/08 §9 M5 验收 1/4)', () => {
+  it('子进程不 close 直接退出:stale lease 可恢复，转录/usage 与退出前快照一致', async () => {
+    const script = `
+      import { Session } from './src/session/index.ts';
+      import { createFauxStreamFn } from './src/providers/faux/index.ts';
+      const dir = process.env.CODA_TEST_SESSION_DIR;
+      if (!dir) throw new Error('missing test session directory');
+      const model = { ref: { provider: 'faux', api: 'faux', model: 'test-model' } };
+      const streamFn = createFauxStreamFn({
+        turns: [{
+          events: [{ kind: 'text', text: 'answer' }],
+          usage: { input: 240, output: 30, reasoning: 5 },
+        }],
+      });
+      const session = await Session.create({
+        dir,
+        agentConfig: { streamFn, model, tools: [], systemPrompt: 'test', cwd: dir },
+      });
+      await session.prompt('question');
+      console.log(JSON.stringify({ id: session.id, messages: session.messages, usage: session.usage() }));
+      // Deliberately omit session.close(); the unref'd kernel lease dies with this process.
+    `;
+    const child = Bun.spawn({
+      cmd: [process.execPath, '-e', script],
+      cwd: process.cwd(),
+      env: { ...process.env, CODA_TEST_SESSION_DIR: tmpdir },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    const snapshot = JSON.parse(stdout.trim()) as {
+      id: string;
+      messages: AgentMessage[];
+      usage: ReturnType<Session['usage']>;
+    };
 
-    const r = await resumeSession(h.session.id, { turns: [] });
+    const r = await resumeSession(snapshot.id, { turns: [] });
     expect(r.streamFn.calls).toHaveLength(0);                     // 恢复完成后不自动跑(docs/08 §4.3)
-    expect([...r.session.messages]).toEqual(origMessages);
+    expect([...r.session.messages]).toEqual(snapshot.messages);
 
     const usage = r.session.usage();
-    expect(usage).toEqual(origUsage);                             // 恢复后统计不丢
+    expect(usage).toEqual(snapshot.usage);                        // 恢复后统计不丢
     // 手工求和:独立于实现的期望值(逐条 assistant 逐字段相加)
-    expect(usage.cumulative).toEqual({ input: 360, output: 45, cacheRead: 20, reasoning: 5 });
-    expect(usage.turns).toBe(2);
+    expect(usage.cumulative).toEqual({ input: 240, output: 30, reasoning: 5 });
+    expect(usage.turns).toBe(1);
     expect(usage.lastTurn).toEqual({ input: 240, output: 30, reasoning: 5 });
     expect(usage.contextTokens).toBe(270);
+    await r.session.close();
   });
 
-  it('尾行半截 JSON:恢复成功(半截行丢弃),会话可继续对话', async () => {
+  it('释放 live lease 后制造尾行半截 JSON:丢弃残片后由 canonical sidecar 补齐并可继续', async () => {
     const h = await makeSession({ turns: [{ events: [{ kind: 'text', text: 'hello world' }] }] });
     await h.session.prompt('hi');
+    await h.session.close();
 
     // 手工 truncate 文件尾:assistant 行只剩前 25 字节,模拟写半行被杀
     const file = sessionFile(h.session.id);
@@ -216,23 +242,29 @@ describe('kill → resume(docs/08 §9 M5 验收 1/4)', () => {
     writeFileSync(file, [...lines.slice(0, -1), tail.slice(0, 25)].join('\n'), 'utf8');
 
     const r = await resumeSession(h.session.id, { turns: [{ events: [{ kind: 'text', text: 'again' }] }] });
-    expect([...r.session.messages].map((m) => m.role)).toEqual(['user']);   // 半截 assistant 被丢弃
-    expect(r.session.usage().turns).toBe(0);
+    // v1 尾部残片先丢弃；Phase 2 的 canonical sidecar 随后恢复已权威提交的 assistant。
+    expect([...r.session.messages].map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(r.session.usage().turns).toBe(1);
 
     await r.session.prompt('go on');                              // 恢复后照常开新一轮
-    expect([...r.session.messages].map((m) => m.role)).toEqual(['user', 'user', 'assistant']);
+    expect([...r.session.messages].map((m) => m.role)).toEqual([
+      'user', 'assistant', 'user', 'assistant',
+    ]);
     const outbound = r.streamFn.calls[0]?.context.messages ?? [];
-    expect(outbound.map((m) => m.role)).toEqual(['user', 'user']);   // 出站只含两条完整 user
+    expect(outbound.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
 
     // repairTail 回归(核查发现的真缺陷):残片若不截掉,恢复后的 append 会粘在半截行
     // 尾部形成「中部损坏行」,下一次 load 按规格拒绝。这里断言二次 resume 依旧成功。
+    await r.session.close();
     const r2 = await resumeSession(h.session.id, { turns: [] });
-    expect([...r2.session.messages].map((m) => m.role)).toEqual(['user', 'user', 'assistant']);
+    expect([...r2.session.messages].map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    await r2.session.close();
   });
 
-  it('repairTail:残片恰在换行前崩溃(JSON 完整无行尾)→ 补换行保留记录', async () => {
+  it('释放 live lease 后制造完整 JSON 无行尾:repairTail 补换行保留记录', async () => {
     const h = await makeSession({ turns: [{ events: [{ kind: 'text', text: 'hello world' }] }] });
     await h.session.prompt('hi');
+    await h.session.close();
     const file = sessionFile(h.session.id);
     const raw = readFileSync(file, 'utf8');
     writeFileSync(file, raw.slice(0, -1), 'utf8');   // 去掉末尾 \n:记录完整但无行尾
@@ -246,7 +278,10 @@ describe('kill → resume(docs/08 §9 M5 验收 1/4)', () => {
     const linesAfter = rawAfter.split('\n').filter((l) => l.length > 0);
     expect(linesAfter).toHaveLength(5);
     for (const line of linesAfter) expect(() => JSON.parse(line)).not.toThrow();
-    await expect(resumeSession(h.session.id, { turns: [] })).resolves.toBeDefined();
+    await r.session.close();
+    const secondResume = await resumeSession(h.session.id, { turns: [] });
+    expect(secondResume).toBeDefined();
+    await secondResume.session.close();
   });
 });
 
@@ -402,8 +437,8 @@ describe('磁盘写失败降级(docs/08 §8)', () => {
 
 // ---------- 6. usage_update 保序与串行送达(核查修复回归) ----------
 
-describe('usage_update 与主事件同链保序(docs/08 §7.2;session.ts 旁路事件走同一 await 链)', () => {
-  it('async listener:message_end(assistant) 后紧跟 usage_update;全程无重入;close 前全部送达', async () => {
+describe('usage_update 经异步 cursor pump 保序(docs/08 §7.2/§2)', () => {
+  it('慢 listener 不背压 run，放行后完整、无重入且 message_end 紧邻 usage_update', async () => {
     const h = await makeSession({
       turns: [
         { events: [{ kind: 'text', text: 'one' }] },
@@ -411,11 +446,14 @@ describe('usage_update 与主事件同链保序(docs/08 §7.2;session.ts 旁路�
       ],
     });
 
-    // 慢消费者(仅微任务让出,无计时器):进入即置忙,处理完毕才解除——
-    // 若旁路事件被 void fanout(不 await),下一事件会在处理中重入,当场记账。
+    const listenerGate = createGate();
     const entryOrder: string[] = [];
     const completionOrder: string[] = [];
     const usageTurns: number[] = [];
+    let resolveDelivered!: () => void;
+    const delivered = new Promise<void>((resolve) => {
+      resolveDelivered = resolve;
+    });
     let busy = false;
     let reentered = 0;
     h.session.subscribe(async (e) => {
@@ -424,14 +462,18 @@ describe('usage_update 与主事件同链保序(docs/08 §7.2;session.ts 旁路�
       const label = e.type === 'message_end' ? `message_end(${e.message.role})` : e.type;
       entryOrder.push(label);
       if (e.type === 'usage_update') usageTurns.push(e.usage.turns);
-      for (let hop = 0; hop < 64; hop++) await Promise.resolve();
+      if (entryOrder.length === 1) await listenerGate.opened;
       completionOrder.push(label);
       busy = false;
+      if (e.type === 'usage_update' && e.usage.turns === 2) resolveDelivered();
     });
 
     await h.session.prompt('go');
     await h.session.prompt('again');
-    await h.session.close();
+    // Cursor remains pinned at the first event, but neither run waited for the observer gate.
+    expect(entryOrder).toHaveLength(1);
+    listenerGate.open();
+    await delivered;
 
     expect(reentered).toBe(0);                                    // 串行:任一事件处理期间无并发进入
     expect(completionOrder).toEqual(entryOrder);                  // 完成序 == 到达序(逐个 await 的直接证据)
@@ -444,9 +486,9 @@ describe('usage_update 与主事件同链保序(docs/08 §7.2;session.ts 旁路�
     expect(assistantEnds).toHaveLength(2);
     for (const i of assistantEnds) expect(entryOrder[i + 1]).toBe('usage_update');
 
-    // close() 返回前全部送达,且快照内容单调递增
     expect(entryOrder.filter((t) => t === 'usage_update')).toHaveLength(2);
     expect(usageTurns).toEqual([1, 2]);
+    await h.session.close();
   });
 });
 

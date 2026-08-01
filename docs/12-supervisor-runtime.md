@@ -1144,8 +1144,8 @@ flowchart BT
 | `Supervisor` | workspace/thread 生命周期、op 路由、父子拓扑、跨线程取消 | 不采样模型、不执行工具、不合并 transcript |
 | `ThreadRuntime` | 单 thread 的 active-run 门禁与协作者编排 | 不持有全局 thread map，不渲染 |
 | `TranscriptRepository` | thread journal 的 append/load/fold IO 与 transcript view（含 event/mailbox/control records） | 不分配 seq，不决定 op/retry/权限，不发 UI |
-| `RetryCoordinator` | 错误分类、退避、创建 successor run | 不直接修改 transcript |
-| `CompactionCoordinator` | 触发/摘要/切点/续跑协调 | 不拥有 Agent 内部数组 |
+| `RetryCoordinator` | 错误分类、attempt/可取消退避与重试决策 | 不直接修改 transcript，不分配/持久化 identity |
+| `CompactionCoordinator` | 触发/摘要/切点与 transform plan | 不拥有 Agent 内部数组，不分配/持久化 identity |
 | `EventCommitter` | 分配 seq、权威持久化、返回一个 envelope 或连续原子 batch | 不执行普通观察者回调 |
 | `EventHub` | Runtime 每 workspace 一个，汇聚所有 per-thread committer并服务 current/future thread filter、cursor 与隔离 | 不持有 ThreadRuntime map、不重新编号、不成为事实源 |
 | `CapabilityRegistry` | 原子注册 schema + executor、产出不可变 snapshot | 不在执行时回查最新版本 |
@@ -1159,8 +1159,10 @@ flowchart BT
 这里的“facade”分两种 composition：Runtime/CLI 内的 default-thread view 委托 Supervisor 已拥有的
 ThreadRuntime；exported direct `Session.create/resume` 则委托 internal `StandaloneSessionHost` 的单个
 ThreadRuntime，**不**创建 Runtime/取得 workspace SupervisorLease。后者按 v1 session backend 持有独立
-sidecar lease、per-instance AgentConfig/private EventHub，并通过 standalone fenced outbox + 全局 CAS
-实现同一 LegacyApprovalPatternRepositoryPort。不同 session id 可在同 cwd 并行；同一 backend 双 resume
+sidecar lease、per-instance AgentConfig/private EventHub。它保留既有 opaque `beforeToolCall` callback：其中
+caller-owned broker/policy gate 是 process-local 兼容例外，因为 public Session 没有结构化 response ingress，
+host 不得猜测 callback 或伪造 durable control。Runtime/CLI composition 才必须使用同一
+LegacyApprovalPatternRepositoryPort/control 链。不同 session id 可在同 cwd 并行；同一 backend 双 resume
 阶段 2 起 `session_in_use`。standalone host 无 canonical catalog/ledger 写权，不能用来绕过 Runtime lease；
 direct Session 与 Runtime 共写 claimed v1 backend 仍是 §11.1 的 unsupported 边界。
 
@@ -1440,7 +1442,8 @@ reservation 可在副作用前 durable，又不需要伪造仅用于分配 ident
 `policyRevision` 是 stable legacy-rule revision 与本 turn 的 turnCeiling revision 的 hash；同一 run
 下一 turn 若 workspace ceiling 收紧，legacy preflight/control revision 也必须收紧/变化。
 因此阶段 1 的迟到 abort、event envelope 与 receipt 都引用 Supervisor 已知的同一 reservation。阶段 2
-把这次握手移入 RetryCoordinator/CompactionCoordinator，而不改变身份语义。
+把这次握手收进 `ThreadRuntime` 与 coordinator/driver 的编排边界；coordinator 只产出 decision/plan，
+不分配或持久化 identity，身份语义不变。
 
 这个 hook **不是** `Session.subscribe()`：现有普通 listener 的 reject 会被兼容路径隔离/吞掉，不能
 承担权威 gate。阶段 1 给 Session 增加可选的 internal authoritative-before-mirror hook，只由
@@ -1488,7 +1491,7 @@ checkpoint.frontend+旧 high-water，不会返回“新消息+旧 seq”。重�
 切点重建 Agent 的 summary+tail 出站上下文。v1 文件从此只是兼容镜像，不能
 反向覆盖 canonical projection。首次导入纯 v1 时才由验证后的 transcript/usage/最后一条有效
 CompactionRecord 建 seed；若 tailStartId 不在 transcript，按 [08](./08-session-persistence.md) §4.1
-忽略该 compaction 并告警。导入不伪造历史 envelope。阶段 2 将同一 writer/checkpoint 原样迁入
+忽略该 compaction 并告警。导入不伪造历史 envelope。阶段 2 已把同一 writer/checkpoint 原样迁入
 TranscriptRepository/EventCommitter。
 
 resume 还有一个在 `thread_resumed`/snapshot 可见前完成的 recovery barrier。Supervisor 先 fold
@@ -1534,7 +1537,8 @@ AgentEvent / control event
 
 runtime-managed Agent 的 `authoritativeEventSink` 是独立 internal hook，不属于 `Agent.subscribe()` 的
 catch-and-diagnose listener chain；EventCommitter reject 必须向 Agent 传播并终止该 thread，不能被当成
-普通 observer error。standalone Agent 的 public subscribe 仍保持阶段 0 等待与异常隔离语义。
+普通 observer error。exported `Agent` 自身的 public subscribe 仍保持阶段 0 等待与异常隔离语义；direct
+`Session.subscribe()` 已由 standalone canonical sidecar 的 cursor pump 投影，按本阶段规则不再背压 Agent。
 
 只有权威提交可以背压 Agent。普通观察者失败、变慢或退订不得拖慢 provider delta、工具执行或其他
 thread；EventHub 对每个订阅者保序并隔离队列，溢出策略必须显式（断开并报告 gap，或由 durable
@@ -2454,6 +2458,7 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
 |---|---|---|---|---|
 | exported `Agent` API | 行为冻结 | 保留，内部单 run 引擎 | 保留 | legacy facade/AgentConfig.tools 与调用语义不变；Runtime 改用独立 snapshot engine |
 | `Session` API | 当前单会话实现 | 保持原实现/settlement；新 Runtime 仅由隔离 driver 包装 | 改为默认 thread facade 并委托 ThreadRuntime；事件值/顺序兼容，普通 listener 不再背压 | 继续兼容，标记 legacy |
+| direct Session opaque approval hook | caller-owned `beforeToolCall`/broker | 保持 | process-local 兼容例外；无 response ingress，故不伪造 durable control | 保持，未来可 additive opt-in structured adapter |
 | 同 cwd/root 的两个不同 direct Session | 可并行、配置隔离 | 保持 | 各自 StandaloneSessionHost/private hub/backend lease，可并行且不争 SupervisorLease | 保持 |
 | 同一 backend/id 的两个 direct `Session.resume` | 可发生但无单 writer 保障 | 保持旧实现 | 有意安全收紧：第二个稳定 `session_in_use` | 同左 |
 | public Runtime | 无 | 新增无副作用 entry + `RuntimePort/Supervisor` | 使用拆分后的组件 | 使用动态 registry/policy |

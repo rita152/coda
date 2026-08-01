@@ -923,7 +923,9 @@ control_resolved 并释放 waiter。force/空 pattern 的 allow_always 按既有
 repository 明确 definitely-not-applied 时 response interrupted + claim release、request 保持 pending并可用
 新 OpId 重答；conflict/fenced/unknown 保留 claim并分别 quarantine workspace/停 admission/degrade，
 且都停止该 workspace 的新 admission/capability execution。crash recovery
-可补 pattern/control 但绝不重放 executor。阶段 3
+可补 pattern/control 但绝不重放 executor。exported direct Session 的 arbitrary opaque
+`beforeToolCall` 没有 response ingress，仍是明确列入兼容矩阵的 caller-owned process-local edge；core 不从
+该 callback 猜测或合成 control。阶段 3
 才以 PreparedInvocation/PolicyEngine/grant repository 取代这个窄 bridge。按 `kind`
 分级的默认策略保持：`read` / `search` / `plan` 通常直通；`edit` 的描述包含 diff 摘要；
 `execute`（bash）包含命令与模型提供的 description。

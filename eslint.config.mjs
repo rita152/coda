@@ -40,16 +40,17 @@ export default tseslint.config(
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
-          // session 只依赖 protocol/shared/agent(见 docs/02 §7),不得触碰 providers/tools/cli
+          // session 只依赖 protocol/shared/agent(见 docs/02 §7),不得触碰 runtime/providers/tools/cli
+          { target: './src/session', from: './src/runtime' },
           { target: './src/session', from: './src/cli' },
           { target: './src/session', from: './src/providers' },
           { target: './src/session', from: './src/tools' },
-          // runtime 是无 UI 的 Supervisor/路由层，只依赖 protocol/shared 与本层；
-          // Session/Agent/provider/tool 只能经注入 port 或上层 legacy adapter 接入。
+          // runtime 是无 UI 的 Supervisor/路由层；阶段 2 起组装 session 层的六个协作者，
+          // 仍不得直接依赖 Agent/provider/tool 或 CLI。
           {
             target: './src/runtime',
             from: './src',
-            except: ['./runtime', './protocol', './shared'],
+            except: ['./runtime', './protocol', './shared', './session'],
           },
           // provider 之间互相隔离(跨 provider import 是设计异味)
           { target: './src/providers/openai-chat', from: './src/providers/faux' },
@@ -136,8 +137,27 @@ export default tseslint.config(
         { selector: String.raw`ImportExpression > Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(动态 import 同样受限)' },
         { selector: String.raw`TSImportType Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(import() 类型引用同样受限)' },
         {
-          selector: String.raw`TSImportType Literal[value=/^\.\.\u002F(cli|providers|session|agent|tools)(\u002F|$)/]`,
-          message: 'src/runtime core 禁止通过 import() 类型引用 CLI/provider/Session/Agent/tool',
+          selector: String.raw`TSImportType Literal[value=/^\.\.\u002F(cli|providers|agent|tools)(\u002F|$)/]`,
+          message: 'src/runtime core 禁止通过 import() 类型引用 CLI/provider/Agent/tool',
+        },
+      ],
+    },
+  },
+
+  // session is the per-thread layer and must never reach back into the workspace/runtime or edge
+  // layers. TS import() types bypass import/no-restricted-paths, so close that channel explicitly.
+  // Preserve the global SDK restrictions because flat-config rule entries replace rather than merge.
+  {
+    files: ['src/session/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error',
+        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(动态 import 同样受限)' },
+        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(import() 类型引用同样受限)' },
+        { selector: String.raw`ImportExpression > Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(动态 import 同样受限)' },
+        { selector: String.raw`TSImportType Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(import() 类型引用同样受限)' },
+        {
+          selector: String.raw`TSImportType Literal[value=/^\.\.\u002F(runtime|cli|providers|tools)(\u002F|$)/]`,
+          message: 'src/session 禁止通过 import() 类型引用 runtime/CLI/provider/tool',
         },
       ],
     },

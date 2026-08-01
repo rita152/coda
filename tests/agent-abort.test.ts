@@ -48,13 +48,46 @@ describe('流式中 abort(矩阵行 3)', () => {
 });
 
 describe('工具执行中 abort(矩阵行 4——核心验收)', () => {
+  it('tool_execution_start 权威提交等待中 abort:不跨过 executor 副作用边界', async () => {
+    const startCommitGate = createGate();
+    let executed = false;
+    const tool = makeTool('danger', async () => {
+      executed = true;
+      return textOutput('must not run');
+    });
+    const h = makeHarness(
+      {
+        turns: [{ events: [{ kind: 'tool_call', name: 'danger', args: {}, id: 'c1' }] }],
+      },
+      { tools: [tool] },
+    );
+    h.agent.subscribe(async (event) => {
+      if (event.type === 'tool_execution_start') await startCommitGate.opened;
+    });
+
+    const started = h.waitForEvent((event) => event.type === 'tool_execution_start');
+    const run = h.agent.prompt('go');
+    await started;
+    h.agent.abort();
+    startCommitGate.open();
+    await run;
+
+    expect(executed).toBe(false);
+    expect(h.events.filter((event) => event.type === 'tool_execution_end')).toHaveLength(0);
+    expect(h.agent.transcript.filter((message) => message.role === 'tool_result')).toHaveLength(0);
+    const end = h.events.find((event) => event.type === 'agent_end');
+    expect(end?.type === 'agent_end' && end.reason).toBe('aborted');
+  });
+
   it('sequential 批:执行中工具收到 signal;后续工具不执行不伪造;孤儿在下次出站补合成结果', async () => {
     const gate = createGate();
+    const executionStarted = createGate();
     let secondExecuted = false;
     let sawAbortSignal = false;
     const first = makeTool(
       'first',
       async (_args, ctx) => {
+        executionStarted.open();
         await gate.opened;
         sawAbortSignal = ctx.signal.aborted;   // abort 后才放行,工具应能观察到
         throw new Error('Tool execution was interrupted');
@@ -79,9 +112,8 @@ describe('工具执行中 abort(矩阵行 4——核心验收)', () => {
       },
       { tools: [first, second] },
     );
-    const started = h.waitForEvent((e) => e.type === 'tool_execution_start');
     const run = h.agent.prompt('go');
-    await started;
+    await executionStarted.opened;
     h.agent.abort();
     gate.open();
     await run;

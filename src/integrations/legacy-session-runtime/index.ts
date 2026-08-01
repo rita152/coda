@@ -15,34 +15,26 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import type { ApprovalBroker } from '../../agent/index.js';
+import { INTERRUPTED_RESULT_TEXT } from '../../agent/index.js';
 import type {
-  AgentEvent,
-  ExternalOpId,
   ModelConfig,
   PermissionCeilingSnapshot,
-  RunId,
-  RuntimeEvent,
   ThreadId,
-  TurnId,
   WorkspaceId,
 } from '../../protocol/index.js';
-import { canonicalJson, canonicalJsonSha256, strictJsonSnapshot } from '../../protocol/index.js';
+import { canonicalJson, strictJsonSnapshot } from '../../protocol/index.js';
 import type {
-  PreparedThreadDriverCommand,
-  RecoveryQueueCommand,
+  LegacyApprovalAdapter,
+  LegacyApprovalAdapterFactory,
+  LegacyApprovalPatternRepositoryPort,
   ThreadDriverAttachment,
   ThreadDriverCheckpoint,
-  ThreadDriverCheckpointMutation,
-  ThreadDriverEvent,
   ThreadDriverFactory,
   ThreadDriverHostServices,
-  ThreadDriverPort,
 } from '../../runtime/ports.js';
 import {
   defaultSessionDir,
   loadSession,
-  Session,
   SessionStore,
   STORE_VERSION,
   PROTOCOL_VERSION,
@@ -51,46 +43,35 @@ import {
 import type {
   MetaRecord,
   ModelPricing,
-  SessionEvent,
-  SessionOptions,
   SessionRecord,
-  SessionRuntimeMirrorGuard,
 } from '../../session/index.js';
-
-type ApprovalRequestEvent = Extract<AgentEvent, { type: 'approval_request' }>;
-type ActivityCommand = Extract<
-  PreparedThreadDriverCommand,
-  { readonly op: { readonly type: 'prompt' | 'continue' } }
->;
-type SetModelCommand = Extract<
-  PreparedThreadDriverCommand,
-  { readonly op: { readonly type: 'set_model' } }
->;
-type AbortCommand = Extract<
-  PreparedThreadDriverCommand,
-  { readonly op: { readonly type: 'abort' } }
->;
+import { LegacyThreadExecution } from '../../session/legacy-thread-execution.js';
+import type {
+  SessionOptions,
+  SessionRuntimeMirrorGuard,
+} from '../../session/legacy-thread-execution.js';
+import {
+  checkpointFromLegacySession,
+  LegacySessionThreadDriver,
+} from '../../session/legacy-session-thread-driver.js';
 
 export interface LegacySessionAttachmentContext {
   readonly workspaceId: WorkspaceId;
   readonly threadId: ThreadId;
   readonly model: ModelConfig;
   readonly permissionCeiling: PermissionCeilingSnapshot;
-  /** Pass this callback to the attachment-local ApprovalBroker constructor. */
-  readonly emitApproval: (event: ApprovalRequestEvent) => void;
-  /** Pass this callback to legacy approval policy requestAbort. */
-  readonly requestAbort: () => void;
 }
 
 export interface LegacySessionAttachmentConfiguration {
   readonly sessionOptions: Omit<
     SessionOptions,
-    'dir' | 'authoritativeEventSink' | 'runtimeMirrorGuard' | 'runtimeQueueSeed'
+    | 'dir'
+    | 'authoritativeEventSink'
+    | 'runtimeMirrorGuard'
+    | 'runtimeQueueSeed'
+    | 'observerPort'
+    | 'legacyRuntimeAttachment'
   >;
-  readonly approval?: {
-    readonly broker: ApprovalBroker;
-    readonly onAbort: () => void;
-  };
   /** Revision of attachment-local legacy project/policy rules. */
   readonly policyRevision?: string;
 }
@@ -101,6 +82,8 @@ export interface LegacySessionThreadDriverFactoryOptions {
   readonly configure: (
     context: LegacySessionAttachmentContext,
   ) => LegacySessionAttachmentConfiguration;
+  /** Static policy bridge. The Runtime owns its repository and all control waiters. */
+  readonly approvalAdapterFactory?: LegacyApprovalAdapterFactory;
 }
 
 interface DriverConstructionInput {
@@ -112,34 +95,7 @@ interface DriverConstructionInput {
   readonly sessionId: string;
   readonly create: boolean;
   readonly creationKey?: string;
-  readonly usedRequestIds: readonly string[];
-}
-
-interface ActivityContext {
-  readonly rootOpId: ExternalOpId;
-  readonly rootRunId: RunId;
-  currentRunId: RunId;
-  currentTurnId?: TurnId;
-  currentTurnCeilingRevision?: string;
-  turnOrdinal: number;
-  terminalStatus?: 'completed' | 'aborted' | 'error';
-  retry?: { readonly predecessorRunId: RunId; readonly successorRunId: RunId };
-  compaction?: { readonly predecessorRunId: RunId; readonly successorRunId: RunId };
-  successorCommitPending?: RunId;
-}
-
-interface PendingApproval {
-  readonly requestId: string;
-  readonly rawApprovalId: string;
-  readonly owningRunId: RunId;
-  readonly owningTurnId: TurnId;
-  readonly policyRevision: string;
-}
-
-interface PendingQueueCommit {
-  readonly opId: ExternalOpId;
-  readonly resolve: () => void;
-  readonly reject: (error: unknown) => void;
+  readonly legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort;
 }
 
 const DRIVER_REF_KIND = 'session-v1';
@@ -168,7 +124,15 @@ export function createLegacySessionThreadDriverFactory(
 ): ThreadDriverFactory {
   const sessionDir = options.sessionDir ?? defaultSessionDir();
   return {
-    requirements: { approvalMode: 'legacy_session_edge' },
+    requirements: {
+      approvalMode: options.approvalAdapterFactory === undefined
+        ? 'legacy_session_edge'
+        : 'durable_legacy_bridge',
+    },
+    ...(options.approvalAdapterFactory !== undefined && {
+      openLegacyApprovalAdapter: (input) => options.approvalAdapterFactory?.open(input)
+        ?? Promise.reject(new Error('Legacy approval adapter factory is unavailable')),
+    }),
     create: async (input, host) => constructDriver(
       options,
       sessionDir,
@@ -180,7 +144,9 @@ export function createLegacySessionThreadDriverFactory(
         sessionId: deterministicSessionId(input.creationKey),
         create: true,
         creationKey: input.creationKey,
-        usedRequestIds: [],
+        ...(input.legacyApprovalPatterns !== undefined && {
+          legacyApprovalPatterns: input.legacyApprovalPatterns,
+        }),
       },
       host,
     ),
@@ -199,7 +165,9 @@ export function createLegacySessionThreadDriverFactory(
           }),
           sessionId: input.durableRef.key,
           create: false,
-          usedRequestIds: input.usedRequestIds,
+          ...(input.legacyApprovalPatterns !== undefined && {
+            legacyApprovalPatterns: input.legacyApprovalPatterns,
+          }),
         },
         host,
       );
@@ -219,652 +187,127 @@ async function constructDriver(
     threadId: input.threadId,
     model: input.model,
     permissionCeiling: input.permissionCeiling,
-    emitApproval: (event) => {
-      if (driverRef.current === undefined) throw new Error('Legacy approval emitted before driver construction');
-      driverRef.current.emitApproval(event);
-    },
-    requestAbort: () => driverRef.current?.requestAbortFromPolicy(),
   });
-  const sessionOptions: SessionOptions = {
-    ...configured.sessionOptions,
-    dir: sessionDir,
-    agentConfig: {
-      ...configured.sessionOptions.agentConfig,
-      model: input.model,
-    },
-    authoritativeEventSink: (events) => {
-      if (driverRef.current === undefined) {
-        return Promise.reject(new Error('Legacy Session emitted before driver construction'));
+  let approvalAdapter: LegacyApprovalAdapter | undefined;
+  let session: LegacyThreadExecution | undefined;
+  let driver: LegacySessionThreadDriver | undefined;
+  try {
+    if (options.approvalAdapterFactory !== undefined) {
+      if (input.legacyApprovalPatterns === undefined) {
+        throw new Error('Durable legacy approval storage is required before driver construction');
       }
-      return driverRef.current.commitSessionEvents(events);
-    },
-  };
-  const mirror = new LegacySessionMirrorClaim({
-    dir: sessionDir,
-    sourceSessionId: input.sessionId,
-    workspaceId: input.workspaceId,
-    threadId: input.threadId,
-    recordedCwd: sessionOptions.agentConfig.cwd ?? process.cwd(),
-    model: input.model,
-    ...(input.creationKey !== undefined && { creationKey: input.creationKey }),
-  });
-  let activeSessionId = input.sessionId;
-  let createMeta: MetaRecord | undefined;
-  if (!input.create && input.initialCheckpoint !== undefined) {
-    activeSessionId = mirror.prepareResume(
-      input.initialCheckpoint,
-      configured.sessionOptions.pricing,
-    );
-  } else if (input.create) {
-    const preparation = mirror.prepareCreate();
-    activeSessionId = preparation.activeSessionId;
-    createMeta = preparation.meta;
-  }
-  sessionOptions.runtimeMirrorGuard = mirror;
-  if (input.initialCheckpoint !== undefined) {
-    sessionOptions.runtimeQueueSeed = input.initialCheckpoint.frontend.queues;
-  }
-  const session = input.create
-    ? await Session.createWithId(activeSessionId, sessionOptions, createMeta)
-    : await Session.resume(activeSessionId, sessionOptions);
-  if (input.create) mirror.finishCreate(activeSessionId);
-  const driver = new LegacySessionThreadDriver({
-    workspaceId: input.workspaceId,
-    threadId: input.threadId,
-    permissionCeiling: input.permissionCeiling,
-    host,
-    session,
-    configured,
-    pendingMirrorDiagnostic: mirror.rebuiltAfterConcurrentWriter,
-    usedRequestIds: input.usedRequestIds,
-  });
-  driverRef.current = driver;
-  return {
-    driver,
-    durableRef: { kind: DRIVER_REF_KIND, key: input.sessionId },
-    initialCheckpoint: input.initialCheckpoint ?? checkpointFromSession(session),
-  };
-}
-
-class LegacySessionThreadDriver implements ThreadDriverPort {
-  readonly #workspaceId: WorkspaceId;
-  readonly #threadId: ThreadId;
-  readonly #permissionCeiling: PermissionCeilingSnapshot;
-  readonly #host: ThreadDriverHostServices;
-  readonly #session: Session;
-  readonly #approval: LegacySessionAttachmentConfiguration['approval'];
-  readonly #policyRevision: string;
-  readonly #pendingApprovals = new Map<string, PendingApproval>();
-  readonly #usedApprovalIds = new Set<string>();
-  readonly #pendingQueueCommits: PendingQueueCommit[] = [];
-  readonly #sideTasks = new Set<Promise<void>>();
-  #activity: ActivityContext | undefined;
-  #activated = false;
-  #recovering = false;
-  #recovered = false;
-  #closed = false;
-  #closePromise: Promise<void> | undefined;
-  #fatalError: unknown;
-  #pendingMirrorDiagnostic: boolean;
-  #mirrorDiagnosticCommitted = false;
-
-  constructor(input: {
-    readonly workspaceId: WorkspaceId;
-    readonly threadId: ThreadId;
-    readonly permissionCeiling: PermissionCeilingSnapshot;
-    readonly host: ThreadDriverHostServices;
-    readonly session: Session;
-    readonly configured: LegacySessionAttachmentConfiguration;
-    readonly pendingMirrorDiagnostic: boolean;
-    readonly usedRequestIds: readonly string[];
-  }) {
-    this.#workspaceId = input.workspaceId;
-    this.#threadId = input.threadId;
-    this.#permissionCeiling = input.permissionCeiling;
-    this.#host = input.host;
-    this.#session = input.session;
-    this.#approval = input.configured.approval;
-    this.#policyRevision = input.configured.policyRevision ?? 'legacy-session-policy-v1';
-    this.#pendingMirrorDiagnostic = input.pendingMirrorDiagnostic;
-    for (const requestId of input.usedRequestIds) this.#usedApprovalIds.add(requestId);
-  }
-
-  async recover(commands: readonly RecoveryQueueCommand[]): Promise<void> {
-    this.#assertNotClosed();
-    if (this.#activated || this.#recovering || this.#recovered) {
-      throw new Error('Legacy Session recovery must run exactly once before activation');
-    }
-    this.#recovering = true;
-    try {
-      // Recovery diagnostics are canonical facts and must become durable before any recovered
-      // queue effect or resumed-thread visibility is published by the Supervisor.
-      if (this.#pendingMirrorDiagnostic) await this.#commitMirrorDiagnostic();
-      for (const command of commands) await this.#dispatchQueueOperation(command.op);
-      this.#throwFatal();
-      this.#recovered = true;
-    } catch (error) {
-      if (error instanceof LegacySessionConcurrentWriterError) {
-        this.#markFatal(error);
-        await this.#commitMirrorDiagnostic();
-      }
-      throw error;
-    } finally {
-      this.#recovering = false;
-    }
-  }
-
-  async activate(): Promise<void> {
-    this.#assertNotClosed();
-    if (!this.#recovered || this.#recovering) {
-      throw new Error('Legacy Session driver must finish recovery before activation');
-    }
-    this.#activated = true;
-  }
-
-  dispatch(command: PreparedThreadDriverCommand): ReturnType<ThreadDriverPort['dispatch']> {
-    this.#assertReady();
-    return { completion: this.#dispatch(command) };
-  }
-
-  interactionState(): ReturnType<ThreadDriverPort['interactionState']> {
-    return this.#session.interactionState();
-  }
-
-  close(): Promise<void> {
-    if (this.#closePromise !== undefined) return this.#closePromise;
-    this.#closed = true;
-    this.#closePromise = (async () => {
-      this.#session.abort();
-      this.#approval?.onAbort();
-      await Promise.allSettled([...this.#sideTasks]);
-      for (const pending of this.#pendingQueueCommits.splice(0)) {
-        pending.reject(new Error('Legacy Session driver closed'));
-      }
-      await this.#session.close();
-    })();
-    return this.#closePromise;
-  }
-
-  requestAbortFromPolicy(): void {
-    this.#session.abort();
-  }
-
-  emitApproval(event: ApprovalRequestEvent): void {
-    try {
-      this.#assertReady();
-      const activity = this.#requireActivity();
-      const owningTurnId = activity.currentTurnId;
-      if (owningTurnId === undefined) throw new Error('Approval request has no active turn');
-      const requestId = this.#allocateApprovalRequestId(event.approvalId);
-      const pending: PendingApproval = {
-        requestId,
-        rawApprovalId: event.approvalId,
-        owningRunId: activity.currentRunId,
-        owningTurnId,
-        policyRevision: this.#currentPolicyRevision(activity),
-      };
-      this.#pendingApprovals.set(requestId, pending);
-      const task = this.#host.commitEvent({
-        event: {
-          type: 'control_request',
-          requestId,
-          kind: 'approval',
-          owningRunId: pending.owningRunId,
-          owningTurnId: pending.owningTurnId,
-          policyRevision: pending.policyRevision,
-          payload: {
-            toolCallId: event.toolCallId,
-            description: event.description,
-          },
-        },
-        runId: pending.owningRunId,
-        turnId: pending.owningTurnId,
-      }).then(
-        () => {
-          this.#usedApprovalIds.add(requestId);
-        },
-        (error) => {
-          if (this.#pendingApprovals.get(requestId) === pending) {
-            this.#pendingApprovals.delete(requestId);
-          }
-          throw error;
-        },
-      );
-      this.#trackSideTask(task);
-    } catch (error) {
-      this.#markFatal(error);
-    }
-  }
-
-  async commitSessionEvent(event: SessionEvent): Promise<void> {
-    this.#assertEventSinkReady();
-    this.#throwFatal();
-    if (event.type === 'queue_update') {
-      const pending = this.#pendingQueueCommits.shift();
-      if (pending !== undefined) {
-        try {
-          await this.#host.commitEvent({ event, opId: pending.opId });
-          pending.resolve();
-        } catch (error) {
-          pending.reject(error);
-          throw error;
-        }
-        return;
-      }
-    }
-    const activity = this.#requireActivity();
-    switch (event.type) {
-      case 'turn_start': {
-        const reservation = await this.#host.reserveTurn({
-          runId: activity.currentRunId,
-          turnOrdinal: ++activity.turnOrdinal,
-        });
-        activity.currentTurnId = reservation.turnId;
-        activity.currentTurnCeilingRevision = reservation.turnCeiling.revision;
-        await this.#host.commitEvent({
-          event,
-          runId: activity.currentRunId,
-          turnId: reservation.turnId,
-        });
-        return;
-      }
-      case 'agent_end': {
-        const predecessorRunId = activity.currentRunId;
-        const successorReason = event.willRetry === true
-          ? 'retry'
-          : this.#session.runtimeFollowUpState() === 'compacting'
-            ? 'compaction'
-            : undefined;
-        const successor = successorReason === undefined
-          ? undefined
-          : await this.#host.reserveSuccessor({
-              threadId: this.#threadId,
-              predecessorRunId,
-              reason: successorReason,
-            });
-        if (successor !== undefined) {
-          if (successorReason === 'retry') {
-            activity.retry = { predecessorRunId, successorRunId: successor.runId };
-          } else {
-            activity.compaction = { predecessorRunId, successorRunId: successor.runId };
-          }
-          // reserveSuccessor has already made this the canonical current RunId. Publish that
-          // CAS target to abort dispatch before awaiting predecessor agent_end commit, otherwise
-          // an abort accepted in this window would incorrectly compare against the predecessor.
-          activity.currentRunId = successor.runId;
-          activity.turnOrdinal = 0;
-          activity.successorCommitPending = successor.runId;
-        }
-        await this.#host.commitEvent({
-          event,
-          runId: predecessorRunId,
-          ...(predecessorRunId === activity.rootRunId && { opId: activity.rootOpId }),
-        });
-        activity.terminalStatus = event.reason;
-        activity.currentTurnId = undefined;
-        activity.currentTurnCeilingRevision = undefined;
-        activity.successorCommitPending = undefined;
-        return;
-      }
-      case 'retry_scheduled': {
-        const retry = activity.retry;
-        if (retry === undefined) throw new Error('retry_scheduled has no reserved successor');
-        await this.#host.commitEvent({
-          event: {
-            ...event,
-            predecessorRunId: retry.predecessorRunId,
-            successorRunId: retry.successorRunId,
-          },
-          runId: retry.successorRunId,
-        });
-        activity.retry = undefined;
-        return;
-      }
-      case 'compaction_start': {
-        const compaction = activity.compaction;
-        if (compaction === undefined) {
-          throw new Error('compaction_start has no predecessor agent_end reservation');
-        }
-        activity.currentRunId = compaction.successorRunId;
-        activity.currentTurnId = undefined;
-        activity.currentTurnCeilingRevision = undefined;
-        activity.turnOrdinal = 0;
-        await this.#host.commitEvent({
-          event: {
-            ...event,
-            predecessorRunId: compaction.predecessorRunId,
-            activityRunId: compaction.successorRunId,
-          },
-          runId: compaction.successorRunId,
-        });
-        return;
-      }
-      case 'compaction_end': {
-        const checkpoint = event.ok ? this.#session.compactionCheckpoint() : undefined;
-        const mutation: ThreadDriverCheckpointMutation | undefined = checkpoint === undefined
-          ? undefined
-          : {
-              type: 'compaction_committed',
-              compaction: {
-                id: checkpoint.id,
-                timestamp: checkpoint.timestamp,
-                tailStartId: checkpoint.tailStartId,
-                summary: checkpoint.summary,
-                ...(checkpoint.contextTokensBefore !== undefined && {
-                  contextTokensBefore: checkpoint.contextTokensBefore,
-                }),
-              },
-            };
-        await this.#host.commitEvent({
-          event: { ...event, activityRunId: activity.currentRunId },
-          runId: activity.currentRunId,
-        }, mutation);
-        activity.compaction = undefined;
-        return;
-      }
-      case 'usage_update':
-        await this.#commitTurnEvent({ type: event.type, usage: event.usage });
-        return;
-      case 'queue_update': {
-        if (activity.currentTurnId !== undefined) {
-          await this.#commitTurnEvent(event);
-        } else {
-          await this.#host.commitEvent({ event, opId: activity.rootOpId });
-        }
-        return;
-      }
-      case 'agent_start':
-        await this.#host.commitEvent({
-          event,
-          runId: activity.currentRunId,
-          ...(activity.currentRunId === activity.rootRunId && { opId: activity.rootOpId }),
-        });
-        return;
-      case 'error':
-        await this.#host.commitEvent({
-          event,
-          runId: activity.currentRunId,
-          ...(activity.currentTurnId !== undefined && { turnId: activity.currentTurnId }),
-        });
-        return;
-      case 'approval_request':
-        throw new Error('Approval requests must use the legacy approval side channel');
-      case 'turn_end':
-      case 'message_start':
-      case 'message_update':
-      case 'message_end':
-      case 'tool_execution_start':
-      case 'tool_execution_update':
-      case 'tool_execution_end':
-      case 'plan_update':
-        await this.#commitTurnEvent(event);
-        return;
-    }
-  }
-
-  async commitSessionEvents(events: readonly [SessionEvent, ...SessionEvent[]]): Promise<void> {
-    if (events.length === 1) {
-      await this.commitSessionEvent(events[0]);
-      return;
-    }
-    this.#assertEventSinkReady();
-    this.#throwFatal();
-    const [messageEvent, usageEvent, ...unexpected] = events;
-    if (
-      unexpected.length !== 0 ||
-      messageEvent.type !== 'message_end' ||
-      usageEvent?.type !== 'usage_update'
-    ) {
-      throw new Error('Legacy Session emitted an unsupported authoritative event batch');
-    }
-    const activity = this.#requireActivity();
-    const turnId = activity.currentTurnId;
-    if (turnId === undefined) throw new Error('message_end batch has no active turn');
-    const inputs: [ThreadDriverEvent, ThreadDriverEvent] = [
-      { event: messageEvent, runId: activity.currentRunId, turnId },
-      {
-        event: { type: 'usage_update', usage: usageEvent.usage },
-        runId: activity.currentRunId,
-        turnId,
-      },
-    ];
-    await this.#host.commitEventBatch(inputs);
-  }
-
-  async #dispatch(command: PreparedThreadDriverCommand) {
-    try {
-      this.#throwFatal();
-      switch (command.op.type) {
-        case 'prompt':
-        case 'continue':
-          return await this.#dispatchActivity(command as ActivityCommand);
-        case 'set_model':
-          this.#session.setModel((command as SetModelCommand).resolvedModel);
-          return { kind: 'operation', outcome: 'applied' } as const;
-        case 'steer':
-        case 'follow_up':
-          return await this.#dispatchQueueOperation(command.op);
-        case 'control_response':
-          return await this.#dispatchControlResponse(command.op);
-        case 'abort':
-          return await this.#dispatchAbort(command as AbortCommand);
-      }
-    } catch (error) {
-      if (error instanceof LegacySessionConcurrentWriterError) {
-        this.#markFatal(error);
-        await this.#commitMirrorDiagnostic();
-      }
-      throw error;
-    }
-  }
-
-  async #dispatchActivity(
-    command: ActivityCommand,
-  ) {
-    if (this.#activity !== undefined) throw new Error('Legacy Session driver already has an active activity');
-    const activity: ActivityContext = {
-      rootOpId: command.op.opId,
-      rootRunId: command.runId,
-      currentRunId: command.runId,
-      turnOrdinal: 0,
-    };
-    this.#activity = activity;
-    try {
-      if (command.resolvedInput.kind === 'prompt_input') {
-        await this.#session.prompt(command.resolvedInput.text);
-      } else {
-        await this.#session.continue();
-      }
-      await this.#session.waitForIdle();
-      await Promise.all([...this.#sideTasks]);
-      this.#throwFatal();
-      if (activity.terminalStatus === undefined) {
-        throw new Error('Legacy Session activity completed without agent_end');
-      }
-      return {
-        kind: 'activity',
-        status: activity.terminalStatus,
-        terminalRunId: activity.currentRunId,
-      } as const;
-    } finally {
-      if (this.#activity === activity) this.#activity = undefined;
-    }
-  }
-
-  async #dispatchQueueOperation(
-    op: Extract<PreparedThreadDriverCommand['op'], { type: 'steer' | 'follow_up' }>,
-  ) {
-    if (op.text.trim().length === 0) return { kind: 'operation', outcome: 'no_op' } as const;
-    const completion = new Promise<void>((resolve, reject) => {
-      this.#pendingQueueCommits.push({ opId: op.opId, resolve, reject });
-    });
-    try {
-      if (op.type === 'steer') this.#session.steer(op.text);
-      else this.#session.followUp(op.text);
-    } catch (error) {
-      const pending = this.#pendingQueueCommits.findIndex((candidate) => candidate.opId === op.opId);
-      if (pending >= 0) this.#pendingQueueCommits.splice(pending, 1);
-      throw error;
-    }
-    await completion;
-    this.#throwFatal();
-    return { kind: 'operation', outcome: 'applied' } as const;
-  }
-
-  async #dispatchControlResponse(
-    op: Extract<PreparedThreadDriverCommand['op'], { type: 'control_response' }>,
-  ) {
-    const pending = this.#pendingApprovals.get(op.requestId);
-    if (pending === undefined) return { kind: 'operation', outcome: 'no_op' } as const;
-    if (op.decision === 'confirm') throw new Error('Approval request cannot accept resource confirmation');
-    await this.#host.commitEvent({
-      event: {
-        type: 'control_resolved',
-        requestId: pending.requestId,
-        kind: 'approval',
-        owningRunId: pending.owningRunId,
-        owningTurnId: pending.owningTurnId,
-        policyRevision: pending.policyRevision,
-        decision: op.decision,
-      },
-      runId: pending.owningRunId,
-      turnId: pending.owningTurnId,
-      opId: op.opId,
-    });
-    this.#pendingApprovals.delete(op.requestId);
-    this.#approval?.broker.resolve(pending.rawApprovalId, op.decision);
-    return { kind: 'operation', outcome: 'applied' } as const;
-  }
-
-  async #dispatchAbort(command: AbortCommand) {
-    const target = command.resolvedTarget;
-    if (target.kind !== 'run' || this.#activity?.currentRunId !== target.runId) {
-      return { kind: 'operation', outcome: 'no_op' } as const;
-    }
-    const op = command.op;
-    const reservedSuccessorWindow = this.#activity.successorCommitPending === target.runId;
-    this.#session.abort();
-    // A retry successor can be cancelled while it is sleeping, before that successor ever emits
-    // its own agent_end. Record the accepted abort immediately so activity completion cannot reuse
-    // the predecessor's terminal error if its waitForIdle continuation wins the wake-up race.
-    this.#activity.terminalStatus = 'aborted';
-    for (const pending of [...this.#pendingApprovals.values()]) {
-      await this.#host.commitEvent({
-        event: {
-          type: 'control_resolved',
-          requestId: pending.requestId,
-          kind: 'approval',
-          owningRunId: pending.owningRunId,
-          owningTurnId: pending.owningTurnId,
-          policyRevision: pending.policyRevision,
-          decision: 'aborted',
-        },
-        runId: pending.owningRunId,
-        turnId: pending.owningTurnId,
-        opId: op.opId,
+      approvalAdapter = await options.approvalAdapterFactory.open({
+        workspaceId: input.workspaceId,
+        threadId: input.threadId,
+        patterns: input.legacyApprovalPatterns,
       });
-      this.#pendingApprovals.delete(pending.requestId);
     }
-    this.#approval?.onAbort();
-    // The predecessor agent_end commit can itself be held by the authoritative host. The
-    // successor is only a detached retry/compaction at this point, so signalling its controller
-    // is the complete effect and must not deadlock the abort receipt on that predecessor gate.
-    if (!reservedSuccessorWindow) await this.#session.waitForIdle();
-    this.#throwFatal();
-    return { kind: 'operation', outcome: 'applied' } as const;
-  }
-
-  #commitTurnEvent(event: RuntimeEvent): Promise<void> {
-    const activity = this.#requireActivity();
-    if (activity.currentTurnId === undefined) {
-      return Promise.reject(new Error(`${event.type} has no active turn`));
+    const configuredBeforeToolCall = configured.sessionOptions.agentConfig.beforeToolCall;
+    const sessionOptions: SessionOptions = {
+      ...configured.sessionOptions,
+      dir: sessionDir,
+      legacyRuntimeAttachment: true,
+      agentConfig: {
+        ...configured.sessionOptions.agentConfig,
+        model: input.model,
+        ...(approvalAdapter !== undefined && {
+          beforeToolCall: async (call) => {
+            const configuredDecision = configuredBeforeToolCall === undefined
+              ? undefined
+              : await configuredBeforeToolCall(call);
+            if (configuredDecision?.block === true) return configuredDecision;
+            const driver = driverRef.current;
+            if (driver === undefined) throw new Error('Legacy approval requested before driver construction');
+            const decision = await driver.requestLegacyApproval(call);
+            if (decision.kind === 'allow') return {};
+            if (decision.kind === 'aborted') {
+              return { block: true as const, reason: INTERRUPTED_RESULT_TEXT };
+            }
+            return { block: true as const, reason: decision.reason };
+          },
+        }),
+      },
+      authoritativeEventSink: (events) => {
+        if (driverRef.current === undefined) {
+          return Promise.reject(new Error('Legacy Session emitted before driver construction'));
+        }
+        return driverRef.current.commitSessionEvents(events);
+      },
+    };
+    const mirror = new LegacySessionMirrorClaim({
+      dir: sessionDir,
+      sourceSessionId: input.sessionId,
+      workspaceId: input.workspaceId,
+      threadId: input.threadId,
+      recordedCwd: sessionOptions.agentConfig.cwd ?? process.cwd(),
+      model: input.model,
+      ...(input.creationKey !== undefined && { creationKey: input.creationKey }),
+    });
+    let activeSessionId = input.sessionId;
+    let createMeta: MetaRecord | undefined;
+    if (!input.create && input.initialCheckpoint !== undefined) {
+      activeSessionId = mirror.prepareResume(
+        input.initialCheckpoint,
+        configured.sessionOptions.pricing,
+      );
+    } else if (input.create) {
+      const preparation = mirror.prepareCreate();
+      activeSessionId = preparation.activeSessionId;
+      createMeta = preparation.meta;
     }
-    return this.#host.commitEvent({
-      event,
-      runId: activity.currentRunId,
-      turnId: activity.currentTurnId,
+    sessionOptions.runtimeMirrorGuard = mirror;
+    if (input.initialCheckpoint !== undefined) {
+      sessionOptions.runtimeQueueSeed = input.initialCheckpoint.frontend.queues;
+    }
+    session = input.create
+      ? await LegacyThreadExecution.createWithId(activeSessionId, sessionOptions, createMeta)
+      : await LegacyThreadExecution.resume(activeSessionId, sessionOptions);
+    if (input.create) mirror.finishCreate(activeSessionId);
+    driver = new LegacySessionThreadDriver({
+      threadId: input.threadId,
+      host,
+      session,
+      approvalAdapter,
+      cwd: sessionOptions.agentConfig.cwd ?? process.cwd(),
+      pendingMirrorDiagnostic: mirror.rebuiltAfterConcurrentWriter,
+      isMirrorConcurrencyError: (error) => error instanceof LegacySessionConcurrentWriterError,
     });
-  }
-
-  #currentPolicyRevision(activity: ActivityContext): string {
-    return canonicalJsonSha256({
-      adapter: 'legacy-session-v1',
-      policyRevision: this.#policyRevision,
-      threadCeilingRevision: this.#permissionCeiling.revision,
-      turnCeilingRevision: activity.currentTurnCeilingRevision ?? this.#permissionCeiling.revision,
-    });
-  }
-
-  #allocateApprovalRequestId(rawId: string): string {
-    if (!this.#usedApprovalIds.has(rawId) && !this.#pendingApprovals.has(rawId)) return rawId;
-    for (let suffix = 1; suffix < Number.MAX_SAFE_INTEGER; suffix++) {
-      const candidate = `${rawId}~${suffix}`;
-      if (!this.#usedApprovalIds.has(candidate) && !this.#pendingApprovals.has(candidate)) {
-        return candidate;
+    driverRef.current = driver;
+    return {
+      driver,
+      durableRef: { kind: DRIVER_REF_KIND, key: input.sessionId },
+      initialCheckpoint: input.initialCheckpoint ?? checkpointFromLegacySession(session),
+      ...(approvalAdapter !== undefined && {
+        legacyApprovalAdapter: approvalAdapter,
+        legacyApprovalPolicyRevision: configured.policyRevision ?? 'legacy-session-policy-v2',
+      }),
+    };
+  } catch (error) {
+    const failures: unknown[] = [error];
+    if (driver !== undefined) {
+      try {
+        await driver.close();
+      } catch (closeError) {
+        failures.push(closeError);
+      }
+    } else {
+      if (session !== undefined) {
+        try {
+          await session.close();
+        } catch (closeError) {
+          failures.push(closeError);
+        }
+      }
+      if (approvalAdapter !== undefined) {
+        try {
+          await approvalAdapter.close();
+        } catch (closeError) {
+          failures.push(closeError);
+        }
       }
     }
-    throw new Error(`Unable to allocate canonical approval id for ${rawId}`);
-  }
-
-  async #commitMirrorDiagnostic(): Promise<void> {
-    if (this.#mirrorDiagnosticCommitted) return;
-    await this.#host.commitEvent({
-      event: {
-        type: 'runtime_diagnostic',
-        severity: 'error',
-        code: 'legacy_backend_concurrent_writer',
-        message: 'Legacy Session mirror changed outside Runtime; the attachment was quarantined.',
-        scope: 'thread',
-      },
-    });
-    this.#mirrorDiagnosticCommitted = true;
-    this.#pendingMirrorDiagnostic = false;
-  }
-
-  #trackSideTask(task: Promise<void>): void {
-    this.#sideTasks.add(task);
-    void task.then(
-      () => this.#sideTasks.delete(task),
-      (error) => {
-        this.#sideTasks.delete(task);
-        this.#markFatal(error);
-      },
-    );
-  }
-
-  #markFatal(error: unknown): void {
-    if (this.#fatalError !== undefined) return;
-    this.#fatalError = error;
-    this.#session.abort();
-    this.#approval?.onAbort();
-    for (const pending of this.#pendingQueueCommits.splice(0)) pending.reject(error);
-  }
-
-  #throwFatal(): void {
-    if (this.#fatalError !== undefined) throw this.#fatalError;
-  }
-
-  #requireActivity(): ActivityContext {
-    if (this.#activity === undefined) throw new Error('Legacy Session event has no active Runtime activity');
-    return this.#activity;
-  }
-
-  #assertReady(): void {
-    this.#assertNotClosed();
-    if (!this.#activated) throw new Error('Legacy Session driver is quarantined');
-    this.#throwFatal();
-  }
-
-  #assertEventSinkReady(): void {
-    this.#assertNotClosed();
-    if (!this.#activated && !this.#recovering) {
-      throw new Error('Legacy Session driver is quarantined');
-    }
-    this.#throwFatal();
-  }
-
-  #assertNotClosed(): void {
-    if (this.#closed) throw new Error('Legacy Session driver is closed');
+    if (failures.length === 1) throw error;
+    throw new AggregateError(failures, 'Legacy Session driver construction cleanup failed');
   }
 }
 
@@ -1450,33 +893,6 @@ function reconcileSessionMirror(
   ) {
     throw new LegacySessionCheckpointMismatchError('legacy compaction repair did not converge');
   }
-}
-
-function checkpointFromSession(session: Session): ThreadDriverCheckpoint {
-  const compaction = session.compactionCheckpoint();
-  return snapshotCheckpoint({
-    frontend: {
-      model: session.currentModel(),
-      transcript: [...session.messages],
-      usage: session.usage(),
-      queues: { steering: [], followUp: [] },
-      plan: [],
-      pendingControls: [],
-    },
-    execution: {
-      ...(compaction !== undefined && {
-        compaction: {
-          id: compaction.id,
-          timestamp: compaction.timestamp,
-          tailStartId: compaction.tailStartId,
-          summary: compaction.summary,
-          ...(compaction.contextTokensBefore !== undefined && {
-            contextTokensBefore: compaction.contextTokensBefore,
-          }),
-        },
-      }),
-    },
-  });
 }
 
 function snapshotCheckpoint(checkpoint: ThreadDriverCheckpoint): ThreadDriverCheckpoint {

@@ -9,7 +9,8 @@ Agent 执行引擎及其协作者；workspace/thread 生命周期与跨线程操
 > **阶段 0 基线说明**：本文件以 [12 Supervisor Runtime](./12-supervisor-runtime.md) 为上位契约。
 > “单 active run”只在一个 thread 内成立；不同 thread 可以并发。阶段 0 不改变现有 `Session`
 > 行为；阶段 1 保留现有 `Session` API/settlement 实现，由隔离的 legacy driver 供新 Runtime 包装；
-> 阶段 2 才把 `Session` 改成委托下文六个协作者的单默认 thread facade。
+> 阶段 2 已把 public `Session` 收窄为由 `StandaloneSessionHost` 组合的单默认 thread facade，并把
+> repository、retry、compaction、权威提交与观察者广播拆到下文协作者。
 
 ## 1. 职责边界:为什么必须分层
 
@@ -23,7 +24,7 @@ pi-mono 的 `AgentSession` 是本项目最重要的反面教材:一个类 3300+ 
 |---|---|---|
 | 持久化 | `EventCommitter` 接收事件并经 `TranscriptRepository` 权威提交 | 否 |
 | 恢复 | 构造 Agent 时注入 `initialMessages`(补充字段,见 3.1) | 只是初始数据 |
-| auto-retry | `RetryCoordinator` 监听 run 终态 → 退避后创建 successor run | 否 |
+| auto-retry | `RetryCoordinator` 监听 run 终态 → 返回分类/退避/重试决策；`ThreadRuntime` 预留 successor run | 否 |
 | compaction 触发 | `CompactionCoordinator` 令 `shouldStopAfterTurn` 返回 true | 只知道「该停了」 |
 | compaction 生效 | repository fold + `transformContext` 出站时丢前缀、注入摘要 | 否 |
 | usage 统计 | repository reducer 对 `message_end`(assistant)累加 | 否 |
@@ -32,8 +33,8 @@ opencode 的佐证:V1 的 `SessionProcessor` 把「事件 → 持久化状态」
 
 ### 1.2 session 层的六个协作者
 
-`ThreadRuntime` 只做单 thread active-run 门禁与编排（目标 < 300 行），其余五个协作者各自独立
-可测；六者共同取代当前巨型 `Session`。其中 EventHub 的**实例所有权是 workspace Runtime 级**，其余
+`ThreadRuntime` 只做单 thread active-run 门禁与编排，其余五个协作者各自独立可测；阶段 2 以这
+六个窄边界取代了巨型 `Session` 的混合职责。其中 EventHub 的**实例所有权是 workspace Runtime 级**，其余
 五项按 thread 建立；“拆出六组件”不表示每 thread 各建一个无法看见未来 thread 的 hub：
 
 ```mermaid
@@ -54,16 +55,18 @@ flowchart LR
 |---|---|---|
 | `ThreadRuntime` | 一个 thread 的 mailbox dispatcher、active-run 门禁与协作者编排 | 全局 thread map、UI、具体 provider/tool |
 | `TranscriptRepository` | thread journal 的 append/load/fold IO 与 transcript view（含 identity、mailbox、control、compaction、event records） | 分配 seq、决定 op/control/retry、事件广播 |
-| `RetryCoordinator` | 错误分类、可取消退避、创建 successor `RunId` | 直接改 transcript 或复用旧 run |
-| `CompactionCoordinator` | 阈值/overflow 决策、摘要、切点与 successor run 协调 | 拥有 Agent 消息数组 |
+| `RetryCoordinator` | 错误分类、attempt 状态、可取消退避与重试决策 | 直接改 transcript、分配/持久化 identity 或复用旧 run |
+| `CompactionCoordinator` | 阈值/overflow 决策、摘要、合法切点与 active transform view | 拥有 Agent 消息数组或分配/持久化 identity |
 | `EventCommitter` | 经 runtime-only awaited authoritative sink 分配 per-thread `seq`，权威提交 transcript/seq/control，产出一个或原子连续的一组 `EventEnvelope` | 注册为 public Agent subscriber 或执行普通 observer 回调 |
 | `EventHub` | 每 workspace 一个；汇聚所有 per-thread committer，支持未来 thread filter、cursor、每观察者保序与故障隔离 | 持有 ThreadRuntime/全局执行状态、重新编号、成为事实源或反向背压 Agent |
 
 usage 是从 repository transcript fold 出的纯投影；可保留 `UsageTracker` 作为内部 reducer，但它不
-拥有独立事实源或生命周期。Runtime/UI 只消费 `EventHub` 的 envelope；legacy `Session.subscribe`
-从指定默认 thread 投影裸 `SessionEvent`。
-`RuntimePort.events()` 直接在这个 workspace hub 原子 hot-register；hub 通过 storage replay resolver 按
-thread cursor 补读，不拥有 journal。某 thread writer fatal 只终止包含该 thread 的 subscriptions（先
+拥有独立事实源或生命周期。Runtime/UI 只消费 workspace `EventHub` 的 envelope；production CLI 的
+legacy projector 从指定默认 thread 投影裸 `SessionEvent`，direct exported `Session.subscribe` 则走
+standalone host 自己的 private durable cursor pump；该 pump 仅在同批 legacy v1 mirror 完成后推进
+`publishedThroughSeq`，因此 canonical-only 的后续 envelope 不会越过兼容投影提前送达观察者。
+`RuntimePort.events()` 直接在这个 workspace hub 原子 hot-register；hub 只从有界内存 retention window
+按 thread cursor replay，cursor 早于保留下界时显式报 gap，并不拥有或回读 journal。某 thread writer fatal 只终止包含该 thread 的 subscriptions（先
 drain，error 带 threadId）；明确排除它的订阅与其他 thread commit 继续。Runtime close 在所有
 EventCommitter/in-flight close barrier 后才给 hub 排 end marker。
 
@@ -73,9 +76,9 @@ EventCommitter/in-flight close barrier 后才给 hub 排 end marker。
   但 identity、op/mailbox、control、event commit 与 seq high-water 必须可持久恢复。
 - 不把 CLI/TUI state 当第二份事实源；server/IDE 与本地 CLI 都通过同一个 `RuntimePort`、mailbox 与
   envelope 契约工作。
-- 已返回 accepted 的 op 必须已由阶段 1 临时 thread journal durable 保存完整 payload/resolved target/
-  run reservation/lifecycle；只有 dispatcher ready queue 可作内存缓存。阶段 2 把同一记录与权威提交
-  语义提取进本节协作者，不能把 durability 推迟到阶段 2。
+- 已返回 accepted 的 op 必须已由 thread journal durable 保存完整 payload/resolved target/run
+  reservation/lifecycle；只有 dispatcher ready queue 可作内存缓存。阶段 2 已把阶段 1 writer 的同一
+  记录与权威提交语义提取进 `TranscriptRepository` / `EventCommitter`，没有改变 durability 边界。
 - 不做 git snapshot / patch 记录(opencode 的 snapshot part)。
 
 ## 2. ThreadRuntime 与 Session 兼容面
@@ -116,8 +119,7 @@ workspace keyspace 的 `reserveDerivedOpIdentity` claim，再进目标 mailbox�
 `cancel_scope` root 不进入 ThreadRuntimeOp；其 fan-out 恢复由 external ledger 负责，每个派生取消仍在目标 thread 自己的 journal/seq 中提交（见
 [12](./12-supervisor-runtime.md) §3.4）。
 
-以下 `Session` API 是必须保留的兼容 surface；阶段 1 仍由现有类直接实现，阶段 2 才成为单默认
-thread facade：
+以下 `Session` API 是必须保留的兼容 surface；阶段 2 起它是单默认 thread facade：
 
 ```ts
 // src/session/session.ts
@@ -158,8 +160,9 @@ export type SessionEvent =
   | { type: 'usage_update'; usage: SessionUsage };
 ```
 
-阶段 2 的 exported `Session.create/resume` **不**为每个实例调用 `createRuntime()`，也不取得/共享
-workspace `SupervisorLease`。它由 internal `StandaloneSessionHost` 组装恰好一个 ThreadRuntime：
+exported `Session.create/resume` **不**为每个实例调用 `createRuntime()`，也不取得/共享 workspace
+`SupervisorLease`。阶段 2 的 internal `StandaloneSessionHost` 必须组装恰好一个 canonical
+`ThreadRuntime`，public facade 只经该 runtime 的 mailbox/legacy projection 工作：
 
 - identity 由该 v1 session 的 legacy WorkspaceId/ThreadId 与私有 durable op/run/turn sidecar 提供；
   `SessionOptions.agentConfig/retry/compaction/pricing` 全部是 per-instance attachment config，不进全局
@@ -171,12 +174,15 @@ workspace `SupervisorLease`。它由 internal `StandaloneSessionHost` 组装恰�
 - 每个 standalone host 拥有一个只服务该 Session 的 private EventHub/cursor pump；“每 workspace 一个
   EventHub”只约束 canonical Runtime。private hub 不汇聚同 cwd 的其他 standalone Session，也不产生
   RuntimePort/跨 thread 语义；Session close 只关闭自身 hub/ThreadRuntime/sidecar lease；
-- approval 不能退回 ApprovalBroker 旁路。host 打开 internal
-  `StandaloneLegacyApprovalPatternRepository`，它以 StandaloneSessionLease fence 私有 outbox，并用
-  `(legacyWorkspaceId,legacyThreadId,responseOpId)` 做 receipt key，再经与 Runtime bridge 相同的全局
-  approvals lock/CAS 更新 Set。它与 Runtime-owned fence-bound repository 都只向 ThreadRuntime 暴露
-  `LegacyApprovalPatternRepositoryPort`，因此 request/response、first-wins、pattern-before-control 与
-  crash recovery 仍走同一 EventCommitter control 状态机；standalone lease 绝不能调用 canonical storage。
+- Runtime/CLI composition 的 approval 不得退回 ApprovalBroker 旁路：它使用 Runtime-owned、fence-bound
+  `LegacyApprovalPatternRepositoryPort`，request/response、first-wins、pattern-before-control 与 crash
+  recovery 都走 EventCommitter control 状态机。
+- exported direct `Session` 是兼容例外。其既有 `AgentConfig.beforeToolCall` 是任意 opaque callback，public
+  API 又没有 control-response ingress；host 无法可靠识别其中是否使用 `ApprovalBroker`，也拿不到
+  patterns、decision 或 resolver。因此 direct Session 中由调用方放进该 callback 的 broker/policy gate
+  保持 caller-owned、process-local，不伪造 `control_request`、pending control 或 durable receipt；崩溃
+  恢复只中断旧 activity，不能恢复一个不可观察的审批等待。若未来增加显式 structured approval adapter
+  与 response API，可由调用方 opt in durable control，但阶段 2 不改变现有 public API 或 callback 行为。
 
 direct Session 与 canonical Runtime 同时写同一个 claimed v1 backend 仍按 [12 §11.1](./12-supervisor-runtime.md)
 明确 unsupported：fingerprint mismatch 后 Runtime quarantine/重建私有 mirror，不能用上述 standalone
@@ -189,9 +195,9 @@ legacy `Session` 把这些调用转换成目标默认 thread 的身份化 op，�
 
 兼容还包括方法 settle/throw 边界：
 
-- 阶段 1 旧 `Session` 类原样保留。`prompt()/continue()` 仍在它们启动的首个 Agent run boundary
-  resolve；detached retry/compaction 继续由 `waitForIdle()` 等待。LegacySessionThreadDriver 的完整
-  因果链 completion 是内部 Runtime 契约，不得泄漏来延迟旧 promise。
+- 阶段 1 旧 `Session` 类的兼容 settle 边界继续保留：`prompt()/continue()` 在它们启动的首个 Agent
+  run boundary resolve；detached retry/compaction 继续由 `waitForIdle()` 等待。canonical driver 的
+  完整因果链 completion 是内部 Runtime 契约，不得泄漏来延迟旧 promise。
 - 阶段 2 facade 的 `prompt()/continue()` 先经 mailbox admission，再只等待 receipt 中 root RunId 的
   首个 `agent_end` 权威提交；`waitForIdle()` 才等待该 thread 所有 causal successor/coordinator 收束。
 - `steer()/followUp()/abort()/setModel()` 保持同步 void/同步 guard。阶段 2 facade 使用 ThreadRuntime
@@ -205,12 +211,14 @@ legacy `Session` 把这些调用转换成目标默认 thread 的身份化 op，�
   fail closed/发 error 并停止采样，不能静默回滚成旧模型或再调用 resolver 得到另一份配置。重启后
   该秘密 sidecar 不恢复，仍只能由显式 `thread_resume`/新的 setModel 调用提供。public
   `RuntimePort.submit({type:'set_model'})` 不开放此 sidecar，始终通过 `RuntimeModelResolver`。
-- `Session.subscribe()` 的 payload/相对顺序保持；阶段 2 按明确目标改为 EventHub 异步 observer，
+- `Session.subscribe()` 的 payload/相对顺序保持；阶段 2 改为 private journal-backed 异步 observer，
   listener 延迟不再延迟 run/`waitForIdle()`。这是 observer 规则要求的唯一刻意 timing 变化；close
   仍等待 run/权威提交，但不等待普通 listener drain。由于 legacy API 无 gap/error channel，facade
-  使用 per-listener durable cursor-backed pump 并在存活期 pin retention floor；queue overflow 转为补读，
-  不能静默 disconnect。unsubscribe/close 释放 cursor；listener reject 只诊断、推进该 listener 对本次
-  event 的 cursor 并继续投递后续事件，保持当前 Emitter 的“异常不自动退订”行为。
+  使用 per-listener durable cursor-backed pump；standalone canonical sidecar 在 Session 存活期 append-only，
+  因而完整历史本身就是 cursor 的 retention floor，不另建可遗忘的内存 pin。wake-up 不携带 payload，
+  backlog 始终从 sidecar fold 补读，不能静默 disconnect。unsubscribe/close 释放 cursor；listener reject
+  只诊断、推进该 listener 对本次 event 的 cursor 并继续投递后续事件，保持当前 Emitter 的“异常不自动
+  退订”行为。
 
 `interactionState()` 是模型/provider 管理命令的权威门禁。retry backoff 与 compaction 中 Agent
 可能短暂报告 idle，Session 必须继续分别报告 `retrying` / `compacting`；只有四层状态都落到
@@ -606,9 +614,9 @@ mutable import/resume 则要求 cwd 在**当前 host**上是 non-empty、无 NUL
   崩溃后可能没有对应终态 message，转录仍合法，事件订阅者则可重放已提交的 partial/delta。
 - 落盘确定性：只有独立 runtime-only `authoritativeEventSink` 调用的 `EventCommitter` 权威 append/flush
   可以背压 Agent；committer 绝不能注册到会 catch listener rejection 的 public Agent Emitter。普通 UI/headless/telemetry
-  observer 由 `EventHub` 独立异步入队，变慢或失败不得拖慢 provider、工具或其他 thread。阶段 0
-  的 legacy `Session.subscribe` 仍按现状 await listener，并由 characterization tests 冻结；阶段 2
-  切换到上述目标。`ThreadRuntime.close()` 必须等待 active run 与权威提交；各前端在关闭订阅后自行
+  observer 由 `EventHub` 独立异步入队，变慢或失败不得拖慢 provider、工具或其他 thread。直接
+  `Agent.subscribe` 仍保留阶段 0 awaited Emitter 语义；阶段 2 的 `Session.subscribe` 已改由 private
+  journal-backed cursor pump 异步投递。`ThreadRuntime.close()` 必须等待 active run 与权威提交；各前端在关闭订阅后自行
   等待输出泵 drain，不能把 UI drain 重新塞回 core 提交链。
 - legacy tool `onUpdate` 的 fire-and-forget emit 若遇到 `tool_execution_update` commit reject，sink 必须
   latch writer fatal 并 abort run/tool child signal；每个后续 awaited emit、provider/tool 启动与
@@ -694,13 +702,13 @@ resumeLegacy(sessionId):
   if comp:
     idx = messages.findIndex(m => m.id === comp.tailStartId)
     active = idx >= 0
-      ? [syntheticSummaryMessage(comp.summary), ...messages.slice(idx)]
+      ? [syntheticSummaryMessage(comp), ...messages.slice(idx)]
       : messages                       // tailStartId 找不到:忽略该 compaction,告警
   else: active = messages
   expose as idle ThreadRuntime + legacy Session projection
 ```
 
-`syntheticSummaryMessage` 是一条 `source: 'synthetic'` 的 UserMessage,内容形如 `[Conversation summary]\n<summary>`——与 plan 批准注入(见 [07](./07-tools.md))共用同一 source 语义,模型视角就是一条普通用户消息。
+`syntheticSummaryMessage` 是一条 `source: 'synthetic'` 的 UserMessage,内容形如 `[Conversation summary]\n<summary>`——与 plan 批准注入(见 [07](./07-tools.md))共用同一 source 语义,模型视角就是一条普通用户消息。从 `CompactionRecord` fold 时，其 message id 由完整 record 做 domain-separated SHA-256 确定性派生，timestamp 固定为 compaction timestamp；同一 checkpoint 被 bootstrap、execution 与 transform 重读多少次都必须得到逐字段相同的 synthetic message，不能用进程随机数或恢复时 wall clock。
 
 恢复后的 `continue` 先领取统一 suspended FIFO 的最老项：它可能是 `accepted_pending`
 prompt/continue，也可能是 recovery 已把旧 op completed(interrupted)、但原 prompt input 仍未
@@ -795,6 +803,11 @@ adapter 最了解错误来源(APIError 的 status/code、fetch 网络错误、in
 
 ### 5.2 退避与决策纯函数
 
+阶段 2 的 `src/session/retry-coordinator.ts` 已把可变 attempt/reset 状态与可取消 `sleep` 收进
+`RetryCoordinator`；错误分类和 delay 计算仍留在 `retry.ts` 的纯函数中。coordinator 只返回决策，
+successor `RunId` 的 reservation、事件提交和实际 `continue()` 仍由 ThreadRuntime/driver 编排，因此
+它不能直接写 transcript 或绕过 authoritative sink。
+
 ```ts
 // src/session/retry.ts
 export type RetrySleep = (delayMs: number, signal: AbortSignal) => Promise<boolean>;
@@ -814,7 +827,8 @@ export function decideRetry(msg: AssistantMessage, attempt: number, opts: Resolv
   // if (!classifyRetryable(msg.errorDetails, msg.errorMessage)) return no(kind)
   // if (attempt >= opts.maxAttempts) return no('max attempts')
   // base = msg.errorDetails?.retryAfterMs ?? opts.baseDelayMs * 2 ** attempt
-  // return { retry: true, delayMs: min(opts.maxDelayMs, base) * (0.5 + random()) }  // equal-jitter 变体
+  // return { retry: true, delayMs: round(min(opts.maxDelayMs, base) * (0.5 + random())) }
+  // equal-jitter 变体；进入 EventEnvelope 前归一为非负安全整数毫秒
 }
 ```
 
@@ -834,7 +848,8 @@ retryCoordinator.onRunEnd(currentRunId, e):
     d = decideRetry(lastAssistant(e.messages), attempt, opts)
     if !d.retry: 透传 agent_end;return
     attempt++
-    successorRunId = ids.newRunId()                                   // 立即分配 activity identity
+    successor = await threadRuntime.reserveSuccessor(currentRunId)     // runtime 先 durable 预留 identity
+    successorRunId = successor.runId
     record { successorRunId, predecessorRunId: currentRunId, state: 'retrying' }
     透传 { ...e, willRetry: true }                                    // UI 显示「重试中」而非「已结束」
     commit retry_scheduled { attempt, delayMs, predecessorRunId: currentRunId,
@@ -847,7 +862,8 @@ retryCoordinator.onRunEnd(currentRunId, e):
 
 关键设计:**重试的执行动作仍是 `continue()`，但身份上必须是新 run**。失败的 assistant 消息(stopReason 'error')留在转录里,transform 层重放时过滤它,于是 continue 发出的请求与失败前完全一致——与 4.3 的恢复续跑、abort 续跑共用同一机制。`predecessorRunId` 保留因果链，旧 `RunId` 永不复活。legacy `agent_end.willRetry` 是裸 SessionEvent 投影；canonical envelope 直接携带所属 run identity。
 
-RetryCoordinator 决定重试时就分配 successor RunId；它在 backoff/采样/工具期间始终是该 thread 的
+RetryCoordinator 产出重试决策后，ThreadRuntime/driver host 立即 durable 预留 successor RunId；该 identity
+在 backoff/采样/工具期间始终是该 thread 的
 `activeRunId`，不会出现“retrying 但没有可取消身份”的空窗。退避等待期间用户输入照常进入该 thread
 mailbox；匹配 successor RunId 的 abort 会取消计时器并以 aborted 结案该 activity。其他 thread 的
 abort 不得影响这条链，仍指向 predecessor 或更旧 RunId 的迟到 abort 必须拒绝。
@@ -855,6 +871,11 @@ abort 不得影响这条链，仍指向 predecessor 或更旧 RunId 的迟到 ab
 ## 6. compaction(M7)
 
 ### 6.1 触发:threshold 主动 + overflow 被动
+
+阶段 2 的 `src/session/compaction-coordinator.ts` 已统一拥有 threshold flag、overflow 次数、checkpoint、
+合法 tail plan、摘要/硬截断选择与 active transform view；`compactor.ts` 只保留无状态的切点、渲染和
+摘要 helper。coordinator 读取 Agent 消息快照但不拥有或原地改写消息数组，successor identity 与
+commit 仍由 ThreadRuntime/driver 完成。
 
 上下文当前体量的估算不需要 tokenizer:**最近一条成功 assistant 的 `usage.input + usage.output` 就是下一次请求的上下文规模下界**(usage 是 inclusive 口径,input 已含缓存部分)。触发条件:
 
@@ -942,8 +963,8 @@ stateDiagram-v2
   [*] --> idle
   idle --> running: prompt()/continue() 创建 RunId
   running --> idle: agent_end(completed)
-  running --> compacting: turn_end/overflow 后立即分配 successor RunId
-  running --> backoff: retry 决定后立即分配 successor RunId
+  running --> compacting: turn_end/overflow 后由 ThreadRuntime 立即预留 successor RunId
+  running --> backoff: retry 决定后由 ThreadRuntime 立即预留 successor RunId
   backoff --> running: 同一 successor RunId 退避结束后 continue()
   compacting --> running: 仅 steering/follow-up/残局时，同一 activity RunId 续跑
   compacting --> starting: 有 queued prompt 时，C 结案后启动 prompt 自己的 P
@@ -1014,7 +1035,9 @@ export interface ModelPricing {   // 每百万 token 美元价
 
 ## 8. 边界情况清单
 
-- 最后一行半截 JSON:丢弃;中部损坏行:拒绝加载。
+- 最后一行半截 JSON：持有有效 writer lease 后丢弃残片（完整 JSON 只缺 LF 则补 LF）；中部损坏行拒绝
+  加载。direct Session 若 canonical sidecar 已权威提交对应 v1 message/compaction，则丢弃残片后按原始
+  append history 补齐 mirror suffix；同 message id 的历史重复记录也不能被 legacy 折叠视图掩盖。
 - MessageRecord 里出现未知 role / 未知 part type(未来版本写的文件):拒绝加载并提示版本不兼容(meta.version 升版时提供迁移脚本,v1 不做向前兼容)。
 - compaction record 的 tailStartId 指向不存在的消息:忽略该 record,告警,用全量转录。
 - thread 目录不存在：create 时建立；磁盘满导致权威 append 失败时，该 thread 进入 degraded/fatal，

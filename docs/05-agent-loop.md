@@ -12,7 +12,7 @@
 
 阶段 0 的 Agent 核心依赖 `protocol/shared`，并通过唯一的迁移期类型边
 `tools/types.ts` 接收 `ToolDefinition[]`；provider 以 `StreamFn` 注入，既有
-`subscribe(listener)` 行为保持不变。阶段 2 的 runtime-managed Agent 通过独立、awaited 的 internal
+`subscribe(listener)` 行为保持不变。自阶段 2 起，runtime-managed Agent 通过独立、awaited 的 internal
 `authoritativeEventSink` 直连唯一 EventCommitter，绝不把 committer 注册成会吞错的 public subscriber；
 普通 UI 由 EventHub 异步订阅。阶段 3 的 ThreadRuntime 改用只消费不可变 catalog/adapter snapshot 的
 runtime engine；exported legacy Agent 仍保留 `AgentConfig.tools/StreamFn` surface，由精确的兼容 facade
@@ -67,7 +67,7 @@ stateDiagram-v2
     idle --> idle: "steer() / followUp()(入队,等下一次 run)"
 ```
 
-只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 完成权威提交,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。直接使用 legacy `Agent` 时始终等待其全部 subscribe listener，行为冻结；阶段 2 的 ThreadRuntime 内部 Agent 使用独立 awaited `authoritativeEventSink`，普通 observer 改订阅 EventHub，因而 runtime run 只等待权威提交。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
+只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 完成权威提交,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。直接使用 legacy `Agent` 时始终等待其全部 subscribe listener，行为冻结；自阶段 2 起，ThreadRuntime 内部 Agent 使用独立 awaited `authoritativeEventSink`，普通 observer 改订阅 EventHub，因而 runtime run 只等待权威提交。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
 
 ### 1.2 逐方法语义与合法调用时机
 
@@ -79,7 +79,7 @@ stateDiagram-v2
 | `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
 | `abort()` | no-op | `taskAbort.abort()`,请求中止;队列**不清空** |
 | `continue()` | 见下文;返回 Promise 同 prompt | **throw** |
-| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 权威提交后 resolve；阶段 0 legacy 实现仍额外等待全部 listener |
+| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 权威提交后 resolve；直接构造的 legacy `Agent` 还等待其 Emitter listener，Session/Runtime 的普通 observer 已异步隔离 |
 | `subscribe` / `clearQueues` / `steeringMode=` | 任意时刻合法 | 任意时刻合法 |
 
 **为什么 `prompt()` 在运行中 throw 而不是自动排队**:pi 的原话是"入口强制二选一,没有第三种模糊状态"。"运行中的新输入"存在两种截然不同的意图——引导当前任务(steer)与追加下一个任务(followUp),API 层面替调用者猜意图必然猜错一半。codex 走了另一条路:同一个 `Op::UserInput` 由 core 按当前状态自动分派(有 active turn 即 steering)——那是**跨进程外协议**的正确选择,因为客户端无法可靠感知 core 状态;而我们的 Agent 是进程内对象,`state` 就在手边,让调用方(CLI 键位层:Enter=steer,Alt+Enter=followUp)显式选择,错误立即暴露。
@@ -234,7 +234,7 @@ flowchart TD
 ### 2.3 为什么 error/aborted 直接结束,不在 loop 内重试
 
 1. **abort 是用户意图**,唯一正确的响应是尽快停下并保留现场(队列不清、转录完整),把"接下来做什么"还给 ThreadRuntime/调用方。
-2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——属于 RetryCoordinator/CompactionCoordinator。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——目标架构把它们拆成独立协作者,loop 保持哑。
+2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——属于 RetryCoordinator/CompactionCoordinator。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——阶段 2 已把二者拆成独立协作者，loop 保持哑。
 3. **结束是无损的**:错误已编码为带 `errorMessage` 的合法 AssistantMessage 留在转录里(可持久化、可诊断),transform 层重放时会过滤它,所以 `continue()` 的重采样在语义上与"loop 内重试"完全等价,只是控制权交还了一层。
 4. 备选方案:codex 在 turn 内做流断线重试并发 `StreamError` 事件通知 UI("不终止 turn")。这个体验更平滑,但需要 loop 感知"可重试性"。v1 走"结束 + session continue()"的简单路线,M7 若引入 in-loop 流重试,`AgentEvent.error{fatal:false}` 可承担 StreamError 的通知角色。
 
@@ -386,10 +386,14 @@ async function finalizeToolCall(cfg, call, r, emit) {
 关键决策:
 
 - **校验失败与未知工具名回喂模型,而不是抛异常**。幻觉工具名、漏参数、类型错都是模型的常规失误,属于对话内容而非程序错误;合成 isError ToolResultMessage(附可用工具列表 / 美化后的 zod 错误 + "请修正后重试")让模型自我修正,任务继续。抛异常会把一次可自愈的失误升级成整个 run 的失败。gemini-cli 把这类失败建模为工具状态机的 `Error` 终态、同样回喂——业界一致。注意 reject 出的结果**不发 `tool_execution_start/end`**?不——为了 UI 一致性,reject 结果同样走 finalize 发 `tool_execution_end`(start 可省;实现时统一发 start/end 对更简单,args 用原始 `call.arguments`)。
-- **`beforeToolCall` 是阶段 0 的权限兼容挂载点**:既有 approval 流程仍通过
-  `approval_request` + Promise resolver 保持行为。阶段 2 后 approval 统一为先经 EventCommitter
-  提交的 `control_request{kind:'approval'}` 与 `control_response` op；阶段 3 由 PolicyEngine 读取
-  唯一 `PreparedInvocation`（身份只取其 frozen context）返回 `allow | deny | ask`。legacy hook 只做适配，不能绕过
+- **`beforeToolCall` 是阶段 0 的权限兼容挂载点**:直接构造的 legacy `Agent` 仍可通过
+  `approval_request` + Promise resolver 保持原行为；production Runtime 自阶段 2 起不再让
+  `ApprovalBroker` 或 CLI 持有 waiter。legacy driver 经 `ThreadDriverHostServices` 把请求交给 durable
+  control bridge：`control_request{kind:'approval'}` 先由 EventCommitter 权威提交，调用方再用
+  identity-bearing `control_response` op 应答，first-wins claim、abort 与恢复都在同一 thread journal。
+  CLI 注入的 `LegacyApprovalAdapter` 只对 frozen 请求做 preflight/applyResponse，并通过 fence-bound
+  pattern repository 落 `allow_always`，不发事件、不持 waiter。阶段 3 再由 PolicyEngine 读取唯一
+  `PreparedInvocation`（身份只取其 frozen context）返回 `allow | deny | ask`。legacy hook 不能绕过
   thread/run 作用域、跨 thread resolve，或在等待期间偷换 executor。deny 仍合成 isError 结果回喂，
   abort 则先传播 cancellation 再以 aborted 结案 pending control。
 - **CLI 可组合多个 `beforeToolCall` gate 而无需扩展 loop**：项目规则感知先检查 `edit` /
@@ -483,7 +487,7 @@ abort 发生在不同时点的行为:
 吞掉并诊断，`waitForIdle()` 要等它们全部 settle。这是**冻结现状，不是目标背压模型**；阶段 0 不
 改变该行为，避免文档重写夹带生产语义变化。
 
-### 7.2 阶段 2 canonical 路径
+### 7.2 阶段 2 已落地的 canonical 路径
 
 ```text
 AgentEvent / control event
@@ -491,11 +495,15 @@ AgentEvent / control event
       ├─ TranscriptRepository / control / seq high-water 权威写入
       └─ 返回 EventEnvelope 或连续原子 batch（per-thread seq）
   → EventHub.publish(envelope)        // 非阻塞入各订阅者队列
-      ├─ Session legacy projector
+      ├─ Runtime legacy projector
       ├─ headless output pump
       ├─ TUI
       └─ telemetry / tests
 ```
+
+exported direct `Session` 不创建 workspace Runtime/EventHub；它由 `StandaloneSessionHost` 组合单默认
+thread、backend lease 与 private journal-backed observer pump。该路径同样先完成权威提交和 v1 mirror，
+再异步唤醒 legacy listener，但不产生 RuntimePort 的跨 thread/cursor-gap 语义。
 
 规则与取舍:
 
@@ -514,13 +522,13 @@ AgentEvent / control event
 5. **兼容面的等待边界分开。**直接构造的 standalone `Agent.subscribe` 继续按阶段 0 逐 listener
    await，并保持 listener reject 只诊断的既有语义；它没有 TranscriptRepository，也不承诺 durable replay。
    ThreadRuntime 不把 EventCommitter 或普通 observer 挂到这个入口，而使用上述独立 authoritative sink。
-   `Session.subscribe` 在阶段 2 作为 EventHub 上的 legacy facade
-   保持 payload/顺序，但不再反向延迟 run；需要“前端已显示/写完”时等前端自己的 drain。
-6. **无 gap channel 的 Session subscriber 必须 cursor-backed。**Session facade 不得把有限
-   EventHub queue 的 disconnect/gap 隐藏起来；每个 listener 维护 last-delivered `(threadId,seq)`，queue
-   满时暂停 live drain、从 durable journal 补读 `seq > lastDelivered`，再无缝回到 live。subscription
-   存活期间 repository 保留/钉住所需 cursor floor，所以无论 listener 多慢，显式 unsubscribe/Session
-   close 前都不丢、不重排、不重复 legacy event；资源占用随 unsubscribe/close 释放。listener reject
+   `Session.subscribe` 自阶段 2 起经 private journal-backed pump 保持 payload/顺序，但不再反向延迟
+   run；需要“前端已显示/写完”时等前端自己的 drain。
+6. **无 gap channel 的 Session subscriber 必须 cursor-backed。**Session facade 不得把有限队列的
+   disconnect/gap 隐藏起来；standalone host 先把完整 batch flush 到 private durable journal，每个
+   listener 再维护独立的内存 delivery cursor。新订阅从当前 tail 开始；存活的慢 listener 不走有界
+   queue，也不会因容量溢出丢事件，而是从共享 durable source 依序追上。unsubscribe/Session close
+   立即释放 cursor，close 不等待普通 listener drain。listener reject
    只诊断，并把该次尝试视为已消费后继续向同一 listener 投递后续事件；它不自动退订、不成为 run
    error，也不影响其他 listener。只有显式 unsubscribe/close 才移除 listener。只有原生
    RuntimePort AsyncIterable 有 typed gap terminal channel，可选择 disconnect 策略。
@@ -554,7 +562,7 @@ loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转�
 - [ ] `setModel()` 仅 idle 成功，既有 transcript 不变；running 时 throw
 - [ ] 运行中调 `prompt()` throw;`steer/followUp` 在 idle 与 running 均入队不 throw
 - [ ] `continue()` 三路启动:steering 优先 → follow-up → 末条 assistant 为 aborted/error、或转录末尾存在未配对 toolCall / 末条消息非完结态(崩溃恢复)时重采样;三者皆无 throw;`agent_start.reason` 分别为 `'follow_up'/'follow_up'/'continue'`
-- [ ] 阶段 0 characterization:`waitForIdle()` 仍等待人为 gate 住的 legacy listener；阶段 2 迁移测试改为只等待 EventCommitter，不等待普通 observer
+- [ ] 阶段 0 characterization:`Agent.waitForIdle()` 仍等待人为 gate 住的 direct legacy listener；阶段 2 回归断言 Session/Runtime 只等待权威提交，不等待普通 observer
 
 runLoop(全部用 faux provider 离线验证):
 

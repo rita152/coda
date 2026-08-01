@@ -6,15 +6,12 @@
 
 import packageJson from '../../package.json';
 import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
-import { ApprovalBroker } from '../agent/index.js';
-import type { AgentConfig } from '../agent/index.js';
 import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
-import type { ToolDefinition } from '../tools/types.js';
 import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import { createFileRuntimeStorage, createRuntime } from '../runtime/index.js';
 import { createStdoutOutput, runtimeHomeDir } from '../shared/index.js';
-import { createApprovalPolicy } from './approval-policy.js';
+import { defaultRulesFile } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
 import {
   getMissingApiKeyMessage,
@@ -39,6 +36,7 @@ import {
   resolveRuntimeStorageRoots,
 } from './runtime-composition.js';
 import { RuntimeFrontendSession } from './runtime-frontend.js';
+import { createStaticLegacyApprovalAdapterFactory } from './legacy-approval-adapter.js';
 import { isRuntimeResumeRequest, selectCliResumeTarget } from './runtime-resume.js';
 import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
@@ -133,6 +131,7 @@ async function main(): Promise<number> {
   const storage = createFileRuntimeStorage({
     root: roots.runtimeRoot,
     legacySessionDir: roots.legacySessionDir,
+    legacyApprovalFile: defaultRulesFile(),
   });
   let resumeTarget;
   try {
@@ -168,40 +167,19 @@ async function main(): Promise<number> {
   }
 
   const projectRuleWarnings = createWarningHub();
+  const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
+    mode: approvalMode,
+    projectRoot: cwd,
+    tools: createCodingTools(),
+  });
   const driverFactory = createLegacySessionThreadDriverFactory({
     sessionDir: roots.legacySessionDir,
-    configure: ({ model, emitApproval, requestAbort }) => {
-      // Attachment-local mutable state: rules, broker/policy, tools, and Agent FileTracker are
-      // never shared across independently attached Runtime threads.
+    approvalAdapterFactory,
+    configure: ({ model }) => {
+      // Attachment-local project rules, tools, and Agent FileTracker are never shared across
+      // independently attached Runtime threads. Approval state lives in the durable bridge.
       const projectRules = new ProjectRules({ cwd, onWarning: projectRuleWarnings.emit });
       const tools = guardProjectRuleExecutions(createCodingTools(), projectRules);
-      let approvalBeforeToolCall: AgentConfig['beforeToolCall'];
-      let attachmentApproval:
-        | { readonly broker: ApprovalBroker; readonly onAbort: () => void }
-        | undefined;
-      if (approvalMode === 'interactive') {
-        const broker = new ApprovalBroker((event) => {
-          if (event.type !== 'approval_request') {
-            throw new Error(`unexpected legacy approval event: ${event.type}`);
-          }
-          emitApproval(event);
-        });
-        const policy = createApprovalPolicy({
-          broker,
-          projectRoot: cwd,
-          tools,
-          requestAbort,
-        });
-        approvalBeforeToolCall = policy.beforeToolCall;
-        attachmentApproval = { broker, onAbort: policy.onAbort };
-      } else if (approvalMode === 'deny') {
-        approvalBeforeToolCall = createDenyHook(tools);
-      }
-      const beforeToolCall: NonNullable<AgentConfig['beforeToolCall']> = async (call) => {
-        const rulesDecision = await projectRules.beforeToolCall(call);
-        if (rulesDecision.block) return rulesDecision;
-        return approvalBeforeToolCall?.(call) ?? {};
-      };
       return {
         sessionOptions: {
           agentConfig: {
@@ -211,11 +189,10 @@ async function main(): Promise<number> {
             cwd,
             systemPrompt: () => buildSystemPrompt(cwd),
             transformContext: (context) => projectRules.inject(context),
-            beforeToolCall,
+            beforeToolCall: (call) => projectRules.beforeToolCall(call),
           },
         },
-        ...(attachmentApproval !== undefined && { approval: attachmentApproval }),
-        policyRevision: `legacy-cli-${approvalMode}-v1`,
+        policyRevision: `legacy-cli-${approvalMode}-v2`,
       };
     },
   });
@@ -420,25 +397,6 @@ async function readFauxScript(path: string | undefined): Promise<FauxScript> {
       : ((await Bun.file(path).json()) as FauxScript);
   script.onExhausted = script.onExhausted ?? 'emptyStop';
   return script;
-}
-
-/**
- * --approval-mode deny 的静态 beforeToolCall(M6 分工约定;kind 直通同 docs/07 §3.1):
- * read/search/plan 放行,edit/execute(含缺省 kind)直接 block——不建 broker、无审批事件,
- * 任务继续(deny 是引导不是终止,docs/07 §3.2)。
- */
-function createDenyHook(tools: ToolDefinition[]): NonNullable<AgentConfig['beforeToolCall']> {
-  const kinds = new Map(tools.map((t) => [t.name, t.kind ?? 'execute']));
-  return async (call) => {
-    const kind = kinds.get(call.name) ?? 'execute';
-    if (kind === 'read' || kind === 'search' || kind === 'plan') return {};
-    return {
-      block: true,
-      reason:
-        `Tool "${call.name}" requires approval, but approvals are disabled ` +
-        '(--approval-mode deny). Use read-only tools, or ask the user to rerun without deny mode.',
-    };
-  };
 }
 
 function buildSystemPrompt(cwd: string): string {

@@ -165,8 +165,8 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(rules).toContain('import/no-restricted-paths');
   });
 
-  it('src/runtime 不得反向 import CLI/provider/Session/Agent/tool 实现', async () => {
-    for (const dependency of ['cli/main', 'providers/faux/index', 'session/index', 'agent/index', 'tools/index']) {
+  it('src/runtime 不得反向 import CLI/provider/Agent/tool 实现', async () => {
+    for (const dependency of ['cli/main', 'providers/faux/index', 'agent/index', 'tools/index']) {
       const probeName = dependency.replaceAll('/', '-');
       const { rules } = await lintProbe(
         `src/runtime/${probeName}.probe.ts`,
@@ -176,10 +176,10 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     }
   });
 
-  it('src/runtime 可依赖 protocol/shared（public entry 的合法叶子）', async () => {
+  it('src/runtime 可依赖 protocol/shared/session（阶段 2 的合法方向）', async () => {
     const { errorCount } = await lintProbe(
       'src/runtime/legal.probe.ts',
-      "import '../protocol/index.js';\nimport '../shared/index.js';\n",
+      "import '../protocol/index.js';\nimport '../shared/index.js';\nimport '../session/index.js';\n",
     );
     expect(errorCount).toBe(0);
   });
@@ -192,10 +192,26 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(dynamicRules).toContain('import/no-restricted-paths');
 
     const { rules: typeRules } = await lintProbe(
-      'src/runtime/import-session-type.probe.ts',
-      "export type LegacySession = import('../session/index.js').Session;\n",
+      'src/runtime/import-agent-type.probe.ts',
+      "export type LegacyAgent = import('../agent/index.js').Agent;\n",
     );
     expect(typeRules).toContain('no-restricted-syntax');
+  });
+
+  it('src/session 不得反向 import runtime（每线程层不认识 workspace Supervisor）', async () => {
+    const { rules } = await lintProbe(
+      'src/session/runtime-dep.probe.ts',
+      "import '../runtime/index.js';\n",
+    );
+    expect(rules).toContain('import/no-restricted-paths');
+  });
+
+  it('src/session 的 import() type 不能绕过 runtime 反向依赖边界', async () => {
+    const { rules } = await lintProbe(
+      'src/session/runtime-import-type.probe.ts',
+      "export type RuntimeLeak = import('../runtime/index.js').RuntimePort;\n",
+    );
+    expect(rules).toContain('no-restricted-syntax');
   });
 
   it('src/agent 内 import @anthropic-ai/sdk 报错(M7:SDK 仅限 anthropic-messages,type-only 同拦)', async () => {

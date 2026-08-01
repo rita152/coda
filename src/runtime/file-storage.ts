@@ -23,6 +23,7 @@ import {
   assertThreadId,
   assertWorkspaceId,
   canonicalJson,
+  canonicalJsonSha256,
   canonicalizeRuntimeOp,
   isDerivedOpId,
   isExternalOpId,
@@ -52,6 +53,8 @@ import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError
 import type {
   DerivedOpIdentityClaim,
   DerivedOpIdentityReservation,
+  LegacyApprovalPatternCommitResult,
+  LegacyApprovalPatternRepository,
   LegacyThreadImport,
   LegacyThreadSeedRecord,
   RuntimeJournalRecord,
@@ -71,6 +74,8 @@ export interface FileRuntimeStorageOptions {
   readonly root: string;
   /** Existing append-only Session v1 directory. It is indexed read-only until explicit import. */
   readonly legacySessionDir?: string;
+  /** Existing global legacy approvals Set. It is only mutated through the fenced phase-2 bridge. */
+  readonly legacyApprovalFile?: string;
 }
 
 interface WorkspaceBindingFile {
@@ -89,6 +94,24 @@ interface WorkspaceLedgerFile {
 interface ThreadCatalogFile {
   readonly version: 1;
   readonly threads: readonly ThreadCatalogRecord[];
+}
+
+interface LegacyApprovalOutboxReceipt {
+  readonly responseOpId: ExternalOpId;
+  readonly acceptedAt: number;
+  readonly patterns: readonly [string, ...string[]];
+  readonly state: 'reserved' | 'applied';
+}
+
+interface LegacyApprovalOutboxFile {
+  readonly version: 1;
+  readonly receipts: readonly LegacyApprovalOutboxReceipt[];
+}
+
+interface LegacyApprovalGlobalLockRecord {
+  readonly version: 1;
+  readonly pid: number;
+  readonly nonce: string;
 }
 
 interface SupervisorLockRecord {
@@ -138,6 +161,9 @@ export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): Ru
   if (options.legacySessionDir !== undefined) {
     assertSafeAbsolutePath(options.legacySessionDir, 'legacySessionDir');
   }
+  if (options.legacyApprovalFile !== undefined) {
+    assertSafeAbsolutePath(options.legacyApprovalFile, 'legacyApprovalFile');
+  }
   const root = options.root;
   const legacySessionDir = options.legacySessionDir;
   return {
@@ -177,7 +203,12 @@ export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): Ru
       if (binding.workspaceId !== workspaceId || binding.recordedCwd !== input.cwd) {
         throw new WorkspaceBindingMismatchError(workspaceId, binding.recordedCwd, input.cwd);
       }
-      return new FileWorkspacePort(workspaceDir, binding, legacySessionDir);
+      return new FileWorkspacePort(
+        workspaceDir,
+        binding,
+        legacySessionDir,
+        options.legacyApprovalFile,
+      );
     },
   };
 }
@@ -188,6 +219,7 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
   readonly #ledgerFile: string;
   readonly #catalogFile: string;
   readonly #threadsDir: string;
+  readonly #legacyApprovalOutboxFile: string;
   readonly #lockFile: string;
   readonly #authorityPort: number;
   #lockServer: Bun.TCPSocketListener | undefined;
@@ -199,12 +231,14 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
     readonly workspaceDir: string,
     binding: WorkspaceBindingFile,
     private readonly legacySessionDir: string | undefined,
+    private readonly legacyApprovalFile: string | undefined,
   ) {
     this.workspaceId = binding.workspaceId;
     this.recordedCwd = binding.recordedCwd;
     this.#ledgerFile = safeChild(workspaceDir, 'ledger.json');
     this.#catalogFile = safeChild(workspaceDir, 'catalog.json');
     this.#threadsDir = safeChild(workspaceDir, 'threads');
+    this.#legacyApprovalOutboxFile = safeChild(workspaceDir, 'legacy-approval-outbox.json');
     this.#lockFile = safeChild(workspaceDir, 'supervisor.lock');
     this.#authorityPort = workspaceAuthorityPort(this.workspaceId);
   }
@@ -442,6 +476,41 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
     return undefined;
   }
 
+  async openLegacyApprovalPatternRepository(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<LegacyApprovalPatternRepository> {
+    this.#assertFence(lease);
+    if (this.legacyApprovalFile === undefined) {
+      throw new RuntimeStorageError(
+        'legacy_approval_storage_unavailable',
+        'File runtime storage has no legacy approval file configured',
+      );
+    }
+    ensureDirectoryTreeNoSymlink(path.dirname(this.legacyApprovalFile));
+    if (!existsSync(this.#legacyApprovalOutboxFile)) {
+      try {
+        writeJsonExclusive(this.#legacyApprovalOutboxFile, {
+          version: 1,
+          receipts: [],
+        } satisfies LegacyApprovalOutboxFile);
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+      }
+    }
+    const outbox = readLegacyApprovalOutbox(this.#legacyApprovalOutboxFile);
+    const approvalRead = readLegacyApprovalPatternFile(this.legacyApprovalFile);
+    const repository = new FileLegacyApprovalPatternRepository({
+      workspace: this,
+      lease: snapshot(lease),
+      approvalFile: this.legacyApprovalFile,
+      outboxFile: this.#legacyApprovalOutboxFile,
+      outbox,
+      invalidApprovalFile: approvalRead.invalid,
+    });
+    await repository.recoverReservedOutbox();
+    return repository;
+  }
+
   async close(): Promise<void> {
     if (this.#lease !== undefined || this.#lockServer !== undefined) {
       throw new RuntimeStorageError('workspace_lease_active', 'Release Supervisor lease before closing storage');
@@ -609,6 +678,154 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
       || lease.processEpoch !== this.#lease.processEpoch) {
       throw new RuntimeStorageError('stale_fence', 'Workspace write fence is not current');
     }
+  }
+}
+
+class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternRepository {
+  readonly workspaceId: WorkspaceId;
+  readonly #workspace: FileWorkspacePort;
+  readonly #lease: SupervisorLease;
+  readonly #approvalFile: string;
+  readonly #outboxFile: string;
+  readonly #startupDiagnostics: readonly { readonly code: string; readonly message: string }[];
+  #outbox: LegacyApprovalOutboxFile;
+  #closed = false;
+
+  constructor(input: {
+    readonly workspace: FileWorkspacePort;
+    readonly lease: SupervisorLease;
+    readonly approvalFile: string;
+    readonly outboxFile: string;
+    readonly outbox: LegacyApprovalOutboxFile;
+    readonly invalidApprovalFile: boolean;
+  }) {
+    this.#workspace = input.workspace;
+    this.#lease = input.lease;
+    this.workspaceId = input.lease.workspaceId;
+    this.#approvalFile = input.approvalFile;
+    this.#outboxFile = input.outboxFile;
+    this.#outbox = input.outbox;
+    this.#startupDiagnostics = input.invalidApprovalFile
+      ? [{
+          code: 'legacy_approvals_invalid_ignored',
+          message: 'Invalid legacy approvals file was ignored and treated as an empty pattern Set',
+        }]
+      : [];
+  }
+
+  startupDiagnostics(): readonly { readonly code: string; readonly message: string }[] {
+    return this.#startupDiagnostics;
+  }
+
+  async snapshot(): Promise<Readonly<import('../protocol/index.js').LegacyApprovalPatternSnapshot>> {
+    this.#assertOpen();
+    this.#workspace.assertFence(this.#lease);
+    return legacyApprovalSnapshot(readLegacyApprovalPatterns(this.#approvalFile));
+  }
+
+  async recoverReservedOutbox(): Promise<void> {
+    for (const receipt of this.#outbox.receipts) {
+      if (receipt.state !== 'reserved') continue;
+      const result = await this.commit({
+        responseOpId: receipt.responseOpId,
+        acceptedAt: receipt.acceptedAt,
+        patterns: receipt.patterns,
+      });
+      if (result.kind !== 'applied' && result.kind !== 'duplicate') {
+        throw new RuntimeStorageError(
+          'legacy_approval_recovery_failed',
+          `Cannot recover reserved legacy approval outbox ${receipt.responseOpId}: ${result.kind}`,
+        );
+      }
+    }
+  }
+
+  async commit(input: {
+    readonly responseOpId: ExternalOpId;
+    readonly acceptedAt: number;
+    readonly patterns: readonly [string, ...string[]];
+  }): Promise<LegacyApprovalPatternCommitResult> {
+    if (this.#closed) return legacyApprovalFenced('stale_fence', 'Legacy approval repository is closed');
+    try {
+      this.#workspace.assertFence(this.#lease);
+    } catch {
+      return legacyApprovalFenced('stale_fence', 'Legacy approval repository lost its workspace fence');
+    }
+    const normalized = validateLegacyApprovalReceipt(input);
+    // Reload before every transaction so a successor holder can continue a durable reserved
+    // outbox and an out-of-process edit cannot be hidden by an attachment-local cache.
+    this.#outbox = readLegacyApprovalOutbox(this.#outboxFile);
+    const prior = this.#outbox.receipts.find((receipt) => receipt.responseOpId === normalized.responseOpId);
+    if (prior !== undefined && !sameLegacyApprovalReceipt(prior, normalized)) {
+      return {
+        kind: 'conflict',
+        revision: legacyApprovalSnapshot(readLegacyApprovalPatterns(this.#approvalFile)).revision,
+        message: `Legacy approval response ${input.responseOpId} changed its durable payload`,
+      };
+    }
+    if (prior?.state === 'applied') {
+      return {
+        kind: 'duplicate',
+        revision: legacyApprovalSnapshot(readLegacyApprovalPatterns(this.#approvalFile)).revision,
+      };
+    }
+    if (prior === undefined) {
+      // Fence comparison and outbox reservation are synchronous under the workspace holder's
+      // kernel authority: no await/check-then-act window can admit a stale writer.
+      try {
+        this.#workspace.assertFence(this.#lease);
+        this.#outbox = snapshot({
+          ...this.#outbox,
+          receipts: [...this.#outbox.receipts, { ...normalized, state: 'reserved' as const }],
+        });
+        writeJsonAtomic(this.#outboxFile, this.#outbox);
+      } catch (error) {
+        if (error instanceof RuntimeStorageError && error.code === 'stale_fence') {
+          return legacyApprovalFenced('stale_fence', error.message);
+        }
+        return { kind: 'definitely_not_applied', message: formatStorageCause(error) };
+      }
+    }
+
+    const lockFile = `${this.#approvalFile}.lock`;
+    const lock = await acquireLegacyApprovalGlobalLock(lockFile);
+    try {
+      // Lock acquisition may wait behind another workspace for seconds. Revalidate the captured
+      // workspace fence after that await and before touching the shared Set; only a successor
+      // holder may recover an outbox reserved by a lease that expired while waiting.
+      try {
+        this.#workspace.assertFence(this.#lease);
+      } catch {
+        return legacyApprovalFenced(
+          'stale_fence',
+          'Legacy approval repository lost its workspace fence while waiting for the global lock',
+        );
+      }
+      const patterns = new Set(readLegacyApprovalPatterns(this.#approvalFile));
+      for (const pattern of normalized.patterns) patterns.add(pattern);
+      const sorted = [...patterns].sort();
+      writeJsonAtomic(this.#approvalFile, sorted);
+      this.#workspace.assertFence(this.#lease);
+      this.#outbox = snapshot({
+        ...this.#outbox,
+        receipts: this.#outbox.receipts.map((receipt) =>
+          receipt.responseOpId === normalized.responseOpId
+            ? { ...receipt, state: 'applied' as const }
+            : receipt),
+      });
+      writeJsonAtomic(this.#outboxFile, this.#outbox);
+      return { kind: 'applied', revision: legacyApprovalSnapshot(sorted).revision };
+    } finally {
+      releaseLegacyApprovalGlobalLock(lockFile, lock);
+    }
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw new RuntimeStorageError('stale_fence', 'Legacy approval repository is closed');
   }
 }
 
@@ -1396,7 +1613,11 @@ function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: 
 function validateLegacySeed(input: unknown): LegacyThreadSeedRecord {
   const value = snapshotUnknown(input, 'invalid_legacy_seed');
   if (isRecord(value)) {
-    assertExactKeys(value, ['type', 'sourceSessionId', 'transcript', 'usage'], ['compaction']);
+    assertExactKeys(
+      value,
+      ['type', 'sourceSessionId', 'transcript', 'usage'],
+      ['compaction', 'mirrorRecords'],
+    );
   }
   if (!isRecord(value) || value.type !== 'legacy_seed'
     || !isNonEmptyWellFormedString(value.sourceSessionId)
@@ -1404,8 +1625,44 @@ function validateLegacySeed(input: unknown): LegacyThreadSeedRecord {
     throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy seed');
   }
   const transcript = value.transcript.map((message) => validateAgentMessage(message));
+  const mirrorRecords = value.mirrorRecords === undefined
+    ? undefined
+    : Array.isArray(value.mirrorRecords)
+      ? value.mirrorRecords.map((record) => validateLegacyMirrorRecord(record))
+      : undefined;
+  if (value.mirrorRecords !== undefined && mirrorRecords === undefined) {
+    throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy mirror history');
+  }
   if (value.compaction !== undefined) validateCompactionCheckpoint(value.compaction);
-  return snapshot({ ...value, transcript }) as unknown as LegacyThreadSeedRecord;
+  return snapshot({
+    ...value,
+    transcript,
+    ...(mirrorRecords !== undefined && { mirrorRecords }),
+  }) as unknown as LegacyThreadSeedRecord;
+}
+
+function validateLegacyMirrorRecord(input: unknown): unknown {
+  const value = snapshotUnknown(input, 'invalid_legacy_seed');
+  if (!isRecord(value)) {
+    throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy mirror record');
+  }
+  if (value.type === 'message') {
+    assertExactKeys(value, ['type', 'message']);
+    return snapshot({ type: 'message', message: validateAgentMessage(value.message) });
+  }
+  if (value.type === 'compaction') {
+    assertExactKeys(value, ['type', 'id', 'timestamp', 'tailStartId', 'summary'], ['contextTokensBefore']);
+    const checkpoint = {
+      id: value.id,
+      timestamp: value.timestamp,
+      tailStartId: value.tailStartId,
+      summary: value.summary,
+      ...(value.contextTokensBefore !== undefined && { contextTokensBefore: value.contextTokensBefore }),
+    };
+    validateCompactionCheckpoint(checkpoint);
+    return value;
+  }
+  throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy mirror record type');
 }
 
 function validateMutation(
@@ -2483,6 +2740,179 @@ function assertExactKeys(
 
 function derivedTuple(claim: DerivedOpIdentityClaim): string {
   return canonicalJson([claim.purpose, claim.workspaceId, claim.parts]);
+}
+
+function readLegacyApprovalOutbox(file: string): LegacyApprovalOutboxFile {
+  const value = readJsonUnknown(file, 'invalid_legacy_approval_outbox');
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.receipts)) {
+    throw new RuntimeStorageError('invalid_legacy_approval_outbox', 'Invalid legacy approval outbox');
+  }
+  const seen = new Set<string>();
+  const receipts = value.receipts.map((receipt) => {
+    if (!isRecord(receipt)
+      || !isExternalOpId(receipt.responseOpId)
+      || !Number.isSafeInteger(receipt.acceptedAt)
+      || (receipt.acceptedAt as number) < 0
+      || !Array.isArray(receipt.patterns)
+      || receipt.patterns.length === 0
+      || receipt.patterns.some((pattern) =>
+        typeof pattern !== 'string' || pattern.length === 0 || !isWellFormedUnicode(pattern))
+      || canonicalJson(receipt.patterns) !== canonicalJson([...new Set(receipt.patterns)].sort())
+      || (receipt.state !== 'reserved' && receipt.state !== 'applied')
+      || seen.has(receipt.responseOpId)) {
+      throw new RuntimeStorageError('invalid_legacy_approval_outbox', 'Invalid legacy approval receipt');
+    }
+    seen.add(receipt.responseOpId);
+    return snapshot(receipt) as unknown as LegacyApprovalOutboxReceipt;
+  });
+  return snapshot({ version: 1, receipts });
+}
+
+function readLegacyApprovalPatterns(file: string): readonly string[] {
+  return readLegacyApprovalPatternFile(file).patterns;
+}
+
+function readLegacyApprovalPatternFile(file: string): {
+  readonly patterns: readonly string[];
+  readonly invalid: boolean;
+} {
+  if (!existsSync(file)) return { patterns: [], invalid: false };
+  assertRegularFileNoSymlink(file);
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+  } catch {
+    return { patterns: [], invalid: true };
+  }
+  if (!Array.isArray(value)) return { patterns: [], invalid: true };
+  const strings = value.filter((item): item is string =>
+    typeof item === 'string' && item.length > 0 && isWellFormedUnicode(item));
+  if (strings.length !== value.length) return { patterns: [], invalid: true };
+  return { patterns: [...new Set(strings)].sort(), invalid: false };
+}
+
+function validateLegacyApprovalReceipt(input: {
+  readonly responseOpId: ExternalOpId;
+  readonly acceptedAt: number;
+  readonly patterns: readonly [string, ...string[]];
+}): Omit<LegacyApprovalOutboxReceipt, 'state'> {
+  if (!isExternalOpId(input.responseOpId)
+    || !Number.isSafeInteger(input.acceptedAt)
+    || input.acceptedAt < 0) {
+    throw new RuntimeStorageError('invalid_legacy_approval_receipt', 'Invalid legacy approval receipt identity');
+  }
+  const patterns = [...input.patterns];
+  if (patterns.length === 0
+    || patterns.some((pattern) => pattern.length === 0 || !isWellFormedUnicode(pattern))
+    || canonicalJson(patterns) !== canonicalJson([...new Set(patterns)].sort())) {
+    throw new RuntimeStorageError(
+      'invalid_legacy_approval_receipt',
+      'patterns must be a non-empty, sorted, unique Unicode string tuple',
+    );
+  }
+  return snapshot({
+    responseOpId: input.responseOpId,
+    acceptedAt: input.acceptedAt,
+    patterns: patterns as [string, ...string[]],
+  });
+}
+
+function sameLegacyApprovalReceipt(
+  prior: LegacyApprovalOutboxReceipt,
+  candidate: Omit<LegacyApprovalOutboxReceipt, 'state'>,
+): boolean {
+  return canonicalJson({
+    responseOpId: prior.responseOpId,
+    acceptedAt: prior.acceptedAt,
+    patterns: prior.patterns,
+  }) === canonicalJson(candidate);
+}
+
+function legacyApprovalSnapshot(
+  patterns: Iterable<string>,
+): Readonly<import('../protocol/index.js').LegacyApprovalPatternSnapshot> {
+  const sorted = [...new Set(patterns)].sort();
+  return snapshot({
+    revision: `legacy-approval-v1-${canonicalJsonSha256(sorted)}`,
+    patterns: sorted,
+  });
+}
+
+function legacyApprovalFenced(
+  code: 'stale_fence' | 'wrong_workspace',
+  message: string,
+): Extract<LegacyApprovalPatternCommitResult, { kind: 'fenced' }> {
+  return { kind: 'fenced', code, message };
+}
+
+async function acquireLegacyApprovalGlobalLock(file: string): Promise<LegacyApprovalGlobalLockRecord> {
+  const record = snapshot<LegacyApprovalGlobalLockRecord>({
+    version: 1,
+    pid: process.pid,
+    nonce: crypto.randomUUID(),
+  });
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      writeJsonExclusive(file, record);
+      return record;
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+      let existing: LegacyApprovalGlobalLockRecord;
+      try {
+        existing = readLegacyApprovalGlobalLock(file);
+      } catch (readError) {
+        // The holder may release between our exclusive-create failure and read. Retry that benign
+        // race; a still-present malformed lock remains a storage error.
+        if (!existsSync(file)) continue;
+        throw readError;
+      }
+      if (isProcessAlive(existing.pid)) {
+        if (Date.now() < deadline) {
+          await new Promise<void>((resolve) => { setTimeout(resolve, 10); });
+          continue;
+        }
+        throw new RuntimeStorageError(
+          'legacy_approval_global_lock_busy',
+          'Timed out waiting for another process to update the global legacy approval Set',
+        );
+      }
+      unlinkIfExact(file, existing);
+    }
+  }
+}
+
+function readLegacyApprovalGlobalLock(file: string): LegacyApprovalGlobalLockRecord {
+  const value = readJsonUnknown(file, 'invalid_legacy_approval_global_lock');
+  if (!isRecord(value) || value.version !== 1 || !Number.isSafeInteger(value.pid)
+    || (value.pid as number) < 1 || !isNonEmptyWellFormedString(value.nonce)) {
+    throw new RuntimeStorageError(
+      'invalid_legacy_approval_global_lock',
+      'Invalid legacy approval global lock',
+    );
+  }
+  return snapshot(value) as unknown as LegacyApprovalGlobalLockRecord;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return hasErrorCode(error, 'EPERM');
+  }
+}
+
+function releaseLegacyApprovalGlobalLock(
+  file: string,
+  record: LegacyApprovalGlobalLockRecord,
+): void {
+  unlinkIfExact(file, record);
+  fsyncDirectory(path.dirname(file));
+}
+
+function formatStorageCause(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function omitActiveRun(

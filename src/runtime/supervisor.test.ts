@@ -17,6 +17,9 @@ import type {
 import { WorkspaceEventStream } from './event-stream.js';
 import { createMemoryRuntimeStorage } from './memory-storage.js';
 import type {
+  LegacyApprovalAdapter,
+  LegacyApprovalInvocationResult,
+  LegacyApprovalPatternRepository,
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
@@ -215,14 +218,48 @@ describe('Supervisor recovery and idempotency', () => {
       expect((await runtime.listThreads())[0]).toMatchObject({
         threadId,
         state: 'suspended',
-        suspendedWork: [{ kind: 'reserved_op', ownerOpId: op.opId, runId: RECOVERY_RUN_ID }],
+        suspendedWork: [{
+          kind: 'interrupted',
+          ownerOpId: op.opId,
+          terminalRunId: RECOVERY_RUN_ID,
+          inputOwnerOpId: op.opId,
+        }],
       });
       expect(await runtime.submit(op)).toMatchObject({
         accepted: true,
         duplicate: true,
         runId: RECOVERY_RUN_ID,
       });
-      expect(drivers.resumeCalls).toBe(0);
+      expect(await runtime.submit({
+        type: 'thread_resume',
+        opId: 'op_e_10000000000000000000000000000007' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        model: MODEL.ref,
+      })).toMatchObject({ accepted: true });
+      expect(await runtime.submit(prompt(
+        'op_e_10000000000000000000000000000008',
+        threadId,
+        'must not bypass accepted recovery',
+      ))).toMatchObject({ accepted: false, reason: 'suspended_work_pending' });
+      const continuation = await runtime.submit({
+        type: 'continue',
+        opId: 'op_e_10000000000000000000000000000009' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+      });
+      expect(continuation).toMatchObject({ accepted: true });
+      if (!continuation.accepted) throw new Error('continue was not accepted');
+      expect(drivers.dispatches(threadId).at(-1)).toMatchObject({
+        op: { type: 'continue', opId: continuation.opId },
+        runId: continuation.runId,
+        resolvedInput: {
+          kind: 'prompt_input',
+          sourceOpId: op.opId,
+          text: op.text,
+        },
+      });
+      expect(drivers.resumeCalls).toBe(1);
     } finally {
       await runtime.close();
     }
@@ -716,6 +753,120 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
+  test('definitely-not-applied allow_always recovery aborts the request skipped by its durable claim', async () => {
+    const storage = createMemoryRuntimeStorage();
+    const threadId = 'thread-control-definitely-not-applied' as ThreadId;
+    const seeded = await seedControlResponseCrash(storage, threadId, 'started', true);
+    const runtime = await openRuntime(storage, new WorkspaceFatalApprovalFactory());
+    try {
+      const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+      expect(folded.checkpoint.frontend.pendingControls).toEqual([]);
+      expect(folded.controlClaims.has(seeded.requestId)).toBe(false);
+      expect(folded.envelopes.find((envelope) =>
+        envelope.event.type === 'control_resolved'
+        && envelope.event.requestId === seeded.requestId)).toMatchObject({
+        opId: deriveOpId({
+          purpose: 'control_recovery',
+          workspaceId: WORKSPACE_ID,
+          parts: [threadId, seeded.requestId],
+        }),
+        event: { type: 'control_resolved', decision: 'aborted' },
+      });
+      expect(folded.mailbox.get(seeded.responseOpId)).toMatchObject({
+        state: 'completed',
+        outcome: 'interrupted',
+      });
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  test('an approval fatal gates and synchronously cancels every active thread in the workspace', async () => {
+    const drivers = new WorkspaceFatalApprovalFactory();
+    const runtime = await openRuntime(createMemoryRuntimeStorage(), drivers);
+    const firstThreadId = runtime.newThreadId();
+    const secondThreadId = runtime.newThreadId();
+    const iterator = runtime.events()[Symbol.asyncIterator]();
+    try {
+      expect((await runtime.submit(createThreadOp(runtime.newOpId(), firstThreadId))).accepted).toBe(true);
+      expect((await runtime.submit(createThreadOp(runtime.newOpId(), secondThreadId))).accepted).toBe(true);
+      const firstPrompt = await runtime.submit(prompt(runtime.newOpId(), firstThreadId, 'first active'));
+      const secondPrompt = await runtime.submit(prompt(runtime.newOpId(), secondThreadId, 'second active'));
+      if (!firstPrompt.accepted || firstPrompt.runId === undefined) throw new Error('first prompt failed');
+      if (!secondPrompt.accepted || secondPrompt.runId === undefined) throw new Error('second prompt failed');
+
+      const approval = drivers.requestApproval(firstThreadId, firstPrompt.runId);
+      const request = await nextEvent(iterator, (envelope) =>
+        envelope.threadId === firstThreadId && envelope.event.type === 'control_request');
+      if (request.event.type !== 'control_request') throw new Error('missing approval request');
+      const response = {
+        type: 'control_response',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId: firstThreadId,
+        requestId: request.event.requestId,
+        decision: 'allow_always',
+      } as const;
+      expect((await runtime.submit(response)).accepted).toBe(true);
+
+      await expect(approval).resolves.toEqual({ kind: 'aborted' });
+      expect(drivers.dispatches(firstThreadId).filter((command) => command.op.type === 'abort')).toHaveLength(1);
+      expect(drivers.dispatches(secondThreadId).filter((command) => command.op.type === 'abort')).toHaveLength(1);
+      await expect(drivers.requestApproval(secondThreadId, secondPrompt.runId)).rejects.toMatchObject({
+        code: 'legacy_approval_conflict',
+      });
+      expect(await runtime.submit(response)).toMatchObject({
+        accepted: true,
+        duplicate: true,
+        opId: response.opId,
+      });
+      expect(await runtime.submit({ ...response, decision: 'deny' })).toMatchObject({
+        accepted: false,
+        duplicate: false,
+        reason: 'op_id_conflict',
+      });
+      await expect(runtime.submit(prompt(runtime.newOpId(), secondThreadId, 'must remain gated')))
+        .rejects.toMatchObject({ code: 'legacy_approval_conflict' });
+    } finally {
+      await iterator.return?.();
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  test('commits a tolerant-load approval warning once as a canonical runtime diagnostic', async () => {
+    const base = createMemoryRuntimeStorage();
+    const runtime = await openRuntime(withLegacyApprovalStartupDiagnostic(base), new WorkspaceFatalApprovalFactory());
+    const firstThreadId = runtime.newThreadId();
+    const secondThreadId = runtime.newThreadId();
+    const iterator = runtime.events()[Symbol.asyncIterator]();
+    try {
+      expect((await runtime.submit(createThreadOp(runtime.newOpId(), firstThreadId))).accepted).toBe(true);
+      const warning = await nextEvent(iterator, (envelope) =>
+        envelope.threadId === firstThreadId
+        && envelope.event.type === 'runtime_diagnostic'
+        && envelope.event.code === 'legacy_approvals_invalid_ignored');
+      expect(warning.event).toEqual({
+        type: 'runtime_diagnostic',
+        severity: 'warning',
+        code: 'legacy_approvals_invalid_ignored',
+        message: 'Invalid legacy approvals were ignored',
+        scope: 'thread',
+      });
+
+      expect((await runtime.submit(createThreadOp(runtime.newOpId(), secondThreadId))).accepted).toBe(true);
+      const records = [
+        ...await loadThreadRecords(base, firstThreadId),
+        ...await loadThreadRecords(base, secondThreadId),
+      ];
+      expect(records.flatMap((record) => record.type === 'commit' ? record.envelopes : [])
+        .filter((envelope) => envelope.event.type === 'runtime_diagnostic'
+          && envelope.event.code === 'legacy_approvals_invalid_ignored')).toHaveLength(1);
+    } finally {
+      await iterator.return?.();
+      await runtime.close();
+    }
+  });
+
   test('recovers a partial assistant/tool crash in one authoritative interruption commit', async () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-partial-tool-crash' as ThreadId;
@@ -728,27 +879,53 @@ describe('Supervisor recovery and idempotency', () => {
         && (record.mutations ?? []).some((mutation) => mutation.type === 'activity_interrupted'));
       expect(recoveryCommit).toMatchObject({
         type: 'commit',
-        envelopes: [expect.objectContaining({
-          opId: seeded.rootOpId,
-          runId: seeded.runId,
-          event: expect.objectContaining({
-            type: 'op_completed',
-            outcome: 'interrupted',
-            terminalRunId: seeded.runId,
+        envelopes: expect.arrayContaining([
+          expect.objectContaining({
+            opId: deriveOpId({
+              purpose: 'control_recovery',
+              workspaceId: WORKSPACE_ID,
+              parts: [threadId, seeded.requestId],
+            }),
+            runId: seeded.runId,
+            turnId: seeded.turnId,
+            event: expect.objectContaining({
+              type: 'control_resolved',
+              requestId: seeded.requestId,
+              decision: 'aborted',
+            }),
           }),
-        })],
-        mutations: expect.arrayContaining([expect.objectContaining({
-          type: 'activity_interrupted',
-          rootOpId: seeded.rootOpId,
-          rootRunId: seeded.runId,
-          terminalRunId: seeded.runId,
-          terminalTurnId: seeded.turnId,
-          discardedPartialAssistantId: seeded.assistantId,
-          discardedStartedToolCallIds: [seeded.toolCallId],
-        })]),
+          expect.objectContaining({
+            opId: seeded.rootOpId,
+            runId: seeded.runId,
+            event: expect.objectContaining({
+              type: 'op_completed',
+              outcome: 'interrupted',
+              terminalRunId: seeded.runId,
+            }),
+          }),
+        ]),
+        mutations: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'control_resolved',
+            resolution: expect.objectContaining({
+              requestId: seeded.requestId,
+              decision: 'aborted',
+            }),
+          }),
+          expect.objectContaining({
+            type: 'activity_interrupted',
+            rootOpId: seeded.rootOpId,
+            rootRunId: seeded.runId,
+            terminalRunId: seeded.runId,
+            terminalTurnId: seeded.turnId,
+            discardedPartialAssistantId: seeded.assistantId,
+            discardedStartedToolCallIds: [seeded.toolCallId],
+          }),
+        ]),
       });
       const snapshot = await runtime.getThreadSnapshot(threadId);
       expect(snapshot?.activity).toBeUndefined();
+      expect(snapshot?.pendingControls).toEqual([]);
       expect(snapshot?.transcript.some((message) => message.id === seeded.assistantId)).toBe(false);
       expect((await runtime.submit(resumeOp(
         'op_e_2f000000000000000000000000000001',
@@ -1696,6 +1873,7 @@ async function seedControlResponseCrash(
   storage: RuntimeStoragePort,
   threadId: ThreadId,
   responsePhase: 'accepted_pending' | 'started',
+  durableAllowAlways = false,
 ): Promise<{ readonly requestId: string; readonly responseOpId: ExternalOpId }> {
   const promptOp = prompt(
     responsePhase === 'accepted_pending'
@@ -1774,7 +1952,13 @@ async function seedControlResponseCrash(
       owningRunId: runId,
       owningTurnId: turnId,
       policyRevision: 'policy-control-recovery',
-      payload: { toolCallId: 'call-control-recovery', description: 'recover me' },
+      payload: {
+        toolCallId: 'call-control-recovery',
+        description: 'recover me',
+        ...(durableAllowAlways && {
+          legacyProposal: { patterns: ['Edit(*)'] as [string], forceConfirm: false },
+        }),
+      },
     },
     runId,
     turnId,
@@ -1785,7 +1969,7 @@ async function seedControlResponseCrash(
     workspaceId: WORKSPACE_ID,
     threadId,
     requestId,
-    decision: 'allow_once',
+    decision: durableAllowAlways ? 'allow_always' as const : 'allow_once' as const,
   } as const;
   await writer.appendPrepare({
     type: 'mailbox_prepare',
@@ -1802,7 +1986,7 @@ async function seedControlResponseCrash(
       type: 'control_response_claimed',
       requestId,
       responseOpId,
-      decision: 'allow_once',
+      decision: responseOp.decision,
       acceptedAt: 1,
     },
   ], 1);
@@ -1946,6 +2130,7 @@ async function seedPartialToolCrash(
   readonly turnId: import('../protocol/index.js').TurnId;
   readonly assistantId: string;
   readonly toolCallId: string;
+  readonly requestId: string;
 }> {
   const rootOpId = 'op_e_2f000000000000000000000000000000' as ExternalOpId;
   const rootOp = prompt(rootOpId, threadId, 'partial tool crash');
@@ -1953,6 +2138,7 @@ async function seedPartialToolCrash(
   const turnId = 'turn-partial-tool-crash' as import('../protocol/index.js').TurnId;
   const assistantId = 'assistant-partial-crash';
   const toolCallId = 'tool-call-partial-crash';
+  const requestId = 'request-partial-crash';
   const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
   const lease = await workspace.acquireSupervisorLease('seed-partial-tool');
   const ledger: SupervisorOpLedgerRecord = {
@@ -2047,10 +2233,26 @@ async function seedPartialToolCrash(
     runId,
     turnId,
   });
+  await writer.commitDriverEvent({
+    event: {
+      type: 'control_request',
+      requestId,
+      kind: 'approval',
+      owningRunId: runId,
+      owningTurnId: turnId,
+      policyRevision: 'policy-partial-crash',
+      payload: {
+        toolCallId,
+        description: 'pending approval at crash',
+      },
+    },
+    runId,
+    turnId,
+  });
   await writer.close();
   await workspace.releaseSupervisorLease(lease);
   await workspace.close();
-  return { rootOpId, runId, turnId, assistantId, toolCallId };
+  return { rootOpId, runId, turnId, assistantId, toolCallId, requestId };
 }
 
 async function seedQueueCrash(
@@ -2622,6 +2824,42 @@ async function openRuntime(
   });
 }
 
+function withLegacyApprovalStartupDiagnostic(base: RuntimeStoragePort): RuntimeStoragePort {
+  return {
+    listStoredThreads: () => base.listStoredThreads(),
+    async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
+      const workspace = await base.openWorkspace(input);
+      return new Proxy(workspace, {
+        get(target, property, receiver) {
+          if (property === 'openLegacyApprovalPatternRepository') {
+            return async (
+              ...args: Parameters<NonNullable<
+                RuntimeWorkspaceStoragePort['openLegacyApprovalPatternRepository']
+              >>
+            ): Promise<LegacyApprovalPatternRepository> => {
+              const open = target.openLegacyApprovalPatternRepository;
+              if (open === undefined) throw new Error('Legacy approval repository is unavailable');
+              const repository = await open.call(target, ...args);
+              return {
+                workspaceId: repository.workspaceId,
+                snapshot: () => repository.snapshot(),
+                commit: (commitInput) => repository.commit(commitInput),
+                startupDiagnostics: () => [{
+                  code: 'legacy_approvals_invalid_ignored',
+                  message: 'Invalid legacy approvals were ignored',
+                }],
+                close: () => repository.close(),
+              };
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  };
+}
+
 function threadMeta(threadId: ThreadId, createdByOpId: ExternalOpId): ThreadMetaRecord {
   return {
     type: 'thread_meta',
@@ -2747,6 +2985,89 @@ class FixedPolicy implements PermissionPolicyPort {
           },
         }
       : CEILING;
+  }
+}
+
+class WorkspaceFatalApprovalFactory implements ThreadDriverFactory {
+  readonly requirements = { approvalMode: 'durable_legacy_bridge' as const };
+  readonly #base = new RecordingDriverFactory();
+  readonly #hosts = new Map<ThreadId, ThreadDriverHostServices>();
+
+  async create(
+    input: Parameters<ThreadDriverFactory['create']>[0],
+    host: ThreadDriverHostServices,
+  ): Promise<ThreadDriverAttachment> {
+    this.#hosts.set(input.threadId, host);
+    return this.#withApproval(await this.#base.create(input, host));
+  }
+
+  async resume(
+    input: Parameters<ThreadDriverFactory['resume']>[0],
+    host: ThreadDriverHostServices,
+  ): Promise<ThreadDriverAttachment> {
+    this.#hosts.set(input.threadId, host);
+    return this.#withApproval(await this.#base.resume(input, host));
+  }
+
+  dispatches(threadId: ThreadId): readonly PreparedThreadDriverCommand[] {
+    return this.#base.dispatches(threadId);
+  }
+
+  async openLegacyApprovalAdapter(): Promise<LegacyApprovalAdapter> {
+    return {
+      async preflight() { return { kind: 'allow' }; },
+      async applyResponse() {
+        return {
+          ok: false,
+          code: 'legacy_approval_definitely_not_applied',
+          message: 'recovery fixture did not apply a pattern',
+        };
+      },
+      async close() {},
+    };
+  }
+
+  async requestApproval(threadId: ThreadId, runId: RunId): Promise<LegacyApprovalInvocationResult> {
+    const host = this.#hosts.get(threadId);
+    if (host === undefined) throw new Error(`missing host for ${threadId}`);
+    const turn = await host.reserveTurn({ runId, turnOrdinal: 1 });
+    await host.commitEvent({
+      event: { type: 'turn_start' },
+      runId,
+      turnId: turn.turnId,
+    });
+    if (host.requestLegacyApproval === undefined) throw new Error('approval host bridge is unavailable');
+    return host.requestLegacyApproval({
+      toolCallId: `call-${threadId}`,
+      toolName: 'edit',
+      cwd: CWD,
+      args: { path: `${threadId}.ts` },
+    });
+  }
+
+  #withApproval(attachment: ThreadDriverAttachment): ThreadDriverAttachment {
+    const adapter: LegacyApprovalAdapter = {
+      async preflight() {
+        return {
+          kind: 'ask',
+          description: 'approve edit',
+          proposal: { patterns: ['Edit(*)'], forceConfirm: false },
+        };
+      },
+      async applyResponse() {
+        return {
+          ok: false,
+          code: 'legacy_approval_conflict',
+          message: 'conflicting durable approval receipt',
+        };
+      },
+      async close() {},
+    };
+    return {
+      ...attachment,
+      legacyApprovalAdapter: adapter,
+      legacyApprovalPolicyRevision: 'workspace-fatal-test',
+    };
   }
 }
 

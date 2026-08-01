@@ -21,7 +21,7 @@ import type { ToolContext, ToolDefinition } from '../tools/types.js';
 import { newMessageId } from './ids.js';
 import type { DrainMode, PendingMessageQueue } from './queue.js';
 import { errorToolResult, failTruncatedToolCalls, formatToolError, toToolResultMessage } from './tool-result.js';
-import { convertContext } from './transform.js';
+import { convertContext, INTERRUPTED_RESULT_TEXT } from './transform.js';
 
 export type Emit = (e: AgentEvent) => Promise<void>;
 
@@ -327,14 +327,24 @@ async function runOne(
   p: Prepared,
   taskSignal: AbortSignal,
   emit: Emit,
-): Promise<{ result: ToolResultMessage; terminate: boolean }> {
+): Promise<
+  | { kind: 'completed'; result: ToolResultMessage; terminate: boolean }
+  | { kind: 'aborted_before_execute' }
+> {
   // reject 结果同样发 start/end 对(UI 一致性;args 用原始 call.arguments)
   const args = p.kind === 'ok' ? p.args : p.call.arguments;
+  const abortedBeforeStart = taskSignal.aborted;
   await emit({ type: 'tool_execution_start', toolCallId: p.call.id, toolName: p.call.name, args });
+  // tool_execution_start 是权威背压边界；等待提交时可能已收到 abort。
+  // 若 cancellation 正是在等待该提交时发生，未执行的 call 保持孤儿事实；若它在进入
+  // start 边界前已发生（例如 approval 返回 abort），则保留既有的中断结果投影。
+  if (taskSignal.aborted && !abortedBeforeStart) return { kind: 'aborted_before_execute' };
 
   let result: ToolResultMessage;
   let terminate = false;
-  if (p.kind === 'reject') {
+  if (taskSignal.aborted) {
+    result = errorToolResult(p.call, INTERRUPTED_RESULT_TEXT);
+  } else if (p.kind === 'reject') {
     result = p.result;
   } else {
     const toolCtx: ToolContext = {
@@ -367,7 +377,7 @@ async function runOne(
   // 工具不依赖事件总线,保持 tools → protocol 的依赖方向)。整表替换语义,快照即全量。
   const planSteps = extractPlanSteps(result);
   if (planSteps !== undefined) await emit({ type: 'plan_update', steps: planSteps });
-  return { result, terminate };
+  return { kind: 'completed', result, terminate };
 }
 
 /** plan 工具 details 的鸭子识别:非 isError 且 details.steps 是 PlanStep 数组形态。 */
@@ -415,6 +425,7 @@ async function executeToolCalls(
   if (sequential) {
     for (const p of prepared) {
       const r = await runOne(cfg, p, taskSignal, emit);
+      if (r.kind === 'aborted_before_execute') break;
       results.set(p.call.id, r.result);
       allTerminate &&= r.terminate;
       if (taskSignal.aborted) break;   // ★ 每个工具后检查;剩余不执行、不伪造结果,成为孤儿
@@ -423,6 +434,7 @@ async function executeToolCalls(
     await Promise.all(
       prepared.map(async (p) => {      // 并发执行;tool_execution_end 按完成顺序发出
         const r = await runOne(cfg, p, taskSignal, emit);
+        if (r.kind === 'aborted_before_execute') return;
         results.set(p.call.id, r.result);
         allTerminate &&= r.terminate;
       }),

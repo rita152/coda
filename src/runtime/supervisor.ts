@@ -30,6 +30,22 @@ import type {
   ThreadSummary,
   WorkspaceId,
 } from '../protocol/index.js';
+import type { EventSubscriptionOptions } from '../session/event-hub.js';
+import { EventHub } from '../session/event-hub.js';
+import type {
+  CommitEnvelopeInput,
+  FoldedRunEntry,
+  FoldedThreadJournal,
+} from '../session/thread-journal.js';
+import {
+  foldThreadJournal,
+  snapshotFromFold,
+  ThreadJournalWriter,
+} from '../session/thread-journal.js';
+import {
+  ThreadDriverHostController,
+  ThreadRuntime,
+} from '../session/thread-runtime.js';
 import {
   RuntimeClosedError,
   RuntimeIdentityValidationError,
@@ -37,16 +53,15 @@ import {
   RuntimeStorageError,
   WorkspaceBindingMismatchError,
 } from './errors.js';
-import type { EventSubscriptionOptions } from './event-stream.js';
-import { WorkspaceEventStream } from './event-stream.js';
 import { createDefaultRuntimeIdentityFactory } from './identity-factory.js';
-import { validatePermissionCeilingSnapshot } from './permission-ceiling.js';
+import { validatePermissionCeilingSnapshot } from '../session/permission-ceiling.js';
 import type {
   PermissionPolicyPort,
   RecoveryQueueCommand,
   RuntimeClock,
   RuntimeIdentityFactory,
   RuntimeJournalRecord,
+  LegacyApprovalPatternRepository,
   RuntimeModelResolver,
   RuntimeStoragePort,
   RuntimeWorkspaceStoragePort,
@@ -61,9 +76,6 @@ import type {
   ThreadResultDeliveryRecord,
   ThreadResultOutboxMutation,
 } from './ports.js';
-import type { FoldedRunEntry, FoldedThreadJournal } from './thread-journal.js';
-import { foldThreadJournal, snapshotFromFold, ThreadJournalWriter } from './thread-journal.js';
-import { Phase1ThreadRuntime, ThreadDriverHostController } from './thread-runtime.js';
 
 export interface RuntimePort {
   readonly workspaceId: WorkspaceId;
@@ -116,15 +128,28 @@ export async function createRuntime(options: CreateRuntimeOptions): Promise<Runt
     await workspace.close().catch(() => undefined);
     throw error;
   }
+  let legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
   try {
+    if (options.threadDriverFactory.requirements.approvalMode === 'durable_legacy_bridge') {
+      const open = workspace.openLegacyApprovalPatternRepository;
+      if (open === undefined) {
+        throw new RuntimeStorageError(
+          'legacy_approval_storage_unavailable',
+          'The selected static driver requires fenced legacy approval storage',
+        );
+      }
+      legacyApprovalPatterns = await open.call(workspace, lease);
+    }
     return await Supervisor.open({
       options,
       workspaceId,
       workspace,
       lease,
       identityFactory,
+      ...(legacyApprovalPatterns !== undefined && { legacyApprovalPatterns }),
     });
   } catch (error) {
+    await legacyApprovalPatterns?.close().catch(() => undefined);
     await workspace.releaseSupervisorLease(lease).catch(() => undefined);
     await workspace.close().catch(() => undefined);
     throw error;
@@ -137,6 +162,7 @@ interface SupervisorOpenInput {
   readonly workspace: RuntimeWorkspaceStoragePort;
   readonly lease: SupervisorLease;
   readonly identityFactory: RuntimeIdentityFactory;
+  readonly legacyApprovalPatterns?: LegacyApprovalPatternRepository;
 }
 
 class Supervisor implements RuntimePort {
@@ -149,12 +175,18 @@ class Supervisor implements RuntimePort {
   readonly #modelResolver: RuntimeModelResolver;
   readonly #permissionPolicy: PermissionPolicyPort;
   readonly #driverFactory: ThreadDriverFactory;
-  readonly #events = new WorkspaceEventStream();
-  readonly #threads = new Map<ThreadId, Phase1ThreadRuntime>();
+  readonly #legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
+  readonly #pendingApprovalDiagnostics: {
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly #events = new EventHub();
+  readonly #threads = new Map<ThreadId, ThreadRuntime>();
   readonly #catalog = new Map<ThreadId, ThreadCatalogRecord>();
   readonly #threadMeta = new Map<ThreadId, ThreadMetaRecord>();
   readonly #unloaded = new Map<ThreadId, FoldedThreadJournal>();
   readonly #inFlight = new Set<Promise<unknown>>();
+  readonly #threadUnloadFlights = new Map<ThreadId, Promise<void>>();
   readonly #opFlights = new Map<ExternalOpId, {
     readonly payloadHash: string;
     readonly promise: Promise<OpReceipt>;
@@ -166,6 +198,8 @@ class Supervisor implements RuntimePort {
   readonly #attachmentLifecycleOps = new Map<ThreadId, OpId>();
   readonly #closeController = new AbortController();
   #state: 'open' | 'closing' | 'closed' = 'open';
+  #approvalFatal: Error | undefined;
+  #approvalDiagnosticFlight: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
   private constructor(input: SupervisorOpenInput) {
@@ -178,6 +212,10 @@ class Supervisor implements RuntimePort {
     this.#modelResolver = input.options.modelResolver;
     this.#permissionPolicy = input.options.permissionPolicy;
     this.#driverFactory = input.options.threadDriverFactory;
+    this.#legacyApprovalPatterns = input.legacyApprovalPatterns;
+    this.#pendingApprovalDiagnostics = [
+      ...(input.legacyApprovalPatterns?.startupDiagnostics?.() ?? []),
+    ];
   }
 
   static async open(input: SupervisorOpenInput): Promise<Supervisor> {
@@ -286,6 +324,11 @@ class Supervisor implements RuntimePort {
       const receipt = await existingFlight.promise;
       return { ...receipt, duplicate: true };
     }
+    if (this.#approvalFatal !== undefined) {
+      const replay = await this.#replayOpWhileApprovalFatal(op, payloadHash);
+      if (replay !== undefined) return replay;
+      throw this.#approvalFatal;
+    }
     const flight = this.#submitCanonical(op);
     this.#opFlights.set(op.opId, { payloadHash, promise: flight });
     try {
@@ -293,6 +336,24 @@ class Supervisor implements RuntimePort {
     } finally {
       this.#opFlights.delete(op.opId);
     }
+  }
+
+  async #replayOpWhileApprovalFatal(
+    op: Readonly<RuntimeOp>,
+    payloadHash: string,
+  ): Promise<OpReceipt | undefined> {
+    const record = (await this.#workspace.loadSupervisorOps())
+      .find((candidate) => candidate.opId === op.opId);
+    if (record === undefined) return undefined;
+    if (record.payloadHash !== payloadHash) {
+      return { accepted: false, opId: op.opId, duplicate: false, reason: 'op_id_conflict' };
+    }
+    if (record.state === 'final') {
+      if (record.receipt === undefined) throw new Error(`Final ledger op ${op.opId} has no receipt`);
+      return { ...record.receipt, duplicate: true };
+    }
+    const recovered = this.#recoverSupervisorReceipt(record);
+    return recovered === undefined ? undefined : { ...recovered, duplicate: true };
   }
 
   async #submitCanonical(op: Readonly<RuntimeOp>): Promise<OpReceipt> {
@@ -449,6 +510,9 @@ class Supervisor implements RuntimePort {
       permissionCeiling: ceiling,
       ...(op.parentThreadId !== undefined && { parentThreadId: op.parentThreadId }),
       creationKey,
+      ...(this.#legacyApprovalPatterns !== undefined && {
+        legacyApprovalPatterns: this.#legacyApprovalPatterns,
+      }),
     }, host);
     let journal: ThreadJournalPort | undefined;
     let writer: ThreadJournalWriter | undefined;
@@ -479,8 +543,9 @@ class Supervisor implements RuntimePort {
       clock: this.#clock,
       state: foldThreadJournal(records),
       records,
-    });
+      });
       this.#events.registerThread(op.threadId);
+      await this.#commitApprovalStartupDiagnostics(writer);
       const summary: ThreadSummary = {
       threadId: op.threadId,
       ...(op.parentThreadId !== undefined && { parentThreadId: op.parentThreadId }),
@@ -494,7 +559,7 @@ class Supervisor implements RuntimePort {
     ], [
       { type: 'model_selected', ownerOpId: op.opId, model: op.model },
     ]);
-      const runtime = new Phase1ThreadRuntime({
+      const runtime = new ThreadRuntime({
       workspaceId: this.workspaceId,
       cwd: this.#cwd,
       threadId: op.threadId,
@@ -505,6 +570,8 @@ class Supervisor implements RuntimePort {
       permissionPolicy: this.#permissionPolicy,
       threadCeiling: ceiling,
       onThreadResultPending: (result) => this.#deliverThreadResult(result),
+      onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
+      workspaceApprovalFailure: () => this.#approvalFatal,
     });
       host.bind(runtime);
       await attachment.driver.recover([]);
@@ -540,6 +607,10 @@ class Supervisor implements RuntimePort {
   }
 
   async #resumeThread(op: Extract<RuntimeOp, { type: 'thread_resume' }>): Promise<OpReceipt> {
+    // A thread_closed envelope is published before the runtime has released its journal lease and
+    // before the Supervisor has moved the attachment into #unloaded. Reattachment must cross that
+    // complete unload boundary instead of racing the stale entry in #threads.
+    await this.#threadUnloadFlights.get(op.threadId);
     let catalog = this.#catalog.get(op.threadId);
     if (catalog === undefined) return rejected(op, 'thread_not_found');
     if (this.#threads.has(op.threadId)) return rejected(op, 'thread_already_attached');
@@ -663,6 +734,9 @@ class Supervisor implements RuntimePort {
           permissionCeiling: state.meta.permissionCeiling,
           committedCheckpoint: state.checkpoint,
           usedRequestIds: snapshot([...state.usedRequestIds]),
+          ...(this.#legacyApprovalPatterns !== undefined && {
+            legacyApprovalPatterns: this.#legacyApprovalPatterns,
+          }),
         }, host);
       }
       if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(expectedAttachmentCheckpoint)) {
@@ -685,7 +759,8 @@ class Supervisor implements RuntimePort {
         state,
         records,
       });
-      const runtime = new Phase1ThreadRuntime({
+      await this.#commitApprovalStartupDiagnostics(writer);
+      const runtime = new ThreadRuntime({
         workspaceId: this.workspaceId,
         cwd: this.#cwd,
         threadId: op.threadId,
@@ -696,6 +771,8 @@ class Supervisor implements RuntimePort {
         permissionPolicy: this.#permissionPolicy,
         threadCeiling: state.meta.permissionCeiling,
         onThreadResultPending: (result) => this.#deliverThreadResult(result),
+        onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
+        workspaceApprovalFailure: () => this.#approvalFatal,
       });
       host.bind(runtime);
       await this.#recoverQueueEffects(attachment.driver, writer);
@@ -707,7 +784,7 @@ class Supervisor implements RuntimePort {
       const staleModelOps = [...recoveredState.mailbox.entries()].filter(([, entry]) =>
         entry.op.type === 'set_model'
         && (entry.state === 'accepted_pending' || entry.state === 'started'));
-      const resumeEnvelopes: import('./thread-journal.js').CommitEnvelopeInput[] = staleModelOps.map(([opId]) => ({
+      const resumeEnvelopes: CommitEnvelopeInput[] = staleModelOps.map(([opId]) => ({
         event: { type: 'op_completed', opType: 'set_model', outcome: 'superseded' },
         opId,
       }));
@@ -725,10 +802,7 @@ class Supervisor implements RuntimePort {
         { type: 'model_selected', ownerOpId: op.opId, model: op.model },
       );
       await writer.commit(
-        resumeEnvelopes as [
-          import('./thread-journal.js').CommitEnvelopeInput,
-          ...import('./thread-journal.js').CommitEnvelopeInput[],
-        ],
+        resumeEnvelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
         resumeMutations,
       );
       await attachment.driver.activate();
@@ -781,7 +855,9 @@ class Supervisor implements RuntimePort {
     }
     const receipt = await thread.acceptExternal(op);
     if (op.type === 'thread_close' && receipt.accepted) {
-      const unload = thread.close(op).then(() => {
+      // Defer close by one microtask so the unload flight is visible before thread_closed can be
+      // published. A resume submitted from that event can then await lease release and cleanup.
+      const unload = Promise.resolve().then(() => thread.close(op)).then(() => {
         if (this.#threads.get(op.threadId) !== thread) return;
         this.#threads.delete(op.threadId);
         this.#unloaded.set(op.threadId, thread.durableState());
@@ -792,8 +868,14 @@ class Supervisor implements RuntimePort {
         }
         this.#threadClaims.set(op.threadId, { kind: 'existing' });
       });
+      this.#threadUnloadFlights.set(op.threadId, unload);
       this.#inFlight.add(unload);
-      void unload.finally(() => this.#inFlight.delete(unload)).catch(() => undefined);
+      void unload.finally(() => {
+        if (this.#threadUnloadFlights.get(op.threadId) === unload) {
+          this.#threadUnloadFlights.delete(op.threadId);
+        }
+        this.#inFlight.delete(unload);
+      }).catch(() => undefined);
     }
     return receipt;
   }
@@ -830,7 +912,7 @@ class Supervisor implements RuntimePort {
         candidates.push({ opId, op: entry.op, state: entry.state });
       }
     }
-    const startEnvelopes: import('./thread-journal.js').CommitEnvelopeInput[] = [];
+    const startEnvelopes: CommitEnvelopeInput[] = [];
     const startMutations: import('./ports.js').RuntimeThreadMutation[] = [];
     for (const { opId, op: queueOp, state } of candidates) {
       if (state !== 'accepted_pending') continue;
@@ -839,10 +921,7 @@ class Supervisor implements RuntimePort {
     }
     if (startEnvelopes.length > 0) {
       await writer.commit(
-        startEnvelopes as [
-          import('./thread-journal.js').CommitEnvelopeInput,
-          ...import('./thread-journal.js').CommitEnvelopeInput[],
-        ],
+        startEnvelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
         startMutations,
       );
     }
@@ -861,7 +940,7 @@ class Supervisor implements RuntimePort {
     }
     await driver.recover(snapshot(commands));
 
-    const completionEnvelopes: import('./thread-journal.js').CommitEnvelopeInput[] = [];
+    const completionEnvelopes: CommitEnvelopeInput[] = [];
     const completionMutations: import('./ports.js').RuntimeThreadMutation[] = [];
     for (const { opId, op: queueOp } of candidates) {
       const effectCommitted = writer.state.envelopes.some((envelope) =>
@@ -878,10 +957,7 @@ class Supervisor implements RuntimePort {
     }
     if (completionEnvelopes.length > 0) {
       await writer.commit(
-        completionEnvelopes as [
-          import('./thread-journal.js').CommitEnvelopeInput,
-          ...import('./thread-journal.js').CommitEnvelopeInput[],
-        ],
+        completionEnvelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
         completionMutations,
       );
     }
@@ -981,6 +1057,9 @@ class Supervisor implements RuntimePort {
         parentThreadId: input.state.meta.parentThreadId,
       }),
       creationKey,
+      ...(this.#legacyApprovalPatterns !== undefined && {
+        legacyApprovalPatterns: this.#legacyApprovalPatterns,
+      }),
     }, input.host);
     input.capture(attachment);
     if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(input.expectedCheckpoint)) {
@@ -1033,6 +1112,7 @@ class Supervisor implements RuntimePort {
         state,
         records,
       });
+      await this.#commitApprovalStartupDiagnostics(writer);
       if (!resolution.ok) {
         await writer.commit([{
           event: {
@@ -1090,6 +1170,9 @@ class Supervisor implements RuntimePort {
           permissionCeiling: state.meta.permissionCeiling,
           committedCheckpoint: state.checkpoint,
           usedRequestIds: snapshot([...state.usedRequestIds]),
+          ...(this.#legacyApprovalPatterns !== undefined && {
+            legacyApprovalPatterns: this.#legacyApprovalPatterns,
+          }),
         }, host);
       }
       if (canonicalJson(attachment.durableRef) !== canonicalJson(driverRef)
@@ -1099,7 +1182,7 @@ class Supervisor implements RuntimePort {
           `Recovered driver differs from committed attachment ${op.threadId}`,
         );
       }
-      const runtime = new Phase1ThreadRuntime({
+      const runtime = new ThreadRuntime({
         workspaceId: this.workspaceId,
         cwd: this.#cwd,
         threadId: op.threadId,
@@ -1110,6 +1193,8 @@ class Supervisor implements RuntimePort {
         permissionPolicy: this.#permissionPolicy,
         threadCeiling: state.meta.permissionCeiling,
         onThreadResultPending: (result) => this.#deliverThreadResult(result),
+        onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
+        workspaceApprovalFailure: () => this.#approvalFatal,
       });
       host.bind(runtime);
       await this.#recoverQueueEffects(attachment.driver, writer);
@@ -1437,6 +1522,165 @@ class Supervisor implements RuntimePort {
     }
   }
 
+  async #recoverLegacyApprovalResponse(
+    writer: ThreadJournalWriter,
+    response: Extract<RuntimeOp, { type: 'control_response' }>,
+    request: Extract<RuntimeEvent, { type: 'control_request'; kind: 'approval' }>,
+    state: 'accepted_pending' | 'started',
+  ): Promise<void> {
+    const repository = this.#legacyApprovalPatterns;
+    const openAdapter = this.#driverFactory.openLegacyApprovalAdapter;
+    if (repository === undefined || openAdapter === undefined) {
+      throw new RuntimeStorageError(
+        'legacy_approval_recovery_unavailable',
+        'Durable legacy approval recovery requires a fenced repository and static adapter',
+      );
+    }
+    if (state === 'accepted_pending') {
+      await writer.commit([{
+        event: { type: 'op_started', opType: 'control_response' },
+        opId: response.opId,
+      }], [{ type: 'started', opId: response.opId }]);
+    }
+    const claim = writer.state.controlClaims.get(request.requestId);
+    if (claim === undefined || claim.responseOpId !== response.opId) {
+      throw new RuntimeStorageError('legacy_approval_claim_missing', request.requestId);
+    }
+    const proposal = request.payload.legacyProposal;
+    if (proposal === undefined) {
+      throw new RuntimeStorageError('legacy_approval_proposal_missing', request.requestId);
+    }
+    const adapter = await openAdapter.call(this.#driverFactory, {
+      workspaceId: this.workspaceId,
+      threadId: writer.state.meta.threadId,
+      patterns: repository,
+    });
+    let result: Awaited<ReturnType<typeof adapter.applyResponse>>;
+    try {
+      result = await adapter.applyResponse({
+        request: snapshot({
+          workspaceId: this.workspaceId,
+          threadId: writer.state.meta.threadId,
+          requestId: request.requestId,
+          owningRunId: request.owningRunId,
+          owningTurnId: request.owningTurnId,
+          toolCallId: request.payload.toolCallId,
+          description: request.payload.description,
+          policyRevision: request.policyRevision,
+          proposal,
+        }),
+        responseOpId: response.opId,
+        acceptedAt: claim.acceptedAt,
+        decision: 'allow_always',
+      });
+    } catch (error) {
+      const failure = new RuntimeStorageError(
+        'legacy_approval_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      );
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    } finally {
+      await adapter.close().catch(() => undefined);
+    }
+    if (!result.ok) {
+      if (result.code === 'legacy_approval_definitely_not_applied') {
+        const resolutionOpId = this.#identityFactory.deriveOpId({
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (!isDerivedOpId(resolutionOpId)) throw new Error('identity_factory_invalid_derived_op');
+        const claim = await this.#workspace.reserveDerivedOpIdentity(this.#lease, {
+          opId: resolutionOpId,
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (claim.kind === 'conflict') throw new Error('derived_op_identity_conflict');
+        const resolution: Extract<RuntimeEvent, { type: 'control_resolved' }> = {
+          type: 'control_resolved',
+          requestId: request.requestId,
+          kind: request.kind,
+          owningRunId: request.owningRunId,
+          owningTurnId: request.owningTurnId,
+          policyRevision: request.policyRevision,
+          decision: 'aborted',
+        };
+        await writer.commit([
+          {
+            event: resolution,
+            runId: request.owningRunId,
+            turnId: request.owningTurnId,
+            opId: resolutionOpId,
+          },
+          {
+            event: { type: 'op_completed', opType: 'control_response', outcome: 'interrupted' },
+            opId: response.opId,
+          },
+          {
+            event: {
+              type: 'runtime_diagnostic',
+              severity: 'warning',
+              code: result.code,
+              message: result.message,
+              scope: 'thread',
+            },
+          },
+        ], [
+          { type: 'control_resolved', resolution },
+          { type: 'completed', opId: response.opId, outcome: 'interrupted' },
+          {
+            type: 'control_response_claim_released',
+            requestId: request.requestId,
+            responseOpId: response.opId,
+            reason: 'effect_definitely_not_applied',
+          },
+        ]);
+        return;
+      }
+      const failure = new RuntimeStorageError(result.code, result.message);
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    }
+    const resolution: Extract<RuntimeEvent, { type: 'control_resolved'; kind: 'approval' }> = {
+      type: 'control_resolved',
+      requestId: request.requestId,
+      kind: 'approval',
+      owningRunId: request.owningRunId,
+      owningTurnId: request.owningTurnId,
+      policyRevision: request.policyRevision,
+      decision: result.effectiveDecision,
+      ...(result.effectiveDecision !== 'allow_always' && {
+        requestedDecision: 'allow_always',
+      }),
+    };
+    try {
+      await writer.commit([
+        {
+          event: resolution,
+          runId: request.owningRunId,
+          turnId: request.owningTurnId,
+          opId: response.opId,
+        },
+        {
+          event: { type: 'op_completed', opType: 'control_response', outcome: 'applied' },
+          opId: response.opId,
+        },
+      ], [
+        { type: 'control_resolved', resolution },
+        { type: 'completed', opId: response.opId, outcome: 'applied' },
+      ]);
+    } catch (error) {
+      const failure = new RuntimeStorageError(
+        'legacy_approval_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      );
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    }
+  }
+
   async #recoverUnloadedJournal(
     threadId: ThreadId,
     journal: import('./ports.js').ThreadJournalPort,
@@ -1445,6 +1689,8 @@ class Supervisor implements RuntimePort {
     let state = foldThreadJournal(initialRecords);
     const recoverable = [...state.mailbox.entries()].filter(([, entry]) =>
       entry.state === 'prepared'
+      || (entry.state === 'accepted_pending'
+        && (entry.op.type === 'prompt' || entry.op.type === 'continue'))
       || (entry.state === 'started'
         && entry.op.type !== 'set_model'
         && entry.op.type !== 'steer'
@@ -1505,6 +1751,21 @@ class Supervisor implements RuntimePort {
             }], [{ type: 'completed', opId, outcome }]);
             continue;
           }
+          if (
+            pendingRequest?.kind === 'approval'
+            && pendingRequest.payload.legacyProposal !== undefined
+            && response.decision === 'allow_always'
+            && !pendingRequest.payload.legacyProposal.forceConfirm
+            && pendingRequest.payload.legacyProposal.patterns.length > 0
+          ) {
+            await this.#recoverLegacyApprovalResponse(
+              writer,
+              response,
+              pendingRequest,
+              entry.state,
+            );
+            continue;
+          }
           const resolutionOpId = this.#identityFactory.deriveOpId({
             purpose: 'control_recovery',
             workspaceId: this.workspaceId,
@@ -1527,7 +1788,7 @@ class Supervisor implements RuntimePort {
             policyRevision: request.policyRevision,
             decision: 'aborted',
           };
-          const envelopes: import('./thread-journal.js').CommitEnvelopeInput[] = [];
+          const envelopes: CommitEnvelopeInput[] = [];
           const mutations: import('./ports.js').RuntimeThreadMutation[] = [];
           if (entry.state === 'accepted_pending') {
             envelopes.push({
@@ -1561,15 +1822,14 @@ class Supervisor implements RuntimePort {
             });
           }
           await writer.commit(
-            envelopes as [
-              import('./thread-journal.js').CommitEnvelopeInput,
-              ...import('./thread-journal.js').CommitEnvelopeInput[],
-            ],
+            envelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
             mutations,
           );
           continue;
         }
-        if (entry.state !== 'started') continue;
+        const recoverableActivity = (entry.op.type === 'prompt' || entry.op.type === 'continue')
+          && (entry.state === 'accepted_pending' || entry.state === 'started');
+        if (!recoverableActivity && entry.state !== 'started') continue;
         if (entry.op.type === 'set_model') continue;
         const parentOpId = 'parentOpId' in entry.op ? entry.op.parentOpId : undefined;
         if (entry.op.type === 'prompt' || entry.op.type === 'continue') {
@@ -1579,6 +1839,42 @@ class Supervisor implements RuntimePort {
           }
           const terminal = terminalRunForRoot(writer.state, root.runId);
           const activity = writer.state.checkpoint.frontend.activity;
+          const unresolvedControls = writer.state.checkpoint.frontend.pendingControls.filter((request) =>
+            runDescendsFromRoot(writer.state, request.owningRunId, root.runId)
+            && !writer.state.controlClaims.has(request.requestId));
+          const controlEnvelopes: CommitEnvelopeInput[] = [];
+          const controlMutations: import('./ports.js').RuntimeThreadMutation[] = [];
+          for (const request of unresolvedControls) {
+            const resolutionOpId = this.#identityFactory.deriveOpId({
+              purpose: 'control_recovery',
+              workspaceId: this.workspaceId,
+              parts: [threadId, request.requestId],
+            });
+            if (!isDerivedOpId(resolutionOpId)) throw new Error('identity_factory_invalid_derived_op');
+            const claim = await this.#workspace.reserveDerivedOpIdentity(this.#lease, {
+              opId: resolutionOpId,
+              purpose: 'control_recovery',
+              workspaceId: this.workspaceId,
+              parts: [threadId, request.requestId],
+            });
+            if (claim.kind === 'conflict') throw new Error('derived_op_identity_conflict');
+            const resolution: Extract<RuntimeEvent, { type: 'control_resolved' }> = {
+              type: 'control_resolved',
+              requestId: request.requestId,
+              kind: request.kind,
+              owningRunId: request.owningRunId,
+              owningTurnId: request.owningTurnId,
+              policyRevision: request.policyRevision,
+              decision: 'aborted',
+            };
+            controlEnvelopes.push({
+              event: resolution,
+              opId: resolutionOpId,
+              runId: request.owningRunId,
+              turnId: request.owningTurnId,
+            });
+            controlMutations.push({ type: 'control_resolved', resolution });
+          }
           const mutations: import('./ports.js').RuntimeThreadMutation[] = [
             { type: 'completed', opId, outcome: 'interrupted' },
             { type: 'run_terminal', runId: terminal.runId, status: 'interrupted' },
@@ -1613,7 +1909,7 @@ class Supervisor implements RuntimePort {
               status: 'error',
             });
           }
-          await writer.commit([{
+          controlEnvelopes.push({
             event: {
               type: 'op_completed',
               opType: entry.op.type,
@@ -1622,7 +1918,11 @@ class Supervisor implements RuntimePort {
             },
             opId,
             runId: root.runId,
-          }], mutations);
+          });
+          await writer.commit(
+            controlEnvelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
+            [...controlMutations, ...mutations],
+          );
         } else {
           await writer.commit([{
             event: {
@@ -1810,6 +2110,11 @@ class Supervisor implements RuntimePort {
     }
     this.#events.close();
     try {
+      await this.#legacyApprovalPatterns?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       await this.#workspace.releaseSupervisorLease(this.#lease);
     } catch (error) {
       failures.push(error);
@@ -1825,6 +2130,41 @@ class Supervisor implements RuntimePort {
 
   #assertOpen(): void {
     if (this.#state !== 'open') throw new RuntimeClosedError();
+  }
+
+  #latchApprovalFatal(error: Error): void {
+    if (this.#approvalFatal !== undefined) return;
+    this.#approvalFatal = error;
+    for (const thread of this.#threads.values()) {
+      thread.stopForWorkspaceApprovalFatal(error);
+    }
+  }
+
+  async #commitApprovalStartupDiagnostics(writer: ThreadJournalWriter): Promise<void> {
+    if (this.#pendingApprovalDiagnostics.length === 0) return;
+    const existing = this.#approvalDiagnosticFlight;
+    if (existing !== undefined) {
+      await existing;
+      return;
+    }
+    const diagnostics = [...this.#pendingApprovalDiagnostics];
+    const flight = writer.commit(diagnostics.map((diagnostic) => ({
+      event: {
+        type: 'runtime_diagnostic' as const,
+        severity: 'warning' as const,
+        code: diagnostic.code,
+        message: diagnostic.message,
+        scope: 'thread' as const,
+      },
+    })) as [CommitEnvelopeInput, ...CommitEnvelopeInput[]]).then(() => {
+      this.#pendingApprovalDiagnostics.splice(0, diagnostics.length);
+    });
+    this.#approvalDiagnosticFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (this.#approvalDiagnosticFlight === flight) this.#approvalDiagnosticFlight = undefined;
+    }
   }
 }
 
@@ -1926,6 +2266,23 @@ function terminalRunForRoot(state: FoldedThreadJournal, rootRunId: RunId): Folde
     if (successor === undefined) return current;
     current = successor;
   }
+}
+
+function runDescendsFromRoot(
+  state: FoldedThreadJournal,
+  runId: RunId,
+  rootRunId: RunId,
+): boolean {
+  let current = state.runs.get(runId);
+  const visited = new Set<RunId>();
+  while (current !== undefined && !visited.has(current.runId)) {
+    if (current.runId === rootRunId) return true;
+    visited.add(current.runId);
+    current = current.predecessorRunId === undefined
+      ? undefined
+      : state.runs.get(current.predecessorRunId);
+  }
+  return false;
 }
 
 function recoverySummary(state: FoldedThreadJournal | undefined): ThreadSummary | undefined {

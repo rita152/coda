@@ -1,0 +1,1678 @@
+// One thread's phase-1 FIFO admission/mailbox and active-run gate. Driver dispatch is deliberately
+// not awaited by the mailbox so steer/follow-up/abort can reach an active run.
+
+import {
+  canonicalJson,
+  canonicalJsonSha256,
+  isDerivedOpId,
+  isRunId,
+  isTurnId,
+  strictJsonSnapshot,
+} from '../protocol/index.js';
+import type {
+  ExternalThreadRuntimeOp,
+  ExternalOpId,
+  InternalOpReceipt,
+  InternalThreadRuntimeOp,
+  MailboxRuntimeOp,
+  OpId,
+  OpReceipt,
+  PermissionCeilingSnapshot,
+  ResolvedAbortTarget,
+  RunId,
+  RuntimeOp,
+  ThreadId,
+  ThreadSnapshot,
+  TurnId,
+  WorkspaceId,
+} from '../protocol/index.js';
+import type {
+  LegacyApprovalContext,
+  LegacyApprovalInvocationResult,
+  LegacyApprovalRequestSnapshot,
+  PermissionPolicyPort,
+  PreparedThreadDriverCommand,
+  RuntimeClock,
+  ThreadDriverAttachment,
+  ThreadDriverCheckpointMutation,
+  ThreadDriverEvent,
+  ThreadDriverHostServices,
+  ThreadIdentityPort,
+  ThreadRuntimePreparedInput,
+} from './thread-runtime-ports.js';
+import type {
+  RuntimeThreadMutation,
+  ThreadResultDeliveryRecord,
+  ThreadResultOutboxMutation,
+} from './thread-journal-records.js';
+import { RuntimeStorageError } from '../shared/runtime-storage-error.js';
+import { validatePermissionCeilingSnapshot } from './permission-ceiling.js';
+import { snapshotFromFold, ThreadJournalWriter } from './thread-journal.js';
+import type { FoldedThreadJournal } from './thread-journal.js';
+
+interface ActiveRun {
+  readonly rootOpId: ExternalOpId;
+  readonly rootRunId: RunId;
+  currentRunId: RunId;
+  currentCeiling: PermissionCeilingSnapshot;
+}
+
+interface QueuedActivity {
+  readonly op: Extract<RuntimeOp, { type: 'prompt' }>;
+  readonly runId: RunId;
+  readonly permissionCeiling: PermissionCeilingSnapshot;
+  readonly command: Extract<PreparedThreadDriverCommand, { op: { type: 'prompt' } }>;
+}
+
+export interface ThreadRuntimeOptions {
+  readonly workspaceId: WorkspaceId;
+  readonly cwd: string;
+  readonly threadId: ThreadId;
+  readonly writer: ThreadJournalWriter;
+  readonly attachment: ThreadDriverAttachment;
+  readonly identityFactory: ThreadIdentityPort;
+  readonly clock: RuntimeClock;
+  readonly permissionPolicy: PermissionPolicyPort;
+  readonly threadCeiling: PermissionCeilingSnapshot;
+  readonly onThreadResultPending?: (result: ThreadResultOutboxMutation) => Promise<void>;
+  readonly onWorkspaceApprovalFatal?: (error: Error) => void;
+  readonly workspaceApprovalFailure?: () => Error | undefined;
+}
+
+interface PendingLegacyApprovalWaiter {
+  readonly requestId: string;
+  readonly owningRunId: RunId;
+  readonly owningTurnId: TurnId;
+  readonly resolve: (result: LegacyApprovalInvocationResult) => void;
+}
+
+export class ThreadDriverHostController implements ThreadDriverHostServices {
+  #runtime: ThreadRuntime | undefined;
+
+  bind(runtime: ThreadRuntime): void {
+    if (this.#runtime !== undefined) throw new Error('Thread driver host is already bound');
+    this.#runtime = runtime;
+  }
+
+  commitEvent(
+    event: ThreadDriverEvent,
+    checkpointMutation?: ThreadDriverCheckpointMutation,
+  ): Promise<void> {
+    return this.#get().commitDriverEvent(event, checkpointMutation);
+  }
+
+  commitEventBatch(
+    events: readonly [ThreadDriverEvent, ...ThreadDriverEvent[]],
+    checkpointMutation?: ThreadDriverCheckpointMutation,
+  ): Promise<void> {
+    return this.#get().commitDriverEventBatch(events, checkpointMutation);
+  }
+
+  reserveSuccessor(input: {
+    readonly threadId: ThreadId;
+    readonly predecessorRunId: RunId;
+    readonly reason: 'retry' | 'compaction';
+  }): Promise<{ readonly runId: RunId; readonly permissionCeiling: PermissionCeilingSnapshot }> {
+    return this.#get().reserveSuccessor(input);
+  }
+
+  reserveTurn(input: {
+    readonly runId: RunId;
+    readonly turnOrdinal: number;
+  }): Promise<{
+    readonly turnId: TurnId;
+    readonly workspaceCeiling: PermissionCeilingSnapshot;
+    readonly runCeiling: PermissionCeilingSnapshot;
+    readonly turnCeiling: PermissionCeilingSnapshot;
+  }> {
+    return this.#get().reserveTurn(input);
+  }
+
+  requestLegacyApproval(input: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly cwd: string;
+    readonly args: unknown;
+  }): Promise<LegacyApprovalInvocationResult> {
+    return this.#get().requestLegacyApproval(input);
+  }
+
+  #get(): ThreadRuntime {
+    if (this.#runtime === undefined) throw new Error('Thread driver emitted before attachment activation');
+    return this.#runtime;
+  }
+}
+
+export class ThreadRuntime {
+  readonly workspaceId: WorkspaceId;
+  readonly threadId: ThreadId;
+  readonly #cwd: string;
+  readonly #writer: ThreadJournalWriter;
+  readonly #attachment: ThreadDriverAttachment;
+  readonly #identityFactory: ThreadIdentityPort;
+  readonly #clock: RuntimeClock;
+  readonly #permissionPolicy: PermissionPolicyPort;
+  readonly #threadCeiling: PermissionCeilingSnapshot;
+  readonly #onThreadResultPending: ((result: ThreadResultOutboxMutation) => Promise<void>) | undefined;
+  readonly #onWorkspaceApprovalFatal: ((error: Error) => void) | undefined;
+  readonly #workspaceApprovalFailure: (() => Error | undefined) | undefined;
+  readonly #approvalWaiters = new Map<string, PendingLegacyApprovalWaiter>();
+  #admission: Promise<void> = Promise.resolve();
+  #active: ActiveRun | undefined;
+  readonly #queuedActivities: QueuedActivity[] = [];
+  #closing = false;
+  #closed = false;
+  #closePromise: Promise<void> | undefined;
+  #effectBarrier: Promise<void> = Promise.resolve();
+  readonly #background = new Set<Promise<void>>();
+  readonly #bestEffort = new Set<Promise<void>>();
+  readonly #backgroundFailures: unknown[] = [];
+  #approvalFatal: Error | undefined;
+  readonly #turnReservations = new Map<string, {
+    readonly turnId: TurnId;
+    readonly workspaceCeiling: PermissionCeilingSnapshot;
+    readonly runCeiling: PermissionCeilingSnapshot;
+    readonly turnCeiling: PermissionCeilingSnapshot;
+    readonly turnOrdinal: number;
+    activated: boolean;
+  }>();
+  readonly #successors = new Map<string, {
+    readonly runId: RunId;
+    readonly permissionCeiling: PermissionCeilingSnapshot;
+    readonly predecessorRunId: RunId;
+    readonly reason: 'retry' | 'compaction';
+  }>();
+  #pendingSuccessor: {
+    readonly runId: RunId;
+    readonly permissionCeiling: PermissionCeilingSnapshot;
+    readonly predecessorRunId: RunId;
+    readonly reason: 'retry' | 'compaction';
+  } | undefined;
+
+  constructor(options: ThreadRuntimeOptions) {
+    this.workspaceId = options.workspaceId;
+    this.threadId = options.threadId;
+    this.#cwd = options.cwd;
+    this.#writer = options.writer;
+    this.#attachment = options.attachment;
+    this.#identityFactory = options.identityFactory;
+    this.#clock = options.clock;
+    this.#permissionPolicy = options.permissionPolicy;
+    this.#threadCeiling = options.threadCeiling;
+    this.#onThreadResultPending = options.onThreadResultPending;
+    this.#onWorkspaceApprovalFatal = options.onWorkspaceApprovalFatal;
+    this.#workspaceApprovalFailure = options.workspaceApprovalFailure;
+    for (const run of this.#writer.state.runs.values()) {
+      if (run.predecessorRunId === undefined || (run.reason !== 'retry' && run.reason !== 'compaction')) continue;
+      this.#successors.set(successorKey(run.predecessorRunId, run.reason), {
+        runId: run.runId,
+        permissionCeiling: run.permissionCeiling,
+        predecessorRunId: run.predecessorRunId,
+        reason: run.reason,
+      });
+    }
+    for (const turn of this.#writer.state.turns.values()) {
+      if (
+        turn.workspaceCeiling === undefined ||
+        turn.runCeiling === undefined ||
+        turn.turnCeiling === undefined
+      ) continue;
+      const reservation = {
+        turnId: turn.turnId,
+        workspaceCeiling: turn.workspaceCeiling,
+        runCeiling: turn.runCeiling,
+        turnCeiling: turn.turnCeiling,
+        turnOrdinal: turn.turnOrdinal,
+        activated: turn.activated,
+      };
+      this.#turnReservations.set(turnOrdinalKey(turn.runId, turn.turnOrdinal), reservation);
+      this.#turnReservations.set(turnIdentityKey(turn.runId, turn.turnId), reservation);
+    }
+  }
+
+  snapshot(): Readonly<ThreadSnapshot> {
+    return snapshotFromFold(this.#writer.state);
+  }
+
+  durableState(): FoldedThreadJournal {
+    return this.#writer.state;
+  }
+
+  summary(): import('../protocol/index.js').ThreadSummary {
+    return this.#writer.state.summary;
+  }
+
+  /**
+   * Package-level standalone facade barrier. It observes the same FIFO/effect/background lanes as
+   * close(), but neither closes the driver nor waits for ordinary EventHub observers.
+   */
+  async waitForIdle(): Promise<void> {
+    while (true) {
+      const admission = this.#admission;
+      const effect = this.#effectBarrier;
+      const background = [...this.#background];
+      await admission;
+      await effect;
+      await Promise.all(background);
+      if (this.#backgroundFailures.length > 0) {
+        throw new AggregateError(
+          [...this.#backgroundFailures],
+          `Thread ${this.threadId} background execution failed`,
+        );
+      }
+      if (
+        admission === this.#admission
+        && effect === this.#effectBarrier
+        && this.#background.size === 0
+        && this.#active === undefined
+        && this.#attachment.driver.interactionState() === 'idle'
+      ) {
+        return;
+      }
+    }
+  }
+
+  activeRunId(): RunId | undefined {
+    return this.#active?.currentRunId;
+  }
+
+  currentAbortTarget(): ResolvedAbortTarget {
+    return this.#resolveAbortTarget();
+  }
+
+  activeRunCeiling(runId: RunId): PermissionCeilingSnapshot | undefined {
+    if (this.#active?.currentRunId === runId) return this.#active.currentCeiling;
+    return this.#writer.state.runs.get(runId)?.permissionCeiling;
+  }
+
+  stopForWorkspaceApprovalFatal(error: Error): void {
+    if (this.#approvalFatal !== undefined) return;
+    this.#approvalFatal = error;
+    try {
+      const active = this.#active;
+      if (active !== undefined) {
+        const cancellation = this.#attachment.driver.dispatch({
+          op: {
+            type: 'abort',
+            opId: active.rootOpId,
+            workspaceId: this.workspaceId,
+            threadId: this.threadId,
+            expectedRunId: active.currentRunId,
+          },
+          resolvedTarget: { kind: 'run', runId: active.currentRunId },
+        }).completion;
+        void cancellation.catch(() => undefined);
+      }
+    } catch {
+      // The fatal gate remains authoritative even when best-effort driver cancellation fails.
+    }
+    for (const [requestId, waiter] of this.#approvalWaiters) {
+      this.#approvalWaiters.delete(requestId);
+      waiter.resolve({ kind: 'aborted' });
+    }
+  }
+
+  async commitThreadResult(result: ThreadResultOutboxMutation): Promise<number> {
+    if (result.parentThreadId !== this.threadId) throw new Error('thread_result_parent_mismatch');
+    const existing = this.#writer.state.envelopes.find((envelope) => envelope.opId === result.resultOpId);
+    if (existing !== undefined) {
+      if (existing.event.type !== 'thread_result' || canonicalJson(existing.event) !== canonicalJson({
+        type: 'thread_result',
+        resultOpId: result.resultOpId,
+        childThreadId: result.childThreadId,
+        terminalRunId: result.terminalRunId,
+        status: result.status,
+        ...(result.summary !== undefined && { summary: result.summary }),
+      })) {
+        throw new RuntimeStorageError('thread_result_conflict', result.resultOpId);
+      }
+      return existing.seq;
+    }
+    const [envelope] = await this.#writer.commit([{
+      event: {
+        type: 'thread_result',
+        resultOpId: result.resultOpId,
+        childThreadId: result.childThreadId,
+        terminalRunId: result.terminalRunId,
+        status: result.status,
+        ...(result.summary !== undefined && { summary: result.summary }),
+      },
+      opId: result.resultOpId,
+    }]);
+    if (envelope === undefined) throw new Error('thread_result_commit_missing');
+    return envelope.seq;
+  }
+
+  async acknowledgeThreadResult(record: ThreadResultDeliveryRecord): Promise<void> {
+    if (this.#writer.state.deliveredThreadResults.has(record.resultOpId)) return;
+    await this.#writer.appendPrepare(record);
+  }
+
+  acceptExternal(
+    op: ExternalThreadRuntimeOp,
+    prepared?: ThreadRuntimePreparedInput,
+  ): Promise<OpReceipt> {
+    return this.#withAdmission(() => this.#acceptExternal(op, prepared));
+  }
+
+  acceptInternal(op: InternalThreadRuntimeOp): Promise<InternalOpReceipt> {
+    return this.#withAdmission(() => this.#acceptInternal(op));
+  }
+
+  async commitDriverEvent(
+    input: ThreadDriverEvent,
+    checkpointMutation?: ThreadDriverCheckpointMutation,
+  ): Promise<void> {
+    await this.commitDriverEventBatch([input], checkpointMutation);
+  }
+
+  async commitDriverEventBatch(
+    inputs: readonly [ThreadDriverEvent, ...ThreadDriverEvent[]],
+    checkpointMutation?: ThreadDriverCheckpointMutation,
+  ): Promise<void> {
+    if (this.#closed) throw new Error(`Thread ${this.threadId} is closed`);
+    const extra: RuntimeThreadMutation[] = [];
+    let activatesSuccessor = false;
+    const pendingSuccessor = this.#pendingSuccessor;
+    const virtuallyActivatedRuns = new Set<RunId>();
+    const virtuallyActivatedTurns = new Set<string>();
+    const turnsToActivate: Array<{
+      readonly key: string;
+      readonly reservation: {
+        activated: boolean;
+        readonly turnOrdinal: number;
+      };
+    }> = [];
+    let inputMaterialized = false;
+    for (const input of inputs) {
+      this.#assertDriverEventIdentity(input, virtuallyActivatedRuns, virtuallyActivatedTurns);
+      const activatesAtAgentEnd =
+        !activatesSuccessor &&
+        pendingSuccessor !== undefined &&
+        input.event.type === 'agent_end' &&
+        input.runId === pendingSuccessor.predecessorRunId;
+      const activatesAtCompactionStart =
+        !activatesSuccessor &&
+        pendingSuccessor !== undefined &&
+        pendingSuccessor.reason === 'compaction' &&
+        input.event.type === 'compaction_start' &&
+        input.runId === pendingSuccessor.runId &&
+        input.event.predecessorRunId === pendingSuccessor.predecessorRunId;
+      if (pendingSuccessor !== undefined && this.#active !== undefined
+        && (activatesAtAgentEnd || activatesAtCompactionStart)) {
+        const predecessor = this.#writer.state.runs.get(pendingSuccessor.predecessorRunId);
+        if (predecessor === undefined) throw new Error('successor predecessor is not durable');
+        extra.push(
+          {
+            type: 'run_terminal',
+            runId: pendingSuccessor.predecessorRunId,
+            status: input.event.type === 'agent_end'
+              ? input.event.reason === 'aborted'
+                ? 'aborted'
+                : input.event.reason === 'error' ? 'error' : 'completed'
+              : input.event.reason === 'overflow' ? 'error' : 'completed',
+          },
+          {
+            type: 'run_reserved',
+            runId: pendingSuccessor.runId,
+            reason: pendingSuccessor.reason,
+            predecessorRunId: pendingSuccessor.predecessorRunId,
+            permissionCeiling: pendingSuccessor.permissionCeiling,
+          },
+        );
+        virtuallyActivatedRuns.add(pendingSuccessor.runId);
+        if (activatesAtCompactionStart) {
+          extra.push({ type: 'run_started', runId: pendingSuccessor.runId });
+        }
+        activatesSuccessor = true;
+      }
+      if (input.event.type === 'turn_start') {
+        if (input.runId === undefined || input.turnId === undefined) {
+          throw new Error('turn_start requires a reserved runId/turnId');
+        }
+        const key = turnIdentityKey(input.runId, input.turnId);
+        const reservation = this.#turnReservations.get(key);
+        if (reservation === undefined || reservation.activated || virtuallyActivatedTurns.has(key)) {
+          throw new Error('turn_start does not match a fresh turn reservation');
+        }
+        virtuallyActivatedTurns.add(key);
+        turnsToActivate.push({ key, reservation });
+        extra.push({
+          type: 'turn_activated',
+          runId: input.runId,
+          turnId: input.turnId,
+          turnOrdinal: reservation.turnOrdinal,
+        });
+      }
+      if (input.event.type === 'agent_start' && input.runId !== undefined) {
+        const run = this.#writer.state.runs.get(input.runId);
+        if (run?.state === 'reserved' || virtuallyActivatedRuns.has(input.runId)) {
+          extra.push({ type: 'run_started', runId: input.runId });
+        }
+      }
+      if (!inputMaterialized
+        && input.event.type === 'message_end'
+        && input.event.message.role === 'user'
+        && input.event.message.source === 'prompt'
+        && this.#active !== undefined
+        && this.#writer.state.inputOwners.has(this.#active.rootOpId)) {
+        extra.push({
+          type: 'input_materialized',
+          ownerOpId: this.#active.rootOpId,
+          messageId: input.event.message.id,
+        });
+        inputMaterialized = true;
+      }
+    }
+    await this.#writer.commitDriverEvents(inputs, checkpointMutation, extra);
+    for (const { reservation } of turnsToActivate) reservation.activated = true;
+    if (activatesSuccessor) this.#pendingSuccessor = undefined;
+  }
+
+  reserveSuccessor(input: {
+    readonly threadId: ThreadId;
+    readonly predecessorRunId: RunId;
+    readonly reason: 'retry' | 'compaction';
+  }): Promise<{ readonly runId: RunId; readonly permissionCeiling: PermissionCeilingSnapshot }> {
+    return this.#withAdmission(async () => {
+      this.#assertWorkspaceCapabilitiesAvailable();
+      if (input.threadId !== this.threadId) throw new Error('invalid_successor_reservation');
+      const key = successorKey(input.predecessorRunId, input.reason);
+      const existing = this.#successors.get(key);
+      if (existing !== undefined) return existing;
+      if (this.#active?.currentRunId !== input.predecessorRunId) {
+        throw new Error('invalid_successor_reservation');
+      }
+      if ([...this.#successors.values()].some((candidate) => candidate.predecessorRunId === input.predecessorRunId)) {
+        throw new Error('invalid_successor_reservation');
+      }
+      const runId = this.#newRunId();
+      const workspaceCeiling = await this.#workspaceCeiling();
+      const permissionCeiling = validatePermissionCeilingSnapshot(await this.#permissionPolicy.resolveCeiling({
+        kind: 'run',
+        workspaceId: this.workspaceId,
+        threadId: this.threadId,
+        runId,
+        workspaceCeiling,
+        threadCeiling: this.#threadCeiling,
+        predecessorRunId: input.predecessorRunId,
+        predecessorCeiling: this.#active.currentCeiling,
+      }));
+      this.#assertWorkspaceCapabilitiesAvailable();
+      await this.#writer.appendPrepare({
+        type: 'successor_run_prepare',
+        runId,
+        predecessorRunId: input.predecessorRunId,
+        reason: input.reason,
+        permissionCeiling,
+        timestamp: this.#clock.now(),
+      });
+      this.#assertWorkspaceCapabilitiesAvailable();
+      const reservation = {
+        runId,
+        permissionCeiling,
+        predecessorRunId: input.predecessorRunId,
+        reason: input.reason,
+      };
+      this.#successors.set(key, reservation);
+      this.#pendingSuccessor = reservation;
+      this.#active.currentRunId = runId;
+      this.#active.currentCeiling = permissionCeiling;
+      return reservation;
+    });
+  }
+
+  async requestLegacyApproval(input: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly cwd: string;
+    readonly args: unknown;
+  }): Promise<LegacyApprovalInvocationResult> {
+    this.#assertWorkspaceCapabilitiesAvailable();
+    const adapter = this.#attachment.legacyApprovalAdapter;
+    if (adapter === undefined) throw new Error('legacy_approval_adapter_unavailable');
+    const active = this.#active;
+    const activity = this.#writer.state.checkpoint.frontend.activity;
+    if (active === undefined || activity?.runId !== active.currentRunId || activity.turnId === undefined) {
+      throw new Error('legacy_approval_has_no_active_turn');
+    }
+    if (input.cwd !== this.#cwd) throw new Error('legacy_approval_cwd_mismatch');
+    const reservation = this.#turnReservations.get(
+      turnIdentityKey(active.currentRunId, activity.turnId),
+    );
+    if (reservation === undefined || !reservation.activated) {
+      throw new Error('legacy_approval_turn_not_activated');
+    }
+    const args = strictJsonSnapshot(input.args);
+    const policyRevision = canonicalJsonSha256({
+      adapter: this.#attachment.legacyApprovalPolicyRevision ?? 'legacy-session-policy-v2',
+      permissionCeilingRevision: reservation.turnCeiling.revision,
+    });
+    const context = strictJsonSnapshot({
+      workspaceId: this.workspaceId,
+      threadId: this.threadId,
+      runId: active.currentRunId,
+      turnId: activity.turnId,
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+      cwd: input.cwd,
+      policyRevision,
+      permissionCeiling: reservation.turnCeiling,
+    }) as unknown as LegacyApprovalContext;
+    const decision = await adapter.preflight({ context, args });
+    this.#assertWorkspaceCapabilitiesAvailable();
+    if (decision.kind === 'allow' || decision.kind === 'deny') return decision;
+    const proposal = strictJsonSnapshot({
+      patterns: [...new Set(decision.proposal.patterns)].sort(),
+      forceConfirm: decision.proposal.forceConfirm,
+    }) as unknown as import('../protocol/index.js').LegacyApprovalProposal;
+    let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
+    await this.#withAdmission(async () => {
+      this.#assertWorkspaceCapabilitiesAvailable();
+      if (this.#closing || this.#closed
+        || this.#active?.currentRunId !== context.runId
+        || this.#writer.state.checkpoint.frontend.activity?.turnId !== context.turnId) {
+        waiter = Promise.resolve({ kind: 'aborted' });
+        return;
+      }
+      const requestId = this.#newApprovalRequestId();
+      let resolveWaiter!: (result: LegacyApprovalInvocationResult) => void;
+      waiter = new Promise<LegacyApprovalInvocationResult>((resolve) => {
+        resolveWaiter = resolve;
+      });
+      const pending: PendingLegacyApprovalWaiter = {
+        requestId,
+        owningRunId: context.runId,
+        owningTurnId: context.turnId,
+        resolve: resolveWaiter,
+      };
+      const request = {
+        type: 'control_request' as const,
+        requestId,
+        kind: 'approval' as const,
+        owningRunId: context.runId,
+        owningTurnId: context.turnId,
+        policyRevision,
+        payload: {
+          toolCallId: input.toolCallId,
+          description: decision.description,
+          legacyProposal: proposal,
+        },
+      };
+      this.#approvalWaiters.set(requestId, pending);
+      try {
+        await this.#writer.commitDriverEvent({
+          event: request,
+          runId: context.runId,
+          turnId: context.turnId,
+        });
+      } catch (error) {
+        this.#approvalWaiters.delete(requestId);
+        resolveWaiter({ kind: 'aborted' });
+        throw error;
+      }
+      if (this.#workspaceCapabilityFailure() !== undefined) {
+        this.#approvalWaiters.delete(requestId);
+        resolveWaiter({ kind: 'aborted' });
+      }
+    });
+    if (waiter === undefined) throw new Error('legacy_approval_waiter_not_created');
+    return waiter;
+  }
+
+  /** Completes only durable multi-pattern allow-always effects before driver activation. */
+  async recoverLegacyApprovalEffects(): Promise<void> {
+    for (const [opId, entry] of this.#writer.state.mailbox) {
+      if (entry.op.type !== 'control_response'
+        || (entry.state !== 'accepted_pending' && entry.state !== 'started')) continue;
+      const request = this.#durableApprovalRequest(entry.op.requestId);
+      if (request === undefined
+        || entry.op.decision !== 'allow_always'
+        || request.proposal.forceConfirm
+        || request.proposal.patterns.length === 0) continue;
+      const claim = this.#writer.state.controlClaims.get(request.requestId);
+      if (claim === undefined || claim.responseOpId !== opId) {
+        throw new RuntimeStorageError('legacy_approval_claim_missing', request.requestId);
+      }
+      if (entry.state === 'accepted_pending') {
+        await this.#writer.commit([{
+          event: { type: 'op_started', opType: 'control_response' },
+          opId,
+        }], [{ type: 'started', opId }]);
+      }
+      await this.#finishLegacyControlResponse(entry.op, claim.acceptedAt);
+    }
+  }
+
+  reserveTurn(input: {
+    readonly runId: RunId;
+    readonly turnOrdinal: number;
+  }): Promise<{
+    readonly turnId: TurnId;
+    readonly workspaceCeiling: PermissionCeilingSnapshot;
+    readonly runCeiling: PermissionCeilingSnapshot;
+    readonly turnCeiling: PermissionCeilingSnapshot;
+  }> {
+    return this.#withAdmission(async () => {
+      this.#assertWorkspaceCapabilitiesAvailable();
+      if (
+        this.#active?.currentRunId !== input.runId ||
+        !Number.isSafeInteger(input.turnOrdinal) ||
+        input.turnOrdinal < 1
+      ) {
+        throw new Error('invalid_turn_reservation');
+      }
+      const ordinalKey = turnOrdinalKey(input.runId, input.turnOrdinal);
+      const prior = this.#turnReservations.get(ordinalKey);
+      if (prior !== undefined) return prior;
+      const previousOrdinals = [...this.#writer.state.turns.values()]
+        .filter((turn) => turn.runId === input.runId)
+        .map((turn) => turn.turnOrdinal);
+      const expected = (previousOrdinals.length === 0 ? 0 : Math.max(...previousOrdinals)) + 1;
+      if (input.turnOrdinal !== expected) throw new Error('invalid_turn_reservation');
+      const turnId = this.#newTurnId();
+      const workspaceCeiling = await this.#workspaceCeiling();
+      const runCeiling = this.#active.currentCeiling;
+      const turnCeiling = validatePermissionCeilingSnapshot(await this.#permissionPolicy.resolveCeiling({
+        kind: 'turn',
+        workspaceId: this.workspaceId,
+        threadId: this.threadId,
+        runId: input.runId,
+        turnId,
+        workspaceCeiling,
+        runCeiling,
+      }));
+      this.#assertWorkspaceCapabilitiesAvailable();
+      await this.#writer.appendPrepare({
+        type: 'turn_prepare',
+        runId: input.runId,
+        turnId,
+        turnOrdinal: input.turnOrdinal,
+        workspaceCeiling,
+        runCeiling,
+        turnCeiling,
+        timestamp: this.#clock.now(),
+      });
+      this.#assertWorkspaceCapabilitiesAvailable();
+      const reservation = {
+        turnId,
+        workspaceCeiling,
+        runCeiling,
+        turnCeiling,
+        turnOrdinal: input.turnOrdinal,
+        activated: false,
+      };
+      this.#turnReservations.set(ordinalKey, reservation);
+      this.#turnReservations.set(turnIdentityKey(input.runId, turnId), reservation);
+      return reservation;
+    });
+  }
+
+  close(op?: InternalThreadRuntimeOp | Extract<RuntimeOp, { type: 'thread_close' }>): Promise<void> {
+    if (this.#closePromise !== undefined) return this.#closePromise;
+    this.#closing = true;
+    this.#closePromise = (async () => {
+      await this.#admission;
+      const failures: unknown[] = [];
+      if (this.#active !== undefined) {
+        const abortCommand: PreparedThreadDriverCommand = {
+          op: {
+            type: 'abort',
+            opId: op?.opId ?? this.#active.rootOpId,
+            workspaceId: this.workspaceId,
+            threadId: this.threadId,
+            ...(op !== undefined && 'parentOpId' in op && op.parentOpId !== undefined
+              ? { parentOpId: op.parentOpId }
+              : {}),
+            resolvedTarget: { kind: 'run', runId: this.#active.currentRunId },
+          } as Extract<MailboxRuntimeOp, { type: 'abort' }>,
+          resolvedTarget: { kind: 'run', runId: this.#active.currentRunId },
+        };
+        let cancellation: Promise<unknown> | undefined;
+        try {
+          cancellation = this.#attachment.driver.dispatch(abortCommand).completion;
+          await this.#abortPendingControls(abortCommand.op.opId);
+        } catch (error) {
+          failures.push(error);
+        }
+        await cancellation?.catch((error) => failures.push(error));
+      }
+      while (this.#background.size > 0) {
+        await Promise.all([...this.#background]);
+      }
+      failures.push(...this.#backgroundFailures);
+      try {
+        await this.#attachment.driver.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        if (op !== undefined) {
+          const parentOpId = 'parentOpId' in op ? op.parentOpId : undefined;
+          const outcome = failures.length === 0 ? 'applied' : 'interrupted';
+          await this.#writer.commit([
+            {
+              event: {
+                type: 'op_completed',
+                opType: 'thread_close',
+                outcome,
+                ...(parentOpId !== undefined && { parentOpId }),
+              },
+              opId: op.opId,
+            },
+            {
+              event: { type: 'thread_closed', threadId: this.threadId },
+              opId: op.opId,
+            },
+          ], [{ type: 'completed', opId: op.opId, outcome }]);
+        }
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        this.#closed = true;
+        try {
+          await this.#writer.close();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) throw new AggregateError(failures, `Thread ${this.threadId} close failed`);
+    })();
+    return this.#closePromise;
+  }
+
+  async #acceptExternal(
+    op: ExternalThreadRuntimeOp,
+    prepared?: ThreadRuntimePreparedInput,
+  ): Promise<OpReceipt> {
+    await this.#effectBarrier;
+    if (this.#closing || this.#closed) return rejectedExternal(op, 'thread_closed');
+    const prior = this.#writer.state.mailbox.get(op.opId);
+    if (prior !== undefined) {
+      if (canonicalJson(prior.op) !== canonicalJson(op)) {
+        return rejectedExternal(op, 'op_id_conflict');
+      }
+      if (prior.state === 'prepared') {
+        const receipt = await this.#rejectExternal(op, 'interrupted_before_accept');
+        return { ...receipt, duplicate: true };
+      }
+      if (prior.state === 'rejected') {
+        return {
+          accepted: false,
+          opId: op.opId,
+          duplicate: true,
+          reason: prior.reason ?? 'rejected',
+          threadId: this.threadId,
+        };
+      }
+      const run = [...this.#writer.state.runs.values()].find((entry) => entry.ownerOpId === op.opId);
+      return {
+        accepted: true,
+        opId: op.opId,
+        duplicate: true,
+        threadId: this.threadId,
+        ...(run !== undefined && { runId: run.runId }),
+      };
+    }
+    await this.#writer.appendPrepare({
+      type: 'mailbox_prepare',
+      opId: op.opId,
+      op,
+      timestamp: this.#clock.now(),
+    });
+
+    switch (op.type) {
+      case 'prompt':
+      case 'continue':
+        return this.#acceptActivity(op);
+      case 'set_model':
+        if (this.#active !== undefined || this.#attachment.driver.interactionState() !== 'idle') {
+          return this.#rejectExternal(op, 'thread_busy');
+        }
+        if (prepared?.resolvedModel === undefined) {
+          return this.#rejectExternal(op, 'model_resolution_missing');
+        }
+        await this.#acceptOperation(op, { op, resolvedModel: prepared.resolvedModel });
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      case 'steer':
+      case 'follow_up':
+        await this.#acceptOperation(op, {
+          op,
+          ...(prepared?.legacyQueuedMessage !== undefined && {
+            legacyQueuedMessage: prepared.legacyQueuedMessage,
+          }),
+        });
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      case 'control_response': {
+        if (this.#writer.state.controlClaims.has(op.requestId)) {
+          return this.#rejectExternal(op, 'control_response_already_claimed');
+        }
+        const pending = this.#writer.state.checkpoint.frontend.pendingControls
+          .find((request) => request.requestId === op.requestId);
+        if (pending === undefined) return this.#rejectExternal(op, 'control_request_not_found');
+        const valid = pending.kind === 'approval'
+          ? op.decision === 'allow_once' || op.decision === 'allow_always' || op.decision === 'deny'
+          : op.decision === 'confirm' || op.decision === 'deny';
+        if (!valid) return this.#rejectExternal(op, 'invalid_decision');
+        await this.#acceptOperation(op, { op });
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      }
+      case 'abort': {
+        const target = this.#resolveAbortTarget(op.expectedRunId);
+        if (op.expectedRunId !== undefined && target.kind === 'no_current_activity') {
+          return this.#rejectExternal(op, 'stale_run');
+        }
+        await this.#acceptAbort(op, target);
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      }
+      case 'thread_close':
+        await this.#writer.commit([
+          { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
+          { event: { type: 'op_started', opType: op.type }, opId: op.opId },
+        ], [
+          { type: 'accepted_pending', opId: op.opId, opType: op.type },
+          { type: 'started', opId: op.opId },
+        ]);
+        this.#closing = true;
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+    }
+  }
+
+  async #acceptInternal(op: InternalThreadRuntimeOp): Promise<InternalOpReceipt> {
+    await this.#effectBarrier;
+    if (this.#closed) return { accepted: false, opId: op.opId, duplicate: false, reason: 'thread_closed', threadId: this.threadId };
+    const existing = this.#writer.state.mailbox.get(op.opId);
+    if (existing !== undefined) {
+      if (canonicalJson(existing.op) !== canonicalJson(op)) {
+        return {
+          accepted: false,
+          opId: op.opId,
+          duplicate: false,
+          reason: 'op_id_conflict',
+          threadId: this.threadId,
+        };
+      }
+      if (existing.state === 'rejected') {
+        return {
+          accepted: false,
+          opId: op.opId,
+          duplicate: true,
+          reason: existing.reason ?? 'rejected',
+          threadId: this.threadId,
+        };
+      }
+      return { accepted: true, opId: op.opId, duplicate: true, threadId: this.threadId };
+    }
+    await this.#writer.appendPrepare({
+      type: 'mailbox_prepare',
+      opId: op.opId,
+      op,
+      timestamp: this.#clock.now(),
+    });
+    if (op.type === 'abort') {
+      await this.#acceptAbort(op, op.resolvedTarget);
+    } else {
+      await this.#writer.commit([
+        { event: { type: 'op_accepted', opType: 'thread_close', ...(op.parentOpId !== undefined && { parentOpId: op.parentOpId }) }, opId: op.opId },
+        { event: { type: 'op_started', opType: 'thread_close', ...(op.parentOpId !== undefined && { parentOpId: op.parentOpId }) }, opId: op.opId },
+      ], [
+        { type: 'accepted_pending', opId: op.opId, opType: 'thread_close' },
+        { type: 'started', opId: op.opId },
+      ]);
+      this.#closing = true;
+    }
+    return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+  }
+
+  async #acceptActivity(
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+  ): Promise<OpReceipt> {
+    const interactionState = this.#attachment.driver.interactionState();
+    const activeRun = this.#active === undefined
+      ? undefined
+      : this.#writer.state.runs.get(this.#active.currentRunId);
+    const queueDuringCompaction = op.type === 'prompt'
+      && this.#active !== undefined
+      // The callback observer may enqueue immediately after durable compaction_end, when the
+      // legacy driver already projects idle but the canonical compaction successor still owns the
+      // thread. Keep that finalization window in the same FIFO admission rule.
+      && (interactionState === 'compacting' || activeRun?.reason === 'compaction');
+    if (!queueDuringCompaction && (this.#active !== undefined || interactionState !== 'idle')) {
+      return this.#rejectExternal(op, 'thread_busy_use_steer_or_follow_up');
+    }
+    const suspended = this.#writer.state.summary.suspendedWork?.[0];
+    if (op.type === 'prompt' && suspended !== undefined) {
+      return this.#rejectExternal(op, 'suspended_work_pending');
+    }
+    const suspendedInputOwner = suspended === undefined
+      ? undefined
+      : suspended.kind === 'reserved_op' ? suspended.ownerOpId
+        : suspended.inputOwnerOpId;
+    const suspendedInput = suspendedInputOwner === undefined
+      ? undefined
+      : this.#writer.state.inputOwners.get(suspendedInputOwner);
+    const sourcePrompt = suspendedInput === undefined
+      ? undefined
+      : this.#writer.state.mailbox.get(suspendedInput.sourceOpId)?.op;
+    if (suspendedInput !== undefined && sourcePrompt?.type !== 'prompt') {
+      throw new RuntimeStorageError('invalid_suspended_input', 'Suspended input source is not a prompt');
+    }
+    if (op.type === 'continue' && suspended === undefined
+      && !hasContinuableState(this.#writer.state.checkpoint.frontend)) {
+      return this.#rejectExternal(op, 'nothing_to_continue');
+    }
+    const runId = this.#newRunId();
+    const workspaceCeiling = await this.#workspaceCeiling();
+    const permissionCeiling = validatePermissionCeilingSnapshot(await this.#permissionPolicy.resolveCeiling({
+      kind: 'run',
+      workspaceId: this.workspaceId,
+      threadId: this.threadId,
+      runId,
+      workspaceCeiling,
+      threadCeiling: this.#threadCeiling,
+      ...(op.permissionNarrowing !== undefined && { requestedNarrowing: op.permissionNarrowing }),
+    }));
+    if (!queueDuringCompaction) {
+      this.#active = {
+        rootOpId: op.opId,
+        rootRunId: runId,
+        currentRunId: runId,
+        currentCeiling: permissionCeiling,
+      };
+    }
+    const acceptanceMutations: RuntimeThreadMutation[] = [
+      { type: 'accepted_pending', opId: op.opId, opType: op.type },
+      {
+        type: 'run_reserved',
+        runId,
+        ownerOpId: op.opId,
+        reason: op.type,
+        permissionCeiling,
+      },
+    ];
+    if (op.type === 'continue' && suspendedInputOwner !== undefined && suspendedInput !== undefined) {
+      acceptanceMutations.push({
+        type: 'input_transferred',
+        fromOpId: suspendedInputOwner,
+        toOpId: op.opId,
+      });
+    }
+    await this.#writer.commit([{
+      event: { type: 'op_accepted', opType: op.type },
+      opId: op.opId,
+      runId,
+    }], acceptanceMutations);
+    const command: PreparedThreadDriverCommand = op.type === 'prompt'
+      ? {
+          op,
+          runId,
+          permissionCeiling,
+          resolvedInput: { kind: 'prompt_input', sourceOpId: op.opId, text: op.text },
+        }
+      : {
+          op,
+          runId,
+          permissionCeiling,
+          resolvedInput: sourcePrompt?.type === 'prompt'
+            ? {
+                kind: 'prompt_input',
+                sourceOpId: suspendedInput?.sourceOpId as OpId,
+                text: sourcePrompt.text,
+              }
+            : { kind: 'existing_residue' },
+        };
+    if (queueDuringCompaction) {
+      this.#queuedActivities.push({
+        op,
+        runId,
+        permissionCeiling,
+        command: command as Extract<PreparedThreadDriverCommand, { op: { type: 'prompt' } }>,
+      });
+      // The acceptance commit above and compaction_end share EventCommitter's serialized writer
+      // chain. If this acceptance won, notify before compaction_end can resume the driver; if
+      // compaction_end won, its prior auto-continue remains the authoritative ordering.
+      this.#attachment.driver.activityQueuedDuringCompaction?.();
+      return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId, runId };
+    }
+    await this.#startActivity(op, runId, permissionCeiling, command);
+    return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId, runId };
+  }
+
+  async #startActivity(
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+    runId: RunId,
+    permissionCeiling: PermissionCeilingSnapshot,
+    command: Extract<PreparedThreadDriverCommand, { op: { type: 'prompt' | 'continue' } }>,
+  ): Promise<void> {
+    await this.#writer.commit([{
+      event: { type: 'op_started', opType: op.type },
+      opId: op.opId,
+      runId,
+    }], [
+      { type: 'started', opId: op.opId },
+      { type: 'run_started', runId },
+    ]);
+    let dispatch: ReturnType<ThreadDriverAttachment['driver']['dispatch']>;
+    try {
+      this.#assertWorkspaceCapabilitiesAvailable();
+      dispatch = this.#attachment.driver.dispatch(command);
+    } catch (error) {
+      dispatch = { completion: Promise.reject(error) };
+    }
+    this.#track(this.#finishActivity(op, runId, permissionCeiling, dispatch.completion));
+  }
+
+  async #acceptOperation(
+    op: Extract<ExternalThreadRuntimeOp, { type: 'steer' | 'follow_up' | 'control_response' | 'set_model' }>,
+    command: PreparedThreadDriverCommand,
+  ): Promise<void> {
+    const acceptedAt = this.#clock.now();
+    const mutations: RuntimeThreadMutation[] = [
+      { type: 'accepted_pending', opId: op.opId, opType: op.type },
+      { type: 'started', opId: op.opId },
+    ];
+    if (op.type === 'control_response') {
+      mutations.push({
+        type: 'control_response_claimed',
+        requestId: op.requestId,
+        responseOpId: op.opId,
+        decision: op.decision,
+        acceptedAt,
+      });
+    }
+    await this.#writer.commit([
+      { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
+      { event: { type: 'op_started', opType: op.type }, opId: op.opId },
+    ], mutations, acceptedAt);
+    if (op.type === 'control_response') {
+      const effect = this.#finishLegacyControlResponse(op, acceptedAt);
+      this.#effectBarrier = this.#track(effect);
+      return;
+    }
+    let completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'];
+    try {
+      completion = this.#attachment.driver.dispatch(command).completion;
+    } catch (error) {
+      completion = Promise.reject(error);
+    }
+    const effect = completion.then(
+      async (result) => {
+        const outcome = result.kind === 'operation' ? result.outcome : 'interrupted';
+        const mutations: RuntimeThreadMutation[] = [
+          { type: 'completed', opId: op.opId, outcome },
+        ];
+        if (op.type === 'set_model' && outcome === 'applied' && 'resolvedModel' in command) {
+          mutations.push({ type: 'model_selected', ownerOpId: op.opId, model: command.resolvedModel.ref });
+        }
+        await this.#writer.commit([{
+          event: { type: 'op_completed', opType: op.type, outcome },
+          opId: op.opId,
+        }], mutations);
+      },
+      async () => {
+        await this.#writer.commit([{
+          event: { type: 'op_completed', opType: op.type, outcome: 'interrupted' },
+          opId: op.opId,
+        }], [{ type: 'completed', opId: op.opId, outcome: 'interrupted' }]);
+      },
+    );
+    this.#effectBarrier = this.#track(effect);
+  }
+
+  async #acceptAbort(
+    op: Extract<MailboxRuntimeOp, { type: 'abort' }>,
+    target: ResolvedAbortTarget,
+  ): Promise<void> {
+    const parentOpId = 'parentOpId' in op ? op.parentOpId : undefined;
+    await this.#writer.commit([
+      {
+        event: { type: 'op_accepted', opType: 'abort', ...(parentOpId !== undefined && { parentOpId }) },
+        opId: op.opId,
+      },
+      {
+        event: { type: 'op_started', opType: 'abort', ...(parentOpId !== undefined && { parentOpId }) },
+        opId: op.opId,
+      },
+    ], [{
+      type: 'accepted_pending',
+      opId: op.opId,
+      opType: 'abort',
+      resolvedTarget: target,
+      ...(parentOpId !== undefined && { parentOpId }),
+    }, { type: 'started', opId: op.opId }]);
+    if (target.kind === 'suspended') {
+      await this.#completeSuspendedAbort(op, target, parentOpId);
+      return;
+    }
+    if (target.kind === 'no_current_activity') {
+      await this.#completeAbort(op, 'no_op', parentOpId);
+      return;
+    }
+    if ('resolvedTarget' in op && (
+      this.#active?.currentRunId !== target.runId
+      || this.#writer.state.runs.get(target.runId)?.state === 'terminal'
+    )) {
+      await this.#completeAbort(op, 'no_op', parentOpId);
+      return;
+    }
+    let completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'];
+    try {
+      completion = this.#attachment.driver.dispatch({ op, resolvedTarget: target }).completion;
+      // dispatch() synchronously propagates the run cancellation token. Only after that boundary
+      // may pending approval waiters be durably concluded as aborted.
+      await this.#abortPendingControls(op.opId);
+    } catch (error) {
+      completion = Promise.reject(error);
+    }
+    const effect = completion.then(
+      () => this.#completeAbort(op, 'applied', parentOpId),
+      () => this.#completeAbort(op, 'interrupted', parentOpId),
+    );
+    this.#effectBarrier = this.#track(effect);
+  }
+
+  async #finishLegacyControlResponse(
+    op: Extract<RuntimeOp, { type: 'control_response' }>,
+    acceptedAt: number,
+  ): Promise<void> {
+    const request = this.#durableApprovalRequest(op.requestId);
+    const adapter = this.#attachment.legacyApprovalAdapter;
+    if (request === undefined || adapter === undefined || op.decision === 'confirm') {
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        'legacy_approval_unknown_outcome',
+        `Durable approval bridge cannot apply response ${op.opId}`,
+      ));
+      return;
+    }
+    let result: Awaited<ReturnType<typeof adapter.applyResponse>>;
+    try {
+      result = await adapter.applyResponse({
+        request,
+        responseOpId: op.opId,
+        acceptedAt,
+        decision: op.decision,
+      });
+    } catch (error) {
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        'legacy_approval_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      ));
+      return;
+    }
+    if (!result.ok) {
+      if (result.code === 'legacy_approval_definitely_not_applied') {
+        await this.#writer.commit([
+          {
+            event: { type: 'op_completed', opType: 'control_response', outcome: 'interrupted' },
+            opId: op.opId,
+          },
+          {
+            event: {
+              type: 'runtime_diagnostic',
+              severity: 'warning',
+              code: result.code,
+              message: result.message,
+              scope: 'thread',
+            },
+          },
+        ], [
+          { type: 'completed', opId: op.opId, outcome: 'interrupted' },
+          {
+            type: 'control_response_claim_released',
+            requestId: request.requestId,
+            responseOpId: op.opId,
+            reason: 'effect_definitely_not_applied',
+          },
+        ]);
+        return;
+      }
+      this.#failWorkspaceApproval(new RuntimeStorageError(result.code, result.message));
+      return;
+    }
+    const resolution = {
+      type: 'control_resolved' as const,
+      requestId: request.requestId,
+      kind: 'approval' as const,
+      owningRunId: request.owningRunId,
+      owningTurnId: request.owningTurnId,
+      policyRevision: request.policyRevision,
+      decision: result.effectiveDecision,
+      ...(op.decision === 'allow_always' && result.effectiveDecision !== 'allow_always' && {
+        requestedDecision: 'allow_always' as const,
+      }),
+    };
+    try {
+      await this.#writer.commit([
+        {
+          event: resolution,
+          runId: request.owningRunId,
+          turnId: request.owningTurnId,
+          opId: op.opId,
+        },
+        {
+          event: { type: 'op_completed', opType: 'control_response', outcome: 'applied' },
+          opId: op.opId,
+        },
+      ], [
+        { type: 'control_resolved', resolution },
+        { type: 'completed', opId: op.opId, outcome: 'applied' },
+      ]);
+    } catch (error) {
+      // The adapter reported that its external effect is applied. If the canonical resolution
+      // cannot be committed, no thread may start another capability until recovery reconciles the
+      // same response OpId; treating this as an ordinary background failure is unsafe.
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        'legacy_approval_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      ));
+      return;
+    }
+    const waiter = this.#approvalWaiters.get(request.requestId);
+    if (waiter !== undefined) {
+      this.#approvalWaiters.delete(request.requestId);
+      waiter.resolve(result.effectiveDecision === 'deny'
+        ? {
+            kind: 'deny',
+            reason:
+              'User denied permission: the user rejected this tool call in the approval prompt. ' +
+              'Do not retry the same call; ask the user or take a different approach.',
+          }
+        : { kind: 'allow' });
+    }
+  }
+
+  async #abortPendingControls(opId: OpId): Promise<void> {
+    const pending = this.#writer.state.checkpoint.frontend.pendingControls;
+    if (pending.length === 0) return;
+    const envelopes = pending.map((request) => ({
+      event: {
+        type: 'control_resolved' as const,
+        requestId: request.requestId,
+        kind: request.kind,
+        owningRunId: request.owningRunId,
+        owningTurnId: request.owningTurnId,
+        policyRevision: request.policyRevision,
+        decision: 'aborted' as const,
+      },
+      runId: request.owningRunId,
+      turnId: request.owningTurnId,
+      opId,
+    }));
+    const mutations: RuntimeThreadMutation[] = envelopes.map((input) => ({
+      type: 'control_resolved',
+      resolution: input.event,
+    }));
+    await this.#writer.commit(
+      envelopes as [typeof envelopes[number], ...typeof envelopes],
+      mutations,
+    );
+    for (const request of pending) {
+      const waiter = this.#approvalWaiters.get(request.requestId);
+      if (waiter === undefined) continue;
+      this.#approvalWaiters.delete(request.requestId);
+      waiter.resolve({ kind: 'aborted' });
+    }
+  }
+
+  #durableApprovalRequest(requestId: string): LegacyApprovalRequestSnapshot | undefined {
+    const request = this.#writer.state.checkpoint.frontend.pendingControls.find((candidate) =>
+      candidate.requestId === requestId);
+    if (request?.kind !== 'approval' || request.payload.legacyProposal === undefined) return undefined;
+    return strictJsonSnapshot({
+      workspaceId: this.workspaceId,
+      threadId: this.threadId,
+      requestId: request.requestId,
+      owningRunId: request.owningRunId,
+      owningTurnId: request.owningTurnId,
+      toolCallId: request.payload.toolCallId,
+      description: request.payload.description,
+      policyRevision: request.policyRevision,
+      proposal: request.payload.legacyProposal,
+    }) as unknown as LegacyApprovalRequestSnapshot;
+  }
+
+  #newApprovalRequestId(): string {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const requestId = `ap_${crypto.randomUUID().replaceAll('-', '')}`;
+      if (!this.#writer.state.usedRequestIds.has(requestId)
+        && !this.#approvalWaiters.has(requestId)) return requestId;
+    }
+    throw new Error('identity_collision');
+  }
+
+  #failWorkspaceApproval(error: Error): void {
+    this.stopForWorkspaceApprovalFatal(error);
+    this.#onWorkspaceApprovalFatal?.(error);
+  }
+
+  async #completeAbort(
+    op: Extract<MailboxRuntimeOp, { type: 'abort' }>,
+    outcome: 'applied' | 'no_op' | 'interrupted',
+    parentOpId?: OpId,
+  ): Promise<void> {
+    await this.#writer.commit([{
+      event: { type: 'op_completed', opType: 'abort', outcome, ...(parentOpId !== undefined && { parentOpId }) },
+      opId: op.opId,
+    }], [{ type: 'completed', opId: op.opId, outcome }]);
+  }
+
+  async #completeSuspendedAbort(
+    op: Extract<MailboxRuntimeOp, { type: 'abort' }>,
+    target: Extract<ResolvedAbortTarget, { kind: 'suspended' }>,
+    parentOpId?: OpId,
+  ): Promise<void> {
+    const owner = this.#writer.state.mailbox.get(target.ownerOpId);
+    const terminal = this.#writer.state.runs.get(target.terminalRunId);
+    const root = [...this.#writer.state.runs.values()].find((run) => run.ownerOpId === target.ownerOpId);
+    const finishOwner = owner !== undefined
+      && owner.state !== 'completed' && owner.state !== 'rejected'
+      && (owner.op.type === 'prompt' || owner.op.type === 'continue')
+      && root !== undefined;
+    const stateMutations: RuntimeThreadMutation[] = [];
+    if (finishOwner) {
+      stateMutations.push({ type: 'completed', opId: target.ownerOpId, outcome: 'interrupted' });
+      if (terminal !== undefined && terminal.state !== 'terminal' && terminal.state !== 'prepared') {
+        stateMutations.push({ type: 'run_terminal', runId: terminal.runId, status: 'aborted' });
+      }
+    }
+    if (target.inputOwnerOpId !== undefined
+      && this.#writer.state.inputOwners.has(target.inputOwnerOpId)) {
+      stateMutations.push({
+        type: 'input_cancelled',
+        ownerOpId: target.inputOwnerOpId,
+        byAbortOpId: op.opId,
+      });
+    }
+    stateMutations.push({ type: 'completed', opId: op.opId, outcome: 'applied' });
+    const abortEnvelope = {
+      event: {
+        type: 'op_completed' as const,
+        opType: 'abort' as const,
+        outcome: 'applied' as const,
+        ...(parentOpId !== undefined && { parentOpId }),
+      },
+      opId: op.opId,
+    };
+    if (finishOwner && root !== undefined && (owner.op.type === 'prompt' || owner.op.type === 'continue')) {
+      await this.#writer.commit([
+        {
+          event: {
+            type: 'op_completed',
+            opType: owner.op.type,
+            terminalRunId: target.terminalRunId,
+            outcome: 'interrupted',
+          },
+          opId: target.ownerOpId,
+          runId: root.runId,
+        },
+        abortEnvelope,
+      ], stateMutations);
+      return;
+    }
+    await this.#writer.commit([abortEnvelope], stateMutations);
+  }
+
+  async #finishActivity(
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+    rootRunId: RunId,
+    rootCeiling: PermissionCeilingSnapshot,
+    completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'],
+  ): Promise<void> {
+    let status: 'completed' | 'aborted' | 'error' = 'error';
+    let reportedTerminalRunId: RunId | undefined;
+    try {
+      const result = await completion;
+      if (result.kind !== 'activity') throw new Error('Activity driver returned an operation completion');
+      if (result.status !== 'completed' && result.status !== 'aborted' && result.status !== 'error') {
+        throw new Error('Activity driver returned an invalid status');
+      }
+      status = result.status;
+      reportedTerminalRunId = result.terminalRunId;
+    } catch {
+      status = 'error';
+    }
+    let pendingToDeliver: ThreadResultOutboxMutation | undefined;
+    await this.#withAdmission(async () => {
+      const active = this.#active;
+      let terminalRunId = active?.rootOpId === op.opId ? active.currentRunId : rootRunId;
+      if (reportedTerminalRunId !== undefined) {
+        const reported = this.#writer.state.runs.get(reportedTerminalRunId);
+        const isCurrentCausalTerminal = active?.rootOpId === op.opId
+          && active.rootRunId === rootRunId
+          && active.currentRunId === reportedTerminalRunId
+          && reported !== undefined
+          && reported.state !== 'prepared';
+        if (isCurrentCausalTerminal) {
+          terminalRunId = reportedTerminalRunId;
+        } else {
+          status = 'error';
+        }
+      }
+      const outcome = status === 'completed' ? 'applied' : 'interrupted';
+      void rootCeiling;
+      const mutations: RuntimeThreadMutation[] = [
+        { type: 'completed', opId: op.opId, outcome },
+        { type: 'run_terminal', runId: terminalRunId, status },
+      ];
+      const parentThreadId = this.#writer.state.meta.parentThreadId;
+      if (parentThreadId !== undefined) {
+        const resultOpId = this.#identityFactory.deriveOpId({
+          purpose: 'thread_result',
+          workspaceId: this.workspaceId,
+          parts: [parentThreadId, this.threadId, terminalRunId],
+        });
+        if (!isDerivedOpId(resultOpId)) throw new Error('identity_factory_invalid_derived_op');
+        pendingToDeliver = {
+          type: 'thread_result_pending',
+          resultOpId,
+          parentThreadId,
+          childThreadId: this.threadId,
+          terminalRunId,
+          status,
+        };
+        mutations.push(pendingToDeliver);
+      }
+      await this.#writer.commit([{
+        event: { type: 'op_completed', opType: op.type, terminalRunId, outcome },
+        opId: op.opId,
+        runId: rootRunId,
+      }], mutations);
+      if (this.#active?.rootOpId === op.opId) this.#active = undefined;
+      if (this.#closing) {
+        await this.#cancelQueuedActivities();
+      } else {
+        await this.#startNextQueuedActivity();
+      }
+    });
+    if (pendingToDeliver !== undefined && this.#onThreadResultPending !== undefined) {
+      this.#trackBestEffort(this.#onThreadResultPending(pendingToDeliver));
+    }
+  }
+
+  async #startNextQueuedActivity(): Promise<void> {
+    const next = this.#queuedActivities.shift();
+    if (next === undefined) return;
+    this.#active = {
+      rootOpId: next.op.opId,
+      rootRunId: next.runId,
+      currentRunId: next.runId,
+      currentCeiling: next.permissionCeiling,
+    };
+    await this.#startActivity(next.op, next.runId, next.permissionCeiling, next.command);
+  }
+
+  async #cancelQueuedActivities(): Promise<void> {
+    const queued = this.#queuedActivities.splice(0);
+    for (const item of queued) {
+      await this.#writer.commit([{
+        event: {
+          type: 'op_completed',
+          opType: 'prompt',
+          terminalRunId: item.runId,
+          outcome: 'interrupted',
+        },
+        opId: item.op.opId,
+        runId: item.runId,
+      }], [
+        { type: 'completed', opId: item.op.opId, outcome: 'interrupted' },
+        { type: 'run_terminal', runId: item.runId, status: 'aborted' },
+        { type: 'input_cancelled', ownerOpId: item.op.opId, byAbortOpId: item.op.opId },
+      ]);
+    }
+  }
+
+  async #rejectExternal(op: ExternalThreadRuntimeOp, reason: string): Promise<OpReceipt> {
+    await this.#writer.commit([{
+      event: { type: 'op_rejected', opType: op.type, reason },
+      opId: op.opId,
+    }], [{ type: 'rejected', opId: op.opId, reason }]);
+    return rejectedExternal(op, reason);
+  }
+
+  #resolveAbortTarget(expectedRunId?: RunId): ResolvedAbortTarget {
+    const current = this.#active?.currentRunId;
+    if (current !== undefined && (expectedRunId === undefined || expectedRunId === current)) {
+      return { kind: 'run', runId: current };
+    }
+    const suspended = this.#writer.state.summary.suspendedWork?.[0];
+    if (suspended !== undefined) {
+      if (suspended.kind === 'reserved_op' && (expectedRunId === undefined || expectedRunId === suspended.runId)) {
+        return {
+          kind: 'suspended',
+          ownerOpId: suspended.ownerOpId,
+          terminalRunId: suspended.runId,
+          ...(this.#writer.state.inputOwners.has(suspended.ownerOpId)
+            && { inputOwnerOpId: suspended.ownerOpId }),
+        };
+      }
+      if (
+        suspended.kind === 'interrupted' &&
+        (expectedRunId === undefined || expectedRunId === suspended.terminalRunId)
+      ) {
+        return {
+          kind: 'suspended',
+          ownerOpId: suspended.ownerOpId,
+          terminalRunId: suspended.terminalRunId,
+          ...(suspended.inputOwnerOpId !== undefined && { inputOwnerOpId: suspended.inputOwnerOpId }),
+        };
+      }
+    }
+    return { kind: 'no_current_activity' };
+  }
+
+  async #workspaceCeiling(): Promise<PermissionCeilingSnapshot> {
+    return validatePermissionCeilingSnapshot(await this.#permissionPolicy.snapshotWorkspaceCeiling({
+      workspaceId: this.workspaceId,
+      cwd: this.#cwd,
+    }));
+  }
+
+  #assertWorkspaceCapabilitiesAvailable(): void {
+    const failure = this.#workspaceCapabilityFailure();
+    if (failure !== undefined) throw failure;
+  }
+
+  #workspaceCapabilityFailure(): Error | undefined {
+    return this.#approvalFatal ?? this.#workspaceApprovalFailure?.();
+  }
+
+  #newRunId(): RunId {
+    const runId = this.#identityFactory.newRunId();
+    if (!isRunId(runId) || this.#writer.state.runs.has(runId)) throw new Error('identity_collision');
+    return runId;
+  }
+
+  #newTurnId(): TurnId {
+    const turnId = this.#identityFactory.newTurnId();
+    if (!isTurnId(turnId) || [...this.#writer.state.turns.values()].some((turn) => turn.turnId === turnId)) {
+      throw new Error('identity_collision');
+    }
+    return turnId;
+  }
+
+  #withAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#admission.then(operation);
+    this.#admission = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  #track(task: Promise<void>): Promise<void> {
+    const guarded: Promise<void> = task.catch((error) => {
+      this.#backgroundFailures.push(error);
+    }).finally(() => {
+      this.#background.delete(guarded);
+    });
+    this.#background.add(guarded);
+    return guarded;
+  }
+
+  #trackBestEffort(task: Promise<void>): void {
+    const guarded = task.catch(() => undefined).finally(() => {
+      this.#bestEffort.delete(guarded);
+    });
+    this.#bestEffort.add(guarded);
+  }
+
+  #assertDriverEventIdentity(
+    input: ThreadDriverEvent,
+    virtuallyActivatedRuns: ReadonlySet<RunId> = new Set(),
+    virtuallyActivatedTurns: ReadonlySet<string> = new Set(),
+  ): void {
+    if (input.runId !== undefined) {
+      const run = this.#writer.state.runs.get(input.runId);
+      if (run === undefined) throw new Error('driver_event_unknown_run');
+      if (run.state === 'terminal') throw new Error('driver_event_terminal_run');
+      if (run.state === 'prepared' && !virtuallyActivatedRuns.has(input.runId)) {
+        const reservation = [...this.#successors.values()].find((candidate) => candidate.runId === input.runId);
+        const isReservationNotice = reservation !== undefined
+          && input.event.type === 'retry_scheduled'
+          && input.event.successorRunId === input.runId
+          && input.event.predecessorRunId === reservation.predecessorRunId;
+        const isCompactionActivation = reservation !== undefined
+          && reservation.reason === 'compaction'
+          && input.event.type === 'compaction_start'
+          && input.event.activityRunId === input.runId
+          && input.event.predecessorRunId === reservation.predecessorRunId;
+        if (!isReservationNotice && !isCompactionActivation) {
+          throw new Error('driver_event_unactivated_run');
+        }
+      }
+    }
+    if (input.turnId !== undefined) {
+      if (input.runId === undefined) throw new Error('driver_event_turn_without_run');
+      const reservation = this.#turnReservations.get(turnIdentityKey(input.runId, input.turnId));
+      if (reservation === undefined) throw new Error('driver_event_unknown_turn');
+      const turnKey = turnIdentityKey(input.runId, input.turnId);
+      if (!reservation.activated && !virtuallyActivatedTurns.has(turnKey) && input.event.type !== 'turn_start') {
+        throw new Error('driver_event_unactivated_turn');
+      }
+    }
+    if (input.opId !== undefined && !this.#writer.state.mailbox.has(input.opId)) {
+      throw new Error('driver_event_unknown_op');
+    }
+  }
+}
+
+function rejectedExternal(op: ExternalThreadRuntimeOp, reason: string): OpReceipt {
+  return { accepted: false, opId: op.opId, duplicate: false, reason, threadId: op.threadId };
+}
+
+function hasContinuableState(frontend: ThreadDriverAttachment['initialCheckpoint']['frontend']): boolean {
+  if (frontend.queues.steering.length > 0 || frontend.queues.followUp.length > 0) return true;
+  const tail = frontend.transcript.at(-1);
+  if (tail === undefined) return false;
+  if (tail.role !== 'assistant') return true;
+  return tail.stopReason === 'aborted' || tail.stopReason === 'error' || tail.stopReason === 'tool_calls';
+}
+
+function successorKey(runId: RunId, reason: 'retry' | 'compaction'): string {
+  return canonicalJson(['successor', runId, reason]);
+}
+
+function turnOrdinalKey(runId: RunId, ordinal: number): string {
+  return canonicalJson(['turn_ordinal', runId, ordinal]);
+}
+
+function turnIdentityKey(runId: RunId, turnId: TurnId): string {
+  return canonicalJson(['turn_identity', runId, turnId]);
+}

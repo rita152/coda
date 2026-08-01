@@ -7,12 +7,12 @@ import {
   assertWorkspaceId,
 } from '../protocol/index.js';
 import type { UserMessage } from '../protocol/index.js';
-import { WorkspaceEventStream } from './event-stream.js';
+import { EventHub } from './event-hub.js';
 import type {
   RuntimeJournalRecord,
-  ThreadJournalPort,
+  ThreadJournalAppendPort,
   ThreadMetaRecord,
-} from './ports.js';
+} from './thread-journal-records.js';
 import {
   ThreadJournalWriter,
   foldThreadJournal,
@@ -85,10 +85,65 @@ describe('ThreadJournalWriter', () => {
   });
 });
 
+describe('foldThreadJournal commit correspondence', () => {
+  test('rejects control mutation identity that differs from its same-record envelope', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0] as ThreadMetaRecord;
+    const request = {
+      type: 'control_request' as const,
+      requestId: 'approval-request-envelope',
+      kind: 'approval' as const,
+      owningRunId: fixture.runId,
+      owningTurnId: fixture.turnId,
+      policyRevision: 'policy-v1',
+      payload: { toolCallId: 'call-1', description: 'approve fixture' },
+    };
+    expect(() => foldThreadJournal([meta, {
+      type: 'commit',
+      firstSeq: 1,
+      envelopes: [{
+        workspaceId: meta.workspaceId,
+        threadId: meta.threadId,
+        runId: fixture.runId,
+        turnId: fixture.turnId,
+        seq: 1,
+        timestamp: 1,
+        event: request,
+      }],
+      mutations: [{
+        type: 'control_requested',
+        request: { ...request, requestId: 'approval-request-mutation' },
+      }],
+    }])).toThrow(/control_request envelopes and mutations differ/);
+  });
+
+  test('rejects a successful compaction event without its checkpoint mutation', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0] as ThreadMetaRecord;
+    expect(() => foldThreadJournal([meta, {
+      type: 'commit',
+      firstSeq: 1,
+      envelopes: [{
+        workspaceId: meta.workspaceId,
+        threadId: meta.threadId,
+        runId: fixture.runId,
+        seq: 1,
+        timestamp: 1,
+        event: {
+          type: 'compaction_end',
+          activityRunId: fixture.runId,
+          ok: true,
+          droppedMessages: 1,
+        },
+      }],
+    }])).toThrow(/compaction_end envelopes and mutations differ/);
+  });
+});
+
 function writerFixture(): {
   readonly writer: ThreadJournalWriter;
   readonly journal: RecordingJournal;
-  readonly events: WorkspaceEventStream;
+  readonly events: EventHub;
   readonly threadId: ReturnType<typeof assertThreadId>;
   readonly runId: ReturnType<typeof assertRunId>;
   readonly turnId: ReturnType<typeof assertTurnId>;
@@ -110,7 +165,7 @@ function writerFixture(): {
   };
   const records: RuntimeJournalRecord[] = [meta];
   const journal = new RecordingJournal(records);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
     workspaceId,
@@ -124,7 +179,7 @@ function writerFixture(): {
   return { writer, journal, events, threadId, runId, turnId };
 }
 
-class RecordingJournal implements ThreadJournalPort {
+class RecordingJournal implements ThreadJournalAppendPort {
   beforeFirstCommit?: () => Promise<void>;
   #commitCount = 0;
 

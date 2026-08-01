@@ -87,13 +87,17 @@ const interactive = stdin.isTTY && !flags.json && flags.prompt === undefined;
 const cliConfig = resolveCliConfig(flags, env, readConfigFile(), {
   allowMissingModel: interactive || (flags.json && flags.eventFormat === 'envelope'),
 });
+const providerRegistry = interactive || cliConfig.model === undefined
+  ? new ProviderRegistry()
+  : undefined;
 const storageRoots = resolveRuntimeStorageRoots({
   homeDir: resolveHomeDirectory(env),           // 只有 CLI composition root 读取 env/home
   legacySessionDir: flags.sessionDir,
 });
 const storage = createFileRuntimeStorage({
-  runtimeRoot: storageRoots.runtimeRoot,
+  root: storageRoots.runtimeRoot,
   legacySessionDir: storageRoots.legacySessionDir,
+  legacyApprovalFile: defaultRulesFile(),
 });
 const resumeTarget = isResumeRequest(flags)
   ? await selectCliResumeTarget(await storage.listStoredThreads(), flags)
@@ -103,73 +107,76 @@ const runtimeCwd = resumeTarget?.ownerRecordedCwd ?? cwd;
 if (resumeTarget && runtimeCwd !== cwd) {
   warnCrossCwdResume({ invocationCwd: cwd, executionCwd: runtimeCwd });
 }
+const legacyTools = createCodingTools();
+const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
+  mode: approvalMode,
+  projectRoot: runtimeCwd,
+  tools: legacyTools,
+});
+const driverFactory = createLegacySessionThreadDriverFactory({
+  sessionDir: storageRoots.legacySessionDir,
+  approvalAdapterFactory,
+  configure: ({ model }) => {
+    const projectRules = new ProjectRules({ cwd: runtimeCwd });
+    return {
+      sessionOptions: {
+        agentConfig: {
+          streamFn: createProviderStreamFn(fauxScript),
+          tools: guardProjectRuleExecutions(createCodingTools(), projectRules),
+          systemPrompt: () => buildSystemPrompt(runtimeCwd),
+          transformContext: (context) => projectRules.inject(context),
+          beforeToolCall: (call) => projectRules.beforeToolCall(call),
+          model,
+          cwd: runtimeCwd,
+        },
+      },
+      policyRevision: `legacy-cli-${approvalMode}-v2`,
+    };
+  },
+});
+const modelResolver = createCliRuntimeModelResolver(providerRegistry);
+if (cliConfig.model) modelResolver.register(cliConfig.model);
 const runtime = await createRuntime({
   workspace: {
     cwd: runtimeCwd,
     ...(resumeTarget && { workspaceId: resumeTarget.ownerWorkspaceId }),
   },                                          // 可列索引，但尚未创建/attach thread
   storage,                                    // 显式 port；runtime core 不自行找目录
-  modelResolver: createLegacyModelResolver(providerConfigs),
-  permissionPolicy: createLegacyPermissionPolicy({ cwd: runtimeCwd }),
-  threadDriverFactory: createLegacySessionThreadDriverFactory({
-    createAttachmentConfig: ({ workspaceId, threadId, model, permissionCeiling }) => {
-      const approvalBroker = new ApprovalBroker();
-      const permissionState = createAttachmentPermissionState(permissionCeiling);
-      return {
-        approvalBroker,
-        permissionState,
-        legacyRuleRevision: legacyPolicyRevision({ cwd: runtimeCwd, workspaceId, threadId }),
-        agentConfig: {
-          streamFn: createLegacyProviderDispatcher(providerConfigs),
-          tools: createCodingTools(),
-          systemPrompt: assembleLegacyPrompt({ cwd: runtimeCwd, workspaceId, threadId }),
-          beforeToolCall: createThreadPolicyHook({
-            workspaceId, threadId, approvalBroker, permissionState,
-          }),
-          model,
-          cwd: runtimeCwd,
-        },
-      };
-    },
-  }),
+  modelResolver,
+  permissionPolicy: createLegacyPermissionPolicy(),
+  threadDriverFactory: driverFactory,
 });                                             // 未选模型时仍是零 thread/零 journal
 
-const ids = flags.eventFormat === 'envelope'
-  ? undefined
-  : await selectOrAllocateDefaultThread(runtime, {
-      workspaceId: runtime.workspaceId,
-      resumeTarget,
-      newThreadId: () => runtime.newThreadId(),
-      newOpId: () => runtime.newOpId(),
-    });
-
 if (flags.json && flags.eventFormat === 'envelope') {
-  const events = runtime.events();              // 返回前 workspace-wide hot-register
-  return startEnvelopeHeadless(runtime, { events }); // 不隐式 create/resume 默认 thread
+  return startEnvelopeHeadless(runtime);        // 不隐式 create/resume 默认 thread
 }
 
-if (!interactive) {
-  if (!cliConfig.model) exitWithLoginAndModelHint();
-  if (!ids) throw new Error('default thread identity is required');
-  const events = runtime.events({ threadIds: [ids.threadId] }); // 返回前已 hot-register
-  const receipt = await submitCreateOrResume(runtime, ids, cliConfig.model);
-  if (!receipt.accepted) return reportRejectedReceipt(receipt);
-  const snapshot = await runtime.getThreadSnapshot(ids.threadId);
-  const attachment = { threadId: ids.threadId, events, snapshot };
-  if (flags.json) return startHeadless(runtime, attachment, flags.eventFormat);
-  return runOneShotWithPlainRenderer(runtime, attachment);
-}
-
-const frontend = new InteractiveFrontend({ runtime, cliConfig });
+const frontend = new RuntimeFrontendSession({
+  runtime,
+  attachment: resumeTarget ? 'resume' : 'create',
+  ...(resumeTarget && { threadId: resumeTarget.threadId }),
+  ...(cliConfig.model && { initialModel: cliConfig.model }),
+  registerModel: (model) => modelResolver.register(model),
+});
+await frontend.initialize();
+const approval = approvalMode === 'interactive'
+  ? {
+      broker: { resolve: (requestId, decision) => frontend.resolveApproval(requestId, decision) },
+      onAbort: () => {},
+      subscribe: () => () => {},
+    }
+  : undefined;                                 // 只翻译成 control_response/abort op，不持 waiter
 if (stdinIsTty && stdoutIsTty && TERM !== 'dumb') {
   try {
     const { startTui } = await import('./tui.js');     // native 依赖只在这里加载
-    return await startTui(frontend);
+    return await startTui(frontend, approval);
   } catch (error) {
     logTuiFallback(error);                             // startTui 已恢复终端
   }
 }
-return startRepl(frontend, createClassicRenderer(...));
+if (flags.json) return startHeadless(frontend, { approval });
+if (flags.prompt) return runOneShotWithPlainRenderer(frontend, flags.prompt);
+return startRepl(frontend, createClassicRenderer(...), approval);
 ```
 
 `resolveRuntimeStorageRoots()` 把所有目录选择收口在 CLI：未传覆盖时，legacy session root 是
@@ -196,8 +203,9 @@ Runtime 自身绝不 fallback ambient `process.cwd()`。global picker 仍可列�
 
 第二项列明的收紧是 mutable ownership：阶段 1+ production CLI 对同一 owner workspace 获取排他
 SupervisorLease；已有 CLI/Runtime 存活时，第二个同 cwd mutable CLI 在 recovery/attach 前报
-`workspace_in_use`。单实例命令/事件与直接构造 exported legacy Session 的双实例行为不变；并发 picker/
-审计只走 `listStoredThreads()` 等只读入口。
+`workspace_in_use`。direct exported `Session` 不取得这把 workspace lease：不同 session id 仍可并行，
+但同一 backend/session id 的双 `resume` 自阶段 2 起稳定报 `session_in_use`；并发 picker/审计只走
+`listStoredThreads()` 等只读入口。
 
 flag parser 只保留空格形式 `--resume <legacy-id>` 的既有日期形状启发式，避免把
 `coda --resume "prompt"` 的 prompt 误吞；任意 opaque ThreadId 必须使用无歧义的
@@ -211,21 +219,25 @@ workspace 内唯一，global catalog 若匹配 0 项则 not found、1 项才直�
 subscription，不生成默认 ThreadId、不隐式提交 lifecycle op；每个 create/resume 的 ModelRef 来自调用方
 RuntimeOp。legacy `--json` 与 one-shot/plain 才使用伪码中的单 thread attachment。
 
-`InteractiveFrontend` 始终持有 catalog-capable RuntimePort，但可以没有 attached thread：没有有效
+`RuntimeFrontendSession` 是 CLI 的 legacy `CliSession` adapter；它始终持有 catalog-capable
+RuntimePort，但可以没有 attached thread：没有有效
 模型选择时 `messages=[]`、usage 为零，prompt
 给出 `/login` → `/model` 的可执行提示；只有 `/model` 成功或最近一次**用户显式选择**仍有效时，
-才显式提交携带 ModelRef 的 create/resume 并 attach 默认 thread。CLI 不持有 Agent，也不直接调用 `Session`、retry、compaction
-或 approval resolver。它先调用 `runtime.events({ threadIds: [threadId] })` 建立 hot subscription，再
+才显式提交携带 ModelRef 的 create/resume 并 attach 默认 thread。CLI 不持有 Agent，也不直接调用
+`Session`、retry、compaction 或 control waiter；审批按键只由 adapter 翻译为 `control_response`/`abort`
+op。它先调用 `runtime.events({ threadIds: [threadId] })` 建立 hot subscription，再
 提交 create/resume op；receipt 后调用 `runtime.getThreadSnapshot(threadId)`，用 transcript/usage 及
 queue/plan/control/in-flight projection hydrate renderer，并丢弃订阅队列中
 `seq <= snapshot.highWaterSeq` 的 envelope，之后只增量应用更大 seq。CLI 不直接读 repository；
 `retry_scheduled`、`compaction_start` 与 `control_request` 都从同一 envelope 流到达。旧 v1 历史只在
 snapshot 中出现，不伪造过去的 envelope。
 
-`createAttachmentConfig` 每次 attachment 调用一次，必须构造全新的 ApprovalBroker/pending map、
-project-rule/doom-loop/active-run permission state，并让该 attachment 的新 Agent 自建 FileTracker；不能浅拷贝
-捕获同一对象的 hook，也不能让 ToolDefinition 捕获 tracker。provider
-dispatcher 与不可变 tool 定义可共享。稳定 `legacyRuleRevision` 与当前 run command/reservation 的
+`createLegacySessionThreadDriverFactory.configure` 每次 attachment 调用一次，必须构造全新的
+project-rule/doom-loop state，并让该 attachment 的新 Agent 自建 FileTracker；不能浅拷贝捕获同一对象的
+hook，也不能让 ToolDefinition 捕获 tracker。CLI 同时注入 immutable
+`createStaticLegacyApprovalAdapterFactory`；每个 adapter 只做 frozen preflight/applyResponse，durable
+pattern repository 与 pending control waiter 都由 Runtime 在 Supervisor lease 下拥有。provider
+dispatcher 与不可变 tool 定义可共享。稳定 `policyRevision` 与当前 run command/reservation 的
 `permissionCeiling.revision` 组成 control request/resolution 的冻结 `policyRevision`；相同 thread 的
 不同 run 不能沿用 attachment 初始 revision。Supervisor 通过独立 PermissionPolicyPort 派生并持久化
 run permissionCeiling，driver 在任何 sampling/tool/approval 前把该同一对象绑定到 attachment 的
@@ -234,16 +246,16 @@ EffectivePolicySnapshot 统一解释。正常 workspace picker 的候选只来�
 持久索引；CLI `--continue/--resume` 则只经上面的 storage global catalog bootstrap，CLI 本身仍不
 扫描或直读 repository。两者选中后都严格执行 events → resume → snapshot 顺序。
 
-以上是阶段 1 composition：`LegacySessionThreadDriverFactory` 是隔离的过渡 adapter，不属于
+以上是阶段 2 composition：`LegacySessionThreadDriverFactory` 是隔离的过渡 adapter，不属于
 Supervisor core；阶段 3 才把静态 provider/tool 输入替换成 `ProviderAdapterRegistry` 与
 `CapabilityRegistry`。CLI 始终只负责选择并注入实现，不在 adapter 外持有 run/mailbox 状态机。
 
-阶段 1 只有临时 per-thread event journal/writer 的提交能背压 driver；阶段 2 原样提取为
-`EventCommitter`。TUI 消费自己的 runtime subscription 队列（阶段 2 由 EventHub 提供）并按
+阶段 2 已把临时 per-thread writer 提取为 `TranscriptRepository` + `EventCommitter`，并由
+workspace-owned `EventHub` 提供 runtime subscription。TUI 消费自己的队列并按
 `maxFps:30` 合并绘制；classic/plain/headless 的 stdout `drain` 只背压各自输出泵，不反向阻塞
-Runtime，退出则必须等待输出泵 drain。阶段 0 现有 Session listener await/drain 路径只作为 legacy
-行为；阶段 1 新 RuntimePort/production CLI 使用最小异步 subscription queue，而旧 exported Session
-类仍保留 awaited listener。阶段 2 才把 Session/Agent 主路径也统一为 EventCommitter→EventHub。
+Runtime，退出则必须等待输出泵 drain。direct `Agent.subscribe` 仍保留阶段 0 awaited Emitter 语义；
+exported `Session.subscribe` 已经由 standalone private durable cursor pump 异步投递，慢 listener 或
+reject 不会反向延迟 run/`waitForIdle()`。
 
 ### 2.1 项目规则感知(`AGENTS.md`)
 
@@ -526,10 +538,10 @@ thread_close op；close 内部传播 cancellation 并结案已有 control/run �
   `op_rejected`/receipt 本身仍被 public SessionEvent projector 丢弃，不能为了生成这两条兼容行为把状态机
   塞回 projector。
 - **stdout 纪律:除 NDJSON 外零输出。** 日志、警告一律走 stderr。这条不守住,下游 `| jq` 直接坏。
-- headless 从 runtime event subscription（阶段 2 起由 EventHub 实现）异步消费并写入自己的有序输出队列；stdout `drain` 只背压该输出泵，不反向
+- headless 从 runtime EventHub subscription 异步消费并写入自己的有序输出队列；stdout `drain` 只背压该输出泵，不反向
   背压 Agent 或其他 observer。shutdown 必须等输出泵完整 drain。默认 legacy 格式保留 payload、顺序
   与退出纪律；阶段 0 CLI 通过 Session listener await drain 的内部 timing 不属于 wire 格式，CLI 在
-  阶段 1 切 RuntimePort 时由输出泵接管。旧 exported Session listener 到阶段 2 前仍保持原 timing。
+  阶段 1 切 RuntimePort 时由输出泵接管；阶段 2 的 exported Session listener 也已改为异步投递。
 - 无法解析的 stdin 行:legacy 输出 `{type:'error', fatal:false, message:'invalid command: …'}`；envelope
   transport 输出 `{type:'transport_error', fatal:false, message:'invalid command: …'}`，均继续读下一行。
 - runtime iterator 的 `EventSubscriptionGapError` / `RuntimeEventStreamError` 只在已排队 envelope 输出并

@@ -2,7 +2,7 @@
 
 # 11 实施路线图：Supervisor Runtime 阶段 0–3
 
-本文规定从当前单 `Session` 实现迁移到可嵌入多线程 Runtime 的唯一 active roadmap。目标语义以
+本文记录从原单 `Session` 实现迁移到可嵌入多线程 Runtime 的唯一 active roadmap。目标语义以
 [12-supervisor-runtime](./12-supervisor-runtime.md) 为 canonical 契约；原 M0–M7 已经形成的
 protocol、provider、agent、工具、CLI、持久化、approval、retry 与 compaction 能力是**历史实现
 基线**，不再是待执行路线，也不得覆盖阶段 0–3 的新约束。
@@ -88,7 +88,7 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
   `RuntimeOp`、`OpReceipt`、`RuntimeEvent`、`EventEnvelope`、JSON-safe PermissionCeilingSnapshot 与
   per-create/run PermissionNarrowing；相对导入保持 `.js`。
 - envelope 使用目标 thread 的独立 `seq`；阶段 1 由 runtime 内部的临时 event journal/writer 持久化
-  high-water mark，close/resume 后继续递增；阶段 2 将其原样提取进 EventCommitter/Repository。
+  high-water mark，close/resume 后继续递增；阶段 2 已将其原样提取进 EventCommitter/Repository。
 - 同一临时 thread journal 在 accepted receipt 前保存完整 RuntimeOp payload、resolved abort target、
   run reservation 与 op lifecycle；dispatcher cache 可在内存，crash 后从 journal 重建 suspended FIFO。
 - `src/runtime/` 提供 `Supervisor`、`RuntimePort` 与显式 factory；一个 Supervisor 只服务一个
@@ -114,7 +114,9 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
   才从 legacy 文件建 seed。
 - Supervisor core 只依赖注入的 `ThreadDriverFactory/ThreadDriverPort`。阶段 1 的独立 legacy adapter
   为每个 ThreadId 驱动一个现有 Session，并把 SessionEvent/ApprovalBroker 映射到 canonical event/op；
-  阶段 2 在不改 RuntimePort 的前提下用 ThreadRuntime 替换它。阶段 1 factory 接收
+  阶段 2 在不改 RuntimePort 的前提下保留这条窄 static adapter，但让它直接组合
+  `LegacyThreadExecution`，并把 durable mailbox/control、repository/committer/hub 归还 canonical
+  ThreadRuntime。阶段 1 factory 接收
   per-attachment config factory：无状态 StreamFn/ToolDefinition 可共享，ApprovalBroker、pending map、
   FileTracker 与 rule/policy/doom-loop 状态必须每 thread 新建；不提前要求阶段 3 registry。
 - legacy Session 的内部 retry/compaction 必须经 Supervisor 注入的 `reserveSuccessor` 权威 hook 取得
@@ -151,7 +153,8 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
 - CLI 收敛为参数/配置/composition 与前端适配：输入映射为 op，canonical envelope 映射为 UI；
   legacy `Session`/headless 使用 projector，默认输出保持旧形态，显式 flag 才输出 envelope。
 - exported Session 类在阶段 1 保持现有 promise/sync throw 与 awaited listener 实现；runtime driver 的
-  完整 causal completion 不泄漏给旧 prompt promise，阶段 2 才把 Session 改为 facade。
+  完整 causal completion 不泄漏给旧 prompt promise。阶段 2 已把 Session 收窄为 facade，并仅把普通
+  listener timing 改为异步 observer。
 - 旧 JSONL v1 确定性映射到默认 workspace/thread；恢复不自动启动 run。retry/continue 创建新
   `RunId`，用 `predecessorRunId` 关联。
 
@@ -212,13 +215,13 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
 - Supervisor 是否只依赖窄 driver port，Session/ApprovalBroker import 是否被隔离在 legacy adapter，
   从而既能阶段 1 多 thread，又没有提前拆 Session 或实现 registry。
 
-review 清零、`bun run check` 全绿并完成阶段 1 commit/push 后，才能拆分 Session。
+阶段 1 的 review、check、commit/push gate 完成后，阶段 2 才开始拆分 Session；该串行门禁已执行。
 
 ## 3. 阶段 2：拆分 Session 与事件通道
 
 ### 3.1 目标
 
-把当前 Session 的执行编排、持久化、retry、compaction 与广播职责拆成窄协作者，同时保持现有
+把原 Session 的执行编排、持久化、retry、compaction 与广播职责拆成窄协作者，同时保持现有
 单 Agent 生命周期和 legacy 投影不变。只有权威提交背压 Agent，普通观察者异步消费。
 
 ### 3.2 交付物与职责
@@ -227,22 +230,31 @@ review 清零、`bun run check` 全绿并完成阶段 1 commit/push 后，才能
 |---|---|
 | `ThreadRuntime` | 单 thread active-run 门禁、mailbox dispatcher、六组件编排 |
 | `TranscriptRepository` | 提供完整 thread journal 的 append/load/fold IO 与 transcript view（含 identity/mailbox/control/event/run/compaction records）；不分配 seq、不决定 control 状态 |
-| `RetryCoordinator` | 错误分类、可取消退避、创建 successor run |
-| `CompactionCoordinator` | 阈值、摘要、合法切点与 successor run 协调 |
+| `RetryCoordinator` | 错误分类、attempt/可取消退避与重试决策；不分配 identity |
+| `CompactionCoordinator` | 阈值、摘要、合法切点与 transform plan；不分配 identity |
 | `EventCommitter` | 唯一权威 writer：由 runtime-only awaited authoritative sink 调用 repository append port，分配 per-thread seq、提交 transcript/seq/control 并返回 envelope 或连续原子 batch；不注册为 public subscriber |
 | `EventHub` | Runtime-owned、每 workspace 一个；汇聚 per-thread committer，支持 future-thread filter、每订阅者 FIFO、cursor/gap/退订与错误隔离 |
 
-`Session` 保留为一个默认 thread 的 facade，只委托 `ThreadRuntime` 并投影事件；不允许在 facade
+阶段 2 的实现映射已经固定：`ThreadJournalWriter` 组合 `TranscriptRepository` 与 `EventCommitter`，
+Supervisor 只创建一个 workspace `EventHub`；legacy execution 组合 `RetryCoordinator` 与
+`CompactionCoordinator`，不再自己持有两套决策状态。production CLI 继续通过
+`LegacySessionThreadDriverFactory` 适配静态 Agent/provider/tool，但 approval 改由
+`LegacyApprovalAdapter` + Runtime-owned durable pattern repository/control waiter 承担，CLI 自己只保留
+决议到 `control_response`/`abort` op 的前端映射。
+
+`Session` 已收窄为一个默认 thread 的 facade，只委托 `ThreadRuntime` 并投影事件；不允许在 facade
 重新实现 retry、compaction、approval 或 fan-out。需要调用方决议的 approval/resource confirmation
 统一为 `control_request/control_resolved`，request 和 response 都走 EventCommitter；child
 `thread_result` 是无需应答的通知事件。legacy projector 把 approval 分支恢复为旧事件。
 
 exported direct `Session.create/resume` 使用 internal `StandaloneSessionHost`，不各自创建 Runtime 或争抢
 workspace SupervisorLease：每个不同 session id 有自己的 ThreadRuntime、per-instance AgentConfig、private
-EventHub 与 backend/sidecar `StandaloneSessionLease`。standalone approval repository 用该 lease 的私有
-outbox + `(workspace,thread,responseOpId)` receipt key，再走共享 approvals lock/CAS；ThreadRuntime 仍只见
-同一 LegacyApprovalPatternRepositoryPort/control 链。不同 session id 同 cwd 可并行且配置互不串；同一
-backend 双 resume 阶段 2 起 `session_in_use`。direct Session 与 Runtime 共写 claimed backend 仍 unsupported。
+EventHub 与 backend/sidecar `StandaloneSessionLease`。既有 direct Session 的任意 opaque
+`AgentConfig.beforeToolCall` 没有结构化 response ingress，故其中 caller-owned ApprovalBroker/policy gate
+明确保持 process-local 兼容行为；host 不猜测 callback、不制造 phantom pending control。durable
+LegacyApprovalPatternRepository/control 链只约束 Runtime/CLI composition。不同 session id 同 cwd 可并行且
+配置互不串；同一 backend 双 resume 阶段 2 起 `session_in_use`。direct Session 与 Runtime 共写 claimed
+backend 仍 unsupported。
 
 facade 保持 prompt/continue 在 root Agent run boundary settle、waitForIdle 等全部 causal successor；
 同步 void/guard 方法经本地 admission shim 进入同一 mailbox。唯一有意改变的旧 timing 是普通
@@ -260,9 +272,9 @@ Agent/control event
 headless stdout `drain` 只背压该前端的输出泵，不能反向卡住 Agent；shutdown 必须等待输出泵排空。
 
 阶段 1 已在 legacy driver **边缘**完成 `approval_request ↔ control_request` 与
-`control_response ↔ ApprovalBroker` 的 wire 映射，以保持 RuntimeEvent 联合单一；阶段 2 的新增语义
-是把 request/response、等待者状态与 abort 结案移入同一 durable EventCommitter 链，并删除 core 对
-legacy broker 的依赖，不是再次改变 public wire。registry/PolicyEngine 尚未进入本阶段，因此 static
+`control_response ↔ ApprovalBroker` 的 wire 映射，以保持 RuntimeEvent 联合单一；阶段 2 已把
+request/response、等待者状态与 abort 结案移入同一 durable EventCommitter 链，并删除 core 对
+legacy broker 的依赖，没有再次改变 public wire。registry/PolicyEngine 尚未进入本阶段，因此 static
 ThreadRuntime 必须使用 [12 §6.2](./12-supervisor-runtime.md) 的 `LegacyApprovalAdapter` 窄 bridge：CLI
 注入 factory，Runtime 取得 SupervisorLease 后由 workspace storage 打开 fence-bound
 LegacyApprovalPatternRepository，per-thread adapter 只做 preflight/applyResponse，不发事件或持 waiter。
@@ -281,11 +293,14 @@ ask 的 `{patterns,forceConfirm}` 随 control_request 持久化；allow_always �
 2. 每个 observer 内 envelope 顺序不变；溢出明确 disconnect/gap，不静默丢关键事件。
    无 gap channel 的 Session/Agent facade 例外使用 durable cursor-backed pump：把 listener gate 卡到
    超过 EventHub capacity，run/其他 thread 仍完成，放行后 listener 收到完整、不重复、严格有序序列；
-   listener reject 只诊断并继续后续事件，不自动退订；unsubscribe/close 才释放 retention pin。
+   listener reject 只诊断并继续后续事件，不自动退订；standalone append-only sidecar 保留完整 backlog，
+   unsubscribe/close 释放 cursor。
 3. control request 先权威提交再等待，response 先提交再 resolve；first-wins response claim 拒绝第二 OpId，
    同 OpId duplicate 回原 receipt。approval 等待中 abort 先传播
    cancellation，结案为 aborted 而非 denied。
    kind/proposal invalid_decision 在 op_accepted/claim 前 rejected，request 仍 pending且 valid 新 OpId 可答。
+   该 invariant 覆盖 Runtime/CLI durable bridge；direct Session 的 opaque caller-owned callback 按上述兼容
+   例外测试原行为与取消，不伪造 canonical control。
 4. retry/compaction/usage/resume/尾行截断与 tool-call 配对回归保持；successor run identity 正确。
 5. facade 与默认 headless 的 legacy 事件相对顺序、内容和退出纪律保持。
 6. `ThreadRuntime`、repository、coordinator、committer、hub 均有窄单测，集成测试不读取私有状态。

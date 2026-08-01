@@ -8,6 +8,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -193,6 +194,135 @@ describe('FileRuntimeStorage', () => {
 
     const second = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
     await expect(second.acquireSupervisorLease('schema-second')).rejects.toBeInstanceOf(RuntimeStorageError);
+    await second.close();
+  });
+
+  test('commits legacy approval patterns once per exact workspace receipt and fences closed writers', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_legacy_approval_receipt' as WorkspaceId;
+    const storage = createFileRuntimeStorage({ root, legacyApprovalFile: approvals });
+    const workspace = await storage.openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('legacy-approval-receipt');
+    const repository = await workspace.openLegacyApprovalPatternRepository?.(lease);
+    if (repository === undefined) throw new Error('legacy approval repository unavailable');
+    const input = {
+      responseOpId: 'op_e_a1000000000000000000000000000001' as ExternalOpId,
+      acceptedAt: 10,
+      patterns: ['bash:npm *', 'edit:/workspace/**'] as const,
+    };
+    expect((await repository.commit(input)).kind).toBe('applied');
+    expect((await repository.commit(input)).kind).toBe('duplicate');
+    expect(await repository.commit({ ...input, acceptedAt: 11 })).toMatchObject({ kind: 'conflict' });
+    expect(JSON.parse(readFileSync(approvals, 'utf8'))).toEqual([
+      'bash:npm *',
+      'edit:/workspace/**',
+    ]);
+    await repository.close();
+    expect(await repository.commit(input)).toMatchObject({ kind: 'fenced', code: 'stale_fence' });
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('waits through ordinary global approval lock contention instead of degrading the workspace', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const workspaceId = 'ws_legacy_approval_lock_wait' as WorkspaceId;
+    const workspace = await createFileRuntimeStorage({ root, legacyApprovalFile: approvals })
+      .openWorkspace({ cwd: path.join(root, 'cwd'), workspaceId });
+    const lease = await workspace.acquireSupervisorLease('legacy-approval-lock-wait');
+    const repository = await workspace.openLegacyApprovalPatternRepository?.(lease);
+    if (repository === undefined) throw new Error('legacy approval repository unavailable');
+    const lockFile = `${approvals}.lock`;
+    writeFileSync(lockFile, `${JSON.stringify({ version: 1, pid: process.pid, nonce: 'held-by-test' })}\n`);
+    const release = setTimeout(() => { unlinkSync(lockFile); }, 40);
+
+    try {
+      await expect(repository.commit({
+        responseOpId: 'op_e_a3000000000000000000000000000003' as ExternalOpId,
+        acceptedAt: 30,
+        patterns: ['bash:bun test'] as const,
+      })).resolves.toMatchObject({ kind: 'applied' });
+    } finally {
+      clearTimeout(release);
+    }
+    await repository.close();
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('a lease lost while waiting for the global approval lock cannot update the shared Set', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const workspaceId = 'ws_legacy_approval_stale_waiter' as WorkspaceId;
+    const workspace = await createFileRuntimeStorage({ root, legacyApprovalFile: approvals })
+      .openWorkspace({ cwd: path.join(root, 'cwd'), workspaceId });
+    const lease = await workspace.acquireSupervisorLease('legacy-approval-stale-waiter');
+    const repository = await workspace.openLegacyApprovalPatternRepository?.(lease);
+    if (repository === undefined) throw new Error('legacy approval repository unavailable');
+    const lockFile = `${approvals}.lock`;
+    writeFileSync(lockFile, `${JSON.stringify({ version: 1, pid: process.pid, nonce: 'held-by-test' })}\n`);
+
+    const pending = repository.commit({
+      responseOpId: 'op_e_a3000000000000000000000000000004' as ExternalOpId,
+      acceptedAt: 31,
+      patterns: ['bash:bun test stale'] as const,
+    });
+    await workspace.releaseSupervisorLease(lease);
+    unlinkSync(lockFile);
+
+    await expect(pending).resolves.toMatchObject({ kind: 'fenced', code: 'stale_fence' });
+    expect(existsSync(approvals)).toBe(false);
+    await repository.close();
+    await workspace.close();
+  });
+
+  test('replays a reserved pattern outbox before returning the recovery repository', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_legacy_approval_recovery' as WorkspaceId;
+    const storage = createFileRuntimeStorage({ root, legacyApprovalFile: approvals });
+    const first = await storage.openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('legacy-approval-crash-first');
+    const firstRepository = await first.openLegacyApprovalPatternRepository?.(firstLease);
+    await firstRepository?.close();
+    await first.releaseSupervisorLease(firstLease);
+    await first.close();
+
+    const responseOpId = 'op_e_a2000000000000000000000000000002' as ExternalOpId;
+    writeFileSync(path.join(workspacePath(root, workspaceId), 'legacy-approval-outbox.json'), `${JSON.stringify({
+      version: 1,
+      receipts: [{
+        responseOpId,
+        acceptedAt: 20,
+        patterns: ['bash:bun test', 'edit:/project/**'],
+        state: 'reserved',
+      }],
+    })}\n`);
+    // Existing behavior is intentionally tolerant: a corrupt global Set is treated as empty,
+    // then the fenced reserved outbox repairs it before any Runtime attachment can start.
+    writeFileSync(approvals, '{bad json');
+
+    const second = await storage.openWorkspace({ cwd, workspaceId });
+    const secondLease = await second.acquireSupervisorLease('legacy-approval-crash-second');
+    const recovered = await second.openLegacyApprovalPatternRepository?.(secondLease);
+    if (recovered === undefined) throw new Error('legacy approval repository unavailable');
+    expect(recovered.startupDiagnostics?.()).toEqual([{
+      code: 'legacy_approvals_invalid_ignored',
+      message: 'Invalid legacy approvals file was ignored and treated as an empty pattern Set',
+    }]);
+    expect((await recovered.snapshot()).patterns).toEqual([
+      'bash:bun test',
+      'edit:/project/**',
+    ]);
+    const outbox = JSON.parse(
+      readFileSync(path.join(workspacePath(root, workspaceId), 'legacy-approval-outbox.json'), 'utf8'),
+    ) as { receipts: Array<{ state: string }> };
+    expect(outbox.receipts[0]?.state).toBe('applied');
+    await recovered.close();
+    await second.releaseSupervisorLease(secondLease);
     await second.close();
   });
 

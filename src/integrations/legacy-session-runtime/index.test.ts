@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, vi } from 'bun:test';
+import { z } from 'zod';
 import type {
-  AgentEvent,
   AgentMessage,
   EventEnvelope,
   ExternalOpId,
@@ -16,16 +16,23 @@ import type {
   WorkspaceId,
 } from '../../protocol/index.js';
 import { createFauxStreamFn, createGate } from '../../providers/faux/index.js';
-import { createFileRuntimeStorage, createRuntime } from '../../runtime/index.js';
+import {
+  createFileRuntimeStorage,
+  createMemoryRuntimeStorage,
+  createRuntime,
+} from '../../runtime/index.js';
 import type {
+  LegacyApprovalAdapterFactory,
+  LegacyApprovalPatternRepositoryPort,
   PermissionPolicyPort,
   ThreadDriverCheckpoint,
   ThreadDriverEvent,
   ThreadDriverHostServices,
-  ThreadDriverPort,
 } from '../../runtime/ports.js';
 import { loadSession, Session } from '../../session/index.js';
 import type { ModelPricing } from '../../session/index.js';
+import { LegacyThreadExecution } from '../../session/legacy-thread-execution.js';
+import type { ToolDefinition } from '../../tools/types.js';
 import {
   createLegacySessionThreadDriverFactory,
   LegacySessionCheckpointMismatchError,
@@ -136,6 +143,146 @@ function fixedPermissionPolicy(): PermissionPolicyPort {
 }
 
 describe('legacy Session ThreadDriver factory', () => {
+  it('adapter open 后 mirror prepare 失败会精确 close 一次', async () => {
+    const dir = tempDir();
+    const creationKey = 'cleanup-mirror-prepare';
+    const sessionId = deterministicSessionIdForTest(creationKey);
+    writeFileSync(path.join(dir, `${sessionId}.jsonl`), 'foreign backend\n', 'utf8');
+    const approval = trackedApprovalAdapterFactory();
+    const factory = cleanupTestFactory(dir, approval.factory);
+
+    await expect(factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey,
+      legacyApprovalPatterns: approvalPatterns(),
+    }, host().port)).rejects.toBeInstanceOf(LegacySessionCheckpointMismatchError);
+    expect(approval.opens).toBe(1);
+    expect(approval.closes).toBe(1);
+  });
+
+  it('Session create 失败会清理已打开的 adapter', async () => {
+    const dir = tempDir();
+    const approval = trackedApprovalAdapterFactory();
+    const create = vi.spyOn(LegacyThreadExecution, 'createWithId').mockImplementation(async () => {
+      throw new Error('injected Session create failure');
+    });
+    try {
+      await expect(cleanupTestFactory(dir, approval.factory).create({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        model: MODEL,
+        permissionCeiling: CEILING,
+        creationKey: 'cleanup-session-create',
+        legacyApprovalPatterns: approvalPatterns(),
+      }, host().port)).rejects.toThrow('injected Session create failure');
+      expect(approval.opens).toBe(1);
+      expect(approval.closes).toBe(1);
+    } finally {
+      create.mockRestore();
+    }
+  });
+
+  it('Session resume 失败会清理已打开的 adapter', async () => {
+    const dir = tempDir();
+    const seed = await createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'resume cleanup seed',
+            cwd: dir,
+          },
+        },
+      }),
+    }).create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'cleanup-session-resume',
+    }, host().port);
+    await seed.driver.close();
+
+    const approval = trackedApprovalAdapterFactory();
+    const resume = vi.spyOn(LegacyThreadExecution, 'resume').mockImplementation(async () => {
+      throw new Error('injected Session resume failure');
+    });
+    try {
+      await expect(cleanupTestFactory(dir, approval.factory).resume({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        model: MODEL,
+        permissionCeiling: CEILING,
+        durableRef: seed.durableRef,
+        committedCheckpoint: seed.initialCheckpoint,
+        usedRequestIds: [],
+        legacyApprovalPatterns: approvalPatterns(),
+      }, host().port)).rejects.toThrow('injected Session resume failure');
+      expect(approval.opens).toBe(1);
+      expect(approval.closes).toBe(1);
+    } finally {
+      resume.mockRestore();
+    }
+  });
+
+  it('mirror finish 失败会同时 close 已创建 Session 与 adapter', async () => {
+    const dir = tempDir();
+    const approval = trackedApprovalAdapterFactory();
+    const originalCreate = LegacyThreadExecution.createWithId.bind(LegacyThreadExecution);
+    const create = vi.spyOn(LegacyThreadExecution, 'createWithId').mockImplementation(async (...args) => {
+      const session = await originalCreate(...args);
+      writeFileSync(path.join(dir, `${args[0]}.jsonl`), 'foreign tail\n', { flag: 'a' });
+      return session;
+    });
+    const close = vi.spyOn(LegacyThreadExecution.prototype, 'close');
+    try {
+      await expect(cleanupTestFactory(dir, approval.factory).create({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        model: MODEL,
+        permissionCeiling: CEILING,
+        creationKey: 'cleanup-mirror-finish',
+        legacyApprovalPatterns: approvalPatterns(),
+      }, host().port)).rejects.toThrow(/created backend|fingerprint|concurrent/i);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(approval.closes).toBe(1);
+    } finally {
+      close.mockRestore();
+      create.mockRestore();
+    }
+  });
+
+  it('driver 组装后 checkpoint 投影失败通过 driver 统一 close Session 与 adapter', async () => {
+    const dir = tempDir();
+    const approval = trackedApprovalAdapterFactory();
+    const projection = vi.spyOn(LegacyThreadExecution.prototype, 'compactionCheckpoint')
+      .mockImplementation(() => {
+        throw new Error('injected attachment projection failure');
+      });
+    const close = vi.spyOn(LegacyThreadExecution.prototype, 'close');
+    try {
+      await expect(cleanupTestFactory(dir, approval.factory).create({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        model: MODEL,
+        permissionCeiling: CEILING,
+        creationKey: 'cleanup-attachment-projection',
+        legacyApprovalPatterns: approvalPatterns(),
+      }, host().port)).rejects.toThrow('injected attachment projection failure');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(approval.closes).toBe(1);
+    } finally {
+      close.mockRestore();
+      projection.mockRestore();
+    }
+  });
+
   it('creationKey 经哈希形成幂等安全 backend，重复 create 不产生第二个文件', async () => {
     const dir = tempDir();
     let configurations = 0;
@@ -578,6 +725,110 @@ describe('legacy Session ThreadDriver factory', () => {
     }
   });
 
+  it('真实 ThreadDriverHostController 保留 approval 调用 receiver 并完成 durable 决议', async () => {
+    const dir = tempDir();
+    let executed = false;
+    const tool: ToolDefinition<{ value: string }> = {
+      name: 'danger',
+      description: 'approval receiver regression tool',
+      parameters: z.object({ value: z.string() }),
+      kind: 'execute',
+      async execute() {
+        executed = true;
+        return { content: [{ type: 'text', text: 'executed' }] };
+      },
+    };
+    const approvalAdapterFactory: LegacyApprovalAdapterFactory = {
+      async open() {
+        return {
+          async preflight() {
+            return {
+              kind: 'ask',
+              description: 'approve danger',
+              proposal: { patterns: [], forceConfirm: true },
+            };
+          },
+          async applyResponse(input) {
+            return {
+              ok: true,
+              effectiveDecision: input.decision,
+              persistedPatterns: [],
+            };
+          },
+          async close() {},
+        };
+      },
+    };
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      approvalAdapterFactory,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({
+              turns: [
+                { events: [{ kind: 'tool_call', name: tool.name, args: { value: 'x' } }] },
+                { events: [{ kind: 'text', text: 'done' }] },
+              ],
+            }),
+            model,
+            tools: [tool],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const runtime = await createRuntime({
+      workspace: { cwd: dir, workspaceId: WORKSPACE_ID },
+      storage: createMemoryRuntimeStorage(),
+      modelResolver: { resolve: async () => ({ ok: true, model: MODEL }) },
+      permissionPolicy: fixedPermissionPolicy(),
+      threadDriverFactory: factory,
+    });
+    const threadId = runtime.newThreadId();
+    const iterator = runtime.events({ threadIds: [threadId] })[Symbol.asyncIterator]();
+    try {
+      expect((await runtime.submit({
+        type: 'thread_create',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        model: MODEL.ref,
+      })).accepted).toBe(true);
+
+      expect((await runtime.submit({
+        type: 'prompt',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        text: 'run danger',
+      })).accepted).toBe(true);
+      const boundary = await nextRuntimeEvent(iterator, (envelope) =>
+        envelope.event.type === 'control_request' || envelope.event.type === 'agent_end');
+      expect(boundary.event.type).toBe('control_request');
+      if (boundary.event.type !== 'control_request') throw new Error('approval request was skipped');
+      expect(boundary.event.kind).toBe('approval');
+
+      expect((await runtime.submit({
+        type: 'control_response',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        requestId: boundary.event.requestId,
+        decision: 'allow_once',
+      })).accepted).toBe(true);
+      await nextRuntimeEvent(iterator, (envelope) => envelope.event.type === 'agent_end');
+      expect(executed).toBe(true);
+      expect((await runtime.getThreadSnapshot(threadId))?.transcript).toContainEqual(
+        expect.objectContaining({ role: 'tool_result', isError: false }),
+      );
+    } finally {
+      await iterator.return?.();
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
   it('映射 run/turn 身份；authoritative commit 失败使 activity 拒绝且不采样 provider', async () => {
     const dir = tempDir();
     const streams: ReturnType<typeof createFauxStreamFn>[] = [];
@@ -1003,230 +1254,6 @@ describe('legacy Session ThreadDriver factory', () => {
     await attachment.driver.close();
   });
 
-  it('approval raw requestId 在 resolution 后稳定消歧为最小未用 suffix', async () => {
-    const dir = tempDir();
-    const gate = createGate();
-    let resolveStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve;
-    });
-    const observedHost = host();
-    const factory = createLegacySessionThreadDriverFactory({
-      sessionDir: dir,
-      configure: ({ model }) => ({
-        sessionOptions: {
-          agentConfig: {
-            streamFn: createFauxStreamFn({ turns: [{ onRequest: resolveStarted, events: [{ kind: 'gate', gate }] }] }),
-            model,
-            tools: [],
-            systemPrompt: 'test',
-            cwd: dir,
-          },
-        },
-      }),
-    });
-    const attachment = await factory.create({
-      workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID,
-      model: MODEL,
-      permissionCeiling: CEILING,
-      creationKey: 'approval-reuse-key',
-    }, observedHost.port);
-    await attachment.driver.recover([]);
-    await attachment.driver.activate();
-    const activity = attachment.driver.dispatch({
-      op: {
-        type: 'prompt',
-        opId: OP_ID,
-        workspaceId: WORKSPACE_ID,
-        threadId: THREAD_ID,
-        text: 'go',
-      },
-      runId: RUN_ID,
-      permissionCeiling: CEILING,
-      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
-    }).completion;
-    await started;
-    const internal = attachment.driver as ThreadDriverPort & {
-      emitApproval(event: Extract<AgentEvent, { type: 'approval_request' }>): void;
-    };
-    const request = {
-      type: 'approval_request',
-      approvalId: 'ap_reused',
-      toolCallId: 'call_1',
-      description: 'test approval',
-    } as const;
-    internal.emitApproval(request);
-    await observedHost.waitForEventCount('control_request', 1);
-    await attachment.driver.dispatch({
-      op: {
-        type: 'control_response',
-        opId: 'op_e_44444444444444444444444444444444' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId: THREAD_ID,
-        requestId: request.approvalId,
-        decision: 'allow_once',
-      },
-    }).completion;
-    internal.emitApproval(request);
-    await observedHost.waitForEventCount('control_request', 2);
-    const requests = observedHost.events.filter((event) => event.event.type === 'control_request');
-    expect(requests.map((event) => event.event.type === 'control_request' && event.event.requestId)).toEqual([
-      'ap_reused',
-      'ap_reused~1',
-    ]);
-    await attachment.driver.dispatch({
-      op: {
-        type: 'control_response',
-        opId: 'op_e_66666666666666666666666666666666' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId: THREAD_ID,
-        requestId: 'ap_reused~1',
-        decision: 'deny',
-      },
-    }).completion;
-    gate.open();
-    await expect(activity).resolves.toMatchObject({ kind: 'activity' });
-    await attachment.driver.close();
-  });
-
-  it('approval canonical suffix 从 durable journal used-set 跨 Runtime resume 续接', async () => {
-    const legacyDir = tempDir();
-    const runtimeRoot = tempDir();
-    const gates = [createGate(), createGate()];
-    const providerEntered = [deferred<void>(), deferred<void>()];
-    const emitters: Array<(event: Extract<AgentEvent, { type: 'approval_request' }>) => void> = [];
-    let attachmentOrdinal = 0;
-    const factory = createLegacySessionThreadDriverFactory({
-      sessionDir: legacyDir,
-      configure: (context) => {
-        const ordinal = attachmentOrdinal++;
-        const gate = gates[ordinal];
-        if (gate === undefined) throw new Error('unexpected attachment');
-        emitters.push(context.emitApproval);
-        return {
-          sessionOptions: {
-            agentConfig: {
-              streamFn: createFauxStreamFn({
-                turns: [{
-                  onRequest: () => providerEntered[ordinal]?.resolve(),
-                  events: [{ kind: 'gate', gate }, { kind: 'text', text: `turn-${ordinal}` }],
-                }],
-              }),
-              model: context.model,
-              tools: [],
-              systemPrompt: 'test',
-              cwd: legacyDir,
-            },
-          },
-        };
-      },
-    });
-    const storage = createFileRuntimeStorage({ root: runtimeRoot, legacySessionDir: legacyDir });
-    const threadId = 'thread-approval-resume' as ThreadId;
-    const request = {
-      type: 'approval_request',
-      approvalId: 'approval/reused',
-      toolCallId: 'call-reused',
-      description: 'same raw id',
-    } as const;
-    const makeRuntime = () => createRuntime({
-      workspace: { cwd: legacyDir, workspaceId: WORKSPACE_ID },
-      storage,
-      modelResolver: { resolve: async () => ({ ok: true as const, model: MODEL }) },
-      permissionPolicy: fixedPermissionPolicy(),
-      threadDriverFactory: factory,
-    });
-
-    const first = await makeRuntime();
-    const firstEvents = first.events({ threadIds: [threadId] })[Symbol.asyncIterator]();
-    try {
-      expect((await first.submit({
-        type: 'thread_create',
-        opId: 'op_e_80808080808080808080808080808080' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        model: MODEL.ref,
-      })).accepted).toBe(true);
-      const promptReceipt = await first.submit({
-        type: 'prompt',
-        opId: 'op_e_81818181818181818181818181818181' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        text: 'first',
-      });
-      if (!promptReceipt.accepted || promptReceipt.runId === undefined) throw new Error('first prompt failed');
-      await nextEnvelope(firstEvents, (envelope) =>
-        envelope.event.type === 'turn_start' && envelope.runId === promptReceipt.runId);
-      await providerEntered[0]?.promise;
-      emitters[0]?.(request);
-      const firstRequest = await nextEnvelope(firstEvents, (envelope) =>
-        envelope.event.type === 'control_request');
-      expect(firstRequest.event).toMatchObject({ requestId: 'approval/reused' });
-      expect((await first.submit({
-        type: 'control_response',
-        opId: 'op_e_82828282828282828282828282828282' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        requestId: 'approval/reused',
-        decision: 'deny',
-      })).accepted).toBe(true);
-      gates[0]?.open();
-      await nextEnvelope(firstEvents, (envelope) =>
-        envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed');
-    } finally {
-      gates[0]?.open();
-      await firstEvents.return?.();
-      await first.close().catch(() => undefined);
-    }
-
-    const second = await makeRuntime();
-    const secondEvents = second.events({ threadIds: [threadId] })[Symbol.asyncIterator]();
-    try {
-      expect((await second.submit({
-        type: 'thread_resume',
-        opId: 'op_e_83838383838383838383838383838383' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        model: MODEL.ref,
-      })).accepted).toBe(true);
-      const promptReceipt = await second.submit({
-        type: 'prompt',
-        opId: 'op_e_84848484848484848484848484848484' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        text: 'second',
-      });
-      if (!promptReceipt.accepted || promptReceipt.runId === undefined) throw new Error('second prompt failed');
-      await nextEnvelope(secondEvents, (envelope) =>
-        envelope.event.type === 'turn_start' && envelope.runId === promptReceipt.runId);
-      await providerEntered[1]?.promise;
-      emitters[1]?.(request);
-      const secondRequest = await nextEnvelope(secondEvents, (envelope) =>
-        envelope.event.type === 'control_request'
-        || (envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed'));
-      expect(secondRequest.event).toMatchObject({
-        type: 'control_request',
-        requestId: 'approval/reused~1',
-      });
-      expect((await second.submit({
-        type: 'control_response',
-        opId: 'op_e_85858585858585858585858585858585' as ExternalOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        requestId: 'approval/reused~1',
-        decision: 'deny',
-      })).accepted).toBe(true);
-      gates[1]?.open();
-      await nextEnvelope(secondEvents, (envelope) =>
-        envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed');
-    } finally {
-      gates[1]?.open();
-      await secondEvents.return?.();
-      await second.close().catch(() => undefined);
-    }
-  });
-
   it('successor reserve 后 predecessor agent_end commit 前可按 successor RunId 取消', async () => {
     const dir = tempDir();
     const baseHost = host();
@@ -1413,17 +1440,82 @@ function deferred<T>(): Deferred<T> {
   };
 }
 
-async function nextEnvelope(
+async function nextRuntimeEvent(
   iterator: AsyncIterator<Readonly<EventEnvelope>>,
   predicate: (envelope: Readonly<EventEnvelope>) => boolean,
 ): Promise<Readonly<EventEnvelope>> {
   for (;;) {
     const item = await iterator.next();
-    if (item.done) throw new Error('Runtime event stream ended before the expected envelope');
+    if (item.done) throw new Error('Runtime event stream closed before the expected event');
     if (predicate(item.value)) return item.value;
   }
 }
 
 function deterministicSessionIdForTest(creationKey: string): string {
   return `runtime-${createHash('sha256').update(creationKey, 'utf8').digest('hex').slice(0, 40)}`;
+}
+
+function cleanupTestFactory(
+  dir: string,
+  approvalAdapterFactory: LegacyApprovalAdapterFactory,
+) {
+  return createLegacySessionThreadDriverFactory({
+    sessionDir: dir,
+    approvalAdapterFactory,
+    configure: ({ model }) => ({
+      sessionOptions: {
+        agentConfig: {
+          streamFn: createFauxStreamFn({ turns: [] }),
+          model,
+          tools: [],
+          systemPrompt: 'cleanup test',
+          cwd: dir,
+        },
+      },
+    }),
+  });
+}
+
+function approvalPatterns(): LegacyApprovalPatternRepositoryPort {
+  return {
+    workspaceId: WORKSPACE_ID,
+    snapshot: async () => ({ revision: 'cleanup-test', patterns: [] }),
+    commit: async () => ({ kind: 'applied', revision: 'cleanup-test' }),
+  };
+}
+
+function trackedApprovalAdapterFactory(): {
+  readonly factory: LegacyApprovalAdapterFactory;
+  readonly opens: number;
+  readonly closes: number;
+} {
+  let opens = 0;
+  let closes = 0;
+  return {
+    get opens() {
+      return opens;
+    },
+    get closes() {
+      return closes;
+    },
+    factory: {
+      async open() {
+        opens++;
+        let closed = false;
+        return {
+          preflight: async () => ({ kind: 'allow' }),
+          applyResponse: async (input) => ({
+            ok: true,
+            effectiveDecision: input.decision,
+            persistedPatterns: [],
+          }),
+          async close() {
+            if (closed) throw new Error('approval adapter closed twice');
+            closed = true;
+            closes++;
+          },
+        };
+      },
+    },
+  };
 }

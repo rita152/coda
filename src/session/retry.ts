@@ -56,7 +56,10 @@ export function decideRetry(
   if (attempt >= opts.maxAttempts) return { retry: false, reason: `max attempts reached (${opts.maxAttempts})` };
 
   const base = msg.errorDetails?.retryAfterMs ?? opts.baseDelayMs * 2 ** attempt;
-  const delayMs = Math.min(opts.maxDelayMs, base) * (0.5 + opts.jitter());
+  // RuntimeEvent.delayMs is a protocol duration and must be a non-negative safe integer. The
+  // equal-jitter formula normally produces a fraction with Math.random(), so normalize at the
+  // policy boundary before the value reaches persistence, timers, or observers.
+  const delayMs = Math.round(Math.min(opts.maxDelayMs, base) * (0.5 + opts.jitter()));
   return { retry: true, delayMs };
 }
 

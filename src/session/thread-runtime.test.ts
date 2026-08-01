@@ -15,28 +15,33 @@ import type {
   UserMessage,
   WorkspaceId,
 } from '../protocol/index.js';
-import { WorkspaceEventStream } from './event-stream.js';
+import { EventHub } from './event-hub.js';
 import type {
   PermissionPolicyPort,
+  LegacyApprovalAdapter,
+  LegacyApprovalApplyResult,
+  LegacyApprovalPreflightResult,
   PreparedThreadDriverCommand,
   RuntimeClock,
-  RuntimeIdentityFactory,
-  RuntimeJournalRecord,
   ThreadDriverAttachment,
   ThreadDriverCompletion,
   ThreadDriverPort,
-  ThreadJournalPort,
+  ThreadIdentityPort,
+} from './thread-runtime-ports.js';
+import type {
+  RuntimeJournalRecord,
+  ThreadJournalAppendPort,
   ThreadMetaRecord,
-} from './ports.js';
+} from './thread-journal-records.js';
 import { emptyCheckpoint, foldThreadJournal, ThreadJournalWriter } from './thread-journal.js';
-import { Phase1ThreadRuntime } from './thread-runtime.js';
+import { ThreadRuntime } from './thread-runtime.js';
 
 const WORKSPACE_ID = 'workspace-thread-runtime' as WorkspaceId;
 const THREAD_ID = 'thread-runtime-under-test' as ThreadId;
 const MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'runtime' } };
 const CEILING = { revision: 'thread-ceiling', constraints: [] } as const;
 
-describe('Phase1ThreadRuntime durable admission and identity', () => {
+describe('ThreadRuntime durable admission and identity', () => {
   test('keeps successor and turn reservations stable and rejects a successor fork', async () => {
     const fixture = runtimeFixture();
     const receipt = await fixture.runtime.acceptExternal(prompt(opId(1), 'identity'));
@@ -146,6 +151,19 @@ describe('Phase1ThreadRuntime durable admission and identity', () => {
     ]));
     fixture.driver.complete(receipt.runId, 'completed');
     await fixture.runtime.close();
+  });
+
+  test('waitForIdle surfaces a final background commit failure even when the active run cannot clear', async () => {
+    const fixture = runtimeFixture();
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(27), 'fail final commit'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    fixture.journal.nextAppendFailure = new Error('final activity commit failed');
+    fixture.driver.complete(receipt.runId, 'completed');
+
+    await expect(fixture.runtime.waitForIdle()).rejects.toThrow(
+      `Thread ${THREAD_ID} background execution failed`,
+    );
+    await fixture.runtime.close().catch(() => undefined);
   });
 
   test('rejects an internal duplicate OpId carrying a different canonical payload', async () => {
@@ -262,9 +280,64 @@ describe('Phase1ThreadRuntime durable admission and identity', () => {
       if (!queued.accepted) throw new Error('compacting prompt was rejected');
       expect(queued.runId).not.toBe(first.runId);
       expect(fixture.driver.commands.filter((command) => command.op.type === 'prompt')).toHaveLength(1);
+      expect(fixture.driver.compactionQueueNotifications).toBe(1);
     } finally {
       fixture.driver.stateOverride = undefined;
       fixture.driver.complete(first.runId, 'completed');
+      await fixture.runtime.close().catch(() => undefined);
+    }
+  });
+
+  test('keeps a prompt in FIFO while an idle driver finalizes the active compaction successor', async () => {
+    const fixture = runtimeFixture();
+    const first = await fixture.runtime.acceptExternal(prompt(opId(27), 'trigger compaction'));
+    if (!first.accepted || first.runId === undefined) throw new Error('first prompt failed');
+    const successor = await fixture.runtime.reserveSuccessor({
+      threadId: THREAD_ID,
+      predecessorRunId: first.runId,
+      reason: 'compaction',
+    });
+    await fixture.runtime.commitDriverEvent({
+      event: {
+        type: 'compaction_start',
+        reason: 'threshold',
+        predecessorRunId: first.runId,
+        activityRunId: successor.runId,
+      },
+      runId: successor.runId,
+    });
+    await fixture.runtime.commitDriverEvent({
+      event: {
+        type: 'compaction_end',
+        activityRunId: successor.runId,
+        ok: true,
+        droppedMessages: 1,
+      },
+      runId: successor.runId,
+    }, {
+      type: 'compaction_committed',
+      compaction: {
+        id: 'compaction-id',
+        timestamp: 1,
+        tailStartId: 'tail-message-id',
+        summary: 'compacted summary',
+      },
+    });
+
+    // The legacy execution can already project idle after compaction_end while ThreadRuntime is
+    // still closing the root activity around its canonical compaction successor.
+    fixture.driver.stateOverride = 'idle';
+    const queued = await fixture.runtime.acceptExternal(prompt(opId(28), 'after committed compaction'));
+    try {
+      expect(queued).toMatchObject({ accepted: true });
+      if (!queued.accepted || queued.runId === undefined) throw new Error('queued prompt failed');
+      expect(queued.runId).not.toBe(first.runId);
+      expect(queued.runId).not.toBe(successor.runId);
+      expect(fixture.driver.commands.filter((command) => command.op.type === 'prompt')).toHaveLength(1);
+      expect(fixture.driver.compactionQueueNotifications).toBe(1);
+    } finally {
+      fixture.driver.stateOverride = undefined;
+      fixture.driver.complete(first.runId, 'completed', successor.runId);
       await fixture.runtime.close().catch(() => undefined);
     }
   });
@@ -403,45 +476,288 @@ describe('Phase1ThreadRuntime durable admission and identity', () => {
     fixture.driver.complete(receipt.runId, 'completed');
     await fixture.runtime.close();
   });
+
+  test('commits an approval request before waiting and resolves only after the durable response effect', async () => {
+    const applyEntered = deferred<void>();
+    const applyGate = deferred<void>();
+    const adapter = new RecordingApprovalAdapter({
+      apply: async () => {
+        applyEntered.resolve(undefined);
+        await applyGate.promise;
+        return { ok: true, effectiveDecision: 'allow_always', persistedPatterns: ['one', 'two'] };
+      },
+    });
+    const fixture = runtimeFixture({ approvalAdapter: adapter });
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(18), 'approval chain'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({
+      event: { type: 'turn_start' },
+      runId: receipt.runId,
+      turnId: turn.turnId,
+    });
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    let invocationSettled = false;
+    const invocation = fixture.runtime.requestLegacyApproval({
+      toolCallId: 'call-durable-order',
+      toolName: 'edit',
+      cwd: '/runtime/thread-runtime',
+      args: { path: 'a.ts' },
+    }).then((result) => {
+      invocationSettled = true;
+      return result;
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const requestId = request.event.requestId;
+    expect(invocationSettled).toBe(false);
+    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
+    const response = {
+      type: 'control_response',
+      opId: opId(19),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      requestId,
+      decision: 'allow_always',
+    } as const;
+    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
+    await applyEntered.promise;
+    expect(invocationSettled).toBe(false);
+    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
+    const resolved = nextEnvelope(iterator, (envelope) =>
+      envelope.event.type === 'control_resolved' && envelope.opId === response.opId);
+    applyGate.resolve(undefined);
+    expect((await resolved).event).toMatchObject({
+      type: 'control_resolved',
+      decision: 'allow_always',
+    });
+    await expect(invocation).resolves.toEqual({ kind: 'allow' });
+    expect(fixture.driver.commands.some((command) => command.op.type === 'control_response')).toBe(false);
+    fixture.driver.complete(receipt.runId, 'completed');
+    await iterator.return?.();
+    await fixture.runtime.close();
+  });
+
+  test('definitely-not-applied releases only the response claim and a new OpId can retry', async () => {
+    const adapter = new RecordingApprovalAdapter({
+      results: [
+        {
+          ok: false,
+          code: 'legacy_approval_definitely_not_applied',
+          message: 'no outbox or Set mutation',
+        },
+        { ok: true, effectiveDecision: 'allow_once', persistedPatterns: [] },
+      ],
+    });
+    const fixture = runtimeFixture({ approvalAdapter: adapter });
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(20), 'retry approval'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    const invocation = fixture.runtime.requestLegacyApproval({
+      toolCallId: 'call-retry',
+      toolName: 'edit',
+      cwd: '/runtime/thread-runtime',
+      args: { path: 'retry.ts' },
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const first = { type: 'control_response' as const, opId: opId(21), workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID, requestId: request.event.requestId, decision: 'allow_always' as const };
+    expect((await fixture.runtime.acceptExternal(first)).accepted).toBe(true);
+    await nextEnvelope(iterator, (envelope) =>
+      envelope.opId === first.opId && envelope.event.type === 'op_completed');
+    expect(fixture.runtime.durableState().controlClaims.has(first.requestId)).toBe(false);
+    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
+    expect(await fixture.runtime.acceptExternal(first)).toMatchObject({ accepted: true, duplicate: true });
+    expect(adapter.applyCalls).toHaveLength(1);
+    const second = { ...first, opId: opId(22), decision: 'allow_once' as const };
+    expect((await fixture.runtime.acceptExternal(second)).accepted).toBe(true);
+    await expect(invocation).resolves.toEqual({ kind: 'allow' });
+    expect(adapter.applyCalls).toHaveLength(2);
+    fixture.driver.complete(receipt.runId, 'completed');
+    await iterator.return?.();
+    await fixture.runtime.close();
+  });
+
+  test('approval fatal retains the claim, latches workspace, and releases the cancelled execution waiter', async () => {
+    const fatal: Error[] = [];
+    const adapter = new RecordingApprovalAdapter({
+      results: [{
+        ok: false,
+        code: 'legacy_approval_conflict',
+        message: 'receipt payload changed',
+      }],
+    });
+    const fixture = runtimeFixture({
+      approvalAdapter: adapter,
+      onWorkspaceApprovalFatal: (error) => fatal.push(error),
+    });
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(23), 'fatal approval'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    const invocation = fixture.runtime.requestLegacyApproval({
+      toolCallId: 'call-fatal',
+      toolName: 'edit',
+      cwd: '/runtime/thread-runtime',
+      args: { path: 'fatal.ts' },
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const response = { type: 'control_response' as const, opId: opId(24), workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID, requestId: request.event.requestId, decision: 'allow_always' as const };
+    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
+    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
+    expect(fatal).toHaveLength(1);
+    expect(fixture.runtime.durableState().controlClaims.get(response.requestId)?.responseOpId).toBe(response.opId);
+    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
+    expect(fixture.driver.commands.at(-1)?.op.type).toBe('abort');
+    fixture.driver.complete(receipt.runId, 'aborted');
+    await iterator.return?.();
+    await fixture.runtime.close().catch(() => undefined);
+  });
+
+  test('latches workspace fatal when an applied approval effect cannot commit its resolution', async () => {
+    const fatal: Error[] = [];
+    const fixtureRef: { current?: ReturnType<typeof runtimeFixture> } = {};
+    const adapter = new RecordingApprovalAdapter({
+      apply: async () => {
+        const fixture = fixtureRef.current;
+        if (fixture === undefined) throw new Error('fixture is not initialized');
+        fixture.journal.nextAppendFailure = new Error('resolution commit failed after pattern effect');
+        return {
+          ok: true,
+          effectiveDecision: 'allow_always',
+          persistedPatterns: ['Edit(*)'],
+        };
+      },
+    });
+    const fixture = runtimeFixture({
+      approvalAdapter: adapter,
+      onWorkspaceApprovalFatal: (error) => fatal.push(error),
+    });
+    fixtureRef.current = fixture;
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(29), 'post-effect commit failure'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({
+      event: { type: 'turn_start' },
+      runId: receipt.runId,
+      turnId: turn.turnId,
+    });
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    const invocation = fixture.runtime.requestLegacyApproval({
+      toolCallId: 'call-post-effect-failure',
+      toolName: 'edit',
+      cwd: '/runtime/thread-runtime',
+      args: { path: 'fatal-after-effect.ts' },
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const response = {
+      type: 'control_response',
+      opId: opId(30),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      requestId: request.event.requestId,
+      decision: 'allow_always',
+    } as const;
+    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
+
+    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
+    expect(fatal).toHaveLength(1);
+    expect(fatal[0]).toMatchObject({ code: 'legacy_approval_unknown_outcome' });
+    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
+    expect(fixture.runtime.durableState().controlClaims.get(request.event.requestId)).toMatchObject({
+      responseOpId: response.opId,
+    });
+    expect(fixture.driver.commands.at(-1)?.op.type).toBe('abort');
+    fixture.driver.complete(receipt.runId, 'aborted');
+    await iterator.return?.();
+    await fixture.runtime.close().catch(() => undefined);
+  });
+
+  test('abort dispatches cancellation before it durably resolves the waiter as aborted', async () => {
+    const adapter = new RecordingApprovalAdapter();
+    const fixture = runtimeFixture({ approvalAdapter: adapter });
+    const receipt = await fixture.runtime.acceptExternal(prompt(opId(25), 'abort approval'));
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    const invocation = fixture.runtime.requestLegacyApproval({
+      toolCallId: 'call-abort',
+      toolName: 'edit',
+      cwd: '/runtime/thread-runtime',
+      args: { path: 'abort.ts' },
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const requestId = request.event.requestId;
+    let pendingAtCancellation = false;
+    fixture.driver.onAbortDispatch = () => {
+      pendingAtCancellation = fixture.runtime.snapshot().pendingControls.some((pending) =>
+        pending.requestId === requestId);
+    };
+    const abort = { type: 'abort' as const, opId: opId(26), workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID, expectedRunId: receipt.runId };
+    expect((await fixture.runtime.acceptExternal(abort)).accepted).toBe(true);
+    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
+    expect(pendingAtCancellation).toBe(true);
+    const resolution = fixture.runtime.durableState().envelopes.findLast((envelope) =>
+      envelope.event.type === 'control_resolved' && envelope.event.requestId === requestId);
+    expect(resolution?.event).toMatchObject({ type: 'control_resolved', decision: 'aborted' });
+    fixture.driver.complete(receipt.runId, 'aborted');
+    await iterator.return?.();
+    await fixture.runtime.close();
+  });
 });
 
 interface RuntimeFixture {
-  readonly runtime: Phase1ThreadRuntime;
+  readonly runtime: ThreadRuntime;
   readonly writer: ThreadJournalWriter;
   readonly journal: RecordingJournal;
-  readonly events: WorkspaceEventStream;
+  readonly events: EventHub;
   readonly driver: ScriptedDriver;
   readonly policy: CountingPolicy;
 }
 
 function runtimeFixture(options: {
-  readonly identityFactory?: RuntimeIdentityFactory;
+  readonly identityFactory?: ThreadIdentityPort;
   readonly policy?: CountingPolicy;
+  readonly approvalAdapter?: LegacyApprovalAdapter;
+  readonly onWorkspaceApprovalFatal?: (error: Error) => void;
 } = {}): RuntimeFixture {
   const meta = threadMeta();
   const journal = new RecordingJournal([meta]);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(THREAD_ID);
   const writer = writerFor(journal, events);
   const driver = new ScriptedDriver();
   const policy = options.policy ?? new CountingPolicy();
-  const runtime = new Phase1ThreadRuntime({
+  const runtime = new ThreadRuntime({
     workspaceId: WORKSPACE_ID,
     cwd: '/runtime/thread-runtime',
     threadId: THREAD_ID,
     writer,
-    attachment: attachment(driver, MODEL.ref),
+    attachment: attachment(driver, MODEL.ref, options.approvalAdapter),
     identityFactory: options.identityFactory ?? new TestIdentityFactory(),
     clock: TEST_CLOCK,
     permissionPolicy: policy,
     threadCeiling: CEILING,
+    ...(options.onWorkspaceApprovalFatal !== undefined && {
+      onWorkspaceApprovalFatal: options.onWorkspaceApprovalFatal,
+    }),
   });
   return { runtime, writer, journal, events, driver, policy };
 }
 
 interface PreparedIdentityFixture {
   readonly journal: RecordingJournal;
-  readonly events: WorkspaceEventStream;
+  readonly events: EventHub;
   readonly rootRunId: RunId;
   readonly successorRunId: RunId;
   readonly turnId: TurnId;
@@ -454,7 +770,7 @@ async function preparedIdentityFixture(): Promise<PreparedIdentityFixture> {
   const rootOpId = opId(10);
   const rootOp = prompt(rootOpId, 'prepared');
   const journal = new RecordingJournal([threadMeta()]);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(THREAD_ID);
   const writer = writerFor(journal, events);
   await writer.appendPrepare({ type: 'mailbox_prepare', opId: rootOpId, op: rootOp, timestamp: 1 });
@@ -501,9 +817,9 @@ async function preparedIdentityFixture(): Promise<PreparedIdentityFixture> {
   return { journal, events, rootRunId, successorRunId, turnId };
 }
 
-function recoveredRuntime(prepared: PreparedIdentityFixture): Phase1ThreadRuntime {
+function recoveredRuntime(prepared: PreparedIdentityFixture): ThreadRuntime {
   const writer = writerFor(prepared.journal, prepared.events);
-  return new Phase1ThreadRuntime({
+  return new ThreadRuntime({
     workspaceId: WORKSPACE_ID,
     cwd: '/runtime/thread-runtime',
     threadId: THREAD_ID,
@@ -516,7 +832,7 @@ function recoveredRuntime(prepared: PreparedIdentityFixture): Phase1ThreadRuntim
   });
 }
 
-function writerFor(journal: RecordingJournal, events: WorkspaceEventStream): ThreadJournalWriter {
+function writerFor(journal: RecordingJournal, events: EventHub): ThreadJournalWriter {
   return new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: THREAD_ID,
@@ -528,11 +844,19 @@ function writerFor(journal: RecordingJournal, events: WorkspaceEventStream): Thr
   });
 }
 
-function attachment(driver: ScriptedDriver, model: ModelRef): ThreadDriverAttachment {
+function attachment(
+  driver: ScriptedDriver,
+  model: ModelRef,
+  approvalAdapter?: LegacyApprovalAdapter,
+): ThreadDriverAttachment {
   return {
     driver,
     durableRef: { kind: 'test-driver', key: THREAD_ID },
     initialCheckpoint: emptyCheckpoint(model),
+    ...(approvalAdapter !== undefined && {
+      legacyApprovalAdapter: approvalAdapter,
+      legacyApprovalPolicyRevision: 'test-policy-v2',
+    }),
   };
 }
 
@@ -583,10 +907,22 @@ async function nextEvent(
   }
 }
 
+async function nextEnvelope(
+  iterator: AsyncIterator<Readonly<import('../protocol/index.js').EventEnvelope>>,
+  predicate: (event: Readonly<import('../protocol/index.js').EventEnvelope>) => boolean,
+): Promise<Readonly<import('../protocol/index.js').EventEnvelope>> {
+  for (;;) {
+    const item = await iterator.next();
+    if (item.done) throw new Error('Event stream ended before expected envelope');
+    if (predicate(item.value)) return item.value;
+  }
+}
+
 const TEST_CLOCK: RuntimeClock = { now: () => 1 };
 
-class RecordingJournal implements ThreadJournalPort {
+class RecordingJournal implements ThreadJournalAppendPort {
   readonly records: RuntimeJournalRecord[];
+  nextAppendFailure: Error | undefined;
 
   constructor(records: readonly RuntimeJournalRecord[]) {
     this.records = [...records];
@@ -594,19 +930,21 @@ class RecordingJournal implements ThreadJournalPort {
 
   async acquireWriteLease(): Promise<void> {}
   async load(): Promise<readonly RuntimeJournalRecord[]> { return [...this.records]; }
-  async append(records: readonly RuntimeJournalRecord[]): Promise<void> { this.records.push(...records); }
+  async append(records: readonly RuntimeJournalRecord[]): Promise<void> {
+    const failure = this.nextAppendFailure;
+    this.nextAppendFailure = undefined;
+    if (failure !== undefined) throw failure;
+    this.records.push(...records);
+  }
   async releaseWriteLease(): Promise<void> {}
 }
 
-class TestIdentityFactory implements RuntimeIdentityFactory {
+class TestIdentityFactory implements ThreadIdentityPort {
   #run = 0;
   #turn = 0;
 
-  newThreadId(): ThreadId { return 'thread-generated' as ThreadId; }
   newRunId(): RunId { return `run-generated-${++this.#run}` as RunId; }
   newTurnId(): TurnId { return `turn-generated-${++this.#turn}` as TurnId; }
-  newOpId(): ExternalOpId { return opId(99); }
-  newProcessEpoch(): string { return 'test-process'; }
   deriveOpId(input: Parameters<typeof deriveOpId>[0]): ReturnType<typeof deriveOpId> {
     return deriveOpId(input);
   }
@@ -659,12 +997,15 @@ class ScriptedDriver implements ThreadDriverPort {
   nextOperationCompletion: ThreadDriverCompletion | undefined;
   stateOverride: 'idle' | 'running' | 'retrying' | 'compacting' | undefined;
   closeFailure: Error | undefined;
+  onAbortDispatch: (() => void) | undefined;
+  compactionQueueNotifications = 0;
 
   async recover(): Promise<void> {}
   async activate(): Promise<void> {}
 
   dispatch(command: PreparedThreadDriverCommand): { readonly completion: Promise<ThreadDriverCompletion> } {
     this.commands.push(command);
+    if (command.op.type === 'abort') this.onAbortDispatch?.();
     if ((command.op.type === 'prompt' || command.op.type === 'continue') && 'runId' in command) {
       const completion = deferred<ThreadDriverCompletion>();
       this.#activities.set(command.runId, completion);
@@ -677,6 +1018,10 @@ class ScriptedDriver implements ThreadDriverPort {
 
   interactionState(): 'idle' | 'running' | 'retrying' | 'compacting' {
     return this.stateOverride ?? (this.#activities.size === 0 ? 'idle' : 'running');
+  }
+
+  activityQueuedDuringCompaction(): void {
+    this.compactionQueueNotifications++;
   }
 
   async close(): Promise<void> {
@@ -694,6 +1039,39 @@ class ScriptedDriver implements ThreadDriverPort {
     this.#activities.delete(runId);
     activity.resolve({ kind: 'activity', status, terminalRunId });
   }
+}
+
+class RecordingApprovalAdapter implements LegacyApprovalAdapter {
+  readonly applyCalls: Array<Parameters<LegacyApprovalAdapter['applyResponse']>[0]> = [];
+  readonly #results: LegacyApprovalApplyResult[];
+  readonly #apply: (() => Promise<LegacyApprovalApplyResult>) | undefined;
+
+  constructor(input: {
+    readonly results?: readonly LegacyApprovalApplyResult[];
+    readonly apply?: () => Promise<LegacyApprovalApplyResult>;
+  } = {}) {
+    this.#results = [...(input.results ?? [])];
+    this.#apply = input.apply;
+  }
+
+  async preflight(): Promise<LegacyApprovalPreflightResult> {
+    return {
+      kind: 'ask',
+      description: 'approve test invocation',
+      proposal: { patterns: ['one', 'two'], forceConfirm: false },
+    };
+  }
+
+  async applyResponse(
+    input: Parameters<LegacyApprovalAdapter['applyResponse']>[0],
+  ): Promise<LegacyApprovalApplyResult> {
+    this.applyCalls.push(input);
+    if (this.#apply !== undefined) return this.#apply();
+    return this.#results.shift()
+      ?? { ok: true, effectiveDecision: input.decision, persistedPatterns: [] };
+  }
+
+  async close(): Promise<void> {}
 }
 
 interface Deferred<T> {

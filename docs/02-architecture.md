@@ -175,10 +175,17 @@ export default tseslint.config(
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
-          // session 只依赖 protocol/shared/agent,不得触碰 providers/tools/cli
+          // session 只依赖 protocol/shared/agent,不得触碰 runtime/providers/tools/cli
+          { target: './src/session', from: './src/runtime' },
           { target: './src/session', from: './src/cli' },
           { target: './src/session', from: './src/providers' },
           { target: './src/session', from: './src/tools' },
+          // Phase 2:runtime 组装 session 的每线程协作者；不得直接依赖 Agent/provider/tool/CLI
+          {
+            target: './src/runtime',
+            from: './src',
+            except: ['./runtime', './protocol', './shared', './session'],
+          },
           // provider 之间互相隔离(跨 provider import 是设计异味)
           { target: './src/providers/openai-chat', from: './src/providers/faux' },
           { target: './src/providers/faux', from: './src/providers/openai-chat' },

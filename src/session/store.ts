@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import { PROTOCOL_VERSION } from '../protocol/index.js';
+import { canonicalJson, PROTOCOL_VERSION, sha256Hex } from '../protocol/index.js';
 import type { AgentMessage, ModelRef, UserMessage } from '../protocol/index.js';
 import { runtimeHomeDir } from '../shared/index.js';
 
@@ -175,6 +175,47 @@ export class SessionStore {
 
 /** 加载会话文件:meta 校验、崩溃截断容忍、compaction 折叠(docs/08 §4.1)。 */
 export function loadSession(dir: string, id: string): LoadedSession {
+  const { records, droppedCorruptTail } = readSessionRecords(dir, id);
+  const meta = validateSessionRecords(records, id);
+
+  // 同 id 重复保留最后一条;顺序按首次出现位置
+  const byId = new Map<string, AgentMessage>();
+  const order: string[] = [];
+  let lastCompaction: CompactionRecord | undefined;
+  for (const r of records) {
+    if (r.type === 'message') {
+      const m = r.message;
+      if (!byId.has(m.id)) order.push(m.id);
+      byId.set(m.id, m);
+    } else if (r.type === 'compaction') {
+      lastCompaction = r;
+    }
+  }
+  const messages = order.map((mid) => byId.get(mid) as AgentMessage);
+
+  let active = messages;
+  if (lastCompaction) {
+    const idx = messages.findIndex((m) => m.id === lastCompaction?.tailStartId);
+    if (idx >= 0) {
+      active = [syntheticSummaryMessage(lastCompaction), ...messages.slice(idx)];
+    }
+    // tailStartId 找不到:忽略该 compaction 用全量转录(调用方告警)
+  }
+
+  return { meta, messages, active, lastCompaction, droppedCorruptTail };
+}
+
+/** @internal Canonical mirror recovery needs append history before the legacy id-dedup view. */
+export function loadSessionRecordHistory(dir: string, id: string): readonly SessionRecord[] {
+  const { records } = readSessionRecords(dir, id);
+  validateSessionRecords(records, id);
+  return records;
+}
+
+function readSessionRecords(
+  dir: string,
+  id: string,
+): { readonly records: SessionRecord[]; readonly droppedCorruptTail: boolean } {
   const file = path.join(dir, `${id}.jsonl`);
   if (!existsSync(file)) throw new Error(`Session not found: ${id} (${file})`);
   const raw = readFileSync(file, 'utf8');
@@ -200,6 +241,10 @@ export function loadSession(dir: string, id: string): LoadedSession {
     records.push(parsed as SessionRecord);
   }
 
+  return { records, droppedCorruptTail };
+}
+
+function validateSessionRecords(records: readonly SessionRecord[], id: string): MetaRecord {
   const meta = records[0];
   if (meta === undefined || meta.type !== 'meta') {
     throw new Error(`Session file has no meta header: ${id}.jsonl`);
@@ -207,33 +252,12 @@ export function loadSession(dir: string, id: string): LoadedSession {
   if (meta.version !== STORE_VERSION) {
     throw new Error(`Session store version ${String(meta.version)} is not supported (expected ${STORE_VERSION})`);
   }
-
-  // 同 id 重复保留最后一条;顺序按首次出现位置
-  const byId = new Map<string, AgentMessage>();
-  const order: string[] = [];
-  let lastCompaction: CompactionRecord | undefined;
   for (const r of records) {
     if (r.type === 'message') {
-      const m = r.message;
-      validateMessage(m, id);
-      if (!byId.has(m.id)) order.push(m.id);
-      byId.set(m.id, m);
-    } else if (r.type === 'compaction') {
-      lastCompaction = r;
+      validateMessage(r.message, id);
     }
   }
-  const messages = order.map((mid) => byId.get(mid) as AgentMessage);
-
-  let active = messages;
-  if (lastCompaction) {
-    const idx = messages.findIndex((m) => m.id === lastCompaction?.tailStartId);
-    if (idx >= 0) {
-      active = [syntheticSummaryMessage(lastCompaction.summary), ...messages.slice(idx)];
-    }
-    // tailStartId 找不到:忽略该 compaction 用全量转录(调用方告警)
-  }
-
-  return { meta, messages, active, lastCompaction, droppedCorruptTail };
+  return meta;
 }
 
 /** 未知 role / part type(未来版本写的文件)→ 拒绝加载(docs/08 §8;v1 不做向前兼容)。 */
@@ -253,11 +277,22 @@ function validateMessage(m: AgentMessage, sessionId: string): void {
   }
 }
 
-export function syntheticSummaryMessage(summary: string): UserMessage {
+export function syntheticSummaryMessage(summary: string): UserMessage;
+export function syntheticSummaryMessage(compaction: CompactionRecord): UserMessage;
+export function syntheticSummaryMessage(input: string | CompactionRecord): UserMessage {
+  const summary = typeof input === 'string' ? input : input.summary;
+  const deterministic = typeof input === 'string'
+    ? undefined
+    : sha256Hex(canonicalJson({
+        domain: 'session-compaction-summary-v1',
+        compaction: input,
+      }));
   return {
     role: 'user',
-    id: `u_summary_${Math.random().toString(36).slice(2, 10)}`,
-    timestamp: Date.now(),
+    id: deterministic === undefined
+      ? `u_summary_${Math.random().toString(36).slice(2, 10)}`
+      : `u_summary_${deterministic}`,
+    timestamp: typeof input === 'string' ? Date.now() : input.timestamp,
     content: [{ type: 'text', text: `[Conversation summary]\n${summary}` }],
     source: 'synthetic',
   };
