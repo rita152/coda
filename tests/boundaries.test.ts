@@ -176,12 +176,70 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     }
   });
 
-  it('src/runtime 可依赖 protocol/shared/session（阶段 2 的合法方向）', async () => {
+  it('src/runtime 可依赖 protocol/shared/session/capabilities（阶段 3 的合法方向）', async () => {
     const { errorCount } = await lintProbe(
       'src/runtime/legal.probe.ts',
-      "import '../protocol/index.js';\nimport '../shared/index.js';\nimport '../session/index.js';\n",
+      "import '../protocol/index.js';\nimport '../shared/index.js';\nimport '../session/index.js';\nimport type { RuntimeCapabilityServices } from '../capabilities/index.js';\nexport type Services = RuntimeCapabilityServices;\n",
     );
     expect(errorCount).toBe(0);
+  });
+
+  it('src/capabilities 只向下依赖 protocol/shared 与窄 tools/types 兼容口', async () => {
+    for (const dependency of [
+      'agent/index',
+      'cli/main',
+      'providers/faux/index',
+      'runtime/index',
+      'session/index',
+      'tools/index',
+    ]) {
+      const probeName = dependency.replaceAll('/', '-');
+      const { rules } = await lintProbe(
+        `src/capabilities/${probeName}.probe.ts`,
+        `import '../${dependency}.js';\n`,
+      );
+      expect(rules).toContain('import/no-restricted-paths');
+    }
+
+    const { errorCount } = await lintProbe(
+      'src/capabilities/legacy-tool-types.probe.ts',
+      "import type { ToolDefinition } from '../tools/types.js';\nexport type Legacy = ToolDefinition;\n",
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('legacy-coding-tools 集成层只能向下依赖 capability/tool 基础层', async () => {
+    for (const dependency of [
+      'agent/index',
+      'cli/main',
+      'providers/faux/index',
+      'runtime/index',
+      'session/index',
+    ]) {
+      const probeName = dependency.replaceAll('/', '-');
+      const { rules } = await lintProbe(
+        `src/integrations/legacy-coding-tools/${probeName}.probe.ts`,
+        `import '../../${dependency}.js';\n`,
+      );
+      expect(rules).toContain('import/no-restricted-paths');
+    }
+
+    const { errorCount } = await lintProbe(
+      'src/integrations/legacy-coding-tools/legal.probe.ts',
+      "import type { CapabilityRegistration } from '../../capabilities/index.js';\nimport type { ToolDefinition } from '../../tools/index.js';\nexport type Legal = CapabilityRegistration | ToolDefinition;\n",
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('src/tools 不得反向依赖 capabilities 或 legacy-coding-tools', async () => {
+    for (const dependency of ['capabilities/index', 'integrations/legacy-coding-tools/index']) {
+      const probeName = dependency.replaceAll('/', '-');
+      const { rules } = await lintProbe(
+        `src/tools/${probeName}.probe.ts`,
+        `import '../${dependency}.js';\n`,
+      );
+      expect(rules).toContain('import/no-restricted-paths');
+    }
   });
 
   it('src/runtime 的 dynamic import/import() type 也不能绕过 core 边界', async () => {

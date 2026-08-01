@@ -57,6 +57,8 @@ export interface FoldedThreadJournal {
     readonly decision: import('../protocol/index.js').ControlResponseDecision;
     readonly acceptedAt: number;
   }>;
+  /** Canonical rule scopes durably discovered by prior invocation freshness checks. */
+  readonly observedRuleScopes: ReadonlySet<string>;
 }
 
 export interface FoldedMailboxEntry {
@@ -203,6 +205,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
     Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>();
   const deliveredThreadResults = new Set<import('../protocol/index.js').DerivedOpId>();
   const usedRequestIds = new Set<string>();
+  const observedRuleScopes = new Set<string>();
   const controlClaims = new Map<string, {
     readonly responseOpId: import('../protocol/index.js').ExternalOpId;
     readonly decision: import('../protocol/index.js').ControlResponseDecision;
@@ -463,9 +466,23 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
           }
           pendingThreadResults.set(mutation.resultOpId, mutation);
           break;
+        case 'rule_scope_observed':
+          observedRuleScopes.add(mutation.scope);
+          break;
+        case 'rule_scope_window_replaced': {
+          const current = [...observedRuleScopes].sort(compareUtf8);
+          if (canonicalJson(current) !== canonicalJson(mutation.consumedScopes)) {
+            throw new RuntimeStorageError(
+              'rule_scope_window_mismatch',
+              `Rule scope window for ${mutation.owningTurnId} does not match its durable witness`,
+            );
+          }
+          observedRuleScopes.clear();
+          for (const scope of mutation.replacementScopes) observedRuleScopes.add(scope);
+          break;
+        }
         case 'message_appended':
         case 'control_resolved':
-        case 'rule_scope_observed':
           break;
       }
     }
@@ -485,6 +502,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
     deliveredThreadResults,
     usedRequestIds,
     controlClaims,
+    observedRuleScopes,
   };
 }
 
@@ -707,11 +725,16 @@ function validateCommitCorrespondence(
   );
 
   for (const mutation of record.mutations ?? []) {
-    if (mutation.type !== 'turn_activated') continue;
-    const matched = record.envelopes.some((envelope) =>
-      envelope.runId === mutation.runId && envelope.turnId === mutation.turnId
-      && (envelope.event.type === 'turn_start' || envelope.event.type === 'queue_update'));
-    if (!matched) throw invalidJournal('turn_activated has no matching first turn envelope');
+    if (mutation.type === 'turn_activated') {
+      const matched = record.envelopes.some((envelope) =>
+        envelope.runId === mutation.runId && envelope.turnId === mutation.turnId
+        && (envelope.event.type === 'turn_start' || envelope.event.type === 'queue_update'));
+      if (!matched) throw invalidJournal('turn_activated has no matching first turn envelope');
+    } else if (mutation.type === 'rule_scope_window_replaced') {
+      const matched = record.envelopes.some((envelope) =>
+        envelope.turnId === mutation.owningTurnId && envelope.event.type === 'turn_start');
+      if (!matched) throw invalidJournal('rule scope window replacement has no matching turn_start');
+    }
   }
 }
 
@@ -799,4 +822,16 @@ function withoutActivity(
 
 function snapshot<T>(value: T): T {
   return strictJsonSnapshot(value) as T;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
 }

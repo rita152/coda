@@ -57,11 +57,15 @@ function tempDir(): string {
   return dir;
 }
 
-function host(options?: { failType?: ThreadDriverEvent['event']['type'] }): {
+function host(options?: {
+  failType?: ThreadDriverEvent['event']['type'];
+  failFirstTurnReservation?: boolean;
+}): {
   readonly port: ThreadDriverHostServices;
   readonly events: ThreadDriverEvent[];
   readonly batches: ThreadDriverEvent[][];
   readonly actions: string[];
+  readonly turnOrdinals: number[];
   readonly waitForEventCount: (
     type: ThreadDriverEvent['event']['type'],
     count: number,
@@ -70,6 +74,7 @@ function host(options?: { failType?: ThreadDriverEvent['event']['type'] }): {
   const events: ThreadDriverEvent[] = [];
   const batches: ThreadDriverEvent[][] = [];
   const actions: string[] = [];
+  const turnOrdinals: number[] = [];
   const waiters: {
     readonly type: ThreadDriverEvent['event']['type'];
     readonly count: number;
@@ -90,6 +95,7 @@ function host(options?: { failType?: ThreadDriverEvent['event']['type'] }): {
     events,
     batches,
     actions,
+    turnOrdinals,
     waitForEventCount: (type, count) => {
       if (events.filter((event) => event.event.type === type).length >= count) {
         return Promise.resolve();
@@ -113,7 +119,11 @@ function host(options?: { failType?: ThreadDriverEvent['event']['type'] }): {
         }
         notify();
       },
-      reserveTurn: async () => {
+      reserveTurn: async (input) => {
+        turnOrdinals.push(input.turnOrdinal);
+        if (options?.failFirstTurnReservation === true && turnOrdinals.length === 1) {
+          throw new Error('first turn reservation failed');
+        }
         turn++;
         actions.push('reserve:turn');
         return {
@@ -779,6 +789,10 @@ describe('legacy Session ThreadDriver factory', () => {
         },
       }),
     });
+    expect(factory.requirements).toEqual({
+      approvalMode: 'durable_legacy_bridge',
+      capabilityMode: 'static',
+    });
     const runtime = await createRuntime({
       workspace: { cwd: dir, workspaceId: WORKSPACE_ID },
       storage: createMemoryRuntimeStorage(),
@@ -826,6 +840,322 @@ describe('legacy Session ThreadDriver factory', () => {
     } finally {
       await iterator.return?.();
       await runtime.close().catch(() => undefined);
+    }
+  });
+
+  it('registry 新调用只走 runtime turn，legacy factory 仅供历史 approval 恢复', async () => {
+    const dir = tempDir();
+    const legacyStream = createFauxStreamFn({
+      turns: [
+        { events: [{ kind: 'tool_call', name: 'danger', args: { value: 'legacy' } }] },
+        { events: [{ kind: 'text', text: 'legacy done' }] },
+      ],
+    });
+    const registryStream = createFauxStreamFn({
+      turns: [
+        { events: [{ kind: 'tool_call', name: 'danger', args: { value: 'registry' } }] },
+        { events: [{ kind: 'text', text: 'registry done' }] },
+      ],
+    });
+    let legacyBeforeToolCalls = 0;
+    let legacyToolExecutions = 0;
+    let approvalOpens = 0;
+    let approvalPreflights = 0;
+    let approvalCloses = 0;
+    let registryExecutions = 0;
+    const legacyTool: ToolDefinition<{ value: string }> = {
+      name: 'danger',
+      description: 'legacy attachment tool',
+      parameters: z.object({ value: z.string() }),
+      kind: 'execute',
+      async execute() {
+        legacyToolExecutions++;
+        return { content: [{ type: 'text', text: 'legacy executed' }] };
+      },
+    };
+    const approvalAdapterFactory: LegacyApprovalAdapterFactory = {
+      async open() {
+        approvalOpens++;
+        return {
+          async preflight() {
+            approvalPreflights++;
+            return { kind: 'allow' };
+          },
+          async applyResponse(input) {
+            return {
+              ok: true,
+              effectiveDecision: input.decision,
+              persistedPatterns: [],
+            };
+          },
+          async close() {
+            approvalCloses++;
+          },
+        };
+      },
+    };
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      capabilityMode: 'registry',
+      approvalAdapterFactory,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: legacyStream,
+            model,
+            tools: [legacyTool],
+            systemPrompt: 'legacy fallback',
+            cwd: dir,
+            beforeToolCall: async () => {
+              legacyBeforeToolCalls++;
+              return {};
+            },
+          },
+        },
+      }),
+    });
+    expect(factory.requirements).toEqual({
+      approvalMode: 'legacy_session_edge',
+      capabilityMode: 'registry',
+    });
+
+    const observedHost = host();
+    const captures: Parameters<NonNullable<ThreadDriverHostServices['captureRuntimeTurn']>>[0][] = [];
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'registry-with-historical-approval-factory',
+    }, {
+      ...observedHost.port,
+      captureRuntimeTurn: async (input) => {
+        captures.push(input);
+        return {
+          streamFn: registryStream,
+          assemble: (outboundMessages) => ({
+            ok: true,
+            context: {
+              systemPrompt: 'registry turn',
+              messages: [...outboundMessages],
+              tools: [],
+            },
+          }),
+          prepareToolCall: async (call, sourceOrdinal) => {
+            expect(call.name).toBe('danger');
+            expect(sourceOrdinal).toBe(0);
+            return {
+              ok: true,
+              args: call.arguments,
+              executionMode: 'parallel',
+              execute: async () => {
+                registryExecutions++;
+                return { content: [{ type: 'text', text: 'registry executed' }] };
+              },
+            };
+          },
+        };
+      },
+    });
+    let historicalAdapter: Awaited<ReturnType<LegacyApprovalAdapterFactory['open']>> | undefined;
+    try {
+      expect(attachment.legacyApprovalAdapter).toBeUndefined();
+      expect(approvalOpens).toBe(0);
+      await attachment.driver.recover([]);
+      await attachment.driver.activate();
+      expect(await attachment.driver.dispatch({
+        op: {
+          type: 'prompt',
+          opId: OP_ID,
+          workspaceId: WORKSPACE_ID,
+          threadId: THREAD_ID,
+          text: 'run registry danger',
+        },
+        runId: RUN_ID,
+        permissionCeiling: CEILING,
+        resolvedInput: {
+          kind: 'prompt_input',
+          sourceOpId: OP_ID,
+          text: 'run registry danger',
+        },
+      }).completion).toEqual({
+        kind: 'activity',
+        status: 'completed',
+        terminalRunId: RUN_ID,
+      });
+
+      expect(captures).toHaveLength(2);
+      expect(registryStream.calls).toHaveLength(2);
+      expect(registryExecutions).toBe(1);
+      expect(legacyStream.calls).toHaveLength(0);
+      expect(legacyBeforeToolCalls).toBe(0);
+      expect(legacyToolExecutions).toBe(0);
+      expect(approvalOpens).toBe(0);
+      expect(approvalPreflights).toBe(0);
+
+      const openHistoricalAdapter = factory.openLegacyApprovalAdapter;
+      expect(openHistoricalAdapter).toBeDefined();
+      if (openHistoricalAdapter === undefined) throw new Error('historical adapter factory missing');
+      historicalAdapter = await openHistoricalAdapter({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        patterns: approvalPatterns(),
+      });
+      expect(approvalOpens).toBe(1);
+    } finally {
+      await historicalAdapter?.close();
+      await attachment.driver.close();
+    }
+    expect(approvalCloses).toBe(1);
+  });
+
+  it('registry capture reservation 失败后用同一 ordinal 提交完整 error turn', async () => {
+    const dir = tempDir();
+    const stream = createFauxStreamFn({
+      turns: [{ events: [{ kind: 'text', text: 'must not sample' }] }],
+    });
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      capabilityMode: 'registry',
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: stream,
+            model,
+            tools: [],
+            systemPrompt: 'reservation retry',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const observedHost = host({ failFirstTurnReservation: true });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'registry-reservation-retry',
+    }, {
+      ...observedHost.port,
+      captureRuntimeTurn: async () => {
+        throw new Error('capture must not run after reservation failure');
+      },
+    });
+    try {
+      await attachment.driver.recover([]);
+      await attachment.driver.activate();
+      expect(await attachment.driver.dispatch({
+        op: {
+          type: 'prompt',
+          opId: OP_ID,
+          workspaceId: WORKSPACE_ID,
+          threadId: THREAD_ID,
+          text: 'go',
+        },
+        runId: RUN_ID,
+        permissionCeiling: CEILING,
+        resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+      }).completion).toEqual({
+        kind: 'activity',
+        status: 'error',
+        terminalRunId: RUN_ID,
+      });
+      expect(observedHost.turnOrdinals).toEqual([1, 1]);
+      expect(stream.calls).toHaveLength(0);
+      expect(observedHost.events.map((event) => event.event.type)).toEqual([
+        'agent_start',
+        'turn_start',
+        'message_start',
+        'message_end',
+        'error',
+        'message_start',
+        'message_end',
+        'usage_update',
+        'turn_end',
+        'agent_end',
+      ]);
+    } finally {
+      await attachment.driver.close();
+    }
+  });
+
+  it('registry capture gate 可被 run abort 唤醒且 driver idle/close 不挂', async () => {
+    const dir = tempDir();
+    const stream = createFauxStreamFn({
+      turns: [{ events: [{ kind: 'text', text: 'must not sample' }] }],
+    });
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      capabilityMode: 'registry',
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: stream,
+            model,
+            tools: [],
+            systemPrompt: 'capture abort',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const observedHost = host();
+    const captureEntered = deferred<void>();
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'registry-capture-abort',
+    }, {
+      ...observedHost.port,
+      captureRuntimeTurn: async ({ signal }): Promise<never> => {
+        captureEntered.resolve(undefined);
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('capture aborted')), { once: true });
+        });
+      },
+    });
+    try {
+      await attachment.driver.recover([]);
+      await attachment.driver.activate();
+      const activity = attachment.driver.dispatch({
+        op: {
+          type: 'prompt',
+          opId: OP_ID,
+          workspaceId: WORKSPACE_ID,
+          threadId: THREAD_ID,
+          text: 'go',
+        },
+        runId: RUN_ID,
+        permissionCeiling: CEILING,
+        resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+      }).completion;
+      await captureEntered.promise;
+
+      expect(await attachment.driver.dispatch({
+        op: {
+          type: 'abort',
+          opId: 'op_e_92929292929292929292929292929292' as ExternalOpId,
+          workspaceId: WORKSPACE_ID,
+          threadId: THREAD_ID,
+          expectedRunId: RUN_ID,
+        },
+        resolvedTarget: { kind: 'run', runId: RUN_ID },
+      }).completion).toEqual({ kind: 'operation', outcome: 'applied' });
+      expect(await activity).toEqual({
+        kind: 'activity',
+        status: 'aborted',
+        terminalRunId: RUN_ID,
+      });
+      expect(stream.calls).toHaveLength(0);
+      expect(observedHost.events.some((event) => event.event.type === 'turn_start')).toBe(true);
+      expect(observedHost.events.some((event) => event.event.type === 'turn_end')).toBe(true);
+      expect(observedHost.events.findLast((event) => event.event.type === 'agent_end')?.event)
+        .toMatchObject({ type: 'agent_end', reason: 'aborted' });
+    } finally {
+      await attachment.driver.close();
     }
   });
 

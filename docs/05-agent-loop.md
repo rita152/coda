@@ -325,6 +325,17 @@ async function streamAssistantResponse(
    snapshot；
 4. registry/rules/grants/provider 在流式期间的更新只影响下一 turn；当前 turn 不回查“最新”版本。
 
+canonical Runtime 的 `RuntimeTurnProvider.capture()` 因而在 Agent 调用 `emit(turn_start)` 前运行；legacy
+driver 在该握手中先 reserve TurnId，再让 ThreadRuntime 以 `(RunId,TurnId)` single-flight 捕获。capture
+必须接收当前 run 的 `AbortSignal`，grant/rule/base-prompt/policy 等每个异步只读 gate 都要 race 该 signal；
+底层只读操作可以自行收束，但 abort/close 不得等待一个不合作的 snapshot provider。相同身份的串行/并发
+capture 必须返回同一不可变 port（同一失败也不得重读 mutable source）。普通 capture 失败仍以已预留
+TurnId 提交 `turn_start`，随后走防御路径形成配对的 error assistant/turn_end/agent_end；若失败由 run abort
+触发，则形成配对的 **aborted** assistant/turn_end/agent_end，不发布 fatal protocol error。两条路径 provider/
+executor 都是零调用；turn-scoped diagnostic 只能在 `turn_start` 已权威提交后发布。driver 的本地
+turnOrdinal 只在 authoritative reservation 成功返回后推进，失败重试与 error closure 必须继续请求同一
+ordinal，不能先自增而制造跳号。
+
 这样模型看到的 schema 与实际执行的 executor 机械同版。阶段 0 的 `ToolDefinition[]` 和固定
 `StreamFn` 由 legacy adapter 形成 revision 固定的 snapshot，保持既有 Agent API；Agent 自身不拥有
 动态 registry，也不决定 workspace/thread 权限。

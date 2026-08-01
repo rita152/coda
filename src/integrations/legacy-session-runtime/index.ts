@@ -82,8 +82,13 @@ export interface LegacySessionThreadDriverFactoryOptions {
   readonly configure: (
     context: LegacySessionAttachmentContext,
   ) => LegacySessionAttachmentConfiguration;
-  /** Static policy bridge. The Runtime owns its repository and all control waiters. */
+  /**
+   * Static policy bridge for new attachments. Registry mode keeps the factory available only for
+   * recovering historical legacy approval responses.
+   */
   readonly approvalAdapterFactory?: LegacyApprovalAdapterFactory;
+  /** Canonical Runtime uses the same durable Session mirror with a registry-backed turn engine. */
+  readonly capabilityMode?: 'static' | 'registry';
 }
 
 interface DriverConstructionInput {
@@ -123,11 +128,13 @@ export function createLegacySessionThreadDriverFactory(
   options: LegacySessionThreadDriverFactoryOptions,
 ): ThreadDriverFactory {
   const sessionDir = options.sessionDir ?? defaultSessionDir();
+  const capabilityMode = options.capabilityMode ?? 'static';
+  const installsLegacyApprovalBridge = capabilityMode === 'static'
+    && options.approvalAdapterFactory !== undefined;
   return {
     requirements: {
-      approvalMode: options.approvalAdapterFactory === undefined
-        ? 'legacy_session_edge'
-        : 'durable_legacy_bridge',
+      approvalMode: installsLegacyApprovalBridge ? 'durable_legacy_bridge' : 'legacy_session_edge',
+      capabilityMode,
     },
     ...(options.approvalAdapterFactory !== undefined && {
       openLegacyApprovalAdapter: (input) => options.approvalAdapterFactory?.open(input)
@@ -192,7 +199,7 @@ async function constructDriver(
   let session: LegacyThreadExecution | undefined;
   let driver: LegacySessionThreadDriver | undefined;
   try {
-    if (options.approvalAdapterFactory !== undefined) {
+    if (options.capabilityMode !== 'registry' && options.approvalAdapterFactory !== undefined) {
       if (input.legacyApprovalPatterns === undefined) {
         throw new Error('Durable legacy approval storage is required before driver construction');
       }
@@ -210,6 +217,15 @@ async function constructDriver(
       agentConfig: {
         ...configured.sessionOptions.agentConfig,
         model: input.model,
+        ...(options.capabilityMode === 'registry' && {
+          runtimeTurnProvider: {
+            capture: (turnInput) => {
+              const driver = driverRef.current;
+              if (driver === undefined) throw new Error('Registry turn requested before driver construction');
+              return driver.runtimeTurnProvider.capture(turnInput);
+            },
+          },
+        }),
         ...(approvalAdapter !== undefined && {
           beforeToolCall: async (call) => {
             const configuredDecision = configuredBeforeToolCall === undefined

@@ -29,6 +29,7 @@ import type {
   UserMessage,
   WorkspaceId,
 } from '../protocol/index.js';
+import type { RuntimeTurnPort } from '../agent/index.js';
 
 export interface RuntimeClock {
   now(): number;
@@ -310,6 +311,15 @@ export interface ThreadDriverHostServices {
     readonly runCeiling: PermissionCeilingSnapshot;
     readonly turnCeiling: PermissionCeilingSnapshot;
   }>;
+  /** Canonical registry execution captures all mutable services once for the already-reserved turn. */
+  captureRuntimeTurn?(input: {
+    readonly rootOpId: ExternalOpId;
+    readonly runId: RunId;
+    readonly turnId: TurnId;
+    readonly model: Readonly<ModelConfig>;
+    readonly transcript: readonly Readonly<AgentMessage>[];
+    readonly signal: AbortSignal;
+  }): Promise<RuntimeTurnPort>;
   /**
    * Static phase-2 approval bridge. The host owns the durable request, waiter, response claim,
    * and resolution ordering; the legacy driver only awaits the resulting invocation decision.

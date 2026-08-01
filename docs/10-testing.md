@@ -15,15 +15,17 @@
 
 ### 1.1 Supervisor 迁移的分阶段门禁
 
-阶段 0–3 严格串行推进。每一阶段先跑本节定向门禁，再跑既有回归与 `bun run check`；review
-发现问题后直接修复并重新执行同一组门禁，review 清零、提交并推送后，下一阶段才能开始。
+阶段 0–3 严格串行推进。每一阶段先跑本节定向门禁，再跑既有回归与 `bun run check`。阶段 0–1
+沿用 review-to-clear 闭环；阶段 2 起每个阶段实现完成后只允许两轮完整 review：第一轮发现问题后
+直接修复并复跑定向门禁，第二轮重新覆盖完整范围并验证修复；第二轮的新修复继续复跑受影响门禁，
+但不得启动第三轮完整 review。提交条件仍是没有已知问题且最终 check 通过。
 
 | 阶段 | 新增测试面 | 必须保持的兼容面 |
 |---|---|---|
 | 0 · 冻结基线 | 两个 legacy `Session` 可同时停在各自 gate；同一 Session 的第二个 prompt 被拒绝；abort A 不释放/取消 B；mailbox/transcript 不串线 | 生产行为不变；默认 headless 仍逐行输出裸 `SessionEvent`，无 identity/envelope |
 | 1 · 身份化 Runtime | opaque ID 不可混传的类型测试；Supervisor 跨 thread 并发；per-thread seq 独立递增并在 resume 后续接；重复 OpId 幂等；public runtime entry import 无副作用 | `Agent`/`Session` API 与默认 headless 逐事件深等投影；旧 JSONL 可读；显式 envelope 模式可用 |
 | 2 · Session 拆分 | 六个协作者的窄单测；repository/committer gate 会背压 Agent；任意 observer gate/异常/退订不背压；control request/response 同链提交；headless 输出泵自行 drain | 当前单 Agent 生命周期、retry、compaction、approval、usage、恢复与事件相对顺序不变 |
-| 3 · 动态 registry | schema/executor 热更新对抗；不可变 snapshot；PreparedInvocation 固定 validator/executor/args/revision；provider adapter snapshot；PromptAssembler/PolicyEngine 身份与权限矩阵；跨 thread FileTracker services 隔离 | 现有工具/provider 全经 adapter 后行为与错误形态不变；同 turn 永不混用 revision |
+| 3 · 动态 registry | schema/executor 热更新对抗；不可变 snapshot；PreparedInvocation 固定 validator/executor/args/resources/analysis/revision；resolver/policy/selector/analysis exact-shape；provider adapter snapshot；PromptAssembler/PolicyEngine 身份、冻结配置与权限矩阵；opaque/incomplete once-only；跨 thread FileTracker services 隔离 | 现有工具/provider 全经 adapter 后行为与错误形态不变；同 turn 永不混用 revision，CLI policy/freshness 不重解析 command |
 
 阶段 0 的 characterization tests 只记录既有事实，不提前实现 Supervisor。至少需要下列可观察
 断言：
@@ -87,6 +89,9 @@
   ordinal/owner 错配拒绝；workspace 在同 run 下一 turn 收紧必须进入 turnCeiling，而安全材料相同的新
   run/turn ceiling revision 保持相同，不因 owner identity 漂移；legacy/static approval
   `control_request.policyRevision` 也必须逐字采用该 turnCeiling 组成的 revision，不能沿用 run 初值。
+- turn reservation 在 ceiling/append 前失败时 driver 不推进 ordinal，capture-error closure 仍以 ordinal 1
+  形成完整 error turn；appendPrepare 成功后 concurrent workspace fatal 也必须让同 key 取回原 TurnId，
+  不追加第二条 prepare，且新 reservation 仍优先暴露 workspace fatal 而不是 active-run 跳号错误。
 - legacy Session retry/compaction 的 host reservation gate 未放行时，不得发布 coordinator event 或
   启动内部 successor；放行后 event、后续 turn 与迟到 abort 都使用同一新 RunId，TurnId 逐采样新建。
 - retry/compaction 决策后把 gate 卡在 predecessor agent_end 之前：reservation 未 durable 时旧 end
@@ -295,9 +300,12 @@ resume、再次 RuntimePort.close 必须得到新 derived OpId 并真正关闭�
 - durable legacy bridge 覆盖 non-empty non-force multi-pattern 的 reserve-outbox→global CAS→finalize→
   control 顺序、force/empty 降级 once、tolerant corrupt approvals.json→empty+diagnostic，以及每个 crash
   window。阶段 2→3 upgrade 在 workspace barrier 下逐 thread 按完整 accepted FIFO inventory（不比较不同
-  thread 的先后），并用 fence-bound 只读 inventory probe 探测 pending reserved outbox：仅 live effect
-  obligation/reserved outbox 才打开 legacy writer；probe 缺失/失败 fail closed，明确无 obligation 时不打开
-  writer。需要 writer 时缺 extension 是 typed construction failure；不开 preflight、不迁移 grant、不重放 executor。
+  thread 的先后），并用 fence-bound 只读 inventory probe 探测阶段 2 pending reserved pattern outbox：仅
+  live legacyProposal effect obligation 或该 reserved outbox 才打开 recovery-only legacy writer；明确无
+  obligation 时不得打开。阶段 3 legacy-global `PolicyGrant` receipt 由 PolicyGrantRepository 自恢复，不算
+  阶段 2 pending。probe 缺失/非法/失败，以及需要 writer 时缺 adapter/storage extension，均为
+  `legacy_approval_recovery_unavailable` construction failure；恢复后 writer 关闭一次，且不开 preflight、
+  不迁移 grant、不重放 executor。
 - facade `setModel(ModelConfig):void` 的 trusted resolved-model admission 验证 ref 一致并只持久 ModelRef；
   调用返回后 `currentModel()` 与紧随 prompt 的 driver 立即看到同一完整 config。public set_model 仍走
   async resolver；trusted sidecar 不落盘，durable failure fail closed而不静默 rollback。其余 sync guard/
@@ -328,21 +336,44 @@ registrationDigest、validator/resource resolver、PolicyEngine 输入、executo
   required resource 缺失、额外/歧义资源、非法 JSON 及 catalog/InvocationContext/
   EffectivePolicySnapshot context 错配都返回 typed recoverable failure且 executor 零调用。bash/path analyzer
   与 executor 同 registrationDigest；PreparedInvocation 固定 schema/metadata/policy/validator/executor、
-  normalized args/resources、executionMode、原 toolCallId 与同 turn effective policy，approval 等待期间不换版；
+  normalized args/resources/analysis、executionMode、原 toolCallId 与同 turn effective policy，approval 等待期间
+  不换版。resolver 省略 analysis 时固定规范化为 complete/persistable/eligible/空 attributes；显式 analysis
+  strict-copy/deep-freeze，非法 reasons、inherited/accessor/unknown fields fail closed。registration policy/
+  selector、resolution/resources 与 analysis 边界都必须用 exact own-data-property shape，拼错 selector key 不得
+  被静默忽略；
 - generic legacy adapter 缺显式 binding 一律 `invalid_registration`，不得按 tool.name/kind 猜。integration
   工厂必须恰好产出 read/ls/glob/grep/bash/edit/write/plan 八项及 [07 §1.2](./07-tools.md) 的 selector 表；
   schema、policy、resolver/analyzer、executor 的同一 registrationDigest 热更新对抗全链一致。用两个
   type/access 相同但 selectorId 不同的 selector 证明 resolver 按 id 精确绑定；同 selector 多 target
   合法，完整 tuple 才去重，required missing/unknown/type-access mismatch 均 fail closed；
+- authoritative Bash resolver 覆盖 literal `cd`、directory `-C`、输入/输出重定向、裸相对文件与目录，
+  并把可见 filesystem target 保守绑定 read + write。substitution/opaque script、项目外路径与
+  canonicalization 不全都保留 askable invocation，但 analysis 必须是 incomplete 或 once_only，绝不生成/
+  命中持久 grant；危险命令产生 `safety:deny`。CLI policy 只消费 exact-shape
+  `legacy_bash_analysis_v2` frozen attributes/resources：篡改 PreparedInvocation.args 后 decision 不变，spy
+  证明 evaluate 不调用 analyzer/realpath/live filesystem。完整项目内 pattern 继续匹配 legacy remembered
+  approval，opaque/external pattern 即使预存也只能 ask once；
+- Python/Node/Bun/Deno/Perl 等 direct、script 与 runner-wrapped interpreter 入口必须冻结为 opaque/
+  incomplete/once-only；先存 `bash:python *`/`bash:node *` 也不能免审后续 inline code。catastrophic deny
+  覆盖 `rm -rf //`、`/./*`、HOME 词法等价形态及 BusyBox/Toybox dispatcher，全程不读取 HOME/filesystem；
+- 八个 built-in binding version/digest v2 冻结 exact `filesystemTargets`：file、directory 与冲突后的 unknown。
+  facts 与 resources 集合不一致 fail closed；对同一 PreparedInvocation 在 prepare 后创建/替换目标，freshness
+  scope 不变，且 spy 证明不对 target 做 stat/realpath。file 只取父目录，directory/unknown 取自身保守链；
 - RuleSnapshot capture 固定 owner、四维 budget、正文/digest、canonical path、root→narrow 顺序和 diagnostics；
   capture failure 不采样。BasePromptSnapshot、RuleSnapshot.owner 与 EffectivePolicySnapshot.context 的
   workspace/thread/run/turn/cwd，以及 base prompt/model ref 任一错配，PromptAssembler 都返回 typed
   `invalid_prompt_context` 且 provider 零调用。assembler 只读传入的 outbound messages、base prompt、
   `effectivePolicy.rules`、model/catalog，返回深冻结 Context，不读 live transcript/registry/filesystem/env/secret；
+- 分别把 grant snapshot、RuleSnapshotProvider、BasePromptProvider、ThreadPolicyEngine capture 卡在永不
+  自行释放的 gate，再提交目标 run abort：每一处都必须由 capture signal 唤醒，形成配对 aborted
+  assistant/turn_end/agent_end，provider/executor 零调用，abort op、waitForIdle 与 close 全部完成；后台
+  只读 promise 的迟到 resolve/reject 不得产生 unhandled rejection 或第二份 capture；
 - `ThreadPolicyEngine.capture()` 的 `ceilingRevision`、`policyBasisRevision`、`grantRevision` 与 combined revision
   分开断言：engine/constraints/ceiling/rule 改变会改 basis，新增 grant 只推进 grant/combined revision，
   不让新 grant 自失效。evaluate 只读同一 PreparedInvocation；identity/constraint 缺失或 context mismatch
-  fail closed，spy 证明它不读 mutable rule/grant store、filesystem，也不执行 capability；
+  fail closed，spy 证明它不读 mutable rule/grant store、filesystem，也不执行 capability。construction-time
+  policy configuration 进入 basis：CLI 的 approvalMode、projectRoot、projectRootReal、bashAnalysisVersion
+  任一改变都会改变 policyBasisRevision，旧配置 snapshot/grant 不得跨配置命中；
 - RuleSnapshot/policy basis 的 revision golden 排除纯 owner run/turn identity：相同安全材料的新 turn/run
   basis 相同，ceiling/rule/constraint material 改变才变化；combined revision 仍绑定当前 context。每个
   attachment `PolicyEngine.openThread()` 得到独占 doom-loop state，同 invocation digest 第三次 ask 不再
@@ -360,6 +391,12 @@ registrationDigest、validator/resource resolver、PolicyEngine 输入、executo
   原子比较 captured fencing token 并 reserve grant mutation，workspace mode 还必须在该事务内保存 grant；
   wrong workspace、post-release/旧 token typed fenced，单独 `validateWriteFence()` 的 check-then-act 不能
   通过测试；close 也纳入构造失败/正常退出门禁；
+- upgrade barrier 用 action log 固定 `legacy:open → per-thread legacy FIFO/unresolved-request recovery →
+  legacy:close → grants:open → PolicyEngine/driver attach`；control-only journal 不打开 legacy writer，
+  effect/outbox 才打开。close 失败时 grants/engine/driver 均为零，registry create/resume input 永远没有
+  `legacyApprovalPatterns`；同 journal 并存的 registry grant response 留给 grant repo 打开后的正常 recovery；
+- registry `ruleBudget` 带 symbol、accessor、non-enumerable、额外字段或 non-plain prototype 时，在
+  `storage.openWorkspace` 计数仍为 0 时拒绝；合法四字段 snapshot 在 host 随后改写原对象时保持不变；
 - grant flush gate 未开时不得提交 control_resolved、resolve waiter 或调用 executor；commit
   `definitely_not_applied` 使 response interrupted、释放 claim而 request 保持 pending，仅新 OpId 可重试；
   conflict/fenced/unknown 保留 claim，并分别 quarantine/stop/degrade 整个 workspace，全部停止新 admission/
@@ -371,10 +408,13 @@ registrationDigest、validator/resource resolver、PolicyEngine 输入、executo
   workspace outbox；同一 transaction reserve `(grantId,patterns)` 后才用跨 workspace lock/CAS 原子更新
   shared approvals Set 并 finalize。两个 workspace holder、outbox/CAS 各 crash window、旧 holder 迟到写与
   新 holder 恢复都不得丢复合 bash 的任一 pattern、重复授权或接受未 reserve 的 stale mutation；既有
-  跨 cwd/global approval scope 黄金用例保持；
-- RuleFreshnessPort 在 preflight 与真实 execute 前只读 frozen RuleSnapshot/resources；同批前序工具改写
+  跨 cwd/global approval scope 黄金用例保持。阶段 2 legacy outbox 同样注入 rename 已成功、directory
+  fsync 失败的窗口：结果必须是 unknown outcome/throw，reserved receipt 与 response claim 保留，绝不能
+  返回 `definitely_not_applied` 后允许新 OpId 叠加授权；
+- RuleFreshnessPort 在 preflight 与真实 execute 前只读 frozen RuleSnapshot/resources/analysis；同批前序工具改写
   AGENTS.md 后，后序工具得到 recoverable stale deny、零副作用，下一 turn 才重捕获/assemble。freshness
-  不能升级为 allow/ask 或替换 PreparedInvocation；`rule_scope_missing.missingScopes` 必须是
+  不能升级为 allow/ask 或替换 PreparedInvocation，也不能检查 command resource、解析 args/shell 或重建
+  capability resource 语义；它只允许读取当前规则文件/目录指纹以回答 freshness。`rule_scope_missing.missingScopes` 必须是
   `RuleFreshnessPort.check()`
   返回的 non-empty strict-copy、去重、UTF-8 排序精确集合，runtime 逐字持久化，不能从 canonicalTarget
   猜 scope；
@@ -387,6 +427,34 @@ registrationDigest、validator/resource resolver、PolicyEngine 输入、executo
   共用 entry 时 FileTracker/services、abort、policy/control 仍隔离；path-like ThreadId/toolCallId 经 safe
   storage key 后不逃逸 truncation root。legacy sequential 批/call.id、工具/provider fixture、loop、
   Session facade、headless 与 TUI 黄金序列全绿；未知 provider api 仍按 StreamFn 铁律给流内 error。
+
+### 1.2 阶段 3 当前测试归属与兼容边界
+
+阶段 3 已不再只有未来测试计划。当前实现的直接证据按职责归属如下；新增回归应补进对应层，而不是
+另建一个只从 private state 猜结果的“大集成测试”：
+
+| 实现面 | 当前直接测试 |
+|---|---|
+| capability registration digest、mutation、immutable snapshot、prepare/resource/analysis binding 与 exact-shape 拒绝 | `src/capabilities/registration-digest.test.ts`、`capability-registry.test.ts` |
+| provider registration digest、mutation 与旧 snapshot StreamFn 固定 | `src/capabilities/provider-registry.test.ts` |
+| PromptAssembler owner/model/context 校验与深冻结 | `src/capabilities/prompt-assembler.test.ts` |
+| conservative PolicyEngine revision/grant/doom-loop/thread isolation、configuration basis、analysis safety/grantability | `src/capabilities/policy-engine.test.ts` |
+| generic zod legacy adapter、八工具显式 binding 与 authoritative Bash analysis/once-only | `src/capabilities/legacy-tool-adapter.test.ts`、`src/integrations/legacy-coding-tools/index.test.ts` |
+| Agent runtime-turn seam、同 turn schema/executor 版本固定、duplicate toolCallId | `tests/agent-loop.test.ts` |
+| CLI registry composition（八工具 + OpenAI Chat/Responses + Anthropic + faux）、冻结 policy basis/Bash projection、legacy approval compatibility | `src/cli/capability-services.test.ts` |
+| CLI `ProjectRules` 的结构化 snapshot/freshness、frozen analysis、无 command reparse、budget/owner/path/stale fail-closed | `src/cli/project-rule-capability.test.ts` |
+| workspace/legacy-global grant repository 的 snapshot、幂等/conflict/fence/corrupt-store | `src/runtime/memory-storage.test.ts`、`src/runtime/file-storage.test.ts` |
+| package exports、外部 ESM/`.d.ts` consumption、依赖边界 | `e2e/capabilities-package.test.ts`、`tests/boundaries.test.ts` |
+| registry Runtime turn capture、freshness、control/grant 与 attachment cleanup | `src/session/thread-runtime.test.ts` |
+| registry driver 只执行 runtime turn、阶段 2 legacy approval 仅作历史 recovery | `src/integrations/legacy-session-runtime/index.test.ts`、`src/runtime/supervisor.test.ts` |
+
+production CLI 与未由 Runtime 注入 internal turn provider 的普通 direct Agent/direct Session 仍走 static
+compatibility path，因此阶段 3 的“兼容 fixture
+全绿”是对既有 test suites 的保留要求，不应误写成 `main.ts` 已默认启用 registry。CLI registry
+composition 测试只证明显式 factory 可无 ambient IO 组装八工具、四 provider 与
+`legacy_global_approvals_v1` policy；`ProjectRules` 的独立 adapter 测试证明同一对象可提供结构化
+snapshot/freshness。两者已经具备显式组合所需端口，但 production `main.ts` 仍按兼容矩阵有意保留
+static composition；以后若切换默认路径，仍须通过阶段 2 legacy recovery 与本节完整门禁。
 
 ## 2. 测试金字塔
 
@@ -679,6 +747,14 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 所有规则断言读 faux 的 `calls[n].context.systemPrompt`，不读取 Agent 私有状态；文件修改不
 依赖 mtime 等待，因为生产逻辑每 turn 重读正文。
 
+阶段 3 另由 `src/cli/project-rule-capability.test.ts` 直接按 `RuleSnapshotProvider`/
+`RuleFreshnessPort` 契约覆盖：root→cwd canonical files、owner-independent revision、下一 turn 才吸收新
+scope、四维 budget 与窄规则优先、结构化 diagnostics、仓库外 symlink 不泄漏、frozen incomplete analysis
+fail-closed、无 command resource/parser 依赖、preflight/execute 双 freshness 检查，以及非法 budget/owner
+mismatch 的 typed failure。freshness 测试允许为指纹比较读取当前规则 filesystem，但必须证明它不从
+args/shell 或 live cwd 重建 resource 语义。它验证的是 registry adapter surface，不取代上面 static
+CLI/Agent 的既有行为 fixture。
+
 ## 7. CLI 测试:OpenTUI 内存帧 + PTY / headless e2e
 
 ### 7.1 OpenTUI TestRenderer(L4 UI)
@@ -757,10 +833,14 @@ harness:
 
 ## 9. 验收清单
 
-- [ ] 阶段 0:legacy characterization 覆盖同 Session 单 run、双 Session gate 并行、abort/mailbox/transcript 隔离与裸 headless 形态；生产行为零变化。
-- [ ] 阶段 1:identity/envelope/RuntimePort/Supervisor、per-thread seq resume、OpId 幂等、无副作用 import 与 legacy 投影门禁全绿。
-- [ ] 阶段 2:六个协作者边界、权威 committer 背压、observer 隔离、control 同链与 headless 自有 drain 门禁全绿。
-- [ ] 阶段 3:registry/snapshot/prepared invocation/provider/prompt/policy 热更新与权限矩阵全绿；既有工具/provider 兼容 fixture 全绿。
+- [x] 阶段 0:legacy characterization 覆盖同 Session 单 run、双 Session gate 并行、abort/mailbox/transcript 隔离与裸 headless 形态；生产行为零变化。
+- [x] 阶段 1:identity/envelope/RuntimePort/Supervisor、per-thread seq resume、OpId 幂等、无副作用 import 与 legacy 投影门禁全绿。
+- [x] 阶段 2:六个协作者边界、权威 committer 背压、observer 隔离、control 同链与 headless 自有 drain 门禁全绿。
+- [x] 阶段 3:registry/snapshot/prepared invocation/provider/prompt/policy、registry Runtime、grant repository 与 package exports 定向矩阵全绿；既有 static 工具/provider 兼容 fixture 保持全绿。
+
+下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
+而推断未在当前环境重跑的双 OS CI 等外部结果。
+
 - [ ] M1:L1 全绿;faux provider 通过「事件语法自检」用例集(每种 FauxTurn 形态产出的事件序列合法、铁律成立)。
 - [ ] M2:§4.2 全部 11 个 fixture 入库且断言通过;两个错误路径单测(reject 不外抛、abort 映射)通过;`record-fixture.ts` 可用。
 - [ ] OpenAI Responses:§4.4 九个生成式 fixture、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。

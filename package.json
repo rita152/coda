@@ -15,6 +15,14 @@
     "./runtime": {
       "types": "./dist/runtime/index.d.ts",
       "import": "./dist/runtime/index.js"
+    },
+    "./capabilities": {
+      "types": "./dist/capabilities/index.d.ts",
+      "import": "./dist/capabilities/index.js"
+    },
+    "./legacy-coding-tools": {
+      "types": "./dist/integrations/legacy-coding-tools/index.d.ts",
+      "import": "./dist/legacy-coding-tools/index.js"
     }
   },
   "scripts": {

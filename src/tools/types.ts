@@ -4,7 +4,7 @@
 
 import type { z } from 'zod';
 import type { ImagePart, TextPart } from '../protocol/index.js';
-import type { FileTracker } from '../shared/index.js';
+import type { FileTrackerPort } from '../shared/index.js';
 
 export type ToolKind = 'read' | 'search' | 'edit' | 'execute' | 'plan';
 
@@ -24,7 +24,7 @@ export interface ToolContext {
   cwd: string;
   signal: AbortSignal;
   onUpdate?: (u: { output?: string }) => void;    // 流式进度(bash 100ms 节流),火后不理
-  fileTracker: FileTracker;
+  fileTracker: FileTrackerPort;
 }
 
 export interface ToolOutput<D = unknown> {

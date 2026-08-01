@@ -197,6 +197,18 @@ export interface RuleScopeMutation {
   readonly invocationId: string;
 }
 
+/**
+ * Consumes one durable hint window and installs its successor atomically with the next turn.
+ * `consumedScopes` is an optimistic witness: recovery rejects a replacement that does not match
+ * the window produced by all preceding `rule_scope_observed` mutations.
+ */
+export interface RuleScopeWindowMutation {
+  readonly type: 'rule_scope_window_replaced';
+  readonly consumedScopes: readonly string[];
+  readonly replacementScopes: readonly string[];
+  readonly owningTurnId: TurnId;
+}
+
 export interface ThreadResultOutboxMutation {
   readonly type: 'thread_result_pending';
   readonly resultOpId: DerivedOpId;
@@ -217,6 +229,7 @@ export type RuntimeThreadMutation =
   | TurnMutation
   | ActivityRecoveryMutation
   | RuleScopeMutation
+  | RuleScopeWindowMutation
   | ModelSelectionMutation;
 
 export interface ThreadResultDeliveryRecord {

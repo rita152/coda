@@ -5,7 +5,10 @@
 
 // 惰性求值(每次调用时判定);非 Bun 环境默认视为开发模式。
 function warnDev(message: string): void {
-  if (typeof Bun !== 'undefined' && Bun.env.NODE_ENV === 'production') {
+  const nodeEnv = (globalThis as {
+    readonly process?: { readonly env?: { readonly NODE_ENV?: string } };
+  }).process?.env?.NODE_ENV;
+  if (nodeEnv === 'production') {
     return;
   }
   console.warn(message);

@@ -17,6 +17,42 @@ export type {
 } from '../protocol/messages.js';
 export type { PlanStep, QueuedMessage } from '../protocol/agent-events.js';
 export type { CompatFlags, ModelConfig } from '../protocol/provider.js';
+export type {
+  BasePromptProvider,
+  BasePromptSnapshot,
+  CapabilityAnalysisReasons,
+  CapabilityInvocationAnalysis,
+  CapabilityRegistryReader,
+  EffectivePolicySnapshot,
+  InvocationContext,
+  PolicyDecision,
+  PolicyEngine,
+  PolicyEngineOptions,
+  PolicyGrant,
+  PolicyGrantCommitResult,
+  PolicyGrantRepository,
+  PolicyGrantRepositoryPort,
+  PolicyGrantSnapshot,
+  PreparedInvocation,
+  PromptAssembler,
+  PromptAssemblyInput,
+  PromptAssemblyResult,
+  PromptModelView,
+  ProviderAdapterRegistryReader,
+  ProviderAdapterSnapshot,
+  ResolvedCapabilityResource,
+  RuleFreshnessPort,
+  RuleFreshnessResult,
+  RuleSnapshot,
+  RuleSnapshotBudget,
+  RuleSnapshotCaptureResult,
+  RuleSnapshotDiagnostic,
+  RuleSnapshotProvider,
+  RuntimeCapabilityServices,
+  ThreadPolicyEngine,
+  ToolCatalogSnapshot,
+  TurnPolicyContext,
+} from '../capabilities/types.js';
 
 export * from './errors.js';
 export type { EventSubscriptionOptions } from './event-stream.js';
@@ -26,4 +62,10 @@ export { createMemoryRuntimeStorage } from './memory-storage.js';
 export type { MemoryRuntimeStorage } from './memory-storage.js';
 export * from './ports.js';
 export { createRuntime } from './supervisor.js';
-export type { CreateRuntimeOptions, RuntimePort } from './supervisor.js';
+export type {
+  CreateRuntimeBaseOptions,
+  CreateRuntimeOptions,
+  RegistryCreateRuntimeOptions,
+  RuntimePort,
+  StaticCreateRuntimeOptions,
+} from './supervisor.js';

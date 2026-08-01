@@ -25,6 +25,24 @@ export default tseslint.config(
           // protocol、shared 是叶子:不得 import src 下任何其他目录
           { target: './src/protocol', from: './src', except: ['./protocol'] },
           { target: './src/shared', from: './src', except: ['./shared'] },
+          // capabilities 只依赖 protocol/shared；generic legacy adapter 唯一窄例外是 tools/types.ts。
+          {
+            target: './src/capabilities',
+            from: './src',
+            except: ['./capabilities', './protocol', './shared', './tools/types.ts'],
+          },
+          // 具体八工具 binding 是集成层，只向下看 capabilities/tools/protocol/shared。
+          {
+            target: './src/integrations/legacy-coding-tools',
+            from: './src',
+            except: [
+              './integrations/legacy-coding-tools',
+              './capabilities',
+              './tools',
+              './protocol',
+              './shared',
+            ],
+          },
           // providers 只向下看 protocol/shared
           { target: './src/providers', from: './src/agent' },
           { target: './src/providers', from: './src/tools' },
@@ -40,6 +58,8 @@ export default tseslint.config(
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
+          { target: './src/tools', from: './src/capabilities' },
+          { target: './src/tools', from: './src/integrations/legacy-coding-tools' },
           // session 只依赖 protocol/shared/agent(见 docs/02 §7),不得触碰 runtime/providers/tools/cli
           { target: './src/session', from: './src/runtime' },
           { target: './src/session', from: './src/cli' },
@@ -50,7 +70,7 @@ export default tseslint.config(
           {
             target: './src/runtime',
             from: './src',
-            except: ['./runtime', './protocol', './shared', './session'],
+            except: ['./runtime', './protocol', './shared', './session', './capabilities'],
           },
           // provider 之间互相隔离(跨 provider import 是设计异味)
           { target: './src/providers/openai-chat', from: './src/providers/faux' },

@@ -4,9 +4,10 @@
 
 本文冻结 coda 从单会话门面演进到可嵌入多线程 Runtime 的目标架构。它是
 `WorkspaceId / ThreadId / RunId / TurnId / OpId`、`EventEnvelope`、Supervisor、mailbox、
-取消/恢复、权限与兼容投影的 canonical 宿主；与旧文档冲突时，以本文为准。阶段 0 只修改
-设计与 characterization tests，不改变现有 `Agent` / `Session` / CLI 行为；阶段 1–3 按本文
-逐步落地，并在每一阶段保留 §11.1 所列兼容面。
+取消/恢复、权限与兼容投影的 canonical 宿主；与旧文档冲突时，以本文为准。阶段 0 只修改了
+设计与 characterization tests，没有改变当时的 `Agent` / `Session` / CLI 行为；阶段 1–3 的 production
+结构现已按本文落地，并继续保留 §11.1 所列兼容面。下文“阶段 1/2”措辞用于说明迁移来源与历史
+兼容责任，不表示当前 public Runtime 仍停留在 Phase-1-only 形态。
 
 ## 1. 核心模型：每线程单 active run
 
@@ -239,20 +240,23 @@ export interface CreateRuntimeBaseOptions {
   readonly clock?: RuntimeClock;
 }
 
-export type StaticCreateRuntimeOptions = CreateRuntimeBaseOptions & {
+// 保留阶段 1 已导出的 interface 形态，已有 consumer 可继续 extends/declaration-merge。
+// capabilityMode/capabilityServices 的相关性由 factory 的 I/O 前 exact-shape gate 强制；
+// 需要编译期收窄的调用方使用下面两个 alias。
+export interface CreateRuntimeOptions extends CreateRuntimeBaseOptions {
+  readonly capabilityMode?: 'static' | 'registry';
+  readonly capabilityServices?: Readonly<RuntimeCapabilityServices>;
+}
+
+export type StaticCreateRuntimeOptions = CreateRuntimeOptions & {
   readonly capabilityMode?: 'static';
   readonly capabilityServices?: never;
 };
 
-export type RegistryCreateRuntimeOptions = CreateRuntimeBaseOptions & {
+export type RegistryCreateRuntimeOptions = CreateRuntimeOptions & {
   readonly capabilityMode: 'registry';
   readonly capabilityServices: Readonly<RuntimeCapabilityServices>;
 };
-
-// 阶段 1–2 的 public alias 只等于 StaticCreateRuntimeOptions；阶段 3 additive 扩为下列 union。
-export type CreateRuntimeOptions =
-  | StaticCreateRuntimeOptions
-  | RegistryCreateRuntimeOptions;
 
 export function createRuntime(options: CreateRuntimeOptions): Promise<RuntimePort>;
 
@@ -442,10 +446,10 @@ export interface RuntimeWorkspaceStoragePort {
     threadId: ThreadId): Promise<LegacyThreadImport | undefined>;
   inspectLegacyApprovalRecovery?(lease: Readonly<SupervisorLease>):
     Promise<Readonly<LegacyApprovalRecoveryInventory>>;
-  openPolicyGrantRepository?(lease: Readonly<SupervisorLease>,
-    mode: PolicyGrantRepository['mode']): Promise<PolicyGrantRepository>;
   openLegacyApprovalPatternRepository?(lease: Readonly<SupervisorLease>):
     Promise<LegacyApprovalPatternRepository>;
+  openPolicyGrantRepository?(lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode']): Promise<PolicyGrantRepository>;
   close(): Promise<void>;
 }
 
@@ -472,24 +476,33 @@ immutable `(workspaceId, recordedCwd 原始 Unicode bytes)`；
 重开时同时验证 requested cwd 与显式/派生 workspaceId，返回 port 的两个 readonly 字段逐字等于已存
 binding。cwd 不做 realpath/case/Unicode/path normalization。任一不匹配在 SupervisorLease、catalog/
 recovery/attach 前 reject `WorkspaceBindingMismatchError`，不能把同一权限/storage namespace 换根。
-上面的 storage port 是阶段 3 最终形态：阶段 1 的实际 interface 截止 `importLegacyThread/close`，不引用
-approval/capability 类型；阶段 2 additive 增加 `openLegacyApprovalPatternRepository`，阶段 3 再增加
-`inspectLegacyApprovalRecovery/openPolicyGrantRepository`。源码可用分阶段 extension interface 组合，不能为了让阶段 1 编译而提前
-创建空 capabilities module 或声称未实现的 method 可用；对应 mode 缺 required extension 时 factory 在
-任何 recovery/attach 前 typed fail。
-阶段 3 还有一个有条件的 upgrade requirement：取得 SupervisorLease 后先 inventory canonical journals；
-对阶段 2 遗留的 `legacyProposal` control/response 逐 thread 按该 thread 完整、跨 op-type 的 accepted
-FIFO 做无副作用 fold；upgrade barrier 可以扫描全部 journal，但不声明跨 thread 的全局顺序。
-无 claim、非持久决定或被较早 abort/close supersede 的项直接由 journal recovery aborted/superseded；
-同时必须调用 fence-bound、只读的 `inspectLegacyApprovalRecovery(lease)`；它与 legacy repository 的
-outbox reservation 线性一致，任何 pending reserved outbox 都不得假阴性，但不会打开 writer 或改状态。
-只有 fold 后仍存在 accepted allow_always + 非空非 force 的 effect obligation，或 inventory 返回已有 pending reserved legacy
-outbox 时，registry Runtime 才必须要求并打开 `openLegacyApprovalPatternRepository(lease)` 作为
-recovery-only writer，在其 FIFO 位置补旧 Set/control。完成后关闭它并打开 grant repository；不得重跑
-legacy preflight/adapter，所有旧 executor 零调用。需要 writer 时缺 extension/open 失败是 typed
-`legacy_approval_recovery_unavailable` construction failure；旧 patterns 不迁成 workspace grants。
-缺 inventory extension/读取失败同样在 recovery/attach 前 typed fail；inventory 明确为 false 且 journal
-没有 effect obligation 时不得为 registry steady state 打开 legacy writer。
+上面的 storage port 是当前阶段 3 形态：阶段 1 的历史 interface 截止 `importLegacyThread/close`，不引用
+approval/capability 类型；阶段 2 曾 additive 增加 `openLegacyApprovalPatternRepository`，阶段 3 又增加
+`inspectLegacyApprovalRecovery/openPolicyGrantRepository`。对应 mode 缺 required extension 时 factory 在
+任何 recovery/attach 前 typed fail；这些 extension 不是可返回空实现的占位 method。
+
+阶段 3 registry construction 取得 `SupervisorLease` 后，必须调用 fence-bound、只读的
+`inspectLegacyApprovalRecovery(lease)`，并扫描 canonical journals。inventory 与阶段 2 legacy repository
+的 outbox reservation 线性一致；它只把尚未应用的阶段 2 pattern receipt 计为
+`hasPendingReservedOutbox`。阶段 3 `legacy_global_approvals_v1` 的 `PolicyGrant` receipt 由
+`PolicyGrantRepository` 自己恢复，不属于这个 inventory，也不能迫使 recovery-only writer 打开。
+缺 inventory extension、返回非法 shape 或读取失败均在 recovery/attach 前 typed fail
+`legacy_approval_recovery_unavailable`。
+
+对阶段 2 遗留的 `legacyProposal` control/response，construction 按每个 thread 完整、跨 op-type 的
+accepted FIFO 做无副作用 fold；可以扫描全部 journal，但不声明跨 thread 的全局顺序。无 claim、非持久
+决定或被较早 abort/close supersede 的项直接由 journal recovery aborted/superseded。只有 fold 后仍存在
+accepted allow_always + 非空非 force 的 effect obligation，或 inventory 报告 pending reserved legacy
+outbox 时，才要求 `ThreadDriverFactory.openLegacyApprovalAdapter` 与
+`openLegacyApprovalPatternRepository(lease)`，并打开 recovery-only writer，在 FIFO 位置补旧 Set/control。
+需要时缺 adapter/storage extension、open 失败均 typed fail `legacy_approval_recovery_unavailable`；明确无
+obligation 时不得打开旧 writer。
+
+registry construction 仍总是按 `RuntimeCapabilityServices.grantMode` 打开 fence-bound
+`PolicyGrantRepository`。旧 recovery 不重跑 legacy preflight，不把旧 patterns 迁成 `PolicyGrant`，旧
+executor 零调用；新 attachment 的 capability 调用只使用
+PreparedInvocation/PolicyEngine/PolicyGrantRepository。`Supervisor.open()` 完成历史 FIFO 恢复后立即关闭
+并丢弃 recovery-only legacy writer；grant repository 则由 Runtime 持有到 `close()`。
 其中 `ThreadMetaRecord`、`LegacyThreadSeedRecord`、`ThreadRecord` 的唯一逐字段定义在
 [08](./08-session-persistence.md) §3.1；这里通过 type-only import 使用这些 protocol record，不能另造
 一套相似结构。`ThreadDriverRef` 则是本章 §2.1 的 protocol 值类型，08 只引用它。
@@ -618,17 +631,17 @@ attached 的 map，否则较早 accepted 的 create/resume 可能在 close 后 a
 RuntimeOpValidationError/option validation。close 失败仍保持 closed（资源错误由 cached promise 报告），
 不能重新开放 admission。
 
-`CreateRuntimeOptions` 的 `capabilityMode` 冻结构造演进边界：阶段 1–2 缺省为 `static`，不得传入部分
-registry service；阶段 3 使用 `registry` 时必须一次性提供完整 `RuntimeCapabilityServices`，Runtime
+`CreateRuntimeOptions` 的 `capabilityMode` 冻结构造演进边界：当前仍缺省为 `static`，且 static mode
+不得传入部分 registry service；显式使用 `registry` 时必须一次性提供完整 `RuntimeCapabilityServices`，Runtime
 取得 SupervisorLease 后，用 workspace storage 的 `openPolicyGrantRepository` 打开一个绑定该 workspace/
 fence 的 PolicyGrantRepository，再把同一只读 service bundle 与 bound repository 传给每个 attachment。
 repository open 失败发生在 recovery/attach/provider 前并关闭 runtime construction；static mode 两项都
 缺省。该变化只扩展 factory construction，`RuntimePort`、wire 与 legacy projection 不变。
-上面代码块展示阶段 3 的最终 union；阶段 1–2 源码只导出
-`CreateRuntimeOptions = StaticCreateRuntimeOptions`，不声明/导出 RegistryCreateRuntimeOptions 或
-RuntimeCapabilityServices 占位，也不接受 `capabilityMode:'registry'`。阶段 3 再新增这些类型并把同名
-CreateRuntimeOptions alias 扩为 union；既有 static consumer 无需修改，阶段 1 因而不会提前形成
-runtime→capabilities import。
+上面代码块保留当前 public `CreateRuntimeOptions` interface；`RegistryCreateRuntimeOptions` 与
+`RuntimeCapabilityServices` 已导出，既有省略 `capabilityMode` 的 static consumer、`extends
+CreateRuntimeOptions` 与 declaration merging 均无需修改。两个窄 alias 提供静态判别，public interface
+本身允许 additive 扩展；factory 在任何 storage/recovery I/O 前验证 mode 相关性，以及 service bundle
+全部字段都是唯一、可枚举的 own data properties（禁止 inherited/accessor/未知字段）。
 
 默认 identity factory 只在显式创建/提交后使用安全随机源；`deriveOpId` 对相同 purpose/parts 必须跨
 进程稳定且按 purpose domain-separated，deployment 重开同一 storage 时不得更换其 derivation 版本。
@@ -645,7 +658,7 @@ stream errors；package root `coda` 不作为 library
 入口，CLI 仍只由 `bin.coda` 暴露。构建必须同时产出 ESM 与声明，消费 smoke 从一个包外临时目录按
 这个 specifier import，不能绕过 exports 直接相对引用 src/dist。
 
-阶段 3 additive 冻结三个可嵌入 package entry，外部宿主不得 deep-import `src/`：
+当前 package exports 已 additive 冻结三个可嵌入 entry，外部宿主不得 deep-import `src/`：
 
 | specifier | 必须导出 |
 |---|---|
@@ -658,6 +671,12 @@ registry 只留在 embedding host，传给 Runtime 的仍是 reader view。BaseP
 RuleFreshnessPort 与 storage/model/permission ports 依赖宿主环境，故只导出接口、由宿主显式注入，不提供
 会暗读 cwd/env 的 default。三个 entry 的 ESM/`.d.ts` 都必须由 package exports 可消费；其中
 `coda/runtime` import 继续不能因 additive type 面而 eager-load zod、具体工具或 provider SDK。
+
+构建产物的实际映射也属于契约：`coda/runtime` 与 `coda/capabilities` 分别指向
+`dist/runtime/index.{js,d.ts}`、`dist/capabilities/index.{js,d.ts}`；`coda/legacy-coding-tools` 的 ESM
+指向 `dist/legacy-coding-tools/index.js`，声明指向
+`dist/integrations/legacy-coding-tools/index.d.ts`。外部消费 smoke 必须同时覆盖 ESM import 与 TypeScript
+declaration resolution，不能因两个 legacy-tool artifact 的物理目录不同而绕过 `exports`。
 
 `projectLegacySessionEvent()` 是 public compatibility projector 的唯一入口。它先要求
 `envelope.threadId === targetThreadId`，否则返回 undefined，防止把多 thread 流混进单 Session；随后
@@ -1264,12 +1283,28 @@ export interface ThreadDriverHostServices {
     readonly runCeiling: PermissionCeilingSnapshot;
     readonly turnCeiling: PermissionCeilingSnapshot;
   }>;
+  captureRuntimeTurn?(input: {
+    readonly rootOpId: ExternalOpId;
+    readonly runId: RunId;
+    readonly turnId: TurnId;
+    readonly model: Readonly<ModelConfig>;
+    readonly transcript: readonly Readonly<AgentMessage>[];
+    readonly signal: AbortSignal;
+  }): Promise<RuntimeTurnPort>;
+  requestLegacyApproval?(input: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly cwd: string;
+    readonly args: unknown;
+  }): Promise<LegacyApprovalInvocationResult>;
 }
 
 export interface ThreadDriverAttachment {
   readonly driver: ThreadDriverPort;
   readonly durableRef: ThreadDriverRef;
   readonly initialCheckpoint: ThreadDriverCheckpoint;
+  readonly legacyApprovalAdapter?: LegacyApprovalAdapter;
+  readonly legacyApprovalPolicyRevision?: string;
 }
 
 export interface RecoveryQueueCommand {
@@ -1281,19 +1316,24 @@ export interface ThreadDriverPort {
   activate(): Promise<void>; // seed/recovery commit 前保持 quarantined；幂等
   dispatch(command: PreparedThreadDriverCommand): ThreadDriverDispatch;
   interactionState(): 'idle' | 'running' | 'retrying' | 'compacting';
+  activityQueuedDuringCompaction?(): void;
   close(): Promise<void>;
 }
 
 export interface ThreadDriverFactory {
   readonly requirements:
-    | { readonly approvalMode: 'legacy_session_edge' }
-    | { readonly approvalMode: 'durable_legacy_bridge' }
-    | { readonly approvalMode: 'registry' };
+    | { readonly approvalMode: 'legacy_session_edge';
+        readonly capabilityMode?: 'static' | 'registry' }
+    | { readonly approvalMode: 'durable_legacy_bridge';
+        readonly capabilityMode?: 'static' | 'registry' };
+  openLegacyApprovalAdapter?(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly threadId: ThreadId;
+    readonly patterns: LegacyApprovalPatternRepositoryPort;
+  }): Promise<LegacyApprovalAdapter>;
   create(input: { workspaceId: WorkspaceId; threadId: ThreadId;
     model: ModelConfig; permissionCeiling: PermissionCeilingSnapshot;
     parentThreadId?: ThreadId; creationKey: string;
-    capabilityServices?: Readonly<RuntimeCapabilityServices>;
-    grantRepository?: PolicyGrantRepositoryPort;
     legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort },
     host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
   resume(input: { workspaceId: WorkspaceId; threadId: ThreadId;
@@ -1301,18 +1341,20 @@ export interface ThreadDriverFactory {
     permissionCeiling: PermissionCeilingSnapshot;
     committedCheckpoint?: ThreadDriverCheckpoint;
     usedRequestIds: readonly string[];
-    capabilityServices?: Readonly<RuntimeCapabilityServices>;
-    grantRepository?: PolicyGrantRepositoryPort;
     legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort },
     host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
 }
 ```
 
-这个代码块同样展示阶段 3 最终 input。阶段 1 create/resume 只含 identity/model/ceiling/driver checkpoint
-字段（resume 另含 fold 后永久 `usedRequestIds`）且 requirements 只有 `legacy_session_edge`；阶段 2 additive 增加 `durable_legacy_bridge` 并传
-`legacyApprovalPatterns`，阶段 3 再增加 `registry` branch 并传 capabilityServices 与
-grantRepository。static branch 永不携带后两项。各阶段以 extension input type 实现，保持阶段 1
-runtime core 不 import capabilities，不能用一组永远 undefined 的占位字段掩盖边界。
+这个代码块展示当前 driver input。阶段 1 create/resume 只有 identity/model/ceiling/driver checkpoint
+字段（resume 另含 fold 后永久 `usedRequestIds`）且 requirements 只有 `legacy_session_edge`；阶段 2
+additive 增加 `durable_legacy_bridge` 与 `legacyApprovalPatterns`。阶段 3 的 registry 判别复用
+`requirements.capabilityMode`，但 `RuntimeCapabilityServices`、per-thread PolicyEngine 和 bound grant
+repository 由 Supervisor 直接交给 `ThreadRuntime`，不穿过 driver create/resume input；driver 只通过
+runtime-only turn port 请求已经捕获的 turn。这样 static driver input 不出现永远 undefined 的 capability
+占位字段，也避免 execution driver 获得 mutable registry/grant writer。`captureRuntimeTurn` 只在 registry
+attachment 使用，`requestLegacyApproval` 只在 static durable bridge 使用；mode validation 必须阻止同一
+attachment 同时依赖两条 approval/capability path。
 `commitEventBatch()` 与 `commitEvent()` 使用同一个 per-thread writer gate；batch 中的连续 envelope、
 checkpoint mutation 与 seq 分配必须一次 append+flush 后整体发布，不能在 message/usage 或
 compaction event 之间暴露半状态。`recover()` 是 quarantined driver 的 mandatory construction hook：
@@ -1322,13 +1364,21 @@ resume 时 Supervisor 先按 accepted FIFO 把尚无 durable `queue_update` 的 
 Supervisor 核对 effect、以原 OpId 完成 mailbox 后，才提交/暴露 `thread_resumed` 并 activate。由
 `control_requested` 全历史折叠出的 `usedRequestIds` 同时传给 factory.resume，adapter 的 canonical raw-id
 suffix allocator 必须从该集合续接，resolution/close/restart 均不得回收。
-`requirements.approvalMode` 是构造期判别：阶段 1 LegacySession factory 声明 `legacy_session_edge`，
-static Runtime 不开新 policy repository；阶段 2 ThreadRuntime static factory 必须声明
-`durable_legacy_bridge`，Runtime 必须成功打开/传入 LegacyApprovalPatternRepository，否则在 recovery/
-attach 前以 `legacy_approval_storage_unavailable` 关闭构造；阶段 3 registry branch 要求 factory 声明
-`registry` 并成功打开 grant repository，任何 mode mismatch 都拒绝。per-thread
-LegacyApprovalAdapter.close 只释放自己的 policy state，不关闭 Runtime-owned shared pattern repository；
-后者由 RuntimePort.close 在全部 attachments 收束后关闭一次。
+`requirements.approvalMode/capabilityMode` 是构造期判别：阶段 1 LegacySession factory 声明
+`legacy_session_edge`，static Runtime 不开新 policy repository；阶段 2 ThreadRuntime static factory 必须
+声明 `durable_legacy_bridge`，Runtime 必须成功打开/传入 LegacyApprovalPatternRepository，否则在
+recovery/attach 前以 `legacy_approval_storage_unavailable` 关闭构造；registry Runtime 要求 factory 的
+`capabilityMode:'registry'` 且 approvalMode 为 `legacy_session_edge`，并成功打开 grant repository，任何
+mode mismatch 都拒绝。canonical approval waiter/effect 属于 ThreadRuntime，不由 driver 安装阶段 2
+durable legacy bridge。static durable bridge 的 per-thread `LegacyApprovalAdapter.close()` 只释放自己的
+policy state，不关闭 Runtime-owned shared pattern repository；该 shared repository 由 `RuntimePort.close()`
+在全部 attachments 收束后关闭一次。registry upgrade 的 adapter 只为仍存续的历史 response 临时打开并
+关闭。registry construction 先只读验证 grant-repository capability，再 inventory/fold 全部旧 legacy
+control（包括无 response 的 unresolved request）；只有 allow_always effect 或 reserved outbox 才打开
+recovery-only pattern writer。旧 control 收束后先清除 Supervisor 引用并关闭 writer，随后才实际打开 grant
+repository、恢复 registry grant、创建 PolicyEngine/driver attachment。writer close 失败时后三者调用数都
+必须为零；registry factory create/resume input 由 capability-mode 判别机械省略
+`legacyApprovalPatterns`，即使未来构造顺序回归也不能泄漏 recovery writer。
 两个 workspace storage `open*Repository()` 都是 recovery barrier：返回前必须在当前 fenced transaction
 扫描本 workspace 已 reserved 未 finalized 的 mutation，并按各 mode 的状态机幂等完成或报告 typed
 construction failure。workspace grant 在同一 workspace transaction 内保存/finalize；只有 legacy-global
@@ -1359,13 +1409,13 @@ creationKey 产生 durable backend 后，即使 quarantined close 明确成功�
 同 OpId/recovery 找回、绑定或明确 quarantine。任何 `activate()` 已开始后的失败也按 unknown-side-effect
 分支保留 claim，不能套用 pre-side-effect release。
 
-阶段 1 的 Supervisor 拥有 mailbox/OpId ledger/run reservation，并把 driver events 交给临时 per-thread
+历史阶段 1 的 Supervisor 拥有 mailbox/OpId ledger/run reservation，并把 driver events 交给临时 per-thread
 event journal/writer 后才发布；legacy driver 继续拥有当前 retry/compaction 行为。它在边缘把
 `approval_request` 映射为 identity-bearing `control_request`，把 `control_response` op 映回既有
 ApprovalBroker，但这个 control 还不是阶段 2 的权威持久链。阶段 2 用真正 `ThreadRuntime` backend
 替换 legacy driver，并把 writer 提取为 EventCommitter/EventHub；`RuntimePort`、RuntimeOp、receipt、
-envelope 与 CLI 不变。阶段 3 才让 runtime factory 接收 capability/provider registries；此前
-composition root 给 legacy factory 注入 per-attachment
+envelope 与 CLI 不变。当前阶段 3 runtime factory 已能接收 capability/provider registry reader；static
+composition 仍给 legacy factory 注入 per-attachment
 `createAttachmentConfig(identity, model, permissionCeiling)` 工厂。
 阶段 1 edge 不得直接假定 legacy broker 的短 raw approvalId 永不碰撞。它以 raw id 为兼容 base，在
 该 thread journal fold 出的永久 used-requestId 集合中选择第一个空闲值（base 未用则原样；否则按
@@ -1383,10 +1433,10 @@ ID factory；crash 前未提交的候选没有对外事实，可以重用。
 active-run permission state；不得浅拷贝或复用捕获这些对象的 hook。无状态 StreamFn、ToolDefinition
 定义等纯值可以共享，但执行 services 仍按 thread 构造。attachment config 还提供稳定、不可变的
 legacy rule revision；阶段 1 driver 把它与当前 run 的 permission ceiling revision 组成冻结的
-`policyRevision` 并复制到 control request/resolution，阶段 3 由 turn 捕获的 EffectivePolicySnapshot
-revision 取代，不能在等待 approval 时漂移。JSON-safe permission ceiling 由
+`policyRevision` 并复制到 control request/resolution；当前 registry path 已改由 turn 捕获的
+EffectivePolicySnapshot revision 提供，不能在等待 approval 时漂移。JSON-safe permission ceiling 由
 独立 PermissionPolicyPort 在 admission 时派生并持久化，再作为 factory/createAttachmentConfig 输入；
-Supervisor 在阶段 1 就冻结 child 的继承交集/provenance，阶段 3 只替换决策实现，不能回头按父线程
+Supervisor 在阶段 1 就冻结 child 的继承交集/provenance，阶段 3 只替换了决策实现，不能回头按父线程
 当时已变化的 policy 重算。
 `dispatch()` 同步返回 completion handle；Supervisor 对 prompt/continue 只跟踪该 promise，不能在
 mailbox dispatcher 中 await 到整轮结束，否则 run 中到达的 steer/follow_up/abort/control_response 会
@@ -1428,8 +1478,12 @@ turnOrdinal；host CAS 校验 runId 属于 bound thread 且仍是当前 reserved
 复用到不同 identity、非 current run 稳定 `invalid_turn_reservation`，provider 零调用。host 必须使用
 createRuntime 时注入的**同一个** PermissionPolicyPort 捕获 workspace ceiling，runCeiling 逐字段取
 RunMutation persisted 值，再用同一两对象调用 `resolveCeiling({kind:'turn',...})` 得到 turnCeiling；三者
-strict-copy/deep-freeze 并随 turn_prepare 持久化。legacy policy 只接收 turnCeiling，阶段 3
-ThreadPolicyEngine.capture 接收三者，driver 不允许通过 closure/CLI 再注入第二份 policy port。reservation 必须
+strict-copy/deep-freeze 并随 turn_prepare 持久化。legacy policy 只接收 turnCeiling；当前 registry
+ThreadPolicyEngine.capture 接收三者，driver 不允许通过 closure/CLI 再注入第二份 policy port。driver
+只能在 `reserveTurn()` 成功返回后推进本地 turnOrdinal；pre-append failure 与 capture-error closure 都
+继续使用原 ordinal。`turn_prepare` append 一旦成功，host 必须先发布同 key 可重取的 in-memory
+reservation 并把它返回给调用方；concurrent workspace fatal 由紧随其后的 capture/side-effect gate
+观察。调用方因此总能取得该 durable TurnId，不能留下 orphan prepare。reservation 必须
 发生在会触发该采样的 steering/follow-up 初始 poll 或 turn-boundary drain **之前**；随后 drain 的
 `queue_update`、注入的 user message、`turn_start` 及整轮事件复用这个 TurnId。没有 drain 的首轮/
 tool-result 续轮仍在 `turn_start` 前 reserve。实现不得先改变队列/发布 queue_update，再到 turn_start
@@ -1669,9 +1723,12 @@ outbox、没有改 global Set；只有该 code 允许释放 response claim。`le
 receipt key 已有不同 durable payload，不能假定无 effect；`legacy_approval_fenced` 表示 holder 已失去
 authority。后两者以及 throw/未知 outcome 都保留 claim，分别 quarantine 整个 workspace 或停止
 workspace admission/degrade；三者都停止该 workspace 的新 admission/capability execution，等待有权
-recovery 对账。
+recovery 对账。atomic reservation 必须记录 rename 是否已成功：rename 前失败才可返回
+`definitely_not_applied`；rename 已成功而 directory fsync 失败时 receipt 可能可见，必须抛
+`legacy_approval_commit_outcome_unknown` 并保留 claim，绝不能让新 OpId 叠加第二次授权。
 
-阶段 2 在 Phase3 registry 尚不存在时使用上面的窄 bridge。static ThreadRuntime factory 在构造时捕获
+阶段 2 在 registry 尚不存在时使用了上面的窄 bridge；当前 static ThreadRuntime compatibility path
+继续沿用它。static factory 在构造时捕获
 `LegacyApprovalAdapterFactory`；Runtime 取得 SupervisorLease 后先由 workspace storage 打开一个
 fence-bound LegacyApprovalPatternRepository，再传给每个 thread factory，由其打开独立 adapter。CLI
 只注入 policy factory/配置，不持有 pattern writer、waiter 或 event 状态。Agent 的 beforeToolCall shim
@@ -1701,17 +1758,19 @@ mailbox 或 executor。adapter 只能应用 ThreadRuntime 已验证为该 reques
 
 crash 时 allow_once/deny/resource confirmation/未持久化的规范化 once 因旧 waiter 消失而 aborted；已经 accepted 且具有
 可持久化 patterns 的 allow_always 则由新 holder 用同 responseOpId 补完 idempotent pattern write 与
-control_resolved，旧 activity 仍 interrupted、executor 不重放。阶段 3 用
-PreparedInvocation/PolicyEngine/PolicyGrantRepository 替换 bridge，RuntimeControlEvent/requestId 与
-EventCommitter 顺序不变；core 不允许并存第二条 ApprovalBroker 事件链。
+control_resolved，旧 activity 仍 interrupted、executor 不重放。显式 registry Runtime 现已用
+PreparedInvocation/PolicyEngine/PolicyGrantRepository 取代该 bridge，RuntimeControlEvent/requestId 与
+EventCommitter 顺序不变；同一个 attachment 不允许并存第二条 ApprovalBroker 事件链。
 
-阶段 2→3 升级时，registry Runtime 在 live attach 前扫描 journal；带 legacyProposal 的 unresolved
-request/response 必须与 abort/thread_close 一起按 accepted FIFO fold，而不是先扫 pending-control map。
-无 claim/非持久决定/被较早取消的项直接 aborted/superseded；只有 fold 后仍存在可持久化
-allow_always obligation 或 reserved outbox 才打开 recovery-only LegacyApprovalPatternRepository 补旧
-Set/control。R→A 先履行 R，A→R 让 R superseded 且 Set 零写；完成后关闭 writer，不得转换成
-PolicyGrant 或重放 executor。需要 writer时 storage extension 缺失/open 失败为
-`legacy_approval_recovery_unavailable`，不能跳过后继续 registry attach。
+阶段 2→3 升级时，registry Runtime 在 live attach 前同时检查只读 legacy outbox inventory 与 canonical
+journals；带 legacyProposal 的 unresolved request/response 必须与 abort/thread_close 一起按 accepted
+FIFO fold，而不是先扫 pending-control map。无 claim/非持久决定/被较早取消的项直接
+aborted/superseded；只有 fold 后仍存在可持久化 allow_always obligation，或 inventory 报告阶段 2
+reserved pattern receipt，才打开 recovery-only `LegacyApprovalPatternRepository` 补旧 Set/control。
+R→A 先履行 R，A→R 让 R superseded 且 Set 零写；恢复完成后立即关闭 writer，不得转换成 PolicyGrant、
+重跑旧 preflight 或重放 executor。需要 writer 时 adapter/storage extension 缺失、open 失败为
+`legacy_approval_recovery_unavailable`，不能跳过后继续 registry attach。阶段 3 legacy-global policy
+receipt 只交给 PolicyGrantRepository 自恢复，不计为这里的阶段 2 reserved outbox。
 
 请求必须先经 EventCommitter 权威提交，执行引擎才等待；pending-control ledger 持久保存请求创建时
 冻结的 `kind/owningRunId/owningTurnId/policyRevision/payload`（含阶段 2 legacyProposal 或阶段 3
@@ -1800,8 +1859,8 @@ effect/control obligation 后，较晚 abort/close 才执行；较早 abort/clos
 
 ## 9. 权限模型
 
-阶段 1 先在 protocol 定义 JSON-safe `PermissionCeilingSnapshot` 供 child metadata/recovery 使用；
-阶段 3 的 PolicyEngine 解释其 constraints。权限决策输入必须是不可变的身份化上下文：
+阶段 1 已在 protocol 定义 JSON-safe `PermissionCeilingSnapshot` 供 child metadata/recovery 使用；
+当前 registry path 的 PolicyEngine 消费并解释其 constraints。权限决策输入必须是不可变的身份化上下文：
 
 ```ts
 export interface PermissionCeilingSnapshot {
@@ -1948,11 +2007,11 @@ RunMutation 已存的 ceiling，再由 port 与 child admission 当时的 worksp
 按当前父配置重算。随后传给 ThreadDriverFactory
 create/resume，legacy beforeToolCall 与阶段 3 PolicyEngine 都必须以这份 persisted ceiling 为上限。
 
-## 10. 注册表与同 turn 版本一致性
+## 10. 注册表与同 turn 版本一致性（阶段 3 已落地）
 
 ### 10.1 JSON-Schema-first
 
-阶段 3 后 canonical capability 注册项直接持有 JSON Schema，而不是把 zod 类型暴露给 core：
+当前 canonical capability 注册项直接持有 JSON Schema，而不是把 zod 类型暴露给 core：
 
 ```ts
 export type CapabilityValidation =
@@ -1985,9 +2044,25 @@ export interface CapabilityPolicyDescriptor {
   attributes?: Readonly<Record<string, unknown>>;
 }
 
+export type CapabilityAnalysisReasons = readonly [string, ...string[]];
+
+export interface CapabilityInvocationAnalysis {
+  readonly resourceCoverage:
+    | { readonly kind: 'complete' }
+    | { readonly kind: 'incomplete'; readonly reasons: CapabilityAnalysisReasons };
+  readonly grantability:
+    | { readonly kind: 'persistable' }
+    | { readonly kind: 'once_only'; readonly reasons: CapabilityAnalysisReasons };
+  readonly safety:
+    | { readonly kind: 'eligible' }
+    | { readonly kind: 'deny'; readonly code: string; readonly reason: string };
+  readonly attributes: Readonly<Record<string, unknown>>;
+}
+
 export type CapabilityResourceResolution =
   | { readonly ok: true;
-      readonly resources: readonly Readonly<ResolvedCapabilityResource>[] }
+      readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
+      readonly analysis?: Readonly<CapabilityInvocationAnalysis> }
   | { readonly ok: false;
       readonly code: 'resource_resolution_failed' | 'ambiguous_resource';
       readonly message: string };
@@ -2086,6 +2161,7 @@ export interface RuleFreshnessPort {
     readonly snapshot: Readonly<RuleSnapshot>;
     readonly context: Readonly<InvocationContext>;
     readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
+    readonly analysis: Readonly<CapabilityInvocationAnalysis>;
   }): Promise<RuleFreshnessResult>;
 }
 
@@ -2105,9 +2181,11 @@ export interface CapabilityRegistration {
   readonly execute: CapabilityExecutor;
 }
 
-export type CapabilityCatalogEntry = Readonly<CapabilityRegistration> & {
+export type CapabilityCatalogEntry = Readonly<
+  Omit<CapabilityRegistration, 'executionMode'> & {
+  readonly executionMode: 'parallel' | 'sequential';
   readonly registrationDigest: string;
-};
+}>;
 ```
 
 现有 `ToolDefinition` 通过 [07 §1.2](./07-tools.md) 的显式
@@ -2171,6 +2249,7 @@ export interface PreparedInvocation {
   readonly executionMode: 'parallel' | 'sequential';
   readonly args: unknown;
   readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
+  readonly analysis: Readonly<CapabilityInvocationAnalysis>;
   readonly context: Readonly<InvocationContext>;
   readonly validator: CapabilityValidator;
   readonly executor: CapabilityExecutor;
@@ -2252,6 +2331,7 @@ export interface PolicyGrantRepositoryPort {
 }
 
 export interface PolicyGrantRepository extends PolicyGrantRepositoryPort {
+  startupDiagnostics?(): readonly { readonly code: string; readonly message: string }[];
   close(): Promise<void>;
 }
 
@@ -2278,6 +2358,10 @@ export interface PolicyEngine {
   }): Promise<ThreadPolicyEngine>;
 }
 
+export interface PolicyEngineOptions {
+  readonly configuration?: Readonly<Record<string, unknown>>;
+}
+
 export interface RuntimeCapabilityServices {
   readonly capabilities: CapabilityRegistryReader;
   readonly providers: ProviderAdapterRegistryReader;
@@ -2293,8 +2377,20 @@ export interface RuntimeCapabilityServices {
 export function createCapabilityRegistry(): CapabilityRegistry;
 export function createProviderAdapterRegistry(): ProviderAdapterRegistry;
 export function createPromptAssembler(): PromptAssembler;
-export function createPolicyEngine(): PolicyEngine;
+export function createPolicyEngine(options?: Readonly<PolicyEngineOptions>): PolicyEngine;
 ```
+
+`createRuntime({capabilityMode:'registry'})` 在任何 `storage.openWorkspace()` 或其他 storage I/O 前，必须把
+`RuntimeCapabilityServices.ruleBudget` 做 strict-JSON exact-own-data-property snapshot，并验证恰好四个
+非负 safe integer 字段。symbol key、accessor、non-enumerable、额外字段、非 plain object 均同步拒绝；
+Supervisor 与 RuleSnapshotProvider 后续只持有这份冻结副本，不重新读取 caller 可变 options。
+
+上述接口不是仅供未来实现的设计草图：四个 factory、两个 registry、PromptAssembler、conservative
+PolicyEngine、legacy tool adapter、registry-aware Runtime turn path 与 workspace/legacy-global
+PolicyGrantRepository
+均已进入当前源码/public exports。registry-aware Agent loop 只接收 Runtime adapter 内部提供的 turn port；
+普通 exported Agent/direct Session 未获该 internal port 时继续使用原 `streamFn + ToolDefinition[]` 路径。这样新增动态
+路径不改变 legacy caller 的构造参数或事件形态。
 
 `CapabilityRegistryReader` 与 `ProviderAdapterRegistryReader` 都只暴露 `snapshot()`；mutable registries
 留在 composition host。完整 registry 可按结构类型注入 reader view，但 Runtime、ThreadRuntime 与
@@ -2327,13 +2423,23 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
 - `CapabilityRegistry.snapshot()` 返回冻结的 `ToolCatalogSnapshot{revision, entries}`；不得暴露可变
   registration 或 registry map。snapshot 的 `resolve()` 和 `prepare()` 只读其冻结索引，绝不回查
   live registry；entries、JSON Schema/metadata/policy 与函数引用均属于该 snapshot 版本。
-- `ThreadRuntime` 在每个 turn 开始、任何 provider sampling 前只捕获一次 catalog/provider/grant、
-  BasePromptSnapshot 与 RuleSnapshot。RuleSnapshotProvider 的输入先 strict JSON copy/freeze，
-  knownResourceScopes 是 thread 已持久观察到的 canonical scope 去重排序，budget 来自 construction；
+- `ThreadRuntime` 在每个 turn 开始、`turn_start` 权威提交与任何 provider sampling 前只捕获一次
+  catalog/provider/grant、BasePromptSnapshot 与 RuleSnapshot；同一 `(RunId,TurnId)` 的串行/并发 capture
+  共享一个 single-flight 结果，失败也不重新读取 mutable source。RuleSnapshotProvider 的输入先 strict
+  JSON copy/freeze，knownResourceScopes 是 thread durable canonical hint 的去重 UTF-8 排序滚动窗口，
+  budget 来自 construction；
   输出 owner 必须逐字段匹配 TurnPolicyContext，正文/digest/discovery/diagnostics 全部进入 revision 并深冻结。
-  capture 失败 fail closed 且不调用 provider。resource preflight 后发现尚未覆盖的 rule scope 时，提交
-  scope hint 并以 recoverable `rule_scope_missing` 结束该调用，下一 turn 才用新 hint 捕获；不能在当前
-  turn 偷换 rules。CLI 只注入 provider/budget，不自行读取或拼装业务规则。
+  capture 接收 run `AbortSignal`；grant/rule/base-prompt/policy 的每个异步 gate 都可被 abort race 唤醒，
+  不合作的只读 source 不得卡住 abort op、idle 或 close。普通 capture 失败 fail closed、不调用 provider，
+  但仍在已预留 TurnId 下形成合法 error turn；abort 导致的 capture 失败形成合法 aborted turn，且不发布
+  fatal protocol diagnostic。成功 capture
+  的 `turn_start` commit 以 `consumedScopes` witness 原子消费/替换当前窗口；本 turn 新观察到的 scopes
+  只进入下一窗口，未继续触达的历史 sibling 因而不会永久占 prompt/budget，capture/turn_start 失败也
+  不会提前丢 hint。resource preflight 后发现尚未覆盖的 rule scope 时，提交 scope hint 并以 recoverable
+  `rule_scope_missing` 结束该调用，下一 turn 才用新 hint 捕获；不能在当前 turn 偷换 rules。CLI 的
+  `ProjectRules` 已实现同一 `RuleSnapshotProvider` 与 `RuleFreshnessPort`，
+  composition 以显式 cwd/budget 注入；Runtime、PromptAssembler 与通用 PolicyEngine 不自行读取或拼装
+  project-rule 文件。
 - `ToolCatalogSnapshot.prepare()` 先对 rawArgs 做 strict JSON deep copy，再按同一 entry 固定执行
   `prepare? → validate → freeze validated value → resolveResources → freeze resource result`；validator
   成功结果的 `value` 是最终规范化 args，resolver 只能收到这份 strict JSON 深冻结值。prepare/
@@ -2352,6 +2458,20 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
   （如 plan 的 resources=[]）时空 resolver result 合法。generic prepare 不允许信任 resolver 绕开 descriptor。
   resolver 试图修改 args/result、或返回后再改写原对象都不能改变 PreparedInvocation；非法值在 executor
   前失败。
+  success 可附 exact-shape `CapabilityInvocationAnalysis`，省略时规范化为
+  `complete + persistable + eligible + attributes:{}`；它与 resources 同时 strict-copy/deep-freeze，非空
+  reasons 去重并按 UTF-8 排序。`safety:deny` 只能收窄，`resourceCoverage:incomplete` 或
+  `grantability:once_only` 禁止生成/命中持久 grant，但不单独把本来无需审批的安全 capability kind 改为
+  ask；当前 Bash 是 execute kind，故 opaque/incomplete/external 调用保持本次 ask、无持久 proposal。
+  attributes 只承载同 registration resolver 产生的冻结 adapter facts；policy/freshness 不得重新解析
+  args/command 或回读 registry。freshness 可读取当前规则文件指纹，但不能用 live filesystem 重建 resource
+  语义。八个 legacy coding-tool binding 当前统一为 version/digest v2：普通 path resolver 用 exact
+  `legacy_filesystem_analysis_v1` attributes、Bash 用 exact `legacy_bash_analysis_v2` attributes，二者都冻结
+  UTF-8 排序的 `filesystemTargets[{canonicalTarget,kind}]`。read/edit/write 为 file，ls/glob/grep 为
+  directory，plan 为空；Bash 同 target 的冲突/unknown 归并为 unknown。解释器 inline/script/module/REPL
+  及 runner 包装一律 incomplete/once-only；词法 root/HOME 等价形态与 BusyBox/Toybox catastrophic dispatcher
+  直接 safety deny。registration、
+  policy、selector、resolution 与 analysis 的 JS 边界拒绝 inherited/accessor/未知 own fields。
 - prepare 成功产生 `PreparedInvocation`，它直接持有注册版本的 registrationDigest、description/inputSchema/metadata/
   policy/executionMode、validator/executor 引用和深冻结的 parsed args；这些字段必须全部从同一个 catalog snapshot
   entry 复制并深冻结。它另持有 turn 开始时捕获的唯一 `effectivePolicy` snapshot；PolicyEngine 只
@@ -2384,6 +2504,11 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
   TurnPolicyContext。这样提交 grant 使 G0→G1 时不会让 grant 自失效，而 ceiling/rule/engine 变化会
   改 basis 并撤销旧授权。`evaluate()` 唯一输入是 PreparedInvocation，任何 identity/约束缺失或未知
   都 fail closed 为 deny，不能执行 capability 或扩大 PermissionCeilingSnapshot。
+  `createPolicyEngine({configuration})` 在 construction 时 strict-copy/deep-freeze host policy config；
+  CLI 的精确 material 是 `{kind:'cli_legacy_policy_v1',approvalMode,projectRoot,projectRootReal,
+  bashAnalysisVersion}`；approval mode、词法/物理 project root、analyzer version 任一变化都必须改变 basis，
+  因此不同配置绝不能复用同一个 policyBasisRevision，evaluate 也不得再读取 live config/filesystem、调用
+  realpath 或重新解析 command。
   per-thread engine 可为兼容现有 adapter 保存唯一的 ephemeral doom-loop counter：按 preflight/source
   顺序串行 evaluate，以 capabilityId/version/registrationDigest/canonical args digest 统计连续相同调用，
   不同调用重置，第 3 次起强制无 grantProposal 的 ask。它不跨 thread、不写 journal，进程恢复重建
@@ -2391,12 +2516,19 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
   禁止用 process-global Map 偷存计数。
 - `RuleFreshnessPort` 是注入 ThreadRuntime 的只读 filesystem freshness checker，不属于 PolicyEngine，
   也不返回 allow/ask。preflight 在 PolicyEngine 前检查一次；approval 完成后、每个 executor 真正产生
-  副作用前再检查一次同一 `PreparedInvocation.effectivePolicy.rules/resources`。结果若 stale，只能把
+  副作用前再检查一次同一 PreparedInvocation 的 `effectivePolicy.rules`、`resources` 与 `analysis`。结果若 stale，只能把
   原决定收窄为 recoverable deny/tool error，触发下一 turn 重新 assemble/prepare；不得换 schema、
   executor、args、approval 或 effective policy。这样同批前序工具改写 AGENTS.md 时后续工具被挡住，
-  同时 ThreadPolicyEngine.evaluate 仍只读 frozen PreparedInvocation。`rule_scope_missing` 必须返回
+  同时 ThreadPolicyEngine.evaluate 仍只读 frozen PreparedInvocation。freshness 不检查 command resource、
+  不解析 args/shell；它只可读取当前 AGENTS/filesystem fingerprints 来比较 freshness，不能从 live cwd/fs
+  重建 capability target。内置 adapter 的 target kind 只能取 resolver-frozen facts；facts/resources 集合
+  必须完全相等，file scope 固定取 parent，directory/unknown 固定取 target 自身的保守链。freshness 不得
+  对 target 做 stat/realpath，因此 prepare 后创建、删除、换类型或替换 symlink 都不能偷换本 invocation
+  的 scope。`rule_scope_missing` 必须返回
   strict-copy、非空、去重、UTF-8 排序的 missingScopes；ThreadRuntime 逐项原样提交
-  `rule_scope_observed`，不得从 canonicalTarget 猜规则 scope。`rule_changed` 不带 missingScopes。
+  `rule_scope_observed` 到当前滚动窗口，不得从 canonicalTarget 猜规则 scope。下一成功 capture 的
+  `turn_start` 以 `rule_scope_window_replaced{consumedScopes,replacementScopes}` 同原子 commit 消费窗口；
+  replay witness 不匹配必须 fail closed。`rule_changed` 不带 missingScopes。
 - turn 进行中 register/unregister 只影响下一个 turn。注册表中的同名更新产生新 revision；旧 snapshot
   在所有引用它的 turn 完成后才可释放。
 - `PolicyDecision.ask.grantProposal` 是 PolicyEngine 根据 PreparedInvocation descriptor/resources
@@ -2405,7 +2537,8 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
   grant proposal 再有意投影掉 selectorId；其 resource pattern 集合
   必须与当前 PreparedInvocation.resources 在 resourceType/access/canonicalTarget 上双向完全相等，
   attributes 与 descriptor attributes canonical JSON 深等；匹配后续 invocation 时也要求相同集合与
-  attributes。generic engine 不重做 normalize，不解释 glob/prefix/regex；空资源、未知 matcher 或无法
+  attributes。generic engine 不重做 normalize，不解释 glob/prefix/regex；只有 analysis 为 complete +
+  persistable 才生成或命中持久 grant，`safety:deny` 直接 recoverable deny。空资源、未知 matcher 或无法
   安全 canonicalize 的 `$()`/opaque script/外部资源 ask 不携带 proposal。canonical
   `mode:'workspace'` 下 `allow_always` response 以 `invalid_decision` 拒绝
   且 request 仍 pending；legacy-global mode 保持现有 ApprovalBroker 行为，在 ThreadRuntime 内把它
@@ -2461,13 +2594,27 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
 | direct Session opaque approval hook | caller-owned `beforeToolCall`/broker | 保持 | process-local 兼容例外；无 response ingress，故不伪造 durable control | 保持，未来可 additive opt-in structured adapter |
 | 同 cwd/root 的两个不同 direct Session | 可并行、配置隔离 | 保持 | 各自 StandaloneSessionHost/private hub/backend lease，可并行且不争 SupervisorLease | 保持 |
 | 同一 backend/id 的两个 direct `Session.resume` | 可发生但无单 writer 保障 | 保持旧实现 | 有意安全收紧：第二个稳定 `session_in_use` | 同左 |
-| public Runtime | 无 | 新增无副作用 entry + `RuntimePort/Supervisor` | 使用拆分后的组件 | 使用动态 registry/policy |
+| public Runtime | 无 | 新增无副作用 entry + `RuntimePort/Supervisor` | 使用拆分后的组件 | static 仍为缺省；显式 `capabilityMode:'registry'` 使用动态 registry/policy |
 | canonical event | 裸 `SessionEvent` | `EventEnvelope<RuntimeEvent>` + per-thread seq（含预留的 `runtime_diagnostic`） | 唯一权威提交路径 | registry/policy 审计留在 PreparedInvocation；不改已有 tool event 字段 |
 | legacy headless | 当前 stdin command + 裸事件 | 默认 frame/event 保持；由 runtime op/envelope 投影 | 保持事件顺序与 stdout 纪律 | 保持 |
 | envelope headless | 无 | 显式 `--event-format=envelope`；命令可指定 thread/op identity，输出 envelope/receipt/transport-error frames | control 进入权威提交链 | 可输出既有 `runtime_diagnostic`；不承诺额外 registry/policy 事件 |
 | session JSONL v1 | 当前格式 | 可读；确定性映射 identity，新增记录向后 tolerant | repository 继续读取 | 不因 registry 改写历史 |
 | direct Session 与 Runtime 同时打开同一 claimed v1 backend | 当前可发生但无 runtime 概念 | 明确 unsupported；fingerprint 检出后 diagnostic+quarantine，canonical 不反向 fold，resume 重建私有 backend | 同左 | 同左 |
-| `ToolDefinition` / 静态 provider switch | 当前 | 保持 | 保持 | legacy adapters 注册到动态 registry |
+| `ToolDefinition` / 静态 provider switch | 当前 | 保持 | 保持 | 默认 CLI/direct API 继续兼容；registry 宿主通过 adapter/binding 显式注册 |
+| package library entries | 无 | `coda/runtime` | 保持 | additive 增加 `coda/capabilities` 与 `coda/legacy-coding-tools` |
+
+阶段 3 当前 composition/兼容矩阵进一步冻结如下：
+
+| composition | capability/provider 来源 | approval/grant store | 当前承诺 |
+|---|---|---|---|
+| `createRuntime()` 缺省 static | 既有 driver 的 `streamFn` / `ToolDefinition[]` | durable legacy bridge（需要时） | 与阶段 2 行为/source 兼容，不接受 `capabilityServices` |
+| `createRuntime({capabilityMode:'registry', ...})` | 宿主 mutable registry 的 snapshot-only reader；每 turn 捕获一次 | 按 `RuntimeCapabilityServices.grantMode` 打开 fence-bound repository | canonical 动态路径；同 turn 不回查 live registry |
+| production CLI / 普通 direct `Agent` / direct `Session` | 未由 Runtime 注入 internal turn provider 时仍走 static compatibility path | 旧 global approvals 或 caller-owned opaque hook | 本阶段不把默认入口静默切到 registry |
+| CLI registry composition factory | 显式注册八个 coding-tool binding 与现有 provider `StreamFn` adapters；`ProjectRules` 可显式注入为 snapshot/freshness 两个 port | `legacy_global_approvals_v1` | factory 与 project-rule adapter 已有测试；production `main.ts` 有意保留 static 默认，未因新增 entry 静默切换 |
+| 普通 embedding | 由宿主选择 registration 与环境 ports | 通常为 workspace-scoped canonical grants | 不读取 CLI config/env，也不隐式安装 builtin/provider |
+
+无论选择哪条 composition，canonical wire 仍是同一 RuntimeOp/EventEnvelope/control 协议；差别只在
+turn 的 capability/provider/policy 来源。static 与 registry service 不得在同一 attachment 中部分混用。
 
 CLI session 选择另有一个显式安全收紧：阶段 0 的 `Session.list`、`--continue` 和 `--resume` 使用整个
 session dir，跨 cwd resume 后却在**本次 invocation cwd** 执行。阶段 1 仍以 global legacy catalog
@@ -2500,8 +2647,11 @@ SessionEvent/NDJSON；retry/compaction 事件剥离新增 identity 字段，
   Session/headless 投影测试全绿。
 - **阶段 2**：Session 拆分为表 5 的六个协作者；approval/control 进入同一提交链；只有
   EventCommitter 背压 Agent，慢 observer 不影响 run 或其他 thread。
-- **阶段 3**：registry/snapshot/prepared invocation/provider registry/prompt/policy 落地；注册表
-  热更新对抗测试证明一个 turn 内 schema/executor revision 一致，现有工具/provider 全经 adapter。
+- **阶段 3**：registry/snapshot/prepared invocation/provider registry/prompt/policy、registry Runtime mode、
+  workspace/legacy-global grant repository 与三个 package entry 已落地；热更新对抗测试证明一个 turn 内
+  schema/validator/resolver/resources/analysis/policy/executor 与 provider revision 一致；CLI policy config
+  在 construction 冻结进 basis，policy/freshness 不重解析 command。八个现有工具和现有 provider
+  `StreamFn` 已有显式 composition adapter；production CLI 默认仍按上表保留 static compatibility path。
 
 ## 12. 必测不变量
 
@@ -2520,6 +2670,20 @@ SessionEvent/NDJSON；retry/compaction 事件剥离新增 identity 字段，
     A 的 read 不得使 B 的 edit 越过 read-before-edit。
 11. `events()` 返回时订阅已建立；对尚未创建的预生成 ThreadId 先订阅再提交 create，首个 lifecycle/
     op envelope 仍可观察，且 cursor replay 切 live 无缺口或重复。
+12. `PreparedInvocation.analysis` 与 resources 来自同一 resolver revision 并深冻结；省略值使用安全默认，
+    policy/selector/resolution/analysis 边界拒绝 inherited/accessor/unknown fields。
+13. CLI approvalMode、projectRoot/projectRootReal 或 bashAnalysisVersion 改变会改变 policy basis；evaluate
+    不读 live config/filesystem、不 realpath 或重解析 command，opaque/incomplete/external Bash 只允许 once。
+14. RuleFreshnessPort 的两次检查使用同一 frozen rules/resources/analysis；可以比较当前规则指纹，但不读取
+    command resource、不解析 shell，也不从 live filesystem 重建 capability target/kind/scope。
+15. capture 的 grant/rule/base-prompt/policy 任一 gate 不合作时，run abort 仍形成完整 aborted closure，
+    provider/executor 零调用，abort op、idle 与 close 不挂死。
+16. registry upgrade 顺序严格为 legacy recovery/open（仅必要时）→全部旧 control 结案→legacy close→
+    grant open→attachment；registry driver 永远拿不到 legacy pattern port。
+17. legacy outbox rename 后 fsync 失败是 unknown outcome、保留 claim；只有 rename 前失败可声明
+    definitely-not-applied。registry ruleBudget 的 strict exact 校验在 storage I/O 计数为零时完成。
+18. binding v2 的 interpreter/script 调用只允许 once，catastrophic root 等价形态直接 deny；同一 frozen
+    invocation 的 filesystem target 在 prepare 后改变 live 类型也不能改变 freshness scope。
 
 ## 相关文档
 

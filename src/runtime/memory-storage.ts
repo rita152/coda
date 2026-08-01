@@ -2,6 +2,7 @@
 // It models workspace/thread leases and fencing; persistence lasts for the storage object's lifetime.
 
 import {
+  assertWorkspaceId,
   canonicalJson,
   canonicalJsonSha256,
   isExternalOpId,
@@ -9,6 +10,12 @@ import {
   legacyWorkspaceId,
   strictJsonSnapshot,
 } from '../protocol/index.js';
+import type {
+  PolicyGrant,
+  PolicyGrantCommitResult,
+  PolicyGrantRepository,
+  PolicyGrantSnapshot,
+} from '../capabilities/types.js';
 import type {
   ExternalOpId,
   ThreadId,
@@ -20,6 +27,7 @@ import { WorkspaceBindingMismatchError, WorkspaceInUseError, RuntimeStorageError
 import type {
   DerivedOpIdentityClaim,
   DerivedOpIdentityReservation,
+  LegacyApprovalRecoveryInventory,
   LegacyApprovalPatternRepository,
   LegacyApprovalPatternCommitResult,
   LegacyThreadImport,
@@ -50,6 +58,7 @@ interface MemoryWorkspace {
   readonly derivedById: Map<string, DerivedOpIdentityClaim>;
   readonly derivedByTuple: Map<string, DerivedOpIdentityClaim>;
   readonly journals: Map<ThreadId, MemoryJournal>;
+  readonly policyGrants: Map<ExternalOpId, Readonly<PolicyGrant>>;
   readonly legacyApprovalOutbox: Map<ExternalOpId, MemoryLegacyApprovalReceipt>;
 }
 
@@ -60,7 +69,21 @@ interface MemoryLegacyApprovalReceipt {
   readonly state: 'reserved' | 'applied';
 }
 
+export interface MemoryRuntimeWorkspaceStoragePort extends RuntimeWorkspaceStoragePort {
+  inspectLegacyApprovalRecovery(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<Readonly<LegacyApprovalRecoveryInventory>>;
+  openPolicyGrantRepository(
+    lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode'],
+  ): Promise<PolicyGrantRepository>;
+}
+
 export interface MemoryRuntimeStorage extends RuntimeStoragePort {
+  openWorkspace(input: {
+    readonly cwd: string;
+    readonly workspaceId?: WorkspaceId;
+  }): Promise<MemoryRuntimeWorkspaceStoragePort>;
   /** Test-only inspection returns detached immutable records, never the mutable backing maps. */
   inspectWorkspace(workspaceId: WorkspaceId): {
     readonly ops: readonly SupervisorOpLedgerRecord[];
@@ -94,7 +117,7 @@ export function createMemoryRuntimeStorage(): MemoryRuntimeStorage {
       return result;
     },
 
-    async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
+    async openWorkspace(input): Promise<MemoryRuntimeWorkspaceStoragePort> {
       const workspaceId = input.workspaceId ?? legacyWorkspaceId(input.cwd);
       let workspace = workspaces.get(workspaceId);
       if (workspace === undefined) {
@@ -106,6 +129,7 @@ export function createMemoryRuntimeStorage(): MemoryRuntimeStorage {
           derivedById: new Map(),
           derivedByTuple: new Map(),
           journals: new Map(),
+          policyGrants: new Map(),
           legacyApprovalOutbox: new Map(),
         };
         workspaces.set(workspaceId, workspace);
@@ -131,7 +155,7 @@ export function createMemoryRuntimeStorage(): MemoryRuntimeStorage {
   };
 }
 
-class MemoryWorkspacePort implements RuntimeWorkspaceStoragePort {
+class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
   readonly workspaceId: WorkspaceId;
   readonly recordedCwd: string;
   #closed = false;
@@ -331,6 +355,30 @@ class MemoryWorkspacePort implements RuntimeWorkspaceStoragePort {
     );
   }
 
+  async inspectLegacyApprovalRecovery(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<Readonly<LegacyApprovalRecoveryInventory>> {
+    this.#assertFence(lease);
+    return snapshot({
+      hasPendingReservedOutbox: [...this.workspace.legacyApprovalOutbox.values()]
+        .some((receipt) => receipt.state === 'reserved'),
+    });
+  }
+
+  async openPolicyGrantRepository(
+    lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode'],
+  ): Promise<PolicyGrantRepository> {
+    this.#assertFence(lease);
+    return new MemoryPolicyGrantRepository(
+      this,
+      snapshot(lease),
+      this.workspace.policyGrants,
+      this.legacyApprovalPatterns,
+      mode,
+    );
+  }
+
   async close(): Promise<void> {
     this.#closed = true;
   }
@@ -353,6 +401,97 @@ class MemoryWorkspacePort implements RuntimeWorkspaceStoragePort {
       current.processEpoch !== lease.processEpoch
     ) {
       throw new RuntimeStorageError('stale_fence', 'Workspace write fence is no longer current');
+    }
+  }
+}
+
+class MemoryPolicyGrantRepository implements PolicyGrantRepository {
+  readonly workspaceId: WorkspaceId;
+  readonly mode: PolicyGrantRepository['mode'];
+  #closed = false;
+
+  constructor(
+    private readonly workspace: MemoryWorkspacePort,
+    private readonly lease: SupervisorLease,
+    private readonly grants: Map<ExternalOpId, Readonly<PolicyGrant>>,
+    private readonly legacyPatterns: Set<string>,
+    mode: PolicyGrantRepository['mode'],
+  ) {
+    this.workspaceId = lease.workspaceId;
+    this.mode = mode;
+  }
+
+  async snapshot(): Promise<Readonly<PolicyGrantSnapshot>> {
+    this.#assertOpen();
+    this.workspace.assertCurrentLease(this.lease);
+    return policyGrantSnapshot(
+      this.workspaceId,
+      this.mode,
+      grantsForMode(this.grants.values(), this.mode),
+      this.legacyPatterns,
+    );
+  }
+
+  async commitAllowAlways(
+    grant: Readonly<PolicyGrant>,
+  ): Promise<PolicyGrantCommitResult> {
+    if (this.#closed) {
+      return policyGrantFenced('stale_fence', 'Policy grant repository is closed');
+    }
+    if (grant.workspaceId !== this.workspaceId) {
+      return policyGrantFenced('wrong_workspace', 'Policy grant belongs to a different workspace');
+    }
+    try {
+      this.workspace.assertCurrentLease(this.lease);
+    } catch {
+      return policyGrantFenced('stale_fence', 'Policy grant repository lost its workspace fence');
+    }
+    const normalized = validatePolicyGrant(grant, this.workspaceId, this.mode);
+    const prior = this.grants.get(normalized.grantId);
+    const currentRevision = policyGrantSnapshot(
+      this.workspaceId,
+      this.mode,
+      grantsForMode(this.grants.values(), this.mode),
+      this.legacyPatterns,
+    ).revision;
+    if (prior !== undefined) {
+      return canonicalJson(prior) === canonicalJson(normalized)
+        ? { kind: 'duplicate', revision: currentRevision }
+        : {
+            kind: 'conflict',
+            revision: currentRevision,
+            message: `Policy grant ${normalized.grantId} changed its durable payload`,
+          };
+    }
+    // Fence comparison and receipt/grant insertion are one synchronous memory transaction.
+    // There is no await between the captured-fence check and the mutation.
+    try {
+      this.workspace.assertCurrentLease(this.lease);
+    } catch {
+      return policyGrantFenced('stale_fence', 'Policy grant repository lost its workspace fence');
+    }
+    this.grants.set(normalized.grantId, normalized);
+    if (normalized.scope.kind === 'legacy_global_approvals_v1') {
+      for (const pattern of normalized.scope.patterns) this.legacyPatterns.add(pattern);
+    }
+    return {
+      kind: 'applied',
+      revision: policyGrantSnapshot(
+        this.workspaceId,
+        this.mode,
+        grantsForMode(this.grants.values(), this.mode),
+        this.legacyPatterns,
+      ).revision,
+    };
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new RuntimeStorageError('stale_fence', 'Policy grant repository is closed');
     }
   }
 }
@@ -561,7 +700,7 @@ function validateLegacyApprovalCommitInput(input: {
   const patterns = [...input.patterns];
   if (patterns.length === 0
     || patterns.some((pattern) => !isWellFormedUnicode(pattern) || pattern.length === 0)
-    || canonicalJson(patterns) !== canonicalJson([...new Set(patterns)].sort())) {
+    || canonicalJson(patterns) !== canonicalJson([...new Set(patterns)].sort(compareUtf8))) {
     throw new RuntimeStorageError(
       'invalid_legacy_approval_receipt',
       'patterns must be a non-empty, sorted, unique Unicode string tuple',
@@ -588,11 +727,185 @@ function sameLegacyApprovalReceipt(
 function legacyApprovalSnapshot(
   patterns: ReadonlySet<string>,
 ): Readonly<import('../protocol/index.js').LegacyApprovalPatternSnapshot> {
-  const sorted = [...patterns].sort();
+  const sorted = [...patterns].sort(compareUtf8);
   return snapshot({
     revision: `legacy-approval-v1-${canonicalJsonSha256(sorted)}`,
     patterns: sorted,
   });
+}
+
+function validatePolicyGrant(
+  input: Readonly<PolicyGrant>,
+  workspaceId: WorkspaceId,
+  mode: PolicyGrantRepository['mode'],
+): Readonly<PolicyGrant> {
+  let value: unknown;
+  try {
+    value = strictJsonSnapshot(input);
+  } catch (error) {
+    throw invalidPolicyGrant(error);
+  }
+  if (!isRecord(value)) throw invalidPolicyGrant();
+  assertExactPolicyGrantKeys(value, [
+    'grantId',
+    'workspaceId',
+    'capabilityId',
+    'capabilityVersion',
+    'registrationDigest',
+    'scope',
+    'policyBasisRevision',
+    'acceptedAt',
+  ]);
+  if (!isExternalOpId(value.grantId)
+    || !isWorkspaceIdValue(value.workspaceId)
+    || value.workspaceId !== workspaceId
+    || !isNonEmptyWellFormedString(value.capabilityId)
+    || !isNonEmptyWellFormedString(value.capabilityVersion)
+    || !isNonEmptyWellFormedString(value.registrationDigest)
+    || !isNonEmptyWellFormedString(value.policyBasisRevision)
+    || typeof value.acceptedAt !== 'number'
+    || !Number.isSafeInteger(value.acceptedAt)
+    || value.acceptedAt < 0) {
+    throw invalidPolicyGrant();
+  }
+  if (mode === 'workspace') validateCanonicalPolicyGrantScope(value.scope);
+  else validateLegacyPolicyGrantScope(value.scope);
+  return value as unknown as Readonly<PolicyGrant>;
+}
+
+function validateCanonicalPolicyGrantScope(input: unknown): void {
+  if (!isRecord(input)) throw invalidPolicyGrant();
+  assertExactPolicyGrantKeys(input, ['kind', 'resourcePatterns', 'attributes']);
+  if (input.kind !== 'canonical_resources_v1'
+    || !Array.isArray(input.resourcePatterns)
+    || input.resourcePatterns.length === 0
+    || !isRecord(input.attributes)) {
+    throw invalidPolicyGrant();
+  }
+  const canonicalPatterns: string[] = [];
+  for (const pattern of input.resourcePatterns) {
+    if (!isRecord(pattern)) throw invalidPolicyGrant();
+    assertExactPolicyGrantKeys(pattern, ['resourceType', 'access', 'matcher', 'pattern']);
+    if (!isPolicyGrantResourceType(pattern.resourceType)
+      || !isPolicyGrantResourceAccess(pattern.access)
+      || pattern.matcher !== 'canonical_target_exact_v1'
+      || !isNonEmptyWellFormedString(pattern.pattern)) {
+      throw invalidPolicyGrant();
+    }
+    canonicalPatterns.push(canonicalJson(pattern));
+  }
+  for (let index = 1; index < canonicalPatterns.length; index++) {
+    if (compareUtf8(canonicalPatterns[index - 1]!, canonicalPatterns[index]!) >= 0) {
+      throw invalidPolicyGrant();
+    }
+  }
+}
+
+function validateLegacyPolicyGrantScope(input: unknown): void {
+  if (!isRecord(input)) throw invalidPolicyGrant();
+  assertExactPolicyGrantKeys(input, ['kind', 'patterns']);
+  if (input.kind !== 'legacy_global_approvals_v1'
+    || !Array.isArray(input.patterns)
+    || input.patterns.length === 0
+    || input.patterns.some((pattern) => !isNonEmptyWellFormedString(pattern))
+    || canonicalJson(input.patterns) !== canonicalJson([...new Set(input.patterns)].sort(compareUtf8))) {
+    throw invalidPolicyGrant();
+  }
+}
+
+function grantsForMode(
+  grants: Iterable<Readonly<PolicyGrant>>,
+  mode: PolicyGrantRepository['mode'],
+): readonly Readonly<PolicyGrant>[] {
+  return [...grants].filter((grant) => mode === 'workspace'
+    ? grant.scope.kind === 'canonical_resources_v1'
+    : grant.scope.kind === 'legacy_global_approvals_v1');
+}
+
+function policyGrantSnapshot(
+  workspaceId: WorkspaceId,
+  mode: PolicyGrantRepository['mode'],
+  grants: Iterable<Readonly<PolicyGrant>>,
+  legacyPatterns: ReadonlySet<string>,
+): Readonly<PolicyGrantSnapshot> {
+  const copied = [...grants].map((grant) => snapshot(grant));
+  if (mode === 'legacy_global_approvals_v1') {
+    const legacyGlobal = legacyApprovalSnapshot(legacyPatterns);
+    return snapshot({
+      workspaceId,
+      revision: `policy-grants-legacy-v1-${canonicalJsonSha256({
+        workspaceId,
+        grants: copied,
+        legacyGlobal,
+      })}`,
+      grants: copied,
+      legacyGlobal,
+    });
+  }
+  return snapshot({
+    workspaceId,
+    revision: `policy-grants-v1-${canonicalJsonSha256({ workspaceId, grants: copied })}`,
+    grants: copied,
+  });
+}
+
+function policyGrantFenced(
+  code: 'stale_fence' | 'wrong_workspace',
+  message: string,
+): Extract<PolicyGrantCommitResult, { kind: 'fenced' }> {
+  return { kind: 'fenced', code, message };
+}
+
+function invalidPolicyGrant(error?: unknown): RuntimeStorageError {
+  const detail = error instanceof Error ? `: ${error.message}` : '';
+  return new RuntimeStorageError('invalid_policy_grant', `Invalid policy grant${detail}`);
+}
+
+function assertExactPolicyGrantKeys(
+  value: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+): void {
+  if (Object.keys(value).length !== required.length
+    || required.some((key) => !Object.hasOwn(value, key))) {
+    throw invalidPolicyGrant();
+  }
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isWorkspaceIdValue(value: unknown): value is WorkspaceId {
+  try {
+    assertWorkspaceId(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isNonEmptyWellFormedString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && isWellFormedUnicode(value);
+}
+
+function isPolicyGrantResourceType(value: unknown): boolean {
+  return value === 'filesystem' || value === 'command' || value === 'network' || value === 'other';
+}
+
+function isPolicyGrantResourceAccess(value: unknown): boolean {
+  return value === 'read' || value === 'write' || value === 'execute' || value === 'connect';
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 function snapshot<T>(value: T): T {

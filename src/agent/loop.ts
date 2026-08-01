@@ -16,14 +16,48 @@ import type {
   UserMessage,
   AgentMessage,
 } from '../protocol/index.js';
+import type {
+  CapabilityResult,
+  PromptAssemblyResult,
+} from '../capabilities/types.js';
 import type { FileTracker } from '../shared/index.js';
-import type { ToolContext, ToolDefinition } from '../tools/types.js';
+import type { ToolDefinition } from '../tools/types.js';
 import { newMessageId } from './ids.js';
 import type { DrainMode, PendingMessageQueue } from './queue.js';
 import { errorToolResult, failTruncatedToolCalls, formatToolError, toToolResultMessage } from './tool-result.js';
 import { convertContext, INTERRUPTED_RESULT_TEXT } from './transform.js';
 
 export type Emit = (e: AgentEvent) => Promise<void>;
+
+export type RuntimeToolPreparation =
+  | {
+      readonly ok: true;
+      readonly args: unknown;
+      readonly executionMode: 'parallel' | 'sequential';
+      execute(input: {
+        readonly signal: AbortSignal;
+        readonly onUpdate: (update: Readonly<Record<string, unknown>>) => void;
+      }): Promise<CapabilityResult>;
+    }
+  | { readonly ok: false; readonly message: string };
+
+export interface RuntimeTurnPort {
+  readonly streamFn: StreamFn;
+  assemble(outboundMessages: readonly Readonly<AgentMessage>[]): PromptAssemblyResult;
+  prepareToolCall(
+    call: Readonly<ToolCallPart>,
+    sourceOrdinal: number,
+    signal: AbortSignal,
+  ): Promise<RuntimeToolPreparation>;
+}
+
+export interface RuntimeTurnProvider {
+  capture(input: {
+    readonly model: Readonly<ModelConfig>;
+    readonly transcript: readonly Readonly<AgentMessage>[];
+    readonly signal: AbortSignal;
+  }): Promise<RuntimeTurnPort>;
+}
 
 /** runLoop 的完整配置:AgentConfig 的钩子 + Agent 预解析的执行环境。 */
 export interface LoopConfig {
@@ -42,6 +76,10 @@ export interface LoopConfig {
   toolExecution?: 'sequential' | 'parallel';
   steeringMode: () => DrainMode;   // live 读取:运行中切换即时生效
   followUpMode: () => DrainMode;
+  /** @internal Canonical Runtime path; legacy Agent leaves this absent. */
+  runtimeTurnProvider?: RuntimeTurnProvider;
+  /** @internal One Agent run is serial, so this value is scoped to the current turn only. */
+  activeRuntimeTurn?: RuntimeTurnPort;
 }
 
 export interface LoopQueues {
@@ -55,6 +93,10 @@ export interface LoopSeed {
   /** continue() 已自行 drain 时跳过起跑 poll,防止双重消费。 */
   skipInitialPoll: boolean;
 }
+
+type RuntimeTurnCapture =
+  | { readonly ok: true; readonly runtimeTurn: RuntimeTurnPort | undefined }
+  | { readonly ok: false; readonly error: unknown };
 
 export async function runLoop(
   cfg: LoopConfig,
@@ -83,6 +125,11 @@ export async function runLoop(
   outer: while (true) {                  // ── 外层:follow-up 续命 ──
     let hasMoreToolCalls = true;         // 初始 true:即使无 pending 也要采样一次
     while (hasMoreToolCalls || pendingMessages.length > 0) {  // ── 内层:工具循环 + steering ──
+      // Registry Runtime 必须先完成该 turn 的全部依赖快照，再允许权威
+      // turn_start 落盘。捕获失败也在这里先被观察，随后交给采样防御路径
+      // 合成完整的 error turn，不让事件文法断裂。
+      cfg.activeRuntimeTurn = undefined;
+      const runtimeTurnCapture = await captureRuntimeTurn(cfg, transcript, taskSignal);
       await emit({ type: 'turn_start' });
 
       // [B] 注入排队消息:逐条走 message_start/end 生命周期,追加进转录。
@@ -95,13 +142,20 @@ export async function runLoop(
       pendingMessages = [];
 
       // [C] 采样:transformContext → convertContext → StreamFn → 消费事件流
-      const assistant = await streamAssistantResponse(cfg, transcript, taskSignal, emit);
+      const assistant = await streamAssistantResponseWithCapture(
+        cfg,
+        transcript,
+        taskSignal,
+        emit,
+        runtimeTurnCapture,
+      );
       transcript.push(assistant);
       newMessages.push(assistant);
 
       // [D] error/aborted → 直接收尾(重试是 session 层的策略问题,loop 保持哑;docs/05 §2.3)
       if (assistant.stopReason === 'error' || assistant.stopReason === 'aborted') {
         await emit({ type: 'turn_end', message: assistant, toolResults: [] });
+        cfg.activeRuntimeTurn = undefined;
         await emit({
           type: 'agent_end',
           reason: assistant.stopReason === 'aborted' ? 'aborted' : 'error',
@@ -135,6 +189,7 @@ export async function runLoop(
       }
 
       await emit({ type: 'turn_end', message: assistant, toolResults });
+      cfg.activeRuntimeTurn = undefined;
 
       // [G] abort 检查:工具批次执行中被 abort(流采样中的 abort 已在 [D] 收尾)。
       //     显式检查而非等下一次 StreamFn 返回 aborted——转录更干净。
@@ -192,13 +247,40 @@ export async function streamAssistantResponse(
   taskSignal: AbortSignal,
   emit: Emit,
 ): Promise<AssistantMessage> {
+  return streamAssistantResponseWithCapture(cfg, transcript, taskSignal, emit);
+}
+
+async function streamAssistantResponseWithCapture(
+  cfg: LoopConfig,
+  transcript: AgentMessage[],
+  taskSignal: AbortSignal,
+  emit: Emit,
+  capturedRuntimeTurn?: RuntimeTurnCapture,
+): Promise<AssistantMessage> {
   let started = false;
   let lastPartial: AssistantMessage | undefined;   // 防御路径复用已宣布的消息 id 与已生成内容
   let stage = 'transformContext hook';             // 防御路径的错误归因标注
   try {
+    const capture = capturedRuntimeTurn ?? await captureRuntimeTurn(cfg, transcript, taskSignal);
+    if (!capture.ok) {
+      if (taskSignal.aborted) return emitAbortedAssistant(cfg, emit);
+      stage = 'RuntimeTurnProvider.capture';
+      throw capture.error;
+    }
+    const runtimeTurn = capture.runtimeTurn;
+    cfg.activeRuntimeTurn = runtimeTurn;
+    if (runtimeTurn !== undefined && taskSignal.aborted) {
+      return emitAbortedAssistant(cfg, emit);
+    }
     let ctx: Context = currentContext(cfg, transcript);
     if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
     stage = 'convertContext';
+    if (runtimeTurn !== undefined) {
+      stage = 'PromptAssembler';
+      const assembly = runtimeTurn.assemble(ctx.messages);
+      if (!assembly.ok) throw new Error(`${assembly.code}: ${assembly.message}`);
+      ctx = assembly.context as Context;
+    }
     // 视觉能力取 compat.supportsImageParts(CompatFlags 是开放袋,此处只认布尔 false)
     ctx = convertContext(ctx, cfg.model.ref, {
       supportsImages: cfg.model.compat?.['supportsImageParts'] !== false,
@@ -210,7 +292,10 @@ export async function streamAssistantResponse(
 
     // StreamFn 铁律:绝不 throw、绝不 reject。外层 try 只是协议 bug 的最后防线。
     stage = 'StreamFn (provider contract: never throw/reject)';
-    const stream = cfg.streamFn(cfg.model, ctx, { signal, ...cfg.model.defaults });
+    const stream = (runtimeTurn?.streamFn ?? cfg.streamFn)(cfg.model, ctx, {
+      signal,
+      ...cfg.model.defaults,
+    });
     for await (const ev of stream) {
       if (ev.type === 'start') {
         started = true;
@@ -222,7 +307,7 @@ export async function streamAssistantResponse(
       lastPartial = ev.partial;
       await emit({ type: 'message_update', messageId: ev.partial.id, event: ev });
     }
-    const message = await stream.result();
+    const message = rejectDuplicateToolCallIds(await stream.result());
     await emit({ type: 'message_end', message });
     return message;
   } catch (err) {
@@ -249,6 +334,62 @@ export async function streamAssistantResponse(
   }
 }
 
+async function captureRuntimeTurn(
+  cfg: LoopConfig,
+  transcript: AgentMessage[],
+  signal: AbortSignal,
+): Promise<RuntimeTurnCapture> {
+  if (cfg.runtimeTurnProvider === undefined) return { ok: true, runtimeTurn: undefined };
+  try {
+    return {
+      ok: true,
+      runtimeTurn: await cfg.runtimeTurnProvider.capture({ model: cfg.model, transcript, signal }),
+    };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+async function emitAbortedAssistant(
+  cfg: LoopConfig,
+  emit: Emit,
+): Promise<AssistantMessage> {
+  const message: AssistantMessage = {
+    role: 'assistant',
+    id: newMessageId('a'),
+    timestamp: Date.now(),
+    content: [],
+    model: cfg.model.ref,
+    stopReason: 'aborted',
+    errorDetails: { kind: 'aborted', retryable: false },
+    usage: { input: 0, output: 0 },
+  };
+  await emit({ type: 'message_start', message });
+  await emit({ type: 'message_end', message });
+  return message;
+}
+
+function rejectDuplicateToolCallIds(message: AssistantMessage): AssistantMessage {
+  const seen = new Set<string>();
+  let duplicate: string | undefined;
+  for (const part of message.content) {
+    if (part.type !== 'tool_call') continue;
+    if (seen.has(part.id)) {
+      duplicate = part.id;
+      break;
+    }
+    seen.add(part.id);
+  }
+  if (duplicate === undefined) return message;
+  return {
+    ...message,
+    content: message.content.filter((part) => part.type !== 'tool_call'),
+    stopReason: 'error',
+    errorMessage: `duplicate_tool_call_id: provider reused ${JSON.stringify(duplicate)} in one assistant message`,
+    errorDetails: { kind: 'unknown', retryable: false, code: 'duplicate_tool_call_id' },
+  };
+}
+
 /** Context 组装:systemPrompt 每 turn 重新求值 + 工具 promptSnippet 拼装(docs/07 §1.5)。 */
 function currentContext(cfg: LoopConfig, transcript: AgentMessage[]): Context {
   const base = typeof cfg.systemPrompt === 'function' ? cfg.systemPrompt() : cfg.systemPrompt;
@@ -265,11 +406,51 @@ function currentContext(cfg: LoopConfig, transcript: AgentMessage[]): Context {
 // ---------- 工具执行三阶段 ----------
 
 type Prepared =
-  | { kind: 'ok'; call: ToolCallPart; tool: ToolDefinition; args: unknown }
+  | {
+      kind: 'ok';
+      call: ToolCallPart;
+      args: unknown;
+      executionMode: 'parallel' | 'sequential';
+      execute(input: {
+        readonly signal: AbortSignal;
+        readonly onUpdate: (update: Readonly<Record<string, unknown>>) => void;
+      }): Promise<CapabilityResult>;
+    }
   | { kind: 'reject'; call: ToolCallPart; result: ToolResultMessage }; // 直接就是回喂结果
 
 /** 阶段 1:查找 → prepareArguments 修补 → zod 校验 → beforeToolCall 拦截。失败=回喂,不 throw。 */
-async function prepareToolCall(cfg: LoopConfig, call: ToolCallPart): Promise<Prepared> {
+async function prepareToolCall(
+  cfg: LoopConfig,
+  call: ToolCallPart,
+  sourceOrdinal: number,
+  taskSignal: AbortSignal,
+): Promise<Prepared> {
+  const runtimeTurn = cfg.activeRuntimeTurn;
+  if (runtimeTurn !== undefined) {
+    let prepared: RuntimeToolPreparation;
+    try {
+      prepared = await runtimeTurn.prepareToolCall(call, sourceOrdinal, taskSignal);
+    } catch (error) {
+      return {
+        kind: 'reject',
+        call,
+        result: errorToolResult(
+          call,
+          `Capability preflight failed: ${formatToolError(error)}`,
+        ),
+      };
+    }
+    if (!prepared.ok) {
+      return { kind: 'reject', call, result: errorToolResult(call, prepared.message) };
+    }
+    return {
+      kind: 'ok',
+      call,
+      args: prepared.args,
+      executionMode: prepared.executionMode,
+      execute: prepared.execute,
+    };
+  }
   const tool = cfg.tools.find((t) => t.name === call.name);
   if (!tool) {
     return {
@@ -318,7 +499,21 @@ async function prepareToolCall(cfg: LoopConfig, call: ToolCallPart): Promise<Pre
       };
     }
   }
-  return { kind: 'ok', call, tool, args: parsed.data };
+  return {
+    kind: 'ok',
+    call,
+    args: parsed.data,
+    executionMode: tool.executionMode ?? 'parallel',
+    execute: async ({ signal, onUpdate }) => tool.execute(
+      { id: call.id, args: parsed.data },
+      {
+        cwd: cfg.cwd,
+        signal,
+        onUpdate: (update) => onUpdate(update),
+        fileTracker: cfg.fileTracker,
+      },
+    ),
+  };
 }
 
 /** 阶段 2+3:execute(throw=失败)→ afterToolCall 改写 → tool_execution_end。 */
@@ -347,16 +542,13 @@ async function runOne(
   } else if (p.kind === 'reject') {
     result = p.result;
   } else {
-    const toolCtx: ToolContext = {
-      cwd: cfg.cwd,
-      signal: AbortSignal.any([taskSignal]),   // 工具级 child signal
-      onUpdate: (u) => {
-        void emit({ type: 'tool_execution_update', toolCallId: p.call.id, update: u });  // 火后不理,仍进链
-      },
-      fileTracker: cfg.fileTracker,
-    };
     try {
-      const output = await p.tool.execute({ id: p.call.id, args: p.args }, toolCtx);
+      const output = await p.execute({
+        signal: AbortSignal.any([taskSignal]),
+        onUpdate: (update) => {
+          void emit({ type: 'tool_execution_update', toolCallId: p.call.id, update });
+        },
+      });
       result = toToolResultMessage(p.call, output, cfg.spillDir);
       terminate = output.terminate === true;
     } catch (err) {
@@ -407,17 +599,17 @@ async function executeToolCalls(
   emit: Emit,
 ): Promise<{ toolResults: ToolResultMessage[]; terminate: boolean }> {
   const prepared: Prepared[] = [];
-  for (const call of toolCalls) {
+  for (const [sourceOrdinal, call] of toolCalls.entries()) {
     // ★ preflight 也要查 abort:beforeToolCall 是审批挂载点,abort 后再 prepare 下一个 call
     //   会向已清空的 broker 发起新审批请求 → 永不 resolve → waitForIdle 挂死(R7 死锁)。
     //   已 abort 则停止 prepare 剩余 call,它们成为孤儿由 transform 层补合成中断结果。
     if (taskSignal.aborted) break;
-    prepared.push(await prepareToolCall(cfg, call));
+    prepared.push(await prepareToolCall(cfg, call, sourceOrdinal, taskSignal));
   }
 
   const sequential =
     cfg.toolExecution === 'sequential' ||
-    prepared.some((p) => p.kind === 'ok' && p.tool.executionMode === 'sequential');
+    prepared.some((p) => p.kind === 'ok' && p.executionMode === 'sequential');
 
   const results = new Map<string, ToolResultMessage>();
   let allTerminate = true;

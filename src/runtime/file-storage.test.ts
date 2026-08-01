@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
+  statSync,
   truncateSync,
   unlinkSync,
   writeFileSync,
@@ -14,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { PolicyGrant } from '../capabilities/types.js';
 import type { ExternalOpId, ThreadId, WorkspaceId } from '../protocol/index.js';
 import { runtimeOpPayloadHash, sha256Hex } from '../protocol/index.js';
 import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError } from './errors.js';
@@ -197,6 +200,300 @@ describe('FileRuntimeStorage', () => {
     await second.close();
   });
 
+  test('persists canonical policy grants with exact receipt idempotency across reopen', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_policy_grants' as WorkspaceId;
+    const first = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('file-policy-first');
+    const firstRepository = await first.openPolicyGrantRepository(firstLease, 'workspace');
+    const initialRevision = (await firstRepository.snapshot()).revision;
+    const grant = policyGrant(workspaceId, 'op_e_c1000000000000000000000000000001');
+
+    const applied = await firstRepository.commitAllowAlways(grant);
+    expect(applied).toMatchObject({ kind: 'applied' });
+    expect(applied.kind === 'applied' && applied.revision).not.toBe(initialRevision);
+    expect(await firstRepository.commitAllowAlways(grant)).toEqual({
+      kind: 'duplicate',
+      revision: applied.kind === 'applied' ? applied.revision : '',
+    });
+    expect(await firstRepository.commitAllowAlways({ ...grant, policyBasisRevision: 'changed' }))
+      .toMatchObject({
+        kind: 'conflict',
+        revision: applied.kind === 'applied' ? applied.revision : '',
+      });
+    await firstRepository.close();
+    await first.releaseSupervisorLease(firstLease);
+    await first.close();
+
+    const second = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const secondLease = await second.acquireSupervisorLease('file-policy-second');
+    const secondRepository = await second.openPolicyGrantRepository(secondLease, 'workspace');
+    const recovered = await secondRepository.snapshot();
+    expect(recovered).toMatchObject({
+      workspaceId,
+      revision: applied.kind === 'applied' ? applied.revision : '',
+      grants: [grant],
+    });
+    expectDeepFrozen(recovered);
+    expect(await secondRepository.commitAllowAlways(grant)).toMatchObject({ kind: 'duplicate' });
+    await secondRepository.close();
+    await second.releaseSupervisorLease(secondLease);
+    await second.close();
+  });
+
+  test('fences invalid policy grant writers and fails closed on canonical store corruption', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_policy_fencing' as WorkspaceId;
+    const first = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('file-policy-fencing-first');
+    const repository = await first.openPolicyGrantRepository(firstLease, 'workspace');
+
+    expect(await repository.commitAllowAlways(policyGrant(
+      'ws_file_policy_other' as WorkspaceId,
+      'op_e_c2000000000000000000000000000002',
+    ))).toMatchObject({ kind: 'fenced', code: 'wrong_workspace' });
+    await expect(repository.commitAllowAlways({
+      ...policyGrant(workspaceId, 'op_e_c3000000000000000000000000000003'),
+      scope: { kind: 'legacy_global_approvals_v1', patterns: ['bash:*'] },
+    })).rejects.toMatchObject({ code: 'invalid_policy_grant' });
+    await expect(first.openPolicyGrantRepository(firstLease, 'legacy_global_approvals_v1'))
+      .rejects.toMatchObject({ code: 'legacy_approval_storage_unavailable' });
+
+    await first.releaseSupervisorLease(firstLease);
+    expect(await repository.commitAllowAlways(policyGrant(
+      workspaceId,
+      'op_e_c4000000000000000000000000000004',
+    ))).toMatchObject({ kind: 'fenced', code: 'stale_fence' });
+    await repository.close();
+    await first.close();
+
+    const grantFile = path.join(workspacePath(root, workspaceId), 'policy-grants.json');
+    writeFileSync(grantFile, `${JSON.stringify({ version: 1, workspaceId, grants: [{ invalid: true }] })}\n`);
+    const second = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const secondLease = await second.acquireSupervisorLease('file-policy-fencing-second');
+    await expect(second.openPolicyGrantRepository(secondLease, 'workspace'))
+      .rejects.toMatchObject({ code: 'invalid_policy_grant_store' });
+    await second.releaseSupervisorLease(secondLease);
+    await second.close();
+  });
+
+  test('reports a pre-rename policy grant storage failure as definitely not applied', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_policy_not_applied' as WorkspaceId;
+    const workspace = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('file-policy-not-applied');
+    const repository = await workspace.openPolicyGrantRepository(lease, 'workspace');
+    const initial = await repository.snapshot();
+    const workspaceDir = workspacePath(root, workspaceId);
+    const originalMode = statSync(workspaceDir).mode & 0o777;
+    let result;
+    try {
+      chmodSync(workspaceDir, 0o500);
+      result = await repository.commitAllowAlways(policyGrant(
+        workspaceId,
+        'op_e_c5000000000000000000000000000005',
+      ));
+    } finally {
+      chmodSync(workspaceDir, originalMode);
+    }
+    expect(result).toMatchObject({ kind: 'definitely_not_applied' });
+    expect(await repository.snapshot()).toMatchObject({ revision: initial.revision, grants: [] });
+
+    await repository.close();
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('persists exact legacy-global policy grants and projects the shared pattern snapshot', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_legacy_policy_grants' as WorkspaceId;
+    const storage = createFileRuntimeStorage({ root, legacyApprovalFile: approvals });
+    const first = await storage.openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('legacy-policy-first');
+    const firstRepository = await first.openPolicyGrantRepository(
+      firstLease,
+      'legacy_global_approvals_v1',
+    );
+    const grant = legacyPolicyGrant(
+      workspaceId,
+      'op_e_c6000000000000000000000000000006',
+    );
+
+    const applied = await firstRepository.commitAllowAlways(grant);
+    expect(applied).toMatchObject({ kind: 'applied' });
+    expect(await firstRepository.commitAllowAlways(grant)).toMatchObject({ kind: 'duplicate' });
+    expect(await firstRepository.commitAllowAlways({
+      ...grant,
+      policyBasisRevision: 'changed',
+    })).toMatchObject({ kind: 'conflict' });
+    expect(await firstRepository.snapshot()).toMatchObject({
+      workspaceId,
+      grants: [grant],
+      legacyGlobal: { patterns: ['bash:bun test'] },
+    });
+    await expect(firstRepository.commitAllowAlways(policyGrant(
+      workspaceId,
+      'op_e_c7000000000000000000000000000007',
+    ))).rejects.toMatchObject({ code: 'invalid_policy_grant' });
+    await firstRepository.close();
+    await first.releaseSupervisorLease(firstLease);
+    await first.close();
+
+    const second = await storage.openWorkspace({ cwd, workspaceId });
+    const secondLease = await second.acquireSupervisorLease('legacy-policy-second');
+    const secondRepository = await second.openPolicyGrantRepository(
+      secondLease,
+      'legacy_global_approvals_v1',
+    );
+    expect(await secondRepository.snapshot()).toMatchObject({ grants: [grant] });
+    expect(await secondRepository.commitAllowAlways(grant)).toMatchObject({ kind: 'duplicate' });
+    const legacyPatterns = await second.openLegacyApprovalPatternRepository(secondLease);
+    expect(await legacyPatterns.snapshot()).toMatchObject({ patterns: ['bash:bun test'] });
+    await legacyPatterns.close();
+    await secondRepository.close();
+    await second.releaseSupervisorLease(secondLease);
+    await second.close();
+  });
+
+  test('linearizes one grant receipt key across concurrent workspace and legacy-global repositories', async () => {
+    for (const firstMode of ['workspace', 'legacy_global_approvals_v1'] as const) {
+      const root = temporaryDirectory();
+      const approvals = path.join(root, 'approvals.json');
+      const cwd = path.join(root, 'cwd');
+      const workspaceId = `ws_file_cross_mode_${firstMode}` as WorkspaceId;
+      const workspace = await createFileRuntimeStorage({ root, legacyApprovalFile: approvals })
+        .openWorkspace({ cwd, workspaceId });
+      const lease = await workspace.acquireSupervisorLease(`cross-mode-${firstMode}`);
+      const workspaceRepository = await workspace.openPolicyGrantRepository(lease, 'workspace');
+      const legacyRepository = await workspace.openPolicyGrantRepository(
+        lease,
+        'legacy_global_approvals_v1',
+      );
+      const grantId = 'op_e_c6000000000000000000000000000006';
+      const canonical = policyGrant(workspaceId, grantId);
+      const legacy = legacyPolicyGrant(workspaceId, grantId);
+
+      const results = firstMode === 'workspace'
+        ? await Promise.all([
+            workspaceRepository.commitAllowAlways(canonical),
+            legacyRepository.commitAllowAlways(legacy),
+          ])
+        : await Promise.all([
+            legacyRepository.commitAllowAlways(legacy),
+            workspaceRepository.commitAllowAlways(canonical),
+          ]);
+      expect(results.map((result) => result.kind).sort()).toEqual(['applied', 'conflict']);
+      expect((await workspaceRepository.snapshot()).grants).toEqual(
+        firstMode === 'workspace' ? [canonical] : [],
+      );
+      expect((await legacyRepository.snapshot()).grants).toEqual(
+        firstMode === 'legacy_global_approvals_v1' ? [legacy] : [],
+      );
+
+      await legacyRepository.close();
+      await workspaceRepository.close();
+      await workspace.releaseSupervisorLease(lease);
+      await workspace.close();
+    }
+  });
+
+  test('validates and persists legacy patterns in UTF-8 byte order', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_utf8_legacy_patterns' as WorkspaceId;
+    const workspace = await createFileRuntimeStorage({ root, legacyApprovalFile: approvals })
+      .openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('file-utf8-legacy-patterns');
+    const repository = await workspace.openPolicyGrantRepository(
+      lease,
+      'legacy_global_approvals_v1',
+    );
+    const patterns = ['\uE000', '𐀀'] as const;
+    const wrongUtf16Order = [patterns[1], patterns[0]] as const;
+    const grant = {
+      ...legacyPolicyGrant(workspaceId, 'op_e_c7000000000000000000000000000007'),
+      scope: { kind: 'legacy_global_approvals_v1' as const, patterns },
+    };
+
+    await expect(repository.commitAllowAlways({
+      ...grant,
+      grantId: 'op_e_c8000000000000000000000000000008' as ExternalOpId,
+      scope: { ...grant.scope, patterns: wrongUtf16Order },
+    })).rejects.toMatchObject({ code: 'invalid_policy_grant' });
+    expect(await repository.commitAllowAlways(grant)).toMatchObject({ kind: 'applied' });
+    expect(JSON.parse(readFileSync(approvals, 'utf8'))).toEqual(patterns);
+    expect((await repository.snapshot()).legacyGlobal?.patterns).toEqual(patterns);
+
+    await repository.close();
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('recovers a reserved legacy-global policy grant without misclassifying it as phase-2 work', async () => {
+    const root = temporaryDirectory();
+    const approvals = path.join(root, 'approvals.json');
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_file_legacy_policy_recovery' as WorkspaceId;
+    const storage = createFileRuntimeStorage({ root, legacyApprovalFile: approvals });
+    const first = await storage.openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('legacy-policy-reserve');
+    const initialized = await first.openPolicyGrantRepository(
+      firstLease,
+      'legacy_global_approvals_v1',
+    );
+    await initialized.close();
+    await first.releaseSupervisorLease(firstLease);
+    await first.close();
+
+    const grant = legacyPolicyGrant(
+      workspaceId,
+      'op_e_c8000000000000000000000000000008',
+    );
+    const outboxFile = path.join(
+      workspacePath(root, workspaceId),
+      'legacy-approval-outbox.json',
+    );
+    writeFileSync(outboxFile, `${JSON.stringify({
+      version: 1,
+      receipts: [{
+        responseOpId: grant.grantId,
+        acceptedAt: grant.acceptedAt,
+        patterns: grant.scope.kind === 'legacy_global_approvals_v1'
+          ? grant.scope.patterns
+          : [],
+        state: 'reserved',
+        policyGrant: grant,
+      }],
+    })}\n`);
+
+    const second = await storage.openWorkspace({ cwd, workspaceId });
+    const secondLease = await second.acquireSupervisorLease('legacy-policy-recover');
+    expect(await second.inspectLegacyApprovalRecovery(secondLease)).toEqual({
+      hasPendingReservedOutbox: false,
+    });
+    expect(existsSync(approvals)).toBe(false);
+    const recovered = await second.openPolicyGrantRepository(
+      secondLease,
+      'legacy_global_approvals_v1',
+    );
+    expect(await second.inspectLegacyApprovalRecovery(secondLease)).toEqual({
+      hasPendingReservedOutbox: false,
+    });
+    expect(await recovered.snapshot()).toMatchObject({
+      grants: [grant],
+      legacyGlobal: { patterns: ['bash:bun test'] },
+    });
+    await recovered.close();
+    await second.releaseSupervisorLease(secondLease);
+    await second.close();
+  });
+
   test('commits legacy approval patterns once per exact workspace receipt and fences closed writers', async () => {
     const root = temporaryDirectory();
     const approvals = path.join(root, 'approvals.json');
@@ -223,6 +520,88 @@ describe('FileRuntimeStorage', () => {
     expect(await repository.commit(input)).toMatchObject({ kind: 'fenced', code: 'stale_fence' });
     await workspace.releaseSupervisorLease(lease);
     await workspace.close();
+  });
+
+  test('reports a post-rename legacy outbox fsync failure as an unknown outcome', async () => {
+    const root = temporaryDirectory();
+    const moduleUrl = pathToFileURL(path.join(import.meta.dir, 'file-storage.ts')).href;
+    const childCode = `
+      const { mock } = await import('bun:test');
+      const actualFs = await import('node:fs');
+      const nativeFsyncSync = actualFs.fsyncSync;
+      const nativeFstatSync = actualFs.fstatSync;
+      const nativeReadFileSync = actualFs.readFileSync;
+      let faultArmed = false;
+      mock.module('node:fs', () => ({
+        ...actualFs,
+        fsyncSync(fd) {
+          if (faultArmed && nativeFstatSync(fd).isDirectory()) {
+            faultArmed = false;
+            const error = new Error('injected post-rename directory fsync failure');
+            error.code = 'EIO';
+            throw error;
+          }
+          return nativeFsyncSync(fd);
+        },
+      }));
+      const { createFileRuntimeStorage } = await import(${JSON.stringify(moduleUrl)});
+      const { sha256Hex } = await import(${JSON.stringify(
+        pathToFileURL(path.join(import.meta.dir, '../protocol/index.ts')).href,
+      )});
+      const path = await import('node:path');
+      const storageRoot = path.join(${JSON.stringify(root)}, 'storage');
+      const approvals = path.join(${JSON.stringify(root)}, 'approvals.json');
+      const cwd = path.join(${JSON.stringify(root)}, 'cwd');
+      const workspaceId = 'ws_legacy_post_rename_unknown';
+      const storage = createFileRuntimeStorage({ root: storageRoot, legacyApprovalFile: approvals });
+      const workspace = await storage.openWorkspace({ cwd, workspaceId });
+      const lease = await workspace.acquireSupervisorLease('legacy-post-rename-unknown');
+      const repository = await workspace.openLegacyApprovalPatternRepository(lease);
+      faultArmed = true;
+      let resultKind;
+      let errorCode;
+      try {
+        const result = await repository.commit({
+          responseOpId: 'op_e_a4000000000000000000000000000004',
+          acceptedAt: 40,
+          patterns: ['bash:bun test'],
+        });
+        resultKind = result.kind;
+      } catch (error) {
+        resultKind = 'rejected';
+        errorCode = error?.code;
+      }
+      const outboxFile = path.join(
+        storageRoot,
+        'ws-' + sha256Hex(workspaceId),
+        'legacy-approval-outbox.json',
+      );
+      const outbox = JSON.parse(nativeReadFileSync(outboxFile, 'utf8'));
+      await repository.close();
+      await workspace.releaseSupervisorLease(lease);
+      await workspace.close();
+      console.log(JSON.stringify({
+        resultKind,
+        errorCode,
+        receiptState: outbox.receipts[0]?.state,
+      }));
+      process.exit(0);
+    `;
+    const child = Bun.spawn([process.execPath, '-e', childCode], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+    expect(JSON.parse(stdout)).toEqual({
+      resultKind: 'rejected',
+      errorCode: 'legacy_approval_commit_outcome_unknown',
+      receiptState: 'reserved',
+    });
   });
 
   test('waits through ordinary global approval lock contention instead of degrading the workspace', async () => {
@@ -307,6 +686,9 @@ describe('FileRuntimeStorage', () => {
 
     const second = await storage.openWorkspace({ cwd, workspaceId });
     const secondLease = await second.acquireSupervisorLease('legacy-approval-crash-second');
+    expect(await second.inspectLegacyApprovalRecovery(secondLease)).toEqual({
+      hasPendingReservedOutbox: true,
+    });
     const recovered = await second.openLegacyApprovalPatternRepository?.(secondLease);
     if (recovered === undefined) throw new Error('legacy approval repository unavailable');
     expect(recovered.startupDiagnostics?.()).toEqual([{
@@ -317,6 +699,9 @@ describe('FileRuntimeStorage', () => {
       'bash:bun test',
       'edit:/project/**',
     ]);
+    expect(await second.inspectLegacyApprovalRecovery(secondLease)).toEqual({
+      hasPendingReservedOutbox: false,
+    });
     const outbox = JSON.parse(
       readFileSync(path.join(workspacePath(root, workspaceId), 'legacy-approval-outbox.json'), 'utf8'),
     ) as { receipts: Array<{ state: string }> };
@@ -594,6 +979,44 @@ function mailboxPrepare(opId: ExternalOpId, workspaceId: WorkspaceId, threadId: 
     op: { type: 'prompt', opId, workspaceId, threadId, text: 'x' },
     timestamp: 1,
   };
+}
+
+function policyGrant(workspaceId: WorkspaceId, grantId: string): PolicyGrant {
+  return {
+    grantId: grantId as ExternalOpId,
+    workspaceId,
+    capabilityId: 'bash',
+    capabilityVersion: '1.0.0',
+    registrationDigest: `capreg_v1_${'2'.repeat(64)}`,
+    scope: {
+      kind: 'canonical_resources_v1',
+      resourcePatterns: [{
+        resourceType: 'command',
+        access: 'execute',
+        matcher: 'canonical_target_exact_v1',
+        pattern: 'bun test',
+      }],
+      attributes: { confirmation: 'required' },
+    },
+    policyBasisRevision: 'policy-basis-v1',
+    acceptedAt: 20,
+  };
+}
+
+function legacyPolicyGrant(workspaceId: WorkspaceId, grantId: string): PolicyGrant {
+  return {
+    ...policyGrant(workspaceId, grantId),
+    scope: {
+      kind: 'legacy_global_approvals_v1',
+      patterns: ['bash:bun test'],
+    },
+  };
+}
+
+function expectDeepFrozen(value: unknown): void {
+  if (value === null || typeof value !== 'object') return;
+  expect(Object.isFrozen(value)).toBe(true);
+  for (const child of Object.values(value)) expectDeepFrozen(child);
 }
 
 function temporaryDirectory(): string {

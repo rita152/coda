@@ -34,6 +34,7 @@ import type {
   ThreadJournalAppendPort,
   ThreadMetaRecord,
 } from '../session/thread-journal-records.js';
+import type { PolicyGrantRepository } from '../capabilities/types.js';
 
 export type {
   LegacyApprovalAdapter,
@@ -124,8 +125,14 @@ export interface LegacyApprovalPatternRepository extends LegacyApprovalPatternRe
 
 export interface ThreadDriverFactory {
   readonly requirements:
-    | { readonly approvalMode: 'legacy_session_edge' }
-    | { readonly approvalMode: 'durable_legacy_bridge' };
+    | {
+        readonly approvalMode: 'legacy_session_edge';
+        readonly capabilityMode?: 'static' | 'registry';
+      }
+    | {
+        readonly approvalMode: 'durable_legacy_bridge';
+        readonly capabilityMode?: 'static' | 'registry';
+      };
   openLegacyApprovalAdapter?(input: {
     readonly workspaceId: WorkspaceId;
     readonly threadId: ThreadId;
@@ -220,6 +227,10 @@ export interface ThreadJournalPort extends ThreadJournalAppendPort {
   releaseWriteLease(): Promise<void>;
 }
 
+export interface LegacyApprovalRecoveryInventory {
+  readonly hasPendingReservedOutbox: boolean;
+}
+
 export interface RuntimeWorkspaceStoragePort {
   readonly workspaceId: WorkspaceId;
   readonly recordedCwd: string;
@@ -253,9 +264,16 @@ export interface RuntimeWorkspaceStoragePort {
     lease: Readonly<SupervisorLease>,
     threadId: ThreadId,
   ): Promise<LegacyThreadImport | undefined>;
+  inspectLegacyApprovalRecovery?(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<Readonly<LegacyApprovalRecoveryInventory>>;
   openLegacyApprovalPatternRepository?(
     lease: Readonly<SupervisorLease>,
   ): Promise<LegacyApprovalPatternRepository>;
+  openPolicyGrantRepository?(
+    lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode'],
+  ): Promise<PolicyGrantRepository>;
   close(): Promise<void>;
 }
 

@@ -4,7 +4,14 @@ export { Agent } from './agent.js';
 export type { AgentConfig } from './agent.js';
 export type { AgentEventListener } from './events.js';
 export { runLoop, streamAssistantResponse } from './loop.js';
-export type { LoopConfig, LoopQueues, LoopSeed } from './loop.js';
+export type {
+  LoopConfig,
+  LoopQueues,
+  LoopSeed,
+  RuntimeToolPreparation,
+  RuntimeTurnPort,
+  RuntimeTurnProvider,
+} from './loop.js';
 export { PendingMessageQueue } from './queue.js';
 export type { DrainMode } from './queue.js';
 export { convertContext, isSameModel, INTERRUPTED_RESULT_TEXT } from './transform.js';

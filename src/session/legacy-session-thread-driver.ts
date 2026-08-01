@@ -24,6 +24,7 @@ import type {
   LegacyThreadExecutionPort,
   SessionEvent,
 } from './legacy-thread-execution.js';
+import type { RuntimeTurnProvider } from '../agent/index.js';
 
 type ActivityCommand = Extract<
   PreparedThreadDriverCommand,
@@ -208,6 +209,33 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
     });
   }
 
+  readonly runtimeTurnProvider: RuntimeTurnProvider = {
+    capture: async (input) => {
+      this.#assertReady();
+      const activity = this.#requireActivity();
+      if (this.#host.captureRuntimeTurn === undefined) {
+        throw new Error('Registry turn capture is unavailable');
+      }
+      if (activity.currentTurnId === undefined) {
+        const turnOrdinal = activity.turnOrdinal + 1;
+        const reservation = await this.#host.reserveTurn({
+          runId: activity.currentRunId,
+          turnOrdinal,
+        });
+        activity.turnOrdinal = turnOrdinal;
+        activity.currentTurnId = reservation.turnId;
+      }
+      return this.#host.captureRuntimeTurn({
+        rootOpId: activity.rootOpId,
+        runId: activity.currentRunId,
+        turnId: activity.currentTurnId,
+        model: input.model,
+        transcript: input.transcript,
+        signal: input.signal,
+      });
+    },
+  };
+
   async commitSessionEvent(event: SessionEvent): Promise<void> {
     this.#assertEventSinkReady();
     this.#throwFatal();
@@ -227,15 +255,21 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
     const activity = this.#requireActivity();
     switch (event.type) {
       case 'turn_start': {
-        const reservation = await this.#host.reserveTurn({
-          runId: activity.currentRunId,
-          turnOrdinal: ++activity.turnOrdinal,
-        });
-        activity.currentTurnId = reservation.turnId;
+        let turnId = activity.currentTurnId;
+        if (turnId === undefined) {
+          const turnOrdinal = activity.turnOrdinal + 1;
+          const reservation = await this.#host.reserveTurn({
+            runId: activity.currentRunId,
+            turnOrdinal,
+          });
+          activity.turnOrdinal = turnOrdinal;
+          turnId = reservation.turnId;
+          activity.currentTurnId = turnId;
+        }
         await this.#host.commitEvent({
           event,
           runId: activity.currentRunId,
-          turnId: reservation.turnId,
+          turnId,
         });
         return;
       }
@@ -358,6 +392,9 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
       case 'approval_request':
         throw new Error('Approval requests must use the legacy approval side channel');
       case 'turn_end':
+        await this.#commitTurnEvent(event);
+        activity.currentTurnId = undefined;
+        return;
       case 'message_start':
       case 'message_update':
       case 'message_end':

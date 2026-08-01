@@ -378,6 +378,13 @@ export interface RuleScopeMutation {
   invocationId: string;
 }
 
+export interface RuleScopeWindowMutation {
+  type: 'rule_scope_window_replaced';
+  consumedScopes: readonly string[]; // 当前 durable window 的 UTF-8 排序 witness
+  replacementScopes: readonly string[];
+  owningTurnId: TurnId;
+}
+
 export interface ThreadResultOutboxMutation {
   type: 'thread_result_pending';
   resultOpId: DerivedOpId;
@@ -409,6 +416,7 @@ export interface ThreadCommitRecord {
     | TurnMutation
     | ActivityRecoveryMutation
     | RuleScopeMutation
+    | RuleScopeWindowMutation
     | ModelSelectionMutation
   )[];
 }
@@ -468,9 +476,12 @@ recovery 时重新调用 clock。成功 compaction 的
 `rule_scope_observed` 与发现缺 scope 后合成的 recoverable tool-result/event 在同一 commit 中落盘；
 mutation 的 scope 只能逐项取 `RuleFreshnessResult{code:'rule_scope_missing'}.missingScopes`，该列表已
 strict-copy、非空、去重并按 UTF-8 排序；ThreadRuntime 不从 ResolvedCapabilityResource.canonicalTarget
-反推规则 scope。repository fold 按 canonical scope 去重，和 thread cwd/root 初始 scope 一起成为下一 turn
-RuleSnapshotProvider 的 `knownResourceScopes`（UTF-8 排序）。它不在当前 turn 加载/替换规则，也不因
-crash/resume 丢失；同 invocation 重放 mutation 是幂等的。
+反推规则 scope。repository fold 按 canonical scope 去重，形成下一 turn RuleSnapshotProvider 的
+`knownResourceScopes` 滚动窗口（UTF-8 排序）；thread cwd/root 仍由 provider 自身作为基础 discovery，
+不写进该窗口。成功 capture 后，`turn_start + turn_activated` 的同一 commit 必须附
+`rule_scope_window_replaced`，其 consumedScopes 逐字段等于 fold 当前窗口，再原子安装 replacementScopes；
+witness 不等则 replay fail closed。capture 或 turn_start 失败不消费，成功 turn 后未再次观察的历史 sibling
+不会永久保留。当前 turn 不加载/替换规则；同 invocation 重放 observed mutation 是幂等的。
 
 `successor_run_prepare/turn_prepare` 与 `mailbox_prepare` 一样是**事件提交前的 durable reservation**，
 本身不分配 seq、也不是普通观察者可见状态。successor prepare 立即参与 admission/abort；它在随后
@@ -479,7 +490,11 @@ interrupted、绝不自动采样。turn prepare 必须发生在 initial poll/tur
 该 turn 的 queue_update（若有）或 turn_start commit 同时写 `turn_activated`，之后整 turn 复用该 ID。
 turn_prepare 还持久化 host 对 bound/current run CAS 后得到的 turnOrdinal 与同一 PermissionPolicyPort
 产出的 workspace/run/turn ceilings；同 key retry 必须读回逐字段相同值，`turn_activated` 的 ordinal/id
-必须匹配。successor key `(predecessorRunId,reason)` 同样把 runId/permissionCeiling 固定在 prepare；
+必须匹配。driver 只能在 `reserveTurn()` 成功返回后推进本地 ordinal；调用在 append 前失败时仍以原
+ordinal 重试，appendPrepare 已成功后则必须先安装可幂等重取的 reservation，再观察任何 post-append
+workspace failure；后者由紧随其后的 capture/side-effect gate 收窄，绝不能留下 caller 取不到 TurnId 的
+durable orphan。successor key
+`(predecessorRunId,reason)` 同样把 runId/permissionCeiling 固定在 prepare；
 同 key retry 不重调 factory/policy，同 predecessor 的不同 reason/fork 是
 `invalid_successor_reservation` fatal。journal 永久 fold used RunId/TurnId；不同 reservation key 命中
 旧 ID 是 `identity_collision` fatal，不能循环猜新 ID。crash 留下未激活 turn prepare 时直接丢弃，
@@ -666,6 +681,8 @@ resume(workspaceId, threadId):
       definitely_not_applied 时 response interrupted + claim release，随后因 waiter 不存在把 request
       aborted；同 OpId 不重试。conflict/fenced/unknown outcome 保留 claim：分别 quarantine workspace/
       停止 workspace admission/degrade，三者都停止新 admission/capability execution并交 recovery 对账。
+      outbox atomic writer 只有在 rename 前失败才能证明 definitely_not_applied；rename 已成功而 directory
+      fsync 失败必须作为 unknown outcome 抛出并保留 reserved receipt/claim，禁止新 OpId 叠加授权。
       effect 已写但 control commit 失败也停止 admission，recovery 只补 control/op terminal
     thread_close：建立 closing barrier，按当前位置先结案此前 obligation，再取消/aborted pending activity/
       controls；其后尚未 terminal op 确定性 superseded，不接受 live attach
@@ -685,8 +702,12 @@ inventory fold；不能只扫 pending-control map，也不声明跨 thread 的�
 `inspectLegacyApprovalRecovery()`（与 outbox reservation 线性一致、无 writer side effect）报告 workspace
 已有 pending reserved legacy pattern outbox 时，才必须通过 storage extension 打开 recovery-only、fence-bound
 `LegacyApprovalPatternRepository`，并在其 FIFO 位置以原 responseOpId/acceptedAt 补旧 global Set→
-control_resolved；随后旧 activity 仍 interrupted。R→A 先补 R 再 A，A→R 不得写 Set。全部旧 control
-收束后立即关闭该 repository，才打开 registry grant repository/attach live driver。需要 writer 时
+control_resolved；随后旧 activity 仍 interrupted。R→A 先补 R 再 A，A→R 不得写 Set。无 accepted
+response 的 unresolved legacy request 也必须在这个 pre-grant pass 以 derived recovery op 结案；同 journal
+中的 registry grant response 则保留到 grant repository 打开后的正常 recovery。全部旧 control 收束后
+先清除 Supervisor 对 legacy writer 的引用并立即关闭 repository，才实际打开 registry grant repository/
+PolicyEngine/attach live driver；close 失败时后三者调用数为零，registry driver create/resume input 永远
+不携带 `legacyApprovalPatterns`。需要 writer 时
 extension 缺失/open 失败以 `legacy_approval_recovery_unavailable` 终止；不得重跑 preflight、不得把旧
 Set/pattern 转成 workspace grant、不得重放 executor。inventory extension 缺失/读取失败同样在 attach
 前 typed fail；只有它明确为 false 且没有上述 effect obligation 时，registry Runtime 才不打开这条

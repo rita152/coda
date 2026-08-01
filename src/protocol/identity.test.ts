@@ -2,7 +2,11 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertLegacyWorkspaceId,
+  assertRunId,
+  assertThreadId,
+  assertTurnId,
   assertWorkspaceId,
+  deriveInvocationId,
   deriveOpId,
   isDerivedOpId,
   isExternalOpId,
@@ -75,6 +79,27 @@ describe('runtime identities', () => {
     const left = deriveOpId({ purpose: 'thread_result', workspaceId, parts: ['a\0b', 'c'] });
     const right = deriveOpId({ purpose: 'thread_result', workspaceId, parts: ['a', 'b\0c'] });
     expect(left).not.toBe(right);
+  });
+
+  test('invocation identities use the frozen turn/ordinal framing', () => {
+    const identity = {
+      workspaceId: assertWorkspaceId('ws'),
+      threadId: assertThreadId('th'),
+      runId: assertRunId('run'),
+      turnId: assertTurnId('turn'),
+    };
+    expect(deriveInvocationId({ ...identity, sourceOrdinal: 0 })).toBe(
+      'inv_e954c16ff7aaa09d4f34a9c4abf128f94e95dee3bc98c458ea6f131e7d6ee44a',
+    );
+    expect(deriveInvocationId({ ...identity, sourceOrdinal: 1 })).not.toBe(
+      deriveInvocationId({ ...identity, sourceOrdinal: 0 }),
+    );
+    expect(() => deriveInvocationId({ ...identity, sourceOrdinal: -1 })).toThrow(
+      RuntimeIdentityValidationError,
+    );
+    expect(() => deriveInvocationId({ ...identity, sourceOrdinal: 0x1_0000_0000 })).toThrow(
+      RuntimeIdentityValidationError,
+    );
   });
 
   test('derived framing rejects sparse parts with a typed identity error', () => {

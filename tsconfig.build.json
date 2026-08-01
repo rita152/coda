@@ -8,9 +8,12 @@
     "outDir": "dist"
   },
   "include": [
+    "src/capabilities/**/*.ts",
+    "src/integrations/legacy-coding-tools/**/*.ts",
     "src/protocol/**/*.ts",
     "src/runtime/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "src/tools/**/*.ts"
   ],
   "exclude": ["src/**/*.test.ts"]
 }

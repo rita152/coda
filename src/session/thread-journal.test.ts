@@ -138,6 +138,65 @@ describe('foldThreadJournal commit correspondence', () => {
       }],
     }])).toThrow(/compaction_end envelopes and mutations differ/);
   });
+
+  test('recovers a consumed rule-scope window and rejects a mismatched replacement witness', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0] as ThreadMetaRecord;
+    const observed = {
+      type: 'commit' as const,
+      firstSeq: 1,
+      envelopes: [{
+        workspaceId: meta.workspaceId,
+        threadId: meta.threadId,
+        seq: 1,
+        timestamp: 1,
+        event: {
+          type: 'runtime_diagnostic' as const,
+          severity: 'warning' as const,
+          code: 'rule_scope_observed',
+          message: 'observed two scopes',
+          scope: 'thread' as const,
+        },
+      }] as const,
+      mutations: [
+        { type: 'rule_scope_observed' as const, scope: '/scope-a', owningTurnId: fixture.turnId,
+          invocationId: 'invocation-a' },
+        { type: 'rule_scope_observed' as const, scope: '/scope-b', owningTurnId: fixture.turnId,
+          invocationId: 'invocation-b' },
+      ] as const,
+    } satisfies RuntimeJournalRecord;
+    const replacement = {
+      type: 'commit' as const,
+      firstSeq: 2,
+      envelopes: [{
+        workspaceId: meta.workspaceId,
+        threadId: meta.threadId,
+        runId: fixture.runId,
+        turnId: fixture.turnId,
+        seq: 2,
+        timestamp: 2,
+        event: { type: 'turn_start' as const },
+      }] as const,
+      mutations: [{
+        type: 'rule_scope_window_replaced' as const,
+        consumedScopes: ['/scope-a', '/scope-b'],
+        replacementScopes: ['/scope-c'],
+        owningTurnId: fixture.turnId,
+      }] as const,
+    } satisfies RuntimeJournalRecord;
+
+    expect([...foldThreadJournal([meta, observed, replacement]).observedRuleScopes])
+      .toEqual(['/scope-c']);
+    expect(() => foldThreadJournal([meta, observed, {
+      ...replacement,
+      mutations: [{
+        type: 'rule_scope_window_replaced',
+        consumedScopes: ['/scope-a'],
+        replacementScopes: ['/scope-c'],
+        owningTurnId: fixture.turnId,
+      }],
+    } satisfies RuntimeJournalRecord])).toThrow(/does not match its durable witness/);
+  });
 });
 
 function writerFixture(): {

@@ -4,12 +4,20 @@
 
 本文定义 coda 的 capability 框架与全部八个内置工具(read / ls / glob / grep / bash / edit / write / plan)的参数 schema、行为规格与实现要点,并给出权限/approval 系统设计,以及工具与 steering/abort 的交互契约。工具执行在 agent loop 中的三阶段调度(prepare → execute → finalize)见 [05 Agent 核心](./05-agent-loop.md),本文只写 capability/tool 侧。
 
-> **阶段 0 基线说明**：本文件以 [12 Supervisor Runtime](./12-supervisor-runtime.md) 为上位契约。
-> 阶段 3 后 canonical 面是 JSON-Schema-first `CapabilityRegistry`、不可变
+> **阶段 3 实现基线**：本文件以 [12 Supervisor Runtime](./12-supervisor-runtime.md) 为上位契约。
+> 当前 canonical 面已经是 JSON-Schema-first `CapabilityRegistry`、不可变
 > `ToolCatalogSnapshot`、`PreparedInvocation`、`PromptAssembler` 与 `PolicyEngine`；下文现有
 > `ToolDefinition` / zod / `beforeToolCall` / `ApprovalBroker` 形态只作为 legacy adapter 的输入，
 > 不是新 runtime 的注册、查找或权限边界。子 Agent 是 Supervisor 管理的独立 thread，绝不注册成
 > capability/tool。
+
+阶段 3 的 public composition surface 已冻结为 `coda/runtime`、`coda/capabilities` 与
+`coda/legacy-coding-tools`。`createRuntime({capabilityMode:'registry', capabilityServices})` 是显式 opt-in；
+它在每个 turn、provider sampling 前各捕获一次 capability/provider/grant/base-prompt/rule/policy
+snapshot，并让 schema、validator、resource resolver、policy 与 executor 沿同一
+`PreparedInvocation` 使用。同 turn 的 live registry 更新只影响下一 turn。`coda/legacy-coding-tools`
+提供八个现有工具的显式 binding；生产 CLI、普通 exported `Agent`/direct `Session` 的默认路径仍保留 static
+`ToolDefinition`/provider dispatch 兼容面，不会因为导入新 entry 自动切换模式。
 
 设计路线先说结论:我们走 opencode / pi-mono / gemini-cli 的「专用工具面」路线,而不是 codex 的「极小工具面 + 强 shell」路线。专用工具能做结构化截断、read-before-edit 追踪、按 kind 分级的权限 gate——这些用裸 shell 都做不到;codex 靠 apply_patch 专用语法 + PTY 会话弥补,复杂度远超 v1 需要。
 
@@ -50,9 +58,25 @@ export interface CapabilityPolicyDescriptor {
   attributes?: Readonly<Record<string, unknown>>;
 }
 
+export type CapabilityAnalysisReasons = readonly [string, ...string[]];
+
+export interface CapabilityInvocationAnalysis {
+  readonly resourceCoverage:
+    | { readonly kind: 'complete' }
+    | { readonly kind: 'incomplete'; readonly reasons: CapabilityAnalysisReasons };
+  readonly grantability:
+    | { readonly kind: 'persistable' }
+    | { readonly kind: 'once_only'; readonly reasons: CapabilityAnalysisReasons };
+  readonly safety:
+    | { readonly kind: 'eligible' }
+    | { readonly kind: 'deny'; readonly code: string; readonly reason: string };
+  readonly attributes: Readonly<Record<string, unknown>>;
+}
+
 export type CapabilityResourceResolution =
   | { readonly ok: true;
-      readonly resources: readonly Readonly<ResolvedCapabilityResource>[] }
+      readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
+      readonly analysis?: Readonly<CapabilityInvocationAnalysis> }
   | { readonly ok: false;
       readonly code: 'resource_resolution_failed' | 'ambiguous_resource';
       readonly message: string };
@@ -136,17 +160,19 @@ export interface ResolvedCapabilityResource {
   canonicalTarget: string;
 }
 
+export type RuleFreshnessResult =
+  | { readonly fresh: true }
+  | { readonly fresh: false; readonly code: 'rule_scope_missing';
+      readonly missingScopes: readonly [string, ...string[]]; readonly message: string }
+  | { readonly fresh: false; readonly code: 'rule_changed'; readonly message: string };
+
 export interface RuleFreshnessPort {
   check(input: {
     readonly snapshot: Readonly<RuleSnapshot>;
     readonly context: Readonly<InvocationContext>;
     readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
-  }): Promise<
-    | { readonly fresh: true }
-    | { readonly fresh: false; readonly code: 'rule_scope_missing';
-        readonly missingScopes: readonly [string, ...string[]]; readonly message: string }
-    | { readonly fresh: false; readonly code: 'rule_changed'; readonly message: string }
-  >;
+    readonly analysis: Readonly<CapabilityInvocationAnalysis>;
+  }): Promise<RuleFreshnessResult>;
 }
 
 import type { FileTrackerPort } from '../shared/file-tracker.js';
@@ -167,9 +193,11 @@ export interface CapabilityRegistration {
   readonly execute: CapabilityExecutor;
 }
 
-export type CapabilityCatalogEntry = Readonly<CapabilityRegistration> & {
+export type CapabilityCatalogEntry = Readonly<
+  Omit<CapabilityRegistration, 'executionMode'> & {
+  readonly executionMode: 'parallel' | 'sequential';
   readonly registrationDigest: string;
-};
+}>;
 
 export interface InvocationContext {
   readonly workspaceId: WorkspaceId;
@@ -247,6 +275,7 @@ export interface PreparedInvocation {
   readonly executionMode: 'parallel' | 'sequential';
   readonly args: unknown;
   readonly resources: readonly Readonly<ResolvedCapabilityResource>[];
+  readonly analysis: Readonly<CapabilityInvocationAnalysis>;
   readonly context: Readonly<InvocationContext>;
   readonly validator: CapabilityValidator;
   readonly executor: CapabilityExecutor;
@@ -326,6 +355,7 @@ export interface PolicyGrantRepositoryPort {
 }
 
 export interface PolicyGrantRepository extends PolicyGrantRepositoryPort {
+  startupDiagnostics?(): readonly { readonly code: string; readonly message: string }[];
   close(): Promise<void>;
 }
 
@@ -352,6 +382,10 @@ export interface PolicyEngine {
   }): Promise<ThreadPolicyEngine>;
 }
 
+export interface PolicyEngineOptions {
+  readonly configuration?: Readonly<Record<string, unknown>>;
+}
+
 export interface RuntimeCapabilityServices {
   readonly capabilities: CapabilityRegistryReader;
   readonly providers: ProviderAdapterRegistryReader;
@@ -366,7 +400,7 @@ export interface RuntimeCapabilityServices {
 
 export function createCapabilityRegistry(): CapabilityRegistry;
 export function createPromptAssembler(): PromptAssembler;
-export function createPolicyEngine(): PolicyEngine;
+export function createPolicyEngine(options?: Readonly<PolicyEngineOptions>): PolicyEngine;
 ```
 
 mutable `CapabilityRegistry`/`ProviderAdapterRegistry` 只由 composition host 持有；传入 Runtime/
@@ -399,14 +433,37 @@ unknown selector、type/access 错配、required 未命中、额外或 resolver 
 resources=[]）时空 result 合法。这样两个同为 filesystem/write 的 `/src` 与 `/dst` 也不会混认。bash/path
 analyzer 必须与 executor 同 registration revision，generic PolicyEngine 不猜资源。
 
-`ThreadRuntime` 在 turn 开始、provider sampling 前只捕获一次 catalog/provider/grant/BasePromptSnapshot/
-RuleSnapshot。RuleSnapshotProvider 输入的 TurnPolicyContext、canonical known scopes 与四维 budget 深冻结；
+resolver success 可同时返回 exact-shape `CapabilityInvocationAnalysis`；省略时规范化为
+`complete + persistable + eligible + attributes:{}`。analysis 与 resources 一起 strict-copy/deep-freeze 到
+PreparedInvocation，非空 reasons 去重并按 UTF-8 排序。`safety:deny` 只能收窄为 recoverable deny；
+`resourceCoverage:incomplete` 或 `grantability:once_only` 使 generic engine 不生成或命中持久 grant；它们
+本身不把缺省安全的 capability kind 扩大为 ask，具体 capability policy 仍决定 allow/ask。内置 bash 是
+`execute`，因此 opaque/incomplete/external 调用仍会 ask，但只允许当前 invocation 的 once 决议。
+`attributes` 是同一版本 resolver 产生的冻结 adapter facts；CLI bash policy 只消费这份 attributes，
+`RuleFreshnessPort` 只消费冻结 analysis/resources，二者都不得重新解析 args/command 或回读 registry。
+freshness 可以读取当前 `AGENTS.md`/文件指纹来回答“是否仍 fresh”，但不能从 live filesystem 重建另一份
+shell 资源语义。八个内置 binding v2 在同一次 resolver 调用中冻结 exact、UTF-8 排序的
+`filesystemTargets:[{canonicalTarget,kind:'file'|'directory'|'unknown'}]`：普通 path binding 使用
+`legacy_filesystem_analysis_v1` attributes，Bash 把同一 facts 嵌入 `legacy_bash_analysis_v2` attributes；
+同一 target 的 kind 冲突或任一 unknown 都冻结为 unknown。freshness 机械核对 facts 与 filesystem
+resources 的 target 集合，file 取父目录，directory/unknown 取自身这一保守超集；它不得 `stat`、realpath
+或因 prepare 后目标被创建/替换而改变 scope。generic engine 不从 attributes 猜权限。registration、policy、selector、resolution 与
+analysis 的公开 JS 边界都拒绝 inherited/accessor/未知 own fields，避免拼写错误被静默丢弃。
+
+`ThreadRuntime` 在 turn 开始、`turn_start` 权威提交与 provider sampling 前只捕获一次
+catalog/provider/grant/BasePromptSnapshot/RuleSnapshot；同一 `(RunId,TurnId)` 的串行或并发 capture
+共享一个 single-flight 结果，失败也不回查 mutable source。RuleSnapshotProvider 输入的
+TurnPolicyContext、canonical known-scope 滚动窗口与四维 budget 深冻结；
 输出 owner 必须匹配；revision 只覆盖 known scopes/budget/diagnostics 与 files 的
 path/scope/digest/content，明确排除 owner/run/turn identity。相同规则材料跨新 turn 可保持同 revision，
 owner 只做接线校验；combined policy revision 仍绑定新 context。ceilingRevision 必须等于本 turn 的
 turnCeiling.revision；其 revision 排除纯 run/turn identity，但 workspace/run/narrowing 安全材料变化会
-改 basis。capture 失败不采样；新资源 scope
-缺规则时提交 hint 并 recoverable deny，下一 turn 才重捕获。CLI 只注入 provider/budget。
+改 basis。capture 失败不采样但仍形成合法 error turn。成功 capture 对应的 `turn_start` commit 原子
+消费该 hint 窗口；本 turn 后续 `rule_scope_missing` 把 freshness 明确返回的 scopes 合并成下一窗口。
+因此未继续触达的历史 sibling 不会永久占预算，而 capture/turn_start 失败也不会提前丢 hint。新资源
+scope 缺规则时提交 hint 并 recoverable deny，下一 turn 才重捕获。CLI 的 `ProjectRules` 已显式实现同一个
+`RuleSnapshotProvider` 与 `RuleFreshnessPort`，composition 将它连同固定 budget 注入；Runtime、assembler
+和通用 policy 不自行读取 project-rule 文件或 ambient cwd。
 
 `PromptAssembler` 只从同一 EffectivePolicySnapshot.rules 渲染，不收第二份 RuleSnapshot；它验证
 base prompt/rules/policy owner 与 model ref 后，使用 outbound message view、base prompt、model、catalog
@@ -426,6 +483,10 @@ close 恰好一次；普通 abort/continue 不另开 engine，只有 recovery re
 ceiling、rules 但排除 grants/turn identity；combined revision 再覆盖 grantRevision/context。因此新增
 grant 不会自失效，规则/ceiling/implementation 改变会失效。evaluate 只接收 PreparedInvocation，
 未知/缺失约束 fail closed，不读 mutable store/filesystem 或执行 capability。
+`createPolicyEngine({configuration})` 在 construction 时 strict-copy/deep-freeze host policy config，并把它
+纳入每个 policyBasisRevision；CLI registry composition 冻结的 exact material 是
+`{kind:'cli_legacy_policy_v1',approvalMode,projectRoot,projectRootReal,bashAnalysisVersion}`，其中 lexical/
+physical root 任一变化都必须改变 basis。evaluate 不读取这类 live config，也不 realpath 资源。
 
 唯一允许的 mutable policy state 是该 per-thread engine 内的 legacy doom-loop tracker：preflight 按
 thread accepted/tool-call source 顺序串行调用 evaluate，tracker 以
@@ -472,8 +533,9 @@ rule store。ThreadRuntime 在 policy preflight 前、以及 approval/同批前�
 `effectivePolicy.rules/context/resources`。freshness 只能把 allow/ask 收窄为 recoverable deny，促使
 下一 turn 重新组装规则；不得替换 snapshot、args、schema、executor、approval 或 effective policy。
 `rule_scope_missing` 必须返回 strict JSON copy、非空、去重且按 UTF-8 排序的 `missingScopes`；
-ThreadRuntime 逐字持久化这些 scope hint，不能从 canonicalTarget 猜项目规则边界。`rule_changed` 不带
-scope。
+ThreadRuntime 逐字持久化这些 scope hint 到当前滚动窗口，不能从 canonicalTarget 猜项目规则边界。
+下一次成功 capture 的 `turn_start` 以 `consumedScopes` witness 原子清空/替换窗口，replay 若 witness 与
+先前 durable observations 不同则 fail closed。`rule_changed` 不带 scope。
 
 `InvocationContext.toolCallId` 是 provider 消息中的原始调用 id，专供事件关联与 legacy
 `ToolDefinition.execute({id,args})` 映射；`invocationId` 是 runtime 为本次执行生成的审计/allow_once
@@ -574,10 +636,15 @@ resolver 的版本材料计入 implementationDigest：
 | `ls` | read | `root`（filesystem/read, `/path`, true） | 缺省 path 仍绑定 canonical cwd |
 | `glob` | search | `root`（filesystem/read, `/path`, true） | 缺省 path 仍绑定 canonical cwd；pattern 不是资源 target |
 | `grep` | search | `root`（filesystem/read, `/path`, true） | 缺省 path 仍绑定 canonical cwd；query 不是资源 target |
-| `bash` | execute | `command`（command/execute, `/command`, true）；`workdir`（filesystem/read, `/workdir`, true）；`filesystem_read_target`（filesystem/read, `/command`, false）；`filesystem_write_target`（filesystem/write, `/command`, false） | 固定版本的 command analyzer 必须始终绑定 command 与实际/default cwd，并可为后两 selector 各返回 0..n 个 canonical target；不得在 evaluate 时重解析 shell |
+| `bash` | execute | `command`（command/execute, `/command`, true）；`workdir`（filesystem/read, `/workdir`, true）；`filesystem_read_target`（filesystem/read, `/command`, false）；`filesystem_write_target`（filesystem/write, `/command`, false） | 固定版本 analyzer 绑定 command 与实际/default cwd；统一跟踪 literal `cd`、目录语义 `-C`、redirect 与裸相对文件名。任意程序的 access mode 无法由 shell 文本证明，因此每个可见目标保守绑定 read+write；opaque/external/canonicalize 不完整通过 analysis 标成 once-only，不在 evaluate/freshness 重解析 shell |
 | `edit` | edit | `file`（filesystem/write, `/path`, true） | 绑定 canonical target；read-before-edit 仍由 per-thread service 强制 |
 | `write` | edit | `file`（filesystem/write, `/path`, true） | 绑定 canonical target；read-before-edit 仍由 per-thread service 强制 |
 | `plan` | plan | 无 | 必须返回空 resources |
+
+工厂当前统一发布 capability/binding version `2`、`legacy-coding-tools-v2` metadata 与对应 v2
+implementation digest。除 Bash 外，resolver 另冻结 exact
+`{kind:'legacy_filesystem_analysis_v1',filesystemTargets:[...]}`；read/edit/write 的 path 是 file，
+ls/glob/grep 的 root 是 directory，plan 是空列表。Bash facts 则进入下面定义的 v2 attributes。
 
 同一 bash selector 返回多个不同 target 是合法集合，不是歧义；重复的完整
 `(selectorId,resourceType,access,canonicalTarget)` tuple 才规范化去重。第三方 legacy tool 也必须提供
@@ -914,8 +981,8 @@ sequenceDiagram
 阶段 0 保留裸 legacy `beforeToolCall` / `ApprovalBroker` 旁路；阶段 1 的 legacy thread driver 在
 边缘把 `approval_request` 投影成 identity-bearing `control_request`，并把 `control_response` op
 映回 broker，因此 canonical wire 从阶段 1 起不含第二种 legacy approval **event** 分支。阶段 2
-`legacyProposal` 只是 canonical control_request payload 中冻结的兼容数据；本阶段才把 request/response
-与等待者状态迁入 durable EventCommitter 链并删除 core 旁路，不是再次修改 public wire。阶段 2
+`legacyProposal` 只是 canonical control_request payload 中冻结的兼容数据；阶段 2 已把 request/response
+与等待者状态迁入 durable EventCommitter 链并删除 core 旁路，没有再次修改 public wire。阶段 2
 static ThreadRuntime 使用 [12](./12-supervisor-runtime.md) §6.2 的 LegacyApprovalAdapter：preflight 只返回
 allow/deny/冻结的 `{patterns,forceConfirm}` ask，不发事件/持 waiter；ThreadRuntime 提交唯一
 control_request，response accepted 后 adapter 先幂等持久化旧 global pattern Set，ThreadRuntime 再提交
@@ -925,10 +992,12 @@ repository 明确 definitely-not-applied 时 response interrupted + claim releas
 且都停止该 workspace 的新 admission/capability execution。crash recovery
 可补 pattern/control 但绝不重放 executor。exported direct Session 的 arbitrary opaque
 `beforeToolCall` 没有 response ingress，仍是明确列入兼容矩阵的 caller-owned process-local edge；core 不从
-该 callback 猜测或合成 control。阶段 3
-才以 PreparedInvocation/PolicyEngine/grant repository 取代这个窄 bridge。按 `kind`
-分级的默认策略保持：`read` / `search` / `plan` 通常直通；`edit` 的描述包含 diff 摘要；
-`execute`（bash）包含命令与模型提供的 description。
+该 callback 猜测或合成 control。当前 registry Runtime 已以
+PreparedInvocation/PolicyEngine/PolicyGrantRepository 取代这个窄 bridge；static Runtime 与 direct
+Session 继续保留上面的 legacy compatibility path。仓库自带的 conservative PolicyEngine 在 constraints
+为空时按 `kind` 分级：`read` / `search` / `plan` 直通，`edit` / `execute` 进入 ask；任何非空且尚未
+识别的 constraint 都 recoverable deny，不能被“默认直通”扩大。宿主需要更丰富的 constraint 语言时，
+应注入另一实现相同 port 的 PolicyEngine，而不是让 CLI/UI 猜权限。
 
 ### 3.2 决策语义与作用域
 
@@ -947,14 +1016,32 @@ policy snapshot。若新 policy revision 必须撤销旧决定，应以目标 ru
 
 前缀 allowlist 有一个经典穿透:`echo $(rm -rf /)` 的 command root 是 `echo`。gemini-cli 用 tree-sitter-bash 解析后**单独标记 command substitution、反引号、process substitution、重定向、subshell**(`shell-utils.ts:340-380`),opencode 同样用 tree-sitter-bash WASM 逐子命令生成权限 pattern。我们的方案:
 
-- v1 实施保守 token 拆分:尊重引号/转义的扫描器拆分复合命令(`&&` / `;` / `|` / `&`),对每个子命令取 root 做 allowlist 匹配。tree-sitter-bash(WASM)的完整语法解析列为 v2 升级项——保守拆分对「拆不动的结构」一律走强制确认,安全性不降级,只是免审面更窄(可接受的 v1 取舍)。
+- 当前 `legacy_bash_analysis_v2` 仍实施保守 token 拆分：尊重引号/转义的扫描器拆分复合命令
+  (`&&` / `;` / `|` / `&`)，对每个子命令取 root。v2 在同一冻结结果中新增 target-kind facts、
+  interpreter/script opaque 矩阵与更严格的 catastrophic deny；tree-sitter-bash(WASM) 完整语法解析仍是
+  后续独立升级，不因版本名相同而宣称已经落地。拆不动的结构一律强制确认，安全性不降级，只是免审面更窄。
 - **含 `$()`、反引号、`<()`、重定向到系统路径的命令,一律强制升级为需确认,且不允许 allow_always 泛化**——嵌套结构里藏着什么静态分析看不全,只能交给人。
-- 危险模式 denylist 先行(`rm -rf /`、`curl … | sh` 等),命中直接 deny 不进 approval。
-- 路径约束:workdir 与共享 bash path analyzer 解析出的 literal `cd`、具备目录语义命令的 `-C`、重定向及路径参数 resolve 后落在项目根外 → 单独触发一次 external-directory 确认(opencode 语义)；动态展开、脚本/opaque 命令或未建模的 group/control flow 不可 allow_always。
+- Python/Node/Bun/Deno/Perl/Ruby/PHP/Lua/R/awk 等解释器的 inline code、脚本/module/preload/REPL
+  入口（含 `env`/`sudo`/`busybox`/`toybox` 等 wrapper 视图）一律视为 opaque：保持可 ask，但
+  `resourceCoverage:incomplete + grantability:once_only`，预存同 root pattern 也不能免审。
+- 危险模式 denylist 先行（`rm -rf /`、`curl … | sh` 等），命中直接 deny 不进 approval。`rm` target
+  只做纯词法 POSIX 规范化，不读取 HOME/filesystem；`//`、`/./*`、HOME 的等价形态，以及
+  BusyBox/Toybox 分派到 `rm` 都必须命中同一 deny。
+- 路径约束:workdir 与共享 bash path analyzer 解析出的 literal `cd`、具备目录语义命令的 `-C`、重定向、裸相对文件名及其他显式路径 canonicalize 后冻结进 resources；落在项目根外 → 单独触发一次 external-directory 确认(opencode 语义)。`~` 不读取 ambient HOME 来猜目标，动态展开、脚本/opaque 命令、未建模 group/control flow 或任一 target canonicalize 失败都标记 `resourceCoverage:incomplete + grantability:once_only`。
+- legacy CLI projection 所需的
+  `{kind:'legacy_bash_analysis_v2',command,patterns,forceConfirm,reasons,accessesExternalProject,filesystemTargets,modelDescription?}`
+  与 generic analysis 在同一次 resolver 调用中冻结。CLI evaluate 只校验/读取该 exact-shape attributes；
+  即使随后 args 或 filesystem 变化，也不得再次调用 analyzer、stat 或 realpath。完整且项目内的 legacy
+  patterns 仍可命中；once-only 调用即使已有同 root pattern 也不得复用或提出持久 pattern。
 
 ### 3.4 doom-loop 检测
 
-模型可能反复发出同一个失败调用(deny 后重试、edit 反复匹配失败)。检测规则:`hash = capabilityId + version + stableStringify(args)`,**同 hash 连续出现 3 次 → 强制进入 approval(绕过 always 规则与 kind 直通)**,description 注明 `This exact call has been attempted 3 times in a row — possible loop.`。用户可选 deny 给出引导文案,或 abort 收手。计数器在出现任何不同调用时清零，按 thread 隔离；一个 thread 的失败不得触发另一个 thread 的 gate。
+模型可能反复发出同一个失败调用(deny 后重试、edit 反复匹配失败)。检测规则:
+`hash = capabilityId + capabilityVersion + registrationDigest + stableStringify(args)`，**同 hash 连续出现
+3 次 → 强制进入 approval(绕过 always 规则与 kind 直通)**，且本次 ask 不携带 grantProposal；description
+注明 `This exact call has been attempted 3 times in a row — possible loop.`。用户可选 deny 给出引导文案,
+或 abort 收手。计数器在出现任何不同调用时重置为 1，按 thread 隔离；一个 thread 的失败不得触发
+另一个 thread 的 gate。普通 abort/continue 不重建 engine，attachment recovery/thread close 才重置。
 
 ## 4. 工具与 steering / abort 的交互
 
@@ -986,31 +1073,31 @@ pending request，不留悬挂 Promise；不得投影成用户主动 deny。
 
 框架:
 
-- [ ] capability 注册项直接携带 JSON Schema；legacy zod 只在注册 adapter 内转换一次，schema 与 executor 原子绑定
-- [ ] turn 开始捕获不可变 `ToolCatalogSnapshot`；同名 capability 热更新后，当前 turn 的 prompt schema、validator、policy 与 executor 仍使用旧 revision，下一 turn 才使用新 revision
-- [ ] `PreparedInvocation` 深冻结 parsed args 并持有版本化 executor；approval 等待期间不回查 registry
-- [ ] 八个工具的 zod schema 经 `z.toJSONSchema()` 渲染无 unrepresentable 报错,每个字段有 description
-- [ ] 未知工具名 / 校验失败产出 isError 结果回喂,loop 不中断;文案含逐字段错误
-- [ ] prepareArguments 修补「edits 为 JSON 字符串」与「平铺 oldText/newText」两个 fixture
-- [ ] 任何工具输出超 2000 行或 50KB:截断 + 落盘 + 尾部续读提示;bash 为尾部截断且跳过框架 post-hook
-- [ ] bash/edit/write 声明 executionMode: 'sequential',批内含任一即整批顺序执行
+- [x] capability 注册项直接携带 JSON Schema；legacy zod 只在注册 adapter 内转换一次，schema 与 executor 原子绑定
+- [x] turn 开始捕获不可变 `ToolCatalogSnapshot`；同名 capability 热更新后，当前 turn 的 prompt schema、validator、policy 与 executor 仍使用旧 revision，下一 turn 才使用新 revision
+- [x] `PreparedInvocation` 深冻结 parsed args 并持有版本化 executor；approval 等待期间不回查 registry
+- [x] 八个工具的 zod schema 经 `z.toJSONSchema()` 渲染无 unrepresentable 报错,每个字段有 description
+- [x] 未知工具名 / 校验失败产出 isError 结果回喂,loop 不中断;文案含逐字段错误
+- [x] prepareArguments 修补「edits 为 JSON 字符串」与「平铺 oldText/newText」两个 fixture
+- [x] 任何工具输出超 2000 行或 50KB:截断 + 落盘 + 尾部续读提示;bash 为尾部截断且跳过框架 post-hook
+- [x] bash/edit/write 声明 executionMode: 'sequential',批内含任一即整批顺序执行
 
 逐工具(fixture 驱动,见 [10 测试策略](./10-testing.md)):
 
-- [ ] read:行号前缀、三态结尾、二进制拒读、图片 ImagePart、相似文件名候选、offset 越界、FileTracker 登记
-- [ ] glob:24h recency 排序;grep:limit 到即 kill rg、exit 1 返回 "No matches found"、行截 500 字符
-- [ ] bash:timeout kill tree(孙进程也死)、尾部截断落盘、exit code 非 0 带完整输出、abort 附 "User aborted the command"
-- [ ] edit:精确/归一化 fuzzy 命中(未触碰行字节不变)、0 次/多次匹配文案、逆序应用与重叠拒绝、CRLF+BOM 仓库往返不变、never_read/stale 两种硬约束报错
-- [ ] write:自动建目录、覆盖受 read-before-edit 约束、diff 进 details
-- [ ] plan:整表替换、details 触发 plan_update 事件、多个 in_progress 时输出提醒
+- [x] read:行号前缀、三态结尾、二进制拒读、图片 ImagePart、相似文件名候选、offset 越界、FileTracker 登记
+- [x] glob:24h recency 排序;grep:limit 到即 kill rg、exit 1 返回 "No matches found"、行截 500 字符
+- [x] bash:timeout kill tree(孙进程也死)、尾部截断落盘、exit code 非 0 带完整输出、abort 附 "User aborted the command"
+- [x] edit:精确/归一化 fuzzy 命中(未触碰行字节不变)、0 次/多次匹配文案、逆序应用与重叠拒绝、CRLF+BOM 仓库往返不变、never_read/stale 两种硬约束报错
+- [x] write:自动建目录、覆盖受 read-before-edit 约束、diff 进 details
+- [x] plan:整表替换、details 触发 plan_update 事件、多个 in_progress 时输出提醒
 
 权限:
 
-- [ ] read/search/plan 直通;deny 回喂后任务继续;allow_always 泛化按 kind 生效
-- [ ] `echo $(rm -rf /)` 被升级为强制确认且不可 always 泛化
-- [ ] 同参数同 capability 连续 3 次强制审批且计数按 thread 隔离
-- [ ] approval request/response 均经同 thread 的 control 提交链；跨 thread 响应拒绝，abort 结案不留悬挂 Promise
-- [ ] 子 Agent 只能由 Supervisor 创建为独立 thread，不出现在 capability snapshot 或工具转录中
+- [x] read/search/plan 缺省直通；deny 可恢复回喂；canonical allow_always 只命中冻结的 exact scope/version/digest/policy basis，legacy-global compatibility 保持旧 pattern 语义
+- [x] `echo $(rm -rf /)` 被升级为强制确认且不可 always 泛化
+- [x] 同参数同 capability 连续 3 次强制审批且计数按 thread 隔离
+- [x] approval request/response 均经同 thread 的 control 提交链；跨 thread 响应拒绝，abort 结案不留悬挂 Promise
+- [x] 子 Agent 只能由 Supervisor 创建为独立 thread，不出现在 capability snapshot 或工具转录中
 
 ## 相关文档
 

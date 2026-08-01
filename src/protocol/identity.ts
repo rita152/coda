@@ -44,6 +44,7 @@ export class RuntimeIdentityValidationError extends TypeError {
 const LEGACY_WORKSPACE_DOMAIN = 'coda.runtime.workspace.v1';
 const LEGACY_THREAD_DOMAIN = 'coda.runtime.thread.v1';
 const DERIVED_OP_DOMAIN = 'coda.runtime.derived-op.v1';
+const INVOCATION_DOMAIN = 'coda.runtime.invocation.v1';
 const EXTERNAL_OP_PATTERN = /^op_e_[0-9a-f]{32}$/;
 const DERIVED_OP_PATTERN = /^op_d_[0-9a-f]{64}$/;
 const LEGACY_WORKSPACE_PATTERN = /^ws_v1_[0-9a-f]{64}$/;
@@ -188,6 +189,39 @@ export function deriveOpId(input: {
   } catch (error) {
     if (error instanceof RuntimeIdentityValidationError) throw error;
     throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'deriveOpId');
+  }
+}
+
+/** Frozen per-turn invocation identity from docs/12 §2.1. */
+export function deriveInvocationId(input: {
+  readonly workspaceId: WorkspaceId;
+  readonly threadId: ThreadId;
+  readonly runId: RunId;
+  readonly turnId: TurnId;
+  readonly sourceOrdinal: number;
+}): string {
+  try {
+    const workspaceId = assertWorkspaceId(input.workspaceId);
+    const threadId = assertThreadId(input.threadId);
+    const runId = assertRunId(input.runId);
+    const turnId = assertTurnId(input.turnId);
+    if (!Number.isSafeInteger(input.sourceOrdinal)
+      || input.sourceOrdinal < 0
+      || input.sourceOrdinal > 0xffff_ffff) {
+      throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'sourceOrdinal');
+    }
+    const hasher = new Bun.CryptoHasher('sha256');
+    hasher.update(INVOCATION_DOMAIN);
+    hasher.update(NUL_BYTE);
+    hasher.update(frame(workspaceId, 'workspaceId'));
+    hasher.update(frame(threadId, 'threadId'));
+    hasher.update(frame(runId, 'runId'));
+    hasher.update(frame(turnId, 'turnId'));
+    hasher.update(uint32be(input.sourceOrdinal));
+    return `inv_${hasher.digest('hex')}`;
+  } catch (error) {
+    if (error instanceof RuntimeIdentityValidationError) throw error;
+    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'deriveInvocationId');
   }
 }
 

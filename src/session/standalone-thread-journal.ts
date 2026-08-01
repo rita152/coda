@@ -688,6 +688,13 @@ function validateMutation(
         && isWellFormedString(value.scope) && isTurnId(value.owningTurnId)
         && isWellFormedString(value.invocationId)) return;
       break;
+    case 'rule_scope_window_replaced':
+      if (hasExactKeys(value, [
+        'type', 'consumedScopes', 'replacementScopes', 'owningTurnId',
+      ]) && isCanonicalScopeArray(value.consumedScopes)
+        && isCanonicalScopeArray(value.replacementScopes)
+        && isTurnId(value.owningTurnId)) return;
+      break;
     case 'thread_result_pending':
       if (hasExactKeys(value, [
         'type', 'resultOpId', 'parentThreadId', 'childThreadId', 'terminalRunId', 'status',
@@ -779,6 +786,25 @@ function isWellFormedString(value: unknown): value is string {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every(isWellFormedString);
+}
+
+function isCanonicalScopeArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value)
+    && value.every((scope) => isWellFormedString(scope) && scope.length > 0)
+    && value.every((scope, index) => index === 0
+      || compareUtf8(value[index - 1] as string, scope) < 0);
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 function invalidJournal(message: string): RuntimeStorageError {

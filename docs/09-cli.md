@@ -241,14 +241,17 @@ dispatcher 与不可变 tool 定义可共享。稳定 `policyRevision` 与当前
 `permissionCeiling.revision` 组成 control request/resolution 的冻结 `policyRevision`；相同 thread 的
 不同 run 不能沿用 attachment 初始 revision。Supervisor 通过独立 PermissionPolicyPort 派生并持久化
 run permissionCeiling，driver 在任何 sampling/tool/approval 前把该同一对象绑定到 attachment 的
-permission state；adapter 不能按 thread id 重算或在 resume/retry 时放宽。阶段 3 再由 turn 捕获的
-EffectivePolicySnapshot 统一解释。正常 workspace picker 的候选只来自 `runtime.listThreads()` 的
+permission state；adapter 不能按 thread id 重算或在 resume/retry 时放宽。显式 registry composition
+已由 turn 捕获的 EffectivePolicySnapshot 统一解释；production static 默认仍由 legacy adapter 保持原
+行为。正常 workspace picker 的候选只来自 `runtime.listThreads()` 的
 持久索引；CLI `--continue/--resume` 则只经上面的 storage global catalog bootstrap，CLI 本身仍不
 扫描或直读 repository。两者选中后都严格执行 events → resume → snapshot 顺序。
 
-以上是阶段 2 composition：`LegacySessionThreadDriverFactory` 是隔离的过渡 adapter，不属于
-Supervisor core；阶段 3 才把静态 provider/tool 输入替换成 `ProviderAdapterRegistry` 与
-`CapabilityRegistry`。CLI 始终只负责选择并注入实现，不在 adapter 外持有 run/mailbox 状态机。
+以上是阶段 2 compatibility composition：`LegacySessionThreadDriverFactory` 是隔离的过渡 adapter，不属于
+Supervisor core。阶段 3 已另外提供显式 `createCliRegistryCapabilityServices()`，用
+`ProviderAdapterRegistry` 与 `CapabilityRegistry` 组装同一批工具/provider；production `main.ts` 仍有意
+保留 static 默认，没有因新增 factory 静默切换。两条路径中 CLI 都只负责选择并注入实现，不在 adapter
+外持有 run/mailbox 状态机。
 
 阶段 2 已把临时 per-thread writer 提取为 `TranscriptRepository` + `EventCommitter`，并由
 workspace-owned `EventHub` 提供 runtime subscription。TUI 消费自己的队列并按
@@ -262,7 +265,8 @@ reject 不会反向延迟 run/`waitForIdle()`。
 项目规则的路径来源与固定预算由 CLI composition 注入 `RuleSnapshotProvider/RuleSnapshotBudget`，base
 system prompt 由 `BasePromptProvider` 注入；每 turn 的读取/发现属于前两者，纯拼装属于
 `PromptAssembler`，执行门禁属于 `PolicyEngine`。CLI 不运行这些业务规则。阶段 0 的 `ProjectRules` + `transformContext` +
-`beforeToolCall` 是 legacy adapter，阶段 3 迁入 registry/snapshot/policy 后仍保持下列文件语义。
+`beforeToolCall` 是 legacy adapter；阶段 3 registry path 已把同一对象作为结构化
+`RuleSnapshotProvider/RuleFreshnessPort` 注入，同时保持下列文件语义。
 规则正文不新增 `AgentMessage` 字段，诊断通过 RuntimeEvent/envelope 到达前端；legacy 投影仍走
 stderr，不污染裸 `SessionEvent`/NDJSON。规则读取器从物理 `cwd` 向上查找最近的
 `.git` 文件或目录作为仓库根；不在 Git 仓库时以 `cwd` 自身为根。首次出站自动发现
@@ -287,13 +291,21 @@ journal、恢复回显或 compaction
 执行前门禁由只读 `RuleFreshnessPort` 与纯 `PolicyEngine` 对同一 `PreparedInvocation` 处理，顺序固定为
 **规则 freshness gate → approval policy**；legacy adapter 继续复用既有 `beforeToolCall`：
 
+`createCliRegistryCapabilityServices()` 只接受显式绝对 `cwd`、host ports 与 budget；composition 构造时只
+物理化一次 project root，并把精确配置
+`{kind:'cli_legacy_policy_v1',approvalMode,projectRoot,projectRootReal,bashAnalysisVersion}` strict-copy/
+deep-freeze 后纳入 `policyBasisRevision`。因此 approval mode、词法/物理 root 或 analyzer version 任一变化
+都会撤销旧 basis；`evaluate()` 不再读取 live config、调用 `realpath` 或重新分析 command。
+
 - `edit` / `write` 的目标作用域是 `path` 所在目录；
 - `bash` 的基础作用域是最终执行 `workdir`，缺省为启动 `cwd`；CLI cwd 与 workdir 先物理化，
-  相对 workdir 在规则分析、approval 与真实 `Bun.spawn` 三处都以同一 cwd 为基准。分析器
-  还跟踪 literal `cd`、`git` / `make` / `ninja` / `tar` / `pnpm` 等确有目录语义的 `-C`、
-  输入输出重定向、显式路径和现存裸目录参数；失败的 `cd` 后保留旧/新 cwd 并集。动态展开、
-  shell group/control flow、脚本、`eval` / `source` / `sh -c`（含 `env` / `sudo` /
-  `nohup` / `timeout` 等 runner 包装）、`git apply` 等无法确定目标的命令由规则 gate
+  相对 workdir 在规则分析、approval 与真实 `Bun.spawn` 三处都以同一 cwd 为基准。registry path 的
+  authoritative capability resolver 在 `prepare()` 中只分析一次，跟踪 literal `cd`、`git` / `make` /
+  `ninja` / `tar` / `pnpm` 等确有目录语义的 `-C`、输入输出重定向、显式路径和裸相对文件/目录；
+  可见 filesystem target 保守绑定 read + write，失败的 `cd` 后保留旧/新 cwd 并集。动态展开、
+  shell group/control flow、脚本、解释器 inline/module/preload/REPL、`eval` / `source` / `sh -c`
+  （含 `env` / `sudo` / `nohup` / `timeout` / BusyBox / Toybox 等 runner 包装）、`git apply` 等无法确定
+  目标的命令由规则 gate
   回喂可恢复错误，要求改用明确 workdir/literal path 或拆成 `edit` / `write`；
 - 首次触达更深目录，或规则在本次模型请求之后发生变化时，本次调用先返回一条可恢复的
   isError tool result，不执行副作用；紧接的下一 turn 注入完整新规则，模型审阅后重试；
@@ -301,14 +313,28 @@ journal、恢复回显或 compaction
   较早的命令若改写 `AGENTS.md`，后续写操作不会在旧规则上下文中漏执行；
 - 若目标没有新增有效规则，调用直接进入原审批/执行路径，不额外消耗 turn。
 
-`RuleFreshnessPort` 只比较 PreparedInvocation 中冻结的 RuleSnapshot/目标资源与当前文件指纹；它不
-解释权限、不返回 allow/ask，也不能加载新规则后继续执行。缺 scope 或指纹变化时只产生 recoverable
-deny/tool result，下一 turn 才由 PromptAssembler 读取并注入新 snapshot。这样 execute 前复检不会
-违反 PolicyEngine 只读 frozen policy 的契约，也不会在同一 PreparedInvocation 中偷换策略。
+resolver 把 legacy Bash 投影冻结为 exact-shape attributes
+`{kind:'legacy_bash_analysis_v2',command,patterns,forceConfirm,reasons,accessesExternalProject,filesystemTargets,modelDescription?}`，
+并同时冻结 `CapabilityInvocationAnalysis`。完整的项目内 literal pattern 保持旧审批匹配；opaque、分析不全、
+canonicalization 不全或项目外访问都标记 `once_only`，本次可 ask，但不得生成或命中 remembered grant；
+危险命令的 `safety:deny` 直接收窄为 recoverable deny。八个内置 binding 全部是 version 2；普通 path
+resolver 用 `legacy_filesystem_analysis_v1` 冻结同形 `filesystemTargets`（file/directory/unknown），Bash
+将其嵌入上面的 v2 attributes。同 target 的冲突 kind 收敛为 unknown。
+
+`RuleFreshnessPort` 只比较 PreparedInvocation 中冻结的 RuleSnapshot/resources/analysis 与当前规则文件指纹；
+它不检查 command resource、不重新解析 args/shell，也不解释权限或返回 allow/ask。freshness 为回答“规则从
+snapshot 后是否变化”可以读取当前 `AGENTS.md`/filesystem fingerprints，但不能据此重建 capability resource
+语义，也不能对 frozen target 做 `stat`/realpath 来重判 file/directory。file scope 固定取父目录，
+directory/unknown 固定取 target 自身的保守链；prepare 后创建、删除或替换 target 不改变这份 scope。
+缺 scope 或指纹变化时只产生 recoverable deny/tool result，下一 turn 才由 PromptAssembler 读取并
+注入新 snapshot。`PolicyEngine.evaluate()` 则完全不读 live filesystem。这样 execute 前复检不会违反
+PolicyEngine 只读 frozen policy 的契约，也不会在同一 PreparedInvocation 中偷换策略。
 
 默认 `RuleSnapshotBudget` 冻结为单文件 **32 KiB** (`maxFileBytes`)、最终规则区块估算
 **16K tokens** (`maxPromptTokens`)；`maxFiles/maxBytes` 也由 composition 显式给出并进入 snapshot
-discovery/revision，不能由 provider 暗读环境。预算包含标题、source /
+discovery/revision，不能由 provider 暗读环境。registry `createRuntime()` 必须在任何 workspace/storage I/O
+前对四字段 budget 做 strict-JSON、exact-own-data-property snapshot；symbol、accessor、non-enumerable、
+额外字段或非 plain object 直接拒绝，后续只使用这份冻结副本。预算包含标题、source /
 scope 与标签，不只计算正文。ASCII 按 `length / 4`，CJK/emoji 按 UTF-16 code unit
 保守计数。总预算不足时先保留窄作用域规则，再按 root → target 渲染；某个 sibling 因预算
 未进入最近 prompt 时，其工具调用仍会被 gate，不能因全局 section 未变化而放行。

@@ -19,6 +19,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import type {
+  PolicyGrant,
+  PolicyGrantCommitResult,
+  PolicyGrantRepository,
+  PolicyGrantSnapshot,
+} from '../capabilities/types.js';
 import {
   assertThreadId,
   assertWorkspaceId,
@@ -53,6 +59,7 @@ import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError
 import type {
   DerivedOpIdentityClaim,
   DerivedOpIdentityReservation,
+  LegacyApprovalRecoveryInventory,
   LegacyApprovalPatternCommitResult,
   LegacyApprovalPatternRepository,
   LegacyThreadImport,
@@ -101,11 +108,19 @@ interface LegacyApprovalOutboxReceipt {
   readonly acceptedAt: number;
   readonly patterns: readonly [string, ...string[]];
   readonly state: 'reserved' | 'applied';
+  /** Present only for registry-mode legacy-global grants; old phase-2 receipts omit it. */
+  readonly policyGrant?: Readonly<PolicyGrant>;
 }
 
 interface LegacyApprovalOutboxFile {
   readonly version: 1;
   readonly receipts: readonly LegacyApprovalOutboxReceipt[];
+}
+
+interface PolicyGrantStoreFile {
+  readonly version: 1;
+  readonly workspaceId: WorkspaceId;
+  readonly grants: readonly Readonly<PolicyGrant>[];
 }
 
 interface LegacyApprovalGlobalLockRecord {
@@ -156,7 +171,27 @@ interface LegacySessionView {
   readonly seed: LegacyThreadSeedRecord;
 }
 
-export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): RuntimeStoragePort {
+export interface FileRuntimeWorkspaceStoragePort extends RuntimeWorkspaceStoragePort {
+  inspectLegacyApprovalRecovery(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<Readonly<LegacyApprovalRecoveryInventory>>;
+  openLegacyApprovalPatternRepository(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<LegacyApprovalPatternRepository>;
+  openPolicyGrantRepository(
+    lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode'],
+  ): Promise<PolicyGrantRepository>;
+}
+
+export interface FileRuntimeStorage extends RuntimeStoragePort {
+  openWorkspace(input: {
+    readonly cwd: string;
+    readonly workspaceId?: WorkspaceId;
+  }): Promise<FileRuntimeWorkspaceStoragePort>;
+}
+
+export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): FileRuntimeStorage {
   assertSafeAbsolutePath(options.root, 'root');
   if (options.legacySessionDir !== undefined) {
     assertSafeAbsolutePath(options.legacySessionDir, 'legacySessionDir');
@@ -180,7 +215,7 @@ export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): Ru
       return snapshot([...canonical, ...legacy]);
     },
 
-    async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
+    async openWorkspace(input): Promise<FileRuntimeWorkspaceStoragePort> {
       assertExecutableCwd(input.cwd);
       const workspaceId = input.workspaceId === undefined
         ? legacyWorkspaceId(input.cwd)
@@ -213,12 +248,13 @@ export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): Ru
   };
 }
 
-class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
+class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
   readonly workspaceId: WorkspaceId;
   readonly recordedCwd: string;
   readonly #ledgerFile: string;
   readonly #catalogFile: string;
   readonly #threadsDir: string;
+  readonly #policyGrantsFile: string;
   readonly #legacyApprovalOutboxFile: string;
   readonly #lockFile: string;
   readonly #authorityPort: number;
@@ -238,6 +274,7 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
     this.#ledgerFile = safeChild(workspaceDir, 'ledger.json');
     this.#catalogFile = safeChild(workspaceDir, 'catalog.json');
     this.#threadsDir = safeChild(workspaceDir, 'threads');
+    this.#policyGrantsFile = safeChild(workspaceDir, 'policy-grants.json');
     this.#legacyApprovalOutboxFile = safeChild(workspaceDir, 'legacy-approval-outbox.json');
     this.#lockFile = safeChild(workspaceDir, 'supervisor.lock');
     this.#authorityPort = workspaceAuthorityPort(this.workspaceId);
@@ -497,7 +534,7 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
         if (!isAlreadyExists(error)) throw error;
       }
     }
-    const outbox = readLegacyApprovalOutbox(this.#legacyApprovalOutboxFile);
+    const outbox = readLegacyApprovalOutbox(this.#legacyApprovalOutboxFile, this.workspaceId);
     const approvalRead = readLegacyApprovalPatternFile(this.legacyApprovalFile);
     const repository = new FileLegacyApprovalPatternRepository({
       workspace: this,
@@ -509,6 +546,86 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
     });
     await repository.recoverReservedOutbox();
     return repository;
+  }
+
+  async inspectLegacyApprovalRecovery(
+    lease: Readonly<SupervisorLease>,
+  ): Promise<Readonly<LegacyApprovalRecoveryInventory>> {
+    this.#assertFence(lease);
+    if (!existsSync(this.#legacyApprovalOutboxFile)) {
+      return snapshot({ hasPendingReservedOutbox: false });
+    }
+    const outbox = readLegacyApprovalOutbox(this.#legacyApprovalOutboxFile, this.workspaceId);
+    return snapshot({
+      hasPendingReservedOutbox: outbox.receipts.some((receipt) =>
+        receipt.state === 'reserved' && receipt.policyGrant === undefined),
+    });
+  }
+
+  async openPolicyGrantRepository(
+    lease: Readonly<SupervisorLease>,
+    mode: PolicyGrantRepository['mode'],
+  ): Promise<PolicyGrantRepository> {
+    this.#assertFence(lease);
+    if (mode === 'legacy_global_approvals_v1') {
+      if (this.legacyApprovalFile === undefined) {
+        throw new RuntimeStorageError(
+          'legacy_approval_storage_unavailable',
+          'Legacy-global policy grants require an explicit legacy approval file',
+        );
+      }
+      ensureDirectoryTreeNoSymlink(path.dirname(this.legacyApprovalFile));
+      if (!existsSync(this.#legacyApprovalOutboxFile)) {
+        try {
+          writeJsonExclusive(this.#legacyApprovalOutboxFile, {
+            version: 1,
+            receipts: [],
+          } satisfies LegacyApprovalOutboxFile);
+        } catch (error) {
+          if (!isAlreadyExists(error)) {
+            throw storageFailure(
+              'legacy_approval_outbox_create_failed',
+              this.#legacyApprovalOutboxFile,
+              error,
+            );
+          }
+        }
+      }
+      const repository = new FilePolicyGrantRepository({
+        workspace: this,
+        lease: snapshot(lease),
+        mode,
+        canonicalFile: this.#policyGrantsFile,
+        legacyApprovalFile: this.legacyApprovalFile,
+        legacyOutboxFile: this.#legacyApprovalOutboxFile,
+        invalidLegacyApprovalFile: readLegacyApprovalPatternFile(this.legacyApprovalFile).invalid,
+      });
+      await repository.recoverLegacyReservedOutbox();
+      return repository;
+    }
+    if (!existsSync(this.#policyGrantsFile)) {
+      try {
+        writeJsonExclusive(this.#policyGrantsFile, {
+          version: 1,
+          workspaceId: this.workspaceId,
+          grants: [],
+        } satisfies PolicyGrantStoreFile);
+      } catch (error) {
+        if (!isAlreadyExists(error)) {
+          throw storageFailure('policy_grant_store_create_failed', this.#policyGrantsFile, error);
+        }
+      }
+    }
+    // Opening is the recovery barrier for workspace mode: the single atomic file contains both
+    // receipt identity and grant payload, so there is no separately reserved outbox to replay.
+    readPolicyGrantStore(this.#policyGrantsFile, this.workspaceId);
+    return new FilePolicyGrantRepository({
+      workspace: this,
+      lease: snapshot(lease),
+      mode,
+      canonicalFile: this.#policyGrantsFile,
+      legacyOutboxFile: this.#legacyApprovalOutboxFile,
+    });
   }
 
   async close(): Promise<void> {
@@ -681,6 +798,298 @@ class FileWorkspacePort implements RuntimeWorkspaceStoragePort {
   }
 }
 
+class FilePolicyGrantRepository implements PolicyGrantRepository {
+  readonly workspaceId: WorkspaceId;
+  readonly mode: PolicyGrantRepository['mode'];
+  readonly #workspace: FileWorkspacePort;
+  readonly #lease: SupervisorLease;
+  readonly #canonicalFile: string;
+  readonly #legacyApprovalFile: string | undefined;
+  readonly #legacyOutboxFile: string;
+  readonly #startupDiagnostics: readonly { readonly code: string; readonly message: string }[];
+  #closed = false;
+
+  constructor(input: {
+    readonly workspace: FileWorkspacePort;
+    readonly lease: SupervisorLease;
+    readonly mode: PolicyGrantRepository['mode'];
+    readonly canonicalFile: string;
+    readonly legacyApprovalFile?: string;
+    readonly legacyOutboxFile: string;
+    readonly invalidLegacyApprovalFile?: boolean;
+  }) {
+    this.#workspace = input.workspace;
+    this.#lease = input.lease;
+    this.mode = input.mode;
+    this.#canonicalFile = input.canonicalFile;
+    this.#legacyApprovalFile = input.legacyApprovalFile;
+    this.#legacyOutboxFile = input.legacyOutboxFile;
+    this.#startupDiagnostics = input.invalidLegacyApprovalFile === true
+      ? [{
+          code: 'legacy_approvals_invalid_ignored',
+          message: 'Invalid legacy approvals file was ignored and treated as an empty pattern Set',
+        }]
+      : [];
+    this.workspaceId = input.lease.workspaceId;
+    if (this.mode === 'legacy_global_approvals_v1'
+      && this.#legacyApprovalFile === undefined) {
+      throw new TypeError('Legacy-global policy grant repository requires approval and outbox files');
+    }
+  }
+
+  async snapshot(): Promise<Readonly<PolicyGrantSnapshot>> {
+    this.#assertOpen();
+    this.#workspace.assertFence(this.#lease);
+    if (this.mode === 'workspace') {
+      const file = this.#requireCanonicalFile();
+      const store = readPolicyGrantStore(file, this.workspaceId);
+      return workspacePolicyGrantSnapshot(this.workspaceId, store.grants);
+    }
+    return this.#legacySnapshot();
+  }
+
+  startupDiagnostics(): readonly { readonly code: string; readonly message: string }[] {
+    return this.#startupDiagnostics;
+  }
+
+  async commitAllowAlways(
+    grant: Readonly<PolicyGrant>,
+  ): Promise<PolicyGrantCommitResult> {
+    if (this.#closed) {
+      return policyGrantFenced('stale_fence', 'Policy grant repository is closed');
+    }
+    if (grant.workspaceId !== this.workspaceId) {
+      return policyGrantFenced('wrong_workspace', 'Policy grant belongs to a different workspace');
+    }
+    try {
+      this.#workspace.assertFence(this.#lease);
+    } catch {
+      return policyGrantFenced('stale_fence', 'Policy grant repository lost its workspace fence');
+    }
+    return this.mode === 'workspace'
+      ? this.#commitWorkspace(grant)
+      : this.#commitLegacyGlobal(grant);
+  }
+
+  async recoverLegacyReservedOutbox(): Promise<void> {
+    if (this.mode !== 'legacy_global_approvals_v1') return;
+    const outbox = readLegacyApprovalOutbox(this.#requireLegacyOutboxFile(), this.workspaceId);
+    for (const receipt of outbox.receipts) {
+      if (receipt.state !== 'reserved' || receipt.policyGrant === undefined) continue;
+      const result = await this.commitAllowAlways(receipt.policyGrant);
+      if (result.kind !== 'applied' && result.kind !== 'duplicate') {
+        throw new RuntimeStorageError(
+          'policy_grant_recovery_failed',
+          `Cannot recover reserved legacy-global policy grant ${receipt.responseOpId}: ${result.kind}`,
+        );
+      }
+    }
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  #commitWorkspace(grant: Readonly<PolicyGrant>): PolicyGrantCommitResult {
+    const file = this.#requireCanonicalFile();
+    const normalized = validatePolicyGrant(grant, this.workspaceId, 'workspace');
+    const store = readPolicyGrantStore(file, this.workspaceId);
+    const currentRevision = workspacePolicyGrantSnapshot(this.workspaceId, store.grants).revision;
+    // The cross-mode check and canonical rename are one synchronous critical section under the
+    // workspace lease. A legacy writer reserves its outbox before its first await, so concurrent
+    // repositories linearize at either this rename or that reservation.
+    const crossModeReceipt = this.#legacyReceipt(normalized.grantId);
+    if (crossModeReceipt !== undefined) {
+      return {
+        kind: 'conflict',
+        revision: currentRevision,
+        message: `Policy grant ${normalized.grantId} already has a legacy-global receipt`,
+      };
+    }
+    const prior = store.grants.find((candidate) => candidate.grantId === normalized.grantId);
+    if (prior !== undefined) {
+      return canonicalJson(prior) === canonicalJson(normalized)
+        ? { kind: 'duplicate', revision: currentRevision }
+        : {
+            kind: 'conflict',
+            revision: currentRevision,
+            message: `Policy grant ${normalized.grantId} changed its durable payload`,
+          };
+    }
+    const next = snapshot<PolicyGrantStoreFile>({
+      ...store,
+      grants: [...store.grants, normalized],
+    });
+    try {
+      // The final fence comparison happens synchronously immediately before rename. Under the
+      // kernel-held workspace authority that rename is the receipt/grant transaction's CAS point.
+      writePolicyGrantStoreAtomic(
+        file,
+        next,
+        () => { this.#workspace.assertFence(this.#lease); },
+      );
+    } catch (error) {
+      if (error instanceof RuntimeStorageError && error.code === 'stale_fence') {
+        return policyGrantFenced('stale_fence', error.message);
+      }
+      if (error instanceof PolicyGrantDefinitelyNotAppliedError) {
+        return { kind: 'definitely_not_applied', message: formatStorageCause(error.originalCause) };
+      }
+      throw storageFailure('policy_grant_commit_outcome_unknown', file, error);
+    }
+    return {
+      kind: 'applied',
+      revision: workspacePolicyGrantSnapshot(this.workspaceId, next.grants).revision,
+    };
+  }
+
+  async #commitLegacyGlobal(grant: Readonly<PolicyGrant>): Promise<PolicyGrantCommitResult> {
+    const approvalFile = this.#requireLegacyApprovalFile();
+    const outboxFile = this.#requireLegacyOutboxFile();
+    const normalized = validatePolicyGrant(
+      grant,
+      this.workspaceId,
+      'legacy_global_approvals_v1',
+    );
+    if (normalized.scope.kind !== 'legacy_global_approvals_v1') {
+      throw new RuntimeStorageError('invalid_policy_grant', 'Invalid legacy-global policy grant scope');
+    }
+    let outbox = readLegacyApprovalOutbox(outboxFile, this.workspaceId);
+    const currentRevision = legacyPolicyGrantSnapshot(
+      this.workspaceId,
+      outbox,
+      readLegacyApprovalPatterns(approvalFile),
+    ).revision;
+    // No await occurs between this cross-mode check and a new outbox reservation. The workspace
+    // writer uses the symmetric synchronous check, making the shared receipt key linearizable.
+    const crossModeGrant = this.#canonicalGrant(normalized.grantId);
+    if (crossModeGrant !== undefined) {
+      return {
+        kind: 'conflict',
+        revision: currentRevision,
+        message: `Policy grant ${normalized.grantId} already has a workspace receipt`,
+      };
+    }
+    const prior = outbox.receipts.find((receipt) => receipt.responseOpId === normalized.grantId);
+    if (prior !== undefined) {
+      if (prior.policyGrant === undefined
+        || canonicalJson(prior.policyGrant) !== canonicalJson(normalized)) {
+        return {
+          kind: 'conflict',
+          revision: currentRevision,
+          message: `Policy grant ${normalized.grantId} changed its durable payload`,
+        };
+      }
+      if (prior.state === 'applied') return { kind: 'duplicate', revision: currentRevision };
+    } else {
+      const receipt: LegacyApprovalOutboxReceipt = snapshot({
+        responseOpId: normalized.grantId,
+        acceptedAt: normalized.acceptedAt,
+        patterns: normalized.scope.patterns,
+        state: 'reserved' as const,
+        policyGrant: normalized,
+      });
+      outbox = snapshot({ ...outbox, receipts: [...outbox.receipts, receipt] });
+      try {
+        writePolicyGrantOutboxAtomic(
+          outboxFile,
+          outbox,
+          () => { this.#workspace.assertFence(this.#lease); },
+        );
+      } catch (error) {
+        if (error instanceof RuntimeStorageError && error.code === 'stale_fence') {
+          return policyGrantFenced('stale_fence', error.message);
+        }
+        if (error instanceof PolicyGrantDefinitelyNotAppliedError) {
+          return { kind: 'definitely_not_applied', message: formatStorageCause(error.originalCause) };
+        }
+        throw storageFailure('policy_grant_commit_outcome_unknown', outboxFile, error);
+      }
+    }
+
+    const lockFile = `${approvalFile}.lock`;
+    let lock: LegacyApprovalGlobalLockRecord;
+    try {
+      lock = await acquireLegacyApprovalGlobalLock(lockFile);
+    } catch (error) {
+      throw storageFailure('policy_grant_commit_outcome_unknown', approvalFile, error);
+    }
+    try {
+      this.#workspace.assertFence(this.#lease);
+      const patterns = new Set(readLegacyApprovalPatterns(approvalFile));
+      for (const pattern of normalized.scope.patterns) patterns.add(pattern);
+      const sorted = [...patterns].sort(compareUtf8);
+      writeJsonAtomic(approvalFile, sorted);
+      this.#workspace.assertFence(this.#lease);
+      // Another thread may have reserved a receipt while this commit waited for the global lock.
+      // Reload before finalization so marking ours applied never drops the other reservation.
+      outbox = readLegacyApprovalOutbox(outboxFile, this.workspaceId);
+      outbox = snapshot({
+        ...outbox,
+        receipts: outbox.receipts.map((receipt) =>
+          receipt.responseOpId === normalized.grantId
+            ? { ...receipt, state: 'applied' as const }
+            : receipt),
+      });
+      writePolicyGrantOutboxAtomic(
+        outboxFile,
+        outbox,
+        () => { this.#workspace.assertFence(this.#lease); },
+      );
+      return {
+        kind: 'applied',
+        revision: legacyPolicyGrantSnapshot(this.workspaceId, outbox, sorted).revision,
+      };
+    } catch (error) {
+      if (error instanceof RuntimeStorageError && error.code === 'stale_fence') {
+        return policyGrantFenced('stale_fence', error.message);
+      }
+      throw storageFailure('policy_grant_commit_outcome_unknown', approvalFile, error);
+    } finally {
+      releaseLegacyApprovalGlobalLock(lockFile, lock);
+    }
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new RuntimeStorageError('stale_fence', 'Policy grant repository is closed');
+    }
+  }
+
+  #legacySnapshot(): Readonly<PolicyGrantSnapshot> {
+    return legacyPolicyGrantSnapshot(
+      this.workspaceId,
+      readLegacyApprovalOutbox(this.#requireLegacyOutboxFile(), this.workspaceId),
+      readLegacyApprovalPatterns(this.#requireLegacyApprovalFile()),
+    );
+  }
+
+  #canonicalGrant(grantId: ExternalOpId): Readonly<PolicyGrant> | undefined {
+    if (!existsSync(this.#canonicalFile)) return undefined;
+    return readPolicyGrantStore(this.#canonicalFile, this.workspaceId).grants.find((grant) =>
+      grant.grantId === grantId);
+  }
+
+  #legacyReceipt(grantId: ExternalOpId): LegacyApprovalOutboxReceipt | undefined {
+    if (!existsSync(this.#legacyOutboxFile)) return undefined;
+    return readLegacyApprovalOutbox(this.#legacyOutboxFile, this.workspaceId).receipts.find((receipt) =>
+      receipt.responseOpId === grantId);
+  }
+
+  #requireCanonicalFile(): string {
+    return this.#canonicalFile;
+  }
+
+  #requireLegacyApprovalFile(): string {
+    if (this.#legacyApprovalFile === undefined) throw new TypeError('Legacy approval file is unavailable');
+    return this.#legacyApprovalFile;
+  }
+
+  #requireLegacyOutboxFile(): string {
+    return this.#legacyOutboxFile;
+  }
+}
+
 class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternRepository {
   readonly workspaceId: WorkspaceId;
   readonly #workspace: FileWorkspacePort;
@@ -725,7 +1134,7 @@ class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternReposi
 
   async recoverReservedOutbox(): Promise<void> {
     for (const receipt of this.#outbox.receipts) {
-      if (receipt.state !== 'reserved') continue;
+      if (receipt.state !== 'reserved' || receipt.policyGrant !== undefined) continue;
       const result = await this.commit({
         responseOpId: receipt.responseOpId,
         acceptedAt: receipt.acceptedAt,
@@ -754,9 +1163,10 @@ class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternReposi
     const normalized = validateLegacyApprovalReceipt(input);
     // Reload before every transaction so a successor holder can continue a durable reserved
     // outbox and an out-of-process edit cannot be hidden by an attachment-local cache.
-    this.#outbox = readLegacyApprovalOutbox(this.#outboxFile);
+    this.#outbox = readLegacyApprovalOutbox(this.#outboxFile, this.workspaceId);
     const prior = this.#outbox.receipts.find((receipt) => receipt.responseOpId === normalized.responseOpId);
-    if (prior !== undefined && !sameLegacyApprovalReceipt(prior, normalized)) {
+    if (prior !== undefined
+      && (prior.policyGrant !== undefined || !sameLegacyApprovalReceipt(prior, normalized))) {
       return {
         kind: 'conflict',
         revision: legacyApprovalSnapshot(readLegacyApprovalPatterns(this.#approvalFile)).revision,
@@ -778,12 +1188,19 @@ class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternReposi
           ...this.#outbox,
           receipts: [...this.#outbox.receipts, { ...normalized, state: 'reserved' as const }],
         });
-        writeJsonAtomic(this.#outboxFile, this.#outbox);
+        writePolicyGrantOutboxAtomic(
+          this.#outboxFile,
+          this.#outbox,
+          () => { this.#workspace.assertFence(this.#lease); },
+        );
       } catch (error) {
         if (error instanceof RuntimeStorageError && error.code === 'stale_fence') {
           return legacyApprovalFenced('stale_fence', error.message);
         }
-        return { kind: 'definitely_not_applied', message: formatStorageCause(error) };
+        if (error instanceof PolicyGrantDefinitelyNotAppliedError) {
+          return { kind: 'definitely_not_applied', message: formatStorageCause(error.originalCause) };
+        }
+        throw storageFailure('legacy_approval_commit_outcome_unknown', this.#outboxFile, error);
       }
     }
 
@@ -803,9 +1220,12 @@ class FileLegacyApprovalPatternRepository implements LegacyApprovalPatternReposi
       }
       const patterns = new Set(readLegacyApprovalPatterns(this.#approvalFile));
       for (const pattern of normalized.patterns) patterns.add(pattern);
-      const sorted = [...patterns].sort();
+      const sorted = [...patterns].sort(compareUtf8);
       writeJsonAtomic(this.#approvalFile, sorted);
       this.#workspace.assertFence(this.#lease);
+      // Parallel thread commits can reserve additional receipts while this call waits for the
+      // global file lock. Reload so finalizing this receipt never overwrites those reservations.
+      this.#outbox = readLegacyApprovalOutbox(this.#outboxFile, this.workspaceId);
       this.#outbox = snapshot({
         ...this.#outbox,
         receipts: this.#outbox.receipts.map((receipt) =>
@@ -1185,6 +1605,7 @@ function validateJournalSequence(
   const deliveredResults = new Set<string>();
   const usedRequestIds = new Set<string>();
   const controlClaims = new Map<string, ExternalOpId>();
+  const observedRuleScopes = new Set<string>();
   let legacySeedSeen = false;
   let nextSeq = 1;
 
@@ -1348,11 +1769,22 @@ function validateJournalSequence(
           pendingResults.set(mutation.resultOpId, mutation);
           break;
         }
+        case 'rule_scope_observed':
+          observedRuleScopes.add(mutation.scope);
+          break;
+        case 'rule_scope_window_replaced': {
+          const current = [...observedRuleScopes].sort(compareUtf8);
+          if (canonicalJson(current) !== canonicalJson(mutation.consumedScopes)) {
+            throw invalidJournal(`Rule scope window witness mismatch for ${mutation.owningTurnId}`);
+          }
+          observedRuleScopes.clear();
+          for (const scope of mutation.replacementScopes) observedRuleScopes.add(scope);
+          break;
+        }
         case 'message_appended':
         case 'compaction_committed':
         case 'activity_interrupted':
         case 'model_selected':
-        case 'rule_scope_observed':
           break;
       }
     }
@@ -1472,6 +1904,10 @@ function validateCommitCorrespondence(
         envelope.runId === mutation.runId && envelope.turnId === mutation.turnId
         && (envelope.event.type === 'turn_start' || envelope.event.type === 'queue_update'));
       if (!found) throw invalidJournal('turn_activated has no matching first turn envelope');
+    } else if (mutation.type === 'rule_scope_window_replaced') {
+      const found = record.envelopes.some((envelope) =>
+        envelope.turnId === mutation.owningTurnId && envelope.event.type === 'turn_start');
+      if (!found) throw invalidJournal('rule scope window replacement has no matching turn_start');
     }
   }
 }
@@ -1802,6 +2238,12 @@ function validateMutation(
       assertExactKeys(value, ['type', 'scope', 'owningTurnId', 'invocationId']);
       if (isWellFormedString(value.scope) && isTurnId(value.owningTurnId)
         && isWellFormedString(value.invocationId)) return value as unknown as RuntimeThreadMutation;
+      break;
+    case 'rule_scope_window_replaced':
+      assertExactKeys(value, ['type', 'consumedScopes', 'replacementScopes', 'owningTurnId']);
+      if (isCanonicalScopeArray(value.consumedScopes)
+        && isCanonicalScopeArray(value.replacementScopes)
+        && isTurnId(value.owningTurnId)) return value as unknown as RuntimeThreadMutation;
       break;
     case 'thread_result_pending':
       assertExactKeys(value, [
@@ -2274,6 +2716,89 @@ function writeJsonAtomic(file: string, value: unknown): void {
   }
 }
 
+class PolicyGrantDefinitelyNotAppliedError extends Error {
+  constructor(readonly originalCause: unknown) {
+    super(formatStorageCause(originalCause));
+    this.name = 'PolicyGrantDefinitelyNotAppliedError';
+  }
+}
+
+function writePolicyGrantStoreAtomic(
+  file: string,
+  value: PolicyGrantStoreFile,
+  assertFence: () => void,
+): void {
+  let temporary: string | undefined;
+  let fd: number | undefined;
+  let renamed = false;
+  try {
+    assertParentSafe(file);
+    temporary = safeChild(path.dirname(file), `.tmp-${path.basename(file)}-${crypto.randomUUID()}`);
+    fd = openRegularExclusive(temporary);
+    writeFileSync(fd, `${canonicalJson(value)}\n`, 'utf8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    assertNotSymlinkIfExists(file);
+    // No await or fallible storage operation may separate this captured-fence comparison from
+    // the atomic rename that linearizes both the receipt and grant payload.
+    assertFence();
+    renameSync(temporary, file);
+    renamed = true;
+    fsyncDirectory(path.dirname(file));
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the transaction failure */ }
+    }
+    if (temporary !== undefined) {
+      try { unlinkSync(temporary); } catch { /* absent after rename or failed create */ }
+    }
+    if (!renamed) {
+      if (error instanceof RuntimeStorageError && error.code === 'stale_fence') throw error;
+      throw new PolicyGrantDefinitelyNotAppliedError(error);
+    }
+    // Once rename succeeds the receipt/grant may be visible even if directory fsync fails. The
+    // caller must degrade on this unknown outcome rather than claim definitely-not-applied.
+    throw error;
+  }
+}
+
+function writePolicyGrantOutboxAtomic(
+  file: string,
+  value: LegacyApprovalOutboxFile,
+  assertFence: () => void,
+): void {
+  let temporary: string | undefined;
+  let fd: number | undefined;
+  let renamed = false;
+  try {
+    assertParentSafe(file);
+    temporary = safeChild(path.dirname(file), `.tmp-${path.basename(file)}-${crypto.randomUUID()}`);
+    fd = openRegularExclusive(temporary);
+    writeFileSync(fd, `${canonicalJson(value)}\n`, 'utf8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    assertNotSymlinkIfExists(file);
+    assertFence();
+    renameSync(temporary, file);
+    renamed = true;
+    fsyncDirectory(path.dirname(file));
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the transaction failure */ }
+    }
+    if (temporary !== undefined) {
+      try { unlinkSync(temporary); } catch { /* absent after rename or failed create */ }
+    }
+    if (!renamed) {
+      if (error instanceof RuntimeStorageError && error.code === 'stale_fence') throw error;
+      throw new PolicyGrantDefinitelyNotAppliedError(error);
+    }
+    throw error;
+  }
+}
+
 function readJsonUnknown(file: string, code: string): unknown {
   assertRegularFileNoSymlink(file);
   try {
@@ -2676,6 +3201,13 @@ function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => isWellFormedString(item));
 }
 
+function isCanonicalScopeArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value)
+    && value.every((item) => isWellFormedString(item) && item.length > 0)
+    && value.every((scope, index) => index === 0
+      || compareUtf8(value[index - 1] as string, scope) < 0);
+}
+
 function validateCompactionCheckpoint(value: unknown): void {
   if (!isRecord(value)) throw new RuntimeStorageError('invalid_thread_mutation', 'Invalid compaction checkpoint');
   assertExactKeys(value, ['id', 'timestamp', 'tailStartId', 'summary'], ['contextTokensBefore']);
@@ -2742,14 +3274,211 @@ function derivedTuple(claim: DerivedOpIdentityClaim): string {
   return canonicalJson([claim.purpose, claim.workspaceId, claim.parts]);
 }
 
-function readLegacyApprovalOutbox(file: string): LegacyApprovalOutboxFile {
+function readPolicyGrantStore(file: string, workspaceId: WorkspaceId): PolicyGrantStoreFile {
+  const value = readJsonUnknown(file, 'invalid_policy_grant_store');
+  if (isRecord(value)) assertExactKeys(value, ['version', 'workspaceId', 'grants']);
+  if (!isRecord(value)
+    || value.version !== 1
+    || value.workspaceId !== workspaceId
+    || !isWorkspaceIdValue(value.workspaceId)
+    || !Array.isArray(value.grants)) {
+    throw new RuntimeStorageError('invalid_policy_grant_store', 'Invalid canonical policy grant store');
+  }
+  const grantIds = new Set<string>();
+  const grants = value.grants.map((grant) => {
+    const normalized = validatePolicyGrant(
+      grant,
+      workspaceId,
+      'workspace',
+      'invalid_policy_grant_store',
+    );
+    if (grantIds.has(normalized.grantId)) {
+      throw new RuntimeStorageError('invalid_policy_grant_store', 'Duplicate policy grant receipt');
+    }
+    grantIds.add(normalized.grantId);
+    return normalized;
+  });
+  return snapshot({ version: 1, workspaceId, grants });
+}
+
+function validatePolicyGrant(
+  input: unknown,
+  workspaceId: WorkspaceId,
+  mode: PolicyGrantRepository['mode'],
+  code = 'invalid_policy_grant',
+): Readonly<PolicyGrant> {
+  let value: unknown;
+  try {
+    value = strictJsonSnapshot(input);
+  } catch (error) {
+    throw invalidPolicyGrant(code, error);
+  }
+  if (!isRecord(value)) throw invalidPolicyGrant(code);
+  assertExactPolicyGrantKeys(value, [
+    'grantId',
+    'workspaceId',
+    'capabilityId',
+    'capabilityVersion',
+    'registrationDigest',
+    'scope',
+    'policyBasisRevision',
+    'acceptedAt',
+  ], code);
+  if (!isExternalOpId(value.grantId)
+    || !isWorkspaceIdValue(value.workspaceId)
+    || value.workspaceId !== workspaceId
+    || !isNonEmptyWellFormedString(value.capabilityId)
+    || !isNonEmptyWellFormedString(value.capabilityVersion)
+    || !isNonEmptyWellFormedString(value.registrationDigest)
+    || !isNonEmptyWellFormedString(value.policyBasisRevision)
+    || typeof value.acceptedAt !== 'number'
+    || !Number.isSafeInteger(value.acceptedAt)
+    || value.acceptedAt < 0) {
+    throw invalidPolicyGrant(code);
+  }
+  if (mode === 'workspace') validateCanonicalPolicyGrantScope(value.scope, code);
+  else validateLegacyPolicyGrantScope(value.scope, code);
+  return value as unknown as Readonly<PolicyGrant>;
+}
+
+function validateCanonicalPolicyGrantScope(input: unknown, code: string): void {
+  if (!isRecord(input)) throw invalidPolicyGrant(code);
+  assertExactPolicyGrantKeys(input, ['kind', 'resourcePatterns', 'attributes'], code);
+  if (input.kind !== 'canonical_resources_v1'
+    || !Array.isArray(input.resourcePatterns)
+    || input.resourcePatterns.length === 0
+    || !isRecord(input.attributes)) {
+    throw invalidPolicyGrant(code);
+  }
+  const canonicalPatterns: string[] = [];
+  for (const pattern of input.resourcePatterns) {
+    if (!isRecord(pattern)) throw invalidPolicyGrant(code);
+    assertExactPolicyGrantKeys(
+      pattern,
+      ['resourceType', 'access', 'matcher', 'pattern'],
+      code,
+    );
+    if (!isPolicyGrantResourceType(pattern.resourceType)
+      || !isPolicyGrantResourceAccess(pattern.access)
+      || pattern.matcher !== 'canonical_target_exact_v1'
+      || !isNonEmptyWellFormedString(pattern.pattern)) {
+      throw invalidPolicyGrant(code);
+    }
+    canonicalPatterns.push(canonicalJson(pattern));
+  }
+  for (let index = 1; index < canonicalPatterns.length; index++) {
+    if (compareUtf8(canonicalPatterns[index - 1]!, canonicalPatterns[index]!) >= 0) {
+      throw invalidPolicyGrant(code);
+    }
+  }
+}
+
+function validateLegacyPolicyGrantScope(input: unknown, code: string): void {
+  if (!isRecord(input)) throw invalidPolicyGrant(code);
+  assertExactPolicyGrantKeys(input, ['kind', 'patterns'], code);
+  if (input.kind !== 'legacy_global_approvals_v1'
+    || !Array.isArray(input.patterns)
+    || input.patterns.length === 0
+    || input.patterns.some((pattern) => !isNonEmptyWellFormedString(pattern))
+    || canonicalJson(input.patterns) !== canonicalJson([...new Set(input.patterns)].sort(compareUtf8))) {
+    throw invalidPolicyGrant(code);
+  }
+}
+
+function workspacePolicyGrantSnapshot(
+  workspaceId: WorkspaceId,
+  grants: Iterable<Readonly<PolicyGrant>>,
+): Readonly<PolicyGrantSnapshot> {
+  const copied = [...grants].map((grant) => snapshot(grant));
+  return snapshot({
+    workspaceId,
+    revision: `policy-grants-v1-${canonicalJsonSha256({ workspaceId, grants: copied })}`,
+    grants: copied,
+  });
+}
+
+function legacyPolicyGrantSnapshot(
+  workspaceId: WorkspaceId,
+  outbox: Readonly<LegacyApprovalOutboxFile>,
+  patterns: Iterable<string>,
+): Readonly<PolicyGrantSnapshot> {
+  const grants = outbox.receipts
+    .filter((receipt) => receipt.state === 'applied' && receipt.policyGrant !== undefined)
+    .map((receipt) => snapshot(receipt.policyGrant!));
+  const legacyGlobal = legacyApprovalSnapshot(patterns);
+  return snapshot({
+    workspaceId,
+    revision: `policy-grants-legacy-v1-${canonicalJsonSha256({
+      workspaceId,
+      grants,
+      legacyGlobal,
+    })}`,
+    grants,
+    legacyGlobal,
+  });
+}
+
+function policyGrantFenced(
+  code: 'stale_fence' | 'wrong_workspace',
+  message: string,
+): Extract<PolicyGrantCommitResult, { kind: 'fenced' }> {
+  return { kind: 'fenced', code, message };
+}
+
+function invalidPolicyGrant(code: string, error?: unknown): RuntimeStorageError {
+  const detail = error instanceof Error ? `: ${error.message}` : '';
+  return new RuntimeStorageError(code, `Invalid policy grant${detail}`);
+}
+
+function assertExactPolicyGrantKeys(
+  value: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  code: string,
+): void {
+  if (Object.keys(value).length !== required.length
+    || required.some((key) => !Object.hasOwn(value, key))) {
+    throw invalidPolicyGrant(code);
+  }
+}
+
+function isPolicyGrantResourceType(value: unknown): boolean {
+  return value === 'filesystem' || value === 'command' || value === 'network' || value === 'other';
+}
+
+function isPolicyGrantResourceAccess(value: unknown): boolean {
+  return value === 'read' || value === 'write' || value === 'execute' || value === 'connect';
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function readLegacyApprovalOutbox(
+  file: string,
+  workspaceId: WorkspaceId,
+): LegacyApprovalOutboxFile {
   const value = readJsonUnknown(file, 'invalid_legacy_approval_outbox');
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.receipts)) {
+  if (!isRecord(value)
+    || Object.keys(value).length !== 2
+    || value.version !== 1
+    || !Array.isArray(value.receipts)) {
     throw new RuntimeStorageError('invalid_legacy_approval_outbox', 'Invalid legacy approval outbox');
   }
   const seen = new Set<string>();
   const receipts = value.receipts.map((receipt) => {
+    const allowedKeys = new Set(['responseOpId', 'acceptedAt', 'patterns', 'state', 'policyGrant']);
     if (!isRecord(receipt)
+      || Object.keys(receipt).some((key) => !allowedKeys.has(key))
+      || !['responseOpId', 'acceptedAt', 'patterns', 'state'].every((key) =>
+        Object.hasOwn(receipt, key))
       || !isExternalOpId(receipt.responseOpId)
       || !Number.isSafeInteger(receipt.acceptedAt)
       || (receipt.acceptedAt as number) < 0
@@ -2757,13 +3486,37 @@ function readLegacyApprovalOutbox(file: string): LegacyApprovalOutboxFile {
       || receipt.patterns.length === 0
       || receipt.patterns.some((pattern) =>
         typeof pattern !== 'string' || pattern.length === 0 || !isWellFormedUnicode(pattern))
-      || canonicalJson(receipt.patterns) !== canonicalJson([...new Set(receipt.patterns)].sort())
+      || canonicalJson(receipt.patterns) !== canonicalJson([...new Set(receipt.patterns)].sort(compareUtf8))
       || (receipt.state !== 'reserved' && receipt.state !== 'applied')
       || seen.has(receipt.responseOpId)) {
       throw new RuntimeStorageError('invalid_legacy_approval_outbox', 'Invalid legacy approval receipt');
     }
+    let policyGrant: Readonly<PolicyGrant> | undefined;
+    if (receipt.policyGrant !== undefined) {
+      policyGrant = validatePolicyGrant(
+        receipt.policyGrant,
+        workspaceId,
+        'legacy_global_approvals_v1',
+        'invalid_legacy_approval_outbox',
+      );
+      if (policyGrant.grantId !== receipt.responseOpId
+        || policyGrant.acceptedAt !== receipt.acceptedAt
+        || policyGrant.scope.kind !== 'legacy_global_approvals_v1'
+        || canonicalJson(policyGrant.scope.patterns) !== canonicalJson(receipt.patterns)) {
+        throw new RuntimeStorageError(
+          'invalid_legacy_approval_outbox',
+          'Legacy-global policy grant receipt fields do not match its frozen grant',
+        );
+      }
+    }
     seen.add(receipt.responseOpId);
-    return snapshot(receipt) as unknown as LegacyApprovalOutboxReceipt;
+    return snapshot({
+      responseOpId: receipt.responseOpId,
+      acceptedAt: receipt.acceptedAt,
+      patterns: receipt.patterns,
+      state: receipt.state,
+      ...(policyGrant !== undefined && { policyGrant }),
+    }) as unknown as LegacyApprovalOutboxReceipt;
   });
   return snapshot({ version: 1, receipts });
 }
@@ -2788,7 +3541,7 @@ function readLegacyApprovalPatternFile(file: string): {
   const strings = value.filter((item): item is string =>
     typeof item === 'string' && item.length > 0 && isWellFormedUnicode(item));
   if (strings.length !== value.length) return { patterns: [], invalid: true };
-  return { patterns: [...new Set(strings)].sort(), invalid: false };
+  return { patterns: [...new Set(strings)].sort(compareUtf8), invalid: false };
 }
 
 function validateLegacyApprovalReceipt(input: {
@@ -2804,7 +3557,7 @@ function validateLegacyApprovalReceipt(input: {
   const patterns = [...input.patterns];
   if (patterns.length === 0
     || patterns.some((pattern) => pattern.length === 0 || !isWellFormedUnicode(pattern))
-    || canonicalJson(patterns) !== canonicalJson([...new Set(patterns)].sort())) {
+    || canonicalJson(patterns) !== canonicalJson([...new Set(patterns)].sort(compareUtf8))) {
     throw new RuntimeStorageError(
       'invalid_legacy_approval_receipt',
       'patterns must be a non-empty, sorted, unique Unicode string tuple',
@@ -2831,7 +3584,7 @@ function sameLegacyApprovalReceipt(
 function legacyApprovalSnapshot(
   patterns: Iterable<string>,
 ): Readonly<import('../protocol/index.js').LegacyApprovalPatternSnapshot> {
-  const sorted = [...new Set(patterns)].sort();
+  const sorted = [...new Set(patterns)].sort(compareUtf8);
   return snapshot({
     revision: `legacy-approval-v1-${canonicalJsonSha256(sorted)}`,
     patterns: sorted,

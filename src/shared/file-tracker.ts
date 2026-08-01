@@ -4,7 +4,13 @@
 
 export type FreshnessCheck = { ok: true } | { ok: false; reason: 'never_read' | 'stale' };
 
-export class FileTracker {
+export interface FileTrackerPort {
+  markRead(path: string, mtimeMs: number): void;
+  assertFresh(path: string, currentMtimeMs: number): FreshnessCheck;
+  hasRead(path: string): boolean;
+}
+
+export class FileTracker implements FileTrackerPort {
   private readonly files = new Map<string, number>();
 
   /** read 成功、edit/write 成功后登记(自己的写不算外部修改)。path 应为 resolve 后的绝对路径。 */

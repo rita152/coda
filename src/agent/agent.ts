@@ -17,7 +17,7 @@ import type { ToolDefinition } from '../tools/types.js';
 import type { AgentEventListener } from './events.js';
 import { Emitter } from './events.js';
 import { newMessageId } from './ids.js';
-import type { LoopConfig, LoopSeed } from './loop.js';
+import type { LoopConfig, LoopSeed, RuntimeTurnProvider } from './loop.js';
 import { runLoop } from './loop.js';
 import type { DrainMode } from './queue.js';
 import { PendingMessageQueue } from './queue.js';
@@ -41,6 +41,8 @@ export interface AgentConfig {
     readonly followUp: readonly UserMessage[];
   };
   truncationScope?: string;                                      // 截断落盘目录 scope(session 注入 sessionId,docs/07 §1.6)
+  /** @internal Canonical Runtime supplies one immutable registry environment per turn. */
+  runtimeTurnProvider?: RuntimeTurnProvider;
 }
 
 export class Agent {
@@ -76,6 +78,7 @@ export class Agent {
       toolExecution: config.toolExecution,
       steeringMode: () => this.steeringMode,
       followUpMode: () => this.followUpMode,
+      runtimeTurnProvider: config.runtimeTurnProvider,
     };
   }
 

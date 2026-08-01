@@ -34,6 +34,7 @@ import type { EventSubscriptionOptions } from '../session/event-hub.js';
 import { EventHub } from '../session/event-hub.js';
 import type {
   CommitEnvelopeInput,
+  FoldedMailboxEntry,
   FoldedRunEntry,
   FoldedThreadJournal,
 } from '../session/thread-journal.js';
@@ -56,11 +57,18 @@ import {
 import { createDefaultRuntimeIdentityFactory } from './identity-factory.js';
 import { validatePermissionCeilingSnapshot } from '../session/permission-ceiling.js';
 import type {
+  PolicyGrant,
+  PolicyGrantRepository,
+  RuntimeCapabilityServices,
+  ThreadPolicyEngine,
+} from '../capabilities/types.js';
+import type {
   PermissionPolicyPort,
   RecoveryQueueCommand,
   RuntimeClock,
   RuntimeIdentityFactory,
   RuntimeJournalRecord,
+  LegacyApprovalAdapter,
   LegacyApprovalPatternRepository,
   RuntimeModelResolver,
   RuntimeStoragePort,
@@ -88,7 +96,7 @@ export interface RuntimePort {
   close(): Promise<void>;
 }
 
-export interface CreateRuntimeOptions {
+export interface CreateRuntimeBaseOptions {
   readonly workspace: {
     readonly cwd: string;
     readonly workspaceId?: WorkspaceId;
@@ -99,20 +107,40 @@ export interface CreateRuntimeOptions {
   readonly threadDriverFactory: ThreadDriverFactory;
   readonly identityFactory?: RuntimeIdentityFactory;
   readonly clock?: RuntimeClock;
-  readonly capabilityMode?: 'static';
-  readonly capabilityServices?: never;
 }
 
+/**
+ * Extensible public construction surface retained for existing TypeScript consumers.
+ * Runtime validation enforces the correlation between capabilityMode and capabilityServices;
+ * callers that want compile-time discrimination can use the two narrower aliases below.
+ */
+export interface CreateRuntimeOptions extends CreateRuntimeBaseOptions {
+  readonly capabilityMode?: 'static' | 'registry';
+  readonly capabilityServices?: Readonly<RuntimeCapabilityServices>;
+}
+
+export type StaticCreateRuntimeOptions = CreateRuntimeOptions & {
+  readonly capabilityMode?: 'static';
+  readonly capabilityServices?: never;
+};
+
+export type RegistryCreateRuntimeOptions = CreateRuntimeOptions & {
+  readonly capabilityMode: 'registry';
+  readonly capabilityServices: Readonly<RuntimeCapabilityServices>;
+};
+
+type ValidatedCreateRuntimeOptions = StaticCreateRuntimeOptions | RegistryCreateRuntimeOptions;
+
 export async function createRuntime(options: CreateRuntimeOptions): Promise<RuntimePort> {
-  validateCreateOptions(options);
-  const cwd = options.workspace.cwd;
-  const workspaceId = options.workspace.workspaceId ?? legacyWorkspaceId(cwd);
-  const identityFactory = options.identityFactory ?? createDefaultRuntimeIdentityFactory();
+  const runtimeOptions = validateCreateOptions(options);
+  const cwd = runtimeOptions.workspace.cwd;
+  const workspaceId = runtimeOptions.workspace.workspaceId ?? legacyWorkspaceId(cwd);
+  const identityFactory = runtimeOptions.identityFactory ?? createDefaultRuntimeIdentityFactory();
   const processEpoch = identityFactory.newProcessEpoch();
   if (typeof processEpoch !== 'string' || processEpoch.length === 0) {
     throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'identityFactory.newProcessEpoch');
   }
-  const workspace = await options.storage.openWorkspace({ cwd, workspaceId });
+  const workspace = await runtimeOptions.storage.openWorkspace({ cwd, workspaceId });
   if (workspace.workspaceId !== workspaceId || workspace.recordedCwd !== cwd) {
     await workspace.close().catch(() => undefined);
     throw new WorkspaceBindingMismatchError(
@@ -129,8 +157,101 @@ export async function createRuntime(options: CreateRuntimeOptions): Promise<Runt
     throw error;
   }
   let legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
+  let policyGrants: PolicyGrantRepository | undefined;
+  let supervisor: Supervisor | undefined;
   try {
-    if (options.threadDriverFactory.requirements.approvalMode === 'durable_legacy_bridge') {
+    if (runtimeOptions.capabilityMode === 'registry') {
+      const openPolicyGrants = workspace.openPolicyGrantRepository;
+      if (openPolicyGrants === undefined) {
+        throw new RuntimeStorageError(
+          'policy_grant_storage_unavailable',
+          'Registry capability mode requires fenced policy grant storage',
+        );
+      }
+      const inspectLegacy = workspace.inspectLegacyApprovalRecovery;
+      if (inspectLegacy === undefined) {
+        throw new RuntimeStorageError(
+          'legacy_approval_recovery_unavailable',
+          'Registry capability mode requires legacy approval recovery inventory',
+        );
+      }
+      let inventory: Awaited<ReturnType<NonNullable<
+        RuntimeWorkspaceStoragePort['inspectLegacyApprovalRecovery']
+      >>>;
+      try {
+        inventory = await inspectLegacy.call(workspace, lease);
+      } catch (error) {
+        throw legacyApprovalRecoveryUnavailable('Cannot inspect legacy approval recovery', error);
+      }
+      const inventoryDescriptor = inventory === null || typeof inventory !== 'object'
+        ? undefined
+        : Object.getOwnPropertyDescriptor(inventory, 'hasPendingReservedOutbox');
+      if (inventoryDescriptor === undefined
+        || !inventoryDescriptor.enumerable
+        || !('value' in inventoryDescriptor)
+        || typeof inventoryDescriptor.value !== 'boolean'
+        || Reflect.ownKeys(inventory).length !== 1) {
+        throw new RuntimeStorageError(
+          'legacy_approval_recovery_unavailable',
+          'Legacy approval recovery inventory is invalid',
+        );
+      }
+      let legacyRecovery: LegacyApprovalJournalRecoveryInventory;
+      try {
+        legacyRecovery = await inspectLegacyApprovalJournalRecovery(workspace);
+      } catch (error) {
+        throw legacyApprovalRecoveryUnavailable('Cannot scan legacy approval journals', error);
+      }
+      const needsLegacyRecovery = inventory.hasPendingReservedOutbox
+        || legacyRecovery.effectThreadIds.length > 0;
+      if (needsLegacyRecovery) {
+        if (runtimeOptions.threadDriverFactory.openLegacyApprovalAdapter === undefined) {
+          throw new RuntimeStorageError(
+            'legacy_approval_recovery_unavailable',
+            'Registry driver cannot recover historical legacy approval effects',
+          );
+        }
+        const openLegacy = workspace.openLegacyApprovalPatternRepository;
+        if (openLegacy === undefined) {
+          throw new RuntimeStorageError(
+            'legacy_approval_recovery_unavailable',
+            'Registry driver recovery requires fenced legacy approval storage',
+          );
+        }
+        try {
+          legacyApprovalPatterns = await openLegacy.call(workspace, lease);
+        } catch (error) {
+          throw legacyApprovalRecoveryUnavailable('Cannot open legacy approval recovery storage', error);
+        }
+      }
+      supervisor = Supervisor.create({
+        options: runtimeOptions,
+        workspaceId,
+        workspace,
+        lease,
+        identityFactory,
+        ...(legacyApprovalPatterns !== undefined && { legacyApprovalPatterns }),
+      });
+      if (legacyRecovery.controlThreadIds.length > 0) {
+        await supervisor.recoverLegacyApprovalUpgrade(legacyRecovery.controlThreadIds);
+      }
+      try {
+        await supervisor.releaseLegacyApprovalRecoveryBridge();
+      } finally {
+        // Ownership transferred into Supervisor.create(); release clears it before awaiting close.
+        legacyApprovalPatterns = undefined;
+      }
+      policyGrants = await openPolicyGrants.call(
+        workspace,
+        lease,
+        runtimeOptions.capabilityServices.grantMode,
+      );
+      supervisor.bindPolicyGrantRepository(
+        policyGrants,
+        runtimeOptions.capabilityServices.grantMode,
+      );
+      await supervisor.initialize();
+    } else if (runtimeOptions.threadDriverFactory.requirements.approvalMode === 'durable_legacy_bridge') {
       const open = workspace.openLegacyApprovalPatternRepository;
       if (open === undefined) {
         throw new RuntimeStorageError(
@@ -139,30 +260,61 @@ export async function createRuntime(options: CreateRuntimeOptions): Promise<Runt
         );
       }
       legacyApprovalPatterns = await open.call(workspace, lease);
+      supervisor = Supervisor.create({
+        options: runtimeOptions,
+        workspaceId,
+        workspace,
+        lease,
+        identityFactory,
+        legacyApprovalPatterns,
+      });
+      await supervisor.initialize();
+    } else {
+      supervisor = Supervisor.create({
+        options: runtimeOptions,
+        workspaceId,
+        workspace,
+        lease,
+        identityFactory,
+      });
+      await supervisor.initialize();
     }
-    return await Supervisor.open({
-      options,
-      workspaceId,
-      workspace,
-      lease,
-      identityFactory,
-      ...(legacyApprovalPatterns !== undefined && { legacyApprovalPatterns }),
-    });
+    return supervisor;
   } catch (error) {
-    await legacyApprovalPatterns?.close().catch(() => undefined);
-    await workspace.releaseSupervisorLease(lease).catch(() => undefined);
-    await workspace.close().catch(() => undefined);
-    throw error;
+    const failures: unknown[] = [error];
+    if (supervisor !== undefined) {
+      try {
+        await supervisor.cleanupAfterConstructionFailure();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+    } else {
+      for (const cleanup of [
+        () => policyGrants?.close(),
+        () => legacyApprovalPatterns?.close(),
+        () => workspace.releaseSupervisorLease(lease),
+        () => workspace.close(),
+      ]) {
+        try {
+          await cleanup();
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+    }
+    if (failures.length === 1) throw error;
+    throw new AggregateError(failures, 'Runtime construction cleanup failed');
   }
 }
 
 interface SupervisorOpenInput {
-  readonly options: CreateRuntimeOptions;
+  readonly options: ValidatedCreateRuntimeOptions;
   readonly workspaceId: WorkspaceId;
   readonly workspace: RuntimeWorkspaceStoragePort;
   readonly lease: SupervisorLease;
   readonly identityFactory: RuntimeIdentityFactory;
   readonly legacyApprovalPatterns?: LegacyApprovalPatternRepository;
+  readonly policyGrants?: PolicyGrantRepository;
 }
 
 class Supervisor implements RuntimePort {
@@ -175,7 +327,9 @@ class Supervisor implements RuntimePort {
   readonly #modelResolver: RuntimeModelResolver;
   readonly #permissionPolicy: PermissionPolicyPort;
   readonly #driverFactory: ThreadDriverFactory;
-  readonly #legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
+  #legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
+  readonly #capabilityServices: Readonly<RuntimeCapabilityServices> | undefined;
+  #policyGrants: PolicyGrantRepository | undefined;
   readonly #pendingApprovalDiagnostics: {
     readonly code: string;
     readonly message: string;
@@ -213,44 +367,54 @@ class Supervisor implements RuntimePort {
     this.#permissionPolicy = input.options.permissionPolicy;
     this.#driverFactory = input.options.threadDriverFactory;
     this.#legacyApprovalPatterns = input.legacyApprovalPatterns;
-    this.#pendingApprovalDiagnostics = [
+    this.#capabilityServices = input.options.capabilityMode === 'registry'
+      ? input.options.capabilityServices
+      : undefined;
+    this.#policyGrants = input.policyGrants;
+    const diagnostics = [
       ...(input.legacyApprovalPatterns?.startupDiagnostics?.() ?? []),
+      ...(input.policyGrants?.startupDiagnostics?.() ?? []),
     ];
+    this.#pendingApprovalDiagnostics = diagnostics.filter((diagnostic, index) =>
+      diagnostics.findIndex((candidate) =>
+        candidate.code === diagnostic.code && candidate.message === diagnostic.message) === index);
   }
 
-  static async open(input: SupervisorOpenInput): Promise<Supervisor> {
-    const supervisor = new Supervisor(input);
-    const catalog = await input.workspace.listThreads();
+  static create(input: SupervisorOpenInput): Supervisor {
+    return new Supervisor(input);
+  }
+
+  async initialize(): Promise<void> {
+    const catalog = await this.#workspace.listThreads();
     for (const item of catalog) {
-      supervisor.#catalog.set(item.summary.threadId, item);
-      supervisor.#threadClaims.set(item.summary.threadId, { kind: 'existing' });
-      supervisor.#events.registerThread(item.summary.threadId);
-      const journal = await input.workspace.openThreadJournal(item.summary.threadId);
+      this.#catalog.set(item.summary.threadId, item);
+      this.#threadClaims.set(item.summary.threadId, { kind: 'existing' });
+      this.#events.registerThread(item.summary.threadId);
+      const journal = await this.#workspace.openThreadJournal(item.summary.threadId);
       if (journal === undefined) continue;
       const records = await journal.load();
       const initial = foldThreadJournal(records);
-      supervisor.#events.seed(item.summary.threadId, initial.envelopes);
-      const recovered = await supervisor.#recoverUnloadedJournal(item.summary.threadId, journal, records);
+      this.#events.seed(item.summary.threadId, initial.envelopes);
+      const recovered = await this.#recoverUnloadedJournal(item.summary.threadId, journal, records);
       const folded = withAttachmentRecoveryOverlay(recovered);
-      supervisor.#threadMeta.set(item.summary.threadId, folded.meta);
-      supervisor.#unloaded.set(item.summary.threadId, folded);
+      this.#threadMeta.set(item.summary.threadId, folded.meta);
+      this.#unloaded.set(item.summary.threadId, folded);
       if (folded.summary.state === 'closed' && item.summary.state !== 'closed') {
-        supervisor.#catalog.set(item.summary.threadId, {
+        this.#catalog.set(item.summary.threadId, {
           ...item,
           summary: withoutActiveRunSummary(item.summary, 'closed'),
         });
       }
     }
-    let ledger = await input.workspace.loadSupervisorOps();
-    supervisor.#restoreReservedLifecycleClaims(ledger);
-    await supervisor.#reconcileSupervisorLedger(ledger);
-    ledger = await input.workspace.loadSupervisorOps();
-    await supervisor.#recoverReservedLifecycleAndScope(ledger);
-    ledger = await input.workspace.loadSupervisorOps();
-    supervisor.#applyLifecycleLedger(ledger);
-    await supervisor.#recoverAcceptedAttachments(ledger);
-    await supervisor.#recoverThreadResultOutbox();
-    return supervisor;
+    let ledger = await this.#workspace.loadSupervisorOps();
+    this.#restoreReservedLifecycleClaims(ledger);
+    await this.#reconcileSupervisorLedger(ledger);
+    ledger = await this.#workspace.loadSupervisorOps();
+    await this.#recoverReservedLifecycleAndScope(ledger);
+    ledger = await this.#workspace.loadSupervisorOps();
+    this.#applyLifecycleLedger(ledger);
+    await this.#recoverAcceptedAttachments(ledger);
+    await this.#recoverThreadResultOutbox();
   }
 
   newThreadId(): ThreadId {
@@ -311,6 +475,112 @@ class Supervisor implements RuntimePort {
     this.#closeController.abort();
     this.#closePromise = this.#performClose();
     return this.#closePromise;
+  }
+
+  async recoverLegacyApprovalUpgrade(threadIds: readonly ThreadId[]): Promise<void> {
+    for (const threadId of new Set(threadIds)) {
+      const journal = await this.#workspace.openThreadJournal(threadId);
+      if (journal === undefined) {
+        throw new RuntimeStorageError(
+          'legacy_approval_recovery_unavailable',
+          `Legacy approval recovery journal is unavailable: ${threadId}`,
+        );
+      }
+      const records = await journal.load();
+      const state = foldThreadJournal(records);
+      const recoveryEvents = new EventHub();
+      recoveryEvents.registerThread(threadId);
+      recoveryEvents.seed(threadId, state.envelopes);
+      try {
+        await this.#recoverUnloadedJournal(
+          threadId,
+          journal,
+          records,
+          recoveryEvents,
+          'legacy_upgrade',
+        );
+      } finally {
+        recoveryEvents.close();
+      }
+    }
+  }
+
+  bindPolicyGrantRepository(
+    repository: PolicyGrantRepository,
+    expectedMode: PolicyGrantRepository['mode'],
+  ): void {
+    this.#policyGrants = repository;
+    if (repository.workspaceId !== this.workspaceId || repository.mode !== expectedMode) {
+      throw new RuntimeStorageError(
+        'policy_grant_storage_mismatch',
+        'Policy grant repository does not match the requested workspace/mode',
+      );
+    }
+    for (const diagnostic of repository.startupDiagnostics?.() ?? []) {
+      if (this.#pendingApprovalDiagnostics.some((candidate) =>
+        candidate.code === diagnostic.code && candidate.message === diagnostic.message)) continue;
+      this.#pendingApprovalDiagnostics.push(diagnostic);
+    }
+  }
+
+  async releaseLegacyApprovalRecoveryBridge(): Promise<void> {
+    const repository = this.#legacyApprovalPatterns;
+    this.#legacyApprovalPatterns = undefined;
+    await repository?.close();
+  }
+
+  /** Construction failed after this Supervisor took ownership of workspace-scoped resources. */
+  async cleanupAfterConstructionFailure(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.#cleanupAttachedThreadsAfterOpenFailure();
+    } catch (error) {
+      failures.push(error);
+    }
+    for (const cleanup of [
+      () => this.#policyGrants?.close(),
+      () => this.#legacyApprovalPatterns?.close(),
+      () => this.#workspace.releaseSupervisorLease(this.#lease),
+      () => this.#workspace.close(),
+    ]) {
+      try {
+        await cleanup();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    this.#state = 'closed';
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Runtime construction owner cleanup failed');
+    }
+  }
+
+  async #cleanupAttachedThreadsAfterOpenFailure(): Promise<void> {
+    this.#state = 'closing';
+    this.#closeController.abort();
+    const failures: unknown[] = [];
+    while (this.#inFlight.size > 0) {
+      await Promise.allSettled([...this.#inFlight]);
+    }
+    const cohort = [...this.#threads.entries()].sort(([left], [right]) =>
+      threadDepth(right, this.#threadMeta) - threadDepth(left, this.#threadMeta));
+    for (const [threadId, thread] of cohort) {
+      try {
+        // No lifecycle op: failed construction must release resources without durably closing a
+        // thread that a later Runtime instance can still recover.
+        await thread.close();
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        this.#threads.delete(threadId);
+        this.#attachmentLifecycleOps.delete(threadId);
+      }
+    }
+    this.#events.close();
+    this.#state = 'closed';
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Supervisor open attachment cleanup failed');
+    }
   }
 
   async #submit(input: RuntimeOp): Promise<OpReceipt> {
@@ -510,12 +780,13 @@ class Supervisor implements RuntimePort {
       permissionCeiling: ceiling,
       ...(op.parentThreadId !== undefined && { parentThreadId: op.parentThreadId }),
       creationKey,
-      ...(this.#legacyApprovalPatterns !== undefined && {
+      ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
         legacyApprovalPatterns: this.#legacyApprovalPatterns,
       }),
     }, host);
     let journal: ThreadJournalPort | undefined;
     let writer: ThreadJournalWriter | undefined;
+    let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
       const meta = snapshot<ThreadMetaRecord>({
       type: 'thread_meta',
@@ -556,9 +827,10 @@ class Supervisor implements RuntimePort {
       { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
       { event: { type: 'thread_created', thread: summary }, opId: op.opId },
       { event: { type: 'op_completed', opType: op.type, outcome: 'applied' }, opId: op.opId },
-    ], [
-      { type: 'model_selected', ownerOpId: op.opId, model: op.model },
-    ]);
+      ], [
+        { type: 'model_selected', ownerOpId: op.opId, model: op.model },
+      ]);
+      threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
       const runtime = new ThreadRuntime({
       workspaceId: this.workspaceId,
       cwd: this.#cwd,
@@ -572,6 +844,12 @@ class Supervisor implements RuntimePort {
       onThreadResultPending: (result) => this.#deliverThreadResult(result),
       onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
       workspaceApprovalFailure: () => this.#approvalFatal,
+      ...(this.#capabilityServices !== undefined && threadPolicyEngine !== undefined
+        && this.#policyGrants !== undefined && {
+        capabilityServices: this.#capabilityServices,
+        threadPolicyEngine,
+        policyGrants: this.#policyGrants,
+      }),
     });
       host.bind(runtime);
       await attachment.driver.recover([]);
@@ -592,6 +870,11 @@ class Supervisor implements RuntimePort {
       const failures: unknown[] = [error];
       try {
         await attachment.driver.close();
+      } catch (closeError) {
+        failures.push(closeError);
+      }
+      try {
+        await threadPolicyEngine?.close();
       } catch (closeError) {
         failures.push(closeError);
       }
@@ -686,6 +969,7 @@ class Supervisor implements RuntimePort {
     let factoryStarted = false;
     let attachment: ThreadDriverAttachment | undefined;
     let writer: ThreadJournalWriter | undefined;
+    let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
       const records = await journal.load();
       const state = foldThreadJournal(records);
@@ -734,7 +1018,7 @@ class Supervisor implements RuntimePort {
           permissionCeiling: state.meta.permissionCeiling,
           committedCheckpoint: state.checkpoint,
           usedRequestIds: snapshot([...state.usedRequestIds]),
-          ...(this.#legacyApprovalPatterns !== undefined && {
+          ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
             legacyApprovalPatterns: this.#legacyApprovalPatterns,
           }),
         }, host);
@@ -760,6 +1044,7 @@ class Supervisor implements RuntimePort {
         records,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
+      threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
       const runtime = new ThreadRuntime({
         workspaceId: this.workspaceId,
         cwd: this.#cwd,
@@ -773,6 +1058,12 @@ class Supervisor implements RuntimePort {
         onThreadResultPending: (result) => this.#deliverThreadResult(result),
         onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
         workspaceApprovalFailure: () => this.#approvalFatal,
+        ...(this.#capabilityServices !== undefined && threadPolicyEngine !== undefined
+          && this.#policyGrants !== undefined && {
+          capabilityServices: this.#capabilityServices,
+          threadPolicyEngine,
+          policyGrants: this.#policyGrants,
+        }),
       });
       host.bind(runtime);
       await this.#recoverQueueEffects(attachment.driver, writer);
@@ -821,6 +1112,11 @@ class Supervisor implements RuntimePort {
         } catch (closeError) {
           failures.push(closeError);
         }
+      }
+      try {
+        await threadPolicyEngine?.close();
+      } catch (closeError) {
+        failures.push(closeError);
       }
       try {
         if (writer !== undefined) await writer.close();
@@ -1057,7 +1353,7 @@ class Supervisor implements RuntimePort {
         parentThreadId: input.state.meta.parentThreadId,
       }),
       creationKey,
-      ...(this.#legacyApprovalPatterns !== undefined && {
+      ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
         legacyApprovalPatterns: this.#legacyApprovalPatterns,
       }),
     }, input.host);
@@ -1095,6 +1391,7 @@ class Supervisor implements RuntimePort {
     await journal.acquireWriteLease(this.#lease);
     let writer: ThreadJournalWriter | undefined;
     let attachment: ThreadDriverAttachment | undefined;
+    let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
       const records = await journal.load();
       const state = foldThreadJournal(records);
@@ -1170,7 +1467,7 @@ class Supervisor implements RuntimePort {
           permissionCeiling: state.meta.permissionCeiling,
           committedCheckpoint: state.checkpoint,
           usedRequestIds: snapshot([...state.usedRequestIds]),
-          ...(this.#legacyApprovalPatterns !== undefined && {
+          ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
             legacyApprovalPatterns: this.#legacyApprovalPatterns,
           }),
         }, host);
@@ -1182,6 +1479,7 @@ class Supervisor implements RuntimePort {
           `Recovered driver differs from committed attachment ${op.threadId}`,
         );
       }
+      threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
       const runtime = new ThreadRuntime({
         workspaceId: this.workspaceId,
         cwd: this.#cwd,
@@ -1195,6 +1493,12 @@ class Supervisor implements RuntimePort {
         onThreadResultPending: (result) => this.#deliverThreadResult(result),
         onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
         workspaceApprovalFailure: () => this.#approvalFatal,
+        ...(this.#capabilityServices !== undefined && threadPolicyEngine !== undefined
+          && this.#policyGrants !== undefined && {
+          capabilityServices: this.#capabilityServices,
+          threadPolicyEngine,
+          policyGrants: this.#policyGrants,
+        }),
       });
       host.bind(runtime);
       await this.#recoverQueueEffects(attachment.driver, writer);
@@ -1212,6 +1516,11 @@ class Supervisor implements RuntimePort {
         } catch (closeError) {
           failures.push(closeError);
         }
+      }
+      try {
+        await threadPolicyEngine?.close();
+      } catch (closeError) {
+        failures.push(closeError);
       }
       try {
         if (writer !== undefined) await writer.close();
@@ -1522,6 +1831,120 @@ class Supervisor implements RuntimePort {
     }
   }
 
+  async #recoverPolicyGrantResponse(
+    writer: ThreadJournalWriter,
+    response: Extract<RuntimeOp, { type: 'control_response' }>,
+    request: Extract<RuntimeEvent, { type: 'control_request'; kind: 'approval' }>,
+    state: 'accepted_pending' | 'started',
+  ): Promise<void> {
+    const repository = this.#policyGrants;
+    const proposal = request.payload.grantProposal;
+    if (repository === undefined || proposal === undefined) {
+      throw new RuntimeStorageError(
+        'policy_grant_recovery_unavailable',
+        'Durable registry approval recovery requires a bound policy grant repository',
+      );
+    }
+    if (state === 'accepted_pending') {
+      await writer.commit([{
+        event: { type: 'op_started', opType: 'control_response' },
+        opId: response.opId,
+      }], [{ type: 'started', opId: response.opId }]);
+    }
+    const claim = writer.state.controlClaims.get(request.requestId);
+    if (claim === undefined || claim.responseOpId !== response.opId) {
+      throw new RuntimeStorageError('policy_grant_claim_missing', request.requestId);
+    }
+    const grant = snapshot<PolicyGrant>({
+      grantId: response.opId,
+      workspaceId: this.workspaceId,
+      capabilityId: proposal.capabilityId,
+      capabilityVersion: proposal.capabilityVersion,
+      registrationDigest: proposal.registrationDigest,
+      scope: proposal.scope,
+      policyBasisRevision: proposal.policyBasisRevision,
+      acceptedAt: claim.acceptedAt,
+    });
+    let result: Awaited<ReturnType<typeof repository.commitAllowAlways>>;
+    try {
+      result = await repository.commitAllowAlways(grant);
+    } catch (error) {
+      const failure = new RuntimeStorageError(
+        'policy_grant_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      );
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    }
+    if (result.kind === 'definitely_not_applied') {
+      await writer.commit([
+        {
+          event: { type: 'op_completed', opType: 'control_response', outcome: 'interrupted' },
+          opId: response.opId,
+        },
+        {
+          event: {
+            type: 'runtime_diagnostic',
+            severity: 'warning',
+            code: 'policy_grant_definitely_not_applied',
+            message: result.message,
+            scope: 'thread',
+          },
+        },
+      ], [
+        { type: 'completed', opId: response.opId, outcome: 'interrupted' },
+        {
+          type: 'control_response_claim_released',
+          requestId: request.requestId,
+          responseOpId: response.opId,
+          reason: 'effect_definitely_not_applied',
+        },
+      ]);
+      return;
+    }
+    if (result.kind === 'conflict' || result.kind === 'fenced') {
+      const failure = new RuntimeStorageError(
+        result.kind === 'conflict' ? 'policy_grant_conflict' : result.code,
+        result.message,
+      );
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    }
+    const resolution: Extract<RuntimeEvent, { type: 'control_resolved'; kind: 'approval' }> = {
+      type: 'control_resolved',
+      requestId: request.requestId,
+      kind: 'approval',
+      owningRunId: request.owningRunId,
+      owningTurnId: request.owningTurnId,
+      policyRevision: request.policyRevision,
+      decision: 'allow_always',
+    };
+    try {
+      await writer.commit([
+        {
+          event: resolution,
+          runId: request.owningRunId,
+          turnId: request.owningTurnId,
+          opId: response.opId,
+        },
+        {
+          event: { type: 'op_completed', opType: 'control_response', outcome: 'applied' },
+          opId: response.opId,
+        },
+      ], [
+        { type: 'control_resolved', resolution },
+        { type: 'completed', opId: response.opId, outcome: 'applied' },
+      ]);
+    } catch (error) {
+      const failure = new RuntimeStorageError(
+        'policy_grant_unknown_outcome',
+        error instanceof Error ? error.message : String(error),
+      );
+      this.#latchApprovalFatal(failure);
+      throw failure;
+    }
+  }
+
   async #recoverLegacyApprovalResponse(
     writer: ThreadJournalWriter,
     response: Extract<RuntimeOp, { type: 'control_response' }>,
@@ -1550,11 +1973,16 @@ class Supervisor implements RuntimePort {
     if (proposal === undefined) {
       throw new RuntimeStorageError('legacy_approval_proposal_missing', request.requestId);
     }
-    const adapter = await openAdapter.call(this.#driverFactory, {
-      workspaceId: this.workspaceId,
-      threadId: writer.state.meta.threadId,
-      patterns: repository,
-    });
+    let adapter: LegacyApprovalAdapter;
+    try {
+      adapter = await openAdapter.call(this.#driverFactory, {
+        workspaceId: this.workspaceId,
+        threadId: writer.state.meta.threadId,
+        patterns: repository,
+      });
+    } catch (error) {
+      throw legacyApprovalRecoveryUnavailable('Cannot open legacy approval recovery adapter', error);
+    }
     let result: Awaited<ReturnType<typeof adapter.applyResponse>>;
     try {
       result = await adapter.applyResponse({
@@ -1685,17 +2113,11 @@ class Supervisor implements RuntimePort {
     threadId: ThreadId,
     journal: import('./ports.js').ThreadJournalPort,
     initialRecords: readonly RuntimeJournalRecord[],
+    events: EventHub = this.#events,
+    mode: 'all' | 'legacy_upgrade' = 'all',
   ): Promise<FoldedThreadJournal> {
     let state = foldThreadJournal(initialRecords);
-    const recoverable = [...state.mailbox.entries()].filter(([, entry]) =>
-      entry.state === 'prepared'
-      || (entry.state === 'accepted_pending'
-        && (entry.op.type === 'prompt' || entry.op.type === 'continue'))
-      || (entry.state === 'started'
-        && entry.op.type !== 'set_model'
-        && entry.op.type !== 'steer'
-        && entry.op.type !== 'follow_up')
-      || (entry.state === 'accepted_pending' && entry.op.type === 'control_response'));
+    const recoverable = recoveryMailboxEntries(state);
     if (recoverable.length === 0) return state;
     await journal.acquireWriteLease(this.#lease);
     const records = await journal.load();
@@ -1704,13 +2126,23 @@ class Supervisor implements RuntimePort {
       workspaceId: this.workspaceId,
       threadId,
       journal,
-      events: this.#events,
+      events,
       clock: this.#clock,
       state,
       records,
     });
     try {
-      for (const [opId, entry] of state.mailbox) {
+      if (mode === 'legacy_upgrade') {
+        await this.#resolveLegacyControlsBeforeUpgrade(writer);
+      }
+      for (const [opId, entry] of recoveryMailboxEntries(writer.state)) {
+        if (mode === 'legacy_upgrade') {
+          if ((entry.state !== 'accepted_pending' && entry.state !== 'started')
+            || entry.op.type !== 'control_response') continue;
+          const response = entry.op;
+          const request = controlRequestForResponse(writer.state, response.requestId);
+          if (request === undefined || !isLegacyApprovalRequest(request)) continue;
+        }
         if (entry.state === 'prepared') {
           const parentOpId = 'parentOpId' in entry.op ? entry.op.parentOpId : undefined;
           await writer.commit([{
@@ -1722,6 +2154,11 @@ class Supervisor implements RuntimePort {
             },
             opId,
           }], [{ type: 'rejected', opId, reason: 'interrupted_before_accept' }]);
+          continue;
+        }
+        if ((entry.state === 'accepted_pending' || entry.state === 'started')
+          && (entry.op.type === 'abort' || entry.op.type === 'thread_close')) {
+          await this.#recoverCancellationBeforeResponses(writer, opId, entry);
           continue;
         }
         if ((entry.state === 'accepted_pending' || entry.state === 'started')
@@ -1744,11 +2181,38 @@ class Supervisor implements RuntimePort {
             const outcome = committedResolution.opId === response.opId
               && committedResolution.event.decision !== 'aborted'
               ? 'applied' as const
-              : 'interrupted' as const;
-            await writer.commit([{
+              : 'superseded' as const;
+            const envelopes: CommitEnvelopeInput[] = [];
+            const mutations: import('./ports.js').RuntimeThreadMutation[] = [];
+            if (entry.state === 'accepted_pending') {
+              envelopes.push({
+                event: { type: 'op_started', opType: 'control_response' },
+                opId,
+              });
+              mutations.push({ type: 'started', opId });
+            }
+            envelopes.push({
               event: { type: 'op_completed', opType: 'control_response', outcome },
               opId,
-            }], [{ type: 'completed', opId, outcome }]);
+            });
+            mutations.push({ type: 'completed', opId, outcome });
+            await writer.commit(
+              envelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
+              mutations,
+            );
+            continue;
+          }
+          if (
+            pendingRequest?.kind === 'approval'
+            && pendingRequest.payload.grantProposal !== undefined
+            && response.decision === 'allow_always'
+          ) {
+            await this.#recoverPolicyGrantResponse(
+              writer,
+              response,
+              pendingRequest,
+              entry.state,
+            );
             continue;
           }
           if (
@@ -1941,6 +2405,150 @@ class Supervisor implements RuntimePort {
     }
   }
 
+  async #resolveLegacyControlsBeforeUpgrade(
+    writer: ThreadJournalWriter,
+  ): Promise<void> {
+    const cancellationBeforeResponse = new Map<string, FoldedMailboxEntry>();
+    const earlierCancellations: FoldedMailboxEntry[] = [];
+    for (const [, entry] of acceptedMailboxEntriesInFifo(writer.state)) {
+      if (entry.op.type === 'abort' || entry.op.type === 'thread_close') {
+        earlierCancellations.push(entry);
+        continue;
+      }
+      if ((entry.state !== 'accepted_pending' && entry.state !== 'started')
+        || entry.op.type !== 'control_response') continue;
+      const response = entry.op;
+      const request = writer.state.checkpoint.frontend.pendingControls.find((candidate) =>
+        candidate.requestId === response.requestId);
+      if (request === undefined || !isLegacyApprovalRequest(request)) continue;
+      const cancellation = earlierCancellations.find((candidate) =>
+        cancellationSupersedesRequest(candidate, request));
+      if (cancellation !== undefined) {
+        cancellationBeforeResponse.set(request.requestId, cancellation);
+      }
+    }
+    for (const request of writer.state.checkpoint.frontend.pendingControls) {
+      if (!isLegacyApprovalRequest(request)) continue;
+      const claim = writer.state.controlClaims.get(request.requestId);
+      const cancellation = claim === undefined
+        ? earlierCancellations.find((candidate) => cancellationSupersedesRequest(candidate, request))
+        : cancellationBeforeResponse.get(request.requestId);
+      // Claimed responses without an earlier cancellation are recovered by the response pass;
+      // unclaimed legacy requests have no effect to replay and must be closed before grant open.
+      if (claim !== undefined && cancellation === undefined) continue;
+      let resolutionOpId: OpId;
+      if (cancellation?.op.type === 'abort') {
+        resolutionOpId = cancellation.op.opId;
+      } else {
+        resolutionOpId = this.#identityFactory.deriveOpId({
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (!isDerivedOpId(resolutionOpId)) throw new Error('identity_factory_invalid_derived_op');
+        const claim = await this.#workspace.reserveDerivedOpIdentity(this.#lease, {
+          opId: resolutionOpId,
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (claim.kind === 'conflict') throw new Error('derived_op_identity_conflict');
+      }
+      const resolution: Extract<RuntimeEvent, { type: 'control_resolved' }> = {
+        type: 'control_resolved',
+        requestId: request.requestId,
+        kind: request.kind,
+        owningRunId: request.owningRunId,
+        owningTurnId: request.owningTurnId,
+        policyRevision: request.policyRevision,
+        decision: 'aborted',
+      };
+      await writer.commit([{
+        event: resolution,
+        runId: request.owningRunId,
+        turnId: request.owningTurnId,
+        opId: resolutionOpId,
+      }], [{ type: 'control_resolved', resolution }]);
+    }
+  }
+
+  async #recoverCancellationBeforeResponses(
+    writer: ThreadJournalWriter,
+    opId: OpId,
+    entry: FoldedMailboxEntry,
+  ): Promise<void> {
+    if ((entry.state !== 'accepted_pending' && entry.state !== 'started')
+      || (entry.op.type !== 'abort' && entry.op.type !== 'thread_close')) {
+      throw new Error('invalid_recovery_cancellation');
+    }
+    const op = entry.op;
+    const pending = writer.state.checkpoint.frontend.pendingControls.filter((request) =>
+      cancellationSupersedesRequest(entry, request));
+    const parentOpId = 'parentOpId' in op ? op.parentOpId : undefined;
+    const envelopes: CommitEnvelopeInput[] = [];
+    const mutations: import('./ports.js').RuntimeThreadMutation[] = [];
+    if (entry.state === 'accepted_pending') {
+      envelopes.push({
+        event: {
+          type: 'op_started',
+          opType: op.type,
+          ...(parentOpId !== undefined && { parentOpId }),
+        },
+        opId,
+      });
+      mutations.push({ type: 'started', opId });
+    }
+    for (const request of pending) {
+      let resolutionOpId: OpId = opId;
+      if (op.type === 'thread_close') {
+        const derived = this.#identityFactory.deriveOpId({
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (!isDerivedOpId(derived)) throw new Error('identity_factory_invalid_derived_op');
+        const claim = await this.#workspace.reserveDerivedOpIdentity(this.#lease, {
+          opId: derived,
+          purpose: 'control_recovery',
+          workspaceId: this.workspaceId,
+          parts: [writer.state.meta.threadId, request.requestId],
+        });
+        if (claim.kind === 'conflict') throw new Error('derived_op_identity_conflict');
+        resolutionOpId = derived;
+      }
+      const resolution: Extract<RuntimeEvent, { type: 'control_resolved' }> = {
+        type: 'control_resolved',
+        requestId: request.requestId,
+        kind: request.kind,
+        owningRunId: request.owningRunId,
+        owningTurnId: request.owningTurnId,
+        policyRevision: request.policyRevision,
+        decision: 'aborted',
+      };
+      envelopes.push({
+        event: resolution,
+        runId: request.owningRunId,
+        turnId: request.owningTurnId,
+        opId: resolutionOpId,
+      });
+      mutations.push({ type: 'control_resolved', resolution });
+    }
+    envelopes.push({
+      event: {
+        type: 'op_completed',
+        opType: op.type,
+        outcome: 'interrupted',
+        ...(parentOpId !== undefined && { parentOpId }),
+      },
+      opId,
+    });
+    mutations.push({ type: 'completed', opId, outcome: 'interrupted' });
+    await writer.commit(
+      envelopes as [CommitEnvelopeInput, ...CommitEnvelopeInput[]],
+      mutations,
+    );
+  }
+
   async #reconcileSupervisorLedger(records: readonly SupervisorOpLedgerRecord[]): Promise<void> {
     for (const record of records) {
       if (record.state === 'final') continue;
@@ -2110,6 +2718,11 @@ class Supervisor implements RuntimePort {
     }
     this.#events.close();
     try {
+      await this.#policyGrants?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       await this.#legacyApprovalPatterns?.close();
     } catch (error) {
       failures.push(error);
@@ -2166,9 +2779,163 @@ class Supervisor implements RuntimePort {
       if (this.#approvalDiagnosticFlight === flight) this.#approvalDiagnosticFlight = undefined;
     }
   }
+
+  async #openThreadPolicyEngine(threadId: ThreadId): Promise<ThreadPolicyEngine | undefined> {
+    const services = this.#capabilityServices;
+    if (services === undefined) return undefined;
+    if (this.#policyGrants === undefined) {
+      throw new RuntimeStorageError(
+        'policy_grant_storage_unavailable',
+        'Registry attachment has no bound policy grant repository',
+      );
+    }
+    const engine: unknown = await services.policyEngine.openThread({
+      workspaceId: this.workspaceId,
+      threadId,
+    });
+    if (engine === null || typeof engine !== 'object'
+      || typeof (engine as Partial<ThreadPolicyEngine>).capture !== 'function'
+      || typeof (engine as Partial<ThreadPolicyEngine>).evaluate !== 'function'
+      || typeof (engine as Partial<ThreadPolicyEngine>).close !== 'function') {
+      const close = (engine as { close?: unknown } | null)?.close;
+      if (typeof close === 'function') {
+        await Promise.resolve(close.call(engine)).catch(() => undefined);
+      }
+      throw new TypeError('PolicyEngine.openThread returned an invalid ThreadPolicyEngine');
+    }
+    return engine as ThreadPolicyEngine;
+  }
 }
 
-function validateCreateOptions(options: CreateRuntimeOptions): void {
+interface LegacyApprovalJournalRecoveryInventory {
+  readonly controlThreadIds: readonly ThreadId[];
+  readonly effectThreadIds: readonly ThreadId[];
+}
+
+async function inspectLegacyApprovalJournalRecovery(
+  workspace: RuntimeWorkspaceStoragePort,
+): Promise<LegacyApprovalJournalRecoveryInventory> {
+  const controlThreadIds: ThreadId[] = [];
+  const effectThreadIds: ThreadId[] = [];
+  const catalog = await workspace.listThreads();
+  for (const item of catalog) {
+    const journal = await workspace.openThreadJournal(item.summary.threadId);
+    if (journal === undefined) continue;
+    const state = foldThreadJournal(await journal.load());
+    const obligations = legacyApprovalRecoveryObligations(state);
+    if (obligations.hasControl) controlThreadIds.push(item.summary.threadId);
+    if (obligations.hasEffect) effectThreadIds.push(item.summary.threadId);
+  }
+  return snapshot({ controlThreadIds, effectThreadIds });
+}
+
+function legacyApprovalRecoveryObligations(
+  state: FoldedThreadJournal,
+): { readonly hasControl: boolean; readonly hasEffect: boolean } {
+  let hasControl = state.checkpoint.frontend.pendingControls.some(isLegacyApprovalRequest);
+  let hasEffect = false;
+  const earlierCancellations: FoldedMailboxEntry[] = [];
+  for (const [, entry] of acceptedMailboxEntriesInFifo(state)) {
+    if (entry.op.type === 'abort' || entry.op.type === 'thread_close') {
+      earlierCancellations.push(entry);
+      continue;
+    }
+    if ((entry.state !== 'accepted_pending' && entry.state !== 'started')
+      || entry.op.type !== 'control_response'
+    ) continue;
+    const response = entry.op;
+    const request = controlRequestForResponse(state, response.requestId);
+    if (request === undefined || !isLegacyApprovalRequest(request)) continue;
+    hasControl = true;
+    const proposal = request.payload.legacyProposal;
+    const alreadyResolved = state.envelopes.some((envelope) =>
+      envelope.event.type === 'control_resolved'
+      && envelope.event.requestId === request.requestId);
+    const superseded = earlierCancellations.some((cancellation) =>
+      cancellationSupersedesRequest(cancellation, request));
+    if (!alreadyResolved
+      && !superseded
+      && response.decision === 'allow_always'
+      && proposal !== undefined
+      && !proposal.forceConfirm
+      && proposal.patterns.length > 0) {
+      hasEffect = true;
+    }
+  }
+  return { hasControl, hasEffect };
+}
+
+function controlRequestForResponse(
+  state: FoldedThreadJournal,
+  requestId: string,
+): Extract<RuntimeEvent, { type: 'control_request' }> | undefined {
+  const pending = state.checkpoint.frontend.pendingControls.find((candidate) =>
+    candidate.requestId === requestId);
+  if (pending !== undefined) return pending;
+  const historical = state.envelopes.findLast((envelope) =>
+    envelope.event.type === 'control_request'
+    && envelope.event.requestId === requestId);
+  return historical?.event.type === 'control_request' ? historical.event : undefined;
+}
+
+function isLegacyApprovalRequest(
+  request: Extract<RuntimeEvent, { type: 'control_request' }>,
+): request is Extract<RuntimeEvent, { type: 'control_request'; kind: 'approval' }> {
+  return request.kind === 'approval' && request.payload.grantProposal === undefined;
+}
+
+function recoveryMailboxEntries(
+  state: FoldedThreadJournal,
+): readonly (readonly [OpId, FoldedMailboxEntry])[] {
+  const prepared = [...state.mailbox.entries()].filter((entry) => entry[1].state === 'prepared');
+  const accepted = acceptedMailboxEntriesInFifo(state).filter(([, entry]) => {
+    if (entry.state === 'accepted_pending') {
+      return entry.op.type === 'prompt'
+        || entry.op.type === 'continue'
+        || entry.op.type === 'control_response'
+        || entry.op.type === 'abort'
+        || entry.op.type === 'thread_close';
+    }
+    return entry.state === 'started'
+      && entry.op.type !== 'set_model'
+      && entry.op.type !== 'steer'
+      && entry.op.type !== 'follow_up';
+  });
+  return [...prepared, ...accepted];
+}
+
+function acceptedMailboxEntriesInFifo(
+  state: FoldedThreadJournal,
+): readonly (readonly [OpId, FoldedMailboxEntry])[] {
+  const acceptedSeq = new Map<OpId, number>();
+  for (const envelope of state.envelopes) {
+    if (envelope.opId !== undefined
+      && envelope.event.type === 'op_accepted'
+      && !acceptedSeq.has(envelope.opId)) {
+      acceptedSeq.set(envelope.opId, envelope.seq);
+    }
+  }
+  return [...state.mailbox.entries()]
+    .filter((entry): entry is [OpId, FoldedMailboxEntry] =>
+      (entry[1].state === 'accepted_pending' || entry[1].state === 'started')
+      && acceptedSeq.has(entry[0]))
+    .sort((left, right) => acceptedSeq.get(left[0])! - acceptedSeq.get(right[0])!);
+}
+
+function cancellationSupersedesRequest(
+  entry: FoldedMailboxEntry,
+  request: Extract<RuntimeEvent, { type: 'control_request' }>,
+): boolean {
+  if (entry.op.type === 'thread_close') return true;
+  if (entry.op.type !== 'abort') return false;
+  const target = entry.resolvedTarget
+    ?? ('resolvedTarget' in entry.op ? entry.op.resolvedTarget : undefined);
+  return target?.kind === 'run' && target.runId === request.owningRunId;
+}
+
+function validateCreateOptions(
+  options: CreateRuntimeOptions,
+): ValidatedCreateRuntimeOptions {
   const cwd = options.workspace.cwd;
   if (
     typeof cwd !== 'string' ||
@@ -2182,12 +2949,122 @@ function validateCreateOptions(options: CreateRuntimeOptions): void {
   if (options.workspace.workspaceId !== undefined) {
     assertWorkspaceId(options.workspace.workspaceId, 'workspace.workspaceId');
   }
-  if (options.capabilityMode !== undefined && options.capabilityMode !== 'static') {
-    throw new TypeError('Phase-1 Runtime only supports capabilityMode="static"');
+  const capabilityMode = options.capabilityMode ?? 'static';
+  const driverMode = options.threadDriverFactory.requirements.capabilityMode ?? 'static';
+  if (capabilityMode === 'static') {
+    if ((options as { readonly capabilityServices?: unknown }).capabilityServices !== undefined) {
+      throw new TypeError('Static Runtime does not accept capabilityServices');
+    }
+    if (driverMode !== 'static') {
+      throw new TypeError('Static Runtime requires a static ThreadDriverFactory');
+    }
+    const { capabilityServices: _capabilityServices, ...staticOptions } = options;
+    void _capabilityServices;
+    return Object.freeze({
+      ...staticOptions,
+      workspace: Object.freeze({ ...options.workspace }),
+      capabilityMode: 'static' as const,
+    }) as StaticCreateRuntimeOptions;
   }
-  if ((options as { readonly capabilityServices?: unknown }).capabilityServices !== undefined) {
-    throw new TypeError('Phase-1 Runtime does not accept capabilityServices');
+  if (capabilityMode !== 'registry') throw new TypeError('Invalid capabilityMode');
+  if (driverMode !== 'registry') {
+    throw new TypeError('Registry Runtime requires a registry-aware ThreadDriverFactory');
   }
+  if (options.threadDriverFactory.requirements.approvalMode !== 'legacy_session_edge') {
+    throw new TypeError('Registry Runtime cannot install the durable legacy approval bridge');
+  }
+  const services: unknown = (options as { readonly capabilityServices?: unknown }).capabilityServices;
+  if (services === null || typeof services !== 'object' || Array.isArray(services)) {
+    throw new TypeError('Registry Runtime requires a complete capabilityServices bundle');
+  }
+  const record = services as Record<string, unknown>;
+  const expectedKeys = [
+    'capabilities',
+    'providers',
+    'promptAssembler',
+    'basePrompts',
+    'ruleSnapshots',
+    'ruleBudget',
+    'policyEngine',
+    'ruleFreshness',
+    'grantMode',
+  ];
+  const ownKeys = Reflect.ownKeys(record);
+  if (ownKeys.length !== expectedKeys.length
+    || expectedKeys.some((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(record, key);
+      return descriptor === undefined || !descriptor.enumerable || !('value' in descriptor);
+    })
+    || ownKeys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))) {
+    throw new TypeError('Registry capabilityServices has missing or unknown fields');
+  }
+  const value = (key: string): unknown => Object.getOwnPropertyDescriptor(record, key)?.value;
+  const capabilities = value('capabilities');
+  const providers = value('providers');
+  const promptAssembler = value('promptAssembler');
+  const basePrompts = value('basePrompts');
+  const ruleSnapshots = value('ruleSnapshots');
+  const policyEngine = value('policyEngine');
+  const ruleFreshness = value('ruleFreshness');
+  const grantMode = value('grantMode');
+  if (!hasMethod(capabilities, 'snapshot')
+    || !hasMethod(providers, 'snapshot')
+    || !hasMethod(promptAssembler, 'assemble')
+    || !hasMethod(basePrompts, 'capture')
+    || !hasMethod(ruleSnapshots, 'capture')
+    || !hasMethod(policyEngine, 'openThread')
+    || !hasMethod(ruleFreshness, 'check')
+    || (grantMode !== 'workspace' && grantMode !== 'legacy_global_approvals_v1')) {
+    throw new TypeError('Registry capabilityServices bundle is incomplete');
+  }
+  let budget: ReturnType<typeof strictJsonSnapshot>;
+  try {
+    budget = strictJsonSnapshot(value('ruleBudget'));
+  } catch {
+    throw new TypeError('Registry ruleBudget is invalid');
+  }
+  if (budget === null || typeof budget !== 'object' || Array.isArray(budget)) {
+    throw new TypeError('Registry ruleBudget is invalid');
+  }
+  const budgetRecord = budget as Readonly<Record<string, unknown>>;
+  const budgetKeys = ['maxFiles', 'maxFileBytes', 'maxBytes', 'maxPromptTokens'];
+  if (Reflect.ownKeys(budgetRecord).length !== budgetKeys.length
+    || budgetKeys.some((key) => !Object.hasOwn(budgetRecord, key))
+    || budgetKeys.some((key) =>
+      !Number.isSafeInteger(budgetRecord[key]) || (budgetRecord[key] as number) < 0)) {
+    throw new TypeError('Registry ruleBudget is invalid');
+  }
+  const capabilityServices = Object.freeze({
+    capabilities,
+    providers,
+    promptAssembler,
+    basePrompts,
+    ruleSnapshots,
+    ruleBudget: budget,
+    policyEngine,
+    ruleFreshness,
+    grantMode,
+  }) as unknown as Readonly<RuntimeCapabilityServices>;
+  return Object.freeze({
+    ...options,
+    workspace: Object.freeze({ ...options.workspace }),
+    capabilityMode: 'registry' as const,
+    capabilityServices,
+  }) as RegistryCreateRuntimeOptions;
+}
+
+function hasMethod(value: unknown, method: string): boolean {
+  return value !== null
+    && typeof value === 'object'
+    && typeof (value as Record<string, unknown>)[method] === 'function';
+}
+
+function legacyApprovalRecoveryUnavailable(context: string, error: unknown): RuntimeStorageError {
+  if (error instanceof RuntimeStorageError && error.code === 'legacy_approval_recovery_unavailable') {
+    return error;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return new RuntimeStorageError('legacy_approval_recovery_unavailable', `${context}: ${detail}`);
 }
 
 function rejected(

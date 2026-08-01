@@ -4,20 +4,26 @@
 import {
   canonicalJson,
   canonicalJsonSha256,
+  deriveInvocationId,
   isDerivedOpId,
   isRunId,
   isTurnId,
+  ProviderEventStream,
   strictJsonSnapshot,
 } from '../protocol/index.js';
 import type {
+  AgentMessage,
+  AssistantMessage,
   ExternalThreadRuntimeOp,
   ExternalOpId,
   InternalOpReceipt,
   InternalThreadRuntimeOp,
   MailboxRuntimeOp,
+  ModelConfig,
   OpId,
   OpReceipt,
   PermissionCeilingSnapshot,
+  PolicyGrantScope,
   ResolvedAbortTarget,
   RunId,
   RuntimeOp,
@@ -26,6 +32,16 @@ import type {
   TurnId,
   WorkspaceId,
 } from '../protocol/index.js';
+import type {
+  PolicyDecision,
+  PolicyGrant,
+  PolicyGrantRepositoryPort,
+  PreparedInvocation,
+  RuntimeCapabilityServices,
+  RuleSnapshotDiagnostic,
+  ThreadPolicyEngine,
+  TurnPolicyContext,
+} from '../capabilities/types.js';
 import type {
   LegacyApprovalContext,
   LegacyApprovalInvocationResult,
@@ -40,15 +56,17 @@ import type {
   ThreadIdentityPort,
   ThreadRuntimePreparedInput,
 } from './thread-runtime-ports.js';
+import type { RuntimeTurnPort } from '../agent/index.js';
 import type {
   RuntimeThreadMutation,
   ThreadResultDeliveryRecord,
   ThreadResultOutboxMutation,
 } from './thread-journal-records.js';
 import { RuntimeStorageError } from '../shared/runtime-storage-error.js';
+import { FileTracker } from '../shared/index.js';
 import { validatePermissionCeilingSnapshot } from './permission-ceiling.js';
 import { snapshotFromFold, ThreadJournalWriter } from './thread-journal.js';
-import type { FoldedThreadJournal } from './thread-journal.js';
+import type { CommitEnvelopeInput, FoldedThreadJournal } from './thread-journal.js';
 
 interface ActiveRun {
   readonly rootOpId: ExternalOpId;
@@ -77,6 +95,9 @@ export interface ThreadRuntimeOptions {
   readonly onThreadResultPending?: (result: ThreadResultOutboxMutation) => Promise<void>;
   readonly onWorkspaceApprovalFatal?: (error: Error) => void;
   readonly workspaceApprovalFailure?: () => Error | undefined;
+  readonly capabilityServices?: Readonly<RuntimeCapabilityServices>;
+  readonly threadPolicyEngine?: ThreadPolicyEngine;
+  readonly policyGrants?: PolicyGrantRepositoryPort;
 }
 
 interface PendingLegacyApprovalWaiter {
@@ -84,6 +105,13 @@ interface PendingLegacyApprovalWaiter {
   readonly owningRunId: RunId;
   readonly owningTurnId: TurnId;
   readonly resolve: (result: LegacyApprovalInvocationResult) => void;
+}
+
+interface RuntimeTurnCaptureState {
+  readonly promise: Promise<RuntimeTurnPort>;
+  status: 'capturing' | 'captured' | 'failed';
+  consumedRuleScopes?: readonly string[];
+  ruleDiagnostics?: readonly Readonly<RuleSnapshotDiagnostic>[];
 }
 
 export class ThreadDriverHostController implements ThreadDriverHostServices {
@@ -137,6 +165,17 @@ export class ThreadDriverHostController implements ThreadDriverHostServices {
     return this.#get().requestLegacyApproval(input);
   }
 
+  captureRuntimeTurn(input: {
+    readonly rootOpId: ExternalOpId;
+    readonly runId: RunId;
+    readonly turnId: TurnId;
+    readonly model: Readonly<ModelConfig>;
+    readonly transcript: readonly Readonly<AgentMessage>[];
+    readonly signal: AbortSignal;
+  }): Promise<RuntimeTurnPort> {
+    return this.#get().captureRuntimeTurn(input);
+  }
+
   #get(): ThreadRuntime {
     if (this.#runtime === undefined) throw new Error('Thread driver emitted before attachment activation');
     return this.#runtime;
@@ -156,7 +195,12 @@ export class ThreadRuntime {
   readonly #onThreadResultPending: ((result: ThreadResultOutboxMutation) => Promise<void>) | undefined;
   readonly #onWorkspaceApprovalFatal: ((error: Error) => void) | undefined;
   readonly #workspaceApprovalFailure: (() => Error | undefined) | undefined;
+  readonly #capabilityServices: Readonly<RuntimeCapabilityServices> | undefined;
+  readonly #threadPolicyEngine: ThreadPolicyEngine | undefined;
+  readonly #policyGrants: PolicyGrantRepositoryPort | undefined;
+  readonly #fileTracker = new FileTracker();
   readonly #approvalWaiters = new Map<string, PendingLegacyApprovalWaiter>();
+  readonly #runtimeTurnCaptures = new Map<string, RuntimeTurnCaptureState>();
   #admission: Promise<void> = Promise.resolve();
   #active: ActiveRun | undefined;
   readonly #queuedActivities: QueuedActivity[] = [];
@@ -202,6 +246,9 @@ export class ThreadRuntime {
     this.#onThreadResultPending = options.onThreadResultPending;
     this.#onWorkspaceApprovalFatal = options.onWorkspaceApprovalFatal;
     this.#workspaceApprovalFailure = options.workspaceApprovalFailure;
+    this.#capabilityServices = options.capabilityServices;
+    this.#threadPolicyEngine = options.threadPolicyEngine;
+    this.#policyGrants = options.policyGrants;
     for (const run of this.#writer.state.runs.values()) {
       if (run.predecessorRunId === undefined || (run.reason !== 'retry' && run.reason !== 'compaction')) continue;
       this.#successors.set(successorKey(run.predecessorRunId, run.reason), {
@@ -376,6 +423,8 @@ export class ThreadRuntime {
     const pendingSuccessor = this.#pendingSuccessor;
     const virtuallyActivatedRuns = new Set<RunId>();
     const virtuallyActivatedTurns = new Set<string>();
+    const deferredTurnDiagnostics: CommitEnvelopeInput[] = [];
+    const turnCapturesToRelease = new Set<string>();
     const turnsToActivate: Array<{
       readonly key: string;
       readonly reservation: {
@@ -435,6 +484,13 @@ export class ThreadRuntime {
         if (reservation === undefined || reservation.activated || virtuallyActivatedTurns.has(key)) {
           throw new Error('turn_start does not match a fresh turn reservation');
         }
+        const capture = this.#runtimeTurnCaptures.get(key);
+        if (this.#capabilityServices !== undefined && capture === undefined) {
+          throw new Error('registry_turn_capture_missing');
+        }
+        if (capture?.status === 'capturing') {
+          throw new Error('registry_turn_capture_incomplete');
+        }
         virtuallyActivatedTurns.add(key);
         turnsToActivate.push({ key, reservation });
         extra.push({
@@ -443,6 +499,35 @@ export class ThreadRuntime {
           turnId: input.turnId,
           turnOrdinal: reservation.turnOrdinal,
         });
+        if (capture?.status === 'captured') {
+          const consumedScopes = capture.consumedRuleScopes ?? [];
+          if (consumedScopes.length > 0) {
+            extra.push({
+              type: 'rule_scope_window_replaced',
+              consumedScopes,
+              replacementScopes: [],
+              owningTurnId: input.turnId,
+            });
+          }
+          for (const diagnostic of capture.ruleDiagnostics ?? []) {
+            deferredTurnDiagnostics.push({
+              event: {
+                type: 'runtime_diagnostic',
+                severity: 'warning',
+                code: diagnostic.code,
+                message: diagnostic.path === undefined
+                  ? diagnostic.message
+                  : `${diagnostic.path}: ${diagnostic.message}`,
+                scope: 'turn',
+              },
+              runId: input.runId,
+              turnId: input.turnId,
+            });
+          }
+        }
+      }
+      if (input.event.type === 'turn_end' && input.runId !== undefined && input.turnId !== undefined) {
+        turnCapturesToRelease.add(turnIdentityKey(input.runId, input.turnId));
       }
       if (input.event.type === 'agent_start' && input.runId !== undefined) {
         const run = this.#writer.state.runs.get(input.runId);
@@ -466,6 +551,13 @@ export class ThreadRuntime {
     }
     await this.#writer.commitDriverEvents(inputs, checkpointMutation, extra);
     for (const { reservation } of turnsToActivate) reservation.activated = true;
+    if (deferredTurnDiagnostics.length > 0) {
+      await this.#writer.commit([
+        deferredTurnDiagnostics[0]!,
+        ...deferredTurnDiagnostics.slice(1),
+      ]);
+    }
+    for (const key of turnCapturesToRelease) this.#runtimeTurnCaptures.delete(key);
     if (activatesSuccessor) this.#pendingSuccessor = undefined;
   }
 
@@ -522,6 +614,381 @@ export class ThreadRuntime {
     });
   }
 
+  captureRuntimeTurn(input: {
+    readonly rootOpId: ExternalOpId;
+    readonly runId: RunId;
+    readonly turnId: TurnId;
+    readonly model: Readonly<ModelConfig>;
+    readonly transcript: readonly Readonly<AgentMessage>[];
+    readonly signal: AbortSignal;
+  }): Promise<RuntimeTurnPort> {
+    const key = turnIdentityKey(input.runId, input.turnId);
+    const existing = this.#runtimeTurnCaptures.get(key);
+    if (existing !== undefined) return existing.promise;
+
+    const state = {} as RuntimeTurnCaptureState;
+    const promise = Promise.resolve()
+      .then(() => this.#captureRuntimeTurnOnce(input, state))
+      .then(
+        (runtimeTurn) => {
+          state.status = 'captured';
+          return runtimeTurn;
+        },
+        (error: unknown) => {
+          state.status = 'failed';
+          throw error;
+        },
+      );
+    Object.assign(state, { promise, status: 'capturing' as const });
+    // Publish the single-flight before invoking any mutable snapshot source. Serial and concurrent
+    // callers for the same identity therefore observe the exact same immutable RuntimeTurnPort.
+    this.#runtimeTurnCaptures.set(key, state);
+    return promise;
+  }
+
+  async #captureRuntimeTurnOnce(
+    input: {
+      readonly rootOpId: ExternalOpId;
+      readonly runId: RunId;
+      readonly turnId: TurnId;
+      readonly model: Readonly<ModelConfig>;
+      readonly transcript: readonly Readonly<AgentMessage>[];
+      readonly signal: AbortSignal;
+    },
+    state: RuntimeTurnCaptureState,
+  ): Promise<RuntimeTurnPort> {
+    this.#assertWorkspaceCapabilitiesAvailable();
+    const services = this.#capabilityServices;
+    const policyEngine = this.#threadPolicyEngine;
+    const grantsRepository = this.#policyGrants;
+    if (services === undefined || policyEngine === undefined || grantsRepository === undefined) {
+      throw new Error('registry_runtime_services_unavailable');
+    }
+    if (services.grantMode !== grantsRepository.mode) {
+      throw new Error('registry_runtime_grant_mode_mismatch');
+    }
+    const active = this.#active;
+    if (active === undefined
+      || active.rootOpId !== input.rootOpId
+      || active.currentRunId !== input.runId) {
+      throw new Error('registry_turn_identity_mismatch');
+    }
+    const reservation = this.#turnReservations.get(turnIdentityKey(input.runId, input.turnId));
+    if (reservation === undefined) {
+      throw new Error('registry_turn_not_reserved');
+    }
+    if (reservation.activated) {
+      throw new Error('registry_turn_capture_after_start');
+    }
+
+    // Snapshot every mutable source exactly once at the turn boundary. Later preparation and
+    // execution only retain references captured below, so hot updates affect the next turn only.
+    const context = strictJsonSnapshot({
+      workspaceId: this.workspaceId,
+      threadId: this.threadId,
+      runId: input.runId,
+      turnId: input.turnId,
+      cwd: this.#cwd,
+    }) as unknown as Readonly<TurnPolicyContext>;
+    const modelView = strictJsonSnapshot({
+      ref: input.model.ref,
+      ...(input.model.limits !== undefined && { limits: input.model.limits }),
+    }) as unknown as Readonly<import('../capabilities/types.js').PromptModelView>;
+    const catalog = services.capabilities.snapshot();
+    const providers = services.providers.snapshot();
+    const provider = providers.resolve(input.model.ref.api);
+    throwIfTurnCaptureAborted(input.signal);
+    const grants = await awaitTurnCaptureGate(grantsRepository.snapshot(), input.signal);
+    const knownResourceScopes = [...this.#writer.state.observedRuleScopes].sort(compareUtf8);
+    const ruleCapture = await awaitTurnCaptureGate(
+      services.ruleSnapshots.capture(strictJsonSnapshot({
+        context,
+        knownResourceScopes,
+        budget: services.ruleBudget,
+      }) as unknown as Parameters<typeof services.ruleSnapshots.capture>[0]),
+      input.signal,
+    );
+    if (!ruleCapture.ok) {
+      throw new Error(`${ruleCapture.code}: ${ruleCapture.message}`);
+    }
+    const basePrompt = await awaitTurnCaptureGate(
+      services.basePrompts.capture(strictJsonSnapshot({
+        context,
+        model: modelView,
+      }) as unknown as Parameters<typeof services.basePrompts.capture>[0]),
+      input.signal,
+    );
+    const effectivePolicy = await awaitTurnCaptureGate(policyEngine.capture({
+      context,
+      workspaceCeiling: reservation.workspaceCeiling,
+      runCeiling: reservation.runCeiling,
+      turnCeiling: reservation.turnCeiling,
+      rules: ruleCapture.snapshot,
+      grants,
+    }), input.signal);
+    this.#assertWorkspaceCapabilitiesAvailable();
+    state.consumedRuleScopes = Object.freeze([...knownResourceScopes]);
+    state.ruleDiagnostics = strictJsonSnapshot(
+      ruleCapture.snapshot.discovery.diagnostics,
+    ) as unknown as readonly Readonly<RuleSnapshotDiagnostic>[];
+    // The transcript is an ownership witness supplied by the driver. PromptAssembler receives the
+    // post-transform outbound view later; retaining this mutable array would violate snapshotting.
+    void input.transcript;
+
+    const streamFn = provider?.stream ?? ((model) => unsupportedProviderStream(
+      model,
+      this.#clock.now(),
+      `No provider adapter is registered for API ${JSON.stringify(model.ref.api)}`,
+    ));
+    const runtimeTurn: RuntimeTurnPort = {
+      streamFn,
+      assemble: (outboundMessages) => services.promptAssembler.assemble({
+        basePrompt,
+        outboundMessages,
+        effectivePolicy,
+        model: modelView,
+        catalog,
+      }),
+      prepareToolCall: async (call, sourceOrdinal, signal) => {
+        const aborted = preflightAbort(signal);
+        if (aborted !== undefined) return aborted;
+        const invocationId = deriveInvocationId({
+          workspaceId: this.workspaceId,
+          threadId: this.threadId,
+          runId: input.runId,
+          turnId: input.turnId,
+          sourceOrdinal,
+        });
+        const prepared = await catalog.prepare({
+          capabilityId: call.name,
+          rawArgs: call.arguments,
+          context: {
+            workspaceId: this.workspaceId,
+            threadId: this.threadId,
+            runId: input.runId,
+            turnId: input.turnId,
+            opId: input.rootOpId,
+            invocationId,
+            toolCallId: call.id,
+            capabilityId: call.name,
+            catalogRevision: catalog.revision,
+            cwd: this.#cwd,
+          },
+          effectivePolicy,
+        });
+        const abortedAfterCatalog = preflightAbort(signal);
+        if (abortedAfterCatalog !== undefined) return abortedAfterCatalog;
+        if (!prepared.ok) return { ok: false, message: prepared.message };
+        const invocation = prepared.invocation;
+        const firstFreshness = await this.#checkInvocationFreshness(invocation, signal);
+        if (!firstFreshness.ok) return firstFreshness;
+        const abortedAfterFreshness = preflightAbort(signal);
+        if (abortedAfterFreshness !== undefined) return abortedAfterFreshness;
+        const rawDecision: unknown = await policyEngine.evaluate(invocation);
+        const abortedAfterPolicy = preflightAbort(signal);
+        if (abortedAfterPolicy !== undefined) return abortedAfterPolicy;
+        const decision = snapshotPolicyDecision(rawDecision);
+        if (decision === undefined) {
+          return { ok: false, message: 'Policy engine returned an invalid decision.' };
+        }
+        if (decision.kind === 'deny') return { ok: false, message: decision.reason };
+        if (decision.kind === 'ask') {
+          const approval = await this.#requestRegistryApproval(invocation, decision, signal);
+          const abortedAfterApproval = preflightAbort(signal);
+          if (abortedAfterApproval !== undefined) return abortedAfterApproval;
+          if (approval.kind === 'deny') return { ok: false, message: approval.reason };
+          if (approval.kind === 'aborted') {
+            return { ok: false, message: 'Tool execution was interrupted before approval completed.' };
+          }
+        }
+        return {
+          ok: true,
+          args: invocation.args,
+          executionMode: invocation.executionMode,
+          execute: async ({ signal, onUpdate }) => {
+            const abortedBeforeFreshness = preflightAbort(signal);
+            if (abortedBeforeFreshness !== undefined) throw new Error(abortedBeforeFreshness.message);
+            const finalFreshness = await this.#checkInvocationFreshness(invocation, signal);
+            if (!finalFreshness.ok) throw new Error(finalFreshness.message);
+            const abortedAfterFreshness = preflightAbort(signal);
+            if (abortedAfterFreshness !== undefined) throw new Error(abortedAfterFreshness.message);
+            this.#assertWorkspaceCapabilitiesAvailable();
+            const abortedBeforeExecutor = preflightAbort(signal);
+            if (abortedBeforeExecutor !== undefined) throw new Error(abortedBeforeExecutor.message);
+            return invocation.executor(invocation.args, {
+              ...invocation.context,
+              signal,
+              onUpdate,
+              services: { fileTracker: this.#fileTracker },
+            });
+          },
+        };
+      },
+    };
+    return Object.freeze(runtimeTurn);
+  }
+
+  async #checkInvocationFreshness(
+    invocation: Readonly<PreparedInvocation>,
+    signal: AbortSignal,
+  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
+    const aborted = preflightAbort(signal);
+    if (aborted !== undefined) return aborted;
+    const services = this.#capabilityServices;
+    if (services === undefined) return { ok: false, message: 'Registry runtime services are unavailable.' };
+    this.#assertWorkspaceCapabilitiesAvailable();
+    let freshness: unknown;
+    try {
+      freshness = await services.ruleFreshness.check({
+        snapshot: invocation.effectivePolicy.rules,
+        context: invocation.context,
+        resources: invocation.resources,
+        analysis: invocation.analysis,
+      });
+    } catch (error) {
+      const abortedAfterFailure = preflightAbort(signal);
+      if (abortedAfterFailure !== undefined) return abortedAfterFailure;
+      return {
+        ok: false,
+        message: `Rule freshness check failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    const abortedAfterCheck = preflightAbort(signal);
+    if (abortedAfterCheck !== undefined) return abortedAfterCheck;
+    this.#assertWorkspaceCapabilitiesAvailable();
+    if (freshness === null || typeof freshness !== 'object' || Array.isArray(freshness)) {
+      return { ok: false, message: 'Rule freshness checker returned an invalid result.' };
+    }
+    const result = freshness as Record<string, unknown>;
+    const resultKeys = Object.keys(result).sort();
+    if (result.fresh === true) {
+      return resultKeys.length === 1 && resultKeys[0] === 'fresh'
+        ? { ok: true }
+        : { ok: false, message: 'Rule freshness checker returned an invalid result.' };
+    }
+    if (result.fresh !== false
+      || (result.code !== 'rule_scope_missing' && result.code !== 'rule_changed')
+      || typeof result.message !== 'string'
+      || (result.code === 'rule_changed'
+        ? canonicalJson(resultKeys) !== canonicalJson(['code', 'fresh', 'message'])
+        : canonicalJson(resultKeys) !== canonicalJson(['code', 'fresh', 'message', 'missingScopes']))) {
+      return { ok: false, message: 'Rule freshness checker returned an invalid result.' };
+    }
+    if (result.code === 'rule_scope_missing') {
+      let missingScopes: readonly string[];
+      try {
+        missingScopes = strictJsonSnapshot(result.missingScopes) as unknown as readonly string[];
+        if (missingScopes.length === 0
+          || missingScopes.some((scope) => typeof scope !== 'string' || scope.length === 0)
+          || missingScopes.some((scope, index) => index > 0
+            && compareUtf8(missingScopes[index - 1]!, scope) >= 0)) {
+          throw new TypeError('missingScopes must be non-empty, unique, and UTF-8 sorted');
+        }
+      } catch (error) {
+        return {
+          ok: false,
+          message: `Invalid rule freshness result: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      const unseen = missingScopes.filter((scope) => !this.#writer.state.observedRuleScopes.has(scope));
+      if (unseen.length > 0) {
+        const abortedBeforeCommit = preflightAbort(signal);
+        if (abortedBeforeCommit !== undefined) return abortedBeforeCommit;
+        await this.#writer.commit([{
+          event: {
+            type: 'runtime_diagnostic',
+            severity: 'warning',
+            code: 'rule_scope_observed',
+            message: `Observed ${unseen.length} new rule scope${unseen.length === 1 ? '' : 's'}`,
+            scope: 'thread',
+          },
+        }], unseen.map((scope) => ({
+          type: 'rule_scope_observed' as const,
+          scope,
+          owningTurnId: invocation.context.turnId,
+          invocationId: invocation.context.invocationId,
+        })));
+        const abortedAfterCommit = preflightAbort(signal);
+        if (abortedAfterCommit !== undefined) return abortedAfterCommit;
+      }
+    }
+    return { ok: false, message: result.message };
+  }
+
+  async #requestRegistryApproval(
+    invocation: Readonly<PreparedInvocation>,
+    decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
+    signal: AbortSignal,
+  ): Promise<LegacyApprovalInvocationResult> {
+    if (signal.aborted) return { kind: 'aborted' };
+    this.#assertWorkspaceCapabilitiesAvailable();
+    if (this.#policyGrants === undefined) throw new Error('policy_grant_repository_unavailable');
+    const context = invocation.context;
+    const requestPayload = strictJsonSnapshot({
+      toolCallId: context.toolCallId,
+      description: decision.description,
+      ...(decision.grantProposal !== undefined && {
+        grantProposal: {
+          capabilityId: context.capabilityId,
+          capabilityVersion: invocation.capabilityVersion,
+          registrationDigest: invocation.registrationDigest,
+          policyBasisRevision: invocation.effectivePolicy.policyBasisRevision,
+          scope: decision.grantProposal,
+        },
+      }),
+    }) as unknown as Extract<
+      import('../protocol/index.js').RuntimeControlEvent,
+      { type: 'control_request'; kind: 'approval' }
+    >['payload'];
+    let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
+    await this.#withAdmission(async () => {
+      if (signal.aborted) {
+        waiter = Promise.resolve({ kind: 'aborted' });
+        return;
+      }
+      this.#assertWorkspaceCapabilitiesAvailable();
+      const activity = this.#writer.state.checkpoint.frontend.activity;
+      if (this.#closing || this.#closed
+        || this.#active?.currentRunId !== context.runId
+        || activity?.turnId !== context.turnId) {
+        waiter = Promise.resolve({ kind: 'aborted' });
+        return;
+      }
+      const requestId = this.#newApprovalRequestId();
+      await this.#writer.commitDriverEvent({
+        event: {
+          type: 'control_request',
+          requestId,
+          kind: 'approval',
+          owningRunId: context.runId,
+          owningTurnId: context.turnId,
+          policyRevision: invocation.effectivePolicy.revision,
+          payload: requestPayload,
+        },
+        runId: context.runId,
+        turnId: context.turnId,
+      });
+      if (signal.aborted || this.#workspaceCapabilityFailure() !== undefined) {
+        waiter = Promise.resolve({ kind: 'aborted' });
+        return;
+      }
+      let resolveWaiter!: (result: LegacyApprovalInvocationResult) => void;
+      waiter = new Promise<LegacyApprovalInvocationResult>((resolve) => {
+        resolveWaiter = resolve;
+      });
+      this.#approvalWaiters.set(requestId, {
+        requestId,
+        owningRunId: context.runId,
+        owningTurnId: context.turnId,
+        resolve: resolveWaiter,
+      });
+    });
+    if (waiter === undefined) throw new Error('registry_approval_waiter_not_created');
+    // Canonical abort resolves this waiter only after control_resolved is durable. Returning on the
+    // raw signal here would let the Agent advance past the authoritative cancellation boundary.
+    return waiter;
+  }
+
   async requestLegacyApproval(input: {
     readonly toolCallId: string;
     readonly toolName: string;
@@ -563,7 +1030,7 @@ export class ThreadRuntime {
     this.#assertWorkspaceCapabilitiesAvailable();
     if (decision.kind === 'allow' || decision.kind === 'deny') return decision;
     const proposal = strictJsonSnapshot({
-      patterns: [...new Set(decision.proposal.patterns)].sort(),
+      patterns: [...new Set(decision.proposal.patterns)].sort(compareUtf8),
       forceConfirm: decision.proposal.forceConfirm,
     }) as unknown as import('../protocol/index.js').LegacyApprovalProposal;
     let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
@@ -654,17 +1121,16 @@ export class ThreadRuntime {
     readonly turnCeiling: PermissionCeilingSnapshot;
   }> {
     return this.#withAdmission(async () => {
-      this.#assertWorkspaceCapabilitiesAvailable();
-      if (
-        this.#active?.currentRunId !== input.runId ||
-        !Number.isSafeInteger(input.turnOrdinal) ||
-        input.turnOrdinal < 1
-      ) {
+      if (!Number.isSafeInteger(input.turnOrdinal) || input.turnOrdinal < 1) {
         throw new Error('invalid_turn_reservation');
       }
       const ordinalKey = turnOrdinalKey(input.runId, input.turnOrdinal);
       const prior = this.#turnReservations.get(ordinalKey);
       if (prior !== undefined) return prior;
+      this.#assertWorkspaceCapabilitiesAvailable();
+      if (this.#active?.currentRunId !== input.runId) {
+        throw new Error('invalid_turn_reservation');
+      }
       const previousOrdinals = [...this.#writer.state.turns.values()]
         .filter((turn) => turn.runId === input.runId)
         .map((turn) => turn.turnOrdinal);
@@ -693,7 +1159,6 @@ export class ThreadRuntime {
         turnCeiling,
         timestamp: this.#clock.now(),
       });
-      this.#assertWorkspaceCapabilitiesAvailable();
       const reservation = {
         turnId,
         workspaceCeiling,
@@ -704,6 +1169,10 @@ export class ThreadRuntime {
       };
       this.#turnReservations.set(ordinalKey, reservation);
       this.#turnReservations.set(turnIdentityKey(input.runId, turnId), reservation);
+      // Once appendPrepare resolves, the TurnId is authoritative even if a workspace-wide fatal
+      // gate latched concurrently. Return the durable reservation; the immediately following
+      // runtime-turn capture observes the fatal gate and can still form a correctly identified
+      // error/aborted turn instead of stranding an unknown TurnId.
       return reservation;
     });
   }
@@ -747,6 +1216,11 @@ export class ThreadRuntime {
         failures.push(error);
       }
       try {
+        await this.#threadPolicyEngine?.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         if (op !== undefined) {
           const parentOpId = 'parentOpId' in op ? op.parentOpId : undefined;
           const outcome = failures.length === 0 ? 'applied' : 'interrupted';
@@ -770,6 +1244,7 @@ export class ThreadRuntime {
         failures.push(error);
       } finally {
         this.#closed = true;
+        this.#runtimeTurnCaptures.clear();
         try {
           await this.#writer.close();
         } catch (error) {
@@ -854,6 +1329,13 @@ export class ThreadRuntime {
           ? op.decision === 'allow_once' || op.decision === 'allow_always' || op.decision === 'deny'
           : op.decision === 'confirm' || op.decision === 'deny';
         if (!valid) return this.#rejectExternal(op, 'invalid_decision');
+        if (pending.kind === 'approval'
+          && op.decision === 'allow_always'
+          && this.#policyGrants?.mode === 'workspace'
+          && pending.payload.legacyProposal === undefined
+          && pending.payload.grantProposal === undefined) {
+          return this.#rejectExternal(op, 'invalid_decision');
+        }
         await this.#acceptOperation(op, { op });
         return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
       }
@@ -1085,7 +1567,7 @@ export class ThreadRuntime {
       { event: { type: 'op_started', opType: op.type }, opId: op.opId },
     ], mutations, acceptedAt);
     if (op.type === 'control_response') {
-      const effect = this.#finishLegacyControlResponse(op, acceptedAt);
+      const effect = this.#finishControlResponse(op, acceptedAt);
       this.#effectBarrier = this.#track(effect);
       return;
     }
@@ -1169,6 +1651,167 @@ export class ThreadRuntime {
       () => this.#completeAbort(op, 'interrupted', parentOpId),
     );
     this.#effectBarrier = this.#track(effect);
+  }
+
+  async #finishControlResponse(
+    op: Extract<RuntimeOp, { type: 'control_response' }>,
+    acceptedAt: number,
+  ): Promise<void> {
+    const pending = this.#writer.state.checkpoint.frontend.pendingControls.find((request) =>
+      request.requestId === op.requestId);
+    if (pending?.kind === 'approval' && pending.payload.legacyProposal !== undefined) {
+      await this.#finishLegacyControlResponse(op, acceptedAt);
+      return;
+    }
+    if (pending?.kind === 'approval' && this.#policyGrants !== undefined) {
+      await this.#finishRegistryControlResponse(op, acceptedAt, pending);
+      return;
+    }
+    this.#failWorkspaceApproval(new RuntimeStorageError(
+      'approval_unknown_outcome',
+      `Durable approval state cannot apply response ${op.opId}`,
+    ));
+  }
+
+  async #finishRegistryControlResponse(
+    op: Extract<RuntimeOp, { type: 'control_response' }>,
+    acceptedAt: number,
+    request: Extract<
+      import('../protocol/index.js').RuntimeControlEvent,
+      { type: 'control_request'; kind: 'approval' }
+    >,
+  ): Promise<void> {
+    const repository = this.#policyGrants;
+    if (repository === undefined || op.decision === 'confirm') {
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        'policy_grant_unknown_outcome',
+        `Policy grant repository cannot apply response ${op.opId}`,
+      ));
+      return;
+    }
+
+    let effectiveDecision: 'allow_once' | 'allow_always' | 'deny' = op.decision;
+    const proposal = request.payload.grantProposal;
+    if (op.decision === 'allow_always' && proposal === undefined) {
+      if (repository.mode !== 'legacy_global_approvals_v1') {
+        this.#failWorkspaceApproval(new RuntimeStorageError(
+          'policy_grant_proposal_missing',
+          `Canonical allow_always response ${op.opId} has no frozen grant proposal`,
+        ));
+        return;
+      }
+      effectiveDecision = 'allow_once';
+    }
+
+    if (op.decision === 'allow_always' && proposal !== undefined) {
+      const grant = strictJsonSnapshot({
+        grantId: op.opId,
+        workspaceId: this.workspaceId,
+        capabilityId: proposal.capabilityId,
+        capabilityVersion: proposal.capabilityVersion,
+        registrationDigest: proposal.registrationDigest,
+        scope: proposal.scope,
+        policyBasisRevision: proposal.policyBasisRevision,
+        acceptedAt,
+      }) as unknown as Readonly<PolicyGrant>;
+      let result: Awaited<ReturnType<typeof repository.commitAllowAlways>>;
+      try {
+        result = await repository.commitAllowAlways(grant);
+      } catch (error) {
+        this.#failWorkspaceApproval(new RuntimeStorageError(
+          'policy_grant_unknown_outcome',
+          error instanceof Error ? error.message : String(error),
+        ));
+        return;
+      }
+      if (result.kind === 'definitely_not_applied') {
+        await this.#writer.commit([
+          {
+            event: { type: 'op_completed', opType: 'control_response', outcome: 'interrupted' },
+            opId: op.opId,
+          },
+          {
+            event: {
+              type: 'runtime_diagnostic',
+              severity: 'warning',
+              code: 'policy_grant_definitely_not_applied',
+              message: result.message,
+              scope: 'thread',
+            },
+          },
+        ], [
+          { type: 'completed', opId: op.opId, outcome: 'interrupted' },
+          {
+            type: 'control_response_claim_released',
+            requestId: request.requestId,
+            responseOpId: op.opId,
+            reason: 'effect_definitely_not_applied',
+          },
+        ]);
+        return;
+      }
+      if (result.kind === 'conflict') {
+        this.#failWorkspaceApproval(new RuntimeStorageError('policy_grant_conflict', result.message));
+        return;
+      }
+      if (result.kind === 'fenced') {
+        this.#failWorkspaceApproval(new RuntimeStorageError(result.code, result.message));
+        return;
+      }
+    }
+
+    const resolution: Extract<
+      import('../protocol/index.js').RuntimeControlEvent,
+      { type: 'control_resolved'; kind: 'approval' }
+    > = {
+      type: 'control_resolved',
+      requestId: request.requestId,
+      kind: 'approval',
+      owningRunId: request.owningRunId,
+      owningTurnId: request.owningTurnId,
+      policyRevision: request.policyRevision,
+      decision: effectiveDecision,
+      ...(op.decision === 'allow_always' && effectiveDecision !== 'allow_always' && {
+        requestedDecision: 'allow_always',
+      }),
+    };
+    try {
+      await this.#writer.commit([
+        {
+          event: resolution,
+          runId: request.owningRunId,
+          turnId: request.owningTurnId,
+          opId: op.opId,
+        },
+        {
+          event: { type: 'op_completed', opType: 'control_response', outcome: 'applied' },
+          opId: op.opId,
+        },
+      ], [
+        { type: 'control_resolved', resolution },
+        { type: 'completed', opId: op.opId, outcome: 'applied' },
+      ]);
+    } catch (error) {
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        op.decision === 'allow_always'
+          ? 'policy_grant_unknown_outcome'
+          : 'approval_resolution_failed',
+        error instanceof Error ? error.message : String(error),
+      ));
+      return;
+    }
+    const waiter = this.#approvalWaiters.get(request.requestId);
+    if (waiter !== undefined) {
+      this.#approvalWaiters.delete(request.requestId);
+      waiter.resolve(effectiveDecision === 'deny'
+        ? {
+            kind: 'deny',
+            reason:
+              'User denied permission: the user rejected this capability invocation. ' +
+              'Do not retry the same call; ask the user or take a different approach.',
+          }
+        : { kind: 'allow' });
+    }
   }
 
   async #finishLegacyControlResponse(
@@ -1675,4 +2318,167 @@ function turnOrdinalKey(runId: RunId, ordinal: number): string {
 
 function turnIdentityKey(runId: RunId, turnId: TurnId): string {
   return canonicalJson(['turn_identity', runId, turnId]);
+}
+
+function unsupportedProviderStream(
+  model: Readonly<ModelConfig>,
+  timestamp: number,
+  errorMessage: string,
+): ProviderEventStream {
+  const stream = new ProviderEventStream();
+  const message: AssistantMessage = {
+    role: 'assistant',
+    id: `a_${crypto.randomUUID()}`,
+    timestamp,
+    content: [],
+    model: { ...model.ref },
+    stopReason: 'error',
+    errorMessage,
+    errorDetails: {
+      kind: 'unknown',
+      code: 'provider_adapter_not_found',
+      retryable: false,
+    },
+    usage: { input: 0, output: 0 },
+  };
+  stream.push({ type: 'start', partial: message });
+  stream.push({ type: 'error', message });
+  stream.end(message);
+  return stream;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index++) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+async function awaitTurnCaptureGate<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  throwIfTurnCaptureAborted(signal);
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(turnCaptureAbortError());
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+  try {
+    const result = await Promise.race([operation, aborted]);
+    throwIfTurnCaptureAborted(signal);
+    return result;
+  } finally {
+    if (abortListener !== undefined) signal.removeEventListener('abort', abortListener);
+  }
+}
+
+function throwIfTurnCaptureAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw turnCaptureAbortError();
+}
+
+function turnCaptureAbortError(): Error {
+  const error = new Error('Runtime turn capture was interrupted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+const PREFLIGHT_ABORTED_MESSAGE = 'Tool execution was interrupted before capability preflight completed.';
+
+function preflightAbort(
+  signal: AbortSignal,
+): { readonly ok: false; readonly message: string } | undefined {
+  return signal.aborted ? { ok: false, message: PREFLIGHT_ABORTED_MESSAGE } : undefined;
+}
+
+function snapshotPolicyDecision(input: unknown): PolicyDecision | undefined {
+  let value: unknown;
+  try {
+    value = strictJsonSnapshot(input);
+  } catch {
+    return undefined;
+  }
+  if (!isDecisionRecord(value) || typeof value.kind !== 'string') return undefined;
+  if (value.kind === 'allow') {
+    return hasDecisionKeys(value, ['kind', 'code', 'reason'])
+      && isDecisionString(value.code) && isDecisionString(value.reason)
+      ? value as unknown as PolicyDecision
+      : undefined;
+  }
+  if (value.kind === 'deny') {
+    return hasDecisionKeys(value, ['kind', 'code', 'reason', 'recoverable'])
+      && isDecisionString(value.code) && isDecisionString(value.reason)
+      && value.recoverable === true
+      ? value as unknown as PolicyDecision
+      : undefined;
+  }
+  if (value.kind !== 'ask'
+    || !hasDecisionKeys(value, ['kind', 'code', 'reason', 'description'], ['grantProposal'])
+    || !isDecisionString(value.code)
+    || !isDecisionString(value.reason)
+    || !isDecisionString(value.description)
+    || (value.grantProposal !== undefined && !isPolicyGrantScope(value.grantProposal))) {
+    return undefined;
+  }
+  return value as unknown as PolicyDecision;
+}
+
+function isPolicyGrantScope(input: unknown): input is Readonly<PolicyGrantScope> {
+  if (!isDecisionRecord(input) || typeof input.kind !== 'string') return false;
+  if (input.kind === 'legacy_global_approvals_v1') {
+    const patterns = input.patterns;
+    return hasDecisionKeys(input, ['kind', 'patterns'])
+      && Array.isArray(patterns)
+      && patterns.length > 0
+      && patterns.every(isDecisionString)
+      && patterns.every((pattern, index) => index === 0
+        || compareUtf8(patterns[index - 1] as string, pattern) < 0);
+  }
+  if (input.kind !== 'canonical_resources_v1'
+    || !hasDecisionKeys(input, ['kind', 'resourcePatterns', 'attributes'])
+    || !Array.isArray(input.resourcePatterns)
+    || input.resourcePatterns.length === 0
+    || !isDecisionRecord(input.attributes)) {
+    return false;
+  }
+  const canonicalPatterns: string[] = [];
+  for (const candidate of input.resourcePatterns) {
+    if (!isDecisionRecord(candidate)
+      || !hasDecisionKeys(candidate, ['resourceType', 'access', 'matcher', 'pattern'])
+      || (candidate.resourceType !== 'filesystem' && candidate.resourceType !== 'command'
+        && candidate.resourceType !== 'network' && candidate.resourceType !== 'other')
+      || (candidate.access !== 'read' && candidate.access !== 'write'
+        && candidate.access !== 'execute' && candidate.access !== 'connect')
+      || candidate.matcher !== 'canonical_target_exact_v1'
+      || !isDecisionString(candidate.pattern)) {
+      return false;
+    }
+    canonicalPatterns.push(canonicalJson(candidate));
+  }
+  return canonicalPatterns.every((pattern, index) => index === 0
+    || compareUtf8(canonicalPatterns[index - 1]!, pattern) < 0);
+}
+
+function isDecisionRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isDecisionString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function hasDecisionKeys(
+  value: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => allowed.has(key));
 }

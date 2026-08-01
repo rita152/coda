@@ -10,6 +10,7 @@ import type {
   ToolResultMessage,
 } from '../src/protocol/index.js';
 import { createGate } from '../src/providers/faux/index.js';
+import type { RuntimeTurnProvider } from '../src/agent/index.js';
 import { makeHarness, makeTool, textOutput, typeSequence } from './helpers/agent-harness.js';
 
 /** 只折叠连续的 message_update(唯一合法的高频重复);其余事件一律保留——意外重复即缺陷。 */
@@ -81,6 +82,190 @@ describe('runLoop:一路到完成路径(M3)', () => {
     const endSeq = h.events.filter((e) => e.type === 'agent_end');
     expect(endSeq).toHaveLength(1);
     expect(endSeq[0]?.type === 'agent_end' && endSeq[0].reason).toBe('completed');
+  });
+
+  it('同一 assistant 重复 toolCallId 在 prepare 前转为不可重试协议错误', async () => {
+    const executed = vi.fn(async () => textOutput('must not execute'));
+    const alpha = makeTool('alpha', executed);
+    const h = makeHarness(
+      {
+        turns: [{
+          events: [
+            { kind: 'tool_call', name: 'alpha', args: { value: 'one' }, id: 'call_duplicate' },
+            { kind: 'tool_call', name: 'alpha', args: { value: 'two' }, id: 'call_duplicate' },
+          ],
+        }],
+      },
+      { tools: [alpha] },
+    );
+
+    await h.agent.prompt('go');
+
+    expect(executed).not.toHaveBeenCalled();
+    expect(h.events.some((event) => event.type === 'tool_execution_start')).toBe(false);
+    const final = h.agent.transcript.findLast((message) => message.role === 'assistant');
+    expect(final?.role === 'assistant' && final.stopReason).toBe('error');
+    expect(final?.role === 'assistant' && final.errorDetails).toMatchObject({
+      code: 'duplicate_tool_call_id',
+      retryable: false,
+    });
+    expect(final?.role === 'assistant' && final.content.some((part) => part.type === 'tool_call')).toBe(false);
+  });
+
+  it('Runtime turn 同时冻结 provider schema 与 executor，热更新只影响下一 turn', async () => {
+    let liveVersion = 1;
+    const capturedVersions: number[] = [];
+    const executedVersions: number[] = [];
+    const delegate: { current?: ReturnType<typeof makeHarness>['streamFn'] } = {};
+    const runtimeTurnProvider: RuntimeTurnProvider = {
+      capture: async () => {
+        const capturedVersion = liveVersion;
+        capturedVersions.push(capturedVersion);
+        return {
+          streamFn: (model, context, options) => {
+            if (delegate.current === undefined) throw new Error('test provider delegate is not ready');
+            return delegate.current(model, context, options);
+          },
+          assemble: (messages) => ({
+            ok: true,
+            context: {
+              systemPrompt: `runtime-v${capturedVersion}`,
+              messages: [...messages],
+              tools: [{
+                name: 'alpha',
+                description: `schema-v${capturedVersion}`,
+                parameters: { type: 'object' },
+              }],
+            },
+          }),
+          prepareToolCall: async (call) => ({
+            ok: true,
+            args: call.arguments,
+            executionMode: 'parallel',
+            execute: async () => {
+              executedVersions.push(capturedVersion);
+              return textOutput(`executor-v${capturedVersion}`);
+            },
+          }),
+        };
+      },
+    };
+    const h = makeHarness({
+      turns: [
+        {
+          onRequest: () => { liveVersion = 2; },
+          events: [{ kind: 'tool_call', name: 'alpha', args: {}, id: 'call_versioned' }],
+        },
+        { events: [{ kind: 'text', text: 'done' }] },
+      ],
+    }, { runtimeTurnProvider });
+    delegate.current = h.streamFn;
+
+    await h.agent.prompt('go');
+
+    expect(capturedVersions).toEqual([1, 2]);
+    expect(executedVersions).toEqual([1]);
+    expect(h.streamFn.calls.map((call) => call.context.tools?.[0]?.description)).toEqual([
+      'schema-v1',
+      'schema-v2',
+    ]);
+  });
+
+  it('Runtime turn snapshot 完成前不发布 turn_start', async () => {
+    const gate = createGate();
+    let markCaptureEntered!: () => void;
+    const captureEntered = new Promise<void>((resolve) => { markCaptureEntered = resolve; });
+    const delegate: { current?: ReturnType<typeof makeHarness>['streamFn'] } = {};
+    const runtimeTurnProvider: RuntimeTurnProvider = {
+      capture: async () => {
+        markCaptureEntered();
+        await gate.opened;
+        return {
+          streamFn: (model, context, options) => {
+            if (delegate.current === undefined) throw new Error('test provider delegate is not ready');
+            return delegate.current(model, context, options);
+          },
+          assemble: (messages) => ({
+            ok: true,
+            context: { systemPrompt: 'captured', messages: [...messages], tools: [] },
+          }),
+          prepareToolCall: async () => ({ ok: false, message: 'unexpected tool call' }),
+        };
+      },
+    };
+    const h = makeHarness({ turns: [{ events: [{ kind: 'text', text: 'done' }] }] }, {
+      runtimeTurnProvider,
+    });
+    delegate.current = h.streamFn;
+
+    const completion = h.agent.prompt('go');
+    await captureEntered;
+    expect(typeSequence(h.events)).toEqual(['agent_start(prompt)']);
+    gate.open();
+    await completion;
+    expect(typeSequence(h.events)).toContain('turn_start');
+  });
+
+  it('Runtime turn snapshot 失败仍用完整 error turn 闭合，provider 零调用', async () => {
+    const h = makeHarness({ turns: [{ events: [{ kind: 'text', text: 'must not sample' }] }] }, {
+      runtimeTurnProvider: {
+        capture: async () => { throw new Error('snapshot boom'); },
+      },
+    });
+
+    await h.agent.prompt('go');
+
+    expect(h.streamFn.calls).toHaveLength(0);
+    expect(collapse(typeSequence(h.events))).toEqual([
+      'agent_start(prompt)',
+      'turn_start',
+      'message_start(user)',
+      'message_end(user)',
+      'error',
+      'message_start(assistant)',
+      'message_end(assistant)',
+      'turn_end',
+      'agent_end(error)',
+    ]);
+  });
+
+  it('Runtime turn snapshot 取消会唤醒 capture 并形成完整 aborted turn', async () => {
+    let markCaptureEntered!: () => void;
+    const captureEntered = new Promise<void>((resolve) => { markCaptureEntered = resolve; });
+    const h = makeHarness({ turns: [{ events: [{ kind: 'text', text: 'must not sample' }] }] }, {
+      runtimeTurnProvider: {
+        capture: async ({ signal }): Promise<never> => {
+          markCaptureEntered();
+          await new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('capture aborted')), { once: true });
+          });
+          throw new Error('unreachable capture continuation');
+        },
+      },
+    });
+
+    const completion = h.agent.prompt('go');
+    await captureEntered;
+    h.agent.abort();
+    await Promise.all([completion, h.agent.waitForIdle()]);
+
+    expect(h.streamFn.calls).toHaveLength(0);
+    expect(collapse(typeSequence(h.events))).toEqual([
+      'agent_start(prompt)',
+      'turn_start',
+      'message_start(user)',
+      'message_end(user)',
+      'message_start(assistant)',
+      'message_end(assistant)',
+      'turn_end',
+      'agent_end(aborted)',
+    ]);
+    const final = h.agent.transcript.findLast((message) => message.role === 'assistant');
+    expect(final?.role === 'assistant' && final.stopReason).toBe('aborted');
+    expect(final?.role === 'assistant' && final.errorDetails).toEqual({
+      kind: 'aborted',
+      retryable: false,
+    });
   });
 
   it('两个 toolCall:结果按源顺序回填,tool_execution_end 按完成顺序(gate 控制第 1 个慢)', async () => {
