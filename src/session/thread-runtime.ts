@@ -924,22 +924,6 @@ export class ThreadRuntime {
     this.#assertWorkspaceCapabilitiesAvailable();
     if (this.#policyGrants === undefined) throw new Error('policy_grant_repository_unavailable');
     const context = invocation.context;
-    const requestPayload = strictJsonSnapshot({
-      toolCallId: context.toolCallId,
-      description: decision.description,
-      ...(decision.grantProposal !== undefined && {
-        grantProposal: {
-          capabilityId: context.capabilityId,
-          capabilityVersion: invocation.capabilityVersion,
-          registrationDigest: invocation.registrationDigest,
-          policyBasisRevision: invocation.effectivePolicy.policyBasisRevision,
-          scope: decision.grantProposal,
-        },
-      }),
-    }) as unknown as Extract<
-      import('../protocol/index.js').RuntimeControlEvent,
-      { type: 'control_request'; kind: 'approval' }
-    >['payload'];
     let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
     await this.#withAdmission(async () => {
       if (signal.aborted) {
@@ -955,6 +939,61 @@ export class ThreadRuntime {
         return;
       }
       const requestId = this.#newApprovalRequestId();
+      const requestPayload = strictJsonSnapshot({
+        toolCallId: context.toolCallId,
+        description: decision.description,
+        ...(decision.grantProposal !== undefined && {
+          grantProposal: {
+            capabilityId: context.capabilityId,
+            capabilityVersion: invocation.capabilityVersion,
+            registrationDigest: invocation.registrationDigest,
+            policyBasisRevision: invocation.effectivePolicy.policyBasisRevision,
+            scope: decision.grantProposal,
+          },
+        }),
+        presentation: {
+          requestId,
+          target: {
+            workspaceId: context.workspaceId,
+            threadId: context.threadId,
+            runId: context.runId,
+            turnId: context.turnId,
+          },
+          capability: {
+            id: context.capabilityId,
+            version: invocation.capabilityVersion,
+            registrationDigest: invocation.registrationDigest,
+          },
+          normalizedResources: invocation.resources.map((resource) => ({
+            selectorId: resource.selectorId,
+            resourceType: resource.resourceType,
+            access: resource.access,
+            canonicalTarget: resource.canonicalTarget,
+          })),
+          risk: {
+            code: decision.code,
+            reason: decision.reason,
+            description: decision.description,
+          },
+          allowOnce: {
+            invocationId: context.invocationId,
+            toolCallId: context.toolCallId,
+          },
+          ...(decision.grantProposal === undefined
+            ? {}
+            : { allowAlways: decision.grantProposal }),
+          revisions: {
+            catalog: context.catalogRevision,
+            effectivePolicy: invocation.effectivePolicy.revision,
+            policyBasis: invocation.effectivePolicy.policyBasisRevision,
+            ceiling: invocation.effectivePolicy.ceilingRevision,
+            grants: invocation.effectivePolicy.grantRevision,
+          },
+        },
+      }) as unknown as Extract<
+        import('../protocol/index.js').RuntimeControlEvent,
+        { type: 'control_request'; kind: 'approval' }
+      >['payload'];
       await this.#writer.commitDriverEvent({
         event: {
           type: 'control_request',
@@ -1339,6 +1378,68 @@ export class ThreadRuntime {
         await this.#acceptOperation(op, { op });
         return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
       }
+      case 'thread_rename': {
+        const updatedAt = this.#clock.now();
+        const summary = {
+          ...this.#writer.state.summary,
+          title: op.title.trim(),
+          updatedAt,
+        };
+        await this.#writer.commit([
+          { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
+          { event: { type: 'op_started', opType: op.type }, opId: op.opId },
+          {
+            event: { type: 'thread_updated', thread: summary, changed: 'title' },
+            opId: op.opId,
+          },
+          {
+            event: { type: 'op_completed', opType: op.type, outcome: 'applied' },
+            opId: op.opId,
+          },
+        ], [
+          { type: 'accepted_pending', opId: op.opId, opType: op.type },
+          { type: 'started', opId: op.opId },
+          { type: 'thread_title_updated', title: op.title.trim(), updatedAt },
+          { type: 'completed', opId: op.opId, outcome: 'applied' },
+        ]);
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      }
+      case 'thread_archive': {
+        if (op.archived
+          && (this.#active !== undefined
+            || this.#writer.state.checkpoint.frontend.pendingControls.length > 0)) {
+          return this.#rejectExternal(op, 'thread_busy');
+        }
+        const updatedAt = this.#clock.now();
+        const { archivedAt: _archivedAt, ...base } = this.#writer.state.summary;
+        void _archivedAt;
+        const archivedAt = op.archived ? updatedAt : undefined;
+        const summary = {
+          ...base,
+          ...(archivedAt === undefined ? {} : { archivedAt }),
+          updatedAt,
+        };
+        await this.#writer.commit([
+          { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
+          { event: { type: 'op_started', opType: op.type }, opId: op.opId },
+          {
+            event: { type: 'thread_updated', thread: summary, changed: 'archived' },
+            opId: op.opId,
+          },
+          {
+            event: { type: 'op_completed', opType: op.type, outcome: 'applied' },
+            opId: op.opId,
+          },
+        ], [
+          { type: 'accepted_pending', opId: op.opId, opType: op.type },
+          { type: 'started', opId: op.opId },
+          { type: 'thread_archive_updated', ...(archivedAt === undefined ? {} : { archivedAt }), updatedAt },
+          { type: 'completed', opId: op.opId, outcome: 'applied' },
+        ]);
+        return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
+      }
+      case 'compact':
+        return this.#acceptActivity(op);
       case 'abort': {
         const target = this.#resolveAbortTarget(op.expectedRunId);
         if (op.expectedRunId !== undefined && target.kind === 'no_current_activity') {
@@ -1407,7 +1508,7 @@ export class ThreadRuntime {
   }
 
   async #acceptActivity(
-    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' | 'compact' }>,
   ): Promise<OpReceipt> {
     const interactionState = this.#attachment.driver.interactionState();
     const activeRun = this.#active === undefined
@@ -1423,8 +1524,11 @@ export class ThreadRuntime {
       return this.#rejectExternal(op, 'thread_busy_use_steer_or_follow_up');
     }
     const suspended = this.#writer.state.summary.suspendedWork?.[0];
-    if (op.type === 'prompt' && suspended !== undefined) {
+    if ((op.type === 'prompt' || op.type === 'compact') && suspended !== undefined) {
       return this.#rejectExternal(op, 'suspended_work_pending');
+    }
+    if (op.type === 'compact' && this.#writer.state.checkpoint.frontend.transcript.length === 0) {
+      return this.#rejectExternal(op, 'nothing_to_compact');
     }
     const suspendedInputOwner = suspended === undefined
       ? undefined
@@ -1452,7 +1556,9 @@ export class ThreadRuntime {
       runId,
       workspaceCeiling,
       threadCeiling: this.#threadCeiling,
-      ...(op.permissionNarrowing !== undefined && { requestedNarrowing: op.permissionNarrowing }),
+      ...(op.type !== 'compact' && op.permissionNarrowing !== undefined && {
+        requestedNarrowing: op.permissionNarrowing,
+      }),
     }));
     if (!queueDuringCompaction) {
       this.#active = {
@@ -1491,7 +1597,7 @@ export class ThreadRuntime {
           permissionCeiling,
           resolvedInput: { kind: 'prompt_input', sourceOpId: op.opId, text: op.text },
         }
-      : {
+      : op.type === 'continue' ? {
           op,
           runId,
           permissionCeiling,
@@ -1502,7 +1608,8 @@ export class ThreadRuntime {
                 text: sourcePrompt.text,
               }
             : { kind: 'existing_residue' },
-        };
+        }
+      : { op, runId, permissionCeiling };
     if (queueDuringCompaction) {
       this.#queuedActivities.push({
         op,
@@ -1521,10 +1628,10 @@ export class ThreadRuntime {
   }
 
   async #startActivity(
-    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' | 'compact' }>,
     runId: RunId,
     permissionCeiling: PermissionCeilingSnapshot,
-    command: Extract<PreparedThreadDriverCommand, { op: { type: 'prompt' | 'continue' } }>,
+    command: Extract<PreparedThreadDriverCommand, { op: { type: 'prompt' | 'continue' | 'compact' } }>,
   ): Promise<void> {
     await this.#writer.commit([{
       event: { type: 'op_started', opType: op.type },
@@ -2009,7 +2116,7 @@ export class ThreadRuntime {
     const root = [...this.#writer.state.runs.values()].find((run) => run.ownerOpId === target.ownerOpId);
     const finishOwner = owner !== undefined
       && owner.state !== 'completed' && owner.state !== 'rejected'
-      && (owner.op.type === 'prompt' || owner.op.type === 'continue')
+      && (owner.op.type === 'prompt' || owner.op.type === 'continue' || owner.op.type === 'compact')
       && root !== undefined;
     const stateMutations: RuntimeThreadMutation[] = [];
     if (finishOwner) {
@@ -2036,7 +2143,7 @@ export class ThreadRuntime {
       },
       opId: op.opId,
     };
-    if (finishOwner && root !== undefined && (owner.op.type === 'prompt' || owner.op.type === 'continue')) {
+    if (finishOwner && root !== undefined) {
       await this.#writer.commit([
         {
           event: {
@@ -2056,7 +2163,7 @@ export class ThreadRuntime {
   }
 
   async #finishActivity(
-    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' }>,
+    op: Extract<RuntimeOp, { type: 'prompt' | 'continue' | 'compact' }>,
     rootRunId: RunId,
     rootCeiling: PermissionCeilingSnapshot,
     completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'],
@@ -2098,7 +2205,7 @@ export class ThreadRuntime {
         { type: 'run_terminal', runId: terminalRunId, status },
       ];
       const parentThreadId = this.#writer.state.meta.parentThreadId;
-      if (parentThreadId !== undefined) {
+      if (parentThreadId !== undefined && op.type !== 'compact') {
         const resultOpId = this.#identityFactory.deriveOpId({
           purpose: 'thread_result',
           workspaceId: this.workspaceId,

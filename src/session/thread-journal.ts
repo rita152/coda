@@ -3,8 +3,10 @@
 
 import {
   canonicalJson,
+  deriveLegacySeedTurnProvenance,
   strictJsonSnapshot,
   validateEventEnvelope,
+  isTurnId,
 } from '../protocol/index.js';
 import type {
   EventEnvelope,
@@ -47,6 +49,8 @@ export interface FoldedThreadJournal {
   readonly mailbox: ReadonlyMap<OpId, FoldedMailboxEntry>;
   readonly runs: ReadonlyMap<RunId, FoldedRunEntry>;
   readonly turns: ReadonlyMap<string, FoldedTurnEntry>;
+  /** Stable historical message ownership, including copied/imported seed history. */
+  readonly messageTurnIds: ReadonlyMap<string, TurnId>;
   readonly inputOwners: ReadonlyMap<OpId, { readonly sourceOpId: OpId }>;
   readonly pendingThreadResults: ReadonlyMap<import('../protocol/index.js').DerivedOpId,
     Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>;
@@ -73,7 +77,7 @@ export interface FoldedRunEntry {
   readonly runId: RunId;
   readonly ownerOpId?: OpId;
   readonly state: 'prepared' | 'reserved' | 'started' | 'terminal';
-  readonly reason: 'prompt' | 'continue' | 'retry' | 'compaction';
+  readonly reason: 'prompt' | 'continue' | 'compact' | 'retry' | 'compaction';
   readonly status?: 'completed' | 'aborted' | 'error' | 'interrupted';
   readonly predecessorRunId?: RunId;
   readonly permissionCeiling: PermissionCeilingSnapshot;
@@ -200,6 +204,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
   const mailbox = new Map<OpId, FoldedMailboxEntry>();
   const runs = new Map<RunId, FoldedRunEntry>();
   const turns = new Map<string, FoldedTurnEntry>();
+  const messageTurnIds = new Map<string, TurnId>();
   const inputOwners = new Map<OpId, { readonly sourceOpId: OpId }>();
   const pendingThreadResults = new Map<import('../protocol/index.js').DerivedOpId,
     Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>();
@@ -222,6 +227,19 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
 
   for (const record of records.slice(1)) {
     if (record.type === 'legacy_seed') {
+      const turnProvenance = record.turnProvenance
+        ?? deriveLegacySeedTurnProvenance(record.sourceSessionId, record.transcript);
+      if (turnProvenance.length !== record.transcript.length
+        || turnProvenance.some((entry, index) =>
+          entry.messageId !== record.transcript[index]?.id || !isTurnId(entry.turnId))) {
+        throw new RuntimeStorageError(
+          'invalid_legacy_seed',
+          'Legacy turn provenance must cover the transcript in order',
+        );
+      }
+      for (const provenance of turnProvenance) {
+        messageTurnIds.set(provenance.messageId, provenance.turnId);
+      }
       checkpoint = snapshot({
         frontend: {
           ...checkpoint.frontend,
@@ -292,13 +310,18 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
       }
       highWaterSeq = validated.seq;
       envelopes.push(validated);
+      if (validated.event.type === 'message_end' && validated.turnId !== undefined) {
+        messageTurnIds.set(validated.event.message.id, validated.turnId);
+      }
       checkpoint = reduceDriverCheckpoint(checkpoint, {
         event: validated.event,
         ...(validated.runId !== undefined && { runId: validated.runId }),
         ...(validated.turnId !== undefined && { turnId: validated.turnId }),
         ...(validated.opId !== undefined && { opId: validated.opId }),
       });
-      if (validated.event.type === 'thread_created' || validated.event.type === 'thread_resumed') {
+      if (validated.event.type === 'thread_created'
+        || validated.event.type === 'thread_resumed'
+        || validated.event.type === 'thread_updated') {
         summary = validated.event.thread;
       } else if (validated.event.type === 'thread_closed') {
         summary = withoutActiveRun(summary, 'closed');
@@ -481,6 +504,23 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
           for (const scope of mutation.replacementScopes) observedRuleScopes.add(scope);
           break;
         }
+        case 'thread_title_updated':
+          summary = {
+            ...summary,
+            title: mutation.title,
+            updatedAt: mutation.updatedAt,
+          };
+          break;
+        case 'thread_archive_updated': {
+          const { archivedAt: _archivedAt, ...rest } = summary;
+          void _archivedAt;
+          summary = {
+            ...rest,
+            ...(mutation.archivedAt === undefined ? {} : { archivedAt: mutation.archivedAt }),
+            updatedAt: mutation.updatedAt,
+          };
+          break;
+        }
         case 'message_appended':
         case 'control_resolved':
           break;
@@ -497,6 +537,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
     mailbox,
     runs,
     turns,
+    messageTurnIds,
     inputOwners,
     pendingThreadResults,
     deliveredThreadResults,
@@ -723,6 +764,24 @@ function validateCommitCorrespondence(
     record.envelopes.flatMap((envelope) =>
       envelope.event.type === 'compaction_end' && envelope.event.ok ? ['committed'] : []),
   );
+
+  for (const mutation of record.mutations ?? []) {
+    if (mutation.type === 'thread_title_updated') {
+      const matched = record.envelopes.some((envelope) =>
+        envelope.event.type === 'thread_updated'
+        && envelope.event.changed === 'title'
+        && envelope.event.thread.title === mutation.title
+        && envelope.event.thread.updatedAt === mutation.updatedAt);
+      if (!matched) throw invalidJournal('thread title mutation has no matching update event');
+    } else if (mutation.type === 'thread_archive_updated') {
+      const matched = record.envelopes.some((envelope) =>
+        envelope.event.type === 'thread_updated'
+        && envelope.event.changed === 'archived'
+        && envelope.event.thread.archivedAt === mutation.archivedAt
+        && envelope.event.thread.updatedAt === mutation.updatedAt);
+      if (!matched) throw invalidJournal('thread archive mutation has no matching update event');
+    }
+  }
 
   for (const mutation of record.mutations ?? []) {
     if (mutation.type === 'turn_activated') {

@@ -1584,6 +1584,120 @@ describe('legacy Session ThreadDriver factory', () => {
     await attachment.driver.close();
   });
 
+  it('manual compact 使用当前 activity 身份并只提交压缩 checkpoint，不隐式 continue', async () => {
+    const dir = tempDir();
+    const stream = createFauxStreamFn({
+      turns: [{ events: [{ kind: 'text', text: 'manual summary' }] }],
+    });
+    const observedHost = host();
+    const mutations: unknown[] = [];
+    const checkpoint: ThreadDriverCheckpoint = {
+      frontend: {
+        model: MODEL.ref,
+        transcript: [
+          {
+            role: 'user',
+            id: 'manual-compact-user',
+            timestamp: 1,
+            source: 'prompt',
+            content: [{ type: 'text', text: 'long context' }],
+          },
+          {
+            role: 'assistant',
+            id: 'manual-compact-assistant',
+            timestamp: 2,
+            model: MODEL.ref,
+            stopReason: 'stop',
+            usage: { input: 7, output: 3 },
+            content: [{ type: 'text', text: 'completed answer' }],
+          },
+        ],
+        usage: {
+          lastTurn: { input: 7, output: 3 },
+          cumulative: { input: 7, output: 3 },
+          turns: 1,
+          contextTokens: 10,
+        },
+        queues: { steering: [], followUp: [] },
+        plan: [],
+        pendingControls: [],
+      },
+      execution: {},
+    };
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          compaction: { threshold: 0.8, keepRatio: 0.5 },
+          agentConfig: {
+            streamFn: stream,
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'manual-compaction-key',
+      initialCheckpoint: checkpoint,
+    }, {
+      ...observedHost.port,
+      commitEvent: async (event, mutation) => {
+        if (mutation !== undefined) mutations.push(mutation);
+        await observedHost.port.commitEvent(event, mutation);
+      },
+    });
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+
+    expect(await attachment.driver.dispatch({
+      op: {
+        type: 'compact',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+    }).completion).toEqual({
+      kind: 'activity',
+      status: 'completed',
+      terminalRunId: RUN_ID,
+    });
+
+    expect(observedHost.events.find((item) => item.event.type === 'compaction_start'))
+      .toMatchObject({
+        runId: RUN_ID,
+        event: {
+          type: 'compaction_start',
+          reason: 'manual',
+          predecessorRunId: RUN_ID,
+          activityRunId: RUN_ID,
+        },
+      });
+    expect(observedHost.events.find((item) => item.event.type === 'compaction_end'))
+      .toMatchObject({
+        runId: RUN_ID,
+        event: { type: 'compaction_end', ok: true, activityRunId: RUN_ID },
+      });
+    expect(mutations).toEqual([
+      expect.objectContaining({
+        type: 'compaction_committed',
+        compaction: expect.objectContaining({ summary: 'manual summary' }),
+      }),
+    ]);
+    expect(observedHost.events.some((item) =>
+      item.event.type === 'agent_start' || item.event.type === 'turn_start')).toBe(false);
+    expect(stream.calls).toHaveLength(1);
+    await attachment.driver.close();
+  });
+
   it('successor reserve 后 predecessor agent_end commit 前可按 successor RunId 取消', async () => {
     const dir = tempDir();
     const baseHost = host();

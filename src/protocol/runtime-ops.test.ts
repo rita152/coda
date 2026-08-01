@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assertExternalOpId, assertThreadId, assertWorkspaceId, deriveOpId } from './identity.js';
+import {
+  assertExternalOpId,
+  assertThreadId,
+  assertTurnId,
+  assertWorkspaceId,
+  deriveOpId,
+} from './identity.js';
 import {
   canonicalRuntimeOpJson,
   canonicalizeRuntimeOp,
@@ -129,6 +135,50 @@ describe('RuntimeOp canonical admission', () => {
     expect(json).toContain('"":true');
     expect(json).toContain('"__proto__":"safe"');
     expect(json).toContain('"constructor":"also-safe"');
+  });
+
+  test('admits UX3 metadata, compaction, fork, and retry operations canonically', () => {
+    const target = assertThreadId('thread-fork-target');
+    const turn = assertTurnId('turn-committed');
+    const operations = [
+      { type: 'thread_rename', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, title: 'Review pass' },
+      { type: 'thread_archive', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, archived: true },
+      { type: 'compact', opId: OP, workspaceId: WORKSPACE, threadId: THREAD },
+      {
+        type: 'conversation_fork', opId: OP, workspaceId: WORKSPACE,
+        sourceThreadId: THREAD, threadId: target,
+        model: { provider: 'p', api: 'faux', model: 'm' },
+        throughTurnId: turn,
+        title: 'Forked review',
+      },
+      {
+        type: 'conversation_retry', opId: OP, workspaceId: WORKSPACE,
+        sourceThreadId: THREAD, threadId: target,
+        model: { provider: 'p', api: 'faux', model: 'm' },
+        turnId: turn,
+      },
+    ] as const;
+    for (const operation of operations) {
+      expect(canonicalizeRuntimeOp(operation)).toEqual(operation);
+    }
+  });
+
+  test('rejects ambiguous conversation targets and malformed UX3 metadata', () => {
+    for (const invalid of [
+      { type: 'thread_rename', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, title: '' },
+      { type: 'thread_archive', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, archived: 'yes' },
+      {
+        type: 'conversation_fork', opId: OP, workspaceId: WORKSPACE,
+        sourceThreadId: THREAD, threadId: THREAD,
+        model: { provider: 'p', api: 'faux', model: 'm' },
+      },
+      {
+        type: 'conversation_retry', opId: OP, workspaceId: WORKSPACE,
+        sourceThreadId: THREAD, threadId: assertThreadId('retry-target'),
+        model: { provider: 'p', api: 'faux', model: 'm' },
+        turnId: '',
+      },
+    ]) expectInvalid(invalid, 'invalid_runtime_op');
   });
 });
 

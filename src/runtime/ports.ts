@@ -13,6 +13,7 @@ import type {
   ResolvedAbortTarget,
   RunId,
   RuntimeOp,
+  RuntimeDiffFile,
   ThreadDriverRef,
   ThreadId,
   ThreadSummary,
@@ -114,6 +115,21 @@ export interface RuntimeModelResolver {
   }): Promise<ModelResolution>;
 }
 
+/**
+ * Optional workspace inspection owned by the composition root. Runtime snapshots and validates
+ * the result before exposing it; terminal frontends never invoke Git or repositories directly.
+ */
+export interface RuntimeWorkspaceReviewPort {
+  snapshotGit(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly cwd: string;
+  }): Promise<{ readonly branch?: string; readonly dirty: boolean }>;
+  snapshotDiff(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly cwd: string;
+  }): Promise<readonly Readonly<RuntimeDiffFile>[]>;
+}
+
 export interface LegacyApprovalPatternRepository extends LegacyApprovalPatternRepositoryPort {
   /** Stable tolerant-load warnings that Runtime must commit as canonical diagnostics. */
   startupDiagnostics?(): readonly {
@@ -145,6 +161,8 @@ export interface ThreadDriverFactory {
     readonly permissionCeiling: PermissionCeilingSnapshot;
     readonly parentThreadId?: ThreadId;
     readonly creationKey: string;
+    /** Optional authoritative seed for a conversation fork/retry. */
+    readonly initialCheckpoint?: ThreadDriverCheckpoint;
     readonly legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort;
   }, host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
   resume(input: {
@@ -201,6 +219,21 @@ export interface SupervisorOpLedgerRecord {
     readonly creationKey: string;
     readonly driverRef?: ThreadDriverRef;
   };
+  /** Stable nested prompt operation used to finish conversation_retry after recovery. */
+  readonly retryPromptOpId?: ExternalOpId;
+  /** Immutable source message selected when conversation_retry first reserves its root op. */
+  readonly retryPrompt?: {
+    readonly messageId: string;
+    readonly turnId: TurnId;
+    readonly text: string;
+    readonly digest: string;
+  };
+  /** A source-dependent rejection is frozen with the reservation for deterministic replay. */
+  readonly retryRejectionReason?:
+    | 'source_thread_not_found'
+    | 'source_thread_busy'
+    | 'retry_turn_not_found'
+    | 'retry_requires_text_prompt';
   readonly state: 'reserved' | 'final';
   readonly receipt?: OpReceipt;
 }

@@ -6,6 +6,7 @@ import {
   assertThreadId,
   assertTurnId,
   assertWorkspaceId,
+  deriveLegacySeedTurnProvenance,
   deriveInvocationId,
   deriveOpId,
   isDerivedOpId,
@@ -42,6 +43,28 @@ describe('runtime identities', () => {
 
     const workspace = legacyWorkspaceId('a\0b');
     expect(legacyThreadId(workspace, 'x\0y')).not.toBe(legacyThreadId(workspace, 'x'));
+  });
+
+  test('legacy seed turn provenance has frozen prompt-group golden vectors', () => {
+    const provenance = deriveLegacySeedTurnProvenance('legacy-001', [{
+      role: 'user', id: 'u1', timestamp: 1, source: 'prompt', content: [{ type: 'text', text: 'one' }],
+    }, {
+      role: 'assistant', id: 'a1', timestamp: 2, content: [],
+      model: { provider: 'faux', api: 'faux', model: 'x' },
+      stopReason: 'stop', usage: { input: 1, output: 1 },
+    }, {
+      role: 'user', id: 'u2', timestamp: 3, source: 'prompt', content: [{ type: 'text', text: 'two' }],
+    }]);
+    expect(provenance.map(({ messageId, turnId }) => ({ messageId, turnId: String(turnId) }))).toEqual([{
+      messageId: 'u1',
+      turnId: 'turn_seed_v1_7e8761785029b27bc95af6e7cf377b47d3fba0362112b777e40c8a616bb1f526',
+    }, {
+      messageId: 'a1',
+      turnId: 'turn_seed_v1_7e8761785029b27bc95af6e7cf377b47d3fba0362112b777e40c8a616bb1f526',
+    }, {
+      messageId: 'u2',
+      turnId: 'turn_seed_v1_39267ce99f84105ae6fca6c52bbe6038589ab3020267fb391122570aee8dbc96',
+    }]);
   });
 
   test('legacy thread mapping rejects a merely branded-looking general workspace value', () => {

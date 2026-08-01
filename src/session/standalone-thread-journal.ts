@@ -651,7 +651,7 @@ function validateMutation(
         'ownerOpId', 'predecessorRunId',
       ]) || !isRunId(value.runId)) break;
       validatePermissionCeilingSnapshot(value.permissionCeiling);
-      if ((value.reason === 'prompt' || value.reason === 'continue')
+      if ((value.reason === 'prompt' || value.reason === 'continue' || value.reason === 'compact')
         && isOpId(value.ownerOpId)
         && (value.predecessorRunId === undefined || (value.reason === 'continue'
           && isRunId(value.predecessorRunId)))) return;
@@ -682,6 +682,16 @@ function validateMutation(
     case 'model_selected':
       if (hasExactKeys(value, ['type', 'ownerOpId', 'model']) && isOpId(value.ownerOpId)
         && isModelRef(value.model)) return;
+      break;
+    case 'thread_title_updated':
+      if (hasExactKeys(value, ['type', 'title', 'updatedAt'])
+        && isWellFormedString(value.title) && value.title.trim().length > 0
+        && value.title.length <= 200 && Number.isFinite(value.updatedAt)) return;
+      break;
+    case 'thread_archive_updated':
+      if (hasExactKeys(value, ['type', 'updatedAt'], ['archivedAt'])
+        && Number.isFinite(value.updatedAt)
+        && (value.archivedAt === undefined || Number.isFinite(value.archivedAt))) return;
       break;
     case 'rule_scope_observed':
       if (hasExactKeys(value, ['type', 'scope', 'owningTurnId', 'invocationId'])
@@ -758,7 +768,9 @@ function isResolvedAbortTarget(input: unknown): boolean {
 function isMailboxOpType(value: string): boolean {
   return value === 'prompt' || value === 'continue' || value === 'steer'
     || value === 'follow_up' || value === 'set_model'
-    || value === 'control_response' || value === 'thread_close';
+    || value === 'control_response' || value === 'thread_rename'
+    || value === 'thread_archive' || value === 'compact'
+    || value === 'thread_close';
 }
 
 function isOutcome(value: unknown): boolean {
@@ -820,7 +832,7 @@ function validateLegacySeed(
   identity: Readonly<StandaloneThreadIdentity>,
 ): void {
   if (!hasExactKeys(seed as unknown, ['type', 'sourceSessionId', 'transcript', 'usage'], [
-    'compaction', 'mirrorRecords',
+    'compaction', 'mirrorRecords', 'turnProvenance',
   ])
     || typeof seed.sourceSessionId !== 'string' || seed.sourceSessionId.length === 0
     || !seed.sourceSessionId.isWellFormed()
@@ -829,6 +841,22 @@ function validateLegacySeed(
     throw new RuntimeStorageError('invalid_legacy_seed', 'Standalone legacy seed is invalid');
   }
   for (const message of seed.transcript) validateSeedMessage(message, identity);
+  if (seed.turnProvenance !== undefined) {
+    if (seed.turnProvenance.length !== seed.transcript.length) {
+      throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+    }
+    for (const [index, provenance] of seed.turnProvenance.entries()) {
+      if (!isRecord(provenance)
+        || !hasExactKeys(provenance, ['messageId', 'turnId'])
+        || typeof provenance.messageId !== 'string'
+        || provenance.messageId !== seed.transcript[index]?.id
+        || typeof provenance.turnId !== 'string'
+        || provenance.turnId.length === 0
+        || !provenance.turnId.isWellFormed()) {
+        throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+      }
+    }
+  }
   validateEventEnvelope({
     workspaceId: identity.workspaceId,
     threadId: identity.threadId,

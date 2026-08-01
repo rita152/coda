@@ -21,7 +21,7 @@ import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** 滚动窗口容量:约 2× 输出上限。结果只保尾部 1×,留 2× 保证截断有余量。 */
 const WINDOW_BYTES = 2 * MAX_OUTPUT_BYTES;
-/** onUpdate 节流间隔(docs/07 §2.5:100ms 推送增量输出)。 */
+/** onUpdate 节流间隔(docs/07 §2.5:100ms 推送累计输出快照)。 */
 const UPDATE_THROTTLE_MS = 100;
 /** 'exit' 后收尾输出的 drain 窗口:流 'end' 先到则提前结束(见 execute 内注释)。 */
 const DRAIN_WINDOW_MS = 300;
@@ -240,17 +240,18 @@ export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
       }
     };
 
-    // ---- onUpdate 100ms 节流(增量推送;lastPushEnd 在回调返回后记账,
+    // ---- onUpdate 100ms 节流(累计快照;lastPushEnd 在回调返回后记账,
     // 保证外部观测到的相邻间隔 ≥ UPDATE_THROTTLE_MS)----
     let pendingUpdate = '';
+    let cumulativeUpdate = '';
     let lastPushEnd = 0; // 0 = 尚未推过 → 首条立即推
     let updateTimer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
 
     const pushUpdate = (): void => {
-      const output = pendingUpdate;
+      cumulativeUpdate += pendingUpdate;
       pendingUpdate = '';
-      ctx.onUpdate?.({ output });
+      ctx.onUpdate?.({ output: cumulativeUpdate });
       lastPushEnd = Date.now();
     };
     const maybePushUpdate = (): void => {

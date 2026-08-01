@@ -706,7 +706,7 @@ edit 是全项目风险密度最高的工具。矩阵按「匹配层级 × 文�
 | kill tree | 命令内 spawn 孙进程(`sh -c 'sleep 30 & sleep 30'`);超时/abort 后按记录的 pgid 检查无存活进程——detached 进程组 + killProcessTree 是 pi/opencode 共同做法,必须有测试钉住 |
 | abort | 长命令执行中触发 signal → 进程组被杀,结果 isError 且说明被中断 |
 | tail 截断 | 产出 5000 行 → 结果保留尾部 2000 行/50KB,附完整输出落盘路径且该文件存在、内容全量(错误信息在尾部,所以保尾不保头) |
-| onUpdate 节流 | 持续输出的命令,收集 update 时间戳,相邻间隔 ≥ 100ms(允许首条例外) |
+| onUpdate 节流 | 持续输出的命令，收集 update 时间戳，相邻间隔 ≥ 100ms（允许首条例外）；每条 output 是前一条的累计扩展，UI 只替换不拼接 |
 | exit code | 非零退出 → isError,输出含 exit code;stderr 并入输出 |
 | workdir | 指定 workdir 后 `pwd` 输出验证;不存在的 workdir → isError |
 
@@ -801,6 +801,27 @@ CLI/Agent 的既有行为 fixture。
     facade 另以定向测试覆盖缺失最终 `agent_end` 时由 canonical `op_completed` 收束 phase，以及 abort
     `stale_run` 竞态不产生误导 warning。统一目录还要覆盖 `/doctor`、`/auth`/`/auth-status` 的 parser、
     palette availability 及 TUI/classic/append-only 实际 handler，不能只断言候选字符串存在。
+14. UX3 gate 分层而不只做截图：`runtime-ops.test.ts`/`runtime-events.test.ts` 验证新增 op、manual compact、
+    metadata lifecycle 与 identity-bound ApprovalPresentation 的 strict JSON/exact-key admission，并逐项篡改
+    description、workspace/thread、policy revision、capability identity、policy basis、scope/存在性来证明
+    展示卡片不能与实际授权 payload 分叉；
+    `thread-runtime.test.ts` 验证 rename/archive/manual compact 的 durable mutation/activity；
+    `supervisor.test.ts` 验证 committed checkpoint fork、reservation 时冻结 message/turn/text/digest、target
+    creation 已提交而 nested prompt 未提交后 source 又前进的 crash recovery、busy-source 拒绝、active turn
+    在 `turn_end` 前的 diff、review/diff query 与 Git port 缺省；file storage 另验证 frozen prompt round-trip
+    与 digest tamper fail-closed。`legacy-session-runtime/index.test.ts` 验证 seeded
+    create 和 manual compact 不隐式 continue。`runtime-frontend.test.ts` 用两个 thread/cursor 证明后台 run
+    在 switch 后完成、new 失败回滚、snapshot/live splice 和 target pending approval；presentation action 的
+    故障注入证明源 flush 不可写时 Runtime action 零调用且画面/approval 保持源，目标投影失败则回切源；
+    `presentation-state.test.ts` 验证跨 thread draft/scroll/unread/panel 独立恢复；`git-review-port.test.ts`
+    在真实临时 Git repo 中验证 staged/unstaged/untracked 完整 patch 且无 shell interpolation；
+    `review-format.test.ts` 验证 full output 与 sanitizer。TUI TestRenderer 覆盖 diff file/scope navigation、
+    picker 对完整 catalog 的 live search、折叠/展开 approval/reasoning 与窄屏 composer；classic/line REPL
+    则从同一 RuntimeWorkspaceActions 执行所有文本等价命令。classic 还断言 attachment replay 恰好一次、
+    switch 后 Ctrl+R 不可命中源 prompt；running `/archive off` 必须解析为 command 而不是 steer。现代
+    presentation 缺少 allow-always scope 时，TUI/classic/line 的 `a` 都不得提交或移除 pending card，legacy
+    无 presentation 路径仍保留兼容键。fork seed 必须覆盖 fork→restart→retry，v1 import 断言持久化稳定
+    message/turn provenance；tool review 用至少两条累计 update（`a`→`ab`）证明 reducer 得到 `ab` 而非 `aab`。
 
 Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlighting；销毁前等待 visual idle，再按 renderer → SyntaxStyle/highlighter 顺序清理，禁止用真实 timeout 猜异步高亮时机。真实人工终端仍保留一条冒烟:alternate screen 进入/退出、resize、长输出滚动与 raw mode 恢复。
 
@@ -895,6 +916,16 @@ Git/queue 不因 draft 非空消失；运行中 read-only/presentation 命令仍
 后迁移到真实 thread；palette `/edit` 等待期间 composer/store 不清空；permission mode 由经过 exact-shape
 校验的冻结 `WorkspaceRuntimeSnapshot` 提供，snapshot query 本身保持零 thread。
 
+UX3 门禁必须机械证明：fork/retry 只复制 committed transcript，源 active/pending-control 时拒绝，retry 的
+nested prompt 在重启/duplicate 下恰好一次；manual compact 使用 activity RunId 并只提交 checkpoint；
+metadata、approval presentation、review/diff 都可由 journal/snapshot 恢复。workspace-wide frontend stream
+用 per-thread cursor 接续，隐藏 thread 的 completion 结案 waiter 但不污染可见 phase/transcript；switch
+失败回滚，切换后只重建目标 pending approvals，abort/control 不串 thread。Git adapter 只由 Runtime
+composition 注入，完整 staged/unstaged/untracked patch 经 Runtime snapshot 返回；CLI/TUI 代码不得 import
+repository 或通过自由文本重算 capability/resource/scope。session picker 的连续输入/退格始终重新过滤原始
+catalog。legacy default NDJSON、one-shot、continue/resume 和旧 threshold/overflow compaction golden 保持
+不变。
+
 ## 8. CI 建议
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
@@ -917,6 +948,9 @@ Git/queue 不因 draft 非空消失；运行中 read-only/presentation 命令仍
   sanitizer、classic 与 accessible 门禁完成；恰好两轮 Agent review 及第二轮修复后的定向门禁全绿。
 - [x] UX2:紧凑信息层级、统一 palette、composer/presentation/transcript 工作流完成；恰好两轮 Agent
   review，第二轮的 pending draft、异步 editor ownership 与 Runtime permission snapshot 修复均经定向门禁。
+- [x] UX3:reasoning/tool/diff/review、approval card、session switch、manual compact 与 fork/retry 的 Runtime
+  事实边界和恢复门禁已实现；恰好两轮 Agent review 已完成，第二轮的 allow-always 可用性、seed turn
+  provenance 与 tool update snapshot 修复均经定向验证，最终 check/diff/scope/public-export 门禁全绿。
 
 下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
 而推断未在当前环境重跑的双 OS CI 等外部结果。

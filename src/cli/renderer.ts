@@ -35,6 +35,8 @@ export interface Renderer {
   setInputLine?(text: string, cursor?: number): void;
   /** 临时状态提示(如「再按一次 Ctrl+C 退出」);undefined 清除。 */
   setStatus?(text: string | undefined): void;
+  /** Runtime approval presentation freezes whether the permanent-scope action exists. */
+  setApprovalAllowsAlways?(available: boolean): void;
   /** 转录区追加一行(斜杠命令 /status /queue /help 的输出)。 */
   println?(text: string): void;
   /** 进入交互:开 bracketed paste(\x1b[?2004h)并首绘动态区。 */
@@ -302,6 +304,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   let cursorRowsAboveBottom = 0;
   let status: string | undefined;
   let approvalPrompt: string | undefined; // M6 审批提示(docs/09 §4:动态区变审批提示行)
+  let approvalDescription: string | undefined;
   let activity: string | undefined;
   let activityTail: string | undefined; // 工具流式输出尾行
   let steerCount = 0;
@@ -314,6 +317,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   let pendingKind: 'text' | 'reasoning' = 'text';
   let midLine = false; // plain:当前物理行未收尾
   let usage: SessionUsage | undefined;
+  const reasoningStartedAt = new Map<number, number>();
+  const toolStartedAt = new Map<string, number>();
 
   const write = (s: string): void => {
     out.enqueue(s);
@@ -458,13 +463,28 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'text_delta':
         streamAppend(ev.delta, 'text');
         break;
+      case 'reasoning_start':
+        reasoningStartedAt.set(ev.contentIndex, Date.now());
+        activity = 'thinking…';
+        redrawDyn();
+        break;
       case 'reasoning_delta':
-        streamAppend(ev.delta, 'reasoning');
+        // Full reasoning is available through Runtime /review; keep the default transcript compact.
         break;
       case 'text_end':
-      case 'reasoning_end':
         endStreamLine();
         break;
+      case 'reasoning_end': {
+        const startedAt = reasoningStartedAt.get(ev.contentIndex);
+        reasoningStartedAt.delete(ev.contentIndex);
+        appendLine(paint(
+          `thinking · ${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
+          DIM_ITALIC,
+        ));
+        activity = 'streaming…';
+        redrawDyn();
+        break;
+      }
       case 'tool_call_start': {
         // 不渲染参数流,动态区提示 preparing <name>…(docs/09 §4)
         const part = ev.partial.content[ev.contentIndex];
@@ -523,11 +543,14 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       result.content.find((p): p is { type: 'text'; text: string } => p.type === 'text')?.text ?? '',
     ));
     const toolName = sanitizeTerminalLine(result.toolName);
+    const startedAt = toolStartedAt.get(result.toolCallId);
+    toolStartedAt.delete(result.toolCallId);
+    const elapsed = startedAt === undefined ? '' : ` · ${formatElapsed(Date.now() - startedAt)}`;
     if (result.isError) {
-      appendLine(paint(`  ✗ ${toolName}: ${truncateToWidth(head, 100)}`, RED));
+      appendLine(paint(`  ✗ ${toolName}${elapsed}: ${truncateToWidth(head, 100)}`, RED));
     } else {
       const suffix = detailsSuffix(result) ?? (head !== '' ? `· ${truncateToWidth(head, 80)}` : '');
-      appendLine(`  ${paint('✓', GREEN)} ${toolName}${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`);
+      appendLine(`  ${paint('✓', GREEN)} ${toolName}${elapsed}${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`);
     }
     renderDiff(result.details);
   }
@@ -573,6 +596,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         activity = undefined;
         activityTail = undefined;
         approvalPrompt = undefined; // abort 收尾等场景兜底撤下审批提示
+        approvalDescription = undefined;
         if (e.reason === 'error') appendLine(paint('✖ agent run failed', RED));
         appendLine(paint(usageSummary(e.reason), DIM));
         break;
@@ -601,7 +625,9 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         break; // tool_result 由 tool_execution_end 渲染,此处去重(docs/09 §4)
       case 'tool_execution_start': {
         approvalPrompt = undefined; // 审批已决议(放行或拒绝都会走到 start),提示撤下
+        approvalDescription = undefined;
         const headline = toolHeadline(e.toolName, e.args);
+        toolStartedAt.set(e.toolCallId, Date.now());
         if (headline !== undefined) appendLine(`${paint('●', CYAN)} ${sanitizeTerminalLine(headline)}`);
         activity = `${sanitizeTerminalLine(e.toolName)} running…`;
         activityTail = undefined;
@@ -644,7 +670,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         // M6(docs/09 §4):转录区一行留痕(plain/headless 可读),动态区切审批提示;
         // 键位表由 repl 同步切审批模式,提示与键位来自同一事件,不会失配。
         appendLine(paint(`? approval required: ${sanitizeTerminalLine(e.description)}`, YELLOW));
-        approvalPrompt = `Allow ${sanitizeTerminalLine(e.description)}? [y=once / a=always / n=deny / Esc=abort]`;
+        approvalDescription = sanitizeTerminalLine(e.description);
+        approvalPrompt = approvalPromptText(approvalDescription, false);
         redrawDyn();
         break;
       case 'error':
@@ -689,7 +716,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         for (const part of m.content) {
           if (part.type === 'text') appendLines(sanitizeTerminalText(part.text).trimEnd());
           else if (part.type === 'reasoning') {
-            appendLines(paint(sanitizeTerminalText(part.text).trimEnd(), DIM_ITALIC));
+            appendLine(paint('thinking · complete', DIM_ITALIC));
           } else {
             appendLine(
               `${paint('●', CYAN)} ${sanitizeTerminalLine(toolHeadline(part.name, part.arguments) ?? part.name)}`,
@@ -719,6 +746,11 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       status = text === undefined ? undefined : sanitizeTerminalLine(text);
       redrawDyn();
     },
+    setApprovalAllowsAlways(available: boolean): void {
+      if (approvalDescription === undefined) return;
+      approvalPrompt = approvalPromptText(approvalDescription, available);
+      redrawDyn();
+    },
     println(text: string): void {
       appendLines(sanitizeTerminalText(text));
     },
@@ -738,9 +770,19 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   };
 }
 
+function approvalPromptText(description: string, allowAlways: boolean): string {
+  return `Allow ${description}? [y=once / ${allowAlways ? 'a=always / ' : ''}n=deny / Esc=abort]`;
+}
+
 /** 长路径显示:保留末两段。 */
 function shortenPath(p: string): string {
   const parts = p.split('/').filter((s) => s !== '');
   if (parts.length <= 2) return p;
   return parts.slice(-2).join('/');
+}
+
+function formatElapsed(milliseconds: number): string {
+  return milliseconds < 1_000
+    ? `${Math.max(0, milliseconds)}ms`
+    : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
 }

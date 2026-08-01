@@ -74,6 +74,8 @@ workspace/Git、context 和 model；其中权限模式来自 Runtime workspace s
 - 输入 `@路径` 后按 `Tab` 补全 workspace 文件或目录；可用 `/files [query]` 列出候选。
 - `Ctrl+F` 或 `/search <query>` 搜索 transcript，`/next`、`/previous` 切换，`End` 或 `/latest` 回到最新输出。
 - `/copy [latest|raw]` 复制内容；`/export [text|raw|latest] [path]` 以 0600 新文件安全导出且不覆盖已有文件。
+- `/review` 展开完整 reasoning/工具参数与输出；`/diff [turn|workspace]` 打开不截断的分组 diff viewer。
+- `/permissions` 查看 Runtime 权威 revision/ceiling；审批卡按 `v` 展开 capability、资源、风险和精确 scope。
 - `/vim on|off` 可选启用最小 Vim composer；默认关闭，不改变现有键位。
 
 draft、stash、搜索、Vim preference 和 OpenTUI stable scroll anchor 按 `(workspace, thread)` 保存。provider
@@ -97,6 +99,21 @@ coda --workspace=<workspace-id> --resume=<thread-id>
 `sessions` 只通过 RuntimePort 列出当前 workspace 的 snapshot，不会创建 thread。
 `--continue` 恢复最近会话；跨 workspace 或同名 thread 使用显式 locator。
 恢复同一 thread 时还会恢复未发送 draft 与稳定滚动位置；`Ctrl+R` 历史从 canonical transcript 重建。
+
+交互中还可以管理和切换任务：
+
+```text
+/sessions [query]          # 按状态、时间、workspace、cwd、标题和摘要搜索
+/switch <thread-id>        # 切换可见任务；后台 run 不停止
+/resume [thread-id]        # 恢复任务；无 id 时打开 picker
+/new                       # 新建并切换
+/rename <title>
+/archive [on|off]
+```
+
+draft、滚动位置和未读位置按 thread 独立保存；切换页面不会停止后台任务。审批和 abort 始终只作用于当前
+选中的 thread/run。`/compact` 做显式上下文压缩；`/fork [turn-id]` 复制已提交对话，`/retry [turn-id]`
+在安全 fork 中重试。fork/retry 不会回滚已经发生的文件、shell、网络或外部工具副作用。
 
 ## 脚本与 CI
 

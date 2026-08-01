@@ -7,6 +7,7 @@
 import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
 import path from 'node:path';
 import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
+import { createGitWorkspaceReviewPort } from './git-review-port.js';
 import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import { createFileRuntimeStorage, createRuntime } from '../runtime/index.js';
@@ -245,6 +246,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       modelResolver,
       permissionPolicy: createLegacyPermissionPolicy(approvalMode),
       threadDriverFactory: driverFactory,
+      workspaceReview: createGitWorkspaceReviewPort(),
     });
   } catch (err) {
     console.error(`[coda] runtime initialization failed: ${sanitizeTerminalError(err)}`);
@@ -325,8 +327,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       })
     : undefined;
   if (presentationStore !== undefined && !resumed) {
-    runtimeSession.subscribeSessionAttached(() => {
-      presentationStore.migrateToThread(runtimeSession.threadId);
+    const unsubscribePendingMigration = runtimeSession.subscribeSessionAttached(() => {
+      if (presentationStore.snapshot().threadId === PENDING_PRESENTATION_THREAD_ID) {
+        presentationStore.migrateToThread(runtimeSession.threadId);
+      }
+      unsubscribePendingMigration();
     });
   }
   let session: CliSession;
@@ -380,6 +385,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
         color: !flags.noColor && Bun.env.NO_COLOR === undefined,
         threadId: runtimeSession.threadId,
         workspaceSnapshot: tuiWorkspaceSnapshot,
+        workspace: runtimeSession,
         eventHighWaterSeq: () => runtimeSession.eventHighWaterSeq(),
         ...(presentationStore !== undefined && {
           presentation: { store: presentationStore },
@@ -512,6 +518,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       mode: interactiveSurface,
       version,
       fatalSignal: output.failureSignal,
+      workspace: runtimeSession,
       ...(presentationStore !== undefined && {
         presentation: { store: presentationStore, cwd },
       }),
@@ -530,6 +537,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   const exitCode = await startRepl(session, renderer, approval, {
     version,
     fatalSignal: output.failureSignal,
+    workspace: runtimeSession,
     ...(presentationStore !== undefined && {
       presentation: { store: presentationStore, cwd },
     }),

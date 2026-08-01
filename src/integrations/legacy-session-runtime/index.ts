@@ -151,6 +151,9 @@ export function createLegacySessionThreadDriverFactory(
         sessionId: deterministicSessionId(input.creationKey),
         create: true,
         creationKey: input.creationKey,
+        ...(input.initialCheckpoint !== undefined && {
+          initialCheckpoint: snapshotCheckpoint(input.initialCheckpoint),
+        }),
         ...(input.legacyApprovalPatterns !== undefined && {
           legacyApprovalPatterns: input.legacyApprovalPatterns,
         }),
@@ -261,7 +264,17 @@ async function constructDriver(
     });
     let activeSessionId = input.sessionId;
     let createMeta: MetaRecord | undefined;
-    if (!input.create && input.initialCheckpoint !== undefined) {
+    const seededCreate = input.create && input.initialCheckpoint !== undefined;
+    if (seededCreate) {
+      // Fork/retry creates a brand-new deterministic backend from canonical context. Persist the
+      // create intent first so prepareResume can safely initialize the missing private mirror;
+      // treating it as an ordinary resume would require a backend that cannot exist yet.
+      mirror.prepareCreate();
+      activeSessionId = mirror.prepareResume(
+        input.initialCheckpoint,
+        configured.sessionOptions.pricing,
+      );
+    } else if (input.initialCheckpoint !== undefined) {
       activeSessionId = mirror.prepareResume(
         input.initialCheckpoint,
         configured.sessionOptions.pricing,
@@ -275,10 +288,10 @@ async function constructDriver(
     if (input.initialCheckpoint !== undefined) {
       sessionOptions.runtimeQueueSeed = input.initialCheckpoint.frontend.queues;
     }
-    session = input.create
+    session = input.create && !seededCreate
       ? await LegacyThreadExecution.createWithId(activeSessionId, sessionOptions, createMeta)
       : await LegacyThreadExecution.resume(activeSessionId, sessionOptions);
-    if (input.create) mirror.finishCreate(activeSessionId);
+    if (input.create && !seededCreate) mirror.finishCreate(activeSessionId);
     driver = new LegacySessionThreadDriver({
       threadId: input.threadId,
       host,

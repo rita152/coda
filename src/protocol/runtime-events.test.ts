@@ -122,6 +122,158 @@ describe('EventEnvelope validation', () => {
     expectInvalid(envelope({ type: 'thread_created', thread: { threadId: THREAD_A } }, { opId: OP }));
   });
 
+  test('validates UX3 thread updates, manual compaction, and activity completion identities', () => {
+    validateEventEnvelope(envelope({
+      type: 'thread_updated',
+      changed: 'title',
+      thread: {
+        threadId: THREAD_A,
+        createdAt: 1,
+        updatedAt: 10,
+        title: 'Review',
+        state: 'idle',
+      },
+    }, { opId: OP }));
+    validateEventEnvelope(envelope({
+      type: 'compaction_start',
+      reason: 'manual',
+      predecessorRunId: assertRunId('run-before-compact'),
+      activityRunId: RUN,
+    }, { runId: RUN }));
+    validateEventEnvelope(envelope({
+      type: 'op_completed',
+      opType: 'compact',
+      terminalRunId: RUN,
+      outcome: 'applied',
+    }, { runId: RUN, opId: OP }));
+    expectInvalid(envelope({
+      type: 'op_completed',
+      opType: 'compact',
+      outcome: 'applied',
+    }, { runId: RUN, opId: OP }));
+  });
+
+  test('accepts only an identity-correlated authoritative approval presentation', () => {
+    const scope = {
+      kind: 'canonical_resources_v1' as const,
+      resourcePatterns: [{
+        resourceType: 'filesystem' as const,
+        access: 'write' as const,
+        matcher: 'canonical_target_exact_v1' as const,
+        pattern: '/workspace/file.ts',
+      }],
+      attributes: {},
+    };
+    const presentation = {
+      requestId: 'req-card',
+      target: { workspaceId: WORKSPACE, threadId: THREAD_A, runId: RUN, turnId: TURN },
+      capability: {
+        id: 'filesystem.edit',
+        version: '1',
+        registrationDigest: 'capreg-v1',
+      },
+      normalizedResources: [{
+        selectorId: 'target',
+        resourceType: 'filesystem',
+        access: 'write',
+        canonicalTarget: '/workspace/file.ts',
+      }],
+      risk: { code: 'write_requires_approval', reason: 'write', description: 'Edit file' },
+      allowOnce: { invocationId: 'invocation-1', toolCallId: 'call-card' },
+      allowAlways: scope,
+      revisions: {
+        catalog: 4,
+        effectivePolicy: 'effective-4',
+        policyBasis: 'basis-4',
+        ceiling: 'ceiling-4',
+        grants: 'grants-4',
+      },
+    };
+    validateEventEnvelope(envelope({
+      type: 'control_request',
+      requestId: 'req-card',
+      kind: 'approval',
+      owningRunId: RUN,
+      owningTurnId: TURN,
+      policyRevision: 'effective-4',
+      payload: {
+        toolCallId: 'call-card',
+        description: 'Edit file',
+        grantProposal: {
+          capabilityId: 'filesystem.edit',
+          capabilityVersion: '1',
+          registrationDigest: 'capreg-v1',
+          policyBasisRevision: 'basis-4',
+          scope,
+        },
+        presentation,
+      },
+    }, { runId: RUN, turnId: TURN }));
+    const payload = {
+      toolCallId: 'call-card',
+      description: 'Edit file',
+      grantProposal: {
+        capabilityId: 'filesystem.edit',
+        capabilityVersion: '1',
+        registrationDigest: 'capreg-v1',
+        policyBasisRevision: 'basis-4',
+        scope,
+      },
+      presentation,
+    };
+    const presentationWithoutAllowAlways: Partial<typeof presentation> = { ...presentation };
+    delete presentationWithoutAllowAlways.allowAlways;
+    const invalidPayloads = [
+      { ...payload, description: 'Different description' },
+      { ...payload, presentation: { ...presentation, requestId: 'different-request' } },
+      { ...payload, presentation: { ...presentation, target: {
+        ...presentation.target,
+        workspaceId: assertWorkspaceId('workspace-other'),
+      } } },
+      { ...payload, presentation: { ...presentation, target: {
+        ...presentation.target,
+        threadId: assertThreadId('thread-other'),
+      } } },
+      { ...payload, presentation: { ...presentation, revisions: {
+        ...presentation.revisions,
+        effectivePolicy: 'effective-other',
+      } } },
+      { ...payload, presentation: { ...presentation, capability: {
+        ...presentation.capability,
+        id: 'filesystem.read',
+      } } },
+      { ...payload, presentation: { ...presentation, capability: {
+        ...presentation.capability,
+        version: '2',
+      } } },
+      { ...payload, presentation: { ...presentation, capability: {
+        ...presentation.capability,
+        registrationDigest: 'capreg-other',
+      } } },
+      { ...payload, presentation: { ...presentation, revisions: {
+        ...presentation.revisions,
+        policyBasis: 'basis-other',
+      } } },
+      { ...payload, presentation: { ...presentation, allowAlways: {
+        ...scope,
+        attributes: { cwd: '/other' },
+      } } },
+      { ...payload, presentation: presentationWithoutAllowAlways },
+      { ...payload, grantProposal: undefined },
+    ];
+    for (const invalidPayload of invalidPayloads) {
+      expectInvalid(envelope({
+        type: 'control_request',
+        requestId: 'req-card',
+        kind: 'approval',
+        owningRunId: RUN,
+        owningTurnId: TURN,
+        policyRevision: 'effective-4',
+        payload: invalidPayload,
+      }, { runId: RUN, turnId: TURN }));
+    }
+  });
+
   test('immediate op origin and parent links follow the event family', () => {
     const derivedAbort = deriveOpId({
       purpose: 'cancel_target',

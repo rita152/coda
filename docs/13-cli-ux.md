@@ -11,7 +11,9 @@
 本文的“UX0 基线”只描述 2026-08-01 在阶段提交中实际观察到的行为，不把目标误写成现状。
 UX1 的 command catalog、产品子命令、UI routing、onboarding、sanitizer、classic 编辑修复与最低
 accessible/plain 文本面已经完成两轮 review；UX2 的信息层级、palette、composer、per-thread
-presentation state 与 transcript 导航也已完成恰好两轮 review。UX3–UX4 仍是后续产品承诺。
+presentation state 与 transcript 导航也已完成恰好两轮 review。UX3 的 Runtime-backed review/diff、
+approval card、session switch、manual compact 与 conversation fork/retry 已完成实现及恰好两轮完整
+review；第二轮修复后只做了定向验证。UX4 仍是后续产品承诺。
 UX0/UX1 历史矩阵继续保留，便于区分阶段观察值、已交付行为和最终目标。
 
 ## 1. 产品不变量与事实边界
@@ -105,8 +107,8 @@ fallback；同一 `expectedRunId` 的迟到 abort 返回 `stale_run` 时视为�
 工具摘要必须能回答名称、目标资源、耗时、状态和结果摘要；完整参数/输出按需展开。reasoning 默认折叠，
 只显示状态和耗时。diff viewer 只使用 Runtime/tool 事件和 `RuntimePort` 的只读 diff query，区分当前
 turn 与工作区总 diff，并分组 staged、unstaged、untracked。Runtime 实现可在端口后注入 Git snapshot
-service，但 UI/CLI 不直接访问 Git 或 repository，也不根据自由文本猜文件或权限资源；UX3 增加 query
-时必须同步维护 12 的 public RuntimePort 契约。
+service，但 UI/CLI 不直接访问 Git 或 repository，也不根据自由文本猜文件或权限资源；当前 query 与
+composition port 已同步维护在 12 的 public RuntimePort 契约。
 
 完成标准：用户能仅用键盘打开工具详情、切文件、滚动完整 diff、返回 transcript，并从相同 command
 catalog 发现 `/diff`、`/review`、`/copy` 和 `/export`。
@@ -158,8 +160,8 @@ interface CommandSpec {
 - UX1 只需要 `availableWhileRunning` 保持既有 slash 门禁；UX2 把它扩展成统一 `availability(context)`，
   只消费 Runtime snapshot/event projection 与明确的 frontend capabilities，返回
   `enabled | disabled(reason) | hidden`。它不读取 Agent/Session private state。
-- command handler 只把动作映射到 `RuntimePort` op/query、provider config port 或纯前端 action。会话列表
-  只用 `RuntimePort.listThreads()`；不得让 CLI 直读 repository。
+- command handler 只把动作映射到 `RuntimePort` op/query、provider config port 或纯前端 action。基础 CLI
+  catalog 用 `RuntimePort.listThreads()`，交互 picker 用 `listThreadDetails()`；不得让 CLI 直读 repository。
 - headless canonical action 仍是 `RuntimeOp`；catalog 只生成说明/completion 或显式 edge adapter，不改变
   wire discriminator。
 - 所有互斥和缺参错误包含稳定 error code、问题说明和一条可复制的修复命令。unknown flag 使用编辑距离
@@ -187,20 +189,20 @@ Agent/Session private state。
 | `task.follow_up` | headless op | Alt+Enter / `/followup` | 已选模型；RuntimePort identity op |
 | `task.abort` | signal/headless op | Esc / `/abort` | 仅当前 `(threadId, expectedRunId)`；RuntimePort op |
 | `task.status_queue` | — | `/status`、`/queue` | attachment 存在；只读 RuntimePort snapshot |
-| `sessions.list` | `coda sessions` | UX3 `/sessions` | 零 attached thread 也可；`RuntimePort.listThreads()` |
+| `sessions.list` | `coda sessions` | `/sessions` | 零 attached thread 也可；`RuntimePort.listThreadDetails()` |
 | `sessions.new` | — | `/new` | idle 或显式后台切换；RuntimePort thread create |
 | `sessions.resume` | 保留 `--resume` | `/resume [thread]` | catalog 中可恢复；RuntimePort resume |
 | `sessions.switch` | — | `/switch [thread]` | 目标存在；只切 attachment/query，不 abort 源 run |
-| `sessions.rename` | — | `/rename <name>` | 目标存在；RuntimePort（新增 op） |
-| `sessions.archive` | — | `/archive [thread]` | 非目标 active control；RuntimePort（新增 op） |
-| `review.diff` | 显式 command/output | `/diff [turn\|workspace]` | attachment 存在；RuntimePort（新增只读 diff query） |
-| `review.run` | 显式 command/output | `/review` | attachment 存在；RuntimePort query/op，不直调 Agent |
+| `sessions.rename` | — | `/rename <name>` | 目标存在；`RuntimePort.thread_rename` |
+| `sessions.archive` | — | `/archive [on\|off]` | archive-on 要求目标无 active control；`RuntimePort.thread_archive` |
+| `review.diff` | 显式 command/output | `/diff [turn\|workspace]` | attachment 存在；`RuntimePort.getDiffSnapshot()` |
+| `review.run` | 显式 command/output | `/review` | attachment 存在；`RuntimePort.getReviewSnapshot()`，不直调 Agent |
 | `content.copy` | 显式 command/output | `/copy [latest\|raw]` | snapshot/envelope projection；纯前端 copy/export port |
 | `content.export` | 显式 command/output | `/export [path]` | snapshot/envelope projection；安全导出 port |
 | `context.compact` | headless op | `/compact` | attachment 可 compact；RuntimePort op |
 | `permissions.show` | 显式 command/output | `/permissions` | attachment 存在；只读 policy/control snapshot/query |
-| `conversation.retry` | — | `/retry` | 已终结 turn；RuntimePort conversation op（UX3） |
-| `conversation.fork` | — | `/fork` | 有可复制 transcript；RuntimePort conversation op（UX3） |
+| `conversation.retry` | — | `/retry [turn-id]` | 已终结 turn、源无 active/control；RuntimePort conversation op |
+| `conversation.fork` | — | `/fork [turn-id]` | 有 committed transcript、源无 active/control；RuntimePort conversation op |
 | `draft.stash_restore` | — | `/stash`、`/restore` | 非 secret composer；presentation store，不写 Runtime |
 
 `coda exec` 只在 argv 最前增加显式动作名：去掉 `exec` 后必须与当前一次性模式使用相同 flags、裸 prompt、
@@ -215,14 +217,14 @@ UX4 的显式 output options。UX1 的 `accessible` 最低语义是 append-only�
 
 ### 3.2 Approval card authoritative fields
 
-当前 `RuntimeControlEvent.control_request.payload` 与 `ThreadSnapshot.pendingControls` 还没有携带下表全部
-字段，因此 UX3 不能让 UI 直接读取内部 `PreparedInvocation`/`PolicyDecision`。UX3 必须先在 03/12 和
-public protocol 中增加 identity-bound、JSON-safe、深冻结的 `ApprovalPresentation`，由 Runtime 在提交
+`RuntimeControlEvent.control_request.payload` 与 `ThreadSnapshot.pendingControls` 已携带下表定义的
+可选 presentation；UI 不能读取内部 `PreparedInvocation`/`PolicyDecision`。public protocol 中的
+identity-bound、JSON-safe、深冻结 `ApprovalPresentation` 由 Runtime 在提交
 control request 时从同一个 PreparedInvocation/PolicyDecision 构造，并把同一值同时放进
 `control_request` EventEnvelope 和 snapshot 的 pending control。这样恢复与 live UI 都只消费
 snapshot/envelope；不得新增 CLI→Capability/PolicyEngine side channel。
 
-目标最小形状如下。它不包含 raw args、validator、executor、秘密或可由 UI 再解释的 shell 文本：
+当前 canonical 形状如下。它不包含 raw args、validator、executor、秘密或可由 UI 再解释的 shell 文本：
 
 ```ts
 interface ApprovalPresentation {
@@ -252,8 +254,9 @@ interface ApprovalPresentation {
 }
 ```
 
-UX3 的卡片只渲染这个 authoritative presentation。缺字段时显示 unavailable 并禁用依赖它的动作，
-不能由 UI 补猜：
+UX3 的卡片只渲染这个 authoritative presentation。缺字段时显示 unavailable，现代 workspace-grant
+card 禁用依赖精确 scope 的动作，不能由 UI 补猜；legacy-global adapter 仅为保持既有 approval 键位可
+继续把 `a` 交给 Runtime 规范化，界面仍不得声称知道其 scope：
 
 | 卡片字段 | 权威来源与含义 |
 |---|---|
@@ -322,13 +325,29 @@ presentation state；这些仍按 UX2/UX3 分阶段交付。
 | copy/export | `/copy latest\|raw`，OSC52/system clipboard；exclusive 0600 export | system clipboard；exclusive export | 文本命令同语义 | shell redirection remains compatible |
 | presentation recovery | draft/stash/search/Vim/stable anchor/unread 按 workspace/thread 恢复 | draft/stash/search/Vim | durable draft/stash/search/Vim | 不创建 presentation file |
 
-UX2 没有实现 thread picker/switch、完整 diff viewer、reasoning/tool cards 或 approval card；这些仍属于
-UX3。当前一次只 attach 一个启动目标 thread；未选模型的 create 路径先使用稳定、frontend-only 的
+UX2 提交当时没有实现 thread picker/switch、完整 diff viewer、reasoning/tool cards 或 approval card；
+这些随后由 UX3 交付。UX2 当时一次只 attach 一个启动目标 thread；未选模型的 create 路径先使用稳定、frontend-only 的
 workspace pending identity，仍保持零 Runtime thread/journal，attachment 成功后再把 state durable migrate
 到真实 `ThreadId`。其余路径和 schema 按 `(workspaceId,threadId)` 隔离，因此 UX3 switch 不需要把
 presentation state 混入 Runtime journal。
 
-### 4.4 UX4 目标语义矩阵
+### 4.4 UX3 实现功能矩阵
+
+| 动作 | OpenTUI | classic | accessible / plain interactive | canonical Runtime |
+|---|---:|---:|---:|---:|
+| reasoning/tool review | transcript 折叠摘要；`/review` 完整展开 | append-only 完整 section | append-only 完整 section | `getReviewSnapshot()`；args/output 不截断 |
+| diff | viewer 文件左右切换、上下滚动、Tab scope | `/diff` 完整文本 | `/diff` 完整文本 | `getDiffSnapshot(turn\|workspace)`；staged/unstaged/untracked/turn |
+| approval | 折叠 card；`v` 权威详情；y/a/n/Esc | 权威详情文本 + 兼容键位 | 权威详情文本 + decision command | pending control 的 `ApprovalPresentation` |
+| sessions | searchable picker；new/resume/switch/rename/archive | 同名文本命令 | 同名文本命令 | thread details query + lifecycle/metadata op |
+| background switch | per-thread draft/scroll/unread；源 run 继续 | 同语义 attachment switch | 同语义 attachment switch | workspace stream + per-thread cursor/snapshot splice |
+| compact/retry/fork | palette/slash | 文本命令 | 文本命令 | manual activity；seeded checkpoint + stable retry op |
+| permissions | `/permissions` | 同名文本命令 | 同名文本命令 | workspace permission snapshot |
+
+classic/accessible 不要求 viewer 的视觉等价，但返回同一 Runtime snapshot 的完整内容，执行相同 target op。
+legacy headless wire 不新增上述 UI 命令；canonical envelope 调用方可直接提交新增 RuntimeOp、使用 query。
+fork/retry 只复制 committed conversation，不 rollback 文件、shell、网络或其他外部副作用。
+
+### 4.5 UX4 目标语义矩阵
 
 | 语义 | TUI | classic | accessible | plain | headless |
 |---|---|---|---|---|---|
@@ -392,6 +411,22 @@ UX1 修复 classic 多行输入、光标、bracketed paste 与 help 文案；UX2
 所有快捷键都是 ordinary draft 路径；provider secret prompt 和 approval freeze 会先截断这些入口。
 Enter、Alt+Enter、Esc 的 prompt/steer/follow-up/abort 语义保持 UX1 值。
 
+### 5.4 UX3 当前值
+
+| 动作 | OpenTUI | classic | accessible / plain |
+|---|---|---|---|
+| approval details | `v` 展开 card；y/a/n/Esc | 先打印权威详情；y/a/n/Esc | append-only 详情 + decision 文本输入 |
+| diff viewer | `/diff`；←/→ 文件、↑/↓ 滚动、Tab scope、Esc 返回 | `/diff [turn\|workspace]` 完整输出 | 同名文本命令完整输出 |
+| session picker | `/sessions`；输入搜索、↑/↓、Enter、Esc | `/sessions [query]` + `/switch`/`/resume` | 同名文本命令 |
+| review/permissions | `/review`、`/permissions` | 同名文本命令 | 同名文本命令 |
+| lifecycle | `/new`、`/rename`、`/archive`、`/compact`、`/retry`、`/fork` | 同名文本命令 | 同名文本命令 |
+
+picker/diff panel 打开时普通 draft 仍由当前 thread 的 presentation store 持有；切换成功才 swap 到目标
+state。审批的 `v` 只影响展示，不提交 control。legacy request 没有 authoritative presentation 时显示
+scope unavailable；既有 allow-always 输入语义为兼容保留，但 UI 不伪造精确 scope。现代 card 没有
+`allowAlways` 时三个交互面都隐藏 `a`，手工输入也只报告 unavailable 并保持 request pending；只有冻结
+scope 实际存在才显示并接受该动作。
+
 ## 6. Presentation state 与恢复
 
 允许持久化的最小结构如下；这是 frontend-private schema，不进入 Runtime journal：
@@ -440,10 +475,13 @@ interface ThreadPresentationState {
   第一个 surviving block，并明确显示“锚点内容已压缩”；这是内容已被权威 compaction 删除后的诚实 fallback，
   不能把 envelope seq 伪装成仍可定位的 transcript identity。`observedHighWaterSeq`/`unreadAfterSeq` 只用于
   live event 未读计算，不参与 snapshot block 定位。
-- UX2 启动/恢复同一目标 thread 时先 replay canonical messages，再按 stable anchor 恢复 presentation；
-  Ctrl+R 历史也从同一 canonical user transcript 重建。UX3 的 thread switch 必须先保存当前 presentation
-  state，为目标建立 hot subscription，再读取 snapshot/cursor，最后恢复目标 presentation state；切换不
-  关闭源 thread、不影响后台 run。
+- 启动/恢复同一目标 thread 时先 replay canonical messages，再按 stable anchor 恢复 presentation；
+  Ctrl+R 历史也从同一 canonical user transcript 重建。UX3 thread switch 先 durable 保存当前
+  presentation state；这一步是 Runtime action 之前的严格 barrier，失败时 thread/画面/approval 全部留在
+  源。workspace-wide hot subscription 已持续接收目标事件，随后读取目标 snapshot/cursor、splice buffered
+  envelope，以目标 transcript 替换 Ctrl+R history，最后恢复目标 presentation 与 pending controls。切换不
+  关闭源 thread、不影响后台 run；目标投影或 new/switch 失败时恢复并 hydrate 原 attachment/presentation，
+  不能留下半迁移 state。classic transcript 只由 attachment replay 一次，switch handler 不二次打印 raw。
 - UI cache 的 approval/activity/usage 永不写入该结构；这些字段只从新 snapshot/envelope 恢复。
 
 ## 7. 终端安全
@@ -513,7 +551,7 @@ wall-clock。
 | UX0 | 本文、09/10/11/地图与 characterization tests | 生产行为零变化；环境/性能/旅程/parity 有证据 |
 | UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 已完成恰好两轮 review；help/version 零副作用且 legacy flags/wire 全绿 |
 | UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | 已完成恰好两轮 review；cold pending draft 可恢复并迁移，permission 只读 Runtime workspace snapshot；provider 全表单隔离；durability failure 可见且不清 draft |
-| UX3 | reasoning/tool/diff/review、session workflow、approval cards、retry/fork | UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
+| UX3 | reasoning/tool/diff/review、session workflow、approval cards、manual compact、retry/fork | 已完成恰好两轮 review；UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
 | UX4 | accessible ASCII/theme/PTY 加固、帧合并/窗口化、自动化输出、真实 PTY | 10k delta 限帧；输入 <100ms；终端模式全路径恢复 |
 
 每阶段恰好两轮完整 Agent review。第一轮修复后复跑定向门禁；第二轮仍可修复并定向验证，但不得发起

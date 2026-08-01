@@ -480,18 +480,38 @@ export type CanonicalAgentEvent =
 export type RuntimeOpLifecycleEvent =
   | { type: 'op_accepted'; opType: RuntimeOp['type']; parentOpId?: OpId }
   | { type: 'op_started'; opType: RuntimeOp['type']; parentOpId?: OpId }
-  | { type: 'op_completed'; opType: 'prompt' | 'continue'; terminalRunId: RunId;
+  | { type: 'op_completed'; opType: 'prompt' | 'continue' | 'compact'; terminalRunId: RunId;
       outcome: 'applied' | 'interrupted' | 'superseded'; parentOpId?: OpId }
   | { type: 'op_completed';
-      opType: Exclude<RuntimeOp['type'], 'prompt' | 'continue'>;
+      opType: Exclude<RuntimeOp['type'], 'prompt' | 'continue' | 'compact'>;
       outcome: 'applied' | 'no_op' | 'interrupted' | 'superseded'; parentOpId?: OpId }
   | { type: 'op_rejected'; opType: RuntimeOp['type']; reason: string; parentOpId?: OpId };
+
+export interface ApprovalPresentation {
+  readonly requestId: string;
+  readonly target: {
+    readonly workspaceId: WorkspaceId; readonly threadId: ThreadId;
+    readonly runId: RunId; readonly turnId: TurnId;
+  };
+  readonly capability: {
+    readonly id: string; readonly version: string; readonly registrationDigest: string;
+  };
+  readonly normalizedResources: readonly Readonly<Record<string, StrictJsonValue>>[];
+  readonly risk: { readonly code: string; readonly reason: string; readonly description: string };
+  readonly allowOnce: { readonly invocationId: string; readonly toolCallId: string };
+  readonly allowAlways?: Readonly<PolicyGrantScope>;
+  readonly revisions: {
+    readonly catalog: number; readonly effectivePolicy: string; readonly policyBasis: string;
+    readonly ceiling: string; readonly grants: string;
+  };
+}
 
 export interface ApprovalControlPayload {
   toolCallId: string;
   description: string;
   legacyProposal?: Readonly<LegacyApprovalProposal>; // 阶段 2 bridge
   grantProposal?: Readonly<ApprovalGrantProposal>; // 阶段 3；不可安全泛化时缺省
+  presentation?: Readonly<ApprovalPresentation>; // legacy adapter 无权威 scope 时缺省
 }
 
 export interface LegacyApprovalProposal {
@@ -578,7 +598,7 @@ export interface ThreadUsage {
 export type RuntimeCoordinatorEvent =
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number;
       errorMessage: string; predecessorRunId: RunId; successorRunId: RunId }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow';
+  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual';
       predecessorRunId: RunId; activityRunId: RunId }
   | { type: 'compaction_end'; activityRunId: RunId;
       ok: boolean; droppedMessages: number };
@@ -586,6 +606,7 @@ export type RuntimeCoordinatorEvent =
 export type RuntimeLifecycleEvent =
   | { type: 'thread_created'; thread: ThreadSummary }
   | { type: 'thread_resumed'; thread: ThreadSummary }
+  | { type: 'thread_updated'; thread: ThreadSummary; changed: 'title' | 'archived' }
   | { type: 'thread_closed'; threadId: ThreadId };
 
 export type RuntimeDiagnosticEvent = {
@@ -686,6 +707,26 @@ idempotency receipt 使用 `(workspaceId,responseOpId/grantId)`，不能使用�
 OpId。
 `op_*`、thread lifecycle/result 与非 approval control 同样由 legacy projector 丢弃；
 retry/compaction 只剥离新增 identity 字段，带 `willRetry` 的 canonical `agent_end` 可直接投影。
+
+UX3 的审阅面不会引入第二套事件事实。`ApprovalPresentation` 在生成 control request 时从同一个
+`PreparedInvocation` 与 `PolicyDecision` 冻结，逐字段绑定 request/workspace/thread/run/turn；UI 只可
+格式化这些字段。协议 admission 还逐字段关联 payload description 与 risk description、event policy
+revision 与 effective-policy revision；存在 `grantProposal` 时，capability id/version/registration digest、
+policy-basis revision 和 canonical scope 必须与 presentation 完全相等，且 `allowAlways` 的存在性也必须
+一致。任一错配都拒绝整个 envelope，不能让“展示的范围”与实际提交的授权 payload 分叉。
+`presentation` 缺省表示 legacy adapter 无法诚实提供规范化 scope，此时界面必须明确
+显示 unavailable，不能从 `description`、shell 字符串或 tool args 反推 allow-always 范围。
+现代 presentation 存在但 `allowAlways` 缺失时，`allow_always` 不是可执行动作：UI 必须隐藏并拒绝该
+输入、保持 control pending；协议/Runtime 的 `invalid_decision` 仍是最终 fail-closed 边界。只有整个
+presentation 缺省的 legacy compatibility request 才可把既有 `a` 输入交给 legacy adapter 规范化。
+
+完整 reasoning/tool 审阅和 diff 通过 [12](./12-supervisor-runtime.md) 的只读 snapshot query 返回：review
+snapshot 由已提交 transcript、activity 与 envelope 折叠；workspace diff 由 composition root 注入的
+`RuntimeWorkspaceReviewPort` 采集，再由 Runtime 复制、校验并绑定 workspace/thread/scope。patch 与工具
+输出在协议层不截断，终端 surface 负责延迟/窗口化显示，但不得改写 canonical 内容。Git adapter、journal
+或 repository 不暴露给 UI。`thread_rename`/`thread_archive` 产生 `thread_updated`；manual compact 使用
+`reason:'manual'` 并像 prompt/continue 一样携带 terminal activity RunId。以上新增事件仍只在 canonical
+envelope 面出现，默认 legacy NDJSON 投影保持原结构。
 
 ## 8. 事件序列示例:2 个工具调用 + 1 条 steering
 

@@ -2,12 +2,17 @@
 // 直接把 SessionEvent 投影为顶部向下增长的转录区，并把输入框和三行状态固定在底部。
 // 本模块只在双 TTY 的交互分支动态加载；headless 与一次性模式不加载 native TUI 依赖。
 
+import { isThreadId, isTurnId } from '../protocol/index.js';
 import type {
   AgentMessage,
+  ApprovalPresentation,
   AssistantMessage,
   ModelRef,
   PlanStep,
   QueuedMessage,
+  RuntimeDiffSnapshot,
+  RuntimeThreadListItem,
+  ThreadId,
   ToolResultMessage,
   UserMessage,
   WorkspaceRuntimeSnapshot,
@@ -22,6 +27,7 @@ import type {
   CliSession,
   InteractiveSession,
 } from './interactive-runtime.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import {
   ProviderCommandController,
   type ProviderCommandChoice,
@@ -43,11 +49,20 @@ import {
 } from './command-catalog.js';
 import type { CommandAvailability } from './command-catalog.js';
 import {
+  approvalAllowsAlways,
+  filterSessionItems,
+  formatApprovalPresentation,
+  formatApprovalSummary,
+  formatPermissionSnapshot,
+  formatReviewSnapshot,
+} from './review-format.js';
+import {
   applyWorkspaceCompletion,
   copyTextToClipboard,
   editDraftWithExternalEditor,
   exportTranscript,
   promptHistoryEntries,
+  runThreadPresentationTransition,
   transcriptContent,
   workspaceCompletionAtCursor,
   workspacePathCandidates,
@@ -155,6 +170,7 @@ export interface TuiOptions {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
   };
+  workspace?: RuntimeWorkspaceActions;
   projectRuleWarnings?: ProjectRuleWarningSource;
 }
 
@@ -172,6 +188,13 @@ interface TuiScreenOptions extends TuiOptions {
 export interface TuiScreen {
   render(event: SessionEvent): void;
   replayTranscript(messages: readonly AgentMessage[]): void;
+  resetTranscript(messages: readonly AgentMessage[], highWaterSeq?: number): void;
+  openDiffViewer(snapshot: Readonly<RuntimeDiffSnapshot>): void;
+  handleDiffViewerKey(key: KeyEvent): 'none' | 'handled' | 'toggle-scope';
+  openSessionPicker(items: readonly RuntimeThreadListItem[], query: string): void;
+  handleSessionPickerKey(key: KeyEvent):
+    | { readonly kind: 'none' | 'handled' }
+    | { readonly kind: 'select'; readonly threadId: ThreadId };
   println(text: string, tone?: Tone): void;
   setUsage(usage: SessionUsage): void;
   setBranch(branch: string | undefined): void;
@@ -184,7 +207,9 @@ export interface TuiScreen {
   ): void;
   setModel(model: ModelRef | undefined, contextLimit?: number): void;
   setProviderCommandsAvailable(available: boolean): void;
+  setInteractionState(phase: TuiPhase): void;
   resolveApproval(): void;
+  toggleApprovalDetails(): void;
   getInput(): string;
   setInput(text: string): void;
   clearInput(): void;
@@ -209,6 +234,7 @@ interface AssistantView {
   reasoning: TextRenderable;
   markdown: MarkdownRenderable;
   reasoningBlocks: Map<number, string>;
+  reasoningStartedAt: Map<number, number>;
   textBlocks: Map<number, string>;
 }
 
@@ -216,6 +242,7 @@ interface ToolView {
   headline: string;
   name: string;
   text: TextRenderable;
+  startedAt: number;
 }
 
 interface PromptMenuItem {
@@ -242,6 +269,10 @@ export class TuiInteractionState {
 
   get phase(): TuiPhase {
     return this.#phase;
+  }
+
+  replace(phase: TuiPhase): void {
+    this.#phase = phase;
   }
 
   apply(event: SessionEvent): void {
@@ -581,6 +612,103 @@ export async function createTuiScreen(
       },
     });
 
+    const diffPanel = new Box(renderer, {
+      id: 'coda-diff-panel',
+      width: '100%',
+      flexGrow: 1,
+      minHeight: 1,
+      visible: false,
+      flexDirection: 'column',
+      paddingX: 2,
+      backgroundColor: transparentBackground,
+    });
+    const diffHeader = new Text(renderer, {
+      id: 'coda-diff-header',
+      width: '100%',
+      height: 1,
+      truncate: true,
+      selectable: false,
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.accent }),
+    });
+    const diffFiles = new Text(renderer, {
+      id: 'coda-diff-files',
+      width: '100%',
+      height: 'auto',
+      maxHeight: 6,
+      wrapMode: 'word',
+      selectable: true,
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.muted }),
+    });
+    const diffScroll = new ScrollBox(renderer, {
+      id: 'coda-diff-scroll',
+      width: '100%',
+      flexGrow: 1,
+      minHeight: 1,
+      scrollY: true,
+      scrollX: false,
+      viewportCulling: true,
+      backgroundColor: transparentBackground,
+      wrapperOptions: { backgroundColor: transparentBackground },
+      viewportOptions: { backgroundColor: transparentBackground },
+      contentOptions: {
+        flexDirection: 'column',
+        minHeight: 'auto',
+        backgroundColor: transparentBackground,
+      },
+      verticalScrollbarOptions: { visible: false, trackOptions: { visible: false } },
+    });
+    const diffBody = new Text(renderer, {
+      id: 'coda-diff-body',
+      width: '100%',
+      height: 'auto',
+      wrapMode: 'none',
+      selectable: true,
+      bg: transparentBackground,
+      fg: terminalForeground,
+    });
+    diffScroll.add(diffBody);
+    diffPanel.add(diffHeader);
+    diffPanel.add(diffFiles);
+    diffPanel.add(diffScroll);
+
+    const sessionPanel = new Box(renderer, {
+      id: 'coda-session-panel',
+      width: '100%',
+      flexGrow: 1,
+      minHeight: 1,
+      visible: false,
+      flexDirection: 'column',
+      paddingX: 2,
+      backgroundColor: transparentBackground,
+    });
+    const sessionHeader = new Text(renderer, {
+      id: 'coda-session-header',
+      width: '100%',
+      height: 2,
+      content: '',
+      wrapMode: 'word',
+      selectable: false,
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: PALETTE.accent }),
+    });
+    const sessionList = new Text(renderer, {
+      id: 'coda-session-list',
+      width: '100%',
+      flexGrow: 1,
+      content: '',
+      wrapMode: 'word',
+      selectable: true,
+      bg: transparentBackground,
+      fg: terminalForeground,
+    });
+    sessionPanel.add(sessionHeader);
+    sessionPanel.add(sessionList);
+
     const composer = new Box(renderer, {
       id: 'coda-composer',
       width: '100%',
@@ -753,6 +881,8 @@ export async function createTuiScreen(
 
     page.add(header);
     page.add(transcript);
+    page.add(diffPanel);
+    page.add(sessionPanel);
     page.add(composer);
     renderer.root.add(page);
 
@@ -795,6 +925,18 @@ export async function createTuiScreen(
     let transcriptSearchQuery = opts.presentation?.store.snapshot().search?.query ?? '';
     let transcriptSearchOrdinal = opts.presentation?.store.snapshot().search?.matchOrdinal ?? 0;
     let blockSequence = 0;
+    let diffSnapshot: Readonly<RuntimeDiffSnapshot> | undefined;
+    let diffFileIndex = 0;
+    let allSessionItems: readonly RuntimeThreadListItem[] = [];
+    let sessionItems: readonly RuntimeThreadListItem[] = [];
+    let sessionQuery = '';
+    let sessionIndex = 0;
+    let approvalCard: {
+      readonly text: TextRenderable;
+      readonly presentation: Readonly<ApprovalPresentation> | undefined;
+      readonly fallbackDescription: string;
+      expanded: boolean;
+    } | undefined;
 
     interface TranscriptBlock {
       readonly key: string;
@@ -811,10 +953,12 @@ export async function createTuiScreen(
 
     const refreshWorkspace = (): void => {
       if (approvalPending) {
+        const allowAlways = approvalAllowsAlways(approvalCard?.presentation);
         workspaceText.content =
           layoutWidth < 68
-            ? 'Approval · y/a/n/Esc'
-            : 'Approval required · y once · a always · n deny · Esc abort';
+            ? `Approval · v details · y${allowAlways ? '/a' : ''}/n/Esc`
+            : `Approval required · v details · y once · ${allowAlways ? 'a always · ' : ''}` +
+              'n deny · Esc abort';
         return;
       }
       workspaceText.content = sanitizeTerminalText(
@@ -825,7 +969,7 @@ export async function createTuiScreen(
     };
 
     const shortThreadId = (): string => {
-      const threadId = opts.threadId ?? 'unattached';
+      const threadId = opts.workspace?.currentThreadId ?? opts.threadId ?? 'unattached';
       return threadId.length <= 12 ? threadId : `…${threadId.slice(-10)}`;
     };
 
@@ -1056,10 +1200,17 @@ export async function createTuiScreen(
             : inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
               ? TRANSCRIPT_MIN_CONTENT_ROWS
               : 0;
-      const transcriptPadding =
-        transcriptRows >= TRANSCRIPT_PADDED_MIN_ROWS ? TRANSCRIPT_PADDING_Y : 0;
-      transcript.visible = transcriptRows > 0;
-      transcript.minHeight = transcriptRows;
+      const reservedTranscriptRows = approvalPending
+        ? Math.min(
+            Math.max(transcriptRows, 1 + TRANSCRIPT_PADDING_Y * 2 + 3),
+            Math.max(0, inputAndTranscriptRows - 1),
+          )
+        : transcriptRows;
+      const transcriptPadding = reservedTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS
+        ? TRANSCRIPT_PADDING_Y
+        : 0;
+      transcript.visible = reservedTranscriptRows > 0;
+      transcript.minHeight = reservedTranscriptRows;
       transcript.content.paddingTop = transcriptPadding;
       transcript.content.paddingBottom = transcriptPadding;
 
@@ -1067,6 +1218,9 @@ export async function createTuiScreen(
         renderSlashRows(0);
         promptBox.height = 0;
         composer.height = footerRows;
+        transcript.maxHeight = approvalPending || approvalCard !== undefined
+          ? Math.max(1, layoutHeight - headerRows - footerRows)
+          : undefined;
         return;
       }
 
@@ -1082,7 +1236,7 @@ export async function createTuiScreen(
         slashRows.length,
         Math.max(
           0,
-          inputAndTranscriptRows - transcriptRows - 1,
+          inputAndTranscriptRows - reservedTranscriptRows - 1,
         ),
       );
       renderSlashRows(menuRows);
@@ -1090,12 +1244,15 @@ export async function createTuiScreen(
         1,
         Math.min(
           PROMPT_MAX_VISIBLE_ROWS,
-          inputAndTranscriptRows - transcriptRows - menuRows,
+          inputAndTranscriptRows - reservedTranscriptRows - menuRows,
         ),
       );
       const visibleRows = Math.min(naturalRows, viewportRows);
       promptBox.height = visibleRows + ruleRows;
       composer.height = menuRows + visibleRows + ruleRows + footerRows;
+      transcript.maxHeight = approvalPending || approvalCard !== undefined
+        ? Math.max(1, layoutHeight - headerRows - composer.height)
+        : undefined;
     };
 
     const completeSelectedMenuItem = (): boolean => {
@@ -1525,6 +1682,7 @@ export async function createTuiScreen(
         reasoning,
         markdown,
         reasoningBlocks: new Map(),
+        reasoningStartedAt: new Map(),
         textBlocks: new Map(),
       };
       registerTranscriptBlock(
@@ -1545,8 +1703,7 @@ export async function createTuiScreen(
     const refreshAssistant = (view: AssistantView, streaming: boolean): void => {
       const reasoningContent = joinedBlocks(view.reasoningBlocks);
       const textContent = joinedBlocks(view.textBlocks);
-      view.reasoning.content =
-        reasoningContent === '' ? '' : `thinking\n${reasoningContent}`;
+      view.reasoning.content = reasoningContent;
       view.reasoning.visible = reasoningContent !== '';
       view.markdown.content = textContent;
       view.markdown.visible = textContent !== '';
@@ -1558,7 +1715,11 @@ export async function createTuiScreen(
       view.textBlocks.clear();
       for (const [index, part] of message.content.entries()) {
         if (part.type === 'reasoning') {
-          view.reasoningBlocks.set(index, sanitizeTerminalText(part.text));
+          const current = view.reasoningBlocks.get(index);
+          view.reasoningBlocks.set(
+            index,
+            current?.startsWith('thinking ·') === true ? current : 'thinking · complete',
+          );
         } else if (part.type === 'text') {
           view.textBlocks.set(index, sanitizeTerminalText(part.text));
         }
@@ -1601,7 +1762,7 @@ export async function createTuiScreen(
       refreshStatus();
       if (headline === undefined) return;
       const text = addText(`● ${headline}`, 'cyan', `tool:${toolCallId}`);
-      toolViews.set(toolCallId, { headline, name: safeToolName, text });
+      toolViews.set(toolCallId, { headline, name: safeToolName, text, startedAt: Date.now() });
     };
 
     const onToolUpdate = (toolCallId: string, output: string): void => {
@@ -1617,8 +1778,10 @@ export async function createTuiScreen(
       const head = truncateToWidth(sanitizeTerminalText(resultHead(result)), 96);
       const suffix = toolDetailsSuffix(result);
       const marker = result.isError ? '✗' : '✓';
+      const elapsed = view === undefined ? undefined : Date.now() - view.startedAt;
       const finalText = sanitizeTerminalText(
         `${marker} ${view?.headline ?? result.toolName}` +
+          (elapsed === undefined ? '' : ` · ${formatElapsed(elapsed)}`) +
           (suffix !== undefined ? ` · ${suffix}` : head !== '' ? ` · ${head}` : ''),
       );
       let renderedAsPlan = false;
@@ -1709,25 +1872,26 @@ export async function createTuiScreen(
           refreshAssistant(view, true);
           break;
         case 'reasoning_start': {
-          const part = event.partial.content[event.contentIndex];
-          const initial = part?.type === 'reasoning' ? sanitizeTerminalText(part.text) : '';
-          view.reasoningBlocks.set(event.contentIndex, initial);
+          view.reasoningStartedAt.set(event.contentIndex, Date.now());
+          view.reasoningBlocks.set(event.contentIndex, 'thinking · in progress');
           refreshAssistant(view, true);
           break;
         }
         case 'reasoning_delta': {
-          const previous = view.reasoningBlocks.get(event.contentIndex) ?? '';
+          // Full reasoning remains canonical in Runtime review snapshots; the transcript keeps
+          // only a stable status row so streaming cannot dominate the primary answer.
+          break;
+        }
+        case 'reasoning_end': {
+          const startedAt = view.reasoningStartedAt.get(event.contentIndex);
           view.reasoningBlocks.set(
             event.contentIndex,
-            previous + sanitizeTerminalText(event.delta),
+            `thinking · ${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
           );
+          view.reasoningStartedAt.delete(event.contentIndex);
           refreshAssistant(view, true);
           break;
         }
-        case 'reasoning_end':
-          view.reasoningBlocks.set(event.contentIndex, sanitizeTerminalText(event.content));
-          refreshAssistant(view, true);
-          break;
         case 'tool_call_start': {
           const part = event.partial.content[event.contentIndex];
           const name = part?.type === 'tool_call' ? part.name : 'tool';
@@ -1903,7 +2067,21 @@ export async function createTuiScreen(
           break;
         case 'approval_request':
           approvalPending = true;
-          addText(`? approval required\n${event.description}`, 'warning');
+          {
+            const presentation = opts.workspace?.approvalPresentation(
+              event.approvalId,
+            );
+            const text = addText(
+              formatApprovalSummary(presentation, event.description).join('\n'),
+              'warning',
+            );
+            approvalCard = {
+              text,
+              presentation,
+              fallbackDescription: event.description,
+              expanded: false,
+            };
+          }
           refreshStatus();
           break;
         case 'error':
@@ -1971,6 +2149,198 @@ export async function createTuiScreen(
       }
       activity = undefined;
       refreshStatus();
+    };
+
+    const resetTranscript = (messages: readonly AgentMessage[], highWaterSeq?: number): void => {
+      diffPanel.visible = false;
+      sessionPanel.visible = false;
+      transcript.visible = true;
+      for (const child of transcript.getChildren()) transcript.remove(child);
+      transcriptBlocks.splice(0, transcriptBlocks.length);
+      toolViews.clear();
+      currentAssistant = undefined;
+      planText = undefined;
+      approvalCard = undefined;
+      approvalPending = false;
+      transcriptSearchQuery = '';
+      transcriptSearchOrdinal = 0;
+      manuallyScrolled = false;
+      unreadAfterSeq = 0;
+      lastObservedHighWater = highWaterSeq ?? opts.eventHighWaterSeq?.() ?? lastObservedHighWater;
+      replayTranscript(messages);
+      jumpToLatest();
+    };
+
+    const refreshDiffViewer = (): void => {
+      const snapshot = diffSnapshot;
+      if (snapshot === undefined) return;
+      const files = snapshot.files;
+      diffFileIndex = Math.max(0, Math.min(diffFileIndex, Math.max(0, files.length - 1)));
+      const current = files[diffFileIndex];
+      diffHeader.content = files.length === 0
+        ? `${snapshot.scope} diff · no files · Tab switch scope · Esc close`
+        : `${snapshot.scope} diff · ${diffFileIndex + 1}/${files.length} · ` +
+          '←/→ file · ↑/↓ scroll · PgUp/PgDn · Tab scope · Esc close';
+      diffFiles.content = files.length === 0
+        ? '(no changed files)'
+        : files.map((file, index) =>
+            sanitizeTerminalText(
+              `${index === diffFileIndex ? '›' : ' '} [${file.group}] ${file.status} ${file.path}`,
+            ))
+          .join('\n');
+      diffBody.content = current === undefined
+        ? ''
+        : sanitizeTerminalText(current.patch === '' ? '(no textual patch)' : current.patch);
+      diffScroll.scrollTo({ x: 0, y: 0 });
+      renderer.requestRender();
+    };
+
+    const openDiffViewer = (snapshot: Readonly<RuntimeDiffSnapshot>): void => {
+      diffSnapshot = snapshot;
+      diffFileIndex = 0;
+      sessionPanel.visible = false;
+      transcript.visible = false;
+      diffPanel.visible = true;
+      opts.presentation?.store.setActivePanel('diff');
+      refreshDiffViewer();
+    };
+
+    const closeDiffViewer = (): void => {
+      if (!diffPanel.visible) return;
+      diffPanel.visible = false;
+      transcript.visible = true;
+      diffSnapshot = undefined;
+      opts.presentation?.store.setActivePanel('transcript');
+      renderer.requestRender();
+    };
+
+    const handleDiffViewerKey = (key: KeyEvent): 'none' | 'handled' | 'toggle-scope' => {
+      if (!diffPanel.visible) return 'none';
+      if (key.name === 'escape') {
+        closeDiffViewer();
+        return 'handled';
+      }
+      if (key.name === 'left' || key.name === 'right') {
+        const count = diffSnapshot?.files.length ?? 0;
+        if (count > 0) {
+          diffFileIndex = (diffFileIndex + (key.name === 'left' ? -1 : 1) + count) % count;
+          refreshDiffViewer();
+        }
+        return 'handled';
+      }
+      if (key.name === 'up' || key.name === 'down') {
+        diffScroll.scrollBy(key.name === 'up' ? -1 : 1);
+        return 'handled';
+      }
+      if (key.name === 'pageup' || key.name === 'pagedown') {
+        diffScroll.scrollBy(key.name === 'pageup' ? -0.9 : 0.9, 'viewport');
+        return 'handled';
+      }
+      if (key.name === 'home') {
+        diffScroll.scrollTo({ x: 0, y: 0 });
+        return 'handled';
+      }
+      if (key.name === 'end') {
+        diffScroll.scrollTo({ x: 0, y: diffScroll.scrollHeight });
+        return 'handled';
+      }
+      if (key.name === 'tab') return 'toggle-scope';
+      return 'none';
+    };
+
+    const refreshSessionPicker = (): void => {
+      sessionIndex = Math.max(0, Math.min(sessionIndex, Math.max(0, sessionItems.length - 1)));
+      sessionHeader.content =
+        `Sessions · ${sessionItems.length} match(es)` +
+        `${sessionQuery === '' ? '' : ` · search ${JSON.stringify(sessionQuery)}`}\n` +
+        'Type to search · Backspace edit · ↑/↓ select · Enter switch · Esc close';
+      if (sessionItems.length === 0) {
+        sessionList.content = 'No matching sessions.';
+      } else {
+        const radius = Math.max(2, Math.floor((layoutHeight - 10) / 4));
+        const start = Math.max(0, Math.min(sessionIndex - radius, sessionItems.length - radius * 2 - 1));
+        const visible = sessionItems.slice(start, start + radius * 2 + 1);
+        sessionList.content = visible.map((item, offset) => {
+          const index = start + offset;
+          const state = item.thread.archivedAt === undefined
+            ? item.thread.state
+            : `${item.thread.state}, archived`;
+          return sanitizeTerminalText(
+            `${index === sessionIndex ? '›' : ' '} ${item.thread.title?.trim() || '(untitled)'}\n` +
+            `    ${state} · ${new Date(item.updatedAt).toISOString()} · ${item.cwd}\n` +
+            `    ${item.preview ?? '(no preview)'} · ${item.thread.threadId}`,
+          );
+        }).join('\n\n');
+      }
+      renderer.requestRender();
+    };
+
+    const openSessionPicker = (
+      items: readonly RuntimeThreadListItem[],
+      query: string,
+    ): void => {
+      diffPanel.visible = false;
+      diffSnapshot = undefined;
+      transcript.visible = false;
+      sessionPanel.visible = true;
+      allSessionItems = items;
+      sessionQuery = sanitizeTerminalText(query);
+      sessionItems = filterSessionItems(allSessionItems, sessionQuery);
+      sessionIndex = 0;
+      opts.presentation?.store.setActivePanel('sessions');
+      refreshSessionPicker();
+    };
+
+    const closeSessionPicker = (): void => {
+      if (!sessionPanel.visible) return;
+      sessionPanel.visible = false;
+      transcript.visible = true;
+      allSessionItems = [];
+      sessionItems = [];
+      opts.presentation?.store.setActivePanel('transcript');
+      renderer.requestRender();
+    };
+
+    const handleSessionPickerKey = (key: KeyEvent):
+      | { readonly kind: 'none' | 'handled' }
+      | { readonly kind: 'select'; readonly threadId: ThreadId } => {
+      if (!sessionPanel.visible) return { kind: 'none' };
+      if (key.name === 'escape') {
+        closeSessionPicker();
+        return { kind: 'handled' };
+      }
+      if (key.name === 'up' || key.name === 'down') {
+        if (sessionItems.length > 0) {
+          sessionIndex = (sessionIndex + (key.name === 'up' ? -1 : 1) + sessionItems.length)
+            % sessionItems.length;
+          refreshSessionPicker();
+        }
+        return { kind: 'handled' };
+      }
+      if (key.name === 'return' || key.name === 'enter' || key.name === 'kpenter') {
+        const selected = sessionItems[sessionIndex];
+        if (selected === undefined) return { kind: 'handled' };
+        closeSessionPicker();
+        return { kind: 'select', threadId: selected.thread.threadId };
+      }
+      if (key.name === 'backspace') {
+        const characters = [...sessionQuery];
+        characters.pop();
+        sessionQuery = characters.join('');
+        sessionItems = filterSessionItems(allSessionItems, sessionQuery);
+        sessionIndex = 0;
+        refreshSessionPicker();
+        return { kind: 'handled' };
+      }
+      if (!key.ctrl && !key.meta && !key.option && !key.super && !key.hyper
+        && key.sequence !== '' && !/[\p{Cc}\p{Cf}]/u.test(key.sequence)) {
+        sessionQuery = sanitizeTerminalText(`${sessionQuery}${key.sequence}`);
+        sessionItems = filterSessionItems(allSessionItems, sessionQuery);
+        sessionIndex = 0;
+        refreshSessionPicker();
+        return { kind: 'handled' };
+      }
+      return { kind: 'handled' };
     };
 
     const applyResponsiveLayout = (width: number, height: number): void => {
@@ -2043,6 +2413,11 @@ export async function createTuiScreen(
     return {
       render,
       replayTranscript,
+      resetTranscript,
+      openDiffViewer,
+      handleDiffViewerKey,
+      openSessionPicker,
+      handleSessionPickerKey,
       println(text: string, tone: Tone = 'normal'): void {
         addText(text, tone);
         observeOutputEvent();
@@ -2102,9 +2477,27 @@ export async function createTuiScreen(
         providerCommandsAvailable = available;
         refreshComposerLayout();
       },
+      setInteractionState(phase: TuiPhase): void {
+        interaction.replace(phase);
+        refreshStatus();
+      },
       resolveApproval(): void {
         approvalPending = false;
         refreshStatus();
+      },
+      toggleApprovalDetails(): void {
+        if (approvalCard === undefined || !approvalPending) return;
+        approvalCard.expanded = !approvalCard.expanded;
+        approvalCard.text.content = (approvalCard.expanded
+          ? formatApprovalPresentation(
+              approvalCard.presentation,
+              approvalCard.fallbackDescription,
+            )
+          : formatApprovalSummary(
+              approvalCard.presentation,
+              approvalCard.fallbackDescription,
+            )).join('\n');
+        refreshComposerLayout();
       },
       getInput: () =>
         secretInput
@@ -2203,9 +2596,9 @@ export async function startTui(
   opts: TuiOptions,
 ): Promise<number> {
   const openTui = await import('@opentui/core');
-  const detectedGit = opts.branch === undefined || opts.gitDirty === undefined
-    ? await detectGitStatus(opts.cwd)
-    : { branch: opts.branch, dirty: opts.gitDirty };
+  // Runtime owns workspace facts. The view never reaches around its snapshot to query Git.
+  const detectedGit = opts.workspaceSnapshot.git
+    ?? { ...(opts.branch === undefined ? {} : { branch: opts.branch }), dirty: opts.gitDirty ?? false };
   const branch = opts.branch ?? detectedGit.branch;
   const gitDirty = opts.gitDirty ?? detectedGit.dirty;
   const interaction = new TuiInteractionState();
@@ -2265,6 +2658,7 @@ export async function startTui(
     }),
     cwd: opts.cwd,
     version: opts.version,
+    ...(opts.workspace !== undefined && { workspace: opts.workspace }),
     ...(opts.presentation !== undefined && { presentation: opts.presentation }),
   });
 }
@@ -2278,6 +2672,7 @@ interface TuiControllerOptions {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
   };
+  workspace?: RuntimeWorkspaceActions;
   projectRuleWarnings?: ProjectRuleWarningSource;
   /** 内存测试禁用 process signal 接线，避免并行用例互相影响。 */
   installSignalHandlers?: boolean;
@@ -2299,7 +2694,7 @@ export function runTuiController(
   opts: TuiControllerOptions,
 ): Promise<number> {
   const history = new InputHistory();
-  for (const prompt of promptHistoryEntries(session.messages)) history.push(prompt);
+  history.replace(promptHistoryEntries(session.messages));
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
   const approvalQueue: string[] = [];
@@ -2315,6 +2710,7 @@ export function runTuiController(
   let providerInputActive = false;
   let providerBeginning = false;
   let reverseSearchQuery: string | undefined;
+  let activeDiffScope: 'turn' | 'workspace' = 'turn';
   const enqueueApproval = (approvalId: string): boolean => {
     if (approvalQueue.includes(approvalId)) return false;
     approvalQueue.push(approvalId);
@@ -2442,6 +2838,147 @@ export function runTuiController(
         );
       } catch (error) {
         screen.println(`copy failed · ${sanitizeTerminalError(error)}`, 'danger');
+      }
+    };
+
+    const switchPresentation = (): void => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) return;
+      const state = opts.presentation?.store.switchToThread(workspace.currentThreadId);
+      history.replace(promptHistoryEntries(session.messages));
+      approvalQueue.length = 0;
+      screen.resolveApproval();
+      latestPromptDraft = state?.draft ?? '';
+      screen.resetTranscript(session.messages, workspace.eventHighWaterSeq());
+      screen.setInteractionState(session.interactionState());
+      if (state !== undefined) screen.restorePresentation(state);
+      screen.setInput(latestPromptDraft);
+      screen.setUsage(session.usage());
+      screen.setModel(session.currentModel());
+      for (const request of workspace.pendingApprovals()) {
+        enqueueApproval(request.approvalId);
+        screen.render({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
+      }
+      screen.println(`switched to ${workspace.currentThreadId}`, 'success');
+    };
+
+    const transitionPresentation = async (
+      transition: () => Promise<unknown>,
+    ): Promise<void> => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) return;
+      await runThreadPresentationTransition(
+        workspace,
+        opts.presentation?.store,
+        transition,
+        switchPresentation,
+      );
+    };
+
+    const runWorkspaceCommand = async (command: SlashCommand): Promise<void> => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) {
+        screen.println(`/${command.cmd} is unavailable in this mode`, 'warning');
+        return;
+      }
+      try {
+        switch (command.cmd) {
+          case 'sessions':
+            screen.openSessionPicker(
+              await workspace.listSessions(),
+              command.query,
+            );
+            return;
+          case 'resume':
+          case 'switch':
+            if (!isThreadId(command.threadId)) {
+              if (command.cmd === 'resume' && command.threadId === '') {
+                screen.openSessionPicker(
+                  await workspace.listSessions(),
+                  '',
+                );
+              } else {
+                screen.println(`usage: /${command.cmd} <thread-id>`, 'warning');
+              }
+              return;
+            }
+            const targetThreadId = command.threadId;
+            await transitionPresentation(() => workspace.switchSession(targetThreadId));
+            return;
+          case 'new':
+            await transitionPresentation(() => workspace.newSession());
+            return;
+          case 'rename':
+            if (command.title === '') {
+              screen.println('usage: /rename <title>', 'warning');
+              return;
+            }
+            await workspace.renameSession(command.title);
+            screen.println('Session renamed.', 'success');
+            return;
+          case 'archive':
+            if (command.mode !== '' && command.mode !== 'on' && command.mode !== 'off') {
+              screen.println('usage: /archive [on|off]', 'warning');
+              return;
+            }
+            await workspace.archiveSession(command.mode !== 'off');
+            screen.println(command.mode === 'off' ? 'Session restored.' : 'Session archived.', 'success');
+            return;
+          case 'compact':
+            await workspace.compactConversation();
+            screen.println('Conversation compacted.', 'success');
+            return;
+          case 'fork':
+          case 'retry':
+            if (command.turnId !== '' && !isTurnId(command.turnId)) {
+              screen.println(`usage: /${command.cmd} [turn-id]`, 'warning');
+              return;
+            }
+            const targetTurnId = command.turnId === '' ? undefined : command.turnId;
+            if (command.cmd === 'fork') {
+              await transitionPresentation(() => workspace.forkConversation(
+                targetTurnId,
+              ));
+            } else {
+              await transitionPresentation(() => workspace.retryConversation(
+                targetTurnId,
+              ));
+            }
+            return;
+          case 'review': {
+            const snapshot = await workspace.reviewSnapshot();
+            if (snapshot === undefined) screen.println('No review data for this session.', 'warning');
+            else formatReviewSnapshot(snapshot).forEach((line) => screen.println(line, 'muted'));
+            return;
+          }
+          case 'diff': {
+            const scope = command.scope === '' ? 'turn' : command.scope;
+            if (scope !== 'turn' && scope !== 'workspace') {
+              screen.println('usage: /diff [turn|workspace]', 'warning');
+              return;
+            }
+            const snapshot = await workspace.diffSnapshot(scope);
+            if (snapshot === undefined) screen.println('No diff data for this session.', 'warning');
+            else {
+              activeDiffScope = scope;
+              screen.openDiffViewer(snapshot);
+            }
+            return;
+          }
+          case 'permissions':
+            formatPermissionSnapshot(await workspace.workspaceSnapshot())
+              .forEach((line) => screen.println(line, 'muted'));
+            return;
+          default:
+            return;
+        }
+      } catch (error) {
+        screen.println(`${command.cmd} failed · ${sanitizeTerminalError(error)}`, 'danger');
       }
     };
 
@@ -2591,6 +3128,20 @@ export function runTuiController(
           }
           return paletteReturnDraft ?? null;
         }
+        case 'sessions':
+        case 'resume':
+        case 'switch':
+        case 'new':
+        case 'rename':
+        case 'archive':
+        case 'compact':
+        case 'fork':
+        case 'retry':
+        case 'review':
+        case 'diff':
+        case 'permissions':
+          void runWorkspaceCommand(command);
+          return paletteReturnDraft ?? null;
         case 'vim':
           if (command.mode !== 'on' && command.mode !== 'off') {
             screen.println('usage: /vim <on|off>', 'warning');
@@ -2709,6 +3260,36 @@ export function runTuiController(
         consume(key);
         return;
       }
+      const sessionPickerAction = screen.handleSessionPickerKey(key);
+      if (sessionPickerAction.kind !== 'none') {
+        consume(key);
+        if (sessionPickerAction.kind === 'select' && opts.workspace !== undefined) {
+          void transitionPresentation(
+            () => opts.workspace?.switchSession(sessionPickerAction.threadId) ?? Promise.resolve(),
+          ).catch((error: unknown) => {
+            screen.println(`switch failed · ${sanitizeTerminalError(error)}`, 'danger');
+          });
+        }
+        return;
+      }
+      const diffAction = screen.handleDiffViewerKey(key);
+      if (diffAction !== 'none') {
+        consume(key);
+        if (diffAction === 'toggle-scope' && opts.workspace !== undefined) {
+          const next = activeDiffScope === 'turn' ? 'workspace' : 'turn';
+          void opts.workspace.diffSnapshot(next).then((snapshot) => {
+            if (snapshot === undefined) {
+              screen.println(`No ${next} diff data.`, 'warning');
+              return;
+            }
+            activeDiffScope = next;
+            screen.openDiffViewer(snapshot);
+          }).catch((error: unknown) => {
+            screen.println(`diff failed · ${sanitizeTerminalError(error)}`, 'danger');
+          });
+        }
+        return;
+      }
       const isEnter = key.name === 'return' || key.name === 'enter' || key.name === 'kpenter';
       if (key.name !== 'escape') escExit.reset();
       if (!(key.ctrl && key.name === 'c')) ctrlCExit.reset();
@@ -2730,6 +3311,14 @@ export function runTuiController(
       }
 
       if (approvalQueue.length > 0 && approval?.broker !== undefined) {
+        if (
+          !key.ctrl && !key.meta && !key.shift && !key.option &&
+          !key.super && !key.hyper && key.name === 'v'
+        ) {
+          consume(key);
+          screen.toggleApprovalDetails();
+          return;
+        }
         const decision = approvalDecisionForKey(key);
         if (decision === 'abort') {
           consume(key);
@@ -2742,7 +3331,15 @@ export function runTuiController(
         }
         if (decision !== undefined) {
           consume(key);
-          const id = approvalQueue.shift();
+          const id = approvalQueue[0];
+          if (decision === 'allow_always'
+            && !approvalAllowsAlways(id === undefined
+              ? undefined
+              : opts.workspace?.approvalPresentation(id))) {
+            screen.println('Allow always is unavailable because Runtime provided no frozen scope.', 'warning');
+            return;
+          }
+          approvalQueue.shift();
           if (id !== undefined) approval.broker.resolve(id, decision);
           if (approvalQueue.length === 0) screen.resolveApproval();
           return;
@@ -2990,6 +3587,12 @@ export function runTuiController(
 function compactNumber(value: number, suffix: string): string {
   const digits = value < 10 ? 1 : 0;
   return `${value.toFixed(digits).replace(/\.0$/, '')}${suffix}`;
+}
+
+function formatElapsed(milliseconds: number): string {
+  return milliseconds < 1_000
+    ? `${Math.max(0, milliseconds)}ms`
+    : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
 }
 
 function formatModelRef(model: ModelRef | undefined): string {

@@ -71,6 +71,79 @@ const MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'runti
 const CEILING = { revision: 'thread-ceiling', constraints: [] } as const;
 
 describe('ThreadRuntime durable admission and identity', () => {
+  test('commits rename/archive metadata and manual compact as canonical Runtime activities', async () => {
+    const fixture = runtimeFixture();
+    expect(await fixture.runtime.acceptExternal({
+      type: 'thread_rename',
+      opId: opId(46),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      title: '  Review target  ',
+    })).toMatchObject({ accepted: true });
+    expect(fixture.runtime.summary()).toMatchObject({ title: 'Review target', updatedAt: 1 });
+    expect(await fixture.runtime.acceptExternal({
+      type: 'thread_archive',
+      opId: opId(47),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      archived: true,
+    })).toMatchObject({ accepted: true });
+    expect(fixture.runtime.summary()).toMatchObject({ archivedAt: 1, updatedAt: 1 });
+
+    const root = prompt(opId(48), 'context to compact');
+    const promptReceipt = await fixture.runtime.acceptExternal(root);
+    if (!promptReceipt.accepted || promptReceipt.runId === undefined) {
+      throw new Error('prompt was not accepted');
+    }
+    const turn = await fixture.runtime.reserveTurn({ runId: promptReceipt.runId, turnOrdinal: 1 });
+    await fixture.runtime.commitDriverEvent({
+      event: { type: 'turn_start' },
+      runId: promptReceipt.runId,
+      turnId: turn.turnId,
+    });
+    const user: UserMessage = {
+      role: 'user',
+      id: 'user-compact-context',
+      timestamp: 1,
+      source: 'prompt',
+      content: [{ type: 'text', text: root.text }],
+    };
+    await fixture.runtime.commitDriverEvent({
+      event: { type: 'message_end', message: user },
+      runId: promptReceipt.runId,
+      turnId: turn.turnId,
+    });
+    fixture.driver.complete(promptReceipt.runId, 'completed');
+    await fixture.runtime.waitForIdle();
+
+    const compact = await fixture.runtime.acceptExternal({
+      type: 'compact',
+      opId: opId(49),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+    });
+    if (!compact.accepted || compact.runId === undefined) throw new Error('compact was not accepted');
+    expect(fixture.driver.commands.at(-1)).toMatchObject({
+      op: { type: 'compact', opId: opId(49) },
+      runId: compact.runId,
+    });
+    fixture.driver.complete(compact.runId, 'completed');
+    await fixture.runtime.waitForIdle();
+    const folded = fixture.runtime.durableState();
+    expect(folded.runs.get(compact.runId)).toMatchObject({
+      reason: 'compact',
+      state: 'terminal',
+      status: 'completed',
+    });
+    expect(folded.envelopes.findLast((item) =>
+      item.opId === opId(49) && item.event.type === 'op_completed')?.event).toMatchObject({
+      opType: 'compact',
+      terminalRunId: compact.runId,
+      outcome: 'applied',
+    });
+    await fixture.runtime.close();
+  });
+
   test('keeps successor and turn reservations stable and rejects a successor fork', async () => {
     const fixture = runtimeFixture();
     const receipt = await fixture.runtime.acceptExternal(prompt(opId(1), 'identity'));
@@ -1332,6 +1405,35 @@ describe('ThreadRuntime durable admission and identity', () => {
       },
     });
     if (proposal === undefined) throw new Error('missing canonical grant proposal');
+    expect(request.event.payload.presentation).toMatchObject({
+      requestId: request.event.requestId,
+      target: {
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        runId: receipt.runId,
+        turnId: request.event.owningTurnId,
+      },
+      capability: { id: 'scoped-execute', version: '1.0.0' },
+      normalizedResources: [{
+        selectorId: 'command',
+        resourceType: 'command',
+        access: 'execute',
+        canonicalTarget: 'bun test',
+      }],
+      risk: { description: expect.any(String) },
+      allowOnce: {
+        invocationId: expect.any(String),
+        toolCallId: 'call-canonical-approval',
+      },
+      allowAlways: proposal.scope,
+      revisions: {
+        catalog: expect.any(Number),
+        effectivePolicy: expect.any(String),
+        policyBasis: expect.any(String),
+        ceiling: expect.any(String),
+        grants: expect.any(String),
+      },
+    });
     expect(preparationSettled).toBe(false);
 
     const response = {
@@ -2239,7 +2341,9 @@ class ScriptedDriver implements ThreadDriverPort {
   dispatch(command: PreparedThreadDriverCommand): { readonly completion: Promise<ThreadDriverCompletion> } {
     this.commands.push(command);
     if (command.op.type === 'abort') this.onAbortDispatch?.();
-    if ((command.op.type === 'prompt' || command.op.type === 'continue') && 'runId' in command) {
+    if ((command.op.type === 'prompt'
+      || command.op.type === 'continue'
+      || command.op.type === 'compact') && 'runId' in command) {
       const completion = deferred<ThreadDriverCompletion>();
       this.#activities.set(command.runId, completion);
       return { completion: completion.promise };

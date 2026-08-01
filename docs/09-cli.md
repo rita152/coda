@@ -12,12 +12,14 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
-> **UX2 完成基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
+> **UX3 实现基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
 > 契约以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。统一 command catalog、薄
 > bootstrap/help/version/completion、产品子命令、`--ui`、最低 accessible/plain 文本面、共享
 > terminal sanitizer 与 classic 多行/光标/paste 已落地；UX2 的紧凑任务栏、palette、composer、
-> per-thread presentation state 与 transcript 导航已完成恰好两轮 review。thread 页面切换、完整
-> review/diff 工作流、长 transcript 窗口化与 delta 限帧仍属 UX3–UX4，不得把后续目标推测为当前行为。
+> per-thread presentation state 与 transcript 导航已完成恰好两轮 review。UX3 已实现 Runtime-backed
+> review/diff、approval card、session switch、manual compact 与 conversation fork/retry，并已完成恰好
+> 两轮完整 review；第二轮修复了 allow-always 可用性、seed turn provenance 与 tool update snapshot
+> 聚合，随后仅运行定向验证。长 transcript 窗口化与 delta 限帧仍属 UX4。
 
 ## 0. 产品 surface 与事实来源
 
@@ -32,8 +34,8 @@ CLI `approvalMode` 只进入注入的 permission policy/approval adapter，不�
 UX1 的 help、completion、错误建议和 CLI 子命令与 UX2 的 categorized fuzzy palette、slash/text
 commands、参数提示和快捷键都由同一个 command catalog 生成。TUI/classic/accessibility 共享
 per-thread presentation state 与 presentation-only actions。UX3 的 diff、session 与 approval UI
-只能展示 Runtime 提交进 snapshot/envelope 的权威 identity/resource/scope。当前 control payload 尚缺完整
-审批详情，因此 UX3 先把由同一 `PreparedInvocation`/`PolicyDecision` 生成的 JSON-safe
+只展示 Runtime 提交进 snapshot/envelope 的权威 identity/resource/scope。由同一
+`PreparedInvocation`/`PolicyDecision` 生成的 JSON-safe
 `ApprovalPresentation` 纳入 canonical event/snapshot；UI 不得直接读取 capability/policy internals，也不得
 从命令字符串或自由文本自行推导权限。工作区 diff 同样必须经新增的 RuntimePort read-only query，底层
 Git adapter 不能直接暴露给 CLI/UI。
@@ -69,8 +71,9 @@ TUI 进入 alternate screen，组件树固定为:
 ```text
 root column (100% × 100%)
 ├── header:首次显示版本 + Unicode 像素 Logo + tips；交互后收缩为紧凑任务栏
-├── transcript:ScrollBox(flexGrow:1)
+├── transcript / diff viewer / session picker:同一可恢复内容区
 └── composer
+    ├── approval card:默认摘要，`v` 展开 Runtime-authoritative scope
     ├── candidate menu:categorized fuzzy slash/provider/@path 候选
     ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
     ├── task:phase/thread/permissions/queue/unread/Vim
@@ -83,8 +86,8 @@ root column (100% × 100%)
   图片协议。首次输入非空 draft、提交消息或恢复已有 draft/thread 后，9 行 onboarding header 永久收缩为
   3 行紧凑任务栏；resize 不会把已完成 onboarding 的 Logo/tips 重新弹回。低于 10 行时连紧凑 header
   也隐藏。header、brand、Logo 与 tips 都不绘制背景色，直接透出终端背景。
-- **transcript**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部；PageUp 或鼠标滚轮上滚后暂停跟尾，按 stable message/tool anchor 保存位置并累计 `N new`。PageDown 回到底部、`End` 或 `/latest` 才清 unread。`/search`、`/next`、`/previous` 定位匹配项但不移动 composer 焦点。
-- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄,workspace 行暂时切成始终可见的 `Approval … y/a/n/Esc`,即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格三行：task 行持续显示 phase、thread、permissions、queue、unread 与可选 Vim mode；workspace 行显示 cwd 与 Git `branch*`；runtime 行左侧显示 `usage.contextTokens`、右侧显示当前 `ModelRef`。这些状态不因 draft 非空而消失。冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比；缺上限显示 `limit unknown`，不得按模型名猜窗口大小。
+- **transcript / panels**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部；PageUp 或鼠标滚轮上滚后暂停跟尾，按 stable message/tool anchor 保存位置并累计 `N new`。PageDown 回到底部、`End` 或 `/latest` 才清 unread。`/search`、`/next`、`/previous` 定位匹配项但不移动 composer 焦点。`/diff` 把同一区域切到完整 Runtime diff viewer，支持 `←/→` 换文件、`↑/↓` 滚动、`Tab` 切 turn/workspace、`Esc` 返回；`/sessions` 打开 searchable picker，搜索始终针对完整 catalog，不在已过滤子集上二次过滤。
+- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄，composer 上方显示默认折叠卡片，workspace 行始终可见 `Approval … v/y/a/n/Esc`；`v` 只展开 Runtime-authored capability/resource/risk/scope/revision，legacy scope 缺失时明确 unavailable。即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格三行：task 行持续显示 phase、thread、permissions、queue、unread 与可选 Vim mode；workspace 行显示 cwd 与 Git `branch*`；runtime 行左侧显示 `usage.contextTokens`、右侧显示当前 `ModelRef`。这些状态不因 draft 非空而消失。冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比；缺上限显示 `limit unknown`，不得按模型名猜窗口大小。
 - **candidate menu**:slash 命令、provider 枚举和 `@` path completion 复用 prompt 正上方的同一个透明候选层。slash 项显示 `[category] /name <argument>`、首个快捷键、说明和 disabled 原因；name/alias 的 exact/prefix/substring/subsequence 优先于 description/category 的模糊命中。可执行性统一由 phase、approval、provider prompt、provider availability、model、transcript 与 stash 状态计算；不可执行项保留以解释原因，provider 自由/秘密输入与审批状态则隐藏无关命令。`Ctrl+K` 从任意普通 draft 打开 palette，`Esc` 恢复原 draft。兼容别名 `/f`、`/q`、`/prev` 继续可输入但不重复占候选行。`↑`/`↓` 循环，`Tab` 采用但不发送，`Enter` 采用后执行；`@query` 的 Tab 插入当前 workspace 相对路径。运行中 read-only/presentation 命令仍可执行，provider 管理命令明确 disabled，普通文本 Enter 继续是 steering。
 - **provider 候选**:`/login` 的 preset、Custom 协议、`/model` 模型、`/logout` provider 都由共用状态机把结构化 `value/label/description` 交给同一 candidate menu；空输入显示候选，输入文本可按 label/value/description 大小写无关过滤，`↑`/`↓` 循环选择，`Enter` 直接确认当前项，不要求输入数字。`Tab` 不确认 provider 选项；`Esc` 静默回到上一步，例如 Custom 协议回到 API key、Custom name 回到 preset。离开秘密步骤时必须先清空 UI 秘密缓冲；协议步骤中已经暂存在 controller 的 key 也要在回退时清空。到达 `/login`、`/model` 或 `/logout` 的根步骤后再按 `Esc` 才静默退出流程，不打印“已取消”。秘密输入和 name/base URL 等自由文本步骤不显示候选。审批期间所有候选隐藏。
 - **候选布局**:候选占用 composer 上方空间，一次最多显示 8 项；项目更多或空间不足时围绕当前项裁切，同时仍优先保留 1 行输入与可用时 1 行 transcript。
@@ -108,7 +111,9 @@ history/presentation API。
 `line-repl.ts` 是 accessible/plain 的最低交互面：只读完整行、append-only，不开 raw mode、
 alternate screen、bracketed-paste mode、鼠标或动画。它以文本命令提供 prompt/steer/follow-up/
 abort/approval/status/queue/model/logout 以及 `/history`、`/edit`、`/files`、`/stash`、`/restore`、
-`/draft`、`/search`、`/next`、`/previous`、`/latest`、`/copy`、`/export`、`/vim` parity；`/login`
+`/draft`、`/search`、`/next`、`/previous`、`/latest`、`/copy`、`/export`、`/vim`，以及 UX3 的
+`/review`、`/diff`、`/permissions`、`/compact`、`/new`、`/sessions`、`/resume`、`/switch`、
+`/rename`、`/archive`、`/retry`、`/fork` parity；`/login`
 明确引导到受保护的 `coda auth login`。输出
 失败会 abort 当前 run、关闭 Runtime 并返回 1。classic 和文本面的真实 key 都不进入历史、
 transcript、event、journal 或日志。
@@ -312,7 +317,7 @@ dispatcher 与不可变 tool 定义可共享。稳定 `policyRevision` 与当前
 run permissionCeiling，driver 在任何 sampling/tool/approval 前把该同一对象绑定到 attachment 的
 permission state；adapter 不能按 thread id 重算或在 resume/retry 时放宽。显式 registry composition
 已由 turn 捕获的 EffectivePolicySnapshot 统一解释；production static 默认仍由 legacy adapter 保持原
-行为。正常 workspace picker 的候选只来自 `runtime.listThreads()` 的
+行为。正常 workspace picker 的候选只来自 `runtime.listThreadDetails()` 的
 持久索引；CLI `--continue/--resume` 则只经上面的 storage global catalog bootstrap，CLI 本身仍不
 扫描或直读 repository。两者选中后都严格执行 events → resume → snapshot 顺序。
 
@@ -329,7 +334,38 @@ Runtime，退出则必须等待输出泵 drain。direct `Agent.subscribe` 仍保
 exported `Session.subscribe` 已经由 standalone private durable cursor pump 异步投递，慢 listener 或
 reject 不会反向延迟 run/`waitForIdle()`。
 
-### 2.1 项目规则感知(`AGENTS.md`)
+### 2.1 交互 session 与审阅工作流
+
+UX3 交互命令全部经 `RuntimeWorkspaceActions` 翻译为 RuntimePort query/op：
+
+```text
+/new                         创建并切换到新 thread
+/sessions [query]            搜索完整 workspace catalog
+/resume [thread-id]          恢复并切换；无 id 时打开 picker
+/switch <thread-id>          切换可见 attachment，不停止源 run
+/rename <title>              写入 canonical thread metadata
+/archive [on|off]            archive/restore 当前 thread
+/compact                     显式 manual compaction，不隐式继续
+/retry [turn-id]             在安全 fork 中重试 user turn
+/fork [turn-id]              复制截至 turn 的 committed conversation
+/review                      展示完整 reasoning/tool review snapshot
+/diff [turn|workspace]       打开完整分组 diff
+/permissions                 展示 Runtime permission revision/ceiling
+```
+
+picker 对 title、ThreadId、state/archived、ISO time、workspace、cwd 与 preview 统一搜索，并按 updatedAt
+倒序。switch 前同步保存源 draft/scroll/unread/panel；目标 snapshot splice 完成后恢复目标 state，并只从
+目标 pending controls 重建审批卡。workspace-wide event pump 继续消费后台 thread，只有当前目标投影到
+transcript；后台 run 的 completion 仍能结案对应 op waiter。`Esc` abort 与 y/a/n approval 严格绑定当前
+目标及 control 冻结的 owning RunId，页面切换不会让旧卡片误作用于新 thread。
+
+reasoning 默认只显示状态和耗时；`/review` 才输出完整 content。工具默认显示名称、目标、状态、耗时与
+结果摘要，完整 args/output 也只来自 Runtime review snapshot。diff viewer 不截断 patch，分组为 staged、
+unstaged、untracked 或 turn；Git 采集在 RuntimePort 后的 composition adapter 中完成，TUI 不导入 Git/
+repository。fork/retry 只复制已提交 conversation checkpoint，源 busy/pending approval 时拒绝；它们不
+回滚 workspace 文件、shell 或外部副作用。
+
+### 2.2 项目规则感知(`AGENTS.md`)
 
 项目规则的路径来源与固定预算由 CLI composition 注入 `RuleSnapshotProvider/RuleSnapshotBudget`，base
 system prompt 由 `BasePromptProvider` 注入；每 turn 的读取/发现属于前两者，纯拼装属于
@@ -456,7 +492,7 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | retry backoff / compacting | `Esc` | 提交目标 thread 的 `abort` op，取消待重试或压缩 |
 | TUI | `PageUp` / `PageDown` | 滚动中间 transcript,输入框保持焦点；classic/accessibility 使用终端 scrollback |
 | 任意 | `Esc Esc`(500ms 内)或 `Ctrl+C Ctrl+C` | 退出（流式中先 abort，等待权威提交与输出泵后 `RuntimePort.close()`） |
-| 审批中 | 无修饰的 `y` / `a` / `n` / `Esc` | 提交 `control_response`（本次允许 / 始终允许 / 拒绝）或目标 run `abort`；其余输入冻结 |
+| 审批中 | 无修饰的 `v` / `y` / `a` / `n` / `Esc` | 展开权威详情，或提交 `control_response`（本次允许 / 始终允许 / 拒绝）/目标 run `abort`；其余输入冻结。现代 card 仅在有 frozen allow-always scope 时提示 `a`；legacy compatibility prompt 仍接受既有 `a`，但明确 scope unavailable |
 
 ### 3.1 为什么与 pi 完全一致
 
@@ -477,7 +513,9 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
   `/quit`（兼容 `/q`）、`/queue`、`/status`、`/help`
   外，还包括 `/abort`、`/history`、`/edit`、`/files`、`/stash`、`/restore`、`/draft`、`/vim`、
   `/search`、`/next`、`/previous`（兼容 `/prev`）、`/latest`、`/copy`、`/export` 与 `/followup`
-  （兼容 `/f`）。运行中 read-only/presentation 命令继续执行；provider/quit 按状态显示 disabled 原因。
+  （兼容 `/f`），以及 `/review`、`/diff`、`/permissions`、`/compact`、`/retry`、`/fork`、`/new`、
+  `/sessions`、`/resume`、`/switch`、`/rename`、`/archive`。运行中 read-only/presentation/session switch
+  命令继续执行；compact/retry/fork/archive-on 与 provider/quit 按状态显示 disabled 原因。
   CLI help/completion、TUI/classic slash 候选和三种 surface 的 `/help` 都由
   `command-catalog.ts` 的 `COMMAND_SPECS` 派生；别名参与匹配和补全但不单独渲染。帮助按 surface
   过滤键位，不把 TUI 的 PageUp/history 或 classic 的多行键位冒充 accessible/plain 能力。
@@ -509,13 +547,14 @@ TUI 渲染行为：
 | `turn_end` | 无额外分隔组件 |
 | `message_start` (user) | 追加 user / steering / follow-up / synthetic 块 |
 | `message_start` (assistant) | 创建按 message id 索引的流式 Markdown 块 |
-| `message_update` | `text_delta` / `reasoning_delta` 分别按 `contentIndex` 累积到有序块,块间保留空行；不能把多个 content part 粘成一个单词或在最终消息到达时跳变；tool-call 参数流只更新 activity |
+| `message_update` | `text_delta` 按 `contentIndex` 累积到有序块；reasoning 默认折叠为状态/耗时，不把完整内容直接铺入 transcript，`/review` 从 Runtime snapshot 展开；不能把多个 content part 粘成一个单词或在最终消息到达时跳变；tool-call 参数流只更新 activity |
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
-| `tool_execution_start/update/end` | 原位更新同一工具块:`●` → 尾行 → `✓/✗`;diff 以语义颜色追加(上限 24 行) |
+| `tool_execution_start/update/end` | 原位更新同一工具摘要块：名称/目标/耗时/状态/结果摘要；`update.output` 是累计快照，view/review reducer 都整块替换而不拼接；`/review` 展开完整 args/output；完整 diff 只进入 Runtime diff viewer，普通 transcript 可保留兼容摘要 |
 | `queue_update` | 完整替换计数;running/retrying 时附在 prompt placeholder |
 | `plan_update` | 原位替换同一 plan 块:`✓` / `▶` / `○`,不重复追加整表 |
-| `control_request(kind:'approval')` | 权威提交后 prompt 横线切黄色,第一条 footer 显示专用键位；已有 draft 保留但冻结；legacy 投影名为 `approval_request` |
+| `control_request(kind:'approval')` | 权威提交后 prompt 横线切黄色并显示折叠卡片；`v` 只展开 `ApprovalPresentation` 的 capability/resource/risk/scope/revision；已有 draft 保留但冻结；legacy scope 缺省时明确 unavailable；legacy 投影名为 `approval_request` |
+| `thread_updated` | 刷新 session catalog/title/archive 状态；不直接改 transcript 或当前 run phase |
 | `usage_update` | 用 `contextTokens` 刷新 footer;不使用 cumulative 伪装当前上下文 |
 | `retry_scheduled` / `compaction_*` | 追加 notice 并更新 activity；controller 与 view 共享同一个 envelope reducer 状态投影,不得分别读取瞬时的 runtime/agent state；取消重试后的 error 与 compaction_end 都回到 idle |
 | `error` | `fatal: false` 打印警告行;`fatal: true` 打印错误并进入退出流程 |
@@ -868,6 +907,23 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   保留可重试 draft/stash，并让退出返回非零。pending key 绝不提交给 Runtime，因而未选模型仍为零
   thread/journal；attachment listener 将它先写入真实 thread 文件、清空源后再切换 owner。Ctrl+O 与
   palette/slash `/edit` 在外部编辑器返回前都保留原 composer/store draft，只有成功结果才能替换。
+- **thread switch 与后台 run**：frontend 初始化时建立 workspace-wide subscription，并为 catalog 中每个
+  thread 以 high-water cursor 接续。switch/new/fork/retry 必须先对源 presentation 做严格同步 flush；失败时
+  不得调用 Runtime action，当前 thread、画面和审批队列保持不变。action 成功后再切换 presentation owner、
+  splice 目标 snapshot/live buffer，并重新以目标 canonical user transcript 替换 Ctrl+R history，最后恢复
+  目标 draft/scroll/unread/panel 与 pending approval；源 run 不 abort/close。目标 presentation 投影失败或
+  resume/new 失败时回滚到原 attachment 并重新 hydrate/恢复源 presentation，而不是留下半切换 view。
+  classic 的 attachment listener 是 transcript replay 的唯一来源，switch handler 不再重复打印 raw transcript。
+  隐藏 thread 的 envelope 只更新 per-thread
+  cursor 和对应 op waiter，不污染当前 transcript/phase；再次切回时以 snapshot 补全。
+- **运行中的 archive**：`/archive off` 是可逆 metadata 恢复，可在 run 中执行，不能被 Enter 路由成 steer；
+  `/archive` 或 `/archive on` 仍交给 Runtime 对 active run/control 返回精确 `thread_busy`，UI 不自行改写事实。
+- **diff/review**：workspace Git port 缺失或失败时明确显示 unavailable/error，不由 UI 回退到 `git`
+  子进程。viewer 保存完整 patch；普通 transcript 的兼容截断摘要不等于 canonical diff。所有路径、patch、
+  tool output、session title/preview 和审批字段进入 frame/文本前仍经过共享 sanitizer。
+- **审批决议可用性**：现代 `ApprovalPresentation.allowAlways` 缺失时，TUI footer、classic 动态提示和
+  accessible 文本提示都不展示 `a`；即使用户手工输入 `a`/`/allow-always`，也只显示 unavailable，pending
+  card/queue 保持不变且不提交无效 response。没有 presentation 的 legacy request 保留既有 `a` 兼容输入。
 
 ## 9. 验收清单
 
@@ -906,6 +962,15 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   provider 的普通字段与 secret 对 task draft/store/history/frame/transcript/log 都保持隔离
 - [x] `/search`/next/previous/latest、`/copy latest|raw` 与 exclusive `/export` 在 TUI/classic/text 共享
   parser/actions；导出不覆盖已有文件，终端控制序列不能借 copy 状态或错误回到 human surface
+- [x] UX3 command catalog 与 TUI/classic/accessible parser 提供 review/diff/permissions/compact、session
+  管理及 fork/retry；所有业务动作只经 RuntimePort，Git/repository 不被 UI 直读
+- [x] reasoning 默认折叠；工具显示目标/状态/耗时/摘要，Runtime review 可展开完整 args/output；diff
+  viewer 保留 staged/unstaged/untracked/turn 完整 patch，并支持文件、滚动和 scope 切换
+- [x] session picker 搜索完整 catalog 的状态/时间/workspace/cwd/preview；跨 thread 切换保留独立
+  draft/scroll/unread，后台 run 继续，new/switch 失败回滚，approval/abort 只作用于当前目标
+- [x] approval card 默认折叠，展开值只来自 identity-bound `ApprovalPresentation`；legacy scope 缺失时
+  明确 unavailable，不从工具参数/命令推导；manual compact 与 fork/retry 有 journal/recovery 门禁且不
+  声称回滚文件或 shell 副作用
 - [ ] `coda --continue` 重放转录后,tool 摘要、最新 plan 与 plan error 都保留,新输入接在原上下文继续
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
 - [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景

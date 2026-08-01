@@ -9,6 +9,7 @@ import type {
   RunId,
   RuntimeEvent,
   RuntimeOp,
+  RuntimeThreadListItem,
   ThreadId,
   ThreadSnapshot,
   TurnId,
@@ -21,6 +22,7 @@ import {
 
 const WORKSPACE_ID = 'workspace-test' as WorkspaceId;
 const THREAD_ID = 'thread-test' as ThreadId;
+const THREAD_B = 'thread-background' as ThreadId;
 const RUN_ID = 'run-test' as RunId;
 const TURN_ID = 'turn-test' as TurnId;
 const MODEL: ModelConfig = {
@@ -113,6 +115,11 @@ describe('RuntimeFrontendSession', () => {
     runtime.requestApproval('approval-1');
     await flushMicrotasks();
     expect(events).toEqual(['approval_request']);
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-1',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
 
     const beforeUnknown = runtime.ops.length;
     session.resolveApproval('missing', 'allow_once');
@@ -120,6 +127,7 @@ describe('RuntimeFrontendSession', () => {
 
     session.resolveApproval('approval-1', 'allow_always');
     await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
     expect(runtime.ops.at(-1)).toMatchObject({
       type: 'control_response',
       workspaceId: WORKSPACE_ID,
@@ -311,6 +319,67 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
+  it('uses per-thread cursors and lets a background run finish while another thread is visible', async () => {
+    const runtime = new WorkspaceFakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'resume',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    expect(runtime.eventOptions?.cursors).toEqual([
+      { threadId: THREAD_ID, afterSeq: 5 },
+      { threadId: THREAD_B, afterSeq: 3 },
+    ]);
+
+    const prompt = session.prompt('keep running in the background');
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('running');
+    await session.switchSession(THREAD_B);
+    expect(session.currentThreadId).toBe(THREAD_B);
+    expect(session.messages[0]?.content[0]).toMatchObject({ text: 'thread B' });
+    expect(runtime.ops.some((op) => op.type === 'abort')).toBe(false);
+
+    runtime.completeBackgroundPrompt();
+    await prompt;
+    expect(session.currentThreadId).toBe(THREAD_B);
+    expect(session.messages[0]?.content[0]).toMatchObject({ text: 'thread B' });
+    await session.switchSession(THREAD_ID);
+    expect(session.messages.at(-1)?.content[0]).toMatchObject({
+      text: 'keep running in the background',
+    });
+    expect(session.eventHighWaterSeq()).toBe(9);
+    await session.close();
+  });
+
+  it('restores the current attached session when creating a new session fails', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    const prompt = session.prompt('preserve this transcript');
+    await flushMicrotasks();
+    runtime.completePrompt();
+    await prompt;
+
+    runtime.nextThreadId = 'thread-create-failure' as ThreadId;
+    runtime.rejectNextCreate = 'provider unavailable';
+    await expect(session.newSession()).rejects.toThrow('provider unavailable');
+
+    expect(session.currentThreadId).toBe(THREAD_ID);
+    expect(session.isAttached()).toBe(true);
+    expect(session.currentModel()).toEqual(MODEL.ref);
+    expect(session.messages.at(-1)?.content[0]).toMatchObject({
+      text: 'preserve this transcript',
+    });
+    await session.close();
+  });
+
   it('closes runtime resources when hot subscription setup throws', async () => {
     const runtime = new FakeRuntime();
     runtime.eventsFailure = new Error('subscription failed');
@@ -336,6 +405,7 @@ class FakeRuntime implements RuntimeFrontendPort {
   #opOrdinal = 0;
   #seq = 0;
   #model: ModelRef = MODEL.ref;
+  readonly #transcript: AgentMessage[] = [];
   #pendingPrompt: Extract<RuntimeOp, { type: 'prompt' }> | undefined;
   #pendingApprovals = new Map<string, { runId: RunId; turnId: TurnId }>();
   eventsFailure: Error | undefined;
@@ -344,6 +414,8 @@ class FakeRuntime implements RuntimeFrontendPort {
   gapDuringAttach = false;
   autoAttached = false;
   closed = false;
+  nextThreadId = THREAD_ID;
+  rejectNextCreate: string | undefined;
 
   simulateAutoAttached(model: ModelRef): void {
     this.autoAttached = true;
@@ -351,7 +423,7 @@ class FakeRuntime implements RuntimeFrontendPort {
   }
 
   newThreadId(): ThreadId {
-    return THREAD_ID;
+    return this.nextThreadId;
   }
 
   newOpId(): ExternalOpId {
@@ -365,6 +437,19 @@ class FakeRuntime implements RuntimeFrontendPort {
     switch (op.type) {
       case 'thread_create':
       case 'thread_resume':
+      case 'conversation_fork':
+      case 'conversation_retry':
+        if (op.type === 'thread_create' && this.rejectNextCreate !== undefined) {
+          const reason = this.rejectNextCreate;
+          this.rejectNextCreate = undefined;
+          return {
+            accepted: false,
+            opId: op.opId,
+            duplicate: false,
+            reason,
+            threadId: op.threadId,
+          };
+        }
         if (op.type === 'thread_resume' && this.autoAttached) {
           return {
             accepted: false,
@@ -439,10 +524,26 @@ class FakeRuntime implements RuntimeFrontendPort {
         return { accepted: true, opId: op.opId, duplicate: false, threadId: THREAD_ID };
       case 'steer':
       case 'follow_up':
+      case 'thread_rename':
+      case 'thread_archive':
       case 'thread_close':
       case 'cancel_scope':
         this.#push({ type: 'op_completed', opType: op.type, outcome: 'applied' }, { opId: op.opId });
         return { accepted: true, opId: op.opId, duplicate: false, threadId: THREAD_ID };
+      case 'compact':
+        this.#push({
+          type: 'op_completed',
+          opType: op.type,
+          terminalRunId: RUN_ID,
+          outcome: 'applied',
+        }, { opId: op.opId, runId: RUN_ID });
+        return {
+          accepted: true,
+          opId: op.opId,
+          duplicate: false,
+          threadId: THREAD_ID,
+          runId: RUN_ID,
+        };
       case 'continue':
         this.#push({
           type: 'op_completed',
@@ -465,7 +566,7 @@ class FakeRuntime implements RuntimeFrontendPort {
     return {
       thread: this.#thread('idle'),
       model: this.#model,
-      transcript: [],
+      transcript: [...this.#transcript],
       usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
       queues: { steering: [], followUp: [] },
       plan: [],
@@ -507,6 +608,7 @@ class FakeRuntime implements RuntimeFrontendPort {
       content: [{ type: 'text' as const, text: op.text }],
       source: 'prompt' as const,
     };
+    this.#transcript.push(message);
     this.#push({ type: 'message_start', message }, { opId: op.opId, runId: RUN_ID, turnId: TURN_ID });
     this.#push({ type: 'message_end', message }, { opId: op.opId, runId: RUN_ID, turnId: TURN_ID });
     this.#push({ type: 'agent_end', reason: 'completed', messages: [message] }, {
@@ -566,6 +668,161 @@ class FakeRuntime implements RuntimeFrontendPort {
       ...identity,
       seq: this.#seq,
       timestamp: this.#seq,
+      event,
+    });
+  }
+}
+
+class WorkspaceFakeRuntime implements RuntimeFrontendPort {
+  readonly workspaceId = WORKSPACE_ID;
+  readonly ops: RuntimeOp[] = [];
+  readonly #events = new AsyncQueue<Readonly<EventEnvelope>>();
+  readonly #seq = new Map<ThreadId, number>([[THREAD_ID, 5], [THREAD_B, 3]]);
+  readonly #messages = new Map<ThreadId, AgentMessage[]>([
+    [THREAD_ID, [{
+      role: 'user',
+      id: 'thread-a-existing',
+      timestamp: 1,
+      source: 'prompt',
+      content: [{ type: 'text', text: 'thread A' }],
+    }]],
+    [THREAD_B, [{
+      role: 'user',
+      id: 'thread-b-existing',
+      timestamp: 1,
+      source: 'prompt',
+      content: [{ type: 'text', text: 'thread B' }],
+    }]],
+  ]);
+  #opOrdinal = 0;
+  #pendingPrompt: Extract<RuntimeOp, { type: 'prompt' }> | undefined;
+  eventOptions: Parameters<RuntimeFrontendPort['events']>[0];
+
+  newThreadId(): ThreadId { return 'thread-new' as ThreadId; }
+
+  newOpId(): ExternalOpId {
+    this.#opOrdinal++;
+    return `op_e_${this.#opOrdinal.toString(16).padStart(32, '0')}` as ExternalOpId;
+  }
+
+  async submit(op: RuntimeOp): Promise<OpReceipt> {
+    this.ops.push(op);
+    if (op.type === 'thread_resume') {
+      return {
+        accepted: false,
+        opId: op.opId,
+        duplicate: false,
+        reason: 'thread_already_attached',
+        threadId: op.threadId,
+      };
+    }
+    if (op.type === 'prompt') {
+      this.#pendingPrompt = op;
+      this.#push(op.threadId, { type: 'agent_start', reason: 'prompt' }, {
+        opId: op.opId,
+        runId: RUN_ID,
+      });
+      return {
+        accepted: true,
+        opId: op.opId,
+        duplicate: false,
+        threadId: op.threadId,
+        runId: RUN_ID,
+      };
+    }
+    return {
+      accepted: true,
+      opId: op.opId,
+      duplicate: false,
+      ...('threadId' in op && { threadId: op.threadId }),
+    };
+  }
+
+  events(options?: Parameters<RuntimeFrontendPort['events']>[0]): AsyncIterable<Readonly<EventEnvelope>> {
+    this.eventOptions = options;
+    return this.#events;
+  }
+
+  async listThreadDetails(): Promise<readonly RuntimeThreadListItem[]> {
+    return [THREAD_ID, THREAD_B].map((threadId) => ({
+      workspaceId: WORKSPACE_ID,
+      cwd: '/workspace',
+      thread: this.#thread(threadId, 'idle'),
+      updatedAt: 1,
+    }));
+  }
+
+  async getThreadSnapshot(threadId: ThreadId): Promise<ThreadSnapshot | undefined> {
+    if (!this.#seq.has(threadId)) return undefined;
+    return {
+      thread: this.#thread(threadId, this.#pendingPrompt?.threadId === threadId ? 'running' : 'idle'),
+      model: MODEL.ref,
+      transcript: [...(this.#messages.get(threadId) ?? [])],
+      usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
+      queues: { steering: [], followUp: [] },
+      plan: [],
+      pendingControls: [],
+      highWaterSeq: this.#seq.get(threadId) ?? 0,
+    };
+  }
+
+  completeBackgroundPrompt(): void {
+    const op = this.#pendingPrompt;
+    if (op === undefined) throw new Error('no background prompt');
+    this.#pendingPrompt = undefined;
+    const message: AgentMessage = {
+      role: 'user',
+      id: 'thread-a-background',
+      timestamp: 2,
+      source: 'prompt',
+      content: [{ type: 'text', text: op.text }],
+    };
+    this.#messages.get(op.threadId)?.push(message);
+    this.#push(op.threadId, { type: 'message_start', message }, {
+      opId: op.opId,
+      runId: RUN_ID,
+      turnId: TURN_ID,
+    });
+    this.#push(op.threadId, { type: 'message_end', message }, {
+      opId: op.opId,
+      runId: RUN_ID,
+      turnId: TURN_ID,
+    });
+    this.#push(op.threadId, {
+      type: 'op_completed',
+      opType: 'prompt',
+      terminalRunId: RUN_ID,
+      outcome: 'applied',
+    }, { opId: op.opId, runId: RUN_ID });
+  }
+
+  async close(): Promise<void> { this.#events.end(); }
+
+  #thread(
+    threadId: ThreadId,
+    state: ThreadSnapshot['thread']['state'],
+  ): ThreadSnapshot['thread'] {
+    return {
+      threadId,
+      createdAt: 1,
+      state,
+      ...(state === 'running' && { activeRunId: RUN_ID }),
+    };
+  }
+
+  #push(
+    threadId: ThreadId,
+    event: RuntimeEvent,
+    identity: { opId?: ExternalOpId; runId?: RunId; turnId?: TurnId } = {},
+  ): void {
+    const seq = (this.#seq.get(threadId) ?? 0) + 1;
+    this.#seq.set(threadId, seq);
+    this.#events.push({
+      workspaceId: WORKSPACE_ID,
+      threadId,
+      ...identity,
+      seq,
+      timestamp: seq,
       event,
     });
   }

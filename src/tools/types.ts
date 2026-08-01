@@ -23,7 +23,7 @@ export interface ToolDefinition<P = any, D = unknown> {
 export interface ToolContext {
   cwd: string;
   signal: AbortSignal;
-  onUpdate?: (u: { output?: string }) => void;    // 流式进度(bash 100ms 节流),火后不理
+  onUpdate?: (u: { output?: string }) => void;    // 累计快照(bash 100ms 节流),火后不理
   fileTracker: FileTrackerPort;
 }
 

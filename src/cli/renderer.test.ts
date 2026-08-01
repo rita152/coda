@@ -176,15 +176,31 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     expect(out.text).not.toContain('\r');
   });
 
-  it('reasoning_delta 无 color 时按原文输出', () => {
+  it('reasoning 默认折叠为状态与耗时，不泄漏完整内容', () => {
     const { out, r } = makePlain();
     r.render({ type: 'message_start', message: am() });
     r.render({
       type: 'message_update',
       messageId: 'a1',
+      event: { type: 'reasoning_start', contentIndex: 0, partial: am() },
+    });
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
       event: { type: 'reasoning_delta', contentIndex: 0, delta: 'thinking hard', partial: am() },
     });
-    expect(out.text).toContain('thinking hard');
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
+      event: {
+        type: 'reasoning_end',
+        contentIndex: 0,
+        content: 'thinking hard',
+        partial: am(),
+      },
+    });
+    expect(out.text).toContain('thinking ·');
+    expect(out.text).not.toContain('thinking hard');
     expect(out.text).not.toContain('\x1b');
   });
 
@@ -539,9 +555,20 @@ describe('interactive 与 color 解耦(NO_COLOR 只禁 SGR,不禁光标控制)',
     r.render({
       type: 'message_update',
       messageId: 'a1',
+      event: { type: 'reasoning_start', contentIndex: 0, partial: am() },
+    });
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
       event: { type: 'reasoning_delta', contentIndex: 0, delta: 'mm', partial: am() },
     });
+    r.render({
+      type: 'message_update',
+      messageId: 'a1',
+      event: { type: 'reasoning_end', contentIndex: 0, content: 'mm', partial: am() },
+    });
     expect(out.text).toMatch(/\x1b\[[0-9;]*m/); // 着色仍在
+    expect(out.text).not.toContain('mm');
     expect(out.text).not.toContain('\x1b[J');   // 无清区(plain 纯追加)
   });
 });
@@ -634,7 +661,7 @@ describe('approval_request 渲染(M6,docs/09 §4:动态区审批提示)', () => 
     expect(out.text).not.toContain('[y=once');
   });
 
-  it('ansi:动态区出现完整审批提示;决议后(tool_execution_start)撤下', () => {
+  it('ansi:永久授权键仅在 Runtime 确认冻结范围后出现;决议后撤下', () => {
     const { out, r } = makeAnsi();
     r.render({
       type: 'approval_request',
@@ -642,7 +669,9 @@ describe('approval_request 渲染(M6,docs/09 §4:动态区审批提示)', () => 
       toolCallId: 'c1',
       description: 'bash: rm -rf dist',
     });
-    // 规格文案逐字(docs/09 §4):Allow <description>? [y=once / a=always / n=deny / Esc=abort]
+    expect(out.text).toContain('Allow bash: rm -rf dist? [y=once / n=deny / Esc=abort]');
+    out.chunks.length = 0;
+    r.setApprovalAllowsAlways?.(true);
     expect(out.text).toContain('Allow bash: rm -rf dist? [y=once / a=always / n=deny / Esc=abort]');
 
     out.chunks.length = 0;

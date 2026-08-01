@@ -209,6 +209,11 @@ export type PreparedThreadDriverCommand =
       readonly resolvedInput: ResolvedRunInput;
     }
   | {
+      readonly op: Extract<RuntimeOp, { type: 'compact' }>;
+      readonly runId: RunId;
+      readonly permissionCeiling: PermissionCeilingSnapshot;
+    }
+  | {
       readonly op: Extract<RuntimeOp, { type: 'set_model' }>;
       readonly resolvedModel: ModelConfig;
     }

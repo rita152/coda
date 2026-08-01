@@ -6,6 +6,7 @@ import type {
   DerivedOpId,
   EventEnvelope,
   ExternalOpId,
+  LegacySeedTurnProvenance,
   MailboxRuntimeOp,
   ModelRef,
   OpId,
@@ -42,6 +43,8 @@ export interface LegacyThreadSeedRecord {
   readonly type: 'legacy_seed';
   readonly sourceSessionId: string;
   readonly transcript: readonly AgentMessage[];
+  /** Stable message-to-turn provenance for retry/fork after a seed is copied or restarted. */
+  readonly turnProvenance?: readonly LegacySeedTurnProvenance[];
   /**
    * Direct-Session sidecars keep the active (possibly compacted) transcript above for compatibility,
    * but recovery also needs the exact raw v1 mirror prefix that existed when the sidecar was born.
@@ -142,7 +145,7 @@ export type RunMutation =
       readonly type: 'run_reserved';
       readonly runId: RunId;
       readonly ownerOpId: OpId;
-      readonly reason: 'prompt';
+      readonly reason: 'prompt' | 'compact';
       readonly permissionCeiling: PermissionCeilingSnapshot;
     }
   | {
@@ -190,6 +193,11 @@ export interface ModelSelectionMutation {
   readonly model: ModelRef;
 }
 
+export type ThreadMetadataMutation =
+  | { readonly type: 'thread_title_updated'; readonly title: string; readonly updatedAt: number }
+  | { readonly type: 'thread_archive_updated'; readonly archivedAt?: number;
+      readonly updatedAt: number };
+
 export interface RuleScopeMutation {
   readonly type: 'rule_scope_observed';
   readonly scope: string;
@@ -230,6 +238,7 @@ export type RuntimeThreadMutation =
   | ActivityRecoveryMutation
   | RuleScopeMutation
   | RuleScopeWindowMutation
+  | ThreadMetadataMutation
   | ModelSelectionMutation;
 
 export interface ThreadResultDeliveryRecord {

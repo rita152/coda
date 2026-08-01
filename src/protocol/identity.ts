@@ -2,6 +2,7 @@
 // Brands prevent accidental TypeScript mixing; runtime validators remain the trust boundary.
 
 import { isWellFormedUnicode } from './strict-json.js';
+import type { AgentMessage } from './messages.js';
 
 export type WorkspaceId = string & { readonly __brand: 'WorkspaceId' };
 export type ThreadId = string & { readonly __brand: 'ThreadId' };
@@ -43,6 +44,7 @@ export class RuntimeIdentityValidationError extends TypeError {
 
 const LEGACY_WORKSPACE_DOMAIN = 'coda.runtime.workspace.v1';
 const LEGACY_THREAD_DOMAIN = 'coda.runtime.thread.v1';
+const LEGACY_SEED_TURN_DOMAIN = 'coda.runtime.legacy-seed-turn.v1';
 const DERIVED_OP_DOMAIN = 'coda.runtime.derived-op.v1';
 const INVOCATION_DOMAIN = 'coda.runtime.invocation.v1';
 const EXTERNAL_OP_PATTERN = /^op_e_[0-9a-f]{32}$/;
@@ -161,6 +163,55 @@ export function legacyThreadId(workspaceId: LegacyWorkspaceId, sessionId: string
   hasher.update(NUL_BYTE);
   hasher.update(UTF8.encode(sessionId));
   return `th_v1_${hasher.digest('hex')}` as ThreadId;
+}
+
+export interface LegacySeedTurnProvenance {
+  readonly messageId: string;
+  readonly turnId: TurnId;
+}
+
+/**
+ * Recover stable turn provenance for history that predates canonical EventEnvelope identities.
+ * A prompt begins a new synthetic turn; steering, follow-up, assistant, and tool-result messages
+ * stay attached to the current turn. Newly created seeds persist original canonical turn ids and
+ * use this deterministic fallback only when reading old v1/early-v2 history.
+ */
+export function deriveLegacySeedTurnProvenance(
+  sourceSessionId: string,
+  transcript: readonly AgentMessage[],
+): readonly LegacySeedTurnProvenance[] {
+  assertWellFormedString(sourceSessionId, 'sourceSessionId');
+  const result: LegacySeedTurnProvenance[] = [];
+  let currentTurnId: TurnId | undefined;
+  let ordinal = 0;
+  for (const message of transcript) {
+    assertWellFormedString(message.id, `transcript[${result.length}].id`);
+    const beginsTurn = currentTurnId === undefined
+      || (message.role === 'user'
+        && (message.source === undefined || message.source === 'prompt'));
+    if (beginsTurn) {
+      currentTurnId = legacySeedTurnId(sourceSessionId, message.id, ordinal++);
+    }
+    const turnId = currentTurnId;
+    if (turnId === undefined) {
+      throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'transcript');
+    }
+    result.push({ messageId: message.id, turnId });
+  }
+  return result;
+}
+
+function legacySeedTurnId(sourceSessionId: string, anchorMessageId: string, ordinal: number): TurnId {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal > 0xffff_ffff) {
+    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'ordinal');
+  }
+  const hasher = new Bun.CryptoHasher('sha256');
+  hasher.update(LEGACY_SEED_TURN_DOMAIN);
+  hasher.update(NUL_BYTE);
+  hasher.update(frame(sourceSessionId, 'sourceSessionId'));
+  hasher.update(frame(anchorMessageId, 'anchorMessageId'));
+  hasher.update(uint32be(ordinal));
+  return `turn_seed_v1_${hasher.digest('hex')}` as TurnId;
 }
 
 /** Frozen length-framed derived-operation identity algorithm from docs/12 §2.1. */

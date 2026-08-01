@@ -806,6 +806,61 @@ describe('FileRuntimeStorage', () => {
     expect(inventory.find((item) => item.threadId === threadId)?.catalog.driverRef).toEqual(driverRef);
   });
 
+  test('persists and validates the immutable retry prompt selected by the root ledger op', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_retry_prompt_freeze' as WorkspaceId;
+    const sourceThreadId = 'thread-retry-source' as ThreadId;
+    const targetThreadId = 'thread-retry-target' as ThreadId;
+    const opId = 'op_e_d1000000000000000000000000000001' as ExternalOpId;
+    const retryPromptOpId = 'op_e_d2000000000000000000000000000002' as ExternalOpId;
+    const text = 'frozen retry prompt';
+    const op = {
+      type: 'conversation_retry' as const,
+      opId,
+      workspaceId,
+      sourceThreadId,
+      threadId: targetThreadId,
+      model: { provider: 'faux', api: 'faux', model: 'test' },
+    };
+    const reserved = {
+      opId,
+      op,
+      payloadHash: runtimeOpPayloadHash(op),
+      driverCreation: { creationKey: 'retry-freeze-key' },
+      retryPromptOpId,
+      retryPrompt: {
+        messageId: 'message-retry-source',
+        turnId: 'turn-retry-source' as import('../protocol/index.js').TurnId,
+        text,
+        digest: sha256Hex(text),
+      },
+      state: 'reserved' as const,
+    };
+    const storage = createFileRuntimeStorage({ root });
+    const workspace = await storage.openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('retry-freeze');
+    await workspace.reserveSupervisorOp(lease, reserved);
+    expect((await workspace.loadSupervisorOps())[0]).toEqual(reserved);
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+
+    const reopened = await storage.openWorkspace({ cwd, workspaceId });
+    const reopenedLease = await reopened.acquireSupervisorLease('retry-freeze-reopen');
+    expect((await reopened.loadSupervisorOps())[0]?.retryPrompt).toEqual(reserved.retryPrompt);
+    await reopened.releaseSupervisorLease(reopenedLease);
+    await reopened.close();
+
+    const ledgerPath = path.join(workspacePath(root, workspaceId), 'ledger.json');
+    const corrupted = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    corrupted.ops[0].retryPrompt.text = 'changed after reservation';
+    writeFileSync(ledgerPath, `${JSON.stringify(corrupted)}\n`);
+    const invalid = await storage.openWorkspace({ cwd, workspaceId });
+    await expect(invalid.acquireSupervisorLease('retry-freeze-invalid'))
+      .rejects.toMatchObject({ code: 'invalid_supervisor_op' });
+    await invalid.close();
+  });
+
   test('never overlays a rejected create ref and fails closed on an accepted non-owner ref', async () => {
     const root = temporaryDirectory();
     const cwd = path.join(root, 'cwd');
@@ -930,6 +985,10 @@ describe('FileRuntimeStorage', () => {
     const imported = await workspace.importLegacyThread(lease, locator?.threadId as ThreadId);
     expect(imported?.seed).toMatchObject({ type: 'legacy_seed', sourceSessionId: sessionId });
     expect(imported?.seed.transcript).toHaveLength(1);
+    expect(imported?.seed.turnProvenance).toEqual([{
+      messageId: 'u1',
+      turnId: expect.stringMatching(/^turn_seed_v1_[0-9a-f]{64}$/),
+    }]);
     await workspace.releaseSupervisorLease(lease);
     await workspace.close();
   });

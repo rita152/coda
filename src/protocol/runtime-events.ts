@@ -36,9 +36,9 @@ export type CanonicalAgentEvent =
 export type RuntimeOpLifecycleEvent =
   | { type: 'op_accepted'; opType: RuntimeOp['type']; parentOpId?: OpId }
   | { type: 'op_started'; opType: RuntimeOp['type']; parentOpId?: OpId }
-  | { type: 'op_completed'; opType: 'prompt' | 'continue'; terminalRunId: RunId;
+  | { type: 'op_completed'; opType: 'prompt' | 'continue' | 'compact'; terminalRunId: RunId;
       outcome: 'applied' | 'interrupted' | 'superseded'; parentOpId?: OpId }
-  | { type: 'op_completed'; opType: Exclude<RuntimeOp['type'], 'prompt' | 'continue'>;
+  | { type: 'op_completed'; opType: Exclude<RuntimeOp['type'], 'prompt' | 'continue' | 'compact'>;
       outcome: 'applied' | 'no_op' | 'interrupted' | 'superseded'; parentOpId?: OpId }
   | { type: 'op_rejected'; opType: RuntimeOp['type']; reason: string; parentOpId?: OpId };
 
@@ -70,11 +70,50 @@ export interface ApprovalGrantProposal {
   scope: Readonly<PolicyGrantScope>;
 }
 
+/**
+ * Runtime-authored, JSON-safe approval card. Frontends may format this value but must never
+ * reconstruct any field from raw tool arguments, shell text, or mutable policy/catalog state.
+ */
+export interface ApprovalPresentation {
+  readonly requestId: string;
+  readonly target: {
+    readonly workspaceId: WorkspaceId;
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly turnId: TurnId;
+  };
+  readonly capability: {
+    readonly id: string;
+    readonly version: string;
+    readonly registrationDigest: string;
+  };
+  readonly normalizedResources: readonly Readonly<Record<string, StrictJsonValue>>[];
+  readonly risk: {
+    readonly code: string;
+    readonly reason: string;
+    readonly description: string;
+  };
+  readonly allowOnce: {
+    readonly invocationId: string;
+    readonly toolCallId: string;
+  };
+  readonly allowAlways?: Readonly<PolicyGrantScope>;
+  readonly revisions: {
+    readonly catalog: number;
+    readonly effectivePolicy: string;
+    readonly policyBasis: string;
+    readonly ceiling: string;
+    readonly grants: string;
+  };
+}
+
 export interface ApprovalControlPayload {
   toolCallId: string;
   description: string;
   legacyProposal?: Readonly<LegacyApprovalProposal>;
   grantProposal?: Readonly<ApprovalGrantProposal>;
+  /** Absent only for legacy adapters that cannot honestly provide PreparedInvocation scope. */
+  presentation?: Readonly<ApprovalPresentation>;
 }
 
 export interface ResourceConfirmationPayload {
@@ -130,7 +169,7 @@ export interface ThreadUsage {
 export type RuntimeCoordinatorEvent =
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number;
       errorMessage: string; predecessorRunId: RunId; successorRunId: RunId }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow';
+  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual';
       predecessorRunId: RunId; activityRunId: RunId }
   | { type: 'compaction_end'; activityRunId: RunId; ok: boolean; droppedMessages: number };
 
@@ -144,6 +183,8 @@ export interface ThreadSummary {
   parentThreadId?: ThreadId;
   createdAt: number;
   title?: string;
+  archivedAt?: number;
+  updatedAt?: number;
   state: 'idle' | 'starting' | 'running' | 'retrying' | 'compacting' | 'suspended' | 'closing' | 'closed';
   activeRunId?: RunId;
   pendingRunIds?: readonly RunId[];
@@ -190,11 +231,76 @@ export interface RuntimePermissionSnapshot {
 export interface WorkspaceRuntimeSnapshot {
   readonly workspaceId: WorkspaceId;
   readonly permissions: Readonly<RuntimePermissionSnapshot>;
+  readonly git?: {
+    readonly branch?: string;
+    readonly dirty: boolean;
+  };
+}
+
+export type RuntimeDiffGroup = 'staged' | 'unstaged' | 'untracked' | 'turn';
+
+export interface RuntimeDiffFile {
+  readonly path: string;
+  readonly group: RuntimeDiffGroup;
+  readonly status: string;
+  /** Complete unified patch; Runtime never truncates this field. */
+  readonly patch: string;
+}
+
+export interface RuntimeDiffSnapshot {
+  readonly workspaceId: WorkspaceId;
+  readonly threadId: ThreadId;
+  readonly scope: 'turn' | 'workspace';
+  readonly generatedAt: number;
+  readonly files: readonly Readonly<RuntimeDiffFile>[];
+}
+
+export interface RuntimeReasoningReview {
+  readonly key: string;
+  readonly messageId: string;
+  readonly status: 'running' | 'completed' | 'aborted' | 'error';
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly durationMs?: number;
+  readonly content: string;
+}
+
+export interface RuntimeToolReview {
+  readonly key: string;
+  readonly toolCallId: string;
+  readonly name: string;
+  readonly target?: string;
+  readonly status: 'running' | 'succeeded' | 'failed' | 'aborted';
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly durationMs?: number;
+  readonly summary?: string;
+  readonly args: StrictJsonValue;
+  readonly output: string;
+  readonly result?: Readonly<ToolResultMessage>;
+}
+
+export interface RuntimeReviewSnapshot {
+  readonly workspaceId: WorkspaceId;
+  readonly threadId: ThreadId;
+  readonly highWaterSeq: number;
+  readonly reasoning: readonly Readonly<RuntimeReasoningReview>[];
+  readonly tools: readonly Readonly<RuntimeToolReview>[];
+}
+
+export interface RuntimeThreadListItem {
+  readonly workspaceId: WorkspaceId;
+  readonly cwd: string;
+  readonly thread: Readonly<ThreadSummary>;
+  readonly preview?: string;
+  readonly updatedAt: number;
 }
 
 export type RuntimeLifecycleEvent =
   | { type: 'thread_created'; thread: ThreadSummary }
   | { type: 'thread_resumed'; thread: ThreadSummary }
+  | { type: 'thread_updated'; thread: ThreadSummary;
+      changed: 'title' | 'archived' }
   | { type: 'thread_closed'; threadId: ThreadId };
 
 export type RuntimeDiagnosticEvent = {
@@ -231,7 +337,7 @@ export type LegacySessionEvent =
   | (AgentEvent & { willRetry?: boolean })
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number;
       errorMessage: string }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' }
+  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual' }
   | { type: 'compaction_end'; ok: boolean; droppedMessages: number }
   | { type: 'usage_update'; usage: ThreadUsage };
 
@@ -334,6 +440,7 @@ export function projectLegacySessionEvent(
     case 'thread_result':
     case 'thread_created':
     case 'thread_resumed':
+    case 'thread_updated':
     case 'thread_closed':
     case 'runtime_diagnostic':
       return undefined;
@@ -354,6 +461,7 @@ function validateEventIdentity(
       return;
     case 'thread_created':
     case 'thread_resumed':
+    case 'thread_updated':
       requireIdentity(envelope, false, false, true);
       if (!isExternalOpId(envelope.opId)) throw new Error(`${type} requires an external opId`);
       if (!isRecord(event.thread) || event.thread.threadId !== envelope.threadId) {
@@ -398,6 +506,13 @@ function validateEventIdentity(
     case 'control_request':
       requireIdentity(envelope, true, true, false);
       requireOwningIdentityMatch(envelope, event);
+      if (event.kind === 'approval' && isRecord(event.payload)
+        && isRecord(event.payload.presentation)
+        && isRecord(event.payload.presentation.target)
+        && (event.payload.presentation.target.workspaceId !== envelope.workspaceId
+          || event.payload.presentation.target.threadId !== envelope.threadId)) {
+        throw new Error('approval presentation envelope identity mismatch');
+      }
       return;
     case 'control_resolved':
       requireIdentity(envelope, true, true, true);
@@ -512,7 +627,7 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
       if (!isRuntimeOpType(event.opType)) throw new Error('invalid opType');
       return;
     case 'op_completed':
-      if (event.opType === 'prompt' || event.opType === 'continue') {
+      if (event.opType === 'prompt' || event.opType === 'continue' || event.opType === 'compact') {
         assertKeys(event, ['type', 'opType', 'terminalRunId', 'outcome'], ['parentOpId']);
         if (!isRunId(event.terminalRunId)
           || (event.outcome !== 'applied'
@@ -525,6 +640,7 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
         if (!isRuntimeOpType(event.opType)
           || event.opType === 'prompt'
           || event.opType === 'continue'
+          || event.opType === 'compact'
           || (event.outcome !== 'applied'
             && event.outcome !== 'no_op'
             && event.outcome !== 'interrupted'
@@ -576,7 +692,7 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
       return;
     case 'compaction_start':
       assertKeys(event, ['type', 'reason', 'predecessorRunId', 'activityRunId']);
-      if ((event.reason !== 'threshold' && event.reason !== 'overflow')
+      if ((event.reason !== 'threshold' && event.reason !== 'overflow' && event.reason !== 'manual')
         || !isRunId(event.predecessorRunId)
         || !isRunId(event.activityRunId)) {
         throw new Error('invalid compaction start');
@@ -592,6 +708,13 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
     case 'thread_resumed':
       assertKeys(event, ['type', 'thread']);
       validateThreadSummary(event.thread);
+      return;
+    case 'thread_updated':
+      assertKeys(event, ['type', 'thread', 'changed']);
+      validateThreadSummary(event.thread);
+      if (event.changed !== 'title' && event.changed !== 'archived') {
+        throw new Error('invalid thread update kind');
+      }
       return;
     case 'thread_closed':
       assertKeys(event, ['type', 'threadId']);
@@ -657,7 +780,42 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
   }
 
   if (event.type === 'control_request') {
-    if (event.kind === 'approval') validateApprovalPayload(event.payload);
+    if (event.kind === 'approval') {
+      validateApprovalPayload(event.payload);
+      const payload = requireRecord(event.payload, 'payload');
+      if (payload.presentation !== undefined) {
+        const presentation = requireRecord(payload.presentation, 'presentation');
+        const target = requireRecord(presentation.target, 'presentation.target');
+        const risk = requireRecord(presentation.risk, 'presentation.risk');
+        const revisions = requireRecord(presentation.revisions, 'presentation.revisions');
+        const proposal = payload.grantProposal === undefined
+          ? undefined
+          : requireRecord(payload.grantProposal, 'grantProposal');
+        if (presentation.requestId !== event.requestId
+          || target.runId !== event.owningRunId
+          || target.turnId !== event.owningTurnId
+          || risk.description !== payload.description
+          || revisions.effectivePolicy !== event.policyRevision
+          || presentation.allowOnce === undefined
+          || requireRecord(presentation.allowOnce, 'presentation.allowOnce').toolCallId
+            !== payload.toolCallId) {
+          throw new Error('approval presentation identity mismatch');
+        }
+        if ((proposal === undefined) !== (presentation.allowAlways === undefined)) {
+          throw new Error('approval presentation grant scope presence mismatch');
+        }
+        if (proposal !== undefined) {
+          const capability = requireRecord(presentation.capability, 'presentation.capability');
+          if (capability.id !== proposal.capabilityId
+            || capability.version !== proposal.capabilityVersion
+            || capability.registrationDigest !== proposal.registrationDigest
+            || revisions.policyBasis !== proposal.policyBasisRevision
+            || canonicalJson(presentation.allowAlways) !== canonicalJson(proposal.scope)) {
+            throw new Error('approval presentation grant proposal mismatch');
+          }
+        }
+      }
+    }
     else if (event.kind === 'resource_confirmation') validateResourcePayload(event.payload);
     else throw new Error('invalid control kind');
     return;
@@ -687,7 +845,11 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
 
 function validateApprovalPayload(value: StrictJsonValue | undefined): void {
   const payload = requireRecord(value, 'payload');
-  assertKeys(payload, ['toolCallId', 'description'], ['legacyProposal', 'grantProposal']);
+  assertKeys(payload, ['toolCallId', 'description'], [
+    'legacyProposal',
+    'grantProposal',
+    'presentation',
+  ]);
   requireString(payload.toolCallId, 'toolCallId');
   requireString(payload.description, 'description');
   if (payload.legacyProposal !== undefined && payload.grantProposal !== undefined) {
@@ -701,6 +863,84 @@ function validateApprovalPayload(value: StrictJsonValue | undefined): void {
     requireBoolean(proposal.forceConfirm, 'forceConfirm');
   }
   if (payload.grantProposal !== undefined) validateGrantProposal(payload.grantProposal);
+  if (payload.presentation !== undefined) validateApprovalPresentation(payload.presentation);
+}
+
+function validateApprovalPresentation(value: StrictJsonValue): void {
+  const presentation = requireRecord(value, 'presentation');
+  assertKeys(presentation, [
+    'requestId',
+    'target',
+    'capability',
+    'normalizedResources',
+    'risk',
+    'allowOnce',
+    'revisions',
+  ], ['allowAlways']);
+  requireString(presentation.requestId, 'presentation.requestId');
+
+  const target = requireRecord(presentation.target, 'presentation.target');
+  assertKeys(target, ['workspaceId', 'threadId', 'runId', 'turnId']);
+  if (!isWorkspaceId(target.workspaceId)
+    || !isThreadId(target.threadId)
+    || !isRunId(target.runId)
+    || !isTurnId(target.turnId)) {
+    throw new Error('invalid approval presentation target');
+  }
+
+  const capability = requireRecord(presentation.capability, 'presentation.capability');
+  assertKeys(capability, ['id', 'version', 'registrationDigest']);
+  requireString(capability.id, 'presentation.capability.id');
+  requireString(capability.version, 'presentation.capability.version');
+  requireString(capability.registrationDigest, 'presentation.capability.registrationDigest');
+
+  for (const resource of requireArray(
+    presentation.normalizedResources,
+    'presentation.normalizedResources',
+  )) {
+    const normalized = requireRecord(resource, 'presentation.normalizedResource');
+    assertKeys(normalized, ['selectorId', 'resourceType', 'access', 'canonicalTarget']);
+    requireString(normalized.selectorId, 'presentation.normalizedResource.selectorId');
+    if (normalized.resourceType !== 'filesystem'
+      && normalized.resourceType !== 'command'
+      && normalized.resourceType !== 'network'
+      && normalized.resourceType !== 'other') {
+      throw new Error('invalid approval presentation resource type');
+    }
+    if (normalized.access !== 'read'
+      && normalized.access !== 'write'
+      && normalized.access !== 'execute'
+      && normalized.access !== 'connect') {
+      throw new Error('invalid approval presentation resource access');
+    }
+    requireString(normalized.canonicalTarget, 'presentation.normalizedResource.canonicalTarget');
+  }
+
+  const risk = requireRecord(presentation.risk, 'presentation.risk');
+  assertKeys(risk, ['code', 'reason', 'description']);
+  requireString(risk.code, 'presentation.risk.code');
+  requireString(risk.reason, 'presentation.risk.reason');
+  requireString(risk.description, 'presentation.risk.description');
+
+  const allowOnce = requireRecord(presentation.allowOnce, 'presentation.allowOnce');
+  assertKeys(allowOnce, ['invocationId', 'toolCallId']);
+  requireString(allowOnce.invocationId, 'presentation.allowOnce.invocationId');
+  requireString(allowOnce.toolCallId, 'presentation.allowOnce.toolCallId');
+  if (presentation.allowAlways !== undefined) validateGrantScope(presentation.allowAlways);
+
+  const revisions = requireRecord(presentation.revisions, 'presentation.revisions');
+  assertKeys(revisions, [
+    'catalog',
+    'effectivePolicy',
+    'policyBasis',
+    'ceiling',
+    'grants',
+  ]);
+  requireNonNegativeSafeInteger(revisions.catalog, 'presentation.revisions.catalog');
+  requireString(revisions.effectivePolicy, 'presentation.revisions.effectivePolicy');
+  requireString(revisions.policyBasis, 'presentation.revisions.policyBasis');
+  requireString(revisions.ceiling, 'presentation.revisions.ceiling');
+  requireString(revisions.grants, 'presentation.revisions.grants');
 }
 
 function validateGrantProposal(value: StrictJsonValue): void {
@@ -716,7 +956,12 @@ function validateGrantProposal(value: StrictJsonValue): void {
   requireString(proposal.capabilityVersion, 'capabilityVersion');
   requireString(proposal.registrationDigest, 'registrationDigest');
   requireString(proposal.policyBasisRevision, 'policyBasisRevision');
-  const scope = requireRecord(proposal.scope, 'scope');
+  if (proposal.scope === undefined) throw new Error('grant scope is missing');
+  validateGrantScope(proposal.scope);
+}
+
+function validateGrantScope(value: StrictJsonValue): void {
+  const scope = requireRecord(value, 'scope');
   if (scope.kind === 'canonical_resources_v1') {
     assertKeys(scope, ['kind', 'resourcePatterns', 'attributes']);
     const patterns = requireArray(scope.resourcePatterns, 'resourcePatterns');
@@ -1003,6 +1248,8 @@ function validateThreadSummary(value: StrictJsonValue | undefined): void {
   assertKeys(thread, ['threadId', 'createdAt', 'state'], [
     'parentThreadId',
     'title',
+    'archivedAt',
+    'updatedAt',
     'activeRunId',
     'pendingRunIds',
     'suspendedWork',
@@ -1013,6 +1260,8 @@ function validateThreadSummary(value: StrictJsonValue | undefined): void {
   }
   requireNumber(thread.createdAt, 'createdAt');
   if (thread.title !== undefined) requireString(thread.title, 'title');
+  if (thread.archivedAt !== undefined) requireNumber(thread.archivedAt, 'archivedAt');
+  if (thread.updatedAt !== undefined) requireNumber(thread.updatedAt, 'updatedAt');
   if (thread.state !== 'idle'
     && thread.state !== 'starting'
     && thread.state !== 'running'
@@ -1159,7 +1408,7 @@ function validateOpLifecycleIdentity(
     validateOpLifecycleOrigin(envelope, event);
     return;
   }
-  const hasRootRun = event.opType === 'prompt' || event.opType === 'continue';
+  const hasRootRun = event.opType === 'prompt' || event.opType === 'continue' || event.opType === 'compact';
   requireIdentity(envelope, hasRootRun, false, true);
   validateOpLifecycleOrigin(envelope, event);
   if (event.type === 'op_completed' && hasRootRun && !isRunId(event.terminalRunId)) {
@@ -1248,6 +1497,11 @@ function isRuntimeOpType(value: StrictJsonValue | undefined): value is RuntimeOp
     || value === 'set_model'
     || value === 'abort'
     || value === 'control_response'
+    || value === 'thread_rename'
+    || value === 'thread_archive'
+    || value === 'compact'
+    || value === 'conversation_fork'
+    || value === 'conversation_retry'
     || value === 'thread_close'
     || value === 'cancel_scope';
 }

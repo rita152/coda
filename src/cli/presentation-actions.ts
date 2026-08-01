@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentMessage, AssistantMessage } from '../protocol/index.js';
+import type { AgentMessage, AssistantMessage, ThreadId } from '../protocol/index.js';
 import { sanitizeTerminalText } from './terminal-sanitize.js';
 
 export type TranscriptContentMode = 'latest' | 'text' | 'raw';
@@ -45,6 +45,45 @@ export interface TranscriptExportOptions {
   readonly destination?: string;
   readonly mode: TranscriptContentMode;
   readonly now?: () => Date;
+}
+
+export interface PresentationThreadNavigator {
+  readonly currentThreadId: ThreadId;
+  isAttached?(): boolean;
+  switchSession(threadId: ThreadId): Promise<void>;
+}
+
+/**
+ * Keep Runtime thread selection and frontend-only presentation state in one visible transaction.
+ * The durability barrier runs before Runtime changes; a presentation failure after the change
+ * restores the source Runtime thread and asks the surface to project that source again.
+ */
+export async function runThreadPresentationTransition(
+  navigator: PresentationThreadNavigator,
+  store: { flush(): void } | undefined,
+  transition: () => Promise<unknown>,
+  presentCurrentThread: () => void,
+): Promise<void> {
+  const sourceThreadId = navigator.currentThreadId;
+  const sourceWasAttached = navigator.isAttached?.() ?? true;
+  store?.flush();
+  try {
+    await transition();
+    presentCurrentThread();
+  } catch (error) {
+    if (sourceWasAttached && navigator.currentThreadId !== sourceThreadId) {
+      try {
+        await navigator.switchSession(sourceThreadId);
+        presentCurrentThread();
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Thread presentation transition failed and ${sourceThreadId} could not be restored`,
+        );
+      }
+    }
+    throw error;
+  }
 }
 
 export function latestAssistantText(messages: readonly AgentMessage[]): string | undefined {

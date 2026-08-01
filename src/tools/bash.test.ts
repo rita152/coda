@@ -351,14 +351,14 @@ describe('bash:尾部截断与落盘(§6.2 tail 截断行)', () => {
 
 describe('bash:onUpdate 节流(宽松时序用例)', () => {
   it(
-    '持续输出:相邻 update 间隔 ≥ 100ms(允许首条例外),片段为增量输出',
+    '持续输出:相邻 update 间隔 ≥ 100ms(允许首条例外),每条都是累计快照',
     async () => {
       const stamps: number[] = [];
-      const fragments: string[] = [];
+      const snapshots: string[] = [];
       const ctx = makeCtx({
         onUpdate: (u) => {
           stamps.push(Date.now());
-          fragments.push(u.output ?? '');
+          snapshots.push(u.output ?? '');
         },
       });
       const out = await run(
@@ -371,10 +371,12 @@ describe('bash:onUpdate 节流(宽松时序用例)', () => {
       for (let i = 2; i < stamps.length; i++) {
         expect((stamps[i] as number) - (stamps[i - 1] as number)).toBeGreaterThanOrEqual(100);
       }
-      // 片段是增量而非全量快照:拼接后按顺序覆盖前缀
-      const joined = fragments.join('');
-      expect(joined.startsWith('tick-0\n')).toBe(true);
-      expect(joined).toContain('tick-5\n');
+      // 每个 update 都替换前一个快照，内容单调扩展而不会要求 UI 拼接。
+      expect(snapshots[0]?.startsWith('tick-0\n')).toBe(true);
+      for (let i = 1; i < snapshots.length; i++) {
+        expect(snapshots[i]?.startsWith(snapshots[i - 1] ?? '')).toBe(true);
+      }
+      expect(snapshots.at(-1)).toContain('tick-5\n');
       // 最终结果仍是全量输出
       const text = (out.content[0] as { text: string }).text;
       expect(text).toContain('tick-24');

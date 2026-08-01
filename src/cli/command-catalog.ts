@@ -231,6 +231,54 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [{ keys: 'PageUp/PageDown', summary: 'scroll output', surfaces: ['tui'] }],
   },
   {
+    id: 'review.diff', category: 'review', summary: 'Open the complete turn or workspace diff',
+    slash: { name: 'diff', argumentHint: '[turn|workspace]', availableWhileRunning: true, order: 23 },
+  },
+  {
+    id: 'review.inspect', category: 'review', summary: 'Inspect reasoning and tool execution details',
+    slash: { name: 'review', availableWhileRunning: true, order: 24 },
+  },
+  {
+    id: 'review.permissions', category: 'review', summary: 'Show authoritative permission scope and revision',
+    slash: { name: 'permissions', availableWhileRunning: true, order: 25 },
+  },
+  {
+    id: 'conversation.compact', category: 'task', summary: 'Compact the current conversation context',
+    slash: { name: 'compact', availableWhileRunning: false, order: 26 },
+  },
+  {
+    id: 'conversation.retry', category: 'task', summary: 'Retry the latest user turn in a safe fork',
+    slash: { name: 'retry', argumentHint: '[turn-id]', availableWhileRunning: false, order: 27 },
+  },
+  {
+    id: 'conversation.fork', category: 'session', summary: 'Fork committed conversation context',
+    slash: { name: 'fork', argumentHint: '[turn-id]', availableWhileRunning: false, order: 28 },
+  },
+  {
+    id: 'session.new', category: 'session', summary: 'Create and switch to a new session',
+    slash: { name: 'new', availableWhileRunning: true, order: 29 },
+  },
+  {
+    id: 'session.list', category: 'session', summary: 'Search sessions with status and workspace context',
+    slash: { name: 'sessions', argumentHint: '[query]', availableWhileRunning: true, order: 30 },
+  },
+  {
+    id: 'session.resume', category: 'session', summary: 'Resume or pick a session',
+    slash: { name: 'resume', argumentHint: '[thread-id]', availableWhileRunning: true, order: 31 },
+  },
+  {
+    id: 'session.switch', category: 'session', summary: 'Switch the visible session without stopping background work',
+    slash: { name: 'switch', argumentHint: '<thread-id>', availableWhileRunning: true, order: 32 },
+  },
+  {
+    id: 'session.rename', category: 'session', summary: 'Rename the current session',
+    slash: { name: 'rename', argumentHint: '<title>', availableWhileRunning: true, order: 33 },
+  },
+  {
+    id: 'session.archive', category: 'session', summary: 'Archive or restore the current session',
+    slash: { name: 'archive', argumentHint: '[on|off]', availableWhileRunning: true, order: 34 },
+  },
+  {
     id: 'palette.open', category: 'help', summary: 'Open the searchable command palette',
     shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette', surfaces: ['tui', 'classic'] }],
   },

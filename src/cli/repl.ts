@@ -16,6 +16,7 @@
 
 import * as readline from 'node:readline';
 import process from 'node:process';
+import { isThreadId, isTurnId } from '../protocol/index.js';
 import type { QueuedMessage } from '../protocol/index.js';
 import type {
   CliApprovalDecision as ApprovalDecision,
@@ -27,6 +28,7 @@ import type {
   CliSession,
   InteractiveSession,
 } from './interactive-runtime.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import { ProviderCommandController } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import {
@@ -44,6 +46,7 @@ import {
   latestAssistantText,
   MessageTranscriptSearch,
   promptHistoryEntries,
+  runThreadPresentationTransition,
   transcriptContent,
   workspaceCompletionAtCursor,
   workspacePathCandidates,
@@ -56,6 +59,15 @@ import {
   findSlashCommand,
   renderInteractiveHelp,
 } from './command-catalog.js';
+import {
+  approvalAllowsAlways,
+  filterSessionItems,
+  formatApprovalPresentation,
+  formatDiffSnapshot,
+  formatPermissionSnapshot,
+  formatReviewSnapshot,
+  formatSessionItems,
+} from './review-format.js';
 export { SLASH_COMMAND_SPECS } from './command-catalog.js';
 export type { SlashCommandSpec } from './command-catalog.js';
 
@@ -93,7 +105,11 @@ export type SlashCommand =
         | 'restore'
         | 'search_next'
         | 'search_previous'
-        | 'latest';
+        | 'latest'
+        | 'review'
+        | 'permissions'
+        | 'compact'
+        | 'new';
     }
   | { cmd: 'follow_up'; text: string }
   | { cmd: 'history_search'; query: string }
@@ -104,6 +120,12 @@ export type SlashCommand =
   | { cmd: 'export'; mode: string; path: string }
   | { cmd: 'vim'; mode: string }
   | { cmd: 'draft'; action: string }
+  | { cmd: 'diff'; scope: string }
+  | { cmd: 'retry' | 'fork'; turnId: string }
+  | { cmd: 'sessions'; query: string }
+  | { cmd: 'resume' | 'switch'; threadId: string }
+  | { cmd: 'rename'; title: string }
+  | { cmd: 'archive'; mode: string }
   | { cmd: 'unknown'; input: string };
 
 /** 非斜杠输入返回 undefined。空闲命令表:/quit /queue /status /help;/f|/followup 随时合法。 */
@@ -157,6 +179,30 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'search_previous' };
     case 'transcript.latest':
       return { cmd: 'latest' };
+    case 'review.diff':
+      return { cmd: 'diff', scope: rest.toLocaleLowerCase('en-US') };
+    case 'review.inspect':
+      return { cmd: 'review' };
+    case 'review.permissions':
+      return { cmd: 'permissions' };
+    case 'conversation.compact':
+      return { cmd: 'compact' };
+    case 'conversation.retry':
+      return { cmd: 'retry', turnId: rest };
+    case 'conversation.fork':
+      return { cmd: 'fork', turnId: rest };
+    case 'session.new':
+      return { cmd: 'new' };
+    case 'session.list':
+      return { cmd: 'sessions', query: rest };
+    case 'session.resume':
+      return { cmd: 'resume', threadId: rest };
+    case 'session.switch':
+      return { cmd: 'switch', threadId: rest };
+    case 'session.rename':
+      return { cmd: 'rename', title: rest };
+    case 'session.archive':
+      return { cmd: 'archive', mode: rest.toLocaleLowerCase('en-US') };
     case 'content.copy':
       return { cmd: 'copy', mode: rest.toLocaleLowerCase('en-US') };
     case 'content.export': {
@@ -270,6 +316,7 @@ export interface ReplOptions {
     registry: ProviderRegistry;
     runtime: InteractiveSession;
   };
+  workspace?: RuntimeWorkspaceActions;
   presentation?: {
     readonly store: ThreadPresentationStore;
     readonly cwd: string;
@@ -290,6 +337,18 @@ export class InputHistory {
   push(text: string): void {
     if (text.trim() === '') return;
     if (this.#items[this.#items.length - 1] !== text) this.#items.push(text);
+    this.#index = this.#items.length;
+    this.#draft = '';
+    this.resetSearch();
+  }
+
+  /** Replace one thread's history projection without retaining entries from the prior thread. */
+  replace(entries: readonly string[]): void {
+    this.#items = [];
+    for (const entry of entries) {
+      if (entry.trim() === '') continue;
+      if (this.#items[this.#items.length - 1] !== entry) this.#items.push(entry);
+    }
     this.#index = this.#items.length;
     this.#draft = '';
     this.resetSearch();
@@ -475,7 +534,7 @@ export async function startRepl(
   let cursor = 0;
   const approvalQueue: string[] = []; // pending approvalId FIFO(非空 = 审批键位模式)
   const history = new InputHistory();
-  for (const prompt of promptHistoryEntries(session.messages)) history.push(prompt);
+  history.replace(promptHistoryEntries(session.messages));
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
   let lastQueues: { steering: QueuedMessage[]; followUp: QueuedMessage[] } = {
@@ -621,6 +680,13 @@ export async function startRepl(
         // Runtime projects canonical control_request through the primary event stream. Direct
         // Session keeps the legacy broker side channel below; id de-duplication supports both.
         enqueueApproval(e.approvalId);
+        renderer.setApprovalAllowsAlways?.(approvalAllowsAlways(
+          opts.workspace?.approvalPresentation(e.approvalId),
+        ));
+        formatApprovalPresentation(
+          opts.workspace?.approvalPresentation(e.approvalId),
+          e.description,
+        ).forEach((line) => renderer.println?.(line));
       } else if (e.type === 'error' && e.fatal) {
         void shutdown(1); // 致命错误进入退出流程(docs/09 §4)
       }
@@ -628,7 +694,12 @@ export async function startRepl(
     // 审批旁路通道:approval_request 入队即切审批键位(渲染提示由 renderer 的
     // approval_request 分支负责——main.ts 已把同一通道接到 renderer.render)。
     const unsubApproval = approval?.subscribe((e) => {
-      if (e.type === 'approval_request') enqueueApproval(e.approvalId);
+      if (e.type === 'approval_request') {
+        enqueueApproval(e.approvalId);
+        renderer.setApprovalAllowsAlways?.(approvalAllowsAlways(
+          opts.workspace?.approvalPresentation(e.approvalId),
+        ));
+      }
     });
     const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
       (messages) => {
@@ -762,6 +833,141 @@ export async function startRepl(
         );
       } catch (error) {
         renderer.println?.(`copy failed: ${sanitizeTerminalError(error)}`);
+      }
+    };
+
+    const switchPresentation = (): string => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) return latestPromptDraft;
+      const state = opts.presentation?.store.switchToThread(workspace.currentThreadId);
+      history.replace(promptHistoryEntries(session.messages));
+      approvalQueue.length = 0;
+      latestPromptDraft = state?.draft ?? '';
+      setInput(latestPromptDraft);
+      renderer.println?.(`— switched to ${workspace.currentThreadId} —`);
+      for (const request of workspace.pendingApprovals()) {
+        enqueueApproval(request.approvalId);
+        renderer.render({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
+        renderer.setApprovalAllowsAlways?.(approvalAllowsAlways(
+          workspace.approvalPresentation(request.approvalId),
+        ));
+        formatApprovalPresentation(
+          workspace.approvalPresentation(request.approvalId),
+          request.description,
+        ).forEach((line) => renderer.println?.(line));
+      }
+      return latestPromptDraft;
+    };
+
+    const transitionPresentation = async (
+      transition: () => Promise<unknown>,
+    ): Promise<void> => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) return;
+      await runThreadPresentationTransition(
+        workspace,
+        opts.presentation?.store,
+        transition,
+        switchPresentation,
+      );
+    };
+
+    const runWorkspaceCommand = async (command: SlashCommand): Promise<void> => {
+      const workspace = opts.workspace;
+      if (workspace === undefined) {
+        renderer.println?.(`/${command.cmd} is unavailable in this mode.`);
+        return;
+      }
+      try {
+        switch (command.cmd) {
+          case 'sessions': {
+            const items = filterSessionItems(await workspace.listSessions(), command.query);
+            formatSessionItems(items).forEach((line) => renderer.println?.(line));
+            return;
+          }
+          case 'resume':
+          case 'switch':
+            if (!isThreadId(command.threadId)) {
+              renderer.println?.(`usage: /${command.cmd} <thread-id>`);
+              formatSessionItems(filterSessionItems(await workspace.listSessions(), ''))
+                .forEach((line) => renderer.println?.(line));
+              return;
+            }
+            const targetThreadId = command.threadId;
+            await transitionPresentation(() => workspace.switchSession(targetThreadId));
+            return;
+          case 'new':
+            await transitionPresentation(() => workspace.newSession());
+            return;
+          case 'rename':
+            if (command.title === '') {
+              renderer.println?.('usage: /rename <title>');
+              return;
+            }
+            await workspace.renameSession(command.title);
+            renderer.println?.('Session renamed.');
+            return;
+          case 'archive':
+            if (command.mode !== '' && command.mode !== 'on' && command.mode !== 'off') {
+              renderer.println?.('usage: /archive [on|off]');
+              return;
+            }
+            await workspace.archiveSession(command.mode !== 'off');
+            renderer.println?.(command.mode === 'off' ? 'Session restored.' : 'Session archived.');
+            return;
+          case 'compact':
+            await workspace.compactConversation();
+            renderer.println?.('Conversation compacted.');
+            return;
+          case 'fork':
+          case 'retry': {
+            if (command.turnId !== '' && !isTurnId(command.turnId)) {
+              renderer.println?.(`usage: /${command.cmd} [turn-id]`);
+              return;
+            }
+            const targetTurnId = command.turnId === '' ? undefined : command.turnId;
+            if (command.cmd === 'fork') {
+              await transitionPresentation(() => workspace.forkConversation(
+                targetTurnId,
+              ));
+            } else {
+              await transitionPresentation(() => workspace.retryConversation(
+                targetTurnId,
+              ));
+            }
+            return;
+          }
+          case 'review': {
+            const snapshot = await workspace.reviewSnapshot();
+            if (snapshot === undefined) renderer.println?.('No review data for this session.');
+            else formatReviewSnapshot(snapshot).forEach((line) => renderer.println?.(line));
+            return;
+          }
+          case 'diff': {
+            const scope = command.scope === '' ? 'turn' : command.scope;
+            if (scope !== 'turn' && scope !== 'workspace') {
+              renderer.println?.('usage: /diff [turn|workspace]');
+              return;
+            }
+            const snapshot = await workspace.diffSnapshot(scope);
+            if (snapshot === undefined) renderer.println?.('No diff data for this session.');
+            else formatDiffSnapshot(snapshot).forEach((line) => renderer.println?.(line));
+            return;
+          }
+          case 'permissions':
+            formatPermissionSnapshot(await workspace.workspaceSnapshot())
+              .forEach((line) => renderer.println?.(line));
+            return;
+          default:
+            return;
+        }
+      } catch (error) {
+        renderer.println?.(`${command.cmd} failed: ${sanitizeTerminalError(error)}`);
       }
     };
 
@@ -911,6 +1117,20 @@ export async function startRepl(
           }
           return paletteReturnDraft ?? null;
         }
+        case 'sessions':
+        case 'resume':
+        case 'switch':
+        case 'new':
+        case 'rename':
+        case 'archive':
+        case 'compact':
+        case 'fork':
+        case 'retry':
+        case 'review':
+        case 'diff':
+        case 'permissions':
+          void runWorkspaceCommand(c);
+          return paletteReturnDraft ?? null;
         case 'vim':
           if (c.mode !== 'on' && c.mode !== 'off') {
             renderer.println?.('usage: /vim <on|off>');
@@ -1090,7 +1310,15 @@ export async function startRepl(
           return;
         }
         if (decision !== undefined) {
-          const id = approvalQueue.shift();
+          const id = approvalQueue[0];
+          if (decision === 'allow_always'
+            && !approvalAllowsAlways(id === undefined
+              ? undefined
+              : opts.workspace?.approvalPresentation(id))) {
+            renderer.println?.('Allow always is unavailable because Runtime provided no frozen scope.');
+            return;
+          }
+          approvalQueue.shift();
           if (id !== undefined) approval.broker.resolve(id, decision);
           return;
         }

@@ -861,7 +861,8 @@ const BashParams = z.object({
 
 - `Bun.spawn([shell, '-c', command], { detached: true, cwd: canonicalize(resolve(ctx.cwd, workdir ?? '.')) })` 建**进程组**;CLI/tool cwd 与 workdir 统一物理化，相对 workdir 不得回退成进程启动目录，也不能在 symlink cwd 下与规则分析分叉。为让规则/审批静态分析与真实 shell 一致，spawn 环境清除会隐式执行脚本或改写 `cd` 查找的 `BASH_ENV` / `CDPATH`。timeout / abort 时调 `killProcessTree`(SIGTERM → 3s 后 SIGKILL 整棵树)。只 kill 直接子进程会漏掉 `bun run dev` 起的孙进程,这是 detached 进程组的全部意义。Bun 负责 spawn 与流式 stdout/stderr；POSIX signal/PGID 收尾属于受控 `process` compatibility 边界。
 - stdout + stderr 合并收集进 rolling buffer(只保留 2 × 上限的滚动窗口,防长命令吃内存);**尾部截断**保留末尾 2000 行 / 50KB——命令输出的错误几乎总在尾部,与 read 的头部截断方向相反;超限全文落盘,输出头部注明 `...output truncated...\nFull output saved to: <path>`。details 打 `truncated` 标记跳过框架 post-hook(见 1.7)。
-- `onUpdate` 以 100ms 节流推送增量输出(`tool_execution_update` 事件),CLI 据此渲染实时进度——用户看得见卡在哪,才知道该不该 Esc。
+- `onUpdate` 以 100ms 节流推送当前累计输出快照(`tool_execution_update` 事件)，消费者整块替换上一快照，
+  不得拼接；CLI 据此渲染实时进度——用户看得见卡在哪，才知道该不该 Esc。
 - 输出显式带退出状态:末尾附 `exit code N`;非 0 → isError: true 但**仍附完整输出**(模型需要 stderr 判断怎么修)。
 - timeout 触发:kill tree 后输出尾附 `Command timed out after 120000 ms and was killed. Retry with a larger timeout value if the command legitimately needs more time.`(opencode 的 `<shell_metadata>` 思路:把「为什么停了、下一步怎么办」讲给模型)。
 - abort 触发:kill tree 后输出尾附 `User aborted the command`,isError: true(该结果进转录,模型能理解发生了什么,见 §4)。

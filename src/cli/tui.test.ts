@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ApprovalBroker } from '../agent/index.js';
 import type {
+  ApprovalPresentation,
   AssistantMessage,
   ProviderEvent,
   ThreadId,
@@ -29,6 +30,8 @@ import type { SessionEvent, SessionUsage } from '../session/index.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
+import type { ReplApproval } from './repl.js';
 import {
   persistableDraft,
   ThreadPresentationStore,
@@ -867,7 +870,9 @@ describe('全屏 OpenTUI 布局', () => {
       await approvalView.flush();
       const approvalLines = frameLines(approvalView.frame());
       expect(approvalLines).toHaveLength(1);
-      expect(approvalLines[0]?.trim()).toBe('Approval · y/a/n/Esc');
+      expect(approvalLines[0]?.trim()).toBe(
+        'Approval · v details · y/a/n/Esc',
+      );
       expect(approvalView.renderer.getCursorState().visible).toBe(false);
       expect(approvalView.screen.getInput()).toBe('draft');
     } finally {
@@ -875,7 +880,7 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
-  it('审批在非空多行 draft 下仍显示持久键位，决议后恢复 workspace 与洋红横线', async () => {
+  it('审批在非空多行 draft 下保留持久键位与可展开卡片，决议后恢复 workspace', async () => {
     const view = await setup(60, 18);
     try {
       view.screen.focusInput();
@@ -892,11 +897,11 @@ describe('全屏 OpenTUI 布局', () => {
       const approvalFrame = view.frame();
       const [approvalTop, approvalBottom] = promptRuleIndexes(view);
       const approvalLines = frameLines(approvalFrame);
-      expect(approvalFrame).toContain('Approval · y/a/n/Esc');
+      expect(approvalFrame).toContain('Approval · v details · y/a/n/Esc');
       expect(approvalFrame).toContain('run bun test');
       expect(approvalFrame).toContain('draft 7');
       expect(approvalFrame).not.toContain('/Users/test/work/coda');
-      expect(approvalLines.at(-2)).toContain('Approval · y/a/n/Esc');
+      expect(approvalLines.at(-2)).toContain('Approval · v details · y/a/n/Esc');
       expect(approvalLines.at(-1)).toContain('context 0 / 128k');
       expect(view.renderer.getCursorState().visible).toBe(false);
       for (const ruleRow of [approvalTop, approvalBottom]) {
@@ -910,11 +915,17 @@ describe('全屏 OpenTUI 布局', () => {
         }
       }
 
+      view.screen.toggleApprovalDetails();
+      await view.flush();
+      expect(view.frame()).toContain('Authoritative normalized scope is unavailable');
+      expect(view.frame()).toContain('Approval · v details · y/a/n/Esc');
+      expect(view.frame()).toContain('draft 7');
+
       view.screen.resolveApproval();
       await view.flush();
       const resolvedFrame = view.frame();
       const [resolvedTop, resolvedBottom] = promptRuleIndexes(view);
-      expect(resolvedFrame).not.toContain('Approval · y/a/n/Esc');
+      expect(resolvedFrame).not.toContain('Approval · v details · y/a/n/Esc');
       expect(resolvedFrame).toContain('/Users/test/work/coda');
       expect(view.screen.getInput()).toContain('draft 7');
       expect(view.renderer.getCursorState().visible).toBe(true);
@@ -1249,6 +1260,113 @@ describe('UX2 TUI presentation workflow', () => {
   });
 });
 
+describe('UX3 TUI review and recovery workflow', () => {
+  it('diff viewer keeps complete grouped patches and supports file/scope navigation', async () => {
+    const view = await setup(100, 30);
+    try {
+      const longPatch = Array.from(
+        { length: 40 },
+        (_, index) => `+ complete patch line ${index}`,
+      ).join('\n');
+      view.screen.openDiffViewer({
+        workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+        threadId: 'thread-diff' as ThreadId,
+        scope: 'turn',
+        generatedAt: 8,
+        files: [
+          {
+            path: 'src/staged.ts',
+            group: 'staged',
+            status: 'M',
+            patch: longPatch,
+          },
+          {
+            path: 'src/unstaged.ts\u001b]0;hidden\u0007',
+            group: 'unstaged',
+            status: 'M',
+            patch: '+ second file',
+          },
+        ],
+      });
+      await view.flush();
+      expect(view.frame()).toContain('turn diff · 1/2');
+      expect(view.frame()).toContain('[staged] M src/staged.ts');
+      const body = view.renderer.root.findDescendantById('coda-diff-body');
+      expect((body as unknown as { content: { chunks: { text: string }[] } })
+        .content.chunks.map((chunk) => chunk.text).join(''))
+        .toContain('+ complete patch line 39');
+
+      expect(view.screen.handleDiffViewerKey({ name: 'right' } as KeyEvent)).toBe('handled');
+      await view.flush();
+      expect(view.frame()).toContain('turn diff · 2/2');
+      expect(view.frame()).toContain('+ second file');
+      expect(view.frame()).not.toContain('\u001b');
+      expect(view.screen.handleDiffViewerKey({ name: 'tab' } as KeyEvent)).toBe('toggle-scope');
+      expect(view.screen.handleDiffViewerKey({ name: 'escape' } as KeyEvent)).toBe('handled');
+      await view.flush();
+      expect(view.frame()).not.toContain('turn diff · 2/2');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('session picker searches the full catalog live and returns only the selected thread', async () => {
+    const view = await setup(100, 30);
+    try {
+      view.screen.openSessionPicker([
+        {
+          workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+          cwd: '/workspace/alpha',
+          updatedAt: 1,
+          preview: 'alpha preview',
+          thread: {
+            threadId: 'thread-alpha' as ThreadId,
+            createdAt: 1,
+            state: 'idle',
+            title: 'Alpha',
+          },
+        },
+        {
+          workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+          cwd: '/workspace/beta',
+          updatedAt: 2,
+          preview: 'beta preview',
+          thread: {
+            threadId: 'thread-beta' as ThreadId,
+            createdAt: 1,
+            state: 'running',
+            title: 'Beta',
+          },
+        },
+      ], '');
+      expect(view.screen.handleSessionPickerKey({
+        name: 'b',
+        sequence: 'b',
+        ctrl: false,
+        meta: false,
+        option: false,
+        super: false,
+        hyper: false,
+      } as KeyEvent)).toEqual({ kind: 'handled' });
+      await view.flush();
+      expect(view.frame()).toContain('1 match(es)');
+      expect(view.frame()).toContain('Beta');
+      expect(view.frame()).not.toContain('Alpha');
+
+      expect(view.screen.handleSessionPickerKey({ name: 'backspace' } as KeyEvent))
+        .toEqual({ kind: 'handled' });
+      expect(view.screen.handleSessionPickerKey({ name: 'down' } as KeyEvent))
+        .toEqual({ kind: 'handled' });
+      expect(view.screen.handleSessionPickerKey({ name: 'enter' } as KeyEvent)).toEqual({
+        kind: 'select',
+        threadId: 'thread-alpha' as ThreadId,
+      });
+    } finally {
+      await view.destroy();
+    }
+  });
+});
+
 describe('TUI 安全渲染与转录恢复', () => {
   it('统一移除 ANSI/OSC/DCS 与危险 C0/C1，同时保留 Unicode、tab 和换行', () => {
     const raw =
@@ -1427,9 +1545,10 @@ describe('TUI 安全渲染与转录恢复', () => {
       await view.resolveHighlights();
       const streaming = view.frame();
       expect(streaming).not.toContain('FIRSTSECOND');
-      expect(streaming).not.toContain('THINK-ONETHINK-TWO');
+      expect(streaming).not.toContain('THINK-ONE');
+      expect(streaming).not.toContain('THINK-TWO');
       expect(streaming.indexOf('SECOND')).toBeGreaterThan(streaming.indexOf('FIRST'));
-      expect(streaming.indexOf('THINK-TWO')).toBeGreaterThan(streaming.indexOf('THINK-ONE'));
+      expect(streaming).toContain('thinking ·');
 
       view.screen.render({
         type: 'message_end',
@@ -1446,7 +1565,9 @@ describe('TUI 安全渲染与转录恢复', () => {
       await view.resolveHighlights();
       const finalFrame = view.frame();
       expect(finalFrame).not.toContain('FIRSTSECOND');
-      expect(finalFrame).not.toContain('THINK-ONETHINK-TWO');
+      expect(finalFrame).not.toContain('THINK-ONE');
+      expect(finalFrame).not.toContain('THINK-TWO');
+      expect(finalFrame).toContain('thinking · complete');
     } finally {
       await view.destroy();
     }
@@ -1590,6 +1711,108 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('切换 thread 后重建交互状态并且审批只作用于新的当前目标', async () => {
+    let currentThreadId = 'thread-running-a' as ThreadId;
+    let pendingOnTarget = true;
+    const resolved: Array<{ readonly id: string; readonly decision: string }> = [];
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const workspace: RuntimeWorkspaceActions = {
+      get currentThreadId() { return currentThreadId; },
+      eventHighWaterSeq: () => currentThreadId === 'thread-idle-b' ? 4 : 8,
+      listSessions: async () => [],
+      workspaceSnapshot: async () => WORKSPACE_SNAPSHOT,
+      switchSession: async (threadId) => { currentThreadId = threadId; },
+      newSession: async () => currentThreadId,
+      renameSession: async () => undefined,
+      archiveSession: async () => undefined,
+      compactConversation: async () => undefined,
+      forkConversation: async () => currentThreadId,
+      retryConversation: async () => currentThreadId,
+      reviewSnapshot: async () => undefined,
+      diffSnapshot: async () => undefined,
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => currentThreadId === 'thread-idle-b' && pendingOnTarget
+        ? [{
+            approvalId: 'approval-thread-b',
+            toolCallId: 'call-thread-b',
+            description: 'approve thread B only',
+          }]
+        : [],
+    };
+    const session: CliSession = {
+      interactionState: () => currentThreadId === 'thread-running-a' ? 'running' : 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      get messages() { return []; },
+      subscribe: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: (text) => {
+        steers.push(typeof text === 'string' ? text : '');
+      },
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const approval: ReplApproval = {
+      broker: {
+        resolve: (id, decision) => {
+          resolved.push({ id, decision });
+          pendingOnTarget = false;
+        },
+      },
+      onAbort: () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const view = await setup(
+      90,
+      28,
+      () => {},
+      true,
+      { model: MODEL, contextLimit: 128_000 },
+      { workspace },
+    );
+    view.screen.render({ type: 'agent_start', reason: 'prompt' });
+    const controller = runTuiController(
+      session,
+      approval,
+      view.screen,
+      view.renderer,
+      {
+        interaction: view.interaction,
+        workspace,
+        installSignalHandlers: false,
+      },
+    );
+
+    view.screen.focusInput();
+    view.screen.setInput('/switch thread-idle-b');
+    await view.flush();
+    view.mockInput.pressEnter();
+    for (let index = 0; index < 8 && currentThreadId !== 'thread-idle-b'; index++) {
+      await Promise.resolve();
+    }
+    await view.flush();
+    expect(currentThreadId).toBe('thread-idle-b' as ThreadId);
+    expect(view.interaction.phase).toBe('idle');
+    expect(view.frame()).toContain('approve thread B only');
+
+    view.mockInput.pressKey('y');
+    expect(resolved).toEqual([{
+      id: 'approval-thread-b',
+      decision: 'allow_once',
+    }]);
+    view.screen.setInput('new target prompt');
+    view.mockInput.pressEnter();
+    expect(prompts).toEqual(['new target prompt']);
+    expect(steers).toEqual([]);
+
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
   it('Ctrl+K/Ctrl+R/Ctrl+O 与 stash/restore 共用 per-thread presentation state', async () => {
     const dir = makeTempDir();
     const store = new ThreadPresentationStore({
@@ -2059,8 +2282,13 @@ describe('TUI 控制器接线', () => {
     expect(broker.pendingCount).toBe(1);
     expect(view.screen.getInput()).toBe('seed');
     expect(view.frame()).toContain(
-      'Approval required · y once · a always · n deny · Esc abort',
+      'Approval required · v details · y once · a always · n deny · Esc abort',
     );
+
+    view.mockInput.pressKey('v');
+    await view.flush();
+    expect(view.frame()).toContain('Authoritative normalized scope is unavailable');
+    expect(broker.pendingCount).toBe(1);
 
     await view.mockInput.pasteBracketedText('PASTED\nTEXT');
     view.mockInput.pressKey('a', { meta: true });
@@ -2114,7 +2342,34 @@ describe('TUI 控制器接线', () => {
       onAbort: (): void => {},
       subscribe: (): (() => void) => () => {},
     };
-    const view = await setup();
+    const presentation = approvalPresentationWithoutAlways('canonical-tui-approval');
+    const workspace: RuntimeWorkspaceActions = {
+      currentThreadId: presentation.target.threadId,
+      eventHighWaterSeq: () => 0,
+      listSessions: async () => [],
+      workspaceSnapshot: async () => WORKSPACE_SNAPSHOT,
+      switchSession: async () => undefined,
+      newSession: async () => presentation.target.threadId,
+      renameSession: async () => undefined,
+      archiveSession: async () => undefined,
+      compactConversation: async () => undefined,
+      forkConversation: async () => presentation.target.threadId,
+      retryConversation: async () => presentation.target.threadId,
+      reviewSnapshot: async () => undefined,
+      diffSnapshot: async () => undefined,
+      approvalPresentation: (requestId) => requestId === presentation.requestId
+        ? presentation
+        : undefined,
+      pendingApprovals: () => [],
+    };
+    const view = await setup(
+      100,
+      30,
+      () => {},
+      true,
+      { model: MODEL, contextLimit: 128_000 },
+      { workspace },
+    );
     view.screen.focusInput();
     const controller = runTuiController(
       session,
@@ -2124,6 +2379,7 @@ describe('TUI 控制器接线', () => {
       {
         interaction: view.interaction,
         installSignalHandlers: false,
+        workspace,
       },
     );
 
@@ -2137,7 +2393,12 @@ describe('TUI 控制器接线', () => {
     });
     await view.flush();
     expect(view.frame()).toContain('Approval required');
+    expect(view.frame()).not.toContain('a always');
 
+    view.mockInput.pressKey('a');
+    await view.flush();
+    expect(resolutions).toEqual([]);
+    expect(view.frame()).toContain('Runtime provided no frozen scope');
     view.mockInput.pressKey('y');
     expect(resolutions).toEqual([
       { id: 'canonical-tui-approval', decision: 'allow_once' },
@@ -2331,3 +2592,26 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 });
+
+function approvalPresentationWithoutAlways(requestId: string): ApprovalPresentation {
+  return {
+    requestId,
+    target: {
+      workspaceId: 'ws_tui_test' as WorkspaceId,
+      threadId: 'thread-approval' as ThreadId,
+      runId: 'run-approval' as never,
+      turnId: 'turn-approval' as never,
+    },
+    capability: { id: 'shell', version: '1', registrationDigest: 'digest' },
+    normalizedResources: [],
+    risk: { code: 'ask', reason: 'execute', description: 'Run canonical command' },
+    allowOnce: { invocationId: 'invocation-approval', toolCallId: 'call-canonical' },
+    revisions: {
+      catalog: 1,
+      effectivePolicy: 'effective',
+      policyBasis: 'basis',
+      ceiling: 'ceiling',
+      grants: 'grants',
+    },
+  };
+}

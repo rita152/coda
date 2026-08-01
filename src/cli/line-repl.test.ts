@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'bun:test';
 import type {
+  ApprovalPresentation,
   AssistantMessage,
   ModelConfig,
   ThreadId,
@@ -15,6 +16,7 @@ import type {
 import type { InteractiveSession } from './interactive-runtime.js';
 import { startLineRepl } from './line-repl.js';
 import type { ProviderRegistry } from './provider-registry.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import { createRenderer } from './renderer.js';
 import {
   persistableDraft,
@@ -22,6 +24,61 @@ import {
 } from './presentation-state.js';
 
 describe('accessible/plain append-only line REPL', () => {
+  it('keeps a modern approval pending when Runtime provides no allow-always scope', async () => {
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const output: string[] = [];
+    const resolutions: Array<{ readonly id: string; readonly decision: string }> = [];
+    let listener: ((event: import('./frontend-types.js').CliSessionEvent) => void) | undefined;
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: (next) => {
+        listener = next;
+        return () => { listener = undefined; };
+      },
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const presentation = lineApprovalPresentationWithoutAlways('line-approval');
+    const renderer = createRenderer(
+      { enqueue: (text) => output.push(text), drain: async () => undefined },
+      { color: false, interactive: false },
+    );
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      mode: 'accessible',
+      workspace: lineApprovalWorkspace(presentation),
+      approval: {
+        broker: { resolve: (id, decision) => resolutions.push({ id, decision }) },
+        onAbort: () => undefined,
+        subscribe: () => () => undefined,
+      },
+    });
+    listener?.({
+      type: 'approval_request',
+      approvalId: presentation.requestId,
+      toolCallId: presentation.allowOnce.toolCallId,
+      description: presentation.risk.description,
+    });
+    stdin.write('a\n');
+    stdin.write('y\n');
+    stdin.write('/quit\n');
+    await expect(running).resolves.toBe(0);
+    expect(resolutions).toEqual([{ id: presentation.requestId, decision: 'allow_once' }]);
+    expect(output.join('')).toContain('Runtime provided no frozen scope');
+    expect(output.join('')).not.toContain('a allow always');
+  });
+
   it('提供文本命令 parity，不控制终端模式或泄漏控制序列', async () => {
     const stdin = new PassThrough();
     const stderr = new PassThrough();
@@ -370,4 +427,185 @@ describe('accessible/plain append-only line REPL', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('accessible 文本面从同一 Runtime workspace 提供审阅、diff 与 session 操作', async () => {
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const stdoutChunks: string[] = [];
+    const actions: string[] = [];
+    let currentThreadId = 'thread-current' as ThreadId;
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const workspace: RuntimeWorkspaceActions = {
+      get currentThreadId() { return currentThreadId; },
+      eventHighWaterSeq: () => 9,
+      listSessions: async () => [{
+        workspaceId: 'workspace-line' as WorkspaceId,
+        cwd: '/workspace',
+        updatedAt: 2,
+        preview: 'listed preview',
+        thread: {
+          threadId: 'thread-listed' as ThreadId,
+          createdAt: 1,
+          state: 'idle',
+          title: 'Listed target',
+        },
+      }],
+      workspaceSnapshot: async () => ({
+        workspaceId: 'workspace-line' as WorkspaceId,
+        permissions: {
+          mode: 'interactive',
+          policyRevision: 'policy-line',
+          ceiling: { revision: 'ceiling-line', constraints: [] },
+        },
+      }),
+      switchSession: async (threadId) => {
+        actions.push(`switch:${threadId}`);
+        currentThreadId = threadId;
+      },
+      newSession: async () => {
+        actions.push('new');
+        currentThreadId = 'thread-new' as ThreadId;
+        return currentThreadId;
+      },
+      renameSession: async (title) => { actions.push(`rename:${title}`); },
+      archiveSession: async (archived) => { actions.push(`archive:${String(archived)}`); },
+      compactConversation: async () => { actions.push('compact'); },
+      forkConversation: async () => 'thread-fork' as ThreadId,
+      retryConversation: async () => 'thread-retry' as ThreadId,
+      reviewSnapshot: async () => ({
+        workspaceId: 'workspace-line' as WorkspaceId,
+        threadId: currentThreadId,
+        highWaterSeq: 9,
+        reasoning: [{
+          key: 'reasoning-line',
+          messageId: 'assistant-line',
+          status: 'completed',
+          startedAt: 1,
+          endedAt: 3,
+          durationMs: 2,
+          content: 'full reasoning detail',
+        }],
+        tools: [],
+      }),
+      diffSnapshot: async (scope) => ({
+        workspaceId: 'workspace-line' as WorkspaceId,
+        threadId: currentThreadId,
+        scope,
+        generatedAt: 3,
+        files: [{
+          path: 'src/line.ts',
+          group: 'unstaged',
+          status: 'M',
+          patch: '+ complete accessible diff',
+        }],
+      }),
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => [],
+    };
+    const renderer = createRenderer(
+      {
+        enqueue: (text) => stdoutChunks.push(text),
+        drain: async () => undefined,
+      },
+      { color: false, interactive: false },
+    );
+
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      mode: 'accessible',
+      workspace,
+    });
+    stdin.write('/review\n');
+    stdin.write('/diff workspace\n');
+    stdin.write('/permissions\n');
+    stdin.write('/sessions listed\n');
+    stdin.write('/rename Review target\n');
+    stdin.write('/archive off\n');
+    stdin.write('/compact\n');
+    stdin.write('/new\n');
+    stdin.write('/switch thread-listed\n');
+    stdin.write('/quit\n');
+
+    await expect(running).resolves.toBe(0);
+    const output = stdoutChunks.join('');
+    expect(output).toContain('Review · 1 reasoning block(s)');
+    expect(output).toContain('full reasoning detail');
+    expect(output).toContain('+ complete accessible diff');
+    expect(output).toContain('Permissions · interactive');
+    expect(output).toContain('Listed target');
+    expect(actions).toEqual([
+      'rename:Review target',
+      'archive:false',
+      'compact',
+      'new',
+      'switch:thread-listed',
+    ]);
+  });
 });
+
+function lineApprovalPresentationWithoutAlways(requestId: string): ApprovalPresentation {
+  return {
+    requestId,
+    target: {
+      workspaceId: 'workspace-line-approval' as WorkspaceId,
+      threadId: 'thread-line-approval' as ThreadId,
+      runId: 'run-line-approval' as never,
+      turnId: 'turn-line-approval' as never,
+    },
+    capability: { id: 'shell', version: '1', registrationDigest: 'digest' },
+    normalizedResources: [],
+    risk: { code: 'ask', reason: 'execute', description: 'Run line command' },
+    allowOnce: { invocationId: 'invocation-line', toolCallId: 'call-line' },
+    revisions: {
+      catalog: 1,
+      effectivePolicy: 'effective',
+      policyBasis: 'basis',
+      ceiling: 'ceiling',
+      grants: 'grants',
+    },
+  };
+}
+
+function lineApprovalWorkspace(presentation: ApprovalPresentation): RuntimeWorkspaceActions {
+  return {
+    currentThreadId: presentation.target.threadId,
+    eventHighWaterSeq: () => 0,
+    listSessions: async () => [],
+    workspaceSnapshot: async () => ({
+      workspaceId: presentation.target.workspaceId,
+      permissions: {
+        mode: 'interactive',
+        policyRevision: 'policy',
+        ceiling: { revision: 'ceiling', constraints: [] },
+      },
+    }),
+    switchSession: async () => undefined,
+    newSession: async () => presentation.target.threadId,
+    renameSession: async () => undefined,
+    archiveSession: async () => undefined,
+    compactConversation: async () => undefined,
+    forkConversation: async () => presentation.target.threadId,
+    retryConversation: async () => presentation.target.threadId,
+    reviewSnapshot: async () => undefined,
+    diffSnapshot: async () => undefined,
+    approvalPresentation: (requestId) => requestId === presentation.requestId
+      ? presentation
+      : undefined,
+    pendingApprovals: () => [],
+  };
+}

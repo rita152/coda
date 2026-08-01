@@ -31,6 +31,7 @@ import type {
   LegacyApprovalAdapter,
   LegacyApprovalInvocationResult,
   LegacyApprovalPatternRepository,
+  LegacyThreadSeedRecord,
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
@@ -273,6 +274,372 @@ describe('Supervisor recovery and idempotency', () => {
       expect(invoke).toThrow(expect.objectContaining({ code }));
     } finally {
       await runtime.close();
+    }
+  });
+
+  test('forks committed context, retries through one stable nested prompt, and exposes Runtime review facts', async () => {
+    const baseStorage = createMemoryRuntimeStorage();
+    const retryOpId = 'op_e_70000000000000000000000000000001' as ExternalOpId;
+    const storage = failSupervisorFinalizeOnce(baseStorage, retryOpId);
+    const drivers = new RecordingDriverFactory();
+    const runtime = await createRuntime({
+      workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
+      storage,
+      modelResolver: {
+        async resolve(ref) { return { ok: true as const, model: { ...MODEL, ref } }; },
+      },
+      permissionPolicy: new FixedPolicy(),
+      threadDriverFactory: drivers,
+      workspaceReview: {
+        async snapshotGit() { return { branch: 'codex/ux3', dirty: true }; },
+        async snapshotDiff() {
+          return [{
+            path: 'src/review.ts',
+            group: 'unstaged' as const,
+            status: 'M',
+            patch: 'diff --git a/src/review.ts b/src/review.ts\n',
+          }];
+        },
+      },
+      identityFactory: new TestIdentityFactory(),
+      clock: { now: () => 2 },
+    });
+    const sourceThreadId = runtime.newThreadId();
+    const forkThreadId = runtime.newThreadId();
+    const retryThreadId = runtime.newThreadId();
+    try {
+      expect(await runtime.submit(createThreadOp(runtime.newOpId(), sourceThreadId)))
+        .toMatchObject({ accepted: true, threadId: sourceThreadId });
+      const sourceSnapshot = await runtime.getThreadSnapshot(sourceThreadId);
+      if (sourceSnapshot === undefined) throw new Error('source snapshot is missing');
+      const iterator = runtime.events({
+        threadIds: [sourceThreadId],
+        cursors: [{ threadId: sourceThreadId, afterSeq: sourceSnapshot.highWaterSeq }],
+      })[Symbol.asyncIterator]();
+      const sourcePrompt = prompt(runtime.newOpId(), sourceThreadId, 'inspect the runtime');
+      const promptReceipt = await runtime.submit(sourcePrompt);
+      if (!promptReceipt.accepted || promptReceipt.runId === undefined) {
+        throw new Error('source prompt was not accepted');
+      }
+      expect(await runtime.submit({
+        type: 'conversation_fork',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        sourceThreadId,
+        threadId: runtime.newThreadId(),
+        model: MODEL.ref,
+      })).toMatchObject({ accepted: false, reason: 'source_thread_busy' });
+      await drivers.materializeTurn(
+        sourceThreadId,
+        promptReceipt.runId,
+        sourcePrompt.text,
+        'runtime inspected',
+      );
+      const completed = nextEvent(iterator, (envelope) =>
+        envelope.opId === sourcePrompt.opId && envelope.event.type === 'op_completed');
+      drivers.complete(sourceThreadId, promptReceipt.runId, 'completed');
+      await completed;
+      await iterator.return?.();
+
+      const forkOp = {
+        type: 'conversation_fork',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        sourceThreadId,
+        threadId: forkThreadId,
+        model: MODEL.ref,
+        title: 'Review fork',
+      } as const;
+      expect(await runtime.submit(forkOp)).toMatchObject({
+        accepted: true,
+        threadId: forkThreadId,
+      });
+      expect((await runtime.getThreadSnapshot(forkThreadId))?.transcript.map((message) =>
+        [message.role, message.content[0]])).toEqual([
+        ['user', { type: 'text', text: 'inspect the runtime' }],
+        ['assistant', { type: 'text', text: 'runtime inspected' }],
+      ]);
+      expect((await runtime.getThreadSnapshot(sourceThreadId))?.transcript).toHaveLength(2);
+
+      expect(await runtime.submit({
+        type: 'thread_rename',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId: forkThreadId,
+        title: 'Renamed review fork',
+      })).toMatchObject({ accepted: true });
+      expect(await runtime.submit({
+        type: 'thread_archive',
+        opId: runtime.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        threadId: forkThreadId,
+        archived: true,
+      })).toMatchObject({ accepted: true });
+      expect((await runtime.listThreadDetails()).find((item) =>
+        item.thread.threadId === forkThreadId)).toMatchObject({
+        cwd: CWD,
+        preview: 'runtime inspected',
+        thread: { title: 'Renamed review fork', archivedAt: 2 },
+      });
+
+      const retryOp = {
+        type: 'conversation_retry',
+        opId: retryOpId,
+        workspaceId: WORKSPACE_ID,
+        sourceThreadId,
+        threadId: retryThreadId,
+        model: MODEL.ref,
+      } as const;
+      await expect(runtime.submit(retryOp)).rejects.toThrow('injected finalize failure');
+      const retryReceipt = await runtime.submit(retryOp);
+      expect(retryReceipt).toMatchObject({
+        accepted: true,
+        duplicate: true,
+        threadId: retryThreadId,
+        runId: expect.any(String),
+      });
+      expect(drivers.dispatches(retryThreadId).filter((command) => command.op.type === 'prompt'))
+        .toHaveLength(1);
+      expect(drivers.dispatches(retryThreadId).at(-1)?.op).toMatchObject({
+        type: 'prompt',
+        text: 'inspect the runtime',
+      });
+      expect(drivers.dispatches(retryThreadId).filter((command) => command.op.type === 'prompt'))
+        .toHaveLength(1);
+      expect((await runtime.getThreadSnapshot(sourceThreadId))?.transcript).toHaveLength(2);
+
+      expect(await runtime.getWorkspaceSnapshot()).toMatchObject({
+        git: { branch: 'codex/ux3', dirty: true },
+      });
+      expect(await runtime.getDiffSnapshot(sourceThreadId, 'workspace')).toMatchObject({
+        scope: 'workspace',
+        files: [{ path: 'src/review.ts', group: 'unstaged', status: 'M' }],
+      });
+      await expect(runtime.getDiffSnapshot(sourceThreadId, 'invalid' as 'turn'))
+        .rejects.toThrow('Runtime diff scope must be turn or workspace');
+      expect(await runtime.getReviewSnapshot(sourceThreadId)).toMatchObject({
+        threadId: sourceThreadId,
+        highWaterSeq: expect.any(Number),
+        reasoning: [],
+        tools: [],
+      });
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  test('turn diff follows the active turn before turn_end instead of showing the prior turn', async () => {
+    const drivers = new RecordingDriverFactory();
+    const runtime = await openRuntime(createMemoryRuntimeStorage(), drivers);
+    const threadId = runtime.newThreadId();
+    let iterator: AsyncIterator<import('../protocol/index.js').EventEnvelope> | undefined;
+    try {
+      expect(await runtime.submit(createThreadOp(runtime.newOpId(), threadId)))
+        .toMatchObject({ accepted: true });
+      const created = await runtime.getThreadSnapshot(threadId);
+      if (created === undefined) throw new Error('created snapshot is missing');
+      iterator = runtime.events({
+        threadIds: [threadId],
+        cursors: [{ threadId, afterSeq: created.highWaterSeq }],
+      })[Symbol.asyncIterator]();
+      const first = await runtime.submit(prompt(runtime.newOpId(), threadId, 'first turn'));
+      if (!first.accepted || first.runId === undefined) throw new Error('first prompt failed');
+      await drivers.materializeTurn(threadId, first.runId, 'first turn', 'first answer');
+      const firstCompleted = nextEvent(iterator, (envelope) =>
+        envelope.opId === first.opId && envelope.event.type === 'op_completed');
+      drivers.complete(threadId, first.runId, 'completed');
+      await firstCompleted;
+
+      const second = await runtime.submit(prompt(runtime.newOpId(), threadId, 'edit now'));
+      if (!second.accepted || second.runId === undefined) throw new Error('second prompt failed');
+      await drivers.materializeToolDiff(
+        threadId,
+        second.runId,
+        'src/active.ts',
+        'diff --git a/src/active.ts b/src/active.ts\n+active turn\n',
+      );
+      expect(await runtime.getDiffSnapshot(threadId, 'turn')).toMatchObject({
+        scope: 'turn',
+        files: [{
+          path: 'src/active.ts',
+          group: 'turn',
+          status: 'modified',
+          patch: expect.stringContaining('+active turn'),
+        }],
+      });
+      expect(await runtime.getReviewSnapshot(threadId)).toMatchObject({
+        tools: [{ output: 'editing src/active.ts\ncomplete' }],
+      });
+      drivers.complete(threadId, second.runId, 'completed');
+    } finally {
+      await iterator?.return?.();
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  test('fork seed preserves message-turn provenance across restart and remains retryable', async () => {
+    const storage = createMemoryRuntimeStorage();
+    const firstDrivers = new RecordingDriverFactory();
+    const first = await openRuntime(storage, firstDrivers);
+    const sourceThreadId = 'thread-fork-retry-source' as ThreadId;
+    const forkThreadId = 'thread-fork-retry-copy' as ThreadId;
+    const retryThreadId = 'thread-fork-retry-target' as ThreadId;
+    const promptText = 'retry the prompt copied into this fork';
+    try {
+      expect(await first.submit(createThreadOp(first.newOpId(), sourceThreadId)))
+        .toMatchObject({ accepted: true });
+      const created = await first.getThreadSnapshot(sourceThreadId);
+      if (created === undefined) throw new Error('source snapshot is missing');
+      const iterator = first.events({
+        threadIds: [sourceThreadId],
+        cursors: [{ threadId: sourceThreadId, afterSeq: created.highWaterSeq }],
+      })[Symbol.asyncIterator]();
+      const promptOp = prompt(first.newOpId(), sourceThreadId, promptText);
+      const promptReceipt = await first.submit(promptOp);
+      if (!promptReceipt.accepted || promptReceipt.runId === undefined) {
+        throw new Error('source prompt failed');
+      }
+      await firstDrivers.materializeTurn(
+        sourceThreadId,
+        promptReceipt.runId,
+        promptText,
+        'copied answer',
+      );
+      const completed = nextEvent(iterator, (envelope) =>
+        envelope.opId === promptOp.opId && envelope.event.type === 'op_completed');
+      firstDrivers.complete(sourceThreadId, promptReceipt.runId, 'completed');
+      await completed;
+      await iterator.return?.();
+      expect(await first.submit({
+        type: 'conversation_fork',
+        opId: first.newOpId(),
+        workspaceId: WORKSPACE_ID,
+        sourceThreadId,
+        threadId: forkThreadId,
+        model: MODEL.ref,
+      })).toMatchObject({ accepted: true, threadId: forkThreadId });
+    } finally {
+      await first.close();
+    }
+
+    const forkSeed = (await loadThreadRecords(storage, forkThreadId)).find((record) =>
+      record.type === 'legacy_seed');
+    expect(forkSeed?.type === 'legacy_seed' ? forkSeed.turnProvenance : undefined)
+      .toHaveLength(2);
+
+    const secondDrivers = new RecordingDriverFactory();
+    const second = await createRuntime({
+      ...constructionRuntimeOptions(storage, secondDrivers),
+      identityFactory: new TestIdentityFactory(100),
+      clock: { now: () => 2 },
+    });
+    try {
+      expect(await second.submit({
+        type: 'conversation_retry',
+        opId: 'op_e_72000000000000000000000000000001' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        sourceThreadId: forkThreadId,
+        threadId: retryThreadId,
+        model: MODEL.ref,
+      })).toMatchObject({ accepted: true, threadId: retryThreadId, runId: expect.any(String) });
+      expect(secondDrivers.dispatches(retryThreadId).at(-1)?.op).toMatchObject({
+        type: 'prompt',
+        text: promptText,
+      });
+    } finally {
+      await second.close().catch(() => undefined);
+    }
+  });
+
+  test('retry recovery uses the prompt frozen before target creation even after the source advances', async () => {
+    const baseStorage = createMemoryRuntimeStorage();
+    const firstDrivers = new RecordingDriverFactory();
+    const runtime = await openRuntime(baseStorage, firstDrivers);
+    const sourceThreadId = 'thread-retry-freeze-source' as ThreadId;
+    const targetThreadId = 'thread-retry-freeze-target' as ThreadId;
+    const originalText = 'retry this original prompt';
+    const newerText = 'a newer source prompt must not replace the retry input';
+    const retryOp: Extract<RuntimeOp, { type: 'conversation_retry' }> = {
+      type: 'conversation_retry',
+      opId: 'op_e_71000000000000000000000000000001' as ExternalOpId,
+      workspaceId: WORKSPACE_ID,
+      sourceThreadId,
+      threadId: targetThreadId,
+      model: MODEL.ref,
+    };
+    try {
+      expect(await runtime.submit(createThreadOp(runtime.newOpId(), sourceThreadId)))
+        .toMatchObject({ accepted: true });
+      const created = await runtime.getThreadSnapshot(sourceThreadId);
+      if (created === undefined) throw new Error('source snapshot is missing');
+      const iterator = runtime.events({
+        threadIds: [sourceThreadId],
+        cursors: [{ threadId: sourceThreadId, afterSeq: created.highWaterSeq }],
+      })[Symbol.asyncIterator]();
+      const original = await runtime.submit(prompt(runtime.newOpId(), sourceThreadId, originalText));
+      if (!original.accepted || original.runId === undefined) throw new Error('original prompt failed');
+      await firstDrivers.materializeTurn(
+        sourceThreadId,
+        original.runId,
+        originalText,
+        'original answer',
+      );
+      const originalCompleted = nextEvent(iterator, (envelope) =>
+        envelope.opId === original.opId && envelope.event.type === 'op_completed');
+      firstDrivers.complete(sourceThreadId, original.runId, 'completed');
+      await originalCompleted;
+
+      const newer = await runtime.submit(prompt(runtime.newOpId(), sourceThreadId, newerText));
+      if (!newer.accepted || newer.runId === undefined) throw new Error('newer prompt failed');
+      await firstDrivers.materializeTurn(sourceThreadId, newer.runId, newerText, 'newer answer');
+      const newerCompleted = nextEvent(iterator, (envelope) =>
+        envelope.opId === newer.opId && envelope.event.type === 'op_completed');
+      firstDrivers.complete(sourceThreadId, newer.runId, 'completed');
+      await newerCompleted;
+      await iterator.return?.();
+    } finally {
+      await runtime.close();
+    }
+
+    const sourceState = foldThreadJournal(await loadThreadRecords(baseStorage, sourceThreadId));
+    const originalEnvelope = sourceState.envelopes.find((envelope) =>
+      envelope.event.type === 'message_end'
+      && envelope.event.message.role === 'user'
+      && envelope.event.message.content.some((part) =>
+        part.type === 'text' && part.text === originalText));
+    if (originalEnvelope?.event.type !== 'message_end'
+      || originalEnvelope.event.message.role !== 'user'
+      || originalEnvelope.turnId === undefined) {
+      throw new Error('original retry prompt identity is missing');
+    }
+    const originalMessageId = originalEnvelope.event.message.id;
+    const originalTurnId = originalEnvelope.turnId;
+    await seedRetryTargetCreationCrash(baseStorage, retryOp, {
+      messageId: originalMessageId,
+      turnId: originalTurnId,
+      text: originalText,
+    });
+
+    const recoveryDrivers = new RecordingDriverFactory();
+    const recovered = await openRuntime(baseStorage, recoveryDrivers);
+    try {
+      expect(recoveryDrivers.dispatches(targetThreadId).filter((command) =>
+        command.op.type === 'prompt').map((command) => command.op)).toEqual([
+        expect.objectContaining({ type: 'prompt', text: originalText }),
+      ]);
+      expect(baseStorage.inspectWorkspace(WORKSPACE_ID)?.ops.find((record) =>
+        record.opId === retryOp.opId)).toMatchObject({
+        state: 'final',
+        retryPrompt: {
+          messageId: originalMessageId,
+          turnId: originalTurnId,
+          text: originalText,
+          digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        receipt: { accepted: true, threadId: targetThreadId },
+      });
+    } finally {
+      await recovered.close().catch(() => undefined);
     }
   });
 
@@ -3570,6 +3937,74 @@ function failSupervisorFinalizeOnce(
   };
 }
 
+async function seedRetryTargetCreationCrash(
+  storage: RuntimeStoragePort,
+  op: Extract<RuntimeOp, { type: 'conversation_retry' }>,
+  retryPrompt: {
+    readonly messageId: string;
+    readonly turnId: import('../protocol/index.js').TurnId;
+    readonly text: string;
+  },
+): Promise<void> {
+  const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
+  const lease = await workspace.acquireSupervisorLease('seed-retry-target-created');
+  const retryPromptOpId = 'op_e_71000000000000000000000000000002' as ExternalOpId;
+  const ledger: SupervisorOpLedgerRecord = {
+    opId: op.opId,
+    op,
+    payloadHash: runtimeOpPayloadHash(op),
+    driverCreation: { creationKey: 'retry-target-created-before-prompt' },
+    retryPromptOpId,
+    retryPrompt: {
+      ...retryPrompt,
+      digest: new Bun.CryptoHasher('sha256').update(retryPrompt.text).digest('hex'),
+    },
+    state: 'reserved',
+  };
+  await workspace.reserveSupervisorOp(lease, ledger);
+  const seed: LegacyThreadSeedRecord = {
+    type: 'legacy_seed',
+    sourceSessionId: op.sourceThreadId,
+    transcript: [],
+    usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
+  };
+  const journal = await workspace.createThreadJournal(lease, {
+    threadId: op.threadId,
+    meta: threadMeta(op.threadId, op.opId),
+    initialRecords: [seed],
+  });
+  await journal.acquireWriteLease(lease);
+  const records = await journal.load();
+  const events = new WorkspaceEventStream();
+  events.registerThread(op.threadId);
+  const writer = new ThreadJournalWriter({
+    workspaceId: WORKSPACE_ID,
+    threadId: op.threadId,
+    journal,
+    events,
+    clock: { now: () => 1 },
+    state: foldThreadJournal(records),
+    records,
+  });
+  const summary = {
+    threadId: op.threadId,
+    createdAt: 1,
+    updatedAt: 1,
+    state: 'idle' as const,
+  };
+  await writer.commit([
+    { event: { type: 'op_accepted', opType: 'conversation_retry' }, opId: op.opId },
+    { event: { type: 'thread_created', thread: summary }, opId: op.opId },
+    {
+      event: { type: 'op_completed', opType: 'conversation_retry', outcome: 'applied' },
+      opId: op.opId,
+    },
+  ], [{ type: 'model_selected', ownerOpId: op.opId, model: op.model }]);
+  await writer.close();
+  await workspace.releaseSupervisorLease(lease);
+  await workspace.close();
+}
+
 async function seedParentCommitBeforeChildAck(
   storage: RuntimeStoragePort,
   parentThreadId: ThreadId,
@@ -4198,8 +4633,12 @@ class TestIdentityFactory implements RuntimeIdentityFactory {
   #thread = 0;
   #run = 0;
   #turn = 0;
-  #op = 0;
+  #op: number;
   #epoch = 0;
+
+  constructor(initialOp = 0) {
+    this.#op = initialOp;
+  }
 
   newThreadId(): ThreadId { return `thread-generated-${++this.#thread}` as ThreadId; }
   newRunId(): RunId { return `run-generated-${++this.#run}` as RunId; }
@@ -4330,7 +4769,10 @@ class RecordingDriverFactory implements ThreadDriverFactory {
   ): Promise<ThreadDriverAttachment> {
     this.createCalls++;
     this.creationKeys.push(input.creationKey);
-    return this.#attachment(input.threadId, input.model.ref, host);
+    const attachment = this.#attachment(input.threadId, input.model.ref, host);
+    return input.initialCheckpoint === undefined
+      ? attachment
+      : { ...attachment, initialCheckpoint: input.initialCheckpoint };
   }
 
   async resume(
@@ -4358,6 +4800,28 @@ class RecordingDriverFactory implements ThreadDriverFactory {
 
   complete(threadId: ThreadId, runId: RunId, status: 'completed' | 'aborted' | 'error'): void {
     this.#drivers.get(threadId)?.complete(runId, status);
+  }
+
+  async materializeTurn(
+    threadId: ThreadId,
+    runId: RunId,
+    promptText: string,
+    responseText: string,
+  ): Promise<void> {
+    const driver = this.#drivers.get(threadId);
+    if (driver === undefined) throw new Error(`Missing driver for ${threadId}`);
+    await driver.materializeTurn(runId, promptText, responseText);
+  }
+
+  async materializeToolDiff(
+    threadId: ThreadId,
+    runId: RunId,
+    target: string,
+    diff: string,
+  ): Promise<void> {
+    const driver = this.#drivers.get(threadId);
+    if (driver === undefined) throw new Error(`Missing driver for ${threadId}`);
+    await driver.materializeToolDiff(runId, target, diff);
   }
 
   #attachment(
@@ -4407,7 +4871,9 @@ class RecordingDriver implements ThreadDriverPort {
 
   dispatch(command: PreparedThreadDriverCommand): { readonly completion: Promise<ThreadDriverCompletion> } {
     this.commands.push(command);
-    if ((command.op.type === 'prompt' || command.op.type === 'continue') && 'runId' in command) {
+    if ((command.op.type === 'prompt'
+      || command.op.type === 'continue'
+      || command.op.type === 'compact') && 'runId' in command) {
       const completion = deferred<ThreadDriverCompletion>();
       this.#pending.set(command.runId, completion);
       return { completion: completion.promise };
@@ -4421,6 +4887,93 @@ class RecordingDriver implements ThreadDriverPort {
 
   interactionState(): 'idle' | 'running' {
     return this.#pending.size === 0 ? 'idle' : 'running';
+  }
+
+  async materializeTurn(runId: RunId, promptText: string, responseText: string): Promise<void> {
+    const turn = await this.host.reserveTurn({ runId, turnOrdinal: 1 });
+    await this.host.commitEvent({ event: { type: 'turn_start' }, runId, turnId: turn.turnId });
+    await this.host.commitEvent({
+      event: {
+        type: 'message_end',
+        message: {
+          role: 'user',
+          id: `user-${runId}`,
+          timestamp: 1,
+          source: 'prompt',
+          content: [{ type: 'text', text: promptText }],
+        },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
+    await this.host.commitEvent({
+      event: {
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          id: `assistant-${runId}`,
+          timestamp: 1,
+          content: [{ type: 'text', text: responseText }],
+          model: MODEL.ref,
+          stopReason: 'stop',
+          usage: { input: 3, output: 2 },
+        },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
+  }
+
+  async materializeToolDiff(runId: RunId, target: string, diff: string): Promise<void> {
+    const turn = await this.host.reserveTurn({ runId, turnOrdinal: 1 });
+    const toolCallId = `tool-${runId}`;
+    await this.host.commitEvent({ event: { type: 'turn_start' }, runId, turnId: turn.turnId });
+    await this.host.commitEvent({
+      event: {
+        type: 'tool_execution_start',
+        toolCallId,
+        toolName: 'edit',
+        args: { path: target },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
+    await this.host.commitEvent({
+      event: {
+        type: 'tool_execution_update',
+        toolCallId,
+        update: { output: `editing ${target}\n` },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
+    await this.host.commitEvent({
+      event: {
+        type: 'tool_execution_update',
+        toolCallId,
+        update: { output: `editing ${target}\ncomplete` },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
+    await this.host.commitEvent({
+      event: {
+        type: 'tool_execution_end',
+        toolCallId,
+        result: {
+          role: 'tool_result',
+          id: `result-${runId}`,
+          timestamp: 1,
+          toolCallId,
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'edited' }],
+          isError: false,
+          details: { diff },
+        },
+      },
+      runId,
+      turnId: turn.turnId,
+    });
   }
 
   async close(): Promise<void> {

@@ -67,7 +67,7 @@ export interface SessionRuntimeMirrorGuard {
 export type SessionEvent =
   | (AgentEvent & { willRetry?: boolean })              // 透传(agent_end 可注解 willRetry,docs/08 §5.3)
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' }
+  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual' }
   | { type: 'compaction_end'; ok: boolean; droppedMessages: number }
   | { type: 'usage_update'; usage: SessionUsage };
 
@@ -81,6 +81,7 @@ export interface LegacyThreadExecutionPort {
   readonly messages: readonly AgentMessage[];
   prompt(text: string): Promise<void>;
   continue(): Promise<void>;
+  compact(): Promise<{ readonly aborted: boolean }>;
   steer(text: string | UserMessage): void;
   followUp(text: string | UserMessage): void;
   abort(): void;
@@ -300,6 +301,29 @@ export class LegacyThreadExecution implements LegacyThreadExecutionPort {
     }
     await this.#agent.continue();
     this.#throwAuthoritativeFailure();
+  }
+
+  /** Explicit idle compaction used by RuntimeOp.compact; it never auto-continues a conversation. */
+  async compact(): Promise<{ readonly aborted: boolean }> {
+    this.#assertOperational();
+    if (this.interactionState() !== 'idle') {
+      throw new Error('任务仍在运行；请先完成或 abort，再压缩上下文');
+    }
+    if (this.#agent.transcript.length === 0) {
+      throw new Error('当前会话没有可压缩的上下文');
+    }
+    const controller = new AbortController();
+    this.#opController = controller;
+    this.#followUpState = 'compacting';
+    this.#compacting = true;
+    try {
+      await this.#runCompaction('manual', controller.signal, false, false);
+      return { aborted: controller.signal.aborted };
+    } finally {
+      this.#compacting = false;
+      if (this.#opController === controller) this.#opController = undefined;
+      if (this.#followUpState === 'compacting') this.#followUpState = 'idle';
+    }
   }
 
   steer(text: string | UserMessage): void {
@@ -581,7 +605,12 @@ export class LegacyThreadExecution implements LegacyThreadExecutionPort {
 
   /** 摘要 → 追加 CompactionRecord + 设 compactionState → 续跑(docs/08 §6.3/§6.5)。
    *  hardTruncate:overflow 压缩后仍 overflow 的第二次,跳过 summarize 直接硬截断(§8)。 */
-  async #runCompaction(reason: 'threshold' | 'overflow', signal: AbortSignal, hardTruncate = false): Promise<void> {
+  async #runCompaction(
+    reason: 'threshold' | 'overflow' | 'manual',
+    signal: AbortSignal,
+    hardTruncate = false,
+    continueAfter = true,
+  ): Promise<void> {
     this.#runtimeMirrorGuard?.assertCurrent();
     await this.#fanout({ type: 'compaction_start', reason });
 
@@ -614,12 +643,12 @@ export class LegacyThreadExecution implements LegacyThreadExecutionPort {
           await this.#resumeAfterCompaction(false);
           return;
         }
-        if (reason === 'threshold') {
+        if (reason === 'threshold' || reason === 'manual') {
           // 主动触发失败:放弃,原上下文继续(docs/08 §6.5),下次 turn_end 会再触发
           console.error(`[compaction] threshold summarize failed, abandoning: ${String(err)}`);
           await this.#fanout({ type: 'compaction_end', ok: false, droppedMessages: 0 });
           this.#compacting = false;
-          await this.#resumeAfterCompaction();
+          await this.#resumeAfterCompaction(continueAfter);
           return;
         }
         // overflow 被动失败:不能用原上下文(会再 400)→ 硬截断(docs/08 §6.5)
@@ -632,7 +661,7 @@ export class LegacyThreadExecution implements LegacyThreadExecutionPort {
       // 空转录极端:无可折叠,放弃
       await this.#fanout({ type: 'compaction_end', ok: false, droppedMessages: 0 });
       this.#compacting = false;
-      await this.#resumeAfterCompaction();
+      await this.#resumeAfterCompaction(continueAfter);
       return;
     }
 
@@ -664,7 +693,7 @@ export class LegacyThreadExecution implements LegacyThreadExecutionPort {
       await this.#fanout({ type: 'compaction_end', ok: true, droppedMessages: dropped.length });
     }
     this.#compacting = false;
-    await this.#resumeAfterCompaction();
+    await this.#resumeAfterCompaction(continueAfter);
   }
 
   /** 压缩收尾:优先重放暂存 prompt,否则 continue 续跑(自然结束的 turn 则无需续跑)。 */

@@ -206,6 +206,49 @@ describe('ThreadPresentationStore', () => {
     otherWorkspace.dispose();
   });
 
+  it('durably swaps independent draft, scroll, unread, and panel state across threads', () => {
+    const { store } = fixture();
+    const other = 'thr_background' as ThreadId;
+    store.setDraft(persistableDraft('thread A draft'));
+    store.setScrollState({
+      blockKey: 'message:a',
+      logicalOffset: 3,
+      fallbackBlockKeys: [],
+      observedHighWaterSeq: 11,
+    }, 11);
+    store.setActivePanel('diff');
+
+    expect(store.switchToThread(other)).toMatchObject({
+      threadId: other,
+      draft: '',
+      unreadAfterSeq: 0,
+    });
+    store.setDraft(persistableDraft('thread B draft'));
+    store.setScrollState({
+      blockKey: 'message:b',
+      logicalOffset: 1,
+      fallbackBlockKeys: ['message:b0'],
+      observedHighWaterSeq: 22,
+    }, 22);
+    store.setActivePanel('sessions');
+
+    expect(store.switchToThread(THREAD)).toMatchObject({
+      threadId: THREAD,
+      draft: 'thread A draft',
+      unreadAfterSeq: 11,
+      activePanel: 'diff',
+      scrollAnchor: { blockKey: 'message:a', logicalOffset: 3 },
+    });
+    expect(store.switchToThread(other)).toMatchObject({
+      threadId: other,
+      draft: 'thread B draft',
+      unreadAfterSeq: 22,
+      activePanel: 'sessions',
+      scrollAnchor: { blockKey: 'message:b', logicalOffset: 1 },
+    });
+    store.dispose();
+  });
+
   it('recovers a stable cold-start draft and migrates it only after a real thread attaches', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'coda-presentation-pending-'));
     roots.push(root);

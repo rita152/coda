@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   canonicalJson,
+  deriveLegacySeedTurnProvenance,
   deriveOpId,
   strictJsonSnapshot,
 } from '../protocol/index.js';
@@ -568,10 +569,14 @@ export class StandaloneSessionHost {
 async function interruptCrashedStandaloneActivities(writer: ThreadJournalWriter): Promise<void> {
   const recoverableActivities = [...writer.state.mailbox.entries()].filter(([, entry]) =>
     (entry.state === 'accepted_pending' || entry.state === 'started')
-    && (entry.op.type === 'prompt' || entry.op.type === 'continue'));
+    && (entry.op.type === 'prompt'
+      || entry.op.type === 'continue'
+      || entry.op.type === 'compact'));
   for (const [opId, entry] of recoverableActivities) {
     if ((entry.state !== 'accepted_pending' && entry.state !== 'started')
-      || (entry.op.type !== 'prompt' && entry.op.type !== 'continue')) {
+      || (entry.op.type !== 'prompt'
+        && entry.op.type !== 'continue'
+        && entry.op.type !== 'compact')) {
       continue;
     }
     const root = [...writer.state.runs.values()].find((run) => run.ownerOpId === opId);
@@ -712,6 +717,7 @@ function standaloneBootstrap(
       type: 'legacy_seed',
       sourceSessionId: sessionId,
       transcript,
+      turnProvenance: deriveLegacySeedTurnProvenance(sessionId, transcript),
       mirrorRecords: loaded === undefined
         ? []
         : loadSessionRecordHistory(dir, sessionId)

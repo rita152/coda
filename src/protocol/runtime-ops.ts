@@ -5,6 +5,7 @@ import {
   isExternalOpId,
   isRunId,
   isThreadId,
+  isTurnId,
   isWorkspaceId,
 } from './identity.js';
 import type {
@@ -13,6 +14,7 @@ import type {
   OpId,
   RunId,
   ThreadId,
+  TurnId,
   WorkspaceId,
 } from './identity.js';
 import {
@@ -60,6 +62,17 @@ export type RuntimeOp =
       expectedRunId?: RunId }
   | { type: 'control_response'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
       requestId: string; decision: ControlResponseDecision }
+  | { type: 'thread_rename'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
+      title: string }
+  | { type: 'thread_archive'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
+      archived: boolean }
+  | { type: 'compact'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId }
+  | { type: 'conversation_fork'; opId: ExternalOpId; workspaceId: WorkspaceId;
+      sourceThreadId: ThreadId; threadId: ThreadId; model: ModelRef; throughTurnId?: TurnId;
+      title?: string }
+  | { type: 'conversation_retry'; opId: ExternalOpId; workspaceId: WorkspaceId;
+      sourceThreadId: ThreadId; threadId: ThreadId; model: ModelRef; turnId?: TurnId;
+      title?: string }
   | { type: 'thread_close'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId }
   | { type: 'cancel_scope'; opId: ExternalOpId; workspaceId: WorkspaceId;
       scope: 'workspace' | 'subtree'; rootThreadId?: ThreadId };
@@ -82,7 +95,8 @@ export type InternalThreadRuntimeOp =
 
 export type ExternalThreadRuntimeOp = Exclude<
   RuntimeOp,
-  { type: 'thread_create' | 'thread_resume' | 'cancel_scope' }
+  { type: 'thread_create' | 'thread_resume' | 'conversation_fork' | 'conversation_retry'
+      | 'cancel_scope' }
 >;
 
 export type MailboxRuntimeOp = ExternalThreadRuntimeOp | InternalThreadRuntimeOp;
@@ -121,6 +135,11 @@ const REQUIRED_KEYS: Readonly<Record<RuntimeOp['type'], readonly string[]>> = {
   set_model: ['type', 'opId', 'workspaceId', 'threadId', 'model'],
   abort: ['type', 'opId', 'workspaceId', 'threadId'],
   control_response: ['type', 'opId', 'workspaceId', 'threadId', 'requestId', 'decision'],
+  thread_rename: ['type', 'opId', 'workspaceId', 'threadId', 'title'],
+  thread_archive: ['type', 'opId', 'workspaceId', 'threadId', 'archived'],
+  compact: ['type', 'opId', 'workspaceId', 'threadId'],
+  conversation_fork: ['type', 'opId', 'workspaceId', 'sourceThreadId', 'threadId', 'model'],
+  conversation_retry: ['type', 'opId', 'workspaceId', 'sourceThreadId', 'threadId', 'model'],
   thread_close: ['type', 'opId', 'workspaceId', 'threadId'],
   cancel_scope: ['type', 'opId', 'workspaceId', 'scope'],
 };
@@ -135,6 +154,11 @@ const OPTIONAL_KEYS: Readonly<Record<RuntimeOp['type'], readonly string[]>> = {
   set_model: [],
   abort: ['expectedRunId'],
   control_response: [],
+  thread_rename: [],
+  thread_archive: [],
+  compact: [],
+  conversation_fork: ['throughTurnId', 'title'],
+  conversation_retry: ['turnId', 'title'],
   thread_close: [],
   cancel_scope: ['rootThreadId'],
 };
@@ -277,6 +301,26 @@ function validateRuntimeOpRecord(
       requireString(op.requestId);
       if (!isControlResponseDecision(op.decision)) throw new Error('Invalid control decision');
       break;
+    case 'thread_rename':
+      requireNonEmptyBoundedString(op.title, 200);
+      break;
+    case 'thread_archive':
+      if (typeof op.archived !== 'boolean') throw new Error('Invalid archive state');
+      break;
+    case 'compact':
+      break;
+    case 'conversation_fork':
+      validateConversationSource(op.sourceThreadId, op.threadId);
+      validateModelRef(op.model);
+      validateOptionalTurnId(op.throughTurnId);
+      validateOptionalBoundedString(op.title, 200);
+      break;
+    case 'conversation_retry':
+      validateConversationSource(op.sourceThreadId, op.threadId);
+      validateModelRef(op.model);
+      validateOptionalTurnId(op.turnId);
+      validateOptionalBoundedString(op.title, 200);
+      break;
     case 'thread_close':
       break;
     case 'cancel_scope':
@@ -330,6 +374,41 @@ function assertExactKeys(
 
 function requireString(value: StrictJsonValue | undefined): asserts value is string {
   if (typeof value !== 'string') throw new Error('Expected a string');
+}
+
+function requireNonEmptyBoundedString(
+  value: StrictJsonValue | undefined,
+  maximum: number,
+): asserts value is string {
+  requireString(value);
+  if (value.trim().length === 0 || value.length > maximum) {
+    throw new Error('Expected a non-empty bounded string');
+  }
+}
+
+function validateOptionalTurnId(value: StrictJsonValue | undefined): void {
+  if (value === undefined) return;
+  if (!isTurnId(value)) throw new Error('Invalid turn id');
+}
+
+function validateOptionalBoundedString(
+  value: StrictJsonValue | undefined,
+  maximum: number,
+): void {
+  if (value === undefined) return;
+  requireNonEmptyBoundedString(value, maximum);
+}
+
+function validateConversationSource(
+  sourceThreadId: StrictJsonValue | undefined,
+  targetThreadId: StrictJsonValue | undefined,
+): void {
+  if (!isThreadId(sourceThreadId) || !isThreadId(targetThreadId)) {
+    throw new Error('Invalid conversation thread identity');
+  }
+  if (sourceThreadId === targetThreadId) {
+    throw new Error('Conversation source and target must differ');
+  }
 }
 
 function isControlResponseDecision(value: StrictJsonValue | undefined): value is ControlResponseDecision {

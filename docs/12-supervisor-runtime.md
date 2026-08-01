@@ -187,8 +187,12 @@ export interface RuntimePort {
   submit(op: RuntimeOp): Promise<OpReceipt>;
   events(options?: EventSubscriptionOptions): AsyncIterable<Readonly<EventEnvelope>>;
   listThreads(): Promise<readonly ThreadSummary[]>;
+  listThreadDetails(): Promise<readonly RuntimeThreadListItem[]>;
   getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>>;
-  getThreadSnapshot(threadId: ThreadId): Promise<ThreadSnapshot | undefined>;
+  getThreadSnapshot(threadId: ThreadId): Promise<Readonly<ThreadSnapshot> | undefined>;
+  getReviewSnapshot(threadId: ThreadId): Promise<Readonly<RuntimeReviewSnapshot> | undefined>;
+  getDiffSnapshot(threadId: ThreadId, scope: 'turn' | 'workspace'):
+    Promise<Readonly<RuntimeDiffSnapshot> | undefined>;
   close(): Promise<void>;
 }
 
@@ -201,6 +205,47 @@ export interface WorkspaceRuntimeSnapshot {
     readonly policyRevision: string;
     readonly ceiling: Readonly<PermissionCeilingSnapshot>;
   };
+  readonly git?: { readonly branch?: string; readonly dirty: boolean };
+}
+
+export interface RuntimeThreadListItem {
+  readonly workspaceId: WorkspaceId;
+  readonly cwd: string;
+  readonly thread: Readonly<ThreadSummary>;
+  readonly preview?: string;
+  readonly updatedAt: number;
+}
+
+export type RuntimeDiffGroup = 'staged' | 'unstaged' | 'untracked' | 'turn';
+export interface RuntimeDiffFile {
+  readonly path: string; readonly group: RuntimeDiffGroup; readonly status: string;
+  readonly patch: string; // 完整 unified patch，不在 RuntimePort 截断
+}
+export interface RuntimeDiffSnapshot {
+  readonly workspaceId: WorkspaceId; readonly threadId: ThreadId;
+  readonly scope: 'turn' | 'workspace'; readonly generatedAt: number;
+  readonly files: readonly Readonly<RuntimeDiffFile>[];
+}
+
+export interface RuntimeReasoningReview {
+  readonly key: string; readonly messageId: string;
+  readonly status: 'running' | 'completed' | 'aborted' | 'error';
+  readonly startedAt: number; readonly endedAt?: number; readonly durationMs?: number;
+  readonly content: string;
+}
+export interface RuntimeToolReview {
+  readonly key: string; readonly toolCallId: string; readonly name: string;
+  readonly target?: string;
+  readonly status: 'running' | 'succeeded' | 'failed' | 'aborted';
+  readonly startedAt: number; readonly endedAt?: number; readonly durationMs?: number;
+  readonly summary?: string; readonly args: StrictJsonValue; readonly output: string;
+  readonly result?: Readonly<ToolResultMessage>;
+}
+export interface RuntimeReviewSnapshot {
+  readonly workspaceId: WorkspaceId; readonly threadId: ThreadId;
+  readonly highWaterSeq: number;
+  readonly reasoning: readonly Readonly<RuntimeReasoningReview>[];
+  readonly tools: readonly Readonly<RuntimeToolReview>[];
 }
 
 export interface RuntimeClock {
@@ -250,6 +295,7 @@ export interface CreateRuntimeBaseOptions {
   readonly modelResolver: RuntimeModelResolver;
   readonly permissionPolicy: PermissionPolicyPort;
   readonly threadDriverFactory: ThreadDriverFactory;
+  readonly workspaceReview?: RuntimeWorkspaceReviewPort;
   readonly identityFactory?: RuntimeIdentityFactory;
   readonly clock?: RuntimeClock;
 }
@@ -369,6 +415,18 @@ export interface SupervisorOpLedgerRecord {
     readonly creationKey: string;
     readonly driverRef?: ThreadDriverRef;
   };
+  readonly retryPromptOpId?: ExternalOpId;
+  readonly retryPrompt?: {
+    readonly messageId: string;
+    readonly turnId: TurnId;
+    readonly text: string;
+    readonly digest: string;
+  };
+  readonly retryRejectionReason?:
+    | 'source_thread_not_found'
+    | 'source_thread_busy'
+    | 'retry_turn_not_found'
+    | 'retry_requires_text_prompt';
   readonly state: 'reserved' | 'final';
   readonly receipt?: OpReceipt;
 }
@@ -732,6 +790,17 @@ export type RuntimeOp =
   | { type: 'abort'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId; expectedRunId?: RunId }
   | { type: 'control_response'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
       requestId: string; decision: ControlResponseDecision }
+  | { type: 'thread_rename'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
+      title: string }
+  | { type: 'thread_archive'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId;
+      archived: boolean }
+  | { type: 'compact'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId }
+  | { type: 'conversation_fork'; opId: ExternalOpId; workspaceId: WorkspaceId;
+      sourceThreadId: ThreadId; threadId: ThreadId; model: ModelRef;
+      throughTurnId?: TurnId; title?: string }
+  | { type: 'conversation_retry'; opId: ExternalOpId; workspaceId: WorkspaceId;
+      sourceThreadId: ThreadId; threadId: ThreadId; model: ModelRef;
+      turnId?: TurnId; title?: string }
   | { type: 'thread_close'; opId: ExternalOpId; workspaceId: WorkspaceId; threadId: ThreadId }
   | { type: 'cancel_scope'; opId: ExternalOpId; workspaceId: WorkspaceId;
       scope: 'workspace' | 'subtree'; rootThreadId?: ThreadId };
@@ -744,7 +813,8 @@ export type InternalThreadRuntimeOp =
 
 export type ExternalThreadRuntimeOp = Exclude<
   RuntimeOp,
-  { type: 'thread_create' | 'thread_resume' | 'cancel_scope' }
+  { type: 'thread_create' | 'thread_resume' | 'conversation_fork' | 'conversation_retry'
+      | 'cancel_scope' }
 >;
 
 export type MailboxRuntimeOp = ExternalThreadRuntimeOp | InternalThreadRuntimeOp;
@@ -762,7 +832,9 @@ export interface ThreadSummary {
   threadId: ThreadId;
   parentThreadId?: ThreadId;
   createdAt: number;
-  title?: string; // 已提交的首条 prompt 摘要；仅用于列表显示
+  title?: string;
+  archivedAt?: number;
+  updatedAt?: number;
   state: 'idle' | 'starting' | 'running' | 'retrying' | 'compacting' | 'suspended' | 'closing' | 'closed';
   activeRunId?: RunId;
   pendingRunIds?: readonly RunId[];
@@ -1052,6 +1124,50 @@ effect 不回滚，root ledger 保留 frozen targets，调用方同 OpId 重试�
 target acceptance 完成后才得到唯一 accepted receipt。其后单个 thread 的实际 cancellation/cleanup
 失败只走该 thread 的 diagnostic/stream-fatal 与 recovery，不改写 root OpReceipt，也不声称它携带
 per-target outcome。
+
+### 3.5 UX3 审阅、session 切换与 conversation 恢复
+
+UX3 的新增动作仍只有 `RuntimePort.submit()` 一条写入路径。`thread_rename` 与 `thread_archive` 由目标
+ThreadRuntime 串行提交 metadata mutation、`thread_updated` 与 op lifecycle；archive 是可逆的目录标记，
+不是 close/abort，也不承诺阻止后续 resume。`compact` 只在目标 idle 时接受，预留自己的 activity RunId，
+提交 `compaction_start{reason:'manual'}`/end 和 checkpoint 后结案，不隐式 continue。rename 可在 active
+run 旁提交 metadata；设置 archived=true 与 compact 在 active run/control 下 fail closed，取消 archive
+仍可恢复目录可见性。任何结果都不由 UI 本地伪造。
+
+`conversation_fork`/`conversation_retry` 是 workspace-routed lifecycle op，源和目标 ThreadId 必须不同。
+Supervisor 先从 source 的 committed journal/snapshot 构造 JSON-safe seed；源有 active run 或 pending
+control 时稳定拒绝 `source_thread_busy`，因而不会复制 partial assistant、未决审批或未提交副作用。fork
+只复制指定 turn（缺省为全部已提交 turn）之前的 canonical transcript/usage/model checkpoint，不启动 run。
+retry 在 root reservation 时就把选中 user message 的 `messageId/turnId/text/sha256 digest` 与稳定 nested
+prompt OpId 一起冻结；源缺失、busy、turn 缺失或不是纯文本时也把确定的 rejection reason 冻结。创建新
+thread 时去掉该 user turn 及其后续内容，再恰好提交一次冻结 text。target creation 已 durable、nested
+prompt 尚未提交时即使 source 后来追加了新 prompt，崩溃恢复也只读取 ledger 的冻结 text，并根据 target
+journal 与 `retryPromptOpId` 对账，不能重新选择 source 的“最新 prompt”或重复提交。两者都通过
+`ThreadDriverFactory.create({initialCheckpoint})` 创建隔离 backend，并在 driver checkpoint 与 journal seed
+逐字段相等后才发布 thread。它们不 rewind 文件、shell、网络或外部工具副作用，也不声称“完全撤销”。
+
+seed 同时持久化按 transcript 顺序完整覆盖的 `turnProvenance[{messageId,turnId}]`。fork 必须复制 source
+fold 中原 canonical TurnId，retry/fork-through-turn 必须从该映射定位 message，不能只扫描 source
+`envelopes`：fork target 和 v1 import 的历史本来就没有本地 message envelope。旧 seed 缺字段时用 08 冻结的
+legacy hash 规则合成稳定 TurnId；新 v1 import 立即显式写出映射。因此 fork→restart→retry 与
+v1-import→retry 都保留可恢复的历史 turn 身份。
+
+`listThreadDetails()`、`getReviewSnapshot()` 与 `getDiffSnapshot()` 是 detached deep-readonly query。
+session item 只来自 workspace catalog/journal fold，并带 workspace/cwd、状态、updatedAt 与安全摘要；review
+只折叠 canonical reasoning/tool activity，保留完整 args/output；turn diff 来自 committed tool details，
+workspace diff 则调用 composition root 显式注入的 `RuntimeWorkspaceReviewPort`。默认 production CLI 的 Git
+adapter 只存在于该 port 后，使用固定 cwd/argv 且不把 path 拼成 shell；Runtime 校验、复制并绑定
+workspace/thread/scope 后再返回。没有注入 port 时 Git/diff 字段诚实缺省，UI 不得自己打开 repository。
+
+前端建立一个 workspace-wide hot subscription，并按每个 thread 的 high-water cursor 接续；只有当前
+attachment 的 envelope 投影到可见 transcript。切换顺序是：保留源 presentation state、为目标保持 hot
+buffer、对源 presentation 执行同步 durability barrier、读取/必要时 resume 目标、snapshot splice、恢复
+目标 presentation/history 与 pending controls。barrier 失败时 Runtime/画面/审批队列都保持源 thread；
+目标 presentation 投影失败时必须 switch 回源并恢复源投影。源 run
+继续由 Runtime 驱动，慢/隐藏 observer 不背压它；op waiter 仍可由后台 thread 的 terminal lifecycle
+结案。abort 与 approval response 始终使用当前选中 target 以及 control 中冻结的 owning RunId，不读取
+切换后的“当前 run”猜测目标。draft、滚动、未读和 panel 仍是 frontend-private presentation state，
+不得回写 Runtime journal。
 
 ## 4. EventEnvelope 与 per-thread seq
 
@@ -1348,6 +1464,7 @@ export interface ThreadDriverFactory {
   create(input: { workspaceId: WorkspaceId; threadId: ThreadId;
     model: ModelConfig; permissionCeiling: PermissionCeilingSnapshot;
     parentThreadId?: ThreadId; creationKey: string;
+    initialCheckpoint?: ThreadDriverCheckpoint;
     legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort },
     host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
   resume(input: { workspaceId: WorkspaceId; threadId: ThreadId;
@@ -2003,6 +2120,9 @@ ThreadRuntime 为该 invocation 派生 child signal，并构造 `CapabilityExecu
 abort 当前 run/tool child signal；所有后续 awaited emit、下一 provider/tool 启动和 side-effect gate 都
 先检查 latch。不能让 fire-and-forget rejected Promise 只变成 unhandled rejection 后继续执行；普通
 EventHub/public subscriber rejection 不得设置该 latch。
+`update.output` 的协议语义是当前累计快照：executor 后一条必须包含截至当时的完整可见输出，checkpoint、
+TUI 与 review reducer 直接替换旧值。把多个快照拼接会产生 `aab` 一类重复内容，发送增量片段则违反
+03 的 snapshot 自愈契约。
 
 1. workspace policy 给出上限，thread/run 只能收窄；子线程默认继承父线程**有效权限的交集**，
    不能因创建新线程获得更高权限。
@@ -2685,7 +2805,23 @@ legacy 投影规则：剥离 envelope 身份/seq，`control_request(kind:'approv
 SessionEvent/NDJSON；retry/compaction 事件剥离新增 identity 字段，
 `CanonicalAgentEvent.agent_end.willRetry` 原样保留。旧消费者继续 tolerant-read 未知内层事件。
 
-### 11.2 阶段验收门
+### 11.3 UX3 review/recovery edge
+
+production CLI 在 composition root 注入 Git review port，并让 `RuntimeFrontendSession` 只调用上述
+RuntimePort query/op。它不持有 `ThreadRuntime`、journal、repository、PreparedInvocation 或 PolicyEngine
+引用。TUI、classic 与 accessible 的 `/review`、`/diff`、`/permissions`、session 管理、compact、fork、
+retry 只是同一 frontend action 的不同投影；slash command 仍来自统一 catalog。workspace-wide event pump
+按 thread cursor 消费，页面 switch 只改变 visible target，不关闭源 attachment，也不把后台 completion
+当成前台 run。目标 snapshot splice 后 pending approval 全量重建；旧页面残留的 approval key 不得发往新
+thread。presentation store 只保存 draft/scroll/unread/panel，切换前后均不能覆盖 Runtime snapshot。
+
+这些 additive op/query/event 只扩展 canonical `coda/runtime` 类型面。默认 legacy `--json` 继续只接受既有
+单线程简写并输出同一裸 SessionEvent；`thread_updated`、conversation lifecycle 与 review/diff query 没有
+legacy wire 投影。manual compaction 仅把既有 compaction reason 扩展为 `manual`，不会改变 threshold/
+overflow 的旧值。未注入 workspace review port 的 embedding 仍可构造 Runtime，查询返回无 Git 状态或
+空 diff，而不是产生 ambient cwd/Git 副作用。
+
+### 11.4 阶段验收门
 
 - **阶段 0**：本文及交叉文档不再宣称“全局单 Agent/子 Agent 是工具”；characterization tests
   锁定当前单 Session 的并发拒绝、两个 Session 的隔离并行、thread-local abort 与裸

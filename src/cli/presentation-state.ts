@@ -187,6 +187,33 @@ export class ThreadPresentationStore {
     }
   }
 
+  /** Durably leave one thread view and restore the independent view state of another. */
+  switchToThread(threadId: ThreadId): ThreadPresentationState {
+    this.#assertOpen();
+    if (threadId === this.#threadId) return this.snapshot();
+    this.#flushDirty(true);
+    this.#threadId = threadId;
+    this.#file = presentationStatePath(this.#root, this.#workspaceId, threadId);
+    this.#state = this.#load();
+    this.#dirty = false;
+    return this.snapshot();
+  }
+
+  setActivePanel(panel: ThreadPresentationState['activePanel']): void {
+    this.#assertOpen();
+    const next = { ...this.#state, ...(panel === undefined ? {} : { activePanel: panel }) };
+    if (panel === undefined) deleteMutableOptional(next, 'activePanel');
+    this.#replace(next, false);
+  }
+
+  setExpanded(blockKey: string, expanded: boolean): void {
+    this.#assertOpen();
+    const keys = new Set(this.#state.expandedBlocks);
+    if (expanded) keys.add(sanitizeTerminalText(blockKey));
+    else keys.delete(blockKey);
+    this.#replace({ ...this.#state, expandedBlocks: [...keys] }, false);
+  }
+
   setDraft(draft: PersistableDraft): void {
     this.#assertOpen();
     if (draft.text === this.#state.draft) return;

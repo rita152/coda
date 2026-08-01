@@ -2,9 +2,11 @@
 // input (no alternate screen, cursor rewrites, mouse, animation, or bracketed-paste toggles).
 
 import * as readline from 'node:readline';
+import { isThreadId, isTurnId } from '../protocol/index.js';
 import type { QueuedMessage } from '../protocol/index.js';
 import { renderInteractiveHelp } from './command-catalog.js';
 import type { InteractiveSession } from './interactive-runtime.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import { applyProviderModelSelection } from './provider-actions.js';
 import {
@@ -30,6 +32,7 @@ import {
   latestAssistantText,
   MessageTranscriptSearch,
   promptHistoryEntries,
+  runThreadPresentationTransition,
   transcriptContent,
   workspacePathCandidates,
 } from './presentation-actions.js';
@@ -37,6 +40,15 @@ import {
   persistableDraft,
   type ThreadPresentationStore,
 } from './presentation-state.js';
+import {
+  approvalAllowsAlways,
+  filterSessionItems,
+  formatApprovalPresentation,
+  formatDiffSnapshot,
+  formatPermissionSnapshot,
+  formatReviewSnapshot,
+  formatSessionItems,
+} from './review-format.js';
 
 export interface LineReplOptions {
   readonly stdin?: NodeJS.ReadStream;
@@ -46,6 +58,7 @@ export interface LineReplOptions {
     readonly registry: ProviderRegistry;
     readonly runtime: InteractiveSession;
   };
+  readonly workspace?: RuntimeWorkspaceActions;
   readonly fatalSignal?: AbortSignal;
   readonly mode: 'accessible' | 'plain';
   readonly version?: string;
@@ -72,7 +85,7 @@ export async function startLineRepl(
   let closing = false;
   let commandChain = Promise.resolve();
   const history = new InputHistory();
-  for (const prompt of promptHistoryEntries(session.messages)) history.push(prompt);
+  history.replace(promptHistoryEntries(session.messages));
   const transcriptSearch = new MessageTranscriptSearch(() => session.messages);
   const rl = readline.createInterface({ input: stdin, terminal: false, crlfDelay: Infinity });
 
@@ -94,7 +107,10 @@ export async function startLineRepl(
       queues = { steering: [...event.steering], followUp: [...event.followUp] };
     } else if (event.type === 'approval_request' && !approvalIds.includes(event.approvalId)) {
       approvalIds.push(event.approvalId);
-      renderer.println?.('Approval response: y=allow once, a=allow always, n=deny, /abort=abort run');
+      formatApprovalPresentation(
+        options.workspace?.approvalPresentation(event.approvalId),
+        event.description,
+      ).forEach((line) => renderer.println?.(line));
     }
   });
 
@@ -168,7 +184,15 @@ export async function startLineRepl(
         return true;
       }
       if (decision === undefined) {
-        renderer.println?.('Approval is waiting: enter y, a, n, or /abort.');
+        const allowAlways = approvalAllowsAlways(options.workspace?.approvalPresentation(approvalId));
+        renderer.println?.(
+          `Approval is waiting: enter y, ${allowAlways ? 'a, ' : ''}n, or /abort.`,
+        );
+        return true;
+      }
+      if (decision === 'allow_always'
+        && !approvalAllowsAlways(options.workspace?.approvalPresentation(approvalId))) {
+        renderer.println?.('Allow always is unavailable because Runtime provided no frozen scope.');
         return true;
       }
       approvalIds.shift();
@@ -341,6 +365,133 @@ export async function startLineRepl(
       }
     };
 
+    const restoreSwitchedPresentation = (): void => {
+      const workspace = options.workspace;
+      if (workspace === undefined) return;
+      options.presentation?.store.switchToThread(workspace.currentThreadId);
+      history.replace(promptHistoryEntries(session.messages));
+      approvalIds.length = 0;
+      renderer.println?.(`— switched to ${workspace.currentThreadId} —`);
+      const raw = transcriptContent(session.messages, 'raw');
+      if (raw !== '') renderer.println?.(raw);
+      for (const request of workspace.pendingApprovals()) {
+        approvalIds.push(request.approvalId);
+        renderer.render({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
+        formatApprovalPresentation(
+          workspace.approvalPresentation(request.approvalId),
+          request.description,
+        ).forEach((line) => renderer.println?.(line));
+      }
+    };
+
+    const transitionPresentation = async (
+      transition: () => Promise<unknown>,
+    ): Promise<void> => {
+      const workspace = options.workspace;
+      if (workspace === undefined) return;
+      await runThreadPresentationTransition(
+        workspace,
+        options.presentation?.store,
+        transition,
+        restoreSwitchedPresentation,
+      );
+    };
+
+    const runWorkspaceCommand = async (
+      command: Extract<ReturnType<typeof decideEnter>, { kind: 'command' }>['command'],
+    ): Promise<void> => {
+      const workspace = options.workspace;
+      if (workspace === undefined) {
+        renderer.println?.(`/${command.cmd} is unavailable in this mode.`);
+        return;
+      }
+      switch (command.cmd) {
+        case 'sessions':
+          formatSessionItems(filterSessionItems(await workspace.listSessions(), command.query))
+            .forEach((line) => renderer.println?.(line));
+          return;
+        case 'resume':
+        case 'switch':
+          if (!isThreadId(command.threadId)) {
+            renderer.println?.(`usage: /${command.cmd} <thread-id>`);
+            formatSessionItems(filterSessionItems(await workspace.listSessions(), ''))
+              .forEach((line) => renderer.println?.(line));
+            return;
+          }
+          const targetThreadId = command.threadId;
+          await transitionPresentation(() => workspace.switchSession(targetThreadId));
+          return;
+        case 'new':
+          await transitionPresentation(() => workspace.newSession());
+          return;
+        case 'rename':
+          if (command.title === '') {
+            renderer.println?.('usage: /rename <title>');
+            return;
+          }
+          await workspace.renameSession(command.title);
+          renderer.println?.('Session renamed.');
+          return;
+        case 'archive':
+          if (command.mode !== '' && command.mode !== 'on' && command.mode !== 'off') {
+            renderer.println?.('usage: /archive [on|off]');
+            return;
+          }
+          await workspace.archiveSession(command.mode !== 'off');
+          renderer.println?.(command.mode === 'off' ? 'Session restored.' : 'Session archived.');
+          return;
+        case 'compact':
+          await workspace.compactConversation();
+          renderer.println?.('Conversation compacted.');
+          return;
+        case 'fork':
+        case 'retry':
+          if (command.turnId !== '' && !isTurnId(command.turnId)) {
+            renderer.println?.(`usage: /${command.cmd} [turn-id]`);
+            return;
+          }
+          const targetTurnId = command.turnId === '' ? undefined : command.turnId;
+          if (command.cmd === 'fork') {
+            await transitionPresentation(() => workspace.forkConversation(
+              targetTurnId,
+            ));
+          } else {
+            await transitionPresentation(() => workspace.retryConversation(
+              targetTurnId,
+            ));
+          }
+          return;
+        case 'review': {
+          const snapshot = await workspace.reviewSnapshot();
+          if (snapshot === undefined) renderer.println?.('No review data for this session.');
+          else formatReviewSnapshot(snapshot).forEach((line) => renderer.println?.(line));
+          return;
+        }
+        case 'diff': {
+          const scope = command.scope === '' ? 'turn' : command.scope;
+          if (scope !== 'turn' && scope !== 'workspace') {
+            renderer.println?.('usage: /diff [turn|workspace]');
+            return;
+          }
+          const snapshot = await workspace.diffSnapshot(scope);
+          if (snapshot === undefined) renderer.println?.('No diff data for this session.');
+          else formatDiffSnapshot(snapshot).forEach((line) => renderer.println?.(line));
+          return;
+        }
+        case 'permissions':
+          formatPermissionSnapshot(await workspace.workspaceSnapshot())
+            .forEach((line) => renderer.println?.(line));
+          return;
+        default:
+          return;
+      }
+    };
+
     const handleLine = async (line: string): Promise<void> => {
       if (closing) return;
       if (respondToApproval(line)) return;
@@ -510,6 +661,20 @@ export async function startLineRepl(
                 }
                 return;
               }
+              case 'sessions':
+              case 'resume':
+              case 'switch':
+              case 'new':
+              case 'rename':
+              case 'archive':
+              case 'compact':
+              case 'fork':
+              case 'retry':
+              case 'review':
+              case 'diff':
+              case 'permissions':
+                await runWorkspaceCommand(action.command);
+                return;
               case 'vim':
                 if (action.command.mode !== 'on' && action.command.mode !== 'off') {
                   renderer.println?.('usage: /vim <on|off>');

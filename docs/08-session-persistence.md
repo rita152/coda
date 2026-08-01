@@ -262,6 +262,7 @@ export interface LegacyThreadSeedRecord {
   type: 'legacy_seed';
   sourceSessionId: string;
   transcript: readonly AgentMessage[];
+  turnProvenance?: readonly { messageId: string; turnId: TurnId }[];
   usage: ThreadUsage;
   compaction?: {
     id: string; timestamp: number; tailStartId: string; summary: string;
@@ -435,6 +436,12 @@ export type ThreadRecord =
 重复调用逐字段核对该 prefix。不得先只落 meta 再补 seed，也不得仅凭
 `ThreadDriverRef.kind === 'session-v1'` 推断 provenance：Runtime 自己新建的 legacy adapter attachment
 也使用同一 opaque ref kind，但不拥有 legacy seed。
+
+`turnProvenance` 存在时必须按 transcript 顺序逐条、完整覆盖 message id，并保存创建 seed 时的 canonical
+`TurnId`；fork/retry 复制 seed 后和进程重启后都以它定位历史 turn，不能依赖目标 journal 不可能拥有的
+历史 envelope。旧 v1/早期 v2 seed 缺少该字段时，fold 按 `sourceSessionId + prompt message id + ordinal`
+的冻结 hash 算法生成稳定 synthetic TurnId；每个 prompt 开新 turn，后续 steering/follow-up/assistant/tool
+message 归入当前 turn。新写入的 v1 import 与 conversation seed 必须把所得映射显式持久化。
 
 EventCommitter 先写 `mailbox_prepare`（尚未对调用方承诺），验证通过后在一个
 `ThreadCommitRecord` 中原子写 `MailboxMutation(accepted_pending)` 与 `op_accepted` envelope；对

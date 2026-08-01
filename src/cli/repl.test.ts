@@ -8,6 +8,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'bun:test';
 import type {
+  ApprovalPresentation,
   AssistantMessage,
   QueuedMessage,
   ThreadId,
@@ -18,13 +19,14 @@ import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
 import { createOrderedOutput } from '../shared/index.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
-import type { CliSession } from './interactive-runtime.js';
+import type { CliSession, InteractiveSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import {
   persistableDraft,
   ThreadPresentationStore,
 } from './presentation-state.js';
 import type { Renderer } from './renderer.js';
+import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import {
   approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
@@ -97,6 +99,36 @@ describe('parseSlashCommand(docs/09 §3.2)', () => {
     expect(parseSlashCommand('/files src')).toEqual({ cmd: 'file_complete', query: 'src' });
   });
 
+  it('解析 UX3 审阅、恢复与 session 管理命令', () => {
+    expect(parseSlashCommand('/diff WORKSPACE')).toEqual({
+      cmd: 'diff',
+      scope: 'workspace',
+    });
+    expect(parseSlashCommand('/review')).toEqual({ cmd: 'review' });
+    expect(parseSlashCommand('/permissions')).toEqual({ cmd: 'permissions' });
+    expect(parseSlashCommand('/compact')).toEqual({ cmd: 'compact' });
+    expect(parseSlashCommand('/retry turn-1')).toEqual({ cmd: 'retry', turnId: 'turn-1' });
+    expect(parseSlashCommand('/fork turn-2')).toEqual({ cmd: 'fork', turnId: 'turn-2' });
+    expect(parseSlashCommand('/new')).toEqual({ cmd: 'new' });
+    expect(parseSlashCommand('/sessions running')).toEqual({
+      cmd: 'sessions',
+      query: 'running',
+    });
+    expect(parseSlashCommand('/resume thread-1')).toEqual({
+      cmd: 'resume',
+      threadId: 'thread-1',
+    });
+    expect(parseSlashCommand('/switch thread-2')).toEqual({
+      cmd: 'switch',
+      threadId: 'thread-2',
+    });
+    expect(parseSlashCommand('/rename Review Pass')).toEqual({
+      cmd: 'rename',
+      title: 'Review Pass',
+    });
+    expect(parseSlashCommand('/archive OFF')).toEqual({ cmd: 'archive', mode: 'off' });
+  });
+
   it('非斜杠返回 undefined;未知斜杠返回 unknown', () => {
     expect(parseSlashCommand('hello')).toBeUndefined();
     expect(parseSlashCommand('/wat now')).toEqual({ cmd: 'unknown', input: '/wat now' });
@@ -112,6 +144,60 @@ describe('parseSlashCommand(docs/09 §3.2)', () => {
     }
   });
 });
+
+function classicApprovalPresentationWithoutAlways(requestId: string): ApprovalPresentation {
+  return {
+    requestId,
+    target: {
+      workspaceId: 'workspace-classic-approval' as WorkspaceId,
+      threadId: 'thread-classic-approval' as ThreadId,
+      runId: 'run-classic-approval' as never,
+      turnId: 'turn-classic-approval' as never,
+    },
+    capability: { id: 'shell', version: '1', registrationDigest: 'digest' },
+    normalizedResources: [],
+    risk: { code: 'ask', reason: 'execute', description: 'Run canonical tool' },
+    allowOnce: { invocationId: 'invocation-classic', toolCallId: 'call-1' },
+    revisions: {
+      catalog: 1,
+      effectivePolicy: 'effective',
+      policyBasis: 'basis',
+      ceiling: 'ceiling',
+      grants: 'grants',
+    },
+  };
+}
+
+function classicApprovalWorkspace(
+  presentation: ApprovalPresentation,
+): RuntimeWorkspaceActions {
+  return {
+    currentThreadId: presentation.target.threadId,
+    eventHighWaterSeq: () => 0,
+    listSessions: async () => [],
+    workspaceSnapshot: async () => ({
+      workspaceId: presentation.target.workspaceId,
+      permissions: {
+        mode: 'interactive',
+        policyRevision: 'policy',
+        ceiling: { revision: 'ceiling', constraints: [] },
+      },
+    }),
+    switchSession: async () => undefined,
+    newSession: async () => presentation.target.threadId,
+    renameSession: async () => undefined,
+    archiveSession: async () => undefined,
+    compactConversation: async () => undefined,
+    forkConversation: async () => presentation.target.threadId,
+    retryConversation: async () => presentation.target.threadId,
+    reviewSnapshot: async () => undefined,
+    diffSnapshot: async () => undefined,
+    approvalPresentation: (requestId) => requestId === presentation.requestId
+      ? presentation
+      : undefined,
+    pendingApprovals: () => [],
+  };
+}
 
 describe('decideEnter:键位表分派(docs/09 §3)', () => {
   it('空输入 → none(空闲与运行中一致)', () => {
@@ -156,6 +242,10 @@ describe('decideEnter:键位表分派(docs/09 §3)', () => {
     expect(decideEnter('running', false, '/search error')).toEqual({
       kind: 'command',
       command: { cmd: 'transcript_search', query: 'error' },
+    });
+    expect(decideEnter('running', false, '/archive off')).toEqual({
+      kind: 'command',
+      command: { cmd: 'archive', mode: 'off' },
     });
     for (const cmd of ['login', 'model', 'logout'] as const) {
       expect(decideEnter('running', false, `/${cmd}`)).toEqual({
@@ -224,6 +314,17 @@ describe('InputHistory:本会话输入历史环(↑/↓)', () => {
     expect(history.reverseSearch('fix')).toBeUndefined();
     history.resetSearch();
     expect(history.reverseSearch('tests')).toBe('run tests');
+  });
+
+  it('切换 thread 时替换历史投影，不泄漏来源 thread 的 prompt', () => {
+    const history = new InputHistory();
+    history.replace(['source A', 'source B']);
+    expect(history.reverseSearch('source')).toBe('source B');
+    history.replace(['target only']);
+    expect(history.reverseSearch('source')).toBeUndefined();
+    expect(history.reverseSearch('target')).toBe('target only');
+    expect(history.up('target draft')).toBe('target only');
+    expect(history.down()).toBe('target draft');
   });
 });
 
@@ -328,6 +429,8 @@ describe('classic REPL canonical approval projection', () => {
     let listener: ((event: SessionEvent) => void | Promise<void>) | undefined;
     let sideListener: ((event: SessionEvent) => void | Promise<void>) | undefined;
     const resolved: Array<{ id: string; decision: string }> = [];
+    const printed: string[] = [];
+    const promptAvailability: boolean[] = [];
     const session: CliSession = {
       interactionState: () => 'idle',
       currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
@@ -361,9 +464,13 @@ describe('classic REPL canonical approval projection', () => {
       render: () => undefined,
       replayTranscript: () => undefined,
       drain: async () => {},
+      println: (text) => printed.push(text),
+      setApprovalAllowsAlways: (available) => promptAvailability.push(available),
     };
+    const modernPresentation = classicApprovalPresentationWithoutAlways('canonical-approval-1');
+    const workspace = classicApprovalWorkspace(modernPresentation);
 
-    const running = startRepl(session, renderer, approval, { stdin });
+    const running = startRepl(session, renderer, approval, { stdin, workspace });
     const emit = listener;
     if (emit === undefined) throw new Error('primary session listener was not registered');
     const request = {
@@ -375,9 +482,22 @@ describe('classic REPL canonical approval projection', () => {
     await emit(request);
     // A transitional adapter that exposes both paths must still enqueue this identity once.
     await sideListener?.(request);
+    stdin.emit('keypress', 'a', { name: 'a' });
+    expect(resolved).toEqual([]);
+    expect(printed).toContain('Allow always is unavailable because Runtime provided no frozen scope.');
     stdin.emit('keypress', 'y', { name: 'y' });
     stdin.emit('keypress', 'n', { name: 'n' });
     expect(resolved).toEqual([{ id: 'canonical-approval-1', decision: 'allow_once' }]);
+    expect(promptAvailability.every((available) => available === false)).toBe(true);
+
+    const legacyRequest = {
+      ...request,
+      approvalId: 'legacy-approval-2',
+      description: 'run legacy tool',
+    };
+    await emit(legacyRequest);
+    stdin.emit('keypress', 'a', { name: 'a' });
+    expect(resolved.at(-1)).toEqual({ id: 'legacy-approval-2', decision: 'allow_always' });
 
     stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
     for (const character of '/quit') stdin.emit('keypress', character, { name: character });
@@ -569,6 +689,264 @@ describe('classic REPL 输入错误边界', () => {
     await expect(running).resolves.toBe(0);
     expect(stdin.rawModeChanges).toEqual([true, false]);
     expect({ closed, mounts, unmounts }).toEqual({ closed: 1, mounts: 1, unmounts: 1 });
+  });
+});
+
+describe('UX3 classic review and recovery parity', () => {
+  it('通过 Runtime workspace 执行 review/diff/permissions/session 文本命令', async () => {
+    const stdin = new TestTtyInput();
+    const printed: string[] = [];
+    const actions: string[] = [];
+    let currentThreadId = 'thread-classic' as ThreadId;
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const workspace: RuntimeWorkspaceActions = {
+      get currentThreadId() { return currentThreadId; },
+      eventHighWaterSeq: () => 4,
+      listSessions: async () => [{
+        workspaceId: 'workspace-classic' as WorkspaceId,
+        cwd: '/workspace',
+        updatedAt: 2,
+        preview: 'classic preview',
+        thread: {
+          threadId: 'thread-target' as ThreadId,
+          createdAt: 1,
+          state: 'idle',
+          title: 'Classic target',
+        },
+      }],
+      workspaceSnapshot: async () => ({
+        workspaceId: 'workspace-classic' as WorkspaceId,
+        permissions: {
+          mode: 'interactive',
+          policyRevision: 'policy-classic',
+          ceiling: { revision: 'ceiling-classic', constraints: [] },
+        },
+      }),
+      switchSession: async (threadId) => {
+        actions.push(`switch:${threadId}`);
+        currentThreadId = threadId;
+      },
+      newSession: async () => {
+        currentThreadId = 'thread-new-classic' as ThreadId;
+        actions.push('new');
+        return currentThreadId;
+      },
+      renameSession: async (title) => { actions.push(`rename:${title}`); },
+      archiveSession: async (archived) => { actions.push(`archive:${String(archived)}`); },
+      compactConversation: async () => { actions.push('compact'); },
+      forkConversation: async () => 'thread-fork-classic' as ThreadId,
+      retryConversation: async () => 'thread-retry-classic' as ThreadId,
+      reviewSnapshot: async () => ({
+        workspaceId: 'workspace-classic' as WorkspaceId,
+        threadId: currentThreadId,
+        highWaterSeq: 4,
+        reasoning: [],
+        tools: [{
+          key: 'tool-classic',
+          toolCallId: 'call-classic',
+          name: 'edit',
+          target: 'src/classic.ts',
+          status: 'succeeded',
+          startedAt: 1,
+          endedAt: 3,
+          durationMs: 2,
+          args: { path: 'src/classic.ts' },
+          output: 'complete tool output',
+        }],
+      }),
+      diffSnapshot: async (scope) => ({
+        workspaceId: 'workspace-classic' as WorkspaceId,
+        threadId: currentThreadId,
+        scope,
+        generatedAt: 3,
+        files: [{
+          path: 'src/classic.ts',
+          group: 'staged',
+          status: 'M',
+          patch: '+ complete classic diff',
+        }],
+      }),
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => [],
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => undefined,
+      println: (text) => printed.push(text),
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+    const submit = async (command: string): Promise<void> => {
+      type(command);
+      stdin.emit('keypress', undefined, { name: 'return' });
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+
+    const running = startRepl(session, renderer, undefined, { stdin, workspace });
+    await submit('/review');
+    await submit('/diff workspace');
+    await submit('/permissions');
+    await submit('/sessions classic');
+    await submit('/rename Review target');
+    await submit('/archive off');
+    await submit('/compact');
+    await submit('/new');
+    await submit('/switch thread-target');
+
+    expect(printed.join('\n')).toContain('complete tool output');
+    expect(printed.join('\n')).toContain('+ complete classic diff');
+    expect(printed.join('\n')).toContain('Permissions · interactive');
+    expect(printed.join('\n')).toContain('Classic target');
+    expect(actions).toEqual([
+      'rename:Review target',
+      'archive:false',
+      'compact',
+      'new',
+      'switch:thread-target',
+    ]);
+
+    await submit('/quit');
+    await expect(running).resolves.toBe(0);
+  });
+
+  it('切换 thread 只重放一次目标 transcript，并重新播种 Ctrl+R 历史', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'coda-classic-switch-'));
+    const stdin = new TestTtyInput();
+    const inputLines: string[] = [];
+    const replayed: Array<readonly import('../protocol/index.js').AgentMessage[]> = [];
+    const attachmentListeners = new Set<
+      (messages: readonly import('../protocol/index.js').AgentMessage[]) => void | Promise<void>
+    >();
+    const sourceThreadId = 'thread-classic-source' as ThreadId;
+    const targetThreadId = 'thread-classic-target' as ThreadId;
+    let currentThreadId = sourceThreadId;
+    const messagesByThread = new Map<ThreadId, readonly import('../protocol/index.js').AgentMessage[]>([
+      [sourceThreadId, [{
+        role: 'user',
+        id: 'source-user',
+        timestamp: 1,
+        source: 'prompt',
+        content: [{ type: 'text', text: 'source-only prompt' }],
+      }]],
+      [targetThreadId, [{
+        role: 'user',
+        id: 'target-user',
+        timestamp: 2,
+        source: 'prompt',
+        content: [{ type: 'text', text: 'target-only prompt' }],
+      }, {
+        role: 'assistant',
+        id: 'target-assistant',
+        timestamp: 3,
+        model: { provider: 'faux', api: 'faux', model: 'test' },
+        content: [{ type: 'text', text: 'target response' }],
+        stopReason: 'stop',
+        usage: { input: 1, output: 1 },
+      }]],
+    ]);
+    const session: InteractiveSession & RuntimeWorkspaceActions = {
+      get currentThreadId() { return currentThreadId; },
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      get messages() { return messagesByThread.get(currentThreadId) ?? []; },
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: (listener) => {
+        attachmentListeners.add(listener);
+        return () => { attachmentListeners.delete(listener); };
+      },
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+      eventHighWaterSeq: () => 4,
+      listSessions: async () => [],
+      workspaceSnapshot: async () => ({
+        workspaceId: 'workspace-classic-switch' as WorkspaceId,
+        permissions: {
+          mode: 'interactive',
+          policyRevision: 'policy',
+          ceiling: { revision: 'ceiling', constraints: [] },
+        },
+      }),
+      switchSession: async (threadId) => {
+        currentThreadId = threadId;
+        for (const listener of attachmentListeners) await listener(session.messages);
+      },
+      newSession: async () => currentThreadId,
+      renameSession: async () => undefined,
+      archiveSession: async () => undefined,
+      compactConversation: async () => undefined,
+      forkConversation: async () => currentThreadId,
+      retryConversation: async () => currentThreadId,
+      reviewSnapshot: async () => undefined,
+      diffSnapshot: async () => undefined,
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => [],
+    };
+    const registry = new ProviderRegistry({
+      configPath: path.join(dir, 'providers.json'),
+      credentialsPath: path.join(dir, 'credentials.json'),
+    });
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: (messages) => { replayed.push(messages); },
+      drain: async () => undefined,
+      setInputLine: (text) => inputLines.push(text),
+      println: () => undefined,
+    };
+    const type = (text: string): void => {
+      for (const character of text) stdin.emit('keypress', character, { name: character });
+    };
+    const running = startRepl(session, renderer, undefined, {
+      stdin,
+      workspace: session,
+      providerCommands: { registry, runtime: session },
+    });
+    try {
+      type(`/switch ${targetThreadId}`);
+      stdin.emit('keypress', undefined, { name: 'return' });
+      for (let attempt = 0; attempt < 20 && currentThreadId !== targetThreadId; attempt++) {
+        await Promise.resolve();
+      }
+      for (let attempt = 0; attempt < 5; attempt++) await Promise.resolve();
+      expect(replayed).toHaveLength(1);
+      expect(replayed[0]?.map((message) => message.id)).toEqual([
+        'target-user',
+        'target-assistant',
+      ]);
+
+      type('source');
+      stdin.emit('keypress', undefined, { name: 'r', ctrl: true });
+      expect(inputLines.at(-1)).toBe('source');
+      stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
+      stdin.emit('keypress', undefined, { name: 'r', ctrl: true });
+      expect(inputLines.at(-1)).toBe('target-only prompt');
+
+      stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
+      type('/quit');
+      stdin.emit('keypress', undefined, { name: 'return' });
+      await expect(running).resolves.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

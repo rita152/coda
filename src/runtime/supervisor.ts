@@ -15,6 +15,7 @@ import {
   strictJsonSnapshot,
 } from '../protocol/index.js';
 import type {
+  AgentMessage,
   DerivedOpId,
   EventEnvelope,
   ExternalOpId,
@@ -23,12 +24,17 @@ import type {
   OpReceipt,
   PermissionCeilingSnapshot,
   RunId,
+  RuntimeDiffSnapshot,
+  RuntimeDiffFile,
   RuntimeOp,
   RuntimePermissionMode,
   RuntimeEvent,
+  RuntimeReviewSnapshot,
+  RuntimeThreadListItem,
   ThreadId,
   ThreadSnapshot,
   ThreadSummary,
+  TurnId,
   WorkspaceId,
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
@@ -58,6 +64,7 @@ import {
 } from './errors.js';
 import { createDefaultRuntimeIdentityFactory } from './identity-factory.js';
 import { validatePermissionCeilingSnapshot } from '../session/permission-ceiling.js';
+import { UsageTracker } from '../session/usage.js';
 import type {
   PolicyGrant,
   PolicyGrantRepository,
@@ -75,9 +82,12 @@ import type {
   RuntimeModelResolver,
   RuntimeStoragePort,
   RuntimeWorkspaceStoragePort,
+  RuntimeWorkspaceReviewPort,
   SupervisorLease,
   SupervisorOpLedgerRecord,
+  LegacyThreadSeedRecord,
   ThreadCatalogRecord,
+  ThreadDriverCheckpoint,
   ThreadDriverAttachment,
   ThreadDriverFactory,
   ThreadDriverPort,
@@ -94,8 +104,14 @@ export interface RuntimePort {
   submit(op: RuntimeOp): Promise<OpReceipt>;
   events(options?: EventSubscriptionOptions): AsyncIterable<Readonly<EventEnvelope>>;
   listThreads(): Promise<readonly ThreadSummary[]>;
+  listThreadDetails(): Promise<readonly RuntimeThreadListItem[]>;
   getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>>;
   getThreadSnapshot(threadId: ThreadId): Promise<Readonly<ThreadSnapshot> | undefined>;
+  getReviewSnapshot(threadId: ThreadId): Promise<Readonly<RuntimeReviewSnapshot> | undefined>;
+  getDiffSnapshot(
+    threadId: ThreadId,
+    scope: 'turn' | 'workspace',
+  ): Promise<Readonly<RuntimeDiffSnapshot> | undefined>;
   close(): Promise<void>;
 }
 
@@ -108,6 +124,7 @@ export interface CreateRuntimeBaseOptions {
   readonly modelResolver: RuntimeModelResolver;
   readonly permissionPolicy: PermissionPolicyPort;
   readonly threadDriverFactory: ThreadDriverFactory;
+  readonly workspaceReview?: RuntimeWorkspaceReviewPort;
   readonly identityFactory?: RuntimeIdentityFactory;
   readonly clock?: RuntimeClock;
 }
@@ -330,6 +347,7 @@ class Supervisor implements RuntimePort {
   readonly #modelResolver: RuntimeModelResolver;
   readonly #permissionPolicy: PermissionPolicyPort;
   readonly #driverFactory: ThreadDriverFactory;
+  readonly #workspaceReview: RuntimeWorkspaceReviewPort | undefined;
   #legacyApprovalPatterns: LegacyApprovalPatternRepository | undefined;
   readonly #capabilityServices: Readonly<RuntimeCapabilityServices> | undefined;
   #policyGrants: PolicyGrantRepository | undefined;
@@ -369,6 +387,7 @@ class Supervisor implements RuntimePort {
     this.#modelResolver = input.options.modelResolver;
     this.#permissionPolicy = input.options.permissionPolicy;
     this.#driverFactory = input.options.threadDriverFactory;
+    this.#workspaceReview = input.options.workspaceReview;
     this.#legacyApprovalPatterns = input.legacyApprovalPatterns;
     this.#capabilityServices = input.options.capabilityMode === 'registry'
       ? input.options.capabilityServices
@@ -460,6 +479,25 @@ class Supervisor implements RuntimePort {
     return snapshot(result);
   }
 
+  async listThreadDetails(): Promise<readonly RuntimeThreadListItem[]> {
+    this.#assertOpen();
+    const summaries = await this.listThreads();
+    return snapshot(summaries.map((thread) => {
+      const state = this.#threadState(thread.threadId);
+      const updatedAt = thread.updatedAt
+        ?? state?.envelopes.at(-1)?.timestamp
+        ?? thread.createdAt;
+      const preview = threadPreview(state?.checkpoint.frontend.transcript ?? []);
+      return {
+        workspaceId: this.workspaceId,
+        cwd: this.#cwd,
+        thread,
+        ...(preview === undefined ? {} : { preview }),
+        updatedAt,
+      };
+    }));
+  }
+
   async getWorkspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>> {
     this.#assertOpen();
     const ceiling = await this.#workspaceCeiling();
@@ -472,6 +510,12 @@ class Supervisor implements RuntimePort {
             workspaceCeiling: ceiling,
           }),
         );
+    const git = this.#workspaceReview === undefined
+      ? undefined
+      : validateGitSnapshot(await this.#workspaceReview.snapshotGit({
+          workspaceId: this.workspaceId,
+          cwd: this.#cwd,
+        }));
     return snapshot({
       workspaceId: this.workspaceId,
       permissions: {
@@ -479,6 +523,7 @@ class Supervisor implements RuntimePort {
         policyRevision: described.policyRevision,
         ceiling,
       },
+      ...(git === undefined ? {} : { git }),
     });
   }
 
@@ -492,6 +537,49 @@ class Supervisor implements RuntimePort {
       ...unloaded,
       summary: recoverySummary(unloaded) ?? unloaded.summary,
     });
+  }
+
+  async getReviewSnapshot(
+    threadId: ThreadId,
+  ): Promise<Readonly<RuntimeReviewSnapshot> | undefined> {
+    this.#assertOpen();
+    assertThreadId(threadId, 'threadId');
+    const state = this.#threadState(threadId);
+    return state === undefined
+      ? undefined
+      : snapshot(buildReviewSnapshot(this.workspaceId, threadId, state));
+  }
+
+  async getDiffSnapshot(
+    threadId: ThreadId,
+    scope: 'turn' | 'workspace',
+  ): Promise<Readonly<RuntimeDiffSnapshot> | undefined> {
+    this.#assertOpen();
+    assertThreadId(threadId, 'threadId');
+    if (scope !== 'turn' && scope !== 'workspace') {
+      throw new TypeError('Runtime diff scope must be turn or workspace');
+    }
+    const state = this.#threadState(threadId);
+    if (state === undefined) return undefined;
+    const files = scope === 'turn'
+      ? turnDiffFiles(state)
+      : this.#workspaceReview === undefined
+        ? []
+        : validateDiffFiles(await this.#workspaceReview.snapshotDiff({
+            workspaceId: this.workspaceId,
+            cwd: this.#cwd,
+          }));
+    return snapshot({
+      workspaceId: this.workspaceId,
+      threadId,
+      scope,
+      generatedAt: this.#clock.now(),
+      files,
+    });
+  }
+
+  #threadState(threadId: ThreadId): FoldedThreadJournal | undefined {
+    return this.#threads.get(threadId)?.durableState() ?? this.#unloaded.get(threadId);
   }
 
   close(): Promise<void> {
@@ -653,7 +741,7 @@ class Supervisor implements RuntimePort {
 
   async #submitCanonical(op: Readonly<RuntimeOp>): Promise<OpReceipt> {
     const payloadHash = runtimeOpPayloadHash(op);
-    const creationKey = op.type === 'thread_create'
+    const creationKey = isThreadCreationOp(op)
       ? `create_${new Bun.CryptoHasher('sha256').update(canonicalJson([
           this.workspaceId,
           op.threadId,
@@ -663,11 +751,20 @@ class Supervisor implements RuntimePort {
     const scopeFreeze = op.type === 'cancel_scope' && op.workspaceId === this.workspaceId
       ? this.#freezeScope(op)
       : undefined;
+    const retryFreeze = op.type === 'conversation_retry'
+      ? this.#freezeRetryPrompt(op)
+      : undefined;
     const reservedRecord: SupervisorOpLedgerRecord = {
       opId: op.opId,
       op,
       payloadHash,
       ...(creationKey !== undefined && { driverCreation: { creationKey } }),
+      ...(op.type === 'conversation_retry' && {
+        retryPromptOpId: this.newOpId(),
+        ...(retryFreeze?.ok === true
+          ? { retryPrompt: retryFreeze.prompt }
+          : { retryRejectionReason: retryFreeze?.reason ?? 'source_thread_not_found' }),
+      }),
       ...(scopeFreeze !== undefined && {
         targetThreadIds: scopeFreeze.targetThreadIds,
         resolvedTargets: scopeFreeze.resolvedTargets,
@@ -708,6 +805,12 @@ class Supervisor implements RuntimePort {
           break;
         case 'cancel_scope':
           receipt = await this.#cancelScope(op, ledgerRecord);
+          break;
+        case 'conversation_fork':
+          receipt = await this.#forkConversation(op, ledgerRecord);
+          break;
+        case 'conversation_retry':
+          receipt = await this.#retryConversation(op, ledgerRecord);
           break;
         default:
           receipt = await this.#routeThreadOp(op);
@@ -911,6 +1014,262 @@ class Supervisor implements RuntimePort {
       }
       if (failures.length === 1) throw error;
       throw new AggregateError(failures, `Thread ${op.threadId} create cleanup failed`);
+    }
+  }
+
+  async #forkConversation(
+    op: Extract<RuntimeOp, { type: 'conversation_fork' }>,
+    ledger: SupervisorOpLedgerRecord,
+  ): Promise<OpReceipt> {
+    const source = this.#threadState(op.sourceThreadId);
+    if (source === undefined) return rejected(op, 'source_thread_not_found');
+    if (source.summary.activeRunId !== undefined
+      || source.checkpoint.frontend.pendingControls.length > 0) {
+      return rejected(op, 'source_thread_busy');
+    }
+    const seed = buildConversationSeed(source, op.model, {
+      ...(op.throughTurnId !== undefined && { throughTurnId: op.throughTurnId }),
+    });
+    if (!seed.ok) return rejected(op, seed.reason);
+    return this.#createForkedThread(op, ledger, seed.checkpoint, seed.record);
+  }
+
+  async #retryConversation(
+    op: Extract<RuntimeOp, { type: 'conversation_retry' }>,
+    ledger: SupervisorOpLedgerRecord,
+  ): Promise<OpReceipt> {
+    if (ledger.retryRejectionReason !== undefined) {
+      return rejected(op, ledger.retryRejectionReason);
+    }
+    const retryPrompt = ledger.retryPrompt;
+    if (retryPrompt === undefined || ledger.retryPromptOpId === undefined) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'conversation_retry has no frozen prompt');
+    }
+    const existingTarget = this.#threadState(op.threadId);
+    const creationApplied = existingTarget?.envelopes.some((envelope) =>
+      envelope.opId === op.opId
+      && envelope.event.type === 'op_completed'
+      && envelope.event.opType === 'conversation_retry') === true;
+    if (creationApplied && !this.#threads.has(op.threadId)) {
+      const catalog = this.#catalog.get(op.threadId);
+      if (catalog === undefined) {
+        throw new RuntimeStorageError('thread_not_found', `Retry target catalog is missing: ${op.threadId}`);
+      }
+      await this.#recoverAcceptedAttachment(ledger, catalog);
+    }
+    let created: OpReceipt;
+    if (creationApplied) {
+      created = { accepted: true, opId: op.opId, duplicate: false, threadId: op.threadId };
+    } else {
+      const source = this.#threadState(op.sourceThreadId);
+      if (source === undefined) {
+        throw new RuntimeStorageError('invalid_supervisor_op', 'Frozen retry source disappeared');
+      }
+      if (source.summary.activeRunId !== undefined
+        || source.checkpoint.frontend.pendingControls.length > 0) {
+        return rejected(op, 'source_thread_busy');
+      }
+      const seed = buildConversationSeed(source, op.model, {
+        retry: true,
+        throughTurnId: retryPrompt.turnId,
+        retryMessageId: retryPrompt.messageId,
+      });
+      if (!seed.ok || seed.retryPrompt === undefined) {
+        throw new RuntimeStorageError(
+          'invalid_supervisor_op',
+          `Frozen retry prompt cannot rebuild its source prefix: ${seed.ok ? 'missing prompt' : seed.reason}`,
+        );
+      }
+      if (seed.retryPrompt.messageId !== retryPrompt.messageId
+        || seed.retryPrompt.turnId !== retryPrompt.turnId
+        || seed.retryPrompt.text !== retryPrompt.text
+        || sha256Text(seed.retryPrompt.text) !== retryPrompt.digest) {
+        throw new RuntimeStorageError('invalid_supervisor_op', 'Frozen retry prompt changed');
+      }
+      created = await this.#createForkedThread(op, ledger, seed.checkpoint, seed.record);
+    }
+    if (!created.accepted) return created;
+    const retryPromptOpId = ledger.retryPromptOpId;
+    const promptReceipt = await this.#submit({
+      type: 'prompt',
+      opId: retryPromptOpId,
+      workspaceId: this.workspaceId,
+      threadId: op.threadId,
+      text: retryPrompt.text,
+    });
+    if (!promptReceipt.accepted || promptReceipt.runId === undefined) {
+      throw new RuntimeStorageError(
+        'conversation_retry_prompt_rejected',
+        promptReceipt.accepted ? 'Retry prompt has no run identity' : promptReceipt.reason,
+      );
+    }
+    return { ...created, runId: promptReceipt.runId };
+  }
+
+  async #createForkedThread(
+    op: Extract<RuntimeOp, { type: 'conversation_fork' | 'conversation_retry' }>,
+    ledger: SupervisorOpLedgerRecord,
+    initialCheckpoint: ThreadDriverCheckpoint,
+    seed: LegacyThreadSeedRecord,
+  ): Promise<OpReceipt> {
+    const existingClaim = this.#threadClaims.get(op.threadId);
+    if (existingClaim !== undefined && existingClaim.opId !== op.opId) {
+      return rejected(op, 'thread_already_exists');
+    }
+    if (this.#catalog.has(op.threadId) && existingClaim?.opId !== op.opId) {
+      return rejected(op, 'thread_already_exists');
+    }
+    this.#threadClaims.set(op.threadId, { kind: 'create', opId: op.opId });
+    const releaseClaim = (): void => {
+      const current = this.#threadClaims.get(op.threadId);
+      if (current?.kind === 'create' && current.opId === op.opId) this.#threadClaims.delete(op.threadId);
+    };
+
+    let model: Awaited<ReturnType<RuntimeModelResolver['resolve']>>;
+    let ceiling: PermissionCeilingSnapshot;
+    try {
+      model = await this.#resolveModel(op.model, op.threadId, op.opId);
+      if (!model.ok) {
+        releaseClaim();
+        return rejected(op, model.code);
+      }
+      const workspaceCeiling = await this.#workspaceCeiling();
+      ceiling = validatePermissionCeilingSnapshot(await this.#permissionPolicy.resolveCeiling({
+        kind: 'root_thread',
+        workspaceId: this.workspaceId,
+        threadId: op.threadId,
+        workspaceCeiling,
+      }));
+    } catch (error) {
+      releaseClaim();
+      throw error;
+    }
+
+    const creationKey = ledger.driverCreation?.creationKey;
+    if (creationKey === undefined) {
+      throw new RuntimeStorageError('invalid_supervisor_op', `${op.type} has no durable creation key`);
+    }
+    const host = new ThreadDriverHostController();
+    const attachment = await this.#driverFactory.create({
+      workspaceId: this.workspaceId,
+      threadId: op.threadId,
+      model: model.model,
+      permissionCeiling: ceiling,
+      creationKey,
+      initialCheckpoint,
+      ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
+        legacyApprovalPatterns: this.#legacyApprovalPatterns,
+      }),
+    }, host);
+    let journal: ThreadJournalPort | undefined;
+    let writer: ThreadJournalWriter | undefined;
+    let threadPolicyEngine: ThreadPolicyEngine | undefined;
+    try {
+      const createdAt = this.#clock.now();
+      const meta = snapshot<ThreadMetaRecord>({
+        type: 'thread_meta',
+        version: 2,
+        protocolVersion: '1.0.0',
+        workspaceId: this.workspaceId,
+        threadId: op.threadId,
+        createdByOpId: op.opId,
+        permissionCeiling: ceiling,
+        createdAt,
+        cwd: this.#cwd,
+        model: op.model,
+        driverRef: attachment.durableRef,
+      });
+      journal = await this.#workspace.createThreadJournal(this.#lease, {
+        threadId: op.threadId,
+        meta,
+        initialRecords: [seed],
+      });
+      await journal.acquireWriteLease(this.#lease);
+      const records = await journal.load();
+      writer = new ThreadJournalWriter({
+        workspaceId: this.workspaceId,
+        threadId: op.threadId,
+        journal,
+        events: this.#events,
+        clock: this.#clock,
+        state: foldThreadJournal(records),
+        records,
+      });
+      if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(writer.state.checkpoint)) {
+        throw new RuntimeStorageError(
+          'driver_checkpoint_mismatch',
+          `Forked driver differs from committed seed ${op.threadId}`,
+        );
+      }
+      this.#events.registerThread(op.threadId);
+      await this.#commitApprovalStartupDiagnostics(writer);
+      const summary: ThreadSummary = {
+        threadId: op.threadId,
+        createdAt,
+        ...(op.title === undefined ? {} : { title: op.title.trim() }),
+        updatedAt: createdAt,
+        state: 'idle',
+      };
+      await writer.commit([
+        { event: { type: 'op_accepted', opType: op.type }, opId: op.opId },
+        { event: { type: 'thread_created', thread: summary }, opId: op.opId },
+        { event: { type: 'op_completed', opType: op.type, outcome: 'applied' }, opId: op.opId },
+      ], [{ type: 'model_selected', ownerOpId: op.opId, model: op.model }]);
+      threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
+      const runtime = new ThreadRuntime({
+        workspaceId: this.workspaceId,
+        cwd: this.#cwd,
+        threadId: op.threadId,
+        writer,
+        attachment,
+        identityFactory: this.#identityFactory,
+        clock: this.#clock,
+        permissionPolicy: this.#permissionPolicy,
+        threadCeiling: ceiling,
+        onThreadResultPending: (result) => this.#deliverThreadResult(result),
+        onWorkspaceApprovalFatal: (error) => this.#latchApprovalFatal(error),
+        workspaceApprovalFailure: () => this.#approvalFatal,
+        ...(this.#capabilityServices !== undefined && threadPolicyEngine !== undefined
+          && this.#policyGrants !== undefined && {
+          capabilityServices: this.#capabilityServices,
+          threadPolicyEngine,
+          policyGrants: this.#policyGrants,
+        }),
+      });
+      host.bind(runtime);
+      await attachment.driver.recover([]);
+      await attachment.driver.activate();
+      this.#threads.set(op.threadId, runtime);
+      this.#catalog.set(op.threadId, {
+        summary,
+        format: 'runtime-v2',
+        storageKey: `runtime:${op.threadId}`,
+        driverRef: attachment.durableRef,
+      });
+      this.#threadMeta.set(op.threadId, meta);
+      this.#threadClaims.set(op.threadId, { kind: 'attached', opId: op.opId });
+      this.#attachmentLifecycleOps.set(op.threadId, op.opId);
+      return { accepted: true, opId: op.opId, duplicate: false, threadId: op.threadId };
+    } catch (error) {
+      const failures: unknown[] = [error];
+      try {
+        await attachment.driver.close();
+      } catch (closeError) {
+        failures.push(closeError);
+      }
+      try {
+        await threadPolicyEngine?.close();
+      } catch (closeError) {
+        failures.push(closeError);
+      }
+      try {
+        if (writer !== undefined) await writer.close();
+        else await journal?.releaseWriteLease();
+      } catch (closeError) {
+        failures.push(closeError);
+      }
+      if (failures.length === 1) throw error;
+      throw new AggregateError(failures, `Thread ${op.threadId} fork cleanup failed`);
     }
   }
 
@@ -1159,7 +1518,9 @@ class Supervisor implements RuntimePort {
   }
 
   async #routeThreadOp(
-    op: Exclude<RuntimeOp, { type: 'thread_create' | 'thread_resume' | 'cancel_scope' }>,
+    op: Exclude<RuntimeOp, {
+      type: 'thread_create' | 'thread_resume' | 'cancel_scope' | 'conversation_fork' | 'conversation_retry'
+    }>,
   ): Promise<OpReceipt> {
     const thread = this.#threads.get(op.threadId);
     if (thread === undefined) {
@@ -1175,6 +1536,12 @@ class Supervisor implements RuntimePort {
       return thread.acceptExternal(op, { resolvedModel: resolution.model });
     }
     const receipt = await thread.acceptExternal(op);
+    if ((op.type === 'thread_rename' || op.type === 'thread_archive') && receipt.accepted) {
+      const catalog = this.#catalog.get(op.threadId);
+      if (catalog !== undefined) {
+        this.#catalog.set(op.threadId, { ...catalog, summary: thread.summary() });
+      }
+    }
     if (op.type === 'thread_close' && receipt.accepted) {
       // Defer close by one microtask so the unload flight is visible before thread_closed can be
       // published. A resume submitted from that event can then await lease release and cleanup.
@@ -1297,7 +1664,7 @@ class Supervisor implements RuntimePort {
   #restoreReservedLifecycleClaims(records: readonly SupervisorOpLedgerRecord[]): void {
     for (const record of records) {
       if (record.state !== 'reserved') continue;
-      if (record.op.type === 'thread_create') {
+      if (isThreadCreationOp(record.op)) {
         const current = this.#threadClaims.get(record.op.threadId);
         if (current === undefined || current.kind === 'existing') {
           this.#threadClaims.set(record.op.threadId, { kind: 'create', opId: record.op.opId });
@@ -1317,6 +1684,8 @@ class Supervisor implements RuntimePort {
     for (const record of records) {
       if (record.state !== 'reserved') continue;
       if (record.op.type !== 'thread_create'
+        && record.op.type !== 'conversation_fork'
+        && record.op.type !== 'conversation_retry'
         && record.op.type !== 'thread_resume'
         && record.op.type !== 'cancel_scope') continue;
       await this.#submitCanonical(record.op);
@@ -1328,6 +1697,8 @@ class Supervisor implements RuntimePort {
     for (const record of records) {
       if (record.state !== 'final' || record.receipt?.accepted !== true) continue;
       if (record.op.type === 'thread_create'
+        || record.op.type === 'conversation_fork'
+        || record.op.type === 'conversation_retry'
         || record.op.type === 'thread_resume'
         || record.op.type === 'thread_close') {
         latest.set(record.op.threadId, record);
@@ -1346,7 +1717,7 @@ class Supervisor implements RuntimePort {
     return records.findLast((record) =>
       record.state === 'final'
       && record.receipt?.accepted === true
-      && record.op.type === 'thread_create'
+      && isThreadCreationOp(record.op)
       && record.op.threadId === threadId);
   }
 
@@ -1359,8 +1730,8 @@ class Supervisor implements RuntimePort {
     readonly capture: (attachment: ThreadDriverAttachment) => void;
   }): Promise<{ readonly attachment: ThreadDriverAttachment; readonly checkpointMatches: boolean }> {
     const createOp = input.createRecord.op;
-    if (createOp.type !== 'thread_create') {
-      throw new RuntimeStorageError('invalid_supervisor_op', 'Driver binding record is not thread_create');
+    if (!isThreadCreationOp(createOp)) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Driver binding record is not a creation op');
     }
     const creationKey = input.createRecord.driverCreation?.creationKey;
     if (creationKey === undefined) {
@@ -1378,6 +1749,9 @@ class Supervisor implements RuntimePort {
         parentThreadId: input.state.meta.parentThreadId,
       }),
       creationKey,
+      ...(createOp.type === 'conversation_fork' || createOp.type === 'conversation_retry'
+        ? { initialCheckpoint: input.expectedCheckpoint }
+        : {}),
       ...(this.#capabilityServices === undefined && this.#legacyApprovalPatterns !== undefined && {
         legacyApprovalPatterns: this.#legacyApprovalPatterns,
       }),
@@ -1408,7 +1782,7 @@ class Supervisor implements RuntimePort {
     catalog: ThreadCatalogRecord,
   ): Promise<void> {
     const op = record.op;
-    if (op.type !== 'thread_create' && op.type !== 'thread_resume') return;
+    if (!isThreadCreationOp(op) && op.type !== 'thread_resume') return;
     const journal = await this.#workspace.openThreadJournal(op.threadId);
     if (journal === undefined) {
       throw new RuntimeStorageError('thread_not_found', `Accepted attachment has no journal: ${op.threadId}`);
@@ -1459,7 +1833,7 @@ class Supervisor implements RuntimePort {
       const host = new ThreadDriverHostController();
       let driverRef = catalog.driverRef ?? state.meta.driverRef ?? record.driverCreation?.driverRef;
       if (driverRef === undefined) {
-        const createRecord = op.type === 'thread_create' ? record : await this.#acceptedCreateRecord(op.threadId);
+        const createRecord = isThreadCreationOp(op) ? record : await this.#acceptedCreateRecord(op.threadId);
         if (createRecord === undefined) {
           throw new RuntimeStorageError(
             'thread_driver_unavailable',
@@ -1533,6 +1907,18 @@ class Supervisor implements RuntimePort {
       this.#attachmentLifecycleOps.set(op.threadId, op.opId);
       this.#unloaded.delete(op.threadId);
       await this.#deliverPendingResultsForParent(op.threadId).catch(() => undefined);
+      if (op.type === 'conversation_retry') {
+        if (record.retryPrompt === undefined || record.retryPromptOpId === undefined) {
+          throw new RuntimeStorageError('invalid_supervisor_op', 'Recovered retry has no frozen prompt');
+        }
+        await this.#submit({
+          type: 'prompt',
+          opId: record.retryPromptOpId,
+          workspaceId: this.workspaceId,
+          threadId: op.threadId,
+          text: record.retryPrompt.text,
+        });
+      }
     } catch (error) {
       const failures: unknown[] = [error];
       if (attachment !== undefined) {
@@ -1649,6 +2035,8 @@ class Supervisor implements RuntimePort {
     for (const record of records) {
       if (record.state !== 'final' || record.receipt?.accepted !== true) continue;
       if (record.op.type === 'thread_create'
+        || record.op.type === 'conversation_fork'
+        || record.op.type === 'conversation_retry'
         || record.op.type === 'thread_resume'
         || record.op.type === 'thread_close') {
         latest.set(record.op.threadId, record);
@@ -1753,6 +2141,43 @@ class Supervisor implements RuntimePort {
     return snapshot({ targetThreadIds, resolvedTargets });
   }
 
+  #freezeRetryPrompt(
+    op: Extract<RuntimeOp, { type: 'conversation_retry' }>,
+  ):
+    | { readonly ok: true; readonly prompt: NonNullable<SupervisorOpLedgerRecord['retryPrompt']> }
+    | { readonly ok: false; readonly reason: NonNullable<
+        SupervisorOpLedgerRecord['retryRejectionReason']
+      > } {
+    const source = this.#threadState(op.sourceThreadId);
+    if (source === undefined) return { ok: false, reason: 'source_thread_not_found' };
+    if (source.summary.activeRunId !== undefined
+      || source.checkpoint.frontend.pendingControls.length > 0) {
+      return { ok: false, reason: 'source_thread_busy' };
+    }
+    const seed = buildConversationSeed(source, op.model, {
+      retry: true,
+      ...(op.turnId !== undefined && { throughTurnId: op.turnId }),
+    });
+    if (!seed.ok) {
+      return {
+        ok: false,
+        reason: seed.reason === 'retry_requires_text_prompt'
+          ? 'retry_requires_text_prompt'
+          : 'retry_turn_not_found',
+      };
+    }
+    if (seed.retryPrompt === undefined) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Retry seed has no selected prompt');
+    }
+    return {
+      ok: true,
+      prompt: snapshot({
+        ...seed.retryPrompt,
+        digest: sha256Text(seed.retryPrompt.text),
+      }),
+    };
+  }
+
   async #acceptUnloadedAbort(
     op: Extract<import('../protocol/index.js').InternalThreadRuntimeOp, { type: 'abort' }>,
   ): Promise<void> {
@@ -1803,7 +2228,9 @@ class Supervisor implements RuntimePort {
         const terminal = writer.state.runs.get(target.terminalRunId);
         const finishOwner = owner !== undefined && root !== undefined
           && owner.state !== 'completed' && owner.state !== 'rejected'
-          && (owner.op.type === 'prompt' || owner.op.type === 'continue');
+          && (owner.op.type === 'prompt'
+            || owner.op.type === 'continue'
+            || owner.op.type === 'compact');
         const mutations: import('./ports.js').RuntimeThreadMutation[] = [];
         if (finishOwner) {
           mutations.push({ type: 'completed', opId: target.ownerOpId, outcome: 'interrupted' });
@@ -1819,7 +2246,10 @@ class Supervisor implements RuntimePort {
           });
         }
         mutations.push({ type: 'completed', opId: op.opId, outcome: 'applied' });
-        if (finishOwner && root !== undefined && (owner.op.type === 'prompt' || owner.op.type === 'continue')) {
+        if (finishOwner && root !== undefined
+          && (owner.op.type === 'prompt'
+            || owner.op.type === 'continue'
+            || owner.op.type === 'compact')) {
           await writer.commit([
             {
               event: {
@@ -2316,12 +2746,14 @@ class Supervisor implements RuntimePort {
           );
           continue;
         }
-        const recoverableActivity = (entry.op.type === 'prompt' || entry.op.type === 'continue')
+        const recoverableActivity = (entry.op.type === 'prompt'
+          || entry.op.type === 'continue'
+          || entry.op.type === 'compact')
           && (entry.state === 'accepted_pending' || entry.state === 'started');
         if (!recoverableActivity && entry.state !== 'started') continue;
         if (entry.op.type === 'set_model') continue;
         const parentOpId = 'parentOpId' in entry.op ? entry.op.parentOpId : undefined;
-        if (entry.op.type === 'prompt' || entry.op.type === 'continue') {
+        if (entry.op.type === 'prompt' || entry.op.type === 'continue' || entry.op.type === 'compact') {
           const root = [...writer.state.runs.values()].find((run) => run.ownerOpId === opId);
           if (root === undefined) {
             throw new RuntimeStorageError('run_reservation_missing', `Recovery has no run for ${opId}`);
@@ -2382,7 +2814,7 @@ class Supervisor implements RuntimePort {
             },
           ];
           const parentThreadId = writer.state.meta.parentThreadId;
-          if (parentThreadId !== undefined) {
+          if (parentThreadId !== undefined && entry.op.type !== 'compact') {
             const resultOpId = this.#identityFactory.deriveOpId({
               purpose: 'thread_result',
               workspaceId: this.workspaceId,
@@ -2591,7 +3023,7 @@ class Supervisor implements RuntimePort {
     receipt: OpReceipt,
   ): SupervisorOpLedgerRecord {
     let driverCreation = record.driverCreation;
-    if (record.op.type === 'thread_create') {
+    if (isThreadCreationOp(record.op)) {
       const creationKey = driverCreation?.creationKey;
       if (creationKey === undefined) {
         throw new RuntimeStorageError('invalid_supervisor_op', 'thread_create has no creation key');
@@ -2640,9 +3072,14 @@ class Supervisor implements RuntimePort {
       return rejected(op, lifecycle.event.reason);
     }
     if (lifecycle?.event.type === 'op_completed') {
-      const rootRun = op.type === 'prompt' || op.type === 'continue'
-        ? [...(state?.runs.values() ?? [])].find((run) => run.ownerOpId === op.opId)
+      const rootOwnerOpId = op.type === 'conversation_retry'
+        ? record.retryPromptOpId
+        : op.opId;
+      const rootRun = op.type === 'prompt' || op.type === 'continue' || op.type === 'compact'
+        || op.type === 'conversation_retry'
+        ? [...(state?.runs.values() ?? [])].find((run) => run.ownerOpId === rootOwnerOpId)
         : undefined;
+      if (op.type === 'conversation_retry' && rootRun === undefined) return undefined;
       return {
         accepted: true,
         opId: op.opId,
@@ -2917,6 +3354,7 @@ function recoveryMailboxEntries(
     if (entry.state === 'accepted_pending') {
       return entry.op.type === 'prompt'
         || entry.op.type === 'continue'
+        || entry.op.type === 'compact'
         || entry.op.type === 'control_response'
         || entry.op.type === 'abort'
         || entry.op.type === 'thread_close';
@@ -2973,6 +3411,11 @@ function validateCreateOptions(
   }
   if (options.workspace.workspaceId !== undefined) {
     assertWorkspaceId(options.workspace.workspaceId, 'workspace.workspaceId');
+  }
+  if (options.workspaceReview !== undefined
+    && (!hasMethod(options.workspaceReview, 'snapshotGit')
+      || !hasMethod(options.workspaceReview, 'snapshotDiff'))) {
+    throw new TypeError('Runtime workspaceReview port is incomplete');
   }
   const capabilityMode = options.capabilityMode ?? 'static';
   const driverMode = options.threadDriverFactory.requirements.capabilityMode ?? 'static';
@@ -3105,6 +3548,371 @@ function rejected(
   };
 }
 
+function isThreadCreationOp(
+  op: Readonly<RuntimeOp>,
+): op is Extract<RuntimeOp, {
+  type: 'thread_create' | 'conversation_fork' | 'conversation_retry'
+}> {
+  return op.type === 'thread_create'
+    || op.type === 'conversation_fork'
+    || op.type === 'conversation_retry';
+}
+
+type ConversationSeed =
+  | {
+      readonly ok: true;
+      readonly checkpoint: ThreadDriverCheckpoint;
+      readonly record: LegacyThreadSeedRecord;
+      readonly retryPrompt?: {
+        readonly messageId: string;
+        readonly turnId: TurnId;
+        readonly text: string;
+      };
+    }
+  | { readonly ok: false; readonly reason: string };
+
+function buildConversationSeed(
+  source: FoldedThreadJournal,
+  model: import('../protocol/index.js').ModelRef,
+  options: {
+    readonly throughTurnId?: TurnId;
+    readonly retry?: boolean;
+    readonly retryMessageId?: string;
+  },
+): ConversationSeed {
+  const transcript = source.checkpoint.frontend.transcript;
+  let cutoff = transcript.length;
+  let retryPrompt: Extract<ConversationSeed, { readonly ok: true }>['retryPrompt'];
+  if (options.retry === true) {
+    const prompt = transcript.findLast((message) =>
+      message.role === 'user'
+      && (message.source === undefined || message.source === 'prompt')
+      && (options.retryMessageId === undefined || message.id === options.retryMessageId)
+      && (options.throughTurnId === undefined
+        || source.messageTurnIds.get(message.id) === options.throughTurnId));
+    const promptTurnId = prompt === undefined ? undefined : source.messageTurnIds.get(prompt.id);
+    if (prompt?.role !== 'user' || promptTurnId === undefined) {
+      return { ok: false, reason: 'retry_turn_not_found' };
+    }
+    if (prompt.content.some((part) => part.type !== 'text')) {
+      return { ok: false, reason: 'retry_requires_text_prompt' };
+    }
+    const retryText = prompt.content.map((part) => part.type === 'text' ? part.text : '').join('');
+    if (retryText.trim() === '') return { ok: false, reason: 'retry_requires_text_prompt' };
+    retryPrompt = {
+      messageId: prompt.id,
+      turnId: promptTurnId,
+      text: retryText,
+    };
+    cutoff = transcript.findIndex((message) => message.id === prompt.id);
+    if (cutoff < 0) return { ok: false, reason: 'retry_turn_not_found' };
+  } else if (options.throughTurnId !== undefined) {
+    const index = transcript.findLastIndex((message) =>
+      source.messageTurnIds.get(message.id) === options.throughTurnId);
+    if (index < 0) {
+      return { ok: false, reason: 'fork_turn_not_found' };
+    }
+    cutoff = index + 1;
+  }
+  const forkedTranscript = snapshot(transcript.slice(0, cutoff));
+  const usage = new UsageTracker();
+  usage.seed(forkedTranscript);
+  const sourceCompaction = source.checkpoint.execution.compaction;
+  const compaction = sourceCompaction !== undefined
+    && forkedTranscript.some((message) => message.id === sourceCompaction.tailStartId)
+      ? snapshot(sourceCompaction)
+      : undefined;
+  const checkpoint = snapshot<ThreadDriverCheckpoint>({
+    frontend: {
+      model,
+      transcript: forkedTranscript,
+      usage: usage.snapshot(),
+      queues: { steering: [], followUp: [] },
+      plan: [],
+      pendingControls: [],
+    },
+    execution: { ...(compaction === undefined ? {} : { compaction }) },
+  });
+  const record = snapshot<LegacyThreadSeedRecord>({
+    type: 'legacy_seed',
+    sourceSessionId: source.meta.threadId,
+    transcript: forkedTranscript,
+    turnProvenance: forkedTranscript.flatMap((message) => {
+      const turnId = source.messageTurnIds.get(message.id);
+      return turnId === undefined ? [] : [{ messageId: message.id, turnId }];
+    }),
+    usage: checkpoint.frontend.usage,
+    ...(compaction === undefined ? {} : { compaction }),
+  });
+  return {
+    ok: true,
+    checkpoint,
+    record,
+    ...(retryPrompt === undefined ? {} : { retryPrompt }),
+  };
+}
+
+function sha256Text(text: string): string {
+  return new Bun.CryptoHasher('sha256').update(text).digest('hex');
+}
+
+function threadPreview(messages: readonly AgentMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message === undefined) continue;
+    const text = message.content
+      .filter((part): part is { readonly type: 'text'; readonly text: string } => part.type === 'text')
+      .map((part) => part.text)
+      .join(' ')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    if (text !== '') return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+  }
+  return undefined;
+}
+
+function validateGitSnapshot(value: unknown): {
+  readonly branch?: string;
+  readonly dirty: boolean;
+} {
+  const copied = strictJsonSnapshot(value);
+  if (copied === null || typeof copied !== 'object' || Array.isArray(copied)) {
+    throw new Error('RuntimeWorkspaceReviewPort returned an invalid Git snapshot');
+  }
+  const record = copied as Readonly<Record<string, unknown>>;
+  const keys = Object.keys(record).sort();
+  if (keys.some((key) => key !== 'branch' && key !== 'dirty')
+    || typeof record['dirty'] !== 'boolean'
+    || (record['branch'] !== undefined && typeof record['branch'] !== 'string')) {
+    throw new Error('RuntimeWorkspaceReviewPort returned an invalid Git snapshot');
+  }
+  return {
+    ...(typeof record['branch'] === 'string' && record['branch'] !== ''
+      ? { branch: record['branch'] }
+      : {}),
+    dirty: record['dirty'],
+  };
+}
+
+function validateDiffFiles(value: unknown): readonly Readonly<RuntimeDiffFile>[] {
+  const files = strictJsonSnapshot(value);
+  if (!Array.isArray(files)) {
+    throw new Error('RuntimeWorkspaceReviewPort returned an invalid diff snapshot');
+  }
+  return files.map((item) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('RuntimeWorkspaceReviewPort returned an invalid diff file');
+    }
+    const file = item as Readonly<Record<string, unknown>>;
+    const keys = Object.keys(file).sort();
+    if (keys.length !== 4
+      || !keys.includes('path')
+      || !keys.includes('group')
+      || !keys.includes('status')
+      || !keys.includes('patch')
+      || typeof file['path'] !== 'string'
+      || file['path'] === ''
+      || (file['group'] !== 'staged'
+        && file['group'] !== 'unstaged'
+        && file['group'] !== 'untracked')
+      || typeof file['status'] !== 'string'
+      || typeof file['patch'] !== 'string') {
+      throw new Error('RuntimeWorkspaceReviewPort returned an invalid diff file');
+    }
+    return file as unknown as Readonly<RuntimeDiffFile>;
+  });
+}
+
+function buildReviewSnapshot(
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  state: FoldedThreadJournal,
+): RuntimeReviewSnapshot {
+  type MutableReasoning = {
+    key: string;
+    messageId: string;
+    status: 'running' | 'completed' | 'aborted' | 'error';
+    startedAt: number;
+    endedAt?: number;
+    durationMs?: number;
+    content: string;
+  };
+  type MutableTool = {
+    key: string;
+    toolCallId: string;
+    name: string;
+    target?: string;
+    status: 'running' | 'succeeded' | 'failed' | 'aborted';
+    startedAt: number;
+    endedAt?: number;
+    durationMs?: number;
+    summary?: string;
+    args: import('../protocol/index.js').StrictJsonValue;
+    output: string;
+    result?: import('../protocol/index.js').ToolResultMessage;
+  };
+  const reasoning = new Map<string, MutableReasoning>();
+  const tools = new Map<string, MutableTool>();
+  for (const envelope of state.envelopes) {
+    const event = envelope.event;
+    if (event.type === 'message_update'
+      && (event.event.type === 'reasoning_start'
+        || event.event.type === 'reasoning_delta'
+        || event.event.type === 'reasoning_end')) {
+      const key = `${event.messageId}:${event.event.contentIndex}`;
+      const existing = reasoning.get(key) ?? {
+        key,
+        messageId: event.messageId,
+        status: 'running' as const,
+        startedAt: envelope.timestamp,
+        content: '',
+      };
+      if (event.event.type === 'reasoning_delta') existing.content += event.event.delta;
+      else if (event.event.type === 'reasoning_end') {
+        existing.content = event.event.content;
+        existing.status = 'completed';
+        existing.endedAt = envelope.timestamp;
+        existing.durationMs = Math.max(0, envelope.timestamp - existing.startedAt);
+      }
+      reasoning.set(key, existing);
+      continue;
+    }
+    if (event.type === 'message_end' && event.message.role === 'assistant') {
+      for (const [contentIndex, part] of event.message.content.entries()) {
+        if (part.type !== 'reasoning') continue;
+        const key = `${event.message.id}:${contentIndex}`;
+        const existing = reasoning.get(key) ?? {
+          key,
+          messageId: event.message.id,
+          status: 'completed' as const,
+          startedAt: envelope.timestamp,
+          content: '',
+        };
+        existing.content = part.text;
+        existing.status = event.message.stopReason === 'aborted'
+          ? 'aborted'
+          : event.message.stopReason === 'error' ? 'error' : 'completed';
+        existing.endedAt = envelope.timestamp;
+        existing.durationMs = Math.max(0, envelope.timestamp - existing.startedAt);
+        reasoning.set(key, existing);
+      }
+      continue;
+    }
+    if (event.type === 'tool_execution_start') {
+      const key = `${envelope.turnId ?? 'turn'}:${event.toolCallId}`;
+      tools.set(key, {
+        key,
+        toolCallId: event.toolCallId,
+        name: event.toolName,
+        ...(toolTarget(event.args) === undefined ? {} : { target: toolTarget(event.args) }),
+        status: 'running',
+        startedAt: envelope.timestamp,
+        args: strictJsonSnapshot(event.args),
+        output: '',
+      });
+      continue;
+    }
+    if (event.type === 'tool_execution_update') {
+      const key = `${envelope.turnId ?? 'turn'}:${event.toolCallId}`;
+      const tool = tools.get(key);
+      if (tool !== undefined && typeof event.update.output === 'string') {
+        tool.output = event.update.output;
+      }
+      continue;
+    }
+    if (event.type === 'tool_execution_end') {
+      const key = `${envelope.turnId ?? 'turn'}:${event.toolCallId}`;
+      const tool = tools.get(key) ?? {
+        key,
+        toolCallId: event.toolCallId,
+        name: event.result.toolName,
+        status: 'running' as const,
+        startedAt: envelope.timestamp,
+        args: null,
+        output: '',
+      };
+      tool.status = event.result.isError
+        ? event.result.content.some((part) => part.type === 'text' && /abort|interrupt/iu.test(part.text))
+          ? 'aborted'
+          : 'failed'
+        : 'succeeded';
+      tool.endedAt = envelope.timestamp;
+      tool.durationMs = Math.max(0, envelope.timestamp - tool.startedAt);
+      tool.summary = toolResultSummary(event.result);
+      tool.result = event.result;
+      tools.set(key, tool);
+    }
+  }
+  return {
+    workspaceId,
+    threadId,
+    highWaterSeq: state.highWaterSeq,
+    reasoning: [...reasoning.values()],
+    tools: [...tools.values()],
+  };
+}
+
+function toolTarget(args: unknown): string | undefined {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined;
+  const record = args as Readonly<Record<string, unknown>>;
+  for (const key of ['path', 'file', 'command', 'url', 'cwd', 'query']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  return undefined;
+}
+
+function toolResultSummary(result: import('../protocol/index.js').ToolResultMessage): string | undefined {
+  const text = result.content
+    .find((part): part is { readonly type: 'text'; readonly text: string } => part.type === 'text')
+    ?.text.replace(/\s+/gu, ' ').trim();
+  if (text === undefined || text === '') return undefined;
+  return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+}
+
+function turnDiffFiles(state: FoldedThreadJournal): readonly Readonly<RuntimeDiffFile>[] {
+  const activity = state.checkpoint.frontend.activity;
+  const selectedTurnId = activity === undefined
+    ? state.envelopes.findLast((envelope) => envelope.event.type === 'turn_end')?.turnId
+    : activity.turnId;
+  if (selectedTurnId === undefined) return [];
+  const starts = new Map<string, { readonly name: string; readonly args: unknown }>();
+  const files: RuntimeDiffFile[] = [];
+  for (const envelope of state.envelopes) {
+    if (envelope.turnId !== selectedTurnId) continue;
+    if (envelope.event.type === 'tool_execution_start') {
+      starts.set(envelope.event.toolCallId, {
+        name: envelope.event.toolName,
+        args: envelope.event.args,
+      });
+      continue;
+    }
+    if (envelope.event.type !== 'tool_execution_end') continue;
+    const details = envelope.event.result.details;
+    if (details === null || typeof details !== 'object' || Array.isArray(details)) continue;
+    const diff = (details as Readonly<Record<string, unknown>>)['diff'];
+    if (typeof diff !== 'string' || diff === '') continue;
+    const start = starts.get(envelope.event.toolCallId);
+    const target = toolTarget(start?.args) ?? pathFromUnifiedDiff(diff)
+      ?? `${start?.name ?? envelope.event.result.toolName}-${envelope.event.toolCallId}`;
+    files.push({
+      path: target,
+      group: 'turn',
+      status: envelope.event.result.isError ? 'failed' : 'modified',
+      patch: diff,
+    });
+  }
+  return files;
+}
+
+function pathFromUnifiedDiff(diff: string): string | undefined {
+  const line = diff.split('\n').find((candidate) => candidate.startsWith('+++ '));
+  if (line === undefined) return undefined;
+  const raw = line.slice(4).split('\t', 1)[0]?.trim();
+  if (raw === undefined || raw === '' || raw === '/dev/null') return undefined;
+  return raw.startsWith('b/') ? raw.slice(2) : raw;
+}
+
 function snapshot<T>(value: T): T {
   return strictJsonSnapshot(value) as T;
 }
@@ -3220,7 +4028,9 @@ function recoverySummary(state: FoldedThreadJournal | undefined): ThreadSummary 
   if (state === undefined) return undefined;
   const reserved = [...state.mailbox.entries()].flatMap(([opId, entry]) => {
     if (entry.state !== 'accepted_pending'
-      || (entry.op.type !== 'prompt' && entry.op.type !== 'continue')) return [];
+      || (entry.op.type !== 'prompt'
+        && entry.op.type !== 'continue'
+        && entry.op.type !== 'compact')) return [];
     const run = [...state.runs.values()].find((candidate) => candidate.ownerOpId === opId);
     return run === undefined ? [] : [{ kind: 'reserved_op' as const, ownerOpId: opId, runId: run.runId }];
   });

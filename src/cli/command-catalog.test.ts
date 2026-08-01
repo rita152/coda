@@ -118,6 +118,8 @@ describe('canonical command catalog', () => {
       'help', 'queue', 'status', 'login', 'model', 'logout', 'auth', 'followup', 'abort',
       'search', 'next', 'previous', 'latest', 'copy', 'export', 'history', 'edit',
       'files', 'stash', 'restore', 'draft', 'vim', 'quit', 'doctor',
+      'diff', 'review', 'permissions', 'compact', 'retry', 'fork', 'new', 'sessions',
+      'resume', 'switch', 'rename', 'archive',
     ]);
     expect(renderInteractiveHelp('tui').join('\n')).toContain('PageUp/PageDown: scroll output');
     expect(renderInteractiveHelp('tui').join('\n')).toContain('Alt+Up/Down: browse prompt history');
@@ -162,6 +164,11 @@ describe('canonical command catalog', () => {
         reason: 'finish or abort the current run first',
       });
     expect(commandPaletteEntries('model', { ...base, phase: 'compacting' })[0]?.availability)
+      .toEqual({
+        kind: 'disabled',
+        reason: 'finish or abort the current run first',
+      });
+    expect(commandPaletteEntries('fork', { ...base, phase: 'running' })[0]?.availability)
       .toEqual({
         kind: 'disabled',
         reason: 'finish or abort the current run first',

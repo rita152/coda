@@ -31,6 +31,7 @@ import {
   canonicalJson,
   canonicalJsonSha256,
   canonicalizeRuntimeOp,
+  deriveLegacySeedTurnProvenance,
   isDerivedOpId,
   isExternalOpId,
   isOpId,
@@ -1523,6 +1524,7 @@ function readLegacySession(file: string): LegacySessionView {
       type: 'legacy_seed',
       sourceSessionId: meta.id,
       transcript: messages,
+      turnProvenance: deriveLegacySeedTurnProvenance(meta.id, messages),
       usage,
       ...(seedCompaction !== undefined && { compaction: seedCompaction }),
     },
@@ -1908,6 +1910,16 @@ function validateCommitCorrespondence(
       const found = record.envelopes.some((envelope) =>
         envelope.turnId === mutation.owningTurnId && envelope.event.type === 'turn_start');
       if (!found) throw invalidJournal('rule scope window replacement has no matching turn_start');
+    } else if (mutation.type === 'thread_title_updated') {
+      requireMatchingEnvelope(record, 'thread_updated', (event) =>
+        event.changed === 'title'
+        && event.thread.title === mutation.title
+        && event.thread.updatedAt === mutation.updatedAt);
+    } else if (mutation.type === 'thread_archive_updated') {
+      requireMatchingEnvelope(record, 'thread_updated', (event) =>
+        event.changed === 'archived'
+        && event.thread.archivedAt === mutation.archivedAt
+        && event.thread.updatedAt === mutation.updatedAt);
     }
   }
 }
@@ -2052,7 +2064,7 @@ function validateLegacySeed(input: unknown): LegacyThreadSeedRecord {
     assertExactKeys(
       value,
       ['type', 'sourceSessionId', 'transcript', 'usage'],
-      ['compaction', 'mirrorRecords'],
+      ['compaction', 'mirrorRecords', 'turnProvenance'],
     );
   }
   if (!isRecord(value) || value.type !== 'legacy_seed'
@@ -2061,6 +2073,7 @@ function validateLegacySeed(input: unknown): LegacyThreadSeedRecord {
     throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy seed');
   }
   const transcript = value.transcript.map((message) => validateAgentMessage(message));
+  const turnProvenance = validateLegacyTurnProvenance(value.turnProvenance, transcript);
   const mirrorRecords = value.mirrorRecords === undefined
     ? undefined
     : Array.isArray(value.mirrorRecords)
@@ -2073,8 +2086,34 @@ function validateLegacySeed(input: unknown): LegacyThreadSeedRecord {
   return snapshot({
     ...value,
     transcript,
+    ...(turnProvenance !== undefined && { turnProvenance }),
     ...(mirrorRecords !== undefined && { mirrorRecords }),
   }) as unknown as LegacyThreadSeedRecord;
+}
+
+function validateLegacyTurnProvenance(
+  input: unknown,
+  transcript: readonly AgentMessage[],
+): readonly import('../protocol/index.js').LegacySeedTurnProvenance[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) {
+    throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+  }
+  if (input.length !== transcript.length) {
+    throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+  }
+  const result = input.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+    }
+    assertExactKeys(entry, ['messageId', 'turnId']);
+    if (!isNonEmptyWellFormedString(entry.messageId)
+      || entry.messageId !== transcript[index]?.id || !isTurnId(entry.turnId)) {
+      throw new RuntimeStorageError('invalid_legacy_seed', 'Invalid legacy turn provenance');
+    }
+    return { messageId: entry.messageId, turnId: entry.turnId };
+  });
+  return snapshot(result);
 }
 
 function validateLegacyMirrorRecord(input: unknown): unknown {
@@ -2198,7 +2237,7 @@ function validateMutation(
     case 'run_reserved':
       assertExactKeys(value, ['type', 'runId', 'reason', 'permissionCeiling'], ['ownerOpId', 'predecessorRunId']);
       if (!isRunId(value.runId) || !isPermissionCeiling(value.permissionCeiling)) break;
-      if (value.reason === 'prompt') {
+      if (value.reason === 'prompt' || value.reason === 'compact') {
         if (!isOpId(value.ownerOpId) || value.predecessorRunId !== undefined) break;
       } else if (value.reason === 'continue') {
         if (!isOpId(value.ownerOpId)
@@ -2233,6 +2272,19 @@ function validateMutation(
     case 'model_selected':
       assertExactKeys(value, ['type', 'ownerOpId', 'model']);
       if (isOpId(value.ownerOpId) && isModelRef(value.model)) return value as unknown as RuntimeThreadMutation;
+      break;
+    case 'thread_title_updated':
+      assertExactKeys(value, ['type', 'title', 'updatedAt']);
+      if (isNonEmptyWellFormedString(value.title)
+        && value.title.length <= 200
+        && isFiniteNumber(value.updatedAt)) return value as unknown as RuntimeThreadMutation;
+      break;
+    case 'thread_archive_updated':
+      assertExactKeys(value, ['type', 'updatedAt'], ['archivedAt']);
+      if (isFiniteNumber(value.updatedAt)
+        && (value.archivedAt === undefined || isFiniteNumber(value.archivedAt))) {
+        return value as unknown as RuntimeThreadMutation;
+      }
       break;
     case 'rule_scope_observed':
       assertExactKeys(value, ['type', 'scope', 'owningTurnId', 'invocationId']);
@@ -2338,7 +2390,8 @@ function validateSupervisorOpRecord(input: unknown, workspaceId: WorkspaceId): v
   const value = snapshotUnknown(input, 'invalid_supervisor_op');
   if (isRecord(value)) {
     assertExactKeys(value, ['opId', 'op', 'payloadHash', 'state'], [
-      'targetThreadIds', 'resolvedTargets', 'driverCreation', 'receipt',
+      'targetThreadIds', 'resolvedTargets', 'driverCreation', 'retryPromptOpId',
+      'retryPrompt', 'retryRejectionReason', 'receipt',
     ]);
   }
   if (!isRecord(value) || !isExternalOpId(value.opId) || !isRecord(value.op)
@@ -2390,6 +2443,32 @@ function validateSupervisorOpRecord(input: unknown, workspaceId: WorkspaceId): v
       throw new RuntimeStorageError('invalid_supervisor_op', 'Invalid driver creation claim');
     }
   }
+  if (value.retryPromptOpId !== undefined && !isExternalOpId(value.retryPromptOpId)) {
+    throw new RuntimeStorageError('invalid_supervisor_op', 'Invalid retry prompt operation id');
+  }
+  if (value.retryPrompt !== undefined) {
+    if (!isRecord(value.retryPrompt)) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Invalid frozen retry prompt');
+    }
+    assertExactKeys(value.retryPrompt, ['messageId', 'turnId', 'text', 'digest']);
+    if (!isNonEmptyWellFormedString(value.retryPrompt.messageId)
+      || !isTurnId(value.retryPrompt.turnId)
+      || typeof value.retryPrompt.text !== 'string'
+      || value.retryPrompt.text.trim() === ''
+      || !isWellFormedUnicode(value.retryPrompt.text)
+      || typeof value.retryPrompt.digest !== 'string'
+      || !/^[0-9a-f]{64}$/.test(value.retryPrompt.digest)
+      || sha256Hex(value.retryPrompt.text) !== value.retryPrompt.digest) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Invalid frozen retry prompt');
+    }
+  }
+  if (value.retryRejectionReason !== undefined
+    && value.retryRejectionReason !== 'source_thread_not_found'
+    && value.retryRejectionReason !== 'source_thread_busy'
+    && value.retryRejectionReason !== 'retry_turn_not_found'
+    && value.retryRejectionReason !== 'retry_requires_text_prompt') {
+    throw new RuntimeStorageError('invalid_supervisor_op', 'Invalid frozen retry rejection');
+  }
   if (value.receipt !== undefined && !isReceiptForOperation(
     value.receipt,
     op,
@@ -2404,8 +2483,28 @@ function validateSupervisorOpRecord(input: unknown, workspaceId: WorkspaceId): v
   } else if (value.targetThreadIds !== undefined || value.resolvedTargets !== undefined) {
     throw new RuntimeStorageError('invalid_supervisor_op', 'Non-scope operation carries scope targets');
   }
-  if ((op.type === 'thread_create') !== (value.driverCreation !== undefined)) {
+  const createsThread = op.type === 'thread_create'
+    || op.type === 'conversation_fork'
+    || op.type === 'conversation_retry';
+  if (createsThread !== (value.driverCreation !== undefined)) {
     throw new RuntimeStorageError('invalid_supervisor_op', 'Driver creation claim is on the wrong op type');
+  }
+  const hasRetryFreeze = (value.retryPrompt !== undefined) !== (value.retryRejectionReason !== undefined);
+  if (op.type === 'conversation_retry') {
+    if (value.retryPromptOpId === undefined || !hasRetryFreeze) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Retry prompt freeze is incomplete');
+    }
+    if (value.retryPromptOpId === op.opId) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Retry prompt operation reuses the root id');
+    }
+    if (value.retryPrompt !== undefined && op.turnId !== undefined
+      && value.retryPrompt.turnId !== op.turnId) {
+      throw new RuntimeStorageError('invalid_supervisor_op', 'Frozen retry turn differs from the op');
+    }
+  } else if (value.retryPromptOpId !== undefined
+    || value.retryPrompt !== undefined
+    || value.retryRejectionReason !== undefined) {
+    throw new RuntimeStorageError('invalid_supervisor_op', 'Retry fields are on the wrong op type');
   }
 }
 
@@ -2428,7 +2527,9 @@ function overlayCatalogDriverRef(
 ): ThreadCatalogRecord {
   let bound = catalog.driverRef;
   for (const record of records) {
-    if (record.op.type !== 'thread_create'
+    if ((record.op.type !== 'thread_create'
+        && record.op.type !== 'conversation_fork'
+        && record.op.type !== 'conversation_retry')
       || record.op.threadId !== catalog.summary.threadId
       || (record.state === 'final' && record.receipt?.accepted !== true)
       || record.driverCreation?.driverRef === undefined) continue;
@@ -2449,7 +2550,9 @@ function isFinalDriverRefEnrichment(
   candidate: SupervisorOpLedgerRecord,
 ): boolean {
   if (existing.state !== 'final' || candidate.state !== 'final'
-    || existing.op.type !== 'thread_create'
+    || (existing.op.type !== 'thread_create'
+      && existing.op.type !== 'conversation_fork'
+      && existing.op.type !== 'conversation_retry')
     || existing.receipt?.accepted !== true || candidate.receipt?.accepted !== true
     || existing.driverCreation?.driverRef !== undefined
     || candidate.driverCreation?.driverRef === undefined) return false;
@@ -2603,7 +2706,9 @@ function foldCatalogSummary(
   for (const record of records) {
     if (record.type !== 'commit') continue;
     for (const envelope of record.envelopes) {
-      if (envelope.event.type === 'thread_created' || envelope.event.type === 'thread_resumed') {
+      if (envelope.event.type === 'thread_created'
+        || envelope.event.type === 'thread_resumed'
+        || envelope.event.type === 'thread_updated') {
         summary = envelope.event.thread;
       } else if (envelope.event.type === 'thread_closed') {
         summary = omitActiveRun(summary, 'closed');
@@ -3125,6 +3230,7 @@ function validateMailboxOp(
     if (isExternalOpId(value.opId)) {
       const canonical = canonicalizeRuntimeOp(value);
       return canonical.type !== 'thread_create' && canonical.type !== 'thread_resume'
+        && canonical.type !== 'conversation_fork' && canonical.type !== 'conversation_retry'
         && canonical.type !== 'cancel_scope' && canonicalJson(canonical) === canonicalJson(value);
     }
     if (!isDerivedOpId(value.opId)) return false;
@@ -3168,7 +3274,8 @@ function isResolvedAbortTarget(value: unknown): boolean {
 
 function isMailboxOpType(value: string): boolean {
   return new Set([
-    'prompt', 'continue', 'steer', 'follow_up', 'set_model', 'control_response', 'thread_close',
+    'prompt', 'continue', 'steer', 'follow_up', 'set_model', 'control_response',
+    'thread_rename', 'thread_archive', 'compact', 'thread_close',
   ]).has(value);
 }
 
@@ -3254,7 +3361,8 @@ function isReceiptForOperation(
       && canonicalJson(value.targetThreadIds) === canonicalJson(frozenTargets);
   }
   if (value.threadId !== op.threadId || value.targetThreadIds !== undefined) return false;
-  if (op.type === 'prompt' || op.type === 'continue') return isRunId(value.runId);
+  if (op.type === 'prompt' || op.type === 'continue' || op.type === 'compact'
+    || op.type === 'conversation_retry') return isRunId(value.runId);
   return value.runId === undefined;
 }
 

@@ -28,7 +28,7 @@ import type { RuntimeTurnProvider } from '../agent/index.js';
 
 type ActivityCommand = Extract<
   PreparedThreadDriverCommand,
-  { readonly op: { readonly type: 'prompt' | 'continue' } }
+  { readonly op: { readonly type: 'prompt' | 'continue' | 'compact' } }
 >;
 type SetModelCommand = Extract<
   PreparedThreadDriverCommand,
@@ -326,7 +326,18 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
       case 'compaction_start': {
         const compaction = activity.compaction;
         if (compaction === undefined) {
-          throw new Error('compaction_start has no predecessor agent_end reservation');
+          if (event.reason !== 'manual') {
+            throw new Error('compaction_start has no predecessor agent_end reservation');
+          }
+          await this.#host.commitEvent({
+            event: {
+              ...event,
+              predecessorRunId: activity.currentRunId,
+              activityRunId: activity.currentRunId,
+            },
+            runId: activity.currentRunId,
+          });
+          return;
         }
         activity.currentRunId = compaction.successorRunId;
         activity.currentTurnId = undefined;
@@ -442,6 +453,7 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
       switch (command.op.type) {
         case 'prompt':
         case 'continue':
+        case 'compact':
           return await this.#dispatchActivity(command as ActivityCommand);
         case 'set_model':
           this.#session.setModel((command as SetModelCommand).resolvedModel);
@@ -475,12 +487,16 @@ export class LegacySessionThreadDriver implements ThreadDriverPort {
     };
     this.#activity = activity;
     try {
-      if (command.resolvedInput.kind === 'prompt_input') {
+      if (command.op.type === 'compact') {
+        const result = await this.#session.compact();
+        this.#throwFatal();
+        activity.terminalStatus = result.aborted ? 'aborted' : 'completed';
+      } else if ('resolvedInput' in command && command.resolvedInput.kind === 'prompt_input') {
         await this.#session.prompt(command.resolvedInput.text);
       } else {
         await this.#session.continue();
       }
-      await this.#session.waitForIdle();
+      if (command.op.type !== 'compact') await this.#session.waitForIdle();
       this.#throwFatal();
       if (activity.terminalStatus === undefined) {
         throw new Error('Legacy Session activity completed without agent_end');

@@ -86,6 +86,37 @@ describe('ThreadJournalWriter', () => {
 });
 
 describe('foldThreadJournal commit correspondence', () => {
+  test('synthesizes stable message-turn provenance for old seeds that predate the field', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0] as ThreadMetaRecord;
+    const prompt = userMessage('legacy-prompt', 'legacy prompt');
+    const assistant = {
+      role: 'assistant' as const,
+      id: 'legacy-answer',
+      timestamp: 2,
+      content: [{ type: 'text' as const, text: 'legacy answer' }],
+      model: meta.model,
+      stopReason: 'stop' as const,
+      usage: { input: 1, output: 1 },
+    };
+    const state = foldThreadJournal([meta, {
+      type: 'legacy_seed',
+      sourceSessionId: 'legacy-session',
+      transcript: [prompt, assistant],
+      usage: { cumulative: { input: 1, output: 1 }, turns: 1, contextTokens: 2 },
+    }]);
+    const promptTurn = state.messageTurnIds.get(prompt.id);
+    expect(promptTurn).toMatch(/^turn_seed_v1_[0-9a-f]{64}$/);
+    expect(state.messageTurnIds.get(assistant.id)).toBe(promptTurn);
+    expect(() => foldThreadJournal([meta, {
+      type: 'legacy_seed',
+      sourceSessionId: 'legacy-session',
+      transcript: [prompt, assistant],
+      turnProvenance: [],
+      usage: { cumulative: { input: 1, output: 1 }, turns: 1, contextTokens: 2 },
+    }])).toThrow(/must cover the transcript in order/);
+  });
+
   test('rejects control mutation identity that differs from its same-record envelope', () => {
     const fixture = writerFixture();
     const meta = fixture.journal.records[0] as ThreadMetaRecord;

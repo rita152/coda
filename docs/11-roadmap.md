@@ -593,7 +593,7 @@ flowchart LR
 | UX0 | 已完成（两轮 review） | 不得改变 | UX 契约、旅程/parity matrix、环境与性能 characterization |
 | UX1 | 已完成（两轮 review） | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
 | UX2 | 已完成（两轮 review） | 保持 Runtime 语义 | 紧凑状态区、command palette、per-thread presentation 与 transcript 导航 |
-| UX3 | 待开始 | 业务动作只经 RuntimePort | review/diff/approval/session picker 与跨 thread attachment 恢复 |
+| UX3 | 已完成（两轮 review） | 业务动作只经 RuntimePort | review/diff/approval/session picker、manual compact、fork/retry 与跨 thread attachment 恢复 |
 | UX4 | 待开始 | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/窗口化与自动化输出 |
 
 每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
@@ -655,6 +655,14 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   capability、规范化 command/file resource、risk、allow-once invocation scope、allow-always frozen
   grantProposal scope、catalogRevision 与 effective policy revisions；UI 不直读 capability/policy internals，
   也不推导授权范围。优先交付 conversation retry/fork 与诚实恢复，不承诺虚假文件全量撤销。
+- 当前实现新增 canonical `thread_rename`、`thread_archive`、`compact`、`conversation_fork` 与
+  `conversation_retry`；metadata/manual compaction、seeded checkpoint 与 stable retry prompt 都经
+  journal/ledger 恢复。`RuntimePort` 增加 thread details、review、diff 与 Git/permission workspace
+  snapshot query，CLI 只注入 workspace review port，UI 不读取 repository。
+- `RuntimeFrontendSession` 使用 workspace-wide event stream 与 per-thread cursors；switch 做目标
+  snapshot splice 并恢复 presentation/pending approvals，隐藏 run 继续且能结案 waiter。TUI 已提供完整
+  diff viewer/searchable session picker、折叠 reasoning/tool/approval cards；classic/accessible 使用同一
+  actions 的文本等价入口。源 busy 时 fork/retry fail closed，文件/shell 副作用明确不 rewind。
 
 ### 8.6 UX4：可访问性、性能与自动化
 

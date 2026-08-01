@@ -615,7 +615,9 @@ function updateCatalog(journal: MemoryJournal, record: Extract<RuntimeJournalRec
   let summary = journal.catalog.summary;
   for (const envelope of record.envelopes) {
     const event = envelope.event;
-    if (event.type === 'thread_created' || event.type === 'thread_resumed') summary = event.thread;
+    if (event.type === 'thread_created'
+      || event.type === 'thread_resumed'
+      || event.type === 'thread_updated') summary = event.thread;
     if (event.type === 'thread_closed') summary = withoutActiveRun(summary, 'closed');
   }
   for (const mutation of record.mutations ?? []) {
@@ -648,7 +650,9 @@ function overlayCatalogDriverRef(
 ): ThreadCatalogRecord {
   let bound = catalog.driverRef;
   for (const record of records) {
-    if (record.op.type !== 'thread_create'
+    if ((record.op.type !== 'thread_create'
+        && record.op.type !== 'conversation_fork'
+        && record.op.type !== 'conversation_retry')
       || record.op.threadId !== catalog.summary.threadId
       || (record.state === 'final' && record.receipt?.accepted !== true)
       || record.driverCreation?.driverRef === undefined) continue;
@@ -669,7 +673,9 @@ function isFinalDriverRefEnrichment(
   candidate: SupervisorOpLedgerRecord,
 ): boolean {
   if (existing.state !== 'final' || candidate.state !== 'final'
-    || existing.op.type !== 'thread_create'
+    || (existing.op.type !== 'thread_create'
+      && existing.op.type !== 'conversation_fork'
+      && existing.op.type !== 'conversation_retry')
     || existing.receipt?.accepted !== true || candidate.receipt?.accepted !== true
     || existing.driverCreation?.driverRef !== undefined
     || candidate.driverCreation?.driverRef === undefined) return false;

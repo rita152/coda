@@ -9,6 +9,7 @@ import {
 import type {
   AgentMessage,
   ApprovalControlDecision,
+  ApprovalPresentation,
   EventEnvelope,
   ExternalOpId,
   ModelConfig,
@@ -17,11 +18,15 @@ import type {
   OpReceipt,
   RunId,
   RuntimeEvent,
+  RuntimeDiffSnapshot,
   RuntimeOp,
+  RuntimeReviewSnapshot,
+  RuntimeThreadListItem,
   ThreadId,
   ThreadSnapshot,
   ThreadUsage,
   UserMessage,
+  WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import type { RuntimePort } from '../runtime/index.js';
 import type {
@@ -42,7 +47,13 @@ export type RuntimeFrontendPort = Pick<
   | 'events'
   | 'getThreadSnapshot'
   | 'close'
->;
+> & Partial<Pick<
+  RuntimePort,
+  | 'listThreadDetails'
+  | 'getWorkspaceSnapshot'
+  | 'getReviewSnapshot'
+  | 'getDiffSnapshot'
+>>;
 
 export interface RuntimeFrontendOptions {
   readonly runtime: RuntimeFrontendPort;
@@ -51,6 +62,28 @@ export interface RuntimeFrontendOptions {
   readonly initialModel?: ModelConfig;
   /** Makes the full trusted config available to RuntimeModelResolver before an op is submitted. */
   readonly registerModel?: (model: ModelConfig) => void;
+}
+
+export interface RuntimeWorkspaceActions {
+  readonly currentThreadId: ThreadId;
+  eventHighWaterSeq(): number;
+  listSessions(): Promise<readonly RuntimeThreadListItem[]>;
+  workspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>>;
+  switchSession(threadId: ThreadId): Promise<void>;
+  newSession(model?: ModelConfig): Promise<ThreadId>;
+  renameSession(title: string): Promise<void>;
+  archiveSession(archived?: boolean): Promise<void>;
+  compactConversation(): Promise<void>;
+  forkConversation(throughTurnId?: import('../protocol/index.js').TurnId): Promise<ThreadId>;
+  retryConversation(turnId?: import('../protocol/index.js').TurnId): Promise<ThreadId>;
+  reviewSnapshot(): Promise<Readonly<RuntimeReviewSnapshot> | undefined>;
+  diffSnapshot(scope: 'turn' | 'workspace'): Promise<Readonly<RuntimeDiffSnapshot> | undefined>;
+  approvalPresentation(requestId: string): Readonly<ApprovalPresentation> | undefined;
+  pendingApprovals(): readonly {
+    readonly approvalId: string;
+    readonly toolCallId: string;
+    readonly description: string;
+  }[];
 }
 
 export class RuntimeFrontendOpRejectedError extends Error {
@@ -93,16 +126,21 @@ const EMPTY_USAGE: ThreadUsage = {
  * Runtime-backed implementation of the frontend's legacy-shaped view.
  * `initialize()` establishes the hot subscription before any lifecycle op.
  */
-export class RuntimeFrontendSession implements InteractiveSession {
+export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorkspaceActions {
   readonly #runtime: RuntimeFrontendPort;
-  readonly #threadId: ThreadId;
-  readonly #attachment: 'create' | 'resume';
+  #threadId: ThreadId;
+  #attachment: 'create' | 'resume';
   readonly #registerModel: ((model: ModelConfig) => void) | undefined;
   readonly #listeners = new Set<CliSessionListener>();
   readonly #attachmentListeners = new Set<
     (messages: readonly AgentMessage[]) => void | Promise<void>
   >();
-  readonly #pendingControls = new Map<string, RunId>();
+  readonly #pendingControls = new Map<string, {
+    readonly runId: RunId;
+    readonly presentation?: Readonly<ApprovalPresentation>;
+    readonly toolCallId?: string;
+    readonly description?: string;
+  }>();
   readonly #abortRequestedRuns = new Set<RunId>();
   readonly #opWaiters = new Map<OpId, (outcome: OpOutcome) => void>();
 
@@ -116,7 +154,10 @@ export class RuntimeFrontendSession implements InteractiveSession {
   #closed = false;
   #hydrating = true;
   #highWaterSeq = 0;
+  readonly #threadHighWater = new Map<ThreadId, number>();
   #pendingEnvelopes: Readonly<EventEnvelope>[] = [];
+  #transitionThreadId: ThreadId | undefined;
+  #transitionEnvelopes: Readonly<EventEnvelope>[] = [];
   #fanoutTail: Promise<void> = Promise.resolve();
   #eventPump: Promise<void> | undefined;
   #initializePromise: Promise<void> | undefined;
@@ -136,6 +177,10 @@ export class RuntimeFrontendSession implements InteractiveSession {
     return this.#threadId;
   }
 
+  get currentThreadId(): ThreadId {
+    return this.#threadId;
+  }
+
   /** Runtime owns no thread or journal until attachment succeeds. */
   isAttached(): boolean {
     return this.#attached;
@@ -144,6 +189,239 @@ export class RuntimeFrontendSession implements InteractiveSession {
   /** Frontends use the canonical Runtime cursor only for unread presentation bookkeeping. */
   eventHighWaterSeq(): number {
     return this.#highWaterSeq;
+  }
+
+  listSessions(): Promise<readonly RuntimeThreadListItem[]> {
+    this.#assertReady();
+    return this.#requireWorkspaceMethod('listThreadDetails')();
+  }
+
+  workspaceSnapshot(): Promise<Readonly<WorkspaceRuntimeSnapshot>> {
+    this.#assertReady();
+    return this.#requireWorkspaceMethod('getWorkspaceSnapshot')();
+  }
+
+  async switchSession(threadId: ThreadId): Promise<void> {
+    this.#assertReady();
+    if (threadId === this.#threadId) return;
+    if (this.#transitionThreadId !== undefined) {
+      throw new Error(`Session switch to ${this.#transitionThreadId} is already in progress`);
+    }
+    this.#transitionThreadId = threadId;
+    this.#transitionEnvelopes = [];
+    try {
+      const snapshot = await this.#runtime.getThreadSnapshot(threadId);
+      if (snapshot === undefined) throw new Error(`Unknown session ${threadId}`);
+      const resume = await this.#runtime.submit({
+        type: 'thread_resume',
+        opId: this.#runtime.newOpId(),
+        workspaceId: this.#runtime.workspaceId,
+        threadId,
+        model: snapshot.model,
+      });
+      if (!resume.accepted && resume.reason !== 'thread_already_attached') {
+        throw new RuntimeFrontendOpRejectedError(resume.opId, resume.reason);
+      }
+      const hydrated = await this.#runtime.getThreadSnapshot(threadId);
+      if (hydrated === undefined) throw new Error(`Runtime resumed ${threadId} without a snapshot`);
+      const pending = this.#transitionEnvelopes;
+      this.#transitionThreadId = undefined;
+      this.#transitionEnvelopes = [];
+      this.#threadId = threadId;
+      this.#attachment = 'resume';
+      this.#attached = true;
+      this.#model = { ref: { ...hydrated.model } };
+      this.#hydrating = true;
+      this.#pendingEnvelopes = pending;
+      this.#hydrate(hydrated);
+      await this.#notifyAttachment();
+    } catch (error) {
+      const pending = this.#transitionEnvelopes;
+      this.#transitionThreadId = undefined;
+      this.#transitionEnvelopes = [];
+      for (const envelope of pending) this.#applyEnvelope(envelope);
+      throw error;
+    }
+  }
+
+  async newSession(model = this.#model): Promise<ThreadId> {
+    this.#assertReady();
+    const previous = {
+      threadId: this.#threadId,
+      attachment: this.#attachment,
+      attached: this.#attached,
+      model: this.#model,
+      state: this.#state,
+      usage: copyUsage(this.#usage),
+      messages: copyMessages(this.#messages),
+      activeRunId: this.#activeRunId,
+      pendingControls: [...this.#pendingControls],
+      hydrating: this.#hydrating,
+      highWaterSeq: this.#highWaterSeq,
+      pendingEnvelopes: [...this.#pendingEnvelopes],
+    };
+    const restorePrevious = (): void => {
+      this.#threadId = previous.threadId;
+      this.#attachment = previous.attachment;
+      this.#attached = previous.attached;
+      this.#model = previous.model;
+      this.#state = previous.state;
+      this.#usage = copyUsage(previous.usage);
+      this.#messages = [...previous.messages];
+      this.#activeRunId = previous.activeRunId;
+      this.#pendingControls.clear();
+      for (const [requestId, control] of previous.pendingControls) {
+        this.#pendingControls.set(requestId, control);
+      }
+      this.#hydrating = previous.hydrating;
+      this.#highWaterSeq = previous.highWaterSeq;
+      this.#pendingEnvelopes = [...previous.pendingEnvelopes];
+    };
+    const threadId = this.#runtime.newThreadId();
+    this.#threadId = threadId;
+    this.#attachment = 'create';
+    this.#attached = false;
+    this.#model = model;
+    this.#hydrating = true;
+    this.#pendingEnvelopes = [];
+    this.#resetDetachedView();
+    try {
+      if (model !== undefined) await this.#ensureAttached(model);
+      else await this.#notifyAttachment();
+      return threadId;
+    } catch (error) {
+      const failedTargetEnvelopes = [...this.#pendingEnvelopes];
+      restorePrevious();
+      // An accepted create can still fail later while hydrating its snapshot. Preserve the
+      // workspace stream cursor for every event already observed from that now-background thread;
+      // otherwise its next live envelope would look like a fatal gap after we restore the source.
+      for (const envelope of failedTargetEnvelopes) {
+        try {
+          this.#applyEnvelope(envelope);
+        } catch (streamError) {
+          this.#reportEventFailure(streamError);
+          break;
+        }
+      }
+      if (previous.attached) {
+        this.#hydrating = true;
+        this.#pendingEnvelopes = [];
+        try {
+          const snapshot = await this.#runtime.getThreadSnapshot(previous.threadId);
+          if (snapshot === undefined) restorePrevious();
+          else this.#hydrate(snapshot);
+        } catch {
+          restorePrevious();
+        }
+      }
+      throw error;
+    }
+  }
+
+  async renameSession(title: string): Promise<void> {
+    this.#assertReady();
+    this.#assertAttachedModel();
+    const trimmed = title.trim();
+    if (trimmed === '') throw new Error('Session title cannot be empty');
+    await this.#submitAndWait({
+      type: 'thread_rename',
+      opId: this.#runtime.newOpId(),
+      workspaceId: this.#runtime.workspaceId,
+      threadId: this.#threadId,
+      title: trimmed,
+    });
+  }
+
+  async archiveSession(archived = true): Promise<void> {
+    this.#assertReady();
+    this.#assertAttachedModel();
+    await this.#submitAndWait({
+      type: 'thread_archive',
+      opId: this.#runtime.newOpId(),
+      workspaceId: this.#runtime.workspaceId,
+      threadId: this.#threadId,
+      archived,
+    });
+  }
+
+  async compactConversation(): Promise<void> {
+    this.#assertReady();
+    this.#assertAttachedModel();
+    await this.#submitAndWait({
+      type: 'compact',
+      opId: this.#runtime.newOpId(),
+      workspaceId: this.#runtime.workspaceId,
+      threadId: this.#threadId,
+    });
+  }
+
+  async forkConversation(
+    throughTurnId?: import('../protocol/index.js').TurnId,
+  ): Promise<ThreadId> {
+    this.#assertReady();
+    const model = this.#model;
+    if (model === undefined) throw new Error('尚未选择模型；请先运行 /model');
+    const target = this.#runtime.newThreadId();
+    const receipt = await this.#runtime.submit({
+      type: 'conversation_fork',
+      opId: this.#runtime.newOpId(),
+      workspaceId: this.#runtime.workspaceId,
+      sourceThreadId: this.#threadId,
+      threadId: target,
+      model: model.ref,
+      ...(throughTurnId === undefined ? {} : { throughTurnId }),
+    });
+    if (!receipt.accepted) throw new RuntimeFrontendOpRejectedError(receipt.opId, receipt.reason);
+    await this.switchSession(target);
+    return target;
+  }
+
+  async retryConversation(turnId?: import('../protocol/index.js').TurnId): Promise<ThreadId> {
+    this.#assertReady();
+    const model = this.#model;
+    if (model === undefined) throw new Error('尚未选择模型；请先运行 /model');
+    const target = this.#runtime.newThreadId();
+    const receipt = await this.#runtime.submit({
+      type: 'conversation_retry',
+      opId: this.#runtime.newOpId(),
+      workspaceId: this.#runtime.workspaceId,
+      sourceThreadId: this.#threadId,
+      threadId: target,
+      model: model.ref,
+      ...(turnId === undefined ? {} : { turnId }),
+    });
+    if (!receipt.accepted) throw new RuntimeFrontendOpRejectedError(receipt.opId, receipt.reason);
+    await this.switchSession(target);
+    return target;
+  }
+
+  reviewSnapshot(): Promise<Readonly<RuntimeReviewSnapshot> | undefined> {
+    this.#assertReady();
+    return this.#requireWorkspaceMethod('getReviewSnapshot')(this.#threadId);
+  }
+
+  diffSnapshot(scope: 'turn' | 'workspace'): Promise<Readonly<RuntimeDiffSnapshot> | undefined> {
+    this.#assertReady();
+    return this.#requireWorkspaceMethod('getDiffSnapshot')(this.#threadId, scope);
+  }
+
+  approvalPresentation(requestId: string): Readonly<ApprovalPresentation> | undefined {
+    return this.#pendingControls.get(requestId)?.presentation;
+  }
+
+  pendingApprovals(): readonly {
+    readonly approvalId: string;
+    readonly toolCallId: string;
+    readonly description: string;
+  }[] {
+    return [...this.#pendingControls].flatMap(([approvalId, control]) =>
+      control.toolCallId === undefined || control.description === undefined
+        ? []
+        : [{
+            approvalId,
+            toolCallId: control.toolCallId,
+            description: control.description,
+          }]);
   }
 
   async initialize(): Promise<void> {
@@ -161,7 +439,10 @@ export class RuntimeFrontendSession implements InteractiveSession {
 
   async #performInitialize(): Promise<void> {
     try {
-      const events = this.#runtime.events({ threadIds: [this.#threadId] });
+      // One non-blocking workspace stream keeps background runs alive while the visible target
+      // changes. Only the selected thread is projected into the legacy-shaped UI view.
+      const cursors = await this.#seedWorkspaceCursors();
+      const events = this.#runtime.events(cursors.length === 0 ? undefined : { cursors });
       this.#eventPump = this.#consumeEvents(events);
       if (this.#model !== undefined) await this.#ensureAttached(this.#model);
       this.#initialized = true;
@@ -286,7 +567,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
   ): void {
     if (!this.#pendingControls.has(requestId) || this.#closed) return;
     if (decision === 'abort') {
-      this.#submitAbort(this.#pendingControls.get(requestId));
+      this.#submitAbort(this.#pendingControls.get(requestId)?.runId);
       return;
     }
     this.#submitDetached({
@@ -353,6 +634,10 @@ export class RuntimeFrontendSession implements InteractiveSession {
       await this.#commitModelUpdate(model);
     }
     this.#model = model;
+    await this.#notifyAttachment();
+  }
+
+  async #notifyAttachment(): Promise<void> {
     for (const listener of [...this.#attachmentListeners]) {
       try {
         await listener(copyMessages(this.#messages));
@@ -382,9 +667,19 @@ export class RuntimeFrontendSession implements InteractiveSession {
     this.#activeRunId = snapshot.thread.activeRunId;
     this.#pendingControls.clear();
     for (const request of snapshot.pendingControls) {
-      this.#pendingControls.set(request.requestId, request.owningRunId);
+      this.#pendingControls.set(request.requestId, {
+        runId: request.owningRunId,
+        ...(request.kind === 'approval' && request.payload.presentation !== undefined && {
+          presentation: strictJsonSnapshot(request.payload.presentation) as unknown as ApprovalPresentation,
+        }),
+        ...(request.kind === 'approval' && {
+          toolCallId: request.payload.toolCallId,
+          description: request.payload.description,
+        }),
+      });
     }
     this.#highWaterSeq = snapshot.highWaterSeq;
+    this.#threadHighWater.set(this.#threadId, snapshot.highWaterSeq);
     const pending = this.#pendingEnvelopes;
     this.#pendingEnvelopes = [];
     this.#hydrating = false;
@@ -401,8 +696,13 @@ export class RuntimeFrontendSession implements InteractiveSession {
   async #consumeEvents(events: AsyncIterable<Readonly<EventEnvelope>>): Promise<void> {
     try {
       for await (const envelope of events) {
+        if (envelope.threadId === this.#transitionThreadId) {
+          this.#transitionEnvelopes.push(envelope);
+          continue;
+        }
         if (this.#hydrating) {
-          this.#pendingEnvelopes.push(envelope);
+          if (envelope.threadId === this.#threadId) this.#pendingEnvelopes.push(envelope);
+          else this.#applyEnvelope(envelope);
           continue;
         }
         this.#applyEnvelope(envelope);
@@ -417,15 +717,44 @@ export class RuntimeFrontendSession implements InteractiveSession {
     }
   }
 
+  async #seedWorkspaceCursors(): Promise<readonly {
+    readonly threadId: ThreadId;
+    readonly afterSeq: number;
+  }[]> {
+    if (this.#runtime.listThreadDetails === undefined) return [];
+    const details = await this.#runtime.listThreadDetails();
+    const snapshots = await Promise.all(details.map((item) =>
+      this.#runtime.getThreadSnapshot(item.thread.threadId)));
+    const cursors: { threadId: ThreadId; afterSeq: number }[] = [];
+    for (let index = 0; index < details.length; index++) {
+      const threadId = details[index]?.thread.threadId;
+      const snapshot = snapshots[index];
+      if (threadId === undefined || snapshot === undefined) continue;
+      this.#threadHighWater.set(threadId, snapshot.highWaterSeq);
+      cursors.push({ threadId, afterSeq: snapshot.highWaterSeq });
+    }
+    return cursors;
+  }
+
   #applyEnvelope(envelope: Readonly<EventEnvelope>): void {
     if (this.#eventFailure !== undefined) return;
-    if (envelope.seq <= this.#highWaterSeq) return;
-    if (envelope.seq !== this.#highWaterSeq + 1) {
+    const previous = this.#threadHighWater.get(envelope.threadId) ?? 0;
+    if (envelope.seq <= previous) return;
+    if (envelope.seq !== previous + 1) {
       throw new RuntimeFrontendEventGapError(
-        this.#threadId,
-        this.#highWaterSeq,
+        envelope.threadId,
+        previous,
         envelope.seq,
       );
+    }
+    this.#threadHighWater.set(envelope.threadId, envelope.seq);
+    if (envelope.threadId !== this.#threadId) {
+      if (envelope.opId !== undefined && envelope.event.type === 'op_completed') {
+        this.#settleOp(envelope.opId, { accepted: true });
+      } else if (envelope.opId !== undefined && envelope.event.type === 'op_rejected') {
+        this.#settleOp(envelope.opId, { accepted: false, reason: envelope.event.reason });
+      }
+      return;
     }
     this.#highWaterSeq = envelope.seq;
     const terminalFallback = this.#applyCanonicalEvent(
@@ -473,13 +802,23 @@ export class RuntimeFrontendSession implements InteractiveSession {
         this.#usage = copyUsage(event.usage);
         break;
       case 'control_request':
-        this.#pendingControls.set(event.requestId, event.owningRunId);
+        this.#pendingControls.set(event.requestId, {
+          runId: event.owningRunId,
+          ...(event.kind === 'approval' && event.payload.presentation !== undefined && {
+            presentation: strictJsonSnapshot(event.payload.presentation) as unknown as ApprovalPresentation,
+          }),
+          ...(event.kind === 'approval' && {
+            toolCallId: event.payload.toolCallId,
+            description: event.payload.description,
+          }),
+        });
         break;
       case 'control_resolved':
         this.#pendingControls.delete(event.requestId);
         break;
       case 'thread_created':
       case 'thread_resumed':
+      case 'thread_updated':
         this.#state = projectInteractionState(event.thread.state);
         this.#activeRunId = event.thread.activeRunId;
         break;
@@ -489,7 +828,7 @@ export class RuntimeFrontendSession implements InteractiveSession {
         break;
       case 'op_completed': {
         let terminalFallback: CliSessionEvent | undefined;
-        if (event.opType === 'prompt' || event.opType === 'continue') {
+        if (event.opType === 'prompt' || event.opType === 'continue' || event.opType === 'compact') {
           const needsTerminalFallback = this.#state !== 'idle';
           const wasAbortRequested = this.#abortRequestedRuns.delete(event.terminalRunId);
           this.#state = 'idle';
@@ -523,6 +862,15 @@ export class RuntimeFrontendSession implements InteractiveSession {
     const index = this.#messages.findIndex((candidate) => candidate.id === message.id);
     if (index < 0) this.#messages.push(message);
     else this.#messages[index] = message;
+  }
+
+  #resetDetachedView(): void {
+    this.#state = 'idle';
+    this.#usage = copyUsage(EMPTY_USAGE);
+    this.#messages = [];
+    this.#activeRunId = undefined;
+    this.#pendingControls.clear();
+    this.#highWaterSeq = this.#threadHighWater.get(this.#threadId) ?? 0;
   }
 
   async #submitAndWait(op: RuntimeOp): Promise<void> {
@@ -645,6 +993,15 @@ export class RuntimeFrontendSession implements InteractiveSession {
 
   #assertOpen(): void {
     if (this.#closed) throw new Error('runtime frontend is closed');
+  }
+
+  #requireWorkspaceMethod<K extends keyof Pick<
+    RuntimePort,
+    'listThreadDetails' | 'getWorkspaceSnapshot' | 'getReviewSnapshot' | 'getDiffSnapshot'
+  >>(name: K): NonNullable<RuntimePort[K]> {
+    const method = this.#runtime[name];
+    if (method === undefined) throw new Error(`Runtime frontend method ${name} is unavailable`);
+    return method.bind(this.#runtime) as NonNullable<RuntimePort[K]>;
   }
 }
 
