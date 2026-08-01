@@ -411,7 +411,10 @@ export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
 
     return {
       content: [{ type: 'text', text }],
-      details: { truncated, spilledPath },
+      // Runtime envelopes are strict JSON: an optional field must be absent rather than present
+      // with `undefined`. Keep the legacy JSON projection identical while making the in-memory
+      // ToolResult safe to commit as a canonical tool_execution_end event.
+      details: { truncated, ...(spilledPath !== undefined && { spilledPath }) },
     };
   },
 };

@@ -27,9 +27,11 @@ export type ApprovalMode = 'interactive' | 'allow' | 'deny';
 
 export interface CliFlags {
   json: boolean;
+  eventFormat: 'legacy' | 'envelope';
   prompt?: string;             // -p 一次性模式
   continue_: boolean;          // --continue
   resume?: string | true;      // --resume [id](true = 列表选择)
+  workspace?: string;          // canonical global locator disambiguation
   model?: string;
   baseUrl?: string;
   apiKey?: string;
@@ -43,11 +45,16 @@ export interface CliFlags {
 
 export type CliProvider = 'openai-chat' | 'openai-responses' | 'anthropic-messages' | 'faux';
 
-/** 会话 id 形状(session/store.ts newSessionId:时间戳前缀 + 随机尾)。 */
-const SESSION_ID_RE = /^\d{8}-\d{6}-/;
+/** v1 public id 与 Runtime 私有 legacy mirror id；任意 opaque ThreadId 仍只走 equals form。 */
+const SESSION_ID_RE = /^(?:\d{8}-\d{6}-|runtime-[0-9a-f]{40}$)/;
 
 export function parseFlags(argv: string[]): CliFlags {
-  const flags: CliFlags = { json: false, continue_: false, noColor: false };
+  const flags: CliFlags = {
+    json: false,
+    eventFormat: 'legacy',
+    continue_: false,
+    noColor: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
     const next = (): string | undefined => argv[i + 1];
@@ -57,12 +64,29 @@ export function parseFlags(argv: string[]): CliFlags {
       i++;
       return v;
     };
+    if (a.startsWith('--event-format=')) {
+      flags.eventFormat = parseEventFormat(a.slice('--event-format='.length));
+      continue;
+    }
+    if (a.startsWith('--resume=')) {
+      const value = a.slice('--resume='.length);
+      if (value.length === 0) throw new Error('flag --resume requires a non-empty value after =');
+      flags.resume = value;
+      continue;
+    }
+    if (a.startsWith('--workspace=')) {
+      const value = a.slice('--workspace='.length);
+      if (value.length === 0) throw new Error('flag --workspace requires a non-empty value after =');
+      flags.workspace = value;
+      continue;
+    }
     switch (a) {
       case '--json': flags.json = true; break;
+      case '--event-format': flags.eventFormat = parseEventFormat(take()); break;
       case '-p': case '--prompt': flags.prompt = take(); break;
       case '--continue': flags.continue_ = true; break;
       case '--resume': {
-        // --resume 的可选值必须形如会话 id(YYYYMMDD-HHMMSS-…,见 store.newSessionId);
+        // --resume 的可选值必须形如旧会话 id 或 Runtime legacy mirror id；
         // 否则视为无 id 的 --resume(列表选择),该值不吞——留在 argv 按裸 prompt 处理
         // (coda --resume "改个 bug" 的 "改个 bug" 是 prompt,不是 id)。
         const v = next();
@@ -70,6 +94,7 @@ export function parseFlags(argv: string[]): CliFlags {
         else flags.resume = true;
         break;
       }
+      case '--workspace': flags.workspace = take(); break;
       case '--model': flags.model = take(); break;
       case '--base-url': flags.baseUrl = take(); break;
       case '--api-key': flags.apiKey = take(); break;
@@ -104,7 +129,17 @@ export function parseFlags(argv: string[]): CliFlags {
         flags.prompt = flags.prompt === undefined ? a : `${flags.prompt} ${a}`;
     }
   }
+  if (flags.eventFormat === 'envelope' && !flags.json) {
+    throw new Error('--event-format=envelope requires --json');
+  }
   return flags;
+}
+
+function parseEventFormat(value: string): CliFlags['eventFormat'] {
+  if (value !== 'legacy' && value !== 'envelope') {
+    throw new Error(`unknown event format: ${value} (expected legacy|envelope)`);
+  }
+  return value;
 }
 
 export interface ResolvedConfig {
@@ -132,11 +167,12 @@ function normalizeApiKey(value: string | undefined): string | undefined {
 
 /** 与 main.ts 的实际分派共用同一个纯判定，避免缺 key 策略和 UI 路由漂移。 */
 export function isFullScreenTuiEligible(
-  flags: Pick<CliFlags, 'json' | 'prompt'>,
+  flags: Pick<CliFlags, 'json' | 'eventFormat' | 'prompt'>,
   terminal: TuiTerminalState,
 ): boolean {
   return (
     !flags.json &&
+    flags.eventFormat !== 'envelope' &&
     flags.prompt === undefined &&
     terminal.stdinIsTTY &&
     terminal.stdoutIsTTY &&

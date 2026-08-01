@@ -23,7 +23,10 @@ export function toToolResultMessage(
     toolName: call.name,
     content,
     isError: false,
-    details: output.details,
+    // Optional protocol fields are presence-based. Leaving an own `details: undefined` property
+    // is invisible in legacy JSON output but is rejected by Runtime's strict-JSON envelope
+    // boundary before tool_execution_end can be committed.
+    ...(output.details !== undefined && { details: output.details }),
   };
 }
 

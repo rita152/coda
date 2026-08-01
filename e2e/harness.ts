@@ -34,7 +34,7 @@ export function requireDist(): void {
   }
 }
 
-/** stdout NDJSON 行解析后的宽松事件形状(tolerant reader:未知字段/类型一律容忍)。 */
+/** stdout NDJSON 行解析后的宽松帧形状；兼容 legacy 顶层 type 与 canonical envelope.event.type。 */
 export interface Ev {
   type: string;
   [key: string]: unknown;
@@ -120,7 +120,15 @@ export function startCoda(opts: StartOptions): CodaProc {
     let ev: Ev;
     try {
       const parsed = JSON.parse(line) as unknown;
-      if (typeof parsed !== 'object' || parsed === null || typeof (parsed as { type?: unknown }).type !== 'string') {
+      const record = parsed as { type?: unknown; event?: { type?: unknown } } | null;
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        (
+          typeof record?.type !== 'string' &&
+          (typeof record?.event !== 'object' || record.event === null || typeof record.event.type !== 'string')
+        )
+      ) {
         parseErrors.push(line);
         return;
       }

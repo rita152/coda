@@ -1,0 +1,1429 @@
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'bun:test';
+import type {
+  AgentEvent,
+  AgentMessage,
+  EventEnvelope,
+  ExternalOpId,
+  ModelConfig,
+  PermissionCeilingSnapshot,
+  RunId,
+  ThreadId,
+  TurnId,
+  WorkspaceId,
+} from '../../protocol/index.js';
+import { createFauxStreamFn, createGate } from '../../providers/faux/index.js';
+import { createFileRuntimeStorage, createRuntime } from '../../runtime/index.js';
+import type {
+  PermissionPolicyPort,
+  ThreadDriverCheckpoint,
+  ThreadDriverEvent,
+  ThreadDriverHostServices,
+  ThreadDriverPort,
+} from '../../runtime/ports.js';
+import { loadSession, Session } from '../../session/index.js';
+import type { ModelPricing } from '../../session/index.js';
+import {
+  createLegacySessionThreadDriverFactory,
+  LegacySessionCheckpointMismatchError,
+} from './index.js';
+
+const MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'test' } };
+const WORKSPACE_ID = 'workspace-test' as WorkspaceId;
+const THREAD_ID = 'thread-test' as ThreadId;
+const RUN_ID = 'run-test' as RunId;
+const OP_ID = 'op_e_11111111111111111111111111111111' as ExternalOpId;
+const CEILING: PermissionCeilingSnapshot = { revision: 'ceiling-v1', constraints: [] };
+
+let dirs: string[] = [];
+afterEach(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  dirs = [];
+});
+
+function tempDir(): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'coda-legacy-driver-'));
+  dirs.push(dir);
+  return dir;
+}
+
+function host(options?: { failType?: ThreadDriverEvent['event']['type'] }): {
+  readonly port: ThreadDriverHostServices;
+  readonly events: ThreadDriverEvent[];
+  readonly batches: ThreadDriverEvent[][];
+  readonly actions: string[];
+  readonly waitForEventCount: (
+    type: ThreadDriverEvent['event']['type'],
+    count: number,
+  ) => Promise<void>;
+} {
+  const events: ThreadDriverEvent[] = [];
+  const batches: ThreadDriverEvent[][] = [];
+  const actions: string[] = [];
+  const waiters: {
+    readonly type: ThreadDriverEvent['event']['type'];
+    readonly count: number;
+    readonly resolve: () => void;
+  }[] = [];
+  let turn = 0;
+  let successor = 0;
+  const notify = (): void => {
+    for (let index = waiters.length - 1; index >= 0; index--) {
+      const waiter = waiters[index] as (typeof waiters)[number];
+      if (events.filter((event) => event.event.type === waiter.type).length >= waiter.count) {
+        waiters.splice(index, 1);
+        waiter.resolve();
+      }
+    }
+  };
+  return {
+    events,
+    batches,
+    actions,
+    waitForEventCount: (type, count) => {
+      if (events.filter((event) => event.event.type === type).length >= count) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => waiters.push({ type, count, resolve }));
+    },
+    port: {
+      commitEvent: async (event) => {
+        if (event.event.type === options?.failType) throw new Error(`commit failed: ${event.event.type}`);
+        actions.push(`commit:${event.event.type}`);
+        events.push(event);
+        notify();
+      },
+      commitEventBatch: async (batch) => {
+        const failed = batch.find((event) => event.event.type === options?.failType);
+        if (failed !== undefined) throw new Error(`commit failed: ${failed.event.type}`);
+        batches.push([...batch]);
+        for (const event of batch) {
+          actions.push(`commit:${event.event.type}`);
+          events.push(event);
+        }
+        notify();
+      },
+      reserveTurn: async () => {
+        turn++;
+        actions.push('reserve:turn');
+        return {
+          turnId: `turn-${turn}` as TurnId,
+          workspaceCeiling: CEILING,
+          runCeiling: CEILING,
+          turnCeiling: { revision: `turn-ceiling-${turn}`, constraints: [] },
+        };
+      },
+      reserveSuccessor: async (input) => {
+        successor++;
+        actions.push(`reserve:${input.reason}`);
+        return {
+          runId: `successor-${successor}` as RunId,
+          permissionCeiling: CEILING,
+        };
+      },
+    },
+  };
+}
+
+function fixedPermissionPolicy(): PermissionPolicyPort {
+  return {
+    snapshotWorkspaceCeiling: async () => CEILING,
+    resolveCeiling: async () => CEILING,
+  };
+}
+
+describe('legacy Session ThreadDriver factory', () => {
+  it('creationKey 经哈希形成幂等安全 backend，重复 create 不产生第二个文件', async () => {
+    const dir = tempDir();
+    let configurations = 0;
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => {
+        configurations++;
+        return {
+          sessionOptions: {
+            agentConfig: {
+              streamFn: createFauxStreamFn({ turns: [] }),
+              model,
+              tools: [],
+              systemPrompt: 'test',
+              cwd: dir,
+            },
+          },
+        };
+      },
+    });
+    const firstHost = host();
+    const first = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: '../path-like-thread' as ThreadId,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'stable/create/key',
+    }, firstHost.port);
+    await first.driver.close();
+    const second = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: '../path-like-thread' as ThreadId,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'stable/create/key',
+    }, host().port);
+
+    expect(first.durableRef).toEqual(second.durableRef);
+    expect(first.durableRef.kind).toBe('session-v1');
+    expect(first.durableRef.key).toMatch(/^runtime-[0-9a-f]{40}$/);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1);
+    expect(configurations).toBe(2);
+    await second.driver.close();
+    await expect(factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: '../different-path' as ThreadId,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'stable/create/key',
+    }, host().port)).rejects.toBeInstanceOf(LegacySessionCheckpointMismatchError);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1);
+  });
+
+  it('拒绝无 persistent claim 的预置 deterministic backend，不把外来文件 bless 为 Runtime backend', async () => {
+    const dir = tempDir();
+    const creationKey = 'prepositioned-without-claim';
+    const sessionId = deterministicSessionIdForTest(creationKey);
+    const foreign = await Session.createWithId(sessionId, {
+      dir,
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [] }),
+        model: MODEL,
+        tools: [],
+        systemPrompt: 'foreign',
+        cwd: dir,
+      },
+    });
+    await foreign.close();
+    const backendFile = path.join(dir, `${sessionId}.jsonl`);
+    const before = await Bun.file(backendFile).text();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'runtime',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+
+    await expect(factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey,
+    }, host().port)).rejects.toBeInstanceOf(LegacySessionCheckpointMismatchError);
+    expect(await Bun.file(backendFile).text()).toBe(before);
+    expect(await Bun.file(path.join(dir, `${sessionId}.runtime-claim.json`)).exists()).toBe(false);
+  });
+
+  it('复用 status=creating 的精确 meta-only crash artifact 并原子转为 active claim', async () => {
+    const dir = tempDir();
+    const creationKey = 'backend-before-finish-crash';
+    const sessionId = deterministicSessionIdForTest(creationKey);
+    const meta = {
+      type: 'meta' as const,
+      version: 1 as const,
+      protocolVersion: '1.0.0',
+      id: sessionId,
+      createdAt: 42,
+      cwd: dir,
+      model: MODEL.ref,
+    };
+    const backendBytes = `${JSON.stringify(meta)}\n`;
+    writeFileSync(path.join(dir, `${sessionId}.jsonl`), backendBytes, 'utf8');
+    const claimFile = path.join(dir, `${sessionId}.runtime-claim.json`);
+    writeFileSync(claimFile, `${JSON.stringify({
+      type: 'coda_runtime_legacy_mirror_claim',
+      version: 1,
+      sourceSessionId: sessionId,
+      activeSessionId: sessionId,
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      recordedCwd: dir,
+      backendMeta: meta,
+      creationKey,
+      generation: 0,
+      expectedTail: {
+        byteLength: Buffer.byteLength(backendBytes),
+        sha256: createHash('sha256').update(backendBytes).digest('hex'),
+      },
+      status: 'creating',
+    })}\n`, 'utf8');
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'runtime',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey,
+    }, host().port);
+    expect(attachment.durableRef).toEqual({ kind: 'session-v1', key: sessionId });
+    expect(await Bun.file(path.join(dir, `${sessionId}.jsonl`)).text()).toBe(backendBytes);
+    expect(JSON.parse(await Bun.file(claimFile).text())).toMatchObject({
+      sourceSessionId: sessionId,
+      activeSessionId: sessionId,
+      creationKey,
+      status: 'active',
+    });
+    expect(readdirSync(dir).filter((name) => name.endsWith('.jsonl'))).toEqual([`${sessionId}.jsonl`]);
+    await attachment.driver.close();
+  });
+
+  it('resume 只接受 session-v1 安全 ref，并在验证后逐字段回传 canonical checkpoint', async () => {
+    const dir = tempDir();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const created = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'resume-key',
+    }, host().port);
+    await created.driver.close();
+    const checkpoint: ThreadDriverCheckpoint = {
+      frontend: {
+        model: MODEL.ref,
+        transcript: [],
+        usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
+        queues: { steering: [], followUp: [] },
+        plan: [{ step: 'canonical only', status: 'pending' }],
+        pendingControls: [],
+      },
+      execution: {},
+    };
+    const resumed = await factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: created.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, host().port);
+    expect(resumed.initialCheckpoint).toEqual(checkpoint);
+    await resumed.driver.close();
+
+    await expect(factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: { kind: 'session-v1', key: '../escape' },
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, host().port)).rejects.toThrow(/invalid legacy session driver ref/i);
+  });
+
+  it('canonical checkpoint 比 v1 mirror 超前时只追加缺失消息并恢复一致 usage', async () => {
+    const dir = tempDir();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const created = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'repair-key',
+    }, host().port);
+    await created.driver.close();
+    const transcript: AgentMessage[] = [
+      {
+        role: 'user',
+        id: 'u_canonical',
+        timestamp: 1,
+        content: [{ type: 'text', text: 'canonical input' }],
+        source: 'prompt',
+      },
+      {
+        role: 'assistant',
+        id: 'a_canonical',
+        timestamp: 2,
+        content: [{ type: 'text', text: 'canonical output' }],
+        model: MODEL.ref,
+        stopReason: 'stop',
+        usage: { input: 7, output: 3 },
+      },
+    ];
+    const checkpoint: ThreadDriverCheckpoint = {
+      frontend: {
+        model: MODEL.ref,
+        transcript,
+        usage: {
+          lastTurn: { input: 7, output: 3 },
+          cumulative: { input: 7, output: 3 },
+          turns: 1,
+          contextTokens: 10,
+        },
+        queues: { steering: [], followUp: [] },
+        plan: [],
+        pendingControls: [],
+      },
+      execution: {},
+    };
+    const resumed = await factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: created.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, host().port);
+
+    expect(resumed.initialCheckpoint).toEqual(checkpoint);
+    expect(loadSession(dir, created.durableRef.key).messages).toEqual(transcript);
+    await resumed.driver.close();
+
+    const divergent = {
+      ...checkpoint,
+      frontend: { ...checkpoint.frontend, transcript: [] },
+    };
+    await expect(factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: created.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: divergent,
+      usedRequestIds: [],
+    }, host().port)).rejects.toBeInstanceOf(LegacySessionCheckpointMismatchError);
+  });
+
+  it('activate 前按 mailbox 顺序恢复未提交 queue effect，并保留 checkpoint queue seed', async () => {
+    const dir = tempDir();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const created = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'queue-recovery-key',
+    }, host().port);
+    await created.driver.close();
+    const checkpoint: ThreadDriverCheckpoint = {
+      frontend: {
+        ...created.initialCheckpoint.frontend,
+        queues: {
+          steering: [{ id: 'queued-before-crash', text: 'already durable', kind: 'steering' }],
+          followUp: [],
+        },
+      },
+      execution: created.initialCheckpoint.execution,
+    };
+    const observedHost = host();
+    const resumed = await factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: created.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, observedHost.port);
+    const recoveryOpId = 'op_e_77777777777777777777777777777777' as ExternalOpId;
+
+    await resumed.driver.recover([{
+      op: {
+        type: 'steer',
+        opId: recoveryOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'recover after crash',
+      },
+    }]);
+    await resumed.driver.activate();
+
+    expect(observedHost.events).toContainEqual({
+      event: {
+        type: 'queue_update',
+        steering: [
+          { id: 'queued-before-crash', text: 'already durable', kind: 'steering' },
+          expect.objectContaining({ text: 'recover after crash', kind: 'steering' }),
+        ],
+        followUp: [],
+      },
+      opId: recoveryOpId,
+    });
+    await expect(resumed.driver.recover([])).rejects.toThrow(/exactly once/i);
+    await resumed.driver.close();
+  });
+
+  it('FileRuntimeStorage 的真实 v1 import 使用 canonical ref 并可由 driver resume', async () => {
+    const legacyDir = tempDir();
+    const runtimeRoot = tempDir();
+    const legacy = await Session.create({
+      dir: legacyDir,
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [{ events: [{ kind: 'text', text: 'legacy answer' }] }] }),
+        model: MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: legacyDir,
+      },
+    });
+    await legacy.prompt('legacy input');
+    const expectedTranscript = [...legacy.messages];
+    await legacy.close();
+
+    const storage = createFileRuntimeStorage({ root: runtimeRoot, legacySessionDir: legacyDir });
+    const locator = (await storage.listStoredThreads())[0];
+    if (locator === undefined) throw new Error('legacy locator missing');
+    expect(locator.catalog.driverRef?.kind).toBe('session-v1');
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: legacyDir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: legacyDir,
+          },
+        },
+      }),
+    });
+    const runtime = await createRuntime({
+      workspace: {
+        cwd: locator.ownerRecordedCwd,
+        workspaceId: locator.ownerWorkspaceId,
+      },
+      storage,
+      modelResolver: { resolve: async () => ({ ok: true, model: MODEL }) },
+      permissionPolicy: fixedPermissionPolicy(),
+      threadDriverFactory: factory,
+    });
+    try {
+      const receipt = await runtime.submit({
+        type: 'thread_resume',
+        opId: 'op_e_22222222222222222222222222222222' as ExternalOpId,
+        workspaceId: runtime.workspaceId,
+        threadId: locator.threadId,
+        model: MODEL.ref,
+      });
+      expect(receipt.accepted).toBe(true);
+      expect((await runtime.getThreadSnapshot(locator.threadId))?.transcript).toEqual(
+        expectedTranscript,
+      );
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  it('映射 run/turn 身份；authoritative commit 失败使 activity 拒绝且不采样 provider', async () => {
+    const dir = tempDir();
+    const streams: ReturnType<typeof createFauxStreamFn>[] = [];
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => {
+        const stream = createFauxStreamFn({ turns: [{ events: [{ kind: 'text', text: 'ok' }] }] });
+        streams.push(stream);
+        return {
+          sessionOptions: {
+            agentConfig: { streamFn: stream, model, tools: [], systemPrompt: 'test', cwd: dir },
+          },
+        };
+      },
+    });
+    const failingHost = host({ failType: 'turn_start' });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'failing-key',
+    }, failingHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const completion = attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+
+    await expect(completion).rejects.toThrow('commit failed: turn_start');
+    expect(streams[0]?.calls).toHaveLength(0);
+    expect(failingHost.events).toEqual([{
+      event: { type: 'agent_start', reason: 'prompt' },
+      runId: RUN_ID,
+      opId: OP_ID,
+    }]);
+    expect(loadSession(dir, attachment.durableRef.key).messages).toEqual([]);
+    await attachment.driver.close();
+  });
+
+  it('canonical 与 v1 mirror 使用同一份自定义 pricing 快照', async () => {
+    const dir = tempDir();
+    const pricing: ModelPricing = { inputPer1M: 2, outputPer1M: 3 };
+    const observedHost = host();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          pricing,
+          agentConfig: {
+            streamFn: createFauxStreamFn({
+              turns: [{
+                events: [{ kind: 'text', text: 'priced' }],
+                usage: { input: 100, output: 10 },
+              }],
+            }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'pricing-key',
+    }, observedHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    await attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+
+    const canonicalMessage = observedHost.events.find((event) =>
+      event.event.type === 'message_end' && event.event.message.role === 'assistant');
+    expect(canonicalMessage?.event).toMatchObject({
+      type: 'message_end',
+      message: { usage: { input: 100, output: 10, costUSD: 0.00023 } },
+    });
+    expect(observedHost.batches).toContainEqual([
+      expect.objectContaining({
+        event: expect.objectContaining({ type: 'message_end', message: expect.objectContaining({ role: 'assistant' }) }),
+      }),
+      expect.objectContaining({ event: expect.objectContaining({ type: 'usage_update' }) }),
+    ]);
+    const mirrorAssistant = loadSession(dir, attachment.durableRef.key).messages
+      .find((message) => message.role === 'assistant');
+    expect(mirrorAssistant?.usage.costUSD).toBe(0.00023);
+    await attachment.driver.close();
+  });
+
+  it('resume 在触碰 legacy mirror 前拒绝 circular canonical checkpoint', async () => {
+    const dir = tempDir();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const created = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'circular-checkpoint-key',
+    }, host().port);
+    await created.driver.close();
+    const before = Bun.file(path.join(dir, `${created.durableRef.key}.jsonl`)).text();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const checkpoint = {
+      frontend: {
+        model: MODEL.ref,
+        transcript: [],
+        usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
+        queues: { steering: [], followUp: [] },
+        plan: [{ step: 'invalid', status: 'pending', circular }],
+        pendingControls: [],
+      },
+      execution: {},
+    } as unknown as ThreadDriverCheckpoint;
+
+    await expect(factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: created.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, host().port)).rejects.toThrow(/circular/i);
+    expect(await Bun.file(path.join(dir, `${created.durableRef.key}.jsonl`)).text()).toBe(await before);
+  });
+
+  it('检测 claimed v1 backend 的外来追加并在下一次采样前 quarantine', async () => {
+    const dir = tempDir();
+    const runtimeStreams: ReturnType<typeof createFauxStreamFn>[] = [];
+    const observedHost = host();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => {
+        const stream = createFauxStreamFn({
+          turns: [
+            { events: [{ kind: 'text', text: 'runtime first' }] },
+            { events: [{ kind: 'text', text: 'must not sample after foreign append' }] },
+          ],
+        });
+        runtimeStreams.push(stream);
+        return {
+          sessionOptions: {
+            agentConfig: { streamFn: stream, model, tools: [], systemPrompt: 'test', cwd: dir },
+          },
+        };
+      },
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'fingerprint-key',
+    }, observedHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    await attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'runtime',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'runtime' },
+    }).completion;
+    const canonicalTranscript = observedHost.events.flatMap((event) =>
+      event.event.type === 'message_end' ? [event.event.message] : []);
+    const canonicalUsage = observedHost.events.findLast((event) => event.event.type === 'usage_update');
+    if (canonicalUsage?.event.type !== 'usage_update') throw new Error('missing canonical usage');
+    const checkpoint: ThreadDriverCheckpoint = {
+      frontend: {
+        model: MODEL.ref,
+        transcript: canonicalTranscript,
+        usage: canonicalUsage.event.usage,
+        queues: { steering: [], followUp: [] },
+        plan: [],
+        pendingControls: [],
+      },
+      execution: {},
+    };
+
+    const foreign = await Session.resume(attachment.durableRef.key, {
+      dir,
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [{ events: [{ kind: 'text', text: 'foreign' }] }] }),
+        model: MODEL,
+        tools: [],
+        systemPrompt: 'foreign',
+        cwd: dir,
+      },
+    });
+    await foreign.prompt('foreign append');
+    await foreign.close();
+
+    const secondOpId = 'op_e_55555555555555555555555555555555' as ExternalOpId;
+    const secondRunId = 'run-second' as RunId;
+    await expect(attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: secondOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'runtime again',
+      },
+      runId: secondRunId,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: secondOpId, text: 'runtime again' },
+    }).completion).rejects.toThrow(/concurrent|fingerprint|quarantine/i);
+    expect(runtimeStreams[0]?.calls).toHaveLength(1);
+    expect(observedHost.events).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({
+        type: 'runtime_diagnostic',
+        code: 'legacy_backend_concurrent_writer',
+      }),
+    }));
+    await attachment.driver.close().catch(() => undefined);
+
+    const sourceFile = path.join(dir, `${attachment.durableRef.key}.jsonl`);
+    const foreignSource = await Bun.file(sourceFile).text();
+    const resumedHost = host();
+    const resumed = await factory.resume({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      durableRef: attachment.durableRef,
+      permissionCeiling: CEILING,
+      committedCheckpoint: checkpoint,
+      usedRequestIds: [],
+    }, resumedHost.port);
+    expect(resumed.initialCheckpoint).toEqual(checkpoint);
+    await resumed.driver.recover([]);
+    await resumed.driver.activate();
+    expect(resumedHost.events).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({
+        type: 'runtime_diagnostic',
+        code: 'legacy_backend_concurrent_writer',
+      }),
+    }));
+    const resumedOpId = 'op_e_56565656565656565656565656565656' as ExternalOpId;
+    await expect(resumed.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: resumedOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'private mirror only',
+      },
+      runId: 'run-private-mirror' as RunId,
+      permissionCeiling: CEILING,
+      resolvedInput: {
+        kind: 'prompt_input',
+        sourceOpId: resumedOpId,
+        text: 'private mirror only',
+      },
+    }).completion).resolves.toMatchObject({ kind: 'activity', status: 'completed' });
+    expect(runtimeStreams[1]?.calls).toHaveLength(1);
+    expect(await Bun.file(sourceFile).text()).toBe(foreignSource);
+    expect(readdirSync(dir).filter((name) => name.endsWith('.jsonl'))).toHaveLength(2);
+    await resumed.driver.close();
+  });
+
+  it('abort 对 resolvedTarget 做 CAS，旧 run target 不得误杀当前 activity', async () => {
+    const dir = tempDir();
+    const gate = createGate();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({
+              turns: [{ onRequest: resolveStarted, events: [{ kind: 'gate', gate }, { kind: 'text', text: 'done' }] }],
+            }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'abort-cas-key',
+    }, host().port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const activity = attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+    await started;
+    const staleRunId = 'stale-run' as RunId;
+    const abort = await attachment.driver.dispatch({
+      op: {
+        type: 'abort',
+        opId: 'op_e_33333333333333333333333333333333' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        expectedRunId: staleRunId,
+      },
+      resolvedTarget: { kind: 'run', runId: staleRunId },
+    }).completion;
+    expect(abort).toEqual({ kind: 'operation', outcome: 'no_op' });
+    expect(attachment.driver.interactionState()).toBe('running');
+    gate.open();
+    expect(await activity).toEqual({ kind: 'activity', status: 'completed', terminalRunId: RUN_ID });
+    await attachment.driver.close();
+  });
+
+  it('compaction successor 在 predecessor agent_end commit 前只预留一次', async () => {
+    const dir = tempDir();
+    const model: ModelConfig = {
+      ...MODEL,
+      limits: { context: 100, output: 20 },
+    };
+    const observedHost = host();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model: configuredModel }) => ({
+        sessionOptions: {
+          compaction: { threshold: 0.8, keepRatio: 0.5 },
+          agentConfig: {
+            streamFn: createFauxStreamFn({
+              turns: [
+                { events: [{ kind: 'text', text: 'hot' }], usage: { input: 90, output: 10 } },
+                { events: [{ kind: 'text', text: 'summary' }] },
+              ],
+            }),
+            model: configuredModel,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model,
+      permissionCeiling: CEILING,
+      creationKey: 'compaction-order-key',
+    }, observedHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const result = await attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+
+    expect(result.kind).toBe('activity');
+    expect(observedHost.actions.filter((action) => action === 'reserve:compaction')).toHaveLength(1);
+    expect(observedHost.actions.indexOf('reserve:compaction')).toBeLessThan(
+      observedHost.actions.indexOf('commit:agent_end'),
+    );
+    expect(observedHost.actions.indexOf('commit:agent_end')).toBeLessThan(
+      observedHost.actions.indexOf('commit:compaction_start'),
+    );
+    await attachment.driver.close();
+  });
+
+  it('approval raw requestId 在 resolution 后稳定消歧为最小未用 suffix', async () => {
+    const dir = tempDir();
+    const gate = createGate();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const observedHost = host();
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createFauxStreamFn({ turns: [{ onRequest: resolveStarted, events: [{ kind: 'gate', gate }] }] }),
+            model,
+            tools: [],
+            systemPrompt: 'test',
+            cwd: dir,
+          },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'approval-reuse-key',
+    }, observedHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const activity = attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+    await started;
+    const internal = attachment.driver as ThreadDriverPort & {
+      emitApproval(event: Extract<AgentEvent, { type: 'approval_request' }>): void;
+    };
+    const request = {
+      type: 'approval_request',
+      approvalId: 'ap_reused',
+      toolCallId: 'call_1',
+      description: 'test approval',
+    } as const;
+    internal.emitApproval(request);
+    await observedHost.waitForEventCount('control_request', 1);
+    await attachment.driver.dispatch({
+      op: {
+        type: 'control_response',
+        opId: 'op_e_44444444444444444444444444444444' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        requestId: request.approvalId,
+        decision: 'allow_once',
+      },
+    }).completion;
+    internal.emitApproval(request);
+    await observedHost.waitForEventCount('control_request', 2);
+    const requests = observedHost.events.filter((event) => event.event.type === 'control_request');
+    expect(requests.map((event) => event.event.type === 'control_request' && event.event.requestId)).toEqual([
+      'ap_reused',
+      'ap_reused~1',
+    ]);
+    await attachment.driver.dispatch({
+      op: {
+        type: 'control_response',
+        opId: 'op_e_66666666666666666666666666666666' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        requestId: 'ap_reused~1',
+        decision: 'deny',
+      },
+    }).completion;
+    gate.open();
+    await expect(activity).resolves.toMatchObject({ kind: 'activity' });
+    await attachment.driver.close();
+  });
+
+  it('approval canonical suffix 从 durable journal used-set 跨 Runtime resume 续接', async () => {
+    const legacyDir = tempDir();
+    const runtimeRoot = tempDir();
+    const gates = [createGate(), createGate()];
+    const providerEntered = [deferred<void>(), deferred<void>()];
+    const emitters: Array<(event: Extract<AgentEvent, { type: 'approval_request' }>) => void> = [];
+    let attachmentOrdinal = 0;
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: legacyDir,
+      configure: (context) => {
+        const ordinal = attachmentOrdinal++;
+        const gate = gates[ordinal];
+        if (gate === undefined) throw new Error('unexpected attachment');
+        emitters.push(context.emitApproval);
+        return {
+          sessionOptions: {
+            agentConfig: {
+              streamFn: createFauxStreamFn({
+                turns: [{
+                  onRequest: () => providerEntered[ordinal]?.resolve(),
+                  events: [{ kind: 'gate', gate }, { kind: 'text', text: `turn-${ordinal}` }],
+                }],
+              }),
+              model: context.model,
+              tools: [],
+              systemPrompt: 'test',
+              cwd: legacyDir,
+            },
+          },
+        };
+      },
+    });
+    const storage = createFileRuntimeStorage({ root: runtimeRoot, legacySessionDir: legacyDir });
+    const threadId = 'thread-approval-resume' as ThreadId;
+    const request = {
+      type: 'approval_request',
+      approvalId: 'approval/reused',
+      toolCallId: 'call-reused',
+      description: 'same raw id',
+    } as const;
+    const makeRuntime = () => createRuntime({
+      workspace: { cwd: legacyDir, workspaceId: WORKSPACE_ID },
+      storage,
+      modelResolver: { resolve: async () => ({ ok: true as const, model: MODEL }) },
+      permissionPolicy: fixedPermissionPolicy(),
+      threadDriverFactory: factory,
+    });
+
+    const first = await makeRuntime();
+    const firstEvents = first.events({ threadIds: [threadId] })[Symbol.asyncIterator]();
+    try {
+      expect((await first.submit({
+        type: 'thread_create',
+        opId: 'op_e_80808080808080808080808080808080' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        model: MODEL.ref,
+      })).accepted).toBe(true);
+      const promptReceipt = await first.submit({
+        type: 'prompt',
+        opId: 'op_e_81818181818181818181818181818181' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        text: 'first',
+      });
+      if (!promptReceipt.accepted || promptReceipt.runId === undefined) throw new Error('first prompt failed');
+      await nextEnvelope(firstEvents, (envelope) =>
+        envelope.event.type === 'turn_start' && envelope.runId === promptReceipt.runId);
+      await providerEntered[0]?.promise;
+      emitters[0]?.(request);
+      const firstRequest = await nextEnvelope(firstEvents, (envelope) =>
+        envelope.event.type === 'control_request');
+      expect(firstRequest.event).toMatchObject({ requestId: 'approval/reused' });
+      expect((await first.submit({
+        type: 'control_response',
+        opId: 'op_e_82828282828282828282828282828282' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        requestId: 'approval/reused',
+        decision: 'deny',
+      })).accepted).toBe(true);
+      gates[0]?.open();
+      await nextEnvelope(firstEvents, (envelope) =>
+        envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed');
+    } finally {
+      gates[0]?.open();
+      await firstEvents.return?.();
+      await first.close().catch(() => undefined);
+    }
+
+    const second = await makeRuntime();
+    const secondEvents = second.events({ threadIds: [threadId] })[Symbol.asyncIterator]();
+    try {
+      expect((await second.submit({
+        type: 'thread_resume',
+        opId: 'op_e_83838383838383838383838383838383' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        model: MODEL.ref,
+      })).accepted).toBe(true);
+      const promptReceipt = await second.submit({
+        type: 'prompt',
+        opId: 'op_e_84848484848484848484848484848484' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        text: 'second',
+      });
+      if (!promptReceipt.accepted || promptReceipt.runId === undefined) throw new Error('second prompt failed');
+      await nextEnvelope(secondEvents, (envelope) =>
+        envelope.event.type === 'turn_start' && envelope.runId === promptReceipt.runId);
+      await providerEntered[1]?.promise;
+      emitters[1]?.(request);
+      const secondRequest = await nextEnvelope(secondEvents, (envelope) =>
+        envelope.event.type === 'control_request'
+        || (envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed'));
+      expect(secondRequest.event).toMatchObject({
+        type: 'control_request',
+        requestId: 'approval/reused~1',
+      });
+      expect((await second.submit({
+        type: 'control_response',
+        opId: 'op_e_85858585858585858585858585858585' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        requestId: 'approval/reused~1',
+        decision: 'deny',
+      })).accepted).toBe(true);
+      gates[1]?.open();
+      await nextEnvelope(secondEvents, (envelope) =>
+        envelope.opId === promptReceipt.opId && envelope.event.type === 'op_completed');
+    } finally {
+      gates[1]?.open();
+      await secondEvents.return?.();
+      await second.close().catch(() => undefined);
+    }
+  });
+
+  it('successor reserve 后 predecessor agent_end commit 前可按 successor RunId 取消', async () => {
+    const dir = tempDir();
+    const baseHost = host();
+    const agentEndEntered = deferred<void>();
+    const releaseAgentEnd = deferred<void>();
+    const gatedHost: ThreadDriverHostServices = {
+      ...baseHost.port,
+      commitEvent: async (event, mutation) => {
+        if (event.event.type === 'agent_end' && event.event.willRetry === true) {
+          agentEndEntered.resolve();
+          await releaseAgentEnd.promise;
+        }
+        await baseHost.port.commitEvent(event, mutation);
+      },
+    };
+    const streams: ReturnType<typeof createFauxStreamFn>[] = [];
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => {
+        const stream = createFauxStreamFn({
+          turns: [
+            {
+              error: {
+                message: 'retry me',
+                details: { kind: 'http', status: 500, retryable: true },
+              },
+            },
+            { events: [{ kind: 'text', text: 'must not retry after successor abort' }] },
+          ],
+        });
+        streams.push(stream);
+        return {
+          sessionOptions: {
+            retry: {
+              maxAttempts: 1,
+              jitter: () => 0,
+              sleep: async (_delayMs, signal) => signal.aborted,
+            },
+            agentConfig: { streamFn: stream, model, tools: [], systemPrompt: 'test', cwd: dir },
+          },
+        };
+      },
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'successor-abort-window-key',
+    }, gatedHost);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const activity = attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+    await agentEndEntered.promise;
+
+    const successorRunId = 'successor-1' as RunId;
+    const abort = attachment.driver.dispatch({
+      op: {
+        type: 'abort',
+        opId: 'op_e_77777777777777777777777777777777' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        expectedRunId: successorRunId,
+      },
+      resolvedTarget: { kind: 'run', runId: successorRunId },
+    }).completion;
+    expect(await abort).toEqual({ kind: 'operation', outcome: 'applied' });
+    releaseAgentEnd.resolve();
+    await activity;
+    expect(streams[0]?.calls).toHaveLength(1);
+    expect(baseHost.actions.indexOf('reserve:retry')).toBeLessThan(
+      baseHost.actions.indexOf('commit:agent_end'),
+    );
+    await attachment.driver.close();
+  });
+
+  it('retry_scheduled 后取消 successor 以 aborted 结案而不是沿用 predecessor error', async () => {
+    const dir = tempDir();
+    const observedHost = host();
+    const sleepEntered = deferred<void>();
+    const stream = createFauxStreamFn({
+      turns: [
+        {
+          error: {
+            message: 'retry me',
+            details: { kind: 'http', status: 500, retryable: true },
+          },
+        },
+        { events: [{ kind: 'text', text: 'must not run after successor abort' }] },
+      ],
+    });
+    const factory = createLegacySessionThreadDriverFactory({
+      sessionDir: dir,
+      configure: ({ model }) => ({
+        sessionOptions: {
+          retry: {
+            maxAttempts: 1,
+            jitter: () => 0,
+            sleep: async (_delayMs, signal) => {
+              sleepEntered.resolve();
+              if (!signal.aborted) {
+                await new Promise<void>((resolve) => {
+                  signal.addEventListener('abort', () => resolve(), { once: true });
+                });
+              }
+              return true;
+            },
+          },
+          agentConfig: { streamFn: stream, model, tools: [], systemPrompt: 'test', cwd: dir },
+        },
+      }),
+    });
+    const attachment = await factory.create({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: MODEL,
+      permissionCeiling: CEILING,
+      creationKey: 'successor-abort-after-retry-scheduled-key',
+    }, observedHost.port);
+    await attachment.driver.recover([]);
+    await attachment.driver.activate();
+    const activity = attachment.driver.dispatch({
+      op: {
+        type: 'prompt',
+        opId: OP_ID,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        text: 'go',
+      },
+      runId: RUN_ID,
+      permissionCeiling: CEILING,
+      resolvedInput: { kind: 'prompt_input', sourceOpId: OP_ID, text: 'go' },
+    }).completion;
+    await observedHost.waitForEventCount('retry_scheduled', 1);
+    await sleepEntered.promise;
+
+    const successorRunId = 'successor-1' as RunId;
+    expect(await attachment.driver.dispatch({
+      op: {
+        type: 'abort',
+        opId: 'op_e_78787878787878787878787878787878' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        expectedRunId: successorRunId,
+      },
+      resolvedTarget: { kind: 'run', runId: successorRunId },
+    }).completion).toEqual({ kind: 'operation', outcome: 'applied' });
+    expect(await activity).toEqual({
+      kind: 'activity',
+      status: 'aborted',
+      terminalRunId: successorRunId,
+    });
+    expect(stream.calls).toHaveLength(1);
+    await attachment.driver.close();
+  });
+});
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolvePromise: ((value: T) => void) | undefined;
+  return {
+    promise: new Promise<T>((resolve) => {
+      resolvePromise = resolve;
+    }),
+    resolve(value: T): void {
+      if (resolvePromise === undefined) throw new Error('Deferred is not initialized');
+      resolvePromise(value);
+    },
+  };
+}
+
+async function nextEnvelope(
+  iterator: AsyncIterator<Readonly<EventEnvelope>>,
+  predicate: (envelope: Readonly<EventEnvelope>) => boolean,
+): Promise<Readonly<EventEnvelope>> {
+  for (;;) {
+    const item = await iterator.next();
+    if (item.done) throw new Error('Runtime event stream ended before the expected envelope');
+    if (predicate(item.value)) return item.value;
+  }
+}
+
+function deterministicSessionIdForTest(creationKey: string): string {
+  return `runtime-${createHash('sha256').update(creationKey, 'utf8').digest('hex').slice(0, 40)}`;
+}

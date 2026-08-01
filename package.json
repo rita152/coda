@@ -11,6 +11,12 @@
   "bin": {
     "coda": "./dist/main.js"
   },
+  "exports": {
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
+    }
+  },
   "scripts": {
     "build": "bun run scripts/build.ts",
     "lint": "bun run --bun eslint . --max-warnings 0",

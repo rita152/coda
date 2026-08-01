@@ -15,13 +15,13 @@
 
 import * as readline from 'node:readline';
 import process from 'node:process';
-import type { ApprovalDecision } from '../agent/index.js';
 import type { QueuedMessage } from '../protocol/index.js';
 import type {
-  SessionEvent,
-  SessionInteractionState,
-  SessionUsage,
-} from '../session/index.js';
+  CliApprovalDecision as ApprovalDecision,
+  CliInteractionState as SessionInteractionState,
+  CliSessionEvent as SessionEvent,
+  CliSessionUsage as SessionUsage,
+} from './frontend-types.js';
 import type {
   CliSession,
   InteractiveSession,
@@ -351,6 +351,9 @@ export async function startRepl(
   let pasting = false;
   let statusShown = false;
   let closing = false;
+  const enqueueApproval = (approvalId: string): void => {
+    if (!approvalQueue.includes(approvalId)) approvalQueue.push(approvalId);
+  };
 
   return await new Promise<number>((resolve) => {
     let secretInput = false;
@@ -419,6 +422,10 @@ export async function startRepl(
     const unsub = session.subscribe((e) => {
       if (e.type === 'queue_update') {
         lastQueues = { steering: [...e.steering], followUp: [...e.followUp] };
+      } else if (e.type === 'approval_request') {
+        // Runtime projects canonical control_request through the primary event stream. Direct
+        // Session keeps the legacy broker side channel below; id de-duplication supports both.
+        enqueueApproval(e.approvalId);
       } else if (e.type === 'error' && e.fatal) {
         void shutdown(1); // 致命错误进入退出流程(docs/09 §4)
       }
@@ -426,7 +433,7 @@ export async function startRepl(
     // 审批旁路通道:approval_request 入队即切审批键位(渲染提示由 renderer 的
     // approval_request 分支负责——main.ts 已把同一通道接到 renderer.render)。
     const unsubApproval = approval?.subscribe((e) => {
-      if (e.type === 'approval_request') approvalQueue.push(e.approvalId);
+      if (e.type === 'approval_request') enqueueApproval(e.approvalId);
     });
     const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
       (messages) => {

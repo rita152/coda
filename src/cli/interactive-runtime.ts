@@ -8,11 +8,11 @@ import type {
   UserMessage,
 } from '../protocol/index.js';
 import type {
-  SessionEvent,
-  SessionInteractionState,
-  SessionListener,
-  SessionUsage,
-} from '../session/index.js';
+  CliInteractionState as SessionInteractionState,
+  CliSessionEvent as SessionEvent,
+  CliSessionListener as SessionListener,
+  CliSessionUsage as SessionUsage,
+} from './frontend-types.js';
 import type { Session } from '../session/index.js';
 
 export interface InteractiveSession {

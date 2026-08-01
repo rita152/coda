@@ -101,7 +101,9 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
   atomic append+flush/lease、安全 storage key 与 v1 import；core 不读 HOME/env/默认目录。CLI 把默认
   legacy/runtime roots 或 `--session-dir` 的固定映射显式交给同一 file adapter，测试可换 tmp/in-memory port。
   workspace storage 首次原子绑定 immutable workspaceId+recordedCwd，mismatch 在 lease/recovery 前 typed
-  reject。
+  reject。v1 import 的 meta+legacy_seed 作为 immutable initial prefix 原子 create；final accepted create
+  的 driverRef 只允许 fenced `undefined→exact` ledger enrichment，catalog/global inventory 从 owner-matched
+  create ledger overlay，rejected/非 owner claim 不得绑定。
 - `getThreadSnapshot()` 原子返回 transcript/usage 与完整当前 frontend reducer projection，再用
   highWaterSeq 与 hot subscription 无缝拼接；CLI 不绕过 RuntimePort 读 repository，v1 历史不伪造事件。
 - create/resume/set_model 以 JSON-safe model_selected mutation 原子维护 current ModelRef；resolver 的
@@ -118,7 +120,8 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
 - legacy Session 的内部 retry/compaction 必须经 Supervisor 注入的 `reserveSuccessor` 权威 hook 取得
   并在 predecessor agent_end 可见前持久登记/激活新的 RunId+permission ceiling；turn 经异步
   `reserveTurn` 先登记 TurnId，
-  全部事件经 `commitEvent`。它不是
+  全部事件经 `commitEvent/commitEventBatch`。resume 还把永久 usedRequestIds 传给 factory，并在 activate
+  前用 mandatory `driver.recover()` 按 accepted FIFO 只补缺失的 queue effect。它不是
   会吞 listener reject 的普通 Session.subscribe；hook 失败必须阻止后续副作用。driver 不得在事件
   到达后补猜 identity。
 - driver 的 activity completion 以 per-op 因果链为边界，覆盖 detached retry/compaction successor，
@@ -130,7 +133,9 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
   legacy driver 不得二次读取 current activity/空 Session 猜输入。
 - legacy factory 的 create 返回实际 Session backend 的 durableRef；Supervisor 持久绑定
   ThreadId→driverRef。create 使用基于 workspace/thread/create-op 的幂等安全 creationKey，任意
-  ThreadId 不得直接成为文件名；resume 只用已验证 ref。
+  ThreadId 不得直接成为文件名；resume 只用已验证 ref。启动时自动恢复最新且未被 close supersede 的
+  accepted create/resume intent；expected resolver failure 只写无 identity attachment diagnostic marker
+  并保持 unloaded，显式新 resume 可用新 ModelRef 继续原 creationKey 的 no-ref skeleton。
 - child terminal commit 写稳定 resultOpId 的 durable outbox；父未 attach 时延迟，resume 后向父 journal
   恰好一次提交 `thread_result`，crash 重投由父 journal/result ledger 去重。
 - public runtime package export 可独立 import；import 不读取环境/配置、不创建目录、不注册 signal、
@@ -166,7 +171,8 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
    op envelope。envelope headless 对每个可解析 op 只输出一个 receipt，覆盖 duplicate/rejected 与
    transport error；legacy 模式不新增 frame。
 8. 在 legacy backend create 成功与 driverRef ledger 绑定之间注入 crash；相同 create OpId 重投取得
-   同一 Session id，重启 resume 精确打开它，且任意/path-like ThreadId 从不进入文件路径。
+   同一 Session id，checkpoint 校验前不得绑定，绑定后重启 resume 精确打开它；final rejected/non-owner
+   create enrichment 必须 conflict，且任意/path-like ThreadId 从不进入文件路径。
 9. 两个 attachment 的 approval/rule/FileTracker 状态互不串线；control decision 按 request kind 校验，
    legacy approval-abort 从 pending record 固定 owningRunId/expectedRunId，迟到命令不杀 successor。
 10. compaction event/mutation/checkpoint 同 gate，crash/resume 后出站仍为 committed summary+tail；

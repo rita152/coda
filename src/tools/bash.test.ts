@@ -87,6 +87,7 @@ describe('bash:基本执行', () => {
     const details = out.details as BashDetails;
     expect(details.truncated).toBe(false);
     expect(details.spilledPath).toBeUndefined();
+    expect('spilledPath' in details).toBe(false);
   });
 
   it('无输出命令:结果只有 exit code 行', async () => {

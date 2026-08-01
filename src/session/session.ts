@@ -12,12 +12,15 @@ import type {
   Context,
   ModelConfig,
   ModelRef,
+  QueuedMessage,
   StreamFn,
+  ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
+import { strictJsonSnapshot } from '../protocol/index.js';
 import type { AgentConfig } from '../agent/index.js';
 import { Agent } from '../agent/index.js';
-import type { CompactionRecord, LoadedSession, SessionListItem } from './store.js';
+import type { CompactionRecord, LoadedSession, MetaRecord, SessionListItem, SessionRecord } from './store.js';
 import {
   defaultSessionDir,
   listSessions,
@@ -43,6 +46,21 @@ export interface SessionOptions {
   pricing?: ModelPricing;            // 成本计算;缺省则 costUSD 不计算
   retry?: RetryOptions;              // M7,见 docs/08 §5
   compaction?: CompactionOptions;    // M7,见 docs/08 §6
+  /** @internal Runtime legacy driver 的 awaited canonical-before-mirror gate；普通调用方勿用。 */
+  authoritativeEventSink?: (events: SessionAuthoritativeEventBatch) => Promise<void>;
+  /** @internal Runtime-only guard for detecting writes outside the canonical mirror path. */
+  runtimeMirrorGuard?: SessionRuntimeMirrorGuard;
+  /** @internal Canonical queue snapshot restored silently before attachment activation. */
+  runtimeQueueSeed?: {
+    readonly steering: readonly QueuedMessage[];
+    readonly followUp: readonly QueuedMessage[];
+  };
+}
+
+export interface SessionRuntimeMirrorGuard {
+  assertCurrent(): void;
+  beforeAppend(record: SessionRecord): void;
+  afterAppend(record: SessionRecord): void;
 }
 
 export type SessionEvent =
@@ -54,6 +72,7 @@ export type SessionEvent =
 
 export type SessionListener = (e: SessionEvent) => void | Promise<void>;
 export type SessionInteractionState = 'idle' | 'running' | 'retrying' | 'compacting';
+export type SessionAuthoritativeEventBatch = readonly [SessionEvent, ...SessionEvent[]];
 
 /** session 安装到 Agent 的钩子宿主:create/resume 先建 Agent(钩子委托到这里),再由 Session 构造时回填。 */
 interface HookHost {
@@ -79,6 +98,8 @@ interface SessionInit {
   hooks: HookHost;
   userTransform?: (ctx: Context) => Promise<Context>;
   userShouldStop?: (ctx: Context) => Promise<boolean>;
+  authoritativeEventSink?: (events: SessionAuthoritativeEventBatch) => Promise<void>;
+  runtimeMirrorGuard?: SessionRuntimeMirrorGuard;
 }
 
 export class Session {
@@ -92,10 +113,13 @@ export class Session {
   readonly #compaction: ResolvedCompactionOptions;
   readonly #userTransform?: (ctx: Context) => Promise<Context>;
   readonly #userShouldStop?: (ctx: Context) => Promise<boolean>;
+  readonly #authoritativeEventSink?: (events: SessionAuthoritativeEventBatch) => Promise<void>;
+  readonly #runtimeMirrorGuard?: SessionRuntimeMirrorGuard;
   readonly #listeners = new Set<SessionListener>();
 
   #degraded = false;                 // 磁盘写失败后的内存模式(docs/08 §8)
   #closed = false;
+  #authoritativeFailure: Error | undefined;
 
   // ---- retry 状态 ----
   #attempt = 0;                      // 已重试次数;任何成功 turn 归零(docs/08 §5.3)
@@ -104,6 +128,7 @@ export class Session {
   // ---- compaction 状态 ----
   #pendingCompaction: { reason: 'threshold'; contextTokens: number } | undefined;
   #compactionState: CompactionState | undefined;
+  #lastCompaction: CompactionRecord | undefined;
   #compacting = false;               // 压缩进行中:prompt() 暂存(docs/08 §6.4)
   #stashedPrompts: string[] = [];
 
@@ -123,6 +148,8 @@ export class Session {
     this.#compaction = init.compaction;
     this.#userTransform = init.userTransform;
     this.#userShouldStop = init.userShouldStop;
+    this.#authoritativeEventSink = init.authoritativeEventSink;
+    this.#runtimeMirrorGuard = init.runtimeMirrorGuard;
 
     // 回填钩子(此刻起 agent 的每次采样/turn 边界都经过 session)
     init.hooks.transform = (ctx) => this.#transformContext(ctx);
@@ -130,6 +157,35 @@ export class Session {
 
     // 落盘监听在透传渲染之前注册:agent 的 listener 串行 await,waitForIdle() 返回即全部落盘。
     this.#agent.subscribe(async (e) => {
+      if (this.#authoritativeEventSink !== undefined) {
+        // Runtime path:authoritative commit must precede the v1 mirror and public observers.
+        // Agent 的通用 Emitter 会隔离 listener 异常，因此这里必须把提交失败收进一条
+        // Session 自己拥有的 fatal lane；否则 Runtime 会把失败误判成一次成功的 run。
+        try {
+          this.#throwAuthoritativeFailure();
+          // Runtime canonical and the legacy JSONL mirror must be derived from exactly the
+          // same JSON-safe, pricing-complete snapshot. Commit both the primary event and its
+          // usage projection before appending the mirror so a crash cannot leave canonical
+          // state behind a mirror record it already exposed.
+          const prepared = this.#prepareForPersistence(e);
+          if (prepared.event.type === 'message_end') {
+            const committed: SessionAuthoritativeEventBatch = [prepared.event, ...prepared.extras];
+            await this.#commitAuthoritative(committed);
+            this.#throwAuthoritativeFailure();
+            const persistenceErrors = this.#persistPrepared(prepared.event);
+            for (const event of committed) await this.#notifyListeners(event);
+            for (const error of persistenceErrors) await this.#fanout(error);
+          } else {
+            await this.#onAgentEvent(prepared.event, prepared.extras);
+            this.#throwAuthoritativeFailure();
+            const persistenceErrors = this.#persistPrepared(prepared.event);
+            for (const error of persistenceErrors) await this.#fanout(error);
+          }
+        } catch (error) {
+          this.#recordAuthoritativeFailure(error);
+        }
+        return;
+      }
       const extras = this.#persist(e);
       await this.#onAgentEvent(e, extras);
     });
@@ -149,8 +205,56 @@ export class Session {
       model: opts.agentConfig.model.ref,
     });
     const hooks: HookHost = {};
-    const agent = new Agent(withSessionHooks(opts.agentConfig, id, hooks));
+    const agent = new Agent(withSessionHooks(
+      opts.agentConfig,
+      id,
+      hooks,
+      opts.runtimeQueueSeed,
+      opts.runtimeMirrorGuard,
+    ));
     return new Session(buildInit(opts, id, store, agent, new UsageTracker(opts.pricing), hooks));
+  }
+
+  /**
+   * @internal Runtime legacy adapter only. Stable ids make driver create idempotent across a
+   * create-backend -> bind crash window; ordinary callers should keep using create().
+   */
+  static async createWithId(
+    id: string,
+    opts: SessionOptions,
+    runtimeMeta?: MetaRecord,
+  ): Promise<Session> {
+    const dir = opts.dir ?? defaultSessionDir();
+    const meta = runtimeMeta ?? {
+      type: 'meta' as const,
+      version: STORE_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      id,
+      createdAt: Date.now(),
+      cwd: opts.agentConfig.cwd ?? process.cwd(),
+      model: opts.agentConfig.model.ref,
+    };
+    if (meta.id !== id || meta.type !== 'meta' || meta.version !== STORE_VERSION) {
+      throw new Error('Runtime Session meta does not match its deterministic id');
+    }
+    const claimed = SessionStore.initializeNamed(dir, id, meta);
+    if (!claimed.created) return Session.resume(id, opts);
+    const hooks: HookHost = {};
+    const agent = new Agent(withSessionHooks(
+      opts.agentConfig,
+      id,
+      hooks,
+      opts.runtimeQueueSeed,
+      opts.runtimeMirrorGuard,
+    ));
+    return new Session(buildInit(
+      opts,
+      id,
+      claimed.store,
+      agent,
+      new UsageTracker(opts.pricing),
+      hooks,
+    ));
   }
 
   static async resume(id: string, opts: SessionOptions): Promise<Session> {
@@ -165,13 +269,19 @@ export class Session {
       console.error(`[session] ${id}: compaction record ignored (tailStartId not found)`);
     }
     const hooks: HookHost = {};
-    const agent = new Agent({ ...withSessionHooks(opts.agentConfig, id, hooks), initialMessages: loaded.active });
+    const agent = new Agent({
+      ...withSessionHooks(opts.agentConfig, id, hooks, opts.runtimeQueueSeed, opts.runtimeMirrorGuard),
+      initialMessages: loaded.active,
+    });
     const usage = new UsageTracker(opts.pricing);
-    usage.seed(loaded.active);       // 统计与转录同源
+    // Standalone keeps the exported v1 observable baseline; Runtime canonical recovery needs
+    // full audit usage because its checkpoint transcript is the source of truth.
+    usage.seed(opts.authoritativeEventSink === undefined ? loaded.active : loaded.messages);
 
     const session = new Session(buildInit(opts, id, store, agent, usage, hooks));
     // 恢复既有 compaction:折叠状态与运行路径共用同一 transformContext(docs/08 §4.1/§6.2)。
     if (loaded.lastCompaction !== undefined && loaded.active !== loaded.messages) {
+      session.#lastCompaction = loaded.lastCompaction;
       session.#compactionState = {
         tailStartId: loaded.lastCompaction.tailStartId,
         synthetic: syntheticSummaryMessage(loaded.lastCompaction.summary),
@@ -189,7 +299,7 @@ export class Session {
    * async 包装把 agent 的同步 throw 规范化为 rejection(Promise 契约);closed 后拒绝。
    */
   async prompt(text: string): Promise<void> {
-    this.#assertOpen();
+    this.#assertOperational();
     if (this.#compacting) {
       this.#stashedPrompts.push(text);   // 压缩完成后重放(先 prompt,隐含开跑)
       return;
@@ -197,28 +307,35 @@ export class Session {
     if (this.#followUpState === 'retrying') {
       throw new Error('任务正在重试；请使用 steer() 或 followUp()');
     }
-    return this.#agent.prompt(text);
+    await this.#agent.prompt(text);
+    this.#throwAuthoritativeFailure();
   }
 
   async continue(): Promise<void> {
-    this.#assertOpen();
+    this.#assertOperational();
     if (this.interactionState() !== 'idle') {
       throw new Error('任务仍在运行；请先完成或 abort，再继续');
     }
-    return this.#agent.continue();
+    await this.#agent.continue();
+    this.#throwAuthoritativeFailure();
   }
 
   steer(text: string | UserMessage): void {
-    this.#assertOpen();
+    this.#assertOperational();
     this.#agent.steer(text);            // 压缩期间直接透传:agent 队列即暂存区,continue 后自然消费
   }
   followUp(text: string | UserMessage): void {
-    this.#assertOpen();
+    this.#assertOperational();
     this.#agent.followUp(text);
   }
 
   #assertOpen(): void {
     if (this.#closed) throw new Error(`Session ${this.id} is closed`);
+  }
+  #assertOperational(): void {
+    this.#assertOpen();
+    this.#throwAuthoritativeFailure();
+    this.#runtimeMirrorGuard?.assertCurrent();
   }
   abort(): void {
     this.#opController?.abort();        // 取消退避等待 / 摘要请求
@@ -235,6 +352,11 @@ export class Session {
     return this.#followUpState;
   }
 
+  /** @internal Runtime driver decision hint; not a replacement for public interactionState(). */
+  runtimeFollowUpState(): 'idle' | 'retrying' | 'compacting' {
+    return this.#followUpState;
+  }
+
   currentModel(): ModelRef {
     return { ...this.#model.ref };
   }
@@ -244,7 +366,7 @@ export class Session {
    * 由实际 adapter 写入新的 ModelRef，因此恢复与审计不会丢失跨模型边界。
    */
   setModel(model: ModelConfig): void {
-    this.#assertOpen();
+    this.#assertOperational();
     if (this.interactionState() !== 'idle') {
       throw new Error('任务仍在运行；请先完成或 abort，再切换模型');
     }
@@ -261,6 +383,11 @@ export class Session {
 
   get messages(): readonly AgentMessage[] {
     return this.#agent.transcript;
+  }
+
+  /** @internal Runtime checkpoint bridge; returns a detached legacy compaction record. */
+  compactionCheckpoint(): Readonly<CompactionRecord> | undefined {
+    return this.#lastCompaction === undefined ? undefined : { ...this.#lastCompaction };
   }
 
   subscribe(listener: SessionListener): () => void {
@@ -284,7 +411,11 @@ export class Session {
     while (true) {
       const op = this.#opChain;
       await Promise.all([op, this.#agent.waitForIdle()]);
-      if (op === this.#opChain && this.interactionState() === 'idle') return;
+      if (op === this.#opChain && this.interactionState() === 'idle') {
+        this.#throwAuthoritativeFailure();
+        this.#runtimeMirrorGuard?.assertCurrent();
+        return;
+      }
     }
   }
 
@@ -292,6 +423,8 @@ export class Session {
 
   /** 出站折叠(docs/08 §6.2):compactionState 存在时前缀换成合成摘要;再链用户钩子。convertContext 在 agent 侧接着跑。 */
   async #transformContext(ctx: Context): Promise<Context> {
+    this.#throwAuthoritativeFailure();
+    this.#runtimeMirrorGuard?.assertCurrent();
     let out = ctx;
     const state = this.#compactionState;
     if (state) {
@@ -301,11 +434,15 @@ export class Session {
       }
     }
     if (this.#userTransform) out = await this.#userTransform(out);
+    // Keep the check adjacent to provider sampling even when a user transform awaited arbitrary
+    // work (or itself touched the legacy backend).
+    this.#runtimeMirrorGuard?.assertCurrent();
     return out;
   }
 
   /** threshold 检测(docs/08 §6.1):超阈值设 pendingCompaction 并让 agent 在 turn 边界体面停下。 */
   async #shouldStopAfterTurn(ctx: Context): Promise<boolean> {
+    this.#throwAuthoritativeFailure();
     if (this.#userShouldStop && (await this.#userShouldStop(ctx))) return true;
     if (!this.#compaction.enabled) return false;
     const limits = this.#model.limits;
@@ -481,6 +618,7 @@ export class Session {
   /** 摘要 → 追加 CompactionRecord + 设 compactionState → 续跑(docs/08 §6.3/§6.5)。
    *  hardTruncate:overflow 压缩后仍 overflow 的第二次,跳过 summarize 直接硬截断(§8)。 */
   async #runCompaction(reason: 'threshold' | 'overflow', signal: AbortSignal, hardTruncate = false): Promise<void> {
+    this.#runtimeMirrorGuard?.assertCurrent();
     await this.#fanout({ type: 'compaction_start', reason });
 
     const transcript = [...this.#agent.transcript];
@@ -495,6 +633,8 @@ export class Session {
       // 压缩后仍 overflow:不再 summarize(会再吃一次超限上下文),直接硬截断降级
       summary = HARD_TRUNCATION_SUMMARY;
     } else {
+      // Compaction bypasses Agent.transformContext and calls StreamFn directly.
+      this.#runtimeMirrorGuard?.assertCurrent();
       try {
         summary = await summarize(this.#streamFn, this.#model, dropped, {
           summaryMaxTokens: this.#compaction.summaryMaxTokens,
@@ -539,10 +679,22 @@ export class Session {
       summary,
       contextTokensBefore: contextTokens,
     };
-    const persistExtras = this.#append(record);
+    this.#lastCompaction = record;
     this.#compactionState = { tailStartId: tailMsg.id, synthetic: syntheticSummaryMessage(summary) };
-    for (const x of persistExtras) await this.#fanout(x);
-    await this.#fanout({ type: 'compaction_end', ok: true, droppedMessages: dropped.length });
+    if (this.#authoritativeEventSink !== undefined) {
+      // Runtime path: expose the pending checkpoint to the adapter, durably commit the
+      // compaction event + mutation, and only then advance the legacy mirror.
+      const event = { type: 'compaction_end', ok: true, droppedMessages: dropped.length } as const;
+      await this.#commitAuthoritative([event]);
+      const persistExtras = this.#append(record);
+      await this.#notifyListeners(event);
+      for (const x of persistExtras) await this.#fanout(x);
+    } else {
+      // Standalone Session keeps its historical mirror-before-observer ordering.
+      const persistExtras = this.#append(record);
+      for (const x of persistExtras) await this.#fanout(x);
+      await this.#fanout({ type: 'compaction_end', ok: true, droppedMessages: dropped.length });
+    }
     this.#compacting = false;
     await this.#resumeAfterCompaction();
   }
@@ -571,28 +723,60 @@ export class Session {
 
   /** 处理落盘与统计,返回随后要按序发出的旁路事件(在主事件 fanout 之后)。 */
   #persist(e: AgentEvent): SessionEvent[] {
-    const extras: SessionEvent[] = [];
-    if (e.type === 'message_end') {
-      let message = sanitizeForDisk(e.message);
-      if (message.role === 'assistant') {
-        const cost = message.usage.costUSD ?? this.#usage.cost(message.usage);
-        if (cost !== undefined && message.usage.costUSD === undefined) {
-          message = { ...message, usage: { ...message.usage, costUSD: cost } };
-        }
-        this.#usage.add(message);
-        extras.push({ type: 'usage_update', usage: this.#usage.snapshot() });
-      }
-      extras.push(...this.#append({ type: 'message', message }));
+    const prepared = this.#prepareForPersistence(e);
+    return [...prepared.extras, ...this.#persistPrepared(prepared.event)];
+  }
+
+  #prepareForPersistence(e: AgentEvent): { event: AgentEvent; extras: SessionEvent[] } {
+    if (e.type === 'tool_execution_end') {
+      // Runtime commits this event before the same result later reaches message_end. Project
+      // arbitrary adapter/tool details through the identical strict-JSON boundary now, otherwise
+      // canonical tool_end can fail or diverge from the transcript/mirror projection.
+      const result = strictJsonSnapshot(sanitizeForDisk(e.result, false)) as unknown as ToolResultMessage;
+      return { event: { ...e, result }, extras: [] };
     }
+    if (e.type === 'message_start' && e.message.role === 'tool_result') {
+      const message = strictJsonSnapshot(sanitizeForDisk(e.message, false)) as unknown as ToolResultMessage;
+      return { event: { ...e, message }, extras: [] };
+    }
+    if (e.type === 'turn_end') {
+      const toolResults = e.toolResults.map((result) =>
+        strictJsonSnapshot(sanitizeForDisk(result, false)) as unknown as ToolResultMessage);
+      return { event: { ...e, toolResults }, extras: [] };
+    }
+    if (e.type === 'agent_end') {
+      const messages = e.messages.map((message) =>
+        strictJsonSnapshot(sanitizeForDisk(message, false)) as unknown as AgentMessage);
+      return { event: { ...e, messages }, extras: [] };
+    }
+    if (e.type !== 'message_end') return { event: e, extras: [] };
+    let message = sanitizeForDisk(e.message);
+    const extras: SessionEvent[] = [];
+    if (message.role === 'assistant') {
+      const cost = message.usage.costUSD ?? this.#usage.cost(message.usage);
+      if (cost !== undefined && message.usage.costUSD === undefined) {
+        message = { ...message, usage: { ...message.usage, costUSD: cost } };
+      }
+      message = strictJsonSnapshot(message) as unknown as AssistantMessage;
+      this.#usage.add(message);
+      extras.push({ type: 'usage_update', usage: this.#usage.snapshot() });
+    } else {
+      message = strictJsonSnapshot(message) as unknown as AgentMessage;
+    }
+    return { event: { ...e, message }, extras };
+  }
+
+  #persistPrepared(e: AgentEvent): SessionEvent[] {
+    if (e.type === 'message_end') return this.#append({ type: 'message', message: e.message });
     if (e.type === 'agent_end') this.#store.fsync();
-    return extras;
+    return [];
   }
 
   #append(record: Parameters<SessionStore['append']>[0]): SessionEvent[] {
     if (this.#degraded) return [];
+    this.#runtimeMirrorGuard?.beforeAppend(record);
     try {
       this.#store.append(record);
-      return [];
     } catch (err) {
       this.#degraded = true;
       return [
@@ -603,9 +787,27 @@ export class Session {
         },
       ];
     }
+    this.#runtimeMirrorGuard?.afterAppend(record);
+    return [];
   }
 
   async #fanout(e: SessionEvent): Promise<void> {
+    this.#throwAuthoritativeFailure();
+    await this.#commitAuthoritative([e]);
+    await this.#notifyListeners(e);
+  }
+
+  async #commitAuthoritative(events: SessionAuthoritativeEventBatch): Promise<void> {
+    if (this.#authoritativeEventSink === undefined) return;
+    try {
+      await this.#authoritativeEventSink(events);
+    } catch (error) {
+      this.#recordAuthoritativeFailure(error);
+      throw this.#authoritativeFailure;
+    }
+  }
+
+  async #notifyListeners(e: SessionEvent): Promise<void> {
     for (const l of [...this.#listeners]) {
       try {
         await l(e);
@@ -614,17 +816,52 @@ export class Session {
       }
     }
   }
+
+  #recordAuthoritativeFailure(error: unknown): void {
+    if (this.#authoritativeFailure !== undefined) return;
+    this.#authoritativeFailure =
+      error instanceof Error ? error : new Error(`authoritative event commit failed: ${String(error)}`);
+    this.#opController?.abort();
+    this.#agent.abort();
+  }
+
+  #throwAuthoritativeFailure(): void {
+    if (this.#authoritativeFailure !== undefined) throw this.#authoritativeFailure;
+  }
 }
 
 // ---------- 装配辅助 ----------
 
 /** 用 session 的钩子委托覆盖 agentConfig 的 transformContext/shouldStopAfterTurn(用户自带的钩子被 session 链式保留)。 */
-function withSessionHooks(agentConfig: AgentConfig, id: string, hooks: HookHost): AgentConfig {
+function withSessionHooks(
+  agentConfig: AgentConfig,
+  id: string,
+  hooks: HookHost,
+  queueSeed?: SessionOptions['runtimeQueueSeed'],
+  mirrorGuard?: SessionRuntimeMirrorGuard,
+): AgentConfig {
+  const userBeforeToolCall = agentConfig.beforeToolCall;
   return {
     ...agentConfig,
     truncationScope: id,   // 落盘 scope = sessionId(docs/07 §1.6)
     transformContext: (ctx) => (hooks.transform ? hooks.transform(ctx) : Promise.resolve(ctx)),
     shouldStopAfterTurn: (ctx) => (hooks.shouldStop ? hooks.shouldStop(ctx) : Promise.resolve(false)),
+    ...(mirrorGuard !== undefined && {
+      beforeToolCall: async (call) => {
+        mirrorGuard.assertCurrent();
+        const decision = await (userBeforeToolCall?.(call) ?? {});
+        // Approval/policy hooks may await user input for an arbitrary duration. Revalidate at the
+        // actual tool boundary so a writer that appeared while waiting cannot gain a tool effect.
+        mirrorGuard.assertCurrent();
+        return decision;
+      },
+    }),
+    ...(queueSeed !== undefined && {
+      initialQueues: {
+        steering: queueSeed.steering.map((message) => queuedUserMessage(message, 'steering')),
+        followUp: queueSeed.followUp.map((message) => queuedUserMessage(message, 'follow_up')),
+      },
+    }),
   };
 }
 
@@ -649,7 +886,23 @@ function buildInit(
   };
   if (opts.agentConfig.transformContext) init.userTransform = opts.agentConfig.transformContext;
   if (opts.agentConfig.shouldStopAfterTurn) init.userShouldStop = opts.agentConfig.shouldStopAfterTurn;
+  if (opts.authoritativeEventSink !== undefined) init.authoritativeEventSink = opts.authoritativeEventSink;
+  if (opts.runtimeMirrorGuard !== undefined) init.runtimeMirrorGuard = opts.runtimeMirrorGuard;
   return init;
+}
+
+function queuedUserMessage(
+  message: QueuedMessage,
+  source: 'steering' | 'follow_up',
+): UserMessage {
+  if (message.kind !== source) throw new Error(`Runtime queue kind mismatch: ${message.kind}`);
+  return {
+    role: 'user',
+    id: message.id,
+    timestamp: 0,
+    content: [{ type: 'text', text: message.text }],
+    source,
+  };
 }
 
 function lastAssistant(messages: readonly AgentMessage[]): AssistantMessage | undefined {
@@ -661,13 +914,25 @@ function lastAssistant(messages: readonly AgentMessage[]): AssistantMessage | un
 }
 
 /** details 不可 JSON 序列化时置 undefined 并告警,不得让写盘失败(docs/08 §3.2)。 */
-function sanitizeForDisk(m: AgentMessage): AgentMessage {
-  if (m.role !== 'tool_result' || m.details === undefined) return m;
+function sanitizeForDisk(m: ToolResultMessage, warn?: boolean): ToolResultMessage;
+function sanitizeForDisk(m: AgentMessage, warn?: boolean): AgentMessage;
+function sanitizeForDisk(m: AgentMessage, warn = true): AgentMessage {
+  if (m.role !== 'tool_result') return m;
+  if (m.details === undefined) return withoutToolResultDetails(m);
   try {
-    JSON.stringify(m.details);
-    return m;
+    return { ...m, details: strictJsonSnapshot(m.details) };
   } catch {
-    console.error(`[session] tool_result ${m.id} details not serializable, dropped from disk record`);
-    return { ...m, details: undefined };
+    if (warn) {
+      console.error(`[session] tool_result ${m.id} details not serializable, dropped from disk record`);
+    }
+    return withoutToolResultDetails(m);
   }
+}
+
+function withoutToolResultDetails(
+  message: Extract<AgentMessage, { role: 'tool_result' }>,
+): Extract<AgentMessage, { role: 'tool_result' }> {
+  const { details, ...withoutDetails } = message;
+  void details;
+  return withoutDetails;
 }

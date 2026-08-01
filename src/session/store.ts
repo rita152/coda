@@ -2,13 +2,27 @@
 // 一个会话 = 一个文件 ~/.coda/sessions/<id>.jsonl,三种记录(meta/message/compaction),
 // 存储 append-only、视图靠折叠;崩溃容忍:尾行半截 JSON 丢弃,中部损坏拒绝加载。
 
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, truncateSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
+import { PROTOCOL_VERSION } from '../protocol/index.js';
 import type { AgentMessage, ModelRef, UserMessage } from '../protocol/index.js';
 import { runtimeHomeDir } from '../shared/index.js';
 
 export const STORE_VERSION = 1;
-export const PROTOCOL_VERSION = '1.0.0';
+export { PROTOCOL_VERSION };
 
 export interface MetaRecord {
   type: 'meta';
@@ -72,6 +86,51 @@ export class SessionStore {
         return { id, store: new SessionStore(dir, id) };
       }
       if (attempt >= 20) throw new Error('Unable to allocate a unique session id');
+    }
+  }
+
+  /**
+   * @internal Runtime adapter:atomically install a complete meta header under a stable name.
+   * The target is created by hard-linking a fully written same-directory temp file, so a failed
+   * write cannot leave an empty claimed backend behind.
+   */
+  static initializeNamed(
+    dir: string,
+    id: string,
+    meta: MetaRecord,
+  ): { created: boolean; store: SessionStore } {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) {
+      throw new Error('Invalid deterministic session id');
+    }
+    mkdirSync(dir, { recursive: true });
+    const store = new SessionStore(dir, id);
+    const temporary = path.join(dir, `.${id}.${crypto.randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(meta)}\n`, { encoding: 'utf8', flag: 'wx' });
+      // The Runtime mirror claim can become durably active immediately after this method returns.
+      // Flush the inode before installing its stable hard-link so a power loss cannot preserve the
+      // active claim while leaving the claimed backend with missing meta bytes.
+      const temporaryFd = openSync(temporary, 'r');
+      try {
+        fsyncSync(temporaryFd);
+      } finally {
+        closeSync(temporaryFd);
+      }
+      try {
+        linkSync(temporary, store.file);
+        return { created: true, store };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return { created: false, store };
+        throw error;
+      }
+    } catch (error) {
+      throw error;
+    } finally {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // A failed temp write may not have created a file; target installation is unaffected.
+      }
     }
   }
 

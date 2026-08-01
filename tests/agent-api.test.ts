@@ -8,7 +8,16 @@ import { describe, expect, it } from 'bun:test';
 import { PendingMessageQueue, runLoop } from '../src/agent/index.js';
 import type { LoopConfig } from '../src/agent/index.js';
 import { hasResidue } from '../src/agent/agent.js';
-import type { AgentEvent, AgentMessage, ToolResultMessage } from '../src/protocol/index.js';
+import {
+  assertRunId,
+  assertThreadId,
+  assertTurnId,
+  assertWorkspaceId,
+  type AgentEvent,
+  type AgentMessage,
+  type ToolResultMessage,
+  validateEventEnvelope,
+} from '../src/protocol/index.js';
 import { createFauxStreamFn, createGate } from '../src/providers/faux/index.js';
 import { FileTracker } from '../src/shared/index.js';
 import type { ToolDefinition } from '../src/tools/types.js';
@@ -162,6 +171,31 @@ async function runTruncationScenario(
 }
 
 describe('框架级截断 post-hook(docs/07 §1.6)', () => {
+  it('无 details 的工具结果省略可选字段并可提交为严格 JSON Runtime event', async () => {
+    const plain = makeTool('plain', async () => textOutput('ok'));
+    const [result] = await runTruncationScenario(
+      [plain],
+      [{ name: 'plain', id: 'call_plain' }],
+      tmpdir(),
+    );
+
+    expect(result).toBeDefined();
+    expect('details' in (result as ToolResultMessage)).toBe(false);
+    expect(() => validateEventEnvelope({
+      workspaceId: assertWorkspaceId('workspace'),
+      threadId: assertThreadId('thread'),
+      runId: assertRunId('run'),
+      turnId: assertTurnId('turn'),
+      seq: 1,
+      timestamp: 1,
+      event: {
+        type: 'tool_execution_end',
+        toolCallId: 'call_plain',
+        result,
+      },
+    })).not.toThrow();
+  });
+
   it('工具输出超 2000 行:截断 + 落盘 + 尾部续读提示;自带 truncated 标记则跳过', async () => {
     const spillDir = mkdtempSync(path.join(tmpdir(), 'coda-spill-'));
     const bigText = Array.from({ length: 3000 }, (_, i) => `line ${i + 1}`).join('\n');

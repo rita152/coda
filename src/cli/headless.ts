@@ -8,9 +8,12 @@
 
 import { createInterface } from 'node:readline';
 import process from 'node:process';
-import type { ApprovalDecision } from '../agent/index.js';
-import type { Session, SessionEvent } from '../session/index.js';
-import { PROTOCOL_VERSION } from '../session/index.js';
+import { PROTOCOL_VERSION } from '../protocol/index.js';
+import type {
+  CliApprovalDecision as ApprovalDecision,
+  CliSessionEvent as SessionEvent,
+} from './frontend-types.js';
+import type { CliSession } from './interactive-runtime.js';
 
 /** stdin 命令(docs/09 §6.2/§6.5):命名对齐内部协议,snake_case 贯穿 wire 面。 */
 export type CliCommand =
@@ -42,7 +45,7 @@ export interface HeadlessOutput {
 }
 
 export async function startHeadless(
-  session: Session,
+  session: CliSession,
   opts: {
     stdin: NodeJS.ReadableStream;
     stdout: HeadlessOutput;
@@ -148,13 +151,15 @@ export async function startHeadless(
   const dispatch = (cmd: CliCommand): void => {
     switch (cmd.type) {
       case 'prompt': {
-        // running/retrying 时不启动第二个任务；compacting 仍由 Session 暂存 prompt。
-        const state = session.interactionState();
-        if (state === 'running' || state === 'retrying') {
-          writeObserved({ type: 'error', fatal: false, message: 'agent is running; use steer or follow_up' });
-          return;
-        }
         session.prompt(cmd.text).catch((err: unknown) => {
+          if (runtimeBusyRejection(err) || legacySessionBusyFailure(err)) {
+            writeObserved({
+              type: 'error',
+              fatal: false,
+              message: 'agent is running; use steer or follow_up',
+            });
+            return;
+          }
           // StreamFn 铁律下 run 不应 reject;真发生即致命(docs/09 §6.4)
           writeObserved({ type: 'error', fatal: true, message: `prompt failed: ${String(err)}` });
           void shutdown(1);
@@ -247,6 +252,23 @@ export async function startHeadless(
   rl.close();
   releaseStdin(opts.stdin);
   return code;
+}
+
+function runtimeBusyRejection(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'reason' in error &&
+    error.reason === 'thread_busy_use_steer_or_follow_up'
+  );
+}
+
+function legacySessionBusyFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message === 'Agent is running; use steer() or followUp()' ||
+    error.message === '任务正在重试；请使用 steer() 或 followUp()'
+  );
 }
 
 /** 解析并校验一行命令;不合法时 throw(调用方转为 non-fatal error 事件)。 */

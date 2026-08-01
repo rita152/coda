@@ -44,6 +44,13 @@ export default tseslint.config(
           { target: './src/session', from: './src/cli' },
           { target: './src/session', from: './src/providers' },
           { target: './src/session', from: './src/tools' },
+          // runtime 是无 UI 的 Supervisor/路由层，只依赖 protocol/shared 与本层；
+          // Session/Agent/provider/tool 只能经注入 port 或上层 legacy adapter 接入。
+          {
+            target: './src/runtime',
+            from: './src',
+            except: ['./runtime', './protocol', './shared'],
+          },
           // provider 之间互相隔离(跨 provider import 是设计异味)
           { target: './src/providers/openai-chat', from: './src/providers/faux' },
           { target: './src/providers/faux', from: './src/providers/openai-chat' },
@@ -114,6 +121,24 @@ export default tseslint.config(
       'no-restricted-syntax': ['error',
         { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(跨 provider 隔离)' },
         { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(跨 provider 隔离)' },
+      ],
+    },
+  },
+
+  // runtime core 的 import() type 不经过 import/no-restricted-paths；显式补上该通道。
+  // flat config 会整体覆盖同 ruleId，故同时保留全局 SDK 动态/type-only 封锁。
+  {
+    files: ['src/runtime/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': ['error',
+        { selector: String.raw`ImportExpression > Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(动态 import 同样受限)' },
+        { selector: String.raw`TSImportType Literal[value=/^openai(\u002F|$)/]`, message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(import() 类型引用同样受限)' },
+        { selector: String.raw`ImportExpression > Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(动态 import 同样受限)' },
+        { selector: String.raw`TSImportType Literal[value=/^@anthropic-ai(\u002F|$)/]`, message: '@anthropic-ai/sdk 只允许在 src/providers/anthropic-messages/ 内使用(import() 类型引用同样受限)' },
+        {
+          selector: String.raw`TSImportType Literal[value=/^\.\.\u002F(cli|providers|session|agent|tools)(\u002F|$)/]`,
+          message: 'src/runtime core 禁止通过 import() 类型引用 CLI/provider/Session/Agent/tool',
+        },
       ],
     },
   },

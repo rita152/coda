@@ -5,9 +5,11 @@ export type {
   CompactionOptions,
   RetryOptions,
   SessionEvent,
+  SessionAuthoritativeEventBatch,
   SessionInteractionState,
   SessionListener,
   SessionOptions,
+  SessionRuntimeMirrorGuard,
 } from './session.js';
 export { decideRetry, sleepWithAbort } from './retry.js';
 export type { ResolvedRetryPolicyOptions, RetryDecision, RetrySleep } from './retry.js';

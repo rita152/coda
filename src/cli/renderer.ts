@@ -14,7 +14,10 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
-import type { SessionEvent, SessionUsage } from '../session/index.js';
+import type {
+  CliSessionEvent as SessionEvent,
+  CliSessionUsage as SessionUsage,
+} from './frontend-types.js';
 
 export interface RendererOptions {
   color: boolean;

@@ -24,6 +24,7 @@ import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
+import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import {
   approvalDecisionForKey,
@@ -1613,6 +1614,72 @@ describe('TUI 控制器接线', () => {
     expect(view.screen.getInput()).toBe('seedAFTER\nTEXT');
 
     view.screen.clearInput();
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('canonical session approval_request enters TUI approval mode without a side channel', async () => {
+    let listener: ((event: SessionEvent) => void | Promise<void>) | undefined;
+    const resolutions: Array<{ id: string; decision: string }> = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: (next) => {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
+      },
+      prompt: async () => {},
+      steer: () => {},
+      followUp: () => {},
+      abort: () => {},
+      close: async () => {},
+    };
+    const approval = {
+      broker: {
+        resolve: (id: string, decision: 'allow_once' | 'allow_always' | 'deny' | 'abort') => {
+          resolutions.push({ id, decision });
+        },
+      },
+      onAbort: (): void => {},
+      subscribe: (): (() => void) => () => {},
+    };
+    const view = await setup();
+    view.screen.focusInput();
+    const controller = runTuiController(
+      session,
+      approval,
+      view.screen,
+      view.renderer,
+      {
+        interaction: view.interaction,
+        installSignalHandlers: false,
+      },
+    );
+
+    const emit = listener;
+    if (emit === undefined) throw new Error('primary session listener was not registered');
+    await emit({
+      type: 'approval_request',
+      approvalId: 'canonical-tui-approval',
+      toolCallId: 'call-canonical',
+      description: 'run canonical command',
+    });
+    await view.flush();
+    expect(view.frame()).toContain('Approval required');
+
+    view.mockInput.pressKey('y');
+    expect(resolutions).toEqual([
+      { id: 'canonical-tui-approval', decision: 'allow_once' },
+    ]);
+
+    view.screen.clearInput();
+    view.screen.focusInput();
     await view.mockInput.typeText('/quit');
     view.mockInput.pressEnter();
     expect(await controller).toBe(0);

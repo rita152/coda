@@ -375,6 +375,8 @@ export type DerivedOpIdentityReservation =
 export interface ThreadJournalCreateInput {
   readonly threadId: ThreadId;
   readonly meta: ThreadMetaRecord;
+  // 仅用于 v1 import；storage 必须与 meta 在同一次 exclusive create + flush 中写入。
+  readonly initialRecords?: readonly LegacyThreadSeedRecord[];
 }
 
 export interface LegacyThreadImport {
@@ -461,6 +463,10 @@ export interface RuntimeStoragePort {
 containment。这里的 port 刻意不暴露裸路径或 SessionStore。`listThreads()` 只读 catalog/v1 index，不取
 thread write lease；`importLegacyThread()` 验证后返回 legacy_seed + durable driverRef，但不伪造事件。
 ThreadDriverFactory 只负责 execution attachment，不兼任 catalog/journal。
+`initialRecords` 只允许经过验证的 `legacy_seed`；file/memory adapter 必须把 `thread_meta` 与这些记录
+作为一个不可分割的 journal 初始化写入。不能先创建只有 meta 的 runtime-v2 journal、再另行补 seed，
+否则 crash 后既无法证明 legacy provenance，又可能把普通 runtime-created `session-v1` driverRef 误判
+为待导入旧会话。重复 create 必须逐字段核对同一 immutable prefix。
 `openWorkspace()` 只接收已经通过 current-host absolute cwd gate 的输入。首次创建时必须原子绑定
 immutable `(workspaceId, recordedCwd 原始 Unicode bytes)`；
 重开时同时验证 requested cwd 与显式/派生 workspaceId，返回 port 的两个 readonly 字段逐字等于已存
@@ -507,6 +513,14 @@ file adapter 构建 catalog 时必须先读取 canonical meta 与 pending/final 
 backend create 与 driverRef bind 之间，pending creationKey 先隐藏该 orphan，启动恢复用同一 key 找回
 并绑定；只有完全未 claimed 的历史 v1 才生成独立 legacy identity。ref/key 必须经 adapter 验证且
 root-contained，碰撞/不一致时 quarantine 并报错，不能猜配。
+这个 bind 复用 `finalizeSupervisorOp` 的 fenced CAS，但对已经 final accepted 的 create 只允许唯一的
+单向 enrichment：`driverCreation.driverRef: undefined → exact value`，receipt、payload、creationKey 与
+其余字段必须逐字不变；相同值重试幂等，改 ref 或给 rejected create 绑定均 conflict。factory.create
+返回后必须先验证 durableRef 形态及 `initialCheckpoint` 与 journal checkpoint canonical deep-equal，
+通过后才 bind，随后才 recover/activate。`listThreads()` 与只读 `listStoredThreads()` 构建 canonical
+catalog 时必须以已验证的 pending/final-accepted create ledger ref overlay 缺省 meta/catalog ref，并对
+两处不一致 fail closed；final rejected create 永不参与 overlay。这样 bind 前 crash 仍用原 creationKey
+找回，bind 后 crash/restart 则稳定走 factory.resume，且 claimed v1 不会再次作为 unclaimed import 出现。
 
 导入 public runtime entry 不得读 `.env`/配置、创建目录、打开 TTY、安装 signal handler 或启动
 网络请求。IO 只在调用显式工厂、查询端口或提交 op 后发生。未给 cursor 的 thread 只接收订阅原子建立后
@@ -958,14 +972,22 @@ lifecycle/scoped op 还遵守：
   旧 fencing token 的任何迟到 append 必须拒绝；
 - recovery 重建最新、未被 close supersede 的 create/resume intent 时，只能用 journal 中的 ModelRef
   重新调用 `RuntimeModelResolver`，绝不持久化/猜测旧 secret。若 resolver 返回 discriminated expected
-  failure（尤其 `credentials_unavailable`），Supervisor 原子把该 attachment intent 记为
-  `recovery_interrupted`、释放可重试 attach claim，并让 catalog entry 保持 `closed/unloaded`；原 lifecycle
+  failure（尤其 `credentials_unavailable`），Supervisor 以一个 scope=thread、无 op/run/turn identity 的
+  `attachment_<model-code>` `runtime_diagnostic` 作为 durable `recovery_interrupted` marker，释放可重试
+  attach claim，并让 catalog entry 保持 `closed/unloaded`；marker 的 seq 必须晚于它所收束的最新
+  `thread_created/thread_resumed`，fold 时只有“最新 marker 晚于最新 attach lifecycle”才 overlay closed；
+  后续显式 resume 的更晚 `thread_resumed` 自然 supersede marker。恢复不得借原 create/resume OpId 伪造
+  `thread_closed`，因为原 lifecycle accepted receipt 是不可改写的历史事实。原 lifecycle
   OpId 的 accepted receipt 仍是历史事实，不改写为 rejected，也不调用 driver/provider/tool。它不使整个
   Runtime construction 失败，`listThreads()` 仍可展示该 thread，并产生稳定
   `attachment_credentials_unavailable`（或对应 model code）diagnostic。随后调用方以新 ExternalOpId 与
   新 ModelRef 显式提交 `thread_resume`，在同一 ledger transition 中 supersede stale intent 后重新 claim/
   attach；有 durableRef 时调用 factory.resume，无 durableRef 的 accepted create skeleton 则继续其原
-  creationKey 的幂等 factory.create，再由新 resume lifecycle commit 对外可见。resolver throw/invalid
+  creationKey 的幂等 factory.create，先校验 checkpoint、再按上面的单向 CAS 持久绑定返回 ref，之后才
+  activate。startup auto-create 与原 committed checkpoint 逐字段相等；若这是携带新 ModelRef 的显式
+  resume，create attachment 的预提交 checkpoint 只允许 `frontend.model` 等于已解析的新 ref，其余字段
+  与 committed checkpoint exact，相同 resume lifecycle commit 随后写 `model_selected`，不能把合法新
+  模型误判为 checkpoint mismatch。resolver throw/invalid
   success payload 是 port fault，仍 fail closed/quarantine，不能伪装成 expected credentials absence；
 - `thread_close` 在 target journal 提交 closing/closed 后把最终 receipt 写入 ledger。卸载后相同 OpId
   从 ledger 返回原 accepted receipt；新的 close OpId 对已 unloaded thread 是 accepted no-op，也只写
@@ -1224,6 +1246,8 @@ export interface ThreadDriverDispatch {
 export interface ThreadDriverHostServices {
   commitEvent(event: ThreadDriverEvent,
     checkpointMutation?: ThreadDriverCheckpointMutation): Promise<void>;
+  commitEventBatch(events: readonly [ThreadDriverEvent, ...ThreadDriverEvent[]],
+    checkpointMutation?: ThreadDriverCheckpointMutation): Promise<void>;
   reserveSuccessor(input: {
     readonly threadId: ThreadId;
     readonly predecessorRunId: RunId;
@@ -1246,7 +1270,12 @@ export interface ThreadDriverAttachment {
   readonly initialCheckpoint: ThreadDriverCheckpoint;
 }
 
+export interface RecoveryQueueCommand {
+  readonly op: Extract<RuntimeOp, { type: 'steer' | 'follow_up' }>;
+}
+
 export interface ThreadDriverPort {
+  recover(commands: readonly RecoveryQueueCommand[]): Promise<void>;
   activate(): Promise<void>; // seed/recovery commit 前保持 quarantined；幂等
   dispatch(command: PreparedThreadDriverCommand): ThreadDriverDispatch;
   interactionState(): 'idle' | 'running' | 'retrying' | 'compacting';
@@ -1269,6 +1298,7 @@ export interface ThreadDriverFactory {
     model: ModelConfig; durableRef: ThreadDriverRef;
     permissionCeiling: PermissionCeilingSnapshot;
     committedCheckpoint?: ThreadDriverCheckpoint;
+    usedRequestIds: readonly string[];
     capabilityServices?: Readonly<RuntimeCapabilityServices>;
     grantRepository?: PolicyGrantRepositoryPort;
     legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort },
@@ -1277,10 +1307,19 @@ export interface ThreadDriverFactory {
 ```
 
 这个代码块同样展示阶段 3 最终 input。阶段 1 create/resume 只含 identity/model/ceiling/driver checkpoint
-字段且 requirements 只有 `legacy_session_edge`；阶段 2 additive 增加 `durable_legacy_bridge` 并传
+字段（resume 另含 fold 后永久 `usedRequestIds`）且 requirements 只有 `legacy_session_edge`；阶段 2 additive 增加 `durable_legacy_bridge` 并传
 `legacyApprovalPatterns`，阶段 3 再增加 `registry` branch 并传 capabilityServices 与
 grantRepository。static branch 永不携带后两项。各阶段以 extension input type 实现，保持阶段 1
 runtime core 不 import capabilities，不能用一组永远 undefined 的占位字段掩盖边界。
+`commitEventBatch()` 与 `commitEvent()` 使用同一个 per-thread writer gate；batch 中的连续 envelope、
+checkpoint mutation 与 seq 分配必须一次 append+flush 后整体发布，不能在 message/usage 或
+compaction event 之间暴露半状态。`recover()` 是 quarantined driver 的 mandatory construction hook：
+fresh create 也调用一次 `recover([])`，其成功后才可 `activate()`；它不是可选 adapter shortcut。
+resume 时 Supervisor 先按 accepted FIFO 把尚无 durable `queue_update` 的 steer/follow-up 原 op 交给一次
+`recover(commands)`，driver 经同一 host commit queue effect；已有 durable effect 的项不得再次传入。
+Supervisor 核对 effect、以原 OpId 完成 mailbox 后，才提交/暴露 `thread_resumed` 并 activate。由
+`control_requested` 全历史折叠出的 `usedRequestIds` 同时传给 factory.resume，adapter 的 canonical raw-id
+suffix allocator 必须从该集合续接，resolution/close/restart 均不得回收。
 `requirements.approvalMode` 是构造期判别：阶段 1 LegacySession factory 声明 `legacy_session_edge`，
 static Runtime 不开新 policy repository；阶段 2 ThreadRuntime static factory 必须声明
 `durable_legacy_bridge`，Runtime 必须成功打开/传入 LegacyApprovalPatternRepository，否则在 recovery/
@@ -1456,8 +1495,10 @@ resume 还有一个在 `thread_resumed`/snapshot 可见前完成的 recovery bar
 checkpoint 与 op/run/control ledger；factory 可构造一个 quarantined、不可 dispatch/不可发布事件的
 legacy driver，然后按下列顺序对齐 canonical projection 与它：
 
-1. 把 committed transcript + compaction 作为 Agent 初始上下文，并把 steering/follow-up 的原 id/FIFO
-   无事件恢复进新 Agent 队列；不得重新提交 enqueue op 或重复 queue_update。
+1. 把 committed transcript + compaction 作为 Agent 初始上下文，并按原 id/FIFO 恢复
+   steering/follow-up：已有 durable `queue_update` 只 seed/fold，不重复；accepted/started 但尚无 effect
+   的原 op 先补 `op_started`（若需要），再经 quarantined `driver.recover()` 恰好一次提交缺失的
+   `queue_update`，最后以原 OpId 完成。不得重新提交 `op_accepted`、分配新 OpId 或重排 FIFO。
 2. 用稳定派生 resolution OpId 把 crash 时 pending control 以 `aborted` 结案；broker waiter 不复活。
 3. 对 crash 时 partial assistant/已开始工具**不合成** message_end/tool result，也不追加事实 transcript
    （工具副作用状态未知）。同一 recovery commit 写 `activity_interrupted` checkpoint mutation（阶段 2

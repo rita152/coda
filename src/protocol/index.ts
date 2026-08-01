@@ -4,3 +4,8 @@ export * from './messages.js';
 export * from './provider.js';
 export * from './agent-events.js';
 export * from './event-stream.js';
+export * from './strict-json.js';
+export * from './identity.js';
+export * from './runtime-ops.js';
+export * from './runtime-events.js';
+export * from './protocol-version.js';

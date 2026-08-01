@@ -19,6 +19,11 @@ describe('parseFlags --resume(docs/09 §2:--resume [id])', () => {
     expect(flags.prompt).toBeUndefined();
   });
 
+  it('Runtime legacy mirror id 同样可用分离参数恢复', () => {
+    const id = `runtime-${'a'.repeat(40)}`;
+    expect(parseFlags(['--resume', id]).resume).toBe(id);
+  });
+
   it('裸文本不被吞:视为无 id 的 --resume(列表选择),该值按裸 prompt 处理', () => {
     const flags = parseFlags(['--resume', 'fix the login bug']);
     expect(flags.resume).toBe(true);
@@ -80,5 +85,31 @@ describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
   it('非法值与缺值报错(fail-fast,不静默降级)', () => {
     expect(() => parseFlags(['--approval-mode', 'yolo'])).toThrow(/unknown approval mode: yolo/);
     expect(() => parseFlags(['--approval-mode'])).toThrow(/requires a value/);
+  });
+});
+
+describe('parseFlags Phase-1 runtime transport', () => {
+  it('legacy 是默认值，envelope 同时支持空格与 equals 文法', () => {
+    expect(parseFlags(['--json']).eventFormat).toBe('legacy');
+    expect(parseFlags(['--json', '--event-format', 'envelope']).eventFormat).toBe('envelope');
+    expect(parseFlags(['--json', '--event-format=envelope']).eventFormat).toBe('envelope');
+  });
+
+  it('envelope 只允许 headless，非法/空值 fail-fast', () => {
+    expect(() => parseFlags(['--event-format=envelope'])).toThrow(/requires --json/);
+    expect(() => parseFlags(['--json', '--event-format=nope'])).toThrow(/unknown event format/);
+    expect(() => parseFlags(['--json', '--event-format='])).toThrow(/unknown event format/);
+  });
+
+  it('equals-form resume 接受 opaque ThreadId，并可用 workspace 消歧', () => {
+    const flags = parseFlags([
+      '--resume=opaque-thread',
+      '--workspace=opaque-workspace',
+    ]);
+    expect(flags.resume).toBe('opaque-thread');
+    expect(flags.workspace).toBe('opaque-workspace');
+    expect(flags.prompt).toBeUndefined();
+    expect(() => parseFlags(['--resume='])).toThrow(/non-empty/);
+    expect(() => parseFlags(['--workspace='])).toThrow(/non-empty/);
   });
 });

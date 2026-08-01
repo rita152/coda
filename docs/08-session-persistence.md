@@ -414,6 +414,12 @@ export type ThreadRecord =
   | ThreadCommitRecord;
 ```
 
+首次导入 v1 时，storage 的 journal-create 边界必须把 `ThreadMetaRecord` 与唯一、已验证的
+`LegacyThreadSeedRecord` 作为同一个 immutable initial prefix，以 exclusive create + flush 原子写入；
+重复调用逐字段核对该 prefix。不得先只落 meta 再补 seed，也不得仅凭
+`ThreadDriverRef.kind === 'session-v1'` 推断 provenance：Runtime 自己新建的 legacy adapter attachment
+也使用同一 opaque ref kind，但不拥有 legacy seed。
+
 EventCommitter 先写 `mailbox_prepare`（尚未对调用方承诺），验证通过后在一个
 `ThreadCommitRecord` 中原子写 `MailboxMutation(accepted_pending)` 与 `op_accepted` envelope；对
 `prompt/continue`，同一 commit 还必须写 `RunMutation(reserved)`，把 admission state 置为

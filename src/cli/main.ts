@@ -1,19 +1,19 @@
 #!/usr/bin/env bun
-// CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → 配置解析 → Session 组装 → 分派
+// CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → Runtime 组合 → 前端适配 → 分派
 // headless / 一次性 / 全屏 TUI（必要时降级 classic REPL）。CLI 是最薄的一层:
 // 把输入翻译成 Agent 方法调用,
 // 把事件翻译成像素;不持有会话状态副本。
 
 import packageJson from '../../package.json';
-import type { ModelConfig } from '../protocol/index.js';
+import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
 import { ApprovalBroker } from '../agent/index.js';
 import type { AgentConfig } from '../agent/index.js';
+import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
 import type { ToolDefinition } from '../tools/types.js';
 import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
-import type { SessionEvent, SessionOptions } from '../session/index.js';
-import { Session } from '../session/index.js';
-import { createStdoutOutput } from '../shared/index.js';
+import { createFileRuntimeStorage, createRuntime } from '../runtime/index.js';
+import { createStdoutOutput, runtimeHomeDir } from '../shared/index.js';
 import { createApprovalPolicy } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
 import {
@@ -24,15 +24,22 @@ import {
   resolveConfig,
 } from './config.js';
 import type { CliFlags } from './config.js';
+import { startEnvelopeHeadless } from './envelope-headless.js';
 import { startHeadless } from './headless.js';
-import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import { createProviderStreamFn } from './provider-stream.js';
 import { guardProjectRuleExecutions, ProjectRules } from './project-rules.js';
 import { createRenderer } from './renderer.js';
+import type { ReplApproval } from './repl.js';
 import { startRepl } from './repl.js';
-import { pickSessionInteractive } from './resume-picker.js';
+import {
+  createCliRuntimeModelResolver,
+  createLegacyPermissionPolicy,
+  resolveRuntimeStorageRoots,
+} from './runtime-composition.js';
+import { RuntimeFrontendSession } from './runtime-frontend.js';
+import { isRuntimeResumeRequest, selectCliResumeTarget } from './runtime-resume.js';
 import { sanitizeTerminalLine } from './terminal-sanitize.js';
 
 async function main(): Promise<number> {
@@ -50,7 +57,7 @@ async function main(): Promise<number> {
   // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §8)。
   // 读空(coda </dev/null 且无 -p):交互 REPL 需要 TTY,进 startRepl 只会无限挂起——
   // 提示用法并 exit 2(放在 Session 创建之前,不为错误路径留下空会话文件)。
-  if (!flags.json && flags.prompt === undefined && !process.stdin.isTTY) {
+  if (flags.eventFormat !== 'envelope' && !flags.json && flags.prompt === undefined && !process.stdin.isTTY) {
     const text = (await Bun.stdin.text()).trim();
     if (text.length === 0) {
       console.error('[coda] empty stdin and no prompt; usage: coda -p "..."  or  echo "..." | coda');
@@ -60,6 +67,7 @@ async function main(): Promise<number> {
   }
 
   const interactiveMode =
+    flags.eventFormat !== 'envelope' &&
     !flags.json &&
     flags.prompt === undefined &&
     process.stdin.isTTY === true;
@@ -92,7 +100,7 @@ async function main(): Promise<number> {
   } else {
     initialModel = registry?.resolveSelectedModel();
   }
-  if (initialModel === undefined && !interactiveMode) {
+  if (initialModel === undefined && !interactiveMode && flags.eventFormat !== 'envelope') {
     console.error(
       `[coda] ${
         legacyMissingKey ??
@@ -102,10 +110,52 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const requestedCwd = flags.cwd ?? process.cwd();
-  const projectRules = new ProjectRules({ cwd: requestedCwd });
-  // 工具与规则分析共用物理 cwd；否则 symlink cwd 下的相对 workdir 会产生两套路径语义。
-  const cwd = projectRules.cwd;
+  // 审批模式默认(docs/09 §6.5 修订):交互 TUI/classic → interactive;headless(--json)与 -p
+  // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
+  // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
+  const approvalMode =
+    flags.approvalMode ?? (
+      flags.eventFormat === 'envelope' || flags.json || flags.prompt !== undefined
+        ? 'allow'
+        : 'interactive'
+    );
+  // -p(非 --json)没有键位面也没有 approval 命令面,interactive 审批只会挂死在等待上:
+  // 显式给出该组合按配置错误 fail-fast(headless --json + interactive 是合法的,有命令面)。
+  if (approvalMode === 'interactive' && flags.prompt !== undefined && !flags.json) {
+    console.error('[coda] --approval-mode interactive 与 -p 一次性模式不兼容(无审批应答面);用 --json 或改用 allow/deny');
+    return 2;
+  }
+
+  const roots = resolveRuntimeStorageRoots({
+    homeDir: runtimeHomeDir(),
+    ...(flags.sessionDir !== undefined && { legacySessionDir: flags.sessionDir }),
+  });
+  const storage = createFileRuntimeStorage({
+    root: roots.runtimeRoot,
+    legacySessionDir: roots.legacySessionDir,
+  });
+  let resumeTarget;
+  try {
+    if (isRuntimeResumeRequest(flags)) {
+      resumeTarget = await selectCliResumeTarget(await storage.listStoredThreads(), flags);
+      if (resumeTarget === undefined) {
+        console.error('[coda] no session to resume');
+        return 2;
+      }
+    }
+  } catch (err) {
+    console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+  const resumed = resumeTarget !== undefined;
+  const requestedCwd = new ProjectRules({ cwd: flags.cwd ?? process.cwd() }).cwd;
+  const cwd = resumeTarget?.ownerRecordedCwd ?? requestedCwd;
+  if (resumeTarget !== undefined && requestedCwd !== cwd) {
+    console.error(
+      `[coda] warning: resuming in recorded cwd ${JSON.stringify(cwd)} ` +
+      `(requested ${JSON.stringify(requestedCwd)})`,
+    );
+  }
   let fauxScript: FauxScript | undefined;
   try {
     fauxScript =
@@ -116,116 +166,116 @@ async function main(): Promise<number> {
     console.error(`[coda] ${err instanceof Error ? err.message : String(err)}`);
     return 2;
   }
-  const streamFn = createProviderStreamFn(fauxScript);
-  const tools = guardProjectRuleExecutions(createCodingTools(), projectRules);
 
-  // 审批模式默认(docs/09 §6.5 修订):交互 TUI/classic → interactive;headless(--json)与 -p
-  // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
-  // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
-  const approvalMode =
-    flags.approvalMode ?? (flags.json || flags.prompt !== undefined ? 'allow' : 'interactive');
-  // -p(非 --json)没有键位面也没有 approval 命令面,interactive 审批只会挂死在等待上:
-  // 显式给出该组合按配置错误 fail-fast(headless --json + interactive 是合法的,有命令面)。
-  if (approvalMode === 'interactive' && flags.prompt !== undefined && !flags.json) {
-    console.error('[coda] --approval-mode interactive 与 -p 一次性模式不兼容(无审批应答面);用 --json 或改用 allow/deny');
+  const projectRuleWarnings = createWarningHub();
+  const driverFactory = createLegacySessionThreadDriverFactory({
+    sessionDir: roots.legacySessionDir,
+    configure: ({ model, emitApproval, requestAbort }) => {
+      // Attachment-local mutable state: rules, broker/policy, tools, and Agent FileTracker are
+      // never shared across independently attached Runtime threads.
+      const projectRules = new ProjectRules({ cwd, onWarning: projectRuleWarnings.emit });
+      const tools = guardProjectRuleExecutions(createCodingTools(), projectRules);
+      let approvalBeforeToolCall: AgentConfig['beforeToolCall'];
+      let attachmentApproval:
+        | { readonly broker: ApprovalBroker; readonly onAbort: () => void }
+        | undefined;
+      if (approvalMode === 'interactive') {
+        const broker = new ApprovalBroker((event) => {
+          if (event.type !== 'approval_request') {
+            throw new Error(`unexpected legacy approval event: ${event.type}`);
+          }
+          emitApproval(event);
+        });
+        const policy = createApprovalPolicy({
+          broker,
+          projectRoot: cwd,
+          tools,
+          requestAbort,
+        });
+        approvalBeforeToolCall = policy.beforeToolCall;
+        attachmentApproval = { broker, onAbort: policy.onAbort };
+      } else if (approvalMode === 'deny') {
+        approvalBeforeToolCall = createDenyHook(tools);
+      }
+      const beforeToolCall: NonNullable<AgentConfig['beforeToolCall']> = async (call) => {
+        const rulesDecision = await projectRules.beforeToolCall(call);
+        if (rulesDecision.block) return rulesDecision;
+        return approvalBeforeToolCall?.(call) ?? {};
+      };
+      return {
+        sessionOptions: {
+          agentConfig: {
+            streamFn: createProviderStreamFn(fauxScript),
+            model,
+            tools,
+            cwd,
+            systemPrompt: () => buildSystemPrompt(cwd),
+            transformContext: (context) => projectRules.inject(context),
+            beforeToolCall,
+          },
+        },
+        ...(attachmentApproval !== undefined && { approval: attachmentApproval }),
+        policyRevision: `legacy-cli-${approvalMode}-v1`,
+      };
+    },
+  });
+  const modelResolver = createCliRuntimeModelResolver(registry);
+  if (initialModel !== undefined) modelResolver.register(initialModel);
+
+  let runtime;
+  try {
+    runtime = await createRuntime({
+      workspace: {
+        cwd,
+        ...(resumeTarget !== undefined
+          ? { workspaceId: resumeTarget.ownerWorkspaceId }
+          : flags.workspace !== undefined
+            ? { workspaceId: flags.workspace as WorkspaceId }
+            : {}),
+      },
+      storage,
+      modelResolver,
+      permissionPolicy: createLegacyPermissionPolicy(),
+      threadDriverFactory: driverFactory,
+    });
+  } catch (err) {
+    console.error(`[coda] runtime initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     return 2;
   }
 
-  // 审批装配(docs/07 §3.1):allow 不挂钩子;interactive 组装 ApprovalBroker +
-  // createApprovalPolicy;deny 直接静态 beforeToolCall(block edit/execute,不建 broker)。
-  // broker 的 approval_request 不经 agent Emitter,由这里的 listeners 旁路通道送达
-  // renderer / headless / repl;requestAbort 晚绑定 session(policy 先于 session 创建)。
-  const sessionRef: { current?: { abort(): void } } = {};
-  const approvalListeners = new Set<(e: SessionEvent) => void>();
-  let approvalBeforeToolCall: AgentConfig['beforeToolCall'];
-  let approval:
-    | {
-        broker: ApprovalBroker;
-        onAbort: () => void;
-        subscribe: (l: (e: SessionEvent) => void) => () => void;
-      }
-    | undefined;
-  if (approvalMode === 'interactive') {
-    const broker = new ApprovalBroker((e) => {
-      for (const l of [...approvalListeners]) l(e);
+  if (flags.eventFormat === 'envelope') {
+    projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
+    const output = createStdoutOutput();
+    return startEnvelopeHeadless(runtime, {
+      stdin: process.stdin,
+      stdout: { enqueue: output.enqueue, drain: output.drain },
     });
-    const policy = createApprovalPolicy({
-      broker,
-      projectRoot: cwd,
-      tools,
-      requestAbort: () => sessionRef.current?.abort(),
-    });
-    approvalBeforeToolCall = policy.beforeToolCall;
-    approval = {
-      broker,
-      onAbort: () => {
-        policy.onAbort();
-      },
-      subscribe: (l) => {
-        approvalListeners.add(l);
-        return () => {
-          approvalListeners.delete(l);
-        };
-      },
-    };
-  } else if (approvalMode === 'deny') {
-    approvalBeforeToolCall = createDenyHook(tools);
   }
-  // 项目规则 gate 先于审批：若新作用域尚未进入模型上下文，先让模型在下一 turn
-  // 看到规则再重试，避免为本轮注定不执行的调用弹审批。
-  const beforeToolCall: NonNullable<AgentConfig['beforeToolCall']> = async (call) => {
-    const rulesDecision = await projectRules.beforeToolCall(call);
-    if (rulesDecision.block) return rulesDecision;
-    return approvalBeforeToolCall?.(call) ?? {};
-  };
 
-  // 恢复目标可在没有模型时先选定，但真正 load/create 必须等到已有有效 ModelConfig。
-  let resumeId: string | undefined;
-  if (flags.continue_ || flags.resume !== undefined) {
-    resumeId = await resolveSessionId(flags, flags.sessionDir);
-    if (resumeId === undefined) {
-      console.error('[coda] no session to resume');
-      return 2;
-    }
-  }
-  const resumed = resumeId !== undefined;
-  const sessionOptions = (model: ModelConfig): SessionOptions => ({
-    agentConfig: {
-      streamFn,
-      model,
-      tools,
-      cwd,
-      systemPrompt: () => buildSystemPrompt(cwd),
-      transformContext: (ctx) => projectRules.inject(ctx),
-      beforeToolCall,
-    },
-    ...(flags.sessionDir !== undefined && { dir: flags.sessionDir }),
+  const runtimeSession = new RuntimeFrontendSession({
+    runtime,
+    attachment: resumed ? 'resume' : 'create',
+    ...(resumeTarget !== undefined && { threadId: resumeTarget.threadId }),
+    ...(initialModel !== undefined && { initialModel }),
+    registerModel: (model) => modelResolver.register(model),
   });
-  const createSession = (model: ModelConfig): Promise<Session> =>
-    resumeId === undefined
-      ? Session.create(sessionOptions(model))
-      : Session.resume(resumeId, sessionOptions(model));
-
-  let interactiveRuntime: InteractiveRuntime | undefined;
-  let concreteSession: Session | undefined;
   let session: CliSession;
   try {
-    if (interactiveMode) {
-      interactiveRuntime = new InteractiveRuntime({
-        ...(initialModel !== undefined && { initialModel }),
-        createSession,
-      });
-      await interactiveRuntime.initialize();
-      session = interactiveRuntime;
-    } else {
-      concreteSession = await createSession(initialModel as ModelConfig);
-      session = concreteSession;
-    }
+    await runtimeSession.initialize();
+    session = runtimeSession;
   } catch (err) {
     console.error(`[coda] session initialization failed: ${err instanceof Error ? err.message : String(err)}`);
     return 2;
   }
-  sessionRef.current = session;
+  // Approval requests are already canonical Runtime events projected through `session.subscribe`;
+  // the legacy UI bridge only translates decisions back into control_response/abort operations.
+  const approval: ReplApproval | undefined = approvalMode === 'interactive'
+    ? {
+        broker: { resolve: (approvalId, decision) => runtimeSession.resolveApproval(approvalId, decision) },
+        onAbort: () => {},
+        subscribe: () => () => {},
+      }
+    : undefined;
 
   // 默认交互面:双 TTY 且终端具备全屏能力时懒加载 OpenTUI。这里必须早于 stdout
   // FileSink/legacy renderer 的创建——两套渲染器不能同时拥有 raw stdin/stdout。
@@ -236,7 +286,7 @@ async function main(): Promise<number> {
       const { startTui } = await import('./tui.js');
       return await startTui(session, approval, {
         cwd,
-        projectRuleWarnings: projectRules,
+        projectRuleWarnings,
         ...(session.currentModel() !== undefined && {
           model: session.currentModel(),
         }),
@@ -246,10 +296,10 @@ async function main(): Promise<number> {
           contextLimit: initialModel.limits.context,
         }),
         resumed,
-        ...(interactiveRuntime !== undefined && registry !== undefined && {
+        ...(registry !== undefined && {
           providerCommands: {
             registry,
-            runtime: interactiveRuntime,
+            runtime: runtimeSession,
           },
         }),
       });
@@ -274,11 +324,9 @@ async function main(): Promise<number> {
   };
 
   if (flags.json) {
-    projectRules.subscribeWarnings((message) => {
-      console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
-    });
+    projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
     // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动退出
-    return startHeadless(concreteSession as Session, {
+    return startHeadless(session, {
       stdin: process.stdin,
       stdout,
       ...(flags.prompt !== undefined && { initialPrompt: flags.prompt }),
@@ -293,13 +341,11 @@ async function main(): Promise<number> {
     interactive: process.stdout.isTTY === true && flags.prompt === undefined,
   });
   if (flags.prompt === undefined && process.stdout.isTTY === true) {
-    projectRules.subscribeWarnings((message) => {
+    projectRuleWarnings.subscribeWarnings((message) => {
       renderer.println?.(`⚠ project rules · ${sanitizeTerminalLine(message)}`);
     });
   } else {
-    projectRules.subscribeWarnings((message) => {
-      console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
-    });
+    projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
   }
   output.failureSignal.addEventListener(
     'abort',
@@ -356,10 +402,10 @@ async function main(): Promise<number> {
 
   const exitCode = await startRepl(session, renderer, approval, {
     fatalSignal: output.failureSignal,
-    ...(interactiveRuntime !== undefined && registry !== undefined && {
+    ...(registry !== undefined && {
       providerCommands: {
         registry,
-        runtime: interactiveRuntime,
+        runtime: runtimeSession,
       },
     }),
   });
@@ -403,11 +449,29 @@ function buildSystemPrompt(cwd: string): string {
   );
 }
 
-async function resolveSessionId(flags: CliFlags, dir: string | undefined): Promise<string | undefined> {
-  const sessions = await Session.list(dir);
-  if (flags.continue_) return sessions[0]?.id;                       // 最近一个
-  if (typeof flags.resume === 'string') return flags.resume;         // 显式 id
-  return pickSessionInteractive(sessions);                           // 列表选择
+interface WarningHub {
+  readonly emit: (message: string) => void;
+  readonly subscribeWarnings: (listener: (message: string) => void) => () => void;
+}
+
+function createWarningHub(): WarningHub {
+  const history: string[] = [];
+  const listeners = new Set<(message: string) => void>();
+  return {
+    emit: (message) => {
+      history.push(message);
+      for (const listener of [...listeners]) listener(message);
+    },
+    subscribeWarnings: (listener) => {
+      for (const message of history) listener(message);
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+function logProjectRuleWarning(message: string): void {
+  console.error(`[coda] warning: project rules · ${sanitizeTerminalLine(message)}`);
 }
 
 main().then(

@@ -35,6 +35,11 @@ export interface AgentConfig {
   toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
   cwd?: string;                                                  // 工具执行工作目录,默认 process.cwd()
   initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §3.1;仅初始数据,agent 不感知恢复)
+  /** @internal Runtime recovery seed; installed silently before any listener can observe a drain. */
+  initialQueues?: {
+    readonly steering: readonly UserMessage[];
+    readonly followUp: readonly UserMessage[];
+  };
   truncationScope?: string;                                      // 截断落盘目录 scope(session 注入 sessionId,docs/07 §1.6)
 }
 
@@ -53,6 +58,8 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.#transcript = [...(config.initialMessages ?? [])];
+    for (const message of config.initialQueues?.steering ?? []) this.#steering.enqueue(message);
+    for (const message of config.initialQueues?.followUp ?? []) this.#followUp.enqueue(message);
     this.#loopConfig = {
       streamFn: config.streamFn,
       model: config.model,

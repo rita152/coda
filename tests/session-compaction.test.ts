@@ -175,6 +175,17 @@ describe('threshold 主动压缩(docs/08 §6.1/§6.2,docs/10 §5 用例 9)', () 
       [lookup],
       { keepRatio: 0.05 },   // keepBudget = 200*0.05 = 10 → 切点落在最后 turn(u3)
     );
+    let boundaryState:
+      | { publicState: ReturnType<Session['interactionState']>; runtimeState: ReturnType<Session['runtimeFollowUpState']> }
+      | undefined;
+    h.session.subscribe((event) => {
+      if (event.type === 'agent_end' && boundaryState === undefined) {
+        boundaryState = {
+          publicState: h.session.interactionState(),
+          runtimeState: h.session.runtimeFollowUpState(),
+        };
+      }
+    });
 
     await h.session.prompt('第三件事');
     // 续跑续到底:等第二个 completed 的 agent_end(压缩后的 continue run)
@@ -188,6 +199,7 @@ describe('threshold 主动压缩(docs/08 §6.1/§6.2,docs/10 §5 用例 9)', () 
     const end = h.events.find((e) => e.type === 'compaction_end');
     expect(end?.type === 'compaction_end' && end.ok).toBe(true);
     expect(end?.type === 'compaction_end' && end.droppedMessages).toBeGreaterThan(0);
+    expect(boundaryState).toEqual({ publicState: 'running', runtimeState: 'compacting' });
 
     // 三次 faux call:热 turn、摘要、续跑
     expect(h.streamFn.calls).toHaveLength(3);

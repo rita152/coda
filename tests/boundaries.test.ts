@@ -3,7 +3,7 @@
 // 若有人静默删除 eslint.config.mjs 里的边界规则,本测试立即变红。
 import { afterEach, describe, expect, it } from 'bun:test';
 import { ESLint } from 'eslint';
-import { writeFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -18,6 +18,7 @@ interface ProbeResult {
 async function lintProbe(relPath: string, code: string): Promise<ProbeResult> {
   const abs = path.join(root, relPath);
   probes.push(abs);
+  await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, code, 'utf8');
   const eslint = new ESLint({ cwd: root });
   const [result] = await eslint.lintFiles([abs]);
@@ -162,6 +163,39 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
       "import '../providers/faux/index.js';\n",
     );
     expect(rules).toContain('import/no-restricted-paths');
+  });
+
+  it('src/runtime 不得反向 import CLI/provider/Session/Agent/tool 实现', async () => {
+    for (const dependency of ['cli/main', 'providers/faux/index', 'session/index', 'agent/index', 'tools/index']) {
+      const probeName = dependency.replaceAll('/', '-');
+      const { rules } = await lintProbe(
+        `src/runtime/${probeName}.probe.ts`,
+        `import '../${dependency}.js';\n`,
+      );
+      expect(rules).toContain('import/no-restricted-paths');
+    }
+  });
+
+  it('src/runtime 可依赖 protocol/shared（public entry 的合法叶子）', async () => {
+    const { errorCount } = await lintProbe(
+      'src/runtime/legal.probe.ts',
+      "import '../protocol/index.js';\nimport '../shared/index.js';\n",
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('src/runtime 的 dynamic import/import() type 也不能绕过 core 边界', async () => {
+    const { rules: dynamicRules } = await lintProbe(
+      'src/runtime/dynamic-cli.probe.ts',
+      "export const loaded = import('../cli/main.js');\n",
+    );
+    expect(dynamicRules).toContain('import/no-restricted-paths');
+
+    const { rules: typeRules } = await lintProbe(
+      'src/runtime/import-session-type.probe.ts',
+      "export type LegacySession = import('../session/index.js').Session;\n",
+    );
+    expect(typeRules).toContain('no-restricted-syntax');
   });
 
   it('src/agent 内 import @anthropic-ai/sdk 报错(M7:SDK 仅限 anthropic-messages,type-only 同拦)', async () => {

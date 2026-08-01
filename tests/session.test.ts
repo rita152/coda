@@ -4,10 +4,20 @@
 // details 序列化降级、磁盘写失败的内存模式降级。
 // 纪律:时序只用 gate 与事件等待(无计时器);出站断言一律用 faux 的 calls。
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
+import { strictJsonSnapshot } from '../src/protocol/index.js';
 import type { AgentMessage, AssistantMessage, ToolResultMessage, UserMessage } from '../src/protocol/index.js';
 import { INTERRUPTED_RESULT_TEXT } from '../src/agent/index.js';
 import { createFauxStreamFn, createGate } from '../src/providers/faux/index.js';
@@ -506,6 +516,27 @@ describe('Session.create fail-fast 与 closed 守卫(docs/08 §8)', () => {
     },
   );
 
+  it.skipIf(process.getuid?.() === 0)(
+    'createWithId:meta 临时写失败不留下空 target 或临时 orphan',
+    async () => {
+      const roDir = path.join(tmpdir, 'readonly-runtime-sessions');
+      mkdirSync(roDir);
+      chmodSync(roDir, 0o500);
+      const id = 'runtime-atomic-test';
+      try {
+        const streamFn = createFauxStreamFn({ turns: [] });
+        await expect(Session.createWithId(id, {
+          dir: roDir,
+          agentConfig: { streamFn, model: TEST_MODEL, tools: [], systemPrompt: 'test', cwd: tmpdir },
+        })).rejects.toThrow();
+        expect(existsSync(path.join(roDir, `${id}.jsonl`))).toBe(false);
+        expect(readdirSync(roDir).some((name) => name.includes(id))).toBe(false);
+      } finally {
+        chmodSync(roDir, 0o700);
+      }
+    },
+  );
+
   it('close() 后:prompt() 是 async rejection(非同步 throw);steer/followUp 同步 throw', async () => {
     const h = await makeSession({ turns: [] });
     await h.session.close();
@@ -539,5 +570,204 @@ describe('Session.create fail-fast 与 closed 守卫(docs/08 §8)', () => {
     await run;                                                    // 冲突不影响第一个任务收尾
     await h.session.close();
     expect([...h.session.messages].map((m) => m.role)).toEqual(['user', 'assistant']);
+  });
+});
+
+describe('Runtime authoritative event lane', () => {
+  it('uses one JSON-safe projection for arbitrary tool details in tool_end, transcript, and mirror', async () => {
+    const unsafe = makeTool('unsafe_details', async () => ({
+      content: [{ type: 'text', text: 'safe result' }],
+      details: {
+        optional: undefined,
+        callback: () => 'not JSON',
+      },
+    }));
+    const streamFn = createFauxStreamFn({
+      turns: [
+        { events: [{ kind: 'tool_call', name: 'unsafe_details', args: {}, id: 'unsafe-call' }] },
+        { events: [{ kind: 'text', text: 'done' }] },
+      ],
+    });
+    const committed: SessionEvent[] = [];
+    const session = await Session.create({
+      dir: tmpdir,
+      authoritativeEventSink: async (input) => {
+        const batch = Array.isArray(input) ? [...input] : [input];
+        strictJsonSnapshot(batch);
+        committed.push(...batch);
+      },
+      agentConfig: {
+        streamFn,
+        model: TEST_MODEL,
+        tools: [unsafe],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+
+    await session.prompt('go');
+    const toolEnd = committed.find((event) => event.type === 'tool_execution_end');
+    if (toolEnd?.type !== 'tool_execution_end') throw new Error('missing tool_execution_end');
+    expect(toolEnd.result).not.toHaveProperty('details');
+    const messageStart = committed.find((event) =>
+      event.type === 'message_start' && event.message.role === 'tool_result');
+    if (messageStart?.type !== 'message_start' || messageStart.message.role !== 'tool_result') {
+      throw new Error('missing canonical tool result message_start');
+    }
+    expect(messageStart.message).toEqual(toolEnd.result);
+    const canonicalMessage = committed.find((event) =>
+      event.type === 'message_end' && event.message.role === 'tool_result');
+    if (canonicalMessage?.type !== 'message_end' || canonicalMessage.message.role !== 'tool_result') {
+      throw new Error('missing canonical tool result message');
+    }
+    expect(canonicalMessage.message).toEqual(toolEnd.result);
+    const turnEnd = committed.find((event) => event.type === 'turn_end' && event.toolResults.length > 0);
+    if (turnEnd?.type !== 'turn_end') throw new Error('missing canonical turn_end tool result');
+    expect(turnEnd.toolResults[0]).toEqual(toolEnd.result);
+    const agentEnd = committed.find((event) => event.type === 'agent_end');
+    if (agentEnd?.type !== 'agent_end') throw new Error('missing canonical agent_end');
+    expect(agentEnd.messages.find((message) => message.role === 'tool_result')).toEqual(toolEnd.result);
+    const mirrored = fileMessages(session.id).find((message) => message.role === 'tool_result');
+    expect(mirrored).toEqual(toolEnd.result);
+    await session.close();
+  });
+
+  it('提交失败先中止副作用，prompt/waitForIdle 可观察，且失败事件不落 v1 镜像', async () => {
+    const streamFn = createFauxStreamFn({
+      turns: [{ events: [{ kind: 'text', text: 'must not be sampled' }] }],
+    });
+    const attempted: SessionEvent['type'][] = [];
+    const publicEvents: SessionEvent[] = [];
+    const failure = new Error('canonical journal unavailable');
+    const session = await Session.create({
+      dir: tmpdir,
+      authoritativeEventSink: async (events) => {
+        attempted.push(...events.map((event) => event.type));
+        if (events.some((event) => event.type === 'turn_start')) throw failure;
+      },
+      agentConfig: {
+        streamFn,
+        model: TEST_MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+    session.subscribe((event) => {
+      publicEvents.push(event);
+    });
+
+    await expect(session.prompt('go')).rejects.toBe(failure);
+    await expect(session.waitForIdle()).rejects.toBe(failure);
+
+    expect(attempted).toEqual(['agent_start', 'turn_start']);
+    expect(publicEvents.map((event) => event.type)).toEqual(['agent_start']);
+    expect(streamFn.calls).toHaveLength(0);
+    expect(readRecords(session.id).map((record) => record.type)).toEqual(['meta']);
+    await session.close();
+  });
+
+  it('assistant message 与 usage 以一个 authoritative batch 成败，不留下 split checkpoint', async () => {
+    const streamFn = createFauxStreamFn({
+      turns: [{
+        events: [{ kind: 'text', text: 'priced answer' }],
+        usage: { input: 100, output: 10 },
+      }],
+    });
+    const committed: SessionEvent[] = [];
+    const failure = new Error('usage checkpoint unavailable');
+    const session = await Session.create({
+      dir: tmpdir,
+      pricing: { inputPer1M: 2, outputPer1M: 3 },
+      authoritativeEventSink: async (input) => {
+        const batch = Array.isArray(input) ? [...input] : [input];
+        if (batch.some((event) => event.type === 'usage_update')) throw failure;
+        committed.push(...batch);
+      },
+      agentConfig: {
+        streamFn,
+        model: TEST_MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+
+    await expect(session.prompt('go')).rejects.toBe(failure);
+    await expect(session.waitForIdle()).rejects.toBe(failure);
+    expect(committed.some((event) => event.type === 'message_end'
+      && event.message.role === 'assistant')).toBe(false);
+    expect(fileMessages(session.id).map((message) => message.role)).toEqual(['user']);
+    await session.close();
+
+    const resumed = await Session.resume(session.id, {
+      dir: tmpdir,
+      pricing: { inputPer1M: 2, outputPer1M: 3 },
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [] }),
+        model: TEST_MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+    expect(resumed.usage()).toEqual({
+      cumulative: { input: 0, output: 0 },
+      turns: 0,
+      contextTokens: 0,
+    });
+    await resumed.close();
+  });
+
+  it('按 canonical batch → v1 mirror → public listener 排序并可无漂移 resume usage', async () => {
+    const streamFn = createFauxStreamFn({
+      turns: [{
+        events: [{ kind: 'text', text: 'ordered answer' }],
+        usage: { input: 100, output: 10 },
+      }],
+    });
+    const batches: SessionEvent[][] = [];
+    const session = await Session.create({
+      dir: tmpdir,
+      pricing: { inputPer1M: 2, outputPer1M: 3 },
+      authoritativeEventSink: async (input) => {
+        batches.push(Array.isArray(input) ? [...input] : [input]);
+      },
+      agentConfig: {
+        streamFn,
+        model: TEST_MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+    const listenerMirrorRoles: string[][] = [];
+    session.subscribe((event) => {
+      if (event.type === 'message_end') {
+        listenerMirrorRoles.push(fileMessages(session.id).map((message) => message.role));
+      }
+    });
+
+    await session.prompt('go');
+    const messageUsageBatch = batches.find((batch) =>
+      batch.some((event) => event.type === 'message_end' && event.message.role === 'assistant'));
+    expect(messageUsageBatch?.map((event) => event.type)).toEqual(['message_end', 'usage_update']);
+    expect(listenerMirrorRoles).toEqual([['user'], ['user', 'assistant']]);
+    const beforeClose = session.usage();
+    expect(beforeClose.cumulative.costUSD).toBe(0.00023);
+    await session.close();
+
+    const resumed = await Session.resume(session.id, {
+      dir: tmpdir,
+      agentConfig: {
+        streamFn: createFauxStreamFn({ turns: [] }),
+        model: TEST_MODEL,
+        tools: [],
+        systemPrompt: 'test',
+        cwd: tmpdir,
+      },
+    });
+    expect(resumed.usage()).toEqual(beforeClose);
+    await resumed.close();
   });
 });

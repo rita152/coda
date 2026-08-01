@@ -13,6 +13,7 @@ import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
 import { createOrderedOutput } from '../shared/index.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
+import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import type { Renderer } from './renderer.js';
 import {
@@ -244,6 +245,70 @@ describe('approvalKeyDecision:审批模式键位映射(M6,docs/09 §4)', () => {
     expect(approvalKeyDecision('q')).toBeUndefined();
     expect(approvalKeyDecision('')).toBeUndefined();
     expect(approvalKeyDecision('space')).toBeUndefined();
+  });
+});
+
+describe('classic REPL canonical approval projection', () => {
+  it('accepts an approval_request delivered by the primary session stream', async () => {
+    const stdin = new TestTtyInput();
+    let listener: ((event: SessionEvent) => void | Promise<void>) | undefined;
+    let sideListener: ((event: SessionEvent) => void | Promise<void>) | undefined;
+    const resolved: Array<{ id: string; decision: string }> = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: (next) => {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
+      },
+      prompt: async () => {},
+      steer: () => {},
+      followUp: () => {},
+      abort: () => {},
+      close: async () => {},
+    };
+    const approval: ReplApproval = {
+      broker: {
+        resolve: (id, decision) => resolved.push({ id, decision }),
+      },
+      onAbort: () => {},
+      subscribe: (next) => {
+        sideListener = next;
+        return () => {
+          sideListener = undefined;
+        };
+      },
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => {},
+    };
+
+    const running = startRepl(session, renderer, approval, { stdin });
+    const emit = listener;
+    if (emit === undefined) throw new Error('primary session listener was not registered');
+    const request = {
+      type: 'approval_request',
+      approvalId: 'canonical-approval-1',
+      toolCallId: 'call-1',
+      description: 'run canonical tool',
+    } as const;
+    await emit(request);
+    // A transitional adapter that exposes both paths must still enqueue this identity once.
+    await sideListener?.(request);
+    stdin.emit('keypress', 'y', { name: 'y' });
+    stdin.emit('keypress', 'n', { name: 'n' });
+    expect(resolved).toEqual([{ id: 'canonical-approval-1', decision: 'allow_once' }]);
+
+    stdin.emit('keypress', undefined, { name: 'u', ctrl: true });
+    for (const character of '/quit') stdin.emit('keypress', character, { name: character });
+    stdin.emit('keypress', undefined, { name: 'return' });
+    await expect(running).resolves.toBe(0);
   });
 });
 

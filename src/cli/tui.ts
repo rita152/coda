@@ -12,10 +12,10 @@ import type {
   UserMessage,
 } from '../protocol/index.js';
 import type {
-  SessionEvent,
-  SessionInteractionState,
-  SessionUsage,
-} from '../session/index.js';
+  CliInteractionState as SessionInteractionState,
+  CliSessionEvent as SessionEvent,
+  CliSessionUsage as SessionUsage,
+} from './frontend-types.js';
 import { runtimeHomeDir } from '../shared/index.js';
 import type {
   CliSession,
@@ -1751,6 +1751,11 @@ export function runTuiController(
     followUp: [],
   };
   let closing = false;
+  const enqueueApproval = (approvalId: string): boolean => {
+    if (approvalQueue.includes(approvalId)) return false;
+    approvalQueue.push(approvalId);
+    return true;
+  };
 
   return new Promise<number>((resolve) => {
     const printError = (error: unknown): void => {
@@ -1984,6 +1989,12 @@ export function runTuiController(
           followUp: [...event.followUp],
         };
       }
+      if (event.type === 'approval_request') {
+        // Runtime delivers canonical control requests on the primary event stream. The legacy
+        // side channel below remains for direct Session; de-duplication keeps mixed adapters safe.
+        escExit.reset();
+        if (!enqueueApproval(event.approvalId)) return;
+      }
       try {
         screen.render(event);
       } catch (error) {
@@ -1999,7 +2010,7 @@ export function runTuiController(
     const unsubApproval = approval?.subscribe((event) => {
       if (event.type !== 'approval_request') return;
       escExit.reset();
-      approvalQueue.push(event.approvalId);
+      if (!enqueueApproval(event.approvalId)) return;
       screen.render(event);
     });
     const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(

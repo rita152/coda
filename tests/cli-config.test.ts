@@ -20,7 +20,7 @@ afterEach(() => {
 
 /** 便捷构造:必填布尔字段兜底,测试只声明关心的字段。 */
 function flags(o: Partial<CliFlags> = {}): CliFlags {
-  return { json: false, continue_: false, noColor: false, ...o };
+  return { json: false, eventFormat: 'legacy', continue_: false, noColor: false, ...o };
 }
 
 function modelConfig(value: { modelConfig?: ModelConfig }): ModelConfig {
@@ -233,6 +233,7 @@ describe('全屏 TUI eligibility 只决定渲染面', () => {
   it('只有无 prompt 的双 TTY 非 dumb 交互启动 eligible', () => {
     expect(isFullScreenTuiEligible(flags(), terminal)).toBe(true);
     expect(isFullScreenTuiEligible(flags({ json: true }), terminal)).toBe(false);
+    expect(isFullScreenTuiEligible(flags({ eventFormat: 'envelope' }), terminal)).toBe(false);
     expect(isFullScreenTuiEligible(flags({ prompt: 'hello' }), terminal)).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdinIsTTY: false })).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdoutIsTTY: false })).toBe(false);
@@ -243,6 +244,8 @@ describe('全屏 TUI eligibility 只决定渲染面', () => {
 describe('parseFlags 边界(docs/09 §2 flag 文法)', () => {
   it('--resume 带值 → id;不带值 → true(进入列表选择)', () => {
     expect(parseFlags(['--resume', '20260101-000000-abcd']).resume).toBe('20260101-000000-abcd');
+    const runtimeId = `runtime-${'b'.repeat(40)}`;
+    expect(parseFlags(['--resume', runtimeId]).resume).toBe(runtimeId);
     expect(parseFlags(['--resume']).resume).toBe(true);
     // 后随另一个 flag:不吞 flag,resume 仍为 true 且后续 flag 正常解析
     const f = parseFlags(['--resume', '--json']);
