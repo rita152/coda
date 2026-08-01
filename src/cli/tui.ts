@@ -47,7 +47,7 @@ import {
   commandPaletteEntries,
   renderInteractiveHelp,
 } from './command-catalog.js';
-import type { CommandAvailability } from './command-catalog.js';
+import type { CliTheme, CommandAvailability } from './command-catalog.js';
 import {
   approvalAllowsAlways,
   filterSessionItems,
@@ -122,10 +122,17 @@ const TRANSCRIPT_MIN_CONTENT_ROWS = 1;
 const TRANSCRIPT_PADDED_MIN_ROWS =
   TRANSCRIPT_MIN_CONTENT_ROWS + TRANSCRIPT_PADDING_Y * 2;
 const MIN_HEADER_VIEWPORT_ROWS = 10;
+export const TRANSCRIPT_REPLAY_CHUNK_MESSAGES = 120;
+
+function toolTranscriptBlockKey(toolCallId: string, occurrence: number): string {
+  return occurrence <= 1
+    ? `tool:${toolCallId}`
+    : `tool:${toolCallId}:occurrence:${occurrence}`;
+}
 
 type Tone = 'normal' | 'muted' | 'accent' | 'success' | 'warning' | 'danger' | 'cyan';
 
-interface Palette {
+export interface TuiPalette {
   border: string;
   promptBorder: string;
   cursor: string;
@@ -137,7 +144,7 @@ interface Palette {
   cyan: string;
 }
 
-const PALETTE: Palette = {
+const AUTO_PALETTE: TuiPalette = {
   border: '#c9ccd3',
   promptBorder: '#a0205e',
   cursor: '#c94740',
@@ -149,11 +156,49 @@ const PALETTE: Palette = {
   cyan: '#276a7a',
 };
 
+const THEME_PALETTES: Readonly<Record<Exclude<CliTheme, 'auto' | 'mono'>, TuiPalette>> = {
+  light: AUTO_PALETTE,
+  dark: {
+    border: '#8b93a1',
+    promptBorder: '#ff70b7',
+    cursor: '#ff7b72',
+    muted: '#a7afbd',
+    accent: '#ff7b72',
+    success: '#6fdb91',
+    warning: '#f2cc60',
+    danger: '#ff7b86',
+    cyan: '#72d4e4',
+  },
+  'high-contrast': {
+    border: '#ffffff',
+    promptBorder: '#ffff00',
+    cursor: '#ffff00',
+    muted: '#ffffff',
+    accent: '#ffff00',
+    success: '#00ff00',
+    warning: '#ffff00',
+    danger: '#ff4d4d',
+    cyan: '#00ffff',
+  },
+};
+
+export function resolveTuiTheme(
+  theme: CliTheme = 'auto',
+  color = true,
+): { readonly color: boolean; readonly palette: TuiPalette } {
+  if (!color || theme === 'mono') return { color: false, palette: AUTO_PALETTE };
+  return {
+    color: true,
+    palette: theme === 'auto' ? AUTO_PALETTE : THEME_PALETTES[theme],
+  };
+}
+
 export interface TuiOptions {
   cwd: string;
   model?: ModelRef;
   version: string;
   color: boolean;
+  theme?: CliTheme;
   contextLimit?: number;
   resumed?: boolean;
   branch?: string;
@@ -183,6 +228,8 @@ interface TuiScreenOptions extends TuiOptions {
   interaction?: TuiInteractionState;
   /** 测试可注入确定性的 highlighter；生产缺省使用 OpenTUI 全局 client。 */
   treeSitterClient?: TreeSitterClient;
+  /** Deterministic performance probe: one callback per coalesced visual stream frame. */
+  onStreamFrame?: (taskCount: number) => void;
 }
 
 export interface TuiScreen {
@@ -432,7 +479,9 @@ export async function createTuiScreen(
   // 正文跟随终端默认前景；OpenTUI 0.4.5 的硬件光标路径会丢失 default
   // intent 并退化为白色 OSC 12，因此光标使用兼顾明暗背景的固定品牌色。
   const terminalForeground = RGBA.defaultForeground();
-  const cursorForeground = RGBA.fromHex(PALETTE.cursor);
+  const resolvedTheme = resolveTuiTheme(opts.theme, opts.color);
+  const palette = resolvedTheme.palette;
+  const cursorForeground = RGBA.fromHex(palette.cursor);
   const interaction = opts.interaction ?? new TuiInteractionState();
   let approvalPending = false;
   let commandPrompt: string | undefined;
@@ -442,32 +491,32 @@ export async function createTuiScreen(
   let rewritingSecret = false;
   let submitHandler = opts.onSubmit ?? (() => {});
   const colored = <T extends object>(value: T): T | Record<string, never> =>
-    opts.color ? value : {};
+    resolvedTheme.color ? value : {};
   const toneColor = (tone: Tone): ColorInput => {
-    if (!opts.color) return terminalForeground;
+    if (!resolvedTheme.color) return terminalForeground;
     switch (tone) {
-      case 'muted': return PALETTE.muted;
-      case 'accent': return PALETTE.accent;
-      case 'success': return PALETTE.success;
-      case 'warning': return PALETTE.warning;
-      case 'danger': return PALETTE.danger;
-      case 'cyan': return PALETTE.cyan;
+      case 'muted': return palette.muted;
+      case 'accent': return palette.accent;
+      case 'success': return palette.success;
+      case 'warning': return palette.warning;
+      case 'danger': return palette.danger;
+      case 'cyan': return palette.cyan;
       default: return terminalForeground;
     }
   };
 
   const syntaxStyle = Syntax.fromStyles({
     default: { fg: terminalForeground },
-    'markup.heading.1': { ...(opts.color && { fg: PALETTE.accent }), bold: true },
-    'markup.heading.2': { ...(opts.color && { fg: PALETTE.accent }), bold: true },
-    'markup.heading.3': { ...(opts.color && { fg: PALETTE.warning }), bold: true },
-    'markup.list': opts.color ? { fg: PALETTE.accent } : {},
-    'markup.raw': opts.color ? { fg: PALETTE.success } : {},
-    'markup.link': opts.color ? { fg: PALETTE.cyan, underline: true } : { underline: true },
-    keyword: { ...(opts.color && { fg: PALETTE.accent }), bold: true },
-    string: opts.color ? { fg: PALETTE.success } : {},
-    number: opts.color ? { fg: PALETTE.warning } : {},
-    comment: { ...(opts.color && { fg: PALETTE.muted }), italic: true },
+    'markup.heading.1': { ...(resolvedTheme.color && { fg: palette.accent }), bold: true },
+    'markup.heading.2': { ...(resolvedTheme.color && { fg: palette.accent }), bold: true },
+    'markup.heading.3': { ...(resolvedTheme.color && { fg: palette.warning }), bold: true },
+    'markup.list': resolvedTheme.color ? { fg: palette.accent } : {},
+    'markup.raw': resolvedTheme.color ? { fg: palette.success } : {},
+    'markup.link': resolvedTheme.color ? { fg: palette.cyan, underline: true } : { underline: true },
+    keyword: { ...(resolvedTheme.color && { fg: palette.accent }), bold: true },
+    string: resolvedTheme.color ? { fg: palette.success } : {},
+    number: resolvedTheme.color ? { fg: palette.warning } : {},
+    comment: { ...(resolvedTheme.color && { fg: palette.muted }), italic: true },
   });
 
   try {
@@ -495,8 +544,8 @@ export async function createTuiScreen(
       borderColor: terminalForeground,
       titleColor: terminalForeground,
       ...colored({
-        borderColor: PALETTE.border,
-        titleColor: PALETTE.accent,
+        borderColor: palette.border,
+        titleColor: palette.accent,
       }),
     });
 
@@ -518,7 +567,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.accent }),
+      ...colored({ fg: palette.accent }),
     });
     const brandCopy = new Text(renderer, {
       id: 'coda-brand-copy',
@@ -546,7 +595,7 @@ export async function createTuiScreen(
       backgroundColor: transparentBackground,
       borderColor: terminalForeground,
       ...colored({
-        borderColor: PALETTE.border,
+        borderColor: palette.border,
       }),
     });
     const tipsTitle = new Text(renderer, {
@@ -556,7 +605,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.accent }),
+      ...colored({ fg: palette.accent }),
     });
     const tipsBody = new Text(renderer, {
       id: 'coda-tips-body',
@@ -572,7 +621,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     tips.add(tipsTitle);
     tips.add(tipsBody);
@@ -630,7 +679,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.accent }),
+      ...colored({ fg: palette.accent }),
     });
     const diffFiles = new Text(renderer, {
       id: 'coda-diff-files',
@@ -641,7 +690,7 @@ export async function createTuiScreen(
       selectable: true,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     const diffScroll = new ScrollBox(renderer, {
       id: 'coda-diff-scroll',
@@ -694,7 +743,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.accent }),
+      ...colored({ fg: palette.accent }),
     });
     const sessionList = new Text(renderer, {
       id: 'coda-session-list',
@@ -763,7 +812,7 @@ export async function createTuiScreen(
         selectable: false,
         bg: transparentBackground,
         fg: terminalForeground,
-        ...colored({ fg: PALETTE.muted }),
+        ...colored({ fg: palette.muted }),
       });
       row.add(prefix);
       row.add(command);
@@ -782,8 +831,8 @@ export async function createTuiScreen(
       borderColor: terminalForeground,
       focusedBorderColor: terminalForeground,
       ...colored({
-        borderColor: PALETTE.promptBorder,
-        focusedBorderColor: PALETTE.promptBorder,
+        borderColor: palette.promptBorder,
+        focusedBorderColor: palette.promptBorder,
       }),
     });
     const input = new Textarea(renderer, {
@@ -814,7 +863,7 @@ export async function createTuiScreen(
       placeholderColor: terminalForeground,
       cursorColor: cursorForeground,
       ...colored({
-        placeholderColor: PALETTE.muted,
+        placeholderColor: palette.muted,
       }),
     });
     promptBox.add(input);
@@ -831,7 +880,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     const taskText = new Text(renderer, {
       id: 'coda-task-status',
@@ -841,7 +890,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     const runtimeRow = new Box(renderer, {
       id: 'coda-runtime-row',
@@ -859,7 +908,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     const modelText = new Text(renderer, {
       id: 'coda-model',
@@ -869,7 +918,7 @@ export async function createTuiScreen(
       selectable: false,
       bg: transparentBackground,
       fg: terminalForeground,
-      ...colored({ fg: PALETTE.muted }),
+      ...colored({ fg: palette.muted }),
     });
     runtimeRow.add(contextText);
     runtimeRow.add(modelText);
@@ -909,6 +958,7 @@ export async function createTuiScreen(
     let currentAssistant: AssistantView | undefined;
     let planText: TextRenderable | undefined;
     const toolViews = new Map<string, ToolView>();
+    const toolOccurrenceCounts = new Map<string, number>();
     let promptMenuMode: 'none' | 'slash' | 'command' | 'file' = 'none';
     let promptMenuItems: readonly PromptMenuItem[] = [];
     let promptMenuSelectedIndex = 0;
@@ -925,6 +975,19 @@ export async function createTuiScreen(
     let transcriptSearchQuery = opts.presentation?.store.snapshot().search?.query ?? '';
     let transcriptSearchOrdinal = opts.presentation?.store.snapshot().search?.matchOrdinal ?? 0;
     let blockSequence = 0;
+    let replayMessages: readonly AgentMessage[] = [];
+    let replayCursor = 0;
+    let replayBanner: TextRenderable | undefined;
+    const replayCompletedToolCalls = new Set<string>();
+    const replayToolResultHeadlines = new Map<number, string>();
+    const replayToolCallBlockKeys = new Map<string, string>();
+    const replayToolResultBlockKeys = new Map<number, string>();
+    let replayLatestPlanSteps:
+      | Extract<SessionEvent, { type: 'plan_update' }>['steps']
+      | undefined;
+    let transcriptInsertIndex: number | undefined;
+    let blockInsertIndex: number | undefined;
+    let screenDestroyed = false;
     let diffSnapshot: Readonly<RuntimeDiffSnapshot> | undefined;
     let diffFileIndex = 0;
     let allSessionItems: readonly RuntimeThreadListItem[] = [];
@@ -944,6 +1007,15 @@ export async function createTuiScreen(
       readonly text: () => string;
     }
     const transcriptBlocks: TranscriptBlock[] = [];
+
+    const addTranscriptRenderable = (renderable: Renderable): void => {
+      if (transcriptInsertIndex === undefined) {
+        transcript.add(renderable);
+        return;
+      }
+      transcript.add(renderable, transcriptInsertIndex);
+      transcriptInsertIndex++;
+    };
 
     const workspace = formatWorkspacePath(opts.cwd, runtimeHomeDir());
 
@@ -1135,10 +1207,10 @@ export async function createTuiScreen(
         const selected = itemIndex === promptMenuSelectedIndex;
         const disabled = item.availability?.kind === 'disabled';
         const selectedColor: ColorInput =
-          opts.color
+          resolvedTheme.color
             ? disabled
-              ? PALETTE.warning
-              : PALETTE.accent
+              ? palette.warning
+              : palette.accent
             : terminalForeground;
         parts.prefix.content = selected ? (disabled ? '× ' : '→ ') : '  ';
         parts.command.content = item.label;
@@ -1487,10 +1559,10 @@ export async function createTuiScreen(
       const compact = layoutWidth < 68;
       if (approvalPending) {
         setPromptPlaceholder('');
-        if (opts.color) {
-          input.placeholderColor = PALETTE.warning;
-          promptBox.borderColor = PALETTE.warning;
-          promptBox.focusedBorderColor = PALETTE.warning;
+        if (resolvedTheme.color) {
+          input.placeholderColor = palette.warning;
+          promptBox.borderColor = palette.warning;
+          promptBox.focusedBorderColor = palette.warning;
         }
         refreshWorkspace();
         refreshComposerLayout();
@@ -1516,10 +1588,10 @@ export async function createTuiScreen(
       } else {
         setPromptPlaceholder('');
       }
-      if (opts.color) {
-        input.placeholderColor = PALETTE.muted;
-        promptBox.borderColor = PALETTE.promptBorder;
-        promptBox.focusedBorderColor = PALETTE.promptBorder;
+      if (resolvedTheme.color) {
+        input.placeholderColor = palette.muted;
+        promptBox.borderColor = palette.promptBorder;
+        promptBox.focusedBorderColor = palette.promptBorder;
       }
       refreshWorkspace();
       refreshComposerLayout();
@@ -1535,7 +1607,12 @@ export async function createTuiScreen(
         key = `${requestedKey}:${++blockSequence}`;
       }
       renderable.id = `coda-transcript-block-${++blockSequence}`;
-      transcriptBlocks.push({ key, renderable, text });
+      const block = { key, renderable, text };
+      if (blockInsertIndex === undefined) transcriptBlocks.push(block);
+      else {
+        transcriptBlocks.splice(blockInsertIndex, 0, block);
+        blockInsertIndex++;
+      }
     };
 
     const captureScrollAnchor = (): TranscriptScrollAnchor | undefined => {
@@ -1543,7 +1620,9 @@ export async function createTuiScreen(
       const recoverable = transcriptBlocks.filter((block) =>
         block.key.startsWith('message:') || block.key.startsWith('tool:'));
       const anchors = recoverable.length > 0 ? recoverable : transcriptBlocks;
-      const top = transcript.scrollTop;
+      // Renderable coordinates already include ScrollBox's content translation, so compare
+      // them with the viewport's absolute top instead of the logical scroll offset.
+      const top = transcript.viewport.y;
       let index = 0;
       for (let candidate = 0; candidate < anchors.length; candidate++) {
         const block = anchors[candidate];
@@ -1571,7 +1650,7 @@ export async function createTuiScreen(
       );
     };
 
-    const observeOutputEvent = (visibleOutput = true): void => {
+    const observeOutputEvent = (visibleOutput = true, deferVisualRefresh = false): void => {
       const current = opts.eventHighWaterSeq?.() ?? lastObservedHighWater + 1;
       if (!visibleOutput) {
         lastObservedHighWater = Math.max(lastObservedHighWater, current);
@@ -1588,7 +1667,11 @@ export async function createTuiScreen(
           opts.presentation?.store.markRead();
         }
       }
-      refreshTaskStatus();
+      if (deferVisualRefresh) {
+        queueFrameTask('stream-status', refreshStatus);
+      } else {
+        refreshTaskStatus();
+      }
     };
 
     const addText = (
@@ -1606,7 +1689,7 @@ export async function createTuiScreen(
         selectable: true,
         ...textOptions(tone),
       });
-      transcript.add(text);
+      addTranscriptRenderable(text);
       registerTranscriptBlock(blockKey, text, () => safeContent);
       return text;
     };
@@ -1676,7 +1759,7 @@ export async function createTuiScreen(
       box.add(label);
       box.add(reasoning);
       box.add(markdown);
-      transcript.add(box);
+      addTranscriptRenderable(box);
       const view: AssistantView = {
         id,
         reasoning,
@@ -1710,7 +1793,37 @@ export async function createTuiScreen(
       view.markdown.streaming = streaming;
     };
 
+    const pendingFrameTasks = new Map<string, () => void>();
+    let streamFrameScheduled = false;
+    const cancelFrameTask = (key: string): void => {
+      pendingFrameTasks.delete(key);
+    };
+    const flushStreamFrame = (): void => {
+      streamFrameScheduled = false;
+      if (screenDestroyed || pendingFrameTasks.size === 0) return;
+      const tasks = [...pendingFrameTasks.values()];
+      pendingFrameTasks.clear();
+      for (const task of tasks) task();
+      opts.onStreamFrame?.(tasks.length);
+      renderer.requestRender();
+      if (pendingFrameTasks.size > 0) scheduleStreamFrame();
+    };
+    const scheduleStreamFrame = (): void => {
+      if (screenDestroyed || streamFrameScheduled) return;
+      streamFrameScheduled = true;
+      renderer.once('frame', flushStreamFrame);
+      renderer.requestRender();
+    };
+    const queueFrameTask = (key: string, task: () => void): void => {
+      pendingFrameTasks.set(key, task);
+      scheduleStreamFrame();
+    };
+    const queueAssistantRefresh = (view: AssistantView): void => {
+      queueFrameTask(`assistant:${view.id}`, () => refreshAssistant(view, true));
+    };
+
     const syncAssistant = (view: AssistantView, message: AssistantMessage): void => {
+      cancelFrameTask(`assistant:${view.id}`);
       view.reasoningBlocks.clear();
       view.textBlocks.clear();
       for (const [index, part] of message.content.entries()) {
@@ -1754,6 +1867,8 @@ export async function createTuiScreen(
       toolName: string,
       args: unknown,
     ): void => {
+      const occurrence = (toolOccurrenceCounts.get(toolCallId) ?? 0) + 1;
+      toolOccurrenceCounts.set(toolCallId, occurrence);
       const safeToolName = firstLine(sanitizeTerminalText(toolName));
       const rawHeadline = toolHeadline(toolName, args);
       const headline =
@@ -1761,7 +1876,11 @@ export async function createTuiScreen(
       activity = `${safeToolName} running`;
       refreshStatus();
       if (headline === undefined) return;
-      const text = addText(`● ${headline}`, 'cyan', `tool:${toolCallId}`);
+      const text = addText(
+        `● ${headline}`,
+        'cyan',
+        toolTranscriptBlockKey(toolCallId, occurrence),
+      );
       toolViews.set(toolCallId, { headline, name: safeToolName, text, startedAt: Date.now() });
     };
 
@@ -1769,11 +1888,17 @@ export async function createTuiScreen(
       const view = toolViews.get(toolCallId);
       if (view === undefined) return;
       const safeOutput = sanitizeTerminalText(output);
-      const tail = truncateToWidth(firstLineFromEnd(safeOutput.trimEnd()), 88);
-      view.text.content = tail === '' ? `● ${view.headline}` : `● ${view.headline}\n  ↳ ${tail}`;
+      queueFrameTask(`tool:${toolCallId}`, () => {
+        const current = toolViews.get(toolCallId);
+        if (current === undefined) return;
+        const tail = truncateToWidth(firstLineFromEnd(safeOutput.trimEnd()), 88);
+        current.text.content =
+          tail === '' ? `● ${current.headline}` : `● ${current.headline}\n  ↳ ${tail}`;
+      });
     };
 
     const onToolEnd = (toolCallId: string, result: ToolResultMessage): void => {
+      cancelFrameTask(`tool:${toolCallId}`);
       const view = toolViews.get(toolCallId);
       const head = truncateToWidth(sanitizeTerminalText(resultHead(result)), 96);
       const suffix = toolDetailsSuffix(result);
@@ -1798,7 +1923,7 @@ export async function createTuiScreen(
         }
       } else {
         view.text.content = finalText;
-        if (opts.color) view.text.fg = result.isError ? PALETTE.danger : PALETTE.success;
+        if (resolvedTheme.color) view.text.fg = result.isError ? palette.danger : palette.success;
         toolViews.delete(toolCallId);
       }
       addDiff(result.details);
@@ -1855,7 +1980,7 @@ export async function createTuiScreen(
           const part = event.partial.content[event.contentIndex];
           const initial = part?.type === 'text' ? sanitizeTerminalText(part.text) : '';
           view.textBlocks.set(event.contentIndex, initial);
-          refreshAssistant(view, true);
+          queueAssistantRefresh(view);
           break;
         }
         case 'text_delta': {
@@ -1864,17 +1989,17 @@ export async function createTuiScreen(
             event.contentIndex,
             previous + sanitizeTerminalText(event.delta),
           );
-          refreshAssistant(view, true);
+          queueAssistantRefresh(view);
           break;
         }
         case 'text_end':
           view.textBlocks.set(event.contentIndex, sanitizeTerminalText(event.content));
-          refreshAssistant(view, true);
+          queueAssistantRefresh(view);
           break;
         case 'reasoning_start': {
           view.reasoningStartedAt.set(event.contentIndex, Date.now());
           view.reasoningBlocks.set(event.contentIndex, 'thinking · in progress');
-          refreshAssistant(view, true);
+          queueAssistantRefresh(view);
           break;
         }
         case 'reasoning_delta': {
@@ -1889,7 +2014,7 @@ export async function createTuiScreen(
             `thinking · ${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
           );
           view.reasoningStartedAt.delete(event.contentIndex);
-          refreshAssistant(view, true);
+          queueAssistantRefresh(view);
           break;
         }
         case 'tool_call_start': {
@@ -1910,15 +2035,26 @@ export async function createTuiScreen(
       }
     };
 
+    const scrollAnchorBlock = (
+      anchor: TranscriptScrollAnchor,
+    ): TranscriptBlock | undefined => {
+      const candidates = [anchor.blockKey, ...anchor.fallbackBlockKeys];
+      return candidates
+        .map((key) => transcriptBlocks.find((candidate) => candidate.key === key))
+        .find((candidate) => candidate !== undefined);
+    };
     const restoreScrollAnchor = (
       anchor: TranscriptScrollAnchor,
     ): boolean => {
-      const candidates = [anchor.blockKey, ...anchor.fallbackBlockKeys];
-      const block = candidates
-        .map((key) => transcriptBlocks.find((candidate) => candidate.key === key))
-        .find((candidate) => candidate !== undefined);
+      const block = scrollAnchorBlock(anchor);
       if (block === undefined) return false;
-      transcript.scrollTop = Math.max(0, block.renderable.y + anchor.logicalOffset);
+      // Moving scrollTop by the block-to-viewport delta keeps the same logical row inside
+      // the anchored block, regardless of prepended replay segments or a resized viewport.
+      transcript.scrollTop = Math.max(
+        0,
+        transcript.scrollTop + block.renderable.y +
+          anchor.logicalOffset - transcript.viewport.y,
+      );
       manuallyScrolled = true;
       return true;
     };
@@ -1931,6 +2067,20 @@ export async function createTuiScreen(
         const pending = pendingScrollAnchor;
         pendingScrollAnchor = undefined;
         if (pending !== undefined && !restoreScrollAnchor(pending)) {
+          // A saved anchor can point into an older replay segment. The first tail frame has
+          // already rendered; load only until that stable key becomes available, then restore
+          // it instead of falsely reporting that the message was compacted.
+          while (replayCursor > 0) {
+            if (!loadEarlierReplay()) break;
+            if (scrollAnchorBlock(pending) !== undefined) {
+              // The inserted renderable receives its final y only on the next layout frame.
+              // loadEarlierReplay already queued that frame; overwrite its temporary viewport
+              // anchor with the durable target so the target wins after layout.
+              pendingScrollAnchor = pending;
+              renderer.requestRender();
+              return;
+            }
+          }
           transientStatus = 'saved scroll anchor was compacted; showing surviving transcript';
         }
         renderer.requestRender();
@@ -1957,6 +2107,14 @@ export async function createTuiScreen(
         transientStatus = 'start with /search <query>';
         refreshStatus();
         return false;
+      }
+      if (replayCursor > 0) {
+        loadEarlierReplay(true);
+        renderer.once('frame', () => {
+          if (!screenDestroyed) searchTranscript('', direction);
+        });
+        renderer.requestRender();
+        return true;
       }
       const folded = transcriptSearchQuery.toLocaleLowerCase('en-US');
       const matches = transcriptBlocks.filter((block) =>
@@ -2124,29 +2282,183 @@ export async function createTuiScreen(
         default:
           break;
       }
+      const streamingUpdate =
+        event.type === 'message_update' || event.type === 'tool_execution_update';
       observeOutputEvent(
         event.type !== 'queue_update' &&
         event.type !== 'usage_update' &&
         event.type !== 'turn_start' &&
         event.type !== 'turn_end',
+        streamingUpdate,
       );
+    };
+
+    const renderHistoricalMessages = (
+      messages: readonly AgentMessage[],
+      start: number,
+      end: number,
+    ): void => {
+      for (let messageIndex = start; messageIndex < end; messageIndex++) {
+        const message = messages[messageIndex];
+        if (message === undefined) continue;
+        if (message.role === 'user') addUser(message);
+        else if (message.role === 'assistant') {
+          addAssistantMessage(message);
+          for (const [contentIndex, part] of message.content.entries()) {
+            if (part.type === 'tool_call') {
+              const callKey = `${messageIndex}:${contentIndex}`;
+              if (replayCompletedToolCalls.has(callKey)) continue;
+              const headline = toolHeadline(part.name, part.arguments);
+              if (headline !== undefined) {
+                addText(
+                  `● ${sanitizeTerminalText(headline)}`,
+                  'cyan',
+                  replayToolCallBlockKeys.get(callKey) ?? toolTranscriptBlockKey(part.id, 1),
+                );
+              }
+            }
+          }
+        }
+        else {
+          // Historical replay is a pure projection. In particular, loading an older segment
+          // must not mutate the current plan or live tool/activity state.
+          const headline = replayToolResultHeadlines.get(messageIndex) ??
+            sanitizeTerminalText(message.toolName);
+          const head = truncateToWidth(sanitizeTerminalText(resultHead(message)), 96);
+          const suffix = toolDetailsSuffix(message);
+          const marker = message.isError ? '✗' : '✓';
+          const renderedAsPlan = message.toolName === 'plan' &&
+            !message.isError &&
+            planStepsFromDetails(message.details) !== undefined;
+          if (!renderedAsPlan) {
+            addText(
+              `${marker} ${headline}` +
+                (suffix !== undefined ? ` · ${suffix}` : head !== '' ? ` · ${head}` : ''),
+              message.isError ? 'danger' : 'success',
+              replayToolResultBlockKeys.get(messageIndex) ??
+                `tool:${message.toolCallId}:result:${message.id}`,
+            );
+          }
+          addDiff(message.details);
+        }
+      }
+    };
+
+    const indexReplayToolPairs = (messages: readonly AgentMessage[]): void => {
+      replayCompletedToolCalls.clear();
+      replayToolResultHeadlines.clear();
+      replayToolCallBlockKeys.clear();
+      replayToolResultBlockKeys.clear();
+      replayLatestPlanSteps = undefined;
+      const occurrences = new Map<string, number>();
+      for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+        const message = messages[messageIndex];
+        if (message?.role === 'tool_result') {
+          if (message.toolName === 'plan' && !message.isError) {
+            const steps = planStepsFromDetails(message.details);
+            if (steps !== undefined) replayLatestPlanSteps = steps;
+          }
+          continue;
+        }
+        if (message?.role !== 'assistant') continue;
+        const calls = new Map<string, { readonly key: string; readonly headline: string }>();
+        for (const [contentIndex, part] of message.content.entries()) {
+          if (part.type !== 'tool_call') continue;
+          const occurrence = (occurrences.get(part.id) ?? 0) + 1;
+          occurrences.set(part.id, occurrence);
+          const callKey = `${messageIndex}:${contentIndex}`;
+          replayToolCallBlockKeys.set(
+            callKey,
+            toolTranscriptBlockKey(part.id, occurrence),
+          );
+          calls.set(part.id, {
+            key: callKey,
+            headline: sanitizeTerminalText(toolHeadline(part.name, part.arguments) ?? part.name),
+          });
+        }
+        for (let resultIndex = messageIndex + 1; resultIndex < messages.length; resultIndex++) {
+          const result = messages[resultIndex];
+          if (result?.role !== 'tool_result') break;
+          const call = calls.get(result.toolCallId);
+          if (call === undefined) continue;
+          replayCompletedToolCalls.add(call.key);
+          replayToolResultHeadlines.set(resultIndex, call.headline);
+          replayToolResultBlockKeys.set(
+            resultIndex,
+            replayToolCallBlockKeys.get(call.key) ?? toolTranscriptBlockKey(result.toolCallId, 1),
+          );
+          calls.delete(result.toolCallId);
+        }
+      }
+      toolOccurrenceCounts.clear();
+      for (const [toolCallId, occurrence] of occurrences) {
+        toolOccurrenceCounts.set(toolCallId, occurrence);
+      }
+    };
+
+    const replayChunkStart = (messages: readonly AgentMessage[], target: number): number => {
+      let start = Math.max(0, Math.min(target, messages.length));
+      const lowerBound = Math.max(0, start - TRANSCRIPT_REPLAY_CHUNK_MESSAGES);
+      while (start > lowerBound) {
+        const message = messages[start];
+        if (
+          message?.role === 'user' &&
+          (message.source === 'prompt' || message.source === 'follow_up')
+        ) {
+          break;
+        }
+        start--;
+      }
+      return start;
+    };
+
+    const refreshReplayBanner = (): void => {
+      if (replayBanner === undefined) return;
+      const loaded = replayMessages.length - replayCursor;
+      replayBanner.content = replayCursor === 0
+        ? `— resumed session · ${replayMessages.length} messages —`
+        : `— resumed session · showing last ${loaded}/${replayMessages.length} messages · ` +
+          'PageUp loads earlier —';
+    };
+
+    const loadEarlierReplay = (all = false): boolean => {
+      if (replayCursor <= 0) return false;
+      const anchor = captureScrollAnchor();
+      const previousCursor = replayCursor;
+      const target = all
+        ? 0
+        : Math.max(0, previousCursor - TRANSCRIPT_REPLAY_CHUNK_MESSAGES);
+      const nextCursor = replayChunkStart(replayMessages, target);
+      transcriptInsertIndex = 1;
+      blockInsertIndex = 1;
+      try {
+        renderHistoricalMessages(replayMessages, nextCursor, previousCursor);
+      } finally {
+        transcriptInsertIndex = undefined;
+        blockInsertIndex = undefined;
+      }
+      replayCursor = nextCursor;
+      refreshReplayBanner();
+      if (anchor !== undefined) scheduleScrollRestore(anchor);
+      transientStatus = replayCursor === 0
+        ? 'complete transcript loaded'
+        : `${previousCursor - nextCursor} earlier messages loaded · PageUp for more`;
+      refreshStatus();
+      return true;
     };
 
     const replayTranscript = (messages: readonly AgentMessage[]): void => {
       if (messages.length === 0) return;
-      addText(`— resumed session · ${messages.length} messages —`, 'muted');
-      for (const message of messages) {
-        if (message.role === 'user') addUser(message);
-        else if (message.role === 'assistant') {
-          addAssistantMessage(message);
-          for (const part of message.content) {
-            if (part.type === 'tool_call') {
-              onToolStart(part.id, part.name, part.arguments);
-            }
-          }
-        }
-        else onToolEnd(message.toolCallId, message);
-      }
+      replayMessages = [...messages];
+      indexReplayToolPairs(replayMessages);
+      replayCursor = replayChunkStart(
+        replayMessages,
+        Math.max(0, replayMessages.length - TRANSCRIPT_REPLAY_CHUNK_MESSAGES),
+      );
+      replayBanner = addText('', 'muted', 'replay:banner');
+      refreshReplayBanner();
+      renderHistoricalMessages(replayMessages, replayCursor, replayMessages.length);
+      if (replayLatestPlanSteps !== undefined) updatePlan(replayLatestPlanSteps);
       activity = undefined;
       refreshStatus();
     };
@@ -2157,6 +2469,15 @@ export async function createTuiScreen(
       transcript.visible = true;
       for (const child of transcript.getChildren()) transcript.remove(child);
       transcriptBlocks.splice(0, transcriptBlocks.length);
+      replayMessages = [];
+      replayCursor = 0;
+      replayBanner = undefined;
+      replayCompletedToolCalls.clear();
+      replayToolResultHeadlines.clear();
+      replayToolCallBlockKeys.clear();
+      replayToolResultBlockKeys.clear();
+      replayLatestPlanSteps = undefined;
+      toolOccurrenceCounts.clear();
       toolViews.clear();
       currentAssistant = undefined;
       planText = undefined;
@@ -2564,6 +2885,11 @@ export async function createTuiScreen(
       },
       handleComposerModeKey,
       scrollPage(direction: -1 | 1): void {
+        if (direction < 0 && loadEarlierReplay()) {
+          manuallyScrolled = true;
+          persistScrollState();
+          return;
+        }
         transcript.scrollBy(direction * 0.8, 'viewport');
         if (direction < 0) {
           manuallyScrolled = true;
@@ -2576,6 +2902,8 @@ export async function createTuiScreen(
         }
       },
       destroy(): void {
+        screenDestroyed = true;
+        pendingFrameTasks.clear();
         renderer.off('resize', onResize);
         syntaxStyle.destroy();
       },

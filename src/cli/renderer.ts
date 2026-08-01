@@ -23,6 +23,8 @@ import { sanitizeTerminalLine, sanitizeTerminalText } from './terminal-sanitize.
 export interface RendererOptions {
   color: boolean;
   interactive: boolean;
+  /** Replace coda-owned status chrome with portable ASCII; user/model payload remains Unicode. */
+  ascii?: boolean;
 }
 
 export interface Renderer {
@@ -291,6 +293,44 @@ export interface RendererOutput {
 
 export function createRenderer(out: RendererOutput, opts: RendererOptions): Renderer {
   const color = opts.color;
+  const ascii = opts.ascii === true;
+  const glyph = {
+    rule: ascii ? '-' : '─',
+    idle: ascii ? '.' : '·',
+    followUp: ascii ? '->' : '↪',
+    steering: ascii ? '>>' : '»',
+    tool: ascii ? '*' : '●',
+    success: ascii ? '[ok]' : '✓',
+    failure: ascii ? '[x]' : '✗',
+    fatal: ascii ? '[x]' : '✖',
+    warning: ascii ? '[!]' : '⚠',
+    retry: ascii ? '[retry]' : '↻',
+    compact: ascii ? '[compact]' : '⋯',
+    done: ascii ? '[done]' : '∙ done',
+    aborted: ascii ? '[aborted]' : '∙ aborted',
+    error: ascii ? '[error]' : '∙ ended with error',
+    planDone: ascii ? '[x]' : '✔',
+    planActive: ascii ? '[>]' : '▶',
+    planPending: ascii ? '[ ]' : '○',
+    replay: ascii ? '--' : '—',
+  } as const;
+  const separator = ascii ? ' | ' : ' · ';
+  const spinnerFrames = ascii ? ['|', '/', '-', '\\'] : SPINNER_FRAMES;
+  const productChrome = (value: string): string => ascii
+    ? value
+        .replaceAll(' · ', ' | ')
+        .replaceAll('—', '--')
+        .replaceAll('…', '...')
+        .replaceAll('✓', '[ok]')
+        .replaceAll('✔', '[x]')
+        .replaceAll('✗', '[x]')
+        .replaceAll('✖', '[x]')
+        .replaceAll('⚠', '[!]')
+        .replaceAll('▶', '[>]')
+        .replaceAll('○', '[ ]')
+        .replaceAll('↻', '[retry]')
+        .replaceAll('⋯', '[compact]')
+    : value;
   // interactive(光标控制/动态区重绘)与 color(SGR 着色)解耦:\x1b[F/\x1b[J 是光标
   // 控制不是着色,NO_COLOR 规范只禁 SGR——无 color 的交互终端仍需动态区,否则 raw mode
   // 下输入行不可见。非交互(非 TTY / -p)→ plain 纯追加(docs/09 §1.3)。
@@ -345,19 +385,21 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       const tail = tailToWidth(sanitizeDynText(pending), w - 1);
       lines.push(pendingKind === 'reasoning' ? paint(tail, DIM_ITALIC) : tail);
     }
-    lines.push(paint('─'.repeat(Math.min(w - 1, 60)), DIM));
+    lines.push(paint(glyph.rule.repeat(Math.min(w - 1, 60)), DIM));
     // 活动行 + 队列徽标(docs/09 §5:同一行,两队列皆空时徽标不显示)
-    const glyph = running ? (SPINNER_FRAMES[spin % SPINNER_FRAMES.length] ?? '⠋') : '·';
+    const activityGlyph = running
+      ? (spinnerFrames[spin % spinnerFrames.length] ?? (ascii ? '|' : '⠋'))
+      : glyph.idle;
     spin++;
     // 优先级:临时状态提示 > 审批提示(键位已切审批模式,提示必须在场)> 常规活动行
     const approval = approvalPrompt !== undefined ? paint(approvalPrompt, YELLOW) : undefined;
-    let act = status ?? approval ?? (running ? (activity ?? 'streaming…') : 'idle');
+    let act = status ?? approval ?? (running ? (activity ?? (ascii ? 'streaming...' : 'streaming…')) : 'idle');
     if (status === undefined && approval === undefined && activityTail !== undefined) {
       act += `  ${activityTail}`;
     }
-    let line = `${glyph} ${sanitizeDynText(act)}`;
+    let line = `${activityGlyph} ${sanitizeDynText(act)}`;
     if (steerCount > 0 || followCount > 0) {
-      line += `  ${paint(`[steer ${steerCount} · follow-up ${followCount}]`, CYAN)}`;
+      line += `  ${paint(`[steer ${steerCount}${separator}follow-up ${followCount}]`, CYAN)}`;
     }
     if (usage !== undefined) {
       line += `  ${paint(`${usage.cumulative.input + usage.cumulative.output} tok`, DIM)}`;
@@ -465,7 +507,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         break;
       case 'reasoning_start':
         reasoningStartedAt.set(ev.contentIndex, Date.now());
-        activity = 'thinking…';
+        activity = ascii ? 'thinking...' : 'thinking…';
         redrawDyn();
         break;
       case 'reasoning_delta':
@@ -478,10 +520,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         const startedAt = reasoningStartedAt.get(ev.contentIndex);
         reasoningStartedAt.delete(ev.contentIndex);
         appendLine(paint(
-          `thinking · ${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
+          `thinking${separator}${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
           DIM_ITALIC,
         ));
-        activity = 'streaming…';
+        activity = ascii ? 'streaming...' : 'streaming…';
         redrawDyn();
         break;
       }
@@ -489,7 +531,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         // 不渲染参数流,动态区提示 preparing <name>…(docs/09 §4)
         const part = ev.partial.content[ev.contentIndex];
         const name = part !== undefined && part.type === 'tool_call' ? part.name : 'tool';
-        activity = `preparing ${sanitizeTerminalLine(name)}…`;
+        activity = `preparing ${sanitizeTerminalLine(name)}${ascii ? '...' : '…'}`;
         redrawDyn();
         break;
       }
@@ -505,10 +547,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       .trimEnd());
     switch (m.source) {
       case 'steering':
-        appendLines(paint(`» steering: ${text}`, CYAN));
+        appendLines(paint(`${glyph.steering} steering: ${text}`, CYAN));
         break;
       case 'follow_up':
-        appendLines(paint(`» follow-up: ${text}`, CYAN));
+        appendLines(paint(`${glyph.steering} follow-up: ${text}`, CYAN));
         break;
       case 'synthetic':
         appendLine(paint(truncateToWidth(firstLine(text), 80), DIM));
@@ -545,12 +587,17 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     const toolName = sanitizeTerminalLine(result.toolName);
     const startedAt = toolStartedAt.get(result.toolCallId);
     toolStartedAt.delete(result.toolCallId);
-    const elapsed = startedAt === undefined ? '' : ` · ${formatElapsed(Date.now() - startedAt)}`;
+    const elapsed = startedAt === undefined ? '' : `${separator}${formatElapsed(Date.now() - startedAt)}`;
     if (result.isError) {
-      appendLine(paint(`  ✗ ${toolName}${elapsed}: ${truncateToWidth(head, 100)}`, RED));
+      appendLine(paint(`  ${glyph.failure} ${toolName}${elapsed}: ${truncateToWidth(head, 100)}`, RED));
     } else {
-      const suffix = detailsSuffix(result) ?? (head !== '' ? `· ${truncateToWidth(head, 80)}` : '');
-      appendLine(`  ${paint('✓', GREEN)} ${toolName}${elapsed}${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`);
+      const suffix = detailsSuffix(result) ?? (
+        head !== '' ? `${ascii ? '' : '· '}${truncateToWidth(head, 80)}` : ''
+      );
+      appendLine(
+        `  ${paint(glyph.success, GREEN)} ${toolName}${elapsed}` +
+          `${suffix !== '' ? ` ${paint(suffix, DIM)}` : ''}`,
+      );
     }
     renderDiff(result.details);
   }
@@ -569,16 +616,16 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       appendLine(`  ${paint(line, code)}`);
     }
     if (lines.length > DIFF_MAX_LINES) {
-      appendLine(paint(`  … (+${lines.length - DIFF_MAX_LINES} more diff lines)`, DIM));
+      appendLine(paint(`  ${ascii ? '...' : '…'} (+${lines.length - DIFF_MAX_LINES} more diff lines)`, DIM));
     }
   }
 
   function usageSummary(reason: 'completed' | 'aborted' | 'error'): string {
-    const head = reason === 'completed' ? '∙ done' : reason === 'aborted' ? '∙ aborted' : '∙ ended with error';
+    const head = reason === 'completed' ? glyph.done : reason === 'aborted' ? glyph.aborted : glyph.error;
     if (usage === undefined) return head;
     const c = usage.cumulative;
-    let s = `${head} · ${usage.turns} turn${usage.turns === 1 ? '' : 's'} · tokens ${c.input} in / ${c.output} out`;
-    if (c.costUSD !== undefined) s += ` · $${c.costUSD.toFixed(4)}`;
+    let s = `${head}${separator}${usage.turns} turn${usage.turns === 1 ? '' : 's'}${separator}tokens ${c.input} in / ${c.output} out`;
+    if (c.costUSD !== undefined) s += `${separator}$${c.costUSD.toFixed(4)}`;
     return s;
   }
 
@@ -586,8 +633,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     switch (e.type) {
       case 'agent_start':
         running = true;
-        activity = 'streaming…';
-        if (e.reason === 'follow_up') appendLine(paint('↪ follow-up', CYAN));
+        activity = ascii ? 'streaming...' : 'streaming…';
+        if (e.reason === 'follow_up') appendLine(paint(`${glyph.followUp} follow-up`, CYAN));
         else redrawDyn();
         break;
       case 'agent_end':
@@ -597,7 +644,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         activityTail = undefined;
         approvalPrompt = undefined; // abort 收尾等场景兜底撤下审批提示
         approvalDescription = undefined;
-        if (e.reason === 'error') appendLine(paint('✖ agent run failed', RED));
+        if (e.reason === 'error') appendLine(paint(`${glyph.fatal} agent run failed`, RED));
         appendLine(paint(usageSummary(e.reason), DIM));
         break;
       case 'turn_start':
@@ -610,7 +657,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         else if (e.message.role === 'assistant') {
           pending = '';
           pendingKind = 'text';
-          activity = 'streaming…';
+          activity = ascii ? 'streaming...' : 'streaming…';
           redrawDyn();
         }
         break;
@@ -628,8 +675,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         approvalDescription = undefined;
         const headline = toolHeadline(e.toolName, e.args);
         toolStartedAt.set(e.toolCallId, Date.now());
-        if (headline !== undefined) appendLine(`${paint('●', CYAN)} ${sanitizeTerminalLine(headline)}`);
-        activity = `${sanitizeTerminalLine(e.toolName)} running…`;
+        if (headline !== undefined) appendLine(`${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(headline)}`);
+        activity = `${sanitizeTerminalLine(e.toolName)} running${ascii ? '...' : '…'}`;
         activityTail = undefined;
         redrawDyn();
         break;
@@ -648,7 +695,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       }
       case 'tool_execution_end':
         onToolEnd(e.result);
-        activity = running ? 'streaming…' : undefined;
+        activity = running ? (ascii ? 'streaming...' : 'streaming…') : undefined;
         activityTail = undefined;
         redrawDyn();
         break;
@@ -657,13 +704,17 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         followCount = e.followUp.length;
         if (ansi) redrawDyn();
         else if (steerCount > 0 || followCount > 0) {
-          appendLine(`[steer ${steerCount} · follow-up ${followCount}]`);
+          appendLine(`[steer ${steerCount}${separator}follow-up ${followCount}]`);
         }
         break;
       case 'plan_update':
         for (const s of e.steps) {
-          const glyph = s.status === 'completed' ? '✔' : s.status === 'in_progress' ? '▶' : '○';
-          appendLine(`${glyph} ${sanitizeTerminalLine(s.step)}`);
+          const marker = s.status === 'completed'
+            ? glyph.planDone
+            : s.status === 'in_progress'
+              ? glyph.planActive
+              : glyph.planPending;
+          appendLine(`${marker} ${sanitizeTerminalLine(s.step)}`);
         }
         break;
       case 'approval_request':
@@ -677,8 +728,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'error':
         appendLine(
           e.fatal
-            ? paint(`✖ fatal: ${sanitizeTerminalLine(e.message)}`, RED)
-            : paint(`⚠ ${sanitizeTerminalLine(e.message)}`, YELLOW),
+            ? paint(`${glyph.fatal} fatal: ${sanitizeTerminalLine(e.message)}`, RED)
+            : paint(`${glyph.warning} ${sanitizeTerminalLine(e.message)}`, YELLOW),
         );
         break;
       case 'usage_update':
@@ -688,17 +739,19 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'retry_scheduled':
         appendLine(
           paint(
-            `↻ retry ${e.attempt}/${e.maxAttempts} in ${e.delayMs}ms: ${sanitizeTerminalLine(e.errorMessage)}`,
+            `${glyph.retry} retry ${e.attempt}/${e.maxAttempts} in ${e.delayMs}ms: ${sanitizeTerminalLine(e.errorMessage)}`,
             YELLOW,
           ),
         );
         break;
       case 'compaction_start':
-        appendLine(paint('⋯ compacting context…', DIM));
+        appendLine(paint(`${glyph.compact} compacting context${ascii ? '...' : '…'}`, DIM));
         break;
       case 'compaction_end':
         appendLine(
-          paint(e.ok ? `⋯ compaction done (dropped ${e.droppedMessages} messages)` : '⋯ compaction failed', DIM),
+          paint(e.ok
+            ? `${glyph.compact} compaction done (dropped ${e.droppedMessages} messages)`
+            : `${glyph.compact} compaction failed`, DIM),
         );
         break;
       default:
@@ -708,7 +761,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
 
   function replayTranscript(messages: readonly AgentMessage[]): void {
     if (messages.length === 0) return;
-    appendLine(paint(`— resumed session · ${messages.length} messages —`, DIM));
+    appendLine(paint(`${glyph.replay} resumed session${separator}${messages.length} messages ${glyph.replay}`, DIM));
     for (const m of messages) {
       if (m.role === 'user') {
         userEcho(m);
@@ -716,10 +769,10 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         for (const part of m.content) {
           if (part.type === 'text') appendLines(sanitizeTerminalText(part.text).trimEnd());
           else if (part.type === 'reasoning') {
-            appendLine(paint('thinking · complete', DIM_ITALIC));
+            appendLine(paint(`thinking${separator}complete`, DIM_ITALIC));
           } else {
             appendLine(
-              `${paint('●', CYAN)} ${sanitizeTerminalLine(toolHeadline(part.name, part.arguments) ?? part.name)}`,
+              `${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(toolHeadline(part.name, part.arguments) ?? part.name)}`,
             );
           }
         }
@@ -743,7 +796,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       redrawDyn();
     },
     setStatus(text: string | undefined): void {
-      status = text === undefined ? undefined : sanitizeTerminalLine(text);
+      status = text === undefined ? undefined : productChrome(sanitizeTerminalLine(text));
       redrawDyn();
     },
     setApprovalAllowsAlways(available: boolean): void {
@@ -752,6 +805,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       redrawDyn();
     },
     println(text: string): void {
+      // `println` also carries raw transcript/review/diff/provider content. Its provenance is
+      // intentionally opaque, so ASCII fallback must never rewrite payload glyphs here.
       appendLines(sanitizeTerminalText(text));
     },
     mount(): void {

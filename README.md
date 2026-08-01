@@ -61,6 +61,8 @@ coda --ui=tui          # 强制 OpenTUI；不满足条件时明确失败
 coda --ui=classic      # raw-key + ANSI 动态区
 coda --ui=accessible   # append-only，无 alternate screen、动画或鼠标依赖
 coda --ui=plain        # append-only 文本交互面
+coda --theme=high-contrast  # auto、light、dark、high-contrast、mono
+coda --ascii           # 文本面使用 ASCII 产品状态符号，payload Unicode 不变
 ```
 
 `auto` 中 OpenTUI 初始化失败会在恢复终端后降级到 classic；显式 `--ui=tui` 不会静默换界面。
@@ -135,6 +137,19 @@ coda --json --event-format=envelope
 ```bash
 printf '%s\n' '解释这个仓库的测试分层' | coda
 ```
+
+需要稳定终态的 automation 可显式 opt in；这些 flags 不改变默认 legacy `--json`：
+
+```bash
+coda exec --output=text --ephemeral "检查类型并给出结论"
+coda exec --output=json --final-only --timeout=5m "运行测试"
+coda exec --output=stream-json "审阅当前改动" | jq -c .
+```
+
+`--output=json` 只写一条 `result`；`stream-json` 写 `stream_start`、typed event 和恰好一条 terminal
+`result`。终态 `status` 为 `completed|aborted|error|timeout`，timeout 退出码为 124，其他失败非零。
+`--ephemeral` 不留下 Runtime/session journal；它不能与 continue/resume 组合。机器格式不混入 human
+progress，text 模式的 progress 写 stderr、最终回答写 stdout。`--json` 与这些新 output flags 互斥。
 
 失败的最终 run 返回非零退出码。人类可读诊断写 stderr，协议 stdout 不会被日志污染。
 

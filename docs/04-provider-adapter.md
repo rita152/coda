@@ -333,6 +333,10 @@ function pushErrorEvent(err, state, stream, signal): void {
 | `BadRequestError`(400) | `error` | 大概率是我们的协议 bug,log 完整出站 messages 现场 |
 | 其余 `APIError`(401/403/404/422…) | `error` | 不可重试,带 status/requestID |
 
+`ProviderErrorDetails` 会进入 strict-JSON Runtime event；`status`、`code`、`requestId`、`retryAfterMs`
+等可选字段没有值时必须省略，不能保留显式 `undefined`，否则诊断消息会在提交前被拒绝并退化成无原因的
+interrupted 终态。三种 provider adapter 的错误分类都遵守这一边界。
+
 abort 的传导链有**两条路径**(openai v6 实测):请求建立阶段(响应头返回前)abort → SDK throw `APIUserAbortError` → catch 分支映射;**SSE 流中途** abort → SDK 的流迭代器捕获 AbortError 后 **clean return,不 throw**(core/streaming.js 显式吞掉)→ for-await 正常结束——adapter 必须在收尾前检查 `signal.aborted && finishReason == null`,命中即按 aborted 收尾,否则用户打断会被误编码为「残缺流」类可重试 network 错误,RetryCoordinator 可能错误地重发用户明确取消的请求。被中断的 AssistantMessage(stopReason `'aborted'`)**保留已流出的部分内容进转录**,重放时由 transform 层过滤(§6)——这保证「转录永远完整」与「出站永远合法」两个不变量同时成立。
 
 ## 5. CompatFlags:方言开关与 baseURL 自动推断

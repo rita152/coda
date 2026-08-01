@@ -42,7 +42,11 @@ export function classifyResponsesError(err: unknown, aborted: boolean): Provider
     const status = typeof err.status === 'number' ? err.status : undefined;
     const code = typeof err.code === 'string' ? err.code : undefined;
     const requestId = err.requestID ?? undefined;
-    const base = { status, code, requestId };
+    const base = {
+      ...(status === undefined ? {} : { status }),
+      ...(code === undefined ? {} : { code }),
+      ...(requestId === undefined ? {} : { requestId }),
+    };
     if (code === 'context_length_exceeded') return { ...base, kind: 'overflow', retryable: false };
     if (status === 429) return { ...base, kind: 'rate_limit', retryable: true, ...retryAfter(err) };
     if ((status === 400 || status === undefined) && OVERFLOW_PATTERN.test(err.message)) {

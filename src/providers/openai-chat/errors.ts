@@ -40,7 +40,14 @@ export function classifyError(err: unknown, aborted: boolean): ProviderErrorDeta
     const status = typeof err.status === 'number' ? err.status : undefined;
     const code = typeof err.code === 'string' ? err.code : undefined;
     const requestId = err.requestID ?? undefined;
-    const base = { status, code, requestId };
+    // ProviderErrorDetails crosses the strict Runtime event boundary. Optional values must be
+    // absent rather than present-as-undefined or an otherwise valid provider failure would
+    // interrupt the run before its diagnostic message can commit.
+    const base = {
+      ...(status === undefined ? {} : { status }),
+      ...(code === undefined ? {} : { code }),
+      ...(requestId === undefined ? {} : { requestId }),
+    };
     // 判定顺序:错误码最优先 → 429 限流(其文案常含 "too many tokens",不得被 overflow 抢先)
     // → 文案 fallback 仅限 400/in-band → 其余按 status
     if (code === 'context_length_exceeded') {

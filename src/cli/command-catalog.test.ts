@@ -92,6 +92,39 @@ describe('canonical command catalog', () => {
     expectUsageError(['--ui=graphical'], 'invalid_value', 'auto|tui|classic|accessible|plain');
   });
 
+  it('parses opt-in UX4 output, theme, ASCII, ephemeral, and timeout flags', () => {
+    expect(parseCliInvocation([
+      'exec',
+      '--output=stream-json',
+      '--final-only',
+      '--ephemeral',
+      '--timeout=1.5s',
+      '--theme=high-contrast',
+      '--ascii',
+      'run',
+    ]).flags).toMatchObject({
+      output: 'stream-json',
+      finalOnly: true,
+      ephemeral: true,
+      timeoutMs: 1_500,
+      theme: 'high-contrast',
+      ascii: true,
+      prompt: 'run',
+    });
+    expect(parseCliInvocation([]).flags).toMatchObject({
+      theme: 'auto',
+      ascii: false,
+      finalOnly: false,
+      ephemeral: false,
+    });
+    expectUsageError(['--timeout=0s'], 'invalid_value', 'greater than zero');
+    expectUsageError(['--timeout=30'], 'invalid_value', '30s');
+    expectUsageError(['--theme=sepia'], 'invalid_value', 'high-contrast');
+    expectUsageError(['--json', '--output=json'], 'mutually_exclusive', 'legacy command stream');
+    expectUsageError(['--json', '--timeout=1s'], 'mutually_exclusive', 'opt-in one-shot');
+    expectUsageError(['--ephemeral', '--resume'], 'mutually_exclusive', 'cannot continue or resume');
+  });
+
   it('generates help, completion, and slash help from the same catalog', () => {
     const help = renderCliHelp('1.2.3');
     const loginHelp = renderCliHelp('1.2.3', ['auth', 'login']);

@@ -19,6 +19,8 @@ export type CliProvider =
   | 'anthropic-messages'
   | 'faux';
 export type CliUiMode = 'auto' | 'tui' | 'classic' | 'accessible' | 'plain';
+export type CliTheme = 'auto' | 'light' | 'dark' | 'high-contrast' | 'mono';
+export type CliOutputMode = 'text' | 'json' | 'stream-json';
 export type CompletionShell = 'bash' | 'zsh' | 'fish' | 'powershell';
 export type ConfigurableCliApi =
   | 'openai-chat'
@@ -136,6 +138,12 @@ export const OPTION_SPECS: readonly OptionSpec[] = [
   { id: 'json', flags: ['--json'], summary: 'Use the legacy NDJSON transport' },
   { id: 'event-format', flags: ['--event-format'], valueHint: '<format>', summary: 'Select headless event framing', choices: ['legacy', 'envelope'] },
   { id: 'ui', flags: ['--ui'], valueHint: '<mode>', summary: 'Select the terminal surface', choices: ['auto', 'tui', 'classic', 'accessible', 'plain'] },
+  { id: 'theme', flags: ['--theme'], valueHint: '<theme>', summary: 'Select auto, light, dark, high-contrast, or mono colors', choices: ['auto', 'light', 'dark', 'high-contrast', 'mono'] },
+  { id: 'ascii', flags: ['--ascii'], summary: 'Use ASCII product chrome where supported' },
+  { id: 'output', flags: ['--output'], valueHint: '<format>', summary: 'Opt into one-shot text, JSON, or streaming JSON output', choices: ['text', 'json', 'stream-json'] },
+  { id: 'final-only', flags: ['--final-only'], summary: 'Suppress progress and emit only the terminal result' },
+  { id: 'ephemeral', flags: ['--ephemeral'], summary: 'Run one-shot without durable session storage' },
+  { id: 'timeout', flags: ['--timeout'], valueHint: '<duration>', summary: 'Abort one-shot after a duration such as 30s' },
   { id: 'preset', flags: ['--preset'], valueHint: '<name>', summary: 'Select an authentication preset', choices: AUTH_PRESET_SPECS.map((preset) => preset.id) },
   { id: 'name', flags: ['--name'], valueHint: '<name>', summary: 'Set a custom provider name' },
   { id: 'api', flags: ['--api'], valueHint: '<api>', summary: 'Select a custom provider protocol', choices: ['openai-chat', 'openai-responses', 'anthropic-messages'] },
@@ -159,6 +167,12 @@ const RUN_OPTION_IDS = [
   'no-color',
   'event-format',
   'ui',
+  'theme',
+  'ascii',
+  'output',
+  'final-only',
+  'ephemeral',
+  'timeout',
 ] as const;
 
 export const COMMAND_SPECS: readonly CommandSpec[] = [
@@ -392,6 +406,12 @@ export interface CliFlags {
   noColor: boolean;
   approvalMode?: ApprovalMode;
   ui: CliUiMode;
+  theme: CliTheme;
+  ascii: boolean;
+  output?: CliOutputMode;
+  finalOnly: boolean;
+  ephemeral: boolean;
+  timeoutMs?: number;
 }
 
 export type CliCommand =
@@ -440,6 +460,8 @@ export class CliUsageError extends Error {
 const SESSION_ID_RE = /^(?:\d{8}-\d{6}-|runtime-[0-9a-f]{40}$)/;
 const COMPLETION_SHELLS: readonly CompletionShell[] = ['bash', 'zsh', 'fish', 'powershell'];
 const UI_MODES: readonly CliUiMode[] = ['auto', 'tui', 'classic', 'accessible', 'plain'];
+const THEMES: readonly CliTheme[] = ['auto', 'light', 'dark', 'high-contrast', 'mono'];
+const OUTPUT_MODES: readonly CliOutputMode[] = ['text', 'json', 'stream-json'];
 const PRESETS: readonly AuthPreset[] = AUTH_PRESET_SPECS.map((preset) => preset.id);
 const CONFIGURABLE_APIS: readonly ConfigurableCliApi[] = [
   'openai-chat', 'openai-responses', 'anthropic-messages',
@@ -522,6 +544,12 @@ export function parseCliInvocation(argv: readonly string[]): CliInvocation {
         break;
       }
       case '--ui': flags.ui = parseChoice(takeOption(), UI_MODES, 'UI mode'); seenOptions.add('ui'); break;
+      case '--theme': flags.theme = parseChoice(takeOption(), THEMES, 'theme'); seenOptions.add('theme'); break;
+      case '--ascii': rejectEquals(name, equals); flags.ascii = true; seenOptions.add('ascii'); break;
+      case '--output': flags.output = parseChoice(takeOption(), OUTPUT_MODES, 'output format'); seenOptions.add('output'); break;
+      case '--final-only': rejectEquals(name, equals); flags.finalOnly = true; seenOptions.add('final-only'); break;
+      case '--ephemeral': rejectEquals(name, equals); flags.ephemeral = true; seenOptions.add('ephemeral'); break;
+      case '--timeout': flags.timeoutMs = parseDuration(takeOption()); seenOptions.add('timeout'); break;
       case '--preset': preset = parseChoice(takeOption(), PRESETS, 'auth preset'); seenOptions.add('preset'); break;
       case '--name': providerName = takeOption(); seenOptions.add('name'); break;
       case '--api': providerApi = parseChoice(takeOption(), CONFIGURABLE_APIS, 'provider API'); seenOptions.add('api'); break;
@@ -569,6 +597,10 @@ function defaultFlags(): CliFlags {
     continue_: false,
     noColor: false,
     ui: 'auto',
+    theme: 'auto',
+    ascii: false,
+    finalOnly: false,
+    ephemeral: false,
   };
 }
 
@@ -700,9 +732,59 @@ function validateGlobalCombinations(flags: CliFlags): void {
   if (flags.json && flags.ui !== 'auto') {
     throw new CliUsageError('mutually_exclusive', '--json and an explicit --ui mode are mutually exclusive', 'coda --json  # remove --ui');
   }
+  if (flags.json && flags.output !== undefined) {
+    throw new CliUsageError(
+      'mutually_exclusive',
+      '--json is the legacy command stream and cannot be combined with --output',
+      'coda exec --output=stream-json <prompt>  # or: coda --json',
+    );
+  }
+  if (flags.json && (flags.finalOnly || flags.ephemeral || flags.timeoutMs !== undefined)) {
+    throw new CliUsageError(
+      'mutually_exclusive',
+      '--final-only, --ephemeral, and --timeout apply to the opt-in one-shot output path, not legacy --json',
+      'coda exec --output=json --final-only <prompt>',
+    );
+  }
+  if (flags.eventFormat !== 'legacy' && flags.output !== undefined) {
+    throw new CliUsageError(
+      'mutually_exclusive',
+      '--event-format selects the legacy --json transport and cannot be combined with --output',
+      'coda exec --output=stream-json <prompt>',
+    );
+  }
+  if (flags.ephemeral && (flags.continue_ || flags.resume !== undefined)) {
+    throw new CliUsageError(
+      'mutually_exclusive',
+      '--ephemeral cannot continue or resume durable session state',
+      'coda exec --ephemeral <prompt>',
+    );
+  }
   if (flags.ui === 'tui' && flags.prompt !== undefined) {
     throw new CliUsageError('mutually_exclusive', '--ui=tui cannot be combined with a one-shot prompt', 'coda --ui=tui  # then enter the task');
   }
+}
+
+function parseDuration(value: string): number {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m)$/u.exec(value);
+  if (match === null) {
+    throw new CliUsageError(
+      'invalid_value',
+      `invalid timeout: ${safeToken(value)} (expected a positive duration such as 500ms, 30s, or 2m)`,
+      'coda exec --timeout=30s <prompt>',
+    );
+  }
+  const amount = Number(match[1]);
+  const multiplier = match[2] === 'ms' ? 1 : match[2] === 's' ? 1_000 : 60_000;
+  const milliseconds = Math.round(amount * multiplier);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) {
+    throw new CliUsageError(
+      'invalid_value',
+      `invalid timeout: ${safeToken(value)} (duration must be greater than zero)`,
+      'coda exec --timeout=30s <prompt>',
+    );
+  }
+  return milliseconds;
 }
 
 function validateCommandOptions(command: CommandPrefix, seen: ReadonlySet<string>): void {

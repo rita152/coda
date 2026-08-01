@@ -594,7 +594,7 @@ flowchart LR
 | UX1 | 已完成（两轮 review） | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
 | UX2 | 已完成（两轮 review） | 保持 Runtime 语义 | 紧凑状态区、command palette、per-thread presentation 与 transcript 导航 |
 | UX3 | 已完成（两轮 review） | 业务动作只经 RuntimePort | review/diff/approval/session picker、manual compact、fork/retry 与跨 thread attachment 恢复 |
-| UX4 | 待开始 | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/窗口化与自动化输出 |
+| UX4 | 已完成（两轮 review） | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/分段加载与自动化输出 |
 
 每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
 本阶段 diff 覆盖行为、恢复、终端安全、兼容与测试；发现问题立即修复并跑定向测试。第二轮重新覆盖
@@ -674,6 +674,10 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   final 写 stdout，机器格式具有稳定终态与失败码。
 - 真实 PTY 覆盖所有退出/降级/resize/paste/TERM/NO_COLOR 路径并验证终端模式复原；1000 条历史首帧、
   10000 delta 限帧、输入反馈 `<100ms`，最终内容不得丢失或重排。
+- 已完成实现把 explicit output adapter 留在 CLI edge，`--json`/历史 `-p` 不调用它；TUI 首批以
+  120 条历史为目标并为 turn 边界最多扩至 240 条，流更新由 native frame task 合并；真实 PTY 用本地悬挂 HTTP provider 覆盖请求中退出，
+  不把外网可用性写进 CI。阶段已完成恰好两轮完整 review；第一轮修复 timeout/plan/tool anchor/termios，
+  第二轮修复 broken-pipe lifecycle 与重复 toolCallId occurrence anchor，第二轮后只运行定向验证。
 
 ### 8.7 跨 UX 阶段不变量
 

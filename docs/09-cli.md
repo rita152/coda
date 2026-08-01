@@ -12,14 +12,17 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
-> **UX3 实现基线（2026-08-01）**：六条用户旅程、surface parity、presentation state、环境与性能
+> **UX4 已完成（2026-08-01，恰好两轮完整 review）**：六条用户旅程、surface parity、presentation state、环境与性能
 > 契约以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。统一 command catalog、薄
 > bootstrap/help/version/completion、产品子命令、`--ui`、最低 accessible/plain 文本面、共享
 > terminal sanitizer 与 classic 多行/光标/paste 已落地；UX2 的紧凑任务栏、palette、composer、
 > per-thread presentation state 与 transcript 导航已完成恰好两轮 review。UX3 已实现 Runtime-backed
 > review/diff、approval card、session switch、manual compact 与 conversation fork/retry，并已完成恰好
 > 两轮完整 review；第二轮修复了 allow-always 可用性、seed turn provenance 与 tool update snapshot
-> 聚合，随后仅运行定向验证。长 transcript 窗口化与 delta 限帧仍属 UX4。
+> 聚合，随后仅运行定向验证。UX4 已实现 accessible ASCII、四套显式主题、按帧 delta 合并、长历史
+> 分段加载、opt-in one-shot automation output 与完整真实 PTY 退出矩阵，并已完成恰好两轮完整 review。
+> 第一轮修复终态/timeout 竞态、跨 segment 最新 plan、tool anchor identity 与真实 termios 证据；第二轮
+> 修复 broken-pipe run 收束与重复 toolCallId 的确定 occurrence anchor，随后只运行定向验证。
 
 ## 0. 产品 surface 与事实来源
 
@@ -49,6 +52,7 @@ Git adapter 不能直接暴露给 CLI/UI。
 | 条件 | 前端 |
 |---|---|
 | `--json` | `startHeadless()`;stdin/stdout NDJSON |
+| `--output=text|json|stream-json` 或 `--final-only/--ephemeral/--timeout` | `startOneShotOutput()`；必须有 one-shot prompt，显式 opt in |
 | `-p`、裸 prompt、非 TTY stdin | plain `Renderer`;跑完退出 |
 | `--ui=auto`，双 TTY 且 `TERM != dumb` | `startTui()`;alternate screen |
 | `--ui=auto`，`TERM=dumb` 或 stdout 非 TTY | accessible append-only line REPL |
@@ -92,7 +96,7 @@ root column (100% × 100%)
 - **provider 候选**:`/login` 的 preset、Custom 协议、`/model` 模型、`/logout` provider 都由共用状态机把结构化 `value/label/description` 交给同一 candidate menu；空输入显示候选，输入文本可按 label/value/description 大小写无关过滤，`↑`/`↓` 循环选择，`Enter` 直接确认当前项，不要求输入数字。`Tab` 不确认 provider 选项；`Esc` 静默回到上一步，例如 Custom 协议回到 API key、Custom name 回到 preset。离开秘密步骤时必须先清空 UI 秘密缓冲；协议步骤中已经暂存在 controller 的 key 也要在回退时清空。到达 `/login`、`/model` 或 `/logout` 的根步骤后再按 `Esc` 才静默退出流程，不打印“已取消”。秘密输入和 name/base URL 等自由文本步骤不显示候选。审批期间所有候选隐藏。
 - **候选布局**:候选占用 composer 上方空间，一次最多显示 8 项；项目更多或空间不足时围绕当前项裁切，同时仍优先保留 1 行输入与可用时 1 行 transcript。
 - **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
-- **主题**:整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和三行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受 `NO_COLOR` / `--no-color` 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色以适配明暗主题；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。accent/muted/success/warning/danger/cyan 仍是 coda 语义色；`NO_COLOR` / `--no-color` 移除文本和边框的自定义前景色,但保留这一个用于焦点可见性的光标色,背景始终保持透明。
+- **主题**:`--theme=auto|light|dark|high-contrast|mono` 由统一 option catalog 提供；OpenTUI 为前四者选择明确 palette，`mono` 与 `NO_COLOR` / `--no-color` 都移除语义色。状态同时保留 `done`、`aborted`、`fatal`、`warning`、`running` 等文字/符号，不能只靠颜色。整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和三行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受主题或 color flag 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先提交目标 thread 的 `abort`、等待 control/权威提交收束并调用 `RuntimePort.close()`；阶段 0 legacy 路径等价执行 `approval.onAbort → Session.close()`。`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 的内容与边框语义色,但保留用于焦点可见性的硬件光标色,且不改变布局和键位。
 
@@ -117,6 +121,10 @@ abort/approval/status/queue/model/logout 以及 `/history`、`/edit`、`/files`�
 明确引导到受保护的 `coda auth login`。输出
 失败会 abort 当前 run、关闭 Runtime 并返回 1。classic 和文本面的真实 key 都不进入历史、
 transcript、event、journal 或日志。
+`TERM=dumb` 的 accessible 自动启用 ASCII 产品 chrome；其他文本面可显式传 `--ascii`。该转换只替换
+coda 自己的 rule/spinner/status/tool/plan glyph，用户、模型和工具 payload 中的 CJK/emoji 原样保留。
+append-only renderer 的欢迎/命令输出先完成 stdout drain，再把下一条 `> ` prompt 写到 stderr；不得让
+提示符越过它所解释的 onboarding 或多行命令结果。
 
 ## 2. 启动流程与会话选择
 
@@ -329,7 +337,12 @@ Supervisor core。阶段 3 已另外提供显式 `createCliRegistryCapabilitySer
 
 阶段 2 已把临时 per-thread writer 提取为 `TranscriptRepository` + `EventCommitter`，并由
 workspace-owned `EventHub` 提供 runtime subscription。TUI 消费自己的队列并按
-`maxFps:30` 合并绘制；classic/plain/headless 的 stdout `drain` 只背压各自输出泵，不反向阻塞
+`maxFps:30` 合并绘制；assistant Markdown、累计 tool output 与 stream status 在同一 native frame 前
+只保留最后一次 visual task，canonical `message_end`/`tool_execution_end` 会取消待处理 task 并同步最终
+内容。恢复 transcript 首帧以最后 120 条 message 为目标；为避免从 turn 中间切开，可向前扩至最多
+240 条，并附一条分段提示。PageUp 每次向前装载一段；搜索
+先装载剩余段再定位。完整 review/tool output 与大型 diff 仍只在用户打开 `/review`、`/diff` panel 时
+构造，旧历史代码高亮也只作用于当前已装载 segment。classic/plain/headless 的 stdout `drain` 只背压各自输出泵，不反向阻塞
 Runtime，退出则必须等待输出泵 drain。direct `Agent.subscribe` 仍保留阶段 0 awaited Emitter 语义；
 exported `Session.subscribe` 已经由 standalone private durable cursor pump 异步投递，慢 listener 或
 reject 不会反向延迟 run/`waitForIdle()`。
@@ -769,6 +782,34 @@ legacy 协议保留 `{ type: 'approval'; approvalId: string; decision: 'allow_on
 `control_response`，runtime 仍必须按 pending request kind 拒绝不兼容 decision。
 审批策略由 `--approval-mode <interactive|allow|deny>` 控制：交互 TUI/classic 默认 `interactive`；
 headless 与 `-p` 默认 `allow`；需要审批流的客户端显式开 `interactive` 并应答 control request。
+
+### 6.6 UX4 显式 one-shot output
+
+下列 flags 只扩展一次性路径，不改变 §6.1–6.5 的默认 `--json` wire：
+
+```text
+coda exec --output=text "task"
+coda exec --output=json --final-only "task"
+coda exec --output=stream-json --ephemeral --timeout=10m "task"
+```
+
+- `--output=text`：最终 assistant text 写 stdout；`running`、tool、approval、retry、compaction 与 timeout
+  progress 写 stderr。`--final-only` 抑制这些 progress。
+- `--output=json`：stdout 恰好一行 terminal `result`。
+- `--output=stream-json`：默认先写 `stream_start{version:1,protocolVersion}`，再写零到多条
+  `{type:'event',event:SessionEvent}`，最后恰好一条 terminal `result`；`--final-only` 只保留 terminal
+  `result`。
+- terminal result 固定为
+  `{type:'result',version:1,status:'completed'|'aborted'|'error'|'timeout',exitCode,text,usage,error?}`。
+  completed 为 0、timeout 为 124，其余失败为 1；机器格式不混入 human stderr。
+- `--timeout=<positive ms|s|m>` 到期只经当前 `CliSession`/RuntimePort abort；若 attachment 尚在建立，随后
+  到达的 `agent_start` 仍立即 abort。`--ephemeral` 使用 memory Runtime storage 与 invocation-private legacy
+  mirror，finally 删除 mirror；它不能与 continue/resume 组合，也不创建用户指定 session/runtime journal。
+- `--json` 与 `--output`、`--final-only`、`--ephemeral`、`--timeout` 互斥；这是保护 legacy 逐字节 wire 的
+  明确边界。未显式使用 UX4 flags 的裸 prompt、pipe、`-p` 和 `exec` 继续走原 renderer/legacy lifecycle。
+- modern one-shot 与 legacy headless 共用 stdout 首次失败纪律：ordered output 的 `failureSignal` 一旦触发，
+  立即对当前 Runtime attachment abort/close 并以 1 退出；损坏通道上不再承诺 terminal record，只在 stderr
+  输出一次诊断。`stream-json` 的 `stream_start` 必须先 drain，已关闭的 pipe 不能启动可能产生工具副作用的 run。
 
 ## 7. Provider 认证、模型发现与选择
 

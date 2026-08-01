@@ -258,6 +258,7 @@ describe('铁律:错误注入方式逐一断言 streamFn 调用本身 never thro
       assertValidProviderEventSequence(events);
       expect(final.stopReason).toBe('error');
       expect(final.errorDetails).toMatchObject({ kind: c.expectKind, retryable: c.retryable });
+      expect(Object.values(final.errorDetails ?? {})).not.toContain(undefined);
       expect(final.errorMessage).toBeTruthy();
     });
   }

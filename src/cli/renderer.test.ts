@@ -400,6 +400,27 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     r.unmount?.();
     expect(out.text).not.toContain('\x1b');
   });
+
+  it('accessible ASCII fallback keeps payload Unicode but replaces product status chrome', () => {
+    const out = new FakeOut();
+    const r = createRenderer(out, { color: false, interactive: false, ascii: true });
+    r.render({ type: 'message_start', message: um('用户内容 中文🙂', 'prompt') });
+    r.render({ type: 'agent_start', reason: 'follow_up' });
+    r.render({ type: 'tool_execution_start', toolCallId: 'ascii-tool', toolName: 'read', args: { path: 'a' } });
+    r.render({ type: 'tool_execution_end', toolCallId: 'ascii-tool', result: tr() });
+    r.render({ type: 'plan_update', steps: [{ step: 'done', status: 'completed' }] });
+    r.render({ type: 'error', fatal: false, message: 'warning' });
+    r.render({ type: 'agent_end', reason: 'completed', messages: [] });
+
+    expect(out.text).toContain('用户内容 中文🙂');
+    expect(out.text).toContain('[ok] read');
+    expect(out.text).toContain('[x] done');
+    expect(out.text).toContain('[!] warning');
+    expect(out.text).not.toMatch(/[✓✗✖⚠●▶○↻⋯∙»↪—]/u);
+    r.println?.('raw payload ✓ … — 中文 👩‍💻');
+    expect(out.text).toContain('raw payload ✓ … — 中文 👩‍💻');
+    expect(out.text).not.toContain('\x1b');
+  });
 });
 
 describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {

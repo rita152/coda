@@ -2821,7 +2821,26 @@ legacy wire 投影。manual compaction 仅把既有 compaction reason 扩展为 
 overflow 的旧值。未注入 workspace review port 的 embedding 仍可构造 Runtime，查询返回无 Git 状态或
 空 diff，而不是产生 ambient cwd/Git 副作用。
 
-### 11.4 阶段验收门
+### 11.4 UX4 output / presentation edge
+
+UX4 不增加 RuntimeOp、EventEnvelope、provider protocol 或业务事实源。`one-shot-output.ts` 是
+`RuntimeFrontendSession` 之上的显式 CLI projection：prompt、timeout abort、usage 与 close 仍只调用
+RuntimePort-backed `CliSession`，terminal `result` 不是 Runtime event，也不得写回 journal。默认 legacy
+`--json`、envelope transport 与历史 `-p` 不经过该 adapter，因而 wire/payload/order 不变。
+
+`--ephemeral` 只替换 composition root 注入的 `RuntimeStorage` 为 memory implementation，并给 legacy
+compatibility driver 一个 invocation-private mirror directory；它不允许 CLI 绕过 Runtime 直接持有
+thread/run 状态。mirror 在 CLI finally 删除，memory storage 随 invocation 消亡。`--timeout` 仍由同一
+目标 session 的 abort op 结案，CLI 不能伪造 timeout RunId 或直接取消 provider internals。
+
+TUI frame coalescing 与 120-message target（为 turn 边界最多扩至 240）的 replay segment 都是
+disposable view projection。coalescer 只缓存
+“下一帧如何画”的 closure，canonical `message_end`/tool end 仍覆盖成 envelope/snapshot 的最终内容；
+segment loader 只切分已经 hydrate 的 snapshot transcript，不向 repository 发第二套分页查询，也不改变
+high-water/unread identity。普通 observer、慢 UI、隐藏 thread attachment 与 output drain 继续由阶段 2
+EventHub/独立输出泵隔离，不能反向背压 Runtime committer。
+
+### 11.5 阶段验收门
 
 - **阶段 0**：本文及交叉文档不再宣称“全局单 Agent/子 Agent 是工具”；characterization tests
   锁定当前单 Session 的并发拒绝、两个 Session 的隔离并行、thread-local abort 与裸

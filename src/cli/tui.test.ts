@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ApprovalBroker } from '../agent/index.js';
 import type {
+  AgentMessage,
   ApprovalPresentation,
   AssistantMessage,
   ProviderEvent,
@@ -44,6 +45,7 @@ import {
   formatWorkspacePath,
   matchingSlashCommands,
   parseGitStatusOutput,
+  resolveTuiTheme,
   runTuiController,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
@@ -271,6 +273,38 @@ describe('TUI footer 格式', () => {
     expect(parseGitStatusOutput('## HEAD (no branch)\n?? scratch.txt\n')).toEqual({
       dirty: true,
     });
+  });
+});
+
+describe('UX4 TUI themes', () => {
+  it('provides distinct light, dark, high-contrast, and color-free mono palettes', () => {
+    const light = resolveTuiTheme('light');
+    const dark = resolveTuiTheme('dark');
+    const highContrast = resolveTuiTheme('high-contrast');
+    const mono = resolveTuiTheme('mono');
+    expect(light.color).toBe(true);
+    expect(dark.color).toBe(true);
+    expect(highContrast.color).toBe(true);
+    expect(light.palette.accent).not.toBe(dark.palette.accent);
+    expect(highContrast.palette.border).toBe('#ffffff');
+    expect(mono.color).toBe(false);
+  });
+
+  it('mono keeps explicit status words while every rendered text span uses terminal foreground', async () => {
+    const view = await setup(80, 24, () => {}, true, undefined, { theme: 'mono' });
+    try {
+      view.screen.render({ type: 'error', fatal: true, message: 'provider failed' });
+      await view.flush();
+      expect(view.frame()).toContain('fatal');
+      expect(view.frame()).toContain('provider failed');
+      for (const row of view.spans().lines) {
+        for (const span of row.spans) {
+          if (span.text.trim() !== '') expect(span.fg.intent).toBe('default');
+        }
+      }
+    } finally {
+      await view.destroy();
+    }
   });
 });
 
@@ -1219,6 +1253,172 @@ describe('UX2 TUI presentation workflow', () => {
     }
   });
 
+  it('live tool 锚点持久化后能按同一 toolCallId 在折叠回放中恢复', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-tool-anchor-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_tui_tool_anchor' as WorkspaceId,
+      threadId: 'thr_tui_tool_anchor' as ThreadId,
+    });
+    const first = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 40,
+    });
+    try {
+      first.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'call-anchor-stable',
+        toolName: 'bash',
+        args: { command: 'bun test' },
+      });
+      first.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'call-anchor-stable',
+        result: toolResult('call-anchor-stable', 'bash', 'tests passed'),
+      });
+      for (let index = 0; index < 30; index++) first.screen.println(`live filler ${index}`);
+      await first.flush();
+      first.screen.scrollPage(-1);
+      await first.flush();
+      store.flush();
+      expect(store.snapshot().scrollAnchor?.blockKey).toBe('tool:call-anchor-stable');
+    } finally {
+      await first.destroy();
+    }
+
+    const replay: AgentMessage[] = [
+      assistant({
+        id: 'assistant-tool-anchor',
+        content: [{
+          type: 'tool_call',
+          id: 'call-anchor-stable',
+          name: 'bash',
+          arguments: { command: 'bun test' },
+        }],
+        stopReason: 'tool_calls',
+      }),
+      toolResult('call-anchor-stable', 'bash', 'tests passed'),
+      ...Array.from({ length: 30 }, (_, index): UserMessage => ({
+        ...user(`replay filler ${index}`),
+        id: `replay-filler-${index}`,
+      })),
+    ];
+    const reopened = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 40,
+    });
+    try {
+      reopened.screen.replayTranscript(replay);
+      reopened.screen.restorePresentation(store.snapshot());
+      await reopened.flush();
+      await reopened.flush();
+      expect(reopened.frame()).not.toContain('saved scroll anchor was compacted');
+      expect(store.snapshot().scrollAnchor?.blockKey).toBe('tool:call-anchor-stable');
+    } finally {
+      await reopened.destroy();
+      store.dispose();
+    }
+  });
+
+  it('跨 turn 重复 toolCallId 使用确定 occurrence 锚点并精确恢复第二次调用', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-reused-tool-anchor-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_tui_reused_tool_anchor' as WorkspaceId,
+      threadId: 'thr_tui_reused_tool_anchor' as ThreadId,
+    });
+    const first = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 80,
+    });
+    try {
+      for (const command of ['bun test first', 'bun test second']) {
+        first.screen.render({
+          type: 'tool_execution_start',
+          toolCallId: 'call-reused-across-turns',
+          toolName: 'bash',
+          args: { command },
+        });
+        first.screen.render({
+          type: 'tool_execution_end',
+          toolCallId: 'call-reused-across-turns',
+          result: toolResult('call-reused-across-turns', 'bash', `${command} passed`),
+        });
+        const fillerCount = command.endsWith('first') ? 10 : 30;
+        for (let index = 0; index < fillerCount; index++) {
+          first.screen.println(`${command} filler ${index}`);
+        }
+      }
+      await first.flush();
+      first.screen.jumpToLatest();
+      await first.flush();
+      first.screen.scrollPage(-1);
+      await first.flush();
+      store.flush();
+      expect(store.snapshot().scrollAnchor?.blockKey).toBe(
+        'tool:call-reused-across-turns:occurrence:2',
+      );
+    } finally {
+      await first.destroy();
+    }
+
+    const replay: AgentMessage[] = [
+      assistant({
+        id: 'assistant-reused-tool-first',
+        content: [{
+          type: 'tool_call',
+          id: 'call-reused-across-turns',
+          name: 'bash',
+          arguments: { command: 'bun test first' },
+        }],
+        stopReason: 'tool_calls',
+      }),
+      toolResult('call-reused-across-turns', 'bash', 'bun test first passed'),
+      ...Array.from({ length: 10 }, (_, index): UserMessage => ({
+        ...user(`first replay filler ${index}`),
+        id: `first-reused-tool-filler-${index}`,
+      })),
+      assistant({
+        id: 'assistant-reused-tool-second',
+        content: [{
+          type: 'tool_call',
+          id: 'call-reused-across-turns',
+          name: 'bash',
+          arguments: { command: 'bun test second' },
+        }],
+        stopReason: 'tool_calls',
+      }),
+      toolResult('call-reused-across-turns', 'bash', 'bun test second passed'),
+      ...Array.from({ length: 30 }, (_, index): UserMessage => ({
+        ...user(`second replay filler ${index}`),
+        id: `second-reused-tool-filler-${index}`,
+      })),
+    ];
+    const reopened = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => 80,
+    });
+    try {
+      reopened.screen.replayTranscript(replay);
+      reopened.screen.restorePresentation(store.snapshot());
+      await reopened.flush();
+      await reopened.flush();
+      expect(reopened.frame()).not.toContain('saved scroll anchor was compacted');
+      expect(store.snapshot().scrollAnchor?.blockKey).toBe(
+        'tool:call-reused-across-turns:occurrence:2',
+      );
+    } finally {
+      await reopened.destroy();
+      store.dispose();
+    }
+  });
+
   it('secret buffer never reaches presentation callbacks and optional Vim mode is modal', async () => {
     const captured: string[] = [];
     const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-secret-state-'));
@@ -1624,11 +1824,67 @@ describe('TUI 安全渲染与转录恢复', () => {
 
       const frame = view.frame();
       expect(frame).toContain('bash: bun test');
+      expect(frame).toContain('tests passed');
+      expect(frame.match(/bash: bun test/gu)).toHaveLength(1);
       expect(frame).toContain('new step');
       expect(frame).not.toContain('old step');
       expect(frame).toContain('invalid plan arguments');
       expect(frame).toContain('✗ plan');
       expect(frame).toContain('malformed plan details');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('分段回放加载旧 plan 后仍保持全量历史中的最新成功 plan', async () => {
+    const messages: AgentMessage[] = [
+      assistant({
+        id: 'assistant-old-plan',
+        content: [{
+          type: 'tool_call',
+          id: 'old-plan-call',
+          name: 'plan',
+          arguments: { steps: [{ step: 'old segmented plan', status: 'in_progress' }] },
+        }],
+        stopReason: 'tool_calls',
+      }),
+      toolResult('old-plan-call', 'plan', 'old segmented plan', {
+        details: { steps: [{ step: 'old segmented plan', status: 'in_progress' }] },
+      }),
+      ...Array.from({ length: 10 }, (_, index): UserMessage => ({
+        ...user(`before latest plan ${index}`),
+        id: `before-latest-plan-${index}`,
+      })),
+      assistant({
+        id: 'assistant-latest-plan',
+        content: [{
+          type: 'tool_call',
+          id: 'latest-plan-call',
+          name: 'plan',
+          arguments: { steps: [{ step: 'latest segmented plan', status: 'completed' }] },
+        }],
+        stopReason: 'tool_calls',
+      }),
+      toolResult('latest-plan-call', 'plan', 'latest segmented plan', {
+        details: { steps: [{ step: 'latest segmented plan', status: 'completed' }] },
+      }),
+      ...Array.from({ length: 118 }, (_, index): UserMessage => ({
+        ...user(`after latest plan ${index}`),
+        id: `after-latest-plan-${index}`,
+      })),
+    ];
+    const view = await setup(100, 50);
+    try {
+      view.screen.replayTranscript(messages);
+      await view.flush();
+      expect(view.frame()).toContain('latest segmented plan');
+      expect(view.frame()).not.toContain('old segmented plan');
+
+      view.screen.scrollPage(-1);
+      await view.flush();
+      await view.flush();
+      expect(view.frame()).toContain('latest segmented plan');
+      expect(view.frame()).not.toContain('old segmented plan');
     } finally {
       await view.destroy();
     }

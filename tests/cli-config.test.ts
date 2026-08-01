@@ -21,7 +21,18 @@ afterEach(() => {
 
 /** 便捷构造:必填布尔字段兜底,测试只声明关心的字段。 */
 function flags(o: Partial<CliFlags> = {}): CliFlags {
-  return { json: false, eventFormat: 'legacy', continue_: false, noColor: false, ui: 'auto', ...o };
+  return {
+    json: false,
+    eventFormat: 'legacy',
+    continue_: false,
+    noColor: false,
+    ui: 'auto',
+    theme: 'auto',
+    ascii: false,
+    finalOnly: false,
+    ephemeral: false,
+    ...o,
+  };
 }
 
 function modelConfig(value: { modelConfig?: ModelConfig }): ModelConfig {

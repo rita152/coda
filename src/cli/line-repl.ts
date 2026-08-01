@@ -100,8 +100,6 @@ export async function startLineRepl(
   if (options.presentation?.store.snapshot().draft !== '') {
     renderer.println?.('A draft was restored for this thread. Use /draft show or /draft send.');
   }
-  stderr.write('> ');
-
   const unsub = session.subscribe((event) => {
     if (event.type === 'queue_update') {
       queues = { steering: [...event.steering], followUp: [...event.followUp] };
@@ -114,7 +112,12 @@ export async function startLineRepl(
     }
   });
 
-  return await new Promise<number>((resolve) => {
+  // Attach readline handlers synchronously, but gate every line behind this flush. A caller may
+  // already have piped input waiting; delaying handler installation across an await would drop
+  // those emitted lines.
+  const onboardingDrain = renderer.drain();
+  commandChain = onboardingDrain;
+  const completion = new Promise<number>((resolve) => {
     const cleanup = (): void => {
       unsub();
       rl.removeAllListeners();
@@ -701,12 +704,17 @@ export async function startLineRepl(
     };
 
     rl.on('line', (line) => {
-      commandChain = commandChain.then(() => handleLine(line)).catch((error) => {
-        renderer.println?.(`command failed: ${safeError(error)}`);
-      });
-      commandChain.finally(() => {
+      commandChain = commandChain
+        .then(() => handleLine(line))
+        .catch((error) => {
+          renderer.println?.(`command failed: ${safeError(error)}`);
+        })
+        // Text commands may enqueue several stdout lines. Keep the next stderr prompt below all
+        // of them while retaining the immediate prompt used for steering after an async task.
+        .then(() => renderer.drain());
+      void commandChain.then(() => {
         if (!closing) stderr.write('> ');
-      }).catch(() => undefined);
+      }, () => undefined);
     });
     rl.once('close', () => { void shutdown(0, true); });
     process.once('SIGTERM', onTerminate);
@@ -714,6 +722,11 @@ export async function startLineRepl(
     options.fatalSignal?.addEventListener('abort', onFatalOutput, { once: true });
     if (options.fatalSignal?.aborted === true) onFatalOutput();
   });
+  // stdout is intentionally queued while the prompt lives on stderr. Flush onboarding first so
+  // a real PTY never shows an input prompt above the mode/help text it is meant to explain.
+  await onboardingDrain;
+  if (!closing) stderr.write('> ');
+  return await completion;
 }
 
 function formatModel(session: InteractiveSession): string | undefined {

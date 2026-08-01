@@ -6,11 +6,17 @@
 
 import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
 import path from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
 import { createGitWorkspaceReviewPort } from './git-review-port.js';
 import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
-import { createFileRuntimeStorage, createRuntime } from '../runtime/index.js';
+import {
+  createFileRuntimeStorage,
+  createMemoryRuntimeStorage,
+  createRuntime,
+} from '../runtime/index.js';
 import { createStdoutOutput, runtimeHomeDir } from '../shared/index.js';
 import { defaultRulesFile } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
@@ -25,6 +31,7 @@ import type { ResolvedConfig } from './config.js';
 import type { CliFlags, CliInvocation } from './command-catalog.js';
 import { startEnvelopeHeadless } from './envelope-headless.js';
 import { startHeadless } from './headless.js';
+import { startOneShotOutput } from './one-shot-output.js';
 import type { CliSession } from './interactive-runtime.js';
 import { startLineRepl } from './line-repl.js';
 import { ProviderRegistry } from './provider-registry.js';
@@ -55,7 +62,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   const sessionsCommand = invocation.command.kind === 'sessions';
 
   // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
-  if (!sessionsCommand) void cleanupTruncated();
+  if (!sessionsCommand && !flags.ephemeral) void cleanupTruncated();
 
   // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §8)。
   // 读空(coda </dev/null 且无 -p):交互 REPL 需要 TTY,进 startRepl 只会无限挂起——
@@ -76,6 +83,18 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   }
   if (flags.ui === 'tui' && flags.prompt !== undefined) {
     console.error('[coda] --ui=tui cannot be combined with one-shot input; remove --ui or start an interactive TTY');
+    return 2;
+  }
+  const modernOneShot =
+    flags.output !== undefined ||
+    flags.finalOnly ||
+    flags.ephemeral ||
+    flags.timeoutMs !== undefined;
+  if (modernOneShot && flags.prompt === undefined) {
+    console.error(
+      '[coda] --output, --final-only, --ephemeral, and --timeout require one-shot input; ' +
+        'provide a prompt or pipe stdin',
+    );
     return 2;
   }
 
@@ -160,11 +179,13 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     homeDir: runtimeHomeDir(),
     ...(flags.sessionDir !== undefined && { legacySessionDir: flags.sessionDir }),
   });
-  const storage = createFileRuntimeStorage({
-    root: roots.runtimeRoot,
-    legacySessionDir: roots.legacySessionDir,
-    legacyApprovalFile: defaultRulesFile(),
-  });
+  const storage = flags.ephemeral
+    ? createMemoryRuntimeStorage()
+    : createFileRuntimeStorage({
+        root: roots.runtimeRoot,
+        legacySessionDir: roots.legacySessionDir,
+        legacyApprovalFile: defaultRulesFile(),
+      });
   let resumeTarget;
   try {
     if (isRuntimeResumeRequest(flags)) {
@@ -198,6 +219,13 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
+  const ephemeralLegacyDir = flags.ephemeral
+    ? mkdtempSync(path.join(tmpdir(), 'coda-ephemeral-'))
+    : undefined;
+  const cleanupEphemeral = (): void => {
+    if (ephemeralLegacyDir === undefined) return;
+    rmSync(ephemeralLegacyDir, { recursive: true, force: true });
+  };
   const projectRuleWarnings = createWarningHub();
   const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
     mode: approvalMode,
@@ -205,7 +233,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     tools: createCodingTools(),
   });
   const driverFactory = createLegacySessionThreadDriverFactory({
-    sessionDir: roots.legacySessionDir,
+    sessionDir: ephemeralLegacyDir ?? roots.legacySessionDir,
     approvalAdapterFactory,
     configure: ({ model }) => {
       // Attachment-local project rules, tools, and Agent FileTracker are never shared across
@@ -250,6 +278,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     });
   } catch (err) {
     console.error(`[coda] runtime initialization failed: ${sanitizeTerminalError(err)}`);
+    cleanupEphemeral();
     return 2;
   }
 
@@ -345,6 +374,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     } catch (saveError) {
       console.error(`[coda] presentation save failed: ${sanitizeTerminalError(saveError)}`);
     }
+    cleanupEphemeral();
     return 2;
   }
   // Approval requests are already canonical Runtime events projected through `session.subscribe`;
@@ -356,6 +386,23 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
         subscribe: () => () => {},
       }
     : undefined;
+
+  if (modernOneShot) {
+    projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
+    const output = createStdoutOutput();
+    try {
+      return await startOneShotOutput(session, {
+        prompt: flags.prompt as string,
+        mode: flags.output ?? 'text',
+        finalOnly: flags.finalOnly,
+        ...(flags.timeoutMs === undefined ? {} : { timeoutMs: flags.timeoutMs }),
+        stdout: { enqueue: output.enqueue, drain: output.drain },
+        fatalSignal: output.failureSignal,
+      });
+    } finally {
+      cleanupEphemeral();
+    }
+  }
   let classicSurface = interactiveSurface === 'classic';
 
   // 默认交互面:双 TTY 且终端具备全屏能力时懒加载 OpenTUI。这里必须早于 stdout
@@ -382,7 +429,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
           model: session.currentModel(),
         }),
         version,
-        color: !flags.noColor && Bun.env.NO_COLOR === undefined,
+        color:
+          !flags.noColor &&
+          flags.theme !== 'mono' &&
+          Bun.env.NO_COLOR === undefined,
+        theme: flags.theme,
         threadId: runtimeSession.threadId,
         workspaceSnapshot: tuiWorkspaceSnapshot,
         workspace: runtimeSession,
@@ -444,8 +495,15 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   // interactive 由 TTY(且非一次性)决定;color 独立(NO_COLOR/--no-color 只禁 SGR 着色,
   // 不禁动态区光标控制,docs/09 §1.3)
   const renderer = createRenderer(stdout, {
-    color: !flags.noColor && process.stdout.isTTY === true && Bun.env.NO_COLOR === undefined,
+    color:
+      !flags.noColor &&
+      flags.theme !== 'mono' &&
+      process.stdout.isTTY === true &&
+      Bun.env.NO_COLOR === undefined,
     interactive: classicSurface,
+    ascii:
+      flags.ascii ||
+      (interactiveSurface === 'accessible' && Bun.env.TERM === 'dumb'),
   });
   if (flags.prompt === undefined && process.stdout.isTTY === true) {
     projectRuleWarnings.subscribeWarnings((message) => {

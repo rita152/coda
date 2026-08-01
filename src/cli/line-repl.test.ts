@@ -24,6 +24,58 @@ import {
 } from './presentation-state.js';
 
 describe('accessible/plain append-only line REPL', () => {
+  it('flushes onboarding and command output before writing the next stderr prompt', async () => {
+    const stdin = new PassThrough();
+    const calls: Array<{ readonly kind: 'stdout' | 'stderr' | 'drain'; readonly text?: string }> = [];
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const renderer = createRenderer({
+      enqueue: (text) => calls.push({ kind: 'stdout', text }),
+      drain: () => {
+        calls.push({ kind: 'drain' });
+        return Promise.resolve();
+      },
+    }, { color: false, interactive: false, ascii: true });
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: {
+        write: (text: string) => {
+          calls.push({ kind: 'stderr', text });
+          return true;
+        },
+      } as NodeJS.WriteStream,
+      mode: 'accessible',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    stdin.write('/help\n');
+    stdin.write('/quit\n');
+    await expect(running).resolves.toBe(0);
+
+    const prompts = calls
+      .map((call, index) => ({ call, index }))
+      .filter(({ call }) => call.kind === 'stderr' && call.text === '> ');
+    expect(prompts).toHaveLength(2);
+    for (const { index } of prompts) expect(calls[index - 1]?.kind).toBe('drain');
+    expect(calls.slice(0, prompts[0]?.index).some((call) =>
+      call.kind === 'stdout' && call.text?.includes('Accessible mode: append-only output.'))).toBe(true);
+    expect(calls.slice((prompts[0]?.index ?? 0) + 1, prompts[1]?.index).some((call) =>
+      call.kind === 'stdout' && call.text?.includes('/help: Show commands'))).toBe(true);
+  });
+
   it('keeps a modern approval pending when Runtime provides no allow-always scope', async () => {
     const stdin = new PassThrough();
     const stderr = new PassThrough();

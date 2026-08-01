@@ -871,6 +871,19 @@ Agent review**。第一轮覆盖全部阶段范围，修复后复跑定向测试
 | UX3 | reasoning/tool cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
 | UX4 | accessible ASCII/theme/PTY 加固；frame coalescing/virtualization；output/final-only/ephemeral/timeout；真实 PTY 全退出矩阵；1000 history/10k delta/100ms input | 默认 `--json` 逐字节兼容，普通 observer/慢 UI 不背压 Runtime |
 
+UX4 实现门禁落在四组可机械定位的测试中：`command-catalog.test.ts` 与
+`one-shot-output.test.ts` 固定 flag 互斥、duration grammar、terminal record 与 timeout；
+`e2e/product-cli.test.ts` 驱动构建产物固定 text/json/stream-json/final-only、ephemeral 零 journal、
+timeout 124，并用本地 403 provider 证明可选错误字段省略 `undefined` 后能穿过 strict Runtime boundary；
+`ux-characterization.test.ts` 固定输入反馈 `<100ms`、10,000 patterned delta 完整且每批 visual frame
+callback `<=2`、1,000 个 single-message turn 的首批 renderable `<=121` 并可经 PageUp 恢复全部原序内容；
+`e2e/tui.test.ts` 的 10 条 macOS real-PTY 用例覆盖正常退出、40×10 resize + multiline paste、运行中
+abort、审批 abort、真实 fatal、悬挂本地 provider HTTP 请求中退出、OpenTUI 初始化失败降级、
+`TERM=dumb`/`NO_COLOR` accessible 与显式 TUI 拒绝。进入过全屏的每条路径逐一匹配 alternate screen、
+mouse 1000/1002/1003/1006、bracketed paste、title 与 default cursor 的 enable/restore 顺序；Expect
+harness 还在启动命令前固定 `stty sane` 并记录 `stty -g`，进程 EOF 后从同一 slave PTY 再读一次，所有
+`runPty` 退出路径都必须逐字相等，不能用 ANSI leave sequence 代替 raw/termios 复原证据。
+
 UX0 characterization 的精确职责：
 
 1. 三个 viewport 都必须保留 task 文本、draft、workspace、context 和 viewport 内光标；40×10 隐藏
@@ -895,6 +908,8 @@ listener、provider/OpenTUI module probe 和网络 spy；`-h/--help/-V/--version
 cleanup directory、Runtime storage、signal 或动态 native import 前退出。UX4 的真实 PTY 至少覆盖正常
 退出、运行中 abort、fatal、审批 abort、provider 请求中退出、初始化失败 fallback、resize、多行 paste、
 TERM=dumb 和 NO_COLOR，并逐项断言 raw mode、mouse、bracketed paste、title 与 alternate screen 恢复。
+raw mode 的断言必须比较同一真实 slave PTY 在命令启动前与 EOF 后的 `stty -g`，不能只搜索输出中的
+控制序列。
 
 UX1 当前门禁还必须机械证明：`sessions` 只经 `RuntimePort.listThreads()` 且不创建 thread/journal；
 `models --select` 只更新 CLI-edge 默认选择且不 attach；`exec` 与旧 one-shot legacy NDJSON 等价；
@@ -926,6 +941,14 @@ repository 或通过自由文本重算 capability/resource/scope。session picke
 catalog。legacy default NDJSON、one-shot、continue/resume 和旧 threshold/overflow compaction golden 保持
 不变。
 
+UX4 门禁还必须证明默认 legacy `--json` 与历史 `-p` 根本不调用新 output adapter；machine output 的
+stdout 只有 JSON record 且恰好一个终态，text progress 与 final 分流；ephemeral 临时 mirror 即使 timeout
+也由 finally 回收。ordered stream stdout 在首个 sink failure 时必须立即 abort/close 当前 run、stderr
+只诊断一次并返回 1；测试用尚未结束的 scripted run 证明 broken pipe 后不会继续副作用。TUI 的重复
+`toolCallId` 跨 turn live→persist→replay 使用确定 occurrence ordinal，第二次调用的 anchor 必须 exact 命中，
+不能依赖当前渲染顺序生成后缀。TUI listener 对 delta 只排轻量 frame task，不等待 Markdown layout；Runtime
+EventHub observer-isolation 既有测试继续证明慢 frontend/切换 attachment 不反向背压 run。
+
 ## 8. CI 建议
 
 - **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
@@ -951,6 +974,9 @@ catalog。legacy default NDJSON、one-shot、continue/resume 和旧 threshold/ov
 - [x] UX3:reasoning/tool/diff/review、approval card、session switch、manual compact 与 fork/retry 的 Runtime
   事实边界和恢复门禁已实现；恰好两轮 Agent review 已完成，第二轮的 allow-always 可用性、seed turn
   provenance 与 tool update snapshot 修复均经定向验证，最终 check/diff/scope/public-export 门禁全绿。
+- [x] UX4:accessible ASCII/theme/PTY、限帧/分段加载与 automation output 已实现；恰好两轮 Agent
+  review 已完成。第一轮的 timeout/plan/tool-anchor/termios 修复与第二轮的 broken-pipe lifecycle、重复
+  toolCallId occurrence anchor 修复均经定向验证，之后未发起第三轮完整 review。
 
 下面的 M1–M7/CI 条目保留为全产品历史覆盖清单，不是阶段 3 completion 状态；本次不因定向门禁通过
 而推断未在当前环境重跑的双 OS CI 等外部结果。

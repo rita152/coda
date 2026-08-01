@@ -373,6 +373,7 @@ describe('terminal and errors', () => {
       assertValidProviderEventSequence(events);
       expect(final.stopReason).toBe('error');
       expect(final.errorDetails).toMatchObject(testCase.expected);
+      expect(Object.values(final.errorDetails ?? {})).not.toContain(undefined);
     }
   });
 

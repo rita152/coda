@@ -18,8 +18,12 @@ import type {
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import { isFullScreenTuiEligible, parseFlags } from './config.js';
+import type { ThreadPresentationState } from './presentation-state.js';
 import { createRenderer } from './renderer.js';
-import { createTuiScreen } from './tui.js';
+import {
+  createTuiScreen,
+  TRANSCRIPT_REPLAY_CHUNK_MESSAGES,
+} from './tui.js';
 import type { TuiScreen } from './tui.js';
 
 const MODEL = {
@@ -45,7 +49,12 @@ interface View {
   destroy(): Promise<void>;
 }
 
-async function createView(width: number, height: number, color = true): Promise<View> {
+async function createView(
+  width: number,
+  height: number,
+  color = true,
+  onStreamFrame?: (taskCount: number) => void,
+): Promise<View> {
   const testRenderer = await createTestRenderer({
     width,
     height,
@@ -61,6 +70,7 @@ async function createView(width: number, height: number, color = true): Promise<
     workspaceSnapshot: WORKSPACE_SNAPSHOT,
     contextLimit: 128_000,
     treeSitterClient: highlighter,
+    ...(onStreamFrame === undefined ? {} : { onStreamFrame }),
   });
   return {
     testRenderer,
@@ -238,8 +248,8 @@ describe('UX0 terminal environment characterization', () => {
   });
 });
 
-describe('UX0 rendering performance characterization', () => {
-  test('records first-frame, input, 10k delta, and 1k transcript boundaries', async () => {
+describe('UX4 rendering performance gates', () => {
+  test('keeps input under 100ms, coalesces 10k deltas, and segments 1k history', async () => {
     const startedAt = performance.now();
     const interactionView = await createView(80, 24);
     try {
@@ -254,12 +264,15 @@ describe('UX0 rendering performance characterization', () => {
       expect(interactionView.testRenderer.captureCharFrame()).toContain('输入反馈');
 
       expect(firstFrameMs).toBeLessThan(2_000);
-      expect(inputFeedbackMs).toBeLessThan(1_000);
+      expect(inputFeedbackMs).toBeLessThan(100);
     } finally {
       await interactionView.destroy();
     }
 
-    const deltaView = await createView(80, 24);
+    let streamFrames = 0;
+    const deltaView = await createView(80, 24, true, () => {
+      streamFrames++;
+    });
     try {
       const assistant = assistantMessage('assistant-deltas');
       deltaView.screen.render({ type: 'message_start', message: assistant });
@@ -293,7 +306,8 @@ describe('UX0 rendering performance characterization', () => {
         .find((child): child is MarkdownRenderable => child instanceof MarkdownRenderable);
       if (markdown === undefined) throw new Error('assistant Markdown was not rendered');
       expect(markdown.content).toBe(expected);
-      expect(tenThousandDeltaMs).toBeLessThan(30_000);
+      expect(streamFrames).toBeLessThanOrEqual(2);
+      expect(tenThousandDeltaMs).toBeLessThan(1_000);
     } finally {
       await deltaView.destroy();
     }
@@ -314,19 +328,69 @@ describe('UX0 rendering performance characterization', () => {
         throw new Error('transcript ScrollBox was not rendered');
       }
       const children = transcriptRenderable.getChildren();
-      expect(children).toHaveLength(1_001);
+      expect(children.length).toBeLessThanOrEqual(TRANSCRIPT_REPLAY_CHUNK_MESSAGES + 1);
+      expect(textContent(children[0] as TextRenderable)).toContain(
+        `last ${TRANSCRIPT_REPLAY_CHUNK_MESSAGES}/1000`,
+      );
+      const last = children.at(-1);
+      if (!(last instanceof TextRenderable)) throw new Error('latest history row was not text');
+      expect(textContent(last)).toBe('you\n历史 999 🙂');
+      expect(transcriptView.testRenderer.captureCharFrame()).toContain('历史 999 🙂');
+
+      for (let page = 0; page < 8; page++) {
+        transcriptView.screen.scrollPage(-1);
+        await transcriptView.testRenderer.flush();
+      }
+      const complete = transcriptRenderable.getChildren();
+      expect(complete).toHaveLength(1_001);
       for (const [childIndex, messageIndex] of [[1, 0], [501, 500], [1_000, 999]] as const) {
-        const child = children[childIndex];
+        const child = complete[childIndex];
         if (!(child instanceof TextRenderable)) throw new Error('history row was not text');
         expect(textContent(child)).toBe(`you\n历史 ${messageIndex} 🙂`);
       }
-      expect(transcriptView.testRenderer.captureCharFrame()).toContain('历史 999 🙂');
 
-      // Broad regression ceilings keep UX0 deterministic across CI hardware. The measured
-      // local medians live in docs/13-cli-ux.md; UX4 tightens the delta/input targets.
+      // The first interactive tail stays bounded; explicit PageUp proves every segment remains
+      // reachable in original order without asking Runtime for a second transcript authority.
       expect(thousandMessageReplayMs).toBeLessThan(5_000);
     } finally {
       await transcriptView.destroy();
+    }
+
+    const anchorView = await createView(80, 24);
+    try {
+      const transcript = Array.from({ length: 1_000 }, (_, index) =>
+        userMessage(`anchor history ${index}`, `anchor-history-${index}`),
+      );
+      anchorView.screen.replayTranscript(transcript);
+      await anchorView.testRenderer.flush();
+      expect(
+        anchorView.testRenderer.renderer.root
+          .findDescendantById('coda-transcript')
+          ?.getChildren().length,
+      ).toBeLessThanOrEqual(TRANSCRIPT_REPLAY_CHUNK_MESSAGES + 1);
+      anchorView.screen.restorePresentation({
+        workspaceId: 'ws_anchor_performance' as WorkspaceId,
+        threadId: 'thread-anchor-performance' as never,
+        draft: '',
+        scrollAnchor: {
+          blockKey: 'message:anchor-history-100',
+          logicalOffset: 0,
+          fallbackBlockKeys: [],
+          observedHighWaterSeq: 0,
+        },
+        unreadAfterSeq: 0,
+        expandedBlocks: [],
+        vimEnabled: false,
+        updatedAt: 1,
+      } satisfies ThreadPresentationState);
+      await anchorView.testRenderer.flush();
+      await anchorView.testRenderer.flush();
+      expect(anchorView.testRenderer.captureCharFrame()).toContain('anchor history 100');
+      expect(anchorView.testRenderer.captureCharFrame()).not.toContain(
+        'saved scroll anchor was compacted',
+      );
+    } finally {
+      await anchorView.destroy();
     }
   }, 45_000);
 });

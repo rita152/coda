@@ -42,7 +42,11 @@ export function classifyError(err: unknown, aborted: boolean): ProviderErrorDeta
     const status = typeof err.status === 'number' ? err.status : undefined;
     const code = innerErrorType(err);
     const requestId = err.requestID ?? undefined;
-    const base = { status, code, requestId };
+    const base = {
+      ...(status === undefined ? {} : { status }),
+      ...(code === undefined ? {} : { code }),
+      ...(requestId === undefined ? {} : { requestId }),
+    };
     // 判定顺序:429 限流最先(其文案常含 "too many tokens",不得被 overflow 抢先)→ overflow 文案
     // → auth → 5xx/瞬时 → 其余按 status
     if (status === 429) {

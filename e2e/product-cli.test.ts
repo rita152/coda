@@ -317,6 +317,171 @@ test('exec is an incremental alias for the legacy one-shot NDJSON mode', () => {
   expect(events.at(-1)).toMatchObject({ type: 'agent_end', reason: 'completed' });
 }, T);
 
+test('opt-in output formats keep final stdout stable and text progress on stderr', () => {
+  const root = temporaryRoot('coda-product-output-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  const script = path.join(root, 'faux.json');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(script, JSON.stringify({
+    turns: [{ events: [{ kind: 'text', text: 'automation answer' }] }],
+    onExhausted: 'emptyStop',
+  }), 'utf8');
+  const base = [
+    'exec', '--provider', 'faux', '--faux-script', script, '--cwd', cwd,
+    '-p', 'automation task',
+  ] as const;
+
+  const text = runCoda([...base, '--output=text'], home, cwd);
+  expect(text).toEqual({
+    code: 0,
+    stdout: 'automation answer\n',
+    stderr: '[coda] running\n',
+  });
+
+  const json = runCoda([...base, '--output=json'], home, cwd);
+  expect(json.code).toBe(0);
+  expect(json.stderr).toBe('');
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    type: 'result',
+    version: 1,
+    status: 'completed',
+    exitCode: 0,
+    text: 'automation answer',
+  });
+
+  const stream = runCoda([...base, '--output=stream-json'], home, cwd);
+  expect(stream.code).toBe(0);
+  expect(stream.stderr).toBe('');
+  const records = stream.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
+    readonly type: string;
+    readonly status?: string;
+  });
+  expect(records[0]?.type).toBe('stream_start');
+  expect(records.some((record) => record.type === 'event')).toBe(true);
+  expect(records.at(-1)).toMatchObject({ type: 'result', status: 'completed' });
+
+  const finalOnly = runCoda([
+    ...base, '--output=stream-json', '--final-only',
+  ], home, cwd);
+  expect(finalOnly.code).toBe(0);
+  expect(finalOnly.stdout.trimEnd().split('\n')).toHaveLength(1);
+  expect(JSON.parse(finalOnly.stdout)).toMatchObject({ type: 'result', status: 'completed' });
+}, T);
+
+test('stream-json broken pipe aborts the run before a delayed tool side effect', async () => {
+  const root = temporaryRoot('coda-product-broken-pipe-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  const script = path.join(root, 'faux.json');
+  const marker = path.join(cwd, 'must-not-exist');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(script, JSON.stringify({
+    turns: [{ events: [{
+      kind: 'tool_call',
+      name: 'bash',
+      args: { command: 'sleep 0.5; touch must-not-exist' },
+    }] }],
+    onExhausted: 'emptyStop',
+  }), 'utf8');
+
+  const result = await runCodaClosingStdoutAfterFirstLine([
+    'exec', '--provider', 'faux', '--faux-script', script, '--cwd', cwd,
+    '--ephemeral', '--output=stream-json', '-p', 'stop when stdout closes',
+  ], home, cwd);
+
+  expect(JSON.parse(result.stdout.split('\n')[0] as string)).toMatchObject({
+    type: 'stream_start',
+  });
+  expect(result.code).toBe(1);
+  expect(result.stderr.match(/stdout write failed/gu)).toHaveLength(1);
+  await Bun.sleep(600);
+  expect(existsSync(marker)).toBe(false);
+}, T);
+
+test('ephemeral one-shot leaves no Runtime/session journal and timeout exits 124', () => {
+  const root = temporaryRoot('coda-product-ephemeral-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  const requestedSessionDir = path.join(root, 'must-not-be-created');
+  const successScript = path.join(root, 'success.json');
+  const timeoutScript = path.join(root, 'timeout.json');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(successScript, JSON.stringify({
+    turns: [{ events: [{ kind: 'text', text: 'temporary answer' }] }],
+    onExhausted: 'emptyStop',
+  }), 'utf8');
+  writeFileSync(timeoutScript, JSON.stringify({
+    turns: [{ events: [{
+      kind: 'tool_call',
+      name: 'bash',
+      args: { command: 'sleep 2' },
+    }] }],
+    onExhausted: 'emptyStop',
+  }), 'utf8');
+
+  const success = runCoda([
+    'exec', '--provider', 'faux', '--faux-script', successScript,
+    '--cwd', cwd, '--session-dir', requestedSessionDir,
+    '--ephemeral', '--output=json', '-p', 'temporary task',
+  ], home, cwd);
+  expect(success.code).toBe(0);
+  expect(JSON.parse(success.stdout)).toMatchObject({ status: 'completed' });
+  expect(existsSync(requestedSessionDir)).toBe(false);
+  expect(allRelativeFiles(home).some((file) => /thread|journal|runtime/iu.test(file))).toBe(false);
+
+  const timeout = runCoda([
+    'exec', '--provider', 'faux', '--faux-script', timeoutScript,
+    '--cwd', cwd, '--session-dir', requestedSessionDir,
+    '--ephemeral', '--output=json', '--timeout=50ms', '-p', 'wait too long',
+  ], home, cwd);
+  expect(timeout.code).toBe(124);
+  expect(timeout.stderr).toBe('');
+  expect(JSON.parse(timeout.stdout)).toMatchObject({
+    type: 'result',
+    status: 'timeout',
+    exitCode: 124,
+  });
+  expect(existsSync(requestedSessionDir)).toBe(false);
+  expect(allRelativeFiles(home).some((file) => /thread|journal|runtime/iu.test(file))).toBe(false);
+}, T);
+
+test('provider HTTP failures survive the strict Runtime boundary and explain machine failure', async () => {
+  const root = temporaryRoot('coda-product-provider-error-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch: () => Response.json(
+      { error: { message: 'regional opt-in required', type: 'permission_denied' } },
+      { status: 403 },
+    ),
+  });
+  try {
+    const result = await runCodaAsync([
+      'exec', '--provider', 'openai-chat', '--model', 'error-fixture',
+      '--base-url', `http://127.0.0.1:${server.port}/v1`, '--api-key', 'local-fixture-key',
+      '--cwd', cwd, '--ephemeral', '--output=json', '-p', 'fail with details',
+    ], home, cwd);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      type: 'result',
+      status: 'error',
+      exitCode: 1,
+      error: expect.stringMatching(/403.*regional opt-in required/iu),
+    });
+  } finally {
+    server.stop(true);
+  }
+}, T);
+
 function temporaryRoot(prefix: string): string {
   const directory = mkdtempSync(path.join(tmpdir(), prefix));
   ownedDirectories.push(directory);
@@ -367,6 +532,54 @@ async function runCodaAsync(
     new Response(child.stderr).text(),
   ]);
   return { code, stdout, stderr };
+}
+
+async function runCodaClosingStdoutAfterFirstLine(
+  args: readonly string[],
+  home: string,
+  cwd: string,
+): Promise<CommandResult> {
+  const child = Bun.spawn(
+    [Bun.argv[0] as string, '--no-env-file', DIST_MAIN, ...args],
+    {
+      cwd,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: buildE2eEnvironment(Bun.env, home, { TERM: 'dumb', NO_COLOR: '1' }),
+    },
+  );
+  const stderrPromise = new Response(child.stderr).text();
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  let stdout = '';
+  try {
+    while (!stdout.includes('\n')) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      stdout += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+  } finally {
+    reader.releaseLock();
+  }
+
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const code = await Promise.race([
+      child.exited,
+      new Promise<never>((_resolve, reject) => {
+        watchdog = setTimeout(() => {
+          child.kill(9);
+          reject(new Error('broken-pipe child did not exit'));
+        }, 5_000);
+      }),
+    ]);
+    return { code, stdout, stderr: await stderrPromise };
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    child.kill();
+  }
 }
 
 function allRelativeFiles(root: string): string[] {

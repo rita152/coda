@@ -13,7 +13,8 @@ UX1 的 command catalog、产品子命令、UI routing、onboarding、sanitizer�
 accessible/plain 文本面已经完成两轮 review；UX2 的信息层级、palette、composer、per-thread
 presentation state 与 transcript 导航也已完成恰好两轮 review。UX3 的 Runtime-backed review/diff、
 approval card、session switch、manual compact 与 conversation fork/retry 已完成实现及恰好两轮完整
-review；第二轮修复后只做了定向验证。UX4 仍是后续产品承诺。
+review；第二轮修复后只做了定向验证。UX4 的 accessible ASCII/theme、限帧、历史分段、automation
+output 与真实 PTY 已完成实现及恰好两轮完整 review；第二轮修复后只做了定向验证，未发起第三轮。
 UX0/UX1 历史矩阵继续保留，便于区分阶段观察值、已交付行为和最终目标。
 
 ## 1. 产品不变量与事实边界
@@ -347,7 +348,7 @@ classic/accessible 不要求 viewer 的视觉等价，但返回同一 Runtime sn
 legacy headless wire 不新增上述 UI 命令；canonical envelope 调用方可直接提交新增 RuntimeOp、使用 query。
 fork/retry 只复制 committed conversation，不 rollback 文件、shell、网络或其他外部副作用。
 
-### 4.5 UX4 目标语义矩阵
+### 4.5 UX4 实现语义矩阵
 
 | 语义 | TUI | classic | accessible | plain | headless |
 |---|---|---|---|---|---|
@@ -357,6 +358,9 @@ fork/retry 只复制 committed conversation，不 rollback 文件、shell、网�
 | diff/review/tool details | interactive viewer | paged text command | append-only sections | explicit command output | structured events/output |
 | copy/export/compact/permissions | palette/slash | text command | text command | CLI subcommand/flag | stable machine output/op |
 | progress/status/wait reason | persistent status region | append-only status lines | append-only status lines | stderr | stderr or stream record |
+| theme / no-color | auto/light/dark/high-contrast/mono palette + 文字状态 | mono/no-color + 文字状态 | ASCII chrome + append-only 文字状态 | ASCII/mono option | 无终端样式 |
+| long transcript | 首批目标 120 条（turn 边界最多 240），PageUp 分段加载，search 可装全量 | terminal scrollback | append-only scrollback | — | consumer-owned |
+| one-shot automation | — | — | — | text/json/stream-json + final-only/ephemeral/timeout | opt-in terminal result；legacy wire 不变 |
 
 “功能等价”指同一业务动作、目标 identity、错误和恢复结果，不要求视觉等价。plain 不承担长驻交互，
 但相同动作必须能通过显式 CLI 子命令/flags 完成或清楚声明仅交互可用。
@@ -467,8 +471,10 @@ interface ThreadPresentationState {
   也不能覆盖任务 draft、进入 prompt history 或传给 presentation API，流程结束后原样恢复任务 draft。
   secret buffer 在此基础上还不得进入 frame/transcript/log/error。
 - transcript block key 来自 snapshot 可恢复的稳定 identity：message 用 `message:<AgentMessage.id>`，
-  part/tool block 再附 content index 或 toolCallId；不得只用 envelope seq，因为 v1 snapshot-only 历史没有
-  历史 envelope。`fallbackBlockKeys` 以距离从近到远保存一个有界邻居链。
+  part/tool block 再附 content index 或 toolCallId；同一 provider 可跨 turn 复用 toolCallId，因此首个 occurrence
+  保持 `tool:<toolCallId>`，后续 occurrence 按完整 canonical transcript 的时间顺序附确定 ordinal，live 与 replay
+  必须得到同一个 key，不能使用当前 renderable 数量或装载 segment 顺序。不得只用 envelope seq，因为 v1
+  snapshot-only 历史没有历史 envelope。`fallbackBlockKeys` 以距离从近到远保存一个有界邻居链。
 - resize 只重算 visual rows，不改 scroll anchor 的 `(blockKey, logicalOffset)`。用户手动上滚后 live event 只
   增加 unread，不抢回 sticky bottom；jump-to-latest 才清 unread。
 - 恢复时先找 exact blockKey，再找首个仍存在的 fallback key。compaction 已删除全部候选时定位到新 summary/
@@ -522,8 +528,12 @@ UX2 characterization 在写入 ordinary draft/user message 后视为“首次交
 120×40 都不再显示 Logo/tips；40 列可裁掉完整 model 字符串，80/120 列保留紧凑 taskbar 与 model。
 首次交互前的 onboarding frame 仍按表中的 UX0 尺寸层级显示，resize 不会让已收缩的装饰重新出现。
 
-UX4 的真实 PTY 矩阵在此基础上增加 resize、多行 paste、fatal、approval abort、provider 初始化失败、
-terminal title/mouse/bracketed paste/alternate screen 全路径恢复。
+UX4 的真实 PTY 矩阵在此基础上实际覆盖正常退出、40×10 resize + 多行 bracketed paste、运行中 abort、
+approval abort、fatal、悬挂 provider HTTP 请求中退出、OpenTUI 初始化失败降级、`TERM=dumb`、
+`NO_COLOR` 与显式 TUI 拒绝；凡进入全屏的路径都逐项验证 title、mouse、bracketed paste、cursor 与
+alternate screen 的 enable/restore 顺序。所有 Expect 驱动路径还会在受测命令前后读取同一个 slave
+PTY 的 `stty -g` 并要求完全相等，因此 raw mode 恢复由真实 termios 状态证明，而不是从 leave sequence
+间接推测。
 
 ## 9. UX0 性能基线
 
@@ -538,11 +548,12 @@ characterization run，用于发现数量级变化，不是跨机器 SLA：
 | 10,000 个单字符 delta 后一次 flush | 9,712.5ms | 30s | 按帧合并，最终内容无丢失/重排 |
 | replay 1,000 条短消息 | 35.6ms | 5s | 分段/窗口化，不阻塞首个可交互帧 |
 
-当前 10k delta 路径每个 delta 都更新 Markdown content，是 UX4 必须消除的明确性能债务。测试使用宽
-上限避免把机器速度当 correctness，同时以 0–9 patterned stream 精确比较全部 10,000 字符，并用独立
-view 检查 1,000 条历史的 child count 与首/中/末顺序，内容丢失或重排不能靠耗时断言通过。UX4 应新增
-“render invalidation/frame 次数有界”的确定性断言，并把输入反馈目标收紧到 100ms，而不是只降低本机
-wall-clock。
+UX4 已消除“每个 delta 立刻重排 Markdown”的债务：同一 native frame 中相同 assistant/tool/status task
+覆盖旧 task，终态同步 canonical 完整内容。测试以 0–9 patterned stream 精确比较全部 10,000 字符，
+同时固定 visual frame callback `<=2`、wall-clock `<1s` 和输入反馈 `<100ms`。1,000 条单-message turn
+历史的首帧只构造最后 120 条与 segment banner（121 个 child）；一般 transcript 为保留完整 turn 可把
+单段向前扩至最多 240 条。八次 PageUp 后再精确检查首/中/末及全部 1,001 个 renderable 的顺序。时间
+上限只用于发现数量级退化；内容、child 数与 frame 数才是 correctness 门禁。
 
 ## 10. 阶段边界
 
@@ -552,7 +563,7 @@ wall-clock。
 | UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 已完成恰好两轮 review；help/version 零副作用且 legacy flags/wire 全绿 |
 | UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | 已完成恰好两轮 review；cold pending draft 可恢复并迁移，permission 只读 Runtime workspace snapshot；provider 全表单隔离；durability failure 可见且不清 draft |
 | UX3 | reasoning/tool/diff/review、session workflow、approval cards、manual compact、retry/fork | 已完成恰好两轮 review；UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
-| UX4 | accessible ASCII/theme/PTY 加固、帧合并/窗口化、自动化输出、真实 PTY | 10k delta 限帧；输入 <100ms；终端模式全路径恢复 |
+| UX4 | accessible ASCII/theme/PTY 加固、帧合并/分段加载、自动化输出、真实 PTY | 已完成恰好两轮 review；10k delta 限帧、输入 <100ms、broken-pipe 收束与真实 termios 恢复均有门禁 |
 
 每阶段恰好两轮完整 Agent review。第一轮修复后复跑定向门禁；第二轮仍可修复并定向验证，但不得发起
 第三轮完整 review。随后 `bun run check`、`git diff --check`、scope/public export 审计、单独 commit 和
