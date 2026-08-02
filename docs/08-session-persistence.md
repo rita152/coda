@@ -628,6 +628,30 @@ mutable import/resume 则要求 cwd 在**当前 host**上是 non-empty、无 NUL
 
 ### 3.3 追加纪律、事件提交与崩溃容忍
 
+`TranscriptRepository` 的 fold 路径分为冷、热两条，但二者必须复用同一条 record reducer：首次构造、
+恢复与审计从完整 journal 执行 full fold，作为 grammar 与 recovery 的权威 oracle；正常 hot append 则在
+已验证的当前 projection 上创建隔离 candidate，只按顺序 fold 本次 non-empty batch。新 record 仍逐条经过
+strict JSON snapshot，batch 中后记录必须看见前记录产生的状态，任何校验失败都发生在 IO 前且不得修改
+当前 projection。只有 `append(...,{flush:true})` 成功后 repository 才同时安装 candidate 与新增 records；
+append/flush 失败时二者保持旧值。增量路径只消除对历史大 payload 的重复校验与 checkpoint 重建，不改变
+JSONL 格式、seq、flush、发布或恢复语义；每个成功 hot prefix 必须与对相同 durable records 的 cold full
+fold 逐字段等价。hot reducer 对未变化、已验证且已冻结的 checkpoint 子树做结构共享，只冻结本次
+path-copy 新建的节点；尤其 `message_update.partial` 不得触发对既有 transcript/tool result 的再次
+deep snapshot。cold full fold 仍执行完整 strict validation：每条输入 record 都必须先独立 strict-snapshot，
+随后才可在同一 reducer 中复用已验证的冻结子树，fold 完成后再对最终 checkpoint 做一次完整 strict
+snapshot。这样即使非法中间值后来被覆盖也必须 fail closed，同时恢复复杂度按 journal bytes 与最终
+checkpoint 大小线性增长，而不是对每个流式 event 重新 deep-snapshot 当时的整个 checkpoint。结构共享
+不能成为绕过持久化边界校验的入口。
+
+文件型 `ThreadJournalPort` 也必须保持同一增量边界：取得 writer lease 后，第一次 writable `load()`
+对完整 JSONL 做 tail repair、record validation 与 sequence grammar fold，并同时捕获已打开 append fd 的
+`dev/ino/size`。后续 `append` 只 strict-validate 新 batch，并在隔离复制的 grammar state（mailbox/run/turn/
+control/result/rule-scope 集合与 `nextSeq`）上推进，不得为每条流式 event 重新 read/parse/snapshot 全历史；
+batch 内失败不写 bytes、不安装 candidate。写入前后都要比较 fd 与 pathname 的 regular-file identity 和
+expected size，外部 append、truncate 或 replacement 一律以 `invalid_thread_journal` fail closed，不能被热
+append 静默吸收。显式 writable `load()` 是唯一允许重新 full repair/rebase 的入口；冷恢复、审计和
+read-only load 仍走完整 oracle。只有 fd flush 成功且 post-write boundary 相符后才安装新 grammar state。
+
 - 写入时机：每个 `message_end` 通过 `EventCommitter` 与 message mutation 一起提交。legacy v1
   facade 仍表现为追加一条 MessageRecord。**不是** `agent_end` 时批量写——agent 中途崩溃也要能
   恢复到最后一条完整消息。

@@ -84,6 +84,78 @@ describe('EventCommitter + TranscriptRepository', () => {
     expect(repository.state.highWaterSeq).toBe(0);
   });
 
+  test('repository incremental fold visits only the newly appended records', async () => {
+    const journal = new RecordingJournal([{ type: 'seed' }]);
+    let fullFoldVisits = 0;
+    let appendFoldVisits = 0;
+    const repository = new TranscriptRepository<TestRecord, TestState>({
+      journal,
+      records: journal.records,
+      fold: (records) => {
+        fullFoldVisits += records.length;
+        return fold(records);
+      },
+      foldAppend: (current, records) => {
+        appendFoldVisits += records.length;
+        return {
+          highWaterSeq: records.reduce((last, record) =>
+            record.type === 'commit' ? record.envelopes.at(-1)?.seq ?? last : last,
+          current.highWaterSeq),
+        };
+      },
+    });
+
+    for (let seq = 1; seq <= 8; seq++) {
+      await repository.append([{
+        type: 'commit',
+        firstSeq: seq,
+        envelopes: [persistedEnvelope(THREAD_A, seq)],
+      }]);
+    }
+
+    expect(fullFoldVisits).toBe(1);
+    expect(appendFoldVisits).toBe(8);
+    expect(repository.state.highWaterSeq).toBe(8);
+  });
+
+  test('repository validates an incremental candidate before IO and installs it only after flush', async () => {
+    const journal = new RecordingJournal([{ type: 'seed' }]);
+    const repository = new TranscriptRepository<TestRecord, TestState>({
+      journal,
+      records: journal.records,
+      fold,
+      foldAppend: (current, records) => {
+        const next = records[0];
+        if (next.type === 'commit' && next.firstSeq !== current.highWaterSeq + 1) {
+          throw new Error('invalid incremental sequence');
+        }
+        return {
+          highWaterSeq: next.type === 'commit'
+            ? next.envelopes.at(-1)?.seq ?? current.highWaterSeq
+            : current.highWaterSeq,
+        };
+      },
+    });
+
+    await expect(repository.append([{
+      type: 'commit',
+      firstSeq: 2,
+      envelopes: [persistedEnvelope(THREAD_A, 2)],
+    }])).rejects.toThrow('invalid incremental sequence');
+    expect(journal.appendCalls).toBe(0);
+    expect(repository.records()).toEqual([{ type: 'seed' }]);
+    expect(repository.state.highWaterSeq).toBe(0);
+
+    journal.failure = new Error('flush failed');
+    await expect(repository.append([{
+      type: 'commit',
+      firstSeq: 1,
+      envelopes: [persistedEnvelope(THREAD_A, 1)],
+    }])).rejects.toThrow('flush failed');
+    expect(repository.records()).toEqual([{ type: 'seed' }]);
+    expect(repository.state.highWaterSeq).toBe(0);
+  });
+
   test('the authoritative append gate backpressures commit and publishes only after flush', async () => {
     const fixture = createFixture(THREAD_A);
     const appendEntered = deferred<void>();

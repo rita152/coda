@@ -1720,6 +1720,27 @@ AgentEvent / control event
   → UI / headless / telemetry / tests 等普通观察者异步消费
 ```
 
+EventCommitter 的单 writer chain 还冻结了 repository 的 hot-fold 边界：cold load 对完整 journal 做一次
+full fold；每次 authoritative append 在 IO 前把新 batch strict-snapshot，并在当前 validated projection 的
+隔离副本上只归约该 batch。full 与 incremental 必须调用同一 record reducer并产生逐字段等价状态；batch
+内保持原顺序，任一 grammar 错误不写盘，flush 成功前不安装 candidate，随后才允许 EventHub publish。
+因此 transcript 增长不能让每次提交重新扫描、校验和冻结全部历史 payload；这是一条主线程响应性与
+observer-isolation 所依赖的实现不变量，而不是新的 Runtime 状态源或 wire 语义。具体而言，hot checkpoint
+归约只对新建的 path-copy 节点做冻结，并复用当前 projection 与已验证 envelope 中的冻结子树；流式
+`partialAssistant` 更新不得 deep-snapshot 未变化的历史 transcript。cold full fold 仍是完整 strict grammar
+oracle：所有输入 record 先各自 strict-snapshot，grammar/seq/correspondence 仍逐 record 全量执行；中间
+checkpoint 使用同一条 frozen path-copy reducer，结束时再对最终 checkpoint 做一次完整 strict snapshot。
+因此后来被覆盖的非法 record 仍会失败，但恢复不会为每个 `message_update` 重扫当时的全部 transcript。
+full/incremental 的逐字段等价门禁负责防止结构共享改变恢复语义。
+
+物理 `FileJournalPort` 不能在 repository 已经增量 fold 后又把同一优化抵消：writer 的第一次 writable
+load 对完整 JSONL repair/validate，并缓存 sequence grammar state 与 append fd 的 `dev/ino/size`；后续
+commit 只验证新 batch、在隔离 candidate 上推进 grammar、经同一 fd append+flush，绝不重新读取历史。
+每次写入前后必须核对 fd/pathname identity 与 expected size；外部 append、truncate、rename/replacement
+以 `invalid_thread_journal` fail closed。显式 writable load 才能 full repair/rebase，read-only/cold load
+继续作为完整 oracle；flush 或 post-write fence 成功前不得安装 candidate。该缓存只是已持久事实的验证
+边界，不是新的 Runtime、seq、checkpoint 或 presentation 状态源。
+
 runtime-managed Agent 的 `authoritativeEventSink` 是独立 internal hook，不属于 `Agent.subscribe()` 的
 catch-and-diagnose listener chain；EventCommitter reject 必须向 Agent 传播并终止该 thread，不能被当成
 普通 observer error。exported `Agent` 自身的 public subscribe 仍保持阶段 0 等待与异常隔离语义；direct

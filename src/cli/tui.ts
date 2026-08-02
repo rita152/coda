@@ -234,6 +234,7 @@ interface TuiScreenOptions extends TuiOptions {
 
 export interface TuiScreen {
   render(event: SessionEvent): void;
+  activePanel(): 'transcript' | 'diff' | 'sessions';
   replayTranscript(messages: readonly AgentMessage[]): void;
   resetTranscript(messages: readonly AgentMessage[], highWaterSeq?: number): void;
   openDiffViewer(snapshot: Readonly<RuntimeDiffSnapshot>): void;
@@ -970,6 +971,7 @@ export async function createTuiScreen(
     let mouseScrollStateScheduled = false;
     let pendingScrollAnchor: TranscriptScrollAnchor | undefined;
     let scrollRestoreScheduled = false;
+    let transcriptGeneration = 0;
     let unreadAfterSeq = opts.presentation?.store.snapshot().unreadAfterSeq ?? 0;
     let lastObservedHighWater = opts.eventHighWaterSeq?.() ?? 0;
     let transcriptSearchQuery = opts.presentation?.store.snapshot().search?.query ?? '';
@@ -988,6 +990,7 @@ export async function createTuiScreen(
     let transcriptInsertIndex: number | undefined;
     let blockInsertIndex: number | undefined;
     let screenDestroyed = false;
+    let activePanel: 'transcript' | 'diff' | 'sessions' = 'transcript';
     let diffSnapshot: Readonly<RuntimeDiffSnapshot> | undefined;
     let diffFileIndex = 0;
     let allSessionItems: readonly RuntimeThreadListItem[] = [];
@@ -1281,7 +1284,7 @@ export async function createTuiScreen(
       const transcriptPadding = reservedTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS
         ? TRANSCRIPT_PADDING_Y
         : 0;
-      transcript.visible = reservedTranscriptRows > 0;
+      transcript.visible = activePanel === 'transcript' && reservedTranscriptRows > 0;
       transcript.minHeight = reservedTranscriptRows;
       transcript.content.paddingTop = transcriptPadding;
       transcript.content.paddingBottom = transcriptPadding;
@@ -1650,6 +1653,26 @@ export async function createTuiScreen(
       );
     };
 
+    const persistUnreadBoundary = (): void => {
+      if (!manuallyScrolled || opts.presentation === undefined) return;
+      // Output does not move a manual viewport, so its already-laid-out durable anchor remains
+      // authoritative. Re-capturing here would scan every block for every provider delta and can
+      // select a newly queued block whose layout coordinate is still the default y=0.
+      const state = opts.presentation.store.snapshot();
+      opts.presentation.store.setScrollState(state.scrollAnchor, unreadAfterSeq);
+    };
+
+    const transcriptMaximum = (): number =>
+      Math.max(0, transcript.scrollHeight - transcript.viewport.height);
+
+    // OpenTUI 0.4.5 re-engages sticky-bottom at maximum - 1 during layout. Coda keeps the
+    // documented presentation mode authoritative by disabling native sticky behavior only
+    // while a real manual navigation is active, then re-enabling it at the exact latest row.
+    const pauseTranscriptFollowing = (): void => {
+      transcript.stickyScroll = false;
+      manuallyScrolled = true;
+    };
+
     const observeOutputEvent = (visibleOutput = true, deferVisualRefresh = false): void => {
       const current = opts.eventHighWaterSeq?.() ?? lastObservedHighWater + 1;
       if (!visibleOutput) {
@@ -1657,9 +1680,13 @@ export async function createTuiScreen(
         return;
       }
       if (manuallyScrolled && current > lastObservedHighWater) {
-        if (unreadAfterSeq === 0) unreadAfterSeq = lastObservedHighWater;
+        const startedUnreadInterval = unreadAfterSeq === 0;
+        if (startedUnreadInterval) unreadAfterSeq = lastObservedHighWater;
         lastObservedHighWater = current;
-        persistScrollState();
+        // The unread boundary is durable and immutable until latest is reached. Later deltas only
+        // advance the in-memory high-water used by the footer; they must not rewrite the same
+        // presentation state or recalculate the viewport anchor.
+        if (startedUnreadInterval) persistUnreadBoundary();
       } else {
         lastObservedHighWater = Math.max(lastObservedHighWater, current);
         if (!manuallyScrolled) {
@@ -2048,6 +2075,7 @@ export async function createTuiScreen(
     ): boolean => {
       const block = scrollAnchorBlock(anchor);
       if (block === undefined) return false;
+      pauseTranscriptFollowing();
       // Moving scrollTop by the block-to-viewport delta keeps the same logical row inside
       // the anchored block, regardless of prepended replay segments or a resized viewport.
       transcript.scrollTop = Math.max(
@@ -2055,14 +2083,15 @@ export async function createTuiScreen(
         transcript.scrollTop + block.renderable.y +
           anchor.logicalOffset - transcript.viewport.y,
       );
-      manuallyScrolled = true;
       return true;
     };
     const scheduleScrollRestore = (anchor: TranscriptScrollAnchor): void => {
+      const generation = transcriptGeneration;
       pendingScrollAnchor = anchor;
       if (scrollRestoreScheduled) return;
       scrollRestoreScheduled = true;
       renderer.once('frame', () => {
+        if (screenDestroyed || generation !== transcriptGeneration) return;
         scrollRestoreScheduled = false;
         const pending = pendingScrollAnchor;
         pendingScrollAnchor = undefined;
@@ -2089,7 +2118,11 @@ export async function createTuiScreen(
     };
 
     const jumpToLatest = (): void => {
+      // Move while native sticky is paused, then re-enable it from the exact bottom. This avoids
+      // treating maximum - 1 as latest while still letting subsequent content follow naturally.
+      transcript.stickyScroll = false;
       transcript.scrollTo({ x: 0, y: transcript.scrollHeight });
+      transcript.stickyScroll = true;
       manuallyScrolled = false;
       unreadAfterSeq = 0;
       lastObservedHighWater = opts.eventHighWaterSeq?.() ?? lastObservedHighWater;
@@ -2109,9 +2142,12 @@ export async function createTuiScreen(
         return false;
       }
       if (replayCursor > 0) {
+        const generation = transcriptGeneration;
         loadEarlierReplay(true);
         renderer.once('frame', () => {
-          if (!screenDestroyed) searchTranscript('', direction);
+          if (!screenDestroyed && generation === transcriptGeneration) {
+            searchTranscript('', direction);
+          }
         });
         renderer.requestRender();
         return true;
@@ -2132,8 +2168,8 @@ export async function createTuiScreen(
       }
       const match = matches[transcriptSearchOrdinal];
       if (match === undefined) return false;
+      pauseTranscriptFollowing();
       transcript.scrollChildIntoView(match.renderable.id);
-      manuallyScrolled = true;
       transientStatus =
         `match ${transcriptSearchOrdinal + 1}/${matches.length} · ${transcriptSearchQuery}`;
       opts.presentation?.store.setSearch({
@@ -2424,6 +2460,7 @@ export async function createTuiScreen(
     const loadEarlierReplay = (all = false): boolean => {
       if (replayCursor <= 0) return false;
       const anchor = captureScrollAnchor();
+      pauseTranscriptFollowing();
       const previousCursor = replayCursor;
       const target = all
         ? 0
@@ -2464,9 +2501,16 @@ export async function createTuiScreen(
     };
 
     const resetTranscript = (messages: readonly AgentMessage[], highWaterSeq?: number): void => {
+      transcriptGeneration++;
+      pendingScrollAnchor = undefined;
+      scrollRestoreScheduled = false;
+      mouseScrollStateScheduled = false;
+      pendingFrameTasks.clear();
+      activePanel = 'transcript';
       diffPanel.visible = false;
       sessionPanel.visible = false;
       transcript.visible = true;
+      opts.presentation?.store.setActivePanel('transcript');
       for (const child of transcript.getChildren()) transcript.remove(child);
       transcriptBlocks.splice(0, transcriptBlocks.length);
       replayMessages = [];
@@ -2519,6 +2563,7 @@ export async function createTuiScreen(
     const openDiffViewer = (snapshot: Readonly<RuntimeDiffSnapshot>): void => {
       diffSnapshot = snapshot;
       diffFileIndex = 0;
+      activePanel = 'diff';
       sessionPanel.visible = false;
       transcript.visible = false;
       diffPanel.visible = true;
@@ -2528,6 +2573,7 @@ export async function createTuiScreen(
 
     const closeDiffViewer = (): void => {
       if (!diffPanel.visible) return;
+      activePanel = 'transcript';
       diffPanel.visible = false;
       transcript.visible = true;
       diffSnapshot = undefined;
@@ -2566,7 +2612,9 @@ export async function createTuiScreen(
         return 'handled';
       }
       if (key.name === 'tab') return 'toggle-scope';
-      return 'none';
+      // While the diff owns the viewport, every key belongs to that panel. In particular,
+      // printable keys must not leak into the hidden composer.
+      return 'handled';
     };
 
     const refreshSessionPicker = (): void => {
@@ -2600,6 +2648,7 @@ export async function createTuiScreen(
       items: readonly RuntimeThreadListItem[],
       query: string,
     ): void => {
+      activePanel = 'sessions';
       diffPanel.visible = false;
       diffSnapshot = undefined;
       transcript.visible = false;
@@ -2614,6 +2663,7 @@ export async function createTuiScreen(
 
     const closeSessionPicker = (): void => {
       if (!sessionPanel.visible) return;
+      activePanel = 'transcript';
       sessionPanel.visible = false;
       transcript.visible = true;
       allSessionItems = [];
@@ -2712,16 +2762,64 @@ export async function createTuiScreen(
     transcript.onMouseScroll = (event) => {
       const direction = event.scroll?.direction;
       if (direction !== 'up' && direction !== 'down') return;
-      if (direction === 'up') manuallyScrolled = true;
-      if (!manuallyScrolled || mouseScrollStateScheduled) return;
+      const beforeTop = transcript.scrollTop;
+      const beforeMaximum = transcriptMaximum();
+      const wasManuallyScrolled = manuallyScrolled;
+      const canMove = direction === 'up'
+        ? beforeTop > 0
+        : beforeTop < beforeMaximum;
+      const canLoadEarlierAtTop = direction === 'up' && replayCursor > 0 && beforeTop <= 0;
+
+      // A wheel event over content that has not entered layout yet is a real no-op. Do not let
+      // intent alone create a manual mode, anchor, or unread boundary.
+      if (!canMove && !canLoadEarlierAtTop && !(direction === 'down' && manuallyScrolled)) {
+        return;
+      }
+      if (direction === 'up' && (canMove || canLoadEarlierAtTop)) {
+        // The callback runs before ScrollBox's built-in movement. Pause sticky now so the next
+        // layout cannot turn a one-row wheel-up into maximum - 1 -> maximum rebound.
+        pauseTranscriptFollowing();
+        // Freeze a stable, already-laid-out anchor for output that can arrive before the frame
+        // callback records the post-wheel position. A speculative no-move is rolled back below.
+        persistScrollState();
+      }
+      if (mouseScrollStateScheduled) return;
       mouseScrollStateScheduled = true;
-      // ScrollBox applies its built-in wheel movement during the same dispatch. Persist on the
-      // next frame so the stable anchor reflects the resulting viewport, not the prior one.
+      const generation = transcriptGeneration;
+      // ScrollBox applies its built-in movement later in this dispatch. Inspect the result on the
+      // next frame so only an actual movement (or a real segment load) changes presentation mode.
       renderer.once('frame', () => {
+        if (screenDestroyed || generation !== transcriptGeneration) return;
         mouseScrollStateScheduled = false;
-        const maximum = Math.max(0, transcript.scrollHeight - transcript.viewport.height);
-        if (transcript.scrollTop >= maximum - 1) jumpToLatest();
-        else {
+        const afterTop = transcript.scrollTop;
+        const afterMaximum = transcriptMaximum();
+        if (direction === 'up') {
+          if (replayCursor > 0 && afterTop <= 0 && loadEarlierReplay()) {
+            const wheelStep = Math.max(1, event.scroll?.delta ?? 1);
+            // loadEarlierReplay first restores the stable anchor after prepend. Register after it
+            // so this same wheel interaction then exposes an earlier row instead of only loading.
+            renderer.once('frame', () => {
+              if (screenDestroyed || generation !== transcriptGeneration) return;
+              transcript.scrollBy(-wheelStep);
+              pauseTranscriptFollowing();
+              persistScrollState();
+              refreshTaskStatus();
+              renderer.requestRender();
+            });
+            renderer.requestRender();
+            return;
+          }
+          if (afterTop < beforeTop) {
+            pauseTranscriptFollowing();
+            persistScrollState();
+            refreshTaskStatus();
+          } else if (!wasManuallyScrolled) {
+            // Sticky was paused speculatively before built-in dispatch, but no movement occurred.
+            jumpToLatest();
+          }
+        } else if (manuallyScrolled && afterTop >= afterMaximum) {
+          jumpToLatest();
+        } else if (manuallyScrolled && afterTop > beforeTop) {
           persistScrollState();
           refreshTaskStatus();
         }
@@ -2733,6 +2831,7 @@ export async function createTuiScreen(
 
     return {
       render,
+      activePanel: () => activePanel,
       replayTranscript,
       resetTranscript,
       openDiffViewer,
@@ -2866,6 +2965,13 @@ export async function createTuiScreen(
       searchTranscript,
       jumpToLatest,
       restorePresentation(state: ThreadPresentationState): void {
+        // Diff/session payloads come from live Runtime queries and are intentionally not stored.
+        // A recovered presentation therefore has exactly one safe panel: the transcript.
+        activePanel = 'transcript';
+        diffPanel.visible = false;
+        sessionPanel.visible = false;
+        transcript.visible = true;
+        opts.presentation?.store.setActivePanel('transcript');
         vimEnabled = state.vimEnabled;
         vimInsertMode = !vimEnabled;
         unreadAfterSeq = state.unreadAfterSeq <= lastObservedHighWater
@@ -2875,7 +2981,12 @@ export async function createTuiScreen(
         transcriptSearchOrdinal = state.search?.matchOrdinal ?? 0;
         if (state.draft !== '') input.setText(state.draft);
         input.gotoBufferEnd();
-        if (state.scrollAnchor !== undefined) scheduleScrollRestore(state.scrollAnchor);
+        if (state.scrollAnchor !== undefined) {
+          // Manual mode begins with the durable navigation fact, not one layout frame later.
+          // Output arriving between restorePresentation and that frame is already unread.
+          pauseTranscriptFollowing();
+          scheduleScrollRestore(state.scrollAnchor);
+        }
         refreshStatus();
       },
       setVimEnabled(enabled: boolean): void {
@@ -2886,19 +2997,38 @@ export async function createTuiScreen(
       handleComposerModeKey,
       scrollPage(direction: -1 | 1): void {
         if (direction < 0 && loadEarlierReplay()) {
-          manuallyScrolled = true;
-          persistScrollState();
+          // Prepending preserves the prior anchor. Move after that restore so the first PageUp is
+          // visibly a PageUp, rather than an invisible segment-load-only operation.
+          const generation = transcriptGeneration;
+          renderer.once('frame', () => {
+            if (screenDestroyed || generation !== transcriptGeneration) return;
+            transcript.scrollBy(-0.8, 'viewport');
+            pauseTranscriptFollowing();
+            persistScrollState();
+            refreshTaskStatus();
+            renderer.requestRender();
+          });
+          renderer.requestRender();
           return;
         }
-        transcript.scrollBy(direction * 0.8, 'viewport');
         if (direction < 0) {
-          manuallyScrolled = true;
-          persistScrollState();
-          refreshTaskStatus();
+          const beforeTop = transcript.scrollTop;
+          if (beforeTop <= 0) return;
+          transcript.stickyScroll = false;
+          transcript.scrollBy(-0.8, 'viewport');
+          if (transcript.scrollTop < beforeTop) {
+            pauseTranscriptFollowing();
+            persistScrollState();
+            refreshTaskStatus();
+          } else if (!manuallyScrolled) {
+            transcript.stickyScroll = true;
+          }
         } else {
-          const maximum = Math.max(0, transcript.scrollHeight - transcript.viewport.height);
-          if (transcript.scrollTop >= maximum - 1) jumpToLatest();
-          else persistScrollState();
+          if (!manuallyScrolled) return;
+          const beforeTop = transcript.scrollTop;
+          transcript.scrollBy(0.8, 'viewport');
+          if (transcript.scrollTop >= transcriptMaximum()) jumpToLatest();
+          else if (transcript.scrollTop > beforeTop) persistScrollState();
         }
       },
       destroy(): void {
@@ -3039,6 +3169,7 @@ export function runTuiController(
   let providerBeginning = false;
   let reverseSearchQuery: string | undefined;
   let activeDiffScope: 'turn' | 'workspace' = 'turn';
+  let panelRequestGeneration = 0;
   const enqueueApproval = (approvalId: string): boolean => {
     if (approvalQueue.includes(approvalId)) return false;
     approvalQueue.push(approvalId);
@@ -3216,12 +3347,20 @@ export function runTuiController(
       }
       try {
         switch (command.cmd) {
-          case 'sessions':
+          case 'sessions': {
+            const generation = ++panelRequestGeneration;
+            const requestedFromPanel = screen.activePanel();
+            const sessions = await workspace.listSessions();
+            if (
+              generation !== panelRequestGeneration ||
+              screen.activePanel() !== requestedFromPanel
+            ) return;
             screen.openSessionPicker(
-              await workspace.listSessions(),
+              sessions,
               command.query,
             );
             return;
+          }
           case 'resume':
           case 'switch':
             if (!isThreadId(command.threadId)) {
@@ -3290,7 +3429,13 @@ export function runTuiController(
               screen.println('usage: /diff [turn|workspace]', 'warning');
               return;
             }
+            const generation = ++panelRequestGeneration;
+            const requestedFromPanel = screen.activePanel();
             const snapshot = await workspace.diffSnapshot(scope);
+            if (
+              generation !== panelRequestGeneration ||
+              screen.activePanel() !== requestedFromPanel
+            ) return;
             if (snapshot === undefined) screen.println('No diff data for this session.', 'warning');
             else {
               activeDiffScope = scope;
@@ -3604,8 +3749,13 @@ export function runTuiController(
       if (diffAction !== 'none') {
         consume(key);
         if (diffAction === 'toggle-scope' && opts.workspace !== undefined) {
+          const generation = ++panelRequestGeneration;
           const next = activeDiffScope === 'turn' ? 'workspace' : 'turn';
           void opts.workspace.diffSnapshot(next).then((snapshot) => {
+            if (
+              generation !== panelRequestGeneration ||
+              screen.activePanel() !== 'diff'
+            ) return;
             if (snapshot === undefined) {
               screen.println(`No ${next} diff data.`, 'warning');
               return;

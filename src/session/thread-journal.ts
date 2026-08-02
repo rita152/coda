@@ -112,6 +112,7 @@ export class ThreadJournalWriter {
       journal: input.journal,
       records: input.records,
       fold: foldThreadJournal,
+      foldAppend: foldThreadJournalAppend,
     });
     this.#committer = new EventCommitter({
       workspaceId: input.workspaceId,
@@ -196,36 +197,78 @@ export class ThreadJournalWriter {
 }
 
 export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): FoldedThreadJournal {
-  const meta = records[0];
+  // Cold fold is the full-history oracle, so every record must cross the strict JSON boundary even
+  // when a later event overwrites all values derived from it. Once validated, those frozen records
+  // can safely participate in the same path-copy reducer as hot appends; repeatedly snapshotting the
+  // whole growing checkpoint for each streaming event would make recovery quadratic.
+  const validatedRecords = records.map(snapshot);
+  const meta = validatedRecords[0];
   if (meta === undefined || meta.type !== 'thread_meta') {
     throw new RuntimeStorageError('missing_thread_meta', 'Thread journal has no v2 meta record');
   }
-  const envelopes: Readonly<EventEnvelope>[] = [];
-  const mailbox = new Map<OpId, FoldedMailboxEntry>();
-  const runs = new Map<RunId, FoldedRunEntry>();
-  const turns = new Map<string, FoldedTurnEntry>();
-  const messageTurnIds = new Map<string, TurnId>();
-  const inputOwners = new Map<OpId, { readonly sourceOpId: OpId }>();
-  const pendingThreadResults = new Map<import('../protocol/index.js').DerivedOpId,
-    Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>();
-  const deliveredThreadResults = new Set<import('../protocol/index.js').DerivedOpId>();
-  const usedRequestIds = new Set<string>();
-  const observedRuleScopes = new Set<string>();
-  const controlClaims = new Map<string, {
+  const folded = foldThreadJournalRecords(meta, validatedRecords.slice(1), undefined, true);
+  // Validate and detach the final derived projection once. Grammar/sequence/correspondence checks
+  // still ran for every record above; this final snapshot preserves the checkpoint's public strict
+  // JSON and deep-freeze contract without revisiting historical state for every intermediate event.
+  return { ...folded, checkpoint: snapshot(folded.checkpoint) };
+}
+
+/**
+ * Folds a durable append against an already validated journal projection.
+ *
+ * The candidate owns fresh collection containers, so validation failures and journal flush
+ * failures cannot mutate the currently installed projection. Cold load continues to use
+ * foldThreadJournal() as the full-history grammar oracle.
+ */
+export function foldThreadJournalAppend(
+  current: FoldedThreadJournal,
+  records: readonly [RuntimeJournalRecord, ...RuntimeJournalRecord[]],
+): FoldedThreadJournal {
+  return foldThreadJournalRecords(current.meta, records, current);
+}
+
+function foldThreadJournalRecords(
+  meta: ThreadMetaRecord,
+  records: readonly RuntimeJournalRecord[],
+  current?: FoldedThreadJournal,
+  reuseValidatedCheckpointSubtrees = current !== undefined,
+): FoldedThreadJournal {
+  const envelopes: Readonly<EventEnvelope>[] = current === undefined ? [] : [...current.envelopes];
+  const mailbox = current === undefined
+    ? new Map<OpId, FoldedMailboxEntry>() : new Map(current.mailbox);
+  const runs = current === undefined
+    ? new Map<RunId, FoldedRunEntry>() : new Map(current.runs);
+  const turns = current === undefined
+    ? new Map<string, FoldedTurnEntry>() : new Map(current.turns);
+  const messageTurnIds = current === undefined
+    ? new Map<string, TurnId>() : new Map(current.messageTurnIds);
+  const inputOwners = current === undefined
+    ? new Map<OpId, { readonly sourceOpId: OpId }>() : new Map(current.inputOwners);
+  const pendingThreadResults = current === undefined
+    ? new Map<import('../protocol/index.js').DerivedOpId,
+        Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>()
+    : new Map(current.pendingThreadResults);
+  const deliveredThreadResults = current === undefined
+    ? new Set<import('../protocol/index.js').DerivedOpId>() : new Set(current.deliveredThreadResults);
+  const usedRequestIds = current === undefined
+    ? new Set<string>() : new Set(current.usedRequestIds);
+  const observedRuleScopes = current === undefined
+    ? new Set<string>() : new Set(current.observedRuleScopes);
+  const controlClaims = current === undefined ? new Map<string, {
     readonly responseOpId: import('../protocol/index.js').ExternalOpId;
     readonly decision: import('../protocol/index.js').ControlResponseDecision;
     readonly acceptedAt: number;
-  }>();
-  let checkpoint = emptyCheckpoint(meta.model);
-  let summary: ThreadSummary = {
-    threadId: meta.threadId,
-    ...(meta.parentThreadId !== undefined && { parentThreadId: meta.parentThreadId }),
-    createdAt: meta.createdAt,
-    state: 'idle',
-  };
-  let highWaterSeq = 0;
+  }>() : new Map(current.controlClaims);
+  let checkpoint = current?.checkpoint ?? emptyCheckpoint(meta.model);
+  let summary: ThreadSummary = current?.summary ?? {
+      threadId: meta.threadId,
+      ...(meta.parentThreadId !== undefined && { parentThreadId: meta.parentThreadId }),
+      createdAt: meta.createdAt,
+      state: 'idle',
+    };
+  let highWaterSeq = current?.highWaterSeq ?? 0;
 
-  for (const record of records.slice(1)) {
+  for (const record of records) {
     if (record.type === 'legacy_seed') {
       const turnProvenance = record.turnProvenance
         ?? deriveLegacySeedTurnProvenance(record.sourceSessionId, record.transcript);
@@ -240,7 +283,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
       for (const provenance of turnProvenance) {
         messageTurnIds.set(provenance.messageId, provenance.turnId);
       }
-      checkpoint = snapshot({
+      checkpoint = finalizeCheckpoint({
         frontend: {
           ...checkpoint.frontend,
           transcript: record.transcript,
@@ -249,7 +292,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
         execution: {
           ...(record.compaction !== undefined && { compaction: record.compaction }),
         },
-      });
+      }, reuseValidatedCheckpointSubtrees);
       continue;
     }
     if (record.type === 'mailbox_prepare') {
@@ -318,7 +361,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
         ...(validated.runId !== undefined && { runId: validated.runId }),
         ...(validated.turnId !== undefined && { turnId: validated.turnId }),
         ...(validated.opId !== undefined && { opId: validated.opId }),
-      });
+      }, undefined, reuseValidatedCheckpointSubtrees);
       if (validated.event.type === 'thread_created'
         || validated.event.type === 'thread_resumed'
         || validated.event.type === 'thread_updated') {
@@ -433,7 +476,10 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
           break;
         }
         case 'model_selected':
-          checkpoint = { ...checkpoint, frontend: { ...checkpoint.frontend, model: mutation.model } };
+          checkpoint = finalizeCheckpoint({
+            ...checkpoint,
+            frontend: { ...checkpoint.frontend, model: mutation.model },
+          }, reuseValidatedCheckpointSubtrees);
           break;
         case 'control_response_claimed':
           controlClaims.set(mutation.requestId, {
@@ -448,10 +494,16 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
           }
           break;
         case 'compaction_committed':
-          checkpoint = { ...checkpoint, execution: { ...checkpoint.execution, compaction: mutation.compaction } };
+          checkpoint = finalizeCheckpoint({
+            ...checkpoint,
+            execution: { ...checkpoint.execution, compaction: mutation.compaction },
+          }, reuseValidatedCheckpointSubtrees);
           break;
         case 'activity_interrupted':
-          checkpoint = { ...checkpoint, frontend: withoutActivity(checkpoint.frontend) };
+          checkpoint = finalizeCheckpoint({
+            ...checkpoint,
+            frontend: withoutActivity(checkpoint.frontend),
+          }, reuseValidatedCheckpointSubtrees);
           summary = {
             ...withoutActiveRun(summary, 'suspended'),
             suspendedWork: [{
@@ -577,6 +629,7 @@ function reduceDriverCheckpoint(
   current: ThreadDriverCheckpoint,
   input: ThreadDriverEvent,
   mutation?: ThreadDriverCheckpointMutation,
+  reuseValidatedSubtrees = false,
 ): ThreadDriverCheckpoint {
   const event = input.event;
   let frontend = current.frontend;
@@ -691,7 +744,7 @@ function reduceDriverCheckpoint(
   } else if (mutation?.type === 'activity_interrupted') {
     frontend = withoutActivity(frontend);
   }
-  return snapshot({ frontend, execution });
+  return finalizeCheckpoint({ frontend, execution }, reuseValidatedSubtrees);
 }
 
 function turnKey(runId: RunId, ordinal: number): string {
@@ -881,6 +934,22 @@ function withoutActivity(
 
 function snapshot<T>(value: T): T {
   return strictJsonSnapshot(value) as T;
+}
+
+function finalizeCheckpoint<T>(value: T, reuseValidatedSubtrees: boolean): T {
+  if (!reuseValidatedSubtrees) return snapshot(value);
+  // Incremental fold starts from a projection produced by the cold fold or an earlier append,
+  // and every appended record has already crossed strictJsonSnapshot plus envelope validation.
+  // Freeze only newly allocated path-copy nodes. Encountering a frozen child means it is one of
+  // those already-validated immutable subtrees, so streaming updates never walk historical
+  // transcript/tool-result payloads merely to install a new partialAssistant reference.
+  return freezeDerivedJson(value);
+}
+
+function freezeDerivedJson<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) freezeDerivedJson(child);
+  return Object.freeze(value);
 }
 
 function compareUtf8(left: string, right: string): number {

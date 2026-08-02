@@ -477,6 +477,18 @@ interface ThreadPresentationState {
   snapshot-only 历史没有历史 envelope。`fallbackBlockKeys` 以距离从近到远保存一个有界邻居链。
 - resize 只重算 visual rows，不改 scroll anchor 的 `(blockKey, logicalOffset)`。用户手动上滚后 live event 只
   增加 unread，不抢回 sticky bottom；jump-to-latest 才清 unread。
+- wheel 输入按“一次事件、一帧”结算。只有 ScrollBox 布局后实际移动或在 segment 顶部实际装载更早历史，
+  才进入 manual scroll；queued Markdown 尚无可滚动布局时的 no-op 不写 anchor、manual 或 unread。
+  manual 期间暂停 native sticky，连续小幅上滚不得在 `maximum - 1` 回弹；明确下滚到精确 maximum、
+  `End` 或 `/latest` 才恢复 sticky 并清 unread。只有真实 viewport 变化才重抓 stable anchor；live 输出
+  复用已提交 anchor，且每个 unread interval 只持久化一次 boundary，不能按 provider delta 扫描全部 block，
+  也不能选中尚未布局、坐标仍为默认值的新 block。首次 PageUp 装载 segment 后必须产生 page 级可见位移。
+- transcript reset 建立新的 presentation generation；旧 thread 排队中的 anchor restore、segment load、wheel
+  和 search frame callback 都不得写入新 thread 的 viewport 或 durable state。
+- active panel 是 transcript/diff/sessions 可见性和输入路由的唯一 presentation 判据。diff 或 sessions 打开时，
+  live event、status/composer refresh 与 resize 不得重新显示 transcript；键盘与鼠标只作用于当前可见 panel。
+  panel payload 不属于 durable presentation state，恢复时必须同步回退 transcript；异步 diff/session 查询只有在
+  发起它的 panel generation 仍 active 时才能提交可见结果。
 - 恢复时先找 exact blockKey，再找首个仍存在的 fallback key。compaction 已删除全部候选时定位到新 summary/
   第一个 surviving block，并明确显示“锚点内容已压缩”；这是内容已被权威 compaction 删除后的诚实 fallback，
   不能把 envelope seq 伪装成仍可定位的 transcript identity。`observedHighWaterSeq`/`unreadAfterSeq` 只用于

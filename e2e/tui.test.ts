@@ -20,6 +20,7 @@ import {
   assertSanitizedTestEnvironment,
   sanitizedTestEnvironment,
 } from '../scripts/test-environment.js';
+import { killProcessTree } from '../src/shared/kill-process-tree.js';
 import {
   CASE_TIMEOUT_MS,
   DIST_MAIN,
@@ -60,7 +61,11 @@ function expectTerminalRestored(output: string, requireEntered = true): void {
 function expectPtyTermiosRestored(output: string): void {
   const readMode = (marker: string): string => {
     const match = new RegExp(`__CODA_TERMIOS_${marker}__([^\\r\\n]+)`, 'u').exec(output);
-    expect(match, `missing PTY termios ${marker.toLocaleLowerCase('en-US')} marker`).not.toBeNull();
+    expect(
+      match,
+      `missing PTY termios ${marker.toLocaleLowerCase('en-US')} marker\n` +
+        output.slice(-OUTPUT_PREVIEW_LIMIT),
+    ).not.toBeNull();
     return match?.[1]?.trim() ?? '';
   };
   const before = readMode('BEFORE');
@@ -103,6 +108,72 @@ function readPersistedText(root: string): string {
   return chunks.join('\n');
 }
 
+function readPersistedUserTexts(root: string): readonly string[] {
+  const texts: string[] = [];
+  const collect = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+      return;
+    }
+    if (typeof value !== 'object' || value === null) return;
+    const record = value as Record<string, unknown>;
+    if (record.role === 'user' && Array.isArray(record.content)) {
+      const text = record.content
+        .flatMap((part) => {
+          if (typeof part !== 'object' || part === null) return [];
+          const content = part as Record<string, unknown>;
+          return content.type === 'text' && typeof content.text === 'string' ? [content.text] : [];
+        })
+        .join('');
+      texts.push(text);
+    }
+    for (const child of Object.values(record)) collect(child);
+  };
+  const visit = (target: string): void => {
+    if (!existsSync(target)) return;
+    const stat = statSync(target);
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(target)) visit(path.join(target, name));
+      return;
+    }
+    if (!stat.isFile()) return;
+    for (const line of readFileSync(target, 'utf8').split(/\r?\n/u)) {
+      if (line.trim() === '') continue;
+      try {
+        collect(JSON.parse(line));
+      } catch {
+        // Presentation and auxiliary files may use pretty-printed JSON. The canonical and legacy
+        // journals that own committed user messages are JSONL and are handled above.
+      }
+    }
+  };
+  visit(root);
+  return texts;
+}
+
+function readWheelProbeRows(output: string): readonly (number | undefined)[] {
+  const rows: (number | undefined)[] = [];
+  const marker = /__CODA_WHEEL_SCREEN_(\d+)__/gu;
+  let offset = 0;
+  for (const match of output.matchAll(marker)) {
+    const matchIndex = match.index;
+    if (matchIndex === undefined) continue;
+    const frame = output.slice(offset, matchIndex);
+    const probeIndex = frame.lastIndexOf('wheelProbeComplete = true;');
+    let probeRow: number | undefined;
+    if (probeIndex >= 0) {
+      const cursor = /\x1b\[(\d+);(\d+)H/gu;
+      for (const cursorMatch of frame.slice(0, probeIndex).matchAll(cursor)) {
+        const encodedRow = cursorMatch[1];
+        if (encodedRow !== undefined) probeRow = Number(encodedRow);
+      }
+    }
+    rows.push(probeRow);
+    offset = matchIndex + match[0].length;
+  }
+  return rows;
+}
+
 async function pumpText(
   stream: ReadableStream<Uint8Array>,
   onChunk: (text: string) => void,
@@ -126,6 +197,7 @@ function waitForPtyExit(
   completion: Promise<number>,
   child: ReturnType<typeof Bun.spawn>,
   output: () => string,
+  watchdogMs = WATCHDOG_MS,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let settled = false;
@@ -135,11 +207,11 @@ function waitForPtyExit(
       child.kill(9);
       reject(
         new Error(
-          `watchdog: PTY did not exit within ${WATCHDOG_MS}ms\n` +
+          `watchdog: PTY did not exit within ${watchdogMs}ms\n` +
             output().slice(-OUTPUT_PREVIEW_LIMIT),
         ),
       );
-    }, WATCHDOG_MS);
+    }, watchdogMs);
     timer.unref();
 
     void completion.then(
@@ -172,9 +244,22 @@ async function runPty(
     readonly finalDelayMs?: number;
     readonly resize?: { readonly columns: number; readonly rows: number };
     readonly waitFile?: string;
+    readonly wheelProbe?: {
+      readonly x: number;
+      readonly y: number;
+      readonly directions: readonly ('up' | 'down')[];
+      readonly frameDelayMs?: number;
+    };
+    readonly afterWheelInput?: string;
+    readonly exitMarker?: string;
+    readonly exitJournalRoot?: string;
+    readonly exitInput?: string;
+    readonly exitDelayMs?: number;
+    readonly watchdogMs?: number;
   } = {},
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   const driverPath = path.join(root, `expect-${crypto.randomUUID()}.tcl`);
+  const spawnedPidPath = path.join(root, `expect-child-${crypto.randomUUID()}.pid`);
   writeFileSync(driverPath, [
     'set timeout 15',
     'set ready [lindex $argv 0]',
@@ -186,8 +271,73 @@ async function runPty(
     'set columns [lindex $argv 6]',
     'set rows [lindex $argv 7]',
     'set wait_file [lindex $argv 8]',
-    'set command [lrange $argv 9 end]',
+    'set wheel_directions [lindex $argv 9]',
+    'set mouse_x [lindex $argv 10]',
+    'set mouse_y [lindex $argv 11]',
+    'set wheel_frame_delay [lindex $argv 12]',
+    'set after_wheel_payload [lindex $argv 13]',
+    'set exit_ready [lindex $argv 14]',
+    'set exit_journal_root [lindex $argv 15]',
+    'set exit_payload [lindex $argv 16]',
+    'set exit_delay [lindex $argv 17]',
+    'set child_pid_file [lindex $argv 18]',
+    'set command [lrange $argv 19 end]',
+    'proc drain_pending_output {} {',
+    '  set previous_timeout $::timeout',
+    '  set ::timeout 0',
+    '  expect {',
+    '    -re {.+} { exp_continue }',
+    '    timeout {}',
+    '    eof {}',
+    '  }',
+    '  set ::timeout $previous_timeout',
+    '}',
+    'proc wait_for_render_frame {frame_delay} {',
+    '  set previous_timeout $::timeout',
+    '  set ::timeout 2',
+    '  expect {',
+    '    -exact "\\x1b\\[?2026l" {}',
+    '    timeout { exit 126 }',
+    '    eof { exit 125 }',
+    '  }',
+    '  set ::timeout $previous_timeout',
+    '  after $frame_delay',
+    '}',
+    'proc mark_wheel_snapshot {index} {',
+    '  puts -nonewline "__CODA_WHEEL_SCREEN_${index}__"',
+    '  flush stdout',
+    '}',
+    'proc file_contains_ordered {target before after} {',
+    '  if {[file isdirectory $target]} {',
+    '    foreach child [glob -nocomplain -directory $target * .*] {',
+    '      set name [file tail $child]',
+    '      if {$name eq "." || $name eq ".."} { continue }',
+    '      if {[file_contains_ordered $child $before $after]} { return 1 }',
+    '    }',
+    '    return 0',
+    '  }',
+    '  if {![file isfile $target]} { return 0 }',
+    '  if {[catch {set handle [open $target r]}]} { return 0 }',
+    '  fconfigure $handle -encoding utf-8 -translation binary',
+    '  set data [read $handle]',
+    '  close $handle',
+    '  set before_index [string first $before $data]',
+    '  if {$before_index < 0} { return 0 }',
+    '  set after_index [string first $after $data [expr {$before_index + [string length $before]}]]',
+    '  return [expr {$after_index >= 0}]',
+    '}',
+    'proc wait_for_journal_completion {root marker} {',
+    '  set waited 0',
+    '  while {![file_contains_ordered $root $marker {"type":"op_completed"}] && $waited < 15000} {',
+    '    after 25',
+    '    incr waited 25',
+    '  }',
+    '  if {![file_contains_ordered $root $marker {"type":"op_completed"}]} { exit 124 }',
+    '}',
     'spawn -noecho /bin/sh -c {read _coda_start; "$@"; _coda_status=$?; printf "\\n__CODA_CHILD_EXITED__\\n"; read _coda_finish; exit $_coda_status} sh {*}$command',
+    'set child_pid_handle [open $child_pid_file w]',
+    'puts -nonewline $child_pid_handle [exp_pid]',
+    'close $child_pid_handle',
     'set pty_name $spawn_out(slave,name)',
     'exec /bin/sh -c "stty sane < $pty_name"',
     'set termios_before [exec /bin/sh -c "stty -g < $pty_name"]',
@@ -222,9 +372,44 @@ async function runPty(
     '    eof {}',
     '  }',
     '}',
+    'if {$wheel_directions ne ""} {',
+    '  wait_for_render_frame $wheel_frame_delay',
+    '  drain_pending_output',
+    '  set wheel_index 0',
+    '  mark_wheel_snapshot $wheel_index',
+    '  foreach direction [split $wheel_directions ""] {',
+    '    if {$direction eq "u"} {',
+    '      set button 64',
+    '    } else {',
+    '      set button 65',
+    '    }',
+    '    drain_pending_output',
+    '    send -- "\\x1b\\[<${button};${mouse_x};${mouse_y}M"',
+    '    wait_for_render_frame $wheel_frame_delay',
+    '    drain_pending_output',
+    '    incr wheel_index',
+    '    mark_wheel_snapshot $wheel_index',
+    '  }',
+    '}',
+    'if {$after_wheel_payload ne ""} {',
+    '  send -- $after_wheel_payload',
+    '  after $wheel_frame_delay',
+    '  drain_pending_output',
+    '}',
     'if {$final_payload ne ""} {',
     '  after $final_delay',
     '  send -- $final_payload',
+    '}',
+    'if {$exit_ready ne ""} {',
+    '  expect {',
+    '    -exact $exit_ready {',
+    '      if {$exit_journal_root ne ""} { wait_for_journal_completion $exit_journal_root $exit_ready }',
+    '      after $exit_delay',
+    '      send -- $exit_payload',
+    '    }',
+    '    timeout { exit 124 }',
+    '    eof {}',
+    '  }',
     '}',
     'expect {',
     '  -exact "__CODA_CHILD_EXITED__" {}',
@@ -254,6 +439,16 @@ async function runPty(
       options.resize === undefined ? '' : String(options.resize.columns),
       options.resize === undefined ? '' : String(options.resize.rows),
       options.waitFile ?? '',
+      options.wheelProbe?.directions.map((direction) => direction[0]).join('') ?? '',
+      options.wheelProbe === undefined ? '' : String(options.wheelProbe.x),
+      options.wheelProbe === undefined ? '' : String(options.wheelProbe.y),
+      String(options.wheelProbe?.frameDelayMs ?? 50),
+      options.afterWheelInput ?? '',
+      options.exitMarker ?? '',
+      options.exitJournalRoot ?? '',
+      options.exitInput ?? '',
+      String(options.exitDelayMs ?? 0),
+      spawnedPidPath,
       Bun.argv[0] as string,
       '--no-env-file',
       DIST_MAIN,
@@ -280,15 +475,29 @@ async function runPty(
     ([exitCode]) => exitCode,
   );
   void completion.catch(() => undefined);
+  let terminalRestored = false;
   try {
     const code = await waitForPtyExit(
       completion,
       child,
       () => `stdout=${JSON.stringify(stdout)}\nstderr=${JSON.stringify(stderr)}`,
+      options.watchdogMs,
     );
     expectPtyTermiosRestored(stdout);
+    terminalRestored = true;
     return { code, stdout, stderr };
   } finally {
+    if (!terminalRestored && existsSync(spawnedPidPath)) {
+      const spawnedPid = Number.parseInt(readFileSync(spawnedPidPath, 'utf8'), 10);
+      if (Number.isSafeInteger(spawnedPid) && spawnedPid > 0) {
+        await killProcessTree(spawnedPid, { graceMs: 250 });
+        try {
+          process.kill(spawnedPid, 'SIGKILL');
+        } catch {
+          // The direct child normally exits with the process group; ESRCH is the expected case.
+        }
+      }
+    }
     child.kill();
   }
 }
@@ -469,6 +678,122 @@ test.skipIf(process.platform !== 'darwin')(
       expect(readPersistedText(path.join(root, 'sessions'))).toContain(
         '"text":"first line\\nsecond line"',
       );
+      expectTerminalRestored(result.stdout);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  { timeout: CASE_TIMEOUT_MS },
+);
+
+test.skipIf(process.platform !== 'darwin')(
+  '真实 PTY 逐帧处理鼠标滚轮 SGR，且不把转义序列写入 composer 或 transcript',
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-wheel-'));
+    const home = path.join(root, '.home');
+    const longAnswer = [
+      '# Wheel probe',
+      ...Array.from(
+        { length: 50 },
+        (_, index) => `wheel-line-${String(index).padStart(3, '0')} · const value = ${index};`,
+      ),
+      '',
+      '```ts',
+      'const wheelProbeComplete = true;',
+      '```',
+    ].join('\n');
+    const scriptPath = writeFauxScript(root, {
+      turns: [
+        { events: [{ kind: 'text', text: longAnswer }] },
+        { events: [{ kind: 'text', text: 'WHEEL_PROBE_SECOND_TURN_COMPLETE' }] },
+      ],
+      onExhausted: 'emptyStop',
+    });
+    const env: Record<string, string> = {
+      ...sanitizedTestEnvironment(Bun.env),
+      HOME: home,
+      USERPROFILE: home,
+      TERM: 'xterm-256color',
+      NO_COLOR: '1',
+      COLUMNS: '80',
+      LINES: '24',
+    };
+    assertSanitizedTestEnvironment(env);
+
+    try {
+      const draft = 'wheel-draft-safe';
+      const result = await runPty(
+        root,
+        env,
+        tuiArgs(root, scriptPath),
+        'render a long wheel transcript\r',
+        {
+          readyMarker: 'Tips for getting started',
+          nextMarker: '∙ done',
+          nextInput: draft,
+          wheelProbe: {
+            // SGR coordinates are 1-based and stay inside the 80x24 transcript viewport.
+            x: 10,
+            y: 10,
+            directions: ['up', 'up', 'up', 'down', 'down', 'down'],
+            // Production is capped at 30 FPS. Expect waits for the synchronized-render frame
+            // terminator, then this gap keeps the next wheel event in a separate frame.
+            frameDelayMs: 50,
+          },
+          afterWheelInput: '\x1b[4~',
+          finalInput: '\r',
+          exitMarker: 'WHEEL_PROBE_SECOND_TURN_COMPLETE',
+          exitJournalRoot: path.join(root, 'sessions'),
+          exitInput: '/quit\r',
+          watchdogMs: 30_000,
+        },
+      );
+      expect(result.code, JSON.stringify(result).slice(-OUTPUT_PREVIEW_LIMIT)).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(result.stdout).toContain('WHEEL_PROBE_SECOND_TURN_COMPLETE');
+      expect(result.stdout).not.toMatch(/(?:\x1b\[|\[)?<?6[45];\d+;\d+[Mm]/u);
+
+      const probeRows = readWheelProbeRows(result.stdout);
+      expect(probeRows).toHaveLength(7);
+      expect(
+        probeRows.every((row): row is number => row !== undefined),
+        JSON.stringify({ probeRows }),
+      ).toBe(true);
+      const [
+        atBottom,
+        afterFirstUp,
+        afterSecondUp,
+        afterThirdUp,
+        afterFirstDown,
+        afterSecondDown,
+        afterThirdDown,
+      ] = probeRows as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ];
+      // Scrolling the viewport upward moves a stable content row downward on screen. Every event
+      // must advance it; a native-sticky bounce would repeat or reverse one of these inequalities.
+      expect(afterFirstUp).toBeGreaterThan(atBottom);
+      expect(afterSecondUp).toBeGreaterThan(afterFirstUp);
+      expect(afterThirdUp).toBeGreaterThan(afterSecondUp);
+      expect(afterFirstDown).toBeLessThan(afterThirdUp);
+      expect(afterSecondDown).toBeLessThan(afterFirstDown);
+      expect(afterThirdDown).toBeLessThan(afterSecondDown);
+      expect(afterThirdDown).toBe(atBottom);
+
+      const persistedRoot = path.join(root, 'sessions');
+      const persisted = readPersistedText(persistedRoot);
+      const persistedUserTexts = readPersistedUserTexts(persistedRoot);
+      const submittedDrafts = persistedUserTexts.filter((text) => text.includes(draft));
+      expect(submittedDrafts.length).toBeGreaterThan(0);
+      expect(submittedDrafts.every((text) => text === draft)).toBe(true);
+      expect(persistedUserTexts).not.toContainEqual(expect.stringMatching(/[\u0000-\u001f\u007f-\u009f]/u));
+      expect(persisted).not.toMatch(/(?:\\u001b|\x1b)?(?:\\?\[)?<?6[45];\d+;\d+[Mm]/u);
       expectTerminalRestored(result.stdout);
     } finally {
       rmSync(root, { recursive: true, force: true });

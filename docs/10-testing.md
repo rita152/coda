@@ -268,6 +268,28 @@ observer gate 未开 → Agent 与另一个 thread 仍必须完成
 shutdown           → headless 自己的输出泵等待 drain 后退出
 ```
 
+repository 另有一组不依赖 wall clock 的增量 fold 门禁：generic repository 的 fold spy 证明 cold full fold
+只在初始化调用一次，连续 N 次 hot append 的 incremental callback 只接收 N 条新增 record，而不是访问
+`1+2+…+N` 条历史；thread journal 对每个 prefix 与不同 batch partition 比较 incremental state 和 cold
+`foldThreadJournal(records)`，必须覆盖全部 Map/Set、envelopes、checkpoint 与 summary。测试还要证明同批
+前一 record 的 mutation 对后一 record 可见、非法 suffix/append failure 不修改当前 projection、历史
+validated envelope identity 不被重新 snapshot；连续 `message_update` 还必须保持未变化 transcript 数组及
+历史 message 的 identity，证明 hot checkpoint path-copy 没有再次遍历巨大 tool result。性能调查可以用
+冻结的长 journal 报告 full/incremental 耗时对照，但 CI pass/fail 只依赖上述 record-visit、identity 与
+differential 不变量，不设置易抖动的毫秒阈值。
+
+cold fold 还必须有非 wall-clock 的复杂度门禁：在已完成历史 message 中放置唯一大 sentinel，再跟随
+多次累计 `message_update`，通过字符访问 spy 证明历史 payload 只在输入 record validation 与最终
+checkpoint snapshot 中被常数次访问，而不是随 update 数重复扫描。另用“倒数第二个 partial 含非法
+Unicode、最后一个 partial 合法”的 journal 证明每条中间 record 仍逐条 strict-validate；最终 checkpoint
+必须与源 records 脱离并保持递归冻结，且继续与 incremental prefix/batch fold 逐字段等价。
+
+文件 journal port 另以 fs spy 证明一次 writable load 后连续 N 次 append 不再调用 JSONL
+`readFileSync`，但 reopen/cold load 仍逐字段得到相同 records。边界测试必须覆盖合法外部 append、同尺寸
+新 inode replacement 都在写入前 fail closed，opened inode 与 replacement 均不被改写；非法 multi-record
+batch 不得泄漏 candidate grammar state，随后同一合法 record 仍可追加。append-before-load 还要证明只
+lazy full repair 一次；既有 torn-tail/final-LF 用例继续证明显式 writable load 是 repair/rebase 点。
+
 同时对每个 observer 断言局部 FIFO；慢 observer 队列溢出必须得到显式 disconnect/gap，observer
 throw 不得变成 run error。approval 请求先提交再等待，response 也先提交再 resolve；abort 竞态的
 结案必须是 aborted，不得投影成 deny。分别断言 gap iterator drain 后 throw

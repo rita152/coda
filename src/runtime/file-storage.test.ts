@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   statSync,
@@ -141,6 +142,156 @@ describe('FileRuntimeStorage', () => {
     );
     await fixture.journal.append([next], { flush: true });
     expect(await fixture.journal.load()).toHaveLength(3);
+
+    await fixture.journal.releaseWriteLease();
+    await fixture.workspace.releaseSupervisorLease(fixture.lease);
+    await fixture.workspace.close();
+  });
+
+  test('does not rescan validated journal history for each leased append', async () => {
+    const root = temporaryDirectory();
+    const moduleUrl = pathToFileURL(path.join(import.meta.dir, 'file-storage.ts')).href;
+    const childCode = `
+      const { mock } = await import('bun:test');
+      const actualFs = await import('node:fs');
+      const nativeReadFileSync = actualFs.readFileSync;
+      let journalReads = 0;
+      mock.module('node:fs', () => ({
+        ...actualFs,
+        readFileSync(file, ...args) {
+          if (typeof file === 'string' && file.endsWith('.jsonl')) journalReads++;
+          return nativeReadFileSync(file, ...args);
+        },
+      }));
+      const { createFileRuntimeStorage } = await import(${JSON.stringify(moduleUrl)});
+      const root = ${JSON.stringify(root)};
+      const cwd = root + '/cwd';
+      const workspaceId = 'ws_incremental_journal_append';
+      const threadId = 'th_incremental_journal_append';
+      const storage = createFileRuntimeStorage({ root });
+      const workspace = await storage.openWorkspace({ cwd, workspaceId });
+      const lease = await workspace.acquireSupervisorLease('incremental-journal-append');
+      const journal = await workspace.createThreadJournal(lease, {
+        threadId,
+        meta: {
+          type: 'thread_meta',
+          version: 2,
+          protocolVersion: '1.0.0',
+          workspaceId,
+          threadId,
+          permissionCeiling: { revision: 'test', constraints: [] },
+          createdAt: 1,
+          cwd,
+          model: { provider: 'faux', api: 'faux', model: 'test' },
+        },
+      });
+      await journal.acquireWriteLease(lease);
+      await journal.load();
+      journalReads = 0;
+      for (let index = 1; index <= 8; index++) {
+        const suffix = String(index).padStart(32, '0');
+        const opId = 'op_e_' + suffix;
+        await journal.append([{
+          type: 'mailbox_prepare',
+          opId,
+          op: { type: 'prompt', opId, workspaceId, threadId, text: 'x' },
+          timestamp: index,
+        }], { flush: true });
+      }
+      const appendJournalReads = journalReads;
+      const journalFile = actualFs.readdirSync(root + '/ws-' + (await import(${JSON.stringify(
+        pathToFileURL(path.join(import.meta.dir, '../protocol/index.ts')).href,
+      )})).sha256Hex(workspaceId) + '/threads')
+        .find((name) => name.endsWith('.jsonl'));
+      const journalText = nativeReadFileSync(
+        root + '/ws-' + (await import(${JSON.stringify(
+          pathToFileURL(path.join(import.meta.dir, '../protocol/index.ts')).href,
+        )})).sha256Hex(workspaceId) + '/threads/' + journalFile,
+        'utf8',
+      );
+      await journal.releaseWriteLease();
+      await workspace.releaseSupervisorLease(lease);
+      await workspace.close();
+      console.log(JSON.stringify({
+        appendJournalReads,
+        recordCount: journalText.trimEnd().split('\\n').length,
+      }));
+    `;
+    const child = Bun.spawn([process.execPath, '-e', childCode], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+    expect(JSON.parse(stdout)).toEqual({ appendJournalReads: 0, recordCount: 9 });
+  });
+
+  test('fails closed when a leased journal changes outside the active writer', async () => {
+    const fixture = await createJournalFixture();
+    const file = journalPath(fixture.root, fixture.workspaceId, fixture.threadId);
+    await fixture.journal.load();
+    const foreign = mailboxPrepare(
+      'op_e_33333333333333333333333333333333' as ExternalOpId,
+      fixture.workspaceId,
+      fixture.threadId,
+    );
+    appendFileSync(file, `${JSON.stringify(foreign)}\n`, 'utf8');
+    const local = mailboxPrepare(
+      'op_e_44444444444444444444444444444444' as ExternalOpId,
+      fixture.workspaceId,
+      fixture.threadId,
+    );
+
+    await expect(fixture.journal.append([local], { flush: true }))
+      .rejects.toMatchObject({ code: 'invalid_thread_journal' });
+    expect(readFileSync(file, 'utf8').trimEnd().split('\n')).toHaveLength(2);
+
+    await fixture.journal.releaseWriteLease();
+    await fixture.workspace.releaseSupervisorLease(fixture.lease);
+    await fixture.workspace.close();
+  });
+
+  test('rejects same-size journal replacement through the leased append descriptor', async () => {
+    const fixture = await createJournalFixture();
+    const file = journalPath(fixture.root, fixture.workspaceId, fixture.threadId);
+    await fixture.journal.load();
+    const original = readFileSync(file);
+    const displaced = `${file}.displaced`;
+    renameSync(file, displaced);
+    writeFileSync(file, original);
+    const local = mailboxPrepare(
+      'op_e_55555555555555555555555555555555' as ExternalOpId,
+      fixture.workspaceId,
+      fixture.threadId,
+    );
+
+    await expect(fixture.journal.append([local], { flush: true }))
+      .rejects.toMatchObject({ code: 'invalid_thread_journal' });
+    expect(readFileSync(file)).toEqual(original);
+    expect(readFileSync(displaced)).toEqual(original);
+
+    await fixture.journal.releaseWriteLease();
+    await fixture.workspace.releaseSupervisorLease(fixture.lease);
+    await fixture.workspace.close();
+  });
+
+  test('isolates a failed incremental batch and lazily initializes an unloaded writer', async () => {
+    const fixture = await createJournalFixture();
+    const prepare = mailboxPrepare(
+      'op_e_66666666666666666666666666666666' as ExternalOpId,
+      fixture.workspaceId,
+      fixture.threadId,
+    );
+
+    await expect(fixture.journal.append([prepare, prepare], { flush: true }))
+      .rejects.toMatchObject({ code: 'invalid_thread_journal' });
+    expect(await fixture.journal.load()).toHaveLength(1);
+    await fixture.journal.append([prepare], { flush: true });
+    expect(await fixture.journal.load()).toHaveLength(2);
 
     await fixture.journal.releaseWriteLease();
     await fixture.workspace.releaseSupervisorLease(fixture.lease);

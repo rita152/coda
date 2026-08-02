@@ -10,11 +10,16 @@ export interface TranscriptJournalPort<TRecord> {
 }
 
 export type TranscriptFold<TRecord, TState> = (records: readonly TRecord[]) => TState;
+export type TranscriptAppendFold<TRecord, TState> = (
+  current: TState,
+  appended: readonly [TRecord, ...TRecord[]],
+) => TState;
 
 export interface TranscriptRepositoryOptions<TRecord, TState> {
   readonly journal: TranscriptJournalPort<TRecord>;
   readonly records: readonly TRecord[];
   readonly fold: TranscriptFold<TRecord, TState>;
+  readonly foldAppend?: TranscriptAppendFold<TRecord, TState>;
 }
 
 /**
@@ -26,6 +31,7 @@ export interface TranscriptRepositoryOptions<TRecord, TState> {
 export class TranscriptRepository<TRecord, TState> {
   readonly #journal: TranscriptJournalPort<TRecord>;
   readonly #fold: TranscriptFold<TRecord, TState>;
+  readonly #foldAppend?: TranscriptAppendFold<TRecord, TState>;
   readonly #records: TRecord[];
   #state: TState;
   #closed = false;
@@ -33,6 +39,7 @@ export class TranscriptRepository<TRecord, TState> {
   constructor(options: TranscriptRepositoryOptions<TRecord, TState>) {
     this.#journal = options.journal;
     this.#fold = options.fold;
+    this.#foldAppend = options.foldAppend;
     this.#records = options.records.map(snapshotRecord);
     this.#state = options.fold(this.#records);
   }
@@ -40,12 +47,14 @@ export class TranscriptRepository<TRecord, TState> {
   static async load<TRecord, TState>(options: {
     readonly journal: TranscriptJournalPort<TRecord>;
     readonly fold: TranscriptFold<TRecord, TState>;
+    readonly foldAppend?: TranscriptAppendFold<TRecord, TState>;
   }): Promise<TranscriptRepository<TRecord, TState>> {
     const records = await options.journal.load();
     return new TranscriptRepository({
       journal: options.journal,
       records,
       fold: options.fold,
+      ...(options.foldAppend !== undefined && { foldAppend: options.foldAppend }),
     });
   }
 
@@ -60,10 +69,11 @@ export class TranscriptRepository<TRecord, TState> {
   async append(records: readonly [TRecord, ...TRecord[]]): Promise<void> {
     if (this.#closed) throw new Error('TranscriptRepository is closed');
     const snapshots = records.map(snapshotRecord) as [TRecord, ...TRecord[]];
-    const candidateRecords = [...this.#records, ...snapshots];
     // Fold is also the journal grammar validator. Run it before IO so malformed batches can never
     // become durable, then install the already-validated state only after the flush succeeds.
-    const candidateState = this.#fold(candidateRecords);
+    const candidateState = this.#foldAppend === undefined
+      ? this.#fold([...this.#records, ...snapshots])
+      : this.#foldAppend(this.#state, snapshots);
     await this.#journal.append(snapshots, { flush: true });
     this.#records.push(...snapshots);
     this.#state = candidateState;

@@ -3,9 +3,11 @@
 // the workspace writer authority, while on-disk lock records are audit/fencing metadata only.
 
 import {
-  appendFileSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -14,7 +16,6 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
-  truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -1255,6 +1256,9 @@ class FileJournalPort implements ThreadJournalPort {
   #lockFd: number | undefined;
   #lockRecord: ThreadLockRecord | undefined;
   #lease: SupervisorLease | undefined;
+  #journalFd: number | undefined;
+  #journalBoundary: JournalFileBoundary | undefined;
+  #sequenceState: JournalSequenceState | undefined;
 
   constructor(
     private readonly workspace: FileWorkspacePort,
@@ -1312,7 +1316,14 @@ class FileJournalPort implements ThreadJournalPort {
       return readJournalRecords(this.file, this.workspace.workspaceId, this.threadId, 'strict');
     }
     this.workspace.assertFence(this.#lease);
-    return readJournalRecords(this.file, this.workspace.workspaceId, this.threadId, 'repair');
+    const loaded = readValidatedJournal(
+      this.file,
+      this.workspace.workspaceId,
+      this.threadId,
+      'repair',
+    );
+    this.#installValidatedBoundary(loaded);
+    return loaded.records;
   }
 
   async append(
@@ -1324,25 +1335,49 @@ class FileJournalPort implements ThreadJournalPort {
     }
     this.workspace.assertFence(this.#lease);
     if (records.length === 0) return;
-    const existing = readJournalRecords(
-      this.file,
-      this.workspace.workspaceId,
-      this.threadId,
-      'repair',
-    );
+    if (this.#sequenceState === undefined || this.#journalBoundary === undefined
+      || this.#journalFd === undefined) {
+      const loaded = readValidatedJournal(
+        this.file,
+        this.workspace.workspaceId,
+        this.threadId,
+        'repair',
+      );
+      this.#installValidatedBoundary(loaded);
+    }
+    const sequenceState = this.#sequenceState;
+    const boundary = this.#journalBoundary;
+    const journalFd = this.#journalFd;
+    if (sequenceState === undefined || boundary === undefined || journalFd === undefined) {
+      throw new RuntimeStorageError('invalid_thread_journal', `Thread ${this.threadId} has no append boundary`);
+    }
+    assertJournalFileBoundary(this.file, journalFd, boundary);
     const validated = records.map((record) =>
       validateJournalRecord(record, this.workspace.workspaceId, this.threadId, false));
-    validateJournalSequence([...existing, ...validated], this.workspace.workspaceId, this.threadId);
+    const nextSequenceState = validateJournalSequenceAppend(
+      validated,
+      this.workspace.workspaceId,
+      this.threadId,
+      sequenceState,
+    );
     const data = `${validated.map((record) => canonicalJson(record)).join('\n')}\n`;
-    appendFileSync(this.file, data, { encoding: 'utf8', flag: 'a' });
-    fsyncFile(this.file);
+    writeFileSync(journalFd, data, { encoding: 'utf8' });
+    fsyncSync(journalFd);
+    const nextBoundary = { ...boundary, size: boundary.size + Buffer.byteLength(data) };
+    assertJournalFileBoundary(this.file, journalFd, nextBoundary);
+    this.#sequenceState = nextSequenceState;
+    this.#journalBoundary = nextBoundary;
     this.workspace.updateCatalog(this.threadId, validated);
   }
 
   async releaseWriteLease(): Promise<void> {
     const record = this.#lockRecord;
     if (record !== undefined) unlinkIfExact(this.#lockFile, record);
+    if (this.#journalFd !== undefined) closeSync(this.#journalFd);
     if (this.#lockFd !== undefined) closeSync(this.#lockFd);
+    this.#journalFd = undefined;
+    this.#journalBoundary = undefined;
+    this.#sequenceState = undefined;
     this.#lockFd = undefined;
     this.#lockRecord = undefined;
     this.#lease = undefined;
@@ -1365,6 +1400,25 @@ class FileJournalPort implements ThreadJournalPort {
       throw new RuntimeStorageError('thread_in_use', `Thread ${this.threadId} lock changed during recovery`);
     }
     fsyncDirectory(path.dirname(this.#lockFile));
+  }
+
+  #installValidatedBoundary(loaded: Readonly<ValidatedJournal>): void {
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        this.file,
+        constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW,
+      );
+      assertJournalFileBoundary(this.file, fd, loaded.boundary);
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      if (error instanceof RuntimeStorageError) throw error;
+      throw storageFailure('invalid_thread_journal', this.file, error);
+    }
+    if (this.#journalFd !== undefined) closeSync(this.#journalFd);
+    this.#journalFd = fd;
+    this.#journalBoundary = loaded.boundary;
+    this.#sequenceState = loaded.sequenceState;
   }
 }
 
@@ -1531,256 +1585,325 @@ function readLegacySession(file: string): LegacySessionView {
   });
 }
 
+interface JournalFileBoundary {
+  readonly dev: number;
+  readonly ino: number;
+  readonly size: number;
+}
+
+interface ValidatedJournal {
+  readonly records: readonly RuntimeJournalRecord[];
+  readonly sequenceState: JournalSequenceState;
+  readonly boundary: JournalFileBoundary;
+}
+
 function readJournalRecords(
   file: string,
   workspaceId: WorkspaceId,
   threadId: ThreadId,
   mode: 'strict' | 'repair' | 'read_only',
 ): readonly RuntimeJournalRecord[] {
+  return readValidatedJournal(file, workspaceId, threadId, mode).records;
+}
+
+function readValidatedJournal(
+  file: string,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  mode: 'strict' | 'repair' | 'read_only',
+): ValidatedJournal {
   assertRegularFileNoSymlink(file);
-  const bytes = readFileSync(file);
+  const fd = openSync(
+    file,
+    (mode === 'repair' ? constants.O_RDWR | constants.O_APPEND : constants.O_RDONLY)
+      | constants.O_NOFOLLOW,
+  );
+  let initialBoundary: JournalFileBoundary;
+  let bytes: Buffer;
+  try {
+    const initialStat = fstatSync(fd);
+    initialBoundary = { dev: initialStat.dev, ino: initialStat.ino, size: initialStat.size };
+    assertJournalFileBoundary(file, fd, initialBoundary);
+    bytes = readFileSync(fd);
+    if (bytes.length !== initialBoundary.size) {
+      throw new RuntimeStorageError(
+        'invalid_thread_journal',
+        `Thread journal changed during load: ${file}`,
+      );
+    }
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
   const records: RuntimeJournalRecord[] = [];
   let cursor = 0;
   let line = 0;
   let lastGoodOffset = 0;
   let needsFinalNewline = false;
-  while (cursor < bytes.length) {
-    const newline = bytes.indexOf(0x0a, cursor);
-    const end = newline < 0 ? bytes.length : newline;
-    const next = newline < 0 ? bytes.length : newline + 1;
-    const text = bytes.subarray(cursor, end).toString('utf8');
-    line++;
-    if (text.length === 0) {
-      if (next === bytes.length) break;
-      throw new RuntimeStorageError('corrupt_thread_journal', `Empty journal record at line ${line}`);
-    }
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      const record = validateJournalRecord(parsed, workspaceId, threadId, records.length === 0);
-      records.push(record);
-      lastGoodOffset = next;
-      if (newline < 0 && mode === 'repair') needsFinalNewline = true;
-    } catch (error) {
-      if (next < bytes.length) {
-        throw storageFailure('corrupt_thread_journal', `${file}:${line}`, error);
+  let expectedSize = bytes.length;
+  try {
+    while (cursor < bytes.length) {
+      const newline = bytes.indexOf(0x0a, cursor);
+      const end = newline < 0 ? bytes.length : newline;
+      const next = newline < 0 ? bytes.length : newline + 1;
+      const text = bytes.subarray(cursor, end).toString('utf8');
+      line++;
+      if (text.length === 0) {
+        if (next === bytes.length) break;
+        throw new RuntimeStorageError('corrupt_thread_journal', `Empty journal record at line ${line}`);
       }
-      if (mode === 'strict') {
-        throw new RuntimeStorageError('corrupt_tail_requires_write_lease', `Thread ${threadId} has a corrupt tail`);
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        const record = validateJournalRecord(parsed, workspaceId, threadId, records.length === 0);
+        records.push(record);
+        lastGoodOffset = next;
+        if (newline < 0 && mode === 'repair') needsFinalNewline = true;
+      } catch (error) {
+        if (next < bytes.length) {
+          throw storageFailure('corrupt_thread_journal', `${file}:${line}`, error);
+        }
+        if (mode === 'strict') {
+          throw new RuntimeStorageError('corrupt_tail_requires_write_lease', `Thread ${threadId} has a corrupt tail`);
+        }
+        if (mode === 'read_only') break;
+        ftruncateSync(fd, lastGoodOffset);
+        fsyncSync(fd);
+        expectedSize = lastGoodOffset;
+        break;
       }
-      if (mode === 'read_only') break;
-      truncateSync(file, lastGoodOffset);
-      fsyncFile(file);
-      break;
+      cursor = next;
     }
-    cursor = next;
+    if (needsFinalNewline) {
+      writeFileSync(fd, '\n', 'utf8');
+      fsyncSync(fd);
+      expectedSize++;
+    }
+    if (records.length === 0 || records[0]?.type !== 'thread_meta') {
+      throw new RuntimeStorageError('invalid_thread_journal', `Thread ${threadId} has no meta header`);
+    }
+    const sequenceState = validateJournalSequence(records, workspaceId, threadId);
+    const storedRecords = snapshot(records);
+    const boundary = { ...initialBoundary, size: expectedSize };
+    assertJournalFileBoundary(file, fd, boundary);
+    return { records: storedRecords, sequenceState, boundary };
+  } finally {
+    closeSync(fd);
   }
-  if (needsFinalNewline) {
-    appendFileSync(file, '\n', 'utf8');
-    fsyncFile(file);
-  }
-  if (records.length === 0 || records[0]?.type !== 'thread_meta') {
-    throw new RuntimeStorageError('invalid_thread_journal', `Thread ${threadId} has no meta header`);
-  }
-  validateJournalSequence(records, workspaceId, threadId);
-  return snapshot(records);
+}
+
+interface JournalSequenceState {
+  recordCount: number;
+  readonly mailboxPrepares: Map<OpIdString, Extract<RuntimeJournalRecord, { type: 'mailbox_prepare' }>>;
+  readonly mailboxStates: Map<OpIdString, 'prepared' | 'accepted_pending' | 'started' | 'completed' | 'rejected'>;
+  readonly usedRunIds: Map<string, string>;
+  readonly runStates: Map<string, 'reserved' | 'started' | 'terminal'>;
+  readonly successorByPredecessor: Map<string, Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>>;
+  readonly successorByRun: Map<string, Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>>;
+  readonly turnByKey: Map<string, Extract<RuntimeJournalRecord, { type: 'turn_prepare' }>>;
+  readonly usedTurnIds: Map<string, string>;
+  readonly activatedTurns: Set<string>;
+  readonly pendingResults: Map<string, Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>;
+  readonly deliveredResults: Set<string>;
+  readonly usedRequestIds: Set<string>;
+  readonly controlClaims: Map<string, ExternalOpId>;
+  readonly observedRuleScopes: Set<string>;
+  legacySeedSeen: boolean;
+  nextSeq: number;
 }
 
 function validateJournalSequence(
   records: readonly RuntimeJournalRecord[],
   workspaceId: WorkspaceId,
   threadId: ThreadId,
-): void {
+): JournalSequenceState {
   if (records.length === 0 || records[0]?.type !== 'thread_meta') {
     throw new RuntimeStorageError('invalid_thread_journal', `Thread ${threadId} has no meta header`);
   }
+  return validateJournalSequenceAppend(records, workspaceId, threadId, emptyJournalSequenceState());
+}
 
-  const mailboxPrepares = new Map<OpIdString, Extract<RuntimeJournalRecord, { type: 'mailbox_prepare' }>>();
-  const mailboxStates = new Map<OpIdString, 'prepared' | 'accepted_pending' | 'started' | 'completed' | 'rejected'>();
-  const usedRunIds = new Map<string, string>();
-  const runStates = new Map<string, 'reserved' | 'started' | 'terminal'>();
-  const successorByPredecessor = new Map<string, Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>>();
-  const successorByRun = new Map<string, Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>>();
-  const turnByKey = new Map<string, Extract<RuntimeJournalRecord, { type: 'turn_prepare' }>>();
-  const usedTurnIds = new Map<string, string>();
-  const activatedTurns = new Set<string>();
-  const pendingResults = new Map<string, Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>>();
-  const deliveredResults = new Set<string>();
-  const usedRequestIds = new Set<string>();
-  const controlClaims = new Map<string, ExternalOpId>();
-  const observedRuleScopes = new Set<string>();
-  let legacySeedSeen = false;
-  let nextSeq = 1;
+function validateJournalSequenceAppend(
+  records: readonly RuntimeJournalRecord[],
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  previous: Readonly<JournalSequenceState>,
+): JournalSequenceState {
+  const state = cloneJournalSequenceState(previous);
 
-  for (let index = 0; index < records.length; index++) {
-    const record = records[index] as RuntimeJournalRecord;
+  for (const record of records) {
+    const index = state.recordCount;
+    state.recordCount++;
     if (record.type === 'thread_meta') {
       if (index !== 0 || record.workspaceId !== workspaceId || record.threadId !== threadId) {
         throw invalidJournal('thread_meta must appear exactly once at position zero');
       }
       continue;
     }
+    if (index === 0) {
+      throw invalidJournal(`Thread ${threadId} has no meta header`);
+    }
     if (record.type === 'legacy_seed') {
-      if (legacySeedSeen || index !== 1) {
+      if (state.legacySeedSeen || index !== 1) {
         throw invalidJournal('legacy_seed must appear at most once immediately after thread_meta');
       }
-      legacySeedSeen = true;
+      state.legacySeedSeen = true;
       continue;
     }
     if (record.type === 'mailbox_prepare') {
-      if (mailboxPrepares.has(record.opId)) throw invalidJournal(`Duplicate mailbox prepare ${record.opId}`);
-      mailboxPrepares.set(record.opId, record);
-      mailboxStates.set(record.opId, 'prepared');
+      if (state.mailboxPrepares.has(record.opId)) throw invalidJournal(`Duplicate mailbox prepare ${record.opId}`);
+      state.mailboxPrepares.set(record.opId, record);
+      state.mailboxStates.set(record.opId, 'prepared');
       continue;
     }
     if (record.type === 'successor_run_prepare') {
-      const prior = successorByPredecessor.get(record.predecessorRunId);
+      const prior = state.successorByPredecessor.get(record.predecessorRunId);
       if (prior !== undefined) {
         throw invalidJournal(`Duplicate successor reservation for ${record.predecessorRunId}`);
       }
-      claimIdentity(usedRunIds, record.runId, successorIdentityKey(record), 'RunId');
-      if (!usedRunIds.has(record.predecessorRunId)) {
+      claimIdentity(state.usedRunIds, record.runId, successorIdentityKey(record), 'RunId');
+      if (!state.usedRunIds.has(record.predecessorRunId)) {
         throw invalidJournal(`Successor predecessor is unknown: ${record.predecessorRunId}`);
       }
-      successorByPredecessor.set(record.predecessorRunId, record);
-      successorByRun.set(record.runId, record);
+      state.successorByPredecessor.set(record.predecessorRunId, record);
+      state.successorByRun.set(record.runId, record);
       continue;
     }
     if (record.type === 'turn_prepare') {
       const key = turnReservationKey(record.runId, record.turnOrdinal);
-      if (turnByKey.has(key)) throw invalidJournal(`Duplicate turn reservation ${key}`);
-      if (!usedRunIds.has(record.runId)) throw invalidJournal(`Turn reservation has unknown RunId ${record.runId}`);
-      claimIdentity(usedTurnIds, record.turnId, key, 'TurnId');
-      turnByKey.set(key, record);
+      if (state.turnByKey.has(key)) throw invalidJournal(`Duplicate turn reservation ${key}`);
+      if (!state.usedRunIds.has(record.runId)) throw invalidJournal(`Turn reservation has unknown RunId ${record.runId}`);
+      claimIdentity(state.usedTurnIds, record.turnId, key, 'TurnId');
+      state.turnByKey.set(key, record);
       continue;
     }
     if (record.type === 'thread_result_delivered') {
-      const pending = pendingResults.get(record.resultOpId);
+      const pending = state.pendingResults.get(record.resultOpId);
       if (pending === undefined || pending.parentThreadId !== record.parentThreadId) {
         throw invalidJournal(`Thread result delivery has no matching outbox item ${record.resultOpId}`);
       }
-      if (deliveredResults.has(record.resultOpId)) {
+      if (state.deliveredResults.has(record.resultOpId)) {
         throw invalidJournal(`Duplicate thread result delivery ${record.resultOpId}`);
       }
-      deliveredResults.add(record.resultOpId);
+      state.deliveredResults.add(record.resultOpId);
       continue;
     }
 
-    if (record.firstSeq !== nextSeq) {
-      throw invalidJournal(`Commit sequence expected ${nextSeq}, received ${record.firstSeq}`);
+    if (record.firstSeq !== state.nextSeq) {
+      throw invalidJournal(`Commit sequence expected ${state.nextSeq}, received ${record.firstSeq}`);
     }
-    nextSeq += record.envelopes.length;
-    validateCommitCorrespondence(record, mailboxPrepares);
+    state.nextSeq += record.envelopes.length;
+    validateCommitCorrespondence(record, state.mailboxPrepares);
 
     for (const mutation of record.mutations ?? []) {
       switch (mutation.type) {
         case 'accepted_pending':
-          transitionMailbox(mailboxStates, mutation.opId, ['prepared'], 'accepted_pending');
+          transitionMailbox(state.mailboxStates, mutation.opId, ['prepared'], 'accepted_pending');
           break;
         case 'started':
-          transitionMailbox(mailboxStates, mutation.opId, ['accepted_pending'], 'started');
+          transitionMailbox(state.mailboxStates, mutation.opId, ['accepted_pending'], 'started');
           break;
         case 'completed':
-          transitionMailbox(mailboxStates, mutation.opId, ['accepted_pending', 'started'], 'completed');
+          transitionMailbox(state.mailboxStates, mutation.opId, ['accepted_pending', 'started'], 'completed');
           break;
         case 'rejected':
-          transitionMailbox(mailboxStates, mutation.opId, ['prepared'], 'rejected');
+          transitionMailbox(state.mailboxStates, mutation.opId, ['prepared'], 'rejected');
           break;
         case 'run_reserved': {
           if (mutation.reason === 'retry' || mutation.reason === 'compaction') {
-            const prepared = successorByRun.get(mutation.runId);
+            const prepared = state.successorByRun.get(mutation.runId);
             if (prepared === undefined
               || prepared.predecessorRunId !== mutation.predecessorRunId
               || prepared.reason !== mutation.reason
               || canonicalJson(prepared.permissionCeiling) !== canonicalJson(mutation.permissionCeiling)) {
               throw invalidJournal(`Run activation does not match successor prepare ${mutation.runId}`);
             }
-            claimIdentity(usedRunIds, mutation.runId, successorIdentityKey(prepared), 'RunId');
+            claimIdentity(state.usedRunIds, mutation.runId, successorIdentityKey(prepared), 'RunId');
           } else if ('ownerOpId' in mutation) {
-            const prepared = mailboxPrepares.get(mutation.ownerOpId);
+            const prepared = state.mailboxPrepares.get(mutation.ownerOpId);
             if (prepared === undefined || prepared.op.type !== mutation.reason) {
               throw invalidJournal(`Root run has no matching mailbox prepare ${mutation.runId}`);
             }
-            claimIdentity(usedRunIds, mutation.runId, rootRunIdentityKey(mutation.ownerOpId), 'RunId');
+            claimIdentity(state.usedRunIds, mutation.runId, rootRunIdentityKey(mutation.ownerOpId), 'RunId');
           } else {
             throw invalidJournal(`Malformed root run reservation ${mutation.runId}`);
           }
-          if (runStates.has(mutation.runId)) throw invalidJournal(`RunId activated twice ${mutation.runId}`);
-          runStates.set(mutation.runId, 'reserved');
+          if (state.runStates.has(mutation.runId)) throw invalidJournal(`RunId activated twice ${mutation.runId}`);
+          state.runStates.set(mutation.runId, 'reserved');
           break;
         }
         case 'run_started':
-          transitionRun(runStates, mutation.runId, ['reserved'], 'started');
+          transitionRun(state.runStates, mutation.runId, ['reserved'], 'started');
           break;
         case 'run_terminal':
-          transitionRun(runStates, mutation.runId, ['reserved', 'started'], 'terminal');
+          transitionRun(state.runStates, mutation.runId, ['reserved', 'started'], 'terminal');
           break;
         case 'turn_activated': {
           const key = turnReservationKey(mutation.runId, mutation.turnOrdinal);
-          const prepared = turnByKey.get(key);
+          const prepared = state.turnByKey.get(key);
           if (prepared === undefined || prepared.turnId !== mutation.turnId) {
             throw invalidJournal(`Turn activation has no matching prepare ${mutation.turnId}`);
           }
-          if (activatedTurns.has(key)) throw invalidJournal(`Turn activated twice ${mutation.turnId}`);
-          activatedTurns.add(key);
+          if (state.activatedTurns.has(key)) throw invalidJournal(`Turn activated twice ${mutation.turnId}`);
+          state.activatedTurns.add(key);
           break;
         }
         case 'input_materialized': {
-          const prepared = mailboxPrepares.get(mutation.ownerOpId);
+          const prepared = state.mailboxPrepares.get(mutation.ownerOpId);
           if (prepared === undefined || (prepared.op.type !== 'prompt' && prepared.op.type !== 'continue')) {
             throw invalidJournal(`Input owner is not a prompt/continue op ${mutation.ownerOpId}`);
           }
           break;
         }
         case 'input_transferred':
-          if (!mailboxPrepares.has(mutation.fromOpId) || !mailboxPrepares.has(mutation.toOpId)) {
+          if (!state.mailboxPrepares.has(mutation.fromOpId) || !state.mailboxPrepares.has(mutation.toOpId)) {
             throw invalidJournal('Input transfer references an unknown mailbox op');
           }
           break;
         case 'input_cancelled':
-          if (!mailboxPrepares.has(mutation.ownerOpId) || !mailboxPrepares.has(mutation.byAbortOpId)) {
+          if (!state.mailboxPrepares.has(mutation.ownerOpId) || !state.mailboxPrepares.has(mutation.byAbortOpId)) {
             throw invalidJournal('Input cancellation references an unknown mailbox op');
           }
           break;
         case 'control_requested':
-          if (usedRequestIds.has(mutation.request.requestId)) {
+          if (state.usedRequestIds.has(mutation.request.requestId)) {
             throw invalidJournal(`Control request identity reused ${mutation.request.requestId}`);
           }
-          usedRequestIds.add(mutation.request.requestId);
+          state.usedRequestIds.add(mutation.request.requestId);
           break;
         case 'control_response_claimed':
-          if (!usedRequestIds.has(mutation.requestId) || controlClaims.has(mutation.requestId)) {
+          if (!state.usedRequestIds.has(mutation.requestId) || state.controlClaims.has(mutation.requestId)) {
             throw invalidJournal(`Invalid control response claim ${mutation.requestId}`);
           }
-          controlClaims.set(mutation.requestId, mutation.responseOpId);
+          state.controlClaims.set(mutation.requestId, mutation.responseOpId);
           break;
         case 'control_response_claim_released':
-          if (controlClaims.get(mutation.requestId) !== mutation.responseOpId) {
+          if (state.controlClaims.get(mutation.requestId) !== mutation.responseOpId) {
             throw invalidJournal(`Control response release does not own claim ${mutation.requestId}`);
           }
-          controlClaims.delete(mutation.requestId);
+          state.controlClaims.delete(mutation.requestId);
           break;
         case 'control_resolved':
-          if (!usedRequestIds.has(mutation.resolution.requestId)) {
+          if (!state.usedRequestIds.has(mutation.resolution.requestId)) {
             throw invalidJournal(`Control resolution has no request ${mutation.resolution.requestId}`);
           }
           break;
         case 'thread_result_pending': {
-          if (mutation.childThreadId !== threadId || pendingResults.has(mutation.resultOpId)) {
+          if (mutation.childThreadId !== threadId || state.pendingResults.has(mutation.resultOpId)) {
             throw invalidJournal(`Invalid or duplicate thread result outbox item ${mutation.resultOpId}`);
           }
-          pendingResults.set(mutation.resultOpId, mutation);
+          state.pendingResults.set(mutation.resultOpId, mutation);
           break;
         }
         case 'rule_scope_observed':
-          observedRuleScopes.add(mutation.scope);
+          state.observedRuleScopes.add(mutation.scope);
           break;
         case 'rule_scope_window_replaced': {
-          const current = [...observedRuleScopes].sort(compareUtf8);
+          const current = [...state.observedRuleScopes].sort(compareUtf8);
           if (canonicalJson(current) !== canonicalJson(mutation.consumedScopes)) {
             throw invalidJournal(`Rule scope window witness mismatch for ${mutation.owningTurnId}`);
           }
-          observedRuleScopes.clear();
-          for (const scope of mutation.replacementScopes) observedRuleScopes.add(scope);
+          state.observedRuleScopes.clear();
+          for (const scope of mutation.replacementScopes) state.observedRuleScopes.add(scope);
           break;
         }
         case 'message_appended':
@@ -1791,6 +1914,51 @@ function validateJournalSequence(
       }
     }
   }
+  return state;
+}
+
+function emptyJournalSequenceState(): JournalSequenceState {
+  return {
+    recordCount: 0,
+    mailboxPrepares: new Map(),
+    mailboxStates: new Map(),
+    usedRunIds: new Map(),
+    runStates: new Map(),
+    successorByPredecessor: new Map(),
+    successorByRun: new Map(),
+    turnByKey: new Map(),
+    usedTurnIds: new Map(),
+    activatedTurns: new Set(),
+    pendingResults: new Map(),
+    deliveredResults: new Set(),
+    usedRequestIds: new Set(),
+    controlClaims: new Map(),
+    observedRuleScopes: new Set(),
+    legacySeedSeen: false,
+    nextSeq: 1,
+  };
+}
+
+function cloneJournalSequenceState(previous: Readonly<JournalSequenceState>): JournalSequenceState {
+  return {
+    recordCount: previous.recordCount,
+    mailboxPrepares: new Map(previous.mailboxPrepares),
+    mailboxStates: new Map(previous.mailboxStates),
+    usedRunIds: new Map(previous.usedRunIds),
+    runStates: new Map(previous.runStates),
+    successorByPredecessor: new Map(previous.successorByPredecessor),
+    successorByRun: new Map(previous.successorByRun),
+    turnByKey: new Map(previous.turnByKey),
+    usedTurnIds: new Map(previous.usedTurnIds),
+    activatedTurns: new Set(previous.activatedTurns),
+    pendingResults: new Map(previous.pendingResults),
+    deliveredResults: new Set(previous.deliveredResults),
+    usedRequestIds: new Set(previous.usedRequestIds),
+    controlClaims: new Map(previous.controlClaims),
+    observedRuleScopes: new Set(previous.observedRuleScopes),
+    legacySeedSeen: previous.legacySeedSeen,
+    nextSeq: previous.nextSeq,
+  };
 }
 
 type OpIdString = string;
@@ -2933,9 +3101,27 @@ function unlinkIfExact(file: string, expected: unknown): void {
   }
 }
 
-function fsyncFile(file: string): void {
-  const fd = openSync(file, 'r+');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+function assertJournalFileBoundary(
+  file: string,
+  fd: number,
+  expected: Readonly<JournalFileBoundary>,
+): void {
+  try {
+    const descriptor = fstatSync(fd);
+    const pathname = lstatSync(file);
+    if (!descriptor.isFile() || pathname.isSymbolicLink() || !pathname.isFile()
+      || descriptor.dev !== expected.dev || descriptor.ino !== expected.ino
+      || pathname.dev !== expected.dev || pathname.ino !== expected.ino
+      || descriptor.size !== expected.size || pathname.size !== expected.size) {
+      throw new RuntimeStorageError(
+        'invalid_thread_journal',
+        `Thread journal changed outside the active writer: ${file}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof RuntimeStorageError) throw error;
+    throw storageFailure('invalid_thread_journal', file, error);
+  }
 }
 
 function fsyncDirectory(directory: string): void {

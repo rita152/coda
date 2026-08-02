@@ -1,7 +1,7 @@
 // OpenTUI 视图回归测试：用内存 TestRenderer 验证全屏分区、顶部向下的转录顺序、
 // 固定底部状态、响应式降级与 Enter/Shift+Enter。无需真实 TTY 或网络。
 
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import {
   BoxRenderable,
   type KeyEvent,
@@ -49,6 +49,7 @@ import {
   runTuiController,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
+  TRANSCRIPT_REPLAY_CHUNK_MESSAGES,
   TuiInteractionState,
   tuiCanAbort,
   tuiEnterState,
@@ -1197,6 +1198,468 @@ describe('UX2 TUI presentation workflow', () => {
     }
   });
 
+  it('每个独立 wheel-up 帧都持续上移，不从 maximum - 1 回弹到底部', async () => {
+    const view = await setup(80, 20);
+    try {
+      view.screen.focusInput();
+      view.screen.setInput('wheel events must not enter the composer');
+      for (let index = 0; index < 30; index++) {
+        view.screen.println(`single-wheel-row-${String(index).padStart(2, '0')}`);
+      }
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      const initialTop = transcript.scrollTop;
+      expect(initialTop).toBeGreaterThan(4);
+      const eventTops: number[] = [];
+      const frameTops: number[] = [];
+
+      for (let index = 0; index < 4; index++) {
+        await view.mockMouse.scroll(
+          transcript.screenX + 1,
+          transcript.screenY + 1,
+          'up',
+          { delayMs: 0 },
+        );
+        eventTops.push(transcript.scrollTop);
+        await view.flush();
+        frameTops.push(transcript.scrollTop);
+      }
+
+      const expectedTops = Array.from({ length: 4 }, (_, index) => initialTop - index - 1);
+      expect({ eventTops, frameTops, input: view.screen.getInput() }).toEqual({
+        eventTops: expectedTops,
+        frameTops: expectedTops,
+        input: 'wheel events must not enter the composer',
+      });
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('queued Markdown 尚未布局时的 wheel no-op 不建立 manual anchor 或 unread', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-queued-wheel-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_queued_wheel' as WorkspaceId,
+      threadId: 'thr_queued_wheel' as ThreadId,
+    });
+    let highWater = 20;
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      presentation: { store },
+      eventHighWaterSeq: () => highWater,
+    });
+    try {
+      view.screen.focusInput();
+      view.screen.setInput('queued wheel draft');
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      const streamingAssistant = assistant({ id: 'a-queued-wheel' });
+      highWater++;
+      view.screen.render({ type: 'message_start', message: streamingAssistant });
+      highWater++;
+      view.screen.render({
+        type: 'message_update',
+        messageId: streamingAssistant.id,
+        event: {
+          type: 'text_delta',
+          contentIndex: 0,
+          delta: Array.from({ length: 80 }, (_, index) => `queued-markdown-${index}`).join('\n'),
+          partial: { ...streamingAssistant, content: [{ type: 'text', text: '' }] },
+        },
+      });
+
+      const beforeWheel = transcript.scrollTop;
+      await view.mockMouse.scroll(
+        transcript.screenX + 1,
+        transcript.screenY + 1,
+        'up',
+        { delayMs: 0 },
+      );
+      expect(transcript.scrollTop).toBe(beforeWheel);
+      await view.flush();
+
+      const stateAfterNoop = store.snapshot();
+      const firstMaximum = Math.max(0, transcript.scrollHeight - transcript.viewport.height);
+      const topAfterNoop = transcript.scrollTop;
+
+      highWater++;
+      view.screen.render({
+        type: 'message_update',
+        messageId: streamingAssistant.id,
+        event: {
+          type: 'text_delta',
+          contentIndex: 0,
+          delta: '\nqueued-markdown-final',
+          partial: { ...streamingAssistant, content: [{ type: 'text', text: '' }] },
+        },
+      });
+      await view.flush();
+
+      const stateAfterLiveOutput = store.snapshot();
+      expect({
+        stateAfterNoop: {
+          scrollAnchor: stateAfterNoop.scrollAnchor,
+          unreadAfterSeq: stateAfterNoop.unreadAfterSeq,
+        },
+        topAfterNoop,
+        firstMaximum,
+        stateAfterLiveOutput: {
+          scrollAnchor: stateAfterLiveOutput.scrollAnchor,
+          unreadAfterSeq: stateAfterLiveOutput.unreadAfterSeq,
+        },
+        topAfterLiveOutput: transcript.scrollTop,
+        finalMaximum: Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        input: view.screen.getInput(),
+      }).toEqual({
+        stateAfterNoop: { scrollAnchor: undefined, unreadAfterSeq: 0 },
+        topAfterNoop: firstMaximum,
+        firstMaximum,
+        stateAfterLiveOutput: { scrollAnchor: undefined, unreadAfterSeq: 0 },
+        topAfterLiveOutput: Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        finalMaximum: Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        input: 'queued wheel draft',
+      });
+    } finally {
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
+  it('wheel-up 与下一帧之间到达的首批 live output 仍从上滚前累计 unread', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-wheel-frame-unread-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_wheel_frame_unread' as WorkspaceId,
+      threadId: 'thr_wheel_frame_unread' as ThreadId,
+    });
+    let highWater = 40;
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      presentation: { store },
+      eventHighWaterSeq: () => highWater,
+    });
+    try {
+      for (let index = 0; index < 30; index++) {
+        view.screen.println(`wheel-frame-row-${String(index).padStart(2, '0')}`);
+      }
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      const beforeWheel = transcript.scrollTop;
+      await view.mockMouse.scroll(
+        transcript.screenX + 1,
+        transcript.screenY + 1,
+        'up',
+        { delayMs: 0 },
+      );
+      expect(transcript.scrollTop).toBe(beforeWheel - 1);
+
+      // Runtime output can arrive after the physical wheel event but before Coda's frame callback
+      // commits manual mode. It belongs to the unread interval started by that wheel event.
+      highWater++;
+      view.screen.render({
+        type: 'message_start',
+        message: { ...user('same-frame live output'), id: 'same-frame-live-output' },
+      });
+      await view.flush();
+
+      expect({
+        unreadAfterSeq: store.snapshot().unreadAfterSeq,
+        heldAboveLatest: transcript.scrollTop <
+          Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        frame: view.frame(),
+      }).toEqual({
+        unreadAfterSeq: 40,
+        heldAboveLatest: true,
+        frame: expect.stringContaining('1 new'),
+      });
+    } finally {
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
+  it('durable anchor 恢复与下一帧之间到达的 live output 不清 unread', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-restore-frame-unread-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_restore_frame_unread' as WorkspaceId,
+      threadId: 'thr_restore_frame_unread' as ThreadId,
+    });
+    store.setScrollState({
+      blockKey: 'message:restore-frame-20',
+      logicalOffset: 0,
+      fallbackBlockKeys: ['message:restore-frame-19'],
+      observedHighWaterSeq: 40,
+    }, 40);
+    store.flush();
+    const durableState = store.snapshot();
+    let highWater = 41;
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+      eventHighWaterSeq: () => highWater,
+    });
+    try {
+      const messages = Array.from({ length: 30 }, (_, index): UserMessage => ({
+        ...user(`restore-frame-${String(index).padStart(2, '0')}`),
+        id: `restore-frame-${index}`,
+      }));
+      view.screen.replayTranscript(messages);
+      await view.flush();
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+
+      view.screen.restorePresentation(durableState);
+      highWater++;
+      view.screen.render({
+        type: 'message_start',
+        message: { ...user('restore same-frame output'), id: 'restore-same-frame-output' },
+      });
+      await view.flush();
+
+      expect({
+        unreadAfterSeq: store.snapshot().unreadAfterSeq,
+        heldAboveLatest: transcript.scrollTop <
+          Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        frame: view.frame(),
+      }).toEqual({
+        unreadAfterSeq: 40,
+        heldAboveLatest: true,
+        frame: expect.stringContaining('2 new'),
+      });
+    } finally {
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
+  it('manual live output 复用已提交锚点且不按 delta 重扫整棵 transcript', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-manual-live-anchor-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_manual_live_anchor' as WorkspaceId,
+      threadId: 'thr_manual_live_anchor' as ThreadId,
+    });
+    const scrollWrites = spyOn(store, 'setScrollState');
+    let highWater = 80;
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      presentation: { store },
+      eventHighWaterSeq: () => highWater,
+    });
+    try {
+      const messages = Array.from({ length: 30 }, (_, index): UserMessage => ({
+        ...user(`manual-live-${String(index).padStart(2, '0')}`),
+        id: `manual-live-${index}`,
+      }));
+      view.screen.replayTranscript(messages);
+      await view.flush();
+      view.screen.scrollPage(-1);
+      await view.flush();
+
+      const stableAnchor = store.snapshot().scrollAnchor;
+      if (stableAnchor === undefined) throw new Error('manual anchor was not persisted');
+      const writesBeforeOutput = scrollWrites.mock.calls.length;
+      const streamingAssistant = assistant({ id: 'manual-live-assistant' });
+      highWater++;
+      view.screen.render({ type: 'message_start', message: streamingAssistant });
+
+      // The new block has not received a layout coordinate yet. It must never replace the
+      // already committed viewport anchor merely because output arrived between frames.
+      const anchorBeforeLayout = store.snapshot().scrollAnchor;
+      for (let index = 0; index < 1_000; index++) {
+        highWater++;
+        view.screen.render({
+          type: 'message_update',
+          messageId: streamingAssistant.id,
+          event: {
+            type: 'text_delta',
+            contentIndex: 0,
+            delta: String(index % 10),
+            partial: { ...streamingAssistant, content: [{ type: 'text', text: '' }] },
+          },
+        });
+      }
+
+      expect({
+        stableBlockKey: stableAnchor.blockKey,
+        blockKeyBeforeLayout: anchorBeforeLayout?.blockKey,
+        outputScrollWrites: scrollWrites.mock.calls.length - writesBeforeOutput,
+        unreadAfterSeq: store.snapshot().unreadAfterSeq,
+      }).toEqual({
+        stableBlockKey: stableAnchor.blockKey,
+        blockKeyBeforeLayout: stableAnchor.blockKey,
+        outputScrollWrites: 1,
+        unreadAfterSeq: 80,
+      });
+    } finally {
+      scrollWrites.mockRestore();
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
+  it('分段历史的首次 PageUp 可见上移，wheel 到当前段顶部会加载更早历史', async () => {
+    const view = await setup(80, 20);
+    try {
+      const messages = Array.from({ length: 300 }, (_, index): UserMessage => ({
+        ...user(`segmented-history-${String(index).padStart(3, '0')}`),
+        id: `segmented-history-${index}`,
+      }));
+      view.screen.replayTranscript(messages);
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      const beforeFrame = view.frame();
+      expect(transcript.getChildren()).toHaveLength(TRANSCRIPT_REPLAY_CHUNK_MESSAGES + 1);
+      expect(transcript.scrollTop).toBe(
+        Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+      );
+
+      view.screen.scrollPage(-1);
+      await view.flush();
+      await view.flush();
+
+      const afterPageUpFrame = view.frame();
+      const loadedAfterPageUp = transcript.getChildren().length;
+      const topAfterPageUp = transcript.scrollTop;
+      const maximumAfterPageUp = Math.max(
+        0,
+        transcript.scrollHeight - transcript.viewport.height,
+      );
+      const pageUpDistance = maximumAfterPageUp - topAfterPageUp;
+      expect(pageUpDistance).toBeGreaterThanOrEqual(
+        Math.max(1, Math.round(transcript.viewport.height * 0.8) - 1),
+      );
+      transcript.scrollTop = 1;
+      await view.flush();
+      await view.mockMouse.scroll(
+        transcript.screenX + 1,
+        transcript.screenY + 1,
+        'up',
+        { delayMs: 0 },
+      );
+      await view.flush();
+      await view.flush();
+
+      expect({
+        pageUpLoadedEarlier: loadedAfterPageUp > TRANSCRIPT_REPLAY_CHUNK_MESSAGES + 1,
+        pageUpChangedFrame: afterPageUpFrame !== beforeFrame,
+        pageUpLeftStickyBottom: topAfterPageUp < maximumAfterPageUp,
+        wheelLoadedEarlier: transcript.getChildren().length > loadedAfterPageUp,
+        finalChildCount: transcript.getChildren().length,
+      }).toEqual({
+        pageUpLoadedEarlier: true,
+        pageUpChangedFrame: true,
+        pageUpLeftStickyBottom: true,
+        wheelLoadedEarlier: true,
+        finalChildCount: messages.length + 1,
+      });
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('resetTranscript 会隔离旧 segment/anchor 的 queued frame callback', async () => {
+    const view = await setup(80, 20);
+    try {
+      const sourceMessages = Array.from({ length: 300 }, (_, index): UserMessage => ({
+        ...user(`source-history-${String(index).padStart(3, '0')}`),
+        id: `source-history-${index}`,
+      }));
+      const targetMessages = Array.from({ length: 300 }, (_, index): UserMessage => ({
+        ...user(`target-history-${String(index).padStart(3, '0')}`),
+        id: `target-history-${index}`,
+      }));
+      view.screen.replayTranscript(sourceMessages);
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      view.screen.scrollPage(-1);
+      // Deliberately reset before the segment's anchor-restore/PageUp callbacks receive a frame.
+      view.screen.resetTranscript(targetMessages, 300);
+      const expectedTailChildren = TRANSCRIPT_REPLAY_CHUNK_MESSAGES + 1;
+      await view.flush();
+      await view.flush();
+
+      expect({
+        childCount: transcript.getChildren().length,
+        atLatest: transcript.scrollTop ===
+          Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+        frame: view.frame(),
+      }).toEqual({
+        childCount: expectedTailChildren,
+        atLatest: true,
+        frame: expect.stringContaining('target-history-299'),
+      });
+      expect(view.frame()).not.toContain('source-history-');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('resetTranscript 会隔离旧 wheel 的 queued frame callback 与 manual state', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-wheel-reset-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_wheel_reset' as WorkspaceId,
+      threadId: 'thr_wheel_source' as ThreadId,
+    });
+    const view = await setup(80, 20, () => {}, true, undefined, {
+      presentation: { store },
+      eventHighWaterSeq: () => 30,
+    });
+    try {
+      const sourceMessages = Array.from({ length: 30 }, (_, index): UserMessage => ({
+        ...user(`wheel-source-${String(index).padStart(2, '0')}`),
+        id: `wheel-source-${index}`,
+      }));
+      const targetMessages = Array.from({ length: 10 }, (_, index): UserMessage => ({
+        ...user(`wheel-target-${String(index).padStart(2, '0')}`),
+        id: `wheel-target-${index}`,
+      }));
+      view.screen.replayTranscript(sourceMessages);
+      await view.flush();
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+
+      await view.mockMouse.scroll(
+        transcript.screenX + 1,
+        transcript.screenY + 1,
+        'up',
+        { delayMs: 0 },
+      );
+      store.switchToThread('thr_wheel_target' as ThreadId);
+      view.screen.resetTranscript(targetMessages, 30);
+      await view.flush();
+
+      expect({
+        scrollAnchor: store.snapshot().scrollAnchor,
+        unreadAfterSeq: store.snapshot().unreadAfterSeq,
+        atLatest: transcript.scrollTop ===
+          Math.max(0, transcript.scrollHeight - transcript.viewport.height),
+      }).toEqual({
+        scrollAnchor: undefined,
+        unreadAfterSeq: 0,
+        atLatest: true,
+      });
+    } finally {
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
   it('resize 与重新打开同一 thread 都按稳定 message anchor 恢复 draft/滚动', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-anchor-state-'));
     tempDirs.push(root);
@@ -1565,6 +2028,223 @@ describe('UX3 TUI review and recovery workflow', () => {
       await view.destroy();
     }
   });
+
+  it('restorePresentation 对不可独立恢复的 panel 明确回退 transcript 并同步 store', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-panel-restore-fallback-'));
+    tempDirs.push(root);
+    const store = new ThreadPresentationStore({
+      root,
+      workspaceId: 'ws_panel_restore_fallback' as WorkspaceId,
+      threadId: 'thr_panel_restore_fallback' as ThreadId,
+    });
+    store.setActivePanel('diff');
+    store.flush();
+    const state = store.snapshot();
+    const view = await setup(100, 30, () => {}, true, undefined, {
+      resumed: true,
+      presentation: { store },
+    });
+    try {
+      view.screen.resetTranscript([{
+        ...user('panel restore transcript'),
+        id: 'panel-restore-transcript',
+      }], 1);
+      view.screen.restorePresentation(state);
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      const diffPanel = view.renderer.root.findDescendantById('coda-diff-panel');
+      const sessionPanel = view.renderer.root.findDescendantById('coda-session-panel');
+      if (transcript === undefined || diffPanel === undefined || sessionPanel === undefined) {
+        throw new Error('panel not found');
+      }
+      // Diff/session payloads are Runtime queries and are not durable presentation data. Until the
+      // controller explicitly re-queries one, recovery must normalize both view and store to the
+      // transcript instead of retaining an impossible activePanel value.
+      expect({
+        storePanel: store.snapshot().activePanel,
+        transcriptVisible: transcript.visible,
+        diffVisible: diffPanel.visible,
+        sessionsVisible: sessionPanel.visible,
+      }).toEqual({
+        storePanel: 'transcript',
+        transcriptVisible: true,
+        diffVisible: false,
+        sessionsVisible: false,
+      });
+    } finally {
+      await view.destroy();
+      store.dispose();
+    }
+  });
+
+  it('diff 与 sessions 在 live/status/composer/resize 刷新中保持独占，输入只路由到 active panel', async () => {
+    const view = await setup(100, 30);
+    try {
+      for (let index = 0; index < 30; index++) {
+        view.screen.println(`panel-transcript-${String(index).padStart(2, '0')}`);
+      }
+      await view.flush();
+
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      const diffPanel = view.renderer.root.findDescendantById('coda-diff-panel');
+      const diffScroll = view.renderer.root.findDescendantById('coda-diff-scroll');
+      const sessionPanel = view.renderer.root.findDescendantById('coda-session-panel');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      if (!(diffScroll instanceof ScrollBoxRenderable)) throw new Error('diff scroll not found');
+      if (diffPanel === undefined || sessionPanel === undefined) throw new Error('panel not found');
+
+      const diffSnapshot = {
+        workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+        threadId: 'thread-exclusive-panel' as ThreadId,
+        scope: 'turn' as const,
+        generatedAt: 9,
+        files: [{
+          path: 'src/panel.ts',
+          group: 'unstaged' as const,
+          status: 'M',
+          patch: Array.from(
+            { length: 80 },
+            (_, index) => `+ active-diff-line-${String(index).padStart(2, '0')}`,
+          ).join('\n'),
+        }],
+      };
+      const sessions = [
+        {
+          workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+          cwd: '/workspace/one',
+          updatedAt: 2,
+          preview: 'first session',
+          thread: {
+            threadId: 'thread-panel-one' as ThreadId,
+            createdAt: 1,
+            state: 'idle' as const,
+            title: 'Panel One',
+          },
+        },
+        {
+          workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+          cwd: '/workspace/two',
+          updatedAt: 3,
+          preview: 'second session',
+          thread: {
+            threadId: 'thread-panel-two' as ThreadId,
+            createdAt: 1,
+            state: 'running' as const,
+            title: 'Panel Two',
+          },
+        },
+      ];
+
+      const diffRefreshStates: Array<{
+        readonly trigger: string;
+        readonly transcriptVisible: boolean;
+        readonly diffVisible: boolean;
+      }> = [];
+      const diffTriggers: ReadonlyArray<readonly [string, () => void]> = [
+        ['live event', () => view.screen.render({
+          type: 'message_start',
+          message: { ...user('hidden diff live event'), id: 'hidden-diff-live' },
+        })],
+        ['status refresh', () => view.screen.setUsage({
+          cumulative: { input: 2, output: 3 },
+          turns: 1,
+          contextTokens: 4,
+        })],
+        ['composer refresh', () => view.screen.setInput('diff panel keeps this draft')],
+        ['resize', () => view.resize(96, 28)],
+      ];
+      for (const [trigger, refresh] of diffTriggers) {
+        view.screen.openDiffViewer(diffSnapshot);
+        await view.flush();
+        refresh();
+        await view.flush();
+        diffRefreshStates.push({
+          trigger,
+          transcriptVisible: transcript.visible,
+          diffVisible: diffPanel.visible,
+        });
+      }
+      const sessionRefreshStates: Array<{
+        readonly trigger: string;
+        readonly transcriptVisible: boolean;
+        readonly sessionsVisible: boolean;
+      }> = [];
+      const sessionTriggers: ReadonlyArray<readonly [string, () => void]> = [
+        ['live event', () => view.screen.render({
+          type: 'message_start',
+          message: { ...user('hidden sessions live event'), id: 'hidden-sessions-live' },
+        })],
+        ['status refresh', () => view.screen.setTransientStatus('session status refresh')],
+        ['composer refresh', () => view.screen.setInput('sessions panel keeps this draft')],
+        ['resize', () => view.resize(92, 26)],
+      ];
+      for (const [trigger, refresh] of sessionTriggers) {
+        view.screen.openSessionPicker(sessions, '');
+        await view.flush();
+        refresh();
+        await view.flush();
+        sessionRefreshStates.push({
+          trigger,
+          transcriptVisible: transcript.visible,
+          sessionsVisible: sessionPanel.visible,
+        });
+      }
+      view.screen.openDiffViewer(diffSnapshot);
+      await view.flush();
+      const transcriptTopDuringDiff = transcript.scrollTop;
+      const diffTopBeforeWheel = diffScroll.scrollTop;
+      await view.mockMouse.scroll(
+        diffScroll.screenX + 1,
+        diffScroll.screenY + 1,
+        'down',
+        { delayMs: 0 },
+      );
+      await view.flush();
+      expect(diffScroll.scrollTop).toBeGreaterThan(diffTopBeforeWheel);
+      expect(transcript.scrollTop).toBe(transcriptTopDuringDiff);
+      const diffTopBeforeKey = diffScroll.scrollTop;
+      expect(view.screen.handleDiffViewerKey({ name: 'pagedown' } as KeyEvent)).toBe('handled');
+      await view.flush();
+      expect(diffScroll.scrollTop).toBeGreaterThan(diffTopBeforeKey);
+      expect(transcript.scrollTop).toBe(transcriptTopDuringDiff);
+
+      view.screen.openSessionPicker(sessions, '');
+      await view.flush();
+      const transcriptTopDuringSessions = transcript.scrollTop;
+      expect(view.screen.handleSessionPickerKey({ name: 'pageup' } as KeyEvent))
+        .toEqual({ kind: 'handled' });
+      await view.mockMouse.scroll(
+        sessionPanel.screenX + 1,
+        sessionPanel.screenY + 2,
+        'up',
+        { delayMs: 0 },
+      );
+      await view.flush();
+      expect(transcript.scrollTop).toBe(transcriptTopDuringSessions);
+      expect({
+        diffRefreshStates,
+        sessionRefreshStates,
+        finalTranscriptVisible: transcript.visible,
+        finalSessionPanelVisible: sessionPanel.visible,
+      }).toEqual({
+        diffRefreshStates: diffTriggers.map(([trigger]) => ({
+          trigger,
+          transcriptVisible: false,
+          diffVisible: true,
+        })),
+        sessionRefreshStates: sessionTriggers.map(([trigger]) => ({
+          trigger,
+          transcriptVisible: false,
+          sessionsVisible: true,
+        })),
+        finalTranscriptVisible: false,
+        finalSessionPanelVisible: true,
+      });
+    } finally {
+      await view.destroy();
+    }
+  });
 });
 
 describe('TUI 安全渲染与转录恢复', () => {
@@ -1883,6 +2563,12 @@ describe('TUI 安全渲染与转录恢复', () => {
       view.screen.scrollPage(-1);
       await view.flush();
       await view.flush();
+      // A real PageUp now moves a viewport page after loading the segment, so the footer plan
+      // may be outside the visible window. Returning to latest proves that replaying the older
+      // plan did not replace the canonical latest successful plan.
+      expect(view.frame()).not.toContain('old segmented plan');
+      view.screen.jumpToLatest();
+      await view.flush();
       expect(view.frame()).toContain('latest segmented plan');
       expect(view.frame()).not.toContain('old segmented plan');
     } finally {
@@ -1967,6 +2653,168 @@ describe('TUI 交互状态投影', () => {
 });
 
 describe('TUI 控制器接线', () => {
+  it('diff active panel 经 controller 消费普通键与鼠标，不改写隐藏的 composer draft', async () => {
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const view = await setup(100, 30);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      interaction: view.interaction,
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('held composer draft');
+    view.screen.openDiffViewer({
+      workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+      threadId: 'thread-controller-diff' as ThreadId,
+      scope: 'turn',
+      generatedAt: 10,
+      files: [{
+        path: 'src/controller-diff.ts',
+        group: 'unstaged',
+        status: 'M',
+        patch: Array.from({ length: 80 }, (_, index) => `+ diff-row-${index}`).join('\n'),
+      }],
+    });
+    await view.flush();
+    const diffScroll = view.renderer.root.findDescendantById('coda-diff-scroll');
+    if (!(diffScroll instanceof ScrollBoxRenderable)) throw new Error('diff scroll not found');
+
+    await view.mockInput.typeText('x');
+    await view.mockMouse.scroll(
+      diffScroll.screenX + 1,
+      diffScroll.screenY + 1,
+      'down',
+      { delayMs: 0 },
+    );
+    await view.flush();
+    const draftAfterDiffInput = view.screen.getInput();
+
+    view.mockInput.pressEscape();
+    await view.flush();
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+    expect(draftAfterDiffInput).toBe('held composer draft');
+  });
+
+  it('陈旧 async diff scope 结果不会从已切换的 sessions panel 抢回 active panel', async () => {
+    const threadId = 'thread-stale-diff' as ThreadId;
+    const staleDiffSnapshot = {
+      workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+      threadId,
+      scope: 'workspace' as const,
+      generatedAt: 12,
+      files: [{
+        path: 'src/stale-diff.ts',
+        group: 'unstaged' as const,
+        status: 'M',
+        patch: '+ stale diff result',
+      }],
+    };
+    let resolveDiff!: (snapshot: typeof staleDiffSnapshot | undefined) => void;
+    const pendingDiff = new Promise<typeof staleDiffSnapshot | undefined>((resolve) => {
+      resolveDiff = resolve;
+    });
+    let diffRequests = 0;
+    const sessions = [{
+      workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+      cwd: '/workspace/stale-diff',
+      updatedAt: 2,
+      preview: 'session remains active',
+      thread: {
+        threadId,
+        createdAt: 1,
+        state: 'idle' as const,
+        title: 'Stale Diff Session',
+      },
+    }];
+    const workspace: RuntimeWorkspaceActions = {
+      get currentThreadId() { return threadId; },
+      eventHighWaterSeq: () => 0,
+      listSessions: async () => sessions,
+      workspaceSnapshot: async () => WORKSPACE_SNAPSHOT,
+      switchSession: async () => undefined,
+      newSession: async () => threadId,
+      renameSession: async () => undefined,
+      archiveSession: async () => undefined,
+      compactConversation: async () => undefined,
+      forkConversation: async () => threadId,
+      retryConversation: async () => threadId,
+      reviewSnapshot: async () => undefined,
+      diffSnapshot: async () => {
+        diffRequests++;
+        return pendingDiff;
+      },
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => [],
+    };
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const view = await setup(100, 30, () => {}, true, undefined, { workspace });
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      interaction: view.interaction,
+      workspace,
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.openDiffViewer({ ...staleDiffSnapshot, scope: 'turn' });
+    await view.flush();
+
+    view.mockInput.pressTab();
+    expect(diffRequests).toBe(1);
+    view.mockInput.pressEscape();
+    view.screen.openSessionPicker(sessions, '');
+    await view.flush();
+    resolveDiff(staleDiffSnapshot);
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    await view.flush();
+
+    const transcript = view.renderer.root.findDescendantById('coda-transcript');
+    const diffPanel = view.renderer.root.findDescendantById('coda-diff-panel');
+    const sessionPanel = view.renderer.root.findDescendantById('coda-session-panel');
+    if (transcript === undefined || diffPanel === undefined || sessionPanel === undefined) {
+      throw new Error('panel not found');
+    }
+    const staleResultState = {
+      transcriptVisible: transcript.visible,
+      diffVisible: diffPanel.visible,
+      sessionsVisible: sessionPanel.visible,
+    };
+
+    view.mockInput.pressEscape();
+    await view.flush();
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+    expect(staleResultState).toEqual({
+      transcriptVisible: false,
+      diffVisible: false,
+      sessionsVisible: true,
+    });
+  });
+
   it('切换 thread 后重建交互状态并且审批只作用于新的当前目标', async () => {
     let currentThreadId = 'thread-running-a' as ThreadId;
     let pendingOnTarget = true;
