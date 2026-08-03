@@ -219,6 +219,89 @@ function addNullType(child: unknown): void {
 
 // ---------- 参数裁剪 ----------
 
+type OpenAIReasoningEffort = NonNullable<ChatCompletionCreateParamsStreaming['reasoning_effort']>;
+
+interface KnownModelParameters {
+  models: readonly string[];
+  supportsTemperature: boolean;
+  reasoningEfforts: readonly OpenAIReasoningEffort[];
+}
+
+const KNOWN_MODEL_PARAMETERS: readonly KnownModelParameters[] = [
+  {
+    models: ['gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
+    models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+  },
+  {
+    models: ['gpt-5.1'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high'],
+  },
+  {
+    models: ['gpt-5'],
+    supportsTemperature: false,
+    reasoningEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  {
+    models: ['o1', 'o1-mini', 'o3', 'o3-mini', 'o4-mini'],
+    supportsTemperature: false,
+    reasoningEfforts: ['low', 'medium', 'high'],
+  },
+  {
+    models: [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-4.1',
+      'gpt-4.1-mini',
+      'gpt-4.1-nano',
+      'gpt-4-turbo',
+      'gpt-3.5-turbo',
+    ],
+    supportsTemperature: true,
+    reasoningEfforts: [],
+  },
+];
+
+function knownModelParameters(model: string): KnownModelParameters | undefined {
+  const id = model.trim().toLowerCase();
+  return KNOWN_MODEL_PARAMETERS.find((entry) =>
+    entry.models.some((base) => matchesModelOrSnapshot(id, base)),
+  );
+}
+
+function matchesModelOrSnapshot(model: string, base: string): boolean {
+  if (model === base) return true;
+  if (!model.startsWith(`${base}-`)) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(model.slice(base.length + 1));
+}
+
+function parseReasoningEffort(value: string | undefined): OpenAIReasoningEffort | undefined {
+  switch (value) {
+    case 'none':
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function parseTemperature(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 2
+    ? value
+    : undefined;
+}
+
 export function buildParams(
   model: ModelConfig,
   ctx: Context,
@@ -226,8 +309,21 @@ export function buildParams(
   compat: ResolvedCompat,
 ): ChatCompletionCreateParamsStreaming {
   const maxTokens = options?.maxOutputTokens ?? model.defaults?.maxOutputTokens;
-  const temperature = options?.temperature ?? model.defaults?.temperature;
-  const reasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
+  const requestedTemperature = options?.temperature ?? model.defaults?.temperature;
+  const requestedReasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
+  const knownParameters = knownModelParameters(model.ref.model);
+  const temperature =
+    compat.supportsTemperature && knownParameters?.supportsTemperature !== false
+      ? parseTemperature(requestedTemperature)
+      : undefined;
+  const parsedReasoningEffort = compat.supportsReasoningEffort
+    ? parseReasoningEffort(requestedReasoningEffort)
+    : undefined;
+  const reasoningEffort =
+    parsedReasoningEffort !== undefined &&
+    (knownParameters === undefined || knownParameters.reasoningEfforts.includes(parsedReasoningEffort))
+      ? parsedReasoningEffort
+      : undefined;
   const tools: ChatCompletionTool[] | undefined = ctx.tools?.map((t) => ({
     type: 'function' as const,
     function: {
@@ -243,11 +339,8 @@ export function buildParams(
     stream: true,
     ...(compat.supportsUsageInStreaming && { stream_options: { include_usage: true } }),
     ...(maxTokens != null && { [compat.maxTokensField]: maxTokens }),
-    ...(temperature != null && compat.supportsTemperature && { temperature }),
-    ...(reasoningEffort != null &&
-      compat.supportsReasoningEffort && {
-        reasoning_effort: reasoningEffort as ChatCompletionCreateParamsStreaming['reasoning_effort'],
-      }),
+    ...(temperature !== undefined && { temperature }),
+    ...(reasoningEffort !== undefined && { reasoning_effort: reasoningEffort }),
     ...(tools && tools.length > 0 && { tools }),
   };
 }

@@ -270,6 +270,14 @@ describe('buildParams(参数裁剪)', () => {
     expect(params.thinking).toBeUndefined();
   });
 
+  it('无 thinking:非法或越界 temperature 被省略', () => {
+    const temperatureModel = { ...model, ref: { ...model.ref, model: 'claude-sonnet-4-6' } };
+    for (const temperature of [-0.1, 1.1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const params = buildParams(temperatureModel, { messages: [] }, { temperature }, compat);
+      expect(params.temperature).toBeUndefined();
+    }
+  });
+
   it('当前默认温度模型:无 thinking 参数也不发送非默认 temperature', () => {
     const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
     const params = buildParams(model, ctx, { temperature: 0.3 }, compat);

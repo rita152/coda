@@ -172,14 +172,130 @@ export function convertTools(ctx: Context): FunctionTool[] {
   }));
 }
 
+type ResponsesReasoning = NonNullable<ResponseCreateParamsStreaming['reasoning']>;
+type ResponsesReasoningEffort = NonNullable<ResponsesReasoning['effort']>;
+
+interface KnownModelParameters {
+  models: readonly string[];
+  supportsTemperature: boolean;
+  reasoningEfforts: readonly ResponsesReasoningEffort[];
+}
+
+const KNOWN_MODEL_PARAMETERS: readonly KnownModelParameters[] = [
+  {
+    models: ['gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
+    models: ['gpt-5.5-pro', 'gpt-5.4-pro', 'gpt-5.2-pro'],
+    supportsTemperature: false,
+    reasoningEfforts: ['medium', 'high', 'xhigh'],
+  },
+  {
+    models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+  },
+  {
+    models: ['gpt-5.3-codex', 'gpt-5.2-codex'],
+    supportsTemperature: false,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+  },
+  {
+    models: ['gpt-5.1'],
+    supportsTemperature: false,
+    reasoningEfforts: ['none', 'low', 'medium', 'high'],
+  },
+  {
+    models: ['gpt-5-pro'],
+    supportsTemperature: false,
+    reasoningEfforts: ['high'],
+  },
+  {
+    models: ['gpt-5'],
+    supportsTemperature: false,
+    reasoningEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  {
+    models: ['o1', 'o1-mini', 'o3', 'o3-mini', 'o4-mini'],
+    supportsTemperature: false,
+    reasoningEfforts: ['low', 'medium', 'high'],
+  },
+  {
+    models: [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-4.1',
+      'gpt-4.1-mini',
+      'gpt-4.1-nano',
+      'gpt-4-turbo',
+      'gpt-3.5-turbo',
+    ],
+    supportsTemperature: true,
+    reasoningEfforts: [],
+  },
+];
+
+function knownModelParameters(model: string): KnownModelParameters | undefined {
+  const id = model.trim().toLowerCase();
+  return KNOWN_MODEL_PARAMETERS.find((entry) =>
+    entry.models.some((base) => matchesModelOrSnapshot(id, base)),
+  );
+}
+
+function matchesModelOrSnapshot(model: string, base: string): boolean {
+  if (model === base) return true;
+  if (!model.startsWith(`${base}-`)) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(model.slice(base.length + 1));
+}
+
+function parseReasoningEffort(value: string | undefined): ResponsesReasoningEffort | undefined {
+  switch (value) {
+    case 'none':
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function parseTemperature(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 2
+    ? value
+    : undefined;
+}
+
 export function buildParams(
   model: ModelConfig,
   ctx: Context,
   options?: StreamOptions,
 ): ResponseCreateParamsStreaming {
   const maxOutputTokens = options?.maxOutputTokens ?? model.defaults?.maxOutputTokens;
-  const temperature = options?.temperature ?? model.defaults?.temperature;
-  const reasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
+  const requestedTemperature = options?.temperature ?? model.defaults?.temperature;
+  const requestedReasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
+  const knownParameters = knownModelParameters(model.ref.model);
+  const temperature = knownParameters?.supportsTemperature === false
+    ? undefined
+    : parseTemperature(requestedTemperature);
+  const parsedReasoningEffort = parseReasoningEffort(requestedReasoningEffort);
+  const reasoningEffort =
+    parsedReasoningEffort !== undefined &&
+    (knownParameters === undefined || knownParameters.reasoningEfforts.includes(parsedReasoningEffort))
+      ? parsedReasoningEffort
+      : undefined;
+  const supportsReasoning = knownParameters === undefined || knownParameters.reasoningEfforts.length > 0;
+  const reasoning: ResponsesReasoning | undefined = supportsReasoning
+    ? {
+        summary: 'auto',
+        ...(reasoningEffort !== undefined && { effort: reasoningEffort }),
+      }
+    : undefined;
   return {
     model: model.ref.model,
     instructions: ctx.systemPrompt,
@@ -187,15 +303,10 @@ export function buildParams(
     tools: convertTools(ctx),
     stream: true,
     // 本地 transcript 全量重放是正确性路径；此请求不发送 previous_response_id。
-    include: ['reasoning.encrypted_content'],
+    ...(supportsReasoning && { include: ['reasoning.encrypted_content' as const] }),
     ...(maxOutputTokens !== undefined && { max_output_tokens: maxOutputTokens }),
     ...(temperature !== undefined && { temperature }),
-    // Reasoning summary 是 UI 的可展示、非原始推理摘要；即使沿用模型默认 effort 也请求它。
-    reasoning: {
-      summary: 'auto',
-      ...(reasoningEffort !== undefined && {
-        effort: reasoningEffort as NonNullable<ResponseCreateParamsStreaming['reasoning']>['effort'],
-      }),
-    },
+    // 未知模型保留历史 summary 回退；已知非 reasoning 模型不发送相关字段。
+    ...(reasoning !== undefined && { reasoning }),
   };
 }

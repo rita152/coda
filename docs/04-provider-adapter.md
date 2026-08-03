@@ -194,23 +194,43 @@ tools: ctx.tools?.map(t => ({
 
 ### 3.6 参数裁剪(buildParams)
 
-per-model 参数裁剪而非无脑透传,否则 400——openai-node 类型注释明确 o 系列不支持 `temperature`/`top_p`/`presence_penalty`/`frequency_penalty`,`max_tokens` 已 deprecated 且与 o 系列不兼容:
+参数裁剪必须同时看 endpoint 方言与已知模型能力,否则推理模型收到 `temperature` 或不支持的
+`reasoning_effort` 会直接 400。`compat` 决定字段名和 endpoint 是否接受可选字段；adapter 内的私有
+模型表只能进一步收窄。模型匹配只接受精确 id 或官方日期快照(`base-YYYY-MM-DD`)，不能用宽泛前缀
+让 Pro、Codex、Chat 等命名变体误继承基础模型能力。未知模型保留 endpoint 的兼容回退，但非法
+effort 字符串以及非有限值、超出 `0..2` 的 temperature 一律省略。
 
 ```ts
 function buildParams(model, ctx, options, compat): ChatCompletionCreateParamsStreaming {
   const maxTokens = options?.maxOutputTokens ?? model.defaults?.maxOutputTokens;
-  const temperature = options?.temperature ?? model.defaults?.temperature;
+  const known = knownModelParameters(model.ref.model);
+  const temperature = normalizeTemperature(model, options, compat, known);
+  const reasoningEffort = normalizeReasoningEffort(model, options, compat, known);
   return {
     model: model.ref.model, messages: convertMessages(ctx, model, compat),
     stream: true,
     ...(compat.supportsUsageInStreaming && { stream_options: { include_usage: true } }),
     ...(maxTokens != null && { [compat.maxTokensField]: maxTokens }),   // 'max_completion_tokens' | 'max_tokens'
-    ...(temperature != null && compat.supportsTemperature && { temperature }),
-    ...(reasoningEffort != null && compat.supportsReasoningEffort && { reasoning_effort: reasoningEffort }),
+    ...(temperature !== undefined && { temperature }),
+    ...(reasoningEffort !== undefined && { reasoning_effort: reasoningEffort }),
     ...toolsAndChoice(ctx, compat),
   };
 }
 ```
+
+当前 OpenAI 已知模型矩阵如下；Responses-only 的 Pro/Codex 型号不加入 Chat 表：
+
+| 已知模型 | reasoning effort | temperature |
+|---|---|---|
+| GPT-4o、GPT-4.1、GPT-4 Turbo、GPT-3.5 Turbo | 省略 | `0..2` 内透传 |
+| o1/o3/o4-mini | `low/medium/high` | 省略 |
+| GPT-5 | `minimal/low/medium/high` | 省略 |
+| GPT-5.1 | `none/low/medium/high` | 省略 |
+| GPT-5.2/5.4/5.5（含 5.4 mini/nano） | `none/low/medium/high/xhigh` | 省略 |
+| GPT-5.6（含 Sol/Terra/Luna） | `none/low/medium/high/xhigh/max` | 省略 |
+| Responses: GPT-5.2/5.4/5.5 Pro | `medium/high/xhigh` | 省略 |
+| Responses: GPT-5 Pro | `high` | 省略 |
+| Responses: GPT-5.2/5.3 Codex | `low/medium/high/xhigh` | 省略 |
 
 给推理模型设太小的 `max_completion_tokens` 会出现「token 全烧在 reasoning、content 为空、finish_reason:'length'」,这不是 adapter 能救的,Runtime 的 model limits 配置负责给足预算。
 
@@ -461,7 +481,7 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
 - **temperature 能力安全:**`supportsTemperature` 只是 endpoint 门禁；Claude Fable 5、
   Mythos 5/Preview、Opus 5、Opus 4.8/4.7、Sonnet 5 只接受默认 temperature，resolver 对这些
   精确 model id 收窄为省略 temperature；thinking 开启时所有模型也省略 temperature。未知模型与
-  兼容端点继续使用 endpoint profile，不按模型名猜测其能力。
+  兼容端点继续使用 endpoint profile，不按模型名猜测其能力；实际发送值还必须是 `0..1` 内的有限数。
 - **入站:**`content_block_start/delta/stop` 按 wire index 定位，按本地 append 顺序分配
   `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。
   `redacted_thinking.data` 作为 opaque 字符串保存在 `ReasoningPart` 的 adapter 私有 envelope
@@ -561,8 +581,9 @@ client.responses.create({
   input: convertInput(context.messages),
   tools: convertTools(context.tools),
   stream: true,
-  include: ['reasoning.encrypted_content'],
-  reasoning: { summary: 'auto', /* effort 仅在 options/defaults 明确给出时加入 */ },
+  // 已知 reasoning 模型与未知兼容模型才加入；已知非 reasoning 模型整体省略
+  ...(supportsReasoning && { include: ['reasoning.encrypted_content'] }),
+  ...(supportsReasoning && { reasoning: { summary: 'auto', /* effort 已按模型校验 */ } }),
   // options/defaults 按需映射 max_output_tokens、temperature、reasoning effort
 }, { signal });
 ```
@@ -587,18 +608,19 @@ client.responses.create({
 `AssistantTextPart`，不能放到整条内部消息上。出站转换只合并相邻且 phase 相同的文本；phase 边界、
 reasoning item 和 function call 都会先 flush 当前 assistant input message，以保持完整输出次序。
 
-首次 Responses 请求显式发送 `reasoning.summary:'auto'`，即使未指定 `reasoning.effort` 也请求摘要。
-它请求的是 API 可返回的 reasoning **摘要**，不是原始 reasoning tokens；TUI 只用 public
+已知 reasoning 模型显式发送 `reasoning.summary:'auto'`，即使未指定 `reasoning.effort` 也请求摘要；
+已知非 reasoning 模型同时省略 `reasoning` 与 `include:['reasoning.encrypted_content']`。未知模型保留
+summary-only 的历史兼容回退。它请求的是 API 可返回的 reasoning **摘要**，不是原始 reasoning tokens；TUI 只用 public
 `ReasoningPart.kind === 'summary'` 的文本更新临时 Working 行，Runtime review 仍是完整 canonical
 message/reasoning 内容的读取面。加密 replay 数据继续由 `include:['reasoning.encrypted_content']`
 保留，不能因摘要 UI 而移除。
 
-非 reasoning Responses 模型和兼容端点可能拒绝整个 `reasoning` 参数。adapter 只在首次参数是严格的
+未知兼容端点仍可能拒绝整个 `reasoning` 参数。adapter 只在首次参数是严格的
 summary-only `{summary:'auto'}`，且 SDK 抛出 HTTP 400、结构化 `param` 精确为 `reasoning` 或
 `reasoning.summary` 时，复制参数并省略整个 `reasoning` 字段重试**一次**。显式 effort、任何未来
 reasoning 选项、无结构 message-only 400、401/403/422/429/5xx、网络错误和已经开始的 SSE 流都不得
-降级；第二次请求前再次检查 abort，第二次失败直接进入既有唯一 error 终态。这里不做模型名猜测、
-全局负缓存或第三次请求。
+降级；第二次请求前再次检查 abort，第二次失败直接进入既有唯一 error 终态。这里不做全局负缓存
+或第三次请求。
 
 ### 11.2 transcript 是唯一事实源
 

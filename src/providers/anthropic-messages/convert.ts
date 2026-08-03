@@ -179,7 +179,9 @@ export function buildParams(
   compat: ResolvedAnthropicCompat,
 ): MessageCreateParamsStreaming {
   const requestedMax = options?.maxOutputTokens ?? model.defaults?.maxOutputTokens ?? compat.defaultMaxTokens;
-  const temperature = options?.temperature ?? model.defaults?.temperature;
+  const temperature = parseAnthropicTemperature(
+    options?.temperature ?? model.defaults?.temperature,
+  );
   const reasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
   const effort = parseAnthropicEffort(reasoningEffort);
   const thinkingMode = compat.supportsThinking ? thinkingModeForModel(model.ref.model) : 'unsupported';
@@ -235,4 +237,10 @@ function parseAnthropicEffort(value: string | undefined): AnthropicEffort | unde
     default:
       return undefined;
   }
+}
+
+function parseAnthropicTemperature(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : undefined;
 }

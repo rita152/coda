@@ -320,4 +320,45 @@ describe('buildParams(参数裁剪)', () => {
     const p2 = buildParams(m, ctx, { maxOutputTokens: 100 }, compat);
     expect(p2.max_completion_tokens).toBe(100);
   });
+
+  it('按已知模型精确裁剪 temperature 与 reasoning effort', () => {
+    const cases = [
+      { id: 'gpt-4o', effort: 'high', expectedTemperature: 0.7, expectedEffort: undefined },
+      { id: 'o3-mini', effort: 'high', expectedTemperature: undefined, expectedEffort: 'high' },
+      { id: 'gpt-5', effort: 'minimal', expectedTemperature: undefined, expectedEffort: 'minimal' },
+      { id: 'gpt-5.4-2026-03-05', effort: 'xhigh', expectedTemperature: undefined, expectedEffort: 'xhigh' },
+      { id: 'gpt-5.6-luna', effort: 'max', expectedTemperature: undefined, expectedEffort: 'max' },
+      { id: 'gpt-test', effort: 'provider-specific', expectedTemperature: 0.7, expectedEffort: undefined },
+    ] as const;
+
+    for (const testCase of cases) {
+      const params = buildParams(
+        { ref: { provider: 'openai', api: 'openai-chat', model: testCase.id } },
+        { messages: [] },
+        { temperature: 0.7, reasoningEffort: testCase.effort },
+        compat,
+      );
+      expect(params.temperature).toBe(testCase.expectedTemperature);
+      expect(params.reasoning_effort).toBe(testCase.expectedEffort);
+    }
+  });
+
+  it('相似命名变体不继承基础模型能力,且越界 temperature 被省略', () => {
+    const variant = buildParams(
+      { ref: { provider: 'openai', api: 'openai-chat', model: 'gpt-5-chat-latest' } },
+      { messages: [] },
+      { temperature: 0.7, reasoningEffort: 'xhigh' },
+      compat,
+    );
+    expect(variant.temperature).toBe(0.7);
+    expect(variant.reasoning_effort).toBe('xhigh');
+
+    const invalidTemperature = buildParams(
+      { ref: { provider: 'openai', api: 'openai-chat', model: 'gpt-4o' } },
+      { messages: [] },
+      { temperature: 2.1 },
+      compat,
+    );
+    expect(invalidTemperature.temperature).toBeUndefined();
+  });
 });

@@ -209,4 +209,43 @@ describe('buildParams', () => {
     );
     expect(params.reasoning).toEqual({ summary: 'auto' });
   });
+
+  it('按已知模型精确裁剪 temperature、reasoning 与 include', () => {
+    const context: Context = { messages: [], tools: [] };
+    const cases = [
+      { id: 'gpt-4o', effort: 'high', temperature: 0.7, reasoning: undefined, include: false },
+      { id: 'gpt-5.6-luna', effort: 'max', temperature: undefined, reasoning: { effort: 'max', summary: 'auto' }, include: true },
+      { id: 'gpt-5.3-codex', effort: 'xhigh', temperature: undefined, reasoning: { effort: 'xhigh', summary: 'auto' }, include: true },
+      { id: 'gpt-5.3-codex', effort: 'minimal', temperature: undefined, reasoning: { summary: 'auto' }, include: true },
+      { id: 'gpt-5.5-pro', effort: 'low', temperature: undefined, reasoning: { summary: 'auto' }, include: true },
+      { id: 'gpt-test', effort: 'provider-specific', temperature: 0.7, reasoning: { summary: 'auto' }, include: true },
+    ] as const;
+
+    for (const testCase of cases) {
+      const params = buildParams(
+        { ref: { provider: 'openai', api: 'openai-responses', model: testCase.id } },
+        context,
+        { temperature: 0.7, reasoningEffort: testCase.effort },
+      );
+      expect(params.temperature).toBe(testCase.temperature);
+      expect(params.reasoning).toEqual(testCase.reasoning);
+      expect('include' in params).toBe(testCase.include);
+    }
+  });
+
+  it('基础模型不会吞掉命名变体,且越界 temperature 被省略', () => {
+    const variant = buildParams(
+      { ref: { provider: 'openai', api: 'openai-responses', model: 'gpt-5.4-pro' } },
+      { messages: [], tools: [] },
+      { reasoningEffort: 'low' },
+    );
+    expect(variant.reasoning).toEqual({ summary: 'auto' });
+
+    const invalidTemperature = buildParams(
+      { ref: { provider: 'openai', api: 'openai-responses', model: 'gpt-4o' } },
+      { messages: [], tools: [] },
+      { temperature: Number.NaN },
+    );
+    expect(invalidTemperature.temperature).toBeUndefined();
+  });
 });
