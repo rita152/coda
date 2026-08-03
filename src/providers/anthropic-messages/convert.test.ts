@@ -112,6 +112,36 @@ describe('convertMessages(出站快照)', () => {
     expect(wire[0]?.content).toEqual([{ type: 'text', text: 'answer' }]);
   });
 
+  it('redacted_thinking:JSON 持久化后仍原样回传,不当作可见 thinking 解释', () => {
+    const data = 'opaque-ciphertext:preserve-exactly';
+    const assistant: Context['messages'][number] = {
+      role: 'assistant', id: 'a-redacted', timestamp: 1,
+      content: [
+        {
+          type: 'reasoning',
+          text: '',
+          signature: `anthropic-messages:redacted-thinking:v1:${JSON.stringify({ type: 'redacted_thinking', data })}`,
+        },
+        { type: 'tool_call', id: 'toolu_redacted', name: 'read', arguments: { path: 'x' }, rawArguments: '{"path":"x"}' },
+      ],
+      model: model.ref, stopReason: 'tool_calls', usage: { input: 1, output: 1 },
+    };
+    const replayed = JSON.parse(JSON.stringify(assistant)) as Context['messages'][number];
+    const wire = convertMessages({
+      messages: [
+        replayed,
+        {
+          role: 'tool_result', id: 'tr-redacted', timestamp: 2,
+          toolCallId: 'toolu_redacted', toolName: 'read', content: [{ type: 'text', text: 'ok' }], isError: false,
+        },
+      ],
+    }, compat);
+    const assistantContent = wire[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(assistantContent[0]).toEqual({ type: 'redacted_thinking', data });
+    expect(assistantContent[0]).not.toHaveProperty('thinking');
+    expect(assistantContent[1]).toMatchObject({ type: 'tool_use', id: 'toolu_redacted' });
+  });
+
   it('supportsImageParts=false:图片降级为占位文本,不无声丢弃', () => {
     const noVision = { ...compat, supportsImageParts: false };
     const ctx: Context = {

@@ -5,7 +5,8 @@
 //  - systemPrompt → 顶层 system 参数(不是消息);
 //  - tool_result → user 消息内的 tool_result content block,图片直接进 block(原生支持,
 //    不需要 openai-chat 的「抽出补 user 消息」补丁);
-//  - assistant 的 ReasoningPart → thinking block(带 signature 原样回传);
+//  - assistant 的 ReasoningPart → thinking block(带 signature 原样回传);其中 Anthropic
+//    redacted_thinking 通过 adapter 私有 opaque envelope 恢复为同名 block;
 //  - 工具 schema 的 parameters → input_schema;
 //  - 连续同 role 消息合并(Anthropic 要求 user/assistant 交替)。
 
@@ -15,6 +16,7 @@ import type {
   ImageBlockParam,
   MessageCreateParamsStreaming,
   MessageParam,
+  RedactedThinkingBlockParam,
   Tool,
   ToolResultBlockParam,
   ToolUseBlockParam,
@@ -29,6 +31,7 @@ import type {
   UserMessage,
 } from '../../protocol/index.js';
 import type { ResolvedAnthropicCompat } from './compat.js';
+import { decodeRedactedThinking } from './redacted-thinking.js';
 
 // tool_result 的 content 子集(Anthropic 允许其中携带 text/image,原生支持图片)。
 type ToolResultContent = Extract<ToolResultBlockParam['content'], unknown[]>[number];
@@ -82,13 +85,23 @@ function convertAssistantContent(m: AssistantMessage): ContentBlockParam[] {
   const blocks: ContentBlockParam[] = [];
   for (const part of m.content) {
     switch (part.type) {
-      case 'reasoning':
+      case 'reasoning': {
+        const redactedData = decodeRedactedThinking(part.signature);
+        if (redactedData !== undefined) {
+          const block: RedactedThinkingBlockParam = {
+            type: 'redacted_thinking',
+            data: redactedData,
+          };
+          blocks.push(block);
+          break;
+        }
         // thinking block 必须带合法 signature 才能回传;缺失(跨模型降级后本不该到这里)则跳过,
         // 避免服务端因无签名 thinking 块 400。
         if (part.signature && part.signature.length > 0) {
           blocks.push({ type: 'thinking', thinking: part.text, signature: part.signature });
         }
         break;
+      }
       case 'text':
         if (part.text.length > 0) blocks.push({ type: 'text', text: part.text });
         break;

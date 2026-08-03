@@ -14,9 +14,10 @@ import type {
 } from '../../protocol/index.js';
 import type { ProviderEventStream } from '../../protocol/index.js';
 import { parsePartialJson } from '../../shared/partial-json.js';
+import { encodeRedactedThinking } from './redacted-thinking.js';
 
 interface BlockState {
-  kind: 'text' | 'reasoning' | 'tool_call';
+  kind: 'text' | 'reasoning' | 'redacted_thinking' | 'tool_call';
   contentIndex: number;
   part: TextPart | ReasoningPart | ToolCallPart;
   closed: boolean;
@@ -113,6 +114,19 @@ function openBlock(e: Record<string, unknown>, state: StreamState, stream: Provi
     state.partial.content.push(part);
     state.blocks.set(idx, { kind: 'reasoning', contentIndex, part, closed: false });
     stream.push({ type: 'reasoning_start', contentIndex, partial: state.partial });
+  } else if (type === 'redacted_thinking') {
+    const data = cb['data'];
+    if (typeof data === 'string') {
+      // redacted_thinking 没有可见文本;复用 reasoning 三段式事件,只保存 opaque data 的信封。
+      const part: ReasoningPart = {
+        type: 'reasoning',
+        text: '',
+        signature: encodeRedactedThinking(data),
+      };
+      state.partial.content.push(part);
+      state.blocks.set(idx, { kind: 'redacted_thinking', contentIndex, part, closed: false });
+      stream.push({ type: 'reasoning_start', contentIndex, partial: state.partial });
+    }
   } else if (type === 'tool_use') {
     const id = typeof cb['id'] === 'string' && cb['id'].length > 0 ? cb['id'] : `toolu_${crypto.randomUUID()}`;
     const part: ToolCallPart = {
@@ -126,8 +140,8 @@ function openBlock(e: Record<string, unknown>, state: StreamState, stream: Provi
     state.blocks.set(idx, { kind: 'tool_call', contentIndex, part, closed: false });
     stream.push({ type: 'tool_call_start', contentIndex, partial: state.partial });
   }
-  // 其它块类型(redacted_thinking / server_tool_use 等)当前不建模:不入 content,后续 delta/stop 因
-  // blocks 无该 index 而被忽略——转录里不出现未知块,符合协议演进的 tolerant reader 纪律。
+  // 其它块类型(server_tool_use 等)当前不建模:不入 content,后续 delta/stop 因 blocks 无该
+  // index 而被忽略——转录里不出现未知块,符合协议演进的 tolerant reader 纪律。
 }
 
 function blockDelta(e: Record<string, unknown>, state: StreamState, stream: ProviderEventStream): void {
@@ -171,7 +185,7 @@ function closeBlock(block: BlockState, state: StreamState, stream: ProviderEvent
   block.closed = true;
   if (block.kind === 'text') {
     stream.push({ type: 'text_end', contentIndex: block.contentIndex, content: (block.part as TextPart).text, partial: state.partial });
-  } else if (block.kind === 'reasoning') {
+  } else if (block.kind === 'reasoning' || block.kind === 'redacted_thinking') {
     stream.push({ type: 'reasoning_end', contentIndex: block.contentIndex, content: (block.part as ReasoningPart).text, partial: state.partial });
   } else {
     finalizeToolArguments(block.part as ToolCallPart);

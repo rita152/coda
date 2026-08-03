@@ -441,12 +441,18 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
 
 - **出站:**`systemPrompt` 进顶层 `system`；连续同 role 消息合并以满足 user/assistant
   交替约束；`ToolResultMessage` 进 user 消息的 `tool_result` block，文本/图片都可原生回传；
-  有合法 signature 的 `ReasoningPart` 恢复为 `thinking` block；工具 schema 使用 `input_schema`。
+  有合法 signature 的 `ReasoningPart` 恢复为 `thinking` block；其中 adapter 私有的
+  `redacted_thinking` opaque envelope 恢复为同名 block，`data` 字符串原样回传；工具 schema
+  使用 `input_schema`。
+  当前 envelope 使用 `anthropic-messages:redacted-thinking:v1:` 前缀和
+  `{type:'redacted_thinking',data:string}` JSON 载荷；载荷中的 `data` 不被 adapter 解释。
   `max_tokens` 是必填项，默认值、thinking budget、图片与 temperature 支持由 adapter 自己的
   `AnthropicCompatFlags` 解析，不复用 openai-chat 的 compat 类型。
 - **入站:**`content_block_start/delta/stop` 按 wire index 定位，按本地 append 顺序分配
-  `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。未建模的
-  `redacted_thinking` / server-tool block 按 tolerant-reader 规则忽略，不泄漏到内部协议。
+  `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。
+  `redacted_thinking.data` 作为 opaque 字符串保存在 `ReasoningPart` 的 adapter 私有 envelope
+  中，并通过既有 reasoning 三段式事件占位；不得解密、解释或转成可见文本。其他未建模的
+  server-tool block 仍按 tolerant-reader 规则忽略。
 - **终态:**`end_turn | stop_sequence | pause_turn` → `stop`，`max_tokens` → `length`，
   `tool_use` → `tool_calls`，`refusal` → `content_filter`。`model_context_window_exceeded` 是
   Anthropic 的上下文窗口截断标记，编码为 `error` + `errorDetails.kind = 'overflow'`，交给
@@ -499,8 +505,8 @@ Anthropic 的公开流事件边界见其
 adapter 本体的测试不用 faux,用**录制的 SSE/event fixture 回放**并走与生产相同的消费管线。
 Chat 需覆盖 tool_calls 多片分割、双 index、usage chunk、`length` 截断 JSON、in-band error、id 缺失、
 `reasoning_content` 与空 choices；Responses 需覆盖 text/reasoning/function-call/terminal 事件与并行
-arguments；Anthropic 需覆盖 text/tool/thinking、exclusive → inclusive usage、stop_reason、残缺流与
-abort clean return。完整矩阵见 [测试文档](./10-testing.md)。
+arguments；Anthropic 需覆盖 text/tool/thinking/redacted_thinking round-trip、exclusive → inclusive
+usage、stop_reason、残缺流与 abort clean return。完整矩阵见 [测试文档](./10-testing.md)。
 
 ## 10. 验收清单
 

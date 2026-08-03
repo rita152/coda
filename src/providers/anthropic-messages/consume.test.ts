@@ -99,6 +99,39 @@ describe('fixture 回放(真实录制 claude-opus-5,全部产出合法事件序�
     // input=534,output=71,reasoning=thinking_tokens=42
     expect(final.usage).toEqual({ input: 534, output: 71, reasoning: 42 });
   });
+
+  it('redacted_thinking:保留 opaque data,并占用原始 content 顺序', async () => {
+    const data = 'opaque-ciphertext:do-not-decode';
+    const lines: unknown[] = [
+      { type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_redacted', name: 'read', input: {} } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"x"}' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 4 } },
+      { type: 'message_stop' },
+    ];
+    const stream = consumeAnthropicStreamForTest(ref, compat, () => Promise.resolve(fixtureEvents(lines)));
+    const { events, final } = await collectStream(stream);
+    assertValidProviderEventSequence(events);
+
+    expect(events.map((event) => event.type)).toEqual([
+      'start', 'reasoning_start', 'reasoning_end',
+      'tool_call_start', 'tool_call_delta', 'tool_call_end', 'done',
+    ]);
+    expect(final.content[0]).toEqual({
+      type: 'reasoning',
+      text: '',
+      signature: `anthropic-messages:redacted-thinking:v1:${JSON.stringify({ type: 'redacted_thinking', data })}`,
+    });
+    expect(final.content[1]).toMatchObject({
+      type: 'tool_call',
+      id: 'toolu_redacted',
+      rawArguments: '{"path":"x"}',
+    });
+    expect(final.stopReason).toBe('tool_calls');
+  });
 });
 
 describe('usage 换算单测(exclusive → inclusive,各形态断言不变量)', () => {
