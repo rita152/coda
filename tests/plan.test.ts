@@ -9,19 +9,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'bun:test';
 import type { AgentEvent, PlanStep, ToolResultMessage } from '../src/protocol/index.js';
-import { createFauxStreamFn } from '../src/providers/faux/index.js';
-import { Session } from '../src/session/index.js';
-import { FileTracker } from '../src/shared/index.js';
-import { planTool } from '../src/tools/plan.js';
-import type { ToolContext } from '../src/tools/types.js';
-import { makeHarness, makeTool, TEST_MODEL, textOutput } from './helpers/agent-harness.js';
+import {
+  PLAN_PROMPT_SNIPPET,
+  executePlan,
+  planParameters,
+} from '../src/tools/plan.js';
+import type { PlanArgs } from '../src/tools/plan.js';
+import { makeHarness, makeTool, textOutput } from './helpers/agent-harness.js';
 
 // ---------- 仪器 ----------
-
-/** 直接单测 execute 用的最小 ToolContext(plan 不触碰 ctx,仅满足类型)。 */
-function toolCtx(): ToolContext {
-  return { cwd: process.cwd(), signal: new AbortController().signal, fileTracker: new FileTracker() };
-}
 
 function planUpdates(events: AgentEvent[]): PlanStep[][] {
   return events
@@ -33,6 +29,12 @@ function resultText(r: ToolResultMessage | undefined): string {
   const part = r?.content[0];
   return part?.type === 'text' ? part.text : '';
 }
+
+const planCapability = makeTool<PlanArgs>(
+  'plan',
+  async (args) => executePlan({ id: 'plan-test', args }),
+  { parameters: planParameters, promptSnippet: PLAN_PROMPT_SNIPPET },
+);
 
 // ---------- plan 工具与 plan_update(M6 验收 3) ----------
 
@@ -56,7 +58,7 @@ describe('整表替换语义(docs/07 §2.8)', () => {
           { events: [{ kind: 'text', text: 'done' }] },
         ],
       },
-      { tools: [planTool] },
+      { tools: [planCapability] },
     );
     await h.agent.prompt('go');
 
@@ -76,7 +78,7 @@ describe('整表替换语义(docs/07 §2.8)', () => {
           { events: [{ kind: 'text', text: 'cleared' }] },
         ],
       },
-      { tools: [planTool] },
+      { tools: [planCapability] },
     );
     await h.agent.prompt('go');
 
@@ -100,7 +102,7 @@ describe('多 in_progress:提醒而非拒绝(docs/07 §2.8)', () => {
           { events: [{ kind: 'text', text: 'noted' }] },
         ],
       },
-      { tools: [planTool] },
+      { tools: [planCapability] },
     );
     await h.agent.prompt('go');
 
@@ -119,7 +121,7 @@ describe('输出回显与 details(docs/07 §2.8)', () => {
       { step: '实现新格式解析', status: 'in_progress' },
       { step: '补回归测试', status: 'pending' },
     ];
-    const out = await planTool.execute({ id: 'p1', args: { steps } }, toolCtx());
+    const out = await executePlan({ id: 'p1', args: { steps } });
 
     expect(out.content).toEqual([
       {
@@ -131,20 +133,17 @@ describe('输出回显与 details(docs/07 §2.8)', () => {
   });
 
   it("空 steps 数组 → '(empty plan)'", async () => {
-    const out = await planTool.execute({ id: 'p1', args: { steps: [] } }, toolCtx());
+    const out = await executePlan({ id: 'p1', args: { steps: [] } });
     expect(out.content).toEqual([{ type: 'text', text: '(empty plan)' }]);
     expect(out.details).toEqual({ steps: [] });
   });
 });
 
 describe('注册形态(docs/07 §2.8/§1.5)', () => {
-  it("kind='plan';promptSnippet 拼进 system prompt 的 # Tool usage notes 小节", async () => {
-    expect(planTool.kind).toBe('plan'); // 权限分级:plan 默认直通不产生 approval(docs/07 §3.1)
-    expect(planTool.executionMode).toBeUndefined(); // 不声明 sequential,不拖累批调度
-
+  it('registry turn assembles the plan prompt snippet into the provider context', async () => {
     const h = makeHarness(
       { turns: [{ events: [{ kind: 'text', text: 'hi' }] }] },
-      { tools: [planTool] },
+      { tools: [planCapability] },
     );
     await h.agent.prompt('go');
     const systemPrompt = h.streamFn.calls[0]?.context.systemPrompt ?? '';
@@ -155,8 +154,8 @@ describe('注册形态(docs/07 §2.8/§1.5)', () => {
 
 // ---------- 截断落盘统一验收(docs/11 M6「截断落盘完善」) ----------
 
-describe('截断落盘:Session 路径 spillDir 含 sessionId(docs/07 §1.6)', () => {
-  it('超限工具输出全文落盘到 ~/.coda/truncated/<sessionId>/;结果尾部续读提示含该路径', async () => {
+describe('截断落盘:Agent 使用显式 scope(docs/07 §1.6)', () => {
+  it('超限能力输出全文落盘到 ~/.coda/truncated/<scope>/', async () => {
     // HOME 重定向到临时目录:truncationDir 基于 os.homedir()(POSIX 读 $HOME),
     // 测试不污染真实 ~/.coda;finally 恢复并整树清理。
     const prevHome = process.env['HOME'];
@@ -165,32 +164,28 @@ describe('截断落盘:Session 路径 spillDir 含 sessionId(docs/07 §1.6)', ()
     try {
       const fullText = Array.from({ length: 3000 }, (_, i) => `line ${i + 1}`).join('\n');
       const big = makeTool('big', async () => textOutput(fullText));
-      const streamFn = createFauxStreamFn({
+      const scope = 'plan-spill-test';
+      const harness = makeHarness({
         turns: [
           { events: [{ kind: 'tool_call', name: 'big', args: {}, id: 'call_big' }] },
           { events: [{ kind: 'text', text: 'done' }] },
         ],
-      });
-      const session = await Session.create({
-        dir: path.join(fakeHome, 'sessions'), // 会话存储与截断落盘分属两处,互不混淆
-        agentConfig: { streamFn, model: TEST_MODEL, tools: [big], systemPrompt: 'test' },
-      });
-      await session.prompt('go');
-      await session.close();
+      }, { tools: [big], truncationScope: scope });
+      await harness.agent.prompt('go');
 
-      // 落盘目录以 sessionId 为 scope(Session.create 注入 truncationScope = id)
-      const spillRoot = path.join(fakeHome, '.coda', 'truncated', session.id);
+      const spillRoot = path.join(fakeHome, '.coda', 'truncated', scope);
       const files = readdirSync(spillRoot);
       expect(files).toHaveLength(1);
       expect(files[0]).toMatch(/-call_big\.txt$/);
       // 落盘为全文(3000 行),不是截断后的 2000 行
       expect(readFileSync(path.join(spillRoot, files[0] as string), 'utf8')).toBe(fullText);
 
-      // 转录内是截断视图 + 可执行续读提示,提示中的落盘路径含 sessionId
-      const result = session.messages.find((m): m is ToolResultMessage => m.role === 'tool_result');
+      const result = harness.agent.transcript.find(
+        (message): message is ToolResultMessage => message.role === 'tool_result',
+      );
       const text = resultText(result);
       expect(text).toContain('[Output truncated: showing first 2000 of 3000 lines.');
-      expect(text).toContain(path.join('.coda', 'truncated', session.id));
+      expect(text).toContain(path.join('.coda', 'truncated', scope));
     } finally {
       if (prevHome === undefined) delete process.env['HOME'];
       else process.env['HOME'] = prevHome;

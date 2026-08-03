@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type {
   AgentMessage,
+  ApprovalPresentation,
   EventEnvelope,
   ExternalOpId,
   ModelConfig,
@@ -32,6 +33,34 @@ const RECOVERED_MODEL: ModelConfig = {
   ref: { provider: 'faux', api: 'faux', model: 'recovered-before-cli-resume' },
 };
 
+function approvalPresentation(requestId: string): ApprovalPresentation {
+  return {
+    requestId,
+    target: { workspaceId: WORKSPACE_ID, threadId: THREAD_ID, runId: RUN_ID, turnId: TURN_ID },
+    capability: { id: 'bash', version: '1', registrationDigest: 'digest-1' },
+    normalizedResources: [{
+      resourceType: 'command', access: 'execute', matcher: 'canonical_target_exact_v1', pattern: 'echo approved',
+    }],
+    risk: { code: 'command', reason: 'execute', description: 'run command' },
+    allowOnce: { invocationId: 'invocation-1', toolCallId: 'tool-1' },
+    revisions: {
+      catalog: 1,
+      effectivePolicy: 'policy-1',
+      policyBasis: 'basis-1',
+      ceiling: 'ceiling-1',
+      grants: 'grants-1',
+    },
+  };
+}
+
+function approvalPayload(requestId: string) {
+  return {
+    toolCallId: 'tool-1',
+    description: 'run command',
+    presentation: approvalPresentation(requestId),
+  };
+}
+
 describe('RuntimeFrontendSession', () => {
   it('hot-subscribes before create and settles prompt only at canonical op completion', async () => {
     const runtime = new FakeRuntime();
@@ -61,7 +90,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     expect(settled).toBe(true);
     expect(session.interactionState()).toBe('idle');
-    expect(events).toEqual(['agent_start', 'message_start', 'message_end', 'agent_end']);
+    expect(events).toEqual(['agent_start', 'message_start', 'message_end', 'agent_end', 'op_completed']);
     expect(session.messages).toHaveLength(1);
     expect(session.messages[0]?.role).toBe('user');
     await session.close();
@@ -98,7 +127,7 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
-  it('projects approval requests and maps decisions back to identity-bearing ops', async () => {
+  it('projects canonical control requests and maps decisions back to identity-bearing ops', async () => {
     const runtime = new FakeRuntime();
     const session = new RuntimeFrontendSession({
       runtime,
@@ -114,16 +143,15 @@ describe('RuntimeFrontendSession', () => {
 
     runtime.requestApproval('approval-1');
     await flushMicrotasks();
-    expect(events).toEqual(['approval_request']);
+    expect(events).toEqual(['control_request']);
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-1',
+      requestId: 'approval-1',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-1'),
     }]);
 
-    const beforeUnknown = runtime.ops.length;
-    session.resolveApproval('missing', 'allow_once');
-    expect(runtime.ops).toHaveLength(beforeUnknown);
+    expect(() => session.resolveApproval('missing', 'allow_once')).toThrow(/not pending/);
 
     session.resolveApproval('approval-1', 'allow_always');
     await flushMicrotasks();
@@ -163,7 +191,7 @@ describe('RuntimeFrontendSession', () => {
       order.push(event.type);
     });
     const unsubscribe = session.subscribePendingApprovals((snapshot) => {
-      order.push(`pending:${snapshot.approvals.map((item) => item.approvalId).join(',')}`);
+      order.push(`pending:${snapshot.approvals.map((item) => item.requestId).join(',')}`);
     });
     await flushMicrotasks();
     expect(order).toEqual(['pending:approval-recovered']);
@@ -173,8 +201,9 @@ describe('RuntimeFrontendSession', () => {
     runtime.resolveApprovalExternally('approval-live');
     await flushMicrotasks();
     expect(order).toEqual([
-      'approval_request',
+      'control_request',
       'pending:approval-recovered,approval-live',
+      'control_resolved',
       'pending:approval-recovered',
     ]);
 
@@ -207,15 +236,15 @@ describe('RuntimeFrontendSession', () => {
       if (event.type === 'agent_start') {
         markBlocked();
         await fanoutGate;
-      } else if (event.type === 'approval_request') {
-        order.push('approval_request');
+      } else if (event.type === 'control_request' && event.kind === 'approval') {
+        order.push('control_request');
       }
     });
     const prompt = session.prompt('block frontend fanout');
     await blocked;
 
     session.subscribePendingApprovals((snapshot) => {
-      order.push(`pending:${snapshot.approvals.map((item) => item.approvalId).join(',')}`);
+      order.push(`pending:${snapshot.approvals.map((item) => item.requestId).join(',')}`);
     });
     runtime.requestApproval('approval-after-subscribe');
     await flushMicrotasks();
@@ -223,7 +252,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
 
     expect(order).toEqual([
-      'approval_request',
+      'control_request',
       'pending:approval-after-subscribe',
     ]);
     runtime.completePrompt();
@@ -244,7 +273,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     let presented: readonly string[] = [];
     session.subscribePendingApprovals((snapshot) => {
-      presented = snapshot.approvals.map((item) => item.approvalId);
+      presented = snapshot.approvals.map((item) => item.requestId);
     });
     await flushMicrotasks();
     expect(presented).toEqual(['approval-before-boundary']);
@@ -276,6 +305,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     releaseFanout();
     await flushMicrotasks();
+    await flushMicrotasks();
 
     expect(presentedAtBoundary).toEqual([]);
     expect(presented).toEqual(['approval-after-boundary']);
@@ -284,7 +314,7 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
-  it('keeps late or already-claimed approval response races silent', async () => {
+  it('reports rejected control responses and leaves the canonical request pending', async () => {
     for (const reason of [
       'control_request_not_found',
       'control_response_already_claimed',
@@ -307,13 +337,13 @@ describe('RuntimeFrontendSession', () => {
 
       session.resolveApproval(`approval-${reason}`, 'allow_once');
       await flushMicrotasks();
-      expect(session.pendingApprovals()).toEqual([]);
+      expect(session.pendingApprovals()).toMatchObject([{ requestId: `approval-${reason}` }]);
       const afterFirstResponse = runtime.ops.length;
       session.resolveApproval(`approval-${reason}`, 'allow_once');
       await flushMicrotasks();
 
-      expect(errors).toEqual([]);
-      expect(runtime.ops).toHaveLength(afterFirstResponse);
+      expect(errors).toEqual([reason, reason]);
+      expect(runtime.ops).toHaveLength(afterFirstResponse + 1);
       await session.close();
     }
   });
@@ -331,7 +361,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     const snapshots: string[][] = [];
     session.subscribePendingApprovals((snapshot) => {
-      snapshots.push(snapshot.approvals.map((item) => item.approvalId));
+    snapshots.push(snapshot.approvals.map((item) => item.requestId));
     });
     await flushMicrotasks();
     snapshots.length = 0;
@@ -341,8 +371,8 @@ describe('RuntimeFrontendSession', () => {
     session.resolveApproval('approval-envelope-first', 'allow_once');
     await flushMicrotasks();
 
-    expect(session.pendingApprovals()).toEqual([]);
-    expect(snapshots.every((snapshot) => snapshot.length === 0)).toBe(true);
+    expect(session.pendingApprovals()).toMatchObject([{ requestId: 'approval-envelope-first' }]);
+    expect(snapshots.some((snapshot) => snapshot.includes('approval-envelope-first'))).toBe(true);
     await session.close();
   });
 
@@ -371,9 +401,10 @@ describe('RuntimeFrontendSession', () => {
 
     expect(errors).toEqual(['policy_changed']);
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-retryable',
+      requestId: 'approval-retryable',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-retryable'),
     }]);
 
     runtime.controlRejectionReason = undefined;
@@ -580,9 +611,10 @@ describe('RuntimeFrontendSession', () => {
     runtime.requestApproval(THREAD_B, 'approval-thread-a');
     await flushMicrotasks();
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-thread-a',
+      requestId: 'approval-thread-a',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-thread-a'),
     }]);
     await session.switchSession(THREAD_ID);
     expect(session.pendingApprovals()).toEqual([]);
@@ -594,15 +626,17 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     expect(errors).toEqual([]);
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-thread-a',
+      requestId: 'approval-thread-a',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-thread-a'),
     }]);
     await session.switchSession(THREAD_ID);
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-thread-a',
+      requestId: 'approval-thread-a',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-thread-a'),
     }]);
 
     session.resolveApproval('approval-thread-a', 'deny');
@@ -634,9 +668,10 @@ describe('RuntimeFrontendSession', () => {
     runtime.interruptDeferredControlResponse();
     await flushMicrotasks();
     expect(session.pendingApprovals()).toEqual([{
-      approvalId: 'approval-interrupted',
+      requestId: 'approval-interrupted',
       toolCallId: 'tool-1',
       description: 'run command',
+      presentation: approvalPresentation('approval-interrupted'),
     }]);
 
     session.resolveApproval('approval-interrupted', 'allow_once');
@@ -686,7 +721,7 @@ describe('RuntimeFrontendSession', () => {
     await flushMicrotasks();
     const snapshots: string[][] = [];
     session.subscribePendingApprovals((snapshot) => {
-      snapshots.push(snapshot.approvals.map((item) => item.approvalId));
+      snapshots.push(snapshot.approvals.map((item) => item.requestId));
     });
     await flushMicrotasks();
     snapshots.length = 0;
@@ -923,7 +958,7 @@ class FakeRuntime implements RuntimeFrontendPort {
         owningRunId: pending.runId,
         owningTurnId: pending.turnId,
         policyRevision: 'policy-1',
-        payload: { toolCallId: 'tool-1', description: 'run command' },
+        payload: approvalPayload(requestId),
       })),
       highWaterSeq: this.gapDuringAttach ? 2 : this.#seq,
     };
@@ -1011,7 +1046,7 @@ class FakeRuntime implements RuntimeFrontendPort {
       owningRunId: RUN_ID,
       owningTurnId: TURN_ID,
       policyRevision: 'policy-1',
-      payload: { toolCallId: 'tool-1', description: 'run command' },
+      payload: approvalPayload(requestId),
     }, { runId: RUN_ID, turnId: TURN_ID });
   }
 
@@ -1221,7 +1256,7 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
           owningRunId: pending.runId,
           owningTurnId: pending.turnId,
           policyRevision: 'policy-1',
-          payload: { toolCallId: 'tool-1', description: 'run command' },
+          payload: approvalPayload(requestId),
         }),
       ),
       highWaterSeq: this.#seq.get(threadId) ?? 0,
@@ -1237,7 +1272,7 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
       owningRunId: RUN_ID,
       owningTurnId: TURN_ID,
       policyRevision: 'policy-1',
-      payload: { toolCallId: 'tool-1', description: 'run command' },
+      payload: approvalPayload(requestId),
     }, { runId: RUN_ID, turnId: TURN_ID });
   }
 

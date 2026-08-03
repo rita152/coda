@@ -1,27 +1,21 @@
-// CLI-only view types. Frontends consume the legacy event projection, but they do not
-// depend on Session: a RuntimePort facade and the exported Session can both implement
-// these structurally compatible values during the Phase-1 migration.
+// CLI-only view types. Human frontends consume canonical Runtime event payloads; machine
+// transports consume the complete identity-bearing EventEnvelope directly.
 
 import type {
   ApprovalControlDecision,
-  LegacySessionEvent,
+  RuntimeEvent,
   ThreadUsage,
 } from '../protocol/index.js';
 
-export type CliSessionEvent = LegacySessionEvent;
-export type CliSessionUsage = ThreadUsage;
+export type CliRuntimeEvent = RuntimeEvent;
+export type CliThreadUsage = ThreadUsage;
 export type CliInteractionState = 'idle' | 'running' | 'retrying' | 'compacting';
 export type CliApprovalDecision = ApprovalControlDecision | 'abort';
-export type CliSessionListener = (
-  event: CliSessionEvent,
+export type CliRuntimeEventListener = (
+  event: CliRuntimeEvent,
 ) => void | Promise<void>;
 
-/** Frontend bridge for resolving and observing canonical approval requests. */
+/** Frontend action for resolving durable approval controls. */
 export interface CliApprovalBridge {
-  broker?: {
-    resolve: (approvalId: string, decision: CliApprovalDecision) => void;
-  };
-  /** Must run after the active session has received its abort request. */
-  onAbort: () => void;
-  subscribe: (listener: (event: CliSessionEvent) => void) => () => void;
+  resolve: (requestId: string, decision: CliApprovalDecision) => void;
 }

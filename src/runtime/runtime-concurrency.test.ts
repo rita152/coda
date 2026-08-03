@@ -9,19 +9,26 @@ import type {
   WorkspaceId,
 } from '../protocol/index.js';
 import { deriveOpId } from '../protocol/index.js';
+import {
+  createCapabilityRegistry,
+  createPolicyEngine,
+  createPromptAssembler,
+  createProviderAdapterRegistry,
+} from '../capabilities/index.js';
+import type { RuntimeCapabilityServices } from '../capabilities/index.js';
 import { createMemoryRuntimeStorage } from './memory-storage.js';
 import type {
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RuntimeIdentityFactory,
-  ThreadDriverAttachment,
   ThreadDriverCompletion,
   ThreadDriverFactory,
-  ThreadDriverHostServices,
+  RuntimeThreadDriverAttachment,
+  RuntimeThreadDriverHostServices,
   ThreadDriverPort,
 } from './ports.js';
 import { createRuntime } from './supervisor.js';
-import { emptyCheckpoint } from './thread-journal.js';
+import { emptyCheckpoint } from '../session/thread-journal.js';
 
 const WORKSPACE_ID = 'ws_runtime_concurrency' as WorkspaceId;
 const CWD = '/runtime/concurrency';
@@ -140,6 +147,8 @@ async function runtimeFixture(): Promise<{
     },
     permissionPolicy: policy,
     threadDriverFactory: drivers,
+    capabilityMode: 'registry',
+    capabilityServices: capabilityServices(),
     identityFactory: new FakeIdentityFactory(),
     clock: { now: () => 1 },
   });
@@ -203,13 +212,13 @@ class FakePolicy implements PermissionPolicyPort {
 }
 
 class FakeDriverFactory implements ThreadDriverFactory {
-  readonly requirements = { approvalMode: 'legacy_session_edge' as const };
+  readonly requirements = { capabilityMode: 'registry' as const };
   readonly #drivers = new Map<ThreadId, FakeDriver>();
 
   async create(input: {
     readonly threadId: ThreadId;
     readonly model: ModelConfig;
-  }, host: ThreadDriverHostServices): Promise<ThreadDriverAttachment> {
+  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
     void host;
     return this.#attachment(input.threadId, input.model.ref);
   }
@@ -217,13 +226,11 @@ class FakeDriverFactory implements ThreadDriverFactory {
   async resume(input: {
     readonly threadId: ThreadId;
     readonly model: ModelConfig;
-    readonly committedCheckpoint?: import('./ports.js').ThreadDriverCheckpoint;
-  }, host: ThreadDriverHostServices): Promise<ThreadDriverAttachment> {
+    readonly committedCheckpoint: import('./ports.js').ThreadDriverCheckpoint;
+  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
     void host;
     const attachment = this.#attachment(input.threadId, input.model.ref);
-    return input.committedCheckpoint === undefined
-      ? attachment
-      : { ...attachment, initialCheckpoint: input.committedCheckpoint };
+    return { ...attachment, initialCheckpoint: input.committedCheckpoint };
   }
 
   complete(threadId: ThreadId, runId: RunId | undefined, status: 'completed' | 'aborted' | 'error'): void {
@@ -237,15 +244,48 @@ class FakeDriverFactory implements ThreadDriverFactory {
     return runId !== undefined && (this.#drivers.get(threadId)?.hasPending(runId) ?? false);
   }
 
-  #attachment(threadId: ThreadId, model: ModelRef): ThreadDriverAttachment {
+  #attachment(threadId: ThreadId, model: ModelRef): RuntimeThreadDriverAttachment {
     const driver = new FakeDriver();
     this.#drivers.set(threadId, driver);
     return {
       driver,
-      durableRef: { kind: 'fake', key: threadId },
       initialCheckpoint: emptyCheckpoint(model),
     };
   }
+}
+
+function capabilityServices(): RuntimeCapabilityServices {
+  return {
+    capabilities: createCapabilityRegistry(),
+    providers: createProviderAdapterRegistry(),
+    promptAssembler: createPromptAssembler(),
+    basePrompts: {
+      async capture(input) {
+        return { owner: input.context, model: input.model.ref, revision: 'base-v1', content: '' };
+      },
+    },
+    ruleSnapshots: {
+      async capture(input) {
+        return {
+          ok: true,
+          snapshot: {
+            revision: 'rules-v1',
+            owner: input.context,
+            discovery: {
+              knownResourceScopes: [...input.knownResourceScopes],
+              budget: input.budget,
+              diagnostics: [],
+            },
+            files: [],
+          },
+        };
+      },
+    },
+    ruleBudget: { maxFiles: 1, maxFileBytes: 1_024, maxBytes: 1_024, maxPromptTokens: 256 },
+    policyEngine: createPolicyEngine(),
+    ruleFreshness: { async check() { return { fresh: true }; } },
+    grantMode: 'workspace',
+  };
 }
 
 class FakeDriver implements ThreadDriverPort {

@@ -1,49 +1,155 @@
-// L4 loop 测试的公共 harness:测试工具构造、AgentEvent 收集与等待、事件序列归一化。
-// 纪律(docs/10 §5/§8):时序控制只用 faux 的 gate 与事件等待,禁止计时器;
-// 断言出站转录一律用 faux 的 calls,不猜 agent 内部状态。
+// Agent-loop test harness. Even synthetic tools cross the RuntimeTurnProvider boundary so tests
+// cannot accidentally exercise a removed static-tool or static-provider Agent path.
 
 import { z } from 'zod';
 import { Agent } from '../../src/agent/index.js';
-import type { AgentConfig } from '../../src/agent/index.js';
-import type { AgentEvent, AgentMessage, ModelConfig } from '../../src/protocol/index.js';
+import type {
+  AgentConfig,
+  RuntimeTurnProvider,
+} from '../../src/agent/index.js';
+import type {
+  AgentEvent,
+  AgentMessage,
+  JSONSchema,
+  ModelConfig,
+  StreamFn,
+  ToolCallPart,
+} from '../../src/protocol/index.js';
 import { createFauxStreamFn } from '../../src/providers/faux/index.js';
 import type { FauxScript } from '../../src/providers/faux/index.js';
-import type { ToolContext, ToolDefinition, ToolOutput } from '../../src/tools/types.js';
+import { FileTracker } from '../../src/shared/index.js';
+import type {
+  ToolContext,
+  ToolOutput,
+} from '../../src/tools/types.js';
 
 export const TEST_MODEL: ModelConfig = {
   ref: { provider: 'faux', api: 'faux', model: 'test' },
 };
 
-/** 极简测试工具:单 value 字段 schema,execute 可注入(第 2 参拿 ToolContext,可观测 signal)。 */
-export function makeTool(
+export interface TestCapability<P = unknown> {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: z.ZodType<P>;
+  readonly promptSnippet?: string;
+  readonly executionMode?: 'sequential';
+  execute(args: P, context: ToolContext): Promise<ToolOutput>;
+}
+
+/** Minimal synthetic capability with a single optional `value` field by default. */
+export function makeTool<P = { value?: string }>(
   name: string,
-  execute: (args: { value?: string }, ctx: ToolContext) => Promise<ToolOutput>,
-  opts?: { executionMode?: 'sequential' },
-): ToolDefinition {
+  execute: (args: P, ctx: ToolContext) => Promise<ToolOutput>,
+  opts?: {
+    readonly executionMode?: 'sequential';
+    readonly parameters?: z.ZodType<P>;
+    readonly promptSnippet?: string;
+  },
+): TestCapability<P> {
+  const defaultParameters = z.object({
+    value: z.string().optional().describe('test value'),
+  }) as unknown as z.ZodType<P>;
   return {
     name,
-    description: `test tool ${name}`,
-    parameters: z.object({
-      value: z.string().optional().describe('test value'),
-    }),
-    executionMode: opts?.executionMode,
-    execute: async (call, ctx) => execute(call.args as { value?: string }, ctx),
+    description: `test capability ${name}`,
+    parameters: opts?.parameters ?? defaultParameters,
+    ...(opts?.executionMode === undefined ? {} : { executionMode: opts.executionMode }),
+    ...(opts?.promptSnippet === undefined ? {} : { promptSnippet: opts.promptSnippet }),
+    execute,
   };
 }
 
 /**
- * 内部消息 → wire 形状(assistant.tool_calls / tool.tool_call_id)的最小映射,
- * 供复用 M2 的配对断言 assertToolCallPairing 直接验 transform 产物(docs/11 M4 验收 3)。
- * 真正的 wire 渲染在 adapter(tests zone 禁 import openai-chat),此映射只保留配对结构。
+ * Construct the only Agent execution port used by tests. Provider, schemas and executors are
+ * captured together for each turn, matching the production registry lifecycle.
+ */
+export function makeRuntimeTurnProvider(
+  streamFn: StreamFn,
+  tools: readonly TestCapability[] = [],
+  systemPrompt = 'You are a test agent.',
+): RuntimeTurnProvider {
+  const fileTracker = new FileTracker();
+  return {
+    async capture() {
+      const captured = [...tools];
+      return {
+        streamFn,
+        assemble(messages) {
+          const snippets = captured
+            .map((tool) => tool.promptSnippet)
+            .filter((snippet): snippet is string => snippet !== undefined && snippet.length > 0);
+          return {
+            ok: true as const,
+            context: {
+              systemPrompt: snippets.length === 0
+                ? systemPrompt
+                : `${systemPrompt}\n\n# Tool usage notes\n\n${snippets.join('\n\n')}`,
+              messages: [...messages],
+              tools: captured.map((tool) => ({
+                name: tool.name,
+                description: tool.description,
+                parameters: z.toJSONSchema(tool.parameters) as JSONSchema,
+              })),
+            },
+          };
+        },
+        async prepareToolCall(call: Readonly<ToolCallPart>) {
+          const tool = captured.find((candidate) => candidate.name === call.name);
+          if (tool === undefined) {
+            return {
+              ok: false as const,
+              message:
+                `Unknown tool "${call.name}". Available tools: ` +
+                `${captured.map((candidate) => candidate.name).join(', ')}.`,
+            };
+          }
+          const parsed = tool.parameters.safeParse(call.arguments);
+          if (!parsed.success) {
+            return {
+              ok: false as const,
+              message:
+                `The ${tool.name} capability was called with invalid arguments: ` +
+                `${z.prettifyError(parsed.error)}. ` +
+                'Please rewrite the input so it satisfies the expected schema.',
+            };
+          }
+          return {
+            ok: true as const,
+            args: parsed.data,
+            executionMode: tool.executionMode ?? 'parallel' as const,
+            execute: async (input: {
+              readonly signal: AbortSignal;
+              readonly onUpdate: (update: Readonly<Record<string, unknown>>) => void;
+            }) => tool.execute(parsed.data, {
+              cwd: process.cwd(),
+              signal: input.signal,
+              onUpdate: input.onUpdate,
+              fileTracker,
+            }),
+          };
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Internal messages to the minimum wire pairing shape used by transform assertions.
  */
 export function toWireShape(messages: readonly AgentMessage[]): unknown[] {
-  return messages.map((m) => {
-    if (m.role === 'assistant') {
-      const toolCalls = m.content.filter((p) => p.type === 'tool_call').map((p) => ({ id: p.id }));
-      return toolCalls.length > 0 ? { role: 'assistant', tool_calls: toolCalls } : { role: 'assistant' };
+  return messages.map((message) => {
+    if (message.role === 'assistant') {
+      const toolCalls = message.content
+        .filter((part) => part.type === 'tool_call')
+        .map((part) => ({ id: part.id }));
+      return toolCalls.length > 0
+        ? { role: 'assistant', tool_calls: toolCalls }
+        : { role: 'assistant' };
     }
-    if (m.role === 'tool_result') return { role: 'tool', tool_call_id: m.toolCallId };
-    return { role: m.role };
+    if (message.role === 'tool_result') {
+      return { role: 'tool', tool_call_id: message.toolCallId };
+    }
+    return { role: message.role };
   });
 }
 
@@ -55,31 +161,48 @@ export interface Harness {
   agent: Agent;
   events: AgentEvent[];
   streamFn: ReturnType<typeof createFauxStreamFn>;
-  /** 等待谓词命中的下一个事件(含未来事件;不含已收集的历史)。 */
-  waitForEvent: (pred: (e: AgentEvent) => boolean) => Promise<AgentEvent>;
+  /** Wait for the next future event that matches the predicate. */
+  waitForEvent: (pred: (event: AgentEvent) => boolean) => Promise<AgentEvent>;
 }
+
+type HarnessConfig = Partial<Omit<AgentConfig, 'model' | 'runtimeTurnProvider'>> & {
+  readonly tools?: readonly TestCapability[];
+  readonly runtimeTurnProvider?: RuntimeTurnProvider;
+  readonly systemPrompt?: string;
+};
 
 export function makeHarness(
   script: FauxScript,
-  cfg?: Partial<Omit<AgentConfig, 'streamFn' | 'model'>>,
+  cfg: HarnessConfig = {},
 ): Harness {
   const streamFn = createFauxStreamFn(script);
+  const tools = cfg.tools ?? [];
+  const runtimeTurnProvider = cfg.runtimeTurnProvider
+    ?? makeRuntimeTurnProvider(streamFn, tools, cfg.systemPrompt);
   const agent = new Agent({
-    streamFn,
     model: TEST_MODEL,
-    tools: [],
-    systemPrompt: 'You are a test agent.',
-    ...cfg,
+    runtimeTurnProvider,
+    ...(cfg.transformContext === undefined ? {} : { transformContext: cfg.transformContext }),
+    ...(cfg.afterToolCall === undefined ? {} : { afterToolCall: cfg.afterToolCall }),
+    ...(cfg.shouldStopAfterTurn === undefined
+      ? {}
+      : { shouldStopAfterTurn: cfg.shouldStopAfterTurn }),
+    ...(cfg.initialMessages === undefined ? {} : { initialMessages: cfg.initialMessages }),
+    ...(cfg.initialQueues === undefined ? {} : { initialQueues: cfg.initialQueues }),
+    ...(cfg.truncationScope === undefined ? {} : { truncationScope: cfg.truncationScope }),
   });
   const events: AgentEvent[] = [];
-  const waiters: { pred: (e: AgentEvent) => boolean; resolve: (e: AgentEvent) => void }[] = [];
-  agent.subscribe((e) => {
-    events.push(e);
-    for (let i = waiters.length - 1; i >= 0; i--) {
-      const w = waiters[i] as (typeof waiters)[number];
-      if (w.pred(e)) {
-        waiters.splice(i, 1);
-        w.resolve(e);
+  const waiters: {
+    readonly pred: (event: AgentEvent) => boolean;
+    readonly resolve: (event: AgentEvent) => void;
+  }[] = [];
+  agent.subscribe((event) => {
+    events.push(event);
+    for (let index = waiters.length - 1; index >= 0; index--) {
+      const waiter = waiters[index] as (typeof waiters)[number];
+      if (waiter.pred(event)) {
+        waiters.splice(index, 1);
+        waiter.resolve(event);
       }
     }
   });
@@ -94,14 +217,14 @@ export function makeHarness(
   };
 }
 
-/** 归一化快照:剥 id/timestamp/内容,只留事件 type 序列(message_* 附角色标注)。 */
+/** Normalize IDs/content while retaining the event grammar. */
 export function typeSequence(events: AgentEvent[]): string[] {
-  return events.map((e) => {
-    if (e.type === 'message_start' || e.type === 'message_end') {
-      return `${e.type}(${e.message.role})`;
+  return events.map((event) => {
+    if (event.type === 'message_start' || event.type === 'message_end') {
+      return `${event.type}(${event.message.role})`;
     }
-    if (e.type === 'agent_start') return `agent_start(${e.reason})`;
-    if (e.type === 'agent_end') return `agent_end(${e.reason})`;
-    return e.type;
+    if (event.type === 'agent_start') return `agent_start(${event.reason})`;
+    if (event.type === 'agent_end') return `agent_end(${event.reason})`;
+    return event.type;
   });
 }

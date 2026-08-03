@@ -1,3 +1,4 @@
+// Resource resolvers for the eight native coding capability registrations.
 import path from 'node:path';
 import type {
   CapabilityInvocationAnalysis,
@@ -7,19 +8,19 @@ import type {
 } from '../../capabilities/types.js';
 import { canonicalizePath, isPathInside, resolveToolWorkdir } from '../../shared/index.js';
 import {
-  LEGACY_BASH_ANALYSIS_VERSION,
+  BASH_ANALYSIS_VERSION,
   analyzeBashCommand,
   analyzeBashPaths,
 } from './bash-analyze.js';
-import type { LegacyFilesystemTarget } from './bash-analyze.js';
+import type { FilesystemTarget } from './bash-analyze.js';
 
 type JsonArgs = Readonly<Record<string, unknown>>;
 
-export const LEGACY_FILESYSTEM_ANALYSIS_VERSION = 'legacy_filesystem_analysis_v1';
+export const FILESYSTEM_ANALYSIS_VERSION = 'filesystem_analysis_v2';
 
-export interface LegacyFilesystemInvocationAnalysisAttributes {
-  readonly kind: typeof LEGACY_FILESYSTEM_ANALYSIS_VERSION;
-  readonly filesystemTargets: readonly Readonly<LegacyFilesystemTarget>[];
+export interface FilesystemInvocationAnalysisAttributes {
+  readonly kind: typeof FILESYSTEM_ANALYSIS_VERSION;
+  readonly filesystemTargets: readonly Readonly<FilesystemTarget>[];
 }
 
 export function requiredPathResolver(input: {
@@ -96,7 +97,7 @@ export const bashResourceResolver: CapabilityResourceResolver = async (args, con
     },
     filesystem('workdir', 'read', workdir),
   ];
-  const filesystemTargetKinds = new Map<string, LegacyFilesystemTarget['kind']>([
+  const filesystemTargetKinds = new Map<string, FilesystemTarget['kind']>([
     [workdir, 'directory'],
   ]);
 
@@ -131,9 +132,8 @@ export const bashResourceResolver: CapabilityResourceResolver = async (args, con
   }
 
   const attributes = {
-    kind: LEGACY_BASH_ANALYSIS_VERSION,
+    kind: BASH_ANALYSIS_VERSION,
     command: record.command,
-    patterns: commandAnalysis.denied ? [] : commandAnalysis.patterns,
     forceConfirm: commandAnalysis.denied ? true : commandAnalysis.forceConfirm,
     reasons: commandAnalysis.denied
       ? [commandAnalysis.reason]
@@ -156,7 +156,7 @@ export const bashResourceResolver: CapabilityResourceResolver = async (args, con
     safety: commandAnalysis.denied
       ? {
           kind: 'deny',
-          code: 'legacy_bash_command_denied',
+          code: 'bash_command_denied',
           reason: deniedReason(commandAnalysis.reason),
         }
       : { kind: 'eligible' },
@@ -166,9 +166,9 @@ export const bashResourceResolver: CapabilityResourceResolver = async (args, con
 };
 
 function mergeTargetKind(
-  targets: Map<string, LegacyFilesystemTarget['kind']>,
+  targets: Map<string, FilesystemTarget['kind']>,
   canonicalTarget: string,
-  kind: LegacyFilesystemTarget['kind'],
+  kind: FilesystemTarget['kind'],
 ): void {
   const current = targets.get(canonicalTarget);
   if (current === undefined) {
@@ -179,14 +179,14 @@ function mergeTargetKind(
 }
 
 function filesystemAnalysis(
-  filesystemTargets: readonly Readonly<LegacyFilesystemTarget>[],
+  filesystemTargets: readonly Readonly<FilesystemTarget>[],
 ): CapabilityInvocationAnalysis {
   return {
     resourceCoverage: { kind: 'complete' },
     grantability: { kind: 'persistable' },
     safety: { kind: 'eligible' },
     attributes: {
-      kind: LEGACY_FILESYSTEM_ANALYSIS_VERSION,
+      kind: FILESYSTEM_ANALYSIS_VERSION,
       filesystemTargets: [...filesystemTargets]
         .sort((left, right) => compareUtf8(left.canonicalTarget, right.canonicalTarget)),
     },

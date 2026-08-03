@@ -7,7 +7,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { FileTracker } from '../shared/index.js';
 import type { ToolContext } from './types.js';
-import { writeTool, type WriteDetails } from './write.js';
+import {
+  WRITE_DESCRIPTION,
+  executeWrite,
+  writeParameters,
+  type WriteDetails,
+} from './write.js';
 
 let tmpdir: string;
 let fileTracker: FileTracker;
@@ -26,7 +31,7 @@ function ctx(overrides?: Partial<ToolContext>): ToolContext {
 }
 
 function run(args: { path: string; content: string }, c: ToolContext = ctx()) {
-  return writeTool.execute({ id: 'call_1', args }, c);
+  return executeWrite({ id: 'call_1', args }, c);
 }
 
 /** 模拟 read 工具的登记(read 工具单独交付,这里直接操作 FileTracker)。 */
@@ -205,16 +210,14 @@ describe('write:abort 与 schema', () => {
     expect(fs.existsSync(path.join(tmpdir, 'f.txt'))).toBe(false);
   });
 
-  it('声明 executionMode: sequential 与 kind: edit;description 引导 edit 优先', () => {
-    expect(writeTool.executionMode).toBe('sequential');
-    expect(writeTool.kind).toBe('edit');
-    expect(writeTool.description).toContain(
+  it('description 引导 edit 优先', () => {
+    expect(WRITE_DESCRIPTION).toContain(
       'Prefer the edit tool for modifying existing files; use write only for new files or intentional full rewrites',
     );
   });
 
   it('参数 schema 可渲染为 JSON Schema 且每个字段带 description(§1.2 约束)', () => {
-    const schema = z.toJSONSchema(writeTool.parameters) as {
+    const schema = z.toJSONSchema(writeParameters) as {
       properties: Record<string, { description?: string }>;
       required?: string[];
     };

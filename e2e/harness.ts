@@ -1,5 +1,5 @@
 // L5 e2e harness(规格见 docs/10-testing.md §7):spawn 构建产物 dist/main.js,
-// 走 --json headless 管道驱动完整会话:stdin 写 JSON 命令、逐行收 stdout NDJSON。
+// 走 canonical --json headless 管道驱动完整会话:stdin 写完整 RuntimeOp、逐行收 stdout NDJSON。
 // faux 脚本是 FauxScript 的可序列化子集(events/stopReason/usage,无 gate/回调),
 // 写成临时 JSON 文件经 --faux-script 传入。
 // 计时纪律:本文件的 setTimeout 只用于单事件 15s 看门狗(挂起时快速失败并倾倒已收事件),
@@ -34,20 +34,33 @@ export function requireDist(): void {
   }
 }
 
-/** stdout NDJSON 行解析后的宽松帧形状；兼容 legacy 顶层 type 与 canonical envelope.event.type。 */
+/** 测试侧事件视图：控制帧原样保留，EventEnvelope 则投影其 event 并带回 envelope identity。 */
 export interface Ev {
   type: string;
   [key: string]: unknown;
 }
+
+/** stdout 的 canonical wire frame，保留给协议形状断言。 */
+export type HeadlessFrame =
+  | { readonly type: 'protocol'; readonly protocolVersion: string; readonly workspaceId: string }
+  | { readonly type: 'op_receipt'; readonly receipt: Record<string, unknown> }
+  | { readonly type: 'transport_error'; readonly fatal: boolean; readonly message: string }
+  | {
+      readonly workspaceId: string;
+      readonly threadId: string;
+      readonly seq: number;
+      readonly timestamp: number;
+      readonly event: { readonly type: string; readonly [key: string]: unknown };
+      readonly runId?: string;
+      readonly turnId?: string;
+      readonly opId?: string;
+    };
 
 export interface StartOptions {
   /** FauxScript 的可序列化子集,原样写入临时 JSON 文件。 */
   script: unknown;
   /** cwd 下的预置文件(相对路径 → 内容)。 */
   files?: Record<string, string>;
-  /** --resume <id>(配合 sessionDir 复用会话目录)。 */
-  resume?: string;
-  sessionDir?: string;
   cwd?: string;
   /** -p <text>(一次性模式;与 json:false 组合可测人类可读模式退出码)。 */
   prompt?: string;
@@ -62,11 +75,12 @@ export interface StartOptions {
 export interface CodaProc {
   child: ReturnType<typeof Bun.spawn>;
   cwd: string;
-  sessionDir: string;
   /** stdout 原始行(管道纪律断言用:每行必须可 JSON.parse)。 */
   lines: string[];
+  /** 未投影的 canonical stdout frame，用于断言 EventEnvelope wire identity。 */
+  frames: HeadlessFrame[];
   events: Ev[];
-  /** 无法 JSON.parse(或无 type 字段)的 stdout 行——任何用例都应断言其为空。 */
+  /** 不能解析为 canonical headless frame 的 stdout 行——任何用例都应断言其为空。 */
   parseErrors: string[];
   stderr: () => string;
   send: (cmd: unknown) => void;
@@ -75,15 +89,13 @@ export interface CodaProc {
   /** 等待谓词命中的事件(先查历史再等未来;超时 reject 并倾倒已收事件)。 */
   waitForEvent: (pred: (e: Ev) => boolean, label: string, timeoutMs?: number) => Promise<Ev>;
   waitForExit: (timeoutMs?: number) => Promise<number>;
-  /** 测试收尾兜底:进程若还活着强杀(正常路径经 shutdown/EOF 自然退出)。 */
+  /** 测试收尾兜底:进程若还活着强杀(正常路径经 EOF 自然退出)。 */
   kill: () => void;
 }
 
 export function startCoda(opts: StartOptions): CodaProc {
   const cwd = opts.cwd ?? mkdtempSync(path.join(tmpdir(), 'coda-e2e-'));
-  const sessionDir = opts.sessionDir ?? path.join(cwd, 'sessions');
   const isolatedHome = path.join(cwd, '.home');
-  mkdirSync(sessionDir, { recursive: true });
   mkdirSync(isolatedHome, { recursive: true });
   for (const [name, content] of Object.entries(opts.files ?? {})) {
     writeFileSync(path.join(cwd, name), content, 'utf8');
@@ -95,10 +107,9 @@ export function startCoda(opts: StartOptions): CodaProc {
   if (opts.json !== false) args.push('--json');
   args.push(
     '--provider', 'faux', '--faux-script', scriptPath,
-    '--session-dir', sessionDir, '--cwd', cwd,
+    '--cwd', cwd,
   );
   if (opts.prompt !== undefined) args.push('-p', opts.prompt);
-  if (opts.resume !== undefined) args.push('--resume', opts.resume);
   if (opts.extraArgs !== undefined) args.push(...opts.extraArgs);
   const childEnv = buildE2eEnvironment(Bun.env, isolatedHome, opts.env);
   const child = Bun.spawn([Bun.argv[0] as string, '--no-env-file', ...args], {
@@ -109,6 +120,7 @@ export function startCoda(opts: StartOptions): CodaProc {
   });
 
   const lines: string[] = [];
+  const frames: HeadlessFrame[] = [];
   const events: Ev[] = [];
   const parseErrors: string[] = [];
   let stderrBuf = '';
@@ -117,26 +129,47 @@ export function startCoda(opts: StartOptions): CodaProc {
 
   const onLine = (line: string): void => {
     lines.push(line);
+    let frame: HeadlessFrame;
     let ev: Ev;
     try {
       const parsed = JSON.parse(line) as unknown;
-      const record = parsed as { type?: unknown; event?: { type?: unknown } } | null;
+      const record = parsed as {
+        type?: unknown;
+        event?: { type?: unknown; [key: string]: unknown };
+        workspaceId?: unknown;
+        threadId?: unknown;
+        runId?: unknown;
+        turnId?: unknown;
+        opId?: unknown;
+        seq?: unknown;
+        timestamp?: unknown;
+      } | null;
       if (
         typeof parsed !== 'object' ||
         parsed === null ||
-        (
-          typeof record?.type !== 'string' &&
-          (typeof record?.event !== 'object' || record.event === null || typeof record.event.type !== 'string')
-        )
+        !isCanonicalHeadlessFrame(record)
       ) {
         parseErrors.push(line);
         return;
       }
-      ev = parsed as Ev;
+      frame = parsed as HeadlessFrame;
+      ev = isEventEnvelopeFrame(frame)
+        ? {
+            ...frame.event,
+            workspaceId: frame.workspaceId,
+            threadId: frame.threadId,
+            ...(frame.runId !== undefined && { runId: frame.runId }),
+            ...(frame.turnId !== undefined && { turnId: frame.turnId }),
+            ...(frame.opId !== undefined && { opId: frame.opId }),
+            seq: frame.seq,
+            timestamp: frame.timestamp,
+          }
+        : frame;
     } catch {
       parseErrors.push(line);
       return;
     }
+    frames.push(frame);
     events.push(ev);
     for (let i = waiters.length - 1; i >= 0; i--) {
       const w = waiters[i] as Waiter;
@@ -187,8 +220,8 @@ export function startCoda(opts: StartOptions): CodaProc {
   return {
     child,
     cwd,
-    sessionDir,
     lines,
+    frames,
     events,
     parseErrors,
     stderr: () => stderrBuf,
@@ -229,6 +262,35 @@ export function startCoda(opts: StartOptions): CodaProc {
       if (!processExited) child.kill(9);
     },
   };
+}
+
+function isCanonicalHeadlessFrame(
+  frame: {
+    type?: unknown;
+    event?: { type?: unknown };
+    workspaceId?: unknown;
+    threadId?: unknown;
+    seq?: unknown;
+    timestamp?: unknown;
+  } | null,
+): frame is HeadlessFrame {
+  if (frame === null) return false;
+  if (frame.type === 'protocol') {
+    return typeof frame.workspaceId === 'string';
+  }
+  if (frame.type === 'op_receipt') return true;
+  if (frame.type === 'transport_error') return typeof (frame as { fatal?: unknown }).fatal === 'boolean';
+  return (
+    typeof frame.event?.type === 'string' &&
+    typeof frame.workspaceId === 'string' &&
+    typeof frame.threadId === 'string' &&
+    typeof frame.seq === 'number' &&
+    typeof frame.timestamp === 'number'
+  );
+}
+
+function isEventEnvelopeFrame(frame: HeadlessFrame): frame is Extract<HeadlessFrame, { event: unknown }> {
+  return 'event' in frame;
 }
 
 /** E2E 子进程只继承非敏感变量，并默认使用测试拥有的 HOME。 */

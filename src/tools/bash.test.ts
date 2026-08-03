@@ -7,8 +7,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { FileTracker } from '../shared/index.js';
-import { bashTool } from './bash.js';
-import type { BashDetails } from './bash.js';
+import { bashParameters, executeBash } from './bash.js';
+import type { BashArgs, BashDetails } from './bash.js';
 import type { ToolContext } from './types.js';
 
 let dir: string;
@@ -39,10 +39,10 @@ function makeCtx(overrides?: Partial<ToolContext>): ToolContext {
 }
 
 function run(
-  args: { command: string; timeout?: number; workdir?: string },
+  args: BashArgs,
   ctx: ToolContext = makeCtx(),
 ) {
-  return bashTool.execute({ id: 'call_bash_1', args }, ctx);
+  return executeBash({ id: 'call_bash_1', args }, ctx);
 }
 
 /** 断言 promise 拒绝并返回错误对象(bash 的失败语义是 throw,loop 层转 isError)。 */
@@ -60,11 +60,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe('bash:声明与 schema', () => {
-  it('executionMode sequential、kind execute,参数面与规格一致', () => {
-    expect(bashTool.name).toBe('bash');
-    expect(bashTool.executionMode).toBe('sequential');
-    expect(bashTool.kind).toBe('execute');
-    const schema = z.toJSONSchema(bashTool.parameters) as {
+  it('参数面与规格一致', () => {
+    const schema = z.toJSONSchema(bashParameters) as {
       properties: Record<string, { maximum?: number; minimum?: number }>;
       required?: string[];
     };
@@ -358,7 +355,7 @@ describe('bash:onUpdate 节流(宽松时序用例)', () => {
       const ctx = makeCtx({
         onUpdate: (u) => {
           stamps.push(Date.now());
-          snapshots.push(u.output ?? '');
+          snapshots.push(typeof u.output === 'string' ? u.output : '');
         },
       });
       const out = await run(

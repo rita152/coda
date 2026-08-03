@@ -425,7 +425,7 @@ function validateRuleFile(input: unknown): void {
 
 function snapshotGrants(input: unknown): Readonly<PolicyGrantSnapshot> {
   const snapshot = snapshotRecord(input, 'grants');
-  assertExactKeys(snapshot, ['workspaceId', 'revision', 'grants'], 'grants', ['legacyGlobal']);
+  assertExactKeys(snapshot, ['workspaceId', 'revision', 'grants'], 'grants');
   if (!isWorkspaceId(snapshot.workspaceId)
     || !isNonEmptyString(snapshot.revision)
     || !Array.isArray(snapshot.grants)) {
@@ -438,7 +438,6 @@ function snapshotGrants(input: unknown): Readonly<PolicyGrantSnapshot> {
     if (seenGrantIds.has(grantId)) throw new TypeError('Duplicate policy grant id');
     seenGrantIds.add(grantId);
   }
-  if (snapshot.legacyGlobal !== undefined) validateLegacyGlobalSnapshot(snapshot.legacyGlobal);
   return snapshot as unknown as Readonly<PolicyGrantSnapshot>;
 }
 
@@ -494,27 +493,7 @@ function validateGrantScope(input: unknown): void {
     assertCanonicalUniqueOrder(keys, 'Canonical policy grant resource patterns');
     return;
   }
-  if (scope.kind === 'legacy_global_approvals_v1') {
-    assertExactKeys(scope, ['kind', 'patterns'], 'grant.scope');
-    if (!Array.isArray(scope.patterns) || scope.patterns.length === 0
-      || !scope.patterns.every(isNonEmptyString)) {
-      throw new TypeError('Invalid legacy policy grant scope');
-    }
-    assertCanonicalUniqueOrder(scope.patterns, 'Legacy policy grant patterns');
-    return;
-  }
   throw new TypeError('Unknown policy grant scope');
-}
-
-function validateLegacyGlobalSnapshot(input: unknown): void {
-  const snapshot = asRecord(input, 'grants.legacyGlobal');
-  assertExactKeys(snapshot, ['revision', 'patterns'], 'grants.legacyGlobal');
-  if (!isNonEmptyString(snapshot.revision)
-    || !Array.isArray(snapshot.patterns)
-    || !snapshot.patterns.every(isNonEmptyString)) {
-    throw new TypeError('Invalid legacy approval pattern snapshot');
-  }
-  assertCanonicalUniqueOrder(snapshot.patterns, 'Legacy approval snapshot patterns');
 }
 
 function snapshotEffectiveConstraints(

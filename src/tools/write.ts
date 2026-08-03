@@ -8,14 +8,14 @@ import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { z } from 'zod';
 import { withPathLock } from './path-lock.js';
-import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
-const WriteParams = z.object({
+export const writeParameters = z.object({
   path: z.string().describe('Path to the file to write. Parent directories are created automatically'),
   content: z.string().describe('Full content to write (this replaces the entire file)'),
 });
 
-type WriteArgs = z.infer<typeof WriteParams>;
+export type WriteArgs = z.infer<typeof writeParameters>;
 
 /** approval UI / 持久化用的结构化细节(diff 不回喂模型,§2.6)。 */
 export interface WriteDetails {
@@ -60,7 +60,7 @@ function countChanges(patch: string): { additions: number; deletions: number } {
   return { additions, deletions };
 }
 
-async function executeWrite(args: WriteArgs, ctx: ToolContext): Promise<ToolOutput<WriteDetails>> {
+async function executeWriteArgs(args: WriteArgs, ctx: ToolContext): Promise<ToolOutput<WriteDetails>> {
   const absPath = path.resolve(ctx.cwd, args.path);
 
   return withPathLock(absPath, async () => {
@@ -130,13 +130,13 @@ async function executeWrite(args: WriteArgs, ctx: ToolContext): Promise<ToolOutp
   });
 }
 
-export const writeTool: ToolDefinition<WriteArgs, WriteDetails> = {
-  name: 'write',
-  description:
-    'Write a file to disk, creating it (and any missing parent directories) or replacing its entire contents. ' +
-    'Prefer the edit tool for modifying existing files; use write only for new files or intentional full rewrites.',
-  parameters: WriteParams,
-  executionMode: 'sequential',
-  kind: 'edit',
-  execute: (call, ctx) => executeWrite(call.args, ctx),
-};
+export const WRITE_DESCRIPTION =
+  'Write a file to disk, creating it (and any missing parent directories) or replacing its entire contents. ' +
+  'Prefer the edit tool for modifying existing files; use write only for new files or intentional full rewrites.';
+
+export function executeWrite(
+  call: ToolExecutionInput<WriteArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<WriteDetails>> {
+  return executeWriteArgs(call.args, ctx);
+}

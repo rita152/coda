@@ -1,7 +1,7 @@
-// 旧式 CLI 配置解析(规格见 docs/09-cli.md §7):flags > 环境变量 > ~/.coda/config.json,
+// CLI 配置解析:flags > 环境变量 > ~/.coda/config.json,
 // 逐字段独立合并。这里不再提供任何默认模型；交互启动的主路径由 provider registry
 // 恢复最近一次用户显式选择，或保持未选择状态等待 /model。
-// 密钥永远不进会话 JSONL、不出现在任何 SessionEvent(ModelConfig 不随事件外发)。
+// 密钥永远不进 Runtime journal，也不出现在任何 RuntimeEvent（ModelConfig 不随事件外发）。
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -70,12 +70,11 @@ function normalizeApiKey(value: string | undefined): string | undefined {
 
 /** 与 main.ts 的实际分派共用同一个纯判定，避免缺 key 策略和 UI 路由漂移。 */
 export function isFullScreenTuiEligible(
-  flags: Pick<CliFlags, 'json' | 'eventFormat' | 'prompt'> & { readonly ui?: CliUiMode },
+  flags: Pick<CliFlags, 'json' | 'prompt'> & { readonly ui?: CliUiMode },
   terminal: TuiTerminalState,
 ): boolean {
   return (
     !flags.json &&
-    flags.eventFormat !== 'envelope' &&
     flags.prompt === undefined &&
     (flags.ui === undefined || flags.ui === 'auto' || flags.ui === 'tui') &&
     terminal.stdinIsTTY &&

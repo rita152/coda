@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import type { QueuedMessage } from '../protocol/index.js';
-import type { CliSessionUsage } from './frontend-types.js';
+import type { CliThreadUsage } from './frontend-types.js';
 import {
   approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
@@ -259,7 +259,7 @@ describe('TUI double-press disambiguation', () => {
 
 describe('TUI status and queue formatting', () => {
   it('status 包含模型、turns、token 累计与成本', () => {
-    const usage: CliSessionUsage = {
+    const usage: CliThreadUsage = {
       lastTurn: { input: 120, output: 31 },
       cumulative: { input: 2_310, output: 95, costUSD: 0.0123, reasoning: 7 },
       turns: 3,
@@ -274,7 +274,7 @@ describe('TUI status and queue formatting', () => {
   });
 
   it('无定价/无模型时省略对应行', () => {
-    const usage: CliSessionUsage = {
+    const usage: CliThreadUsage = {
       cumulative: { input: 10, output: 2 },
       turns: 1,
       contextTokens: 12,

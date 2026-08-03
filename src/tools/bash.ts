@@ -16,7 +16,7 @@ import {
   spillToFile,
   truncationDir,
 } from '../shared/index.js';
-import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** 滚动窗口容量:约 2× 输出上限。结果只保尾部 1×,留 2× 保证截断有余量。 */
@@ -98,7 +98,7 @@ async function waitForSink(result: number | Promise<number>): Promise<void> {
   await result;
 }
 
-const BashParams = z.object({
+export const bashParameters = z.object({
   command: z.string().describe('The command to execute'),
   timeout: z
     .number()
@@ -117,28 +117,27 @@ const BashParams = z.object({
     .describe('5-10 word active-voice summary of what this command does'),
 });
 
-type BashArgs = z.infer<typeof BashParams>;
+export type BashArgs = z.infer<typeof bashParameters>;
 
 export interface BashDetails {
   truncated: boolean;
   spilledPath?: string | undefined; // 全文落盘位置(截断且落盘成功时存在)
 }
 
-export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
-  name: 'bash',
-  description:
-    'Execute a bash command and return its combined stdout/stderr output. ' +
-    "The output always ends with 'exit code N'. " +
-    "Use the workdir parameter to run in a different directory instead of 'cd'. " +
-    'Long output keeps the tail (2000 lines / 48KB); the full output is saved to a file whose path is included in the result.',
-  parameters: BashParams,
-  executionMode: 'sequential',
-  kind: 'execute',
-  promptSnippet:
-    'bash: AVOID `cd <dir> && cmd` — pass the workdir parameter instead. ' +
-    'Output is stdout and stderr combined; on long output only the tail is shown and the full output is saved to a file.',
+export const BASH_DESCRIPTION =
+  'Execute a bash command and return its combined stdout/stderr output. ' +
+  "The output always ends with 'exit code N'. " +
+  "Use the workdir parameter to run in a different directory instead of 'cd'. " +
+  'Long output keeps the tail (2000 lines / 48KB); the full output is saved to a file whose path is included in the result.';
 
-  async execute(call, ctx: ToolContext): Promise<ToolOutput<BashDetails>> {
+export const BASH_PROMPT_SNIPPET =
+  'bash: AVOID `cd <dir> && cmd` — pass the workdir parameter instead. ' +
+  'Output is stdout and stderr combined; on long output only the tail is shown and the full output is saved to a file.';
+
+export async function executeBash(
+  call: ToolExecutionInput<BashArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<BashDetails>> {
     const { command, workdir } = call.args;
     const timeoutMs = call.args.timeout ?? DEFAULT_TIMEOUT_MS;
     const cwd = resolveToolWorkdir(ctx.cwd, workdir);
@@ -413,9 +412,8 @@ export const bashTool: ToolDefinition<BashArgs, BashDetails> = {
     return {
       content: [{ type: 'text', text }],
       // Runtime envelopes are strict JSON: an optional field must be absent rather than present
-      // with `undefined`. Keep the legacy JSON projection identical while making the in-memory
+      // with `undefined`. Keep the JSON projection stable while making the in-memory
       // ToolResult safe to commit as a canonical tool_execution_end event.
       details: { truncated, ...(spilledPath !== undefined && { spilledPath }) },
     };
-  },
-};
+}

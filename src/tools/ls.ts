@@ -5,11 +5,11 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
 const DEFAULT_LIMIT = 500;
 
-const LsParams = z.object({
+export const lsParameters = z.object({
   path: z
     .string()
     .optional()
@@ -17,18 +17,17 @@ const LsParams = z.object({
   limit: z.number().int().min(1).optional().describe('Maximum entries to return (default 500)'),
 });
 
-type LsArgs = z.infer<typeof LsParams>;
+export type LsArgs = z.infer<typeof lsParameters>;
 
-export const lsTool: ToolDefinition<LsArgs> = {
-  name: 'ls',
-  description:
-    'List the entries of a directory (non-recursive), in alphabetical order. ' +
-    "Directories are suffixed with '/'. Dotfiles are included. " +
-    'Use the glob tool to find files recursively.',
-  parameters: LsParams,
-  kind: 'read',
+export const LS_DESCRIPTION =
+  'List the entries of a directory (non-recursive), in alphabetical order. ' +
+  "Directories are suffixed with '/'. Dotfiles are included. " +
+  'Use the glob tool to find files recursively.';
 
-  async execute(call, ctx: ToolContext): Promise<ToolOutput<unknown>> {
+export async function executeLs(
+  call: ToolExecutionInput<LsArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<unknown>> {
     const target = path.resolve(ctx.cwd, call.args.path ?? '.');
     const shown = call.args.path ?? target; // 报错回显模型原话;省略 path 时回显解析后的 cwd
     const limit = call.args.limit ?? DEFAULT_LIMIT;
@@ -61,5 +60,4 @@ export const lsTool: ToolDefinition<LsArgs> = {
       text += `\n(Showing first ${limit} of ${total} entries. Use glob for targeted listing.)`;
     }
     return { content: [{ type: 'text', text }] };
-  },
-};
+}

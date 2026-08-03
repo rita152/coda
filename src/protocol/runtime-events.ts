@@ -1,9 +1,8 @@
-// Canonical Runtime event union, identity-bearing envelope, and legacy single-thread projection.
+// Canonical Runtime event union and identity-bearing envelope.
 
 import type { AgentEvent, PlanStep, QueuedMessage } from './agent-events.js';
 import type { AgentMessage, AssistantMessage, ModelRef, ToolResultMessage, Usage } from './messages.js';
 import {
-  assertThreadId,
   isDerivedOpId,
   isExternalOpId,
   isOpId,
@@ -30,7 +29,7 @@ import { canonicalJson, strictJsonSnapshot } from './strict-json.js';
 import type { StrictJsonValue } from './strict-json.js';
 
 export type CanonicalAgentEvent =
-  | Exclude<AgentEvent, { type: 'approval_request' } | { type: 'agent_end' }>
+  | Exclude<AgentEvent, { type: 'agent_end' }>
   | (Extract<AgentEvent, { type: 'agent_end' }> & { willRetry?: boolean });
 
 export type RuntimeOpLifecycleEvent =
@@ -42,11 +41,6 @@ export type RuntimeOpLifecycleEvent =
       outcome: 'applied' | 'no_op' | 'interrupted' | 'superseded'; parentOpId?: OpId }
   | { type: 'op_rejected'; opType: RuntimeOp['type']; reason: string; parentOpId?: OpId };
 
-export interface LegacyApprovalProposal {
-  readonly patterns: readonly string[];
-  readonly forceConfirm: boolean;
-}
-
 export interface PolicyGrantResourcePattern {
   readonly resourceType: 'filesystem' | 'command' | 'network' | 'other';
   readonly access: 'read' | 'write' | 'execute' | 'connect';
@@ -54,13 +48,12 @@ export interface PolicyGrantResourcePattern {
   readonly pattern: string;
 }
 
-export type PolicyGrantScope =
-  | { readonly kind: 'canonical_resources_v1';
-      readonly resourcePatterns: readonly [Readonly<PolicyGrantResourcePattern>,
-        ...Readonly<PolicyGrantResourcePattern>[]];
-      readonly attributes: Readonly<Record<string, unknown>> }
-  | { readonly kind: 'legacy_global_approvals_v1';
-      readonly patterns: readonly [string, ...string[]] };
+export type PolicyGrantScope = {
+  readonly kind: 'canonical_resources_v1';
+  readonly resourcePatterns: readonly [Readonly<PolicyGrantResourcePattern>,
+    ...Readonly<PolicyGrantResourcePattern>[]];
+  readonly attributes: Readonly<Record<string, unknown>>;
+};
 
 export interface ApprovalGrantProposal {
   capabilityId: string;
@@ -110,21 +103,14 @@ export interface ApprovalPresentation {
 export interface ApprovalControlPayload {
   toolCallId: string;
   description: string;
-  legacyProposal?: Readonly<LegacyApprovalProposal>;
   grantProposal?: Readonly<ApprovalGrantProposal>;
-  /** Absent only for legacy adapters that cannot honestly provide PreparedInvocation scope. */
-  presentation?: Readonly<ApprovalPresentation>;
+  presentation: Readonly<ApprovalPresentation>;
 }
 
 export interface ResourceConfirmationPayload {
   resourceType: string;
   resourceId: string;
   description: string;
-}
-
-export interface LegacyApprovalPatternSnapshot {
-  readonly revision: string;
-  readonly patterns: readonly string[];
 }
 
 export interface WorkspaceWriteFence {
@@ -332,15 +318,6 @@ export interface EventEnvelope<TEvent = RuntimeEvent> {
   readonly event: TEvent;
 }
 
-/** Protocol-local shape structurally identical to the legacy session event surface. */
-export type LegacySessionEvent =
-  | (AgentEvent & { willRetry?: boolean })
-  | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number;
-      errorMessage: string }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual' }
-  | { type: 'compaction_end'; ok: boolean; droppedMessages: number }
-  | { type: 'usage_update'; usage: ThreadUsage };
-
 export class EventEnvelopeValidationError extends TypeError {
   override readonly name = 'EventEnvelopeValidationError';
   readonly code = 'invalid_event_envelope' as const;
@@ -379,71 +356,6 @@ export function validateEventEnvelope(input: unknown): Readonly<EventEnvelope> {
   } catch (error) {
     if (error instanceof EventEnvelopeValidationError) throw error;
     throw new EventEnvelopeValidationError(error instanceof Error ? error.message : 'unknown error');
-  }
-}
-
-/** Pure compatibility projection. Non-target and non-lossless event families are omitted. */
-export function projectLegacySessionEvent(
-  envelope: Readonly<EventEnvelope>,
-  options: { readonly targetThreadId: ThreadId },
-): Readonly<LegacySessionEvent> | undefined {
-  const targetThreadId = assertThreadId(options.targetThreadId, 'targetThreadId');
-  if (envelope.threadId !== targetThreadId) return undefined;
-
-  const event = envelope.event;
-  switch (event.type) {
-    case 'agent_start':
-    case 'agent_end':
-    case 'turn_start':
-    case 'turn_end':
-    case 'message_start':
-    case 'message_update':
-    case 'message_end':
-    case 'tool_execution_start':
-    case 'tool_execution_update':
-    case 'tool_execution_end':
-    case 'queue_update':
-    case 'plan_update':
-    case 'error':
-      return event;
-    case 'control_request':
-      if (event.kind !== 'approval') return undefined;
-      return Object.freeze({
-        type: 'approval_request',
-        approvalId: event.requestId,
-        toolCallId: event.payload.toolCallId,
-        description: event.payload.description,
-      });
-    case 'retry_scheduled':
-      return Object.freeze({
-        type: event.type,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        delayMs: event.delayMs,
-        errorMessage: event.errorMessage,
-      });
-    case 'compaction_start':
-      return Object.freeze({ type: event.type, reason: event.reason });
-    case 'compaction_end':
-      return Object.freeze({
-        type: event.type,
-        ok: event.ok,
-        droppedMessages: event.droppedMessages,
-      });
-    case 'usage_update':
-      return Object.freeze({ type: event.type, usage: event.usage });
-    case 'op_accepted':
-    case 'op_started':
-    case 'op_completed':
-    case 'op_rejected':
-    case 'control_resolved':
-    case 'thread_result':
-    case 'thread_created':
-    case 'thread_resumed':
-    case 'thread_updated':
-    case 'thread_closed':
-    case 'runtime_diagnostic':
-      return undefined;
   }
 }
 
@@ -845,25 +757,11 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
 
 function validateApprovalPayload(value: StrictJsonValue | undefined): void {
   const payload = requireRecord(value, 'payload');
-  assertKeys(payload, ['toolCallId', 'description'], [
-    'legacyProposal',
-    'grantProposal',
-    'presentation',
-  ]);
+  assertKeys(payload, ['toolCallId', 'description', 'presentation'], ['grantProposal']);
   requireString(payload.toolCallId, 'toolCallId');
   requireString(payload.description, 'description');
-  if (payload.legacyProposal !== undefined && payload.grantProposal !== undefined) {
-    throw new Error('approval proposals are mutually exclusive');
-  }
-  if (payload.legacyProposal !== undefined) {
-    const proposal = requireRecord(payload.legacyProposal, 'legacyProposal');
-    assertKeys(proposal, ['patterns', 'forceConfirm']);
-    const patterns = requireArray(proposal.patterns, 'patterns');
-    for (const pattern of patterns) requireString(pattern, 'pattern');
-    requireBoolean(proposal.forceConfirm, 'forceConfirm');
-  }
   if (payload.grantProposal !== undefined) validateGrantProposal(payload.grantProposal);
-  if (payload.presentation !== undefined) validateApprovalPresentation(payload.presentation);
+  validateApprovalPresentation(payload.presentation as StrictJsonValue);
 }
 
 function validateApprovalPresentation(value: StrictJsonValue): void {
@@ -985,13 +883,6 @@ function validateGrantScope(value: StrictJsonValue): void {
       requireString(pattern.pattern, 'pattern');
     }
     requireRecord(scope.attributes, 'attributes');
-    return;
-  }
-  if (scope.kind === 'legacy_global_approvals_v1') {
-    assertKeys(scope, ['kind', 'patterns']);
-    const patterns = requireArray(scope.patterns, 'patterns');
-    if (patterns.length === 0) throw new Error('legacy patterns must be non-empty');
-    for (const pattern of patterns) requireString(pattern, 'pattern');
     return;
   }
   throw new Error('invalid grant scope');

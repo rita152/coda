@@ -7,7 +7,11 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { FileTracker, MAX_OUTPUT_LINES } from '../shared/index.js';
-import { readTool } from './read.js';
+import {
+  READ_PROMPT_SNIPPET,
+  executeRead,
+  readParameters,
+} from './read.js';
 import type { ToolContext } from './types.js';
 
 // String.prototype.isWellFormed 是 ES2024 API(Node ≥ 20 运行时可用);
@@ -40,7 +44,7 @@ function write(name: string, content: string | Buffer): string {
 }
 
 async function run(args: { path: string; offset?: number; limit?: number }) {
-  return readTool.execute({ id: 'call_1', args }, ctx);
+  return executeRead({ id: 'call_1', args }, ctx);
 }
 
 function textOf(out: Awaited<ReturnType<typeof run>>): string {
@@ -51,16 +55,14 @@ function textOf(out: Awaited<ReturnType<typeof run>>): string {
 
 describe('read:schema 与元数据', () => {
   it('zod schema 渲染 JSON Schema 无报错,每个字段有 description(docs/07 §5 框架验收)', () => {
-    const js = z.toJSONSchema(readTool.parameters) as {
+    const js = z.toJSONSchema(readParameters) as {
       properties: Record<string, { description?: string }>;
     };
     expect(Object.keys(js.properties).sort()).toEqual(['limit', 'offset', 'path']);
     for (const prop of Object.values(js.properties)) {
       expect(prop.description).toBeTruthy();
     }
-    expect(readTool.kind).toBe('read');
-    expect(readTool.executionMode).toBeUndefined(); // read 可并行,不声明 sequential
-    expect(readTool.promptSnippet).toMatch(/line-number prefix/);
+    expect(READ_PROMPT_SNIPPET).toMatch(/line-number prefix/);
   });
 });
 
@@ -237,7 +239,7 @@ describe('read:错误路径', () => {
     const ac = new AbortController();
     ac.abort();
     const aborted: ToolContext = { cwd: tmpdir, signal: ac.signal, fileTracker };
-    await expect(readTool.execute({ id: 'call_1', args: { path: 'a.txt' } }, aborted)).rejects.toThrow(
+    await expect(executeRead({ id: 'call_1', args: { path: 'a.txt' } }, aborted)).rejects.toThrow(
       /aborted/i,
     );
   });
@@ -260,7 +262,7 @@ describe('read:错误路径', () => {
       const aborting: ToolContext = { cwd: tmpdir, signal: ac.signal, fileTracker };
       queueMicrotask(() => ac.abort());
 
-      await expect(readTool.execute({ id: 'call_1', args: { path: name } }, aborting)).rejects.toThrow(/aborted/i);
+      await expect(executeRead({ id: 'call_1', args: { path: name } }, aborting)).rejects.toThrow(/aborted/i);
       expect(fileTracker.hasRead(abs)).toBe(false);
     }
   });

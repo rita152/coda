@@ -78,7 +78,7 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(rules).toContain('import/no-restricted-paths');
   });
 
-  it('src/agent 内 import 具体工具实现报错,import tools/types.ts 放行(白名单例外)', async () => {
+  it('src/agent 内 import 任何 tools 模块都报错', async () => {
     const { rules: implRules } = await lintProbe(
       'src/agent/tool-impl.probe.ts',
       "import '../tools/index.js';\n",
@@ -89,8 +89,8 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
       'src/agent/tool-types.probe.ts',
       "import type * as ToolTypes from '../tools/types.js';\nexport type T = typeof ToolTypes;\n",
     );
-    expect(typesRules).not.toContain('import/no-restricted-paths');
-    expect(typesErrors).toBe(0);
+    expect(typesRules).toContain('import/no-restricted-paths');
+    expect(typesErrors).toBeGreaterThan(0);
   });
 
   it('src/tools 内 import src/agent 报错(反向依赖被拦)', async () => {
@@ -184,7 +184,7 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(errorCount).toBe(0);
   });
 
-  it('src/capabilities 只向下依赖 protocol/shared 与窄 tools/types 兼容口', async () => {
+  it('src/capabilities 只向下依赖 protocol/shared', async () => {
     for (const dependency of [
       'agent/index',
       'cli/main',
@@ -201,14 +201,14 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
       expect(rules).toContain('import/no-restricted-paths');
     }
 
-    const { errorCount } = await lintProbe(
-      'src/capabilities/legacy-tool-types.probe.ts',
-      "import type { ToolDefinition } from '../tools/types.js';\nexport type Legacy = ToolDefinition;\n",
+    const { rules } = await lintProbe(
+      'src/capabilities/tool-types.probe.ts',
+      "import type { ToolContext } from '../tools/types.js';\nexport type Leak = ToolContext;\n",
     );
-    expect(errorCount).toBe(0);
+    expect(rules).toContain('import/no-restricted-paths');
   });
 
-  it('legacy-coding-tools 集成层只能向下依赖 capability/tool 基础层', async () => {
+  it('coding-capabilities 集成层只能向下依赖 capability/tool 基础层', async () => {
     for (const dependency of [
       'agent/index',
       'cli/main',
@@ -218,21 +218,45 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     ]) {
       const probeName = dependency.replaceAll('/', '-');
       const { rules } = await lintProbe(
-        `src/integrations/legacy-coding-tools/${probeName}.probe.ts`,
+        `src/integrations/coding-capabilities/${probeName}.probe.ts`,
         `import '../../${dependency}.js';\n`,
       );
       expect(rules).toContain('import/no-restricted-paths');
     }
 
     const { errorCount } = await lintProbe(
-      'src/integrations/legacy-coding-tools/legal.probe.ts',
-      "import type { CapabilityRegistration } from '../../capabilities/index.js';\nimport type { ToolDefinition } from '../../tools/index.js';\nexport type Legal = CapabilityRegistration | ToolDefinition;\n",
+      'src/integrations/coding-capabilities/legal.probe.ts',
+      "import type { CapabilityRegistration } from '../../capabilities/index.js';\nimport type { ToolContext } from '../../tools/index.js';\nexport type Legal = CapabilityRegistration | ToolContext;\n",
     );
     expect(errorCount).toBe(0);
   });
 
-  it('src/tools 不得反向依赖 capabilities 或 legacy-coding-tools', async () => {
-    for (const dependency of ['capabilities/index', 'integrations/legacy-coding-tools/index']) {
+  it('runtime-thread-driver 集成层只组合 protocol 与 session', async () => {
+    for (const dependency of [
+      'agent/index',
+      'capabilities/index',
+      'cli/main',
+      'providers/faux/index',
+      'runtime/index',
+      'tools/index',
+    ]) {
+      const probeName = dependency.replaceAll('/', '-');
+      const { rules } = await lintProbe(
+        `src/integrations/runtime-thread-driver/${probeName}.probe.ts`,
+        `import '../../${dependency}.js';\n`,
+      );
+      expect(rules).toContain('import/no-restricted-paths');
+    }
+
+    const { errorCount } = await lintProbe(
+      'src/integrations/runtime-thread-driver/legal.probe.ts',
+      "import type { ThreadId } from '../../protocol/index.js';\nimport type { RuntimeThreadDriverFactory } from '../../session/index.js';\nexport type Legal = ThreadId | RuntimeThreadDriverFactory;\n",
+    );
+    expect(errorCount).toBe(0);
+  });
+
+  it('src/tools 不得反向依赖 capabilities 或 coding-capabilities', async () => {
+    for (const dependency of ['capabilities/index', 'integrations/coding-capabilities/index']) {
       const probeName = dependency.replaceAll('/', '-');
       const { rules } = await lintProbe(
         `src/tools/${probeName}.probe.ts`,
@@ -251,7 +275,7 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
 
     const { rules: typeRules } = await lintProbe(
       'src/runtime/import-agent-type.probe.ts',
-      "export type LegacyAgent = import('../agent/index.js').Agent;\n",
+      "export type ForbiddenAgent = import('../agent/index.js').Agent;\n",
     );
     expect(typeRules).toContain('no-restricted-syntax');
   });

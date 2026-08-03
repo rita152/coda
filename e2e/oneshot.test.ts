@@ -84,8 +84,8 @@ test('--json -p: project-rule warning only uses stderr and never corrupts stdout
   expect(proc.parseErrors).toEqual([]);
 }, T);
 
-test('完整旧式非交互配置不读取损坏的 provider registry', async () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), 'coda-e2e-legacy-'));
+test('完整显式非交互配置不读取损坏的 provider registry', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'coda-e2e-explicit-'));
   const registryDir = path.join(cwd, '.home', '.coda');
   mkdirSync(registryDir, { recursive: true });
   writeFileSync(path.join(registryDir, 'providers.json'), '{broken', 'utf8');
@@ -93,7 +93,7 @@ test('完整旧式非交互配置不读取损坏的 provider registry', async ()
     startCoda({
       cwd,
       script: {
-        turns: [{ events: [{ kind: 'text', text: 'legacy still works' }] }],
+        turns: [{ events: [{ kind: 'text', text: 'explicit config works' }] }],
         onExhausted: 'emptyStop',
       },
       prompt: 'use explicit faux config',

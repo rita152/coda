@@ -1,15 +1,14 @@
-// Static CLI compatibility re-export. The authoritative implementation belongs to the
-// versioned legacy-coding-tools binding so Runtime policy/freshness never uses a second parser.
+// CLI re-export of the authoritative analysis used by the native bash capability.
 
 export {
-  LEGACY_BASH_ANALYSIS_VERSION,
+  BASH_ANALYSIS_VERSION,
   analyzeBashCommand,
   analyzeBashPaths,
-} from '../integrations/legacy-coding-tools/bash-analyze.js';
+} from '../integrations/coding-capabilities/bash-analyze.js';
 export type {
   BashAnalysis,
+  BashFilesystemTarget,
   BashPathAnalysis,
   BashPathTarget,
-  LegacyBashFilesystemTarget,
-  LegacyFilesystemTarget,
-} from '../integrations/legacy-coding-tools/bash-analyze.js';
+  FilesystemTarget,
+} from '../integrations/coding-capabilities/bash-analyze.js';

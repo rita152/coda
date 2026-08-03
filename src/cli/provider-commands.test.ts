@@ -21,10 +21,10 @@ import type {
   UserMessage,
 } from '../protocol/index.js';
 import type {
-  SessionInteractionState,
-  SessionListener,
-  SessionUsage,
-} from '../session/index.js';
+  CliInteractionState,
+  CliRuntimeEventListener,
+  CliThreadUsage,
+} from './frontend-types.js';
 import type { InteractiveSession } from './interactive-runtime.js';
 import {
   ProviderCommandController,
@@ -54,13 +54,13 @@ afterEach(() => {
 });
 
 class MemoryRuntime implements InteractiveSession {
-  state: SessionInteractionState = 'idle';
+  state: CliInteractionState = 'idle';
   model: ModelRef | undefined;
   readonly selectedConfigs: ModelConfig[] = [];
   clearCount = 0;
   readonly messages: readonly AgentMessage[] = [];
 
-  interactionState(): SessionInteractionState {
+  interactionState(): CliInteractionState {
     return this.state;
   }
 
@@ -78,7 +78,7 @@ class MemoryRuntime implements InteractiveSession {
     this.model = undefined;
   }
 
-  usage(): SessionUsage {
+  usage(): CliThreadUsage {
     return {
       cumulative: { input: 0, output: 0 },
       turns: 0,
@@ -86,7 +86,7 @@ class MemoryRuntime implements InteractiveSession {
     };
   }
 
-  subscribe(listener: SessionListener): () => void {
+  subscribe(listener: CliRuntimeEventListener): () => void {
     void listener;
     return () => {};
   }

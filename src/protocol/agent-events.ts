@@ -5,9 +5,8 @@
 //   assistant-message := message_start message_update* message_end
 //   tool-phase := (tool_execution_start tool_execution_update* tool_execution_end)+
 //                 tool-result-message*        // message_start/message_end 对,按 assistant 源顺序
-// queue_update / plan_update / approval_request / error(fatal:false) 是旁路事件,可出现在
-// 骨架任意间隙——approval_request 发生在 prepare 阶段(tool_execution_start 之前),
-// 且由权限层(ApprovalBroker)经宿主通道发出,不经过 agent 的 Emitter(loop 对审批零感知)。
+// queue_update / plan_update / error(fatal:false) 是旁路事件,可出现在骨架任意间隙。
+// 审批是 Runtime 的 durable control 协议，不属于 identity-free AgentEvent。
 // 消费端纪律:tolerant reader——未知 type 静默忽略,已知事件的未知字段忽略。
 
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from './messages.js';
@@ -29,5 +28,4 @@ export type AgentEvent =
   | { type: 'tool_execution_end'; toolCallId: string; result: ToolResultMessage }
   | { type: 'queue_update'; steering: QueuedMessage[]; followUp: QueuedMessage[] }
   | { type: 'plan_update'; steps: PlanStep[] }
-  | { type: 'approval_request'; approvalId: string; toolCallId: string; description: string }   // M6
   | { type: 'error'; message: string; fatal: boolean };

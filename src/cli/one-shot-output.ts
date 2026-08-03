@@ -1,12 +1,10 @@
-// Explicit UX4 one-shot output adapter. The legacy `--json` command stream and the historical
-// human `-p` renderer deliberately do not call this module; opting in with --output/final-only/
-// ephemeral/timeout is the compatibility boundary.
+// Explicit one-shot output adapter over canonical Runtime events.
 
 import { PROTOCOL_VERSION } from '../protocol/index.js';
 import type { AssistantMessage } from '../protocol/index.js';
 import type {
-  CliSessionEvent as SessionEvent,
-  CliSessionUsage as SessionUsage,
+  CliRuntimeEvent,
+  CliThreadUsage,
 } from './frontend-types.js';
 import type { CliSession } from './interactive-runtime.js';
 import type { CliOutputMode } from './command-catalog.js';
@@ -22,7 +20,7 @@ export interface OneShotResult {
   readonly status: OneShotStatus;
   readonly exitCode: number;
   readonly text: string;
-  readonly usage: SessionUsage;
+  readonly usage: CliThreadUsage;
   readonly error?: string;
 }
 
@@ -32,7 +30,7 @@ export type OneShotStreamRecord =
       readonly version: 1;
       readonly protocolVersion: string;
     }
-  | { readonly type: 'event'; readonly event: SessionEvent }
+  | { readonly type: 'event'; readonly event: CliRuntimeEvent }
   | OneShotResult;
 
 export interface OneShotOutputOptions {
@@ -47,8 +45,7 @@ export interface OneShotOutputOptions {
 }
 
 /**
- * Run exactly one Runtime-backed prompt and project it onto an opt-in automation format.
- * SessionEvent is only an event projection; lifecycle, timeout abort, usage, and persistence
+ * Run exactly one Runtime-backed prompt. Lifecycle, timeout abort, usage, and persistence
  * remain owned by the Runtime behind CliSession.
  */
 export async function startOneShotOutput(
@@ -64,7 +61,7 @@ export async function startOneShotOutput(
   let lastError: string | undefined;
   let outputFailure: unknown;
   let timedOut = false;
-  let terminal: Extract<SessionEvent, { type: 'agent_end' }> | undefined;
+  let terminal: Extract<CliRuntimeEvent, { type: 'agent_end' }> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let resolveTerminal!: () => void;
   const terminalReached = new Promise<void>((resolve) => {
@@ -106,8 +103,10 @@ export async function startOneShotOutput(
         progress(summary === undefined ? `tool ${event.toolName}` : `tool ${summary}`);
         break;
       }
-      case 'approval_request':
-        progress(`waiting for approval: ${event.description}`);
+      case 'control_request':
+        if (event.kind === 'approval') {
+          progress(`waiting for approval: ${event.payload.description}`);
+        }
         break;
       case 'retry_scheduled':
         progress(`retry ${event.attempt}/${event.maxAttempts} in ${event.delayMs}ms`);

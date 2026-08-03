@@ -29,10 +29,10 @@ import type {
   WorkspaceId,
 } from '../protocol/index.js';
 import {
-  LEGACY_BASH_ANALYSIS_VERSION,
-  type LegacyBashFilesystemTarget,
+  BASH_ANALYSIS_VERSION,
+  type BashFilesystemTarget,
 } from './bash-analyze.js';
-import { LEGACY_FILESYSTEM_ANALYSIS_VERSION } from '../integrations/legacy-coding-tools/index.js';
+import { FILESYSTEM_ANALYSIS_VERSION } from '../integrations/coding-capabilities/index.js';
 import { ProjectRules } from './project-rules.js';
 
 const WORKSPACE = 'workspace-rules' as WorkspaceId;
@@ -367,7 +367,7 @@ describe('ProjectRules registry snapshot adapter', () => {
     });
     expect(missingShape).toMatchObject({ fresh: false, code: 'rule_changed' });
     if (missingShape.fresh) throw new Error('Expected missing target facts to fail closed');
-    expect(missingShape.message).toContain('Invalid frozen legacy filesystem analysis');
+    expect(missingShape.message).toContain('Invalid frozen filesystem analysis');
 
     const mismatched = await rules.check({
       snapshot,
@@ -478,14 +478,14 @@ function filesystemAnalysis(canonicalTarget: string): CapabilityInvocationAnalys
     grantability: { kind: 'persistable' },
     safety: { kind: 'eligible' },
     attributes: {
-      kind: LEGACY_FILESYSTEM_ANALYSIS_VERSION,
+      kind: FILESYSTEM_ANALYSIS_VERSION,
       filesystemTargets: [{ canonicalTarget, kind: 'file' }],
     },
   };
 }
 
 function bashAnalysis(
-  filesystemTargets: readonly LegacyBashFilesystemTarget[],
+  filesystemTargets: readonly BashFilesystemTarget[],
 ): CapabilityInvocationAnalysis {
   const sortedTargets = [...filesystemTargets].sort((left, right) =>
     Buffer.compare(Buffer.from(left.canonicalTarget), Buffer.from(right.canonicalTarget)));
@@ -494,9 +494,8 @@ function bashAnalysis(
     grantability: { kind: 'persistable' },
     safety: { kind: 'eligible' },
     attributes: {
-      kind: LEGACY_BASH_ANALYSIS_VERSION,
+      kind: BASH_ANALYSIS_VERSION,
       command: 'fixture command',
-      patterns: ['bash:fixture *'],
       forceConfirm: false,
       reasons: [],
       accessesExternalProject: false,

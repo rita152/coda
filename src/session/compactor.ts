@@ -1,6 +1,6 @@
 // compaction 协作者(规格见 docs/08-session-persistence.md §6.3):切点选择 + 摘要生成。
 // 两个纯粹的能力,不碰 agent、不碰磁盘——切点是纯函数,摘要是一次性 streamFn 调用。
-// 生效机制(transformContext 折叠 + CompactionRecord 落盘)在 session.ts;本文件只产料。
+// 生效机制由 RuntimeThreadExecution 安装 canonical checkpoint；本文件只产料。
 
 import type {
   AgentMessage,
@@ -9,6 +9,8 @@ import type {
   StreamFn,
   UserMessage,
 } from '../protocol/index.js';
+import { canonicalJson, sha256Hex } from '../protocol/index.js';
+import type { ThreadCompactionCheckpoint } from './thread-runtime-ports.js';
 
 export interface CompactionOptions {
   enabled?: boolean; // M7 起默认 true(仍需 model.limits.context 才会触发)
@@ -45,6 +47,23 @@ export const SUMMARIZE_PROMPT = [
   '- Next step: the immediate action to take when work resumes.',
   'Be specific with names, paths, and identifiers. Omit nothing load-bearing.',
 ].join('\n');
+
+/** Deterministic synthetic context message derived from the canonical compaction checkpoint. */
+export function syntheticSummaryMessage(
+  checkpoint: Readonly<ThreadCompactionCheckpoint>,
+): UserMessage {
+  const digest = sha256Hex(canonicalJson({
+    domain: 'runtime-compaction-summary-v2',
+    checkpoint,
+  }));
+  return {
+    role: 'user',
+    id: `u_summary_${digest}`,
+    timestamp: checkpoint.timestamp,
+    content: [{ type: 'text', text: `[Conversation summary]\n${checkpoint.summary}` }],
+    source: 'synthetic',
+  };
+}
 
 /** len(JSON)/4 粗估 token——compaction 不需要真 tokenizer(docs/08 §6.1/§6.3)。 */
 function estimateTokens(m: AgentMessage): number {

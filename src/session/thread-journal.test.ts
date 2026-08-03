@@ -8,7 +8,14 @@ import {
   assertTurnId,
   assertWorkspaceId,
 } from '../protocol/index.js';
-import type { AssistantMessage, UserMessage } from '../protocol/index.js';
+import type {
+  AssistantMessage,
+  RunId,
+  ThreadId,
+  TurnId,
+  UserMessage,
+  WorkspaceId,
+} from '../protocol/index.js';
 import { EventHub } from './event-hub.js';
 import type {
   RuntimeJournalRecord,
@@ -341,31 +348,33 @@ describe('foldThreadJournalAppend', () => {
 });
 
 describe('foldThreadJournal commit correspondence', () => {
-  test('synthesizes stable message-turn provenance for old seeds that predate the field', () => {
+  test('requires exact message-turn provenance for canonical thread seeds', () => {
     const fixture = writerFixture();
     const meta = fixture.journal.records[0] as ThreadMetaRecord;
-    const prompt = userMessage('legacy-prompt', 'legacy prompt');
+    const prompt = userMessage('seed-prompt', 'seed prompt');
     const assistant = {
       role: 'assistant' as const,
-      id: 'legacy-answer',
+      id: 'seed-answer',
       timestamp: 2,
-      content: [{ type: 'text' as const, text: 'legacy answer' }],
+      content: [{ type: 'text' as const, text: 'seed answer' }],
       model: meta.model,
       stopReason: 'stop' as const,
       usage: { input: 1, output: 1 },
     };
     const state = foldThreadJournal([meta, {
-      type: 'legacy_seed',
-      sourceSessionId: 'legacy-session',
+      type: 'thread_seed',
       transcript: [prompt, assistant],
+      turnProvenance: [
+        { messageId: prompt.id, turnId: fixture.turnId },
+        { messageId: assistant.id, turnId: fixture.turnId },
+      ],
       usage: { cumulative: { input: 1, output: 1 }, turns: 1, contextTokens: 2 },
     }]);
     const promptTurn = state.messageTurnIds.get(prompt.id);
-    expect(promptTurn).toMatch(/^turn_seed_v1_[0-9a-f]{64}$/);
+    expect(promptTurn).toBe(fixture.turnId);
     expect(state.messageTurnIds.get(assistant.id)).toBe(promptTurn);
     expect(() => foldThreadJournal([meta, {
-      type: 'legacy_seed',
-      sourceSessionId: 'legacy-session',
+      type: 'thread_seed',
       transcript: [prompt, assistant],
       turnProvenance: [],
       usage: { cumulative: { input: 1, output: 1 }, turns: 1, contextTokens: 2 },
@@ -382,7 +391,15 @@ describe('foldThreadJournal commit correspondence', () => {
       owningRunId: fixture.runId,
       owningTurnId: fixture.turnId,
       policyRevision: 'policy-v1',
-      payload: { toolCallId: 'call-1', description: 'approve fixture' },
+      payload: approvalPayload(
+        'approval-request-envelope',
+        fixture.workspaceId,
+        fixture.threadId,
+        fixture.runId,
+        fixture.turnId,
+        'call-1',
+        'approve fixture',
+      ),
     };
     expect(() => foldThreadJournal([meta, {
       type: 'commit',
@@ -606,7 +623,15 @@ async function appendRepresentativeJournal(fixture: ReturnType<typeof writerFixt
     owningRunId: fixture.runId,
     owningTurnId: fixture.turnId,
     policyRevision: 'policy-v1',
-    payload: { toolCallId: 'call-1', description: 'approve representative fixture' },
+    payload: approvalPayload(
+      'approval-representative',
+      fixture.workspaceId,
+      fixture.threadId,
+      fixture.runId,
+      fixture.turnId,
+      'call-1',
+      'approve representative fixture',
+    ),
   } as const;
   await fixture.writer.commitDriverEvent({
     event: request,
@@ -766,6 +791,7 @@ function writerFixture(): {
   readonly writer: ThreadJournalWriter;
   readonly journal: RecordingJournal;
   readonly events: EventHub;
+  readonly workspaceId: ReturnType<typeof assertWorkspaceId>;
   readonly threadId: ReturnType<typeof assertThreadId>;
   readonly runId: ReturnType<typeof assertRunId>;
   readonly turnId: ReturnType<typeof assertTurnId>;
@@ -798,7 +824,37 @@ function writerFixture(): {
     state: foldThreadJournal(records),
     records,
   });
-  return { writer, journal, events, threadId, runId, turnId };
+  return { writer, journal, events, workspaceId, threadId, runId, turnId };
+}
+
+function approvalPayload(
+  requestId: string,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  runId: RunId,
+  turnId: TurnId,
+  toolCallId: string,
+  description: string,
+) {
+  return {
+    toolCallId,
+    description,
+    presentation: {
+      requestId,
+      target: { workspaceId, threadId, runId, turnId },
+      capability: { id: 'test.capability', version: '1', registrationDigest: 'registration-v1' },
+      normalizedResources: [],
+      risk: { code: 'test_approval', reason: description, description },
+      allowOnce: { invocationId: `invocation-${requestId}`, toolCallId },
+      revisions: {
+        catalog: 1,
+        effectivePolicy: 'policy-v1',
+        policyBasis: 'basis-v1',
+        ceiling: 'ceiling-v1',
+        grants: 'grants-v1',
+      },
+    },
+  } as const;
 }
 
 class RecordingJournal implements ThreadJournalAppendPort {

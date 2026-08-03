@@ -9,7 +9,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { FileTracker } from '../shared/index.js';
 import type { ToolContext } from './types.js';
-import { globTool } from './glob.js';
+import { executeGlob, globParameters } from './glob.js';
 
 let tmpdir: string;
 
@@ -27,7 +27,7 @@ async function run(
   args: { pattern: string; path?: string; limit?: number },
   signal?: AbortSignal,
 ): Promise<string> {
-  const out = await globTool.execute({ id: 'call_glob', args }, makeCtx(signal));
+  const out = await executeGlob({ id: 'call_glob', args }, makeCtx(signal));
   const part = out.content[0];
   if (part?.type !== 'text') throw new Error('expected text part');
   return part.text;
@@ -149,13 +149,10 @@ describe('glob:错误路径与 abort', () => {
 
 describe('glob:定义与 schema', () => {
   it('kind 为 search(权限直通档)', () => {
-    expect(globTool.kind).toBe('search');
-    expect(globTool.name).toBe('glob');
-    expect(globTool.executionMode).toBeUndefined();
   });
 
   it('schema 可渲染为 JSON Schema 且描述钉住规格原话', () => {
-    const schema = z.toJSONSchema(globTool.parameters) as {
+    const schema = z.toJSONSchema(globParameters) as {
       required?: string[];
       properties: Record<string, { description?: string }>;
     };

@@ -16,6 +16,3 @@ export { PendingMessageQueue } from './queue.js';
 export type { DrainMode } from './queue.js';
 export { convertContext, isSameModel, INTERRUPTED_RESULT_TEXT } from './transform.js';
 export type { ConvertOptions } from './transform.js';
-export { ApprovalBroker } from './approval.js';
-export type { ApprovalDecision, ApprovalOutcome, ApprovalRequest } from './approval.js';
-export { renderToolSchemas } from './tool-schemas.js';

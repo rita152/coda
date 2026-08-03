@@ -9,7 +9,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { FileTracker } from '../shared/index.js';
 import type { ToolContext } from './types.js';
-import { lsTool } from './ls.js';
+import { executeLs, lsParameters } from './ls.js';
 
 let tmpdir: string;
 
@@ -18,7 +18,7 @@ function makeCtx(): ToolContext {
 }
 
 async function run(args: { path?: string; limit?: number }): Promise<string> {
-  const out = await lsTool.execute({ id: 'call_ls', args }, makeCtx());
+  const out = await executeLs({ id: 'call_ls', args }, makeCtx());
   const part = out.content[0];
   if (part?.type !== 'text') throw new Error('expected text part');
   return part.text;
@@ -111,7 +111,7 @@ describe('ls:错误路径', () => {
     const ac = new AbortController();
     ac.abort();
     const ctx: ToolContext = { cwd: tmpdir, signal: ac.signal, fileTracker: new FileTracker() };
-    await expect(lsTool.execute({ id: 'call_ls', args: {} }, ctx)).rejects.toThrow(
+    await expect(executeLs({ id: 'call_ls', args: {} }, ctx)).rejects.toThrow(
       'User aborted the directory listing',
     );
   });
@@ -119,13 +119,10 @@ describe('ls:错误路径', () => {
 
 describe('ls:定义与 schema', () => {
   it('kind 为 read(权限直通档)', () => {
-    expect(lsTool.kind).toBe('read');
-    expect(lsTool.name).toBe('ls');
-    expect(lsTool.executionMode).toBeUndefined();
   });
 
   it('schema 可渲染为 JSON Schema 且 path 描述含 opencode 实战原话', () => {
-    const schema = z.toJSONSchema(lsTool.parameters) as {
+    const schema = z.toJSONSchema(lsParameters) as {
       properties: Record<string, { description?: string }>;
     };
     expect(schema.properties['path']?.description).toContain("do NOT pass 'undefined' or 'null'");

@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 import { FileTracker } from '../shared/index.js';
 import type { ToolContext } from './types.js';
-import { editTool } from './edit.js';
+import {
+  editParameters,
+  executeEdit,
+  prepareEditArguments,
+} from './edit.js';
 import type { EditArgs, EditDetails } from './edit.js';
 
 let tmpdir: string;
@@ -32,7 +36,7 @@ function seed(rel: string, content: string | Buffer): string {
 }
 
 function run(args: EditArgs) {
-  return editTool.execute({ id: 'call_1', args }, ctx);
+  return executeEdit({ id: 'call_1', args }, ctx);
 }
 
 function textOf(out: { content: { type: string; text?: string }[] }): string {
@@ -290,35 +294,33 @@ describe('edit:并发串行化(矩阵 16)', () => {
 });
 
 describe('edit:prepareArguments 修补(docs/07 §1.4)', () => {
-  const prepare = editTool.prepareArguments as (raw: unknown) => unknown;
+  const prepare = prepareEditArguments;
 
   it('edits 为 JSON 字符串:解析为数组后过 zod', () => {
     const prepared = prepare({
       path: 'a.ts',
       edits: '[{"oldText":"a","newText":"b"}]',
     });
-    const parsed = editTool.parameters.parse(prepared) as EditArgs;
+    const parsed = editParameters.parse(prepared) as EditArgs;
     expect(parsed.edits).toEqual([{ oldText: 'a', newText: 'b' }]);
   });
 
   it('平铺 oldText/newText:包成 edits 数组', () => {
     const prepared = prepare({ path: 'a.ts', oldText: 'a', newText: 'b', replaceAll: true });
-    const parsed = editTool.parameters.parse(prepared) as EditArgs;
+    const parsed = editParameters.parse(prepared) as EditArgs;
     expect(parsed.path).toBe('a.ts');
     expect(parsed.edits).toEqual([{ oldText: 'a', newText: 'b', replaceAll: true }]);
   });
 
   it('不可解析的 edits 字符串:保留原样,交给 zod 报错(不猜语义)', () => {
     const prepared = prepare({ path: 'a.ts', edits: 'not-json' });
-    expect(() => editTool.parameters.parse(prepared)).toThrow();
+    expect(() => editParameters.parse(prepared)).toThrow();
   });
 });
 
 describe('edit:框架契约与边界', () => {
-  it('声明 executionMode/kind,schema 可渲染为 JSON Schema 且字段带 description', () => {
-    expect(editTool.executionMode).toBe('sequential');
-    expect(editTool.kind).toBe('edit');
-    const schema = z.toJSONSchema(editTool.parameters) as {
+  it('schema 可渲染为 JSON Schema 且字段带 description', () => {
+    const schema = z.toJSONSchema(editParameters) as {
       properties: Record<string, { description?: string }>;
     };
     expect(schema.properties.path?.description).toBeTruthy();
@@ -337,7 +339,7 @@ describe('edit:框架契约与边界', () => {
     controller.abort();
     const aborted: ToolContext = { ...ctx, signal: controller.signal };
     await expect(
-      editTool.execute(
+      executeEdit(
         { id: 'call_1', args: { path: 'abort.txt', edits: [{ oldText: 'x', newText: 'y' }] } },
         aborted,
       ),

@@ -39,7 +39,6 @@ describe('CompactionCoordinator', () => {
     expect(coordinator.decideRunEnd('completed', undefined, MODEL)).toEqual({ kind: 'none' });
 
     coordinator.install({
-      type: 'compaction',
       id: 'cmp',
       timestamp: 1,
       tailStartId: 'tail',

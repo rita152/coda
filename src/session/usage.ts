@@ -1,15 +1,7 @@
-// UsageTracker:token/成本聚合(规格见 docs/08-session-persistence.md §7)。
-// 口径铁律:Usage 是 inclusive 总量,session 及以上只做加法;可选字段「出现过才累加,
-// 从未出现保持 undefined」——不把「provider 不上报」渲染成 0。
+// Canonical thread-checkpoint usage projection. Usage uses inclusive totals and only accumulates;
+// optional fields remain undefined until a provider reports them instead of rendering absence as 0.
 
-import type { AgentMessage, AssistantMessage, Usage } from '../protocol/index.js';
-
-export interface SessionUsage {
-  lastTurn?: Usage;          // 最近一条 assistant 的 usage(per-turn 视图)
-  cumulative: Usage;         // 全会话累计:对每条 assistant 消息逐字段求和
-  turns: number;             // assistant 消息条数(含 error/aborted)
-  contextTokens: number;     // 最近一条成功 assistant 的 input + output(compaction 触发用,M7)
-}
+import type { AgentMessage, AssistantMessage, ThreadUsage, Usage } from '../protocol/index.js';
 
 export interface ModelPricing {   // 每百万 token 美元价
   inputPer1M: number;
@@ -26,11 +18,19 @@ export class UsageTracker {
 
   constructor(private readonly pricing?: ModelPricing) {}
 
-  /** 恢复会话时从 initialMessages 重建(统计与转录同源,无独立状态文件)。 */
+  /** 仅供从消息导入新 transcript 时计算初始 usage；恢复必须使用 canonical checkpoint。 */
   seed(messages: readonly AgentMessage[]): void {
     for (const m of messages) {
       if (m.role === 'assistant') this.add(m);
     }
+  }
+
+  /** 原样恢复 journal 已提交的 usage 投影，避免从 transcript 建立第二套恢复事实。 */
+  restore(usage: Readonly<ThreadUsage>): void {
+    this.#cumulative = { ...usage.cumulative };
+    this.#lastTurn = usage.lastTurn === undefined ? undefined : { ...usage.lastTurn };
+    this.#turns = usage.turns;
+    this.#contextTokens = usage.contextTokens;
   }
 
   /**
@@ -58,7 +58,7 @@ export class UsageTracker {
     return cost;
   }
 
-  /** inclusive 口径下的换算——session 层唯一做「减法」的地方,且只在此一处(docs/08 §7.3)。 */
+  /** Inclusive pricing conversion; cache tokens are subtracted only at this conversion boundary. */
   cost(u: Usage): number | undefined {
     if (!this.pricing) return undefined;
     const p = this.pricing;
@@ -72,7 +72,7 @@ export class UsageTracker {
     );
   }
 
-  snapshot(): SessionUsage {
+  snapshot(): ThreadUsage {
     return {
       ...(this.#lastTurn !== undefined && { lastTurn: this.#lastTurn }),
       cumulative: { ...this.#cumulative },

@@ -1,5 +1,5 @@
 // Supervisor-owned Runtime ports. Thread execution contracts are canonically owned by
-// `session` and re-exported here so Phase-1 imports remain source-compatible.
+// `session` and re-exported here for the public Runtime composition surface.
 
 import type {
   DerivedOpId,
@@ -9,12 +9,10 @@ import type {
   ModelRef,
   OpId,
   OpReceipt,
-  PermissionCeilingSnapshot,
   ResolvedAbortTarget,
   RunId,
   RuntimeOp,
   RuntimeDiffFile,
-  ThreadDriverRef,
   ThreadId,
   ThreadSummary,
   TurnId,
@@ -23,42 +21,30 @@ import type {
   WorkspaceWriteFenceValidation,
 } from '../protocol/index.js';
 import type {
-  LegacyApprovalAdapter,
-  LegacyApprovalPatternRepositoryPort,
-  ThreadDriverAttachment,
-  ThreadDriverCheckpoint,
-  ThreadDriverHostServices,
+  RuntimeThreadDriverFactory,
   ThreadIdentityPort,
 } from '../session/thread-runtime-ports.js';
 import type {
-  LegacyThreadSeedRecord,
+  ThreadSeedRecord,
   ThreadJournalAppendPort,
   ThreadMetaRecord,
 } from '../session/thread-journal-records.js';
 import type { PolicyGrantRepository } from '../capabilities/types.js';
 
 export type {
-  LegacyApprovalAdapter,
-  LegacyApprovalAdapterFactory,
-  LegacyApprovalApplyResult,
-  LegacyApprovalContext,
-  LegacyApprovalInvocationResult,
-  LegacyApprovalPatternCommitResult,
-  LegacyApprovalPatternRepositoryPort,
-  LegacyApprovalPreflightResult,
-  LegacyApprovalRequestSnapshot,
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
   RuntimeClock,
   ThreadCompactionCheckpoint,
-  ThreadDriverAttachment,
+  RuntimeThreadDriverAttachment,
+  RuntimeThreadDriverFactory,
+  RuntimeThreadDriverHostServices,
   ThreadDriverCheckpoint,
   ThreadDriverCheckpointMutation,
   ThreadDriverCompletion,
   ThreadDriverDispatch,
   ThreadDriverEvent,
-  ThreadDriverHostServices,
   ThreadDriverPort,
   ThreadIdentityPort,
 } from '../session/thread-runtime-ports.js';
@@ -67,8 +53,6 @@ export type {
   ControlMutation,
   IdentityPrepareRecord,
   InputOwnershipMutation,
-  LegacyMirrorRecord,
-  LegacyThreadSeedRecord,
   MailboxMutation,
   MailboxPrepareRecord,
   ModelSelectionMutation,
@@ -81,6 +65,7 @@ export type {
   ThreadMetaRecord,
   ThreadResultDeliveryRecord,
   ThreadResultOutboxMutation,
+  ThreadSeedRecord,
   TranscriptMutation,
   TurnMutation,
 } from '../session/thread-journal-records.js';
@@ -130,52 +115,7 @@ export interface RuntimeWorkspaceReviewPort {
   }): Promise<readonly Readonly<RuntimeDiffFile>[]>;
 }
 
-export interface LegacyApprovalPatternRepository extends LegacyApprovalPatternRepositoryPort {
-  /** Stable tolerant-load warnings that Runtime must commit as canonical diagnostics. */
-  startupDiagnostics?(): readonly {
-    readonly code: string;
-    readonly message: string;
-  }[];
-  close(): Promise<void>;
-}
-
-export interface ThreadDriverFactory {
-  readonly requirements:
-    | {
-        readonly approvalMode: 'legacy_session_edge';
-        readonly capabilityMode?: 'static' | 'registry';
-      }
-    | {
-        readonly approvalMode: 'durable_legacy_bridge';
-        readonly capabilityMode?: 'static' | 'registry';
-      };
-  openLegacyApprovalAdapter?(input: {
-    readonly workspaceId: WorkspaceId;
-    readonly threadId: ThreadId;
-    readonly patterns: LegacyApprovalPatternRepositoryPort;
-  }): Promise<LegacyApprovalAdapter>;
-  create(input: {
-    readonly workspaceId: WorkspaceId;
-    readonly threadId: ThreadId;
-    readonly model: ModelConfig;
-    readonly permissionCeiling: PermissionCeilingSnapshot;
-    readonly parentThreadId?: ThreadId;
-    readonly creationKey: string;
-    /** Optional authoritative seed for a conversation fork/retry. */
-    readonly initialCheckpoint?: ThreadDriverCheckpoint;
-    readonly legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort;
-  }, host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
-  resume(input: {
-    readonly workspaceId: WorkspaceId;
-    readonly threadId: ThreadId;
-    readonly model: ModelConfig;
-    readonly durableRef: ThreadDriverRef;
-    readonly permissionCeiling: PermissionCeilingSnapshot;
-    readonly committedCheckpoint?: ThreadDriverCheckpoint;
-    readonly usedRequestIds: readonly string[];
-    readonly legacyApprovalPatterns?: LegacyApprovalPatternRepositoryPort;
-  }, host: ThreadDriverHostServices): Promise<ThreadDriverAttachment>;
-}
+export type ThreadDriverFactory = RuntimeThreadDriverFactory;
 
 export interface SupervisorLease extends WorkspaceWriteFence {
   readonly processEpoch: string;
@@ -183,26 +123,15 @@ export interface SupervisorLease extends WorkspaceWriteFence {
 
 export interface ThreadCatalogRecord {
   readonly summary: ThreadSummary;
-  readonly format: 'runtime-v2' | 'session-v1';
+  readonly format: 'runtime-v2';
   readonly storageKey: string;
-  readonly driverRef?: ThreadDriverRef;
 }
 
 export interface StoredThreadLocator {
-  readonly sourceSessionId?: string;
   readonly ownerWorkspaceId: WorkspaceId;
   readonly ownerRecordedCwd: string;
   readonly threadId: ThreadId;
   readonly catalog: ThreadCatalogRecord;
-  readonly executionEligibility:
-    | { readonly kind: 'mutable' }
-    | { readonly kind: 'read_only'; readonly code: 'invalid_legacy_workspace_cwd' };
-}
-
-export interface LegacyThreadImport {
-  readonly catalog: ThreadCatalogRecord;
-  readonly seed: LegacyThreadSeedRecord;
-  readonly driverRef: ThreadDriverRef;
 }
 
 export interface SupervisorOpLedgerRecord {
@@ -215,10 +144,6 @@ export interface SupervisorOpLedgerRecord {
     readonly target: ResolvedAbortTarget;
     readonly derivedOpId: DerivedOpId;
   }[];
-  readonly driverCreation?: {
-    readonly creationKey: string;
-    readonly driverRef?: ThreadDriverRef;
-  };
   /** Stable nested prompt operation used to finish conversation_retry after recovery. */
   readonly retryPromptOpId?: ExternalOpId;
   /** Immutable source message selected when conversation_retry first reserves its root op. */
@@ -260,10 +185,6 @@ export interface ThreadJournalPort extends ThreadJournalAppendPort {
   releaseWriteLease(): Promise<void>;
 }
 
-export interface LegacyApprovalRecoveryInventory {
-  readonly hasPendingReservedOutbox: boolean;
-}
-
 export interface RuntimeWorkspaceStoragePort {
   readonly workspaceId: WorkspaceId;
   readonly recordedCwd: string;
@@ -289,23 +210,12 @@ export interface RuntimeWorkspaceStoragePort {
     input: {
       readonly threadId: ThreadId;
       readonly meta: ThreadMetaRecord;
-      readonly initialRecords?: readonly LegacyThreadSeedRecord[];
+      readonly initialRecords?: readonly ThreadSeedRecord[];
     },
   ): Promise<ThreadJournalPort>;
   openThreadJournal(threadId: ThreadId): Promise<ThreadJournalPort | undefined>;
-  importLegacyThread(
-    lease: Readonly<SupervisorLease>,
-    threadId: ThreadId,
-  ): Promise<LegacyThreadImport | undefined>;
-  inspectLegacyApprovalRecovery?(
-    lease: Readonly<SupervisorLease>,
-  ): Promise<Readonly<LegacyApprovalRecoveryInventory>>;
-  openLegacyApprovalPatternRepository?(
-    lease: Readonly<SupervisorLease>,
-  ): Promise<LegacyApprovalPatternRepository>;
   openPolicyGrantRepository?(
     lease: Readonly<SupervisorLease>,
-    mode: PolicyGrantRepository['mode'],
   ): Promise<PolicyGrantRepository>;
   close(): Promise<void>;
 }

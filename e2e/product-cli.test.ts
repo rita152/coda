@@ -247,7 +247,6 @@ test('sessions lists the current workspace through RuntimePort without creating 
   const root = temporaryRoot('coda-product-sessions-');
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'work');
-  const legacySessions = path.join(root, 'legacy-sessions');
   mkdirSync(home, { recursive: true });
   mkdirSync(cwd, { recursive: true });
   const staleTruncation = path.join(home, '.coda', 'truncated', 'old', 'spill.txt');
@@ -260,7 +259,6 @@ test('sessions lists the current workspace through RuntimePort without creating 
     'sessions',
     '--json',
     '--cwd', cwd,
-    '--session-dir', legacySessions,
   ], home, cwd);
   expect(result.code).toBe(0);
   expect(result.stderr).toBe('');
@@ -270,17 +268,13 @@ test('sessions lists the current workspace through RuntimePort without creating 
     sessions: [],
   });
   expect(allRelativeFiles(home).some((file) => /thread|journal/iu.test(file))).toBe(false);
-  const runtimeFiles = allRelativeFiles(legacySessions);
-  expect(runtimeFiles.some((file) => /(?:^|\/)threads(?:\/|$)|journal|\.jsonl$/iu.test(file))).toBe(false);
-  expect(runtimeFiles.some((file) => file.endsWith('/catalog.json'))).toBe(true);
   expect(existsSync(staleTruncation)).toBe(true);
 }, T);
 
-test('exec is an incremental alias for the legacy one-shot NDJSON mode', () => {
+test('exec --json uses the canonical one-shot NDJSON transport', () => {
   const root = temporaryRoot('coda-product-exec-');
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'work');
-  const sessionDir = path.join(root, 'sessions');
   const script = path.join(root, 'faux.json');
   mkdirSync(home, { recursive: true });
   mkdirSync(cwd, { recursive: true });
@@ -294,27 +288,31 @@ test('exec is an incremental alias for the legacy one-shot NDJSON mode', () => {
     '--json',
     '--provider', 'faux',
     '--faux-script', script,
-    '--session-dir', sessionDir,
     '--cwd', cwd,
     '-p', 'run through exec',
   ], home, cwd);
   expect(result.code).toBe(0);
   expect(result.stderr).toBe('');
-  const events = result.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
-    readonly type: string;
-    readonly message?: { readonly role?: string; readonly content?: readonly { readonly text?: string }[] };
-    readonly reason?: string;
+  const frames = result.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
+    readonly type?: string;
+    readonly protocolVersion?: string;
+    readonly event?: {
+      readonly type?: string;
+      readonly message?: { readonly role?: string; readonly content?: readonly { readonly text?: string }[] };
+      readonly reason?: string;
+    };
   });
-  expect(events[0]?.type).toBe('protocol');
-  expect(events.some((event) =>
-    event.type === 'message_start' &&
-    event.message?.role === 'user' &&
-    event.message.content?.[0]?.text === 'run through exec')).toBe(true);
-  expect(events.some((event) =>
-    event.type === 'message_end' &&
-    event.message?.role === 'assistant' &&
-    event.message.content?.[0]?.text === 'exec alias answer')).toBe(true);
-  expect(events.at(-1)).toMatchObject({ type: 'agent_end', reason: 'completed' });
+  expect(frames[0]).toMatchObject({ type: 'protocol', protocolVersion: '2.0.0' });
+  expect(frames.some((frame) =>
+    frame.event?.type === 'message_start' &&
+    frame.event.message?.role === 'user' &&
+    frame.event.message.content?.[0]?.text === 'run through exec')).toBe(true);
+  expect(frames.some((frame) =>
+    frame.event?.type === 'message_end' &&
+    frame.event.message?.role === 'assistant' &&
+    frame.event.message.content?.[0]?.text === 'exec alias answer')).toBe(true);
+  expect(frames.some((frame) =>
+    frame.event?.type === 'agent_end' && frame.event.reason === 'completed')).toBe(true);
 }, T);
 
 test('opt-in output formats keep final stdout stable and text progress on stderr', () => {
@@ -405,7 +403,6 @@ test('ephemeral one-shot leaves no Runtime/session journal and timeout exits 124
   const root = temporaryRoot('coda-product-ephemeral-');
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'work');
-  const requestedSessionDir = path.join(root, 'must-not-be-created');
   const successScript = path.join(root, 'success.json');
   const timeoutScript = path.join(root, 'timeout.json');
   mkdirSync(home, { recursive: true });
@@ -425,17 +422,16 @@ test('ephemeral one-shot leaves no Runtime/session journal and timeout exits 124
 
   const success = runCoda([
     'exec', '--provider', 'faux', '--faux-script', successScript,
-    '--cwd', cwd, '--session-dir', requestedSessionDir,
+    '--cwd', cwd,
     '--ephemeral', '--output=json', '-p', 'temporary task',
   ], home, cwd);
   expect(success.code).toBe(0);
   expect(JSON.parse(success.stdout)).toMatchObject({ status: 'completed' });
-  expect(existsSync(requestedSessionDir)).toBe(false);
   expect(allRelativeFiles(home).some((file) => /thread|journal|runtime/iu.test(file))).toBe(false);
 
   const timeout = runCoda([
     'exec', '--provider', 'faux', '--faux-script', timeoutScript,
-    '--cwd', cwd, '--session-dir', requestedSessionDir,
+    '--cwd', cwd,
     '--ephemeral', '--output=json', '--timeout=50ms', '-p', 'wait too long',
   ], home, cwd);
   expect(timeout.code).toBe(124);
@@ -445,7 +441,6 @@ test('ephemeral one-shot leaves no Runtime/session journal and timeout exits 124
     status: 'timeout',
     exitCode: 124,
   });
-  expect(existsSync(requestedSessionDir)).toBe(false);
   expect(allRelativeFiles(home).some((file) => /thread|journal|runtime/iu.test(file))).toBe(false);
 }, T);
 

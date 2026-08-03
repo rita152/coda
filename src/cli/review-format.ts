@@ -66,17 +66,8 @@ export function formatPermissionSnapshot(snapshot: WorkspaceRuntimeSnapshot): re
 }
 
 export function formatApprovalPresentation(
-  presentation: Readonly<ApprovalPresentation> | undefined,
-  fallbackDescription: string,
+  presentation: Readonly<ApprovalPresentation>,
 ): readonly string[] {
-  if (presentation === undefined) {
-    return [
-      '? approval required',
-      fallbackDescription,
-      'Authoritative normalized scope is unavailable for this legacy request.',
-      'y allow once · n deny · Esc abort',
-    ].map(sanitizeTerminalText);
-  }
   return [
     `? approval · ${presentation.capability.id}@${presentation.capability.version}`,
     `target: ${presentation.normalizedResources.length === 0
@@ -95,11 +86,10 @@ export function formatApprovalPresentation(
   ].map(sanitizeTerminalText);
 }
 
-/** Legacy requests retain their historical `a` key; canonical cards require a frozen scope. */
 export function approvalAllowsAlways(
-  presentation: Readonly<ApprovalPresentation> | undefined,
+  presentation: Readonly<ApprovalPresentation>,
 ): boolean {
-  return presentation === undefined || presentation.allowAlways !== undefined;
+  return presentation.allowAlways !== undefined;
 }
 
 function duration(value: number | undefined): string {

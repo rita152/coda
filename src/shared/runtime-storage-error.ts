@@ -1,9 +1,4 @@
-/**
- * Storage-authority failure shared by the session and runtime layers.
- *
- * The class lives below both layers so compatibility re-exports preserve
- * `instanceof` identity across the Phase-2 boundary migration.
- */
+/** Storage-authority failure shared below the per-thread and workspace Runtime layers. */
 export class RuntimeStorageError extends Error {
   override readonly name = 'RuntimeStorageError';
 

@@ -4,7 +4,6 @@ import type {
   ExternalOpId,
   ImagePart,
   JSONSchema,
-  LegacyApprovalPatternSnapshot,
   ModelApi,
   ModelRef,
   OpId,
@@ -358,7 +357,6 @@ export interface PolicyGrantSnapshot {
   readonly workspaceId: WorkspaceId;
   readonly revision: string;
   readonly grants: readonly Readonly<PolicyGrant>[];
-  readonly legacyGlobal?: Readonly<LegacyApprovalPatternSnapshot>;
 }
 
 export type PolicyGrantCommitResult =
@@ -373,7 +371,7 @@ export type PolicyGrantCommitResult =
 
 export interface PolicyGrantRepositoryPort {
   readonly workspaceId: WorkspaceId;
-  readonly mode: 'workspace' | 'legacy_global_approvals_v1';
+  readonly mode: 'workspace';
   snapshot(): Promise<Readonly<PolicyGrantSnapshot>>;
   commitAllowAlways(grant: Readonly<PolicyGrant>): Promise<PolicyGrantCommitResult>;
 }

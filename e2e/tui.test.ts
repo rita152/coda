@@ -89,7 +89,6 @@ function tuiArgs(
     '--faux-script', scriptPath,
     '--approval-mode', approvalMode,
     '--cwd', root,
-    '--session-dir', path.join(root, 'sessions'),
   ];
 }
 
@@ -142,7 +141,7 @@ function readPersistedUserTexts(root: string): readonly string[] {
       try {
         collect(JSON.parse(line));
       } catch {
-        // Presentation and auxiliary files may use pretty-printed JSON. The canonical and legacy
+        // Presentation and auxiliary files may use pretty-printed JSON. Canonical Runtime
         // journals that own committed user messages are JSONL and are handled above.
       }
     }
@@ -575,8 +574,6 @@ test.skipIf(process.platform !== 'darwin')(
         'allow',
         '--cwd',
         root,
-        '--session-dir',
-        path.join(root, 'sessions'),
       ],
       {
         cwd: root,
@@ -675,7 +672,7 @@ test.skipIf(process.platform !== 'darwin')(
       expect(result.code, JSON.stringify(result).slice(-OUTPUT_PREVIEW_LIMIT)).toBe(0);
       expect(result.stderr).toBe('');
       expect(result.stdout).toContain('__CODA_RESIZED_40x10__');
-      expect(readPersistedText(path.join(root, 'sessions'))).toContain(
+      expect(readPersistedText(home)).toContain(
         '"text":"first line\\nsecond line"',
       );
       expectTerminalRestored(result.stdout);
@@ -743,7 +740,7 @@ test.skipIf(process.platform !== 'darwin')(
           afterWheelInput: '\x1b[4~',
           finalInput: '\r',
           exitMarker: 'WHEEL_PROBE_SECOND_TURN_COMPLETE',
-          exitJournalRoot: path.join(root, 'sessions'),
+          exitJournalRoot: path.join(home, '.coda', 'runtime-v2'),
           exitInput: '/quit\r',
           watchdogMs: 30_000,
         },
@@ -786,7 +783,7 @@ test.skipIf(process.platform !== 'darwin')(
       expect(afterThirdDown).toBeLessThan(afterSecondDown);
       expect(afterThirdDown).toBe(atBottom);
 
-      const persistedRoot = path.join(root, 'sessions');
+      const persistedRoot = home;
       const persisted = readPersistedText(persistedRoot);
       const persistedUserTexts = readPersistedUserTexts(persistedRoot);
       const submittedDrafts = persistedUserTexts.filter((text) => text.includes(draft));
@@ -971,7 +968,6 @@ test.skipIf(process.platform !== 'darwin')(
           '--model', 'pty-hanging-provider',
           '--approval-mode', 'allow',
           '--cwd', root,
-          '--session-dir', path.join(root, 'sessions'),
         ],
         'wait on the provider\r',
         {

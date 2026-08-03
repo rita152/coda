@@ -8,7 +8,7 @@ import type {
 } from '../protocol/index.js';
 import {
   createCliRuntimeModelResolver,
-  createLegacyPermissionPolicy,
+  createCliPermissionPolicy,
   resolveRuntimeStorageRoots,
 } from './runtime-composition.js';
 
@@ -24,13 +24,6 @@ describe('runtime CLI composition adapters', () => {
   it('maps default and overridden storage roots without reading ambient HOME', () => {
     expect(resolveRuntimeStorageRoots({ homeDir: '/host/home' })).toEqual({
       runtimeRoot: '/host/home/.coda/runtime-v2',
-      legacySessionDir: '/host/home/.coda/sessions',
-    });
-    expect(
-      resolveRuntimeStorageRoots({ homeDir: '/ignored', legacySessionDir: '/tmp/sessions' }),
-    ).toEqual({
-      runtimeRoot: '/tmp/sessions/.runtime-v2',
-      legacySessionDir: '/tmp/sessions',
     });
   });
 
@@ -55,7 +48,7 @@ describe('runtime CLI composition adapters', () => {
   });
 
   it('keeps permission derivation monotone across thread, run, and turn', async () => {
-    const policy = createLegacyPermissionPolicy('deny');
+    const policy = createCliPermissionPolicy('deny');
     const workspace = await policy.snapshotWorkspaceCeiling({
       workspaceId: WORKSPACE_ID,
       cwd: '/workspace',
@@ -64,7 +57,7 @@ describe('runtime CLI composition adapters', () => {
       workspaceId: WORKSPACE_ID,
       cwd: '/workspace',
       workspaceCeiling: workspace,
-    })).toEqual({ mode: 'deny', policyRevision: 'legacy-cli-deny-v2' });
+    })).toEqual({ mode: 'deny', policyRevision: 'cli-permission-deny-v3' });
     const thread = await policy.resolveCeiling({
       kind: 'root_thread',
       workspaceId: WORKSPACE_ID,

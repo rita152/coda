@@ -6,10 +6,11 @@ import type {
   AssistantMessage,
   ProviderEvent,
   QueuedMessage,
+  RunId,
   ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
-import type { SessionUsage } from '../session/index.js';
+import type { CliThreadUsage } from './frontend-types.js';
 import {
   charWidth,
   createRenderer,
@@ -40,6 +41,44 @@ function makeAppendOnly(): { out: FakeOut; r: Renderer } {
 }
 
 const MODEL = { provider: 'faux', api: 'faux', model: 'faux-1' };
+const RETRY_PREDECESSOR_RUN_ID = 'run-renderer-predecessor' as RunId;
+const RETRY_SUCCESSOR_RUN_ID = 'run-renderer-successor' as RunId;
+const COMPACTION_RUN_ID = 'run-renderer-compaction' as RunId;
+
+function approvalControlRequest(requestId: string, description: string) {
+  return {
+    type: 'control_request' as const,
+    requestId,
+    kind: 'approval' as const,
+    owningRunId: 'run-renderer' as never,
+    owningTurnId: 'turn-renderer' as never,
+    policyRevision: 'policy-renderer',
+    payload: {
+      toolCallId: 'call-approval',
+      description,
+      presentation: {
+        requestId,
+        target: {
+          workspaceId: 'workspace-renderer' as never,
+          threadId: 'thread-renderer' as never,
+          runId: 'run-renderer' as never,
+          turnId: 'turn-renderer' as never,
+        },
+        capability: { id: 'bash', version: '1', registrationDigest: 'digest-renderer' },
+        normalizedResources: [],
+        risk: { code: 'command', reason: 'execute', description },
+        allowOnce: { invocationId: 'invocation-renderer', toolCallId: 'call-approval' },
+        revisions: {
+          catalog: 1,
+          effectivePolicy: 'policy-renderer',
+          policyBasis: 'basis-renderer',
+          ceiling: 'ceiling-renderer',
+          grants: 'grants-renderer',
+        },
+      },
+    },
+  };
+}
 
 function am(over: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
@@ -111,12 +150,7 @@ describe('append-only one-shot 渲染', () => {
       }),
     });
     r.render({ type: 'plan_update', steps: [{ step: attack, status: 'in_progress' }] });
-    r.render({
-      type: 'approval_request',
-      approvalId: 'approval-1',
-      toolCallId: 'call-approval',
-      description: attack,
-    });
+    r.render(approvalControlRequest('approval-1', attack));
     r.render({ type: 'error', fatal: false, message: attack });
     r.render({
       type: 'retry_scheduled',
@@ -124,6 +158,8 @@ describe('append-only one-shot 渲染', () => {
       maxAttempts: 2,
       delayMs: 1,
       errorMessage: attack,
+      predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
+      successorRunId: RETRY_SUCCESSOR_RUN_ID,
     });
     r.replayTranscript([
       um(attack),
@@ -462,7 +498,7 @@ describe('append-only one-shot 渲染', () => {
     const { out, r } = makeAppendOnly();
     r.render({ type: 'agent_start', reason: 'follow_up' });
     expect(out.text).toContain('↪ follow-up');
-    const usage: SessionUsage = {
+    const usage: CliThreadUsage = {
       cumulative: { input: 2310, output: 95, costUSD: 0.0123 },
       turns: 2,
       contextTokens: 2405,
@@ -602,7 +638,7 @@ describe('append-only one-shot 渲染', () => {
     expect(out.text).not.toContain('1. [in_progress]');
   });
 
-  it('retry/compaction 叠加事件渲染(SessionEvent 透传面)', () => {
+  it('retry/compaction 叠加事件渲染(Runtime event 透传面)', () => {
     const { out, r } = makeAppendOnly();
     r.render({
       type: 'retry_scheduled',
@@ -610,9 +646,21 @@ describe('append-only one-shot 渲染', () => {
       maxAttempts: 5,
       delayMs: 4000,
       errorMessage: 'http 500',
+      predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
+      successorRunId: RETRY_SUCCESSOR_RUN_ID,
     });
-    r.render({ type: 'compaction_start', reason: 'threshold' });
-    r.render({ type: 'compaction_end', ok: true, droppedMessages: 12 });
+    r.render({
+      type: 'compaction_start',
+      reason: 'threshold',
+      predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
+      activityRunId: COMPACTION_RUN_ID,
+    });
+    r.render({
+      type: 'compaction_end',
+      activityRunId: COMPACTION_RUN_ID,
+      ok: true,
+      droppedMessages: 12,
+    });
     expect(out.text).toContain('retry 2/5 in 4000ms: http 500');
     expect(out.text).toContain('compacting');
     expect(out.text).toContain('dropped 12');
@@ -800,15 +848,10 @@ describe('简化 wcwidth(docs/09 §8:CJK/emoji 宽度)', () => {
   });
 });
 
-describe('approval_request append-only 渲染', () => {
+describe('control_request append-only 渲染', () => {
   it('转录留痕一行', () => {
     const { out, r } = makeAppendOnly();
-    r.render({
-      type: 'approval_request',
-      approvalId: 'ap_1',
-      toolCallId: 'c1',
-      description: 'bash: rm -rf dist',
-    });
+    r.render(approvalControlRequest('ap_1', 'bash: rm -rf dist'));
     expect(out.text).toContain('? approval required: bash: rm -rf dist');
     expect(out.text).not.toContain('[y=once');
   });

@@ -3,7 +3,6 @@
 
 import path from 'node:path';
 import {
-  adaptLegacyTool,
   createCapabilityRegistry,
   createPolicyEngine,
   createPromptAssembler,
@@ -13,7 +12,6 @@ import type {
   BasePromptProvider,
   PolicyDecision,
   PolicyEngine,
-  PolicyGrantSnapshot,
   PreparedInvocation,
   ProviderAdapterRegistry,
   RuleFreshnessPort,
@@ -22,27 +20,29 @@ import type {
   RuntimeCapabilityServices,
   ThreadPolicyEngine,
 } from '../capabilities/index.js';
-import { createCodingToolCapabilityBindings } from '../integrations/legacy-coding-tools/index.js';
 import {
-  LEGACY_BASH_ANALYSIS_VERSION,
-} from '../integrations/legacy-coding-tools/bash-analyze.js';
+  BASH_ANALYSIS_VERSION,
+  createCodingCapabilityRegistrations,
+} from '../integrations/coding-capabilities/index.js';
 import type {
-  LegacyBashInvocationAnalysisAttributes,
-} from '../integrations/legacy-coding-tools/bash-analyze.js';
+  BashInvocationAnalysisAttributes,
+} from '../integrations/coding-capabilities/index.js';
 import {
   canonicalJsonSha256,
+  ProviderEventStream,
   sha256Hex,
   strictJsonSnapshot,
 } from '../protocol/index.js';
-import type { ModelApi, PolicyGrantScope, StreamFn } from '../protocol/index.js';
+import type {
+  AssistantMessage,
+  ModelApi,
+  StreamFn,
+} from '../protocol/index.js';
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import { streamAnthropicMessages } from '../providers/anthropic-messages/index.js';
 import { streamOpenAIChat } from '../providers/openai-chat/index.js';
 import { streamOpenAIResponses } from '../providers/openai-responses/index.js';
-import { canonicalizePath, isPathInside } from '../shared/index.js';
-import type { StaticLegacyApprovalMode } from './legacy-approval-adapter.js';
-import { createProviderStreamFn } from './provider-stream.js';
 
 const PROVIDER_VERSION = '1';
 const PROVIDER_APIS = Object.freeze([
@@ -52,10 +52,12 @@ const PROVIDER_APIS = Object.freeze([
   'faux',
 ] as const satisfies readonly ModelApi[]);
 
+export type CliApprovalMode = 'interactive' | 'allow' | 'deny';
+
 export interface CliRegistryCapabilityServiceOptions {
   /** Explicit absolute CLI workspace root. Relative paths are rejected instead of using ambient cwd. */
   readonly cwd: string;
-  readonly approvalMode: StaticLegacyApprovalMode;
+  readonly approvalMode: CliApprovalMode;
   readonly basePrompts: BasePromptProvider;
   readonly ruleSnapshots: RuleSnapshotProvider;
   readonly ruleFreshness: RuleFreshnessPort;
@@ -95,12 +97,7 @@ export function createCliBasePromptProvider(
   return Object.freeze(provider);
 }
 
-/**
- * Build the phase-3 registry services used by the legacy CLI surface.
- *
- * Project rule discovery/freshness remains an explicit host responsibility so this factory can be
- * embedded and tested without filesystem or environment reads.
- */
+/** Build the native registry services used by the CLI Runtime composition. */
 export function createCliRegistryCapabilityServices(
   options: CliRegistryCapabilityServiceOptions,
 ): Readonly<CliRegistryCapabilityComposition> {
@@ -111,10 +108,12 @@ export function createCliRegistryCapabilityServices(
   const ruleBudget = snapshotRuleBudget(options.ruleBudget);
 
   const capabilityRegistry = createCapabilityRegistry();
-  for (const binding of createCodingToolCapabilityBindings()) {
-    const result = capabilityRegistry.register(adaptLegacyTool(binding));
+  for (const registration of createCodingCapabilityRegistrations()) {
+    const result = capabilityRegistry.register(registration);
     if (!result.ok) {
-      throw new TypeError(`Failed to register CLI capability ${JSON.stringify(binding.tool.name)}: ${result.message}`);
+      throw new TypeError(
+        `Failed to register CLI capability ${JSON.stringify(registration.id)}: ${result.message}`,
+      );
     }
   }
 
@@ -139,19 +138,19 @@ export function createCliRegistryCapabilityServices(
     basePrompts: options.basePrompts,
     ruleSnapshots: options.ruleSnapshots,
     ruleBudget,
-    policyEngine: createCliLegacyPolicyEngine({
+    policyEngine: createCliPolicyEngine({
       approvalMode: options.approvalMode,
       projectRoot,
     }),
     ruleFreshness: options.ruleFreshness,
-    grantMode: 'legacy_global_approvals_v1',
+    grantMode: 'workspace',
   });
 
   return Object.freeze({ capabilityRegistry, providerRegistry, services });
 }
 
-function createCliLegacyPolicyEngine(input: {
-  readonly approvalMode: StaticLegacyApprovalMode;
+function createCliPolicyEngine(input: {
+  readonly approvalMode: CliApprovalMode;
   readonly projectRoot: string;
 }): PolicyEngine {
   if (input.approvalMode !== 'interactive'
@@ -159,193 +158,118 @@ function createCliLegacyPolicyEngine(input: {
     && input.approvalMode !== 'deny') {
     throw new TypeError('Invalid CLI approval mode');
   }
-  const projectRootReal = canonicalizePath(input.projectRoot);
   const delegate = createPolicyEngine({
     configuration: {
-      kind: 'cli_legacy_policy_v1',
+      kind: 'cli_policy_v2',
       approvalMode: input.approvalMode,
       projectRoot: input.projectRoot,
-      projectRootReal,
-      bashAnalysisVersion: LEGACY_BASH_ANALYSIS_VERSION,
+      bashAnalysisVersion: BASH_ANALYSIS_VERSION,
     },
   });
   const policyEngine: PolicyEngine = {
     async openThread(owner) {
       const engine = await delegate.openThread(owner);
-      return Object.freeze(new CliLegacyThreadPolicyEngine({
-        engine,
-        approvalMode: input.approvalMode,
-        projectRoot: input.projectRoot,
-        projectRootReal,
-      }));
+      return Object.freeze(new CliThreadPolicyEngine(engine, input.approvalMode));
     },
   };
   return Object.freeze(policyEngine);
 }
 
-class CliLegacyThreadPolicyEngine implements ThreadPolicyEngine {
-  readonly #engine: ThreadPolicyEngine;
-  readonly #approvalMode: StaticLegacyApprovalMode;
-  readonly #projectRoot: string;
-  readonly #projectRootReal: string;
-  #legacyPatterns = new Set<string>();
+class CliThreadPolicyEngine implements ThreadPolicyEngine {
   #closed = false;
 
-  constructor(input: {
-    readonly engine: ThreadPolicyEngine;
-    readonly approvalMode: StaticLegacyApprovalMode;
-    readonly projectRoot: string;
-    readonly projectRootReal: string;
-  }) {
-    this.#engine = input.engine;
-    this.#approvalMode = input.approvalMode;
-    this.#projectRoot = input.projectRoot;
-    this.#projectRootReal = input.projectRootReal;
-  }
+  constructor(
+    readonly engine: ThreadPolicyEngine,
+    readonly approvalMode: CliApprovalMode,
+  ) {}
 
   async capture(input: Parameters<ThreadPolicyEngine['capture']>[0]) {
-    // Detach once before crossing the delegate's async boundary so the wrapper matches exactly the
-    // legacy material captured into this policy revision, even if a caller later mutates its input.
-    const grants = snapshotJson(input.grants) as Readonly<PolicyGrantSnapshot>;
-    const policy = await this.#engine.capture({ ...input, grants });
-    this.#legacyPatterns = new Set(legacyPatterns(grants));
-    return policy;
+    return this.engine.capture(input);
   }
 
   async evaluate(invocation: Readonly<PreparedInvocation>): Promise<PolicyDecision> {
-    const decision = await this.#engine.evaluate(invocation);
+    const decision = await this.engine.evaluate(invocation);
     if (decision.kind !== 'ask') return decision;
 
-    // The old --approval-mode allow/deny switch happened before interactive analyzers. Preserve
-    // that behavior while retaining the generic engine's identity and ceiling denials above.
-    if (this.#approvalMode === 'allow') {
+    // The CLI mode only resolves an otherwise-ask decision. Safety and ceiling denials remain
+    // authoritative because the generic engine evaluates them before this wrapper is reached.
+    if (this.approvalMode === 'allow') {
       return snapshotJson({
         kind: 'allow',
         code: 'cli_approval_mode_allow',
         reason: 'CLI approval mode allows capabilities that otherwise require approval',
       });
     }
-    if (this.#approvalMode === 'deny') {
+    if (this.approvalMode === 'deny') {
       return snapshotJson({
         kind: 'deny',
         code: 'cli_approval_mode_deny',
         reason:
-          `Tool "${invocation.context.capabilityId}" requires approval, but approvals are disabled ` +
-          '(--approval-mode deny). Use read-only tools, or ask the user to rerun without deny mode.',
+          `Capability "${invocation.context.capabilityId}" requires approval, but approvals are disabled ` +
+          '(--approval-mode deny). Use read-only capabilities, or rerun without deny mode.',
         recoverable: true as const,
       });
     }
 
-    if (invocation.context.capabilityId === 'bash') {
-      return this.#evaluateInteractiveBash(invocation, decision);
+    if (decision.code === 'doom_loop_confirmation_required'
+      || invocation.context.capabilityId !== 'bash') {
+      return decision;
     }
-    if (decision.code === 'doom_loop_confirmation_required') return decision;
-    if (invocation.policy.kind === 'edit') {
-      return this.#evaluateInteractiveEdit(invocation, decision);
-    }
-    return decisionWithoutProposal(decision);
+    return describeInteractiveBash(invocation, decision);
   }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#legacyPatterns.clear();
-    await this.#engine.close();
-  }
-
-  #evaluateInteractiveBash(
-    invocation: Readonly<PreparedInvocation>,
-    decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
-  ): PolicyDecision {
-    const analysis = frozenLegacyBashAnalysis(invocation.analysis.attributes);
-    if (analysis === undefined) {
-      return snapshotJson({
-        kind: 'deny',
-        code: 'invalid_legacy_bash_analysis',
-        reason: 'The prepared bash invocation is missing its frozen authoritative analysis',
-        recoverable: true as const,
-      });
-    }
-    if (decision.code === 'doom_loop_confirmation_required') return decision;
-
-    const modelNote = analysis.modelDescription === undefined
-      ? ''
-      : ` — ${analysis.modelDescription}`;
-    const description =
-      `bash: ${analysis.command}${modelNote}` +
-      `${analysis.accessesExternalProject ? ' (accesses paths outside project root)' : ''}` +
-      `${invocation.analysis.resourceCoverage.kind === 'complete'
-        ? ''
-        : ' (contains paths that could not be fully analyzed)'}`;
-    if (analysis.forceConfirm
-      || invocation.analysis.resourceCoverage.kind === 'incomplete'
-      || invocation.analysis.grantability.kind === 'once_only'
-      || analysis.accessesExternalProject) {
-      return askWithoutProposal(decision, description);
-    }
-    return this.#matchOrAsk(decision, description, analysis.patterns);
-  }
-
-  #evaluateInteractiveEdit(
-    invocation: Readonly<PreparedInvocation>,
-    decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
-  ): PolicyDecision {
-    const resources = invocation.resources;
-    const learnable = resources.length > 0 && resources.every((resource) =>
-      resource.resourceType === 'filesystem'
-      && resource.access === 'write'
-      && this.#isInsideProject(resource.canonicalTarget));
-    const target = resources[0]?.canonicalTarget;
-    const description = target === undefined
-      ? decision.description
-      : `${invocation.context.capabilityId} ${target}${learnable ? '' : ' (outside project root)'}`;
-    if (!learnable) return askWithoutProposal(decision, description);
-    return this.#matchOrAsk(
-      decision,
-      description,
-      [`${invocation.context.capabilityId}:${this.#projectRoot}/**`],
-    );
-  }
-
-  #matchOrAsk(
-    decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
-    description: string,
-    patterns: readonly string[],
-  ): PolicyDecision {
-    const normalized = normalizedPatterns(patterns);
-    if (normalized.length === 0) return askWithoutProposal(decision, description);
-    if (normalized.every((pattern) => this.#legacyPatterns.has(pattern))) {
-      return snapshotJson({
-        kind: 'allow',
-        code: 'matching_legacy_global_approval',
-        reason: 'The legacy global approval snapshot matches this invocation',
-      });
-    }
-    const grantProposal: PolicyGrantScope = {
-      kind: 'legacy_global_approvals_v1',
-      patterns: normalized as [string, ...string[]],
-    };
-    return snapshotJson({ ...decision, description, grantProposal });
-  }
-
-  #isInsideProject(candidate: string): boolean {
-    if (!path.isAbsolute(candidate)) return false;
-    try {
-      return isPathInside(this.#projectRootReal, path.normalize(candidate));
-    } catch {
-      return false;
-    }
+    await this.engine.close();
   }
 }
 
-function frozenLegacyBashAnalysis(
+function describeInteractiveBash(
+  invocation: Readonly<PreparedInvocation>,
+  decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
+): PolicyDecision {
+  const analysis = frozenBashAnalysis(invocation.analysis.attributes);
+  if (analysis === undefined) {
+    return snapshotJson({
+      kind: 'deny',
+      code: 'invalid_bash_analysis',
+      reason: 'The prepared bash invocation is missing its frozen authoritative analysis',
+      recoverable: true as const,
+    });
+  }
+
+  const modelNote = analysis.modelDescription === undefined
+    ? ''
+    : ` — ${analysis.modelDescription}`;
+  const description =
+    `bash: ${analysis.command}${modelNote}` +
+    `${analysis.accessesExternalProject ? ' (accesses paths outside project root)' : ''}` +
+    `${invocation.analysis.resourceCoverage.kind === 'complete'
+      ? ''
+      : ' (contains paths that could not be fully analyzed)'}`;
+  const mayPersist = !analysis.forceConfirm
+    && !analysis.accessesExternalProject
+    && invocation.analysis.resourceCoverage.kind === 'complete'
+    && invocation.analysis.grantability.kind === 'persistable';
+  return snapshotJson({
+    kind: 'ask',
+    code: decision.code,
+    reason: decision.reason,
+    description,
+    ...(mayPersist && decision.grantProposal !== undefined
+      ? { grantProposal: decision.grantProposal }
+      : {}),
+  });
+}
+
+function frozenBashAnalysis(
   value: Readonly<Record<string, unknown>>,
-): Readonly<LegacyBashInvocationAnalysisAttributes> | undefined {
+): Readonly<BashInvocationAnalysisAttributes> | undefined {
   const snapshot = snapshotJson(value) as Readonly<Record<string, unknown>>;
   const required = [
     'kind',
     'command',
-    'patterns',
     'forceConfirm',
     'reasons',
     'accessesExternalProject',
@@ -354,10 +278,8 @@ function frozenLegacyBashAnalysis(
   const allowed = new Set([...required, 'modelDescription']);
   if (required.some((key) => !Object.hasOwn(snapshot, key))
     || Object.keys(snapshot).some((key) => !allowed.has(key))
-    || snapshot.kind !== LEGACY_BASH_ANALYSIS_VERSION
+    || snapshot.kind !== BASH_ANALYSIS_VERSION
     || typeof snapshot.command !== 'string'
-    || !Array.isArray(snapshot.patterns)
-    || !snapshot.patterns.every((pattern) => typeof pattern === 'string' && pattern.length > 0)
     || typeof snapshot.forceConfirm !== 'boolean'
     || !Array.isArray(snapshot.reasons)
     || !snapshot.reasons.every((reason) => typeof reason === 'string' && reason.length > 0)
@@ -366,7 +288,7 @@ function frozenLegacyBashAnalysis(
     || (snapshot.modelDescription !== undefined && typeof snapshot.modelDescription !== 'string')) {
     return undefined;
   }
-  return snapshot as unknown as Readonly<LegacyBashInvocationAnalysisAttributes>;
+  return snapshot as unknown as Readonly<BashInvocationAnalysisAttributes>;
 }
 
 function validFrozenFilesystemTargets(value: unknown): boolean {
@@ -395,15 +317,32 @@ function validFrozenFilesystemTargets(value: unknown): boolean {
 function providerAdapterStreams(
   fauxScript: FauxScript | undefined,
 ): Readonly<Record<(typeof PROVIDER_APIS)[number], StreamFn>> {
-  // createProviderStreamFn preserves the existing in-stream error when the CLI has no faux script.
-  const faux = fauxScript === undefined ? createProviderStreamFn() : createFauxStreamFn(fauxScript);
   return Object.freeze({
     'openai-chat': streamOpenAIChat,
     'openai-responses': streamOpenAIResponses,
     'anthropic-messages': streamAnthropicMessages,
-    faux,
+    faux: fauxScript === undefined ? unconfiguredFauxStream : createFauxStreamFn(fauxScript),
   });
 }
+
+const unconfiguredFauxStream: StreamFn = (model) => {
+  const stream = new ProviderEventStream();
+  const message: AssistantMessage = {
+    role: 'assistant',
+    id: `a_${crypto.randomUUID()}`,
+    timestamp: Date.now(),
+    content: [],
+    model: { ...model.ref },
+    stopReason: 'error',
+    errorMessage: 'faux provider 未配置脚本',
+    errorDetails: { kind: 'unknown', retryable: false },
+    usage: { input: 0, output: 0 },
+  };
+  stream.push({ type: 'start', partial: message });
+  stream.push({ type: 'error', message });
+  stream.end(message);
+  return stream;
+};
 
 function providerImplementationDigest(api: ModelApi): string {
   return `impl_sha256_${sha256Hex(`coda.cli.provider-adapter.${api}.v1`)}`;
@@ -449,14 +388,6 @@ function requireMethod(value: unknown, method: string, label: string): void {
   }
 }
 
-function legacyPatterns(snapshot: Readonly<PolicyGrantSnapshot>): readonly string[] {
-  return snapshot.legacyGlobal?.patterns ?? [];
-}
-
-function normalizedPatterns(patterns: readonly string[]): readonly string[] {
-  return [...new Set(patterns.filter((pattern) => pattern.length > 0))].sort(compareUtf8);
-}
-
 function compareUtf8(left: string, right: string): number {
   const encoder = new TextEncoder();
   const leftBytes = encoder.encode(left);
@@ -467,24 +398,6 @@ function compareUtf8(left: string, right: string): number {
     if (difference !== 0) return difference;
   }
   return leftBytes.length - rightBytes.length;
-}
-
-function askWithoutProposal(
-  decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
-  description = decision.description,
-): PolicyDecision {
-  return snapshotJson({
-    kind: 'ask',
-    code: decision.code,
-    reason: decision.reason,
-    description,
-  });
-}
-
-function decisionWithoutProposal(
-  decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
-): PolicyDecision {
-  return decision.grantProposal === undefined ? decision : askWithoutProposal(decision);
 }
 
 function snapshotJson<T>(value: T): Readonly<T> {

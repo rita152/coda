@@ -6,7 +6,6 @@ import type {
   DerivedOpId,
   EventEnvelope,
   ExternalOpId,
-  LegacySeedTurnProvenance,
   MailboxRuntimeOp,
   ModelRef,
   OpId,
@@ -14,7 +13,6 @@ import type {
   ResolvedAbortTarget,
   RunId,
   RuntimeEvent,
-  ThreadDriverRef,
   ThreadId,
   ThreadUsage,
   TurnId,
@@ -36,29 +34,21 @@ export interface ThreadMetaRecord {
   readonly createdAt: number;
   readonly cwd: string;
   readonly model: ModelRef;
-  readonly driverRef?: ThreadDriverRef;
 }
 
-export interface LegacyThreadSeedRecord {
-  readonly type: 'legacy_seed';
-  readonly sourceSessionId: string;
+export interface ThreadSeedTurnProvenance {
+  readonly messageId: string;
+  readonly turnId: TurnId;
+}
+
+export interface ThreadSeedRecord {
+  readonly type: 'thread_seed';
   readonly transcript: readonly AgentMessage[];
-  /** Stable message-to-turn provenance for retry/fork after a seed is copied or restarted. */
-  readonly turnProvenance?: readonly LegacySeedTurnProvenance[];
-  /**
-   * Direct-Session sidecars keep the active (possibly compacted) transcript above for compatibility,
-   * but recovery also needs the exact raw v1 mirror prefix that existed when the sidecar was born.
-   * Canonical Runtime imports omit this standalone-only field because their transcript is already
-   * the complete audit transcript.
-   */
-  readonly mirrorRecords?: readonly LegacyMirrorRecord[];
+  /** Exact message-to-turn provenance required for deterministic fork and recovery. */
+  readonly turnProvenance: readonly ThreadSeedTurnProvenance[];
   readonly usage: ThreadUsage;
   readonly compaction?: ThreadCompactionCheckpoint;
 }
-
-export type LegacyMirrorRecord =
-  | { readonly type: 'message'; readonly message: AgentMessage }
-  | ({ readonly type: 'compaction' } & ThreadCompactionCheckpoint);
 
 export interface MailboxPrepareRecord {
   readonly type: 'mailbox_prepare';
@@ -257,7 +247,7 @@ export interface ThreadCommitRecord {
 
 export type RuntimeJournalRecord =
   | ThreadMetaRecord
-  | LegacyThreadSeedRecord
+  | ThreadSeedRecord
   | MailboxPrepareRecord
   | IdentityPrepareRecord
   | ThreadResultDeliveryRecord

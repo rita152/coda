@@ -6,7 +6,7 @@
 import path from 'node:path';
 import { z } from 'zod';
 import { RG_MISSING_MESSAGE, resolveRgPath } from './rg.js';
-import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
 const DEFAULT_LIMIT = 100;
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -14,7 +14,7 @@ const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 /** signal 触发中断后的错误文案(对齐 grep/bash 的 "User aborted the ...",docs/07 §4)。 */
 const MSG_ABORTED = 'User aborted the glob search';
 
-const GlobParams = z.object({
+export const globParameters = z.object({
   pattern: z.string().describe("Glob pattern, e.g. '**/*.ts' or 'src/**/*.test.ts'"),
   path: z
     .string()
@@ -23,7 +23,7 @@ const GlobParams = z.object({
   limit: z.number().int().min(1).optional().describe('Maximum files to return (default 100)'),
 });
 
-type GlobArgs = z.infer<typeof GlobParams>;
+export type GlobArgs = z.infer<typeof globParameters>;
 
 interface FileEntry {
   display: string; // 给模型看的路径(cwd 内相对 cwd,越出 cwd 用绝对路径)
@@ -81,15 +81,14 @@ async function runRgFiles(
   return stdout.split('\n').filter((line) => line.length > 0);
 }
 
-export const globTool: ToolDefinition<GlobArgs> = {
-  name: 'glob',
-  description:
-    'Find files matching a glob pattern (recursive, respects .gitignore). ' +
-    'Files modified within the last 24 hours are listed first (newest first), the rest alphabetically.',
-  parameters: GlobParams,
-  kind: 'search',
+export const GLOB_DESCRIPTION =
+  'Find files matching a glob pattern (recursive, respects .gitignore). ' +
+  'Files modified within the last 24 hours are listed first (newest first), the rest alphabetically.';
 
-  async execute(call, ctx: ToolContext): Promise<ToolOutput<unknown>> {
+export async function executeGlob(
+  call: ToolExecutionInput<GlobArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<unknown>> {
     const searchDir = path.resolve(ctx.cwd, call.args.path ?? '.');
     const shownDir = call.args.path ?? searchDir;
     const limit = call.args.limit ?? DEFAULT_LIMIT;
@@ -138,8 +137,7 @@ export const globTool: ToolDefinition<GlobArgs> = {
       text += `\n(Results truncated: showing first ${limit}. Refine the pattern or path.)`;
     }
     return { content: [{ type: 'text', text }] };
-  },
-};
+}
 
 function errorCode(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null || !('code' in err)) return undefined;

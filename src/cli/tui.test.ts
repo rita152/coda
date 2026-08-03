@@ -14,24 +14,24 @@ import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ApprovalBroker } from '../agent/index.js';
 import type {
   AgentMessage,
   ApprovalPresentation,
   AssistantMessage,
   ProviderEvent,
+  RunId,
   ThreadId,
   ToolResultMessage,
   UserMessage,
   WorkspaceRuntimeSnapshot,
   WorkspaceId,
 } from '../protocol/index.js';
-import { createFauxStreamFn } from '../providers/faux/index.js';
-import { Session } from '../session/index.js';
-import type { SessionEvent, SessionUsage } from '../session/index.js';
-import type { CliApprovalBridge } from './frontend-types.js';
-import { InteractiveRuntime } from './interactive-runtime.js';
-import type { CliSession } from './interactive-runtime.js';
+import type {
+  CliApprovalBridge,
+  CliRuntimeEvent,
+  CliThreadUsage,
+} from './frontend-types.js';
+import type { CliSession, InteractiveSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
 import {
@@ -58,6 +58,9 @@ import {
 import type { TuiOptions, TuiScreen } from './tui.js';
 
 const MODEL = { provider: 'openai', api: 'openai-chat', model: 'gpt-5.2' };
+const RETRY_PREDECESSOR_RUN_ID = 'run-tui-predecessor' as RunId;
+const RETRY_SUCCESSOR_RUN_ID = 'run-tui-successor' as RunId;
+const COMPACTION_RUN_ID = 'run-tui-compaction' as RunId;
 const WORKSPACE_SNAPSHOT = {
   workspaceId: 'ws_tui_test' as WorkspaceId,
   permissions: {
@@ -119,17 +122,19 @@ function makeTempDir(): string {
   return dir;
 }
 
-function waitForSessionEvent(
-  session: Session,
-  predicate: (event: SessionEvent) => boolean,
-): Promise<SessionEvent> {
-  return new Promise((resolve) => {
-    const unsubscribe = session.subscribe((event) => {
-      if (!predicate(event)) return;
-      unsubscribe();
-      resolve(event);
-    });
-  });
+function idleCliSession(): CliSession {
+  return {
+    interactionState: () => 'idle',
+    currentModel: () => MODEL,
+    usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+    messages: [],
+    subscribe: () => () => undefined,
+    prompt: async () => undefined,
+    steer: () => undefined,
+    followUp: () => undefined,
+    abort: () => undefined,
+    close: async () => undefined,
+  };
 }
 
 function textDelta(delta: string): ProviderEvent {
@@ -660,12 +665,9 @@ describe('全屏 OpenTUI 布局', () => {
             ],
           }),
         });
-        view.screen.render({
-          type: 'approval_request',
-          approvalId: 'approval-transparent',
-          toolCallId: 'call-transparent',
-          description: 'verify transparent background',
-        });
+        view.screen.render(approvalControlRequest(
+          'approval-transparent', 'verify transparent background', 'call-transparent',
+        ));
         await view.flush();
         await view.resolveHighlights();
 
@@ -883,7 +885,7 @@ describe('全屏 OpenTUI 布局', () => {
   it('usage_update 刷新 context 状态而不使用 cumulative token', async () => {
     const view = await setup();
     try {
-      const usage: SessionUsage = {
+      const usage: CliThreadUsage = {
         cumulative: { input: 90_000, output: 10_000 },
         turns: 5,
         contextTokens: 4_096,
@@ -952,12 +954,9 @@ describe('全屏 OpenTUI 布局', () => {
       view.screen.setInput(
         Array.from({ length: 8 }, (_, index) => `draft ${index}`).join('\n'),
       );
-      view.screen.render({
-        type: 'approval_request',
-        approvalId: 'approval-1',
-        toolCallId: 'call-1',
-        description: 'bash: bun test — Run the test suite',
-      });
+      view.screen.render(approvalControlRequest(
+        'approval-1', 'bash: bun test — Run the test suite', 'call-1',
+      ));
       await view.flush();
       const approvalFrame = view.frame();
       const approvalLines = frameLines(approvalFrame);
@@ -974,10 +973,9 @@ describe('全屏 OpenTUI 布局', () => {
       expect(approvalFooter.screenY + approvalFooter.height).toBe(approvalLines.length);
       expect(approvalFooter.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
       expect(approvalLines[approvalFooter.screenY - 1]?.trim()).toBe('');
-      expect(approvalFrame).toContain('Would you like to run the following command?');
+      expect(approvalFrame).toContain('Would you like to allow the following action?');
       expect(approvalFrame).toContain('Environment: local');
-      expect(approvalFrame).toContain('Reason: Run the test suite');
-      expect(approvalFrame).toContain('$ bun test');
+      expect(approvalFrame).toContain('Reason: bash: bun test — Run the test suite');
       expect(approvalFrame).toContain('› 1. Yes, proceed (y)');
       expect(approvalFrame).toContain('Press enter to confirm or esc to cancel');
       expect(approvalFrame).not.toContain('draft 7');
@@ -987,7 +985,7 @@ describe('全屏 OpenTUI 布局', () => {
       view.resize(80, 30);
       view.screen.toggleApprovalDetails();
       await view.flush();
-      expect(view.frame()).toContain('Authoritative normalized scope is unavailable');
+      expect(view.frame()).toContain('Details');
       expect(view.frame()).not.toContain('draft 7');
 
       view.screen.resolveApproval();
@@ -1017,14 +1015,12 @@ describe('全屏 OpenTUI 布局', () => {
   it('矮窗口与多行审批内容始终让当前决议项可见', async () => {
     const view = await setup(40, 10);
     try {
-      view.screen.render({
-        type: 'approval_request',
-        approvalId: 'approval-narrow',
-        toolCallId: 'call-narrow',
-        description:
-          'bash: printf first\nprintf second\nprintf third\nprintf fourth — ' +
+      view.screen.render(approvalControlRequest(
+        'approval-narrow',
+        'bash: printf first\nprintf second\nprintf third\nprintf fourth — ' +
           'A long reason that wraps across several narrow terminal rows',
-      });
+        'call-narrow',
+      ));
       await view.flush();
       expect(view.frame()).toContain('› 1. Yes, proceed (y)');
       expect(view.frame()).toContain('Press enter to confirm or esc to');
@@ -1032,11 +1028,11 @@ describe('全屏 OpenTUI 布局', () => {
       expect(view.screen.handleApprovalPanelKey({ name: 'down' } as KeyEvent))
         .toEqual({ kind: 'handled' });
       await view.flush();
-      expect(view.frame()).toContain("› 2. Yes, and don't ask again");
+      expect(view.frame()).toContain('› 2. No, and tell Coda what to do');
       expect(view.screen.handleApprovalPanelKey({ name: 'down' } as KeyEvent))
         .toEqual({ kind: 'handled' });
       await view.flush();
-      expect(view.frame()).toContain('› 3. No, and tell Coda what to do');
+      expect(view.frame()).toContain('› 1. Yes, proceed (y)');
     } finally {
       await view.destroy();
     }
@@ -2747,12 +2743,7 @@ describe('TUI 安全渲染与转录恢复', () => {
         type: 'plan_update',
         steps: [{ step: `inspect${osc}safe`, status: 'in_progress' }],
       });
-      view.screen.render({
-        type: 'approval_request',
-        approvalId: 'approval-1',
-        toolCallId: 'tool-1',
-        description: `run${osc}safe`,
-      });
+      view.screen.render(approvalControlRequest('approval-1', `run${osc}safe`, 'tool-1'));
       view.screen.render({ type: 'error', fatal: false, message: `warning${osc}safe` });
       await view.flush();
       await view.resolveHighlights();
@@ -3115,6 +3106,8 @@ describe('TUI 交互状态投影', () => {
         maxAttempts: 5,
         delayMs: 1_000,
         errorMessage: 'retry me',
+        predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
+        successorRunId: RETRY_SUCCESSOR_RUN_ID,
       });
       expect(view.interaction.phase).toBe('retrying');
       expect(tuiEnterState(view.interaction.phase)).toBe('running');
@@ -3125,14 +3118,24 @@ describe('TUI 交互状态投影', () => {
       expect(view.interaction.phase).toBe('idle');
       expect(view.frame()).not.toContain('coda · ready');
 
-      view.screen.render({ type: 'compaction_start', reason: 'threshold' });
+      view.screen.render({
+        type: 'compaction_start',
+        reason: 'threshold',
+        predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
+        activityRunId: COMPACTION_RUN_ID,
+      });
       await view.flush();
       expect(view.interaction.phase).toBe('compacting');
       expect(tuiEnterState(view.interaction.phase)).toBe('idle');
       expect(tuiCanAbort(view.interaction.phase)).toBe(true);
       expect(view.frame()).toContain('Compacting context · Enter queue');
 
-      view.screen.render({ type: 'compaction_end', ok: false, droppedMessages: 0 });
+      view.screen.render({
+        type: 'compaction_end',
+        activityRunId: COMPACTION_RUN_ID,
+        ok: false,
+        droppedMessages: 0,
+      });
       await view.flush();
       expect(view.interaction.phase).toBe('idle');
       expect(view.frame()).not.toContain('Compacting context · Enter queue');
@@ -3215,7 +3218,7 @@ describe('TUI 控制器接线', () => {
   });
 
   it('审批队列抢占背景 panel，并按队首逐张展示和决议', async () => {
-    let listener: (event: SessionEvent) => void = () => {};
+    let listener: (event: CliRuntimeEvent) => void = () => {};
     const resolved: Array<{ id: string; decision: string }> = [];
     const session: CliSession = {
       interactionState: () => 'idle',
@@ -3233,11 +3236,7 @@ describe('TUI 控制器接线', () => {
       close: async () => undefined,
     };
     const approval: CliApprovalBridge = {
-      broker: {
-        resolve: (id, decision) => resolved.push({ id, decision }),
-      },
-      onAbort: () => undefined,
-      subscribe: () => () => undefined,
+      resolve: (id, decision) => resolved.push({ id, decision }),
     };
     const view = await setup(90, 30);
     const controller = runTuiController(session, approval, view.screen, view.renderer, {
@@ -3251,18 +3250,8 @@ describe('TUI 控制器接线', () => {
       generatedAt: 10,
       files: [{ path: 'a.ts', group: 'unstaged', status: 'M', patch: '+change' }],
     });
-    listener({
-      type: 'approval_request',
-      approvalId: 'approval-first',
-      toolCallId: 'call-first',
-      description: 'first dangerous command',
-    });
-    listener({
-      type: 'approval_request',
-      approvalId: 'approval-second',
-      toolCallId: 'call-second',
-      description: 'second dangerous command',
-    });
+    listener(approvalControlRequest('approval-first', 'first dangerous command', 'call-first'));
+    listener(approvalControlRequest('approval-second', 'second dangerous command', 'call-second'));
     await view.flush();
     expect(view.frame()).toContain('first dangerous command');
     expect(view.frame()).not.toContain('second dangerous command');
@@ -3373,7 +3362,7 @@ describe('TUI 控制器接线', () => {
         threadId,
         createdAt: 1,
         state: 'idle' as const,
-        title: 'Stale Diff Session',
+        title: 'Stale Diff Thread',
       },
     }];
     const workspace: RuntimeWorkspaceActions = {
@@ -3393,7 +3382,6 @@ describe('TUI 控制器接线', () => {
         diffRequests++;
         return pendingDiff;
       },
-      approvalPresentation: () => undefined,
       pendingApprovals: () => [],
       subscribePendingApprovals: () => () => {},
     };
@@ -3473,12 +3461,15 @@ describe('TUI 控制器接线', () => {
       retryConversation: async () => currentThreadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
-      approvalPresentation: () => undefined,
       pendingApprovals: () => currentThreadId === 'thread-idle-b' && pendingOnTarget
         ? [{
-            approvalId: 'approval-thread-b',
+            requestId: 'approval-thread-b',
             toolCallId: 'call-thread-b',
             description: 'approve thread B only',
+            presentation: approvalPresentationWithoutAlways(
+              'approval-thread-b',
+              'approve thread B only',
+            ),
         }]
         : [],
       subscribePendingApprovals: () => () => {},
@@ -3498,14 +3489,10 @@ describe('TUI 控制器接线', () => {
       close: async () => undefined,
     };
     const approval: CliApprovalBridge = {
-      broker: {
-        resolve: (id, decision) => {
-          resolved.push({ id, decision });
-          pendingOnTarget = false;
-        },
+      resolve: (id, decision) => {
+        resolved.push({ id, decision });
+        pendingOnTarget = false;
       },
-      onAbort: () => undefined,
-      subscribe: () => () => undefined,
     };
     const view = await setup(
       90,
@@ -3691,15 +3678,7 @@ describe('TUI 控制器接线', () => {
   });
 
   it('项目规则 warning 经 TUI 单写入者清洗展示，并在关闭后退订', async () => {
-    const session = await Session.create({
-      dir: makeTempDir(),
-      agentConfig: {
-        streamFn: createFauxStreamFn({ turns: [] }),
-        model: { ref: MODEL },
-        tools: [],
-        systemPrompt: 'test',
-      },
-    });
+    const session = idleCliSession();
     const view = await setup(80, 20);
     view.screen.focusInput();
     const println = view.screen.println.bind(view.screen);
@@ -3771,13 +3750,18 @@ describe('TUI 控制器接线', () => {
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
     });
-    let createCalls = 0;
-    const runtime = new InteractiveRuntime({
-      createSession: async () => {
-        createCalls++;
-        throw new Error('/login 不得创建 Session');
+    let currentModel: ReturnType<InteractiveSession['currentModel']>;
+    const runtime: InteractiveSession = {
+      ...idleCliSession(),
+      currentModel: () => currentModel,
+      setModel: (model) => {
+        currentModel = model.ref;
       },
-    });
+      clearModel: () => {
+        currentModel = undefined;
+      },
+      subscribeSessionAttached: () => () => undefined,
+    };
     const view = await setup(80, 24, () => {}, true, {}, {
       presentation: { store },
     });
@@ -3881,7 +3865,6 @@ describe('TUI 控制器接线', () => {
     view.mockInput.pressEnter();
     await waitForFrame('已保存 OpenCode Go 的认证配置');
     expect(view.frame()).not.toContain(secret);
-    expect(createCalls).toBe(0);
     expect(runtime.currentModel()).toBeUndefined();
     await waitForInput(taskDraft);
     expect(store.snapshot().draft).toBe(taskDraft);
@@ -3899,15 +3882,7 @@ describe('TUI 控制器接线', () => {
   });
 
   it('真实 PageUp/PageDown 按键滚动转录，消费事件且不夺走输入焦点', async () => {
-    const session = await Session.create({
-      dir: makeTempDir(),
-      agentConfig: {
-        streamFn: createFauxStreamFn({ turns: [] }),
-        model: { ref: MODEL },
-        tools: [],
-        systemPrompt: 'test',
-      },
-    });
+    const session = idleCliSession();
     const view = await setup(80, 20);
     view.screen.focusInput();
     const pageKeyEvents: KeyEvent[] = [];
@@ -3977,35 +3952,24 @@ describe('TUI 控制器接线', () => {
   });
 
   it('审批期间冻结修饰键和 bracketed paste，决议后恢复输入', async () => {
-    const session = await Session.create({
-      dir: makeTempDir(),
-      agentConfig: {
-        streamFn: createFauxStreamFn({ turns: [] }),
-        model: { ref: MODEL },
-        tools: [],
-        systemPrompt: 'test',
-      },
-    });
-    const listeners = new Set<(event: SessionEvent) => void>();
-    const broker = new ApprovalBroker((event) => {
-      for (const listener of [...listeners]) listener(event);
-    });
-    const approval = {
-      broker,
-      onAbort: (): void => {
-        broker.abortAll();
-      },
-      subscribe(listener: (event: SessionEvent) => void): () => void {
-        listeners.add(listener);
-        return () => {
-          listeners.delete(listener);
-        };
-      },
+    const session = idleCliSession();
+    let listener: ((event: CliRuntimeEvent) => void | Promise<void>) | undefined;
+    const decisions: Array<{ id: string; decision: string }> = [];
+    const approval: CliApprovalBridge = {
+      resolve: (id, decision) => decisions.push({ id, decision }),
     };
     const view = await setup();
     view.screen.focusInput();
     const controller = runTuiController(
-      session,
+      {
+        ...session,
+        subscribe(next) {
+          listener = next;
+          return () => {
+            listener = undefined;
+          };
+        },
+      },
       approval,
       view.screen,
       view.renderer,
@@ -4016,38 +3980,27 @@ describe('TUI 控制器接线', () => {
     );
 
     view.screen.setInput('seed');
-    const pending = broker.request({
-      toolCallId: 'call-1',
-      description: 'run tests',
-      patterns: ['bash:bun test'],
-    });
+    const emit = listener;
+    if (emit === undefined) throw new Error('primary session listener was not registered');
+    await emit(approvalControlRequest('approval-input-freeze', 'run tests', 'call-1'));
     await view.flush();
-    expect(broker.pendingCount).toBe(1);
     expect(view.screen.getInput()).toBe('seed');
     expect(view.frame()).toContain('Would you like to allow the following action?');
     expect(view.frame()).toContain('› 1. Yes, proceed (y)');
-    expect(view.frame()).toContain("2. Yes, and don't ask again for matching commands (a)");
+    expect(view.frame()).not.toContain("don't ask again");
 
     view.mockInput.pressKey('v');
     await view.flush();
-    expect(view.frame()).toContain('Authoritative normalized scope is unavailable');
-    expect(broker.pendingCount).toBe(1);
+    expect(view.frame()).toContain('Details');
 
     await view.mockInput.pasteBracketedText('PASTED\nTEXT');
     view.mockInput.pressKey('a', { meta: true });
     view.mockInput.pressKey('a', { super: true });
     await view.flush();
     expect(view.screen.getInput()).toBe('seed');
-    expect(broker.pendingCount).toBe(1);
 
-    view.mockInput.pressArrow('down');
-    await view.flush();
-    expect(view.frame()).toContain("› 2. Yes, and don't ask again for matching commands (a)");
-    view.mockInput.pressEnter();
-    expect(await pending).toEqual({
-      decision: 'allow_always',
-      learned: ['bash:bun test'],
-    });
+    view.mockInput.pressKey('y');
+    expect(decisions).toEqual([{ id: 'approval-input-freeze', decision: 'allow_once' }]);
     await view.mockInput.pasteBracketedText('AFTER\nTEXT');
     await view.flush();
     expect(view.screen.getInput()).toBe('seedAFTER\nTEXT');
@@ -4059,8 +4012,8 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
-  it('canonical session approval_request enters TUI approval mode without a side channel', async () => {
-    let listener: ((event: SessionEvent) => void | Promise<void>) | undefined;
+  it('canonical control_request enters TUI approval mode on the primary event stream', async () => {
+    let listener: ((event: CliRuntimeEvent) => void | Promise<void>) | undefined;
     const resolutions: Array<{ id: string; decision: string }> = [];
     const session: CliSession = {
       interactionState: () => 'idle',
@@ -4080,13 +4033,9 @@ describe('TUI 控制器接线', () => {
       close: async () => {},
     };
     const approval = {
-      broker: {
-        resolve: (id: string, decision: 'allow_once' | 'allow_always' | 'deny' | 'abort') => {
-          resolutions.push({ id, decision });
-        },
+      resolve: (id: string, decision: 'allow_once' | 'allow_always' | 'deny' | 'abort') => {
+        resolutions.push({ id, decision });
       },
-      onAbort: (): void => {},
-      subscribe: (): (() => void) => () => {},
     };
     const presentation = approvalPresentationWithoutAlways('canonical-tui-approval');
     const workspace: RuntimeWorkspaceActions = {
@@ -4103,9 +4052,6 @@ describe('TUI 控制器接线', () => {
       retryConversation: async () => presentation.target.threadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
-      approvalPresentation: (requestId) => requestId === presentation.requestId
-        ? presentation
-        : undefined,
       pendingApprovals: () => [],
       subscribePendingApprovals: () => () => {},
     };
@@ -4132,12 +4078,7 @@ describe('TUI 控制器接线', () => {
 
     const emit = listener;
     if (emit === undefined) throw new Error('primary session listener was not registered');
-    await emit({
-      type: 'approval_request',
-      approvalId: 'canonical-tui-approval',
-      toolCallId: 'call-canonical',
-      description: 'run canonical command',
-    });
+    await emit(approvalControlRequest('canonical-tui-approval', 'run canonical command', 'call-canonical'));
     await view.flush();
     expect(view.frame()).toContain('Would you like to allow the following action?');
     expect(view.frame()).not.toContain("don't ask again");
@@ -4162,8 +4103,18 @@ describe('TUI 控制器接线', () => {
   it('审批快照恢复初始队列，并在外部决议后原子切换当前卡片', async () => {
     const threadId = 'thread-approval-sync' as ThreadId;
     let pending = [
-      { approvalId: 'approval-first', toolCallId: 'call-first', description: 'first command' },
-      { approvalId: 'approval-second', toolCallId: 'call-second', description: 'second command' },
+      {
+        requestId: 'approval-first',
+        toolCallId: 'call-first',
+        description: 'first command',
+        presentation: approvalPresentationWithoutAlways('approval-first', 'first command'),
+      },
+      {
+        requestId: 'approval-second',
+        toolCallId: 'call-second',
+        description: 'second command',
+        presentation: approvalPresentationWithoutAlways('approval-second', 'second command'),
+      },
     ];
     let pendingListener:
       | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
@@ -4182,7 +4133,6 @@ describe('TUI 控制器接线', () => {
       retryConversation: async () => threadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
-      approvalPresentation: () => undefined,
       pendingApprovals: () => pending,
       subscribePendingApprovals: (listener) => {
         pendingListener = listener;
@@ -4216,7 +4166,7 @@ describe('TUI 控制器接线', () => {
     view.screen.setInput('preserved draft');
     const controller = runTuiController(
       session,
-      { broker: { resolve: () => {} }, onAbort: () => {}, subscribe: () => () => {} },
+      { resolve: () => {} },
       view.screen,
       view.renderer,
       { interaction: view.interaction, installSignalHandlers: false, workspace },
@@ -4245,188 +4195,12 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
-  it('retry 退避期间 Enter 进入 steering，不会启动第二个 prompt 破坏续跑', async () => {
-    let releaseSleep: ((aborted: boolean) => void) | undefined;
-    let markSleepStarted!: () => void;
-    const sleepStarted = new Promise<void>((resolve) => {
-      markSleepStarted = resolve;
-    });
-    const streamFn = createFauxStreamFn({
-      turns: [
-        {
-          error: {
-            message: 'temporary provider failure',
-            details: { kind: 'http', status: 500, retryable: true },
-          },
-        },
-        { events: [{ kind: 'text', text: 'retry succeeded' }] },
-      ],
-    });
-    const session = await Session.create({
-      dir: makeTempDir(),
-      agentConfig: {
-        streamFn,
-        model: { ref: MODEL },
-        tools: [],
-        systemPrompt: 'test',
-      },
-      retry: {
-        jitter: () => 0.5,
-        sleep: (_delayMs, signal) =>
-          new Promise<boolean>((resolve) => {
-            let settled = false;
-            const finish = (aborted: boolean): void => {
-              if (settled) return;
-              settled = true;
-              resolve(aborted);
-            };
-            releaseSleep = finish;
-            signal.addEventListener('abort', () => {
-              finish(true);
-            }, { once: true });
-            markSleepStarted();
-          }),
-      },
-    });
-    const errors: string[] = [];
-    session.subscribe((event) => {
-      if (event.type === 'error') errors.push(event.message);
-    });
-    const view = await setup();
-    view.screen.focusInput();
-    const controller = runTuiController(
-      session,
-      undefined,
-      view.screen,
-      view.renderer,
-      {
-        interaction: view.interaction,
-        installSignalHandlers: false,
-      },
-    );
-
-    const retryScheduled = waitForSessionEvent(
-      session,
-      (event) => event.type === 'retry_scheduled',
-    );
-    void session.prompt('initial prompt');
-    await retryScheduled;
-    await sleepStarted;
-    expect(view.interaction.phase).toBe('retrying');
-
-    const steeringQueued = waitForSessionEvent(
-      session,
-      (event) =>
-        event.type === 'queue_update' &&
-        event.steering.some((message) => message.text === 'steer during retry'),
-    );
-    await view.mockInput.typeText('steer during retry');
-    view.mockInput.pressEnter();
-    await steeringQueued;
-
-    const finalAgentEnd = waitForSessionEvent(
-      session,
-      (event) => event.type === 'agent_end' && event.willRetry !== true,
-    );
-    expect(releaseSleep).toBeDefined();
-    releaseSleep?.(false);
-    await finalAgentEnd;
-    expect(streamFn.calls).toHaveLength(2);
-    expect(errors.some((message) => message.includes('Nothing to continue'))).toBe(false);
-    expect(
-      session.messages.some(
-        (message) =>
-          message.role === 'user' &&
-          message.source === 'steering' &&
-          message.content.some(
-            (part) => part.type === 'text' && part.text === 'steer during retry',
-          ),
-      ),
-    ).toBe(true);
-
-    await view.resolveHighlights();
-    await view.mockInput.typeText('/quit');
-    view.mockInput.pressEnter();
-    expect(await controller).toBe(0);
-    await view.destroyHighlighter();
-  });
-
-  it('retry 退避期间单次 Esc 取消重试并恢复 idle', async () => {
-    let markSleepStarted!: () => void;
-    const sleepStarted = new Promise<void>((resolve) => {
-      markSleepStarted = resolve;
-    });
-    const streamFn = createFauxStreamFn({
-      turns: [
-        {
-          error: {
-            message: 'temporary provider failure',
-            details: { kind: 'http', status: 500, retryable: true },
-          },
-        },
-        { events: [{ kind: 'text', text: 'must not run' }] },
-      ],
-    });
-    const session = await Session.create({
-      dir: makeTempDir(),
-      agentConfig: {
-        streamFn,
-        model: { ref: MODEL },
-        tools: [],
-        systemPrompt: 'test',
-      },
-      retry: {
-        jitter: () => 0.5,
-        sleep: (_delayMs, signal) =>
-          new Promise<boolean>((resolve) => {
-            signal.addEventListener('abort', () => {
-              resolve(true);
-            }, { once: true });
-            markSleepStarted();
-          }),
-      },
-    });
-    const view = await setup();
-    view.screen.focusInput();
-    const controller = runTuiController(
-      session,
-      undefined,
-      view.screen,
-      view.renderer,
-      {
-        interaction: view.interaction,
-        installSignalHandlers: false,
-      },
-    );
-
-    const retryScheduled = waitForSessionEvent(
-      session,
-      (event) => event.type === 'retry_scheduled',
-    );
-    void session.prompt('initial prompt');
-    await retryScheduled;
-    await sleepStarted;
-    const cancelled = waitForSessionEvent(
-      session,
-      (event) => event.type === 'error' && event.message === 'retry cancelled by abort',
-    );
-
-    view.mockInput.pressEscape();
-    await cancelled;
-    await view.flush();
-    expect(streamFn.calls).toHaveLength(1);
-    expect(view.interaction.phase).toBe('idle');
-    expect(view.frame()).not.toContain('aborting…');
-
-    await view.resolveHighlights();
-    await view.mockInput.typeText('/quit');
-    view.mockInput.pressEnter();
-    expect(await controller).toBe(0);
-    await view.destroyHighlighter();
-  });
 });
 
-function approvalPresentationWithoutAlways(requestId: string): ApprovalPresentation {
+function approvalPresentationWithoutAlways(
+  requestId: string,
+  description = 'Run canonical command',
+): ApprovalPresentation {
   return {
     requestId,
     target: {
@@ -4437,7 +4211,7 @@ function approvalPresentationWithoutAlways(requestId: string): ApprovalPresentat
     },
     capability: { id: 'shell', version: '1', registrationDigest: 'digest' },
     normalizedResources: [],
-    risk: { code: 'ask', reason: 'execute', description: 'Run canonical command' },
+    risk: { code: 'ask', reason: 'execute', description },
     allowOnce: { invocationId: 'invocation-approval', toolCallId: 'call-canonical' },
     revisions: {
       catalog: 1,
@@ -4445,6 +4219,37 @@ function approvalPresentationWithoutAlways(requestId: string): ApprovalPresentat
       policyBasis: 'basis',
       ceiling: 'ceiling',
       grants: 'grants',
+    },
+  };
+}
+
+function approvalControlRequest(
+  requestId: string,
+  description: string,
+  toolCallId = 'call-canonical',
+): Extract<CliRuntimeEvent, { type: 'control_request'; kind: 'approval' }> {
+  const presentation = approvalPresentationWithoutAlways(requestId);
+  return {
+    type: 'control_request',
+    requestId,
+    kind: 'approval',
+    owningRunId: presentation.target.runId,
+    owningTurnId: presentation.target.turnId,
+    policyRevision: presentation.revisions.effectivePolicy,
+    payload: {
+      toolCallId,
+      description,
+      presentation: {
+        ...presentation,
+        allowOnce: {
+          ...presentation.allowOnce,
+          toolCallId,
+        },
+        risk: {
+          ...presentation.risk,
+          description,
+        },
+      },
     },
   };
 }

@@ -121,19 +121,17 @@ export const OPTION_SPECS: readonly OptionSpec[] = [
   { id: 'version', flags: ['-V', '--version'], summary: 'Show version and exit' },
   { id: 'prompt', flags: ['-p', '--prompt'], valueHint: '<text>', summary: 'Run one prompt and exit' },
   { id: 'continue', flags: ['--continue'], summary: 'Continue the most recent session' },
-  { id: 'resume', flags: ['--resume'], valueHint: '[thread]', summary: 'Resume a session (picker when omitted)' },
+  { id: 'resume', flags: ['--resume'], valueHint: '[=<thread-id>]', summary: 'Resume a thread (picker when omitted)' },
   { id: 'workspace', flags: ['--workspace'], valueHint: '<id>', summary: 'Disambiguate a workspace identity' },
   { id: 'model', flags: ['--model'], valueHint: '<id>', summary: 'Use an explicit model id' },
   { id: 'base-url', flags: ['--base-url'], valueHint: '<url>', summary: 'Override the provider base URL' },
   { id: 'api-key', flags: ['--api-key'], valueHint: '<key>', summary: 'Use an API key (interactive login is safer)' },
-  { id: 'provider', flags: ['--provider'], valueHint: '<api>', summary: 'Select a legacy provider adapter', choices: ['openai-chat', 'openai-responses', 'anthropic-messages', 'faux'] },
+  { id: 'provider', flags: ['--provider'], valueHint: '<api>', summary: 'Select a provider adapter', choices: ['openai-chat', 'openai-responses', 'anthropic-messages', 'faux'] },
   { id: 'faux-script', flags: ['--faux-script'], valueHint: '<path>', summary: 'Load an offline faux-provider script', hidden: true },
   { id: 'approval-mode', flags: ['--approval-mode'], valueHint: '<mode>', summary: 'Set approval behavior', choices: ['interactive', 'allow', 'deny'] },
   { id: 'cwd', flags: ['--cwd'], valueHint: '<path>', summary: 'Set the workspace directory' },
-  { id: 'session-dir', flags: ['--session-dir'], valueHint: '<path>', summary: 'Override legacy session storage', hidden: true },
   { id: 'no-color', flags: ['--no-color'], summary: 'Disable semantic colors' },
-  { id: 'json', flags: ['--json'], summary: 'Use the legacy NDJSON transport' },
-  { id: 'event-format', flags: ['--event-format'], valueHint: '<format>', summary: 'Select headless event framing', choices: ['legacy', 'envelope'] },
+  { id: 'json', flags: ['--json'], summary: 'Use the canonical NDJSON transport' },
   { id: 'ui', flags: ['--ui'], valueHint: '<mode>', summary: 'Select the terminal surface', choices: ['auto', 'tui'] },
   { id: 'theme', flags: ['--theme'], valueHint: '<theme>', summary: 'Select auto, light, dark, high-contrast, or mono colors', choices: ['auto', 'light', 'dark', 'high-contrast', 'mono'] },
   { id: 'ascii', flags: ['--ascii'], summary: 'Use ASCII product chrome where supported' },
@@ -160,9 +158,7 @@ const RUN_OPTION_IDS = [
   'faux-script',
   'approval-mode',
   'cwd',
-  'session-dir',
   'no-color',
-  'event-format',
   'ui',
   'theme',
   'ascii',
@@ -224,7 +220,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     cli: {
       path: ['sessions'],
       usage: '[--cwd <path>] [--workspace <id>] [--json]',
-      optionIds: ['json', 'cwd', 'workspace', 'session-dir'],
+      optionIds: ['json', 'cwd', 'workspace'],
     },
   },
   {
@@ -384,7 +380,6 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 
 export interface CliFlags {
   json: boolean;
-  eventFormat: 'legacy' | 'envelope';
   prompt?: string;
   continue_: boolean;
   resume?: string | true;
@@ -395,7 +390,6 @@ export interface CliFlags {
   provider?: CliProvider;
   fauxScript?: string;
   cwd?: string;
-  sessionDir?: string;
   noColor: boolean;
   approvalMode?: ApprovalMode;
   ui: CliUiMode;
@@ -450,7 +444,6 @@ export class CliUsageError extends Error {
   }
 }
 
-const SESSION_ID_RE = /^(?:\d{8}-\d{6}-|runtime-[0-9a-f]{40}$)/;
 const COMPLETION_SHELLS: readonly CompletionShell[] = ['bash', 'zsh', 'fish', 'powershell'];
 const UI_MODES: readonly CliUiMode[] = ['auto', 'tui'];
 const THEMES: readonly CliTheme[] = ['auto', 'light', 'dark', 'high-contrast', 'mono'];
@@ -509,12 +502,6 @@ export function parseCliInvocation(argv: readonly string[]): CliInvocation {
         seenOptions.add('resume');
         if (equals !== undefined) {
           flags.resume = requireEqualsValue(name, equals.value);
-          break;
-        }
-        const value = args[index + 1];
-        if (value !== undefined && SESSION_ID_RE.test(value)) {
-          flags.resume = value;
-          index++;
         } else {
           flags.resume = true;
         }
@@ -528,14 +515,7 @@ export function parseCliInvocation(argv: readonly string[]): CliInvocation {
       case '--faux-script': flags.fauxScript = takeOption(); seenOptions.add('faux-script'); break;
       case '--approval-mode': flags.approvalMode = parseChoice(takeOption(), ['interactive', 'allow', 'deny'], 'approval mode'); seenOptions.add('approval-mode'); break;
       case '--cwd': flags.cwd = takeOption(); seenOptions.add('cwd'); break;
-      case '--session-dir': flags.sessionDir = takeOption(); seenOptions.add('session-dir'); break;
       case '--no-color': rejectEquals(name, equals); flags.noColor = true; seenOptions.add('no-color'); break;
-      case '--event-format': {
-        const value = equals === undefined ? take() : equals.value;
-        flags.eventFormat = parseChoice(value, ['legacy', 'envelope'], 'event format');
-        seenOptions.add('event-format');
-        break;
-      }
       case '--ui': flags.ui = parseChoice(takeOption(), UI_MODES, 'UI mode'); seenOptions.add('ui'); break;
       case '--theme': flags.theme = parseChoice(takeOption(), THEMES, 'theme'); seenOptions.add('theme'); break;
       case '--ascii': rejectEquals(name, equals); flags.ascii = true; seenOptions.add('ascii'); break;
@@ -556,7 +536,7 @@ export function parseCliInvocation(argv: readonly string[]): CliInvocation {
   const finalized = finalizeCommand(command, positional, { preset, providerName, providerApi, selectedModel });
   validateCommandOptions(command, seenOptions);
   validateAuthPresetOptions(finalized, seenOptions);
-  if (finalized.kind === 'run') appendLegacyPrompt(flags, positional);
+  if (finalized.kind === 'run') appendPositionalPrompt(flags, positional);
   validateGlobalCombinations(flags);
   return {
     command: finalized,
@@ -586,7 +566,6 @@ function validateAuthPresetOptions(
 function defaultFlags(): CliFlags {
   return {
     json: false,
-    eventFormat: 'legacy',
     continue_: false,
     noColor: false,
     ui: 'auto',
@@ -719,31 +698,21 @@ function validateGlobalCombinations(flags: CliFlags): void {
       'coda --continue  # or: coda --resume',
     );
   }
-  if (flags.eventFormat === 'envelope' && !flags.json) {
-    throw new CliUsageError('mutually_exclusive', '--event-format=envelope requires --json', 'coda --json --event-format=envelope');
-  }
   if (flags.json && flags.ui !== 'auto') {
     throw new CliUsageError('mutually_exclusive', '--json and an explicit --ui mode are mutually exclusive', 'coda --json  # remove --ui');
   }
   if (flags.json && flags.output !== undefined) {
     throw new CliUsageError(
       'mutually_exclusive',
-      '--json is the legacy command stream and cannot be combined with --output',
+      '--json is the canonical command stream and cannot be combined with --output',
       'coda exec --output=stream-json <prompt>  # or: coda --json',
     );
   }
   if (flags.json && (flags.finalOnly || flags.ephemeral || flags.timeoutMs !== undefined)) {
     throw new CliUsageError(
       'mutually_exclusive',
-      '--final-only, --ephemeral, and --timeout apply to the opt-in one-shot output path, not legacy --json',
+      '--final-only, --ephemeral, and --timeout apply to the opt-in one-shot output path, not --json',
       'coda exec --output=json --final-only <prompt>',
-    );
-  }
-  if (flags.eventFormat !== 'legacy' && flags.output !== undefined) {
-    throw new CliUsageError(
-      'mutually_exclusive',
-      '--event-format selects the legacy --json transport and cannot be combined with --output',
-      'coda exec --output=stream-json <prompt>',
     );
   }
   if (flags.ephemeral && (flags.continue_ || flags.resume !== undefined)) {
@@ -809,13 +778,13 @@ function helpTarget(argv: readonly string[], helpIndex: number): readonly string
   return paths.find((path) => path.every((segment, index) => candidate[index] === segment));
 }
 
-function appendLegacyPrompt(flags: CliFlags, positional: readonly string[]): void {
+function appendPositionalPrompt(flags: CliFlags, positional: readonly string[]): void {
   if (positional.length === 0) return;
   const text = positional.join(' ');
   flags.prompt = flags.prompt === undefined ? text : `${flags.prompt} ${text}`;
 }
 
-/** Public parser with legacy naked-prompt projection. */
+/** Public parser including positional prompt shorthand. */
 export function parseCommandLine(argv: readonly string[]): CliInvocation {
   return parseCliInvocation(argv);
 }

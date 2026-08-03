@@ -13,7 +13,7 @@ import {
 } from './command-catalog.js';
 
 describe('canonical command catalog', () => {
-  it('preserves legacy naked prompt, -p append, resume, and headless flags', () => {
+  it('supports positional prompt, -p append, canonical resume, and headless flags', () => {
     const naked = parseCliInvocation(['fix', 'the', 'bug']);
     expect(naked.command).toEqual({ kind: 'run', explicitExec: false });
     expect(naked.flags.prompt).toBe('fix the bug');
@@ -120,7 +120,7 @@ describe('canonical command catalog', () => {
     expectUsageError(['--timeout=0s'], 'invalid_value', 'greater than zero');
     expectUsageError(['--timeout=30'], 'invalid_value', '30s');
     expectUsageError(['--theme=sepia'], 'invalid_value', 'high-contrast');
-    expectUsageError(['--json', '--output=json'], 'mutually_exclusive', 'legacy command stream');
+    expectUsageError(['--json', '--output=json'], 'mutually_exclusive', 'canonical command stream');
     expectUsageError(['--json', '--timeout=1s'], 'mutually_exclusive', 'opt-in one-shot');
     expectUsageError(['--ephemeral', '--resume'], 'mutually_exclusive', 'cannot continue or resume');
   });

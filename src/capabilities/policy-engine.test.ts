@@ -98,7 +98,7 @@ describe('conservative PolicyEngine', () => {
   test('binds explicit host configuration into the policy basis and rejects cross-config snapshots', async () => {
     const interactive = await createPolicyEngine({
       configuration: {
-        kind: 'cli_legacy_policy_v1',
+        kind: 'cli_policy_v2',
         approvalMode: 'interactive',
         projectRoot: '/workspace',
         analyzerVersion: 'v1',
@@ -106,7 +106,7 @@ describe('conservative PolicyEngine', () => {
     }).openThread({ workspaceId: WORKSPACE, threadId: THREAD });
     const denied = await createPolicyEngine({
       configuration: {
-        kind: 'cli_legacy_policy_v1',
+        kind: 'cli_policy_v2',
         approvalMode: 'deny',
         projectRoot: '/workspace',
         analyzerVersion: 'v1',

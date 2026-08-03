@@ -7,16 +7,16 @@ import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES } from '../shared/index.js';
-import type { ToolDefinition } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
 // 参数 schema 与 docs/07 §2.1 逐字段一致
-const ReadParams = z.object({
+export const readParameters = z.object({
   path: z.string().describe('Path to the file to read (absolute, or relative to cwd)'),
   offset: z.number().int().min(1).optional().describe('Line number to start reading from (1-indexed)'),
   limit: z.number().int().min(1).optional().describe('Maximum number of lines to read (default 2000)'),
 });
 
-type ReadArgs = z.infer<typeof ReadParams>;
+export type ReadArgs = z.infer<typeof readParameters>;
 
 export interface ReadDetails {
   path: string;          // resolve 后的绝对路径
@@ -133,20 +133,20 @@ function findSimilarNames(absPath: string, cwd: string): string[] {
     });
 }
 
-export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
-  name: 'read',
-  description:
-    'Reads a file from the local filesystem and returns its content with 1-indexed line numbers ("N: text"). ' +
-    'By default reads the first 2000 lines (up to 50KB); use offset and limit to page through larger files, ' +
-    'following the continuation hint at the end of truncated output. Lines longer than 2000 characters are truncated. ' +
-    'Image files (png/jpeg/gif/webp) are returned as images; other binary files cannot be read.',
-  parameters: ReadParams,
-  kind: 'read',
-  promptSnippet:
-    'The read tool prefixes every output line with its line number as "N: ". The prefix is not part of the file — ' +
-    'when constructing oldText for the edit tool, strip the line-number prefix and use the raw line content.',
+export const READ_DESCRIPTION =
+  'Reads a file from the local filesystem and returns its content with 1-indexed line numbers ("N: text"). ' +
+  'By default reads the first 2000 lines (up to 50KB); use offset and limit to page through larger files, ' +
+  'following the continuation hint at the end of truncated output. Lines longer than 2000 characters are truncated. ' +
+  'Image files (png/jpeg/gif/webp) are returned as images; other binary files cannot be read.';
 
-  async execute({ args }, ctx) {
+export const READ_PROMPT_SNIPPET =
+  'The read tool prefixes every output line with its line number as "N: ". The prefix is not part of the file — ' +
+  'when constructing oldText for the edit tool, strip the line-number prefix and use the raw line content.';
+
+export async function executeRead(
+  { args }: ToolExecutionInput<ReadArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<ReadDetails>> {
     const resolved = path.resolve(ctx.cwd, args.path);
     assertNotAborted(ctx.signal);
 
@@ -258,5 +258,4 @@ export const readTool: ToolDefinition<ReadArgs, ReadDetails> = {
     const details: ReadDetails = { path: resolved, truncated: byteCapped || hasMoreAfterLimit };
     if (!byteCapped) details.totalLines = lineNo;
     return { content: [{ type: 'text', text }], details };
-  },
-};
+}

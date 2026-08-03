@@ -1,9 +1,8 @@
-// Runtime journal reducer plus a Phase-1-compatible writer facade. Phase 2 delegates IO, seq
-// allocation, atomic commit, and observer publication to narrow session-layer collaborators.
+// Canonical Runtime thread-journal reducer and writer. IO, sequence allocation, atomic commits,
+// and observer publication are delegated to narrow session-layer collaborators.
 
 import {
   canonicalJson,
-  deriveLegacySeedTurnProvenance,
   strictJsonSnapshot,
   validateEventEnvelope,
   isTurnId,
@@ -269,15 +268,14 @@ function foldThreadJournalRecords(
   let highWaterSeq = current?.highWaterSeq ?? 0;
 
   for (const record of records) {
-    if (record.type === 'legacy_seed') {
-      const turnProvenance = record.turnProvenance
-        ?? deriveLegacySeedTurnProvenance(record.sourceSessionId, record.transcript);
+    if (record.type === 'thread_seed') {
+      const turnProvenance = record.turnProvenance;
       if (turnProvenance.length !== record.transcript.length
         || turnProvenance.some((entry, index) =>
           entry.messageId !== record.transcript[index]?.id || !isTurnId(entry.turnId))) {
         throw new RuntimeStorageError(
-          'invalid_legacy_seed',
-          'Legacy turn provenance must cover the transcript in order',
+          'invalid_thread_seed',
+          'Thread seed turn provenance must cover the transcript in order',
         );
       }
       for (const provenance of turnProvenance) {
@@ -726,8 +724,16 @@ function reduceDriverCheckpoint(
       }
       break;
     case 'compaction_start':
-      if (frontend.activity !== undefined) {
-        frontend = { ...frontend, activity: { ...frontend.activity, compaction: event } };
+      frontend = {
+        ...frontend,
+        activity: frontend.activity?.runId === event.activityRunId
+          ? { ...frontend.activity, compaction: event }
+          : { runId: event.activityRunId, toolExecutions: [], compaction: event },
+      };
+      break;
+    case 'compaction_end':
+      if (frontend.activity?.runId === event.activityRunId) {
+        frontend = withoutActivity(frontend);
       }
       break;
     case 'agent_end':

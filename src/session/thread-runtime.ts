@@ -3,7 +3,6 @@
 
 import {
   canonicalJson,
-  canonicalJsonSha256,
   deriveInvocationId,
   isDerivedOpId,
   isRunId,
@@ -43,13 +42,10 @@ import type {
   TurnPolicyContext,
 } from '../capabilities/types.js';
 import type {
-  LegacyApprovalContext,
-  LegacyApprovalInvocationResult,
-  LegacyApprovalRequestSnapshot,
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
+  RuntimeThreadDriverAttachment,
   RuntimeClock,
-  ThreadDriverAttachment,
   ThreadDriverCheckpointMutation,
   ThreadDriverEvent,
   ThreadDriverHostServices,
@@ -87,7 +83,7 @@ export interface ThreadRuntimeOptions {
   readonly cwd: string;
   readonly threadId: ThreadId;
   readonly writer: ThreadJournalWriter;
-  readonly attachment: ThreadDriverAttachment;
+  readonly attachment: RuntimeThreadDriverAttachment;
   readonly identityFactory: ThreadIdentityPort;
   readonly clock: RuntimeClock;
   readonly permissionPolicy: PermissionPolicyPort;
@@ -100,11 +96,16 @@ export interface ThreadRuntimeOptions {
   readonly policyGrants?: PolicyGrantRepositoryPort;
 }
 
-interface PendingLegacyApprovalWaiter {
+type CapabilityApprovalResult =
+  | { readonly kind: 'allow' }
+  | { readonly kind: 'deny'; readonly reason: string }
+  | { readonly kind: 'aborted' };
+
+interface PendingApprovalWaiter {
   readonly requestId: string;
   readonly owningRunId: RunId;
   readonly owningTurnId: TurnId;
-  readonly resolve: (result: LegacyApprovalInvocationResult) => void;
+  readonly resolve: (result: CapabilityApprovalResult) => void;
 }
 
 interface RuntimeTurnCaptureState {
@@ -156,15 +157,6 @@ export class ThreadDriverHostController implements ThreadDriverHostServices {
     return this.#get().reserveTurn(input);
   }
 
-  requestLegacyApproval(input: {
-    readonly toolCallId: string;
-    readonly toolName: string;
-    readonly cwd: string;
-    readonly args: unknown;
-  }): Promise<LegacyApprovalInvocationResult> {
-    return this.#get().requestLegacyApproval(input);
-  }
-
   captureRuntimeTurn(input: {
     readonly rootOpId: ExternalOpId;
     readonly runId: RunId;
@@ -187,7 +179,7 @@ export class ThreadRuntime {
   readonly threadId: ThreadId;
   readonly #cwd: string;
   readonly #writer: ThreadJournalWriter;
-  readonly #attachment: ThreadDriverAttachment;
+  readonly #attachment: RuntimeThreadDriverAttachment;
   readonly #identityFactory: ThreadIdentityPort;
   readonly #clock: RuntimeClock;
   readonly #permissionPolicy: PermissionPolicyPort;
@@ -199,7 +191,7 @@ export class ThreadRuntime {
   readonly #threadPolicyEngine: ThreadPolicyEngine | undefined;
   readonly #policyGrants: PolicyGrantRepositoryPort | undefined;
   readonly #fileTracker = new FileTracker();
-  readonly #approvalWaiters = new Map<string, PendingLegacyApprovalWaiter>();
+  readonly #approvalWaiters = new Map<string, PendingApprovalWaiter>();
   readonly #runtimeTurnCaptures = new Map<string, RuntimeTurnCaptureState>();
   #admission: Promise<void> = Promise.resolve();
   #active: ActiveRun | undefined;
@@ -290,8 +282,8 @@ export class ThreadRuntime {
   }
 
   /**
-   * Package-level standalone facade barrier. It observes the same FIFO/effect/background lanes as
-   * close(), but neither closes the driver nor waits for ordinary EventHub observers.
+   * ThreadRuntime quiescence barrier. It observes the same FIFO/effect/background lanes as close(),
+   * but neither closes the driver nor waits for ordinary EventHub observers.
    */
   async waitForIdle(): Promise<void> {
     while (true) {
@@ -335,8 +327,8 @@ export class ThreadRuntime {
   stopForWorkspaceApprovalFatal(error: Error): void {
     if (this.#approvalFatal !== undefined) return;
     this.#approvalFatal = error;
+    const active = this.#active;
     try {
-      const active = this.#active;
       if (active !== undefined) {
         const cancellation = this.#attachment.driver.dispatch({
           op: {
@@ -353,9 +345,10 @@ export class ThreadRuntime {
     } catch {
       // The fatal gate remains authoritative even when best-effort driver cancellation fails.
     }
-    for (const [requestId, waiter] of this.#approvalWaiters) {
-      this.#approvalWaiters.delete(requestId);
-      waiter.resolve({ kind: 'aborted' });
+    if (active !== undefined) {
+      // A workspace fatal may race the control_request append outside admission. Queue the durable
+      // resolution behind that append and only wake approval waiters after control_resolved commits.
+      this.#track(this.#withAdmission(() => this.#abortPendingControls(active.rootOpId)));
     }
   }
 
@@ -474,6 +467,16 @@ export class ThreadRuntime {
           extra.push({ type: 'run_started', runId: pendingSuccessor.runId });
         }
         activatesSuccessor = true;
+      }
+      if (
+        !activatesAtCompactionStart
+        && input.event.type === 'compaction_start'
+        && input.runId !== undefined
+        && this.#writer.state.runs.get(input.runId)?.state === 'reserved'
+      ) {
+        // Automatic compaction reserves its successor atomically with the predecessor agent_end.
+        // Its later compaction_start is therefore the durable transition that starts that run.
+        extra.push({ type: 'run_started', runId: input.runId });
       }
       if (input.event.type === 'turn_start') {
         if (input.runId === undefined || input.turnId === undefined) {
@@ -919,12 +922,12 @@ export class ThreadRuntime {
     invocation: Readonly<PreparedInvocation>,
     decision: Extract<PolicyDecision, { readonly kind: 'ask' }>,
     signal: AbortSignal,
-  ): Promise<LegacyApprovalInvocationResult> {
+  ): Promise<CapabilityApprovalResult> {
     if (signal.aborted) return { kind: 'aborted' };
     this.#assertWorkspaceCapabilitiesAvailable();
     if (this.#policyGrants === undefined) throw new Error('policy_grant_repository_unavailable');
     const context = invocation.context;
-    let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
+    let waiter: Promise<CapabilityApprovalResult> | undefined;
     await this.#withAdmission(async () => {
       if (signal.aborted) {
         waiter = Promise.resolve({ kind: 'aborted' });
@@ -1007,12 +1010,8 @@ export class ThreadRuntime {
         runId: context.runId,
         turnId: context.turnId,
       });
-      if (signal.aborted || this.#workspaceCapabilityFailure() !== undefined) {
-        waiter = Promise.resolve({ kind: 'aborted' });
-        return;
-      }
-      let resolveWaiter!: (result: LegacyApprovalInvocationResult) => void;
-      waiter = new Promise<LegacyApprovalInvocationResult>((resolve) => {
+      let resolveWaiter!: (result: CapabilityApprovalResult) => void;
+      waiter = new Promise<CapabilityApprovalResult>((resolve) => {
         resolveWaiter = resolve;
       });
       this.#approvalWaiters.set(requestId, {
@@ -1026,128 +1025,6 @@ export class ThreadRuntime {
     // Canonical abort resolves this waiter only after control_resolved is durable. Returning on the
     // raw signal here would let the Agent advance past the authoritative cancellation boundary.
     return waiter;
-  }
-
-  async requestLegacyApproval(input: {
-    readonly toolCallId: string;
-    readonly toolName: string;
-    readonly cwd: string;
-    readonly args: unknown;
-  }): Promise<LegacyApprovalInvocationResult> {
-    this.#assertWorkspaceCapabilitiesAvailable();
-    const adapter = this.#attachment.legacyApprovalAdapter;
-    if (adapter === undefined) throw new Error('legacy_approval_adapter_unavailable');
-    const active = this.#active;
-    const activity = this.#writer.state.checkpoint.frontend.activity;
-    if (active === undefined || activity?.runId !== active.currentRunId || activity.turnId === undefined) {
-      throw new Error('legacy_approval_has_no_active_turn');
-    }
-    if (input.cwd !== this.#cwd) throw new Error('legacy_approval_cwd_mismatch');
-    const reservation = this.#turnReservations.get(
-      turnIdentityKey(active.currentRunId, activity.turnId),
-    );
-    if (reservation === undefined || !reservation.activated) {
-      throw new Error('legacy_approval_turn_not_activated');
-    }
-    const args = strictJsonSnapshot(input.args);
-    const policyRevision = canonicalJsonSha256({
-      adapter: this.#attachment.legacyApprovalPolicyRevision ?? 'legacy-session-policy-v2',
-      permissionCeilingRevision: reservation.turnCeiling.revision,
-    });
-    const context = strictJsonSnapshot({
-      workspaceId: this.workspaceId,
-      threadId: this.threadId,
-      runId: active.currentRunId,
-      turnId: activity.turnId,
-      toolCallId: input.toolCallId,
-      toolName: input.toolName,
-      cwd: input.cwd,
-      policyRevision,
-      permissionCeiling: reservation.turnCeiling,
-    }) as unknown as LegacyApprovalContext;
-    const decision = await adapter.preflight({ context, args });
-    this.#assertWorkspaceCapabilitiesAvailable();
-    if (decision.kind === 'allow' || decision.kind === 'deny') return decision;
-    const proposal = strictJsonSnapshot({
-      patterns: [...new Set(decision.proposal.patterns)].sort(compareUtf8),
-      forceConfirm: decision.proposal.forceConfirm,
-    }) as unknown as import('../protocol/index.js').LegacyApprovalProposal;
-    let waiter: Promise<LegacyApprovalInvocationResult> | undefined;
-    await this.#withAdmission(async () => {
-      this.#assertWorkspaceCapabilitiesAvailable();
-      if (this.#closing || this.#closed
-        || this.#active?.currentRunId !== context.runId
-        || this.#writer.state.checkpoint.frontend.activity?.turnId !== context.turnId) {
-        waiter = Promise.resolve({ kind: 'aborted' });
-        return;
-      }
-      const requestId = this.#newApprovalRequestId();
-      let resolveWaiter!: (result: LegacyApprovalInvocationResult) => void;
-      waiter = new Promise<LegacyApprovalInvocationResult>((resolve) => {
-        resolveWaiter = resolve;
-      });
-      const pending: PendingLegacyApprovalWaiter = {
-        requestId,
-        owningRunId: context.runId,
-        owningTurnId: context.turnId,
-        resolve: resolveWaiter,
-      };
-      const request = {
-        type: 'control_request' as const,
-        requestId,
-        kind: 'approval' as const,
-        owningRunId: context.runId,
-        owningTurnId: context.turnId,
-        policyRevision,
-        payload: {
-          toolCallId: input.toolCallId,
-          description: decision.description,
-          legacyProposal: proposal,
-        },
-      };
-      this.#approvalWaiters.set(requestId, pending);
-      try {
-        await this.#writer.commitDriverEvent({
-          event: request,
-          runId: context.runId,
-          turnId: context.turnId,
-        });
-      } catch (error) {
-        this.#approvalWaiters.delete(requestId);
-        resolveWaiter({ kind: 'aborted' });
-        throw error;
-      }
-      if (this.#workspaceCapabilityFailure() !== undefined) {
-        this.#approvalWaiters.delete(requestId);
-        resolveWaiter({ kind: 'aborted' });
-      }
-    });
-    if (waiter === undefined) throw new Error('legacy_approval_waiter_not_created');
-    return waiter;
-  }
-
-  /** Completes only durable multi-pattern allow-always effects before driver activation. */
-  async recoverLegacyApprovalEffects(): Promise<void> {
-    for (const [opId, entry] of this.#writer.state.mailbox) {
-      if (entry.op.type !== 'control_response'
-        || (entry.state !== 'accepted_pending' && entry.state !== 'started')) continue;
-      const request = this.#durableApprovalRequest(entry.op.requestId);
-      if (request === undefined
-        || entry.op.decision !== 'allow_always'
-        || request.proposal.forceConfirm
-        || request.proposal.patterns.length === 0) continue;
-      const claim = this.#writer.state.controlClaims.get(request.requestId);
-      if (claim === undefined || claim.responseOpId !== opId) {
-        throw new RuntimeStorageError('legacy_approval_claim_missing', request.requestId);
-      }
-      if (entry.state === 'accepted_pending') {
-        await this.#writer.commit([{
-          event: { type: 'op_started', opType: 'control_response' },
-          opId,
-        }], [{ type: 'started', opId }]);
-      }
-      await this.#finishLegacyControlResponse(entry.op, claim.acceptedAt);
-    }
   }
 
   reserveTurn(input: {
@@ -1350,12 +1227,7 @@ export class ThreadRuntime {
         return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
       case 'steer':
       case 'follow_up':
-        await this.#acceptOperation(op, {
-          op,
-          ...(prepared?.legacyQueuedMessage !== undefined && {
-            legacyQueuedMessage: prepared.legacyQueuedMessage,
-          }),
-        });
+        await this.#acceptOperation(op, { op });
         return { accepted: true, opId: op.opId, duplicate: false, threadId: this.threadId };
       case 'control_response': {
         if (this.#writer.state.controlClaims.has(op.requestId)) {
@@ -1370,8 +1242,6 @@ export class ThreadRuntime {
         if (!valid) return this.#rejectExternal(op, 'invalid_decision');
         if (pending.kind === 'approval'
           && op.decision === 'allow_always'
-          && this.#policyGrants?.mode === 'workspace'
-          && pending.payload.legacyProposal === undefined
           && pending.payload.grantProposal === undefined) {
           return this.#rejectExternal(op, 'invalid_decision');
         }
@@ -1517,7 +1387,7 @@ export class ThreadRuntime {
     const queueDuringCompaction = op.type === 'prompt'
       && this.#active !== undefined
       // The callback observer may enqueue immediately after durable compaction_end, when the
-      // legacy driver already projects idle but the canonical compaction successor still owns the
+      // The driver already projects idle but the canonical compaction successor still owns the
       // thread. Keep that finalization window in the same FIFO admission rule.
       && (interactionState === 'compacting' || activeRun?.reason === 'compaction');
     if (!queueDuringCompaction && (this.#active !== undefined || interactionState !== 'idle')) {
@@ -1641,7 +1511,7 @@ export class ThreadRuntime {
       { type: 'started', opId: op.opId },
       { type: 'run_started', runId },
     ]);
-    let dispatch: ReturnType<ThreadDriverAttachment['driver']['dispatch']>;
+    let dispatch: ReturnType<RuntimeThreadDriverAttachment['driver']['dispatch']>;
     try {
       this.#assertWorkspaceCapabilitiesAvailable();
       dispatch = this.#attachment.driver.dispatch(command);
@@ -1678,7 +1548,7 @@ export class ThreadRuntime {
       this.#effectBarrier = this.#track(effect);
       return;
     }
-    let completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'];
+    let completion: ReturnType<RuntimeThreadDriverAttachment['driver']['dispatch']>['completion'];
     try {
       completion = this.#attachment.driver.dispatch(command).completion;
     } catch (error) {
@@ -1744,7 +1614,7 @@ export class ThreadRuntime {
       await this.#completeAbort(op, 'no_op', parentOpId);
       return;
     }
-    let completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'];
+    let completion: ReturnType<RuntimeThreadDriverAttachment['driver']['dispatch']>['completion'];
     try {
       completion = this.#attachment.driver.dispatch({ op, resolvedTarget: target }).completion;
       // dispatch() synchronously propagates the run cancellation token. Only after that boundary
@@ -1766,10 +1636,6 @@ export class ThreadRuntime {
   ): Promise<void> {
     const pending = this.#writer.state.checkpoint.frontend.pendingControls.find((request) =>
       request.requestId === op.requestId);
-    if (pending?.kind === 'approval' && pending.payload.legacyProposal !== undefined) {
-      await this.#finishLegacyControlResponse(op, acceptedAt);
-      return;
-    }
     if (pending?.kind === 'approval' && this.#policyGrants !== undefined) {
       await this.#finishRegistryControlResponse(op, acceptedAt, pending);
       return;
@@ -1797,17 +1663,14 @@ export class ThreadRuntime {
       return;
     }
 
-    let effectiveDecision: 'allow_once' | 'allow_always' | 'deny' = op.decision;
+    const effectiveDecision: 'allow_once' | 'allow_always' | 'deny' = op.decision;
     const proposal = request.payload.grantProposal;
     if (op.decision === 'allow_always' && proposal === undefined) {
-      if (repository.mode !== 'legacy_global_approvals_v1') {
-        this.#failWorkspaceApproval(new RuntimeStorageError(
-          'policy_grant_proposal_missing',
-          `Canonical allow_always response ${op.opId} has no frozen grant proposal`,
-        ));
-        return;
-      }
-      effectiveDecision = 'allow_once';
+      this.#failWorkspaceApproval(new RuntimeStorageError(
+        'policy_grant_proposal_missing',
+        `Canonical allow_always response ${op.opId} has no frozen grant proposal`,
+      ));
+      return;
     }
 
     if (op.decision === 'allow_always' && proposal !== undefined) {
@@ -1921,116 +1784,6 @@ export class ThreadRuntime {
     }
   }
 
-  async #finishLegacyControlResponse(
-    op: Extract<RuntimeOp, { type: 'control_response' }>,
-    acceptedAt: number,
-  ): Promise<void> {
-    const request = this.#durableApprovalRequest(op.requestId);
-    const adapter = this.#attachment.legacyApprovalAdapter;
-    if (request === undefined || adapter === undefined || op.decision === 'confirm') {
-      this.#failWorkspaceApproval(new RuntimeStorageError(
-        'legacy_approval_unknown_outcome',
-        `Durable approval bridge cannot apply response ${op.opId}`,
-      ));
-      return;
-    }
-    let result: Awaited<ReturnType<typeof adapter.applyResponse>>;
-    try {
-      result = await adapter.applyResponse({
-        request,
-        responseOpId: op.opId,
-        acceptedAt,
-        decision: op.decision,
-      });
-    } catch (error) {
-      this.#failWorkspaceApproval(new RuntimeStorageError(
-        'legacy_approval_unknown_outcome',
-        error instanceof Error ? error.message : String(error),
-      ));
-      return;
-    }
-    if (!result.ok) {
-      if (result.code === 'legacy_approval_definitely_not_applied') {
-        await this.#writer.commit([
-          {
-            event: { type: 'op_completed', opType: 'control_response', outcome: 'interrupted' },
-            opId: op.opId,
-          },
-          {
-            event: {
-              type: 'runtime_diagnostic',
-              severity: 'warning',
-              code: result.code,
-              message: result.message,
-              scope: 'thread',
-            },
-          },
-        ], [
-          { type: 'completed', opId: op.opId, outcome: 'interrupted' },
-          {
-            type: 'control_response_claim_released',
-            requestId: request.requestId,
-            responseOpId: op.opId,
-            reason: 'effect_definitely_not_applied',
-          },
-        ]);
-        return;
-      }
-      this.#failWorkspaceApproval(new RuntimeStorageError(result.code, result.message));
-      return;
-    }
-    const resolution = {
-      type: 'control_resolved' as const,
-      requestId: request.requestId,
-      kind: 'approval' as const,
-      owningRunId: request.owningRunId,
-      owningTurnId: request.owningTurnId,
-      policyRevision: request.policyRevision,
-      decision: result.effectiveDecision,
-      ...(op.decision === 'allow_always' && result.effectiveDecision !== 'allow_always' && {
-        requestedDecision: 'allow_always' as const,
-      }),
-    };
-    try {
-      await this.#writer.commit([
-        {
-          event: resolution,
-          runId: request.owningRunId,
-          turnId: request.owningTurnId,
-          opId: op.opId,
-        },
-        {
-          event: { type: 'op_completed', opType: 'control_response', outcome: 'applied' },
-          opId: op.opId,
-        },
-      ], [
-        { type: 'control_resolved', resolution },
-        { type: 'completed', opId: op.opId, outcome: 'applied' },
-      ]);
-    } catch (error) {
-      // The adapter reported that its external effect is applied. If the canonical resolution
-      // cannot be committed, no thread may start another capability until recovery reconciles the
-      // same response OpId; treating this as an ordinary background failure is unsafe.
-      this.#failWorkspaceApproval(new RuntimeStorageError(
-        'legacy_approval_unknown_outcome',
-        error instanceof Error ? error.message : String(error),
-      ));
-      return;
-    }
-    const waiter = this.#approvalWaiters.get(request.requestId);
-    if (waiter !== undefined) {
-      this.#approvalWaiters.delete(request.requestId);
-      waiter.resolve(result.effectiveDecision === 'deny'
-        ? {
-            kind: 'deny',
-            reason:
-              'User denied permission: the user rejected this tool call in the approval prompt. ' +
-              'Do not retry the same call; ask the user or take a different approach.',
-          }
-        : { kind: 'allow' });
-    }
-  }
-
   async #abortPendingControls(opId: OpId): Promise<void> {
     const pending = this.#writer.state.checkpoint.frontend.pendingControls;
     if (pending.length === 0) return;
@@ -2062,23 +1815,6 @@ export class ThreadRuntime {
       this.#approvalWaiters.delete(request.requestId);
       waiter.resolve({ kind: 'aborted' });
     }
-  }
-
-  #durableApprovalRequest(requestId: string): LegacyApprovalRequestSnapshot | undefined {
-    const request = this.#writer.state.checkpoint.frontend.pendingControls.find((candidate) =>
-      candidate.requestId === requestId);
-    if (request?.kind !== 'approval' || request.payload.legacyProposal === undefined) return undefined;
-    return strictJsonSnapshot({
-      workspaceId: this.workspaceId,
-      threadId: this.threadId,
-      requestId: request.requestId,
-      owningRunId: request.owningRunId,
-      owningTurnId: request.owningTurnId,
-      toolCallId: request.payload.toolCallId,
-      description: request.payload.description,
-      policyRevision: request.policyRevision,
-      proposal: request.payload.legacyProposal,
-    }) as unknown as LegacyApprovalRequestSnapshot;
   }
 
   #newApprovalRequestId(): string {
@@ -2166,7 +1902,7 @@ export class ThreadRuntime {
     op: Extract<RuntimeOp, { type: 'prompt' | 'continue' | 'compact' }>,
     rootRunId: RunId,
     rootCeiling: PermissionCeilingSnapshot,
-    completion: ReturnType<ThreadDriverAttachment['driver']['dispatch']>['completion'],
+    completion: ReturnType<RuntimeThreadDriverAttachment['driver']['dispatch']>['completion'],
   ): Promise<void> {
     let status: 'completed' | 'aborted' | 'error' = 'error';
     let reportedTerminalRunId: RunId | undefined;
@@ -2407,7 +2143,7 @@ function rejectedExternal(op: ExternalThreadRuntimeOp, reason: string): OpReceip
   return { accepted: false, opId: op.opId, duplicate: false, reason, threadId: op.threadId };
 }
 
-function hasContinuableState(frontend: ThreadDriverAttachment['initialCheckpoint']['frontend']): boolean {
+function hasContinuableState(frontend: RuntimeThreadDriverAttachment['initialCheckpoint']['frontend']): boolean {
   if (frontend.queues.steering.length > 0 || frontend.queues.followUp.length > 0) return true;
   const tail = frontend.transcript.at(-1);
   if (tail === undefined) return false;
@@ -2537,15 +2273,6 @@ function snapshotPolicyDecision(input: unknown): PolicyDecision | undefined {
 
 function isPolicyGrantScope(input: unknown): input is Readonly<PolicyGrantScope> {
   if (!isDecisionRecord(input) || typeof input.kind !== 'string') return false;
-  if (input.kind === 'legacy_global_approvals_v1') {
-    const patterns = input.patterns;
-    return hasDecisionKeys(input, ['kind', 'patterns'])
-      && Array.isArray(patterns)
-      && patterns.length > 0
-      && patterns.every(isDecisionString)
-      && patterns.every((pattern, index) => index === 0
-        || compareUtf8(patterns[index - 1] as string, pattern) < 0);
-  }
   if (input.kind !== 'canonical_resources_v1'
     || !hasDecisionKeys(input, ['kind', 'resourcePatterns', 'attributes'])
     || !Array.isArray(input.resourcePatterns)

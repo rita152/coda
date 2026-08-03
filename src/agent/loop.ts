@@ -3,7 +3,6 @@
 // 独立于 Agent 类的纯函数:faux provider 下全离线可测。
 // 全部复杂度围绕一个目标:转录在任何时刻(abort/length/工具失败/provider 出错)完整可重放。
 
-import { z } from 'zod';
 import type {
   AgentEvent,
   AssistantMessage,
@@ -12,7 +11,6 @@ import type {
   StreamFn,
   ToolCallPart,
   ToolResultMessage,
-  ToolSchema,
   UserMessage,
   AgentMessage,
 } from '../protocol/index.js';
@@ -20,8 +18,6 @@ import type {
   CapabilityResult,
   PromptAssemblyResult,
 } from '../capabilities/types.js';
-import type { FileTracker } from '../shared/index.js';
-import type { ToolDefinition } from '../tools/types.js';
 import { newMessageId } from './ids.js';
 import type { DrainMode, PendingMessageQueue } from './queue.js';
 import { errorToolResult, failTruncatedToolCalls, formatToolError, toToolResultMessage } from './tool-result.js';
@@ -61,23 +57,14 @@ export interface RuntimeTurnProvider {
 
 /** runLoop 的完整配置:AgentConfig 的钩子 + Agent 预解析的执行环境。 */
 export interface LoopConfig {
-  streamFn: StreamFn;
   model: ModelConfig;
-  tools: ToolDefinition[];
-  toolSchemas: ToolSchema[];
-  systemPrompt: string | (() => string);
-  cwd: string;
-  fileTracker: FileTracker;
   spillDir: string;
   transformContext?: (ctx: Context) => Promise<Context>;
-  beforeToolCall?: (call: ToolCallPart) => Promise<{ block: true; reason: string } | { block?: false }>;
   afterToolCall?: (call: ToolCallPart, result: ToolResultMessage) => Promise<ToolResultMessage>;
   shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
-  toolExecution?: 'sequential' | 'parallel';
   steeringMode: () => DrainMode;   // live 读取:运行中切换即时生效
   followUpMode: () => DrainMode;
-  /** @internal Canonical Runtime path; legacy Agent leaves this absent. */
-  runtimeTurnProvider?: RuntimeTurnProvider;
+  runtimeTurnProvider: RuntimeTurnProvider;
   /** @internal One Agent run is serial, so this value is scoped to the current turn only. */
   activeRuntimeTurn?: RuntimeTurnPort;
 }
@@ -95,7 +82,7 @@ export interface LoopSeed {
 }
 
 type RuntimeTurnCapture =
-  | { readonly ok: true; readonly runtimeTurn: RuntimeTurnPort | undefined }
+  | { readonly ok: true; readonly runtimeTurn: RuntimeTurnPort }
   | { readonly ok: false; readonly error: unknown };
 
 export async function runLoop(
@@ -204,7 +191,7 @@ export async function runLoop(
       if (cfg.shouldStopAfterTurn) {
         let stop = false;
         try {
-          stop = await cfg.shouldStopAfterTurn(currentContext(cfg, transcript));
+          stop = await cfg.shouldStopAfterTurn(outboundContext(transcript));
         } catch (err) {
           await emit({ type: 'error', message: `shouldStopAfterTurn hook threw: ${formatToolError(err)}`, fatal: true });
           await emit({ type: 'agent_end', reason: 'error', messages: newMessages });
@@ -269,18 +256,16 @@ async function streamAssistantResponseWithCapture(
     }
     const runtimeTurn = capture.runtimeTurn;
     cfg.activeRuntimeTurn = runtimeTurn;
-    if (runtimeTurn !== undefined && taskSignal.aborted) {
+    if (taskSignal.aborted) {
       return emitAbortedAssistant(cfg, emit);
     }
-    let ctx: Context = currentContext(cfg, transcript);
+    let ctx: Context = outboundContext(transcript);
     if (cfg.transformContext) ctx = await cfg.transformContext(ctx);
+    stage = 'PromptAssembler';
+    const assembly = runtimeTurn.assemble(ctx.messages);
+    if (!assembly.ok) throw new Error(`${assembly.code}: ${assembly.message}`);
+    ctx = assembly.context as Context;
     stage = 'convertContext';
-    if (runtimeTurn !== undefined) {
-      stage = 'PromptAssembler';
-      const assembly = runtimeTurn.assemble(ctx.messages);
-      if (!assembly.ok) throw new Error(`${assembly.code}: ${assembly.message}`);
-      ctx = assembly.context as Context;
-    }
     // 视觉能力取 compat.supportsImageParts(CompatFlags 是开放袋,此处只认布尔 false)
     ctx = convertContext(ctx, cfg.model.ref, {
       supportsImages: cfg.model.compat?.['supportsImageParts'] !== false,
@@ -292,7 +277,7 @@ async function streamAssistantResponseWithCapture(
 
     // StreamFn 铁律:绝不 throw、绝不 reject。外层 try 只是协议 bug 的最后防线。
     stage = 'StreamFn (provider contract: never throw/reject)';
-    const stream = (runtimeTurn?.streamFn ?? cfg.streamFn)(cfg.model, ctx, {
+    const stream = runtimeTurn.streamFn(cfg.model, ctx, {
       signal,
       ...cfg.model.defaults,
     });
@@ -339,7 +324,6 @@ async function captureRuntimeTurn(
   transcript: AgentMessage[],
   signal: AbortSignal,
 ): Promise<RuntimeTurnCapture> {
-  if (cfg.runtimeTurnProvider === undefined) return { ok: true, runtimeTurn: undefined };
   try {
     return {
       ok: true,
@@ -390,17 +374,11 @@ function rejectDuplicateToolCallIds(message: AssistantMessage): AssistantMessage
   };
 }
 
-/** Context 组装:systemPrompt 每 turn 重新求值 + 工具 promptSnippet 拼装(docs/07 §1.5)。 */
-function currentContext(cfg: LoopConfig, transcript: AgentMessage[]): Context {
-  const base = typeof cfg.systemPrompt === 'function' ? cfg.systemPrompt() : cfg.systemPrompt;
-  const snippets = cfg.tools
-    .filter((t) => t.promptSnippet !== undefined && t.promptSnippet.length > 0)
-    .map((t) => t.promptSnippet as string);
-  const systemPrompt =
-    snippets.length > 0 ? `${base}\n\n# Tool usage notes\n\n${snippets.join('\n\n')}` : base;
+/** Build the mutable outbound message view consumed by compaction before registry assembly. */
+function outboundContext(transcript: AgentMessage[]): Context {
   // messages 给浅拷贝数组:transformContext 钩子(M7 compaction 的法定挂载点)对数组的
   // splice/push 不得触及权威转录本体——「转录任何时刻完整可重放」优先于一次数组分配。
-  return { systemPrompt, messages: [...transcript], tools: cfg.toolSchemas };
+  return { messages: [...transcript] };
 }
 
 // ---------- 工具执行三阶段 ----------
@@ -418,7 +396,7 @@ type Prepared =
     }
   | { kind: 'reject'; call: ToolCallPart; result: ToolResultMessage }; // 直接就是回喂结果
 
-/** 阶段 1:查找 → prepareArguments 修补 → zod 校验 → beforeToolCall 拦截。失败=回喂,不 throw。 */
+/** Phase 1 delegates lookup, argument repair, validation and policy to the captured runtime turn. */
 async function prepareToolCall(
   cfg: LoopConfig,
   call: ToolCallPart,
@@ -426,93 +404,35 @@ async function prepareToolCall(
   taskSignal: AbortSignal,
 ): Promise<Prepared> {
   const runtimeTurn = cfg.activeRuntimeTurn;
-  if (runtimeTurn !== undefined) {
-    let prepared: RuntimeToolPreparation;
-    try {
-      prepared = await runtimeTurn.prepareToolCall(call, sourceOrdinal, taskSignal);
-    } catch (error) {
-      return {
-        kind: 'reject',
-        call,
-        result: errorToolResult(
-          call,
-          `Capability preflight failed: ${formatToolError(error)}`,
-        ),
-      };
-    }
-    if (!prepared.ok) {
-      return { kind: 'reject', call, result: errorToolResult(call, prepared.message) };
-    }
+  if (runtimeTurn === undefined) {
     return {
-      kind: 'ok',
+      kind: 'reject',
       call,
-      args: prepared.args,
-      executionMode: prepared.executionMode,
-      execute: prepared.execute,
+      result: errorToolResult(call, 'Capability turn snapshot is unavailable'),
     };
   }
-  const tool = cfg.tools.find((t) => t.name === call.name);
-  if (!tool) {
+  let prepared: RuntimeToolPreparation;
+  try {
+    prepared = await runtimeTurn.prepareToolCall(call, sourceOrdinal, taskSignal);
+  } catch (error) {
     return {
       kind: 'reject',
       call,
       result: errorToolResult(
         call,
-        `Unknown tool "${call.name}". Available tools: ${cfg.tools.map((t) => t.name).join(', ')}.`,
+        `Capability preflight failed: ${formatToolError(error)}`,
       ),
     };
   }
-
-  let raw: unknown = call.arguments;
-  if (tool.prepareArguments) {
-    try {
-      raw = tool.prepareArguments(raw);
-    } catch {
-      raw = call.arguments;  // 修补器只做无损搬运,自身出错则退回原参数走正常校验
-    }
-  }
-
-  const parsed = tool.parameters.safeParse(raw);
-  if (!parsed.success) {
-    return {
-      kind: 'reject',
-      call,
-      result: errorToolResult(
-        call,
-        `The ${tool.name} tool was called with invalid arguments: ${z.prettifyError(parsed.error)}. ` +
-          'Please rewrite the input so it satisfies the expected schema.',
-      ),
-    };
-  }
-
-  if (cfg.beforeToolCall) {
-    // 钩子 throw 按 block 处理回喂(M6 approval 挂在此钩子:审批 Promise 被 reject
-    // 是现实路径,不能让它穿透 runLoop 打断整个 run)
-    try {
-      const d = await cfg.beforeToolCall(call);
-      if (d.block) return { kind: 'reject', call, result: errorToolResult(call, d.reason) };
-    } catch (err) {
-      return {
-        kind: 'reject',
-        call,
-        result: errorToolResult(call, `Tool call was blocked: beforeToolCall hook failed (${formatToolError(err)}).`),
-      };
-    }
+  if (!prepared.ok) {
+    return { kind: 'reject', call, result: errorToolResult(call, prepared.message) };
   }
   return {
     kind: 'ok',
     call,
-    args: parsed.data,
-    executionMode: tool.executionMode ?? 'parallel',
-    execute: async ({ signal, onUpdate }) => tool.execute(
-      { id: call.id, args: parsed.data },
-      {
-        cwd: cfg.cwd,
-        signal,
-        onUpdate: (update) => onUpdate(update),
-        fileTracker: cfg.fileTracker,
-      },
-    ),
+    args: prepared.args,
+    executionMode: prepared.executionMode,
+    execute: prepared.execute,
   };
 }
 
@@ -600,16 +520,16 @@ async function executeToolCalls(
 ): Promise<{ toolResults: ToolResultMessage[]; terminate: boolean }> {
   const prepared: Prepared[] = [];
   for (const [sourceOrdinal, call] of toolCalls.entries()) {
-    // ★ preflight 也要查 abort:beforeToolCall 是审批挂载点,abort 后再 prepare 下一个 call
-    //   会向已清空的 broker 发起新审批请求 → 永不 resolve → waitForIdle 挂死(R7 死锁)。
+    // Preflight can wait on Runtime policy/control. Once aborted, preparing another call could
+    // create control work that no caller remains responsible for resolving.
     //   已 abort 则停止 prepare 剩余 call,它们成为孤儿由 transform 层补合成中断结果。
     if (taskSignal.aborted) break;
     prepared.push(await prepareToolCall(cfg, call, sourceOrdinal, taskSignal));
   }
 
-  const sequential =
-    cfg.toolExecution === 'sequential' ||
-    prepared.some((p) => p.kind === 'ok' && p.executionMode === 'sequential');
+  const sequential = prepared.some(
+    (p) => p.kind === 'ok' && p.executionMode === 'sequential',
+  );
 
   const results = new Map<string, ToolResultMessage>();
   let allTerminate = true;

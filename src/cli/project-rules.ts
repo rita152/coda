@@ -26,21 +26,15 @@ import {
   sha256Hex,
   strictJsonSnapshot,
 } from '../protocol/index.js';
-import type { ToolCallPart, Context } from '../protocol/index.js';
 import {
   canonicalizePath,
   isPathInside,
 } from '../shared/index.js';
-import type { ToolDefinition } from '../tools/types.js';
-import {
-  LEGACY_BASH_ANALYSIS_VERSION,
-  analyzeBashPaths,
-} from './bash-analyze.js';
-import type { LegacyBashFilesystemTarget } from './bash-analyze.js';
-import { LEGACY_FILESYSTEM_ANALYSIS_VERSION } from '../integrations/legacy-coding-tools/resource-resolvers.js';
+import { BASH_ANALYSIS_VERSION } from './bash-analyze.js';
+import type { BashFilesystemTarget } from './bash-analyze.js';
+import { FILESYSTEM_ANALYSIS_VERSION } from '../integrations/coding-capabilities/resource-resolvers.js';
 
 const MAX_PROJECT_RULE_FILE_BYTES = 32 * 1024;
-const MAX_PROJECT_RULE_TOKENS = 16 * 1024;
 const MAX_WARNING_HISTORY = 128;
 const RULES_FILE_NAME = 'AGENTS.md';
 const UTF8_DECODER = new TextDecoder();
@@ -53,7 +47,6 @@ const RULES_HEADER =
 export interface ProjectRulesOptions {
   cwd: string;
   maxFileBytes?: number;
-  maxTotalTokens?: number;
   onWarning?: (message: string) => void;
 }
 
@@ -71,11 +64,6 @@ interface LoadedRule extends RuleCandidate {
   tokenUnits: number;
 }
 
-interface LegacyRuleSnapshot {
-  rules: LoadedRule[];
-  section: string;
-}
-
 interface TargetResolution {
   targets: Set<string>;
   incompleteReasons: string[];
@@ -90,7 +78,6 @@ interface CapabilityTargetResolution extends TargetResolution {
   leafScopes: Set<string>;
 }
 
-type GateDecision = { block: true; reason: string } | { block?: false };
 type WarningListener = (message: string) => void;
 type DiagnosticCollector = (diagnostic: Readonly<RuleSnapshotDiagnostic>) => void;
 
@@ -155,18 +142,6 @@ function renderRuleBlock(rule: RuleCandidate & { content: string }): string {
   );
 }
 
-function renderRules(rules: readonly LoadedRule[]): string {
-  if (rules.length === 0) return '';
-  return RULES_HEADER + rules.map((rule) => rule.block).join(RULE_SEPARATOR);
-}
-
-function sameRules(left: readonly LoadedRule[], right: readonly LoadedRule[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((rule, index) => rule.block === right[index]?.block)
-  );
-}
-
 function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return (
     left.dev === right.dev &&
@@ -177,25 +152,17 @@ function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   );
 }
 
-/**
- * 只持有“上一请求真正注入的规则”和“本轮工具触达、下一请求仍需携带的目录”。
- * targets 不跨未使用 turn 永久累积，避免历史 sibling 抢占预算和 O(N²) 重扫。
- */
 export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
   readonly cwd: string;
   readonly repositoryRoot: string;
 
   readonly #maxFileBytes: number;
-  readonly #maxTotalTokens: number;
   readonly #warningListeners = new Set<WarningListener>();
   readonly #warningHistory: string[] = [];
   readonly #warningKeys = new Set<string>();
-  readonly #nextTargets = new Set<string>();
-  #lastInjectedRules: LoadedRule[] = [];
 
   constructor(options: ProjectRulesOptions) {
     this.#maxFileBytes = options.maxFileBytes ?? MAX_PROJECT_RULE_FILE_BYTES;
-    this.#maxTotalTokens = options.maxTotalTokens ?? MAX_PROJECT_RULE_TOKENS;
     if (options.onWarning !== undefined) this.#warningListeners.add(options.onWarning);
 
     try {
@@ -219,24 +186,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
     this.#warningListeners.add(listener);
     return () => {
       this.#warningListeners.delete(listener);
-    };
-  }
-
-  /** AgentConfig.transformContext 挂载点：只改出站 Context 的 systemPrompt 副本。 */
-  async inject(ctx: Context): Promise<Context> {
-    // 新模型 turn 重新开放 warning；同一 turn 的 preflight + execute 复检只报告一次。
-    this.#warningKeys.clear();
-    const targets = new Set([this.cwd, ...this.#nextTargets]);
-    const snapshot = await this.#scan(targets);
-    this.#lastInjectedRules = snapshot.rules;
-    this.#nextTargets.clear();
-    if (snapshot.section === '') return ctx;
-    return {
-      ...ctx,
-      systemPrompt:
-        ctx.systemPrompt === undefined
-          ? snapshot.section
-          : `${ctx.systemPrompt}\n\n${snapshot.section}`,
     };
   }
 
@@ -386,42 +335,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
     }
   }
 
-  /**
-   * 当前调用的规则链必须与最近出站 prompt 中对应 source 的快照一致；不一致就 block
-   * 一轮。bash 同时覆盖 workdir、literal cd/-C、重定向与显式路径参数。
-   */
-  async beforeToolCall(call: ToolCallPart): Promise<GateDecision> {
-    const resolution = this.#targetDirectories(call);
-    if (resolution === undefined) return {};
-    for (const target of resolution.targets) this.#nextTargets.add(target);
-
-    const snapshot = await this.#scan(resolution.targets);
-    const candidateSources = new Set(
-      this.#candidates(resolution.targets).map((candidate) => candidate.source),
-    );
-    const injected = this.#lastInjectedRules.filter((rule) =>
-      candidateSources.has(rule.source),
-    );
-    if (!sameRules(snapshot.rules, injected)) {
-      return {
-        block: true,
-        reason:
-          'Project rules for this path were loaded or changed after the last model context was built. ' +
-          'They will be present in the next turn; review the scoped <project_rule> blocks, then retry this tool call.',
-      };
-    }
-    if (resolution.incompleteReasons.length > 0) {
-      return {
-        block: true,
-        reason:
-          'This bash command contains filesystem paths that project-rule analysis cannot determine safely: ' +
-          `${resolution.incompleteReasons.join('; ')}. ` +
-          'Use an explicit workdir and literal paths, or split the operation into edit/write calls.',
-      };
-    }
-    return {};
-  }
-
   #warn(message: string): void {
     if (this.#warningKeys.has(message)) return;
     this.#warningKeys.add(message);
@@ -448,38 +361,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
       ...(diagnosticPath !== undefined && { path: diagnosticPath }),
       message,
     }));
-  }
-
-  #targetDirectories(call: ToolCallPart): TargetResolution | undefined {
-    if (call.name !== 'edit' && call.name !== 'write' && call.name !== 'bash') {
-      return undefined;
-    }
-    const args =
-      typeof call.arguments === 'object' && call.arguments !== null
-        ? (call.arguments as Record<string, unknown>)
-        : {};
-    const targets = new Set<string>();
-    const incompleteReasons: string[] = [];
-
-    if (call.name === 'bash') {
-      const analysis = analyzeBashPaths(
-        typeof args.command === 'string' ? args.command : '',
-        this.cwd,
-        typeof args.workdir === 'string' ? args.workdir : undefined,
-      );
-      for (const target of analysis.targets) {
-        const isDirectory =
-          target.kind === 'directory' ||
-          (target.kind === 'unknown' && this.#isExistingDirectory(target.path));
-        this.#addPathScopes(targets, target.path, isDirectory);
-      }
-      if (!analysis.complete) incompleteReasons.push(...analysis.reasons);
-      return { targets, incompleteReasons };
-    }
-
-    if (typeof args.path !== 'string') return { targets, incompleteReasons };
-    this.#addPathScopes(targets, path.resolve(this.cwd, args.path), false);
-    return { targets, incompleteReasons };
   }
 
   #assertContextCwd(context: Readonly<TurnPolicyContext>): void {
@@ -585,18 +466,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
       .filter((scope) => this.#candidates([scope]).some((candidate) =>
         sources.has(candidate.source)));
     return normalizedPaths(matching.length > 0 ? matching : [...resolution.leafScopes]);
-  }
-
-  #isExistingDirectory(targetPath: string): boolean {
-    try {
-      const physical = canonicalizePath(targetPath);
-      return (
-        isPathInside(this.repositoryRoot, physical) &&
-        statSync(physical).isDirectory()
-      );
-    } catch {
-      return false;
-    }
   }
 
   /** Use only resolver-frozen path meaning; this method performs no metadata or realpath reads. */
@@ -955,35 +824,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
     };
   }
 
-  async #scan(targets: Iterable<string>): Promise<LegacyRuleSnapshot> {
-    const loaded: LoadedRule[] = [];
-    for (const candidate of this.#candidates(targets)) {
-      const rule = await this.#load(candidate);
-      if (rule !== undefined) loaded.push(rule);
-    }
-
-    let usedUnits = 0;
-    const selected = new Set<string>();
-    const priority = [...loaded].sort(
-      (a, b) => b.depth - a.depth || compareUtf8(a.source, b.source),
-    );
-    for (const rule of priority) {
-      const nextUnits =
-        (selected.size === 0 ? tokenUnits(RULES_HEADER) : usedUnits + tokenUnits(RULE_SEPARATOR)) +
-        rule.tokenUnits;
-      if (Math.ceil(nextUnits / 4) > this.#maxTotalTokens) {
-        this.#warn(
-          `ignored project rules ${rule.source}: rendered section would exceed ` +
-            `${this.#maxTotalTokens}-token estimate`,
-        );
-        continue;
-      }
-      usedUnits = nextUnits;
-      selected.add(rule.source);
-    }
-    const rules = loaded.filter((rule) => selected.has(rule.source));
-    return { rules, section: renderRules(rules) };
-  }
 }
 
 const FRESH_RULES = Object.freeze({ fresh: true as const });
@@ -1056,12 +896,11 @@ function snapshotCapabilityAnalysis(
 
 function frozenBashFilesystemTargetKinds(
   input: Readonly<Record<string, unknown>>,
-): ReadonlyMap<string, LegacyBashFilesystemTarget['kind']> {
+): ReadonlyMap<string, BashFilesystemTarget['kind']> {
   const attributes = snapshotJson(input) as Readonly<Record<string, unknown>>;
   const required = [
     'kind',
     'command',
-    'patterns',
     'forceConfirm',
     'reasons',
     'accessesExternalProject',
@@ -1070,11 +909,9 @@ function frozenBashFilesystemTargetKinds(
   const allowed = new Set([...required, 'modelDescription']);
   if (required.some((key) => !Object.hasOwn(attributes, key))
     || Object.keys(attributes).some((key) => !allowed.has(key))
-    || attributes.kind !== LEGACY_BASH_ANALYSIS_VERSION
+    || attributes.kind !== BASH_ANALYSIS_VERSION
     || typeof attributes.command !== 'string'
     || attributes.command.length === 0
-    || !Array.isArray(attributes.patterns)
-    || !attributes.patterns.every((pattern) => typeof pattern === 'string' && pattern.length > 0)
     || typeof attributes.forceConfirm !== 'boolean'
     || !Array.isArray(attributes.reasons)
     || !attributes.reasons.every((reason) => typeof reason === 'string' && reason.length > 0)
@@ -1082,14 +919,14 @@ function frozenBashFilesystemTargetKinds(
     || (attributes.modelDescription !== undefined && typeof attributes.modelDescription !== 'string')
     || !Array.isArray(attributes.filesystemTargets)
     || attributes.filesystemTargets.length === 0) {
-    throw new TypeError('Invalid frozen legacy bash analysis attributes');
+    throw new TypeError('Invalid frozen bash analysis attributes');
   }
 
-  const targets = new Map<string, LegacyBashFilesystemTarget['kind']>();
+  const targets = new Map<string, BashFilesystemTarget['kind']>();
   let previous: string | undefined;
   for (const value of attributes.filesystemTargets) {
     if (!isRecord(value) || !hasExactKeys(value, ['canonicalTarget', 'kind'])) {
-      throw new TypeError('Invalid frozen legacy bash filesystem target');
+      throw new TypeError('Invalid frozen bash filesystem target');
     }
     const canonicalTarget = value.canonicalTarget;
     const kind = value.kind;
@@ -1099,7 +936,7 @@ function frozenBashFilesystemTargetKinds(
       || path.normalize(canonicalTarget) !== canonicalTarget
       || (kind !== 'file' && kind !== 'directory' && kind !== 'unknown')
       || (previous !== undefined && compareUtf8(previous, canonicalTarget) >= 0)) {
-      throw new TypeError('Invalid frozen legacy bash filesystem target');
+      throw new TypeError('Invalid frozen bash filesystem target');
     }
     targets.set(canonicalTarget, kind);
     previous = canonicalTarget;
@@ -1109,19 +946,19 @@ function frozenBashFilesystemTargetKinds(
 
 function frozenFilesystemTargetKinds(
   input: Readonly<Record<string, unknown>>,
-): ReadonlyMap<string, LegacyBashFilesystemTarget['kind']> {
+): ReadonlyMap<string, BashFilesystemTarget['kind']> {
   const attributes = snapshotJson(input) as Readonly<Record<string, unknown>>;
   if (!hasExactKeys(attributes, ['kind', 'filesystemTargets'])
-    || attributes.kind !== LEGACY_FILESYSTEM_ANALYSIS_VERSION
+    || attributes.kind !== FILESYSTEM_ANALYSIS_VERSION
     || !Array.isArray(attributes.filesystemTargets)) {
-    throw new TypeError('Invalid frozen legacy filesystem analysis attributes');
+    throw new TypeError('Invalid frozen filesystem analysis attributes');
   }
 
-  const targets = new Map<string, LegacyBashFilesystemTarget['kind']>();
+  const targets = new Map<string, BashFilesystemTarget['kind']>();
   let previous: string | undefined;
   for (const value of attributes.filesystemTargets) {
     if (!isRecord(value) || !hasExactKeys(value, ['canonicalTarget', 'kind'])) {
-      throw new TypeError('Invalid frozen legacy filesystem target');
+      throw new TypeError('Invalid frozen filesystem target');
     }
     const canonicalTarget = value.canonicalTarget;
     const kind = value.kind;
@@ -1131,7 +968,7 @@ function frozenFilesystemTargetKinds(
       || path.normalize(canonicalTarget) !== canonicalTarget
       || (kind !== 'file' && kind !== 'directory' && kind !== 'unknown')
       || (previous !== undefined && compareUtf8(previous, canonicalTarget) >= 0)) {
-      throw new TypeError('Invalid frozen legacy filesystem target');
+      throw new TypeError('Invalid frozen filesystem target');
     }
     targets.set(canonicalTarget, kind);
     previous = canonicalTarget;
@@ -1305,35 +1142,4 @@ function snapshotJson<T>(value: T): Readonly<T> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * batch preflight 早于整批 execute；前一命令可能改写 AGENTS.md。三个副作用工具在真正
- * execute 边界复检一次，仍只通过普通工具失败回喂，不新增 agent/protocol 契约。
- */
-export function guardProjectRuleExecutions(
-  tools: readonly ToolDefinition[],
-  rules: ProjectRules,
-): ToolDefinition[] {
-  return tools.map((tool) => {
-    if (!GUARDED_TOOL_NAMES.has(tool.name)) return tool;
-    return {
-      ...tool,
-      async execute(call, ctx) {
-        const rawArgs: unknown = call.args;
-        const args =
-          typeof rawArgs === 'object' && rawArgs !== null && !Array.isArray(rawArgs)
-            ? (rawArgs as Record<string, unknown>)
-            : {};
-        const decision = await rules.beforeToolCall({
-          type: 'tool_call',
-          id: call.id,
-          name: tool.name,
-          arguments: args,
-        });
-        if (decision.block) throw new Error(decision.reason);
-        return tool.execute(call, ctx);
-      },
-    };
-  });
 }

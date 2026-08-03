@@ -1,24 +1,21 @@
 #!/usr/bin/env bun
 // CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → Runtime 组合 → 前端适配 → 分派
 // headless / 一次性 / 全屏 TUI。CLI 是最薄的一层:
-// 把输入翻译成 Agent 方法调用,
-// 把事件翻译成像素;不持有会话状态副本。
+// 把输入翻译成 identity-bearing RuntimeOps，
+// 把 canonical RuntimeEvents 翻译成像素；不持有 Runtime 权威状态副本。
 
-import type { ModelConfig, WorkspaceId } from '../protocol/index.js';
+import type { ModelConfig, RuntimeOp, StreamFn, WorkspaceId } from '../protocol/index.js';
 import path from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { createLegacySessionThreadDriverFactory } from '../integrations/legacy-session-runtime/index.js';
+import { createRuntimeThreadDriverFactory } from '../integrations/runtime-thread-driver/index.js';
 import { createGitWorkspaceReviewPort } from './git-review-port.js';
-import { createCodingTools } from '../tools/index.js';
 import type { FauxScript } from '../providers/faux/index.js';
 import {
   createFileRuntimeStorage,
   createMemoryRuntimeStorage,
   createRuntime,
 } from '../runtime/index.js';
+import type { StoredThreadLocator } from '../runtime/index.js';
 import { createStdoutOutput, runtimeHomeDir } from '../shared/index.js';
-import { defaultRulesFile } from './approval-policy.js';
 import { cleanupTruncated } from './cleanup.js';
 import {
   getMissingApiKeyMessage,
@@ -29,23 +26,24 @@ import {
 } from './config.js';
 import type { ResolvedConfig } from './config.js';
 import type { CliFlags, CliInvocation } from './command-catalog.js';
-import { startEnvelopeHeadless } from './envelope-headless.js';
-import { startHeadless } from './headless.js';
+import { createHeadlessPromptOp, startHeadless } from './headless.js';
 import { startOneShotOutput } from './one-shot-output.js';
 import type { CliApprovalBridge } from './frontend-types.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import { runStandaloneProductCommand } from './product-commands.js';
-import { createProviderStreamFn } from './provider-stream.js';
-import { guardProjectRuleExecutions, ProjectRules } from './project-rules.js';
+import { ProjectRules } from './project-rules.js';
 import { createRenderer } from './renderer.js';
 import {
   createCliRuntimeModelResolver,
-  createLegacyPermissionPolicy,
+  createCliPermissionPolicy,
   resolveRuntimeStorageRoots,
 } from './runtime-composition.js';
 import { RuntimeFrontendSession } from './runtime-frontend.js';
-import { createStaticLegacyApprovalAdapterFactory } from './legacy-approval-adapter.js';
+import {
+  createCliBasePromptProvider,
+  createCliRegistryCapabilityServices,
+} from './capability-services.js';
 import { isRuntimeResumeRequest, selectCliResumeTarget } from './runtime-resume.js';
 import { sanitizeTerminalError, sanitizeTerminalLine } from './terminal-sanitize.js';
 import {
@@ -70,7 +68,6 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   // 提示用法并 exit 2(放在 Session 创建之前,不为错误路径留下空会话文件)。
   if (
     !sessionsCommand &&
-    flags.eventFormat !== 'envelope' &&
     !flags.json &&
     flags.prompt === undefined &&
     !process.stdin.isTTY
@@ -101,7 +98,6 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
 
   const interactiveMode =
     !sessionsCommand &&
-    flags.eventFormat !== 'envelope' &&
     !flags.json &&
     flags.prompt === undefined &&
     process.stdin.isTTY === true;
@@ -134,12 +130,12 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     }
   }
 
-  const legacyMissingKey = getMissingApiKeyMessage(resolved);
+  const missingKey = getMissingApiKeyMessage(resolved);
   let initialModel: ModelConfig | undefined;
   if (resolved.modelConfig !== undefined) {
-    // 旧式显式 model 配置若缺 key，交互面退回未选择状态；绝不拿占位配置创建 Session。
+    // 显式 model 配置若缺 key，交互面退回未选择状态；绝不拿占位配置创建线程。
     initialModel =
-      legacyMissingKey === undefined ? resolved.modelConfig : undefined;
+      missingKey === undefined ? resolved.modelConfig : undefined;
   } else {
     initialModel = registry?.resolveSelectedModel();
   }
@@ -147,11 +143,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     !sessionsCommand &&
     initialModel === undefined &&
     !interactiveMode &&
-    flags.eventFormat !== 'envelope'
+    (!flags.json || flags.prompt !== undefined)
   ) {
     console.error(
       `[coda] ${
-        legacyMissingKey ??
+        missingKey ??
         '尚未选择模型；请先在交互终端运行 /login 配置 API key，再运行 /model'
       }`,
     );
@@ -163,7 +159,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
   const approvalMode =
     flags.approvalMode ?? (
-      flags.eventFormat === 'envelope' || flags.json || flags.prompt !== undefined
+      flags.json || flags.prompt !== undefined
         ? 'allow'
         : 'interactive'
     );
@@ -174,18 +170,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
-  const roots = resolveRuntimeStorageRoots({
-    homeDir: runtimeHomeDir(),
-    ...(flags.sessionDir !== undefined && { legacySessionDir: flags.sessionDir }),
-  });
+  const roots = resolveRuntimeStorageRoots({ homeDir: runtimeHomeDir() });
   const storage = flags.ephemeral
     ? createMemoryRuntimeStorage()
-    : createFileRuntimeStorage({
-        root: roots.runtimeRoot,
-        legacySessionDir: roots.legacySessionDir,
-        legacyApprovalFile: defaultRulesFile(),
-      });
-  let resumeTarget;
+    : createFileRuntimeStorage({ root: roots.runtimeRoot });
+  let resumeTarget: StoredThreadLocator | undefined;
   try {
     if (isRuntimeResumeRequest(flags)) {
       resumeTarget = await selectCliResumeTarget(await storage.listStoredThreads(), flags);
@@ -218,42 +207,31 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
-  const ephemeralLegacyDir = flags.ephemeral
-    ? mkdtempSync(path.join(tmpdir(), 'coda-ephemeral-'))
-    : undefined;
-  const cleanupEphemeral = (): void => {
-    if (ephemeralLegacyDir === undefined) return;
-    rmSync(ephemeralLegacyDir, { recursive: true, force: true });
-  };
   const projectRuleWarnings = createWarningHub();
-  const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
-    mode: approvalMode,
-    projectRoot: cwd,
-    tools: createCodingTools(),
-  });
-  const driverFactory = createLegacySessionThreadDriverFactory({
-    sessionDir: ephemeralLegacyDir ?? roots.legacySessionDir,
-    approvalAdapterFactory,
-    configure: ({ model }) => {
-      // Attachment-local project rules, tools, and Agent FileTracker are never shared across
-      // independently attached Runtime threads. Approval state lives in the durable bridge.
-      const projectRules = new ProjectRules({ cwd, onWarning: projectRuleWarnings.emit });
-      const tools = guardProjectRuleExecutions(createCodingTools(), projectRules);
-      return {
-        sessionOptions: {
-          agentConfig: {
-            streamFn: createProviderStreamFn(fauxScript),
-            model,
-            tools,
-            cwd,
-            systemPrompt: () => buildSystemPrompt(cwd),
-            transformContext: (context) => projectRules.inject(context),
-            beforeToolCall: (call) => projectRules.beforeToolCall(call),
-          },
-        },
-        policyRevision: `legacy-cli-${approvalMode}-v2`,
-      };
+  const projectRules = new ProjectRules({ cwd, onWarning: projectRuleWarnings.emit });
+  const capabilityComposition = createCliRegistryCapabilityServices({
+    cwd,
+    approvalMode,
+    basePrompts: createCliBasePromptProvider({ content: buildSystemPrompt(cwd) }),
+    ruleSnapshots: projectRules,
+    ruleFreshness: projectRules,
+    ruleBudget: {
+      maxFiles: 32,
+      maxFileBytes: 32 * 1024,
+      maxBytes: 256 * 1024,
+      maxPromptTokens: 16 * 1024,
     },
+    ...(fauxScript !== undefined && { fauxScript }),
+  });
+  const compactionStreamFn: StreamFn = (model, context, options) => {
+    const adapter = capabilityComposition.providerRegistry.snapshot().resolve(model.ref.api);
+    if (adapter === undefined) {
+      throw new Error(`No provider adapter is registered for ${JSON.stringify(model.ref.api)}`);
+    }
+    return adapter.stream(model, context, options);
+  };
+  const driverFactory = createRuntimeThreadDriverFactory({
+    configure: () => ({ compactionStreamFn }),
   });
   const modelResolver = createCliRuntimeModelResolver(registry);
   if (initialModel !== undefined) modelResolver.register(initialModel);
@@ -271,13 +249,14 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       },
       storage,
       modelResolver,
-      permissionPolicy: createLegacyPermissionPolicy(approvalMode),
+      permissionPolicy: createCliPermissionPolicy(approvalMode),
       threadDriverFactory: driverFactory,
+      capabilityMode: 'registry',
+      capabilityServices: capabilityComposition.services,
       workspaceReview: createGitWorkspaceReviewPort(),
     });
   } catch (err) {
     console.error(`[coda] runtime initialization failed: ${sanitizeTerminalError(err)}`);
-    cleanupEphemeral();
     return 2;
   }
 
@@ -314,12 +293,35 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     }
   }
 
-  if (flags.eventFormat === 'envelope') {
+  if (flags.json) {
     projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
     const output = createStdoutOutput();
-    return startEnvelopeHeadless(runtime, {
+    const initialOps: RuntimeOp[] = [];
+    if (flags.prompt !== undefined) {
+      if (initialModel === undefined) {
+        console.error('[coda] --json with an initial prompt requires a configured model');
+        await runtime.close().catch(() => undefined);
+        return 2;
+      }
+      const threadId = resumeTarget?.threadId ?? runtime.newThreadId();
+      initialOps.push({
+        type: resumed ? 'thread_resume' : 'thread_create',
+        opId: runtime.newOpId(),
+        workspaceId: runtime.workspaceId,
+        threadId,
+        model: initialModel.ref,
+      });
+      initialOps.push(createHeadlessPromptOp({
+        workspaceId: runtime.workspaceId,
+        threadId,
+        opId: runtime.newOpId(),
+        text: flags.prompt,
+      }));
+    }
+    return startHeadless(runtime, {
       stdin: process.stdin,
       stdout: { enqueue: output.enqueue, drain: output.drain },
+      ...(initialOps.length > 0 && { initialOps }),
     });
   }
 
@@ -373,34 +375,27 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     } catch (saveError) {
       console.error(`[coda] presentation save failed: ${sanitizeTerminalError(saveError)}`);
     }
-    cleanupEphemeral();
     return 2;
   }
   // Approval requests are already canonical Runtime events projected through `session.subscribe`;
   // the frontend bridge only translates decisions back into control_response/abort operations.
   const approval: CliApprovalBridge | undefined = approvalMode === 'interactive'
     ? {
-        broker: { resolve: (approvalId, decision) => runtimeSession.resolveApproval(approvalId, decision) },
-        onAbort: () => {},
-        subscribe: () => () => {},
+        resolve: (requestId, decision) => runtimeSession.resolveApproval(requestId, decision),
       }
     : undefined;
 
   if (modernOneShot) {
     projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
     const output = createStdoutOutput();
-    try {
-      return await startOneShotOutput(session, {
-        prompt: flags.prompt as string,
-        mode: flags.output ?? 'text',
-        finalOnly: flags.finalOnly,
-        ...(flags.timeoutMs === undefined ? {} : { timeoutMs: flags.timeoutMs }),
-        stdout: { enqueue: output.enqueue, drain: output.drain },
-        fatalSignal: output.failureSignal,
-      });
-    } finally {
-      cleanupEphemeral();
-    }
+    return startOneShotOutput(session, {
+      prompt: flags.prompt as string,
+      mode: flags.output ?? 'text',
+      finalOnly: flags.finalOnly,
+      ...(flags.timeoutMs === undefined ? {} : { timeoutMs: flags.timeoutMs }),
+      stdout: { enqueue: output.enqueue, drain: output.drain },
+      fatalSignal: output.failureSignal,
+    });
   }
   // 唯一长驻交互面在完整双 TTY 中懒加载 OpenTUI。headless 与一次性路径不会
   // 初始化 native renderer；已进入运行期的错误由 startTui 自己收尾。
@@ -470,17 +465,6 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     drain: output.drain,
   };
 
-  if (flags.json) {
-    projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
-    // --json 与 -p 组合(docs/09 §6.4 一次性特例):启动注入 prompt,最终 agent_end 后自动退出
-    return startHeadless(session, {
-      stdin: process.stdin,
-      stdout,
-      ...(flags.prompt !== undefined && { initialPrompt: flags.prompt }),
-      ...(approval !== undefined && { approval }),
-    });
-  }
-
   if (flags.prompt === undefined) {
     console.error('[coda] interactive mode requires a supported full-screen TUI terminal');
     await session.close().catch(() => undefined);
@@ -492,7 +476,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
-  // 旧式 -p 人类可读输出保持 append-only；颜色只控制 SGR，不初始化 TUI。
+  // -p 人类可读输出保持 append-only；颜色只控制 SGR，不初始化 TUI。
   const renderer = createRenderer(stdout, {
     color:
       !flags.noColor &&

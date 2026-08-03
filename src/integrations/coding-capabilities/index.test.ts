@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { strictJsonSnapshot } from '../../protocol/index.js';
 import type { InvocationContext } from '../../capabilities/types.js';
-import type { LegacyBashInvocationAnalysisAttributes } from './bash-analyze.js';
+import type { BashInvocationAnalysisAttributes } from './bash-analyze.js';
 import {
-  createCodingToolCapabilityBindings,
-  LEGACY_FILESYSTEM_ANALYSIS_VERSION,
+  createCodingCapabilityRegistrations,
+  FILESYSTEM_ANALYSIS_VERSION,
 } from './index.js';
-import type { LegacyFilesystemInvocationAnalysisAttributes } from './index.js';
+import type { FilesystemInvocationAnalysisAttributes } from './index.js';
 
 const context = strictJsonSnapshot({
   workspaceId: 'ws_binding_test',
@@ -30,21 +30,21 @@ afterEach(() => {
   }
 });
 
-describe('legacy coding tool capability bindings', () => {
-  test('exposes exactly the eight explicit bindings in stable prompt order', () => {
-    const bindings = createCodingToolCapabilityBindings();
-    expect(bindings.map((binding) => binding.tool.name)).toEqual([
+describe('native coding capability registrations', () => {
+  test('exposes exactly the eight native registrations in stable prompt order', () => {
+    const registrations = createCodingCapabilityRegistrations();
+    expect(registrations.map((registration) => registration.id)).toEqual([
       'read', 'ls', 'glob', 'grep', 'bash', 'edit', 'write', 'plan',
     ]);
-    expect(bindings.every((binding) => binding.policy.kind === binding.tool.kind)).toBe(true);
-    expect(bindings.map((binding) => binding.version)).toEqual([
-      '2', '2', '2', '2', '2', '2', '2', '2',
+    expect(registrations.map((registration) => registration.version)).toEqual([
+      '3', '3', '3', '3', '3', '3', '3', '3',
     ]);
-    expect(Object.isFrozen(bindings)).toBe(true);
+    expect(Object.isFrozen(registrations)).toBe(true);
+    expect(registrations.every(Object.isFrozen)).toBe(true);
   });
 
   test('freezes exact target kinds for every non-bash built-in resolver', async () => {
-    const bindings = createCodingToolCapabilityBindings();
+    const registrations = createCodingCapabilityRegistrations();
     for (const fixture of [
       { name: 'read', args: { path: 'nested/item.ts' }, kind: 'file' as const },
       { name: 'ls', args: { path: 'nested' }, kind: 'directory' as const },
@@ -53,14 +53,14 @@ describe('legacy coding tool capability bindings', () => {
       { name: 'edit', args: { path: 'nested/item.ts' }, kind: 'file' as const },
       { name: 'write', args: { path: 'nested/item.ts' }, kind: 'file' as const },
     ]) {
-      const binding = bindings.find((candidate) => candidate.tool.name === fixture.name);
-      if (binding === undefined) throw new Error(`missing ${fixture.name} binding`);
-      const result = await binding.resolveResources(fixture.args, context);
+      const registration = registrations.find((candidate) => candidate.id === fixture.name);
+      if (registration === undefined) throw new Error(`missing ${fixture.name} registration`);
+      const result = await registration.resolveResources(fixture.args, context);
       expect(result.ok, fixture.name).toBe(true);
       if (!result.ok) continue;
-      const attributes = result.analysis?.attributes as unknown as LegacyFilesystemInvocationAnalysisAttributes;
+      const attributes = result.analysis?.attributes as unknown as FilesystemInvocationAnalysisAttributes;
       expect(attributes, fixture.name).toEqual({
-        kind: LEGACY_FILESYSTEM_ANALYSIS_VERSION,
+        kind: FILESYSTEM_ANALYSIS_VERSION,
         filesystemTargets: [{
           canonicalTarget: path.join(context.cwd, ...fixture.args.path.split('/')),
           kind: fixture.kind,
@@ -68,20 +68,20 @@ describe('legacy coding tool capability bindings', () => {
       });
     }
 
-    const plan = bindings.find((candidate) => candidate.tool.name === 'plan');
-    if (plan === undefined) throw new Error('missing plan binding');
+    const plan = registrations.find((candidate) => candidate.id === 'plan');
+    if (plan === undefined) throw new Error('missing plan registration');
     const result = await plan.resolveResources({}, context);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.analysis?.attributes).toEqual({
-      kind: LEGACY_FILESYSTEM_ANALYSIS_VERSION,
+      kind: FILESYSTEM_ANALYSIS_VERSION,
       filesystemTargets: [],
     });
   });
 
   test('keeps the two same-type bash selectors distinct and permits multiple targets', async () => {
-    const bash = createCodingToolCapabilityBindings().find((binding) => binding.tool.name === 'bash');
-    if (bash === undefined) throw new Error('missing bash binding');
+    const bash = createCodingCapabilityRegistrations().find((registration) => registration.id === 'bash');
+    if (bash === undefined) throw new Error('missing bash registration');
     const result = await bash.resolveResources({
       command: 'cp ./a.txt ./b.txt && cat ./c.txt > ./d.txt',
     }, context);
@@ -111,7 +111,7 @@ describe('legacy coding tool capability bindings', () => {
       canonicalTarget: path.join(context.cwd, 'packages', 'app'),
     }));
     expect(cd.analysis?.resourceCoverage).toEqual({ kind: 'complete' });
-    const frozenAnalysis = cd.analysis?.attributes as unknown as LegacyBashInvocationAnalysisAttributes;
+    const frozenAnalysis = cd.analysis?.attributes as unknown as BashInvocationAnalysisAttributes;
     const frozenTargets = frozenAnalysis.filesystemTargets;
     expect(frozenTargets).toEqual(expect.arrayContaining([
       {
@@ -197,7 +197,7 @@ describe('legacy coding tool capability bindings', () => {
       const result = await bashBinding().resolveResources({ command }, context);
       expect(result.ok, command).toBe(true);
       if (!result.ok) continue;
-      const attributes = result.analysis?.attributes as unknown as LegacyBashInvocationAnalysisAttributes;
+      const attributes = result.analysis?.attributes as unknown as BashInvocationAnalysisAttributes;
       const expectedTarget = command.startsWith('printf')
         ? context.cwd
         : path.join(context.cwd, 'nested');
@@ -231,7 +231,7 @@ describe('legacy coding tool capability bindings', () => {
     if (!result.ok) return;
     expect(result.analysis?.safety).toMatchObject({
       kind: 'deny',
-      code: 'legacy_bash_command_denied',
+      code: 'bash_command_denied',
     });
     expect(result.analysis?.grantability.kind).toBe('once_only');
   });
@@ -254,7 +254,7 @@ describe('legacy coding tool capability bindings', () => {
 });
 
 function bashBinding() {
-  const bash = createCodingToolCapabilityBindings().find((binding) => binding.tool.name === 'bash');
-  if (bash === undefined) throw new Error('missing bash binding');
+  const bash = createCodingCapabilityRegistrations().find((registration) => registration.id === 'bash');
+  if (bash === undefined) throw new Error('missing bash registration');
   return bash;
 }

@@ -18,6 +18,8 @@ import type {
   TurnPolicyContext,
 } from '../capabilities/index.js';
 import type {
+  ExternalOpId,
+  PolicyGrantScope,
   RunId,
   ThreadId,
   TurnId,
@@ -30,7 +32,7 @@ import {
   createCliBasePromptProvider,
   createCliRegistryCapabilityServices,
 } from './capability-services.js';
-import type { StaticLegacyApprovalMode } from './legacy-approval-adapter.js';
+import type { CliApprovalMode } from './capability-services.js';
 
 const PROJECT_ROOT = mkdtempSync(path.join(tmpdir(), 'coda-cli-capabilities-'));
 const WORKSPACE_ID = 'workspace-cli' as WorkspaceId;
@@ -49,7 +51,7 @@ afterAll(() => {
 });
 
 describe('CLI registry capability composition', () => {
-  it('registers the exact legacy tool and provider tables in stable order', async () => {
+  it('registers the exact native capability and provider tables in stable order', async () => {
     const ports = explicitPorts();
     const composition = createCliRegistryCapabilityServices({
       cwd: PROJECT_ROOT,
@@ -118,7 +120,7 @@ describe('CLI registry capability composition', () => {
     expect(composition.services.basePrompts).toBe(ports.basePrompts);
     expect(composition.services.ruleSnapshots).toBe(ports.ruleSnapshots);
     expect(composition.services.ruleFreshness).toBe(ports.ruleFreshness);
-    expect(composition.services.grantMode).toBe('legacy_global_approvals_v1');
+    expect(composition.services.grantMode).toBe('workspace');
     expect(Object.isFrozen(composition)).toBe(true);
     expect(Object.isFrozen(composition.services)).toBe(true);
     expect(Object.isFrozen(composition.services.ruleBudget)).toBe(true);
@@ -198,7 +200,7 @@ describe('CLI registry capability composition', () => {
     try {
       const interactive = await capturePolicy(interactiveEngine);
       const denied = await capturePolicy(denyEngine);
-      const other = await capturePolicy(otherEngine, [], otherRoot);
+      const other = await capturePolicy(otherEngine, undefined, otherRoot);
       expect(interactive.policyBasisRevision).not.toBe(denied.policyBasisRevision);
       expect(interactive.policyBasisRevision).not.toBe(other.policyBasisRevision);
     } finally {
@@ -209,8 +211,7 @@ describe('CLI registry capability composition', () => {
     }
   });
 
-  it('projects interactive edits into durable legacy-global patterns and reuses snapshots', async () => {
-    const expectedPattern = `write:${PROJECT_ROOT}/**`;
+  it('projects interactive edits into exact canonical workspace grants and reuses them', async () => {
     const first = await policyDecision('interactive', 'write', {
       path: 'created.ts',
       content: 'export {};\n',
@@ -219,8 +220,13 @@ describe('CLI registry capability composition', () => {
       kind: 'ask',
       code: 'approval_required',
       grantProposal: {
-        kind: 'legacy_global_approvals_v1',
-        patterns: [expectedPattern],
+        kind: 'canonical_resources_v1',
+        resourcePatterns: [{
+          resourceType: 'filesystem',
+          access: 'write',
+          matcher: 'canonical_target_exact_v1',
+        }],
+        attributes: {},
       },
     });
     expectDeepFrozen(first);
@@ -229,59 +235,48 @@ describe('CLI registry capability composition', () => {
       'interactive',
       'write',
       { path: 'created.ts', content: 'export {};\n' },
-      [expectedPattern],
+      approvalScope(first),
     );
     expect(remembered).toMatchObject({
       kind: 'allow',
-      code: 'matching_legacy_global_approval',
+      code: 'matching_policy_grant',
     });
   });
 
-  it('keeps unsafe or non-generalizable bash calls out of legacy grants', async () => {
+  it('keeps unsafe or non-generalizable bash calls out of workspace grants', async () => {
     const dangerous = await policyDecision('interactive', 'bash', { command: 'rm -rf /' });
     expect(dangerous).toMatchObject({
       kind: 'deny',
-      code: 'legacy_bash_command_denied',
+      code: 'bash_command_denied',
     });
 
     const opaque = await policyDecision('interactive', 'bash', { command: 'echo $(pwd)' });
     expect(opaque).toMatchObject({ kind: 'ask' });
     expect(opaque).not.toHaveProperty('grantProposal');
-    const rememberedOpaque = await policyDecision(
-      'interactive',
-      'bash',
-      { command: 'echo $(pwd)' },
-      ['bash:echo *'],
-    );
-    expect(rememberedOpaque).toMatchObject({ kind: 'ask' });
-    expect(rememberedOpaque).not.toHaveProperty('grantProposal');
-
-    const rememberedInterpreter = await policyDecision(
+    const interpreter = await policyDecision(
       'interactive',
       'bash',
       { command: 'python -c "open(\'created.ts\', \'w\').close()"' },
-      ['bash:python *'],
     );
-    expect(rememberedInterpreter).toMatchObject({ kind: 'ask' });
-    expect(rememberedInterpreter).not.toHaveProperty('grantProposal');
+    expect(interpreter).toMatchObject({ kind: 'ask' });
+    expect(interpreter).not.toHaveProperty('grantProposal');
 
     const safe = await policyDecision('interactive', 'bash', { command: 'bun test' });
     expect(safe).toMatchObject({
       kind: 'ask',
       grantProposal: {
-        kind: 'legacy_global_approvals_v1',
-        patterns: ['bash:bun *'],
+        kind: 'canonical_resources_v1',
       },
     });
     const rememberedSafe = await policyDecision(
       'interactive',
       'bash',
       { command: 'bun test' },
-      ['bash:bun *'],
+      approvalScope(safe),
     );
     expect(rememberedSafe).toMatchObject({
       kind: 'allow',
-      code: 'matching_legacy_global_approval',
+      code: 'matching_policy_grant',
     });
   });
 
@@ -304,8 +299,7 @@ describe('CLI registry capability composition', () => {
       expect(decision).toMatchObject({
         kind: 'ask',
         grantProposal: {
-          kind: 'legacy_global_approvals_v1',
-          patterns: ['bash:bun *'],
+          kind: 'canonical_resources_v1',
         },
       });
       if (decision.kind !== 'ask') throw new Error('Expected an approval');
@@ -374,7 +368,7 @@ function explicitPorts(): {
   };
 }
 
-function compositionFor(mode: StaticLegacyApprovalMode, cwd = PROJECT_ROOT) {
+function compositionFor(mode: CliApprovalMode, cwd = PROJECT_ROOT) {
   const ports = explicitPorts();
   return createCliRegistryCapabilityServices({
     cwd,
@@ -386,10 +380,10 @@ function compositionFor(mode: StaticLegacyApprovalMode, cwd = PROJECT_ROOT) {
 }
 
 async function policyDecision(
-  mode: StaticLegacyApprovalMode,
+  mode: CliApprovalMode,
   capabilityId: string,
   rawArgs: unknown,
-  patterns: readonly string[] = [],
+  grantScope?: Readonly<PolicyGrantScope>,
 ) {
   const composition = compositionFor(mode);
   const engine = await composition.services.policyEngine.openThread({
@@ -397,7 +391,18 @@ async function policyDecision(
     threadId: THREAD_ID,
   });
   try {
-    const effectivePolicy = await capturePolicy(engine, patterns);
+    let effectivePolicy = await capturePolicy(engine);
+    if (grantScope !== undefined) {
+      const registration = composition.services.capabilities.snapshot().resolve(capabilityId);
+      if (registration === undefined) throw new Error(`Missing capability ${capabilityId}`);
+      effectivePolicy = await capturePolicy(engine, {
+        capabilityId,
+        capabilityVersion: registration.version,
+        registrationDigest: registration.registrationDigest,
+        policyBasisRevision: effectivePolicy.policyBasisRevision,
+        scope: grantScope,
+      });
+    }
     const invocation = await prepareInvocation(
       composition,
       effectivePolicy,
@@ -412,7 +417,13 @@ async function policyDecision(
 
 async function capturePolicy(
   engine: ThreadPolicyEngine,
-  patterns: readonly string[] = [],
+  grant?: {
+    readonly capabilityId: string;
+    readonly capabilityVersion: string;
+    readonly registrationDigest: string;
+    readonly policyBasisRevision: string;
+    readonly scope: Readonly<PolicyGrantScope>;
+  },
   cwd = PROJECT_ROOT,
 ): Promise<Readonly<EffectivePolicySnapshot>> {
   const context = turnContext({ cwd });
@@ -425,14 +436,26 @@ async function capturePolicy(
     rules: rules(context, RULE_BUDGET, [cwd]),
     grants: {
       workspaceId: WORKSPACE_ID,
-      revision: `grants-v1-${patterns.length}`,
-      grants: [],
-      legacyGlobal: {
-        revision: `legacy-v1-${patterns.length}`,
-        patterns,
-      },
+      revision: grant === undefined ? 'grants-v1-empty' : 'grants-v1-one',
+      grants: grant === undefined ? [] : [{
+        grantId: 'op_e_00000000000000000000000000000001' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        capabilityId: grant.capabilityId,
+        capabilityVersion: grant.capabilityVersion,
+        registrationDigest: grant.registrationDigest,
+        policyBasisRevision: grant.policyBasisRevision,
+        scope: grant.scope,
+        acceptedAt: 1,
+      }],
     },
   });
+}
+
+function approvalScope(decision: Awaited<ReturnType<typeof policyDecision>>): Readonly<PolicyGrantScope> {
+  if (decision.kind !== 'ask' || decision.grantProposal === undefined) {
+    throw new Error('Expected a canonical grant proposal');
+  }
+  return decision.grantProposal;
 }
 
 async function prepareInvocation(

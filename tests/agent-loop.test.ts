@@ -11,7 +11,13 @@ import type {
 } from '../src/protocol/index.js';
 import { createGate } from '../src/providers/faux/index.js';
 import type { RuntimeTurnProvider } from '../src/agent/index.js';
-import { makeHarness, makeTool, textOutput, typeSequence } from './helpers/agent-harness.js';
+import {
+  makeHarness,
+  makeRuntimeTurnProvider,
+  makeTool,
+  textOutput,
+  typeSequence,
+} from './helpers/agent-harness.js';
 
 /** 只折叠连续的 message_update(唯一合法的高频重复);其余事件一律保留——意外重复即缺陷。 */
 function collapse(seq: string[]): string[] {
@@ -562,13 +568,12 @@ describe('runLoop:一路到完成路径(M3)', () => {
 
   it('违约 StreamFn(同步 throw):防御路径合成 error assistant + fatal 事件,loop 不崩', async () => {
     const { Agent } = await import('../src/agent/index.js');
+    const streamFn = () => {
+      throw new Error('rogue provider');
+    };
     const agent = new Agent({
-      streamFn: () => {
-        throw new Error('rogue provider');
-      },
       model: { ref: { provider: 'rogue', api: 'x', model: 'y' } },
-      tools: [],
-      systemPrompt: 'test',
+      runtimeTurnProvider: makeRuntimeTurnProvider(streamFn),
     });
     const events: AgentEvent[] = [];
     agent.subscribe((e) => {
@@ -611,11 +616,10 @@ describe('runLoop:一路到完成路径(M3)', () => {
       },
       result: () => Promise.resolve(grownPartial),   // 不会走到:迭代已 throw
     };
+    const streamFn = () => rogueStream as unknown as ProviderEventStream;
     const agent = new Agent({
-      streamFn: () => rogueStream as unknown as ProviderEventStream,
       model: { ref: { provider: 'rogue', api: 'x', model: 'y' } },
-      tools: [],
-      systemPrompt: 'test',
+      runtimeTurnProvider: makeRuntimeTurnProvider(streamFn),
     });
     const events: AgentEvent[] = [];
     agent.subscribe((e) => {
@@ -669,11 +673,10 @@ describe('runLoop:一路到完成路径(M3)', () => {
       },
       result: () => Promise.reject(new Error('result exploded')),
     };
+    const streamFn = () => rogueStream as unknown as ProviderEventStream;
     const agent = new Agent({
-      streamFn: () => rogueStream as unknown as ProviderEventStream,
       model: { ref: { provider: 'rogue', api: 'x', model: 'y' } },
-      tools: [],
-      systemPrompt: 'test',
+      runtimeTurnProvider: makeRuntimeTurnProvider(streamFn),
     });
     const events: AgentEvent[] = [];
     agent.subscribe((e) => {

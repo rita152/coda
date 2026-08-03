@@ -1,12 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  assertLegacyWorkspaceId,
   assertRunId,
   assertThreadId,
   assertTurnId,
   assertWorkspaceId,
-  deriveLegacySeedTurnProvenance,
   deriveInvocationId,
   deriveOpId,
   isDerivedOpId,
@@ -15,62 +13,15 @@ import {
   isThreadId,
   isTurnId,
   isWorkspaceId,
-  legacyThreadId,
-  legacyWorkspaceId,
   RuntimeIdentityValidationError,
+  workspaceIdFromCwd,
 } from './identity.js';
 
 describe('runtime identities', () => {
-  test('legacy identity golden vectors are byte-stable', () => {
-    const alpha = legacyWorkspaceId('/work/alpha');
-    expect(String(alpha)).toBe('ws_v1_33c68026e39376337b611a28b1e8f4625f1e0afe3fa140e3ab3b602ca944e5ee');
-    expect(String(legacyWorkspaceId('/工作/甲'))).toBe(
-      'ws_v1_b85604486dec545464d56c643ee14acee012d00576a42d3a7136127d5e3df119',
-    );
-    expect(String(legacyWorkspaceId('C:\\repo'))).toBe(
-      'ws_v1_06ae402892a0930119b83e143b055d02fba6f2461ec9d6f471600ea3056bea27',
-    );
-    expect(String(legacyThreadId(alpha, '20250101-010203-abcd'))).toBe(
-      'th_v1_5754738e401cada8c5130e7b6c381e19fb19542fa43f659db399c7f4c6cad782',
-    );
-  });
-
-  test('legacy raw framing accepts empty, relative, NUL, and supplementary Unicode', () => {
-    expect(legacyWorkspaceId('')).toMatch(/^ws_v1_[0-9a-f]{64}$/);
-    expect(legacyWorkspaceId('../escape')).not.toBe(legacyWorkspaceId('/escape'));
-    expect(legacyWorkspaceId('a\0b')).not.toBe(legacyWorkspaceId('a'));
-    expect(legacyWorkspaceId('/repo/😀')).not.toBe(legacyWorkspaceId('/repo/�'));
-
-    const workspace = legacyWorkspaceId('a\0b');
-    expect(legacyThreadId(workspace, 'x\0y')).not.toBe(legacyThreadId(workspace, 'x'));
-  });
-
-  test('legacy seed turn provenance has frozen prompt-group golden vectors', () => {
-    const provenance = deriveLegacySeedTurnProvenance('legacy-001', [{
-      role: 'user', id: 'u1', timestamp: 1, source: 'prompt', content: [{ type: 'text', text: 'one' }],
-    }, {
-      role: 'assistant', id: 'a1', timestamp: 2, content: [],
-      model: { provider: 'faux', api: 'faux', model: 'x' },
-      stopReason: 'stop', usage: { input: 1, output: 1 },
-    }, {
-      role: 'user', id: 'u2', timestamp: 3, source: 'prompt', content: [{ type: 'text', text: 'two' }],
-    }]);
-    expect(provenance.map(({ messageId, turnId }) => ({ messageId, turnId: String(turnId) }))).toEqual([{
-      messageId: 'u1',
-      turnId: 'turn_seed_v1_7e8761785029b27bc95af6e7cf377b47d3fba0362112b777e40c8a616bb1f526',
-    }, {
-      messageId: 'a1',
-      turnId: 'turn_seed_v1_7e8761785029b27bc95af6e7cf377b47d3fba0362112b777e40c8a616bb1f526',
-    }, {
-      messageId: 'u2',
-      turnId: 'turn_seed_v1_39267ce99f84105ae6fca6c52bbe6038589ab3020267fb391122570aee8dbc96',
-    }]);
-  });
-
-  test('legacy thread mapping rejects a merely branded-looking general workspace value', () => {
-    const workspace = assertWorkspaceId('workspace\0opaque');
-    expect(() => legacyThreadId(workspace as never, 'session')).toThrow(RuntimeIdentityValidationError);
-    expect(assertLegacyWorkspaceId(legacyWorkspaceId('/work'))).toBe(legacyWorkspaceId('/work'));
+  test('canonical workspace identities use the v2 namespace and exact cwd bytes', () => {
+    expect(workspaceIdFromCwd('/work/alpha')).toMatch(/^ws_v2_[0-9a-f]{64}$/);
+    expect(workspaceIdFromCwd('/work/alpha')).toBe(workspaceIdFromCwd('/work/alpha'));
+    expect(workspaceIdFromCwd('/work/alpha')).not.toBe(workspaceIdFromCwd('/work/alpha/'));
   });
 
   test('derived operation identities match all frozen golden vectors', () => {
@@ -136,7 +87,7 @@ describe('runtime identities', () => {
       throw new Error('expected sparse parts to fail');
     } catch (error) {
       expect(error).toBeInstanceOf(RuntimeIdentityValidationError);
-      expect((error as RuntimeIdentityValidationError).code).toBe('invalid_legacy_identity_input');
+      expect((error as RuntimeIdentityValidationError).code).toBe('invalid_identity_input');
       expect((error as RuntimeIdentityValidationError).field).toBe('parts[0]');
     }
   });
@@ -158,10 +109,7 @@ describe('runtime identities', () => {
   });
 
   test('hash inputs reject lone surrogates before UTF-8 encoding', () => {
-    expect(() => legacyWorkspaceId('\ud800')).toThrow(RuntimeIdentityValidationError);
-    expect(() => legacyThreadId(legacyWorkspaceId('/work'), '\udc00')).toThrow(
-      RuntimeIdentityValidationError,
-    );
+    expect(() => workspaceIdFromCwd('\ud800')).toThrow(RuntimeIdentityValidationError);
     expect(() => deriveOpId({
       purpose: 'cancel_target',
       workspaceId: assertWorkspaceId('workspace'),

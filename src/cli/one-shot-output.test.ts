@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import type { AgentMessage, AssistantMessage, UserMessage } from '../protocol/index.js';
+import type { AgentMessage, AssistantMessage, RunId, UserMessage } from '../protocol/index.js';
 import type { CliSession } from './interactive-runtime.js';
-import type { CliSessionEvent, CliSessionListener } from './frontend-types.js';
+import type { CliRuntimeEvent, CliRuntimeEventListener } from './frontend-types.js';
 import { createOrderedOutput } from '../shared/ordered-output.js';
 import { startOneShotOutput } from './one-shot-output.js';
 
@@ -13,7 +13,7 @@ const EMPTY_USAGE = {
 } as const;
 
 class ScriptedSession implements CliSession {
-  readonly #listeners = new Set<CliSessionListener>();
+  readonly #listeners = new Set<CliRuntimeEventListener>();
   readonly messages: readonly AgentMessage[] = [];
   readonly #answer: string;
   readonly #failure: boolean;
@@ -50,7 +50,7 @@ class ScriptedSession implements CliSession {
     return EMPTY_USAGE;
   }
 
-  subscribe(listener: CliSessionListener): () => void {
+  subscribe(listener: CliRuntimeEventListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -72,6 +72,8 @@ class ScriptedSession implements CliSession {
         maxAttempts: 2,
         delayMs: 1,
         errorMessage: 'retryable provider failure',
+        predecessorRunId: 'run-retry-1' as RunId,
+        successorRunId: 'run-retry-2' as RunId,
       });
       this.#emit({ type: 'agent_end', reason: 'error', messages: [], willRetry: true });
       this.#emit({ type: 'agent_start', reason: 'continue' });
@@ -106,7 +108,7 @@ class ScriptedSession implements CliSession {
     return Promise.resolve();
   }
 
-  #emit(event: CliSessionEvent): void {
+  #emit(event: CliRuntimeEvent): void {
     for (const listener of [...this.#listeners]) void listener(event);
   }
 }

@@ -7,13 +7,11 @@ import type {
   AgentMessage,
   Context,
   ModelConfig,
-  StreamFn,
   ToolCallPart,
   ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
-import { FileTracker, truncationDir } from '../shared/index.js';
-import type { ToolDefinition } from '../tools/types.js';
+import { truncationDir } from '../shared/index.js';
 import type { AgentEventListener } from './events.js';
 import { Emitter } from './events.js';
 import { newMessageId } from './ids.js';
@@ -21,19 +19,14 @@ import type { LoopConfig, LoopSeed, RuntimeTurnProvider } from './loop.js';
 import { runLoop } from './loop.js';
 import type { DrainMode } from './queue.js';
 import { PendingMessageQueue } from './queue.js';
-import { renderToolSchemas } from './tool-schemas.js';
 
 export interface AgentConfig {
-  streamFn: StreamFn;
   model: ModelConfig;
-  tools: ToolDefinition[];
-  systemPrompt: string | (() => string);
+  /** Supplies the one immutable provider/catalog/policy environment used by each turn. */
+  runtimeTurnProvider: RuntimeTurnProvider;
   transformContext?: (ctx: Context) => Promise<Context>;        // 压缩/裁剪钩子(M7 compaction)
-  beforeToolCall?: (call: ToolCallPart) => Promise<{ block: true; reason: string } | { block?: false }>;
   afterToolCall?: (call: ToolCallPart, result: ToolResultMessage) => Promise<ToolResultMessage>;
   shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
-  toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
-  cwd?: string;                                                  // 工具执行工作目录,默认 process.cwd()
   initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §3.1;仅初始数据,agent 不感知恢复)
   /** @internal Runtime recovery seed; installed silently before any listener can observe a drain. */
   initialQueues?: {
@@ -41,8 +34,6 @@ export interface AgentConfig {
     readonly followUp: readonly UserMessage[];
   };
   truncationScope?: string;                                      // 截断落盘目录 scope(session 注入 sessionId,docs/07 §1.6)
-  /** @internal Canonical Runtime supplies one immutable registry environment per turn. */
-  runtimeTurnProvider?: RuntimeTurnProvider;
 }
 
 export class Agent {
@@ -63,22 +54,14 @@ export class Agent {
     for (const message of config.initialQueues?.steering ?? []) this.#steering.enqueue(message);
     for (const message of config.initialQueues?.followUp ?? []) this.#followUp.enqueue(message);
     this.#loopConfig = {
-      streamFn: config.streamFn,
       model: config.model,
-      tools: config.tools,
-      toolSchemas: renderToolSchemas(config.tools),   // 构造时一次性渲染并缓存
-      systemPrompt: config.systemPrompt,
-      cwd: config.cwd ?? process.cwd(),
-      fileTracker: new FileTracker(),                 // 会话级 read-before-edit 登记表
+      runtimeTurnProvider: config.runtimeTurnProvider,
       spillDir: truncationDir(config.truncationScope ?? `agent-${crypto.randomUUID().slice(0, 8)}`),
       transformContext: config.transformContext,
-      beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,
       shouldStopAfterTurn: config.shouldStopAfterTurn,
-      toolExecution: config.toolExecution,
       steeringMode: () => this.steeringMode,
       followUpMode: () => this.followUpMode,
-      runtimeTurnProvider: config.runtimeTurnProvider,
     };
   }
 

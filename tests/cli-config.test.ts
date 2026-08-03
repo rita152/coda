@@ -23,7 +23,6 @@ afterEach(() => {
 function flags(o: Partial<CliFlags> = {}): CliFlags {
   return {
     json: false,
-    eventFormat: 'legacy',
     continue_: false,
     noColor: false,
     ui: 'auto',
@@ -245,7 +244,6 @@ describe('全屏 TUI eligibility', () => {
   it('只有无 prompt 的双 TTY 非 dumb 交互启动 eligible', () => {
     expect(isFullScreenTuiEligible(flags(), terminal)).toBe(true);
     expect(isFullScreenTuiEligible(flags({ json: true }), terminal)).toBe(false);
-    expect(isFullScreenTuiEligible(flags({ eventFormat: 'envelope' }), terminal)).toBe(false);
     expect(isFullScreenTuiEligible(flags({ prompt: 'hello' }), terminal)).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdinIsTTY: false })).toBe(false);
     expect(isFullScreenTuiEligible(flags(), { ...terminal, stdoutIsTTY: false })).toBe(false);
@@ -280,10 +278,9 @@ describe('--ui 纯路由', () => {
 });
 
 describe('parseFlags 边界(docs/09 §2 flag 文法)', () => {
-  it('--resume 带值 → id;不带值 → true(进入列表选择)', () => {
-    expect(parseFlags(['--resume', '20260101-000000-abcd']).resume).toBe('20260101-000000-abcd');
-    const runtimeId = `runtime-${'b'.repeat(40)}`;
-    expect(parseFlags(['--resume', runtimeId]).resume).toBe(runtimeId);
+  it('--resume=<thread-id> 使用 canonical identity；不带值进入列表选择', () => {
+    const threadId = 'th_11111111-1111-4111-8111-111111111111';
+    expect(parseFlags([`--resume=${threadId}`]).resume).toBe(threadId);
     expect(parseFlags(['--resume']).resume).toBe(true);
     // 后随另一个 flag:不吞 flag,resume 仍为 true 且后续 flag 正常解析
     const f = parseFlags(['--resume', '--json']);
@@ -304,8 +301,8 @@ describe('parseFlags 边界(docs/09 §2 flag 文法)', () => {
   });
 
   it('组合:布尔 flag 与取值 flag 混排互不干扰', () => {
-    const f = parseFlags(['--json', '--model', 'm1', '--no-color', '-p', 'do it', '--session-dir', '/tmp/x']);
-    expect(f).toMatchObject({ json: true, noColor: true, model: 'm1', prompt: 'do it', sessionDir: '/tmp/x' });
+    const f = parseFlags(['--json', '--model', 'm1', '--no-color', '-p', 'do it']);
+    expect(f).toMatchObject({ json: true, noColor: true, model: 'm1', prompt: 'do it' });
   });
 
   it('--provider openai-responses 是合法 provider 值', () => {

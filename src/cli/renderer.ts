@@ -1,4 +1,4 @@
-// Append-only 人类可读渲染器：把 SessionEvent 投影为一次性命令的终端输出。
+// Append-only 人类可读渲染器：把 canonical RuntimeEvent 投影为一次性命令的终端输出。
 // 全屏交互由 OpenTUI 独占；本模块不接管 raw TTY、输入行或光标重绘。
 
 import type {
@@ -10,8 +10,8 @@ import type {
   UserMessage,
 } from '../protocol/index.js';
 import type {
-  CliSessionEvent as SessionEvent,
-  CliSessionUsage as SessionUsage,
+  CliRuntimeEvent,
+  CliThreadUsage,
 } from './frontend-types.js';
 import {
   explorationCall,
@@ -38,9 +38,9 @@ export interface RendererOptions {
 }
 
 export interface Renderer {
-  render(e: SessionEvent): void;
+  render(e: CliRuntimeEvent): void;
   replayTranscript(messages: readonly AgentMessage[]): void;
-  /** 等待此前渲染排队的 stdout 内容；Session listener 用它施加有序背压。 */
+  /** 等待此前渲染排队的 stdout 内容；Runtime event subscriber 用它施加有序背压。 */
   drain(): Promise<void>;
 }
 
@@ -219,7 +219,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   const separator = ascii ? ' | ' : ' · ';
   // 流式状态
   let midLine = false;
-  let usage: SessionUsage | undefined;
+  let usage: CliThreadUsage | undefined;
   const toolStartedAt = new Map<string, number>();
   const explorationGroups = new Set<ExplorationGroup>();
   let activeExplorationGroup: ExplorationGroup | undefined;
@@ -411,7 +411,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   }
 
   /** 与全屏 TUI 一致：标题 + 进度 + 树状三态 checklist，而不是无层级的纯文本。 */
-  function renderPlanUpdate(steps: Extract<SessionEvent, { type: 'plan_update' }>['steps']): void {
+  function renderPlanUpdate(steps: Extract<CliRuntimeEvent, { type: 'plan_update' }>['steps']): void {
     startToolBlock();
     const useAscii = ascii || !color;
     const presentation = layoutPlan(
@@ -522,7 +522,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   /** 成功 plan 的权威可见投影紧随其后的 plan_update；不要先写一条冗余工具结果。 */
   function planSnapshot(
     details: unknown,
-  ): Extract<SessionEvent, { type: 'plan_update' }>['steps'] | undefined {
+  ): Extract<CliRuntimeEvent, { type: 'plan_update' }>['steps'] | undefined {
     const steps = asRecord(details)['steps'];
     if (!Array.isArray(steps) || !steps.every((candidate) => {
       const step = asRecord(candidate);
@@ -612,7 +612,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     return s;
   }
 
-  function render(e: SessionEvent): void {
+  function render(e: CliRuntimeEvent): void {
     switch (e.type) {
       case 'agent_start':
         flushExplorationCalls();
@@ -685,9 +685,12 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         flushExplorationCalls();
         renderPlanUpdate(e.steps);
         break;
-      case 'approval_request':
+      case 'control_request':
+        if (e.kind !== 'approval') break;
         flushExplorationCalls();
-        appendLine(paint(`? approval required: ${sanitizeTerminalLine(e.description)}`, YELLOW));
+        appendLine(
+          paint(`? approval required: ${sanitizeTerminalLine(e.payload.presentation.risk.description)}`, YELLOW),
+        );
         break;
       case 'error':
         flushExplorationCalls();
@@ -730,7 +733,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     if (messages.length === 0) return;
     const resultCalls = new Map<number, ToolCallPart>();
     const deferredStarts = new Map<number, ToolCallPart[]>();
-    let latestPlan: Extract<SessionEvent, { type: 'plan_update' }>['steps'] | undefined;
+    let latestPlan: Extract<CliRuntimeEvent, { type: 'plan_update' }>['steps'] | undefined;
     for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
       const message = messages[messageIndex];
       if (message?.role === 'tool_result') {

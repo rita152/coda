@@ -40,9 +40,9 @@ const capabilitiesResult = await Bun.build({
   naming: 'index.js',
 });
 
-const legacyCodingToolsResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/integrations/legacy-coding-tools/index.ts`],
-  outdir: `${OUT_DIR}/legacy-coding-tools`,
+const codingCapabilitiesResult = await Bun.build({
+  entrypoints: [`${PROJECT_ROOT}/src/integrations/coding-capabilities/index.ts`],
+  outdir: `${OUT_DIR}/coding-capabilities`,
   target: 'bun',
   format: 'esm',
   packages: 'external',
@@ -54,7 +54,7 @@ for (const log of [
   ...cliResult.logs,
   ...runtimeResult.logs,
   ...capabilitiesResult.logs,
-  ...legacyCodingToolsResult.logs,
+  ...codingCapabilitiesResult.logs,
 ]) {
   console.error(log);
 }
@@ -62,7 +62,7 @@ for (const log of [
 if (!cliResult.success
   || !runtimeResult.success
   || !capabilitiesResult.success
-  || !legacyCodingToolsResult.success) {
+  || !codingCapabilitiesResult.success) {
   process.exit(1);
 }
 

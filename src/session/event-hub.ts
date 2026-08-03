@@ -447,11 +447,6 @@ export class EventHub {
   }
 }
 
-/** @deprecated Phase-1 compatibility alias. Use EventHub. */
-export { EventHub as WorkspaceEventStream };
-/** @deprecated Phase-1 compatibility alias. Use EventHubOptions. */
-export type WorkspaceEventStreamOptions = EventHubOptions;
-
 function matches(subscription: Subscription, threadId: ThreadId): boolean {
   return subscription.filter === undefined || subscription.filter.has(threadId);
 }

@@ -6,7 +6,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { FileTracker } from '../shared/index.js';
 import type { ToolContext, ToolOutput } from './types.js';
-import { GREP_ABORTED_MESSAGE, grepTool, MORE_MATCHES_NOTE } from './grep.js';
+import {
+  GREP_ABORTED_MESSAGE,
+  MORE_MATCHES_NOTE,
+  executeGrep,
+} from './grep.js';
+import type { GrepArgs } from './grep.js';
 
 let tmpdir: string;
 let ctx: ToolContext;
@@ -27,10 +32,8 @@ function write(rel: string, content: string): void {
   writeFileSync(abs, content);
 }
 
-type GrepArgs = Parameters<typeof grepTool.execute>[0]['args'];
-
-function run(args: GrepArgs, context: ToolContext = ctx): ReturnType<typeof grepTool.execute> {
-  return grepTool.execute({ id: 'call_1', args }, context);
+function run(args: GrepArgs, context: ToolContext = ctx): ReturnType<typeof executeGrep> {
+  return executeGrep({ id: 'call_1', args }, context);
 }
 
 function textOf(out: ToolOutput): string {

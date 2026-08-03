@@ -1,5 +1,5 @@
 // 全屏交互 TUI(规格见 docs/09-cli.md §1–5):OpenTUI 独占 raw stdin/stdout，
-// 把 SessionEvent 投影为顶部向下增长的转录区；普通 composer 或临时审批面板固定在底部。
+// 把 canonical RuntimeEvent 渲染为顶部向下增长的转录区；普通 composer 或临时审批面板固定在底部。
 // 本模块只在双 TTY 的交互分支动态加载；headless 与一次性模式不加载 native TUI 依赖。
 
 import { isThreadId, isTurnId } from '../protocol/index.js';
@@ -22,9 +22,9 @@ import type {
 import type {
   CliApprovalBridge,
   CliApprovalDecision as ApprovalDecision,
-  CliInteractionState as SessionInteractionState,
-  CliSessionEvent as SessionEvent,
-  CliSessionUsage as SessionUsage,
+  CliInteractionState,
+  CliRuntimeEvent,
+  CliThreadUsage,
 } from './frontend-types.js';
 import { runtimeHomeDir } from '../shared/index.js';
 import type {
@@ -287,7 +287,7 @@ interface TuiScreenOptions extends TuiOptions {
 }
 
 export interface TuiScreen {
-  render(event: SessionEvent): void;
+  render(event: CliRuntimeEvent): void;
   activePanel(): 'transcript' | 'diff' | 'sessions';
   replayTranscript(messages: readonly AgentMessage[]): void;
   resetTranscript(messages: readonly AgentMessage[], highWaterSeq?: number): void;
@@ -298,7 +298,7 @@ export interface TuiScreen {
     | { readonly kind: 'none' | 'handled' }
     | { readonly kind: 'select'; readonly threadId: ThreadId };
   println(text: string, tone?: Tone): void;
-  setUsage(usage: SessionUsage): void;
+  setUsage(usage: CliThreadUsage): void;
   setBranch(branch: string | undefined): void;
   setGitDirty(dirty: boolean): void;
   setTransientStatus(status: string | undefined): void;
@@ -400,10 +400,10 @@ type ApprovalPanelLine =
   | { readonly kind: 'field'; readonly label: string; readonly value: string }
   | { readonly kind: 'option'; readonly index: number; readonly option: ApprovalPanelOption };
 
-export type TuiPhase = SessionInteractionState;
+export type TuiPhase = CliInteractionState;
 
 /**
- * TUI 唯一的交互状态投影。它只由 SessionEvent 推导，可随时丢弃重建；
+ * TUI 唯一的交互状态投影。它只由 canonical Runtime event 推导，可随时丢弃重建；
  * 视图标题、Enter 分派和 Esc 语义共享同一个实例，避免各自读取不同状态源。
  */
 export class TuiInteractionState {
@@ -417,7 +417,7 @@ export class TuiInteractionState {
     this.#phase = phase;
   }
 
-  apply(event: SessionEvent): void {
+  apply(event: CliRuntimeEvent): void {
     switch (event.type) {
       case 'agent_start':
         this.#phase = 'running';
@@ -444,7 +444,7 @@ export class TuiInteractionState {
   }
 }
 
-/** running/retrying 的 Enter 是 steering；compacting 的 prompt 由 Session 暂存。 */
+/** running/retrying 的 Enter 是 steering；compacting 的 prompt 由 Runtime 暂存。 */
 export function tuiEnterState(phase: TuiPhase): 'idle' | 'running' {
   return interactionEnterState(phase);
 }
@@ -469,29 +469,18 @@ interface ApprovalPanelCopy {
 }
 
 function approvalPanelCopy(
-  presentation: Readonly<ApprovalPresentation> | undefined,
-  fallbackDescription: string,
+  presentation: Readonly<ApprovalPresentation>,
 ): ApprovalPanelCopy {
-  const safeFallback = sanitizeTerminalText(fallbackDescription).trim();
-  const canonicalTarget = presentation?.normalizedResources
+  const canonicalTarget = presentation.normalizedResources
     .find((resource) =>
       resource['resourceType'] === 'command' &&
       resource['access'] === 'execute' &&
       typeof resource['canonicalTarget'] === 'string' &&
       resource['canonicalTarget'].trim() !== ''
     )?.['canonicalTarget'];
-  const canonicalCommand = typeof canonicalTarget === 'string'
-    ? canonicalTarget
-    : undefined;
-  const legacy = legacyBashApproval(safeFallback);
-  const command = canonicalCommand ?? legacy?.command;
-  const reason = sanitizeTerminalText(
-    presentation?.risk.description.trim() ||
-      legacy?.reason ||
-      safeFallback ||
-      'This action requires approval.',
-  );
-  const target = command === undefined && presentation !== undefined
+  const command = typeof canonicalTarget === 'string' ? canonicalTarget : undefined;
+  const reason = sanitizeTerminalText(presentation.risk.description);
+  const target = command === undefined
     ? sanitizeTerminalText(safeJsonValue(presentation.normalizedResources))
     : undefined;
   return {
@@ -504,29 +493,6 @@ function approvalPanelCopy(
   };
 }
 
-function legacyBashApproval(
-  description: string,
-): { readonly command: string; readonly reason?: string } | undefined {
-  if (!description.startsWith('bash: ')) return undefined;
-  const body = description.slice('bash: '.length);
-  const markers = [
-    ' — ',
-    ' (accesses paths outside project root)',
-    ' (contains paths that could not be fully analyzed)',
-  ];
-  const boundary = markers
-    .map((marker) => body.indexOf(marker))
-    .filter((index) => index >= 0)
-    .sort((left, right) => left - right)[0];
-  if (boundary === undefined) return { command: body };
-  const command = body.slice(0, boundary).trim();
-  const reason = body.slice(boundary).replace(/^\s*—\s*/u, '').trim();
-  return {
-    command,
-    ...(reason === '' ? {} : { reason }),
-  };
-}
-
 function safeJsonValue(value: unknown): string {
   try {
     return JSON.stringify(value) ?? 'undefined';
@@ -536,16 +502,14 @@ function safeJsonValue(value: unknown): string {
 }
 
 function approvalPanelOptions(
-  presentation: Readonly<ApprovalPresentation> | undefined,
+  presentation: Readonly<ApprovalPresentation>,
 ): readonly ApprovalPanelOption[] {
   return [
     { decision: 'allow_once', label: 'Yes, proceed', shortcut: 'y' },
     ...(approvalAllowsAlways(presentation)
       ? [{
           decision: 'allow_always' as const,
-          label: presentation === undefined
-            ? "Yes, and don't ask again for matching commands"
-            : "Yes, and don't ask again for this approved scope",
+          label: "Yes, and don't ask again for this approved scope",
           shortcut: 'a' as const,
         }]
       : []),
@@ -1264,7 +1228,7 @@ export async function createTuiScreen(
     let selectedModel = opts.model;
     let providerCommandsAvailable = opts.providerCommands !== undefined;
     let selectedContextLimit = opts.contextLimit;
-    let usage: SessionUsage = {
+    let usage: CliThreadUsage = {
       cumulative: { input: 0, output: 0 },
       turns: 0,
       contextTokens: 0,
@@ -1318,7 +1282,7 @@ export async function createTuiScreen(
     >();
     const replayExplorationGroups = new Map<string, ExplorationGroupView>();
     let replayLatestPlanSteps:
-      | Extract<SessionEvent, { type: 'plan_update' }>['steps']
+      | Extract<CliRuntimeEvent, { type: 'plan_update' }>['steps']
       | undefined;
     let transcriptInsertIndex: number | undefined;
     let blockInsertIndex: number | undefined;
@@ -1331,8 +1295,7 @@ export async function createTuiScreen(
     let sessionIndex = 0;
     let approvalCard: {
       readonly toolCallId: string;
-      readonly presentation: Readonly<ApprovalPresentation> | undefined;
-      readonly fallbackDescription: string;
+      readonly presentation: Readonly<ApprovalPresentation>;
       selectedIndex: number;
       expanded: boolean;
     } | undefined;
@@ -1362,16 +1325,10 @@ export async function createTuiScreen(
 
     const fullApprovalLines = (): readonly ApprovalPanelLine[] => {
       if (approvalCard === undefined) return [];
-      const copy = approvalPanelCopy(
-        approvalCard.presentation,
-        approvalCard.fallbackDescription,
-      );
+      const copy = approvalPanelCopy(approvalCard.presentation);
       const options = approvalPanelOptions(approvalCard.presentation);
       const details = approvalCard.expanded
-        ? formatApprovalPresentation(
-            approvalCard.presentation,
-            approvalCard.fallbackDescription,
-          ).slice(0, -1)
+        ? formatApprovalPresentation(approvalCard.presentation).slice(0, -1)
         : [];
       return [
         { kind: 'title', text: copy.title },
@@ -3074,7 +3031,7 @@ export async function createTuiScreen(
       renderer.requestRender();
     };
 
-    const updatePlan = (steps: Extract<SessionEvent, { type: 'plan_update' }>['steps']): void => {
+    const updatePlan = (steps: Extract<CliRuntimeEvent, { type: 'plan_update' }>['steps']): void => {
       finishExplorationGroup();
       // plan 是整表替换的 Runtime 快照；单行化防止不可信 step 文本伪造列表层级。
       planSteps = steps.map((step) => ({
@@ -3104,7 +3061,7 @@ export async function createTuiScreen(
 
     const onProviderUpdate = (
       messageId: string,
-      event: Extract<SessionEvent, { type: 'message_update' }>['event'],
+      event: Extract<CliRuntimeEvent, { type: 'message_update' }>['event'],
     ): void => {
       const assistantForText = (): AssistantView => {
         if (currentAssistant === undefined || currentAssistant.id !== messageId) {
@@ -3310,7 +3267,7 @@ export async function createTuiScreen(
       applyResponsiveLayout(layoutWidth, layoutHeight);
     };
 
-    const render = (event: SessionEvent): void => {
+    const render = (event: CliRuntimeEvent): void => {
       interaction.apply(event);
       switch (event.type) {
         case 'agent_start':
@@ -3396,18 +3353,15 @@ export async function createTuiScreen(
         case 'plan_update':
           updatePlan(event.steps);
           break;
-        case 'approval_request':
+        case 'control_request':
+          if (event.kind !== 'approval') break;
           finishExplorationGroup();
           clearWorkingSummary();
           approvalPending = true;
           {
-            const presentation = opts.workspace?.approvalPresentation(
-              event.approvalId,
-            );
             approvalCard = {
-              toolCallId: event.toolCallId,
-              presentation,
-              fallbackDescription: event.description,
+              toolCallId: event.payload.toolCallId,
+              presentation: event.payload.presentation,
               selectedIndex: 0,
               expanded: false,
             };
@@ -4118,7 +4072,7 @@ export async function createTuiScreen(
         addText(text, tone);
         observeOutputEvent();
       },
-      setUsage(nextUsage: SessionUsage): void {
+      setUsage(nextUsage: CliThreadUsage): void {
         usage = nextUsage;
         refreshStatus();
       },
@@ -4457,7 +4411,7 @@ type TuiControllerRenderer =
 
 /**
  * 复用纯 TUI 交互决策，保证 prompt/steer/follow-up/审批语义集中定义。
- * 返回前总是关闭 Session 并恢复 renderer。
+ * 返回前总是关闭 Runtime-backed frontend 并恢复 renderer。
  */
 export function runTuiController(
   session: CliSession,
@@ -4470,7 +4424,10 @@ export function runTuiController(
   history.replace(promptHistoryEntries(session.messages));
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
-  type ApprovalRequestEvent = Extract<SessionEvent, { type: 'approval_request' }>;
+  type ApprovalRequestEvent = Extract<
+    CliRuntimeEvent,
+    { type: 'control_request'; kind: 'approval' }
+  >;
   const approvalQueue: string[] = [];
   const approvalEvents = new Map<string, ApprovalRequestEvent>();
   let lastQueues: { steering: QueuedMessage[]; followUp: QueuedMessage[] } = {
@@ -4488,9 +4445,9 @@ export function runTuiController(
   let activeDiffScope: 'turn' | 'workspace' = 'turn';
   let panelRequestGeneration = 0;
   const enqueueApproval = (event: ApprovalRequestEvent): boolean => {
-    if (approvalEvents.has(event.approvalId)) return false;
-    approvalEvents.set(event.approvalId, event);
-    approvalQueue.push(event.approvalId);
+    if (approvalEvents.has(event.requestId)) return false;
+    approvalEvents.set(event.requestId, event);
+    approvalQueue.push(event.requestId);
     return true;
   };
   const renderCurrentApproval = (): void => {
@@ -4508,10 +4465,17 @@ export function runTuiController(
     clearApprovalQueue();
     for (const request of requests) {
       enqueueApproval({
-        type: 'approval_request',
-        approvalId: request.approvalId,
-        toolCallId: request.toolCallId,
-        description: request.description,
+        type: 'control_request',
+        requestId: request.requestId,
+        kind: 'approval',
+        owningRunId: request.presentation.target.runId,
+        owningTurnId: request.presentation.target.turnId,
+        policyRevision: request.presentation.revisions.effectivePolicy,
+        payload: {
+          toolCallId: request.toolCallId,
+          description: request.description,
+          presentation: request.presentation,
+        },
       });
     }
     const nextHead = approvalQueue[0];
@@ -4729,7 +4693,7 @@ export function runTuiController(
               return;
             }
             await workspace.renameSession(command.title);
-            screen.println('Session renamed.', 'success');
+            screen.println('Thread renamed.', 'success');
             return;
           case 'archive':
             if (command.mode !== '' && command.mode !== 'on' && command.mode !== 'off') {
@@ -4737,7 +4701,7 @@ export function runTuiController(
               return;
             }
             await workspace.archiveSession(command.mode !== 'off');
-            screen.println(command.mode === 'off' ? 'Session restored.' : 'Session archived.', 'success');
+            screen.println(command.mode === 'off' ? 'Thread restored.' : 'Thread archived.', 'success');
             return;
           case 'compact':
             await workspace.compactConversation();
@@ -5071,7 +5035,7 @@ export function runTuiController(
     };
 
     const handlePendingApprovalKey = (key: KeyEvent): boolean => {
-      if (approvalQueue.length === 0 || approval?.broker === undefined) return false;
+      if (approvalQueue.length === 0 || approval === undefined) return false;
       const approvalAction = screen.handleApprovalPanelKey(key);
       if (approvalAction.kind === 'handled') {
         consume(key);
@@ -5085,24 +5049,22 @@ export function runTuiController(
         escExit.reset();
         clearApprovalQueue();
         session.abort();
-        approval.onAbort();
         screen.resolveApproval();
         return true;
       }
       if (decision !== undefined) {
         consume(key);
         const id = approvalQueue[0];
-        if (decision === 'allow_always'
-          && !approvalAllowsAlways(id === undefined
-            ? undefined
-            : opts.workspace?.approvalPresentation(id))) {
+        const request = id === undefined ? undefined : approvalEvents.get(id);
+        if (request === undefined) return true;
+        if (decision === 'allow_always' && !approvalAllowsAlways(request.payload.presentation)) {
           screen.println('Allow always is unavailable because Runtime provided no frozen scope.', 'warning');
           return true;
         }
         approvalQueue.shift();
         if (id !== undefined) {
           approvalEvents.delete(id);
-          approval.broker.resolve(id, decision);
+          approval.resolve(id, decision);
         }
         if (approvalQueue.length === 0) screen.resolveApproval();
         else renderCurrentApproval();
@@ -5319,13 +5281,11 @@ export function runTuiController(
           followUp: [...event.followUp],
         };
       }
-      if (event.type === 'approval_request') {
-        // Runtime delivers canonical control requests on the primary event stream. The legacy
-        // side channel below remains for direct Session; de-duplication keeps mixed adapters safe.
+      if (event.type === 'control_request' && event.kind === 'approval') {
         escExit.reset();
       }
       try {
-        if (event.type === 'approval_request') {
+        if (event.type === 'control_request' && event.kind === 'approval') {
           if (!enqueueApproval(event)) return;
           if (approvalQueue.length === 1) renderCurrentApproval();
         } else {
@@ -5340,20 +5300,6 @@ export function runTuiController(
         return;
       }
       if (event.type === 'error' && event.fatal) void shutdown(1, true);
-    });
-    const unsubApproval = approval?.subscribe((event) => {
-      if (event.type !== 'approval_request') return;
-      escExit.reset();
-      try {
-        if (!enqueueApproval(event)) return;
-        if (approvalQueue.length === 1) renderCurrentApproval();
-      } catch (error) {
-        screen.println(
-          `TUI render failed · ${error instanceof Error ? error.message : String(error)}`,
-          'danger',
-        );
-        void shutdown(1, true);
-      }
     });
     const unsubPendingApprovals = opts.workspace?.subscribePendingApprovals((snapshot) => {
       if (snapshot.threadId !== opts.workspace?.currentThreadId || closing) return;
@@ -5389,7 +5335,6 @@ export function runTuiController(
         process.removeListener('SIGHUP', onSignal);
       }
       unsubSession();
-      unsubApproval?.();
       unsubPendingApprovals?.();
       unsubAttached?.();
       clearApprovalQueue();
@@ -5409,7 +5354,6 @@ export function runTuiController(
       try {
         if (forceAbort || tuiCanAbort(opts.interaction.phase)) {
           session.abort();
-          approval?.onAbort();
         }
         await providerController?.close();
         await session.close();

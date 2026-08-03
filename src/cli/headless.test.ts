@@ -1,307 +1,337 @@
-// headless 生命周期单测(docs/09 §6.4 M5 核查修复面):
-// (1) fatal:true 的 error 事件 → 事件照常外发后 shutdown 并 exit 1(「致命错误 → exit 1」);
-// (2) initialPrompt(--json -p 一次性特例)→ 启动注入 prompt,agent_end 后自动 shutdown,
-//     reason 'error' → exit 1、completed → 0。
-// 基础契约(protocol 首行/容错/EOF)已由 tests/headless.test.ts 覆盖,此处不重复。
-// 纪律:注入 PassThrough 流 + 真实 Session + faux provider,零计时器;
-// fatal 通过 AgentConfig.systemPrompt 函数 throw 触发 loop 的防御路径(不 mock 内部)。
-
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { describe, expect, it } from 'bun:test';
 import { PassThrough } from 'node:stream';
-import { createInterface } from 'node:readline';
-import { expect, test, vi } from 'bun:test';
-import { createFauxStreamFn } from '../providers/faux/index.js';
-import type { FauxScript } from '../providers/faux/index.js';
-import { Session } from '../session/index.js';
-import type { RetryOptions } from '../session/index.js';
-import { startHeadless } from './headless.js';
+import type {
+  EventEnvelope,
+  ExternalOpId,
+  OpReceipt,
+  RuntimeOp,
+  ThreadId,
+  WorkspaceId,
+} from '../protocol/index.js';
+import { PROTOCOL_VERSION } from '../protocol/index.js';
+import {
+  createHeadlessPromptOp,
+  startHeadless,
+  type HeadlessRuntimePort,
+} from './headless.js';
 
-interface Ev {
-  type: string;
-  [key: string]: unknown;
-}
+const WORKSPACE_ID = 'workspace-envelope' as WorkspaceId;
+const THREAD_ID = 'thread-envelope' as ThreadId;
+const OP_ID = 'op_e_00000000000000000000000000000001' as ExternalOpId;
+const SECOND_OP_ID = 'op_e_00000000000000000000000000000002' as ExternalOpId;
 
-interface RunOptions {
-  script: FauxScript;
-  initialPrompt?: string;
-  /** 覆盖 systemPrompt(函数 throw 可触发 loop 防御路径的 fatal 事件)。 */
-  systemPrompt?: string | (() => string);
-  retry?: RetryOptions;
-}
-
-interface HeadlessRun {
-  stdin: PassThrough;
-  events: Ev[];
-  exit: Promise<number>;
-  send: (cmd: unknown) => void;
-  waitForEvent: (pred: (e: Ev) => boolean) => Promise<Ev>;
-}
-
-function signal(): { promise: Promise<void>; open: () => void } {
-  let open!: () => void;
-  const promise = new Promise<void>((resolve) => {
-    open = resolve;
-  });
-  return { promise, open };
-}
-
-async function startRun(opts: RunOptions): Promise<HeadlessRun> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-cli-'));
-  const session = await Session.create({
-    dir,
-    ...(opts.retry !== undefined && { retry: opts.retry }),
-    agentConfig: {
-      streamFn: createFauxStreamFn(opts.script),
-      model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
-      tools: [],
-      systemPrompt: opts.systemPrompt ?? 'test',
-      cwd: dir,
-    },
+describe('canonical headless transport', () => {
+  it('constructs a fully identified prompt for --json -p composition', () => {
+    expect(createHeadlessPromptOp({
+      opId: OP_ID,
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      text: 'hello',
+    })).toEqual({
+      type: 'prompt',
+      opId: OP_ID,
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      text: 'hello',
+    });
   });
 
-  const stdin = new PassThrough();
-  const stdout = new PassThrough();
-  const events: Ev[] = [];
-  const waiters: { pred: (e: Ev) => boolean; resolve: (e: Ev) => void }[] = [];
-  const rl = createInterface({ input: stdout, terminal: false });
-  rl.on('line', (line) => {
-    const ev = JSON.parse(line) as Ev; // 管道纪律:每行必须可 parse,否则测试即失败
-    events.push(ev);
-    for (let i = waiters.length - 1; i >= 0; i--) {
-      const w = waiters[i] as (typeof waiters)[number];
-      if (w.pred(ev)) {
-        waiters.splice(i, 1);
-        w.resolve(ev);
+  it('registers hot events, survives invalid input, emits receipt, and drains on shutdown', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const running = startHeadless(runtime, { stdin, stdout: output });
+
+    const hello = await output.waitFor((frame) => frame.type === 'protocol');
+    expect(hello).toEqual({
+      type: 'protocol',
+      protocolVersion: PROTOCOL_VERSION,
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(runtime.order).toEqual(['events']);
+
+    stdin.write('{not-json}\n');
+    await output.waitFor(
+      (frame) => frame.type === 'transport_error' && frame.code === 'invalid_input',
+    );
+    stdin.write(`${JSON.stringify(promptOp())}\n`);
+    const receipt = await output.waitFor((frame) => frame.type === 'op_receipt');
+    expect(receipt).toMatchObject({ type: 'op_receipt', receipt: { accepted: true, opId: OP_ID } });
+    await output.waitFor((frame) =>
+      (frame.event as { type?: unknown } | undefined)?.type === 'runtime_diagnostic',
+    );
+
+    stdin.end();
+    expect(await running).toBe(0);
+    expect(runtime.closed).toBe(true);
+    expect(runtime.order.slice(0, 2)).toEqual(['events', 'submit:prompt']);
+  });
+
+  it('maps partial scope dispatch failure without fabricating a receipt', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    runtime.scopeFailure = true;
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const running = startHeadless(runtime, { stdin, stdout: output });
+    await output.waitFor((frame) => frame.type === 'protocol');
+
+    const scopeOp = {
+      type: 'cancel_scope',
+      opId: OP_ID,
+      workspaceId: WORKSPACE_ID,
+      scope: 'workspace',
+    } satisfies RuntimeOp;
+    stdin.write(`${JSON.stringify(scopeOp)}\n`);
+    const error = await output.waitFor(
+      (frame) => frame.type === 'transport_error' && frame.code === 'scope_dispatch_failed',
+    );
+    expect(error).toMatchObject({
+      fatal: false,
+      opId: OP_ID,
+      failedThreadIds: [THREAD_ID],
+    });
+    expect(output.frames.some((frame) => frame.type === 'op_receipt')).toBe(false);
+    stdin.end();
+    expect(await running).toBe(0);
+  });
+
+  it('dispatches every complete line before an immediate EOF closes the runtime', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    runtime.rejectSubmitAfterClose = true;
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const running = startHeadless(runtime, { stdin, stdout: output });
+    await output.waitFor((frame) => frame.type === 'protocol');
+
+    stdin.end(
+      `${JSON.stringify(promptOp(OP_ID))}\n${JSON.stringify(promptOp(SECOND_OP_ID))}\n`,
+    );
+
+    expect(await running).toBe(0);
+    const receiptIds = output.frames
+      .filter((frame) => frame.type === 'op_receipt')
+      .map((frame) => (frame.receipt as { opId?: unknown }).opId);
+    expect(receiptIds).toEqual([OP_ID, SECOND_OP_ID]);
+    expect(runtime.order).toEqual(['events', 'submit:prompt', 'submit:prompt', 'close']);
+  });
+
+  it('keeps a --json -p initial operation sequence alive through its terminal event', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const createOp = {
+      type: 'thread_create',
+      opId: SECOND_OP_ID,
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: { provider: 'openai', api: 'openai-responses', model: 'gpt-5.6' },
+    } satisfies RuntimeOp;
+    const running = startHeadless(runtime, {
+      stdin,
+      stdout: output,
+      initialOps: [createOp, promptOp()],
+    });
+
+    stdin.end();
+    await output.waitFor((frame) =>
+      frame.type === 'op_receipt' && (frame.receipt as { opId?: unknown }).opId === OP_ID,
+    );
+    expect(runtime.closed).toBe(false);
+
+    runtime.emit({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      opId: OP_ID,
+      seq: 3,
+      timestamp: 3,
+      event: { type: 'agent_end', reason: 'completed', messages: [] },
+    });
+
+    expect(await running).toBe(0);
+    expect(runtime.order).toEqual(['events', 'submit:thread_create', 'submit:prompt', 'close']);
+  });
+
+  it('rejects identity-free legacy commands instead of translating them', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const running = startHeadless(runtime, { stdin, stdout: output });
+    await output.waitFor((frame) => frame.type === 'protocol');
+
+    stdin.end(`${JSON.stringify({ type: 'prompt', text: 'legacy' })}\n`);
+
+    expect(await running).toBe(0);
+    expect(runtime.order).toEqual(['events', 'submit:prompt', 'close']);
+    expect(output.frames.some((frame) => frame.type === 'op_receipt')).toBe(false);
+    expect(output.frames).toContainEqual(expect.objectContaining({
+      type: 'transport_error',
+      code: 'invalid_input',
+    }));
+  });
+
+  it('drains a typed stream failure and exits 1', async () => {
+    const runtime = new FakeHeadlessRuntime();
+    const stdin = new PassThrough();
+    const output = new CapturingOutput();
+    const running = startHeadless(runtime, { stdin, stdout: output });
+    await output.waitFor((frame) => frame.type === 'protocol');
+
+    const failure = Object.assign(new Error('cursor fell behind'), {
+      code: 'event_subscription_gap',
+      threadId: THREAD_ID,
+      lastDeliveredSeq: 4,
+      nextAvailableSeq: 8,
+    });
+    runtime.failEvents(failure);
+    const frame = await output.waitFor(
+      (candidate) => candidate.type === 'transport_error' && candidate.fatal === true,
+    );
+    expect(frame).toMatchObject({
+      code: 'event_subscription_gap',
+      threadId: THREAD_ID,
+      lastDeliveredSeq: 4,
+      nextAvailableSeq: 8,
+    });
+    expect(await running).toBe(1);
+    expect(runtime.closed).toBe(true);
+  });
+});
+
+class FakeHeadlessRuntime implements HeadlessRuntimePort {
+  readonly workspaceId = WORKSPACE_ID;
+  readonly order: string[] = [];
+  readonly #events = new FailableAsyncQueue<Readonly<EventEnvelope>>();
+  closed = false;
+  scopeFailure = false;
+  rejectSubmitAfterClose = false;
+
+  async submit(op: RuntimeOp): Promise<OpReceipt> {
+    if (this.rejectSubmitAfterClose && this.closed) {
+      throw Object.assign(new Error('runtime closed'), { code: 'runtime_closed' });
+    }
+    this.order.push(`submit:${op.type}`);
+    if (op.type === 'prompt' && (op.opId === undefined || op.workspaceId === undefined || op.threadId === undefined)) {
+      throw Object.assign(new Error('missing prompt identity'), { code: 'invalid_runtime_op' });
+    }
+    if (this.scopeFailure && op.type === 'cancel_scope') {
+      throw Object.assign(new Error('one target writer failed'), {
+        code: 'scope_dispatch_failed',
+        opId: op.opId,
+        failedThreadIds: [THREAD_ID],
+      });
+    }
+    this.#events.push({
+      workspaceId: WORKSPACE_ID,
+      threadId: op.type === 'cancel_scope' ? THREAD_ID : op.threadId,
+      opId: op.opId,
+      seq: 1,
+      timestamp: 1,
+      event: {
+        type: 'runtime_diagnostic',
+        severity: 'warning',
+        code: 'fake',
+        message: 'fake event',
+        scope: 'thread',
+      },
+    });
+    return {
+      accepted: true,
+      opId: op.opId,
+      duplicate: false,
+      ...(op.type !== 'cancel_scope' && { threadId: op.threadId }),
+    };
+  }
+
+  events(): AsyncIterable<Readonly<EventEnvelope>> {
+    this.order.push('events');
+    return this.#events;
+  }
+
+  async close(): Promise<void> {
+    this.order.push('close');
+    this.closed = true;
+    this.#events.end();
+  }
+
+  failEvents(error: unknown): void {
+    this.#events.fail(error);
+  }
+
+  emit(event: Readonly<EventEnvelope>): void {
+    this.#events.push(event);
+  }
+}
+
+class CapturingOutput {
+  readonly frames: Record<string, unknown>[] = [];
+  readonly #waiters: {
+    predicate: (frame: Record<string, unknown>) => boolean;
+    resolve: (frame: Record<string, unknown>) => void;
+  }[] = [];
+
+  enqueue = (chunk: string): void => {
+    const frame = JSON.parse(chunk) as Record<string, unknown>;
+    this.frames.push(frame);
+    for (let index = this.#waiters.length - 1; index >= 0; index--) {
+      const waiter = this.#waiters[index];
+      if (waiter !== undefined && waiter.predicate(frame)) {
+        this.#waiters.splice(index, 1);
+        waiter.resolve(frame);
       }
     }
-  });
-
-  const exit = startHeadless(session, {
-    stdin,
-    stdout: {
-      enqueue: (chunk) => {
-        stdout.write(chunk);
-      },
-      drain: () => Promise.resolve(),
-    },
-    ...(opts.initialPrompt !== undefined && { initialPrompt: opts.initialPrompt }),
-  });
-  return {
-    stdin,
-    events,
-    exit,
-    send: (cmd) => {
-      stdin.write(`${JSON.stringify(cmd)}\n`);
-    },
-    waitForEvent: (pred) => {
-      const found = events.find(pred);
-      if (found !== undefined) return Promise.resolve(found);
-      return new Promise<Ev>((resolve) => {
-        waiters.push({ pred, resolve });
-      });
-    },
   };
+
+  drain = async (): Promise<void> => {};
+
+  waitFor(
+    predicate: (frame: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    const existing = this.frames.find(predicate);
+    if (existing !== undefined) return Promise.resolve(existing);
+    return new Promise((resolve) => this.#waiters.push({ predicate, resolve }));
+  }
 }
 
-test('fatal error 事件:照常外发后走 shutdown 路径,exit 1(docs/09 §6.4)', async () => {
-  // systemPrompt 函数 throw → streamAssistantResponse 防御路径发 {type:'error',fatal:true}
-  const run = await startRun({
-    script: { turns: [{ events: [{ kind: 'text', text: 'unreachable' }] }] },
-    systemPrompt: () => {
-      throw new Error('system prompt bug');
-    },
-  });
+class FailableAsyncQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
+  readonly #values: T[] = [];
+  readonly #waiters: {
+    resolve: (result: IteratorResult<T>) => void;
+    reject: (error: unknown) => void;
+  }[] = [];
+  #closed = false;
+  #failure: unknown;
 
-  run.send({ type: 'prompt', text: 'go' });
-  const fatal = await run.waitForEvent((e) => e.type === 'error' && e['fatal'] === true);
-  expect(String(fatal['message'])).toContain('system prompt bug');
-
-  // 不需要 shutdown 命令/EOF:fatal 自行触发退出,且退出码为 1(不是 shutdown 的 0)
-  await expect(run.exit).resolves.toBe(1);
-  // 事件流完整闭合:fatal 后 agent_end(error) 仍照常外发(abort→close 不吞尾部事件)
-  const end = run.events.find((e) => e.type === 'agent_end');
-  expect(end?.['reason']).toBe('error');
-});
-
-test('initialPrompt 一次性特例:注入 prompt → agent_end(completed) 自动 shutdown,exit 0', async () => {
-  const run = await startRun({
-    script: { turns: [{ events: [{ kind: 'text', text: 'one shot answer' }] }], onExhausted: 'emptyStop' },
-    initialPrompt: 'say it once',
-  });
-
-  // 不写任何 stdin 命令:事件流完整外发后自动退出
-  await expect(run.exit).resolves.toBe(0);
-  expect(run.events[0]).toEqual({ type: 'protocol', protocolVersion: '1.1.0' });
-  const types = run.events.map((e) => e.type);
-  expect(types).toContain('agent_start');
-  expect(types).toContain('agent_end');
-  const user = run.events.find(
-    (e) => e.type === 'message_start' && (e['message'] as { role?: string }).role === 'user',
-  );
-  expect((user?.['message'] as { content: { text?: string }[] }).content[0]?.text).toBe('say it once');
-});
-
-test('initialPrompt 一次性特例:stdin EOF 不会中止仍在等待的真实异步任务', async () => {
-  const retryGate = signal();
-  const run = await startRun({
-    script: {
-      turns: [
-        {
-          error: {
-            message: 'retry after EOF',
-            details: { kind: 'http', status: 503, retryable: true },
-          },
-        },
-        { events: [{ kind: 'text', text: 'answer after EOF' }] },
-      ],
-      onExhausted: 'emptyStop',
-    },
-    initialPrompt: 'keep running',
-    retry: {
-      jitter: () => 0.5,
-      sleep: async () => {
-        await retryGate.promise;
-        return false;
-      },
-    },
-  });
-
-  await run.waitForEvent((event) =>
-    event.type === 'agent_end' && event['willRetry'] === true);
-  run.stdin.end();
-  retryGate.open();
-
-  await expect(run.exit).resolves.toBe(0);
-  const ends = run.events.filter((event) => event.type === 'agent_end');
-  expect(ends).toHaveLength(2);
-  expect(ends.at(-1)?.['reason']).toBe('completed');
-  expect(JSON.stringify(run.events)).toContain('answer after EOF');
-});
-
-test('initialPrompt 一次性特例:agent_end reason error → exit 1(脚本可感知)', async () => {
-  const run = await startRun({
-    script: { turns: [{ error: { message: 'provider blew up' } }], onExhausted: 'emptyStop' },
-    initialPrompt: 'doomed',
-  });
-
-  await expect(run.exit).resolves.toBe(1);
-  const end = run.events.find((e) => e.type === 'agent_end');
-  expect(end?.['reason']).toBe('error');
-});
-
-test('initialPrompt 一次性特例:RetrySleep reject 发 fatal error 并 exit 1', async () => {
-  const run = await startRun({
-    script: {
-      turns: [
-        {
-          error: {
-            message: 'temporary outage',
-            details: { kind: 'http', status: 503, retryable: true },
-          },
-        },
-      ],
-    },
-    initialPrompt: 'retry once',
-    retry: {
-      jitter: () => 0.5,
-      sleep: () => Promise.reject(new Error('injected sleep failure')),
-    },
-  });
-
-  await expect(run.exit).resolves.toBe(1);
-  const fatal = run.events.find((e) => e.type === 'error' && e['fatal'] === true);
-  expect(String(fatal?.['message'])).toContain('injected sleep failure');
-  const ends = run.events.filter((e) => e.type === 'agent_end');
-  expect(ends).toHaveLength(1);
-  expect(ends[0]?.['willRetry']).toBe(true);
-});
-
-test('protocol stdout 失败会关闭 Session、只诊断一次并 exit 1', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-output-failure-'));
-  const session = await Session.create({
-    dir,
-    agentConfig: {
-      streamFn: createFauxStreamFn({ turns: [], onExhausted: 'emptyStop' }),
-      model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
-      tools: [],
-      systemPrompt: 'test',
-      cwd: dir,
-    },
-  });
-  const failure = new Error('broken stdout');
-  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-
-  try {
-    await expect(
-      startHeadless(session, {
-        stdin: new PassThrough(),
-        stdout: {
-          enqueue: () => undefined,
-          drain: () => Promise.reject(failure),
-        },
-      }),
-    ).resolves.toBe(1);
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    await expect(session.prompt('after close')).rejects.toThrow(/closed/i);
-  } finally {
-    errorSpy.mockRestore();
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return this;
   }
-});
 
-test('Session listener 等待每条 NDJSON drain 后才放行下一事件', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'coda-headless-backpressure-'));
-  const session = await Session.create({
-    dir,
-    agentConfig: {
-      streamFn: createFauxStreamFn({
-        turns: [{ events: [{ kind: 'text', text: 'answer' }] }],
-        onExhausted: 'emptyStop',
-      }),
-      model: { ref: { provider: 'faux', api: 'faux', model: 'test' } },
-      tools: [],
-      systemPrompt: 'test',
-      cwd: dir,
-    },
-  });
-  const stdin = new PassThrough();
-  const protocolDrain = signal();
-  const firstEventDrain = signal();
-  const firstEventBlocked = signal();
-  const agentEnded = signal();
-  const events: Ev[] = [];
-  let drainCalls = 0;
+  next(): Promise<IteratorResult<T>> {
+    const value = this.#values.shift();
+    if (value !== undefined) return Promise.resolve({ done: false, value });
+    if (this.#failure !== undefined) return Promise.reject(this.#failure);
+    if (this.#closed) return Promise.resolve({ done: true, value: undefined });
+    return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
+  }
 
-  const exit = startHeadless(session, {
-    stdin,
-    stdout: {
-      enqueue(chunk) {
-        const event = JSON.parse(chunk) as Ev;
-        events.push(event);
-        if (event.type === 'agent_end') agentEnded.open();
-      },
-      drain() {
-        drainCalls++;
-        if (drainCalls === 1) return protocolDrain.promise;
-        if (drainCalls === 2) {
-          firstEventBlocked.open();
-          return firstEventDrain.promise;
-        }
-        return Promise.resolve();
-      },
-    },
-  });
+  push(value: T): void {
+    const waiter = this.#waiters.shift();
+    if (waiter !== undefined) waiter.resolve({ done: false, value });
+    else this.#values.push(value);
+  }
 
-  expect(events.map((e) => e.type)).toEqual(['protocol']);
-  protocolDrain.open();
-  stdin.write(`${JSON.stringify({ type: 'prompt', text: 'go' })}\n`);
+  end(): void {
+    this.#closed = true;
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter.resolve({ done: true, value: undefined });
+    }
+  }
 
-  await firstEventBlocked.promise;
-  expect(events.map((e) => e.type)).toEqual(['protocol', 'agent_start']);
+  fail(error: unknown): void {
+    this.#failure = error;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+  }
+}
 
-  firstEventDrain.open();
-  await agentEnded.promise;
-  stdin.end();
-  await expect(exit).resolves.toBe(0);
-});
+function promptOp(opId: ExternalOpId = OP_ID): Extract<RuntimeOp, { type: 'prompt' }> {
+  return createHeadlessPromptOp({ opId, workspaceId: WORKSPACE_ID, threadId: THREAD_ID, text: 'hello' });
+}

@@ -1,4 +1,4 @@
-// Phase 3 package contract: external consumers compose through only the three declared entries.
+// Canonical package contract: external consumers compose through only the three declared entries.
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
   existsSync,
@@ -16,12 +16,12 @@ import path from 'node:path';
 const ROOT = path.resolve(import.meta.dir, '..');
 const CAPABILITIES_JS = path.join(ROOT, 'dist', 'capabilities', 'index.js');
 const CAPABILITIES_TYPES = path.join(ROOT, 'dist', 'capabilities', 'index.d.ts');
-const LEGACY_TOOLS_JS = path.join(ROOT, 'dist', 'legacy-coding-tools', 'index.js');
-const LEGACY_TOOLS_TYPES = path.join(
+const CODING_CAPABILITIES_JS = path.join(ROOT, 'dist', 'coding-capabilities', 'index.js');
+const CODING_CAPABILITIES_TYPES = path.join(
   ROOT,
   'dist',
   'integrations',
-  'legacy-coding-tools',
+  'coding-capabilities',
   'index.d.ts',
 );
 const RUNTIME_JS = path.join(ROOT, 'dist', 'runtime', 'index.js');
@@ -33,13 +33,13 @@ afterEach(() => {
   }
 });
 
-describe('Phase 3 capability package exports', () => {
+describe('canonical capability package exports', () => {
   it('imports both ESM entries externally and registers exactly the eight explicit bindings', async () => {
     for (const artifact of [
       CAPABILITIES_JS,
       CAPABILITIES_TYPES,
-      LEGACY_TOOLS_JS,
-      LEGACY_TOOLS_TYPES,
+      CODING_CAPABILITIES_JS,
+      CODING_CAPABILITIES_TYPES,
     ]) {
       expect(existsSync(artifact)).toBe(true);
     }
@@ -50,10 +50,10 @@ describe('Phase 3 capability package exports', () => {
       probePath,
       [
         "const capabilities = await import('coda/capabilities');",
-        "const legacyTools = await import('coda/legacy-coding-tools');",
+        "const coding = await import('coda/coding-capabilities');",
         'const registry = capabilities.createCapabilityRegistry();',
-        'const bindings = legacyTools.createCodingToolCapabilityBindings();',
-        'const registrations = bindings.map((binding) => registry.register(capabilities.adaptLegacyTool(binding)));',
+        'const nativeRegistrations = coding.createCodingCapabilityRegistrations();',
+        'const registrations = nativeRegistrations.map((registration) => registry.register(registration));',
         'console.log(JSON.stringify({',
         '  factoryKinds: [',
         '    capabilities.createCapabilityRegistry,',
@@ -61,9 +61,9 @@ describe('Phase 3 capability package exports', () => {
         '    capabilities.createPromptAssembler,',
         '    capabilities.createPolicyEngine,',
         '  ].map((factory) => typeof factory),',
-        '  hasGenericAdapter: typeof capabilities.adaptLegacyTool === "function",',
-        '  leaksConcreteTools: Object.hasOwn(capabilities, "createCodingToolCapabilityBindings"),',
-        '  bindingNames: bindings.map((binding) => binding.tool.name),',
+        '  hasRemovedAdapter: Object.hasOwn(capabilities, "adaptLegacyTool"),',
+        '  leaksConcreteTools: Object.hasOwn(capabilities, "createCodingCapabilityRegistrations"),',
+        '  registrationNames: nativeRegistrations.map((registration) => registration.id),',
         '  registrations,',
         '  catalogNames: registry.snapshot().entries.map((entry) => entry.id),',
         '}));',
@@ -76,9 +76,9 @@ describe('Phase 3 capability package exports', () => {
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout) as unknown).toEqual({
       factoryKinds: ['function', 'function', 'function', 'function'],
-      hasGenericAdapter: true,
+      hasRemovedAdapter: false,
       leaksConcreteTools: false,
-      bindingNames: ['read', 'ls', 'glob', 'grep', 'bash', 'edit', 'write', 'plan'],
+      registrationNames: ['read', 'ls', 'glob', 'grep', 'bash', 'edit', 'write', 'plan'],
       registrations: [
         { ok: true, revision: 1 },
         { ok: true, revision: 2 },
@@ -95,7 +95,7 @@ describe('Phase 3 capability package exports', () => {
 
     const providerImport = /(?:from\s*|import\()\s*["'](?:openai(?:\/[^"']*)?|@anthropic-ai\/sdk(?:\/[^"']*)?)["']/;
     expect(readFileSync(CAPABILITIES_JS, 'utf8')).not.toMatch(providerImport);
-    expect(readFileSync(LEGACY_TOOLS_JS, 'utf8')).not.toMatch(providerImport);
+    expect(readFileSync(CODING_CAPABILITIES_JS, 'utf8')).not.toMatch(providerImport);
     expect(readFileSync(RUNTIME_JS, 'utf8')).not.toMatch(
       /(?:from\s*|import\()\s*["'](?:zod|openai(?:\/[^"']*)?|@anthropic-ai\/sdk(?:\/[^"']*)?)["']/,
     );
@@ -109,10 +109,10 @@ describe('Phase 3 capability package exports', () => {
       [
         "const runtimeApi = await import('coda/runtime');",
         "const capabilities = await import('coda/capabilities');",
-        "const legacyTools = await import('coda/legacy-coding-tools');",
+        "const coding = await import('coda/coding-capabilities');",
         'const capabilityRegistry = capabilities.createCapabilityRegistry();',
-        'const registrations = legacyTools.createCodingToolCapabilityBindings()',
-        '  .map((binding) => capabilityRegistry.register(capabilities.adaptLegacyTool(binding)));',
+        'const registrations = coding.createCodingCapabilityRegistrations()',
+        '  .map((registration) => capabilityRegistry.register(registration));',
         'if (registrations.some((result) => !result.ok)) throw new Error("capability registration failed");',
         'const providerRegistry = capabilities.createProviderAdapterRegistry();',
         'const unexpectedCalls = {',
@@ -137,7 +137,7 @@ describe('Phase 3 capability package exports', () => {
         '    resolveCeiling: () => unexpected("permissionPolicy"),',
         '  },',
         '  threadDriverFactory: {',
-        '    requirements: { approvalMode: "legacy_session_edge", capabilityMode: "registry" },',
+        '    requirements: { capabilityMode: "registry" },',
         '    create: () => unexpected("driverCreate"),',
         '    resume: () => unexpected("driverResume"),',
         '  },',
@@ -199,7 +199,6 @@ describe('Phase 3 capability package exports', () => {
       sourcePath,
       [
         'import {',
-        '  adaptLegacyTool,',
         '  createCapabilityRegistry,',
         '  createPolicyEngine,',
         '  createPromptAssembler,',
@@ -208,9 +207,8 @@ describe('Phase 3 capability package exports', () => {
         '  type RuntimeCapabilityServices as CapabilityServices,',
         "} from 'coda/capabilities';",
         'import {',
-        '  createCodingToolCapabilityBindings,',
-        '  type LegacyToolCapabilityBinding,',
-        "} from 'coda/legacy-coding-tools';",
+        '  createCodingCapabilityRegistrations,',
+        "} from 'coda/coding-capabilities';",
         'import type {',
         '  RegistryCreateRuntimeOptions,',
         '  RuleFreshnessResult as RuntimeRuleFreshnessResult,',
@@ -220,8 +218,8 @@ describe('Phase 3 capability package exports', () => {
         'const providerRegistry = createProviderAdapterRegistry();',
         'const promptAssembler = createPromptAssembler();',
         'const policyEngine = createPolicyEngine();',
-        'const binding: Readonly<LegacyToolCapabilityBinding> = createCodingToolCapabilityBindings()[0]!;',
-        'capabilityRegistry.register(adaptLegacyTool(binding));',
+        'const registration = createCodingCapabilityRegistrations()[0]!;',
+        'capabilityRegistry.register(registration);',
         "const readers: Pick<RuntimeServices, 'capabilities' | 'providers' | 'promptAssembler' | 'policyEngine'> = {",
         '  capabilities: capabilityRegistry,',
         '  providers: providerRegistry,',

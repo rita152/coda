@@ -3,14 +3,14 @@
 // (pi-mono 同款约定:工具只 throw,不自己构造 error 结果)。
 
 import type { TextPart, ToolCallPart, ToolResultMessage } from '../protocol/index.js';
-import type { ToolOutput, TruncatedDetails } from '../tools/types.js';
+import type { CapabilityResult } from '../capabilities/types.js';
 import { clipHead, MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, safeBasename, spillToFile } from '../shared/index.js';
 import { newMessageId } from './ids.js';
 
 /** 成功结果:应用框架级截断 post-hook(工具自带截断标记则跳过)。 */
 export function toToolResultMessage(
   call: ToolCallPart,
-  output: ToolOutput,
+  output: CapabilityResult,
   spillDir: string,
 ): ToolResultMessage {
   const selfTruncated = (output.details as TruncatedDetails | undefined)?.truncated === true;
@@ -23,9 +23,8 @@ export function toToolResultMessage(
     toolName: call.name,
     content,
     isError: false,
-    // Optional protocol fields are presence-based. Leaving an own `details: undefined` property
-    // is invisible in legacy JSON output but is rejected by Runtime's strict-JSON envelope
-    // boundary before tool_execution_end can be committed.
+    // Optional protocol fields are presence-based. An own `details: undefined` property is
+    // rejected by Runtime's strict-JSON envelope boundary before tool_execution_end is committed.
     ...(output.details !== undefined && { details: output.details }),
   };
 }
@@ -82,9 +81,9 @@ export function failTruncatedToolCalls(toolCalls: ToolCallPart[]): ToolResultMes
  */
 function applyTruncationHook(
   call: ToolCallPart,
-  content: ToolOutput['content'],
+  content: CapabilityResult['content'],
   spillDir: string,
-): ToolOutput['content'] {
+): CapabilityResult['content'] {
   const textParts = content.filter((p): p is TextPart => p.type === 'text');
   if (textParts.length === 0) return content;
 
@@ -104,4 +103,8 @@ function applyTruncationHook(
   const truncatedPart: TextPart = { type: 'text', text: clip.text + note };
   // 保留非文本 part(图片),文本合并为单一截断块
   return [truncatedPart, ...content.filter((p) => p.type !== 'text')];
+}
+
+interface TruncatedDetails {
+  readonly truncated?: boolean;
 }

@@ -16,8 +16,8 @@ import {
   summarize,
 } from './compactor.js';
 import type { CompactionOptions, ResolvedCompactionOptions } from './compactor.js';
-import type { CompactionRecord } from './store.js';
-import { syntheticSummaryMessage } from './store.js';
+import { syntheticSummaryMessage } from './compactor.js';
+import type { ThreadCompactionCheckpoint } from './thread-runtime-ports.js';
 
 interface CompactionState {
   readonly tailStartId: string;
@@ -41,7 +41,7 @@ export class CompactionCoordinator {
   #pendingThreshold = false;
   #overflowCompactions = 0;
   #state: CompactionState | undefined;
-  #lastCheckpoint: CompactionRecord | undefined;
+  #lastCheckpoint: ThreadCompactionCheckpoint | undefined;
 
   constructor(options?: CompactionOptions) {
     this.#options = resolveCompactionOptions(options);
@@ -59,11 +59,11 @@ export class CompactionCoordinator {
     return this.#options.summaryMaxTokens;
   }
 
-  checkpoint(): Readonly<CompactionRecord> | undefined {
+  checkpoint(): Readonly<ThreadCompactionCheckpoint> | undefined {
     return this.#lastCheckpoint === undefined ? undefined : { ...this.#lastCheckpoint };
   }
 
-  restore(record: CompactionRecord): void {
+  restore(record: ThreadCompactionCheckpoint): void {
     this.#lastCheckpoint = { ...record };
     this.#state = {
       tailStartId: record.tailStartId,
@@ -71,7 +71,7 @@ export class CompactionCoordinator {
     };
   }
 
-  install(record: CompactionRecord): void {
+  install(record: ThreadCompactionCheckpoint): void {
     this.restore(record);
   }
 

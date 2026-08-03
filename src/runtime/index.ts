@@ -55,7 +55,7 @@ export type {
 } from '../capabilities/types.js';
 
 export * from './errors.js';
-export type { EventSubscriptionOptions } from './event-stream.js';
+export type { EventSubscriptionOptions } from '../session/event-hub.js';
 export { createFileRuntimeStorage } from './file-storage.js';
 export type { FileRuntimeStorageOptions } from './file-storage.js';
 export { createMemoryRuntimeStorage } from './memory-storage.js';
@@ -67,5 +67,4 @@ export type {
   CreateRuntimeOptions,
   RegistryCreateRuntimeOptions,
   RuntimePort,
-  StaticCreateRuntimeOptions,
 } from './supervisor.js';

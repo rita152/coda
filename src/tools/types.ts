@@ -1,30 +1,20 @@
-// 工具框架类型(canonical,规格见 docs/07-tools.md §1.1)。
-// 本文件是 agent 目录对 tools 的唯一合法 import(ESLint zone 白名单,见 docs/02-architecture.md):
-// 只放框架契约,不放任何具体工具实现。
+// 内置 coding capability 的底层执行类型。schema、policy、identity 与 executor 的
+// 原子绑定由 integrations/coding-capabilities 直接注册为 CapabilityRegistration；
+// 本文件不再定义第二套工具注册协议。
 
-import type { z } from 'zod';
 import type { ImagePart, TextPart } from '../protocol/index.js';
 import type { FileTrackerPort } from '../shared/index.js';
 
-export type ToolKind = 'read' | 'search' | 'edit' | 'execute' | 'plan';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- P 默认 any:异构 ToolDefinition[] 的既定形态(docs/07 §1.1)
-export interface ToolDefinition<P = any, D = unknown> {
-  name: string;
-  description: string;
-  parameters: z.ZodType<P>;                       // z.toJSONSchema() 渲染进 Context.tools
-  executionMode?: 'sequential';                   // 声明则整批退化为顺序执行(bash/edit/write 声明)
-  promptSnippet?: string;                         // 拼进 system prompt 的使用指引
-  kind?: ToolKind;                                // 权限分级用(M6),缺省视为 'execute'
-  prepareArguments?: (raw: unknown) => unknown;   // zod 校验前的无损结构修补(docs/07 §1.4)
-  execute(call: { id: string; args: P }, ctx: ToolContext): Promise<ToolOutput<D>>;
+export interface ToolExecutionInput<P> {
+  readonly id: string;
+  readonly args: P;
 }
 
 export interface ToolContext {
-  cwd: string;
-  signal: AbortSignal;
-  onUpdate?: (u: { output?: string }) => void;    // 累计快照(bash 100ms 节流),火后不理
-  fileTracker: FileTrackerPort;
+  readonly cwd: string;
+  readonly signal: AbortSignal;
+  readonly onUpdate?: (update: Readonly<Record<string, unknown>>) => void;
+  readonly fileTracker: FileTrackerPort;
 }
 
 export interface ToolOutput<D = unknown> {

@@ -172,7 +172,7 @@ describe('UX0 terminal environment characterization', () => {
   });
 
   test('the main routing predicate rejects TERM=dumb and accepts tmux and SSH TTYs', () => {
-    const flags = { json: false, eventFormat: 'legacy' as const, prompt: undefined };
+    const flags = { json: false, prompt: undefined };
     const terminal = (environment: Readonly<Record<string, string | undefined>>) => ({
       stdinIsTTY: true,
       stdoutIsTTY: true,

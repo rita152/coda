@@ -25,36 +25,49 @@ import type {
   PolicyGrantRepository,
   RuntimeCapabilityServices,
 } from '../capabilities/index.js';
-import { WorkspaceEventStream } from './event-stream.js';
+import { EventHub } from '../session/event-hub.js';
 import { createMemoryRuntimeStorage } from './memory-storage.js';
 import type {
-  LegacyApprovalAdapter,
-  LegacyApprovalInvocationResult,
-  LegacyApprovalPatternRepository,
-  LegacyThreadSeedRecord,
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
   RuntimeIdentityFactory,
   RuntimeStoragePort,
   RuntimeWorkspaceStoragePort,
+  RuntimeThreadDriverAttachment,
+  RuntimeThreadDriverHostServices,
   SupervisorOpLedgerRecord,
-  ThreadDriverAttachment,
   ThreadDriverCheckpoint,
   ThreadDriverCompletion,
   ThreadDriverFactory,
-  ThreadDriverHostServices,
   ThreadDriverPort,
   ThreadJournalPort,
   ThreadMetaRecord,
+  ThreadSeedRecord,
 } from './ports.js';
-import { createRuntime } from './supervisor.js';
-import { emptyCheckpoint, foldThreadJournal, ThreadJournalWriter } from './thread-journal.js';
+import { createRuntime as createCanonicalRuntime } from './supervisor.js';
+import type { CreateRuntimeOptions } from './supervisor.js';
+import { emptyCheckpoint, foldThreadJournal, ThreadJournalWriter } from '../session/thread-journal.js';
 
 const WORKSPACE_ID = 'workspace-supervisor-recovery' as WorkspaceId;
 const CWD = '/runtime/supervisor-recovery';
 const MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'recovery' } };
 const CEILING = { revision: 'test-ceiling', constraints: [] } as const;
+
+type TestCreateRuntimeOptions = Omit<CreateRuntimeOptions, 'capabilityMode' | 'capabilityServices'> & {
+  readonly capabilityMode?: 'registry';
+  readonly capabilityServices?: Readonly<RuntimeCapabilityServices>;
+};
+
+function createRuntime(
+  options: TestCreateRuntimeOptions,
+): ReturnType<typeof createCanonicalRuntime> {
+  return createCanonicalRuntime({
+    capabilityMode: 'registry',
+    capabilityServices: registryCapabilityServices(createPolicyEngine()),
+    ...options,
+  });
+}
 
 describe('Supervisor recovery and idempotency', () => {
   test.each([
@@ -252,7 +265,7 @@ describe('Supervisor recovery and idempotency', () => {
 
   test.each([
     ['thread', '', 'invalid_thread_id'],
-    ['op', '', 'invalid_legacy_identity_input'],
+    ['op', '', 'invalid_identity_input'],
   ] as const)('rejects an invalid identityFactory %s id at the public factory boundary', async (
     kind,
     value,
@@ -523,8 +536,8 @@ describe('Supervisor recovery and idempotency', () => {
     }
 
     const forkSeed = (await loadThreadRecords(storage, forkThreadId)).find((record) =>
-      record.type === 'legacy_seed');
-    expect(forkSeed?.type === 'legacy_seed' ? forkSeed.turnProvenance : undefined)
+      record.type === 'thread_seed');
+    expect(forkSeed?.type === 'thread_seed' ? forkSeed.turnProvenance : undefined)
       .toHaveLength(2);
 
     const secondDrivers = new RecordingDriverFactory();
@@ -1225,120 +1238,6 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
-  test('definitely-not-applied allow_always recovery aborts the request skipped by its durable claim', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-control-definitely-not-applied' as ThreadId;
-    const seeded = await seedControlResponseCrash(storage, threadId, 'started', true);
-    const runtime = await openRuntime(storage, new WorkspaceFatalApprovalFactory());
-    try {
-      const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
-      expect(folded.checkpoint.frontend.pendingControls).toEqual([]);
-      expect(folded.controlClaims.has(seeded.requestId)).toBe(false);
-      expect(folded.envelopes.find((envelope) =>
-        envelope.event.type === 'control_resolved'
-        && envelope.event.requestId === seeded.requestId)).toMatchObject({
-        opId: deriveOpId({
-          purpose: 'control_recovery',
-          workspaceId: WORKSPACE_ID,
-          parts: [threadId, seeded.requestId],
-        }),
-        event: { type: 'control_resolved', decision: 'aborted' },
-      });
-      expect(folded.mailbox.get(seeded.responseOpId)).toMatchObject({
-        state: 'completed',
-        outcome: 'interrupted',
-      });
-    } finally {
-      await runtime.close().catch(() => undefined);
-    }
-  });
-
-  test('an approval fatal gates and synchronously cancels every active thread in the workspace', async () => {
-    const drivers = new WorkspaceFatalApprovalFactory();
-    const runtime = await openRuntime(createMemoryRuntimeStorage(), drivers);
-    const firstThreadId = runtime.newThreadId();
-    const secondThreadId = runtime.newThreadId();
-    const iterator = runtime.events()[Symbol.asyncIterator]();
-    try {
-      expect((await runtime.submit(createThreadOp(runtime.newOpId(), firstThreadId))).accepted).toBe(true);
-      expect((await runtime.submit(createThreadOp(runtime.newOpId(), secondThreadId))).accepted).toBe(true);
-      const firstPrompt = await runtime.submit(prompt(runtime.newOpId(), firstThreadId, 'first active'));
-      const secondPrompt = await runtime.submit(prompt(runtime.newOpId(), secondThreadId, 'second active'));
-      if (!firstPrompt.accepted || firstPrompt.runId === undefined) throw new Error('first prompt failed');
-      if (!secondPrompt.accepted || secondPrompt.runId === undefined) throw new Error('second prompt failed');
-
-      const approval = drivers.requestApproval(firstThreadId, firstPrompt.runId);
-      const request = await nextEvent(iterator, (envelope) =>
-        envelope.threadId === firstThreadId && envelope.event.type === 'control_request');
-      if (request.event.type !== 'control_request') throw new Error('missing approval request');
-      const response = {
-        type: 'control_response',
-        opId: runtime.newOpId(),
-        workspaceId: WORKSPACE_ID,
-        threadId: firstThreadId,
-        requestId: request.event.requestId,
-        decision: 'allow_always',
-      } as const;
-      expect((await runtime.submit(response)).accepted).toBe(true);
-
-      await expect(approval).resolves.toEqual({ kind: 'aborted' });
-      expect(drivers.dispatches(firstThreadId).filter((command) => command.op.type === 'abort')).toHaveLength(1);
-      expect(drivers.dispatches(secondThreadId).filter((command) => command.op.type === 'abort')).toHaveLength(1);
-      await expect(drivers.requestApproval(secondThreadId, secondPrompt.runId)).rejects.toMatchObject({
-        code: 'legacy_approval_conflict',
-      });
-      expect(await runtime.submit(response)).toMatchObject({
-        accepted: true,
-        duplicate: true,
-        opId: response.opId,
-      });
-      expect(await runtime.submit({ ...response, decision: 'deny' })).toMatchObject({
-        accepted: false,
-        duplicate: false,
-        reason: 'op_id_conflict',
-      });
-      await expect(runtime.submit(prompt(runtime.newOpId(), secondThreadId, 'must remain gated')))
-        .rejects.toMatchObject({ code: 'legacy_approval_conflict' });
-    } finally {
-      await iterator.return?.();
-      await runtime.close().catch(() => undefined);
-    }
-  });
-
-  test('commits a tolerant-load approval warning once as a canonical runtime diagnostic', async () => {
-    const base = createMemoryRuntimeStorage();
-    const runtime = await openRuntime(withLegacyApprovalStartupDiagnostic(base), new WorkspaceFatalApprovalFactory());
-    const firstThreadId = runtime.newThreadId();
-    const secondThreadId = runtime.newThreadId();
-    const iterator = runtime.events()[Symbol.asyncIterator]();
-    try {
-      expect((await runtime.submit(createThreadOp(runtime.newOpId(), firstThreadId))).accepted).toBe(true);
-      const warning = await nextEvent(iterator, (envelope) =>
-        envelope.threadId === firstThreadId
-        && envelope.event.type === 'runtime_diagnostic'
-        && envelope.event.code === 'legacy_approvals_invalid_ignored');
-      expect(warning.event).toEqual({
-        type: 'runtime_diagnostic',
-        severity: 'warning',
-        code: 'legacy_approvals_invalid_ignored',
-        message: 'Invalid legacy approvals were ignored',
-        scope: 'thread',
-      });
-
-      expect((await runtime.submit(createThreadOp(runtime.newOpId(), secondThreadId))).accepted).toBe(true);
-      const records = [
-        ...await loadThreadRecords(base, firstThreadId),
-        ...await loadThreadRecords(base, secondThreadId),
-      ];
-      expect(records.flatMap((record) => record.type === 'commit' ? record.envelopes : [])
-        .filter((envelope) => envelope.event.type === 'runtime_diagnostic'
-          && envelope.event.code === 'legacy_approvals_invalid_ignored')).toHaveLength(1);
-    } finally {
-      await iterator.return?.();
-      await runtime.close();
-    }
-  });
-
   test('recovers a partial assistant/tool crash in one authoritative interruption commit', async () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-partial-tool-crash' as ThreadId;
@@ -1697,20 +1596,18 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
-  test('actively recovers a reserved create with its persisted creationKey before admitting competitors', async () => {
+  test('actively recovers a reserved create before admitting competitors', async () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-reserved-create-claim' as ThreadId;
     const original = createThreadOp(
       'op_e_a0000000000000000000000000000001' as ExternalOpId,
       threadId,
     );
-    const creationKey = 'creation-key-reserved-unknown';
-    await seedReservedCreate(storage, original, creationKey);
+    await seedReservedCreate(storage, original);
     const drivers = new RecordingDriverFactory();
     const runtime = await openRuntime(storage, drivers);
     try {
       expect(drivers.createCalls).toBe(1);
-      expect(drivers.creationKeys).toEqual([creationKey]);
       const competing = await runtime.submit(createThreadOp(
         'op_e_a0000000000000000000000000000002' as ExternalOpId,
         threadId,
@@ -1783,7 +1680,7 @@ describe('Supervisor recovery and idempotency', () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-auto-attach-create' as ThreadId;
     const createOpId = 'op_e_a0000000000000000000000000000007' as ExternalOpId;
-    await seedFinalCreateIntent(storage, createThreadOp(createOpId, threadId), 'auto-attach-key');
+    await seedFinalCreateIntent(storage, createThreadOp(createOpId, threadId));
     const drivers = new RecordingDriverFactory();
     const resolved: ModelRef[] = [];
     const runtime = await createRuntime({
@@ -1821,7 +1718,7 @@ describe('Supervisor recovery and idempotency', () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-auto-attach-credentials' as ThreadId;
     const createOpId = 'op_e_a0000000000000000000000000000009' as ExternalOpId;
-    await seedFinalCreateIntent(storage, createThreadOp(createOpId, threadId), 'credentials-key');
+    await seedFinalCreateIntent(storage, createThreadOp(createOpId, threadId));
     const drivers = new RecordingDriverFactory();
     const restoredRef: ModelRef = { ...MODEL.ref, model: 'credentials-restored' };
     let resolverCalls = 0;
@@ -1885,106 +1782,6 @@ describe('Supervisor recovery and idempotency', () => {
         model: restoredRef,
       })).accepted).toBe(true);
       expect(drivers.resumeCalls).toBe(1);
-    } finally {
-      await reopened.close().catch(() => undefined);
-    }
-  });
-
-  test('a fresh resume binds a credentials-interrupted create skeleton once before later resumes use its ref', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-no-ref-credentials-resume' as ThreadId;
-    const createOpId = 'op_e_c000000000000000000000000000000b' as ExternalOpId;
-    const firstResumeOpId = 'op_e_c000000000000000000000000000000c' as ExternalOpId;
-    const secondResumeOpId = 'op_e_c000000000000000000000000000000d' as ExternalOpId;
-    const creationKey = 'no-ref-credentials-resume-key';
-    const restoredModel: ModelRef = { ...MODEL.ref, model: 'credentials-restored-no-ref' };
-    await seedFinalCreateIntent(
-      storage,
-      createThreadOp(createOpId, threadId),
-      creationKey,
-      false,
-    );
-    const drivers = new RecordingDriverFactory();
-    const makeRuntime = () => createRuntime({
-      workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
-      storage,
-      modelResolver: {
-        async resolve(ref) {
-          return ref.model === restoredModel.model
-            ? { ok: true as const, model: { ...MODEL, ref } }
-            : {
-                ok: false as const,
-                code: 'credentials_unavailable' as const,
-                message: 'credentials unavailable during no-ref recovery',
-              };
-        },
-      },
-      permissionPolicy: new FixedPolicy(),
-      threadDriverFactory: drivers,
-      identityFactory: new TestIdentityFactory(),
-      clock: { now: () => 2 },
-    });
-
-    const first = await makeRuntime();
-    try {
-      expect(drivers.createCalls).toBe(0);
-      expect(drivers.resumeCalls).toBe(0);
-      const interrupted = foldThreadJournal(await loadThreadRecords(storage, threadId));
-      expect(interrupted.envelopes.filter((envelope) =>
-        envelope.event.type === 'runtime_diagnostic'
-        && envelope.event.code === 'attachment_credentials_unavailable')).toHaveLength(1);
-      expect((await first.listThreads())[0]).toMatchObject({ threadId, state: 'closed' });
-
-      const receipt = await first.submit({
-        type: 'thread_resume',
-        opId: firstResumeOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        model: restoredModel,
-      });
-      expect(receipt).toMatchObject({ accepted: true, duplicate: false, threadId });
-      expect(drivers.createCalls).toBe(1);
-      expect(drivers.resumeCalls).toBe(0);
-      expect(drivers.creationKeys).toEqual([creationKey]);
-      const createRecord = storage.inspectWorkspace(WORKSPACE_ID)?.ops.find((record) =>
-        record.opId === createOpId);
-      expect(createRecord).toMatchObject({
-        state: 'final',
-        receipt: { accepted: true },
-        driverCreation: {
-          creationKey,
-          driverRef: { kind: 'test-driver', key: threadId },
-        },
-      });
-      const attached = foldThreadJournal(await loadThreadRecords(storage, threadId));
-      expect(attached.checkpoint.frontend.model).toEqual(restoredModel);
-      expect(attached.envelopes.filter((envelope) =>
-        envelope.opId === firstResumeOpId
-        && envelope.event.type === 'thread_resumed')).toHaveLength(1);
-      expect(attached.envelopes.filter((envelope) =>
-        envelope.event.type === 'runtime_diagnostic'
-        && envelope.event.code === 'attachment_credentials_unavailable')).toHaveLength(1);
-    } finally {
-      await first.close().catch(() => undefined);
-    }
-
-    const reopened = await makeRuntime();
-    try {
-      expect(drivers.createCalls).toBe(1);
-      expect(drivers.resumeCalls).toBe(0);
-      expect((await reopened.submit({
-        type: 'thread_resume',
-        opId: secondResumeOpId,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        model: restoredModel,
-      })).accepted).toBe(true);
-      expect(drivers.createCalls).toBe(1);
-      expect(drivers.resumeCalls).toBe(1);
-      const resumed = foldThreadJournal(await loadThreadRecords(storage, threadId));
-      expect(resumed.envelopes.filter((envelope) =>
-        envelope.opId === secondResumeOpId
-        && envelope.event.type === 'thread_resumed')).toHaveLength(1);
     } finally {
       await reopened.close().catch(() => undefined);
     }
@@ -2073,7 +1870,6 @@ describe('Supervisor recovery and idempotency', () => {
     await seedFinalCreateIntent(
       storage,
       createThreadOp('op_e_c0000000000000000000000000000004' as ExternalOpId, threadId),
-      'closed-intent-key',
     );
     await appendFinalCloseIntent(
       storage,
@@ -2105,71 +1901,6 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
-  test('recovers a no-durableRef accepted create skeleton with create once and persists its binding', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-auto-create-skeleton' as ThreadId;
-    const creationKey = 'accepted-create-skeleton-key';
-    await seedFinalCreateIntent(
-      storage,
-      createThreadOp('op_e_c0000000000000000000000000000006' as ExternalOpId, threadId),
-      creationKey,
-      false,
-    );
-    const createDrivers = new RecordingDriverFactory();
-    const first = await openRuntime(storage, createDrivers);
-    try {
-      expect(createDrivers.createCalls).toBe(1);
-      expect(createDrivers.resumeCalls).toBe(0);
-      expect(createDrivers.creationKeys).toEqual([creationKey]);
-    } finally {
-      await first.close();
-    }
-
-    const resumeDrivers = new RecordingDriverFactory();
-    const second = await openRuntime(storage, resumeDrivers);
-    try {
-      expect((await second.submit(resumeOp(
-        'op_e_c0000000000000000000000000000007',
-        threadId,
-      ))).accepted).toBe(true);
-      expect(resumeDrivers.createCalls).toBe(0);
-      expect(resumeDrivers.resumeCalls).toBe(1);
-    } finally {
-      await second.close();
-    }
-  });
-
-  test('does not bind a no-durableRef create until the recovered checkpoint is proven', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-auto-create-skeleton-mismatch' as ThreadId;
-    const createOpId = 'op_e_c000000000000000000000000000000a' as ExternalOpId;
-    const creationKey = 'accepted-create-skeleton-mismatch-key';
-    await seedFinalCreateIntent(
-      storage,
-      createThreadOp(createOpId, threadId),
-      creationKey,
-      false,
-    );
-    const factory = new CreateCheckpointMismatchFactory([true, false]);
-    await expect(openRuntime(storage, factory)).rejects.toMatchObject({
-      code: 'driver_checkpoint_mismatch',
-    });
-    expect(factory.createCalls).toBe(1);
-    expect(factory.closeCalls).toBe(1);
-    expect(factory.creationKeys).toEqual([creationKey]);
-    const afterMismatch = storage.inspectWorkspace(WORKSPACE_ID)?.ops.find((record) =>
-      record.opId === createOpId);
-    expect(afterMismatch?.driverCreation).toEqual({ creationKey });
-
-    const recovered = await openRuntime(storage, factory);
-    try {
-      expect(factory.createCalls).toBe(2);
-      expect(factory.creationKeys).toEqual([creationKey, creationKey]);
-    } finally {
-      await recovered.close();
-    }
-  });
-
   test.each([
     ['safe quarantined close', false],
     ['unknown quarantined close', true],
@@ -2187,7 +1918,6 @@ describe('Supervisor recovery and idempotency', () => {
           : 'op_e_c0000000000000000000000000000009' as ExternalOpId,
         threadId,
       ),
-      `cleanup-key-${closeReject}`,
     );
     const factory = new CheckpointMismatchFactory([
       { mismatch: true, closeReject },
@@ -2208,30 +1938,23 @@ describe('Supervisor recovery and idempotency', () => {
 });
 
 describe('Supervisor registry composition', () => {
-  test('opens grants after lease, skips an unneeded legacy repo, and owns one policy engine per thread', async () => {
+  test('opens grants after the lease and owns one policy engine per thread', async () => {
     const actions: string[] = [];
     const storageProbe = observeRegistryStorage(createMemoryRuntimeStorage(), actions);
     const policyEngine = new RecordingRegistryPolicyEngine(actions);
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
+    const drivers = new ConstructionDriverFactory();
     const runtime = await createRuntime({
       ...constructionRuntimeOptions(storageProbe.storage, drivers),
       capabilityMode: 'registry',
       capabilityServices: registryCapabilityServices(policyEngine),
     });
-    expect(actions.slice(0, 5)).toEqual([
+    expect(actions.slice(0, 4)).toEqual([
       'workspace:open',
       'lease:acquire',
       'lease:acquired',
-      'legacy:inspect:false',
-      'grants:open:workspace',
+      'grants:open',
     ]);
-    expect(storageProbe.legacyInspections).toBe(1);
     expect(storageProbe.grantOpens).toBe(1);
-    expect(storageProbe.legacyOpens).toBe(0);
-    expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
 
     const threadIds = [
       'thread-registry-composition-a' as ThreadId,
@@ -2247,9 +1970,6 @@ describe('Supervisor registry composition', () => {
       }
       expect(policyEngine.opened).toEqual(threadIds);
       expect(drivers.attachments).toHaveLength(2);
-      expect(drivers.attachments.every((attachment) =>
-        attachment.legacyApprovalAdapter === undefined)).toBe(true);
-      expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
     } finally {
       await runtime.close();
     }
@@ -2257,389 +1977,6 @@ describe('Supervisor registry composition', () => {
     expect(policyEngine.closeCounts).toEqual(new Map(threadIds.map((threadId) => [threadId, 1])));
     expect(drivers.closeCounts).toEqual(new Map(threadIds.map((threadId) => [threadId, 1])));
     expect(storageProbe.grantCloses).toBe(1);
-    expect(storageProbe.legacyCloses).toBe(0);
-  });
-
-  test('opens and closes the legacy recovery repo for pending inventory when an adapter is available', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-registry-recovery-writer-barrier' as ThreadId;
-    await seedFinalCreateIntent(
-      storage,
-      createThreadOp('op_e_d0000000000000000000000000000010' as ExternalOpId, threadId),
-      'registry-recovery-writer-barrier',
-    );
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(storage, actions, {
-      hasPendingLegacyRecovery: true,
-    });
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    const runtime = await createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    });
-    expect(storageProbe.legacyInspections).toBe(1);
-    expect(storageProbe.legacyOpens).toBe(1);
-    expect(storageProbe.grantOpens).toBe(1);
-    expect(actions.slice(0, 7)).toEqual([
-      'workspace:open',
-      'lease:acquire',
-      'lease:acquired',
-      'legacy:inspect:true',
-      'legacy:open',
-      'legacy:close',
-      'grants:open:workspace',
-    ]);
-    expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
-    expect(drivers.receivedLegacyPatternPorts).toEqual([false]);
-
-    await runtime.close();
-    expect(storageProbe.legacyCloses).toBe(1);
-    expect(storageProbe.grantCloses).toBe(1);
-    expect(actions.slice(-3)).toEqual([
-      'grants:close',
-      'lease:release',
-      'workspace:close',
-    ]);
-  });
-
-  test('settles legacy controls before grant open without touching registry grant responses', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const legacyThreadId = 'thread-registry-legacy-control-barrier' as ThreadId;
-    const grantThreadId = 'thread-registry-grant-control-barrier' as ThreadId;
-    const legacy = await seedControlResponseCrash(storage, legacyThreadId, 'started');
-    const grant = await seedControlResponseCrash(
-      storage,
-      grantThreadId,
-      'started',
-      true,
-      undefined,
-      'grant',
-    );
-    let legacyAtGrantOpen: ReturnType<typeof foldThreadJournal> | undefined;
-    let grantAtGrantOpen: ReturnType<typeof foldThreadJournal> | undefined;
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(storage, actions, {
-      async beforePolicyGrantOpen(workspace) {
-        const legacyJournal = await workspace.openThreadJournal(legacyThreadId);
-        const grantJournal = await workspace.openThreadJournal(grantThreadId);
-        if (legacyJournal === undefined || grantJournal === undefined) {
-          throw new Error('missing control barrier journal');
-        }
-        legacyAtGrantOpen = foldThreadJournal(await legacyJournal.load());
-        grantAtGrantOpen = foldThreadJournal(await grantJournal.load());
-      },
-    });
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    const runtime = await createRuntime({
-      ...constructionRuntimeOptions(
-        storageProbe.storage,
-        withoutLegacyRecoveryAdapter(drivers),
-      ),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    });
-    try {
-      expect(legacyAtGrantOpen?.mailbox.get(legacy.responseOpId)).toMatchObject({
-        state: 'completed',
-        outcome: 'interrupted',
-      });
-      expect(legacyAtGrantOpen?.checkpoint.frontend.pendingControls).toEqual([]);
-      expect(grantAtGrantOpen?.mailbox.get(grant.responseOpId)).toMatchObject({
-        state: 'started',
-      });
-      expect(grantAtGrantOpen?.checkpoint.frontend.pendingControls).toHaveLength(1);
-      expect(storageProbe.legacyOpens).toBe(0);
-      expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
-      expect(storageProbe.grantCommits).toBe(1);
-    } finally {
-      await runtime.close();
-    }
-  });
-
-  test('aborts an unresolved legacy request before opening grant storage', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-registry-unresolved-legacy-barrier' as ThreadId;
-    const seeded = await seedControlResponseCrash(
-      storage,
-      threadId,
-      'started',
-      true,
-      undefined,
-      'legacy',
-      true,
-    );
-    let stateAtGrantOpen: ReturnType<typeof foldThreadJournal> | undefined;
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(storage, actions, {
-      async beforePolicyGrantOpen(workspace) {
-        const journal = await workspace.openThreadJournal(threadId);
-        if (journal === undefined) throw new Error('missing unresolved legacy journal');
-        stateAtGrantOpen = foldThreadJournal(await journal.load());
-      },
-    });
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    const runtime = await createRuntime({
-      ...constructionRuntimeOptions(
-        storageProbe.storage,
-        withoutLegacyRecoveryAdapter(drivers),
-      ),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    });
-    try {
-      expect(stateAtGrantOpen?.checkpoint.frontend.pendingControls).toEqual([]);
-      expect(stateAtGrantOpen?.envelopes.findLast((envelope) =>
-        envelope.event.type === 'control_resolved'
-        && envelope.event.requestId === seeded.requestId)).toMatchObject({
-        opId: deriveOpId({
-          purpose: 'control_recovery',
-          workspaceId: WORKSPACE_ID,
-          parts: [threadId, seeded.requestId],
-        }),
-        event: { decision: 'aborted' },
-      });
-      expect(storageProbe.legacyOpens).toBe(0);
-      expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
-      expect(storageProbe.grantCommits).toBe(0);
-    } finally {
-      await runtime.close();
-    }
-  });
-
-  test.each([
-    ['abort', 'accepted_pending'],
-    ['abort', 'started'],
-    ['thread_close', 'accepted_pending'],
-    ['thread_close', 'started'],
-  ] as const)(
-    'folds an earlier %s before a later %s durable legacy response without opening a repository',
-    async (cancellationType, responsePhase) => {
-      const storage = createMemoryRuntimeStorage();
-      const threadId = `thread-registry-legacy-a-r-${cancellationType}` as ThreadId;
-      const seeded = await seedControlResponseCrash(
-        storage,
-        threadId,
-        responsePhase,
-        true,
-        cancellationType,
-      );
-      const actions: string[] = [];
-      const storageProbe = observeRegistryStorage(storage, actions);
-      const drivers = new ConstructionDriverFactory({
-        approvalMode: 'legacy_session_edge',
-        capabilityMode: 'registry',
-      });
-      const runtime = await createRuntime({
-        ...constructionRuntimeOptions(storageProbe.storage, drivers),
-        capabilityMode: 'registry',
-        capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-      });
-      try {
-        const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
-        const resolutionOpId = cancellationType === 'abort'
-          ? seeded.cancellationOpId
-          : deriveOpId({
-              purpose: 'control_recovery',
-              workspaceId: WORKSPACE_ID,
-              parts: [threadId, seeded.requestId],
-            });
-        expect(folded.envelopes.findLast((envelope) =>
-          envelope.event.type === 'control_resolved'
-          && envelope.event.requestId === seeded.requestId)).toMatchObject({
-          opId: resolutionOpId,
-          event: { decision: 'aborted' },
-        });
-        expect(folded.mailbox.get(seeded.responseOpId)).toMatchObject({
-          state: 'completed',
-          outcome: 'superseded',
-        });
-        expect(folded.envelopes.filter((envelope) =>
-          envelope.opId === seeded.responseOpId
-          && envelope.event.type === 'op_started')).toHaveLength(1);
-        expect(storageProbe.legacyOpens).toBe(0);
-        expect(storageProbe.grantCommits).toBe(0);
-        expect(drivers.legacyRecoveryAdapterOpens).toBe(0);
-      } finally {
-        await runtime.close();
-      }
-    },
-  );
-
-  test.each(['abort', 'thread_close'] as const)(
-    'supersedes a canonical grant response after an earlier %s with zero grant commits',
-    async (cancellationType) => {
-      const storage = createMemoryRuntimeStorage();
-      const threadId = `thread-registry-grant-a-r-${cancellationType}` as ThreadId;
-      const seeded = await seedControlResponseCrash(
-        storage,
-        threadId,
-        'started',
-        true,
-        cancellationType,
-        'grant',
-      );
-      const actions: string[] = [];
-      const storageProbe = observeRegistryStorage(storage, actions);
-      const drivers = new ConstructionDriverFactory({
-        approvalMode: 'legacy_session_edge',
-        capabilityMode: 'registry',
-      });
-      const runtime = await createRuntime({
-        ...constructionRuntimeOptions(storageProbe.storage, drivers),
-        capabilityMode: 'registry',
-        capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-      });
-      try {
-        const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
-        expect(folded.mailbox.get(seeded.responseOpId)).toMatchObject({
-          state: 'completed',
-          outcome: 'superseded',
-        });
-        expect(storageProbe.grantCommits).toBe(0);
-      } finally {
-        await runtime.close();
-      }
-    },
-  );
-
-  test('rejects pending legacy recovery inventory without a recovery adapter', async () => {
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(createMemoryRuntimeStorage(), actions, {
-      hasPendingLegacyRecovery: true,
-    });
-    const driverFixture = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    await expect(createRuntime({
-      ...constructionRuntimeOptions(
-        storageProbe.storage,
-        withoutLegacyRecoveryAdapter(driverFixture),
-      ),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    })).rejects.toMatchObject({ code: 'legacy_approval_recovery_unavailable' });
-    expect(storageProbe.legacyInspections).toBe(1);
-    expect(storageProbe.legacyOpens).toBe(0);
-    expect(storageProbe.grantOpens).toBe(0);
-    expect(actions).toEqual([
-      'workspace:open',
-      'lease:acquire',
-      'lease:acquired',
-      'legacy:inspect:true',
-      'lease:release',
-      'workspace:close',
-    ]);
-  });
-
-  test('requires legacy recovery inventory and releases the lease when inspection is unavailable', async () => {
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(createMemoryRuntimeStorage(), actions, {
-      exposeLegacyRecoveryInspection: false,
-    });
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    await expect(createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    })).rejects.toMatchObject({ code: 'legacy_approval_recovery_unavailable' });
-    expect(actions).toEqual([
-      'workspace:open',
-      'lease:acquire',
-      'lease:acquired',
-      'lease:release',
-      'workspace:close',
-    ]);
-    expect(storageProbe.legacyInspections).toBe(0);
-    expect(storageProbe.grantOpens).toBe(0);
-  });
-
-  test.each([
-    ['probe', { legacyInspectionError: 'probe failed' }],
-    ['journal scan', { legacyJournalScanError: 'scan failed' }],
-    ['recovery repository open', {
-      hasPendingLegacyRecovery: true,
-      legacyOpenError: 'open failed',
-    }],
-  ] as const)('normalizes a legacy upgrade %s failure before grant open or attach', async (
-    _name,
-    failureOptions,
-  ) => {
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(
-      createMemoryRuntimeStorage(),
-      actions,
-      failureOptions,
-    );
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    await expect(createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    })).rejects.toMatchObject({ code: 'legacy_approval_recovery_unavailable' });
-    expect(storageProbe.grantOpens).toBe(0);
-    expect(drivers.createCalls).toBe(0);
-    expect(actions.filter((action) => action === 'lease:release')).toHaveLength(1);
-    expect(actions.filter((action) => action === 'workspace:close')).toHaveLength(1);
-  });
-
-  test('rejects an inherited legacy recovery inventory field as an invalid shape', async () => {
-    const actions: string[] = [];
-    const inheritedInventory = Object.assign(
-      Object.create({ hasPendingReservedOutbox: true }) as Record<string, unknown>,
-      { extra: true },
-    );
-    const storageProbe = observeRegistryStorage(createMemoryRuntimeStorage(), actions, {
-      legacyInventory: inheritedInventory,
-    });
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-    await expect(createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    })).rejects.toMatchObject({ code: 'legacy_approval_recovery_unavailable' });
-    expect(storageProbe.grantOpens).toBe(0);
-  });
-
-  test('normalizes a legacy recovery adapter open failure before applying its response', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-registry-adapter-open-failure' as ThreadId;
-    await seedControlResponseCrash(storage, threadId, 'started', true);
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(storage, actions);
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    }, {
-      legacyAdapterOpenError: 'adapter open failed',
-    });
-    await expect(createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(new RecordingRegistryPolicyEngine(actions)),
-    })).rejects.toMatchObject({ code: 'legacy_approval_recovery_unavailable' });
-    expect(drivers.legacyRecoveryAdapterOpens).toBe(1);
-    expect(storageProbe.legacyOpens).toBe(1);
-    expect(storageProbe.grantCommits).toBe(0);
   });
 
   test('requires fenced policy grant storage and releases the acquired lease on failure', async () => {
@@ -2648,10 +1985,7 @@ describe('Supervisor registry composition', () => {
       exposePolicyGrantRepository: false,
     });
     const policyEngine = new RecordingRegistryPolicyEngine(actions);
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
+    const drivers = new ConstructionDriverFactory();
     await expect(createRuntime({
       ...constructionRuntimeOptions(storageProbe.storage, drivers),
       capabilityMode: 'registry',
@@ -2664,7 +1998,6 @@ describe('Supervisor registry composition', () => {
       'lease:release',
       'workspace:close',
     ]);
-    expect(storageProbe.legacyInspections).toBe(0);
     expect(drivers.createCalls).toBe(0);
     expect(policyEngine.opened).toEqual([]);
   });
@@ -2676,12 +2009,10 @@ describe('Supervisor registry composition', () => {
     await seedFinalCreateIntent(
       storage,
       createThreadOp('op_e_d1000000000000000000000000000001' as ExternalOpId, firstThreadId),
-      'registry-open-cleanup-first',
     );
     await seedFinalCreateIntent(
       storage,
       createThreadOp('op_e_d1000000000000000000000000000002' as ExternalOpId, secondThreadId),
-      'registry-open-cleanup-second',
     );
     const actions: string[] = [];
     const storageProbe = observeRegistryStorage(storage, actions);
@@ -2689,9 +2020,6 @@ describe('Supervisor registry composition', () => {
       failOpenThreadId: secondThreadId,
     });
     const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    }, {
       failCloseThreadIds: new Set([firstThreadId]),
     });
 
@@ -2723,50 +2051,7 @@ describe('Supervisor registry composition', () => {
     await assertWorkspaceAndJournalsReusable(storage, [firstThreadId, secondThreadId]);
   });
 
-  test('a failed legacy bridge release cleans attached registry resources without closing it twice', async () => {
-    const storage = createMemoryRuntimeStorage();
-    const threadId = 'thread-registry-bridge-release-cleanup' as ThreadId;
-    await seedFinalCreateIntent(
-      storage,
-      createThreadOp('op_e_d2000000000000000000000000000001' as ExternalOpId, threadId),
-      'registry-bridge-release-cleanup',
-    );
-    const actions: string[] = [];
-    const storageProbe = observeRegistryStorage(storage, actions, {
-      hasPendingLegacyRecovery: true,
-      legacyCloseError: 'injected legacy recovery bridge close failure',
-    });
-    const policyEngine = new RecordingRegistryPolicyEngine(actions);
-    const drivers = new ConstructionDriverFactory({
-      approvalMode: 'legacy_session_edge',
-      capabilityMode: 'registry',
-    });
-
-    const failure = await createRuntime({
-      ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
-      capabilityServices: registryCapabilityServices(policyEngine),
-    }).then(
-      async (runtime) => {
-        await runtime.close();
-        return new Error('legacy bridge release unexpectedly succeeded');
-      },
-      (error: unknown) => error,
-    );
-    expect(failure).toMatchObject({ message: 'injected legacy recovery bridge close failure' });
-    expect(failure).not.toBeInstanceOf(AggregateError);
-    expect(storageProbe.legacyCloses).toBe(1);
-    expect(storageProbe.grantOpens).toBe(0);
-    expect(storageProbe.grantCloses).toBe(0);
-    expect(policyEngine.opened).toEqual([]);
-    expect(policyEngine.closeCounts).toEqual(new Map());
-    expect(drivers.closeCounts).toEqual(new Map());
-    expect(actions.filter((action) => action === 'lease:release')).toHaveLength(1);
-    expect(actions.filter((action) => action === 'workspace:close')).toHaveLength(1);
-    await assertWorkspaceAndJournalsReusable(storage, [threadId]);
-  });
-
-  test('fails closed for static bundles, partial registry bundles, and driver mode mismatches', async () => {
+  test('fails closed for malformed canonical bundles and driver mode mismatches', async () => {
     const completeServices = registryCapabilityServices(new RecordingRegistryPolicyEngine([]));
     const { ruleFreshness: _missingRuleFreshness, ...partialServices } = completeServices;
     void _missingRuleFreshness;
@@ -2782,14 +2067,11 @@ describe('Supervisor registry composition', () => {
       readonly build: (storage: RuntimeStoragePort) => unknown;
     }[] = [
       {
-        name: 'static runtime with capability bundle',
-        expected: 'Static Runtime does not accept capabilityServices',
+        name: 'non-canonical runtime mode',
+        expected: 'Canonical Runtime requires registry mode',
         build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'static',
-          })),
-          capabilityMode: 'static',
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
+          capabilityMode: 'retired',
           capabilityServices: completeServices,
         }),
       },
@@ -2797,10 +2079,7 @@ describe('Supervisor registry composition', () => {
         name: 'partial registry bundle',
         expected: 'Registry capabilityServices has missing or unknown fields',
         build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'registry',
-          })),
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
           capabilityMode: 'registry',
           capabilityServices: partialServices,
         }),
@@ -2809,10 +2088,7 @@ describe('Supervisor registry composition', () => {
         name: 'prototype-inherited registry bundle',
         expected: 'Registry capabilityServices has missing or unknown fields',
         build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'registry',
-          })),
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
           capabilityMode: 'registry',
           capabilityServices: inheritedServices,
         }),
@@ -2821,10 +2097,7 @@ describe('Supervisor registry composition', () => {
         name: 'registry bundle with a symbol rule budget field',
         expected: 'Registry ruleBudget is invalid',
         build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'registry',
-          })),
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
           capabilityMode: 'registry',
           capabilityServices: {
             ...completeServices,
@@ -2833,36 +2106,13 @@ describe('Supervisor registry composition', () => {
         }),
       },
       {
-        name: 'registry runtime with static driver',
-        expected: 'Registry Runtime requires a registry-aware ThreadDriverFactory',
+        name: 'canonical runtime with non-canonical driver',
+        expected: 'Canonical Runtime requires a registry ThreadDriverFactory',
         build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'static',
-          })),
-          capabilityMode: 'registry',
-          capabilityServices: completeServices,
-        }),
-      },
-      {
-        name: 'static runtime with registry driver',
-        expected: 'Static Runtime requires a static ThreadDriverFactory',
-        build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'legacy_session_edge',
-            capabilityMode: 'registry',
-          })),
-          capabilityMode: 'static',
-        }),
-      },
-      {
-        name: 'registry runtime with durable legacy bridge',
-        expected: 'Registry Runtime cannot install the durable legacy approval bridge',
-        build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory({
-            approvalMode: 'durable_legacy_bridge',
-            capabilityMode: 'registry',
-          })),
+          ...constructionRuntimeOptions(
+            storage,
+            withInvalidCapabilityMode(new ConstructionDriverFactory()),
+          ),
           capabilityMode: 'registry',
           capabilityServices: completeServices,
         }),
@@ -2912,7 +2162,7 @@ async function seedPromptCrash(
   const journal = await workspace.createThreadJournal(lease, { threadId, meta });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -2988,7 +2238,7 @@ async function seedSetModelCrash(
   });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3028,14 +2278,9 @@ async function seedControlResponseCrash(
   storage: RuntimeStoragePort,
   threadId: ThreadId,
   responsePhase: 'accepted_pending' | 'started',
-  durableAllowAlways = false,
-  cancellationBeforeResponse?: 'abort' | 'thread_close',
-  proposalKind: 'legacy' | 'grant' = 'legacy',
-  omitResponse = false,
 ): Promise<{
   readonly requestId: string;
   readonly responseOpId: ExternalOpId;
-  readonly cancellationOpId?: ExternalOpId;
 }> {
   const promptOp = prompt(
     responsePhase === 'accepted_pending'
@@ -3058,7 +2303,7 @@ async function seedControlResponseCrash(
   });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3117,101 +2362,27 @@ async function seedControlResponseCrash(
       payload: {
         toolCallId: 'call-control-recovery',
         description: 'recover me',
-        ...(durableAllowAlways && proposalKind === 'legacy' && {
-          legacyProposal: { patterns: ['Edit(*)'] as [string], forceConfirm: false },
-        }),
-        ...(durableAllowAlways && proposalKind === 'grant' && {
-          grantProposal: {
-            capabilityId: 'edit',
-            capabilityVersion: '1.0.0',
-            registrationDigest: `capreg_v1_${'1'.repeat(64)}`,
-            policyBasisRevision: 'policy-control-recovery',
-            scope: {
-              kind: 'canonical_resources_v1' as const,
-              resourcePatterns: [{
-                resourceType: 'filesystem' as const,
-                access: 'write' as const,
-                matcher: 'canonical_target_exact_v1' as const,
-                pattern: '/workspace/file.txt',
-              }] as const,
-              attributes: {},
-            },
-          },
+        presentation: approvalPresentation({
+          requestId,
+          threadId,
+          runId,
+          turnId,
+          toolCallId: 'call-control-recovery',
+          policyRevision: 'policy-control-recovery',
+          description: 'recover me',
         }),
       },
     },
     runId,
     turnId,
   });
-  const cancellationOpId = cancellationBeforeResponse === undefined
-    ? undefined
-    : (cancellationBeforeResponse === 'abort'
-        ? 'op_e_21000000000000000000000000000005'
-        : 'op_e_21000000000000000000000000000006') as ExternalOpId;
-  if (cancellationBeforeResponse === 'abort' && cancellationOpId !== undefined) {
-    const abortOp = {
-      type: 'abort' as const,
-      opId: cancellationOpId,
-      workspaceId: WORKSPACE_ID,
-      threadId,
-      expectedRunId: runId,
-    };
-    await writer.appendPrepare({
-      type: 'mailbox_prepare',
-      opId: cancellationOpId,
-      op: abortOp,
-      timestamp: 1,
-    });
-    await writer.commit([
-      { event: { type: 'op_accepted', opType: 'abort' }, opId: cancellationOpId },
-      { event: { type: 'op_started', opType: 'abort' }, opId: cancellationOpId },
-    ], [
-      {
-        type: 'accepted_pending',
-        opId: cancellationOpId,
-        opType: 'abort',
-        resolvedTarget: { kind: 'run', runId },
-      },
-      { type: 'started', opId: cancellationOpId },
-    ]);
-  } else if (cancellationBeforeResponse === 'thread_close' && cancellationOpId !== undefined) {
-    const closeOp = {
-      type: 'thread_close' as const,
-      opId: cancellationOpId,
-      workspaceId: WORKSPACE_ID,
-      threadId,
-    };
-    await writer.appendPrepare({
-      type: 'mailbox_prepare',
-      opId: cancellationOpId,
-      op: closeOp,
-      timestamp: 1,
-    });
-    await writer.commit([
-      { event: { type: 'op_accepted', opType: 'thread_close' }, opId: cancellationOpId },
-      { event: { type: 'op_started', opType: 'thread_close' }, opId: cancellationOpId },
-    ], [
-      { type: 'accepted_pending', opId: cancellationOpId, opType: 'thread_close' },
-      { type: 'started', opId: cancellationOpId },
-    ]);
-  }
-  if (omitResponse) {
-    await writer.close();
-    await workspace.releaseSupervisorLease(lease);
-    await workspace.close();
-    return {
-      requestId,
-      responseOpId,
-      ...(cancellationOpId !== undefined && { cancellationOpId }),
-    };
-  }
   const responseOp = {
     type: 'control_response',
     opId: responseOpId,
     workspaceId: WORKSPACE_ID,
     threadId,
     requestId,
-    decision: durableAllowAlways ? 'allow_always' as const : 'allow_once' as const,
+    decision: 'allow_once' as const,
   } as const;
   await writer.appendPrepare({
     type: 'mailbox_prepare',
@@ -3241,11 +2412,7 @@ async function seedControlResponseCrash(
   await writer.close();
   await workspace.releaseSupervisorLease(lease);
   await workspace.close();
-  return {
-    requestId,
-    responseOpId,
-    ...(cancellationOpId !== undefined && { cancellationOpId }),
-  };
+  return { requestId, responseOpId };
 }
 
 async function seedStartedChildCrash(
@@ -3273,7 +2440,7 @@ async function seedStartedChildCrash(
   });
   await childJournal.acquireWriteLease(lease);
   const records = await childJournal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(childThreadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3335,7 +2502,7 @@ async function seedResolvedControlBeforeResponseCompletion(
     candidate.requestId === seeded.requestId);
   if (request === undefined) throw new Error('missing pending control request');
   if (request.kind !== 'approval') throw new Error('expected an approval request');
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   events.seed(threadId, state.envelopes);
   const writer = new ThreadJournalWriter({
@@ -3400,7 +2567,7 @@ async function seedPartialToolCrash(
   });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3490,6 +2657,15 @@ async function seedPartialToolCrash(
       payload: {
         toolCallId,
         description: 'pending approval at crash',
+        presentation: approvalPresentation({
+          requestId,
+          threadId,
+          runId,
+          turnId,
+          toolCallId,
+          policyRevision: 'policy-partial-crash',
+          description: 'pending approval at crash',
+        }),
       },
     },
     runId,
@@ -3522,7 +2698,7 @@ async function seedQueueCrash(
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
   const state = foldThreadJournal(records);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   events.seed(threadId, state.envelopes);
   const writer = new ThreadJournalWriter({
@@ -3579,7 +2755,6 @@ async function seedQueueCrash(
 async function seedReservedCreate(
   storage: RuntimeStoragePort,
   op: Extract<RuntimeOp, { type: 'thread_create' }>,
-  creationKey: string,
 ): Promise<void> {
   const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
   const lease = await workspace.acquireSupervisorLease('seed-reserved-create');
@@ -3587,7 +2762,6 @@ async function seedReservedCreate(
     opId: op.opId,
     op,
     payloadHash: runtimeOpPayloadHash(op),
-    driverCreation: { creationKey },
     state: 'reserved',
   });
   await workspace.releaseSupervisorLease(lease);
@@ -3597,8 +2771,6 @@ async function seedReservedCreate(
 async function seedFinalCreateIntent(
   storage: RuntimeStoragePort,
   op: Extract<RuntimeOp, { type: 'thread_create' }>,
-  creationKey: string,
-  includeDriverRef = true,
 ): Promise<void> {
   const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
   const lease = await workspace.acquireSupervisorLease('seed-final-create');
@@ -3606,23 +2778,16 @@ async function seedFinalCreateIntent(
     opId: op.opId,
     op,
     payloadHash: runtimeOpPayloadHash(op),
-    driverCreation: {
-      creationKey,
-      ...(includeDriverRef && { driverRef: { kind: 'test-driver', key: op.threadId } }),
-    },
     state: 'reserved',
   };
   await workspace.reserveSupervisorOp(lease, ledger);
-  const completeMeta = threadMeta(op.threadId, op.opId);
-  const { driverRef, ...metaWithoutDriverRef } = completeMeta;
-  void driverRef;
-  const meta: ThreadMetaRecord = includeDriverRef
-    ? completeMeta
-    : metaWithoutDriverRef;
-  const journal = await workspace.createThreadJournal(lease, { threadId: op.threadId, meta });
+  const journal = await workspace.createThreadJournal(lease, {
+    threadId: op.threadId,
+    meta: threadMeta(op.threadId, op.opId),
+  });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(op.threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3684,7 +2849,7 @@ async function appendFinalCloseIntent(
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
   const state = foldThreadJournal(records);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(threadId);
   events.seed(threadId, state.envelopes);
   const writer = new ThreadJournalWriter({
@@ -3732,7 +2897,7 @@ async function seedFinalResumeIntent(
   closeOpId: ExternalOpId,
   resume: Extract<RuntimeOp, { type: 'thread_resume' }>,
 ): Promise<void> {
-  await seedFinalCreateIntent(storage, createOp, 'latest-resume-create-key');
+  await seedFinalCreateIntent(storage, createOp);
   await appendFinalCloseIntent(storage, createOp.threadId, closeOpId);
   const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
   const lease = await workspace.acquireSupervisorLease('seed-final-resume');
@@ -3748,7 +2913,7 @@ async function seedFinalResumeIntent(
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
   const state = foldThreadJournal(records);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(resume.threadId);
   events.seed(resume.threadId, state.envelopes);
   const writer = new ThreadJournalWriter({
@@ -3854,7 +3019,7 @@ async function seedPartialCancelScope(
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
   const state = foldThreadJournal(records);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(left);
   events.seed(left, state.envelopes);
   const writer = new ThreadJournalWriter({
@@ -3953,7 +3118,6 @@ async function seedRetryTargetCreationCrash(
     opId: op.opId,
     op,
     payloadHash: runtimeOpPayloadHash(op),
-    driverCreation: { creationKey: 'retry-target-created-before-prompt' },
     retryPromptOpId,
     retryPrompt: {
       ...retryPrompt,
@@ -3962,10 +3126,10 @@ async function seedRetryTargetCreationCrash(
     state: 'reserved',
   };
   await workspace.reserveSupervisorOp(lease, ledger);
-  const seed: LegacyThreadSeedRecord = {
-    type: 'legacy_seed',
-    sourceSessionId: op.sourceThreadId,
+  const seed: ThreadSeedRecord = {
+    type: 'thread_seed',
     transcript: [],
+    turnProvenance: [],
     usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
   };
   const journal = await workspace.createThreadJournal(lease, {
@@ -3975,7 +3139,7 @@ async function seedRetryTargetCreationCrash(
   });
   await journal.acquireWriteLease(lease);
   const records = await journal.load();
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(op.threadId);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -4032,7 +3196,7 @@ async function seedParentCommitBeforeChildAck(
   });
   await parentJournal.acquireWriteLease(lease);
   await childJournal.acquireWriteLease(lease);
-  const events = new WorkspaceEventStream();
+  const events = new EventHub();
   events.registerThread(parentThreadId);
   events.registerThread(childThreadId);
   const parentRecords = await parentJournal.load();
@@ -4227,37 +3391,17 @@ function observeRegistryStorage(
   actions: string[],
   options: {
     readonly exposePolicyGrantRepository?: boolean;
-    readonly exposeLegacyRecoveryInspection?: boolean;
-    readonly hasPendingLegacyRecovery?: boolean;
-    readonly legacyInspectionError?: string;
-    readonly legacyInventory?: unknown;
-    readonly legacyJournalScanError?: string;
-    readonly legacyOpenError?: string;
-    readonly legacyCloseError?: string;
-    readonly beforePolicyGrantOpen?: (workspace: RuntimeWorkspaceStoragePort) => Promise<void>;
   } = {},
 ): {
   readonly storage: RuntimeStoragePort;
-  readonly legacyInspections: number;
   readonly grantOpens: number;
-  readonly grantCommits: number;
   readonly grantCloses: number;
-  readonly legacyOpens: number;
-  readonly legacyCloses: number;
 } {
-  let legacyInspections = 0;
   let grantOpens = 0;
-  let grantCommits = 0;
   let grantCloses = 0;
-  let legacyOpens = 0;
-  let legacyCloses = 0;
   return {
-    get legacyInspections() { return legacyInspections; },
     get grantOpens() { return grantOpens; },
-    get grantCommits() { return grantCommits; },
     get grantCloses() { return grantCloses; },
-    get legacyOpens() { return legacyOpens; },
-    get legacyCloses() { return legacyCloses; },
     storage: {
       listStoredThreads: () => base.listStoredThreads(),
       async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
@@ -4283,26 +3427,6 @@ function observeRegistryStorage(
                 return target.releaseSupervisorLease(...args);
               };
             }
-            if (property === 'listThreads' && options.legacyJournalScanError !== undefined) {
-              return async () => {
-                actions.push('legacy:scan:error');
-                throw new Error(options.legacyJournalScanError);
-              };
-            }
-            if (property === 'inspectLegacyApprovalRecovery') {
-              if (options.exposeLegacyRecoveryInspection === false) return undefined;
-              return async () => {
-                legacyInspections++;
-                if (options.legacyInspectionError !== undefined) {
-                  actions.push('legacy:inspect:error');
-                  throw new Error(options.legacyInspectionError);
-                }
-                if (options.legacyInventory !== undefined) return options.legacyInventory;
-                const hasPendingReservedOutbox = options.hasPendingLegacyRecovery ?? false;
-                actions.push(`legacy:inspect:${hasPendingReservedOutbox}`);
-                return { hasPendingReservedOutbox };
-              };
-            }
             if (property === 'openPolicyGrantRepository') {
               if (options.exposePolicyGrantRepository === false) return undefined;
               return async (
@@ -4310,61 +3434,18 @@ function observeRegistryStorage(
                   RuntimeWorkspaceStoragePort['openPolicyGrantRepository']
                 >>
               ): Promise<PolicyGrantRepository> => {
-                await options.beforePolicyGrantOpen?.(target);
-                actions.push(`grants:open:${args[1]}`);
+                actions.push('grants:open');
                 const open = target.openPolicyGrantRepository;
                 if (open === undefined) throw new Error('Policy grant repository is unavailable');
                 const repository = await open.call(target, ...args);
                 grantOpens++;
                 return new Proxy(repository, {
                   get(repositoryTarget, repositoryProperty, repositoryReceiver) {
-                    if (repositoryProperty === 'commitAllowAlways') {
-                      return async (...commitArgs: Parameters<PolicyGrantRepository['commitAllowAlways']>) => {
-                        grantCommits++;
-                        return repositoryTarget.commitAllowAlways(...commitArgs);
-                      };
-                    }
                     if (repositoryProperty === 'close') {
                       return async () => {
                         grantCloses++;
                         actions.push('grants:close');
                         return repositoryTarget.close();
-                      };
-                    }
-                    const value = Reflect.get(
-                      repositoryTarget,
-                      repositoryProperty,
-                      repositoryReceiver,
-                    ) as unknown;
-                    return typeof value === 'function' ? value.bind(repositoryTarget) : value;
-                  },
-                });
-              };
-            }
-            if (property === 'openLegacyApprovalPatternRepository') {
-              return async (
-                ...args: Parameters<NonNullable<
-                  RuntimeWorkspaceStoragePort['openLegacyApprovalPatternRepository']
-                >>
-              ): Promise<LegacyApprovalPatternRepository> => {
-                actions.push('legacy:open');
-                if (options.legacyOpenError !== undefined) {
-                  throw new Error(options.legacyOpenError);
-                }
-                const open = target.openLegacyApprovalPatternRepository;
-                if (open === undefined) throw new Error('Legacy approval repository is unavailable');
-                const repository = await open.call(target, ...args);
-                legacyOpens++;
-                return new Proxy(repository, {
-                  get(repositoryTarget, repositoryProperty, repositoryReceiver) {
-                    if (repositoryProperty === 'close') {
-                      return async () => {
-                        legacyCloses++;
-                        actions.push('legacy:close');
-                        await repositoryTarget.close();
-                        if (options.legacyCloseError !== undefined) {
-                          throw new Error(options.legacyCloseError);
-                        }
                       };
                     }
                     const value = Reflect.get(
@@ -4424,119 +3505,58 @@ class RecordingRegistryPolicyEngine implements PolicyEngine {
 }
 
 class ConstructionDriverFactory implements ThreadDriverFactory {
-  readonly attachments: ThreadDriverAttachment[] = [];
+  readonly requirements = { capabilityMode: 'registry' as const };
+  readonly attachments: RuntimeThreadDriverAttachment[] = [];
   readonly closeCounts = new Map<ThreadId, number>();
-  readonly receivedLegacyPatternPorts: boolean[] = [];
   createCalls = 0;
-  legacyRecoveryAdapterOpens = 0;
 
   constructor(
-    readonly requirements: ThreadDriverFactory['requirements'],
     private readonly options: {
       readonly failCloseThreadIds?: ReadonlySet<ThreadId>;
-      readonly legacyAdapterOpenError?: string;
     } = {},
   ) {}
 
   async create(
     input: Parameters<ThreadDriverFactory['create']>[0],
-  ): Promise<ThreadDriverAttachment> {
+  ): Promise<RuntimeThreadDriverAttachment> {
     this.createCalls++;
-    this.receivedLegacyPatternPorts.push(input.legacyApprovalPatterns !== undefined);
-    return this.#attachment(input.threadId, input.model.ref);
+    return this.#attachment(
+      input.threadId,
+      input.initialCheckpoint ?? emptyCheckpoint(input.model.ref),
+    );
   }
 
   async resume(
     input: Parameters<ThreadDriverFactory['resume']>[0],
-  ): Promise<ThreadDriverAttachment> {
-    this.receivedLegacyPatternPorts.push(input.legacyApprovalPatterns !== undefined);
-    const attachment = this.#attachment(input.threadId, input.model.ref);
-    return {
-      ...attachment,
-      durableRef: input.durableRef,
-      ...(input.committedCheckpoint !== undefined && {
-        initialCheckpoint: input.committedCheckpoint,
-      }),
-    };
+  ): Promise<RuntimeThreadDriverAttachment> {
+    return this.#attachment(input.threadId, input.committedCheckpoint);
   }
 
-  async openLegacyApprovalAdapter(): Promise<LegacyApprovalAdapter> {
-    this.legacyRecoveryAdapterOpens++;
-    if (this.options.legacyAdapterOpenError !== undefined) {
-      throw new Error(this.options.legacyAdapterOpenError);
-    }
-    return {
-      async preflight() { return { kind: 'allow' }; },
-      async applyResponse(input) {
-        return {
-          ok: true,
-          effectiveDecision: input.decision,
-          persistedPatterns: [],
-        };
-      },
-      async close() {},
-    };
-  }
-
-  #attachment(threadId: ThreadId, model: ModelRef): ThreadDriverAttachment {
-    const attachment: ThreadDriverAttachment = {
+  #attachment(
+    threadId: ThreadId,
+    checkpoint: ThreadDriverCheckpoint,
+  ): RuntimeThreadDriverAttachment {
+    const attachment: RuntimeThreadDriverAttachment = {
       driver: new CloseOnlyDriver(() => {
         this.closeCounts.set(threadId, (this.closeCounts.get(threadId) ?? 0) + 1);
         if (this.options.failCloseThreadIds?.has(threadId) === true) {
           throw new Error(`injected attachment close failure: ${threadId}`);
         }
       }),
-      durableRef: { kind: 'registry-construction-test', key: threadId },
-      initialCheckpoint: emptyCheckpoint(model),
+      initialCheckpoint: checkpoint,
     };
     this.attachments.push(attachment);
     return attachment;
   }
 }
 
-function withoutLegacyRecoveryAdapter(
+function withInvalidCapabilityMode(
   factory: ConstructionDriverFactory,
 ): ThreadDriverFactory {
   return {
-    requirements: factory.requirements,
+    requirements: { capabilityMode: 'retired' } as unknown as ThreadDriverFactory['requirements'],
     create: (input) => factory.create(input),
     resume: (input) => factory.resume(input),
-  };
-}
-
-function withLegacyApprovalStartupDiagnostic(base: RuntimeStoragePort): RuntimeStoragePort {
-  return {
-    listStoredThreads: () => base.listStoredThreads(),
-    async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
-      const workspace = await base.openWorkspace(input);
-      return new Proxy(workspace, {
-        get(target, property, receiver) {
-          if (property === 'openLegacyApprovalPatternRepository') {
-            return async (
-              ...args: Parameters<NonNullable<
-                RuntimeWorkspaceStoragePort['openLegacyApprovalPatternRepository']
-              >>
-            ): Promise<LegacyApprovalPatternRepository> => {
-              const open = target.openLegacyApprovalPatternRepository;
-              if (open === undefined) throw new Error('Legacy approval repository is unavailable');
-              const repository = await open.call(target, ...args);
-              return {
-                workspaceId: repository.workspaceId,
-                snapshot: () => repository.snapshot(),
-                commit: (commitInput) => repository.commit(commitInput),
-                startupDiagnostics: () => [{
-                  code: 'legacy_approvals_invalid_ignored',
-                  message: 'Invalid legacy approvals were ignored',
-                }],
-                close: () => repository.close(),
-              };
-            };
-          }
-          const value = Reflect.get(target, property, receiver) as unknown;
-          return typeof value === 'function' ? value.bind(target) : value;
-        },
-      });
-    },
   };
 }
 
@@ -4552,8 +3572,54 @@ function threadMeta(threadId: ThreadId, createdByOpId: ExternalOpId): ThreadMeta
     createdAt: 1,
     cwd: CWD,
     model: MODEL.ref,
-    driverRef: { kind: 'test-driver', key: threadId },
   };
+}
+
+function approvalPresentation(input: {
+  readonly requestId: string;
+  readonly threadId: ThreadId;
+  readonly runId: RunId;
+  readonly turnId: import('../protocol/index.js').TurnId;
+  readonly toolCallId: string;
+  readonly policyRevision: string;
+  readonly description: string;
+}) {
+  return {
+    requestId: input.requestId,
+    target: {
+      workspaceId: WORKSPACE_ID,
+      threadId: input.threadId,
+      runId: input.runId,
+      turnId: input.turnId,
+    },
+    capability: {
+      id: 'filesystem.edit',
+      version: '1.0.0',
+      registrationDigest: `capreg_v1_${'1'.repeat(64)}`,
+    },
+    normalizedResources: [{
+      selectorId: 'target',
+      resourceType: 'filesystem',
+      access: 'write',
+      canonicalTarget: '/workspace/file.txt',
+    }],
+    risk: {
+      code: 'write_requires_approval',
+      reason: 'write',
+      description: input.description,
+    },
+    allowOnce: {
+      invocationId: `invocation-${input.requestId}`,
+      toolCallId: input.toolCallId,
+    },
+    revisions: {
+      catalog: 1,
+      effectivePolicy: input.policyRevision,
+      policyBasis: input.policyRevision,
+      ceiling: CEILING.revision,
+      grants: 'grants-v1',
+    },
+  } as const;
 }
 
 function prompt(
@@ -4672,103 +3738,18 @@ class FixedPolicy implements PermissionPolicyPort {
   }
 }
 
-class WorkspaceFatalApprovalFactory implements ThreadDriverFactory {
-  readonly requirements = { approvalMode: 'durable_legacy_bridge' as const };
-  readonly #base = new RecordingDriverFactory();
-  readonly #hosts = new Map<ThreadId, ThreadDriverHostServices>();
-
-  async create(
-    input: Parameters<ThreadDriverFactory['create']>[0],
-    host: ThreadDriverHostServices,
-  ): Promise<ThreadDriverAttachment> {
-    this.#hosts.set(input.threadId, host);
-    return this.#withApproval(await this.#base.create(input, host));
-  }
-
-  async resume(
-    input: Parameters<ThreadDriverFactory['resume']>[0],
-    host: ThreadDriverHostServices,
-  ): Promise<ThreadDriverAttachment> {
-    this.#hosts.set(input.threadId, host);
-    return this.#withApproval(await this.#base.resume(input, host));
-  }
-
-  dispatches(threadId: ThreadId): readonly PreparedThreadDriverCommand[] {
-    return this.#base.dispatches(threadId);
-  }
-
-  async openLegacyApprovalAdapter(): Promise<LegacyApprovalAdapter> {
-    return {
-      async preflight() { return { kind: 'allow' }; },
-      async applyResponse() {
-        return {
-          ok: false,
-          code: 'legacy_approval_definitely_not_applied',
-          message: 'recovery fixture did not apply a pattern',
-        };
-      },
-      async close() {},
-    };
-  }
-
-  async requestApproval(threadId: ThreadId, runId: RunId): Promise<LegacyApprovalInvocationResult> {
-    const host = this.#hosts.get(threadId);
-    if (host === undefined) throw new Error(`missing host for ${threadId}`);
-    const turn = await host.reserveTurn({ runId, turnOrdinal: 1 });
-    await host.commitEvent({
-      event: { type: 'turn_start' },
-      runId,
-      turnId: turn.turnId,
-    });
-    if (host.requestLegacyApproval === undefined) throw new Error('approval host bridge is unavailable');
-    return host.requestLegacyApproval({
-      toolCallId: `call-${threadId}`,
-      toolName: 'edit',
-      cwd: CWD,
-      args: { path: `${threadId}.ts` },
-    });
-  }
-
-  #withApproval(attachment: ThreadDriverAttachment): ThreadDriverAttachment {
-    const adapter: LegacyApprovalAdapter = {
-      async preflight() {
-        return {
-          kind: 'ask',
-          description: 'approve edit',
-          proposal: { patterns: ['Edit(*)'], forceConfirm: false },
-        };
-      },
-      async applyResponse() {
-        return {
-          ok: false,
-          code: 'legacy_approval_conflict',
-          message: 'conflicting durable approval receipt',
-        };
-      },
-      async close() {},
-    };
-    return {
-      ...attachment,
-      legacyApprovalAdapter: adapter,
-      legacyApprovalPolicyRevision: 'workspace-fatal-test',
-    };
-  }
-}
-
 class RecordingDriverFactory implements ThreadDriverFactory {
-  readonly requirements = { approvalMode: 'legacy_session_edge' as const };
+  readonly requirements = { capabilityMode: 'registry' as const };
   readonly #drivers = new Map<ThreadId, RecordingDriver>();
-  readonly creationKeys: string[] = [];
   closeCalls = 0;
   createCalls = 0;
   resumeCalls = 0;
 
   async create(
     input: Parameters<ThreadDriverFactory['create']>[0],
-    host: ThreadDriverHostServices,
-  ): Promise<ThreadDriverAttachment> {
+    host: RuntimeThreadDriverHostServices,
+  ): Promise<RuntimeThreadDriverAttachment> {
     this.createCalls++;
-    this.creationKeys.push(input.creationKey);
     const attachment = this.#attachment(input.threadId, input.model.ref, host);
     return input.initialCheckpoint === undefined
       ? attachment
@@ -4779,15 +3760,13 @@ class RecordingDriverFactory implements ThreadDriverFactory {
     input: {
       readonly threadId: ThreadId;
       readonly model: ModelConfig;
-      readonly committedCheckpoint?: import('./ports.js').ThreadDriverCheckpoint;
+      readonly committedCheckpoint: import('./ports.js').ThreadDriverCheckpoint;
     },
-    host: ThreadDriverHostServices,
-  ): Promise<ThreadDriverAttachment> {
+    host: RuntimeThreadDriverHostServices,
+  ): Promise<RuntimeThreadDriverAttachment> {
     this.resumeCalls++;
     const attachment = this.#attachment(input.threadId, input.model.ref, host);
-    return input.committedCheckpoint === undefined
-      ? attachment
-      : { ...attachment, initialCheckpoint: input.committedCheckpoint };
+    return { ...attachment, initialCheckpoint: input.committedCheckpoint };
   }
 
   dispatches(threadId: ThreadId): readonly PreparedThreadDriverCommand[] {
@@ -4827,13 +3806,12 @@ class RecordingDriverFactory implements ThreadDriverFactory {
   #attachment(
     threadId: ThreadId,
     model: ModelRef,
-    host: ThreadDriverHostServices,
-  ): ThreadDriverAttachment {
+    host: RuntimeThreadDriverHostServices,
+  ): RuntimeThreadDriverAttachment {
     const driver = new RecordingDriver(host, () => { this.closeCalls++; });
     this.#drivers.set(threadId, driver);
     return {
       driver,
-      durableRef: { kind: 'test-driver', key: threadId },
       initialCheckpoint: emptyCheckpoint(model),
     };
   }
@@ -4845,7 +3823,7 @@ class RecordingDriver implements ThreadDriverPort {
   readonly #pending = new Map<RunId, Deferred<ThreadDriverCompletion>>();
 
   constructor(
-    private readonly host: ThreadDriverHostServices,
+    private readonly host: RuntimeThreadDriverHostServices,
     private readonly onClose: () => void,
   ) {}
 
@@ -4890,7 +3868,7 @@ class RecordingDriver implements ThreadDriverPort {
   }
 
   async materializeTurn(runId: RunId, promptText: string, responseText: string): Promise<void> {
-    const turn = await this.host.reserveTurn({ runId, turnOrdinal: 1 });
+    const turn = await this.#reserveCanonicalTurn(runId);
     await this.host.commitEvent({ event: { type: 'turn_start' }, runId, turnId: turn.turnId });
     await this.host.commitEvent({
       event: {
@@ -4925,7 +3903,7 @@ class RecordingDriver implements ThreadDriverPort {
   }
 
   async materializeToolDiff(runId: RunId, target: string, diff: string): Promise<void> {
-    const turn = await this.host.reserveTurn({ runId, turnOrdinal: 1 });
+    const turn = await this.#reserveCanonicalTurn(runId);
     const toolCallId = `tool-${runId}`;
     await this.host.commitEvent({ event: { type: 'turn_start' }, runId, turnId: turn.turnId });
     await this.host.commitEvent({
@@ -4987,10 +3965,30 @@ class RecordingDriver implements ThreadDriverPort {
     this.#pending.delete(runId);
     pending.resolve({ kind: 'activity', status, terminalRunId: runId });
   }
+
+  async #reserveCanonicalTurn(runId: RunId): Promise<{
+    readonly turnId: import('../protocol/index.js').TurnId;
+  }> {
+    const turn = await this.host.reserveTurn({ runId, turnOrdinal: 1 });
+    const rootCommand = this.commands.findLast((command) =>
+      'runId' in command && command.runId === runId);
+    if (rootCommand === undefined || !('runId' in rootCommand)) {
+      throw new Error(`Missing root command for ${runId}`);
+    }
+    await this.host.captureRuntimeTurn?.({
+      rootOpId: rootCommand.op.opId,
+      runId,
+      turnId: turn.turnId,
+      model: MODEL,
+      transcript: [],
+      signal: new AbortController().signal,
+    });
+    return turn;
+  }
 }
 
 class CheckpointMismatchFactory implements ThreadDriverFactory {
-  readonly requirements = { approvalMode: 'legacy_session_edge' as const };
+  readonly requirements = { capabilityMode: 'registry' as const };
   resumeCalls = 0;
   closeCalls = 0;
 
@@ -4999,17 +3997,17 @@ class CheckpointMismatchFactory implements ThreadDriverFactory {
     readonly closeReject?: boolean;
   }>) {}
 
-  async create(): Promise<ThreadDriverAttachment> {
+  async create(): Promise<RuntimeThreadDriverAttachment> {
     throw new Error('CheckpointMismatchFactory.create is not used');
   }
 
   async resume(
     input: Parameters<ThreadDriverFactory['resume']>[0],
-  ): Promise<ThreadDriverAttachment> {
+  ): Promise<RuntimeThreadDriverAttachment> {
     this.resumeCalls++;
     const mode = this.modes.shift();
     if (mode === undefined) throw new Error('No checkpoint mismatch mode configured');
-    const checkpoint = input.committedCheckpoint ?? emptyCheckpoint(input.model.ref);
+    const checkpoint = input.committedCheckpoint;
     const initialCheckpoint: ThreadDriverCheckpoint = mode.mismatch
       ? {
           ...checkpoint,
@@ -5024,45 +4022,8 @@ class CheckpointMismatchFactory implements ThreadDriverFactory {
         this.closeCalls++;
         if (mode.closeReject === true) throw new Error('quarantined close failed');
       }),
-      durableRef: input.durableRef,
       initialCheckpoint,
     };
-  }
-}
-
-class CreateCheckpointMismatchFactory implements ThreadDriverFactory {
-  readonly requirements = { approvalMode: 'legacy_session_edge' as const };
-  readonly creationKeys: string[] = [];
-  createCalls = 0;
-  closeCalls = 0;
-
-  constructor(private readonly mismatches: boolean[]) {}
-
-  async create(
-    input: Parameters<ThreadDriverFactory['create']>[0],
-  ): Promise<ThreadDriverAttachment> {
-    this.createCalls++;
-    this.creationKeys.push(input.creationKey);
-    const mismatch = this.mismatches.shift();
-    if (mismatch === undefined) throw new Error('No create checkpoint mode configured');
-    const checkpoint = emptyCheckpoint(input.model.ref);
-    return {
-      driver: new CloseOnlyDriver(() => { this.closeCalls++; }),
-      durableRef: { kind: 'test-driver', key: input.threadId },
-      initialCheckpoint: mismatch
-        ? {
-            ...checkpoint,
-            frontend: {
-              ...checkpoint.frontend,
-              plan: [{ step: 'uncommitted create state', status: 'pending' }],
-            },
-          }
-        : checkpoint,
-    };
-  }
-
-  async resume(): Promise<ThreadDriverAttachment> {
-    throw new Error('CreateCheckpointMismatchFactory.resume is not used');
   }
 }
 

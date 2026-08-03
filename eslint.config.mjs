@@ -25,22 +25,32 @@ export default tseslint.config(
           // protocol、shared 是叶子:不得 import src 下任何其他目录
           { target: './src/protocol', from: './src', except: ['./protocol'] },
           { target: './src/shared', from: './src', except: ['./shared'] },
-          // capabilities 只依赖 protocol/shared；generic legacy adapter 唯一窄例外是 tools/types.ts。
+          // capabilities 只依赖 protocol/shared。
           {
             target: './src/capabilities',
             from: './src',
-            except: ['./capabilities', './protocol', './shared', './tools/types.ts'],
+            except: ['./capabilities', './protocol', './shared'],
           },
           // 具体八工具 binding 是集成层，只向下看 capabilities/tools/protocol/shared。
           {
-            target: './src/integrations/legacy-coding-tools',
+            target: './src/integrations/coding-capabilities',
             from: './src',
             except: [
-              './integrations/legacy-coding-tools',
+              './integrations/coding-capabilities',
               './capabilities',
               './tools',
               './protocol',
               './shared',
+            ],
+          },
+          // checkpoint-only driver integration only composes protocol and per-thread session ports.
+          {
+            target: './src/integrations/runtime-thread-driver',
+            from: './src',
+            except: [
+              './integrations/runtime-thread-driver',
+              './protocol',
+              './session',
             ],
           },
           // providers 只向下看 protocol/shared
@@ -48,25 +58,24 @@ export default tseslint.config(
           { target: './src/providers', from: './src/tools' },
           { target: './src/providers', from: './src/session' },
           { target: './src/providers', from: './src/cli' },
-          // agent 不认识 providers/session/cli;对 tools 仅放行框架类型文件
+          // agent 不认识 providers/session/cli/tools；能力执行只经 RuntimeTurnProvider。
           { target: './src/agent', from: './src/providers' },
           { target: './src/agent', from: './src/session' },
           { target: './src/agent', from: './src/cli' },
-          { target: './src/agent', from: './src/tools', except: ['./types.ts'] },
+          { target: './src/agent', from: './src/tools' },
           // tools 不认识上层与 providers
           { target: './src/tools', from: './src/providers' },
           { target: './src/tools', from: './src/agent' },
           { target: './src/tools', from: './src/session' },
           { target: './src/tools', from: './src/cli' },
           { target: './src/tools', from: './src/capabilities' },
-          { target: './src/tools', from: './src/integrations/legacy-coding-tools' },
+          { target: './src/tools', from: './src/integrations/coding-capabilities' },
           // session 只依赖 protocol/shared/agent(见 docs/02 §7),不得触碰 runtime/providers/tools/cli
           { target: './src/session', from: './src/runtime' },
           { target: './src/session', from: './src/cli' },
           { target: './src/session', from: './src/providers' },
           { target: './src/session', from: './src/tools' },
-          // runtime 是无 UI 的 Supervisor/路由层；阶段 2 起组装 session 层的六个协作者，
-          // 仍不得直接依赖 Agent/provider/tool 或 CLI。
+          // runtime 是无 UI 的 Supervisor/路由层，仍不得直接依赖 Agent/provider/tool 或 CLI。
           {
             target: './src/runtime',
             from: './src',
@@ -183,7 +192,7 @@ export default tseslint.config(
     },
   },
 
-  // ---- 规则 C:protocol 层零运行时依赖(纯类型 + EventStream,连 node: 内置模块也不引)----
+  // ---- 规则 C:protocol 层零运行时依赖(纯协议类型与校验，连 node: 内置模块也不引)----
   // regex 而非 group:gitignore 语义下 '*' 会连相对导入一起封死(protocol 内部 import './x.js' 也报错)。
   // '^[^.]' 只拦 bare specifier(npm 包与 node: 内置);'../' 越出 protocol 由规则 A 的 zone 兜底。
   {

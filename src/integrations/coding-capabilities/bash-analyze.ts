@@ -1,4 +1,4 @@
-// Legacy coding-tool binding 所有的保守 bash 命令/路径分析。
+// Built-in bash capability 所有的保守命令/路径分析。
 // v2 不引 tree-sitter,用尊重单双引号与反斜杠转义的手写扫描器拆分复合命令，并冻结 target kind。
 // 原则:静态分析看不全的嵌套结构(命令替换 $()/反引号、进程替换 <()/>()、
 // 重定向进系统路径、eval/exec/source 作 root)一律 forceConfirm 交给人,
@@ -7,26 +7,25 @@
 import path from 'node:path';
 import { resolveToolWorkdir } from '../../shared/index.js';
 
-/** Version of the frozen legacy bash command/path analysis consumed by policy adapters. */
-export const LEGACY_BASH_ANALYSIS_VERSION = 'legacy_bash_analysis_v2';
+/** Version of the frozen bash command/path analysis consumed by canonical policy. */
+export const BASH_ANALYSIS_VERSION = 'bash_analysis_v3';
 
-export interface LegacyFilesystemTarget {
+export interface FilesystemTarget {
   readonly canonicalTarget: string;
   readonly kind: BashPathTarget['kind'];
 }
 
-export type LegacyBashFilesystemTarget = LegacyFilesystemTarget;
+export type BashFilesystemTarget = FilesystemTarget;
 
-/** Adapter presentation facts frozen by the authoritative resolver for CLI legacy projection. */
-export interface LegacyBashInvocationAnalysisAttributes {
-  readonly kind: typeof LEGACY_BASH_ANALYSIS_VERSION;
+/** Presentation facts frozen by the authoritative resolver for policy and rule freshness. */
+export interface BashInvocationAnalysisAttributes {
+  readonly kind: typeof BASH_ANALYSIS_VERSION;
   readonly command: string;
-  readonly patterns: readonly string[];
   readonly forceConfirm: boolean;
   readonly reasons: readonly string[];
   readonly accessesExternalProject: boolean;
   /** Resolver-frozen target kinds; freshness must never rediscover these from the live filesystem. */
-  readonly filesystemTargets: readonly Readonly<LegacyBashFilesystemTarget>[];
+  readonly filesystemTargets: readonly Readonly<BashFilesystemTarget>[];
   readonly modelDescription?: string;
 }
 

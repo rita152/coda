@@ -4,8 +4,8 @@
 import type { QueuedMessage } from '../protocol/index.js';
 import type {
   CliApprovalDecision as ApprovalDecision,
-  CliInteractionState as SessionInteractionState,
-  CliSessionUsage as SessionUsage,
+  CliInteractionState,
+  CliThreadUsage,
 } from './frontend-types.js';
 import { findSlashCommand } from './command-catalog.js';
 
@@ -17,12 +17,12 @@ export const CTRL_C_EXIT_WINDOW_MS = 1500;
 
 /** retrying Enter remains steering; compacting accepts a deferred prompt. */
 export function interactionEnterState(
-  state: SessionInteractionState,
+  state: CliInteractionState,
 ): 'idle' | 'running' {
   return state === 'running' || state === 'retrying' ? 'running' : 'idle';
 }
 
-export function interactionCanAbort(state: SessionInteractionState): boolean {
+export function interactionCanAbort(state: CliInteractionState): boolean {
   return state !== 'idle';
 }
 
@@ -301,7 +301,7 @@ export class DoublePress {
   }
 }
 
-export function formatStatusLines(usage: SessionUsage, model?: string): string[] {
+export function formatStatusLines(usage: CliThreadUsage, model?: string): string[] {
   const cumulative = usage.cumulative;
   const lines: string[] = [];
   if (model !== undefined) lines.push(`model: ${model}`);

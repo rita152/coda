@@ -1,5 +1,5 @@
 // config 解析单测(M5 核查修复面,docs/09 §2/§7):
-// (1) --resume 只吞会话 id 形状的值(YYYYMMDD-HHMMSS-…);裸文本不被吞,按裸 prompt 处理;
+// (1) --resume=<ThreadId> 显式选择线程；裸 --resume 打开列表，后续位置参数作为 prompt；
 // (2) readConfigFile:文件不存在静默;JSON 损坏 stderr 警告一行(不静默吞),仍返回 {}。
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -12,16 +12,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('parseFlags --resume(docs/09 §2:--resume [id])', () => {
-  it('形如会话 id 的值被吞为 resume id', () => {
+describe('parseFlags --resume[=<ThreadId>]', () => {
+  it('裸 --resume 不猜测旧 id 形状，后续位置参数作为 prompt', () => {
     const flags = parseFlags(['--resume', '20260727-123456-ab3f']);
-    expect(flags.resume).toBe('20260727-123456-ab3f');
-    expect(flags.prompt).toBeUndefined();
-  });
-
-  it('Runtime legacy mirror id 同样可用分离参数恢复', () => {
-    const id = `runtime-${'a'.repeat(40)}`;
-    expect(parseFlags(['--resume', id]).resume).toBe(id);
+    expect(flags.resume).toBe(true);
+    expect(flags.prompt).toBe('20260727-123456-ab3f');
   });
 
   it('裸文本不被吞:视为无 id 的 --resume(列表选择),该值按裸 prompt 处理', () => {
@@ -37,7 +32,7 @@ describe('parseFlags --resume(docs/09 §2:--resume [id])', () => {
     expect(flags.noColor).toBe(true);
   });
 
-  it('非 id 形状的时间戳残缺值不被吞', () => {
+  it('所有分离位置参数都不被当成 ThreadId', () => {
     const flags = parseFlags(['--resume', '2026-0727']); // 连字符位置不对,不是 id
     expect(flags.resume).toBe(true);
     expect(flags.prompt).toBe('2026-0727');
@@ -88,17 +83,10 @@ describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
   });
 });
 
-describe('parseFlags Phase-1 runtime transport', () => {
-  it('legacy 是默认值，envelope 同时支持空格与 equals 文法', () => {
-    expect(parseFlags(['--json']).eventFormat).toBe('legacy');
-    expect(parseFlags(['--json', '--event-format', 'envelope']).eventFormat).toBe('envelope');
-    expect(parseFlags(['--json', '--event-format=envelope']).eventFormat).toBe('envelope');
-  });
-
-  it('envelope 只允许 headless，非法/空值 fail-fast', () => {
-    expect(() => parseFlags(['--event-format=envelope'])).toThrow(/requires --json/);
-    expect(() => parseFlags(['--json', '--event-format=nope'])).toThrow(/unknown event format/);
-    expect(() => parseFlags(['--json', '--event-format='])).toThrow(/unknown event format/);
+describe('parseFlags canonical runtime transport', () => {
+  it('removes the event-format protocol selector', () => {
+    expect(() => parseFlags(['--event-format=envelope'])).toThrow(/unknown flag/);
+    expect(() => parseFlags(['--json', '--event-format=legacy'])).toThrow(/unknown flag/);
   });
 
   it('equals-form resume 接受 opaque ThreadId，并可用 workspace 消歧', () => {

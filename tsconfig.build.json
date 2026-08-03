@@ -9,7 +9,7 @@
   },
   "include": [
     "src/capabilities/**/*.ts",
-    "src/integrations/legacy-coding-tools/**/*.ts",
+    "src/integrations/coding-capabilities/**/*.ts",
     "src/protocol/**/*.ts",
     "src/runtime/**/*.ts",
     "src/shared/**/*.ts",

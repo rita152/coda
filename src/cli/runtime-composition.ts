@@ -14,23 +14,17 @@ import type {
 
 export interface RuntimeStorageRoots {
   readonly runtimeRoot: string;
-  readonly legacySessionDir: string;
 }
 
 export function resolveRuntimeStorageRoots(input: {
   readonly homeDir: string;
-  readonly legacySessionDir?: string;
 }): RuntimeStorageRoots {
-  const legacySessionDir = input.legacySessionDir ?? path.join(input.homeDir, '.coda', 'sessions');
   return {
-    legacySessionDir,
-    runtimeRoot: input.legacySessionDir === undefined
-      ? path.join(input.homeDir, '.coda', 'runtime-v2')
-      : path.join(legacySessionDir, '.runtime-v2'),
+    runtimeRoot: path.join(input.homeDir, '.coda', 'runtime-v2'),
   };
 }
 
-export interface LegacyModelLookup {
+export interface ModelLookup {
   resolveModel(providerId: string, modelId: string): ModelConfig | undefined;
 }
 
@@ -39,7 +33,7 @@ export interface CliRuntimeModelResolver extends RuntimeModelResolver {
 }
 
 export function createCliRuntimeModelResolver(
-  lookup?: LegacyModelLookup,
+  lookup?: ModelLookup,
 ): CliRuntimeModelResolver {
   const trusted = new Map<string, ModelConfig>();
   return {
@@ -75,7 +69,7 @@ export function createCliRuntimeModelResolver(
   };
 }
 
-export function createLegacyPermissionPolicy(
+export function createCliPermissionPolicy(
   mode: Exclude<RuntimePermissionMode, 'custom'> = 'interactive',
 ): PermissionPolicyPort {
   const workspace = ceiling('workspace', [], []);
@@ -87,7 +81,7 @@ export function createLegacyPermissionPolicy(
     async snapshotWorkspacePermissionStatus() {
       return {
         mode,
-        policyRevision: `legacy-cli-${mode}-v2`,
+        policyRevision: `cli-permission-${mode}-v3`,
       };
     },
 
@@ -158,7 +152,7 @@ function ceiling(
   narrowingRevision?: string,
 ): PermissionCeilingSnapshot {
   return snapshotCeiling({
-    revision: `legacy-v1-${canonicalJsonSha256({
+    revision: `permission-v3-${canonicalJsonSha256({
       domain,
       baseRevisions,
       constraints,

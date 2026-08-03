@@ -2,12 +2,9 @@
 
 import type {
   AgentMessage,
-  ApprovalControlDecision,
   DerivedOpId,
   DerivedOpPurpose,
   ExternalOpId,
-  LegacyApprovalPatternSnapshot,
-  LegacyApprovalProposal,
   MailboxRuntimeOp,
   ModelConfig,
   ModelRef,
@@ -22,12 +19,10 @@ import type {
   RuntimeEvent,
   RuntimePermissionMode,
   RuntimeOp,
-  ThreadDriverRef,
   ThreadId,
   ThreadSnapshot,
   ThreadUsage,
   TurnId,
-  UserMessage,
   WorkspaceId,
 } from '../protocol/index.js';
 import type { RuntimeTurnPort } from '../agent/index.js';
@@ -100,101 +95,6 @@ export interface PermissionPolicyPort {
       }): Promise<PermissionCeilingSnapshot>;
 }
 
-export interface LegacyApprovalContext {
-  readonly workspaceId: WorkspaceId;
-  readonly threadId: ThreadId;
-  readonly runId: RunId;
-  readonly turnId: TurnId;
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly cwd: string;
-  readonly policyRevision: string;
-  readonly permissionCeiling: Readonly<PermissionCeilingSnapshot>;
-}
-
-export type LegacyApprovalPreflightResult =
-  | { readonly kind: 'allow' }
-  | { readonly kind: 'deny'; readonly reason: string }
-  | {
-      readonly kind: 'ask';
-      readonly description: string;
-      readonly proposal: Readonly<LegacyApprovalProposal>;
-    };
-
-export type LegacyApprovalApplyResult =
-  | {
-      readonly ok: true;
-      readonly effectiveDecision: ApprovalControlDecision;
-      readonly persistedPatterns: readonly string[];
-    }
-  | {
-      readonly ok: false;
-      readonly code:
-        | 'legacy_approval_definitely_not_applied'
-        | 'legacy_approval_conflict'
-        | 'legacy_approval_fenced';
-      readonly message: string;
-    };
-
-export interface LegacyApprovalRequestSnapshot {
-  readonly workspaceId: WorkspaceId;
-  readonly threadId: ThreadId;
-  readonly requestId: string;
-  readonly owningRunId: RunId;
-  readonly owningTurnId: TurnId;
-  readonly toolCallId: string;
-  readonly description: string;
-  readonly policyRevision: string;
-  readonly proposal: Readonly<LegacyApprovalProposal>;
-}
-
-export type LegacyApprovalPatternCommitResult =
-  | { readonly kind: 'applied' | 'duplicate'; readonly revision: string }
-  | { readonly kind: 'definitely_not_applied'; readonly message: string }
-  | { readonly kind: 'conflict'; readonly revision: string; readonly message: string }
-  | {
-      readonly kind: 'fenced';
-      readonly code: 'stale_fence' | 'wrong_workspace';
-      readonly message: string;
-    };
-
-export interface LegacyApprovalPatternRepositoryPort {
-  readonly workspaceId: WorkspaceId;
-  snapshot(): Promise<Readonly<LegacyApprovalPatternSnapshot>>;
-  commit(input: {
-    readonly responseOpId: ExternalOpId;
-    readonly acceptedAt: number;
-    readonly patterns: readonly [string, ...string[]];
-  }): Promise<LegacyApprovalPatternCommitResult>;
-}
-
-export interface LegacyApprovalAdapter {
-  preflight(input: {
-    readonly context: Readonly<LegacyApprovalContext>;
-    readonly args: unknown;
-  }): Promise<LegacyApprovalPreflightResult>;
-  applyResponse(input: {
-    readonly request: Readonly<LegacyApprovalRequestSnapshot>;
-    readonly responseOpId: ExternalOpId;
-    readonly acceptedAt: number;
-    readonly decision: ApprovalControlDecision;
-  }): Promise<LegacyApprovalApplyResult>;
-  close(): Promise<void>;
-}
-
-export interface LegacyApprovalAdapterFactory {
-  open(input: {
-    readonly workspaceId: WorkspaceId;
-    readonly threadId: ThreadId;
-    readonly patterns: LegacyApprovalPatternRepositoryPort;
-  }): Promise<LegacyApprovalAdapter>;
-}
-
-export type LegacyApprovalInvocationResult =
-  | { readonly kind: 'allow' }
-  | { readonly kind: 'deny'; readonly reason: string }
-  | { readonly kind: 'aborted' };
-
 export type PreparedThreadDriverCommand =
   | {
       readonly op: Extract<RuntimeOp, { type: 'prompt' }>;
@@ -223,11 +123,6 @@ export type PreparedThreadDriverCommand =
     }
   | {
       readonly op: Extract<RuntimeOp, { type: 'steer' | 'follow_up' }>;
-      /**
-       * Direct Session accepts a complete legacy UserMessage. The mailbox keeps the durable text
-       * projection while this trusted, same-process sidecar preserves its caller identity/media.
-       */
-      readonly legacyQueuedMessage?: Readonly<UserMessage>;
     }
   | {
       readonly op: Extract<RuntimeOp, { type: 'control_response' }>;
@@ -235,7 +130,6 @@ export type PreparedThreadDriverCommand =
 
 export interface ThreadRuntimePreparedInput {
   readonly resolvedModel?: ModelConfig;
-  readonly legacyQueuedMessage?: Readonly<UserMessage>;
 }
 
 export interface RecoveryQueueCommand {
@@ -335,25 +229,36 @@ export interface ThreadDriverHostServices {
     readonly transcript: readonly Readonly<AgentMessage>[];
     readonly signal: AbortSignal;
   }): Promise<RuntimeTurnPort>;
-  /**
-   * Static phase-2 approval bridge. The host owns the durable request, waiter, response claim,
-   * and resolution ordering; the legacy driver only awaits the resulting invocation decision.
-   */
-  requestLegacyApproval?(input: {
-    readonly toolCallId: string;
-    readonly toolName: string;
-    readonly cwd: string;
-    readonly args: unknown;
-  }): Promise<LegacyApprovalInvocationResult>;
 }
 
-export interface ThreadDriverAttachment {
+/** Canonical attachment result: the Runtime journal is the only durable backend. */
+export interface RuntimeThreadDriverAttachment {
   readonly driver: ThreadDriverPort;
-  readonly durableRef: ThreadDriverRef;
   readonly initialCheckpoint: ThreadDriverCheckpoint;
-  readonly legacyApprovalAdapter?: LegacyApprovalAdapter;
-  readonly legacyApprovalPolicyRevision?: string;
 }
+
+/** Canonical driver factory consumed by the runtime-v2-only Supervisor composition. */
+export interface RuntimeThreadDriverFactory {
+  readonly requirements: { readonly capabilityMode: 'registry' };
+  create(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly threadId: ThreadId;
+    readonly model: ModelConfig;
+    readonly permissionCeiling: PermissionCeilingSnapshot;
+    readonly parentThreadId?: ThreadId;
+    readonly initialCheckpoint?: ThreadDriverCheckpoint;
+  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
+  resume(input: {
+    readonly workspaceId: WorkspaceId;
+    readonly threadId: ThreadId;
+    readonly model: ModelConfig;
+    readonly permissionCeiling: PermissionCeilingSnapshot;
+    readonly committedCheckpoint: ThreadDriverCheckpoint;
+    readonly usedRequestIds: readonly string[];
+  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
+}
+
+export type RuntimeThreadDriverHostServices = ThreadDriverHostServices;
 
 export interface ThreadDriverPort {
   /** Replays durable queue effects while the attachment is still quarantined. */

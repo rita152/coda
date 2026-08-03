@@ -5,9 +5,9 @@
 
 import { z } from 'zod';
 import type { PlanStep } from '../protocol/index.js';
-import type { ToolDefinition } from './types.js';
+import type { ToolExecutionInput, ToolOutput } from './types.js';
 
-const PlanParams = z.object({
+export const planParameters = z.object({
   steps: z
     .array(
       z.object({
@@ -18,27 +18,26 @@ const PlanParams = z.object({
     .describe('The complete updated plan (full replacement of the previous list)'),
 });
 
-type PlanArgs = z.infer<typeof PlanParams>;
+export type PlanArgs = z.infer<typeof planParameters>;
 
 /** loop 识别此形态后发 plan_update(docs/07 §2.8);UI/持久化用,不发给模型。 */
 export interface PlanDetails {
   steps: PlanStep[];
 }
 
-export const planTool: ToolDefinition<PlanArgs, PlanDetails> = {
-  name: 'plan',
-  description:
-    'Maintain the task plan as a checklist. Send the COMPLETE updated list every time (full replacement). ' +
-    'Use for tasks with 3+ steps; keep exactly one step in_progress while working.',
-  parameters: PlanParams,
-  kind: 'plan',
-  promptSnippet:
-    'Plan tool usage: use it only for tasks with 3 or more steps. Mark a step in_progress before starting it ' +
-    'and completed immediately after finishing — never batch updates or mark steps completed in advance. ' +
-    'Keep at most one step in_progress at a time. If blocked, keep the step in_progress and add a new step ' +
-    'describing the blocker.',
+export const PLAN_DESCRIPTION =
+  'Maintain the task plan as a checklist. Send the COMPLETE updated list every time (full replacement). ' +
+  'Use for tasks with 3+ steps; keep exactly one step in_progress while working.';
 
-  async execute({ args }) {
+export const PLAN_PROMPT_SNIPPET =
+  'Plan tool usage: use it only for tasks with 3 or more steps. Mark a step in_progress before starting it ' +
+  'and completed immediately after finishing — never batch updates or mark steps completed in advance. ' +
+  'Keep at most one step in_progress at a time. If blocked, keep the step in_progress and add a new step ' +
+  'describing the blocker.';
+
+export async function executePlan(
+  { args }: ToolExecutionInput<PlanArgs>,
+): Promise<ToolOutput<PlanDetails>> {
     const steps = args.steps as PlanStep[];
     const lines = steps.map((s, i) => `${i + 1}. [${s.status}] ${s.step}`);
     const inProgress = steps.filter((s) => s.status === 'in_progress').length;
@@ -50,5 +49,4 @@ export const planTool: ToolDefinition<PlanArgs, PlanDetails> = {
       content: [{ type: 'text', text: lines.join('\n') || '(empty plan)' }],
       details: { steps },
     };
-  },
-};
+}

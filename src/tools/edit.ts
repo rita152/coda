@@ -8,12 +8,12 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { z } from 'zod';
-import type { ToolDefinition } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 import { withPathLock } from './path-lock.js';
 
 // ---- 参数 schema(与 docs/07 §2.6 逐字段一致) ----
 
-const EditParams = z.object({
+export const editParameters = z.object({
   path: z.string().describe('Path to the file to edit'),
   edits: z
     .array(
@@ -32,7 +32,7 @@ const EditParams = z.object({
     .describe('All edits are matched against the original file content; edits must not overlap'),
 });
 
-export type EditArgs = z.infer<typeof EditParams>;
+export type EditArgs = z.infer<typeof editParameters>;
 
 /** 结构化细节:unified diff 进 UI 不回喂模型(docs/07 §2.6)。 */
 export interface EditDetails {
@@ -287,21 +287,17 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new Error(MSG_ABORTED);
 }
 
-export const editTool: ToolDefinition<EditArgs, EditDetails> = {
-  name: 'edit',
-  description:
-    'Replace exact text in an existing file. Each oldText must match the current file content ' +
-    'exactly (including whitespace and indentation) and must be unique unless replaceAll is set. ' +
-    'Prefer this tool over write for modifying existing files.',
-  parameters: EditParams,
-  executionMode: 'sequential',
-  kind: 'edit',
-  promptSnippet:
-    'Before editing a file, read it in the current session first. When composing oldText from ' +
-    'read output, strip the `N: ` line-number prefixes — copy the content verbatim otherwise.',
+export const EDIT_DESCRIPTION =
+  'Replace exact text in an existing file. Each oldText must match the current file content ' +
+  'exactly (including whitespace and indentation) and must be unique unless replaceAll is set. ' +
+  'Prefer this tool over write for modifying existing files.';
 
-  // zod 校验前的无损结构修补(docs/07 §1.4):只做结构搬运,不猜语义。
-  prepareArguments(raw: unknown): unknown {
+export const EDIT_PROMPT_SNIPPET =
+  'Before editing a file, read it in the current session first. When composing oldText from ' +
+  'read output, strip the `N: ` line-number prefixes — copy the content verbatim otherwise.';
+
+// zod 校验前的无损结构修补(docs/07 §1.4):只做结构搬运,不猜语义。
+export function prepareEditArguments(raw: unknown): unknown {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
     const obj: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
     // 高频畸形 1:edits 数组被发成 JSON 字符串
@@ -312,7 +308,7 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
         // 解析失败保留原样,交给 zod 按 §1.3 回喂
       }
     }
-    // 高频畸形 2:旧式平铺 oldText/newText
+    // 高频畸形 2:模型把 oldText/newText 平铺在顶层
     if (!obj.edits && obj.oldText !== undefined) {
       return {
         path: obj.path,
@@ -320,9 +316,12 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
       };
     }
     return obj;
-  },
+}
 
-  async execute(call, ctx) {
+export async function executeEdit(
+  call: ToolExecutionInput<EditArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<EditDetails>> {
     const args = call.args;
     const absPath = path.resolve(ctx.cwd, args.path);
 
@@ -417,8 +416,7 @@ export const editTool: ToolDefinition<EditArgs, EditDetails> = {
         details: { diff, additions, deletions },
       };
     });
-  },
-};
+}
 
 function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
   const out = new Uint8Array(left.length + right.length);

@@ -47,12 +47,9 @@ import type {
 import { EventHub } from './event-hub.js';
 import type {
   PermissionPolicyPort,
-  LegacyApprovalAdapter,
-  LegacyApprovalApplyResult,
-  LegacyApprovalPreflightResult,
   PreparedThreadDriverCommand,
   RuntimeClock,
-  ThreadDriverAttachment,
+  RuntimeThreadDriverAttachment,
   ThreadDriverCompletion,
   ThreadDriverPort,
   ThreadIdentityPort,
@@ -312,6 +309,38 @@ describe('ThreadRuntime durable admission and identity', () => {
     await fixture.runtime.close().catch(() => undefined);
   });
 
+  test('does not dispatch a prompt after a set_model completion commit fails', async () => {
+    const fixture = runtimeFixture();
+    const nextModel: ModelConfig = {
+      ref: { provider: 'faux', api: 'faux', model: 'runtime-next' },
+    };
+    const modelCompletion = deferred<ThreadDriverCompletion>();
+    fixture.driver.nextOperationCompletionDeferred = modelCompletion;
+    const setModel = {
+      type: 'set_model',
+      opId: opId(29),
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      model: nextModel.ref,
+    } as const;
+    expect(await fixture.runtime.acceptExternal(setModel, { resolvedModel: nextModel })).toMatchObject({
+      accepted: true,
+    });
+
+    fixture.journal.nextAppendFailure = new Error('set_model completion commit failed');
+    modelCompletion.resolve({ kind: 'operation', outcome: 'applied' });
+    await expect(fixture.runtime.waitForIdle()).rejects.toThrow(
+      `Thread ${THREAD_ID} background execution failed`,
+    );
+    expect(fixture.runtime.snapshot().model).toEqual(MODEL.ref);
+    const dispatchedBeforePrompt = fixture.driver.commands.length;
+
+    await expect(fixture.runtime.acceptExternal(prompt(opId(30), 'must not reach the new model')))
+      .rejects.toThrow('set_model completion commit failed');
+    expect(fixture.driver.commands).toHaveLength(dispatchedBeforePrompt);
+    await fixture.runtime.close().catch(() => undefined);
+  });
+
   test('rejects an internal duplicate OpId carrying a different canonical payload', async () => {
     const fixture = runtimeFixture();
     const derivedOpId = deriveOpId({
@@ -444,6 +473,11 @@ describe('ThreadRuntime durable admission and identity', () => {
       reason: 'compaction',
     });
     await fixture.runtime.commitDriverEvent({
+      event: { type: 'agent_end', reason: 'completed', messages: [] },
+      runId: first.runId,
+    });
+    expect(fixture.runtime.durableState().runs.get(successor.runId)?.state).toBe('reserved');
+    await fixture.runtime.commitDriverEvent({
       event: {
         type: 'compaction_start',
         reason: 'threshold',
@@ -451,6 +485,16 @@ describe('ThreadRuntime durable admission and identity', () => {
         activityRunId: successor.runId,
       },
       runId: successor.runId,
+    });
+    expect(fixture.runtime.durableState().runs.get(successor.runId)?.state).toBe('started');
+    expect(fixture.runtime.summary()).toMatchObject({
+      state: 'running',
+      activeRunId: successor.runId,
+    });
+    expect(fixture.runtime.snapshot().activity).toMatchObject({
+      runId: successor.runId,
+      toolExecutions: [],
+      compaction: { activityRunId: successor.runId },
     });
     await fixture.runtime.commitDriverEvent({
       event: {
@@ -469,8 +513,9 @@ describe('ThreadRuntime durable admission and identity', () => {
         summary: 'compacted summary',
       },
     });
+    expect(fixture.runtime.snapshot().activity).toBeUndefined();
 
-    // The legacy execution can already project idle after compaction_end while ThreadRuntime is
+    // Execution can already project idle after compaction_end while ThreadRuntime is
     // still closing the root activity around its canonical compaction successor.
     fixture.driver.stateOverride = 'idle';
     const queued = await fixture.runtime.acceptExternal(prompt(opId(28), 'after committed compaction'));
@@ -581,7 +626,13 @@ describe('ThreadRuntime durable admission and identity', () => {
         owningRunId: receipt.runId,
         owningTurnId: turn.turnId,
         policyRevision: 'policy-v1',
-        payload: { toolCallId: 'call-first-wins', description: 'test' },
+        payload: approvalPayload(
+          'approval-first-wins',
+          receipt.runId,
+          turn.turnId,
+          'call-first-wins',
+          'test',
+        ),
       },
       runId: receipt.runId,
       turnId: turn.turnId,
@@ -620,244 +671,6 @@ describe('ThreadRuntime durable admission and identity', () => {
       reason: 'control_response_already_claimed',
     });
     fixture.driver.complete(receipt.runId, 'completed');
-    await fixture.runtime.close();
-  });
-
-  test('commits an approval request before waiting and resolves only after the durable response effect', async () => {
-    const applyEntered = deferred<void>();
-    const applyGate = deferred<void>();
-    const adapter = new RecordingApprovalAdapter({
-      apply: async () => {
-        applyEntered.resolve(undefined);
-        await applyGate.promise;
-        return { ok: true, effectiveDecision: 'allow_always', persistedPatterns: ['one', 'two'] };
-      },
-    });
-    const fixture = runtimeFixture({ approvalAdapter: adapter });
-    const receipt = await fixture.runtime.acceptExternal(prompt(opId(18), 'approval chain'));
-    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
-    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
-    await fixture.runtime.commitDriverEvent({
-      event: { type: 'turn_start' },
-      runId: receipt.runId,
-      turnId: turn.turnId,
-    });
-    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
-    let invocationSettled = false;
-    const invocation = fixture.runtime.requestLegacyApproval({
-      toolCallId: 'call-durable-order',
-      toolName: 'edit',
-      cwd: '/runtime/thread-runtime',
-      args: { path: 'a.ts' },
-    }).then((result) => {
-      invocationSettled = true;
-      return result;
-    });
-    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
-    if (request.event.type !== 'control_request') throw new Error('missing control request');
-    const requestId = request.event.requestId;
-    expect(invocationSettled).toBe(false);
-    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
-    const response = {
-      type: 'control_response',
-      opId: opId(19),
-      workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID,
-      requestId,
-      decision: 'allow_always',
-    } as const;
-    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
-    await applyEntered.promise;
-    expect(invocationSettled).toBe(false);
-    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
-    const resolved = nextEnvelope(iterator, (envelope) =>
-      envelope.event.type === 'control_resolved' && envelope.opId === response.opId);
-    applyGate.resolve(undefined);
-    expect((await resolved).event).toMatchObject({
-      type: 'control_resolved',
-      decision: 'allow_always',
-    });
-    await expect(invocation).resolves.toEqual({ kind: 'allow' });
-    expect(fixture.driver.commands.some((command) => command.op.type === 'control_response')).toBe(false);
-    fixture.driver.complete(receipt.runId, 'completed');
-    await iterator.return?.();
-    await fixture.runtime.close();
-  });
-
-  test('definitely-not-applied releases only the response claim and a new OpId can retry', async () => {
-    const adapter = new RecordingApprovalAdapter({
-      results: [
-        {
-          ok: false,
-          code: 'legacy_approval_definitely_not_applied',
-          message: 'no outbox or Set mutation',
-        },
-        { ok: true, effectiveDecision: 'allow_once', persistedPatterns: [] },
-      ],
-    });
-    const fixture = runtimeFixture({ approvalAdapter: adapter });
-    const receipt = await fixture.runtime.acceptExternal(prompt(opId(20), 'retry approval'));
-    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
-    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
-    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
-    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
-    const invocation = fixture.runtime.requestLegacyApproval({
-      toolCallId: 'call-retry',
-      toolName: 'edit',
-      cwd: '/runtime/thread-runtime',
-      args: { path: 'retry.ts' },
-    });
-    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
-    if (request.event.type !== 'control_request') throw new Error('missing control request');
-    const first = { type: 'control_response' as const, opId: opId(21), workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID, requestId: request.event.requestId, decision: 'allow_always' as const };
-    expect((await fixture.runtime.acceptExternal(first)).accepted).toBe(true);
-    await nextEnvelope(iterator, (envelope) =>
-      envelope.opId === first.opId && envelope.event.type === 'op_completed');
-    expect(fixture.runtime.durableState().controlClaims.has(first.requestId)).toBe(false);
-    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
-    expect(await fixture.runtime.acceptExternal(first)).toMatchObject({ accepted: true, duplicate: true });
-    expect(adapter.applyCalls).toHaveLength(1);
-    const second = { ...first, opId: opId(22), decision: 'allow_once' as const };
-    expect((await fixture.runtime.acceptExternal(second)).accepted).toBe(true);
-    await expect(invocation).resolves.toEqual({ kind: 'allow' });
-    expect(adapter.applyCalls).toHaveLength(2);
-    fixture.driver.complete(receipt.runId, 'completed');
-    await iterator.return?.();
-    await fixture.runtime.close();
-  });
-
-  test('approval fatal retains the claim, latches workspace, and releases the cancelled execution waiter', async () => {
-    const fatal: Error[] = [];
-    const adapter = new RecordingApprovalAdapter({
-      results: [{
-        ok: false,
-        code: 'legacy_approval_conflict',
-        message: 'receipt payload changed',
-      }],
-    });
-    const fixture = runtimeFixture({
-      approvalAdapter: adapter,
-      onWorkspaceApprovalFatal: (error) => fatal.push(error),
-    });
-    const receipt = await fixture.runtime.acceptExternal(prompt(opId(23), 'fatal approval'));
-    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
-    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
-    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
-    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
-    const invocation = fixture.runtime.requestLegacyApproval({
-      toolCallId: 'call-fatal',
-      toolName: 'edit',
-      cwd: '/runtime/thread-runtime',
-      args: { path: 'fatal.ts' },
-    });
-    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
-    if (request.event.type !== 'control_request') throw new Error('missing control request');
-    const response = { type: 'control_response' as const, opId: opId(24), workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID, requestId: request.event.requestId, decision: 'allow_always' as const };
-    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
-    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
-    expect(fatal).toHaveLength(1);
-    expect(fixture.runtime.durableState().controlClaims.get(response.requestId)?.responseOpId).toBe(response.opId);
-    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
-    expect(fixture.driver.commands.at(-1)?.op.type).toBe('abort');
-    fixture.driver.complete(receipt.runId, 'aborted');
-    await iterator.return?.();
-    await fixture.runtime.close().catch(() => undefined);
-  });
-
-  test('latches workspace fatal when an applied approval effect cannot commit its resolution', async () => {
-    const fatal: Error[] = [];
-    const fixtureRef: { current?: ReturnType<typeof runtimeFixture> } = {};
-    const adapter = new RecordingApprovalAdapter({
-      apply: async () => {
-        const fixture = fixtureRef.current;
-        if (fixture === undefined) throw new Error('fixture is not initialized');
-        fixture.journal.nextAppendFailure = new Error('resolution commit failed after pattern effect');
-        return {
-          ok: true,
-          effectiveDecision: 'allow_always',
-          persistedPatterns: ['Edit(*)'],
-        };
-      },
-    });
-    const fixture = runtimeFixture({
-      approvalAdapter: adapter,
-      onWorkspaceApprovalFatal: (error) => fatal.push(error),
-    });
-    fixtureRef.current = fixture;
-    const receipt = await fixture.runtime.acceptExternal(prompt(opId(29), 'post-effect commit failure'));
-    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
-    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
-    await fixture.runtime.commitDriverEvent({
-      event: { type: 'turn_start' },
-      runId: receipt.runId,
-      turnId: turn.turnId,
-    });
-    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
-    const invocation = fixture.runtime.requestLegacyApproval({
-      toolCallId: 'call-post-effect-failure',
-      toolName: 'edit',
-      cwd: '/runtime/thread-runtime',
-      args: { path: 'fatal-after-effect.ts' },
-    });
-    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
-    if (request.event.type !== 'control_request') throw new Error('missing control request');
-    const response = {
-      type: 'control_response',
-      opId: opId(30),
-      workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID,
-      requestId: request.event.requestId,
-      decision: 'allow_always',
-    } as const;
-    expect((await fixture.runtime.acceptExternal(response)).accepted).toBe(true);
-
-    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
-    expect(fatal).toHaveLength(1);
-    expect(fatal[0]).toMatchObject({ code: 'legacy_approval_unknown_outcome' });
-    expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
-    expect(fixture.runtime.durableState().controlClaims.get(request.event.requestId)).toMatchObject({
-      responseOpId: response.opId,
-    });
-    expect(fixture.driver.commands.at(-1)?.op.type).toBe('abort');
-    fixture.driver.complete(receipt.runId, 'aborted');
-    await iterator.return?.();
-    await fixture.runtime.close().catch(() => undefined);
-  });
-
-  test('abort dispatches cancellation before it durably resolves the waiter as aborted', async () => {
-    const adapter = new RecordingApprovalAdapter();
-    const fixture = runtimeFixture({ approvalAdapter: adapter });
-    const receipt = await fixture.runtime.acceptExternal(prompt(opId(25), 'abort approval'));
-    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
-    const turn = await fixture.runtime.reserveTurn({ runId: receipt.runId, turnOrdinal: 1 });
-    await fixture.runtime.commitDriverEvent({ event: { type: 'turn_start' }, runId: receipt.runId, turnId: turn.turnId });
-    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
-    const invocation = fixture.runtime.requestLegacyApproval({
-      toolCallId: 'call-abort',
-      toolName: 'edit',
-      cwd: '/runtime/thread-runtime',
-      args: { path: 'abort.ts' },
-    });
-    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
-    if (request.event.type !== 'control_request') throw new Error('missing control request');
-    const requestId = request.event.requestId;
-    let pendingAtCancellation = false;
-    fixture.driver.onAbortDispatch = () => {
-      pendingAtCancellation = fixture.runtime.snapshot().pendingControls.some((pending) =>
-        pending.requestId === requestId);
-    };
-    const abort = { type: 'abort' as const, opId: opId(26), workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID, expectedRunId: receipt.runId };
-    expect((await fixture.runtime.acceptExternal(abort)).accepted).toBe(true);
-    await expect(invocation).resolves.toEqual({ kind: 'aborted' });
-    expect(pendingAtCancellation).toBe(true);
-    const resolution = fixture.runtime.durableState().envelopes.findLast((envelope) =>
-      envelope.event.type === 'control_resolved' && envelope.event.requestId === requestId);
-    expect(resolution?.event).toMatchObject({ type: 'control_resolved', decision: 'aborted' });
-    fixture.driver.complete(receipt.runId, 'aborted');
-    await iterator.return?.();
     await fixture.runtime.close();
   });
 
@@ -1211,16 +1024,23 @@ describe('ThreadRuntime durable admission and identity', () => {
       const receipt = await fixture.runtime.acceptExternal(root);
       if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
       const runtimeTurn = await captureRegistryTurn(fixture, root.opId, receipt.runId, 1);
+      const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
       fixture.journal.onNextAppend = () => entered.resolve(undefined);
       fixture.journal.nextAppendBarrier = gate.promise;
       const controller = new AbortController();
+      let preparationSettled = false;
       const preparation = runtimeTurn.prepareToolCall({
         type: 'tool_call', id: 'call-abort-approval', name: 'scoped-execute', arguments: { command: 'bun test' },
-      }, 0, controller.signal);
+      }, 0, controller.signal).then((result) => {
+        preparationSettled = true;
+        return result;
+      });
       await entered.promise;
       controller.abort();
       gate.resolve(undefined);
-      expect(await preparation).toMatchObject({ ok: false, message: expect.stringContaining('interrupted') });
+      await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+      expect(preparationSettled).toBe(false);
+      expect(fixture.runtime.snapshot().pendingControls).toHaveLength(1);
       expect(executions).toEqual([]);
       const abort = {
         type: 'abort' as const,
@@ -1230,8 +1050,10 @@ describe('ThreadRuntime durable admission and identity', () => {
         expectedRunId: receipt.runId,
       };
       expect(await fixture.runtime.acceptExternal(abort)).toMatchObject({ accepted: true });
+      expect(await preparation).toMatchObject({ ok: false, message: expect.stringContaining('interrupted') });
       expect(fixture.runtime.snapshot().pendingControls).toEqual([]);
       fixture.driver.complete(receipt.runId, 'aborted');
+      await iterator.return?.();
       await fixture.runtime.close();
     }
 
@@ -1262,6 +1084,43 @@ describe('ThreadRuntime durable admission and identity', () => {
     }
   });
 
+  test('durably resolves a pending approval before a workspace fatal wakes its waiter', async () => {
+    const executions: string[] = [];
+    const fixture = await registryRuntimeFixture(scopedExecuteRegistration(executions));
+    const root = prompt(opId(80), 'workspace fatal approval');
+    const receipt = await fixture.runtime.acceptExternal(root);
+    if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
+    const runtimeTurn = await captureRegistryTurn(fixture, root.opId, receipt.runId, 1);
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
+    let preparationSettled = false;
+    const preparation = runtimeTurn.prepareToolCall({
+      type: 'tool_call',
+      id: 'call-workspace-fatal-approval',
+      name: 'scoped-execute',
+      arguments: { command: 'bun test' },
+    }, 0, new AbortController().signal).then((result) => {
+      preparationSettled = true;
+      return result;
+    });
+    const request = await nextEnvelope(iterator, (envelope) => envelope.event.type === 'control_request');
+    if (request.event.type !== 'control_request') throw new Error('missing control request');
+    const requestId = request.event.requestId;
+
+    fixture.runtime.stopForWorkspaceApprovalFatal(new Error('injected workspace fatal'));
+    const resolution = await nextEnvelope(iterator, (envelope) =>
+      envelope.event.type === 'control_resolved'
+      && envelope.event.requestId === requestId);
+    expect(preparationSettled).toBe(false);
+    expect(resolution.event).toMatchObject({ type: 'control_resolved', decision: 'aborted' });
+    expect(await preparation).toMatchObject({ ok: false, message: expect.stringContaining('interrupted') });
+    expect(fixture.runtime.snapshot().pendingControls).toEqual([]);
+    expect(executions).toEqual([]);
+
+    fixture.driver.complete(receipt.runId, 'aborted');
+    await iterator.return?.();
+    await fixture.runtime.close();
+  });
+
   test('fails closed for unknown, extra-key, and malformed-grant policy decisions', async () => {
     const executions: string[] = [];
     const fixture = await registryRuntimeFixture(scopedExecuteRegistration(executions));
@@ -1277,7 +1136,7 @@ describe('ThreadRuntime durable admission and identity', () => {
         code: 'ask',
         reason: 'malformed grant',
         description: 'malformed grant',
-        grantProposal: { kind: 'legacy_global_approvals_v1', patterns: ['z', 'a'] },
+        grantProposal: { kind: 'future_resources_v9', patterns: ['z', 'a'] },
       },
     ];
     for (const [sourceOrdinal, decision] of decisions.entries()) {
@@ -1575,7 +1434,6 @@ interface RuntimeFixture {
 function runtimeFixture(options: {
   readonly identityFactory?: ThreadIdentityPort;
   readonly policy?: CountingPolicy;
-  readonly approvalAdapter?: LegacyApprovalAdapter;
   readonly onWorkspaceApprovalFatal?: (error: Error) => void;
   readonly workspaceApprovalFailure?: () => Error | undefined;
 } = {}): RuntimeFixture {
@@ -1591,7 +1449,7 @@ function runtimeFixture(options: {
     cwd: '/runtime/thread-runtime',
     threadId: THREAD_ID,
     writer,
-    attachment: attachment(driver, MODEL.ref, options.approvalAdapter),
+    attachment: attachment(driver, MODEL.ref),
     identityFactory: options.identityFactory ?? new TestIdentityFactory(),
     clock: TEST_CLOCK,
     permissionPolicy: policy,
@@ -1830,17 +1688,39 @@ function writerFor(journal: RecordingJournal, events: EventHub): ThreadJournalWr
 function attachment(
   driver: ScriptedDriver,
   model: ModelRef,
-  approvalAdapter?: LegacyApprovalAdapter,
-): ThreadDriverAttachment {
+): RuntimeThreadDriverAttachment {
   return {
     driver,
-    durableRef: { kind: 'test-driver', key: THREAD_ID },
     initialCheckpoint: emptyCheckpoint(model),
-    ...(approvalAdapter !== undefined && {
-      legacyApprovalAdapter: approvalAdapter,
-      legacyApprovalPolicyRevision: 'test-policy-v2',
-    }),
   };
+}
+
+function approvalPayload(
+  requestId: string,
+  runId: RunId,
+  turnId: TurnId,
+  toolCallId: string,
+  description: string,
+) {
+  return {
+    toolCallId,
+    description,
+    presentation: {
+      requestId,
+      target: { workspaceId: WORKSPACE_ID, threadId: THREAD_ID, runId, turnId },
+      capability: { id: 'test.capability', version: '1', registrationDigest: 'registration-v1' },
+      normalizedResources: [],
+      risk: { code: 'test_approval', reason: description, description },
+      allowOnce: { invocationId: `invocation-${requestId}`, toolCallId },
+      revisions: {
+        catalog: 1,
+        effectivePolicy: 'policy-v1',
+        policyBasis: 'basis-v1',
+        ceiling: 'ceiling-v1',
+        grants: 'grants-v1',
+      },
+    },
+  } as const;
 }
 
 function threadMeta(): ThreadMetaRecord {
@@ -1854,7 +1734,6 @@ function threadMeta(): ThreadMetaRecord {
     createdAt: 1,
     cwd: '/runtime/thread-runtime',
     model: MODEL.ref,
-    driverRef: { kind: 'test-driver', key: THREAD_ID },
   };
 }
 
@@ -2330,6 +2209,7 @@ class ScriptedDriver implements ThreadDriverPort {
   readonly commands: PreparedThreadDriverCommand[] = [];
   readonly #activities = new Map<RunId, Deferred<ThreadDriverCompletion>>();
   nextOperationCompletion: ThreadDriverCompletion | undefined;
+  nextOperationCompletionDeferred: Deferred<ThreadDriverCompletion> | undefined;
   stateOverride: 'idle' | 'running' | 'retrying' | 'compacting' | undefined;
   closeFailure: Error | undefined;
   onAbortDispatch: (() => void) | undefined;
@@ -2348,6 +2228,9 @@ class ScriptedDriver implements ThreadDriverPort {
       this.#activities.set(command.runId, completion);
       return { completion: completion.promise };
     }
+    const deferredCompletion = this.nextOperationCompletionDeferred;
+    this.nextOperationCompletionDeferred = undefined;
+    if (deferredCompletion !== undefined) return { completion: deferredCompletion.promise };
     const result = this.nextOperationCompletion ?? { kind: 'operation', outcome: 'applied' };
     this.nextOperationCompletion = undefined;
     return { completion: Promise.resolve(result) };
@@ -2376,39 +2259,6 @@ class ScriptedDriver implements ThreadDriverPort {
     this.#activities.delete(runId);
     activity.resolve({ kind: 'activity', status, terminalRunId });
   }
-}
-
-class RecordingApprovalAdapter implements LegacyApprovalAdapter {
-  readonly applyCalls: Array<Parameters<LegacyApprovalAdapter['applyResponse']>[0]> = [];
-  readonly #results: LegacyApprovalApplyResult[];
-  readonly #apply: (() => Promise<LegacyApprovalApplyResult>) | undefined;
-
-  constructor(input: {
-    readonly results?: readonly LegacyApprovalApplyResult[];
-    readonly apply?: () => Promise<LegacyApprovalApplyResult>;
-  } = {}) {
-    this.#results = [...(input.results ?? [])];
-    this.#apply = input.apply;
-  }
-
-  async preflight(): Promise<LegacyApprovalPreflightResult> {
-    return {
-      kind: 'ask',
-      description: 'approve test invocation',
-      proposal: { patterns: ['one', 'two'], forceConfirm: false },
-    };
-  }
-
-  async applyResponse(
-    input: Parameters<LegacyApprovalAdapter['applyResponse']>[0],
-  ): Promise<LegacyApprovalApplyResult> {
-    this.applyCalls.push(input);
-    if (this.#apply !== undefined) return this.#apply();
-    return this.#results.shift()
-      ?? { ok: true, effectiveDecision: input.decision, persistedPatterns: [] };
-  }
-
-  async close(): Promise<void> {}
 }
 
 interface Deferred<T> {

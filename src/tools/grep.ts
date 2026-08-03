@@ -5,7 +5,7 @@
 
 import path from 'node:path';
 import { z } from 'zod';
-import type { ToolContext, ToolDefinition, ToolOutput } from './types.js';
+import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 import { RG_MISSING_MESSAGE, resolveRgPath } from './rg.js';
 
 const DEFAULT_LIMIT = 100;
@@ -16,7 +16,7 @@ export const MORE_MATCHES_NOTE = '(more matches available — refine pattern or 
 /** signal 触发中断后的错误文案(对齐 bash 的 "User aborted the command",docs/07 §2.5/§4)。 */
 export const GREP_ABORTED_MESSAGE = 'User aborted the search';
 
-const GrepParams = z.object({
+export const grepParameters = z.object({
   pattern: z.string().describe('Regex to search for (ripgrep syntax)'),
   path: z.string().optional().describe('File or directory to search. Omit for cwd'),
   glob: z.string().optional().describe("Filter files, e.g. '*.ts' or '**/*.spec.ts'"),
@@ -26,7 +26,7 @@ const GrepParams = z.object({
   limit: z.number().int().min(1).optional().describe('Maximum matches (default 100)'),
 });
 
-type GrepArgs = z.infer<typeof GrepParams>;
+export type GrepArgs = z.infer<typeof grepParameters>;
 
 /**
  * 结构化细节(不发给模型):limit 早停是否发生、rg 是否确实被我们 kill
@@ -256,16 +256,15 @@ async function formatMatches(matches: RgMatch[], contextN: number, cwd: string):
   return out;
 }
 
-export const grepTool: ToolDefinition<GrepArgs, GrepDetails> = {
-  name: 'grep',
-  kind: 'search',
-  description:
-    'Search file contents for a regex pattern using ripgrep. Respects .gitignore; includes hidden files. ' +
-    'Results are grouped by file in grep format: "path:line: text" for matches, "path-line- text" for context lines. ' +
-    'Prefer this over running grep/rg through the bash tool.',
-  parameters: GrepParams,
+export const GREP_DESCRIPTION =
+  'Search file contents for a regex pattern using ripgrep. Respects .gitignore; includes hidden files. ' +
+  'Results are grouped by file in grep format: "path:line: text" for matches, "path-line- text" for context lines. ' +
+  'Prefer this over running grep/rg through the bash tool.';
 
-  async execute({ args }, ctx: ToolContext): Promise<ToolOutput<GrepDetails>> {
+export async function executeGrep(
+  { args }: ToolExecutionInput<GrepArgs>,
+  ctx: ToolContext,
+): Promise<ToolOutput<GrepDetails>> {
     const rgPath = await resolveRgPath();
     if (rgPath === undefined) throw new Error(RG_MISSING_MESSAGE);
     if (ctx.signal.aborted) throw new Error(GREP_ABORTED_MESSAGE);
@@ -312,5 +311,4 @@ export const grepTool: ToolDefinition<GrepArgs, GrepDetails> = {
     const lines = await formatMatches(run.matches, args.context ?? 0, ctx.cwd);
     if (run.limitReached) lines.push(MORE_MATCHES_NOTE);
     return { content: [{ type: 'text', text: lines.join('\n') }], details };
-  },
-};
+}

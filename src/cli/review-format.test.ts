@@ -64,7 +64,7 @@ describe('UX3 review formatting', () => {
     expect(reviewText).not.toContain('\u001b');
   });
 
-  it('renders only Runtime-authored approval scope and marks legacy scope unavailable', () => {
+  it('renders only required Runtime-authored approval presentation', () => {
     const presentation: ApprovalPresentation = {
       requestId: 'request-1',
       target: {
@@ -79,7 +79,13 @@ describe('UX3 review formatting', () => {
       }],
       risk: { code: 'ask', reason: 'execute', description: 'Run tests' },
       allowOnce: { invocationId: 'invocation-1', toolCallId: 'call-1' },
-      allowAlways: { kind: 'legacy_global_approvals_v1', patterns: ['Bash(bun test)'] },
+      allowAlways: {
+        kind: 'canonical_resources_v1',
+        resourcePatterns: [{
+          resourceType: 'command', access: 'execute', matcher: 'canonical_target_exact_v1', pattern: 'bun test',
+        }],
+        attributes: {},
+      },
       revisions: {
         catalog: 1,
         effectivePolicy: 'effective',
@@ -88,16 +94,13 @@ describe('UX3 review formatting', () => {
         grants: 'grants',
       },
     };
-    const card = formatApprovalPresentation(presentation, 'ignored').join('\n');
+    const card = formatApprovalPresentation(presentation).join('\n');
     expect(card).toContain('bun test');
     expect(card).toContain('allow always scope');
-    expect(formatApprovalPresentation(undefined, 'legacy command').join('\n'))
-      .toContain('scope is unavailable');
     expect(approvalAllowsAlways(presentation)).toBe(true);
     const { allowAlways: _allowAlways, ...withoutAlways } = presentation;
     void _allowAlways;
     expect(approvalAllowsAlways(withoutAlways)).toBe(false);
-    expect(approvalAllowsAlways(undefined)).toBe(true);
   });
 });
 

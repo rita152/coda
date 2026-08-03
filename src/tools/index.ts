@@ -1,28 +1,68 @@
-// 内置工具集出口(八个,docs/07 §2)。工具不感知 agent loop,经 ToolContext 回调对外沟通。
-// 注册顺序即 promptSnippet 拼装顺序(§1.5)。
+// Low-level implementations for the built-in coding capabilities. Registration metadata,
+// schemas and policy bindings are composed atomically by integrations/coding-capabilities.
 
-import { bashTool } from './bash.js';
-import { editTool } from './edit.js';
-import { globTool } from './glob.js';
-import { grepTool } from './grep.js';
-import { lsTool } from './ls.js';
-import { planTool } from './plan.js';
-import { readTool } from './read.js';
-import type { ToolDefinition } from './types.js';
-import { writeTool } from './write.js';
-
-export { bashTool } from './bash.js';
-export { editTool } from './edit.js';
-export { globTool } from './glob.js';
-export { grepTool } from './grep.js';
-export { lsTool } from './ls.js';
-export { planTool } from './plan.js';
-export type { PlanDetails } from './plan.js';
-export { readTool } from './read.js';
-export { writeTool } from './write.js';
-export type { ToolContext, ToolDefinition, ToolKind, ToolOutput, TruncatedDetails } from './types.js';
-
-/** 完整 coding 工具面(docs/07 §2 的八个)。 */
-export function createCodingTools(): ToolDefinition[] {
-  return [readTool, lsTool, globTool, grepTool, bashTool, editTool, writeTool, planTool];
-}
+export {
+  BASH_DESCRIPTION,
+  BASH_PROMPT_SNIPPET,
+  bashParameters,
+  executeBash,
+  type BashArgs,
+  type BashDetails,
+} from './bash.js';
+export {
+  EDIT_DESCRIPTION,
+  EDIT_PROMPT_SNIPPET,
+  editParameters,
+  executeEdit,
+  prepareEditArguments,
+  type EditArgs,
+  type EditDetails,
+} from './edit.js';
+export {
+  GLOB_DESCRIPTION,
+  executeGlob,
+  globParameters,
+  type GlobArgs,
+} from './glob.js';
+export {
+  GREP_DESCRIPTION,
+  executeGrep,
+  grepParameters,
+  type GrepArgs,
+  type GrepDetails,
+} from './grep.js';
+export {
+  LS_DESCRIPTION,
+  executeLs,
+  lsParameters,
+  type LsArgs,
+} from './ls.js';
+export {
+  PLAN_DESCRIPTION,
+  PLAN_PROMPT_SNIPPET,
+  executePlan,
+  planParameters,
+  type PlanArgs,
+  type PlanDetails,
+} from './plan.js';
+export {
+  READ_DESCRIPTION,
+  READ_PROMPT_SNIPPET,
+  executeRead,
+  readParameters,
+  type ReadArgs,
+  type ReadDetails,
+} from './read.js';
+export {
+  WRITE_DESCRIPTION,
+  executeWrite,
+  writeParameters,
+  type WriteArgs,
+  type WriteDetails,
+} from './write.js';
+export type {
+  ToolContext,
+  ToolExecutionInput,
+  ToolOutput,
+  TruncatedDetails,
+} from './types.js';

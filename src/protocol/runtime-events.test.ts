@@ -7,11 +7,9 @@ import {
   assertTurnId,
   assertWorkspaceId,
   deriveOpId,
-  RuntimeIdentityValidationError,
 } from './identity.js';
 import {
   EventEnvelopeValidationError,
-  projectLegacySessionEvent,
   validateEventEnvelope,
 } from './runtime-events.js';
 import type { EventEnvelope } from './runtime-events.js';
@@ -67,7 +65,7 @@ describe('EventEnvelope validation', () => {
       { runId: RUN, opId: OP },
     ));
 
-    validateEventEnvelope(envelope({
+    expectInvalid(envelope({
       type: 'control_request',
       requestId: 'req',
       kind: 'approval',
@@ -478,81 +476,6 @@ describe('EventEnvelope validation', () => {
       terminalRunId: RUN,
       status: 'completed',
     }, { opId: OP }));
-  });
-});
-
-describe('legacy SessionEvent projection', () => {
-  test('filters by thread and preserves canonical agent events', () => {
-    const canonical = validateEventEnvelope(envelope(
-      { type: 'agent_end', reason: 'completed', messages: [], willRetry: true },
-      { runId: RUN },
-    ));
-    expect(projectLegacySessionEvent(canonical, { targetThreadId: THREAD_A })).toEqual({
-      type: 'agent_end',
-      reason: 'completed',
-      messages: [],
-      willRetry: true,
-    });
-    expect(projectLegacySessionEvent(canonical, { targetThreadId: THREAD_B })).toBeUndefined();
-  });
-
-  test('maps approval request fields and drops canonical-only control/lifecycle families', () => {
-    const request = validateEventEnvelope(envelope({
-      type: 'control_request',
-      requestId: 'req-1',
-      kind: 'approval',
-      owningRunId: RUN,
-      owningTurnId: TURN,
-      policyRevision: 'policy',
-      payload: { toolCallId: 'call-1', description: 'approve me' },
-    }, { runId: RUN, turnId: TURN }));
-    expect(projectLegacySessionEvent(request, { targetThreadId: THREAD_A })).toEqual({
-      type: 'approval_request',
-      approvalId: 'req-1',
-      toolCallId: 'call-1',
-      description: 'approve me',
-    });
-
-    const resolved = validateEventEnvelope(envelope({
-      type: 'control_resolved',
-      requestId: 'req-1',
-      kind: 'approval',
-      owningRunId: RUN,
-      owningTurnId: TURN,
-      policyRevision: 'policy',
-      decision: 'deny',
-    }, { runId: RUN, turnId: TURN, opId: OP }));
-    expect(projectLegacySessionEvent(resolved, { targetThreadId: THREAD_A })).toBeUndefined();
-  });
-
-  test('strips successor/activity identities from coordinator events', () => {
-    const successor = assertRunId('run-successor');
-    const scheduled = validateEventEnvelope(envelope({
-      type: 'retry_scheduled',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 100,
-      errorMessage: 'retry',
-      predecessorRunId: RUN,
-      successorRunId: successor,
-    }, { runId: successor }));
-    expect(projectLegacySessionEvent(scheduled, { targetThreadId: THREAD_A })).toEqual({
-      type: 'retry_scheduled',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 100,
-      errorMessage: 'retry',
-    });
-  });
-
-  test('validates the target identity synchronously', () => {
-    const canonical = validateEventEnvelope(envelope(
-      { type: 'agent_start', reason: 'prompt' },
-      { runId: RUN },
-    ));
-    expect(() => projectLegacySessionEvent(canonical, { targetThreadId: '' as never })).toThrow(
-      RuntimeIdentityValidationError,
-    );
   });
 });
 

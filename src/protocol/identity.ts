@@ -1,8 +1,7 @@
-// Opaque runtime identities and the frozen v1/hash framing algorithms.
+// Opaque runtime identities and canonical length-framed hash algorithms.
 // Brands prevent accidental TypeScript mixing; runtime validators remain the trust boundary.
 
 import { isWellFormedUnicode } from './strict-json.js';
-import type { AgentMessage } from './messages.js';
 
 export type WorkspaceId = string & { readonly __brand: 'WorkspaceId' };
 export type ThreadId = string & { readonly __brand: 'ThreadId' };
@@ -11,12 +10,6 @@ export type TurnId = string & { readonly __brand: 'TurnId' };
 export type OpId = string & { readonly __brand: 'OpId' };
 export type ExternalOpId = OpId & { readonly __origin: 'external' };
 export type DerivedOpId = OpId & { readonly __origin: 'derived' };
-export type LegacyWorkspaceId = WorkspaceId & { readonly __legacyVersion: 1 };
-
-export interface ThreadDriverRef {
-  readonly kind: string;
-  readonly key: string;
-}
 
 export type DerivedOpPurpose =
   | 'cancel_target'
@@ -28,8 +21,7 @@ export type RuntimeIdentityValidationCode =
   | 'invalid_workspace_id'
   | 'invalid_thread_id'
   | 'invalid_workspace_cwd'
-  | 'invalid_legacy_workspace_cwd'
-  | 'invalid_legacy_identity_input';
+  | 'invalid_identity_input';
 
 export class RuntimeIdentityValidationError extends TypeError {
   override readonly name = 'RuntimeIdentityValidationError';
@@ -42,14 +34,11 @@ export class RuntimeIdentityValidationError extends TypeError {
   }
 }
 
-const LEGACY_WORKSPACE_DOMAIN = 'coda.runtime.workspace.v1';
-const LEGACY_THREAD_DOMAIN = 'coda.runtime.thread.v1';
-const LEGACY_SEED_TURN_DOMAIN = 'coda.runtime.legacy-seed-turn.v1';
+const WORKSPACE_DOMAIN = 'coda.runtime.workspace.v2';
 const DERIVED_OP_DOMAIN = 'coda.runtime.derived-op.v1';
 const INVOCATION_DOMAIN = 'coda.runtime.invocation.v1';
 const EXTERNAL_OP_PATTERN = /^op_e_[0-9a-f]{32}$/;
 const DERIVED_OP_PATTERN = /^op_d_[0-9a-f]{64}$/;
-const LEGACY_WORKSPACE_PATTERN = /^ws_v1_[0-9a-f]{64}$/;
 const DERIVED_PURPOSES = new Set<DerivedOpPurpose>([
   'cancel_target',
   'control_recovery',
@@ -85,10 +74,6 @@ export function isOpId(value: unknown): value is OpId {
   return isExternalOpId(value) || isDerivedOpId(value);
 }
 
-export function isLegacyWorkspaceId(value: unknown): value is LegacyWorkspaceId {
-  return typeof value === 'string' && LEGACY_WORKSPACE_PATTERN.test(value);
-}
-
 export function assertWorkspaceId(value: unknown, field = 'workspaceId'): WorkspaceId {
   if (!isWorkspaceId(value)) {
     throw new RuntimeIdentityValidationError('invalid_workspace_id', field);
@@ -104,114 +89,42 @@ export function assertThreadId(value: unknown, field = 'threadId'): ThreadId {
 }
 
 export function assertRunId(value: unknown, field = 'runId'): RunId {
-  if (!isRunId(value)) throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+  if (!isRunId(value)) throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   return value;
 }
 
 export function assertTurnId(value: unknown, field = 'turnId'): TurnId {
-  if (!isTurnId(value)) throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+  if (!isTurnId(value)) throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   return value;
 }
 
 export function assertExternalOpId(value: unknown, field = 'opId'): ExternalOpId {
   if (!isExternalOpId(value)) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+    throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   }
   return value;
 }
 
 export function assertDerivedOpId(value: unknown, field = 'opId'): DerivedOpId {
   if (!isDerivedOpId(value)) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+    throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   }
   return value;
 }
 
 export function assertOpId(value: unknown, field = 'opId'): OpId {
-  if (!isOpId(value)) throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+  if (!isOpId(value)) throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   return value;
 }
 
-export function assertLegacyWorkspaceId(
-  value: unknown,
-  field = 'workspaceId',
-): LegacyWorkspaceId {
-  if (!isLegacyWorkspaceId(value)) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
-  }
-  return value;
-}
-
-/** Deterministically map the exact recorded cwd bytes to the frozen v1 workspace namespace. */
-export function legacyWorkspaceId(recordedCwd: string): LegacyWorkspaceId {
+/** Deterministically bind an absolute recorded cwd to the canonical workspace namespace. */
+export function workspaceIdFromCwd(recordedCwd: string): WorkspaceId {
   assertWellFormedString(recordedCwd, 'recordedCwd');
   const hasher = new Bun.CryptoHasher('sha256');
-  hasher.update(LEGACY_WORKSPACE_DOMAIN);
+  hasher.update(WORKSPACE_DOMAIN);
   hasher.update(NUL_BYTE);
   hasher.update(UTF8.encode(recordedCwd));
-  return `ws_v1_${hasher.digest('hex')}` as LegacyWorkspaceId;
-}
-
-/** Deterministically map a legacy session id inside a validated v1 workspace. */
-export function legacyThreadId(workspaceId: LegacyWorkspaceId, sessionId: string): ThreadId {
-  assertLegacyWorkspaceId(workspaceId, 'workspaceId');
-  assertWellFormedString(sessionId, 'sessionId');
-  const hasher = new Bun.CryptoHasher('sha256');
-  hasher.update(LEGACY_THREAD_DOMAIN);
-  hasher.update(NUL_BYTE);
-  hasher.update(UTF8.encode(workspaceId));
-  hasher.update(NUL_BYTE);
-  hasher.update(UTF8.encode(sessionId));
-  return `th_v1_${hasher.digest('hex')}` as ThreadId;
-}
-
-export interface LegacySeedTurnProvenance {
-  readonly messageId: string;
-  readonly turnId: TurnId;
-}
-
-/**
- * Recover stable turn provenance for history that predates canonical EventEnvelope identities.
- * A prompt begins a new synthetic turn; steering, follow-up, assistant, and tool-result messages
- * stay attached to the current turn. Newly created seeds persist original canonical turn ids and
- * use this deterministic fallback only when reading old v1/early-v2 history.
- */
-export function deriveLegacySeedTurnProvenance(
-  sourceSessionId: string,
-  transcript: readonly AgentMessage[],
-): readonly LegacySeedTurnProvenance[] {
-  assertWellFormedString(sourceSessionId, 'sourceSessionId');
-  const result: LegacySeedTurnProvenance[] = [];
-  let currentTurnId: TurnId | undefined;
-  let ordinal = 0;
-  for (const message of transcript) {
-    assertWellFormedString(message.id, `transcript[${result.length}].id`);
-    const beginsTurn = currentTurnId === undefined
-      || (message.role === 'user'
-        && (message.source === undefined || message.source === 'prompt'));
-    if (beginsTurn) {
-      currentTurnId = legacySeedTurnId(sourceSessionId, message.id, ordinal++);
-    }
-    const turnId = currentTurnId;
-    if (turnId === undefined) {
-      throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'transcript');
-    }
-    result.push({ messageId: message.id, turnId });
-  }
-  return result;
-}
-
-function legacySeedTurnId(sourceSessionId: string, anchorMessageId: string, ordinal: number): TurnId {
-  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal > 0xffff_ffff) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'ordinal');
-  }
-  const hasher = new Bun.CryptoHasher('sha256');
-  hasher.update(LEGACY_SEED_TURN_DOMAIN);
-  hasher.update(NUL_BYTE);
-  hasher.update(frame(sourceSessionId, 'sourceSessionId'));
-  hasher.update(frame(anchorMessageId, 'anchorMessageId'));
-  hasher.update(uint32be(ordinal));
-  return `turn_seed_v1_${hasher.digest('hex')}` as TurnId;
+  return `ws_v2_${hasher.digest('hex')}` as WorkspaceId;
 }
 
 /** Frozen length-framed derived-operation identity algorithm from docs/12 §2.1. */
@@ -222,7 +135,7 @@ export function deriveOpId(input: {
 }): DerivedOpId {
   try {
     if (input === null || typeof input !== 'object' || !DERIVED_PURPOSES.has(input.purpose)) {
-      throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'purpose');
+      throw new RuntimeIdentityValidationError('invalid_identity_input', 'purpose');
     }
     const workspaceId = assertWorkspaceId(input.workspaceId);
     const parts = readDenseStringParts(input.parts);
@@ -239,7 +152,7 @@ export function deriveOpId(input: {
     return `op_d_${hasher.digest('hex')}` as DerivedOpId;
   } catch (error) {
     if (error instanceof RuntimeIdentityValidationError) throw error;
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'deriveOpId');
+    throw new RuntimeIdentityValidationError('invalid_identity_input', 'deriveOpId');
   }
 }
 
@@ -259,7 +172,7 @@ export function deriveInvocationId(input: {
     if (!Number.isSafeInteger(input.sourceOrdinal)
       || input.sourceOrdinal < 0
       || input.sourceOrdinal > 0xffff_ffff) {
-      throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'sourceOrdinal');
+      throw new RuntimeIdentityValidationError('invalid_identity_input', 'sourceOrdinal');
     }
     const hasher = new Bun.CryptoHasher('sha256');
     hasher.update(INVOCATION_DOMAIN);
@@ -272,7 +185,7 @@ export function deriveInvocationId(input: {
     return `inv_${hasher.digest('hex')}`;
   } catch (error) {
     if (error instanceof RuntimeIdentityValidationError) throw error;
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'deriveInvocationId');
+    throw new RuntimeIdentityValidationError('invalid_identity_input', 'deriveInvocationId');
   }
 }
 
@@ -282,7 +195,7 @@ function isOpaqueIdentity(value: unknown): value is string {
 
 function assertWellFormedString(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !isWellFormedUnicode(value)) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+    throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   }
 }
 
@@ -293,7 +206,7 @@ function frame(value: unknown, field: string): Uint8Array {
   assertWellFormedString(value, field);
   const bytes = UTF8.encode(value);
   if (bytes.length > 0xffff_ffff) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', field);
+    throw new RuntimeIdentityValidationError('invalid_identity_input', field);
   }
   const result = new Uint8Array(4 + bytes.length);
   result.set(uint32be(bytes.length), 0);
@@ -303,7 +216,7 @@ function frame(value: unknown, field: string): Uint8Array {
 
 function readDenseStringParts(value: unknown): string[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
-    throw new RuntimeIdentityValidationError('invalid_legacy_identity_input', 'parts');
+    throw new RuntimeIdentityValidationError('invalid_identity_input', 'parts');
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const parts: string[] = [];
@@ -314,7 +227,7 @@ function readDenseStringParts(value: unknown): string[] {
       || descriptor.enumerable !== true
       || typeof descriptor.value !== 'string') {
       throw new RuntimeIdentityValidationError(
-        'invalid_legacy_identity_input',
+        'invalid_identity_input',
         `parts[${index}]`,
       );
     }
