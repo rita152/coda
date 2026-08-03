@@ -178,12 +178,77 @@ describe('buildParams(参数裁剪)', () => {
     expect(params.messages.map((m) => m.role)).toEqual(['user']);
   });
 
-  it('thinking:supportsThinking + reasoningEffort → thinking 配置,不发 temperature', () => {
+  it('adaptive thinking:reasoningEffort → output_config.effort,不发固定 budget 或 temperature', () => {
     const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
-    const params = buildParams(model, ctx, { reasoningEffort: 'high', temperature: 0.7 }, compat);
-    expect(params.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    const params = buildParams(model, ctx, { reasoningEffort: 'low', temperature: 0.7, maxOutputTokens: 100 }, compat);
+    expect(params).toEqual({
+      model: 'claude-opus-5',
+      stream: true,
+      max_tokens: 100,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low' },
+    });
     expect(params.temperature).toBeUndefined();   // thinking 开启时省略 temperature(Anthropic 约束)
-    expect(params.max_tokens).toBeGreaterThan(2048);   // max_tokens 抬到 budget 之上
+  });
+
+  it('adaptive thinking 保留每个合法 effort 等级,不退化为同一 budget', () => {
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      const params = buildParams(model, ctx, { reasoningEffort: effort }, compat);
+      expect(params.thinking).toEqual({ type: 'adaptive' });
+      expect(params.output_config).toEqual({ effort });
+      expect(params.thinking).not.toHaveProperty('budget_tokens');
+    }
+  });
+
+  it('legacy thinking model 保留 enabled budget,不发 adaptive-only output_config', () => {
+    const legacyModel: ModelConfig = {
+      ...model,
+      ref: { ...model.ref, model: 'claude-sonnet-4-5' },
+    };
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    const params = buildParams(legacyModel, ctx, { reasoningEffort: 'high', maxOutputTokens: 100 }, compat);
+    expect(params.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    expect(params.output_config).toBeUndefined();
+    expect(params.max_tokens).toBe(2148);
+  });
+
+  it('Opus 4.5 兼容模式同时保留 budget 与官方支持的 effort', () => {
+    const legacyModel: ModelConfig = {
+      ...model,
+      ref: { ...model.ref, model: 'claude-opus-4-5' },
+    };
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    const params = buildParams(legacyModel, ctx, { reasoningEffort: 'medium', maxOutputTokens: 100 }, compat);
+    expect(params.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    expect(params.output_config).toEqual({ effort: 'medium' });
+    expect(params.max_tokens).toBe(2148);
+  });
+
+  it('未能确认 thinking 能力的官方模型不发送 thinking/output_config', () => {
+    const unknownModel: ModelConfig = {
+      ...model,
+      ref: { ...model.ref, model: 'claude-future-9' },
+    };
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    const params = buildParams(unknownModel, ctx, { reasoningEffort: 'high', temperature: 0.3 }, compat);
+    expect(params.thinking).toBeUndefined();
+    expect(params.output_config).toBeUndefined();
+    expect(params.temperature).toBe(0.3);
+  });
+
+  it('不向不支持该等级的模型发送非法 effort,但保留合法 adaptive thinking', () => {
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    const params = buildParams(
+      { ...model, ref: { ...model.ref, model: 'claude-sonnet-4-6' } },
+      ctx,
+      { reasoningEffort: 'xhigh', temperature: 0.3 },
+      compat,
+    );
+    expect(params.thinking).toEqual({ type: 'adaptive' });
+    expect(params.output_config).toBeUndefined();
+    expect(params.temperature).toBeUndefined();
   });
 
   it('无 thinking:温度透传;maxOutputTokens 覆盖缺省', () => {

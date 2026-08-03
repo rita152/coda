@@ -1,13 +1,14 @@
 // Anthropic Messages 私有 compat 结构(docs/04 §8 第 3 点:CompatFlags 是各 adapter 的私有类型,
-// 不复用 openai-chat 的定义)。v1 保持最小:max_tokens 必填缺省、thinking 开关、视觉/温度开关。
+// 不复用 openai-chat 的定义)。当前只承载 max_tokens、thinking、视觉/温度开关；thinking 的
+// 具体模式还要按官方 model id 判定，不能仅凭 endpoint 支持就把所有模型当成同一种方言。
 // protocol 层的 ModelConfig.compat 是开放袋({ [key: string]: unknown }),在 resolveCompat 入口收窄。
 
 import type { ModelConfig } from '../../protocol/index.js';
 
 export interface AnthropicCompatFlags {
   defaultMaxTokens?: number;      // max_tokens 是 Anthropic 必填参数,缺省给此值
-  supportsThinking?: boolean;     // true:reasoningEffort 存在时发 thinking 配置(第三方兼容端点大多不认)
-  thinkingBudgetTokens?: number;  // thinking 开启时的 budget_tokens(须 ≥1024 且 < max_tokens)
+  supportsThinking?: boolean;     // endpoint 允许 thinking;具体 mode 仍按官方 model id 收窄
+  thinkingBudgetTokens?: number;  // enabled 模式的 budget_tokens(须 ≥1024 且 < max_tokens)
   supportsImageParts?: boolean;   // user/tool_result 内可带 image block(Anthropic 原生支持,默认开)
   supportsTemperature?: boolean;  // 是否透传 temperature(thinking 开启时一律不发)
 }
@@ -34,6 +35,70 @@ const CONSERVATIVE_PROFILE: ResolvedAnthropicCompat = {
 
 /** 推断规则表:数据驱动,新方言加一行(host 关键字 → profile 增量)。 */
 const HOST_RULES: { match: string; profile: Partial<ResolvedAnthropicCompat> }[] = [];
+
+// Anthropic 的 Messages API 目前同时存在两代 thinking 协议。这里使用 SDK 当前列出的
+// 官方 model id 做保守 allowlist；未知 id 不发 thinking 字段，避免把 adaptive 或 enabled
+// 猜测到不支持该模式的模型上。模型发现/能力查询不属于 adapter 的同步请求路径。
+const ADAPTIVE_THINKING_MODELS: ReadonlySet<string> = new Set([
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-mythos-preview',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-5',
+  'claude-sonnet-4-6',
+]);
+
+const ENABLED_THINKING_MODELS: ReadonlySet<string> = new Set([
+  'claude-3-7-sonnet-latest',
+  'claude-3-7-sonnet-20250219',
+  'claude-opus-4-1',
+  'claude-opus-4-1-20250805',
+  'claude-opus-4',
+  'claude-opus-4-0',
+  'claude-opus-4-20250514',
+  'claude-opus-4-5',
+  'claude-opus-4-5-20251101',
+  'claude-sonnet-4',
+  'claude-sonnet-4-0',
+  'claude-sonnet-4-20250514',
+  'claude-sonnet-4-5',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5',
+  'claude-haiku-4-5-20251001',
+]);
+
+const XHIGH_EFFORT_MODELS: ReadonlySet<string> = new Set([
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-5',
+]);
+
+export type AnthropicThinkingMode = 'adaptive' | 'enabled' | 'unsupported';
+
+export function thinkingModeForModel(model: string): AnthropicThinkingMode {
+  if (ADAPTIVE_THINKING_MODELS.has(model)) return 'adaptive';
+  if (ENABLED_THINKING_MODELS.has(model)) return 'enabled';
+  return 'unsupported';
+}
+
+/** Claude Opus 4.5 is the one enabled-mode model that also accepts output_config.effort. */
+export function supportsEffortWithEnabledThinking(model: string): boolean {
+  return model === 'claude-opus-4-5' || model === 'claude-opus-4-5-20251101';
+}
+
+export function supportsEffortForModel(model: string, effort: string): boolean {
+  const mode = thinkingModeForModel(model);
+  if (mode === 'unsupported') return false;
+  if (effort === 'xhigh') return XHIGH_EFFORT_MODELS.has(model);
+  if (effort === 'max') return mode === 'adaptive';
+  return mode === 'adaptive' || supportsEffortWithEnabledThinking(model);
+}
 
 /**
  * 按 baseURL 推断完整 compat profile。未设置 baseURL 视为 Anthropic 官方端点;

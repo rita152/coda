@@ -447,7 +447,16 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
   当前 envelope 使用 `anthropic-messages:redacted-thinking:v1:` 前缀和
   `{type:'redacted_thinking',data:string}` JSON 载荷；载荷中的 `data` 不被 adapter 解释。
   `max_tokens` 是必填项，默认值、thinking budget、图片与 temperature 支持由 adapter 自己的
-  `AnthropicCompatFlags` 解析，不复用 openai-chat 的 compat 类型。
+  `AnthropicCompatFlags` 解析，不复用 openai-chat 的 compat 类型。`reasoningEffort` 只接受
+  Anthropic SDK 当前 `OutputConfig.effort` 的 `low | medium | high | xhigh | max` 值。
+- **thinking 能力安全:**官方 endpoint 的已知 adaptive 模型（Claude 4.6、4.7、4.8、5
+  以及 Fable/Mythos 5 和 Mythos Preview）发送精确的
+  `{ thinking: { type: 'adaptive' }, output_config: { effort } }`，不发送
+  `budget_tokens`，也不为 adaptive 模式抬高 `max_tokens`。仍只支持旧 extended-thinking 的
+  4.5、4.1、较早 Claude 4 与 3.7 模型保留
+  `{ thinking: { type: 'enabled', budget_tokens } }`；只有 Opus 4.5 额外发送官方允许的
+  `output_config.effort`。未知 model id 或保守的第三方 endpoint 不发送 `thinking`/
+  `output_config`，避免把任一模式猜测到不支持的模型上。
 - **入站:**`content_block_start/delta/stop` 按 wire index 定位，按本地 append 顺序分配
   `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。
   `redacted_thinking.data` 作为 opaque 字符串保存在 `ReasoningPart` 的 adapter 私有 envelope

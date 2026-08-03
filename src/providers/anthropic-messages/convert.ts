@@ -16,6 +16,7 @@ import type {
   ImageBlockParam,
   MessageCreateParamsStreaming,
   MessageParam,
+  OutputConfig,
   RedactedThinkingBlockParam,
   Tool,
   ToolResultBlockParam,
@@ -30,7 +31,12 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from '../../protocol/index.js';
-import type { ResolvedAnthropicCompat } from './compat.js';
+import {
+  supportsEffortWithEnabledThinking,
+  supportsEffortForModel,
+  thinkingModeForModel,
+  type ResolvedAnthropicCompat,
+} from './compat.js';
 import { decodeRedactedThinking } from './redacted-thinking.js';
 
 // tool_result 的 content 子集(Anthropic 允许其中携带 text/image,原生支持图片)。
@@ -174,10 +180,14 @@ export function buildParams(
   const requestedMax = options?.maxOutputTokens ?? model.defaults?.maxOutputTokens ?? compat.defaultMaxTokens;
   const temperature = options?.temperature ?? model.defaults?.temperature;
   const reasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
-  const thinkingOn = compat.supportsThinking && reasoningEffort != null;
+  const effort = parseAnthropicEffort(reasoningEffort);
+  const thinkingMode = compat.supportsThinking ? thinkingModeForModel(model.ref.model) : 'unsupported';
+  const thinkingOn = reasoningEffort != null && thinkingMode !== 'unsupported';
   const budget = compat.thinkingBudgetTokens;
-  // thinking 开启时 max_tokens 必须 > budget(Anthropic 约束);不足则抬到 budget 之上
-  const maxTokens = thinkingOn && requestedMax <= budget ? budget + requestedMax : requestedMax;
+  // enabled 模式要求 max_tokens 严格大于 budget;adaptive 没有固定 budget,不抬高用户请求。
+  const maxTokens = thinkingOn && thinkingMode === 'enabled' && requestedMax <= budget
+    ? budget + requestedMax
+    : requestedMax;
 
   const params: MessageCreateParamsStreaming = {
     model: model.ref.model,
@@ -189,10 +199,35 @@ export function buildParams(
   const tools = convertTools(ctx);
   if (tools) params.tools = tools;
   if (thinkingOn) {
-    // thinking 开启时不发 temperature(Anthropic 要求 temperature 省略或为 1)
-    params.thinking = { type: 'enabled', budget_tokens: budget };
+    // thinking 开启时不发 temperature(Anthropic 要求 temperature 省略或为 1)。
+    if (thinkingMode === 'adaptive') {
+      params.thinking = { type: 'adaptive' };
+      if (effort !== undefined && supportsEffortForModel(model.ref.model, effort)) {
+        params.output_config = { effort };
+      }
+    } else {
+      params.thinking = { type: 'enabled', budget_tokens: budget };
+      if (effort !== undefined && supportsEffortWithEnabledThinking(model.ref.model) && supportsEffortForModel(model.ref.model, effort)) {
+        params.output_config = { effort };
+      }
+    }
   } else if (temperature != null && compat.supportsTemperature) {
     params.temperature = temperature;
   }
   return params;
+}
+
+type AnthropicEffort = Exclude<NonNullable<OutputConfig['effort']>, null>;
+
+function parseAnthropicEffort(value: string | undefined): AnthropicEffort | undefined {
+  switch (value) {
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return value;
+    default:
+      return undefined;
+  }
 }
