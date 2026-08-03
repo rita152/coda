@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { Context, ModelConfig } from '../../protocol/index.js';
 import { buildParams, convertInput } from './convert.js';
+import { encodeReasoningMetadata } from './reasoning.js';
 
 const model: ModelConfig = {
   ref: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' },
@@ -145,7 +146,7 @@ describe('convertInput', () => {
 });
 
 describe('buildParams', () => {
-  it('映射 instructions/input/tools/options，且不发送 previous_response_id', () => {
+  it('映射 instructions/input/tools/options，显式关闭存储且不发送 previous_response_id', () => {
     const context: Context = {
       systemPrompt: 'You are coda.',
       messages: [{
@@ -181,12 +182,68 @@ describe('buildParams', () => {
         strict: false,
       }],
       stream: true,
+      store: false,
       include: ['reasoning.encrypted_content'],
       temperature: 0.7,
       max_output_tokens: 50,
       reasoning: { effort: 'high', summary: 'auto' },
     });
+    expect(params.store).toBe(false);
     expect('previous_response_id' in params).toBe(false);
+  });
+
+  it('store:false 下仍把加密 reasoning item 随本地 transcript 重放', () => {
+    const reasoningSignature = encodeReasoningMetadata({
+      itemId: 'rs_local',
+      kind: 'summary',
+      index: 0,
+      encryptedContent: 'enc_local',
+    });
+    const params = buildParams(
+      model,
+      {
+        messages: [
+          {
+            role: 'user',
+            id: 'u-replay',
+            timestamp: 1,
+            content: [{ type: 'text', text: 'first turn' }],
+          },
+          {
+            role: 'assistant',
+            id: 'a-replay',
+            timestamp: 2,
+            model: model.ref,
+            stopReason: 'stop',
+            usage: { input: 1, output: 1, reasoning: 1 },
+            content: [
+              { type: 'reasoning', kind: 'summary', text: 'Checked locally.', signature: reasoningSignature },
+              { type: 'text', text: 'The answer.' },
+            ],
+          },
+          {
+            role: 'user',
+            id: 'u-next',
+            timestamp: 3,
+            content: [{ type: 'text', text: 'continue' }],
+          },
+        ],
+        tools: [],
+      },
+    );
+
+    expect(params.store).toBe(false);
+    expect(params.input).toEqual([
+      { role: 'user', content: 'first turn' },
+      {
+        id: 'rs_local',
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'Checked locally.' }],
+        encrypted_content: 'enc_local',
+      },
+      { role: 'assistant', content: 'The answer.' },
+      { role: 'user', content: 'continue' },
+    ]);
   });
 
   it('options 缺失时使用 model defaults；工具 schema 不被 adapter 改写', () => {

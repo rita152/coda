@@ -581,6 +581,8 @@ client.responses.create({
   input: convertInput(context.messages),
   tools: convertTools(context.tools),
   stream: true,
+  // 正确性不依赖服务端状态，同时明确不请求服务端保存 response
+  store: false,
   // 已知 reasoning 模型与未知兼容模型才加入；已知非 reasoning 模型整体省略
   ...(supportsReasoning && { include: ['reasoning.encrypted_content'] }),
   ...(supportsReasoning && { reasoning: { summary: 'auto', /* effort 已按模型校验 */ } }),
@@ -622,12 +624,34 @@ reasoning 选项、无结构 message-only 400、401/403/422/429/5xx、网络错�
 降级；第二次请求前再次检查 abort，第二次失败直接进入既有唯一 error 终态。这里不做全局负缓存
 或第三次请求。
 
-### 11.2 transcript 是唯一事实源
+### 11.2 transcript 是唯一事实源，且请求明确无服务端存储
 
 每次请求都从传入的本地 `Context.messages` 完整重建 `input`。当前实现**不发送
-`previous_response_id`**，也不依赖服务端 conversation/store 状态；因此进程恢复、自动重试和
-compaction 后的请求仍由本地 JSONL transcript 决定。未来允许把 `previous_response_id` 加成
-可选性能优化，但必须同时保留完整本地转录，并满足以下约束:
+`previous_response_id` 或 `conversation`**，因此请求的正确性不依赖服务端 response/conversation
+状态；同时每次请求显式发送 `store:false`，不请求 Responses API 保存该 response 供后续 API 检索。
+这两个语义相关但不等价:
+
+- **不依赖服务端状态**：进程恢复、自动重试和 compaction 后，模型看到的消息顺序、assistant phase、
+  工具配对和 reasoning item 都由本地 JSONL transcript 决定，而不是由 response id 或服务端
+  conversation 补齐。
+- **不请求服务端存储**：`store:false` 关闭 Responses 默认的 response 存储；它不表示请求不经过服务端，
+  也不改变本次请求对输入和输出的处理。
+
+官方当前[无存储 reasoning 指南](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses)
+与 [`store` 参数参考](https://developers.openai.com/api/reference/resources/responses/methods/create)
+在 `store:false`（以及 ZDR）下把 Responses 视为 stateless：reasoning output item 默认带
+`encrypted_content`，客户端应保留并在完整 transcript replay 时原样带回。代码仍保留兼容性的
+`include:['reasoning.encrypted_content']` 请求；当前官方文档称该 `include` 值仍接受但不再是必需项。
+adapter 的 `consume.ts` 将该字段写入本地 reasoning replay 信封，`convertInput` 再恢复为同一个
+Responses reasoning item，因此 stateless/ZDR 不会丢失模型要求的 reasoning replay 状态。
+
+`ModelConfig.baseURL` 不改变以上语义。`openai-responses` 的 custom/unknown baseURL 必须实现与官方
+Responses 请求兼容的 `store:false` 和 encrypted reasoning replay；仅“看起来像 Responses”但不接受
+`store` 的旧版或第三方端点会在请求阶段失败。adapter 不会为这类端点静默删除 `store`，也不会把请求
+回退到 `conversation` 或 `previous_response_id`，因为那会重新引入服务端存储依赖。未知端点现有的
+summary-only reasoning 兼容重试仍只省略 `reasoning`，不会改变 `store:false`。
+
+未来允许把 `previous_response_id` 加成可选性能优化，但必须同时保留完整本地转录，并满足以下约束:
 
 1. 缺失、过期或服务端拒绝该 id 时可立即退回全量 replay；
 2. retry/恢复不得只持有 response id；

@@ -302,7 +302,9 @@ export function buildParams(
     input: convertInput(ctx),
     tools: convertTools(ctx),
     stream: true,
-    // 本地 transcript 全量重放是正确性路径；此请求不发送 previous_response_id。
+    // 本地 transcript 全量重放是正确性路径；显式禁用 Responses 服务端存储，且不发送
+    // previous_response_id。stateless 模式仍通过 reasoning item 的 encrypted_content replay。
+    store: false,
     ...(supportsReasoning && { include: ['reasoning.encrypted_content' as const] }),
     ...(maxOutputTokens !== undefined && { max_output_tokens: maxOutputTokens }),
     ...(temperature !== undefined && { temperature }),

@@ -32,6 +32,19 @@ describe('Responses request summary fallback', () => {
     expect(calls).toEqual([baseParams]);
   });
 
+  it('preserves store:false when summary-only compatibility fallback retries', async () => {
+    const params: ResponseCreateParamsStreaming = { ...baseParams, store: false };
+    const calls: ResponseCreateParamsStreaming[] = [];
+    await createResponsesStreamWithSummaryFallback(params, undefined, (attempt) => {
+      calls.push(attempt);
+      if (calls.length === 1) return Promise.reject(apiError(400, 'reasoning.summary'));
+      return Promise.resolve(emptyEvents());
+    });
+
+    expect(calls[1]).toMatchObject({ store: false });
+    expect(calls[1]).not.toHaveProperty('reasoning');
+  });
+
   for (const param of ['reasoning', 'reasoning.summary'] as const) {
     it(`retries once without summary-only reasoning when param=${param}`, async () => {
       const calls: ResponseCreateParamsStreaming[] = [];
