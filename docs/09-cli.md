@@ -978,7 +978,8 @@ HTTP status 和重试动作的错误，但不得回显响应正文或底层异�
 `provider-id/model-id` 唯一标识，同时显示其 `ModelRef.api`。选择后才按顺序完成:
 
 1. 从 registry 解析完整 `ModelConfig`，包含真实 `ModelRef.api`、baseURL、key，以及目录中
-   明确存在的 limits；Custom 的标准 `/models` 没有可信 limits 时继续显示 `limit unknown`；
+   明确存在的 limits；官方 Anthropic `/models` 返回的 `max_input_tokens` /
+   `max_tokens` 会归一为 limits，其他没有可信 limits 的 Custom 模型继续显示 `limit unknown`；
 2. `coda models --select` 只把已验证的 provider/model 写为 CLI-edge 的最近显式选择，不构造
    Runtime、不 attach/create/resume thread，也不写 journal；下一次真正启动任务时由 composition root
    把完整 `ModelConfig` 交给 Runtime。交互 TUI 的 `/model` 只在 idle 时经

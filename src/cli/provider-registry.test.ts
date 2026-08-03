@@ -7,10 +7,12 @@ import {
   it,
 } from 'bun:test';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -20,11 +22,13 @@ import {
   modelsEndpoint,
   OPENCODE_GO_BASE_URL,
   ProviderRegistry,
+  type CachedProviderModel,
 } from './provider-registry.js';
 
 interface ModelsFixture {
   openCodeGoMixed: unknown;
   custom: unknown;
+  anthropic: unknown;
 }
 
 const fixturePath = path.join(
@@ -353,6 +357,156 @@ describe('Custom provider 管理', () => {
       'https://anthropic.example/v1/models',
       'https://anthropic.example/v1/models?after_id=same-cursor',
     ]);
+  });
+
+  it('保留 Anthropic 模型能力与 token limits，且缓存重载后仍可 resolve', async () => {
+    const files = paths();
+    const registry = new ProviderRegistry({
+      ...files,
+      now: () => 5678,
+      fetch: async () => jsonResponse(fixture.anthropic),
+    });
+
+    const configured = await registry.configureCustom(
+      'Anthropic',
+      'https://api.anthropic.com',
+      'anthropic-key',
+      'anthropic-messages',
+    );
+    const expectedModel: CachedProviderModel = {
+      id: 'claude-opus-4-6',
+      api: 'anthropic-messages',
+      capabilities: {
+        image_input: { supported: true },
+        thinking: {
+          supported: true,
+          types: { enabled: { supported: true } },
+        },
+        future_capability: { supported: true, rollout: 'preview' },
+      },
+      limits: { context: 200_000, output: 64_000 },
+    };
+    expect(configured.refresh).toEqual({
+      ok: true,
+      providerId: 'custom:anthropic',
+      models: [
+        expectedModel,
+        { id: 'claude-legacy', api: 'anthropic-messages' },
+      ],
+      ignoredUnknownModelIds: [],
+    });
+    expect(configured.provider.models).toEqual([
+      expectedModel,
+      { id: 'claude-legacy', api: 'anthropic-messages' },
+    ]);
+
+    const nonAnthropicFiles = paths();
+    const nonAnthropic = new ProviderRegistry({
+      ...nonAnthropicFiles,
+      fetch: async () => jsonResponse(fixture.anthropic),
+    });
+    await nonAnthropic.configureCustom(
+      'OpenAI Gateway',
+      'https://openai.example/v1',
+      'openai-key',
+      'openai-responses',
+    );
+    expect(
+      nonAnthropic.resolveModel('custom:openai%20gateway', 'claude-opus-4-6'),
+    ).toMatchObject({
+      ref: {
+        provider: 'custom:openai%20gateway',
+        api: 'openai-responses',
+        model: 'claude-opus-4-6',
+      },
+    });
+    expect(
+      nonAnthropic.resolveModel('custom:openai%20gateway', 'claude-opus-4-6')?.limits,
+    ).toBeUndefined();
+    expect(
+      nonAnthropic.resolveModel('custom:openai%20gateway', 'claude-opus-4-6')?.capabilities,
+    ).toBeUndefined();
+
+    const persisted = JSON.parse(readFileSync(files.configPath, 'utf8')) as {
+      providers: Array<{ models: unknown }>;
+    };
+    expect(persisted.providers[0]?.models).toEqual([
+      expectedModel,
+      { id: 'claude-legacy', api: 'anthropic-messages' },
+    ]);
+
+    const restored = new ProviderRegistry({
+      ...files,
+      fetch: async () => jsonResponse({ data: [] }),
+    });
+    expect(restored.listProviders()[0]?.models).toEqual([
+      expectedModel,
+      { id: 'claude-legacy', api: 'anthropic-messages' },
+    ]);
+    expect(
+      restored.resolveModel('custom:anthropic', 'claude-opus-4-6'),
+    ).toMatchObject({
+      ref: {
+        provider: 'custom:anthropic',
+        api: 'anthropic-messages',
+        model: 'claude-opus-4-6',
+      },
+      capabilities: expectedModel.capabilities,
+      limits: { context: 200_000, output: 64_000 },
+    });
+    expect(
+      restored.resolveModel('custom:anthropic', 'claude-legacy'),
+    ).toMatchObject({
+      ref: {
+        provider: 'custom:anthropic',
+        api: 'anthropic-messages',
+        model: 'claude-legacy',
+      },
+    });
+    expect(
+      restored.resolveModel('custom:anthropic', 'claude-legacy')?.limits,
+    ).toBeUndefined();
+  });
+
+  it('接受旧的仅含 id/api 缓存格式', async () => {
+    const files = paths();
+    mkdirSync(path.dirname(files.configPath), { recursive: true });
+    writeFileSync(
+      files.configPath,
+      JSON.stringify({
+        version: 1,
+        providers: [
+          {
+            id: 'custom:legacy',
+            name: 'Legacy',
+            kind: 'custom',
+            baseURL: 'https://legacy.example/v1',
+            api: 'anthropic-messages',
+            models: [{ id: 'legacy-model', api: 'anthropic-messages' }],
+          },
+        ],
+      }),
+    );
+    writeFileSync(
+      files.credentialsPath,
+      JSON.stringify({ version: 1, apiKeys: { 'custom:legacy': 'legacy-key' } }),
+    );
+
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async () => jsonResponse({ data: [] }),
+    });
+    expect(registry.resolveModel('custom:legacy', 'legacy-model')).toMatchObject({
+      ref: {
+        provider: 'custom:legacy',
+        api: 'anthropic-messages',
+        model: 'legacy-model',
+      },
+      apiKey: 'legacy-key',
+    });
+    expect(
+      registry.resolveModel('custom:legacy', 'legacy-model')?.limits,
+    ).toBeUndefined();
   });
 
   it('id 生成先 NFKC/折叠空白/小写，并拒绝空名称与危险 base URL', () => {

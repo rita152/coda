@@ -31,6 +31,10 @@ export type ConfigurableModelApi =
 export interface CachedProviderModel {
   id: string;
   api: ConfigurableModelApi;
+  /** Provider 返回的模型能力；保持开放形状以兼容后续 Anthropic capability 字段。 */
+  capabilities?: Readonly<Record<string, unknown>>;
+  /** 已通过 provider 元数据校验的输入/输出 token 上限。 */
+  limits?: Readonly<{ context: number; output: number }>;
 }
 
 export interface StoredProvider {
@@ -188,8 +192,14 @@ const EMPTY_CONFIG: ProviderConfigData = { version: 1, providers: [] };
 const EMPTY_CREDENTIALS: CredentialData = { version: 1, apiKeys: {} };
 const MAX_MODEL_REFRESH_PAGES = 1_000;
 
+interface DiscoveredProviderModel {
+  id: string;
+  capabilities?: Readonly<Record<string, unknown>>;
+  limits?: Readonly<{ context: number; output: number }>;
+}
+
 interface ModelsPage {
-  ids: string[];
+  models: DiscoveredProviderModel[];
   hasMore: boolean;
   lastId?: string;
 }
@@ -294,12 +304,23 @@ export class ProviderRegistry {
         ? metadata?.api
         : provider.api;
     if (api === undefined || cached.api !== api) return undefined;
+    const hasTrustedRemoteMetadata =
+      provider.kind === 'custom' && provider.api === 'anthropic-messages';
+    const limits =
+      provider.kind === 'opencode-go'
+        ? metadata?.limits
+        : hasTrustedRemoteMetadata
+          ? cached.limits
+          : undefined;
     return {
       ref: { provider: provider.id, api, model: modelId },
       baseURL: provider.baseURL,
       apiKey,
-      ...(metadata !== undefined && {
-        limits: { ...metadata.limits },
+      ...(hasTrustedRemoteMetadata && cached.capabilities !== undefined && {
+        capabilities: cloneCapabilities(cached.capabilities),
+      }),
+      ...(limits !== undefined && {
+        limits: { ...limits },
       }),
     };
   }
@@ -447,6 +468,7 @@ export class ProviderRegistry {
     }
     const paginate =
       provider.kind === 'custom' && provider.api === 'anthropic-messages';
+    const hasTrustedRemoteMetadata = paginate;
     const seenIds = new Set<string>();
     const seenCursors = new Set<string>();
     const ignoredUnknownModelIds: string[] = [];
@@ -498,18 +520,27 @@ export class ProviderRegistry {
       }
 
       pagesRead += 1;
-      for (const id of page.ids) {
-        if (seenIds.has(id)) continue;
-        seenIds.add(id);
+      for (const candidate of page.models) {
+        if (seenIds.has(candidate.id)) continue;
+        seenIds.add(candidate.id);
         const api =
           provider.kind === 'opencode-go'
-            ? OPENCODE_GO_MODELS[id]?.api
+            ? OPENCODE_GO_MODELS[candidate.id]?.api
             : provider.api;
         if (api === undefined) {
-          ignoredUnknownModelIds.push(id);
+          ignoredUnknownModelIds.push(candidate.id);
           continue;
         }
-        models.push({ id, api });
+        models.push({
+          id: candidate.id,
+          api,
+          ...(hasTrustedRemoteMetadata && candidate.capabilities !== undefined && {
+            capabilities: cloneCapabilities(candidate.capabilities),
+          }),
+          ...(hasTrustedRemoteMetadata && candidate.limits !== undefined && {
+            limits: { ...candidate.limits },
+          }),
+        });
       }
 
       if (!paginate || !page.hasMore) break;
@@ -547,7 +578,7 @@ export class ProviderRegistry {
     return {
       ok: true,
       providerId,
-      models: models.map((model) => ({ ...model })),
+      models: models.map(cloneCachedProviderModel),
       ignoredUnknownModelIds,
     };
   }
@@ -729,7 +760,7 @@ function modelsPageFromPayload(
     throw new Error('invalid models payload');
   }
   const seen = new Set<string>();
-  const ids: string[] = [];
+  const models: DiscoveredProviderModel[] = [];
   for (const item of payload['data']) {
     if (!isRecord(item) || typeof item['id'] !== 'string') {
       throw new Error('invalid model entry');
@@ -743,7 +774,16 @@ function modelsPageFromPayload(
       throw new Error('invalid model id');
     }
     seen.add(id);
-    ids.push(id);
+    const capabilities = parseCapabilities(item['capabilities']);
+    const limits = parseModelLimits(
+      item['max_input_tokens'],
+      item['max_tokens'],
+    );
+    models.push({
+      id,
+      ...(capabilities !== undefined && { capabilities }),
+      ...(limits !== undefined && { limits }),
+    });
   }
   let hasMore = false;
   let lastId: string | undefined;
@@ -761,7 +801,7 @@ function modelsPageFromPayload(
     }
   }
   return {
-    ids,
+    models,
     hasMore,
     ...(lastId !== undefined && { lastId }),
   };
@@ -894,7 +934,16 @@ function parseCachedModel(value: unknown, file: string): CachedProviderModel {
   ) {
     throw new Error(`provider 配置包含无效模型 id: ${file}`);
   }
-  return { id: value['id'], api: value['api'] };
+  const capabilities = parseCapabilities(value['capabilities']);
+  const limits =
+    parseStoredModelLimits(value['limits']) ??
+    parseModelLimits(value['max_input_tokens'], value['max_tokens']);
+  return {
+    id: value['id'],
+    api: value['api'],
+    ...(capabilities !== undefined && { capabilities }),
+    ...(limits !== undefined && { limits }),
+  };
 }
 
 function parseSelection(value: unknown, file: string): ProviderSelection | undefined {
@@ -940,8 +989,53 @@ function isConfigurableApi(value: unknown): value is ConfigurableModelApi {
 function cloneProvider(provider: StoredProvider): StoredProvider {
   return {
     ...provider,
-    models: provider.models.map((model) => ({ ...model })),
+    models: provider.models.map(cloneCachedProviderModel),
   };
+}
+
+function cloneCachedProviderModel(model: CachedProviderModel): CachedProviderModel {
+  return {
+    id: model.id,
+    api: model.api,
+    ...(model.capabilities !== undefined && {
+      capabilities: cloneCapabilities(model.capabilities),
+    }),
+    ...(model.limits !== undefined && { limits: { ...model.limits } }),
+  };
+}
+
+function cloneCapabilities(
+  capabilities: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return structuredClone(capabilities);
+}
+
+function parseCapabilities(
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(value) || Array.isArray(value)) return undefined;
+  return cloneCapabilities(value);
+}
+
+function parseStoredModelLimits(
+  value: unknown,
+): Readonly<{ context: number; output: number }> | undefined {
+  if (!isRecord(value)) return undefined;
+  return parseModelLimits(value['context'], value['output']);
+}
+
+function parseModelLimits(
+  maxInputTokens: unknown,
+  maxTokens: unknown,
+): Readonly<{ context: number; output: number }> | undefined {
+  if (!isPositiveSafeInteger(maxInputTokens) || !isPositiveSafeInteger(maxTokens)) {
+    return undefined;
+  }
+  return { context: maxInputTokens, output: maxTokens };
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function sameProviderRevision(

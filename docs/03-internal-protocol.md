@@ -363,12 +363,19 @@ export interface ModelConfig {
   ref: ModelRef;
   baseURL?: string; apiKey?: string; headers?: Record<string, string>;
   compat?: CompatFlags;      // 方言开关,见 04 文档
+  capabilities?: Readonly<Record<string, unknown>>; // provider model metadata,供参数协商
   limits?: { context: number; output: number };
   defaults?: { temperature?: number; reasoningEffort?: string; maxOutputTokens?: number };
 }
 export interface StreamOptions { signal?: AbortSignal; temperature?: number; maxOutputTokens?: number; reasoningEffort?: string }
 export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOptions) => ProviderEventStream;
 ```
+
+`ModelConfig.capabilities` 是 provider 模型目录返回的开放 JSON 对象，不能在 protocol 层猜测或
+枚举第三方字段；adapter 可在自己的入口收窄它。官方 Anthropic `ModelInfo` 的
+`max_input_tokens` / `max_tokens` 只有在两者都是有效正整数时才归一为 `limits.context` /
+`limits.output`，缺失、`null` 或非法值表示上限未知。provider 缓存会保留该能力对象和归一后的
+limits，未知顶层字段忽略，旧的仅含 `id`/`api` 缓存继续有效。
 
 `StreamFn` 是 Agent 执行路径唯一认识的 provider 形态:一个普通函数，不是类，也不让 Agent 回查
 可变注册表。当前有两条 composition：production CLI、direct Agent/Session 与缺省 static Runtime

@@ -34,6 +34,7 @@ export interface ModelConfig {
   ref: ModelRef;
   baseURL?: string; apiKey?: string; headers?: Record<string, string>;
   compat?: CompatFlags;      // 方言开关,见 §5
+  capabilities?: Readonly<Record<string, unknown>>; // provider model metadata,供参数协商
   limits?: { context: number; output: number };
   defaults?: { temperature?: number; reasoningEffort?: string; maxOutputTokens?: number };
 }
@@ -800,6 +801,12 @@ Custom provider 在登录时绑定一个固定 `api`，且只能是
 `openai-chat | openai-responses | anthropic-messages`。`/models` 返回的每个合法 id 都带该
 固定 api 进入缓存；切换协议等价于 endpoint 语义变化，旧缓存必须清空后重新发现。Custom 的
 provider name 只负责形成稳定、大小写不敏感的 id，不参与 wire 分发。
+
+官方 Anthropic `/models` 的 `ModelInfo` 还可能返回开放的 `capabilities` 对象以及
+`max_input_tokens`、`max_tokens`。registry 原样保留能力对象，并在两个值都是有效正整数时把它们
+归一为 `ModelConfig.limits`；其它未知顶层字段、缺失/`null`/非法可选元数据不影响该模型进入缓存。
+`resolveModel()` 将这些只读元数据带入下一次采样，供后续参数协商使用；旧的仅含 `id`/`api` 缓存
+仍按 `limit unknown` 兼容加载。
 
 ## 相关文档
 

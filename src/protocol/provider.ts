@@ -36,6 +36,7 @@ export interface ModelConfig {
   ref: ModelRef;
   baseURL?: string; apiKey?: string; headers?: Record<string, string>;
   compat?: CompatFlags;      // 方言开关,见 docs/04-provider-adapter.md
+  capabilities?: Readonly<Record<string, unknown>>; // provider model metadata,供参数协商
   limits?: { context: number; output: number };
   defaults?: { temperature?: number; reasoningEffort?: string; maxOutputTokens?: number };
 }

@@ -28,6 +28,34 @@ const fixture = {
       { id: 'org/custom-beta', object: 'model' },
     ],
   },
+  anthropic: {
+    data: [
+      {
+        id: 'claude-opus-4-6',
+        type: 'model',
+        display_name: 'Claude Opus 4.6',
+        created_at: '2026-02-04T00:00:00Z',
+        capabilities: {
+          image_input: { supported: true },
+          thinking: {
+            supported: true,
+            types: { enabled: { supported: true } },
+          },
+          future_capability: { supported: true, rollout: 'preview' },
+        },
+        max_input_tokens: 200_000,
+        max_tokens: 64_000,
+        future_metadata: { retained: false },
+      },
+      {
+        id: 'claude-legacy',
+        type: 'model',
+        capabilities: null,
+        max_input_tokens: null,
+        max_tokens: null,
+      },
+    ],
+  },
 };
 
 mkdirSync(path.dirname(output), { recursive: true });
