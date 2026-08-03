@@ -238,6 +238,16 @@ describe('buildParams(参数裁剪)', () => {
     expect(params.temperature).toBe(0.3);
   });
 
+  it('none 或未知 reasoningEffort 不会意外开启 thinking', () => {
+    const ctx: Context = { messages: [] };
+    for (const reasoningEffort of ['none', 'provider-specific']) {
+      const params = buildParams(model, ctx, { reasoningEffort, temperature: 0.3 }, compat);
+      expect(params.thinking).toBeUndefined();
+      expect(params.output_config).toBeUndefined();
+      expect(params.temperature).toBeUndefined();
+    }
+  });
+
   it('不向不支持该等级的模型发送非法 effort,但保留合法 adaptive thinking', () => {
     const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
     const params = buildParams(
@@ -253,10 +263,17 @@ describe('buildParams(参数裁剪)', () => {
 
   it('无 thinking:温度透传;maxOutputTokens 覆盖缺省', () => {
     const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
-    const params = buildParams(model, ctx, { temperature: 0.3, maxOutputTokens: 1000 }, compat);
+    const temperatureModel = { ...model, ref: { ...model.ref, model: 'claude-sonnet-4-6' } };
+    const params = buildParams(temperatureModel, ctx, { temperature: 0.3, maxOutputTokens: 1000 }, compat);
     expect(params.temperature).toBe(0.3);
     expect(params.max_tokens).toBe(1000);
     expect(params.thinking).toBeUndefined();
+  });
+
+  it('当前默认温度模型:无 thinking 参数也不发送非默认 temperature', () => {
+    const ctx: Context = { messages: [{ role: 'user', id: 'u', timestamp: 1, content: [{ type: 'text', text: 'hi' }] }] };
+    const params = buildParams(model, ctx, { temperature: 0.3 }, compat);
+    expect(params.temperature).toBeUndefined();
   });
 
   it('未识别端点(保守 profile):reasoningEffort 存在也不发 thinking', () => {

@@ -457,6 +457,10 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
   `{ thinking: { type: 'enabled', budget_tokens } }`；只有 Opus 4.5 额外发送官方允许的
   `output_config.effort`。未知 model id 或保守的第三方 endpoint 不发送 `thinking`/
   `output_config`，避免把任一模式猜测到不支持的模型上。
+- **temperature 能力安全:**`supportsTemperature` 只是 endpoint 门禁；Claude Fable 5、
+  Mythos 5/Preview、Opus 5、Opus 4.8/4.7、Sonnet 5 只接受默认 temperature，resolver 对这些
+  精确 model id 收窄为省略 temperature；thinking 开启时所有模型也省略 temperature。未知模型与
+  兼容端点继续使用 endpoint profile，不按模型名猜测其能力。
 - **入站:**`content_block_start/delta/stop` 按 wire index 定位，按本地 append 顺序分配
   `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。
   `redacted_thinking.data` 作为 opaque 字符串保存在 `ReasoningPart` 的 adapter 私有 envelope

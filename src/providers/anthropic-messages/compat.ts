@@ -10,7 +10,7 @@ export interface AnthropicCompatFlags {
   supportsThinking?: boolean;     // endpoint 允许 thinking;具体 mode 仍按官方 model id 收窄
   thinkingBudgetTokens?: number;  // enabled 模式的 budget_tokens(须 ≥1024 且 < max_tokens)
   supportsImageParts?: boolean;   // user/tool_result 内可带 image block(Anthropic 原生支持,默认开)
-  supportsTemperature?: boolean;  // 是否透传 temperature(thinking 开启时一律不发)
+  supportsTemperature?: boolean;  // endpoint 是否接受 temperature(模型限制在 resolveCompat 再收窄)
 }
 
 export type ResolvedAnthropicCompat = Required<AnthropicCompatFlags>;
@@ -100,6 +100,22 @@ export function supportsEffortForModel(model: string, effort: string): boolean {
   return mode === 'adaptive' || supportsEffortWithEnabledThinking(model);
 }
 
+// Claude Opus 4.7 及后续模型和 Mythos Preview 对非默认 sampling 参数返回 400。
+// 这里只维护官方当前精确 model id；未知模型继续遵守 endpoint profile。
+const DEFAULT_TEMPERATURE_ONLY_MODELS: ReadonlySet<string> = new Set([
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-mythos-preview',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-5',
+]);
+
+export function isDefaultTemperatureOnlyModel(model: string): boolean {
+  return DEFAULT_TEMPERATURE_ONLY_MODELS.has(model);
+}
+
 /**
  * 按 baseURL 推断完整 compat profile。未设置 baseURL 视为 Anthropic 官方端点;
  * 未识别 host 走保守 profile。
@@ -157,5 +173,8 @@ export function resolveCompat(model: ModelConfig): ResolvedAnthropicCompat {
     }
     (overrides as Record<string, unknown>)[key] = value;
   }
-  return { ...detectCompat(model.baseURL), ...overrides };
+  const resolved = { ...detectCompat(model.baseURL), ...overrides };
+  return isDefaultTemperatureOnlyModel(model.ref.model)
+    ? { ...resolved, supportsTemperature: false }
+    : resolved;
 }

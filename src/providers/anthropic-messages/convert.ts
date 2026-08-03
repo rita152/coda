@@ -32,6 +32,7 @@ import type {
   UserMessage,
 } from '../../protocol/index.js';
 import {
+  isDefaultTemperatureOnlyModel,
   supportsEffortWithEnabledThinking,
   supportsEffortForModel,
   thinkingModeForModel,
@@ -182,7 +183,7 @@ export function buildParams(
   const reasoningEffort = options?.reasoningEffort ?? model.defaults?.reasoningEffort;
   const effort = parseAnthropicEffort(reasoningEffort);
   const thinkingMode = compat.supportsThinking ? thinkingModeForModel(model.ref.model) : 'unsupported';
-  const thinkingOn = reasoningEffort != null && thinkingMode !== 'unsupported';
+  const thinkingOn = effort !== undefined && thinkingMode !== 'unsupported';
   const budget = compat.thinkingBudgetTokens;
   // enabled 模式要求 max_tokens 严格大于 budget;adaptive 没有固定 budget,不抬高用户请求。
   const maxTokens = thinkingOn && thinkingMode === 'enabled' && requestedMax <= budget
@@ -211,7 +212,11 @@ export function buildParams(
         params.output_config = { effort };
       }
     }
-  } else if (temperature != null && compat.supportsTemperature) {
+  } else if (
+    temperature != null &&
+    compat.supportsTemperature &&
+    !isDefaultTemperatureOnlyModel(model.ref.model)
+  ) {
     params.temperature = temperature;
   }
   return params;
