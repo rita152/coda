@@ -732,7 +732,9 @@ fixture 同时包含 OpenCode Go 的 `openai-chat` 已知 id（含 `deepseek-v4-
 `ProviderRegistry` 测试注入内存 `fetch` 返回该 fixture，CI 不访问 OpenCode、models.dev 或任何
 custom endpoint。测试必须断言已知 id 的显式协议与 limits、未知 id 被忽略且不可 resolve、
 `/models` URL 与 OpenAI bearer / Anthropic `x-api-key` headers，并确认 `/model` 把 context limit
-传给 footer、成功切换不再追加“已选择 …”消息；Custom 无可信元数据时仍不生成 limits。fixture
+传给 footer、成功切换不再追加“已选择 …”消息；Custom 无可信元数据时仍不生成 limits。Anthropic
+models 的分页测试覆盖 `has_more`/`last_id` → `after_id`、空页、跨页重复 id，以及缺失/重复游标
+不会继续循环。fixture
 只能经生成脚本更新，不能手改以掩盖 mapping 漂移。
 
 ## 5. loop 集成测试(L4):steering / follow-up / abort 的确定性方法

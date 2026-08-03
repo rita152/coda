@@ -203,6 +203,158 @@ describe('Custom provider 管理', () => {
     expect(calls[2]?.authorization).toBe('Bearer acme-key-2');
   });
 
+  it('Anthropic models endpoint 按 after_id 分页并跨页去重', async () => {
+    const files = paths();
+    const pages: unknown[] = [
+      {
+        data: [{ id: 'first' }, { id: 'duplicate' }],
+        has_more: true,
+        last_id: 'cursor-1',
+      },
+      {
+        data: [{ id: 'duplicate' }, { id: 'second' }],
+        has_more: false,
+      },
+    ];
+    const calls: {
+      url: string;
+      apiKey: string | null;
+      version: string | null;
+    }[] = [];
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async (input, init) => {
+        const headers = new Headers(init?.headers);
+        calls.push({
+          url: String(input),
+          apiKey: headers.get('x-api-key'),
+          version: headers.get('anthropic-version'),
+        });
+        const page = pages.shift();
+        if (page === undefined) throw new Error('unexpected models page');
+        return jsonResponse(page);
+      },
+    });
+
+    const result = await registry.configureCustom(
+      'Anthropic',
+      'https://anthropic.example',
+      'anthropic-key',
+      'anthropic-messages',
+    );
+
+    expect(result.refresh).toEqual({
+      ok: true,
+      providerId: 'custom:anthropic',
+      models: [
+        { id: 'first', api: 'anthropic-messages' },
+        { id: 'duplicate', api: 'anthropic-messages' },
+        { id: 'second', api: 'anthropic-messages' },
+      ],
+      ignoredUnknownModelIds: [],
+    });
+    expect(calls).toEqual([
+      {
+        url: 'https://anthropic.example/v1/models',
+        apiKey: 'anthropic-key',
+        version: '2023-06-01',
+      },
+      {
+        url: 'https://anthropic.example/v1/models?after_id=cursor-1',
+        apiKey: 'anthropic-key',
+        version: '2023-06-01',
+      },
+    ]);
+  });
+
+  it('Anthropic models 空页可成功清空缓存且不继续请求', async () => {
+    const files = paths();
+    const calls: string[] = [];
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async (input) => {
+        calls.push(String(input));
+        return jsonResponse({ data: [], has_more: false });
+      },
+    });
+
+    const result = await registry.configureCustom(
+      'Empty Anthropic',
+      'https://anthropic.example',
+      'anthropic-key',
+      'anthropic-messages',
+    );
+
+    expect(result.refresh).toMatchObject({
+      ok: true,
+      models: [],
+      ignoredUnknownModelIds: [],
+    });
+    expect(calls).toEqual(['https://anthropic.example/v1/models']);
+  });
+
+  it('Anthropic models 缺少 next cursor 时拒绝继续分页', async () => {
+    const files = paths();
+    const calls: string[] = [];
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async (input) => {
+        calls.push(String(input));
+        return jsonResponse({
+          data: [{ id: 'first' }],
+          has_more: true,
+        });
+      },
+    });
+
+    const result = await registry.configureCustom(
+      'Malformed Anthropic',
+      'https://anthropic.example',
+      'anthropic-key',
+      'anthropic-messages',
+    );
+
+    expect(result.refresh.ok).toBe(false);
+    expect(calls).toEqual(['https://anthropic.example/v1/models']);
+  });
+
+  it('Anthropic models 重复 next cursor 时停止而不陷入循环', async () => {
+    const files = paths();
+    const calls: string[] = [];
+    let page = 0;
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async (input) => {
+        calls.push(String(input));
+        page += 1;
+        return page === 1
+          ? jsonResponse({
+              data: [{ id: 'first' }],
+              has_more: true,
+              last_id: 'same-cursor',
+            })
+          : jsonResponse({
+              data: [{ id: 'second' }],
+              has_more: true,
+              last_id: 'same-cursor',
+            });
+      },
+    });
+
+    const result = await registry.configureCustom(
+      'Looping Anthropic',
+      'https://anthropic.example',
+      'anthropic-key',
+      'anthropic-messages',
+    );
+
+    expect(result.refresh.ok).toBe(false);
+    expect(calls).toEqual([
+      'https://anthropic.example/v1/models',
+      'https://anthropic.example/v1/models?after_id=same-cursor',
+    ]);
+  });
+
   it('id 生成先 NFKC/折叠空白/小写，并拒绝空名称与危险 base URL', () => {
     expect(customProviderId('  ＡＣＭＥ   Team ')).toBe('custom:acme%20team');
     expect(() => customProviderId('  ')).toThrow(/不能为空/);

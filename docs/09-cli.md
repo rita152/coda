@@ -953,7 +953,9 @@ API-key preset 固定为:
   文本。name 经 NFKC、首尾/连续空白归一化后做大小写不敏感 canonical 化，稳定 id 为
   `custom:<percent-encoded-name>`；同名再次登录就是更新，大小写不同不产生第二份 provider。
   不同 name 可并存。OpenAI 两种协议请求 `<baseURL>/models`；Anthropic 在 baseURL 尚未以
-  `/v1` 结尾时请求 `<baseURL>/v1/models`，并使用对应认证 header。
+  `/v1` 结尾时请求 `<baseURL>/v1/models`，并使用对应认证 header。Anthropic 响应带官方
+  `has_more`/`last_id` 时，后续请求用 `after_id=<last_id>` 读取所有页面；各页模型按 id 全局去重。
+  `has_more=true` 时缺少或重复游标视为 payload 错误，保留已有配置与缓存。
 
 非秘密配置、模型缓存和最近显式选择写入 `~/.coda/providers.json`；key 单独写入
 `~/.coda/credentials.json`。每次写入先在短跨进程锁内重新读取并合并最新状态，再采用同目录

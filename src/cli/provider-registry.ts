@@ -186,6 +186,13 @@ export const OPENCODE_GO_MODELS: Readonly<
 
 const EMPTY_CONFIG: ProviderConfigData = { version: 1, providers: [] };
 const EMPTY_CREDENTIALS: CredentialData = { version: 1, apiKeys: {} };
+const MAX_MODEL_REFRESH_PAGES = 1_000;
+
+interface ModelsPage {
+  ids: string[];
+  hasMore: boolean;
+  lastId?: string;
+}
 
 export class ProviderRegistry {
   readonly configPath: string;
@@ -414,11 +421,12 @@ export class ProviderRegistry {
           'provider 配置和 API key 已保留',
       };
     }
-    let response: Response;
+    // Header 构造也可能因非 ByteString 输入抛错；与 fetch 异常一样收敛为静态错误，
+    // 绝不让平台错误把 header value（API key）带回 UI/日志。
+    let headers: Headers;
+    let requestSignal: AbortSignal;
     try {
-      // Header 构造也可能因非 ByteString 输入抛错；与 fetch 异常一样收敛为静态错误，
-      // 绝不让平台错误把 header value（API key）带回 UI/日志。
-      const headers = new Headers();
+      headers = new Headers();
       if (provider.kind === 'opencode-go' || provider.api !== 'anthropic-messages') {
         headers.set('Authorization', `Bearer ${apiKey}`);
       } else {
@@ -426,11 +434,8 @@ export class ProviderRegistry {
         headers.set('anthropic-version', '2023-06-01');
       }
       const timeout = AbortSignal.timeout(this.#refreshTimeoutMs);
-      response = await this.#fetch(url, {
-        method: 'GET',
-        headers,
-        signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
-      });
+      requestSignal =
+        signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
     } catch {
       return {
         ok: false,
@@ -440,41 +445,89 @@ export class ProviderRegistry {
           'provider 配置和 API key 已保留',
       };
     }
-    if (!response.ok) {
-      return {
-        ok: false,
-        providerId,
-        error:
-          `${url} 返回 HTTP ${response.status}；检查 API key、base URL 和协议后重新运行 /login。` +
-          'provider 配置和 API key 已保留',
-      };
-    }
-
-    let ids: string[];
-    try {
-      ids = modelIdsFromPayload(await response.json());
-    } catch {
-      return {
-        ok: false,
-        providerId,
-        error:
-          `${url} 返回的 models JSON 不符合标准 { data: [{ id }] }；` +
-          '修正 endpoint 后重新运行 /login。provider 配置和 API key 已保留',
-      };
-    }
-
+    const paginate =
+      provider.kind === 'custom' && provider.api === 'anthropic-messages';
+    const seenIds = new Set<string>();
+    const seenCursors = new Set<string>();
     const ignoredUnknownModelIds: string[] = [];
     const models: CachedProviderModel[] = [];
-    for (const id of ids) {
-      const api =
-        provider.kind === 'opencode-go'
-          ? OPENCODE_GO_MODELS[id]?.api
-          : provider.api;
-      if (api === undefined) {
-        ignoredUnknownModelIds.push(id);
-        continue;
+    let cursor: string | undefined;
+    let pagesRead = 0;
+    while (true) {
+      const pageURL =
+        cursor === undefined
+          ? url
+          : `${url}?${new URLSearchParams({ after_id: cursor }).toString()}`;
+      let response: Response;
+      try {
+        response = await this.#fetch(pageURL, {
+          method: 'GET',
+          headers,
+          signal: requestSignal,
+        });
+      } catch {
+        return {
+          ok: false,
+          providerId,
+          error:
+            `无法连接 ${pageURL}；检查网络与 base URL 后重新运行 /login。` +
+            'provider 配置和 API key 已保留',
+        };
       }
-      models.push({ id, api });
+      if (!response.ok) {
+        return {
+          ok: false,
+          providerId,
+          error:
+            `${pageURL} 返回 HTTP ${response.status}；检查 API key、base URL 和协议后重新运行 /login。` +
+            'provider 配置和 API key 已保留',
+        };
+      }
+
+      let page: ModelsPage;
+      try {
+        page = modelsPageFromPayload(await response.json(), paginate);
+      } catch {
+        return {
+          ok: false,
+          providerId,
+          error:
+            `${pageURL} 返回的 models JSON 不符合标准 { data: [{ id }] }；` +
+            '修正 endpoint 后重新运行 /login。provider 配置和 API key 已保留',
+        };
+      }
+
+      pagesRead += 1;
+      for (const id of page.ids) {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        const api =
+          provider.kind === 'opencode-go'
+            ? OPENCODE_GO_MODELS[id]?.api
+            : provider.api;
+        if (api === undefined) {
+          ignoredUnknownModelIds.push(id);
+          continue;
+        }
+        models.push({ id, api });
+      }
+
+      if (!paginate || !page.hasMore) break;
+      if (
+        page.lastId === undefined ||
+        seenCursors.has(page.lastId) ||
+        pagesRead >= MAX_MODEL_REFRESH_PAGES
+      ) {
+        return {
+          ok: false,
+          providerId,
+          error:
+            `${pageURL} 返回的 models JSON 不符合标准 { data: [{ id }] }；` +
+            '修正 endpoint 后重新运行 /login。provider 配置和 API key 已保留',
+        };
+      }
+      seenCursors.add(page.lastId);
+      cursor = page.lastId;
     }
 
     const updated: StoredProvider = {
@@ -668,7 +721,10 @@ function requireApiKey(apiKey: string): string {
   return normalized;
 }
 
-function modelIdsFromPayload(payload: unknown): string[] {
+function modelsPageFromPayload(
+  payload: unknown,
+  paginate: boolean,
+): ModelsPage {
   if (!isRecord(payload) || !Array.isArray(payload['data'])) {
     throw new Error('invalid models payload');
   }
@@ -689,7 +745,26 @@ function modelIdsFromPayload(payload: unknown): string[] {
     seen.add(id);
     ids.push(id);
   }
-  return ids;
+  let hasMore = false;
+  let lastId: string | undefined;
+  if (paginate && payload['has_more'] !== undefined) {
+    if (typeof payload['has_more'] !== 'boolean') {
+      throw new Error('invalid models pagination flag');
+    }
+    hasMore = payload['has_more'];
+    if (hasMore) {
+      if (typeof payload['last_id'] !== 'string') {
+        throw new Error('invalid models pagination cursor');
+      }
+      lastId = payload['last_id'].trim();
+      if (lastId === '') throw new Error('invalid models pagination cursor');
+    }
+  }
+  return {
+    ids,
+    hasMore,
+    ...(lastId !== undefined && { lastId }),
+  };
 }
 
 function readProviderConfig(file: string): ProviderConfigData {
