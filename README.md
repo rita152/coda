@@ -3,9 +3,23 @@
 coda 是一个 TypeScript 终端 coding agent，支持流式输出、steering / follow-up、工具调用、
 session 恢复和可脚本化的 headless 协议。运行时与包管理器固定为 **Bun 1.3.14**。
 
+## 界面预览
+
+### 首次启动
+
+![coda 的首次启动界面](assets/screenshots/coda-onboarding.png)
+
+### 交互式分析
+
+![coda 的交互式分析与转录界面](assets/screenshots/coda-transcript.png)
+
+### 工具执行审批
+
+![coda 的工具执行审批界面](assets/screenshots/coda-approval.png)
+
 ## 安装
 
-当前仓库是 private package，从源码构建：
+当前 npm package 标记为 `private`，从源码构建：
 
 ```bash
 bun install --frozen-lockfile
@@ -187,3 +201,7 @@ git diff --check
 Runtime 0–3 与 CLI UX0–UX4 已全部进入当前基线，项目目前处于完成后的维护、加固与 surface 收敛
 阶段，没有进行中的编号里程碑。分层和产品契约见 [docs/README.md](docs/README.md)，完成记录、
 当前兼容边界与尚未立项的后续范围见 [docs/11-roadmap.md](docs/11-roadmap.md)。
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 发布。
