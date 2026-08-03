@@ -146,7 +146,7 @@ describe('usage 换算单测(exclusive → inclusive,各形态断言不变量)',
 });
 
 describe('stop_reason 映射', () => {
-  async function replayStop(stopReason: string): Promise<AssistantMessage> {
+  async function replayStop(stopReason: string): Promise<{ events: ProviderEvent[]; final: AssistantMessage }> {
     const lines: unknown[] = [
       { type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 1 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -156,7 +156,7 @@ describe('stop_reason 映射', () => {
       { type: 'message_stop' },
     ];
     const stream = consumeAnthropicStreamForTest(ref, compat, () => Promise.resolve(fixtureEvents(lines)));
-    return (await collectStream(stream)).final;
+    return collectStream(stream);
   }
 
   it.each([
@@ -167,13 +167,26 @@ describe('stop_reason 映射', () => {
     ['tool_use', 'tool_calls'],
     ['refusal', 'content_filter'],
   ] as const)('%s → %s', async (wire, internal) => {
-    const final = await replayStop(wire);
+    const { final } = await replayStop(wire);
     expect(final.stopReason).toBe(internal);
   });
 
-  it('未知 stop_reason 保守当作 stop(留 console.warn 现场)', async () => {
-    const final = await replayStop('some_new_reason');
-    expect(final.stopReason).toBe('stop');
+  it('model_context_window_exceeded → overflow error(截断交给 compaction)', async () => {
+    const { events, final } = await replayStop('model_context_window_exceeded');
+    assertValidProviderEventSequence(events);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(final.stopReason).toBe('error');
+    expect(final.errorMessage).toContain('model context window exceeded');
+    expect(final.errorDetails).toMatchObject({ kind: 'overflow', retryable: false });
+  });
+
+  it('未知 stop_reason fail closed 为 unknown error,不把截断误报为成功', async () => {
+    const { events, final } = await replayStop('some_new_reason');
+    assertValidProviderEventSequence(events);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(final.stopReason).toBe('error');
+    expect(final.errorMessage).toContain("unknown stop_reason 'some_new_reason'");
+    expect(final.errorDetails).toMatchObject({ kind: 'unknown', retryable: false });
   });
 
   it('流结束无 stop_reason:按 error 编码(残缺流,network 可重试)', async () => {

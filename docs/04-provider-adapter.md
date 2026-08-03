@@ -448,8 +448,11 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
   `contentIndex`；`input_json_delta` 持续拼接 `rawArguments` 并刷新容错解析。未建模的
   `redacted_thinking` / server-tool block 按 tolerant-reader 规则忽略，不泄漏到内部协议。
 - **终态:**`end_turn | stop_sequence | pause_turn` → `stop`，`max_tokens` → `length`，
-  `tool_use` → `tool_calls`，`refusal` → `content_filter`。流结束仍无 `stop_reason` 是可重试
-  network error；其他未知值警告后保守当作 `stop`。
+  `tool_use` → `tool_calls`，`refusal` → `content_filter`。`model_context_window_exceeded` 是
+  Anthropic 的上下文窗口截断标记，编码为 `error` + `errorDetails.kind = 'overflow'`，交给
+  session compaction；流结束仍无 `stop_reason` 是可重试 network error。其他未知值警告后
+  fail closed 为不可重试的 `error`(`errorDetails.kind = 'unknown'`)，不能把未来新增的截断
+  原因误报为成功。
 - **usage:**Anthropic 的 exclusive 输入口径在 adapter 内归一为
   `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`；`cacheRead/cacheWrite/reasoning`
   仍是 inclusive totals 的信息性拆分。

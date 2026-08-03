@@ -6,6 +6,7 @@
 import type {
   AssistantMessage,
   ModelRef,
+  ProviderErrorDetails,
   ReasoningPart,
   TextPart,
   ToolCallPart,
@@ -228,14 +229,27 @@ function applyUsage(raw: unknown, state: StreamState): void {
 // 是 adapter 补充)。pause_turn 是服务端工具(web_search 等)对未完成 turn 的中断,本该由「重发
 // 部分 assistant 续跑」处理;coda v1 只接客户端工具,pause_turn 实际不可达,故当作干净 stop 收尾
 // (无 tool_calls 的 stop → loop 走 agent_end completed,不做续跑——这是有意的近似,非「loop 层
-// 可继续」)。若将来接服务端工具,需为 pause_turn 引入区分表示以支持续跑。
-const STOP_REASON_MAP: Record<string, AssistantMessage['stopReason']> = {
-  end_turn: 'stop',
-  stop_sequence: 'stop',
-  pause_turn: 'stop',
-  max_tokens: 'length',
-  tool_use: 'tool_calls',
-  refusal: 'content_filter',
+// 可继续」)。model_context_window_exceeded 是 Anthropic 的成功响应截断标记,但我方没有独立的
+// stop reason:编码为 overflow error 交给 session compaction。未知值也必须 fail closed,不能把
+// 未来新增的截断原因误报成成功 stop。
+interface StopReasonMapping {
+  stopReason: AssistantMessage['stopReason'];
+  errorMessage?: string;
+  errorDetails?: ProviderErrorDetails;
+}
+
+const STOP_REASON_MAP: Readonly<Record<string, StopReasonMapping>> = {
+  end_turn: { stopReason: 'stop' },
+  stop_sequence: { stopReason: 'stop' },
+  pause_turn: { stopReason: 'stop' },
+  max_tokens: { stopReason: 'length' },
+  tool_use: { stopReason: 'tool_calls' },
+  refusal: { stopReason: 'content_filter' },
+  model_context_window_exceeded: {
+    stopReason: 'error',
+    errorMessage: 'model context window exceeded',
+    errorDetails: { kind: 'overflow', retryable: false },
+  },
 };
 
 /**
@@ -255,10 +269,23 @@ export function finalize(state: StreamState, stream: ProviderEventStream): void 
   }
   const mapped = STOP_REASON_MAP[state.stopReason];
   if (mapped === undefined) {
-    console.warn(`[anthropic-messages] unknown stop_reason '${state.stopReason}', treating as 'stop'`);
+    const reason = state.stopReason;
+    console.warn(`[anthropic-messages] unknown stop_reason '${reason}', treating as 'error'`);
+    state.partial.stopReason = 'error';
+    state.partial.errorMessage = `unknown stop_reason '${reason}'`;
+    state.partial.errorDetails = { kind: 'unknown', retryable: false };
+    stream.push({ type: 'error', message: state.partial });
+    stream.end(state.partial);
+    return;
   }
-  state.partial.stopReason = mapped ?? 'stop';
-  stream.push({ type: 'done', message: state.partial });
+  state.partial.stopReason = mapped.stopReason;
+  if (mapped.errorMessage !== undefined) state.partial.errorMessage = mapped.errorMessage;
+  if (mapped.errorDetails !== undefined) state.partial.errorDetails = { ...mapped.errorDetails };
+  if (mapped.stopReason === 'error') {
+    stream.push({ type: 'error', message: state.partial });
+  } else {
+    stream.push({ type: 'done', message: state.partial });
+  }
   stream.end(state.partial);
 }
 
