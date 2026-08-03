@@ -133,7 +133,7 @@ test('initialPrompt 一次性特例:注入 prompt → agent_end(completed) 自�
 
   // 不写任何 stdin 命令:事件流完整外发后自动退出
   await expect(run.exit).resolves.toBe(0);
-  expect(run.events[0]).toEqual({ type: 'protocol', protocolVersion: '1.0.0' });
+  expect(run.events[0]).toEqual({ type: 'protocol', protocolVersion: '1.1.0' });
   const types = run.events.map((e) => e.type);
   expect(types).toContain('agent_start');
   expect(types).toContain('agent_end');

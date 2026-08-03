@@ -4,6 +4,14 @@
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error' | 'aborted';
 
 export interface TextPart      { type: 'text'; text: string }
+export type AssistantMessagePhase = 'commentary' | 'final_answer';
+export interface AssistantTextPart extends TextPart {
+  /**
+   * provider 显式声明的可见文本阶段。缺省表示 provider 未标注；消费者不得根据
+   * reasoning 或文本位置自行推断 commentary。
+   */
+  phase?: AssistantMessagePhase;
+}
 export interface ReasoningPart {
   type: 'reasoning';
   text: string;
@@ -55,7 +63,7 @@ export interface UserMessage {
 }
 export interface AssistantMessage {
   role: 'assistant'; id: string; timestamp: number;
-  content: (TextPart | ReasoningPart | ToolCallPart)[];
+  content: (AssistantTextPart | ReasoningPart | ToolCallPart)[];
   model: ModelRef;
   stopReason: StopReason; errorMessage?: string;   // error/aborted 也是一条合法消息,保留在转录中
   errorDetails?: ProviderErrorDetails;

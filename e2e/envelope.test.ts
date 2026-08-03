@@ -25,7 +25,7 @@ test('envelope mode reads RuntimeOps from piped stdin instead of consuming it as
   const protocol = await process.waitForEvent((frame) => frame.type === 'protocol', 'envelope protocol');
   expect(protocol).toEqual({
     type: 'protocol',
-    protocolVersion: '1.0.0',
+    protocolVersion: '1.1.0',
     eventFormat: 'envelope',
     workspaceId: WORKSPACE_ID,
   });

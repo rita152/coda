@@ -11,6 +11,7 @@ import type {
   ResponseReasoningItem,
 } from 'openai/resources/responses/responses';
 import type {
+  AssistantMessagePhase,
   AssistantMessage,
   Context,
   ImagePart,
@@ -64,16 +65,28 @@ interface ReasoningAccumulator {
 
 function pushAssistant(out: ResponseInputItem[], message: AssistantMessage): void {
   let pendingText = '';
+  let pendingPhase: AssistantMessagePhase | undefined;
   const reasoning = new Map<string, ReasoningAccumulator>();
   const flushText = (): void => {
     if (pendingText.length === 0) return;
-    out.push({ role: 'assistant', content: pendingText });
+    out.push({
+      role: 'assistant',
+      content: pendingText,
+      ...(pendingPhase !== undefined && { phase: pendingPhase }),
+    });
     pendingText = '';
+    pendingPhase = undefined;
+  };
+  const appendText = (text: string, phase: AssistantMessagePhase | undefined): void => {
+    if (text.length === 0) return;
+    if (pendingText.length > 0 && pendingPhase !== phase) flushText();
+    if (pendingText.length === 0) pendingPhase = phase;
+    pendingText += text;
   };
 
   for (const part of message.content) {
     if (part.type === 'text') {
-      pendingText += part.text;
+      appendText(part.text, part.phase);
       continue;
     }
     if (part.type === 'reasoning') {
@@ -81,7 +94,7 @@ function pushAssistant(out: ResponseInputItem[], message: AssistantMessage): voi
       if (metadata === undefined) {
         // 同 provider 但缺少可验证的 Responses replay 信封时降级为 assistant 文本；
         // 跨模型的常规路径已由 transform 层做同样降级。
-        pendingText += part.text;
+        appendText(part.text, undefined);
         continue;
       }
       flushText();

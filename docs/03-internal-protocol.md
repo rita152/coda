@@ -125,6 +125,10 @@ subscription gap 与 writer/runtime fatal 是 iterator 的 typed terminal errors
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error' | 'aborted';
 
 export interface TextPart      { type: 'text'; text: string }
+export type AssistantMessagePhase = 'commentary' | 'final_answer';
+export interface AssistantTextPart extends TextPart {
+  phase?: AssistantMessagePhase;
+}
 export interface ReasoningPart {
   type: 'reasoning';
   text: string;
@@ -160,7 +164,7 @@ export interface UserMessage {
 }
 export interface AssistantMessage {
   role: 'assistant'; id: string; timestamp: number;
-  content: (TextPart | ReasoningPart | ToolCallPart)[];
+  content: (AssistantTextPart | ReasoningPart | ToolCallPart)[];
   model: ModelRef;
   stopReason: StopReason; errorMessage?: string;   // error/aborted 也是一条合法消息,保留在转录中
   errorDetails?: ProviderErrorDetails;             // adapter 填写；RetryCoordinator 消费，见 08 §5.1
@@ -200,7 +204,14 @@ export interface Context {
 
 ### 2.2 Part 类型逐一说明
 
-- **TextPart**:普通文本。assistant 出站到 Chat Completions 时会被合并为纯字符串 content(pi 的 openai-completions adapter 注释明确指出:数组形式 `[{type:"text"}]` 会诱发 DeepSeek 等模型模仿结构输出),但内部协议保留数组形态——这是"内部表达力 ≥ 任意 wire 格式"原则的体现,降级永远发生在 adapter。
+- **TextPart / AssistantTextPart**:普通文本。assistant 专属的 `phase` 只保存 provider 明确声明的
+  用户可见阶段：`commentary` 是中间进度或工具调用前说明，`final_answer` 是完成答复；缺失表示
+  provider 没有标注，消费端不得按文本位置或 stop reason 猜测并写回 phase。该字段来自 Responses
+  assistant message，而不是 reasoning/thinking；它继续使用 `text_start/delta/end`，事件消费者从
+  `partial.content[contentIndex].phase` 读取。assistant 出站到 Chat Completions 时会被合并为纯字符串
+  content(pi 的 openai-completions adapter 注释明确指出:数组形式 `[{type:"text"}]` 会诱发 DeepSeek
+  等模型模仿结构输出),但内部协议保留数组形态——这是"内部表达力 ≥ 任意 wire 格式"原则的体现,
+  降级永远发生在 adapter。
 - **ReasoningPart**:推理文本或摘要。`kind:'summary'` 是 canonical 的展示安全标记，只有该值允许前端把文本投影到临时 Working 行；`kind:'content'` 表示原始 reasoning content，缺失 `kind` 是 Anthropic/Chat/旧转录等未声明展示安全性的兼容形态，两者都不得进入默认 UI。`signature` 承载 provider 私有 replay 元数据:Anthropic thinking signature，或 OpenAI Responses adapter 的版本化信封(item id、item/summary/content kind、index、可选 `encrypted_content`)。Responses 的无可见文本 reasoning item 用空 `text`、缺失 public `kind` 与 item-only 信封表示，以免工具后续回合丢失 stateless replay 项。protocol 不解析 signature；同模型由所属 adapter 原样恢复，跨模型 replay 时由 transform 层剥离并把整块降级为文本(见 [04-provider-adapter](./04-provider-adapter.md))。
 - **ImagePart**:base64 + mimeType,不做 URL 形态(避免生命周期/鉴权问题)。出现在 user 输入与工具结果中(read 工具读图片文件时);Chat Completions 的 tool 消息不能携带图片,adapter 会把它抽出补一条 user 消息——这是 pi 验证过的降级手法。
 - **ToolCallPart**:`arguments` 是**解析后的对象**。流式期间 adapter 用容错 JSON 解析(partial-json)在每个 delta 后刷新它,所以 UI 随时能渲染"参数正在生长"的预览;`rawArguments` 保留原始字符串,专供 `stopReason === 'length'` 截断场景的诊断(此时 `arguments` 可能"能解析但不完整",loop 层一律不执行,见 [05-agent-loop](./05-agent-loop.md))。
@@ -300,7 +311,7 @@ terminal := done | error                             (恰好一个,且是最后�
 2. **终止事件恰好一个**:`done` 或 `error`,之后流结束(`EventStream.end()` 被调用)。`done.message.stopReason` 只允许 stop/length/tool_calls/content_filter;`error.message.stopReason` 只允许 error/aborted。这个划分让 loop 的判断退化为对事件类型的判断。
 3. **`done` 之前所有块必须闭合**。Chat Completions 流常常不给显式的块结束信号,adapter 在收到 finish_reason 时负责补发未闭合块的 `*_end`(Vercel AI SDK 在 `flush()` 里做同样的事)。`error` 则允许截断任何未闭合的块——错误路径不做补齐,`error.message` 即最终快照,半截文本保留在其中。
 4. **`contentIndex` 即 `partial.content` 数组下标**,块按 index 递增追加(append-only)。协议不禁止多个块同时打开(为 Anthropic/Responses API 式并行块留门),消费者必须用 `contentIndex` 定位,**不得假设"当前块 = 最后一个块"**;v1 的 Chat Completions adapter 实际串行产块。
-5. **`partial` 是 provider 流内同一个逐步生长的对象**(引用恒定),每个事件携带当时的最新视图。消费者不得改写它；legacy v1 `MessageRecord` 只在 message_end clone 最终消息，但 canonical EventCommitter 对**每个**进入 envelope 的 message_update 按 §1 在 seq 分配前 deep snapshot，不能让早期已提交事件随以后 token 增长。`tool_call_delta` 的 `delta` 是原始 JSON 字符串片段,同时 partial 中对应 `ToolCallPart.arguments` 已被容错解析刷新;`tool_call_end.toolCall` 携带最终解析结果。
+5. **`partial` 是 provider 流内同一个逐步生长的对象**(引用恒定),每个事件携带当时的最新视图。消费者不得改写它；`text_*` 指向 `AssistantTextPart` 时，provider 明确给出的 `phase` 也随 partial 提交，且绝不改走 `reasoning_*`。legacy v1 `MessageRecord` 只在 message_end clone 最终消息，但 canonical EventCommitter 对**每个**进入 envelope 的 message_update 按 §1 在 seq 分配前 deep snapshot，不能让早期已提交事件随以后 token 增长。`tool_call_delta` 的 `delta` 是原始 JSON 字符串片段,同时 partial 中对应 `ToolCallPart.arguments` 已被容错解析刷新;`tool_call_end.toolCall` 携带最终解析结果。
 6. `text_end/reasoning_end` 的 `content` 是该块完整文本,消费者可用它校验自己的增量拼接。
 
 ### 4.3 设计理由:三段式 + contentIndex + partial 快照

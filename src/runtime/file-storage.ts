@@ -3358,8 +3358,12 @@ function isMessagePart(value: unknown, role: AgentMessage['role']): boolean {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
   try {
     if (value.type === 'text') {
-      assertExactKeys(value, ['type', 'text']);
-      return isWellFormedString(value.text);
+      assertExactKeys(value, ['type', 'text'], role === 'assistant' ? ['phase'] : []);
+      return isWellFormedString(value.text)
+        && (role !== 'assistant'
+          || value.phase === undefined
+          || value.phase === 'commentary'
+          || value.phase === 'final_answer');
     }
     if (value.type === 'image' && role !== 'assistant') {
       assertExactKeys(value, ['type', 'data', 'mimeType']);

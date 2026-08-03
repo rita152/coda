@@ -156,7 +156,7 @@ describe('FileRuntimeStorage', () => {
     await fixture.workspace.close();
   });
 
-  test('round-trips reasoning presentation kinds through the canonical journal', async () => {
+  test('round-trips assistant text phases and reasoning kinds through the canonical journal', async () => {
     const fixture = await createJournalFixture();
     const runId = 'run_file_storage_reasoning' as RunId;
     const turnId = 'turn_file_storage_reasoning' as TurnId;
@@ -165,6 +165,8 @@ describe('FileRuntimeStorage', () => {
       id: 'assistant-reasoning-kinds',
       timestamp: 2,
       content: [
+        { type: 'text', text: 'visible progress', phase: 'commentary' },
+        { type: 'text', text: 'final response', phase: 'final_answer' },
         { type: 'reasoning', kind: 'summary', text: 'safe summary' },
         { type: 'reasoning', kind: 'content', text: 'private content', signature: 'sig' },
         { type: 'reasoning', text: 'legacy reasoning' },
@@ -209,29 +211,35 @@ describe('FileRuntimeStorage', () => {
     await reopened.close();
   });
 
-  test('rejects an unknown reasoning presentation kind at the storage boundary', async () => {
+  test('rejects unknown assistant presentation metadata at the storage boundary', async () => {
     const fixture = await createJournalFixture();
-    const invalidSeed = {
-      type: 'legacy_seed',
-      sourceSessionId: 'invalid-reasoning-kind',
-      transcript: [{
-        role: 'assistant',
-        id: 'assistant-invalid-reasoning-kind',
-        timestamp: 2,
-        content: [{ type: 'reasoning', kind: 'unknown', text: 'not canonical' }],
-        model: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' },
-        stopReason: 'stop',
-        usage: { input: 1, output: 1 },
-      }],
-      usage: {
-        cumulative: { input: 1, output: 1 },
-        turns: 1,
-        contextTokens: 2,
-      },
-    } as unknown as RuntimeJournalRecord;
+    const invalidParts = [
+      { source: 'invalid-reasoning-kind', part: { type: 'reasoning', kind: 'unknown', text: 'not canonical' } },
+      { source: 'invalid-assistant-phase', part: { type: 'text', text: 'not canonical', phase: 'thinking' } },
+    ];
+    for (const { source, part } of invalidParts) {
+      const invalidSeed = {
+        type: 'legacy_seed',
+        sourceSessionId: source,
+        transcript: [{
+          role: 'assistant',
+          id: `assistant-${source}`,
+          timestamp: 2,
+          content: [part],
+          model: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' },
+          stopReason: 'stop',
+          usage: { input: 1, output: 1 },
+        }],
+        usage: {
+          cumulative: { input: 1, output: 1 },
+          turns: 1,
+          contextTokens: 2,
+        },
+      } as unknown as RuntimeJournalRecord;
 
-    await expect(fixture.journal.append([invalidSeed], { flush: true }))
-      .rejects.toBeInstanceOf(RuntimeStorageError);
+      await expect(fixture.journal.append([invalidSeed], { flush: true }))
+        .rejects.toBeInstanceOf(RuntimeStorageError);
+    }
     expect(await fixture.journal.load()).toHaveLength(1);
     await fixture.journal.releaseWriteLease();
     await fixture.workspace.releaseSupervisorLease(fixture.lease);

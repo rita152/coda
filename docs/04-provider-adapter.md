@@ -459,6 +459,17 @@ helper 中**值得照抄**的部分(抄算法不抄依赖):`#accumulateChatCompl
 - **client:**缓存键为 `(剔除末尾一个 /v1 后的 baseURL, apiKey, 排序后的 headers)`。
   只精确剔除末尾 `/v1`，避免 Anthropic SDK 追加 `/v1/messages` 时形成 `/v1/v1/messages`。
 
+本项目当前的 Chat Completions 与 Anthropic Messages wire 都没有 Responses assistant message
+`phase` 的等价字段。两者产生的普通可见文本继续保存为缺失 `phase` 的 `AssistantTextPart`；不得根据
+文本先后、`tool_calls` / `tool_use` stop reason 或是否紧邻工具调用，推断并写回 `commentary`。
+需要跨 provider 展示中间进度时，前端组合既有 Runtime 事实：message/turn 生命周期、
+`tool_call_*`、approval、`tool_execution_start/update/end`、plan、retry 与 compaction；这些是应用执行
+进度，不是 assistant commentary。Chat 的 reasoning 扩展与 Anthropic `thinking/signature` 仍只走
+`ReasoningPart` / `reasoning_*`。如果未来需要模型主动报告语义里程碑，应增加显式、无副作用的
+progress capability 及独立 provenance/event，而不是借用 thinking block 或伪造 provider phase。
+Anthropic 的公开流事件边界见其
+[streaming 文档](https://platform.claude.com/docs/en/build-with-claude/streaming)。
+
 新增其他 provider 时按以下清单实施:
 
 1. 新建隔离的 `src/providers/<adapter>/`，并在 ESLint/边界测试中把第三方 SDK 精确限定在该目录。
@@ -539,7 +550,7 @@ client.responses.create({
 |---|---|
 | `systemPrompt` | 顶层 `instructions` |
 | `UserMessage` 文本/图片 | `input` 中 user message；图片为 data URI `input_image` |
-| assistant `TextPart` | assistant input message |
+| assistant `AssistantTextPart` | assistant input message；`phase` 明确存在时原样回传 `commentary` / `final_answer`，缺失时不猜测 |
 | assistant `ReasoningPart` | 仅当 `signature` 是本 adapter 的 replay 信封时恢复为 `reasoning` item；信封保存 item id、item/summary/content kind、index 与可选 `encrypted_content` |
 | `ToolCallPart` | `{type:'function_call', call_id: part.id, name, arguments}`，优先使用 `rawArguments` |
 | `ToolResultMessage` | `{type:'function_call_output', call_id: toolCallId, output}`；文本/图片均可回传，`details` 永不出站 |
@@ -548,6 +559,10 @@ client.responses.create({
 `ToolCallPart.id` 在本 adapter 中明确等于 Responses `call_id`，不是 output item 的 `id`。
 这是本地工具结果与 `function_call_output.call_id` 配对的唯一键。adapter 只做转换，**不得执行工具**；
 工具发现、审批、调度与执行继续完全属于 agent loop。
+
+同一内部 `AssistantMessage` 可以依次包含多个 Responses message item，因此 phase 只能落在
+`AssistantTextPart`，不能放到整条内部消息上。出站转换只合并相邻且 phase 相同的文本；phase 边界、
+reasoning item 和 function call 都会先 flush 当前 assistant input message，以保持完整输出次序。
 
 首次 Responses 请求显式发送 `reasoning.summary:'auto'`，即使未指定 `reasoning.effort` 也请求摘要。
 它请求的是 API 可返回的 reasoning **摘要**，不是原始 reasoning tokens；TUI 只用 public
@@ -571,7 +586,7 @@ compaction 后的请求仍由本地 JSONL transcript 决定。未来允许把 `p
 
 1. 缺失、过期或服务端拒绝该 id 时可立即退回全量 replay；
 2. retry/恢复不得只持有 response id；
-3. 任何优化都不得改变 `Context` 的消息顺序、工具配对或 reasoning replay 内容。
+3. 任何优化都不得改变 `Context` 的消息顺序、assistant phase、工具配对或 reasoning replay 内容。
 
 ### 11.3 入站事件与并行状态机
 
@@ -580,7 +595,7 @@ append-only 分配。状态机允许多个块同时打开，尤其允许多个 f
 
 | Responses 事件 | ProviderEvent |
 |---|---|
-| `response.output_text.delta/done`、`response.refusal.delta/done` | `text_start/delta/end` |
+| message item 的 `phase` + `response.output_text.delta/done`、`response.refusal.delta/done` | `AssistantTextPart.phase` + `text_start/delta/end` |
 | `response.reasoning_summary_text.delta/done`、`response.reasoning_text.delta/done` | `reasoning_start/delta/end` |
 | `response.output_item.added` 的 `function_call` | 建立 `ToolCallPart` 并发 `tool_call_start` |
 | `response.function_call_arguments.delta/done` | 按 `item_id`/`output_index` 独立拼接并发 `tool_call_delta/end` |
@@ -591,6 +606,12 @@ arguments 分片只做字符串拼接；每个 delta 后用容错 JSON 解析刷
 reconciliation 快照：只允许补上已流式前缀的缺失后缀；若完整值与已收到前缀矛盾，编码为流内
 非重试协议错误，而不是静默改写 transcript。两个并行 call 各有独立槽位，任何时候都不能用
 “最后一个块”推断当前目标。
+
+message item 的 `phase` 按 `item_id` 记录，`output_item.added/done` 与 terminal output 都参与
+reconciliation；晚到的已知 phase 可补进最终 TextPart，冲突的已知值是协议错误。`null`、缺失和未知
+未来值按 tolerant-reader 规则省略，不擅自改成 `final_answer`。commentary 仍是公开 assistant 文本，
+不会生成 `ReasoningPart` 或 `reasoning_*`；Responses reasoning item/summary、Anthropic thinking 与
+Chat 的 reasoning 扩展也绝不能反向标成 commentary。
 
 reasoning summary/content 分别成为 `kind:'summary'` / `kind:'content'` 的 `ReasoningPart`；item-only
 replay 占位不设置 public `kind`。output item 完成时若得到
@@ -619,6 +640,7 @@ replay 占位不设置 public `kind`。output item 完成时若得到
 
 上游事实依据以 OpenAI 官方文档为准:
 [streaming Responses](https://developers.openai.com/api/docs/guides/streaming-responses)、
+[assistant phase](https://developers.openai.com/api/docs/guides/reasoning#phase-parameter)、
 [reasoning summaries](https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries)、
 [streaming function calls](https://developers.openai.com/api/docs/guides/function-calling#streaming)、
 [Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与

@@ -1102,8 +1102,13 @@ function validateUserContentPart(value: StrictJsonValue): void {
 function validateAssistantContentPart(value: StrictJsonValue): void {
   const part = requireRecord(value, 'assistant content part');
   if (part.type === 'text') {
-    assertKeys(part, ['type', 'text']);
+    assertKeys(part, ['type', 'text'], ['phase']);
     requireString(part.text, 'text');
+    if (part.phase !== undefined
+      && part.phase !== 'commentary'
+      && part.phase !== 'final_answer') {
+      throw new Error('invalid assistant text phase');
+    }
     return;
   }
   if (part.type === 'reasoning') {

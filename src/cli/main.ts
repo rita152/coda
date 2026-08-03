@@ -52,6 +52,9 @@ import {
   PENDING_PRESENTATION_THREAD_ID,
   ThreadPresentationStore,
 } from './presentation-state.js';
+import systemPromptTemplate from './system-prompt.md' with { type: 'text' };
+
+const SYSTEM_PROMPT_WORKING_DIRECTORY = '{{WORKING_DIRECTORY}}';
 
 export async function runCli(invocation: CliInvocation, version: string): Promise<number> {
   const flags: CliFlags = { ...invocation.flags };
@@ -548,12 +551,10 @@ async function readFauxScript(path: string | undefined): Promise<FauxScript> {
   return script;
 }
 
-function buildSystemPrompt(cwd: string): string {
-  return (
-    `You are coda, a terminal coding agent. Working directory: ${cwd}\n` +
-    'Use the provided tools to inspect and modify files. Read files before editing them. ' +
-    'Prefer small, verifiable steps; when done, summarize what changed in one short sentence.'
-  );
+export function buildSystemPrompt(cwd: string): string {
+  return systemPromptTemplate
+    .trimEnd()
+    .replace(SYSTEM_PROMPT_WORKING_DIRECTORY, () => cwd);
 }
 
 interface WarningHub {

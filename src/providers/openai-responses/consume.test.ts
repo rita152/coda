@@ -69,6 +69,132 @@ describe('fixture replay', () => {
     expect(final.usage).toEqual({ input: 8, output: 4 });
   });
 
+  it('assistant message phase round-trips as text metadata, never as reasoning', async () => {
+    const commentaryItem = {
+      id: 'msg_commentary',
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      phase: 'commentary',
+      content: [{ type: 'output_text', text: 'I will inspect the logs.', annotations: [] }],
+    };
+    const finalItem = {
+      id: 'msg_final',
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      phase: 'final_answer',
+      content: [{ type: 'output_text', text: 'The cache key is stale.', annotations: [] }],
+    };
+    const stream = consumeResponsesStreamForTest(ref, () => Promise.resolve(fixtureEvents([
+      {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { ...commentaryItem, status: 'in_progress', content: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        item_id: commentaryItem.id,
+        output_index: 0,
+        content_index: 0,
+        delta: 'I will inspect the logs.',
+      },
+      {
+        type: 'response.output_text.done',
+        item_id: commentaryItem.id,
+        output_index: 0,
+        content_index: 0,
+        text: 'I will inspect the logs.',
+      },
+      { type: 'response.output_item.done', output_index: 0, item: commentaryItem },
+      {
+        type: 'response.output_item.added',
+        output_index: 1,
+        item: { ...finalItem, status: 'in_progress', content: [] },
+      },
+      {
+        type: 'response.output_text.delta',
+        item_id: finalItem.id,
+        output_index: 1,
+        content_index: 0,
+        delta: 'The cache key is stale.',
+      },
+      {
+        type: 'response.output_text.done',
+        item_id: finalItem.id,
+        output_index: 1,
+        content_index: 0,
+        text: 'The cache key is stale.',
+      },
+      { type: 'response.output_item.done', output_index: 1, item: finalItem },
+      {
+        type: 'response.completed',
+        response: { output: [commentaryItem, finalItem], usage: null },
+      },
+    ])));
+
+    const { events, final } = await collectStream(stream);
+    assertValidProviderEventSequence(events);
+    expect(events.some((event) => event.type.startsWith('reasoning_'))).toBe(false);
+    expect(final.content).toEqual([
+      { type: 'text', text: 'I will inspect the logs.', phase: 'commentary' },
+      { type: 'text', text: 'The cache key is stale.', phase: 'final_answer' },
+    ]);
+    expect(convertInput({ messages: [final] })).toEqual([
+      { role: 'assistant', content: 'I will inspect the logs.', phase: 'commentary' },
+      { role: 'assistant', content: 'The cache key is stale.', phase: 'final_answer' },
+    ]);
+  });
+
+  it('late known phase is reconciled while null and unknown phases stay absent', async () => {
+    const lateItem = {
+      id: 'msg_late_phase',
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      phase: 'commentary',
+      content: [{ type: 'output_text', text: 'Late phase.', annotations: [] }],
+    };
+    const futureItem = {
+      id: 'msg_future_phase',
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      phase: 'future_phase',
+      content: [{ type: 'output_text', text: 'Future phase.', annotations: [] }],
+    };
+    const stream = consumeResponsesStreamForTest(ref, () => Promise.resolve(fixtureEvents([
+      {
+        type: 'response.output_text.delta',
+        item_id: lateItem.id,
+        output_index: 0,
+        content_index: 0,
+        delta: 'Late phase.',
+      },
+      {
+        type: 'response.output_text.done',
+        item_id: lateItem.id,
+        output_index: 0,
+        content_index: 0,
+        text: 'Late phase.',
+      },
+      { type: 'response.output_item.done', output_index: 0, item: lateItem },
+      { type: 'response.output_item.added', output_index: 1, item: futureItem },
+      { type: 'response.output_item.done', output_index: 1, item: futureItem },
+      {
+        type: 'response.completed',
+        response: { output: [lateItem, futureItem], usage: null },
+      },
+    ])));
+
+    const { events, final } = await collectStream(stream);
+    assertValidProviderEventSequence(events);
+    expect(final.content).toEqual([
+      { type: 'text', text: 'Late phase.', phase: 'commentary' },
+      { type: 'text', text: 'Future phase.' },
+    ]);
+  });
+
   it('reasoning summary 带可 replay 的私有 signature，usage.reasoning 映射', async () => {
     const { events, final } = await replay('reasoning');
     assertValidProviderEventSequence(events);

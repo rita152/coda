@@ -11,6 +11,7 @@ import {
   isExternalOpId,
   isThreadId,
   legacyWorkspaceId,
+  PROTOCOL_VERSION,
   runtimeOpPayloadHash,
   strictJsonSnapshot,
 } from '../protocol/index.js';
@@ -919,7 +920,7 @@ class Supervisor implements RuntimePort {
       const meta = snapshot<ThreadMetaRecord>({
       type: 'thread_meta',
       version: 2,
-      protocolVersion: '1.0.0',
+      protocolVersion: PROTOCOL_VERSION,
       workspaceId: this.workspaceId,
       threadId: op.threadId,
       ...(op.parentThreadId !== undefined && { parentThreadId: op.parentThreadId }),
@@ -1169,7 +1170,7 @@ class Supervisor implements RuntimePort {
       const meta = snapshot<ThreadMetaRecord>({
         type: 'thread_meta',
         version: 2,
-        protocolVersion: '1.0.0',
+        protocolVersion: PROTOCOL_VERSION,
         workspaceId: this.workspaceId,
         threadId: op.threadId,
         createdByOpId: op.opId,
@@ -1321,7 +1322,7 @@ class Supervisor implements RuntimePort {
       const meta = snapshot<ThreadMetaRecord>({
         type: 'thread_meta',
         version: 2,
-        protocolVersion: '1.0.0',
+        protocolVersion: PROTOCOL_VERSION,
         workspaceId: this.workspaceId,
         threadId: op.threadId,
         createdByOpId: op.opId,

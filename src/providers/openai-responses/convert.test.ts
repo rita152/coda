@@ -117,6 +117,31 @@ describe('convertInput', () => {
       },
     ]);
   });
+
+  it('assistant 文本按 phase 边界分组并原样回传', () => {
+    const context: Context = {
+      messages: [{
+        role: 'assistant',
+        id: 'a-phases',
+        timestamp: 1,
+        model: model.ref,
+        stopReason: 'stop',
+        usage: { input: 1, output: 1 },
+        content: [
+          { type: 'text', text: 'Inspecting ', phase: 'commentary' },
+          { type: 'text', text: 'the logs.', phase: 'commentary' },
+          { type: 'text', text: 'Root cause found.', phase: 'final_answer' },
+          { type: 'text', text: ' Legacy text stays unlabeled.' },
+        ],
+      }],
+    };
+
+    expect(convertInput(context)).toEqual([
+      { role: 'assistant', content: 'Inspecting the logs.', phase: 'commentary' },
+      { role: 'assistant', content: 'Root cause found.', phase: 'final_answer' },
+      { role: 'assistant', content: ' Legacy text stays unlabeled.' },
+    ]);
+  });
 });
 
 describe('buildParams', () => {

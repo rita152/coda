@@ -616,7 +616,7 @@ mutable import/resume 则要求 cwd 在**当前 host**上是 non-empty、无 NUL
 ### 3.2 v1 格式示例
 
 ```jsonl
-{"type":"meta","version":1,"protocolVersion":"1.0.0","id":"20260726-153012-a1b2","createdAt":1753515012000,"cwd":"/Users/zp/proj","model":{"provider":"openai","api":"openai-chat","model":"gpt-5.2"}}
+{"type":"meta","version":1,"protocolVersion":"1.1.0","id":"20260726-153012-a1b2","createdAt":1753515012000,"cwd":"/Users/zp/proj","model":{"provider":"openai","api":"openai-chat","model":"gpt-5.2"}}
 {"type":"message","message":{"role":"user","id":"msg_01","timestamp":1753515013000,"source":"prompt","content":[{"type":"text","text":"把 utils.ts 里的重复代码抽成函数"}]}}
 {"type":"message","message":{"role":"assistant","id":"msg_02","timestamp":1753515016000,"model":{"provider":"openai","api":"openai-chat","model":"gpt-5.2"},"stopReason":"tool_calls","usage":{"input":2310,"output":95},"content":[{"type":"text","text":"先看一下文件。"},{"type":"tool_call","id":"call_a","name":"read","arguments":{"path":"src/utils.ts"}}]}}
 {"type":"message","message":{"role":"tool_result","id":"msg_03","timestamp":1753515016400,"toolCallId":"call_a","toolName":"read","isError":false,"content":[{"type":"text","text":"1: export function ..."}]}}

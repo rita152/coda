@@ -3,9 +3,10 @@
 
 import type {
   AssistantMessage,
+  AssistantMessagePhase,
+  AssistantTextPart,
   ModelRef,
   ReasoningPart,
-  TextPart,
   ToolCallPart,
   Usage,
 } from '../../protocol/index.js';
@@ -17,7 +18,7 @@ import { ResponsesWireError } from './wire-error.js';
 interface TextSlot {
   kind: 'text';
   contentIndex: number;
-  part: TextPart;
+  part: AssistantTextPart;
   closed: boolean;
 }
 
@@ -46,6 +47,7 @@ type BlockSlot = TextSlot | ReasoningSlot | ToolSlot;
 export interface ResponsesStreamState {
   partial: AssistantMessage;
   textSlots: Map<string, TextSlot>;
+  messagePhases: Map<string, AssistantMessagePhase>;
   reasoningSlots: Map<string, ReasoningSlot>;
   toolSlotsByItem: Map<string, ToolSlot>;
   toolSlotsByOutput: Map<number, ToolSlot>;
@@ -64,6 +66,7 @@ export function newResponsesStreamState(ref: ModelRef): ResponsesStreamState {
       usage: { input: 0, output: 0 },
     },
     textSlots: new Map(),
+    messagePhases: new Map(),
     reasoningSlots: new Map(),
     toolSlotsByItem: new Map(),
     toolSlotsByOutput: new Map(),
@@ -181,19 +184,23 @@ function syncContentPart(
 ): void {
   const part = asRecord(wire['part']);
   const type = part['type'];
+  const itemId = stringOr(wire['item_id'], '');
+  const phase = state.messagePhases.get(itemId);
   if (type === 'output_text') {
     syncText(
-      textKey('output_text', stringOr(wire['item_id'], ''), numberOr(wire['content_index'], 0)),
+      textKey('output_text', itemId, numberOr(wire['content_index'], 0)),
       stringOr(part['text'], ''),
       close,
+      phase,
       state,
       stream,
     );
   } else if (type === 'refusal') {
     syncText(
-      textKey('refusal', stringOr(wire['item_id'], ''), numberOr(wire['content_index'], 0)),
+      textKey('refusal', itemId, numberOr(wire['content_index'], 0)),
       stringOr(part['refusal'], ''),
       close,
+      phase,
       state,
       stream,
     );
@@ -219,8 +226,14 @@ function appendTextEvent(
 ): void {
   const delta = wire['delta'];
   if (typeof delta !== 'string' || delta.length === 0) return;
-  const key = textKey(kind, stringOr(wire['item_id'], ''), numberOr(wire['content_index'], 0));
-  appendText(ensureTextSlot(key, state, stream), delta, state, stream);
+  const itemId = stringOr(wire['item_id'], '');
+  const key = textKey(kind, itemId, numberOr(wire['content_index'], 0));
+  appendText(
+    ensureTextSlot(key, state.messagePhases.get(itemId), state, stream),
+    delta,
+    state,
+    stream,
+  );
 }
 
 function finishTextEvent(
@@ -230,10 +243,12 @@ function finishTextEvent(
   state: ResponsesStreamState,
   stream: ProviderEventStream,
 ): void {
+  const itemId = stringOr(wire['item_id'], '');
   syncText(
-    textKey(kind, stringOr(wire['item_id'], ''), numberOr(wire['content_index'], 0)),
+    textKey(kind, itemId, numberOr(wire['content_index'], 0)),
     stringOr(wire[valueField], ''),
     true,
+    state.messagePhases.get(itemId),
     state,
     stream,
   );
@@ -243,28 +258,45 @@ function syncText(
   key: string,
   complete: string,
   close: boolean,
+  phase: AssistantMessagePhase | undefined,
   state: ResponsesStreamState,
   stream: ProviderEventStream,
 ): void {
-  const slot = ensureTextSlot(key, state, stream);
+  const slot = ensureTextSlot(key, phase, state, stream);
   appendMissing(slot, complete, state, stream);
   if (close) closeBlock(slot, state, stream);
 }
 
 function ensureTextSlot(
   key: string,
+  phase: AssistantMessagePhase | undefined,
   state: ResponsesStreamState,
   stream: ProviderEventStream,
 ): TextSlot {
   let slot = state.textSlots.get(key);
-  if (slot !== undefined) return slot;
+  if (slot !== undefined) {
+    reconcileTextPhase(slot, phase);
+    return slot;
+  }
   const contentIndex = state.partial.content.length;
-  const part: TextPart = { type: 'text', text: '' };
+  const part: AssistantTextPart = {
+    type: 'text',
+    text: '',
+    ...(phase !== undefined && { phase }),
+  };
   slot = { kind: 'text', contentIndex, part, closed: false };
   state.partial.content.push(part);
   state.textSlots.set(key, slot);
   stream.push({ type: 'text_start', contentIndex, partial: state.partial });
   return slot;
+}
+
+function reconcileTextPhase(slot: TextSlot, phase: AssistantMessagePhase | undefined): void {
+  if (phase === undefined || slot.part.phase === phase) return;
+  if (slot.part.phase !== undefined) {
+    throw new ResponsesWireError('assistant message phase changed during streaming');
+  }
+  slot.part.phase = phase;
 }
 
 function appendText(
@@ -506,6 +538,7 @@ function syncOutputItem(
   const itemType = item['type'];
   const itemId = stringOr(item['id'], `output_${outputIndex}`);
   if (itemType === 'message') {
+    const phase = recordMessagePhase(itemId, item['phase'], state);
     const content = Array.isArray(item['content']) ? item['content'] : [];
     for (let i = 0; i < content.length; i++) {
       const part = asRecord(content[i]);
@@ -514,6 +547,7 @@ function syncOutputItem(
           textKey('output_text', itemId, i),
           stringOr(part['text'], ''),
           close,
+          phase,
           state,
           stream,
         );
@@ -522,6 +556,7 @@ function syncOutputItem(
           textKey('refusal', itemId, i),
           stringOr(part['refusal'], ''),
           close,
+          phase,
           state,
           stream,
         );
@@ -541,6 +576,23 @@ function syncOutputItem(
     syncToolArguments(slot, stringOr(item['arguments'], ''), state, stream);
     if (close) closeBlock(slot, state, stream);
   }
+}
+
+function recordMessagePhase(
+  itemId: string,
+  rawPhase: unknown,
+  state: ResponsesStreamState,
+): AssistantMessagePhase | undefined {
+  const phase = rawPhase === 'commentary' || rawPhase === 'final_answer'
+    ? rawPhase
+    : undefined;
+  const current = state.messagePhases.get(itemId);
+  if (phase === undefined) return current;
+  if (current !== undefined && current !== phase) {
+    throw new ResponsesWireError('assistant message phase changed during streaming');
+  }
+  state.messagePhases.set(itemId, phase);
+  return phase;
 }
 
 function syncReasoningItem(

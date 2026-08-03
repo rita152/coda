@@ -28,7 +28,7 @@ describe('envelope headless transport', () => {
     const hello = await output.waitFor((frame) => frame.type === 'protocol');
     expect(hello).toEqual({
       type: 'protocol',
-      protocolVersion: '1.0.0',
+      protocolVersion: '1.1.0',
       eventFormat: 'envelope',
       workspaceId: WORKSPACE_ID,
     });

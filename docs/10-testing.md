@@ -689,6 +689,10 @@ HTTP 400 且结构化 `param` 为 `reasoning` / `reasoning.summary` 才省略 re
 第二次失败不发第三次。SSE 流内 error 已经取得流，只走既有唯一终态，绝不重新生成。
 这条断言保证 fixture replay、恢复与 retry 始终由本地 transcript 驱动。
 
+内联事件另覆盖 assistant message `phase`：`commentary` / `final_answer` 按文本 part 保真回放，
+相邻但 phase 不同的文本不得合并；迟到的合法 phase 可补写最终 part，空值与未知未来值按未标注处理。
+断言全过程仍只产生 `text_*`，绝不把 commentary 映射为 `reasoning_*`。
+
 ### 4.5 Anthropic Messages 录制 fixture
 
 Anthropic adapter 已经是当前实现，不再是“新增 provider”的假想例。
@@ -1113,7 +1117,7 @@ EventHub observer-isolation 既有测试继续证明慢 frontend/切换 attachme
 - [ ] M1:L1 全绿;faux provider 通过「事件语法自检」用例集(每种 FauxTurn 形态产出的事件序列合法、铁律成立)。
 - [ ] M2:§4.2 全部 12 个 synthetic canonical fixture 入库且断言通过，额外两个
   recorded Kimi fixture 保持回归；错误注入与 abort 映射通过；`record:fixture`/`smoke` 仅手动可用。
-- [ ] OpenAI Responses:§4.4 九个生成式 fixture、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。
+- [ ] OpenAI Responses:§4.4 九个生成式 fixture、assistant message phase、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。
 - [ ] Anthropic Messages:§4.5 的 text/tool/thinking 三个录制 fixture、usage/stop/error/abort 注入与出站
   role/tool_result/thinking 转换全部通过；`record:anthropic`/`smoke:anthropic` 仅手动可用。
 - [ ] Provider 登录/模型目录:§4.6 生成式 fixture、OAuth 占位、OpenCode 混合 mapping、多个 Custom、刷新失败、恢复/切换/logout 与 TUI 密钥不泄漏回归全部通过。

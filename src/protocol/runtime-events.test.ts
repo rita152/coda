@@ -415,6 +415,34 @@ describe('EventEnvelope validation', () => {
     }));
   });
 
+  test('assistant text accepts only commentary/final phases without widening user text', () => {
+    for (const phase of ['commentary', 'final_answer'] as const) {
+      const partial = assistant([{ type: 'text', text: phase, phase }]);
+      validateEventEnvelope(messageUpdate({
+        type: 'text_end',
+        contentIndex: 0,
+        content: phase,
+        partial,
+      }));
+    }
+
+    expectInvalid(messageUpdate({
+      type: 'text_end',
+      contentIndex: 0,
+      content: 'bad',
+      partial: assistant([{ type: 'text', text: 'bad', phase: 'thinking' }]),
+    }));
+    expectInvalid(envelope({
+      type: 'message_start',
+      message: {
+        role: 'user',
+        id: 'user-with-phase',
+        timestamp: 1,
+        content: [{ type: 'text', text: 'not assistant commentary', phase: 'commentary' }],
+      },
+    }, { runId: RUN, turnId: TURN }));
+  });
+
   test('rejects explicit undefined, unknown envelope fields, and ill-formed identities', () => {
     expectInvalid(envelope(
       { type: 'agent_start', reason: 'prompt' },

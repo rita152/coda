@@ -43,7 +43,7 @@ test('case 1: pure text conversation — protocol header, event order, exit 0', 
 
   // 启动首行:{"type":"protocol","protocolVersion":"…"} 旁路事件(docs/09 §6.3)
   const header = await proc.waitForEvent((e) => e.type === 'protocol', 'protocol header');
-  expect(header).toEqual({ type: 'protocol', protocolVersion: '1.0.0' });
+  expect(header).toEqual({ type: 'protocol', protocolVersion: '1.1.0' });
 
   proc.send({ type: 'prompt', text: 'say hello' });
   const end = await proc.waitForEvent((e) => e.type === 'agent_end', 'agent_end');
