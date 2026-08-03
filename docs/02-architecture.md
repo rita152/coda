@@ -9,7 +9,11 @@
 
 整个架构由三条原则推导而来,后文所有结构都是这三条的机械展开:
 
-1. **协议隔离(需求 1)**:`openai` 包及其一切类型只存在于 `src/providers/openai-chat/` 与 `src/providers/openai-responses/` 内；两个 adapter 也不得互相依赖。agent 核心只认识内部协议(`AgentMessage` / `ProviderEvent` / `StreamFn`)。这不是口头约定,而是 ESLint 规则——违规直接 lint 失败(见第 3 节)。
+1. **协议隔离(需求 1)**:生产 `src/` 中，`openai` 包及其类型只存在于
+   `src/providers/openai-chat/` / `src/providers/openai-responses/`，`@anthropic-ai/sdk` 只存在于
+   `src/providers/anthropic-messages/`；三个 adapter 不得互相依赖。手动 recorder 是 `scripts/` 下带
+   局部 lint 说明的非运行时例外。agent 核心只认识内部协议(`AgentMessage` / `ProviderEvent` /
+   `StreamFn`)。这不是口头约定，而是 ESLint 规则——违规直接 lint 失败(见第 3 节)。
 2. **事件驱动、单向可观察流**:provider/agent/runtime 的可观察输出使用 JSON-safe discriminated
    union（`ProviderEvent`、`AgentEvent`、`RuntimeEvent`）；请求/回执、查询、AbortSignal 与 executor
    回调走各自 typed port，不伪装成事件。UI 不直接读 Agent 内部状态，只消费 RuntimePort 快照与
@@ -33,7 +37,8 @@ src/
     faux/          # 脚本化测试 provider
   integrations/
     legacy-coding-tools/ # 八个内置工具的显式 capability bindings/analyzer
-  agent/           # legacy Agent facade + runtime snapshot engine、runLoop、队列、工具执行调度
+    legacy-session-runtime/ # Runtime → legacy Session/Agent 的兼容 driver factory
+  agent/           # Agent facade + runLoop；可选 runtimeTurnProvider 接入 turn snapshot
   tools/           # read/ls/grep/glob/bash/edit/write/plan + 框架
   session/         # ThreadRuntime、转录 repository、retry/compaction、事件提交与广播、legacy Session
   runtime/         # Supervisor、RuntimePort 与无副作用 public entry
@@ -41,22 +46,23 @@ src/
   shared/          # truncate、fs 工具、进程树 kill 等无状态工具函数
 ```
 
-逐目录职责与建议文件划分:
+逐目录职责与当前主要文件：
 
-| 目录 | 职责 | 建议文件 | 明确不做的事 |
+| 目录 | 职责 | 当前主要文件 | 明确不做的事 |
 |---|---|---|---|
 | `protocol/` | 定义全项目通用语言:身份、Runtime op/receipt/event envelope、消息模型、Provider 流事件、Agent 事件、`EventStream` 泛型实现。是唯一"所有人都可以依赖"的目录 | `identity.ts`、`runtime-ops.ts`、`runtime-events.ts`、`messages.ts`、`provider.ts`、`agent-events.ts`、`event-stream.ts` | 不 import 任何 npm 运行时依赖、任何其他 src 目录;不包含业务逻辑 |
-| `providers/openai-chat/` | Chat Completions adapter:出站把 `Context` 翻译成 wire 消息,入站把 SSE chunk 状态机化为 `ProviderEvent`;`CompatFlags` 方言处理 | `index.ts`(导出 StreamFn)、`convert.ts`(出站转换)、`stream.ts`(入站状态机)、`compat.ts`(方言推断) | 不感知 agent 存在;不处理重试策略(整轮重发在 session 层);不 throw(铁律见 [03](./03-internal-protocol.md)) |
-| `providers/openai-responses/` | Responses adapter:把完整本地 transcript 翻译成 `instructions/input/tools`，把 Responses item/delta/terminal 事件翻译成 `ProviderEvent` | `index.ts`、`convert.ts`、`consume.ts`、`errors.ts`、`reasoning.ts` | 不执行工具;不依赖服务端 response id 维持正确性;不访问 agent/session/队列;不与 sibling adapter 共享 wire 类型 |
+| `providers/openai-chat/` | Chat Completions adapter:出站把 `Context` 翻译成 wire 消息,入站把 SSE chunk 状态机化为 `ProviderEvent`;`CompatFlags` 方言处理 | `index.ts`(StreamFn/传输)、`convert.ts`(出站)、`consume.ts`(入站状态机)、`compat.ts`、`errors.ts` | 不感知 agent 存在;不处理整轮重试策略;不 throw(铁律见 [03](./03-internal-protocol.md)) |
+| `providers/openai-responses/` | Responses adapter:把完整本地 transcript 翻译成 `instructions/input/tools`，把 Responses item/delta/terminal 事件翻译成 `ProviderEvent` | `index.ts`、`convert.ts`、`consume.ts`、`request.ts`、`reasoning.ts`、`errors.ts`、`wire-error.ts` | 不执行工具;不依赖服务端 response id 维持正确性;不访问 agent/session/队列;不与 sibling adapter 共享 wire 类型 |
 | `providers/anthropic-messages/` | Anthropic Messages adapter | `index.ts`、`convert.ts`、`consume.ts`、`errors.ts`、`compat.ts` | 与其它 provider 隔离；SDK 类型不外泄 |
 | `providers/faux/` | 脚本化回放 `ProviderEvent` 的测试 provider,让 loop/steering/CLI 全离线可测 | `index.ts` | 不依赖网络、不依赖 openai 包 |
-| `agent/` | exported legacy `Agent` facade 与 runtime snapshot engine、runLoop 双层循环、steering/follow-up 队列、工具执行三阶段调度、出站前 transform 层 | `legacy-agent.ts`、`runtime-agent.ts`、`run-loop.ts`、`queues.ts`、`tool-executor.ts`、`transform.ts` | 不 import 任何 provider；runtime engine 不 import tools，legacy facade 仅 type-import `tools/types.ts`；不做持久化 |
-| `tools/` | 工具框架(`ToolDefinition`、统一截断 post-hook)+ 八个内置工具 | `types.ts`(框架类型)、`framework.ts`、`read.ts` 等每工具一文件、`index.ts`(`createCodingTools()`) | 不感知 agent loop;不直接发 AgentEvent(经 `ToolContext.onUpdate` 回调) |
-| `capabilities/` | `CapabilityRegistry`、`ToolCatalogSnapshot`、`PreparedInvocation`、`ProviderAdapterRegistry`、`PromptAssembler`、`PolicyEngine` | `registry.ts`、`snapshot.ts`、`prepared-invocation.ts`、`provider-registry.ts`、`prompt-assembler.ts`、`policy-engine.ts` | 不 import 具体实现；仅 legacy-tool-adapter 可窄依赖 `tools/types.ts`，执行期不回查可变 registry |
-| `integrations/legacy-coding-tools/` | 八个内置 `LegacyToolCapabilityBinding` 与版本化 bash analyzer | `index.ts`、`resource-resolver.ts` | 只依赖 capabilities public types 与具体 tools；不持有 thread/runtime 状态 |
+| `agent/` | 同一个 `Agent`/runLoop 同时承载 static compatibility 与可选 `runtimeTurnProvider` seam；实现双队列、工具调度和出站 transform | `agent.ts`、`loop.ts`、`queue.ts`、`tool-result.ts`、`tool-schemas.ts`、`transform.ts`、`approval.ts` | 不 import provider 或具体工具实现；只可 type-import `tools/types.ts`；不做持久化 |
+| `tools/` | 工具框架(`ToolDefinition`、统一截断 post-hook)+ 八个内置工具 | `types.ts`、`index.ts`、`read.ts` / `ls.ts` / `glob.ts` / `grep.ts` / `bash.ts` / `edit.ts` / `write.ts` / `plan.ts` | 不感知 agent loop;不直接发 AgentEvent(经 `ToolContext.onUpdate` 回调) |
+| `capabilities/` | `CapabilityRegistry`、`ToolCatalogSnapshot`/`PreparedInvocation` 类型、`ProviderAdapterRegistry`、`PromptAssembler`、`PolicyEngine` | `capability-registry.ts`、`types.ts`、`legacy-tool-adapter.ts`、`provider-registry.ts`、`prompt-assembler.ts`、`policy-engine.ts`、`registration-digest.ts` | 不 import 具体实现；仅 generic legacy adapter 窄依赖 `tools/types.ts`，执行期不回查可变 registry |
+| `integrations/legacy-coding-tools/` | 八个内置 `LegacyToolCapabilityBinding` 与版本化 analyzer/resource resolver | `index.ts`、`bash-analyze.ts`、`resource-resolvers.ts` | 依赖 capabilities 契约与具体 tools；不持有 thread/runtime 状态 |
+| `integrations/legacy-session-runtime/` | 把 `ThreadDriverFactory` 适配到 legacy Session/Agent execution | `index.ts` | 只在 composition 边缘桥接 runtime/session；不得成为新的事实源 |
 | `session/` | 每线程执行与持久化：`ThreadRuntime`、`TranscriptRepository`、`RetryCoordinator`、`CompactionCoordinator`、`EventCommitter`；另提供由 Runtime 每 workspace 实例化一个的 `EventHub`；保留 legacy `Session` facade | `thread-runtime.ts`、`transcript-repository.ts`、`retry-coordinator.ts`、`compaction-coordinator.ts`、`event-committer.ts`、`event-hub.ts`、`session.ts` | ThreadRuntime 不持有全局 thread map；EventHub 只持 subscription/replay routing；普通 observer 不背压 Agent；不渲染 |
-| `runtime/` | workspace 级 Supervisor、thread 生命周期/op 路由、`RuntimePort`、public runtime 工厂 | `supervisor.ts`、`runtime-port.ts`、`index.ts` | 不执行 turn/工具，不读 CLI 环境，不导入 TUI 或具体 provider SDK |
-| `cli/` | 参数/配置与前端适配：把 TUI 按键或 NDJSON 映射到 RuntimePort，把 envelope 或 legacy 投影渲染到 OpenTUI、one-shot human renderer 或 headless | `main.ts`、`project-rules.ts`、`provider-commands.ts`、`interactive-runtime.ts`、`tui.ts`、`renderer.ts`、`headless.ts` | 不拥有 run/retry/compaction/权限状态机；秘密不进入 renderer/event/transcript |
+| `runtime/` | workspace 级 Supervisor、thread 生命周期/op 路由、`RuntimePort`、storage 与 public runtime 工厂 | `supervisor.ts`、`ports.ts`、`event-stream.ts`、`file-storage.ts`、`memory-storage.ts`、`index.ts` | 不执行 turn/工具，不读 CLI 环境，不导入 TUI 或具体 provider SDK |
+| `cli/` | 参数/configuration/composition 与前端适配：把 TUI、one-shot 或 NDJSON 映射到 RuntimePort 并渲染投影 | `bootstrap.ts`、`main.ts`、`command-catalog.ts`、`runtime-frontend.ts`、`tui.ts`、`renderer.ts`、`one-shot-output.ts`、`headless.ts`、provider/project-rule 模块 | 不拥有 run/retry/compaction/权限状态机；秘密不进入 renderer/event/transcript |
 | `shared/` | 底层纯函数、基础 port 与无上层依赖的局部状态容器：截断、路径规范化、`FileTrackerPort/FileTracker`、`killProcessTree` 等 | `truncate.ts`、`fs-path.ts`、`file-tracker.ts`、`kill-process-tree.ts` | 不 import 其他 src 目录；状态实例不得跨 thread 共享 |
 
 两个容易放错位置的东西:
@@ -80,6 +86,7 @@ flowchart BT
   tools["src/tools\n(zod、@vscode/ripgrep)"]
   capabilities["src/capabilities\nregistry/snapshot/prompt/policy"]
   legacy_tools["src/integrations/legacy-coding-tools\n显式 builtin bindings"]
+  legacy_session["src/integrations/legacy-session-runtime\nRuntime ↔ legacy Session/Agent bridge"]
   session["src/session"]
   runtime["src/runtime\nSupervisor + RuntimePort"]
   cli["src/cli\n组装根 + OpenTUI"]
@@ -98,6 +105,10 @@ flowchart BT
   capabilities -. "仅 legacy-tool-adapter → tools/types.ts" .-> tools
   legacy_tools --> capabilities
   legacy_tools --> tools
+  legacy_session --> runtime
+  legacy_session --> session
+  legacy_session --> agent
+  legacy_session --> protocol
   agent --> capabilities
   session --> shared
   session --> agent
@@ -114,23 +125,26 @@ flowchart BT
   cli --> faux
   cli --> tools
   cli --> legacy_tools
-  agent -. "阶段 0–2 legacy：仅 tools/types.ts 类型" .-> tools
+  cli --> legacy_session
+  agent -. "当前兼容 seam：仅 tools/types.ts 的 type-only 依赖" .-> tools
 ```
 
-文字版目标规则:`protocol/shared` 是叶子；`providers/*` 与 `tools/*` 保持隔离；
+文字版当前规则:`protocol/shared` 是叶子；`providers/*` 与 `tools/*` 保持隔离；
 `capabilities` 定义注册表/snapshot/policy 而不认识具体实现；认识八个具体工具的显式 binding 只在
-`integrations/legacy-coding-tools`；`agent` 消费 snapshot 与 provider port；
+`integrations/legacy-coding-tools`；`integrations/legacy-session-runtime` 只在 composition 边缘把
+Runtime driver port 接到 legacy Session/Agent；`agent` 消费 snapshot 与 provider port；
 `session` 组装单 thread；`runtime` 组装 Supervisor；`cli` 的运行期命令与事件路径只经过
 RuntimePort。图中 CLI 到 capability/provider/tool 的边只允许 composition-root 注册内置实现，不允许
-CLI 持有执行状态或在运行中绕过 RuntimePort 直接调用 Session/Agent。阶段 1–3 迁移期间的临时旧
-边界由兼容矩阵管理，最终 ESLint zone 必须机械化上述方向。补充两条细化:
+CLI 持有执行状态或在运行中绕过 RuntimePort 直接调用 Session/Agent。static `ToolDefinition`、provider
+dispatcher 与 legacy Session driver 是 [12 §11](./12-supervisor-runtime.md) 明确保留的兼容边，不是
+尚未完成的迁移占位。补充两条细化:
 
 - `shared` 与 `protocol` 同为叶子层,只被依赖、不依赖任何 src 目录。`protocol` 不依赖 `shared`(保持可独立抽包发布)。
-- **legacy facade 的永久窄例外**：exported `Agent`/`AgentConfig.tools: ToolDefinition[]` 是兼容面，阶段 3
-  仍由 `agent/legacy-agent.ts`（迁移时可先是现有 `agent.ts`）唯一 type-import `tools/types.ts`；具体工具
-  实现始终禁止。ThreadRuntime 使用的 `agent/runtime-agent.ts` 只消费 capabilities snapshot/
-  `PreparedInvocation`，不依赖 tools。阶段 3 删除的是整个 `agent/ → tools/types.ts` 的宽白名单，改成
-  精确到 legacy facade 文件的例外，不能为去掉依赖而破坏 exported Agent API。
+- **Agent 的当前兼容例外**：仓库没有单独的 `legacy-agent.ts` / `runtime-agent.ts`。`agent.ts` 与
+  `loop.ts` 通过可选 `runtimeTurnProvider` 在同一执行循环中接入 registry snapshot；`agent.ts`、
+  `loop.ts`、`tool-result.ts`、`tool-schemas.ts` 仍为 static compatibility type-import
+  `tools/types.ts`。ESLint 只放行这一类型文件，具体工具实现始终禁止。若未来进一步拆分此 seam，必须
+  同步改本节、`eslint.config.mjs` 与 `tests/boundaries.test.ts`，不能把尚未发生的拆分写成现状。
 
 ### 3.2 为什么必须是机械保障
 
@@ -144,84 +158,46 @@ CLI 持有执行状态或在运行中绕过 RuntimePort 直接调用 Session/Age
 
 两条规则配合:`import/no-restricted-paths`(eslint-plugin-import)管**项目内目录间**的依赖方向;`no-restricted-imports`(ESLint 核心规则)管**npm 包**级别的封锁——`openai` 是包名不是路径,前者管不到它。
 
-```js
-// eslint.config.mjs(flat config,M0 里程碑落地)
-import tseslint from 'typescript-eslint';
-import importPlugin from 'eslint-plugin-import';
+**权威配置只有仓库根的 `eslint.config.mjs`；不要从文档复制一份会随实现漂移的完整 zone 数组。**
+设计允许方向与当前机械覆盖必须分开看；现有 zone 不是所有目录的完整 allowlist：
 
-export default tseslint.config(
-  // ---- 规则 A:目录间依赖方向(zone 的语义:target 内的文件不得 import from 内的模块)----
-  {
-    files: ['src/**/*.ts'],
-    plugins: { import: importPlugin },
-    rules: {
-      'import/no-restricted-paths': ['error', {
-        zones: [
-          // protocol、shared 是叶子:不得 import src 下任何其他目录
-          { target: './src/protocol', from: './src', except: ['./protocol'] },
-          { target: './src/shared',   from: './src', except: ['./shared'] },
-          // providers 只向下看 protocol/shared
-          { target: './src/providers', from: './src/agent' },
-          { target: './src/providers', from: './src/tools' },
-          { target: './src/providers', from: './src/session' },
-          { target: './src/providers', from: './src/cli' },
-          // agent 不认识 providers/session/cli;对 tools 仅放行框架类型文件
-          { target: './src/agent', from: './src/providers' },
-          { target: './src/agent', from: './src/session' },
-          { target: './src/agent', from: './src/cli' },
-          { target: './src/agent', from: './src/tools', except: ['./types.ts'] },
-          // tools 不认识上层与 providers
-          { target: './src/tools', from: './src/providers' },
-          { target: './src/tools', from: './src/agent' },
-          { target: './src/tools', from: './src/session' },
-          { target: './src/tools', from: './src/cli' },
-          // session 只依赖 protocol/shared/agent,不得触碰 runtime/providers/tools/cli
-          { target: './src/session', from: './src/runtime' },
-          { target: './src/session', from: './src/cli' },
-          { target: './src/session', from: './src/providers' },
-          { target: './src/session', from: './src/tools' },
-          // Phase 2:runtime 组装 session 的每线程协作者；不得直接依赖 Agent/provider/tool/CLI
-          {
-            target: './src/runtime',
-            from: './src',
-            except: ['./runtime', './protocol', './shared', './session'],
-          },
-          // provider 之间互相隔离(跨 provider import 是设计异味)
-          { target: './src/providers/openai-chat', from: './src/providers/faux' },
-          { target: './src/providers/faux', from: './src/providers/openai-chat' },
-          // 测试只允许用 faux provider(防止测试悄悄变在线测试)
-          { target: './tests', from: './src/providers/openai-chat' },
-        ],
-      }],
-    },
-  },
-  // ---- 规则 B:openai 包只允许出现在两个 OpenAI adapter 内(机械保障)----
-  {
-    files: ['src/**/*.ts'],
-    ignores: ['src/providers/openai-chat/**', 'src/providers/openai-responses/**'],
-    rules: {
-      'no-restricted-imports': ['error', {
-        patterns: [{
-          group: ['openai', 'openai/*'],
-          message: 'openai SDK 只允许在 OpenAI adapter 目录内使用(协议隔离)',
-        }],
-      }],
-    },
-  },
-);
-```
+| target | 设计允许的 `src/` 依赖 / 例外 | 当前机械覆盖 |
+|---|---|---|
+| `protocol` | 仅自身相对模块；生产文件零 bare import | 完整 allowlist zone + bare-import 规则 + 正反探针 |
+| `shared` | 仅自身 | 完整 allowlist zone |
+| `capabilities` | `protocol`、`shared`；generic legacy adapter 可到 `tools/types.ts` | 完整 allowlist zone + 正反探针 |
+| `integrations/legacy-coding-tools` | `capabilities`、`tools`、`protocol`、`shared` | 完整 allowlist zone + 正反探针 |
+| `integrations/legacy-session-runtime` | `runtime`、`session`、`agent`、`protocol`；core 不得反向依赖它 | 无专属 internal-path zone/探针；当前由本契约、review 与全局 SDK 封锁约束 |
+| `agent` | `protocol`、`shared`、`capabilities`；仅 `tools/types.ts` type seam | 已禁 provider/session/CLI/具体 tools 并有探针；尚未机械禁止 runtime/integrations |
+| `tools` | `protocol`、`shared` | 已禁 provider/agent/session/CLI/capabilities/legacy-coding-tools；尚未机械禁止 runtime/legacy-session-runtime |
+| `session` | `protocol`、`shared`、`agent`、`capabilities` | 已禁 runtime/CLI/provider/tools 并有探针；尚未机械禁止 integrations |
+| `runtime` | `protocol`、`shared`、`session`、`capabilities` | 完整 allowlist zone + dynamic/type-import 规则 + 正反探针 |
+| `providers/*` | `protocol`、`shared` | 已禁 agent/tools/session/CLI 与 sibling adapter；尚未机械禁止 runtime/capabilities/integrations |
+| `cli` | composition root 可组装 runtime、integration、provider、tool 与 capability | internal path 不设 allowlist；仍受全局 SDK 白名单约束 |
+| `tests/` | core 测试只使用 faux；adapter fixture 测试与实现共置 | 三个真实 adapter 对 `tests/` 的 import 已禁并有探针 |
 
-上述代码块为示意;**权威版本是仓库根的 `eslint.config.mjs`**(M1 起随实现演进),它在规则 A/B 之外还包含:
+上表“尚未机械禁止”的方向是已知 boundary-hardening gap，不代表设计允许。后续若补 zone，必须同步
+`tests/boundaries.test.ts`；在补齐前，文档不得把全部设计方向声称为 ESLint 已完整强制。
+
+另外还包含:
 
 - **规则 C:protocol 零依赖**——`src/protocol/**` 禁止一切 bare import(含 `node:`、`bun:` 与 `bun` 运行时模块),用 `no-restricted-imports` 的 `regex: '^[^.]'` 形式(gitignore 语义的 `group: ['*']` 会连内部相对导入一起误伤);`*.test.ts` 豁免(需要 `bun:test`),但仍受规则 A/B 约束。
-- **`no-restricted-syntax` 堵两条静默渗漏通道**——`no-restricted-imports` 只管静态 import 声明,动态 `import('openai')` 与内联类型引用 `import('openai/resources').X` 都能绕过;对 protocol(全部 bare specifier)与 openai 封锁(全 src/tests)各加 `ImportExpression`/`TSImportType` 语法选择器规则,tests/boundaries.test.ts 有对应探针。
+- **SDK 白名单**——生产 `src/` 中，`openai` 只允许在 `openai-chat` / `openai-responses`，
+  `@anthropic-ai/sdk` 只允许在 `anthropic-messages`；static、dynamic import 与 `import()` type 引用
+  都受限，三个 provider 彼此隔离。`scripts/record-fixture*.ts` 用逐行 inline disable 声明手动 recorder
+  例外，例外位置可审计且不得扩散到 runtime。
+- **`no-restricted-syntax` 堵静默渗漏通道**——`no-restricted-imports` 只管静态 import 声明，动态
+  `import()` 与内联 `import('pkg').Type` 由额外 selector 拦截；runtime/session 也有专门的 TS import type
+  反向依赖探针。
 
 实施要点与边界情况:
 
 - **`import type` 同样被拦截**。`no-restricted-imports` 默认对 type-only import 一并报错;若切换到 `@typescript-eslint/no-restricted-imports`,其 `allowTypeImports` 选项必须保持 `false`——opencode 的教训里,类型渗漏才是主要祸害。
 - **zone 的 `except` 路径相对于 `from`**(eslint-plugin-import 的语义),所以 agent→tools 的白名单写 `'./types.ts'` 而不是完整路径。
 - **测试文件同样受约束**:`tests/` 里 loop/steering 的测试只允许用 `providers/faux`,不得 import 真实 adapter——否则测试会悄悄变成在线测试。adapter 自己的 fixture 回放测试放在各自 `src/providers/<adapter>/*.test.ts`,天然位于 SDK 白名单目录内。
-- CI 中 `eslint --max-warnings 0` 作为 M0 验收项;可选叠加 dependency-cruiser 生成依赖图并断言无环,作为第二道保险(不是必需,ESLint 两条规则已覆盖全部硬约束)。
+- `bun run lint` 以 `--max-warnings 0` 执行，`tests/boundaries.test.ts` 用正反探针证明规则本身没有被
+  静默删掉。`.github/workflows/ci.yml` 另有 SDK grep 作为第二道防线；其当前已知 Responses 白名单
+  漏洞记录在 [10 §8](./10-testing.md)，不能把该 grep 的存在等同于远端 CI 已通过。
 
 ## 4. 四层核心类型 + Runtime 信封
 
@@ -253,7 +229,7 @@ flowchart TB
   TR -->|"驱动单 thread Agent"| MSG
   MSG -->|"convertContext 清洗后经 StreamFn 出站"| PE
   PE -->|"adapter 出站转换 convert.ts"| WIRE
-  WIRE -->|"SSE 入站状态机 stream.ts"| PE
+  WIRE -->|"SSE/event 入站状态机 consume.ts"| PE
   PE -->|"partial 定稿为 AssistantMessage 追加进转录"| MSG
   MSG -->|"message_* / turn_* 生命周期事件"| AE
   AE -->|"权威持久化、分配 per-thread seq"| EC
@@ -323,7 +299,7 @@ sequenceDiagram
   loop 内层循环:直到无 toolCall 且 steering 队列空
     AG-->>S: turn_start
     AG->>AG: convertContext(ctx):过滤 aborted 消息、修补孤儿 toolCall
-    AG->>AD: snapshot 中的 streamFn(model, ctx, { signal })
+    AG->>AD: static 注入或 registry snapshot 捕获的 streamFn(model, ctx, { signal })
     AD->>API: POST stream:true(Context → wire 消息 + 工具 JSON Schema)
     API-->>AD: SSE wire events(text / reasoning / tool calls / usage)
     AD-->>AG: ProviderEvent(start / text_delta / tool_call_end / done)
@@ -354,7 +330,12 @@ sequenceDiagram
 1. **入口分流**:`prompt()` 仅空闲可调,运行中 throw——强制调用方在 `steer` / `followUp` 之间二选一,消灭"运行中又开新任务"的未定义行为(codex 用 `abort_all_tasks(Replaced)` 解决同一问题,我们选择更保守的显式拒绝)。
 2. **每次采样前先 transform**:清洗发生在"出站前"而非"写入转录时"——转录保留全部历史(含 aborted),wire 层看到的永远是修复过的合法序列。这是 opencode 中断收尾纪律的落地:悬空 tool_call 不补 error 结果,重放时 Anthropic 类协议直接 400。
 3. **SSE → ProviderEvent 是纯状态机**:按 chunk 的 `index` 聚合 tool_calls 分片、容错 JSON 持续刷新 `arguments`、finish_reason 映射 StopReason——结构直接参照 Vercel AI SDK openai-compatible 包的 `doStream` TransformStream 实现。
-4. **事件回流经权威提交点**:`EventCommitter` 是 Agent 唯一 awaited sink，先完成消息、usage、control 与 per-thread seq 的权威提交，再把 envelope 非阻塞入队给 EventHub。普通 observer 各自保序异步消费；legacy Session/headless 只在边缘剥离信封。阶段 0 的现有 Session listener await 行为由 characterization tests 冻结，到阶段 2 才按此目标切换。
+4. **事件回流经权威提交点**:阶段 2 起已切换到 `EventCommitter`/`EventHub`。当前
+   `LegacyThreadExecution` 通过构造期私有、awaited 的 `Agent.subscribe` bridge 调用
+   `authoritativeEventSink → EventCommitter`，先完成消息、usage、control 与 per-thread seq 的权威提交，
+   再把 envelope 非阻塞入队给 EventHub。因为通用 Emitter 会隔离 listener rejection，bridge 自行
+   catch 并 latch writer fatal，随后由 Session/Runtime activity 边界重新抛出；普通 observer 各自保序
+   异步消费，legacy Session/headless 只在边缘剥离信封。
 5. **工具执行期间 abort 随时生效**:`AbortSignal` 从 `agent.abort()` 贯穿 provider 流(HTTP 断开)与工具执行(进程树 kill),被中断的现场由 transform 层在下一次请求前修复。
 6. **再采样**:工具结果按 assistant 消息中的源顺序回填转录后,内层循环回到步骤 1 重新采样;模型不再发起 toolCall 且 steering 队列为空时内层退出,poll follow-up 队列决定续跑或 `agent_end`。
 
@@ -409,7 +390,7 @@ server 化是 transport 替换而非架构重构：
    不静默破坏旧客户端。
 3. **阶段 2**：把阶段 1 临时 runtime event journal 的 seq/high-water writer 提取为唯一
    `EventCommitter`，并与 transcript/mailbox/control 原子提交；`EventHub` 接管异步订阅与 cursor。
-   这是内部拆分，不改变阶段 1 已发布的持久 seq 语义。
+   这是内部拆分，不改变阶段 1 已提交的持久 seq 语义。
 4. **换传输**：stdin/stdout 可替换为 HTTP/WebSocket/SSE，RuntimePort、ThreadRuntime、Agent 与
    adapter 不变；认证只在 transport/host 层增加。
 
@@ -422,12 +403,13 @@ server 化是 transport 替换而非架构重构：
 | `providers/openai-responses/` | `streamOpenAIResponses: StreamFn` | `protocol`、`shared`、`openai` | `cli`(组装)、自身测试 |
 | `providers/anthropic-messages/` | `streamAnthropicMessages: StreamFn` | `protocol`、`shared`、`@anthropic-ai/sdk` | `cli`(组装)、自身测试 |
 | `providers/faux/` | `createFauxStreamFn(script): StreamFn`、`createGate` | `protocol`、`shared` | 测试、`cli`(离线演示) |
-| `agent/` | legacy `Agent` facade、runtime snapshot engine、单 run/turn loop、transform 层函数 | `protocol`、`shared`、`capabilities`；仅 legacy facade 文件可 type-import `tools/types.ts` | `session`、legacy consumer、测试 |
+| `agent/` | source-level `Agent` API、带可选 `runtimeTurnProvider` 的单 run/turn loop、队列与 transform | `protocol`、`shared`、`capabilities`；可 type-import `tools/types.ts`，不可 import 具体工具 | `session`、源码内 legacy consumer、测试 |
 | `tools/` | `ToolDefinition`、`ToolContext`、`ToolOutput`、`createCodingTools(): ToolDefinition[]` | `protocol`、`shared`、zod、`@vscode/ripgrep` | `cli`(组装)、`agent`(仅 types.ts) |
 | `session/` | `ThreadRuntime`、`TranscriptRepository`、`RetryCoordinator`、`CompactionCoordinator`、`EventCommitter`、`EventHub`；legacy `Session` | `protocol`、`shared`、`agent`、`capabilities` | `runtime`、legacy consumer |
 | `capabilities/` | `CapabilityRegistry`、`ToolCatalogSnapshot`、`PreparedInvocation`、`ProviderAdapterRegistry`、`PromptAssembler`、`PolicyEngine` | `protocol`、`shared`、legacy adapter 可依赖 `tools/types.ts` | `agent`、`session`、`runtime`、`cli` |
 | `integrations/legacy-coding-tools/` | `createCodingToolCapabilityBindings()`、内置 resource resolvers/analyzer | `capabilities` public entry、`tools` public entry | `cli` composition root、集成测试 |
-| `runtime/` | `Supervisor`、`RuntimePort`、无副作用 public entry | `protocol`、`shared`、`session`、`capabilities` | CLI、嵌入宿主、server transport |
+| `integrations/legacy-session-runtime/` | `createLegacySessionThreadDriverFactory()` compatibility bridge | `runtime` ports、`session`、`agent`、`protocol` | production CLI composition root、Runtime 兼容测试 |
+| `runtime/` | `Supervisor`、`RuntimePort`、storage adapters、无副作用 public entry | `protocol`、`shared`、`session`、`capabilities` | CLI、嵌入宿主、未来 transport |
 | `cli/` | 参数/配置、内置 registration 组装、`startTui()`、one-shot/headless RuntimePort adapters | `runtime` 及 composition 所需 capability/provider/tool public entry；`@opentui/core` 仅交互分支动态加载 | 终端用户 / 外部进程 |
 | `shared/` | `truncate`、`killProcessTree`、fs 辅助、`FileTrackerPort/FileTracker` | (无) | `agent`、`tools`、`capabilities`、`session`、`cli` |
 
@@ -438,25 +420,28 @@ server 化是 transport 替换而非架构重构：
    `agent/`；一个 turn 使用捕获的同一 adapter snapshot。
 3. 出站事件和入站 op 是唯一运行时边界：任何模块不得导出可变内部状态；观测只消费 envelope，
    干预只提交 identity-bearing RuntimeOp。
-4. provider id 与 wire 协议正交：Runtime 的 ProviderAdapterRegistry 按当次 `ModelRef.api` snapshot
-   选择 adapter；认证命令与 key 永远停留在可信 host 配置边界。
+4. provider id 与 wire 协议正交：registry-mode Runtime 按当次 `ModelRef.api` snapshot 选择 adapter；
+   production static compatibility dispatcher 也只按 `ModelRef.api` 显式分发，不能按 provider id 猜协议。
+   认证命令与 key 永远停留在可信 host 配置边界。
 
-## 8. 验收清单
+## 8. 持续架构回归清单
 
-架构约束的可机械验证项（旧 M0/M1 已形成基线；新增项按阶段 1–3 落地）：
+以下复选框是相关改动时要重新执行的 review 模板，不代表当前 roadmap 未完成；阶段完成状态只看
+[11](./11-roadmap.md) 与 [10 §9](./10-testing.md)。
 
 - [ ] 在 `src/agent/` 下写 `import type { ChatCompletion } from 'openai/resources'`,`eslint` 报错(验证 type-only import 同样被拦)。
 - [ ] 在 `src/protocol/` 下 import `src/agent` 或任何 npm 包,`eslint` 报错;`src/protocol` 编译产物不含任何外部 require/import。
-- [ ] 在 `src/agent/` 下 import `src/tools/read.ts` 始终报错；阶段 0–2 现有 legacy 文件 import
-  `src/tools/types.ts` 通过；阶段 3 后只有 `legacy-agent.ts` 的 type-only import 通过，`runtime-agent.ts` 与
-  其他 agent 文件同一 import 均报错。
+- [ ] 在 `src/agent/` 下 import `src/tools/read.ts` 始终报错；任一 agent 文件 type-import
+  `src/tools/types.ts` 通过。若收窄到文件级例外，先同步实现、ESLint、边界测试与本契约。
 - [ ] 在 `src/tools/` 下 import `src/agent` 报错(反向依赖被拦)。
 - [ ] `tsc --noEmit`(strict)通过;依赖图无环(dependency-cruiser/madge,按 3.3 节为可选的第二道保险,非必需项)。
 - [ ] OpenCode Go 同一 provider 下的 chat/messages 模型分别命中对应 adapter，未知协议模型在进入 `ModelConfig` 前被过滤。
 - [ ] 无模型交互启动时 provider 控制支路可用但 Session 尚不存在；key 不出现在任何核心类型或事件中。
 - [ ] 用 `providers/faux` 替换 `streamFn` 后,`agent/` 全部测试离线通过且零代码改动(证明 StreamFn 注入边界成立)。
 - [ ] headless 模式 stdout 每行可被 `JSON.parse`,事件序列能完整重建会话渲染(证明 SessionEvent 全 JSON 可序列化,server 化前提成立)。
-- [ ] OpenAI SDK import 只出现在 `providers/openai-chat` / `providers/openai-responses`；`tests/boundaries.test.ts` 同时验证 core 封锁、两个白名单与 provider 互相隔离。
+- [ ] 生产 `src/` 的 OpenAI SDK import 只出现在 `providers/openai-chat` / `providers/openai-responses`，
+  Anthropic SDK 只出现在 `providers/anthropic-messages`；手动 recorder 例外带局部 lint 说明；
+  `tests/boundaries.test.ts` 同时验证 core 封锁、三个白名单与 provider 互相隔离。
 - [ ] 同一 ThreadId 至多一个 active RunId；两个 ThreadRuntime 可并发且 transcript/mailbox/cancel/seq 完全隔离。
 - [ ] `runtime` 不依赖 `cli` 或具体 provider/tool；仅 import public runtime entry 不产生文件、环境、signal、TTY 或网络副作用。
 - [ ] EventEnvelope 的 seq 在每个 thread 内严格递增并跨 resume 延续；旧 Session/headless 投影不泄漏 envelope 字段且事件顺序不变。
@@ -467,4 +452,4 @@ server 化是 transport 替换而非架构重构：
 - [04 Provider 接口与 OpenAI adapters](./04-provider-adapter.md) —— wire 层转换全细节、CompatFlags、Responses 契约与新增 provider 指南
 - [05 Agent 循环](./05-agent-loop.md) —— 第 5 节时序图中 runLoop 每一步的精确语义
 - [09 CLI](./09-cli.md) —— 第 1 层 UI 命令的键位映射与 headless NDJSON 外协议
-- [12 Supervisor、多线程 Runtime](./12-supervisor-runtime.md) —— 目标依赖图、身份、组件职责与兼容矩阵
+- [12 Supervisor、多线程 Runtime](./12-supervisor-runtime.md) —— 当前依赖图、身份、组件职责与兼容矩阵

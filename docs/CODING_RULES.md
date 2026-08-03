@@ -12,10 +12,11 @@
 
 ## 2. 分层与依赖
 
-下表同时包含 [11](./11-roadmap.md) 阶段 1–3 将落地的目标目录。阶段 0 必须保持当前生产行为，
-因此尚未迁移的 `Session` 直连、裸 `SessionEvent`、`ToolDefinition` 与静态 provider dispatch 可作为
-原位兼容路径继续存在，但不得扩大或被新 core 依赖；每个目标目录落地的同一阶段，本规则对应边界
-才转为 ESLint 与测试的机械门禁。兼容时限与投影以 [12](./12-supervisor-runtime.md) §11 为准。
+下表是 Runtime 阶段 0–3 完成后的当前目录边界。`Session`、裸 `SessionEvent`、`ToolDefinition` 与
+production CLI 的静态 provider dispatch 是 [12](./12-supervisor-runtime.md) §11 明确保留的兼容面，
+不是尚未完成的迁移占位；不得扩大，也不得被新 core 反向依赖。实际机械门禁以
+`eslint.config.mjs` 与 `tests/boundaries.test.ts` 为准。它们当前并非对每个目录都实现完整 allowlist；
+[02 §3.3](./02-architecture.md) 列出的未机械覆盖方向仍是强制设计边界，不能因 lint 暂未报错而导入。
 
 | 目录 | 职责与边界 |
 |---|---|
@@ -23,6 +24,8 @@
 | `src/shared/` | 与业务层无关的底层工具；不得反向依赖其他 `src` 层。 |
 | `src/providers/<provider>/` | wire 协议双向转换；provider 彼此隔离，生产代码中的第三方 SDK 只能留在所属 adapter。 |
 | `src/capabilities/` | JSON-Schema-first 能力注册、不可变 catalog/provider snapshot、prompt 组装与权限策略；不得执行 CLI/UI 逻辑，也不得在 invocation 执行时回查最新 registry。 |
+| `src/integrations/legacy-coding-tools/` | 八个内置工具到 capability registration 的显式 binding/analyzer；generic capabilities 不认识具体工具。 |
+| `src/integrations/legacy-session-runtime/` | Runtime 到 legacy Session/Agent 的 compatibility driver；只在 composition 边缘桥接，不成为事实源。 |
 | `src/agent/` | 单 thread 内的 run/turn 执行引擎、队列、transform 与工具调度；通过 snapshot/adapter 注入实现，不认识具体 provider、工具、Supervisor 或 CLI。 |
 | `src/tools/` | 工具契约和内置工具；通过 `ToolContext` 通信，不依赖 agent、provider、session 或 CLI。 |
 | `src/session/` | 单 thread runtime、transcript repository、retry/compaction coordinator、权威 event commit 与异步 event hub；不保存 workspace 级 thread map，不做 provider 转换或 UI 渲染。 |
@@ -30,11 +33,15 @@
 | `src/cli/` | composition root、配置、headless、one-shot human renderer 与 OpenTUI 前端；只负责注册具体 adapter/capability、把输入映射成 op、消费 envelope/兼容投影。业务操作必须经过 `RuntimePort`，UI state 不得成为第二份事实源。 |
 
 - 新代码放到拥有该语义的最低层；不得为复用方便绕过 ESLint zone。
-- 新增 provider 时保持独立 adapter，并通过 `ProviderAdapterRegistry` 注册；新增工具时通过 legacy adapter 或原生 capability registration 原子注册 schema、validator 与 executor。
+- 新增 provider 时保持独立 adapter，并在 registry-mode composition 中通过 `ProviderAdapterRegistry`
+  注册；若要让当前 production/default CLI 使用它，还必须同步 model directory 与
+  `src/cli/provider-stream.ts` 的 static compatibility dispatch，直到兼容矩阵明确退役该路径。新增工具
+  通过 legacy adapter 或原生 capability registration 原子注册 schema、validator 与 executor。
 - 认识具体内置工具的 capability binding 只放 `integrations/legacy-coding-tools/`；generic capabilities
   不得 import 具体 tools，tools 不得反向 import capabilities，CLI 不得复制权限/resource switch。
 - 跨目录优先使用各层 `index.ts` 公共出口；只有刻意收窄边界（如 agent → `tools/types.ts`）时才直接导入指定模块，避免无意扩大公共 API。
-- 分阶段迁移期间允许 `Session`、`ToolDefinition` 与 provider switch 的兼容适配层存在；新 core 不得反向依赖兼容层，新增目录出现的同一阶段必须同步补 ESLint zone 与边界测试。
+- `Session`、`ToolDefinition` 与 provider switch 的兼容适配层继续按兼容矩阵存在；新 core 不得反向
+  依赖兼容层。新增或重划目录必须在同一变更中同步 ESLint zone、`tests/boundaries.test.ts` 与 02/12。
 
 ## 3. TypeScript 与排版
 
@@ -47,9 +54,8 @@
 
 ## 4. 运行时不变量
 
-下列 identity/envelope/Supervisor/snapshot 条款是阶段 1–3 的目标不变量；阶段 0 的
-characterization tests 刻意记录迁移前形态，不视为违规。某条款对应阶段一旦提交，后续代码必须
-持续遵守，不能退回兼容实现作为新的事实源。
+下列 identity/envelope/Supervisor/snapshot 条款已经随阶段 1–3 落地，现为所有新代码必须持续遵守的
+运行时不变量。阶段 0 characterization 只用于解释 legacy 行为，不能授权把兼容投影提升为新的事实源。
 
 - `StreamFn` 调用后不得 throw/reject；provider 的失败必须转换为终态 `error` 事件，并以合法 `AssistantMessage` 结束流。
 - 转录是权威、可重放的事实存储；错误、中止和工具失败也必须形成完整消息。新增事件时保持 `agent/turn/message/tool` 生命周期成对闭合。
@@ -69,7 +75,21 @@ characterization tests 刻意记录迁移前形态，不视为违规。某条款
   observer 可变引用。
 - public runtime entry 的 import 必须无副作用：不得读取环境/配置、创建文件、初始化 TTY/provider、注册 signal handler 或发起网络请求；所有副作用从显式工厂/提交 op 开始。
 
-## 5. 测试与交付
+## 5. 实现经济性与复杂度门禁
+
+- 默认目标是满足当前验收条件的最小、完整、可维护变更；不得为假设中的未来需求预建能力，也不得夹带无关重构或顺手清理。
+- 局部任务的默认软预算是不超过 3 个生产文件、约 300 行生产代码变更，且不新增生产依赖、公共 API 或架构层。测试和文档单独估算，但必须与实际行为变更成比例。软预算只用于暴露范围膨胀，不是硬上限，也不得通过压缩排版、合并职责或牺牲可读性规避。
+- 只读检查后、实现前应简要说明最小方案、预计涉及的生产文件和代码量级，以及是否新增抽象或公共面；不要为同一需求并行实现多个备选架构。
+- 优先复用现有函数、类型、数据流和扩展点。默认不新增只有一个当前调用方的工厂、注册表、适配层、配置系统或通用扩展点；为了隔离既有分层边界、I/O、安全、协议或明确测试缝时除外。
+- 不得实现当前验收条件、现有 public contract 或设计契约没有要求的兼容路径、回退分支、配置选项和泛化能力。
+
+出现以下任一情况时，触发复杂度升级门禁：预计或实际变更超过初始文件数或代码量预算的两倍；新增生产依赖、公共 API、顶层模块或架构层；引入新的工厂、注册表、插件机制、兼容层、配置系统或通用框架。
+
+- 如果复杂度来自范围扩大、可选改进或未来泛化，必须停止扩展，在继续实现前取得用户明确批准。
+- 如果复杂度是当前需求不可避免的算法、并发、协议状态机、安全、持久化或故障恢复逻辑，可以超出软预算，但必须先给出复杂度说明：列明迫使复杂度存在的当前不变量或失败模式、较小方案为何不正确、每个新增组件对应的现有需求，以及覆盖这些判断的测试。必要复杂度应集中在拥有该语义的最低层，不得扩散成通用框架。
+- 交付前必须做一次减法审查，删除没有当前需求依据的单次包装层、未使用扩展点、推测性分支或配置、重复类型和状态，以及只复述代码的注释；若同一行为可由现有原语以更小且同样清晰的变更完成，应在交付前收敛实现。
+
+## 6. 测试与交付
 
 - 模块单测与实现共置为 `src/**/*.test.ts`；跨模块 agent/session 测试放 `tests/`；构建产物和进程级验证放 `e2e/`。
 - 默认测试必须离线：核心测试使用 faux provider，adapter 使用已录制 JSONL fixture；不得依赖真实 API、密钥或网络。
@@ -78,4 +98,6 @@ characterization tests 刻意记录迁移前形态，不视为违规。某条款
 - 并发/runtime 测试必须至少覆盖同 thread active-run 拒绝、跨 thread gate 并行与 abort 隔离、per-thread seq 恢复续接、重复 OpId，以及慢 observer 不背压；id、clock、lease 与持久化 gate 应可注入。
 - registry/policy 改动必须有热更新对抗测试：turn 中更新同名 capability 后，当前 turn 仍使用旧 schema/validator/executor，下一 turn 才使用新 revision；权限断言必须基于 `PreparedInvocation` 的归一化参数。
 - 行为或协议变化必须补回归测试并同步相关 `docs/`；修改架构边界或 ESLint 规则时同步扩展 `tests/boundaries.test.ts`。
-- 开发时可先跑定向 `bun test`；交付前必须运行 `bun run check`（lint、typecheck、build、全部测试）。
+- 开发时可先跑定向 `bun --no-env-file test <path>`；交付前必须运行 `bun run check`（lint、typecheck，
+  再由测试编排器执行 unit、build 与 e2e）。`bun run check` 不检查 Markdown 或 worktree scope；文档变更
+  还要单独执行 `git diff --check`、检查相对链接并审阅当前状态表。

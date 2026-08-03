@@ -4,11 +4,17 @@
 
 本篇回答四个问题:我们在做什么(需求的工程化表述)、为什么这样做(关键决策与参考项目的经验教训)、用什么做(技术选型)、明确不做什么(非目标)。后续所有文档的设计都能回溯到本篇的某条决策;反过来,如果某篇文档的设计无法回溯到这里,说明其中一边需要修订。
 
-> **阶段 0 基线更新：**进程级“单 Agent”约束已由[12 · Supervisor、多线程 Runtime](./12-supervisor-runtime.md)取代。当前 CLI 的单 Session 是兼容投影；canonical 运行时允许多个独立 thread 并发，但每个 thread 仍至多一个 active run。
+> **当前基线：**Runtime 阶段 0–3 与 CLI UX0–UX4 均已完成。进程级“单 Agent”约束已由
+> [12 · Supervisor、多线程 Runtime](./12-supervisor-runtime.md)取代；canonical 运行时允许多个独立
+> thread 并发，每个 thread 仍至多一个 active run。TUI 一次显示一个 attachment，但已经支持
+> session picker、thread switch 和后台 run；classic/line REPL 已退役。
 
 ## 1. 项目是什么
 
-在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI：OpenTUI 是唯一长驻交互面，另保留 one-shot 人类输出与 headless `--json` 模式；能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
+**coda** 是一个 TypeScript 终端 coding agent（当前 private package 与 bin 均名为 `coda`）。形态上
+是一个单进程 CLI：OpenTUI 是唯一长驻交互面，另保留 one-shot 人类输出与 headless `--json` 模式；
+能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息
+注入、会话持久化与恢复，以及 Runtime-backed 的审阅、切换、压缩、fork/retry 工作流。
 
 一次典型会话的样子:
 
@@ -35,11 +41,16 @@ $ coda
 
 工程化表述:
 
-- OpenAI Chat Completions 与 Responses 协议的一切 wire 类型**只允许出现在各自的 `src/providers/openai-chat/` / `src/providers/openai-responses/` 目录内**；两个 adapter 互相隔离，`openai` 包在其它目录被 import 都是 ESLint 错误。
+- 生产 `src/` 中，OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 的一切 wire
+  类型**只允许出现在各自的 `src/providers/openai-chat/`、`src/providers/openai-responses/`、
+  `src/providers/anthropic-messages/` 目录内**；三个 adapter 互相隔离，`openai` 与
+  `@anthropic-ai/sdk` 在各自白名单外被 import 都是 ESLint 错误。手动 fixture recorder 是
+  `scripts/` 下明确注释、非运行时的受审计例外。
 - agent 核心只认内部协议:`AgentMessage` / `Context` / `ProviderEvent` / `StreamFn`(见 [03 内部协议](./03-internal-protocol.md))。Agent 通过构造参数注入 `StreamFn`,自身不 import 任何 providers 目录。
 - **新增 provider = 新增一个 adapter 目录,核心零改动。**
 
-验收方式:`tests/boundaries.test.ts` 用 ESLint 探针同时验证 core 禁止 SDK、两个 OpenAI adapter 白名单、provider 互相隔离；接入新 adapter 时 `src/agent` 与工具执行逻辑零 diff。
+验收方式:`tests/boundaries.test.ts` 用 ESLint 探针同时验证 core 禁止 SDK、OpenAI/Anthropic adapter
+白名单与 provider 互相隔离；接入新 adapter 时 `src/agent` 与工具执行逻辑零 diff。
 
 为什么要机械强制而不是靠纪律:opencode V1 依赖 Vercel AI SDK,第三方类型渗入核心签名后,积累出 1832 行 per-provider 的 ProviderTransform 补丁;SDK 大版本改 usage 口径时全链路返工,最终被迫自建 `@opencode-ai/llm`。教训是:**第三方 SDK 类型一旦出现在 core 签名中,隔离就已经失败**,必须从第一天起用 lint 规则封死,而不是等重构时再补。
 
@@ -83,7 +94,7 @@ $ coda
 
 | # | 决策 | 为什么 | 佐证 |
 |---|---|---|---|
-| D1 | provider SDK 只允许出现在所属 adapter；`openai` 白名单为 `openai-chat` / `openai-responses`，ESLint 机械强制且 provider 互相隔离 | 协议隔离靠工具链而非纪律;类型渗入核心签名后返工成本随代码量线性增长 | opencode V1 → 1832 行 ProviderTransform 的返工史 |
+| D1 | 生产 provider SDK 只允许出现在所属 adapter；`openai` 白名单为 `openai-chat` / `openai-responses`，`@anthropic-ai/sdk` 白名单为 `anthropic-messages`，ESLint 机械强制且 provider 互相隔离 | 协议隔离靠工具链而非纪律;类型渗入核心签名后返工成本随代码量线性增长 | opencode V1 → 1832 行 ProviderTransform 的返工史 |
 | D2 | Provider 接口 = 单个函数类型 `StreamFn`,注入给 Agent,核心不 import providers | 最小接口面;新增 provider 零核心改动;测试注入 faux provider 即可离线跑全部 loop 逻辑 | pi-mono 的 agent-core 只依赖 StreamFn;vercel/ai 的 `doStream` 同构 |
 | D3 | **StreamFn never-throw 铁律**:一切失败编码为流内 `error` 事件 + `stopReason: 'error' \| 'aborted'` 的 AssistantMessage | agent loop 零 try/catch 处理 provider 差异;错误路径与正常路径共用同一数据形状 | pi-mono 的 StreamFunction 铁律 |
 | D4 | 错误 / 中止是转录的一等公民:aborted / error 的 AssistantMessage 保留在会话中 | 转录永远完整可回放;重试、UI、统计共享同一事实源 | pi-mono;opencode 的中断收尾纪律(悬空 tool_use 必补 result) |
@@ -193,12 +204,13 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | TypeScript | 6.x,strict 全开 | discriminated union 是整套协议(ProviderEvent / AgentEvent / StopReason)的载体;strict 下的 narrowing 即文档 |
 | Bun | 1.3.14 | 项目唯一运行时与包管理器;原生 TypeScript、fetch、Web Streams、AbortSignal、测试与构建工具链统一 |
 | 模块格式 | ESM | 生态方向;`Bun.build` 直接产出 Bun-targeted ESM,不反向补 CJS |
-| `openai` | ^6(仅两个 OpenAI adapter 内) | Chat Completions 与 Responses 各自使用 SDK 的请求/SSE/错误层；两套 wire 类型不跨 adapter，`maxRetries` 交给 SDK 默认，整轮重发仍在 session 层 |
+| `openai` | ^6（生产 `src/` 仅两个 OpenAI adapter；手动 recorder 例外） | Chat Completions 与 Responses 各自使用 SDK 的请求/SSE/错误层；两套 wire 类型不跨 adapter，`maxRetries` 交给 SDK 默认，整轮重发仍在 session 层 |
+| `@anthropic-ai/sdk` | ^0.115（生产 `src/` 仅 Messages adapter；手动 recorder 例外） | Messages 请求、事件与 SDK 错误只在 adapter 内转换为内部协议；exclusive usage、thinking signature 与 `/v1` base URL 兼容也在该层收敛 |
 | zod | v4 | legacy 工具 validator；注册时一次性 `z.toJSONSchema()`，随后 canonical 事实源是同一 registration/snapshot 中绑定的 JSON Schema、validator 与 executor |
 | `bun:test` | 1.3.14 内置 | 与运行时同版本、fixture 回放与异步迭代器断言无需额外测试运行器 |
 | `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
-| ripgrep | `@vscode/ripgrep` | 安装期自带平台二进制,免自实现下载逻辑;grep 工具直接 spawn 它(D11) |
-| ESLint | flat config + `import/no-restricted-paths` | D1 决策的机械化执行者:依赖方向违规 = CI 红灯 |
+| ripgrep | `@vscode/ripgrep` + PATH fallback | `resolveRgPath()` 优先解析 bundled platform binary，解析失败时回退 PATH 中的 `rg`；不自实现搜索(D11) |
+| ESLint | flat config + `import/no-restricted-paths` | D1 的 SDK/provider 隔离与关键层间边界已机械化；完整覆盖和已知 internal-path gap 见 [02 §3.3](./02-architecture.md) |
 | CLI 渲染 | `@opentui/core` 0.4.x + one-shot human renderer | 见 D18；完整双 TTY 的唯一交互分支使用 alternate screen、ScrollBox、Textarea、Markdown；脚本与 headless 分支不加载 native 包 |
 
 目录结构与依赖方向的完整规则（`protocol/shared` 为叶子，`agent` 消费 capability snapshot，
@@ -212,7 +224,8 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 
 - **Vercel AI SDK(运行时依赖)**:只当参考实现读,不 import——opencode V1 的 1832 行返工是直接反例;
 - **zod-to-json-schema**:zod v4 原生 `z.toJSONSchema()` 已覆盖,少一个随 zod 大版本漂移的桥接件;
-- **Ink / React 系 TUI**:不引 React reconciler;当前 OpenTUI imperative renderable 直接消费 SessionEvent,避免第二套应用状态(D18);
+- **Ink / React 系 TUI**:不引 React reconciler；当前 OpenTUI imperative renderable 消费
+  `RuntimeFrontendSession` 从 Runtime snapshot/EventEnvelope 归约出的 presentation，不另建业务事实源(D18);
 - **execa / shelljs 类包装**:bash 工具由 `Bun.spawn` 建 detached 进程组并精确控制 killProcessTree；仅信号/PGID 收尾落在上述 compatibility 边界;
 - **自研 SSE 解析**:`openai` 包的流解析与错误分类已经过实战,adapter 站在它上面做事件翻译即可(D8 只是不用它的高层 helper,不是不用它的传输层)。
 
@@ -231,28 +244,29 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 
 ## 7. 非目标:v1 明确不做的事
 
-「不做」与「做」同等重要——参考项目里最贵的教训(opencode 的 SDK 返工、pi-mono 的巨类)都来自范围失控。原 M0–M7 已是历史实现基线；当前阶段 0–3 的 active roadmap 见
-[11](./11-roadmap.md)。下表只列本轮明确不交付的产品能力：
+「不做」与「做」同等重要——参考项目里最贵的教训(opencode 的 SDK 返工、pi-mono 的巨类)都来自范围失控。原 M0–M7、Runtime 0–3 与 CLI UX0–UX4 均已成为历史实现基线，完成记录见
+[11](./11-roadmap.md)。下表列出当前基线仍明确不交付的产品能力：
 
 | 非目标 | 说明 | 去向 |
 |---|---|---|
-| 单一前端中的多线程可视化与调度 UX | core 以 Supervisor/ThreadRuntime 支持独立线程；当前 TUI 仍默认只附着一个 thread，后续再提供线程列表/切换/并排视图 | v2 UI |
+| 并排多线程与父/子 Agent 调度 UX | TUI 已有 session picker、thread switch、per-thread draft/未读与后台 run；尚无并排视图、父子拓扑页或子 Agent 调度面 | 后续 UI |
 | 独立 TUI client / server 化 | v1 的 OpenTUI 与 Session 同进程;headless NDJSON 已保留未来拆进程的稳定边界 | v2 |
 | 持久 shell / 交互式长任务 | bash 每次 spawn 新进程(D15);codex 式 `exec_command` + `write_stdin`(session_id + yield_time_ms)另立工具 | v2 |
 | server / client 分离(HTTP API 多客户端) | opencode 的方向;v1 的 headless `--json` NDJSON 已覆盖「协议可对外」的验证需求 | v2 |
 | MCP capability 接入 | CapabilityRegistry 允许外部来源，但阶段 3 只迁移现有内置工具/provider adapter | 后续 |
 | 结构化输出(强制 StructuredOutput 工具注入) | opencode 的跨协议做法,依赖工具框架成熟 | v2 |
-| 会话检查点 / undo | JSONL 追加已保留完整历史,交互式回滚是另一层产品功能 | v2 |
+| 文件副作用级 checkpoint / undo | `/fork`、`/retry` 与 manual compact 只处理已提交对话；不会回滚已经发生的文件、shell、网络或外部工具副作用 | 后续 |
 | Windows 全面验证 | edit 的 CRLF / BOM 剥离-匹配-还原 v1 即有(硬需求),但 CI 矩阵与全工具链验证推后 | v2 |
 
-划界原则：阶段 0–3 只建立可嵌入 Runtime、线程隔离、事件权威提交与版本一致的 registry/policy；
-表中后续产品能力只要求边界不堵死，不提前增加实现复杂度。
+划界原则：当前已完成基线提供可嵌入 Runtime、线程隔离、事件权威提交、版本一致的 registry/policy
+和单 attachment 的多 thread 工作流；表中后续产品能力只要求现有边界不堵死，不提前增加实现复杂度。
 
-## 8. 全项目验收清单(总纲)
+## 8. 持续验收总纲
 
-细化的验收标准按阶段列在 [11 路线图](./11-roadmap.md),此处是三条核心需求的最终验收:
+细化的完成状态见 [11 路线图](./11-roadmap.md) 与 [10 §9](./10-testing.md)。以下空复选框是相关改动
+每次都要重新执行的回归模板，不表示当前阶段未完成：
 
-- [ ] 协议隔离:OpenAI SDK 只出现在两个 OpenAI adapter，Anthropic SDK 只出现在 Messages adapter；ESLint 边界规则与探针测试在 CI 强制，wire 类型不进入 protocol/agent。
+- [ ] 协议隔离:生产 `src/` 的 OpenAI SDK 只出现在两个 OpenAI adapter，Anthropic SDK 只出现在 Messages adapter；手动 recorder 仅为带局部说明的非运行时例外；ESLint 边界规则与探针测试在 CI 强制，wire 类型不进入 protocol/agent。
 - [ ] steering:流式期间 Enter 注入的消息在当前 turn 的工具全部执行完后进入 context(转录中可见 `source: 'steering'` 且位于 toolResults 之后);正在执行的工具从未被跳过;steering 使无 toolCall 的 assistant 之后循环继续。
 - [ ] follow-up:仅在无 toolCall 且 steering 队列为空时被消费;run 内消费是外层循环续跑,不发新 `agent_start`(转录中出现 `source: 'follow_up'` 的 user 消息且其间无 `agent_end`);仅 session 层 `continue()` 消费残留 follow-up 队列时,新 run 的 `agent_start.reason` 为 `follow_up`。
 - [ ] abort 后转录合法:任意时刻 Esc,下一次请求 Chat Completions 不出现 400(tool 配对由 transform 层修复);aborted 消息保留在 JSONL 中。
@@ -261,7 +275,9 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 - [ ] 全部 loop / steering / 工具测试不依赖网络(faux provider + fixture 回放)。
 - [ ] 错误模型闭环:kill 掉网络 / 塞入 in-band error fixture / 任意时刻 abort,agent 进程不崩溃,转录中出现对应 stopReason 的 AssistantMessage,且 `continue()` 可恢复。
 - [ ] `stopReason === 'length'` 且含 toolCall 的响应,批内工具零执行、全部收到合成错误结果(D20 的可观测验证)。
-- [ ] 发布形态:`bun add -g coda`(或 `bunx coda`)后 `coda` 可直接启动全屏 TUI;`Bun.build` 产物含 Bun shebang 的 bin,运行时基线固定为 Bun 1.3.14,并随安装解析当前平台 OpenTUI native optional package。
+- [ ] 当前 private package 从源码执行 `bun install --frozen-lockfile && bun run build && bun link` 后，
+  `coda` 可直接启动全屏 TUI；构建产物含 Bun shebang，运行时基线固定为 Bun 1.3.14，并解析当前平台
+  OpenTUI native optional package。发布到 registry 不是当前已交付承诺。
 - [ ] Runtime 隔离:同一 thread 不得并发两个 run；不同 thread 可并发，任一 thread 的 mailbox、取消、审批、转录与事件 seq 不影响其他 thread；子 Agent 以独立 thread 存在而非工具结果。
 - [ ] 兼容投影:旧 `Session` 与默认 headless raw `SessionEvent` 行为保持；canonical public Runtime 输出带 Workspace/Thread/Run/Turn/Op 身份和 per-thread seq 的 `EventEnvelope`。
 

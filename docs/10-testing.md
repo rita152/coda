@@ -2,7 +2,7 @@
 
 # 10 测试策略(Testing)
 
-本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、OpenTUI 内存渲染回归、headless e2e 与 CI 建议。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。Supervisor、identity、EventEnvelope、事件提交和能力快照的新增用例以 [12](./12-supervisor-runtime.md) 为 canonical 契约；CLI 产品化的用户旅程、surface 边界、presentation state、环境与性能门禁以 [13](./13-cli-ux.md) 为 canonical 契约；旧 M0–M7 标签仅用于定位既有测试族。
+本文规定测试金字塔、faux provider 规格、adapter 的 SSE fixture 回放、steering/follow-up 的确定性测试方法、工具测试矩阵、OpenTUI 内存渲染回归、headless e2e，以及当前 CI 与规划门禁。运行时与测试框架统一为 Bun 1.3.14 / `bun:test`。Supervisor、identity、EventEnvelope、事件提交和能力快照的新增用例以 [12](./12-supervisor-runtime.md) 为 canonical 契约；CLI 产品化的用户旅程、surface 边界、presentation state、环境与性能门禁以 [13](./13-cli-ux.md) 为 canonical 契约；旧 M0–M7 标签仅用于定位既有测试族。
 
 ## 1. 测试哲学
 
@@ -13,10 +13,11 @@
 3. **协议不变量用测试钉死**。StreamFn 铁律(绝不 throw)、事件三段式语法、tool_calls/tool 配对合法性——这些是文档承诺,每条都要有对应断言,防止实现漂移。
 4. **并发与版本语义用对抗时序证明**。线程隔离、权威提交背压、observer 隔离和 catalog snapshot 不能靠“跑得够快”推断；测试必须把双方挂在 gate 上，在已知边界更新 registry、abort 或释放提交，并断言身份、顺序与使用的 revision。
 
-### 1.1 Supervisor 迁移的分阶段门禁
+### 1.1 已完成 Supervisor 迁移的分阶段门禁
 
-阶段 0–3 严格串行推进。每一阶段先跑本节定向门禁，再跑既有回归与 `bun run check`。阶段 0–1
-沿用 review-to-clear 闭环；阶段 2 起每个阶段实现完成后只允许两轮完整 review：第一轮发现问题后
+以下记录实施阶段 0–3 时使用的门禁，当前保留为回归来源而非 active rollout。四阶段当时严格串行
+推进：每一阶段先跑本节定向门禁，再跑既有回归与 `bun run check`。阶段 0–1 沿用 review-to-clear
+闭环；阶段 2 起每个阶段实现完成后只允许两轮完整 review：第一轮发现问题后
 直接修复并复跑定向门禁，第二轮重新覆盖完整范围并验证修复；第二轮的新修复继续复跑受影响门禁，
 但不得启动第三轮完整 review。提交条件仍是没有已知问题且最终 check 通过。
 
@@ -505,12 +506,21 @@ flowchart TB
 | L2 adapter | `src/providers/<adapter>/*.test.ts` + `__fixtures__/` | fixture 文件 | 毫秒级 |
 | L2 capabilities | `src/capabilities/*.test.ts` | protocol、注入式 registration/policy | 毫秒级 |
 | L3 tools | `src/tools/*.test.ts` | tmpdir、rg 二进制、`Bun.spawn` | 秒级 |
-| L4 loop | `src/agent/*.test.ts`、`src/session/*.test.ts` | faux provider | 毫秒级 |
-| L4 runtime | `src/runtime/*.test.ts`、`tests/*runtime*.test.ts` | faux provider、tmpdir、gate/idgen/clock | 毫秒至秒级 |
-| L4 UI | `src/cli/tui.test.ts` | `@opentui/core/testing` 内存 renderer + mock highlighter | 亚秒级 |
+| L4 loop | `tests/agent-*.test.ts`、`tests/transform.test.ts`、`tests/approval.test.ts`、`tests/plan.test.ts`、`tests/session*.test.ts`、`src/session/*.test.ts` | faux provider | 毫秒级 |
+| L4 runtime | `src/runtime/*.test.ts`、`tests/supervisor-baseline-characterization.test.ts` | faux provider、tmpdir、gate/idgen/clock | 毫秒至秒级 |
+| L4 CLI / UI | `src/cli/*.test.ts` | 纯 parser/controller/renderer fixture；`tui.test.ts` / `ux-characterization.test.ts` 使用 `@opentui/core/testing` 内存 renderer + mock highlighter | 毫秒至秒级 |
 | L5 e2e | `e2e/*.test.ts`(`bun run test:e2e`) | `Bun.build` 构建产物 | 数秒 |
 
-L1 要点(不展开):`EventStream` 的 push/end/result 语义(end 后 push 被忽略并产生开发模式警告(console.warn)、迭代器收尾、result 在 end 前 pending)、单消费者迭代顺序、`partial` 快照与 delta 累积一致性的属性测试(随机事件序列折叠后等于 done 消息——对应 opencode `LLMResponse.reduce` 的 reducer 思路)。
+Agent 当前的 loop/steering/abort/transform 是跨模块契约，因此测试按
+[CODING_RULES](./CODING_RULES.md) 放在 `tests/`，`src/agent/` 当前没有共置 `*.test.ts`；不得把
+测试金字塔中的目标路径误写成已存在的文件。CLI 覆盖也不只有 TUI renderer：当前
+`src/cli/` 中的 parser、headless/envelope、provider command、presentation、Runtime frontend、
+one-shot output 和 TUI 都有共置测试。
+
+L1 要点(不展开):`EventStream` 的 push/end/result 语义(end 后 push 被忽略并产生开发模式警告(console.warn)、迭代器收尾、result 在 end 前 pending)、单消费者迭代顺序，以及
+`runtime-events.test.ts` 对 `partial`/contentIndex/terminal block 一致性的校验。“随机事件序列折叠后
+等于 done 消息”的固定种子属性测试实际位于 `src/providers/faux/faux.test.ts`，它是
+faux provider 的可执行事件语法门禁，不是 `src/protocol/` 中的 L1 用例。
 
 ## 3. faux provider 详细规格
 
@@ -609,6 +619,7 @@ fixture 是 JSONL:一行 = 一条 SSE `data:` 的 JSON payload,存 `src/provider
 |---|---|---|
 | `basic-text.jsonl` | 正常文本流 | `start` → `text_start/delta*/end` → `done`;拼接 content 与 `text_end.content` 一致;stopReason 'stop' |
 | `parallel-tool-calls.jsonl` | 两个 tool_calls 按 `index` 交错分片 | 按 index 定位槽位不串包;arguments 逐段拼接;流式期间容错解析持续刷新 `arguments`;两个 `tool_call_end`;stopReason 'tool_calls' |
+| `interleaved-tool-calls.jsonl` | index 0 → 1 → 0 的迟到分片 | 迟到的 index 0 delta 仍回到原槽位；每个 ToolCallPart 的 `arguments === JSON.parse(rawArguments)` |
 | `usage-chunk.jsonl` | `include_usage` 的尾 chunk(`choices:[]`) | 空 choices 的 usage chunk 不 crash;Usage 换算为 inclusive 口径(含 cached/reasoning 明细字段映射) |
 | `usage-missing.jsonl` | provider 未发 usage chunk | usage 各字段为 0/undefined,无 NaN;done 正常 |
 | `length-truncated.jsonl` | `finish_reason:"length"` 且 arguments 半截 JSON | 照常产出 ToolCallPart;`rawArguments` 保留原始截断串;stopReason 'length'(不执行是 loop 层的事,adapter 不管) |
@@ -619,11 +630,26 @@ fixture 是 JSONL:一行 = 一条 SSE `data:` 的 JSON payload,存 `src/provider
 | `text-then-tool.jsonl` | 同一响应先文本后 tool_calls | contentIndex 正确递进;`text_end` 在 `tool_call_start` 前 |
 | `content-filter.jsonl` | `finish_reason:"content_filter"` | 走 done 分支正常收尾;stopReason 'content_filter' |
 
-fixture 之外的两个错误路径用单测直接构造(无法录成 chunk):SDK `create()` reject(APIError with status)→ 流内 `error` 事件、绝不向外抛(**铁律测试**:对每种错误注入方式断言 `streamFn` 调用本身 never rejects);`APIUserAbortError` → stopReason 'aborted'。
+上表是当前 12 个 synthetic canonical fixture。`recorded-kimi-text.jsonl` 与
+`recorded-kimi-tool.jsonl` 是额外的真实网关录制回归，不纳入这个计数。fixture 之外的错误路径用单测
+直接构造(无法录成 chunk):SDK `create()` reject(APIError with status)→ 流内 `error` 事件、
+绝不向外抛(**铁律测试**:对每种错误注入方式断言 `streamFn` 调用本身 never rejects);
+`APIUserAbortError` → stopReason 'aborted'。
 
 ### 4.3 录制与维护
 
-`scripts/record-fixture.ts`:读 `OPENAI_API_KEY` 环境变量,对真实 endpoint 发起带 `stream:true` 的请求,把每条 chunk 原样写 JSONL(脱敏:去 headers、request id 可保留)。**手动运行、fixture 入库**;CI 永不联网。第三方方言(DeepSeek 等的 `reasoning_content`)同法录制。fixture 一经断言固化,升级 `openai` 包大版本时先跑回放——SDK 变更影响一目了然。
+`scripts/record-fixture.ts` 从本地 provider 环境读取 endpoint/key，对真实 endpoint 发起带
+`stream:true` 的请求，把每条 chunk 原样写 JSONL(不写 headers，request id 可保留):
+
+```bash
+bun run record:fixture -- --model kimi-k3 --scenario text \
+  --out src/providers/openai-chat/__fixtures__/recorded-kimi-text.jsonl
+bun run smoke -- --model kimi-k3
+```
+
+两者都是**手动联网流程**，不得进入默认测试或 CI。第三方方言(DeepSeek 等的
+`reasoning_content`)同法录制。fixture 一经断言固化，升级 `openai` 包大版本时先跑
+离线回放——SDK 变更影响一目了然。
 
 ### 4.4 OpenAI Responses 离线 fixtures
 
@@ -663,7 +689,32 @@ HTTP 400 且结构化 `param` 为 `reasoning` / `reasoning.summary` 才省略 re
 第二次失败不发第三次。SSE 流内 error 已经取得流，只走既有唯一终态，绝不重新生成。
 这条断言保证 fixture replay、恢复与 retry 始终由本地 transcript 驱动。
 
-### 4.5 Provider models 离线 fixture
+### 4.5 Anthropic Messages 录制 fixture
+
+Anthropic adapter 已经是当前实现，不再是“新增 provider”的假想例。
+`src/providers/anthropic-messages/consume.test.ts` 通过生产同路径的
+`consumeAnthropicStreamForTest` 回放三个已录制 Messages 事件 fixture:
+
+| fixture | 当前覆盖 |
+|---|---|
+| `text.jsonl` | 文本三段式、`end_turn`、inclusive usage |
+| `tool.jsonl` | text + `tool_use`、`input_json_delta` 累积、wire id 保留 |
+| `thinking.jsonl` | thinking/signature 回放、ReasoningPart、reasoning usage |
+
+同一测试文件还用内联事件/SDK error 注入覆盖 usage 缺失与换算、stop reason、HTTP/
+network 错误、`Retry-After` 与 abort；`convert.test.ts` 覆盖出站 role/tool_result/thinking 转换。
+录制与真实端点冒烟对应的 package scripts 是:
+
+```bash
+bun run record:anthropic -- --scenario text \
+  --out src/providers/anthropic-messages/__fixtures__/text.jsonl
+bun run smoke:anthropic -- --model claude-opus-5
+```
+
+`--scenario` 可取 `text|tool|thinking`，冒烟命令可加 `--vision`。这两个命令会读本地
+Anthropic endpoint/key 并访问真实网络，只能由开发者明确手动执行；CI 只回放已入库的 JSONL。
+
+### 4.6 Provider models 离线 fixture
 
 `src/cli/__fixtures__/provider-models.json` 由
 `scripts/generate-provider-model-fixtures.ts` 确定性生成:
@@ -863,32 +914,44 @@ Markdown 测试注入 `MockTreeSitterClient`,由测试显式 resolve highlightin
 
 `e2e/tui.test.ts` 在 macOS 用系统 `/usr/bin/script` 为 **`Bun.build` 构建产物**提供真实双 TTY,显式移除 `COLORTERM` 后启动 faux TUI 并输入 `/quit`。它定位 prompt 顶线,直接断言 native ANSI 输出对透明单元格使用 SGR 49、横线使用 indexed/125 前景、硬件光标使用 OSC 12 `#c94740` 而非 `#ffffff`、DECSCUSR 为 blinking bar,且全程不能包含任何 `48;2` / `48;5` 实色背景。同时验证终端标题、退出码和 15 秒进程看门狗。`/usr/bin/script` 不是图形终端模拟器,不能验证窗口失焦时的 inactive cursor 外观。非 macOS 跳过这条平台专属探针,由 TestRenderer 的逐 span 断言继续提供跨平台覆盖。
 
-其余 e2e 主要使用 headless 模式验证机器可驱动入口，无需 PTY 仿真。阶段 0 默认仍是 stdin JSON
-命令、stdout NDJSON 裸 `SessionEvent`；阶段 1 起同一 harness 跑两遍：默认 legacy 投影必须逐事件
-兼容，显式 `--event-format=envelope` 则断言 op identity、`EventEnvelope` 与 per-thread seq。两种模式
-都不得把日志、审批旁路或 stdout 背压错误混进协议行（见 [09](./09-cli.md)）。
+其余 e2e 主要使用 headless 模式验证机器可驱动入口，无需 PTY 仿真。当前默认仍是 stdin JSON
+命令、stdout NDJSON 裸 `SessionEvent`；显式 `--event-format=envelope` 使用同一 harness，但现有
+L5 只是独立 smoke，**没有**把每个 legacy faux 剧本成对重跑。日志、审批旁路或 stdout
+背压错误仍不得混进任一协议行（见 [09](./09-cli.md)）。
 
 ```
 harness:
   child = Bun.spawn(['bun', 'dist/main.js', '--json', '--provider', 'faux',
-                     '--faux-script', 'e2e/scripts/<case>.json', '--cwd', tmpdir])
+                     '--faux-script', '<tmpdir>/faux-script-<random>.json', '--cwd', tmpdir],
+                    {env: sanitizedEnvWithIsolatedHome})
   写 stdin: {"type":"prompt","text":"..."}\n
-  逐行读 stdout NDJSON → legacy 事件或 envelope 断言(带 30s 看门狗)
+  逐行读 stdout NDJSON → legacy 事件或 envelope 断言(单等待 15s 看门狗,用例上限 60s)
 ```
 
-`--faux-script` 是 FauxScript 的可序列化子集(events + stopReason + usage,无回调无 gate)。用例:
+`--faux-script` 是 FauxScript 的可序列化子集(events + stopReason + usage,无回调无 gate)。当前 L5 用例:
 
 1. 纯文本对话:事件序列 `agent_start → message_* → agent_end(completed)`,退出码 0。
 2. 工具回路:脚本让模型 read tmpdir 里的预置文件,断言 `tool_execution_*` 事件与 tool_result 内容。
 3. steer:脚本 turn1 调 bash 工具跑 `sleep 0.5`;harness 观察到 `tool_execution_start` 后写入 steer 命令,断言后续出现 source:'steering' 的 message_start。文件脚本没有 gate,这里依赖 0.5s 窗口——**e2e 是唯一允许这种宽松时序的层**,该用例标记 `retry: 1`;其精确版本已在 L4 用 gate 钉死,e2e 只验「管道通」。
 4. abort:写 abort 命令,断言 agent_end(aborted)、进程干净退出。
-5. resume:会话 1 跑完退出,`--resume <id>` 启动会话 2,断言首个事件前的转录回显/usage 与会话 1 一致。
-6. envelope(阶段 1):同一 thread 的 seq 严格递增；resume 后续接旧 high-water mark；legacy 模式对同一 faux script 的内层事件深等于 envelope 投影。
-   先对预生成但尚不存在的 ThreadId 调用 `events()`、不调用 `next()` 就提交 create，首批 lifecycle/op
-   envelope 仍不得丢失；每个可解析 op 恰有一个 receipt frame，覆盖 duplicate/rejected，解析错误用
-   transport_error，而 legacy 流不得新增这些 frame。
-7. control(阶段 2):approval request/response 在阶段 1 wire 映射基础上进入同一 durable commit/replay
-   链；慢 stdout 触发 drain 时 run 已可完成，但 shutdown 等输出泵排空后才退出。
+5. resume:会话 1 跑完退出，`--resume <id>` 启动会话 2。legacy headless 不回显历史转录；
+   `e2e/resume.test.ts` 的证据是会话 1 JSONL 在会话 2 后仍逐记录保留为 append-only 前缀，
+   以及第二次 prompt 后 cumulative usage/turns 同时包含两次会话。
+6. envelope smoke:`e2e/envelope.test.ts` 固定 RuntimeOp stdin 不被当成 one-shot 文本、
+   accepted `thread_create` receipt、`thread_created` envelope 的 identity/整数 seq，以及 crash 后的
+   Supervisor attachment 能被 legacy resume 采纳。它当前不声称 seq resume 续接、双模式投影深等、
+   duplicate/rejected receipt 或 parse-error transport frame 的进程级覆盖。
+7. approval/control:`e2e/approval.test.ts` 在 legacy 运输上覆盖 deny/allow-once/allow-always、
+   abort/shutdown 与静态 deny；canonical control 的 durable commit/replay 深度断言当前位于 L4。
+
+完整设计门禁仍保留，但要把已有覆盖归到实际层级：`src/cli/envelope-headless.test.ts`
+覆盖 invalid input/scope dispatch/receipt，`src/cli/runtime-headless.test.ts` 覆盖 legacy 不新增 receipt frame；
+`src/session/event-committer.test.ts`
+覆盖 per-thread seq high-water 续接和慢 observer 不背压；`src/runtime/runtime-concurrency.test.ts`
+覆盖 OpId 幂等/冲突；`src/session/thread-runtime.test.ts` 与 `src/runtime/supervisor.test.ts` 覆盖
+control durable claim/replay。若后续需要进程级强证据，再把“同一 faux 剧本双跑、seq 恢复续接、
+duplicate/rejected/transport_error、canonical control 与慢 stdout drain”升为新的 L5 用例，
+在落地前不得写成当前 e2e 覆盖。
 
 ### 7.3 UX0–UX4 产品体验门禁
 
@@ -982,15 +1045,48 @@ stdout 只有 JSON record 且恰好一个终态，text progress 与 final 分流
 不能依赖当前渲染顺序生成后缀。TUI listener 对 delta 只排轻量 frame task，不等待 Markdown layout；Runtime
 EventHub observer-isolation 既有测试继续证明慢 frontend/切换 attachment 不反向背压 run。
 
-## 8. CI 建议
+## 8. 当前 CI 与规划门禁
 
-- **矩阵**:GitHub Actions,`os: [ubuntu-latest, macos-latest] × bun: [1.3.14]`。Windows 不进 v1 矩阵(bash 工具依赖 POSIX 进程组),CRLF 相关行为已由 L3 用例在 POSIX 上覆盖文件内容层面；双 OS 同时验证 `@vscode/ripgrep` 与 `@opentui/core` native optional dependency。
-- **步骤**:`bun install --frozen-lockfile` → `bun run lint` → `bun run typecheck` → `bun run test`。测试编排器依次运行 L1–L4、`Bun.build`、L5，因而在无 `dist/` 的干净检出中也自包含；`bun run test:unit` 只跑 L1–L4，`bun run test:e2e` 会先重建再跑 L5。编排器和 e2e harness 都显式净化继承环境中的 API key、base URL、token 与常见凭证，以 `--no-env-file` 启动子 Bun，并固定 `NODE_ENV=test`；每个 e2e 子进程还使用临时 HOME，不能读取或清理用户的真实 Coda 配置与数据。统一交付入口为 `bun run check`,总预算 < 5 分钟,L1–L4 < 60 秒。
-- **边界规则自检**:lint 步骤跑 `import/no-restricted-paths` 与 `no-restricted-imports`(`openai` 只准出现在两个 OpenAI adapter，且所有 provider 互相隔离);另加一个「守卫的守卫」测试——程序化调用 ESLint 检查违规 import 与合法 Responses 白名单片段,断言规则确实报错/放行。阶段 1/3 新增 runtime/capabilities 正反例：runtime 不得 import CLI/具体 adapter/tool，capabilities 不得 import CLI/session，CLI 的业务调用只经 `RuntimePort`。opencode V1 的 `tools: Record<string, ai.Tool>` 类型泄漏说明:边界靠自觉必失守,必须机械强制且强制本身要有测试。
-- **无密钥**:CI 环境不配置任何 API key;`record-fixture.ts` 只在开发者本机手动跑。可选:manual-dispatch 的 nightly workflow 用 secret 对真实 API 做一次冒烟(basic-text + tool call),失败只告警不 block。
-- **flake 政策**:只有 §7.2 headless e2e 用例 3 允许 `retry: 1`;其余任何测试出现 flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
-- **覆盖率**:`bun test --coverage` 产出 Bun coverage / LCOV；对 `src/protocol`、`src/agent` 与真实 adapter 保持行覆盖阈值 90%,若 Bun 原生配置只能表达全局阈值,则由 CI 读取 LCOV 做目录级 gate。`src/cli` 不设统一阈值,但 TUI 的纯格式函数和关键布局/键位必须由 TestRenderer 回归。
-- **确定性守则**(写进 CONTRIBUTING):测试内禁用裸 `setTimeout` 等待(用 gate 或事件等待);id/timestamp 经注入的 idgen/clock 或快照归一化;快照只对「事件 type 序列」做,不对含时间戳的完整对象做。
+下列条目明确区分已落地的 workflow 与尚未机械强制的设计目标，不得把“建议/规划”
+写成当前 CI 已证明的结论。
+
+- **当前矩阵**:`.github/workflows/ci.yml` 的 strategy matrix 只包含
+  `os: [ubuntu-latest, macos-latest]`，并由 setup-bun 对两个 OS 固定安装 Bun 1.3.14。Windows 不进 v1 矩阵(bash 工具依赖
+  POSIX 进程组)，CRLF 内容行为由 L3 在 POSIX 上覆盖。双 OS 会执行 rg/OpenTUI 相关测试，
+  但 `resolveRgPath()` 允许回退 PATH 中的 `rg`，因此现有测试不能单独证明
+  `@vscode/ripgrep` 的 bundled platform binary 已被选中；若这是发布门禁，还需独立探针。
+- **当前步骤**:workflow 运行 `bun install --frozen-lockfile` 后调用 `bun run check`。
+  `check` 依次执行 lint、typecheck 与测试编排器；编排器先跑 L1–L4，再 `Bun.build`，最后跑 L5，
+  因而在无 `dist/` 的干净检出中自包含。`bun run test:unit` 只跑 L1–L4；
+  `bun run test:e2e` 会先重建再跑 L5，应优先于可能读取陈旧 `dist/` 的裸 `bun test e2e`。
+  编排器和 e2e harness 显式净化 API key/base URL/token/常见凭证，内层 Bun 用
+  `--no-env-file` + `NODE_ENV=test`，e2e 子进程使用测试拥有的 HOME。“总预算 < 5 分钟、
+  L1–L4 < 60 秒”仍是性能目标，workflow 当前没有 suite-level 时间门禁。
+- **当前边界门禁**:lint 和 `tests/boundaries.test.ts` 已机械验证
+  `import/no-restricted-paths` / `no-restricted-imports`，包括合法的 OpenAI Responses 白名单、
+  provider 隔离与 runtime/capabilities 正反例。这些是已列方向的证据，不是所有层间设计方向的完整
+  allowlist 证明；agent/tools/session/providers 与 `integrations/legacy-session-runtime` 仍有若干
+  internal-path 方向只由契约/review 约束，准确清单见 [02 §3.3](./02-architecture.md)。补齐时必须同时
+  增加 zone 与正反探针。**已知 CI 缺口**：workflow 的第二道 grep
+  只排除 `providers/openai-chat`，没有排除同样合法的 `providers/openai-responses`；当前
+  Responses imports 会使该 grep 退出 1。这是 workflow 实现缺口，不是可放宽的架构例外；
+  修复前不得把双 OS CI 写成“当前稳定全绿”。
+- **当前无密钥**:CI 不配置 API key；`record:fixture`、`record:anthropic`、`smoke`与
+  `smoke:anthropic` 只能在开发者明确手动执行。带 secret 的 manual-dispatch/nightly 真实 API
+  冒烟仍是可选规划，当前没有对应 workflow。
+- **flake 政策**:只有 §7.2 headless e2e 用例 3 允许 `retry: 1`；其余任何测试出现
+  flake 按 bug 处理(几乎总意味着漏了 gate 或用了真实计时器)。
+- **覆盖率现状与规划**:当前没有 coverage package script、`bunfig.toml` 配置、CI LCOV 上传或
+  阈值 gate。Bun 1.3.14 的 `bun test --coverage` 默认只输出 text reporter，不会自动产出 LCOV；
+  该裸命令还绕过现有的净化编排器，并可能让 e2e 读到陈旧 `dist/`。设计目标仍是对
+  `src/protocol`、`src/agent` 与真实 adapter 保持 90% 行覆盖；落地时必须新增专用的
+  无密钥 coverage 编排命令，显式使用 `--coverage-reporter=lcov`，再由 CI 读取 LCOV 做
+  目录级 gate。在此之前 90% 是未机械强制的规划值，不是当前交付结论。`src/cli`
+  不设统一阈值，但 TUI 的纯格式函数和关键布局/键位仍必须由 TestRenderer 回归。
+- **确定性守则**:权威规则已写入 [CODING_RULES](./CODING_RULES.md) §5：测试内禁用裸
+  `setTimeout` 猜时机(用 gate 或事件等待)；id/timestamp 经注入的 idgen/clock 或快照归一化；
+  快照只对事件 type 序列做，不对含时间戳的完整对象做。仓库当前没有 `CONTRIBUTING.md`，
+  因此不再把一个不存在的文件写成已落地门禁。
 
 ## 9. 验收清单
 
@@ -1015,14 +1111,20 @@ EventHub observer-isolation 既有测试继续证明慢 frontend/切换 attachme
 而推断未在当前环境重跑的双 OS CI 等外部结果。
 
 - [ ] M1:L1 全绿;faux provider 通过「事件语法自检」用例集(每种 FauxTurn 形态产出的事件序列合法、铁律成立)。
-- [ ] M2:§4.2 全部 11 个 fixture 入库且断言通过;两个错误路径单测(reject 不外抛、abort 映射)通过;`record-fixture.ts` 可用。
+- [ ] M2:§4.2 全部 12 个 synthetic canonical fixture 入库且断言通过，额外两个
+  recorded Kimi fixture 保持回归；错误注入与 abort 映射通过；`record:fixture`/`smoke` 仅手动可用。
 - [ ] OpenAI Responses:§4.4 九个生成式 fixture、HTTP/factory 错误注入与出站 replay 测试全部通过；`previous_response_id` 不进入请求；agent core 零改动。
-- [ ] Provider 登录/模型目录:§4.5 生成式 fixture、OAuth 占位、OpenCode 混合 mapping、多个 Custom、刷新失败、恢复/切换/logout 与 TUI 密钥不泄漏回归全部通过。
+- [ ] Anthropic Messages:§4.5 的 text/tool/thinking 三个录制 fixture、usage/stop/error/abort 注入与出站
+  role/tool_result/thinking 转换全部通过；`record:anthropic`/`smoke:anthropic` 仅手动可用。
+- [ ] Provider 登录/模型目录:§4.6 生成式 fixture、OAuth 占位、OpenCode 混合 mapping、多个 Custom、刷新失败、恢复/切换/logout 与 TUI 密钥不泄漏回归全部通过。
 - [ ] M3:工具矩阵(§6)全绿,macOS 与 Linux 双平台;bash kill tree 用例验证无孤儿进程。
 - [ ] M4:§5 用例 1–8 全绿,steering/follow-up/abort/transform 的断言全部基于 `calls` 与事件序列,无一处依赖真实时间。
 - [ ] M5:session 持久化集成测试、OpenTUI 顶部起排/固定 footer/resize 与 Enter/Shift+Enter 回归、共享纯键位逻辑测试，以及 headless e2e 用例 1–5 全绿。
 - [ ] M7:§5 用例 9(retry/compaction)全绿。
-- [ ] CI:双 OS × Bun 1.3.14 矩阵稳定通过,总时长 < 5 分钟;边界规则自检在位。
+- [ ] CI:修复 Responses 合法 import 被第二道 grep 误拦的已知缺口后，双 OS × Bun 1.3.14
+  矩阵稳定通过；总时长 < 5 分钟的性能目标有实际 CI 记录支持。
+- [ ] Coverage:新增无密钥的专用编排命令与 LCOV 目录级 gate；落地前不声称
+  protocol/agent/adapter 的 90% 行覆盖已由 CI 机械保证。
 
 ## 相关文档
 

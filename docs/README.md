@@ -1,16 +1,32 @@
-# coda 实施计划文档地图
+# coda 开发文档地图
 
 **coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 被严格隔离在各自 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
 
-本目录是该项目的完整实施计划,共 13 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，第 13 篇冻结 CLI/TUI UX0–UX4 的用户旅程、surface 边界、恢复与性能契约；阶段实施与兼容时限以 11 为准。
+本目录是该项目的开发文档入口，共 13 篇编号文档。它们同时承担**现行设计契约、实现参考与历史决策记录**：第 12 篇是多线程 Runtime 的总契约，第 13 篇是 CLI/TUI 的产品契约，第 11 篇记录已经完成的阶段和当前交付边界。带“阶段 0”“当时”等字样的段落用于解释迁移历史，不能覆盖同篇标明的当前实现基线。
+
+## 当前实现基线
+
+当前状态与 `main` 的 `b793a89`（2026-08-03）实现基线对齐；本次文档同步发生在其后的工作区中。
+
+| 实现面 | 当前状态 | 主要入口 / 证据 |
+|---|---|---|
+| Runtime 阶段 0–3 | 全部完成 | `src/protocol/`、`src/session/`、`src/runtime/`、`src/capabilities/`；阶段提交见 [11](./11-roadmap.md) |
+| CLI UX0–UX4 | 全部完成 | TUI、review/diff、session switch、fork/retry、PTY/性能与 automation output 已落地；classic/line REPL 已退役 |
+| 交互 surface | 已收敛 | OpenTUI 是唯一长驻交互面；另保留 one-shot human output、legacy `--json` 与显式 envelope/output 模式 |
+| capability composition | 双路径稳定 | `coda/runtime` + `coda/capabilities` 提供 opt-in registry mode；production CLI 与 direct `Agent`/`Session` 仍有意走 static compatibility path |
+| 质量门禁 | 有已知加固项 | 本地 `bun run check` 可覆盖当前代码门禁；远端 workflow 的 Responses grep 仍有误拦，部分 internal-path 设计方向尚未形成完整 ESLint allowlist，见 [10 §8](./10-testing.md) / [02 §3.3](./02-architecture.md) |
+| 后续路线 | 尚未立项 | 当前没有进行中的编号阶段；OAuth、MCP、server/client、持久 PTY shell、Windows 全矩阵等仍是明确边界，不应被写成已交付 |
+
+阶段完成状态只在 [11 路线图](./11-roadmap.md) 和 [10 §9](./10-testing.md) 维护。其余专题文档中的空复选框是**相关改动时要重新执行的回归清单**，不是未完成 backlog；新增阶段时必须同时更新本节、11、10 §9 和受影响的设计契约。
 
 ## 文档性质与约定
 
-三条使用约定,适用于全部 13 篇:
+四条使用约定,适用于全部 13 篇:
 
 1. **类型是 canonical 的。**文档中出现的 TS 类型定义(`AgentMessage`、`ProviderEvent`、`StreamFn`、`ToolDefinition` 等)在各篇之间逐字一致,以 [03 内部协议](./03-internal-protocol.md) 与各自宿主篇为准。实现时可以补充新字段、新类型,但不得改名、改语义。
 2. **每篇独立可读,交叉引用用相对链接。**每篇开头一行面包屑回到本地图,结尾「相关文档」小节指向最相关的 2–4 篇。
 3. **引用参考项目用短名。**正文写「pi-mono 的 agent-loop.ts」「codex 的 protocol.rs」这类短名,仓库全名统一列在本篇末尾的参考仓库表,不在正文里放长链接。
+4. **现状与历史显式分开。**“当前实现”“已完成”必须能由源码、测试或提交记录直接证明；迁移期的未来时态只保留在明确标为历史的段落中。专题验收清单默认是可重复执行的 review 模板，不能据其勾选状态推断项目进度。
 
 ## 阅读顺序与依赖关系
 
@@ -73,7 +89,7 @@ graph TD
 2. [12 Supervisor、多线程 Runtime 与能力快照](./12-supervisor-runtime.md) —— 新基线、身份、mailbox、取消、恢复、权限与兼容矩阵
 3. [02 架构与分层](./02-architecture.md) —— 目录与依赖规则
 4. [03 内部协议](./03-internal-protocol.md) —— canonical 类型
-5. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn、Chat Completions 与 Responses
+5. [04 Provider 与 adapter](./04-provider-adapter.md) —— StreamFn、Chat Completions、Responses 与 Anthropic Messages
 6. [05 Agent 循环](./05-agent-loop.md) —— runLoop 与工具执行
 7. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
 8. [07 工具集](./07-tools.md) —— 八个工具的规格
@@ -91,7 +107,10 @@ graph TD
 
 ### [02 架构与分层](./02-architecture.md)
 
-canonical 目录结构（含 `protocol` / `capabilities` / `agent` / `session` / `runtime` / `cli`）与 ESLint 机械强制的依赖方向,以及一次 op 从 RuntimePort 到 wire 再以 envelope 回到前端的端到端数据流。「SDK 只允许出现在所属 adapter，provider 互相隔离」这条铁律的执行细节在此定义。
+canonical 目录结构（含 `protocol` / `capabilities` / `agent` / `session` / `runtime` / `cli`）、设计依赖方向、
+当前 ESLint 机械覆盖与已知 gap，以及一次 op 从 RuntimePort 到 wire 再以 envelope 回到前端的端到端
+数据流。「生产 SDK 只允许出现在所属 adapter，provider 互相隔离」这条铁律及手动 recorder 例外的
+执行细节在此定义。
 
 ### [03 内部协议](./03-internal-protocol.md)
 
@@ -99,7 +118,9 @@ canonical 目录结构（含 `protocol` / `capabilities` / `agent` / `session` /
 
 ### [04 Provider 与 adapter](./04-provider-adapter.md)
 
-StreamFn 接口契约(never-throw 铁律)、Chat Completions adapter 细节，以及 Responses 的 transcript replay、reasoning/function-call/terminal 事件转换契约。结尾附「新增一个 provider」的操作指南。
+StreamFn 接口契约（never-throw 铁律）、Chat Completions、OpenAI Responses 与 Anthropic Messages
+adapter 细节，以及 model directory / static compatibility dispatch / opt-in ProviderAdapterRegistry 的
+双路径边界。Anthropic 作为已落地范例承载「新增 provider」操作指南。
 
 ### [05 Agent 循环](./05-agent-loop.md)
 
@@ -127,7 +148,7 @@ CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI 是�
 
 ### [11 路线图](./11-roadmap.md)
 
-阶段 0–3 的严格串行路线：契约与 characterization → identity/envelope/RuntimePort → Session 六协作者与事件通道 → registry/snapshot/prompt/policy。每阶段都必须 review 清零、全量检查、提交并推送后才能进入下一阶段；M0–M7 仅保留为历史实现索引。
+已完成的阶段 0–3 路线：契约与 characterization → identity/envelope/RuntimePort → Session 六协作者与事件通道 → registry/snapshot/prompt/policy；随后完成 CLI UX0–UX4。当前没有 active 编号阶段，M0–M7 仅保留为历史实现索引。
 
 ### [12 Supervisor、多线程 Runtime 与能力快照](./12-supervisor-runtime.md)
 
@@ -140,7 +161,7 @@ UX0–UX4 的权威产品契约：六条核心用户旅程，TUI、one-shot 与 
 ## 按角色的阅读路径
 
 **我想尽快把代码跑起来(实现者)。**
-01 → 12 → 11（确认当前阶段）→ 02 → 03 → 10；进行终端产品阶段时再精读 09/13，并按 UX0–UX4 的门禁执行。
+01 → 12 → 11（确认当前基线）→ 02 → 03 → 10；进行终端产品工作时再精读 09/13。新增阶段前先在 11 建立范围和门禁，不要继续沿用已完成的 UX0–UX4 名称。
 
 **我想搞懂协议设计(架构评审)。**
 12 → 03 → 04 → 06：先看 identity/envelope 总契约，再看内部协议、wire 隔离和 thread-local mailbox/取消。
@@ -209,9 +230,13 @@ workspace scope op 则在接收时冻结多个 thread/run 目标快照。
 
 ### Provider 与 adapter
 
-**adapter / provider** —— 把某家 API 的 wire 协议翻译为内部协议的模块,住在 `src/providers/<name>/`;两个 OpenAI adapter 允许 `import "openai"`，但彼此不得导入。
+**adapter / provider** —— 把某家 API 的 wire 协议翻译为内部协议的模块,住在
+`src/providers/<name>/`；两个 OpenAI adapter 只能各自在白名单内 import `openai`，Anthropic
+Messages adapter 只能在自己的白名单内 import `@anthropic-ai/sdk`，三个真实 adapter 彼此不得导入。
 
-**wire 协议** —— 各家 API 的原始类型(如 `ChatCompletionMessageParam`、`ChatCompletionChunk`),只存在于 adapter 内部,严禁出现在其他层的签名中。
+**wire 协议** —— 各家 API 的原始类型(如 `ChatCompletionMessageParam`、`ChatCompletionChunk`)在
+生产 `src/` 中只存在于 adapter 内部，严禁出现在其他层的签名中；手动 fixture recorder 可在
+`scripts/` 内以局部 lint 说明直接读取 wire。
 
 **transform 层** —— 每次出站请求前对转录做的清洗:过滤 aborted / error 的 assistant 消息、为孤儿 toolCall 补合成 isError 结果、跨模型 reasoning 降级、toolCallId 归一化——保证 wire 协议的配对约束永远合法。
 
@@ -258,9 +283,9 @@ capability。新的 core 消费 ToolCatalogSnapshot/PreparedInvocation，不直�
 | `google-gemini/gemini-cli` | 工具调用显式状态机(pending → awaiting_approval → executing → …)、tree-sitter-bash 命令结构解析、grep 匹配少时自动附 context。 |
 | `openai/openai-node` | Chat Completions 与 Responses wire 的事实细节:流式文本/reasoning/function-call 事件、tool call 累积与配对、terminal/usage/error 语义、SDK 错误体系。 |
 
-## 阶段与文档对照
+## 已完成阶段与文档对照
 
-按 [11 路线图](./11-roadmap.md) 严格串行施工时，每个阶段动工前应精读：
+下表用于回溯既有实现为什么依赖这些契约，也可作为同一领域后续改动的阅读索引：
 
 | 阶段 | 主要交付 | 动工前精读 |
 |---|---|---|
@@ -283,7 +308,7 @@ capability。新的 core 消费 ToolCatalogSnapshot/PreparedInvocation，不直�
 1. **加字段 / 加联合分支**：先改宿主契约（identity/op/envelope/Supervisor 在 12 与 03，
    capability/policy 在 07，provider adapter 在 04），同一次修改里检索并同步全部引用。
 2. **改名 / 改语义**:视为设计变更,先回 [01 目标与总览](./01-overview.md) 检查是否推翻了某条决策,再改宿主篇,再同步引用处;涉及 wire 边界(需求 1)或注入点语义(需求 2)的改动必须同步更新 01 的验收清单。
-3. **文档与代码冲突时**:以文档为准先行修订,代码跟随——反向「代码先改、文档后补」是 pi-mono AgentSession 失控路径的第一步,禁止。
+3. **文档与代码冲突时**：先用测试、提交记录与上位契约确认预期。若代码是有意的行为变更，同一工作项同步修订宿主文档和回归测试；若代码违反契约，则修代码。禁止在没有确认语义的情况下只改其中一边。
 
 ## 相关文档
 

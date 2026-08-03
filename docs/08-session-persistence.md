@@ -57,7 +57,7 @@ flowchart LR
 | `TranscriptRepository` | thread journal 的 append/load/fold IO 与 transcript view（含 identity、mailbox、control、compaction、event records） | 分配 seq、决定 op/control/retry、事件广播 |
 | `RetryCoordinator` | 错误分类、attempt 状态、可取消退避与重试决策 | 直接改 transcript、分配/持久化 identity 或复用旧 run |
 | `CompactionCoordinator` | 阈值/overflow 决策、摘要、合法切点与 active transform view | 拥有 Agent 消息数组或分配/持久化 identity |
-| `EventCommitter` | 经 runtime-only awaited authoritative sink 分配 per-thread `seq`，权威提交 transcript/seq/control，产出一个或原子连续的一组 `EventEnvelope` | 注册为 public Agent subscriber 或执行普通 observer 回调 |
+| `EventCommitter` | Agent 事件经 `LegacyThreadExecution` 构造期私有 `Agent.subscribe` bridge 与 awaited `authoritativeEventSink` 汇入；ThreadRuntime 的 control/lifecycle 经同一 thread writer 直接汇入。统一分配 per-thread `seq`，权威提交 transcript/seq/control，并产出一个或原子连续的一组 `EventEnvelope` | 充当普通 public subscriber/observer，执行其回调，或依赖 Emitter 把 listener rejection 传回 run |
 | `EventHub` | 每 workspace 一个；汇聚所有 per-thread committer，支持未来 thread filter、cursor、每观察者保序与故障隔离 | 持有 ThreadRuntime/全局执行状态、重新编号、成为事实源或反向背压 Agent |
 
 usage 是从 repository transcript fold 出的纯投影；可保留 `UsageTracker` 作为内部 reducer，但它不
@@ -90,7 +90,8 @@ canonical 外部入口是 `RuntimePort.submit(RuntimeOp)` / `events()`；`Superv
 ```ts
 export type ExternalThreadRuntimeOp = Exclude<
   RuntimeOp,
-  { type: 'thread_create' | 'thread_resume' | 'cancel_scope' }
+  { type: 'thread_create' | 'thread_resume' | 'conversation_fork' | 'conversation_retry'
+      | 'cancel_scope' }
 >;
 
 export type ThreadRuntimeOp = ExternalThreadRuntimeOp | InternalThreadRuntimeOp;
@@ -127,8 +128,8 @@ export interface SessionOptions {
   agentConfig: AgentConfig;          // streamFn/model/tools/systemPrompt 由 CLI 组装后传入
   dir?: string;                      // 默认 ~/.coda/sessions
   pricing?: ModelPricing;            // 成本计算,见第 7 节;缺省则 costUSD 不计算
-  retry?: RetryOptions;              // M7,见第 5 节;sleep 可注入以确定性测试退避
-  compaction?: CompactionOptions;    // M7,见第 6 节
+  retry?: RetryOptions;              // 当前已实现；见第 5 节，sleep 可注入以确定性测试退避
+  compaction?: CompactionOptions;    // 当前已实现；见第 6 节
 }
 
 export class Session {
@@ -140,13 +141,15 @@ export class Session {
 
   prompt(text: string): Promise<void>;   // 门面:compaction 期间暂存,其余透传 agent.prompt
   continue(): Promise<void>;             // 仅 idle；恢复残局时经 Session 门面续跑
-  steer(text: string): void;             // 透传 agent.steer
-  followUp(text: string): void;          // 透传 agent.followUp
+  steer(input: string | UserMessage): void;    // 透传 agent.steer，已构造消息的 id 保持不变
+  followUp(input: string | UserMessage): void; // 透传 agent.followUp，已构造消息的 id 保持不变
   abort(): void;                         // 透传,同时取消退避等待/压缩请求
   interactionState(): 'idle' | 'running' | 'retrying' | 'compacting';
   currentModel(): ModelRef;
   setModel(model: ModelConfig): void;     // 仅 idle；切换下一次采样使用的完整配置
+  status(): { usage: SessionUsage; model: ModelRef; sessionId: string };
   usage(): SessionUsage;
+  readonly messages: readonly AgentMessage[]; // 当前 canonical seed/transcript 的只读兼容投影
   waitForIdle(): Promise<void>;          // 等 Agent 与 detached retry/compaction 链共同稳定
   subscribe(listener: (e: SessionEvent) => void | Promise<void>): () => void;
   close(): Promise<void>;                // flush 落盘 + 关闭文件句柄
@@ -155,7 +158,7 @@ export class Session {
 export type SessionEvent =
   | (AgentEvent & { willRetry?: boolean })              // 透传；重试中的 agent_end 带注解
   | { type: 'retry_scheduled'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' }
+  | { type: 'compaction_start'; reason: 'threshold' | 'overflow' | 'manual' }
   | { type: 'compaction_end'; ok: boolean; droppedMessages: number }
   | { type: 'usage_update'; usage: SessionUsage };
 ```
@@ -658,9 +661,14 @@ read-only load 仍走完整 oracle。只有 fd flush 成功且 post-write bounda
 - 流式期间不把 partial assistant 写成 transcript mutation：只有 `message_end` 才追加终态消息。
   但每个 `message_update` envelope 本身仍作为 commit record 持久化，才能支持按 seq cursor 无缝重放；
   崩溃后可能没有对应终态 message，转录仍合法，事件订阅者则可重放已提交的 partial/delta。
-- 落盘确定性：只有独立 runtime-only `authoritativeEventSink` 调用的 `EventCommitter` 权威 append/flush
-  可以背压 Agent；committer 绝不能注册到会 catch listener rejection 的 public Agent Emitter。普通 UI/headless/telemetry
-  observer 由 `EventHub` 独立异步入队，变慢或失败不得拖慢 provider、工具或其他 thread。直接
+- 落盘确定性：runtime-managed `LegacyThreadExecution` 在构造时先注册私有
+  `Agent.subscribe` bridge；该 listener await `authoritativeEventSink` 内的 `EventCommitter` 权威
+  append/flush，因而只有这条提交链可以背压 Agent。Agent 的通用 Emitter 会隔离
+  listener rejection，所以 bridge 必须自行 catch commit failure、latch `authoritativeFailure`
+  并 abort 当前 op/Agent；后续 awaited emit、provider/tool 启动与 side-effect gate 都先重新
+  抛出/检查该 latch，不能把提交失败当成一次普通 observer 错误。这是 runtime 内部桥接，
+  不是消费者可替换的 public observer 契约。普通 UI/headless/telemetry observer 由 `EventHub`
+  独立异步入队，变慢或失败不得拖慢 provider、工具或其他 thread。直接
   `Agent.subscribe` 仍保留阶段 0 awaited Emitter 语义；阶段 2 的 `Session.subscribe` 已改由 private
   journal-backed cursor pump 异步投递。`ThreadRuntime.close()` 必须等待 active run 与权威提交；各前端在关闭订阅后自行
   等待输出泵 drain，不能把 UI drain 重新塞回 core 提交链。
@@ -822,7 +830,7 @@ ownership markers 去重，原 prompt 文本只能进入 transcript/provider 一
   write lease 都是硬约束，不以“调用方自行避免”或新 processEpoch 代替；只读审计可以并发，但不得
   接受 op 或发布新 seq。
 
-## 5. auto-retry(M7)
+## 5. auto-retry（历史 M7，当前已实现）
 
 ### 5.1 错误分类:结构化优先,字符串兜底
 
@@ -920,7 +928,7 @@ RetryCoordinator 产出重试决策后，ThreadRuntime/driver host 立即 durabl
 mailbox；匹配 successor RunId 的 abort 会取消计时器并以 aborted 结案该 activity。其他 thread 的
 abort 不得影响这条链，仍指向 predecessor 或更旧 RunId 的迟到 abort 必须拒绝。
 
-## 6. compaction(M7)
+## 6. compaction（历史 M7，当前已实现）
 
 ### 6.1 触发:threshold 主动 + overflow 被动
 
@@ -988,7 +996,7 @@ signal，其他 thread 的 Esc/abort 不能取消它。
 
 ```ts
 export interface CompactionOptions {
-  enabled?: boolean;        // M7 起默认 true
+  enabled?: boolean;        // 当前默认 true
   threshold?: number;       // 0.8
   keepRatio?: number;       // 0.25
   summaryMaxTokens?: number; // 2000
@@ -1106,7 +1114,7 @@ export interface ModelPricing {   // 每百万 token 美元价
 - [ ] 每个 thread 的 envelope seq 严格递增且恢复后继续 high-water mark；两个 thread 的 seq 独立，不伪造全局顺序
 - [ ] accepted OpId 恢复后可去重且不重复副作用；同 workspace 的第二个 mutable Runtime 被拒绝，
   crash 后新 fencing token 可恢复，旧 token 的 thread append 仍失败
-- [ ] 只有独立 authoritative sink 的 `EventCommitter` 权威写入 gate 背压 Agent；public subscriber reject 仍隔离，慢 EventHub observer 不背压 run，关闭时前端输出泵仍完整 drain
+- [ ] 构造期私有 `Agent.subscribe` bridge await authoritative sink，使 `EventCommitter` 权威写入 gate 背压 Agent；commit reject 被 fatal latch 并 abort run，public subscriber reject 仍隔离，慢 EventHub observer 不背压 run，关闭时前端输出泵仍完整 drain
 - [ ] fire-and-forget tool update 的 commit reject 会 latch writer fatal、abort run/tool signal，后续 side-effect gate 不越过
 - [ ] v1 Session JSONL 不原地改写且可确定性映射默认 workspace/thread；legacy `SessionEvent` 逐事件兼容
 - [ ] M5:`Session.create/resume/list/close` 可用;每条 message_end 追加落盘;`close()` 后 kill -9 再 resume,转录与 usage 完整。

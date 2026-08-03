@@ -181,6 +181,9 @@ bun run check   # lint + typecheck + build + unit/e2e
 git diff --check
 ```
 
-`bun.lock` 是唯一依赖锁文件；CI 在 Linux 与 macOS 验证 `@vscode/ripgrep` 的平台二进制。
-分层和产品契约见 [docs/README.md](docs/README.md)，实施状态见
-[docs/11-roadmap.md](docs/11-roadmap.md)。
+`bun.lock` 是唯一依赖锁文件；CI matrix 配置为 Linux 与 macOS。当前 workflow 的已知边界检查缺口
+见 [测试文档 §8](docs/10-testing.md#8-当前-ci-与规划门禁)，修复前不把远端矩阵表述为稳定全绿，
+也不把现有 rg 回归测试表述为已证明一定选中了 `@vscode/ripgrep` 的 bundled platform binary。
+Runtime 0–3 与 CLI UX0–UX4 已全部进入当前基线，项目目前处于完成后的维护、加固与 surface 收敛
+阶段，没有进行中的编号里程碑。分层和产品契约见 [docs/README.md](docs/README.md)，完成记录、
+当前兼容边界与尚未立项的后续范围见 [docs/11-roadmap.md](docs/11-roadmap.md)。

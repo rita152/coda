@@ -182,43 +182,25 @@ interface CommandSpec {
 - 所有互斥和缺参错误包含稳定 error code、问题说明和一条可复制的修复命令。unknown flag 使用编辑距离
   给出至多一个最接近候选，但不自动执行。
 
-### 3.1 Canonical action inventory
+### 3.1 当前 catalog inventory 与 Runtime-only 输入
 
-下表在 UX0 冻结名称与语义所有者；UX1–UX3 按阶段逐项落地。`RuntimePort（新增 query/op）` 表示该
-业务能力必须先扩展并维护 12 的 public port 契约，不能由 CLI 绕过 port 读取 repository、Git 或
-Agent/Session private state。
+精确的 command id、alias、参数、顺序与快捷键以 `src/cli/command-catalog.ts` 的唯一
+`COMMAND_SPECS` 为事实源；本文冻结分组、surface 与语义所有者，不再复制一张容易漂移的逐命令
+平行清单。当前 inventory 为：
 
-| action id | CLI 入口 | TUI 入口 | 可用性与唯一语义所有者 |
-|---|---|---|---|
-| `help.show` | `coda -h`、`coda --help` | `/help`、palette | 总是；纯 `CommandCatalog`，零副作用 |
-| `version.show` | `coda -V`、`coda --version` | help/about | 总是；package build metadata，零副作用 |
-| `doctor.run` | `coda doctor [--json]` | `/doctor`、palette | 无 run 也可；CLI-edge 只读诊断，`--json` 只写机器 stdout |
-| `completion.generate` | `coda completion <bash\|zsh\|fish\|powershell>` | help link | 总是；纯 catalog generator，未知 shell 退出 2 |
-| `auth.login` | `coda auth login` | `/login` | idle/no-model；provider configuration controller |
-| `auth.logout` | `coda auth logout` | `/logout` | 已配置 provider；provider configuration controller |
-| `auth.status` | `coda auth status` | `/auth`（alias `/auth-status`）、palette | 总是；只返回无秘密 provider 状态 |
-| `models.list` | `coda models` | `/model` 的目录步骤 | 已认证；只列 provider catalog，不创建 thread |
-| `models.select` | `coda models --select <ref>` | `/model` 的确认步骤 | CLI 只保存已验证的默认选择且保持零 thread/journal；首次任务/resume 才由 composition root attach，已 attach `/model` 才经 RuntimePort 模型配置适配 |
-| `task.exec` | `coda exec [现有 flags] [prompt]` | prompt composer | root 裸 prompt/`-p` 的增量别名；同一 RuntimePort prompt、退出码和 wire |
-| `task.steer` | headless op | Enter / `/steer` | 当前目标 run 可 steer；RuntimePort identity op |
-| `task.follow_up` | headless op | Alt+Enter / `/followup` | 已选模型；RuntimePort identity op |
-| `task.abort` | signal/headless op | Esc / `/abort` | 仅当前 `(threadId, expectedRunId)`；RuntimePort op |
-| `task.status_queue` | — | `/status`、`/queue` | attachment 存在；只读 RuntimePort snapshot |
-| `sessions.list` | `coda sessions` | `/sessions` | 零 attached thread 也可；`RuntimePort.listThreadDetails()` |
-| `sessions.new` | — | `/new` | idle 或显式后台切换；RuntimePort thread create |
-| `sessions.resume` | 保留 `--resume` | `/resume [thread]` | catalog 中可恢复；RuntimePort resume |
-| `sessions.switch` | — | `/switch [thread]` | 目标存在；只切 attachment/query，不 abort 源 run |
-| `sessions.rename` | — | `/rename <name>` | 目标存在；`RuntimePort.thread_rename` |
-| `sessions.archive` | — | `/archive [on\|off]` | archive-on 要求目标无 active control；`RuntimePort.thread_archive` |
-| `review.diff` | 显式 command/output | `/diff [turn\|workspace]` | attachment 存在；`RuntimePort.getDiffSnapshot()` |
-| `review.run` | 显式 command/output | `/review` | attachment 存在；`RuntimePort.getReviewSnapshot()`，不直调 Agent |
-| `content.copy` | 显式 command/output | `/copy [latest\|raw]` | snapshot/envelope projection；纯前端 copy/export port |
-| `content.export` | 显式 command/output | `/export [path]` | snapshot/envelope projection；安全导出 port |
-| `context.compact` | headless op | `/compact` | attachment 可 compact；RuntimePort op |
-| `permissions.show` | 显式 command/output | `/permissions` | attachment 存在；只读 policy/control snapshot/query |
-| `conversation.retry` | — | `/retry [turn-id]` | 已终结 turn、源无 active/control；RuntimePort conversation op |
-| `conversation.fork` | — | `/fork [turn-id]` | 有 committed transcript、源无 active/control；RuntimePort conversation op |
-| `draft.stash_restore` | — | `/stash`、`/restore` | 非 secret composer；presentation store，不写 Runtime |
+| 分组 | 当前 `CommandSpec.id` | surface / 唯一语义所有者 |
+|---|---|---|
+| bootstrap/help | `help.show`、`version.show`、`doctor.run`、`completion.generate`、`palette.open`、`app.quit` | help/version 与纯 catalog 路径零副作用；quit 只负责前端收束 |
+| provider | `auth.login`、`auth.logout`、`auth.status`、`models.list` | `models --select` 是 `models.list` 的 option，不是独立 id；provider controller 持有凭据与目录 |
+| task | `task.exec`、`task.status`、`task.queue`、`task.follow-up`、`task.abort` | prompt/follow-up/abort 经 RuntimePort；status/queue 只读 projection |
+| session/conversation | `sessions.list`（CLI）、`session.new`、`session.list`、`session.resume`、`session.switch`、`session.rename`、`session.archive`、`conversation.fork`、`conversation.retry`、`conversation.compact` | CLI catalog 与交互 picker 分开命名；业务动作只经 RuntimePort op/query |
+| review/transcript | `transcript.scroll`、`transcript.search`、`transcript.next`、`transcript.previous`、`transcript.latest`、`review.diff`、`review.inspect`、`review.permissions`、`content.copy`、`content.export` | Runtime snapshot/query + frontend presentation；不直读 repository/Agent |
+| composer/settings | `history.search`、`draft.edit`、`draft.files`、`draft.stash`、`draft.restore`、`draft.manage`、`settings.vim` | presentation store / editor / workspace completion；秘密不进入该状态 |
+
+Enter 在 running 时提交 steering 是 composer 的状态化输入动作，headless steering 是 Runtime wire op；
+当前没有 `/steer` 命令，也没有 `task.steer` CommandSpec。`/followup`、`/abort`、`/status` 与 `/queue`
+则分别对应表中的独立 specs。`RuntimePort（新增 query/op）` 表示业务能力必须先扩展并维护 12 的
+public port 契约，不能由 CLI 绕过 port 读取 repository、Git 或 Agent/Session private state。
 
 `coda exec` 只在 argv 最前增加显式动作名：去掉 `exec` 后必须与当前一次性模式使用相同 flags、裸 prompt、
 pipe、`--json`、continue/resume 解析、stdout/stderr 和退出码；不能另建执行状态机。`coda completion` 只接受

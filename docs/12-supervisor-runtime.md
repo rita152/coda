@@ -548,7 +548,7 @@ immutable `(workspaceId, recordedCwd 原始 Unicode bytes)`；
 重开时同时验证 requested cwd 与显式/派生 workspaceId，返回 port 的两个 readonly 字段逐字等于已存
 binding。cwd 不做 realpath/case/Unicode/path normalization。任一不匹配在 SupervisorLease、catalog/
 recovery/attach 前 reject `WorkspaceBindingMismatchError`，不能把同一权限/storage namespace 换根。
-上面的 storage port 是当前阶段 3 形态：阶段 1 的历史 interface 截止 `importLegacyThread/close`，不引用
+上面的 storage port 是当前实现所对应的阶段 3 形态：阶段 1 的历史 interface 截止 `importLegacyThread/close`，不引用
 approval/capability 类型；阶段 2 曾 additive 增加 `openLegacyApprovalPatternRepository`，阶段 3 又增加
 `inspectLegacyApprovalRecovery/openPolicyGrantRepository`。对应 mode 缺 required extension 时 factory 在
 任何 recovery/attach 前 typed fail；这些 extension 不是可返回空实现的占位 method。
@@ -1545,7 +1545,7 @@ event journal/writer 后才发布；legacy driver 继续拥有当前 retry/compa
 `approval_request` 映射为 identity-bearing `control_request`，把 `control_response` op 映回既有
 ApprovalBroker，但这个 control 还不是阶段 2 的权威持久链。阶段 2 用真正 `ThreadRuntime` backend
 替换 legacy driver，并把 writer 提取为 EventCommitter/EventHub；`RuntimePort`、RuntimeOp、receipt、
-envelope 与 CLI 不变。当前阶段 3 runtime factory 已能接收 capability/provider registry reader；static
+envelope 与 CLI 不变。阶段 3 已完成后的当前 runtime factory 能接收 capability/provider registry reader；static
 composition 仍给 legacy factory 注入 per-attachment
 `createAttachmentConfig(identity, model, permissionCeiling)` 工厂。
 阶段 1 edge 不得直接假定 legacy broker 的短 raw approvalId 永不碰撞。它以 raw id 为兼容 base，在
@@ -1713,11 +1713,15 @@ public API、事件与 settlement 不变。不能把旧 checkpoint 的 pendingCo
 事件路径固定为：
 
 ```
-AgentEvent / control event
-  → internal authoritativeEventSink
-  → EventCommitter(分配连续 seq + transcript/seq/control 原子权威提交，Agent await)
+AgentEvent
+  → LegacyThreadExecution 构造期私有 Agent.subscribe bridge
+      → await authoritativeEventSink
+          → EventCommitter(分配连续 seq + transcript/seq/control 原子权威提交)
+control event
+  → EventCommitter(同一 per-thread writer gate)
+EventCommitter
   → EventHub.publish(envelope 或连续 batch，非阻塞入队)
-  → UI / headless / telemetry / tests 等普通观察者异步消费
+      → UI / headless / telemetry / tests 等普通观察者异步消费
 ```
 
 EventCommitter 的单 writer chain 还冻结了 repository 的 hot-fold 边界：cold load 对完整 journal 做一次
@@ -1741,10 +1745,15 @@ commit 只验证新 batch、在隔离 candidate 上推进 grammar、经同一 fd
 继续作为完整 oracle；flush 或 post-write fence 成功前不得安装 candidate。该缓存只是已持久事实的验证
 边界，不是新的 Runtime、seq、checkpoint 或 presentation 状态源。
 
-runtime-managed Agent 的 `authoritativeEventSink` 是独立 internal hook，不属于 `Agent.subscribe()` 的
-catch-and-diagnose listener chain；EventCommitter reject 必须向 Agent 传播并终止该 thread，不能被当成
-普通 observer error。exported `Agent` 自身的 public subscribe 仍保持阶段 0 等待与异常隔离语义；direct
-`Session.subscribe()` 已由 standalone canonical sidecar 的 cursor pump 投影，按本阶段规则不再背压 Agent。
+runtime-managed execution 没有给 Agent 另造一套 emitter API：`LegacyThreadExecution` 在构造时
+先注册一个私有 `Agent.subscribe` bridge，listener 内 await `authoritativeEventSink`。这一实现
+细节不改变契约不变量：权威提交必须在 v1 mirror 与普通观察者之前完成，并可背压
+Agent。由于 Agent 的通用 Emitter 会 catch-and-diagnose listener rejection，bridge 必须在
+EventCommitter reject 时 latch `authoritativeFailure`、abort 当前 op/Agent，并让后续 awaited emit、
+provider/tool 启动及 side-effect gate 重新抛出/检查该 latch，不能把 writer failure 当成
+普通 observer error。该 bridge 不对消费者暴露；exported `Agent` 的普通 public subscribe 仍保持
+阶段 0 等待与异常隔离语义，direct `Session.subscribe()` 则由 standalone canonical sidecar 的
+cursor pump 投影，按本阶段规则不再背压 Agent。
 
 只有权威提交可以背压 Agent。普通观察者失败、变慢或退订不得拖慢 provider delta、工具执行或其他
 thread；EventHub 对每个订阅者保序并隔离队列，溢出策略必须显式（断开并报告 gap，或由 durable
@@ -2555,9 +2564,11 @@ Supervisor 与 RuleSnapshotProvider 后续只持有这份冻结副本，不重�
 上述接口不是仅供未来实现的设计草图：四个 factory、两个 registry、PromptAssembler、conservative
 PolicyEngine、legacy tool adapter、registry-aware Runtime turn path 与 workspace/legacy-global
 PolicyGrantRepository
-均已进入当前源码/public exports。registry-aware Agent loop 只接收 Runtime adapter 内部提供的 turn port；
-普通 exported Agent/direct Session 未获该 internal port 时继续使用原 `streamFn + ToolDefinition[]` 路径。这样新增动态
-路径不改变 legacy caller 的构造参数或事件形态。
+均已进入当前源码/public exports。registry-aware Runtime 与 legacy 路径复用同一个 exported
+`Agent` / `runLoop`；Runtime adapter 只通过 internal `AgentConfig.runtimeTurnProvider` seam 在每个 turn
+开始时捕获一个不可变 `RuntimeTurnPort`，不存在第二套独立 snapshot engine。普通
+exported Agent/direct Session 未配置该 internal provider 时继续使用原 `streamFn + ToolDefinition[]`
+路径，因此动态 registry 不改变 legacy caller 的构造参数、队列/turn 语义或事件形态。
 
 `CapabilityRegistryReader` 与 `ProviderAdapterRegistryReader` 都只暴露 `snapshot()`；mutable registries
 留在 composition host。完整 registry 可按结构类型注入 reader view，但 Runtime、ThreadRuntime 与
@@ -2756,7 +2767,7 @@ driver attachment 的类型面绝不能看到 register/update/unregister。外�
 
 | surface | 阶段 0 | 阶段 1 | 阶段 2 | 阶段 3 |
 |---|---|---|---|---|
-| exported `Agent` API | 行为冻结 | 保留，内部单 run 引擎 | 保留 | legacy facade/AgentConfig.tools 与调用语义不变；Runtime 改用独立 snapshot engine |
+| exported `Agent` API | 行为冻结 | 保留，内部单 run 引擎 | 保留 | legacy facade/AgentConfig.tools 与调用语义不变；Runtime 复用同一 Agent loop，仅经 internal `runtimeTurnProvider` 每 turn 注入快照 |
 | `Session` API | 当前单会话实现 | 保持原实现/settlement；新 Runtime 仅由隔离 driver 包装 | 改为默认 thread facade 并委托 ThreadRuntime；事件值/顺序兼容，普通 listener 不再背压 | 继续兼容，标记 legacy |
 | direct Session opaque approval hook | caller-owned `beforeToolCall`/broker | 保持 | process-local 兼容例外；无 response ingress，故不伪造 durable control | 保持，未来可 additive opt-in structured adapter |
 | 同 cwd/root 的两个不同 direct Session | 可并行、配置隔离 | 保持 | 各自 StandaloneSessionHost/private hub/backend lease，可并行且不争 SupervisorLease | 保持 |

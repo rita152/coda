@@ -1,17 +1,18 @@
 [← 返回地图](./README.md)
 
-# 11 实施路线图与当前基线：Runtime 阶段 0–3 与 CLI UX0–UX4
+# 11 已完成路线图与当前基线：Runtime 阶段 0–3 与 CLI UX0–UX4
 
 本文记录从原单 `Session` 实现迁移到可嵌入多线程 Runtime 的路线与当前落地基线。目标语义以
 [12-supervisor-runtime](./12-supervisor-runtime.md) 为 canonical 契约；原 M0–M7 已经形成的
 protocol、provider、agent、工具、CLI、持久化、approval、retry 与 compaction 能力是**历史实现
-基线**，不再是待执行路线，也不得覆盖阶段 0–3 的新约束。阶段 0–2 已提交；阶段 3 的 registry、
-Runtime mode、turn snapshot、policy/grant 与 package surface 已进入当前实现，本章第 4 节同时记录
-static/legacy compatibility 边界，不能再把它读成“阶段 3 待实现”清单。
+基线**，不再是待执行路线，也不得覆盖阶段 0–3 的新约束。Runtime 阶段 0–3 与 CLI UX0–UX4 均已
+完成、review、提交并进入 `main`；本章记录交付来源和仍然有效的兼容边界，不能再把任一节读成
+待实现清单。
 
-Runtime 阶段 0–3 完成后，产品工作的 active roadmap 转为本文第 8 节的 CLI UX0–UX4。其用户旅程、
-surface 边界、终端环境与性能基线以 [13 CLI/TUI UX](./13-cli-ux.md) 为 canonical 契约；09 记录
-生产行为，10 记录机械化门禁。UX 阶段不得借产品化之名扩张 Agent、Runtime、权限或 provider 协议。
+Runtime 阶段 0–3 完成后，产品工作曾转入本文第 8 节的 CLI UX0–UX4；这条产品路线也已经完成。
+其用户旅程、surface 边界、终端环境与性能基线以 [13 CLI/TUI UX](./13-cli-ux.md) 为 canonical 契约；
+09 记录生产行为，10 记录机械化门禁。当前没有进行中的编号阶段；任何后续里程碑都必须先在本文
+新增范围、非目标与验收门禁，不能复用已完成阶段的名称继续塞入工作。
 
 ## 0. 总览与硬门禁
 
@@ -33,16 +34,31 @@ flowchart LR
 | 0 | 已冻结并提交 | 新设计契约 + characterization tests | 否 |
 | 1 | 已落地并提交 | identity/envelope + `RuntimePort`/Supervisor + legacy 投影 | 只新增 canonical/public surface；旧 surface 保持 |
 | 2 | 已落地并提交 | `Session` 六协作者 + authoritative commit/async observers + control 统一 | 内部结构改变；现有单 Agent 行为保持 |
-| 3 | 当前实现基线 | capability/provider registry + per-turn snapshot + prompt/policy/grant + package exports | 新增 opt-in registry mode；static/legacy 默认行为保持 |
+| 3 | 已落地并提交 | capability/provider registry + per-turn snapshot + prompt/policy/grant + package exports | 新增 opt-in registry mode；static/legacy 默认行为保持 |
 
-四个阶段严格串行，不把后一阶段的实现“顺手”塞入当前提交。阶段 0–1 执行原 review-to-clear
+已完成阶段与提交来源：
+
+| 路线 | 提交序列 | 当前结论 |
+|---|---|---|
+| Runtime 0–3 | `a31fe99` → `10514fa` → `59aa3f4` → `0445052` | canonical Runtime、Session 拆分与 registry mode 已完成 |
+| CLI UX0–UX4 | `60858c4` → `d43c8b1` → `6c9b145` → `ad32310` → `4633009` | 产品化、长任务工作流、审阅/恢复、PTY/性能/automation 已完成 |
+| 基线加固 | `bdfe44a` → `1fe9174` → `b793a89` | journal/TUI 性能与 Responses 兼容已加固；classic/line REPL 已删除 |
+
+当前 production CLI 仍按兼容矩阵使用 static capability/provider composition；
+`coda/runtime` + `coda/capabilities` 的 registry mode 已进入当前 package export surface，但仓库仍是
+private package；不应把“production CLI 尚未默认切换 registry”误报为阶段 3 未完成。未交付边界见
+[01 §7](./01-overview.md)，当前质量状态见 [10 §8–9](./10-testing.md)。
+
+以下是当时的交付流程：四个阶段严格串行，不把后一阶段的实现“顺手”塞入当前提交。阶段 0–1 执行原 review-to-clear
 闭环；按当前执行约束，阶段 2 起每阶段实现完成后**只进行两轮完整 review**：
 
 1. 对照本文件、[12](./12-supervisor-runtime.md) 与对应专题设计文档确认范围；先补测试，再实现。
 2. 第一轮完整 review 覆盖架构、协议、恢复、并发、权限和兼容投影；发现问题直接修复并复跑定向测试。
 3. 第二轮完整 review 验证第一轮修复并重新覆盖全部上述面；发现问题同样直接修复并复跑受影响门禁，
    但不启动第三轮完整 review。
-4. 运行 `bun run check`，检查文档、public exports、依赖边界和 worktree scope。
+4. 运行 `bun run check` 验证 lint、typecheck、build、unit/e2e 与 public export/依赖边界；另行运行
+   `git diff --check`、检查 Markdown 相对链接并审阅 `git status`。`bun run check` 本身不 lint 文档，
+   也不判断 worktree scope。
 5. 只提交当前阶段的变更并推送；commit/push 成功后才开始下一阶段。
 
 两轮完成后的提交条件仍是没有已知 correctness、并发、恢复、权限、兼容或边界问题；不是只看格式，
@@ -104,7 +120,7 @@ mailbox、取消和权限的 thread。阶段 0 只改变文档与 characterizati
   workspace，负责 thread 生命周期、op 路由、幂等和 parent/child 元数据；port 暴露稳定 workspaceId
   与可注入的 newThreadId/newOpId bootstrap helpers，调用方无需重复生成 identity。
 - 历史阶段 1–2 只落 `CreateRuntimeBaseOptions` 的 `capabilityMode?:'static'` 构造分支，并拒绝
-  `capabilityServices`；当前阶段 3 已以向后兼容的类型扩展加入 `capabilityMode:'registry'` 与
+  `capabilityServices`；已完成阶段 3 以向后兼容的类型扩展加入 `capabilityMode:'registry'` 与
   `RuntimeCapabilityServices`。阶段 1 当时没有为 registry 建占位业务类型或部分 service bundle。
 - 注入式 `RuntimeStoragePort/RuntimeWorkspaceStoragePort/ThreadJournalPort` 提供 catalog、完整 op ledger、
   atomic append+flush/lease、安全 storage key 与 v1 import；core 不读 HOME/env/默认目录。CLI 把默认
@@ -368,7 +384,7 @@ composition 保留历史 global approval 语义。两者共享相同 RuntimeOp/E
 
 ### 4.2 交付物
 
-以下条目描述当前阶段 3 implementation contract，而非未来占位类型：
+以下条目描述已完成阶段 3 的当前 implementation contract，而非未来占位类型：
 
 - JSON-Schema-first `CapabilityRegistry` 实现 [12 §10](./12-supervisor-runtime.md) 的正式 mutation/snapshot
   surface：registration 原子包含 id/version、deployment-stable `implementationDigest`、schema/metadata/
@@ -561,18 +577,18 @@ commit/push 后，本路线图完成。
 Agent 必须由 Supervisor 创建独立 thread。server/daemon、持久 shell、独立 TUI client 等仍不属于
 阶段 0–3 的产品交付，但 RuntimePort、mailbox 和 envelope 必须让它们未来无需改写 Agent core。
 
-## 7. 通用完成定义（Definition of Done）
+## 7. 后续阶段通用完成定义（Definition of Done）
 
-- 当前阶段全部验收项、受影响回归与 `bun run check` 全绿；默认测试离线、确定性，无裸 timer。
+- 新阶段全部验收项、受影响回归与 `bun run check` 全绿；默认测试离线、确定性，无裸 timer。
 - 新增/改变行为有测试；协议、架构、恢复或权限语义同步维护 canonical `docs/`。
-- import 边界零违例；新增 `runtime/capabilities` 目录的阶段同步扩展 ESLint zone 和
+- import 边界零违例；新增或重划源码目录的阶段同步扩展 ESLint zone 和
   `tests/boundaries.test.ts`。
 - public/legacy surface 的 package exports、类型与构建产物均有消费测试；不手改 `dist/`。
-- 阶段 0–1 review 没有未解决问题；阶段 2–3 已完成且仅完成两轮完整 review，第二轮修复后已复跑
-  定向门禁与最终 check。
-- 当前阶段 commit scope 纯净、提交成功并已推送；下一阶段尚未混入当前 diff。
+- 新阶段在立项时明确 review 轮数与退出条件；阶段 0–3 的历史 review 规则与完成证据保持原记录，
+  不自动套用或重写。
+- 新阶段 commit scope 纯净、提交成功并已推送；后一阶段尚未混入当前 diff。
 
-## 8. Active roadmap：CLI UX0–UX4
+## 8. 已完成产品路线：CLI UX0–UX4
 
 ### 8.1 串行门禁与状态
 
@@ -597,11 +613,10 @@ flowchart LR
 | UX3 | 已完成（两轮 review） | 业务动作只经 RuntimePort | review/diff/approval/session picker、manual compact、fork/retry 与跨 thread attachment 恢复 |
 | UX4 | 已完成（两轮 review） | legacy wire 默认不变 | TUI theme/PTY 加固、限帧/分段加载与自动化输出 |
 
-每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
-本阶段 diff 覆盖行为、恢复、终端安全、兼容与测试；发现问题立即修复并跑定向测试。第二轮重新覆盖
-完整范围并验证第一轮修复；第二轮发现的问题也立即修复，但此后只做定向验证和最终门禁，不再启动
-第三轮完整 review。随后必须运行 `bun run check` 与 `git diff --check`，确认文档、测试、公共出口和
-worktree 范围，只提交并推送本阶段；成功后才允许开始下一阶段。
+每个 UX 阶段实施时都**恰好进行了两轮完整 review**。第一轮对照 09/10/13、实际实现和阶段 diff
+覆盖行为、恢复、终端安全、兼容与测试；第二轮重新覆盖完整范围并验证第一轮修复。第二轮后的工作
+只做定向验证和最终门禁，没有再启动第三轮完整 review。各阶段随后运行了 `bun run check` 与
+`git diff --check`，并在提交、推送完成后才进入下一阶段。
 
 ### 8.2 UX0：冻结用户体验基线
 

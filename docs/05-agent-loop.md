@@ -4,30 +4,31 @@
 
 本文是 `src/agent/` 的实施规格:Agent 类对外 API 与状态机、runLoop 双层循环的完整语义、streamAssistantResponse 的流水线、工具执行三阶段、parallel/sequential 调度、abort 语义、事件发射规则、错误分类。队列(steering/follow-up)的精确注入语义与转录修复细节见 [06](./06-steering-following.md),工具本体规格见 [07](./07-tools.md),provider 契约见 [04](./04-provider-adapter.md)。
 
-阶段 0 起，Agent 的架构身份被收窄为**单个 ThreadRuntime 内的 run/turn 执行引擎**。每个 thread
+当前 Agent 的架构身份是**单个 ThreadRuntime 内的 run/turn 执行引擎**。每个 thread
 至多一个 active run；不同 ThreadRuntime 各有自己的 Agent、转录、mailbox 与 cancellation root，
 可以并发运行。Supervisor 管理 thread 生命周期与父子拓扑，Agent 不持有全局 thread map；子 Agent
 是独立 child thread，不是 `ToolDefinition`，也不共享父 Agent 的可变状态。canonical 边界见
 [12 · Supervisor Runtime](./12-supervisor-runtime.md)。
 
-阶段 0 的 Agent 核心依赖 `protocol/shared`，并通过唯一的迁移期类型边
-`tools/types.ts` 接收 `ToolDefinition[]`；provider 以 `StreamFn` 注入，既有
-`subscribe(listener)` 行为保持不变。自阶段 2 起，runtime-managed Agent 通过独立、awaited 的 internal
-`authoritativeEventSink` 直连唯一 EventCommitter，绝不把 committer 注册成会吞错的 public subscriber；
-普通 UI 由 EventHub 异步订阅。阶段 3 的 ThreadRuntime 改用只消费不可变 catalog/adapter snapshot 的
-runtime engine；exported legacy Agent 仍保留 `AgentConfig.tools/StreamFn` surface，由精确的兼容 facade
-文件持有唯一 `tools/types.ts` type-import。这层的全部复杂度都围绕一个目标:**转录(`AgentMessage[]`)在任何时刻——
+Agent 核心依赖 `protocol/shared/capabilities`，并通过 `tools/types.ts` 的 type-only 兼容边接收 static
+`ToolDefinition[]`；provider 以 `StreamFn` 注入。仓库没有独立的 legacy/runtime Agent 类：同一个
+`agent.ts` + `loop.ts` 通过可选 `runtimeTurnProvider` 在每个 turn 捕获 catalog/provider/policy snapshot，
+未注入时保持 direct Agent/Session 的 static 行为。runtime-managed compatibility driver 当前通过一个
+私有 `Agent.subscribe()` listener 先调用 awaited authoritative sink，再写 v1 mirror；listener 内把提交
+失败 latch 到 fatal lane，后续执行边界必须抛出并终止 thread。普通 UI 不走这条 Agent listener 链，
+而由 EventHub 异步订阅。这层的全部复杂度都围绕一个目标:**转录(`AgentMessage[]`)在任何时刻——
 包括 abort、length 截断、工具失败、provider 出错——都保持完整且可重放**。
 
 ## 1. Agent 类对外 API
 
-本项目设计约定的对外 API 如下(canonical,不得偏离):
+当前 source-level compatibility API 摘要如下；包级公共 exports 只有 `coda/runtime`、
+`coda/capabilities` 与 `coda/legacy-coding-tools`：
 
 ```ts
 class Agent {
   constructor(config: AgentConfig)
   setModel(model: ModelConfig): void               // 仅 idle；只改变下一次采样
-  prompt(text: string, opts?): Promise<void>     // 仅空闲时;运行中调用 throw(强制走 steer/followUp)
+  prompt(text: string): Promise<void>            // 仅空闲时;运行中调用 throw(强制走 steer/followUp)
   steer(msg: UserMessage | string): void         // 随时可调,入 steering 队列
   followUp(msg: UserMessage | string): void      // 随时可调,入 follow-up 队列
   abort(): void                                  // 硬中断
@@ -46,6 +47,14 @@ interface AgentConfig {
   afterToolCall?:  (call: ToolCallPart, result: ToolResultMessage) => Promise<ToolResultMessage>;
   shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
   toolExecution?: 'sequential' | 'parallel';                     // 默认 parallel(工具可声明强制 sequential)
+  cwd?: string;
+  initialMessages?: AgentMessage[];
+  truncationScope?: string;
+  initialQueues?: {                                               // @internal Runtime recovery
+    readonly steering: readonly UserMessage[];
+    readonly followUp: readonly UserMessage[];
+  };
+  runtimeTurnProvider?: RuntimeTurnProvider;                      // @internal registry-mode seam
 }
 ```
 
@@ -54,7 +63,9 @@ interface AgentConfig {
 payload，由 EventCommitter 统一包装成 EventEnvelope。每次 `prompt()` / `continue()`（包括 retry
 与 compaction 后续跑）都得到新的 RunId；后续 run 只用 `predecessorRunId` 关联，不能复用旧 id。
 
-补充字段(本文档新增,不改上述 API 语义):`AgentConfig.cwd?: string`(工具执行工作目录,由 Bun CLI 启动层解析并显式注入,填充 `ToolContext.cwd`)。Agent 实例另持有一个会话级 `FileTracker`(read-before-edit 约束的登记表,见 [07](./07-tools.md)),随 `ToolContext` 传给每次工具执行。
+`cwd` 由 CLI/宿主显式解析并填充 `ToolContext.cwd`；`initialMessages/initialQueues` 只用于恢复 seed，
+`runtimeTurnProvider` 只用于 canonical Runtime 的 turn capture。Agent 实例另持有一个会话级
+`FileTracker`（read-before-edit 约束的登记表，见 [07](./07-tools.md)），随 `ToolContext` 传给每次工具执行。
 
 ### 1.1 状态机
 
@@ -63,11 +74,11 @@ stateDiagram-v2
     [*] --> idle
     idle --> running: "prompt() / continue()"
     running --> running: "steer() / followUp() / abort()(仅请求中止)"
-    running --> idle: "agent_end 完成权威提交"
+    running --> idle: "agent_end listener chain 已 settle"
     idle --> idle: "steer() / followUp()(入队,等下一次 run)"
 ```
 
-只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径、`agent_end` 完成权威提交,才回到 `idle`。想等中止真正完成,用 `waitForIdle()`。直接使用 legacy `Agent` 时始终等待其全部 subscribe listener，行为冻结；自阶段 2 起，ThreadRuntime 内部 Agent 使用独立 awaited `authoritativeEventSink`，普通 observer 改订阅 EventHub，因而 runtime run 只等待权威提交。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
+只有两个状态,没有 `aborting`/`paused` 之类的中间态——这是有意的。abort 是"请求",不是"瞬时完成的动作":调用 `abort()` 后 state 仍是 `running`,直到 provider 流/工具执行观察到 signal、loop 走完收尾路径且 awaited listener chain settle，Agent 才在 `finally` 回到 `idle`。这只是 Agent 本地状态，不等价于 Runtime 权威提交成功：runtime compatibility bridge 的私有 listener 会把 commit reject catch 并 latch 到 fatal lane；`Session`/Runtime activity 的 `prompt()`、`waitForIdle()` 随后检查该 latch 并 reject，不能把 idle 误报为 completed。普通 observer 订阅 EventHub，因而 runtime run 不等待 UI。gemini-cli 的 CoreToolScheduler 用七态 discriminated union 描述**单个工具调用**的状态,那是 item 级粒度;Agent 级只需要 idle/running 二值,多余状态只会制造"状态机之间互相追认"的同步问题。
 
 ### 1.2 逐方法语义与合法调用时机
 
@@ -79,7 +90,7 @@ stateDiagram-v2
 | `followUp(msg)` | 入 follow-up 队列 | 入 follow-up 队列,agent 将停时消费 |
 | `abort()` | no-op | `taskAbort.abort()`,请求中止;队列**不清空** |
 | `continue()` | 见下文;返回 Promise 同 prompt | **throw** |
-| `waitForIdle()` | 立即 resolve | 当前 run 的 `agent_end` 权威提交后 resolve；直接构造的 legacy `Agent` 还等待其 Emitter listener，Session/Runtime 的普通 observer 已异步隔离 |
+| `waitForIdle()` | Agent 自身立即 resolve；Session/Runtime wrapper 还会检查 authoritative fatal latch | 当前 run 的 `agent_end` listener chain settle 后 Agent resolve；Session/Runtime wrapper 仅在 fatal latch 未置位时 resolve，普通 observer 已异步隔离 |
 | `subscribe` / `clearQueues` / `steeringMode=` | 任意时刻合法 | 任意时刻合法 |
 
 **为什么 `prompt()` 在运行中 throw 而不是自动排队**:pi 的原话是"入口强制二选一,没有第三种模糊状态"。"运行中的新输入"存在两种截然不同的意图——引导当前任务(steer)与追加下一个任务(followUp),API 层面替调用者猜意图必然猜错一半。codex 走了另一条路:同一个 `Op::UserInput` 由 core 按当前状态自动分派(有 active turn 即 steering)——那是**跨进程外协议**的正确选择,因为客户端无法可靠感知 core 状态;而我们的 Agent 是进程内对象,`state` 就在手边,让调用方(CLI 键位层:Enter=steer,Alt+Enter=followUp)显式选择,错误立即暴露。
@@ -236,7 +247,7 @@ flowchart TD
 1. **abort 是用户意图**,唯一正确的响应是尽快停下并保留现场(队列不清、转录完整),把"接下来做什么"还给 ThreadRuntime/调用方。
 2. **error 的重试是策略问题,不是机制问题**:退避曲线、重试上限、是否先 compaction、如何向用户呈现——属于 RetryCoordinator/CompactionCoordinator。loop 若内置重试,这些策略要么写死要么以配置形式泄漏进核心。pi 把 auto-retry 放在 AgentSession(`agent_end` 带 `willRetry` 语义),其 3300 行 AgentSession 的教训恰恰是"queue/loop 核心"与"retry/compaction/persistence 会话服务"必须尽早分层——阶段 2 已把二者拆成独立协作者，loop 保持哑。
 3. **结束是无损的**:错误已编码为带 `errorMessage` 的合法 AssistantMessage 留在转录里(可持久化、可诊断),transform 层重放时会过滤它,所以 `continue()` 的重采样在语义上与"loop 内重试"完全等价,只是控制权交还了一层。
-4. 备选方案:codex 在 turn 内做流断线重试并发 `StreamError` 事件通知 UI("不终止 turn")。这个体验更平滑,但需要 loop 感知"可重试性"。v1 走"结束 + session continue()"的简单路线,M7 若引入 in-loop 流重试,`AgentEvent.error{fatal:false}` 可承担 StreamError 的通知角色。
+4. 备选方案:codex 在 turn 内做流断线重试并发 `StreamError` 事件通知 UI("不终止 turn")。这个体验更平滑,但需要 loop 感知"可重试性"。当前实现保持"结束 + RetryCoordinator/session continue()"路线；若未来另行立项 in-loop 流重试，`AgentEvent.error{fatal:false}` 可承担 StreamError 的通知角色。
 
 ### 2.4 为什么 stopReason 为 length 时全批工具失败、不执行
 
@@ -310,7 +321,7 @@ async function streamAssistantResponse(
 
 ### 3.1 turn 身份与不可变依赖快照
 
-阶段 3 后，ThreadRuntime 开始一次 assistant 采样时必须原子完成以下准备，再发
+当前 registry 路径中，ThreadRuntime 开始一次 assistant 采样时必须原子完成以下准备，再发
 `turn_start`：
 
 1. 创建 `TurnId`，捕获一次 `ToolCatalogSnapshot{revision, entries}` 与一次
@@ -518,11 +529,12 @@ thread、backend lease 与 private journal-backed observer pump。该路径同�
 
 规则与取舍:
 
-1. **只有 EventCommitter 背压 Agent。**runtime-managed 构造路径把它接到独立 awaited
-   `authoritativeEventSink`，不经过 `subscribe`/Emitter 的 catch-and-diagnose fan-out。它是该 thread 的
-   唯一事件序列化点，负责 transcript/control 的权威提交、分配 seq 和推进持久化 high-water mark；
-   sink reject 直接失败并中止该 thread，提交失败时不得先向观察者发布。Agent 在 `agent_end` commit
-   完成后才 idle，因此 `waitForIdle()` 仍保证转录与事件事实已落定。
+1. **只有 EventCommitter 的提交 gate 背压 Agent。**当前 runtime compatibility path 由
+   `LegacyThreadExecution` 注册一个私有、awaited 的 `Agent.subscribe()` listener；该 listener 在 v1
+   mirror 和任何 observer 之前调用 `authoritativeEventSink → EventCommitter`。因为 Agent Emitter 会隔离
+   listener rejection，bridge 必须自行 catch、latch writer fatal、abort 当前 run/tool，并在后续 awaited
+   emit、side-effect gate 与 activity completion 重新抛出。它仍是该 thread 的唯一事件序列化点；
+   提交失败时不得先发布 observer event，也不得把 run 结为成功。
 2. **普通 observer 异步且隔离。**EventHub.publish 只把 envelope 入各自 FIFO，不 await UI、stdout、
    telemetry 或 legacy subscriber 的回调。一个订阅者变慢、throw 或退订不影响 Agent，也不影响
    同 thread 的其他订阅者或别的 thread。每个订阅者内部仍按 seq 保序。
@@ -530,11 +542,11 @@ thread、backend lease 与 private journal-backed observer pump。该路径同�
    `queue_update` 等快照事件能帮助渲染自愈，但不能冒充丢失的权威事件。
 4. **前端自行 drain。**headless stdout 的 drain 只背压自己的 output pump；Runtime close/shutdown
    显式等待该 pump 收束，绝不能把 stdout 压力反传到 Agent。TUI 同理把 delta 合帧后渲染。
-5. **兼容面的等待边界分开。**直接构造的 standalone `Agent.subscribe` 继续按阶段 0 逐 listener
-   await，并保持 listener reject 只诊断的既有语义；它没有 TranscriptRepository，也不承诺 durable replay。
-   ThreadRuntime 不把 EventCommitter 或普通 observer 挂到这个入口，而使用上述独立 authoritative sink。
-   `Session.subscribe` 自阶段 2 起经 private journal-backed pump 保持 payload/顺序，但不再反向延迟
-   run；需要“前端已显示/写完”时等前端自己的 drain。
+5. **兼容面的等待边界分开。**直接构造的 `Agent.subscribe` 逐 listener await，并保持 ordinary listener
+   reject 只诊断的既有语义；它没有 TranscriptRepository，也不承诺 durable replay。Runtime bridge 虽
+   复用该注册入口，但 listener 是私有 authoritative adapter，并以上述 fatal latch 把提交失败从普通
+   observer failure 中恢复出来；普通 observer 绝不注册到这条路径。`Session.subscribe` 经 private
+   journal-backed pump 保持 payload/顺序，但不再反向延迟 run；需要“前端已显示/写完”时等前端自己的 drain。
 6. **无 gap channel 的 Session subscriber 必须 cursor-backed。**Session facade 不得把有限队列的
    disconnect/gap 隐藏起来；standalone host 先把完整 batch flush 到 private durable journal，每个
    listener 再维护独立的内存 delivery cursor。新订阅从当前 tail 开始；存活的慢 listener 不走有界
@@ -566,7 +578,9 @@ loop 对错误的态度:**能回喂模型的回喂,不能回喂的编码进转�
 | `beforeToolCall` 拦截 | 权限 deny(M6) | isError ToolResultMessage(附 reason) | 回喂,loop 继续 | 模型换方案(codex `Denied` 语义) |
 | 协议 bug | StreamFn throw/reject、流无终止事件、`done` 后继续推事件 | 防御 catch → 合成 `stopReason:'error'` assistant + `AgentEvent error{fatal:true}` | `agent_end('error')` | 修 adapter。faux/fixture 测试中直接 assert(见 [10 测试](./10-testing.md));生产防御路径只求不丢转录 |
 
-## 9. 验收清单
+## 9. 持续回归清单
+
+以下项目在相关实现变更时重新执行；空复选框不是 roadmap 进度，完成状态见 [10 §9](./10-testing.md)。
 
 状态机与 API:
 
@@ -598,7 +612,8 @@ runLoop(全部用 faux provider 离线验证):
 - [ ] 故意让 StreamFn throw(违约 provider):loop 不崩,产出协议 bug 防御路径的 error assistant + `fatal:true` 事件
 - [ ] listener throw:loop 不受影响,后续 listener 仍收到事件
 - [ ] 每个 ThreadRuntime 只允许一个 active run；两个 thread 可同时卡在 provider gate，任一 abort/释放不影响另一方
-- [ ] EventCommitter 通过独立 authoritative sink 背压 Agent；public subscribe listener reject 仍隔离，普通 observer gate 不背压 run，且 observer 内 envelope.seq 顺序不乱
+- [ ] Runtime 私有 Agent listener 在 mirror/observer 前 await EventCommitter；commit reject 被 fatal lane
+  重新抛出并终止 run，ordinary subscribe reject 仍隔离，EventHub observer gate 不背压 run
 - [ ] `tool_execution_update` commit reject 会 latch writer fatal 并 abort run/tool signal，后续采样、工具与 side-effect gate 均不越过
 - [ ] retry/compaction 续跑创建新的 RunId 并关联 predecessor；旧 expectedRunId 的 abort 不影响 successor
 - [ ] turn 中热更新 capability/provider registration：当前 turn 的 schema、validator 与 executor/StreamFn 仍来自同一旧 snapshot，下一 turn 才见新版本

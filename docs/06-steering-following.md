@@ -56,13 +56,14 @@ class Agent {
 ### 2.2 内部队列(补充类型,不进 protocol 层)
 
 ```ts
-// src/agent/queue.ts —— 每个 ThreadRuntime 各自持有两个实例
-export class PendingMessageQueue {
-  constructor(public kind: 'steering' | 'follow_up') {}
-  mode: 'all' | 'one-at-a-time' = 'one-at-a-time';
+// src/agent/queue.ts —— 每个 Agent 各自持有 steering / follow-up 两个实例
+export type DrainMode = 'one-at-a-time' | 'all';
 
-  push(msg: UserMessage): void;     // msg.id 即 QueuedMessage.id,注入后保持不变
-  drain(): UserMessage[];           // 'all' 取空;'one-at-a-time' 只取最老一条
+export class PendingMessageQueue {
+  constructor(private readonly kind: 'steering' | 'follow_up') {}
+
+  enqueue(msg: UserMessage): void;        // msg.id 即 QueuedMessage.id,注入后保持不变
+  drain(mode: DrainMode): UserMessage[]; // 'all' 取空;'one-at-a-time' 只取最老一条
   snapshot(): QueuedMessage[];      // 供 queue_update 事件载荷
   clear(): void;
   get size(): number;
@@ -71,7 +72,7 @@ export class PendingMessageQueue {
 
 关键约定:**消息 id 在入队时生成,注入转录后仍是同一个 id**。`QueuedMessage.id === UserMessage.id`,UI 靠 id 而非文本内容关联排队条目与最终消息(为什么必须如此见第 8 节 pi 的教训)。
 
-`drain()` 的 `'one-at-a-time'` 语义:只弹出队首最老一条,其余留在队列里等**下一个** drain 点(即再跑完一个 turn 之后)。这是 pi 的原始设计,也与 opencode V2 的 `promoteNextQueued`("一次只提升一条 queue 消息,再重新评估")一致。
+`drain(mode)` 的 `'one-at-a-time'` 语义:只弹出队首最老一条,其余留在队列里等**下一个** drain 点(即再跑完一个 turn 之后)。这是 pi 的原始设计,也与 opencode V2 的 `promoteNextQueued`("一次只提升一条 queue 消息,再重新评估")一致。
 
 ### 2.3 事件侧类型(定义见 [03 · 内部协议](./03-internal-protocol.md),原样引用)
 
@@ -135,7 +136,7 @@ assistant 未再发起工具调用(本来内层循环该退出)时,只要 steeri
 
 `'one-at-a-time'`(默认)每个注入点只取最老一条;`'all'` 取空整个队列。
 
-**为什么:** 用户连发三条 steering 时,三条一次性全灌给模型,指令间的优先级与先后语境全靠模型猜;one-at-a-time 让每条消息获得一个完整的 turn 响应周期,行为可预测。pi 的两个队列默认都是 one-at-a-time;opencode V2 的 queue 提升同样一次一条再重新评估。`'all'` 保留给"多条消息本来就是同一段话"的场景(如 headless 客户端把一段长指令分片入队)。模式是 Agent 实例上的可变属性,CLI 可通过命令切换。
+**为什么:** 用户连发三条 steering 时,三条一次性全灌给模型,指令间的优先级与先后语境全靠模型猜;one-at-a-time 让每条消息获得一个完整的 turn 响应周期,行为可预测。pi 的两个队列默认都是 one-at-a-time;opencode V2 的 queue 提升同样一次一条再重新评估。`'all'` 保留给"多条消息本来就是同一段话"的场景(如 headless 客户端把一段长指令分片入队)。直接使用 exported `Agent` 时可修改实例上的 `steeringMode` / `followUpMode`;当前 CLI 没有 drain-mode 切换命令,因此 production CLI 保持两者默认值 `one-at-a-time`。
 
 ### 语义 5:硬打断 = abort()
 
@@ -357,7 +358,7 @@ user_input），并附 `opId/workspaceId/threadId`；legacy headless `--json` �
 - [ ] 当前 turn 的工具在 steer 入队后仍全部执行完(工具执行计数断言)。
 - [ ] 续命:assistant 无 toolCall + steering 非空 → 内层循环继续;两队列皆空 → `agent_end(reason:'completed')`。
 - [ ] follow-up 仅在无 toolCall 且无 steering 时被消费;消费后外层循环续跑,新消息 `source === 'follow_up'`。
-- [ ] one-at-a-time:入队 3 条 steering,恰好分 3 个 turn 边界逐条注入;切 `'all'` 后一次注入全部。
+- [ ] one-at-a-time:入队 3 条 steering,恰好分 3 个 turn 边界逐条注入;直接 Agent API 将 `steeringMode` 切为 `'all'` 后一次注入全部。
 - [ ] 起跑前 poll:idle 时 `steer()` 两条 → `prompt()` → 首个 turn 注入(one-at-a-time 注入 1 条)。
 - [ ] abort:provider 流以 `stopReason:'aborted'` 收尾;aborted assistant 落转录;下一次请求(经 transform)不含该消息、孤儿 toolCall 均有 `"[Tool execution was interrupted]"` isError 配对结果。
 - [ ] abort 不清队列;`clearQueues()` 清空并发空快照 `queue_update`。

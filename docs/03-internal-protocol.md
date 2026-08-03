@@ -163,7 +163,7 @@ export interface AssistantMessage {
   content: (TextPart | ReasoningPart | ToolCallPart)[];
   model: ModelRef;
   stopReason: StopReason; errorMessage?: string;   // error/aborted 也是一条合法消息,保留在转录中
-  errorDetails?: ProviderErrorDetails;             // adapter 填写的结构化错误分类(M7 retry 消费,见 08 §5.1)
+  errorDetails?: ProviderErrorDetails;             // adapter 填写；RetryCoordinator 消费，见 08 §5.1
   usage: Usage;
 }
 
@@ -263,7 +263,7 @@ output = 全部输出 token(含 reasoning)
 
 - openai-chat adapter:`input = prompt_tokens`(原生已 inclusive),`cacheRead = prompt_tokens_details.cached_tokens`,`output = completion_tokens`,`reasoning = completion_tokens_details.reasoning_tokens`;
 - openai-responses adapter:`input = input_tokens`、`output = output_tokens`(两者原生已 inclusive)，拆分来自 `input_tokens_details.cached_tokens/cache_write_tokens` 与 `output_tokens_details.reasoning_tokens`;
-- 未来的 Anthropic adapter(M7):`input = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,拆分字段照录;
+- anthropic-messages adapter:`input = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,拆分字段照录;
 - usage 缺失容忍:流式 usage chunk 可能不出现(`supportsUsageInStreaming` 关闭或 provider 不发),此时 `input/output` 填 0,可选字段留 undefined——`Usage` 的必填字段永远存在,消费端无需判空。
 - `costUSD` 由 adapter(知道模型费率时)或 Runtime usage 组件计算写入,协议只承载结果,不承载费率表。
 
@@ -360,9 +360,11 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 ```
 
 `StreamFn` 是 Agent 执行路径唯一认识的 provider 形态:一个普通函数，不是类，也不让 Agent 回查
-可变注册表。阶段 0 通过 `AgentConfig.streamFn` 直接注入；阶段 3 由 ThreadRuntime 在 turn 开始时从
-ProviderAdapterRegistry 的不可变 snapshot 解析并注入，热更新只影响下一 turn(见
-[05-agent-loop](./05-agent-loop.md))。因此 `src/agent/` 对具体 `src/providers/` 零 import。
+可变注册表。当前有两条 composition：production CLI、direct Agent/Session 与缺省 static Runtime
+通过 `AgentConfig.streamFn` 直接注入；显式 registry Runtime 才由 ThreadRuntime 在 turn 开始时从
+`ProviderAdapterRegistry` 的不可变 snapshot 解析，并经 internal `runtimeTurnProvider` 交给同一 Agent
+loop，热更新只影响下一 turn(见 [05-agent-loop](./05-agent-loop.md))。两条路径都只传入普通
+`StreamFn`，因此 `src/agent/` 对具体 `src/providers/` 零 import。
 
 ### 6.2 铁律
 

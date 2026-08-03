@@ -7,12 +7,12 @@ CLI 是整个系统里**最薄**的一层：运行期把用户输入翻译成带
 `EventEnvelope<RuntimeEvent>` 投影成终端像素。参数、凭据来源、前端模式与显示策略属于 CLI，
 active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 
-> **阶段 0 基线说明**：本文件以 [12 Supervisor Runtime](./12-supervisor-runtime.md) 为上位契约。
-> 阶段 0 保留现有 CLI → `Session` 与裸 `SessionEvent` 行为作为 characterization baseline；阶段 1
+> **历史阶段 0 与当前兼容说明**：本文件以 [12 Supervisor Runtime](./12-supervisor-runtime.md) 为上位契约。
+> 阶段 0 当时保留 CLI → `Session` 与裸 `SessionEvent` 行为作为 characterization baseline；阶段 1
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
-> **UX4 已完成（2026-08-01，恰好两轮完整 review）**：六条用户旅程、presentation state、环境与性能
+> **UX4 已完成（2026-08-02，恰好两轮完整 review）**：六条用户旅程、presentation state、环境与性能
 > 契约以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。统一 command catalog、薄
 > bootstrap/help/version/completion、产品子命令、`--ui` 与共享 terminal sanitizer 已落地；历史上的
 > classic 与 accessible/plain line REPL 后续已退役，当前只保留 TUI 长驻交互；UX2 的紧凑任务栏、palette、composer、
@@ -151,34 +151,63 @@ pipe、continue/resume、stdout/stderr、退出码与 legacy wire 不变。`help
 值都读取 OpenAI key，但产生不同的 `ModelRef.api` 并分发到不同 `StreamFn`；CLI 不读取或转换
 任何 Responses wire 事件。
 
-旧式 flags/env/config 仍作为显式非交互配置入口；交互主路径另读认证/模型配置。目标启动组装顺序
-如下（public runtime import 本身零副作用，只有显式工厂与 op 才开始 IO）：
+旧式 flags/env/config 仍作为显式非交互配置入口；交互主路径另读认证/模型配置。当前启动组装顺序
+如下（这是与 `main.ts` 对齐、但省略错误处理/清理/presentation 细节的控制流伪码；public runtime import
+本身零副作用，只有显式工厂与 op 才开始 IO）：
 
 ```ts
-const interactive = stdin.isTTY && !flags.json && flags.prompt === undefined;
-const cliConfig = resolveCliConfig(flags, env, readConfigFile(), {
-  allowMissingModel: interactive || (flags.json && flags.eventFormat === 'envelope'),
-});
-const providerRegistry = interactive || cliConfig.model === undefined
-  ? new ProviderRegistry()
-  : undefined;
+const interactiveMode = !sessionsCommand && flags.eventFormat !== 'envelope' &&
+  !flags.json && flags.prompt === undefined && stdin.isTTY;
+const modernOneShot = flags.output !== undefined || flags.finalOnly ||
+  flags.ephemeral || flags.timeoutMs !== undefined;
+let resolved: ResolvedConfig = {};
+let providerRegistry: ProviderRegistry | undefined;
+if (!sessionsCommand) {
+  resolved = resolveConfig(flags, env, readConfigFile(), {
+    allowMissingApiKey: interactiveMode,
+  });
+  if (interactiveMode || resolved.modelConfig === undefined) {
+    providerRegistry = new ProviderRegistry();
+  }
+}
+const legacyMissingKey = getMissingApiKeyMessage(resolved);
+const initialModel = resolved.modelConfig !== undefined
+  ? (legacyMissingKey === undefined ? resolved.modelConfig : undefined)
+  : providerRegistry?.resolveSelectedModel();
+if (!sessionsCommand && initialModel === undefined && !interactiveMode &&
+    flags.eventFormat !== 'envelope') {
+  console.error(legacyMissingKey ?? '尚未选择模型；请先运行 /login，再运行 /model');
+  return 2;
+}
+const approvalMode = flags.approvalMode ??
+  (flags.eventFormat === 'envelope' || flags.json || flags.prompt !== undefined
+    ? 'allow' : 'interactive');
 const storageRoots = resolveRuntimeStorageRoots({
-  homeDir: resolveHomeDirectory(env),           // 只有 CLI composition root 读取 env/home
+  homeDir: runtimeHomeDir(),                    // 只有 CLI composition root 读取 env/home
   legacySessionDir: flags.sessionDir,
 });
-const storage = createFileRuntimeStorage({
-  root: storageRoots.runtimeRoot,
-  legacySessionDir: storageRoots.legacySessionDir,
-  legacyApprovalFile: defaultRulesFile(),
-});
-const resumeTarget = isResumeRequest(flags)
+const storage = flags.ephemeral
+  ? createMemoryRuntimeStorage()
+  : createFileRuntimeStorage({
+      root: storageRoots.runtimeRoot,
+      legacySessionDir: storageRoots.legacySessionDir,
+      legacyApprovalFile: defaultRulesFile(),
+    });
+const resumeTarget = isRuntimeResumeRequest(flags)
   ? await selectCliResumeTarget(await storage.listStoredThreads(), flags)
   : undefined;
-if (isResumeRequest(flags) && !resumeTarget) exitNoSessionToResume();
-const runtimeCwd = resumeTarget?.ownerRecordedCwd ?? cwd;
-if (resumeTarget && runtimeCwd !== cwd) {
-  warnCrossCwdResume({ invocationCwd: cwd, executionCwd: runtimeCwd });
+if (isRuntimeResumeRequest(flags) && !resumeTarget) exitNoSessionToResume();
+const requestedCwd = new ProjectRules({ cwd: flags.cwd ?? process.cwd() }).cwd;
+const runtimeCwd = resumeTarget?.ownerRecordedCwd ?? requestedCwd;
+if (resumeTarget && runtimeCwd !== requestedCwd) {
+  warnCrossCwdResume({ invocationCwd: requestedCwd, executionCwd: runtimeCwd });
 }
+const fauxScript = resolved.provider === 'faux'
+  ? await readFauxScript(resolved.fauxScript)
+  : undefined;
+const ephemeralLegacyDir = flags.ephemeral
+  ? mkdtempSync(path.join(tmpdir(), 'coda-ephemeral-'))
+  : undefined;
 const legacyTools = createCodingTools();
 const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
   mode: approvalMode,
@@ -186,7 +215,7 @@ const approvalAdapterFactory = createStaticLegacyApprovalAdapterFactory({
   tools: legacyTools,
 });
 const driverFactory = createLegacySessionThreadDriverFactory({
-  sessionDir: storageRoots.legacySessionDir,
+  sessionDir: ephemeralLegacyDir ?? storageRoots.legacySessionDir,
   approvalAdapterFactory,
   configure: ({ model }) => {
     const projectRules = new ProjectRules({ cwd: runtimeCwd });
@@ -207,27 +236,40 @@ const driverFactory = createLegacySessionThreadDriverFactory({
   },
 });
 const modelResolver = createCliRuntimeModelResolver(providerRegistry);
-if (cliConfig.model) modelResolver.register(cliConfig.model);
+if (initialModel) modelResolver.register(initialModel);
 const runtime = await createRuntime({
   workspace: {
     cwd: runtimeCwd,
-    ...(resumeTarget && { workspaceId: resumeTarget.ownerWorkspaceId }),
+    ...(resumeTarget
+      ? { workspaceId: resumeTarget.ownerWorkspaceId }
+      : flags.workspace ? { workspaceId: flags.workspace } : {}),
   },                                          // 可列索引，但尚未创建/attach thread
   storage,                                    // 显式 port；runtime core 不自行找目录
   modelResolver,
-  permissionPolicy: createLegacyPermissionPolicy(),
+  permissionPolicy: createLegacyPermissionPolicy(approvalMode),
   threadDriverFactory: driverFactory,
+  workspaceReview: createGitWorkspaceReviewPort(),
 });                                             // 未选模型时仍是零 thread/零 journal
 
-if (flags.json && flags.eventFormat === 'envelope') {
-  return startEnvelopeHeadless(runtime);        // 不隐式 create/resume 默认 thread
+if (sessionsCommand) {
+  try {
+    const sessions = await runtime.listThreads();
+    // 按 flags.json 写 JSON 或 human list；不创建/attach thread。
+    return 0;
+  } finally {
+    await runtime.close();
+  }
+}
+
+if (flags.eventFormat === 'envelope') {
+  return startEnvelopeHeadless(runtime, { stdin, stdout }); // 不隐式 create/resume 默认 thread
 }
 
 const frontend = new RuntimeFrontendSession({
   runtime,
   attachment: resumeTarget ? 'resume' : 'create',
   ...(resumeTarget && { threadId: resumeTarget.threadId }),
-  ...(cliConfig.model && { initialModel: cliConfig.model }),
+  ...(initialModel && { initialModel }),
   registerModel: (model) => modelResolver.register(model),
 });
 await frontend.initialize();
@@ -238,8 +280,35 @@ const approval = approvalMode === 'interactive'
       subscribe: () => () => {},
     }
   : undefined;                                 // 只翻译成 control_response/abort op，不持 waiter
+if (modernOneShot) {
+  return startOneShotOutput(frontend, {
+    prompt: flags.prompt,
+    mode: flags.output ?? 'text',
+    finalOnly: flags.finalOnly,
+    timeoutMs: flags.timeoutMs,
+  });
+}
 if (flags.json) return startHeadless(frontend, { approval });
-if (flags.prompt) return runOneShotWithPlainRenderer(frontend, flags.prompt);
+if (flags.prompt) {
+  // legacy -p 分支在 main.ts 内联，不是另一个前端函数。
+  const renderer = createRenderer(stdout, rendererOptions);
+  frontend.subscribe((event) => { renderer.render(event); return renderer.drain(); });
+  let unsubscribeFinal = () => {};
+  const finalExit = new Promise<number>((resolve) => {
+    unsubscribeFinal = frontend.subscribe((event) => {
+      if (event.type === 'error' && event.fatal) resolve(1);
+      if (event.type === 'agent_end' && event.willRetry !== true) {
+        resolve(event.reason === 'error' ? 1 : 0);
+      }
+    });
+  });
+  await frontend.prompt(flags.prompt);
+  const exitCode = await finalExit;
+  unsubscribeFinal();
+  await frontend.close();
+  await renderer.drain();
+  return exitCode;
+}
 if (!stdinIsTty || !stdoutIsTty || TERM === 'dumb') return reportTuiUnavailable();
 try {
   const { startTui } = await import('./tui.js');       // native 依赖只在这里加载
@@ -910,12 +979,21 @@ HTTP status 和重试动作的错误，但不得回显响应正文或底层异�
    transcript/普通输出追加“已选择 …”成功消息。若只持久化最近选择失败，当前切换仍有效并
    明确警告下次启动可能无法恢复。
 
-阶段 3 后每次 provider 调用都由 `ProviderAdapterRegistry` 的 turn snapshot **按当次
-`model.ref.api`** 解析到版本化 adapter；CLI 只在 runtime 创建/配置时注册已有
-`openai-chat`、`openai-responses`、`anthropic-messages` adapter，不执行静态 switch，也不能按
-provider id 或上次选择猜协议。一个 turn 捕获 adapter 后，注册表热更新只影响下一 turn；未知 api
-按 StreamFn 铁律产生流内 error。切换不改写 thread meta 或历史消息；每条 assistant 继续记录实际
-采样所用 `ModelRef`，transform 层据此处理跨模型 reasoning。
+provider 协议选择在两条当前 composition 中都只读当次 **`model.ref.api`**，不按 provider id、
+model 名、base URL 或上次选择猜协议:
+
+- 缺省 production CLI 通过 `createProviderStreamFn()` / `providerAdapterForApi()` 的 static
+  compatibility dispatcher 选择 `openai-chat`、`openai-responses`、`anthropic-messages` 或已配置的
+  `faux` StreamFn。该 dispatcher 是 composition boundary，不在 CLI 事件循环、Agent 或 Session 中持有
+  另一套 provider 状态机。
+- 显式 `createRuntime({capabilityMode:'registry', capabilityServices})` 路径才在每个 turn 开始时
+  捕获一次 `ProviderAdapterRegistry` snapshot，并从其中解析版本化 adapter；注册表热更新只影响
+  下一 turn。`createCliRegistryCapabilityServices()` 已提供这条路径的 CLI-owned composition
+  factory，但 production `main.ts` 当前有意保留上述 static 缺省，不把两条 path 部分混用。
+
+两条路径的未知 api 都按 StreamFn 铁律产生流内 error，不 throw/fallback。切换不改写
+thread meta 或历史消息；每条 assistant 继续记录实际采样所用 `ModelRef`，transform 层据此处理
+跨模型 reasoning。
 
 `/login` 更新当前 provider 的 key 时，只要当前模型的 endpoint/api 仍相同且刷新后仍可用，就把
 新凭据换入活动配置但不改变显式选择；否则清除当前选择并要求重新 `/model`。`/logout` 按名称或
@@ -1061,7 +1139,9 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   返回方式；普通 provider 字段不覆盖任务 draft，秘密输入只显示
   掩码且不进 history、draft、frame、事件、转录或日志
 - [ ] OpenCode Go 的实时 models 与显式协议表取交集；表外 id 不可选；多个 custom provider 可按大小写不敏感名称更新并分别 `/logout`
-- [ ] `/login` 不切模型；`/model` 以 provider/model 选择并由 `ProviderAdapterRegistry` snapshot 按 `ModelRef.api` 动态分发；运行中三条管理命令只提示完成或 abort
+- [ ] `/login` 不切模型；`/model` 以 provider/model 选择并始终按 `ModelRef.api` 分发（production
+  缺省为 static compatibility dispatcher，显式 registry mode 为 per-turn snapshot）；运行中三条
+  管理命令只提示完成或 abort
 - [ ] 同一 provider 的旧模型刷新迟到时因 revision CAS 被丢弃，不回滚新 endpoint/key
 - [ ] `/login` 模型刷新中退出会取消请求，并等待 controller 收束后再销毁前端
 - [ ] 零配置冷启动没有 Runtime/thread；失效的最近选择保持未选择，不恢复硬编码默认；`/model` 后才 create/resume 并重放历史
