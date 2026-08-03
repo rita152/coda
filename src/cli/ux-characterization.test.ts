@@ -1,6 +1,6 @@
 // UX0 terminal-product baseline. These tests intentionally describe the observable
-// pre-productization behavior across viewport, terminal-routing, text-width, color,
-// classic/plain, and current rendering-cost boundaries. Later UX stages may update
+// pre-productization behavior across viewport, TUI routing, text-width, color,
+// one-shot human output, and current rendering-cost boundaries. Later UX stages may update
 // an assertion only when the corresponding contract and migration note change.
 
 import { describe, expect, test } from 'bun:test';
@@ -231,7 +231,7 @@ describe('UX0 terminal environment characterization', () => {
     }
   });
 
-  test('plain output is append-only and strips terminal-control injection at the shared boundary', async () => {
+  test('one-shot human output is append-only and strips terminal-control injection at the shared boundary', async () => {
     let output = '';
     const renderer = createRenderer(
       {
@@ -240,7 +240,7 @@ describe('UX0 terminal environment characterization', () => {
         },
         drain: () => Promise.resolve(),
       },
-      { color: false, interactive: false },
+      { color: false },
     );
     const injected = '\x1b]52;c;UX0_BASELINE_SECRET\x07visible';
     renderer.render({
@@ -249,7 +249,7 @@ describe('UX0 terminal environment characterization', () => {
     });
     await renderer.drain();
 
-    // UX1 migration: classic/plain now consume the same sanitizer contract as OpenTUI.
+    // One-shot human output consumes the same sanitizer contract as OpenTUI.
     expect(output).not.toContain('\x1b]52;c;UX0_BASELINE_SECRET\x07');
     expect(output).not.toContain('UX0_BASELINE_SECRET');
     expect(output).toContain('visible');

@@ -20,6 +20,7 @@ import type {
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import type {
+  CliApprovalBridge,
   CliApprovalDecision as ApprovalDecision,
   CliInteractionState as SessionInteractionState,
   CliSessionEvent as SessionEvent,
@@ -111,8 +112,8 @@ import {
   interactionCanAbort,
   interactionEnterState,
   SLASH_COMMAND_SPECS,
-} from './repl.js';
-import type { ReplApproval, SlashCommand, SlashCommandSpec } from './repl.js';
+} from './tui-controls.js';
+import type { SlashCommand, SlashCommandSpec } from './tui-controls.js';
 import type {
   CliRenderer,
   ColorInput,
@@ -4363,7 +4364,7 @@ export async function createTuiScreen(
  */
 export async function startTui(
   session: CliSession,
-  approval: ReplApproval | undefined,
+  approval: CliApprovalBridge | undefined,
   opts: TuiOptions,
 ): Promise<number> {
   const openTui = await import('@opentui/core');
@@ -4455,12 +4456,12 @@ type TuiControllerRenderer =
   Partial<Pick<CliRenderer, 'suspend' | 'resume' | 'copyToClipboardOSC52'>>;
 
 /**
- * 复用 classic REPL 的纯交互决策，保证 prompt/steer/follow-up/审批语义
- * 不因换渲染框架而分叉。返回前总是关闭 Session 并恢复 renderer。
+ * 复用纯 TUI 交互决策，保证 prompt/steer/follow-up/审批语义集中定义。
+ * 返回前总是关闭 Session 并恢复 renderer。
  */
 export function runTuiController(
   session: CliSession,
-  approval: ReplApproval | undefined,
+  approval: CliApprovalBridge | undefined,
   screen: TuiScreen,
   renderer: TuiControllerRenderer,
   opts: TuiControllerOptions,
@@ -4808,7 +4809,7 @@ export function runTuiController(
           else screen.println('No active run to abort.', 'warning');
           return null;
         case 'help':
-          for (const line of renderInteractiveHelp('tui')) screen.println(line, 'muted');
+          for (const line of renderInteractiveHelp()) screen.println(line, 'muted');
           return null;
         case 'status':
           for (const line of formatStatusLines(

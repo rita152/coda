@@ -1,6 +1,5 @@
 import type {
   ApprovalPresentation,
-  RuntimeDiffSnapshot,
   RuntimeReviewSnapshot,
   RuntimeThreadListItem,
   WorkspaceRuntimeSnapshot,
@@ -31,21 +30,6 @@ export function filterSessionItems(
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
-export function formatSessionItems(items: readonly RuntimeThreadListItem[]): readonly string[] {
-  if (items.length === 0) return ['No matching sessions.'];
-  return items.flatMap((item) => {
-    const title = item.thread.title?.trim() || '(untitled)';
-    const state = item.thread.archivedAt === undefined
-      ? item.thread.state
-      : `${item.thread.state}, archived`;
-    const preview = item.preview === undefined ? '' : `\n    ${item.preview}`;
-    return [sanitizeTerminalText(
-      `${item.thread.threadId}  ${state}  ${new Date(item.updatedAt).toISOString()}\n` +
-      `    ${title} · ${item.cwd}${preview}`,
-    )];
-  });
-}
-
 export function formatReviewSnapshot(snapshot: RuntimeReviewSnapshot): readonly string[] {
   const lines: string[] = [
     `Review · ${snapshot.reasoning.length} reasoning block(s) · ${snapshot.tools.length} tool call(s)`,
@@ -65,22 +49,6 @@ export function formatReviewSnapshot(snapshot: RuntimeReviewSnapshot): readonly 
     if (tool.summary !== undefined) lines.push(`  summary: ${tool.summary}`);
     if (tool.output !== '') lines.push(indent(tool.output));
     if (tool.result !== undefined) lines.push(`  result: ${safeJson(tool.result)}`);
-  }
-  return lines.map(sanitizeTerminalText);
-}
-
-export function formatDiffSnapshot(snapshot: RuntimeDiffSnapshot): readonly string[] {
-  if (snapshot.files.length === 0) return [`No ${snapshot.scope} diff.`];
-  const lines: string[] = [
-    `${snapshot.scope} diff · ${snapshot.files.length} file(s)`,
-  ];
-  let priorGroup: string | undefined;
-  for (const file of snapshot.files) {
-    if (file.group !== priorGroup) {
-      priorGroup = file.group;
-      lines.push(`\n[${file.group}]`);
-    }
-    lines.push(`${file.status} ${file.path}`, file.patch === '' ? '  (no textual patch)' : file.patch);
   }
   return lines.map(sanitizeTerminalText);
 }
@@ -132,28 +100,6 @@ export function approvalAllowsAlways(
   presentation: Readonly<ApprovalPresentation> | undefined,
 ): boolean {
   return presentation === undefined || presentation.allowAlways !== undefined;
-}
-
-export function formatApprovalSummary(
-  presentation: Readonly<ApprovalPresentation> | undefined,
-  fallbackDescription: string,
-): readonly string[] {
-  if (presentation === undefined) {
-    return [
-      '? approval required',
-      fallbackDescription,
-      'v details · y allow once · n deny · Esc abort',
-    ].map(sanitizeTerminalText);
-  }
-  return [
-    `? approval · ${presentation.capability.id}@${presentation.capability.version}`,
-    `target: ${presentation.normalizedResources.length === 0
-      ? '(no resources)'
-      : safeJson(presentation.normalizedResources)}`,
-    presentation.allowAlways === undefined
-      ? 'v details · y allow once · n deny · Esc abort'
-      : 'v details · y allow once · a allow always · n deny · Esc abort',
-  ].map(sanitizeTerminalText);
 }
 
 function duration(value: number | undefined): string {

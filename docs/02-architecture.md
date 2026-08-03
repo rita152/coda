@@ -37,7 +37,7 @@ src/
   tools/           # read/ls/grep/glob/bash/edit/write/plan + 框架
   session/         # ThreadRuntime、转录 repository、retry/compaction、事件提交与广播、legacy Session
   runtime/         # Supervisor、RuntimePort 与无副作用 public entry
-  cli/             # 参数/配置与 TUI/classic/headless 前端适配
+  cli/             # 参数/配置、TUI、one-shot 与 headless 前端适配
   shared/          # truncate、fs 工具、进程树 kill 等无状态工具函数
 ```
 
@@ -56,7 +56,7 @@ src/
 | `integrations/legacy-coding-tools/` | 八个内置 `LegacyToolCapabilityBinding` 与版本化 bash analyzer | `index.ts`、`resource-resolver.ts` | 只依赖 capabilities public types 与具体 tools；不持有 thread/runtime 状态 |
 | `session/` | 每线程执行与持久化：`ThreadRuntime`、`TranscriptRepository`、`RetryCoordinator`、`CompactionCoordinator`、`EventCommitter`；另提供由 Runtime 每 workspace 实例化一个的 `EventHub`；保留 legacy `Session` facade | `thread-runtime.ts`、`transcript-repository.ts`、`retry-coordinator.ts`、`compaction-coordinator.ts`、`event-committer.ts`、`event-hub.ts`、`session.ts` | ThreadRuntime 不持有全局 thread map；EventHub 只持 subscription/replay routing；普通 observer 不背压 Agent；不渲染 |
 | `runtime/` | workspace 级 Supervisor、thread 生命周期/op 路由、`RuntimePort`、public runtime 工厂 | `supervisor.ts`、`runtime-port.ts`、`index.ts` | 不执行 turn/工具，不读 CLI 环境，不导入 TUI 或具体 provider SDK |
-| `cli/` | 参数/配置与前端适配：把按键/NDJSON 映射到 RuntimePort，把 envelope 或 legacy 投影渲染到 OpenTUI/classic/plain | `main.ts`、`project-rules.ts`、`provider-commands.ts`、`interactive-runtime.ts`、`tui.ts`、`repl.ts`、`renderer.ts`、`headless.ts` | 不拥有 run/retry/compaction/权限状态机；秘密不进入 renderer/event/transcript |
+| `cli/` | 参数/配置与前端适配：把 TUI 按键或 NDJSON 映射到 RuntimePort，把 envelope 或 legacy 投影渲染到 OpenTUI、one-shot human renderer 或 headless | `main.ts`、`project-rules.ts`、`provider-commands.ts`、`interactive-runtime.ts`、`tui.ts`、`renderer.ts`、`headless.ts` | 不拥有 run/retry/compaction/权限状态机；秘密不进入 renderer/event/transcript |
 | `shared/` | 底层纯函数、基础 port 与无上层依赖的局部状态容器：截断、路径规范化、`FileTrackerPort/FileTracker`、`killProcessTree` 等 | `truncate.ts`、`fs-path.ts`、`file-tracker.ts`、`kill-process-tree.ts` | 不 import 其他 src 目录；状态实例不得跨 thread 共享 |
 
 两个容易放错位置的东西:
@@ -263,7 +263,7 @@ flowchart TB
 
 ### 逐层说明
 
-**第 1 层:UI/host 输入。**OpenTUI/classic/headless 只把输入翻译成带 `OpId` 与目标
+**第 1 层:UI/host 输入。**OpenTUI、one-shot 与 headless 只把输入翻译成带 `OpId` 与目标
 `WorkspaceId/ThreadId` 的 `RuntimeOp`，提交给 RuntimePort。旧 `Session.prompt/steer/followUp/abort`
 由 legacy adapter 隐式绑定默认 workspace/thread 并生成 OpId。`/login`、`/model`、`/logout` 的
 秘密与选择仍留在可信宿主配置边界，但选择结果通过 runtime registry/operation 生效；renderable
@@ -306,7 +306,7 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 ```mermaid
 sequenceDiagram
   participant U as 用户(终端)
-  participant CLI as cli/(OpenTUI / classic / headless)
+  participant CLI as cli/(OpenTUI / one-shot / headless)
   participant R as runtime/(Supervisor)
   participant S as session/(ThreadRuntime)
   participant AG as agent/(runLoop)
@@ -428,7 +428,7 @@ server 化是 transport 替换而非架构重构：
 | `capabilities/` | `CapabilityRegistry`、`ToolCatalogSnapshot`、`PreparedInvocation`、`ProviderAdapterRegistry`、`PromptAssembler`、`PolicyEngine` | `protocol`、`shared`、legacy adapter 可依赖 `tools/types.ts` | `agent`、`session`、`runtime`、`cli` |
 | `integrations/legacy-coding-tools/` | `createCodingToolCapabilityBindings()`、内置 resource resolvers/analyzer | `capabilities` public entry、`tools` public entry | `cli` composition root、集成测试 |
 | `runtime/` | `Supervisor`、`RuntimePort`、无副作用 public entry | `protocol`、`shared`、`session`、`capabilities` | CLI、嵌入宿主、server transport |
-| `cli/` | 参数/配置、内置 registration 组装、`startTui()`、classic/headless RuntimePort adapters | `runtime` 及 composition 所需 capability/provider/tool public entry；`@opentui/core` 仅交互分支动态加载 | 终端用户 / 外部进程 |
+| `cli/` | 参数/配置、内置 registration 组装、`startTui()`、one-shot/headless RuntimePort adapters | `runtime` 及 composition 所需 capability/provider/tool public entry；`@opentui/core` 仅交互分支动态加载 | 终端用户 / 外部进程 |
 | `shared/` | `truncate`、`killProcessTree`、fs 辅助、`FileTrackerPort/FileTracker` | (无) | `agent`、`tools`、`capabilities`、`session`、`cli` |
 
 接口契约的四条不变量(所有模块 PR 审查时对照):

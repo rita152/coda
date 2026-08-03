@@ -311,7 +311,7 @@ terminal := done | error                             (恰好一个,且是最后�
 
 **partial 快照(pi 独有,Vercel 没有)是我们最看重的机制**:每个事件携带完整的中间态 AssistantMessage,消费端可以二选一——做精细增量渲染(消费 delta),或者无脑重渲快照(只看 partial)。这带来两个杠杆:
 
-1. **消费端可降级**:headless JSON 模式、测试断言、简易 UI 只看 partial/最终 message 就够;只有需要逐 token 展示的交互前端（当前为 OpenTUI，classic 为保底）消费 delta。
+1. **消费端可按需选择**:headless JSON 模式与测试断言只看 partial/最终 message 就够；OpenTUI 与 append-only one-shot renderer 消费 delta 来逐 token 展示，但只有 OpenTUI 是长驻交互前端。
 2. **协议演进缓冲**(见第 9 节):将来新增块类型时,不认识新事件的旧消费者仍能从 partial 中渲染它认识的 part,未知 part 显示占位——不会白屏。
 
 代价是每个事件多携带一个引用(不是拷贝),几乎免费。

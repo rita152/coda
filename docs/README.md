@@ -2,7 +2,7 @@
 
 **coda** 是一个从零实现的 TypeScript 终端 coding agent:核心只认自定义的内部协议,OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 被严格隔离在各自 adapter 目录内;支持 steering / follow-up 双队列消息注入;内置 read、ls、grep、glob、bash、edit、write、plan 完整工具集。
 
-本目录是该项目的完整实施计划,共 13 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，第 13 篇冻结 CLI/TUI UX0–UX4 的用户旅程、surface parity、恢复与性能契约；阶段实施与兼容时限以 11 为准。
+本目录是该项目的完整实施计划,共 13 篇编号设计文档。它们不是事后补写的说明书,而是**先于代码的设计契约**:所有类型定义、命名、语义在这里敲定,实现阶段照此执行。第 12 篇冻结多线程 Runtime 的总契约，第 13 篇冻结 CLI/TUI UX0–UX4 的用户旅程、surface 边界、恢复与性能契约；阶段实施与兼容时限以 11 为准。
 
 ## 文档性质与约定
 
@@ -78,8 +78,8 @@ graph TD
 7. [06 Steering / Follow-up](./06-steering-following.md) —— 双队列与 abort
 8. [07 工具集](./07-tools.md) —— 八个工具的规格
 9. [08 会话持久化](./08-session-persistence.md) —— JSONL 与 compaction
-10. [09 CLI / TUI](./09-cli.md) —— 全屏交互、保底模式与 headless
-11. [13 CLI / TUI UX](./13-cli-ux.md) —— 用户旅程、surface parity、恢复、安全与性能
+10. [09 CLI / TUI](./09-cli.md) —— 全屏交互、one-shot 与 headless
+11. [13 CLI / TUI UX](./13-cli-ux.md) —— 用户旅程、surface 边界、恢复、安全与性能
 12. [10 测试策略](./10-testing.md) —— faux provider、fixture 与 UX characterization
 13. [11 路线图](./11-roadmap.md) —— Runtime 阶段 0–3、CLI UX0–UX4 与 review 门禁
 
@@ -119,7 +119,7 @@ ThreadRuntime、TranscriptRepository、RetryCoordinator、CompactionCoordinator�
 
 ### [09 CLI / TUI](./09-cli.md)
 
-CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI/classic/plain 布局与键位保持，默认 headless 继续裸 SessionEvent，显式 envelope 模式输出 identity/seq。stdout drain 只约束前端输出泵，不反向背压 Agent。
+CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI 是唯一长驻交互面，one-shot human renderer 与默认 headless 分别保留人类脚本输出和裸 SessionEvent，显式 envelope 模式输出 identity/seq。stdout drain 只约束前端输出泵，不反向背压 Agent。
 
 ### [10 测试策略](./10-testing.md)
 
@@ -135,7 +135,7 @@ CLI 作为 RuntimePort 的参数/configuration 与前端 adapter；OpenTUI/class
 
 ### [13 CLI / TUI UX](./13-cli-ux.md)
 
-UX0–UX4 的权威产品契约：六条核心用户旅程，TUI/classic/accessible/plain/headless 的现状与目标 parity，统一命令规格、每 thread presentation state、终端 sanitizer、极端终端环境和性能 characterization，以及恰好两轮 review 的阶段门禁。
+UX0–UX4 的权威产品契约：六条核心用户旅程，TUI、one-shot 与 headless 的边界，统一命令规格、每 thread presentation state、终端 sanitizer、极端终端环境和性能 characterization，以及恰好两轮 review 的阶段门禁。
 
 ## 按角色的阅读路径
 
@@ -269,10 +269,10 @@ capability。新的 core 消费 ToolCatalogSnapshot/PreparedInvocation，不直�
 | 2 | Session 六协作者 + commit/hub + control 统一 | 05、06、08、10、12 |
 | 3 | capability/provider registry + prompt + policy | 04、07、10、12 |
 | UX0 | 终端产品契约 + characterization baseline | 09、10、11、12、13 |
-| UX1 | CLI/onboarding/sanitizer/classic | 09、10、13 |
+| UX1 | CLI/onboarding/sanitizer 与历史交互面收敛 | 09、10、13 |
 | UX2 | TUI hierarchy/composer/transcript | 09、10、13 |
 | UX3 | review/diff/session recovery | 08、09、10、12、13 |
-| UX4 | accessibility/performance/automation/PTY | 09、10、13 |
+| UX4 | TUI performance/automation/PTY | 09、10、13 |
 
 旧 M0–M7 只用于解释现有测试/注释来源，历史对照见 [11 §6](./11-roadmap.md)。
 

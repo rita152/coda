@@ -74,7 +74,7 @@ describe('canonical command catalog', () => {
 
   it('rejects ambiguous combinations and options that a command cannot consume', () => {
     expectUsageError(['--continue', '--resume'], 'mutually_exclusive', 'or: coda --resume');
-    expectUsageError(['--json', '--ui=plain'], 'mutually_exclusive', 'remove --ui');
+    expectUsageError(['--json', '--ui=tui'], 'mutually_exclusive', 'remove --ui');
     expectUsageError(['--ui=tui', 'run now'], 'mutually_exclusive', 'then enter the task');
     expectUsageError(['doctor', '--select', 'x/y'], 'unexpected_argument', 'doctor --help');
     expectUsageError(['doctor', '--cwd', '/tmp'], 'unexpected_argument', 'doctor --help');
@@ -86,10 +86,10 @@ describe('canonical command catalog', () => {
     );
   });
 
-  it('uses a valid explicit UI mode and keeps auto as the default', () => {
+  it('只接受 TUI-only 模式并保持 auto 默认值', () => {
     expect(parseCliInvocation([]).flags.ui).toBe('auto');
-    expect(parseCliInvocation(['--ui=accessible']).flags.ui).toBe('accessible');
-    expectUsageError(['--ui=graphical'], 'invalid_value', 'auto|tui|classic|accessible|plain');
+    expect(parseCliInvocation(['--ui=tui']).flags.ui).toBe('tui');
+    expectUsageError(['--ui=graphical'], 'invalid_value', 'auto|tui');
   });
 
   it('parses opt-in UX4 output, theme, ASCII, ephemeral, and timeout flags', () => {
@@ -129,7 +129,7 @@ describe('canonical command catalog', () => {
     const help = renderCliHelp('1.2.3');
     const loginHelp = renderCliHelp('1.2.3', ['auth', 'login']);
     const doctorHelp = renderCliHelp('1.2.3', ['doctor']);
-    const interactiveHelp = renderInteractiveHelp('classic').join('\n');
+    const interactiveHelp = renderInteractiveHelp().join('\n');
     for (const command of COMMAND_SPECS) {
       if (command.cli !== undefined && command.cli.path[0] !== 'help' && command.cli.path[0] !== 'version') {
         expect(help).toContain(`coda ${command.cli.path.join(' ')}`);
@@ -154,16 +154,12 @@ describe('canonical command catalog', () => {
       'diff', 'review', 'permissions', 'compact', 'retry', 'fork', 'new', 'sessions',
       'resume', 'switch', 'rename', 'archive',
     ]);
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('PageUp/PageDown: scroll output');
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('Alt+Up/Down: browse prompt history');
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+K: open command palette');
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+R: search prompt history');
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('Ctrl+O: edit draft in $EDITOR');
-    expect(renderInteractiveHelp('tui').join('\n')).toContain('Meta+S: stash this thread draft');
-    expect(renderInteractiveHelp('classic').join('\n')).toContain('Up/Down: move vertically');
-    expect(renderInteractiveHelp('text').join('\n')).not.toContain('Shift+Enter');
-    expect(renderInteractiveHelp('text').join('\n')).not.toContain('Ctrl+K');
-    expect(renderInteractiveHelp('text').join('\n')).toContain('Ctrl+C: abort a run or exit while idle');
+    expect(interactiveHelp).toContain('PageUp/PageDown: scroll output');
+    expect(interactiveHelp).toContain('Alt+Up/Down: browse prompt history');
+    expect(interactiveHelp).toContain('Ctrl+K: open command palette');
+    expect(interactiveHelp).toContain('Ctrl+R: search prompt history');
+    expect(interactiveHelp).toContain('Ctrl+O: edit draft in $EDITOR');
+    expect(interactiveHelp).toContain('Meta+S: stash this thread draft');
     expect(loginHelp).toContain('--preset <name>');
     expect(loginHelp).toContain('--api-key <key>');
     expect(loginHelp).not.toContain('--select');

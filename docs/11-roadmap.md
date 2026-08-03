@@ -10,7 +10,7 @@ Runtime mode、turn snapshot、policy/grant 与 package surface 已进入当前�
 static/legacy compatibility 边界，不能再把它读成“阶段 3 待实现”清单。
 
 Runtime 阶段 0–3 完成后，产品工作的 active roadmap 转为本文第 8 节的 CLI UX0–UX4。其用户旅程、
-surface parity、终端环境与性能基线以 [13 CLI/TUI UX](./13-cli-ux.md) 为 canonical 契约；09 记录
+surface 边界、终端环境与性能基线以 [13 CLI/TUI UX](./13-cli-ux.md) 为 canonical 契约；09 记录
 生产行为，10 记录机械化门禁。UX 阶段不得借产品化之名扩张 Agent、Runtime、权限或 provider 协议。
 
 ## 0. 总览与硬门禁
@@ -542,7 +542,8 @@ commit/push 后，本路线图完成。
 ## 6. 历史 M0–M7 基线（非 active roadmap）
 
 下表只解释当前仓库能力来自哪里，便于定位旧测试和文档中的 `M*` 标记；这些项视为阶段 0 的
-兼容基线，不应重新执行，也不能作为推迟阶段 0–3 契约的理由。
+历史基线，不应重新执行，也不能作为推迟阶段 0–3 契约的理由。M5/UX1 曾包含 classic 与 line REPL，
+这些前端现已退役，不属于当前兼容面。
 
 | 历史里程碑 | 已形成的基线 |
 |---|---|
@@ -551,7 +552,7 @@ commit/push 后，本路线图完成。
 | M2 | OpenAI Chat Completions adapter 与离线 SSE fixtures |
 | M3 | Agent loop、工具执行框架与内置工具 |
 | M4 | steering/follow-up/abort/transform 与 tool-call 配对修复 |
-| M5 | TUI/classic/plain/headless、Session JSONL create/resume |
+| M5 | 当时的 TUI/legacy REPL/headless、Session JSONL create/resume |
 | M6 | plan、approval、截断输出与前端交互 |
 | M7 | retry、compaction、usage/cost 与多 provider adapter |
 
@@ -590,11 +591,11 @@ flowchart LR
 
 | UX 阶段 | 当前状态 | 生产行为 | 结果 |
 |---|---|---|---|
-| UX0 | 已完成（两轮 review） | 不得改变 | UX 契约、旅程/parity matrix、环境与性能 characterization |
-| UX1 | 已完成（两轮 review） | 保持兼容地新增 | 零副作用帮助、命令目录、onboarding、sanitizer、classic 修复 |
+| UX0 | 已完成（两轮 review） | 不得改变 Runtime 语义 | UX 契约、旅程、环境与性能 characterization |
+| UX1 | 已完成（两轮 review） | CLI 产品化 | 零副作用帮助、命令目录、onboarding、sanitizer；历史 REPL 后续退役 |
 | UX2 | 已完成（两轮 review） | 保持 Runtime 语义 | 紧凑状态区、command palette、per-thread presentation 与 transcript 导航 |
 | UX3 | 已完成（两轮 review） | 业务动作只经 RuntimePort | review/diff/approval/session picker、manual compact、fork/retry 与跨 thread attachment 恢复 |
-| UX4 | 已完成（两轮 review） | legacy wire 默认不变 | accessible ASCII/theme/PTY 加固、限帧/分段加载与自动化输出 |
+| UX4 | 已完成（两轮 review） | legacy wire 默认不变 | TUI theme/PTY 加固、限帧/分段加载与自动化输出 |
 
 每个 UX 阶段**恰好进行两轮完整 review，不能少也不能多**。第一轮对照 09/10/13、实际实现和
 本阶段 diff 覆盖行为、恢复、终端安全、兼容与测试；发现问题立即修复并跑定向测试。第二轮重新覆盖
@@ -606,7 +607,7 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 
 - 新增 13，定义六条核心旅程：首次成功 prompt、登录/模型选择、长任务观察/steer、工具/diff 审阅、
   中止/失败/退出恢复、脚本/CI headless。
-- 同时冻结 TUI、classic、plain、headless 的现状与 UX4 目标 parity；目标列不能伪装成当前实现。
+- 当时记录各 surface 的现状；当前契约已经收敛为 TUI 唯一长驻交互面，另保留 one-shot/headless。
 - characterization 覆盖 `40×10`、`80×24`、`120×40`、CJK、emoji、`NO_COLOR`、`TERM=dumb`、
   tmux/SSH，以及冷启动、首帧、输入反馈、10000 delta 与 1000 条 transcript 回放基线。
 - 本阶段 diff 只允许文档与 characterization tests，不修复测试揭示的生产缺口。
@@ -617,14 +618,15 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   public Runtime import 继续零副作用。
 - 由统一 `CommandCatalog` 生成 help、completion、错误建议与 slash 候选；UX2 palette 继续扩展同一规格；新增
   `doctor [--json]`、`completion <bash|zsh|fish|powershell>`、`auth login|logout|status`、`models`、
-  `sessions`、`exec` 与 `--ui=auto|tui|classic|accessible|plain`，保留全部旧入口和 wire。`exec` 去掉动作
+  `sessions`、`exec` 与 `--ui`。当前 `--ui` 只保留 `auto|tui`；曾经的 classic/accessible/plain 值已随
+  对应 REPL 退役。`exec` 去掉动作
   token 后与现有 one-shot 使用同一解析和 RuntimePort 路径；models 的目录读取与 CLI-edge 默认选择
   保持零 thread/journal，首次任务或 resume 才由 composition root attach；交互面的 `/model` 经
   RuntimePort 模型配置适配改变下一次采样，尚未 attach 时按既有 runtime 行为立即 create/attach。
 - onboarding 显示“登录 → 选择模型 → 输入任务”；保留既有 OpenCode Go，并新增明确的 OpenAI、
   Anthropic、Custom API-key preset；未实现 OAuth 必须标记 disabled/coming soon；secret 永不进入持久
-  状态或输出。UX1 的 accessible 最低即 append-only、无 alternate screen/动画/鼠标依赖。
-- 统一所有 surface 的终端净化，修复 classic 多行、光标、bracketed paste 与键位说明；README 覆盖
+  状态或输出。
+- 统一 TUI、one-shot、产品命令与 human stderr 的终端净化；README 覆盖
   安装到恢复/headless 的完整路径。
 
 ### 8.4 UX2：TUI 信息层级与输入效率
@@ -634,7 +636,6 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 - composer 增加历史搜索、外部编辑、stash/restore、`@` 补全、per-thread draft 与可选 Vim；secret 路径
   不得进入 history/draft/frame/transcript/log/error。
 - transcript 增加搜索、上下项、latest/new-output、copy/raw/export；手动上滚时不得被新事件抢回。
-  classic/accesssible 通过文本命令达到功能等价。
 - frontend-private store 以 `(workspaceId,threadId)` hash 路径、0600 原子文件保存 draft/stash/stable
   scroll anchor/unread/search/Vim；ordinary draft 200ms 合并，显式 stash/restore/退出是 durability barrier，
   barrier 失败保留原 composer/in-memory state 并让 shutdown 非零；provider 的普通表单字段和 secret 都走
@@ -661,18 +662,18 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   snapshot query，CLI 只注入 workspace review port，UI 不读取 repository。
 - `RuntimeFrontendSession` 使用 workspace-wide event stream 与 per-thread cursors；switch 做目标
   snapshot splice 并恢复 presentation/pending approvals，隐藏 run 继续且能结案 waiter。TUI 已提供完整
-  diff viewer/searchable session picker、Working reasoning 摘要/工具 cards 与固定底部临时 approval panel；classic/accessible 使用同一
-  actions 的文本等价入口。源 busy 时 fork/retry fail closed，文件/shell 副作用明确不 rewind。
+  diff viewer/searchable session picker、Working reasoning 摘要/工具 cards 与固定底部临时 approval panel。
+  源 busy 时 fork/retry fail closed，文件/shell 副作用明确不 rewind。
 
 ### 8.6 UX4：可访问性、性能与自动化
 
-- 在 UX1 已冻结的 append-only/no-alternate-screen/no-animation/no-mouse 最低语义上，为 accessible 增加
-  ASCII fallback 与 PTY 加固；light、dark、high-contrast、mono 的状态都有非颜色标识。
+- 为 TUI 加固 PTY 与 light、dark、high-contrast、mono 主题；one-shot ASCII 输出保持 payload Unicode，
+  所有状态都有非颜色标识。
 - delta 按帧合并，长 transcript 窗口化/分段，昂贵内容延迟渲染；普通 observer、慢 UI 和 thread 切换
   不得背压 Runtime。
 - 在默认 legacy `--json` 逐字节兼容前提下增加 output/final-only/ephemeral/timeout；progress 写 stderr，
   final 写 stdout，机器格式具有稳定终态与失败码。
-- 真实 PTY 覆盖所有退出/降级/resize/paste/TERM/NO_COLOR 路径并验证终端模式复原；1000 条历史首帧、
+- 真实 PTY 覆盖所有退出/初始化失败/resize/paste/TERM/NO_COLOR 路径并验证终端模式复原；1000 条历史首帧、
   10000 delta 限帧、输入反馈 `<100ms`，最终内容不得丢失或重排。
 - 已完成实现把 explicit output adapter 留在 CLI edge，`--json`/历史 `-p` 不调用它；TUI 首批以
   120 条历史为目标并为 turn 边界最多扩至 240 条，流更新由 native frame task 合并；真实 PTY 用本地悬挂 HTTP provider 覆盖请求中退出，
@@ -683,7 +684,7 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 
 - 默认 Agent、工具、Runtime、approval 与 Enter/steer/follow-up/abort 语义不变；选模型前零 thread/journal。
 - UI 只消费 RuntimePort snapshot 与 EventEnvelope；thread/run/control/usage/permission 不得有第二事实源。
-- CLI、TUI、classic、accessible、plain、headless 的业务动作共享语义规格，且全部有机械化 parity 测试。
+- TUI、one-shot 与 headless 都只经 RuntimePort；只有 TUI 承担长驻交互动作与键位契约。
 - legacy NDJSON/envelope/一次性/管道/continue/resume golden 始终通过；所有新增业务动作经 RuntimePort。
 - 不实现多 Agent、子 Agent 页面、云任务、远程控制、插件市场或新 provider 协议。
 
@@ -695,4 +696,4 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 - [08-session-persistence.md](./08-session-persistence.md) —— 阶段 2 协作者与恢复边界
 - [10-testing.md](./10-testing.md) —— 各阶段可执行测试门禁
 - [12-supervisor-runtime.md](./12-supervisor-runtime.md) —— 本路线图的 canonical 设计契约
-- [13-cli-ux.md](./13-cli-ux.md) —— UX0–UX4 的用户旅程、parity 与恢复/性能契约
+- [13-cli-ux.md](./13-cli-ux.md) —— UX0–UX4 的用户旅程、surface 边界与恢复/性能契约

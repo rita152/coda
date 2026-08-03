@@ -32,7 +32,7 @@ export interface ResolvedConfig {
 }
 
 export interface ResolveConfigOptions {
-  /** 只供 TTY 交互模式使用；TUI/classic 都可在无模型状态下通过 /login 配置。 */
+  /** 只供 TUI 交互模式使用；可在无模型状态下通过 /login 配置。 */
   allowMissingApiKey?: boolean;
 }
 
@@ -42,10 +42,8 @@ export interface TuiTerminalState {
   term?: string;
 }
 
-export type InteractiveCliSurface = 'tui' | 'classic' | 'accessible' | 'plain';
-
 export type InteractiveUiResolution =
-  | { readonly ok: true; readonly surface: InteractiveCliSurface }
+  | { readonly ok: true; readonly surface: 'tui' }
   | { readonly ok: false; readonly message: string };
 
 /** 显式 --ui 与 auto 共用的纯路由；只选择前端，不读取或改变 Runtime 状态。 */
@@ -54,32 +52,14 @@ export function resolveInteractiveUi(
   terminal: TuiTerminalState,
 ): InteractiveUiResolution {
   const fullTerminal = terminal.stdinIsTTY && terminal.stdoutIsTTY && terminal.term !== 'dumb';
-  switch (mode) {
-    case 'auto':
-      return { ok: true, surface: fullTerminal ? 'tui' : 'accessible' };
-    case 'tui':
-      return fullTerminal
-        ? { ok: true, surface: 'tui' }
-        : {
-            ok: false,
-            message: '--ui=tui requires TTY stdin/stdout and TERM other than dumb; use --ui=accessible',
-          };
-    case 'classic':
-      return fullTerminal
-        ? { ok: true, surface: 'classic' }
-        : {
-            ok: false,
-            message: '--ui=classic requires TTY stdin/stdout and TERM other than dumb; use --ui=accessible',
-          };
-    case 'accessible':
-      return terminal.stdinIsTTY
-        ? { ok: true, surface: 'accessible' }
-        : { ok: false, message: '--ui=accessible requires TTY stdin; use a prompt or pipe for one-shot mode' };
-    case 'plain':
-      return terminal.stdinIsTTY
-        ? { ok: true, surface: 'plain' }
-        : { ok: false, message: '--ui=plain requires TTY stdin; use a prompt or pipe for one-shot mode' };
-  }
+  if (fullTerminal) return { ok: true, surface: 'tui' };
+  const subject = mode === 'tui' ? '--ui=tui' : 'interactive mode';
+  return {
+    ok: false,
+    message:
+      `${subject} requires TTY stdin/stdout and TERM other than dumb; ` +
+      'use a prompt, pipe stdin, or --json for non-interactive use',
+  };
 }
 
 /** API key 边界统一去掉误带空白；全空白与未配置同义，不能遮蔽低优先级来源。 */

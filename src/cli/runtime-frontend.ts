@@ -1,5 +1,5 @@
 // Default-thread CLI facade over RuntimePort. It is intentionally an edge adapter:
-// all business actions become identity-bearing RuntimeOps, while existing TUI/classic/plain
+// all business actions become identity-bearing RuntimeOps, while TUI and one-shot
 // frontends continue to consume the stable legacy SessionEvent projection.
 
 import {

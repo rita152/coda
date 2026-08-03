@@ -173,7 +173,7 @@ export function layoutPlan(
   return { title: 'Updated Plan', progress, lines };
 }
 
-/** 稳定的无样式文本投影，供 transcript 搜索、锚点与 plain renderer 使用。 */
+/** 稳定的无样式文本投影，供 transcript 搜索、锚点与 append-only renderer 使用。 */
 export function planPlainText(steps: readonly PlanStep[], ascii = false): string {
   const presentation = layoutPlan(steps, Number.MAX_SAFE_INTEGER, (value) => value.length, ascii);
   const progress = formatPlanProgress(presentation.progress);

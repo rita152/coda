@@ -15,3 +15,13 @@ export type CliApprovalDecision = ApprovalControlDecision | 'abort';
 export type CliSessionListener = (
   event: CliSessionEvent,
 ) => void | Promise<void>;
+
+/** Frontend bridge for resolving and observing canonical approval requests. */
+export interface CliApprovalBridge {
+  broker?: {
+    resolve: (approvalId: string, decision: CliApprovalDecision) => void;
+  };
+  /** Must run after the active session has received its abort request. */
+  onAbort: () => void;
+  subscribe: (listener: (event: CliSessionEvent) => void) => () => void;
+}

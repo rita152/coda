@@ -8,7 +8,7 @@
 
 ## 1. 项目是什么
 
-在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI:交互式全屏 TUI 为主,附带 classic/plain 保底与 headless `--json` 模式;能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
+在空项目 `/Users/zp/Desktop/openai/openai-sdk-ts` 中从零实现一个 TypeScript 终端 coding agent,工作代号 **coda**(npm 包名占位 `coda`,bin 名 `coda`,可随时改名)。形态上是一个单进程 CLI：OpenTUI 是唯一长驻交互面，另保留 one-shot 人类输出与 headless `--json` 模式；能力上覆盖一个可日常使用的 coding agent 的最小完整集——流式对话、八个内置工具、运行中消息注入、会话持久化与恢复。
 
 一次典型会话的样子:
 
@@ -199,14 +199,14 @@ export type StreamFn = (model: ModelConfig, context: Context, options?: StreamOp
 | `Bun.build` | 1.3.14 内置 | 显式 `target: 'bun'`、ESM 与 external package 策略产出 bin,不引入额外 bundler |
 | ripgrep | `@vscode/ripgrep` | 安装期自带平台二进制,免自实现下载逻辑;grep 工具直接 spawn 它(D11) |
 | ESLint | flat config + `import/no-restricted-paths` | D1 决策的机械化执行者:依赖方向违规 = CI 红灯 |
-| CLI 渲染 | `@opentui/core` 0.4.x;classic readline/ANSI + plain 保底 | 见 D18;eligible 双 TTY 的全屏分支用 alternate screen、ScrollBox、Textarea、Markdown;脚本分支不加载 native 包 |
+| CLI 渲染 | `@opentui/core` 0.4.x + one-shot human renderer | 见 D18；完整双 TTY 的唯一交互分支使用 alternate screen、ScrollBox、Textarea、Markdown；脚本与 headless 分支不加载 native 包 |
 
 目录结构与依赖方向的完整规则（`protocol/shared` 为叶子，`agent` 消费 capability snapshot，
 `runtime` 管理 Supervisor，CLI 只走 RuntimePort）是 [02 架构与分层](./02-architecture.md) 的主题。
 
 ### Bun-native compatibility 边界
 
-项目命令、依赖安装、测试、构建与进程启动统一使用 Bun 1.3.14；普通文件内容 I/O、哈希、进程与流默认使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Bun 官方暂未提供覆盖现有语义的等价接口时，允许以下受控 compatibility 边界：`node:fs` / `node:os` 用于目录、元数据、临时目录、符号链接，以及要求同步顺序或耐久性的配置/会话/审批 append、fsync、truncate 与落盘操作；路径处理使用 `node:path`；classic 保底输入保留 readline/raw TTY；工作目录、TTY 探测、进程退出、信号与 POSIX 进程组收尾保留 `process` compatibility API。eligible 双 TTY 的默认交互面由 OpenTUI 管理 raw TTY；初始化失败先清理终端,已配置 key 时回退 classic,缺 key 的延迟校验会话则关闭并退出 2。除此之外不得新增 Node 专属依赖。这里的 “Bun-native” 指 Bun 是唯一要求安装的运行时，不表示代码必须做到零 Node API。
+项目命令、依赖安装、测试、构建与进程启动统一使用 Bun 1.3.14；普通文件内容 I/O、哈希、进程与流默认使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Bun 官方暂未提供覆盖现有语义的等价接口时，允许以下受控 compatibility 边界：`node:fs` / `node:os` 用于目录、元数据、临时目录、符号链接，以及要求同步顺序或耐久性的配置/会话/审批 append、fsync、truncate 与落盘操作；路径处理使用 `node:path`；headless NDJSON 与 CLI 单次问答可保留 readline；工作目录、TTY 探测、进程退出、信号与 POSIX 进程组收尾保留 `process` compatibility API。长驻交互只由完整双 TTY、非 dumb 终端上的 OpenTUI 管理 raw TTY；初始化失败先清理终端再明确报错退出，不存在交互前端 fallback。除此之外不得新增 Node 专属依赖。这里的 “Bun-native” 指 Bun 是唯一要求安装的运行时，不表示代码必须做到零 Node API。
 
 同样重要的是**明确不引入的依赖**,每条都对应一次别人踩过的坑:
 

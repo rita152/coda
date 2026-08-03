@@ -1,4 +1,4 @@
-// Shared presentation-only actions for TUI, classic and append-only surfaces. These helpers read
+// Presentation-only actions for the TUI. These helpers read
 // the frontend transcript projection and write only explicit user-facing destinations; they do not
 // read repositories or call Agent/Session internals.
 
@@ -19,14 +19,6 @@ import type { AgentMessage, AssistantMessage, ThreadId } from '../protocol/index
 import { sanitizeTerminalText } from './terminal-sanitize.js';
 
 export type TranscriptContentMode = 'latest' | 'text' | 'raw';
-
-export interface TranscriptSearchMatch {
-  readonly messageId: string;
-  readonly label: string;
-  readonly snippet: string;
-  readonly ordinal: number;
-  readonly total: number;
-}
 
 export interface WorkspaceCompletion {
   readonly start: number;
@@ -122,77 +114,6 @@ export function transcriptContent(
   }
   return messages.map(formatMessageText).filter((item) => item !== '').join('\n\n') +
     (messages.length === 0 ? '' : '\n');
-}
-
-export class MessageTranscriptSearch {
-  readonly #messages: () => readonly AgentMessage[];
-  #query = '';
-  #ordinal = -1;
-
-  constructor(messages: () => readonly AgentMessage[]) {
-    this.#messages = messages;
-  }
-
-  get query(): string {
-    return this.#query;
-  }
-
-  setQuery(query: string, preferredOrdinal = 0): TranscriptSearchMatch | undefined {
-    this.#query = sanitizeTerminalText(query).trim();
-    this.#ordinal = Math.max(0, Math.trunc(preferredOrdinal));
-    return this.#current();
-  }
-
-  move(direction: -1 | 1): TranscriptSearchMatch | undefined {
-    const matches = this.#matches();
-    if (matches.length === 0) return undefined;
-    this.#ordinal = (this.#ordinal + direction + matches.length) % matches.length;
-    return this.#toPublic(matches[this.#ordinal], matches.length, this.#ordinal);
-  }
-
-  #current(): TranscriptSearchMatch | undefined {
-    const matches = this.#matches();
-    if (matches.length === 0) return undefined;
-    this.#ordinal = Math.min(this.#ordinal, matches.length - 1);
-    return this.#toPublic(matches[this.#ordinal], matches.length, this.#ordinal);
-  }
-
-  #matches(): InternalSearchMatch[] {
-    if (this.#query === '') return [];
-    const folded = this.#query.toLocaleLowerCase('en-US');
-    const matches: InternalSearchMatch[] = [];
-    for (const message of this.#messages()) {
-      const text = searchableMessageText(message);
-      const index = text.toLocaleLowerCase('en-US').indexOf(folded);
-      if (index < 0) continue;
-      matches.push({
-        messageId: message.id,
-        label: message.role === 'assistant'
-          ? 'coda'
-          : message.role === 'user'
-            ? 'you'
-            : `tool ${message.toolName}`,
-        snippet: excerpt(text, index, this.#query.length),
-      });
-    }
-    return matches;
-  }
-
-  #toPublic(
-    match: InternalSearchMatch | undefined,
-    total: number,
-    ordinal: number,
-  ): TranscriptSearchMatch | undefined {
-    return match === undefined
-      ? undefined
-      : { ...match, ordinal, total };
-  }
-}
-
-interface InternalSearchMatch {
-  readonly messageId: string;
-  readonly label: string;
-  readonly snippet: string;
 }
 
 /** Bounded, symlink-safe workspace index used by @ completion. */
@@ -379,28 +300,6 @@ function formatMessageText(message: AgentMessage): string {
       .map((part) => part.type === 'text' ? part.text : `[image · ${part.mimeType}]`)
       .join('\n'),
   )}`;
-}
-
-function searchableMessageText(message: AgentMessage): string {
-  if (message.role === 'assistant') return sanitizeTerminalText(assistantText(message));
-  if (message.role === 'user') {
-    return sanitizeTerminalText(
-      message.content.map((part) => part.type === 'text' ? part.text : part.mimeType).join('\n'),
-    );
-  }
-  return sanitizeTerminalText(
-    `${message.toolName}\n${message.content
-      .map((part) => part.type === 'text' ? part.text : part.mimeType)
-      .join('\n')}`,
-  );
-}
-
-function excerpt(text: string, index: number, queryLength: number): string {
-  const singleLine = sanitizeTerminalText(text).replace(/\s+/gu, ' ').trim();
-  const safeIndex = Math.min(index, singleLine.length);
-  const start = Math.max(0, safeIndex - 36);
-  const end = Math.min(singleLine.length, safeIndex + queryLength + 56);
-  return `${start > 0 ? '…' : ''}${singleLine.slice(start, end)}${end < singleLine.length ? '…' : ''}`;
 }
 
 function normalizeCompletionQuery(query: string): string {

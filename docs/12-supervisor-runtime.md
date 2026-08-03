@@ -2799,9 +2799,10 @@ model。`coda models --select` 因此可保持零 thread/journal；真正 prompt
 出的完整 `ModelConfig` 交给 Runtime。已有 attachment 的 `/model` 仍须经
 `InteractiveRuntime`/RuntimePort 模型配置适配，UI 不得只改 footer 或本地字段后宣称切换成功。
 
-OpenTUI、classic、accessible/plain 都只消费 `RuntimeFrontendSession` 从 RuntimePort snapshot/query 与
-EventEnvelope 折叠出的 projection；其 renderer 可以维护 draft/cursor/scroll 等 presentation state，但
-不得拥有第二份 thread/run/control/usage/permission 状态。CLI-edge provider 配置不是 Runtime 业务状态的
+OpenTUI、one-shot human renderer 与 legacy headless 只消费 `RuntimeFrontendSession` 从 RuntimePort
+snapshot/query 与 EventEnvelope 折叠出的 projection；envelope headless 直接消费 RuntimePort。只有 TUI 可以维护
+draft/cursor/scroll 等 presentation state，one-shot/headless 不维护这些状态，且任何前端都不得拥有第二份
+thread/run/control/usage/permission 状态。CLI-edge provider 配置不是 Runtime 业务状态的
 旁路：它只在 attach 之前提供 composition 输入，attach 之后的业务动作仍以 RuntimePort 为唯一入口。
 
 CLI session 选择另有一个显式安全收紧：阶段 0 的 `Session.list`、`--continue` 和 `--resume` 使用整个
@@ -2830,8 +2831,8 @@ SessionEvent/NDJSON；retry/compaction 事件剥离新增 identity 字段，
 
 production CLI 在 composition root 注入 Git review port，并让 `RuntimeFrontendSession` 只调用上述
 RuntimePort query/op。它不持有 `ThreadRuntime`、journal、repository、PreparedInvocation 或 PolicyEngine
-引用。TUI、classic 与 accessible 的 `/review`、`/diff`、`/permissions`、session 管理、compact、fork、
-retry 只是同一 frontend action 的不同投影；slash command 仍来自统一 catalog。workspace-wide event pump
+引用。TUI 的 `/review`、`/diff`、`/permissions`、session 管理、compact、fork、retry 只是同一
+frontend action 的交互投影；slash command 仍来自统一 catalog。workspace-wide event pump
 按 thread cursor 消费，页面 switch 只改变 visible target，不关闭源 attachment，也不把后台 completion
 当成前台 run。目标 snapshot splice 后 pending approval 全量重建；旧页面残留的 approval key 不得发往新
 thread。presentation store 只保存 draft/scroll/unread/panel，切换前后均不能覆盖 Runtime snapshot。

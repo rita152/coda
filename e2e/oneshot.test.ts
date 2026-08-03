@@ -1,7 +1,7 @@
 // L5 e2e:一次性模式与退出码(docs/09 §6.4 + §8,M5 核查修复面)。
 // - `coda --json -p "..."`:完整事件流后自动退出(无需 shutdown 命令/EOF);
 //   agent_end reason 'error' → exit 1、completed → exit 0(-p 人类可读模式同规则);
-// - `coda </dev/null`(非 TTY 空 stdin 且无 -p):不落入 REPL 挂起,stderr 用法提示,exit 2。
+// - `coda </dev/null`(非 TTY 空 stdin 且无 -p):不等待交互输入,stderr 用法提示,exit 2。
 
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -198,7 +198,7 @@ test('-p (human-readable): prompt return does not close the scheduled retry', as
   expect(proc.lines.join('\n')).toContain('plain output recovered');
 }, T);
 
-test('empty non-TTY stdin without -p: usage hint on stderr, exit 2 (no REPL hang)', async () => {
+test('empty non-TTY stdin without -p: usage hint on stderr, exit 2', async () => {
   const proc = track(
     startCoda({
       script: { turns: [], onExhausted: 'emptyStop' },

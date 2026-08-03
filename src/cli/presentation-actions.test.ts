@@ -21,7 +21,6 @@ import {
   editDraftWithExternalEditor,
   exportTranscript,
   latestAssistantText,
-  MessageTranscriptSearch,
   promptHistoryEntries,
   runThreadPresentationTransition,
   transcriptContent,
@@ -136,24 +135,6 @@ describe('presentation transcript actions', () => {
     const raw = transcriptContent(messages, 'raw');
     expect(raw.split('\n').filter(Boolean)).toHaveLength(4);
     expect(raw).toContain('\\u001b');
-  });
-
-  it('searches messages cyclically without exposing terminal controls', () => {
-    const messages: AgentMessage[] = [
-      user('u1', 'Needle one'),
-      assistant('a1', 'middle'),
-      assistant('a2', 'needle\u001b]52;c;bad\u0007 two'),
-    ];
-    const search = new MessageTranscriptSearch(() => messages);
-    expect(search.setQuery('needle')).toMatchObject({
-      messageId: 'u1',
-      ordinal: 0,
-      total: 2,
-    });
-    const next = search.move(1);
-    expect(next).toMatchObject({ messageId: 'a2', ordinal: 1, total: 2 });
-    expect(next?.snippet).not.toContain('\u001b');
-    expect(search.move(1)?.messageId).toBe('u1');
   });
 
   it('rebuilds per-thread prompt history while excluding synthetic context', () => {

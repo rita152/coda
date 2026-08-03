@@ -29,11 +29,11 @@ import type {
 import { createFauxStreamFn } from '../providers/faux/index.js';
 import { Session } from '../session/index.js';
 import type { SessionEvent, SessionUsage } from '../session/index.js';
+import type { CliApprovalBridge } from './frontend-types.js';
 import { InteractiveRuntime } from './interactive-runtime.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
-import type { ReplApproval } from './repl.js';
 import {
   persistableDraft,
   ThreadPresentationStore,
@@ -3232,7 +3232,7 @@ describe('TUI 控制器接线', () => {
       abort: () => undefined,
       close: async () => undefined,
     };
-    const approval: ReplApproval = {
+    const approval: CliApprovalBridge = {
       broker: {
         resolve: (id, decision) => resolved.push({ id, decision }),
       },
@@ -3497,7 +3497,7 @@ describe('TUI 控制器接线', () => {
       abort: () => undefined,
       close: async () => undefined,
     };
-    const approval: ReplApproval = {
+    const approval: CliApprovalBridge = {
       broker: {
         resolve: (id, decision) => {
           resolved.push({ id, decision });

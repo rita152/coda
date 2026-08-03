@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type {
   ApprovalPresentation,
-  RuntimeDiffSnapshot,
   RuntimeReviewSnapshot,
   RuntimeThreadListItem,
 } from '../protocol/index.js';
@@ -9,9 +8,7 @@ import {
   approvalAllowsAlways,
   filterSessionItems,
   formatApprovalPresentation,
-  formatDiffSnapshot,
   formatReviewSnapshot,
-  formatSessionItems,
 } from './review-format.js';
 
 describe('UX3 review formatting', () => {
@@ -22,10 +19,9 @@ describe('UX3 review formatting', () => {
     ];
     expect(filterSessionItems(items, 'archived needle /workspace').map((item) =>
       String(item.thread.threadId))).toEqual(['thread-new']);
-    expect(formatSessionItems(filterSessionItems(items, 'running'))[0]).toContain('thread-new');
   });
 
-  it('prints full explicit review/diff details while stripping terminal controls', () => {
+  it('prints full explicit review details while stripping terminal controls', () => {
     const review: RuntimeReviewSnapshot = {
       workspaceId: 'workspace-review' as never,
       threadId: 'thread-review' as never,
@@ -66,18 +62,6 @@ describe('UX3 review formatting', () => {
     expect(reviewText).toContain('complete streamed output');
     expect(reviewText).toContain('complete result');
     expect(reviewText).not.toContain('\u001b');
-
-    const longPatch = `diff --git a/a b/a\n${'+line\n'.repeat(500)}\u001b[2J`;
-    const diff: RuntimeDiffSnapshot = {
-      workspaceId: review.workspaceId,
-      threadId: review.threadId,
-      scope: 'workspace',
-      generatedAt: 1,
-      files: [{ path: 'a', group: 'unstaged', status: 'M', patch: longPatch }],
-    };
-    const diffText = formatDiffSnapshot(diff).join('\n');
-    expect(diffText).toContain('+line\n'.repeat(500));
-    expect(diffText).not.toContain('\u001b');
   });
 
   it('renders only Runtime-authored approval scope and marks legacy scope unavailable', () => {

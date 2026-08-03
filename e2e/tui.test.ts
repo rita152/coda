@@ -996,9 +996,9 @@ test.skipIf(process.platform !== 'darwin')(
 );
 
 test.skipIf(process.platform !== 'darwin')(
-  'OpenTUI 初始化失败在 auto 模式降级 classic 且不泄漏终端模式',
+  'OpenTUI 初始化失败明确退出且不泄漏终端模式',
   async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-init-fallback-'));
+    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-init-failure-'));
     const home = path.join(root, '.home');
     const scriptPath = writeFauxScript(root, { turns: [], onExhausted: 'emptyStop' });
     const env: Record<string, string> = {
@@ -1017,12 +1017,11 @@ test.skipIf(process.platform !== 'darwin')(
         root,
         env,
         tuiArgs(root, scriptPath),
-        '/quit\r',
-        { readyMarker: 'using classic mode' },
+        '',
       );
-      expect(result.code, JSON.stringify(result).slice(-OUTPUT_PREVIEW_LIMIT)).toBe(0);
+      expect(result.code, JSON.stringify(result).slice(-OUTPUT_PREVIEW_LIMIT)).toBe(1);
       expect(result.stderr).toBe('');
-      expect(result.stdout).toContain('full-screen TUI unavailable, using classic mode');
+      expect(result.stdout).toContain('full-screen TUI unavailable');
       expectTerminalRestored(result.stdout, false);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1032,50 +1031,7 @@ test.skipIf(process.platform !== 'darwin')(
 );
 
 test.skipIf(process.platform !== 'darwin')(
-  'TERM=dumb auto 使用无控制序列的 append-only accessible 面',
-  async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'coda-accessible-pty-'));
-    const home = path.join(root, '.home');
-    const env: Record<string, string> = {
-      ...sanitizedTestEnvironment(Bun.env),
-      HOME: home,
-      USERPROFILE: home,
-      TERM: 'dumb',
-      NO_COLOR: '1',
-      COLUMNS: '80',
-      LINES: '24',
-    };
-    assertSanitizedTestEnvironment(env);
-
-    try {
-      const result = await runPty(
-        root,
-        env,
-        [
-          '--provider', 'faux',
-          '--approval-mode', 'allow',
-          '--cwd', root,
-          '--session-dir', path.join(root, 'sessions'),
-        ],
-        '/help\r/quit\r',
-        { readyMarker: 'Accessible mode:' },
-      );
-      expect(result.code, JSON.stringify(result)).toBe(0);
-      expect(result.stderr).toBe('');
-      expect(result.stdout).toContain('Accessible mode: append-only output.');
-      expect(result.stdout).toContain('Ctrl+C: abort a run or exit while idle');
-      expect(result.stdout).not.toContain('Shift+Enter');
-      expect(result.stdout).not.toContain('PageUp/PageDown');
-      expect(result.stdout).not.toContain('\x1b');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-  { timeout: CASE_TIMEOUT_MS },
-);
-
-test.skipIf(process.platform !== 'darwin')(
-  '显式 --ui=tui 在 TERM=dumb 下明确失败且不静默降级',
+  'TUI-only 路由在 TERM=dumb 下明确失败',
   async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'coda-explicit-tui-pty-'));
     const home = path.join(root, '.home');
@@ -1092,8 +1048,8 @@ test.skipIf(process.platform !== 'darwin')(
       const result = await runPty(root, env, ['--ui=tui'], '');
       expect(result.code, JSON.stringify(result)).toBe(2);
       expect(result.stderr).toBe('');
-      expect(result.stdout).toContain('--ui=tui requires TTY stdin/stdout and TERM other than dumb');
-      expect(result.stdout).not.toContain('Accessible mode:');
+      expect(result.stdout).toContain('requires TTY stdin/stdout and TERM other than dumb');
+      expect(result.stdout).toContain('use a prompt, pipe stdin, or --json');
       expect(result.stdout).not.toContain('\x1b');
     } finally {
       rmSync(root, { recursive: true, force: true });

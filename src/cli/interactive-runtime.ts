@@ -34,7 +34,7 @@ export interface InteractiveSession {
   close(): Promise<void>;
 }
 
-/** TUI/classic 控制器只依赖此公共门面；真实 Session 也结构化兼容，便于库级测试。 */
+/** TUI 控制器只依赖此公共门面；真实 Session 也结构化兼容，便于库级测试。 */
 export type CliSession = Pick<
   InteractiveSession,
   | 'interactionState'

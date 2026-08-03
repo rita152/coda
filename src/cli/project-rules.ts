@@ -207,7 +207,7 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
     this.repositoryRoot = findRepositoryRoot(this.cwd);
   }
 
-  /** CLI-local warning 旁路；replay 让 TUI 初始化失败后的 classic sink 不漏启动期告警。 */
+  /** CLI-local warning 旁路；replay 让延迟订阅的 TUI 不漏启动期告警。 */
   subscribeWarnings(listener: WarningListener): () => void {
     for (const warning of this.#warningHistory) {
       try {

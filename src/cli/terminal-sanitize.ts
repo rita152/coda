@@ -1,4 +1,4 @@
-// 终端不可信文本边界；不 import OpenTUI，供全屏、classic 与 stderr 路径共同使用。
+// 终端不可信文本边界；不 import OpenTUI，供全屏、一次性输出与 stderr 路径共同使用。
 
 /** 保留 tab/newline 的正文清洗。 */
 export function sanitizeTerminalText(text: string): string {

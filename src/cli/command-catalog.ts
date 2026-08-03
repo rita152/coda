@@ -10,15 +10,13 @@ export type CommandCategory =
   | 'settings'
   | 'help';
 
-export type InteractiveHelpSurface = 'tui' | 'classic' | 'text';
-
 export type ApprovalMode = 'interactive' | 'allow' | 'deny';
 export type CliProvider =
   | 'openai-chat'
   | 'openai-responses'
   | 'anthropic-messages'
   | 'faux';
-export type CliUiMode = 'auto' | 'tui' | 'classic' | 'accessible' | 'plain';
+export type CliUiMode = 'auto' | 'tui';
 export type CliTheme = 'auto' | 'light' | 'dark' | 'high-contrast' | 'mono';
 export type CliOutputMode = 'text' | 'json' | 'stream-json';
 export type CompletionShell = 'bash' | 'zsh' | 'fish' | 'powershell';
@@ -94,7 +92,6 @@ export interface CommandSpec {
   readonly shortcuts?: readonly {
     readonly keys: string;
     readonly summary: string;
-    readonly surfaces?: readonly InteractiveHelpSurface[];
   }[];
 }
 
@@ -137,7 +134,7 @@ export const OPTION_SPECS: readonly OptionSpec[] = [
   { id: 'no-color', flags: ['--no-color'], summary: 'Disable semantic colors' },
   { id: 'json', flags: ['--json'], summary: 'Use the legacy NDJSON transport' },
   { id: 'event-format', flags: ['--event-format'], valueHint: '<format>', summary: 'Select headless event framing', choices: ['legacy', 'envelope'] },
-  { id: 'ui', flags: ['--ui'], valueHint: '<mode>', summary: 'Select the terminal surface', choices: ['auto', 'tui', 'classic', 'accessible', 'plain'] },
+  { id: 'ui', flags: ['--ui'], valueHint: '<mode>', summary: 'Select the terminal surface', choices: ['auto', 'tui'] },
   { id: 'theme', flags: ['--theme'], valueHint: '<theme>', summary: 'Select auto, light, dark, high-contrast, or mono colors', choices: ['auto', 'light', 'dark', 'high-contrast', 'mono'] },
   { id: 'ascii', flags: ['--ascii'], summary: 'Use ASCII product chrome where supported' },
   { id: 'output', flags: ['--output'], valueHint: '<format>', summary: 'Opt into one-shot text, JSON, or streaming JSON output', choices: ['text', 'json', 'stream-json'] },
@@ -235,14 +232,13 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     cli: { path: ['exec'], usage: '[options] [prompt]', optionIds: RUN_OPTION_IDS },
     shortcuts: [
       { keys: 'Enter', summary: 'send when idle; steer while running' },
-      { keys: 'Shift+Enter', summary: 'insert a newline', surfaces: ['tui', 'classic'] },
-      { keys: 'Up/Down', summary: 'move vertically or browse single-line history', surfaces: ['classic'] },
-      { keys: 'Alt+Up/Down', summary: 'browse prompt history', surfaces: ['tui'] },
+      { keys: 'Shift+Enter', summary: 'insert a newline' },
+      { keys: 'Alt+Up/Down', summary: 'browse prompt history' },
     ],
   },
   {
     id: 'transcript.scroll', category: 'review', summary: 'Scroll the transcript without moving input focus',
-    shortcuts: [{ keys: 'PageUp/PageDown', summary: 'scroll output', surfaces: ['tui'] }],
+    shortcuts: [{ keys: 'PageUp/PageDown', summary: 'scroll output' }],
   },
   {
     id: 'review.diff', category: 'review', summary: 'Open the complete turn or workspace diff',
@@ -294,27 +290,27 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   },
   {
     id: 'palette.open', category: 'help', summary: 'Open the searchable command palette',
-    shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette' }],
   },
   {
     id: 'history.search', category: 'task', summary: 'Search this thread prompt history',
     slash: { name: 'history', argumentHint: '[query]', availableWhileRunning: true, order: 14 },
-    shortcuts: [{ keys: 'Ctrl+R', summary: 'search prompt history', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Ctrl+R', summary: 'search prompt history' }],
   },
   {
     id: 'draft.edit', category: 'task', summary: 'Edit the current draft with $VISUAL or $EDITOR',
     slash: { name: 'edit', availableWhileRunning: true, order: 15 },
-    shortcuts: [{ keys: 'Ctrl+O', summary: 'edit draft in $EDITOR', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Ctrl+O', summary: 'edit draft in $EDITOR' }],
   },
   {
     id: 'draft.files', category: 'task', summary: 'Complete workspace files and directories',
     slash: { name: 'files', argumentHint: '[query]', availableWhileRunning: true, order: 16 },
-    shortcuts: [{ keys: 'Tab after @', summary: 'complete workspace path', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Tab after @', summary: 'complete workspace path' }],
   },
   {
     id: 'draft.stash', category: 'task', summary: 'Stash the current thread draft durably',
     slash: { name: 'stash', argumentHint: '[text]', availableWhileRunning: true, order: 17 },
-    shortcuts: [{ keys: 'Meta+S', summary: 'stash this thread draft', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Meta+S', summary: 'stash this thread draft' }],
   },
   {
     id: 'draft.restore', category: 'task', summary: 'Restore this thread’s stashed draft',
@@ -331,7 +327,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'transcript.search', category: 'review', summary: 'Search the current transcript',
     slash: { name: 'search', argumentHint: '<query>', availableWhileRunning: true, order: 8 },
-    shortcuts: [{ keys: 'Ctrl+F', summary: 'search transcript', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Ctrl+F', summary: 'search transcript' }],
   },
   {
     id: 'transcript.next', category: 'review', summary: 'Jump to the next transcript search match',
@@ -344,7 +340,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'transcript.latest', category: 'review', summary: 'Jump to the latest output and clear unread',
     slash: { name: 'latest', availableWhileRunning: true, order: 11 },
-    shortcuts: [{ keys: 'End', summary: 'jump to latest output', surfaces: ['tui'] }],
+    shortcuts: [{ keys: 'End', summary: 'jump to latest output' }],
   },
   {
     id: 'content.copy', category: 'review', summary: 'Copy the latest response or raw transcript',
@@ -368,23 +364,20 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [{
       keys: 'Alt+Enter',
       summary: 'queue the current draft as follow-up',
-      surfaces: ['tui', 'classic'],
     }],
   },
   {
     id: 'task.abort', category: 'task', summary: 'Abort only the current run',
     slash: { name: 'abort', availableWhileRunning: true, order: 7 },
-    shortcuts: [{ keys: 'Esc', summary: 'abort the current run', surfaces: ['tui', 'classic'] }],
+    shortcuts: [{ keys: 'Esc', summary: 'abort the current run' }],
   },
   {
     id: 'app.quit', category: 'help', summary: 'Exit coda cleanly',
     slash: { name: 'quit', aliases: ['q'], availableWhileRunning: false, order: 21 },
     shortcuts: [
-      { keys: 'Esc Esc', summary: 'exit', surfaces: ['tui', 'classic'] },
-      { keys: 'Ctrl+C Ctrl+C', summary: 'exit', surfaces: ['tui', 'classic'] },
-      { keys: 'Ctrl+D', summary: 'exit while idle with an empty draft', surfaces: ['tui', 'classic'] },
-      { keys: 'Ctrl+C', summary: 'abort a run or exit while idle', surfaces: ['text'] },
-      { keys: 'Ctrl+D/EOF', summary: 'abort a run and exit', surfaces: ['text'] },
+      { keys: 'Esc Esc', summary: 'exit' },
+      { keys: 'Ctrl+C Ctrl+C', summary: 'exit' },
+      { keys: 'Ctrl+D', summary: 'exit while idle with an empty draft' },
     ],
   },
 ] as const;
@@ -459,7 +452,7 @@ export class CliUsageError extends Error {
 
 const SESSION_ID_RE = /^(?:\d{8}-\d{6}-|runtime-[0-9a-f]{40}$)/;
 const COMPLETION_SHELLS: readonly CompletionShell[] = ['bash', 'zsh', 'fish', 'powershell'];
-const UI_MODES: readonly CliUiMode[] = ['auto', 'tui', 'classic', 'accessible', 'plain'];
+const UI_MODES: readonly CliUiMode[] = ['auto', 'tui'];
 const THEMES: readonly CliTheme[] = ['auto', 'light', 'dark', 'high-contrast', 'mono'];
 const OUTPUT_MODES: readonly CliOutputMode[] = ['text', 'json', 'stream-json'];
 const PRESETS: readonly AuthPreset[] = AUTH_PRESET_SPECS.map((preset) => preset.id);
@@ -1118,12 +1111,9 @@ function subsequenceScore(candidate: string, query: string): number | undefined 
   return score;
 }
 
-export function renderInteractiveHelp(
-  surface: InteractiveHelpSurface = 'classic',
-): readonly string[] {
+export function renderInteractiveHelp(): readonly string[] {
   const shortcuts = COMMAND_SPECS
     .flatMap((command) => command.shortcuts ?? [])
-    .filter((shortcut) => shortcut.surfaces === undefined || shortcut.surfaces.includes(surface))
     .map((shortcut) => `${shortcut.keys}: ${shortcut.summary}`);
   const slash = SLASH_COMMAND_SPECS.map((command) =>
     `/${command.name}${command.argumentHint === undefined ? '' : ` ${command.argumentHint}`}: ${command.description}`);

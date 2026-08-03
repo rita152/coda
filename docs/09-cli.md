@@ -12,14 +12,14 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > 起 production CLI 只依赖无副作用 public runtime entry。默认 `--json` 保持 legacy 裸事件，显式
 > `--event-format=envelope` 使用 canonical identity/envelope 协议。
 
-> **UX4 已完成（2026-08-01，恰好两轮完整 review）**：六条用户旅程、surface parity、presentation state、环境与性能
+> **UX4 已完成（2026-08-01，恰好两轮完整 review）**：六条用户旅程、presentation state、环境与性能
 > 契约以 [13 CLI / TUI 产品体验契约](./13-cli-ux.md) 为准。统一 command catalog、薄
-> bootstrap/help/version/completion、产品子命令、`--ui`、最低 accessible/plain 文本面、共享
-> terminal sanitizer 与 classic 多行/光标/paste 已落地；UX2 的紧凑任务栏、palette、composer、
+> bootstrap/help/version/completion、产品子命令、`--ui` 与共享 terminal sanitizer 已落地；历史上的
+> classic 与 accessible/plain line REPL 后续已退役，当前只保留 TUI 长驻交互；UX2 的紧凑任务栏、palette、composer、
 > per-thread presentation state 与 transcript 导航已完成恰好两轮 review。UX3 已实现 Runtime-backed
 > review/diff、approval panel、session switch、manual compact 与 conversation fork/retry，并已完成恰好
 > 两轮完整 review；第二轮修复了 allow-always 可用性、seed turn provenance 与 tool update snapshot
-> 聚合，随后仅运行定向验证。UX4 已实现 accessible ASCII、四套显式主题、按帧 delta 合并、长历史
+> 聚合，随后仅运行定向验证。UX4 已实现 ASCII one-shot 输出、四套显式主题、按帧 delta 合并、长历史
 > 分段加载、opt-in one-shot automation output 与完整真实 PTY 退出矩阵，并已完成恰好两轮完整 review。
 > 第一轮修复终态/timeout 竞态、跨 segment 最新 plan、tool anchor identity 与真实 termios 证据；第二轮
 > 修复 broken-pipe run 收束与重复 toolCallId 的确定 occurrence anchor，随后只运行定向验证。
@@ -34,9 +34,9 @@ envelope seq：v1 snapshot-only 历史没有对应历史 envelope；seq 只用�
 尚无 thread 时，TUI permission mode 来自 `RuntimePort.getWorkspaceSnapshot()` 的冻结 permissions；
 CLI `approvalMode` 只进入注入的 permission policy/approval adapter，不直接进入 view options。
 
-UX1 的 help、completion、错误建议和 CLI 子命令与 UX2 的 categorized fuzzy palette、slash/text
-commands、参数提示和快捷键都由同一个 command catalog 生成。TUI/classic/accessibility 共享
-per-thread presentation state 与 presentation-only actions。UX3 的 diff、session 与 approval UI
+UX1 的 help、completion、错误建议和 CLI 子命令与 UX2 的 categorized fuzzy palette、slash
+commands、参数提示和快捷键都由同一个 command catalog 生成。TUI 独占 per-thread presentation state
+与 presentation-only actions；one-shot/headless 不维护 composer state。UX3 的 diff、session 与 approval UI
 只展示 Runtime 提交进 snapshot/envelope 的权威 identity/resource/scope。由同一
 `PreparedInvocation`/`PolicyDecision` 生成的 JSON-safe
 `ApprovalPresentation` 纳入 canonical event/snapshot；UI 不得直接读取 capability/policy internals，也不得
@@ -53,15 +53,15 @@ Git adapter 不能直接暴露给 CLI/UI。
 |---|---|
 | `--json` | `startHeadless()`;stdin/stdout NDJSON |
 | `--output=text|json|stream-json` 或 `--final-only/--ephemeral/--timeout` | `startOneShotOutput()`；必须有 one-shot prompt，显式 opt in |
-| `-p`、裸 prompt、非 TTY stdin | plain `Renderer`;跑完退出 |
-| `--ui=auto`，双 TTY 且 `TERM != dumb` | `startTui()`;alternate screen |
-| `--ui=auto`，`TERM=dumb` 或 stdout 非 TTY | accessible append-only line REPL |
-| `--ui=tui` | 只允许完整双 TTY/非 dumb；初始化失败明确退出，不换面 |
-| `--ui=classic` | 显式 readline/raw TTY + ANSI 动态区 |
-| `--ui=accessible` / `--ui=plain` | stdin TTY 上的 append-only 文本面，无 raw/alternate screen/鼠标/动画 |
-| auto 中 OpenTUI 初始化失败 | 完整清理 OpenTUI 后降级 classic |
+| `-p`、裸 prompt、非 TTY stdin | append-only human `Renderer`;跑完退出 |
+| `--ui=auto` 或 `--ui=tui`，双 TTY 且 `TERM != dumb` | `startTui()`；alternate screen |
+| 长驻交互但 stdin/stdout 非完整双 TTY或 `TERM=dumb` | 明确报错退出；提示改用 one-shot 或 headless |
+| OpenTUI 初始化失败 | 完整清理 OpenTUI 后明确报错退出，不切换前端 |
 
-OpenTUI 与 classic REPL 不能同时存在:二者都会接管 raw stdin/stdout。`main.ts` 因此必须在创建 stdout FileSink/legacy renderer **之前**选择 TUI。没有遗留布尔 `--classic` 开关；统一使用 `--ui=classic`。auto 初始化失败时先完整销毁 OpenTUI，再自动进入 classic。二者共用 `ProviderCommandController`，所以没有 API key 或模型也能在任一交互面完成 `/login` → `/model`。生产构建保持 `Bun.build({ packages: 'external' })`;运行时安装当前平台的 OpenTUI optional native package。`--json`、`-p` 和管道协议不因 TUI 发生任何变化。
+OpenTUI 是唯一会接管 raw stdin/stdout 的长驻交互前端。`main.ts` 必须在创建 one-shot/headless
+输出泵之前选择 TUI；`--ui` 只保留 `auto|tui`，两者都不提供 UI fallback。没有 API key 或模型时仍可
+在 TUI 完成 `/login` → `/model`。生产构建保持 `Bun.build({ packages: 'external' })`；运行时安装当前平台的
+OpenTUI optional native package。`--json`、`-p` 和管道协议不因 TUI 发生任何变化。
 
 `dist/main.js` 是一个只静态引用 `command-catalog`/终端清洗与 build metadata 的薄 bootstrap。
 `-h/--help`、`-V/--version`、completion 和 usage error 在 dynamic import `main` chunk 之前收束，
@@ -103,37 +103,24 @@ root column (100% × 100%)
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先提交目标 thread 的 `abort`、等待 control/权威提交收束并调用 `RuntimePort.close()`；阶段 0 legacy 路径等价执行 `approval.onAbort → Session.close()`。`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 的内容与边框语义色,但保留用于焦点可见性的硬件光标色,且不改变布局和键位。
 
-所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。OpenTUI、classic、accessible、plain、产品子命令与 human stderr 共用 `terminal-sanitize.ts`：进入 Text/Markdown、状态栏、工具摘要、diff 或 transcript 前剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列，移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。终端标题再经过 `sanitizeTerminalTitle` 把 tab/newline 折成单行；不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。headless JSON 为保持 wire 兼容不删改 payload，只依赖 JSON escaping 并确保日志不泄密。
+所有来自模型、工具、仓库、配置与持久化会话的文本都按不可信终端输入处理。OpenTUI、one-shot human renderer、产品子命令与 human stderr 共用 `terminal-sanitize.ts`：进入 Text/Markdown、状态栏、工具摘要、diff 或 transcript 前剥离 ANSI CSI/OSC/DCS/APC/PM/SOS 序列，移除除 `\t` / `\n` 外的 C0 与全部 C1 控制字符。终端标题再经过 `sanitizeTerminalTitle` 把 tab/newline 折成单行；不得依赖组件转义来阻止 OSC 52、标题注入或隐藏控制字符。headless JSON 为保持 wire 兼容不删改 payload，只依赖 JSON escaping 并确保日志不泄密。
 
-### 1.3 classic / plain 保底
+### 1.3 非交互输出边界
 
-`renderer.ts` 与 `repl.ts` 是受支持的 classic 面：readline/raw TTY compatibility + ANSI 动态区。
-composer 使用 grapheme 边界移动/删除 CJK 和 ZWJ emoji，`Shift+Enter` 插入换行，多行上下保持
-grapheme 列，最多窗口化显示 8 行；bracketed paste 的整块与分段 marker 都不触发发送。
-classic 与 TUI 共用 `ProviderCommandController`、`provider-actions`、presentation actions 和统一 command
-catalog；候选以编号/名称接受。classic 支持 Ctrl+R、Ctrl+O、stash/restore、`@` Tab、copy/export 与
-可选 Vim，恢复同一 `(workspaceId, threadId)` draft。秘密步骤只把等长 `•` 掩码交给 renderer，且不调用
-history/presentation API。
+`renderer.ts` 只保留 one-shot 人类可读投影，不读取长驻输入、不进入 raw mode，也不拥有 composer、
+审批或 presentation state。`-p`、裸 prompt 和非 TTY stdin 完成一个任务后退出；`--ascii` 只替换 coda
+自己的状态 glyph，用户、模型和工具 payload 中的 CJK/emoji 原样保留。输出失败会 abort 当前 run、关闭
+Runtime 并返回 1。
 
-`line-repl.ts` 是 accessible/plain 的最低交互面：只读完整行、append-only，不开 raw mode、
-alternate screen、bracketed-paste mode、鼠标或动画。它以文本命令提供 prompt/steer/follow-up/
-abort/approval/status/queue/model/logout 以及 `/history`、`/edit`、`/files`、`/stash`、`/restore`、
-`/draft`、`/search`、`/next`、`/previous`、`/latest`、`/copy`、`/export`、`/vim`，以及 UX3 的
-`/review`、`/diff`、`/permissions`、`/compact`、`/new`、`/sessions`、`/resume`、`/switch`、
-`/rename`、`/archive`、`/retry`、`/fork` parity；`/login`
-明确引导到受保护的 `coda auth login`。输出
-失败会 abort 当前 run、关闭 Runtime 并返回 1。classic 和文本面的真实 key 都不进入历史、
-transcript、event、journal 或日志。
-`TERM=dumb` 的 accessible 自动启用 ASCII 产品 chrome；其他文本面可显式传 `--ascii`。该转换只替换
-coda 自己的 rule/spinner/status/tool/plan glyph，用户、模型和工具 payload 中的 CJK/emoji 原样保留。
-append-only renderer 的欢迎/命令输出先完成 stdout drain，再把下一条 `> ` prompt 写到 stderr；不得让
-提示符越过它所解释的 onboarding 或多行命令结果。
+`headless.ts` 与 envelope transport 继续使用逐行 NDJSON；这里的 readline 只负责完整 frame 分隔，不是
+交互 REPL。headless wire、stdout 纪律和 shutdown 语义见第 6 节。classic REPL 与 accessible/plain
+line REPL 已移除，不再有 append-only 长驻输入面或跨 UI parity 承诺。
 
 ## 2. 启动流程与会话选择
 
 ```
 coda                    # 新会话
-coda -p "..."           # 一次性:发送 prompt,跑完以 plain 输出退出
+coda -p "..."           # 一次性:发送 prompt,跑完以 append-only human 输出退出
 coda --continue         # 恢复最近一个会话
 coda --resume [legacy-id] # 无 id 时列出全局兼容 catalog；空格形式保留旧 id 形状判定
 coda --resume=<thread-id> # 避免 prompt parser 歧义；跨 workspace 重名时仍要求 --workspace
@@ -251,17 +238,15 @@ const approval = approvalMode === 'interactive'
       subscribe: () => () => {},
     }
   : undefined;                                 // 只翻译成 control_response/abort op，不持 waiter
-if (stdinIsTty && stdoutIsTty && TERM !== 'dumb') {
-  try {
-    const { startTui } = await import('./tui.js');     // native 依赖只在这里加载
-    return await startTui(frontend, approval);
-  } catch (error) {
-    logTuiFallback(error);                             // startTui 已恢复终端
-  }
-}
 if (flags.json) return startHeadless(frontend, { approval });
 if (flags.prompt) return runOneShotWithPlainRenderer(frontend, flags.prompt);
-return startRepl(frontend, createClassicRenderer(...), approval);
+if (!stdinIsTty || !stdoutIsTty || TERM === 'dumb') return reportTuiUnavailable();
+try {
+  const { startTui } = await import('./tui.js');       // native 依赖只在这里加载
+  return await startTui(frontend, approval);
+} catch (error) {
+  return reportTuiInitializationFailure(error);        // startTui 已恢复终端，不切换 UI
+}
 ```
 
 `resolveRuntimeStorageRoots()` 把所有目录选择收口在 CLI：未传覆盖时，legacy session root 是
@@ -302,7 +287,7 @@ workspace 内唯一，global catalog 若匹配 0 项则 not found、1 项才直�
 
 完整 envelope headless 是多 thread transport：它在读取第一条 stdin op 前建立 workspace-wide hot
 subscription，不生成默认 ThreadId、不隐式提交 lifecycle op；每个 create/resume 的 ModelRef 来自调用方
-RuntimeOp。legacy `--json` 与 one-shot/plain 才使用伪码中的单 thread attachment。
+RuntimeOp。legacy `--json` 与 one-shot human renderer 才使用伪码中的单 thread attachment。
 
 `RuntimeFrontendSession` 是 CLI 的 legacy `CliSession` adapter；它始终持有 catalog-capable
 RuntimePort，但可以没有 attached thread：没有有效
@@ -345,7 +330,7 @@ workspace-owned `EventHub` 提供 runtime subscription。TUI 消费自己的队�
 内容。恢复 transcript 首帧以最后 120 条 message 为目标；为避免从 turn 中间切开，可向前扩至最多
 240 条，并附一条分段提示。PageUp 每次向前装载一段；搜索
 先装载剩余段再定位。完整 review/tool output 与大型 diff 仍只在用户打开 `/review`、`/diff` panel 时
-构造，旧历史代码高亮也只作用于当前已装载 segment。classic/plain/headless 的 stdout `drain` 只背压各自输出泵，不反向阻塞
+构造，旧历史代码高亮也只作用于当前已装载 segment。one-shot/headless 的 stdout `drain` 只背压各自输出泵，不反向阻塞
 Runtime，退出则必须等待输出泵 drain。direct `Agent.subscribe` 仍保留阶段 0 awaited Emitter 语义；
 exported `Session.subscribe` 已经由 standalone private durable cursor pump 异步投递，慢 listener 或
 reject 不会反向延迟 run/`waitForIdle()`。
@@ -377,7 +362,7 @@ transcript；后台 run 的 completion 仍能结案对应 op waiter。`Esc` abor
 
 RuntimeFrontendSession 另外提供 frontend-private 的 pending-approval level snapshot subscription；
 它与 legacy 事件 fanout 共用同一条有序队列，但不扩展 CliSessionEvent，因此 headless NDJSON wire
-保持不变。TUI/classic/accessible 在注册输入 handler 前先同步读取一次 pendingApprovals()，随后以
+保持不变。TUI 在注册输入 handler 前先同步读取一次 pendingApprovals()，随后以
 snapshot 原子替换本地 FIFO。control_resolved、外部窗口先行决议以及
 control_request_not_found / control_response_already_claimed 的静默竞态都会撤下陈旧队首并展示
 下一张。broadcast snapshot 在入队点冻结整表，不能跨中间 legacy event 合并，否则该 event 的 listener
@@ -479,8 +464,8 @@ scope 与标签，不只计算正文。ASCII 按 `length / 4`，CJK/emoji 按 UT
 读取/元数据失败（含指向仓库内缺失目标的 dangling 规则链接）、越界符号链接、单文件或
 总预算超限经 runtime diagnostic event 报告；同一 turn 的 preflight / execute 复检去重，
 故障恢复后再次出现仍会重新报告：
-OpenTUI 走 `TuiScreen.println`，TTY classic 走 renderer；legacy plain/headless/一次性仍走清洗后的
-stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；canonical envelope 模式可见
+OpenTUI 走 `TuiScreen.println`；one-shot/headless 的 human warning 走清洗后的 stderr。所有文本先移除
+ANSI/OSC/C0/C1。warning 不进入 transcript；canonical envelope 模式可见
 诊断事件，legacy 裸 NDJSON 为兼容继续不混入该分支，也不会把任务升级为 fatal。
 
 ## 3. 键位表
@@ -488,17 +473,16 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | 状态 | 键 | 行为（canonical；括号内为阶段 0 legacy） |
 |---|---|---|
 | 空闲 | `Enter` | 提交 `prompt` op（`session.prompt(text)`） |
-| TUI / classic 输入 | `Shift+Enter` | 插入换行,不发送 |
+| TUI 输入 | `Shift+Enter` | 插入换行,不发送 |
 | 任意 | `Ctrl+C` | 输入非空:清空输入行;输入为空:提示「再按一次退出」,1.5s 内再按退出 |
 | 空闲 | `Ctrl+D` | 输入为空时退出 |
 | TUI | `Alt+↑` / `Alt+↓` | 顺序浏览输入历史 |
-| classic | `↑` / `↓` | 多行内上下移动；单行边界处浏览历史 |
-| TUI / classic | `Ctrl+R` | 以当前 draft 为 query 反向搜索当前 thread 的 prompt 历史；恢复会话时从 canonical transcript 重建 |
-| TUI / classic | `Ctrl+O` | 暂停终端控制，用 `$VISUAL`/`$EDITOR` 编辑当前 draft，返回后恢复原 surface |
-| TUI / classic | `Ctrl+K` | 打开统一 command palette；`Esc` 返回打开前的 draft |
-| TUI / classic | `Ctrl+F` | 进入 `/search `；classic 以文本结果显示匹配 |
-| TUI / classic | `Meta+S` | 为当前 thread 同步 durable stash 并清空 composer |
-| TUI / classic | `Tab`（cursor 位于 `@query` 后） | 补全 workspace 内文件/目录，不跟随符号链接且有界扫描 |
+| TUI | `Ctrl+R` | 以当前 draft 为 query 反向搜索当前 thread 的 prompt 历史；恢复会话时从 canonical transcript 重建 |
+| TUI | `Ctrl+O` | 暂停终端控制，用 `$VISUAL`/`$EDITOR` 编辑当前 draft，返回后恢复 TUI |
+| TUI | `Ctrl+K` | 打开统一 command palette；`Esc` 返回打开前的 draft |
+| TUI | `Ctrl+F` | 进入 `/search `并显示匹配 |
+| TUI | `Meta+S` | 为当前 thread 同步 durable stash 并清空 composer |
+| TUI | `Tab`（cursor 位于 `@query` 后） | 补全 workspace 内文件/目录，不跟随符号链接且有界扫描 |
 | TUI | `End` | 跳到最新输出并清 unread；文本等价命令是 `/latest` |
 | slash menu | `↑` / `↓` | 循环选择分类、模糊匹配的命令 |
 | slash menu | `Tab` | 补全当前命令并追加空格,不发送 |
@@ -515,13 +499,13 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | 任意 | `Alt+Enter` | 提交 `follow_up` op，进入目标 thread 队列（`session.followUp(text)`） |
 | 流式中 | `Esc` | 提交带目标 `ThreadId/expectedRunId` 的 `abort` op（`session.abort()`） |
 | retry backoff / compacting | `Esc` | 提交目标 thread 的 `abort` op，取消待重试或压缩 |
-| TUI | `PageUp` / `PageDown` | 滚动中间 transcript,输入框保持焦点；classic/accessibility 使用终端 scrollback |
+| TUI | `PageUp` / `PageDown` | 滚动中间 transcript，输入框保持焦点 |
 | 任意 | `Esc Esc`(500ms 内)或 `Ctrl+C Ctrl+C` | 退出（流式中先 abort，等待权威提交与输出泵后 `RuntimePort.close()`） |
 | 审批中 | `↑` / `↓` / `Enter`；无修饰 `v` / `y` / `a` / `n` / `Esc` | 在固定底部临时面板移动/确认选择，展开权威详情，或直接提交 `control_response`（本次允许 / 始终允许 / 拒绝）/目标 run `abort`；其余输入冻结。现代 panel 仅在有 frozen allow-always scope 时显示 `a` 项；legacy compatibility prompt 仍接受既有 `a`，但明确 scope unavailable |
 
-### 3.1 为什么与 pi 完全一致
+### 3.1 为什么采用这组 TUI 键位
 
-键位延续原 classic REPL 与 pi 的交互语义:
+TUI 键位延续 pi 的安全交互语义：
 
 - **流式期间打字的默认去向应当是风险最低的动作。** 用户在模型工作时输入,绝大多数意图是「补充/纠偏」,而 steering 恰好是不打断执行中工具、在 turn 边界温和注入的语义(见 [06-steering-following](./06-steering-following.md))——把它放在无修饰的 `Enter` 上,让最自然的动作对应最安全的语义。
 - **升级动作配升级键。** follow-up(等整个任务结束)是更「延后」的意图,配组合键 `Alt+Enter`;abort 是破坏性动作,配独立键 `Esc`,与输入内容无关(Esc 不消费输入框文本)。
@@ -531,7 +515,7 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 
 ### 3.2 终端编码现实
 
-- OpenTUI 默认启用 Kitty keyboard disambiguation;支持该协议的终端能可靠区分 `Esc`、`Alt+Enter` 与 `Shift+Enter`。不支持时由解析器降级;classic 仍用 readline `escapeCodeTimeout=50ms`。
+- OpenTUI 默认启用 Kitty keyboard disambiguation；支持该协议的终端能可靠区分 `Esc`、`Alt+Enter` 与 `Shift+Enter`，不支持时由 OpenTUI 输入解析器按终端能力处理。
 - `Alt+Enter` 以 `key.meta && return` 为主。始终保留 `/f ` / `/followup ` 兜底,保证不能发送 Meta+Enter 的终端仍有完整功能。
 - Shift+Enter 在不报告修饰键的旧终端可能退化成普通 Enter;可用 bracketed paste 输入多行。
 - 斜杠命令除 `/login`、`/model`、`/logout`、`/auth`（兼容 `/auth-status`）、`/doctor`、
@@ -541,13 +525,12 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
   （兼容 `/f`），以及 `/review`、`/diff`、`/permissions`、`/compact`、`/retry`、`/fork`、`/new`、
   `/sessions`、`/resume`、`/switch`、`/rename`、`/archive`。运行中 read-only/presentation/session switch
   命令继续执行；compact/retry/fork/archive-on 与 provider/quit 按状态显示 disabled 原因。
-  CLI help/completion、TUI/classic slash 候选和三种 surface 的 `/help` 都由
-  `command-catalog.ts` 的 `COMMAND_SPECS` 派生；别名参与匹配和补全但不单独渲染。帮助按 surface
-  过滤键位，不把 TUI 的 PageUp/history 或 classic 的多行键位冒充 accessible/plain 能力。
+  CLI help/completion 与 TUI slash 候选、`/help` 都由 `command-catalog.ts` 的 `COMMAND_SPECS`
+  派生；别名参与匹配和补全但不单独渲染。one-shot/headless 不暴露交互键位帮助。
 
 ## 4. 渲染器与 RuntimeEvent 对应表
 
-交互 TUI/classic/plain 都消费目标 thread 的 `EventEnvelope`，只把 `event` payload 交给视图 reducer，
+交互 TUI 消费目标 thread 的 `EventEnvelope`，只把 `event` payload 交给视图 reducer，
 同时保留 identity/seq 做去重、缺口检测与 stale run 防护：
 
 ```ts
@@ -575,7 +558,7 @@ TUI 渲染行为：
 | `message_update` | `text_delta` 按 `contentIndex` 累积到有序块；仅 public `kind:'summary'` 的 `reasoning_delta/end` 更新同一条 Working 行，raw/未标记 reasoning 不显示且不封口探索块；不生成 status/elapsed transcript 卡片，`/review` 从 Runtime snapshot 展开；不能把多个 content part 粘成一个单词或在最终消息到达时跳变；tool-call 参数流清除摘要并更新 activity |
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
-| `tool_execution_start/update/end` | 原位更新同一工具摘要块：名称/目标/耗时/状态/结果摘要；每个独立调用在 TUI 和 classic/plain 都恰隔一行，而摘要、完成态与兼容 diff 保持同一紧凑块内的零 gap 续行。连续的只读探索 `read` / `ls` / `glob` / `grep` 是紧凑例外：TUI 在同一 `Exploring` / `Explored` 块中按调用顺序列出它们，首项用 `  └ `、后续项用 `    `，相邻 `read` 合并并去重路径。出现非探索工具、可见 user/assistant 文本、plan/diff/approval/error 或 run 边界即封口；失败调用在块内追加显式 `✗` 摘要和 failed 计数。classic/plain 因不能回写 scrollback，在该安全边界输出最终 `Explored` 块及紧随其后的失败行。`bash` 是另一紧凑例外：运行中为单一 `Running` 块，成功完成为 `• Ran`，失败为显式 `✗ Ran`（mono 为 `[x] Ran`），命令高亮且过长时以 `  │ ` 续行；输出以 `  └ ` / `    ` 保留首两行和末两行，中间折叠并引导 `/review`。显式 marker 已表达成功/失败，因此不重复显示 bash 的尾部 `exit code N`。live 与 replay 都按配对后的 tool result 顺序投影，非探索工具/plan 必须封口，不能跨边界合并探索或拆开同一工具块；成功 plan 恢复只显示最后一个合法快照。紧凑块不替代权威工具事实，逐调用状态、耗时、失败与完整 args/output 仍由 Runtime / `/review` 提供；`update.output` 是累计快照，view/review reducer 都整块替换而不拼接；完整 diff 只进入 Runtime diff viewer，普通 transcript 可保留兼容摘要 |
+| `tool_execution_start/update/end` | 原位更新同一工具摘要块：名称/目标/耗时/状态/结果摘要；每个独立调用在 TUI 中恰隔一行，而摘要、完成态与兼容 diff 保持同一紧凑块内的零 gap 续行。连续的只读探索 `read` / `ls` / `glob` / `grep` 是紧凑例外：TUI 在同一 `Exploring` / `Explored` 块中按调用顺序列出它们，首项用 `  └ `、后续项用 `    `，相邻 `read` 合并并去重路径。出现非探索工具、可见 user/assistant 文本、plan/diff/approval/error 或 run 边界即封口；失败调用在块内追加显式 `✗` 摘要和 failed 计数。`bash` 是另一紧凑例外：运行中为单一 `Running` 块，成功完成为 `• Ran`，失败为显式 `✗ Ran`（mono 为 `[x] Ran`），命令高亮且过长时以 `  │ ` 续行；输出以 `  └ ` / `    ` 保留首两行和末两行，中间折叠并引导 `/review`。显式 marker 已表达成功/失败，因此不重复显示 bash 的尾部 `exit code N`。live 与 replay 都按配对后的 tool result 顺序投影，非探索工具/plan 必须封口，不能跨边界合并探索或拆开同一工具块；成功 plan 恢复只显示最后一个合法快照。紧凑块不替代权威工具事实，逐调用状态、耗时、失败与完整 args/output 仍由 Runtime / `/review` 提供；`update.output` 是累计快照，view/review reducer 都整块替换而不拼接；完整 diff 只进入 Runtime diff viewer，普通 transcript 可保留兼容摘要 |
 | `queue_update` | 完整替换计数;running/retrying 时附在 prompt placeholder |
 | `plan_update` | 原位替换同一 plan 块，不重复追加整表：`• Updated Plan · completed/total complete` 标题下首项用 `  └ `、其余项与续行对齐；颜色 TUI 的 completed 为 dim + strikethrough、in_progress 为 cyan + bold、pending 为 dim；`mono`/无色改用 `[x]` / `[>]` / `[ ]`。step 先清洗为单行，窄宽逐词折行且续行对齐状态文本列；可搜索的 transcript 文本投影同步替换为最新快照。 |
 | `control_request(kind:'approval')` | 权威提交后固定底部临时 panel 替换 ordinary composer，且不写 transcript；`↑/↓` + Enter 选择决议，`v` 只展开 `ApprovalPresentation` 的 capability/resource/risk/scope/revision；已有 draft 保留但冻结；legacy scope 缺省时明确 unavailable；legacy 投影名为 `approval_request` |
@@ -597,7 +580,7 @@ TUI 渲染行为：
 | read | `read src/agent/loop.ts [offset=200]` |
 | ls / glob / grep | `grep "StreamFn" src/ (limit 100)` |
 | bash | `Running <高亮 command>`，完成后为 `Ran <高亮 command>` |
-| edit / write | `edit src/cli/repl.ts (2 edits)` / `write docs/x.md` |
+| edit / write | `edit src/cli/tui.ts (2 edits)` / `write docs/x.md` |
 | plan | 不渲染工具头,由 `plan_update` 事件负责(旁路事件,codex `update_plan` 同构) |
 
 连续只读探索使用下列紧凑版式；`glob` 是文件清单，`grep` 是内容搜索：
@@ -610,7 +593,7 @@ TUI 渲染行为：
     Search ^#{1,3} in *.md
 ```
 
-完成的 bash 使用同样紧凑的单块版式；classic/plain 在收到 result 后一次性写出，TUI 从 `Running` 原位切换：
+完成的 bash 使用同样紧凑的单块版式；TUI 从 `Running` 原位切换：
 
 ```text
 ● Ran git status --short && git log -5 --oneline --decorate
@@ -791,7 +774,7 @@ subscription consumer；重复 close 复用同一 promise/result。所有目标�
 event stream，headless drain 已有 envelopes 后输出 fatal transport_error 并 exit 1。成功则给每个
 iterator 排在 buffer 后的正常 end marker，输出泵自行 drain 后 exit 0。
 
-交互 TUI/classic 退出时必须先关闭 `ProviderCommandController`：通过外部
+交互 TUI 退出时必须先关闭 `ProviderCommandController`：通过外部
 `AbortSignal` 取消在途的 `/login` 模型刷新并等待提交收束，再销毁视图。Registry 自身的
 15 秒网络超时仅作为兜底。OpenTUI 的 Working 动画持有 live-render 引用；controller 退订事件后不能再
 依赖迟到的 `agent_end` 释放它，因此 shutdown 必须先幂等销毁 screen（移除 frame callback 并
@@ -799,7 +782,7 @@ iterator 排在 buffer 后的正常 end marker，输出泵自行 drain 后 exit 
 同一顺序，避免 alternate screen/raw mode 因 idle 永不完成而悬挂。
 
 `-p "..."` 一次性模式与 headless 共用同一套 one-shot 生命周期语义：提交一条 `prompt` op，等待
-该 thread 的最终 run 边界后自动 shutdown，默认用 plain 人类可读输出（加 `--json` 时按所选
+该 thread 的最终 run 边界后自动 shutdown，默认用 append-only 人类可读输出（加 `--json` 时按所选
 event format 输出）。accepted receipt 只代表进入 mailbox，不能据此提前关闭 runtime；自动 retry/
 compaction successor 必须一并等待。legacy projector 继续用 `willRetry:true` 区分中间
 `agent_end`。若等待期间收到已提交的 `fatal:true` runtime error，必须先保留其 envelope/legacy 投影，
@@ -827,7 +810,7 @@ legacy 协议保留 `{ type: 'approval'; approvalId: string; decision: 'allow_on
 `owningRunId`，映射为 `abort { expectedRunId: owningRunId }`；未知或已结案 approvalId 稳定拒绝，
 绝不读取 current activity 后改杀 successor。envelope 模式直接提交 identity-bearing
 `control_response`，runtime 仍必须按 pending request kind 拒绝不兼容 decision。
-审批策略由 `--approval-mode <interactive|allow|deny>` 控制：交互 TUI/classic 默认 `interactive`；
+审批策略由 `--approval-mode <interactive|allow|deny>` 控制：交互 TUI 默认 `interactive`；
 headless 与 `-p` 默认 `allow`；需要审批流的客户端显式开 `interactive` 并应答 control request。
 
 ### 6.6 UX4 显式 one-shot output
@@ -862,12 +845,12 @@ coda exec --output=stream-json --ephemeral --timeout=10m "task"
 
 ### 7.1 `/login`:只新增或更新认证
 
-`coda auth login`、TUI `/login` 与 classic `/login` 共用同一组 preset 和
+`coda auth login` 与 TUI `/login` 共用同一组 preset 和
 `provider-actions.ts` 的写入/刷新语义。一级入口固定为 OpenCode Go、OpenAI、Anthropic、Custom 和
 OAuth；OAuth 显示 `coming soon · disabled`，选择它只返回明确错误，不创建 Runtime/thread、不写配置，
-不得伪装成可用流程。TUI 使用 §1.2 的 candidate menu，以 `↑`/`↓` 选择、`Enter` 确认；classic 使用
-同一份结构化候选打印编号/名称；CLI 子命令使用 `--preset` 或带当前步骤的交互 prompt。TUI/classic 的
-`Esc` 逐级静默返回，根步骤静默退出；CLI 的 `Ctrl+C`/`Ctrl+D` 以 130 退出。TUI/classic 的整个
+不得伪装成可用流程。TUI 使用 §1.2 的 candidate menu，以 `↑`/`↓` 选择、`Enter` 确认；CLI 子命令
+使用 `--preset` 或带当前步骤的单次安全 prompt。TUI 的 `Esc` 逐级静默返回，根步骤静默退出；CLI 的
+`Ctrl+C`/`Ctrl+D` 以 130 退出。TUI 的整个
 provider 表单使用独立临时输入缓冲；name/base URL 等非秘密字段也不得覆盖、提交或持久化 composer
 中的任务 draft，流程结束或从根步骤返回时恢复原 draft。所有秘密输入只进入临时 secret buffer，CLI
 走 raw、无 history 的输入，不把 key 回显到 stdout/stderr。窄屏 prompt 把 `[步骤 n]`、当前字段名与
@@ -886,7 +869,7 @@ API-key preset 固定为:
 - **Anthropic**：preset 预填名称 Anthropic、`https://api.anthropic.com` 与
   `anthropic-messages`，用户只秘密输入 key。这两个固定 preset 仍复用 Custom 的稳定 canonical id
   规则（分别为 `custom:openai` / `custom:anthropic`），不新增 provider wire 协议。
-- **Custom**:字段固定为 provider name、base URL、API key 与 protocol。TUI/classic 为了支持现有逐级
+- **Custom**:字段固定为 provider name、base URL、API key 与 protocol。TUI 的逐级
   `Esc` 回退按 name → base URL → API key → protocol 输入；`coda auth login` 为缩短秘密驻留时间按
   name → base URL → protocol → API key 输入，并持续显示 `[field n/4]`、已确认的非秘密字段和
   `Ctrl+C/Ctrl+D cancels`。协议只能从
@@ -900,7 +883,7 @@ API-key preset 固定为:
 `~/.coda/credentials.json`。每次写入先在短跨进程锁内重新读取并合并最新状态，再采用同目录
 临时文件 + fsync + 原子 rename，目录权限收紧为
 `0700`、文件为 `0600`，凭据目标若是符号链接则拒绝读取。秘密输入只在控制器内短暂存在，
-TUI/classic renderer 始终只收到等长掩码；key 不进入输入历史、transcript、thread journal、
+TUI renderer 始终只收到等长掩码；key 不进入输入历史、transcript、thread journal、
 `RuntimeEvent`、legacy `SessionEvent` 或日志。
 
 每次 `/login` / `/logout` 还会更新该 provider 的非秘密 revision。远端模型请求完成后只能在
@@ -920,7 +903,7 @@ HTTP status 和重试动作的错误，但不得回显响应正文或底层异�
    明确存在的 limits；Custom 的标准 `/models` 没有可信 limits 时继续显示 `limit unknown`；
 2. `coda models --select` 只把已验证的 provider/model 写为 CLI-edge 的最近显式选择，不构造
    Runtime、不 attach/create/resume thread，也不写 journal；下一次真正启动任务时由 composition root
-   把完整 `ModelConfig` 交给 Runtime。交互 TUI/classic/accessible/plain 的 `/model` 只在 idle 时经
+   把完整 `ModelConfig` 交给 Runtime。交互 TUI 的 `/model` 只在 idle 时经
    `InteractiveRuntime`/RuntimePort 的模型配置适配更新下一次采样；若尚未 attach，该动作会按既有
    runtime 语义立即 create/attach thread。只有 CLI-edge `coda models --select` 保证零 thread、零 journal；
 3. 成功后记住这次用户显式选择并静默更新 footer；当前模型已经由右下角持续显示，不得再向
@@ -965,26 +948,25 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 ## 8. 边界情况
 
 - **非 TTY stdin**(`echo "..." | coda`):自动等价 `-p` 模式读完 stdin 作为 prompt;`--json` 显式给出时按 headless 协议解析。
-- **粘贴多行文本**:OpenTUI Textarea 与 classic 都启用 bracketed paste,粘贴换行不发送;审批期间整段 paste 被输入边界拦截,不能把首字符误判为 `y` / `a` / `n`;不支持 bracketed paste 时是终端自身的已知限制。
+- **粘贴多行文本**:OpenTUI Textarea 启用 bracketed paste，粘贴换行不发送；审批期间整段 paste 被输入边界拦截，不能把首字符误判为 `y` / `a` / `n`；不支持 bracketed paste 时是终端自身的已知限制。
 - **窗口 resize**:OpenTUI 重跑 Yoga 布局；首次交互前宽度不足依次收起 tips、Logo、model，首次交互后
   始终使用紧凑 header，resize 不恢复 onboarding 装饰。prompt 按新宽度重测软换行并增高或缩回；
   transcript 用 stable block anchor 恢复相同逻辑位置，内容顺序不变，composer 始终在底部。
-- **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽;程序化设置输入历史后调用 Textarea 的 buffer-end API,不能用 JavaScript UTF-16 `string.length` 猜光标列。classic 动态区继续用仓库的 `displayWidth`/截断实现。
+- **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽；程序化设置输入历史后调用 Textarea 的 buffer-end API，不能用 JavaScript UTF-16 `string.length` 猜光标列。one-shot renderer 的静态截断继续使用共享 `displayWidth`。
 - **过小终端**:低于 12 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标。审批继续使用完整临时输入面板而不切换 transcript-style 精简文案。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
-- **Windows**:OpenTUI 依赖对应 win32 native optional package；`TERM=dumb`/非 TTY auto 路由到
-  append-only accessible，只有双 TTY 的 OpenTUI 初始化失败才降级 classic；显式 `--ui=plain` 也可
-  避开 raw/alternate screen。只承诺现代 Windows Terminal。
+- **Windows**:OpenTUI 依赖对应 win32 native optional package；长驻交互同样要求完整双 TTY 和可用的
+  全屏终端，条件不满足或初始化失败时明确报错退出。脚本使用 one-shot/headless；只承诺现代 Windows Terminal。
 - **恢复转录**:`--continue` / `--resume` 可以先记住目标 `ThreadId`（旧 session id 确定性映射）；有
   有效模型时在显示 UI 前提交 resume，没有模型时延迟到 `/model` 后 attach，再用
   `runtime.getThreadSnapshot()` 返回的 committed `AgentMessage` view hydrate，不直读 repository、
   不伪造生命周期事件且不自动启动 run。assistant 的多 text/reasoning
   part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要，历史 bash 则以其 command 和 result 恢复同一
   `Ran` 输出块；plan tool result 从 `details.steps` 恢复最新 plan,失败结果仍可见。初始化/重放失败必须
-  destroy OpenTUI 后才允许降级 classic。
+  destroy OpenTUI 后明确报错退出。
 - **终态兜底**：`prompt` / `continue` 的 canonical `op_completed` 是 root activity 已收束的权威边界。
   若 abort、provider 异常或 legacy adapter 竞态导致其前面没有可投影的最终 `agent_end`，
-  `RuntimeFrontendSession` 必须由该 envelope 清除 active phase，并仅为旧 TUI/classic/plain surface 投影
-  一次 terminal fallback；不得继续显示 running。已带 `expectedRunId` 的 abort 若恰好在此边界后返回
+  `RuntimeFrontendSession` 必须由该 envelope 清除 active phase，并为 TUI 投影一次 terminal completion；
+  不得继续显示 running。已带 `expectedRunId` 的 abort 若恰好在此边界后返回
   `stale_run`，按幂等成功静默收束，不能显示误导性的 warning。
 - **presentation state**：create 交互路径在 attachment 前打开稳定 frontend-only pending key，显式
   resume 则直接打开目标 `ThreadId` 的
@@ -1004,7 +986,7 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   resume/new 失败时回滚到原 attachment 并重新 hydrate/恢复源 presentation，而不是留下半切换 view。
   failed-new 回滚期间不得先广播缓存的源 approvals；attached 源只能以重新 hydrate 后的 snapshot 作为最终
   level 通知，避免后台 resolution 与 source snapshot 对账之间短暂复活旧卡。
-  classic 的 attachment listener 是 transcript replay 的唯一来源，switch handler 不再重复打印 raw transcript。
+  attachment snapshot 是 transcript replay 的唯一来源，switch handler 不再重复投影 raw transcript。
   隐藏 thread 的 envelope 只更新 per-thread
   cursor 和对应 op waiter，不污染当前 transcript/phase；再次切回时以 snapshot 补全。
 - **运行中的 archive**：`/archive off` 是可逆 metadata 恢复，可在 run 中执行，不能被 Enter 路由成 steer；
@@ -1012,10 +994,10 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - **diff/review**：workspace Git port 缺失或失败时明确显示 unavailable/error，不由 UI 回退到 `git`
   子进程。viewer 保存完整 patch；普通 transcript 的兼容截断摘要不等于 canonical diff。所有路径、patch、
   tool output、session title/preview 和审批字段进入 frame/文本前仍经过共享 sanitizer。
-- **审批决议可用性**：现代 `ApprovalPresentation.allowAlways` 缺失时，TUI footer、classic 动态提示和
-  accessible 文本提示都不展示 `a`；即使用户手工输入 `a`/`/allow-always`，也只显示 unavailable，pending
-  card/queue 保持不变且不提交无效 response。没有 presentation 的 legacy request 保留既有 `a` 兼容输入。
-- **审批恢复与外部决议**：三个交互面必须在接收首个用户输入前同步 seed 当前 thread 的 pending approvals，
+- **审批决议可用性**：现代 `ApprovalPresentation.allowAlways` 缺失时，TUI footer 不展示 `a`；即使用户
+  手工按下 `a`，也只显示 unavailable，pending card/queue 保持不变且不提交无效 response。没有
+  presentation 的 legacy request 保留既有 `a` 兼容输入。
+- **审批恢复与外部决议**：TUI 必须在接收首个用户输入前同步 seed 当前 thread 的 pending approvals，
   再订阅与 legacy fanout 保序的 level snapshot。snapshot 以 threadId + approvals 整表替换，旧 thread
   通知不得回灌新 attachment；外部 allow/deny/abort、already-claimed/not-found 都必须解除陈旧输入冻结。
   已提交但尚无终态的 response 以 `(threadId, requestId) -> opId` 隔离并暂时隐藏对应卡片；切换或 hydrate
@@ -1029,14 +1011,12 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] 构建产物 `-h/--help/-V/--version` 在损坏配置与不可写 HOME 下仍 stdout-only、exit 0，且不读写
   配置/目录、不注册 signal、不加载 provider/OpenTUI、不联网；usage error stderr-only、exit 2，并提供
   typo suggestion 或一条可复制的互斥修复命令
-- [ ] help、completion、CLI/slash 候选和 TUI/classic/accessibility `/help` 只来自统一 command catalog，
-  且 surface-specific 帮助不声称不存在的键位
+- [ ] help、completion、CLI/slash 候选和 TUI `/help` 只来自统一 command catalog，且不声称不存在的键位
 - [ ] `doctor/auth/models/sessions/exec` 的人类与 JSON 输出、退出码、零 thread/journal 边界有进程级门禁；
   `sessions` 只调用 RuntimePort catalog query，`exec` 与旧 one-shot/legacy NDJSON 等价
-- [ ] `--ui=auto|tui|classic|accessible|plain` 路由可机械验证；accessible/plain append-only 且不开
-  raw/alternate screen/mouse/animation，显式 tui 不静默降级
+- [ ] `--ui=auto|tui` 路由可机械验证；非完整双 TTY、`TERM=dumb` 与初始化失败都明确退出且不静默降级
 - [ ] 导入 public runtime entry 不读 env/config、不创建文件、不注册 signal、不加载 provider/OpenTUI；CLI 只在显式工厂后产生副作用
-- [ ] TUI/classic/plain/headless 的 prompt/steer/follow-up/abort/control 都只提交 RuntimeOp，不直接调用 Agent/Session
+- [ ] TUI、one-shot 与 headless 的 prompt/steer/follow-up/abort/control 都只提交 RuntimeOp，不直接调用 Agent/Session
 - [ ] 默认 `--json` 的 protocol hello 与裸 SessionEvent 逐行兼容阶段 0；`--event-format=envelope`
   输出完整 identity/per-thread seq 的事件以及每个可解析 op 的唯一 receipt frame
 - [ ] envelope 模式可交错驱动两个 thread，renderer 用 `(threadId, seq)` 保序去重，任一 thread abort 不改变另一个 thread
@@ -1055,13 +1035,13 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] `Esc` 不与方向键冲突;流式中裸 Esc 一次 abort,assistant 以 `[aborted]` 收尾
 - [ ] `Alt+Enter` 与 `/f ` 前缀均能入 follow-up 队列(至少各在一种终端验证)
 - [x] Ctrl+R 从恢复 transcript 搜索当前 thread 历史；Ctrl+O 外部编辑、Meta+S stash、`@` Tab、
-  `/draft`、`/vim` 在 TUI/classic 可用，accessible/plain 有同语义文本命令
+  `/draft`、`/vim` 在 TUI 可用
 - [x] presentation v1 按 workspace/thread 隔离并使用 0600 atomic file；draft/scroll/search/Vim 跨
   resize/reopen 恢复，显式 stash durable；故障注入下 stash/restore/flush/dispose 不清输入、不伪报成功；
   provider 的普通字段与 secret 对 task draft/store/history/frame/transcript/log 都保持隔离
-- [x] `/search`/next/previous/latest、`/copy latest|raw` 与 exclusive `/export` 在 TUI/classic/text 共享
+- [x] `/search`/next/previous/latest、`/copy latest|raw` 与 exclusive `/export` 在 TUI 共享
   parser/actions；导出不覆盖已有文件，终端控制序列不能借 copy 状态或错误回到 human surface
-- [x] UX3 command catalog 与 TUI/classic/accessible parser 提供 review/diff/permissions/compact、session
+- [x] UX3 command catalog 与 TUI parser 提供 review/diff/permissions/compact、session
   管理及 fork/retry；所有业务动作只经 RuntimePort，Git/repository 不被 UI 直读
 - [x] Responses 请求启用 `reasoning.summary:'auto'`；TUI 以 prompt 上方的流光 Working 行临时显示摘要、不写 reasoning transcript 卡片，Runtime review 可展开完整 args/output；工具显示目标/状态/耗时/摘要；diff
   viewer 保留 staged/unstaged/untracked/turn 完整 patch，并支持文件、滚动和 scope 切换
@@ -1074,11 +1054,11 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] `coda --continue` 重放转录后,tool 摘要、最新 plan 与 plan error 都保留,新输入接在原上下文继续
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
 - [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景
-- [ ] TUI 正常退出、fatal、审批中 abort 与初始化失败四条路径都恢复主屏/raw mode；初始化失败后 classic 无双重输入
-- [ ] CLI/TUI/classic 的登录入口都显示 OpenCode Go、OpenAI、Anthropic、Custom 与 disabled OAuth；
+- [ ] TUI 正常退出、fatal、审批中 abort 与初始化失败四条路径都恢复主屏/raw mode；初始化失败不启动第二输入面
+- [ ] CLI/TUI 的登录入口都显示 OpenCode Go、OpenAI、Anthropic、Custom 与 disabled OAuth；
   TUI 与 slash command 复用输入框上方的 `→` candidate menu，以 `↑/↓` 选择、`Enter` 确认且不要求
-  数字输入，classic 保留编号/名称兼容；`Esc` 逐级静默返回、根步骤静默退出且秘密回退先清 key；
-  CLI/TUI/classic 表单持续显示字段/步骤/返回方式；普通 provider 字段不覆盖任务 draft，秘密输入只显示
+  数字输入；`Esc` 逐级静默返回、根步骤静默退出且秘密回退先清 key；CLI/TUI 表单持续显示字段/步骤/
+  返回方式；普通 provider 字段不覆盖任务 draft，秘密输入只显示
   掩码且不进 history、draft、frame、事件、转录或日志
 - [ ] OpenCode Go 的实时 models 与显式协议表取交集；表外 id 不可选；多个 custom provider 可按大小写不敏感名称更新并分别 `/logout`
 - [ ] `/login` 不切模型；`/model` 以 provider/model 选择并由 `ProviderAdapterRegistry` snapshot 按 `ModelRef.api` 动态分发；运行中三条管理命令只提示完成或 abort

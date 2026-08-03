@@ -5,7 +5,7 @@
 ## 1. 技术基线
 
 - 使用 Bun 1.3.14、`bun.lock`、ESM 和严格 TypeScript；不要引入 CommonJS 写法。项目命令统一经 `bun` / `bun run` 执行。
-- Bun API 是默认运行时接口；普通文件内容 I/O、哈希、子进程与流优先使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Node compatibility 仅限 Bun 暂无等价能力的系统边界：`node:fs` / `node:os` 的目录、元数据、临时目录、符号链接和同步耐久性操作，`node:path`，classic 保底的 readline/raw TTY，以及 `process` 的 cwd、TTY、退出、signal/PGID 控制。eligible 双 TTY（stdin/stdout 均为 TTY 且 `TERM != dumb`）默认由 `@opentui/core` 管理；必须在交互分支动态加载，headless/一次性模式不得初始化 native TUI。初始化失败必须先清理 OpenTUI，再回退到同样支持 `/login`、`/model`、`/logout` 的 classic。交互冷启动允许没有 provider/model，且在恢复了有效的用户显式选择或 `/model` 选定模型前不得创建 `Session`；headless/一次性模式仍必须在创建 `Session` 前取得完整 `ModelConfig`。新增或扩大例外必须同步维护对应设计契约；本项目是 Bun-native，但不宣称零 Node API。
+- Bun API 是默认运行时接口；普通文件内容 I/O、哈希、子进程与流优先使用 `Bun.file` / `Bun.write`、`Bun.CryptoHasher`、`Bun.spawn` 与 Web Streams。Node compatibility 仅限 Bun 暂无等价能力的系统边界：`node:fs` / `node:os` 的目录、元数据、临时目录、符号链接和同步耐久性操作，`node:path`，headless NDJSON、CLI 单次问答所需的 readline，以及 `process` 的 cwd、TTY、退出、signal/PGID 控制。长驻交互只由 `@opentui/core` 管理；必须在完整双 TTY（stdin/stdout 均为 TTY 且 `TERM != dumb`）交互分支动态加载，headless/一次性模式不得初始化 native TUI。初始化失败必须先清理 OpenTUI，再明确报错退出，不得切换到另一套交互前端。交互冷启动允许没有 provider/model，且在恢复了有效的用户显式选择或 `/model` 选定模型前不得创建 `Session`；headless/一次性模式仍必须在创建 `Session` 前取得完整 `ModelConfig`。新增或扩大例外必须同步维护对应设计契约；本项目是 Bun-native，但不宣称零 Node API。
 - 相对导入必须写编译后的 `.js` 后缀；纯类型依赖使用 `import type`。
 - 遵守 `strict`、`noUncheckedIndexedAccess`、`verbatimModuleSyntax` 等现有检查；优先用 `unknown` 加收窄，禁止无说明的 `any`、双重断言和规则豁免。
 - 不手改 `dist/`、`node_modules/`、快照或录制 fixture；快照和 fixture 只能通过对应测试/录制流程更新。依赖变更通过 Bun 同步更新 `bun.lock`，禁止提交密钥与 `.env`。
@@ -27,7 +27,7 @@
 | `src/tools/` | 工具契约和内置工具；通过 `ToolContext` 通信，不依赖 agent、provider、session 或 CLI。 |
 | `src/session/` | 单 thread runtime、transcript repository、retry/compaction coordinator、权威 event commit 与异步 event hub；不保存 workspace 级 thread map，不做 provider 转换或 UI 渲染。 |
 | `src/runtime/` | `Supervisor`、workspace/thread 生命周期、op 路由与无副作用 public `RuntimePort`；不采样模型、不执行工具、不渲染。 |
-| `src/cli/` | composition root、配置、headless、OpenTUI 与 classic/plain 前端；只负责注册具体 adapter/capability、把输入映射成 op、消费 envelope/兼容投影。业务操作必须经过 `RuntimePort`，UI state 不得成为第二份事实源。 |
+| `src/cli/` | composition root、配置、headless、one-shot human renderer 与 OpenTUI 前端；只负责注册具体 adapter/capability、把输入映射成 op、消费 envelope/兼容投影。业务操作必须经过 `RuntimePort`，UI state 不得成为第二份事实源。 |
 
 - 新代码放到拥有该语义的最低层；不得为复用方便绕过 ESLint zone。
 - 新增 provider 时保持独立 adapter，并通过 `ProviderAdapterRegistry` 注册；新增工具时通过 legacy adapter 或原生 capability registration 原子注册 schema、validator 与 executor。

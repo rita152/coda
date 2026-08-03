@@ -1,4 +1,4 @@
-// /login、/model、/logout 的共用交互状态机。TUI/classic 只提供显示与输入遮罩；
+// /login、/model、/logout 的共用交互状态机。TUI 只提供显示与输入遮罩；
 // 所有步骤、回退语义、provider 解析和持久化动作都只定义一次。
 
 import type { ModelConfig, ModelRef } from '../protocol/index.js';

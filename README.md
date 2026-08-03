@@ -51,21 +51,19 @@ coda --version
 交互界面中可用 `/login`、`/model`、`/auth`、`/doctor`、`/status`、`/queue`、
 `/followup <text>` 和 `/help`。
 Enter 在 idle 时发送新任务、运行中发送 steering；Alt+Enter 排队 follow-up；Esc 中止当前 run。
-以 `/help` 为准，它会按当前 TUI、classic 或文本界面只显示真实可用的键位。
+以 `/help` 为准，它只显示当前 TUI 中真实可用的键位。
 
 ## 终端界面
 
 ```bash
-coda --ui=auto         # 默认：完整双 TTY 进入 OpenTUI，其他交互环境用 accessible
-coda --ui=tui          # 强制 OpenTUI；不满足条件时明确失败
-coda --ui=classic      # raw-key + ANSI 动态区
-coda --ui=accessible   # append-only，无 alternate screen、动画或鼠标依赖
-coda --ui=plain        # append-only 文本交互面
+coda --ui=auto         # 默认：完整双 TTY 进入 OpenTUI；不满足条件时明确失败
+coda --ui=tui          # 显式选择 OpenTUI；不满足条件时明确失败
 coda --theme=high-contrast  # auto、light、dark、high-contrast、mono
-coda --ascii           # 文本面使用 ASCII 产品状态符号，payload Unicode 不变
+coda --ascii           # one-shot 人类输出使用 ASCII 产品状态符号，payload Unicode 不变
 ```
 
-`auto` 中 OpenTUI 初始化失败会在恢复终端后降级到 classic；显式 `--ui=tui` 不会静默换界面。
+TUI 是唯一长驻交互面。stdin/stdout 不是完整 TTY、`TERM=dumb` 或 OpenTUI 初始化失败时，CLI
+恢复终端后明确报错退出，不会静默切换到另一套交互界面；脚本请使用一次性 prompt、`-p` 或 headless。
 `NO_COLOR=1` 或 `--no-color` 禁用语义色，不改变业务状态和键位。
 
 OpenTUI 首屏显示 onboarding；开始输入后收缩成紧凑任务栏，底部持续显示 phase、thread、权限、队列、
@@ -83,9 +81,8 @@ workspace/Git、context 和 model；其中权限模式来自 Runtime workspace s
 draft、stash、搜索、Vim preference 和 OpenTUI stable scroll anchor 按 `(workspace, thread)` 保存。provider
 表单拥有独立的临时输入缓冲：name/base URL 等普通字段不会覆盖任务 draft，API key 等秘密输入也不会进入
 该存储、history、frame、transcript 或日志。显式 stash/restore 写盘失败时，界面保留当前 draft 并显示
-错误；退出 flush 失败会报告错误并返回非零，不会伪报保存成功。classic 支持相同快捷键/斜杠动作；
-accessible/plain 用 `/history`、`/edit`、`/stash`、`/restore`、`/draft`、`/search`、`/copy`、`/export`
-等 append-only 文本命令提供语义等价入口。
+错误；退出 flush 失败会报告错误并返回非零，不会伪报保存成功。一次性人类输出与 headless
+分别保留用于脚本和机器调用，但都不是长驻交互界面。
 尚未选模型时，draft 使用 workspace 内稳定的 pending presentation key 跨启动恢复，但不会创建 Runtime
 thread 或 journal；模型选择并成功 attachment 后才迁移到真实 thread。外部编辑器运行期间原 draft 仍保留。
 

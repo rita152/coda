@@ -191,7 +191,7 @@ describe('resolveConfig:flag > env > file 且无默认模型(docs/09 §7.3)', ()
     expect(() => resolveConfig(flags({ model: 'm' }), {}, {})).toThrow(/config\.json/);
   });
 
-  it('TTY 交互可把缺 key 保留为待配置状态，TUI/classic 均不在解析期阻断', () => {
+  it('TTY 交互可把缺 key 保留为待配置状态，TUI 不在解析期阻断', () => {
     const openai = resolveConfig(
       flags({ model: 'openai-model' }),
       {},
@@ -239,7 +239,7 @@ describe('resolveConfig:flag > env > file 且无默认模型(docs/09 §7.3)', ()
   });
 });
 
-describe('全屏 TUI eligibility 只决定渲染面', () => {
+describe('全屏 TUI eligibility', () => {
   const terminal = { stdinIsTTY: true, stdoutIsTTY: true, term: 'xterm-256color' };
 
   it('只有无 prompt 的双 TTY 非 dumb 交互启动 eligible', () => {
@@ -256,26 +256,26 @@ describe('全屏 TUI eligibility 只决定渲染面', () => {
 describe('--ui 纯路由', () => {
   const tty = { stdinIsTTY: true, stdoutIsTTY: true, term: 'xterm-256color' };
 
-  it('auto 优先 TUI，dumb/非 stdout TTY 退到 append-only accessible', () => {
+  it('auto 与显式 tui 在完整双 TTY 非 dumb 环境选择 TUI', () => {
     expect(resolveInteractiveUi('auto', tty)).toEqual({ ok: true, surface: 'tui' });
-    expect(resolveInteractiveUi('auto', { ...tty, term: 'dumb' })).toEqual({
-      ok: true,
-      surface: 'accessible',
-    });
-    expect(resolveInteractiveUi('auto', { ...tty, stdoutIsTTY: false })).toEqual({
-      ok: true,
-      surface: 'accessible',
-    });
+    expect(resolveInteractiveUi('tui', tty)).toEqual({ ok: true, surface: 'tui' });
   });
 
-  it('显式 surface 不静默换面，错误给出可执行 accessible 修复', () => {
-    expect(resolveInteractiveUi('classic', tty)).toEqual({ ok: true, surface: 'classic' });
-    expect(resolveInteractiveUi('plain', tty)).toEqual({ ok: true, surface: 'plain' });
-    expect(resolveInteractiveUi('accessible', tty)).toEqual({ ok: true, surface: 'accessible' });
-    expect(resolveInteractiveUi('tui', { ...tty, term: 'dumb' })).toMatchObject({
-      ok: false,
-      message: expect.stringContaining('--ui=accessible'),
-    });
+  it('auto 与显式 tui 在不支持的终端明确失败且给出一次性/headless 修复', () => {
+    for (const mode of ['auto', 'tui'] as const) {
+      for (const terminal of [
+        { ...tty, term: 'dumb' },
+        { ...tty, stdoutIsTTY: false },
+        { ...tty, stdinIsTTY: false },
+      ]) {
+        const resolution = resolveInteractiveUi(mode, terminal);
+        expect(resolution.ok).toBe(false);
+        if (!resolution.ok) {
+          expect(resolution.message.includes('requires TTY stdin/stdout')).toBe(true);
+          expect(resolution.message.includes('use a prompt, pipe stdin, or --json')).toBe(true);
+        }
+      }
+    }
   });
 });
 
