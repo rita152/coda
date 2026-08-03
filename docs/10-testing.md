@@ -727,11 +727,12 @@ Anthropic endpoint/key 并访问真实网络，只能由开发者明确手动执
 bun run fixtures:provider-models
 ```
 
-fixture 同时包含 OpenCode Go 的 `openai-chat` 已知 id（含 `deepseek-v4-flash`）、
-`anthropic-messages` 已知 id 与 Anthropic `ModelInfo` 元数据、实时目录中的未知 id，以及
-Custom 的标准 model ids。
+fixture 同时包含 OpenCode Go 的已知 active id（含 `qwen3.8-max`、`gpt-5.6-luna`）、
+models.dev 已 deprecated 的 id、实时目录中的未收录 id，以及 Custom 的标准 model ids 和
+Anthropic `ModelInfo` 元数据。
 `ProviderRegistry` 测试注入内存 `fetch` 返回该 fixture，CI 不访问 OpenCode、models.dev 或任何
-custom endpoint。测试必须断言已知 id 的显式协议与 limits、未知 id 被忽略且不可 resolve、
+custom endpoint。测试必须断言已知 active id 的显式协议与 limits、deprecated/未收录 id 被忽略且
+不可 resolve、
 `/models` URL 与 OpenAI bearer / Anthropic `x-api-key` headers，并确认 Anthropic 的
 `capabilities` 与 `max_input_tokens`/`max_tokens` 经缓存重载后仍进入 `resolveModel()`，同时
 `/model` 把 context limit 传给 footer、成功切换不再追加“已选择 …”消息；Custom 无可信元数据时

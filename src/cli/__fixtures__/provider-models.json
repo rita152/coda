@@ -14,7 +14,19 @@
         "object": "model"
       },
       {
-        "id": "unknown-future-model",
+        "id": "qwen3.8-max",
+        "object": "model"
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "object": "model"
+      },
+      {
+        "id": "minimax-m2.5",
+        "object": "model"
+      },
+      {
+        "id": "remote-active-but-local-unknown",
         "object": "model"
       }
     ]

@@ -63,7 +63,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('OpenCode Go 混合协议模型发现', () => {
-  it('固定 id/base URL，实时 /models 与官方显式映射求交；未知协议模型不可选', async () => {
+  it('固定 id/base URL，纳入当前 active 模型并排除 deprecated/未知模型', async () => {
     const files = paths();
     const calls: { url: string; authorization: string | null }[] = [];
     const registry = new ProviderRegistry({
@@ -94,8 +94,13 @@ describe('OpenCode Go 混合协议模型发现', () => {
         { id: 'kimi-k3', api: 'openai-chat' },
         { id: 'minimax-m3', api: 'anthropic-messages' },
         { id: 'deepseek-v4-flash', api: 'openai-chat' },
+        { id: 'qwen3.8-max', api: 'anthropic-messages' },
+        { id: 'gpt-5.6-luna', api: 'openai-responses' },
       ],
-      ignoredUnknownModelIds: ['unknown-future-model'],
+      ignoredUnknownModelIds: [
+        'minimax-m2.5',
+        'remote-active-but-local-unknown',
+      ],
     });
     expect(calls).toEqual([
       {
@@ -107,6 +112,8 @@ describe('OpenCode Go 混合协议模型发现', () => {
       ['opencode-go/kimi-k3', 'openai-chat'],
       ['opencode-go/minimax-m3', 'anthropic-messages'],
       ['opencode-go/deepseek-v4-flash', 'openai-chat'],
+      ['opencode-go/qwen3.8-max', 'anthropic-messages'],
+      ['opencode-go/gpt-5.6-luna', 'openai-responses'],
     ]);
     expect(
       registry.resolveModel('opencode-go', 'deepseek-v4-flash'),
@@ -118,7 +125,26 @@ describe('OpenCode Go 混合协议模型发现', () => {
       },
       limits: { context: 1_000_000, output: 384_000 },
     });
-    expect(registry.resolveModel('opencode-go', 'unknown-future-model')).toBeUndefined();
+    expect(registry.resolveModel('opencode-go', 'qwen3.8-max')).toMatchObject({
+      ref: {
+        provider: 'opencode-go',
+        api: 'anthropic-messages',
+        model: 'qwen3.8-max',
+      },
+      limits: { context: 1_000_000, output: 131_072 },
+    });
+    expect(registry.resolveModel('opencode-go', 'gpt-5.6-luna')).toMatchObject({
+      ref: {
+        provider: 'opencode-go',
+        api: 'openai-responses',
+        model: 'gpt-5.6-luna',
+      },
+      limits: { context: 1_050_000, output: 128_000 },
+    });
+    expect(registry.resolveModel('opencode-go', 'minimax-m2.5')).toBeUndefined();
+    expect(
+      registry.resolveModel('opencode-go', 'remote-active-but-local-unknown'),
+    ).toBeUndefined();
 
     const publicConfig = readFileSync(files.configPath, 'utf8');
     const credentials = readFileSync(files.credentialsPath, 'utf8');
@@ -126,6 +152,29 @@ describe('OpenCode Go 混合协议模型发现', () => {
     expect(credentials).toContain('secret-opencode-key');
     expect(statSync(files.credentialsPath).mode & 0o777).toBe(0o600);
     expect(statSync(path.dirname(files.credentialsPath)).mode & 0o777).toBe(0o700);
+  });
+
+  it('远端宣称可用但本地未收录的模型保留 ignored 提示，不会静默消失', async () => {
+    const files = paths();
+    const registry = new ProviderRegistry({
+      ...files,
+      fetch: async () => jsonResponse(fixture.openCodeGoMixed),
+    });
+
+    const result = await registry.configureOpenCodeGo('key');
+
+    expect(result.refresh).toMatchObject({
+      ok: true,
+      ignoredUnknownModelIds: [
+        'minimax-m2.5',
+        'remote-active-but-local-unknown',
+      ],
+    });
+    expect(
+      registry.availableModels().some(
+        (model) => model.model === 'remote-active-but-local-unknown',
+      ),
+    ).toBe(false);
   });
 });
 

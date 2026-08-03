@@ -362,7 +362,7 @@ export class ProviderCommandController {
       );
       if (result.refresh.ignoredUnknownModelIds.length > 0) {
         this.#view.println(
-          `已忽略 ${result.refresh.ignoredUnknownModelIds.length} 个协议未知的模型：` +
+          `已忽略 ${result.refresh.ignoredUnknownModelIds.length} 个未收录或已弃用的模型：` +
             result.refresh.ignoredUnknownModelIds.join(', '),
           'warning',
         );

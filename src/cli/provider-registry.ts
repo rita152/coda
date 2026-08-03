@@ -112,8 +112,9 @@ interface OpenCodeGoModelMetadata {
 
 /**
  * OpenCode Go 的协议来自官方 endpoint 目录，limits 来自 OpenCode 自身使用的
- * models.dev provider 目录。实时 /models 只返回 id，故必须与本表求交；这里不做
- * 任何模型名前缀推断，也不把表外模型暴露给用户。
+ * models.dev provider 目录。这里只收录 models.dev 未标记 deprecated 的 active 模型；
+ * 实时 /models 只返回 id，故必须与本表求交。这里不做任何模型名前缀推断，也不把表外
+ * 模型暴露给用户。
  */
 export const OPENCODE_GO_MODELS: Readonly<
   Record<string, OpenCodeGoModelMetadata>
@@ -166,13 +167,13 @@ export const OPENCODE_GO_MODELS: Readonly<
     api: 'anthropic-messages',
     limits: { context: 204_800, output: 131_072 },
   },
-  'minimax-m2.5': {
-    api: 'anthropic-messages',
-    limits: { context: 204_800, output: 65_536 },
-  },
   'qwen3.7-max': {
     api: 'anthropic-messages',
     limits: { context: 1_000_000, output: 65_536 },
+  },
+  'qwen3.8-max': {
+    api: 'anthropic-messages',
+    limits: { context: 1_000_000, output: 131_072 },
   },
   'qwen3.7-plus': {
     api: 'anthropic-messages',
@@ -185,6 +186,10 @@ export const OPENCODE_GO_MODELS: Readonly<
   hy3: {
     api: 'openai-chat',
     limits: { context: 256_000, output: 64_000 },
+  },
+  'gpt-5.6-luna': {
+    api: 'openai-responses',
+    limits: { context: 1_050_000, output: 128_000 },
   },
 };
 

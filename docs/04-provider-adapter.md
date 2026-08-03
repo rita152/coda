@@ -779,15 +779,18 @@ models.dev provider 目录为事实源，不能从模型名、厂商前缀或 `/
 | `mimo-v2.5-pro` | `openai-chat` | 1,048,576 | 128,000 |
 | `minimax-m3` | `anthropic-messages` | 1,000,000 | 131,072 |
 | `minimax-m2.7` | `anthropic-messages` | 204,800 | 131,072 |
-| `minimax-m2.5` | `anthropic-messages` | 204,800 | 65,536 |
 | `qwen3.7-max` | `anthropic-messages` | 1,000,000 | 65,536 |
+| `qwen3.8-max` | `anthropic-messages` | 1,000,000 | 131,072 |
 | `qwen3.7-plus` | `anthropic-messages` | 1,000,000 | 65,536 |
 | `qwen3.6-plus` | `anthropic-messages` | 1,000,000 | 65,536 |
 | `hy3` | `openai-chat` | 256,000 | 64,000 |
+| `gpt-5.6-luna` | `openai-responses` | 1,050,000 | 128,000 |
 
 保存 key 后 GET `/models`，对响应的标准 `{data:[{id}]}` 去重，再与上表求交集作为可选模型。
 OpenCode Go 当前的该 endpoint 只给标准 id 元数据，因此完整 `ModelConfig.limits` 从显式表复制；
-实时返回但不在表内的 id 只进入 ignored 列表，表内但实时未返回的 id 也不可选。更新表必须依据
+显式表只保留 models.dev `opencode-go` 中没有 `status: "deprecated"` 的 active 项，像
+`minimax-m2.5` 这样的 deprecated 项不可选。实时返回但不在表内的 id 只进入 ignored 列表并在
+登录结果中提示，不能无提示地消失；表内但实时未返回的 id 也不可选。更新表必须依据
 [OpenCode Go 官方 endpoint 目录](https://opencode.ai/docs/go#endpoints)和 models.dev 的
 `opencode-go` 目录，并同步更新生成式离线 fixture，禁止只改测试期望。
 

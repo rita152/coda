@@ -19,7 +19,10 @@ const fixture = {
       { id: 'kimi-k3', object: 'model' },
       { id: 'minimax-m3', object: 'model' },
       { id: 'deepseek-v4-flash', object: 'model' },
-      { id: 'unknown-future-model', object: 'model' },
+      { id: 'qwen3.8-max', object: 'model' },
+      { id: 'gpt-5.6-luna', object: 'model' },
+      { id: 'minimax-m2.5', object: 'model' },
+      { id: 'remote-active-but-local-unknown', object: 'model' },
     ],
   },
   custom: {

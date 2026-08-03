@@ -252,7 +252,7 @@ describe('/login', () => {
     expect(view.prompts.some((prompt) => prompt.secret)).toBe(true);
     expect(runtime.selectedConfigs).toEqual([]);
     expect(runtime.currentModel()).toBeUndefined();
-    expect(registry.availableModels()).toHaveLength(3);
+    expect(registry.availableModels()).toHaveLength(5);
     expect(view.lines.some((line) => line.text.includes('模型列表已刷新'))).toBe(true);
     expect(JSON.stringify({ lines: view.lines, prompts: view.prompts })).not.toContain(secret);
     expect(readFileSync(configPath, 'utf8')).not.toContain(secret);
@@ -565,7 +565,9 @@ describe('/model 与 /logout', () => {
 
     controller.begin('model');
     expect(
-      view.lines.some((line) => line.text.includes('unknown-future-model')),
+      view.lines.some((line) =>
+        line.text.includes('remote-active-but-local-unknown'),
+      ),
     ).toBe(true); // /login 明确报告被忽略
     const modelChoices = view.prompts.at(-1)?.choices ?? [];
     expect(
@@ -574,10 +576,12 @@ describe('/model 与 /logout', () => {
       'opencode-go/kimi-k3',
       'opencode-go/minimax-m3',
       'opencode-go/deepseek-v4-flash',
+      'opencode-go/qwen3.8-max',
+      'opencode-go/gpt-5.6-luna',
     ]);
     expect(
       modelChoices.filter((choice) =>
-        choice.value.includes('unknown-future-model'),
+        choice.value.includes('remote-active-but-local-unknown'),
       ),
     ).toEqual([]);
 

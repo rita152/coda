@@ -937,9 +937,10 @@ API-key preset 固定为:
 - **OpenCode Go**:`provider id = opencode-go`，`baseURL =
   https://opencode.ai/zen/go/v1`，用户只秘密输入 key。保存后立即 GET
   `https://opencode.ai/zen/go/v1/models`；实时结果只决定可用 id，实际协议必须再与
-  [04 文档](./04-provider-adapter.md)中维护的显式 `model → api + limits` 目录相交。表外模型
-  会列入 ignored 提示，绝不能猜测协议或 limits，也不能进入 `/model`；表内模型解析出的
-  `ModelConfig.limits` 同时供 footer 百分比与 `CompactionCoordinator` 使用。
+  [04 文档](./04-provider-adapter.md)中维护的显式 active `model → api + limits` 目录相交。
+  models.dev 标记为 deprecated 的模型（如 `minimax-m2.5`）与表外模型都会列入 ignored 提示，
+  绝不能猜测协议或 limits，也不能进入 `/model`；表内模型解析出的 `ModelConfig.limits` 同时
+  供 footer 百分比与 `CompactionCoordinator` 使用。
 - **OpenAI**：preset 预填名称 OpenAI、`https://api.openai.com/v1` 与
   `openai-responses`，用户只秘密输入 key；不让普通 onboarding 表单重复询问 endpoint/protocol。
 - **Anthropic**：preset 预填名称 Anthropic、`https://api.anthropic.com` 与
