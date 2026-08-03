@@ -6,7 +6,10 @@ import { isThreadId, isTurnId } from '../protocol/index.js';
 import type { QueuedMessage } from '../protocol/index.js';
 import { renderInteractiveHelp } from './command-catalog.js';
 import type { InteractiveSession } from './interactive-runtime.js';
-import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
+import type {
+  PendingApprovalView,
+  RuntimeWorkspaceActions,
+} from './runtime-frontend.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import { applyProviderModelSelection } from './provider-actions.js';
 import {
@@ -87,7 +90,17 @@ export async function startLineRepl(
   const history = new InputHistory();
   history.replace(promptHistoryEntries(session.messages));
   const transcriptSearch = new MessageTranscriptSearch(() => session.messages);
-  const rl = readline.createInterface({ input: stdin, terminal: false, crlfDelay: Infinity });
+  const replaceApprovalIds = (
+    requests: readonly PendingApprovalView[],
+  ): { readonly added: readonly PendingApprovalView[]; readonly removed: readonly string[] } => {
+    const previous = new Set(approvalIds);
+    const next = new Set(requests.map((request) => request.approvalId));
+    approvalIds.splice(0, approvalIds.length, ...next);
+    return {
+      added: requests.filter((request) => !previous.has(request.approvalId)),
+      removed: [...previous].filter((approvalId) => !next.has(approvalId)),
+    };
+  };
 
   renderer.println?.(
     options.mode === 'accessible'
@@ -100,6 +113,23 @@ export async function startLineRepl(
   if (options.presentation?.store.snapshot().draft !== '') {
     renderer.println?.('A draft was restored for this thread. Use /draft show or /draft send.');
   }
+  const renderRecoveredApprovals = (requests: readonly PendingApprovalView[]): void => {
+    for (const request of requests) {
+      renderer.render({
+        type: 'approval_request',
+        approvalId: request.approvalId,
+        toolCallId: request.toolCallId,
+        description: request.description,
+      });
+      formatApprovalPresentation(
+        options.workspace?.approvalPresentation(request.approvalId),
+        request.description,
+      ).forEach((line) => renderer.println?.(line));
+    }
+  };
+  if (options.workspace !== undefined) {
+    renderRecoveredApprovals(replaceApprovalIds(options.workspace.pendingApprovals()).added);
+  }
   const unsub = session.subscribe((event) => {
     if (event.type === 'queue_update') {
       queues = { steering: [...event.steering], followUp: [...event.followUp] };
@@ -111,6 +141,14 @@ export async function startLineRepl(
       ).forEach((line) => renderer.println?.(line));
     }
   });
+  const unsubPendingApprovals = options.workspace?.subscribePendingApprovals((snapshot) => {
+    if (snapshot.threadId !== options.workspace?.currentThreadId || closing) return;
+    const changes = replaceApprovalIds(snapshot.approvals);
+    renderRecoveredApprovals(changes.added);
+    for (const approvalId of changes.removed) {
+      renderer.println?.(`Approval ${approvalId} was resolved elsewhere.`);
+    }
+  });
 
   // Attach readline handlers synchronously, but gate every line behind this flush. A caller may
   // already have piped input waiting; delaying handler installation across an await would drop
@@ -118,8 +156,46 @@ export async function startLineRepl(
   const onboardingDrain = renderer.drain();
   commandChain = onboardingDrain;
   const completion = new Promise<number>((resolve) => {
+    type CapturedApprovalInput = {
+      readonly approvalId: string;
+      readonly allowAlways: boolean;
+      readonly reservedResponse: boolean;
+    };
+    type ApprovalLineDecision = 'allow_once' | 'allow_always' | 'deny' | 'abort' | undefined;
+    const queuedApprovalResponses = new Set<string>();
+    let queuedApprovalAbort = false;
+    const approvalDecisionForLine = (line: string): ApprovalLineDecision => {
+      const normalized = line.trim().toLocaleLowerCase('en-US');
+      if (normalized === 'y' || normalized === '/allow-once') return 'allow_once';
+      if (normalized === 'a' || normalized === '/allow-always') return 'allow_always';
+      if (normalized === 'n' || normalized === '/deny') return 'deny';
+      return normalized === '/abort' ? 'abort' : undefined;
+    };
+    const captureApprovalInput = (line: string): CapturedApprovalInput | undefined => {
+      if (options.approval?.broker === undefined || queuedApprovalAbort) return undefined;
+      const approvalId = approvalIds.find((id) => !queuedApprovalResponses.has(id));
+      if (approvalId === undefined) return undefined;
+      const allowAlways = approvalAllowsAlways(
+        options.workspace?.approvalPresentation(approvalId),
+      );
+      const decision = approvalDecisionForLine(line);
+      let reservedResponse = false;
+      if (decision === 'abort') {
+        queuedApprovalAbort = true;
+      } else if (
+        decision !== undefined &&
+        (decision !== 'allow_always' || allowAlways)
+      ) {
+        // Reserve this exact identity for the queued response. This preserves sequential
+        // `y\nnext\n` semantics without letting a later snapshot retarget `y` to a new head.
+        queuedApprovalResponses.add(approvalId);
+        reservedResponse = true;
+      }
+      return { approvalId, allowAlways, reservedResponse };
+    };
     const cleanup = (): void => {
       unsub();
+      unsubPendingApprovals?.();
       rl.removeAllListeners();
       rl.close();
       process.removeListener('SIGTERM', onTerminate);
@@ -169,37 +245,36 @@ export async function startLineRepl(
       void shutdown(0);
     };
 
-    const respondToApproval = (line: string): boolean => {
-      const approvalId = approvalIds[0];
-      if (approvalId === undefined || options.approval?.broker === undefined) return false;
-      const normalized = line.trim().toLocaleLowerCase('en-US');
-      const decision = normalized === 'y' || normalized === '/allow-once'
-        ? 'allow_once'
-        : normalized === 'a' || normalized === '/allow-always'
-          ? 'allow_always'
-          : normalized === 'n' || normalized === '/deny'
-            ? 'deny'
-            : undefined;
-      if (normalized === '/abort') {
+    const respondToApproval = (
+      line: string,
+      captured: CapturedApprovalInput | undefined,
+    ): boolean => {
+      if (captured === undefined || options.approval?.broker === undefined) return false;
+      const decision = approvalDecisionForLine(line);
+      if (decision === 'abort') {
+        queuedApprovalAbort = false;
+        queuedApprovalResponses.clear();
         session.abort();
         approvalIds.length = 0;
         options.approval.onAbort();
         return true;
       }
       if (decision === undefined) {
-        const allowAlways = approvalAllowsAlways(options.workspace?.approvalPresentation(approvalId));
-        renderer.println?.(
-          `Approval is waiting: enter y, ${allowAlways ? 'a, ' : ''}n, or /abort.`,
-        );
+        if (approvalIds.includes(captured.approvalId)) {
+          renderer.println?.(
+            `Approval is waiting: enter y, ${captured.allowAlways ? 'a, ' : ''}n, or /abort.`,
+          );
+        }
         return true;
       }
-      if (decision === 'allow_always'
-        && !approvalAllowsAlways(options.workspace?.approvalPresentation(approvalId))) {
+      if (captured.reservedResponse) queuedApprovalResponses.delete(captured.approvalId);
+      if (decision === 'allow_always' && !captured.allowAlways) {
         renderer.println?.('Allow always is unavailable because Runtime provided no frozen scope.');
         return true;
       }
-      approvalIds.shift();
-      options.approval.broker.resolve(approvalId, decision);
+      const approvalIndex = approvalIds.indexOf(captured.approvalId);
+      if (approvalIndex !== -1) approvalIds.splice(approvalIndex, 1);
+      options.approval.broker.resolve(captured.approvalId, decision);
       return true;
     };
 
@@ -495,9 +570,12 @@ export async function startLineRepl(
       }
     };
 
-    const handleLine = async (line: string): Promise<void> => {
+    const handleLine = async (
+      line: string,
+      capturedApproval: CapturedApprovalInput | undefined,
+    ): Promise<void> => {
       if (closing) return;
-      if (respondToApproval(line)) return;
+      if (respondToApproval(line, capturedApproval)) return;
       if (line.trim() === '/abort') {
         if (interactionCanAbort(session.interactionState())) session.abort();
         else renderer.println?.('No active run to abort.');
@@ -703,9 +781,13 @@ export async function startLineRepl(
       }
     };
 
+    // Create readline only after synchronous snapshot seeding and all handler closures are ready.
+    // This keeps already-buffered stdin as close as possible to listener installation.
+    const rl = readline.createInterface({ input: stdin, terminal: false, crlfDelay: Infinity });
     rl.on('line', (line) => {
+      const capturedApproval = captureApprovalInput(line);
       commandChain = commandChain
-        .then(() => handleLine(line))
+        .then(() => handleLine(line, capturedApproval))
         .catch((error) => {
           renderer.println?.(`command failed: ${safeError(error)}`);
         })

@@ -177,11 +177,12 @@ export function buildParams(
     include: ['reasoning.encrypted_content'],
     ...(maxOutputTokens !== undefined && { max_output_tokens: maxOutputTokens }),
     ...(temperature !== undefined && { temperature }),
-    ...(reasoningEffort !== undefined && {
-      reasoning: {
+    // Reasoning summary 是 UI 的可展示、非原始推理摘要；即使沿用模型默认 effort 也请求它。
+    reasoning: {
+      summary: 'auto',
+      ...(reasoningEffort !== undefined && {
         effort: reasoningEffort as NonNullable<ResponseCreateParamsStreaming['reasoning']>['effort'],
-        summary: 'auto',
-      },
-    }),
+      }),
+    },
   };
 }

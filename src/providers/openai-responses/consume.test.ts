@@ -74,6 +74,7 @@ describe('fixture replay', () => {
     assertValidProviderEventSequence(events);
     expect(final.content[0]).toMatchObject({
       type: 'reasoning',
+      kind: 'summary',
       text: 'Checked the steps.',
     });
     const reasoning = final.content[0];
@@ -91,6 +92,46 @@ describe('fixture replay', () => {
       encrypted_content: 'enc_reasoning_fixture',
     });
     expect(replayed[1]).toEqual({ role: 'assistant', content: 'The answer is 42.' });
+  });
+
+  it('raw reasoning content 标记为 content，不伪装成可展示 summary', async () => {
+    const reasoningItem = {
+      id: 'rs_raw',
+      type: 'reasoning',
+      status: 'completed',
+      summary: [],
+      content: [{ type: 'reasoning_text', text: 'private chain' }],
+      encrypted_content: 'enc_raw',
+    };
+    const stream = consumeResponsesStreamForTest(ref, () => Promise.resolve(fixtureEvents([
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: 'rs_raw',
+        output_index: 0,
+        content_index: 0,
+        delta: 'private ',
+      },
+      {
+        type: 'response.reasoning_text.done',
+        item_id: 'rs_raw',
+        output_index: 0,
+        content_index: 0,
+        text: 'private chain',
+      },
+      {
+        type: 'response.completed',
+        response: { output: [reasoningItem], usage: null },
+      },
+    ])));
+
+    const { events, final } = await collectStream(stream);
+    assertValidProviderEventSequence(events);
+    expect(final.content).toHaveLength(1);
+    expect(final.content[0]).toMatchObject({
+      type: 'reasoning',
+      kind: 'content',
+      text: 'private chain',
+    });
   });
 
   it('无可见 summary 的 reasoning item 仍写入 transcript 并在工具回合完整 replay', async () => {
@@ -124,6 +165,7 @@ describe('fixture replay', () => {
     const { events, final } = await collectStream(stream);
     assertValidProviderEventSequence(events);
     expect(final.content[0]).toMatchObject({ type: 'reasoning', text: '' });
+    expect(final.content[0]).not.toHaveProperty('kind');
     expect(final.content[1]).toMatchObject({ type: 'tool_call', id: 'call_hidden' });
     expect(convertInput({ messages: [final] })).toEqual([
       {

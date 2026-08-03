@@ -1107,8 +1107,11 @@ function validateAssistantContentPart(value: StrictJsonValue): void {
     return;
   }
   if (part.type === 'reasoning') {
-    assertKeys(part, ['type', 'text'], ['signature']);
+    assertKeys(part, ['type', 'text'], ['kind', 'signature']);
     requireString(part.text, 'text');
+    if (part.kind !== undefined && part.kind !== 'summary' && part.kind !== 'content') {
+      throw new Error('invalid reasoning kind');
+    }
     if (part.signature !== undefined) requireString(part.signature, 'signature');
     return;
   }

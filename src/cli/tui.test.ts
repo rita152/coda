@@ -7,6 +7,7 @@ import {
   type KeyEvent,
   RGBA,
   ScrollBoxRenderable,
+  TextRenderable,
   TextareaRenderable,
 } from '@opentui/core';
 import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing';
@@ -175,7 +176,7 @@ async function setup(
     model?: typeof MODEL;
     contextLimit?: number;
   } = { model: MODEL, contextLimit: 128_000 },
-  overrides: Partial<TuiOptions> = {},
+  overrides: Partial<TuiOptions> & { workingAnimation?: boolean } = {},
 ): Promise<{
   screen: TuiScreen;
   flush: () => Promise<void>;
@@ -287,6 +288,7 @@ describe('UX4 TUI themes', () => {
     expect(dark.color).toBe(true);
     expect(highContrast.color).toBe(true);
     expect(light.palette.accent).not.toBe(dark.palette.accent);
+    expect(light.palette.approvalSurface).not.toBe(dark.palette.approvalSurface);
     expect(highContrast.palette.border).toBe('#ffffff');
     expect(mono.color).toBe(false);
   });
@@ -633,7 +635,7 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
-  it('整棵视图树与动态内容保持 alpha=0，NO_COLOR 也不恢复实色背景', async () => {
+  it('除临时审批面板外保持透明背景，NO_COLOR 也移除审批表面色', async () => {
     for (const color of [true, false]) {
       const view = await setup(100, 50, () => {}, color);
       try {
@@ -678,11 +680,14 @@ describe('全屏 OpenTUI 布局', () => {
           'coda-tips-body',
           'coda-transcript',
           'coda-composer',
+          'coda-approval-footer',
+          'coda-approval-hint',
           'coda-slash-menu',
           'coda-slash-row-0',
           'coda-slash-prefix-0',
           'coda-slash-command-0',
           'coda-slash-description-0',
+          'coda-working',
           'coda-prompt-box',
           'coda-input',
           'coda-workspace',
@@ -703,6 +708,14 @@ describe('全屏 OpenTUI 布局', () => {
           expect(transparent.toInts()).toEqual([0, 0, 0, 0]);
         }
 
+        const approvalPanel = view.renderer.root.findDescendantById('coda-approval-panel');
+        if (!(approvalPanel instanceof BoxRenderable)) {
+          throw new Error('approval panel not found');
+        }
+        expect(approvalPanel.backgroundColor.toInts()).toEqual(
+          color ? [244, 244, 245, 255] : [0, 0, 0, 0],
+        );
+
         const transcript = view.renderer.root.findDescendantById('coda-transcript');
         if (!(transcript instanceof ScrollBoxRenderable)) {
           throw new Error('transcript ScrollBox not found');
@@ -714,12 +727,30 @@ describe('全屏 OpenTUI 布局', () => {
         ]) {
           expect(layer.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
         }
+        const userPrompt = transcript.content.getChildren().find((child) =>
+          child instanceof BoxRenderable &&
+          Array.isArray(child.border) &&
+          child.border.includes('top') &&
+          child.border.includes('bottom')
+        );
+        if (!(userPrompt instanceof BoxRenderable)) {
+          throw new Error('user prompt with horizontal rules not found');
+        }
+        expect(userPrompt.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
+        expect(userPrompt.borderColor.intent).toBe(color ? 'rgb' : 'default');
+        if (color) expect(userPrompt.borderColor.toInts()).toEqual([160, 32, 94, 255]);
 
         const allSpans = view.spans().lines.flatMap((line) => line.spans);
         expect(allSpans.length).toBeGreaterThan(0);
         for (const span of allSpans) {
-          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
+          expect([
+            [0, 0, 0, 0],
+            ...(color ? [[244, 244, 245, 255]] : []),
+          ]).toContainEqual(span.bg.toInts());
         }
+
+        view.screen.resolveApproval();
+        await view.flush();
 
         const input = view.renderer.root.findDescendantById('coda-input');
         if (!(input instanceof TextareaRenderable)) {
@@ -779,16 +810,37 @@ describe('全屏 OpenTUI 布局', () => {
 
       const lines = frameLines(view.frame());
       const headerBottom = lines.findIndex((line) => line.startsWith('└'));
-      const userRow = lines.findIndex((line) => line.trim() === 'you');
+      const userRow = lines.findIndex((line) => line.includes('inspect the repository'));
       const assistantRow = lines.findIndex((line) => line.includes('I will start at the top'));
       const workspaceRow = lines.findIndex((line) => line.includes('/Users/test/work/coda'));
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) {
+        throw new Error('transcript ScrollBox not found');
+      }
+      const userPrompt = transcript.content.getChildren().find((child) =>
+        child instanceof BoxRenderable &&
+        Array.isArray(child.border) &&
+        child.border.includes('top') &&
+        child.border.includes('bottom')
+      );
+      if (!(userPrompt instanceof BoxRenderable)) {
+        throw new Error('user prompt with horizontal rules not found');
+      }
 
       expect(headerBottom).toBeGreaterThanOrEqual(0);
       expect(userRow).toBeGreaterThan(headerBottom);
       expect(userRow - headerBottom).toBeLessThanOrEqual(3);
+      expect(userPrompt.screenY).toBe(userRow - 1);
+      expect(userPrompt.screenY + userPrompt.height - 1).toBe(userRow + 1);
+      expect(lines[userRow - 1]?.trim()).toMatch(/^─+$/);
+      expect(lines[userRow + 1]?.trim()).toMatch(/^─+$/);
+      expect(userPrompt.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
+      expect(userPrompt.borderColor.toInts()).toEqual([160, 32, 94, 255]);
       expect(assistantRow).toBeGreaterThan(userRow);
       expect(assistantRow).toBeLessThan(workspaceRow);
       expect(workspaceRow - assistantRow).toBeGreaterThan(5);
+      expect(lines.some((line) => line.trim() === 'you')).toBe(false);
+      expect(lines.some((line) => line.trim() === 'coda')).toBe(false);
     } finally {
       await view.destroy();
     }
@@ -868,7 +920,7 @@ describe('全屏 OpenTUI 布局', () => {
     }
   });
 
-  it('ultra-compact 高度逐级隐藏装饰，光标不越界且审批优先可见', async () => {
+  it('ultra-compact 高度逐级隐藏装饰且普通输入光标不越界', async () => {
     const longDraft = Array.from({ length: 12 }, (_, index) => `draft-${index}`).join('\n');
     for (const height of [9, 7, 5, 3, 2, 1]) {
       const view = await setup(54, height);
@@ -891,31 +943,9 @@ describe('全屏 OpenTUI 布局', () => {
         await view.destroy();
       }
     }
-
-    const approvalView = await setup(54, 1);
-    try {
-      approvalView.screen.focusInput();
-      approvalView.screen.setInput('draft');
-      approvalView.screen.render({
-        type: 'approval_request',
-        approvalId: 'approval-tiny',
-        toolCallId: 'call-tiny',
-        description: 'run command',
-      });
-      await approvalView.flush();
-      const approvalLines = frameLines(approvalView.frame());
-      expect(approvalLines).toHaveLength(1);
-      expect(approvalLines[0]?.trim()).toBe(
-        'Approval · v details · y/a/n/Esc',
-      );
-      expect(approvalView.renderer.getCursorState().visible).toBe(false);
-      expect(approvalView.screen.getInput()).toBe('draft');
-    } finally {
-      await approvalView.destroy();
-    }
   });
 
-  it('审批在非空多行 draft 下保留持久键位与可展开卡片，决议后恢复 workspace', async () => {
+  it('审批替换底部 composer 而不写入 transcript，决议后恢复 draft 与 workspace', async () => {
     const view = await setup(60, 18);
     try {
       view.screen.focusInput();
@@ -926,41 +956,46 @@ describe('全屏 OpenTUI 布局', () => {
         type: 'approval_request',
         approvalId: 'approval-1',
         toolCallId: 'call-1',
-        description: 'run bun test',
+        description: 'bash: bun test — Run the test suite',
       });
       await view.flush();
       const approvalFrame = view.frame();
-      const [approvalTop, approvalBottom] = promptRuleIndexes(view);
       const approvalLines = frameLines(approvalFrame);
-      expect(approvalFrame).toContain('Approval · v details · y/a/n/Esc');
-      expect(approvalFrame).toContain('run bun test');
-      expect(approvalFrame).toContain('draft 7');
-      expect(approvalFrame).not.toContain('/Users/test/work/coda');
-      expect(approvalLines.at(-2)).toContain('Approval · v details · y/a/n/Esc');
-      expect(approvalLines.at(-1)).toContain('context 0 / 128k');
-      expect(view.renderer.getCursorState().visible).toBe(false);
-      for (const ruleRow of [approvalTop, approvalBottom]) {
-        const ruleSpans = view.spans().lines[ruleRow]?.spans.filter((span) =>
-          span.text.includes('─'),
-        );
-        expect(ruleSpans?.length).toBeGreaterThan(0);
-        for (const span of ruleSpans ?? []) {
-          expect(span.fg.toInts()).toEqual([138, 90, 10, 255]);
-          expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
-        }
+      const approvalPanel = view.renderer.root.findDescendantById('coda-approval-panel');
+      const approvalFooter = view.renderer.root.findDescendantById('coda-approval-footer');
+      if (!(approvalPanel instanceof BoxRenderable)) {
+        throw new Error('approval panel not found');
       }
+      if (!(approvalFooter instanceof BoxRenderable)) {
+        throw new Error('approval footer not found');
+      }
+      expect(approvalPanel.visible).toBe(true);
+      expect(approvalPanel.screenY + approvalPanel.height).toBe(approvalFooter.screenY);
+      expect(approvalFooter.screenY + approvalFooter.height).toBe(approvalLines.length);
+      expect(approvalFooter.backgroundColor.toInts()).toEqual([0, 0, 0, 0]);
+      expect(approvalLines[approvalFooter.screenY - 1]?.trim()).toBe('');
+      expect(approvalFrame).toContain('Would you like to run the following command?');
+      expect(approvalFrame).toContain('Environment: local');
+      expect(approvalFrame).toContain('Reason: Run the test suite');
+      expect(approvalFrame).toContain('$ bun test');
+      expect(approvalFrame).toContain('› 1. Yes, proceed (y)');
+      expect(approvalFrame).toContain('Press enter to confirm or esc to cancel');
+      expect(approvalFrame).not.toContain('draft 7');
+      expect(approvalFrame).not.toContain('/Users/test/work/coda');
+      expect(view.renderer.getCursorState().visible).toBe(false);
 
+      view.resize(80, 30);
       view.screen.toggleApprovalDetails();
       await view.flush();
       expect(view.frame()).toContain('Authoritative normalized scope is unavailable');
-      expect(view.frame()).toContain('Approval · v details · y/a/n/Esc');
-      expect(view.frame()).toContain('draft 7');
+      expect(view.frame()).not.toContain('draft 7');
 
       view.screen.resolveApproval();
       await view.flush();
       const resolvedFrame = view.frame();
       const [resolvedTop, resolvedBottom] = promptRuleIndexes(view);
-      expect(resolvedFrame).not.toContain('Approval · v details · y/a/n/Esc');
+      expect(resolvedFrame).not.toContain('Would you like to run the following command?');
+      expect(resolvedFrame).not.toContain('Run the test suite');
       expect(resolvedFrame).toContain('/Users/test/work/coda');
       expect(view.screen.getInput()).toContain('draft 7');
       expect(view.renderer.getCursorState().visible).toBe(true);
@@ -974,6 +1009,34 @@ describe('全屏 OpenTUI 布局', () => {
           expect(span.bg.toInts()).toEqual([0, 0, 0, 0]);
         }
       }
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('矮窗口与多行审批内容始终让当前决议项可见', async () => {
+    const view = await setup(40, 10);
+    try {
+      view.screen.render({
+        type: 'approval_request',
+        approvalId: 'approval-narrow',
+        toolCallId: 'call-narrow',
+        description:
+          'bash: printf first\nprintf second\nprintf third\nprintf fourth — ' +
+          'A long reason that wraps across several narrow terminal rows',
+      });
+      await view.flush();
+      expect(view.frame()).toContain('› 1. Yes, proceed (y)');
+      expect(view.frame()).toContain('Press enter to confirm or esc to');
+
+      expect(view.screen.handleApprovalPanelKey({ name: 'down' } as KeyEvent))
+        .toEqual({ kind: 'handled' });
+      await view.flush();
+      expect(view.frame()).toContain("› 2. Yes, and don't ask again");
+      expect(view.screen.handleApprovalPanelKey({ name: 'down' } as KeyEvent))
+        .toEqual({ kind: 'handled' });
+      await view.flush();
+      expect(view.frame()).toContain('› 3. No, and tell Coda what to do');
     } finally {
       await view.destroy();
     }
@@ -1059,6 +1122,300 @@ describe('全屏 OpenTUI 布局', () => {
 });
 
 describe('UX2 TUI presentation workflow', () => {
+  it('独立工具块恰隔一行，同一调用的结果与 diff 保持紧凑', async () => {
+    const view = await setup(120, 55);
+    try {
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'write-spacing',
+        toolName: 'write',
+        args: { path: 'src/a.ts' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'write-spacing',
+        result: toolResult('write-spacing', 'write', 'written', {
+          details: { diff: '+added\n-removed' },
+        }),
+      });
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'bash-spacing',
+        toolName: 'bash',
+        args: { command: 'echo next' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'bash-spacing',
+        result: toolResult('bash-spacing', 'bash', 'next'),
+      });
+      await view.flush();
+
+      const rows = frameLines(view.frame());
+      const row = (fragment: string): number => {
+        const index = rows.findIndex((line) => line.includes(fragment));
+        if (index < 0) throw new Error(`missing ${fragment}`);
+        return index;
+      };
+      const write = row('✓ write src/a.ts');
+      const added = row('+added');
+      const removed = row('-removed');
+      const bash = row('• Ran echo next');
+      expect(added).toBe(write + 1);
+      expect(removed).toBe(added + 1);
+      expect(rows[removed + 1]?.trim()).toBe('');
+      expect(bash).toBe(removed + 2);
+      expect(view.screen.searchTranscript('+added')).toBe(true);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('连续 ls/glob/grep/read 显示为一个 Explored 块，并合并相邻 read', async () => {
+    const view = await setup(160, 45);
+    try {
+      const calls = [
+        ['read-1', 'read', { path: 'package.json' }],
+        ['read-2', 'read', { path: 'package.json' }],
+        ['read-3', 'read', { path: 'bun.lock' }],
+        ['ls-1', 'ls', { path: 'docs' }],
+        ['glob-1', 'glob', { pattern: '**/*.md', path: 'docs' }],
+        ['grep-1', 'grep', { pattern: '^#{1,3}', path: '*.md' }],
+      ] as const;
+      for (const [toolCallId, toolName, args] of calls) {
+        view.screen.render({ type: 'tool_execution_start', toolCallId, toolName, args });
+        view.screen.render({
+          type: 'tool_execution_end',
+          toolCallId,
+          result: toolResult(toolCallId, toolName, 'done'),
+        });
+      }
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'bash-1',
+        toolName: 'bash',
+        args: { command: 'bun test' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'bash-1',
+        result: toolResult('bash-1', 'bash', 'tests passed'),
+      });
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame).toContain('• Explored');
+      expect(frame).toContain('└ Read package.json, bun.lock');
+      expect(frame).toContain('List docs');
+      expect(frame).toContain('List **/*.md in docs');
+      expect(frame).toContain('Search ^#{1,3} in *.md');
+      expect(frame.match(/Explored/gu)).toHaveLength(1);
+      expect(frame).toContain('• Ran bun test');
+      expect(frame).toContain('└ tests passed');
+      expect(frame).not.toContain('● read package.json');
+      expect(frame).not.toContain('✓ read');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('探索失败在 live 与 replay 中都保留显式失败摘要', async () => {
+    const view = await setup(100, 40);
+    try {
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'missing-live',
+        toolName: 'read',
+        args: { path: 'missing-live.ts' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'missing-live',
+        result: toolResult('missing-live', 'read', 'ENOENT live', { isError: true }),
+      });
+      await view.flush();
+      expect(view.frame()).toContain('Explored · 1 failed');
+      expect(view.frame()).toContain('✗ read missing-live.ts · ENOENT live');
+
+      view.screen.resetTranscript([
+        assistant({
+          id: 'missing-replay-assistant',
+          content: [{
+            type: 'tool_call',
+            id: 'missing-replay',
+            name: 'read',
+            arguments: { path: 'missing-replay.ts' },
+          }],
+          stopReason: 'tool_calls',
+        }),
+        toolResult('missing-replay', 'read', 'ENOENT replay', { isError: true }),
+      ]);
+      await view.flush();
+      expect(view.frame()).toContain('Explored · 1 failed');
+      expect(view.frame()).toContain('✗ Read missing-replay.ts · ENOENT replay');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('bash 以紧凑 Ran 块续行命令，并保留输出首尾而折叠中段', async () => {
+    const view = await setup(72, 45);
+    try {
+      const output = [
+        'M docs/09-cli.md',
+        'M docs/10-testing.md',
+        ...Array.from({ length: 9 }, (_, index) => `middle ${index + 1}`),
+        'src/cli/tui.ts',
+        'src/cli/ux-characterization.test.ts',
+        'exit code 0',
+      ].join('\n');
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'bash-preview',
+        toolName: 'bash',
+        args: {
+          command:
+            'bun --no-env-file -e "import { mkdtempSync, rmSync } from \'node:fs\'; ' +
+            'import os from \'node:os\'; import path from \'node:path\';"',
+        },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'bash-preview',
+        result: toolResult('bash-preview', 'bash', output),
+      });
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame).toContain('• Ran bun --no-env-file');
+      expect(frame).toContain('│');
+      expect(frame).toContain('└ M docs/09-cli.md');
+      expect(frame).toContain('… +9 lines (use /review to view output)');
+      expect(frame).toContain('src/cli/ux-characterization.test.ts');
+      expect(frame).not.toContain('exit code 0');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('mono bash 以显式文本区分成功与失败', async () => {
+    const view = await setup(80, 30, () => {}, false);
+    try {
+      for (const [toolCallId, command, isError] of [
+        ['bash-ok', 'true', false],
+        ['bash-failed', 'false', true],
+      ] as const) {
+        view.screen.render({
+          type: 'tool_execution_start',
+          toolCallId,
+          toolName: 'bash',
+          args: { command },
+        });
+        view.screen.render({
+          type: 'tool_execution_end',
+          toolCallId,
+          result: toolResult(toolCallId, 'bash', 'exit code 1', { isError }),
+        });
+      }
+      await view.flush();
+
+      expect(view.frame()).toContain('• Ran true');
+      expect(view.frame()).toContain('[x] Ran false');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('恢复转录沿用 Explored 分组，而不是回退成逐条工具结果', async () => {
+    const view = await setup(160, 45);
+    try {
+      view.screen.replayTranscript([
+        assistant({
+          id: 'explore-history',
+          content: [
+            { type: 'tool_call', id: 'history-read-1', name: 'read', arguments: { path: 'a.ts' } },
+            { type: 'tool_call', id: 'history-read-2', name: 'read', arguments: { path: 'b.ts' } },
+            { type: 'tool_call', id: 'history-ls', name: 'ls', arguments: { path: 'src' } },
+            { type: 'tool_call', id: 'history-grep', name: 'grep', arguments: { pattern: 'TODO', path: 'src' } },
+          ],
+          stopReason: 'tool_calls',
+        }),
+        toolResult('history-read-1', 'read', 'first file'),
+        toolResult('history-read-2', 'read', 'second file'),
+        toolResult('history-ls', 'ls', 'directory'),
+        toolResult('history-grep', 'grep', 'matches'),
+      ]);
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame).toContain('• Explored');
+      expect(frame).toContain('└ Read a.ts, b.ts');
+      expect(frame).toContain('List src');
+      expect(frame).toContain('Search TODO in src');
+      expect(frame.match(/Explored/gu)).toHaveLength(1);
+      expect(frame).not.toContain('✓ read');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('恢复时 tool-only assistant 不产生幽灵块，且探索不会跨 edit 合并', async () => {
+    const view = await setup(120, 40);
+    try {
+      view.screen.replayTranscript([
+        assistant({
+          id: 'mixed-tools',
+          content: [
+            { type: 'tool_call', id: 'read-a', name: 'read', arguments: { path: 'a.ts' } },
+            { type: 'tool_call', id: 'edit-b', name: 'edit', arguments: { path: 'b.ts', edits: [{}] } },
+            { type: 'tool_call', id: 'read-c', name: 'read', arguments: { path: 'c.ts' } },
+          ],
+          stopReason: 'tool_calls',
+        }),
+        toolResult('read-a', 'read', 'a'),
+        toolResult('edit-b', 'edit', 'edited'),
+        toolResult('read-c', 'read', 'c'),
+      ]);
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame.match(/Explored/gu)).toHaveLength(2);
+      expect(frame).not.toContain('Read a.ts, c.ts');
+      expect(frame.indexOf('Read a.ts')).toBeLessThan(frame.indexOf('✓ edit b.ts'));
+      expect(frame.indexOf('✓ edit b.ts')).toBeLessThan(frame.indexOf('Read c.ts'));
+      const transcript = view.renderer.root.findDescendantById('coda-transcript');
+      if (!(transcript instanceof ScrollBoxRenderable)) throw new Error('transcript not found');
+      expect(transcript.content.getChildren()).toHaveLength(4); // replay banner + 3 tool blocks
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('恢复时已完成与未完成探索仍按声明顺序合并', async () => {
+    const view = await setup(120, 30);
+    try {
+      view.screen.replayTranscript([
+        assistant({
+          id: 'partial-exploration',
+          content: [
+            { type: 'tool_call', id: 'read-complete', name: 'read', arguments: { path: 'a.ts' } },
+            { type: 'tool_call', id: 'read-pending', name: 'read', arguments: { path: 'b.ts' } },
+          ],
+          stopReason: 'tool_calls',
+        }),
+        toolResult('read-complete', 'read', 'a'),
+      ]);
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame).toContain('• Exploring');
+      expect(frame).toContain('Read a.ts, b.ts');
+      expect(frame).not.toContain('Read b.ts, a.ts');
+    } finally {
+      await view.destroy();
+    }
+  });
+
   it('第一次用户交互后收缩 header，持久状态不因非空 draft 消失', async () => {
     const view = await setup(100, 30, () => {}, true, undefined, {
       threadId: 'thr_1234567890abcdef',
@@ -2247,6 +2604,88 @@ describe('UX3 TUI review and recovery workflow', () => {
   });
 });
 
+describe('TUI plan 展示', () => {
+  it('以标题、完成进度、树状缩进和当前步骤强调展示整表快照', async () => {
+    const view = await setup(100, 42);
+    try {
+      view.screen.render({
+        type: 'plan_update',
+        steps: [
+          { step: 'Inspect current plan styling', status: 'completed' },
+          { step: 'Implement the highlighted plan row with wrapping', status: 'in_progress' },
+          { step: 'Verify the complete terminal layout', status: 'pending' },
+        ],
+      });
+      await view.flush();
+
+      const frame = view.frame();
+      expect(frame).toContain('• Updated Plan · 1/3 complete');
+      expect(frame).toContain('  └ ✔ Inspect current plan styling');
+      expect(frame).toContain('    □ Implement the highlighted plan row with wrapping');
+      expect(frame).toContain('    □ Verify the complete terminal layout');
+
+      const planSpans = view.spans().lines.flatMap((line) => line.spans);
+      const completed = planSpans.find((span) => span.text.includes('Inspect current plan styling'));
+      const active = planSpans.find((span) => span.text.includes('Implement the highlighted plan row'));
+      const pending = planSpans.find((span) => span.text.includes('Verify the complete terminal layout'));
+      expect(completed?.fg.toInts()).toEqual([99, 104, 115, 255]);
+      expect(active?.fg.toInts()).toEqual([39, 106, 122, 255]);
+      expect(pending?.fg.toInts()).toEqual([99, 104, 115, 255]);
+
+      view.resize(32, 42);
+      await view.flush();
+      expect(view.frame()).toContain('        with wrapping');
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('mono 用可辨别的 ASCII 状态替代颜色焦点', async () => {
+    const view = await setup(80, 30, () => {}, true, undefined, { theme: 'mono' });
+    try {
+      view.screen.render({
+        type: 'plan_update',
+        steps: [
+          { step: 'done', status: 'completed' },
+          { step: 'now', status: 'in_progress' },
+          { step: 'next', status: 'pending' },
+        ],
+      });
+      await view.flush();
+      expect(view.frame()).toContain('Updated Plan | 1/3 complete');
+      expect(view.frame()).toContain('  \\ [x] done');
+      expect(view.frame()).toContain('    [>] now');
+      expect(view.frame()).toContain('    [ ] next');
+      for (const line of view.spans().lines) {
+        for (const span of line.spans) {
+          if (span.text.trim() !== '') expect(span.fg.intent).toBe('default');
+        }
+      }
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('整表替换同步更新可搜索的 plan 文本投影', async () => {
+    const view = await setup(80, 30);
+    try {
+      view.screen.render({
+        type: 'plan_update',
+        steps: [{ step: 'obsolete plan step', status: 'in_progress' }],
+      });
+      view.screen.render({
+        type: 'plan_update',
+        steps: [{ step: 'current plan step', status: 'in_progress' }],
+      });
+      await view.flush();
+      expect(view.screen.searchTranscript('obsolete plan step')).toBe(false);
+      expect(view.screen.searchTranscript('current plan step')).toBe(true);
+    } finally {
+      await view.destroy();
+    }
+  });
+});
+
 describe('TUI 安全渲染与转录恢复', () => {
   it('统一移除 ANSI/OSC/DCS 与危险 C0/C1，同时保留 Unicode、tab 和换行', () => {
     const raw =
@@ -2329,7 +2768,7 @@ describe('TUI 安全渲染与转录恢复', () => {
     }
   });
 
-  it('流式 text/reasoning 按 contentIndex 保持块边界，终态不再跳变', async () => {
+  it('流式文本保持块边界，reasoning summary 只替换 prompt 上方的 Working 行', async () => {
     const view = await setup();
     try {
       const textOne = assistant({ content: [{ type: 'text', text: '' }] });
@@ -2343,18 +2782,19 @@ describe('TUI 安全渲染与转录恢复', () => {
         content: [
           { type: 'text', text: 'FIRST' },
           { type: 'text', text: 'SECOND' },
-          { type: 'reasoning', text: '' },
+          { type: 'reasoning', kind: 'summary', text: '' },
         ],
       });
       const reasoningTwo = assistant({
         content: [
           { type: 'text', text: 'FIRST' },
           { type: 'text', text: 'SECOND' },
-          { type: 'reasoning', text: 'THINK-ONE' },
-          { type: 'reasoning', text: '' },
+          { type: 'reasoning', kind: 'summary', text: 'THINK-ONE' },
+          { type: 'reasoning', kind: 'summary', text: '' },
         ],
       });
 
+      view.screen.render({ type: 'agent_start', reason: 'prompt' });
       view.screen.render({ type: 'message_start', message: assistant() });
       view.screen.render({
         type: 'message_update',
@@ -2424,11 +2864,19 @@ describe('TUI 安全渲染与转录恢复', () => {
       await view.flush();
       await view.resolveHighlights();
       const streaming = view.frame();
+      const working = view.renderer.root.findDescendantById('coda-working');
+      const prompt = view.renderer.root.findDescendantById('coda-prompt-box');
+      if (!(working instanceof TextRenderable) || !(prompt instanceof BoxRenderable)) {
+        throw new Error('Working line or prompt box not found');
+      }
       expect(streaming).not.toContain('FIRSTSECOND');
       expect(streaming).not.toContain('THINK-ONE');
-      expect(streaming).not.toContain('THINK-TWO');
+      expect(streaming).toContain('THINK-TWO');
       expect(streaming.indexOf('SECOND')).toBeGreaterThan(streaming.indexOf('FIRST'));
-      expect(streaming).toContain('thinking ·');
+      expect(working.visible).toBe(true);
+      expect(working.height).toBe(1);
+      expect(working.screenY + working.height).toBe(prompt.screenY);
+      expect(streaming).not.toContain('thinking ·');
 
       view.screen.render({
         type: 'message_end',
@@ -2436,18 +2884,76 @@ describe('TUI 安全渲染与转录恢复', () => {
           content: [
             { type: 'text', text: 'FIRST' },
             { type: 'text', text: 'SECOND' },
-            { type: 'reasoning', text: 'THINK-ONE' },
-            { type: 'reasoning', text: 'THINK-TWO' },
+            { type: 'reasoning', kind: 'summary', text: 'THINK-ONE' },
+            { type: 'reasoning', kind: 'summary', text: 'THINK-TWO' },
           ],
         }),
       });
+      view.screen.render({ type: 'agent_end', reason: 'completed', messages: [] });
       await view.flush();
       await view.resolveHighlights();
       const finalFrame = view.frame();
       expect(finalFrame).not.toContain('FIRSTSECOND');
       expect(finalFrame).not.toContain('THINK-ONE');
       expect(finalFrame).not.toContain('THINK-TWO');
-      expect(finalFrame).toContain('thinking · complete');
+      expect(finalFrame).not.toContain('thinking ·');
+      expect(working.visible).toBe(false);
+    } finally {
+      await view.destroy();
+    }
+  });
+
+  it('原始 reasoning/content 不进入 Working，也不封口连续探索', async () => {
+    const view = await setup(100, 35);
+    try {
+      const rawReasoning = assistant({
+        id: 'raw-reasoning',
+        content: [{ type: 'reasoning', kind: 'content', text: 'PRIVATE_CHAIN' }],
+      });
+      view.screen.render({ type: 'agent_start', reason: 'prompt' });
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'raw-read-a',
+        toolName: 'read',
+        args: { path: 'a.ts' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'raw-read-a',
+        result: toolResult('raw-read-a', 'read', 'a'),
+      });
+      view.screen.render({
+        type: 'message_update',
+        messageId: 'raw-reasoning',
+        event: { type: 'reasoning_start', contentIndex: 0, partial: rawReasoning },
+      });
+      view.screen.render({
+        type: 'message_update',
+        messageId: 'raw-reasoning',
+        event: {
+          type: 'reasoning_delta',
+          contentIndex: 0,
+          delta: 'PRIVATE_CHAIN',
+          partial: rawReasoning,
+        },
+      });
+      view.screen.render({
+        type: 'tool_execution_start',
+        toolCallId: 'raw-read-b',
+        toolName: 'read',
+        args: { path: 'b.ts' },
+      });
+      view.screen.render({
+        type: 'tool_execution_end',
+        toolCallId: 'raw-read-b',
+        result: toolResult('raw-read-b', 'read', 'b'),
+      });
+      view.screen.render({ type: 'agent_end', reason: 'completed', messages: [] });
+      await view.flush();
+
+      expect(view.frame()).not.toContain('PRIVATE_CHAIN');
+      expect(view.frame().match(/Explored/gu)).toHaveLength(1);
+      expect(view.frame()).toContain('Read a.ts, b.ts');
     } finally {
       await view.destroy();
     }
@@ -2503,9 +3009,9 @@ describe('TUI 安全渲染与转录恢复', () => {
       await view.resolveHighlights();
 
       const frame = view.frame();
-      expect(frame).toContain('bash: bun test');
+      expect(frame).toContain('• Ran bun test');
       expect(frame).toContain('tests passed');
-      expect(frame.match(/bash: bun test/gu)).toHaveLength(1);
+      expect(frame.match(/Ran bun test/gu)).toHaveLength(1);
       expect(frame).toContain('new step');
       expect(frame).not.toContain('old step');
       expect(frame).toContain('invalid plan arguments');
@@ -2708,6 +3214,137 @@ describe('TUI 控制器接线', () => {
     expect(draftAfterDiffInput).toBe('held composer draft');
   });
 
+  it('审批队列抢占背景 panel，并按队首逐张展示和决议', async () => {
+    let listener: (event: SessionEvent) => void = () => {};
+    const resolved: Array<{ id: string; decision: string }> = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const approval: ReplApproval = {
+      broker: {
+        resolve: (id, decision) => resolved.push({ id, decision }),
+      },
+      onAbort: () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const view = await setup(90, 30);
+    const controller = runTuiController(session, approval, view.screen, view.renderer, {
+      interaction: view.interaction,
+      installSignalHandlers: false,
+    });
+    view.screen.openDiffViewer({
+      workspaceId: WORKSPACE_SNAPSHOT.workspaceId,
+      threadId: 'approval-panel-thread' as ThreadId,
+      scope: 'turn',
+      generatedAt: 10,
+      files: [{ path: 'a.ts', group: 'unstaged', status: 'M', patch: '+change' }],
+    });
+    listener({
+      type: 'approval_request',
+      approvalId: 'approval-first',
+      toolCallId: 'call-first',
+      description: 'first dangerous command',
+    });
+    listener({
+      type: 'approval_request',
+      approvalId: 'approval-second',
+      toolCallId: 'call-second',
+      description: 'second dangerous command',
+    });
+    await view.flush();
+    expect(view.frame()).toContain('first dangerous command');
+    expect(view.frame()).not.toContain('second dangerous command');
+
+    view.mockInput.pressKey('y');
+    await view.flush();
+    expect(resolved).toEqual([{ id: 'approval-first', decision: 'allow_once' }]);
+    expect(view.frame()).not.toContain('first dangerous command');
+    expect(view.frame()).toContain('second dangerous command');
+
+    listener({
+      type: 'tool_execution_start',
+      toolCallId: 'call-first',
+      toolName: 'bash',
+      args: { command: 'first' },
+    });
+    await view.flush();
+    expect(view.frame()).toContain('second dangerous command');
+
+    view.mockInput.pressKey('n');
+    await view.flush();
+    expect(resolved).toEqual([
+      { id: 'approval-first', decision: 'allow_once' },
+      { id: 'approval-second', decision: 'deny' },
+    ]);
+    view.mockInput.pressEscape();
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('活跃 Working 动画退出时先销毁 screen 再等待 renderer idle', async () => {
+    const order: string[] = [];
+    const session: CliSession = {
+      interactionState: () => 'running',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async () => undefined,
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    const view = await setup(90, 30, () => {}, true, undefined, {
+      workingAnimation: true,
+    });
+    const controllerScreen: TuiScreen = {
+      ...view.screen,
+      destroy: () => {
+        order.push('screen.destroy');
+        view.screen.destroy();
+      },
+    };
+    const controllerRenderer = {
+      keyInput: view.renderer.keyInput,
+      idle: async () => {
+        order.push('renderer.idle');
+      },
+      destroy: () => {
+        order.push('renderer.destroy');
+      },
+    };
+    view.screen.render({ type: 'agent_start', reason: 'prompt' });
+    const controller = runTuiController(
+      session,
+      undefined,
+      controllerScreen,
+      controllerRenderer,
+      { interaction: view.interaction, installSignalHandlers: false },
+    );
+
+    view.mockInput.pressKey('c', { ctrl: true });
+    view.mockInput.pressKey('c', { ctrl: true });
+    expect(await controller).toBe(0);
+    expect(order).toEqual(['screen.destroy', 'renderer.idle', 'renderer.destroy']);
+    await view.destroyHighlighter();
+    view.renderer.destroy();
+  });
+
   it('陈旧 async diff scope 结果不会从已切换的 sessions panel 抢回 active panel', async () => {
     const threadId = 'thread-stale-diff' as ThreadId;
     const staleDiffSnapshot = {
@@ -2758,6 +3395,7 @@ describe('TUI 控制器接线', () => {
       },
       approvalPresentation: () => undefined,
       pendingApprovals: () => [],
+      subscribePendingApprovals: () => () => {},
     };
     const session: CliSession = {
       interactionState: () => 'idle',
@@ -2841,8 +3479,9 @@ describe('TUI 控制器接线', () => {
             approvalId: 'approval-thread-b',
             toolCallId: 'call-thread-b',
             description: 'approve thread B only',
-          }]
+        }]
         : [],
+      subscribePendingApprovals: () => () => {},
     };
     const session: CliSession = {
       interactionState: () => currentThreadId === 'thread-running-a' ? 'running' : 'idle',
@@ -3385,9 +4024,9 @@ describe('TUI 控制器接线', () => {
     await view.flush();
     expect(broker.pendingCount).toBe(1);
     expect(view.screen.getInput()).toBe('seed');
-    expect(view.frame()).toContain(
-      'Approval required · v details · y once · a always · n deny · Esc abort',
-    );
+    expect(view.frame()).toContain('Would you like to allow the following action?');
+    expect(view.frame()).toContain('› 1. Yes, proceed (y)');
+    expect(view.frame()).toContain("2. Yes, and don't ask again for matching commands (a)");
 
     view.mockInput.pressKey('v');
     await view.flush();
@@ -3401,7 +4040,10 @@ describe('TUI 控制器接线', () => {
     expect(view.screen.getInput()).toBe('seed');
     expect(broker.pendingCount).toBe(1);
 
-    view.mockInput.pressKey('a');
+    view.mockInput.pressArrow('down');
+    await view.flush();
+    expect(view.frame()).toContain("› 2. Yes, and don't ask again for matching commands (a)");
+    view.mockInput.pressEnter();
     expect(await pending).toEqual({
       decision: 'allow_always',
       learned: ['bash:bun test'],
@@ -3465,6 +4107,7 @@ describe('TUI 控制器接线', () => {
         ? presentation
         : undefined,
       pendingApprovals: () => [],
+      subscribePendingApprovals: () => () => {},
     };
     const view = await setup(
       100,
@@ -3496,8 +4139,8 @@ describe('TUI 控制器接线', () => {
       description: 'run canonical command',
     });
     await view.flush();
-    expect(view.frame()).toContain('Approval required');
-    expect(view.frame()).not.toContain('a always');
+    expect(view.frame()).toContain('Would you like to allow the following action?');
+    expect(view.frame()).not.toContain("don't ask again");
 
     view.mockInput.pressKey('a');
     await view.flush();
@@ -3510,6 +4153,92 @@ describe('TUI 控制器接线', () => {
 
     view.screen.clearInput();
     view.screen.focusInput();
+    await view.mockInput.typeText('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('审批快照恢复初始队列，并在外部决议后原子切换当前卡片', async () => {
+    const threadId = 'thread-approval-sync' as ThreadId;
+    let pending = [
+      { approvalId: 'approval-first', toolCallId: 'call-first', description: 'first command' },
+      { approvalId: 'approval-second', toolCallId: 'call-second', description: 'second command' },
+    ];
+    let pendingListener:
+      | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
+      | undefined;
+    const workspace: RuntimeWorkspaceActions = {
+      currentThreadId: threadId,
+      eventHighWaterSeq: () => 0,
+      listSessions: async () => [],
+      workspaceSnapshot: async () => WORKSPACE_SNAPSHOT,
+      switchSession: async () => undefined,
+      newSession: async () => threadId,
+      renameSession: async () => undefined,
+      archiveSession: async () => undefined,
+      compactConversation: async () => undefined,
+      forkConversation: async () => threadId,
+      retryConversation: async () => threadId,
+      reviewSnapshot: async () => undefined,
+      diffSnapshot: async () => undefined,
+      approvalPresentation: () => undefined,
+      pendingApprovals: () => pending,
+      subscribePendingApprovals: (listener) => {
+        pendingListener = listener;
+        void listener({ threadId, approvals: pending });
+        return () => {
+          pendingListener = undefined;
+        };
+      },
+    };
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => {},
+      prompt: async () => {},
+      steer: () => {},
+      followUp: () => {},
+      abort: () => {},
+      close: async () => {},
+    };
+    const view = await setup(
+      100,
+      30,
+      () => {},
+      true,
+      { model: MODEL, contextLimit: 128_000 },
+      { workspace },
+    );
+    view.screen.focusInput();
+    view.screen.setInput('preserved draft');
+    const controller = runTuiController(
+      session,
+      { broker: { resolve: () => {} }, onAbort: () => {}, subscribe: () => () => {} },
+      view.screen,
+      view.renderer,
+      { interaction: view.interaction, installSignalHandlers: false, workspace },
+    );
+
+    await view.flush();
+    expect(view.frame()).toContain('first command');
+    expect(view.frame()).not.toContain('second command');
+
+    pending = [pending[1]!];
+    await pendingListener?.({ threadId, approvals: pending });
+    await view.flush();
+    expect(view.frame()).not.toContain('first command');
+    expect(view.frame()).toContain('second command');
+
+    pending = [];
+    await pendingListener?.({ threadId, approvals: pending });
+    await view.flush();
+    expect(view.frame()).not.toContain('Would you like to allow the following action?');
+    expect(view.frame()).toContain('preserved draft');
+
+    view.screen.clearInput();
     await view.mockInput.typeText('/quit');
     view.mockInput.pressEnter();
     expect(await controller).toBe(0);

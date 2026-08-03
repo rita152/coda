@@ -3366,8 +3366,9 @@ function isMessagePart(value: unknown, role: AgentMessage['role']): boolean {
       return isWellFormedString(value.data) && isWellFormedString(value.mimeType);
     }
     if (value.type === 'reasoning' && role === 'assistant') {
-      assertExactKeys(value, ['type', 'text'], ['signature']);
+      assertExactKeys(value, ['type', 'text'], ['kind', 'signature']);
       return isWellFormedString(value.text)
+        && (value.kind === undefined || value.kind === 'summary' || value.kind === 'content')
         && (value.signature === undefined || isWellFormedString(value.signature));
     }
     if (value.type === 'tool_call' && role === 'assistant') {

@@ -176,4 +176,12 @@ describe('buildParams', () => {
     expect(params.tools?.[0]).toMatchObject({ parameters, strict: false });
     expect(parameters).toEqual({ type: 'object', properties: { optional: { type: 'string' } } });
   });
+
+  it('未配置 reasoning effort 时仍请求 auto summary', () => {
+    const params = buildParams(
+      { ref: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' } },
+      { messages: [], tools: [] },
+    );
+    expect(params.reasoning).toEqual({ summary: 'auto' });
+  });
 });

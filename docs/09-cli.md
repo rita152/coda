@@ -17,7 +17,7 @@ active-run/mailbox/retry/compaction/control/policy 状态机都属于 Runtime。
 > bootstrap/help/version/completion、产品子命令、`--ui`、最低 accessible/plain 文本面、共享
 > terminal sanitizer 与 classic 多行/光标/paste 已落地；UX2 的紧凑任务栏、palette、composer、
 > per-thread presentation state 与 transcript 导航已完成恰好两轮 review。UX3 已实现 Runtime-backed
-> review/diff、approval card、session switch、manual compact 与 conversation fork/retry，并已完成恰好
+> review/diff、approval panel、session switch、manual compact 与 conversation fork/retry，并已完成恰好
 > 两轮完整 review；第二轮修复了 allow-always 可用性、seed turn provenance 与 tool update snapshot
 > 聚合，随后仅运行定向验证。UX4 已实现 accessible ASCII、四套显式主题、按帧 delta 合并、长历史
 > 分段加载、opt-in one-shot automation output 与完整真实 PTY 退出矩阵，并已完成恰好两轮完整 review。
@@ -76,28 +76,30 @@ TUI 进入 alternate screen，组件树固定为:
 root column (100% × 100%)
 ├── header:首次显示版本 + Unicode 像素 Logo + tips；交互后收缩为紧凑任务栏
 ├── transcript / diff viewer / session picker:同一可恢复内容区
-└── composer
-    ├── approval card:默认摘要，`v` 展开 Runtime-authoritative scope
-    ├── candidate menu:categorized fuzzy slash/provider/@path 候选
-    ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
-    ├── task:phase/thread/permissions/queue/unread/Vim
-    ├── workspace
-    └── context usage                         provider/model
+└── composer:固定底部、二选一
+    ├── approval panel:临时替换普通 composer；详情 + ↑/↓ selection + Enter
+    └── ordinary composer
+        ├── candidate menu:categorized fuzzy slash/provider/@path 候选
+        ├── working:active run 时位于 prompt 正上方的一行摘要
+        ├── prompt:top rule + auto-growing transparent Textarea + bottom rule
+        ├── task:phase/thread/permissions/queue/unread/Vim
+        ├── workspace
+        └── context usage                         provider/model
 ```
 
 - **header**:从 `package.json.version` 取当前版本；Logo 是 ImageGen 参考图
   `assets/branding/coda-pixel-logo-reference.png` 的 6 行 Unicode block 复刻，运行时不读 PNG、不依赖终端
   图片协议。首次输入非空 draft、提交消息或恢复已有 draft/thread 后，9 行 onboarding header 永久收缩为
-  3 行紧凑任务栏；resize 不会把已完成 onboarding 的 Logo/tips 重新弹回。低于 10 行时连紧凑 header
+  3 行紧凑任务栏；resize 不会把已完成 onboarding 的 Logo/tips 重新弹回。低于 12 行时连紧凑 header
   也隐藏。header、brand、Logo 与 tips 都不绘制背景色，直接透出终端背景。
-- **transcript / panels**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部；PageUp 或鼠标滚轮上滚后暂停跟尾，按 stable message/tool anchor 保存位置并累计 `N new`。PageDown 回到底部、`End` 或 `/latest` 才清 unread。`/search`、`/next`、`/previous` 定位匹配项但不移动 composer 焦点。`/diff` 把同一区域切到完整 Runtime diff viewer，支持 `←/→` 换文件、`↑/↓` 滚动、`Tab` 切 turn/workspace、`Esc` 返回；`/sessions` 打开 searchable picker，搜索始终针对完整 catalog，不在已过滤子集上二次过滤。
+- **transcript / panels**:assistant Markdown、user/steering/follow-up、工具进度、diff、plan 与告警按事件顺序向下排列。普通 user prompt 使用与底部 composer 相同的透明 single top/bottom 洋红横线块，正文仍使用终端默认前景；steering/follow-up 复用同一双横线结构并保留各自提示。转录不再显示 `you` 或 `coda` 身份标签：双横线已明确标识 user prompt，其后的无框 Markdown 和工具进度自然属于 model response。独立工具调用各自是一个顶层 block，彼此恰隔一行；同一调用的启动/完成摘要、bash 输出与兼容 diff 是无 gap 的内部续行，不能把 diff 的每一行拆成独立 block。reasoning 不生成 transcript 卡片；它只在活跃 composer 的 Working 行临时显示，完整内容仍经 `/review` 读取。plan 是一个随整表替换而原位刷新的 `• Updated Plan · completed/total complete` checklist：首项以 `  └ ` 承接标题，后续项与折行用固定缩进；completed 降级并划线、in_progress 以 cyan/bold 强调、pending 降级。`mono`/无色使用 `[x]`、`[>]`、`[ ]`，因此状态不依赖颜色。关键配置是 `contentOptions.flexDirection:'column'`、`justifyContent:'flex-start'`、`minHeight:'auto'`;禁止 `column-reverse` / `flex-end`。短内容从中区第一行向下增长,不是 pi 风格从 prompt 上方向上堆。`stickyScroll:true, stickyStart:'bottom'` 只在内容溢出后跟随尾部；PageUp 或鼠标滚轮上滚后暂停跟尾，按 stable message/tool anchor 保存位置并累计 `N new`。PageDown 回到底部、`End` 或 `/latest` 才清 unread。`/search`、`/next`、`/previous` 定位匹配项但不移动 composer 焦点。`/diff` 把同一区域切到完整 Runtime diff viewer，支持 `←/→` 换文件、`↑/↓` 滚动、`Tab` 切 turn/workspace、`Esc` 返回；`/sessions` 打开 searchable picker，搜索始终针对完整 catalog，不在已过滤子集上二次过滤。
 - **transcript navigation invariants**:每个物理 wheel event 独立处理，并在下一事件前完成一帧；只有布局后确实发生上移或装载了更早 segment 才进入 manual mode。queued Markdown 尚未进入 ScrollBox 布局时，wheel no-op 不得建立 anchor、manual mode 或 unread boundary。manual mode 明确暂停 OpenTUI native sticky，避免 `maximum - 1 → maximum` 回弹；只有明确下滚到精确 maximum、`End` 或 `/latest` 才恢复跟尾并清 unread。manual 期间只有真实 viewport 变化才重抓 stable anchor；新模型/工具输出复用已经提交的 anchor，并只在 unread interval 开始时持久化 boundary，不能让尚未布局且坐标仍为默认值的新 block 替换 anchor。首次 PageUp 装载 segment 后必须产生 page 级可见上移，wheel 到当前 segment 顶部也必须继续装载更早历史。thread reset 会让旧 transcript 的延迟 frame/segment callback 失效。`/diff` 或 `/sessions` 是真正的 active panel；live event、status/composer refresh 与 resize 都不得令隐藏 transcript 重现，键盘和鼠标只路由到 active panel；panel payload 不持久化，恢复时回退 transcript，陈旧异步 panel 查询不得抢占后来打开的 panel。
-- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。working/retrying/compacting 与双击退出提示只在输入为空时借单行 placeholder 显示。审批是例外：prompt 横线变黄，composer 上方显示默认折叠卡片，workspace 行始终可见 `Approval … v/y/a/n/Esc`；`v` 只展开 Runtime-authored capability/resource/risk/scope/revision，legacy scope 缺失时明确 unavailable。即使已有 draft 也不能隐藏键位；draft 冻结且编辑光标隐藏,决议后原样恢复 workspace、draft 与光标。正常状态下 prompt 下方严格三行：task 行持续显示 phase、thread、permissions、queue、unread 与可选 Vim mode；workspace 行显示 cwd 与 Git `branch*`；runtime 行左侧显示 `usage.contextTokens`、右侧显示当前 `ModelRef`。这些状态不因 draft 非空而消失。冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比；缺上限显示 `limit unknown`，不得按模型名猜窗口大小。
+- **composer**:固定在屏幕底部。输入区是透明 Textarea,只绘制洋红色 single top/bottom rule,没有左右边、角、title、bottomTitle 或 idle placeholder；Textarea 聚焦、可见且不在审批状态时,使用 OpenTUI 原生硬件光标显示固定高对比品牌红色、持续闪烁的竖线。renderer 的全局鼠标自动聚焦保持关闭,将组件焦点策略明确收敛在输入框；Textarea 自己响应鼠标按下,组件失焦时原生光标隐藏,点击输入区可重新聚焦。终端窗口失焦不改变 Textarea 的逻辑焦点,由终端模拟器把仍可见的原生竖线显示成 inactive/hollow rectangle；切回终端后自然恢复竖线并可直接继续输入。空输入默认只显示 1 行,显式换行或按当前宽度产生软换行时自动增高,内容缩短或终端变宽时自动缩回；空间允许时最多显示 8 行并把超出内容交给 Textarea 内部滚动。布局优先为 transcript 保留至少 1 行真实内容；有空间时连同上下 padding 共保留 3 行,不能让长 draft 吞掉全部模型输出。运行、重试或压缩期间，prompt 正上方持续保留一行 `• Working`；颜色 TUI 以 OpenTUI frame callback 驱动低频流光，mono/无色保持静态文字。只有 canonical `ReasoningPart.kind:'summary'` 的非空文本能在同一行以清洗后的单行摘要原位替换 `Working`；raw content、Anthropic thinking、Chat 扩展与旧转录都不得进入默认 UI。工具启动、下一 assistant message、approval、run 结束或 thread reset 都恢复/清除该临时摘要。空间只有一行时优先保留 prompt。运行提示、双击退出提示仍可在空输入的 placeholder 显示控制语义。审批是例外：`approval_request` 不注册 transcript block，而是在同一个固定底部区域用临时 approval panel **整体替换** candidate/working/prompt/task/workspace/runtime。灰色面板依次展示问题、`Environment: local`、原因、Runtime-authoritative command/target 和三项以内的决议列表，并在最后一项下保留一整行灰色底部留白；确认提示单独位于灰色 surface 下方的透明 footer。`↑`/`↓` 循环选择、`Enter` 确认，同时保留无修饰 `y/a/n/Esc`，`v` 只展开 Runtime-authored capability/resource/risk/scope/revision。审批队列始终只展示和决议队首，且输入优先级高于 diff/session 等背景 panel；决议后才切换到下一张。窄高或多行详情超过 viewport 时面板围绕当前选项移动可见窗口，禁止提交不可见的盲选项。选中项同时使用 `›`、序号和强调色，不能只靠颜色；现代 request 没有 frozen allow-always scope 时不显示第二项，legacy scope 缺失时详情明确 unavailable。已有 draft 在面板期间不可见但原样冻结，编辑光标隐藏；决议后销毁临时面板、恢复 workspace/draft/光标和输入焦点。正常状态下 prompt 下方严格三行：task 行持续显示 phase、thread、permissions、queue、unread 与可选 Vim mode；workspace 行显示 cwd 与 Git `branch*`；runtime 行左侧显示 `usage.contextTokens`、右侧显示当前 `ModelRef`。这些状态不因 draft 非空而消失。冷启动没有模型时右侧明确显示 `no model selected`。只有 `ModelConfig.limits.context` 明确存在时才显示百分比；缺上限显示 `limit unknown`，不得按模型名猜窗口大小。
 - **candidate menu**:slash 命令、provider 枚举和 `@` path completion 复用 prompt 正上方的同一个透明候选层。slash 项显示 `[category] /name <argument>`、首个快捷键、说明和 disabled 原因；name/alias 的 exact/prefix/substring/subsequence 优先于 description/category 的模糊命中。可执行性统一由 phase、approval、provider prompt、provider availability、model、transcript 与 stash 状态计算；不可执行项保留以解释原因，provider 自由/秘密输入与审批状态则隐藏无关命令。`Ctrl+K` 从任意普通 draft 打开 palette，`Esc` 恢复原 draft。兼容别名 `/f`、`/q`、`/prev` 继续可输入但不重复占候选行。`↑`/`↓` 循环，`Tab` 采用但不发送，`Enter` 采用后执行；`@query` 的 Tab 插入当前 workspace 相对路径。运行中 read-only/presentation 命令仍可执行，provider 管理命令明确 disabled，普通文本 Enter 继续是 steering。
 - **provider 候选**:`/login` 的 preset、Custom 协议、`/model` 模型、`/logout` provider 都由共用状态机把结构化 `value/label/description` 交给同一 candidate menu；空输入显示候选，输入文本可按 label/value/description 大小写无关过滤，`↑`/`↓` 循环选择，`Enter` 直接确认当前项，不要求输入数字。`Tab` 不确认 provider 选项；`Esc` 静默回到上一步，例如 Custom 协议回到 API key、Custom name 回到 preset。离开秘密步骤时必须先清空 UI 秘密缓冲；协议步骤中已经暂存在 controller 的 key 也要在回退时清空。到达 `/login`、`/model` 或 `/logout` 的根步骤后再按 `Esc` 才静默退出流程，不打印“已取消”。秘密输入和 name/base URL 等自由文本步骤不显示候选。审批期间所有候选隐藏。
 - **候选布局**:候选占用 composer 上方空间，一次最多显示 8 项；项目更多或空间不足时围绕当前项裁切，同时仍优先保留 1 行输入与可用时 1 行 transcript。
-- **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model；状态 placeholder 与审批 footer 切换为紧凑文案。resize 必须按新宽度重新测量软换行并同步 prompt/composer 高度。低于 10 行进入 ultra-compact:隐藏 header,随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内,审批时则优先保留审批 footer,必要时隐藏输入和光标。
-- **主题**:`--theme=auto|light|dark|high-contrast|mono` 由统一 option catalog 提供；OpenTUI 为前四者选择明确 palette，`mono` 与 `NO_COLOR` / `--no-color` 都移除语义色。状态同时保留 `done`、`aborted`、`fatal`、`warning`、`running` 等文字/符号，不能只靠颜色。整个 TUI 的 native framebuffer 与视图树背景都固定为 `RGBA(0,0,0,0)`。页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、composer、Textarea 普通/聚焦态和三行 footer 都必须显式保持 alpha 0,不能由任何子层重新画出实色块。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受主题或 color flag 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。
+- **响应式**:窄屏先隐藏 tips,再隐藏 Logo和右侧 model。user prompt 新增的两条 transcript 横线属于消息本身；12 行以下先隐藏紧凑 header，为一行 user prompt、ordinary composer 和三行 footer 保留完整结构。approval panel 不属于 transcript，也不因 transcript 剩余高度切换 compact/单行文案；它始终按完整字段、完整选项、底部留白和框外确认提示测量 composer，高度增长时由 transcript 让出空间。resize 必须按新宽度重新测量软换行并同步 composer/approval panel 高度。随后按可用高度依次移除 transcript padding、transcript、runtime、workspace 与一条/两条 prompt rule；普通输入的光标始终留在 viewport 内。
+- **主题**:`--theme=auto|light|dark|high-contrast|mono` 由统一 option catalog 提供；OpenTUI 为前四者选择明确 palette，`mono` 与 `NO_COLOR` / `--no-color` 都移除语义色。状态同时保留 `done`、`aborted`、`fatal`、`warning`、`running` 等文字/符号，不能只靠颜色。native framebuffer、页面、header、ScrollBox 的 root/wrapper/viewport/content、动态转录、Markdown、ordinary composer、Textarea 和三行 footer 都固定为 `RGBA(0,0,0,0)`；临时 approval panel 是唯一有意绘制的实色 surface，light/auto 使用 `#f4f4f5`、dark 使用 `#202126`、high-contrast 使用黑色，mono/`NO_COLOR` 则回到透明。OpenTUI 0.4.5 的运行时构造器尚不读取 `backgroundColor` 配置,所以生产初始化除传入透明配置外,还必须无条件调用 `renderer.setBackgroundColor(...)` 同步 native framebuffer；该行为不受主题或 color flag 控制。ANSI 终端没有逐单元格 alpha 协议,这里的“透明”表示输出 SGR 49、使用终端 profile 的默认背景；若终端窗口本身启用了透明效果即可透出桌面,否则仍显示该 profile 的背景色,alternate screen 也不会透出先前 shell 的字符。正文与输入文字使用终端默认前景色；硬件光标固定使用 `#c94740`,因为 OpenTUI 0.4.5 的 native cursor 路径忽略 default intent,否则会在白色背景上退化成不可见的 `#ffffff`。
 
 OpenTUI 是这一分支的唯一终端写入者和键盘焦点管理者。`exitOnCtrlC:false`、`exitSignals:[]` 让 CLI 在销毁 alternate screen 前先提交目标 thread 的 `abort`、等待 control/权威提交收束并调用 `RuntimePort.close()`；阶段 0 legacy 路径等价执行 `approval.onAbort → Session.close()`。`destroy()` 恢复 raw mode、鼠标与主屏。`NO_COLOR` / `--no-color` 禁用 coda 的内容与边框语义色,但保留用于焦点可见性的硬件光标色,且不改变布局和键位。
 
@@ -373,7 +375,16 @@ picker 对 title、ThreadId、state/archived、ISO time、workspace、cwd 与 pr
 transcript；后台 run 的 completion 仍能结案对应 op waiter。`Esc` abort 与 y/a/n approval 严格绑定当前
 目标及 control 冻结的 owning RunId，页面切换不会让旧卡片误作用于新 thread。
 
-reasoning 默认只显示状态和耗时；`/review` 才输出完整 content。工具默认显示名称、目标、状态、耗时与
+RuntimeFrontendSession 另外提供 frontend-private 的 pending-approval level snapshot subscription；
+它与 legacy 事件 fanout 共用同一条有序队列，但不扩展 CliSessionEvent，因此 headless NDJSON wire
+保持不变。TUI/classic/accessible 在注册输入 handler 前先同步读取一次 pendingApprovals()，随后以
+snapshot 原子替换本地 FIFO。control_resolved、外部窗口先行决议以及
+control_request_not_found / control_response_already_claimed 的静默竞态都会撤下陈旧队首并展示
+下一张。broadcast snapshot 在入队点冻结整表，不能跨中间 legacy event 合并，否则该 event 的 listener
+仍可能看到已 resolved 的旧队首；只有被更新 broadcast 覆盖的 targeted initial replay 可以跳过。同一
+队首的重复 level snapshot 不重建 TUI 卡片，必须保留 selection/展开状态。
+
+reasoning 不写入 transcript；活跃 TUI 的 Working 行只临时显示 API 返回的单行摘要，`/review` 才输出完整 content。工具默认显示名称、目标、状态、耗时与
 结果摘要，完整 args/output 也只来自 Runtime review snapshot。diff viewer 不截断 patch，分组为 staged、
 unstaged、untracked 或 turn；Git 采集在 RuntimePort 后的 composition adapter 中完成，TUI 不导入 Git/
 repository。fork/retry 只复制已提交 conversation checkpoint，源 busy/pending approval 时拒绝；它们不
@@ -506,7 +517,7 @@ stderr。所有文本先移除 ANSI/OSC/C0/C1。warning 不进入 transcript；c
 | retry backoff / compacting | `Esc` | 提交目标 thread 的 `abort` op，取消待重试或压缩 |
 | TUI | `PageUp` / `PageDown` | 滚动中间 transcript,输入框保持焦点；classic/accessibility 使用终端 scrollback |
 | 任意 | `Esc Esc`(500ms 内)或 `Ctrl+C Ctrl+C` | 退出（流式中先 abort，等待权威提交与输出泵后 `RuntimePort.close()`） |
-| 审批中 | 无修饰的 `v` / `y` / `a` / `n` / `Esc` | 展开权威详情，或提交 `control_response`（本次允许 / 始终允许 / 拒绝）/目标 run `abort`；其余输入冻结。现代 card 仅在有 frozen allow-always scope 时提示 `a`；legacy compatibility prompt 仍接受既有 `a`，但明确 scope unavailable |
+| 审批中 | `↑` / `↓` / `Enter`；无修饰 `v` / `y` / `a` / `n` / `Esc` | 在固定底部临时面板移动/确认选择，展开权威详情，或直接提交 `control_response`（本次允许 / 始终允许 / 拒绝）/目标 run `abort`；其余输入冻结。现代 panel 仅在有 frozen allow-always scope 时显示 `a` 项；legacy compatibility prompt 仍接受既有 `a`，但明确 scope unavailable |
 
 ### 3.1 为什么与 pi 完全一致
 
@@ -555,33 +566,65 @@ TUI 渲染行为：
 
 | RuntimeEvent（legacy 名称相同） | TUI 渲染行为 |
 |---|---|
-| `agent_start` | 空输入时 prompt placeholder 进入 working;`reason:'follow_up'` 追加 `↪ follow-up` |
+| `agent_start` | 普通 composer 在 prompt 正上方显示 `• Working`；空输入 placeholder 继续提示 steer/abort，`reason:'follow_up'` 追加 `↪ follow-up` |
 | `agent_end` | 最终边界追加 done/aborted/error;`willRetry:true` 保持 retrying,不误报完成 |
 | `turn_start` | 无可见输出(内部计数) |
 | `turn_end` | 无额外分隔组件 |
 | `message_start` (user) | 追加 user / steering / follow-up / synthetic 块 |
-| `message_start` (assistant) | 创建按 message id 索引的流式 Markdown 块 |
-| `message_update` | `text_delta` 按 `contentIndex` 累积到有序块；reasoning 默认折叠为状态/耗时，不把完整内容直接铺入 transcript，`/review` 从 Runtime snapshot 展开；不能把多个 content part 粘成一个单词或在最终消息到达时跳变；tool-call 参数流只更新 activity |
+| `message_start` (assistant) | 清除上一段 Working 摘要；Markdown 块延迟到首个清洗后非空 text 才创建，tool/reasoning-only 消息不制造空转录块或锚点 |
+| `message_update` | `text_delta` 按 `contentIndex` 累积到有序块；仅 public `kind:'summary'` 的 `reasoning_delta/end` 更新同一条 Working 行，raw/未标记 reasoning 不显示且不封口探索块；不生成 status/elapsed transcript 卡片，`/review` 从 Runtime snapshot 展开；不能把多个 content part 粘成一个单词或在最终消息到达时跳变；tool-call 参数流清除摘要并更新 activity |
 | `message_end` (assistant) | `stopReason: 'length'` 追加警示行 `[output truncated by model limit]`;`'aborted'` 追加 `[aborted]` |
 | `message_end` (tool_result) | 已由 `tool_execution_end` 渲染,此处无输出(去重) |
-| `tool_execution_start/update/end` | 原位更新同一工具摘要块：名称/目标/耗时/状态/结果摘要；`update.output` 是累计快照，view/review reducer 都整块替换而不拼接；`/review` 展开完整 args/output；完整 diff 只进入 Runtime diff viewer，普通 transcript 可保留兼容摘要 |
+| `tool_execution_start/update/end` | 原位更新同一工具摘要块：名称/目标/耗时/状态/结果摘要；每个独立调用在 TUI 和 classic/plain 都恰隔一行，而摘要、完成态与兼容 diff 保持同一紧凑块内的零 gap 续行。连续的只读探索 `read` / `ls` / `glob` / `grep` 是紧凑例外：TUI 在同一 `Exploring` / `Explored` 块中按调用顺序列出它们，首项用 `  └ `、后续项用 `    `，相邻 `read` 合并并去重路径。出现非探索工具、可见 user/assistant 文本、plan/diff/approval/error 或 run 边界即封口；失败调用在块内追加显式 `✗` 摘要和 failed 计数。classic/plain 因不能回写 scrollback，在该安全边界输出最终 `Explored` 块及紧随其后的失败行。`bash` 是另一紧凑例外：运行中为单一 `Running` 块，成功完成为 `• Ran`，失败为显式 `✗ Ran`（mono 为 `[x] Ran`），命令高亮且过长时以 `  │ ` 续行；输出以 `  └ ` / `    ` 保留首两行和末两行，中间折叠并引导 `/review`。显式 marker 已表达成功/失败，因此不重复显示 bash 的尾部 `exit code N`。live 与 replay 都按配对后的 tool result 顺序投影，非探索工具/plan 必须封口，不能跨边界合并探索或拆开同一工具块；成功 plan 恢复只显示最后一个合法快照。紧凑块不替代权威工具事实，逐调用状态、耗时、失败与完整 args/output 仍由 Runtime / `/review` 提供；`update.output` 是累计快照，view/review reducer 都整块替换而不拼接；完整 diff 只进入 Runtime diff viewer，普通 transcript 可保留兼容摘要 |
 | `queue_update` | 完整替换计数;running/retrying 时附在 prompt placeholder |
-| `plan_update` | 原位替换同一 plan 块:`✓` / `▶` / `○`,不重复追加整表 |
-| `control_request(kind:'approval')` | 权威提交后 prompt 横线切黄色并显示折叠卡片；`v` 只展开 `ApprovalPresentation` 的 capability/resource/risk/scope/revision；已有 draft 保留但冻结；legacy scope 缺省时明确 unavailable；legacy 投影名为 `approval_request` |
+| `plan_update` | 原位替换同一 plan 块，不重复追加整表：`• Updated Plan · completed/total complete` 标题下首项用 `  └ `、其余项与续行对齐；颜色 TUI 的 completed 为 dim + strikethrough、in_progress 为 cyan + bold、pending 为 dim；`mono`/无色改用 `[x]` / `[>]` / `[ ]`。step 先清洗为单行，窄宽逐词折行且续行对齐状态文本列；可搜索的 transcript 文本投影同步替换为最新快照。 |
+| `control_request(kind:'approval')` | 权威提交后固定底部临时 panel 替换 ordinary composer，且不写 transcript；`↑/↓` + Enter 选择决议，`v` 只展开 `ApprovalPresentation` 的 capability/resource/risk/scope/revision；已有 draft 保留但冻结；legacy scope 缺省时明确 unavailable；legacy 投影名为 `approval_request` |
+| `control_resolved(kind:'approval')` | 不新增 legacy event；frontend-private level snapshot 在既有 fanout 顺序中原子替换 pending FIFO。队首被其他窗口 allow/deny/abort 或先行 claim 后立即撤下并切到下一张，队列清空则恢复原 draft/焦点 |
 | `thread_updated` | 刷新 session catalog/title/archive 状态；不直接改 transcript 或当前 run phase |
 | `usage_update` | 用 `contextTokens` 刷新 footer;不使用 cumulative 伪装当前上下文 |
 | `retry_scheduled` / `compaction_*` | 追加 notice 并更新 activity；controller 与 view 共享同一个 envelope reducer 状态投影,不得分别读取瞬时的 runtime/agent state；取消重试后的 error 与 compaction_end 都回到 idle |
 | `error` | `fatal: false` 打印警告行;`fatal: true` 打印错误并进入退出流程 |
 
-工具头单行摘要规则(`tool_execution_start` 用 `args` 生成,不等结果):
+并行 exploration 在 presentation 边界封口后仍须等待每个真实 result；若 run/replay 结束仍缺 result，
+只能显示 Exploration incomplete 或保持 Exploring，不能伪造 Explored。历史重放按 assistant content
+的声明顺序投影：paired 调用在 result 位置完成，unmatched 调用在它前面最后一个 paired result 后释放，
+因此 completed read A + unmatched read B 仍显示为 a.ts, b.ts，而不会颠倒。
+
+工具头单行摘要规则(`tool_execution_start` 用 `args` 生成,不等结果；bash 使用下方完成态块):
 
 | 工具 | 摘要示例 |
 |---|---|
 | read | `read src/agent/loop.ts [offset=200]` |
 | ls / glob / grep | `grep "StreamFn" src/ (limit 100)` |
-| bash | `bash: <command 首行,截 80 列>` |
+| bash | `Running <高亮 command>`，完成后为 `Ran <高亮 command>` |
 | edit / write | `edit src/cli/repl.ts (2 edits)` / `write docs/x.md` |
 | plan | 不渲染工具头,由 `plan_update` 事件负责(旁路事件,codex `update_plan` 同构) |
+
+连续只读探索使用下列紧凑版式；`glob` 是文件清单，`grep` 是内容搜索：
+
+```text
+• Explored
+  └ Read package.json, bun.lock
+    List docs
+    List **/*.md in docs
+    Search ^#{1,3} in *.md
+```
+
+完成的 bash 使用同样紧凑的单块版式；classic/plain 在收到 result 后一次性写出，TUI 从 `Running` 原位切换：
+
+```text
+● Ran git status --short && git log -5 --oneline --decorate
+  └ M docs/09-cli.md
+    M docs/10-testing.md
+    … +9 lines (use /review to view output)
+    6c9b145 Upgrade terminal workflows
+    d43c8b1 Productize CLI
+```
+
+命令 token 使用执行文件 / flag / 引号字符串 / shell 分隔符的轻量高亮；这只影响展示，不能替代 bash
+实际解析。命令跨屏时最多保留两条 `  │ ` continuation，输出最多占五个显示行；每条输出行先按当前
+宽度截断，避免单个超长 URL 或日志行撑开 transcript。窗口 resize 必须重新排版这两类行，完整原文仍从
+`/review` 的 Runtime snapshot 获取。
 
 ## 5. 全屏一屏示意
 
@@ -589,10 +632,10 @@ TUI 渲染行为：
 ┌─ coda v0.0.1 ─────────────────────────────────────────────┐
 │ [pixel logo]  Welcome back!  │ Tips for getting started  │
 └───────────────────────────────────────────────────────────┘
-  you
+  ──────────────────────────────────────────────────────────
   把 renderer 抽成接口
+  ──────────────────────────────────────────────────────────
 
-  coda
   我会先检查事件边界，然后修改实现……▌
 
                  （剩余空间；内容继续向下增长）
@@ -750,7 +793,10 @@ iterator 排在 buffer 后的正常 end marker，输出泵自行 drain 后 exit 
 
 交互 TUI/classic 退出时必须先关闭 `ProviderCommandController`：通过外部
 `AbortSignal` 取消在途的 `/login` 模型刷新并等待提交收束，再销毁视图。Registry 自身的
-15 秒网络超时仅作为兜底。
+15 秒网络超时仅作为兜底。OpenTUI 的 Working 动画持有 live-render 引用；controller 退订事件后不能再
+依赖迟到的 `agent_end` 释放它，因此 shutdown 必须先幂等销毁 screen（移除 frame callback 并
+`dropLive()`），再等待 `renderer.idle()`，最后销毁 renderer。双 Ctrl+C、运行中 quit 与 signal 都走
+同一顺序，避免 alternate screen/raw mode 因 idle 永不完成而悬挂。
 
 `-p "..."` 一次性模式与 headless 共用同一套 one-shot 生命周期语义：提交一条 `prompt` op，等待
 该 thread 的最终 run 边界后自动 shutdown，默认用 plain 人类可读输出（加 `--json` 时按所选
@@ -924,7 +970,7 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   始终使用紧凑 header，resize 不恢复 onboarding 装饰。prompt 按新宽度重测软换行并增高或缩回；
   transcript 用 stable block anchor 恢复相同逻辑位置，内容顺序不变，composer 始终在底部。
 - **CJK / emoji 宽字符**:OpenTUI native buffer 负责全屏分支的列宽;程序化设置输入历史后调用 Textarea 的 buffer-end API,不能用 JavaScript UTF-16 `string.length` 猜光标列。classic 动态区继续用仓库的 `displayWidth`/截断实现。
-- **过小终端**:低于 10 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标,审批则隐藏输入并只显示决议键位。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
+- **过小终端**:低于 12 行进入 ultra-compact,按 §1.2 的优先级逐级隐藏装饰与状态行；高度 1 时普通输入仍保留视口内光标。审批继续使用完整临时输入面板而不切换 transcript-style 精简文案。裁切不能产生屏幕外的 visible cursor,也不能让非空 draft 隐藏审批操作。
 - **Windows**:OpenTUI 依赖对应 win32 native optional package；`TERM=dumb`/非 TTY auto 路由到
   append-only accessible，只有双 TTY 的 OpenTUI 初始化失败才降级 classic；显式 `--ui=plain` 也可
   避开 raw/alternate screen。只承诺现代 Windows Terminal。
@@ -932,8 +978,9 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   有效模型时在显示 UI 前提交 resume，没有模型时延迟到 `/model` 后 attach，再用
   `runtime.getThreadSnapshot()` 返回的 committed `AgentMessage` view hydrate，不直读 repository、
   不伪造生命周期事件且不自动启动 run。assistant 的多 text/reasoning
-  part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要；plan tool result 从 `details.steps`
-  恢复最新 plan,失败结果仍可见。初始化/重放失败必须 destroy OpenTUI 后才允许降级 classic。
+  part 按原顺序分块；历史 tool call 必须从参数恢复工具摘要，历史 bash 则以其 command 和 result 恢复同一
+  `Ran` 输出块；plan tool result 从 `details.steps` 恢复最新 plan,失败结果仍可见。初始化/重放失败必须
+  destroy OpenTUI 后才允许降级 classic。
 - **终态兜底**：`prompt` / `continue` 的 canonical `op_completed` 是 root activity 已收束的权威边界。
   若 abort、provider 异常或 legacy adapter 竞态导致其前面没有可投影的最终 `agent_end`，
   `RuntimeFrontendSession` 必须由该 envelope 清除 active phase，并仅为旧 TUI/classic/plain surface 投影
@@ -955,6 +1002,8 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   splice 目标 snapshot/live buffer，并重新以目标 canonical user transcript 替换 Ctrl+R history，最后恢复
   目标 draft/scroll/unread/panel 与 pending approval；源 run 不 abort/close。目标 presentation 投影失败或
   resume/new 失败时回滚到原 attachment 并重新 hydrate/恢复源 presentation，而不是留下半切换 view。
+  failed-new 回滚期间不得先广播缓存的源 approvals；attached 源只能以重新 hydrate 后的 snapshot 作为最终
+  level 通知，避免后台 resolution 与 source snapshot 对账之间短暂复活旧卡。
   classic 的 attachment listener 是 transcript replay 的唯一来源，switch handler 不再重复打印 raw transcript。
   隐藏 thread 的 envelope 只更新 per-thread
   cursor 和对应 op waiter，不污染当前 transcript/phase；再次切回时以 snapshot 补全。
@@ -966,6 +1015,14 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - **审批决议可用性**：现代 `ApprovalPresentation.allowAlways` 缺失时，TUI footer、classic 动态提示和
   accessible 文本提示都不展示 `a`；即使用户手工输入 `a`/`/allow-always`，也只显示 unavailable，pending
   card/queue 保持不变且不提交无效 response。没有 presentation 的 legacy request 保留既有 `a` 兼容输入。
+- **审批恢复与外部决议**：三个交互面必须在接收首个用户输入前同步 seed 当前 thread 的 pending approvals，
+  再订阅与 legacy fanout 保序的 level snapshot。snapshot 以 threadId + approvals 整表替换，旧 thread
+  通知不得回灌新 attachment；外部 allow/deny/abort、already-claimed/not-found 都必须解除陈旧输入冻结。
+  已提交但尚无终态的 response 以 `(threadId, requestId) -> opId` 隔离并暂时隐藏对应卡片；切换或 hydrate
+  只能按目标 thread 的 snapshot 对账，不能清掉其他 thread 的 in-flight 标记。accepted receipt 不是终态：
+  `control_response` 后续若以 `op_completed{outcome:'interrupted'}` 或 `op_rejected` 释放 claim 且 request 仍
+  pending，必须按原 opId 恢复卡片，旧 op 的迟到回执也不得清除新 op 的标记。
+  该 side channel 只服务交互 presentation，禁止进入 headless CliSessionEvent/NDJSON。
 
 ## 9. 验收清单
 
@@ -987,12 +1044,12 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
 - [ ] 100×30 下 header 含版本/Logo/tips;首条 user/assistant 紧跟中区顶部,短内容下方留白而不是贴 footer
 - [ ] 长输出填满中区后自动跟尾；PageUp 或鼠标滚轮上滚后不抢回并累积 unread，PageDown 到底、End 或
   `/latest` 可回到最新内容并清 unread
-- [ ] native framebuffer 与整个视图树都保持 alpha 0,header、transcript、Markdown、prompt 与 footer 不绘制任何实色背景
+- [ ] native framebuffer、header、transcript、Markdown、ordinary prompt 与 footer 保持 alpha 0；只有临时 approval panel 按 light/dark/high-contrast token 绘制 surface，NO_COLOR/mono 下也透明
 - [ ] prompt 为透明双横线,没有左右边/圆角/title；默认 1 行并随显式/软换行增高(空间允许时最多 8 行),内容缩短后缩回；Textarea 聚焦时显示高对比品牌红色闪烁原生竖线,组件失焦时隐藏,终端窗口失焦时允许模拟器显示空心 inactive cursor；点击输入区可恢复组件焦点；正常高度下其后恰有 task、workspace 与 context/model 三行
 - [ ] 输入 `/` 或 Ctrl+K 时 palette 在 prompt 正上方显示 category、命令、参数、快捷键、说明/disabled 原因；name/alias/description/category 模糊搜索大小写无关，窄屏可隐藏说明但不丢候选
 - [ ] palette 中 `↑/↓` 循环选择,`Tab` 补全但不发送,`Enter` 补全后执行,`Esc` 返回原 draft；running/retrying 的 read-only/presentation 命令可执行，provider/quit 保留 disabled 解释且不作为 steering
-- [ ] 首次输入/提交后 9 行 onboarding header 收缩为 3 行 taskbar；resize 宽→窄→宽后 prompt 按软换行增高再缩回，Logo/tips 不重新弹回；非空多行 draft 下审批 footer 与黄色横线仍可见,决议后恢复 workspace/洋红横线
-- [ ] 9→7→5→3→2→1 行的 ultra-compact 降级中光标不越界；1 行审批优先显示 y/a/n/Esc 并隐藏输入光标
+- [ ] 首次输入/提交后 9 行 onboarding header 收缩为 3 行 taskbar；resize 宽→窄→宽后 prompt 按软换行增高再缩回，Logo/tips 不重新弹回；非空多行 draft 下 approval panel 替换 ordinary composer 且不回显 draft，决议后恢复 workspace/洋红横线/draft/焦点
+- [ ] 9→7→5→3→2→1 行的 ordinary composer ultra-compact 降级中光标不越界；审批始终使用完整临时输入面板，不按 transcript 空间切换精简文案
 - [ ] 流式输出期间输入框稳定;Enter 后出现 steering 回显,Shift+Enter 只插入换行
 - [ ] retry backoff 期间 Enter 入 steering 队列、Esc 取消重试；compacting 期间 Enter 的 prompt 在压缩完成后启动
 - [ ] `Esc` 不与方向键冲突;流式中裸 Esc 一次 abort,assistant 以 `[aborted]` 收尾
@@ -1006,13 +1063,14 @@ fail-fast，并提示进入交互终端执行 `/login`、`/model` 或补齐对�
   parser/actions；导出不覆盖已有文件，终端控制序列不能借 copy 状态或错误回到 human surface
 - [x] UX3 command catalog 与 TUI/classic/accessible parser 提供 review/diff/permissions/compact、session
   管理及 fork/retry；所有业务动作只经 RuntimePort，Git/repository 不被 UI 直读
-- [x] reasoning 默认折叠；工具显示目标/状态/耗时/摘要，Runtime review 可展开完整 args/output；diff
+- [x] Responses 请求启用 `reasoning.summary:'auto'`；TUI 以 prompt 上方的流光 Working 行临时显示摘要、不写 reasoning transcript 卡片，Runtime review 可展开完整 args/output；工具显示目标/状态/耗时/摘要；diff
   viewer 保留 staged/unstaged/untracked/turn 完整 patch，并支持文件、滚动和 scope 切换
 - [x] session picker 搜索完整 catalog 的状态/时间/workspace/cwd/preview；跨 thread 切换保留独立
   draft/scroll/unread，后台 run 继续，new/switch 失败回滚，approval/abort 只作用于当前目标
-- [x] approval card 默认折叠，展开值只来自 identity-bound `ApprovalPresentation`；legacy scope 缺失时
-  明确 unavailable，不从工具参数/命令推导；manual compact 与 fork/retry 有 journal/recovery 门禁且不
-  声称回滚文件或 shell 副作用
+- [x] approval request 只投影为固定底部临时 panel，不注册 transcript block；面板的 command/target 与
+  `v` 展开值只来自 identity-bound `ApprovalPresentation`（legacy 仅显示既有 description，scope 缺失时
+  明确 unavailable），`↑/↓` + Enter 与 y/a/n/Esc 提交同一 decision；manual compact 与 fork/retry 有
+  journal/recovery 门禁且不声称回滚文件或 shell 副作用
 - [ ] `coda --continue` 重放转录后,tool 摘要、最新 plan 与 plan error 都保留,新输入接在原上下文继续
 - [ ] 模型/工具/持久化文本中的 CSI/OSC/DCS 与 C0/C1 控制字符不会进入帧或终端标题
 - [ ] 无 `COLORTERM` 的 256 色双 TTY 中首帧使用 SGR 49,且不输出 `48;2` / `48;5` 实色背景

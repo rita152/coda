@@ -147,6 +147,143 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
+  it('publishes recovered and live approval snapshots in canonical event order', async () => {
+    const runtime = new FakeRuntime();
+    runtime.requestApproval('approval-recovered');
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+
+    const order: string[] = [];
+    session.subscribe((event) => {
+      order.push(event.type);
+    });
+    const unsubscribe = session.subscribePendingApprovals((snapshot) => {
+      order.push(`pending:${snapshot.approvals.map((item) => item.approvalId).join(',')}`);
+    });
+    await flushMicrotasks();
+    expect(order).toEqual(['pending:approval-recovered']);
+
+    order.length = 0;
+    runtime.requestApproval('approval-live');
+    runtime.resolveApprovalExternally('approval-live');
+    await flushMicrotasks();
+    expect(order).toEqual([
+      'approval_request',
+      'pending:approval-recovered,approval-live',
+      'pending:approval-recovered',
+    ]);
+
+    runtime.resolveApprovalExternally('approval-recovered');
+    await flushMicrotasks();
+    expect(order.at(-1)).toBe('pending:');
+    unsubscribe();
+    await session.close();
+  });
+
+  it('does not let a delayed initial approval snapshot overtake its canonical event', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    let releaseFanout = (): void => undefined;
+    const fanoutGate = new Promise<void>((resolve) => {
+      releaseFanout = resolve;
+    });
+    let markBlocked = (): void => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    const order: string[] = [];
+    session.subscribe(async (event) => {
+      if (event.type === 'agent_start') {
+        markBlocked();
+        await fanoutGate;
+      } else if (event.type === 'approval_request') {
+        order.push('approval_request');
+      }
+    });
+    const prompt = session.prompt('block frontend fanout');
+    await blocked;
+
+    session.subscribePendingApprovals((snapshot) => {
+      order.push(`pending:${snapshot.approvals.map((item) => item.approvalId).join(',')}`);
+    });
+    runtime.requestApproval('approval-after-subscribe');
+    await flushMicrotasks();
+    releaseFanout();
+    await flushMicrotasks();
+
+    expect(order).toEqual([
+      'approval_request',
+      'pending:approval-after-subscribe',
+    ]);
+    runtime.completePrompt();
+    await prompt;
+    await session.close();
+  });
+
+  it('does not coalesce an approval removal across an intervening canonical event', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    runtime.requestApproval('approval-before-boundary');
+    await flushMicrotasks();
+    let presented: readonly string[] = [];
+    session.subscribePendingApprovals((snapshot) => {
+      presented = snapshot.approvals.map((item) => item.approvalId);
+    });
+    await flushMicrotasks();
+    expect(presented).toEqual(['approval-before-boundary']);
+
+    let releaseFanout = (): void => undefined;
+    const fanoutGate = new Promise<void>((resolve) => {
+      releaseFanout = resolve;
+    });
+    let markBlocked = (): void => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    let presentedAtBoundary: readonly string[] | undefined;
+    session.subscribe(async (event) => {
+      if (event.type !== 'tool_execution_start') return;
+      if (event.toolCallId === 'tool-block-fanout') {
+        markBlocked();
+        await fanoutGate;
+      } else if (event.toolCallId === 'tool-observe-boundary') {
+        presentedAtBoundary = presented;
+      }
+    });
+    runtime.emitToolStart('tool-block-fanout');
+    await blocked;
+
+    runtime.resolveApprovalExternally('approval-before-boundary');
+    runtime.emitToolStart('tool-observe-boundary');
+    runtime.requestApproval('approval-after-boundary');
+    await flushMicrotasks();
+    releaseFanout();
+    await flushMicrotasks();
+
+    expect(presentedAtBoundary).toEqual([]);
+    expect(presented).toEqual(['approval-after-boundary']);
+    runtime.resolveApprovalExternally('approval-after-boundary');
+    await flushMicrotasks();
+    await session.close();
+  });
+
   it('keeps late or already-claimed approval response races silent', async () => {
     for (const reason of [
       'control_request_not_found',
@@ -170,6 +307,7 @@ describe('RuntimeFrontendSession', () => {
 
       session.resolveApproval(`approval-${reason}`, 'allow_once');
       await flushMicrotasks();
+      expect(session.pendingApprovals()).toEqual([]);
       const afterFirstResponse = runtime.ops.length;
       session.resolveApproval(`approval-${reason}`, 'allow_once');
       await flushMicrotasks();
@@ -178,6 +316,71 @@ describe('RuntimeFrontendSession', () => {
       expect(runtime.ops).toHaveLength(afterFirstResponse);
       await session.close();
     }
+  });
+
+  it('does not revive an already-claimed approval when op_rejected precedes its receipt', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    runtime.requestApproval('approval-envelope-first');
+    await flushMicrotasks();
+    const snapshots: string[][] = [];
+    session.subscribePendingApprovals((snapshot) => {
+      snapshots.push(snapshot.approvals.map((item) => item.approvalId));
+    });
+    await flushMicrotasks();
+    snapshots.length = 0;
+    runtime.controlRejectionReason = 'control_response_already_claimed';
+    runtime.emitControlRejectionBeforeReceipt = true;
+
+    session.resolveApproval('approval-envelope-first', 'allow_once');
+    await flushMicrotasks();
+
+    expect(session.pendingApprovals()).toEqual([]);
+    expect(snapshots.every((snapshot) => snapshot.length === 0)).toBe(true);
+    await session.close();
+  });
+
+  it('hides an in-flight approval response and restores it after a non-silent rejection', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    const errors: string[] = [];
+    session.subscribe((event) => {
+      if (event.type === 'error') errors.push(event.message);
+    });
+    runtime.requestApproval('approval-retryable');
+    await flushMicrotasks();
+    runtime.controlRejectionReason = 'policy_changed';
+
+    session.resolveApproval('approval-retryable', 'allow_once');
+    session.resolveApproval('approval-retryable', 'deny');
+    expect(session.pendingApprovals()).toEqual([]);
+    expect(runtime.ops.filter((op) => op.type === 'control_response')).toHaveLength(1);
+    await flushMicrotasks();
+
+    expect(errors).toEqual(['policy_changed']);
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-retryable',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
+
+    runtime.controlRejectionReason = undefined;
+    session.resolveApproval('approval-retryable', 'deny');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
+    await session.close();
   });
 
   it('keeps a zero-thread cold start until an explicit model selection', async () => {
@@ -353,6 +556,96 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
+  it('keeps an in-flight approval response attached to its source thread across switches', async () => {
+    const runtime = new WorkspaceFakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'resume',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    const errors: string[] = [];
+    session.subscribe((event) => {
+      if (event.type === 'error') errors.push(event.message);
+    });
+
+    runtime.requestApproval(THREAD_ID, 'approval-thread-a');
+    await flushMicrotasks();
+    const release = runtime.deferNextControlResponse('policy_changed');
+    session.resolveApproval('approval-thread-a', 'allow_once');
+    expect(session.pendingApprovals()).toEqual([]);
+
+    await session.switchSession(THREAD_B);
+    runtime.requestApproval(THREAD_B, 'approval-thread-a');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-thread-a',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
+    await session.switchSession(THREAD_ID);
+    expect(session.pendingApprovals()).toEqual([]);
+    session.resolveApproval('approval-thread-a', 'deny');
+    expect(runtime.ops.filter((op) => op.type === 'control_response')).toHaveLength(1);
+
+    await session.switchSession(THREAD_B);
+    release();
+    await flushMicrotasks();
+    expect(errors).toEqual([]);
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-thread-a',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
+    await session.switchSession(THREAD_ID);
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-thread-a',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
+
+    session.resolveApproval('approval-thread-a', 'deny');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
+    await session.switchSession(THREAD_B);
+    session.resolveApproval('approval-thread-a', 'deny');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
+    await session.close();
+  });
+
+  it('restores an approval after an accepted response ends without resolving it', async () => {
+    const runtime = new WorkspaceFakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'resume',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    runtime.requestApproval(THREAD_ID, 'approval-interrupted');
+    await flushMicrotasks();
+    runtime.deferNextControlResolution();
+
+    session.resolveApproval('approval-interrupted', 'allow_always');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
+    runtime.interruptDeferredControlResponse();
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([{
+      approvalId: 'approval-interrupted',
+      toolCallId: 'tool-1',
+      description: 'run command',
+    }]);
+
+    session.resolveApproval('approval-interrupted', 'allow_once');
+    await flushMicrotasks();
+    expect(runtime.ops.filter((op) => op.type === 'control_response')).toHaveLength(2);
+    expect(session.pendingApprovals()).toEqual([]);
+    await session.close();
+  });
+
   it('restores the current attached session when creating a new session fails', async () => {
     const runtime = new FakeRuntime();
     const session = new RuntimeFrontendSession({
@@ -377,6 +670,41 @@ describe('RuntimeFrontendSession', () => {
     expect(session.messages.at(-1)?.content[0]).toMatchObject({
       text: 'preserve this transcript',
     });
+    await session.close();
+  });
+
+  it('does not publish cached approvals while a failed new session rehydrates its source', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    runtime.requestApproval('approval-resolved-during-new');
+    await flushMicrotasks();
+    const snapshots: string[][] = [];
+    session.subscribePendingApprovals((snapshot) => {
+      snapshots.push(snapshot.approvals.map((item) => item.approvalId));
+    });
+    await flushMicrotasks();
+    snapshots.length = 0;
+
+    runtime.nextThreadId = 'thread-create-failure' as ThreadId;
+    runtime.rejectNextCreate = 'provider unavailable';
+    const sourceSnapshot = runtime.deferNextSnapshot();
+    const creation = session.newSession();
+    await sourceSnapshot.requested;
+    await flushMicrotasks();
+    expect(snapshots.some((snapshot) => snapshot.includes('approval-resolved-during-new'))).toBe(false);
+
+    runtime.resolveApprovalExternally('approval-resolved-during-new');
+    sourceSnapshot.release();
+    await expect(creation).rejects.toThrow('provider unavailable');
+    await flushMicrotasks();
+    expect(session.pendingApprovals()).toEqual([]);
+    expect(snapshots.at(-1)).toEqual([]);
     await session.close();
   });
 
@@ -408,8 +736,13 @@ class FakeRuntime implements RuntimeFrontendPort {
   readonly #transcript: AgentMessage[] = [];
   #pendingPrompt: Extract<RuntimeOp, { type: 'prompt' }> | undefined;
   #pendingApprovals = new Map<string, { runId: RunId; turnId: TurnId }>();
+  #deferredSnapshot: {
+    readonly promise: Promise<void>;
+    readonly markRequested: () => void;
+  } | undefined;
   eventsFailure: Error | undefined;
   controlRejectionReason: string | undefined;
+  emitControlRejectionBeforeReceipt = false;
   abortCompletesPromptAsStale = false;
   gapDuringAttach = false;
   autoAttached = false;
@@ -485,6 +818,13 @@ class FakeRuntime implements RuntimeFrontendPort {
         return { accepted: true, opId: op.opId, duplicate: false, threadId: THREAD_ID };
       case 'control_response': {
         if (this.controlRejectionReason !== undefined) {
+          if (this.emitControlRejectionBeforeReceipt) {
+            this.#push({
+              type: 'op_rejected',
+              opType: op.type,
+              reason: this.controlRejectionReason,
+            }, { opId: op.opId });
+          }
           return {
             accepted: false,
             opId: op.opId,
@@ -562,6 +902,12 @@ class FakeRuntime implements RuntimeFrontendPort {
   }
 
   async getThreadSnapshot(): Promise<ThreadSnapshot> {
+    const deferredSnapshot = this.#deferredSnapshot;
+    if (deferredSnapshot !== undefined) {
+      this.#deferredSnapshot = undefined;
+      deferredSnapshot.markRequested();
+      await deferredSnapshot.promise;
+    }
     if (this.gapDuringAttach) await flushMicrotasks();
     return {
       thread: this.#thread('idle'),
@@ -570,7 +916,15 @@ class FakeRuntime implements RuntimeFrontendPort {
       usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
       queues: { steering: [], followUp: [] },
       plan: [],
-      pendingControls: [],
+      pendingControls: [...this.#pendingApprovals].map(([requestId, pending]) => ({
+        type: 'control_request' as const,
+        requestId,
+        kind: 'approval' as const,
+        owningRunId: pending.runId,
+        owningTurnId: pending.turnId,
+        policyRevision: 'policy-1',
+        payload: { toolCallId: 'tool-1', description: 'run command' },
+      })),
       highWaterSeq: this.gapDuringAttach ? 2 : this.#seq,
     };
   }
@@ -578,6 +932,19 @@ class FakeRuntime implements RuntimeFrontendPort {
   async close(): Promise<void> {
     this.closed = true;
     this.#events.end();
+  }
+
+  deferNextSnapshot(): { readonly requested: Promise<void>; readonly release: () => void } {
+    let release = (): void => undefined;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markRequested = (): void => undefined;
+    const requested = new Promise<void>((resolve) => {
+      markRequested = resolve;
+    });
+    this.#deferredSnapshot = { promise, markRequested };
+    return { requested, release };
   }
 
   emitAfterGap(): void {
@@ -648,6 +1015,30 @@ class FakeRuntime implements RuntimeFrontendPort {
     }, { runId: RUN_ID, turnId: TURN_ID });
   }
 
+  emitToolStart(toolCallId: string): void {
+    this.#push({
+      type: 'tool_execution_start',
+      toolCallId,
+      toolName: 'bash',
+      args: { command: 'true' },
+    }, { runId: RUN_ID, turnId: TURN_ID });
+  }
+
+  resolveApprovalExternally(requestId: string): void {
+    const pending = this.#pendingApprovals.get(requestId);
+    if (pending === undefined) throw new Error(`no pending approval ${requestId}`);
+    this.#pendingApprovals.delete(requestId);
+    this.#push({
+      type: 'control_resolved',
+      requestId,
+      kind: 'approval',
+      owningRunId: pending.runId,
+      owningTurnId: pending.turnId,
+      policyRevision: 'policy-1',
+      decision: 'deny',
+    }, { runId: pending.runId, turnId: pending.turnId });
+  }
+
   #thread(state: ThreadSnapshot['thread']['state']): ThreadSnapshot['thread'] {
     return {
       threadId: THREAD_ID,
@@ -694,8 +1085,21 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
       content: [{ type: 'text', text: 'thread B' }],
     }]],
   ]);
+  readonly #pendingApprovals = new Map<ThreadId, Map<string, {
+    runId: RunId;
+    turnId: TurnId;
+  }>>([
+    [THREAD_ID, new Map()],
+    [THREAD_B, new Map()],
+  ]);
   #opOrdinal = 0;
   #pendingPrompt: Extract<RuntimeOp, { type: 'prompt' }> | undefined;
+  #deferredControlReceipt: {
+    readonly promise: Promise<void>;
+    readonly reason: string;
+  } | undefined;
+  #deferControlResolution = false;
+  #deferredControlResponse: Extract<RuntimeOp, { type: 'control_response' }> | undefined;
   eventOptions: Parameters<RuntimeFrontendPort['events']>[0];
 
   newThreadId(): ThreadId { return 'thread-new' as ThreadId; }
@@ -730,6 +1134,54 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
         runId: RUN_ID,
       };
     }
+    if (op.type === 'control_response') {
+      const deferredReceipt = this.#deferredControlReceipt;
+      if (deferredReceipt !== undefined) {
+        this.#deferredControlReceipt = undefined;
+        await deferredReceipt.promise;
+        return {
+          accepted: false,
+          opId: op.opId,
+          duplicate: false,
+          reason: deferredReceipt.reason,
+          threadId: op.threadId,
+        };
+      }
+      if (this.#deferControlResolution) {
+        this.#deferControlResolution = false;
+        this.#deferredControlResponse = op;
+        return {
+          accepted: true,
+          opId: op.opId,
+          duplicate: false,
+          threadId: op.threadId,
+        };
+      }
+      const pending = this.#pendingApprovals.get(op.threadId)?.get(op.requestId);
+      if (pending !== undefined) {
+        this.#pendingApprovals.get(op.threadId)?.delete(op.requestId);
+        this.#push(op.threadId, {
+          type: 'control_resolved',
+          requestId: op.requestId,
+          kind: 'approval',
+          owningRunId: pending.runId,
+          owningTurnId: pending.turnId,
+          policyRevision: 'policy-1',
+          decision: op.decision === 'confirm' ? 'deny' : op.decision,
+        }, { opId: op.opId, runId: pending.runId, turnId: pending.turnId });
+      }
+      this.#push(op.threadId, {
+        type: 'op_completed',
+        opType: op.type,
+        outcome: 'applied',
+      }, { opId: op.opId });
+      return {
+        accepted: true,
+        opId: op.opId,
+        duplicate: false,
+        threadId: op.threadId,
+      };
+    }
     return {
       accepted: true,
       opId: op.opId,
@@ -761,9 +1213,56 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
       usage: { cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 },
       queues: { steering: [], followUp: [] },
       plan: [],
-      pendingControls: [],
+      pendingControls: [...(this.#pendingApprovals.get(threadId) ?? [])].map(
+        ([requestId, pending]) => ({
+          type: 'control_request' as const,
+          requestId,
+          kind: 'approval' as const,
+          owningRunId: pending.runId,
+          owningTurnId: pending.turnId,
+          policyRevision: 'policy-1',
+          payload: { toolCallId: 'tool-1', description: 'run command' },
+        }),
+      ),
       highWaterSeq: this.#seq.get(threadId) ?? 0,
     };
+  }
+
+  requestApproval(threadId: ThreadId, requestId: string): void {
+    this.#pendingApprovals.get(threadId)?.set(requestId, { runId: RUN_ID, turnId: TURN_ID });
+    this.#push(threadId, {
+      type: 'control_request',
+      requestId,
+      kind: 'approval',
+      owningRunId: RUN_ID,
+      owningTurnId: TURN_ID,
+      policyRevision: 'policy-1',
+      payload: { toolCallId: 'tool-1', description: 'run command' },
+    }, { runId: RUN_ID, turnId: TURN_ID });
+  }
+
+  deferNextControlResponse(reason: string): () => void {
+    let release = (): void => undefined;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#deferredControlReceipt = { promise, reason };
+    return release;
+  }
+
+  deferNextControlResolution(): void {
+    this.#deferControlResolution = true;
+  }
+
+  interruptDeferredControlResponse(): void {
+    const op = this.#deferredControlResponse;
+    if (op === undefined) throw new Error('no deferred control response');
+    this.#deferredControlResponse = undefined;
+    this.#push(op.threadId, {
+      type: 'op_completed',
+      opType: 'control_response',
+      outcome: 'interrupted',
+    }, { opId: op.opId });
   }
 
   completeBackgroundPrompt(): void {
@@ -859,7 +1358,5 @@ class AsyncQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 12; index++) await Promise.resolve();
 }

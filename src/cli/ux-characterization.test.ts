@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  BoxRenderable,
   MarkdownRenderable,
   RGBA,
   ScrollBoxRenderable,
@@ -117,6 +118,14 @@ function frameLines(frame: string): string[] {
 
 function textContent(renderable: TextRenderable): string {
   return renderable.content.chunks.map((chunk) => chunk.text).join('');
+}
+
+function userPromptContent(renderable: BoxRenderable): string {
+  const body = renderable.getChildren().find((child): child is TextRenderable =>
+    child instanceof TextRenderable
+  );
+  if (body === undefined) throw new Error('user prompt body was not rendered');
+  return textContent(body);
 }
 
 describe('UX0 terminal environment characterization', () => {
@@ -333,8 +342,8 @@ describe('UX4 rendering performance gates', () => {
         `last ${TRANSCRIPT_REPLAY_CHUNK_MESSAGES}/1000`,
       );
       const last = children.at(-1);
-      if (!(last instanceof TextRenderable)) throw new Error('latest history row was not text');
-      expect(textContent(last)).toBe('you\n历史 999 🙂');
+      if (!(last instanceof BoxRenderable)) throw new Error('latest history row was not a prompt');
+      expect(userPromptContent(last)).toBe('历史 999 🙂');
       expect(transcriptView.testRenderer.captureCharFrame()).toContain('历史 999 🙂');
 
       for (let page = 0; page < 8; page++) {
@@ -345,8 +354,8 @@ describe('UX4 rendering performance gates', () => {
       expect(complete).toHaveLength(1_001);
       for (const [childIndex, messageIndex] of [[1, 0], [501, 500], [1_000, 999]] as const) {
         const child = complete[childIndex];
-        if (!(child instanceof TextRenderable)) throw new Error('history row was not text');
-        expect(textContent(child)).toBe(`you\n历史 ${messageIndex} 🙂`);
+        if (!(child instanceof BoxRenderable)) throw new Error('history row was not a prompt');
+        expect(userPromptContent(child)).toBe(`历史 ${messageIndex} 🙂`);
       }
 
       // The first interactive tail stays bounded; explicit PageUp proves every segment remains

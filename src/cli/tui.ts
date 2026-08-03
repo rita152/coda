@@ -1,5 +1,5 @@
 // 全屏交互 TUI(规格见 docs/09-cli.md §1–5):OpenTUI 独占 raw stdin/stdout，
-// 直接把 SessionEvent 投影为顶部向下增长的转录区，并把输入框和三行状态固定在底部。
+// 把 SessionEvent 投影为顶部向下增长的转录区；普通 composer 或临时审批面板固定在底部。
 // 本模块只在双 TTY 的交互分支动态加载；headless 与一次性模式不加载 native TUI 依赖。
 
 import { isThreadId, isTurnId } from '../protocol/index.js';
@@ -9,15 +9,18 @@ import type {
   AssistantMessage,
   ModelRef,
   PlanStep,
+  ProviderEvent,
   QueuedMessage,
   RuntimeDiffSnapshot,
   RuntimeThreadListItem,
   ThreadId,
+  ToolCallPart,
   ToolResultMessage,
   UserMessage,
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import type {
+  CliApprovalDecision as ApprovalDecision,
   CliInteractionState as SessionInteractionState,
   CliSessionEvent as SessionEvent,
   CliSessionUsage as SessionUsage,
@@ -27,7 +30,10 @@ import type {
   CliSession,
   InteractiveSession,
 } from './interactive-runtime.js';
-import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
+import type {
+  PendingApprovalView,
+  RuntimeWorkspaceActions,
+} from './runtime-frontend.js';
 import {
   ProviderCommandController,
   type ProviderCommandChoice,
@@ -40,6 +46,7 @@ import {
 } from './product-commands.js';
 import {
   sanitizeTerminalError,
+  sanitizeTerminalLine,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
 } from './terminal-sanitize.js';
@@ -52,10 +59,27 @@ import {
   approvalAllowsAlways,
   filterSessionItems,
   formatApprovalPresentation,
-  formatApprovalSummary,
   formatPermissionSnapshot,
   formatReviewSnapshot,
 } from './review-format.js';
+import {
+  explorationCall,
+  explorationRows,
+  formatExplorationRow,
+} from './exploration.js';
+import type { ExplorationCall } from './exploration.js';
+import {
+  bashCommandFromArgs,
+  bashOutputEllipsis,
+  layoutBashCommand,
+  previewBashOutput,
+} from './bash-presentation.js';
+import type { BashToken, BashTokenTone } from './bash-presentation.js';
+import {
+  formatPlanProgress,
+  layoutPlan,
+  planPlainText,
+} from './plan-presentation.js';
 import {
   applyWorkspaceCompletion,
   copyTextToClipboard,
@@ -74,7 +98,7 @@ import {
   type TranscriptScrollAnchor,
 } from './presentation-state.js';
 export { sanitizeTerminalText, sanitizeTerminalTitle };
-import { toolHeadline, truncateToWidth } from './renderer.js';
+import { displayWidth, toolHeadline, truncateToWidth } from './renderer.js';
 import {
   approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
@@ -96,6 +120,7 @@ import type {
   MarkdownRenderable,
   PasteEvent,
   Renderable,
+  TextChunk,
   TextRenderable,
   TreeSitterClient,
 } from '@opentui/core';
@@ -110,6 +135,7 @@ const PIXEL_LOGO = [
 ].join('\n');
 
 const DIFF_MAX_LINES = 24;
+const WORKING_SUMMARY_MAX_CODE_UNITS = 4_096;
 const COMPOSER_PADDING_X = 1;
 const PROMPT_MAX_VISIBLE_ROWS = 8;
 const PROMPT_MEASURE_HEIGHT = 65_535;
@@ -117,12 +143,29 @@ const PROMPT_RULE_ROWS = 2;
 const COMPOSER_FOOTER_ROWS = 3;
 const PROMPT_MENU_MAX_ROWS = 8;
 const SLASH_COMMAND_COLUMN_WIDTH = 32;
+const TRANSCRIPT_PADDING_X = 2;
 const TRANSCRIPT_PADDING_Y = 1;
+// 与 Codex history cell 一致：独立转录块间保留恰好一行，块内续行不再额外留白。
+const TRANSCRIPT_BLOCK_GAP_ROWS = 1;
 const TRANSCRIPT_MIN_CONTENT_ROWS = 1;
 const TRANSCRIPT_PADDED_MIN_ROWS =
   TRANSCRIPT_MIN_CONTENT_ROWS + TRANSCRIPT_PADDING_Y * 2;
-const MIN_HEADER_VIEWPORT_ROWS = 10;
+const MIN_HEADER_VIEWPORT_ROWS = 12;
 export const TRANSCRIPT_REPLAY_CHUNK_MESSAGES = 120;
+
+const WORKING_GRAPHEME_SEGMENTER = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+  : undefined;
+
+function workingGraphemes(value: string): string[] {
+  return WORKING_GRAPHEME_SEGMENTER === undefined
+    ? [...value]
+    : [...WORKING_GRAPHEME_SEGMENTER.segment(value)].map((segment) => segment.segment);
+}
+
+function formatWorkingSummary(value: string): string {
+  return sanitizeTerminalLine(value).replace(/ +/gu, ' ');
+}
 
 function toolTranscriptBlockKey(toolCallId: string, occurrence: number): string {
   return occurrence <= 1
@@ -130,11 +173,12 @@ function toolTranscriptBlockKey(toolCallId: string, occurrence: number): string 
     : `tool:${toolCallId}:occurrence:${occurrence}`;
 }
 
-type Tone = 'normal' | 'muted' | 'accent' | 'success' | 'warning' | 'danger' | 'cyan';
+type Tone = 'normal' | 'muted' | 'accent' | 'success' | 'warning' | 'danger' | 'cyan' | 'blue';
 
 export interface TuiPalette {
   border: string;
   promptBorder: string;
+  approvalSurface: string;
   cursor: string;
   muted: string;
   accent: string;
@@ -142,11 +186,13 @@ export interface TuiPalette {
   warning: string;
   danger: string;
   cyan: string;
+  blue: string;
 }
 
 const AUTO_PALETTE: TuiPalette = {
   border: '#c9ccd3',
   promptBorder: '#a0205e',
+  approvalSurface: '#f4f4f5',
   cursor: '#c94740',
   muted: '#636873',
   accent: '#c94740',
@@ -154,6 +200,7 @@ const AUTO_PALETTE: TuiPalette = {
   warning: '#8a5a0a',
   danger: '#bd2e38',
   cyan: '#276a7a',
+  blue: '#1769d1',
 };
 
 const THEME_PALETTES: Readonly<Record<Exclude<CliTheme, 'auto' | 'mono'>, TuiPalette>> = {
@@ -161,6 +208,7 @@ const THEME_PALETTES: Readonly<Record<Exclude<CliTheme, 'auto' | 'mono'>, TuiPal
   dark: {
     border: '#8b93a1',
     promptBorder: '#ff70b7',
+    approvalSurface: '#202126',
     cursor: '#ff7b72',
     muted: '#a7afbd',
     accent: '#ff7b72',
@@ -168,10 +216,12 @@ const THEME_PALETTES: Readonly<Record<Exclude<CliTheme, 'auto' | 'mono'>, TuiPal
     warning: '#f2cc60',
     danger: '#ff7b86',
     cyan: '#72d4e4',
+    blue: '#8ab4f8',
   },
   'high-contrast': {
     border: '#ffffff',
     promptBorder: '#ffff00',
+    approvalSurface: '#000000',
     cursor: '#ffff00',
     muted: '#ffffff',
     accent: '#ffff00',
@@ -179,6 +229,7 @@ const THEME_PALETTES: Readonly<Record<Exclude<CliTheme, 'auto' | 'mono'>, TuiPal
     warning: '#ffff00',
     danger: '#ff4d4d',
     cyan: '#00ffff',
+    blue: '#6ea8fe',
   },
 };
 
@@ -230,6 +281,8 @@ interface TuiScreenOptions extends TuiOptions {
   treeSitterClient?: TreeSitterClient;
   /** Deterministic performance probe: one callback per coalesced visual stream frame. */
   onStreamFrame?: (taskCount: number) => void;
+  /** 生产启用 Working 行的帧驱动流光；测试默认保持静态画面。 */
+  workingAnimation?: boolean;
 }
 
 export interface TuiScreen {
@@ -258,6 +311,7 @@ export interface TuiScreen {
   setInteractionState(phase: TuiPhase): void;
   resolveApproval(): void;
   toggleApprovalDetails(): void;
+  handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult;
   getInput(): string;
   setInput(text: string): void;
   clearInput(): void;
@@ -279,18 +333,41 @@ export interface TuiScreen {
 
 interface AssistantView {
   id: string;
-  reasoning: TextRenderable;
+  placeholder: TextRenderable;
   markdown: MarkdownRenderable;
-  reasoningBlocks: Map<number, string>;
-  reasoningStartedAt: Map<number, number>;
   textBlocks: Map<number, string>;
 }
 
 interface ToolView {
   headline: string;
   name: string;
-  text: TextRenderable;
+  text?: TextRenderable;
+  appendDetail?: (renderable: Renderable) => void;
+  bash?: BashToolView;
   startedAt: number;
+  blockKey: string;
+  explorationGroup?: ExplorationGroupView;
+}
+
+interface BashToolView {
+  readonly container: Renderable;
+  readonly header: TextRenderable;
+  readonly output: TextRenderable;
+  readonly appendDetail: (renderable: Renderable) => void;
+  readonly command: string;
+  latestOutput: string;
+  state: 'running' | 'completed';
+  isError: boolean;
+}
+
+interface ExplorationGroupView {
+  readonly container: Renderable;
+  readonly title: TextRenderable;
+  readonly body: TextRenderable;
+  readonly appendDetail: (renderable: Renderable) => void;
+  readonly calls: ExplorationCall[];
+  readonly failures: string[];
+  readonly activeCallKeys: Set<string>;
 }
 
 interface PromptMenuItem {
@@ -305,6 +382,22 @@ interface PromptMenuItem {
     readonly end: number;
   };
 }
+
+export type ApprovalPanelKeyResult =
+  | { readonly kind: 'none' | 'handled' }
+  | { readonly kind: 'decision'; readonly decision: ApprovalDecision };
+
+interface ApprovalPanelOption {
+  readonly decision: Exclude<ApprovalDecision, 'abort'>;
+  readonly label: string;
+  readonly shortcut: 'y' | 'a' | 'n';
+}
+
+type ApprovalPanelLine =
+  | { readonly kind: 'blank' }
+  | { readonly kind: 'title' | 'command' | 'detail'; readonly text: string }
+  | { readonly kind: 'field'; readonly label: string; readonly value: string }
+  | { readonly kind: 'option'; readonly index: number; readonly option: ApprovalPanelOption };
 
 export type TuiPhase = SessionInteractionState;
 
@@ -365,6 +458,160 @@ export function approvalDecisionForKey(
 ): ReturnType<typeof approvalKeyDecision> {
   if (key.ctrl || key.meta || key.shift || key.option || key.super || key.hyper) return undefined;
   return approvalKeyDecision(key.name);
+}
+
+interface ApprovalPanelCopy {
+  readonly title: string;
+  readonly reason: string;
+  readonly command?: string;
+  readonly target?: string;
+}
+
+function approvalPanelCopy(
+  presentation: Readonly<ApprovalPresentation> | undefined,
+  fallbackDescription: string,
+): ApprovalPanelCopy {
+  const safeFallback = sanitizeTerminalText(fallbackDescription).trim();
+  const canonicalTarget = presentation?.normalizedResources
+    .find((resource) =>
+      resource['resourceType'] === 'command' &&
+      resource['access'] === 'execute' &&
+      typeof resource['canonicalTarget'] === 'string' &&
+      resource['canonicalTarget'].trim() !== ''
+    )?.['canonicalTarget'];
+  const canonicalCommand = typeof canonicalTarget === 'string'
+    ? canonicalTarget
+    : undefined;
+  const legacy = legacyBashApproval(safeFallback);
+  const command = canonicalCommand ?? legacy?.command;
+  const reason = sanitizeTerminalText(
+    presentation?.risk.description.trim() ||
+      legacy?.reason ||
+      safeFallback ||
+      'This action requires approval.',
+  );
+  const target = command === undefined && presentation !== undefined
+    ? sanitizeTerminalText(safeJsonValue(presentation.normalizedResources))
+    : undefined;
+  return {
+    title: command === undefined
+      ? 'Would you like to allow the following action?'
+      : 'Would you like to run the following command?',
+    reason,
+    ...(command === undefined ? {} : { command: sanitizeTerminalText(command) }),
+    ...(target === undefined ? {} : { target }),
+  };
+}
+
+function legacyBashApproval(
+  description: string,
+): { readonly command: string; readonly reason?: string } | undefined {
+  if (!description.startsWith('bash: ')) return undefined;
+  const body = description.slice('bash: '.length);
+  const markers = [
+    ' — ',
+    ' (accesses paths outside project root)',
+    ' (contains paths that could not be fully analyzed)',
+  ];
+  const boundary = markers
+    .map((marker) => body.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  if (boundary === undefined) return { command: body };
+  const command = body.slice(0, boundary).trim();
+  const reason = body.slice(boundary).replace(/^\s*—\s*/u, '').trim();
+  return {
+    command,
+    ...(reason === '' ? {} : { reason }),
+  };
+}
+
+function safeJsonValue(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? 'undefined';
+  } catch {
+    return '[unavailable]';
+  }
+}
+
+function approvalPanelOptions(
+  presentation: Readonly<ApprovalPresentation> | undefined,
+): readonly ApprovalPanelOption[] {
+  return [
+    { decision: 'allow_once', label: 'Yes, proceed', shortcut: 'y' },
+    ...(approvalAllowsAlways(presentation)
+      ? [{
+          decision: 'allow_always' as const,
+          label: presentation === undefined
+            ? "Yes, and don't ask again for matching commands"
+            : "Yes, and don't ask again for this approved scope",
+          shortcut: 'a' as const,
+        }]
+      : []),
+    {
+      decision: 'deny',
+      label: 'No, and tell Coda what to do differently',
+      shortcut: 'n',
+    },
+  ];
+}
+
+function approvalPanelLineText(line: ApprovalPanelLine, selectedIndex: number): string {
+  switch (line.kind) {
+    case 'blank':
+      return '';
+    case 'field':
+      return `${line.label}: ${line.value}`;
+    case 'option':
+      return `${line.index === selectedIndex ? '›' : ' '} ${line.index + 1}. ` +
+        `${line.option.label} (${line.option.shortcut})`;
+    default:
+      return line.text;
+  }
+}
+
+function wrappedApprovalRows(
+  lines: readonly ApprovalPanelLine[],
+  selectedIndex: number,
+  width: number,
+): number {
+  return lines.reduce((rows, line) => {
+    const physicalLines = approvalPanelLineText(line, selectedIndex).split('\n');
+    return rows + physicalLines.reduce((lineRows, physicalLine) =>
+      lineRows + Math.max(1, Math.ceil(displayWidth(physicalLine) / Math.max(1, width))), 0);
+  }, 0);
+}
+
+/** 矮窗口优先保住当前审批选项，并随选择移动可见窗口，禁止盲选被裁掉的决议。 */
+function visibleApprovalLines(
+  lines: readonly ApprovalPanelLine[],
+  selectedIndex: number,
+  width: number,
+  maxRows: number,
+): readonly ApprovalPanelLine[] {
+  if (wrappedApprovalRows(lines, selectedIndex, width) <= maxRows) return lines;
+  const selectedLine = lines.findIndex((line) =>
+    line.kind === 'option' && line.index === selectedIndex);
+  if (selectedLine < 0) return lines.slice(-1);
+
+  const rowsFor = (line: ApprovalPanelLine): number =>
+    wrappedApprovalRows([line], selectedIndex, width);
+  let start = selectedLine;
+  let end = selectedLine + 1;
+  let rows = rowsFor(lines[selectedLine] as ApprovalPanelLine);
+  while (end < lines.length) {
+    const next = rowsFor(lines[end] as ApprovalPanelLine);
+    if (rows + next > maxRows) break;
+    rows += next;
+    end++;
+  }
+  while (start > 0) {
+    const previous = rowsFor(lines[start - 1] as ApprovalPanelLine);
+    if (rows + previous > maxRows) break;
+    rows += previous;
+    start--;
+  }
+  return lines.slice(start, end);
 }
 
 /** 1000 制 token 短格式，status/footer 共用。 */
@@ -470,9 +717,14 @@ export async function createTuiScreen(
     MarkdownRenderable: Markdown,
     RGBA,
     ScrollBoxRenderable: ScrollBox,
+    StyledText,
     SyntaxStyle: Syntax,
     TextRenderable: Text,
     TextareaRenderable: Textarea,
+    bold,
+    dim,
+    fg,
+    strikethrough,
   } = await import('@opentui/core');
 
   // 透明背景让终端自身的背景色/透明度透出；前景与语义色仍由 coda 控制。
@@ -502,6 +754,7 @@ export async function createTuiScreen(
       case 'warning': return palette.warning;
       case 'danger': return palette.danger;
       case 'cyan': return palette.cyan;
+      case 'blue': return palette.blue;
       default: return terminalForeground;
     }
   };
@@ -519,6 +772,7 @@ export async function createTuiScreen(
     number: resolvedTheme.color ? { fg: palette.warning } : {},
     comment: { ...(resolvedTheme.color && { fg: palette.muted }), italic: true },
   });
+  let screenDestroyed = false;
 
   try {
     const page = new Box(renderer, {
@@ -650,10 +904,10 @@ export async function createTuiScreen(
         flexDirection: 'column',
         justifyContent: 'flex-start',
         minHeight: 'auto',
-        paddingX: 2,
+        paddingX: TRANSCRIPT_PADDING_X,
         paddingTop: TRANSCRIPT_PADDING_Y,
         paddingBottom: TRANSCRIPT_PADDING_Y,
-        rowGap: 1,
+        rowGap: TRANSCRIPT_BLOCK_GAP_ROWS,
         backgroundColor: transparentBackground,
       },
       verticalScrollbarOptions: {
@@ -768,6 +1022,51 @@ export async function createTuiScreen(
       paddingX: COMPOSER_PADDING_X,
       backgroundColor: transparentBackground,
     });
+    const approvalPanel = new Box(renderer, {
+      id: 'coda-approval-panel',
+      width: '100%',
+      height: 0,
+      visible: false,
+      flexShrink: 0,
+      flexDirection: 'column',
+      paddingX: 1,
+      paddingTop: 1,
+      backgroundColor: resolvedTheme.color
+        ? RGBA.fromHex(palette.approvalSurface)
+        : transparentBackground,
+    });
+    const approvalText = new Text(renderer, {
+      id: 'coda-approval-content',
+      width: '100%',
+      height: 0,
+      content: '',
+      wrapMode: 'char',
+      selectable: true,
+      bg: transparentBackground,
+      fg: terminalForeground,
+    });
+    approvalPanel.add(approvalText);
+    const approvalFooter = new Box(renderer, {
+      id: 'coda-approval-footer',
+      width: '100%',
+      height: 0,
+      visible: false,
+      flexShrink: 0,
+      paddingX: 1,
+      backgroundColor: transparentBackground,
+    });
+    const approvalHint = new Text(renderer, {
+      id: 'coda-approval-hint',
+      width: '100%',
+      height: 1,
+      content: 'Press enter to confirm or esc to cancel',
+      truncate: true,
+      selectable: false,
+      bg: transparentBackground,
+      fg: terminalForeground,
+      ...colored({ fg: palette.muted }),
+    });
+    approvalFooter.add(approvalHint);
     const slashMenu = new Box(renderer, {
       id: 'coda-slash-menu',
       width: '100%',
@@ -820,6 +1119,18 @@ export async function createTuiScreen(
       row.add(description);
       slashMenu.add(row);
       return { row, prefix, command, description };
+    });
+    const workingText = new Text(renderer, {
+      id: 'coda-working',
+      width: '100%',
+      height: 0,
+      visible: false,
+      flexShrink: 0,
+      content: '',
+      truncate: true,
+      selectable: false,
+      bg: transparentBackground,
+      fg: terminalForeground,
     });
     const promptBox = new Box(renderer, {
       id: 'coda-prompt-box',
@@ -923,7 +1234,10 @@ export async function createTuiScreen(
     });
     runtimeRow.add(contextText);
     runtimeRow.add(modelText);
+    composer.add(approvalPanel);
+    composer.add(approvalFooter);
     composer.add(slashMenu);
+    composer.add(workingText);
     composer.add(promptBox);
     composer.add(taskText);
     composer.add(workspaceText);
@@ -957,9 +1271,16 @@ export async function createTuiScreen(
     let steerCount = 0;
     let followUpCount = 0;
     let currentAssistant: AssistantView | undefined;
+    const workingReasoningBlocks = new Map<number, string>();
+    let workingSummary: string | undefined;
+    let workingShimmerOffset = 0;
+    let workingAnimationLive = false;
+    let planSteps: readonly PlanStep[] | undefined;
     let planText: TextRenderable | undefined;
     const toolViews = new Map<string, ToolView>();
+    const bashToolViews = new Set<BashToolView>();
     const toolOccurrenceCounts = new Map<string, number>();
+    let activeExplorationGroup: ExplorationGroupView | undefined;
     let promptMenuMode: 'none' | 'slash' | 'command' | 'file' = 'none';
     let promptMenuItems: readonly PromptMenuItem[] = [];
     let promptMenuSelectedIndex = 0;
@@ -982,14 +1303,24 @@ export async function createTuiScreen(
     let replayBanner: TextRenderable | undefined;
     const replayCompletedToolCalls = new Set<string>();
     const replayToolResultHeadlines = new Map<number, string>();
+    const replayToolResultBashCommands = new Map<number, string>();
     const replayToolCallBlockKeys = new Map<string, string>();
     const replayToolResultBlockKeys = new Map<number, string>();
+    const replayToolResultExplorations = new Map<
+      number,
+      { readonly call: ExplorationCall; readonly blockKey: string }
+    >();
+    const replayDeferredToolCallKeys = new Set<string>();
+    const replayDeferredToolStarts = new Map<
+      number,
+      Array<{ readonly part: ToolCallPart; readonly blockKey: string }>
+    >();
+    const replayExplorationGroups = new Map<string, ExplorationGroupView>();
     let replayLatestPlanSteps:
       | Extract<SessionEvent, { type: 'plan_update' }>['steps']
       | undefined;
     let transcriptInsertIndex: number | undefined;
     let blockInsertIndex: number | undefined;
-    let screenDestroyed = false;
     let activePanel: 'transcript' | 'diff' | 'sessions' = 'transcript';
     let diffSnapshot: Readonly<RuntimeDiffSnapshot> | undefined;
     let diffFileIndex = 0;
@@ -998,14 +1329,16 @@ export async function createTuiScreen(
     let sessionQuery = '';
     let sessionIndex = 0;
     let approvalCard: {
-      readonly text: TextRenderable;
+      readonly toolCallId: string;
       readonly presentation: Readonly<ApprovalPresentation> | undefined;
       readonly fallbackDescription: string;
+      selectedIndex: number;
       expanded: boolean;
     } | undefined;
 
     interface TranscriptBlock {
       readonly key: string;
+      readonly aliases: string[];
       readonly renderable: Renderable;
       readonly text: () => string;
     }
@@ -1026,16 +1359,120 @@ export async function createTuiScreen(
       return { fg: toneColor(tone), bg: transparentBackground };
     };
 
-    const refreshWorkspace = (): void => {
-      if (approvalPending) {
-        const allowAlways = approvalAllowsAlways(approvalCard?.presentation);
-        workspaceText.content =
-          layoutWidth < 68
-            ? `Approval · v details · y${allowAlways ? '/a' : ''}/n/Esc`
-            : `Approval required · v details · y once · ${allowAlways ? 'a always · ' : ''}` +
-              'n deny · Esc abort';
+    const fullApprovalLines = (): readonly ApprovalPanelLine[] => {
+      if (approvalCard === undefined) return [];
+      const copy = approvalPanelCopy(
+        approvalCard.presentation,
+        approvalCard.fallbackDescription,
+      );
+      const options = approvalPanelOptions(approvalCard.presentation);
+      const details = approvalCard.expanded
+        ? formatApprovalPresentation(
+            approvalCard.presentation,
+            approvalCard.fallbackDescription,
+          ).slice(0, -1)
+        : [];
+      return [
+        { kind: 'title', text: copy.title },
+        { kind: 'blank' },
+        { kind: 'field', label: 'Environment', value: 'local' },
+        { kind: 'blank' },
+        { kind: 'field', label: 'Reason', value: copy.reason },
+        { kind: 'blank' },
+        copy.command === undefined
+          ? { kind: 'field', label: 'Target', value: copy.target ?? '(no resources)' }
+          : { kind: 'command', text: `$ ${copy.command}` },
+        ...(details.length === 0
+          ? []
+          : [
+              { kind: 'blank' } as const,
+              { kind: 'detail', text: 'Details' } as const,
+              ...details.map((text): ApprovalPanelLine => ({ kind: 'detail', text })),
+            ]),
+        { kind: 'blank' },
+        ...options.map((option, index): ApprovalPanelLine => ({
+          kind: 'option',
+          index,
+          option,
+        })),
+        { kind: 'blank' },
+      ];
+    };
+
+    const renderApprovalLines = (lines: readonly ApprovalPanelLine[]): void => {
+      if (approvalCard === undefined) {
+        approvalText.content = '';
         return;
       }
+      const card = approvalCard;
+      const chunks: TextChunk[] = [];
+      const normal = fg(terminalForeground);
+      const muted = fg(toneColor('muted'));
+      const selected = fg(toneColor('cyan'));
+      const commandName = fg(toneColor('cyan'));
+      const commandFlag = fg(toneColor('accent'));
+      const commandString = fg(toneColor('success'));
+      const append = (...parts: readonly TextChunk[]): void => {
+        chunks.push(...parts);
+      };
+      const appendCommand = (value: string): void => {
+        let expectsCommand = true;
+        for (const part of value.split(/(\s+)/u).filter((token) => token !== '')) {
+          if (/^\s+$/u.test(part)) {
+            append(normal(part));
+          } else if (expectsCommand) {
+            append(commandName(part));
+            expectsCommand = false;
+          } else if (part === '|' || part === '||' || part === '&&' || part === ';') {
+            append(normal(part));
+            expectsCommand = true;
+          } else if (part.startsWith('--')) {
+            append(commandFlag(part));
+          } else if (/^['"`]/u.test(part)) {
+            append(commandString(part));
+          } else {
+            append(normal(part));
+          }
+        }
+      };
+      lines.forEach((line, lineIndex) => {
+        switch (line.kind) {
+          case 'blank':
+            break;
+          case 'title':
+            append(bold(normal(line.text)));
+            break;
+          case 'field':
+            append(normal(`${line.label}: `), bold(normal(line.value)));
+            break;
+          case 'command':
+            append(normal('$ '));
+            appendCommand(line.text.replace(/^\$ /u, ''));
+            break;
+          case 'detail':
+            append(line.text === 'Details' ? bold(muted(line.text)) : muted(line.text));
+            break;
+          case 'option': {
+            const active = line.index === card.selectedIndex;
+            const prefix = `${active ? '›' : ' '} ${line.index + 1}. `;
+            if (active) {
+              append(
+                bold(selected(prefix)),
+                bold(selected(line.option.label)),
+                selected(` (${line.option.shortcut})`),
+              );
+            } else {
+              append(normal(prefix), normal(line.option.label), muted(` (${line.option.shortcut})`));
+            }
+            break;
+          }
+        }
+        if (lineIndex < lines.length - 1) append(normal('\n'));
+      });
+      approvalText.content = new StyledText(chunks);
+    };
+
+    const refreshWorkspace = (): void => {
       workspaceText.content = sanitizeTerminalText(
         branch === undefined
           ? workspace
@@ -1235,10 +1672,161 @@ export async function createTuiScreen(
       }
     };
 
+    const workingLabel = (): string => workingSummary ?? 'Working';
+    const renderWorking = (): void => {
+      const label = workingLabel();
+      if (!resolvedTheme.color) {
+        workingText.content = '• ' + label;
+        return;
+      }
+      const graphemes = workingGraphemes(label);
+      const cycle = Math.max(1, graphemes.length + 6);
+      const highlightStart = Math.floor(workingShimmerOffset % cycle) - 3;
+      const highlightEnd = highlightStart + 3;
+      const muted = fg(toneColor('muted'));
+      const highlight = fg(toneColor('accent'));
+      const chunks: TextChunk[] = [muted('• ')];
+      for (const [index, grapheme] of graphemes.entries()) {
+        chunks.push(
+          index >= highlightStart && index < highlightEnd
+            ? highlight(grapheme)
+            : muted(grapheme),
+        );
+      }
+      workingText.content = new StyledText(chunks);
+    };
+    const workingShouldBeVisible = (): boolean =>
+      !approvalPending &&
+      (interaction.phase === 'running' ||
+        interaction.phase === 'retrying' ||
+        interaction.phase === 'compacting');
+    const syncWorkingAnimation = (): void => {
+      const shouldAnimate =
+        opts.workingAnimation === true &&
+        resolvedTheme.color &&
+        workingText.visible &&
+        !screenDestroyed;
+      if (shouldAnimate && !workingAnimationLive) {
+        workingAnimationLive = true;
+        renderer.requestLive();
+      } else if (!shouldAnimate && workingAnimationLive) {
+        workingAnimationLive = false;
+        renderer.dropLive();
+      }
+    };
+    const workingFrameCallback = async (deltaTime: number): Promise<void> => {
+      if (!workingAnimationLive || screenDestroyed) return;
+      const cycle = Math.max(1, workingGraphemes(workingLabel()).length + 6);
+      workingShimmerOffset =
+        (workingShimmerOffset + Math.max(0, deltaTime) / 90) % cycle;
+      renderWorking();
+    };
+    if (opts.workingAnimation === true && resolvedTheme.color) {
+      renderer.setFrameCallback(workingFrameCallback);
+    }
+    const setWorkingSummary = (value: string | undefined): void => {
+      const formatted = value === undefined ? '' : formatWorkingSummary(value);
+      workingSummary = formatted === '' ? undefined : formatted;
+      renderWorking();
+      renderer.requestRender();
+    };
+    const refreshWorkingSummary = (): void => {
+      const latest = [...workingReasoningBlocks.entries()]
+        .sort(([left], [right]) => right - left)
+        .map(([, text]) => text)
+        .find((text) => formatWorkingSummary(text) !== '');
+      setWorkingSummary(latest);
+    };
+    const clearWorkingSummary = (): void => {
+      workingReasoningBlocks.clear();
+      setWorkingSummary(undefined);
+    };
+    const appendWorkingSummary = (contentIndex: number, delta: string): void => {
+      workingReasoningBlocks.set(
+        contentIndex,
+        ((workingReasoningBlocks.get(contentIndex) ?? '') + sanitizeTerminalText(delta))
+          .slice(0, WORKING_SUMMARY_MAX_CODE_UNITS),
+      );
+      refreshWorkingSummary();
+    };
+    const finishWorkingSummary = (contentIndex: number, content: string): void => {
+      const safeContent = sanitizeTerminalText(content).slice(0, WORKING_SUMMARY_MAX_CODE_UNITS);
+      if (safeContent !== '' || !workingReasoningBlocks.has(contentIndex)) {
+        workingReasoningBlocks.set(contentIndex, safeContent);
+      }
+      refreshWorkingSummary();
+    };
+    const syncWorkingSummaryFromMessage = (message: AssistantMessage): void => {
+      workingReasoningBlocks.clear();
+      for (const [contentIndex, part] of message.content.entries()) {
+        if (part.type === 'reasoning' && part.kind === 'summary') {
+          workingReasoningBlocks.set(
+            contentIndex,
+            sanitizeTerminalText(part.text).slice(0, WORKING_SUMMARY_MAX_CODE_UNITS),
+          );
+        }
+      }
+      refreshWorkingSummary();
+    };
+
     const refreshComposerLayout = (): void => {
       refreshPromptMenu();
+      if (approvalPending && approvalCard !== undefined) {
+        const availableRows = Math.max(1, layoutHeight - headerRows);
+        const footerRows = availableRows > 1 ? 1 : 0;
+        const availablePanelRows = availableRows - footerRows;
+        const contentWidth = Math.max(1, layoutWidth - COMPOSER_PADDING_X * 2 - 2);
+        const paddingTop = availablePanelRows > 1 ? 1 : 0;
+        const lines = visibleApprovalLines(
+          fullApprovalLines(),
+          approvalCard.selectedIndex,
+          contentWidth,
+          Math.max(1, availablePanelRows - paddingTop),
+        );
+        renderApprovalLines(lines);
+        const contentRows = wrappedApprovalRows(
+          lines,
+          approvalCard.selectedIndex,
+          contentWidth,
+        );
+        const panelRows = Math.min(availablePanelRows, contentRows + paddingTop);
+        const transcriptRows = Math.max(0, availableRows - panelRows - footerRows);
+
+        renderSlashRows(0);
+        approvalPanel.visible = true;
+        approvalPanel.paddingTop = paddingTop;
+        approvalPanel.height = panelRows;
+        approvalText.height = Math.max(1, panelRows - paddingTop);
+        approvalFooter.visible = footerRows > 0;
+        approvalFooter.height = footerRows;
+        slashMenu.visible = false;
+        workingText.visible = false;
+        workingText.height = 0;
+        promptBox.visible = false;
+        input.visible = false;
+        taskText.visible = false;
+        workspaceText.visible = false;
+        runtimeRow.visible = false;
+        composer.height = panelRows + footerRows;
+        transcript.visible = activePanel === 'transcript' && transcriptRows > 0;
+        transcript.minHeight = Math.max(1, transcriptRows);
+        transcript.maxHeight = Math.max(1, transcriptRows);
+        transcript.content.paddingTop = transcriptRows >= TRANSCRIPT_PADDED_MIN_ROWS
+          ? TRANSCRIPT_PADDING_Y
+          : 0;
+        transcript.content.paddingBottom = transcript.content.paddingTop;
+        refreshCursorVisibility();
+        syncWorkingAnimation();
+        return;
+      }
+
+      approvalPanel.visible = false;
+      approvalPanel.height = 0;
+      approvalText.height = 0;
+      approvalFooter.visible = false;
+      approvalFooter.height = 0;
       const taskVisible = layoutHeight >= 3;
-      const workspaceVisible = layoutHeight >= 4 || approvalPending;
+      const workspaceVisible = layoutHeight >= 4;
       const runtimeVisible = layoutHeight >= 5;
       taskText.visible = taskVisible;
       workspaceText.visible = workspaceVisible;
@@ -1246,10 +1834,16 @@ export async function createTuiScreen(
       const footerRows =
         Number(taskVisible) + Number(workspaceVisible) + Number(runtimeVisible);
 
-      const rowsAfterHeaderAndFooter = Math.max(
+      const ordinaryComposerRows = Math.max(
         0,
         layoutHeight - headerRows - footerRows,
       );
+      // 极窄高度优先保留可编辑 prompt；有两行时才让 Working 占据 prompt 正上方的一行。
+      const workingRows =
+        workingShouldBeVisible() && ordinaryComposerRows >= 2 ? 1 : 0;
+      workingText.visible = workingRows > 0;
+      workingText.height = workingRows;
+      const rowsAfterHeaderAndFooter = ordinaryComposerRows - workingRows;
       const promptVisible = rowsAfterHeaderAndFooter >= 1;
       const ruleRows = promptVisible
         ? Math.min(PROMPT_RULE_ROWS, Math.max(0, rowsAfterHeaderAndFooter - 1))
@@ -1275,12 +1869,7 @@ export async function createTuiScreen(
             : inputAndTranscriptRows >= TRANSCRIPT_MIN_CONTENT_ROWS + 1
               ? TRANSCRIPT_MIN_CONTENT_ROWS
               : 0;
-      const reservedTranscriptRows = approvalPending
-        ? Math.min(
-            Math.max(transcriptRows, 1 + TRANSCRIPT_PADDING_Y * 2 + 3),
-            Math.max(0, inputAndTranscriptRows - 1),
-          )
-        : transcriptRows;
+      const reservedTranscriptRows = transcriptRows;
       const transcriptPadding = reservedTranscriptRows >= TRANSCRIPT_PADDED_MIN_ROWS
         ? TRANSCRIPT_PADDING_Y
         : 0;
@@ -1293,9 +1882,8 @@ export async function createTuiScreen(
         renderSlashRows(0);
         promptBox.height = 0;
         composer.height = footerRows;
-        transcript.maxHeight = approvalPending || approvalCard !== undefined
-          ? Math.max(1, layoutHeight - headerRows - footerRows)
-          : undefined;
+        transcript.maxHeight = undefined;
+        syncWorkingAnimation();
         return;
       }
 
@@ -1324,10 +1912,9 @@ export async function createTuiScreen(
       );
       const visibleRows = Math.min(naturalRows, viewportRows);
       promptBox.height = visibleRows + ruleRows;
-      composer.height = menuRows + visibleRows + ruleRows + footerRows;
-      transcript.maxHeight = approvalPending || approvalCard !== undefined
-        ? Math.max(1, layoutHeight - headerRows - composer.height)
-        : undefined;
+      composer.height = menuRows + workingRows + visibleRows + ruleRows + footerRows;
+      transcript.maxHeight = undefined;
+      syncWorkingAnimation();
     };
 
     const completeSelectedMenuItem = (): boolean => {
@@ -1553,6 +2140,7 @@ export async function createTuiScreen(
 
     const refreshStatus = (): void => {
       const phase = interaction.phase;
+      renderWorking();
       refreshTaskStatus();
       contextText.content = formatContextUsage(usage.contextTokens, selectedContextLimit);
       const queue =
@@ -1562,12 +2150,6 @@ export async function createTuiScreen(
       const compact = layoutWidth < 68;
       if (approvalPending) {
         setPromptPlaceholder('');
-        if (resolvedTheme.color) {
-          input.placeholderColor = palette.warning;
-          promptBox.borderColor = palette.warning;
-          promptBox.focusedBorderColor = palette.warning;
-        }
-        refreshWorkspace();
         refreshComposerLayout();
         return;
       }
@@ -1606,16 +2188,27 @@ export async function createTuiScreen(
       text: () => string,
     ): void => {
       let key = requestedKey;
-      while (transcriptBlocks.some((block) => block.key === key)) {
+      while (transcriptBlocks.some((block) =>
+        block.key === key || block.aliases.includes(key))) {
         key = `${requestedKey}:${++blockSequence}`;
       }
       renderable.id = `coda-transcript-block-${++blockSequence}`;
-      const block = { key, renderable, text };
+      const block = { key, aliases: [], renderable, text };
       if (blockInsertIndex === undefined) transcriptBlocks.push(block);
       else {
         transcriptBlocks.splice(blockInsertIndex, 0, block);
         blockInsertIndex++;
       }
+    };
+
+    const addTranscriptBlockAlias = (renderable: Renderable, requestedKey: string): void => {
+      const block = transcriptBlocks.find((candidate) => candidate.renderable === renderable);
+      if (block === undefined || block.key === requestedKey || block.aliases.includes(requestedKey)) return;
+      if (transcriptBlocks.some((candidate) =>
+        candidate.key === requestedKey || candidate.aliases.includes(requestedKey))) {
+        return;
+      }
+      block.aliases.push(requestedKey);
     };
 
     const captureScrollAnchor = (): TranscriptScrollAnchor | undefined => {
@@ -1626,11 +2219,13 @@ export async function createTuiScreen(
       // Renderable coordinates already include ScrollBox's content translation, so compare
       // them with the viewport's absolute top instead of the logical scroll offset.
       const top = transcript.viewport.y;
-      let index = 0;
-      for (let candidate = 0; candidate < anchors.length; candidate++) {
-        const block = anchors[candidate];
-        if (block !== undefined && block.renderable.y <= top) index = candidate;
-      }
+      // If the viewport begins in rowGap, anchor the following block instead of attaching an
+      // out-of-range logical offset to the preceding block. This matters for bordered user
+      // prompts, whose three-row geometry makes a gap-aligned viewport much more common.
+      const firstVisible = anchors.findIndex((block) =>
+        block.renderable.y + Math.max(1, block.renderable.height) > top
+      );
+      const index = firstVisible < 0 ? anchors.length - 1 : firstVisible;
       const selected = anchors[index];
       if (selected === undefined) return undefined;
       const fallbackBlockKeys = [
@@ -1701,11 +2296,16 @@ export async function createTuiScreen(
       }
     };
 
+    const finishExplorationGroup = (): void => {
+      activeExplorationGroup = undefined;
+    };
+
     const addText = (
       content: string,
       tone: Tone = 'normal',
       blockKey = `event:${++blockSequence}`,
     ): TextRenderable => {
+      finishExplorationGroup();
       const safeContent = sanitizeTerminalText(content);
       const text = new Text(renderer, {
         width: '100%',
@@ -1721,6 +2321,365 @@ export async function createTuiScreen(
       return text;
     };
 
+    /**
+     * 一次工具调用的摘要、结果和附带 diff 共享一个顶层块：ScrollBox 只在不同调用之间
+     * 施加全局 rowGap，块内始终紧凑，等价于 Codex 的一个 history cell。
+     */
+    const addToolText = (
+      content: string,
+      tone: Tone,
+      blockKey: string,
+    ): { readonly text: TextRenderable; readonly appendDetail: (renderable: Renderable) => void } => {
+      finishExplorationGroup();
+      const safeContent = sanitizeTerminalText(content);
+      const box = new Box(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        flexDirection: 'column',
+        rowGap: 0,
+        backgroundColor: transparentBackground,
+      });
+      const text = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content: safeContent,
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions(tone),
+      });
+      box.add(text);
+      addTranscriptRenderable(box);
+      registerTranscriptBlock(blockKey, box, () => {
+        const current = text.content;
+        return typeof current === 'string' ? current : safeContent;
+      });
+      return {
+        text,
+        appendDetail: (renderable: Renderable): void => {
+          box.add(renderable);
+          renderer.requestRender();
+        },
+      };
+    };
+
+    const explorationRowContent = (row: ReturnType<typeof explorationRows>[number]): string =>
+      sanitizeTerminalLine(formatExplorationRow(row));
+
+    const explorationGroupContent = (group: ExplorationGroupView): string => [
+      ...explorationRows(group.calls)
+        .map((row, index) => `${index === 0 ? '  └ ' : '    '}${explorationRowContent(row)}`),
+      ...group.failures.map((failure) => `  ✗ ${failure}`),
+    ].join('\n');
+
+    const explorationGroupChunks = (group: ExplorationGroupView): TextChunk[] => {
+      const rows = explorationRows(group.calls);
+      const normal = fg(terminalForeground);
+      const muted = fg(toneColor('muted'));
+      const action = fg(toneColor('cyan'));
+      const chunks: TextChunk[] = [];
+      rows.forEach((row, index) => {
+        const label = sanitizeTerminalLine(row.label);
+        const target = sanitizeTerminalLine(row.target);
+        chunks.push(muted(index === 0 ? '  └ ' : '    '), action(label));
+        if (target !== '') chunks.push(normal(` ${target}`));
+        if (index < rows.length - 1) chunks.push(normal('\n'));
+      });
+      for (const failure of group.failures) {
+        if (chunks.length > 0) chunks.push(normal('\n'));
+        chunks.push(fg(toneColor('danger'))(`  ✗ ${failure}`));
+      }
+      return chunks;
+    };
+
+    const refreshExplorationGroup = (group: ExplorationGroupView): void => {
+      const normal = fg(terminalForeground);
+      const failureSuffix = group.failures.length === 0
+        ? ''
+        : ` · ${group.failures.length} failed`;
+      group.title.content = new StyledText([
+        fg(toneColor('muted'))('• '),
+        bold(normal(
+          `${group.activeCallKeys.size === 0 ? 'Explored' : 'Exploring'}${failureSuffix}`,
+        )),
+      ]);
+      group.body.content = new StyledText(explorationGroupChunks(group));
+      renderer.requestRender();
+    };
+
+    const recordExplorationFailure = (
+      group: ExplorationGroupView,
+      headline: string,
+      result: ToolResultMessage,
+    ): void => {
+      const head = truncateToWidth(sanitizeTerminalText(resultHead(result)), 96);
+      group.failures.push(`${sanitizeTerminalLine(headline)}${head === '' ? '' : ` · ${head}`}`);
+    };
+
+    const completeExplorationGroups = (): void => {
+      const groups = new Set<ExplorationGroupView>();
+      if (activeExplorationGroup !== undefined) groups.add(activeExplorationGroup);
+      for (const view of toolViews.values()) {
+        if (view.explorationGroup !== undefined) groups.add(view.explorationGroup);
+      }
+      for (const group of groups) {
+        group.activeCallKeys.clear();
+        refreshExplorationGroup(group);
+      }
+    };
+
+    const addExplorationCall = (
+      call: ExplorationCall,
+      blockKey: string,
+    ): ExplorationGroupView => {
+      const existing = activeExplorationGroup;
+      if (existing !== undefined) {
+        existing.calls.push(call);
+        existing.activeCallKeys.add(blockKey);
+        addTranscriptBlockAlias(existing.container, blockKey);
+        refreshExplorationGroup(existing);
+        return existing;
+      }
+
+      const box = new Box(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        flexDirection: 'column',
+        rowGap: 0,
+        backgroundColor: transparentBackground,
+      });
+      const title = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content: '• Exploring',
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions('normal'),
+      });
+      const body = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content: '',
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions('normal'),
+      });
+      box.add(title);
+      box.add(body);
+      addTranscriptRenderable(box);
+      const appendDetail = (renderable: Renderable): void => {
+        box.add(renderable);
+        renderer.requestRender();
+      };
+      const group: ExplorationGroupView = {
+        container: box,
+        title,
+        body,
+        appendDetail,
+        calls: [call],
+        failures: [],
+        activeCallKeys: new Set([blockKey]),
+      };
+      registerTranscriptBlock(
+        blockKey,
+        box,
+        () => {
+          const status = group.activeCallKeys.size === 0 ? 'Explored' : 'Exploring';
+          const failureSuffix = group.failures.length === 0
+            ? ''
+            : ` · ${group.failures.length} failed`;
+          return `${status}${failureSuffix}\n${explorationGroupContent(group)}`;
+        },
+      );
+      activeExplorationGroup = group;
+      refreshExplorationGroup(group);
+      return group;
+    };
+
+    const bashTokenTone = (tone: BashTokenTone): Tone => {
+      switch (tone) {
+        case 'command': return 'blue';
+        case 'flag': return 'accent';
+        case 'string': return 'success';
+        case 'operator': return 'cyan';
+        case 'comment': return 'muted';
+        default: return 'normal';
+      }
+    };
+
+    const bashTokenChunks = (tokens: readonly BashToken[]): TextChunk[] =>
+      tokens.map((token) => fg(toneColor(bashTokenTone(token.tone)))(token.text));
+
+    const bashTranscriptContent = (view: BashToolView): string => {
+      const preview = previewBashOutput(view.latestOutput);
+      const output = preview.lines.length === 0
+        ? (view.state === 'completed' ? ['(no output)'] : [])
+        : preview.lines;
+      const title = view.state === 'running' ? 'Running' : 'Ran';
+      const marker = view.state === 'completed' && view.isError
+        ? (resolvedTheme.color ? '✗' : '[x]')
+        : '•';
+      return [`${marker} ${title} ${view.command}`, ...output].join('\n');
+    };
+
+    /** 将 bash 命令与其输出保持为一个可原位刷新的紧凑块。 */
+    const refreshBashTool = (view: BashToolView): void => {
+      const normal = fg(terminalForeground);
+      const muted = fg(toneColor('muted'));
+      const statusTone: Tone = view.state === 'running'
+        ? 'cyan'
+        : view.isError
+          ? 'danger'
+          : 'success';
+      const title = view.state === 'running' ? 'Running' : 'Ran';
+      const statusGlyph = view.state === 'completed' && view.isError
+        ? (resolvedTheme.color ? '✗' : '[x]')
+        : '•';
+      const contentWidth = Math.max(1, layoutWidth - TRANSCRIPT_PADDING_X * 2);
+      const headerPrefix = `${statusGlyph} ${title} `;
+      const continuationPrefix = '  │ ';
+      const command = layoutBashCommand(
+        view.command,
+        Math.max(1, contentWidth - displayWidth(headerPrefix)),
+        Math.max(1, contentWidth - displayWidth(continuationPrefix)),
+        displayWidth,
+      );
+      const headerChunks: TextChunk[] = [
+        fg(toneColor(statusTone))(statusGlyph),
+        normal(' '),
+        bold(normal(title)),
+      ];
+      const first = command.lines[0] ?? [];
+      if (first.length > 0) headerChunks.push(normal(' '), ...bashTokenChunks(first));
+      for (const line of command.lines.slice(1)) {
+        headerChunks.push(normal('\n'), muted(continuationPrefix), ...bashTokenChunks(line));
+      }
+      view.header.content = new StyledText(headerChunks);
+
+      const preview = previewBashOutput(view.latestOutput);
+      const visibleLines = preview.lines.length === 0
+        ? (view.state === 'completed' ? ['(no output)'] : [])
+        : preview.lines;
+      const outputFirstPrefix = '  └ ';
+      const outputNextPrefix = '    ';
+      const outputWidth = Math.max(1, contentWidth - displayWidth(outputFirstPrefix));
+      const outputChunks: TextChunk[] = [];
+      const headLines = preview.omittedLines === undefined
+        ? visibleLines.length
+        : Math.min(2, visibleLines.length);
+      visibleLines.forEach((rawLine, index) => {
+        const prefix = index === 0 ? outputFirstPrefix : outputNextPrefix;
+        outputChunks.push(
+          muted(prefix),
+          muted(truncateToWidth(rawLine.replaceAll('\t', '  '), outputWidth)),
+        );
+        if (preview.omittedLines !== undefined && index + 1 === headLines) {
+          outputChunks.push(normal('\n'), muted(outputNextPrefix), muted(bashOutputEllipsis(preview.omittedLines)));
+        }
+        if (index < visibleLines.length - 1) outputChunks.push(normal('\n'));
+      });
+      view.output.visible = outputChunks.length > 0;
+      view.output.content = outputChunks.length === 0 ? '' : new StyledText(outputChunks);
+      renderer.requestRender();
+    };
+
+    const addBashTool = (
+      command: string,
+      blockKey: string,
+      state: BashToolView['state'] = 'running',
+      latestOutput = '',
+      isError = false,
+    ): BashToolView => {
+      finishExplorationGroup();
+      const box = new Box(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        flexDirection: 'column',
+        rowGap: 0,
+        backgroundColor: transparentBackground,
+      });
+      const header = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content: '',
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions('normal'),
+      });
+      const output = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content: '',
+        visible: false,
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions('muted'),
+      });
+      box.add(header);
+      box.add(output);
+      addTranscriptRenderable(box);
+      const appendDetail = (renderable: Renderable): void => {
+        box.add(renderable);
+        renderer.requestRender();
+      };
+      const view: BashToolView = {
+        container: box,
+        header,
+        output,
+        appendDetail,
+        command: sanitizeTerminalText(command),
+        latestOutput: sanitizeTerminalText(latestOutput),
+        state,
+        isError,
+      };
+      bashToolViews.add(view);
+      registerTranscriptBlock(blockKey, box, () => bashTranscriptContent(view));
+      refreshBashTool(view);
+      return view;
+    };
+
+    const refreshBashToolViews = (): void => {
+      for (const view of bashToolViews) refreshBashTool(view);
+    };
+
+    const addUserPrompt = (
+      content: string,
+      tone: Tone,
+      blockKey: string,
+    ): void => {
+      finishExplorationGroup();
+      const prompt = new Box(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        flexDirection: 'column',
+        border: ['top', 'bottom'],
+        borderStyle: 'single',
+        backgroundColor: transparentBackground,
+        borderColor: terminalForeground,
+        ...colored({ borderColor: palette.promptBorder }),
+      });
+      const body = new Text(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        content,
+        wrapMode: 'word',
+        selectable: true,
+        ...textOptions(tone),
+      });
+      prompt.add(body);
+      addTranscriptRenderable(prompt);
+      registerTranscriptBlock(blockKey, prompt, () => content);
+    };
+
     const addUser = (message: UserMessage): void => {
       const body = message.content
         .map((part) =>
@@ -1733,11 +2692,11 @@ export async function createTuiScreen(
       if (message.source === 'synthetic') {
         addText(body, 'muted', `message:${message.id}`);
       } else if (message.source === 'steering') {
-        addText(`» steering\n${body}`, 'cyan', `message:${message.id}`);
+        addUserPrompt(`» steering\n${body}`, 'cyan', `message:${message.id}`);
       } else if (message.source === 'follow_up') {
-        addText(`» follow-up\n${body}`, 'cyan', `message:${message.id}`);
+        addUserPrompt(`» follow-up\n${body}`, 'cyan', `message:${message.id}`);
       } else {
-        addText(`you\n${body}`, 'accent', `message:${message.id}`);
+        addUserPrompt(body, 'normal', `message:${message.id}`);
       }
     };
 
@@ -1750,21 +2709,13 @@ export async function createTuiScreen(
         rowGap: 0,
         backgroundColor: transparentBackground,
       });
-      const label = new Text(renderer, {
+      const placeholder = new Text(renderer, {
         width: '100%',
         height: 1,
-        content: 'coda',
+        content: ' ',
         selectable: false,
-        ...textOptions('accent'),
-      });
-      const reasoning = new Text(renderer, {
-        width: '100%',
-        height: 'auto',
-        flexShrink: 0,
-        content: '',
-        visible: false,
-        wrapMode: 'word',
-        ...textOptions('muted'),
+        bg: transparentBackground,
+        fg: terminalForeground,
       });
       const markdown = new Markdown(renderer, {
         width: '100%',
@@ -1783,22 +2734,19 @@ export async function createTuiScreen(
         bg: transparentBackground,
         fg: terminalForeground,
       });
-      box.add(label);
-      box.add(reasoning);
+      box.add(placeholder);
       box.add(markdown);
       addTranscriptRenderable(box);
       const view: AssistantView = {
         id,
-        reasoning,
+        placeholder,
         markdown,
-        reasoningBlocks: new Map(),
-        reasoningStartedAt: new Map(),
         textBlocks: new Map(),
       };
       registerTranscriptBlock(
         `message:${id}`,
         box,
-        () => `${joinedBlocks(view.reasoningBlocks)}\n${joinedBlocks(view.textBlocks)}`,
+        () => joinedBlocks(view.textBlocks),
       );
       return view;
     };
@@ -1811,10 +2759,8 @@ export async function createTuiScreen(
         .join('\n\n');
 
     const refreshAssistant = (view: AssistantView, streaming: boolean): void => {
-      const reasoningContent = joinedBlocks(view.reasoningBlocks);
       const textContent = joinedBlocks(view.textBlocks);
-      view.reasoning.content = reasoningContent;
-      view.reasoning.visible = reasoningContent !== '';
+      view.placeholder.visible = streaming && textContent === '';
       view.markdown.content = textContent;
       view.markdown.visible = textContent !== '';
       view.markdown.streaming = streaming;
@@ -1851,25 +2797,25 @@ export async function createTuiScreen(
 
     const syncAssistant = (view: AssistantView, message: AssistantMessage): void => {
       cancelFrameTask(`assistant:${view.id}`);
-      view.reasoningBlocks.clear();
       view.textBlocks.clear();
       for (const [index, part] of message.content.entries()) {
-        if (part.type === 'reasoning') {
-          const current = view.reasoningBlocks.get(index);
-          view.reasoningBlocks.set(
-            index,
-            current?.startsWith('thinking ·') === true ? current : 'thinking · complete',
-          );
-        } else if (part.type === 'text') {
+        if (part.type === 'text') {
           view.textBlocks.set(index, sanitizeTerminalText(part.text));
         }
       }
       refreshAssistant(view, false);
     };
 
+    const assistantHasVisibleTranscriptContent = (message: AssistantMessage): boolean =>
+      message.content.some((part) =>
+        part.type === 'text' && sanitizeTerminalText(part.text) !== '');
+
     const addAssistantMessage = (message: AssistantMessage): void => {
-      const view = createAssistant(message.id);
-      syncAssistant(view, message);
+      if (assistantHasVisibleTranscriptContent(message)) {
+        finishExplorationGroup();
+        const view = createAssistant(message.id);
+        syncAssistant(view, message);
+      }
       addAssistantWarning(message);
     };
 
@@ -1883,41 +2829,85 @@ export async function createTuiScreen(
       }
     };
 
-    const resultHead = (result: ToolResultMessage): string =>
-      firstLine(
-        result.content.find((part): part is { type: 'text'; text: string } => part.type === 'text')
-          ?.text ?? '',
-      );
+    const resultText = (result: ToolResultMessage): string =>
+      result.content.find((part): part is { type: 'text'; text: string } => part.type === 'text')
+        ?.text ?? '';
+
+    const resultHead = (result: ToolResultMessage): string => firstLine(resultText(result));
 
     const onToolStart = (
       toolCallId: string,
       toolName: string,
       args: unknown,
     ): void => {
+      clearWorkingSummary();
       const occurrence = (toolOccurrenceCounts.get(toolCallId) ?? 0) + 1;
       toolOccurrenceCounts.set(toolCallId, occurrence);
+      const blockKey = toolTranscriptBlockKey(toolCallId, occurrence);
       const safeToolName = firstLine(sanitizeTerminalText(toolName));
       const rawHeadline = toolHeadline(toolName, args);
       const headline =
         rawHeadline === undefined ? undefined : sanitizeTerminalText(rawHeadline);
+      const exploration = explorationCall(toolName, args);
+      const bashCommand = toolName === 'bash' ? bashCommandFromArgs(args) : undefined;
       activity = `${safeToolName} running`;
       refreshStatus();
+      if (exploration !== undefined) {
+        const explorationGroup = addExplorationCall(exploration, blockKey);
+        toolViews.set(toolCallId, {
+          headline: headline ?? safeToolName,
+          name: safeToolName,
+          startedAt: Date.now(),
+          blockKey,
+          explorationGroup,
+        });
+        return;
+      }
+      finishExplorationGroup();
+      if (bashCommand !== undefined) {
+        const bash = addBashTool(bashCommand, blockKey);
+        toolViews.set(toolCallId, {
+          headline: headline ?? safeToolName,
+          name: safeToolName,
+          bash,
+          startedAt: Date.now(),
+          blockKey,
+        });
+        return;
+      }
       if (headline === undefined) return;
-      const text = addText(
+      const tool = addToolText(
         `● ${headline}`,
         'cyan',
-        toolTranscriptBlockKey(toolCallId, occurrence),
+        blockKey,
       );
-      toolViews.set(toolCallId, { headline, name: safeToolName, text, startedAt: Date.now() });
+      toolViews.set(toolCallId, {
+        headline,
+        name: safeToolName,
+        text: tool.text,
+        appendDetail: tool.appendDetail,
+        startedAt: Date.now(),
+        blockKey,
+      });
     };
 
     const onToolUpdate = (toolCallId: string, output: string): void => {
       const view = toolViews.get(toolCallId);
-      if (view === undefined) return;
+      if (view?.bash !== undefined) {
+        const safeOutput = sanitizeTerminalText(output);
+        queueFrameTask(`tool:${toolCallId}`, () => {
+          const current = toolViews.get(toolCallId);
+          if (current?.bash === undefined) return;
+          current.bash.latestOutput = safeOutput;
+          refreshBashTool(current.bash);
+        });
+        return;
+      }
+      if (view?.text === undefined) return;
       const safeOutput = sanitizeTerminalText(output);
       queueFrameTask(`tool:${toolCallId}`, () => {
         const current = toolViews.get(toolCallId);
-        if (current === undefined) return;
+        if (current?.text === undefined) return;
         const tail = truncateToWidth(firstLineFromEnd(safeOutput.trimEnd()), 88);
         current.text.content =
           tail === '' ? `● ${current.headline}` : `● ${current.headline}\n  ↳ ${tail}`;
@@ -1927,6 +2917,17 @@ export async function createTuiScreen(
     const onToolEnd = (toolCallId: string, result: ToolResultMessage): void => {
       cancelFrameTask(`tool:${toolCallId}`);
       const view = toolViews.get(toolCallId);
+      if (view?.bash !== undefined) {
+        view.bash.latestOutput = sanitizeTerminalText(resultText(result));
+        view.bash.state = 'completed';
+        view.bash.isError = result.isError;
+        refreshBashTool(view.bash);
+        toolViews.delete(toolCallId);
+        addDiff(result.details, view.bash.appendDetail);
+        activity = defaultActivity(interaction.phase);
+        refreshStatus();
+        return;
+      }
       const head = truncateToWidth(sanitizeTerminalText(resultHead(result)), 96);
       const suffix = toolDetailsSuffix(result);
       const marker = result.isError ? '✗' : '✓';
@@ -1936,6 +2937,20 @@ export async function createTuiScreen(
           (elapsed === undefined ? '' : ` · ${formatElapsed(elapsed)}`) +
           (suffix !== undefined ? ` · ${suffix}` : head !== '' ? ` · ${head}` : ''),
       );
+      if (view?.explorationGroup !== undefined) {
+        view.explorationGroup.activeCallKeys.delete(view.blockKey);
+        if (result.isError) {
+          recordExplorationFailure(view.explorationGroup, view.headline, result);
+        }
+        refreshExplorationGroup(view.explorationGroup);
+        toolViews.delete(toolCallId);
+        addDiff(result.details, view.explorationGroup.appendDetail);
+        activity = defaultActivity(interaction.phase);
+        refreshStatus();
+        return;
+      }
+
+      finishExplorationGroup();
       let renderedAsPlan = false;
       if (result.toolName === 'plan') {
         const steps = planStepsFromDetails(result.details);
@@ -1944,107 +2959,213 @@ export async function createTuiScreen(
           renderedAsPlan = true;
         }
       }
-      if (view === undefined) {
+      let appendDetail = view?.appendDetail;
+      if (view?.text === undefined) {
         if (!renderedAsPlan) {
-          addText(finalText, result.isError ? 'danger' : 'success');
+          const completed = addToolText(
+            finalText,
+            result.isError ? 'danger' : 'success',
+            `event:${++blockSequence}`,
+          );
+          appendDetail = completed.appendDetail;
         }
       } else {
         view.text.content = finalText;
         if (resolvedTheme.color) view.text.fg = result.isError ? palette.danger : palette.success;
         toolViews.delete(toolCallId);
       }
-      addDiff(result.details);
+      addDiff(result.details, appendDetail);
       activity = defaultActivity(interaction.phase);
       refreshStatus();
     };
 
-    const addDiff = (details: unknown): void => {
+    const addDiff = (
+      details: unknown,
+      appendDetail?: (renderable: Renderable) => void,
+    ): void => {
       const diff = stringField(asRecord(details), 'diff');
       if (diff === undefined || diff === '') return;
+      finishExplorationGroup();
       const lines = diff.replace(/\n$/, '').split('\n');
+      const box = new Box(renderer, {
+        width: '100%',
+        height: 'auto',
+        flexShrink: 0,
+        flexDirection: 'column',
+        rowGap: 0,
+        backgroundColor: transparentBackground,
+      });
+      const transcriptLines: string[] = [];
       for (const line of lines.slice(0, DIFF_MAX_LINES)) {
         const tone: Tone =
           line.startsWith('+') && !line.startsWith('+++')
             ? 'success'
             : line.startsWith('-') && !line.startsWith('---')
               ? 'danger'
-              : line.startsWith('@@')
-                ? 'cyan'
-                : 'muted';
-        addText(`  ${line}`, tone);
+            : line.startsWith('@@')
+              ? 'cyan'
+              : 'muted';
+        const content = sanitizeTerminalText(`  ${line}`);
+        transcriptLines.push(content);
+        box.add(new Text(renderer, {
+          width: '100%',
+          height: 'auto',
+          flexShrink: 0,
+          content,
+          wrapMode: 'word',
+          selectable: true,
+          ...textOptions(tone),
+        }));
       }
       if (lines.length > DIFF_MAX_LINES) {
-        addText(`  … ${lines.length - DIFF_MAX_LINES} more diff lines`, 'muted');
+        const content = `  … ${lines.length - DIFF_MAX_LINES} more diff lines`;
+        transcriptLines.push(content);
+        box.add(new Text(renderer, {
+          width: '100%',
+          height: 'auto',
+          flexShrink: 0,
+          content,
+          wrapMode: 'word',
+          selectable: true,
+          ...textOptions('muted'),
+        }));
       }
+      if (appendDetail === undefined) addTranscriptRenderable(box);
+      else appendDetail(box);
+      registerTranscriptBlock(`event:${++blockSequence}`, box, () => transcriptLines.join('\n'));
+      renderer.requestRender();
+    };
+
+    const refreshPlan = (): void => {
+      if (planText === undefined || planSteps === undefined) return;
+      const presentation = layoutPlan(
+        planSteps,
+        Math.max(1, layoutWidth - TRANSCRIPT_PADDING_X * 2),
+        displayWidth,
+        !resolvedTheme.color,
+      );
+      const normal = fg(terminalForeground);
+      const muted = fg(toneColor('muted'));
+      const active = fg(toneColor('cyan'));
+      const chunks: TextChunk[] = [muted('• '), bold(normal(presentation.title))];
+      const progress = formatPlanProgress(presentation.progress);
+      if (progress !== undefined) {
+        chunks.push(muted(`${resolvedTheme.color ? ' · ' : ' | '}${progress}`));
+      }
+      if (presentation.lines.length > 0) chunks.push(normal('\n'));
+      presentation.lines.forEach((line, index) => {
+        chunks.push(muted(line.prefix));
+        if (line.status === 'completed') {
+          if (line.marker !== '') chunks.push(dim(muted(`${line.marker} `)));
+          chunks.push(strikethrough(dim(muted(line.text))));
+        } else if (line.status === 'in_progress') {
+          if (line.marker !== '') chunks.push(bold(active(`${line.marker} `)));
+          chunks.push(bold(active(line.text)));
+        } else if (line.status === 'pending') {
+          if (line.marker !== '') chunks.push(dim(muted(`${line.marker} `)));
+          chunks.push(dim(muted(line.text)));
+        } else {
+          chunks.push(dim(muted(line.text)));
+        }
+        if (index < presentation.lines.length - 1) chunks.push(normal('\n'));
+      });
+      planText.content = new StyledText(chunks);
+      renderer.requestRender();
     };
 
     const updatePlan = (steps: Extract<SessionEvent, { type: 'plan_update' }>['steps']): void => {
-      const content = [
-        'plan',
-        ...steps.map((step) => {
-          const glyph =
-            step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '▶' : '○';
-          return `${glyph} ${sanitizeTerminalText(step.step)}`;
-        }),
-      ].join('\n');
+      finishExplorationGroup();
+      // plan 是整表替换的 Runtime 快照；单行化防止不可信 step 文本伪造列表层级。
+      planSteps = steps.map((step) => ({
+        step: sanitizeTerminalLine(step.step),
+        status: step.status,
+      }));
       if (planText === undefined) {
-        planText = addText(content, 'muted');
-      } else {
-        planText.content = content;
+        planText = new Text(renderer, {
+          id: 'coda-plan',
+          width: '100%',
+          height: 'auto',
+          flexShrink: 0,
+          content: '',
+          wrapMode: 'word',
+          selectable: true,
+          ...textOptions('normal'),
+        });
+        addTranscriptRenderable(planText);
+        registerTranscriptBlock(
+          'plan',
+          planText,
+          () => planPlainText(planSteps ?? [], !resolvedTheme.color),
+        );
       }
+      refreshPlan();
     };
 
     const onProviderUpdate = (
       messageId: string,
       event: Extract<SessionEvent, { type: 'message_update' }>['event'],
     ): void => {
-      if (currentAssistant === undefined || currentAssistant.id !== messageId) {
-        currentAssistant = createAssistant(messageId);
-      }
-      const view = currentAssistant;
+      const assistantForText = (): AssistantView => {
+        if (currentAssistant === undefined || currentAssistant.id !== messageId) {
+          currentAssistant = createAssistant(messageId);
+        }
+        return currentAssistant;
+      };
+      const isDisplaySafeReasoningSummary = (candidate: ProviderEvent): boolean => {
+        if (!('partial' in candidate) || !('contentIndex' in candidate)) return false;
+        const part = candidate.partial.content[candidate.contentIndex];
+        return part?.type === 'reasoning' && part.kind === 'summary';
+      };
       switch (event.type) {
         case 'text_start': {
           const part = event.partial.content[event.contentIndex];
           const initial = part?.type === 'text' ? sanitizeTerminalText(part.text) : '';
+          if (initial === '') break;
+          const view = assistantForText();
+          finishExplorationGroup();
           view.textBlocks.set(event.contentIndex, initial);
           queueAssistantRefresh(view);
           break;
         }
         case 'text_delta': {
+          const delta = sanitizeTerminalText(event.delta);
+          if (delta === '') break;
+          const view = assistantForText();
+          finishExplorationGroup();
           const previous = view.textBlocks.get(event.contentIndex) ?? '';
           view.textBlocks.set(
             event.contentIndex,
-            previous + sanitizeTerminalText(event.delta),
+            previous + delta,
           );
           queueAssistantRefresh(view);
           break;
         }
-        case 'text_end':
-          view.textBlocks.set(event.contentIndex, sanitizeTerminalText(event.content));
+        case 'text_end': {
+          const content = sanitizeTerminalText(event.content);
+          if (content === '') break;
+          const view = assistantForText();
+          finishExplorationGroup();
+          view.textBlocks.set(event.contentIndex, content);
           queueAssistantRefresh(view);
           break;
+        }
         case 'reasoning_start': {
-          view.reasoningStartedAt.set(event.contentIndex, Date.now());
-          view.reasoningBlocks.set(event.contentIndex, 'thinking · in progress');
-          queueAssistantRefresh(view);
+          if (!isDisplaySafeReasoningSummary(event)) break;
+          clearWorkingSummary();
           break;
         }
         case 'reasoning_delta': {
-          // Full reasoning remains canonical in Runtime review snapshots; the transcript keeps
-          // only a stable status row so streaming cannot dominate the primary answer.
+          if (!isDisplaySafeReasoningSummary(event)) break;
+          appendWorkingSummary(event.contentIndex, event.delta);
           break;
         }
         case 'reasoning_end': {
-          const startedAt = view.reasoningStartedAt.get(event.contentIndex);
-          view.reasoningBlocks.set(
-            event.contentIndex,
-            `thinking · ${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
-          );
-          view.reasoningStartedAt.delete(event.contentIndex);
-          queueAssistantRefresh(view);
+          if (!isDisplaySafeReasoningSummary(event)) break;
+          finishWorkingSummary(event.contentIndex, event.content);
           break;
         }
         case 'tool_call_start': {
+          clearWorkingSummary();
           const part = event.partial.content[event.contentIndex];
           const name = part?.type === 'tool_call' ? part.name : 'tool';
           activity = `preparing ${firstLine(sanitizeTerminalText(name))}`;
@@ -2067,7 +3188,8 @@ export async function createTuiScreen(
     ): TranscriptBlock | undefined => {
       const candidates = [anchor.blockKey, ...anchor.fallbackBlockKeys];
       return candidates
-        .map((key) => transcriptBlocks.find((candidate) => candidate.key === key))
+        .map((key) => transcriptBlocks.find((candidate) =>
+          candidate.key === key || candidate.aliases.includes(key)))
         .find((candidate) => candidate !== undefined);
     };
     const restoreScrollAnchor = (
@@ -2191,13 +3313,18 @@ export async function createTuiScreen(
       interaction.apply(event);
       switch (event.type) {
         case 'agent_start':
+          finishExplorationGroup();
           transientStatus = undefined;
+          clearWorkingSummary();
           activity = event.reason === 'follow_up' ? 'follow-up' : 'working';
           if (event.reason === 'follow_up') addText('↪ follow-up', 'cyan');
           refreshStatus();
           break;
         case 'agent_end':
+          completeExplorationGroups();
+          finishExplorationGroup();
           currentAssistant = undefined;
+          clearWorkingSummary();
           if (event.willRetry === true) {
             activity = 'retrying';
           } else {
@@ -2222,7 +3349,8 @@ export async function createTuiScreen(
             markInteracted();
             addUser(event.message);
           } else if (event.message.role === 'assistant') {
-            currentAssistant = createAssistant(event.message.id);
+            currentAssistant = undefined;
+            clearWorkingSummary();
           }
           break;
         case 'message_update':
@@ -2230,17 +3358,25 @@ export async function createTuiScreen(
           break;
         case 'message_end':
           if (event.message.role === 'assistant') {
-            const view =
+            syncWorkingSummaryFromMessage(event.message);
+            if (assistantHasVisibleTranscriptContent(event.message)) finishExplorationGroup();
+            let view =
               currentAssistant?.id === event.message.id
                 ? currentAssistant
-                : createAssistant(event.message.id);
-            syncAssistant(view, event.message);
+                : undefined;
+            if (view === undefined && assistantHasVisibleTranscriptContent(event.message)) {
+              view = createAssistant(event.message.id);
+            }
+            if (view !== undefined) syncAssistant(view, event.message);
             addAssistantWarning(event.message);
             currentAssistant = undefined;
           }
           break;
         case 'tool_execution_start':
-          approvalPending = false;
+          if (approvalCard?.toolCallId === event.toolCallId) {
+            approvalPending = false;
+            approvalCard = undefined;
+          }
           onToolStart(event.toolCallId, event.toolName, event.args);
           break;
         case 'tool_execution_update':
@@ -2260,25 +3396,25 @@ export async function createTuiScreen(
           updatePlan(event.steps);
           break;
         case 'approval_request':
+          finishExplorationGroup();
+          clearWorkingSummary();
           approvalPending = true;
           {
             const presentation = opts.workspace?.approvalPresentation(
               event.approvalId,
             );
-            const text = addText(
-              formatApprovalSummary(presentation, event.description).join('\n'),
-              'warning',
-            );
             approvalCard = {
-              text,
+              toolCallId: event.toolCallId,
               presentation,
               fallbackDescription: event.description,
+              selectedIndex: 0,
               expanded: false,
             };
           }
           refreshStatus();
           break;
         case 'error':
+          completeExplorationGroups();
           if (interaction.phase === 'idle') transientStatus = undefined;
           activity = defaultActivity(interaction.phase);
           addText(
@@ -2292,6 +3428,7 @@ export async function createTuiScreen(
           refreshStatus();
           break;
         case 'retry_scheduled':
+          clearWorkingSummary();
           activity = `retry ${event.attempt}/${event.maxAttempts}`;
           addText(
             `↻ retry ${event.attempt}/${event.maxAttempts} in ${event.delayMs}ms · ${event.errorMessage}`,
@@ -2300,6 +3437,7 @@ export async function createTuiScreen(
           refreshStatus();
           break;
         case 'compaction_start':
+          clearWorkingSummary();
           activity = 'compacting context';
           addText('⋯ compacting context…', 'muted');
           refreshStatus();
@@ -2329,11 +3467,41 @@ export async function createTuiScreen(
       );
     };
 
+    const renderDeferredReplayStarts = (messageIndex: number): void => {
+      for (const deferred of replayDeferredToolStarts.get(messageIndex) ?? []) {
+        const { part, blockKey } = deferred;
+        const exploration = explorationCall(part.name, part.arguments);
+        if (exploration !== undefined) {
+          replayExplorationGroups.set(
+            blockKey,
+            addExplorationCall(exploration, blockKey),
+          );
+          continue;
+        }
+        const bashCommand = part.name === 'bash'
+          ? bashCommandFromArgs(part.arguments)
+          : undefined;
+        if (bashCommand !== undefined) {
+          addBashTool(bashCommand, blockKey);
+          continue;
+        }
+        const headline = toolHeadline(part.name, part.arguments);
+        addToolText(
+          `● ${sanitizeTerminalText(headline ?? part.name)}`,
+          'cyan',
+          blockKey,
+        );
+      }
+    };
+
     const renderHistoricalMessages = (
       messages: readonly AgentMessage[],
       start: number,
       end: number,
     ): void => {
+      // A lazily prepended segment is not necessarily contiguous with the already-rendered
+      // tail. Keep its exploration cell local rather than merging across that visual seam.
+      if (transcriptInsertIndex !== undefined) finishExplorationGroup();
       for (let messageIndex = start; messageIndex < end; messageIndex++) {
         const message = messages[messageIndex];
         if (message === undefined) continue;
@@ -2343,13 +3511,31 @@ export async function createTuiScreen(
           for (const [contentIndex, part] of message.content.entries()) {
             if (part.type === 'tool_call') {
               const callKey = `${messageIndex}:${contentIndex}`;
-              if (replayCompletedToolCalls.has(callKey)) continue;
+              const blockKey = replayToolCallBlockKeys.get(callKey) ??
+                toolTranscriptBlockKey(part.id, 1);
+              if (replayCompletedToolCalls.has(callKey) ||
+                replayDeferredToolCallKeys.has(callKey)) continue;
+              const exploration = explorationCall(part.name, part.arguments);
+              if (exploration !== undefined) {
+                replayExplorationGroups.set(
+                  blockKey,
+                  addExplorationCall(exploration, blockKey),
+                );
+                continue;
+              }
+              const bashCommand = part.name === 'bash'
+                ? bashCommandFromArgs(part.arguments)
+                : undefined;
+              if (bashCommand !== undefined) {
+                addBashTool(bashCommand, blockKey);
+                continue;
+              }
               const headline = toolHeadline(part.name, part.arguments);
               if (headline !== undefined) {
-                addText(
+                addToolText(
                   `● ${sanitizeTerminalText(headline)}`,
                   'cyan',
-                  replayToolCallBlockKeys.get(callKey) ?? toolTranscriptBlockKey(part.id, 1),
+                  blockKey,
                 );
               }
             }
@@ -2358,6 +3544,39 @@ export async function createTuiScreen(
         else {
           // Historical replay is a pure projection. In particular, loading an older segment
           // must not mutate the current plan or live tool/activity state.
+          const exploration = replayToolResultExplorations.get(messageIndex);
+          if (exploration !== undefined) {
+            const group = replayExplorationGroups.get(exploration.blockKey) ??
+              addExplorationCall(exploration.call, exploration.blockKey);
+            group.activeCallKeys.delete(exploration.blockKey);
+            if (message.isError) {
+              recordExplorationFailure(
+                group,
+                formatExplorationRow(exploration.call),
+                message,
+              );
+            }
+            refreshExplorationGroup(group);
+            replayExplorationGroups.delete(exploration.blockKey);
+            addDiff(message.details, group.appendDetail);
+            renderDeferredReplayStarts(messageIndex);
+            continue;
+          }
+          finishExplorationGroup();
+          const bashCommand = replayToolResultBashCommands.get(messageIndex);
+          if (bashCommand !== undefined) {
+            const bash = addBashTool(
+              bashCommand,
+              replayToolResultBlockKeys.get(messageIndex) ??
+                `tool:${message.toolCallId}:result:${message.id}`,
+              'completed',
+              sanitizeTerminalText(resultText(message)),
+              message.isError,
+            );
+            addDiff(message.details, bash.appendDetail);
+            renderDeferredReplayStarts(messageIndex);
+            continue;
+          }
           const headline = replayToolResultHeadlines.get(messageIndex) ??
             sanitizeTerminalText(message.toolName);
           const head = truncateToWidth(sanitizeTerminalText(resultHead(message)), 96);
@@ -2366,25 +3585,33 @@ export async function createTuiScreen(
           const renderedAsPlan = message.toolName === 'plan' &&
             !message.isError &&
             planStepsFromDetails(message.details) !== undefined;
+          let appendDetail: ((renderable: Renderable) => void) | undefined;
           if (!renderedAsPlan) {
-            addText(
+            const completed = addToolText(
               `${marker} ${headline}` +
                 (suffix !== undefined ? ` · ${suffix}` : head !== '' ? ` · ${head}` : ''),
               message.isError ? 'danger' : 'success',
               replayToolResultBlockKeys.get(messageIndex) ??
                 `tool:${message.toolCallId}:result:${message.id}`,
             );
+            appendDetail = completed.appendDetail;
           }
-          addDiff(message.details);
+          addDiff(message.details, appendDetail);
         }
+        renderDeferredReplayStarts(messageIndex);
       }
     };
 
     const indexReplayToolPairs = (messages: readonly AgentMessage[]): void => {
       replayCompletedToolCalls.clear();
       replayToolResultHeadlines.clear();
+      replayToolResultBashCommands.clear();
       replayToolCallBlockKeys.clear();
       replayToolResultBlockKeys.clear();
+      replayToolResultExplorations.clear();
+      replayExplorationGroups.clear();
+      replayDeferredToolCallKeys.clear();
+      replayDeferredToolStarts.clear();
       replayLatestPlanSteps = undefined;
       const occurrences = new Map<string, number>();
       for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
@@ -2397,33 +3624,69 @@ export async function createTuiScreen(
           continue;
         }
         if (message?.role !== 'assistant') continue;
-        const calls = new Map<string, { readonly key: string; readonly headline: string }>();
+        const calls = new Map<string, {
+          readonly key: string;
+          readonly part: ToolCallPart;
+          readonly blockKey: string;
+          readonly headline: string;
+          readonly exploration: ExplorationCall | undefined;
+          readonly bashCommand: string | undefined;
+        }>();
+        const orderedCalls: Array<NonNullable<ReturnType<typeof calls.get>>> = [];
         for (const [contentIndex, part] of message.content.entries()) {
           if (part.type !== 'tool_call') continue;
           const occurrence = (occurrences.get(part.id) ?? 0) + 1;
           occurrences.set(part.id, occurrence);
           const callKey = `${messageIndex}:${contentIndex}`;
-          replayToolCallBlockKeys.set(
-            callKey,
-            toolTranscriptBlockKey(part.id, occurrence),
-          );
-          calls.set(part.id, {
+          const blockKey = toolTranscriptBlockKey(part.id, occurrence);
+          replayToolCallBlockKeys.set(callKey, blockKey);
+          const call = {
             key: callKey,
+            part,
+            blockKey,
             headline: sanitizeTerminalText(toolHeadline(part.name, part.arguments) ?? part.name),
-          });
+            exploration: explorationCall(part.name, part.arguments),
+            bashCommand: part.name === 'bash' ? bashCommandFromArgs(part.arguments) : undefined,
+          };
+          calls.set(part.id, call);
+          orderedCalls.push(call);
         }
+        const resultIndexes = new Map<string, number>();
         for (let resultIndex = messageIndex + 1; resultIndex < messages.length; resultIndex++) {
           const result = messages[resultIndex];
           if (result?.role !== 'tool_result') break;
           const call = calls.get(result.toolCallId);
           if (call === undefined) continue;
           replayCompletedToolCalls.add(call.key);
+          resultIndexes.set(call.key, resultIndex);
           replayToolResultHeadlines.set(resultIndex, call.headline);
+          if (call.bashCommand !== undefined) {
+            replayToolResultBashCommands.set(resultIndex, call.bashCommand);
+          }
           replayToolResultBlockKeys.set(
             resultIndex,
             replayToolCallBlockKeys.get(call.key) ?? toolTranscriptBlockKey(result.toolCallId, 1),
           );
+          if (call.exploration !== undefined) {
+            replayToolResultExplorations.set(resultIndex, {
+              call: call.exploration,
+              blockKey: replayToolCallBlockKeys.get(call.key) ??
+                toolTranscriptBlockKey(result.toolCallId, 1),
+            });
+          }
           calls.delete(result.toolCallId);
+        }
+        let releaseAfter = messageIndex;
+        for (const call of orderedCalls) {
+          const resultIndex = resultIndexes.get(call.key);
+          if (resultIndex !== undefined) {
+            releaseAfter = Math.max(releaseAfter, resultIndex);
+            continue;
+          }
+          replayDeferredToolCallKeys.add(call.key);
+          const pending = replayDeferredToolStarts.get(releaseAfter) ?? [];
+          pending.push({ part: call.part, blockKey: call.blockKey });
+          replayDeferredToolStarts.set(releaseAfter, pending);
         }
       }
       toolOccurrenceCounts.clear();
@@ -2485,6 +3748,7 @@ export async function createTuiScreen(
     };
 
     const replayTranscript = (messages: readonly AgentMessage[]): void => {
+      clearWorkingSummary();
       if (messages.length === 0) return;
       replayMessages = [...messages];
       indexReplayToolPairs(replayMessages);
@@ -2518,12 +3782,21 @@ export async function createTuiScreen(
       replayBanner = undefined;
       replayCompletedToolCalls.clear();
       replayToolResultHeadlines.clear();
+      replayToolResultBashCommands.clear();
       replayToolCallBlockKeys.clear();
       replayToolResultBlockKeys.clear();
+      replayToolResultExplorations.clear();
+      replayExplorationGroups.clear();
+      replayDeferredToolCallKeys.clear();
+      replayDeferredToolStarts.clear();
       replayLatestPlanSteps = undefined;
       toolOccurrenceCounts.clear();
       toolViews.clear();
+      bashToolViews.clear();
+      activeExplorationGroup = undefined;
       currentAssistant = undefined;
+      clearWorkingSummary();
+      planSteps = undefined;
       planText = undefined;
       approvalCard = undefined;
       approvalPending = false;
@@ -2717,6 +3990,8 @@ export async function createTuiScreen(
     const applyResponsiveLayout = (width: number, height: number): void => {
       layoutWidth = width;
       layoutHeight = height;
+      refreshBashToolViews();
+      refreshPlan();
       if (hasInteracted) {
         const showCompactHeader = height >= MIN_HEADER_VIEWPORT_ROWS;
         header.visible = showCompactHeader;
@@ -2899,25 +4174,52 @@ export async function createTuiScreen(
       },
       setInteractionState(phase: TuiPhase): void {
         interaction.replace(phase);
+        clearWorkingSummary();
         refreshStatus();
       },
       resolveApproval(): void {
         approvalPending = false;
+        approvalCard = undefined;
         refreshStatus();
+        input.focus();
+        refreshCursorVisibility();
       },
       toggleApprovalDetails(): void {
         if (approvalCard === undefined || !approvalPending) return;
         approvalCard.expanded = !approvalCard.expanded;
-        approvalCard.text.content = (approvalCard.expanded
-          ? formatApprovalPresentation(
-              approvalCard.presentation,
-              approvalCard.fallbackDescription,
-            )
-          : formatApprovalSummary(
-              approvalCard.presentation,
-              approvalCard.fallbackDescription,
-            )).join('\n');
         refreshComposerLayout();
+      },
+      handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult {
+        if (!approvalPending || approvalCard === undefined) return { kind: 'none' };
+        if (key.ctrl || key.meta || key.shift || key.option || key.super || key.hyper) {
+          return { kind: 'none' };
+        }
+        if (key.name === 'v') {
+          approvalCard.expanded = !approvalCard.expanded;
+          refreshComposerLayout();
+          return { kind: 'handled' };
+        }
+        const options = approvalPanelOptions(approvalCard.presentation);
+        if ((key.name === 'up' || key.name === 'down') && options.length > 0) {
+          const delta = key.name === 'up' ? -1 : 1;
+          approvalCard.selectedIndex =
+            (approvalCard.selectedIndex + delta + options.length) % options.length;
+          refreshComposerLayout();
+          return { kind: 'handled' };
+        }
+        if (
+          key.name === 'return' || key.name === 'enter' || key.name === 'kpenter' ||
+          key.name === 'linefeed'
+        ) {
+          const selected = options[approvalCard.selectedIndex];
+          return selected === undefined
+            ? { kind: 'handled' }
+            : { kind: 'decision', decision: selected.decision };
+        }
+        const decision = approvalDecisionForKey(key);
+        return decision === undefined
+          ? { kind: 'none' }
+          : { kind: 'decision', decision };
       },
       getInput: () =>
         secretInput
@@ -3032,15 +4334,26 @@ export async function createTuiScreen(
         }
       },
       destroy(): void {
+        if (screenDestroyed) return;
         screenDestroyed = true;
         pendingFrameTasks.clear();
         renderer.off('resize', onResize);
+        if (!renderer.isDestroyed) {
+          if (opts.workingAnimation === true && resolvedTheme.color) {
+            renderer.removeFrameCallback(workingFrameCallback);
+          }
+          if (workingAnimationLive) renderer.dropLive();
+        }
+        workingAnimationLive = false;
         syntaxStyle.destroy();
       },
     };
   } catch (error) {
+    if (!screenDestroyed) {
+      screenDestroyed = true;
+      syntaxStyle.destroy();
+    }
     renderer.destroy();
-    syntaxStyle.destroy();
     throw error;
   }
 }
@@ -3092,6 +4405,7 @@ export async function startTui(
       branch,
       gitDirty,
       interaction,
+      workingAnimation: true,
     });
     initializingScreen.setUsage(session.usage());
     if (opts.resumed === true) initializingScreen.replayTranscript(session.messages);
@@ -3100,8 +4414,8 @@ export async function startTui(
     }
     initializingScreen.focusInput();
   } catch (error) {
-    renderer.destroy();
     initializingScreen?.destroy();
+    renderer.destroy();
     throw error;
   }
   const screen = initializingScreen;
@@ -3155,7 +4469,9 @@ export function runTuiController(
   history.replace(promptHistoryEntries(session.messages));
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
+  type ApprovalRequestEvent = Extract<SessionEvent, { type: 'approval_request' }>;
   const approvalQueue: string[] = [];
+  const approvalEvents = new Map<string, ApprovalRequestEvent>();
   let lastQueues: { steering: QueuedMessage[]; followUp: QueuedMessage[] } = {
     steering: [],
     followUp: [],
@@ -3170,11 +4486,45 @@ export function runTuiController(
   let reverseSearchQuery: string | undefined;
   let activeDiffScope: 'turn' | 'workspace' = 'turn';
   let panelRequestGeneration = 0;
-  const enqueueApproval = (approvalId: string): boolean => {
-    if (approvalQueue.includes(approvalId)) return false;
-    approvalQueue.push(approvalId);
+  const enqueueApproval = (event: ApprovalRequestEvent): boolean => {
+    if (approvalEvents.has(event.approvalId)) return false;
+    approvalEvents.set(event.approvalId, event);
+    approvalQueue.push(event.approvalId);
     return true;
   };
+  const renderCurrentApproval = (): void => {
+    const id = approvalQueue[0];
+    const event = id === undefined ? undefined : approvalEvents.get(id);
+    if (event === undefined) screen.resolveApproval();
+    else screen.render(event);
+  };
+  const clearApprovalQueue = (): void => {
+    approvalQueue.length = 0;
+    approvalEvents.clear();
+  };
+  const replaceApprovalQueue = (requests: readonly PendingApprovalView[]): void => {
+    const previousHead = approvalQueue[0];
+    clearApprovalQueue();
+    for (const request of requests) {
+      enqueueApproval({
+        type: 'approval_request',
+        approvalId: request.approvalId,
+        toolCallId: request.toolCallId,
+        description: request.description,
+      });
+    }
+    const nextHead = approvalQueue[0];
+    if (previousHead === nextHead) return;
+    if (nextHead === undefined) screen.resolveApproval();
+    else {
+      escExit.reset();
+      renderCurrentApproval();
+    }
+  };
+
+  if (opts.workspace !== undefined) {
+    replaceApprovalQueue(opts.workspace.pendingApprovals());
+  }
 
   return new Promise<number>((resolve) => {
     const printError = (error: unknown): void => {
@@ -3305,7 +4655,7 @@ export function runTuiController(
       if (workspace === undefined) return;
       const state = opts.presentation?.store.switchToThread(workspace.currentThreadId);
       history.replace(promptHistoryEntries(session.messages));
-      approvalQueue.length = 0;
+      clearApprovalQueue();
       screen.resolveApproval();
       latestPromptDraft = state?.draft ?? '';
       screen.resetTranscript(session.messages, workspace.eventHighWaterSeq());
@@ -3314,15 +4664,7 @@ export function runTuiController(
       screen.setInput(latestPromptDraft);
       screen.setUsage(session.usage());
       screen.setModel(session.currentModel());
-      for (const request of workspace.pendingApprovals()) {
-        enqueueApproval(request.approvalId);
-        screen.render({
-          type: 'approval_request',
-          approvalId: request.approvalId,
-          toolCallId: request.toolCallId,
-          description: request.description,
-        });
-      }
+      replaceApprovalQueue(workspace.pendingApprovals());
       screen.println(`switched to ${workspace.currentThreadId}`, 'success');
     };
 
@@ -3727,12 +5069,56 @@ export function runTuiController(
       key.stopPropagation();
     };
 
+    const handlePendingApprovalKey = (key: KeyEvent): boolean => {
+      if (approvalQueue.length === 0 || approval?.broker === undefined) return false;
+      const approvalAction = screen.handleApprovalPanelKey(key);
+      if (approvalAction.kind === 'handled') {
+        consume(key);
+        return true;
+      }
+      const decision = approvalAction.kind === 'decision'
+        ? approvalAction.decision
+        : undefined;
+      if (decision === 'abort') {
+        consume(key);
+        escExit.reset();
+        clearApprovalQueue();
+        session.abort();
+        approval.onAbort();
+        screen.resolveApproval();
+        return true;
+      }
+      if (decision !== undefined) {
+        consume(key);
+        const id = approvalQueue[0];
+        if (decision === 'allow_always'
+          && !approvalAllowsAlways(id === undefined
+            ? undefined
+            : opts.workspace?.approvalPresentation(id))) {
+          screen.println('Allow always is unavailable because Runtime provided no frozen scope.', 'warning');
+          return true;
+        }
+        approvalQueue.shift();
+        if (id !== undefined) {
+          approvalEvents.delete(id);
+          approval.broker.resolve(id, decision);
+        }
+        if (approvalQueue.length === 0) screen.resolveApproval();
+        else renderCurrentApproval();
+        return true;
+      }
+      // 审批中其余键（含所有修饰键组合）全部冻结，不能编辑 prompt 或背景 panel。
+      consume(key);
+      return true;
+    };
+
     const onKeyPress = (key: KeyEvent): void => {
       if (closing) return;
       if (editing) {
         consume(key);
         return;
       }
+      if (handlePendingApprovalKey(key)) return;
       const sessionPickerAction = screen.handleSessionPickerKey(key);
       if (sessionPickerAction.kind !== 'none') {
         consume(key);
@@ -3784,45 +5170,6 @@ export function runTuiController(
       }
       if (key.name === 'pageup' || key.name === 'pagedown') {
         screen.scrollPage(key.name === 'pageup' ? -1 : 1);
-        consume(key);
-        return;
-      }
-
-      if (approvalQueue.length > 0 && approval?.broker !== undefined) {
-        if (
-          !key.ctrl && !key.meta && !key.shift && !key.option &&
-          !key.super && !key.hyper && key.name === 'v'
-        ) {
-          consume(key);
-          screen.toggleApprovalDetails();
-          return;
-        }
-        const decision = approvalDecisionForKey(key);
-        if (decision === 'abort') {
-          consume(key);
-          escExit.reset();
-          approvalQueue.length = 0;
-          session.abort();
-          approval.onAbort();
-          screen.resolveApproval();
-          return;
-        }
-        if (decision !== undefined) {
-          consume(key);
-          const id = approvalQueue[0];
-          if (decision === 'allow_always'
-            && !approvalAllowsAlways(id === undefined
-              ? undefined
-              : opts.workspace?.approvalPresentation(id))) {
-            screen.println('Allow always is unavailable because Runtime provided no frozen scope.', 'warning');
-            return;
-          }
-          approvalQueue.shift();
-          if (id !== undefined) approval.broker.resolve(id, decision);
-          if (approvalQueue.length === 0) screen.resolveApproval();
-          return;
-        }
-        // 审批中其余键（含所有修饰键组合）全部冻结，不能编辑 prompt。
         consume(key);
         return;
       }
@@ -3975,10 +5322,14 @@ export function runTuiController(
         // Runtime delivers canonical control requests on the primary event stream. The legacy
         // side channel below remains for direct Session; de-duplication keeps mixed adapters safe.
         escExit.reset();
-        if (!enqueueApproval(event.approvalId)) return;
       }
       try {
-        screen.render(event);
+        if (event.type === 'approval_request') {
+          if (!enqueueApproval(event)) return;
+          if (approvalQueue.length === 1) renderCurrentApproval();
+        } else {
+          screen.render(event);
+        }
       } catch (error) {
         screen.println(
           `TUI render failed · ${error instanceof Error ? error.message : String(error)}`,
@@ -3992,8 +5343,28 @@ export function runTuiController(
     const unsubApproval = approval?.subscribe((event) => {
       if (event.type !== 'approval_request') return;
       escExit.reset();
-      if (!enqueueApproval(event.approvalId)) return;
-      screen.render(event);
+      try {
+        if (!enqueueApproval(event)) return;
+        if (approvalQueue.length === 1) renderCurrentApproval();
+      } catch (error) {
+        screen.println(
+          `TUI render failed · ${error instanceof Error ? error.message : String(error)}`,
+          'danger',
+        );
+        void shutdown(1, true);
+      }
+    });
+    const unsubPendingApprovals = opts.workspace?.subscribePendingApprovals((snapshot) => {
+      if (snapshot.threadId !== opts.workspace?.currentThreadId || closing) return;
+      try {
+        replaceApprovalQueue(snapshot.approvals);
+      } catch (error) {
+        screen.println(
+          `TUI approval sync failed · ${error instanceof Error ? error.message : String(error)}`,
+          'danger',
+        );
+        void shutdown(1, true);
+      }
     });
     const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
       (messages) => {
@@ -4018,8 +5389,16 @@ export function runTuiController(
       }
       unsubSession();
       unsubApproval?.();
+      unsubPendingApprovals?.();
       unsubAttached?.();
-      approvalQueue.length = 0;
+      clearApprovalQueue();
+    };
+
+    let screenStopped = false;
+    const stopScreen = (): void => {
+      if (screenStopped) return;
+      screenStopped = true;
+      screen.destroy();
     };
 
     async function shutdown(code: number, forceAbort = false): Promise<void> {
@@ -4034,6 +5413,8 @@ export function runTuiController(
         await providerController?.close();
         await session.close();
         if (editing) renderer.resume?.();
+        // Working 动画持有 live-render 引用；cleanup 已退订 agent_end，必须在 idle 前释放。
+        stopScreen();
         await renderer.idle();
       } catch (error) {
         code = 1;
@@ -4046,8 +5427,8 @@ export function runTuiController(
           code = 1;
           console.error(`[coda] TUI presentation save failed: ${sanitizeTerminalError(error)}`);
         }
+        stopScreen();
         renderer.destroy();
-        screen.destroy();
         resolve(code);
       }
     }

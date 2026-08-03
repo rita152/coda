@@ -872,7 +872,7 @@ test.skipIf(process.platform !== 'darwin')(
         'request approval\r',
         {
           readyMarker: 'Tips for getting started',
-          nextMarker: 'approval required',
+          nextMarker: 'Would you like to run the following command?',
           nextInput: '\x1b',
           finalInput: '/quit\r',
           finalDelayMs: 350,
@@ -880,7 +880,7 @@ test.skipIf(process.platform !== 'darwin')(
       );
       expect(result.code, JSON.stringify(result).slice(-OUTPUT_PREVIEW_LIMIT)).toBe(0);
       expect(result.stderr).toBe('');
-      expect(result.stdout).toContain('approval required');
+      expect(result.stdout).toContain('Would you like to run the following command?');
       expect(existsSync(path.join(root, 'denied.txt'))).toBe(false);
       expectTerminalRestored(result.stdout);
     } finally {

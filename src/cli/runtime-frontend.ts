@@ -64,6 +64,17 @@ export interface RuntimeFrontendOptions {
   readonly registerModel?: (model: ModelConfig) => void;
 }
 
+export interface PendingApprovalView {
+  readonly approvalId: string;
+  readonly toolCallId: string;
+  readonly description: string;
+}
+
+export interface PendingApprovalSnapshot {
+  readonly threadId: ThreadId;
+  readonly approvals: readonly PendingApprovalView[];
+}
+
 export interface RuntimeWorkspaceActions {
   readonly currentThreadId: ThreadId;
   eventHighWaterSeq(): number;
@@ -79,11 +90,10 @@ export interface RuntimeWorkspaceActions {
   reviewSnapshot(): Promise<Readonly<RuntimeReviewSnapshot> | undefined>;
   diffSnapshot(scope: 'turn' | 'workspace'): Promise<Readonly<RuntimeDiffSnapshot> | undefined>;
   approvalPresentation(requestId: string): Readonly<ApprovalPresentation> | undefined;
-  pendingApprovals(): readonly {
-    readonly approvalId: string;
-    readonly toolCallId: string;
-    readonly description: string;
-  }[];
+  pendingApprovals(): readonly PendingApprovalView[];
+  subscribePendingApprovals(
+    listener: (snapshot: Readonly<PendingApprovalSnapshot>) => void | Promise<void>,
+  ): () => void;
 }
 
 export class RuntimeFrontendOpRejectedError extends Error {
@@ -135,6 +145,9 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
   readonly #attachmentListeners = new Set<
     (messages: readonly AgentMessage[]) => void | Promise<void>
   >();
+  readonly #pendingApprovalListeners = new Set<
+    (snapshot: Readonly<PendingApprovalSnapshot>) => void | Promise<void>
+  >();
   readonly #pendingControls = new Map<string, {
     readonly runId: RunId;
     readonly presentation?: Readonly<ApprovalPresentation>;
@@ -142,6 +155,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     readonly description?: string;
   }>();
   readonly #abortRequestedRuns = new Set<RunId>();
+  readonly #submittedControlResponses = new Map<ThreadId, Map<string, OpId>>();
   readonly #opWaiters = new Map<OpId, (outcome: OpOutcome) => void>();
 
   #model: ModelConfig | undefined;
@@ -159,6 +173,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
   #transitionThreadId: ThreadId | undefined;
   #transitionEnvelopes: Readonly<EventEnvelope>[] = [];
   #fanoutTail: Promise<void> = Promise.resolve();
+  #pendingApprovalRevision = 0;
   #eventPump: Promise<void> | undefined;
   #initializePromise: Promise<void> | undefined;
   #attachmentPromise: Promise<void> | undefined;
@@ -260,7 +275,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       highWaterSeq: this.#highWaterSeq,
       pendingEnvelopes: [...this.#pendingEnvelopes],
     };
-    const restorePrevious = (): void => {
+    const restorePrevious = (notifyPendingApprovals = true): void => {
       this.#threadId = previous.threadId;
       this.#attachment = previous.attachment;
       this.#attached = previous.attached;
@@ -276,6 +291,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       this.#hydrating = previous.hydrating;
       this.#highWaterSeq = previous.highWaterSeq;
       this.#pendingEnvelopes = [...previous.pendingEnvelopes];
+      if (notifyPendingApprovals) this.#enqueuePendingApprovalSnapshot();
     };
     const threadId = this.#runtime.newThreadId();
     this.#threadId = threadId;
@@ -291,7 +307,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       return threadId;
     } catch (error) {
       const failedTargetEnvelopes = [...this.#pendingEnvelopes];
-      restorePrevious();
+      restorePrevious(false);
       // An accepted create can still fail later while hydrating its snapshot. Preserve the
       // workspace stream cursor for every event already observed from that now-background thread;
       // otherwise its next live envelope would look like a fatal gap after we restore the source.
@@ -313,7 +329,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
         } catch {
           restorePrevious();
         }
-      }
+      } else this.#enqueuePendingApprovalSnapshot();
       throw error;
     }
   }
@@ -409,19 +425,27 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     return this.#pendingControls.get(requestId)?.presentation;
   }
 
-  pendingApprovals(): readonly {
-    readonly approvalId: string;
-    readonly toolCallId: string;
-    readonly description: string;
-  }[] {
+  pendingApprovals(): readonly PendingApprovalView[] {
     return [...this.#pendingControls].flatMap(([approvalId, control]) =>
-      control.toolCallId === undefined || control.description === undefined
+      this.#hasSubmittedControlResponse(this.#threadId, approvalId) ||
+      control.toolCallId === undefined ||
+      control.description === undefined
         ? []
         : [{
             approvalId,
             toolCallId: control.toolCallId,
             description: control.description,
           }]);
+  }
+
+  subscribePendingApprovals(
+    listener: (snapshot: Readonly<PendingApprovalSnapshot>) => void | Promise<void>,
+  ): () => void {
+    this.#pendingApprovalListeners.add(listener);
+    this.#enqueuePendingApprovalSnapshot(listener);
+    return () => {
+      this.#pendingApprovalListeners.delete(listener);
+    };
   }
 
   async initialize(): Promise<void> {
@@ -570,9 +594,12 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       this.#submitAbort(this.#pendingControls.get(requestId)?.runId);
       return;
     }
+    const opId = this.#runtime.newOpId();
+    if (!this.#markSubmittedControlResponse(this.#threadId, requestId, opId)) return;
+    this.#enqueuePendingApprovalSnapshot();
     this.#submitDetached({
       type: 'control_response',
-      opId: this.#runtime.newOpId(),
+      opId,
       workspaceId: this.#runtime.workspaceId,
       threadId: this.#threadId,
       requestId,
@@ -678,6 +705,10 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
         }),
       });
     }
+    this.#reconcileSubmittedControlResponses(
+      this.#threadId,
+      new Set(snapshot.pendingControls.map((request) => request.requestId)),
+    );
     this.#highWaterSeq = snapshot.highWaterSeq;
     this.#threadHighWater.set(this.#threadId, snapshot.highWaterSeq);
     const pending = this.#pendingEnvelopes;
@@ -686,11 +717,13 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     try {
       for (const envelope of pending) {
         if (envelope.seq > this.#highWaterSeq) this.#applyEnvelope(envelope);
+        else this.#applyControlResponseLifecycle(envelope);
       }
     } catch (error) {
       this.#reportEventFailure(error);
       throw error;
     }
+    this.#enqueuePendingApprovalSnapshot();
   }
 
   async #consumeEvents(events: AsyncIterable<Readonly<EventEnvelope>>): Promise<void> {
@@ -748,6 +781,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       );
     }
     this.#threadHighWater.set(envelope.threadId, envelope.seq);
+    const submittedApprovalChanged = this.#applyControlResponseLifecycle(envelope);
     if (envelope.threadId !== this.#threadId) {
       if (envelope.opId !== undefined && envelope.event.type === 'op_completed') {
         this.#settleOp(envelope.opId, { accepted: true });
@@ -766,6 +800,95 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       targetThreadId: this.#threadId,
     }) ?? terminalFallback;
     if (projected !== undefined) this.#enqueueFanout(projected);
+    if (
+      ((envelope.event.type === 'control_request' || envelope.event.type === 'control_resolved') &&
+        envelope.event.kind === 'approval') ||
+      submittedApprovalChanged
+    ) {
+      this.#enqueuePendingApprovalSnapshot();
+    }
+  }
+
+  #applyControlResponseLifecycle(envelope: Readonly<EventEnvelope>): boolean {
+    const event = envelope.event;
+    if (event.type === 'control_resolved') {
+      return this.#clearSubmittedControlResponse(envelope.threadId, event.requestId);
+    }
+    if (
+      (event.type === 'op_completed' || event.type === 'op_rejected') &&
+      event.opType === 'control_response' &&
+      envelope.opId !== undefined
+    ) {
+      const requestId = this.#submittedControlResponseByOp(envelope.threadId, envelope.opId);
+      if (requestId === undefined) return false;
+      const cleared = this.#clearSubmittedControlResponse(
+        envelope.threadId,
+        requestId,
+        envelope.opId,
+      );
+      if (
+        event.type === 'op_rejected' &&
+        isSilentLegacyControlRejection(event.reason) &&
+        envelope.threadId === this.#threadId
+      ) {
+        return this.#pendingControls.delete(requestId) || cleared;
+      }
+      return cleared;
+    }
+    return false;
+  }
+
+  #hasSubmittedControlResponse(threadId: ThreadId, requestId: string): boolean {
+    return this.#submittedControlResponses.get(threadId)?.has(requestId) === true;
+  }
+
+  #markSubmittedControlResponse(
+    threadId: ThreadId,
+    requestId: string,
+    opId: OpId,
+  ): boolean {
+    let submitted = this.#submittedControlResponses.get(threadId);
+    if (submitted?.has(requestId) === true) return false;
+    if (submitted === undefined) {
+      submitted = new Map();
+      this.#submittedControlResponses.set(threadId, submitted);
+    }
+    submitted.set(requestId, opId);
+    return true;
+  }
+
+  #clearSubmittedControlResponse(
+    threadId: ThreadId,
+    requestId: string,
+    expectedOpId?: OpId,
+  ): boolean {
+    const submitted = this.#submittedControlResponses.get(threadId);
+    if (submitted === undefined) return false;
+    if (expectedOpId !== undefined && submitted.get(requestId) !== expectedOpId) return false;
+    const cleared = submitted.delete(requestId);
+    if (submitted.size === 0) this.#submittedControlResponses.delete(threadId);
+    return cleared;
+  }
+
+  #submittedControlResponseByOp(threadId: ThreadId, opId: OpId): string | undefined {
+    const submitted = this.#submittedControlResponses.get(threadId);
+    if (submitted === undefined) return undefined;
+    for (const [requestId, submittedOpId] of submitted) {
+      if (submittedOpId === opId) return requestId;
+    }
+    return undefined;
+  }
+
+  #reconcileSubmittedControlResponses(
+    threadId: ThreadId,
+    pendingRequestIds: ReadonlySet<string>,
+  ): void {
+    const submitted = this.#submittedControlResponses.get(threadId);
+    if (submitted === undefined) return;
+    for (const requestId of submitted.keys()) {
+      if (!pendingRequestIds.has(requestId)) submitted.delete(requestId);
+    }
+    if (submitted.size === 0) this.#submittedControlResponses.delete(threadId);
   }
 
   #applyCanonicalEvent(
@@ -871,6 +994,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     this.#activeRunId = undefined;
     this.#pendingControls.clear();
     this.#highWaterSeq = this.#threadHighWater.get(this.#threadId) ?? 0;
+    this.#enqueuePendingApprovalSnapshot();
   }
 
   async #submitAndWait(op: RuntimeOp): Promise<void> {
@@ -904,15 +1028,45 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
             op.type === 'control_response' &&
             isSilentLegacyControlRejection(receipt.reason)
           ) {
-            this.#pendingControls.delete(op.requestId);
+            const cleared = this.#clearSubmittedControlResponse(
+              op.threadId,
+              op.requestId,
+              op.opId,
+            );
+            if (op.threadId === this.#threadId) {
+              const removed = this.#pendingControls.delete(op.requestId);
+              if (cleared || removed) this.#enqueuePendingApprovalSnapshot();
+            }
             return;
           }
-          this.#enqueueFanout({ type: 'error', fatal: false, message: receipt.reason });
+          if (op.type === 'control_response') {
+            const cleared = this.#clearSubmittedControlResponse(
+              op.threadId,
+              op.requestId,
+              op.opId,
+            );
+            if (cleared && op.threadId === this.#threadId) {
+              this.#enqueuePendingApprovalSnapshot();
+            }
+          }
+          if (!('threadId' in op) || op.threadId === this.#threadId) {
+            this.#enqueueFanout({ type: 'error', fatal: false, message: receipt.reason });
+          }
         }
       },
       (error: unknown) => {
         if (op.type === 'abort' && op.expectedRunId !== undefined) {
           this.#abortRequestedRuns.delete(op.expectedRunId);
+        }
+        if (op.type === 'control_response') {
+          const cleared = this.#clearSubmittedControlResponse(
+            op.threadId,
+            op.requestId,
+            op.opId,
+          );
+          if (cleared && op.threadId === this.#threadId) {
+            this.#enqueuePendingApprovalSnapshot();
+          }
         }
         this.#enqueueFanout({
           type: 'error',
@@ -977,6 +1131,35 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
 
   #enqueueFanout(event: CliSessionEvent): void {
     this.#fanoutTail = this.#fanoutTail.then(() => this.#fanout(event));
+  }
+
+  #enqueuePendingApprovalSnapshot(
+    target?: (snapshot: Readonly<PendingApprovalSnapshot>) => void | Promise<void>,
+  ): void {
+    const listeners = target === undefined ? [...this.#pendingApprovalListeners] : [target];
+    const revisionAtEnqueue = target === undefined
+      ? ++this.#pendingApprovalRevision
+      : this.#pendingApprovalRevision;
+    const snapshot: Readonly<PendingApprovalSnapshot> = {
+      threadId: this.#threadId,
+      approvals: this.pendingApprovals(),
+    };
+    this.#fanoutTail = this.#fanoutTail.then(async () => {
+      // A targeted subscription replay is obsolete once a newer broadcast exists. Broadcasts
+      // themselves are never coalesced across the shared legacy-event queue: each captured level
+      // is an ordering barrier, so a resolved card is gone before the next canonical event fanout.
+      if (target !== undefined && revisionAtEnqueue !== this.#pendingApprovalRevision) return;
+      for (const listener of listeners) {
+        if (!this.#pendingApprovalListeners.has(listener)) continue;
+        try {
+          await listener(snapshot);
+        } catch (error) {
+          console.error(
+            `[runtime frontend] pending approval listener threw (ignored): ${sanitizeTerminalError(error)}`,
+          );
+        }
+      }
+    });
   }
 
   #assertAttachedModel(): void {

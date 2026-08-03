@@ -4,7 +4,13 @@
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error' | 'aborted';
 
 export interface TextPart      { type: 'text'; text: string }
-export interface ReasoningPart { type: 'reasoning'; text: string; signature?: string }
+export interface ReasoningPart {
+  type: 'reasoning';
+  text: string;
+  /** 仅显式标记为 summary 的文本可进入面向用户的临时 Working 投影。 */
+  kind?: 'summary' | 'content';
+  signature?: string;
+}
 export interface ImagePart     { type: 'image'; data: string /* base64 */; mimeType: string }
 export interface ToolCallPart  {
   type: 'tool_call'; id: string; name: string;

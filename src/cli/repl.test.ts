@@ -196,6 +196,7 @@ function classicApprovalWorkspace(
       ? presentation
       : undefined,
     pendingApprovals: () => [],
+    subscribePendingApprovals: () => () => {},
   };
 }
 
@@ -504,6 +505,72 @@ describe('classic REPL canonical approval projection', () => {
     stdin.emit('keypress', undefined, { name: 'return' });
     await expect(running).resolves.toBe(0);
   });
+
+  it('同步恢复审批，并在外部决议后切换队首且解除输入冻结', async () => {
+    const stdin = new TestTtyInput();
+    const threadId = 'thread-classic-snapshot' as ThreadId;
+    let pending = [
+      { approvalId: 'approval-first', toolCallId: 'call-first', description: 'first command' },
+      { approvalId: 'approval-second', toolCallId: 'call-second', description: 'second command' },
+    ];
+    let pendingListener:
+      | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
+      | undefined;
+    const workspace: RuntimeWorkspaceActions = {
+      ...classicApprovalWorkspace(classicApprovalPresentationWithoutAlways('approval-first')),
+      currentThreadId: threadId,
+      pendingApprovals: () => pending,
+      approvalPresentation: () => undefined,
+      subscribePendingApprovals: (listener) => {
+        pendingListener = listener;
+        void listener({ threadId, approvals: pending });
+        return () => {
+          pendingListener = undefined;
+        };
+      },
+    };
+    const prompts: string[] = [];
+    const approvalPrompts: Array<string | undefined> = [];
+    const session: CliSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => {},
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => {},
+      followUp: () => {},
+      abort: () => {},
+      close: async () => {},
+    };
+    const renderer: Renderer = {
+      render: () => undefined,
+      replayTranscript: () => undefined,
+      drain: async () => {},
+      setApprovalRequest: (request) => approvalPrompts.push(request?.description),
+    };
+    const running = startRepl(session, renderer, {
+      broker: { resolve: () => {} },
+      onAbort: () => {},
+      subscribe: () => () => {},
+    }, { stdin, workspace });
+
+    expect(approvalPrompts.at(-1)).toBe('first command');
+    stdin.emit('keypress', 'x', { name: 'x' });
+    pending = [pending[1]!];
+    await pendingListener?.({ threadId, approvals: pending });
+    expect(approvalPrompts.at(-1)).toBe('second command');
+    pending = [];
+    await pendingListener?.({ threadId, approvals: pending });
+    expect(approvalPrompts.at(-1)).toBeUndefined();
+
+    for (const character of 'go') stdin.emit('keypress', character, { name: character });
+    stdin.emit('keypress', undefined, { name: 'return' });
+    expect(prompts).toEqual(['go']);
+    for (const character of '/quit') stdin.emit('keypress', character, { name: character });
+    stdin.emit('keypress', undefined, { name: 'return' });
+    await expect(running).resolves.toBe(0);
+  });
 });
 
 describe('REPL 致命输出失败生命周期(docs/09 §1.3/§3)', () => {
@@ -779,6 +846,7 @@ describe('UX3 classic review and recovery parity', () => {
       }),
       approvalPresentation: () => undefined,
       pendingApprovals: () => [],
+      subscribePendingApprovals: () => () => {},
     };
     const renderer: Renderer = {
       render: () => undefined,
@@ -900,6 +968,7 @@ describe('UX3 classic review and recovery parity', () => {
       diffSnapshot: async () => undefined,
       approvalPresentation: () => undefined,
       pendingApprovals: () => [],
+      subscribePendingApprovals: () => () => {},
     };
     const registry = new ProviderRegistry({
       configPath: path.join(dir, 'providers.json'),

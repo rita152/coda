@@ -125,7 +125,12 @@ subscription gap 与 writer/runtime fatal 是 iterator 的 typed terminal errors
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error' | 'aborted';
 
 export interface TextPart      { type: 'text'; text: string }
-export interface ReasoningPart { type: 'reasoning'; text: string; signature?: string }
+export interface ReasoningPart {
+  type: 'reasoning';
+  text: string;
+  kind?: 'summary' | 'content';
+  signature?: string;
+}
 export interface ImagePart     { type: 'image'; data: string /* base64 */; mimeType: string }
 export interface ToolCallPart  {
   type: 'tool_call'; id: string; name: string;
@@ -196,7 +201,7 @@ export interface Context {
 ### 2.2 Part 类型逐一说明
 
 - **TextPart**:普通文本。assistant 出站到 Chat Completions 时会被合并为纯字符串 content(pi 的 openai-completions adapter 注释明确指出:数组形式 `[{type:"text"}]` 会诱发 DeepSeek 等模型模仿结构输出),但内部协议保留数组形态——这是"内部表达力 ≥ 任意 wire 格式"原则的体现,降级永远发生在 adapter。
-- **ReasoningPart**:推理文本或摘要。`signature` 承载 provider 私有 replay 元数据:Anthropic thinking signature，或 OpenAI Responses adapter 的版本化信封(item id、item/summary/content kind、index、可选 `encrypted_content`)。Responses 的无可见文本 reasoning item 用空 `text` + item-only 信封表示，以免工具后续回合丢失 stateless replay 项。protocol 不解析该字段；同模型由所属 adapter 原样恢复，跨模型 replay 时由 transform 层剥离并把整块降级为文本(见 [04-provider-adapter](./04-provider-adapter.md))。
+- **ReasoningPart**:推理文本或摘要。`kind:'summary'` 是 canonical 的展示安全标记，只有该值允许前端把文本投影到临时 Working 行；`kind:'content'` 表示原始 reasoning content，缺失 `kind` 是 Anthropic/Chat/旧转录等未声明展示安全性的兼容形态，两者都不得进入默认 UI。`signature` 承载 provider 私有 replay 元数据:Anthropic thinking signature，或 OpenAI Responses adapter 的版本化信封(item id、item/summary/content kind、index、可选 `encrypted_content`)。Responses 的无可见文本 reasoning item 用空 `text`、缺失 public `kind` 与 item-only 信封表示，以免工具后续回合丢失 stateless replay 项。protocol 不解析 signature；同模型由所属 adapter 原样恢复，跨模型 replay 时由 transform 层剥离并把整块降级为文本(见 [04-provider-adapter](./04-provider-adapter.md))。
 - **ImagePart**:base64 + mimeType,不做 URL 形态(避免生命周期/鉴权问题)。出现在 user 输入与工具结果中(read 工具读图片文件时);Chat Completions 的 tool 消息不能携带图片,adapter 会把它抽出补一条 user 消息——这是 pi 验证过的降级手法。
 - **ToolCallPart**:`arguments` 是**解析后的对象**。流式期间 adapter 用容错 JSON 解析(partial-json)在每个 delta 后刷新它,所以 UI 随时能渲染"参数正在生长"的预览;`rawArguments` 保留原始字符串,专供 `stopReason === 'length'` 截断场景的诊断(此时 `arguments` 可能"能解析但不完整",loop 层一律不执行,见 [05-agent-loop](./05-agent-loop.md))。
 

@@ -18,8 +18,16 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { PolicyGrant } from '../capabilities/types.js';
-import type { ExternalOpId, ThreadId, WorkspaceId } from '../protocol/index.js';
+import type {
+  AgentMessage,
+  ExternalOpId,
+  RunId,
+  ThreadId,
+  TurnId,
+  WorkspaceId,
+} from '../protocol/index.js';
 import { runtimeOpPayloadHash, sha256Hex } from '../protocol/index.js';
+import type { RuntimeJournalRecord } from '../session/thread-journal-records.js';
 import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError } from './errors.js';
 import { createFileRuntimeStorage } from './file-storage.js';
 import type { SupervisorLease, ThreadMetaRecord } from './ports.js';
@@ -143,6 +151,88 @@ describe('FileRuntimeStorage', () => {
     await fixture.journal.append([next], { flush: true });
     expect(await fixture.journal.load()).toHaveLength(3);
 
+    await fixture.journal.releaseWriteLease();
+    await fixture.workspace.releaseSupervisorLease(fixture.lease);
+    await fixture.workspace.close();
+  });
+
+  test('round-trips reasoning presentation kinds through the canonical journal', async () => {
+    const fixture = await createJournalFixture();
+    const runId = 'run_file_storage_reasoning' as RunId;
+    const turnId = 'turn_file_storage_reasoning' as TurnId;
+    const message: AgentMessage = {
+      role: 'assistant',
+      id: 'assistant-reasoning-kinds',
+      timestamp: 2,
+      content: [
+        { type: 'reasoning', kind: 'summary', text: 'safe summary' },
+        { type: 'reasoning', kind: 'content', text: 'private content', signature: 'sig' },
+        { type: 'reasoning', text: 'legacy reasoning' },
+      ],
+      model: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' },
+      stopReason: 'stop',
+      usage: { input: 3, output: 2 },
+    };
+    const commit: RuntimeJournalRecord = {
+      type: 'commit',
+      firstSeq: 1,
+      envelopes: [{
+        workspaceId: fixture.workspaceId,
+        threadId: fixture.threadId,
+        runId,
+        turnId,
+        seq: 1,
+        timestamp: 2,
+        event: { type: 'message_end', message },
+      }],
+      mutations: [{ type: 'message_appended', message }],
+    };
+
+    await fixture.journal.append([commit], { flush: true });
+    await fixture.journal.releaseWriteLease();
+    await fixture.workspace.releaseSupervisorLease(fixture.lease);
+    await fixture.workspace.close();
+
+    const reopened = await createFileRuntimeStorage({ root: fixture.root }).openWorkspace({
+      cwd: fixture.cwd,
+      workspaceId: fixture.workspaceId,
+    });
+    const lease = await reopened.acquireSupervisorLease('reasoning-kind-reopen');
+    const journal = await reopened.openThreadJournal(fixture.threadId);
+    const records = await journal?.load();
+    const persisted = records?.find((record) => record.type === 'commit');
+    expect(persisted?.type === 'commit' ? persisted.mutations?.[0] : undefined).toEqual({
+      type: 'message_appended',
+      message,
+    });
+    await reopened.releaseSupervisorLease(lease);
+    await reopened.close();
+  });
+
+  test('rejects an unknown reasoning presentation kind at the storage boundary', async () => {
+    const fixture = await createJournalFixture();
+    const invalidSeed = {
+      type: 'legacy_seed',
+      sourceSessionId: 'invalid-reasoning-kind',
+      transcript: [{
+        role: 'assistant',
+        id: 'assistant-invalid-reasoning-kind',
+        timestamp: 2,
+        content: [{ type: 'reasoning', kind: 'unknown', text: 'not canonical' }],
+        model: { provider: 'openai', api: 'openai-responses', model: 'gpt-test' },
+        stopReason: 'stop',
+        usage: { input: 1, output: 1 },
+      }],
+      usage: {
+        cumulative: { input: 1, output: 1 },
+        turns: 1,
+        contextTokens: 2,
+      },
+    } as unknown as RuntimeJournalRecord;
+
+    await expect(fixture.journal.append([invalidSeed], { flush: true }))
+      .rejects.toBeInstanceOf(RuntimeStorageError);
+    expect(await fixture.journal.load()).toHaveLength(1);
     await fixture.journal.releaseWriteLease();
     await fixture.workspace.releaseSupervisorLease(fixture.lease);
     await fixture.workspace.close();

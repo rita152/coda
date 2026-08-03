@@ -645,7 +645,7 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
 
 ### 8.5 UX3：以审阅和恢复为中心
 
-- reasoning 与工具调用以摘要卡片默认折叠并可展开；diff viewer 支持文件、滚动、分组及 turn/workspace 切换。
+- reasoning 以 prompt 上方的临时 Working 摘要显示、完整内容经 /review 读取；工具调用保持紧凑摘要块；diff viewer 支持文件、滚动、分组及 turn/workspace 切换。
 - `/diff`、`/review`、`/copy`、`/export`、`/compact`、`/permissions` 以及 `/new`、`/sessions`、
   `/resume`、`/switch`、`/rename`、`/archive` 逐项进入 13 §3.1 的统一目录。
 - picker 支持搜索/状态/时间/workspace/cwd/摘要；切换 thread 保留各自 draft、滚动与未读，后台 run 继续，
@@ -661,7 +661,7 @@ worktree 范围，只提交并推送本阶段；成功后才允许开始下一�
   snapshot query，CLI 只注入 workspace review port，UI 不读取 repository。
 - `RuntimeFrontendSession` 使用 workspace-wide event stream 与 per-thread cursors；switch 做目标
   snapshot splice 并恢复 presentation/pending approvals，隐藏 run 继续且能结案 waiter。TUI 已提供完整
-  diff viewer/searchable session picker、折叠 reasoning/tool/approval cards；classic/accessible 使用同一
+  diff viewer/searchable session picker、Working reasoning 摘要/工具 cards 与固定底部临时 approval panel；classic/accessible 使用同一
   actions 的文本等价入口。源 busy 时 fork/retry fail closed，文件/shell 副作用明确不 rewind。
 
 ### 8.6 UX4：可访问性、性能与自动化

@@ -131,6 +131,284 @@ describe('accessible/plain append-only line REPL', () => {
     expect(output.join('')).not.toContain('a allow always');
   });
 
+  it('同步门禁恢复的审批，并在外部决议后接受普通 prompt', async () => {
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const output: string[] = [];
+    const prompts: string[] = [];
+    const presentation = lineApprovalPresentationWithoutAlways('line-recovered-approval');
+    const threadId = presentation.target.threadId;
+    let pending = [{
+      approvalId: presentation.requestId,
+      toolCallId: presentation.allowOnce.toolCallId,
+      description: presentation.risk.description,
+    }];
+    let pendingListener:
+      | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
+      | undefined;
+    const workspace: RuntimeWorkspaceActions = {
+      ...lineApprovalWorkspace(presentation),
+      pendingApprovals: () => pending,
+      subscribePendingApprovals: (listener) => {
+        pendingListener = listener;
+        void listener({ threadId, approvals: pending });
+        return () => {
+          pendingListener = undefined;
+        };
+      },
+    };
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    let markWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => { markWaiting = resolve; });
+    const renderer = createRenderer(
+      {
+        enqueue: (text) => {
+          output.push(text);
+          if (text.includes('Approval is waiting')) markWaiting();
+        },
+        drain: async () => undefined,
+      },
+      { color: false, interactive: false },
+    );
+    // A pipe may already contain its first complete line before the REPL installs readline.
+    stdin.write('ordinary prompt\n');
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      mode: 'accessible',
+      workspace,
+      approval: {
+        broker: { resolve: () => undefined },
+        onAbort: () => undefined,
+        subscribe: () => () => undefined,
+      },
+    });
+
+    await waiting;
+    expect(prompts).toEqual([]);
+    pending = [];
+    await pendingListener?.({ threadId, approvals: pending });
+    stdin.write('real task\n');
+    stdin.write('/quit\n');
+
+    await expect(running).resolves.toBe(0);
+    expect(prompts).toEqual(['real task']);
+    expect(output.join('')).toContain('Run line command');
+    expect(output.join('')).toContain('was resolved elsewhere');
+  });
+
+  it('把已入队审批响应绑定原 id，外部换队首后不误发 prompt 或决议新队首', async () => {
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const prompts: string[] = [];
+    const resolutions: Array<{ readonly id: string; readonly decision: string }> = [];
+    let markNextPrompt!: () => void;
+    const nextPrompt = new Promise<void>((resolve) => { markNextPrompt = resolve; });
+    const presentation = lineApprovalPresentationWithoutAlways('approval-a');
+    const threadId = presentation.target.threadId;
+    const approvalA = {
+      approvalId: presentation.requestId,
+      toolCallId: presentation.allowOnce.toolCallId,
+      description: presentation.risk.description,
+    };
+    const approvalB = {
+      approvalId: 'approval-b',
+      toolCallId: 'tool-b',
+      description: 'Run second line command',
+    };
+    let pending = [approvalA];
+    let pendingListener:
+      | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
+      | undefined;
+    const workspace: RuntimeWorkspaceActions = {
+      ...lineApprovalWorkspace(presentation),
+      pendingApprovals: () => pending,
+      subscribePendingApprovals: (listener) => {
+        pendingListener = listener;
+        return () => {
+          pendingListener = undefined;
+        };
+      },
+    };
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async (text) => {
+        prompts.push(text);
+        if (text === 'next task') markNextPrompt();
+      },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    let releaseOnboarding!: () => void;
+    const onboardingGate = new Promise<void>((resolve) => { releaseOnboarding = resolve; });
+    let markFirstCommandDrained!: () => void;
+    const firstCommandDrained = new Promise<void>((resolve) => {
+      markFirstCommandDrained = resolve;
+    });
+    let drainCount = 0;
+    const renderer = createRenderer(
+      {
+        enqueue: () => undefined,
+        drain: () => {
+          drainCount += 1;
+          if (drainCount === 1) return onboardingGate;
+          if (drainCount === 2) markFirstCommandDrained();
+          return Promise.resolve();
+        },
+      },
+      { color: false, interactive: false },
+    );
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      mode: 'accessible',
+      workspace,
+      approval: {
+        broker: { resolve: (id, decision) => resolutions.push({ id, decision }) },
+        onAbort: () => undefined,
+        subscribe: () => () => undefined,
+      },
+    });
+    const publishPending = async (): Promise<void> => {
+      const listener = pendingListener;
+      if (listener === undefined) throw new Error('pending approval listener was not registered');
+      await listener({ threadId, approvals: pending });
+    };
+
+    stdin.write('y\nnext task\n');
+    pending = [];
+    await publishPending();
+    pending = [approvalB];
+    await publishPending();
+    releaseOnboarding();
+    await firstCommandDrained;
+    await nextPrompt;
+
+    expect(prompts).toEqual(['next task']);
+    expect(resolutions).toEqual([{ id: approvalA.approvalId, decision: 'allow_once' }]);
+    stdin.write('n\n/quit\n');
+    await expect(running).resolves.toBe(0);
+    expect(prompts).toEqual(['next task']);
+    expect(resolutions).toEqual([
+      { id: approvalA.approvalId, decision: 'allow_once' },
+      { id: approvalB.approvalId, decision: 'deny' },
+    ]);
+  });
+
+  it('普通输入入队后即使审批快照先到，仍按输入到达时语义执行', async () => {
+    const stdin = new PassThrough();
+    const stderr = new PassThrough();
+    const prompts: string[] = [];
+    const resolutions: Array<{ readonly id: string; readonly decision: string }> = [];
+    const presentation = lineApprovalPresentationWithoutAlways('approval-after-input');
+    const threadId = presentation.target.threadId;
+    const approval = {
+      approvalId: presentation.requestId,
+      toolCallId: presentation.allowOnce.toolCallId,
+      description: presentation.risk.description,
+    };
+    let pending: typeof approval[] = [];
+    let pendingListener:
+      | Parameters<RuntimeWorkspaceActions['subscribePendingApprovals']>[0]
+      | undefined;
+    const workspace: RuntimeWorkspaceActions = {
+      ...lineApprovalWorkspace(presentation),
+      pendingApprovals: () => pending,
+      subscribePendingApprovals: (listener) => {
+        pendingListener = listener;
+        return () => {
+          pendingListener = undefined;
+        };
+      },
+    };
+    const session: InteractiveSession = {
+      interactionState: () => 'idle',
+      currentModel: () => ({ provider: 'faux', api: 'faux', model: 'test' }),
+      setModel: () => undefined,
+      clearModel: () => undefined,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      subscribeSessionAttached: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+    let releaseOnboarding!: () => void;
+    const onboardingGate = new Promise<void>((resolve) => { releaseOnboarding = resolve; });
+    let markFirstCommandDrained!: () => void;
+    const firstCommandDrained = new Promise<void>((resolve) => {
+      markFirstCommandDrained = resolve;
+    });
+    let drainCount = 0;
+    const renderer = createRenderer(
+      {
+        enqueue: () => undefined,
+        drain: () => {
+          drainCount += 1;
+          if (drainCount === 1) return onboardingGate;
+          if (drainCount === 2) markFirstCommandDrained();
+          return Promise.resolve();
+        },
+      },
+      { color: false, interactive: false },
+    );
+    const running = startLineRepl(session, renderer, {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      mode: 'accessible',
+      workspace,
+      approval: {
+        broker: { resolve: (id, decision) => resolutions.push({ id, decision }) },
+        onAbort: () => undefined,
+        subscribe: () => () => undefined,
+      },
+    });
+    const publishPending = async (): Promise<void> => {
+      const listener = pendingListener;
+      if (listener === undefined) throw new Error('pending approval listener was not registered');
+      await listener({ threadId, approvals: pending });
+    };
+
+    stdin.write('real task\n');
+    pending = [approval];
+    await publishPending();
+    releaseOnboarding();
+    await firstCommandDrained;
+
+    expect(prompts).toEqual(['real task']);
+    expect(resolutions).toEqual([]);
+    stdin.write('n\n/quit\n');
+    await expect(running).resolves.toBe(0);
+    expect(prompts).toEqual(['real task']);
+    expect(resolutions).toEqual([{ id: approval.approvalId, decision: 'deny' }]);
+  });
+
   it('提供文本命令 parity，不控制终端模式或泄漏控制序列', async () => {
     const stdin = new PassThrough();
     const stderr = new PassThrough();
@@ -567,6 +845,7 @@ describe('accessible/plain append-only line REPL', () => {
       }),
       approvalPresentation: () => undefined,
       pendingApprovals: () => [],
+      subscribePendingApprovals: () => () => {},
     };
     const renderer = createRenderer(
       {
@@ -659,5 +938,6 @@ function lineApprovalWorkspace(presentation: ApprovalPresentation): RuntimeWorks
       ? presentation
       : undefined,
     pendingApprovals: () => [],
+    subscribePendingApprovals: () => () => {},
   };
 }

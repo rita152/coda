@@ -176,7 +176,7 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     expect(out.text).not.toContain('\r');
   });
 
-  it('reasoning 默认折叠为状态与耗时，不泄漏完整内容', () => {
+  it('plain 不写入 reasoning 摘要或状态卡片', () => {
     const { out, r } = makePlain();
     r.render({ type: 'message_start', message: am() });
     r.render({
@@ -199,12 +199,12 @@ describe('plain 模式渲染(docs/09 §4)', () => {
         partial: am(),
       },
     });
-    expect(out.text).toContain('thinking ·');
     expect(out.text).not.toContain('thinking hard');
+    expect(out.text).not.toContain('thinking');
     expect(out.text).not.toContain('\x1b');
   });
 
-  it('工具头单行摘要:bash 取 command 首行(docs/09 §4 表)', () => {
+  it('bash 完成后以 Ran 块展示多行命令与紧凑输出预览', () => {
     const { out, r } = makePlain();
     r.render({
       type: 'tool_execution_start',
@@ -212,8 +212,73 @@ describe('plain 模式渲染(docs/09 §4)', () => {
       toolName: 'bash',
       args: { command: 'npm test\necho second-line' },
     });
-    expect(out.text).toContain('● bash: npm test');
-    expect(out.text).not.toContain('second-line');
+    expect(out.text).toBe('');
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'c1',
+      result: tr({
+        toolCallId: 'c1',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'tests passed\nexit code 0' }],
+      }),
+    });
+    expect(out.text).toContain('● Ran npm test\n  │ echo second-line\n  └ tests passed');
+    expect(out.text).not.toContain('exit code 0');
+  });
+
+  it('bash 使用成功/失败状态点、命令高亮和首尾输出预览', () => {
+    const out = new FakeOut();
+    out.columns = 160;
+    const r = createRenderer(out, { color: true, interactive: false });
+    const output = [
+      'M docs/09-cli.md',
+      'M docs/10-testing.md',
+      ...Array.from({ length: 9 }, (_, index) => `middle ${index + 1}`),
+      '6c9b145 Upgrade terminal workflows',
+      'd43c8b1 Productize CLI',
+      'exit code 0',
+    ].join('\n');
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'bash-preview',
+      toolName: 'bash',
+      args: { command: 'git status --short && git log -5 --oneline --decorate' },
+    });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'bash-preview',
+      result: tr({
+        toolCallId: 'bash-preview',
+        toolName: 'bash',
+        content: [{ type: 'text', text: output }],
+      }),
+    });
+
+    expect(out.text).toContain('\x1b[32m●\x1b[0m \x1b[1mRan\x1b[0m \x1b[34mgit\x1b[0m status');
+    expect(out.text).toContain('\x1b[31m--short\x1b[0m \x1b[36m&&\x1b[0m \x1b[34mgit\x1b[0m');
+    expect(out.text).toContain('  └ M docs/09-cli.md');
+    expect(out.text).toContain('    … +9 lines (use /review to view output)');
+    expect(out.text).toContain('    d43c8b1 Productize CLI');
+    expect(out.text).not.toContain('exit code 0');
+
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'bash-failure',
+      toolName: 'bash',
+      args: { command: 'bun -e "throw new Error(\'boom\')"' },
+    });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'bash-failure',
+      result: tr({
+        toolCallId: 'bash-failure',
+        toolName: 'bash',
+        isError: true,
+        content: [{ type: 'text', text: 'Error: boom\nexit code 1' }],
+      }),
+    });
+    expect(out.text).toContain('\x1b[31m✗\x1b[0m \x1b[1mRan\x1b[0m \x1b[34mbun\x1b[0m');
+    expect(out.text).toContain('\x1b[32m"throw new Error(\'boom\')"\x1b[0m');
   });
 
   it('工具头:read 带 offset/limit,edit 带 edits 数', () => {
@@ -225,6 +290,146 @@ describe('plain 模式渲染(docs/09 §4)', () => {
       'grep "StreamFn" src/ (limit 100)',
     );
     expect(toolHeadline('plan', {})).toBeUndefined(); // plan 不渲染工具头
+  });
+
+  it('连续 ls/glob/grep/read 折叠为一个 Explored 块，且相邻 read 合并路径', () => {
+    const { out, r } = makePlain();
+    const calls = [
+      ['read-1', 'read', { path: 'package.json' }],
+      ['read-2', 'read', { path: 'package.json' }],
+      ['read-3', 'read', { path: 'bun.lock' }],
+      ['ls-1', 'ls', { path: 'docs' }],
+      ['glob-1', 'glob', { pattern: '**/*.md', path: 'docs' }],
+      ['grep-1', 'grep', { pattern: '^#{1,3}', path: '*.md' }],
+    ] as const;
+    for (const [toolCallId, toolName, args] of calls) {
+      r.render({ type: 'tool_execution_start', toolCallId, toolName, args });
+      r.render({
+        type: 'tool_execution_end',
+        toolCallId,
+        result: tr({ toolCallId, toolName }),
+      });
+    }
+    r.render({ type: 'agent_end', reason: 'completed', messages: [] });
+
+    expect(out.text).toContain(
+      '• Explored\n' +
+        '  └ Read package.json, bun.lock\n' +
+        '    List docs\n' +
+        '    List **/*.md in docs\n' +
+        '    Search ^#{1,3} in *.md',
+    );
+    expect(out.text.match(/Explored/gu)).toHaveLength(1);
+    expect(out.text).not.toContain('● read package.json');
+    expect(out.text).not.toContain('✓ read');
+  });
+
+  it('探索工具失败保留显式失败事实', () => {
+    const { out, r } = makePlain();
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'missing-read',
+      toolName: 'read',
+      args: { path: 'missing.ts' },
+    });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'missing-read',
+      result: tr({
+        toolCallId: 'missing-read',
+        isError: true,
+        content: [{ type: 'text', text: 'ENOENT: missing.ts' }],
+      }),
+    });
+    r.render({ type: 'agent_end', reason: 'completed', messages: [] });
+
+    expect(out.text).toContain('• Explored');
+    expect(out.text).toContain('✗ Read missing.ts: ENOENT: missing.ts');
+  });
+
+  it('并行探索在封口后等待真实结果，失败不附着到其他工具块', () => {
+    const { out, r } = makePlain();
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'parallel-read',
+      toolName: 'read',
+      args: { path: 'a.ts' },
+    });
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'parallel-edit',
+      toolName: 'edit',
+      args: { path: 'b.ts', edits: [{}] },
+    });
+    expect(out.text).not.toContain('Explored');
+
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'parallel-edit',
+      result: tr({
+        toolCallId: 'parallel-edit',
+        toolName: 'edit',
+        content: [{ type: 'text', text: 'edited' }],
+      }),
+    });
+    expect(out.text).not.toContain('Explored');
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'parallel-read',
+      result: tr({
+        toolCallId: 'parallel-read',
+        toolName: 'read',
+        isError: true,
+        content: [{ type: 'text', text: 'ENOENT' }],
+      }),
+    });
+
+    const editEnd = out.text.indexOf('✓ edit');
+    const explored = out.text.indexOf('Explored · 1 failed');
+    const failure = out.text.indexOf('✗ Read a.ts: ENOENT');
+    expect(editEnd).toBeGreaterThanOrEqual(0);
+    expect(explored).toBeGreaterThan(editEnd);
+    expect(failure).toBeGreaterThan(explored);
+    expect(out.text.slice(editEnd, explored)).toContain('\n\n');
+  });
+
+  it('不可见 reasoning 不会把连续探索拆成两个块', () => {
+    const { out, r } = makePlain();
+    const reasoning = am({
+      content: [{ type: 'reasoning', kind: 'content', text: 'private reasoning' }],
+    });
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'read-a',
+      toolName: 'read',
+      args: { path: 'a.ts' },
+    });
+    r.render({
+      type: 'message_update',
+      messageId: 'reasoning-message',
+      event: { type: 'reasoning_start', contentIndex: 0, partial: reasoning },
+    });
+    r.render({
+      type: 'message_update',
+      messageId: 'reasoning-message',
+      event: {
+        type: 'reasoning_delta',
+        contentIndex: 0,
+        delta: 'private reasoning',
+        partial: reasoning,
+      },
+    });
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'read-b',
+      toolName: 'read',
+      args: { path: 'b.ts' },
+    });
+    r.render({ type: 'agent_end', reason: 'completed', messages: [] });
+
+    expect(out.text.match(/Exploration incomplete/gu)).toHaveLength(1);
+    expect(out.text).toContain('Read a.ts, b.ts');
+    expect(out.text).not.toContain('private reasoning');
   });
 
   it('steering / follow-up / synthetic 的 message_start 回显', () => {
@@ -308,6 +513,52 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     expect(out.text).toContain('✗ edit: oldText not found in file');
   });
 
+  it('独立工具块恰隔一行，同一调用的结果与 diff 保持紧凑', () => {
+    const { out, r } = makePlain();
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'write-1',
+      toolName: 'write',
+      args: { path: 'src/a.ts' },
+    });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'write-1',
+      result: tr({
+        toolCallId: 'write-1',
+        toolName: 'write',
+        content: [{ type: 'text', text: 'written' }],
+        details: { diff: '+added\n-removed' },
+      }),
+    });
+    r.render({
+      type: 'tool_execution_start',
+      toolCallId: 'edit-1',
+      toolName: 'edit',
+      args: { path: 'src/b.ts', edits: [{}] },
+    });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'edit-1',
+      result: tr({ toolCallId: 'edit-1', toolName: 'edit' }),
+    });
+
+    const rows = out.text.split('\n');
+    const row = (fragment: string): number => {
+      const index = rows.findIndex((line) => line.includes(fragment));
+      if (index < 0) throw new Error(`missing ${fragment}`);
+      return index;
+    };
+    const write = row('✓ write');
+    const added = row('+added');
+    const removed = row('-removed');
+    const edit = row('● edit src/b.ts');
+    expect(added).toBe(write + 1);
+    expect(removed).toBe(added + 1);
+    expect(rows[removed + 1]).toBe('');
+    expect(edit).toBe(removed + 2);
+  });
+
   it('details.diff 渲染上限 40 行,超出提示行数(docs/09 §4)', () => {
     const { out, r } = makePlain();
     const diffLines = ['--- a', '+++ b', '@@ -1 +1 @@'];
@@ -331,7 +582,7 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     expect(out.text).toContain('✖ fatal: cannot continue');
   });
 
-  it('plan_update 以清单渲染三种状态', () => {
+  it('plan_update 以 Codex 风格标题、进度和树状清单渲染三种状态', () => {
     const { out, r } = makePlain();
     r.render({
       type: 'plan_update',
@@ -341,9 +592,27 @@ describe('plain 模式渲染(docs/09 §4)', () => {
         { step: 'run tests', status: 'pending' },
       ],
     });
-    expect(out.text).toContain('✔ read files');
-    expect(out.text).toContain('▶ edit code');
-    expect(out.text).toContain('○ run tests');
+    expect(out.text).toContain(
+      '* Updated Plan | 1/3 complete\n' +
+        '  \\ [x] read files\n' +
+        '    [>] edit code\n' +
+        '    [ ] run tests',
+    );
+  });
+
+  it('成功 plan 工具结果让位于紧随其后的整表 checklist，不额外打印工具结果', () => {
+    const { out, r } = makePlain();
+    const steps = [{ step: 'render a focused plan', status: 'in_progress' }] as const;
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'plan-1',
+      result: tr({ toolCallId: 'plan-1', toolName: 'plan', details: { steps } }),
+    });
+    r.render({ type: 'plan_update', steps: [...steps] });
+
+    expect(out.text).toContain('* Updated Plan | 0/1 complete');
+    expect(out.text).not.toContain('✓ plan');
+    expect(out.text).not.toContain('1. [in_progress]');
   });
 
   it('retry/compaction 叠加事件渲染(SessionEvent 透传面)', () => {
@@ -380,9 +649,88 @@ describe('plain 模式渲染(docs/09 §4)', () => {
     expect(out.text).toContain('4 messages');
     expect(out.text).toContain('you: 把 utils 重构一下');
     expect(out.text).toContain('先看文件。');
-    expect(out.text).toContain('● read src/utils.ts');
-    expect(out.text).toContain('✓ read');
+    expect(out.text).toContain('• Explored');
+    expect(out.text).toContain('  └ Read src/utils.ts');
+    expect(out.text).not.toContain('● read src/utils.ts');
+    expect(out.text).not.toContain('✓ read');
     expect(out.text).toContain('改完了。');
+  });
+
+  it('replay 按工具结果顺序封口探索块，不跨 edit 合并或拆开 edit 调用', () => {
+    const { out, r } = makePlain();
+    r.replayTranscript([
+      am({
+        content: [
+          { type: 'tool_call', id: 'read-a', name: 'read', arguments: { path: 'a.ts' } },
+          { type: 'tool_call', id: 'edit-b', name: 'edit', arguments: { path: 'b.ts', edits: [{}] } },
+          { type: 'tool_call', id: 'read-c', name: 'read', arguments: { path: 'c.ts' } },
+        ],
+        stopReason: 'tool_calls',
+      }),
+      tr({ id: 'result-a', toolCallId: 'read-a' }),
+      tr({ id: 'result-b', toolCallId: 'edit-b', toolName: 'edit', content: [{ type: 'text', text: 'edited' }] }),
+      tr({ id: 'result-c', toolCallId: 'read-c' }),
+    ]);
+
+    expect(out.text.match(/Explored/gu)).toHaveLength(2);
+    const firstRead = out.text.indexOf('Read a.ts');
+    const editStart = out.text.indexOf('● edit b.ts');
+    const editEnd = out.text.indexOf('✓ edit');
+    const secondRead = out.text.indexOf('Read c.ts');
+    expect(firstRead).toBeGreaterThanOrEqual(0);
+    expect(editStart).toBeGreaterThan(firstRead);
+    expect(editEnd).toBeGreaterThan(editStart);
+    expect(secondRead).toBeGreaterThan(editEnd);
+    expect(out.text).not.toContain('Read a.ts, c.ts');
+  });
+
+  it('replay 恢复最后一个成功 plan 快照而不留下运行中工具头', () => {
+    const { out, r } = makePlain();
+    r.replayTranscript([
+      am({
+        content: [{ type: 'tool_call', id: 'plan-old', name: 'plan', arguments: {} }],
+        stopReason: 'tool_calls',
+      }),
+      tr({
+        id: 'plan-old-result',
+        toolCallId: 'plan-old',
+        toolName: 'plan',
+        details: { steps: [{ step: 'obsolete step', status: 'in_progress' }] },
+      }),
+      am({
+        content: [{ type: 'tool_call', id: 'plan-new', name: 'plan', arguments: {} }],
+        stopReason: 'tool_calls',
+      }),
+      tr({
+        id: 'plan-new-result',
+        toolCallId: 'plan-new',
+        toolName: 'plan',
+        details: { steps: [{ step: 'current step', status: 'completed' }] },
+      }),
+    ]);
+
+    expect(out.text).toContain('Updated Plan | 1/1 complete');
+    expect(out.text).toContain('current step');
+    expect(out.text).not.toContain('obsolete step');
+    expect(out.text).not.toContain('● plan');
+  });
+
+  it('replay 已完成与未完成探索仍按声明顺序投影', () => {
+    const { out, r } = makePlain();
+    r.replayTranscript([
+      am({
+        content: [
+          { type: 'tool_call', id: 'read-complete', name: 'read', arguments: { path: 'a.ts' } },
+          { type: 'tool_call', id: 'read-incomplete', name: 'read', arguments: { path: 'b.ts' } },
+        ],
+        stopReason: 'tool_calls',
+      }),
+      tr({ id: 'read-complete-result', toolCallId: 'read-complete' }),
+    ]);
+
+    expect(out.text).toContain('• Exploration incomplete');
+    expect(out.text).toContain('Read a.ts, b.ts');
+    expect(out.text).not.toContain('Read b.ts, a.ts');
   });
 
   it('plain 模式全程零 ANSI 序列(NO_COLOR 纪律,docs/09 §9)', () => {
@@ -442,7 +790,11 @@ describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {
     });
     r.render({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'npm t' } });
     r.render({ type: 'tool_execution_update', toolCallId: 'c1', update: { output: 'line1\nline2\n' } });
-    r.render({ type: 'tool_execution_end', toolCallId: 'c1', result: tr({ toolName: 'bash' }) });
+    r.render({
+      type: 'tool_execution_end',
+      toolCallId: 'c1',
+      result: tr({ toolCallId: 'c1', toolName: 'bash' }),
+    });
     r.render({ type: 'turn_end', message: am(), toolResults: [] });
     r.render({ type: 'agent_end', reason: 'completed', messages: [] });
     r.redraw?.();
@@ -453,7 +805,7 @@ describe('ANSI 交互模式(docs/09 §1.3 动态区)', () => {
     expect(text).toContain('\x1b[?2004h'); // bracketed paste 开
     expect(text).toContain('\x1b[?2004l'); // bracketed paste 关(unmount)
     expect(text).toContain('[steer 1 · follow-up 1]');
-    expect(text).toContain('bash: npm t'); // 工具头(● 带色码,断言纯文本部分)
+    expect(text.replace(SGR_RE, '')).toContain('Ran npm t'); // 完成态使用紧凑 bash 块
   });
 
   it('转录行永远以完整行落盘:流式未完行留在动态区', () => {
@@ -572,6 +924,7 @@ describe('interactive 与 color 解耦(NO_COLOR 只禁 SGR,不禁光标控制)',
   it('非交互+有color(-p 于 TTY):plain 追加带色,无光标控制', () => {
     const out = new FakeOut();
     const r = createRenderer(out, { color: true, interactive: false });
+    r.render({ type: 'message_start', message: um('visible user text') });
     r.render({ type: 'message_start', message: am() });
     r.render({
       type: 'message_update',
@@ -590,6 +943,7 @@ describe('interactive 与 color 解耦(NO_COLOR 只禁 SGR,不禁光标控制)',
     });
     expect(out.text).toMatch(/\x1b\[[0-9;]*m/); // 着色仍在
     expect(out.text).not.toContain('mm');
+    expect(out.text).not.toContain('thinking');
     expect(out.text).not.toContain('\x1b[J');   // 无清区(plain 纯追加)
   });
 });

@@ -11,6 +11,7 @@ import type {
   AgentMessage,
   AssistantMessage,
   ProviderEvent,
+  ToolCallPart,
   ToolResultMessage,
   UserMessage,
 } from '../protocol/index.js';
@@ -18,6 +19,22 @@ import type {
   CliSessionEvent as SessionEvent,
   CliSessionUsage as SessionUsage,
 } from './frontend-types.js';
+import {
+  explorationCall,
+  explorationRows,
+} from './exploration.js';
+import type { ExplorationCall } from './exploration.js';
+import {
+  bashCommandFromArgs,
+  bashOutputEllipsis,
+  layoutBashCommand,
+  previewBashOutput,
+} from './bash-presentation.js';
+import type { BashToken, BashTokenTone } from './bash-presentation.js';
+import {
+  formatPlanProgress,
+  layoutPlan,
+} from './plan-presentation.js';
 import { sanitizeTerminalLine, sanitizeTerminalText } from './terminal-sanitize.js';
 
 export interface RendererOptions {
@@ -39,6 +56,11 @@ export interface Renderer {
   setStatus?(text: string | undefined): void;
   /** Runtime approval presentation freezes whether the permanent-scope action exists. */
   setApprovalAllowsAlways?(available: boolean): void;
+  /** Replace the active approval prompt without appending another transcript entry. */
+  setApprovalRequest?(request: {
+    readonly description: string;
+    readonly allowAlways: boolean;
+  } | undefined): void;
   /** 转录区追加一行(斜杠命令 /status /queue /help 的输出)。 */
   println?(text: string): void;
   /** 进入交互:开 bracketed paste(\x1b[?2004h)并首绘动态区。 */
@@ -54,13 +76,17 @@ const RESET = '\x1b[0m';
 const BOLD = '1';
 const DIM = '2';
 const DIM_ITALIC = '2;3';
+const DIM_STRIKETHROUGH = '2;9';
 const RED = '31';
 const GREEN = '32';
+const BLUE = '34';
 const YELLOW = '33';
 const CYAN = '36';
+const CYAN_BOLD = '1;36';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const DIFF_MAX_LINES = 40; // docs/09 §4:diff 渲染上限
+const WORKING_SUMMARY_MAX_CODE_UNITS = 4_096;
 const PASTE_ON = '\x1b[?2004h';
 const PASTE_OFF = '\x1b[?2004l';
 
@@ -291,6 +317,22 @@ export interface RendererOutput {
   columns?: number;
 }
 
+interface ActiveExplorationCall {
+  readonly call: ExplorationCall;
+  readonly group: ExplorationGroup;
+  result?: ToolResultMessage;
+}
+
+interface ExplorationGroup {
+  readonly calls: ActiveExplorationCall[];
+  sealed: boolean;
+  rendered: boolean;
+}
+
+interface ActiveBashCall {
+  readonly command: string;
+}
+
 export function createRenderer(out: RendererOutput, opts: RendererOptions): Renderer {
   const color = opts.color;
   const ascii = opts.ascii === true;
@@ -299,6 +341,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     idle: ascii ? '.' : '·',
     followUp: ascii ? '->' : '↪',
     steering: ascii ? '>>' : '»',
+    explored: ascii ? '*' : '•',
+    exploredBranch: ascii ? '\\' : '└',
     tool: ascii ? '*' : '●',
     success: ascii ? '[ok]' : '✓',
     failure: ascii ? '[x]' : '✗',
@@ -357,8 +401,17 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   let pendingKind: 'text' | 'reasoning' = 'text';
   let midLine = false; // plain:当前物理行未收尾
   let usage: SessionUsage | undefined;
-  const reasoningStartedAt = new Map<number, number>();
+  const reasoningSummaries = new Map<number, string>();
   const toolStartedAt = new Map<string, number>();
+  const explorationGroups = new Set<ExplorationGroup>();
+  let activeExplorationGroup: ExplorationGroup | undefined;
+  const startedExplorationCalls = new Map<string, ActiveExplorationCall>();
+  const startedBashCalls = new Map<string, ActiveBashCall>();
+  // classic/plain 没有 TUI 的 HistoryCell 容器；以这两个标记复现「独立工具块前一行空白、
+  // 同一调用的结果/diff 紧贴」的排版节奏。
+  const visibleToolStarts = new Set<string>();
+  let hasTranscriptContent = false;
+  let lastTranscriptLineWasBlank = false;
 
   const write = (s: string): void => {
     out.enqueue(s);
@@ -458,10 +511,200 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       }
       write(`${text}\n`);
     }
+    if (text !== '') hasTranscriptContent = true;
+    lastTranscriptLineWasBlank = text === '';
   }
 
   function appendLines(text: string): void {
     for (const line of text.split('\n')) appendLine(line);
+  }
+
+  /** 对齐 Codex 的 cell inset：仅在不同工具调用开始前插入一行，而非逐输出行留白。 */
+  function startToolBlock(): void {
+    if (hasTranscriptContent && !lastTranscriptLineWasBlank) appendLine('');
+  }
+
+  function startExplorationCall(toolCallId: string, call: ExplorationCall): void {
+    const group = activeExplorationGroup ?? {
+      calls: [],
+      sealed: false,
+      rendered: false,
+    };
+    if (activeExplorationGroup === undefined) {
+      activeExplorationGroup = group;
+      explorationGroups.add(group);
+    }
+    const active: ActiveExplorationCall = { call, group };
+    group.calls.push(active);
+    startedExplorationCalls.set(toolCallId, active);
+  }
+
+  /**
+   * classic/plain 是 append-only：边界只封存当前组，必须等组内每个并行调用都有
+   * 结果后才能写 `Explored`。这避免 read 尚未完成时被非探索工具的 start 伪造成功。
+   */
+  function renderExplorationGroup(group: ExplorationGroup, allowIncomplete: boolean): void {
+    if (group.rendered) return;
+    const complete = group.calls.every((entry) => entry.result !== undefined);
+    if (!complete && !allowIncomplete) return;
+    group.rendered = true;
+    explorationGroups.delete(group);
+    startToolBlock();
+    const failures = group.calls.filter((entry) => entry.result?.isError === true);
+    const title = complete ? 'Explored' : 'Exploration incomplete';
+    appendLine(
+      `${paint(glyph.explored, DIM)} ${paint(title, BOLD)}` +
+        (failures.length === 0
+          ? ''
+          : paint(`${separator}${failures.length} failed`, RED)),
+    );
+    const rows = explorationRows(group.calls.map((entry) => entry.call));
+    for (const [index, row] of rows.entries()) {
+      const prefix = index === 0 ? `  ${glyph.exploredBranch} ` : '    ';
+      const target = sanitizeTerminalLine(row.target);
+      appendLine(
+        `${paint(prefix, DIM)}${paint(row.label, CYAN)}` +
+          (target === '' ? '' : ` ${target}`),
+      );
+    }
+    for (const entry of failures) {
+      const result = entry.result;
+      if (result === undefined) continue;
+      const head = sanitizeTerminalLine(firstLine(bashResultText(result)));
+      const target = sanitizeTerminalLine(entry.call.target);
+      appendLine(paint(
+        `  ${glyph.failure} ${entry.call.label}` +
+          (target === '' ? '' : ` ${target}`) +
+          (head === '' ? '' : `: ${truncateToWidth(head, 100)}`),
+        RED,
+      ));
+    }
+    for (const entry of group.calls) {
+      if (entry.result !== undefined) renderDiff(entry.result.details);
+    }
+  }
+
+  function flushExplorationCalls(allowIncomplete = false): void {
+    if (activeExplorationGroup !== undefined) {
+      activeExplorationGroup.sealed = true;
+      activeExplorationGroup = undefined;
+    }
+    for (const group of [...explorationGroups]) {
+      if (group.sealed) renderExplorationGroup(group, allowIncomplete);
+    }
+  }
+
+  function bashTokenColor(tone: BashTokenTone): string | undefined {
+    switch (tone) {
+      case 'command': return BLUE;
+      case 'flag': return RED;
+      case 'string': return GREEN;
+      case 'operator': return CYAN;
+      case 'comment': return DIM;
+      default: return undefined;
+    }
+  }
+
+  function paintBashTokens(tokens: readonly BashToken[]): string {
+    return tokens.map((token) => {
+      const code = bashTokenColor(token.tone);
+      return code === undefined ? token.text : paint(token.text, code);
+    }).join('');
+  }
+
+  function bashResultText(result: ToolResultMessage): string {
+    return result.content.find((part): part is { type: 'text'; text: string } => part.type === 'text')
+      ?.text ?? '';
+  }
+
+  function renderBashStart(command: string): void {
+    startToolBlock();
+    const safeCommand = sanitizeTerminalText(command);
+    const headerPrefix = `${glyph.tool} Running `;
+    const continuationPrefix = `  ${ascii ? '|' : '│'} `;
+    const layout = layoutBashCommand(
+      safeCommand,
+      Math.max(1, width() - displayWidth(headerPrefix)),
+      Math.max(1, width() - displayWidth(continuationPrefix)),
+      displayWidth,
+    );
+    appendLine(
+      `${paint(glyph.tool, CYAN)} ${paint('Running', BOLD)} ` +
+        `${paintBashTokens(layout.lines[0] ?? [])}`.trimEnd(),
+    );
+    for (const line of layout.lines.slice(1)) {
+      appendLine(`${paint(continuationPrefix, DIM)}${paintBashTokens(line)}`);
+    }
+  }
+
+  /** 已完成 bash 统一渲染为 Codex 风格的命令头和首尾输出预览。 */
+  function renderBashResult(command: string, result: ToolResultMessage): void {
+    startToolBlock();
+    const safeCommand = sanitizeTerminalText(command);
+    const statusCode = result.isError ? RED : GREEN;
+    const statusGlyph = result.isError ? glyph.failure : glyph.tool;
+    const headerPrefix = `${statusGlyph} Ran `;
+    const continuationPrefix = `  ${ascii ? '|' : '│'} `;
+    const outputFirstPrefix = `  ${ascii ? '\\' : '└'} `;
+    const outputNextPrefix = '    ';
+    const layout = layoutBashCommand(
+      safeCommand,
+      Math.max(1, width() - displayWidth(headerPrefix)),
+      Math.max(1, width() - displayWidth(continuationPrefix)),
+      displayWidth,
+    );
+    const first = layout.lines[0] ?? [];
+    appendLine(`${paint(statusGlyph, statusCode)} ${paint('Ran', BOLD)} ${paintBashTokens(first)}`.trimEnd());
+    for (const line of layout.lines.slice(1)) {
+      appendLine(`${paint(continuationPrefix, DIM)}${paintBashTokens(line)}`);
+    }
+
+    const preview = previewBashOutput(sanitizeTerminalText(bashResultText(result)));
+    if (preview.lines.length === 0) {
+      appendLine(paint(`${outputFirstPrefix}(no output)`, DIM));
+      return;
+    }
+    const headLines = preview.omittedLines === undefined
+      ? preview.lines.length
+      : Math.min(2, preview.lines.length);
+    for (const [index, rawLine] of preview.lines.entries()) {
+      const prefix = index === 0 ? outputFirstPrefix : outputNextPrefix;
+      const line = truncateToWidth(rawLine.replaceAll('\t', '  '), Math.max(1, width() - displayWidth(prefix)));
+      appendLine(paint(`${prefix}${line}`, DIM));
+      if (preview.omittedLines !== undefined && index + 1 === headLines) {
+        appendLine(paint(`${outputNextPrefix}${bashOutputEllipsis(preview.omittedLines)}`, DIM));
+      }
+    }
+  }
+
+  /** 与全屏 TUI 一致：标题 + 进度 + 树状三态 checklist，而不是无层级的纯文本。 */
+  function renderPlanUpdate(steps: Extract<SessionEvent, { type: 'plan_update' }>['steps']): void {
+    startToolBlock();
+    const useAscii = ascii || !color;
+    const presentation = layoutPlan(
+      steps.map((step) => ({
+        step: sanitizeTerminalLine(step.step),
+        status: step.status,
+      })),
+      Math.max(1, width() - 1),
+      displayWidth,
+      useAscii,
+    );
+    const progress = formatPlanProgress(presentation.progress);
+    const bullet = useAscii ? '*' : glyph.explored;
+    appendLine(
+      `${paint(bullet, DIM)} ${paint(presentation.title, BOLD)}` +
+        (progress === undefined ? '' : paint(`${useAscii ? ' | ' : ' · '}${progress}`, DIM)),
+    );
+    for (const line of presentation.lines) {
+      const text = `${line.prefix}${line.marker === '' ? '' : `${line.marker} `}${line.text}`;
+      const code = line.status === 'completed'
+        ? DIM_STRIKETHROUGH
+        : line.status === 'in_progress'
+          ? CYAN_BOLD
+          : DIM;
+      appendLine(paint(text, code));
+    }
   }
 
   // ---- 流式文本 ----
@@ -501,34 +744,49 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   // ---- 事件处理 ----
 
   function onProviderEvent(ev: ProviderEvent): void {
+    const isDisplaySafeReasoningSummary = (event: ProviderEvent): boolean => {
+      if (!('partial' in event) || !('contentIndex' in event)) return false;
+      const part = event.partial.content[event.contentIndex];
+      return part?.type === 'reasoning' && part.kind === 'summary';
+    };
     switch (ev.type) {
       case 'text_delta':
+        if (ev.delta !== '') flushExplorationCalls();
         streamAppend(ev.delta, 'text');
         break;
       case 'reasoning_start':
-        reasoningStartedAt.set(ev.contentIndex, Date.now());
-        activity = ascii ? 'thinking...' : 'thinking…';
+        if (!isDisplaySafeReasoningSummary(ev)) break;
+        reasoningSummaries.clear();
+        reasoningSummaries.set(ev.contentIndex, '');
+        activity = 'Working';
         redrawDyn();
         break;
-      case 'reasoning_delta':
-        // Full reasoning is available through Runtime /review; keep the default transcript compact.
+      case 'reasoning_delta': {
+        if (!isDisplaySafeReasoningSummary(ev)) break;
+        const summary = (reasoningSummaries.get(ev.contentIndex) ?? '') +
+          sanitizeTerminalText(ev.delta);
+        reasoningSummaries.set(ev.contentIndex, summary.slice(0, WORKING_SUMMARY_MAX_CODE_UNITS));
+        activity = sanitizeTerminalLine(summary).replace(/ +/gu, ' ') || 'Working';
+        redrawDyn();
         break;
+      }
       case 'text_end':
         endStreamLine();
         break;
       case 'reasoning_end': {
-        const startedAt = reasoningStartedAt.get(ev.contentIndex);
-        reasoningStartedAt.delete(ev.contentIndex);
-        appendLine(paint(
-          `thinking${separator}${startedAt === undefined ? 'complete' : formatElapsed(Date.now() - startedAt)}`,
-          DIM_ITALIC,
-        ));
-        activity = ascii ? 'streaming...' : 'streaming…';
+        if (!isDisplaySafeReasoningSummary(ev)) break;
+        const summary = sanitizeTerminalText(ev.content).slice(0, WORKING_SUMMARY_MAX_CODE_UNITS);
+        if (summary !== '' || !reasoningSummaries.has(ev.contentIndex)) {
+          reasoningSummaries.set(ev.contentIndex, summary);
+        }
+        const visible = reasoningSummaries.get(ev.contentIndex) ?? '';
+        activity = sanitizeTerminalLine(visible).replace(/ +/gu, ' ') || 'Working';
         redrawDyn();
         break;
       }
       case 'tool_call_start': {
         // 不渲染参数流,动态区提示 preparing <name>…(docs/09 §4)
+        reasoningSummaries.clear();
         const part = ev.partial.content[ev.contentIndex];
         const name = part !== undefined && part.type === 'tool_call' ? part.name : 'tool';
         activity = `preparing ${sanitizeTerminalLine(name)}${ascii ? '...' : '…'}`;
@@ -541,6 +799,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   }
 
   function userEcho(m: UserMessage): void {
+    flushExplorationCalls();
     const text = sanitizeTerminalText(m.content
       .map((p) => (p.type === 'text' ? p.text : '[image]'))
       .join('\n')
@@ -561,9 +820,15 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   }
 
   function assistantEndWarnings(m: AssistantMessage): void {
-    if (m.stopReason === 'length') appendLine(paint('[output truncated by model limit]', YELLOW));
-    else if (m.stopReason === 'aborted') appendLine(paint('[aborted]', YELLOW));
+    if (m.stopReason === 'length') {
+      flushExplorationCalls();
+      appendLine(paint('[output truncated by model limit]', YELLOW));
+    } else if (m.stopReason === 'aborted') {
+      flushExplorationCalls();
+      appendLine(paint('[aborted]', YELLOW));
+    }
     else if (m.stopReason === 'error') {
+      flushExplorationCalls();
       appendLine(paint(`[error] ${sanitizeTerminalLine(m.errorMessage ?? 'provider error')}`, RED));
     }
   }
@@ -580,14 +845,57 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
     return parts.length > 0 ? parts.join(' ') : undefined;
   }
 
+  /** 成功 plan 的权威可见投影紧随其后的 plan_update；不要先写一条冗余工具结果。 */
+  function planSnapshot(
+    details: unknown,
+  ): Extract<SessionEvent, { type: 'plan_update' }>['steps'] | undefined {
+    const steps = asRecord(details)['steps'];
+    if (!Array.isArray(steps) || !steps.every((candidate) => {
+      const step = asRecord(candidate);
+      return typeof step['step'] === 'string' &&
+        (step['status'] === 'pending' ||
+          step['status'] === 'in_progress' ||
+          step['status'] === 'completed');
+    })) return undefined;
+    return steps.map((candidate) => {
+      const step = asRecord(candidate);
+      return {
+        step: step['step'] as string,
+        status: step['status'] as 'pending' | 'in_progress' | 'completed',
+      };
+    });
+  }
+
   function onToolEnd(result: ToolResultMessage): void {
+    const exploration = startedExplorationCalls.get(result.toolCallId);
+    startedExplorationCalls.delete(result.toolCallId);
+    const bash = startedBashCalls.get(result.toolCallId);
+    startedBashCalls.delete(result.toolCallId);
+    const startedAt = toolStartedAt.get(result.toolCallId);
+    toolStartedAt.delete(result.toolCallId);
+    const hadVisibleToolStart = visibleToolStarts.delete(result.toolCallId);
+    if (exploration !== undefined) {
+      exploration.result = result;
+      if (exploration.group.sealed) renderExplorationGroup(exploration.group, false);
+      return;
+    }
+
+    flushExplorationCalls();
+    if (bash !== undefined) {
+      renderBashResult(bash.command, result);
+      renderDiff(result.details);
+      return;
+    }
+    if (result.toolName === 'plan' && !result.isError && planSnapshot(result.details) !== undefined) {
+      renderDiff(result.details);
+      return;
+    }
     const head = sanitizeTerminalLine(firstLine(
       result.content.find((p): p is { type: 'text'; text: string } => p.type === 'text')?.text ?? '',
     ));
     const toolName = sanitizeTerminalLine(result.toolName);
-    const startedAt = toolStartedAt.get(result.toolCallId);
-    toolStartedAt.delete(result.toolCallId);
     const elapsed = startedAt === undefined ? '' : `${separator}${formatElapsed(Date.now() - startedAt)}`;
+    if (!hadVisibleToolStart) startToolBlock();
     if (result.isError) {
       appendLine(paint(`  ${glyph.failure} ${toolName}${elapsed}: ${truncateToWidth(head, 100)}`, RED));
     } else {
@@ -606,6 +914,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   function renderDiff(details: unknown): void {
     const diff = str(asRecord(details)['diff']);
     if (diff === undefined || diff === '') return;
+    flushExplorationCalls();
     const lines = sanitizeTerminalText(diff).replace(/\n$/, '').split('\n');
     for (const line of lines.slice(0, DIFF_MAX_LINES)) {
       let code: string | undefined;
@@ -632,16 +941,26 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
   function render(e: SessionEvent): void {
     switch (e.type) {
       case 'agent_start':
+        flushExplorationCalls();
         running = true;
-        activity = ascii ? 'streaming...' : 'streaming…';
+        reasoningSummaries.clear();
+        activity = 'Working';
         if (e.reason === 'follow_up') appendLine(paint(`${glyph.followUp} follow-up`, CYAN));
         else redrawDyn();
         break;
       case 'agent_end':
+        flushExplorationCalls(true);
+        explorationGroups.clear();
+        activeExplorationGroup = undefined;
+        startedExplorationCalls.clear();
+        startedBashCalls.clear();
+        toolStartedAt.clear();
+        visibleToolStarts.clear();
         endStreamLine();
         running = false;
         activity = undefined;
         activityTail = undefined;
+        reasoningSummaries.clear();
         approvalPrompt = undefined; // abort 收尾等场景兜底撤下审批提示
         approvalDescription = undefined;
         if (e.reason === 'error') appendLine(paint(`${glyph.fatal} agent run failed`, RED));
@@ -657,7 +976,8 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         else if (e.message.role === 'assistant') {
           pending = '';
           pendingKind = 'text';
-          activity = ascii ? 'streaming...' : 'streaming…';
+          reasoningSummaries.clear();
+          activity = 'Working';
           redrawDyn();
         }
         break;
@@ -673,9 +993,24 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       case 'tool_execution_start': {
         approvalPrompt = undefined; // 审批已决议(放行或拒绝都会走到 start),提示撤下
         approvalDescription = undefined;
+        reasoningSummaries.clear();
+        const exploration = explorationCall(e.toolName, e.args);
+        const bashCommand = e.toolName === 'bash' ? bashCommandFromArgs(e.args) : undefined;
         const headline = toolHeadline(e.toolName, e.args);
         toolStartedAt.set(e.toolCallId, Date.now());
-        if (headline !== undefined) appendLine(`${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(headline)}`);
+        if (exploration !== undefined) {
+          startExplorationCall(e.toolCallId, exploration);
+        } else if (bashCommand !== undefined) {
+          flushExplorationCalls();
+          startedBashCalls.set(e.toolCallId, { command: bashCommand });
+        } else {
+          flushExplorationCalls();
+          if (headline !== undefined) {
+            startToolBlock();
+            appendLine(`${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(headline)}`);
+            visibleToolStarts.add(e.toolCallId);
+          }
+        }
         activity = `${sanitizeTerminalLine(e.toolName)} running${ascii ? '...' : '…'}`;
         activityTail = undefined;
         redrawDyn();
@@ -695,7 +1030,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       }
       case 'tool_execution_end':
         onToolEnd(e.result);
-        activity = running ? (ascii ? 'streaming...' : 'streaming…') : undefined;
+        activity = running ? 'Working' : undefined;
         activityTail = undefined;
         redrawDyn();
         break;
@@ -704,28 +1039,25 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         followCount = e.followUp.length;
         if (ansi) redrawDyn();
         else if (steerCount > 0 || followCount > 0) {
+          flushExplorationCalls();
           appendLine(`[steer ${steerCount}${separator}follow-up ${followCount}]`);
         }
         break;
       case 'plan_update':
-        for (const s of e.steps) {
-          const marker = s.status === 'completed'
-            ? glyph.planDone
-            : s.status === 'in_progress'
-              ? glyph.planActive
-              : glyph.planPending;
-          appendLine(`${marker} ${sanitizeTerminalLine(s.step)}`);
-        }
+        flushExplorationCalls();
+        renderPlanUpdate(e.steps);
         break;
       case 'approval_request':
         // M6(docs/09 §4):转录区一行留痕(plain/headless 可读),动态区切审批提示;
         // 键位表由 repl 同步切审批模式,提示与键位来自同一事件,不会失配。
+        flushExplorationCalls();
         appendLine(paint(`? approval required: ${sanitizeTerminalLine(e.description)}`, YELLOW));
         approvalDescription = sanitizeTerminalLine(e.description);
         approvalPrompt = approvalPromptText(approvalDescription, false);
         redrawDyn();
         break;
       case 'error':
+        flushExplorationCalls();
         appendLine(
           e.fatal
             ? paint(`${glyph.fatal} fatal: ${sanitizeTerminalLine(e.message)}`, RED)
@@ -737,6 +1069,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         redrawDyn();
         break;
       case 'retry_scheduled':
+        flushExplorationCalls();
         appendLine(
           paint(
             `${glyph.retry} retry ${e.attempt}/${e.maxAttempts} in ${e.delayMs}ms: ${sanitizeTerminalLine(e.errorMessage)}`,
@@ -745,9 +1078,11 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         );
         break;
       case 'compaction_start':
+        flushExplorationCalls();
         appendLine(paint(`${glyph.compact} compacting context${ascii ? '...' : '…'}`, DIM));
         break;
       case 'compaction_end':
+        flushExplorationCalls();
         appendLine(
           paint(e.ok
             ? `${glyph.compact} compaction done (dropped ${e.droppedMessages} messages)`
@@ -761,26 +1096,108 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
 
   function replayTranscript(messages: readonly AgentMessage[]): void {
     if (messages.length === 0) return;
+    const resultCalls = new Map<number, ToolCallPart>();
+    const deferredStarts = new Map<number, ToolCallPart[]>();
+    let latestPlan: Extract<SessionEvent, { type: 'plan_update' }>['steps'] | undefined;
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const message = messages[messageIndex];
+      if (message?.role === 'tool_result') {
+        if (message.toolName === 'plan' && !message.isError) {
+          latestPlan = planSnapshot(message.details) ?? latestPlan;
+        }
+        continue;
+      }
+      if (message?.role !== 'assistant') continue;
+      const calls = new Map<string, { key: string; part: ToolCallPart }>();
+      const orderedCalls: Array<{ key: string; part: ToolCallPart }> = [];
+      for (const [contentIndex, part] of message.content.entries()) {
+        if (part.type !== 'tool_call') continue;
+        const call = { key: `${messageIndex}:${contentIndex}`, part };
+        calls.set(part.id, call);
+        orderedCalls.push(call);
+      }
+      const resultIndexes = new Map<string, number>();
+      for (let resultIndex = messageIndex + 1; resultIndex < messages.length; resultIndex++) {
+        const result = messages[resultIndex];
+        if (result?.role !== 'tool_result') break;
+        const call = calls.get(result.toolCallId);
+        if (call === undefined) continue;
+        resultIndexes.set(call.key, resultIndex);
+        resultCalls.set(resultIndex, call.part);
+        calls.delete(result.toolCallId);
+      }
+      let releaseAfter = messageIndex;
+      for (const call of orderedCalls) {
+        const resultIndex = resultIndexes.get(call.key);
+        if (resultIndex !== undefined) {
+          releaseAfter = Math.max(releaseAfter, resultIndex);
+          continue;
+        }
+        const pending = deferredStarts.get(releaseAfter) ?? [];
+        pending.push(call.part);
+        deferredStarts.set(releaseAfter, pending);
+      }
+    }
+
+    const startReplayCall = (part: ToolCallPart, expectsResult: boolean): void => {
+      const exploration = explorationCall(part.name, part.arguments);
+      const command = part.name === 'bash' ? bashCommandFromArgs(part.arguments) : undefined;
+      if (exploration !== undefined) {
+        startExplorationCall(part.id, exploration);
+      } else if (command !== undefined) {
+        flushExplorationCalls();
+        if (expectsResult) startedBashCalls.set(part.id, { command });
+        else renderBashStart(command);
+      } else {
+        flushExplorationCalls();
+        const headline = toolHeadline(part.name, part.arguments);
+        if (!expectsResult || headline !== undefined) {
+          startToolBlock();
+          appendLine(
+            `${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(headline ?? part.name)}`,
+          );
+          if (expectsResult) visibleToolStarts.add(part.id);
+        }
+      }
+    };
+
+    flushExplorationCalls(true);
+    explorationGroups.clear();
+    activeExplorationGroup = undefined;
+    startedExplorationCalls.clear();
+    startedBashCalls.clear();
+    toolStartedAt.clear();
+    visibleToolStarts.clear();
     appendLine(paint(`${glyph.replay} resumed session${separator}${messages.length} messages ${glyph.replay}`, DIM));
-    for (const m of messages) {
+    for (const [messageIndex, m] of messages.entries()) {
       if (m.role === 'user') {
         userEcho(m);
       } else if (m.role === 'assistant') {
         for (const part of m.content) {
-          if (part.type === 'text') appendLines(sanitizeTerminalText(part.text).trimEnd());
+          if (part.type === 'text') {
+            flushExplorationCalls();
+            appendLines(sanitizeTerminalText(part.text).trimEnd());
+          }
           else if (part.type === 'reasoning') {
-            appendLine(paint(`thinking${separator}complete`, DIM_ITALIC));
-          } else {
-            appendLine(
-              `${paint(glyph.tool, CYAN)} ${sanitizeTerminalLine(toolHeadline(part.name, part.arguments) ?? part.name)}`,
-            );
+            // 仅在交互动态行显示本轮 reasoning summary；历史与 plain 不添加伪摘要。
           }
         }
         assistantEndWarnings(m);
       } else {
+        const part = resultCalls.get(messageIndex);
+        if (part !== undefined) startReplayCall(part, true);
         onToolEnd(m);
       }
+      for (const part of deferredStarts.get(messageIndex) ?? []) startReplayCall(part, false);
     }
+    flushExplorationCalls(true);
+    if (latestPlan !== undefined) renderPlanUpdate(latestPlan);
+    explorationGroups.clear();
+    activeExplorationGroup = undefined;
+    startedExplorationCalls.clear();
+    startedBashCalls.clear();
+    toolStartedAt.clear();
+    visibleToolStarts.clear();
     appendLine('');
   }
 
@@ -804,9 +1221,20 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
       approvalPrompt = approvalPromptText(approvalDescription, available);
       redrawDyn();
     },
+    setApprovalRequest(request): void {
+      if (request === undefined) {
+        approvalDescription = undefined;
+        approvalPrompt = undefined;
+      } else {
+        approvalDescription = sanitizeTerminalLine(request.description);
+        approvalPrompt = approvalPromptText(approvalDescription, request.allowAlways);
+      }
+      redrawDyn();
+    },
     println(text: string): void {
       // `println` also carries raw transcript/review/diff/provider content. Its provenance is
       // intentionally opaque, so ASCII fallback must never rewrite payload glyphs here.
+      flushExplorationCalls();
       appendLines(sanitizeTerminalText(text));
     },
     mount(): void {

@@ -363,7 +363,11 @@ function ensureReasoningSlot(
     return slot;
   }
   const contentIndex = state.partial.content.length;
-  const part: ReasoningPart = { type: 'reasoning', text: '' };
+  const part: ReasoningPart = {
+    type: 'reasoning',
+    text: '',
+    ...(kind === 'item' ? {} : { kind }),
+  };
   slot = {
     kind: 'reasoning',
     contentIndex,

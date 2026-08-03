@@ -287,7 +287,9 @@ Unicode、最后一个 partial 合法”的 journal 证明每条中间 record �
 文件 journal port 另以 fs spy 证明一次 writable load 后连续 N 次 append 不再调用 JSONL
 `readFileSync`，但 reopen/cold load 仍逐字段得到相同 records。边界测试必须覆盖合法外部 append、同尺寸
 新 inode replacement 都在写入前 fail closed，opened inode 与 replacement 均不被改写；非法 multi-record
-batch 不得泄漏 candidate grammar state，随后同一合法 record 仍可追加。append-before-load 还要证明只
+batch 不得泄漏 candidate grammar state，随后同一合法 record 仍可追加。`ReasoningPart.kind`
+的 `summary` / `content` 也必须经 canonical commit 与 reopen 原样 round-trip，未知 kind 在 storage boundary
+fail closed。append-before-load 还要证明只
 lazy full repair 一次；既有 torn-tail/final-LF 用例继续证明显式 writable load 是 repair/rebase 点。
 
 同时对每个 observer 断言局部 FIFO；慢 observer 队列溢出必须得到显式 disconnect/gap，observer
@@ -653,8 +655,12 @@ HTTP 401/429/500、`Retry-After`、factory reject、原生迭代中断与“干�
 正常 SSE payload，测试以 SDK error/拒绝的 factory 直接注入；断言 `StreamFn` 同步返回，
 `for await` 与 `result()` 都正常完成，错误只出现在 `ProviderEvent.error` 中。
 
-出站测试额外锁定 `instructions/input/tools`、`strict:false`、options/defaults 与
-`include:['reasoning.encrypted_content']`，并明确断言请求对象不存在 `previous_response_id`。
+出站测试额外锁定 `instructions/input/tools`、`strict:false`、options/defaults、首次请求存在的
+`reasoning:{summary:'auto'}` 与 `include:['reasoning.encrypted_content']`，并明确断言请求对象不存在
+`previous_response_id`。`request.test.ts` 另锁定 summary-only 协商矩阵：支持端点只请求一次；只有
+HTTP 400 且结构化 `param` 为 `reasoning` / `reasoning.summary` 才省略 reasoning 重试一次；无关/无结构
+400、其他 HTTP/网络错误、显式 effort 或额外 reasoning 字段都不得降级；首次失败后 abort 不发第二次，
+第二次失败不发第三次。SSE 流内 error 已经取得流，只走既有唯一终态，绝不重新生成。
 这条断言保证 fixture replay、恢复与 retry 始终由本地 transcript 驱动。
 
 ### 4.5 Provider models 离线 fixture
@@ -783,14 +789,20 @@ CLI/Agent 的既有行为 fixture。
 
 `src/cli/tui.test.ts` 用 `createTestRenderer({width,height,kittyKeyboard:true,autoFocus:false})` 构建内存终端，不写真实 stdout；`autoFocus` 显式匹配生产配置,避免测试默认值掩盖组件级鼠标聚焦缺陷。覆盖:
 
-1. header 含版本、Unicode 像素 Logo 与 tips；page、header、ScrollBox 四层、动态 Text/Markdown、composer、Textarea 普通/聚焦态和 footer 的背景全部保持 alpha 0。prompt 是两条纯 `─` 洋红横线,中间没有侧边/圆角/title；聚焦输入文字使用终端默认前景 intent,硬件光标固定为 `[201,71,64,255]` 且状态为 visible/line/blinking。测试同时渲染 user、Markdown heading/quote/table/code 与 approval,并在 color/`NO_COLOR` 两条路径逐 span 断言背景 `[0,0,0,0]`；`NO_COLOR` 下所有非空 span 的前景 intent 也必须为 default,但保留高对比硬件光标作为焦点提示,上下两条 rule 则钉死透明背景及对应语义前景。构建产物还由 `e2e/tui.test.ts` 在不设置 `COLORTERM` 的双 TTY 中检查启动 ANSI 输出必须包含 SGR 49、OSC 12 `#c94740` 与 blinking-bar DECSCUSR,不能出现白色光标或任何 `48;2` / `48;5` 实色背景。
-2. 短 transcript 的第一条消息紧跟 header,assistant 在 user 下方,二者与 prompt 之间保留空白——直接钉死“从顶部向下增长”；长 transcript 用 PageUp 或鼠标滚轮上滚后，动态增高 prompt 和新增输出不得抢回跟尾，footer 累积 `N new`；PageDown 到底、End 或 `/latest` 才清 unread。
+1. header 含版本、Unicode 像素 Logo 与 tips；page、header、ScrollBox 四层、动态 Text/Markdown、composer、Textarea 普通/聚焦态和 footer 的背景全部保持 alpha 0。composer 与 transcript user prompt 都使用两条纯 `─` 洋红横线,中间没有侧边/圆角/title；转录不显示 `you` / `coda` 标签，assistant Markdown 直接跟在有框 user prompt 后。聚焦输入文字使用终端默认前景 intent,硬件光标固定为 `[201,71,64,255]` 且状态为 visible/line/blinking。测试同时渲染 user、Markdown heading/quote/table/code 与 approval,并在 color/`NO_COLOR` 两条路径逐 span 断言背景 `[0,0,0,0]`；`NO_COLOR` 下所有非空 span 的前景 intent 也必须为 default,但保留高对比硬件光标作为焦点提示,上下两条 rule 则钉死透明背景及对应语义前景。构建产物还由 `e2e/tui.test.ts` 在不设置 `COLORTERM` 的双 TTY 中检查启动 ANSI 输出必须包含 SGR 49、OSC 12 `#c94740` 与 blinking-bar DECSCUSR,不能出现白色光标或任何 `48;2` / `48;5` 实色背景。
+2. 短 transcript 的第一条 user prompt 双横线块紧跟 header，assistant 无标签输出位于其下方，二者与 composer 之间保留空白——直接钉死“从顶部向下增长”；长 transcript 用 PageUp 或鼠标滚轮上滚后，动态增高 prompt 和新增输出不得抢回跟尾，footer 累积 `N new`；PageDown 到底、End 或 `/latest` 才清 unread。
 3. `usage_update` 使用 `contextTokens`,不误用 cumulative；无 limit 的纯函数测试显示 `limit unknown`。
-4. prompt 空输入默认 1 行；Shift+Enter 显式换行增高，首次输入后 header 从 onboarding 收缩为 3 行任务栏，100→54→100 resize 时软换行按 1→2→1 行变化且 tips/Logo 不再弹回。12 行输入封顶 8 行时末行与光标仍可见、Textarea 已内部滚动，窄/宽 footer 都锚定 task/workspace/runtime 三行，transcript 至少保留 1 行真实内容。审批使用非空多行 draft + 60×18 compact 布局，断言持久 footer 键位、黄色双横线和冻结光标，决议后恢复 workspace、可见光标与洋红双横线。9/7/5/3/2/1 行分别带长 draft 验证 ultra-compact 光标不越界且末行可见，1 行审批只显示键位并隐藏光标。
+4. prompt 空输入默认 1 行；Shift+Enter 显式换行增高，首次输入后 header 从 onboarding 收缩为 3 行任务栏，100→54→100 resize 时软换行按 1→2→1 行变化且 tips/Logo 不再弹回。12 行输入封顶 8 行时末行与光标仍可见、Textarea 已内部滚动，窄/宽 footer 都锚定 task/workspace/runtime 三行，transcript 至少保留 1 行真实内容。审批使用非空多行 draft + 60×18 布局，断言完整临时面板、末项下方灰色留白、框外透明确认提示和冻结光标，决议后恢复 workspace、可见光标与洋红双横线；40×10 + 多行 command/reason 逐次切换 selection，当前选项仍可见，禁止 blind selection。
 5. mock keys 验证常规 Return(作为 Enter)与 Kitty keypad Enter submit、Shift+Enter newline；CJK 与 ZWJ emoji 的程序化赋值后光标位于 buffer 末尾。mock mouse 先使 Textarea 失焦再点击输入区,验证其自行恢复焦点,且 visible/line/blinking 硬件光标重新落在 prompt 边界和输入列范围内。终端窗口失焦后的空心 inactive cursor 由终端模拟器绘制,不属于 TestRenderer 的 framebuffer 状态。
-6. sanitizer 纯函数注入 CSI/OSC/DCS/C0/C1；live user/assistant/tool/plan/approval/error 路径分别注入 OSC,断言帧中不存在 ESC/BEL。terminal title 额外折叠 tab/newline 并移除 OSC；多 text/reasoning part 在 streaming 与 final 两条路径保持相同分块。
-7. 恢复转录断言 tool call 参数生成原摘要、plan tool result 恢复最新步骤、plan error 可见,且畸形 plan details 回退为普通工具结果。
-8. 以真实 `Session` + faux stream 驱动 TUI controller,通过 mock input 的真实 ANSI PageUp/PageDown 序列验证按键被消费、转录滚动且输入焦点/内容不丢；同时覆盖 retry backoff 的 Enter=steer、Esc=cancel,以及审批时非空 draft 下持久键位先可见、只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。compaction 在本文件用 SessionEvent 投影 + 纯键位决策覆盖；真实摘要 gate、暂存 prompt 与 abort 生命周期由 session 层测试负责,不得把它表述成 controller 集成覆盖。
+6. sanitizer 纯函数注入 CSI/OSC/DCS/C0/C1；live user/assistant/tool/plan/approval/error 路径分别注入 OSC,断言帧中不存在 ESC/BEL。terminal title 额外折叠 tab/newline 并移除 OSC；多 text part 在 streaming 与 final 两条路径保持相同分块；只有 `ReasoningPart.kind:'summary'` 替换 prompt 正上方的 Working 行，raw/content/未标记 reasoning 不显示、不封口探索，终态不遗留 thinking transcript 卡片。
+7. 工具块间距断言独立调用恰隔一行，同一调用的完成摘要与 diff 连续无空行；TUI 还断言嵌套 diff 仍可搜索，classic/plain 同步验证该节奏。live/replay 的探索失败必须显示 `✗` 摘要，`[read, edit, read]` 形成两个块且 edit 不拆开；tool/reasoning-only assistant 不新增空 block。bash mono 成败分别为 `• Ran` / `[x] Ran`，命令 ZWJ grapheme 不拆分且 omission marker 不超宽。plan 展示纯函数断言 `Updated Plan`、完成进度、树状首项/续行缩进与 CJK/长词安全折行；TUI 逐 span 断言 completed 弱化、in-progress cyan 焦点、pending 弱化，并在 mono 下验证 `[x]` / `[>]` / `[ ]`；TUI 与 plain 恢复都只显示最后一个成功 plan，plan error 可见，畸形 details 回退普通工具结果。
+8. 以真实 `Session` + faux stream 驱动 TUI controller,通过 mock input 的真实 ANSI PageUp/PageDown 序列验证按键被消费、转录滚动且输入焦点/内容不丢；同时覆盖 retry backoff 的 Enter=steer、Esc=cancel,以及审批时非空 draft 下持久键位先可见、只有无修饰 y/a/n/Esc 生效、paste 全量冻结且决议后恢复。两条 pending approval 只显示队首，输入抢占 active diff/session panel，第一张决议后才显示第二张；第一工具启动不能撤下第二张。彩色 active run 的退出顺序断言 screen destroy/drop-live 先于 renderer idle，防止 shutdown 悬挂。compaction 在本文件用 SessionEvent 投影 + 纯键位决策覆盖；真实摘要 gate、暂存 prompt 与 abort 生命周期由 session 层测试负责,不得把它表述成 controller 集成覆盖。
+   exploration 另以定向用例覆盖 parallel group 封口后等待全部 result、缺失 result 不伪造成功，以及
+   completed read A + unmatched read B 在 classic/TUI replay 中仍保持 a.ts → b.ts 的声明顺序。
+   approval lifecycle 另覆盖 recovered initial snapshot、targeted initial 的 supersede，以及
+   resolve snapshot 不跨中间 legacy event 被后续 request level 合并，
+   外部 allow/deny/abort 与 already-claimed/not-found 清除队首；TUI 同 head snapshot 不重置
+   selection/展开态，classic/line 同步 seed 在首个输入前建立门禁，且 headless wire 不增加事件类型。
 9. CLI 配置纯函数钉死“无硬编码默认模型”：TTY 交互无 key/model 可进入未选择状态，headless、
    一次性与管道在 Session 创建前 fail-fast；空白 flag/env/file key 不得遮蔽低优先级有效来源。
 10. `ProviderCommandController` 以 fake view + 离线 registry 覆盖 OpenCode Go/OpenAI/Anthropic/Custom
@@ -833,12 +845,15 @@ CLI/Agent 的既有行为 fixture。
     在 `turn_end` 前的 diff、review/diff query 与 Git port 缺省；file storage 另验证 frozen prompt round-trip
     与 digest tamper fail-closed。`legacy-session-runtime/index.test.ts` 验证 seeded
     create 和 manual compact 不隐式 continue。`runtime-frontend.test.ts` 用两个 thread/cursor 证明后台 run
-    在 switch 后完成、new 失败回滚、snapshot/live splice 和 target pending approval；presentation action 的
+    在 switch 后完成、new 失败回滚、snapshot/live splice 和 target pending approval；审批测试还覆盖
+    initial level snapshot 不越过 canonical request、同 requestId 的跨 thread 隔离、迟到 receipt、
+    envelope-first already-claimed、failed-new 回滚期间不发布缓存旧卡，以及 accepted response 以 interrupted
+    终止后按原 opId 恢复；presentation action 的
     故障注入证明源 flush 不可写时 Runtime action 零调用且画面/approval 保持源，目标投影失败则回切源；
     `presentation-state.test.ts` 验证跨 thread draft/scroll/unread/panel 独立恢复；`git-review-port.test.ts`
     在真实临时 Git repo 中验证 staged/unstaged/untracked 完整 patch 且无 shell interpolation；
     `review-format.test.ts` 验证 full output 与 sanitizer。TUI TestRenderer 覆盖 diff file/scope navigation、
-    picker 对完整 catalog 的 live search、折叠/展开 approval/reasoning 与窄屏 composer；classic/line REPL
+    picker 对完整 catalog 的 live search、approval 与 Working 行的窄屏 composer；classic/line REPL
     则从同一 RuntimeWorkspaceActions 执行所有文本等价命令。classic 还断言 attachment replay 恰好一次、
     switch 后 Ctrl+R 不可命中源 prompt；running `/archive off` 必须解析为 command 而不是 steer。现代
     presentation 缺少 allow-always scope 时，TUI/classic/line 的 `a` 都不得提交或移除 pending card，legacy
@@ -890,7 +905,7 @@ Agent review**。第一轮覆盖全部阶段范围，修复后复跑定向测试
 | UX0 | `src/cli/ux-characterization.test.ts` 冻结 40×10/80×24/120×40、CJK/emoji、NO_COLOR、TERM=dumb、tmux/SSH 路由和性能数量级；文档记录六旅程/parity | 生产文件零变化；现有 CLI/TUI/headless tests 原样通过 |
 | UX1 | `e2e/product-cli.test.ts` 对构建产物验证 help/version/completion 零副作用、usage stdout/stderr/exit、doctor/auth/models/sessions/exec；`command-catalog.test.ts` 验证统一 parser/help/completion/slash/shortcut；`renderer.test.ts`、`repl.test.ts`、`line-repl.test.ts`、`provider-commands.test.ts`、`tui.test.ts` 覆盖 sanitizer、classic 多行/cursor/paste、accessible 最低模式与 onboarding | 所有旧 flags、裸 prompt、`-p`、continue/resume、默认 legacy NDJSON 与 envelope golden |
 | UX2 | compact header/status、palette availability/fuzzy search；Ctrl+R/editor/stash/`@`/per-thread draft；scroll/search/unread/copy/export；provider 全表单 taint 隔离与 durability fault injection；cold pending→attached migration；workspace permission snapshot | Enter/steer/follow-up/abort/control identity；UI 只读 snapshot/envelope |
-| UX3 | reasoning/tool cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
+| UX3 | reasoning Working 摘要/工具 cards、完整 diff viewer、session picker/switch、approval presentation 的 snapshot/live 深等、retry/fork/recovery；跨 thread abort/control 隔离 | background run 不因切换停止；PreparedInvocation/PolicyEngine 的权威 scope 由 Runtime 投影进 snapshot/envelope，UI 不直读或重算 |
 | UX4 | accessible ASCII/theme/PTY 加固；frame coalescing/virtualization；output/final-only/ephemeral/timeout；真实 PTY 全退出矩阵；1000 history/10k delta/100ms input | 默认 `--json` 逐字节兼容，普通 observer/慢 UI 不背压 Runtime |
 
 UX4 实现门禁落在四组可机械定位的测试中：`command-catalog.test.ts` 与
@@ -909,7 +924,7 @@ harness 还在启动命令前固定 `stty sane` 并记录 `stty -g`，进程 EOF
 UX0 characterization 的精确职责：
 
 1. 三个 viewport 都必须保留 task 文本、draft、workspace、context 和 viewport 内光标；40×10 隐藏
-   Logo/tips/model，80×24 与 120×40 保留完整层级。
+   Logo/tips/model 与紧凑 header，为双横线 user prompt 让出空间，80×24 与 120×40 保留紧凑 taskbar。
 2. CJK、ZWJ emoji 和宽字符不以 UTF-16 length 计算光标列；characterization 断言 composer 的精确显示
    列，classic 的简化 wcwidth 另有纯函数覆盖。
 3. `TERM=dumb` 双 TTY 让 main 共用的 routing predicate 返回 false；`screen-256color`、

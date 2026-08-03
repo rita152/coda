@@ -376,6 +376,18 @@ describe('EventEnvelope validation', () => {
       contentIndex: 0,
       partial: textPartial,
     }));
+    validateEventEnvelope(messageUpdate({
+      type: 'reasoning_end',
+      contentIndex: 0,
+      content: 'safe summary',
+      partial: assistant([{ type: 'reasoning', kind: 'summary', text: 'safe summary' }]),
+    }));
+    expectInvalid(messageUpdate({
+      type: 'reasoning_end',
+      contentIndex: 0,
+      content: 'unknown reasoning',
+      partial: assistant([{ type: 'reasoning', kind: 'unknown', text: 'unknown reasoning' }]),
+    }));
     expectInvalid(messageUpdate({
       type: 'text_end',
       contentIndex: 0,

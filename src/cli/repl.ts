@@ -28,7 +28,10 @@ import type {
   CliSession,
   InteractiveSession,
 } from './interactive-runtime.js';
-import type { RuntimeWorkspaceActions } from './runtime-frontend.js';
+import type {
+  PendingApprovalView,
+  RuntimeWorkspaceActions,
+} from './runtime-frontend.js';
 import { ProviderCommandController } from './provider-commands.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import {
@@ -532,7 +535,9 @@ export async function startRepl(
   const stdin: ReplInput = opts.stdin ?? process.stdin;
   let input = '';
   let cursor = 0;
+  type ApprovalRequestEvent = Extract<SessionEvent, { type: 'approval_request' }>;
   const approvalQueue: string[] = []; // pending approvalId FIFO(非空 = 审批键位模式)
+  const approvalEvents = new Map<string, ApprovalRequestEvent>();
   const history = new InputHistory();
   history.replace(promptHistoryEntries(session.messages));
   const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
@@ -554,8 +559,11 @@ export async function startRepl(
   let providerBeginning = false;
   let reverseSearchQuery: string | undefined;
   const transcriptSearch = new MessageTranscriptSearch(() => session.messages);
-  const enqueueApproval = (approvalId: string): void => {
-    if (!approvalQueue.includes(approvalId)) approvalQueue.push(approvalId);
+  const enqueueApproval = (event: ApprovalRequestEvent): boolean => {
+    if (approvalEvents.has(event.approvalId)) return false;
+    approvalEvents.set(event.approvalId, event);
+    approvalQueue.push(event.approvalId);
+    return true;
   };
 
   return await new Promise<number>((resolve) => {
@@ -599,6 +607,61 @@ export async function startRepl(
       statusShown = false;
       renderer.setStatus?.(undefined);
     };
+
+    const renderCurrentApproval = (): void => {
+      const approvalId = approvalQueue[0];
+      const event = approvalId === undefined ? undefined : approvalEvents.get(approvalId);
+      renderer.setApprovalRequest?.(event === undefined
+        ? undefined
+        : {
+            description: event.description,
+            allowAlways: approvalAllowsAlways(
+              opts.workspace?.approvalPresentation(event.approvalId),
+            ),
+          });
+    };
+    const clearApprovalQueue = (): void => {
+      approvalQueue.length = 0;
+      approvalEvents.clear();
+      renderCurrentApproval();
+    };
+    const replaceApprovalQueue = (
+      requests: readonly PendingApprovalView[],
+    ): readonly PendingApprovalView[] => {
+      const previousHead = approvalQueue[0];
+      const known = new Set(approvalEvents.keys());
+      approvalQueue.length = 0;
+      approvalEvents.clear();
+      for (const request of requests) {
+        enqueueApproval({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
+      }
+      if (previousHead !== approvalQueue[0]) renderCurrentApproval();
+      return requests.filter((request) => !known.has(request.approvalId));
+    };
+    const renderRecoveredApprovals = (requests: readonly PendingApprovalView[]): void => {
+      for (const request of requests) {
+        renderer.render({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
+        formatApprovalPresentation(
+          opts.workspace?.approvalPresentation(request.approvalId),
+          request.description,
+        ).forEach((line) => renderer.println?.(line));
+      }
+      renderCurrentApproval();
+    };
+
+    if (opts.workspace !== undefined) {
+      renderRecoveredApprovals(replaceApprovalQueue(opts.workspace.pendingApprovals()));
+    }
 
     const canAbort = (): boolean => interactionCanAbort(session.interactionState());
 
@@ -679,14 +742,13 @@ export async function startRepl(
       } else if (e.type === 'approval_request') {
         // Runtime projects canonical control_request through the primary event stream. Direct
         // Session keeps the legacy broker side channel below; id de-duplication supports both.
-        enqueueApproval(e.approvalId);
-        renderer.setApprovalAllowsAlways?.(approvalAllowsAlways(
-          opts.workspace?.approvalPresentation(e.approvalId),
-        ));
-        formatApprovalPresentation(
-          opts.workspace?.approvalPresentation(e.approvalId),
-          e.description,
-        ).forEach((line) => renderer.println?.(line));
+        if (enqueueApproval(e)) {
+          formatApprovalPresentation(
+            opts.workspace?.approvalPresentation(e.approvalId),
+            e.description,
+          ).forEach((line) => renderer.println?.(line));
+        }
+        renderCurrentApproval();
       } else if (e.type === 'error' && e.fatal) {
         void shutdown(1); // 致命错误进入退出流程(docs/09 §4)
       }
@@ -695,11 +757,14 @@ export async function startRepl(
     // approval_request 分支负责——main.ts 已把同一通道接到 renderer.render)。
     const unsubApproval = approval?.subscribe((e) => {
       if (e.type === 'approval_request') {
-        enqueueApproval(e.approvalId);
-        renderer.setApprovalAllowsAlways?.(approvalAllowsAlways(
-          opts.workspace?.approvalPresentation(e.approvalId),
-        ));
+        enqueueApproval(e);
+        renderCurrentApproval();
       }
+    });
+    const unsubPendingApprovals = opts.workspace?.subscribePendingApprovals((snapshot) => {
+      if (snapshot.threadId !== opts.workspace?.currentThreadId || closing) return;
+      const recovered = replaceApprovalQueue(snapshot.approvals);
+      renderRecoveredApprovals(recovered);
     });
     const unsubAttached = opts.providerCommands?.runtime.subscribeSessionAttached(
       (messages) => {
@@ -721,8 +786,9 @@ export async function startRepl(
       opts.fatalSignal?.removeEventListener('abort', onFatalSignal);
       unsub();
       unsubApproval?.();
+      unsubPendingApprovals?.();
       unsubAttached?.();
-      approvalQueue.length = 0;
+      clearApprovalQueue();
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       renderer.unmount?.();
@@ -736,7 +802,7 @@ export async function startRepl(
         if (forceAbort || canAbort()) {
           session.abort();
           // R7 时序:abort 在前;pending 审批以 'abort' 决议,否则 waitForIdle 挂死
-          approvalQueue.length = 0;
+          clearApprovalQueue();
           approval?.onAbort();
         }
         await providerController?.close();
@@ -841,12 +907,17 @@ export async function startRepl(
       if (workspace === undefined) return latestPromptDraft;
       const state = opts.presentation?.store.switchToThread(workspace.currentThreadId);
       history.replace(promptHistoryEntries(session.messages));
-      approvalQueue.length = 0;
+      clearApprovalQueue();
       latestPromptDraft = state?.draft ?? '';
       setInput(latestPromptDraft);
       renderer.println?.(`— switched to ${workspace.currentThreadId} —`);
       for (const request of workspace.pendingApprovals()) {
-        enqueueApproval(request.approvalId);
+        enqueueApproval({
+          type: 'approval_request',
+          approvalId: request.approvalId,
+          toolCallId: request.toolCallId,
+          description: request.description,
+        });
         renderer.render({
           type: 'approval_request',
           approvalId: request.approvalId,
@@ -861,6 +932,7 @@ export async function startRepl(
           request.description,
         ).forEach((line) => renderer.println?.(line));
       }
+      renderCurrentApproval();
       return latestPromptDraft;
     };
 
@@ -1304,7 +1376,7 @@ export async function startRepl(
           // Esc 在审批模式的语义 = 决议 abort;时序纪律(R7):先 session.abort()
           //(任务观察到 cancellation),再 policy.onAbort()(pending 以 'abort' 决议)——
           // 顺序反了,审批结果会以「拒绝」形态漏给模型。
-          approvalQueue.length = 0;
+          clearApprovalQueue();
           session.abort();
           approval.onAbort();
           return;
@@ -1319,7 +1391,11 @@ export async function startRepl(
             return;
           }
           approvalQueue.shift();
-          if (id !== undefined) approval.broker.resolve(id, decision);
+          if (id !== undefined) {
+            approvalEvents.delete(id);
+            approval.broker.resolve(id, decision);
+          }
+          renderCurrentApproval();
           return;
         }
         return; // 审批模式吞掉其余非 Ctrl 键位(输入行冻结,防误触)

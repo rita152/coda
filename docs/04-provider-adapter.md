@@ -487,7 +487,8 @@ client.responses.create({
   tools: convertTools(context.tools),
   stream: true,
   include: ['reasoning.encrypted_content'],
-  // options/defaults 按需映射 max_output_tokens、temperature、reasoning
+  reasoning: { summary: 'auto', /* effort 仅在 options/defaults 明确给出时加入 */ },
+  // options/defaults 按需映射 max_output_tokens、temperature、reasoning effort
 }, { signal });
 ```
 
@@ -506,6 +507,19 @@ client.responses.create({
 `ToolCallPart.id` 在本 adapter 中明确等于 Responses `call_id`，不是 output item 的 `id`。
 这是本地工具结果与 `function_call_output.call_id` 配对的唯一键。adapter 只做转换，**不得执行工具**；
 工具发现、审批、调度与执行继续完全属于 agent loop。
+
+首次 Responses 请求显式发送 `reasoning.summary:'auto'`，即使未指定 `reasoning.effort` 也请求摘要。
+它请求的是 API 可返回的 reasoning **摘要**，不是原始 reasoning tokens；TUI 只用 public
+`ReasoningPart.kind === 'summary'` 的文本更新临时 Working 行，Runtime review 仍是完整 canonical
+message/reasoning 内容的读取面。加密 replay 数据继续由 `include:['reasoning.encrypted_content']`
+保留，不能因摘要 UI 而移除。
+
+非 reasoning Responses 模型和兼容端点可能拒绝整个 `reasoning` 参数。adapter 只在首次参数是严格的
+summary-only `{summary:'auto'}`，且 SDK 抛出 HTTP 400、结构化 `param` 精确为 `reasoning` 或
+`reasoning.summary` 时，复制参数并省略整个 `reasoning` 字段重试**一次**。显式 effort、任何未来
+reasoning 选项、无结构 message-only 400、401/403/422/429/5xx、网络错误和已经开始的 SSE 流都不得
+降级；第二次请求前再次检查 abort，第二次失败直接进入既有唯一 error 终态。这里不做模型名猜测、
+全局负缓存或第三次请求。
 
 ### 11.2 transcript 是唯一事实源
 
@@ -537,7 +551,8 @@ reconciliation 快照：只允许补上已流式前缀的缺失后缀；若完�
 非重试协议错误，而不是静默改写 transcript。两个并行 call 各有独立槽位，任何时候都不能用
 “最后一个块”推断当前目标。
 
-reasoning summary/content 分别成为现有 `ReasoningPart`。output item 完成时若得到
+reasoning summary/content 分别成为 `kind:'summary'` / `kind:'content'` 的 `ReasoningPart`；item-only
+replay 占位不设置 public `kind`。output item 完成时若得到
 `encrypted_content`，adapter 更新该 part 的私有 signature 信封，使同一
 `ModelRef` 的下一轮全量 replay 可以恢复原 Responses reasoning item；跨模型时既有 transform
 规则会将它降级为文本并剥离信封。若 reasoning item 没有任何可见 summary/content，仍必须生成
@@ -563,6 +578,7 @@ reasoning summary/content 分别成为现有 `ReasoningPart`。output item 完�
 
 上游事实依据以 OpenAI 官方文档为准:
 [streaming Responses](https://developers.openai.com/api/docs/guides/streaming-responses)、
+[reasoning summaries](https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries)、
 [streaming function calls](https://developers.openai.com/api/docs/guides/function-calling#streaming)、
 [Responses migration](https://developers.openai.com/api/docs/guides/migrate-to-responses) 与
 [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events)。

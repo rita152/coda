@@ -12,7 +12,7 @@
 UX1 的 command catalog、产品子命令、UI routing、onboarding、sanitizer、classic 编辑修复与最低
 accessible/plain 文本面已经完成两轮 review；UX2 的信息层级、palette、composer、per-thread
 presentation state 与 transcript 导航也已完成恰好两轮 review。UX3 的 Runtime-backed review/diff、
-approval card、session switch、manual compact 与 conversation fork/retry 已完成实现及恰好两轮完整
+approval panel、session switch、manual compact 与 conversation fork/retry 已完成实现及恰好两轮完整
 review；第二轮修复后只做了定向验证。UX4 的 accessible ASCII/theme、限帧、历史分段、automation
 output 与真实 PTY 已完成实现及恰好两轮完整 review；第二轮修复后只做了定向验证，未发起第三轮。
 UX0/UX1 历史矩阵继续保留，便于区分阶段观察值、已交付行为和最终目标。
@@ -89,7 +89,8 @@ preset/action/catalog 语义；TUI/classic 共用交互 controller，CLI 使用�
 ### 2.3 启动长任务、观察进度并中途 steer
 
 发送 prompt 后，持久状态区至少展示：thread、run phase、模型、权限模式、context、Git branch/dirty、
-steering/follow-up 队列数量。正文按 turn 展示 assistant 流、reasoning 摘要、工具 activity 和等待原因。
+steering/follow-up 队列数量。正文按 turn 展示 assistant 流、工具 activity 和等待原因；活跃 composer 的
+prompt 正上方持续显示流光 Working，若 API 返回 reasoning summary 则原位显示该单行摘要。
 运行中 Enter 保持 steering；Alt+Enter 或 `/followup` 保持 follow-up；Esc 只 abort 当前可见目标
 `(threadId, expectedRunId)`。
 
@@ -105,8 +106,20 @@ fallback；同一 `expectedRunId` 的迟到 abort 返回 `stale_run` 时视为�
 
 ### 2.4 检查工具调用和代码 diff
 
-工具摘要必须能回答名称、目标资源、耗时、状态和结果摘要；完整参数/输出按需展开。reasoning 默认折叠，
-只显示状态和耗时。diff viewer 只使用 Runtime/tool 事件和 `RuntimePort` 的只读 diff query，区分当前
+工具摘要必须能回答名称、目标资源、耗时、状态和结果摘要；完整参数/输出按需展开。不同工具调用之间
+保留恰好一行，用于扫描调用边界；同一调用的摘要、完成态和兼容 diff 必须紧贴，不能把 diff 的每一行
+做成独立有间距的转录条目。连续的
+`read` / `ls` / `glob` / `grep` 是转录紧凑例外：一个 `Exploring` / `Explored` 块只列行动和目标，
+相邻 read 合并路径；逐调用耗时、状态、失败与完整结果仍以 Runtime 和 `/review` 为准，紧凑块不得
+伪造成功或丢弃失败事实。并行探索在 presentation 边界封口后仍要等待全部真实 result；中止/恢复时
+缺失 result 的组只能显示 incomplete/running，不得伪装成 `Explored`。replay 中 paired 与 unmatched
+调用仍按 assistant content 的声明顺序投影，不能因 result 位于后续消息而颠倒。plan 是整表替换的单一
+checklist，不积累旧快照：`Updated Plan` 标题携带
+完成计数，首项以树状 connector 承接，completed 弱化/划线、in-progress 强调、pending 弱化；窄宽续行保持
+状态文本列对齐，无色面改用显式 `[x]` / `[>]` / `[ ]`。`bash` 以单块呈现：运行时显示 `Running`，成功完成显示 `• Ran`，失败显示 `✗ Ran`（无色为 `[x] Ran`）；
+可执行文件、flag、引号字符串和 shell 分隔符高亮，长命令以竖线续行。输出首两行和末两行可见，
+中段折叠为指向 `/review` 的提示，且不重复展示工具尾部的 `exit code N`。reasoning 不写入 transcript：
+Working 临时显示 API 返回的摘要，`/review` 才提供完整内容。diff viewer 只使用 Runtime/tool 事件和 `RuntimePort` 的只读 diff query，区分当前
 turn 与工作区总 diff，并分组 staged、unstaged、untracked。Runtime 实现可在端口后注入 Git snapshot
 service，但 UI/CLI 不直接访问 Git 或 repository，也不根据自由文本猜文件或权限资源；当前 query 与
 composition port 已同步维护在 12 的 public RuntimePort 契约。
@@ -336,9 +349,10 @@ presentation state 混入 Runtime journal。
 
 | 动作 | OpenTUI | classic | accessible / plain interactive | canonical Runtime |
 |---|---:|---:|---:|---:|
-| reasoning/tool review | transcript 折叠摘要；`/review` 完整展开 | append-only 完整 section | append-only 完整 section | `getReviewSnapshot()`；args/output 不截断 |
+| reasoning/tool review | prompt 上方 Working 临时摘要；`/review` 完整展开 | 交互动态活动行显示摘要；plain 不追加 reasoning 行 | append-only review 命令 | `getReviewSnapshot()`；args/output 不截断 |
 | diff | viewer 文件左右切换、上下滚动、Tab scope | `/diff` 完整文本 | `/diff` 完整文本 | `getDiffSnapshot(turn\|workspace)`；staged/unstaged/untracked/turn |
-| approval | 折叠 card；`v` 权威详情；y/a/n/Esc | 权威详情文本 + 兼容键位 | 权威详情文本 + decision command | pending control 的 `ApprovalPresentation` |
+| approval | 固定底部临时 panel（不进 transcript）；↑/↓/Enter + y/a/n/Esc；`v` 权威详情 | 权威详情文本 + 兼容键位 | 权威详情文本 + decision command | pending control 的 `ApprovalPresentation` |
+| conversation roles | user prompt 使用 composer 同款透明双横线；assistant 无 `coda` 标签直接输出 | append-only 文本角色提示 | append-only 文本角色提示 | committed `AgentMessage.role/source` |
 | sessions | searchable picker；new/resume/switch/rename/archive | 同名文本命令 | 同名文本命令 | thread details query + lifecycle/metadata op |
 | background switch | per-thread draft/scroll/unread；源 run 继续 | 同语义 attachment switch | 同语义 attachment switch | workspace stream + per-thread cursor/snapshot splice |
 | compact/retry/fork | palette/slash | 文本命令 | 文本命令 | manual activity；seeded checkpoint + stable retry op |
@@ -419,15 +433,28 @@ Enter、Alt+Enter、Esc 的 prompt/steer/follow-up/abort 语义保持 UX1 值。
 
 | 动作 | OpenTUI | classic | accessible / plain |
 |---|---|---|---|
-| approval details | `v` 展开 card；y/a/n/Esc | 先打印权威详情；y/a/n/Esc | append-only 详情 + decision 文本输入 |
+| approval details | 临时替换 composer；↑/↓/Enter；`v` 展开；y/a/n/Esc | 先打印权威详情；y/a/n/Esc | append-only 详情 + decision 文本输入 |
 | diff viewer | `/diff`；←/→ 文件、↑/↓ 滚动、Tab scope、Esc 返回 | `/diff [turn\|workspace]` 完整输出 | 同名文本命令完整输出 |
 | session picker | `/sessions`；输入搜索、↑/↓、Enter、Esc | `/sessions [query]` + `/switch`/`/resume` | 同名文本命令 |
 | review/permissions | `/review`、`/permissions` | 同名文本命令 | 同名文本命令 |
 | lifecycle | `/new`、`/rename`、`/archive`、`/compact`、`/retry`、`/fork` | 同名文本命令 | 同名文本命令 |
 
 picker/diff panel 打开时普通 draft 仍由当前 thread 的 presentation store 持有；切换成功才 swap 到目标
-state。审批的 `v` 只影响展示，不提交 control。legacy request 没有 authoritative presentation 时显示
-scope unavailable；既有 allow-always 输入语义为兼容保留，但 UI 不伪造精确 scope。现代 card 没有
+state。审批 panel 属于 ephemeral input surface：它固定在页面底部、替换 ordinary composer、不得注册
+transcript block；灰色 surface 只包审批内容、选项及末项下方一行留白，确认提示位于其下方的透明 footer；决议后销毁并恢复
+原 draft/焦点。pending queue 只显示队首，审批键位优先于 diff/session 等背景 panel；决议后才展示下一张。
+三个交互面在安装输入 handler 前同步 seed 当前 thread 的 pending queue，再订阅
+`RuntimeFrontendSession` 的 frontend-private level snapshot；snapshot 与 legacy event fanout 共用有序
+队列，但不进入 headless wire。外部窗口的 allow/deny/abort、already-claimed/not-found 或 thread switch
+必须原子替换本地 FIFO、撤下陈旧队首并解除输入冻结；同一队首的重复 snapshot 不能重置 TUI
+selection/展开态。本地 response 入队后按 `(threadId, requestId, opId)` 临时隐藏卡片；non-silent
+`op_rejected` 或 `control_response` 的 interrupted 终态恢复仍 pending 的卡，`control_resolved` 与两类
+silent race 则撤下它，任何迟到旧 op 都不能清除新 response 的状态。每次 broadcast level 都在其
+canonical 入队点冻结，不能越过中间 legacy event 被后续 level 合并；targeted initial replay 被更新
+broadcast supersede 时才允许跳过。
+多行详情或矮窗口放不下完整内容时，panel 围绕当前选项移动窗口，当前决议项必须始终可见。`↑`/`↓` 只改变 presentation selection，`Enter` 才提交
+当前项；`v` 只影响展示，不提交 control。legacy request 没有 authoritative presentation 时显示 scope
+unavailable；既有 allow-always 输入语义为兼容保留，但 UI 不伪造精确 scope。现代 panel 没有
 `allowAlways` 时三个交互面都隐藏 `a`，手工输入也只报告 unavailable 并保持 request pending；只有冻结
 scope 实际存在才显示并接受该动作。
 
@@ -525,8 +552,8 @@ JSON escaping；任何伴随的人类诊断仍先清洗。
 
 | 环境 | UX0 实际行为 |
 |---|---|
-| 40×10 | 4 行紧凑 header；无 Logo/tips/model；保留 transcript 内容、draft、workspace、context 和可见光标 |
-| 80×24 | 完整 9 行 header、Logo/tips、transcript、prompt、workspace、context/model |
+| 40×10 | 首次交互后隐藏紧凑 header；无 Logo/tips/model；保留双横线 user prompt、draft、workspace、context 和可见光标 |
+| 80×24 | 首次交互后使用 3 行紧凑 header；保留 transcript、prompt、workspace、context/model |
 | 120×40 | 与 80×24 同层级，更多 transcript 空间；不把短内容贴到底部 |
 | CJK / emoji | TestRenderer 保留 CJK/ZWJ emoji，并精确断言 composer 光标显示列；classic 使用简化 wcwidth |
 | `NO_COLOR` / `--no-color` | UX0 冻结等价 renderer；UX1 由实际 parser/main wiring 与 renderer 回归验证 `color:false`，append-only 面不生成 cursor 控制 |
@@ -537,8 +564,9 @@ JSON escaping；任何伴随的人类诊断仍先清洗。
 | stdin 非 TTY | 无 `--json` 时读为 one-shot prompt；`--json` 时 NDJSON |
 
 UX2 characterization 在写入 ordinary draft/user message 后视为“首次交互已发生”：40×10、80×24 与
-120×40 都不再显示 Logo/tips；40 列可裁掉完整 model 字符串，80/120 列保留紧凑 taskbar 与 model。
-首次交互前的 onboarding frame 仍按表中的 UX0 尺寸层级显示，resize 不会让已收缩的装饰重新出现。
+120×40 都不再显示 Logo/tips；40×10 进一步隐藏紧凑 header，为三行双横线 user prompt 与完整 footer
+让出空间，40 列可裁掉完整 model 字符串，80/120 列保留紧凑 taskbar 与 model。首次交互前的 onboarding
+frame 仍按 viewport 尺寸选择完整或精简层级，resize 不会让已收缩的装饰重新出现。
 
 UX4 的真实 PTY 矩阵在此基础上实际覆盖正常退出、40×10 resize + 多行 bracketed paste、运行中 abort、
 approval abort、fatal、悬挂 provider HTTP 请求中退出、OpenTUI 初始化失败降级、`TERM=dumb`、
@@ -574,7 +602,7 @@ UX4 已消除“每个 delta 立刻重排 Markdown”的债务：同一 native f
 | UX0 | 本文、09/10/11/地图与 characterization tests | 生产行为零变化；环境/性能/旅程/parity 有证据 |
 | UX1 | command catalog、help/version、CLI 子命令、`--ui`、onboarding、sanitizer、classic 修复、README；accessible 最低 append-only/no alternate-screen/no animation/no mouse | 已完成恰好两轮 review；help/version 零副作用且 legacy flags/wire 全绿 |
 | UX2 | TUI 层级、palette、composer、presentation state、搜索/copy/export | 已完成恰好两轮 review；cold pending draft 可恢复并迁移，permission 只读 Runtime workspace snapshot；provider 全表单隔离；durability failure 可见且不清 draft |
-| UX3 | reasoning/tool/diff/review、session workflow、approval cards、manual compact、retry/fork | 已完成恰好两轮 review；UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
+| UX3 | reasoning/tool/diff/review、session workflow、approval panel、manual compact、retry/fork | 已完成恰好两轮 review；UI 只展示 Runtime/PreparedInvocation/PolicyEngine 权威范围 |
 | UX4 | accessible ASCII/theme/PTY 加固、帧合并/分段加载、自动化输出、真实 PTY | 已完成恰好两轮 review；10k delta 限帧、输入 <100ms、broken-pipe 收束与真实 termios 恢复均有门禁 |
 
 每阶段恰好两轮完整 Agent review。第一轮修复后复跑定向门禁；第二轮仍可修复并定向验证，但不得发起
