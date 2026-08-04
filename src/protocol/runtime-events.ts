@@ -122,10 +122,6 @@ export type WorkspaceWriteFenceValidation =
   | { readonly current: true }
   | { readonly current: false; readonly code: 'stale_fence' | 'wrong_workspace' };
 
-export interface WorkspaceWriteFenceAuthority {
-  validateWriteFence(fence: Readonly<WorkspaceWriteFence>): Promise<WorkspaceWriteFenceValidation>;
-}
-
 export type RuntimeControlEvent =
   | { type: 'control_request'; requestId: string;
       kind: 'approval'; owningRunId: RunId; owningTurnId: TurnId; policyRevision: string;

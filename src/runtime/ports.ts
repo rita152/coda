@@ -21,7 +21,6 @@ import type {
   WorkspaceWriteFenceValidation,
 } from '../protocol/index.js';
 import type {
-  RuntimeThreadDriverFactory,
   ThreadIdentityPort,
 } from '../session/thread-runtime-ports.js';
 import type {
@@ -36,10 +35,10 @@ export type {
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
   RuntimeClock,
+  ThreadDriverHostServices,
   ThreadCompactionCheckpoint,
   RuntimeThreadDriverAttachment,
   RuntimeThreadDriverFactory,
-  RuntimeThreadDriverHostServices,
   ThreadDriverCheckpoint,
   ThreadDriverCheckpointMutation,
   ThreadDriverCompletion,
@@ -114,8 +113,6 @@ export interface RuntimeWorkspaceReviewPort {
     readonly cwd: string;
   }): Promise<readonly Readonly<RuntimeDiffFile>[]>;
 }
-
-export type ThreadDriverFactory = RuntimeThreadDriverFactory;
 
 export interface SupervisorLease extends WorkspaceWriteFence {
   readonly processEpoch: string;

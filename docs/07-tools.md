@@ -39,7 +39,8 @@ revision 与 canonical normalized resources。
 
 `allow_always` 产生 workspace-scoped `PolicyGrant`，其 scope 使用
 `canonical_resources_v1`，并包含 resource patterns 与 attributes。grant 只命中完全相同的 capability
-identity 与 policy basis；更新 schema/executor/digest 后不得继承旧授权。
+identity 与 policy basis；更新 schema/executor/digest 后不得继承旧授权。grant repository 以
+`workspaceId` 和 Supervisor fence 确认归属，公共契约不再携带只有 `workspace` 一个取值的 mode 字段。
 
 ## 4. Approval 与 control
 

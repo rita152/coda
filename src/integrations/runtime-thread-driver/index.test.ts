@@ -13,7 +13,7 @@ import type {
 import { ProviderEventStream } from '../../protocol/index.js';
 import { emptyCheckpoint } from '../../session/index.js';
 import type {
-  RuntimeThreadDriverHostServices,
+  ThreadDriverHostServices,
   ThreadDriverCheckpoint,
   ThreadDriverEvent,
 } from '../../session/index.js';
@@ -33,7 +33,7 @@ const CEILING: PermissionCeilingSnapshot = {
 };
 const UNUSED_STREAM: StreamFn = () => new ProviderEventStream();
 type CapturedRuntimeTurn = Awaited<ReturnType<
-  NonNullable<RuntimeThreadDriverHostServices['captureRuntimeTurn']>
+  NonNullable<ThreadDriverHostServices['captureRuntimeTurn']>
 >>;
 
 describe('createRuntimeThreadDriverFactory', () => {
@@ -195,11 +195,11 @@ function checkpointWithPlan(step: string): ThreadDriverCheckpoint {
   };
 }
 
-class RegistryCaptureHost implements RuntimeThreadDriverHostServices {
+class RegistryCaptureHost implements ThreadDriverHostServices {
   readonly events: ThreadDriverEvent[] = [];
   readonly timeline: string[] = [];
   readonly captureCalls: Array<Parameters<
-    NonNullable<RuntimeThreadDriverHostServices['captureRuntimeTurn']>
+    NonNullable<ThreadDriverHostServices['captureRuntimeTurn']>
   >[0]> = [];
 
   constructor(private readonly streamFn: StreamFn) {}
@@ -245,7 +245,7 @@ class RegistryCaptureHost implements RuntimeThreadDriverHostServices {
   }
 
   async captureRuntimeTurn(
-    input: Parameters<NonNullable<RuntimeThreadDriverHostServices['captureRuntimeTurn']>>[0],
+    input: Parameters<NonNullable<ThreadDriverHostServices['captureRuntimeTurn']>>[0],
   ): Promise<CapturedRuntimeTurn> {
     this.captureCalls.push(input);
     this.timeline.push('capture:registry_turn');

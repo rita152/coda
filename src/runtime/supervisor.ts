@@ -113,7 +113,7 @@ export interface RuntimePort {
   close(): Promise<void>;
 }
 
-export interface CreateRuntimeBaseOptions {
+export interface CreateRuntimeOptions {
   readonly workspace: {
     readonly cwd: string;
     readonly workspaceId?: WorkspaceId;
@@ -125,16 +125,8 @@ export interface CreateRuntimeBaseOptions {
   readonly workspaceReview?: RuntimeWorkspaceReviewPort;
   readonly identityFactory?: RuntimeIdentityFactory;
   readonly clock?: RuntimeClock;
-}
-
-export interface CreateRuntimeOptions extends CreateRuntimeBaseOptions {
-  readonly capabilityMode: 'registry';
   readonly capabilityServices: Readonly<RuntimeCapabilityServices>;
 }
-
-export type RegistryCreateRuntimeOptions = CreateRuntimeOptions;
-
-type ValidatedCreateRuntimeOptions = CreateRuntimeOptions;
 
 export async function createRuntime(options: CreateRuntimeOptions): Promise<RuntimePort> {
   const runtimeOptions = validateCreateOptions(options);
@@ -212,7 +204,7 @@ export async function createRuntime(options: CreateRuntimeOptions): Promise<Runt
 }
 
 interface SupervisorOpenInput {
-  readonly options: ValidatedCreateRuntimeOptions;
+  readonly options: CreateRuntimeOptions;
   readonly workspaceId: WorkspaceId;
   readonly workspace: RuntimeWorkspaceStoragePort;
   readonly lease: SupervisorLease;
@@ -272,11 +264,10 @@ class Supervisor implements RuntimePort {
     this.#workspaceReview = input.options.workspaceReview;
     this.#capabilityServices = input.options.capabilityServices;
     this.#policyGrants = input.policyGrants;
-    if (input.policyGrants.workspaceId !== this.workspaceId
-      || input.policyGrants.mode !== input.options.capabilityServices.grantMode) {
+    if (input.policyGrants.workspaceId !== this.workspaceId) {
       throw new RuntimeStorageError(
         'policy_grant_storage_mismatch',
-        'Policy grant repository does not match the requested workspace/mode',
+        'Policy grant repository does not match the requested workspace',
       );
     }
     const diagnostics = [
@@ -2654,7 +2645,7 @@ function cancellationSupersedesRequest(
 
 function validateCreateOptions(
   options: CreateRuntimeOptions,
-): ValidatedCreateRuntimeOptions {
+): CreateRuntimeOptions {
   const cwd = options.workspace.cwd;
   if (
     typeof cwd !== 'string' ||
@@ -2673,10 +2664,6 @@ function validateCreateOptions(
       || !hasMethod(options.workspaceReview, 'snapshotDiff'))) {
     throw new TypeError('Runtime workspaceReview port is incomplete');
   }
-  if (options.capabilityMode !== 'registry') throw new TypeError('Canonical Runtime requires registry mode');
-  if (options.threadDriverFactory.requirements.capabilityMode !== 'registry') {
-    throw new TypeError('Canonical Runtime requires a registry ThreadDriverFactory');
-  }
   const services: unknown = (options as { readonly capabilityServices?: unknown }).capabilityServices;
   if (services === null || typeof services !== 'object' || Array.isArray(services)) {
     throw new TypeError('Registry Runtime requires a complete capabilityServices bundle');
@@ -2691,7 +2678,6 @@ function validateCreateOptions(
     'ruleBudget',
     'policyEngine',
     'ruleFreshness',
-    'grantMode',
   ];
   const ownKeys = Reflect.ownKeys(record);
   if (ownKeys.length !== expectedKeys.length
@@ -2710,15 +2696,13 @@ function validateCreateOptions(
   const ruleSnapshots = value('ruleSnapshots');
   const policyEngine = value('policyEngine');
   const ruleFreshness = value('ruleFreshness');
-  const grantMode = value('grantMode');
   if (!hasMethod(capabilities, 'snapshot')
     || !hasMethod(providers, 'snapshot')
     || !hasMethod(promptAssembler, 'assemble')
     || !hasMethod(basePrompts, 'capture')
     || !hasMethod(ruleSnapshots, 'capture')
     || !hasMethod(policyEngine, 'openThread')
-    || !hasMethod(ruleFreshness, 'check')
-    || grantMode !== 'workspace') {
+    || !hasMethod(ruleFreshness, 'check')) {
     throw new TypeError('Registry capabilityServices bundle is incomplete');
   }
   let budget: ReturnType<typeof strictJsonSnapshot>;
@@ -2747,12 +2731,10 @@ function validateCreateOptions(
     ruleBudget: budget,
     policyEngine,
     ruleFreshness,
-    grantMode,
   }) as unknown as Readonly<RuntimeCapabilityServices>;
   return Object.freeze({
     ...options,
     workspace: Object.freeze({ ...options.workspace }),
-    capabilityMode: 'registry' as const,
     capabilityServices,
   }) as CreateRuntimeOptions;
 }

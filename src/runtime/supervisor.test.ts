@@ -35,11 +35,11 @@ import type {
   RuntimeStoragePort,
   RuntimeWorkspaceStoragePort,
   RuntimeThreadDriverAttachment,
-  RuntimeThreadDriverHostServices,
+  RuntimeThreadDriverFactory,
   SupervisorOpLedgerRecord,
   ThreadDriverCheckpoint,
   ThreadDriverCompletion,
-  ThreadDriverFactory,
+  ThreadDriverHostServices,
   ThreadDriverPort,
   ThreadJournalPort,
   ThreadMetaRecord,
@@ -54,8 +54,7 @@ const CWD = '/runtime/supervisor-recovery';
 const MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'recovery' } };
 const CEILING = { revision: 'test-ceiling', constraints: [] } as const;
 
-type TestCreateRuntimeOptions = Omit<CreateRuntimeOptions, 'capabilityMode' | 'capabilityServices'> & {
-  readonly capabilityMode?: 'registry';
+type TestCreateRuntimeOptions = Omit<CreateRuntimeOptions, 'capabilityServices'> & {
   readonly capabilityServices?: Readonly<RuntimeCapabilityServices>;
 };
 
@@ -63,7 +62,6 @@ function createRuntime(
   options: TestCreateRuntimeOptions,
 ): ReturnType<typeof createCanonicalRuntime> {
   return createCanonicalRuntime({
-    capabilityMode: 'registry',
     capabilityServices: registryCapabilityServices(createPolicyEngine()),
     ...options,
   });
@@ -1945,7 +1943,6 @@ describe('Supervisor registry composition', () => {
     const drivers = new ConstructionDriverFactory();
     const runtime = await createRuntime({
       ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
       capabilityServices: registryCapabilityServices(policyEngine),
     });
     expect(actions.slice(0, 4)).toEqual([
@@ -1988,7 +1985,6 @@ describe('Supervisor registry composition', () => {
     const drivers = new ConstructionDriverFactory();
     await expect(createRuntime({
       ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
       capabilityServices: registryCapabilityServices(policyEngine),
     })).rejects.toMatchObject({ code: 'policy_grant_storage_unavailable' });
     expect(actions).toEqual([
@@ -2025,7 +2021,6 @@ describe('Supervisor registry composition', () => {
 
     const failure = await createRuntime({
       ...constructionRuntimeOptions(storageProbe.storage, drivers),
-      capabilityMode: 'registry',
       capabilityServices: registryCapabilityServices(policyEngine),
     }).then(
       async (runtime) => {
@@ -2051,7 +2046,7 @@ describe('Supervisor registry composition', () => {
     await assertWorkspaceAndJournalsReusable(storage, [firstThreadId, secondThreadId]);
   });
 
-  test('fails closed for malformed canonical bundles and driver mode mismatches', async () => {
+  test('fails closed for malformed canonical capability bundles', async () => {
     const completeServices = registryCapabilityServices(new RecordingRegistryPolicyEngine([]));
     const { ruleFreshness: _missingRuleFreshness, ...partialServices } = completeServices;
     void _missingRuleFreshness;
@@ -2067,20 +2062,10 @@ describe('Supervisor registry composition', () => {
       readonly build: (storage: RuntimeStoragePort) => unknown;
     }[] = [
       {
-        name: 'non-canonical runtime mode',
-        expected: 'Canonical Runtime requires registry mode',
-        build: (storage) => ({
-          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
-          capabilityMode: 'retired',
-          capabilityServices: completeServices,
-        }),
-      },
-      {
         name: 'partial registry bundle',
         expected: 'Registry capabilityServices has missing or unknown fields',
         build: (storage) => ({
           ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
-          capabilityMode: 'registry',
           capabilityServices: partialServices,
         }),
       },
@@ -2089,7 +2074,6 @@ describe('Supervisor registry composition', () => {
         expected: 'Registry capabilityServices has missing or unknown fields',
         build: (storage) => ({
           ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
-          capabilityMode: 'registry',
           capabilityServices: inheritedServices,
         }),
       },
@@ -2098,23 +2082,10 @@ describe('Supervisor registry composition', () => {
         expected: 'Registry ruleBudget is invalid',
         build: (storage) => ({
           ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
-          capabilityMode: 'registry',
           capabilityServices: {
             ...completeServices,
             ruleBudget: invalidRuleBudget,
           },
-        }),
-      },
-      {
-        name: 'canonical runtime with non-canonical driver',
-        expected: 'Canonical Runtime requires a registry ThreadDriverFactory',
-        build: (storage) => ({
-          ...constructionRuntimeOptions(
-            storage,
-            withInvalidCapabilityMode(new ConstructionDriverFactory()),
-          ),
-          capabilityMode: 'registry',
-          capabilityServices: completeServices,
         }),
       },
     ];
@@ -3285,7 +3256,7 @@ async function seedParentCommitBeforeChildAck(
 
 async function openRuntime(
   storage: RuntimeStoragePort,
-  drivers: ThreadDriverFactory,
+  drivers: RuntimeThreadDriverFactory,
 ): Promise<Awaited<ReturnType<typeof createRuntime>>> {
   return createRuntime({
     workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
@@ -3304,7 +3275,7 @@ async function openRuntime(
 
 function constructionRuntimeOptions(
   storage: RuntimeStoragePort,
-  drivers: ThreadDriverFactory,
+  drivers: RuntimeThreadDriverFactory,
 ) {
   return {
     workspace: { cwd: CWD, workspaceId: WORKSPACE_ID },
@@ -3382,7 +3353,6 @@ function registryCapabilityServices(policyEngine: PolicyEngine): RuntimeCapabili
     ruleFreshness: {
       async check() { return { fresh: true }; },
     },
-    grantMode: 'workspace',
   };
 }
 
@@ -3504,8 +3474,7 @@ class RecordingRegistryPolicyEngine implements PolicyEngine {
   }
 }
 
-class ConstructionDriverFactory implements ThreadDriverFactory {
-  readonly requirements = { capabilityMode: 'registry' as const };
+class ConstructionDriverFactory implements RuntimeThreadDriverFactory {
   readonly attachments: RuntimeThreadDriverAttachment[] = [];
   readonly closeCounts = new Map<ThreadId, number>();
   createCalls = 0;
@@ -3517,7 +3486,7 @@ class ConstructionDriverFactory implements ThreadDriverFactory {
   ) {}
 
   async create(
-    input: Parameters<ThreadDriverFactory['create']>[0],
+    input: Parameters<RuntimeThreadDriverFactory['create']>[0],
   ): Promise<RuntimeThreadDriverAttachment> {
     this.createCalls++;
     return this.#attachment(
@@ -3527,7 +3496,7 @@ class ConstructionDriverFactory implements ThreadDriverFactory {
   }
 
   async resume(
-    input: Parameters<ThreadDriverFactory['resume']>[0],
+    input: Parameters<RuntimeThreadDriverFactory['resume']>[0],
   ): Promise<RuntimeThreadDriverAttachment> {
     return this.#attachment(input.threadId, input.committedCheckpoint);
   }
@@ -3548,16 +3517,6 @@ class ConstructionDriverFactory implements ThreadDriverFactory {
     this.attachments.push(attachment);
     return attachment;
   }
-}
-
-function withInvalidCapabilityMode(
-  factory: ConstructionDriverFactory,
-): ThreadDriverFactory {
-  return {
-    requirements: { capabilityMode: 'retired' } as unknown as ThreadDriverFactory['requirements'],
-    create: (input) => factory.create(input),
-    resume: (input) => factory.resume(input),
-  };
 }
 
 function threadMeta(threadId: ThreadId, createdByOpId: ExternalOpId): ThreadMetaRecord {
@@ -3738,16 +3697,15 @@ class FixedPolicy implements PermissionPolicyPort {
   }
 }
 
-class RecordingDriverFactory implements ThreadDriverFactory {
-  readonly requirements = { capabilityMode: 'registry' as const };
+class RecordingDriverFactory implements RuntimeThreadDriverFactory {
   readonly #drivers = new Map<ThreadId, RecordingDriver>();
   closeCalls = 0;
   createCalls = 0;
   resumeCalls = 0;
 
   async create(
-    input: Parameters<ThreadDriverFactory['create']>[0],
-    host: RuntimeThreadDriverHostServices,
+    input: Parameters<RuntimeThreadDriverFactory['create']>[0],
+    host: ThreadDriverHostServices,
   ): Promise<RuntimeThreadDriverAttachment> {
     this.createCalls++;
     const attachment = this.#attachment(input.threadId, input.model.ref, host);
@@ -3762,7 +3720,7 @@ class RecordingDriverFactory implements ThreadDriverFactory {
       readonly model: ModelConfig;
       readonly committedCheckpoint: import('./ports.js').ThreadDriverCheckpoint;
     },
-    host: RuntimeThreadDriverHostServices,
+    host: ThreadDriverHostServices,
   ): Promise<RuntimeThreadDriverAttachment> {
     this.resumeCalls++;
     const attachment = this.#attachment(input.threadId, input.model.ref, host);
@@ -3806,7 +3764,7 @@ class RecordingDriverFactory implements ThreadDriverFactory {
   #attachment(
     threadId: ThreadId,
     model: ModelRef,
-    host: RuntimeThreadDriverHostServices,
+    host: ThreadDriverHostServices,
   ): RuntimeThreadDriverAttachment {
     const driver = new RecordingDriver(host, () => { this.closeCalls++; });
     this.#drivers.set(threadId, driver);
@@ -3823,7 +3781,7 @@ class RecordingDriver implements ThreadDriverPort {
   readonly #pending = new Map<RunId, Deferred<ThreadDriverCompletion>>();
 
   constructor(
-    private readonly host: RuntimeThreadDriverHostServices,
+    private readonly host: ThreadDriverHostServices,
     private readonly onClose: () => void,
   ) {}
 
@@ -3987,8 +3945,7 @@ class RecordingDriver implements ThreadDriverPort {
   }
 }
 
-class CheckpointMismatchFactory implements ThreadDriverFactory {
-  readonly requirements = { capabilityMode: 'registry' as const };
+class CheckpointMismatchFactory implements RuntimeThreadDriverFactory {
   resumeCalls = 0;
   closeCalls = 0;
 
@@ -4002,7 +3959,7 @@ class CheckpointMismatchFactory implements ThreadDriverFactory {
   }
 
   async resume(
-    input: Parameters<ThreadDriverFactory['resume']>[0],
+    input: Parameters<RuntimeThreadDriverFactory['resume']>[0],
   ): Promise<RuntimeThreadDriverAttachment> {
     this.resumeCalls++;
     const mode = this.modes.shift();

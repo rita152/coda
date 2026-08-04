@@ -327,7 +327,6 @@ class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
 
 class MemoryPolicyGrantRepository implements PolicyGrantRepository {
   readonly workspaceId: WorkspaceId;
-  readonly mode: PolicyGrantRepository['mode'];
   #closed = false;
 
   constructor(
@@ -336,7 +335,6 @@ class MemoryPolicyGrantRepository implements PolicyGrantRepository {
     private readonly grants: Map<ExternalOpId, Readonly<PolicyGrant>>,
   ) {
     this.workspaceId = lease.workspaceId;
-    this.mode = 'workspace';
   }
 
   async snapshot(): Promise<Readonly<PolicyGrantSnapshot>> {

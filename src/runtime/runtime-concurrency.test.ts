@@ -21,10 +21,10 @@ import type {
   PermissionPolicyPort,
   PreparedThreadDriverCommand,
   RuntimeIdentityFactory,
+  RuntimeThreadDriverFactory,
   ThreadDriverCompletion,
-  ThreadDriverFactory,
+  ThreadDriverHostServices,
   RuntimeThreadDriverAttachment,
-  RuntimeThreadDriverHostServices,
   ThreadDriverPort,
 } from './ports.js';
 import { createRuntime } from './supervisor.js';
@@ -147,7 +147,6 @@ async function runtimeFixture(): Promise<{
     },
     permissionPolicy: policy,
     threadDriverFactory: drivers,
-    capabilityMode: 'registry',
     capabilityServices: capabilityServices(),
     identityFactory: new FakeIdentityFactory(),
     clock: { now: () => 1 },
@@ -211,14 +210,13 @@ class FakePolicy implements PermissionPolicyPort {
   }
 }
 
-class FakeDriverFactory implements ThreadDriverFactory {
-  readonly requirements = { capabilityMode: 'registry' as const };
+class FakeDriverFactory implements RuntimeThreadDriverFactory {
   readonly #drivers = new Map<ThreadId, FakeDriver>();
 
   async create(input: {
     readonly threadId: ThreadId;
     readonly model: ModelConfig;
-  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
+  }, host: ThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
     void host;
     return this.#attachment(input.threadId, input.model.ref);
   }
@@ -227,7 +225,7 @@ class FakeDriverFactory implements ThreadDriverFactory {
     readonly threadId: ThreadId;
     readonly model: ModelConfig;
     readonly committedCheckpoint: import('./ports.js').ThreadDriverCheckpoint;
-  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
+  }, host: ThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment> {
     void host;
     const attachment = this.#attachment(input.threadId, input.model.ref);
     return { ...attachment, initialCheckpoint: input.committedCheckpoint };
@@ -284,7 +282,6 @@ function capabilityServices(): RuntimeCapabilityServices {
     ruleBudget: { maxFiles: 1, maxFileBytes: 1_024, maxBytes: 1_024, maxPromptTokens: 256 },
     policyEngine: createPolicyEngine(),
     ruleFreshness: { async check() { return { fresh: true }; } },
-    grantMode: 'workspace',
   };
 }
 

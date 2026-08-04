@@ -62,3 +62,7 @@ control request、thread lifecycle、agent 生命周期、usage 和 diagnostics 
 
 TUI、human one-shot 和 canonical headless 共享 `RuntimePort`。前端输入必须先取得完整 identity；机器输出
 必须来自 `EventEnvelope`，人类前端只能投影其 `event`。`--json` 不提供另一套命令、事件或 approval 协议。
+
+embedded host 通过唯一的 `CreateRuntimeOptions`、`RuntimeThreadDriverFactory` 与
+`ThreadDriverHostServices` 组装 canonical Runtime。迁移期的 mode selector 和同义 type alias 不属于公共
+协议；registry capability services 与 workspace-fenced grant repository 是必需结构，而不是可切换模式。

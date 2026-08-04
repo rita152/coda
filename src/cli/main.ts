@@ -251,7 +251,6 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       modelResolver,
       permissionPolicy: createCliPermissionPolicy(approvalMode),
       threadDriverFactory: driverFactory,
-      capabilityMode: 'registry',
       capabilityServices: capabilityComposition.services,
       workspaceReview: createGitWorkspaceReviewPort(),
     });

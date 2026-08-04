@@ -15,7 +15,9 @@ interface RuntimePort {
 ```
 
 factory 还可提供 thread id/op id 分配和只读 query。public entry 无副作用；宿主显式提供 storage、provider
-和 capability composition 后才打开 workspace。
+和 capability composition 后才打开 workspace。`CreateRuntimeOptions` 只有 canonical registry composition，
+不暴露单值 `capabilityMode`；thread driver 使用 `RuntimeThreadDriverFactory` 与
+`ThreadDriverHostServices` 两个 canonical contract，不保留迁移别名或 mode requirement。
 
 ## 2. Admission 与 mailbox
 
@@ -45,7 +47,8 @@ revision 和 presentation。`control_response` 经同一 mailbox admission；acc
 才发出 `control_resolved` 和执行/拒绝结果。close/abort 将 pending request 标记为 aborted。
 
 policy grant 使用 workspace-fenced storage，并绑定 capability digest、normalized resource scope 与 policy
-basis revision。thread/run narrowing 永远不能扩大 workspace ceiling。
+basis revision。repository 的 `workspaceId` 与 Supervisor lease/fence 已完整表达归属，不另设单值 grant
+mode。thread/run narrowing 永远不能扩大 workspace ceiling。
 
 ## 6. Durability 与恢复
 
@@ -66,3 +69,4 @@ metadata、transcript、control、grant 与 seq high-water mark。恢复后的�
 - 不可在 EventCommitter 外分配 seq 或发布权威 event。
 - 不可让 observer、renderer 或 transport 写入 transcript/control。
 - 不可在响应 control 时重新执行 prepare、重新解析 provider args 或重新查询 registry。
+- 不可为 canonical-only runtime、driver 或 grant storage 重新增加单值 mode selector 或同义公共别名。

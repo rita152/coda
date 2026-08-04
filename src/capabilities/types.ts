@@ -371,7 +371,6 @@ export type PolicyGrantCommitResult =
 
 export interface PolicyGrantRepositoryPort {
   readonly workspaceId: WorkspaceId;
-  readonly mode: 'workspace';
   snapshot(): Promise<Readonly<PolicyGrantSnapshot>>;
   commitAllowAlways(grant: Readonly<PolicyGrant>): Promise<PolicyGrantCommitResult>;
 }
@@ -482,5 +481,4 @@ export interface RuntimeCapabilityServices {
   readonly ruleBudget: Readonly<RuleSnapshotBudget>;
   readonly policyEngine: PolicyEngine;
   readonly ruleFreshness: RuleFreshnessPort;
-  readonly grantMode: PolicyGrantRepository['mode'];
 }

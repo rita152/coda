@@ -667,9 +667,6 @@ export class ThreadRuntime {
     if (services === undefined || policyEngine === undefined || grantsRepository === undefined) {
       throw new Error('registry_runtime_services_unavailable');
     }
-    if (services.grantMode !== grantsRepository.mode) {
-      throw new Error('registry_runtime_grant_mode_mismatch');
-    }
     const active = this.#active;
     if (active === undefined
       || active.rootOpId !== input.rootOpId

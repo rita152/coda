@@ -63,8 +63,6 @@ export type { MemoryRuntimeStorage } from './memory-storage.js';
 export * from './ports.js';
 export { createRuntime } from './supervisor.js';
 export type {
-  CreateRuntimeBaseOptions,
   CreateRuntimeOptions,
-  RegistryCreateRuntimeOptions,
   RuntimePort,
 } from './supervisor.js';
