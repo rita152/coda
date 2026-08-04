@@ -198,11 +198,7 @@ export type DerivedOpIdentityReservation =
 
 export interface ThreadJournalPort extends ThreadJournalAppendPort {
   acquireWriteLease(lease: Readonly<SupervisorLease>): Promise<void>;
-  loadState(): Promise<{
-    readonly state: FoldedThreadJournal;
-    /** May be empty when storage already supplies the validated fold, avoiding retained history. */
-    readonly records: readonly RuntimeJournalRecord[];
-  }>;
+  loadState(): Promise<FoldedThreadJournal>;
   saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void>;
   replayEvents(afterSeq: number, throughSeq: number): Promise<readonly EventEnvelope[]>;
   releaseWriteLease(): Promise<void>;

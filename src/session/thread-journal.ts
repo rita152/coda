@@ -136,12 +136,9 @@ export class ThreadJournalWriter {
     readonly events: EventHub;
     readonly clock: RuntimeClock;
     readonly state: FoldedThreadJournal;
-    readonly records: readonly RuntimeJournalRecord[];
   }) {
     this.#repository = new TranscriptRepository({
       journal: input.journal,
-      records: input.records,
-      fold: foldThreadJournal,
       foldAppend: foldThreadJournalAppend,
       state: input.state,
     });

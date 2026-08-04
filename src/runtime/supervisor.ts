@@ -309,8 +309,8 @@ class Supervisor implements RuntimePort {
       try {
         const loaded = await journal.loadState();
         this.#registerStoredEventHistory(threadId, {
-          highWaterSeq: loaded.state.highWaterSeq,
-          replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
+          highWaterSeq: loaded.highWaterSeq,
+          replayStartSeq: loaded.envelopes[0]?.seq ?? loaded.highWaterSeq + 1,
         });
         const recovered = await this.#recoverUnloadedJournal(threadId, journal, loaded);
         const folded = recovered;
@@ -525,8 +525,7 @@ class Supervisor implements RuntimePort {
       if (journal === undefined) return undefined;
       await journal.acquireWriteLease(this.#lease);
       try {
-        const loaded = await journal.loadState();
-        const state = loaded.state;
+        const state = await journal.loadState();
         this.#unloaded.set(threadId, state);
         this.#threadMeta.set(threadId, state.meta);
         const catalog = this.#catalog.get(threadId);
@@ -828,19 +827,18 @@ class Supervisor implements RuntimePort {
     });
       journal = await this.#workspace.createThreadJournal(this.#lease, { threadId: op.threadId, meta });
       await journal.acquireWriteLease(this.#lease);
-      const loaded = await journal.loadState();
+      const state = await journal.loadState();
       writer = new ThreadJournalWriter({
       workspaceId: this.workspaceId,
       threadId: op.threadId,
       journal,
       events: this.#events,
       clock: this.#clock,
-      state: loaded.state,
-      records: loaded.records,
+      state,
       });
       this.#registerStoredEventHistory(op.threadId, {
-        highWaterSeq: loaded.state.highWaterSeq,
-        replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
+        highWaterSeq: state.highWaterSeq,
+        replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
       });
       if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(writer.state.checkpoint)) {
         throw new RuntimeStorageError(
@@ -1073,15 +1071,14 @@ class Supervisor implements RuntimePort {
         initialRecords: [seed],
       });
       await journal.acquireWriteLease(this.#lease);
-      const loaded = await journal.loadState();
+      const state = await journal.loadState();
       writer = new ThreadJournalWriter({
         workspaceId: this.workspaceId,
         threadId: op.threadId,
         journal,
         events: this.#events,
         clock: this.#clock,
-        state: loaded.state,
-        records: loaded.records,
+        state,
       });
       if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(writer.state.checkpoint)) {
         throw new RuntimeStorageError(
@@ -1090,8 +1087,8 @@ class Supervisor implements RuntimePort {
         );
       }
       this.#registerStoredEventHistory(op.threadId, {
-        highWaterSeq: loaded.state.highWaterSeq,
-        replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
+        highWaterSeq: state.highWaterSeq,
+        replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
       const summary: ThreadSummary = {
@@ -1202,8 +1199,7 @@ class Supervisor implements RuntimePort {
     let writer: ThreadJournalWriter | undefined;
     let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
-      const loaded = await journal.loadState();
-      const state = loaded.state;
+      const state = await journal.loadState();
       const host = new ThreadDriverHostController();
       factoryStarted = true;
       attachment = await this.#driverFactory.resume({
@@ -1232,7 +1228,6 @@ class Supervisor implements RuntimePort {
         events: this.#events,
         clock: this.#clock,
         state,
-        records: loaded.records,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
       threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
@@ -1532,8 +1527,7 @@ class Supervisor implements RuntimePort {
     let attachment: RuntimeThreadDriverAttachment | undefined;
     let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
-      const loaded = await journal.loadState();
-      const state = loaded.state;
+      const state = await journal.loadState();
       const resolution = await this.#resolveModel(
         state.checkpoint.frontend.model,
         op.threadId,
@@ -1546,7 +1540,6 @@ class Supervisor implements RuntimePort {
         events: this.#events,
         clock: this.#clock,
         state,
-        records: loaded.records,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
       if (!resolution.ok) {
@@ -1713,15 +1706,14 @@ class Supervisor implements RuntimePort {
     const journal = await this.#workspace.openThreadJournal(childThreadId);
     if (journal === undefined) throw new RuntimeStorageError('thread_result_child_missing', childThreadId);
     await journal.acquireWriteLease(this.#lease);
-    const loaded = await journal.loadState();
+    const state = await journal.loadState();
     const writer = new ThreadJournalWriter({
       workspaceId: this.workspaceId,
       threadId: childThreadId,
       journal,
       events: this.#events,
       clock: this.#clock,
-      state: loaded.state,
-      records: loaded.records,
+      state,
     });
     try {
       if (!writer.state.deliveredThreadResults.has(record.resultOpId)) {
@@ -1889,8 +1881,7 @@ class Supervisor implements RuntimePort {
     const journal = await this.#workspace.openThreadJournal(op.threadId);
     if (journal === undefined) throw new Error(`Missing journal for scope target ${op.threadId}`);
     await journal.acquireWriteLease(this.#lease);
-    const loaded = await journal.loadState();
-    const state = loaded.state;
+    const state = await journal.loadState();
     const existing = state.mailbox.get(op.opId);
     if (existing !== undefined) {
       if (canonicalJson(existing.op) !== canonicalJson(op)) {
@@ -1907,7 +1898,6 @@ class Supervisor implements RuntimePort {
       events: this.#events,
       clock: this.#clock,
       state,
-      records: loaded.records,
     });
     try {
       await writer.appendPrepare({
@@ -2108,12 +2098,8 @@ class Supervisor implements RuntimePort {
   async #recoverUnloadedJournal(
     threadId: ThreadId,
     journal: import('./ports.js').ThreadJournalPort,
-    loaded: {
-      readonly state: FoldedThreadJournal;
-      readonly records: readonly RuntimeJournalRecord[];
-    },
+    state: FoldedThreadJournal,
   ): Promise<FoldedThreadJournal> {
-    const state = loaded.state;
     const recoverable = recoveryMailboxEntries(state);
     if (recoverable.length === 0) {
       await journal.saveRecoveryState(state).catch(() => undefined);
@@ -2127,7 +2113,6 @@ class Supervisor implements RuntimePort {
       events: this.#events,
       clock: this.#clock,
       state,
-      records: loaded.records,
     });
     try {
       for (const [opId, entry] of recoveryMailboxEntries(writer.state)) {

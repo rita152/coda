@@ -36,7 +36,7 @@ interface TestState {
 }
 
 describe('EventCommitter + TranscriptRepository', () => {
-  test('repository loads, snapshots, and folds records without allocating or publishing seq', async () => {
+  test('repository starts from a storage-validated fold without loading physical history', () => {
     const persisted = [
       { type: 'seed' as const },
       {
@@ -46,29 +46,25 @@ describe('EventCommitter + TranscriptRepository', () => {
       },
     ];
     const journal = new RecordingJournal(persisted);
+    const repository = new TranscriptRepository({
+      journal,
+      state: fold(persisted),
+      foldAppend,
+    });
 
-    const repository = await TranscriptRepository.load({ journal, fold });
-    persisted[1] = {
-      type: 'commit',
-      firstSeq: 9,
-      envelopes: [persistedEnvelope(THREAD_A, 9)],
-    };
-
-    expect(journal.loadCalls).toBe(1);
     expect(repository.state.highWaterSeq).toBe(1);
-    expect(repository.records()[1]).toMatchObject({ type: 'commit', firstSeq: 1 });
   });
 
   test('repository validates the candidate fold before writing an invalid batch', async () => {
     const journal = new RecordingJournal([{ type: 'seed' }]);
     const repository = new TranscriptRepository<TestRecord, TestState>({
       journal,
-      records: journal.records,
-      fold: (records) => {
+      state: fold(journal.records),
+      foldAppend: (current, records) => {
         if (records.some((record) => record.type === 'commit' && record.firstSeq !== 1)) {
           throw new Error('invalid candidate sequence');
         }
-        return fold(records);
+        return foldAppend(current, records);
       },
     });
 
@@ -80,21 +76,15 @@ describe('EventCommitter + TranscriptRepository', () => {
 
     expect(journal.appendCalls).toBe(0);
     expect(journal.records).toEqual([{ type: 'seed' }]);
-    expect(repository.records()).toEqual([{ type: 'seed' }]);
     expect(repository.state.highWaterSeq).toBe(0);
   });
 
   test('repository incremental fold visits only the newly appended records', async () => {
     const journal = new RecordingJournal([{ type: 'seed' }]);
-    let fullFoldVisits = 0;
     let appendFoldVisits = 0;
     const repository = new TranscriptRepository<TestRecord, TestState>({
       journal,
-      records: journal.records,
-      fold: (records) => {
-        fullFoldVisits += records.length;
-        return fold(records);
-      },
+      state: fold(journal.records),
       foldAppend: (current, records) => {
         appendFoldVisits += records.length;
         return {
@@ -113,7 +103,6 @@ describe('EventCommitter + TranscriptRepository', () => {
       }]);
     }
 
-    expect(fullFoldVisits).toBe(1);
     expect(appendFoldVisits).toBe(8);
     expect(repository.state.highWaterSeq).toBe(8);
   });
@@ -122,8 +111,7 @@ describe('EventCommitter + TranscriptRepository', () => {
     const journal = new RecordingJournal([{ type: 'seed' }]);
     const repository = new TranscriptRepository<TestRecord, TestState>({
       journal,
-      records: journal.records,
-      fold,
+      state: fold(journal.records),
       foldAppend: (current, records) => {
         const next = records[0];
         if (next.type === 'commit' && next.firstSeq !== current.highWaterSeq + 1) {
@@ -143,7 +131,6 @@ describe('EventCommitter + TranscriptRepository', () => {
       envelopes: [persistedEnvelope(THREAD_A, 2)],
     }])).rejects.toThrow('invalid incremental sequence');
     expect(journal.appendCalls).toBe(0);
-    expect(repository.records()).toEqual([{ type: 'seed' }]);
     expect(repository.state.highWaterSeq).toBe(0);
 
     journal.failure = new Error('flush failed');
@@ -152,7 +139,7 @@ describe('EventCommitter + TranscriptRepository', () => {
       firstSeq: 1,
       envelopes: [persistedEnvelope(THREAD_A, 1)],
     }])).rejects.toThrow('flush failed');
-    expect(repository.records()).toEqual([{ type: 'seed' }]);
+    expect(journal.records).toEqual([{ type: 'seed' }]);
     expect(repository.state.highWaterSeq).toBe(0);
   });
 
@@ -294,8 +281,8 @@ function createFixture(threadId: ThreadId, hub = new EventHub()): {
   const journal = new RecordingJournal([{ type: 'seed' }]);
   const repository = new TranscriptRepository({
     journal,
-    records: journal.records,
-    fold: fold,
+    state: fold(journal.records),
+    foldAppend,
   });
   hub.registerThread(threadId);
   const committer = new EventCommitter<TestRecord, TestState, TestMutation>({
@@ -321,15 +308,9 @@ class RecordingJournal implements TranscriptJournalPort<TestRecord> {
   failure?: Error;
   releaseFailure?: Error;
   appendCalls = 0;
-  loadCalls = 0;
   releaseWriteLeaseCalls = 0;
 
   constructor(readonly records: TestRecord[]) {}
-
-  async load(): Promise<readonly TestRecord[]> {
-    this.loadCalls += 1;
-    return this.records;
-  }
 
   async append(records: readonly TestRecord[]): Promise<void> {
     this.appendCalls += 1;
@@ -364,6 +345,17 @@ function fold(records: readonly TestRecord[]): TestState {
   return {
     highWaterSeq: records.reduce((last, record) =>
       record.type === 'commit' ? record.envelopes.at(-1)?.seq ?? last : last, 0),
+  };
+}
+
+function foldAppend(
+  current: TestState,
+  records: readonly [TestRecord, ...TestRecord[]],
+): TestState {
+  return {
+    highWaterSeq: records.reduce((last, record) =>
+      record.type === 'commit' ? record.envelopes.at(-1)?.seq ?? last : last,
+    current.highWaterSeq),
   };
 }
 

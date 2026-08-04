@@ -1035,7 +1035,6 @@ function writerFixture(): {
     events,
     clock: { now: () => 10 },
     state: foldThreadJournal(records),
-    records,
   });
   return { writer, journal, events, workspaceId, threadId, runId, turnId };
 }
@@ -1077,10 +1076,6 @@ class RecordingJournal implements ThreadJournalAppendPort {
   constructor(readonly records: RuntimeJournalRecord[]) {}
 
   async acquireWriteLease(): Promise<void> {}
-
-  async load(): Promise<readonly RuntimeJournalRecord[]> {
-    return this.records;
-  }
 
   async append(records: readonly RuntimeJournalRecord[]): Promise<void> {
     if (records.some((record) => record.type === 'commit')) {

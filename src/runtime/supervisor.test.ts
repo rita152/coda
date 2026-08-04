@@ -32,6 +32,7 @@ import type {
   PreparedThreadDriverCommand,
   RecoveryQueueCommand,
   RuntimeIdentityFactory,
+  RuntimeJournalRecord,
   RuntimeStoragePort,
   RuntimeWorkspaceStoragePort,
   RuntimeThreadDriverAttachment,
@@ -47,7 +48,7 @@ import type {
 } from './ports.js';
 import { createRuntime as createCanonicalRuntime } from './supervisor.js';
 import type { CreateRuntimeOptions } from './supervisor.js';
-import { emptyCheckpoint, foldThreadJournal, ThreadJournalWriter } from '../session/thread-journal.js';
+import { emptyCheckpoint, ThreadJournalWriter } from '../session/thread-journal.js';
 
 const WORKSPACE_ID = 'workspace-supervisor-recovery' as WorkspaceId;
 const CWD = '/runtime/supervisor-recovery';
@@ -533,10 +534,7 @@ describe('Supervisor recovery and idempotency', () => {
       await first.close();
     }
 
-    const forkSeed = (await loadThreadRecords(storage, forkThreadId)).find((record) =>
-      record.type === 'thread_seed');
-    expect(forkSeed?.type === 'thread_seed' ? forkSeed.turnProvenance : undefined)
-      .toHaveLength(2);
+    expect((await loadThreadState(storage, forkThreadId)).messageTurnIds.size).toBe(2);
 
     const secondDrivers = new RecordingDriverFactory();
     const second = await createRuntime({
@@ -612,7 +610,7 @@ describe('Supervisor recovery and idempotency', () => {
       await runtime.close();
     }
 
-    const sourceState = foldThreadJournal(await loadThreadRecords(baseStorage, sourceThreadId));
+    const sourceState = await loadThreadState(baseStorage, sourceThreadId);
     const originalEnvelope = sourceState.envelopes.find((envelope) =>
       envelope.event.type === 'message_end'
       && envelope.event.message.role === 'user'
@@ -908,11 +906,12 @@ describe('Supervisor recovery and idempotency', () => {
       })).accepted).toBe(true);
       expect((await runtime.getThreadSnapshot(threadId))?.thread.suspendedWork ?? []).toEqual([]);
 
-      const records = await loadThreadRecords(storage, threadId);
-      const cancellations = records.flatMap((record) => record.type === 'commit'
-        ? (record.mutations ?? []).filter((mutation) => mutation.type === 'input_cancelled')
-        : []);
-      expect(cancellations).toContainEqual(expect.objectContaining({ ownerOpId: original.opId }));
+      const state = await loadThreadState(storage, threadId);
+      expect(state.inputOwners.has(original.opId)).toBe(false);
+      expect(state.mailbox.get(original.opId)).toMatchObject({
+        state: 'completed',
+        outcome: 'interrupted',
+      });
     } finally {
       await runtime.close();
     }
@@ -993,23 +992,17 @@ describe('Supervisor recovery and idempotency', () => {
     drivers.complete(childThreadId, childPrompt.runId, 'completed');
     await runtime.close();
 
-    const parentRecords = await loadThreadRecords(storage, parentThreadId);
-    const childRecords = await loadThreadRecords(storage, childThreadId);
-    const parentResults = parentRecords.flatMap((record) => record.type === 'commit'
-      ? record.envelopes.filter((envelope) => envelope.event.type === 'thread_result')
-      : []);
-    const childPending = childRecords.flatMap((record) => record.type === 'commit'
-      ? (record.mutations ?? []).filter((mutation) => mutation.type === 'thread_result_pending')
-      : []);
-    const childDelivered = childRecords.filter((record) => record.type === 'thread_result_delivered');
+    const parentState = await loadThreadState(storage, parentThreadId);
+    const childState = await loadThreadState(storage, childThreadId);
+    const parentResults = [...parentState.threadResults.values()];
+    const childPending = [...childState.pendingThreadResults.values()];
     expect(parentResults).toHaveLength(1);
     expect(childPending).toHaveLength(1);
-    expect(childDelivered).toHaveLength(1);
+    expect(childState.deliveredThreadResults).toEqual(new Set([childPending[0]?.resultOpId]));
     expect(parentResults[0]).toMatchObject({
-      threadId: parentThreadId,
-      opId: childPending[0]?.resultOpId,
       event: {
         type: 'thread_result',
+        resultOpId: childPending[0]?.resultOpId,
         childThreadId,
         terminalRunId: childPrompt.runId,
         status: 'completed',
@@ -1025,19 +1018,15 @@ describe('Supervisor recovery and idempotency', () => {
 
     const runtime = await openRuntime(storage, new RecordingDriverFactory());
     await runtime.close();
-    const parentRecords = await loadThreadRecords(storage, parentThreadId);
-    const childRecords = await loadThreadRecords(storage, childThreadId);
-    const parentResults = parentRecords.flatMap((record) => record.type === 'commit'
-      ? record.envelopes.filter((envelope) => envelope.event.type === 'thread_result')
-      : []);
-    const deliveries = childRecords.filter((record) => record.type === 'thread_result_delivered');
+    const parentState = await loadThreadState(storage, parentThreadId);
+    const childState = await loadThreadState(storage, childThreadId);
+    const parentResults = [...parentState.threadResults.values()];
     expect(parentResults).toHaveLength(1);
-    expect(parentResults[0]).toMatchObject({ opId: seeded.resultOpId, seq: seeded.parentCommitSeq });
-    expect(deliveries).toEqual([expect.objectContaining({
-      resultOpId: seeded.resultOpId,
-      parentThreadId,
-      parentCommitSeq: seeded.parentCommitSeq,
-    })]);
+    expect(parentResults[0]).toMatchObject({
+      seq: seeded.parentCommitSeq,
+      event: { resultOpId: seeded.resultOpId },
+    });
+    expect(childState.deliveredThreadResults).toEqual(new Set([seeded.resultOpId]));
   });
 
   test('does not backpressure child terminal or next admission on a gated parent result commit', async () => {
@@ -1095,25 +1084,21 @@ describe('Supervisor recovery and idempotency', () => {
     const seeded = await seedStartedChildCrash(storage, parentThreadId, childThreadId);
     const first = await openRuntime(storage, new RecordingDriverFactory());
     try {
-      const childBeforeResume = await loadThreadRecords(storage, childThreadId);
-      const terminalCommit = childBeforeResume.find((record) => record.type === 'commit'
-        && record.envelopes.some((envelope) => envelope.opId === seeded.childOpId
-          && envelope.event.type === 'op_completed'));
-      expect(terminalCommit).toMatchObject({
-        mutations: expect.arrayContaining([
-          expect.objectContaining({
-            type: 'thread_result_pending',
-            parentThreadId,
-            childThreadId,
-            terminalRunId: seeded.childRunId,
-            status: 'error',
-          }),
-        ]),
+      const childBeforeResume = await loadThreadState(storage, childThreadId);
+      expect(childBeforeResume.runs.get(seeded.childRunId)).toMatchObject({
+        state: 'terminal',
+        status: 'interrupted',
       });
-      expect((await loadThreadRecords(storage, parentThreadId)).flatMap((record) =>
-        record.type === 'commit'
-          ? record.envelopes.filter((envelope) => envelope.event.type === 'thread_result')
-          : [])).toEqual([]);
+      expect([...childBeforeResume.pendingThreadResults.values()]).toContainEqual(
+        expect.objectContaining({
+          type: 'thread_result_pending',
+          parentThreadId,
+          childThreadId,
+          terminalRunId: seeded.childRunId,
+          status: 'error',
+        }),
+      );
+      expect((await loadThreadState(storage, parentThreadId)).threadResults.size).toBe(0);
 
       expect((await first.submit({
         type: 'thread_resume',
@@ -1122,10 +1107,7 @@ describe('Supervisor recovery and idempotency', () => {
         threadId: parentThreadId,
         model: MODEL.ref,
       })).accepted).toBe(true);
-      const parentResults = (await loadThreadRecords(storage, parentThreadId)).flatMap((record) =>
-        record.type === 'commit'
-          ? record.envelopes.filter((envelope) => envelope.event.type === 'thread_result')
-          : []);
+      const parentResults = [...(await loadThreadState(storage, parentThreadId)).threadResults.values()];
       expect(parentResults).toEqual([expect.objectContaining({
         event: expect.objectContaining({
           type: 'thread_result',
@@ -1134,21 +1116,16 @@ describe('Supervisor recovery and idempotency', () => {
           status: 'error',
         }),
       })]);
-      expect((await loadThreadRecords(storage, childThreadId)).filter((record) =>
-        record.type === 'thread_result_delivered')).toHaveLength(1);
+      expect((await loadThreadState(storage, childThreadId)).deliveredThreadResults.size).toBe(1);
     } finally {
       await first.close();
     }
 
     const second = await openRuntime(storage, new RecordingDriverFactory());
     try {
-      const parentResults = (await loadThreadRecords(storage, parentThreadId)).flatMap((record) =>
-        record.type === 'commit'
-          ? record.envelopes.filter((envelope) => envelope.event.type === 'thread_result')
-          : []);
+      const parentResults = [...(await loadThreadState(storage, parentThreadId)).threadResults.values()];
       expect(parentResults).toHaveLength(1);
-      expect((await loadThreadRecords(storage, childThreadId)).filter((record) =>
-        record.type === 'thread_result_delivered')).toHaveLength(1);
+      expect((await loadThreadState(storage, childThreadId)).deliveredThreadResults.size).toBe(1);
     } finally {
       await second.close();
     }
@@ -1184,13 +1161,12 @@ describe('Supervisor recovery and idempotency', () => {
         expect((await runtime.getThreadSnapshot(threadId))?.model).toEqual(RESUME_MODEL.ref);
         expect(drivers.dispatches(threadId).filter((command) => command.op.type === 'set_model')).toEqual([]);
 
-        const records = await loadThreadRecords(storage, threadId);
-        const supersession = records.find((record) => record.type === 'commit'
-          && (record.mutations ?? []).some((mutation) => mutation.type === 'completed'
-            && mutation.opId === staleOp.opId && mutation.outcome === 'superseded')
-          && (record.mutations ?? []).some((mutation) => mutation.type === 'model_selected'
-            && mutation.ownerOpId === resumeOpId));
-        expect(supersession).toBeDefined();
+        const state = await loadThreadState(storage, threadId);
+        expect(state.mailbox.get(staleOp.opId)).toMatchObject({
+          state: 'completed',
+          outcome: 'superseded',
+        });
+        expect(state.checkpoint.frontend.model).toEqual(RESUME_MODEL.ref);
         expect(storage.inspectWorkspace(WORKSPACE_ID)?.ops.find((record) => record.opId === staleOp.opId))
           .toMatchObject({ state: 'final', receipt: { accepted: true } });
       } finally {
@@ -1220,12 +1196,12 @@ describe('Supervisor recovery and idempotency', () => {
         model: RESUME_MODEL.ref,
       })).accepted).toBe(true);
       expect((await runtime.getThreadSnapshot(threadId))?.model).toEqual(RESUME_MODEL.ref);
-      const records = await loadThreadRecords(storage, threadId);
-      const oldTerminals = records.flatMap((record) => record.type === 'commit'
-        ? (record.mutations ?? []).filter((mutation) => mutation.type === 'completed'
-          && mutation.opId === staleOp.opId)
-        : []);
-      expect(oldTerminals).toEqual([{ type: 'completed', opId: staleOp.opId, outcome: 'applied' }]);
+      const state = await loadThreadState(storage, threadId);
+      expect(state.mailbox.get(staleOp.opId)).toMatchObject({ state: 'completed', outcome: 'applied' });
+      expect(state.opTerminals.get(staleOp.opId)?.event).toMatchObject({
+        type: 'op_completed',
+        outcome: 'applied',
+      });
       expect(drivers.dispatches(threadId).filter((command) => command.op.type === 'set_model')).toEqual([]);
     } finally {
       await runtime.close().catch(() => undefined);
@@ -1239,8 +1215,7 @@ describe('Supervisor recovery and idempotency', () => {
       const seeded = await seedControlResponseCrash(storage, threadId, responsePhase);
       const runtime = await openRuntime(storage, new RecordingDriverFactory());
       try {
-        const records = await loadThreadRecords(storage, threadId);
-        const folded = foldThreadJournal(records);
+        const folded = await loadThreadState(storage, threadId);
         expect(folded.checkpoint.frontend.pendingControls).toEqual([]);
         const resolution = folded.envelopes.find((envelope) =>
           envelope.event.type === 'control_resolved'
@@ -1276,7 +1251,7 @@ describe('Supervisor recovery and idempotency', () => {
     const seeded = await seedResolvedControlBeforeResponseCompletion(storage, threadId);
     const runtime = await openRuntime(storage, new RecordingDriverFactory());
     try {
-      const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+      const folded = await loadThreadState(storage, threadId);
       const resolutions = folded.envelopes.filter((envelope) =>
         envelope.event.type === 'control_resolved'
         && envelope.event.requestId === seeded.requestId);
@@ -1303,9 +1278,10 @@ describe('Supervisor recovery and idempotency', () => {
     const threadId = 'thread-partial-tool-crash' as ThreadId;
     const seeded = await seedPartialToolCrash(storage, threadId);
     const drivers = new RecordingDriverFactory();
-    const runtime = await openRuntime(storage, drivers);
+    const journalFixture = recordJournalAppends(storage);
+    const runtime = await openRuntime(journalFixture.storage, drivers);
     try {
-      const records = await loadThreadRecords(storage, threadId);
+      const records = journalFixture.records(threadId);
       const recoveryCommit = records.find((record) => record.type === 'commit'
         && (record.mutations ?? []).some((mutation) => mutation.type === 'activity_interrupted'));
       expect(recoveryCommit).toMatchObject({
@@ -1401,7 +1377,7 @@ describe('Supervisor recovery and idempotency', () => {
       expect(drivers.recoveries(threadId)).toEqual(effectCommitted
         ? [[]]
         : [[expect.objectContaining({ op: expect.objectContaining({ opId: queueOpId, type: opType }) })]]);
-      const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+      const folded = await loadThreadState(storage, threadId);
       expect(folded.mailbox.get(queueOpId)).toMatchObject({ state: 'completed', outcome: 'applied' });
       const queueEffects = folded.envelopes.filter((envelope) =>
         envelope.opId === queueOpId && envelope.event.type === 'queue_update');
@@ -1465,11 +1441,8 @@ describe('Supervisor recovery and idempotency', () => {
       expect(await cancel).toMatchObject({ accepted: true, targetThreadIds: [threadId] });
       expect((await runtime.getThreadSnapshot(threadId))?.thread.activeRunId).toBe(successor.runId);
 
-      const records = await loadThreadRecords(baseStorage, threadId);
-      const derivedAbort = records.flatMap((record) => record.type === 'commit'
-        ? record.envelopes.filter((envelope) => envelope.event.type === 'op_completed'
-          && envelope.event.opType === 'abort')
-        : []);
+      const derivedAbort = (await loadThreadState(baseStorage, threadId)).envelopes.filter((envelope) =>
+        envelope.event.type === 'op_completed' && envelope.event.opType === 'abort');
       expect(derivedAbort.at(-1)?.event).toMatchObject({ outcome: 'no_op' });
       drivers.complete(threadId, successor.runId, 'completed');
     } finally {
@@ -1608,7 +1581,7 @@ describe('Supervisor recovery and idempotency', () => {
     await expect(threadClose).resolves.toMatchObject({ accepted: true, threadId });
     await runtimeClose;
     expect(drivers.closeCalls).toBe(1);
-    const folded = foldThreadJournal(await loadThreadRecords(baseStorage, threadId));
+    const folded = await loadThreadState(baseStorage, threadId);
     expect(folded.summary.state).toBe('closed');
   });
 
@@ -1640,7 +1613,7 @@ describe('Supervisor recovery and idempotency', () => {
       expect(factory.closeCalls).toBe(1);
     }
 
-    const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+    const folded = await loadThreadState(storage, threadId);
     const expected = lifecycleOps.map((lifecycleOp) => deriveOpId({
       purpose: 'thread_close_on_runtime_close',
       workspaceId: WORKSPACE_ID,
@@ -1807,7 +1780,7 @@ describe('Supervisor recovery and idempotency', () => {
       expect(resolverCalls).toBe(1);
       expect(drivers.resumeCalls).toBe(0);
       expect((await runtime.listThreads())[0]).toMatchObject({ threadId, state: 'closed' });
-      const before = foldThreadJournal(await loadThreadRecords(storage, threadId));
+      const before = await loadThreadState(storage, threadId);
       const diagnostics = before.envelopes.filter((envelope) =>
         envelope.event.type === 'runtime_diagnostic'
         && envelope.event.code === 'attachment_credentials_unavailable');
@@ -1830,7 +1803,7 @@ describe('Supervisor recovery and idempotency', () => {
     const reopened = await makeRuntime();
     try {
       expect(resolverCalls).toBe(1);
-      const reopenedState = foldThreadJournal(await loadThreadRecords(storage, threadId));
+      const reopenedState = await loadThreadState(storage, threadId);
       expect(reopenedState.envelopes.filter((envelope) =>
         envelope.event.type === 'runtime_diagnostic'
         && envelope.event.code === 'attachment_credentials_unavailable')).toHaveLength(1);
@@ -1864,7 +1837,7 @@ describe('Supervisor recovery and idempotency', () => {
         [left, seeded.leftDerived],
         [right, seeded.rightDerived],
       ] as const) {
-        const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+        const folded = await loadThreadState(storage, threadId);
         expect(folded.mailbox.get(derivedOpId)).toMatchObject({ state: 'completed', outcome: 'no_op' });
         expect(folded.envelopes.filter((envelope) =>
           envelope.opId === derivedOpId && envelope.event.type === 'op_accepted')).toHaveLength(1);
@@ -1918,7 +1891,7 @@ describe('Supervisor recovery and idempotency', () => {
       workspaceId: WORKSPACE_ID,
       parts: [threadId, resumeOpId],
     });
-    const folded = foldThreadJournal(await loadThreadRecords(storage, threadId));
+    const folded = await loadThreadState(storage, threadId);
     expect(folded.envelopes.filter((envelope) =>
       envelope.opId === expectedCloseId
       && envelope.event.type === 'thread_closed')).toHaveLength(1);
@@ -2277,7 +2250,7 @@ async function seedPromptCrash(
   const meta = threadMeta(threadId, op.opId);
   const journal = await workspace.createThreadJournal(lease, { threadId, meta });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
@@ -2286,8 +2259,7 @@ async function seedPromptCrash(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   await writer.appendPrepare({ type: 'mailbox_prepare', opId: op.opId, op, timestamp: 1 });
   await writer.commit([{
@@ -2353,7 +2325,7 @@ async function seedSetModelCrash(
     meta: threadMeta(threadId, op.opId),
   });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
@@ -2362,8 +2334,7 @@ async function seedSetModelCrash(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   await writer.appendPrepare({ type: 'mailbox_prepare', opId: op.opId, op, timestamp: 1 });
   await writer.commit([{
@@ -2418,7 +2389,7 @@ async function seedControlResponseCrash(
     meta: threadMeta(threadId, promptOp.opId),
   });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
@@ -2427,8 +2398,7 @@ async function seedControlResponseCrash(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   await writer.appendPrepare({
     type: 'mailbox_prepare',
@@ -2555,7 +2525,7 @@ async function seedStartedChildCrash(
     meta: childMeta,
   });
   await childJournal.acquireWriteLease(lease);
-  const records = await childJournal.load();
+  const state = await childJournal.loadState();
   const events = new EventHub();
   events.registerThread(childThreadId);
   const writer = new ThreadJournalWriter({
@@ -2564,8 +2534,7 @@ async function seedStartedChildCrash(
     journal: childJournal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   const childPrompt = prompt(childOpId, childThreadId, 'crash child');
   await writer.appendPrepare({
@@ -2612,8 +2581,7 @@ async function seedResolvedControlBeforeResponseCompletion(
   const journal = await workspace.openThreadJournal(threadId);
   if (journal === undefined) throw new Error('missing control recovery journal');
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
-  const state = foldThreadJournal(records);
+  const state = await journal.loadState();
   const request = state.checkpoint.frontend.pendingControls.find((candidate) =>
     candidate.requestId === seeded.requestId);
   if (request === undefined) throw new Error('missing pending control request');
@@ -2628,7 +2596,6 @@ async function seedResolvedControlBeforeResponseCompletion(
     events,
     clock: { now: () => 1 },
     state,
-    records,
   });
   await writer.commitDriverEvent({
     event: {
@@ -2682,7 +2649,7 @@ async function seedPartialToolCrash(
     meta: threadMeta(threadId, rootOpId),
   });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   const writer = new ThreadJournalWriter({
@@ -2691,8 +2658,7 @@ async function seedPartialToolCrash(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   await writer.appendPrepare({
     type: 'mailbox_prepare',
@@ -2812,8 +2778,7 @@ async function seedQueueCrash(
   const journal = await workspace.openThreadJournal(threadId);
   if (journal === undefined) throw new Error('missing queue recovery journal');
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
-  const state = foldThreadJournal(records);
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   events.seed(threadId, state.envelopes);
@@ -2824,7 +2789,6 @@ async function seedQueueCrash(
     events,
     clock: { now: () => 1 },
     state,
-    records,
   });
   const queueOp = {
     type: opType,
@@ -2902,7 +2866,7 @@ async function seedFinalCreateIntent(
     meta: threadMeta(op.threadId, op.opId),
   });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(op.threadId);
   const writer = new ThreadJournalWriter({
@@ -2911,8 +2875,7 @@ async function seedFinalCreateIntent(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   await writer.commit([
     { event: { type: 'op_accepted', opType: 'thread_create' }, opId: op.opId },
@@ -2963,8 +2926,7 @@ async function appendFinalCloseIntent(
   const journal = await workspace.openThreadJournal(threadId);
   if (journal === undefined) throw new Error('missing final close journal');
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
-  const state = foldThreadJournal(records);
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(threadId);
   events.seed(threadId, state.envelopes);
@@ -2975,7 +2937,6 @@ async function appendFinalCloseIntent(
     events,
     clock: { now: () => 1 },
     state,
-    records,
   });
   await writer.appendPrepare({
     type: 'mailbox_prepare',
@@ -3027,8 +2988,7 @@ async function seedFinalResumeIntent(
   const journal = await workspace.openThreadJournal(resume.threadId);
   if (journal === undefined) throw new Error('missing final resume journal');
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
-  const state = foldThreadJournal(records);
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(resume.threadId);
   events.seed(resume.threadId, state.envelopes);
@@ -3039,7 +2999,6 @@ async function seedFinalResumeIntent(
     events,
     clock: { now: () => 1 },
     state,
-    records,
   });
   await writer.commit([
     { event: { type: 'op_accepted', opType: 'thread_resume' }, opId: resume.opId },
@@ -3133,8 +3092,7 @@ async function seedPartialCancelScope(
   const journal = await workspace.openThreadJournal(left);
   if (journal === undefined) throw new Error('missing partial cancel target journal');
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
-  const state = foldThreadJournal(records);
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(left);
   events.seed(left, state.envelopes);
@@ -3145,7 +3103,6 @@ async function seedPartialCancelScope(
     events,
     clock: { now: () => 1 },
     state,
-    records,
   });
   const derived = {
     type: 'abort' as const,
@@ -3254,7 +3211,7 @@ async function seedRetryTargetCreationCrash(
     initialRecords: [seed],
   });
   await journal.acquireWriteLease(lease);
-  const records = await journal.load();
+  const state = await journal.loadState();
   const events = new EventHub();
   events.registerThread(op.threadId);
   const writer = new ThreadJournalWriter({
@@ -3263,8 +3220,7 @@ async function seedRetryTargetCreationCrash(
     journal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(records),
-    records,
+    state,
   });
   const summary = {
     threadId: op.threadId,
@@ -3315,16 +3271,15 @@ async function seedParentCommitBeforeChildAck(
   const events = new EventHub();
   events.registerThread(parentThreadId);
   events.registerThread(childThreadId);
-  const parentRecords = await parentJournal.load();
-  const childRecords = await childJournal.load();
+  const parentState = await parentJournal.loadState();
+  const childState = await childJournal.loadState();
   const parentWriter = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: parentThreadId,
     journal: parentJournal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(parentRecords),
-    records: parentRecords,
+    state: parentState,
   });
   const childWriter = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
@@ -3332,8 +3287,7 @@ async function seedParentCommitBeforeChildAck(
     journal: childJournal,
     events,
     clock: { now: () => 1 },
-    state: foldThreadJournal(childRecords),
-    records: childRecords,
+    state: childState,
   });
   const childOp = prompt(childOpId, childThreadId, 'child outbox');
   await childWriter.appendPrepare({ type: 'mailbox_prepare', opId: childOpId, op: childOp, timestamp: 1 });
@@ -3790,13 +3744,15 @@ function onlyLedgerRecord(storage: ReturnType<typeof createMemoryRuntimeStorage>
   return record;
 }
 
-async function loadThreadRecords(
+async function loadThreadState(
   storage: RuntimeStoragePort,
   threadId: ThreadId,
-): Promise<readonly import('./ports.js').RuntimeJournalRecord[]> {
+): Promise<import('../session/thread-journal.js').FoldedThreadJournal> {
   const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
   try {
-    return await (await workspace.openThreadJournal(threadId))?.load() ?? [];
+    const journal = await workspace.openThreadJournal(threadId);
+    if (journal === undefined) throw new Error(`Missing thread journal ${threadId}`);
+    return await journal.loadState();
   } finally {
     await workspace.close();
   }
@@ -4156,6 +4112,56 @@ class CloseOnlyDriver implements ThreadDriverPort {
   interactionState(): 'idle' { return 'idle'; }
 
   async close(): Promise<void> { this.onClose(); }
+}
+
+function recordJournalAppends(base: RuntimeStoragePort): {
+  readonly storage: RuntimeStoragePort;
+  records(threadId: ThreadId): readonly RuntimeJournalRecord[];
+} {
+  const appended = new Map<ThreadId, RuntimeJournalRecord[]>();
+  const wrapJournal = (threadId: ThreadId, journal: ThreadJournalPort): ThreadJournalPort =>
+    new Proxy(journal, {
+      get(target, property, receiver) {
+        if (property === 'append') {
+          return async (...args: Parameters<ThreadJournalPort['append']>) => {
+            const [records] = args;
+            const captured = appended.get(threadId) ?? [];
+            captured.push(...records);
+            appended.set(threadId, captured);
+            return target.append(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  return {
+    records: (threadId) => appended.get(threadId) ?? [],
+    storage: {
+      listStoredThreads: () => base.listStoredThreads(),
+      async openWorkspace(input): Promise<RuntimeWorkspaceStoragePort> {
+        const workspace = await base.openWorkspace(input);
+        return new Proxy(workspace, {
+          get(target, property, receiver) {
+            if (property === 'createThreadJournal') {
+              return async (...args: Parameters<RuntimeWorkspaceStoragePort['createThreadJournal']>) => {
+                const journal = await target.createThreadJournal(...args);
+                return wrapJournal(args[1].threadId, journal);
+              };
+            }
+            if (property === 'openThreadJournal') {
+              return async (...args: Parameters<RuntimeWorkspaceStoragePort['openThreadJournal']>) => {
+                const journal = await target.openThreadJournal(...args);
+                return journal === undefined ? undefined : wrapJournal(args[0], journal);
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+    },
+  };
 }
 
 function gateFirstDerivedReservation(base: RuntimeStoragePort): {

@@ -96,7 +96,13 @@ describe('FileRuntimeStorage canonical persistence', () => {
       initialRecords: [seed],
     });
 
-    expect(await journal.load()).toEqual([meta, seed]);
+    const loaded = await journal.loadState();
+    expect(loaded.meta).toEqual(meta);
+    expect(loaded.checkpoint.frontend.transcript).toEqual(seed.transcript);
+    expect([...loaded.messageTurnIds]).toEqual(seed.turnProvenance.map((entry) => [
+      entry.messageId,
+      entry.turnId,
+    ]));
     const [catalog] = await workspace.listThreads();
     expect(catalog).toMatchObject({
       summary: { threadId, createdAt: 1, state: 'idle' },
@@ -124,7 +130,8 @@ describe('FileRuntimeStorage canonical persistence', () => {
 
     const reopened = await storage.openWorkspace({ cwd, workspaceId });
     const reopenedLease = await reopened.acquireSupervisorLease('thread-seed-second');
-    expect(await (await reopened.openThreadJournal(threadId))?.load()).toEqual([meta, seed]);
+    const reopenedJournal = await reopened.openThreadJournal(threadId);
+    expect((await reopenedJournal?.loadState())?.checkpoint.frontend.transcript).toEqual(seed.transcript);
     await reopened.releaseSupervisorLease(reopenedLease);
     await reopened.close();
   });
@@ -155,7 +162,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     reads.length = 0;
     const existing = await second.createThreadJournal(secondLease, { threadId, meta });
     await existing.acquireWriteLease(secondLease);
-    expect((await existing.loadState()).state.highWaterSeq).toBe(1);
+    expect((await existing.loadState()).highWaterSeq).toBe(1);
     expect(reads.filter((read) => read.kind === 'body')).toHaveLength(1);
     await existing.releaseWriteLease();
     await second.releaseSupervisorLease(secondLease);
@@ -182,7 +189,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const meta = threadMeta({ workspaceId, threadId, cwd });
     await workspace.createThreadJournal(lease, { threadId, meta });
     rewriteJournal(journalPath(root, workspaceId, threadId), '2.0.7');
-    expect((await (await workspace.openThreadJournal(threadId))?.load())?.[0])
+    expect((await (await workspace.openThreadJournal(threadId))?.loadState())?.meta)
       .toEqual({ ...meta, protocolVersion: '2.0.7' });
 
     await workspace.releaseSupervisorLease(lease);
@@ -508,7 +515,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     ];
     await journal.append(records, { flush: true });
     await journal.saveRecoveryState(foldThreadJournalAppend(
-      initial.state,
+      initial,
       records as [RuntimeJournalRecord, ...RuntimeJournalRecord[]],
     ));
     await journal.releaseWriteLease();
@@ -554,7 +561,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const initial = await created.loadState();
     const first = journalCommit(workspaceId, threadId, 1, diagnostic('diag-1'));
     await created.append([first], { flush: true });
-    const firstState = foldThreadJournalAppend(initial.state, [first]);
+    const firstState = foldThreadJournalAppend(initial, [first]);
     await created.saveRecoveryState(firstState);
     await created.releaseWriteLease();
     const file = journalPath(root, workspaceId, threadId);
@@ -564,7 +571,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const exact = await workspace.openThreadJournal(threadId);
     if (exact === undefined) throw new Error('exact journal missing');
     await exact.acquireWriteLease(lease);
-    expect((await exact.loadState()).state.highWaterSeq).toBe(1);
+    expect((await exact.loadState()).highWaterSeq).toBe(1);
     expect(reads.some((read) => read.kind === 'body' || read.kind === 'tail')).toBe(false);
     expect(reads.some((read) => read.kind === 'snapshot')).toBe(true);
     const second = journalCommit(workspaceId, threadId, 2, diagnostic('diag-2'));
@@ -582,7 +589,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const tail = await workspace.openThreadJournal(threadId);
     if (tail === undefined) throw new Error('tail journal missing');
     await tail.acquireWriteLease(lease);
-    expect((await tail.loadState()).state.highWaterSeq).toBe(2);
+    expect((await tail.loadState()).highWaterSeq).toBe(2);
     expect(reads.some((read) => read.kind === 'tail' && read.bytes > 0)).toBe(true);
     expect(reads.some((read) => read.kind === 'body')).toBe(false);
     await tail.releaseWriteLease();
@@ -592,7 +599,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const missing = await workspace.openThreadJournal(threadId);
     if (missing === undefined) throw new Error('missing-snapshot journal missing');
     await missing.acquireWriteLease(lease);
-    expect((await missing.loadState()).state.highWaterSeq).toBe(2);
+    expect((await missing.loadState()).highWaterSeq).toBe(2);
     expect(reads.some((read) => read.kind === 'body' && read.bytes > 0)).toBe(true);
     await missing.releaseWriteLease();
 
@@ -601,7 +608,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const corrupt = await workspace.openThreadJournal(threadId);
     if (corrupt === undefined) throw new Error('corrupt-snapshot journal missing');
     await corrupt.acquireWriteLease(lease);
-    expect((await corrupt.loadState()).state.highWaterSeq).toBe(2);
+    expect((await corrupt.loadState()).highWaterSeq).toBe(2);
     expect(reads.some((read) => read.kind === 'body' && read.bytes > 0)).toBe(true);
     await corrupt.releaseWriteLease();
 
@@ -614,7 +621,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const ignoredTemporary = await workspace.openThreadJournal(threadId);
     if (ignoredTemporary === undefined) throw new Error('temporary-snapshot journal missing');
     await ignoredTemporary.acquireWriteLease(lease);
-    expect((await ignoredTemporary.loadState()).state.highWaterSeq).toBe(2);
+    expect((await ignoredTemporary.loadState()).highWaterSeq).toBe(2);
     expect(reads.some((read) => read.kind === 'body' || read.kind === 'tail')).toBe(false);
     await ignoredTemporary.releaseWriteLease();
 
@@ -626,7 +633,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const replaced = await workspace.openThreadJournal(threadId);
     if (replaced === undefined) throw new Error('replaced journal missing');
     await replaced.acquireWriteLease(lease);
-    const replacedState = (await replaced.loadState()).state;
+    const replacedState = await replaced.loadState();
     expect(reads.some((read) => read.kind === 'body' && read.bytes > 0)).toBe(true);
     expect(replacedState.envelopes.some((envelope) =>
       envelope.event.type === 'runtime_diagnostic' && envelope.event.code === 'diag-X')).toBe(true);
@@ -637,7 +644,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const torn = await workspace.openThreadJournal(threadId);
     if (torn === undefined) throw new Error('torn journal missing');
     await torn.acquireWriteLease(lease);
-    expect((await torn.loadState()).state.highWaterSeq).toBe(2);
+    expect((await torn.loadState()).highWaterSeq).toBe(2);
     expect(reads.some((read) => read.kind === 'tail' && read.bytes > 0)).toBe(true);
     expect(readFileSync(file, 'utf8').endsWith('\n')).toBe(true);
     await torn.releaseWriteLease();
@@ -649,7 +656,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const truncated = await workspace.openThreadJournal(threadId);
     if (truncated === undefined) throw new Error('truncated journal missing');
     await truncated.acquireWriteLease(lease);
-    expect((await truncated.loadState()).state.highWaterSeq).toBe(0);
+    expect((await truncated.loadState()).highWaterSeq).toBe(0);
     expect(reads.some((read) => read.kind === 'body')).toBe(true);
     await truncated.releaseWriteLease();
 
@@ -675,7 +682,7 @@ describe('FileRuntimeStorage canonical persistence', () => {
       const initial = await journal.loadState();
       const closed = journalCommit(workspaceId, threadId, 1, { type: 'thread_closed', threadId });
       await journal.append([closed], { flush: true });
-      await journal.saveRecoveryState(foldThreadJournalAppend(initial.state, [closed]));
+      await journal.saveRecoveryState(foldThreadJournalAppend(initial, [closed]));
       await journal.releaseWriteLease();
     }
     await first.releaseSupervisorLease(lease);
@@ -796,10 +803,9 @@ describe('FileRuntimeStorage canonical persistence', () => {
     const journal = await second.openThreadJournal(threadId);
     if (journal === undefined) throw new Error('journal missing');
     await journal.acquireWriteLease(secondLease);
-    expect(await journal.load()).toEqual([
-      threadMeta({ workspaceId, threadId, cwd }),
-      threadSeed(),
-    ]);
+    const repaired = await journal.loadState();
+    expect(repaired.meta).toEqual(threadMeta({ workspaceId, threadId, cwd }));
+    expect(repaired.checkpoint.frontend.transcript).toEqual(threadSeed().transcript);
     expect(readFileSync(file, 'utf8')).not.toContain('{"type":"thread_seed"');
     await journal.releaseWriteLease();
     await second.releaseSupervisorLease(secondLease);

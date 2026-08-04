@@ -80,6 +80,10 @@ snapshot 缺失、损坏、replace 或 truncate 才单次流式 full fallback。
 `recoveryRequired`；snapshot 原子 rename/fsync 后才能清除 hint。tail repair 仍只允许在当前 workspace fence 与
 thread write lease 下执行。
 
+storage 的 `loadState()` 边界只返回 folded recovery state。Supervisor 不机械透传 physical records，attached
+`ThreadJournalWriter` 也只持有 folded state 并增量验证新 append；因此 session/runtime 常驻内存不随该 thread
+的 live journal record 数增长，cold full fold、tail fold 与 snapshot fold 仍由 storage 负责且互为恢复 oracle。
+
 Op terminal、accepted FIFO seq、queue effect、thread result 和 control resolution 是独立 recovery index，随
 snapshot 校验/物化；恢复正确性不依赖有界 replay tail。snapshot 自身对 replay window 也使用“至多一个中段
 seed partial + 后续 delta”的紧凑表示，decode 后仍得到逐字段相同的连续 public envelope。

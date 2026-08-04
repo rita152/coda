@@ -85,7 +85,7 @@ export interface MemoryRuntimeStorage extends RuntimeStoragePort {
 export interface MemoryRuntimeStorageOptions {
   readonly onJournalRead?: (observation: Readonly<{
     readonly threadId: ThreadId;
-    readonly kind: 'records' | 'state' | 'replay';
+    readonly kind: 'state' | 'replay';
   }>) => void;
 }
 
@@ -449,23 +449,15 @@ class MemoryJournalPort implements ThreadJournalPort {
     this.#lease = snapshot(lease);
   }
 
-  async load(): Promise<readonly RuntimeJournalRecord[]> {
-    this.onJournalRead?.({ threadId: this.journal.catalog.summary.threadId, kind: 'records' });
-    return snapshot(this.journal.records);
-  }
-
-  async loadState(): Promise<{
-    readonly state: FoldedThreadJournal;
-    readonly records: readonly RuntimeJournalRecord[];
-  }> {
+  async loadState(): Promise<FoldedThreadJournal> {
     this.onJournalRead?.({ threadId: this.journal.catalog.summary.threadId, kind: 'state' });
     if (this.journal.catalog.journal?.snapshotSize === this.journal.records.length) {
-      return { state: this.journal.recoveryState, records: [] };
+      return this.journal.recoveryState;
     }
     const records = snapshot(this.journal.records);
     const state = foldThreadJournal(records);
     this.journal.recoveryState = state;
-    return { state, records: [] };
+    return state;
   }
 
   async saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void> {

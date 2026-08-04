@@ -1688,7 +1688,6 @@ function writerFor(journal: RecordingJournal, events: EventHub): ThreadJournalWr
     events,
     clock: TEST_CLOCK,
     state: foldThreadJournal(journal.records),
-    records: journal.records,
   });
 }
 
@@ -2129,7 +2128,6 @@ class RecordingJournal implements ThreadJournalAppendPort {
   }
 
   async acquireWriteLease(): Promise<void> {}
-  async load(): Promise<readonly RuntimeJournalRecord[]> { return [...this.records]; }
   async append(records: readonly RuntimeJournalRecord[]): Promise<void> {
     const failure = this.nextAppendFailure;
     this.nextAppendFailure = undefined;

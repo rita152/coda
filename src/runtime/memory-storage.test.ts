@@ -120,7 +120,13 @@ describe('MemoryRuntimeStorage canonical persistence', () => {
       meta,
       initialRecords: [seed],
     });
-    expect(await journal.load()).toEqual([meta, seed]);
+    const state = await journal.loadState();
+    expect(state.meta).toEqual(meta);
+    expect(state.checkpoint.frontend.transcript).toEqual(seed.transcript);
+    expect([...state.messageTurnIds]).toEqual(seed.turnProvenance.map((entry) => [
+      entry.messageId,
+      entry.turnId,
+    ]));
     expect(await workspace.listThreads()).toEqual([{
       summary: { threadId, createdAt: 1, state: 'idle' },
       format: 'runtime-v2',

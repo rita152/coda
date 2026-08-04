@@ -915,43 +915,7 @@ class FileJournalPort implements ThreadJournalPort {
     }
   }
 
-  async load(): Promise<readonly RuntimeJournalRecord[]> {
-    if (this.#lease === undefined) {
-      this.workspace.assertLeaseHeld();
-      return readJournalRecords(
-        this.file,
-        this.workspace.workspaceId,
-        this.threadId,
-        'strict',
-        (observation) => this.workspace.observeJournalRead(
-          observation.threadId,
-          observation.kind,
-          observation.bytes,
-        ),
-      );
-    }
-    this.workspace.assertFence(this.#lease);
-    const loaded = readValidatedJournal(
-      this.file,
-      this.workspace.workspaceId,
-      this.threadId,
-      'repair',
-      {
-        observer: (observation) => this.workspace.observeJournalRead(
-          observation.threadId,
-          observation.kind,
-          observation.bytes,
-        ),
-      },
-    );
-    this.#installValidatedBoundary(loaded);
-    return loaded.records;
-  }
-
-  async loadState(): Promise<{
-    readonly state: FoldedThreadJournal;
-    readonly records: readonly RuntimeJournalRecord[];
-  }> {
+  async loadState(): Promise<FoldedThreadJournal> {
     this.workspace.assertLeaseHeld();
     // The header/protocol/schema gate always precedes snapshot or body parsing.
     const currentBoundary = journalBoundary(this.file);
@@ -978,13 +942,12 @@ class FileJournalPort implements ThreadJournalPort {
     if (materialized !== undefined && sameBoundary(materialized.boundary, boundary)) {
       if (this.#lease !== undefined) {
         this.#installValidatedBoundary({
-          records: [],
           boundary,
           sequenceState: materialized.sequenceState,
           codecState: materialized.codecState,
         });
       }
-      return { state: materialized.state, records: [] };
+      return materialized.state;
     }
     if (materialized !== undefined
       && materialized.boundary.dev === boundary.dev
@@ -1011,7 +974,7 @@ class FileJournalPort implements ThreadJournalPort {
         this.#installValidatedBoundary(tail);
         await this.saveRecoveryState(state);
       }
-      return { state, records: [] };
+      return state;
     }
 
     const loaded = readValidatedJournal(
@@ -1020,7 +983,6 @@ class FileJournalPort implements ThreadJournalPort {
       this.threadId,
       this.#lease === undefined ? 'strict' : 'repair',
       {
-        retainRecords: false,
         foldState: true,
         observer: (observation) => this.workspace.observeJournalRead(
           observation.threadId,
@@ -1037,7 +999,7 @@ class FileJournalPort implements ThreadJournalPort {
       this.#installValidatedBoundary(loaded);
       await this.saveRecoveryState(state);
     }
-    return { state, records: [] };
+    return state;
   }
 
   async saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void> {
@@ -1127,7 +1089,6 @@ class FileJournalPort implements ThreadJournalPort {
         this.threadId,
         'read_only',
         {
-          retainRecords: false,
           foldState: true,
           observer: (observation) => this.workspace.observeJournalRead(
             observation.threadId,
@@ -1163,7 +1124,6 @@ class FileJournalPort implements ThreadJournalPort {
         this.threadId,
         'repair',
         {
-          retainRecords: false,
           observer: (observation) => this.workspace.observeJournalRead(
             observation.threadId,
             observation.kind,
@@ -1438,7 +1398,6 @@ interface ValidatedRecoverySnapshot {
 }
 
 interface ValidatedJournal {
-  readonly records: readonly RuntimeJournalRecord[];
   readonly sequenceState: JournalSequenceState;
   readonly codecState: JournalMessageCodecState;
   readonly boundary: JournalFileBoundary;
@@ -1446,7 +1405,6 @@ interface ValidatedJournal {
 }
 
 interface ReadValidatedJournalOptions {
-  readonly retainRecords?: boolean;
   readonly foldState?: boolean;
   readonly observer?: JournalReadObserver;
 }
@@ -1454,16 +1412,6 @@ interface ReadValidatedJournalOptions {
 interface JournalHeaderLine {
   readonly text: string;
   readonly nextOffset: number;
-}
-
-function readJournalRecords(
-  file: string,
-  workspaceId: WorkspaceId,
-  threadId: ThreadId,
-  mode: 'strict' | 'repair' | 'read_only',
-  observer?: JournalReadObserver,
-): readonly RuntimeJournalRecord[] {
-  return readValidatedJournal(file, workspaceId, threadId, mode, { observer }).records;
 }
 
 function readValidatedJournal(
@@ -1512,8 +1460,6 @@ function readValidatedJournal(
     kind: 'body',
     bytes: Math.max(0, bytes.length - bodyOffset),
   });
-  const retainRecords = options.retainRecords !== false;
-  const records: RuntimeJournalRecord[] = retainRecords ? [header] : [];
   let sequenceState = validateJournalSequence([header], workspaceId, threadId);
   let foldedState = options.foldState === true ? foldThreadJournal([header]) : undefined;
   let codecState = emptyJournalMessageCodecState();
@@ -1552,7 +1498,6 @@ function readValidatedJournal(
         const candidateFoldedState = foldedState === undefined
           ? undefined
           : foldThreadJournalAppend(foldedState, [record]);
-        if (retainRecords) records.push(record);
         sequenceState = candidateSequenceState;
         foldedState = candidateFoldedState;
         codecState = candidateCodecState;
@@ -1578,7 +1523,6 @@ function readValidatedJournal(
       fsyncSync(fd);
       expectedSize++;
     }
-    const storedRecords = snapshot(records);
     const boundary = expectedSize === initialBoundary.size
       ? initialBoundary
       : journalBoundaryFromOpenFile(file, fd);
@@ -1587,7 +1531,6 @@ function readValidatedJournal(
     }
     assertJournalFileBoundary(file, fd, boundary);
     return {
-      records: storedRecords,
       sequenceState,
       codecState: cloneJournalMessageCodecState(codecState),
       boundary,
@@ -1694,7 +1637,6 @@ function readValidatedJournalTail(
     }
     assertJournalFileBoundary(file, fd, boundary);
     return {
-      records: [],
       sequenceState,
       codecState: cloneJournalMessageCodecState(codecState),
       boundary,

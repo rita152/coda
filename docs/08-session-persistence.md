@@ -105,6 +105,10 @@ OpId terminal、mailbox accepted seq/queue-effect witness、thread-result 及 co
    不保留所有重建 envelope，然后重建 snapshot；
 5. 只有持有 workspace fence 和 thread write lease 的 reader 可以截断 torn final record 或补 final newline。
 
+`ThreadJournalPort.loadState()` 只交付上述验证得到的 folded state，不暴露 physical record 列表。
+attached writer 以该 state 为起点只对新 batch 做增量 fold；storage 保留 durable journal，session/runtime 不再为
+已附加 thread 复制一份随 live record 数无界增长的 records 数组。
+
 snapshot 用同目录临时文件写入并 fsync，随后 rename 与目录 fsync。append 先 fsync journal，再把 catalog
 boundary 标成 `recoveryRequired`；snapshot rename 成功后才把 catalog 更新到 exact boundary/hint。因此
 “append 已 durable、snapshot/catalog 未更新”“snapshot temp 未 rename”“snapshot 已 rename、catalog 未更新”
