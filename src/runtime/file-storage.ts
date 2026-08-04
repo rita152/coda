@@ -76,6 +76,7 @@ import {
   threadJournalRequiresRecovery,
 } from '../session/thread-journal.js';
 import type { FoldedThreadJournal } from '../session/thread-journal.js';
+import { compareUtf8 } from '../shared/index.js';
 import {
   deserializeThreadRecoveryState,
   serializeThreadRecoveryState,
@@ -3753,17 +3754,6 @@ function readPolicyGrantStore(file: string, workspaceId: WorkspaceId): PolicyGra
   return snapshot({ version: 1, workspaceId, grants });
 }
 
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
-}
 
 function formatStorageCause(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

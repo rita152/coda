@@ -59,7 +59,7 @@ import type {
   ThreadResultOutboxMutation,
 } from './thread-journal-records.js';
 import { RuntimeStorageError } from '../shared/runtime-storage-error.js';
-import { FileTracker } from '../shared/index.js';
+import { compareUtf8, FileTracker } from '../shared/index.js';
 import { validatePermissionCeilingSnapshot } from './permission-ceiling.js';
 import { snapshotFromFold, ThreadJournalWriter } from './thread-journal.js';
 import type { CommitEnvelopeInput, FoldedThreadJournal } from './thread-journal.js';
@@ -2155,18 +2155,6 @@ function unsupportedProviderStream(
   stream.push({ type: 'error', message });
   stream.end(message);
   return stream;
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 async function awaitTurnCaptureGate<T>(

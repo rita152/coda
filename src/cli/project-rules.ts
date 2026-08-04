@@ -28,6 +28,7 @@ import {
 } from '../protocol/index.js';
 import {
   canonicalizePath,
+  compareUtf8,
   isPathInside,
 } from '../shared/index.js';
 import { BASH_ANALYSIS_VERSION } from '../integrations/coding-capabilities/index.js';
@@ -1026,18 +1027,6 @@ function maximalScopes(scopes: readonly string[]): readonly string[] {
   const normalized = normalizedPaths(scopes);
   return normalized.filter((scope) => !normalized.some((other) =>
     other !== scope && isPathInside(scope, other)));
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function staleRules(message: string): Awaited<ReturnType<RuleFreshnessPort['check']>> {

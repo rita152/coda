@@ -36,6 +36,7 @@ import type {
   ThreadPolicyEngine,
   TurnPolicyContext,
 } from './types.js';
+import { compareUtf8 } from '../shared/index.js';
 
 const POLICY_ENGINE_CONFIG = 'coda.policy-engine.conservative.v1';
 const POLICY_BASIS_PREFIX = 'policy_basis_v1_';
@@ -871,18 +872,6 @@ function assertCanonicalUniqueOrder(values: readonly string[], field: string): v
       throw new TypeError(`${field} must be unique and UTF-8 sorted`);
     }
   }
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

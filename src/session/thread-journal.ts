@@ -26,6 +26,7 @@ import { RuntimeEventStreamError } from './event-errors.js';
 import type { EventHub } from './event-hub.js';
 import { TranscriptRepository } from './transcript-repository.js';
 import { RuntimeStorageError } from '../shared/runtime-storage-error.js';
+import { compareUtf8 } from '../shared/index.js';
 import type {
   RuntimeClock,
   ThreadDriverCheckpoint,
@@ -1105,16 +1106,4 @@ function freezeDerivedJson<T>(value: T): T {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) freezeDerivedJson(child);
   return Object.freeze(value);
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }

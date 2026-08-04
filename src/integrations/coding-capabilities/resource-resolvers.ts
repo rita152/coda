@@ -6,7 +6,12 @@ import type {
   CapabilityResourceResolver,
   ResolvedCapabilityResource,
 } from '../../capabilities/types.js';
-import { canonicalizePath, isPathInside, resolveToolWorkdir } from '../../shared/index.js';
+import {
+  canonicalizePath,
+  compareUtf8,
+  isPathInside,
+  resolveToolWorkdir,
+} from '../../shared/index.js';
 import {
   BASH_ANALYSIS_VERSION,
   analyzeBashCommand,
@@ -191,18 +196,6 @@ function filesystemAnalysis(
         .sort((left, right) => compareUtf8(left.canonicalTarget, right.canonicalTarget)),
     },
   };
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function canonicalPath(cwd: string, value: string): string {

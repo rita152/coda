@@ -43,6 +43,7 @@ import type { FauxScript } from '../providers/faux/index.js';
 import { streamAnthropicMessages } from '../providers/anthropic-messages/index.js';
 import { streamOpenAIChat } from '../providers/openai-chat/index.js';
 import { streamOpenAIResponses } from '../providers/openai-responses/index.js';
+import { compareUtf8 } from '../shared/index.js';
 
 const PROVIDER_VERSION = '1';
 const PROVIDER_APIS = Object.freeze([
@@ -385,18 +386,6 @@ function requireMethod(value: unknown, method: string, label: string): void {
     || typeof (value as Readonly<Record<string, unknown>>)[method] !== 'function') {
     throw new TypeError(`CLI registry ${label} must provide ${method}()`);
   }
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function snapshotJson<T>(value: T): Readonly<T> {

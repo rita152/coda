@@ -25,6 +25,7 @@ import {
   computeCapabilityRegistrationDigest,
   IMPLEMENTATION_DIGEST_PATTERN,
 } from './registration-digest.js';
+import { compareUtf8 } from '../shared/index.js';
 
 const RESOURCE_TYPES = new Set<CapabilityResourceType>([
   'filesystem',
@@ -45,8 +46,6 @@ const POLICY_KINDS = new Set<CapabilityPolicyDescriptor['kind']>([
   'execute',
   'plan',
 ]);
-const UTF8 = new TextEncoder();
-
 export function createCapabilityRegistry(): CapabilityRegistry {
   return new DefaultCapabilityRegistry();
 }
@@ -727,17 +726,6 @@ function compareResources(
     || compareUtf8(left.resourceType, right.resourceType)
     || compareUtf8(left.access, right.access)
     || compareUtf8(left.canonicalTarget, right.canonicalTarget);
-}
-
-function compareUtf8(left: string, right: string): number {
-  const leftBytes = UTF8.encode(left);
-  const rightBytes = UTF8.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = (leftBytes[index] ?? 0) - (rightBytes[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function prepareFailure(
