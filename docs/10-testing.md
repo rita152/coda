@@ -47,3 +47,11 @@ bun run check
 
 最后一条是交付门禁（lint、typecheck、unit、build 与 e2e）。文档改动额外执行 `git diff --check`，并检查
 相对链接与测试映射。
+
+## 5. Protocol compatibility 回归
+
+`src/protocol/protocol-version.test.ts` 固定 strict core SemVer、当前 `2.0.x` reader 范围和 patch 策略。
+`src/runtime/file-storage.test.ts` 必须覆盖当前版本与 compatible patch 成功、malformed、已淘汰 major、未来
+major、未来 minor，以及新 metadata 只能写唯一 `PROTOCOL_VERSION`。恢复测试还必须分别穿过 create、
+resume/open 和 workspace reopen 路径，并构造“不支持的 metadata + 损坏正文”，断言稳定的
+`RuntimeStorageError.code` 优先于泛化 journal/tail corruption。

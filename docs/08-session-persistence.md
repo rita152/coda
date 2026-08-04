@@ -42,3 +42,25 @@ compaction 和 retry 由 ThreadRuntime 协调，写入其 activity/run relation 
 
 storage implementation 负责路径、原子写、fsync/rename、lock/lease 与损坏处理；其公共输入输出必须仍是
 canonical protocol value。CLI 参数、TTY、provider credentials 和 renderer state 不进入 durable record。
+
+## 7. Protocol compatibility gate
+
+runtime-v2 thread journal 的第零条记录必须是 `thread_meta`。file storage 先只读取并解析该完整首行，判定
+`protocolVersion` 后才读取 journal 正文；在门禁成功前不得校验/折叠 event、mutation、transcript 或恢复任何
+可执行状态。因此，即使正文同时损坏，不支持的 metadata 版本也必须优先产生版本错误，且不得触发 tail repair。
+
+当前 strict recovery reader 的唯一支持范围是 canonical core SemVer `2.0.x`：
+
+- 版本必须严格写成无前导零的 `MAJOR.MINOR.PATCH`；prerelease、build metadata、空白和其他形态均为
+  `malformed_protocol_version`。
+- major 小于 `2` 已淘汰，报 `retired_protocol_major`；major 大于 `2` 报
+  `unsupported_protocol_major`。
+- major 为 `2` 时只支持 minor `0`；更高 minor 报 `unsupported_protocol_minor`。reader 不推定未来 minor
+  的 journal grammar 或恢复语义向后兼容。
+- `2.0` 内的任意 patch 可读；按本契约，patch 不得改变 durable grammar 或行为语义。创建新 journal 时仍须
+  精确写入唯一的 `PROTOCOL_VERSION`，其他可读 patch 也会以 `protocol_version_write_mismatch` 拒绝成为新
+  metadata。
+
+`thread_meta.version: 2` 只标识 metadata/journal record schema，继续由严格 shape validation 负责；
+`thread_meta.protocolVersion` 才负责 Runtime 协议与恢复兼容性，二者不能互相替代。headless hello 已在第一帧
+公告同一个 `PROTOCOL_VERSION`，当前协议不增加协商状态机或第二套版本字段。

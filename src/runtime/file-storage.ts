@@ -12,6 +12,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -31,6 +32,7 @@ import {
   assertWorkspaceId,
   canonicalJson,
   canonicalJsonSha256,
+  classifyProtocolVersion,
   canonicalizeRuntimeOp,
   isDerivedOpId,
   isExternalOpId,
@@ -44,6 +46,7 @@ import {
   sha256Hex,
   strictJsonSnapshot,
   validateEventEnvelope,
+  PROTOCOL_VERSION,
 } from '../protocol/index.js';
 import type {
   AgentMessage,
@@ -354,6 +357,12 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     this.#assertFence(lease);
     const threadId = assertThreadId(input.threadId);
     validateThreadMeta(input.meta, this.workspaceId, threadId);
+    if (input.meta.protocolVersion !== PROTOCOL_VERSION) {
+      throw new RuntimeStorageError(
+        'protocol_version_write_mismatch',
+        `Thread ${threadId} protocolVersion ${input.meta.protocolVersion} does not match writer ${PROTOCOL_VERSION}`,
+      );
+    }
     const initialRecords = [input.meta, ...(input.initialRecords ?? [])];
     for (const record of input.initialRecords ?? []) {
       validateJournalRecord(record, this.workspaceId, threadId, false);
@@ -921,6 +930,11 @@ interface ValidatedJournal {
   readonly boundary: JournalFileBoundary;
 }
 
+interface JournalHeaderLine {
+  readonly text: string;
+  readonly nextOffset: number;
+}
+
 function readJournalRecords(
   file: string,
   workspaceId: WorkspaceId,
@@ -944,10 +958,21 @@ function readValidatedJournal(
   );
   let initialBoundary: JournalFileBoundary;
   let bytes: Buffer;
+  let header: ThreadMetaRecord;
+  let bodyOffset: number;
   try {
     const initialStat = fstatSync(fd);
     initialBoundary = { dev: initialStat.dev, ino: initialStat.ino, size: initialStat.size };
     assertJournalFileBoundary(file, fd, initialBoundary);
+    const headerLine = readJournalHeaderLine(fd, initialBoundary.size, file);
+    header = validateThreadMeta(
+      parseJournalHeaderValue(headerLine.text, file),
+      workspaceId,
+      threadId,
+    );
+    bodyOffset = headerLine.nextOffset;
+    // Explicit-position header reads leave the descriptor at zero. The body is read only after
+    // protocol compatibility succeeds, preserving the gate before any executable state is parsed.
     bytes = readFileSync(fd);
     if (bytes.length !== initialBoundary.size) {
       throw new RuntimeStorageError(
@@ -959,10 +984,10 @@ function readValidatedJournal(
     closeSync(fd);
     throw error;
   }
-  const records: RuntimeJournalRecord[] = [];
-  let cursor = 0;
-  let line = 0;
-  let lastGoodOffset = 0;
+  const records: RuntimeJournalRecord[] = [header];
+  let cursor = bodyOffset;
+  let line = 1;
+  let lastGoodOffset = bodyOffset;
   let needsFinalNewline = false;
   let expectedSize = bytes.length;
   try {
@@ -1530,6 +1555,9 @@ function validateJournalRecord(
 
 function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: ThreadId): ThreadMetaRecord {
   const value = snapshotUnknown(input, 'invalid_thread_meta');
+  if (isRecord(value) && value.type === 'thread_meta') {
+    assertReadableProtocolVersion(value.protocolVersion, threadId);
+  }
   if (isRecord(value)) {
     assertExactKeys(value, [
       'type', 'version', 'protocolVersion', 'workspaceId', 'threadId', 'permissionCeiling',
@@ -1548,6 +1576,28 @@ function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: 
     throw new RuntimeStorageError('invalid_thread_meta', `Invalid metadata for thread ${threadId}`);
   }
   return value as unknown as ThreadMetaRecord;
+}
+
+function assertReadableProtocolVersion(value: unknown, threadId: ThreadId): void {
+  const compatibility = classifyProtocolVersion(value);
+  if (compatibility.compatible) return;
+  const version = JSON.stringify(value) ?? String(value);
+  let message: string;
+  switch (compatibility.code) {
+    case 'malformed_protocol_version':
+      message = `Thread ${threadId} has malformed protocolVersion ${version}; expected canonical MAJOR.MINOR.PATCH`;
+      break;
+    case 'retired_protocol_major':
+      message = `Thread ${threadId} protocolVersion ${version} uses retired major ${compatibility.major}`;
+      break;
+    case 'unsupported_protocol_major':
+      message = `Thread ${threadId} protocolVersion ${version} uses unsupported future major ${compatibility.major}`;
+      break;
+    case 'unsupported_protocol_minor':
+      message = `Thread ${threadId} protocolVersion ${version} uses unsupported future minor ${compatibility.minor}`;
+      break;
+  }
+  throw new RuntimeStorageError(compatibility.code, message);
 }
 
 function validateThreadSeed(input: unknown): ThreadSeedRecord {
@@ -1974,16 +2024,58 @@ function readThreadLock(file: string): ThreadLockRecord {
 
 function readJournalHeader(file: string): ThreadMetaRecord {
   assertRegularFileNoSymlink(file);
-  const bytes = readFileSync(file);
-  const newline = bytes.indexOf(0x0a);
-  if (newline < 0) throw new RuntimeStorageError('invalid_thread_journal', 'Thread meta line is incomplete');
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const parsed = JSON.parse(bytes.subarray(0, newline).toString('utf8')) as unknown;
+    const stat = fstatSync(fd);
+    const header = readJournalHeaderLine(fd, stat.size, file);
+    const parsed = parseJournalHeaderValue(header.text, file);
     if (!isRecord(parsed) || parsed.type !== 'thread_meta' || !isThreadId(parsed.threadId)
       || !isWorkspaceIdValue(parsed.workspaceId)) {
       throw new Error('invalid meta header');
     }
     return validateThreadMeta(parsed, parsed.workspaceId, parsed.threadId);
+  } catch (error) {
+    throw storageFailure('invalid_thread_journal', file, error);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readJournalHeaderLine(
+  fd: number,
+  fileSize: number,
+  file: string,
+): JournalHeaderLine {
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  let length = 0;
+  while (offset < fileSize) {
+    const chunk = Buffer.allocUnsafe(Math.min(4096, fileSize - offset));
+    const bytesRead = readSync(fd, chunk, 0, chunk.length, offset);
+    if (bytesRead === 0) break;
+    const bytes = chunk.subarray(0, bytesRead);
+    const newline = bytes.indexOf(0x0a);
+    if (newline >= 0) {
+      chunks.push(bytes.subarray(0, newline));
+      length += newline;
+      return {
+        text: Buffer.concat(chunks, length).toString('utf8'),
+        nextOffset: offset + newline + 1,
+      };
+    }
+    chunks.push(bytes);
+    length += bytes.length;
+    offset += bytes.length;
+  }
+  throw new RuntimeStorageError('invalid_thread_journal', `Thread meta line is incomplete: ${file}`);
+}
+
+function parseJournalHeaderValue(
+  text: string,
+  file: string,
+): unknown {
+  try {
+    return JSON.parse(text) as unknown;
   } catch (error) {
     throw storageFailure('invalid_thread_journal', file, error);
   }

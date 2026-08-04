@@ -17,7 +17,7 @@ import type {
   TurnId,
   WorkspaceId,
 } from '../protocol/index.js';
-import { runtimeOpPayloadHash, sha256Hex } from '../protocol/index.js';
+import { PROTOCOL_VERSION, runtimeOpPayloadHash, sha256Hex } from '../protocol/index.js';
 import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError } from './errors.js';
 import { createFileRuntimeStorage } from './file-storage.js';
 import type { SupervisorOpLedgerRecord, ThreadMetaRecord, ThreadSeedRecord } from './ports.js';
@@ -111,6 +111,131 @@ describe('FileRuntimeStorage canonical persistence', () => {
     expect(await (await reopened.openThreadJournal(threadId))?.load()).toEqual([meta, seed]);
     await reopened.releaseSupervisorLease(reopenedLease);
     await reopened.close();
+  });
+
+  test('writes only the canonical protocol version while reading compatible patch journals', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_protocol_patch' as WorkspaceId;
+    const threadId = 'thread-protocol-patch' as ThreadId;
+    const workspace = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('protocol-patch');
+
+    await expect(workspace.createThreadJournal(lease, {
+      threadId,
+      meta: threadMeta({ workspaceId, threadId, cwd, protocolVersion: '2.0.7' }),
+    })).rejects.toMatchObject({
+      name: 'RuntimeStorageError',
+      code: 'protocol_version_write_mismatch',
+    });
+    expect(existsSync(journalPath(root, workspaceId, threadId))).toBe(false);
+
+    const meta = threadMeta({ workspaceId, threadId, cwd });
+    await workspace.createThreadJournal(lease, { threadId, meta });
+    rewriteJournal(journalPath(root, workspaceId, threadId), '2.0.7');
+    expect((await (await workspace.openThreadJournal(threadId))?.load())?.[0])
+      .toEqual({ ...meta, protocolVersion: '2.0.7' });
+
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test.each([
+    ['not-semver', 'malformed_protocol_version'],
+    ['1.9.9', 'retired_protocol_major'],
+    ['3.0.0', 'unsupported_protocol_major'],
+    ['2.1.0', 'unsupported_protocol_minor'],
+  ] as const)('reports %s compatibility failures on the resume/open path', async (
+    protocolVersion,
+    code,
+  ) => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = `ws_protocol_resume_${code}` as WorkspaceId;
+    const threadId = `thread-protocol-resume-${code}` as ThreadId;
+    const workspace = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease(`protocol-resume-${protocolVersion}`);
+    await workspace.createThreadJournal(lease, {
+      threadId,
+      meta: threadMeta({ workspaceId, threadId, cwd }),
+    });
+    rewriteJournal(journalPath(root, workspaceId, threadId), protocolVersion);
+
+    await expect(workspace.openThreadJournal(threadId)).rejects.toMatchObject({
+      name: 'RuntimeStorageError',
+      code,
+      message: expect.stringContaining(protocolVersion),
+    });
+
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('checks an existing journal version before its damaged body on create', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_protocol_create' as WorkspaceId;
+    const threadId = 'thread-protocol-create' as ThreadId;
+    const workspace = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('protocol-create');
+    const meta = threadMeta({ workspaceId, threadId, cwd });
+    await workspace.createThreadJournal(lease, { threadId, meta });
+    rewriteJournal(journalPath(root, workspaceId, threadId), '2.1.0', '{damaged body}\n');
+
+    await expect(workspace.createThreadJournal(lease, { threadId, meta })).rejects.toMatchObject({
+      name: 'RuntimeStorageError',
+      code: 'unsupported_protocol_minor',
+      message: expect.stringContaining('2.1.0'),
+    });
+
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('checks protocol compatibility before damaged-body recovery on workspace reopen', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_protocol_reopen' as WorkspaceId;
+    const threadId = 'thread-protocol-reopen' as ThreadId;
+    const storage = createFileRuntimeStorage({ root });
+    const first = await storage.openWorkspace({ cwd, workspaceId });
+    const firstLease = await first.acquireSupervisorLease('protocol-reopen-first');
+    await first.createThreadJournal(firstLease, {
+      threadId,
+      meta: threadMeta({ workspaceId, threadId, cwd }),
+    });
+    await first.releaseSupervisorLease(firstLease);
+    await first.close();
+    rewriteJournal(journalPath(root, workspaceId, threadId), '3.0.0', '{damaged body}\n');
+
+    const reopened = await storage.openWorkspace({ cwd, workspaceId });
+    await expect(reopened.acquireSupervisorLease('protocol-reopen-second')).rejects.toMatchObject({
+      name: 'RuntimeStorageError',
+      code: 'unsupported_protocol_major',
+      message: expect.stringContaining('3.0.0'),
+    });
+    await reopened.close();
+  });
+
+  test('keeps record schema version separate from protocol compatibility', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_record_schema_version' as WorkspaceId;
+    const threadId = 'thread-record-schema-version' as ThreadId;
+    const workspace = await createFileRuntimeStorage({ root }).openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('record-schema-version');
+    const meta = {
+      ...threadMeta({ workspaceId, threadId, cwd }),
+      version: 3,
+    } as unknown as ThreadMetaRecord;
+
+    await expect(workspace.createThreadJournal(lease, { threadId, meta })).rejects.toMatchObject({
+      name: 'RuntimeStorageError',
+      code: 'invalid_thread_meta',
+    });
+
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
   });
 
   test('rejects malformed seed provenance before creating a journal', async () => {
@@ -342,11 +467,12 @@ function threadMeta(input: {
   workspaceId: WorkspaceId;
   threadId: ThreadId;
   cwd: string;
+  protocolVersion?: string;
 }): ThreadMetaRecord {
   return {
     type: 'thread_meta',
     version: 2,
-    protocolVersion: '2.0.0',
+    protocolVersion: input.protocolVersion ?? PROTOCOL_VERSION,
     workspaceId: input.workspaceId,
     threadId: input.threadId,
     permissionCeiling: { revision: 'test', constraints: [] },
@@ -415,4 +541,16 @@ function workspacePath(root: string, workspaceId: WorkspaceId): string {
 
 function journalPath(root: string, workspaceId: WorkspaceId, threadId: ThreadId): string {
   return path.join(workspacePath(root, workspaceId), 'threads', `th-${sha256Hex(threadId)}.jsonl`);
+}
+
+function rewriteJournal(
+  file: string,
+  protocolVersion: string,
+  body?: string,
+): void {
+  const [header, ...existingBody] = readFileSync(file, 'utf8').split('\n');
+  if (header === undefined) throw new Error('journal has no header');
+  const meta = JSON.parse(header) as Record<string, unknown>;
+  meta.protocolVersion = protocolVersion;
+  writeFileSync(file, `${JSON.stringify(meta)}\n${body ?? existingBody.join('\n')}`);
 }
