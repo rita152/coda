@@ -1,4 +1,4 @@
-// detectCompat 规则表单测(docs/04 §5、§10 验收:四类 baseURL 各返回预期 profile,覆盖生效)。
+// detectCompat 规则表单测(见 docs/04-provider-adapter.md)。
 import { describe, expect, it } from 'bun:test';
 import { detectCompat, resolveCompat } from './compat.js';
 
@@ -10,7 +10,7 @@ describe('detectCompat', () => {
       supportsDeveloperRole: true,
       supportsUsageInStreaming: true,
       supportsStrictTools: true,
-      reasoningFormat: 'openai',
+      supportsReasoning: true,
     });
   });
 
@@ -18,24 +18,24 @@ describe('detectCompat', () => {
     expect(detectCompat('https://api.openai.com/v1')).toEqual(detectCompat(undefined));
   });
 
-  it('api.deepseek.com → max_tokens + reasoning_content + strict/developer 关', () => {
+  it('api.deepseek.com → max_tokens + reasoning 读取 + strict/developer 关', () => {
     const p = detectCompat('https://api.deepseek.com/v1');
     expect(p).toMatchObject({
       maxTokensField: 'max_tokens',
       supportsDeveloperRole: false,
       supportsStrictTools: false,
       supportsUsageInStreaming: true,
-      reasoningFormat: 'reasoning_content',
+      supportsReasoning: true,
     });
   });
 
-  it('openrouter.ai → reasoning_content + usage 开 + strict 关 + 视觉开', () => {
+  it('openrouter.ai → reasoning 读取 + usage 开 + strict 关 + 视觉开', () => {
     const p = detectCompat('https://openrouter.ai/api/v1');
     expect(p).toMatchObject({
       supportsStrictTools: false,
       supportsUsageInStreaming: true,
       supportsImageParts: true,
-      reasoningFormat: 'reasoning_content',
+      supportsReasoning: true,
     });
   });
 
@@ -49,7 +49,7 @@ describe('detectCompat', () => {
         supportsStrictTools: false,
         supportsImageParts: false,
         supportsTemperature: false,
-        reasoningFormat: 'reasoning_content',
+        supportsReasoning: true,
       });
     }
   });
@@ -67,16 +67,17 @@ describe('resolveCompat(白名单收窄:垃圾值不得直达 wire)', () => {
         compat: {
           maxTokensField: 'max_output_tokens',        // typo:非法枚举 → 丢弃
           supportsImageParts: 'false',                // 字符串布尔 → 丢弃(不得当 truthy)
-          reasoningFormat: null,                      // null → 丢弃
+          supportsReasoning: null,                     // null → 丢弃
+          reasoningFormat: 'none',                     // 已移除的名义方言 → 按未知键丢弃
           totallyUnknownKey: true,                    // 未知键 → 丢弃
           supportsUsageInStreaming: true,             // 合法 → 生效
         },
       });
       expect(p.maxTokensField).toBe('max_tokens');    // 保守值保留,typo 未直达 wire 参数键
       expect(p.supportsImageParts).toBe(false);
-      expect(p.reasoningFormat).toBe('reasoning_content');
+      expect(p.supportsReasoning).toBe(true);
       expect(p.supportsUsageInStreaming).toBe(true);
-      expect(warnings).toHaveLength(4);
+      expect(warnings).toHaveLength(5);
     } finally {
       console.warn = orig;
     }

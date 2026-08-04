@@ -188,6 +188,10 @@ export OPENAI_API_KEY='...'
 coda exec -p "检查类型错误"
 ```
 
+未给出 `--provider` 时，直接使用 OpenAI（未设置 base URL 或 base URL 为 HTTPS
+`api.openai.com`）默认走 Responses API。自定义 OpenAI-compatible base URL 默认走 Chat Completions
+兼容路径；需要固定协议时显式传入 `--provider openai-chat` 或 `--provider openai-responses`。
+
 优先使用 `coda auth login` 的秘密输入，不要把真实 key 写进 shell history、prompt、日志或仓库。
 
 ## 开发

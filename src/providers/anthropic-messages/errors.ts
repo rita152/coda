@@ -1,4 +1,4 @@
-// 错误映射(规格见 docs/04-provider-adapter.md §4.6/§8 与 docs/08 §5.1 分类基线)。
+// 错误映射(见 docs/04-provider-adapter.md 的流契约与 docs/08-session-persistence.md 的错误分类)。
 // 形态对齐 src/providers/openai-chat/errors.ts:SDK 错误家族 → ProviderErrorDetails,
 // stopReason 编码为 error/aborted。铁律:StreamFn 绝不 throw,一切错误编码为流内 error 事件。
 

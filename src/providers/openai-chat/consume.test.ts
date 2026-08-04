@@ -1,4 +1,4 @@
-// 入站解析测试:SSE chunk fixture 回放(docs/10-testing.md §4)+ 错误路径单测。
+// 入站解析测试:SSE chunk fixture 回放(见 docs/10-testing.md)+ 错误路径单测。
 // fixture 回放与生产路径走同一条 runChatStream 管线,只是 chunks 来源不同。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -107,7 +107,7 @@ describe('fixture 回放(全部产出合法事件序列)', () => {
     expect(events.at(-1)?.type).toBe('error');
     expect(final.stopReason).toBe('error');
     expect(final.errorMessage).toContain('server had an error');
-    // in-band server_error 是可重试的瞬时故障(docs/08 §5.1);code 从 error 体读取
+    // in-band server_error 是可重试的瞬时故障;code 从 error 体读取。
     expect(final.errorDetails).toMatchObject({ kind: 'http', retryable: true, code: 'internal_error' });
     expect(final.content).toEqual([{ type: 'text', text: 'part' }]);   // 半截内容保留
   });
@@ -122,7 +122,7 @@ describe('fixture 回放(全部产出合法事件序列)', () => {
     expect(c1[0]?.arguments).toEqual({ path: 'x' });
     expect(c1[0]?.id).not.toBe(toolCallsOf(r2.final)[0]?.id);    // 兜底 id 不冲突
 
-    // 出站回传:兜底 id 配对成立(docs/04 §10 验收「id 缺失 fixture」后半句)
+    // 出站回传:兜底 id 仍可正确配对。
     const call = c1[0] as ToolCallPart;
     const wire = convertMessages({
       messages: [
@@ -144,7 +144,7 @@ describe('fixture 回放(全部产出合法事件序列)', () => {
     expect(on.events.filter((e) => e.type.startsWith('reasoning_')).length).toBeGreaterThan(2);
 
     expect(on.final.stopReason).toBe('stop');
-    const off = await replayFixture('reasoning-content', { ...openaiCompat, reasoningFormat: 'none' });
+    const off = await replayFixture('reasoning-content', { ...openaiCompat, supportsReasoning: false });
     assertValidProviderEventSequence(off.events);
     expect(off.final.content).toEqual([{ type: 'text', text: '答案是 42' }]);
   });

@@ -1,4 +1,4 @@
-// SSE chunk fixture 录制(docs/10-testing.md §4.3):对真实 endpoint 发起流式请求,
+// SSE chunk fixture 录制(见 docs/10-testing.md 的 fixture 回归):对真实 endpoint 发起流式请求,
 // 把每条原始 chunk 存为 JSONL。手动运行、fixture 入库;CI 永不联网。
 // 用法:bun run record:fixture -- --model kimi-k3 --scenario text --out src/providers/openai-chat/__fixtures__/kimi-text.jsonl
 import { mkdirSync } from 'node:fs';

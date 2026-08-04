@@ -1,5 +1,5 @@
-// faux provider 测试:事件语法自检 + StreamFn 铁律 + 属性测试
-// (docs/10-testing.md 第 3 节、第 9 节 M1 验收;docs/03-internal-protocol.md 第 10 节)。
+// faux provider 测试:事件语法自检 + StreamFn 铁律 + 属性测试。
+// 见 docs/10-testing.md 的协议兼容回归与 docs/03-internal-protocol.md 的事件生命周期。
 import { describe, expect, it, vi } from 'bun:test';
 import type { Context, ModelConfig, ProviderEvent } from '../../protocol/index.js';
 import {
@@ -258,7 +258,7 @@ describe('partial 快照的中间态(非恒真断言)', () => {
     }
     const final = await stream.result();
 
-    // 末份快照深等于 done.message(M1 验收第 2 条的非恒真版本)
+    // 末份快照深等于 done.message 的非恒真版本。
     expect(snapshots.at(-1)).toEqual(structuredClone(final));
     // 快照内容块数单调不减(前缀式生长)
     const lengths = snapshots.map((s) => (s as { content: unknown[] }).content.length);

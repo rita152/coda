@@ -1,4 +1,4 @@
-// 出站转换测试:逐 role 映射、配对纪律、strict 清洗、参数裁剪(docs/04 §3 + §10 验收)。
+// 出站转换测试:逐 role 映射、配对纪律、strict 清洗、参数裁剪(见 docs/04-provider-adapter.md)。
 import { describe, expect, it } from 'bun:test';
 import type { Context, ModelConfig } from '../../protocol/index.js';
 import { assertToolCallPairing } from '../../../tests/helpers/wire-pairing.js';
@@ -8,7 +8,7 @@ import { buildParams, convertMessages, toStrictSchema } from './convert.js';
 const compat = detectCompat(undefined);   // OpenAI 全开
 const model: ModelConfig = { ref: { provider: 'openai', api: 'openai-chat', model: 'gpt-test' } };
 
-/** docs/04 §10 验收指定的综合 Context:system + user(图) + assistant(text+2 toolCall) + 2 toolResult(其一带图)。 */
+/** 综合 Context:system + user(图) + assistant(text+2 toolCall) + 2 toolResult(其一带图)。 */
 const richContext: Context = {
   systemPrompt: 'You are coda.',
   messages: [
@@ -86,7 +86,7 @@ describe('convertMessages(出站快照)', () => {
     expect(convertMessages(ctx, compat)[0]?.content).toBe('hi');
 
     const noVision = convertMessages(richContext, { ...compat, supportsImageParts: false });
-    // user 消息降为纯文本 + 占位(与 M4 transform 层形态对齐,不无声丢弃);工具结果图片不补 user 消息
+    // user 消息降为纯文本 + 占位(与 transform 层形态对齐,不无声丢弃);工具结果图片不补 user 消息
     expect(noVision[1]?.content).toContain('[image omitted: image/png]');
     expect(noVision.filter((m) => m.role === 'user')).toHaveLength(2);   // u1 与 u2,无图片附加消息
   });

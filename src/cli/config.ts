@@ -125,7 +125,10 @@ export function resolveConfig(
   file: CodaConfigFile,
   options: ResolveConfigOptions = {},
 ): ResolvedConfig {
-  const provider = flags.provider ?? 'openai-chat';
+  const baseURL = flags.baseUrl ?? env['CODA_BASE_URL'] ?? file.baseURL ?? undefined;
+  const provider = flags.provider ?? (
+    isOfficialOpenAIBaseURL(baseURL) ? 'openai-responses' : 'openai-chat'
+  );
   if (provider === 'faux') {
     // faux 是正式 provider(e2e 用):无需 key/baseURL
     return {
@@ -143,7 +146,6 @@ export function resolveConfig(
     }
     return flags.provider === undefined ? {} : { provider };
   }
-  const baseURL = flags.baseUrl ?? env['CODA_BASE_URL'] ?? file.baseURL ?? undefined;
   // anthropic 侧优先接受 ANTHROPIC_API_KEY;两 provider 都尊重 CODA_API_KEY 与 config 文件
   const apiKeyEnv = file.apiKeyEnv?.trim();
   const fileApiKey =
@@ -179,4 +181,15 @@ export function resolveConfig(
     console.error('[coda] warning: ~/.coda/config.json 中存在明文 apiKey,建议改用 apiKeyEnv');
   }
   return resolved;
+}
+
+/** 未显式选择协议时，只有官方 HTTPS endpoint 使用 Responses；其余 base URL 保守走 Chat 兼容层。 */
+function isOfficialOpenAIBaseURL(baseURL: string | undefined): boolean {
+  if (baseURL === undefined) return true;
+  try {
+    const url = new URL(baseURL);
+    return url.protocol === 'https:' && url.hostname === 'api.openai.com' && url.port === '';
+  } catch {
+    return false;
+  }
 }

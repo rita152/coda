@@ -1,4 +1,4 @@
-// 错误映射(规格见 docs/04-provider-adapter.md §4.6 与 docs/08 §5.1 分类基线)。
+// 错误映射(见 docs/04-provider-adapter.md 的流契约与 docs/08-session-persistence.md 的错误分类)。
 // SSE in-band 错误(data 行带 error 字段)已被 SDK 转为 throw APIError,与 HTTP 错误同路径。
 
 import OpenAI from 'openai';

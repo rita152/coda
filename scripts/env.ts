@@ -14,7 +14,7 @@ export function loadEndpointEnv(): EndpointEnv {
 }
 
 /**
- * Anthropic Messages 端点凭证(M7):优先项目 .env 的小写 claude_* 键(用户为 coda 显式约定的
+ * Anthropic Messages 端点凭证:优先项目 .env 的小写 claude_* 键(用户为 coda 显式约定的
  * 网关端点),再回退 ANTHROPIC_* 环境变量。precedence 与 OpenAI 侧相反是有意的——宿主机常带
  * Claude Code 自己的 ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN(指向 api.anthropic.com),
  * 若让它盖过 .env,coda 的网关 key 会被发去真 Anthropic 而 401。

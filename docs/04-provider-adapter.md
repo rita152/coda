@@ -23,3 +23,7 @@ adapter 必须及时检查 `AbortSignal`，停止后不再产生副作用或继�
 宿主通过 `ProviderAdapterRegistry` 显式注册 adapter。每 turn 捕获不可变 adapter snapshot；运行中增删
 provider 只影响下一 turn。provider 配置、API key 与 base URL 属于可信 composition 边界，绝不进入
 RuntimeOp、EventEnvelope、transcript 或 renderer。
+
+CLI 未显式选择 provider 时，未设置 base URL 或 HTTPS `api.openai.com` 使用 OpenAI Responses adapter；
+其他 base URL 默认使用 OpenAI Chat adapter，以保留 OpenAI-compatible endpoint 的保守兼容路径。显式
+`openai-chat`、`openai-responses` 和第三方 provider 的模型协议映射优先于该默认规则。

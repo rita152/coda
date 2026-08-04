@@ -1,6 +1,6 @@
-// 入站解析:Anthropic Messages 流事件状态机(规格见 docs/04-provider-adapter.md §7、§8)。
+// 入站解析:Anthropic Messages 流事件状态机(规格见 docs/04-provider-adapter.md)。
 // Messages 的 content_block_start/delta/stop 天然对应内部协议三段式,不需按 index 归并 arguments
-// (input_json_delta 自带块定位)。手写 for-await 消费(理由见 docs/04 §7)。
+// (input_json_delta 自带块定位)。手写 for-await 消费以保持已验证的 fixture 回放路径。
 // 签名不 import @anthropic-ai/sdk 类型:事件形状结构化读取,fixture 回放测试直接喂 JSON 行。
 
 import type {
@@ -23,7 +23,7 @@ interface BlockState {
   closed: boolean;
 }
 
-// usage 累加器:分量各自 last-wins,input 恒由分量重算(inclusive 口径,docs/03 §3.2)。
+// usage 累加器:分量各自 last-wins,input 恒由分量重算(inclusive 口径,见 docs/03-internal-protocol.md)。
 interface UsageAcc {
   inputTokens: number;
   cacheRead: number;
@@ -215,7 +215,7 @@ function numberOr(v: unknown, fallback: number): number {
 }
 
 /**
- * usage 换算(docs/03 §3.2,M7 重点:Anthropic exclusive → 内部 inclusive):
+ * usage 换算(Anthropic exclusive → 内部 inclusive):
  *   input = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
  *   output = output_tokens;cacheRead/cacheWrite/reasoning 为信息性拆分
  * 非标扩展字段(inference_geo/iterations/service_tier/嵌套 cache_creation)一律容忍忽略。
@@ -239,7 +239,7 @@ function applyUsage(raw: unknown, state: StreamState): void {
   state.partial.usage = usage;
 }
 
-// stop_reason 映射(docs/04 §8 列 end_turn/max_tokens/tool_use/refusal;stop_sequence/pause_turn
+// stop_reason 映射:处理 end_turn/max_tokens/tool_use/refusal;stop_sequence/pause_turn
 // 是 adapter 补充)。pause_turn 是服务端工具(web_search 等)对未完成 turn 的中断,本该由「重发
 // 部分 assistant 续跑」处理;coda v1 只接客户端工具,pause_turn 实际不可达,故当作干净 stop 收尾
 // (无 tool_calls 的 stop → loop 走 agent_end completed,不做续跑——这是有意的近似,非「loop 层
