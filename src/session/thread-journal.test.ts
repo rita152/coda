@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   PROTOCOL_VERSION,
   assertDerivedOpId,
@@ -159,10 +159,21 @@ describe('ThreadJournalWriter', () => {
     expect(JSON.stringify(commits)).not.toContain('driver_checkpoint');
   });
 
-  test('publishes only after the canonical commit has flushed', async () => {
+  test('updates durable replay range then publishes only after the canonical commit has flushed', async () => {
     const fixture = writerFixture();
     const appendEntered = deferred<void>();
     const releaseAppend = deferred<void>();
+    const actions: string[] = [];
+    const updateDurableReplayRange = fixture.events.updateDurableReplayRange.bind(fixture.events);
+    const publish = fixture.events.publish.bind(fixture.events);
+    const updateSpy = spyOn(fixture.events, 'updateDurableReplayRange').mockImplementation((...args) => {
+      actions.push('range');
+      updateDurableReplayRange(...args);
+    });
+    const publishSpy = spyOn(fixture.events, 'publish').mockImplementation((envelopes) => {
+      actions.push('publish');
+      publish(envelopes);
+    });
     fixture.journal.beforeFirstCommit = async () => {
       appendEntered.resolve(undefined);
       await releaseAppend.promise;
@@ -179,6 +190,8 @@ describe('ThreadJournalWriter', () => {
     await appendEntered.promise;
     const pendingNext = iterator.next();
     expect(await remainsPending(pendingNext)).toBe(true);
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(publishSpy).not.toHaveBeenCalled();
     releaseAppend.resolve(undefined);
     await commit;
 
@@ -186,6 +199,7 @@ describe('ThreadJournalWriter', () => {
     expect(delivered.done).toBe(false);
     expect(delivered.value?.seq).toBe(1);
     expect(fixture.journal.records.at(-1)?.type).toBe('commit');
+    expect(actions).toEqual(['range', 'publish']);
     await iterator.return?.();
   });
 
@@ -1027,7 +1041,13 @@ function writerFixture(): {
   const records: RuntimeJournalRecord[] = [meta];
   const journal = new RecordingJournal(records);
   const events = new EventHub();
-  events.registerThread(threadId);
+  events.registerThread(threadId, {
+    highWaterSeq: 0,
+    replayStartSeq: 1,
+    replay: async (afterSeq, throughSeq) => foldThreadJournal(journal.records).envelopes.filter(
+      (envelope) => envelope.seq > afterSeq && envelope.seq <= throughSeq,
+    ),
+  });
   const writer = new ThreadJournalWriter({
     workspaceId,
     threadId,

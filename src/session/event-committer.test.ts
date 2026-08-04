@@ -284,7 +284,14 @@ function createFixture(threadId: ThreadId, hub = new EventHub()): {
     state: fold(journal.records),
     foldAppend,
   });
-  hub.registerThread(threadId);
+  hub.registerThread(threadId, {
+    highWaterSeq: 0,
+    replayStartSeq: 1,
+    replay: async (afterSeq, throughSeq) => journal.records.flatMap((record) =>
+      record.type === 'commit'
+        ? record.envelopes.filter((envelope) => envelope.seq > afterSeq && envelope.seq <= throughSeq)
+        : []),
+  });
   const committer = new EventCommitter<TestRecord, TestState, TestMutation>({
     workspaceId: WORKSPACE,
     threadId,
@@ -297,7 +304,13 @@ function createFixture(threadId: ThreadId, hub = new EventHub()): {
       envelopes,
       ...(mutations.length > 0 && { mutations }),
     }),
-    publish: (envelopes) => hub.publish(envelopes),
+    publish: (envelopes) => {
+      hub.updateDurableReplayRange(threadId, {
+        highWaterSeq: repository.state.highWaterSeq,
+        replayStartSeq: 1,
+      });
+      hub.publish(envelopes);
+    },
     onWriterFatal: () => hub.failThread(threadId, 'writer_failed'),
   });
   return { hub, journal, committer };

@@ -1448,7 +1448,7 @@ function runtimeFixture(options: {
   const meta = threadMeta();
   const journal = new RecordingJournal([meta]);
   const events = new EventHub();
-  events.registerThread(THREAD_ID);
+  registerEventsForJournal(events, THREAD_ID, journal);
   const writer = writerFor(journal, events);
   const driver = new ScriptedDriver();
   const policy = options.policy ?? new CountingPolicy();
@@ -1525,7 +1525,7 @@ async function registryRuntimeFixture(
   const meta = threadMeta();
   const journal = new RecordingJournal([meta]);
   const events = new EventHub();
-  events.registerThread(THREAD_ID);
+  registerEventsForJournal(events, THREAD_ID, journal);
   const writer = writerFor(journal, events);
   const driver = new ScriptedDriver();
   const policy = new CountingPolicy();
@@ -1619,7 +1619,7 @@ async function preparedIdentityFixture(): Promise<PreparedIdentityFixture> {
   const rootOp = prompt(rootOpId, 'prepared');
   const journal = new RecordingJournal([threadMeta()]);
   const events = new EventHub();
-  events.registerThread(THREAD_ID);
+  registerEventsForJournal(events, THREAD_ID, journal);
   const writer = writerFor(journal, events);
   await writer.appendPrepare({ type: 'mailbox_prepare', opId: rootOpId, op: rootOp, timestamp: 1 });
   await writer.commit([{
@@ -1688,6 +1688,21 @@ function writerFor(journal: RecordingJournal, events: EventHub): ThreadJournalWr
     events,
     clock: TEST_CLOCK,
     state: foldThreadJournal(journal.records),
+  });
+}
+
+function registerEventsForJournal(
+  events: EventHub,
+  threadId: ThreadId,
+  journal: RecordingJournal,
+): void {
+  const initial = foldThreadJournal(journal.records);
+  events.registerThread(threadId, {
+    highWaterSeq: initial.highWaterSeq,
+    replayStartSeq: initial.envelopes[0]?.seq ?? initial.highWaterSeq + 1,
+    replay: async (afterSeq, throughSeq) => foldThreadJournal(journal.records).envelopes.filter(
+      (envelope) => envelope.seq > afterSeq && envelope.seq <= throughSeq,
+    ),
   });
 }
 

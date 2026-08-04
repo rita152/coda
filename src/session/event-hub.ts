@@ -1,5 +1,5 @@
-// Workspace-owned asynchronous observer channel. It routes already-committed envelopes through
-// bounded, per-subscriber queues and never participates in authoritative persistence or seq allocation.
+// Workspace-owned asynchronous observer channel. It routes already-committed envelopes through one
+// global bounded live-order buffer and bounded per-subscriber queues; storage owns cursor replay.
 
 import {
   isThreadId,
@@ -20,6 +20,7 @@ export interface EventSubscriptionOptions {
 
 export interface EventHubOptions {
   readonly subscriptionQueueLimit?: number;
+  /** Maximum number of envelopes retained in the global cross-thread live-order buffer. */
   readonly historyLimit?: number;
 }
 
@@ -29,12 +30,11 @@ export interface EventThreadRegistration {
   readonly replay: (afterSeq: number, throughSeq: number) => Promise<readonly EventEnvelope[]>;
 }
 
-interface ThreadHistory {
-  readonly envelopes: Readonly<EventEnvelope>[];
+interface ThreadReplayState {
   highWaterSeq: number;
   storageHighWaterSeq: number;
   storageReplayStartSeq: number;
-  replay?: EventThreadRegistration['replay'];
+  readonly replay: EventThreadRegistration['replay'];
 }
 
 interface OrderedEnvelope {
@@ -81,8 +81,7 @@ const DEFAULT_SUBSCRIPTION_QUEUE_LIMIT = 256;
 const DEFAULT_HISTORY_LIMIT = 4_096;
 
 export class EventHub {
-  readonly #histories = new Map<ThreadId, ThreadHistory>();
-  readonly #knownThreads = new Set<ThreadId>();
+  readonly #histories = new Map<ThreadId, ThreadReplayState>();
   readonly #subscriptions = new Set<Subscription>();
   readonly #liveHistory: OrderedEnvelope[] = [];
   readonly #queueLimit: number;
@@ -98,39 +97,29 @@ export class EventHub {
     this.#historyLimit = positiveLimit(options.historyLimit ?? DEFAULT_HISTORY_LIMIT, 'historyLimit');
   }
 
-  registerThread(threadId: ThreadId, registration?: EventThreadRegistration): void {
+  registerThread(threadId: ThreadId, registration: EventThreadRegistration): void {
     assertStreamThreadId(threadId);
-    if (registration !== undefined) validateRegistration(registration);
-    this.#knownThreads.add(threadId);
-    const existing = this.#histories.get(threadId);
-    if (existing === undefined) {
-      this.#histories.set(threadId, {
-        envelopes: [],
-        highWaterSeq: registration?.highWaterSeq ?? 0,
-        storageHighWaterSeq: registration?.highWaterSeq ?? 0,
-        storageReplayStartSeq: registration?.replayStartSeq ?? 1,
-        ...(registration !== undefined && { replay: registration.replay }),
-      });
-    } else if (registration !== undefined) {
-      if (existing.highWaterSeq !== 0 || existing.envelopes.length > 0 || existing.replay !== undefined) {
-        throw new RuntimeEventStreamError('history_already_initialized', threadId);
-      }
-      existing.highWaterSeq = registration.highWaterSeq;
-      existing.storageHighWaterSeq = registration.highWaterSeq;
-      existing.storageReplayStartSeq = registration.replayStartSeq;
-      existing.replay = registration.replay;
-      for (const subscription of this.#subscriptions) {
-        const afterSeq = subscription.cursorAfterSeq.get(threadId);
-        if (afterSeq === undefined) continue;
-        this.#installReplay(subscription, threadId, afterSeq, registration.highWaterSeq);
-      }
+    validateRegistration(registration);
+    if (this.#histories.has(threadId)) {
+      throw new RuntimeEventStreamError('history_already_initialized', threadId);
+    }
+    this.#histories.set(threadId, {
+      highWaterSeq: registration.highWaterSeq,
+      storageHighWaterSeq: registration.highWaterSeq,
+      storageReplayStartSeq: registration.replayStartSeq,
+      replay: registration.replay,
+    });
+    for (const subscription of this.#subscriptions) {
+      const afterSeq = subscription.cursorAfterSeq.get(threadId);
+      if (afterSeq === undefined) continue;
+      this.#installReplay(subscription, threadId, afterSeq, registration.highWaterSeq);
     }
     for (const subscription of this.#subscriptions) this.#wake(subscription);
   }
 
   /**
-   * Advances the range that the registered storage loader can serve after a durable live commit.
-   * The writer calls this only after publish has installed the same high-water in memory.
+   * Advances the range that the registered storage loader can serve after a durable append and
+   * before the corresponding live publication.
    */
   updateDurableReplayRange(
     threadId: ThreadId,
@@ -139,9 +128,8 @@ export class EventHub {
     assertStreamThreadId(threadId);
     const history = this.#histories.get(threadId);
     if (history === undefined) throw new RuntimeEventStreamError('unknown_thread', threadId);
-    if (history.replay === undefined) return;
     if (!Number.isSafeInteger(range.highWaterSeq) || range.highWaterSeq < history.storageHighWaterSeq
-      || range.highWaterSeq > history.highWaterSeq
+      || range.highWaterSeq < history.highWaterSeq
       || !Number.isSafeInteger(range.replayStartSeq)
       || range.replayStartSeq < history.storageReplayStartSeq
       || range.replayStartSeq > range.highWaterSeq + 1) {
@@ -151,80 +139,30 @@ export class EventHub {
     history.storageReplayStartSeq = range.replayStartSeq;
   }
 
-  seed(threadId: ThreadId, envelopes: readonly EventEnvelope[]): void {
-    assertStreamThreadId(threadId);
-    if (this.#closed) throw new RuntimeEventStreamError('seed_after_close', threadId);
-    const snapshots = envelopes.map((envelope) => validateEventEnvelope(envelope));
-    let previous = 0;
-    for (const envelope of snapshots) {
-      if (envelope.threadId !== threadId || envelope.seq !== previous + 1) {
-        throw new RuntimeEventStreamError('invalid_persisted_sequence', threadId);
-      }
-      previous = envelope.seq;
-    }
-    const existing = this.#histories.get(threadId);
-    if (existing !== undefined && existing.highWaterSeq > 0) {
-      throw new RuntimeEventStreamError('history_already_initialized', threadId);
-    }
-
-    // Validation above is deliberately complete before either known-thread or history state mutates.
-    const retained = snapshots.slice(-this.#historyLimit);
-    const firstRetainedSeq = retained[0]?.seq ?? previous + 1;
-    this.#knownThreads.add(threadId);
-    this.#histories.set(threadId, {
-      envelopes: retained,
-      highWaterSeq: previous,
-      storageHighWaterSeq: previous,
-      storageReplayStartSeq: firstRetainedSeq,
-    });
-    for (const subscription of [...this.#subscriptions]) {
-      const afterSeq = subscription.cursorAfterSeq.get(threadId);
-      if (afterSeq === undefined) continue;
-      if (afterSeq < firstRetainedSeq - 1) {
-        this.#setGap(subscription, threadId, firstRetainedSeq);
-        continue;
-      }
-      if (afterSeq < previous) {
-        subscription.replay.splice(subscription.replayIndex, 0, {
-          threadId,
-          nextSeq: afterSeq + 1,
-          throughSeq: previous,
-        });
-        this.#fill(subscription);
-        this.#wake(subscription);
-      }
-    }
-  }
-
   publish(envelopes: readonly EventEnvelope[]): void {
     if (this.#closed) throw new RuntimeEventStreamError('publish_after_close');
     const snapshots = envelopes.map((envelope) => validateEventEnvelope(envelope));
     const nextByThread = new Map<ThreadId, number>();
     for (const envelope of snapshots) {
-      const previous = nextByThread.get(envelope.threadId)
-        ?? this.#histories.get(envelope.threadId)?.highWaterSeq
-        ?? 0;
+      const history = this.#histories.get(envelope.threadId);
+      if (history === undefined) {
+        throw new RuntimeEventStreamError('unknown_thread', envelope.threadId);
+      }
+      const previous = nextByThread.get(envelope.threadId) ?? history.highWaterSeq;
       if (envelope.seq !== previous + 1) {
         throw new RuntimeEventStreamError('non_contiguous_sequence', envelope.threadId);
+      }
+      if (envelope.seq > history.storageHighWaterSeq) {
+        throw new RuntimeEventStreamError('publish_before_durable_replay_range', envelope.threadId);
       }
       nextByThread.set(envelope.threadId, envelope.seq);
     }
 
     // A consumer continuation cannot interleave within this synchronous loop. Offering each valid
-    // member before retention trimming lets every subscriber use its finite queue first.
+    // member before retention trimming lets every subscriber use its finite queue first. The batch
+    // validation above guarantees every synchronous lookup in this loop has a registration.
     for (const envelope of snapshots) {
-      this.#knownThreads.add(envelope.threadId);
-      let history = this.#histories.get(envelope.threadId);
-      if (history === undefined) {
-        history = {
-          envelopes: [],
-          highWaterSeq: 0,
-          storageHighWaterSeq: 0,
-          storageReplayStartSeq: 1,
-        };
-        this.#histories.set(envelope.threadId, history);
-      }
-      history.envelopes.push(envelope);
+      const history = this.#histories.get(envelope.threadId) as ThreadReplayState;
       history.highWaterSeq = envelope.seq;
       this.#liveHistory.push({ order: this.#nextLiveOrder++, envelope });
 
@@ -235,7 +173,6 @@ export class EventHub {
         }
         this.#fill(subscription);
       }
-      this.#trimThreadHistory(history);
       this.#trimLiveHistory();
     }
     for (const subscription of this.#subscriptions) this.#wake(subscription);
@@ -270,7 +207,7 @@ export class EventHub {
       const history = this.#histories.get(cursor.threadId);
       const highWaterSeq = history?.highWaterSeq ?? 0;
       if (cursor.afterSeq > highWaterSeq) {
-        if (!this.#knownThreads.has(cursor.threadId) && cursor.afterSeq === 0) continue;
+        if (history === undefined && cursor.afterSeq === 0) continue;
         this.#terminate(subscription, {
           kind: 'error',
           liveBoundary: subscription.nextLiveOrder,
@@ -335,10 +272,6 @@ export class EventHub {
       this.#fill(subscription);
       this.#wake(subscription);
     }
-  }
-
-  history(threadId: ThreadId): readonly Readonly<EventEnvelope>[] {
-    return [...(this.#histories.get(threadId)?.envelopes ?? [])];
   }
 
   async #next(subscription: Subscription): Promise<IteratorResult<Readonly<EventEnvelope>>> {
@@ -420,12 +353,6 @@ export class EventHub {
     }
   }
 
-  #trimThreadHistory(history: ThreadHistory): void {
-    if (history.envelopes.length > this.#historyLimit) {
-      history.envelopes.splice(0, history.envelopes.length - this.#historyLimit);
-    }
-  }
-
   #trimLiveHistory(): void {
     while (this.#liveHistory.length > this.#historyLimit) {
       const removed = this.#liveHistory.shift();
@@ -449,10 +376,7 @@ export class EventHub {
   ): boolean {
     if (afterSeq >= highWaterSeq) return true;
     const history = this.#histories.get(threadId);
-    const firstMemorySeq = history?.envelopes[0]?.seq ?? highWaterSeq + 1;
-    const firstAvailableSeq = history?.replay === undefined
-      ? firstMemorySeq
-      : Math.min(history.storageReplayStartSeq, firstMemorySeq);
+    const firstAvailableSeq = history?.storageReplayStartSeq ?? highWaterSeq + 1;
     if (afterSeq < firstAvailableSeq - 1) {
       this.#setGap(subscription, threadId, firstAvailableSeq);
       return false;
@@ -478,37 +402,20 @@ export class EventHub {
       const firstSeq = replay.nextSeq;
       const prepared: Readonly<EventEnvelope>[] = [];
       let nextSeq = firstSeq;
-      if (nextSeq <= history.storageHighWaterSeq) {
-        const through = Math.min(replay.throughSeq, history.storageHighWaterSeq);
-        if (history.replay !== undefined) {
-          const loaded = await history.replay(nextSeq - 1, through);
-          for (const envelope of loaded.map((item) => validateEventEnvelope(item))) {
-            if (envelope.threadId !== replay.threadId || envelope.seq !== nextSeq || envelope.seq > through) {
-              this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
-              return;
-            }
-            prepared.push(envelope);
-            nextSeq++;
-          }
-        }
-        while (nextSeq <= through) {
-          const envelope = memoryEnvelope(history, nextSeq);
-          if (envelope === undefined) {
-            this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
-            return;
-          }
-          prepared.push(envelope);
-          nextSeq++;
-        }
-      }
-      while (nextSeq <= replay.throughSeq) {
-        const envelope = memoryEnvelope(history, nextSeq);
-        if (envelope === undefined) {
-          this.#setGap(subscription, replay.threadId, history.envelopes[0]?.seq);
+      const loaded = await history.replay(nextSeq - 1, replay.throughSeq);
+      for (const envelope of loaded.map((item) => validateEventEnvelope(item))) {
+        if (envelope.threadId !== replay.threadId
+          || envelope.seq !== nextSeq
+          || envelope.seq > replay.throughSeq) {
+          this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
           return;
         }
         prepared.push(envelope);
         nextSeq++;
+      }
+      if (nextSeq <= replay.throughSeq) {
+        this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
+        return;
       }
       replay.firstPreparedSeq = firstSeq;
       replay.prepared = prepared;
@@ -602,16 +509,6 @@ function validateRegistration(registration: Readonly<EventThreadRegistration>): 
     || typeof registration.replay !== 'function') {
     throw new TypeError('Invalid event thread registration');
   }
-}
-
-function memoryEnvelope(
-  history: Readonly<ThreadHistory>,
-  seq: number,
-): Readonly<EventEnvelope> | undefined {
-  const firstSeq = history.envelopes[0]?.seq;
-  if (firstSeq === undefined || seq < firstSeq) return undefined;
-  const envelope = history.envelopes[seq - firstSeq];
-  return envelope?.seq === seq ? envelope : undefined;
 }
 
 function assertStreamThreadId(threadId: ThreadId): void {

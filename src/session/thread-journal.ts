@@ -161,14 +161,15 @@ export class ThreadJournalWriter {
         ...(mutations.length > 0 && { mutations }),
       }),
       publish: (envelopes) => {
-        input.events.publish(envelopes);
         // This callback still runs inside EventCommitter's per-thread serial gate. Read the exact
-        // post-append fold before a later commit can advance it, then expose the same durable range.
+        // post-append fold before a later commit can advance it. Expose that durable range before
+        // live publication so every later cursor can replay without a duplicate in-memory tail.
         const state = this.#repository.state;
         input.events.updateDurableReplayRange(input.threadId, {
           highWaterSeq: state.highWaterSeq,
           replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
         });
+        input.events.publish(envelopes);
       },
       onWriterFatal: (failure) => input.events.failThread(
         input.threadId,

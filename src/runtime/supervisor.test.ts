@@ -2234,6 +2234,19 @@ const RECOVERY_RUN_ID = 'run-recovery-root' as RunId;
 const STALE_MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'stale' } };
 const RESUME_MODEL: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'resume-new' } };
 
+function registerJournalEvents(
+  events: EventHub,
+  threadId: ThreadId,
+  journal: ThreadJournalPort,
+  state: ReturnType<typeof foldThreadJournal>,
+): void {
+  events.registerThread(threadId, {
+    highWaterSeq: state.highWaterSeq,
+    replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
+    replay: (afterSeq, throughSeq) => journal.replayEvents(afterSeq, throughSeq),
+  });
+}
+
 async function seedPromptCrash(
   storage: RuntimeStoragePort,
   threadId: ThreadId,
@@ -2254,7 +2267,7 @@ async function seedPromptCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2329,7 +2342,7 @@ async function seedSetModelCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2393,7 +2406,7 @@ async function seedControlResponseCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2529,7 +2542,7 @@ async function seedStartedChildCrash(
   await childJournal.acquireWriteLease(lease);
   const state = await childJournal.loadState();
   const events = new EventHub();
-  events.registerThread(childThreadId);
+  registerJournalEvents(events, childThreadId, childJournal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: childThreadId,
@@ -2589,8 +2602,7 @@ async function seedResolvedControlBeforeResponseCompletion(
   if (request === undefined) throw new Error('missing pending control request');
   if (request.kind !== 'approval') throw new Error('expected an approval request');
   const events = new EventHub();
-  events.registerThread(threadId);
-  events.seed(threadId, state.envelopes);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2653,7 +2665,7 @@ async function seedPartialToolCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2782,8 +2794,7 @@ async function seedQueueCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
-  events.seed(threadId, state.envelopes);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2870,7 +2881,7 @@ async function seedFinalCreateIntent(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(op.threadId);
+  registerJournalEvents(events, op.threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: op.threadId,
@@ -2930,8 +2941,7 @@ async function appendFinalCloseIntent(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(threadId);
-  events.seed(threadId, state.envelopes);
+  registerJournalEvents(events, threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId,
@@ -2992,8 +3002,7 @@ async function seedFinalResumeIntent(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(resume.threadId);
-  events.seed(resume.threadId, state.envelopes);
+  registerJournalEvents(events, resume.threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: resume.threadId,
@@ -3096,8 +3105,7 @@ async function seedPartialCancelScope(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(left);
-  events.seed(left, state.envelopes);
+  registerJournalEvents(events, left, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: left,
@@ -3215,7 +3223,7 @@ async function seedRetryTargetCreationCrash(
   await journal.acquireWriteLease(lease);
   const state = await journal.loadState();
   const events = new EventHub();
-  events.registerThread(op.threadId);
+  registerJournalEvents(events, op.threadId, journal, state);
   const writer = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: op.threadId,
@@ -3271,10 +3279,10 @@ async function seedParentCommitBeforeChildAck(
   await parentJournal.acquireWriteLease(lease);
   await childJournal.acquireWriteLease(lease);
   const events = new EventHub();
-  events.registerThread(parentThreadId);
-  events.registerThread(childThreadId);
   const parentState = await parentJournal.loadState();
   const childState = await childJournal.loadState();
+  registerJournalEvents(events, parentThreadId, parentJournal, parentState);
+  registerJournalEvents(events, childThreadId, childJournal, childState);
   const parentWriter = new ThreadJournalWriter({
     workspaceId: WORKSPACE_ID,
     threadId: parentThreadId,

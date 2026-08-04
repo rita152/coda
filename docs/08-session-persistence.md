@@ -11,7 +11,8 @@ control 状态、policy grants、catalog/policy revision 所需快照和每个 t
 2. 深拷贝、冻结提交值，并从已提交 high-water 计算该 thread 的下一个 `seq`；
 3. 在 durable store 追加与该 canonical envelope 等价的 v3 physical record 与
    transcript/control/thread mutation；高频 `message_update` 使用下述紧凑 codec；
-4. durable append 成功后发布同一个 `EventEnvelope` 给异步 observer。
+4. durable append 成功后先推进 EventHub 中 storage high-water 与 replay-start；
+5. 发布同一个 `EventEnvelope` 给异步 observer。
 
 任何失败都不能暴露半提交 event。普通 observer 失败、慢消费或退订不会回滚 durable 事实，也不会背压
 Agent。
@@ -135,10 +136,14 @@ Supervisor ledger/attachment lifecycle。显式 resume/query/fork/retry/cancel-s
 不超过 4 MiB 的连续 replay window，同时保留真实 high-water。snapshot 对 window 中完整 assistant lifecycle
 直接使用 v3 增量 codec；若 window 从 lifecycle 中段开始，只保存第一个累计 partial 作为 replay base，后续
 update 仍保存实际 delta。因此 window、cursor/gap 语义不缩短，也不会把二次方写放大转移到 materialization。
-EventHub 注册
-storage high-water/replay-start，而不是 seed 全部历史；有 cursor 的 subscriber 才按需读取对应 range，并在
+EventHub 必须为每个 thread 一次性注册完整的 storage high-water、replay-start 与 loader；未注册 thread 的
+publish 必须失败，而不是建立 persistence-less history。EventHub 不 seed 全部历史，也不保留第二份 per-thread
+envelope tail；有 cursor 的 subscriber 才通过 loader 按需读取对应 range，并在
 捕获的 high-water 后无重复、无丢失地切到 live。cursor 早于保留窗口仍按既有 structured gap contract 失败。
-每次 live commit durable publish 后，writer 同步推进 EventHub 中的 storage high-water 和精确 replay-start；
+每次 live commit durable append 后，writer 在 publish 前同步推进 EventHub 中的 storage high-water 和精确
+replay-start；
 因此同一进程内新增的事件即使已移出内存 live tail，后续 cursor 仍可从 storage 按需恢复。
+EventHub 只保留跨 thread 的全局有界 live 顺序缓冲和每个 subscriber 的有限队列；前者负责 replay boundary
+之后的 storage/live handoff 与慢 observer gap，不承担 cursor persistence replay。
 无 cursor 的 TUI workspace stream 从注册 high-water 后接收 live event；只 hydrate 当前选择的 thread，不为
 建立 cursor 预取所有 thread snapshot。

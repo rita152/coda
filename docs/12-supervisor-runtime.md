@@ -40,13 +40,16 @@ snapshot；Agent 完成后 ThreadRuntime 以确定顺序持久化结果并提交
 seq；run/turn/op identity 在适用时保留。慢或失败 observer 只影响自身订阅。subscription gap 必须以结构化
 error 终止，不得静默跳过 seq。
 
-Supervisor 只向 EventHub 注册每个 thread 的 durable high-water、replay retention 起点和 storage replay
-loader，不 seed 全部历史。带 cursor 的 subscriber 先捕获订阅瞬间 high-water，再按需从 storage 读取有限范围，
+Supervisor 必须向 EventHub 一次性注册每个 thread 的 durable high-water、replay retention 起点和 storage
+replay loader；未注册 thread 的 publish 失败。EventHub 不 seed 全部历史，也不保留 per-thread envelope tail。
+带 cursor 的 subscriber 先捕获订阅瞬间 high-water，再按需从 storage 读取有限范围，
 最后从该 boundary 无缝切到 live；这一 handoff 不得丢失或重复 envelope。cursor 早于 retention 起点仍产生既有
 structured gap。无 cursor 的 workspace/TUI subscription 从注册 high-water 后观察 live event，不为建立游标
 预读所有 thread snapshot；consumer 收到的 `message_update` 始终是重建后的完整 public envelope。
-新建 thread 从创建起就安装同一 lazy loader，且每次 durable live commit 都推进其 storage range，
-所以内存 tail 裁剪不会使已落盘的同进程新事件丧失 cursor replay 能力。
+新建 thread 从创建起就安装同一 lazy loader；每次 durable live commit 在 journal append 后、live publish 前
+推进其 storage range，所以全局有界 live 顺序缓冲的裁剪不会使已落盘的同进程新事件丧失 cursor replay 能力。
+该全局缓冲只负责 storage/live handoff、慢 observer、filtered subscription 和 structured gap；普通 subscriber
+仍使用相互隔离的有限队列。
 
 ## 5. Control 与权限
 
