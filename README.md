@@ -157,8 +157,10 @@ coda exec --output=json --final-only --timeout=5m "运行测试"
 coda exec --output=stream-json "审阅当前改动" | jq -c .
 ```
 
-`--output=json` 只写一条 `result`；`stream-json` 写 `stream_start`、typed event 和恰好一条 terminal
-`result`。终态 `status` 为 `completed|aborted|error|timeout`，timeout 退出码为 124，其他失败非零。
+`--output=json` 只写一条 `result`；`stream-json` 写 `stream_start`、按 canonical 顺序排列的
+`{"type":"event","envelope":EventEnvelope}` 和恰好一条 terminal `result`。其中 `envelope` 原样保留
+`workspaceId/threadId/runId/turnId/opId/seq/timestamp/event`；不会把裸 event payload 或前端合成事件伪装成
+Runtime 事件。终态 `status` 为 `completed|aborted|error|timeout`，timeout 退出码为 124，其他失败非零。
 `--ephemeral` 不留下 Runtime/session journal；它不能与 continue/resume 组合。机器格式不混入 human
 progress，text 模式的 progress 写 stderr、最终回答写 stdout。`--json` 与这些新 output flags 互斥。
 

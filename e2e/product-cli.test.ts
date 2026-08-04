@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, expect, test } from 'bun:test';
+import { readEventEnvelope } from '../src/protocol/index.js';
 import { buildE2eEnvironment, CASE_TIMEOUT_MS, DIST_MAIN, requireDist } from './harness.js';
 
 interface CommandResult {
@@ -355,9 +356,43 @@ test('opt-in output formats keep final stdout stable and text progress on stderr
   const records = stream.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
     readonly type: string;
     readonly status?: string;
+    readonly event?: unknown;
+    readonly envelope?: Record<string, unknown> & {
+      readonly event?: { readonly type?: string; readonly [key: string]: unknown };
+    };
   });
   expect(records[0]?.type).toBe('stream_start');
-  expect(records.some((record) => record.type === 'event')).toBe(true);
+  const eventRecords = records.filter((record) => record.type === 'event');
+  expect(eventRecords.length).toBeGreaterThan(0);
+  expect(eventRecords.every((record) => record.event === undefined)).toBe(true);
+  for (const record of eventRecords) {
+    expect(readEventEnvelope(record.envelope).kind).toBe('known');
+  }
+  const envelopes = eventRecords.map((record) => record.envelope as NonNullable<typeof record.envelope>);
+  const lifecycle = envelopes.map((envelope) => envelope.event?.type);
+  expect(lifecycle.indexOf('agent_start')).toBeLessThan(lifecycle.indexOf('message_start'));
+  expect(lifecycle.indexOf('message_start')).toBeLessThan(lifecycle.lastIndexOf('message_end'));
+  expect(lifecycle.lastIndexOf('message_end')).toBeLessThan(lifecycle.indexOf('agent_end'));
+  expect(lifecycle.indexOf('agent_end')).toBeLessThan(lifecycle.indexOf('op_completed'));
+  expect(envelopes.every((envelope, index) =>
+    index === 0 || Number(envelope.seq) === Number(envelopes[index - 1]?.seq) + 1)).toBe(true);
+  const agentStart = envelopes.find((envelope) => envelope.event?.type === 'agent_start');
+  expect(agentStart).toMatchObject({
+    workspaceId: expect.any(String),
+    threadId: expect.any(String),
+    runId: expect.any(String),
+    opId: expect.any(String),
+    seq: expect.any(Number),
+    timestamp: expect.any(Number),
+    event: { type: 'agent_start', reason: 'prompt' },
+  });
+  const turnEvent = envelopes.find((envelope) => envelope.event?.type === 'turn_start');
+  expect(turnEvent).toMatchObject({
+    threadId: agentStart?.threadId,
+    runId: agentStart?.runId,
+    turnId: expect.any(String),
+    event: { type: 'turn_start' },
+  });
   expect(records.at(-1)).toMatchObject({ type: 'result', status: 'completed' });
 
   const finalOnly = runCoda([

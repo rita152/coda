@@ -27,6 +27,7 @@ import type {
 import type { RuntimePort } from '../runtime/index.js';
 import type {
   CliInteractionState,
+  CliRuntimeEnvelopeListener,
   CliRuntimeEvent,
   CliRuntimeEventListener,
 } from './frontend-types.js';
@@ -138,6 +139,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
   #attachment: 'create' | 'resume';
   readonly #registerModel: ((model: ModelConfig) => void) | undefined;
   readonly #listeners = new Set<CliRuntimeEventListener>();
+  readonly #envelopeListeners = new Set<CliRuntimeEnvelopeListener>();
   readonly #attachmentListeners = new Set<
     (messages: readonly AgentMessage[]) => void | Promise<void>
   >();
@@ -516,6 +518,14 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     };
   }
 
+  /** Machine-facing observation of exact canonical envelopes for the selected thread. */
+  subscribeEnvelopes(listener: CliRuntimeEnvelopeListener): () => void {
+    this.#envelopeListeners.add(listener);
+    return () => {
+      this.#envelopeListeners.delete(listener);
+    };
+  }
+
   subscribeSessionAttached(
     listener: (messages: readonly AgentMessage[]) => void | Promise<void>,
   ): () => void {
@@ -785,6 +795,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       envelope.runId,
       envelope.opId,
     );
+    this.#enqueueEnvelopeFanout(envelope);
     this.#enqueueFanout(terminalFallback ?? envelope.event);
     if (
       ((envelope.event.type === 'control_request' || envelope.event.type === 'control_resolved') &&
@@ -1090,8 +1101,31 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     }
   }
 
+  async #fanoutEnvelope(
+    envelope: Readonly<EventEnvelope>,
+    listeners: readonly CliRuntimeEnvelopeListener[],
+  ): Promise<void> {
+    for (const listener of listeners) {
+      try {
+        await listener(envelope);
+      } catch (error) {
+        console.error(
+          `[runtime frontend] envelope listener threw (ignored): ${sanitizeTerminalError(error)}`,
+        );
+      }
+    }
+  }
+
   #enqueueFanout(event: CliRuntimeEvent): void {
     this.#fanoutTail = this.#fanoutTail.then(() => this.#fanout(event));
+  }
+
+  #enqueueEnvelopeFanout(envelope: Readonly<EventEnvelope>): void {
+    // Capture observers at the canonical observation point: late subscribers must not receive
+    // pre-subscription envelopes, while already-observed records still drain after unsubscribe.
+    const listeners = [...this.#envelopeListeners];
+    if (listeners.length === 0) return;
+    this.#fanoutTail = this.#fanoutTail.then(() => this.#fanoutEnvelope(envelope, listeners));
   }
 
   #enqueuePendingApprovalSnapshot(

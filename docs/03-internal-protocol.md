@@ -90,3 +90,12 @@ Runtime 发出 `op_*` lifecycle、`thread_*` lifecycle、`usage_update`、`runti
 non-fatal `transport_error`，后续行仍可处理。EOF 是有序关闭：已读完整行先完成 dispatch，随后 Runtime
 关闭并 drain 输出。读取 stdout 的 public wire consumer 在识别 envelope frame 后使用
 `readEventEnvelope`，并根据其 `kind` 执行已知事件投影或未知事件的显式保留/忽略策略。
+
+## 6. One-shot stream-json records
+
+`--output=stream-json` 是带终态摘要的 one-shot record 语法，不新增 core RuntimeOp、control 或事件协议。
+首条 `stream_start` 公告当前 `PROTOCOL_VERSION`；中间记录固定为
+`{"type":"event","envelope":EventEnvelope}`；最后恰好一条 `result`。`EventEnvelope` 必须是 RuntimePort
+实际交付的完整值，保留 workspace/thread/run/turn/op identity、per-thread `seq`、`timestamp` 与 event payload
+及其顺序。前端只能另行投影 `envelope.event` 以计算进度或终态，不得把投影、合成 fallback 或重建 identity
+写入 event record。`--final-only` 省略 `stream_start` 和所有 event record，只保留 `result`。
