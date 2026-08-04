@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, expect, test } from 'bun:test';
-import { readEventEnvelope } from '../src/protocol/index.js';
+import { PROTOCOL_VERSION, readEventEnvelope } from '../src/protocol/index.js';
 import { buildE2eEnvironment, CASE_TIMEOUT_MS, DIST_MAIN, requireDist } from './harness.js';
 
 interface CommandResult {
@@ -361,7 +361,11 @@ test('opt-in output formats keep final stdout stable and text progress on stderr
       readonly event?: { readonly type?: string; readonly [key: string]: unknown };
     };
   });
-  expect(records[0]?.type).toBe('stream_start');
+  expect(records[0]).toMatchObject({
+    type: 'stream_start',
+    version: 2,
+    protocolVersion: PROTOCOL_VERSION,
+  });
   const eventRecords = records.filter((record) => record.type === 'event');
   expect(eventRecords.length).toBeGreaterThan(0);
   expect(eventRecords.every((record) => record.event === undefined)).toBe(true);

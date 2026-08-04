@@ -206,7 +206,7 @@ describe('opt-in one-shot output adapter', () => {
       else {
         expect(records[0]).toEqual({
           type: 'stream_start',
-          version: 1,
+          version: 2,
           protocolVersion: PROTOCOL_VERSION,
         });
         const eventRecords = records.filter((record) => record['type'] === 'event');

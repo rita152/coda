@@ -29,7 +29,7 @@ export interface OneShotResult {
 export type OneShotStreamRecord =
   | {
       readonly type: 'stream_start';
-      readonly version: 1;
+      readonly version: 2;
       readonly protocolVersion: string;
     }
   | { readonly type: 'event'; readonly envelope: Readonly<EventEnvelope> }
@@ -146,7 +146,7 @@ export async function startOneShotOutput(
     if (options.mode === 'stream-json' && !options.finalOnly) {
       writeJson({
         type: 'stream_start',
-        version: 1,
+        version: 2,
         protocolVersion: PROTOCOL_VERSION,
       });
       // Establish the stream before starting a side-effecting run. A pipe that is already

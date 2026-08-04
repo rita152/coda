@@ -49,7 +49,8 @@ Runtime 提交 `control_response`；它不持有 resolver 或 policy state。std
 只写 stderr，避免污染 NDJSON。
 
 `--output=stream-json` 是 one-shot record 流，不是第二套 core input/control 协议。首条记录为
-`stream_start`；其后每条 Runtime 事件记录必须是
+`{type:"stream_start",version:2,protocolVersion:PROTOCOL_VERSION}`；`version` 标识 one-shot record schema，
+`protocolVersion` 标识 core Runtime 协议。其后每条 Runtime 事件记录必须是
 `{"type":"event","envelope":EventEnvelope}`，完整保留 RuntimePort 交付的 identity、`seq`、`timestamp` 和
 event payload，最后恰好一条 `result`。人类 view 可用 canonical `op_completed` 合成终止投影，但该投影不得
 进入机器事件记录；机器输出不得重建、补造或剥离 envelope identity。`--final-only` 只写 terminal result。

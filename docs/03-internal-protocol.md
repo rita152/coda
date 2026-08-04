@@ -94,7 +94,8 @@ non-fatal `transport_error`，后续行仍可处理。EOF 是有序关闭：已�
 ## 6. One-shot stream-json records
 
 `--output=stream-json` 是带终态摘要的 one-shot record 语法，不新增 core RuntimeOp、control 或事件协议。
-首条 `stream_start` 公告当前 `PROTOCOL_VERSION`；中间记录固定为
+首条 `stream_start` 的 record schema `version` 为 `2`，并单独公告当前 core `PROTOCOL_VERSION`；
+两者不可混用。中间记录固定为
 `{"type":"event","envelope":EventEnvelope}`；最后恰好一条 `result`。`EventEnvelope` 必须是 RuntimePort
 实际交付的完整值，保留 workspace/thread/run/turn/op identity、per-thread `seq`、`timestamp` 与 event payload
 及其顺序。前端只能另行投影 `envelope.event` 以计算进度或终态，不得把投影、合成 fallback 或重建 identity
