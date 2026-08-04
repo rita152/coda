@@ -76,7 +76,6 @@ import type {
   RecoveryQueueCommand,
   RuntimeClock,
   RuntimeIdentityFactory,
-  RuntimeJournalRecord,
   RuntimeModelResolver,
   RuntimeThreadDriverAttachment,
   RuntimeThreadDriverFactory,

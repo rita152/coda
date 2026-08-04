@@ -29,7 +29,6 @@ import type {
   ThreadSeedRecord,
   ThreadJournalAppendPort,
   ThreadMetaRecord,
-  RuntimeJournalRecord,
 } from '../session/thread-journal-records.js';
 import type { PolicyGrantRepository } from '../capabilities/types.js';
 
