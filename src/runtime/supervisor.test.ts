@@ -1998,6 +1998,42 @@ describe('Supervisor registry composition', () => {
     expect(policyEngine.opened).toEqual([]);
   });
 
+  test.each([
+    'own',
+    'inherited',
+    'non_enumerable',
+  ] as const)('rejects a retired %s policy grant repository mode and releases storage', async (
+    retiredGrantMode,
+  ) => {
+    const actions: string[] = [];
+    const storageProbe = observeRegistryStorage(createMemoryRuntimeStorage(), actions, {
+      retiredGrantMode,
+    });
+    const policyEngine = new RecordingRegistryPolicyEngine(actions);
+    const drivers = new ConstructionDriverFactory();
+
+    await expect(createRuntime({
+      ...constructionRuntimeOptions(storageProbe.storage, drivers),
+      capabilityServices: registryCapabilityServices(policyEngine),
+    })).rejects.toMatchObject({
+      code: 'policy_grant_storage_mismatch',
+      message: 'Policy grant repository mode selector has been removed',
+    });
+    expect(actions).toEqual([
+      'workspace:open',
+      'lease:acquire',
+      'lease:acquired',
+      'grants:open',
+      'grants:close',
+      'lease:release',
+      'workspace:close',
+    ]);
+    expect(storageProbe.grantOpens).toBe(1);
+    expect(storageProbe.grantCloses).toBe(1);
+    expect(drivers.createCalls).toBe(0);
+    expect(policyEngine.opened).toEqual([]);
+  });
+
   test('cleans earlier registry attachments when a later policy engine fails during Supervisor.open', async () => {
     const storage = createMemoryRuntimeStorage();
     const firstThreadId = 'thread-registry-open-cleanup-first' as ThreadId;
@@ -3408,6 +3444,7 @@ function observeRegistryStorage(
   actions: string[],
   options: {
     readonly exposePolicyGrantRepository?: boolean;
+    readonly retiredGrantMode?: 'own' | 'inherited' | 'non_enumerable';
   } = {},
 ): {
   readonly storage: RuntimeStoragePort;
@@ -3456,21 +3493,34 @@ function observeRegistryStorage(
                 if (open === undefined) throw new Error('Policy grant repository is unavailable');
                 const repository = await open.call(target, ...args);
                 grantOpens++;
-                return new Proxy(repository, {
-                  get(repositoryTarget, repositoryProperty, repositoryReceiver) {
+                let repositorySurface: object = repository;
+                if (options.retiredGrantMode === 'inherited') {
+                  repositorySurface = Object.create({ mode: 'thread' }) as object;
+                } else if (options.retiredGrantMode !== undefined) {
+                  repositorySurface = Object.defineProperty({}, 'mode', {
+                    value: 'thread',
+                    enumerable: options.retiredGrantMode === 'own',
+                    configurable: true,
+                  });
+                }
+                return new Proxy(repositorySurface as PolicyGrantRepository, {
+                  get(_repositoryTarget, repositoryProperty, repositoryReceiver) {
+                    if (repositoryProperty === 'mode') {
+                      return Reflect.get(repositorySurface, repositoryProperty, repositoryReceiver) as unknown;
+                    }
                     if (repositoryProperty === 'close') {
                       return async () => {
                         grantCloses++;
                         actions.push('grants:close');
-                        return repositoryTarget.close();
+                        return repository.close();
                       };
                     }
                     const value = Reflect.get(
-                      repositoryTarget,
+                      repository,
                       repositoryProperty,
-                      repositoryReceiver,
+                      repository,
                     ) as unknown;
-                    return typeof value === 'function' ? value.bind(repositoryTarget) : value;
+                    return typeof value === 'function' ? value.bind(repository) : value;
                   },
                 });
               };

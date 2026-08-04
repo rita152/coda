@@ -48,13 +48,18 @@ revision 和 presentation。`control_response` 经同一 mailbox admission；acc
 
 policy grant 使用 workspace-fenced storage，并绑定 capability digest、normalized resource scope 与 policy
 basis revision。repository 的 `workspaceId` 与 Supervisor lease/fence 已完整表达归属，不另设单值 grant
-mode。thread/run narrowing 永远不能扩大 workspace ceiling。
+mode；host 返回 own、继承或不可枚举的退役 `mode` 都必须在 attachment/policy execution 前拒绝。
+thread/run narrowing 永远不能扩大 workspace ceiling。
 
 ## 6. Durability 与恢复
 
 一个 workspace writer 持有 lease/fence。thread journal 的 mutation 和 event 在 publish 前提交；恢复加载
 metadata、transcript、control、grant 与 seq high-water mark。恢复后的新 prompt 产生新 RunId，且不会重放
 已接受 op 的副作用。
+
+`WorkspaceWriteFenceAuthority` 只作为 deprecated 的窄 public type 保留给既有 embedding；单独
+`validateWriteFence()` 是诊断性检查，不能授权随后写入。canonical host 应实现完整 workspace storage port，
+并在同一原子 mutation/CAS 中比较 captured fence，避免 check-then-act 竞态。
 
 ## 7. Close
 

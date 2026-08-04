@@ -264,6 +264,12 @@ class Supervisor implements RuntimePort {
     this.#workspaceReview = input.options.workspaceReview;
     this.#capabilityServices = input.options.capabilityServices;
     this.#policyGrants = input.policyGrants;
+    if ('mode' in input.policyGrants) {
+      throw new RuntimeStorageError(
+        'policy_grant_storage_mismatch',
+        'Policy grant repository mode selector has been removed',
+      );
+    }
     if (input.policyGrants.workspaceId !== this.workspaceId) {
       throw new RuntimeStorageError(
         'policy_grant_storage_mismatch',

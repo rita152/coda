@@ -122,6 +122,14 @@ export type WorkspaceWriteFenceValidation =
   | { readonly current: true }
   | { readonly current: false; readonly code: 'stale_fence' | 'wrong_workspace' };
 
+/**
+ * @deprecated Implement the complete Runtime workspace storage port instead. Fence validation is
+ * diagnostic only and cannot authorize a write; mutations must compare the fence atomically.
+ */
+export interface WorkspaceWriteFenceAuthority {
+  validateWriteFence(fence: Readonly<WorkspaceWriteFence>): Promise<WorkspaceWriteFenceValidation>;
+}
+
 export type RuntimeControlEvent =
   | { type: 'control_request'; requestId: string;
       kind: 'approval'; owningRunId: RunId; owningTurnId: TurnId; policyRevision: string;
