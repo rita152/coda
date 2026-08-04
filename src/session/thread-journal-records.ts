@@ -23,7 +23,8 @@ import type { ThreadCompactionCheckpoint } from './thread-runtime-ports.js';
 
 export interface ThreadMetaRecord {
   readonly type: 'thread_meta';
-  readonly version: 2;
+  /** Durable journal grammar. Runtime wire protocol versioning is intentionally independent. */
+  readonly version: 3;
   readonly protocolVersion: string;
   readonly workspaceId: WorkspaceId;
   readonly threadId: ThreadId;

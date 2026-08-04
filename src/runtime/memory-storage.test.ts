@@ -90,7 +90,7 @@ describe('MemoryRuntimeStorage canonical persistence', () => {
     const lease = await workspace.acquireSupervisorLease('memory-thread-seed');
     const meta: ThreadMetaRecord = {
       type: 'thread_meta',
-      version: 2,
+      version: 3,
       protocolVersion: '2.0.0',
       workspaceId,
       threadId,
@@ -125,6 +125,16 @@ describe('MemoryRuntimeStorage canonical persistence', () => {
       summary: { threadId, createdAt: 1, state: 'idle' },
       format: 'runtime-v2',
       storageKey: `memory:${workspaceId}:${threadId}`,
+      meta,
+      journal: {
+        version: 3,
+        size: 2,
+        snapshotSize: 2,
+        highWaterSeq: 0,
+        replayStartSeq: 1,
+        recoveryRequired: false,
+      },
+      updatedAt: 1,
     }]);
     expect(await storage.listStoredThreads()).toEqual([{
       ownerWorkspaceId: workspaceId,

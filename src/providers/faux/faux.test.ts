@@ -33,11 +33,17 @@ describe('createFauxStreamFn:基本回放', () => {
     expect(final.usage).toEqual({ input: 100, output: 10 });   // 缺省 usage
     expect(final.model).toEqual(model.ref);
 
-    // 每个事件的 partial 是同一个逐步生长的对象;done.message 即最终形态
-    for (const e of events) {
-      const snapshot = e.type === 'done' || e.type === 'error' ? e.message : e.partial;
-      expect(snapshot).toBe(final);
-    }
+    // Adapter 内部可以复用累计器，但 stream 在 push 时已按事件时点脱离快照。
+    expect(events[0]).toMatchObject({ type: 'start', partial: { content: [] } });
+    const textSnapshots = events
+      .filter((event) => event.type.startsWith('text_'))
+      .map((event) => event.type !== 'done' && event.type !== 'error'
+        && event.partial.content[0]?.type === 'text'
+        ? event.partial.content[0].text
+        : undefined);
+    expect(textSnapshots).toEqual(['', 'hello', 'hello worl', 'hello world!', 'hello world!']);
+    const terminal = events.at(-1);
+    expect(terminal?.type === 'done' ? terminal.message : undefined).toEqual(final);
   });
 
   it('reasoning + text 多块:contentIndex 递增,折叠 delta 等于块内容', async () => {

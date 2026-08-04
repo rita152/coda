@@ -576,7 +576,7 @@ describe('RuntimeFrontendSession', () => {
     await session.close();
   });
 
-  it('uses per-thread cursors and lets a background run finish while another thread is visible', async () => {
+  it('starts live without preloading workspace snapshots and keeps a background run alive', async () => {
     const runtime = new WorkspaceFakeRuntime();
     const session = new RuntimeFrontendSession({
       runtime,
@@ -585,10 +585,8 @@ describe('RuntimeFrontendSession', () => {
       initialModel: MODEL,
     });
     await session.initialize();
-    expect(runtime.eventOptions?.cursors).toEqual([
-      { threadId: THREAD_ID, afterSeq: 5 },
-      { threadId: THREAD_B, afterSeq: 3 },
-    ]);
+    expect(runtime.eventOptions).toBeUndefined();
+    expect(runtime.snapshotReads).toEqual([THREAD_ID]);
 
     const prompt = session.prompt('keep running in the background');
     await flushMicrotasks();
@@ -1159,6 +1157,7 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
   #deferControlResolution = false;
   #deferredControlResponse: Extract<RuntimeOp, { type: 'control_response' }> | undefined;
   eventOptions: Parameters<RuntimeFrontendPort['events']>[0];
+  readonly snapshotReads: ThreadId[] = [];
 
   newThreadId(): ThreadId { return 'thread-new' as ThreadId; }
 
@@ -1263,6 +1262,7 @@ class WorkspaceFakeRuntime implements RuntimeFrontendPort {
   }
 
   async getThreadSnapshot(threadId: ThreadId): Promise<ThreadSnapshot | undefined> {
+    this.snapshotReads.push(threadId);
     if (!this.#seq.has(threadId)) return undefined;
     return {
       thread: this.#thread(threadId, this.#pendingPrompt?.threadId === threadId ? 'running' : 'idle'),

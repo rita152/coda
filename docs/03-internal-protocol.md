@@ -48,6 +48,13 @@ strict JSON 深冻结快照，再要求 envelope/event 只含当前 schema 字�
 与 identity correlation 有效。未知 event type、未知字段或未知 durable state 一律失败，不得把 consumer
 兼容策略用于恢复，也不得静默跳过。
 
+public protocol value 与 physical durable record 是两个版本域。`message_update` 交给 live TUI、headless、
+one-shot 和 cursor replay 时始终是完整 `EventEnvelope`，其中 provider block event 仍带当前累计
+`partial`。journal schema v3 可以只保存 block start/delta/end、assistant message shell 与不能推导的 part
+metadata；reader 必须按 message/block lifecycle 确定性重建累计 `partial`，再通过
+`validateEventEnvelope`，才可交给 fold 或 consumer。physical compact record 不是新的 RuntimeEvent，也不得从
+`events()` 或 wire 输出泄漏。
+
 `coda/runtime` 另行导出 `readEventEnvelope`，供 external/headless consumer 对 `JSON.parse` 后的 envelope
 执行 tolerant read。它仍要求完整 strict JSON、合法 envelope identity、正整数 `seq`、有限
 `timestamp`，并保持 `turnId` 必须伴随 `runId`：
@@ -100,3 +107,6 @@ non-fatal `transport_error`，后续行仍可处理。EOF 是有序关闭：已�
 实际交付的完整值，保留 workspace/thread/run/turn/op identity、per-thread `seq`、`timestamp` 与 event payload
 及其顺序。前端只能另行投影 `envelope.event` 以计算进度或终态，不得把投影、合成 fallback 或重建 identity
 写入 event record。`--final-only` 省略 `stream_start` 和所有 event record，只保留 `result`。
+
+core `PROTOCOL_VERSION` 保持 `2.0.0` 不表示 durable journal grammar 仍是 version 2；headless
+`stream_start.version: 2` 也只版本化 one-shot record 语法。三者必须分别门禁，不能用其中一个推断另外两个。

@@ -1725,7 +1725,7 @@ function approvalPayload(
 function threadMeta(): ThreadMetaRecord {
   return {
     type: 'thread_meta',
-    version: 2,
+    version: 3,
     protocolVersion: PROTOCOL_VERSION,
     workspaceId: WORKSPACE_ID,
     threadId: THREAD_ID,

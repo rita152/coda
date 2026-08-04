@@ -354,9 +354,9 @@ export class ThreadRuntime {
 
   async commitThreadResult(result: ThreadResultOutboxMutation): Promise<number> {
     if (result.parentThreadId !== this.threadId) throw new Error('thread_result_parent_mismatch');
-    const existing = this.#writer.state.envelopes.find((envelope) => envelope.opId === result.resultOpId);
+    const existing = this.#writer.state.threadResults.get(result.resultOpId);
     if (existing !== undefined) {
-      if (existing.event.type !== 'thread_result' || canonicalJson(existing.event) !== canonicalJson({
+      if (canonicalJson(existing.event) !== canonicalJson({
         type: 'thread_result',
         resultOpId: result.resultOpId,
         childThreadId: result.childThreadId,

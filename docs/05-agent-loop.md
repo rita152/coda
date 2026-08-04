@@ -10,6 +10,12 @@ policy 与 transcript snapshot，不认识 workspace lifecycle、durable storage
 - steering 与 follow-up 进入 thread-local queue，并在规定 turn 边界注入；不能绕过 active-run gate。
 - 完成、错误和取消都必须关闭已开始的消息/turn/run，并写回可重放 transcript。
 
+provider adapter 可以在每个 block delta 上产生带累计 assistant `partial` 的 public event；这是 Agent/Runtime
+观察语义，不是 physical journal 的存储要求。ThreadRuntime 提交同一个 public value，storage v3 codec 在
+持久化边界验证累计 partial 与 delta fold 一致后写紧凑记录，恢复时再重建，因此 Agent 不感知 durable codec。
+`ProviderEventStream` 在 push 时已将该 public value 脱离并冻结；Agent 可以等待权威提交，而不会让
+adapter 后续修改同一 accumulator 的行为改写已发出事件。
+
 ## 工具
 
 provider tool call 经参数修补、schema 验证与 capability prepare 形成 `PreparedInvocation`。同一 turn 内

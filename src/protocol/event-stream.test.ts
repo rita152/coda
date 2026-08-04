@@ -1,6 +1,8 @@
 // EventStream 语义测试，覆盖 docs/04-provider-adapter.md“流”的 non-throwing terminal contract。
 import { afterEach, describe, expect, it, vi } from 'bun:test';
 import { EventStream } from './event-stream.js';
+import type { AssistantMessage } from './messages.js';
+import { ProviderEventStream } from './provider.js';
 
 async function collect<T, R>(stream: EventStream<T, R>): Promise<T[]> {
   const out: T[] = [];
@@ -216,5 +218,56 @@ describe('EventStream', () => {
     expect(await guard(s2.result())).toBe('r2');
     expect(await collect(s2)).toEqual(['y']);     // 剩余事件仍可迭代
     expect(rejections).toEqual([]);               // 全程零 rejection
+  });
+});
+
+describe('ProviderEventStream', () => {
+  it('captures a growing provider accumulator at push time even while the consumer is behind', async () => {
+    const stream = new ProviderEventStream();
+    const partial: AssistantMessage = {
+      role: 'assistant',
+      id: 'a_snapshot',
+      timestamp: 1,
+      content: [],
+      model: { provider: 'faux', api: 'faux', model: 'test' },
+      stopReason: 'stop',
+      usage: { input: 0, output: 0 },
+    };
+
+    stream.push({ type: 'start', partial });
+    const part = { type: 'text' as const, text: '' };
+    partial.content.push(part);
+    stream.push({ type: 'text_start', contentIndex: 0, partial });
+    part.text = '你好';
+    stream.push({ type: 'text_delta', contentIndex: 0, delta: '你好', partial });
+    stream.push({ type: 'text_end', contentIndex: 0, content: '你好', partial });
+    partial.usage = { input: 7, output: 2 };
+    stream.push({ type: 'done', message: partial });
+    stream.end(partial);
+
+    // Mutating the adapter-owned accumulator after enqueue/end cannot rewrite queued events or
+    // result().  This models an authoritative commit awaiting while the provider keeps parsing.
+    part.text = '被后续修改';
+    partial.usage.output = 999;
+
+    const events = await collect(stream);
+    expect(events[0]).toMatchObject({ type: 'start', partial: { content: [] } });
+    expect(events[1]).toMatchObject({
+      type: 'text_start',
+      partial: { content: [{ type: 'text', text: '' }] },
+    });
+    expect(events[2]).toMatchObject({
+      type: 'text_delta',
+      partial: { content: [{ type: 'text', text: '你好' }] },
+    });
+    expect(events[4]).toMatchObject({
+      type: 'done',
+      message: { content: [{ type: 'text', text: '你好' }], usage: { input: 7, output: 2 } },
+    });
+    expect(await stream.result()).toMatchObject({
+      content: [{ type: 'text', text: '你好' }],
+      usage: { input: 7, output: 2 },
+    });
+    expect(Object.isFrozen(events[2])).toBe(true);
   });
 });

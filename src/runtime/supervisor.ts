@@ -47,8 +47,8 @@ import type {
   FoldedThreadJournal,
 } from '../session/thread-journal.js';
 import {
-  foldThreadJournal,
   snapshotFromFold,
+  threadJournalRequiresRecovery,
   ThreadJournalWriter,
 } from '../session/thread-journal.js';
 import {
@@ -234,6 +234,7 @@ class Supervisor implements RuntimePort {
   readonly #catalog = new Map<ThreadId, ThreadCatalogRecord>();
   readonly #threadMeta = new Map<ThreadId, ThreadMetaRecord>();
   readonly #unloaded = new Map<ThreadId, FoldedThreadJournal>();
+  readonly #stateLoadFlights = new Map<ThreadId, Promise<FoldedThreadJournal | undefined>>();
   readonly #inFlight = new Set<Promise<unknown>>();
   readonly #threadUnloadFlights = new Map<ThreadId, Promise<void>>();
   readonly #opFlights = new Map<ExternalOpId, {
@@ -293,21 +294,37 @@ class Supervisor implements RuntimePort {
     for (const item of catalog) {
       this.#catalog.set(item.summary.threadId, item);
       this.#threadClaims.set(item.summary.threadId, { kind: 'existing' });
-      this.#events.registerThread(item.summary.threadId);
+      if (item.meta !== undefined) this.#threadMeta.set(item.summary.threadId, item.meta);
+    }
+    for (const item of catalog) {
+      const threadId = item.summary.threadId;
+      const mustRecover = item.journal?.recoveryRequired !== false;
       const journal = await this.#workspace.openThreadJournal(item.summary.threadId);
       if (journal === undefined) continue;
-      const records = await journal.load();
-      const initial = foldThreadJournal(records);
-      this.#events.seed(item.summary.threadId, initial.envelopes);
-      const recovered = await this.#recoverUnloadedJournal(item.summary.threadId, journal, records);
-      const folded = withAttachmentRecoveryOverlay(recovered);
-      this.#threadMeta.set(item.summary.threadId, folded.meta);
-      this.#unloaded.set(item.summary.threadId, folded);
-      if (folded.summary.state === 'closed' && item.summary.state !== 'closed') {
-        this.#catalog.set(item.summary.threadId, {
-          ...item,
-          summary: withoutActiveRunSummary(item.summary, 'closed'),
+      if (!mustRecover && item.journal !== undefined) {
+        this.#registerStoredEventHistory(threadId, item.journal);
+        continue;
+      }
+      await journal.acquireWriteLease(this.#lease);
+      try {
+        const loaded = await journal.loadState();
+        this.#registerStoredEventHistory(threadId, {
+          highWaterSeq: loaded.state.highWaterSeq,
+          replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
         });
+        const recovered = await this.#recoverUnloadedJournal(threadId, journal, loaded);
+        const folded = recovered;
+        this.#threadMeta.set(threadId, folded.meta);
+        this.#unloaded.set(threadId, folded);
+        if (folded.summary.state === 'closed' && item.summary.state !== 'closed') {
+          this.#catalog.set(threadId, {
+            ...item,
+            summary: withoutActiveRunSummary(item.summary, 'closed'),
+          });
+        }
+      } catch (error) {
+        await journal.releaseWriteLease().catch(() => undefined);
+        throw error;
       }
     }
     let ledger = await this.#workspace.loadSupervisorOps();
@@ -319,6 +336,29 @@ class Supervisor implements RuntimePort {
     this.#applyLifecycleLedger(ledger);
     await this.#recoverAcceptedAttachments(ledger);
     await this.#recoverThreadResultOutbox();
+    for (const [threadId, state] of this.#unloaded) {
+      if (!threadJournalRequiresRecovery(state)) this.#unloaded.delete(threadId);
+    }
+  }
+
+  #registerStoredEventHistory(
+    threadId: ThreadId,
+    journal: Readonly<Pick<
+      NonNullable<ThreadCatalogRecord['journal']>,
+      'highWaterSeq' | 'replayStartSeq'
+    >>,
+  ): void {
+    this.#events.registerThread(threadId, {
+      highWaterSeq: journal.highWaterSeq,
+      replayStartSeq: journal.replayStartSeq,
+      replay: async (afterSeq, throughSeq) => {
+        const stored = await this.#workspace.openThreadJournal(threadId);
+        if (stored === undefined) {
+          throw new RuntimeStorageError('thread_not_found', `Replay journal is missing: ${threadId}`);
+        }
+        return stored.replayEvents(afterSeq, throughSeq);
+      },
+    });
   }
 
   newThreadId(): ThreadId {
@@ -357,19 +397,27 @@ class Supervisor implements RuntimePort {
     const persisted = await this.#workspace.listThreads();
     const result = persisted.map((item) => this.#threads.get(item.summary.threadId)?.summary()
       ?? recoverySummary(this.#unloaded.get(item.summary.threadId))
+      ?? this.#catalog.get(item.summary.threadId)?.summary
       ?? item.summary);
     return snapshot(result);
   }
 
   async listThreadDetails(): Promise<readonly RuntimeThreadListItem[]> {
     this.#assertOpen();
-    const summaries = await this.listThreads();
-    return snapshot(summaries.map((thread) => {
-      const state = this.#threadState(thread.threadId);
+    const persisted = await this.#workspace.listThreads();
+    return snapshot(persisted.map((item) => {
+      const thread = this.#threads.get(item.summary.threadId)?.summary()
+        ?? recoverySummary(this.#unloaded.get(item.summary.threadId))
+        ?? this.#catalog.get(item.summary.threadId)?.summary
+        ?? item.summary;
+      const state = this.#threadState(item.summary.threadId);
       const updatedAt = thread.updatedAt
         ?? state?.envelopes.at(-1)?.timestamp
+        ?? item.updatedAt
         ?? thread.createdAt;
-      const preview = threadPreview(state?.checkpoint.frontend.transcript ?? []);
+      const preview = state === undefined
+        ? item.preview
+        : threadPreview(state.checkpoint.frontend.transcript);
       return {
         workspaceId: this.workspaceId,
         cwd: this.#cwd,
@@ -414,7 +462,7 @@ class Supervisor implements RuntimePort {
     assertThreadId(threadId, 'threadId');
     const attached = this.#threads.get(threadId)?.snapshot();
     if (attached !== undefined) return attached;
-    const unloaded = this.#unloaded.get(threadId);
+    const unloaded = await this.#loadUnloadedState(threadId);
     return unloaded === undefined ? undefined : snapshotFromFold({
       ...unloaded,
       summary: recoverySummary(unloaded) ?? unloaded.summary,
@@ -426,7 +474,7 @@ class Supervisor implements RuntimePort {
   ): Promise<Readonly<RuntimeReviewSnapshot> | undefined> {
     this.#assertOpen();
     assertThreadId(threadId, 'threadId');
-    const state = this.#threadState(threadId);
+    const state = await this.#loadUnloadedState(threadId);
     return state === undefined
       ? undefined
       : snapshot(buildReviewSnapshot(this.workspaceId, threadId, state));
@@ -441,7 +489,7 @@ class Supervisor implements RuntimePort {
     if (scope !== 'turn' && scope !== 'workspace') {
       throw new TypeError('Runtime diff scope must be turn or workspace');
     }
-    const state = this.#threadState(threadId);
+    const state = await this.#loadUnloadedState(threadId);
     if (state === undefined) return undefined;
     const files = scope === 'turn'
       ? turnDiffFiles(state)
@@ -462,6 +510,38 @@ class Supervisor implements RuntimePort {
 
   #threadState(threadId: ThreadId): FoldedThreadJournal | undefined {
     return this.#threads.get(threadId)?.durableState() ?? this.#unloaded.get(threadId);
+  }
+
+  async #loadUnloadedState(threadId: ThreadId): Promise<FoldedThreadJournal | undefined> {
+    const attached = this.#threads.get(threadId)?.durableState();
+    if (attached !== undefined) return attached;
+    const existing = this.#unloaded.get(threadId);
+    if (existing !== undefined) return existing;
+    if (!this.#catalog.has(threadId)) return undefined;
+    const currentFlight = this.#stateLoadFlights.get(threadId);
+    if (currentFlight !== undefined) return currentFlight;
+    const flight = (async (): Promise<FoldedThreadJournal | undefined> => {
+      const journal = await this.#workspace.openThreadJournal(threadId);
+      if (journal === undefined) return undefined;
+      await journal.acquireWriteLease(this.#lease);
+      try {
+        const loaded = await journal.loadState();
+        const state = loaded.state;
+        this.#unloaded.set(threadId, state);
+        this.#threadMeta.set(threadId, state.meta);
+        const catalog = this.#catalog.get(threadId);
+        if (catalog !== undefined) this.#catalog.set(threadId, { ...catalog, summary: state.summary });
+        return state;
+      } finally {
+        await journal.releaseWriteLease();
+      }
+    })();
+    this.#stateLoadFlights.set(threadId, flight);
+    try {
+      return await flight;
+    } finally {
+      this.#stateLoadFlights.delete(threadId);
+    }
   }
 
   close(): Promise<void> {
@@ -564,6 +644,7 @@ class Supervisor implements RuntimePort {
       if (record.receipt === undefined) throw new Error(`Final ledger op ${op.opId} has no receipt`);
       return { ...record.receipt, duplicate: true };
     }
+    await this.#loadLedgerRecoveryStates(record);
     const recovered = this.#recoverSupervisorReceipt(record);
     return recovered === undefined ? undefined : { ...recovered, duplicate: true };
   }
@@ -571,10 +652,10 @@ class Supervisor implements RuntimePort {
   async #submitCanonical(op: Readonly<RuntimeOp>): Promise<OpReceipt> {
     const payloadHash = runtimeOpPayloadHash(op);
     const scopeFreeze = op.type === 'cancel_scope' && op.workspaceId === this.workspaceId
-      ? this.#freezeScope(op)
+      ? await this.#freezeScope(op)
       : undefined;
     const retryFreeze = op.type === 'conversation_retry'
-      ? this.#freezeRetryPrompt(op)
+      ? await this.#freezeRetryPrompt(op)
       : undefined;
     const reservedRecord: SupervisorOpLedgerRecord = {
       opId: op.opId,
@@ -603,6 +684,7 @@ class Supervisor implements RuntimePort {
     }
     const ledgerRecord = reservation.record;
     if (reservation.kind === 'duplicate') {
+      await this.#loadLedgerRecoveryStates(ledgerRecord);
       const recovered = this.#recoverSupervisorReceipt(ledgerRecord);
       if (recovered !== undefined) {
         await this.#workspace.finalizeSupervisorOp(
@@ -732,7 +814,7 @@ class Supervisor implements RuntimePort {
     try {
       const meta = snapshot<ThreadMetaRecord>({
       type: 'thread_meta',
-      version: 2,
+      version: 3,
       protocolVersion: PROTOCOL_VERSION,
       workspaceId: this.workspaceId,
       threadId: op.threadId,
@@ -746,17 +828,20 @@ class Supervisor implements RuntimePort {
     });
       journal = await this.#workspace.createThreadJournal(this.#lease, { threadId: op.threadId, meta });
       await journal.acquireWriteLease(this.#lease);
-      const records = await journal.load();
+      const loaded = await journal.loadState();
       writer = new ThreadJournalWriter({
       workspaceId: this.workspaceId,
       threadId: op.threadId,
       journal,
       events: this.#events,
       clock: this.#clock,
-      state: foldThreadJournal(records),
-      records,
+      state: loaded.state,
+      records: loaded.records,
       });
-      this.#events.registerThread(op.threadId);
+      this.#registerStoredEventHistory(op.threadId, {
+        highWaterSeq: loaded.state.highWaterSeq,
+        replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
+      });
       if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(writer.state.checkpoint)) {
         throw new RuntimeStorageError(
           'driver_checkpoint_mismatch',
@@ -835,7 +920,7 @@ class Supervisor implements RuntimePort {
   async #forkConversation(
     op: Extract<RuntimeOp, { type: 'conversation_fork' }>,
   ): Promise<OpReceipt> {
-    const source = this.#threadState(op.sourceThreadId);
+    const source = await this.#loadUnloadedState(op.sourceThreadId);
     if (source === undefined) return rejected(op, 'source_thread_not_found');
     if (source.summary.activeRunId !== undefined
       || source.checkpoint.frontend.pendingControls.length > 0) {
@@ -859,11 +944,10 @@ class Supervisor implements RuntimePort {
     if (retryPrompt === undefined || ledger.retryPromptOpId === undefined) {
       throw new RuntimeStorageError('invalid_supervisor_op', 'conversation_retry has no frozen prompt');
     }
-    const existingTarget = this.#threadState(op.threadId);
-    const creationApplied = existingTarget?.envelopes.some((envelope) =>
-      envelope.opId === op.opId
-      && envelope.event.type === 'op_completed'
-      && envelope.event.opType === 'conversation_retry') === true;
+    const existingTarget = await this.#loadUnloadedState(op.threadId);
+    const creationTerminal = existingTarget?.opTerminals.get(op.opId)?.event;
+    const creationApplied = creationTerminal?.type === 'op_completed'
+      && creationTerminal.opType === 'conversation_retry';
     if (creationApplied && !this.#threads.has(op.threadId)) {
       const catalog = this.#catalog.get(op.threadId);
       if (catalog === undefined) {
@@ -875,7 +959,7 @@ class Supervisor implements RuntimePort {
     if (creationApplied) {
       created = { accepted: true, opId: op.opId, duplicate: false, threadId: op.threadId };
     } else {
-      const source = this.#threadState(op.sourceThreadId);
+      const source = await this.#loadUnloadedState(op.sourceThreadId);
       if (source === undefined) {
         throw new RuntimeStorageError('invalid_supervisor_op', 'Frozen retry source disappeared');
       }
@@ -973,7 +1057,7 @@ class Supervisor implements RuntimePort {
       const createdAt = this.#clock.now();
       const meta = snapshot<ThreadMetaRecord>({
         type: 'thread_meta',
-        version: 2,
+        version: 3,
         protocolVersion: PROTOCOL_VERSION,
         workspaceId: this.workspaceId,
         threadId: op.threadId,
@@ -989,15 +1073,15 @@ class Supervisor implements RuntimePort {
         initialRecords: [seed],
       });
       await journal.acquireWriteLease(this.#lease);
-      const records = await journal.load();
+      const loaded = await journal.loadState();
       writer = new ThreadJournalWriter({
         workspaceId: this.workspaceId,
         threadId: op.threadId,
         journal,
         events: this.#events,
         clock: this.#clock,
-        state: foldThreadJournal(records),
-        records,
+        state: loaded.state,
+        records: loaded.records,
       });
       if (canonicalJson(attachment.initialCheckpoint) !== canonicalJson(writer.state.checkpoint)) {
         throw new RuntimeStorageError(
@@ -1005,7 +1089,10 @@ class Supervisor implements RuntimePort {
           `Forked driver differs from committed seed ${op.threadId}`,
         );
       }
-      this.#events.registerThread(op.threadId);
+      this.#registerStoredEventHistory(op.threadId, {
+        highWaterSeq: loaded.state.highWaterSeq,
+        replayStartSeq: loaded.state.envelopes[0]?.seq ?? loaded.state.highWaterSeq + 1,
+      });
       await this.#commitApprovalStartupDiagnostics(writer);
       const summary: ThreadSummary = {
         threadId: op.threadId,
@@ -1115,8 +1202,8 @@ class Supervisor implements RuntimePort {
     let writer: ThreadJournalWriter | undefined;
     let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
-      const records = await journal.load();
-      const state = foldThreadJournal(records);
+      const loaded = await journal.loadState();
+      const state = loaded.state;
       const host = new ThreadDriverHostController();
       factoryStarted = true;
       attachment = await this.#driverFactory.resume({
@@ -1145,7 +1232,7 @@ class Supervisor implements RuntimePort {
         events: this.#events,
         clock: this.#clock,
         state,
-        records,
+        records: loaded.records,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
       threadPolicyEngine = await this.#openThreadPolicyEngine(op.threadId);
@@ -1199,6 +1286,7 @@ class Supervisor implements RuntimePort {
       );
       await attachment.driver.activate();
       this.#threads.set(op.threadId, runtime);
+      this.#unloaded.delete(op.threadId);
       this.#threadClaims.set(op.threadId, { kind: 'attached', opId: op.opId });
       this.#attachmentLifecycleOps.set(op.threadId, op.opId);
       await this.#deliverPendingResultsForParent(op.threadId).catch(() => undefined);
@@ -1334,8 +1422,7 @@ class Supervisor implements RuntimePort {
     const commands: RecoveryQueueCommand[] = [];
     const noOpIds = new Set<OpId>();
     for (const { opId, op: queueOp } of candidates) {
-      const effectCommitted = writer.state.envelopes.some((envelope) =>
-        envelope.opId === opId && envelope.event.type === 'queue_update');
+      const effectCommitted = writer.state.mailbox.get(opId)?.effectCommitted === true;
       if (effectCommitted) continue;
       if (queueOp.text.trim().length === 0) {
         noOpIds.add(opId);
@@ -1348,8 +1435,7 @@ class Supervisor implements RuntimePort {
     const completionEnvelopes: CommitEnvelopeInput[] = [];
     const completionMutations: import('./ports.js').RuntimeThreadMutation[] = [];
     for (const { opId, op: queueOp } of candidates) {
-      const effectCommitted = writer.state.envelopes.some((envelope) =>
-        envelope.opId === opId && envelope.event.type === 'queue_update');
+      const effectCommitted = writer.state.mailbox.get(opId)?.effectCommitted === true;
       if (!effectCommitted && !noOpIds.has(opId)) {
         throw new RuntimeStorageError('queue_recovery_effect_missing', opId);
       }
@@ -1424,7 +1510,9 @@ class Supervisor implements RuntimePort {
     for (const [threadId, record] of latest) {
       if (record.op.type === 'thread_close' || this.#threads.has(threadId)) continue;
       const catalog = this.#catalog.get(threadId);
-      if (catalog === undefined || this.#unloaded.get(threadId)?.summary.state === 'closed') continue;
+      if (catalog === undefined
+        || catalog.summary.state === 'closed'
+        || this.#unloaded.get(threadId)?.summary.state === 'closed') continue;
       await this.#recoverAcceptedAttachment(record, catalog);
     }
   }
@@ -1444,8 +1532,8 @@ class Supervisor implements RuntimePort {
     let attachment: RuntimeThreadDriverAttachment | undefined;
     let threadPolicyEngine: ThreadPolicyEngine | undefined;
     try {
-      const records = await journal.load();
-      const state = foldThreadJournal(records);
+      const loaded = await journal.loadState();
+      const state = loaded.state;
       const resolution = await this.#resolveModel(
         state.checkpoint.frontend.model,
         op.threadId,
@@ -1458,7 +1546,7 @@ class Supervisor implements RuntimePort {
         events: this.#events,
         clock: this.#clock,
         state,
-        records,
+        records: loaded.records,
       });
       await this.#commitApprovalStartupDiagnostics(writer);
       if (!resolution.ok) {
@@ -1471,7 +1559,7 @@ class Supervisor implements RuntimePort {
             scope: 'thread',
           },
         }]);
-        const interrupted = withAttachmentRecoveryOverlay(writer.state);
+        const interrupted = writer.state;
         this.#unloaded.set(op.threadId, interrupted);
         this.#catalog.set(op.threadId, {
           ...catalog,
@@ -1592,14 +1680,13 @@ class Supervisor implements RuntimePort {
     if (parent !== undefined) {
       parentCommitSeq = await parent.commitThreadResult(result);
     } else {
-      const parentState = this.#unloaded.get(result.parentThreadId);
-      const envelope = parentState?.envelopes.find((candidate) => candidate.opId === result.resultOpId);
-      if (envelope !== undefined) {
-        if (envelope.event.type !== 'thread_result'
-          || canonicalJson(envelope.event) !== canonicalJson(threadResultEvent(result))) {
+      const parentState = await this.#loadUnloadedState(result.parentThreadId);
+      const committed = parentState?.threadResults.get(result.resultOpId);
+      if (committed !== undefined) {
+        if (canonicalJson(committed.event) !== canonicalJson(threadResultEvent(result))) {
           throw new RuntimeStorageError('thread_result_conflict', result.resultOpId);
         }
-        parentCommitSeq = envelope.seq;
+        parentCommitSeq = committed.seq;
       }
     }
     if (parentCommitSeq === undefined) return;
@@ -1626,15 +1713,15 @@ class Supervisor implements RuntimePort {
     const journal = await this.#workspace.openThreadJournal(childThreadId);
     if (journal === undefined) throw new RuntimeStorageError('thread_result_child_missing', childThreadId);
     await journal.acquireWriteLease(this.#lease);
-    const records = await journal.load();
+    const loaded = await journal.loadState();
     const writer = new ThreadJournalWriter({
       workspaceId: this.workspaceId,
       threadId: childThreadId,
       journal,
       events: this.#events,
       clock: this.#clock,
-      state: foldThreadJournal(records),
-      records,
+      state: loaded.state,
+      records: loaded.records,
     });
     try {
       if (!writer.state.deliveredThreadResults.has(record.resultOpId)) {
@@ -1726,14 +1813,14 @@ class Supervisor implements RuntimePort {
     };
   }
 
-  #freezeScope(op: Extract<RuntimeOp, { type: 'cancel_scope' }>): {
+  async #freezeScope(op: Extract<RuntimeOp, { type: 'cancel_scope' }>): Promise<{
     readonly targetThreadIds: readonly ThreadId[];
     readonly resolvedTargets: readonly {
       readonly threadId: ThreadId;
       readonly target: import('../protocol/index.js').ResolvedAbortTarget;
       readonly derivedOpId: DerivedOpId;
     }[];
-  } {
+  }> {
     const targetThreadIds = op.scope === 'workspace'
       ? [...this.#catalog.keys()]
       : op.rootThreadId !== undefined && this.#catalog.has(op.rootThreadId)
@@ -1741,7 +1828,9 @@ class Supervisor implements RuntimePort {
         : [];
     const resolvedTargets = targetThreadIds.map((threadId) => {
       const target = this.#threads.get(threadId)?.currentAbortTarget()
-        ?? abortTargetFromFold(this.#unloaded.get(threadId));
+        ?? (this.#unloaded.has(threadId)
+          ? abortTargetFromFold(this.#unloaded.get(threadId))
+          : abortTargetFromSummary(this.#catalog.get(threadId)?.summary));
       const derivedOpId = this.#identityFactory.deriveOpId({
         purpose: 'cancel_target',
         workspaceId: this.workspaceId,
@@ -1757,14 +1846,14 @@ class Supervisor implements RuntimePort {
     return snapshot({ targetThreadIds, resolvedTargets });
   }
 
-  #freezeRetryPrompt(
+  async #freezeRetryPrompt(
     op: Extract<RuntimeOp, { type: 'conversation_retry' }>,
-  ):
+  ): Promise<
     | { readonly ok: true; readonly prompt: NonNullable<SupervisorOpLedgerRecord['retryPrompt']> }
     | { readonly ok: false; readonly reason: NonNullable<
         SupervisorOpLedgerRecord['retryRejectionReason']
-      > } {
-    const source = this.#threadState(op.sourceThreadId);
+      > }> {
+    const source = await this.#loadUnloadedState(op.sourceThreadId);
     if (source === undefined) return { ok: false, reason: 'source_thread_not_found' };
     if (source.summary.activeRunId !== undefined
       || source.checkpoint.frontend.pendingControls.length > 0) {
@@ -1800,8 +1889,8 @@ class Supervisor implements RuntimePort {
     const journal = await this.#workspace.openThreadJournal(op.threadId);
     if (journal === undefined) throw new Error(`Missing journal for scope target ${op.threadId}`);
     await journal.acquireWriteLease(this.#lease);
-    const records = await journal.load();
-    const state = foldThreadJournal(records);
+    const loaded = await journal.loadState();
+    const state = loaded.state;
     const existing = state.mailbox.get(op.opId);
     if (existing !== undefined) {
       if (canonicalJson(existing.op) !== canonicalJson(op)) {
@@ -1818,7 +1907,7 @@ class Supervisor implements RuntimePort {
       events: this.#events,
       clock: this.#clock,
       state,
-      records,
+      records: loaded.records,
     });
     try {
       await writer.appendPrepare({
@@ -2019,14 +2108,18 @@ class Supervisor implements RuntimePort {
   async #recoverUnloadedJournal(
     threadId: ThreadId,
     journal: import('./ports.js').ThreadJournalPort,
-    initialRecords: readonly RuntimeJournalRecord[],
+    loaded: {
+      readonly state: FoldedThreadJournal;
+      readonly records: readonly RuntimeJournalRecord[];
+    },
   ): Promise<FoldedThreadJournal> {
-    let state = foldThreadJournal(initialRecords);
+    const state = loaded.state;
     const recoverable = recoveryMailboxEntries(state);
-    if (recoverable.length === 0) return state;
-    await journal.acquireWriteLease(this.#lease);
-    const records = await journal.load();
-    state = foldThreadJournal(records);
+    if (recoverable.length === 0) {
+      await journal.saveRecoveryState(state).catch(() => undefined);
+      await journal.releaseWriteLease();
+      return state;
+    }
     const writer = new ThreadJournalWriter({
       workspaceId: this.workspaceId,
       threadId,
@@ -2034,7 +2127,7 @@ class Supervisor implements RuntimePort {
       events: this.#events,
       clock: this.#clock,
       state,
-      records,
+      records: loaded.records,
     });
     try {
       for (const [opId, entry] of recoveryMailboxEntries(writer.state)) {
@@ -2061,18 +2154,14 @@ class Supervisor implements RuntimePort {
           const response = entry.op;
           const pendingRequest = writer.state.checkpoint.frontend.pendingControls
             .find((candidate) => candidate.requestId === response.requestId);
-          const historicalRequest = writer.state.envelopes.find((envelope) =>
-            envelope.event.type === 'control_request'
-            && envelope.event.requestId === response.requestId);
-          const committedResolution = writer.state.envelopes.findLast((envelope) =>
-            envelope.event.type === 'control_resolved'
-            && envelope.event.requestId === response.requestId);
+          const historicalRequest = writer.state.controlRequests.get(response.requestId);
+          const committedResolution = writer.state.controlResolutions.get(response.requestId);
           const request = pendingRequest
-            ?? (historicalRequest?.event.type === 'control_request' ? historicalRequest.event : undefined);
+            ?? historicalRequest;
           if (request === undefined) {
             throw new RuntimeStorageError('control_request_not_found', response.requestId);
           }
-          if (committedResolution?.event.type === 'control_resolved') {
+          if (committedResolution !== undefined) {
             const outcome = committedResolution.opId === response.opId
               && committedResolution.event.decision !== 'aborted'
               ? 'applied' as const
@@ -2367,6 +2456,7 @@ class Supervisor implements RuntimePort {
   async #reconcileSupervisorLedger(records: readonly SupervisorOpLedgerRecord[]): Promise<void> {
     for (const record of records) {
       if (record.state === 'final') continue;
+      await this.#loadLedgerRecoveryStates(record);
       const receipt = this.#recoverSupervisorReceipt(record);
       if (receipt === undefined) continue;
       await this.#workspace.finalizeSupervisorOp(
@@ -2374,6 +2464,18 @@ class Supervisor implements RuntimePort {
         this.#finalSupervisorRecord(record, receipt),
       );
     }
+  }
+
+  async #loadLedgerRecoveryStates(record: SupervisorOpLedgerRecord): Promise<void> {
+    const threadIds = new Set<ThreadId>();
+    if (record.op.type === 'cancel_scope') {
+      for (const target of record.resolvedTargets ?? []) threadIds.add(target.threadId);
+    } else if ('threadId' in record.op) {
+      threadIds.add(record.op.threadId);
+    }
+    await Promise.all([...threadIds].map(async (threadId) => {
+      if (this.#catalog.has(threadId)) await this.#loadUnloadedState(threadId);
+    }));
   }
 
   #finalSupervisorRecord(
@@ -2408,12 +2510,11 @@ class Supervisor implements RuntimePort {
         : undefined;
     }
     const state = this.#threads.get(op.threadId)?.durableState() ?? this.#unloaded.get(op.threadId);
-    const lifecycle = state?.envelopes.findLast((envelope) => envelope.opId === op.opId
-      && (envelope.event.type === 'op_completed' || envelope.event.type === 'op_rejected'));
-    if (lifecycle?.event.type === 'op_rejected') {
-      return rejected(op, lifecycle.event.reason);
+    const lifecycle = state?.opTerminals.get(op.opId)?.event;
+    if (lifecycle?.type === 'op_rejected') {
+      return rejected(op, lifecycle.reason);
     }
-    if (lifecycle?.event.type === 'op_completed') {
+    if (lifecycle?.type === 'op_completed') {
       const rootOwnerOpId = op.type === 'conversation_retry'
         ? record.retryPromptOpId
         : op.opId;
@@ -2623,19 +2724,11 @@ function recoveryMailboxEntries(
 function acceptedMailboxEntriesInFifo(
   state: FoldedThreadJournal,
 ): readonly (readonly [OpId, FoldedMailboxEntry])[] {
-  const acceptedSeq = new Map<OpId, number>();
-  for (const envelope of state.envelopes) {
-    if (envelope.opId !== undefined
-      && envelope.event.type === 'op_accepted'
-      && !acceptedSeq.has(envelope.opId)) {
-      acceptedSeq.set(envelope.opId, envelope.seq);
-    }
-  }
   return [...state.mailbox.entries()]
     .filter((entry): entry is [OpId, FoldedMailboxEntry] =>
       (entry[1].state === 'accepted_pending' || entry[1].state === 'started')
-      && acceptedSeq.has(entry[0]))
-    .sort((left, right) => acceptedSeq.get(left[0])! - acceptedSeq.get(right[0])!);
+      && entry[1].acceptedSeq !== undefined)
+    .sort((left, right) => left[1].acceptedSeq! - right[1].acceptedSeq!);
 }
 
 function cancellationSupersedesRequest(
@@ -3266,22 +3359,6 @@ function recoverySummary(state: FoldedThreadJournal | undefined): ThreadSummary 
   return { ...summary, state: 'suspended', suspendedWork };
 }
 
-function withAttachmentRecoveryOverlay(state: FoldedThreadJournal): FoldedThreadJournal {
-  const latestLifecycleSeq = state.envelopes.findLast((envelope) =>
-    envelope.event.type === 'thread_created' || envelope.event.type === 'thread_resumed')?.seq ?? 0;
-  const latestRecoverySeq = state.envelopes.findLast((envelope) =>
-    envelope.event.type === 'runtime_diagnostic'
-    && envelope.event.scope === 'thread'
-    && (envelope.event.code === 'attachment_model_not_found'
-      || envelope.event.code === 'attachment_credentials_unavailable'
-      || envelope.event.code === 'attachment_invalid_model'))?.seq ?? 0;
-  if (latestRecoverySeq <= latestLifecycleSeq || state.summary.state === 'closed') return state;
-  return {
-    ...state,
-    summary: withoutActiveRunSummary(state.summary, 'closed'),
-  };
-}
-
 function abortTargetFromFold(
   state: FoldedThreadJournal | undefined,
 ): import('../protocol/index.js').ResolvedAbortTarget {
@@ -3307,4 +3384,29 @@ function abortTargetFromFold(
   return activeRunId === undefined
     ? { kind: 'no_current_activity' }
     : { kind: 'run', runId: activeRunId };
+}
+
+function abortTargetFromSummary(
+  summary: ThreadSummary | undefined,
+): import('../protocol/index.js').ResolvedAbortTarget {
+  const suspended = summary?.suspendedWork?.[0];
+  if (suspended?.kind === 'reserved_op') {
+    return {
+      kind: 'suspended',
+      ownerOpId: suspended.ownerOpId,
+      terminalRunId: suspended.runId,
+      inputOwnerOpId: suspended.ownerOpId,
+    };
+  }
+  if (suspended?.kind === 'interrupted') {
+    return {
+      kind: 'suspended',
+      ownerOpId: suspended.ownerOpId,
+      terminalRunId: suspended.terminalRunId,
+      ...(suspended.inputOwnerOpId !== undefined && { inputOwnerOpId: suspended.inputOwnerOpId }),
+    };
+  }
+  return summary?.activeRunId === undefined
+    ? { kind: 'no_current_activity' }
+    : { kind: 'run', runId: summary.activeRunId };
 }

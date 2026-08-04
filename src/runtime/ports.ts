@@ -4,6 +4,7 @@
 import type {
   DerivedOpId,
   DerivedOpPurpose,
+  EventEnvelope,
   ExternalOpId,
   ModelConfig,
   ModelRef,
@@ -23,10 +24,12 @@ import type {
 import type {
   ThreadIdentityPort,
 } from '../session/thread-runtime-ports.js';
+import type { FoldedThreadJournal } from '../session/thread-journal.js';
 import type {
   ThreadSeedRecord,
   ThreadJournalAppendPort,
   ThreadMetaRecord,
+  RuntimeJournalRecord,
 } from '../session/thread-journal-records.js';
 import type { PolicyGrantRepository } from '../capabilities/types.js';
 
@@ -122,6 +125,22 @@ export interface ThreadCatalogRecord {
   readonly summary: ThreadSummary;
   readonly format: 'runtime-v2';
   readonly storageKey: string;
+  /** Header/index data only; listing and clean startup never need the journal body. */
+  readonly meta?: ThreadMetaRecord;
+  readonly journal?: {
+    readonly version: 3;
+    readonly dev?: number;
+    readonly ino?: number;
+    readonly mtimeMs?: number;
+    readonly ctimeMs?: number;
+    readonly size: number;
+    readonly snapshotSize: number;
+    readonly highWaterSeq: number;
+    readonly replayStartSeq: number;
+    readonly recoveryRequired: boolean;
+  };
+  readonly preview?: string;
+  readonly updatedAt?: number;
 }
 
 export interface StoredThreadLocator {
@@ -179,6 +198,13 @@ export type DerivedOpIdentityReservation =
 
 export interface ThreadJournalPort extends ThreadJournalAppendPort {
   acquireWriteLease(lease: Readonly<SupervisorLease>): Promise<void>;
+  loadState(): Promise<{
+    readonly state: FoldedThreadJournal;
+    /** May be empty when storage already supplies the validated fold, avoiding retained history. */
+    readonly records: readonly RuntimeJournalRecord[];
+  }>;
+  saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void>;
+  replayEvents(afterSeq: number, throughSeq: number): Promise<readonly EventEnvelope[]>;
   releaseWriteLease(): Promise<void>;
 }
 

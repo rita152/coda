@@ -13,6 +13,7 @@ import type {
   OpId,
   PermissionCeilingSnapshot,
   RunId,
+  RuntimeEvent,
   ThreadId,
   ThreadSnapshot,
   ThreadSummary,
@@ -43,6 +44,8 @@ export interface FoldedThreadJournal {
   readonly meta: ThreadMetaRecord;
   readonly highWaterSeq: number;
   readonly envelopes: readonly Readonly<EventEnvelope>[];
+  /** Canonical serialized bytes retained by `envelopes`, independently capped from event count. */
+  readonly replayBytes: number;
   readonly checkpoint: ThreadDriverCheckpoint;
   readonly summary: ThreadSummary;
   readonly mailbox: ReadonlyMap<OpId, FoldedMailboxEntry>;
@@ -60,9 +63,18 @@ export interface FoldedThreadJournal {
     readonly decision: import('../protocol/index.js').ControlResponseDecision;
     readonly acceptedAt: number;
   }>;
+  /** Recovery/idempotency facts must never depend on the bounded replay envelope window. */
+  readonly opTerminals: ReadonlyMap<OpId, FoldedOpTerminal>;
+  readonly threadResults: ReadonlyMap<import('../protocol/index.js').DerivedOpId, FoldedThreadResult>;
+  readonly controlRequests: ReadonlyMap<string, Extract<RuntimeEvent, { type: 'control_request' }>>;
+  readonly controlResolutions: ReadonlyMap<string, FoldedControlResolution>;
   /** Canonical rule scopes durably discovered by prior invocation freshness checks. */
   readonly observedRuleScopes: ReadonlySet<string>;
 }
+
+/** Public cursor replay and in-memory review retain a fixed tail; transcript/recovery state is separate. */
+export const THREAD_REPLAY_LIMIT = 4_096;
+export const THREAD_REPLAY_BYTE_LIMIT = 4 * 1_024 * 1_024;
 
 export interface FoldedMailboxEntry {
   readonly op: import('../protocol/index.js').MailboxRuntimeOp;
@@ -70,6 +82,24 @@ export interface FoldedMailboxEntry {
   readonly outcome?: 'applied' | 'no_op' | 'interrupted' | 'superseded';
   readonly reason?: string;
   readonly resolvedTarget?: import('../protocol/index.js').ResolvedAbortTarget;
+  readonly acceptedSeq?: number;
+  readonly effectCommitted?: boolean;
+}
+
+export interface FoldedOpTerminal {
+  readonly seq: number;
+  readonly event: Extract<RuntimeEvent, { type: 'op_completed' | 'op_rejected' }>;
+}
+
+export interface FoldedThreadResult {
+  readonly seq: number;
+  readonly event: Extract<RuntimeEvent, { type: 'thread_result' }>;
+}
+
+export interface FoldedControlResolution {
+  readonly seq: number;
+  readonly opId?: OpId;
+  readonly event: Extract<RuntimeEvent, { type: 'control_resolved' }>;
 }
 
 export interface FoldedRunEntry {
@@ -97,6 +127,7 @@ export type { CommitEnvelopeInput } from './event-committer.js';
 export class ThreadJournalWriter {
   readonly #repository: TranscriptRepository<RuntimeJournalRecord, FoldedThreadJournal>;
   readonly #committer: EventCommitter<RuntimeJournalRecord, FoldedThreadJournal, RuntimeThreadMutation>;
+  readonly #saveRecoveryState: ((state: Readonly<FoldedThreadJournal>) => Promise<void>) | undefined;
 
   constructor(input: {
     readonly workspaceId: WorkspaceId;
@@ -112,7 +143,14 @@ export class ThreadJournalWriter {
       records: input.records,
       fold: foldThreadJournal,
       foldAppend: foldThreadJournalAppend,
+      state: input.state,
     });
+    this.#saveRecoveryState = 'saveRecoveryState' in input.journal
+      && typeof input.journal.saveRecoveryState === 'function'
+      ? input.journal.saveRecoveryState.bind(input.journal) as (
+          state: Readonly<FoldedThreadJournal>,
+        ) => Promise<void>
+      : undefined;
     this.#committer = new EventCommitter({
       workspaceId: input.workspaceId,
       threadId: input.threadId,
@@ -125,7 +163,16 @@ export class ThreadJournalWriter {
         envelopes,
         ...(mutations.length > 0 && { mutations }),
       }),
-      publish: (envelopes) => input.events.publish(envelopes),
+      publish: (envelopes) => {
+        input.events.publish(envelopes);
+        // This callback still runs inside EventCommitter's per-thread serial gate. Read the exact
+        // post-append fold before a later commit can advance it, then expose the same durable range.
+        const state = this.#repository.state;
+        input.events.updateDurableReplayRange(input.threadId, {
+          highWaterSeq: state.highWaterSeq,
+          replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
+        });
+      },
       onWriterFatal: (failure) => input.events.failThread(
         input.threadId,
         failure instanceof RuntimeStorageError ? failure.code : 'writer_failed',
@@ -139,6 +186,7 @@ export class ThreadJournalWriter {
 
   async appendPrepare(record: Exclude<RuntimeJournalRecord, ThreadCommitRecord | ThreadMetaRecord>): Promise<void> {
     await this.#committer.append([snapshot(record)]);
+    await this.#persistRecoveryState();
   }
 
   async commit(
@@ -146,7 +194,11 @@ export class ThreadJournalWriter {
     mutations: readonly RuntimeThreadMutation[] = [],
     acceptedTimestamp?: number,
   ): Promise<readonly Readonly<EventEnvelope>[]> {
-    return this.#committer.commit(envelopeInputs, mutations, acceptedTimestamp);
+    const envelopes = await this.#committer.commit(envelopeInputs, mutations, acceptedTimestamp);
+    if (mutations.length > 0 || envelopeInputs.some((input) => input.event.type !== 'message_update')) {
+      await this.#persistRecoveryState();
+    }
+    return envelopes;
   }
 
   async commitDriverEvent(
@@ -184,6 +236,9 @@ export class ThreadJournalWriter {
       });
     }
     await this.#committer.commit(inputs, mutations);
+    if (mutations.length > 0 || inputs.some((input) => input.event.type !== 'message_update')) {
+      await this.#persistRecoveryState();
+    }
   }
 
   async drain(): Promise<void> {
@@ -191,7 +246,14 @@ export class ThreadJournalWriter {
   }
 
   async close(): Promise<void> {
+    await this.#persistRecoveryState();
     await this.#committer.close();
+  }
+
+  async #persistRecoveryState(): Promise<void> {
+    // The journal remains authoritative. A failed cache refresh leaves a detectable stale boundary
+    // and must not roll back or hide an already-published canonical commit.
+    await this.#saveRecoveryState?.(this.state).catch(() => undefined);
   }
 }
 
@@ -203,7 +265,7 @@ export function foldThreadJournal(records: readonly RuntimeJournalRecord[]): Fol
   const validatedRecords = records.map(snapshot);
   const meta = validatedRecords[0];
   if (meta === undefined || meta.type !== 'thread_meta') {
-    throw new RuntimeStorageError('missing_thread_meta', 'Thread journal has no v2 meta record');
+    throw new RuntimeStorageError('missing_thread_meta', 'Thread journal has no v3 meta record');
   }
   const folded = foldThreadJournalRecords(meta, validatedRecords.slice(1), undefined, true);
   // Validate and detach the final derived projection once. Grammar/sequence/correspondence checks
@@ -233,6 +295,7 @@ function foldThreadJournalRecords(
   reuseValidatedCheckpointSubtrees = current !== undefined,
 ): FoldedThreadJournal {
   const envelopes: Readonly<EventEnvelope>[] = current === undefined ? [] : [...current.envelopes];
+  let replayBytes = current?.replayBytes ?? 0;
   const mailbox = current === undefined
     ? new Map<OpId, FoldedMailboxEntry>() : new Map(current.mailbox);
   const runs = current === undefined
@@ -258,6 +321,16 @@ function foldThreadJournalRecords(
     readonly decision: import('../protocol/index.js').ControlResponseDecision;
     readonly acceptedAt: number;
   }>() : new Map(current.controlClaims);
+  const opTerminals = current === undefined
+    ? new Map<OpId, FoldedOpTerminal>() : new Map(current.opTerminals);
+  const threadResults = current === undefined
+    ? new Map<import('../protocol/index.js').DerivedOpId, FoldedThreadResult>()
+    : new Map(current.threadResults);
+  const controlRequests = current === undefined
+    ? new Map<string, Extract<RuntimeEvent, { type: 'control_request' }>>()
+    : new Map(current.controlRequests);
+  const controlResolutions = current === undefined
+    ? new Map<string, FoldedControlResolution>() : new Map(current.controlResolutions);
   let checkpoint = current?.checkpoint ?? emptyCheckpoint(meta.model);
   let summary: ThreadSummary = current?.summary ?? {
       threadId: meta.threadId,
@@ -351,6 +424,48 @@ function foldThreadJournalRecords(
       }
       highWaterSeq = validated.seq;
       envelopes.push(validated);
+      replayBytes += replayEnvelopeBytes(validated);
+      while (envelopes.length > THREAD_REPLAY_LIMIT || replayBytes > THREAD_REPLAY_BYTE_LIMIT) {
+        const removed = envelopes.shift();
+        if (removed === undefined) break;
+        replayBytes -= replayEnvelopeBytes(removed);
+      }
+      if (validated.opId !== undefined
+        && (validated.event.type === 'op_completed' || validated.event.type === 'op_rejected')) {
+        opTerminals.set(validated.opId, {
+          seq: validated.seq,
+          event: validated.event,
+        });
+      }
+      if (validated.event.type === 'thread_result') {
+        const existing = threadResults.get(validated.event.resultOpId);
+        if (existing !== undefined
+          && canonicalJson(existing.event) !== canonicalJson(validated.event)) {
+          throw new RuntimeStorageError('thread_result_conflict', validated.event.resultOpId);
+        }
+        if (existing === undefined) {
+          threadResults.set(validated.event.resultOpId, {
+            seq: validated.seq,
+            event: validated.event,
+          });
+        }
+      } else if (validated.event.type === 'control_request') {
+        controlRequests.set(validated.event.requestId, validated.event);
+      } else if (validated.event.type === 'control_resolved') {
+        controlResolutions.set(validated.event.requestId, {
+          seq: validated.seq,
+          ...(validated.opId !== undefined && { opId: validated.opId }),
+          event: validated.event,
+        });
+      }
+      if (validated.opId !== undefined) {
+        const mailboxEntry = mailbox.get(validated.opId);
+        if (mailboxEntry !== undefined && validated.event.type === 'op_accepted') {
+          mailbox.set(validated.opId, { ...mailboxEntry, acceptedSeq: validated.seq });
+        } else if (mailboxEntry !== undefined && validated.event.type === 'queue_update') {
+          mailbox.set(validated.opId, { ...mailboxEntry, effectCommitted: true });
+        }
+      }
       if (validated.event.type === 'message_end' && validated.turnId !== undefined) {
         messageTurnIds.set(validated.event.message.id, validated.turnId);
       }
@@ -366,6 +481,12 @@ function foldThreadJournalRecords(
         summary = validated.event.thread;
       } else if (validated.event.type === 'thread_closed') {
         summary = withoutActiveRun(summary, 'closed');
+      } else if (validated.event.type === 'runtime_diagnostic'
+        && validated.event.scope === 'thread'
+        && (validated.event.code === 'attachment_model_not_found'
+          || validated.event.code === 'attachment_credentials_unavailable'
+          || validated.event.code === 'attachment_invalid_model')) {
+        summary = withoutActiveRun(summary, 'closed');
       }
     }
     for (const mutation of record.mutations ?? []) {
@@ -379,6 +500,8 @@ function foldThreadJournalRecords(
             op: existing.op,
             state: 'accepted_pending',
             ...('resolvedTarget' in mutation && { resolvedTarget: mutation.resolvedTarget }),
+            ...(existing.acceptedSeq !== undefined && { acceptedSeq: existing.acceptedSeq }),
+            ...(existing.effectCommitted === true && { effectCommitted: true }),
           });
           break;
         }
@@ -395,6 +518,8 @@ function foldThreadJournalRecords(
             ...(mutation.type === 'completed' && { outcome: mutation.outcome }),
             ...(mutation.type === 'rejected' && { reason: mutation.reason }),
             ...(existing.resolvedTarget !== undefined && { resolvedTarget: existing.resolvedTarget }),
+            ...(existing.acceptedSeq !== undefined && { acceptedSeq: existing.acceptedSeq }),
+            ...(existing.effectCommitted === true && { effectCommitted: true }),
           });
           break;
         }
@@ -582,6 +707,7 @@ function foldThreadJournalRecords(
     meta,
     highWaterSeq,
     envelopes,
+    replayBytes,
     checkpoint,
     summary,
     mailbox,
@@ -593,8 +719,33 @@ function foldThreadJournalRecords(
     deliveredThreadResults,
     usedRequestIds,
     controlClaims,
+    opTerminals,
+    threadResults,
+    controlRequests,
+    controlResolutions,
     observedRuleScopes,
   };
+}
+
+/** True only when startup must converge a durable obligation before normal admission. */
+export function threadJournalRequiresRecovery(state: FoldedThreadJournal): boolean {
+  if ([...state.mailbox.values()].some((entry) =>
+    entry.state === 'prepared' || entry.state === 'accepted_pending' || entry.state === 'started')) {
+    return true;
+  }
+  if (state.checkpoint.frontend.pendingControls.length > 0
+    || state.inputOwners.size > 0
+    || state.controlClaims.size > 0) {
+    return true;
+  }
+  for (const result of state.pendingThreadResults.values()) {
+    if (!state.deliveredThreadResults.has(result.resultOpId)) return true;
+  }
+  return state.summary.state === 'starting'
+    || state.summary.state === 'running'
+    || state.summary.state === 'retrying'
+    || state.summary.state === 'compacting'
+    || state.summary.state === 'closing';
 }
 
 export function snapshotFromFold(state: FoldedThreadJournal): Readonly<ThreadSnapshot> {
@@ -940,6 +1091,10 @@ function withoutActivity(
 
 function snapshot<T>(value: T): T {
   return strictJsonSnapshot(value) as T;
+}
+
+function replayEnvelopeBytes(envelope: Readonly<EventEnvelope>): number {
+  return new TextEncoder().encode(canonicalJson(envelope)).byteLength;
 }
 
 function finalizeCheckpoint<T>(value: T, reuseValidatedSubtrees: boolean): T {

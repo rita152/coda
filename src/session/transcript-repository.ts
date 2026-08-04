@@ -20,6 +20,8 @@ export interface TranscriptRepositoryOptions<TRecord, TState> {
   readonly records: readonly TRecord[];
   readonly fold: TranscriptFold<TRecord, TState>;
   readonly foldAppend?: TranscriptAppendFold<TRecord, TState>;
+  /** A storage-validated materialization avoids folding the same journal a second time. */
+  readonly state?: TState;
 }
 
 /**
@@ -41,7 +43,7 @@ export class TranscriptRepository<TRecord, TState> {
     this.#fold = options.fold;
     this.#foldAppend = options.foldAppend;
     this.#records = options.records.map(snapshotRecord);
-    this.#state = options.fold(this.#records);
+    this.#state = options.state ?? options.fold(this.#records);
   }
 
   static async load<TRecord, TState>(options: {

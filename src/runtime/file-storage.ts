@@ -58,6 +58,24 @@ import type {
   WorkspaceWriteFenceValidation,
 } from '../protocol/index.js';
 import { RuntimeStorageError, WorkspaceBindingMismatchError, WorkspaceInUseError } from './errors.js';
+import {
+  cloneJournalMessageCodecState,
+  decodeDurableCommitRecord,
+  emptyJournalMessageCodecState,
+  encodeDurableJournalRecord,
+} from '../session/thread-journal-codec.js';
+import type { JournalMessageCodecState } from '../session/thread-journal-codec.js';
+import {
+  foldThreadJournal,
+  foldThreadJournalAppend,
+  threadJournalRequiresRecovery,
+} from '../session/thread-journal.js';
+import type { FoldedThreadJournal } from '../session/thread-journal.js';
+import {
+  deserializeThreadRecoveryState,
+  serializeThreadRecoveryState,
+} from '../session/thread-recovery-snapshot.js';
+import type { SerializedThreadRecoveryState } from '../session/thread-recovery-snapshot.js';
 import type {
   DerivedOpIdentityClaim,
   DerivedOpIdentityReservation,
@@ -77,7 +95,15 @@ import type {
 
 export interface FileRuntimeStorageOptions {
   readonly root: string;
+  /** Deterministic diagnostics for proving that listing/startup do not consume journal bodies. */
+  readonly onJournalRead?: (observation: Readonly<{
+    readonly threadId: ThreadId;
+    readonly kind: 'body' | 'tail' | 'snapshot';
+    readonly bytes: number;
+  }>) => void;
 }
+
+type JournalReadObserver = NonNullable<FileRuntimeStorageOptions['onJournalRead']>;
 
 interface WorkspaceBindingFile {
   readonly version: 1;
@@ -165,7 +191,7 @@ export function createFileRuntimeStorage(options: FileRuntimeStorageOptions): Fi
       if (binding.workspaceId !== workspaceId || binding.recordedCwd !== input.cwd) {
         throw new WorkspaceBindingMismatchError(workspaceId, binding.recordedCwd, input.cwd);
       }
-      return new FileWorkspacePort(workspaceDir, binding);
+      return new FileWorkspacePort(workspaceDir, binding, options.onJournalRead);
     },
   };
 }
@@ -179,6 +205,8 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
   readonly #policyGrantsFile: string;
   readonly #lockFile: string;
   readonly #authorityPort: number;
+  readonly #onJournalRead: JournalReadObserver | undefined;
+  readonly #validatedJournals = new Map<ThreadId, ValidatedJournalLocator>();
   #lockServer: Bun.TCPSocketListener | undefined;
   #lockRecord: SupervisorLockRecord | undefined;
   #lease: SupervisorLease | undefined;
@@ -187,6 +215,7 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
   constructor(
     readonly workspaceDir: string,
     binding: WorkspaceBindingFile,
+    onJournalRead: JournalReadObserver | undefined,
   ) {
     this.workspaceId = binding.workspaceId;
     this.recordedCwd = binding.recordedCwd;
@@ -196,6 +225,7 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     this.#policyGrantsFile = safeChild(workspaceDir, 'policy-grants.json');
     this.#lockFile = safeChild(workspaceDir, 'supervisor.lock');
     this.#authorityPort = workspaceAuthorityPort(this.workspaceId);
+    this.#onJournalRead = onJournalRead;
   }
 
   async acquireSupervisorLease(processEpoch: string): Promise<SupervisorLease> {
@@ -368,14 +398,18 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
       validateJournalRecord(record, this.workspaceId, threadId, false);
     }
     const file = this.#threadFile(threadId);
+    let created = false;
     if (!existsSync(file)) {
       try {
         writeJsonLinesExclusive(file, initialRecords);
+        created = true;
       } catch (error) {
         if (!isAlreadyExists(error)) throw storageFailure('thread_create_failed', file, error);
       }
     }
-    const storedRecords = readJournalRecords(file, this.workspaceId, threadId, 'strict');
+    const storedRecords = created
+      ? snapshot(initialRecords)
+      : readJournalInitialRecords(file, this.workspaceId, threadId, initialRecords.length);
     const storedMeta = storedRecords[0];
     if (storedMeta?.type !== 'thread_meta') {
       throw new RuntimeStorageError('invalid_thread_journal', `Thread ${threadId} has no metadata`);
@@ -387,8 +421,18 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
         `Thread ${threadId} has different immutable initial records`,
       );
     }
-    this.#upsertCatalogFromRecords(file, storedRecords);
-    return new FileJournalPort(this, threadId, file);
+    const catalogHasThread = this.#readCatalog().threads.some((entry) =>
+      entry.summary.threadId === threadId);
+    if (created || !catalogHasThread) {
+      this.#upsertCatalogFromRecords(file, storedRecords);
+    } else {
+      this.#validatedJournals.set(threadId, {
+        meta: storedMeta,
+        boundary: journalBoundary(file),
+      });
+    }
+    const locator = this.#validatedJournals.get(threadId);
+    return new FileJournalPort(this, threadId, file, locator);
   }
 
   async openThreadJournal(threadIdInput: ThreadId): Promise<ThreadJournalPort | undefined> {
@@ -396,10 +440,14 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     const threadId = assertThreadId(threadIdInput);
     const file = this.#threadFile(threadId);
     if (!existsSync(file)) return undefined;
-    assertRegularFileNoSymlink(file);
-    // Validate immutable ownership before handing out a writer-capable port.
-    readJournalRecords(file, this.workspaceId, threadId, 'strict');
-    return new FileJournalPort(this, threadId, file);
+    const boundary = journalBoundary(file);
+    let locator = this.#validatedJournals.get(threadId);
+    if (locator === undefined || !sameBoundary(locator.boundary, boundary)) {
+      const meta = validateThreadMeta(readJournalHeader(file), this.workspaceId, threadId);
+      locator = { meta, boundary };
+      this.#validatedJournals.set(threadId, locator);
+    }
+    return new FileJournalPort(this, threadId, file, locator);
   }
 
   async openPolicyGrantRepository(
@@ -444,7 +492,20 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     this.#assertLeaseHeld();
   }
 
-  updateCatalog(threadId: ThreadId, records: readonly RuntimeJournalRecord[]): void {
+  observeJournalRead(
+    threadId: ThreadId,
+    kind: 'body' | 'tail' | 'snapshot',
+    bytes: number,
+  ): void {
+    this.#onJournalRead?.({ threadId, kind, bytes });
+  }
+
+  updateCatalog(
+    threadId: ThreadId,
+    records: readonly RuntimeJournalRecord[],
+    boundary: Readonly<JournalFileBoundary>,
+    highWaterSeq: number,
+  ): void {
     this.#assertLeaseHeld();
     const catalog = this.#readCatalog();
     const index = catalog.threads.findIndex((entry) => entry.summary.threadId === threadId);
@@ -454,7 +515,61 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     }
     const summary = foldCatalogSummary(entry.summary, records);
     const threads = [...catalog.threads];
-    threads[index] = snapshot({ ...entry, summary });
+    threads[index] = snapshot({
+      ...entry,
+      summary,
+      journal: {
+        version: 3,
+        dev: boundary.dev,
+        ino: boundary.ino,
+        mtimeMs: boundary.mtimeMs,
+        ctimeMs: boundary.ctimeMs,
+        size: boundary.size,
+        snapshotSize: entry.journal?.snapshotSize ?? 0,
+        highWaterSeq,
+        replayStartSeq: entry.journal?.replayStartSeq ?? 1,
+        recoveryRequired: true,
+      },
+      updatedAt: records.flatMap((record) => record.type === 'commit' ? record.envelopes : [])
+        .at(-1)?.timestamp ?? entry.updatedAt,
+    });
+    this.#writeCatalog({ ...catalog, threads });
+  }
+
+  installRecoveryCatalog(
+    threadId: ThreadId,
+    state: Readonly<FoldedThreadJournal>,
+    boundary: Readonly<JournalFileBoundary>,
+  ): void {
+    this.#assertLeaseHeld();
+    const catalog = this.#readCatalog();
+    const index = catalog.threads.findIndex((entry) => entry.summary.threadId === threadId);
+    const entry = catalog.threads[index];
+    if (entry === undefined) {
+      throw new RuntimeStorageError('catalog_thread_missing', `Thread ${threadId} is absent from catalog`);
+    }
+    const replayStartSeq = state.envelopes[0]?.seq ?? state.highWaterSeq + 1;
+    const preview = previewFromFold(state);
+    const threads = [...catalog.threads];
+    threads[index] = snapshot({
+      ...entry,
+      summary: state.summary,
+      meta: state.meta,
+      journal: {
+        version: 3,
+        dev: boundary.dev,
+        ino: boundary.ino,
+        mtimeMs: boundary.mtimeMs,
+        ctimeMs: boundary.ctimeMs,
+        size: boundary.size,
+        snapshotSize: boundary.size,
+        highWaterSeq: state.highWaterSeq,
+        replayStartSeq,
+        recoveryRequired: threadJournalRequiresRecovery(state),
+      },
+      ...(preview === undefined ? {} : { preview }),
+      updatedAt: state.envelopes.at(-1)?.timestamp ?? entry.updatedAt ?? state.meta.createdAt,
+    });
     this.#writeCatalog({ ...catalog, threads });
   }
 
@@ -480,11 +595,24 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
       }
     }
     this.#readLedger();
-    this.#readCatalog();
+    try {
+      this.#readCatalog();
+    } catch (error) {
+      if (!(error instanceof RuntimeStorageError) || error.code !== 'invalid_thread_catalog') throw error;
+      this.#writeCatalog({
+        version: 1,
+        threads: listHeaderOnlyCatalog(this.#threadsDir, {
+          version: 1,
+          workspaceId: this.workspaceId,
+          recordedCwd: this.recordedCwd,
+        }),
+      });
+    }
   }
 
   async #reconcileCatalog(): Promise<void> {
     this.#assertLeaseHeld();
+    this.#validatedJournals.clear();
     const catalog = this.#readCatalog();
     const existingById = new Map(catalog.threads.map((entry) => [entry.summary.threadId, entry]));
     const reconciled: ThreadCatalogRecord[] = [];
@@ -499,21 +627,40 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
       if (path.basename(this.#threadFile(header.threadId)) !== entry.name) {
         throw new RuntimeStorageError('thread_storage_key_mismatch', `Thread ${header.threadId} uses an invalid storage key`);
       }
-      const journal = new FileJournalPort(this, header.threadId, file);
-      // The temporary writer lease both proves single ownership and durably repairs a torn tail.
-      await journal.acquireWriteLease(this.#lease as SupervisorLease);
-      let records: readonly RuntimeJournalRecord[];
-      try {
-        records = await journal.load();
-      } finally {
-        await journal.releaseWriteLease();
-      }
       const previous = existingById.get(header.threadId);
-      const initial = previous?.summary ?? summaryFromMeta(header);
+      const boundary = journalBoundary(file);
+      this.#validatedJournals.set(header.threadId, { meta: header, boundary });
+      const indexed = previous?.journal;
+      const exact = indexed !== undefined
+        && indexed.dev === boundary.dev
+        && indexed.ino === boundary.ino
+        && indexed.size === boundary.size
+        && indexed.mtimeMs === boundary.mtimeMs
+        && indexed.ctimeMs === boundary.ctimeMs
+        && previous?.meta !== undefined
+        && canonicalJson(previous.meta) === canonicalJson(header);
       reconciled.push(snapshot({
-        summary: foldCatalogSummary(initial, records),
+        summary: previous?.summary ?? summaryFromMeta(header),
         format: 'runtime-v2',
         storageKey: entry.name,
+        meta: header,
+        journal: exact
+          ? indexed
+          : {
+              version: 3,
+              dev: boundary.dev,
+              ino: boundary.ino,
+              mtimeMs: boundary.mtimeMs,
+              ctimeMs: boundary.ctimeMs,
+              size: boundary.size,
+              snapshotSize: indexed?.dev === boundary.dev && indexed.ino === boundary.ino
+                ? indexed.snapshotSize : 0,
+              highWaterSeq: indexed?.highWaterSeq ?? 0,
+              replayStartSeq: indexed?.replayStartSeq ?? 1,
+              recoveryRequired: true,
+            },
+        ...(previous?.preview !== undefined && { preview: previous.preview }),
+        ...(previous?.updatedAt !== undefined && { updatedAt: previous.updatedAt }),
       }));
       existingById.delete(header.threadId);
     }
@@ -535,12 +682,29 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
     }
     const catalog = this.#readCatalog();
     const index = catalog.threads.findIndex((entry) => entry.summary.threadId === meta.threadId);
-    const previous = index < 0 ? undefined : catalog.threads[index];
+    const state = foldThreadJournal(records);
+    const boundary = journalBoundary(file);
     const entry = snapshot<ThreadCatalogRecord>({
-      summary: foldCatalogSummary(previous?.summary ?? summaryFromMeta(meta), records),
+      summary: state.summary,
       format: 'runtime-v2',
       storageKey: path.basename(file),
+      meta,
+      journal: {
+        version: 3,
+        dev: boundary.dev,
+        ino: boundary.ino,
+        mtimeMs: boundary.mtimeMs,
+        ctimeMs: boundary.ctimeMs,
+        size: boundary.size,
+        snapshotSize: 0,
+        highWaterSeq: state.highWaterSeq,
+        replayStartSeq: state.envelopes[0]?.seq ?? state.highWaterSeq + 1,
+        recoveryRequired: true,
+      },
+      ...(previewFromFold(state) === undefined ? {} : { preview: previewFromFold(state) }),
+      updatedAt: state.envelopes.at(-1)?.timestamp ?? meta.createdAt,
     });
+    this.#validatedJournals.set(meta.threadId, { meta, boundary });
     const threads = [...catalog.threads];
     if (index < 0) threads.push(entry);
     else threads[index] = entry;
@@ -690,19 +854,23 @@ class FilePolicyGrantRepository implements PolicyGrantRepository {
 
 class FileJournalPort implements ThreadJournalPort {
   readonly #lockFile: string;
+  readonly #snapshotFile: string;
   #lockFd: number | undefined;
   #lockRecord: ThreadLockRecord | undefined;
   #lease: SupervisorLease | undefined;
   #journalFd: number | undefined;
   #journalBoundary: JournalFileBoundary | undefined;
   #sequenceState: JournalSequenceState | undefined;
+  #codecState: JournalMessageCodecState | undefined;
 
   constructor(
     private readonly workspace: FileWorkspacePort,
     private readonly threadId: ThreadId,
     private readonly file: string,
+    private readonly validatedLocator?: Readonly<ValidatedJournalLocator>,
   ) {
     this.#lockFile = `${file}.lock`;
+    this.#snapshotFile = `${file}.recovery.json`;
   }
 
   async acquireWriteLease(lease: Readonly<SupervisorLease>): Promise<void> {
@@ -750,7 +918,17 @@ class FileJournalPort implements ThreadJournalPort {
   async load(): Promise<readonly RuntimeJournalRecord[]> {
     if (this.#lease === undefined) {
       this.workspace.assertLeaseHeld();
-      return readJournalRecords(this.file, this.workspace.workspaceId, this.threadId, 'strict');
+      return readJournalRecords(
+        this.file,
+        this.workspace.workspaceId,
+        this.threadId,
+        'strict',
+        (observation) => this.workspace.observeJournalRead(
+          observation.threadId,
+          observation.kind,
+          observation.bytes,
+        ),
+      );
     }
     this.workspace.assertFence(this.#lease);
     const loaded = readValidatedJournal(
@@ -758,9 +936,213 @@ class FileJournalPort implements ThreadJournalPort {
       this.workspace.workspaceId,
       this.threadId,
       'repair',
+      {
+        observer: (observation) => this.workspace.observeJournalRead(
+          observation.threadId,
+          observation.kind,
+          observation.bytes,
+        ),
+      },
     );
     this.#installValidatedBoundary(loaded);
     return loaded.records;
+  }
+
+  async loadState(): Promise<{
+    readonly state: FoldedThreadJournal;
+    readonly records: readonly RuntimeJournalRecord[];
+  }> {
+    this.workspace.assertLeaseHeld();
+    // The header/protocol/schema gate always precedes snapshot or body parsing.
+    const currentBoundary = journalBoundary(this.file);
+    const header = this.validatedLocator !== undefined
+      && sameBoundary(this.validatedLocator.boundary, currentBoundary)
+      ? this.validatedLocator.meta
+      : validateThreadMeta(
+          readJournalHeader(this.file),
+          this.workspace.workspaceId,
+          this.threadId,
+        );
+    const boundary = currentBoundary;
+    const materialized = readRecoverySnapshot(
+      this.#snapshotFile,
+      header,
+      this.workspace.workspaceId,
+      this.threadId,
+      (observation) => this.workspace.observeJournalRead(
+        observation.threadId,
+        observation.kind,
+        observation.bytes,
+      ),
+    );
+    if (materialized !== undefined && sameBoundary(materialized.boundary, boundary)) {
+      if (this.#lease !== undefined) {
+        this.#installValidatedBoundary({
+          records: [],
+          boundary,
+          sequenceState: materialized.sequenceState,
+          codecState: materialized.codecState,
+        });
+      }
+      return { state: materialized.state, records: [] };
+    }
+    if (materialized !== undefined
+      && materialized.boundary.dev === boundary.dev
+      && materialized.boundary.ino === boundary.ino
+      && materialized.boundary.size < boundary.size) {
+      const tail = readValidatedJournalTail(
+        this.file,
+        this.workspace.workspaceId,
+        this.threadId,
+        this.#lease === undefined ? 'strict' : 'repair',
+        materialized,
+        boundary,
+        (observation) => this.workspace.observeJournalRead(
+          observation.threadId,
+          observation.kind,
+          observation.bytes,
+        ),
+      );
+      const state = tail.state;
+      if (state === undefined) {
+        throw new RuntimeStorageError('invalid_thread_journal', 'Tail recovery did not materialize state');
+      }
+      if (this.#lease !== undefined) {
+        this.#installValidatedBoundary(tail);
+        await this.saveRecoveryState(state);
+      }
+      return { state, records: [] };
+    }
+
+    const loaded = readValidatedJournal(
+      this.file,
+      this.workspace.workspaceId,
+      this.threadId,
+      this.#lease === undefined ? 'strict' : 'repair',
+      {
+        retainRecords: false,
+        foldState: true,
+        observer: (observation) => this.workspace.observeJournalRead(
+          observation.threadId,
+          observation.kind,
+          observation.bytes,
+        ),
+      },
+    );
+    const state = loaded.state;
+    if (state === undefined) {
+      throw new RuntimeStorageError('invalid_thread_journal', 'Full recovery did not materialize state');
+    }
+    if (this.#lease !== undefined) {
+      this.#installValidatedBoundary(loaded);
+      await this.saveRecoveryState(state);
+    }
+    return { state, records: [] };
+  }
+
+  async saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void> {
+    if (this.#lease === undefined || this.#journalBoundary === undefined
+      || this.#sequenceState === undefined || this.#codecState === undefined
+      || this.#journalFd === undefined) {
+      throw new RuntimeStorageError('thread_not_writable', `Thread ${this.threadId} has no recovery boundary`);
+    }
+    this.workspace.assertFence(this.#lease);
+    assertJournalFileBoundary(this.file, this.#journalFd, this.#journalBoundary);
+    if (state.meta.threadId !== this.threadId || state.meta.workspaceId !== this.workspace.workspaceId
+      || state.highWaterSeq !== this.#sequenceState.nextSeq - 1) {
+      throw new RuntimeStorageError('invalid_recovery_snapshot', 'Recovery state does not match journal sequence');
+    }
+    const serializedState = serializeThreadRecoveryState(state);
+    writeRecoverySnapshot(this.#snapshotFile, {
+      version: 1,
+      workspaceId: this.workspace.workspaceId,
+      threadId: this.threadId,
+      boundary: this.#journalBoundary,
+      state: serializedState,
+      sequence: serializeJournalSequenceState(this.#sequenceState),
+      codec: cloneJournalMessageCodecState(this.#codecState),
+    });
+    this.workspace.installRecoveryCatalog(
+      this.threadId,
+      state,
+      this.#journalBoundary,
+    );
+  }
+
+  async replayEvents(afterSeq: number, throughSeq: number): Promise<readonly import('../protocol/index.js').EventEnvelope[]> {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0
+      || !Number.isSafeInteger(throughSeq) || throughSeq < afterSeq) {
+      throw new RuntimeStorageError('invalid_event_cursor', 'Invalid event replay range');
+    }
+    const boundary = journalBoundary(this.file);
+    const header = this.validatedLocator !== undefined
+      && sameBoundary(this.validatedLocator.boundary, boundary)
+      ? this.validatedLocator.meta
+      : validateThreadMeta(
+          readJournalHeader(this.file),
+          this.workspace.workspaceId,
+          this.threadId,
+        );
+    const materialized = readRecoverySnapshot(
+      this.#snapshotFile,
+      header,
+      this.workspace.workspaceId,
+      this.threadId,
+      (observation) => this.workspace.observeJournalRead(
+        observation.threadId,
+        observation.kind,
+        observation.bytes,
+      ),
+    );
+    let state: FoldedThreadJournal;
+    if (materialized !== undefined && sameBoundary(materialized.boundary, boundary)
+      && recoveryStateCoversCursor(materialized.state, afterSeq)) {
+      state = materialized.state;
+    } else if (materialized !== undefined
+      && materialized.boundary.dev === boundary.dev
+      && materialized.boundary.ino === boundary.ino
+      && materialized.boundary.size < boundary.size
+      && recoveryStateCoversCursor(materialized.state, afterSeq)) {
+      const tail = readValidatedJournalTail(
+        this.file,
+        this.workspace.workspaceId,
+        this.threadId,
+        'read_only',
+        materialized,
+        boundary,
+        (observation) => this.workspace.observeJournalRead(
+          observation.threadId,
+          observation.kind,
+          observation.bytes,
+        ),
+      );
+      if (tail.state === undefined) {
+        throw new RuntimeStorageError('invalid_thread_journal', 'Tail replay did not materialize state');
+      }
+      state = tail.state;
+    } else {
+      const loaded = readValidatedJournal(
+        this.file,
+        this.workspace.workspaceId,
+        this.threadId,
+        'read_only',
+        {
+          retainRecords: false,
+          foldState: true,
+          observer: (observation) => this.workspace.observeJournalRead(
+            observation.threadId,
+            observation.kind,
+            observation.bytes,
+          ),
+        },
+      );
+      if (loaded.state === undefined) {
+        throw new RuntimeStorageError('invalid_thread_journal', 'Replay recovery did not materialize state');
+      }
+      state = loaded.state;
+    }
+    return state.envelopes.filter((envelope) =>
+      envelope.seq > afterSeq && envelope.seq <= throughSeq);
   }
 
   async append(
@@ -772,20 +1154,31 @@ class FileJournalPort implements ThreadJournalPort {
     }
     this.workspace.assertFence(this.#lease);
     if (records.length === 0) return;
-    if (this.#sequenceState === undefined || this.#journalBoundary === undefined
+    if (this.#sequenceState === undefined || this.#codecState === undefined
+      || this.#journalBoundary === undefined
       || this.#journalFd === undefined) {
       const loaded = readValidatedJournal(
         this.file,
         this.workspace.workspaceId,
         this.threadId,
         'repair',
+        {
+          retainRecords: false,
+          observer: (observation) => this.workspace.observeJournalRead(
+            observation.threadId,
+            observation.kind,
+            observation.bytes,
+          ),
+        },
       );
       this.#installValidatedBoundary(loaded);
     }
     const sequenceState = this.#sequenceState;
+    const codecState = this.#codecState;
     const boundary = this.#journalBoundary;
     const journalFd = this.#journalFd;
-    if (sequenceState === undefined || boundary === undefined || journalFd === undefined) {
+    if (sequenceState === undefined || codecState === undefined
+      || boundary === undefined || journalFd === undefined) {
       throw new RuntimeStorageError('invalid_thread_journal', `Thread ${this.threadId} has no append boundary`);
     }
     assertJournalFileBoundary(this.file, journalFd, boundary);
@@ -797,14 +1190,27 @@ class FileJournalPort implements ThreadJournalPort {
       this.threadId,
       sequenceState,
     );
-    const data = `${validated.map((record) => canonicalJson(record)).join('\n')}\n`;
+    const nextCodecState = cloneJournalMessageCodecState(codecState);
+    const durable = validated.map((record) => encodeDurableJournalRecord(record, nextCodecState));
+    const data = `${durable.map((record) => canonicalJson(record)).join('\n')}\n`;
     writeFileSync(journalFd, data, { encoding: 'utf8' });
     fsyncSync(journalFd);
-    const nextBoundary = { ...boundary, size: boundary.size + Buffer.byteLength(data) };
+    const expectedSize = boundary.size + Buffer.byteLength(data);
+    const nextBoundary = journalBoundaryFromOpenFile(this.file, journalFd);
+    if (nextBoundary.dev !== boundary.dev || nextBoundary.ino !== boundary.ino
+      || nextBoundary.size !== expectedSize) {
+      throw new RuntimeStorageError('invalid_thread_journal', 'Journal append boundary changed');
+    }
     assertJournalFileBoundary(this.file, journalFd, nextBoundary);
     this.#sequenceState = nextSequenceState;
+    this.#codecState = nextCodecState;
     this.#journalBoundary = nextBoundary;
-    this.workspace.updateCatalog(this.threadId, validated);
+    this.workspace.updateCatalog(
+      this.threadId,
+      validated,
+      nextBoundary,
+      nextSequenceState.nextSeq - 1,
+    );
   }
 
   async releaseWriteLease(): Promise<void> {
@@ -815,6 +1221,7 @@ class FileJournalPort implements ThreadJournalPort {
     this.#journalFd = undefined;
     this.#journalBoundary = undefined;
     this.#sequenceState = undefined;
+    this.#codecState = undefined;
     this.#lockFd = undefined;
     this.#lockRecord = undefined;
     this.#lease = undefined;
@@ -856,6 +1263,7 @@ class FileJournalPort implements ThreadJournalPort {
     this.#journalFd = fd;
     this.#journalBoundary = loaded.boundary;
     this.#sequenceState = loaded.sequenceState;
+    this.#codecState = loaded.codecState;
   }
 }
 
@@ -871,40 +1279,56 @@ function readAllCanonicalLocators(root: string): StoredThreadLocator[] {
     const workspaceDir = safeChild(root, entry.name);
     const binding = readBinding(safeChild(workspaceDir, 'binding.json'));
     const catalogFile = safeChild(workspaceDir, 'catalog.json');
-    const catalog = existsSync(catalogFile)
-      ? readCatalog(catalogFile)
-      : { version: 1 as const, threads: [] };
-    const byId = new Map(catalog.threads.map((item) => [item.summary.threadId, item]));
-    const inventory: ThreadCatalogRecord[] = [];
     const threadsDir = safeChild(workspaceDir, 'threads');
-    if (existsSync(threadsDir)) {
-      assertDirectoryNoSymlink(threadsDir);
-      for (const journalEntry of readdirSync(threadsDir, { withFileTypes: true })) {
-        if (!journalEntry.name.startsWith('th-') || !journalEntry.name.endsWith('.jsonl')) continue;
-        if (!journalEntry.isFile() || journalEntry.isSymbolicLink()) {
-          throw new RuntimeStorageError('unsafe_storage_key', `Invalid journal entry: ${journalEntry.name}`);
-        }
-        const file = safeChild(threadsDir, journalEntry.name);
-        const header = readJournalHeader(file);
-        validateThreadMeta(header, binding.workspaceId, header.threadId);
-        if (`th-${sha256Hex(header.threadId)}.jsonl` !== journalEntry.name) {
-          throw new RuntimeStorageError('thread_storage_key_mismatch', `Invalid storage key for ${header.threadId}`);
-        }
-        const records = readJournalRecords(file, binding.workspaceId, header.threadId, 'read_only');
-        const previous = byId.get(header.threadId);
-        inventory.push(snapshot({
-          summary: foldCatalogSummary(previous?.summary ?? summaryFromMeta(header), records),
-          format: 'runtime-v2' as const,
-          storageKey: journalEntry.name,
-        }));
-        byId.delete(header.threadId);
+    const catalogExists = existsSync(catalogFile);
+    let catalog: ThreadCatalogFile;
+    if (!catalogExists) {
+      catalog = { version: 1, threads: listHeaderOnlyCatalog(threadsDir, binding) };
+    } else {
+      try {
+        catalog = readCatalog(catalogFile);
+      } catch (error) {
+        if (!(error instanceof RuntimeStorageError) || error.code !== 'invalid_thread_catalog') throw error;
+        catalog = { version: 1, threads: listHeaderOnlyCatalog(threadsDir, binding) };
       }
     }
-    const orphan = [...byId.values()][0];
-    if (orphan !== undefined) {
-      throw new RuntimeStorageError('catalog_orphan', `Missing journal for ${orphan.summary.threadId}`);
-    }
-    for (const thread of inventory) {
+    for (const indexed of catalog.threads) {
+      const threadId = indexed.summary.threadId;
+      const expectedStorageKey = `th-${sha256Hex(threadId)}.jsonl`;
+      if (indexed.storageKey !== expectedStorageKey
+        || (indexed.meta !== undefined && indexed.meta.workspaceId !== binding.workspaceId)) {
+        throw new RuntimeStorageError(
+          'invalid_thread_catalog',
+          `Catalog thread ${threadId} is outside its workspace/storage fence`,
+        );
+      }
+      const file = safeChild(threadsDir, indexed.storageKey);
+      if (!existsSync(file)) {
+        throw new RuntimeStorageError('catalog_orphan', `Catalog references missing thread journal ${threadId}`);
+      }
+      const boundary = journalBoundary(file);
+      const exact = indexed.meta !== undefined && indexed.journal !== undefined
+        && indexed.journal.dev === boundary.dev && indexed.journal.ino === boundary.ino
+        && indexed.journal.size === boundary.size
+        && indexed.journal.mtimeMs === boundary.mtimeMs
+        && indexed.journal.ctimeMs === boundary.ctimeMs;
+      const meta = exact
+        ? indexed.meta as ThreadMetaRecord
+        : validateThreadMeta(readJournalHeader(file), binding.workspaceId, threadId);
+      const thread: ThreadCatalogRecord = exact
+        ? indexed
+        : snapshot({
+            ...indexed,
+            meta,
+            journal: {
+              version: 3,
+              ...boundary,
+              snapshotSize: 0,
+              highWaterSeq: indexed.journal?.highWaterSeq ?? 0,
+              replayStartSeq: indexed.journal?.replayStartSeq ?? 1,
+              recoveryRequired: true,
+            },
+          });
       result.push(snapshot({
         ownerWorkspaceId: binding.workspaceId,
         ownerRecordedCwd: binding.recordedCwd,
@@ -916,16 +1340,115 @@ function readAllCanonicalLocators(root: string): StoredThreadLocator[] {
   return result;
 }
 
+function listHeaderOnlyCatalog(
+  threadsDir: string,
+  binding: Readonly<WorkspaceBindingFile>,
+): ThreadCatalogRecord[] {
+  if (!existsSync(threadsDir)) return [];
+  assertDirectoryNoSymlink(threadsDir);
+  const result: ThreadCatalogRecord[] = [];
+  for (const entry of readdirSync(threadsDir, { withFileTypes: true })) {
+    if (!entry.name.startsWith('th-') || !entry.name.endsWith('.jsonl')) continue;
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new RuntimeStorageError('unsafe_storage_key', `Thread journal is not a regular file: ${entry.name}`);
+    }
+    const file = safeChild(threadsDir, entry.name);
+    const raw = readJournalHeader(file);
+    const meta = validateThreadMeta(raw, binding.workspaceId, raw.threadId);
+    if (entry.name !== `th-${sha256Hex(meta.threadId)}.jsonl`) {
+      throw new RuntimeStorageError('thread_storage_key_mismatch', `Thread ${meta.threadId} uses an invalid storage key`);
+    }
+    result.push(snapshot({
+      summary: summaryFromMeta(meta),
+      format: 'runtime-v2',
+      storageKey: entry.name,
+      meta,
+      journal: {
+        version: 3,
+        ...journalBoundary(file),
+        snapshotSize: 0,
+        highWaterSeq: 0,
+        replayStartSeq: 1,
+        recoveryRequired: true,
+      },
+      updatedAt: meta.createdAt,
+    }));
+  }
+  return result;
+}
+
 interface JournalFileBoundary {
   readonly dev: number;
   readonly ino: number;
   readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+interface ValidatedJournalLocator {
+  readonly meta: ThreadMetaRecord;
+  readonly boundary: JournalFileBoundary;
+}
+
+interface SerializedJournalSequenceState {
+  readonly recordCount: number;
+  readonly mailboxPrepares: readonly (readonly [string,
+    Extract<RuntimeJournalRecord, { type: 'mailbox_prepare' }>])[];
+  readonly mailboxStates: readonly (readonly [string,
+    'prepared' | 'accepted_pending' | 'started' | 'completed' | 'rejected'])[];
+  readonly usedRunIds: readonly (readonly [string, string])[];
+  readonly runStates: readonly (readonly [string, 'reserved' | 'started' | 'terminal'])[];
+  readonly successorByPredecessor: readonly (readonly [string,
+    Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>])[];
+  readonly successorByRun: readonly (readonly [string,
+    Extract<RuntimeJournalRecord, { type: 'successor_run_prepare' }>])[];
+  readonly turnByKey: readonly (readonly [string,
+    Extract<RuntimeJournalRecord, { type: 'turn_prepare' }>])[];
+  readonly usedTurnIds: readonly (readonly [string, string])[];
+  readonly activatedTurns: readonly string[];
+  readonly pendingResults: readonly (readonly [string,
+    Extract<RuntimeThreadMutation, { type: 'thread_result_pending' }>])[];
+  readonly deliveredResults: readonly string[];
+  readonly usedRequestIds: readonly string[];
+  readonly controlClaims: readonly (readonly [string, ExternalOpId])[];
+  readonly observedRuleScopes: readonly string[];
+  readonly seedSeen: boolean;
+  readonly nextSeq: number;
+}
+
+interface ThreadRecoverySnapshotPayload {
+  readonly version: 1;
+  readonly workspaceId: WorkspaceId;
+  readonly threadId: ThreadId;
+  readonly boundary: JournalFileBoundary;
+  readonly state: SerializedThreadRecoveryState;
+  readonly sequence: SerializedJournalSequenceState;
+  readonly codec: JournalMessageCodecState;
+}
+
+interface ThreadRecoverySnapshotFile extends ThreadRecoverySnapshotPayload {
+  readonly digest: string;
+}
+
+interface ValidatedRecoverySnapshot {
+  readonly boundary: JournalFileBoundary;
+  readonly state: FoldedThreadJournal;
+  readonly sequenceState: JournalSequenceState;
+  readonly codecState: JournalMessageCodecState;
 }
 
 interface ValidatedJournal {
   readonly records: readonly RuntimeJournalRecord[];
   readonly sequenceState: JournalSequenceState;
+  readonly codecState: JournalMessageCodecState;
   readonly boundary: JournalFileBoundary;
+  readonly state?: FoldedThreadJournal;
+}
+
+interface ReadValidatedJournalOptions {
+  readonly retainRecords?: boolean;
+  readonly foldState?: boolean;
+  readonly observer?: JournalReadObserver;
 }
 
 interface JournalHeaderLine {
@@ -938,8 +1461,9 @@ function readJournalRecords(
   workspaceId: WorkspaceId,
   threadId: ThreadId,
   mode: 'strict' | 'repair' | 'read_only',
+  observer?: JournalReadObserver,
 ): readonly RuntimeJournalRecord[] {
-  return readValidatedJournal(file, workspaceId, threadId, mode).records;
+  return readValidatedJournal(file, workspaceId, threadId, mode, { observer }).records;
 }
 
 function readValidatedJournal(
@@ -947,6 +1471,7 @@ function readValidatedJournal(
   workspaceId: WorkspaceId,
   threadId: ThreadId,
   mode: 'strict' | 'repair' | 'read_only',
+  options: ReadValidatedJournalOptions = {},
 ): ValidatedJournal {
   assertRegularFileNoSymlink(file);
   const fd = openSync(
@@ -960,7 +1485,7 @@ function readValidatedJournal(
   let bodyOffset: number;
   try {
     const initialStat = fstatSync(fd);
-    initialBoundary = { dev: initialStat.dev, ino: initialStat.ino, size: initialStat.size };
+    initialBoundary = boundaryFromStat(initialStat);
     assertJournalFileBoundary(file, fd, initialBoundary);
     const headerLine = readJournalHeaderLine(fd, initialBoundary.size, file);
     header = validateThreadMeta(
@@ -982,7 +1507,16 @@ function readValidatedJournal(
     closeSync(fd);
     throw error;
   }
-  const records: RuntimeJournalRecord[] = [header];
+  options.observer?.({
+    threadId,
+    kind: 'body',
+    bytes: Math.max(0, bytes.length - bodyOffset),
+  });
+  const retainRecords = options.retainRecords !== false;
+  const records: RuntimeJournalRecord[] = retainRecords ? [header] : [];
+  let sequenceState = validateJournalSequence([header], workspaceId, threadId);
+  let foldedState = options.foldState === true ? foldThreadJournal([header]) : undefined;
+  let codecState = emptyJournalMessageCodecState();
   let cursor = bodyOffset;
   let line = 1;
   let lastGoodOffset = bodyOffset;
@@ -1001,8 +1535,27 @@ function readValidatedJournal(
       }
       try {
         const parsed = JSON.parse(text) as unknown;
-        const record = validateJournalRecord(parsed, workspaceId, threadId, records.length === 0);
-        records.push(record);
+        const candidateCodecState = cloneJournalMessageCodecState(codecState);
+        const record = validateJournalRecord(
+          parsed,
+          workspaceId,
+          threadId,
+          false,
+          candidateCodecState,
+        );
+        const candidateSequenceState = validateJournalSequenceAppend(
+          [record],
+          workspaceId,
+          threadId,
+          sequenceState,
+        );
+        const candidateFoldedState = foldedState === undefined
+          ? undefined
+          : foldThreadJournalAppend(foldedState, [record]);
+        if (retainRecords) records.push(record);
+        sequenceState = candidateSequenceState;
+        foldedState = candidateFoldedState;
+        codecState = candidateCodecState;
         lastGoodOffset = next;
         if (newline < 0 && mode === 'repair') needsFinalNewline = true;
       } catch (error) {
@@ -1025,14 +1578,128 @@ function readValidatedJournal(
       fsyncSync(fd);
       expectedSize++;
     }
-    if (records.length === 0 || records[0]?.type !== 'thread_meta') {
-      throw new RuntimeStorageError('invalid_thread_journal', `Thread ${threadId} has no meta header`);
-    }
-    const sequenceState = validateJournalSequence(records, workspaceId, threadId);
     const storedRecords = snapshot(records);
-    const boundary = { ...initialBoundary, size: expectedSize };
+    const boundary = expectedSize === initialBoundary.size
+      ? initialBoundary
+      : journalBoundaryFromOpenFile(file, fd);
+    if (boundary.size !== expectedSize) {
+      throw new RuntimeStorageError('invalid_thread_journal', 'Repaired journal size differs from boundary');
+    }
     assertJournalFileBoundary(file, fd, boundary);
-    return { records: storedRecords, sequenceState, boundary };
+    return {
+      records: storedRecords,
+      sequenceState,
+      codecState: cloneJournalMessageCodecState(codecState),
+      boundary,
+      ...(foldedState !== undefined && { state: foldedState }),
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readValidatedJournalTail(
+  file: string,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  mode: 'strict' | 'repair' | 'read_only',
+  materialized: Readonly<ValidatedRecoverySnapshot>,
+  initialBoundary: Readonly<JournalFileBoundary>,
+  observer?: JournalReadObserver,
+): ValidatedJournal {
+  const fd = openSync(
+    file,
+    (mode === 'repair' ? constants.O_RDWR | constants.O_APPEND : constants.O_RDONLY)
+      | constants.O_NOFOLLOW,
+  );
+  let codecState = cloneJournalMessageCodecState(materialized.codecState);
+  let sequenceState = cloneJournalSequenceState(materialized.sequenceState);
+  let foldedState = materialized.state;
+  let expectedSize = initialBoundary.size;
+  try {
+    assertJournalFileBoundary(file, fd, initialBoundary);
+    const length = initialBoundary.size - materialized.boundary.size;
+    observer?.({ threadId, kind: 'tail', bytes: length });
+    const bytes = Buffer.allocUnsafe(length);
+    let read = 0;
+    while (read < length) {
+      const count = readSync(
+        fd,
+        bytes,
+        read,
+        length - read,
+        materialized.boundary.size + read,
+      );
+      if (count === 0) break;
+      read += count;
+    }
+    if (read !== length) throw new RuntimeStorageError('invalid_thread_journal', 'Journal tail changed during read');
+    let cursor = 0;
+    let lastGoodOffset = materialized.boundary.size;
+    let needsFinalNewline = false;
+    while (cursor < bytes.length) {
+      const newline = bytes.indexOf(0x0a, cursor);
+      const end = newline < 0 ? bytes.length : newline;
+      const next = newline < 0 ? bytes.length : newline + 1;
+      const text = bytes.subarray(cursor, end).toString('utf8');
+      if (text.length === 0) {
+        if (next === bytes.length) break;
+        throw new RuntimeStorageError('corrupt_thread_journal', 'Empty journal tail record');
+      }
+      try {
+        const candidateCodecState = cloneJournalMessageCodecState(codecState);
+        const record = validateJournalRecord(
+          JSON.parse(text) as unknown,
+          workspaceId,
+          threadId,
+          false,
+          candidateCodecState,
+        );
+        const candidateSequenceState = validateJournalSequenceAppend(
+          [record],
+          workspaceId,
+          threadId,
+          sequenceState,
+        );
+        const candidateFoldedState = foldThreadJournalAppend(foldedState, [record]);
+        sequenceState = candidateSequenceState;
+        foldedState = candidateFoldedState;
+        codecState = candidateCodecState;
+        lastGoodOffset = materialized.boundary.size + next;
+        if (newline < 0 && mode === 'repair') needsFinalNewline = true;
+      } catch (error) {
+        if (next < bytes.length) throw storageFailure('corrupt_thread_journal', file, error);
+        if (mode === 'strict') {
+          throw new RuntimeStorageError('corrupt_tail_requires_write_lease', `Thread ${threadId} has a corrupt tail`);
+        }
+        if (mode === 'read_only') break;
+        ftruncateSync(fd, lastGoodOffset);
+        fsyncSync(fd);
+        expectedSize = lastGoodOffset;
+        needsFinalNewline = false;
+        break;
+      }
+      cursor = next;
+    }
+    if (needsFinalNewline) {
+      writeFileSync(fd, '\n', 'utf8');
+      fsyncSync(fd);
+      expectedSize++;
+    }
+    const boundary = expectedSize === initialBoundary.size
+      ? initialBoundary
+      : journalBoundaryFromOpenFile(file, fd);
+    if (boundary.size !== expectedSize) {
+      throw new RuntimeStorageError('invalid_thread_journal', 'Repaired journal tail size differs from boundary');
+    }
+    assertJournalFileBoundary(file, fd, boundary);
+    return {
+      records: [],
+      sequenceState,
+      codecState: cloneJournalMessageCodecState(codecState),
+      boundary,
+      state: foldedState,
+    };
   } finally {
     closeSync(fd);
   }
@@ -1308,6 +1975,226 @@ function cloneJournalSequenceState(previous: Readonly<JournalSequenceState>): Jo
   };
 }
 
+function serializeJournalSequenceState(
+  state: Readonly<JournalSequenceState>,
+): SerializedJournalSequenceState {
+  return snapshot({
+    recordCount: state.recordCount,
+    mailboxPrepares: [...state.mailboxPrepares],
+    mailboxStates: [...state.mailboxStates],
+    usedRunIds: [...state.usedRunIds],
+    runStates: [...state.runStates],
+    successorByPredecessor: [...state.successorByPredecessor],
+    successorByRun: [...state.successorByRun],
+    turnByKey: [...state.turnByKey],
+    usedTurnIds: [...state.usedTurnIds],
+    activatedTurns: [...state.activatedTurns],
+    pendingResults: [...state.pendingResults],
+    deliveredResults: [...state.deliveredResults],
+    usedRequestIds: [...state.usedRequestIds],
+    controlClaims: [...state.controlClaims],
+    observedRuleScopes: [...state.observedRuleScopes],
+    seedSeen: state.seedSeen,
+    nextSeq: state.nextSeq,
+  });
+}
+
+function deserializeJournalSequenceState(input: unknown): JournalSequenceState {
+  if (!isRecord(input)) throw new RuntimeStorageError('invalid_recovery_snapshot', 'Sequence cache is invalid');
+  assertExactKeys(input, [
+    'recordCount', 'mailboxPrepares', 'mailboxStates', 'usedRunIds', 'runStates',
+    'successorByPredecessor', 'successorByRun', 'turnByKey', 'usedTurnIds',
+    'activatedTurns', 'pendingResults', 'deliveredResults', 'usedRequestIds',
+    'controlClaims', 'observedRuleScopes', 'seedSeen', 'nextSeq',
+  ]);
+  if (!isNonNegativeSafeInteger(input.recordCount) || !isPositiveSafeInteger(input.nextSeq)
+    || typeof input.seedSeen !== 'boolean') {
+    throw new RuntimeStorageError('invalid_recovery_snapshot', 'Sequence counters are invalid');
+  }
+  const entries = (value: unknown, label: string): readonly (readonly [unknown, unknown])[] => {
+    if (!Array.isArray(value) || value.some((entry) => !Array.isArray(entry) || entry.length !== 2)) {
+      throw new RuntimeStorageError('invalid_recovery_snapshot', `${label} entries are invalid`);
+    }
+    const keys = value.map((entry) => canonicalJson(entry[0]));
+    if (new Set(keys).size !== keys.length) {
+      throw new RuntimeStorageError('invalid_recovery_snapshot', `${label} entries are duplicated`);
+    }
+    return value as readonly (readonly [unknown, unknown])[];
+  };
+  const strings = (value: unknown, label: string): readonly string[] => {
+    if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')
+      || new Set(value).size !== value.length) {
+      throw new RuntimeStorageError('invalid_recovery_snapshot', `${label} set is invalid`);
+    }
+    return value as readonly string[];
+  };
+  return {
+    recordCount: input.recordCount,
+    mailboxPrepares: new Map(entries(input.mailboxPrepares, 'mailboxPrepares')) as JournalSequenceState['mailboxPrepares'],
+    mailboxStates: new Map(entries(input.mailboxStates, 'mailboxStates')) as JournalSequenceState['mailboxStates'],
+    usedRunIds: new Map(entries(input.usedRunIds, 'usedRunIds')) as JournalSequenceState['usedRunIds'],
+    runStates: new Map(entries(input.runStates, 'runStates')) as JournalSequenceState['runStates'],
+    successorByPredecessor: new Map(entries(
+      input.successorByPredecessor,
+      'successorByPredecessor',
+    )) as JournalSequenceState['successorByPredecessor'],
+    successorByRun: new Map(entries(input.successorByRun, 'successorByRun')) as JournalSequenceState['successorByRun'],
+    turnByKey: new Map(entries(input.turnByKey, 'turnByKey')) as JournalSequenceState['turnByKey'],
+    usedTurnIds: new Map(entries(input.usedTurnIds, 'usedTurnIds')) as JournalSequenceState['usedTurnIds'],
+    activatedTurns: new Set(strings(input.activatedTurns, 'activatedTurns')),
+    pendingResults: new Map(entries(input.pendingResults, 'pendingResults')) as JournalSequenceState['pendingResults'],
+    deliveredResults: new Set(strings(input.deliveredResults, 'deliveredResults')),
+    usedRequestIds: new Set(strings(input.usedRequestIds, 'usedRequestIds')),
+    controlClaims: new Map(entries(input.controlClaims, 'controlClaims')) as JournalSequenceState['controlClaims'],
+    observedRuleScopes: new Set(strings(input.observedRuleScopes, 'observedRuleScopes')),
+    seedSeen: input.seedSeen,
+    nextSeq: input.nextSeq,
+  };
+}
+
+function writeRecoverySnapshot(
+  file: string,
+  payload: Readonly<ThreadRecoverySnapshotPayload>,
+): void {
+  const copied = snapshot(payload);
+  writeJsonAtomic(file, {
+    ...copied,
+    digest: canonicalJsonSha256(copied),
+  } satisfies ThreadRecoverySnapshotFile);
+}
+
+function readRecoverySnapshot(
+  file: string,
+  meta: Readonly<ThreadMetaRecord>,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  observer?: JournalReadObserver,
+): ValidatedRecoverySnapshot | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    const snapshotStat = lstatSync(file);
+    observer?.({ threadId, kind: 'snapshot', bytes: snapshotStat.size });
+    const value = readJsonUnknown(file, 'invalid_recovery_snapshot');
+    if (!isRecord(value)) throw new Error('snapshot is not an object');
+    assertExactKeys(value, [
+      'version', 'workspaceId', 'threadId', 'boundary', 'state', 'sequence', 'codec', 'digest',
+    ]);
+    const { digest, ...payload } = value;
+    if (value.version !== 1 || value.workspaceId !== workspaceId || value.threadId !== threadId
+      || typeof digest !== 'string' || canonicalJsonSha256(payload) !== digest
+      || !isJournalBoundary(value.boundary)) {
+      throw new Error('snapshot identity, digest, or boundary is invalid');
+    }
+    const state = deserializeThreadRecoveryState(value.state, meta);
+    const sequenceState = deserializeJournalSequenceState(value.sequence);
+    const codecState = deserializeJournalCodecState(value.codec);
+    if (sequenceState.nextSeq !== state.highWaterSeq + 1) {
+      throw new Error('snapshot sequence differs from high-water');
+    }
+    return {
+      boundary: value.boundary,
+      state,
+      sequenceState,
+      codecState,
+    };
+  } catch {
+    // Snapshot is a cache. Missing/corrupt/untrusted materialization always falls back to journal.
+    return undefined;
+  }
+}
+
+function deserializeJournalCodecState(input: unknown): JournalMessageCodecState {
+  if (!isRecord(input)) throw new Error('codec state is not an object');
+  assertExactKeys(input, ['nextBlockStartIndex', 'openBlocks'], ['activeAssistant']);
+  const nextBlockStartIndex = input.nextBlockStartIndex;
+  if (!isNonNegativeSafeInteger(nextBlockStartIndex)
+    || !Array.isArray(input.openBlocks) || input.openBlocks.some((block) =>
+    !isRecord(block) || !isNonNegativeSafeInteger(block.contentIndex)
+    || (block.family !== 'text' && block.family !== 'reasoning' && block.family !== 'tool_call'))
+    || (input.activeAssistant !== undefined
+      && (!isRecord(input.activeAssistant) || input.activeAssistant.role !== 'assistant'))) {
+    throw new Error('codec state is malformed');
+  }
+  const activeAssistant = input.activeAssistant === undefined
+    ? undefined
+    : validateAgentMessage(input.activeAssistant);
+  if (activeAssistant !== undefined && activeAssistant.role !== 'assistant') {
+    throw new Error('codec active message is not an assistant');
+  }
+  const openBlocks = input.openBlocks as readonly {
+    readonly contentIndex: number;
+    readonly family: 'text' | 'reasoning' | 'tool_call';
+  }[];
+  const openIndexes = new Set(openBlocks.map((block) => block.contentIndex));
+  if (openIndexes.size !== openBlocks.length
+    || (activeAssistant === undefined
+      && (nextBlockStartIndex !== 0 || openBlocks.length !== 0))
+    || (activeAssistant !== undefined
+      && (nextBlockStartIndex > activeAssistant.content.length
+        || openBlocks.some((block) => block.contentIndex >= nextBlockStartIndex
+          || activeAssistant.content[block.contentIndex]?.type !== block.family)))) {
+    throw new Error('codec lifecycle state is inconsistent');
+  }
+  return cloneJournalMessageCodecState({
+    ...(activeAssistant !== undefined && { activeAssistant }),
+    nextBlockStartIndex,
+    openBlocks,
+  });
+}
+
+function journalBoundary(file: string): JournalFileBoundary {
+  assertRegularFileNoSymlink(file);
+  const stat = lstatSync(file);
+  return boundaryFromStat(stat);
+}
+
+function boundaryFromStat(stat: Readonly<{
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}>): JournalFileBoundary {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  };
+}
+
+function journalBoundaryFromOpenFile(file: string, fd: number): JournalFileBoundary {
+  const descriptor = fstatSync(fd);
+  const pathname = lstatSync(file);
+  const fromDescriptor = boundaryFromStat(descriptor);
+  const fromPath = boundaryFromStat(pathname);
+  if (!descriptor.isFile() || pathname.isSymbolicLink() || !pathname.isFile()
+    || !sameBoundary(fromDescriptor, fromPath)) {
+    throw new RuntimeStorageError(
+      'invalid_thread_journal',
+      `Thread journal changed outside the active writer: ${file}`,
+    );
+  }
+  return fromDescriptor;
+}
+
+function isJournalBoundary(value: unknown): value is JournalFileBoundary {
+  return isRecord(value) && isNonNegativeSafeInteger(value.dev)
+    && isNonNegativeSafeInteger(value.ino) && isNonNegativeSafeInteger(value.size)
+    && isNonNegativeFiniteNumber(value.mtimeMs) && isNonNegativeFiniteNumber(value.ctimeMs)
+    && Object.keys(value).length === 5;
+}
+
+function sameBoundary(left: Readonly<JournalFileBoundary>, right: Readonly<JournalFileBoundary>): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function recoveryStateCoversCursor(state: Readonly<FoldedThreadJournal>, afterSeq: number): boolean {
+  return afterSeq >= (state.envelopes[0]?.seq ?? state.highWaterSeq + 1) - 1;
+}
+
 type OpIdString = string;
 
 function invalidJournal(message: string): RuntimeStorageError {
@@ -1471,6 +2358,7 @@ function validateJournalRecord(
   workspaceId: WorkspaceId,
   threadId: ThreadId,
   requireMeta: boolean,
+  physicalCodecState?: JournalMessageCodecState,
 ): RuntimeJournalRecord {
   const value = snapshotUnknown(input, 'invalid_thread_journal');
   if (!isRecord(value) || typeof value.type !== 'string') {
@@ -1517,8 +2405,35 @@ function validateJournalRecord(
       }
       return value as unknown as RuntimeJournalRecord;
     case 'commit': {
+      if (physicalCodecState !== undefined) {
+        const decoded = decodeDurableCommitRecord(input, workspaceId, threadId, physicalCodecState);
+        return validateCanonicalCommit(decoded, workspaceId, threadId);
+      }
+      return validateCanonicalCommit(value, workspaceId, threadId);
+    }
+    case 'thread_result_delivered':
+      assertExactKeys(value, ['type', 'resultOpId', 'parentThreadId', 'parentCommitSeq']);
+      if (!isDerivedOpId(value.resultOpId) || !isThreadId(value.parentThreadId)
+        || !isPositiveSafeInteger(value.parentCommitSeq)) {
+        throw new RuntimeStorageError('invalid_thread_journal', 'Invalid thread_result_delivered');
+      }
+      return value as unknown as RuntimeJournalRecord;
+    default:
+      throw new RuntimeStorageError('invalid_thread_journal', `Unknown journal record ${value.type}`);
+  }
+}
+
+function validateCanonicalCommit(
+  input: unknown,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+): Extract<RuntimeJournalRecord, { type: 'commit' }> {
+      const value = snapshotUnknown(input, 'invalid_thread_journal');
+      if (!isRecord(value)) {
+        throw new RuntimeStorageError('invalid_thread_journal', 'Invalid commit shape');
+      }
       assertExactKeys(value, ['type', 'firstSeq', 'envelopes'], ['mutations']);
-      if (!isPositiveSafeInteger(value.firstSeq) || !Array.isArray(value.envelopes)
+      if (value.type !== 'commit' || !isPositiveSafeInteger(value.firstSeq) || !Array.isArray(value.envelopes)
         || value.envelopes.length === 0 || (value.mutations !== undefined && !Array.isArray(value.mutations))) {
         throw new RuntimeStorageError('invalid_thread_journal', 'Invalid commit shape');
       }
@@ -1537,24 +2452,16 @@ function validateJournalRecord(
         firstSeq,
         envelopes: envelopes as unknown as readonly [typeof envelopes[number], ...typeof envelopes],
         ...(mutations !== undefined && { mutations }),
-      }) as RuntimeJournalRecord;
-    }
-    case 'thread_result_delivered':
-      assertExactKeys(value, ['type', 'resultOpId', 'parentThreadId', 'parentCommitSeq']);
-      if (!isDerivedOpId(value.resultOpId) || !isThreadId(value.parentThreadId)
-        || !isPositiveSafeInteger(value.parentCommitSeq)) {
-        throw new RuntimeStorageError('invalid_thread_journal', 'Invalid thread_result_delivered');
-      }
-      return value as unknown as RuntimeJournalRecord;
-    default:
-      throw new RuntimeStorageError('invalid_thread_journal', `Unknown journal record ${value.type}`);
-  }
+      }) as Extract<RuntimeJournalRecord, { type: 'commit' }>;
 }
 
 function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: ThreadId): ThreadMetaRecord {
   const value = snapshotUnknown(input, 'invalid_thread_meta');
   if (isRecord(value) && value.type === 'thread_meta') {
     assertReadableProtocolVersion(value.protocolVersion, threadId);
+    if (value.version !== 3) {
+      throw unsupportedJournalVersion(threadId, value.version);
+    }
   }
   if (isRecord(value)) {
     assertExactKeys(value, [
@@ -1562,7 +2469,7 @@ function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: 
       'createdAt', 'cwd', 'model',
     ], ['parentThreadId', 'createdByRunId', 'createdByOpId']);
   }
-  if (!isRecord(value) || value.type !== 'thread_meta' || value.version !== 2
+  if (!isRecord(value) || value.type !== 'thread_meta' || value.version !== 3
     || !isNonEmptyWellFormedString(value.protocolVersion) || value.workspaceId !== workspaceId
     || value.threadId !== threadId || !isThreadId(value.threadId)
     || (value.parentThreadId !== undefined && !isThreadId(value.parentThreadId))
@@ -1574,6 +2481,13 @@ function validateThreadMeta(input: unknown, workspaceId: WorkspaceId, threadId: 
     throw new RuntimeStorageError('invalid_thread_meta', `Invalid metadata for thread ${threadId}`);
   }
   return value as unknown as ThreadMetaRecord;
+}
+
+function unsupportedJournalVersion(threadId: ThreadId, version: unknown): RuntimeStorageError {
+  return new RuntimeStorageError(
+    'unsupported_journal_version',
+    `Thread ${threadId} uses unsupported journal version ${String(version)}; clear the workspace journal`,
+  );
 }
 
 function assertReadableProtocolVersion(value: unknown, threadId: ThreadId): void {
@@ -1874,16 +2788,60 @@ function validateCatalog(input: unknown): void {
   }
   const ids = new Set<string>();
   for (const entry of value.threads) {
-    if (isRecord(entry)) assertExactKeys(entry, ['summary', 'format', 'storageKey']);
+    if (isRecord(entry)) {
+      assertExactKeys(entry, ['summary', 'format', 'storageKey'], [
+        'meta', 'journal', 'preview', 'updatedAt',
+      ]);
+    }
     if (!isRecord(entry) || !isThreadSummary(entry.summary)
       || entry.format !== 'runtime-v2'
-      || !isNonEmptyWellFormedString(entry.storageKey)) {
+      || !isNonEmptyWellFormedString(entry.storageKey)
+      || (entry.preview !== undefined && !isWellFormedString(entry.preview))
+      || (entry.updatedAt !== undefined && !isFiniteNumber(entry.updatedAt))) {
       throw new RuntimeStorageError('invalid_thread_catalog', 'Invalid thread catalog entry');
     }
+    if (isRecord(entry.meta) && entry.meta.type === 'thread_meta') {
+      assertReadableProtocolVersion(entry.meta.protocolVersion, entry.summary.threadId as ThreadId);
+      if (entry.meta.version !== 3) {
+        throw unsupportedJournalVersion(entry.summary.threadId as ThreadId, entry.meta.version);
+      }
+    }
+    if (entry.meta !== undefined) {
+      if (!isRecord(entry.meta) || entry.meta.type !== 'thread_meta' || entry.meta.version !== 3
+        || entry.meta.threadId !== entry.summary.threadId || !isWorkspaceIdValue(entry.meta.workspaceId)) {
+        throw new RuntimeStorageError('invalid_thread_catalog', 'Invalid thread catalog metadata');
+      }
+    }
+    if (entry.journal !== undefined) validateCatalogJournal(entry.journal);
     if (ids.has(entry.summary.threadId as string)) {
       throw new RuntimeStorageError('invalid_thread_catalog', 'Duplicate thread catalog entry');
     }
     ids.add(entry.summary.threadId as string);
+  }
+}
+
+function validateCatalogJournal(input: unknown): void {
+  if (!isRecord(input)) throw new RuntimeStorageError('invalid_thread_catalog', 'Invalid journal index');
+  if (input.version !== 3) {
+    throw new RuntimeStorageError(
+      'unsupported_journal_version',
+      `Catalog uses unsupported journal version ${String(input.version)}; clear the workspace journal`,
+    );
+  }
+  assertExactKeys(input, [
+    'version', 'size', 'snapshotSize', 'highWaterSeq', 'replayStartSeq', 'recoveryRequired',
+  ], ['dev', 'ino', 'mtimeMs', 'ctimeMs']);
+  if (!isNonNegativeSafeInteger(input.size)
+    || !isNonNegativeSafeInteger(input.snapshotSize)
+    || !isNonNegativeSafeInteger(input.highWaterSeq)
+    || !isPositiveSafeInteger(input.replayStartSeq)
+    || input.replayStartSeq > input.highWaterSeq + 1
+    || typeof input.recoveryRequired !== 'boolean'
+    || (input.dev !== undefined && !isNonNegativeSafeInteger(input.dev))
+    || (input.ino !== undefined && !isNonNegativeSafeInteger(input.ino))
+    || (input.mtimeMs !== undefined && !isNonNegativeFiniteNumber(input.mtimeMs))
+    || (input.ctimeMs !== undefined && !isNonNegativeFiniteNumber(input.ctimeMs))) {
+    throw new RuntimeStorageError('invalid_thread_catalog', 'Invalid journal index');
   }
 }
 
@@ -2039,13 +2997,52 @@ function readJournalHeader(file: string): ThreadMetaRecord {
   }
 }
 
+function readJournalInitialRecords(
+  file: string,
+  workspaceId: WorkspaceId,
+  threadId: ThreadId,
+  count: number,
+): readonly RuntimeJournalRecord[] {
+  assertRegularFileNoSymlink(file);
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const boundary = boundaryFromStat(fstatSync(fd));
+    const records: RuntimeJournalRecord[] = [];
+    let offset = 0;
+    for (let index = 0; index < count; index++) {
+      const line = readJournalLine(fd, boundary.size, file, offset);
+      const parsed = parseJournalHeaderValue(line.text, file);
+      const record = index === 0
+        ? validateThreadMeta(parsed, workspaceId, threadId)
+        : validateJournalRecord(parsed, workspaceId, threadId, false);
+      records.push(record);
+      offset = line.nextOffset;
+    }
+    assertJournalFileBoundary(file, fd, boundary);
+    return snapshot(records);
+  } catch (error) {
+    throw storageFailure('invalid_thread_journal', file, error);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function readJournalHeaderLine(
   fd: number,
   fileSize: number,
   file: string,
 ): JournalHeaderLine {
+  return readJournalLine(fd, fileSize, file, 0);
+}
+
+function readJournalLine(
+  fd: number,
+  fileSize: number,
+  file: string,
+  startOffset: number,
+): JournalHeaderLine {
   const chunks: Buffer[] = [];
-  let offset = 0;
+  let offset = startOffset;
   let length = 0;
   while (offset < fileSize) {
     const chunk = Buffer.allocUnsafe(Math.min(4096, fileSize - offset));
@@ -2065,7 +3062,7 @@ function readJournalHeaderLine(
     length += bytes.length;
     offset += bytes.length;
   }
-  throw new RuntimeStorageError('invalid_thread_journal', `Thread meta line is incomplete: ${file}`);
+  throw new RuntimeStorageError('invalid_thread_journal', `Journal record line is incomplete: ${file}`);
 }
 
 function parseJournalHeaderValue(
@@ -2155,6 +3152,16 @@ function summaryFromMeta(meta: ThreadMetaRecord): ThreadCatalogRecord['summary']
     createdAt: meta.createdAt,
     state: 'idle' as const,
   });
+}
+
+function previewFromFold(state: Readonly<FoldedThreadJournal>): string | undefined {
+  for (let index = state.checkpoint.frontend.transcript.length - 1; index >= 0; index--) {
+    const message = state.checkpoint.frontend.transcript[index];
+    const text = message?.content.flatMap((part) => part.type === 'text' ? [part.text] : [])
+      .join(' ').replace(/\s+/gu, ' ').trim();
+    if (text !== undefined && text !== '') return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+  }
+  return undefined;
 }
 
 async function acquireKernelAuthority(
@@ -2322,12 +3329,8 @@ function assertJournalFileBoundary(
   expected: Readonly<JournalFileBoundary>,
 ): void {
   try {
-    const descriptor = fstatSync(fd);
-    const pathname = lstatSync(file);
-    if (!descriptor.isFile() || pathname.isSymbolicLink() || !pathname.isFile()
-      || descriptor.dev !== expected.dev || descriptor.ino !== expected.ino
-      || pathname.dev !== expected.dev || pathname.ino !== expected.ino
-      || descriptor.size !== expected.size || pathname.size !== expected.size) {
+    const current = journalBoundaryFromOpenFile(file, fd);
+    if (!sameBoundary(current, expected)) {
       throw new RuntimeStorageError(
         'invalid_thread_journal',
         `Thread journal changed outside the active writer: ${file}`,
@@ -2451,6 +3454,10 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isModelRef(value: unknown): value is ModelRef {
   if (!isRecord(value)) return false;
   try {
@@ -2515,12 +3522,15 @@ function isThreadSummary(value: unknown): value is ThreadCatalogRecord['summary'
   if (!isRecord(value)) return false;
   try {
     assertExactKeys(value, ['threadId', 'createdAt', 'state'], [
-      'parentThreadId', 'title', 'activeRunId', 'pendingRunIds', 'suspendedWork',
+      'parentThreadId', 'title', 'archivedAt', 'updatedAt', 'activeRunId',
+      'pendingRunIds', 'suspendedWork',
     ]);
     if (!isThreadId(value.threadId) || !isFiniteNumber(value.createdAt)
       || typeof value.state !== 'string' || !states.has(value.state)
       || (value.parentThreadId !== undefined && !isThreadId(value.parentThreadId))
       || (value.title !== undefined && !isWellFormedString(value.title))
+      || (value.archivedAt !== undefined && !isFiniteNumber(value.archivedAt))
+      || (value.updatedAt !== undefined && !isFiniteNumber(value.updatedAt))
       || (value.activeRunId !== undefined && !isRunId(value.activeRunId))) return false;
     if (value.pendingRunIds !== undefined && (!Array.isArray(value.pendingRunIds)
       || !value.pendingRunIds.every(isRunId)

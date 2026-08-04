@@ -125,6 +125,63 @@ describe('EventHub', () => {
     await iterator.return?.();
   });
 
+  test('loads a storage-backed cursor before handing off exactly once to concurrent live events', async () => {
+    const stream = new EventHub({ subscriptionQueueLimit: 1, historyLimit: 2 });
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const replayCalls: Array<readonly [number, number]> = [];
+    stream.registerThread(THREAD_A, {
+      highWaterSeq: 3,
+      replayStartSeq: 2,
+      replay: async (afterSeq, throughSeq) => {
+        replayCalls.push([afterSeq, throughSeq]);
+        await gate;
+        return [envelope(THREAD_A, 2), envelope(THREAD_A, 3)];
+      },
+    });
+    const iterator = stream.subscribe({
+      threadIds: [THREAD_A],
+      cursors: [{ threadId: THREAD_A, afterSeq: 1 }],
+    })[Symbol.asyncIterator]();
+    const first = iterator.next();
+
+    stream.publish([envelope(THREAD_A, 4)]);
+    release?.();
+    expect((await first).value?.seq).toBe(2);
+    expect(await nextSeq(iterator)).toBe(3);
+    expect(await nextSeq(iterator)).toBe(4);
+    expect(replayCalls).toEqual([[1, 3]]);
+    await iterator.return?.();
+  });
+
+  test('replays durable live growth after it has fallen out of the in-memory history window', async () => {
+    const stream = new EventHub({ historyLimit: 2 });
+    const durable = [envelope(THREAD_A, 1)];
+    const replayCalls: Array<readonly [number, number]> = [];
+    stream.registerThread(THREAD_A, {
+      highWaterSeq: 1,
+      replayStartSeq: 1,
+      replay: async (afterSeq, throughSeq) => {
+        replayCalls.push([afterSeq, throughSeq]);
+        return durable.filter((item) => item.seq > afterSeq && item.seq <= throughSeq);
+      },
+    });
+    for (let seq = 2; seq <= 6; seq++) {
+      const item = envelope(THREAD_A, seq);
+      durable.push(item);
+      stream.publish([item]);
+      stream.updateDurableReplayRange(THREAD_A, { highWaterSeq: seq, replayStartSeq: 1 });
+    }
+
+    const iterator = stream.subscribe({
+      threadIds: [THREAD_A],
+      cursors: [{ threadId: THREAD_A, afterSeq: 1 }],
+    })[Symbol.asyncIterator]();
+    for (let seq = 2; seq <= 6; seq++) expect(await nextSeq(iterator)).toBe(seq);
+    expect(replayCalls).toEqual([[1, 6]]);
+    await iterator.return?.();
+  });
+
   test('preserves one subscription FIFO across interleaved thread publications', async () => {
     const stream = new EventHub({ subscriptionQueueLimit: 1, historyLimit: 6 });
     const iterator = stream.subscribe()[Symbol.asyncIterator]();

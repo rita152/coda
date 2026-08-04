@@ -748,6 +748,68 @@ describe('Supervisor recovery and idempotency', () => {
     }
   });
 
+  test('cold startup reads only recovery-required state and resume adds only its selected target', async () => {
+    const reads: Array<{ readonly threadId: ThreadId; readonly kind: string }> = [];
+    const storage = createMemoryRuntimeStorage({
+      onJournalRead: (observation) => reads.push(observation),
+    });
+    const cleanThreadId = 'thread-lazy-clean' as ThreadId;
+    const targetThreadId = 'thread-lazy-target' as ThreadId;
+    const recoveryThreadId = 'thread-lazy-recovery' as ThreadId;
+    const workspace = await storage.openWorkspace({ cwd: CWD, workspaceId: WORKSPACE_ID });
+    const lease = await workspace.acquireSupervisorLease('seed-lazy-clean');
+    await workspace.createThreadJournal(lease, {
+      threadId: cleanThreadId,
+      meta: threadMeta(
+        cleanThreadId,
+        'op_e_b1000000000000000000000000000001' as ExternalOpId,
+      ),
+    });
+    await workspace.createThreadJournal(lease, {
+      threadId: targetThreadId,
+      meta: threadMeta(
+        targetThreadId,
+        'op_e_b2000000000000000000000000000002' as ExternalOpId,
+      ),
+    });
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+    await seedPromptCrash(
+      storage,
+      recoveryThreadId,
+      prompt(
+        'op_e_b3000000000000000000000000000003' as ExternalOpId,
+        recoveryThreadId,
+        'recover me',
+      ),
+      'accepted_pending',
+    );
+    reads.length = 0;
+
+    const runtime = await openRuntime(storage, new RecordingDriverFactory());
+    try {
+      expect(reads).toEqual([{ threadId: recoveryThreadId, kind: 'state' }]);
+      expect(await runtime.listThreads()).toHaveLength(3);
+      expect(reads).toEqual([{ threadId: recoveryThreadId, kind: 'state' }]);
+
+      const receipt = await runtime.submit({
+        type: 'thread_resume',
+        opId: 'op_e_b4000000000000000000000000000004' as ExternalOpId,
+        workspaceId: WORKSPACE_ID,
+        threadId: targetThreadId,
+        model: MODEL.ref,
+      });
+      expect(receipt).toMatchObject({ accepted: true, threadId: targetThreadId });
+      expect(reads).toEqual([
+        { threadId: recoveryThreadId, kind: 'state' },
+        { threadId: targetThreadId, kind: 'state' },
+      ]);
+      expect(reads.some((read) => read.threadId === cleanThreadId)).toBe(false);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   test('resumed suspended work blocks prompt and continue transfers the oldest input to a fresh run', async () => {
     const storage = createMemoryRuntimeStorage();
     const threadId = 'thread-suspended-fifo' as ThreadId;
@@ -3619,7 +3681,7 @@ class ConstructionDriverFactory implements RuntimeThreadDriverFactory {
 function threadMeta(threadId: ThreadId, createdByOpId: ExternalOpId): ThreadMetaRecord {
   return {
     type: 'thread_meta',
-    version: 2,
+    version: 3,
     protocolVersion: PROTOCOL_VERSION,
     workspaceId: WORKSPACE_ID,
     threadId,

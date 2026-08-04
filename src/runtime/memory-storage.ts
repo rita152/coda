@@ -24,6 +24,11 @@ import type {
   WorkspaceWriteFenceValidation,
 } from '../protocol/index.js';
 import { WorkspaceBindingMismatchError, WorkspaceInUseError, RuntimeStorageError } from './errors.js';
+import {
+  foldThreadJournal,
+  threadJournalRequiresRecovery,
+} from '../session/thread-journal.js';
+import type { FoldedThreadJournal } from '../session/thread-journal.js';
 import type {
   DerivedOpIdentityClaim,
   DerivedOpIdentityReservation,
@@ -43,6 +48,7 @@ import type {
 interface MemoryJournal {
   readonly records: RuntimeJournalRecord[];
   catalog: ThreadCatalogRecord;
+  recoveryState: FoldedThreadJournal;
   leaseOwner?: symbol;
 }
 
@@ -76,7 +82,16 @@ export interface MemoryRuntimeStorage extends RuntimeStoragePort {
   } | undefined;
 }
 
-export function createMemoryRuntimeStorage(): MemoryRuntimeStorage {
+export interface MemoryRuntimeStorageOptions {
+  readonly onJournalRead?: (observation: Readonly<{
+    readonly threadId: ThreadId;
+    readonly kind: 'records' | 'state' | 'replay';
+  }>) => void;
+}
+
+export function createMemoryRuntimeStorage(
+  options: MemoryRuntimeStorageOptions = {},
+): MemoryRuntimeStorage {
   const workspaces = new Map<WorkspaceId, MemoryWorkspace>();
 
   return {
@@ -114,7 +129,7 @@ export function createMemoryRuntimeStorage(): MemoryRuntimeStorage {
       } else if (workspace.recordedCwd !== input.cwd) {
         throw new WorkspaceBindingMismatchError(workspaceId, workspace.recordedCwd, input.cwd);
       }
-      return new MemoryWorkspacePort(workspace);
+      return new MemoryWorkspacePort(workspace, options.onJournalRead);
     },
 
     inspectWorkspace(workspaceId) {
@@ -133,7 +148,10 @@ class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
   readonly recordedCwd: string;
   #closed = false;
 
-  constructor(private readonly workspace: MemoryWorkspace) {
+  constructor(
+    private readonly workspace: MemoryWorkspace,
+    private readonly onJournalRead: MemoryRuntimeStorageOptions['onJournalRead'],
+  ) {
     this.workspaceId = workspace.workspaceId;
     this.recordedCwd = workspace.recordedCwd;
   }
@@ -256,6 +274,12 @@ class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
       meta,
       ...(input.initialRecords ?? []).map(snapshot),
     ];
+    if (meta.version !== 3) {
+      throw new RuntimeStorageError(
+        'unsupported_journal_version',
+        `Thread ${input.threadId} uses unsupported journal version ${String(meta.version)}; clear the workspace journal`,
+      );
+    }
     if (existing !== undefined) {
       if (canonicalJson(existing.records.slice(0, records.length)) !== canonicalJson(records)) {
         throw new RuntimeStorageError(
@@ -263,10 +287,12 @@ class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
           `Thread ${input.threadId} has different immutable initial records`,
         );
       }
-      return new MemoryJournalPort(this, existing);
+      return new MemoryJournalPort(this, existing, this.onJournalRead);
     }
+    const recoveryState = foldThreadJournal(records);
     const journal: MemoryJournal = {
       records,
+      recoveryState,
       catalog: snapshot({
         summary: {
           threadId: input.threadId,
@@ -276,16 +302,26 @@ class MemoryWorkspacePort implements MemoryRuntimeWorkspaceStoragePort {
         },
         format: 'runtime-v2',
         storageKey: `memory:${this.workspaceId}:${input.threadId}`,
+        meta,
+        journal: {
+          version: 3,
+          size: records.length,
+          snapshotSize: records.length,
+          highWaterSeq: 0,
+          replayStartSeq: 1,
+          recoveryRequired: false,
+        },
+        updatedAt: meta.createdAt,
       }),
     };
     this.workspace.journals.set(input.threadId, journal);
-    return new MemoryJournalPort(this, journal);
+    return new MemoryJournalPort(this, journal, this.onJournalRead);
   }
 
   async openThreadJournal(threadId: ThreadId): Promise<ThreadJournalPort | undefined> {
     this.#assertOpen();
     const journal = this.workspace.journals.get(threadId);
-    return journal === undefined ? undefined : new MemoryJournalPort(this, journal);
+    return journal === undefined ? undefined : new MemoryJournalPort(this, journal, this.onJournalRead);
   }
 
   async openPolicyGrantRepository(
@@ -401,6 +437,7 @@ class MemoryJournalPort implements ThreadJournalPort {
   constructor(
     private readonly workspace: MemoryWorkspacePort,
     private readonly journal: MemoryJournal,
+    private readonly onJournalRead: MemoryRuntimeStorageOptions['onJournalRead'],
   ) {}
 
   async acquireWriteLease(lease: Readonly<SupervisorLease>): Promise<void> {
@@ -413,7 +450,55 @@ class MemoryJournalPort implements ThreadJournalPort {
   }
 
   async load(): Promise<readonly RuntimeJournalRecord[]> {
+    this.onJournalRead?.({ threadId: this.journal.catalog.summary.threadId, kind: 'records' });
     return snapshot(this.journal.records);
+  }
+
+  async loadState(): Promise<{
+    readonly state: FoldedThreadJournal;
+    readonly records: readonly RuntimeJournalRecord[];
+  }> {
+    this.onJournalRead?.({ threadId: this.journal.catalog.summary.threadId, kind: 'state' });
+    if (this.journal.catalog.journal?.snapshotSize === this.journal.records.length) {
+      return { state: this.journal.recoveryState, records: [] };
+    }
+    const records = snapshot(this.journal.records);
+    const state = foldThreadJournal(records);
+    this.journal.recoveryState = state;
+    return { state, records: [] };
+  }
+
+  async saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void> {
+    if (this.#lease === undefined) {
+      throw new RuntimeStorageError('thread_not_writable', 'Thread journal has no active write lease');
+    }
+    this.workspace.assertCurrentLease(this.#lease);
+    this.journal.recoveryState = state as FoldedThreadJournal;
+    const first = state.envelopes[0]?.seq ?? state.highWaterSeq + 1;
+    this.journal.catalog = snapshot({
+      ...this.journal.catalog,
+      summary: state.summary,
+      meta: state.meta,
+      journal: {
+        version: 3,
+        size: this.journal.records.length,
+        snapshotSize: this.journal.records.length,
+        highWaterSeq: state.highWaterSeq,
+        replayStartSeq: first,
+        recoveryRequired: threadJournalRequiresRecovery(state),
+      },
+      updatedAt: state.envelopes.at(-1)?.timestamp ?? this.journal.catalog.updatedAt ?? state.meta.createdAt,
+      ...(previewFromState(state) === undefined ? {} : { preview: previewFromState(state) }),
+    });
+  }
+
+  async replayEvents(afterSeq: number, throughSeq: number): Promise<readonly import('../protocol/index.js').EventEnvelope[]> {
+    this.onJournalRead?.({ threadId: this.journal.catalog.summary.threadId, kind: 'replay' });
+    const state = this.journal.catalog.journal?.snapshotSize === this.journal.records.length
+      ? this.journal.recoveryState
+      : foldThreadJournal(this.journal.records);
+    return state.envelopes.filter((envelope) =>
+      envelope.seq > afterSeq && envelope.seq <= throughSeq);
   }
 
   async append(
@@ -459,7 +544,30 @@ function updateCatalog(journal: MemoryJournal, record: Extract<RuntimeJournalRec
       summary = withoutActiveRun(summary, 'idle');
     }
   }
-  journal.catalog = snapshot({ ...journal.catalog, summary });
+  const highWaterSeq = record.firstSeq + record.envelopes.length - 1;
+  journal.catalog = snapshot({
+    ...journal.catalog,
+    summary,
+    journal: {
+      version: 3,
+      size: journal.records.length,
+      snapshotSize: journal.catalog.journal?.snapshotSize ?? 0,
+      highWaterSeq,
+      replayStartSeq: journal.catalog.journal?.replayStartSeq ?? 1,
+      recoveryRequired: true,
+    },
+    updatedAt: record.envelopes.at(-1)?.timestamp ?? journal.catalog.updatedAt,
+  });
+}
+
+function previewFromState(state: Readonly<FoldedThreadJournal>): string | undefined {
+  for (let index = state.checkpoint.frontend.transcript.length - 1; index >= 0; index--) {
+    const message = state.checkpoint.frontend.transcript[index];
+    const text = message?.content.flatMap((part) => part.type === 'text' ? [part.text] : [])
+      .join(' ').replace(/\s+/gu, ' ').trim();
+    if (text !== undefined && text !== '') return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+  }
+  return undefined;
 }
 
 function withoutActiveRun(

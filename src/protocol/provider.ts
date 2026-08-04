@@ -7,6 +7,7 @@
 
 import type { AssistantMessage, Context, ModelRef, ToolCallPart } from './messages.js';
 import { EventStream } from './event-stream.js';
+import { strictJsonSnapshot } from './strict-json.js';
 
 export type ProviderEvent =
   | { type: 'start'; partial: AssistantMessage }
@@ -22,7 +23,21 @@ export type ProviderEvent =
   | { type: 'done';  message: AssistantMessage }    // stopReason ∈ stop | length | tool_calls | content_filter
   | { type: 'error'; message: AssistantMessage };   // stopReason ∈ error | aborted
 
-export class ProviderEventStream extends EventStream<ProviderEvent, AssistantMessage> {}
+/**
+ * Provider adapters deliberately grow one mutable assistant accumulator while parsing a wire
+ * stream.  The queue cannot retain that accumulator by reference: a durable/event listener may be
+ * awaiting an earlier event while the adapter advances later deltas.  Capture strict JSON at the
+ * production boundary so every queued event denotes the partial that existed at push time.
+ */
+export class ProviderEventStream extends EventStream<ProviderEvent, AssistantMessage> {
+  override push(event: ProviderEvent): void {
+    super.push(strictJsonSnapshot(event) as unknown as ProviderEvent);
+  }
+
+  override end(result: AssistantMessage): void {
+    super.end(strictJsonSnapshot(result) as unknown as AssistantMessage);
+  }
+}
 
 /**
  * 方言开关的开放承载形态。具体字段是各 adapter 的私有契约(openai-chat 的完整定义见

@@ -458,8 +458,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     try {
       // One non-blocking workspace stream keeps background runs alive while the visible target
       // changes. Only the selected thread is projected into the human UI view.
-      const cursors = await this.#seedWorkspaceCursors();
-      const events = this.#runtime.events(cursors.length === 0 ? undefined : { cursors });
+      const events = this.#runtime.events();
       this.#eventPump = this.#consumeEvents(events);
       if (this.#model !== undefined) await this.#ensureAttached(this.#model);
       this.#initialized = true;
@@ -749,28 +748,11 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     }
   }
 
-  async #seedWorkspaceCursors(): Promise<readonly {
-    readonly threadId: ThreadId;
-    readonly afterSeq: number;
-  }[]> {
-    if (this.#runtime.listThreadDetails === undefined) return [];
-    const details = await this.#runtime.listThreadDetails();
-    const snapshots = await Promise.all(details.map((item) =>
-      this.#runtime.getThreadSnapshot(item.thread.threadId)));
-    const cursors: { threadId: ThreadId; afterSeq: number }[] = [];
-    for (let index = 0; index < details.length; index++) {
-      const threadId = details[index]?.thread.threadId;
-      const snapshot = snapshots[index];
-      if (threadId === undefined || snapshot === undefined) continue;
-      this.#threadHighWater.set(threadId, snapshot.highWaterSeq);
-      cursors.push({ threadId, afterSeq: snapshot.highWaterSeq });
-    }
-    return cursors;
-  }
-
   #applyEnvelope(envelope: Readonly<EventEnvelope>): void {
     if (this.#eventFailure !== undefined) return;
-    const previous = this.#threadHighWater.get(envelope.threadId) ?? 0;
+    // A no-cursor workspace subscription begins at each registered thread's durable high-water.
+    // Establish that baseline from the first live envelope without loading every thread snapshot.
+    const previous = this.#threadHighWater.get(envelope.threadId) ?? envelope.seq - 1;
     if (envelope.seq <= previous) return;
     if (envelope.seq !== previous + 1) {
       throw new RuntimeFrontendEventGapError(

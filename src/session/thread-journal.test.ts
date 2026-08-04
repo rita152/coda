@@ -7,6 +7,7 @@ import {
   assertThreadId,
   assertTurnId,
   assertWorkspaceId,
+  canonicalJson,
 } from '../protocol/index.js';
 import type {
   AssistantMessage,
@@ -24,11 +25,105 @@ import type {
 } from './thread-journal-records.js';
 import {
   ThreadJournalWriter,
+  THREAD_REPLAY_BYTE_LIMIT,
+  THREAD_REPLAY_LIMIT,
   foldThreadJournal,
   foldThreadJournalAppend,
+  threadJournalRequiresRecovery,
 } from './thread-journal.js';
+import {
+  deserializeThreadRecoveryState,
+  serializeThreadRecoveryState,
+} from './thread-recovery-snapshot.js';
 
 describe('ThreadJournalWriter', () => {
+  test('keeps the full replay window with at most one cumulative seed partial', async () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0];
+    if (meta === undefined || meta.type !== 'thread_meta') throw new Error('missing fixture meta');
+    const lifecycleOpId = assertExternalOpId('op_e_99999999999999999999999999999999');
+    await fixture.writer.commit([{
+      event: { type: 'op_completed', opType: 'thread_resume', outcome: 'applied' },
+      opId: lifecycleOpId,
+    }]);
+    const messageId = 'assistant-snapshot-tail';
+    const emptyText = {
+      ...assistantMessage(meta, messageId, ''),
+      content: [{ type: 'text' as const, text: '' }],
+    };
+    await fixture.writer.commitDriverEvent({
+      runId: fixture.runId,
+      turnId: fixture.turnId,
+      event: { type: 'message_start', message: assistantMessage(meta, messageId, '') },
+    });
+    await fixture.writer.commitDriverEvent({
+      runId: fixture.runId,
+      turnId: fixture.turnId,
+      event: {
+        type: 'message_update',
+        messageId,
+        event: { type: 'text_start', contentIndex: 0, partial: emptyText },
+      },
+    });
+    for (const text of ['a', 'ab', 'abc']) {
+      await fixture.writer.commitDriverEvent({
+        runId: fixture.runId,
+        turnId: fixture.turnId,
+        event: {
+          type: 'message_update',
+          messageId,
+          event: {
+            type: 'text_delta',
+            contentIndex: 0,
+            delta: text.at(-1) as string,
+            partial: assistantMessage(meta, messageId, text),
+          },
+        },
+      });
+    }
+    const terminal = assistantMessage(meta, messageId, 'abc');
+    await fixture.writer.commitDriverEvent({
+      runId: fixture.runId,
+      turnId: fixture.turnId,
+      event: {
+        type: 'message_update',
+        messageId,
+        event: { type: 'text_end', contentIndex: 0, content: 'abc', partial: terminal },
+      },
+    });
+    await fixture.writer.commitDriverEvent({
+      runId: fixture.runId,
+      turnId: fixture.turnId,
+      event: { type: 'message_end', message: terminal },
+    });
+
+    const serialized = serializeThreadRecoveryState(fixture.writer.state);
+    expect(serialized.envelopes.filter((envelope) =>
+      envelope.event.type === 'message_update')).toHaveLength(5);
+    expect(serialized.envelopes.map((envelope) => envelope.seq))
+      .toEqual(fixture.writer.state.envelopes.map((envelope) => envelope.seq));
+    expect(JSON.stringify(serialized).match(/"partial"/gu) ?? []).toHaveLength(0);
+    const recovered = deserializeThreadRecoveryState(serialized, meta);
+    expect(recovered.envelopes).toEqual(fixture.writer.state.envelopes);
+    expect(recovered.opTerminals.get(lifecycleOpId)).toMatchObject({
+      seq: 1,
+      event: { type: 'op_completed', opType: 'thread_resume', outcome: 'applied' },
+    });
+
+    const cutEnvelopes = fixture.writer.state.envelopes.filter((envelope) => envelope.seq >= 4);
+    const cut = {
+      ...fixture.writer.state,
+      envelopes: cutEnvelopes,
+      replayBytes: cutEnvelopes.reduce(
+        (total, envelope) => total + new TextEncoder().encode(canonicalJson(envelope)).byteLength,
+        0,
+      ),
+    };
+    const seeded = serializeThreadRecoveryState(cut);
+    expect(JSON.stringify(seeded).match(/"partial"/gu) ?? []).toHaveLength(1);
+    expect(deserializeThreadRecoveryState(seeded, meta).envelopes).toEqual(cutEnvelopes);
+  });
+
   test('serializes concurrent driver events and persists canonical transcript mutations', async () => {
     const fixture = writerFixture();
     const firstAppendEntered = deferred<void>();
@@ -155,6 +250,119 @@ describe('ThreadJournalWriter', () => {
 });
 
 describe('foldThreadJournal cold fold', () => {
+  test('marks pending control, input ownership, and response claims as startup obligations', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0];
+    if (meta === undefined || meta.type !== 'thread_meta') throw new Error('missing fixture meta');
+    const clean = foldThreadJournal([meta]);
+    expect(threadJournalRequiresRecovery(clean)).toBe(false);
+
+    const request = {
+      type: 'control_request' as const,
+      requestId: 'approval-recovery-hint',
+      kind: 'approval' as const,
+      owningRunId: fixture.runId,
+      owningTurnId: fixture.turnId,
+      policyRevision: 'policy-v1',
+      payload: approvalPayload(
+        'approval-recovery-hint',
+        fixture.workspaceId,
+        fixture.threadId,
+        fixture.runId,
+        fixture.turnId,
+        'call-recovery-hint',
+        'recover pending approval',
+      ),
+    };
+    expect(threadJournalRequiresRecovery({
+      ...clean,
+      checkpoint: {
+        ...clean.checkpoint,
+        frontend: { ...clean.checkpoint.frontend, pendingControls: [request] },
+      },
+    })).toBe(true);
+
+    const ownerOpId = assertExternalOpId('op_e_b1000000000000000000000000000001');
+    expect(threadJournalRequiresRecovery({
+      ...clean,
+      inputOwners: new Map([[ownerOpId, { sourceOpId: ownerOpId }]]),
+    })).toBe(true);
+    expect(threadJournalRequiresRecovery({
+      ...clean,
+      controlClaims: new Map([[request.requestId, {
+        responseOpId: ownerOpId,
+        decision: 'allow_once',
+        acceptedAt: 2,
+      }]]),
+    })).toBe(true);
+  });
+
+  test('retains only a fixed replay tail while high-water continues with total history', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0];
+    if (meta === undefined || meta.type !== 'thread_meta') throw new Error('missing fixture meta');
+    const total = THREAD_REPLAY_LIMIT + 1_000;
+    const records: RuntimeJournalRecord[] = [meta];
+    for (let seq = 1; seq <= total; seq++) {
+      records.push({
+        type: 'commit',
+        firstSeq: seq,
+        envelopes: [{
+          workspaceId: meta.workspaceId,
+          threadId: meta.threadId,
+          seq,
+          timestamp: seq,
+          event: {
+            type: 'runtime_diagnostic',
+            severity: 'warning',
+            code: `retained-${seq}`,
+            message: '',
+            scope: 'thread',
+          },
+        }],
+      });
+    }
+
+    const state = foldThreadJournal(records);
+    expect(state.highWaterSeq).toBe(total);
+    expect(state.envelopes).toHaveLength(THREAD_REPLAY_LIMIT);
+    expect(state.envelopes[0]?.seq).toBe(total - THREAD_REPLAY_LIMIT + 1);
+    expect(state.envelopes.at(-1)?.seq).toBe(total);
+  });
+
+  test('bounds replay retention by serialized bytes when individual envelopes are large', () => {
+    const fixture = writerFixture();
+    const meta = fixture.journal.records[0];
+    if (meta === undefined || meta.type !== 'thread_meta') throw new Error('missing fixture meta');
+    const payload = 'x'.repeat(256 * 1_024);
+    const records: RuntimeJournalRecord[] = [meta];
+    for (let seq = 1; seq <= 24; seq++) {
+      records.push({
+        type: 'commit',
+        firstSeq: seq,
+        envelopes: [{
+          workspaceId: meta.workspaceId,
+          threadId: meta.threadId,
+          seq,
+          timestamp: seq,
+          event: {
+            type: 'runtime_diagnostic',
+            severity: 'warning',
+            code: `large-retained-${seq}`,
+            message: payload,
+            scope: 'thread',
+          },
+        }],
+      });
+    }
+
+    const state = foldThreadJournal(records);
+    expect(state.highWaterSeq).toBe(24);
+    expect(state.envelopes.length).toBeLessThan(24);
+    expect(state.replayBytes).toBeLessThanOrEqual(THREAD_REPLAY_BYTE_LIMIT);
+    expect(state.envelopes.at(-1)?.seq).toBe(24);
+  });
+
   test.serial('does not revisit frozen historical transcript for every message update', async () => {
     const fixture = writerFixture();
     const meta = fixture.journal.records[0];
@@ -772,6 +980,7 @@ function normalizeFold(state: ReturnType<typeof foldThreadJournal>): unknown {
     meta: state.meta,
     highWaterSeq: state.highWaterSeq,
     envelopes: state.envelopes,
+    replayBytes: state.replayBytes,
     checkpoint: state.checkpoint,
     summary: state.summary,
     mailbox: [...state.mailbox],
@@ -783,6 +992,10 @@ function normalizeFold(state: ReturnType<typeof foldThreadJournal>): unknown {
     deliveredThreadResults: [...state.deliveredThreadResults],
     usedRequestIds: [...state.usedRequestIds],
     controlClaims: [...state.controlClaims],
+    opTerminals: [...state.opTerminals],
+    threadResults: [...state.threadResults],
+    controlRequests: [...state.controlRequests],
+    controlResolutions: [...state.controlResolutions],
     observedRuleScopes: [...state.observedRuleScopes],
   };
 }
@@ -802,7 +1015,7 @@ function writerFixture(): {
   const turnId = assertTurnId('turn-thread-journal-test');
   const meta: ThreadMetaRecord = {
     type: 'thread_meta',
-    version: 2,
+    version: 3,
     protocolVersion: PROTOCOL_VERSION,
     workspaceId,
     threadId,

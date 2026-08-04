@@ -23,9 +23,18 @@ export interface EventHubOptions {
   readonly historyLimit?: number;
 }
 
+export interface EventThreadRegistration {
+  readonly highWaterSeq: number;
+  readonly replayStartSeq: number;
+  readonly replay: (afterSeq: number, throughSeq: number) => Promise<readonly EventEnvelope[]>;
+}
+
 interface ThreadHistory {
   readonly envelopes: Readonly<EventEnvelope>[];
   highWaterSeq: number;
+  storageHighWaterSeq: number;
+  storageReplayStartSeq: number;
+  replay?: EventThreadRegistration['replay'];
 }
 
 interface OrderedEnvelope {
@@ -37,6 +46,9 @@ interface ReplayCursor {
   readonly threadId: ThreadId;
   nextSeq: number;
   readonly throughSeq: number;
+  firstPreparedSeq?: number;
+  prepared?: readonly Readonly<EventEnvelope>[];
+  loading?: Promise<void>;
 }
 
 interface GapMarker {
@@ -86,12 +98,57 @@ export class EventHub {
     this.#historyLimit = positiveLimit(options.historyLimit ?? DEFAULT_HISTORY_LIMIT, 'historyLimit');
   }
 
-  registerThread(threadId: ThreadId): void {
+  registerThread(threadId: ThreadId, registration?: EventThreadRegistration): void {
     assertStreamThreadId(threadId);
+    if (registration !== undefined) validateRegistration(registration);
     this.#knownThreads.add(threadId);
-    if (!this.#histories.has(threadId)) {
-      this.#histories.set(threadId, { envelopes: [], highWaterSeq: 0 });
+    const existing = this.#histories.get(threadId);
+    if (existing === undefined) {
+      this.#histories.set(threadId, {
+        envelopes: [],
+        highWaterSeq: registration?.highWaterSeq ?? 0,
+        storageHighWaterSeq: registration?.highWaterSeq ?? 0,
+        storageReplayStartSeq: registration?.replayStartSeq ?? 1,
+        ...(registration !== undefined && { replay: registration.replay }),
+      });
+    } else if (registration !== undefined) {
+      if (existing.highWaterSeq !== 0 || existing.envelopes.length > 0 || existing.replay !== undefined) {
+        throw new RuntimeEventStreamError('history_already_initialized', threadId);
+      }
+      existing.highWaterSeq = registration.highWaterSeq;
+      existing.storageHighWaterSeq = registration.highWaterSeq;
+      existing.storageReplayStartSeq = registration.replayStartSeq;
+      existing.replay = registration.replay;
+      for (const subscription of this.#subscriptions) {
+        const afterSeq = subscription.cursorAfterSeq.get(threadId);
+        if (afterSeq === undefined) continue;
+        this.#installReplay(subscription, threadId, afterSeq, registration.highWaterSeq);
+      }
     }
+    for (const subscription of this.#subscriptions) this.#wake(subscription);
+  }
+
+  /**
+   * Advances the range that the registered storage loader can serve after a durable live commit.
+   * The writer calls this only after publish has installed the same high-water in memory.
+   */
+  updateDurableReplayRange(
+    threadId: ThreadId,
+    range: Readonly<Pick<EventThreadRegistration, 'highWaterSeq' | 'replayStartSeq'>>,
+  ): void {
+    assertStreamThreadId(threadId);
+    const history = this.#histories.get(threadId);
+    if (history === undefined) throw new RuntimeEventStreamError('unknown_thread', threadId);
+    if (history.replay === undefined) return;
+    if (!Number.isSafeInteger(range.highWaterSeq) || range.highWaterSeq < history.storageHighWaterSeq
+      || range.highWaterSeq > history.highWaterSeq
+      || !Number.isSafeInteger(range.replayStartSeq)
+      || range.replayStartSeq < history.storageReplayStartSeq
+      || range.replayStartSeq > range.highWaterSeq + 1) {
+      throw new RuntimeEventStreamError('invalid_storage_replay_range', threadId);
+    }
+    history.storageHighWaterSeq = range.highWaterSeq;
+    history.storageReplayStartSeq = range.replayStartSeq;
   }
 
   seed(threadId: ThreadId, envelopes: readonly EventEnvelope[]): void {
@@ -112,12 +169,14 @@ export class EventHub {
 
     // Validation above is deliberately complete before either known-thread or history state mutates.
     const retained = snapshots.slice(-this.#historyLimit);
+    const firstRetainedSeq = retained[0]?.seq ?? previous + 1;
     this.#knownThreads.add(threadId);
     this.#histories.set(threadId, {
       envelopes: retained,
       highWaterSeq: previous,
+      storageHighWaterSeq: previous,
+      storageReplayStartSeq: firstRetainedSeq,
     });
-    const firstRetainedSeq = retained[0]?.seq ?? previous + 1;
     for (const subscription of [...this.#subscriptions]) {
       const afterSeq = subscription.cursorAfterSeq.get(threadId);
       if (afterSeq === undefined) continue;
@@ -157,7 +216,12 @@ export class EventHub {
       this.#knownThreads.add(envelope.threadId);
       let history = this.#histories.get(envelope.threadId);
       if (history === undefined) {
-        history = { envelopes: [], highWaterSeq: 0 };
+        history = {
+          envelopes: [],
+          highWaterSeq: 0,
+          storageHighWaterSeq: 0,
+          storageReplayStartSeq: 1,
+        };
         this.#histories.set(envelope.threadId, history);
       }
       history.envelopes.push(envelope);
@@ -214,18 +278,7 @@ export class EventHub {
         });
         break;
       }
-      const firstRetainedSeq = history?.envelopes[0]?.seq ?? highWaterSeq + 1;
-      if (cursor.afterSeq < firstRetainedSeq - 1) {
-        this.#setGap(subscription, cursor.threadId, firstRetainedSeq);
-        break;
-      }
-      if (cursor.afterSeq < highWaterSeq) {
-        subscription.replay.push({
-          threadId: cursor.threadId,
-          nextSeq: cursor.afterSeq + 1,
-          throughSeq: highWaterSeq,
-        });
-      }
+      if (!this.#installReplay(subscription, cursor.threadId, cursor.afterSeq, highWaterSeq)) break;
     }
 
     if (subscription.terminal === undefined) {
@@ -290,6 +343,7 @@ export class EventHub {
 
   async #next(subscription: Subscription): Promise<IteratorResult<Readonly<EventEnvelope>>> {
     while (true) {
+      await this.#prepareReplay(subscription);
       this.#fill(subscription);
       const envelope = subscription.queue.shift();
       if (envelope !== undefined) {
@@ -324,18 +378,16 @@ export class EventHub {
         const replay = subscription.replay[subscription.replayIndex];
         if (replay !== undefined) {
           if (replay.nextSeq > replay.throughSeq) {
+            delete replay.prepared;
+            delete replay.firstPreparedSeq;
+            delete replay.loading;
             subscription.replayIndex++;
             continue;
           }
-          const history = this.#histories.get(replay.threadId);
-          const firstRetainedSeq = history?.envelopes[0]?.seq ?? (history?.highWaterSeq ?? 0) + 1;
-          if (replay.nextSeq < firstRetainedSeq) {
-            this.#setGap(subscription, replay.threadId, firstRetainedSeq);
-            return;
-          }
-          const envelope = history?.envelopes[replay.nextSeq - firstRetainedSeq];
+          if (replay.prepared === undefined || replay.firstPreparedSeq === undefined) return;
+          const envelope = replay.prepared[replay.nextSeq - replay.firstPreparedSeq];
           if (envelope === undefined || envelope.seq !== replay.nextSeq) {
-            this.#setGap(subscription, replay.threadId, firstRetainedSeq);
+            this.#setGap(subscription, replay.threadId, replay.firstPreparedSeq);
             return;
           }
           subscription.queue.push(envelope);
@@ -387,6 +439,92 @@ export class EventHub {
         }
       }
     }
+  }
+
+  #installReplay(
+    subscription: Subscription,
+    threadId: ThreadId,
+    afterSeq: number,
+    highWaterSeq: number,
+  ): boolean {
+    if (afterSeq >= highWaterSeq) return true;
+    const history = this.#histories.get(threadId);
+    const firstMemorySeq = history?.envelopes[0]?.seq ?? highWaterSeq + 1;
+    const firstAvailableSeq = history?.replay === undefined
+      ? firstMemorySeq
+      : Math.min(history.storageReplayStartSeq, firstMemorySeq);
+    if (afterSeq < firstAvailableSeq - 1) {
+      this.#setGap(subscription, threadId, firstAvailableSeq);
+      return false;
+    }
+    subscription.replay.splice(subscription.replayIndex, 0, {
+      threadId,
+      nextSeq: afterSeq + 1,
+      throughSeq: highWaterSeq,
+    });
+    return true;
+  }
+
+  async #prepareReplay(subscription: Subscription): Promise<void> {
+    const replay = subscription.replay[subscription.replayIndex];
+    if (replay === undefined || replay.prepared !== undefined || subscription.terminal?.kind === 'gap') return;
+    if (replay.loading !== undefined) return replay.loading;
+    const load = (async (): Promise<void> => {
+      const history = this.#histories.get(replay.threadId);
+      if (history === undefined) {
+        this.#setGap(subscription, replay.threadId);
+        return;
+      }
+      const firstSeq = replay.nextSeq;
+      const prepared: Readonly<EventEnvelope>[] = [];
+      let nextSeq = firstSeq;
+      if (nextSeq <= history.storageHighWaterSeq) {
+        const through = Math.min(replay.throughSeq, history.storageHighWaterSeq);
+        if (history.replay !== undefined) {
+          const loaded = await history.replay(nextSeq - 1, through);
+          for (const envelope of loaded.map((item) => validateEventEnvelope(item))) {
+            if (envelope.threadId !== replay.threadId || envelope.seq !== nextSeq || envelope.seq > through) {
+              this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
+              return;
+            }
+            prepared.push(envelope);
+            nextSeq++;
+          }
+        }
+        while (nextSeq <= through) {
+          const envelope = memoryEnvelope(history, nextSeq);
+          if (envelope === undefined) {
+            this.#setGap(subscription, replay.threadId, history.storageReplayStartSeq);
+            return;
+          }
+          prepared.push(envelope);
+          nextSeq++;
+        }
+      }
+      while (nextSeq <= replay.throughSeq) {
+        const envelope = memoryEnvelope(history, nextSeq);
+        if (envelope === undefined) {
+          this.#setGap(subscription, replay.threadId, history.envelopes[0]?.seq);
+          return;
+        }
+        prepared.push(envelope);
+        nextSeq++;
+      }
+      replay.firstPreparedSeq = firstSeq;
+      replay.prepared = prepared;
+      this.#fill(subscription);
+      this.#wake(subscription);
+    })().catch((error: unknown) => {
+      this.#terminate(subscription, {
+        kind: 'error',
+        liveBoundary: subscription.nextLiveOrder,
+        error: error instanceof Error
+          ? error
+          : new RuntimeEventStreamError('storage_replay_failed', replay.threadId),
+      }, true);
+    });
+    replay.loading = load;
+    await load;
   }
 
   #setGap(subscription: Subscription, threadId: ThreadId, nextAvailableSeq?: number): void {
@@ -441,7 +579,8 @@ export class EventHub {
   }
 
   #wake(subscription: Subscription): void {
-    if (subscription.queue.length === 0 && subscription.terminal === undefined) return;
+    const replayPending = subscription.replay[subscription.replayIndex] !== undefined;
+    if (subscription.queue.length === 0 && subscription.terminal === undefined && !replayPending) return;
     subscription.waiter?.();
     subscription.waiter = undefined;
   }
@@ -454,6 +593,25 @@ function matches(subscription: Subscription, threadId: ThreadId): boolean {
 function positiveLimit(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${field} must be a positive safe integer`);
   return value;
+}
+
+function validateRegistration(registration: Readonly<EventThreadRegistration>): void {
+  if (!Number.isSafeInteger(registration.highWaterSeq) || registration.highWaterSeq < 0
+    || !Number.isSafeInteger(registration.replayStartSeq) || registration.replayStartSeq < 1
+    || registration.replayStartSeq > registration.highWaterSeq + 1
+    || typeof registration.replay !== 'function') {
+    throw new TypeError('Invalid event thread registration');
+  }
+}
+
+function memoryEnvelope(
+  history: Readonly<ThreadHistory>,
+  seq: number,
+): Readonly<EventEnvelope> | undefined {
+  const firstSeq = history.envelopes[0]?.seq;
+  if (firstSeq === undefined || seq < firstSeq) return undefined;
+  const envelope = history.envelopes[seq - firstSeq];
+  return envelope?.seq === seq ? envelope : undefined;
 }
 
 function assertStreamThreadId(threadId: ThreadId): void {

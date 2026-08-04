@@ -15,6 +15,10 @@ Provider adapter 位于 `src/providers/<provider>/`，只负责 provider wire �
 Agent 能关闭消息和 run 生命周期。流式 delta 只转换为 `ProviderEvent`；Agent/ThreadRuntime 决定消息、
 工具和 transcript 的权威提交。
 
+adapter 可以在解析时逐步修改一个 assistant accumulator，但 `ProviderEventStream.push` 是所有权边界：
+它必须在 push 当下取得并冻结 strict-JSON 快照。因此 Agent 等待前一条 transcript/event commit
+时，adapter 继续生成 delta 不得改变已排队或已观察事件的累计 `partial`。
+
 adapter 必须及时检查 `AbortSignal`，停止后不再产生副作用或继续消费输出。未知 provider 字段可忽略，
 但已识别字段必须做 JSON/类型收窄，不能用未校验断言穿透到 core。
 
