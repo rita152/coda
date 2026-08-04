@@ -784,11 +784,6 @@ function appendPositionalPrompt(flags: CliFlags, positional: readonly string[]):
   flags.prompt = flags.prompt === undefined ? text : `${flags.prompt} ${text}`;
 }
 
-/** Public parser including positional prompt shorthand. */
-export function parseCommandLine(argv: readonly string[]): CliInvocation {
-  return parseCliInvocation(argv);
-}
-
 function splitLongOption(argument: string): { name: string; value: string } | undefined {
   if (!argument.startsWith('--')) return undefined;
   const index = argument.indexOf('=');

@@ -26,7 +26,7 @@ import {
 } from './config.js';
 import type { ResolvedConfig } from './config.js';
 import type { CliFlags, CliInvocation } from './command-catalog.js';
-import { createHeadlessPromptOp, startHeadless } from './headless.js';
+import { startHeadless } from './headless.js';
 import { startOneShotOutput } from './one-shot-output.js';
 import type { CliControlActions } from './frontend-types.js';
 import type { CliSession } from './interactive-runtime.js';
@@ -37,7 +37,6 @@ import { createRenderer } from './renderer.js';
 import {
   createCliRuntimeModelResolver,
   createCliPermissionPolicy,
-  resolveRuntimeStorageRoots,
 } from './runtime-composition.js';
 import { RuntimeFrontendSession } from './runtime-frontend.js';
 import {
@@ -170,10 +169,10 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
-  const roots = resolveRuntimeStorageRoots({ homeDir: runtimeHomeDir() });
+  const runtimeRoot = path.join(runtimeHomeDir(), '.coda', 'runtime-v2');
   const storage = flags.ephemeral
     ? createMemoryRuntimeStorage()
-    : createFileRuntimeStorage({ root: roots.runtimeRoot });
+    : createFileRuntimeStorage({ root: runtimeRoot });
   let resumeTarget: StoredThreadLocator | undefined;
   try {
     if (isRuntimeResumeRequest(flags)) {
@@ -310,12 +309,13 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
         threadId,
         model: initialModel.ref,
       });
-      initialOps.push(createHeadlessPromptOp({
+      initialOps.push({
+        type: 'prompt',
         workspaceId: runtime.workspaceId,
         threadId,
         opId: runtime.newOpId(),
         text: flags.prompt,
-      }));
+      });
     }
     return startHeadless(runtime, {
       stdin: process.stdin,
@@ -344,7 +344,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   });
   const presentationStore = interactiveMode
     ? new ThreadPresentationStore({
-        root: path.join(roots.runtimeRoot, 'presentation-v1'),
+        root: path.join(runtimeRoot, 'presentation-v1'),
         workspaceId: runtime.workspaceId,
         // A create path first owns the stable workspace-pending draft, even when a model is
         // already selected. Attachment migrates it to the reserved Runtime ThreadId. Explicit

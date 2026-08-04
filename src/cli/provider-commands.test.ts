@@ -231,7 +231,7 @@ describe('/login', () => {
     expect(controller.active).toBe(false);
     expect(view.lines.at(-1)?.text).toContain('coming soon');
     expect(view.lines.at(-1)?.text).toContain('disabled');
-    expect(registry.listProviders()).toEqual([]);
+    expect(registry.availableModels()).toEqual([]);
     expect(registry.listCredentials()).toEqual([]);
   });
 
@@ -283,18 +283,14 @@ describe('/login', () => {
     await controller.submit('Anthropic');
     await controller.submit(anthropicSecret);
 
-    expect(registry.listProviders()).toMatchObject([
+    expect(registry.listCredentials()).toEqual([
       {
-        id: 'custom:anthropic',
-        name: 'Anthropic',
-        baseURL: 'https://api.anthropic.com',
-        api: 'anthropic-messages',
+        providerId: 'custom:anthropic',
+        providerName: 'Anthropic',
       },
       {
-        id: 'custom:openai',
-        name: 'OpenAI',
-        baseURL: 'https://api.openai.com/v1',
-        api: 'openai-responses',
+        providerId: 'custom:openai',
+        providerName: 'OpenAI',
       },
     ]);
     expect(requests.map((request) => request.url)).toEqual([
@@ -327,7 +323,7 @@ describe('/login', () => {
     await loginOpenCode(controller, secret);
 
     expect(controller.active).toBe(false);
-    expect(registry.listConfiguredProviders()).toHaveLength(1);
+    expect(registry.listCredentials()).toHaveLength(1);
     const output = view.lines.map((line) => line.text).join('\n');
     expect(output).toContain('无法连接 https://opencode.ai/zen/go/v1/models');
     expect(output).toContain('重新运行 /login');
@@ -342,6 +338,7 @@ describe('/login', () => {
       registry,
       runtime,
       view,
+      configPath,
     } = setup();
     controller.begin('login');
     await controller.submit('Custom');
@@ -372,11 +369,11 @@ describe('/login', () => {
     });
     await controller.submit('some-made-up-protocol');
     expect(controller.active).toBe(true);
-    expect(registry.listProviders()).toEqual([]);
+    expect(registry.listCredentials()).toEqual([]);
 
     await controller.submit('OpenAI Responses');
     expect(controller.active).toBe(false);
-    expect(registry.listProviders()[0]).toMatchObject({
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).providers[0]).toMatchObject({
       id: 'custom:example',
       api: 'openai-responses',
     });
@@ -394,7 +391,6 @@ describe('/login', () => {
       apiKey: 'second-key',
       protocol: '3',
     });
-    expect(registry.listProviders()).toHaveLength(2);
     expect(registry.listCredentials()).toHaveLength(2);
   });
 
@@ -419,7 +415,7 @@ describe('/login', () => {
     await controller.submit('custom-secret-to-clear');
     expect(view.prompts.at(-1)?.prompt).toContain('[步骤 5] 选择协议');
     expect(controller.back()).toBe(true);
-    expect(controller.secret).toBe(true);
+    expect(view.prompts.at(-1)?.secret).toBe(true);
     expect(view.prompts.at(-1)?.prompt).toContain('[步骤 4] API key');
     expect(controller.back()).toBe(true);
     expect(view.prompts.at(-1)?.prompt).toContain('[步骤 3] base URL');
@@ -505,7 +501,6 @@ describe('/login', () => {
     await saving;
     expect(refreshSignal?.aborted).toBe(true);
     expect(controller.active).toBe(false);
-    expect(controller.busy).toBe(false);
   });
 
   it('view 在 submit 中重入 close 仍等待当前操作', async () => {
@@ -541,14 +536,12 @@ describe('/login', () => {
     if (close === undefined) throw new Error('expected reentrant close');
     for (let turn = 0; turn < 5; turn++) await Promise.resolve();
     expect(closeSettled).toBe(false);
-    expect(controller.busy).toBe(true);
 
     releaseFetch(
       new Response(JSON.stringify(fixture.openCodeGoMixed), { status: 200 }),
     );
     await close;
     await saving;
-    expect(controller.busy).toBe(false);
     expect(controller.active).toBe(false);
   });
 });
@@ -612,6 +605,7 @@ describe('/model 与 /logout', () => {
       controller,
       registry,
       runtime,
+      configPath,
     } = setup(fixture.openCodeGoMixed);
     await loginOpenCode(controller, 'logout-key');
     controller.begin('model');
@@ -624,7 +618,7 @@ describe('/model 与 /logout', () => {
     expect(runtime.currentModel()).toBeUndefined();
     expect(runtime.clearCount).toBe(1);
     expect(registry.listCredentials()).toEqual([]);
-    expect(registry.listProviders()).toHaveLength(1);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).providers).toHaveLength(1);
     expect(registry.availableModels()).toEqual([]);
     expect(registry.selectedModel()).toBeUndefined();
   });

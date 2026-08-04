@@ -6,7 +6,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'bun:test';
-import { parseFlags, readConfigFile } from './config.js';
+import { parseCliInvocation } from './command-catalog.js';
+import { readConfigFile } from './config.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -14,26 +15,26 @@ afterEach(() => {
 
 describe('parseFlags --resume[=<ThreadId>]', () => {
   it('裸 --resume 不猜测旧 id 形状，后续位置参数作为 prompt', () => {
-    const flags = parseFlags(['--resume', '20260727-123456-ab3f']);
+    const flags = parseCliInvocation(['--resume', '20260727-123456-ab3f']).flags;
     expect(flags.resume).toBe(true);
     expect(flags.prompt).toBe('20260727-123456-ab3f');
   });
 
   it('裸文本不被吞:视为无 id 的 --resume(列表选择),该值按裸 prompt 处理', () => {
-    const flags = parseFlags(['--resume', 'fix the login bug']);
+    const flags = parseCliInvocation(['--resume', 'fix the login bug']).flags;
     expect(flags.resume).toBe(true);
     expect(flags.prompt).toBe('fix the login bug');
   });
 
   it('--resume 后跟另一 flag / 结尾:同样是列表选择', () => {
-    expect(parseFlags(['--resume']).resume).toBe(true);
-    const flags = parseFlags(['--resume', '--no-color']);
+    expect(parseCliInvocation(['--resume']).flags.resume).toBe(true);
+    const flags = parseCliInvocation(['--resume', '--no-color']).flags;
     expect(flags.resume).toBe(true);
     expect(flags.noColor).toBe(true);
   });
 
   it('所有分离位置参数都不被当成 ThreadId', () => {
-    const flags = parseFlags(['--resume', '2026-0727']); // 连字符位置不对,不是 id
+    const flags = parseCliInvocation(['--resume', '2026-0727']).flags; // 连字符位置不对,不是 id
     expect(flags.resume).toBe(true);
     expect(flags.prompt).toBe('2026-0727');
   });
@@ -67,37 +68,37 @@ describe('readConfigFile(docs/09)', () => {
 
 describe('parseFlags --approval-mode(docs/07 §4 / docs/09 §1)', () => {
   it('解析三个合法值', () => {
-    expect(parseFlags(['--approval-mode', 'interactive']).approvalMode).toBe('interactive');
-    expect(parseFlags(['--approval-mode', 'allow']).approvalMode).toBe('allow');
-    expect(parseFlags(['--approval-mode', 'deny']).approvalMode).toBe('deny');
+    expect(parseCliInvocation(['--approval-mode', 'interactive']).flags.approvalMode).toBe('interactive');
+    expect(parseCliInvocation(['--approval-mode', 'allow']).flags.approvalMode).toBe('allow');
+    expect(parseCliInvocation(['--approval-mode', 'deny']).flags.approvalMode).toBe('deny');
   });
 
   it('缺省不设值——默认由 main 按形态定(交互 TUI → interactive,headless/-p → allow)', () => {
-    expect(parseFlags([]).approvalMode).toBeUndefined();
-    expect(parseFlags(['--json']).approvalMode).toBeUndefined();
+    expect(parseCliInvocation([]).flags.approvalMode).toBeUndefined();
+    expect(parseCliInvocation(['--json']).flags.approvalMode).toBeUndefined();
   });
 
   it('非法值与缺值报错(fail-fast,不静默降级)', () => {
-    expect(() => parseFlags(['--approval-mode', 'yolo'])).toThrow(/unknown approval mode: yolo/);
-    expect(() => parseFlags(['--approval-mode'])).toThrow(/requires a value/);
+    expect(() => parseCliInvocation(['--approval-mode', 'yolo'])).toThrow(/unknown approval mode: yolo/);
+    expect(() => parseCliInvocation(['--approval-mode'])).toThrow(/requires a value/);
   });
 });
 
 describe('parseFlags canonical runtime transport', () => {
   it('rejects the removed event-format protocol selector', () => {
-    expect(() => parseFlags(['--event-format=envelope'])).toThrow(/unknown flag/);
-    expect(() => parseFlags(['--json', '--event-format=legacy'])).toThrow(/unknown flag/);
+    expect(() => parseCliInvocation(['--event-format=envelope'])).toThrow(/unknown flag/);
+    expect(() => parseCliInvocation(['--json', '--event-format=legacy'])).toThrow(/unknown flag/);
   });
 
   it('equals-form resume 接受 opaque ThreadId，并可用 workspace 消歧', () => {
-    const flags = parseFlags([
+    const flags = parseCliInvocation([
       '--resume=opaque-thread',
       '--workspace=opaque-workspace',
-    ]);
+    ]).flags;
     expect(flags.resume).toBe('opaque-thread');
     expect(flags.workspace).toBe('opaque-workspace');
     expect(flags.prompt).toBeUndefined();
-    expect(() => parseFlags(['--resume='])).toThrow(/non-empty/);
-    expect(() => parseFlags(['--workspace='])).toThrow(/non-empty/);
+    expect(() => parseCliInvocation(['--resume='])).toThrow(/non-empty/);
+    expect(() => parseCliInvocation(['--workspace='])).toThrow(/non-empty/);
   });
 });

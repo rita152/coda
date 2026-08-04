@@ -6,11 +6,11 @@
 
 import { afterEach, describe, expect, it, vi } from 'bun:test';
 import type { CliFlags, CodaConfigFile } from '../src/cli/config.js';
+import { parseCliInvocation } from '../src/cli/command-catalog.js';
 import type { ModelConfig } from '../src/protocol/index.js';
 import {
   getMissingApiKeyMessage,
   isFullScreenTuiEligible,
-  parseFlags,
   resolveInteractiveUi,
   resolveConfig,
 } from '../src/cli/config.js';
@@ -324,32 +324,32 @@ describe('--ui 纯路由', () => {
 describe('parseFlags 边界', () => {
   it('--resume=<thread-id> 使用 canonical identity；不带值进入列表选择', () => {
     const threadId = 'th_11111111-1111-4111-8111-111111111111';
-    expect(parseFlags([`--resume=${threadId}`]).resume).toBe(threadId);
-    expect(parseFlags(['--resume']).resume).toBe(true);
+    expect(parseCliInvocation([`--resume=${threadId}`]).flags.resume).toBe(threadId);
+    expect(parseCliInvocation(['--resume']).flags.resume).toBe(true);
     // 后随另一个 flag:不吞 flag,resume 仍为 true 且后续 flag 正常解析
-    const f = parseFlags(['--resume', '--json']);
+    const f = parseCliInvocation(['--resume', '--json']).flags;
     expect(f.resume).toBe(true);
     expect(f.json).toBe(true);
   });
 
   it('裸参数聚合为 prompt 文本(coda "做点什么" 便利形态)', () => {
-    expect(parseFlags(['fix', 'the', 'bug']).prompt).toBe('fix the bug');
-    expect(parseFlags(['-p', 'hello', 'world']).prompt).toBe('hello world');
+    expect(parseCliInvocation(['fix', 'the', 'bug']).flags.prompt).toBe('fix the bug');
+    expect(parseCliInvocation(['-p', 'hello', 'world']).flags.prompt).toBe('hello world');
   });
 
   it('未知 flag throw;取值 flag 缺值 throw', () => {
-    expect(() => parseFlags(['--frobnicate'])).toThrow(/unknown flag/);
-    expect(() => parseFlags(['--model'])).toThrow(/requires a value/);
-    expect(() => parseFlags(['--model', '--json'])).toThrow(/requires a value/);
-    expect(() => parseFlags(['--provider', 'bogus'])).toThrow(/unknown provider/);
+    expect(() => parseCliInvocation(['--frobnicate'])).toThrow(/unknown flag/);
+    expect(() => parseCliInvocation(['--model'])).toThrow(/requires a value/);
+    expect(() => parseCliInvocation(['--model', '--json'])).toThrow(/requires a value/);
+    expect(() => parseCliInvocation(['--provider', 'bogus'])).toThrow(/unknown provider/);
   });
 
   it('组合:布尔 flag 与取值 flag 混排互不干扰', () => {
-    const f = parseFlags(['--json', '--model', 'm1', '--no-color', '-p', 'do it']);
+    const f = parseCliInvocation(['--json', '--model', 'm1', '--no-color', '-p', 'do it']).flags;
     expect(f).toMatchObject({ json: true, noColor: true, model: 'm1', prompt: 'do it' });
   });
 
   it('--provider openai-responses 是合法 provider 值', () => {
-    expect(parseFlags(['--provider', 'openai-responses']).provider).toBe('openai-responses');
+    expect(parseCliInvocation(['--provider', 'openai-responses']).flags.provider).toBe('openai-responses');
   });
 });

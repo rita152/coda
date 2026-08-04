@@ -17,7 +17,8 @@ import type {
   WorkspaceId,
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
-import { isFullScreenTuiEligible, parseFlags } from './config.js';
+import { parseCliInvocation } from './command-catalog.js';
+import { isFullScreenTuiEligible } from './config.js';
 import type { ThreadPresentationState } from './presentation-state.js';
 import { createRenderer } from './renderer.js';
 import {
@@ -206,7 +207,7 @@ describe('terminal environment characterization', () => {
   });
 
   test('NO_COLOR-equivalent rendering stays transparent and --no-color remains parseable', async () => {
-    expect(parseFlags(['--no-color']).noColor).toBe(true);
+    expect(parseCliInvocation(['--no-color']).flags.noColor).toBe(true);
 
     // This test can inject only the already-resolved renderer option. A process-level
     // probe proves main.ts maps both NO_COLOR and --no-color to this state.
@@ -387,9 +388,7 @@ describe('rendering performance gates', () => {
           observedHighWaterSeq: 0,
         },
         unreadAfterSeq: 0,
-        expandedBlocks: [],
         vimEnabled: false,
-        updatedAt: 1,
       } satisfies ThreadPresentationState);
       await anchorView.testRenderer.flush();
       await anchorView.testRenderer.flush();

@@ -65,15 +65,7 @@ export interface ThreadPresentationState {
   /** Zero means the transcript is read through the current high-water mark. */
   readonly unreadAfterSeq: number;
   readonly search?: PresentationSearchState;
-  readonly expandedBlocks: readonly string[];
-  readonly activePanel?:
-    | 'transcript'
-    | 'tool'
-    | 'diff'
-    | 'sessions'
-    | 'permissions';
   readonly vimEnabled: boolean;
-  readonly updatedAt: number;
 }
 
 interface PresentationFile {
@@ -123,10 +115,6 @@ export class ThreadPresentationStore {
     this.#state = this.#load();
   }
 
-  get file(): string {
-    return this.#file;
-  }
-
   snapshot(): ThreadPresentationState {
     return copyState(this.#state);
   }
@@ -147,7 +135,6 @@ export class ThreadPresentationStore {
     const migrated = {
       ...this.#state,
       threadId,
-      updatedAt: this.#now(),
     };
     try {
       atomicWritePresentation(targetFile, {
@@ -157,7 +144,7 @@ export class ThreadPresentationStore {
       if (existsSync(this.#file)) {
         atomicWritePresentation(this.#file, {
           version: PRESENTATION_SCHEMA_VERSION,
-          state: emptyState(this.#workspaceId, this.#threadId, this.#now()),
+          state: emptyState(this.#workspaceId, this.#threadId),
         });
       }
     } catch (error) {
@@ -197,21 +184,6 @@ export class ThreadPresentationStore {
     this.#state = this.#load();
     this.#dirty = false;
     return this.snapshot();
-  }
-
-  setActivePanel(panel: ThreadPresentationState['activePanel']): void {
-    this.#assertOpen();
-    const next = { ...this.#state, ...(panel === undefined ? {} : { activePanel: panel }) };
-    if (panel === undefined) deleteMutableOptional(next, 'activePanel');
-    this.#replace(next, false);
-  }
-
-  setExpanded(blockKey: string, expanded: boolean): void {
-    this.#assertOpen();
-    const keys = new Set(this.#state.expandedBlocks);
-    if (expanded) keys.add(sanitizeTerminalText(blockKey));
-    else keys.delete(blockKey);
-    this.#replace({ ...this.#state, expandedBlocks: [...keys] }, false);
   }
 
   setDraft(draft: PersistableDraft): void {
@@ -298,13 +270,12 @@ export class ThreadPresentationStore {
   }
 
   #replace(next: ThreadPresentationState, durable: boolean): void {
-    const updated = { ...next, updatedAt: this.#now() };
-    if (sameState(this.#state, updated)) return;
+    if (sameState(this.#state, next)) return;
     if (durable) {
       try {
         atomicWritePresentation(this.#file, {
           version: PRESENTATION_SCHEMA_VERSION,
-          state: updated,
+          state: next,
         });
       } catch (error) {
         this.#onWarning?.(`presentation state could not be saved: ${errorMessage(error)}`);
@@ -317,11 +288,11 @@ export class ThreadPresentationStore {
         clearTimeout(this.#timer);
         this.#timer = undefined;
       }
-      this.#state = updated;
+      this.#state = next;
       this.#dirty = false;
       return;
     }
-    this.#state = updated;
+    this.#state = next;
     this.#dirty = true;
     this.#scheduleFlush();
   }
@@ -358,7 +329,7 @@ export class ThreadPresentationStore {
   }
 
   #load(): ThreadPresentationState {
-    const empty = emptyState(this.#workspaceId, this.#threadId, this.#now());
+    const empty = emptyState(this.#workspaceId, this.#threadId);
     if (!existsSync(this.#file)) return empty;
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.#file, 'utf8'));
@@ -396,16 +367,13 @@ function digestIdentity(value: string): string {
 function emptyState(
   workspaceId: WorkspaceId,
   threadId: PresentationThreadId,
-  updatedAt: number,
 ): ThreadPresentationState {
   return {
     workspaceId,
     threadId,
     draft: '',
     unreadAfterSeq: 0,
-    expandedBlocks: [],
     vimEnabled: false,
-    updatedAt,
   };
 }
 
@@ -428,12 +396,9 @@ function parsePresentationFile(
     ? undefined
     : sanitizeTerminalText(rawStashedDraft);
   const unreadAfterSeq = sequenceValue(state['unreadAfterSeq'], 'unreadAfterSeq');
-  const expandedBlocks = stringArray(state['expandedBlocks'], 'expandedBlocks');
   const vimEnabled = booleanValue(state['vimEnabled'], 'vimEnabled');
-  const updatedAt = finiteNumber(state['updatedAt'], 'updatedAt');
   const scrollAnchor = parseScrollAnchor(state['scrollAnchor']);
   const search = parseSearch(state['search']);
-  const activePanel = parseActivePanel(state['activePanel']);
   return {
     workspaceId,
     threadId,
@@ -442,10 +407,7 @@ function parsePresentationFile(
     ...(scrollAnchor === undefined ? {} : { scrollAnchor }),
     unreadAfterSeq,
     ...(search === undefined ? {} : { search }),
-    expandedBlocks,
-    ...(activePanel === undefined ? {} : { activePanel }),
     vimEnabled,
-    updatedAt,
   };
 }
 
@@ -476,20 +438,6 @@ function parseSearch(value: unknown): PresentationSearchState | undefined {
     query: sanitizeTerminalText(stringValue(search['query'], 'search.query')),
     matchOrdinal: sequenceValue(search['matchOrdinal'], 'search.matchOrdinal'),
   };
-}
-
-function parseActivePanel(value: unknown): ThreadPresentationState['activePanel'] {
-  if (value === undefined) return undefined;
-  if (
-    value === 'transcript' ||
-    value === 'tool' ||
-    value === 'diff' ||
-    value === 'sessions' ||
-    value === 'permissions'
-  ) {
-    return value;
-  }
-  throw new Error('activePanel is invalid');
 }
 
 function atomicWritePresentation(file: string, value: PresentationFile): void {
@@ -547,7 +495,6 @@ function copyState(state: ThreadPresentationState): ThreadPresentationState {
       ? {}
       : { scrollAnchor: copyAnchor(state.scrollAnchor) }),
     ...(state.search === undefined ? {} : { search: { ...state.search } }),
-    expandedBlocks: [...state.expandedBlocks],
   };
 }
 
@@ -565,7 +512,7 @@ function safeSequence(value: number): number {
 }
 
 function sameState(left: ThreadPresentationState, right: ThreadPresentationState): boolean {
-  return JSON.stringify({ ...left, updatedAt: 0 }) === JSON.stringify({ ...right, updatedAt: 0 });
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {

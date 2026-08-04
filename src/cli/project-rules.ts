@@ -30,8 +30,8 @@ import {
   canonicalizePath,
   isPathInside,
 } from '../shared/index.js';
-import { BASH_ANALYSIS_VERSION } from './bash-analyze.js';
-import type { BashFilesystemTarget } from './bash-analyze.js';
+import { BASH_ANALYSIS_VERSION } from '../integrations/coding-capabilities/index.js';
+import type { BashFilesystemTarget } from '../integrations/coding-capabilities/index.js';
 import { FILESYSTEM_ANALYSIS_VERSION } from '../integrations/coding-capabilities/resource-resolvers.js';
 
 const MAX_PROJECT_RULE_FILE_BYTES = 32 * 1024;
@@ -89,11 +89,6 @@ function tokenUnits(text: string): number {
     units += text.charCodeAt(i) <= 0x7f ? 1 : 4;
   }
   return units;
-}
-
-/** ASCII 沿用 len/4；CJK/emoji 按 UTF-16 code unit 计一 token，避免系统性低估。 */
-export function estimateProjectRuleTokens(text: string): number {
-  return Math.ceil(tokenUnits(text) / 4);
 }
 
 function isMissing(error: unknown): boolean {
@@ -488,69 +483,6 @@ export class ProjectRules implements RuleSnapshotProvider, RuleFreshnessPort {
       targets.add(current);
     }
     leafScopes.add(directory);
-  }
-
-  /**
-   * 词法路径逐级解析：遇越界链接时保留链接前的安全祖先规则；文件 leaf 另行解析，
-   * 因而 dangling leaf 指向仓库外既会 warning，也不会丢掉其所在目录 AGENTS.md。
-   */
-  #addPathScopes(
-    targets: Set<string>,
-    targetPath: string,
-    targetIsDirectory: boolean,
-    leafScopes?: Set<string>,
-  ): void {
-    const absolute = path.resolve(targetPath);
-    const lexicalDirectory = targetIsDirectory ? absolute : path.dirname(absolute);
-    let crossedBoundary = false;
-    let deepestSafeScope: string | undefined;
-
-    if (isPathInside(this.repositoryRoot, lexicalDirectory)) {
-      const relative = path.relative(this.repositoryRoot, lexicalDirectory);
-      const parts = relative === '' ? [] : relative.split(path.sep);
-      let lexicalPrefix = this.repositoryRoot;
-      targets.add(this.repositoryRoot);
-      deepestSafeScope = this.repositoryRoot;
-      for (const part of parts) {
-        lexicalPrefix = path.join(lexicalPrefix, part);
-        try {
-          const physicalPrefix = canonicalizePath(lexicalPrefix);
-          if (!isPathInside(this.repositoryRoot, physicalPrefix)) {
-            crossedBoundary = true;
-            this.#warn(
-              `project rules stopped at ${lexicalPrefix}: path crosses a symlink outside ` +
-                `repository root ${this.repositoryRoot}`,
-            );
-            break;
-          }
-          targets.add(physicalPrefix);
-          deepestSafeScope = physicalPrefix;
-        } catch (error) {
-          crossedBoundary = true;
-          this.#warn(`could not resolve project-rule scope ${lexicalPrefix}: ${String(error)}`);
-          break;
-        }
-      }
-    }
-
-    try {
-      const physicalTarget = canonicalizePath(absolute);
-      if (isPathInside(this.repositoryRoot, physicalTarget)) {
-        const physicalScope = targetIsDirectory ? physicalTarget : path.dirname(physicalTarget);
-        targets.add(physicalScope);
-        deepestSafeScope = physicalScope;
-      } else if (!crossedBoundary && isPathInside(this.repositoryRoot, absolute)) {
-        this.#warn(
-          `project rules not loaded for physical target ${physicalTarget}: ` +
-            `path crosses a symlink outside repository root ${this.repositoryRoot}`,
-        );
-      }
-    } catch (error) {
-      if (!crossedBoundary && isPathInside(this.repositoryRoot, absolute)) {
-        this.#warn(`could not resolve project-rule target ${absolute}: ${String(error)}`);
-      }
-    }
-    if (deepestSafeScope !== undefined) leafScopes?.add(deepestSafeScope);
   }
 
   #candidates(targets: Iterable<string>): RuleCandidate[] {

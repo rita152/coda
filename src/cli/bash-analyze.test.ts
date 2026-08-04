@@ -3,8 +3,11 @@
 // 'npm test && npm run build' → ['bash:npm *','bash:npm *']。
 
 import { describe, expect, test } from 'bun:test';
-import type { BashAnalysis } from './bash-analyze.js';
-import { analyzeBashCommand, analyzeBashPaths } from './bash-analyze.js';
+import type { BashAnalysis } from '../integrations/coding-capabilities/bash-analyze.js';
+import {
+  analyzeBashCommand,
+  analyzeBashPaths,
+} from '../integrations/coding-capabilities/bash-analyze.js';
 
 /** 收窄到非 denied 分支(denied 时报出 reason,便于诊断)。 */
 function ok(a: BashAnalysis): Extract<BashAnalysis, { denied: false }> {

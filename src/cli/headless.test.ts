@@ -10,7 +10,6 @@ import type {
 } from '../protocol/index.js';
 import { PROTOCOL_VERSION } from '../protocol/index.js';
 import {
-  createHeadlessPromptOp,
   startHeadless,
   type HeadlessRuntimePort,
 } from './headless.js';
@@ -21,21 +20,6 @@ const OP_ID = 'op_e_00000000000000000000000000000001' as ExternalOpId;
 const SECOND_OP_ID = 'op_e_00000000000000000000000000000002' as ExternalOpId;
 
 describe('canonical headless transport', () => {
-  it('constructs a fully identified prompt for --json -p composition', () => {
-    expect(createHeadlessPromptOp({
-      opId: OP_ID,
-      workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID,
-      text: 'hello',
-    })).toEqual({
-      type: 'prompt',
-      opId: OP_ID,
-      workspaceId: WORKSPACE_ID,
-      threadId: THREAD_ID,
-      text: 'hello',
-    });
-  });
-
   it('registers hot events, survives invalid input, emits receipt, and drains on shutdown', async () => {
     const runtime = new FakeHeadlessRuntime();
     const stdin = new PassThrough();
@@ -333,5 +317,11 @@ class FailableAsyncQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
 }
 
 function promptOp(opId: ExternalOpId = OP_ID): Extract<RuntimeOp, { type: 'prompt' }> {
-  return createHeadlessPromptOp({ opId, workspaceId: WORKSPACE_ID, threadId: THREAD_ID, text: 'hello' });
+  return {
+    type: 'prompt',
+    opId,
+    workspaceId: WORKSPACE_ID,
+    threadId: THREAD_ID,
+    text: 'hello',
+  };
 }

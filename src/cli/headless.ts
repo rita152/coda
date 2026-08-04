@@ -228,15 +228,6 @@ export async function startHeadless(
   return code;
 }
 
-export function createHeadlessPromptOp(input: {
-  readonly workspaceId: RuntimeOp['workspaceId'];
-  readonly threadId: ThreadId;
-  readonly opId: ExternalOpId;
-  readonly text: string;
-}): Extract<RuntimeOp, { readonly type: 'prompt' }> {
-  return { type: 'prompt', ...input };
-}
-
 function invalidInput(message: string): Extract<HeadlessOutputFrame, { type: 'transport_error' }> {
   return { type: 'transport_error', fatal: false, code: 'invalid_input', message };
 }

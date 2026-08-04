@@ -230,16 +230,6 @@ export class ProviderRegistry {
     this.#credentials = readCredentials(this.credentialsPath);
   }
 
-  listProviders(): StoredProvider[] {
-    return this.#config.providers.map(cloneProvider);
-  }
-
-  listConfiguredProviders(): StoredProvider[] {
-    return this.#config.providers
-      .filter((provider) => this.#apiKey(provider.id) !== undefined)
-      .map(cloneProvider);
-  }
-
   listCredentials(): ProviderCredentialInfo[] {
     return Object.keys(this.#credentials.apiKeys)
       .filter((providerId) => this.#apiKey(providerId) !== undefined)
@@ -337,13 +327,6 @@ export class ProviderRegistry {
     this.#writeConfig((config) => ({
       ...config,
       selected: { providerId, model },
-    }));
-  }
-
-  clearSelection(): void {
-    this.#writeConfig((config) => ({
-      version: 1,
-      providers: config.providers,
     }));
   }
 

@@ -223,8 +223,10 @@ describe('Custom provider 管理', () => {
     expect(acme.provider.id).toBe('custom:acme%20gateway');
     expect(updated.provider.id).toBe(acme.provider.id);
     expect(beta.provider.id).toBe('custom:beta');
-    expect(registry.listProviders()).toHaveLength(2);
     expect(registry.listCredentials()).toHaveLength(2);
+    expect(new Set(registry.availableModels().map((model) => model.providerId))).toEqual(
+      new Set([acme.provider.id, beta.provider.id]),
+    );
     expect(
       registry
         .availableModels()
@@ -488,10 +490,6 @@ describe('Custom provider 管理', () => {
       ...files,
       fetch: async () => jsonResponse({ data: [] }),
     });
-    expect(restored.listProviders()[0]?.models).toEqual([
-      expectedModel,
-      { id: 'claude-legacy', api: 'anthropic-messages' },
-    ]);
     expect(
       restored.resolveModel('custom:anthropic', 'claude-opus-4-6'),
     ).toMatchObject({
@@ -601,7 +599,10 @@ describe('刷新失败、恢复与 logout', () => {
     );
 
     const persisted = new ProviderRegistry(options);
-    expect(persisted.listProviders().map((provider) => provider.id)).toEqual([
+    const persistedConfig = JSON.parse(readFileSync(files.configPath, 'utf8')) as {
+      providers: Array<{ id: string }>;
+    };
+    expect(persistedConfig.providers.map((provider) => provider.id)).toEqual([
       alpha.provider.id,
       beta.provider.id,
       gamma.provider.id,
@@ -745,7 +746,9 @@ describe('刷新失败、恢复与 logout', () => {
 
     expect(restored.logout(configured.provider.id)).toBe(true);
     expect(restored.listCredentials()).toEqual([]);
-    expect(restored.listProviders()).toHaveLength(1);
+    expect(
+      (JSON.parse(readFileSync(files.configPath, 'utf8')) as { providers: unknown[] }).providers,
+    ).toHaveLength(1);
     expect(readFileSync(files.credentialsPath, 'utf8')).not.toContain('restore-key');
   });
 });

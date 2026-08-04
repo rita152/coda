@@ -94,14 +94,6 @@ export class ProviderCommandController {
     return this.#step !== undefined;
   }
 
-  get secret(): boolean {
-    return this.#step?.secret === true;
-  }
-
-  get busy(): boolean {
-    return this.#busy;
-  }
-
   begin(command: ProviderCommandName): void {
     if (this.#closed) return;
     if (this.#busy) {

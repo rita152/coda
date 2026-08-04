@@ -44,17 +44,14 @@ import {
   formatContextUsage,
   formatTokenCount,
   formatWorkspacePath,
-  matchingSlashCommands,
-  parseGitStatusOutput,
   resolveTuiTheme,
   runTuiController,
   sanitizeTerminalText,
   sanitizeTerminalTitle,
   TRANSCRIPT_REPLAY_CHUNK_MESSAGES,
   TuiInteractionState,
-  tuiCanAbort,
-  tuiEnterState,
 } from './tui.js';
+import { interactionCanAbort, interactionEnterState } from './tui-controls.js';
 import type { TuiOptions, TuiScreen } from './tui.js';
 
 const MODEL = { provider: 'openai', api: 'openai-chat', model: 'gpt-5.2' };
@@ -268,19 +265,6 @@ describe('TUI footer 格式', () => {
     expect(formatWorkspacePath('/Users/tester/work', '/Users/test')).toBe('/Users/tester/work');
   });
 
-  it('git porcelain 同时投影 branch 与 dirty，detached HEAD 不伪造分支', () => {
-    expect(parseGitStatusOutput('## main...origin/main [ahead 1]\n M src/a.ts\n')).toEqual({
-      branch: 'main',
-      dirty: true,
-    });
-    expect(parseGitStatusOutput('## No commits yet on feature\n')).toEqual({
-      branch: 'feature',
-      dirty: false,
-    });
-    expect(parseGitStatusOutput('## HEAD (no branch)\n?? scratch.txt\n')).toEqual({
-      dirty: true,
-    });
-  });
 });
 
 describe('TUI themes', () => {
@@ -983,7 +967,7 @@ describe('全屏 OpenTUI 布局', () => {
       expect(view.renderer.getCursorState().visible).toBe(false);
 
       view.resize(80, 30);
-      view.screen.toggleApprovalDetails();
+      view.screen.handleApprovalPanelKey({ name: 'v' } as KeyEvent);
       await view.flush();
       expect(view.frame()).toContain('Details');
       expect(view.frame()).not.toContain('draft 7');
@@ -1418,9 +1402,8 @@ describe('TUI presentation workflow', () => {
       workspaceSnapshot: {
         ...WORKSPACE_SNAPSHOT,
         permissions: { ...WORKSPACE_SNAPSHOT.permissions, mode: 'deny' },
+        git: { branch: 'main', dirty: true },
       },
-      branch: 'main',
-      gitDirty: true,
     });
     try {
       view.screen.setInput('a long working draft');
@@ -2382,7 +2365,7 @@ describe('TUI review and recovery workflow', () => {
     }
   });
 
-  it('restorePresentation 对不可独立恢复的 panel 明确回退 transcript 并同步 store', async () => {
+  it('restorePresentation 从持久化状态安全回到 transcript', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-panel-restore-fallback-'));
     tempDirs.push(root);
     const store = new ThreadPresentationStore({
@@ -2390,8 +2373,6 @@ describe('TUI review and recovery workflow', () => {
       workspaceId: 'ws_panel_restore_fallback' as WorkspaceId,
       threadId: 'thr_panel_restore_fallback' as ThreadId,
     });
-    store.setActivePanel('diff');
-    store.flush();
     const state = store.snapshot();
     const view = await setup(100, 30, () => {}, true, undefined, {
       resumed: true,
@@ -2411,16 +2392,12 @@ describe('TUI review and recovery workflow', () => {
       if (transcript === undefined || diffPanel === undefined || sessionPanel === undefined) {
         throw new Error('panel not found');
       }
-      // Diff/session payloads are Runtime queries and are not durable presentation data. Until the
-      // controller explicitly re-queries one, recovery must normalize both view and store to the
-      // transcript instead of retaining an impossible activePanel value.
+      // Diff/session payloads are Runtime queries and are not durable presentation data.
       expect({
-        storePanel: store.snapshot().activePanel,
         transcriptVisible: transcript.visible,
         diffVisible: diffPanel.visible,
         sessionsVisible: sessionPanel.visible,
       }).toEqual({
-        storePanel: 'transcript',
         transcriptVisible: true,
         diffVisible: false,
         sessionsVisible: false,
@@ -3075,22 +3052,6 @@ describe('TUI 安全渲染与转录恢复', () => {
 });
 
 describe('TUI 交互状态投影', () => {
-  it('命令模糊匹配只返回当前 phase 可执行项，并保留 canonical 排序', () => {
-    expect(matchingSlashCommands('/ST', 'idle').map((command) => command.name)[0]).toBe(
-      'status',
-    );
-    const running = matchingSlashCommands('/', 'running').map((command) => command.name);
-    expect(running).toContain('followup');
-    expect(running).toContain('status');
-    expect(running).toContain('search');
-    expect(running).not.toContain('quit');
-    expect(matchingSlashCommands('/f', 'idle').map((command) => command.name)[0]).toBe(
-      'followup',
-    );
-    expect(matchingSlashCommands('/status ', 'idle')).toEqual([]);
-    expect(matchingSlashCommands('ask /status', 'idle')).toEqual([]);
-  });
-
   it('retry 取消和 compaction 结束都回到 idle，Enter/Esc 语义按 phase 区分', async () => {
     const view = await setup();
     try {
@@ -3110,8 +3071,8 @@ describe('TUI 交互状态投影', () => {
         successorRunId: RETRY_SUCCESSOR_RUN_ID,
       });
       expect(view.interaction.phase).toBe('retrying');
-      expect(tuiEnterState(view.interaction.phase)).toBe('running');
-      expect(tuiCanAbort(view.interaction.phase)).toBe(true);
+      expect(interactionEnterState(view.interaction.phase)).toBe('running');
+      expect(interactionCanAbort(view.interaction.phase)).toBe(true);
 
       view.screen.render({ type: 'error', fatal: false, message: 'retry cancelled by abort' });
       await view.flush();
@@ -3126,8 +3087,8 @@ describe('TUI 交互状态投影', () => {
       });
       await view.flush();
       expect(view.interaction.phase).toBe('compacting');
-      expect(tuiEnterState(view.interaction.phase)).toBe('idle');
-      expect(tuiCanAbort(view.interaction.phase)).toBe(true);
+      expect(interactionEnterState(view.interaction.phase)).toBe('idle');
+      expect(interactionCanAbort(view.interaction.phase)).toBe(true);
       expect(view.frame()).toContain('Compacting context · Enter queue');
 
       view.screen.render({

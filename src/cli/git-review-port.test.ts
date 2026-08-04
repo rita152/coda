@@ -11,6 +11,28 @@ afterEach(() => {
 });
 
 describe('Git workspace review port', () => {
+  it('projects unborn branches and omits detached HEAD names', async () => {
+    const unborn = mkdtempSync(path.join(os.tmpdir(), 'coda-git-review-unborn-'));
+    roots.push(unborn);
+    git(unborn, ['init', '-b', 'feature']);
+    const review = createGitWorkspaceReviewPort();
+    expect(await review.snapshotGit({ workspaceId: 'workspace-test' as never, cwd: unborn }))
+      .toEqual({ branch: 'feature', dirty: false });
+
+    const detached = mkdtempSync(path.join(os.tmpdir(), 'coda-git-review-detached-'));
+    roots.push(detached);
+    git(detached, ['init', '-b', 'main']);
+    git(detached, ['config', 'user.email', 'coda@example.test']);
+    git(detached, ['config', 'user.name', 'Coda Test']);
+    writeFileSync(path.join(detached, 'tracked.ts'), 'export const tracked = true;\n');
+    git(detached, ['add', 'tracked.ts']);
+    git(detached, ['commit', '-m', 'baseline']);
+    git(detached, ['checkout', '--detach']);
+    writeFileSync(path.join(detached, 'scratch.ts'), 'export const scratch = true;\n');
+    expect(await review.snapshotGit({ workspaceId: 'workspace-test' as never, cwd: detached }))
+      .toEqual({ dirty: true });
+  });
+
   it('returns complete staged, unstaged, and untracked patches without shell interpolation', async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), 'coda-git-review-'));
     roots.push(cwd);

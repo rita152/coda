@@ -7,7 +7,6 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { CompatFlags, ModelConfig } from '../protocol/index.js';
 import { runtimeHomeDir } from '../shared/index.js';
-import { parseCliInvocation } from './command-catalog.js';
 import type { CliFlags, CliProvider, CliUiMode } from './command-catalog.js';
 import { sanitizeTerminalError, sanitizeTerminalLine } from './terminal-sanitize.js';
 export type { ApprovalMode, CliFlags, CliProvider, CliUiMode } from './command-catalog.js';
@@ -19,10 +18,6 @@ export interface CodaConfigFile {
   apiKey?: string;             // 明文兜底;存在时启动打印警告
   defaults?: { temperature?: number; reasoningEffort?: string; maxOutputTokens?: number };
   compat?: CompatFlags;
-}
-
-export function parseFlags(argv: string[]): CliFlags {
-  return parseCliInvocation(argv).flags;
 }
 
 export interface ResolvedConfig {

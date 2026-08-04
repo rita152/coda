@@ -59,10 +59,11 @@ describe('ThreadPresentationStore', () => {
     store.setDraft(persistableDraft('first'));
     now = 11;
     store.setDraft(persistableDraft('second'));
-    expect(existsSync(store.file)).toBe(false);
+    const file = presentationStatePath(root, WORKSPACE, THREAD);
+    expect(existsSync(file)).toBe(false);
     await Bun.sleep(20);
 
-    expect(statSync(store.file).mode & 0o777).toBe(0o600);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
     const restored = new ThreadPresentationStore({
       root,
       workspaceId: WORKSPACE,
@@ -82,7 +83,7 @@ describe('ThreadPresentationStore', () => {
   it('makes stash/restore durable and keeps presentation-only navigation state', () => {
     const { root, store } = fixture();
     store.stash(persistableDraft('long prompt'));
-    expect(JSON.parse(readFileSync(store.file, 'utf8')).state).toMatchObject({
+    expect(JSON.parse(readFileSync(presentationStatePath(root, WORKSPACE, THREAD), 'utf8')).state).toMatchObject({
       draft: '',
       stashedDraft: 'long prompt',
     });
@@ -120,7 +121,7 @@ describe('ThreadPresentationStore', () => {
 
   it('quarantines malformed or identity-mismatched state without blocking recovery', () => {
     const { root, store } = fixture({ now: () => 123 });
-    const file = store.file;
+    const file = presentationStatePath(root, WORKSPACE, THREAD);
     store.dispose();
     const directory = path.dirname(file);
     mkdirSync(directory, { recursive: true });
@@ -200,13 +201,15 @@ describe('ThreadPresentationStore', () => {
     });
     expect(otherThread.snapshot()).toMatchObject({ draft: '', vimEnabled: false });
     expect(otherWorkspace.snapshot()).toMatchObject({ draft: '', vimEnabled: false });
-    expect(otherThread.file).not.toBe(store.file);
-    expect(otherWorkspace.file).not.toBe(store.file);
+    expect(presentationStatePath(root, WORKSPACE, 'thr_other' as ThreadId))
+      .not.toBe(presentationStatePath(root, WORKSPACE, THREAD));
+    expect(presentationStatePath(root, 'ws_other' as WorkspaceId, THREAD))
+      .not.toBe(presentationStatePath(root, WORKSPACE, THREAD));
     otherThread.dispose();
     otherWorkspace.dispose();
   });
 
-  it('durably swaps independent draft, scroll, unread, and panel state across threads', () => {
+  it('durably swaps independent draft, scroll, and unread state across threads', () => {
     const { store } = fixture();
     const other = 'thr_background' as ThreadId;
     store.setDraft(persistableDraft('thread A draft'));
@@ -216,8 +219,6 @@ describe('ThreadPresentationStore', () => {
       fallbackBlockKeys: [],
       observedHighWaterSeq: 11,
     }, 11);
-    store.setActivePanel('diff');
-
     expect(store.switchToThread(other)).toMatchObject({
       threadId: other,
       draft: '',
@@ -230,20 +231,16 @@ describe('ThreadPresentationStore', () => {
       fallbackBlockKeys: ['message:b0'],
       observedHighWaterSeq: 22,
     }, 22);
-    store.setActivePanel('sessions');
-
     expect(store.switchToThread(THREAD)).toMatchObject({
       threadId: THREAD,
       draft: 'thread A draft',
       unreadAfterSeq: 11,
-      activePanel: 'diff',
       scrollAnchor: { blockKey: 'message:a', logicalOffset: 3 },
     });
     expect(store.switchToThread(other)).toMatchObject({
       threadId: other,
       draft: 'thread B draft',
       unreadAfterSeq: 22,
-      activePanel: 'sessions',
       scrollAnchor: { blockKey: 'message:b', logicalOffset: 1 },
     });
     store.dispose();
@@ -276,7 +273,7 @@ describe('ThreadPresentationStore', () => {
       threadId: attachedThread,
       draft: 'survive before model selection',
     });
-    expect(recovered.file).toBe(presentationStatePath(root, WORKSPACE, attachedThread));
+    expect(existsSync(presentationStatePath(root, WORKSPACE, attachedThread))).toBe(true);
     expect(existsSync(presentationStatePath(
       root,
       WORKSPACE,

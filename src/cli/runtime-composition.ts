@@ -1,7 +1,6 @@
 // Explicit adapters owned by the CLI composition root. Runtime core receives these narrow ports
 // and never reads provider credentials, HOME, cwd, or approval flags on its own.
 
-import path from 'node:path';
 import type { ModelConfig, ModelRef, RuntimePermissionMode } from '../protocol/index.js';
 import { canonicalJsonSha256, strictJsonSnapshot } from '../protocol/index.js';
 import type {
@@ -11,18 +10,6 @@ import type {
   PermissionPolicyPort,
   RuntimeModelResolver,
 } from '../runtime/index.js';
-
-export interface RuntimeStorageRoots {
-  readonly runtimeRoot: string;
-}
-
-export function resolveRuntimeStorageRoots(input: {
-  readonly homeDir: string;
-}): RuntimeStorageRoots {
-  return {
-    runtimeRoot: path.join(input.homeDir, '.coda', 'runtime-v2'),
-  };
-}
 
 export interface ModelLookup {
   resolveModel(providerId: string, modelId: string): ModelConfig | undefined;

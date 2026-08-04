@@ -31,7 +31,7 @@ import type {
 import {
   BASH_ANALYSIS_VERSION,
   type BashFilesystemTarget,
-} from './bash-analyze.js';
+} from '../integrations/coding-capabilities/index.js';
 import { FILESYSTEM_ANALYSIS_VERSION } from '../integrations/coding-capabilities/index.js';
 import { ProjectRules } from './project-rules.js';
 

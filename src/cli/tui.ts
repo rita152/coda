@@ -113,7 +113,7 @@ import {
   interactionEnterState,
   SLASH_COMMAND_SPECS,
 } from './tui-controls.js';
-import type { SlashCommand, SlashCommandSpec } from './tui-controls.js';
+import type { SlashCommand } from './tui-controls.js';
 import type {
   CliRenderer,
   ColorInput,
@@ -253,8 +253,6 @@ export interface TuiOptions {
   theme?: CliTheme;
   contextLimit?: number;
   resumed?: boolean;
-  branch?: string;
-  gitDirty?: boolean;
   threadId?: string;
   workspaceSnapshot: Readonly<WorkspaceRuntimeSnapshot>;
   eventHighWaterSeq?: () => number;
@@ -299,8 +297,6 @@ export interface TuiScreen {
     | { readonly kind: 'select'; readonly threadId: ThreadId };
   println(text: string, tone?: Tone): void;
   setUsage(usage: CliThreadUsage): void;
-  setBranch(branch: string | undefined): void;
-  setGitDirty(dirty: boolean): void;
   setTransientStatus(status: string | undefined): void;
   setCommandPrompt(
     prompt: string | undefined,
@@ -311,7 +307,6 @@ export interface TuiScreen {
   setProviderCommandsAvailable(available: boolean): void;
   setInteractionState(phase: TuiPhase): void;
   resolveApproval(): void;
-  toggleApprovalDetails(): void;
   handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult;
   getInput(): string;
   setInput(text: string): void;
@@ -442,15 +437,6 @@ export class TuiInteractionState {
         break;
     }
   }
-}
-
-/** running/retrying 的 Enter 是 steering；compacting 的 prompt 由 Runtime 暂存。 */
-export function tuiEnterState(phase: TuiPhase): 'idle' | 'running' {
-  return interactionEnterState(phase);
-}
-
-export function tuiCanAbort(phase: TuiPhase): boolean {
-  return interactionCanAbort(phase);
 }
 
 /** 审批决议必须来自完全无修饰键的 y/a/n/Esc。 */
@@ -603,45 +589,6 @@ export function formatWorkspacePath(cwd: string, home: string): string {
   if (cwd === normalizedHome) return '~';
   if (cwd.startsWith(`${normalizedHome}/`)) return `~${cwd.slice(normalizedHome.length)}`;
   return cwd;
-}
-
-export interface GitStatus {
-  readonly branch?: string;
-  readonly dirty: boolean;
-}
-
-export function parseGitStatusOutput(stdout: string): GitStatus {
-  const lines = stdout.replaceAll('\r\n', '\n').split('\n');
-  const heading = lines[0]?.startsWith('## ') === true ? lines[0].slice(3) : '';
-  const branch = heading
-    .replace(/^No commits yet on /u, '')
-    .split('...')[0]
-    ?.trim();
-  return {
-    ...(branch === undefined || branch === '' || branch === 'HEAD (no branch)'
-      ? {}
-      : { branch }),
-    dirty: lines.slice(1).some((line) => line !== ''),
-  };
-}
-
-/** Testable projection of the Runtime command catalog's currently enabled actions. */
-export function matchingSlashCommands(
-  text: string,
-  phase: TuiPhase,
-): readonly SlashCommandSpec[] {
-  if (!/^\/[^\s/]*$/u.test(text)) return [];
-  return commandPaletteEntries(text.slice(1), {
-    phase,
-    approvalPending: false,
-    providerPromptActive: false,
-    providerCommandsAvailable: true,
-    hasModel: true,
-    hasTranscript: true,
-    hasStash: true,
-  })
-    .filter((entry) => entry.availability.kind === 'enabled')
-    .map((entry) => entry.command);
 }
 
 /**
@@ -1196,8 +1143,8 @@ export async function createTuiScreen(
     let layoutWidth = renderer.width;
     let layoutHeight = renderer.height;
     let headerRows = 9;
-    let branch = opts.branch;
-    let gitDirty = opts.gitDirty ?? false;
+    const branch = opts.workspaceSnapshot.git?.branch;
+    const gitDirty = opts.workspaceSnapshot.git?.dirty ?? false;
     let hasInteracted = opts.resumed === true ||
       (opts.presentation?.store.snapshot().draft ?? '') !== '';
     let selectedModel = opts.model;
@@ -3704,7 +3651,6 @@ export async function createTuiScreen(
       diffPanel.visible = false;
       sessionPanel.visible = false;
       transcript.visible = true;
-      opts.presentation?.store.setActivePanel('transcript');
       for (const child of transcript.getChildren()) transcript.remove(child);
       transcriptBlocks.splice(0, transcriptBlocks.length);
       replayMessages = [];
@@ -3770,7 +3716,6 @@ export async function createTuiScreen(
       sessionPanel.visible = false;
       transcript.visible = false;
       diffPanel.visible = true;
-      opts.presentation?.store.setActivePanel('diff');
       refreshDiffViewer();
     };
 
@@ -3780,7 +3725,6 @@ export async function createTuiScreen(
       diffPanel.visible = false;
       transcript.visible = true;
       diffSnapshot = undefined;
-      opts.presentation?.store.setActivePanel('transcript');
       renderer.requestRender();
     };
 
@@ -3860,7 +3804,6 @@ export async function createTuiScreen(
       sessionQuery = sanitizeTerminalText(query);
       sessionItems = filterSessionItems(allSessionItems, sessionQuery);
       sessionIndex = 0;
-      opts.presentation?.store.setActivePanel('sessions');
       refreshSessionPicker();
     };
 
@@ -3871,7 +3814,6 @@ export async function createTuiScreen(
       transcript.visible = true;
       allSessionItems = [];
       sessionItems = [];
-      opts.presentation?.store.setActivePanel('transcript');
       renderer.requestRender();
     };
 
@@ -4051,14 +3993,6 @@ export async function createTuiScreen(
         usage = nextUsage;
         refreshStatus();
       },
-      setBranch(nextBranch: string | undefined): void {
-        branch = nextBranch;
-        refreshWorkspace();
-      },
-      setGitDirty(nextDirty: boolean): void {
-        gitDirty = nextDirty;
-        refreshWorkspace();
-      },
       setTransientStatus(status: string | undefined): void {
         transientStatus =
           status === undefined ? undefined : sanitizeTerminalText(status);
@@ -4113,11 +4047,6 @@ export async function createTuiScreen(
         refreshStatus();
         input.focus();
         refreshCursorVisibility();
-      },
-      toggleApprovalDetails(): void {
-        if (approvalCard === undefined || !approvalPending) return;
-        approvalCard.expanded = !approvalCard.expanded;
-        refreshComposerLayout();
       },
       handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult {
         if (!approvalPending || approvalCard === undefined) return { kind: 'none' };
@@ -4203,7 +4132,6 @@ export async function createTuiScreen(
         diffPanel.visible = false;
         sessionPanel.visible = false;
         transcript.visible = true;
-        opts.presentation?.store.setActivePanel('transcript');
         vimEnabled = state.vimEnabled;
         vimInsertMode = !vimEnabled;
         unreadAfterSeq = state.unreadAfterSeq <= lastObservedHighWater
@@ -4297,11 +4225,6 @@ export async function startTui(
   opts: TuiOptions,
 ): Promise<number> {
   const openTui = await import('@opentui/core');
-  // Runtime owns workspace facts. The view never reaches around its snapshot to query Git.
-  const detectedGit = opts.workspaceSnapshot.git
-    ?? { ...(opts.branch === undefined ? {} : { branch: opts.branch }), dirty: opts.gitDirty ?? false };
-  const branch = opts.branch ?? detectedGit.branch;
-  const gitDirty = opts.gitDirty ?? detectedGit.dirty;
   const interaction = new TuiInteractionState();
   const transparentBackground = openTui.RGBA.fromValues(0, 0, 0, 0);
   const renderer = await openTui.createCliRenderer({
@@ -4332,8 +4255,6 @@ export async function startTui(
     );
     initializingScreen = await createTuiScreen(renderer, {
       ...opts,
-      branch,
-      gitDirty,
       interaction,
       workingAnimation: true,
     });
@@ -4744,7 +4665,7 @@ export function runTuiController(
           void shutdown(0);
           return null;
         case 'abort':
-          if (tuiCanAbort(opts.interaction.phase)) session.abort();
+          if (interactionCanAbort(opts.interaction.phase)) session.abort();
           else screen.println('No active run to abort.', 'warning');
           return null;
         case 'help':
@@ -4928,7 +4849,7 @@ export function runTuiController(
               return paletteReturnDraft ?? null;
             }
             try {
-              if (tuiEnterState(opts.interaction.phase) === 'running') {
+              if (interactionEnterState(opts.interaction.phase) === 'running') {
                 session.steer(draft);
               } else {
                 session.prompt(draft).catch((error) => {
@@ -4964,7 +4885,7 @@ export function runTuiController(
         void providerController.submit(raw);
         return;
       }
-      const action = decideEnter(tuiEnterState(opts.interaction.phase), meta, raw);
+      const action = decideEnter(interactionEnterState(opts.interaction.phase), meta, raw);
       if (action.kind === 'none') {
         screen.clearInput();
         return;
@@ -5234,7 +5155,7 @@ export function runTuiController(
         consume(key);
         if (escExit.hit(Date.now())) {
           void shutdown(0);
-        } else if (tuiCanAbort(opts.interaction.phase)) {
+        } else if (interactionCanAbort(opts.interaction.phase)) {
           session.abort();
           screen.setTransientStatus('aborting…');
         } else {
@@ -5327,7 +5248,7 @@ export function runTuiController(
       closing = true;
       cleanup();
       try {
-        if (forceAbort || tuiCanAbort(opts.interaction.phase)) {
+        if (forceAbort || interactionCanAbort(opts.interaction.phase)) {
           session.abort();
         }
         await providerController?.close();

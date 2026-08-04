@@ -9,7 +9,6 @@ import type {
 import {
   createCliRuntimeModelResolver,
   createCliPermissionPolicy,
-  resolveRuntimeStorageRoots,
 } from './runtime-composition.js';
 
 const MODEL: ModelConfig = {
@@ -21,12 +20,6 @@ const THREAD_ID = 'thread' as ThreadId;
 const OP_ID = 'op_e_00000000000000000000000000000001' as ExternalOpId;
 
 describe('runtime CLI composition adapters', () => {
-  it('maps default and overridden storage roots without reading ambient HOME', () => {
-    expect(resolveRuntimeStorageRoots({ homeDir: '/host/home' })).toEqual({
-      runtimeRoot: '/host/home/.coda/runtime-v2',
-    });
-  });
-
   it('resolves only a trusted exact ModelRef and never leaks it into the ref', async () => {
     const resolver = createCliRuntimeModelResolver({
       resolveModel: () => MODEL,
