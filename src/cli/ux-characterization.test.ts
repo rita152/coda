@@ -1,7 +1,6 @@
-// UX0 terminal-product baseline. These tests intentionally describe the observable
-// pre-productization behavior across viewport, TUI routing, text-width, color,
-// one-shot human output, and current rendering-cost boundaries. Later UX stages may update
-// an assertion only when the corresponding contract and migration note change.
+// Terminal-product characterization. These tests intentionally describe observable behavior
+// across viewport, TUI routing, text-width, color, one-shot human output, and rendering-cost
+// boundaries. Assertions change only with their corresponding contract and migration note.
 
 import { describe, expect, test } from 'bun:test';
 import {
@@ -128,7 +127,7 @@ function userPromptContent(renderable: BoxRenderable): string {
   return textContent(body);
 }
 
-describe('UX0 terminal environment characterization', () => {
+describe('terminal environment characterization', () => {
   test('40x10, 80x24, and 120x40 preserve task text, draft, footer, and cursor bounds', async () => {
     for (const [width, height] of [[40, 10], [80, 24], [120, 40]] as const) {
       const view = await createView(width, height);
@@ -209,8 +208,8 @@ describe('UX0 terminal environment characterization', () => {
   test('NO_COLOR-equivalent rendering stays transparent and --no-color remains parseable', async () => {
     expect(parseFlags(['--no-color']).noColor).toBe(true);
 
-    // UX0 can inject only the already-resolved renderer option. UX1 adds the process-level
-    // probe that proves main.ts maps both NO_COLOR and --no-color to this state.
+    // This test can inject only the already-resolved renderer option. A process-level
+    // probe proves main.ts maps both NO_COLOR and --no-color to this state.
     const view = await createView(80, 24, false);
     try {
       view.screen.render({
@@ -242,7 +241,7 @@ describe('UX0 terminal environment characterization', () => {
       },
       { color: false },
     );
-    const injected = '\x1b]52;c;UX0_BASELINE_SECRET\x07visible';
+    const injected = '\x1b]52;c;TERMINAL_BASELINE_SECRET\x07visible';
     renderer.render({
       type: 'message_start',
       message: userMessage(injected),
@@ -250,14 +249,14 @@ describe('UX0 terminal environment characterization', () => {
     await renderer.drain();
 
     // One-shot human output consumes the same sanitizer contract as OpenTUI.
-    expect(output).not.toContain('\x1b]52;c;UX0_BASELINE_SECRET\x07');
-    expect(output).not.toContain('UX0_BASELINE_SECRET');
+    expect(output).not.toContain('\x1b]52;c;TERMINAL_BASELINE_SECRET\x07');
+    expect(output).not.toContain('TERMINAL_BASELINE_SECRET');
     expect(output).toContain('visible');
     expect(output).not.toContain('\x1b[?1049h');
   });
 });
 
-describe('UX4 rendering performance gates', () => {
+describe('rendering performance gates', () => {
   test('keeps input under 100ms, coalesces 10k deltas, and segments 1k history', async () => {
     const startedAt = performance.now();
     const interactionView = await createView(80, 24);

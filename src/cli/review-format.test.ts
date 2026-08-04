@@ -11,7 +11,7 @@ import {
   formatReviewSnapshot,
 } from './review-format.js';
 
-describe('UX3 review formatting', () => {
+describe('review formatting', () => {
   it('searches session identity, state, time, workspace, cwd, and preview before newest-first display', () => {
     const items = [
       sessionItem('thread-old', 1, 'idle', 'older summary'),

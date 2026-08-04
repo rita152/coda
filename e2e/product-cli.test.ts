@@ -1,4 +1,4 @@
-// UX1 产品 CLI 边界：真实驱动 dist/main.js，验证薄 bootstrap、输出通道、
+// 产品 CLI 边界：真实驱动 dist/main.js，验证薄 bootstrap、输出通道、
 // RuntimePort session inventory 与 exec 别名。子进程 HOME 与凭据环境全部隔离。
 
 import {

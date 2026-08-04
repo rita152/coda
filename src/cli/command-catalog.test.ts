@@ -92,7 +92,7 @@ describe('canonical command catalog', () => {
     expectUsageError(['--ui=graphical'], 'invalid_value', 'auto|tui');
   });
 
-  it('parses opt-in UX4 output, theme, ASCII, ephemeral, and timeout flags', () => {
+  it('parses opt-in output, theme, ASCII, ephemeral, and timeout flags', () => {
     expect(parseCliInvocation([
       'exec',
       '--output=stream-json',

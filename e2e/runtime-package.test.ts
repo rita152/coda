@@ -1,4 +1,4 @@
-// Phase 1 package-level contract: a consumer outside the repository can resolve
+// Package-level contract: a consumer outside the repository can resolve
 // `coda/runtime` (JavaScript + declarations), and importing it performs no host IO.
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
