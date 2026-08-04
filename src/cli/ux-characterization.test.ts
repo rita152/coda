@@ -69,6 +69,7 @@ async function createView(
     color,
     model: MODEL,
     workspaceSnapshot: WORKSPACE_SNAPSHOT,
+    interactionState: () => 'idle',
     contextLimit: 128_000,
     treeSitterClient: highlighter,
     ...(onStreamFrame === undefined ? {} : { onStreamFrame }),

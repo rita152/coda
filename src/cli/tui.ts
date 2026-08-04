@@ -275,7 +275,7 @@ interface ProjectRuleWarningSource {
 
 interface TuiScreenOptions extends TuiOptions {
   onSubmit?: () => void;
-  interaction?: TuiInteractionState;
+  interactionState: () => TuiPhase;
   /** 测试可注入确定性的 highlighter；生产缺省使用 OpenTUI 全局 client。 */
   treeSitterClient?: TreeSitterClient;
   /** Deterministic performance probe: one callback per coalesced visual stream frame. */
@@ -305,7 +305,6 @@ export interface TuiScreen {
   ): void;
   setModel(model: ModelRef | undefined, contextLimit?: number): void;
   setProviderCommandsAvailable(available: boolean): void;
-  setInteractionState(phase: TuiPhase): void;
   resolveApproval(): void;
   handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult;
   getInput(): string;
@@ -396,48 +395,6 @@ type ApprovalPanelLine =
   | { readonly kind: 'option'; readonly index: number; readonly option: ApprovalPanelOption };
 
 export type TuiPhase = CliInteractionState;
-
-/**
- * TUI 唯一的交互状态投影。它只由 canonical Runtime event 推导，可随时丢弃重建；
- * 视图标题、Enter 分派和 Esc 语义共享同一个实例，避免各自读取不同状态源。
- */
-export class TuiInteractionState {
-  #phase: TuiPhase = 'idle';
-
-  get phase(): TuiPhase {
-    return this.#phase;
-  }
-
-  replace(phase: TuiPhase): void {
-    this.#phase = phase;
-  }
-
-  apply(event: CliRuntimeEvent): void {
-    switch (event.type) {
-      case 'agent_start':
-        this.#phase = 'running';
-        break;
-      case 'agent_end':
-        this.#phase = event.willRetry === true ? 'retrying' : 'idle';
-        break;
-      case 'retry_scheduled':
-        this.#phase = 'retrying';
-        break;
-      case 'compaction_start':
-        this.#phase = 'compacting';
-        break;
-      case 'compaction_end':
-        this.#phase = 'idle';
-        break;
-      case 'error':
-        // retry 的取消、sleep 失败和 continue 失败都只以 error 收尾，不再补 agent_end。
-        if (event.fatal || this.#phase === 'retrying') this.#phase = 'idle';
-        break;
-      default:
-        break;
-    }
-  }
-}
 
 /** 审批决议必须来自完全无修饰键的 y/a/n/Esc。 */
 export function approvalDecisionForKey(
@@ -622,7 +579,7 @@ export async function createTuiScreen(
   const resolvedTheme = resolveTuiTheme(opts.theme, opts.color);
   const palette = resolvedTheme.palette;
   const cursorForeground = RGBA.fromHex(palette.cursor);
-  const interaction = opts.interaction ?? new TuiInteractionState();
+  const interactionState = opts.interactionState;
   let approvalPending = false;
   let commandPrompt: string | undefined;
   let commandChoices: readonly ProviderCommandChoice[] = [];
@@ -1370,7 +1327,7 @@ export async function createTuiScreen(
       : Math.max(1, lastObservedHighWater - unreadAfterSeq);
 
     const refreshTaskStatus = (): void => {
-      const phase = approvalPending ? 'approval' : interaction.phase;
+      const phase = approvalPending ? 'approval' : interactionState();
       const queue = `${steerCount}/${followUpCount}`;
       const permission = opts.workspaceSnapshot.permissions.mode;
       const unread = unreadCount();
@@ -1423,7 +1380,7 @@ export async function createTuiScreen(
           if (/^\/[^\s/]*$/u.test(source)) {
             nextMode = 'slash';
             nextItems = commandPaletteEntries(source.slice(1), {
-              phase: interaction.phase,
+              phase: interactionState(),
               approvalPending,
               providerPromptActive: false,
               providerCommandsAvailable,
@@ -1469,7 +1426,7 @@ export async function createTuiScreen(
         }
       }
       if (nextItems.length === 0) nextMode = 'none';
-      const nextKey = `${nextMode}\0${interaction.phase}\0${source}\0${nextItems
+      const nextKey = `${nextMode}\0${interactionState()}\0${source}\0${nextItems
         .map((item) => item.key)
         .join('\0')}`;
       if (nextKey !== promptMenuKey) {
@@ -1577,9 +1534,9 @@ export async function createTuiScreen(
     };
     const workingShouldBeVisible = (): boolean =>
       !approvalPending &&
-      (interaction.phase === 'running' ||
-        interaction.phase === 'retrying' ||
-        interaction.phase === 'compacting');
+      (interactionState() === 'running' ||
+        interactionState() === 'retrying' ||
+        interactionState() === 'compacting');
     const syncWorkingAnimation = (): void => {
       const shouldAnimate =
         opts.workingAnimation === true &&
@@ -2019,7 +1976,7 @@ export async function createTuiScreen(
     };
 
     const refreshStatus = (): void => {
-      const phase = interaction.phase;
+      const phase = interactionState();
       renderWorking();
       refreshTaskStatus();
       contextText.content = formatContextUsage(usage.contextTokens, selectedContextLimit);
@@ -2804,7 +2761,7 @@ export async function createTuiScreen(
         refreshBashTool(view.bash);
         toolViews.delete(toolCallId);
         addDiff(result.details, view.bash.appendDetail);
-        activity = defaultActivity(interaction.phase);
+        activity = defaultActivity(interactionState());
         refreshStatus();
         return;
       }
@@ -2825,7 +2782,7 @@ export async function createTuiScreen(
         refreshExplorationGroup(view.explorationGroup);
         toolViews.delete(toolCallId);
         addDiff(result.details, view.explorationGroup.appendDetail);
-        activity = defaultActivity(interaction.phase);
+        activity = defaultActivity(interactionState());
         refreshStatus();
         return;
       }
@@ -2855,7 +2812,7 @@ export async function createTuiScreen(
         toolViews.delete(toolCallId);
       }
       addDiff(result.details, appendDetail);
-      activity = defaultActivity(interaction.phase);
+      activity = defaultActivity(interactionState());
       refreshStatus();
     };
 
@@ -3190,7 +3147,6 @@ export async function createTuiScreen(
     };
 
     const render = (event: CliRuntimeEvent): void => {
-      interaction.apply(event);
       switch (event.type) {
         case 'agent_start':
           finishExplorationGroup();
@@ -3292,8 +3248,8 @@ export async function createTuiScreen(
           break;
         case 'error':
           completeExplorationGroups();
-          if (interaction.phase === 'idle') transientStatus = undefined;
-          activity = defaultActivity(interaction.phase);
+          if (interactionState() === 'idle') transientStatus = undefined;
+          activity = defaultActivity(interactionState());
           addText(
             `${event.fatal ? '✖ fatal' : '⚠ warning'} · ${event.message}`,
             event.fatal ? 'danger' : 'warning',
@@ -3327,7 +3283,7 @@ export async function createTuiScreen(
               : '⋯ compaction failed',
             event.ok ? 'muted' : 'warning',
           );
-          activity = defaultActivity(interaction.phase);
+          activity = defaultActivity(interactionState());
           refreshStatus();
           break;
         default:
@@ -4036,11 +3992,6 @@ export async function createTuiScreen(
         providerCommandsAvailable = available;
         refreshComposerLayout();
       },
-      setInteractionState(phase: TuiPhase): void {
-        interaction.replace(phase);
-        clearWorkingSummary();
-        refreshStatus();
-      },
       resolveApproval(): void {
         approvalPending = false;
         approvalCard = undefined;
@@ -4225,7 +4176,6 @@ export async function startTui(
   opts: TuiOptions,
 ): Promise<number> {
   const openTui = await import('@opentui/core');
-  const interaction = new TuiInteractionState();
   const transparentBackground = openTui.RGBA.fromValues(0, 0, 0, 0);
   const renderer = await openTui.createCliRenderer({
     screenMode: 'alternate-screen',
@@ -4255,7 +4205,7 @@ export async function startTui(
     );
     initializingScreen = await createTuiScreen(renderer, {
       ...opts,
-      interaction,
+      interactionState: () => session.interactionState(),
       workingAnimation: true,
     });
     initializingScreen.setUsage(session.usage());
@@ -4272,7 +4222,6 @@ export async function startTui(
   const screen = initializingScreen;
 
   return runTuiController(session, approval, screen, renderer, {
-    interaction,
     ...(opts.projectRuleWarnings !== undefined && {
       projectRuleWarnings: opts.projectRuleWarnings,
     }),
@@ -4287,7 +4236,6 @@ export async function startTui(
 }
 
 interface TuiControllerOptions {
-  interaction: TuiInteractionState;
   cwd?: string;
   version?: string;
   presentation?: TuiOptions['presentation'];
@@ -4520,7 +4468,6 @@ export function runTuiController(
       screen.resolveApproval();
       latestPromptDraft = state?.draft ?? '';
       screen.resetTranscript(session.messages, workspace.eventHighWaterSeq());
-      screen.setInteractionState(session.interactionState());
       if (state !== undefined) screen.restorePresentation(state);
       screen.setInput(latestPromptDraft);
       screen.setUsage(session.usage());
@@ -4665,7 +4612,7 @@ export function runTuiController(
           void shutdown(0);
           return null;
         case 'abort':
-          if (interactionCanAbort(opts.interaction.phase)) session.abort();
+          if (interactionCanAbort(session.interactionState())) session.abort();
           else screen.println('No active run to abort.', 'warning');
           return null;
         case 'help':
@@ -4849,7 +4796,7 @@ export function runTuiController(
               return paletteReturnDraft ?? null;
             }
             try {
-              if (interactionEnterState(opts.interaction.phase) === 'running') {
+              if (interactionEnterState(session.interactionState()) === 'running') {
                 session.steer(draft);
               } else {
                 session.prompt(draft).catch((error) => {
@@ -4885,7 +4832,7 @@ export function runTuiController(
         void providerController.submit(raw);
         return;
       }
-      const action = decideEnter(interactionEnterState(opts.interaction.phase), meta, raw);
+      const action = decideEnter(interactionEnterState(session.interactionState()), meta, raw);
       if (action.kind === 'none') {
         screen.clearInput();
         return;
@@ -5148,14 +5095,14 @@ export function runTuiController(
       }
       if (key.ctrl && key.name === 'd') {
         consume(key);
-        if (screen.getInput() === '' && opts.interaction.phase === 'idle') void shutdown(0);
+        if (screen.getInput() === '' && session.interactionState() === 'idle') void shutdown(0);
         return;
       }
       if (key.name === 'escape') {
         consume(key);
         if (escExit.hit(Date.now())) {
           void shutdown(0);
-        } else if (interactionCanAbort(opts.interaction.phase)) {
+        } else if (interactionCanAbort(session.interactionState())) {
           session.abort();
           screen.setTransientStatus('aborting…');
         } else {
@@ -5248,7 +5195,7 @@ export function runTuiController(
       closing = true;
       cleanup();
       try {
-        if (forceAbort || interactionCanAbort(opts.interaction.phase)) {
+        if (forceAbort || interactionCanAbort(session.interactionState())) {
           session.abort();
         }
         await providerController?.close();

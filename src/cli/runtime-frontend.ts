@@ -874,7 +874,9 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
         this.#activeRunId = runId;
         break;
       case 'agent_end':
-        if (event.willRetry !== true) {
+        if (event.willRetry === true) {
+          this.#state = 'retrying';
+        } else {
           this.#state = 'idle';
           this.#activeRunId = undefined;
         }
@@ -888,7 +890,16 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
         this.#activeRunId = event.activityRunId;
         break;
       case 'compaction_end':
-        if (this.#state === 'compacting') this.#state = 'idle';
+        if (this.#state === 'compacting') {
+          this.#state = 'idle';
+          this.#activeRunId = undefined;
+        }
+        break;
+      case 'error':
+        if (event.fatal || this.#state === 'retrying') {
+          this.#state = 'idle';
+          this.#activeRunId = undefined;
+        }
         break;
       case 'message_end':
         this.#upsertMessage(event.message);

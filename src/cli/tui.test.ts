@@ -19,7 +19,6 @@ import type {
   ApprovalPresentation,
   AssistantMessage,
   ProviderEvent,
-  RunId,
   ThreadId,
   ToolResultMessage,
   UserMessage,
@@ -28,6 +27,7 @@ import type {
 } from '../protocol/index.js';
 import type {
   CliControlActions,
+  CliInteractionState,
   CliRuntimeEvent,
   CliThreadUsage,
 } from './frontend-types.js';
@@ -49,15 +49,10 @@ import {
   sanitizeTerminalText,
   sanitizeTerminalTitle,
   TRANSCRIPT_REPLAY_CHUNK_MESSAGES,
-  TuiInteractionState,
 } from './tui.js';
-import { interactionCanAbort, interactionEnterState } from './tui-controls.js';
 import type { TuiOptions, TuiScreen } from './tui.js';
 
 const MODEL = { provider: 'openai', api: 'openai-chat', model: 'gpt-5.2' };
-const RETRY_PREDECESSOR_RUN_ID = 'run-tui-predecessor' as RunId;
-const RETRY_SUCCESSOR_RUN_ID = 'run-tui-successor' as RunId;
-const COMPACTION_RUN_ID = 'run-tui-compaction' as RunId;
 const WORKSPACE_SNAPSHOT = {
   workspaceId: 'ws_tui_test' as WorkspaceId,
   permissions: {
@@ -178,7 +173,10 @@ async function setup(
     model?: typeof MODEL;
     contextLimit?: number;
   } = { model: MODEL, contextLimit: 128_000 },
-  overrides: Partial<TuiOptions> & { workingAnimation?: boolean } = {},
+  overrides: Partial<TuiOptions> & {
+    workingAnimation?: boolean;
+    interactionState?: () => CliInteractionState;
+  } = {},
 ): Promise<{
   screen: TuiScreen;
   flush: () => Promise<void>;
@@ -188,7 +186,6 @@ async function setup(
   mockInput: Awaited<ReturnType<typeof createTestRenderer>>['mockInput'];
   mockMouse: Awaited<ReturnType<typeof createTestRenderer>>['mockMouse'];
   renderer: Awaited<ReturnType<typeof createTestRenderer>>['renderer'];
-  interaction: TuiInteractionState;
   resolveHighlights: () => Promise<void>;
   destroyHighlighter: () => Promise<void>;
   destroy: () => Promise<void>;
@@ -201,7 +198,6 @@ async function setup(
     autoFocus: false,
   });
   const treeSitterClient = new MockTreeSitterClient();
-  const interaction = new TuiInteractionState();
   const screen = await createTuiScreen(testRenderer.renderer, {
     cwd: '/Users/test/work/coda',
     version: '0.0.1',
@@ -213,7 +209,7 @@ async function setup(
     ...overrides,
     workspaceSnapshot: overrides.workspaceSnapshot ?? WORKSPACE_SNAPSHOT,
     onSubmit,
-    interaction,
+    interactionState: overrides.interactionState ?? (() => 'idle'),
     treeSitterClient,
   });
   return {
@@ -225,7 +221,6 @@ async function setup(
     mockInput: testRenderer.mockInput,
     mockMouse: testRenderer.mockMouse,
     renderer: testRenderer.renderer,
-    interaction,
     resolveHighlights: async () => {
       treeSitterClient.resolveAllHighlightOnce();
       await testRenderer.flush();
@@ -1404,6 +1399,7 @@ describe('TUI presentation workflow', () => {
         permissions: { ...WORKSPACE_SNAPSHOT.permissions, mode: 'deny' },
         git: { branch: 'main', dirty: true },
       },
+      interactionState: () => 'running',
     });
     try {
       view.screen.setInput('a long working draft');
@@ -2737,7 +2733,10 @@ describe('TUI 安全渲染与转录恢复', () => {
   });
 
   it('流式文本保持块边界，reasoning summary 只替换 prompt 上方的 Working 行', async () => {
-    const view = await setup();
+    let phase: CliInteractionState = 'running';
+    const view = await setup(100, 30, () => {}, true, undefined, {
+      interactionState: () => phase,
+    });
     try {
       const textOne = assistant({ content: [{ type: 'text', text: '' }] });
       const textTwo = assistant({
@@ -2857,6 +2856,7 @@ describe('TUI 安全渲染与转录恢复', () => {
           ],
         }),
       });
+      phase = 'idle';
       view.screen.render({ type: 'agent_end', reason: 'completed', messages: [] });
       await view.flush();
       await view.resolveHighlights();
@@ -3052,59 +3052,6 @@ describe('TUI 安全渲染与转录恢复', () => {
 });
 
 describe('TUI 交互状态投影', () => {
-  it('retry 取消和 compaction 结束都回到 idle，Enter/Esc 语义按 phase 区分', async () => {
-    const view = await setup();
-    try {
-      view.screen.render({
-        type: 'agent_end',
-        reason: 'error',
-        messages: [],
-        willRetry: true,
-      });
-      view.screen.render({
-        type: 'retry_scheduled',
-        attempt: 1,
-        maxAttempts: 5,
-        delayMs: 1_000,
-        errorMessage: 'retry me',
-        predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
-        successorRunId: RETRY_SUCCESSOR_RUN_ID,
-      });
-      expect(view.interaction.phase).toBe('retrying');
-      expect(interactionEnterState(view.interaction.phase)).toBe('running');
-      expect(interactionCanAbort(view.interaction.phase)).toBe(true);
-
-      view.screen.render({ type: 'error', fatal: false, message: 'retry cancelled by abort' });
-      await view.flush();
-      expect(view.interaction.phase).toBe('idle');
-      expect(view.frame()).not.toContain('coda · ready');
-
-      view.screen.render({
-        type: 'compaction_start',
-        reason: 'threshold',
-        predecessorRunId: RETRY_PREDECESSOR_RUN_ID,
-        activityRunId: COMPACTION_RUN_ID,
-      });
-      await view.flush();
-      expect(view.interaction.phase).toBe('compacting');
-      expect(interactionEnterState(view.interaction.phase)).toBe('idle');
-      expect(interactionCanAbort(view.interaction.phase)).toBe(true);
-      expect(view.frame()).toContain('Compacting context · Enter queue');
-
-      view.screen.render({
-        type: 'compaction_end',
-        activityRunId: COMPACTION_RUN_ID,
-        ok: false,
-        droppedMessages: 0,
-      });
-      await view.flush();
-      expect(view.interaction.phase).toBe('idle');
-      expect(view.frame()).not.toContain('Compacting context · Enter queue');
-    } finally {
-      await view.destroy();
-    }
-  });
-
   it('审批只接受完全无修饰键的决议', () => {
     const plain = {
       name: 'a',
@@ -3138,7 +3085,6 @@ describe('TUI 控制器接线', () => {
     };
     const view = await setup(100, 30);
     const controller = runTuiController(session, undefined, view.screen, view.renderer, {
-      interaction: view.interaction,
       installSignalHandlers: false,
     });
     view.screen.focusInput();
@@ -3201,7 +3147,6 @@ describe('TUI 控制器接线', () => {
     };
     const view = await setup(90, 30);
     const controller = runTuiController(session, approval, view.screen, view.renderer, {
-      interaction: view.interaction,
       installSignalHandlers: false,
     });
     view.screen.openDiffViewer({
@@ -3284,7 +3229,7 @@ describe('TUI 控制器接线', () => {
       undefined,
       controllerScreen,
       controllerRenderer,
-      { interaction: view.interaction, installSignalHandlers: false },
+      { installSignalHandlers: false },
     );
 
     view.mockInput.pressKey('c', { ctrl: true });
@@ -3360,7 +3305,6 @@ describe('TUI 控制器接线', () => {
     };
     const view = await setup(100, 30, () => {}, true, undefined, { workspace });
     const controller = runTuiController(session, undefined, view.screen, view.renderer, {
-      interaction: view.interaction,
       workspace,
       installSignalHandlers: false,
     });
@@ -3470,7 +3414,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         workspace,
         installSignalHandlers: false,
       },
@@ -3485,7 +3428,7 @@ describe('TUI 控制器接线', () => {
     }
     await view.flush();
     expect(currentThreadId).toBe('thread-idle-b' as ThreadId);
-    expect(view.interaction.phase).toBe('idle');
+    expect(session.interactionState()).toBe('idle');
     expect(view.frame()).toContain('approve thread B only');
 
     view.mockInput.pressKey('y');
@@ -3538,7 +3481,6 @@ describe('TUI 控制器接线', () => {
     });
     let editCalls = 0;
     const controller = runTuiController(session, undefined, view.screen, view.renderer, {
-      interaction: view.interaction,
       cwd: dir,
       presentation: {
         store,
@@ -3618,7 +3560,6 @@ describe('TUI 控制器接线', () => {
     });
     view.screen.focusInput();
     const controller = runTuiController(session, undefined, view.screen, view.renderer, {
-      interaction: view.interaction,
       presentation: { store },
       installSignalHandlers: false,
     });
@@ -3659,7 +3600,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         installSignalHandlers: false,
         projectRuleWarnings: {
           subscribeWarnings(listener) {
@@ -3734,7 +3674,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         providerCommands: { registry, runtime },
         presentation: { store },
         installSignalHandlers: false,
@@ -3856,7 +3795,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         installSignalHandlers: false,
       },
     );
@@ -3935,7 +3873,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         installSignalHandlers: false,
       },
     );
@@ -4031,7 +3968,6 @@ describe('TUI 控制器接线', () => {
       view.screen,
       view.renderer,
       {
-        interaction: view.interaction,
         installSignalHandlers: false,
         workspace,
       },
@@ -4130,7 +4066,7 @@ describe('TUI 控制器接线', () => {
       { resolveApproval: () => {} },
       view.screen,
       view.renderer,
-      { interaction: view.interaction, installSignalHandlers: false, workspace },
+      { installSignalHandlers: false, workspace },
     );
 
     await view.flush();

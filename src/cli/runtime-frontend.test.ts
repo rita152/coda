@@ -25,6 +25,8 @@ const WORKSPACE_ID = 'workspace-test' as WorkspaceId;
 const THREAD_ID = 'thread-test' as ThreadId;
 const THREAD_B = 'thread-background' as ThreadId;
 const RUN_ID = 'run-test' as RunId;
+const RETRY_RUN_ID = 'run-retry-test' as RunId;
+const COMPACTION_RUN_ID = 'run-compaction-test' as RunId;
 const TURN_ID = 'turn-test' as TurnId;
 const MODEL: ModelConfig = {
   ref: { provider: 'faux', api: 'faux', model: 'faux' },
@@ -147,6 +149,80 @@ describe('RuntimeFrontendSession', () => {
       type: 'abort',
       expectedRunId: RUN_ID,
     });
+    await session.close();
+  });
+
+  it('owns retry, abort, and prompt op lifecycle in one canonical projection', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+    const events: string[] = [];
+    session.subscribe((event) => {
+      events.push(event.type);
+    });
+
+    const prompt = session.prompt('retry lifecycle');
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('running');
+
+    runtime.endPromptForRetry();
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('retrying');
+
+    runtime.scheduleRetry();
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('retrying');
+    session.abort();
+    expect(runtime.ops.at(-1)).toMatchObject({
+      type: 'abort',
+      expectedRunId: RETRY_RUN_ID,
+    });
+
+    runtime.failRetryAndCompletePrompt();
+    await prompt;
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('idle');
+    expect(events).toEqual([
+      'agent_start',
+      'agent_end',
+      'retry_scheduled',
+      'op_completed',
+      'error',
+      'op_completed',
+    ]);
+    await session.close();
+  });
+
+  it('projects compaction activity and clears its abort target at completion', async () => {
+    const runtime = new FakeRuntime();
+    const session = new RuntimeFrontendSession({
+      runtime,
+      attachment: 'create',
+      threadId: THREAD_ID,
+      initialModel: MODEL,
+    });
+    await session.initialize();
+
+    runtime.startCompaction();
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('compacting');
+    session.abort();
+    expect(runtime.ops.at(-1)).toMatchObject({
+      type: 'abort',
+      expectedRunId: COMPACTION_RUN_ID,
+    });
+
+    runtime.endCompaction();
+    await flushMicrotasks();
+    expect(session.interactionState()).toBe('idle');
+    session.abort();
+    expect(runtime.ops.at(-1)).toEqual(expect.objectContaining({ type: 'abort' }));
+    expect(runtime.ops.at(-1)).not.toHaveProperty('expectedRunId');
     await session.close();
   });
 
@@ -1056,6 +1132,65 @@ class FakeRuntime implements RuntimeFrontendPort {
       terminalRunId: RUN_ID,
       outcome: 'interrupted',
     }, { opId: op.opId, runId: RUN_ID });
+  }
+
+  endPromptForRetry(): void {
+    const op = this.#pendingPrompt;
+    if (op === undefined) throw new Error('no pending prompt');
+    this.#push({
+      type: 'agent_end',
+      reason: 'error',
+      messages: [],
+      willRetry: true,
+    }, { opId: op.opId, runId: RUN_ID });
+  }
+
+  scheduleRetry(): void {
+    const op = this.#pendingPrompt;
+    if (op === undefined) throw new Error('no pending prompt');
+    this.#push({
+      type: 'retry_scheduled',
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 10,
+      errorMessage: 'retry requested',
+      predecessorRunId: RUN_ID,
+      successorRunId: RETRY_RUN_ID,
+    }, { opId: op.opId, runId: RETRY_RUN_ID });
+  }
+
+  failRetryAndCompletePrompt(): void {
+    const op = this.#pendingPrompt;
+    if (op === undefined) throw new Error('no pending prompt');
+    this.#pendingPrompt = undefined;
+    this.#push({ type: 'error', fatal: false, message: 'retry cancelled by abort' }, {
+      opId: op.opId,
+      runId: RETRY_RUN_ID,
+    });
+    this.#push({
+      type: 'op_completed',
+      opType: 'prompt',
+      terminalRunId: RETRY_RUN_ID,
+      outcome: 'interrupted',
+    }, { opId: op.opId, runId: RETRY_RUN_ID });
+  }
+
+  startCompaction(): void {
+    this.#push({
+      type: 'compaction_start',
+      reason: 'threshold',
+      predecessorRunId: RUN_ID,
+      activityRunId: COMPACTION_RUN_ID,
+    }, { runId: COMPACTION_RUN_ID });
+  }
+
+  endCompaction(): void {
+    this.#push({
+      type: 'compaction_end',
+      activityRunId: COMPACTION_RUN_ID,
+      ok: true,
+      droppedMessages: 2,
+    }, { runId: COMPACTION_RUN_ID });
   }
 
   requestApproval(requestId: string): void {
