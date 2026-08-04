@@ -115,12 +115,23 @@ function isBoolean(v: unknown): boolean {
   return typeof v === 'boolean';
 }
 
+function legacyReasoningSupport(value: unknown): boolean | undefined {
+  if (value === 'none') return false;
+  if (value === 'openai' || value === 'reasoning_content') return true;
+  return undefined;
+}
+
 /** detectCompat 推断 + model.compat 显式字段浅覆盖(白名单收窄,见上)。 */
 export function resolveCompat(model: ModelConfig): ResolvedCompat {
   const overrides: Partial<ResolvedCompat> = {};
+  let legacyReasoningFormat: unknown;
   const bag = model.compat ?? {};
   for (const [key, value] of Object.entries(bag)) {
     if (value === undefined) continue;
+    if (key === 'reasoningFormat') {
+      legacyReasoningFormat = value;
+      continue;
+    }
     const validator = FLAG_VALIDATORS[key as keyof CompatFlags];
     if (validator === undefined) {
       console.warn(`[openai-chat] unknown compat key '${key}' ignored`);
@@ -131,6 +142,17 @@ export function resolveCompat(model: ModelConfig): ResolvedCompat {
       continue;
     }
     (overrides as Record<string, unknown>)[key] = value;
+  }
+  if (legacyReasoningFormat !== undefined) {
+    const migrated = legacyReasoningSupport(legacyReasoningFormat);
+    if (migrated === undefined) {
+      console.warn(`[openai-chat] invalid deprecated compat value for 'reasoningFormat' (${JSON.stringify(legacyReasoningFormat)}) ignored`);
+    } else if (overrides.supportsReasoning !== undefined) {
+      console.warn("[openai-chat] deprecated compat key 'reasoningFormat' ignored because 'supportsReasoning' takes precedence");
+    } else {
+      console.warn("[openai-chat] deprecated compat key 'reasoningFormat' mapped to 'supportsReasoning'");
+      overrides.supportsReasoning = migrated;
+    }
   }
   return { ...detectCompat(model.baseURL), ...overrides };
 }

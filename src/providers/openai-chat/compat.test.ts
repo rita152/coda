@@ -68,7 +68,7 @@ describe('resolveCompat(白名单收窄:垃圾值不得直达 wire)', () => {
           maxTokensField: 'max_output_tokens',        // typo:非法枚举 → 丢弃
           supportsImageParts: 'false',                // 字符串布尔 → 丢弃(不得当 truthy)
           supportsReasoning: null,                     // null → 丢弃
-          reasoningFormat: 'none',                     // 已移除的名义方言 → 按未知键丢弃
+          reasoningFormat: 'constructor',              // 已废弃值非法 → 丢弃
           totallyUnknownKey: true,                    // 未知键 → 丢弃
           supportsUsageInStreaming: true,             // 合法 → 生效
         },
@@ -78,6 +78,46 @@ describe('resolveCompat(白名单收窄:垃圾值不得直达 wire)', () => {
       expect(p.supportsReasoning).toBe(true);
       expect(p.supportsUsageInStreaming).toBe(true);
       expect(warnings).toHaveLength(5);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it('旧 reasoningFormat 保持读取开关语义并发出迁移告警', () => {
+    const warnings: string[] = [];
+    const orig = console.warn;
+    console.warn = (msg: string) => { warnings.push(msg); };
+    try {
+      for (const [reasoningFormat, supportsReasoning] of Object.entries({
+        none: false,
+        openai: true,
+        reasoning_content: true,
+      })) {
+        expect(resolveCompat({
+          ref: { provider: 'x', api: 'openai-chat', model: 'm' },
+          compat: { reasoningFormat },
+        }).supportsReasoning).toBe(supportsReasoning);
+      }
+      expect(warnings).toHaveLength(3);
+      expect(warnings.every((warning) => warning.includes("'supportsReasoning'"))).toBe(true);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it('当前 supportsReasoning 显式值优先于旧 reasoningFormat', () => {
+    const warnings: string[] = [];
+    const orig = console.warn;
+    console.warn = (msg: string) => { warnings.push(msg); };
+    try {
+      const p = resolveCompat({
+        ref: { provider: 'x', api: 'openai-chat', model: 'm' },
+        compat: { supportsReasoning: true, reasoningFormat: 'none' },
+      });
+      expect(p.supportsReasoning).toBe(true);
+      expect(warnings).toEqual([
+        "[openai-chat] deprecated compat key 'reasoningFormat' ignored because 'supportsReasoning' takes precedence",
+      ]);
     } finally {
       console.warn = orig;
     }
