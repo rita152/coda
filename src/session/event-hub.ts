@@ -298,6 +298,9 @@ export class EventHub {
         if (terminal.kind === 'error') throw terminal.error;
         return { done: true, value: undefined };
       }
+      // A future cursor registration can insert a new replay while the prior loader is awaiting.
+      // Prepare that replay directly because its registration wake may predate this waiter.
+      if (subscription.replay[subscription.replayIndex] !== undefined) continue;
       await new Promise<void>((resolve) => {
         subscription.waiter = resolve;
       });

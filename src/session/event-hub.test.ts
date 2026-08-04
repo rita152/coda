@@ -191,6 +191,46 @@ describe('EventHub', () => {
     await liveOnly.return?.();
   });
 
+  test('continues into a future cursor replay installed while another replay is loading', async () => {
+    const stream = new EventHub();
+    let markAEntered!: () => void;
+    let releaseA!: () => void;
+    let markBEntered!: () => void;
+    let releaseB!: () => void;
+    const aEntered = new Promise<void>((resolve) => { markAEntered = resolve; });
+    const aGate = new Promise<void>((resolve) => { releaseA = resolve; });
+    const bEntered = new Promise<void>((resolve) => { markBEntered = resolve; });
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    registerThread(stream, THREAD_A, [envelope(THREAD_A, 1)], {
+      beforeReplay: async () => {
+        markAEntered();
+        await aGate;
+      },
+    });
+    const iterator = stream.subscribe({
+      cursors: [
+        { threadId: THREAD_A, afterSeq: 0 },
+        { threadId: THREAD_B, afterSeq: 0 },
+      ],
+    })[Symbol.asyncIterator]();
+    const first = iterator.next();
+    await aEntered;
+
+    registerThread(stream, THREAD_B, [envelope(THREAD_B, 1)], {
+      beforeReplay: async () => {
+        markBEntered();
+        await bGate;
+      },
+    });
+    releaseA();
+    await bEntered;
+    releaseB();
+
+    expect((await first).value).toEqual(envelope(THREAD_B, 1));
+    expect((await iterator.next()).value).toEqual(envelope(THREAD_A, 1));
+    await iterator.return?.();
+  });
+
   test('hands storage replay off exactly once to concurrent live events', async () => {
     const stream = new EventHub({ subscriptionQueueLimit: 1, historyLimit: 2 });
     let release: (() => void) | undefined;
