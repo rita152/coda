@@ -2,11 +2,7 @@
 // It models workspace/thread leases and fencing; persistence lasts for the storage object's lifetime.
 
 import {
-  assertWorkspaceId,
   canonicalJson,
-  canonicalJsonSha256,
-  isExternalOpId,
-  isWellFormedUnicode,
   workspaceIdFromCwd,
   strictJsonSnapshot,
 } from '../protocol/index.js';
@@ -24,6 +20,11 @@ import type {
   WorkspaceWriteFenceValidation,
 } from '../protocol/index.js';
 import { WorkspaceBindingMismatchError, WorkspaceInUseError, RuntimeStorageError } from './errors.js';
+import {
+  policyGrantFenced,
+  validatePolicyGrant,
+  workspacePolicyGrantSnapshot,
+} from './policy-grant-storage.js';
 import {
   foldThreadJournal,
   threadJournalRequiresRecovery,
@@ -376,7 +377,7 @@ class MemoryPolicyGrantRepository implements PolicyGrantRepository {
   async snapshot(): Promise<Readonly<PolicyGrantSnapshot>> {
     this.#assertOpen();
     this.workspace.assertCurrentLease(this.lease);
-    return policyGrantSnapshot(this.workspaceId, this.grants.values());
+    return workspacePolicyGrantSnapshot(this.workspaceId, this.grants.values());
   }
 
   async commitAllowAlways(
@@ -395,7 +396,7 @@ class MemoryPolicyGrantRepository implements PolicyGrantRepository {
     }
     const normalized = validatePolicyGrant(grant, this.workspaceId);
     const prior = this.grants.get(normalized.grantId);
-    const currentRevision = policyGrantSnapshot(this.workspaceId, this.grants.values()).revision;
+    const currentRevision = workspacePolicyGrantSnapshot(this.workspaceId, this.grants.values()).revision;
     if (prior !== undefined) {
       return canonicalJson(prior) === canonicalJson(normalized)
         ? { kind: 'duplicate', revision: currentRevision }
@@ -415,7 +416,7 @@ class MemoryPolicyGrantRepository implements PolicyGrantRepository {
     this.grants.set(normalized.grantId, normalized);
     return {
       kind: 'applied',
-      revision: policyGrantSnapshot(this.workspaceId, this.grants.values()).revision,
+      revision: workspacePolicyGrantSnapshot(this.workspaceId, this.grants.values()).revision,
     };
   }
 
@@ -573,142 +574,6 @@ function withoutActiveRun(
 
 function derivedTuple(claim: DerivedOpIdentityClaim): string {
   return JSON.stringify([claim.purpose, claim.workspaceId, ...claim.parts]);
-}
-
-function validatePolicyGrant(
-  input: Readonly<PolicyGrant>,
-  workspaceId: WorkspaceId,
-): Readonly<PolicyGrant> {
-  let value: unknown;
-  try {
-    value = strictJsonSnapshot(input);
-  } catch (error) {
-    throw invalidPolicyGrant(error);
-  }
-  if (!isRecord(value)) throw invalidPolicyGrant();
-  assertExactPolicyGrantKeys(value, [
-    'grantId',
-    'workspaceId',
-    'capabilityId',
-    'capabilityVersion',
-    'registrationDigest',
-    'scope',
-    'policyBasisRevision',
-    'acceptedAt',
-  ]);
-  if (!isExternalOpId(value.grantId)
-    || !isWorkspaceIdValue(value.workspaceId)
-    || value.workspaceId !== workspaceId
-    || !isNonEmptyWellFormedString(value.capabilityId)
-    || !isNonEmptyWellFormedString(value.capabilityVersion)
-    || !isNonEmptyWellFormedString(value.registrationDigest)
-    || !isNonEmptyWellFormedString(value.policyBasisRevision)
-    || typeof value.acceptedAt !== 'number'
-    || !Number.isSafeInteger(value.acceptedAt)
-    || value.acceptedAt < 0) {
-    throw invalidPolicyGrant();
-  }
-  validateCanonicalPolicyGrantScope(value.scope);
-  return value as unknown as Readonly<PolicyGrant>;
-}
-
-function validateCanonicalPolicyGrantScope(input: unknown): void {
-  if (!isRecord(input)) throw invalidPolicyGrant();
-  assertExactPolicyGrantKeys(input, ['kind', 'resourcePatterns', 'attributes']);
-  if (input.kind !== 'canonical_resources_v1'
-    || !Array.isArray(input.resourcePatterns)
-    || input.resourcePatterns.length === 0
-    || !isRecord(input.attributes)) {
-    throw invalidPolicyGrant();
-  }
-  const canonicalPatterns: string[] = [];
-  for (const pattern of input.resourcePatterns) {
-    if (!isRecord(pattern)) throw invalidPolicyGrant();
-    assertExactPolicyGrantKeys(pattern, ['resourceType', 'access', 'matcher', 'pattern']);
-    if (!isPolicyGrantResourceType(pattern.resourceType)
-      || !isPolicyGrantResourceAccess(pattern.access)
-      || pattern.matcher !== 'canonical_target_exact_v1'
-      || !isNonEmptyWellFormedString(pattern.pattern)) {
-      throw invalidPolicyGrant();
-    }
-    canonicalPatterns.push(canonicalJson(pattern));
-  }
-  for (let index = 1; index < canonicalPatterns.length; index++) {
-    if (compareUtf8(canonicalPatterns[index - 1]!, canonicalPatterns[index]!) >= 0) {
-      throw invalidPolicyGrant();
-    }
-  }
-}
-
-function policyGrantSnapshot(
-  workspaceId: WorkspaceId,
-  grants: Iterable<Readonly<PolicyGrant>>,
-): Readonly<PolicyGrantSnapshot> {
-  const copied = [...grants].map((grant) => snapshot(grant));
-  return snapshot({
-    workspaceId,
-    revision: `policy-grants-v1-${canonicalJsonSha256({ workspaceId, grants: copied })}`,
-    grants: copied,
-  });
-}
-
-function policyGrantFenced(
-  code: 'stale_fence' | 'wrong_workspace',
-  message: string,
-): Extract<PolicyGrantCommitResult, { kind: 'fenced' }> {
-  return { kind: 'fenced', code, message };
-}
-
-function invalidPolicyGrant(error?: unknown): RuntimeStorageError {
-  const detail = error instanceof Error ? `: ${error.message}` : '';
-  return new RuntimeStorageError('invalid_policy_grant', `Invalid policy grant${detail}`);
-}
-
-function assertExactPolicyGrantKeys(
-  value: Readonly<Record<string, unknown>>,
-  required: readonly string[],
-): void {
-  if (Object.keys(value).length !== required.length
-    || required.some((key) => !Object.hasOwn(value, key))) {
-    throw invalidPolicyGrant();
-  }
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isWorkspaceIdValue(value: unknown): value is WorkspaceId {
-  try {
-    assertWorkspaceId(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isNonEmptyWellFormedString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && isWellFormedUnicode(value);
-}
-
-function isPolicyGrantResourceType(value: unknown): boolean {
-  return value === 'filesystem' || value === 'command' || value === 'network' || value === 'other';
-}
-
-function isPolicyGrantResourceAccess(value: unknown): boolean {
-  return value === 'read' || value === 'write' || value === 'execute' || value === 'connect';
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function snapshot<T>(value: T): T {
