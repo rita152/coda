@@ -1,4 +1,4 @@
-// Append-only 人类可读渲染器：把 canonical RuntimeEvent 投影为一次性命令的终端输出。
+// Append-only 人类可读渲染器：把 RuntimeEvent payload 投影为一次性命令的终端输出。
 // 全屏交互由 OpenTUI 独占；本模块不接管 raw TTY、输入行或光标重绘。
 
 import type {
@@ -725,7 +725,7 @@ export function createRenderer(out: RendererOutput, opts: RendererOptions): Rend
         );
         break;
       default:
-        break; // tolerant reader:未知事件静默忽略(docs/03 §7)
+        break; // tolerant reader:未知事件静默忽略(docs/03 §4)
     }
   }
 

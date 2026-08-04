@@ -1,4 +1,4 @@
-// Explicit one-shot output adapter over canonical Runtime events.
+// Explicit one-shot output adapter over Runtime event payloads delivered by the frontend view.
 
 import { PROTOCOL_VERSION } from '../protocol/index.js';
 import type { AssistantMessage } from '../protocol/index.js';

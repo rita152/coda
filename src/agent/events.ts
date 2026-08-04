@@ -1,9 +1,10 @@
-// 事件发射器:单一 promise 链把全部发射串行化(规格见 docs/05-agent-loop.md 第 7 节)。
+// Agent-loop emitter: one promise chain serializes internal payload delivery. Runtime event
+// durability and identity are owned by RuntimeThreadExecution, not this emitter.
 // listener 逐个 await、订阅序执行——代价是慢 listener 拖慢 loop,换来确定性:
 // 事件到达每个 listener 的顺序与产生顺序严格一致;agent_end 的 emit settle 之后
 // Agent 才翻回 idle,waitForIdle() resolve 时一切副作用已尘埃落定。
 
-import type { AgentEvent } from '../protocol/index.js';
+import type { AgentEvent } from '../protocol/agent-events.js';
 
 export type AgentEventListener = (e: AgentEvent) => void | Promise<void>;
 

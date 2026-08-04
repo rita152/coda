@@ -1,4 +1,4 @@
-// 启动清理(规格见 docs/07-tools.md §1.6):截断落盘 ~/.coda/truncated 的 7 天保留——
+// 启动清理(规格见 docs/07-tools.md §1):截断落盘 ~/.coda/truncated 的 7 天保留——
 // mtime 超 7 天的文件删除,清空后的 scope 目录随手移除(根目录保留)。
 // 纪律:失败静默、绝不阻塞启动(main.ts fire-and-forget);目录与 now 可注入供测试
 // (禁计时器——测试用 utimes 造旧文件 + 注入 now,零真实等待)。
@@ -7,7 +7,7 @@ import { readdir, rmdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { runtimeHomeDir } from '../shared/index.js';
 
-/** 7 天保留(docs/07 §1.6);mtime 严格早于 now - RETENTION 才删(「超 7 天」)。 */
+/** 7 天保留(docs/07 §1);mtime 严格早于 now - RETENTION 才删(「超 7 天」)。 */
 export const TRUNCATED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function defaultTruncatedRoot(): string {

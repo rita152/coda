@@ -127,7 +127,7 @@ export function workspaceIdFromCwd(recordedCwd: string): WorkspaceId {
   return `ws_v2_${hasher.digest('hex')}` as WorkspaceId;
 }
 
-/** Frozen length-framed derived-operation identity algorithm from docs/12 §2.1. */
+/** Frozen length-framed derived-operation identity algorithm from docs/12 §2. */
 export function deriveOpId(input: {
   readonly purpose: DerivedOpPurpose;
   readonly workspaceId: WorkspaceId;
@@ -156,7 +156,7 @@ export function deriveOpId(input: {
   }
 }
 
-/** Frozen per-turn invocation identity from docs/12 §2.1. */
+/** Frozen per-turn invocation identity from docs/12 §2. */
 export function deriveInvocationId(input: {
   readonly workspaceId: WorkspaceId;
   readonly threadId: ThreadId;

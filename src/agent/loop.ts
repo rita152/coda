@@ -1,10 +1,11 @@
-// runLoop:双层循环(外层 follow-up 续命,内层工具循环 + steering)与
-// streamAssistantResponse 流水线、工具执行三阶段调度(规格见 docs/05-agent-loop.md §2-§5)。
+// runLoop emits internal Agent-loop payloads; RuntimeThreadExecution wraps them in the
+// identity-bearing Runtime event stream. The loop owns the double loop (follow-up + tools/steering),
+// streamAssistantResponse 流水线、工具执行三阶段调度(规格见 docs/05-agent-loop.md)。
 // 独立于 Agent 类的纯函数:faux provider 下全离线可测。
 // 全部复杂度围绕一个目标:转录在任何时刻(abort/length/工具失败/provider 出错)完整可重放。
 
+import type { AgentEvent } from '../protocol/agent-events.js';
 import type {
-  AgentEvent,
   AssistantMessage,
   Context,
   ModelConfig,
@@ -95,7 +96,7 @@ export async function runLoop(
 ): Promise<void> {
   const newMessages: AgentMessage[] = []; // 本 run 新增消息,agent_end 携带
 
-  // queue_update:drain 消费时机的快照发射(docs/06 §8.1——注入消息的 message_start 之前)
+  // queue_update:drain 消费时机的快照发射(docs/06 §3——注入消息的 message_start 之前)
   const emitQueueUpdate = (): Promise<void> =>
     emit({
       type: 'queue_update',
@@ -139,7 +140,7 @@ export async function runLoop(
       transcript.push(assistant);
       newMessages.push(assistant);
 
-      // [D] error/aborted → 直接收尾(重试是 session 层的策略问题,loop 保持哑;docs/05 §2.3)
+      // error/aborted → 直接收尾；重试由 session 层处理，agent loop 不负责重试。
       if (assistant.stopReason === 'error' || assistant.stopReason === 'aborted') {
         await emit({ type: 'turn_end', message: assistant, toolResults: [] });
         cfg.activeRuntimeTurn = undefined;
@@ -225,7 +226,7 @@ export async function runLoop(
 
 /**
  * 把「当前转录」变成「一条完整落地的 AssistantMessage」,途中把 provider 流事件
- * 转发为 message_update(docs/05 §3)。顺序决策:transformContext(用户钩子,看原貌)
+ * 转发为 message_update(docs/05 Agent Loop)。顺序决策:transformContext(用户钩子,看原貌)
  * 先于 convertContext(固定清洗,出站前最后一道合法性保证)。
  */
 export async function streamAssistantResponse(
@@ -271,7 +272,7 @@ async function streamAssistantResponseWithCapture(
       supportsImages: cfg.model.compat?.['supportsImageParts'] !== false,
     });
 
-    // 每次模型调用取 child signal(AbortController 树,docs/05 §6):
+    // 每次模型调用取 child signal(AbortController 树,docs/05 取消与背压):
     // 未来单调用级取消不牵连整个 run,也避免向 taskSignal 反复 addEventListener 泄漏。
     const signal = AbortSignal.any([taskSignal]);
 
@@ -296,7 +297,7 @@ async function streamAssistantResponseWithCapture(
     await emit({ type: 'message_end', message });
     return message;
   } catch (err) {
-    // 防御路径(docs/05 §8):钩子 bug 或违约 provider,合成 error assistant 收尾,
+    // 防御路径(docs/05 取消与背压):钩子 bug 或违约 provider,合成 error assistant 收尾,
     // 不让异常穿透 runLoop——事件文法(run 必以 agent_end 闭合)与转录完整性优先。
     const errorMessage = `[protocol bug] ${stage} threw: ${formatToolError(err)}`;
     // 已宣布过 message_start 则复用同一消息(id 与已生成 content 保留),start/end 同 id
@@ -376,7 +377,7 @@ function rejectDuplicateToolCallIds(message: AssistantMessage): AssistantMessage
 
 /** Build the mutable outbound message view consumed by compaction before registry assembly. */
 function outboundContext(transcript: AgentMessage[]): Context {
-  // messages 给浅拷贝数组:transformContext 钩子(M7 compaction 的法定挂载点)对数组的
+  // messages 给浅拷贝数组:transformContext 钩子(compaction 的挂载点)对数组的
   // splice/push 不得触及权威转录本体——「转录任何时刻完整可重放」优先于一次数组分配。
   return { messages: [...transcript] };
 }
@@ -485,7 +486,7 @@ async function runOne(
     }
   }
   await emit({ type: 'tool_execution_end', toolCallId: p.call.id, result });
-  // plan_update 旁路事件:loop 在 finalize 识别 plan 形态的 details 后发出(docs/07 §2.8,
+  // plan_update 旁路事件:loop 在 finalize 识别 plan 形态的 details 后发出(docs/07 §2,
   // 工具不依赖事件总线,保持 tools → protocol 的依赖方向)。整表替换语义,快照即全量。
   const planSteps = extractPlanSteps(result);
   if (planSteps !== undefined) await emit({ type: 'plan_update', steps: planSteps });
@@ -508,7 +509,7 @@ function extractPlanSteps(result: ToolResultMessage): { step: string; status: 'p
 }
 
 /**
- * 批调度(docs/05 §5):preflight 一律按源顺序串行(审批 UI 逐个弹出、校验顺序确定);
+ * 批调度(docs/07 §4):preflight 一律按源顺序串行(审批 UI 逐个弹出、校验顺序确定);
  * 任一被调用工具声明 executionMode:'sequential' ⇒ 整批退化顺序执行;
  * 回填按 assistant 源顺序,不按完成顺序——转录顺序必须确定。
  */

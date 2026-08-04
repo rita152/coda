@@ -1,5 +1,5 @@
-// Canonical per-thread runtime collaborators. Persistence authority belongs to the runtime-v2
-// journal; this entry intentionally exposes no standalone Session or identity-free event facade.
+// Per-thread Runtime collaborators. Persistence authority belongs to the Runtime journal; this
+// entry intentionally exposes no standalone Session or unscoped event channel.
 export { decideRetry, sleepWithAbort } from './retry.js';
 export type { ResolvedRetryPolicyOptions, RetryDecision, RetrySleep } from './retry.js';
 export type { RetryOptions } from './retry.js';

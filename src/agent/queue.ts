@@ -1,6 +1,5 @@
 // steering / follow-up 双队列的载体(语义规格见 docs/06-steering-following.md)。
-// M3:入队/drain 与 runLoop 的 [A]/[I]/[J] 注入点已按 docs/05 §2.2 伪码接线;
-// M4 交付完整语义验收矩阵、queue_update 事件与 abort 交互。
+// 入队/drain 与 runLoop 的注入点遵循 docs/05 Agent Loop 与 docs/06 Steering / Follow-up。
 // 队列元素是完整 UserMessage(id 已定):queue_update 快照与断言一律用 id,
 // 不用文本匹配(pi 的教训:文本 indexOf 匹配会误伤重复文本)。
 
@@ -36,7 +35,7 @@ export class PendingMessageQueue {
     this.items = [];
   }
 
-  /** queue_update 事件的快照形态(docs/03 §7:QueuedMessage)。 */
+  /** queue_update payload snapshot used by the Runtime event projection. */
   snapshot(): QueuedMessage[] {
     return this.items.map((m) => ({
       id: m.id,

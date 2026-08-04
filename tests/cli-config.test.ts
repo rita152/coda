@@ -1,6 +1,6 @@
-// CLI 配置解析测试(docs/09-cli.md §7,docs/11 M5 验收 4):resolveConfig 是纯函数
+// CLI 配置解析测试(docs/09-cli.md):resolveConfig 是纯函数
 // (flags/env/file 全部注入,不碰真实 process.env 与磁盘),对 model/baseURL/apiKey
-// 三字段做「flag > 环境变量 > config.json」的独立合并矩阵；model 不设内置默认——M5 对抗核查
+// 三字段做「flag > 环境变量 > config.json」的独立合并矩阵；model 不设内置默认
 // 用 mutation 实证过:优先级反转时原有测试全绿,故此矩阵按「同时给出多来源不同值」
 // 构造,任何一层被跳过或反转都必红。另覆盖 parseFlags 的边界文法。
 
@@ -49,7 +49,7 @@ const FULL_ENV: NodeJS.ProcessEnv = {
 };
 const FULL_FILE: CodaConfigFile = { model: 'file-model', baseURL: 'https://file.example', apiKey: 'file-key' };
 
-describe('resolveConfig:flag > env > file 且无默认模型(docs/09 §7.3)', () => {
+describe('resolveConfig:flag > env > file 且无默认模型', () => {
   it('三来源同时在场:三字段全部取 flag', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);   // file.apiKey 明文警告不进测试输出
     const r = resolveConfig(FULL_FLAGS, FULL_ENV, FULL_FILE);
@@ -92,7 +92,7 @@ describe('resolveConfig:flag > env > file 且无默认模型(docs/09 §7.3)', ()
     expect(modelConfig(r).apiKey).toBe('indirect-key');
   });
 
-  it('CODA_API_KEY 缺席时回退 OPENAI_API_KEY(docs/09 §7.3 表)', () => {
+  it('CODA_API_KEY 缺席时回退 OPENAI_API_KEY', () => {
     const r = resolveConfig(
       flags({ model: 'explicit-model' }),
       { OPENAI_API_KEY: 'openai-env-key' },
@@ -277,7 +277,7 @@ describe('--ui 纯路由', () => {
   });
 });
 
-describe('parseFlags 边界(docs/09 §2 flag 文法)', () => {
+describe('parseFlags 边界(docs/09 §1 路由)', () => {
   it('--resume=<thread-id> 使用 canonical identity；不带值进入列表选择', () => {
     const threadId = 'th_11111111-1111-4111-8111-111111111111';
     expect(parseFlags([`--resume=${threadId}`]).resume).toBe(threadId);

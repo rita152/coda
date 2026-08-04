@@ -2,8 +2,8 @@
 // retry/compaction policy, usage projection, and the authoritative event sink, but no filesystem
 // persistence, public observer surface, workspace identity, or secondary transcript mirror.
 
+import type { AgentEvent } from '../protocol/agent-events.js';
 import type {
-  AgentEvent,
   AgentMessage,
   AssistantMessage,
   CanonicalAgentEvent,

@@ -828,7 +828,7 @@ describe('append-only color output', () => {
   });
 });
 
-describe('简化 wcwidth(docs/09 §8:CJK/emoji 宽度)', () => {
+describe('简化 wcwidth(docs/09 §4:CJK/emoji 宽度)', () => {
   it('CJK 宽 2、ASCII 宽 1、emoji 宽 2', () => {
     expect(charWidth('中'.codePointAt(0) ?? 0)).toBe(2);
     expect(charWidth('a'.codePointAt(0) ?? 0)).toBe(1);

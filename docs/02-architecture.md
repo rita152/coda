@@ -22,6 +22,8 @@ shared/         无业务依赖的基础设施
 
 `cli/` 是 composition root 和 presentation 层。它可以注册 provider、capability 和 project-rule
 服务，但不得保存 run、队列、policy、seq 或 transcript 的第二份状态，也不得直接驱动 Agent。
+Agent loop 的本地事件 payload 只在 `session/` 内部被消费；CLI view 只投影 envelope 的 `event`，两者都不
+构成独立的 Runtime 输入/输出协议。
 
 ## 目录职责
 
@@ -58,5 +60,5 @@ control request、thread lifecycle、agent 生命周期、usage 和 diagnostics 
 
 ## 运行形态
 
-TUI、human one-shot 和 canonical headless 共享 `RuntimePort`。前端输入必须先取得完整 identity；输出
-必须来自 `EventEnvelope`。`--json` 不提供另一套命令、事件或 approval 协议。
+TUI、human one-shot 和 canonical headless 共享 `RuntimePort`。前端输入必须先取得完整 identity；机器输出
+必须来自 `EventEnvelope`，人类前端只能投影其 `event`。`--json` 不提供另一套命令、事件或 approval 协议。

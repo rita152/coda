@@ -1,14 +1,14 @@
-// M3 runLoop 语义测试(L4,全离线,faux provider;规格出处 docs/05-agent-loop.md、docs/11 M3 验收)。
+// runLoop 语义测试(L4,全离线,faux provider;规格出处 docs/05-agent-loop.md)。
 // 时序控制只用 gate 与事件等待;出站断言用 faux 的 calls。
 
 import { describe, expect, it, vi } from 'bun:test';
 import type {
-  AgentEvent,
   AssistantMessage,
   ProviderEvent,
   ProviderEventStream,
   ToolResultMessage,
 } from '../src/protocol/index.js';
+import type { AgentEvent } from '../src/protocol/agent-events.js';
 import { createGate } from '../src/providers/faux/index.js';
 import type { RuntimeTurnProvider } from '../src/agent/index.js';
 import {
@@ -31,7 +31,7 @@ function toolResultsOf(events: AgentEvent[]): ToolResultMessage[] {
     .filter((m): m is ToolResultMessage => m.role === 'tool_result');
 }
 
-describe('runLoop:一路到完成路径(M3)', () => {
+describe('runLoop:一路到完成路径', () => {
   it('纯文本回复 + 空队列:恰好 1 turn,事件骨架完整', async () => {
     const h = makeHarness({ turns: [{ events: [{ kind: 'text', text: 'hello world' }] }] });
     await h.agent.prompt('hi');
@@ -479,7 +479,7 @@ describe('runLoop:一路到完成路径(M3)', () => {
     expect(start2?.type === 'agent_start' && start2.reason).toBe('follow_up');
   });
 
-  it('steering 注入最小冒烟:运行中 steer(),注入落在 turn 边界,下一 turn 出站含 source:steering(docs/11 M3)', async () => {
+  it('steering 注入最小冒烟:运行中 steer(),注入落在 turn 边界,下一 turn 出站含 source:steering', async () => {
     const gate = createGate();
     const h = makeHarness({
       turns: [
@@ -503,7 +503,7 @@ describe('runLoop:一路到完成路径(M3)', () => {
     expect(steered?.role === 'user' && steered.content[0]?.type === 'text' && steered.content[0].text).toBe(
       'mid-run steer',
     );
-    // 事件序:turn_end 之后 queue_update(drain 快照,M4)→ turn_start → message_start(user)
+    // 事件序:turn_end 之后 queue_update(drain 快照)→ turn_start → message_start(user)
     // (turn 边界注入,非流中插入)
     const seq = typeSequence(h.events);
     const firstTurnEnd = seq.indexOf('turn_end');

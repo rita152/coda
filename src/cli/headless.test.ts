@@ -151,14 +151,14 @@ describe('canonical headless transport', () => {
     expect(runtime.order).toEqual(['events', 'submit:thread_create', 'submit:prompt', 'close']);
   });
 
-  it('rejects identity-free legacy commands instead of translating them', async () => {
+  it('rejects identity-free commands instead of translating them', async () => {
     const runtime = new FakeHeadlessRuntime();
     const stdin = new PassThrough();
     const output = new CapturingOutput();
     const running = startHeadless(runtime, { stdin, stdout: output });
     await output.waitFor((frame) => frame.type === 'protocol');
 
-    stdin.end(`${JSON.stringify({ type: 'prompt', text: 'legacy' })}\n`);
+    stdin.end(`${JSON.stringify({ type: 'prompt', text: 'missing runtime identity' })}\n`);
 
     expect(await running).toBe(0);
     expect(runtime.order).toEqual(['events', 'submit:prompt', 'close']);

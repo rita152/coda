@@ -1,9 +1,9 @@
-// L5 e2e harness(规格见 docs/10-testing.md §7):spawn 构建产物 dist/main.js,
+// E2E harness(规格见 docs/10-testing.md §3):spawn 构建产物 dist/main.js,
 // 走 canonical --json headless 管道驱动完整会话:stdin 写完整 RuntimeOp、逐行收 stdout NDJSON。
 // faux 脚本是 FauxScript 的可序列化子集(events/stopReason/usage,无 gate/回调),
 // 写成临时 JSON 文件经 --faux-script 传入。
 // 计时纪律:本文件的 setTimeout 只用于单事件 15s 看门狗(挂起时快速失败并倾倒已收事件),
-// 不用于等待条件;唯一允许宽松时序的是 steer 用例(docs/10 §7 用例 3 + §8 flake 政策)。
+// 不用于等待条件;只用单事件看门狗处理挂起进程。
 // bun:test 用例超时统一 60s(慢 CI 余量):单事件看门狗先于用例超时触发,失败信息更有用。
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ export function requireDist(): void {
   if (!existsSync(DIST_MAIN)) {
     throw new Error(
       `e2e requires the built CLI at ${DIST_MAIN} — run \`bun run test:e2e\` ` +
-        '(docs/10-testing.md §2: L5 drives the Bun.build output).',
+        '(docs/10-testing.md §3: the harness drives the Bun.build output).',
     );
   }
 }
@@ -66,7 +66,7 @@ export interface StartOptions {
   prompt?: string;
   /** 默认 true(--json headless);false 走人类可读输出——此时 stdout 行不是 NDJSON,勿断言 parseErrors。 */
   json?: boolean;
-  /** 额外 CLI flags(如 ['--approval-mode', 'interactive'],M6 审批用例)。 */
+  /** 额外 CLI flags(如 ['--approval-mode', 'interactive'] 的 control 用例)。 */
   extraArgs?: string[];
   /** 安全环境变量覆盖;HOME 默认隔离到本次临时 cwd，继承环境会先移除凭证与 endpoint。 */
   env?: Record<string, string>;

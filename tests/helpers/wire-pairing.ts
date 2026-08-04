@@ -1,4 +1,4 @@
-// tool_calls / tool 配对断言(docs/04 §3.3 的可执行形态;M2 引入,M4 复用为贯穿不变量)。
+// tool_calls / tool 配对断言(docs/04 Provider Adapter 的请求契约)。
 // 结构化读取 wire 消息,不 import openai 类型。校验失败 throw(bun:test 报为测试失败)。
 
 interface WireToolCall { id?: string }

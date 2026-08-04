@@ -1,4 +1,4 @@
-// bash 结构分析单测(docs/07-tools.md §3.3):拆分/引号/转义矩阵、forceConfirm 升级条件、
+// bash 结构分析单测(docs/07-tools.md §3):拆分/引号/转义矩阵、forceConfirm 升级条件、
 // denylist 各条。关键验收:echo $(rm -rf /) 必 forceConfirm(而非 denied)且理由可见;
 // 'npm test && npm run build' → ['bash:npm *','bash:npm *']。
 
@@ -383,7 +383,7 @@ describe('denylist(直接 deny 不进 approval)', () => {
   });
 });
 
-// ───────────────────────── M6 对抗核查:三个 high 安全绕过(docs/07 §3.3)─────────────────────────
+// ───────────────────────── 安全对抗核查:三个 high 安全绕过(docs/07 §3)─────────────────────────
 // 三处根因同为 root 提取不够健壮:字面量 root 比对被 (1) 绝对路径 (2) subshell/组定界符
 // (3) 运行器包装 藏住真实命令,denylist 不命中 → denied:false + 可泛化 pattern(allow_always 中毒)。
 

@@ -1,4 +1,4 @@
-// cleanup 单测(docs/07-tools.md §1.6):截断落盘 7 天保留的启动清理。
+// cleanup 单测(docs/07-tools.md §1):截断落盘 7 天保留的启动清理。
 // 纪律:禁计时器——旧文件用 utimesSync 伪造 mtime,now 经参数注入,零真实等待。
 
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
@@ -20,7 +20,7 @@ function touch(file: string, mtimeMs: number): void {
   utimesSync(file, mtimeMs / 1000, mtimeMs / 1000);
 }
 
-describe('cleanupTruncated:7 天保留(docs/07 §1.6)', () => {
+describe('cleanupTruncated:7 天保留(docs/07 §1)', () => {
   it('超 7 天的文件删除,新文件保留;根目录本身保留', async () => {
     const root = makeRoot();
     const old = path.join(root, 's01', 'old.txt');

@@ -1,5 +1,5 @@
-// Default-thread human-frontend facade over RuntimePort. All business actions become
-// identity-bearing RuntimeOps, and emitted payloads remain canonical RuntimeEvents.
+// Default-thread human-frontend adapter over RuntimePort. All business actions become
+// identity-bearing RuntimeOps, and emitted payloads are projections of RuntimeEvent values.
 
 import { strictJsonSnapshot } from '../protocol/index.js';
 import type {
@@ -649,7 +649,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     if (adoptedAutoAttachment && !sameModelRef(snapshot.model, model.ref)) {
       // Supervisor startup may have already recovered the prior lifecycle before the CLI can
       // submit its explicit resume. Preserve the user's requested model through a regular
-      // identity-bearing op instead of letting the facade diverge from the attached driver.
+      // identity-bearing op instead of letting the adapter diverge from the attached driver.
       await this.#commitModelUpdate(model);
     }
     this.#model = model;
@@ -1108,7 +1108,7 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
     this.#fanoutTail = this.#fanoutTail.then(async () => {
       // A targeted subscription replay is obsolete once a newer broadcast exists. Broadcasts
       // themselves are never coalesced across the shared frontend event queue: each captured level
-      // is an ordering barrier, so a resolved card is gone before the next canonical event fanout.
+      // is an ordering barrier, so a resolved card is gone before the next Runtime event fanout.
       if (target !== undefined && revisionAtEnqueue !== this.#pendingApprovalRevision) return;
       for (const listener of listeners) {
         if (!this.#pendingApprovalListeners.has(listener)) continue;

@@ -1,8 +1,9 @@
-// 内部协议:全项目的唯一公共语言(规格见 docs/03-internal-protocol.md)。
-// 零运行时依赖(ESLint 规则 C 强制);禁止 import 任何 provider SDK。
+// Public protocol barrel: RuntimeOp and EventEnvelope are the canonical runtime boundary.
+// Agent-loop payloads stay internal to the execution layer; this module has no runtime
+// dependencies and may not import provider SDKs.
 export * from './messages.js';
 export * from './provider.js';
-export * from './agent-events.js';
+export type { PlanStep, QueuedMessage } from './agent-events.js';
 export * from './event-stream.js';
 export * from './strict-json.js';
 export * from './identity.js';

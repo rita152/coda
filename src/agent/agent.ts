@@ -1,4 +1,4 @@
-// Agent 类:runLoop 纯函数的薄封装(规格见 docs/05-agent-loop.md §1)。
+// Agent 类:runLoop 纯函数的薄封装(规格见 docs/05-agent-loop.md)。
 // 管理 state 翻转(running → finally 回 idle)、持有双队列与 taskAbort、
 // 把 subscribe 的 listener 接到 emit。只有 idle/running 两个状态——abort 是
 // 「请求」不是「瞬时动作」,想等中止真正完成用 waitForIdle()。
@@ -24,16 +24,16 @@ export interface AgentConfig {
   model: ModelConfig;
   /** Supplies the one immutable provider/catalog/policy environment used by each turn. */
   runtimeTurnProvider: RuntimeTurnProvider;
-  transformContext?: (ctx: Context) => Promise<Context>;        // 压缩/裁剪钩子(M7 compaction)
+  transformContext?: (ctx: Context) => Promise<Context>;        // 压缩/裁剪钩子
   afterToolCall?: (call: ToolCallPart, result: ToolResultMessage) => Promise<ToolResultMessage>;
   shouldStopAfterTurn?: (ctx: Context) => Promise<boolean>;
-  initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §3.1;仅初始数据,agent 不感知恢复)
+  initialMessages?: AgentMessage[];                              // 恢复会话的初始转录(docs/08 §2;仅初始数据,agent 不感知恢复)
   /** @internal Runtime recovery seed; installed silently before any listener can observe a drain. */
   initialQueues?: {
     readonly steering: readonly UserMessage[];
     readonly followUp: readonly UserMessage[];
   };
-  truncationScope?: string;                                      // 截断落盘目录 scope(session 注入 sessionId,docs/07 §1.6)
+  truncationScope?: string;                                      // Runtime thread 注入的截断落盘 scope(docs/07 §1)
 }
 
 export class Agent {
@@ -123,7 +123,7 @@ export class Agent {
   }
 
   /**
-   * abort/重试后续跑(docs/05 §1.2):steering 优先 → follow-up → 残局重采样 → throw。
+   * abort/重试后续跑(docs/05 Agent Loop):steering 优先 → follow-up → 残局重采样 → throw。
    * 消费了排队消息 reason 为 'follow_up',纯重采样为 'continue'。
    */
   continue(): Promise<void> {
@@ -158,7 +158,7 @@ export class Agent {
   clearQueues(): void {
     this.#steering.clear();
     this.#followUp.clear();
-    this.#emitQueueUpdate();   // 空快照(docs/06 §8.1)
+    this.#emitQueueUpdate();   // 空快照(docs/06 §3)
   }
 
   #emitQueueUpdate(): void {

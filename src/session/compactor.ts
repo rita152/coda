@@ -1,4 +1,4 @@
-// compaction 协作者(规格见 docs/08-session-persistence.md §6.3):切点选择 + 摘要生成。
+// compaction 协作者(规格见 docs/08-session-persistence.md §5):切点选择 + 摘要生成。
 // 两个纯粹的能力,不碰 agent、不碰磁盘——切点是纯函数,摘要是一次性 streamFn 调用。
 // 生效机制由 RuntimeThreadExecution 安装 canonical checkpoint；本文件只产料。
 
@@ -13,7 +13,7 @@ import { canonicalJson, sha256Hex } from '../protocol/index.js';
 import type { ThreadCompactionCheckpoint } from './thread-runtime-ports.js';
 
 export interface CompactionOptions {
-  enabled?: boolean; // M7 起默认 true(仍需 model.limits.context 才会触发)
+  enabled?: boolean; // 默认 true(仍需 model.limits.context 才会触发)
   threshold?: number; // 默认 0.8:contextTokens 超过 threshold*(context-reserveOutput) 触发
   keepRatio?: number; // 默认 0.25:保留尾部预算 = contextTokens * keepRatio
   summaryMaxTokens?: number; // 默认 2000:摘要请求的 maxOutputTokens
@@ -32,7 +32,7 @@ export function resolveCompactionOptions(opts?: CompactionOptions): ResolvedComp
   return { ...DEFAULT_COMPACTION_OPTIONS, ...opts };
 }
 
-/** overflow 摘要失败时的硬截断占位(docs/08 §6.5:信息有损但会话能活)。 */
+/** overflow 摘要失败时的硬截断占位(docs/08 §5:信息有损但会话能活)。 */
 export const HARD_TRUNCATION_SUMMARY = '[Earlier conversation truncated due to context limit]';
 
 export const SUMMARIZE_PROMPT = [
@@ -65,7 +65,7 @@ export function syntheticSummaryMessage(
   };
 }
 
-/** len(JSON)/4 粗估 token——compaction 不需要真 tokenizer(docs/08 §6.1/§6.3)。 */
+/** len(JSON)/4 粗估 token——compaction 不需要真 tokenizer(docs/08 §5)。 */
 function estimateTokens(m: AgentMessage): number {
   return Math.ceil(JSON.stringify(m).length / 4);
 }
@@ -79,7 +79,7 @@ function isTurnStart(m: AgentMessage): boolean {
 }
 
 /**
- * 选择保留尾部的起始下标(docs/08 §6.3):
+ * 选择保留尾部的起始下标(docs/08 §5):
  *   从尾部向前累计估算 token 到 keepBudget → 得到粗切点;
  *   切点向前(向更早)对齐到最近一条 turn 起点 user 消息——保证不切开 assistant 的
  *   tool_call 与其 tool_result;找不到则退化为保留最后一整个 turn 并告警。
@@ -154,7 +154,7 @@ function textOfParts(content: { type: string; text?: string }[]): string {
 }
 
 /**
- * 一次性摘要请求(docs/08 §6.3):不经过 agent,直接调 streamFn。挂 session 的 AbortSignal
+ * 一次性摘要请求(docs/08 §5):不经过 agent,直接调 streamFn。挂 thread runtime 的 AbortSignal
  * 使 Esc 可取消。失败(error/aborted)抛出——由 session 决定降级(threshold 放弃 / overflow 硬截断)。
  */
 export async function summarize(

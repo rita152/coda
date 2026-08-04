@@ -1,5 +1,5 @@
-// transform 层:每次出站请求前的固定清洗(规格:docs/04-provider-adapter.md §6、
-// docs/06-steering-following.md §7)。产出出站副本,绝不改写权威转录——转录是事实日志
+// transform 层:每次出站请求前的固定清洗(规格:docs/04-provider-adapter.md、
+// docs/06-steering-following.md)。产出出站副本,绝不改写权威转录——转录是事实日志
 // (aborted/error 也是合法消息),清洗只发生在每次出站的视图上;不落盘、幂等、纯函数。
 //
 // 四步(顺序敏感:先滤 aborted 再补孤儿,被滤 assistant 的 toolResult 一并滤除):

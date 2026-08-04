@@ -1,5 +1,5 @@
 // ToolResultMessage 的统一构造:成功输出、错误输出、length 全批合成失败,
-// 以及框架级截断 post-hook(docs/07-tools.md §1.6)。所有错误路径产出形态一致
+// 以及框架级截断 post-hook(docs/07-tools.md §1)。所有错误路径产出形态一致
 // (pi-mono 同款约定:工具只 throw,不自己构造 error 结果)。
 
 import type { TextPart, ToolCallPart, ToolResultMessage } from '../protocol/index.js';
@@ -59,7 +59,7 @@ function isAbortError(err: unknown): boolean {
 }
 
 /**
- * stopReason 'length' ⇒ 全批合成 isError、不执行(docs/05-agent-loop.md §2.4 的硬规则)。
+ * stopReason 'length' ⇒ 全批合成 isError、不执行(docs/05-agent-loop.md 工具规则)。
  * 文案必须可执行:告诉模型为什么没执行、下一步怎么办。
  */
 export function failTruncatedToolCalls(toolCalls: ToolCallPart[]): ToolResultMessage[] {

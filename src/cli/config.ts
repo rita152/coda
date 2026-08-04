@@ -110,7 +110,7 @@ export function readConfigFile(file = path.join(runtimeHomeDir(), '.coda', 'conf
   try {
     return JSON.parse(raw) as CodaConfigFile;
   } catch (err) {
-    // 损坏的 config 不静默吞:用户改错一行会以为配置生效(docs/09 §7 缺 key 报错要可执行,
+    // 损坏的 config 不静默吞:用户改错一行会以为配置生效(docs/09 的 CLI 错误纪律,
     // 同理坏文件要可见)。stderr 一行警告后按无配置继续,不阻断启动。
     console.error(
       `[coda] warning: ignoring invalid JSON in ${sanitizeTerminalLine(file)}: ${sanitizeTerminalError(err)}`,

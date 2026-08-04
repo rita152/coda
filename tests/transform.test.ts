@@ -1,4 +1,4 @@
-// transform 层单测(M4;规格 docs/04 §6 四步 + docs/06 §7)。
+// transform 层单测(规格见 docs/04-provider-adapter.md 与 docs/06-steering-following.md)。
 // convertContext 是纯函数视图变换:不落盘、幂等、绝不改写输入。
 
 import { describe, expect, it } from 'bun:test';
@@ -207,7 +207,7 @@ describe('convertContext 步骤 4:非视觉模型图片降级', () => {
   });
 });
 
-describe('convertContext 块归属配对(M4 对抗核查:跨 turn id 复用 / 声明序 / dangling)', () => {
+describe('convertContext 块归属配对(跨 turn id 复用 / 声明序 / dangling)', () => {
   // 出处:src/agent/transform.ts 头注——「每条 tool_result 只归属于其前方最近一条声明了
   // 该 id 的 assistant(块内配对)」。provider 跨 turn 复用确定性 id(vLLM/llama.cpp 的
   // call_0)时,全局 id 集合会把后 turn 的真实结果错配给前 turn 的孤儿/被滤块。

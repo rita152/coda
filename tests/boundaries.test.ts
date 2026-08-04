@@ -1,4 +1,4 @@
-// M0:ESLint 边界规则的自证测试(docs/11-roadmap.md M0 实现要点、docs/02-architecture.md 第 8 节)。
+// ESLint 架构边界的自证测试(docs/02-architecture.md 目录职责与依赖方向)。
 // 原理:向 src/ 写入带故意违例的探针文件,断言 ESLint 报出预期规则,再清理。
 // 若有人静默删除 eslint.config.mjs 里的边界规则,本测试立即变红。
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -37,7 +37,13 @@ afterEach(async () => {
   }
 });
 
-describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
+describe('import 边界规则(docs/02-architecture.md)', () => {
+  it('protocol barrel does not publish the internal agent-loop event payload', async () => {
+    const source = await Bun.file(path.join(root, 'src/protocol/index.ts')).text();
+    expect(source).not.toContain("export * from './agent-events.js';");
+    expect(source).toContain("export type { PlanStep, QueuedMessage } from './agent-events.js';");
+  });
+
   it('src/agent 内 import openai 报错(type-only 同样拦截)', async () => {
     const { rules } = await lintProbe(
       'src/agent/openai.probe.ts',
@@ -296,7 +302,7 @@ describe('import 边界规则(docs/02-architecture.md 第 3 节)', () => {
     expect(rules).toContain('no-restricted-syntax');
   });
 
-  it('src/agent 内 import @anthropic-ai/sdk 报错(M7:SDK 仅限 anthropic-messages,type-only 同拦)', async () => {
+  it('src/agent 内 import @anthropic-ai/sdk 报错(SDK 仅限 anthropic-messages,type-only 同拦)', async () => {
     const { rules } = await lintProbe(
       'src/agent/anthropic.probe.ts',
       "import type Anthropic from '@anthropic-ai/sdk';\nexport type X = Anthropic;\n",

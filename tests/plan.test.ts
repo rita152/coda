@@ -1,14 +1,12 @@
-// M6 验收 3(docs/11-roadmap.md)+ docs/07-tools.md §2.8:plan 工具整表替换语义、
-// plan_update 旁路事件(loop 在 finalize 识别 details 后发出)、多 in_progress 提醒、
-// 回显编号列表、promptSnippet 拼装(docs/07 §1.5)。
-// 附:截断落盘统一验收(docs/11 M6「截断落盘完善」)——Session 路径 spillDir 含 sessionId
-// (~/.coda/truncated/<sessionId>/,docs/07 §1.6;框架 post-hook 本体已在 tests/agent-api.test.ts 覆盖)。
+// Plan capability and truncation regressions (docs/07 §1-2): full-table plan updates,
+// multiple in-progress reminders, numbered output, prompt assembly and explicit spill scope.
 
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'bun:test';
-import type { AgentEvent, PlanStep, ToolResultMessage } from '../src/protocol/index.js';
+import type { PlanStep, ToolResultMessage } from '../src/protocol/index.js';
+import type { AgentEvent } from '../src/protocol/agent-events.js';
 import {
   PLAN_PROMPT_SNIPPET,
   executePlan,
@@ -36,9 +34,9 @@ const planCapability = makeTool<PlanArgs>(
   { parameters: planParameters, promptSnippet: PLAN_PROMPT_SNIPPET },
 );
 
-// ---------- plan 工具与 plan_update(M6 验收 3) ----------
+// ---------- plan 工具与 plan_update ----------
 
-describe('整表替换语义(docs/07 §2.8)', () => {
+describe('整表替换语义(docs/07 §2)', () => {
   it('两个 turn 各调 plan(不同全表):两次 plan_update 快照均为完整新表,非增量', async () => {
     const table1: PlanStep[] = [
       { step: '定位配置加载代码', status: 'in_progress' },
@@ -89,7 +87,7 @@ describe('整表替换语义(docs/07 §2.8)', () => {
   });
 });
 
-describe('多 in_progress:提醒而非拒绝(docs/07 §2.8)', () => {
+describe('多 in_progress:提醒而非拒绝(docs/07 §2)', () => {
   it("两个 in_progress:结果 isError:false,输出含 'Reminder' 提醒文案;plan_update 照发", async () => {
     const steps: PlanStep[] = [
       { step: 'refactor renderer', status: 'in_progress' },
@@ -114,7 +112,7 @@ describe('多 in_progress:提醒而非拒绝(docs/07 §2.8)', () => {
   });
 });
 
-describe('输出回显与 details(docs/07 §2.8)', () => {
+describe('输出回显与 details(docs/07 §2)', () => {
   it("回显编号列表('1. [completed] …');details.steps 与参数逐字等", async () => {
     const steps: PlanStep[] = [
       { step: '定位配置加载代码', status: 'completed' },
@@ -139,7 +137,7 @@ describe('输出回显与 details(docs/07 §2.8)', () => {
   });
 });
 
-describe('注册形态(docs/07 §2.8/§1.5)', () => {
+describe('注册形态(docs/07 §1-2)', () => {
   it('registry turn assembles the plan prompt snippet into the provider context', async () => {
     const h = makeHarness(
       { turns: [{ events: [{ kind: 'text', text: 'hi' }] }] },
@@ -152,9 +150,9 @@ describe('注册形态(docs/07 §2.8/§1.5)', () => {
   });
 });
 
-// ---------- 截断落盘统一验收(docs/11 M6「截断落盘完善」) ----------
+// ---------- 截断落盘统一验收(docs/07 §1) ----------
 
-describe('截断落盘:Agent 使用显式 scope(docs/07 §1.6)', () => {
+describe('截断落盘:Agent 使用显式 scope(docs/07 §1)', () => {
   it('超限能力输出全文落盘到 ~/.coda/truncated/<scope>/', async () => {
     // HOME 重定向到临时目录:truncationDir 基于 os.homedir()(POSIX 读 $HOME),
     // 测试不污染真实 ~/.coda;finally 恢复并整树清理。

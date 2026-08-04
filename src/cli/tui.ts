@@ -1,5 +1,5 @@
 // 全屏交互 TUI(规格见 docs/09-cli.md §1–5):OpenTUI 独占 raw stdin/stdout，
-// 把 canonical RuntimeEvent 渲染为顶部向下增长的转录区；普通 composer 或临时审批面板固定在底部。
+// 把 RuntimeEvent payload 渲染为顶部向下增长的转录区；普通 composer 或临时审批面板固定在底部。
 // 本模块只在双 TTY 的交互分支动态加载；headless 与一次性模式不加载 native TUI 依赖。
 
 import { isThreadId, isTurnId } from '../protocol/index.js';
@@ -20,7 +20,7 @@ import type {
   WorkspaceRuntimeSnapshot,
 } from '../protocol/index.js';
 import type {
-  CliApprovalBridge,
+  CliControlActions,
   CliApprovalDecision as ApprovalDecision,
   CliInteractionState,
   CliRuntimeEvent,
@@ -610,26 +610,6 @@ export interface GitStatus {
   readonly dirty: boolean;
 }
 
-export async function detectGitStatus(cwd: string): Promise<GitStatus> {
-  try {
-    const child = Bun.spawn(
-      ['git', '-C', cwd, 'status', '--porcelain=v1', '--branch', '--untracked-files=normal'],
-      {
-      stdout: 'pipe',
-      stderr: 'ignore',
-      },
-    );
-    const [code, stdout] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-    ]);
-    if (code !== 0) return { dirty: false };
-    return parseGitStatusOutput(stdout);
-  } catch {
-    return { dirty: false };
-  }
-}
-
 export function parseGitStatusOutput(stdout: string): GitStatus {
   const lines = stdout.replaceAll('\r\n', '\n').split('\n');
   const heading = lines[0]?.startsWith('## ') === true ? lines[0].slice(3) : '';
@@ -645,12 +625,7 @@ export function parseGitStatusOutput(stdout: string): GitStatus {
   };
 }
 
-/** Compatibility helper retained for callers/tests that only need the branch label. */
-export async function detectGitBranch(cwd: string): Promise<string | undefined> {
-  return (await detectGitStatus(cwd)).branch;
-}
-
-/** Compatibility projection of the canonical fuzzy palette's currently enabled actions. */
+/** Testable projection of the Runtime command catalog's currently enabled actions. */
 export function matchingSlashCommands(
   text: string,
   phase: TuiPhase,
@@ -4318,7 +4293,7 @@ export async function createTuiScreen(
  */
 export async function startTui(
   session: CliSession,
-  approval: CliApprovalBridge | undefined,
+  approval: CliControlActions | undefined,
   opts: TuiOptions,
 ): Promise<number> {
   const openTui = await import('@opentui/core');
@@ -4415,7 +4390,7 @@ type TuiControllerRenderer =
  */
 export function runTuiController(
   session: CliSession,
-  approval: CliApprovalBridge | undefined,
+  approval: CliControlActions | undefined,
   screen: TuiScreen,
   renderer: TuiControllerRenderer,
   opts: TuiControllerOptions,
@@ -5064,7 +5039,7 @@ export function runTuiController(
         approvalQueue.shift();
         if (id !== undefined) {
           approvalEvents.delete(id);
-          approval.resolve(id, decision);
+          approval.resolveApproval(id, decision);
         }
         if (approvalQueue.length === 0) screen.resolveApproval();
         else renderCurrentApproval();

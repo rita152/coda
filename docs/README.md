@@ -12,6 +12,7 @@
 - capability catalog、provider adapter 与 policy 在每 turn 冻结；权限基于 canonical resources 与
   `PreparedInvocation` 决策。
 - `--json` 是 protocol `2.0.0` NDJSON：完整 op 输入、hello/envelope/receipt/error 输出、EOF 关闭。
+- Agent loop payload 与 CLI view 都是 `EventEnvelope.event` 的内部投影；它们不是第二条 Runtime 协议。
 
 ## 阅读顺序
 

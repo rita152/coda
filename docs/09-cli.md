@@ -43,7 +43,8 @@ op，并将它们作为 initial operation sequence 提交。headless 订阅先�
 
 ## 4. TUI 与 human one-shot
 
-TUI 和 one-shot 订阅 EventEnvelope 并建立可丢弃 view state。approval UI 等待 `control_request`，向
+TUI 和 one-shot 订阅 EventEnvelope 并建立可丢弃 view state；渲染器消费的是 envelope 的 `event` payload。
+approval UI 等待 `control_request`，向
 Runtime 提交 `control_response`；它不持有 resolver 或 policy state。stdout 是机器输出时诊断和 warning
 只写 stderr，避免污染 NDJSON。
 

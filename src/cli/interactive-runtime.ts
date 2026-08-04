@@ -1,5 +1,5 @@
 // Narrow human-frontend contract implemented by RuntimeFrontendSession. There is no direct
-// Session factory or identity-free execution facade: every mutation is translated to RuntimeOp.
+// Session factory or identity-free execution path: every mutation is translated to RuntimeOp.
 
 import type {
   AgentMessage,

@@ -2,7 +2,7 @@
 // CLI 入口(规格见 docs/09-cli.md §2):flag 解析 → Runtime 组合 → 前端适配 → 分派
 // headless / 一次性 / 全屏 TUI。CLI 是最薄的一层:
 // 把输入翻译成 identity-bearing RuntimeOps，
-// 把 canonical RuntimeEvents 翻译成像素；不持有 Runtime 权威状态副本。
+// 把 Runtime event payloads 翻译成像素；不持有 Runtime 权威状态副本。
 
 import type { ModelConfig, RuntimeOp, StreamFn, WorkspaceId } from '../protocol/index.js';
 import path from 'node:path';
@@ -28,7 +28,7 @@ import type { ResolvedConfig } from './config.js';
 import type { CliFlags, CliInvocation } from './command-catalog.js';
 import { createHeadlessPromptOp, startHeadless } from './headless.js';
 import { startOneShotOutput } from './one-shot-output.js';
-import type { CliApprovalBridge } from './frontend-types.js';
+import type { CliControlActions } from './frontend-types.js';
 import type { CliSession } from './interactive-runtime.js';
 import { ProviderRegistry } from './provider-registry.js';
 import { runStandaloneProductCommand } from './product-commands.js';
@@ -60,10 +60,10 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   if (standaloneExit !== undefined) return standaloneExit;
   const sessionsCommand = invocation.command.kind === 'sessions';
 
-  // 启动清理:截断落盘的 7 天保留(docs/07 §1.6)。fire-and-forget:失败静默、不阻塞启动。
+  // 启动清理:截断落盘的 7 天保留(docs/07 §1)。fire-and-forget:失败静默、不阻塞启动。
   if (!sessionsCommand && !flags.ephemeral) void cleanupTruncated();
 
-  // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §8)。
+  // 非 TTY stdin 且非 --json:读完 stdin 作为一次性 prompt(docs/09 §1)。
   // 读空(coda </dev/null 且无 -p):没有可执行的交互或一次性输入——
   // 提示用法并 exit 2(放在 Session 创建之前,不为错误路径留下空会话文件)。
   if (
@@ -154,7 +154,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     return 2;
   }
 
-  // 审批模式默认(docs/09 §6.5 修订):交互 TUI → interactive;headless(--json)与 -p
+  // 审批模式默认(docs/09 路由):交互 TUI → interactive;headless(--json)与 -p
   // 一次性 → allow(机器驱动场景由调用方自决信任边界)。显式 --approval-mode 覆盖一切。
   // 注意此判定在「非 TTY stdin → prompt」归一之后:echo | coda 同属机器驱动形态。
   const approvalMode =
@@ -377,11 +377,11 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     }
     return 2;
   }
-  // Approval requests are already canonical Runtime events projected through `session.subscribe`;
-  // the frontend bridge only translates decisions back into control_response/abort operations.
-  const approval: CliApprovalBridge | undefined = approvalMode === 'interactive'
+  // Approval requests arrive as Runtime event payloads through `session.subscribe`; this small
+  // UI action adapter only translates decisions back into control_response/abort operations.
+  const approval: CliControlActions | undefined = approvalMode === 'interactive'
     ? {
-        resolve: (requestId, decision) => runtimeSession.resolveApproval(requestId, decision),
+        resolveApproval: (requestId, decision) => runtimeSession.resolveApproval(requestId, decision),
       }
     : undefined;
 
@@ -455,7 +455,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   }
 
   // 输出走有序 Bun FileSink 队列；TTY 能力探测仍由 compatibility 边界的 process.stdout 提供。
-  // Session listener 在每个事件后 drain，给流式输出施加背压；退出路径再做最终 drain。
+  // Runtime event subscriber 在每个事件后 drain，给流式输出施加有序背压；退出路径再做最终 drain。
   const output = createStdoutOutput();
   const stdout = {
     get columns(): number | undefined {
@@ -503,7 +503,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
     await renderer.drain();
   }
   // -p 一次性模式:与 headless 共享 one-shot 收尾语义，但使用人类可读输出。退出码同 --json 特例规则
-  // (docs/09 §6.4):willRetry:true 是中间边界；只按最终 agent_end 决定退出码。
+  // willRetry:true 是中间边界；只按最终 agent_end 决定退出码。
   let resolveFinalExit!: (code: number) => void;
   const finalExit = new Promise<number>((resolve) => {
     resolveFinalExit = resolve;

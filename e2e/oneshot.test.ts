@@ -1,4 +1,4 @@
-// L5 e2e:一次性模式与退出码(docs/09 §6.4 + §8,M5 核查修复面)。
+// E2E:一次性模式与退出码(docs/09 §3-4)。
 // - `coda --json -p "..."`:完整事件流后自动退出(无需 shutdown 命令/EOF);
 //   agent_end reason 'error' → exit 1、completed → exit 0(-p 人类可读模式同规则);
 // - `coda </dev/null`(非 TTY 空 stdin 且无 -p):不等待交互输入,stderr 用法提示,exit 2。
@@ -33,7 +33,7 @@ function track(p: CodaProc): CodaProc {
 
 const T = { timeout: CASE_TIMEOUT_MS };
 
-test('--json -p: full event stream then automatic exit 0 (docs/09 §6.4 one-shot)', async () => {
+test('--json -p: full event stream then automatic exit 0 (docs/09 §3 one-shot)', async () => {
   const proc = track(
     startCoda({
       script: {

@@ -1,5 +1,5 @@
-// M4 abort 全链路(docs/11 M4 验收 3/4——本里程碑核心验收;docs/06 §6/§7/§9)。
-// 断言链:aborted 入转录(事实)→ 出站视图修复(transform)→ wire 配对合法(复用 M2 断言)。
+// Abort and continuation regression tests cover the Agent Loop and steering/follow-up contracts.
+// 断言链:aborted 入转录(事实)→ 出站视图修复(transform)→ wire 配对合法。
 
 import { describe, expect, it } from 'bun:test';
 import type { AssistantMessage, ToolResultMessage, UserMessage } from '../src/protocol/index.js';
@@ -26,7 +26,7 @@ describe('流式中 abort(矩阵行 3)', () => {
 
     const assistant = h.agent.transcript.find((m) => m.role === 'assistant') as AssistantMessage;
     expect(assistant.stopReason).toBe('aborted');
-    // 已生成的 partial 内容保留在消息里(docs/05 §6 表)
+    // 已生成的 partial 内容保留在消息里(docs/05 Agent Loop)
     expect(assistant.content.some((p) => p.type === 'text' && p.text.length > 0)).toBe(true);
     const end = h.events.find((e) => e.type === 'agent_end');
     expect(end?.type === 'agent_end' && end.reason).toBe('aborted');
@@ -128,7 +128,7 @@ describe('工具执行中 abort(矩阵行 4——核心验收)', () => {
     expect(transcriptResults[0]?.isError).toBe(true);
     const end = h.events.find((e) => e.type === 'agent_end');
     expect(end?.type === 'agent_end' && end.reason).toBe('aborted');
-    // [G] 检查(docs/05 §2):工具批执行中被 abort → 批后直接收尾,不再发起下一次采样
+    // 工具批执行中被 abort → 批后直接收尾,不再发起下一次采样(docs/05 Agent Loop)
     expect(h.streamFn.calls).toHaveLength(1);
 
     // 下一次出站(continue 重采样):孤儿 c2 已补合成结果,配对合法(检查 convertContext 产物)
@@ -141,7 +141,7 @@ describe('工具执行中 abort(矩阵行 4——核心验收)', () => {
     const synth = outboundResults[1];
     expect(synth?.isError).toBe(true);
     expect(synth?.content).toEqual([{ type: 'text', text: INTERRUPTED_RESULT_TEXT }]);
-    // ★ 复用 M2 配对断言直接验 wire 形状(docs/11 M4 验收 3)
+    // 复用 provider wire 配对断言直接验形状(docs/04 Provider Adapter)
     assertToolCallPairing(toWireShape(outbound));
   });
 
@@ -227,7 +227,7 @@ describe('idle abort 与队列保留细则', () => {
   });
 });
 
-describe('continue() 的 drain 语义(M4 对抗核查:skipInitialPoll 与队列优先级)', () => {
+describe('continue() 的 drain 语义(skipInitialPoll 与队列优先级)', () => {
   it('abort 前排 2 条 steering:continue() 首次出站恰 1 条(预 drain 后 [A] 不再二次 drain),第 2 条下个边界注入', async () => {
     const gate = createGate();
     const h = makeHarness({

@@ -1,5 +1,5 @@
-// 消息模型:会话数据层(canonical 类型,规格见 docs/03-internal-protocol.md 第 2、3 节)。
-// 本文件是全项目的"事实存储"类型:JSONL 持久化按行存的就是 AgentMessage,恢复即重放。
+// Runtime message values are the transcript payloads shared by the agent, Runtime and adapters.
+// Their durable use follows the identity and lifecycle rules in docs/03-internal-protocol.md.
 
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'error' | 'aborted';
 
@@ -44,7 +44,7 @@ export interface Usage {
 }
 
 /**
- * adapter 填写的结构化错误分类(规格见 docs/08-session-persistence.md §5.1),
+ * adapter 填写的结构化错误分类(规格见 docs/04-provider-adapter.md 与 docs/08-session-persistence.md §5),
  * 供 session 层 retry/compaction 判定,免于对 errorMessage 做正则猜测。
  */
 export interface ProviderErrorDetails {

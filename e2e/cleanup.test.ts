@@ -1,4 +1,4 @@
-// L5 e2e:启动清理接线(docs/07-tools.md §1.6)。cleanup 函数本体的 7 天边界在
+// E2E:启动清理接线(docs/07-tools.md §1)。cleanup 函数本体的 7 天边界在
 // src/cli/cleanup.test.ts 单测钉死;这里只证一件事:main.ts 启动确实调用了清理——
 // HOME 指到临时目录,预置过期落盘文件,跑一次一次性会话后文件应消失。
 // mtime 用 utimesSync 伪造,零计时器;进程自然退出即 fs 操作已 settle。

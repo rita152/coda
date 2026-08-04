@@ -1,4 +1,4 @@
-// auto-retry 决策纯函数(规格见 docs/08-session-persistence.md §5.2)。
+// auto-retry 决策纯函数(规格见 docs/08-session-persistence.md §5)。
 // 无 IO、无计时器:只吃「一条 error assistant 消息 + 当前已重试次数」,吐退避决策。
 // 这是从 pi 3300 行教训里换来的形态——重试逻辑一旦与循环控制缠在一起就再也测不动。
 // 退避实际睡眠由 session 层调用 RetrySleep;生产默认 sleepWithAbort,测试可注入 gate。
@@ -36,7 +36,7 @@ export function resolveRetryOptions(opts?: RetryOptions): ResolvedRetryOptions {
 export type RetryDecision = { retry: false; reason: string } | { retry: true; delayMs: number };
 
 /**
- * 退避决策(docs/08 §5.2):
+ * 退避决策(docs/08 §5):
  *   stopReason !== 'error'         → 不重试(aborted 是用户意志,非错误也无从重试)
  *   分类不可重试 / retryable:false → 不重试(理由带 kind)
  *   attempt >= maxAttempts         → 不重试(上限)
@@ -64,7 +64,7 @@ export function decideRetry(
 }
 
 /**
- * 结构化优先、字符串兜底(docs/08 §5.1)。adapter 最了解错误来源并填 errorDetails;
+ * 结构化优先、字符串兜底(docs/08 §5)。adapter 最了解错误来源并填 errorDetails;
  * 缺省时对 errorMessage 做保守的网络类文案匹配——宁可漏判可重试,不可误判把 4xx 重放。
  */
 function classifyRetryable(

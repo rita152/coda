@@ -1,4 +1,4 @@
-// config 解析单测(M5 核查修复面,docs/09 §2/§7):
+// config 解析单测(docs/09 CLI 路由):
 // (1) --resume=<ThreadId> 显式选择线程；裸 --resume 打开列表，后续位置参数作为 prompt；
 // (2) readConfigFile:文件不存在静默;JSON 损坏 stderr 警告一行(不静默吞),仍返回 {}。
 
@@ -39,7 +39,7 @@ describe('parseFlags --resume[=<ThreadId>]', () => {
   });
 });
 
-describe('readConfigFile(docs/09 §7)', () => {
+describe('readConfigFile(docs/09)', () => {
   it('文件不存在:静默返回 {}', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const file = path.join(mkdtempSync(path.join(tmpdir(), 'coda-config-')), 'nope.json');
@@ -65,7 +65,7 @@ describe('readConfigFile(docs/09 §7)', () => {
   });
 });
 
-describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
+describe('parseFlags --approval-mode(docs/07 §4 / docs/09 §1)', () => {
   it('解析三个合法值', () => {
     expect(parseFlags(['--approval-mode', 'interactive']).approvalMode).toBe('interactive');
     expect(parseFlags(['--approval-mode', 'allow']).approvalMode).toBe('allow');
@@ -84,7 +84,7 @@ describe('parseFlags --approval-mode(M6,docs/07 §3 / docs/09 §6.5)', () => {
 });
 
 describe('parseFlags canonical runtime transport', () => {
-  it('removes the event-format protocol selector', () => {
+  it('rejects the removed event-format protocol selector', () => {
     expect(() => parseFlags(['--event-format=envelope'])).toThrow(/unknown flag/);
     expect(() => parseFlags(['--json', '--event-format=legacy'])).toThrow(/unknown flag/);
   });

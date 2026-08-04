@@ -27,7 +27,7 @@ import type {
   WorkspaceId,
 } from '../protocol/index.js';
 import type {
-  CliApprovalBridge,
+  CliControlActions,
   CliRuntimeEvent,
   CliThreadUsage,
 } from './frontend-types.js';
@@ -3235,8 +3235,8 @@ describe('TUI 控制器接线', () => {
       abort: () => undefined,
       close: async () => undefined,
     };
-    const approval: CliApprovalBridge = {
-      resolve: (id, decision) => resolved.push({ id, decision }),
+    const approval: CliControlActions = {
+      resolveApproval: (id, decision) => resolved.push({ id, decision }),
     };
     const view = await setup(90, 30);
     const controller = runTuiController(session, approval, view.screen, view.renderer, {
@@ -3488,8 +3488,8 @@ describe('TUI 控制器接线', () => {
       abort: () => undefined,
       close: async () => undefined,
     };
-    const approval: CliApprovalBridge = {
-      resolve: (id, decision) => {
+    const approval: CliControlActions = {
+      resolveApproval: (id, decision) => {
         resolved.push({ id, decision });
         pendingOnTarget = false;
       },
@@ -3955,8 +3955,8 @@ describe('TUI 控制器接线', () => {
     const session = idleCliSession();
     let listener: ((event: CliRuntimeEvent) => void | Promise<void>) | undefined;
     const decisions: Array<{ id: string; decision: string }> = [];
-    const approval: CliApprovalBridge = {
-      resolve: (id, decision) => decisions.push({ id, decision }),
+    const approval: CliControlActions = {
+      resolveApproval: (id, decision) => decisions.push({ id, decision }),
     };
     const view = await setup();
     view.screen.focusInput();
@@ -4033,7 +4033,7 @@ describe('TUI 控制器接线', () => {
       close: async () => {},
     };
     const approval = {
-      resolve: (id: string, decision: 'allow_once' | 'allow_always' | 'deny' | 'abort') => {
+      resolveApproval: (id: string, decision: 'allow_once' | 'allow_always' | 'deny' | 'abort') => {
         resolutions.push({ id, decision });
       },
     };
@@ -4166,7 +4166,7 @@ describe('TUI 控制器接线', () => {
     view.screen.setInput('preserved draft');
     const controller = runTuiController(
       session,
-      { resolve: () => {} },
+      { resolveApproval: () => {} },
       view.screen,
       view.renderer,
       { interaction: view.interaction, installSignalHandlers: false, workspace },

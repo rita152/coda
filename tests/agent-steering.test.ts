@@ -1,8 +1,9 @@
-// M4 steering / follow-up 语义矩阵(docs/06 七条语义 + §11 验收清单 + docs/11 M4 测试矩阵)。
-// 时序控制只用 gate 与事件等待;出站断言用 faux 的 calls(docs/10 §5)。
+// Steering / follow-up 语义矩阵(docs/06 Steering、Follow-up 与取消)。
+// 时序控制只用 gate 与事件等待;出站断言用 faux 的 calls(docs/10 测试策略)。
 
 import { describe, expect, it } from 'bun:test';
-import type { AgentEvent, UserMessage } from '../src/protocol/index.js';
+import type { UserMessage } from '../src/protocol/index.js';
+import type { AgentEvent } from '../src/protocol/agent-events.js';
 import { createGate } from '../src/providers/faux/index.js';
 import { makeHarness, makeTool, textOutput } from './helpers/agent-harness.js';
 
@@ -42,7 +43,7 @@ describe('语义 1:steering 不打断当前 turn', () => {
     gate.open();
     await run;
 
-    // (a) 出站转录:steering user 紧跟 toolResult 之后(docs/06 §5 注入形态)
+    // (a) 出站转录:steering user 紧跟 toolResult 之后(docs/06 §1 三种意图)
     const msgs = h.streamFn.calls[1]?.context.messages ?? [];
     expect(msgs.map((m) => (m.role === 'user' ? `user:${m.source}` : m.role))).toEqual([
       'user:prompt',
@@ -260,7 +261,7 @@ describe('语义 4:one-at-a-time vs all', () => {
     await run;
 
     expect(h.streamFn.calls).toHaveLength(4);
-    // 逐次多一条 steering(docs/10 §5 用例 4)
+    // 逐次多一条 steering(docs/10 测试策略)
     expect(outboundSources(h, 1)).toEqual(['prompt', 'steering']);
     expect(outboundSources(h, 2)).toEqual(['prompt', 'steering', 'steering']);
     expect(outboundSources(h, 3)).toEqual(['prompt', 'steering', 'steering', 'steering']);
@@ -353,7 +354,7 @@ describe('起跑前 poll(注入点 ①)', () => {
     expect(outboundSources(h, 0)).toEqual(['prompt', 'steering']);   // 首 turn 注入 1 条
     expect(outboundSources(h, 1)).toEqual(['prompt', 'steering', 'steering']);   // 第二条下个边界
 
-    // [A] 起跑 drain 的 queue_update(docs/06 §8.1):注入前发射且快照缩减(M4 对抗核查)
+    // 起跑 drain 的 queue_update(docs/06 §3 观察):注入前发射且快照缩减
     const ups = queueUpdates(h.events);
     expect(ups).toHaveLength(4);                                     // 入队 ×2 + [A] drain + [I] drain
     const ids = ups[1]?.steering.map((q) => q.id) ?? [];
@@ -366,7 +367,7 @@ describe('起跑前 poll(注入点 ①)', () => {
   });
 });
 
-describe('queue_update 事件(docs/06 §8)', () => {
+describe('queue_update 事件(docs/06 §3)', () => {
   it('入队、注入、清空三个时机各发快照;id 与注入后 UserMessage.id 一致;重复文本不错乱', async () => {
     const gate = createGate();
     const h = makeHarness({
@@ -433,7 +434,7 @@ describe('queue_update 事件(docs/06 §8)', () => {
     expect(ups).toHaveLength(2);                    // 入队 1 次 + [J] drain 1 次
     expect(ups[0]?.followUp).toHaveLength(1);
     expect(ups[1]?.followUp).toEqual([]);           // drain 快照已不含该消息
-    // [J] 的 queue_update 先于注入消息的 message_start(docs/06 §8.1)
+    // queue_update 先于注入消息的 message_start(docs/06 §3)
     const drainIdx = h.events.indexOf(ups[1] as AgentEvent);
     const injectIdx = h.events.findIndex(
       (e) => e.type === 'message_start' && e.message.role === 'user' && e.message.source === 'follow_up',
@@ -491,7 +492,7 @@ describe('边界 8:length 截断的 turn 与 steering 共存', () => {
   });
 });
 
-describe('运行中 clearQueues(docs/06 §8)', () => {
+describe('运行中 clearQueues(docs/06)', () => {
   it('流式挂起时入 2 条 steering 再 clearQueues:零注入、单 turn 完结、空快照事件已发', async () => {
     const gate = createGate();
     const h = makeHarness({
@@ -548,7 +549,7 @@ describe('运行中 clearQueues(docs/06 §8)', () => {
   });
 });
 
-describe('[H] shouldStopAfterTurn 优先于双队列(docs/05 §2)', () => {
+describe('[H] shouldStopAfterTurn 优先于双队列(docs/05)', () => {
   it('同时入 steering 与 follow-up:两队列都未被 poll;agent_end 后 continue() 先后消费两条', async () => {
     const gate = createGate();
     const h = makeHarness(

@@ -1,5 +1,5 @@
 // ProviderEvent 文法校验器(docs/03-internal-protocol.md 4.2 的可执行形态)。
-// 对 faux provider 与真实 adapter(M2 起)的事件流做同一套断言——
+// 对 faux provider 与真实 adapter 的事件流做同一套断言——
 // faux 自己违反事件文法时,这里全线报警。校验失败直接 throw(bun:test 报为测试失败)。
 
 import type { AssistantMessage, ProviderEvent, Usage } from '../../src/protocol/index.js';
@@ -71,7 +71,7 @@ export function assertValidProviderEventSequence(events: ProviderEvent[]): void 
       if (open.has(contentIndex) || closed.has(contentIndex)) {
         fail(`block index ${contentIndex} reused`, i, event);
       }
-      // append-only:块按 index 递增追加,contentIndex === 已开块数(docs/03 §4.2.4)
+      // append-only:块按 index 递增追加,contentIndex === 已开块数(docs/04 Provider Adapter)
       if (contentIndex !== started) {
         fail(`block index ${contentIndex} not append-only (expected ${started})`, i, event);
       }
@@ -95,7 +95,7 @@ export function assertValidProviderEventSequence(events: ProviderEvent[]): void 
         const folded = deltas.get(contentIndex) ?? '';
         const part = partial.content[contentIndex];
         if (event.type === 'text_end' || event.type === 'reasoning_end') {
-          // *_end.content 是该块完整文本 == 累积 delta == partial 中的块文本(docs/03 §4.2.6)
+          // *_end.content 是该块完整文本 == 累积 delta == partial 中的块文本(docs/04 Provider Adapter)
           if (event.content !== folded) {
             fail(`${event.type}.content != folded deltas ('${event.content}' vs '${folded}')`, i, event);
           }

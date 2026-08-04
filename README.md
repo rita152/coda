@@ -130,17 +130,16 @@ draft、滚动位置和未读位置按 thread 独立保存；切换页面不会�
 
 ## 脚本与 CI
 
-默认 `--json` 仍是兼容的 legacy NDJSON，stdout 只写协议记录：
+`--json` 是 protocol `2.0.0` 的 canonical NDJSON transport。stdin 每行必须是完整的
+identity-bearing `RuntimeOp`，stdout 只写 protocol hello、`EventEnvelope`、`op_receipt` 或
+`transport_error`：
 
 ```bash
 coda exec --json -p "运行测试并报告结果" > events.ndjson
-echo '{"type":"prompt","text":"检查当前工作区"}' | coda --json
-```
-
-canonical identity/envelope 传输需要显式 opt in：
-
-```bash
-coda --json --event-format=envelope
+printf '%s\n' \
+  '{"type":"thread_create","opId":"op_e_00000000000000000000000000000021","workspaceId":"workspace-script","threadId":"thread-script","model":{"provider":"faux","api":"faux","model":"faux"}}' \
+  '{"type":"prompt","opId":"op_e_00000000000000000000000000000022","workspaceId":"workspace-script","threadId":"thread-script","text":"检查当前工作区"}' \
+  | coda --json --workspace workspace-script
 ```
 
 一次性人类可读模式也可用管道：
@@ -149,7 +148,8 @@ coda --json --event-format=envelope
 printf '%s\n' '解释这个仓库的测试分层' | coda
 ```
 
-需要稳定终态的 automation 可显式 opt in；这些 flags 不改变默认 legacy `--json`：
+需要稳定终态的 automation 可选择 one-shot 输出格式；这些 flags 不改变 `--json` 的 canonical
+Runtime transport：
 
 ```bash
 coda exec --output=text --ephemeral "检查类型并给出结论"
@@ -196,7 +196,7 @@ git diff --check
 ```
 
 `bun.lock` 是唯一依赖锁文件；CI matrix 配置为 Linux 与 macOS。当前 workflow 的已知边界检查缺口
-见 [测试文档 §8](docs/10-testing.md#8-当前-ci-与规划门禁)，修复前不把远端矩阵表述为稳定全绿，
+见[测试文档](docs/10-testing.md)，修复前不把远端矩阵表述为稳定全绿，
 也不把现有 rg 回归测试表述为已证明一定选中了 `@vscode/ripgrep` 的 bundled platform binary。
 Runtime 0–3 与 CLI UX0–UX4 已全部进入当前基线，项目目前处于完成后的维护、加固与 surface 收敛
 阶段，没有进行中的编号里程碑。分层和产品契约见 [docs/README.md](docs/README.md)，完成记录、

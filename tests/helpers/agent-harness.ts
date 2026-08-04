@@ -8,13 +8,13 @@ import type {
   RuntimeTurnProvider,
 } from '../../src/agent/index.js';
 import type {
-  AgentEvent,
   AgentMessage,
   JSONSchema,
   ModelConfig,
   StreamFn,
   ToolCallPart,
 } from '../../src/protocol/index.js';
+import type { AgentEvent } from '../../src/protocol/agent-events.js';
 import { createFauxStreamFn } from '../../src/providers/faux/index.js';
 import type { FauxScript } from '../../src/providers/faux/index.js';
 import { FileTracker } from '../../src/shared/index.js';
