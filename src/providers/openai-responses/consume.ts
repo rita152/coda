@@ -94,8 +94,10 @@ export function handleResponseEvent(
     case 'response.content_part.added':
       syncContentPart(wire, false, state, stream);
       break;
+    // Part-level done only reconciles payload. output_item.done may still add
+    // phase/signature/call_id, so it alone closes blocks before the response terminal.
     case 'response.content_part.done':
-      syncContentPart(wire, true, state, stream);
+      syncContentPart(wire, false, state, stream);
       break;
     case 'response.output_text.delta':
       appendTextEvent(wire, 'output_text', state, stream);
@@ -113,7 +115,7 @@ export function handleResponseEvent(
       syncReasoningPartEvent(wire, 'summary', false, state, stream);
       break;
     case 'response.reasoning_summary_part.done':
-      syncReasoningPartEvent(wire, 'summary', true, state, stream);
+      syncReasoningPartEvent(wire, 'summary', false, state, stream);
       break;
     case 'response.reasoning_summary_text.delta':
       appendReasoningEvent(wire, 'summary', state, stream);
@@ -247,7 +249,7 @@ function finishTextEvent(
   syncText(
     textKey(kind, itemId, numberOr(wire['content_index'], 0)),
     stringOr(wire[valueField], ''),
-    true,
+    false,
     state.messagePhases.get(itemId),
     state,
     stream,
@@ -335,7 +337,7 @@ function finishReasoningEvent(
     kind,
     reasoningIndex(wire, kind),
     stringOr(wire['text'], ''),
-    true,
+    false,
     undefined,
     state,
     stream,
@@ -469,7 +471,6 @@ function finishFunctionArguments(
     stream,
   );
   syncToolArguments(slot, stringOr(wire['arguments'], ''), state, stream);
-  closeBlock(slot, state, stream);
 }
 
 function ensureToolSlot(

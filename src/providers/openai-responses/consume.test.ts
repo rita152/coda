@@ -52,6 +52,15 @@ function toolCallsOf(message: AssistantMessage): ToolCallPart[] {
   return message.content.filter((part): part is ToolCallPart => part.type === 'tool_call');
 }
 
+function eventOfType<T extends ProviderEvent['type']>(
+  events: ProviderEvent[],
+  type: T,
+): Extract<ProviderEvent, { type: T }> {
+  const event = events.find((candidate) => candidate.type === type);
+  if (event === undefined) throw new Error(`expected provider event ${type}`);
+  return event as Extract<ProviderEvent, { type: T }>;
+}
+
 describe('fixture replay', () => {
   it('text: output_text delta → TextPart，completed → stop', async () => {
     const { events, final } = await replay('text');
@@ -189,6 +198,8 @@ describe('fixture replay', () => {
 
     const { events, final } = await collectStream(stream);
     assertValidProviderEventSequence(events);
+    const textEnd = eventOfType(events, 'text_end');
+    expect(textEnd.partial.content[textEnd.contentIndex]).toEqual(final.content[0]);
     expect(final.content).toEqual([
       { type: 'text', text: 'Late phase.', phase: 'commentary' },
       { type: 'text', text: 'Future phase.' },
@@ -207,6 +218,8 @@ describe('fixture replay', () => {
     if (reasoning?.type !== 'reasoning') throw new Error('expected reasoning part');
     expect(reasoning.signature).toStartWith('openai-responses:v1:');
     expect(reasoning.signature).toContain('enc_reasoning_fixture');
+    const reasoningEnd = eventOfType(events, 'reasoning_end');
+    expect(reasoningEnd.partial.content[reasoningEnd.contentIndex]).toEqual(reasoning);
     expect(final.content[1]).toEqual({ type: 'text', text: 'The answer is 42.' });
     expect(final.usage).toEqual({ input: 12, output: 11, reasoning: 5 });
 
@@ -346,6 +359,45 @@ describe('fixture replay', () => {
       },
       { type: 'function_call_output', call_id: 'call_weather', output: 'sunny' },
     ]);
+  });
+
+  it('function call 在 output item 终态才关闭，保留最终 call_id', async () => {
+    const callItem = {
+      id: 'fc_late_id',
+      type: 'function_call',
+      status: 'completed',
+      call_id: 'call_late_id',
+      name: 'read',
+      arguments: '{"path":"late.ts"}',
+    };
+    const stream = consumeResponsesStreamForTest(ref, () => Promise.resolve(fixtureEvents([
+      {
+        type: 'response.function_call_arguments.delta',
+        item_id: callItem.id,
+        output_index: 0,
+        delta: '{"path":"late.ts"}',
+      },
+      {
+        type: 'response.function_call_arguments.done',
+        item_id: callItem.id,
+        output_index: 0,
+        name: callItem.name,
+        arguments: callItem.arguments,
+      },
+      { type: 'response.output_item.done', output_index: 0, item: callItem },
+      {
+        type: 'response.completed',
+        response: { output: [callItem], usage: null },
+      },
+    ])));
+
+    const { events, final } = await collectStream(stream);
+    assertValidProviderEventSequence(events);
+    const toolEnd = eventOfType(events, 'tool_call_end');
+    const finalCall = toolCallsOf(final)[0];
+    if (finalCall === undefined) throw new Error('expected final tool call');
+    expect(toolEnd.toolCall).toEqual(finalCall);
+    expect(toolEnd.toolCall.id).toBe(callItem.call_id);
   });
 
   it('parallel fragmented calls 独立累积，交错 delta 不串槽', async () => {
