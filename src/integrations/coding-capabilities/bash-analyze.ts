@@ -1,5 +1,5 @@
 // Built-in bash capability 所有的保守命令/路径分析。
-// v2 不引 tree-sitter,用尊重单双引号与反斜杠转义的手写扫描器拆分复合命令，并冻结 target kind。
+// 当前实现不引 tree-sitter,用尊重单双引号与反斜杠转义的手写扫描器拆分复合命令，并冻结 target kind。
 // 原则:静态分析看不全的嵌套结构(命令替换 $()/反引号、进程替换 <()/>()、
 // 重定向进系统路径、eval/exec/source 作 root)一律 forceConfirm 交给人,
 // 且不许 allow_always 泛化;明确危险的模式(rm -rf / 等)直接 denied,不进 approval。
@@ -35,7 +35,7 @@ export type BashAnalysis =
       denied: false;
       /** 拆分后的子命令原文(trim 后,引号保留)。 */
       subcommands: string[];
-      /** 每个子命令的审批 pattern:'bash:<root> *'(docs/07 §3.2 的泛化形态)。 */
+      /** 每个子命令的审批 pattern:'bash:<root> *'(policy 语义见 docs/07-tools.md)。 */
       patterns: string[];
       forceConfirm: boolean;
       /** forceConfirm 的人类可读理由(approval UI 可直接展示)。 */
@@ -54,7 +54,7 @@ export interface BashPathAnalysis {
   reasons: string[];
 }
 
-/** 重定向进这些前缀 → forceConfirm(">/etc、>/usr 等",docs/07 §3.3)。 */
+/** 重定向进这些前缀 → forceConfirm(">/etc、>/usr 等"，安全不变量见 docs/07-tools.md)。 */
 const SYSTEM_PATH_PREFIXES = [
   '/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/sys', '/proc',
   '/lib', '/var', '/opt', '/root', '/System', '/Library',
@@ -296,7 +296,7 @@ function skipAssignments(tokens: string[]): string[] {
 /**
  * 命令名归一:含斜杠的 root 是路径调用(/bin/rm、/usr/bin/rm、./rm),取 basename 得命令名再比对。
  * 否则 denylist 的字面量 root==='rm' 判定会被 '/bin/rm -rf /' 之类绝对路径整段绕过
- * (docs/07 §3.3 denylist 按命令语义,不按调用路径)。
+ * denylist 按命令语义而非调用路径匹配。
  */
 function commandName(root: string): string {
   return root.includes('/') ? path.basename(root) : root;
@@ -721,7 +721,7 @@ export function analyzeBashPaths(
 
 /**
  * analyzeBashCommand:拆分复合命令并产出审批 patterns 与 forceConfirm 判定。
- * denylist 命中 → { denied: true },调用方直接 deny 不进 approval(docs/07 §3.3)。
+ * denylist 命中 → { denied: true },调用方直接 deny 不进 approval。
  */
 export function analyzeBashCommand(command: string): BashAnalysis {
   const scanned = scan(command);

@@ -241,7 +241,7 @@ function applyUsage(raw: unknown, state: StreamState): void {
 
 // stop_reason 映射:处理 end_turn/max_tokens/tool_use/refusal;stop_sequence/pause_turn
 // 是 adapter 补充)。pause_turn 是服务端工具(web_search 等)对未完成 turn 的中断,本该由「重发
-// 部分 assistant 续跑」处理;coda v1 只接客户端工具,pause_turn 实际不可达,故当作干净 stop 收尾
+// 部分 assistant 续跑」处理;Coda 当前只接客户端工具,pause_turn 实际不可达,故当作干净 stop 收尾
 // (无 tool_calls 的 stop → loop 走 agent_end completed,不做续跑——这是有意的近似,非「loop 层
 // 可继续」)。model_context_window_exceeded 是 Anthropic 的成功响应截断标记,但我方没有独立的
 // stop reason:编码为 overflow error 交给 session compaction。未知值也必须 fail closed,不能把

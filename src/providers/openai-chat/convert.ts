@@ -1,4 +1,4 @@
-// 出站转换:内部 Context → Chat Completions wire 消息(规格见 docs/04-provider-adapter.md 第 3 节)。
+// 出站转换:内部 Context → Chat Completions wire 消息(规格见 docs/04-provider-adapter.md“请求”)。
 // 本函数假定输入已经过 transform 层清洗(aborted 已滤、孤儿 toolCall 已补结果),
 // 只做机械映射,不做修复——职责分开才可各自测试。
 

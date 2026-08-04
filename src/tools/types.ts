@@ -20,7 +20,7 @@ export interface ToolContext {
 export interface ToolOutput<D = unknown> {
   content: (TextPart | ImagePart)[];
   details?: D;                                    // 结构化细节(UI/持久化用,不发给模型)
-  terminate?: boolean;                            // 批内全 terminate 才提前收尾(docs/05 §4)
+  terminate?: boolean;                            // 批内全 terminate 才提前收尾(见 docs/05-agent-loop.md“工具”)
 }
 
 /**

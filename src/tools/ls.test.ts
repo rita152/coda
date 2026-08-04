@@ -1,4 +1,4 @@
-// ls 工具测试(L3:真实文件系统 + tmpdir 隔离,docs/10-testing.md §6)。
+// ls 工具测试(L3:真实文件系统 + tmpdir 隔离；测试层次见 docs/10-testing.md)。
 // 覆盖:字母序/目录后缀/dotfiles/不递归、limit 截断文案、非目录与不存在报错、
 // .gitignore 忽略目录仍列名、空目录、schema 描述钉住规格原话。
 

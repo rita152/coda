@@ -65,7 +65,7 @@ export function classifyError(err: unknown, aborted: boolean): ProviderErrorDeta
     }
     if (status !== undefined) return { ...base, kind: 'http', retryable: false };   // 其余 4xx(含 400 协议 bug)
     // SSE in-band 错误(SDK 以 status=undefined 的 APIError 抛出):按 error 体的 type/code 分类,
-    // server_error/internal 类是可重试的瞬时故障(docs/08 §5.1)
+    // server_error/internal 类是可重试的瞬时故障(见 docs/08-session-persistence.md“Compaction 与 retry”)
     const type = (err as { type?: unknown }).type;
     if (type === 'server_error' || code === 'internal_error') {
       return { ...base, kind: 'http', retryable: true };
