@@ -14,7 +14,7 @@ import { pushErrorEvent } from './errors.js';
 export { detectCompat, resolveCompat } from './compat.js';
 export type { AnthropicCompatFlags, ResolvedAnthropicCompat } from './compat.js';
 export { convertMessages, buildParams } from './convert.js';
-export { consumeAnthropicStreamForTest, runAnthropicStream };
+export { consumeAnthropicStreamForTest };
 
 export const streamAnthropicMessages: StreamFn = (model, context, options) => {
   const compat = resolveCompat(model);
@@ -98,6 +98,6 @@ function getClient(model: ModelConfig): Anthropic {
  * 结尾）；Anthropic SDK 自己会追加 /v1/messages，故只在该精确尾段存在时剥离。
  * 这让 OpenCode Go 的固定 .../v1 根可由两种 adapter 共用而不产生 /v1/v1。
  */
-export function anthropicSdkBaseURL(baseURL: string | undefined): string | undefined {
+function anthropicSdkBaseURL(baseURL: string | undefined): string | undefined {
   return baseURL?.replace(/\/v1\/?$/u, '');
 }

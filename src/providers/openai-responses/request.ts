@@ -3,7 +3,7 @@
 import OpenAI from 'openai';
 import type { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses';
 
-export type CreateResponsesStream = (
+type CreateResponsesStream = (
   params: ResponseCreateParamsStreaming,
   signal: AbortSignal | undefined,
 ) => Promise<AsyncIterable<unknown>>;

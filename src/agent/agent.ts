@@ -230,9 +230,8 @@ function normalizeQueuedMessage(
  * 或末条 assistant 自己的 toolCall 未配对(崩溃形态:stopReason 'tool_calls' 收尾)。
  * 不做全转录扫描:历史中段的孤儿(abort 留下、已由 transform 出站修复)是既成事实,
  * 不该让之后每次 continue() 都误判为「有残局」而重采样(核查发现的过宽判定)。
- * 导出仅为直接单测(崩溃恢复形态难以从公共 API 构造);非 Agent 公共 API。
  */
-export function hasResidue(transcript: readonly AgentMessage[]): boolean {
+function hasResidue(transcript: readonly AgentMessage[]): boolean {
   if (transcript.length === 0) return false;
   const last = transcript[transcript.length - 1] as AgentMessage;
   if (last.role === 'user' || last.role === 'tool_result') return true;

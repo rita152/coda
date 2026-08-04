@@ -23,7 +23,6 @@ import type { FauxCall, FauxEventSpec, FauxScript, FauxTurn, Gate } from './type
 
 export { createGate } from './types.js';
 export type { FauxCall, FauxEventSpec, FauxScript, FauxTurn, Gate } from './types.js';
-export { parsePartialJson } from '../../shared/partial-json.js';
 
 const DEFAULT_CHUNK_SIZE = 8;
 

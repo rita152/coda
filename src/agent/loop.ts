@@ -1,6 +1,6 @@
 // runLoop emits internal Agent-loop payloads; RuntimeThreadExecution wraps them in the
 // identity-bearing Runtime event stream. The loop owns the double loop (follow-up + tools/steering),
-// streamAssistantResponse 流水线、工具执行三阶段调度(规格见 docs/05-agent-loop.md)。
+// assistant response 流水线、工具执行三阶段调度(规格见 docs/05-agent-loop.md)。
 // 独立于 Agent 类的纯函数:faux provider 下全离线可测。
 // 全部复杂度围绕一个目标:转录在任何时刻(abort/length/工具失败/provider 出错)完整可重放。
 
@@ -24,7 +24,7 @@ import type { DrainMode, PendingMessageQueue } from './queue.js';
 import { errorToolResult, failTruncatedToolCalls, formatToolError, toToolResultMessage } from './tool-result.js';
 import { convertContext, INTERRUPTED_RESULT_TEXT } from './transform.js';
 
-export type Emit = (e: AgentEvent) => Promise<void>;
+type Emit = (e: AgentEvent) => Promise<void>;
 
 export type RuntimeToolPreparation =
   | {
@@ -229,15 +229,6 @@ export async function runLoop(
  * 转发为 message_update(docs/05 Agent Loop)。顺序决策:transformContext(用户钩子,看原貌)
  * 先于 convertContext(固定清洗,出站前最后一道合法性保证)。
  */
-export async function streamAssistantResponse(
-  cfg: LoopConfig,
-  transcript: AgentMessage[],
-  taskSignal: AbortSignal,
-  emit: Emit,
-): Promise<AssistantMessage> {
-  return streamAssistantResponseWithCapture(cfg, transcript, taskSignal, emit);
-}
-
 async function streamAssistantResponseWithCapture(
   cfg: LoopConfig,
   transcript: AgentMessage[],

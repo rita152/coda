@@ -64,5 +64,4 @@ export type {
   ToolContext,
   ToolExecutionInput,
   ToolOutput,
-  TruncatedDetails,
 } from './types.js';

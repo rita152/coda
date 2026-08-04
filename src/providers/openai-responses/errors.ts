@@ -33,7 +33,7 @@ function describeError(err: unknown): string {
 
 const OVERFLOW_PATTERN = /context.length|context_length|maximum context|too many tokens/i;
 
-export function classifyResponsesError(err: unknown, aborted: boolean): ProviderErrorDetails {
+function classifyResponsesError(err: unknown, aborted: boolean): ProviderErrorDetails {
   if (aborted) return { kind: 'aborted', retryable: false };
   if (err instanceof OpenAI.APIConnectionTimeoutError || err instanceof OpenAI.APIConnectionError) {
     return { kind: 'network', retryable: true };

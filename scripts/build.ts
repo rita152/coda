@@ -6,63 +6,39 @@ const OUT_DIR = `${PROJECT_ROOT}/dist`;
 
 await $`rm -rf ${OUT_DIR}`.quiet();
 
-const cliResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/cli/bootstrap.ts`],
-  outdir: OUT_DIR,
-  target: 'bun',
-  format: 'esm',
-  packages: 'external',
-  splitting: true,
-  sourcemap: 'external',
-  naming: {
-    entry: 'main.js',
-    chunk: 'chunks/[name]-[hash].js',
+const builds = [
+  {
+    entrypoint: 'src/cli/bootstrap.ts',
+    outdir: OUT_DIR,
+    splitting: true,
+    naming: { entry: 'main.js', chunk: 'chunks/[name]-[hash].js' },
   },
-});
+  { entrypoint: 'src/runtime/index.ts', outdir: `${OUT_DIR}/runtime`, naming: 'index.js' },
+  { entrypoint: 'src/capabilities/index.ts', outdir: `${OUT_DIR}/capabilities`, naming: 'index.js' },
+  {
+    entrypoint: 'src/integrations/coding-capabilities/index.ts',
+    outdir: `${OUT_DIR}/coding-capabilities`,
+    naming: 'index.js',
+  },
+] as const;
 
-const runtimeResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/runtime/index.ts`],
-  outdir: `${OUT_DIR}/runtime`,
-  target: 'bun',
-  format: 'esm',
-  packages: 'external',
-  sourcemap: 'external',
-  naming: 'index.js',
-});
+const results = [];
+for (const { entrypoint, ...options } of builds) {
+  results.push(await Bun.build({
+    entrypoints: [`${PROJECT_ROOT}/${entrypoint}`],
+    target: 'bun',
+    format: 'esm',
+    packages: 'external',
+    sourcemap: 'external',
+    ...options,
+  }));
+}
 
-const capabilitiesResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/capabilities/index.ts`],
-  outdir: `${OUT_DIR}/capabilities`,
-  target: 'bun',
-  format: 'esm',
-  packages: 'external',
-  sourcemap: 'external',
-  naming: 'index.js',
-});
-
-const codingCapabilitiesResult = await Bun.build({
-  entrypoints: [`${PROJECT_ROOT}/src/integrations/coding-capabilities/index.ts`],
-  outdir: `${OUT_DIR}/coding-capabilities`,
-  target: 'bun',
-  format: 'esm',
-  packages: 'external',
-  sourcemap: 'external',
-  naming: 'index.js',
-});
-
-for (const log of [
-  ...cliResult.logs,
-  ...runtimeResult.logs,
-  ...capabilitiesResult.logs,
-  ...codingCapabilitiesResult.logs,
-]) {
+for (const log of results.flatMap((result) => result.logs)) {
   console.error(log);
 }
 
-if (!cliResult.success
-  || !runtimeResult.success
-  || !capabilitiesResult.success
-  || !codingCapabilitiesResult.success) {
+if (results.some((result) => !result.success)) {
   process.exit(1);
 }
 

@@ -8,7 +8,8 @@ import {
   foldDeltas,
   microtaskUntil,
 } from '../../../tests/helpers/provider-events.js';
-import { createFauxStreamFn, createGate, parsePartialJson } from './index.js';
+import { parsePartialJson } from '../../shared/partial-json.js';
+import { createFauxStreamFn, createGate } from './index.js';
 import type { FauxScript } from './index.js';
 
 const model: ModelConfig = { ref: { provider: 'faux', api: 'faux', model: 'faux-1' } };

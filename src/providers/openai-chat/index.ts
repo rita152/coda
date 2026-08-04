@@ -14,7 +14,7 @@ import { pushErrorEvent } from './errors.js';
 export { detectCompat, resolveCompat } from './compat.js';
 export type { CompatFlags, ResolvedCompat } from './compat.js';
 export { convertMessages, buildParams, toStrictSchema } from './convert.js';
-export { consumeChatStreamForTest, runChatStream };
+export { consumeChatStreamForTest };
 
 export const streamOpenAIChat: StreamFn = (model, context, options) => {
   const compat = resolveCompat(model);

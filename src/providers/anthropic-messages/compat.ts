@@ -33,9 +33,6 @@ const CONSERVATIVE_PROFILE: ResolvedAnthropicCompat = {
   supportsTemperature: true,
 };
 
-/** 推断规则表:数据驱动,新方言加一行(host 关键字 → profile 增量)。 */
-const HOST_RULES: { match: string; profile: Partial<ResolvedAnthropicCompat> }[] = [];
-
 // Anthropic 的 Messages API 目前同时存在两代 thinking 协议。这里使用 SDK 当前列出的
 // 官方 model id 做保守 allowlist；未知 id 不发 thinking 字段，避免把 adaptive 或 enabled
 // 猜测到不支持该模式的模型上。模型发现/能力查询不属于 adapter 的同步请求路径。
@@ -79,7 +76,7 @@ const XHIGH_EFFORT_MODELS: ReadonlySet<string> = new Set([
   'claude-sonnet-5',
 ]);
 
-export type AnthropicThinkingMode = 'adaptive' | 'enabled' | 'unsupported';
+type AnthropicThinkingMode = 'adaptive' | 'enabled' | 'unsupported';
 
 export function thinkingModeForModel(model: string): AnthropicThinkingMode {
   if (ADAPTIVE_THINKING_MODELS.has(model)) return 'adaptive';
@@ -129,12 +126,6 @@ export function detectCompat(baseURL: string | undefined): ResolvedAnthropicComp
     return { ...CONSERVATIVE_PROFILE };
   }
   if (host === 'api.anthropic.com') return { ...OFFICIAL_PROFILE };
-  for (const rule of HOST_RULES) {
-    // 只做 host 精确/后缀匹配:子串匹配会被 api.anthropic.com.evil.example 误命中
-    if (host === rule.match || host.endsWith(`.${rule.match}`)) {
-      return { ...CONSERVATIVE_PROFILE, ...rule.profile };
-    }
-  }
   return { ...CONSERVATIVE_PROFILE };
 }
 

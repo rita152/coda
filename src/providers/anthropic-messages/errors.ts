@@ -33,7 +33,7 @@ function describeError(err: unknown): string {
 // Anthropic 上下文溢出:400 invalid_request,文案形如 "prompt is too long: N tokens > M maximum"
 const OVERFLOW_PATTERN = /prompt is too long|too many tokens|maximum.*(context|tokens)|context.*length/i;
 
-export function classifyError(err: unknown, aborted: boolean): ProviderErrorDetails {
+function classifyError(err: unknown, aborted: boolean): ProviderErrorDetails {
   if (aborted) return { kind: 'aborted', retryable: false };
   if (err instanceof Anthropic.APIConnectionTimeoutError || err instanceof Anthropic.APIConnectionError) {
     return { kind: 'network', retryable: true };

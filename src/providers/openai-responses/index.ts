@@ -14,7 +14,7 @@ import { pushResponsesErrorEvent } from './errors.js';
 import { createResponsesStreamWithSummaryFallback } from './request.js';
 
 export { buildParams, convertInput, convertTools } from './convert.js';
-export { consumeResponsesStreamForTest, runResponsesStream };
+export { consumeResponsesStreamForTest };
 
 export const streamOpenAIResponses: StreamFn = (model, context, options) =>
   runResponsesStream(model.ref, options?.signal, async () => {

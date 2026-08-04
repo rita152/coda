@@ -3,7 +3,7 @@
 export { Agent } from './agent.js';
 export type { AgentConfig } from './agent.js';
 export type { AgentEventListener } from './events.js';
-export { runLoop, streamAssistantResponse } from './loop.js';
+export { runLoop } from './loop.js';
 export type {
   LoopConfig,
   LoopQueues,
