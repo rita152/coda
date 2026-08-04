@@ -15,7 +15,7 @@ import {
   strictJsonSnapshot,
 } from '../protocol/index.js';
 import type { WorkspaceId } from '../protocol/index.js';
-import { RuntimeStorageError } from '../shared/runtime-storage-error.js';
+import { compareUtf8, RuntimeStorageError } from '../shared/index.js';
 
 export function validatePolicyGrant(
   input: unknown,
@@ -141,18 +141,6 @@ function isPolicyGrantResourceType(value: unknown): boolean {
 
 function isPolicyGrantResourceAccess(value: unknown): boolean {
   return value === 'read' || value === 'write' || value === 'execute' || value === 'connect';
-}
-
-function compareUtf8(left: string, right: string): number {
-  const encoder = new TextEncoder();
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index++) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
 }
 
 function snapshot<T>(value: T): T {

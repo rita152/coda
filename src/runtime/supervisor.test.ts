@@ -49,6 +49,7 @@ import type {
 import { createRuntime as createCanonicalRuntime } from './supervisor.js';
 import type { CreateRuntimeOptions } from './supervisor.js';
 import { emptyCheckpoint, ThreadJournalWriter } from '../session/thread-journal.js';
+import type { FoldedThreadJournal } from '../session/thread-journal.js';
 
 const WORKSPACE_ID = 'workspace-supervisor-recovery' as WorkspaceId;
 const CWD = '/runtime/supervisor-recovery';
@@ -2238,7 +2239,7 @@ function registerJournalEvents(
   events: EventHub,
   threadId: ThreadId,
   journal: ThreadJournalPort,
-  state: ReturnType<typeof foldThreadJournal>,
+  state: Readonly<FoldedThreadJournal>,
 ): void {
   events.registerThread(threadId, {
     highWaterSeq: state.highWaterSeq,
