@@ -2051,6 +2051,12 @@ describe('Supervisor registry composition', () => {
     const { ruleFreshness: _missingRuleFreshness, ...partialServices } = completeServices;
     void _missingRuleFreshness;
     const inheritedServices = Object.create(completeServices) as RuntimeCapabilityServices;
+    const inheritedGrantModeServices = Object.assign(Object.create({
+      grantMode: 'workspace',
+    }) as object, completeServices) as RuntimeCapabilityServices;
+    const nonEnumerableGrantModeServices = Object.defineProperty({
+      ...completeServices,
+    }, 'grantMode', { value: 'workspace' }) as RuntimeCapabilityServices;
     const invalidRuleBudget = { ...completeServices.ruleBudget } as Record<PropertyKey, unknown>;
     Object.defineProperty(invalidRuleBudget, Symbol('unknown-budget-field'), {
       value: 1,
@@ -2092,6 +2098,22 @@ describe('Supervisor registry composition', () => {
         build: (storage) => ({
           ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
           capabilityServices: partialServices,
+        }),
+      },
+      {
+        name: 'inherited capabilityServices grantMode selector',
+        expected: 'Runtime capabilityServices grantMode selector has been removed',
+        build: (storage) => ({
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
+          capabilityServices: inheritedGrantModeServices,
+        }),
+      },
+      {
+        name: 'non-enumerable capabilityServices grantMode selector',
+        expected: 'Runtime capabilityServices grantMode selector has been removed',
+        build: (storage) => ({
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
+          capabilityServices: nonEnumerableGrantModeServices,
         }),
       },
       {

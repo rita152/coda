@@ -2675,6 +2675,9 @@ function validateCreateOptions(
     throw new TypeError('Registry Runtime requires a complete capabilityServices bundle');
   }
   const record = services as Record<string, unknown>;
+  if ('grantMode' in record) {
+    throw new TypeError('Runtime capabilityServices grantMode selector has been removed');
+  }
   const expectedKeys = [
     'capabilities',
     'providers',
