@@ -1,7 +1,7 @@
-// write 工具:新建或整体覆盖文件(规格见 docs/07-tools.md §2.7)。
-// 覆盖已有文件受 read-before-edit 硬约束(文案同 §2.6);新文件不受约束。
-// 覆盖时保留原文件 BOM 与行尾风格(模型永远输出 LF,这层负责翻译,§2.6 BOM/CRLF 三步)。
-// 写入经 per-path 串行队列(path-lock);abort 只在每个 await 后检查 signal(§4)。
+// write 工具:新建或整体覆盖文件(工具 Executor 语义见 docs/07-tools.md)。
+// 覆盖已有文件受 read-before-edit 硬约束;新文件不受约束。
+// 覆盖时保留原文件 BOM 与行尾风格(模型永远输出 LF,这层负责翻译)。
+// 写入经 per-path 串行队列(path-lock);abort 只在每个 await 后检查 signal。
 
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -17,7 +17,7 @@ export const writeParameters = z.object({
 
 export type WriteArgs = z.infer<typeof writeParameters>;
 
-/** approval UI / 持久化用的结构化细节(diff 不回喂模型,§2.6)。 */
+/** approval UI / 持久化用的结构化细节(diff 不回喂模型)。 */
 export interface WriteDetails {
   diff: string;        // unified diff(新文件时旧内容为空串)
   additions: number;
@@ -77,7 +77,7 @@ async function executeWriteArgs(args: WriteArgs, ctx: ToolContext): Promise<Tool
       throw new Error(`Cannot write to ${args.path}: it is a directory.`);
     }
 
-    // read-before-edit 硬约束(§2.6 文案,仅覆盖已有文件时生效)
+    // read-before-edit 硬约束，仅覆盖已有文件时生效。
     let oldText = '';       // LF 空间的旧内容(diff 用;新文件为空串)
     let hasBom = false;
     let isCrlf = false;
@@ -107,7 +107,7 @@ async function executeWriteArgs(args: WriteArgs, ctx: ToolContext): Promise<Tool
     const body = isCrlf ? contentLf.replaceAll('\n', '\r\n') : contentLf;
     const finalText = (hasBom ? BOM : '') + body;
 
-    // diff 在 LF 空间生成(与 edit 的匹配空间一致,§2.6);新文件旧内容为空串
+    // diff 在 LF 空间生成(与 edit 的匹配空间一致);新文件旧内容为空串。
     const diff = createTwoFilesPatch(args.path, args.path, oldText, contentLf);
     const { additions, deletions } = countChanges(diff);
 
@@ -118,7 +118,7 @@ async function executeWriteArgs(args: WriteArgs, ctx: ToolContext): Promise<Tool
     // 报成功比报错更如实(abort 语义只保证「不写入」,不保证「写入后装没写」)。
     await Bun.write(absPath, finalText);
     const newStat = await stat(absPath);
-    // 成功后登记:自己的写不算外部修改(§2.6),后续 edit/write 无需重新 read
+    // 成功后登记:自己的写不算外部修改，后续 edit/write 无需重新 read。
     ctx.fileTracker.markRead(absPath, newStat.mtimeMs);
 
     const lines = countLines(args.content);

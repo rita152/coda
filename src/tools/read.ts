@@ -1,4 +1,4 @@
-// read 工具:带行号的文本读取 + 图片 ImagePart(规格见 docs/07-tools.md §2.1)。
+// read 工具:带行号的文本读取 + 图片 ImagePart(工具 Executor 语义见 docs/07-tools.md)。
 // 三重上限:MAX_OUTPUT_LINES 行 / MAX_OUTPUT_BYTES 字节 / 单行 2000 字符;
 // 流式逐行读取并同时计数行与字节,命中字节上限即中断上游文件流,
 // 不整读大文件进内存(opencode 做法)。>20MB 直接拒读(gemini-cli 保险)。
@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES } from '../shared/index.js';
 import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 
-// 参数 schema 与 docs/07 §2.1 逐字段一致
+// 参数 schema 与当前工具契约逐字段一致。
 export const readParameters = z.object({
   path: z.string().describe('Path to the file to read (absolute, or relative to cwd)'),
   offset: z.number().int().min(1).optional().describe('Line number to start reading from (1-indexed)'),
@@ -20,18 +20,18 @@ export type ReadArgs = z.infer<typeof readParameters>;
 
 export interface ReadDetails {
   path: string;          // resolve 后的绝对路径
-  truncated: boolean;    // 行数/字节任一截断即 true;框架 post-hook 见之跳过(docs/07 §1.6)
+  truncated: boolean;    // 行数/字节任一截断即 true;框架 post-hook 见之跳过
   totalLines?: number;   // 字节截断提前收流时未知,缺省
 }
 
-const MAX_LINE_CHARS = 2000;                 // 单行字符上限(docs/07 §2.1)
+const MAX_LINE_CHARS = 2000;                 // 单行字符上限
 const MAX_FILE_BYTES = 20 * 1024 * 1024;     // gemini-cli 的 20MB 文件上限保险
 const SAMPLE_BYTES = 4096;                   // 二进制采样窗口
 const NON_PRINTABLE_RATIO = 0.3;             // 不可打印占比阈值
 const UTF8_ENCODER = new TextEncoder();
 const ABORTED_MESSAGE = 'User aborted the read operation.';
 
-// 图片走 ImagePart 返回,不算二进制拒读(docs/07 §2.1)
+// 图片走 ImagePart 返回,不算二进制拒读。
 const IMAGE_MIME: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -237,7 +237,7 @@ export async function executeRead(
       throw new Error(`Offset ${args.offset} is out of range for this file (${lineNo} lines).`);
     }
 
-    // 结尾三态,永远告诉模型下一步 offset(docs/07 §2.1)
+    // 结尾三态,永远告诉模型下一步 offset。
     let tail: string;
     if (byteCapped) {
       const last = offset + kept.length - 1;
@@ -252,7 +252,7 @@ export async function executeRead(
     const numbered = kept.map((l, i) => `${offset + i}: ${l}`);
     const text = [...numbered, tail].join('\n');
 
-    // 读取成功登记:edit/write read-before-edit 硬约束的数据来源(docs/07 §2.1/§2.6)
+    // 读取成功登记:edit/write read-before-edit 硬约束的数据来源。
     ctx.fileTracker.markRead(resolved, stat.mtimeMs);
 
     const details: ReadDetails = { path: resolved, truncated: byteCapped || hasMoreAfterLimit };

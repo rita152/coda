@@ -34,7 +34,7 @@
     "test:unit": "bun --no-env-file run scripts/test.ts unit",
     "test:e2e": "bun --no-env-file run scripts/test.ts e2e",
     "check": "bun run lint && bun run typecheck && bun run test",
-    "demo:m1": "bun run scripts/demo-m1.ts",
+    "demo:faux": "bun run scripts/demo-faux.ts",
     "smoke": "bun run scripts/smoke-stream.ts",
     "smoke:anthropic": "bun run scripts/smoke-anthropic.ts",
     "record:fixture": "bun run scripts/record-fixture.ts",

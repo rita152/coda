@@ -1,4 +1,4 @@
-// 出站转换:内部 Context → Chat Completions wire 消息(规格见 docs/04-provider-adapter.md 第 3 节)。
+// 出站转换:内部 Context → Chat Completions wire 消息(规格见 docs/04-provider-adapter.md“请求”)。
 // 本函数假定输入已经过 transform 层清洗(aborted 已滤、孤儿 toolCall 已补结果),
 // 只做机械映射,不做修复——职责分开才可各自测试。
 
@@ -77,7 +77,7 @@ function convertUser(m: UserMessage, compat: ResolvedCompat): ChatCompletionMess
     return { role: 'user', content: text };
   }
   if (!compat.supportsImageParts) {
-    // 与 transform 层(M4)的降级形态对齐:占位文本,不无声丢弃(模型应知道「这里曾有图」)
+    // 与 transform 层的降级形态对齐:占位文本,不无声丢弃(模型应知道「这里曾有图」)
     const placeholders = images.map((p) => `[image omitted: ${p.mimeType}]`).join(' ');
     return { role: 'user', content: text ? `${text} ${placeholders}` : placeholders };
   }
@@ -136,7 +136,7 @@ function toImageUrlPart(img: ImagePart): ChatCompletionContentPart {
 // ---------- strict schema 清洗 ----------
 
 /**
- * OpenAI Structured Outputs 的 JSON Schema 子集清洗(docs/04 §3.5):根为 object、
+ * OpenAI Structured Outputs 的 JSON Schema 子集清洗:根为 object、
  * 所有对象 additionalProperties:false、全属性入 required、原可选属性转 type:[...,'null']。
  * protocol 层的 ToolSchema 保持原始 JSON Schema,清洗只发生在出站瞬间。
  */

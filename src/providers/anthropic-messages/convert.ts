@@ -1,7 +1,7 @@
-// 出站转换:内部 Context → Anthropic Messages wire 参数(规格见 docs/04-provider-adapter.md §8)。
+// 出站转换:内部 Context → Anthropic Messages wire 参数(规格见 docs/04-provider-adapter.md)。
 // 本函数假定输入已经过 transform 层清洗(aborted 已滤、孤儿 toolCall 已补结果),只做机械映射。
 //
-// 与 openai-chat 的关键差异(协议表达力验证点,docs/04 §8):
+// 与 openai-chat 的关键差异(协议表达力验证点):
 //  - systemPrompt → 顶层 system 参数(不是消息);
 //  - tool_result → user 消息内的 tool_result content block,图片直接进 block(原生支持,
 //    不需要 openai-chat 的「抽出补 user 消息」补丁);

@@ -121,7 +121,7 @@ export const bashResourceResolver: CapabilityResourceResolver = async (args, con
       onceOnlyReasons.add(`filesystem target is outside the project root: ${canonicalTarget}`);
     }
     mergeTargetKind(filesystemTargetKinds, canonicalTarget, target.kind);
-    // The v2 shell analyzer identifies all literal targets but cannot soundly infer an arbitrary
+    // The frozen shell analyzer identifies all literal targets but cannot soundly infer an arbitrary
     // program's access mode. Bind both sides so an exact grant can never omit a possible mutation.
     resources.push(filesystem('filesystem_read_target', 'read', canonicalTarget));
     resources.push(filesystem('filesystem_write_target', 'write', canonicalTarget));

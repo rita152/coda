@@ -17,10 +17,10 @@ import {
 import type {
   ModelPricing,
   RuntimeThreadDriverAttachment,
-  RuntimeThreadDriverHostServices,
   RuntimeThreadDriverFactory,
   RuntimeThreadExecutionOptions,
   ThreadDriverCheckpoint,
+  ThreadDriverHostServices,
 } from '../../session/index.js';
 import type { CompactionOptions } from '../../session/compactor.js';
 import type { RetryOptions } from '../../session/retry.js';
@@ -51,7 +51,6 @@ export function createRuntimeThreadDriverFactory(
   options: RuntimeThreadDriverFactoryOptions,
 ): RuntimeThreadDriverFactory {
   return {
-    requirements: { capabilityMode: 'registry' },
     create: async (input, host) => constructDriver(
       options,
       input,
@@ -70,7 +69,7 @@ export function createRuntimeThreadDriverFactory(
 function constructDriver(
   options: RuntimeThreadDriverFactoryOptions,
   input: RuntimeThreadAttachmentContext,
-  host: RuntimeThreadDriverHostServices,
+  host: ThreadDriverHostServices,
   checkpointInput: Readonly<ThreadDriverCheckpoint>,
 ): RuntimeThreadDriverAttachment {
   const checkpoint = snapshotCheckpoint(checkpointInput);

@@ -1,5 +1,5 @@
 // clipHead/clipTail 单元测试:行/字节双上限(谁先命中算谁)、行边界切割、
-// 多字节安全、首行即超限的至少一行保证(规格见 docs/07-tools.md §1.6)。
+// 多字节安全、首行即超限的至少一行保证(工具输出截断契约)。
 
 import { describe, expect, it } from 'bun:test';
 import { clipHead, clipTail, MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES } from './truncate.js';

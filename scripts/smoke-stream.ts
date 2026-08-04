@@ -1,4 +1,4 @@
-// M2 冒烟(docs/11-roadmap.md M2 验收 4,手动、不进 CI):经 streamOpenAIChat 完整管线
+// OpenAI Chat 冒烟(手动、不进 CI):经 streamOpenAIChat 完整管线
 // 对真实 endpoint 跑 (1) 带工具调用的流式往返 (2) 可选视觉测试。
 // 用法:bun run smoke -- [--model kimi-k3] [--vision]
 import type { AgentMessage, Context, ModelConfig } from '../src/protocol/index.js';
@@ -92,7 +92,7 @@ if (first.role === 'assistant' && first.stopReason === 'tool_calls') {
   }
   console.log('\n[smoke] tool roundtrip OK — no 400, pairing accepted by endpoint');
 } else {
-  console.error('\n[smoke] FAILED: model did not call the tool — tool roundtrip (M2 acceptance #4) unverified');
+  console.error('\n[smoke] FAILED: model did not call the tool — tool roundtrip unverified');
   process.exit(2);   // 区分「端点可达但工具路径未验证」
 }
 

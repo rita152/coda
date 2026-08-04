@@ -1,7 +1,7 @@
-// edit 工具:old/new 精确替换 + 零风险归一化 fuzzy(规格见 docs/07-tools.md §2.6)。
+// edit 工具:old/new 精确替换 + 零风险归一化 fuzzy(工具 Executor 语义见 docs/07-tools.md)。
 // 匹配策略两层到顶:精确 indexOf → 归一化空间按行匹配(NFKC + trimEnd + 不可见字符
 // → ASCII),明确拒绝编辑距离/相似度类匹配——静默改错的代价远大于让模型重发一次。
-// 失败语义:throw 即失败(§1.1),错误文案面向模型、告知下一步动作。
+// 失败语义:throw 即失败，错误文案面向模型、告知下一步动作。
 
 import type { Stats } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -11,7 +11,7 @@ import { z } from 'zod';
 import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 import { withPathLock } from './path-lock.js';
 
-// ---- 参数 schema(与 docs/07 §2.6 逐字段一致) ----
+// ---- 参数 schema ----
 
 export const editParameters = z.object({
   path: z.string().describe('Path to the file to edit'),
@@ -34,14 +34,14 @@ export const editParameters = z.object({
 
 export type EditArgs = z.infer<typeof editParameters>;
 
-/** 结构化细节:unified diff 进 UI 不回喂模型(docs/07 §2.6)。 */
+/** 结构化细节:unified diff 进 UI 不回喂模型。 */
 export interface EditDetails {
   diff: string;
   additions: number;
   deletions: number;
 }
 
-// ---- 错误文案(docs/07 §2.6 逐字) ----
+// ---- 错误文案 ----
 
 const MSG_NEVER_READ = 'File has not been read in this session. Use the read tool first.';
 const MSG_STALE = 'File has been modified since it was last read. Re-read it to see the current content.';
@@ -181,7 +181,7 @@ function splitOldText(oldText: string): { lines: string[]; hadTrailingNewline: b
 
 /**
  * 单条 edit → 替换区间列表。两层匹配(精确 indexOf → 归一化按行),唯一性检查
- * 在两层空间各自执行;到此为止,不做编辑距离/相似度(docs/07 §2.6 步骤 3)。
+ * 在两层空间各自执行;到此为止,不做编辑距离/相似度。
  */
 function resolveEdit(
   work: string,
@@ -296,7 +296,7 @@ export const EDIT_PROMPT_SNIPPET =
   'Before editing a file, read it in the current session first. When composing oldText from ' +
   'read output, strip the `N: ` line-number prefixes — copy the content verbatim otherwise.';
 
-// zod 校验前的无损结构修补(docs/07 §1.4):只做结构搬运,不猜语义。
+// zod 校验前的无损结构修补:只做结构搬运,不猜语义。
 export function prepareEditArguments(raw: unknown): unknown {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
     const obj: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
@@ -305,7 +305,7 @@ export function prepareEditArguments(raw: unknown): unknown {
       try {
         obj.edits = JSON.parse(obj.edits);
       } catch {
-        // 解析失败保留原样,交给 zod 按 §1.3 回喂
+        // 解析失败保留原样,交给 zod 生成可恢复错误。
       }
     }
     // 高频畸形 2:模型把 oldText/newText 平铺在顶层
@@ -352,7 +352,7 @@ export async function executeEdit(
       throwIfAborted(ctx.signal);
       if (st.isDirectory()) throw new Error(`Cannot edit a directory: ${args.path}`);
 
-      // read-before-edit 硬约束(docs/07 §2.6)
+      // read-before-edit 硬约束。
       const fresh = ctx.fileTracker.assertFresh(absPath, st.mtimeMs);
       if (!fresh.ok) throw new Error(fresh.reason === 'never_read' ? MSG_NEVER_READ : MSG_STALE);
 

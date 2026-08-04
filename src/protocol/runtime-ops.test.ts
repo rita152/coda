@@ -137,7 +137,7 @@ describe('RuntimeOp canonical admission', () => {
     expect(json).toContain('"constructor":"also-safe"');
   });
 
-  test('admits UX3 metadata, compaction, fork, and retry operations canonically', () => {
+  test('admits metadata, compaction, fork, and retry operations canonically', () => {
     const target = assertThreadId('thread-fork-target');
     const turn = assertTurnId('turn-committed');
     const operations = [
@@ -163,7 +163,7 @@ describe('RuntimeOp canonical admission', () => {
     }
   });
 
-  test('rejects ambiguous conversation targets and malformed UX3 metadata', () => {
+  test('rejects ambiguous conversation targets and malformed metadata', () => {
     for (const invalid of [
       { type: 'thread_rename', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, title: '' },
       { type: 'thread_archive', opId: OP, workspaceId: WORKSPACE, threadId: THREAD, archived: 'yes' },

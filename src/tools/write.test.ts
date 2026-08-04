@@ -1,4 +1,4 @@
-// write 工具测试(docs/07-tools.md §2.7 + docs/10-testing.md §6.1 行 17)。
+// write 工具测试(工具 Executor 与分层测试契约见 docs/07-tools.md、docs/10-testing.md)。
 // L3:真实文件系统,每用例独立 tmpdir,FileTracker 每测试新建。
 import fs from 'node:fs';
 import os from 'node:os';
@@ -216,7 +216,7 @@ describe('write:abort 与 schema', () => {
     );
   });
 
-  it('参数 schema 可渲染为 JSON Schema 且每个字段带 description(§1.2 约束)', () => {
+  it('参数 schema 可渲染为 JSON Schema 且每个字段带 description', () => {
     const schema = z.toJSONSchema(writeParameters) as {
       properties: Record<string, { description?: string }>;
       required?: string[];

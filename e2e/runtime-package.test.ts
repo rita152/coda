@@ -1,4 +1,4 @@
-// Phase 1 package-level contract: a consumer outside the repository can resolve
+// Package-level contract: a consumer outside the repository can resolve
 // `coda/runtime` (JavaScript + declarations), and importing it performs no host IO.
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
@@ -109,12 +109,12 @@ describe('coda/runtime package export', () => {
         "import { createRuntime, type CreateRuntimeOptions, type RuntimePort } from 'coda/runtime';",
         'interface ExtendedRuntimeOptions extends CreateRuntimeOptions { readonly hostTag?: string }',
         "type RuntimeFactory = (options: Parameters<typeof createRuntime>[0]) => Promise<RuntimePort>;",
-        "const registryMode: ExtendedRuntimeOptions['capabilityMode'] = 'registry';",
+        "const hostTag: ExtendedRuntimeOptions['hostTag'] = 'embedded';",
         "type HasSupervisor = 'Supervisor' extends keyof typeof runtime ? true : false;",
         "const factory: RuntimeFactory = createRuntime;",
         "const hasSupervisor: HasSupervisor = false;",
         'void factory;',
-        'void registryMode;',
+        'void hostTag;',
         'void hasSupervisor;',
       ].join('\n'),
       'utf8',

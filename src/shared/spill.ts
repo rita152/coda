@@ -1,6 +1,6 @@
-// 截断落盘:超限工具输出的全文存档(规格见 docs/07-tools.md §1.6)。
-// 目录形态 ~/.coda/truncated/<scope>/<timestamp>-<toolCallId>.txt;scope 在 M5 接入
-// session 后为 sessionId,当前为 Agent 实例 id。7 天保留与启动清理在 M6 完善。
+// 截断落盘:超限工具输出的全文存档(规格见 docs/07-tools.md)。
+// 目录形态 ~/.coda/truncated/<scope>/<timestamp>-<toolCallId>.txt;Runtime Agent 以当前 threadId 作为 scope。
+// 启动时清理超过 7 天的文件。
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';

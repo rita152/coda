@@ -4,7 +4,6 @@ import { deriveOpId } from '../protocol/index.js';
 import type {
   ExternalOpId,
   RunId,
-  RuntimeIdentityValidationError,
   ThreadId,
   TurnId,
 } from '../protocol/index.js';
@@ -30,7 +29,3 @@ export function createDefaultRuntimeIdentityFactory(): RuntimeIdentityFactory {
     deriveOpId,
   };
 }
-
-// Preserve a type-only reference so package declaration emit documents the factory-fault class
-// without instantiating it on the import path.
-export type DefaultIdentityFactoryFault = RuntimeIdentityValidationError;

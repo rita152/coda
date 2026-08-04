@@ -107,8 +107,12 @@ describe('RuntimeFrontendSession', () => {
     });
     await session.initialize();
     const events: string[] = [];
+    const envelopes: Readonly<EventEnvelope>[] = [];
     session.subscribe((event) => {
       events.push(event.type === 'agent_end' ? `agent_end:${event.reason}` : event.type);
+    });
+    session.subscribeEnvelopes((envelope) => {
+      envelopes.push(envelope);
     });
 
     const prompt = session.prompt('abort race');
@@ -120,6 +124,25 @@ describe('RuntimeFrontendSession', () => {
 
     expect(session.interactionState()).toBe('idle');
     expect(events).toEqual(['agent_start', 'agent_end:aborted']);
+    expect(envelopes.map((envelope) => envelope.event.type)).toEqual([
+      'agent_start',
+      'op_completed',
+    ]);
+    expect(envelopes.at(-1)).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      runId: RUN_ID,
+      opId: runtime.ops[1]?.opId,
+      seq: 4,
+      timestamp: 4,
+      event: {
+        type: 'op_completed',
+        opType: 'prompt',
+        terminalRunId: RUN_ID,
+        outcome: 'interrupted',
+      },
+    });
+    expect(envelopes.some((envelope) => envelope.event.type === 'agent_end')).toBe(false);
     expect(runtime.ops.at(-1)).toMatchObject({
       type: 'abort',
       expectedRunId: RUN_ID,

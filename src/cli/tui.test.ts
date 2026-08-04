@@ -283,7 +283,7 @@ describe('TUI footer 格式', () => {
   });
 });
 
-describe('UX4 TUI themes', () => {
+describe('TUI themes', () => {
   it('provides distinct light, dark, high-contrast, and color-free mono palettes', () => {
     const light = resolveTuiTheme('light');
     const dark = resolveTuiTheme('dark');
@@ -1117,7 +1117,7 @@ describe('全屏 OpenTUI 布局', () => {
   });
 });
 
-describe('UX2 TUI presentation workflow', () => {
+describe('TUI presentation workflow', () => {
   it('独立工具块恰隔一行，同一调用的结果与 diff 保持紧凑', async () => {
     const view = await setup(120, 55);
     try {
@@ -2276,7 +2276,7 @@ describe('UX2 TUI presentation workflow', () => {
   });
 });
 
-describe('UX3 TUI review and recovery workflow', () => {
+describe('TUI review and recovery workflow', () => {
   it('diff viewer keeps complete grouped patches and supports file/scope navigation', async () => {
     const view = await setup(100, 30);
     try {

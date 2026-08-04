@@ -182,7 +182,7 @@ describe('import 边界规则(docs/02-architecture.md)', () => {
     }
   });
 
-  it('src/runtime 可依赖 protocol/shared/session/capabilities（阶段 3 的合法方向）', async () => {
+  it('src/runtime 可依赖 protocol/shared/session/capabilities（当前合法方向）', async () => {
     const { errorCount } = await lintProbe(
       'src/runtime/legal.probe.ts',
       "import '../protocol/index.js';\nimport '../shared/index.js';\nimport '../session/index.js';\nimport type { RuntimeCapabilityServices } from '../capabilities/index.js';\nexport type Services = RuntimeCapabilityServices;\n",

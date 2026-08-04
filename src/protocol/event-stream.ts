@@ -1,4 +1,4 @@
-// EventStream:流事件的载体(规格见 docs/03-internal-protocol.md 第 5 节)。
+// EventStream:provider 流事件的载体(契约见 docs/04-provider-adapter.md“流”)。
 // 手写 push 队列 + waiting resolver:有消费者正在 await 时 push 直接 resolve 其
 // Promise(零延迟路径),否则事件进内部 FIFO buffer。无背压(buffer 无上界,上游
 // 天然有界——单条 LLM 流式响应)。

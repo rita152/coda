@@ -1,4 +1,4 @@
-// 错误映射(规格见 docs/04-provider-adapter.md §4.6 与 docs/08 §5.1 分类基线)。
+// 错误映射(见 docs/04-provider-adapter.md 的流契约与 docs/08-session-persistence.md 的错误分类)。
 // SSE in-band 错误(data 行带 error 字段)已被 SDK 转为 throw APIError,与 HTTP 错误同路径。
 
 import OpenAI from 'openai';
@@ -65,7 +65,7 @@ export function classifyError(err: unknown, aborted: boolean): ProviderErrorDeta
     }
     if (status !== undefined) return { ...base, kind: 'http', retryable: false };   // 其余 4xx(含 400 协议 bug)
     // SSE in-band 错误(SDK 以 status=undefined 的 APIError 抛出):按 error 体的 type/code 分类,
-    // server_error/internal 类是可重试的瞬时故障(docs/08 §5.1)
+    // server_error/internal 类是可重试的瞬时故障(见 docs/08-session-persistence.md“Compaction 与 retry”)
     const type = (err as { type?: unknown }).type;
     if (type === 'server_error' || code === 'internal_error') {
       return { ...base, kind: 'http', retryable: true };

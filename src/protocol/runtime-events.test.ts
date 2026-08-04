@@ -121,7 +121,7 @@ describe('EventEnvelope validation', () => {
     expectInvalid(envelope({ type: 'thread_created', thread: { threadId: THREAD_A } }, { opId: OP }));
   });
 
-  test('validates UX3 thread updates, manual compaction, and activity completion identities', () => {
+  test('validates thread updates, manual compaction, and activity completion identities', () => {
     validateEventEnvelope(envelope({
       type: 'thread_updated',
       changed: 'title',

@@ -1,5 +1,5 @@
 // Runtime 边界的 typed failures。正常的业务拒绝使用 OpReceipt；只有构造、端口、
-// 订阅与存储权威性故障经这些 error 传播（docs/12 §3.1）。
+// 订阅与存储权威性故障经这些 error 传播（docs/12“Event subscription”与“Durability 与恢复”）。
 
 import type { ExternalOpId, ThreadId, WorkspaceId } from '../protocol/index.js';
 

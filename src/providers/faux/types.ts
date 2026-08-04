@@ -35,7 +35,7 @@ export type FauxEventSpec =
 export interface FauxTurn {
   events?: FauxEventSpec[];
   // 类型收窄:done 事件的 stopReason 只允许 stop/length/tool_calls/content_filter
-  // (docs/03 §4.2 事件文法);error/aborted 只能经 error 字段或 abort 路径产生,
+  // 见 docs/03-internal-protocol.md 的事件生命周期;error/aborted 只能经 error 字段或 abort 路径产生,
   // 否则脚本可把 faux 配置成产出非法流。缺省推断:有 tool_call → 'tool_calls',否则 'stop'。
   stopReason?: Exclude<StopReason, 'error' | 'aborted'>;
   error?: { message: string; details?: ProviderErrorDetails }; // 以 error 事件收尾(stopReason 'error')

@@ -1,5 +1,5 @@
 // read 工具 L3 测试:真实文件系统 + tmpdir 隔离
-// (docs/10-testing.md §6.3 read 行;docs/07-tools.md §5 read 验收行:
+// (分层测试与工具安全不变量见 docs/10-testing.md、docs/07-tools.md:
 // 行号前缀/三态结尾/二进制拒读/图片 ImagePart/相似候选/offset 越界/FileTracker 登记/单行截断)。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';

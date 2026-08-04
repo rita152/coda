@@ -1512,7 +1512,6 @@ async function registryRuntimeFixture(
     ruleBudget: RULE_BUDGET,
     policyEngine,
     ruleFreshness: freshness,
-    grantMode: 'workspace',
   };
 
   const meta = threadMeta();

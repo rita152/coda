@@ -239,7 +239,6 @@ export interface RuntimeThreadDriverAttachment {
 
 /** Canonical driver factory consumed by the runtime-v2-only Supervisor composition. */
 export interface RuntimeThreadDriverFactory {
-  readonly requirements: { readonly capabilityMode: 'registry' };
   create(input: {
     readonly workspaceId: WorkspaceId;
     readonly threadId: ThreadId;
@@ -247,7 +246,7 @@ export interface RuntimeThreadDriverFactory {
     readonly permissionCeiling: PermissionCeilingSnapshot;
     readonly parentThreadId?: ThreadId;
     readonly initialCheckpoint?: ThreadDriverCheckpoint;
-  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
+  }, host: ThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
   resume(input: {
     readonly workspaceId: WorkspaceId;
     readonly threadId: ThreadId;
@@ -255,10 +254,8 @@ export interface RuntimeThreadDriverFactory {
     readonly permissionCeiling: PermissionCeilingSnapshot;
     readonly committedCheckpoint: ThreadDriverCheckpoint;
     readonly usedRequestIds: readonly string[];
-  }, host: RuntimeThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
+  }, host: ThreadDriverHostServices): Promise<RuntimeThreadDriverAttachment>;
 }
-
-export type RuntimeThreadDriverHostServices = ThreadDriverHostServices;
 
 export interface ThreadDriverPort {
   /** Replays durable queue effects while the attachment is still quarantined. */

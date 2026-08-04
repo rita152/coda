@@ -1,9 +1,10 @@
-// CLI-only view types. Human frontends receive the event payload projected from EventEnvelope;
-// machine transports consume the complete identity-bearing envelope directly. This is not a
-// second Runtime event protocol.
+// CLI-only view types. CliRuntimeEvent and its listener are human-frontend projections of
+// EventEnvelope.event, never a machine transport. Machine output must subscribe to the complete
+// identity-bearing EventEnvelope instead of treating this projection as a second Runtime protocol.
 
 import type {
   ApprovalControlDecision,
+  EventEnvelope,
   RuntimeEvent,
   ThreadUsage,
 } from '../protocol/index.js';
@@ -14,6 +15,9 @@ export type CliInteractionState = 'idle' | 'running' | 'retrying' | 'compacting'
 export type CliApprovalDecision = ApprovalControlDecision | 'abort';
 export type CliRuntimeEventListener = (
   event: CliRuntimeEvent,
+) => void | Promise<void>;
+export type CliRuntimeEnvelopeListener = (
+  envelope: Readonly<EventEnvelope>,
 ) => void | Promise<void>;
 
 /** Frontend action for submitting decisions for durable Runtime controls. */

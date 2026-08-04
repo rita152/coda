@@ -1,4 +1,4 @@
-// CompatFlags:方言差异声明化为数据(规格见 docs/04-provider-adapter.md 第 5 节)。
+// CompatFlags:方言差异声明化为数据(规格见 docs/04-provider-adapter.md)。
 // 本接口是 openai-chat 的私有精确类型;protocol 层的 ModelConfig.compat 是开放袋
 // ({ [key: string]: unknown }),在 resolveCompat 入口处收窄。
 // 蓝本:pi-mono 的 OpenAICompletionsCompat。
@@ -10,13 +10,10 @@ export interface CompatFlags {
   supportsDeveloperRole?: boolean;          // true:systemPrompt 渲染为 developer(第三方大多只认 system)
   supportsUsageInStreaming?: boolean;       // true:发 stream_options:{include_usage:true}(有的端点见到即 400)
   supportsStrictTools?: boolean;            // true:工具 schema 附 strict:true(需子集清洗,见 convert.ts)
-  supportsParallelToolCalls?: boolean;      // 预留:当前 buildParams 无消费点(StreamOptions 未承载该参数来源)
   supportsImageParts?: boolean;             // user content 可带 image_url part(视觉能力)
   supportsTemperature?: boolean;            // o 系列为 false(400 防线)
-  supportsStop?: boolean;                   // 预留:o3/o4-mini 不支持 stop(当前无 stop 参数来源)
   supportsReasoningEffort?: boolean;        // 是否透传 reasoning_effort
-  reasoningFormat?: 'none' | 'openai' | 'reasoning_content';
-    // 入站:读哪个扩展字段('reasoning_content' 覆盖 DeepSeek/OpenRouter/vLLM 系);出站:reasoning 参数方言
+  supportsReasoning?: boolean;              // 是否读取已知的 reasoning 扩展字段
   requiresToolResultName?: boolean;         // tool 消息须附 name 字段(个别方言)
   requiresAssistantAfterToolResult?: boolean; // tool 结果后必须跟 assistant 消息(插合成占位)
 }
@@ -29,12 +26,10 @@ const OPENAI_PROFILE: ResolvedCompat = {
   supportsDeveloperRole: true,
   supportsUsageInStreaming: true,
   supportsStrictTools: true,
-  supportsParallelToolCalls: true,
   supportsImageParts: true,
   supportsTemperature: true,
-  supportsStop: true,
   supportsReasoningEffort: true,
-  reasoningFormat: 'openai',
+  supportsReasoning: true,
   requiresToolResultName: false,
   requiresAssistantAfterToolResult: false,
 };
@@ -45,12 +40,10 @@ const CONSERVATIVE_PROFILE: ResolvedCompat = {
   supportsDeveloperRole: false,
   supportsUsageInStreaming: false,
   supportsStrictTools: false,
-  supportsParallelToolCalls: false,
   supportsImageParts: false,
   supportsTemperature: false,
-  supportsStop: false,
   supportsReasoningEffort: false,
-  reasoningFormat: 'reasoning_content',   // 只影响入站读取,读不到即忽略,无 400 风险
+  supportsReasoning: true,                 // 只影响入站读取,读不到即忽略,无 400 风险
   requiresToolResultName: false,
   requiresAssistantAfterToolResult: false,
 };
@@ -65,8 +58,6 @@ const HOST_RULES: { match: string; profile: Partial<ResolvedCompat> }[] = [
       supportsStrictTools: false,
       supportsUsageInStreaming: true,
       supportsTemperature: true,
-      supportsStop: true,
-      reasoningFormat: 'reasoning_content',
     },
   },
   {
@@ -78,8 +69,6 @@ const HOST_RULES: { match: string; profile: Partial<ResolvedCompat> }[] = [
       supportsUsageInStreaming: true,
       supportsImageParts: true,
       supportsTemperature: true,
-      supportsStop: true,
-      reasoningFormat: 'reasoning_content',
     },
   },
 ];
@@ -114,12 +103,10 @@ const FLAG_VALIDATORS: Record<keyof CompatFlags, (v: unknown) => boolean> = {
   supportsDeveloperRole: isBoolean,
   supportsUsageInStreaming: isBoolean,
   supportsStrictTools: isBoolean,
-  supportsParallelToolCalls: isBoolean,
   supportsImageParts: isBoolean,
   supportsTemperature: isBoolean,
-  supportsStop: isBoolean,
   supportsReasoningEffort: isBoolean,
-  reasoningFormat: (v) => v === 'none' || v === 'openai' || v === 'reasoning_content',
+  supportsReasoning: isBoolean,
   requiresToolResultName: isBoolean,
   requiresAssistantAfterToolResult: isBoolean,
 };
@@ -128,12 +115,23 @@ function isBoolean(v: unknown): boolean {
   return typeof v === 'boolean';
 }
 
+function legacyReasoningSupport(value: unknown): boolean | undefined {
+  if (value === 'none') return false;
+  if (value === 'openai' || value === 'reasoning_content') return true;
+  return undefined;
+}
+
 /** detectCompat 推断 + model.compat 显式字段浅覆盖(白名单收窄,见上)。 */
 export function resolveCompat(model: ModelConfig): ResolvedCompat {
   const overrides: Partial<ResolvedCompat> = {};
+  let legacyReasoningFormat: unknown;
   const bag = model.compat ?? {};
   for (const [key, value] of Object.entries(bag)) {
     if (value === undefined) continue;
+    if (key === 'reasoningFormat') {
+      legacyReasoningFormat = value;
+      continue;
+    }
     const validator = FLAG_VALIDATORS[key as keyof CompatFlags];
     if (validator === undefined) {
       console.warn(`[openai-chat] unknown compat key '${key}' ignored`);
@@ -144,6 +142,17 @@ export function resolveCompat(model: ModelConfig): ResolvedCompat {
       continue;
     }
     (overrides as Record<string, unknown>)[key] = value;
+  }
+  if (legacyReasoningFormat !== undefined) {
+    const migrated = legacyReasoningSupport(legacyReasoningFormat);
+    if (migrated === undefined) {
+      console.warn(`[openai-chat] invalid deprecated compat value for 'reasoningFormat' (${JSON.stringify(legacyReasoningFormat)}) ignored`);
+    } else if (overrides.supportsReasoning !== undefined) {
+      console.warn("[openai-chat] deprecated compat key 'reasoningFormat' ignored because 'supportsReasoning' takes precedence");
+    } else {
+      console.warn("[openai-chat] deprecated compat key 'reasoningFormat' mapped to 'supportsReasoning'");
+      overrides.supportsReasoning = migrated;
+    }
   }
   return { ...detectCompat(model.baseURL), ...overrides };
 }

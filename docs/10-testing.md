@@ -32,6 +32,7 @@ EventEnvelope，并保留 raw frame 供 wire 断言。核心覆盖：
 - `e2e/approval.test.ts`：`control_request` 到完整 `control_response`；
 - `e2e/resume.test.ts`：跨进程 `thread_resume`；
 - `e2e/oneshot.test.ts`：`--json -p` 初始 op 序列、retry 与退出码。
+- `e2e/product-cli.test.ts`：`--output=stream-json` 完整 envelope、顺序、terminal result 与 broken pipe abort。
 
 所有 e2e stdout 行都必须 JSON 可解析且符合上述 frame 集合。进程关闭使用 EOF；测试不得发送隐藏 shutdown frame。
 

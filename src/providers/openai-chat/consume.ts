@@ -1,4 +1,4 @@
-// 入站解析:chunk 累积状态机(规格见 docs/04-provider-adapter.md 第 4 节)。
+// 入站解析:chunk 累积状态机(规格见 docs/04-provider-adapter.md)。
 // 累积算法照抄 openai-node ChatCompletionStream.ts 的 #accumulateChatCompletion:
 // tool_calls 按 delta.tool_calls[].index 定位槽位、arguments 字符串拼接、name 覆盖不拼接。
 // 签名不 import openai 类型(chunk 形状结构化读取)——fixture 回放测试直接喂 JSON 行。
@@ -65,7 +65,7 @@ export function handleChunk(
   const delta = choice.delta ?? {};
 
   // reasoning 扩展字段(DeepSeek/OpenRouter/vLLM 系非标方言;SDK 类型不含,须自行读取)
-  if (compat.reasoningFormat !== 'none') {
+  if (compat.supportsReasoning) {
     const r = delta['reasoning_content'] ?? delta['reasoning'] ?? delta['reasoning_text'];
     if (typeof r === 'string' && r.length > 0) emitReasoningDelta(r, state, stream);
   }
@@ -221,7 +221,7 @@ function applyUsage(usage: unknown, state: StreamState): void {
   const cacheRead = num(promptDetails?.['cached_tokens']);
   const cacheWrite = num(promptDetails?.['cache_write_tokens']);   // 非标扩展,可缺失
   const reasoning = num(completionDetails?.['reasoning_tokens']);
-  // 协议不变量在 adapter 出口恒成立(03 §3.1):违反口径的明细字段丢弃,不污染下游
+  // 协议不变量在 adapter 出口恒成立:违反口径的明细字段丢弃,不污染下游。
   if (cacheRead !== undefined && cacheWrite !== undefined && cacheRead + cacheWrite <= mapped.input) {
     mapped.cacheRead = cacheRead;
     mapped.cacheWrite = cacheWrite;
@@ -272,7 +272,7 @@ export function finalize(state: StreamState, stream: ProviderEventStream): void 
   }
   const mapped = FINISH_REASON_MAP[state.finishReason];
   if (mapped === undefined) {
-    // 未知方言值:保守当作 stop,但留下现场(规格 04 §4.4)
+    // 未知方言值:保守当作 stop,但留下现场。
     console.warn(`[openai-chat] unknown finish_reason '${state.finishReason}', treating as 'stop'`);
   }
   state.partial.stopReason = mapped ?? 'stop';

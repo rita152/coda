@@ -116,6 +116,50 @@ describe('resolveConfig:flag > env > file 且无默认模型', () => {
     expect(modelConfig(r).apiKey).toBe('responses-key');
   });
 
+  it('未显式 provider 时，官方 endpoint 默认 Responses，非官方 base URL 保守走 Chat', () => {
+    const direct = resolveConfig(
+      flags({ model: 'gpt-direct' }),
+      { OPENAI_API_KEY: 'direct-key' },
+      {},
+    );
+    const official = resolveConfig(
+      flags({ model: 'gpt-official' }),
+      { OPENAI_API_KEY: 'official-key' },
+      { baseURL: 'https://api.openai.com/v1' },
+    );
+    const custom = resolveConfig(
+      flags({ model: 'gateway-model' }),
+      { CODA_BASE_URL: 'https://gateway.example/v1', OPENAI_API_KEY: 'gateway-key' },
+      {},
+    );
+    const customPort = resolveConfig(
+      flags({ model: 'proxy-model', baseUrl: 'https://api.openai.com:8443/v1' }),
+      { OPENAI_API_KEY: 'proxy-key' },
+      {},
+    );
+
+    expect(modelConfig(direct).ref.api).toBe('openai-responses');
+    expect(modelConfig(official).ref.api).toBe('openai-responses');
+    expect(modelConfig(custom).ref.api).toBe('openai-chat');
+    expect(modelConfig(customPort).ref.api).toBe('openai-chat');
+  });
+
+  it('显式 provider 始终优先于默认规则', () => {
+    const chat = resolveConfig(
+      flags({ provider: 'openai-chat', model: 'chat-model' }),
+      { OPENAI_API_KEY: 'chat-key' },
+      {},
+    );
+    const responses = resolveConfig(
+      flags({ provider: 'openai-responses', model: 'responses-model', baseUrl: 'https://gateway.example/v1' }),
+      { OPENAI_API_KEY: 'responses-key' },
+      {},
+    );
+
+    expect(modelConfig(chat).ref.api).toBe('openai-chat');
+    expect(modelConfig(responses).ref.api).toBe('openai-responses');
+  });
+
   it('空白 key 等同缺失：高优先级空值不遮蔽 provider 环境变量，生效值去掉首尾空白', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const openai = resolveConfig(
@@ -160,7 +204,7 @@ describe('resolveConfig:flag > env > file 且无默认模型', () => {
     expect(getMissingApiKeyMessage(deferred)).toContain('OPENAI_API_KEY');
   });
 
-  it('apiKeyEnv 间接引用:key 取 env[file.apiKeyEnv];指向的变量未设置时不回退明文 apiKey(§7.3)', () => {
+  it('apiKeyEnv 间接引用:key 取 env[file.apiKeyEnv];指向的变量未设置时不回退明文 apiKey', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const hit = resolveConfig(
       flags({ model: 'm' }),
@@ -277,7 +321,7 @@ describe('--ui 纯路由', () => {
   });
 });
 
-describe('parseFlags 边界(docs/09 §1 路由)', () => {
+describe('parseFlags 边界', () => {
   it('--resume=<thread-id> 使用 canonical identity；不带值进入列表选择', () => {
     const threadId = 'th_11111111-1111-4111-8111-111111111111';
     expect(parseFlags([`--resume=${threadId}`]).resume).toBe(threadId);

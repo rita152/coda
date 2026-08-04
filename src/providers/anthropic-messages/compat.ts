@@ -1,4 +1,4 @@
-// Anthropic Messages 私有 compat 结构(docs/04 §8 第 3 点:CompatFlags 是各 adapter 的私有类型,
+// Anthropic Messages 私有 compat 结构(见 docs/04-provider-adapter.md:CompatFlags 是各 adapter 的私有类型,
 // 不复用 openai-chat 的定义)。当前只承载 max_tokens、thinking、视觉/温度开关；thinking 的
 // 具体模式还要按官方 model id 判定，不能仅凭 endpoint 支持就把所有模型当成同一种方言。
 // protocol 层的 ModelConfig.compat 是开放袋({ [key: string]: unknown }),在 resolveCompat 入口收窄。

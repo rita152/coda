@@ -41,12 +41,19 @@ headless 在关闭前完成已读完整行、关闭 Runtime 并 drain stdout。
 op，并将它们作为 initial operation sequence 提交。headless 订阅先于 initial op 安装；initial prompt 的
 最终（非 retry）`agent_end` 后自然关闭。错误终态退出码为 1，完成/abort 为 0。
 
-## 4. TUI 与 human one-shot
+## 4. TUI 与 one-shot
 
 TUI 和 one-shot 订阅 EventEnvelope 并建立可丢弃 view state；渲染器消费的是 envelope 的 `event` payload。
 approval UI 等待 `control_request`，向
 Runtime 提交 `control_response`；它不持有 resolver 或 policy state。stdout 是机器输出时诊断和 warning
 只写 stderr，避免污染 NDJSON。
+
+`--output=stream-json` 是 one-shot record 流，不是第二套 core input/control 协议。首条记录为
+`{type:"stream_start",version:2,protocolVersion:PROTOCOL_VERSION}`；`version` 标识 one-shot record schema，
+`protocolVersion` 标识 core Runtime 协议。其后每条 Runtime 事件记录必须是
+`{"type":"event","envelope":EventEnvelope}`，完整保留 RuntimePort 交付的 identity、`seq`、`timestamp` 和
+event payload，最后恰好一条 `result`。人类 view 可用 canonical `op_completed` 合成终止投影，但该投影不得
+进入机器事件记录；机器输出不得重建、补造或剥离 envelope identity。`--final-only` 只写 terminal result。
 
 ## 5. 退出与信号
 

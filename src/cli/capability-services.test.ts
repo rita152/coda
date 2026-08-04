@@ -120,7 +120,16 @@ describe('CLI registry capability composition', () => {
     expect(composition.services.basePrompts).toBe(ports.basePrompts);
     expect(composition.services.ruleSnapshots).toBe(ports.ruleSnapshots);
     expect(composition.services.ruleFreshness).toBe(ports.ruleFreshness);
-    expect(composition.services.grantMode).toBe('workspace');
+    expect(Object.keys(composition.services).sort()).toEqual([
+      'basePrompts',
+      'capabilities',
+      'policyEngine',
+      'promptAssembler',
+      'providers',
+      'ruleBudget',
+      'ruleFreshness',
+      'ruleSnapshots',
+    ]);
     expect(Object.isFrozen(composition)).toBe(true);
     expect(Object.isFrozen(composition.services)).toBe(true);
     expect(Object.isFrozen(composition.services.ruleBudget)).toBe(true);

@@ -157,8 +157,10 @@ coda exec --output=json --final-only --timeout=5m "运行测试"
 coda exec --output=stream-json "审阅当前改动" | jq -c .
 ```
 
-`--output=json` 只写一条 `result`；`stream-json` 写 `stream_start`、typed event 和恰好一条 terminal
-`result`。终态 `status` 为 `completed|aborted|error|timeout`，timeout 退出码为 124，其他失败非零。
+`--output=json` 只写一条 `result`；`stream-json` 以 `{type:"stream_start",version:2}` 开始、再按 canonical 顺序写入
+`{"type":"event","envelope":EventEnvelope}` 和恰好一条 terminal `result`。其中 `envelope` 原样保留
+`workspaceId/threadId/runId/turnId/opId/seq/timestamp/event`；不会把裸 event payload 或前端合成事件伪装成
+Runtime 事件。终态 `status` 为 `completed|aborted|error|timeout`，timeout 退出码为 124，其他失败非零。
 `--ephemeral` 不留下 Runtime/session journal；它不能与 continue/resume 组合。机器格式不混入 human
 progress，text 模式的 progress 写 stderr、最终回答写 stdout。`--json` 与这些新 output flags 互斥。
 
@@ -186,6 +188,10 @@ export OPENAI_API_KEY='...'
 coda exec -p "检查类型错误"
 ```
 
+未给出 `--provider` 时，直接使用 OpenAI（未设置 base URL 或 base URL 为 HTTPS
+`api.openai.com`）默认走 Responses API。自定义 OpenAI-compatible base URL 默认走 Chat Completions
+兼容路径；需要固定协议时显式传入 `--provider openai-chat` 或 `--provider openai-responses`。
+
 优先使用 `coda auth login` 的秘密输入，不要把真实 key 写进 shell history、prompt、日志或仓库。
 
 ## 开发
@@ -198,7 +204,7 @@ git diff --check
 `bun.lock` 是唯一依赖锁文件；CI matrix 配置为 Linux 与 macOS。当前 workflow 的已知边界检查缺口
 见[测试文档](docs/10-testing.md)，修复前不把远端矩阵表述为稳定全绿，
 也不把现有 rg 回归测试表述为已证明一定选中了 `@vscode/ripgrep` 的 bundled platform binary。
-Runtime 0–3 与 CLI UX0–UX4 已全部进入当前基线，项目目前处于完成后的维护、加固与 surface 收敛
+Runtime 与 CLI UX 已全部进入当前基线，项目目前处于完成后的维护、加固与 surface 收敛
 阶段，没有进行中的编号里程碑。分层和产品契约见 [docs/README.md](docs/README.md)，完成记录、
 当前兼容边界与尚未立项的后续范围见 [docs/11-roadmap.md](docs/11-roadmap.md)。
 

@@ -1,4 +1,4 @@
-// Anthropic Messages SSE fixture 录制(M7,docs/10 §4.3 同思路):对真实 Messages 端点
+// Anthropic Messages SSE fixture 录制(见 docs/10-testing.md 的 fixture 回归):对真实 Messages 端点
 // 发起流式请求,把每条原始 SSE 事件存为 JSONL。手动运行、fixture 入库;CI 永不联网。
 // 用法:bun run record:anthropic -- --scenario text|tool|thinking --out src/providers/anthropic-messages/__fixtures__/xxx.jsonl
 import { mkdirSync } from 'node:fs';

@@ -1,4 +1,4 @@
-// One thread's phase-1 FIFO admission/mailbox and active-run gate. Driver dispatch is deliberately
+// One thread's FIFO admission/mailbox and active-run gate. Driver dispatch is deliberately
 // not awaited by the mailbox so steer/follow-up/abort can reach an active run.
 
 import {
@@ -666,9 +666,6 @@ export class ThreadRuntime {
     const grantsRepository = this.#policyGrants;
     if (services === undefined || policyEngine === undefined || grantsRepository === undefined) {
       throw new Error('registry_runtime_services_unavailable');
-    }
-    if (services.grantMode !== grantsRepository.mode) {
-      throw new Error('registry_runtime_grant_mode_mismatch');
     }
     const active = this.#active;
     if (active === undefined

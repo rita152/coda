@@ -251,7 +251,6 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
       modelResolver,
       permissionPolicy: createCliPermissionPolicy(approvalMode),
       threadDriverFactory: driverFactory,
-      capabilityMode: 'registry',
       capabilityServices: capabilityComposition.services,
       workspaceReview: createGitWorkspaceReviewPort(),
     });
@@ -388,7 +387,7 @@ export async function runCli(invocation: CliInvocation, version: string): Promis
   if (modernOneShot) {
     projectRuleWarnings.subscribeWarnings(logProjectRuleWarning);
     const output = createStdoutOutput();
-    return startOneShotOutput(session, {
+    return startOneShotOutput(runtimeSession, {
       prompt: flags.prompt as string,
       mode: flags.output ?? 'text',
       finalOnly: flags.finalOnly,

@@ -1,4 +1,4 @@
-// UX1 产品 CLI 边界：真实驱动 dist/main.js，验证薄 bootstrap、输出通道、
+// 产品 CLI 边界：真实驱动 dist/main.js，验证薄 bootstrap、输出通道、
 // RuntimePort session inventory 与 exec 别名。子进程 HOME 与凭据环境全部隔离。
 
 import {
@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, expect, test } from 'bun:test';
+import { PROTOCOL_VERSION, readEventEnvelope } from '../src/protocol/index.js';
 import { buildE2eEnvironment, CASE_TIMEOUT_MS, DIST_MAIN, requireDist } from './harness.js';
 
 interface CommandResult {
@@ -355,9 +356,47 @@ test('opt-in output formats keep final stdout stable and text progress on stderr
   const records = stream.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
     readonly type: string;
     readonly status?: string;
+    readonly event?: unknown;
+    readonly envelope?: Record<string, unknown> & {
+      readonly event?: { readonly type?: string; readonly [key: string]: unknown };
+    };
   });
-  expect(records[0]?.type).toBe('stream_start');
-  expect(records.some((record) => record.type === 'event')).toBe(true);
+  expect(records[0]).toMatchObject({
+    type: 'stream_start',
+    version: 2,
+    protocolVersion: PROTOCOL_VERSION,
+  });
+  const eventRecords = records.filter((record) => record.type === 'event');
+  expect(eventRecords.length).toBeGreaterThan(0);
+  expect(eventRecords.every((record) => record.event === undefined)).toBe(true);
+  for (const record of eventRecords) {
+    expect(readEventEnvelope(record.envelope).kind).toBe('known');
+  }
+  const envelopes = eventRecords.map((record) => record.envelope as NonNullable<typeof record.envelope>);
+  const lifecycle = envelopes.map((envelope) => envelope.event?.type);
+  expect(lifecycle.indexOf('agent_start')).toBeLessThan(lifecycle.indexOf('message_start'));
+  expect(lifecycle.indexOf('message_start')).toBeLessThan(lifecycle.lastIndexOf('message_end'));
+  expect(lifecycle.lastIndexOf('message_end')).toBeLessThan(lifecycle.indexOf('agent_end'));
+  expect(lifecycle.indexOf('agent_end')).toBeLessThan(lifecycle.indexOf('op_completed'));
+  expect(envelopes.every((envelope, index) =>
+    index === 0 || Number(envelope.seq) === Number(envelopes[index - 1]?.seq) + 1)).toBe(true);
+  const agentStart = envelopes.find((envelope) => envelope.event?.type === 'agent_start');
+  expect(agentStart).toMatchObject({
+    workspaceId: expect.any(String),
+    threadId: expect.any(String),
+    runId: expect.any(String),
+    opId: expect.any(String),
+    seq: expect.any(Number),
+    timestamp: expect.any(Number),
+    event: { type: 'agent_start', reason: 'prompt' },
+  });
+  const turnEvent = envelopes.find((envelope) => envelope.event?.type === 'turn_start');
+  expect(turnEvent).toMatchObject({
+    threadId: agentStart?.threadId,
+    runId: agentStart?.runId,
+    turnId: expect.any(String),
+    event: { type: 'turn_start' },
+  });
   expect(records.at(-1)).toMatchObject({ type: 'result', status: 'completed' });
 
   const finalOnly = runCoda([
@@ -366,6 +405,121 @@ test('opt-in output formats keep final stdout stable and text progress on stderr
   expect(finalOnly.code).toBe(0);
   expect(finalOnly.stdout.trimEnd().split('\n')).toHaveLength(1);
   expect(JSON.parse(finalOnly.stdout)).toMatchObject({ type: 'result', status: 'completed' });
+}, T);
+
+test('stream-json preserves canonical envelopes across a recovered retry', () => {
+  const root = temporaryRoot('coda-product-stream-retry-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  const script = path.join(root, 'faux.json');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(script, JSON.stringify({
+    turns: [
+      {
+        error: {
+          message: 'temporary outage',
+          details: { kind: 'http', status: 503, retryable: true, retryAfterMs: 0 },
+        },
+      },
+      { events: [{ kind: 'text', text: 'recovered after retry' }] },
+    ],
+    onExhausted: 'throw',
+  }), 'utf8');
+
+  const result = runCoda([
+    'exec', '--provider', 'faux', '--faux-script', script, '--cwd', cwd,
+    '--output=stream-json', '-p', 'retry once',
+  ], home, cwd);
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  const records = result.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
+    readonly type: string;
+    readonly version?: number;
+    readonly protocolVersion?: string;
+    readonly status?: string;
+    readonly text?: string;
+    readonly event?: unknown;
+    readonly envelope?: Record<string, unknown> & {
+      readonly workspaceId?: string;
+      readonly threadId?: string;
+      readonly runId?: string;
+      readonly opId?: string;
+      readonly seq?: number;
+      readonly timestamp?: number;
+      readonly event?: {
+        readonly type?: string;
+        readonly reason?: string;
+        readonly willRetry?: boolean;
+        readonly predecessorRunId?: string;
+        readonly successorRunId?: string;
+        readonly terminalRunId?: string;
+      };
+    };
+  });
+  expect(records[0]).toEqual({
+    type: 'stream_start',
+    version: 2,
+    protocolVersion: PROTOCOL_VERSION,
+  });
+  expect(records.at(-1)).toMatchObject({
+    type: 'result',
+    status: 'completed',
+    text: 'recovered after retry',
+  });
+
+  const eventRecords = records.slice(1, -1);
+  expect(eventRecords.length).toBeGreaterThan(0);
+  for (const record of eventRecords) {
+    expect(Object.keys(record).sort()).toEqual(['envelope', 'type']);
+    expect(record.type).toBe('event');
+    expect(record.event).toBeUndefined();
+    expect(readEventEnvelope(record.envelope).kind).toBe('known');
+  }
+  const envelopes = eventRecords.map((record) => record.envelope as NonNullable<typeof record.envelope>);
+  expect(envelopes.every((envelope, index) =>
+    index === 0 || envelope.seq === Number(envelopes[index - 1]?.seq) + 1)).toBe(true);
+  expect(new Set(envelopes.map((envelope) => envelope.workspaceId)).size).toBe(1);
+  expect(new Set(envelopes.map((envelope) => envelope.threadId)).size).toBe(1);
+  expect(envelopes.every((envelope) =>
+    typeof envelope.seq === 'number' && typeof envelope.timestamp === 'number')).toBe(true);
+
+  const agentStarts = envelopes.filter((envelope) => envelope.event?.type === 'agent_start');
+  const agentEnds = envelopes.filter((envelope) => envelope.event?.type === 'agent_end');
+  expect(agentStarts).toHaveLength(2);
+  expect(agentEnds).toHaveLength(2);
+  const runIds = agentStarts.map((envelope) => envelope.runId);
+  expect(runIds.every((runId) => typeof runId === 'string')).toBe(true);
+  expect(new Set(runIds).size).toBe(2);
+  expect(agentEnds.map((envelope) => envelope.runId)).toEqual(runIds);
+  expect(agentEnds[0]?.event).toMatchObject({ type: 'agent_end', reason: 'error', willRetry: true });
+  expect(agentEnds[1]?.event).toMatchObject({ type: 'agent_end', reason: 'completed' });
+  expect(agentEnds[1]?.event?.willRetry).toBeUndefined();
+
+  for (const runId of runIds) {
+    const lifecycle = envelopes
+      .filter((envelope) => envelope.runId === runId)
+      .map((envelope) => envelope.event?.type);
+    expect(lifecycle.indexOf('agent_start')).toBeLessThan(lifecycle.indexOf('turn_start'));
+    expect(lifecycle.indexOf('turn_start')).toBeLessThan(lifecycle.indexOf('message_start'));
+    expect(lifecycle.indexOf('message_start')).toBeLessThan(lifecycle.lastIndexOf('message_end'));
+    expect(lifecycle.lastIndexOf('message_end')).toBeLessThan(lifecycle.indexOf('turn_end'));
+    expect(lifecycle.indexOf('turn_end')).toBeLessThan(lifecycle.indexOf('agent_end'));
+  }
+  const retryScheduled = envelopes.filter((envelope) => envelope.event?.type === 'retry_scheduled');
+  expect(retryScheduled).toHaveLength(1);
+  expect(retryScheduled[0]).toMatchObject({
+    runId: runIds[1],
+    event: {
+      predecessorRunId: runIds[0],
+      successorRunId: runIds[1],
+    },
+  });
+  const completed = envelopes.filter((envelope) => envelope.event?.type === 'op_completed');
+  expect(completed).toHaveLength(1);
+  expect(completed[0]?.event?.terminalRunId).toBe(runIds[1]);
+  expect(envelopes.indexOf(agentEnds[1] as NonNullable<typeof agentEnds[number]>))
+    .toBeLessThan(envelopes.indexOf(completed[0] as NonNullable<typeof completed[number]>));
 }, T);
 
 test('stream-json broken pipe aborts the run before a delayed tool side effect', async () => {

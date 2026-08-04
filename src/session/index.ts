@@ -97,7 +97,6 @@ export type {
   RuntimeClock,
   RuntimeThreadDriverAttachment,
   RuntimeThreadDriverFactory,
-  RuntimeThreadDriverHostServices,
   ThreadCompactionCheckpoint,
   ThreadDriverCheckpoint,
   ThreadDriverCheckpointMutation,

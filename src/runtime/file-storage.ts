@@ -594,7 +594,6 @@ class FileWorkspacePort implements FileRuntimeWorkspaceStoragePort {
 
 class FilePolicyGrantRepository implements PolicyGrantRepository {
   readonly workspaceId: WorkspaceId;
-  readonly mode: PolicyGrantRepository['mode'];
   readonly #workspace: FileWorkspacePort;
   readonly #lease: SupervisorLease;
   readonly #canonicalFile: string;
@@ -607,7 +606,6 @@ class FilePolicyGrantRepository implements PolicyGrantRepository {
   }) {
     this.#workspace = input.workspace;
     this.#lease = input.lease;
-    this.mode = 'workspace';
     this.#canonicalFile = input.canonicalFile;
     this.workspaceId = input.lease.workspaceId;
   }

@@ -1,4 +1,4 @@
-// Anthropic Messages adapter(M7,规格见 docs/04-provider-adapter.md §8)。
+// Anthropic Messages adapter(规格见 docs/04-provider-adapter.md)。
 // src/ 内唯一允许 import "@anthropic-ai/sdk" 的目录(ESLint 规则 B')。
 // 对外只导出 streamAnthropicMessages。铁律:一旦被调用绝不 throw、绝不 reject;
 // 一切错误(网络/4xx/5xx/abort/SSE 中断/setup 异常)编码为流内 error 事件。
@@ -46,7 +46,7 @@ function runAnthropicStream(
       }
       // 中途 abort 时 SDK 的 SSE 迭代器可能捕获 AbortError 后 clean return(不 throw):
       // for-await 正常结束 + signal 已 abort + 无 stop_reason ⇒ 是中途打断,必须编码为
-      // aborted 而非「残缺流」——否则用户的 Esc 会被 session 层当可重试网络错误(docs/04 §4.6)。
+      // aborted 而非「残缺流」——否则用户的 Esc 会被 session 层当可重试网络错误。
       if (signal?.aborted && !state.stopReason) {
         pushErrorEvent(new Anthropic.APIUserAbortError(), state, stream, signal);
         return;

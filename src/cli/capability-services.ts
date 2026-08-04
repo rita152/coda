@@ -143,7 +143,6 @@ export function createCliRegistryCapabilityServices(
       projectRoot,
     }),
     ruleFreshness: options.ruleFreshness,
-    grantMode: 'workspace',
   });
 
   return Object.freeze({ capabilityRegistry, providerRegistry, services });

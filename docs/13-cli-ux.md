@@ -16,6 +16,9 @@ control card 使用 Runtime 给出的 presentation；批准、拒绝和资源确
 
 `exec`/`-p` 的 human output 是 EventEnvelope 的 renderer。完成、error、retry 与 timeout 的退出码由 Runtime
 终态决定；renderer terminal result 不写回 transcript。机器可读输出时 progress/warning 走 stderr。
+`--output=stream-json` 以 `{type:"stream_start",version:2}` 公告 record schema；event record 使用外层
+`{type:"event",envelope}`，其中 `envelope` 是 RuntimePort
+交付的完整 EventEnvelope；内部 payload 投影或为了人类终止状态合成的 event 不得写入机器流。
 
 ## Headless
 

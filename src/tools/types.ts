@@ -20,12 +20,12 @@ export interface ToolContext {
 export interface ToolOutput<D = unknown> {
   content: (TextPart | ImagePart)[];
   details?: D;                                    // 结构化细节(UI/持久化用,不发给模型)
-  terminate?: boolean;                            // 批内全 terminate 才提前收尾(docs/05 §4)
+  terminate?: boolean;                            // 批内全 terminate 才提前收尾(见 docs/05-agent-loop.md“工具”)
 }
 
 /**
  * details 的约定字段:工具自带截断(bash 的尾部截断)时打 truncated 标记,
- * 框架级截断 post-hook(docs/07 §1.6)看到即跳过,不做二次截断。
+ * 框架级截断 post-hook 看到即跳过,不做二次截断。
  */
 export interface TruncatedDetails {
   truncated?: boolean;

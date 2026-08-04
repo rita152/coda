@@ -72,7 +72,7 @@ function classifyRetryable(
   errorMessage: string | undefined,
 ): { retryable: boolean; reason: string } {
   if (details) {
-    // overflow 转交 compaction(§6.1),auth/aborted 重试无意义:分类硬否决,忽略 retryable 标志
+    // overflow 转交 compaction；auth/aborted 重试无意义:分类硬否决,忽略 retryable 标志
     if (details.kind === 'overflow' || details.kind === 'auth' || details.kind === 'aborted') {
       return { retryable: false, reason: `error kind '${details.kind}' is not retryable` };
     }

@@ -1,4 +1,4 @@
-// 入站解析测试:Messages SSE fixture 回放(docs/10 §4)+ usage 换算 + 错误路径 + abort。
+// 入站解析测试:Messages SSE fixture 回放(见 docs/10-testing.md)+ usage 换算 + 错误路径 + abort。
 // fixture 回放与生产路径走同一条 runAnthropicStream 管线,只是事件来源不同。
 // 本测试位于 adapter 目录内(非 tests/):tests/ 被 ESLint 禁止 import 真实 adapter(防在线测试)。
 import { readFileSync } from 'node:fs';

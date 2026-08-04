@@ -1,8 +1,10 @@
-// Explicit one-shot output adapter over Runtime event payloads delivered by the frontend view.
+// Explicit one-shot output adapter. Human rendering consumes the frontend event projection;
+// stream-json writes only complete canonical EventEnvelopes received from RuntimePort.
 
 import { PROTOCOL_VERSION } from '../protocol/index.js';
-import type { AssistantMessage } from '../protocol/index.js';
+import type { AssistantMessage, EventEnvelope } from '../protocol/index.js';
 import type {
+  CliRuntimeEnvelopeListener,
   CliRuntimeEvent,
   CliThreadUsage,
 } from './frontend-types.js';
@@ -27,11 +29,15 @@ export interface OneShotResult {
 export type OneShotStreamRecord =
   | {
       readonly type: 'stream_start';
-      readonly version: 1;
+      readonly version: 2;
       readonly protocolVersion: string;
     }
-  | { readonly type: 'event'; readonly event: CliRuntimeEvent }
+  | { readonly type: 'event'; readonly envelope: Readonly<EventEnvelope> }
   | OneShotResult;
+
+interface OneShotSession extends CliSession {
+  subscribeEnvelopes(listener: CliRuntimeEnvelopeListener): () => void;
+}
 
 export interface OneShotOutputOptions {
   readonly prompt: string;
@@ -49,7 +55,7 @@ export interface OneShotOutputOptions {
  * remain owned by the Runtime behind CliSession.
  */
 export async function startOneShotOutput(
-  session: CliSession,
+  session: OneShotSession,
   options: OneShotOutputOptions,
 ): Promise<number> {
   const stderr = options.stderr ?? process.stderr;
@@ -79,10 +85,12 @@ export async function startOneShotOutput(
   };
   options.fatalSignal?.addEventListener('abort', onOutputFailure, { once: true });
   if (options.fatalSignal?.aborted === true) onOutputFailure();
+  const unsubscribeEnvelopes = options.mode === 'stream-json' && !options.finalOnly
+    ? session.subscribeEnvelopes((envelope) => {
+        writeJson({ type: 'event', envelope });
+      })
+    : () => undefined;
   const unsubscribe = session.subscribe((event) => {
-    if (options.mode === 'stream-json' && !options.finalOnly) {
-      writeJson({ type: 'event', event });
-    }
     switch (event.type) {
       case 'agent_start':
         progress(timedOut ? 'timeout reached; aborting the started run' : 'running');
@@ -138,7 +146,7 @@ export async function startOneShotOutput(
     if (options.mode === 'stream-json' && !options.finalOnly) {
       writeJson({
         type: 'stream_start',
-        version: 1,
+        version: 2,
         protocolVersion: PROTOCOL_VERSION,
       });
       // Establish the stream before starting a side-effecting run. A pipe that is already
@@ -164,6 +172,7 @@ export async function startOneShotOutput(
     }
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
+    unsubscribeEnvelopes();
     unsubscribe();
     options.fatalSignal?.removeEventListener('abort', onOutputFailure);
     try {

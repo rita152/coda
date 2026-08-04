@@ -1,4 +1,4 @@
-// M7 Anthropic 冒烟(docs/11 M7,手动、不进 CI):经 streamAnthropicMessages 完整管线对真实
+// Anthropic Messages 冒烟(手动、不进 CI):经 streamAnthropicMessages 完整管线对真实
 // Messages 端点跑一轮带工具调用的流式往返(claude-opus-5)。tool_result block 原生支持图片,
 // 不需要 openai-chat 的抽出补丁——这是协议表达力的验证点。
 // 用法:bun run smoke:anthropic -- [--model claude-opus-5] [--vision]

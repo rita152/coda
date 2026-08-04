@@ -1,6 +1,6 @@
-// FileTracker:read-before-edit 硬约束的登记表(规格见 docs/07-tools.md §1.1/§2.6)。
-// 会话级 {resolvedPath → mtimeMs}:read 成功、edit/write 成功后登记;edit/write
-// 动笔前校验「读过且磁盘未变新」。宿主是 Agent 实例(经 ToolContext 传给每次执行)。
+// FileTracker:read-before-edit 硬约束的登记表(工具 Executor 语义见 docs/07-tools.md)。
+// Thread 级 {resolvedPath → mtimeMs}:read 成功、edit/write 成功后登记;edit/write
+// 动笔前校验「读过且磁盘未变新」。由 ThreadRuntime 持有,经 ToolContext 传给每次执行。
 
 export type FreshnessCheck = { ok: true } | { ok: false; reason: 'never_read' | 'stale' };
 

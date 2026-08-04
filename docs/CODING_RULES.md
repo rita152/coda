@@ -15,7 +15,8 @@
 下表是 canonical Runtime 的当前目录边界。旧 Session facade、identity-free event、静态工具/provider
 dispatch 和兼容 approval bridge 已退役，不得重新引入。实际机械门禁以
 `eslint.config.mjs` 与 `tests/boundaries.test.ts` 为准。它们当前并非对每个目录都实现完整 allowlist；
-[02 §3.3](./02-architecture.md) 列出的未机械覆盖方向仍是强制设计边界，不能因 lint 暂未报错而导入。
+[02 “分层”](./02-architecture.md#分层)与[“目录职责”](./02-architecture.md#目录职责)列出的未机械覆盖方向仍是
+强制设计边界，不能因 lint 暂未报错而导入。
 
 | 目录 | 职责与边界 |
 |---|---|

@@ -1,11 +1,31 @@
 import { describe, expect, it } from 'bun:test';
-import type { AgentMessage, AssistantMessage, RunId, UserMessage } from '../protocol/index.js';
+import { PROTOCOL_VERSION } from '../protocol/index.js';
+import type {
+  AgentMessage,
+  AssistantMessage,
+  EventEnvelope,
+  ExternalOpId,
+  RunId,
+  ThreadId,
+  TurnId,
+  UserMessage,
+  WorkspaceId,
+} from '../protocol/index.js';
 import type { CliSession } from './interactive-runtime.js';
-import type { CliRuntimeEvent, CliRuntimeEventListener } from './frontend-types.js';
+import type {
+  CliRuntimeEnvelopeListener,
+  CliRuntimeEvent,
+  CliRuntimeEventListener,
+} from './frontend-types.js';
 import { createOrderedOutput } from '../shared/ordered-output.js';
 import { startOneShotOutput } from './one-shot-output.js';
 
 const MODEL = { provider: 'faux', api: 'faux', model: 'test' } as const;
+const WORKSPACE_ID = 'workspace-one-shot' as WorkspaceId;
+const THREAD_ID = 'thread-one-shot' as ThreadId;
+const RUN_ID = 'run-one-shot' as RunId;
+const TURN_ID = 'turn-one-shot' as TurnId;
+const OP_ID = 'op_e_00000000000000000000000000000001' as ExternalOpId;
 const EMPTY_USAGE = {
   cumulative: { input: 3, output: 2 },
   turns: 1,
@@ -14,6 +34,7 @@ const EMPTY_USAGE = {
 
 class ScriptedSession implements CliSession {
   readonly #listeners = new Set<CliRuntimeEventListener>();
+  readonly #envelopeListeners = new Set<CliRuntimeEnvelopeListener>();
   readonly messages: readonly AgentMessage[] = [];
   readonly #answer: string;
   readonly #failure: boolean;
@@ -21,6 +42,7 @@ class ScriptedSession implements CliSession {
   readonly #retryThenSuccess: boolean;
   readonly #delayAfterTerminalMs: number;
   #finishPrompt: (() => void) | undefined;
+  #seq = 0;
   abortCalls = 0;
   closed = false;
 
@@ -53,6 +75,11 @@ class ScriptedSession implements CliSession {
   subscribe(listener: CliRuntimeEventListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  subscribeEnvelopes(listener: CliRuntimeEnvelopeListener): () => void {
+    this.#envelopeListeners.add(listener);
+    return () => this.#envelopeListeners.delete(listener);
   }
 
   async prompt(text: string): Promise<void> {
@@ -109,6 +136,19 @@ class ScriptedSession implements CliSession {
   }
 
   #emit(event: CliRuntimeEvent): void {
+    this.#seq++;
+    const turnScoped = event.type === 'message_start' || event.type === 'message_end';
+    const envelope: Readonly<EventEnvelope> = {
+      workspaceId: WORKSPACE_ID,
+      threadId: THREAD_ID,
+      runId: event.type === 'retry_scheduled' ? event.successorRunId : RUN_ID,
+      ...(turnScoped ? { turnId: TURN_ID } : {}),
+      ...(event.type === 'agent_start' || event.type === 'agent_end' ? { opId: OP_ID } : {}),
+      seq: this.#seq,
+      timestamp: 1_700_000_000_000 + this.#seq,
+      event,
+    };
+    for (const listener of [...this.#envelopeListeners]) void listener(envelope);
     for (const listener of [...this.#listeners]) void listener(event);
   }
 }
@@ -150,7 +190,7 @@ describe('opt-in one-shot output adapter', () => {
     }]);
   });
 
-  it('streams typed event records followed by one terminal result, or only that result with --final-only', async () => {
+  it('streams complete envelopes in prompt lifecycle order, or only the result with --final-only', async () => {
     for (const finalOnly of [false, true]) {
       const io = output();
       expect(await startOneShotOutput(new ScriptedSession(), {
@@ -164,8 +204,42 @@ describe('opt-in one-shot output adapter', () => {
       expect(records.at(-1)).toMatchObject({ type: 'result', status: 'completed', exitCode: 0 });
       if (finalOnly) expect(records).toHaveLength(1);
       else {
-        expect(records[0]).toMatchObject({ type: 'stream_start', version: 1 });
-        expect(records.some((record) => record['type'] === 'event')).toBe(true);
+        expect(records[0]).toEqual({
+          type: 'stream_start',
+          version: 2,
+          protocolVersion: PROTOCOL_VERSION,
+        });
+        const eventRecords = records.filter((record) => record['type'] === 'event');
+        expect(eventRecords.map((record) =>
+          (record['envelope'] as EventEnvelope).event.type)).toEqual([
+          'agent_start',
+          'message_start',
+          'message_end',
+          'agent_end',
+        ]);
+        expect(eventRecords[0]).toEqual({
+          type: 'event',
+          envelope: {
+            workspaceId: WORKSPACE_ID,
+            threadId: THREAD_ID,
+            runId: RUN_ID,
+            opId: OP_ID,
+            seq: 1,
+            timestamp: 1_700_000_000_001,
+            event: { type: 'agent_start', reason: 'prompt' },
+          },
+        });
+        expect(eventRecords[1]).toMatchObject({
+          envelope: {
+            workspaceId: WORKSPACE_ID,
+            threadId: THREAD_ID,
+            runId: RUN_ID,
+            turnId: TURN_ID,
+            seq: 2,
+            timestamp: 1_700_000_000_002,
+          },
+        });
+        expect(eventRecords.every((record) => record['event'] === undefined)).toBe(true);
       }
     }
   });
