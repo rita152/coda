@@ -10,6 +10,7 @@ import {
 } from './identity.js';
 import {
   EventEnvelopeValidationError,
+  readEventEnvelope,
   validateEventEnvelope,
 } from './runtime-events.js';
 import type { EventEnvelope } from './runtime-events.js';
@@ -479,8 +480,121 @@ describe('EventEnvelope validation', () => {
   });
 });
 
+describe('EventEnvelope tolerant reading', () => {
+  test('accepts unknown envelope and known-event fields while narrowing known data', () => {
+    const input = envelope({
+      type: 'agent_end',
+      reason: 'completed',
+      messages: [{
+        role: 'user',
+        id: 'user-1',
+        timestamp: 1,
+        content: [{ type: 'text', text: 'hello', futureTone: 'muted' }],
+        futureSourceMetadata: { imported: true },
+      }],
+      willRetry: false,
+      futurePresentation: { compact: true },
+    }, {
+      runId: RUN,
+      transportTrace: 'trace-1',
+    });
+
+    const result = readEventEnvelope(input);
+
+    expect(result.kind).toBe('known');
+    if (result.kind !== 'known') throw new Error('expected a known event');
+    expect(result.envelope.event.type).toBe('agent_end');
+    if (result.envelope.event.type !== 'agent_end') throw new Error('expected agent_end');
+    expect(result.envelope.event.reason).toBe('completed');
+    expect(Reflect.get(result.envelope, 'transportTrace')).toBe('trace-1');
+    expect(Reflect.get(result.envelope.event, 'futurePresentation')).toEqual({ compact: true });
+    expect(Reflect.get(result.envelope.event.messages[0]!, 'futureSourceMetadata')).toEqual({
+      imported: true,
+    });
+    expect(Reflect.get(result.envelope.event.messages[0]!.content[0]!, 'futureTone')).toBe('muted');
+    expect(Object.isFrozen(result.envelope)).toBe(true);
+    expect(Object.isFrozen(Reflect.get(result.envelope.event, 'futurePresentation'))).toBe(true);
+  });
+
+  test('preserves unknown event types for an explicit consumer ignore decision', () => {
+    const input = envelope({
+      type: 'future_runtime_notice',
+      payload: { schemaRevision: 3 },
+    }, {
+      runId: RUN,
+      transportTrace: 'trace-2',
+    });
+
+    const result = readEventEnvelope(input);
+
+    expect(result.kind).toBe('unknown');
+    if (result.kind !== 'unknown') throw new Error('expected an unknown event');
+    expect(JSON.stringify(result.envelope)).toBe(JSON.stringify(input));
+    expect(result.envelope.event.type).toBe('future_runtime_notice');
+    expect(Object.isFrozen(result.envelope.event)).toBe(true);
+    expectInvalid(input);
+  });
+
+  test('still rejects malformed known fields, identity, and strict JSON', () => {
+    expectUnreadable(envelope({
+      type: 'agent_end',
+      reason: 'completed',
+      messages: [],
+      willRetry: 'later',
+      futurePresentation: true,
+    }, { runId: RUN }));
+    expectUnreadable(envelope(
+      { type: 'future_runtime_notice' },
+      { threadId: '', runId: RUN },
+    ));
+    expectUnreadable(envelope(
+      { type: 'future_runtime_notice' },
+      { turnId: TURN },
+    ));
+    expectUnreadable(envelope(
+      { type: 'future_runtime_notice' },
+      { runId: RUN, transportTrace: undefined },
+    ));
+    expectUnreadable(envelope({
+      type: 'future_runtime_notice',
+      payload: 1n,
+    }, { runId: RUN }));
+  });
+
+  test('keeps the writer and recovery validator fail-closed', () => {
+    expectInvalid(envelope({
+      type: 'agent_start',
+      reason: 'prompt',
+      futurePresentation: true,
+    }, { runId: RUN }));
+    expectInvalid(envelope({
+      type: 'agent_end',
+      reason: 'completed',
+      messages: [{
+        role: 'user',
+        id: 'user-2',
+        timestamp: 1,
+        content: [{ type: 'text', text: 'hello' }],
+        futureSourceMetadata: true,
+      }],
+    }, { runId: RUN }));
+    expectInvalid(envelope(
+      { type: 'agent_start', reason: 'prompt' },
+      { runId: RUN, transportTrace: 'trace-3' },
+    ));
+    expectInvalid(envelope(
+      { type: 'future_runtime_notice' },
+      { runId: RUN },
+    ));
+  });
+});
+
 function expectInvalid(input: unknown): void {
   expect(() => validateEventEnvelope(input)).toThrow(EventEnvelopeValidationError);
+}
+
+function expectUnreadable(input: unknown): void {
+  expect(() => readEventEnvelope(input)).toThrow(EventEnvelopeValidationError);
 }
 
 function assistant(content: readonly unknown[]): unknown {

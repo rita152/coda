@@ -318,6 +318,22 @@ export interface EventEnvelope<TEvent = RuntimeEvent> {
   readonly event: TEvent;
 }
 
+/** Strict-JSON event payload retained when a consumer does not recognize its discriminator. */
+export type UnknownRuntimeEvent = Readonly<Record<string, StrictJsonValue>> & {
+  readonly type: string;
+};
+
+/**
+ * Consumer read result. Known events are safely narrowed; unknown events remain available for
+ * logging, forwarding, or an explicit ignore decision.
+ */
+export type EventEnvelopeReadResult =
+  | { readonly kind: 'known'; readonly envelope: Readonly<EventEnvelope> }
+  | {
+      readonly kind: 'unknown';
+      readonly envelope: Readonly<EventEnvelope<UnknownRuntimeEvent>>;
+    };
+
 export class EventEnvelopeValidationError extends TypeError {
   override readonly name = 'EventEnvelopeValidationError';
   readonly code = 'invalid_event_envelope' as const;
@@ -330,33 +346,78 @@ export class EventEnvelopeValidationError extends TypeError {
 /** Writer/recovery validator for strict JSON envelope snapshots and identity presence. */
 export function validateEventEnvelope(input: unknown): Readonly<EventEnvelope> {
   try {
-    const snapshot = strictJsonSnapshot(input);
-    if (!isRecord(snapshot)) throw new Error('envelope must be an object');
-    assertEnvelopeKeys(snapshot);
-    if (!isWorkspaceId(snapshot.workspaceId)) throw new Error('invalid workspaceId');
-    if (!isThreadId(snapshot.threadId)) throw new Error('invalid threadId');
-    if (snapshot.runId !== undefined && !isRunId(snapshot.runId)) throw new Error('invalid runId');
-    if (snapshot.turnId !== undefined && !isTurnId(snapshot.turnId)) throw new Error('invalid turnId');
-    if (snapshot.opId !== undefined && !isOpId(snapshot.opId)) throw new Error('invalid opId');
-    if (snapshot.turnId !== undefined && snapshot.runId === undefined) {
-      throw new Error('turnId requires runId');
+    const snapshot = snapshotEventEnvelope(input, assertEnvelopeKeys);
+    if (!validateKnownRuntimeEventPayload(snapshot.event, assertKeys)) {
+      throw new Error(`unknown runtime event type: ${String(snapshot.event.type)}`);
     }
-    if (!Number.isSafeInteger(snapshot.seq) || typeof snapshot.seq !== 'number' || snapshot.seq < 1) {
-      throw new Error('seq must be a positive safe integer');
-    }
-    if (typeof snapshot.timestamp !== 'number' || !Number.isFinite(snapshot.timestamp)) {
-      throw new Error('timestamp must be finite');
-    }
-    if (!isRecord(snapshot.event) || typeof snapshot.event.type !== 'string') {
-      throw new Error('event must have a discriminator');
-    }
-    validateRuntimeEventPayload(snapshot.event);
     validateEventIdentity(snapshot, snapshot.event);
     return snapshot as Readonly<EventEnvelope>;
   } catch (error) {
     if (error instanceof EventEnvelopeValidationError) throw error;
     throw new EventEnvelopeValidationError(error instanceof Error ? error.message : 'unknown error');
   }
+}
+
+/**
+ * Tolerant public wire reader. The envelope and every recognized field remain strict JSON, while
+ * additive fields are retained and ignored for narrowing. Unknown event types are preserved.
+ */
+export function readEventEnvelope(input: unknown): EventEnvelopeReadResult {
+  try {
+    const snapshot = snapshotEventEnvelope(input, requireEnvelopeKeys);
+    if (!validateKnownRuntimeEventPayload(snapshot.event, requireKeys)) {
+      return {
+        kind: 'unknown',
+        envelope: snapshot as Readonly<EventEnvelope<UnknownRuntimeEvent>>,
+      };
+    }
+    validateEventIdentity(snapshot, snapshot.event);
+    return { kind: 'known', envelope: snapshot as Readonly<EventEnvelope> };
+  } catch (error) {
+    if (error instanceof EventEnvelopeValidationError) throw error;
+    throw new EventEnvelopeValidationError(error instanceof Error ? error.message : 'unknown error');
+  }
+}
+
+type EventEnvelopeRecord = Readonly<Record<string, StrictJsonValue>> & {
+  readonly event: Readonly<Record<string, StrictJsonValue>> & { readonly type: string };
+};
+
+type EnvelopeKeyValidator = (
+  envelope: Readonly<Record<string, StrictJsonValue>>,
+) => void;
+
+type EventKeyValidator = (
+  value: Readonly<Record<string, StrictJsonValue>>,
+  required: readonly string[],
+  optional?: readonly string[],
+) => void;
+
+function snapshotEventEnvelope(
+  input: unknown,
+  validateEnvelopeKeys: EnvelopeKeyValidator,
+): EventEnvelopeRecord {
+  const snapshot = strictJsonSnapshot(input);
+  if (!isRecord(snapshot)) throw new Error('envelope must be an object');
+  validateEnvelopeKeys(snapshot);
+  if (!isWorkspaceId(snapshot.workspaceId)) throw new Error('invalid workspaceId');
+  if (!isThreadId(snapshot.threadId)) throw new Error('invalid threadId');
+  if (snapshot.runId !== undefined && !isRunId(snapshot.runId)) throw new Error('invalid runId');
+  if (snapshot.turnId !== undefined && !isTurnId(snapshot.turnId)) throw new Error('invalid turnId');
+  if (snapshot.opId !== undefined && !isOpId(snapshot.opId)) throw new Error('invalid opId');
+  if (snapshot.turnId !== undefined && snapshot.runId === undefined) {
+    throw new Error('turnId requires runId');
+  }
+  if (!Number.isSafeInteger(snapshot.seq) || typeof snapshot.seq !== 'number' || snapshot.seq < 1) {
+    throw new Error('seq must be a positive safe integer');
+  }
+  if (typeof snapshot.timestamp !== 'number' || !Number.isFinite(snapshot.timestamp)) {
+    throw new Error('timestamp must be finite');
+  }
+  if (!isRecord(snapshot.event) || typeof snapshot.event.type !== 'string') {
+    throw new Error('event must have a discriminator');
+  }
+  return snapshot as EventEnvelopeRecord;
 }
 
 function validateEventIdentity(
@@ -462,85 +523,94 @@ function validateEventIdentity(
   }
 }
 
-function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonValue>>): void {
+function validateKnownRuntimeEventPayload(
+  event: Readonly<Record<string, StrictJsonValue>>,
+  validateKeys: EventKeyValidator,
+): boolean {
   switch (event.type) {
     case 'agent_start':
-      assertKeys(event, ['type', 'reason']);
+      validateKeys(event, ['type', 'reason']);
       if (event.reason !== 'prompt' && event.reason !== 'follow_up' && event.reason !== 'continue') {
         throw new Error('invalid agent_start reason');
       }
-      return;
+      return true;
     case 'agent_end':
-      assertKeys(event, ['type', 'reason', 'messages'], ['willRetry']);
+      validateKeys(event, ['type', 'reason', 'messages'], ['willRetry']);
       if (event.reason !== 'completed' && event.reason !== 'aborted' && event.reason !== 'error') {
         throw new Error('invalid agent_end reason');
       }
-      for (const message of requireArray(event.messages, 'messages')) validateAgentMessage(message);
-      if (event.willRetry !== undefined) requireBoolean(event.willRetry, 'willRetry');
-      return;
-    case 'turn_start':
-      assertKeys(event, ['type']);
-      return;
-    case 'turn_end':
-      assertKeys(event, ['type', 'message', 'toolResults']);
-      validateAssistantMessage(event.message);
-      for (const result of requireArray(event.toolResults, 'toolResults')) {
-        validateToolResultMessage(result);
+      for (const message of requireArray(event.messages, 'messages')) {
+        validateAgentMessage(message, validateKeys);
       }
-      return;
+      if (event.willRetry !== undefined) requireBoolean(event.willRetry, 'willRetry');
+      return true;
+    case 'turn_start':
+      validateKeys(event, ['type']);
+      return true;
+    case 'turn_end':
+      validateKeys(event, ['type', 'message', 'toolResults']);
+      validateAssistantMessage(event.message, validateKeys);
+      for (const result of requireArray(event.toolResults, 'toolResults')) {
+        validateToolResultMessage(result, validateKeys);
+      }
+      return true;
     case 'message_start':
     case 'message_end':
-      assertKeys(event, ['type', 'message']);
-      validateAgentMessage(event.message);
-      return;
+      validateKeys(event, ['type', 'message']);
+      validateAgentMessage(event.message, validateKeys);
+      return true;
     case 'message_update':
-      assertKeys(event, ['type', 'messageId', 'event']);
+      validateKeys(event, ['type', 'messageId', 'event']);
       requireString(event.messageId, 'messageId');
-      validateMessageUpdateProviderEvent(event.event, event.messageId);
-      return;
+      validateMessageUpdateProviderEvent(event.event, event.messageId, validateKeys);
+      return true;
     case 'tool_execution_start':
-      assertKeys(event, ['type', 'toolCallId', 'toolName', 'args']);
+      validateKeys(event, ['type', 'toolCallId', 'toolName', 'args']);
       requireString(event.toolCallId, 'toolCallId');
       requireString(event.toolName, 'toolName');
-      return;
+      return true;
     case 'tool_execution_update':
-      assertKeys(event, ['type', 'toolCallId', 'update']);
+      validateKeys(event, ['type', 'toolCallId', 'update']);
       requireString(event.toolCallId, 'toolCallId');
       {
         const update = requireRecord(event.update, 'update');
         if (update.output !== undefined) requireString(update.output, 'output');
       }
-      return;
+      return true;
     case 'tool_execution_end':
-      assertKeys(event, ['type', 'toolCallId', 'result']);
+      validateKeys(event, ['type', 'toolCallId', 'result']);
       requireString(event.toolCallId, 'toolCallId');
-      validateToolResultMessage(event.result);
+      validateToolResultMessage(event.result, validateKeys);
       if (requireRecord(event.result, 'result').toolCallId !== event.toolCallId) {
         throw new Error('tool result identity mismatch');
       }
-      return;
+      return true;
     case 'queue_update':
-      assertKeys(event, ['type', 'steering', 'followUp']);
-      for (const item of requireArray(event.steering, 'steering')) validateQueuedMessage(item, 'steering');
-      for (const item of requireArray(event.followUp, 'followUp')) validateQueuedMessage(item, 'follow_up');
-      return;
+      validateKeys(event, ['type', 'steering', 'followUp']);
+      for (const item of requireArray(event.steering, 'steering')) {
+        validateQueuedMessage(item, 'steering', validateKeys);
+      }
+      for (const item of requireArray(event.followUp, 'followUp')) {
+        validateQueuedMessage(item, 'follow_up', validateKeys);
+      }
+      return true;
     case 'plan_update':
-      assertKeys(event, ['type', 'steps']);
-      for (const step of requireArray(event.steps, 'steps')) validatePlanStep(step);
-      return;
+      validateKeys(event, ['type', 'steps']);
+      for (const step of requireArray(event.steps, 'steps')) validatePlanStep(step, validateKeys);
+      return true;
     case 'error':
-      assertKeys(event, ['type', 'message', 'fatal']);
+      validateKeys(event, ['type', 'message', 'fatal']);
       requireString(event.message, 'message');
       requireBoolean(event.fatal, 'fatal');
-      return;
+      return true;
     case 'op_accepted':
     case 'op_started':
-      assertKeys(event, ['type', 'opType'], ['parentOpId']);
+      validateKeys(event, ['type', 'opType'], ['parentOpId']);
       if (!isRuntimeOpType(event.opType)) throw new Error('invalid opType');
-      return;
+      return true;
     case 'op_completed':
       if (event.opType === 'prompt' || event.opType === 'continue' || event.opType === 'compact') {
-        assertKeys(event, ['type', 'opType', 'terminalRunId', 'outcome'], ['parentOpId']);
+        validateKeys(event, ['type', 'opType', 'terminalRunId', 'outcome'], ['parentOpId']);
         if (!isRunId(event.terminalRunId)
           || (event.outcome !== 'applied'
             && event.outcome !== 'interrupted'
@@ -548,7 +618,7 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
           throw new Error('invalid activity completion');
         }
       } else {
-        assertKeys(event, ['type', 'opType', 'outcome'], ['parentOpId']);
+        validateKeys(event, ['type', 'opType', 'outcome'], ['parentOpId']);
         if (!isRuntimeOpType(event.opType)
           || event.opType === 'prompt'
           || event.opType === 'continue'
@@ -560,18 +630,18 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
           throw new Error('invalid operation completion');
         }
       }
-      return;
+      return true;
     case 'op_rejected':
-      assertKeys(event, ['type', 'opType', 'reason'], ['parentOpId']);
+      validateKeys(event, ['type', 'opType', 'reason'], ['parentOpId']);
       if (!isRuntimeOpType(event.opType)) throw new Error('invalid opType');
       requireString(event.reason, 'reason');
-      return;
+      return true;
     case 'control_request':
     case 'control_resolved':
-      validateControlEvent(event);
-      return;
+      validateControlEvent(event, validateKeys);
+      return true;
     case 'thread_result':
-      assertKeys(
+      validateKeys(
         event,
         ['type', 'resultOpId', 'childThreadId', 'terminalRunId', 'status'],
         ['summary'],
@@ -583,9 +653,9 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
         throw new Error('invalid thread result');
       }
       if (event.summary !== undefined) requireString(event.summary, 'summary');
-      return;
+      return true;
     case 'retry_scheduled':
-      assertKeys(event, [
+      validateKeys(event, [
         'type',
         'attempt',
         'maxAttempts',
@@ -601,39 +671,39 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
       if (!isRunId(event.predecessorRunId) || !isRunId(event.successorRunId)) {
         throw new Error('invalid retry run identity');
       }
-      return;
+      return true;
     case 'compaction_start':
-      assertKeys(event, ['type', 'reason', 'predecessorRunId', 'activityRunId']);
+      validateKeys(event, ['type', 'reason', 'predecessorRunId', 'activityRunId']);
       if ((event.reason !== 'threshold' && event.reason !== 'overflow' && event.reason !== 'manual')
         || !isRunId(event.predecessorRunId)
         || !isRunId(event.activityRunId)) {
         throw new Error('invalid compaction start');
       }
-      return;
+      return true;
     case 'compaction_end':
-      assertKeys(event, ['type', 'activityRunId', 'ok', 'droppedMessages']);
+      validateKeys(event, ['type', 'activityRunId', 'ok', 'droppedMessages']);
       if (!isRunId(event.activityRunId)) throw new Error('invalid compaction activity run');
       requireBoolean(event.ok, 'ok');
       requireNonNegativeSafeInteger(event.droppedMessages, 'droppedMessages');
-      return;
+      return true;
     case 'thread_created':
     case 'thread_resumed':
-      assertKeys(event, ['type', 'thread']);
-      validateThreadSummary(event.thread);
-      return;
+      validateKeys(event, ['type', 'thread']);
+      validateThreadSummary(event.thread, validateKeys);
+      return true;
     case 'thread_updated':
-      assertKeys(event, ['type', 'thread', 'changed']);
-      validateThreadSummary(event.thread);
+      validateKeys(event, ['type', 'thread', 'changed']);
+      validateThreadSummary(event.thread, validateKeys);
       if (event.changed !== 'title' && event.changed !== 'archived') {
         throw new Error('invalid thread update kind');
       }
-      return;
+      return true;
     case 'thread_closed':
-      assertKeys(event, ['type', 'threadId']);
+      validateKeys(event, ['type', 'threadId']);
       if (!isThreadId(event.threadId)) throw new Error('invalid closed thread id');
-      return;
+      return true;
     case 'runtime_diagnostic':
-      assertKeys(event, ['type', 'severity', 'code', 'message', 'scope']);
+      validateKeys(event, ['type', 'severity', 'code', 'message', 'scope']);
       if (event.severity !== 'warning' && event.severity !== 'error') {
         throw new Error('invalid diagnostic severity');
       }
@@ -642,19 +712,22 @@ function validateRuntimeEventPayload(event: Readonly<Record<string, StrictJsonVa
       if (event.scope !== 'thread' && event.scope !== 'run' && event.scope !== 'turn') {
         throw new Error('invalid diagnostic scope');
       }
-      return;
+      return true;
     case 'usage_update':
-      assertKeys(event, ['type', 'usage']);
-      validateThreadUsage(event.usage);
-      return;
+      validateKeys(event, ['type', 'usage']);
+      validateThreadUsage(event.usage, validateKeys);
+      return true;
     default:
-      throw new Error(`unknown runtime event type: ${String(event.type)}`);
+      return false;
   }
 }
 
-function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>): void {
+function validateControlEvent(
+  event: Readonly<Record<string, StrictJsonValue>>,
+  validateKeys: EventKeyValidator,
+): void {
   if (event.type === 'control_request') {
-    assertKeys(event, [
+    validateKeys(event, [
       'type',
       'requestId',
       'kind',
@@ -664,7 +737,7 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
       'payload',
     ]);
   } else if (event.kind === 'approval') {
-    assertKeys(event, [
+    validateKeys(event, [
       'type',
       'requestId',
       'kind',
@@ -674,7 +747,7 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
       'decision',
     ], ['requestedDecision']);
   } else {
-    assertKeys(event, [
+    validateKeys(event, [
       'type',
       'requestId',
       'kind',
@@ -693,7 +766,7 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
 
   if (event.type === 'control_request') {
     if (event.kind === 'approval') {
-      validateApprovalPayload(event.payload);
+      validateApprovalPayload(event.payload, validateKeys);
       const payload = requireRecord(event.payload, 'payload');
       if (payload.presentation !== undefined) {
         const presentation = requireRecord(payload.presentation, 'presentation');
@@ -728,7 +801,9 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
         }
       }
     }
-    else if (event.kind === 'resource_confirmation') validateResourcePayload(event.payload);
+    else if (event.kind === 'resource_confirmation') {
+      validateResourcePayload(event.payload, validateKeys);
+    }
     else throw new Error('invalid control kind');
     return;
   }
@@ -755,18 +830,26 @@ function validateControlEvent(event: Readonly<Record<string, StrictJsonValue>>):
   throw new Error('invalid control kind');
 }
 
-function validateApprovalPayload(value: StrictJsonValue | undefined): void {
+function validateApprovalPayload(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const payload = requireRecord(value, 'payload');
-  assertKeys(payload, ['toolCallId', 'description', 'presentation'], ['grantProposal']);
+  validateKeys(payload, ['toolCallId', 'description', 'presentation'], ['grantProposal']);
   requireString(payload.toolCallId, 'toolCallId');
   requireString(payload.description, 'description');
-  if (payload.grantProposal !== undefined) validateGrantProposal(payload.grantProposal);
-  validateApprovalPresentation(payload.presentation as StrictJsonValue);
+  if (payload.grantProposal !== undefined) {
+    validateGrantProposal(payload.grantProposal, validateKeys);
+  }
+  validateApprovalPresentation(payload.presentation as StrictJsonValue, validateKeys);
 }
 
-function validateApprovalPresentation(value: StrictJsonValue): void {
+function validateApprovalPresentation(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const presentation = requireRecord(value, 'presentation');
-  assertKeys(presentation, [
+  validateKeys(presentation, [
     'requestId',
     'target',
     'capability',
@@ -778,7 +861,7 @@ function validateApprovalPresentation(value: StrictJsonValue): void {
   requireString(presentation.requestId, 'presentation.requestId');
 
   const target = requireRecord(presentation.target, 'presentation.target');
-  assertKeys(target, ['workspaceId', 'threadId', 'runId', 'turnId']);
+  validateKeys(target, ['workspaceId', 'threadId', 'runId', 'turnId']);
   if (!isWorkspaceId(target.workspaceId)
     || !isThreadId(target.threadId)
     || !isRunId(target.runId)
@@ -787,7 +870,7 @@ function validateApprovalPresentation(value: StrictJsonValue): void {
   }
 
   const capability = requireRecord(presentation.capability, 'presentation.capability');
-  assertKeys(capability, ['id', 'version', 'registrationDigest']);
+  validateKeys(capability, ['id', 'version', 'registrationDigest']);
   requireString(capability.id, 'presentation.capability.id');
   requireString(capability.version, 'presentation.capability.version');
   requireString(capability.registrationDigest, 'presentation.capability.registrationDigest');
@@ -797,7 +880,7 @@ function validateApprovalPresentation(value: StrictJsonValue): void {
     'presentation.normalizedResources',
   )) {
     const normalized = requireRecord(resource, 'presentation.normalizedResource');
-    assertKeys(normalized, ['selectorId', 'resourceType', 'access', 'canonicalTarget']);
+    validateKeys(normalized, ['selectorId', 'resourceType', 'access', 'canonicalTarget']);
     requireString(normalized.selectorId, 'presentation.normalizedResource.selectorId');
     if (normalized.resourceType !== 'filesystem'
       && normalized.resourceType !== 'command'
@@ -815,19 +898,21 @@ function validateApprovalPresentation(value: StrictJsonValue): void {
   }
 
   const risk = requireRecord(presentation.risk, 'presentation.risk');
-  assertKeys(risk, ['code', 'reason', 'description']);
+  validateKeys(risk, ['code', 'reason', 'description']);
   requireString(risk.code, 'presentation.risk.code');
   requireString(risk.reason, 'presentation.risk.reason');
   requireString(risk.description, 'presentation.risk.description');
 
   const allowOnce = requireRecord(presentation.allowOnce, 'presentation.allowOnce');
-  assertKeys(allowOnce, ['invocationId', 'toolCallId']);
+  validateKeys(allowOnce, ['invocationId', 'toolCallId']);
   requireString(allowOnce.invocationId, 'presentation.allowOnce.invocationId');
   requireString(allowOnce.toolCallId, 'presentation.allowOnce.toolCallId');
-  if (presentation.allowAlways !== undefined) validateGrantScope(presentation.allowAlways);
+  if (presentation.allowAlways !== undefined) {
+    validateGrantScope(presentation.allowAlways, validateKeys);
+  }
 
   const revisions = requireRecord(presentation.revisions, 'presentation.revisions');
-  assertKeys(revisions, [
+  validateKeys(revisions, [
     'catalog',
     'effectivePolicy',
     'policyBasis',
@@ -841,9 +926,12 @@ function validateApprovalPresentation(value: StrictJsonValue): void {
   requireString(revisions.grants, 'presentation.revisions.grants');
 }
 
-function validateGrantProposal(value: StrictJsonValue): void {
+function validateGrantProposal(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const proposal = requireRecord(value, 'grantProposal');
-  assertKeys(proposal, [
+  validateKeys(proposal, [
     'capabilityId',
     'capabilityVersion',
     'registrationDigest',
@@ -855,18 +943,21 @@ function validateGrantProposal(value: StrictJsonValue): void {
   requireString(proposal.registrationDigest, 'registrationDigest');
   requireString(proposal.policyBasisRevision, 'policyBasisRevision');
   if (proposal.scope === undefined) throw new Error('grant scope is missing');
-  validateGrantScope(proposal.scope);
+  validateGrantScope(proposal.scope, validateKeys);
 }
 
-function validateGrantScope(value: StrictJsonValue): void {
+function validateGrantScope(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const scope = requireRecord(value, 'scope');
   if (scope.kind === 'canonical_resources_v1') {
-    assertKeys(scope, ['kind', 'resourcePatterns', 'attributes']);
+    validateKeys(scope, ['kind', 'resourcePatterns', 'attributes']);
     const patterns = requireArray(scope.resourcePatterns, 'resourcePatterns');
     if (patterns.length === 0) throw new Error('resourcePatterns must be non-empty');
     for (const item of patterns) {
       const pattern = requireRecord(item, 'resourcePattern');
-      assertKeys(pattern, ['resourceType', 'access', 'matcher', 'pattern']);
+      validateKeys(pattern, ['resourceType', 'access', 'matcher', 'pattern']);
       if (pattern.resourceType !== 'filesystem'
         && pattern.resourceType !== 'command'
         && pattern.resourceType !== 'network'
@@ -888,20 +979,28 @@ function validateGrantScope(value: StrictJsonValue): void {
   throw new Error('invalid grant scope');
 }
 
-function validateResourcePayload(value: StrictJsonValue | undefined): void {
+function validateResourcePayload(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const payload = requireRecord(value, 'payload');
-  assertKeys(payload, ['resourceType', 'resourceId', 'description']);
+  validateKeys(payload, ['resourceType', 'resourceId', 'description']);
   requireString(payload.resourceType, 'resourceType');
   requireString(payload.resourceId, 'resourceId');
   requireString(payload.description, 'description');
 }
 
-function validateAgentMessage(value: StrictJsonValue | undefined): void {
+function validateAgentMessage(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const message = requireRecord(value, 'message');
   if (message.role === 'user') {
-    assertKeys(message, ['role', 'id', 'timestamp', 'content'], ['source']);
+    validateKeys(message, ['role', 'id', 'timestamp', 'content'], ['source']);
     validateMessageBase(message);
-    for (const part of requireArray(message.content, 'content')) validateUserContentPart(part);
+    for (const part of requireArray(message.content, 'content')) {
+      validateUserContentPart(part, validateKeys);
+    }
     if (message.source !== undefined
       && message.source !== 'prompt'
       && message.source !== 'steering'
@@ -912,19 +1011,22 @@ function validateAgentMessage(value: StrictJsonValue | undefined): void {
     return;
   }
   if (message.role === 'assistant') {
-    validateAssistantMessage(message);
+    validateAssistantMessage(message, validateKeys);
     return;
   }
   if (message.role === 'tool_result') {
-    validateToolResultMessage(message);
+    validateToolResultMessage(message, validateKeys);
     return;
   }
   throw new Error('invalid message role');
 }
 
-function validateAssistantMessage(value: StrictJsonValue | undefined): void {
+function validateAssistantMessage(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const message = requireRecord(value, 'assistant message');
-  assertKeys(message, [
+  validateKeys(message, [
     'role',
     'id',
     'timestamp',
@@ -935,8 +1037,10 @@ function validateAssistantMessage(value: StrictJsonValue | undefined): void {
   ], ['errorMessage', 'errorDetails']);
   if (message.role !== 'assistant') throw new Error('invalid assistant role');
   validateMessageBase(message);
-  for (const part of requireArray(message.content, 'content')) validateAssistantContentPart(part);
-  validateModelRef(message.model);
+  for (const part of requireArray(message.content, 'content')) {
+    validateAssistantContentPart(part, validateKeys);
+  }
+  validateModelRef(message.model, validateKeys);
   if (message.stopReason !== 'stop'
     && message.stopReason !== 'length'
     && message.stopReason !== 'tool_calls'
@@ -946,13 +1050,18 @@ function validateAssistantMessage(value: StrictJsonValue | undefined): void {
     throw new Error('invalid stop reason');
   }
   if (message.errorMessage !== undefined) requireString(message.errorMessage, 'errorMessage');
-  if (message.errorDetails !== undefined) validateProviderErrorDetails(message.errorDetails);
-  validateUsage(message.usage);
+  if (message.errorDetails !== undefined) {
+    validateProviderErrorDetails(message.errorDetails, validateKeys);
+  }
+  validateUsage(message.usage, validateKeys);
 }
 
-function validateToolResultMessage(value: StrictJsonValue | undefined): void {
+function validateToolResultMessage(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const message = requireRecord(value, 'tool result');
-  assertKeys(message, [
+  validateKeys(message, [
     'role',
     'id',
     'timestamp',
@@ -965,7 +1074,9 @@ function validateToolResultMessage(value: StrictJsonValue | undefined): void {
   validateMessageBase(message);
   requireString(message.toolCallId, 'toolCallId');
   requireString(message.toolName, 'toolName');
-  for (const part of requireArray(message.content, 'content')) validateUserContentPart(part);
+  for (const part of requireArray(message.content, 'content')) {
+    validateUserContentPart(part, validateKeys);
+  }
   requireBoolean(message.isError, 'isError');
 }
 
@@ -974,15 +1085,18 @@ function validateMessageBase(message: Readonly<Record<string, StrictJsonValue>>)
   requireNumber(message.timestamp, 'message timestamp');
 }
 
-function validateUserContentPart(value: StrictJsonValue): void {
+function validateUserContentPart(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const part = requireRecord(value, 'content part');
   if (part.type === 'text') {
-    assertKeys(part, ['type', 'text']);
+    validateKeys(part, ['type', 'text']);
     requireString(part.text, 'text');
     return;
   }
   if (part.type === 'image') {
-    assertKeys(part, ['type', 'data', 'mimeType']);
+    validateKeys(part, ['type', 'data', 'mimeType']);
     requireString(part.data, 'data');
     requireString(part.mimeType, 'mimeType');
     return;
@@ -990,10 +1104,13 @@ function validateUserContentPart(value: StrictJsonValue): void {
   throw new Error('invalid user/tool-result content part');
 }
 
-function validateAssistantContentPart(value: StrictJsonValue): void {
+function validateAssistantContentPart(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const part = requireRecord(value, 'assistant content part');
   if (part.type === 'text') {
-    assertKeys(part, ['type', 'text'], ['phase']);
+    validateKeys(part, ['type', 'text'], ['phase']);
     requireString(part.text, 'text');
     if (part.phase !== undefined
       && part.phase !== 'commentary'
@@ -1003,7 +1120,7 @@ function validateAssistantContentPart(value: StrictJsonValue): void {
     return;
   }
   if (part.type === 'reasoning') {
-    assertKeys(part, ['type', 'text'], ['kind', 'signature']);
+    validateKeys(part, ['type', 'text'], ['kind', 'signature']);
     requireString(part.text, 'text');
     if (part.kind !== undefined && part.kind !== 'summary' && part.kind !== 'content') {
       throw new Error('invalid reasoning kind');
@@ -1012,7 +1129,7 @@ function validateAssistantContentPart(value: StrictJsonValue): void {
     return;
   }
   if (part.type === 'tool_call') {
-    assertKeys(part, ['type', 'id', 'name', 'arguments'], ['rawArguments']);
+    validateKeys(part, ['type', 'id', 'name', 'arguments'], ['rawArguments']);
     requireString(part.id, 'tool call id');
     requireString(part.name, 'tool name');
     requireRecord(part.arguments, 'tool arguments');
@@ -1022,17 +1139,23 @@ function validateAssistantContentPart(value: StrictJsonValue): void {
   throw new Error('invalid assistant content part');
 }
 
-function validateModelRef(value: StrictJsonValue | undefined): void {
+function validateModelRef(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const model = requireRecord(value, 'model');
-  assertKeys(model, ['provider', 'api', 'model']);
+  validateKeys(model, ['provider', 'api', 'model']);
   requireString(model.provider, 'provider');
   requireString(model.api, 'api');
   requireString(model.model, 'model');
 }
 
-function validateProviderErrorDetails(value: StrictJsonValue): void {
+function validateProviderErrorDetails(
+  value: StrictJsonValue,
+  validateKeys: EventKeyValidator,
+): void {
   const details = requireRecord(value, 'errorDetails');
-  assertKeys(details, ['kind', 'retryable'], [
+  validateKeys(details, ['kind', 'retryable'], [
     'status',
     'code',
     'requestId',
@@ -1057,6 +1180,7 @@ function validateProviderErrorDetails(value: StrictJsonValue): void {
 function validateMessageUpdateProviderEvent(
   value: StrictJsonValue | undefined,
   messageId: StrictJsonValue,
+  validateKeys: EventKeyValidator,
 ): void {
   const provider = requireRecord(value, 'provider event');
   if (provider.type === 'start' || provider.type === 'done' || provider.type === 'error') {
@@ -1074,19 +1198,19 @@ function validateMessageUpdateProviderEvent(
   }
 
   if (startTypes.has(provider.type)) {
-    assertKeys(provider, ['type', 'contentIndex', 'partial']);
+    validateKeys(provider, ['type', 'contentIndex', 'partial']);
   } else if (deltaTypes.has(provider.type)) {
-    assertKeys(provider, ['type', 'contentIndex', 'delta', 'partial']);
+    validateKeys(provider, ['type', 'contentIndex', 'delta', 'partial']);
     requireString(provider.delta, 'delta');
   } else if (endTypes.has(provider.type)) {
-    assertKeys(provider, ['type', 'contentIndex', 'content', 'partial']);
+    validateKeys(provider, ['type', 'contentIndex', 'content', 'partial']);
     requireString(provider.content, 'content');
   } else {
-    assertKeys(provider, ['type', 'contentIndex', 'toolCall', 'partial']);
-    validateToolCallPart(provider.toolCall);
+    validateKeys(provider, ['type', 'contentIndex', 'toolCall', 'partial']);
+    validateToolCallPart(provider.toolCall, validateKeys);
   }
   requireNonNegativeSafeInteger(provider.contentIndex, 'contentIndex');
-  validateAssistantMessage(provider.partial);
+  validateAssistantMessage(provider.partial, validateKeys);
   const partial = requireRecord(provider.partial, 'partial');
   if (partial.id !== messageId) throw new Error('provider partial messageId mismatch');
   const content = requireArray(partial.content, 'partial.content');
@@ -1119,32 +1243,42 @@ function validateMessageUpdateProviderEvent(
   }
 }
 
-function validateToolCallPart(value: StrictJsonValue | undefined): void {
+function validateToolCallPart(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const part = requireRecord(value, 'toolCall');
   if (part.type !== 'tool_call') throw new Error('invalid tool call part type');
-  validateAssistantContentPart(part);
+  validateAssistantContentPart(part, validateKeys);
 }
 
-function validateQueuedMessage(value: StrictJsonValue, expectedKind: 'steering' | 'follow_up'): void {
+function validateQueuedMessage(
+  value: StrictJsonValue,
+  expectedKind: 'steering' | 'follow_up',
+  validateKeys: EventKeyValidator,
+): void {
   const item = requireRecord(value, 'queued message');
-  assertKeys(item, ['id', 'text', 'kind']);
+  validateKeys(item, ['id', 'text', 'kind']);
   requireString(item.id, 'queue id');
   requireString(item.text, 'queue text');
   if (item.kind !== expectedKind) throw new Error('queue kind does not match its lane');
 }
 
-function validatePlanStep(value: StrictJsonValue): void {
+function validatePlanStep(value: StrictJsonValue, validateKeys: EventKeyValidator): void {
   const item = requireRecord(value, 'plan step');
-  assertKeys(item, ['step', 'status']);
+  validateKeys(item, ['step', 'status']);
   requireString(item.step, 'step');
   if (item.status !== 'pending' && item.status !== 'in_progress' && item.status !== 'completed') {
     throw new Error('invalid plan status');
   }
 }
 
-function validateThreadSummary(value: StrictJsonValue | undefined): void {
+function validateThreadSummary(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const thread = requireRecord(value, 'thread');
-  assertKeys(thread, ['threadId', 'createdAt', 'state'], [
+  validateKeys(thread, ['threadId', 'createdAt', 'state'], [
     'parentThreadId',
     'title',
     'archivedAt',
@@ -1181,20 +1315,20 @@ function validateThreadSummary(value: StrictJsonValue | undefined): void {
   }
   if (thread.suspendedWork !== undefined) {
     for (const item of requireArray(thread.suspendedWork, 'suspendedWork')) {
-      validateSuspendedWork(item);
+      validateSuspendedWork(item, validateKeys);
     }
   }
 }
 
-function validateSuspendedWork(value: StrictJsonValue): void {
+function validateSuspendedWork(value: StrictJsonValue, validateKeys: EventKeyValidator): void {
   const item = requireRecord(value, 'suspendedWork');
   if (item.kind === 'reserved_op') {
-    assertKeys(item, ['kind', 'ownerOpId', 'runId']);
+    validateKeys(item, ['kind', 'ownerOpId', 'runId']);
     if (!isOpId(item.ownerOpId) || !isRunId(item.runId)) throw new Error('invalid reserved work');
     return;
   }
   if (item.kind === 'interrupted') {
-    assertKeys(item, ['kind', 'ownerOpId', 'terminalRunId'], ['inputOwnerOpId']);
+    validateKeys(item, ['kind', 'ownerOpId', 'terminalRunId'], ['inputOwnerOpId']);
     if (!isOpId(item.ownerOpId)
       || !isRunId(item.terminalRunId)
       || (item.inputOwnerOpId !== undefined && !isOpId(item.inputOwnerOpId))) {
@@ -1205,18 +1339,24 @@ function validateSuspendedWork(value: StrictJsonValue): void {
   throw new Error('invalid suspended work kind');
 }
 
-function validateThreadUsage(value: StrictJsonValue | undefined): void {
+function validateThreadUsage(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const usage = requireRecord(value, 'usage');
-  assertKeys(usage, ['cumulative', 'turns', 'contextTokens'], ['lastTurn']);
-  if (usage.lastTurn !== undefined) validateUsage(usage.lastTurn);
-  validateUsage(usage.cumulative);
+  validateKeys(usage, ['cumulative', 'turns', 'contextTokens'], ['lastTurn']);
+  if (usage.lastTurn !== undefined) validateUsage(usage.lastTurn, validateKeys);
+  validateUsage(usage.cumulative, validateKeys);
   requireNonNegativeSafeInteger(usage.turns, 'turns');
   requireNonNegativeFinite(usage.contextTokens, 'contextTokens');
 }
 
-function validateUsage(value: StrictJsonValue | undefined): void {
+function validateUsage(
+  value: StrictJsonValue | undefined,
+  validateKeys: EventKeyValidator,
+): void {
   const usage = requireRecord(value, 'usage');
-  assertKeys(usage, ['input', 'output'], [
+  validateKeys(usage, ['input', 'output'], [
     'cacheRead',
     'cacheWrite',
     'reasoning',
@@ -1247,6 +1387,13 @@ function assertKeys(
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`unexpected event field: ${key}`);
   }
+  requireKeys(value, required);
+}
+
+function requireKeys(
+  value: Readonly<Record<string, StrictJsonValue>>,
+  required: readonly string[],
+): void {
   for (const key of required) {
     if (!Object.hasOwn(value, key)) throw new Error(`missing event field: ${key}`);
   }
@@ -1381,6 +1528,11 @@ function assertEnvelopeKeys(envelope: Readonly<Record<string, StrictJsonValue>>)
   for (const key of Object.keys(envelope)) {
     if (!required.has(key) && !optional.has(key)) throw new Error(`unknown envelope field: ${key}`);
   }
+  requireEnvelopeKeys(envelope);
+}
+
+function requireEnvelopeKeys(envelope: Readonly<Record<string, StrictJsonValue>>): void {
+  const required = ['workspaceId', 'threadId', 'seq', 'timestamp', 'event'];
   for (const key of required) {
     if (!Object.hasOwn(envelope, key)) throw new Error(`missing envelope field: ${key}`);
   }

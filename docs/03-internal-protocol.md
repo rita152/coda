@@ -41,8 +41,25 @@ interface EventEnvelope<TEvent = RuntimeEvent> {
 ```
 
 `seq` 只在权威提交点分配。`turnId` 必须伴随 `runId`；event identity 描述的是事件所属实体，不是 client
-猜测出来的关联。reader 对未知 event type/字段保持 tolerant，但 writer 必须发出已验证的 canonical
-事件。
+猜测出来的关联。
+
+`validateEventEnvelope` 是 canonical writer、journal recovery 与 durable storage 的权威边界：它先取得
+strict JSON 深冻结快照，再要求 envelope/event 只含当前 schema 字段、event type 已知、所有已知 payload
+与 identity correlation 有效。未知 event type、未知字段或未知 durable state 一律失败，不得把 consumer
+兼容策略用于恢复，也不得静默跳过。
+
+`coda/runtime` 另行导出 `readEventEnvelope`，供 external/headless consumer 对 `JSON.parse` 后的 envelope
+执行 tolerant read。它仍要求完整 strict JSON、合法 envelope identity、正整数 `seq`、有限
+`timestamp`，并保持 `turnId` 必须伴随 `runId`：
+
+- 已知 event type 返回 `kind: 'known'`，递归校验所有已知必填/可选字段及 event identity correlation；
+  additive envelope/event/payload 字段被保留但不参与收窄。
+- 未知 event type 返回 `kind: 'unknown'`，保留完整、深冻结的 strict JSON envelope；reader 只校验通用
+  envelope identity，不臆造未知 event 的 identity presence/correlation 规则。
+
+因此 preservation 与 ignore 分属两层：protocol reader 从不丢弃未知事件；presentation consumer 可以显式
+忽略 `kind: 'unknown'`，也可以记录或转发原 envelope。不得把 `readEventEnvelope` 结果当作 canonical
+writer/recovery validation 的替代品。
 
 ## 4. 事件与生命周期
 
@@ -71,4 +88,5 @@ Runtime 发出 `op_*` lifecycle、`thread_*` lifecycle、`usage_update`、`runti
 之后 stdout 只允许完整 `EventEnvelope`、`{"type":"op_receipt","receipt":…}` 和
 `{"type":"transport_error",…}`。stdin 每个非空行是一个完整 `RuntimeOp`；无效 JSON 或无效 op 产生
 non-fatal `transport_error`，后续行仍可处理。EOF 是有序关闭：已读完整行先完成 dispatch，随后 Runtime
-关闭并 drain 输出。
+关闭并 drain 输出。读取 stdout 的 public wire consumer 在识别 envelope frame 后使用
+`readEventEnvelope`，并根据其 `kind` 执行已知事件投影或未知事件的显式保留/忽略策略。
