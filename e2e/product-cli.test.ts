@@ -316,6 +316,157 @@ test('exec --json uses the canonical one-shot NDJSON transport', () => {
     frame.event?.type === 'agent_end' && frame.event.reason === 'completed')).toBe(true);
 }, T);
 
+test('OpenAI Responses completes one persisted prompt through the built CLI', async () => {
+  const root = temporaryRoot('coda-product-responses-prompt-');
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'work');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+
+  const prompt = 'complete this prompt end to end';
+  const fixture = readFileSync(path.join(
+    import.meta.dir,
+    '..',
+    'src',
+    'providers',
+    'openai-responses',
+    '__fixtures__',
+    'reasoning.jsonl',
+  ), 'utf8');
+  const responseStream = fixture.split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => `data: ${line}\n\n`)
+    .join('') + 'data: [DONE]\n\n';
+  const received: {
+    method?: string;
+    path?: string;
+    authorization?: string | null;
+    body?: Record<string, unknown>;
+  } = {};
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      received.method = request.method;
+      received.path = url.pathname;
+      received.authorization = request.headers.get('authorization');
+      const body = await request.json();
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return Response.json({ error: 'expected an object request body' }, { status: 400 });
+      }
+      received.body = body as Record<string, unknown>;
+      return new Response(responseStream, {
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      });
+    },
+  });
+
+  try {
+    const result = await runCodaAsync([
+      'exec',
+      '--provider', 'openai-responses',
+      '--model', 'gpt-test',
+      '--base-url', `http://127.0.0.1:${server.port}/v1`,
+      '--api-key', 'local-fixture-key',
+      '--cwd', cwd,
+      '--output=stream-json',
+      '-p', prompt,
+    ], home, cwd);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(received.method).toBe('POST');
+    expect(received.path).toBe('/v1/responses');
+    expect(received.authorization).toBe('Bearer local-fixture-key');
+    expect(received.body).toMatchObject({
+      model: 'gpt-test',
+      stream: true,
+      store: false,
+      input: [{ role: 'user', content: prompt }],
+    });
+
+    const records = result.stdout.trimEnd().split('\n').map((line) => JSON.parse(line) as {
+      readonly type: string;
+      readonly version?: number;
+      readonly protocolVersion?: string;
+      readonly status?: string;
+      readonly exitCode?: number;
+      readonly text?: string;
+      readonly envelope?: Record<string, unknown> & {
+        readonly event?: {
+          readonly type?: string;
+          readonly reason?: string;
+          readonly outcome?: string;
+          readonly event?: {
+            readonly type?: string;
+            readonly partial?: {
+              readonly content?: readonly {
+                readonly type?: string;
+                readonly signature?: string;
+              }[];
+            };
+          };
+        };
+      };
+    });
+    expect(records[0]).toEqual({
+      type: 'stream_start',
+      version: 2,
+      protocolVersion: PROTOCOL_VERSION,
+    });
+    expect(records.at(-1)).toMatchObject({
+      type: 'result',
+      status: 'completed',
+      exitCode: 0,
+      text: 'The answer is 42.',
+    });
+
+    const eventRecords = records.filter((record) => record.type === 'event');
+    for (const record of eventRecords) {
+      expect(readEventEnvelope(record.envelope).kind).toBe('known');
+    }
+    const envelopes = eventRecords.map((record) => record.envelope as NonNullable<typeof record.envelope>);
+    const lifecycle = envelopes.map((envelope) => envelope.event?.type);
+    expect(lifecycle).toEqual(expect.arrayContaining([
+      'agent_start',
+      'turn_start',
+      'message_start',
+      'message_end',
+      'turn_end',
+      'agent_end',
+      'op_completed',
+    ]));
+    expect(lifecycle.indexOf('agent_start')).toBeLessThan(lifecycle.indexOf('turn_start'));
+    expect(lifecycle.indexOf('turn_start')).toBeLessThan(lifecycle.indexOf('message_start'));
+    expect(lifecycle.lastIndexOf('message_end')).toBeLessThan(lifecycle.indexOf('turn_end'));
+    expect(lifecycle.indexOf('turn_end')).toBeLessThan(lifecycle.indexOf('agent_end'));
+    expect(lifecycle.indexOf('agent_end')).toBeLessThan(lifecycle.indexOf('op_completed'));
+    expect(envelopes.find((envelope) => envelope.event?.type === 'agent_end')).toMatchObject({
+      event: { type: 'agent_end', reason: 'completed' },
+    });
+    expect(envelopes.find((envelope) => envelope.event?.type === 'op_completed')).toMatchObject({
+      event: { type: 'op_completed', outcome: 'applied' },
+    });
+    const reasoningEnd = envelopes.find((envelope) =>
+      envelope.event?.type === 'message_update' && envelope.event.event?.type === 'reasoning_end');
+    expect(reasoningEnd?.event?.event?.partial?.content?.[0]).toMatchObject({
+      type: 'reasoning',
+      signature: expect.stringContaining('enc_reasoning_fixture'),
+    });
+
+    const sessions = runCoda(['sessions', '--json', '--cwd', cwd], home, cwd);
+    expect(sessions.code).toBe(0);
+    expect(sessions.stderr).toBe('');
+    const inventory = JSON.parse(sessions.stdout) as {
+      readonly sessions?: readonly { readonly state?: string }[];
+    };
+    expect(inventory.sessions).toHaveLength(1);
+    expect(inventory.sessions?.[0]).toMatchObject({ state: 'closed' });
+  } finally {
+    server.stop(true);
+  }
+}, T);
+
 test('opt-in output formats keep final stdout stable and text progress on stderr', () => {
   const root = temporaryRoot('coda-product-output-');
   const home = path.join(root, 'home');
