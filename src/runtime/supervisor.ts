@@ -2646,6 +2646,12 @@ function cancellationSupersedesRequest(
 function validateCreateOptions(
   options: CreateRuntimeOptions,
 ): CreateRuntimeOptions {
+  if ('capabilityMode' in options) {
+    throw new TypeError('Runtime capabilityMode selector has been removed');
+  }
+  if ('requirements' in options.threadDriverFactory) {
+    throw new TypeError('Runtime ThreadDriverFactory requirements selector has been removed');
+  }
   const cwd = options.workspace.cwd;
   if (
     typeof cwd !== 'string' ||

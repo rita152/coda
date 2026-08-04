@@ -2046,7 +2046,7 @@ describe('Supervisor registry composition', () => {
     await assertWorkspaceAndJournalsReusable(storage, [firstThreadId, secondThreadId]);
   });
 
-  test('fails closed for malformed canonical capability bundles', async () => {
+  test('fails closed for retired selectors and malformed canonical capability bundles', async () => {
     const completeServices = registryCapabilityServices(new RecordingRegistryPolicyEngine([]));
     const { ruleFreshness: _missingRuleFreshness, ...partialServices } = completeServices;
     void _missingRuleFreshness;
@@ -2061,6 +2061,31 @@ describe('Supervisor registry composition', () => {
       readonly expected: string;
       readonly build: (storage: RuntimeStoragePort) => unknown;
     }[] = [
+      {
+        name: 'non-enumerable runtime capabilityMode selector',
+        expected: 'Runtime capabilityMode selector has been removed',
+        build: (storage) => Object.defineProperty({
+          ...constructionRuntimeOptions(storage, new ConstructionDriverFactory()),
+          capabilityServices: completeServices,
+        }, 'capabilityMode', { value: 'static' }),
+      },
+      {
+        name: 'inherited driver requirements selector',
+        expected: 'Runtime ThreadDriverFactory requirements selector has been removed',
+        build: (storage) => {
+          const delegate = new ConstructionDriverFactory();
+          const threadDriverFactory = Object.assign(Object.create({
+            requirements: { capabilityMode: 'registry' },
+          }) as object, {
+            create: delegate.create.bind(delegate),
+            resume: delegate.resume.bind(delegate),
+          });
+          return {
+            ...constructionRuntimeOptions(storage, threadDriverFactory),
+            capabilityServices: completeServices,
+          };
+        },
+      },
       {
         name: 'partial registry bundle',
         expected: 'Registry capabilityServices has missing or unknown fields',
@@ -2099,8 +2124,8 @@ describe('Supervisor registry composition', () => {
           throw new Error('invalid composition must fail before storage opens');
         },
       };
-      await expect(createRuntime(
-        scenario.build(storage) as Parameters<typeof createRuntime>[0],
+      await expect(createCanonicalRuntime(
+        scenario.build(storage) as Parameters<typeof createCanonicalRuntime>[0],
       )).rejects.toThrow(scenario.expected);
       expect({ name: scenario.name, workspaceOpens }).toEqual({
         name: scenario.name,
