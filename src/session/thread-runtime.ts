@@ -281,36 +281,6 @@ export class ThreadRuntime {
     return this.#writer.state.summary;
   }
 
-  /**
-   * ThreadRuntime quiescence barrier. It observes the same FIFO/effect/background lanes as close(),
-   * but neither closes the driver nor waits for ordinary EventHub observers.
-   */
-  async waitForIdle(): Promise<void> {
-    while (true) {
-      const admission = this.#admission;
-      const effect = this.#effectBarrier;
-      const background = [...this.#background];
-      await admission;
-      await effect;
-      await Promise.all(background);
-      if (this.#backgroundFailures.length > 0) {
-        throw new AggregateError(
-          [...this.#backgroundFailures],
-          `Thread ${this.threadId} background execution failed`,
-        );
-      }
-      if (
-        admission === this.#admission
-        && effect === this.#effectBarrier
-        && this.#background.size === 0
-        && this.#active === undefined
-        && this.#attachment.driver.interactionState() === 'idle'
-      ) {
-        return;
-      }
-    }
-  }
-
   activeRunId(): RunId | undefined {
     return this.#active?.currentRunId;
   }

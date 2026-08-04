@@ -63,16 +63,12 @@ export class CompactionCoordinator {
     return this.#lastCheckpoint === undefined ? undefined : { ...this.#lastCheckpoint };
   }
 
-  restore(record: ThreadCompactionCheckpoint): void {
+  install(record: ThreadCompactionCheckpoint): void {
     this.#lastCheckpoint = { ...record };
     this.#state = {
       tailStartId: record.tailStartId,
       synthetic: syntheticSummaryMessage(record),
     };
-  }
-
-  install(record: ThreadCompactionCheckpoint): void {
-    this.restore(record);
   }
 
   transform(ctx: Context): Context {

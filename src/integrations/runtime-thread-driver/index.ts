@@ -72,7 +72,7 @@ function constructDriver(
   host: ThreadDriverHostServices,
   checkpointInput: Readonly<ThreadDriverCheckpoint>,
 ): RuntimeThreadDriverAttachment {
-  const checkpoint = snapshotCheckpoint(checkpointInput);
+  const checkpoint = strictJsonSnapshot(checkpointInput) as unknown as Readonly<ThreadDriverCheckpoint>;
   const configured = options.configure({
     workspaceId: input.workspaceId,
     threadId: input.threadId,
@@ -101,10 +101,4 @@ function constructDriver(
   const driver = new RuntimeThreadDriver({ threadId: input.threadId, host, execution });
   state.driver = driver;
   return { driver, initialCheckpoint: checkpoint };
-}
-
-function snapshotCheckpoint(
-  checkpoint: Readonly<ThreadDriverCheckpoint>,
-): Readonly<ThreadDriverCheckpoint> {
-  return strictJsonSnapshot(checkpoint) as unknown as Readonly<ThreadDriverCheckpoint>;
 }

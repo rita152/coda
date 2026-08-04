@@ -110,8 +110,11 @@ describe('ThreadRuntime durable admission and identity', () => {
       runId: promptReceipt.runId,
       turnId: turn.turnId,
     });
+    const promptEvents = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
     fixture.driver.complete(promptReceipt.runId, 'completed');
-    await fixture.runtime.waitForIdle();
+    await nextEvent(promptEvents, (envelope) =>
+      envelope.opId === root.opId && envelope.event.type === 'op_completed');
+    await promptEvents.return?.();
 
     const compact = await fixture.runtime.acceptExternal({
       type: 'compact',
@@ -124,8 +127,11 @@ describe('ThreadRuntime durable admission and identity', () => {
       op: { type: 'compact', opId: opId(49) },
       runId: compact.runId,
     });
+    const compactEvents = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
     fixture.driver.complete(compact.runId, 'completed');
-    await fixture.runtime.waitForIdle();
+    await nextEvent(compactEvents, (envelope) =>
+      envelope.opId === opId(49) && envelope.event.type === 'op_completed');
+    await compactEvents.return?.();
     const folded = fixture.runtime.durableState();
     expect(folded.runs.get(compact.runId)).toMatchObject({
       reason: 'compact',
@@ -296,17 +302,19 @@ describe('ThreadRuntime durable admission and identity', () => {
     await fixture.runtime.close();
   });
 
-  test('waitForIdle surfaces a final background commit failure even when the active run cannot clear', async () => {
+  test('close surfaces a final background commit failure even when the active run cannot clear', async () => {
     const fixture = runtimeFixture();
     const receipt = await fixture.runtime.acceptExternal(prompt(opId(27), 'fail final commit'));
     if (!receipt.accepted || receipt.runId === undefined) throw new Error('prompt was not accepted');
     fixture.journal.nextAppendFailure = new Error('final activity commit failed');
     fixture.driver.complete(receipt.runId, 'completed');
 
-    await expect(fixture.runtime.waitForIdle()).rejects.toThrow(
-      `Thread ${THREAD_ID} background execution failed`,
-    );
-    await fixture.runtime.close().catch(() => undefined);
+    await expect(fixture.runtime.close()).rejects.toMatchObject({
+      message: `Thread ${THREAD_ID} close failed`,
+      errors: expect.arrayContaining([
+        expect.objectContaining({ message: 'final activity commit failed' }),
+      ]),
+    });
   });
 
   test('does not dispatch a prompt after a set_model completion commit fails', async () => {
@@ -327,17 +335,17 @@ describe('ThreadRuntime durable admission and identity', () => {
       accepted: true,
     });
 
+    const iterator = fixture.events.subscribe({ threadIds: [THREAD_ID] })[Symbol.asyncIterator]();
     fixture.journal.nextAppendFailure = new Error('set_model completion commit failed');
     modelCompletion.resolve({ kind: 'operation', outcome: 'applied' });
-    await expect(fixture.runtime.waitForIdle()).rejects.toThrow(
-      `Thread ${THREAD_ID} background execution failed`,
-    );
+    await expect(iterator.next()).rejects.toMatchObject({ causeCode: 'writer_failed' });
     expect(fixture.runtime.snapshot().model).toEqual(MODEL.ref);
     const dispatchedBeforePrompt = fixture.driver.commands.length;
 
     await expect(fixture.runtime.acceptExternal(prompt(opId(30), 'must not reach the new model')))
       .rejects.toThrow('set_model completion commit failed');
     expect(fixture.driver.commands).toHaveLength(dispatchedBeforePrompt);
+    await iterator.return?.();
     await fixture.runtime.close().catch(() => undefined);
   });
 

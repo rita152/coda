@@ -241,10 +241,6 @@ export class ThreadJournalWriter {
     }
   }
 
-  async drain(): Promise<void> {
-    await this.#committer.drain();
-  }
-
   async close(): Promise<void> {
     await this.#persistRecoveryState();
     await this.#committer.close();

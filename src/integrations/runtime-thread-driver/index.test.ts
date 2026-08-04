@@ -15,8 +15,8 @@ import { emptyCheckpoint } from '../../session/index.js';
 import type {
   ThreadDriverHostServices,
   ThreadDriverCheckpoint,
-  ThreadDriverEvent,
 } from '../../session/index.js';
+import type { ThreadDriverEvent } from '../../session/thread-runtime-ports.js';
 import { createRuntimeThreadDriverFactory } from './index.js';
 
 const WORKSPACE_ID = 'workspace-runtime-driver-factory' as WorkspaceId;

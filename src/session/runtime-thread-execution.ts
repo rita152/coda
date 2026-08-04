@@ -129,7 +129,7 @@ export class RuntimeThreadExecution implements RuntimeThreadExecutionPort {
     this.#compactionStreamFn = options.compactionStreamFn;
     this.#eventSink = options.eventSink;
     if (options.checkpoint.execution.compaction !== undefined) {
-      this.#compaction.restore(options.checkpoint.execution.compaction);
+      this.#compaction.install(options.checkpoint.execution.compaction);
     }
 
     const hooks: HookHost = {};

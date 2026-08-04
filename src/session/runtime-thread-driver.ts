@@ -54,7 +54,7 @@ interface PendingQueueCommit {
   readonly reject: (error: unknown) => void;
 }
 
-export interface RuntimeThreadDriverOptions {
+interface RuntimeThreadDriverOptions {
   readonly threadId: ThreadId;
   readonly host: ThreadDriverHostServices;
   readonly execution: RuntimeThreadExecutionPort;
