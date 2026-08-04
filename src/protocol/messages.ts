@@ -44,7 +44,8 @@ export interface Usage {
 }
 
 /**
- * adapter 填写的结构化错误分类(规格见 docs/04-provider-adapter.md 与 docs/08-session-persistence.md §5),
+ * adapter 填写的结构化错误分类(规格见 docs/04-provider-adapter.md“流”与
+ * docs/08-session-persistence.md“Compaction 与 retry”),
  * 供 session 层 retry/compaction 判定,免于对 errorMessage 做正则猜测。
  */
 export interface ProviderErrorDetails {

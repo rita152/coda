@@ -1,4 +1,4 @@
-// EventStream 语义测试(docs/03-internal-protocol.md 第 5 节 + 第 10 节验收清单)。
+// EventStream 语义测试，覆盖 docs/04-provider-adapter.md“流”的 non-throwing terminal contract。
 import { afterEach, describe, expect, it, vi } from 'bun:test';
 import { EventStream } from './event-stream.js';
 

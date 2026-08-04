@@ -1,5 +1,5 @@
 // Provider 边界:ProviderEvent 流事件、StreamFn 契约、ModelConfig。
-// 规格见 docs/03-internal-protocol.md 第 4、6 节;事件文法不变量见其 4.2 节:
+// 规格见 docs/04-provider-adapter.md“请求”与“流”;事件文法不变量如下:
 //   stream   := start block* terminal
 //   block    := text | reasoning | tool_call        (各自三段式 *_start *_delta* *_end)
 //   terminal := done | error                        (恰好一个,且是最后一个事件)
@@ -26,7 +26,7 @@ export class ProviderEventStream extends EventStream<ProviderEvent, AssistantMes
 
 /**
  * 方言开关的开放承载形态。具体字段是各 adapter 的私有契约(openai-chat 的完整定义见
- * docs/04-provider-adapter.md 第 5 节,由 adapter 导出精确类型并在入口处收窄)。
+ * 所属 adapter,由 adapter 导出精确类型并在入口处收窄;所有权见 docs/04-provider-adapter.md“请求”)。
  * protocol 层不为任何 adapter 的方言建模——依赖方向(protocol 零依赖)禁止在此
  * 引用 adapter 类型,这里只承载"透传给 adapter 的配置袋"。
  */
