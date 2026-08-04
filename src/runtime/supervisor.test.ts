@@ -998,11 +998,13 @@ describe('Supervisor recovery and idempotency', () => {
     const childPending = [...childState.pendingThreadResults.values()];
     expect(parentResults).toHaveLength(1);
     expect(childPending).toHaveLength(1);
-    expect(childState.deliveredThreadResults).toEqual(new Set([childPending[0]?.resultOpId]));
+    const pending = childPending[0];
+    if (pending === undefined) throw new Error('child result outbox is missing');
+    expect(childState.deliveredThreadResults).toEqual(new Set([pending.resultOpId]));
     expect(parentResults[0]).toMatchObject({
       event: {
         type: 'thread_result',
-        resultOpId: childPending[0]?.resultOpId,
+        resultOpId: pending.resultOpId,
         childThreadId,
         terminalRunId: childPrompt.runId,
         status: 'completed',
