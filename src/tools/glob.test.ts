@@ -1,4 +1,4 @@
-// glob 工具测试(L3:真实文件系统 + 真实 ripgrep 二进制,docs/10-testing.md §6.3)。
+// glob 工具测试(L3:真实文件系统 + 真实 ripgrep 二进制,见 docs/10-testing.md 的分层测试)。
 // 覆盖:递归匹配与相对路径显示、24h recency 排序(fs.utimesSync 控制 mtime)、
 // 0 结果与 limit 截断文案、.gitignore(非 git tmpdir)、path 参数、错误路径、abort。
 
@@ -33,7 +33,7 @@ async function run(
   return part.text;
 }
 
-/** 建文件并把 mtime 拨到指定时刻(recency 排序的控制手段,docs/10 §6.3)。 */
+/** 建文件并把 mtime 拨到指定时刻(recency 排序的控制手段)。 */
 function touchAt(rel: string, mtime: Date): void {
   const abs = path.join(tmpdir, rel);
   fs.mkdirSync(path.dirname(abs), { recursive: true });

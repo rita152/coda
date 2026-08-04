@@ -1,4 +1,4 @@
-// grep 工具测试(L3:真实文件系统 + 真实 rg 子进程,docs/10-testing.md §6.3)。
+// grep 工具测试(L3:真实文件系统 + 真实 rg 子进程,见 docs/10-testing.md 的分层测试)。
 // 每用例独立 tmpdir 作 ToolContext.cwd,afterEach 清理;FileTracker 每测试新建。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -53,7 +53,7 @@ describe('grep:基本匹配', () => {
     expect(text.split('\n')).toEqual(['a.txt:1: foo1', 'a.txt:3: foo22']);
   });
 
-  it('--hidden 下 dotfiles 可搜,但 .git/ 仍被排除(docs/07 §2.4)', async () => {
+  it('--hidden 下 dotfiles 可搜,但 .git/ 仍被排除', async () => {
     write('.env.example', 'secret_pattern=1\n');
     write('.git/config', 'secret_pattern=2\n');
     write('src/a.ts', 'secret_pattern=3\n');

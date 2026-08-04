@@ -1,4 +1,4 @@
-// ripgrep 二进制定位(grep/glob 共用,规格见 docs/07-tools.md §2.3/§2.4、风险 R9)。
+// ripgrep 二进制定位(grep/glob 共用,工具 Executor 语义见 docs/07-tools.md)。
 // 首选 @vscode/ripgrep 内嵌二进制;下载失败的环境(离线/代理)降级 PATH 上的 rg;
 // 都没有则返回 undefined——工具层给出明确报错(附安装提示),而非静默失效。
 

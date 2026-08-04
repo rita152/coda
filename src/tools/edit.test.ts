@@ -1,5 +1,5 @@
-// edit 工具测试:docs/10-testing.md §6.1 矩阵 1–16 行 + prepareArguments 修补
-// (docs/07-tools.md §1.4/§2.6)。真实文件系统,每用例独立 tmpdir,FileTracker 每测试新建。
+// edit 工具测试:分层测试与工具 Executor 契约见 docs/10-testing.md、docs/07-tools.md。
+// 真实文件系统,每用例独立 tmpdir,FileTracker 每测试新建。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -293,7 +293,7 @@ describe('edit:并发串行化(矩阵 16)', () => {
   });
 });
 
-describe('edit:prepareArguments 修补(docs/07 §1.4)', () => {
+describe('edit:prepareArguments 修补', () => {
   const prepare = prepareEditArguments;
 
   it('edits 为 JSON 字符串:解析为数组后过 zod', () => {

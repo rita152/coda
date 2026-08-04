@@ -1,4 +1,4 @@
-// glob 工具:ripgrep --files 驱动的文件查找(规格见 docs/07-tools.md §2.3)。
+// glob 工具:ripgrep --files 驱动的文件查找(工具 Executor 语义见 docs/07-tools.md)。
 // 天然吃 .gitignore(rg 15 默认只在 git 仓库内读 .gitignore,显式加
 // --no-require-git 让非 git 目录同样生效);排序抄 gemini-cli sortFileEntries:
 // 24 小时内修改过的文件按 mtime 新→旧排最前,其余按字母序。

@@ -517,7 +517,7 @@ describe('运行中 clearQueues(docs/06)', () => {
     const ends = h.events.filter((e) => e.type === 'agent_end');
     expect(ends).toHaveLength(1);
     expect(ends[0]?.type === 'agent_end' && ends[0].reason).toBe('completed');
-    expect(queueUpdates(h.events).at(-1)?.steering).toEqual([]);   // 空快照(§8.1)
+    expect(queueUpdates(h.events).at(-1)?.steering).toEqual([]);   // 空快照
   });
 
   it('先注入 1 条再 clearQueues:已注入转录的消息不受影响,仅清仍排队的消息', async () => {

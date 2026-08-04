@@ -1,9 +1,9 @@
-// bash 工具:每次 spawn 新进程执行 shell 命令(规格见 docs/07-tools.md §2.5)。
+// bash 工具:每次 spawn 新进程执行 shell 命令(工具 Executor 语义见 docs/07-tools.md)。
 // 关键点:detached 进程组 + killProcessTree(只杀直接子进程会漏掉孙进程);
 // stdout+stderr 合并进滚动窗口(约 2× MAX_OUTPUT_BYTES,防长命令吃内存);
 // 总量首次越过 1× 上限时全文落盘并此后持续追加(落盘文件保证全量);
 // 结果尾部截断(clipTail——命令错误几乎总在末尾),details 打 truncated 标记
-// 跳过框架 post-hook(docs/07 §1.6)。
+// 跳过框架 post-hook，避免二次截断。
 
 import type { FileSink } from 'bun';
 import { z } from 'zod';
@@ -21,7 +21,7 @@ import type { ToolContext, ToolExecutionInput, ToolOutput } from './types.js';
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** 滚动窗口容量:约 2× 输出上限。结果只保尾部 1×,留 2× 保证截断有余量。 */
 const WINDOW_BYTES = 2 * MAX_OUTPUT_BYTES;
-/** onUpdate 节流间隔(docs/07 §2.5:100ms 推送累计输出快照)。 */
+/** onUpdate 节流间隔:每 100ms 推送累计输出快照。 */
 const UPDATE_THROTTLE_MS = 100;
 /** 'exit' 后收尾输出的 drain 窗口:流 'end' 先到则提前结束(见 execute 内注释)。 */
 const DRAIN_WINDOW_MS = 300;
@@ -186,7 +186,7 @@ export async function executeBash(
       }
     })();
 
-    // ---- 输出收集:滚动窗口 + 越限落盘(docs/07 §2.5)----
+    // ---- 输出收集:滚动窗口 + 越限落盘 ----
     const windowChunks: Uint8Array[] = [];
     let windowBytes = 0;
     let totalBytes = 0;
@@ -361,15 +361,15 @@ export async function executeBash(
       await outputChain.catch(() => undefined);
       await finishSpill();
     }
-    // 结果决议前清理进程组残留:bash v1 无持久 shell/后台 job 语义(docs/07 §2.5,
-    // PTY 会话是 v2),此刻组里仍存活的只会是泄漏的后台孤儿。组已消失时是 ESRCH 快路径。
+    // 结果决议前清理进程组残留:bash 不复用持久 shell 或后台 job。
+    // 此刻组里仍存活的只会是泄漏的后台孤儿。组已消失时是 ESRCH 快路径。
     await killProcessTree(child.pid);
     // 收尾补推:门槛已满足(或从未推过)才推,不破坏节流不变量
     if (pendingUpdate !== '' && (lastPushEnd === 0 || Date.now() - lastPushEnd >= UPDATE_THROTTLE_MS)) {
       pushUpdate();
     }
 
-    // ---- 结果文本:尾部截断 + 截断头注 + 退出状态(docs/07 §2.5)----
+    // ---- 结果文本:尾部截断 + 截断头注 + 退出状态 ----
     const windowText = new TextDecoder().decode(concatChunks(windowChunks));
     const clip = clipTail(windowText);
     // 行数截断但字节未越限(如 5000 行短输出):流式路径未触发落盘,此刻窗口仍全量,补落盘

@@ -1,4 +1,4 @@
-// ls 工具:非递归目录列举(规格见 docs/07-tools.md §2.2,样板取 pi-mono ls.ts)。
+// ls 工具:非递归目录列举(工具 Executor 语义见 docs/07-tools.md,样板取 pi-mono ls.ts)。
 // 字母序、目录加 / 后缀、含 dotfiles;递归找文件是 glob 的事。被 .gitignore
 // 忽略的目录仍列出名字(不递归故无「内容遍历」一说),不做任何过滤。
 
@@ -37,7 +37,7 @@ export async function executeLs(
       dirents = await readdir(target, { withFileTypes: true });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      // path 指向文件 → 规格文案,引导模型改用 read(docs/07 §2.2)
+      // path 指向文件 → 规格文案,引导模型改用 read。
       if (code === 'ENOTDIR') throw new Error(`Not a directory: ${shown} (did you mean the read tool?)`);
       if (code === 'ENOENT') throw new Error(`Directory not found: ${shown}`);
       throw err;

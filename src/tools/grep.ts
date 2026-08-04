@@ -1,4 +1,4 @@
-// grep 工具:调 ripgrep 二进制做内容搜索(规格见 docs/07-tools.md §2.4)。
+// grep 工具:调 ripgrep 二进制做内容搜索(工具 Executor 语义见 docs/07-tools.md)。
 // 要点:--json 流式解析 match 事件;match 数达 limit 即 kill rg(大仓库不搜完再截断);
 // context 不用 rg 的 -C(会让 limit 数到 context 行),命中后自行读文件切片,limit 只数 match;
 // exit 1 = 无匹配不是错误;exit ≥ 2 才 throw(附 stderr);ToolContext.signal 触发时 kill rg。
@@ -11,9 +11,9 @@ import { RG_MISSING_MESSAGE, resolveRgPath } from './rg.js';
 const DEFAULT_LIMIT = 100;
 const MAX_LINE_CHARS = 500;
 
-/** limit 命中 kill rg 后附在结果尾部的提示(docs/07 §2.4)。 */
+/** limit 命中 kill rg 后附在结果尾部的提示。 */
 export const MORE_MATCHES_NOTE = '(more matches available — refine pattern or path)';
-/** signal 触发中断后的错误文案(对齐 bash 的 "User aborted the command",docs/07 §2.5/§4)。 */
+/** signal 触发中断后的错误文案(对齐 bash 的 "User aborted the command")。 */
 export const GREP_ABORTED_MESSAGE = 'User aborted the search';
 
 export const grepParameters = z.object({
@@ -56,7 +56,7 @@ function stripEol(text: string): string {
   return text.replace(/\r?\n$/, '').replace(/\r$/, '');
 }
 
-/** 单行截到 500 字符(docs/07 §2.4)。 */
+/** 单行截到 500 字符。 */
 function clipLine(text: string): string {
   return text.length > MAX_LINE_CHARS ? text.slice(0, MAX_LINE_CHARS) : text;
 }
@@ -210,7 +210,7 @@ async function readFileLines(
 }
 
 /**
- * gnu grep 风格格式化,按文件分组(docs/07 §2.4):
+ * gnu grep 风格格式化,按文件分组:
  * match 行 `path:line: text`,context 行 `path-line- text`。
  * 相邻 match 的 context 区间重叠时合并,不重复输出;match 行格式优先。
  */
@@ -270,7 +270,7 @@ export async function executeGrep(
     if (ctx.signal.aborted) throw new Error(GREP_ABORTED_MESSAGE);
 
     const limit = args.limit ?? DEFAULT_LIMIT;
-    // --hidden 让 dotfiles 可搜,但会连带解除 rg 对 .git/ 的默认跳过,必须显式排除(docs/07 §2.4);
+    // --hidden 让 dotfiles 可搜,但会连带解除 rg 对 .git/ 的默认跳过,必须显式排除。
     // --no-require-git 让 .gitignore 在非 git 目录同样生效(与 glob 一致)
     const rgArgs = [
       '--json',

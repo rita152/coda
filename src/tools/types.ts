@@ -25,7 +25,7 @@ export interface ToolOutput<D = unknown> {
 
 /**
  * details 的约定字段:工具自带截断(bash 的尾部截断)时打 truncated 标记,
- * 框架级截断 post-hook(docs/07 §1.6)看到即跳过,不做二次截断。
+ * 框架级截断 post-hook 看到即跳过,不做二次截断。
  */
 export interface TruncatedDetails {
   truncated?: boolean;

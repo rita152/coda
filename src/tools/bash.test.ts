@@ -1,4 +1,4 @@
-// bash 工具测试(docs/10-testing.md §6.2 矩阵):真实子进程 + 真实 tmpdir。
+// bash 工具测试(见 docs/10-testing.md 的分层测试):真实子进程 + 真实 tmpdir。
 // 计时类断言均给宽松上下界并标注「宽松时序用例」——L3 是唯一允许真实时间流逝的层。
 
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
@@ -101,7 +101,7 @@ describe('bash:基本执行', () => {
   });
 });
 
-describe('bash:exit code(§6.2 exit code 行)', () => {
+describe('bash:exit code', () => {
   it('非零退出 → throw,消息含 exit code 与 stderr(完整结果文本)', async () => {
     const err = await rejection(run({ command: 'echo some-stdout; echo the-failure >&2; exit 3' }));
     expect(err.message).toContain('exit code 3');
@@ -110,7 +110,7 @@ describe('bash:exit code(§6.2 exit code 行)', () => {
   });
 });
 
-describe('bash:workdir(§6.2 workdir 行)', () => {
+describe('bash:workdir', () => {
   it('指定 workdir 后 pwd 生效', async () => {
     const sub = path.join(dir, 'sub');
     mkdirSync(sub);
@@ -250,7 +250,7 @@ describe('bash:abort(宽松时序用例)', () => {
   });
 });
 
-describe('bash:尾部截断与落盘(§6.2 tail 截断行)', () => {
+describe('bash:尾部截断与落盘', () => {
   it(
     '5000 行长输出:保尾 2000 行/48KB,落盘文件存在且内容全量(字节精确)',
     async () => {

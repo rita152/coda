@@ -1,4 +1,4 @@
-// killProcessTree:杀掉 detached 进程组的整棵树(规格见 docs/07-tools.md §2.5)。
+// killProcessTree:杀掉 detached 进程组的整棵树(工具 Executor 语义见 docs/07-tools.md)。
 // bash 工具以 { detached: true } spawn 使子进程成为进程组组长(pgid = pid),
 // 这里对 -pid 发信号覆盖全组——只 kill 直接子进程会漏掉 `npm run dev` 起的孙进程。
 // SIGTERM → 宽限期轮询 → 仍存活则 SIGKILL。任何路径都不 throw(进程已死是常态)。
