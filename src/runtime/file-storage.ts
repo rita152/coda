@@ -866,6 +866,7 @@ class FileJournalPort implements ThreadJournalPort {
   #lease: SupervisorLease | undefined;
   #journalFd: number | undefined;
   #journalBoundary: JournalFileBoundary | undefined;
+  #journalDigest: string | undefined;
   #sequenceState: JournalSequenceState | undefined;
   #codecState: JournalMessageCodecState | undefined;
 
@@ -945,10 +946,16 @@ class FileJournalPort implements ThreadJournalPort {
         observation.bytes,
       ),
     );
-    if (materialized !== undefined && sameBoundary(materialized.boundary, boundary)) {
+    if (materialized !== undefined && sameBoundary(materialized.boundary, boundary)
+      && (this.#lease === undefined || materialized.journalDigest !== undefined)) {
       if (this.#lease !== undefined) {
+        const journalDigest = materialized.journalDigest;
+        if (journalDigest === undefined) {
+          throw new RuntimeStorageError('invalid_recovery_snapshot', 'Recovery snapshot has no journal digest');
+        }
         this.#installValidatedBoundary({
           boundary,
+          journalDigest,
           sequenceState: materialized.sequenceState,
           codecState: materialized.codecState,
         });
@@ -956,6 +963,7 @@ class FileJournalPort implements ThreadJournalPort {
       return materialized.state;
     }
     if (materialized !== undefined
+      && materialized.journalDigest !== undefined
       && materialized.boundary.dev === boundary.dev
       && materialized.boundary.ino === boundary.ino
       && materialized.boundary.size < boundary.size) {
@@ -1010,12 +1018,13 @@ class FileJournalPort implements ThreadJournalPort {
 
   async saveRecoveryState(state: Readonly<FoldedThreadJournal>): Promise<void> {
     if (this.#lease === undefined || this.#journalBoundary === undefined
+      || this.#journalDigest === undefined
       || this.#sequenceState === undefined || this.#codecState === undefined
       || this.#journalFd === undefined) {
       throw new RuntimeStorageError('thread_not_writable', `Thread ${this.threadId} has no recovery boundary`);
     }
     this.workspace.assertFence(this.#lease);
-    assertJournalFileBoundary(this.file, this.#journalFd, this.#journalBoundary);
+    const boundary = this.#validatedWritableBoundary();
     if (state.meta.threadId !== this.threadId || state.meta.workspaceId !== this.workspace.workspaceId
       || state.highWaterSeq !== this.#sequenceState.nextSeq - 1) {
       throw new RuntimeStorageError('invalid_recovery_snapshot', 'Recovery state does not match journal sequence');
@@ -1025,7 +1034,8 @@ class FileJournalPort implements ThreadJournalPort {
       version: 1,
       workspaceId: this.workspace.workspaceId,
       threadId: this.threadId,
-      boundary: this.#journalBoundary,
+      boundary,
+      journalDigest: this.#journalDigest,
       state: serializedState,
       sequence: serializeJournalSequenceState(this.#sequenceState),
       codec: cloneJournalMessageCodecState(this.#codecState),
@@ -1033,7 +1043,7 @@ class FileJournalPort implements ThreadJournalPort {
     this.workspace.installRecoveryCatalog(
       this.threadId,
       state,
-      this.#journalBoundary,
+      boundary,
     );
   }
 
@@ -1067,6 +1077,7 @@ class FileJournalPort implements ThreadJournalPort {
       && recoveryStateCoversCursor(materialized.state, afterSeq)) {
       state = materialized.state;
     } else if (materialized !== undefined
+      && materialized.journalDigest !== undefined
       && materialized.boundary.dev === boundary.dev
       && materialized.boundary.ino === boundary.ino
       && materialized.boundary.size < boundary.size
@@ -1122,7 +1133,7 @@ class FileJournalPort implements ThreadJournalPort {
     this.workspace.assertFence(this.#lease);
     if (records.length === 0) return;
     if (this.#sequenceState === undefined || this.#codecState === undefined
-      || this.#journalBoundary === undefined
+      || this.#journalBoundary === undefined || this.#journalDigest === undefined
       || this.#journalFd === undefined) {
       const loaded = readValidatedJournal(
         this.file,
@@ -1141,13 +1152,13 @@ class FileJournalPort implements ThreadJournalPort {
     }
     const sequenceState = this.#sequenceState;
     const codecState = this.#codecState;
-    const boundary = this.#journalBoundary;
+    const journalDigest = this.#journalDigest;
     const journalFd = this.#journalFd;
     if (sequenceState === undefined || codecState === undefined
-      || boundary === undefined || journalFd === undefined) {
+      || journalDigest === undefined || journalFd === undefined) {
       throw new RuntimeStorageError('invalid_thread_journal', `Thread ${this.threadId} has no append boundary`);
     }
-    assertJournalFileBoundary(this.file, journalFd, boundary);
+    const boundary = this.#validatedWritableBoundary();
     const validated = records.map((record) =>
       validateJournalRecord(record, this.workspace.workspaceId, this.threadId, false));
     const nextSequenceState = validateJournalSequenceAppend(
@@ -1159,6 +1170,7 @@ class FileJournalPort implements ThreadJournalPort {
     const nextCodecState = cloneJournalMessageCodecState(codecState);
     const durable = validated.map((record) => encodeDurableJournalRecord(record, nextCodecState));
     const data = `${durable.map((record) => canonicalJson(record)).join('\n')}\n`;
+    const nextJournalDigest = extendJournalDigest(journalDigest, [Buffer.from(data)]);
     writeFileSync(journalFd, data, { encoding: 'utf8' });
     fsyncSync(journalFd);
     const expectedSize = boundary.size + Buffer.byteLength(data);
@@ -1171,6 +1183,7 @@ class FileJournalPort implements ThreadJournalPort {
     this.#sequenceState = nextSequenceState;
     this.#codecState = nextCodecState;
     this.#journalBoundary = nextBoundary;
+    this.#journalDigest = nextJournalDigest;
     this.workspace.updateCatalog(
       this.threadId,
       validated,
@@ -1186,6 +1199,7 @@ class FileJournalPort implements ThreadJournalPort {
     if (this.#lockFd !== undefined) closeSync(this.#lockFd);
     this.#journalFd = undefined;
     this.#journalBoundary = undefined;
+    this.#journalDigest = undefined;
     this.#sequenceState = undefined;
     this.#codecState = undefined;
     this.#lockFd = undefined;
@@ -1228,8 +1242,31 @@ class FileJournalPort implements ThreadJournalPort {
     if (this.#journalFd !== undefined) closeSync(this.#journalFd);
     this.#journalFd = fd;
     this.#journalBoundary = loaded.boundary;
+    this.#journalDigest = loaded.journalDigest;
     this.#sequenceState = loaded.sequenceState;
     this.#codecState = loaded.codecState;
+  }
+
+  #validatedWritableBoundary(): JournalFileBoundary {
+    const expected = this.#journalBoundary;
+    const expectedDigest = this.#journalDigest;
+    const fd = this.#journalFd;
+    if (expected === undefined || expectedDigest === undefined || fd === undefined) {
+      throw new RuntimeStorageError('thread_not_writable', `Thread ${this.threadId} has no journal boundary`);
+    }
+    const current = journalBoundaryFromOpenFile(this.file, fd);
+    if (sameBoundary(current, expected)) return current;
+    if (!sameBoundaryExceptCtime(current, expected)) {
+      throw journalChangedOutsideWriter(this.file);
+    }
+    this.workspace.observeJournalRead(this.threadId, 'body', current.size);
+    const currentDigest = journalDigestFromOpenFile(this.file, fd, current);
+    const verified = journalBoundaryFromOpenFile(this.file, fd);
+    if (!sameBoundary(current, verified) || currentDigest !== expectedDigest) {
+      throw journalChangedOutsideWriter(this.file);
+    }
+    this.#journalBoundary = verified;
+    return verified;
   }
 }
 
@@ -1387,6 +1424,7 @@ interface ThreadRecoverySnapshotPayload {
   readonly workspaceId: WorkspaceId;
   readonly threadId: ThreadId;
   readonly boundary: JournalFileBoundary;
+  readonly journalDigest: string;
   readonly state: SerializedThreadRecoveryState;
   readonly sequence: SerializedJournalSequenceState;
   readonly codec: JournalMessageCodecState;
@@ -1398,6 +1436,7 @@ interface ThreadRecoverySnapshotFile extends ThreadRecoverySnapshotPayload {
 
 interface ValidatedRecoverySnapshot {
   readonly boundary: JournalFileBoundary;
+  readonly journalDigest?: string;
   readonly state: FoldedThreadJournal;
   readonly sequenceState: JournalSequenceState;
   readonly codecState: JournalMessageCodecState;
@@ -1407,6 +1446,7 @@ interface ValidatedJournal {
   readonly sequenceState: JournalSequenceState;
   readonly codecState: JournalMessageCodecState;
   readonly boundary: JournalFileBoundary;
+  readonly journalDigest: string;
   readonly state?: FoldedThreadJournal;
 }
 
@@ -1536,10 +1576,14 @@ function readValidatedJournal(
       throw new RuntimeStorageError('invalid_thread_journal', 'Repaired journal size differs from boundary');
     }
     assertJournalFileBoundary(file, fd, boundary);
+    const digestChunks = expectedSize > bytes.length
+      ? [bytes, Buffer.from('\n')]
+      : [bytes.subarray(0, expectedSize)];
     return {
       sequenceState,
       codecState: cloneJournalMessageCodecState(codecState),
       boundary,
+      journalDigest: extendJournalDigest(INITIAL_JOURNAL_DIGEST, digestChunks),
       ...(foldedState !== undefined && { state: foldedState }),
     };
   } finally {
@@ -1556,6 +1600,10 @@ function readValidatedJournalTail(
   initialBoundary: Readonly<JournalFileBoundary>,
   observer?: JournalReadObserver,
 ): ValidatedJournal {
+  const previousJournalDigest = materialized.journalDigest;
+  if (previousJournalDigest === undefined) {
+    throw new RuntimeStorageError('invalid_recovery_snapshot', 'Recovery snapshot has no journal digest');
+  }
   const fd = openSync(
     file,
     (mode === 'repair' ? constants.O_RDWR | constants.O_APPEND : constants.O_RDONLY)
@@ -1642,10 +1690,15 @@ function readValidatedJournalTail(
       throw new RuntimeStorageError('invalid_thread_journal', 'Repaired journal tail size differs from boundary');
     }
     assertJournalFileBoundary(file, fd, boundary);
+    const validatedTailSize = expectedSize - materialized.boundary.size;
+    const digestChunks = validatedTailSize > bytes.length
+      ? [bytes, Buffer.from('\n')]
+      : [bytes.subarray(0, validatedTailSize)];
     return {
       sequenceState,
       codecState: cloneJournalMessageCodecState(codecState),
       boundary,
+      journalDigest: extendJournalDigest(previousJournalDigest, digestChunks),
       state: foldedState,
     };
   } finally {
@@ -2026,11 +2079,13 @@ function readRecoverySnapshot(
     if (!isRecord(value)) throw new Error('snapshot is not an object');
     assertExactKeys(value, [
       'version', 'workspaceId', 'threadId', 'boundary', 'state', 'sequence', 'codec', 'digest',
-    ]);
+    ], ['journalDigest']);
     const { digest, ...payload } = value;
     if (value.version !== 1 || value.workspaceId !== workspaceId || value.threadId !== threadId
       || typeof digest !== 'string' || canonicalJsonSha256(payload) !== digest
-      || !isJournalBoundary(value.boundary)) {
+      || !isJournalBoundary(value.boundary)
+      || (value.journalDigest !== undefined
+        && (typeof value.journalDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(value.journalDigest)))) {
       throw new Error('snapshot identity, digest, or boundary is invalid');
     }
     const state = deserializeThreadRecoveryState(value.state, meta);
@@ -2041,6 +2096,7 @@ function readRecoverySnapshot(
     }
     return {
       boundary: value.boundary,
+      ...(value.journalDigest !== undefined && { journalDigest: value.journalDigest }),
       state,
       sequenceState,
       codecState,
@@ -2137,6 +2193,73 @@ function isJournalBoundary(value: unknown): value is JournalFileBoundary {
 function sameBoundary(left: Readonly<JournalFileBoundary>, right: Readonly<JournalFileBoundary>): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size
     && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function sameBoundaryExceptCtime(
+  left: Readonly<JournalFileBoundary>,
+  right: Readonly<JournalFileBoundary>,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeMs === right.mtimeMs;
+}
+
+const JOURNAL_DIGEST_DOMAIN = 'coda.runtime-journal-record-chain.v1\0';
+const INITIAL_JOURNAL_DIGEST = sha256Hex('coda.runtime-journal-record-chain.v1:empty');
+
+function extendJournalDigest(previousDigest: string, chunks: Iterable<Uint8Array>): string {
+  let digest = previousDigest;
+  let hasher = journalRecordHasher(digest);
+  let hasPendingBytes = false;
+  for (const chunk of chunks) {
+    let cursor = 0;
+    while (cursor < chunk.length) {
+      const newline = chunk.indexOf(0x0a, cursor);
+      const end = newline < 0 ? chunk.length : newline + 1;
+      hasher.update(chunk.subarray(cursor, end));
+      hasPendingBytes = true;
+      cursor = end;
+      if (newline >= 0) {
+        digest = hasher.digest('hex');
+        hasher = journalRecordHasher(digest);
+        hasPendingBytes = false;
+      }
+    }
+  }
+  return hasPendingBytes ? hasher.digest('hex') : digest;
+}
+
+function journalRecordHasher(previousDigest: string): Bun.CryptoHasher {
+  return new Bun.CryptoHasher('sha256')
+    .update(JOURNAL_DIGEST_DOMAIN)
+    .update(previousDigest, 'hex');
+}
+
+function journalDigestFromOpenFile(
+  file: string,
+  fd: number,
+  boundary: Readonly<JournalFileBoundary>,
+): string {
+  return extendJournalDigest(INITIAL_JOURNAL_DIGEST, journalFileChunks(file, fd, boundary.size));
+}
+
+function* journalFileChunks(file: string, fd: number, size: number): Generator<Buffer> {
+  let offset = 0;
+  while (offset < size) {
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, size - offset));
+    const count = readSync(fd, chunk, 0, chunk.length, offset);
+    if (count === 0) {
+      throw new RuntimeStorageError('invalid_thread_journal', `Journal changed during digest verification: ${file}`);
+    }
+    offset += count;
+    yield chunk.subarray(0, count);
+  }
+}
+
+function journalChangedOutsideWriter(file: string): RuntimeStorageError {
+  return new RuntimeStorageError(
+    'invalid_thread_journal',
+    `Thread journal changed outside the active writer: ${file}`,
+  );
 }
 
 function recoveryStateCoversCursor(state: Readonly<FoldedThreadJournal>, afterSeq: number): boolean {

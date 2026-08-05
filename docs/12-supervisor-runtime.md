@@ -77,9 +77,10 @@ catalog 缺失/损坏时只从 header 重建保守 locator 并将 thread 标记�
 版本门禁。崩溃后已存在的 create/fork 只核对 immutable header/seed 前缀，不在 `loadState()` 之前
 再解析一次正文。
 
-可信 recovery snapshot 与 journal 的 inode/size/time boundary 绑定，包含所有确定性恢复状态、identity set、
+可信 recovery snapshot 与 journal 的 inode/size/mtime/ctime boundary 及可追加组合的内容摘要绑定；包含所有确定性恢复状态、identity set、
 sequence/compact-codec state 和有界 replay tail。exact boundary 直接恢复，append-only boundary 只 fold tail，
-snapshot 缺失、损坏、replace 或 truncate 才单次流式 full fallback。journal append 先 fsync 并将 catalog 标为
+ctime-only 漂移必须验证正文或由 active writer 重算摘要后刷新；snapshot 缺失、损坏、replace 或 truncate
+才单次流式 full fallback。journal append 先 fsync 并将 catalog 标为
 `recoveryRequired`；snapshot 原子 rename/fsync 后才能清除 hint。tail repair 仍只允许在当前 workspace fence 与
 thread write lease 下执行。
 

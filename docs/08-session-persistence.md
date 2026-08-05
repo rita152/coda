@@ -91,7 +91,7 @@ delta 数量。终态 message/transcript 仍完整保存，公开 RuntimeEvent/E
 ## 9. Materialized recovery snapshot
 
 每个 thread 可有一个原子 `.recovery.json` materialization。它包含对应 journal 的
-`dev/ino/size/mtime/ctime` boundary、event high-water、有限 replay tail、checkpoint、summary、mailbox、
+`dev/ino/size/mtime/ctime` 快速 boundary 和可追加组合的 journal 内容摘要；event high-water、有限 replay tail、checkpoint、summary、mailbox、
 run/turn、control claim、cancel/input ownership、result outbox、identity set，以及继续验证 tail 所需的
 sequence/codec state。payload 带 canonical digest；metadata 必须与 journal header 完全相同。
 OpId terminal、mailbox accepted seq/queue-effect witness、thread-result 及 control request/resolution 另有明确
@@ -100,7 +100,7 @@ OpId terminal、mailbox accepted seq/queue-effect witness、thread-result 及 co
 恢复按以下顺序选择，且 journal 正文最多解析一次：
 
 1. 先执行已缓存或新读取的 header protocol/schema/ownership gate；
-2. snapshot boundary 与当前 journal 完全一致时直接使用 snapshot，不读正文；
+2. snapshot 的完整 stat boundary 与当前 journal 一致时直接使用 snapshot，不读正文；ctime-only 漂移必须先验证正文并刷新 snapshot，已加载的 active writer 只有在重算内容摘要一致后才能刷新写 boundary；
 3. inode 相同且 journal 只在 snapshot boundary 后增长时，仅解析、验证并 fold tail；
 4. snapshot 缺失、损坏、truncate、replace 或 boundary 不可信时，单次流式解析全 journal，边验证边 fold，
    不保留所有重建 envelope，然后重建 snapshot；

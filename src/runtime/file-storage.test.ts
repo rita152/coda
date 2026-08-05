@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -10,6 +11,7 @@ import {
   symlinkSync,
   truncateSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -660,6 +662,90 @@ describe('FileRuntimeStorage canonical persistence', () => {
     expect(reads.some((read) => read.kind === 'body')).toBe(true);
     await truncated.releaseWriteLease();
 
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('does not fence an active writer on ctime-only metadata drift', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_ctime_metadata_drift' as WorkspaceId;
+    const threadId = 'thread-ctime-metadata-drift' as ThreadId;
+    const storage = createFileRuntimeStorage({ root });
+    const workspace = await storage.openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('ctime-metadata-drift');
+    const created = await workspace.createThreadJournal(lease, {
+      threadId,
+      meta: threadMeta({ workspaceId, threadId, cwd }),
+    });
+    await created.acquireWriteLease(lease);
+    const initial = await created.loadState();
+    const first = journalCommit(workspaceId, threadId, 1, diagnostic('before-ctime-drift'));
+    await created.append([first], { flush: true });
+    const firstState = foldThreadJournalAppend(initial, [first]);
+    await created.saveRecoveryState(firstState);
+    await created.releaseWriteLease();
+
+    const journal = await workspace.openThreadJournal(threadId);
+    if (journal === undefined) throw new Error('ctime metadata drift journal missing');
+    await journal.acquireWriteLease(lease);
+    expect((await journal.loadState()).highWaterSeq).toBe(1);
+    const file = journalPath(root, workspaceId, threadId);
+    const before = statSync(file);
+    chmodSync(file, 0o640);
+    const after = statSync(file);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ctimeMs).not.toBe(before.ctimeMs);
+
+    const commit = journalCommit(workspaceId, threadId, 2, diagnostic('ctime-drift'));
+    await journal.append([commit], { flush: true });
+    await journal.saveRecoveryState(foldThreadJournalAppend(firstState, [commit]));
+    expect((await journal.loadState()).highWaterSeq).toBe(2);
+
+    await journal.releaseWriteLease();
+    await workspace.releaseSupervisorLease(lease);
+    await workspace.close();
+  });
+
+  test('fences an equal-size journal rewrite even when its mtime is restored', async () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, 'cwd');
+    const workspaceId = 'ws_restored_mtime_rewrite' as WorkspaceId;
+    const threadId = 'thread-restored-mtime-rewrite' as ThreadId;
+    const storage = createFileRuntimeStorage({ root });
+    const workspace = await storage.openWorkspace({ cwd, workspaceId });
+    const lease = await workspace.acquireSupervisorLease('restored-mtime-rewrite');
+    const journal = await workspace.createThreadJournal(lease, {
+      threadId,
+      meta: threadMeta({ workspaceId, threadId, cwd }),
+    });
+    await journal.acquireWriteLease(lease);
+    const initial = await journal.loadState();
+    const first = journalCommit(workspaceId, threadId, 1, diagnostic('diag-1'));
+    await journal.append([first], { flush: true });
+    await journal.saveRecoveryState(foldThreadJournalAppend(initial, [first]));
+
+    const file = journalPath(root, workspaceId, threadId);
+    const original = readFileSync(file, 'utf8');
+    const rewritten = original.replaceAll('diag-1', 'diag-X');
+    expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(original));
+    const before = statSync(file);
+    writeFileSync(file, rewritten);
+    utimesSync(file, before.atimeMs / 1000, before.mtimeMs / 1000);
+    const after = statSync(file);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ctimeMs).not.toBe(before.ctimeMs);
+
+    await expect(journal.append([
+      journalCommit(workspaceId, threadId, 2, diagnostic('must-not-append')),
+    ], { flush: true })).rejects.toMatchObject({ code: 'invalid_thread_journal' });
+    expect(readFileSync(file, 'utf8')).toBe(rewritten);
+
+    await journal.releaseWriteLease();
     await workspace.releaseSupervisorLease(lease);
     await workspace.close();
   });
