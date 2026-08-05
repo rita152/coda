@@ -12,7 +12,6 @@ import { findSlashCommand } from './command-catalog.js';
 export { SLASH_COMMAND_SPECS } from './command-catalog.js';
 export type { SlashCommandSpec } from './command-catalog.js';
 
-export const ESC_EXIT_WINDOW_MS = 500;
 export const CTRL_C_EXIT_WINDOW_MS = 1500;
 
 /** retrying Enter remains steering; compacting accepts a deferred prompt. */

@@ -3240,6 +3240,30 @@ describe('TUI 控制器接线', () => {
     view.renderer.destroy();
   });
 
+  it('双击 Esc 不再退出，只有双击 Ctrl+C 退出', async () => {
+    const session = idleCliSession();
+    const view = await setup(90, 30);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    let settled = false;
+    void controller.then(() => {
+      settled = true;
+    });
+
+    view.mockInput.pressEscape();
+    view.mockInput.pressEscape();
+    await view.flush();
+    expect(settled).toBe(false);
+    expect(view.frame()).not.toContain('press Esc again to exit');
+
+    view.mockInput.pressKey('c', { ctrl: true });
+    view.mockInput.pressKey('c', { ctrl: true });
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
   it('陈旧 async diff scope 结果不会从已切换的 sessions panel 抢回 active panel', async () => {
     const threadId = 'thread-stale-diff' as ThreadId;
     const staleDiffSnapshot = {

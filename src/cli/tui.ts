@@ -105,7 +105,6 @@ import {
   CTRL_C_EXIT_WINDOW_MS,
   decideEnter,
   DoublePress,
-  ESC_EXIT_WINDOW_MS,
   formatQueueLines,
   formatStatusLines,
   InputHistory,
@@ -1916,7 +1915,7 @@ export async function createTuiScreen(
           input.undo();
           return true;
         case 'escape':
-          // A second Esc keeps the product's existing abort/exit semantics.
+          // A second Esc falls through to the product's abort handling.
           return false;
         default:
           return true;
@@ -4266,7 +4265,6 @@ export function runTuiController(
 ): Promise<number> {
   const history = new InputHistory();
   history.replace(promptHistoryEntries(session.messages));
-  const escExit = new DoublePress(ESC_EXIT_WINDOW_MS);
   const ctrlCExit = new DoublePress(CTRL_C_EXIT_WINDOW_MS);
   type ApprovalRequestEvent = Extract<
     CliRuntimeEvent,
@@ -4326,7 +4324,6 @@ export function runTuiController(
     if (previousHead === nextHead) return;
     if (nextHead === undefined) screen.resolveApproval();
     else {
-      escExit.reset();
       renderCurrentApproval();
     }
   };
@@ -4889,7 +4886,6 @@ export function runTuiController(
         : undefined;
       if (decision === 'abort') {
         consume(key);
-        escExit.reset();
         clearApprovalQueue();
         session.abort();
         screen.resolveApproval();
@@ -4961,7 +4957,6 @@ export function runTuiController(
         return;
       }
       const isEnter = key.name === 'return' || key.name === 'enter' || key.name === 'kpenter';
-      if (key.name !== 'escape') escExit.reset();
       if (!(key.ctrl && key.name === 'c')) ctrlCExit.reset();
       if (!(key.ctrl && key.name === 'r')) {
         reverseSearchQuery = undefined;
@@ -4982,7 +4977,6 @@ export function runTuiController(
 
       if (key.name === 'escape' && providerController?.active === true) {
         providerController.back();
-        escExit.reset();
         consume(key);
         return;
       }
@@ -4991,7 +4985,6 @@ export function runTuiController(
         const draft = paletteReturnDraft;
         paletteReturnDraft = undefined;
         screen.setInput(draft);
-        escExit.reset();
         consume(key);
         return;
       }
@@ -5100,13 +5093,9 @@ export function runTuiController(
       }
       if (key.name === 'escape') {
         consume(key);
-        if (escExit.hit(Date.now())) {
-          void shutdown(0);
-        } else if (interactionCanAbort(session.interactionState())) {
+        if (interactionCanAbort(session.interactionState())) {
           session.abort();
           screen.setTransientStatus('aborting…');
-        } else {
-          screen.setTransientStatus('press Esc again to exit');
         }
       }
     };
@@ -5123,9 +5112,6 @@ export function runTuiController(
           steering: [...event.steering],
           followUp: [...event.followUp],
         };
-      }
-      if (event.type === 'control_request' && event.kind === 'approval') {
-        escExit.reset();
       }
       try {
         if (event.type === 'control_request' && event.kind === 'approval') {

@@ -827,7 +827,7 @@ test.skipIf(process.platform !== 'darwin')(
           readyMarker: 'Tips for getting started',
           nextMarker: 'bash running',
           nextInput: '\x1b',
-          finalInput: '\x1b',
+          finalInput: '\x03\x03',
           finalDelayMs: 350,
         },
       );
@@ -974,7 +974,7 @@ test.skipIf(process.platform !== 'darwin')(
           readyMarker: 'Tips for getting started',
           waitFile: requestMarker,
           nextInput: '\x1b',
-          finalInput: '\x1b',
+          finalInput: '\x03\x03',
           finalDelayMs: 350,
         },
       );

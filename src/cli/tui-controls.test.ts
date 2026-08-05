@@ -9,7 +9,6 @@ import {
   CTRL_C_EXIT_WINDOW_MS,
   decideEnter,
   DoublePress,
-  ESC_EXIT_WINDOW_MS,
   formatQueueLines,
   formatStatusLines,
   InputHistory,
@@ -251,8 +250,7 @@ describe('TUI double-press disambiguation', () => {
     expect(presses.hit(701)).toBe(false);
   });
 
-  it('退出窗口常量保持 Esc 500ms / Ctrl+C 1.5s', () => {
-    expect(ESC_EXIT_WINDOW_MS).toBe(500);
+  it('Ctrl+C 退出窗口常量为 1.5s', () => {
     expect(CTRL_C_EXIT_WINDOW_MS).toBe(1_500);
   });
 });

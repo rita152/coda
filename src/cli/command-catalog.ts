@@ -371,7 +371,6 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     id: 'app.quit', category: 'help', summary: 'Exit coda cleanly',
     slash: { name: 'quit', aliases: ['q'], availableWhileRunning: false, order: 21 },
     shortcuts: [
-      { keys: 'Esc Esc', summary: 'exit' },
       { keys: 'Ctrl+C Ctrl+C', summary: 'exit' },
       { keys: 'Ctrl+D', summary: 'exit while idle with an empty draft' },
     ],
