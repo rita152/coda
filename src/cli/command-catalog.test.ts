@@ -148,7 +148,7 @@ describe('canonical command catalog', () => {
       expect(completion).toContain('login');
     }
     expect(SLASH_COMMAND_SPECS.map((command) => command.name)).toEqual([
-      'help', 'queue', 'status', 'login', 'model', 'logout', 'auth', 'followup', 'abort',
+      'help', 'insert-mode', 'status', 'login', 'model', 'logout', 'auth', 'abort',
       'search', 'next', 'previous', 'latest', 'copy', 'export', 'history', 'edit',
       'files', 'stash', 'restore', 'draft', 'vim', 'quit', 'doctor',
       'diff', 'review', 'permissions', 'compact', 'retry', 'fork', 'new', 'sessions',
@@ -208,6 +208,35 @@ describe('canonical command catalog', () => {
         reason: 'provider management is unavailable on this surface',
       });
     expect(commandPaletteEntries('', { ...base, providerPromptActive: true })).toEqual([]);
+  });
+
+  it('insert-mode 取代 queue/followup 进入目录且各 phase 均可用', () => {
+    const insertMode = SLASH_COMMAND_SPECS.find(
+      (command) => command.actionId === 'task.insert-mode',
+    );
+    expect(insertMode).toMatchObject({
+      name: 'insert-mode',
+      availableWhileRunning: true,
+      category: 'task',
+    });
+    expect(insertMode?.aliases).toBeUndefined();
+    expect(SLASH_COMMAND_SPECS.some(
+      (command) => command.actionId === 'task.queue' ||
+        command.actionId === 'task.follow-up',
+    )).toBe(false);
+    const base = {
+      phase: 'idle' as const,
+      approvalPending: false,
+      providerPromptActive: false,
+      providerCommandsAvailable: true,
+      hasModel: false,
+      hasTranscript: false,
+      hasStash: false,
+    };
+    for (const phase of ['idle', 'running', 'compacting'] as const) {
+      expect(commandPaletteEntries('insert-mode', { ...base, phase })[0]?.availability)
+        .toEqual({ kind: 'enabled' });
+    }
   });
 
   it('bash completion returns argv-level hierarchical tokens and option values', () => {

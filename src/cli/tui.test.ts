@@ -373,7 +373,8 @@ describe('全屏 OpenTUI 布局', () => {
       expect(menu.height).toBe(8);
       expect(menu.screenY + menu.height).toBe(prompt.screenY);
       expect(view.frame()).toContain('→ [help] /help');
-      expect(view.frame()).toContain('/followup <text>');
+      expect(view.frame()).toContain('[task] /insert-mode');
+      expect(view.frame()).not.toContain('/followup');
       expect(view.frame()).not.toContain('/f <text>');
       expect(view.frame()).not.toContain('/q ');
       expect(view.frame()).toContain('Show model, usage, and token status');
@@ -405,7 +406,7 @@ describe('全屏 OpenTUI 布局', () => {
       view.mockInput.pressArrow('down');
       view.mockInput.pressTab();
       await view.flush();
-      expect(view.screen.getInput()).toBe('/queue ');
+      expect(view.screen.getInput()).toBe('/insert-mode ');
 
       view.screen.clearInput();
       await view.mockInput.typeText('/');
@@ -418,10 +419,16 @@ describe('全屏 OpenTUI 布局', () => {
       expect(view.screen.getInput()).toBe('/help ');
 
       view.screen.clearInput();
+      await view.mockInput.typeText('/in');
+      view.mockInput.pressTab();
+      await view.flush();
+      expect(view.screen.getInput()).toBe('/insert-mode ');
+
+      view.screen.clearInput();
       await view.mockInput.typeText('/f');
       view.mockInput.pressTab();
       await view.flush();
-      expect(view.screen.getInput()).toBe('/followup ');
+      expect(view.screen.getInput()).not.toBe('/followup ');
 
       view.screen.clearInput();
       await view.mockInput.typeText('/q');
@@ -4116,6 +4123,251 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
+});
+
+describe('TUI insert mode picker', () => {
+  function insertModeSession(over: {
+    interactionState: () => CliInteractionState;
+    prompts?: string[];
+    steers?: string[];
+    followUps?: string[];
+  }): CliSession {
+    return {
+      interactionState: over.interactionState,
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async (text) => { over.prompts?.push(text); },
+      steer: (text) => { over.steers?.push(typeof text === 'string' ? text : ''); },
+      followUp: (text) => { over.followUps?.push(typeof text === 'string' ? text : ''); },
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('默认 steering：运行中普通 Enter 走 steer，空闲 Enter 保持为 prompt', async () => {
+    let phase: CliInteractionState = 'running';
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const followUps: string[] = [];
+    const session = insertModeSession({
+      interactionState: () => phase,
+      prompts,
+      steers,
+      followUps,
+    });
+    const view = await setup(90, 28);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('add tests');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(steers).toEqual(['add tests']);
+    expect(followUps).toEqual([]);
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+    expect(prompts).toEqual([]);
+  });
+
+  it('弹出 exactly steering/following 两个选项；选择 following 后运行中 Enter 走 followUp', async () => {
+    let phase: CliInteractionState = 'running';
+    const steers: string[] = [];
+    const followUps: string[] = [];
+    const session = insertModeSession({
+      interactionState: () => phase,
+      steers,
+      followUps,
+    });
+    const view = await setup(90, 28);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('/insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    const frame = view.frame();
+    expect(frame).toContain('steering');
+    expect(frame).toContain('following');
+
+    view.screen.setInput('following');
+    view.mockInput.pressEnter();
+    await view.flush();
+
+    view.screen.setInput('first follow-up');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(followUps).toEqual(['first follow-up']);
+    expect(steers).toEqual([]);
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('切换回 steering 后运行中 Enter 重新走 steer', async () => {
+    let phase: CliInteractionState = 'running';
+    const steers: string[] = [];
+    const followUps: string[] = [];
+    const session = insertModeSession({
+      interactionState: () => phase,
+      steers,
+      followUps,
+    });
+    const view = await setup(90, 28);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('/insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('following');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('queued follow-up');
+    view.mockInput.pressEnter();
+    await view.flush();
+
+    view.screen.setInput('/insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('steering');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('steer now');
+    view.mockInput.pressEnter();
+    await view.flush();
+
+    expect(followUps).toEqual(['queued follow-up']);
+    expect(steers).toEqual(['steer now']);
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('idle 状态下无论哪种 insert mode，Enter 仍是新 prompt', async () => {
+    const prompts: string[] = [];
+    const followUps: string[] = [];
+    const session = insertModeSession({
+      interactionState: () => 'idle',
+      prompts,
+      followUps,
+    });
+    const view = await setup(90, 28);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('/insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('following');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('new prompt while idle');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(prompts).toEqual(['new prompt while idle']);
+    expect(followUps).toEqual([]);
+
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('从 palette 进入 /insert-mode 保留草稿，Esc 离开 picker 不破坏草稿', async () => {
+    let phase: CliInteractionState = 'running';
+    const dir = makeTempDir();
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_insert_mode' as WorkspaceId,
+      threadId: 'thr_insert_mode' as ThreadId,
+    });
+    store.setDraft(persistableDraft('preserved draft'));
+    store.flush();
+    const session = insertModeSession({ interactionState: () => phase });
+    const view = await setup(100, 24, () => {}, true, undefined, {
+      presentation: { store },
+    });
+    view.screen.restorePresentation(store.snapshot());
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      presentation: { store },
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.flush();
+    await view.mockInput.typeText('insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(store.snapshot().draft).toBe('preserved draft');
+
+    view.mockInput.pressEscape();
+    await view.flush();
+    expect(view.screen.getInput()).toBe('preserved draft');
+    expect(store.snapshot().draft).toBe('preserved draft');
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('picker 选择模式后把 palette 草稿恢复到 composer', async () => {
+    let phase: CliInteractionState = 'running';
+    const dir = makeTempDir();
+    const store = new ThreadPresentationStore({
+      root: path.join(dir, 'presentation'),
+      workspaceId: 'ws_insert_mode' as WorkspaceId,
+      threadId: 'thr_insert_mode' as ThreadId,
+    });
+    store.setDraft(persistableDraft('draft survives picker'));
+    store.flush();
+    const session = insertModeSession({ interactionState: () => phase });
+    const view = await setup(100, 24, () => {}, true, undefined, {
+      presentation: { store },
+    });
+    view.screen.restorePresentation(store.snapshot());
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      presentation: { store },
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+
+    view.mockInput.pressKey('k', { ctrl: true });
+    await view.flush();
+    await view.mockInput.typeText('insert-mode');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('steering');
+    view.mockInput.pressEnter();
+    await view.flush();
+
+    expect(view.screen.getInput()).toBe('draft survives picker');
+    expect(store.snapshot().draft).toBe('draft survives picker');
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
 });
 
 function approvalPresentationWithoutAlways(

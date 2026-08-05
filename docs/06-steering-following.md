@@ -57,7 +57,9 @@ Agent；权威 transcript、control 与 event commit 才能施加必要背压。
 
 ## 5. CLI 映射
 
-TUI 的 Enter、Alt+Enter 与 Esc 只是这些 canonical op 的输入映射。TUI 和 human one-shot 通过
+TUI 的 Enter 与 Esc 只是这些 canonical op 的输入映射。运行中普通 Enter 按 `/insert-mode`
+选择的路由：`steering`（默认）映射为 `steer`，`following` 映射为 `follow_up`；idle 时 Enter 始终是
+新 `prompt`。TUI 和 human one-shot 通过
 Runtime-backed frontend 订阅事件；`--json` 直接接收完整 RuntimeOp。协议版本为 `2.0.0`，不存在旧
 identity-free 输入、Session resolver 或 approval bridge。具体 CLI 行为见[CLI 文档](./09-cli.md)与
 [CLI UX](./13-cli-ux.md)。

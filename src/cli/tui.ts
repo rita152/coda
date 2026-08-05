@@ -10,7 +10,6 @@ import type {
   ModelRef,
   PlanStep,
   ProviderEvent,
-  QueuedMessage,
   RuntimeDiffSnapshot,
   RuntimeThreadListItem,
   ThreadId,
@@ -105,14 +104,15 @@ import {
   CTRL_C_EXIT_WINDOW_MS,
   decideEnter,
   DoublePress,
-  formatQueueLines,
   formatStatusLines,
   InputHistory,
+  INSERT_MODE_CHOICES,
   interactionCanAbort,
   interactionEnterState,
+  selectInsertModeChoice,
   SLASH_COMMAND_SPECS,
 } from './tui-controls.js';
-import type { SlashCommand } from './tui-controls.js';
+import type { InsertMode, SlashCommand } from './tui-controls.js';
 import type {
   CliRenderer,
   ColorInput,
@@ -304,6 +304,7 @@ export interface TuiScreen {
   ): void;
   setModel(model: ModelRef | undefined, contextLimit?: number): void;
   setProviderCommandsAvailable(available: boolean): void;
+  setInsertMode(mode: InsertMode): void;
   resolveApproval(): void;
   handleApprovalPanelKey(key: KeyEvent): ApprovalPanelKeyResult;
   getInput(): string;
@@ -1105,6 +1106,7 @@ export async function createTuiScreen(
       (opts.presentation?.store.snapshot().draft ?? '') !== '';
     let selectedModel = opts.model;
     let providerCommandsAvailable = opts.providerCommands !== undefined;
+    let insertMode: InsertMode = 'steering';
     let selectedContextLimit = opts.contextLimit;
     let usage: CliThreadUsage = {
       cumulative: { input: 0, output: 0 },
@@ -1996,15 +1998,18 @@ export async function createTuiScreen(
       } else if (phase === 'compacting') {
         setPromptPlaceholder(
           compact
-            ? 'Compacting · Enter queue · Esc abort'
-            : `Compacting context · Enter queue · Alt+Enter follow-up · Esc abort${queue}`,
+            ? 'Compacting · Esc abort'
+            : `Compacting context · Esc abort${queue}`,
         );
       } else if (phase === 'running' || phase === 'retrying') {
         const label = activity ?? (phase === 'retrying' ? 'retrying' : 'working');
+        const enterHint = insertMode === 'following'
+          ? 'Enter follow-up'
+          : 'Enter steer';
         setPromptPlaceholder(
           compact
-            ? `${label} · Enter steer · Esc abort`
-            : `${label} · Enter steer · Alt+Enter follow-up · Esc abort${queue}`,
+            ? `${label} · ${enterHint} · Esc abort`
+            : `${label} · ${enterHint} · Esc abort${queue}`,
         );
       } else {
         setPromptPlaceholder('');
@@ -3991,6 +3996,10 @@ export async function createTuiScreen(
         providerCommandsAvailable = available;
         refreshComposerLayout();
       },
+      setInsertMode(mode: InsertMode): void {
+        insertMode = mode;
+        refreshStatus();
+      },
       resolveApproval(): void {
         approvalPending = false;
         approvalCard = undefined;
@@ -4272,10 +4281,6 @@ export function runTuiController(
   >;
   const approvalQueue: string[] = [];
   const approvalEvents = new Map<string, ApprovalRequestEvent>();
-  let lastQueues: { steering: QueuedMessage[]; followUp: QueuedMessage[] } = {
-    steering: [],
-    followUp: [],
-  };
   let closing = false;
   let editing = false;
   let paletteReturnDraft: string | undefined;
@@ -4283,6 +4288,9 @@ export function runTuiController(
   let providerTaskDraft: string | undefined;
   let providerInputActive = false;
   let providerBeginning = false;
+  let insertMode: InsertMode = 'steering';
+  let insertModePickerActive = false;
+  let insertModePickerDraft: string | undefined;
   let reverseSearchQuery: string | undefined;
   let activeDiffScope: 'turn' | 'workspace' = 'turn';
   let panelRequestGeneration = 0;
@@ -4341,7 +4349,7 @@ export function runTuiController(
     };
 
     screen.setInputChangeHandler((draft) => {
-      if (providerInputActive || draft.startsWith('/')) return;
+      if (insertModePickerActive || providerInputActive || draft.startsWith('/')) return;
       latestPromptDraft = draft;
       opts.presentation?.store.setDraft(persistableDraft(draft));
     });
@@ -4391,6 +4399,36 @@ export function runTuiController(
       return providerController.active ? '' : restoreProviderTaskDraft();
     };
     screen.setProviderCommandsAvailable(providerController !== undefined);
+
+    /** 复用 commandPrompt 弹层交互；picker 结束后恢复被保护的草稿。 */
+    const beginInsertModePicker = (): string => {
+      insertModePickerDraft = paletteReturnDraft ?? latestPromptDraft;
+      paletteReturnDraft = undefined;
+      insertModePickerActive = true;
+      screen.setCommandPrompt('Insert mode · how Enter routes while running', false, [
+        ...INSERT_MODE_CHOICES.map((choice) => ({
+          value: choice.value,
+          label: choice.label,
+          description: choice.value === 'steering'
+            ? 'Enter steers the current run'
+            : 'Enter queues a follow-up',
+        })),
+      ]);
+      return '';
+    };
+
+    const finishInsertModePicker = (): void => {
+      insertModePickerActive = false;
+      screen.setCommandPrompt(undefined, false);
+      const draft = insertModePickerDraft ?? '';
+      insertModePickerDraft = undefined;
+      screen.setInput(draft);
+    };
+
+    const cancelInsertModePicker = (): void => {
+      finishInsertModePicker();
+      screen.println('Insert mode unchanged.', 'muted');
+    };
 
     const unsubscribeProjectWarnings = opts.projectRuleWarnings?.subscribeWarnings((message) => {
       try {
@@ -4647,14 +4685,8 @@ export function runTuiController(
             return paletteReturnDraft ?? latestPromptDraft;
           }
           return beginProviderCommand(command.cmd);
-        case 'queue':
-          for (const line of formatQueueLines(lastQueues.steering, lastQueues.followUp)) {
-            screen.println(line, 'muted');
-          }
-          return null;
-        case 'follow_up':
-          if (command.text !== '') session.followUp(command.text);
-          return null;
+        case 'insert_mode':
+          return beginInsertModePicker();
         case 'history_search': {
           const query = command.query === '' ? latestPromptDraft : command.query;
           const match = history.reverseSearch(query);
@@ -4820,16 +4852,33 @@ export function runTuiController(
       }
     };
 
-    function submit(meta: boolean): void {
+    function submit(): void {
       if (closing || approvalQueue.length > 0) return;
       const raw = screen.getInput();
+      if (insertModePickerActive) {
+        screen.markInteracted();
+        const mode = selectInsertModeChoice(raw);
+        if (mode === undefined) {
+          screen.println('choose steering or following', 'warning');
+          return;
+        }
+        insertMode = mode;
+        screen.setInsertMode(mode);
+        finishInsertModePicker();
+        screen.println(`Insert mode: ${mode}.`, 'success');
+        return;
+      }
       if (providerController?.active === true) {
         screen.markInteracted();
         screen.clearInput();
         void providerController.submit(raw);
         return;
       }
-      const action = decideEnter(interactionEnterState(session.interactionState()), meta, raw);
+      const action = decideEnter(
+        interactionEnterState(session.interactionState()),
+        insertMode,
+        raw,
+      );
       if (action.kind === 'none') {
         screen.clearInput();
         return;
@@ -4866,7 +4915,7 @@ export function runTuiController(
       screen.setInput(nextInput);
     }
     screen.setSubmitHandler(() => {
-      submit(false);
+      submit();
     });
 
     const consume = (key: KeyEvent): void => {
@@ -4981,6 +5030,12 @@ export function runTuiController(
         return;
       }
 
+      if (key.name === 'escape' && insertModePickerActive) {
+        cancelInsertModePicker();
+        consume(key);
+        return;
+      }
+
       if (key.name === 'escape' && paletteReturnDraft !== undefined) {
         const draft = paletteReturnDraft;
         paletteReturnDraft = undefined;
@@ -5052,7 +5107,7 @@ export function runTuiController(
       }
 
       if (isEnter && key.meta) {
-        submit(true);
+        submit();
         consume(key);
         return;
       }
@@ -5107,12 +5162,6 @@ export function runTuiController(
     };
 
     const unsubSession = session.subscribe((event) => {
-      if (event.type === 'queue_update') {
-        lastQueues = {
-          steering: [...event.steering],
-          followUp: [...event.followUp],
-        };
-      }
       try {
         if (event.type === 'control_request' && event.kind === 'approval') {
           if (!enqueueApproval(event)) return;

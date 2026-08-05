@@ -227,7 +227,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     id: 'task.exec', category: 'task', summary: 'Run the existing one-shot mode explicitly',
     cli: { path: ['exec'], usage: '[options] [prompt]', optionIds: RUN_OPTION_IDS },
     shortcuts: [
-      { keys: 'Enter', summary: 'send when idle; steer while running' },
+      { keys: 'Enter', summary: 'send when idle; route by insert mode while running' },
       { keys: 'Shift+Enter', summary: 'insert a newline' },
       { keys: 'Alt+Up/Down', summary: 'browse prompt history' },
     ],
@@ -347,20 +347,12 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     slash: { name: 'export', argumentHint: '[text|raw|latest] [path]', availableWhileRunning: true, order: 13 },
   },
   {
-    id: 'task.queue', category: 'task', summary: 'Show steering and follow-up queues',
-    slash: { name: 'queue', availableWhileRunning: true, order: 1 },
+    id: 'task.insert-mode', category: 'task', summary: 'Choose how Enter routes text while running',
+    slash: { name: 'insert-mode', availableWhileRunning: true, order: 1 },
   },
   {
     id: 'task.status', category: 'task', summary: 'Show model, usage, and token status',
     slash: { name: 'status', availableWhileRunning: true, order: 2 },
-  },
-  {
-    id: 'task.follow-up', category: 'task', summary: 'Queue a follow-up after the current task',
-    slash: { name: 'followup', aliases: ['f'], argumentHint: '<text>', availableWhileRunning: true, order: 6 },
-    shortcuts: [{
-      keys: 'Alt+Enter',
-      summary: 'queue the current draft as follow-up',
-    }],
   },
   {
     id: 'task.abort', category: 'task', summary: 'Abort only the current run',
@@ -998,9 +990,6 @@ export function interactiveCommandAvailability(
     !context.providerCommandsAvailable
   ) {
     return { kind: 'disabled', reason: 'provider management is unavailable on this surface' };
-  }
-  if (command.actionId === 'task.follow-up' && !context.hasModel) {
-    return { kind: 'disabled', reason: 'select a model first' };
   }
   if (command.actionId === 'task.abort' && context.phase === 'idle') {
     return { kind: 'disabled', reason: 'no active run' };

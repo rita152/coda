@@ -1,20 +1,20 @@
-// TUI interaction decision tests: slash-command dispatch, Enter routing, per-thread history,
-// double-press disambiguation, approval keys, and compact status/queue projections.
+// TUI interaction decision tests: slash-command dispatch, insert-mode Enter routing,
+// per-thread history, double-press disambiguation, approval keys, and status projections.
 
 import { describe, expect, it } from 'bun:test';
-import type { QueuedMessage } from '../protocol/index.js';
 import type { CliThreadUsage } from './frontend-types.js';
 import {
   approvalKeyDecision,
   CTRL_C_EXIT_WINDOW_MS,
   decideEnter,
   DoublePress,
-  formatQueueLines,
   formatStatusLines,
   InputHistory,
+  INSERT_MODE_CHOICES,
   interactionCanAbort,
   interactionEnterState,
   parseSlashCommand,
+  selectInsertModeChoice,
   SLASH_COMMAND_SPECS,
 } from './tui-controls.js';
 
@@ -22,7 +22,7 @@ describe('TUI slash command parsing', () => {
   it('识别 canonical 命令及 /q 短别名', () => {
     expect(parseSlashCommand('/quit')).toEqual({ cmd: 'quit' });
     expect(parseSlashCommand('/q')).toEqual({ cmd: 'quit' });
-    expect(parseSlashCommand('/queue')).toEqual({ cmd: 'queue' });
+    expect(parseSlashCommand('/insert-mode')).toEqual({ cmd: 'insert_mode' });
     expect(parseSlashCommand('/status')).toEqual({ cmd: 'status' });
     expect(parseSlashCommand('/help')).toEqual({ cmd: 'help' });
     expect(parseSlashCommand('/login')).toEqual({ cmd: 'login' });
@@ -33,16 +33,16 @@ describe('TUI slash command parsing', () => {
     expect(parseSlashCommand('/doctor')).toEqual({ cmd: 'doctor' });
   });
 
-  it('/f 与 /followup 携带文本', () => {
+  it('/queue 与 /followup 已退役，解析为 unknown', () => {
+    expect(parseSlashCommand('/queue')).toEqual({ cmd: 'unknown', input: '/queue' });
     expect(parseSlashCommand('/f 顺便改下颜色')).toEqual({
-      cmd: 'follow_up',
-      text: '顺便改下颜色',
+      cmd: 'unknown',
+      input: '/f 顺便改下颜色',
     });
     expect(parseSlashCommand('/followup run tests')).toEqual({
-      cmd: 'follow_up',
-      text: 'run tests',
+      cmd: 'unknown',
+      input: '/followup run tests',
     });
-    expect(parseSlashCommand('/f')).toEqual({ cmd: 'follow_up', text: '' });
   });
 
   it('解析 presentation、搜索、copy/export 与 Vim 命令', () => {
@@ -114,54 +114,63 @@ describe('TUI slash command parsing', () => {
 
 describe('TUI Enter routing', () => {
   it('空输入在空闲与运行中都不提交', () => {
-    expect(decideEnter('idle', false, '')).toEqual({ kind: 'none' });
-    expect(decideEnter('running', false, '   ')).toEqual({ kind: 'none' });
+    expect(decideEnter('idle', 'steering', '')).toEqual({ kind: 'none' });
+    expect(decideEnter('running', 'steering', '   ')).toEqual({ kind: 'none' });
   });
 
-  it('空闲 Enter=prompt，运行中 Enter=steer', () => {
-    expect(decideEnter('idle', false, '改一下')).toEqual({ kind: 'prompt', text: '改一下' });
-    expect(decideEnter('running', false, '改一下')).toEqual({ kind: 'steer', text: '改一下' });
+  it('默认 steering：空闲 Enter=prompt，运行中 Enter=steer', () => {
+    expect(decideEnter('idle', 'steering', '改一下')).toEqual({ kind: 'prompt', text: '改一下' });
+    expect(decideEnter('running', 'steering', '改一下')).toEqual({ kind: 'steer', text: '改一下' });
   });
 
-  it('Alt+Enter(meta)=follow-up，空闲与运行中皆然', () => {
-    expect(decideEnter('running', true, '收尾时跑测试')).toEqual({
+  it('following 模式：空闲 Enter 仍为 prompt，运行中 Enter=follow-up', () => {
+    expect(decideEnter('idle', 'following', '改一下')).toEqual({ kind: 'prompt', text: '改一下' });
+    expect(decideEnter('running', 'following', '改一下')).toEqual({
       kind: 'follow_up',
-      text: '收尾时跑测试',
+      text: '改一下',
     });
-    expect(decideEnter('idle', true, 'x')).toEqual({ kind: 'follow_up', text: 'x' });
   });
 
-  it('流式中 /f <text> 进入 follow-up，空文本不提交', () => {
-    expect(decideEnter('running', false, '/f 顺便重命名')).toEqual({
-      kind: 'follow_up',
-      text: '顺便重命名',
-    });
-    expect(decideEnter('idle', false, '/f also idle ok')).toEqual({
-      kind: 'follow_up',
-      text: 'also idle ok',
-    });
-    expect(decideEnter('running', false, '/f')).toEqual({ kind: 'none' });
+  it('insert mode 选择只接受 steering/following 或对应序号', () => {
+    expect(INSERT_MODE_CHOICES.map((choice) => choice.label)).toEqual([
+      'steering',
+      'following',
+    ]);
+    expect(selectInsertModeChoice('steering')).toBe('steering');
+    expect(selectInsertModeChoice('following')).toBe('following');
+    expect(selectInsertModeChoice('1')).toBe('steering');
+    expect(selectInsertModeChoice('2')).toBe('following');
+    expect(selectInsertModeChoice('')).toBeUndefined();
+    expect(selectInsertModeChoice('queue')).toBeUndefined();
   });
 
   it('运行中执行可用命令，provider 管理命令进入控制器', () => {
-    expect(decideEnter('idle', false, '/status')).toEqual({
+    expect(decideEnter('idle', 'steering', '/insert-mode')).toEqual({
+      kind: 'command',
+      command: { cmd: 'insert_mode' },
+    });
+    expect(decideEnter('running', 'following', '/insert-mode')).toEqual({
+      kind: 'command',
+      command: { cmd: 'insert_mode' },
+    });
+    expect(decideEnter('idle', 'steering', '/status')).toEqual({
       kind: 'command',
       command: { cmd: 'status' },
     });
-    expect(decideEnter('running', false, '/status')).toEqual({
+    expect(decideEnter('running', 'following', '/status')).toEqual({
       kind: 'command',
       command: { cmd: 'status' },
     });
-    expect(decideEnter('running', false, '/search error')).toEqual({
+    expect(decideEnter('running', 'following', '/search error')).toEqual({
       kind: 'command',
       command: { cmd: 'transcript_search', query: 'error' },
     });
-    expect(decideEnter('running', false, '/archive off')).toEqual({
+    expect(decideEnter('running', 'following', '/archive off')).toEqual({
       kind: 'command',
       command: { cmd: 'archive', mode: 'off' },
     });
     for (const cmd of ['login', 'model', 'logout'] as const) {
-      expect(decideEnter('running', false, `/${cmd}`)).toEqual({
+      expect(decideEnter('running', 'following', `/${cmd}`)).toEqual({
         kind: 'command',
         command: { cmd },
       });
@@ -172,11 +181,11 @@ describe('TUI Enter routing', () => {
     const state = interactionEnterState('compacting');
     expect(state).toBe('idle');
     expect(interactionCanAbort('compacting')).toBe(true);
-    expect(decideEnter(state, false, '压缩后继续')).toEqual({
+    expect(decideEnter(state, 'following', '压缩后继续')).toEqual({
       kind: 'prompt',
       text: '压缩后继续',
     });
-    expect(decideEnter(state, false, '/quit')).toEqual({
+    expect(decideEnter(state, 'steering', '/quit')).toEqual({
       kind: 'command',
       command: { cmd: 'quit' },
     });
@@ -255,7 +264,7 @@ describe('TUI double-press disambiguation', () => {
   });
 });
 
-describe('TUI status and queue formatting', () => {
+describe('TUI status formatting', () => {
   it('status 包含模型、turns、token 累计与成本', () => {
     const usage: CliThreadUsage = {
       lastTurn: { input: 120, output: 31 },
@@ -281,21 +290,6 @@ describe('TUI status and queue formatting', () => {
     expect(joined).not.toContain('model:');
     expect(joined).not.toContain('cost:');
     expect(joined).toContain('tokens: 10 in / 2 out');
-  });
-
-  it('空队列给出提示，非空队列列出并截断长文本', () => {
-    expect(formatQueueLines([], [])).toEqual(['queues empty']);
-    const steering: QueuedMessage[] = [{
-      id: 's1',
-      text: 'a'.repeat(80),
-      kind: 'steering',
-    }];
-    const followUp: QueuedMessage[] = [{ id: 'f1', text: 'short', kind: 'follow_up' }];
-    const lines = formatQueueLines(steering, followUp);
-    expect(lines[0]).toBe('steering (1):');
-    expect(lines[1]).toContain('…');
-    expect(lines).toContain('follow-up (1):');
-    expect(lines).toContain('  1. short');
   });
 });
 

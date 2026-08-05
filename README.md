@@ -62,9 +62,10 @@ coda --version
    coda exec "检查并修复失败的测试"
    ```
 
-交互界面中可用 `/login`、`/model`、`/auth`、`/doctor`、`/status`、`/queue`、
-`/followup <text>` 和 `/help`。
-Enter 在 idle 时发送新任务、运行中发送 steering；Alt+Enter 排队 follow-up；Esc 中止当前 run。
+交互界面中可用 `/login`、`/model`、`/auth`、`/doctor`、`/status`、`/insert-mode` 和
+`/help`。
+`/insert-mode` 决定运行中 Enter 的语义：`steering`（默认）调整当前 run，`following` 排队 follow-up；
+idle 时 Enter 始终发送新任务。Esc 中止当前 run。
 以 `/help` 为准，它只显示当前 TUI 中真实可用的键位。
 
 ## 终端界面

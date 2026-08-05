@@ -1,7 +1,6 @@
 // Pure TUI interaction decisions. This module owns no terminal, Runtime, or session lifecycle;
 // the OpenTUI controller maps these values onto its canonical frontend operations.
 
-import type { QueuedMessage } from '../protocol/index.js';
 import type {
   CliApprovalDecision as ApprovalDecision,
   CliInteractionState,
@@ -13,6 +12,30 @@ export { SLASH_COMMAND_SPECS } from './command-catalog.js';
 export type { SlashCommandSpec } from './command-catalog.js';
 
 export const CTRL_C_EXIT_WINDOW_MS = 1500;
+
+/** While a run is active, plain Enter routes text by this insert mode. */
+export type InsertMode = 'steering' | 'following';
+
+export const INSERT_MODE_CHOICES: readonly { value: InsertMode; label: string }[] = [
+  { value: 'steering', label: 'steering' },
+  { value: 'following', label: 'following' },
+];
+
+/** Resolve a picker submission to one of the supported insert modes. */
+export function selectInsertModeChoice(raw: string): InsertMode | undefined {
+  const normalized = raw.trim().toLocaleLowerCase('en-US');
+  if (normalized === 'steering') return 'steering';
+  if (normalized === 'following') return 'following';
+  const number = Number(normalized);
+  if (
+    Number.isInteger(number) &&
+    number >= 1 &&
+    number <= INSERT_MODE_CHOICES.length
+  ) {
+    return INSERT_MODE_CHOICES[number - 1]?.value;
+  }
+  return undefined;
+}
 
 /** retrying Enter remains steering; compacting accepts a deferred prompt. */
 export function interactionEnterState(
@@ -30,7 +53,7 @@ export type SlashCommand =
       cmd:
         | 'quit'
         | 'abort'
-        | 'queue'
+        | 'insert_mode'
         | 'status'
         | 'doctor'
         | 'auth_status'
@@ -48,7 +71,6 @@ export type SlashCommand =
         | 'compact'
         | 'new';
     }
-  | { cmd: 'follow_up'; text: string }
   | { cmd: 'history_search'; query: string }
   | { cmd: 'stash'; text: string }
   | { cmd: 'file_complete'; query: string }
@@ -74,8 +96,8 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
   switch (findSlashCommand(head)?.actionId) {
     case 'app.quit':
       return { cmd: 'quit' };
-    case 'task.queue':
-      return { cmd: 'queue' };
+    case 'task.insert-mode':
+      return { cmd: 'insert_mode' };
     case 'task.status':
       return { cmd: 'status' };
     case 'doctor.run':
@@ -90,8 +112,6 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'model' };
     case 'auth.logout':
       return { cmd: 'logout' };
-    case 'task.follow-up':
-      return { cmd: 'follow_up', text: rest };
     case 'task.abort':
       return { cmd: 'abort' };
     case 'history.search':
@@ -170,16 +190,12 @@ export type EnterAction =
 /** Map Enter onto prompt, steering, follow-up, or a catalog command. */
 export function decideEnter(
   state: 'idle' | 'running',
-  meta: boolean,
+  mode: InsertMode,
   raw: string,
 ): EnterAction {
   const text = raw.trim();
   if (text === '') return { kind: 'none' };
-  if (meta) return { kind: 'follow_up', text };
   const slash = parseSlashCommand(text);
-  if (slash !== undefined && slash.cmd === 'follow_up') {
-    return slash.text === '' ? { kind: 'none' } : { kind: 'follow_up', text: slash.text };
-  }
   if (
     slash !== undefined &&
     (slash.cmd === 'login' || slash.cmd === 'model' || slash.cmd === 'logout')
@@ -197,7 +213,11 @@ export function decideEnter(
   ) {
     return { kind: 'command', command: slash };
   }
-  if (state === 'running') return { kind: 'steer', text };
+  if (state === 'running') {
+    return mode === 'following'
+      ? { kind: 'follow_up', text }
+      : { kind: 'steer', text };
+  }
   if (slash !== undefined) return { kind: 'command', command: slash };
   return { kind: 'prompt', text };
 }
@@ -313,26 +333,5 @@ export function formatStatusLines(usage: CliThreadUsage, model?: string): string
   if (usage.lastTurn !== undefined) {
     lines.push(`last turn: ${usage.lastTurn.input} in / ${usage.lastTurn.output} out`);
   }
-  return lines;
-}
-
-export function formatQueueLines(
-  steering: readonly QueuedMessage[],
-  followUp: readonly QueuedMessage[],
-): string[] {
-  if (steering.length === 0 && followUp.length === 0) return ['queues empty'];
-  const lines: string[] = [];
-  const append = (label: string, items: readonly QueuedMessage[]): void => {
-    if (items.length === 0) return;
-    lines.push(`${label} (${items.length}):`);
-    items.forEach((message, index) => {
-      const content = message.text.length > 60
-        ? `${message.text.slice(0, 60)}…`
-        : message.text;
-      lines.push(`  ${index + 1}. ${content}`);
-    });
-  };
-  append('steering', steering);
-  append('follow-up', followUp);
   return lines;
 }
