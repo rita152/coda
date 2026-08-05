@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
-  chmodSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,15 +14,11 @@ import type {
   UserMessage,
 } from '../protocol/index.js';
 import {
-  applyWorkspaceCompletion,
-  editDraftWithExternalEditor,
   exportTranscript,
   latestAssistantText,
   promptHistoryEntries,
   runThreadPresentationTransition,
   transcriptContent,
-  workspaceCompletionAtCursor,
-  workspacePathCandidates,
 } from './presentation-actions.js';
 
 const roots: string[] = [];
@@ -144,43 +137,6 @@ describe('presentation transcript actions', () => {
       { ...user('u3', 'summary'), source: 'synthetic' },
     ];
     expect(promptHistoryEntries(messages)).toEqual(['first', 'steer']);
-  });
-
-  it('indexes files and directories for fuzzy @ completion without traversing symlinks', () => {
-    const root = tempRoot();
-    mkdirSync(path.join(root, 'src', 'nested'), { recursive: true });
-    mkdirSync(path.join(root, 'node_modules', 'ignored'), { recursive: true });
-    writeFileSync(path.join(root, 'src', 'nested', 'feature.ts'), 'x');
-    writeFileSync(path.join(root, 'src', 'other.ts'), 'x');
-    writeFileSync(path.join(root, 'node_modules', 'ignored', 'secret.ts'), 'x');
-
-    expect(workspacePathCandidates(root, 'sft')).toContain('src/nested/feature.ts');
-    expect(workspacePathCandidates(root, '')).toContain('src/');
-    expect(workspacePathCandidates(root, '').join('\n')).not.toContain('node_modules');
-
-    const completion = workspaceCompletionAtCursor('inspect @src/nf', 15, root);
-    expect(completion?.candidates).toContain('src/nested/feature.ts');
-    expect(
-      applyWorkspaceCompletion('inspect @src/nf', completion!, 'src/nested/feature.ts'),
-    ).toEqual({
-      text: 'inspect @src/nested/feature.ts',
-      cursor: 'inspect @src/nested/feature.ts'.length,
-    });
-  });
-
-  it('runs the configured editor, strips terminal controls, and removes its temporary file', async () => {
-    const root = tempRoot();
-    const editor = path.join(root, 'editor.sh');
-    writeFileSync(
-      editor,
-      '#!/bin/sh\nprintf \'edited\\033[31m\\n\' > "$1"\n',
-      { mode: 0o700 },
-    );
-    chmodSync(editor, 0o700);
-    expect(await editDraftWithExternalEditor('before', {
-      cwd: root,
-      env: { EDITOR: editor, SHELL: '/bin/sh', PATH: Bun.env.PATH },
-    })).toBe('edited');
   });
 
   it('exports with exclusive creation, mode 0600, and never overwrites', () => {

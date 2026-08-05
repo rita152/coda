@@ -60,7 +60,6 @@ export interface ThreadPresentationState {
   readonly workspaceId: WorkspaceId;
   readonly threadId: PresentationThreadId;
   readonly draft: string;
-  readonly stashedDraft?: string;
   readonly scrollAnchor?: TranscriptScrollAnchor;
   /** Zero means the transcript is read through the current high-water mark. */
   readonly unreadAfterSeq: number;
@@ -84,7 +83,7 @@ export interface PresentationStoreOptions {
 
 /**
  * One store instance owns one (workspace, thread) file. UI updates are coalesced for at most
- * 200ms; explicit stash/restore and dispose are synchronous durability barriers.
+ * 200ms; explicit durability barriers and dispose are synchronous.
  */
 export class ThreadPresentationStore {
   readonly #root: string;
@@ -190,27 +189,6 @@ export class ThreadPresentationStore {
     this.#assertOpen();
     if (draft.text === this.#state.draft) return;
     this.#replace({ ...this.#state, draft: draft.text }, false);
-  }
-
-  /** Save and clear the active draft. This is an explicit durability barrier. */
-  stash(draft: PersistableDraft): void {
-    this.#assertOpen();
-    if (draft.text === '') return;
-    this.#replace(
-      { ...this.#state, draft: '', stashedDraft: draft.text },
-      true,
-    );
-  }
-
-  /** Move the stash back into the composer and durably consume it. */
-  restoreStash(): PersistableDraft | undefined {
-    this.#assertOpen();
-    const stashed = this.#state.stashedDraft;
-    if (stashed === undefined) return undefined;
-    const next = { ...this.#state, draft: stashed };
-    deleteMutableOptional(next, 'stashedDraft');
-    this.#replace(next, true);
-    return persistableDraft(stashed);
   }
 
   setScrollState(
@@ -391,10 +369,6 @@ function parsePresentationFile(
     throw new Error('presentation identity does not match its path');
   }
   const draft = sanitizeTerminalText(stringValue(state['draft'], 'draft'));
-  const rawStashedDraft = optionalString(state['stashedDraft'], 'stashedDraft');
-  const stashedDraft = rawStashedDraft === undefined
-    ? undefined
-    : sanitizeTerminalText(rawStashedDraft);
   const unreadAfterSeq = sequenceValue(state['unreadAfterSeq'], 'unreadAfterSeq');
   const vimEnabled = booleanValue(state['vimEnabled'], 'vimEnabled');
   const scrollAnchor = parseScrollAnchor(state['scrollAnchor']);
@@ -403,7 +377,6 @@ function parsePresentationFile(
     workspaceId,
     threadId,
     draft,
-    ...(stashedDraft === undefined ? {} : { stashedDraft }),
     ...(scrollAnchor === undefined ? {} : { scrollAnchor }),
     unreadAfterSeq,
     ...(search === undefined ? {} : { search }),
@@ -525,10 +498,6 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function stringValue(value: unknown, label: string): string {
   if (typeof value !== 'string') throw new Error(`${label} must be a string`);
   return value;
-}
-
-function optionalString(value: unknown, label: string): string | undefined {
-  return value === undefined ? undefined : stringValue(value, label);
 }
 
 function booleanValue(value: unknown, label: string): boolean {

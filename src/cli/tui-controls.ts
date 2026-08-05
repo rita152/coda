@@ -60,8 +60,6 @@ export type SlashCommand =
         | 'login'
         | 'model'
         | 'logout'
-        | 'edit'
-        | 'restore'
         | 'search_next'
         | 'search_previous'
         | 'latest'
@@ -70,15 +68,12 @@ export type SlashCommand =
         | 'compact'
         | 'new';
     }
-  | { cmd: 'stash'; text: string }
-  | { cmd: 'file_complete'; query: string }
   | { cmd: 'transcript_search'; query: string }
   | { cmd: 'copy'; mode: string }
   | { cmd: 'export'; mode: string; path: string }
   | { cmd: 'vim'; mode: string }
-  | { cmd: 'draft'; action: string }
   | { cmd: 'diff'; scope: string }
-  | { cmd: 'retry' | 'fork'; turnId: string }
+  | { cmd: 'fork'; turnId: string }
   | { cmd: 'sessions'; query: string }
   | { cmd: 'resume' | 'switch'; threadId: string }
   | { cmd: 'rename'; title: string }
@@ -110,18 +105,8 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'model' };
     case 'auth.logout':
       return { cmd: 'logout' };
-    case 'draft.edit':
-      return { cmd: 'edit' };
-    case 'draft.files':
-      return { cmd: 'file_complete', query: rest };
-    case 'draft.stash':
-      return { cmd: 'stash', text: rest };
-    case 'draft.restore':
-      return { cmd: 'restore' };
     case 'settings.vim':
       return { cmd: 'vim', mode: rest.toLocaleLowerCase('en-US') };
-    case 'draft.manage':
-      return { cmd: 'draft', action: rest.toLocaleLowerCase('en-US') };
     case 'transcript.search':
       return { cmd: 'transcript_search', query: rest };
     case 'transcript.next':
@@ -138,8 +123,6 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'permissions' };
     case 'conversation.compact':
       return { cmd: 'compact' };
-    case 'conversation.retry':
-      return { cmd: 'retry', turnId: rest };
     case 'conversation.fork':
       return { cmd: 'fork', turnId: rest };
     case 'session.new':

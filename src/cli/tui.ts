@@ -81,15 +81,11 @@ import {
   planPlainText,
 } from './plan-presentation.js';
 import {
-  applyWorkspaceCompletion,
   copyTextToClipboard,
-  editDraftWithExternalEditor,
   exportTranscript,
   promptHistoryEntries,
   runThreadPresentationTransition,
   transcriptContent,
-  workspaceCompletionAtCursor,
-  workspacePathCandidates,
 } from './presentation-actions.js';
 import {
   persistableDraft,
@@ -110,7 +106,6 @@ import {
   interactionCanAbort,
   interactionEnterState,
   selectInsertModeChoice,
-  SLASH_COMMAND_SPECS,
 } from './tui-controls.js';
 import type { InsertMode, SlashCommand } from './tui-controls.js';
 import type {
@@ -257,7 +252,6 @@ export interface TuiOptions {
   eventHighWaterSeq?: () => number;
   presentation?: {
     readonly store: ThreadPresentationStore;
-    readonly editDraft?: (draft: string) => Promise<string>;
     readonly copyText?: (text: string) => Promise<void>;
   };
   providerCommands?: {
@@ -366,16 +360,12 @@ interface ExplorationGroupView {
 }
 
 interface PromptMenuItem {
-  kind: 'slash' | 'command' | 'file';
+  kind: 'slash' | 'command';
   key: string;
   value: string;
   label: string;
   description?: string;
   availability?: CommandAvailability;
-  replacement?: {
-    readonly start: number;
-    readonly end: number;
-  };
 }
 
 export type ApprovalPanelKeyResult =
@@ -1126,7 +1116,7 @@ export async function createTuiScreen(
     const bashToolViews = new Set<BashToolView>();
     const toolOccurrenceCounts = new Map<string, number>();
     let activeExplorationGroup: ExplorationGroupView | undefined;
-    let promptMenuMode: 'none' | 'slash' | 'command' | 'file' = 'none';
+    let promptMenuMode: 'none' | 'slash' | 'command' = 'none';
     let promptMenuItems: readonly PromptMenuItem[] = [];
     let promptMenuSelectedIndex = 0;
     let promptMenuKey = '';
@@ -1354,7 +1344,6 @@ export async function createTuiScreen(
       const source = input.plainText;
       let nextMode: typeof promptMenuMode = 'none';
       let nextItems: readonly PromptMenuItem[] = [];
-      let completionQuery = '';
       if (!approvalPending && !secretInput) {
         if (commandPrompt !== undefined && commandChoices.length > 0) {
           const query = source.trim().toLocaleLowerCase('en-US');
@@ -1387,7 +1376,6 @@ export async function createTuiScreen(
               providerCommandsAvailable,
               hasModel: selectedModel !== undefined,
               hasTranscript: transcriptBlocks.length > 0,
-              hasStash: opts.presentation?.store.snapshot().stashedDraft !== undefined,
             }).map(({ command, availability }) => ({
               kind: 'slash',
               key: `${command.name}\0${availability.kind}`,
@@ -1404,25 +1392,6 @@ export async function createTuiScreen(
               ].filter((part): part is string => part !== undefined).join(' · '),
               availability,
             }));
-          } else {
-            const completion = workspaceCompletionAtCursor(
-              source,
-              input.cursorOffset,
-              opts.cwd,
-              50,
-            );
-            if (completion !== undefined) {
-              completionQuery = completion.query.toLocaleLowerCase('en-US');
-              nextMode = 'file';
-              nextItems = completion.candidates.map((candidate) => ({
-                kind: 'file',
-                key: candidate,
-                value: candidate,
-                label: `@${candidate}`,
-                description: candidate.endsWith('/') ? 'directory' : 'file',
-                replacement: { start: completion.start, end: completion.end },
-              }));
-            }
           }
         }
       }
@@ -1434,23 +1403,12 @@ export async function createTuiScreen(
         const query =
           nextMode === 'slash'
             ? source.slice(1).toLocaleLowerCase('en-US')
-            : nextMode === 'file'
-              ? completionQuery
-              : source.trim().toLocaleLowerCase('en-US');
+            : source.trim().toLocaleLowerCase('en-US');
         const exact =
           nextMode === 'slash'
-            ? nextItems.findIndex((item) => {
-                const command = SLASH_COMMAND_SPECS.find(
-                  (candidate) => candidate.name === item.value,
-                );
-                return (
-                  item.value.toLocaleLowerCase('en-US') === query ||
-                  command?.aliases?.some(
-                    (alias) =>
-                      alias.toLocaleLowerCase('en-US') === query,
-                  ) === true
-                );
-              })
+            ? nextItems.findIndex(
+                (item) => item.value.toLocaleLowerCase('en-US') === query,
+              )
             : nextItems.findIndex(
                 (item) =>
                   item.value.toLocaleLowerCase('en-US') === query ||
@@ -1763,22 +1721,6 @@ export async function createTuiScreen(
         refreshTaskStatus();
         return true;
       }
-      if (selected.kind === 'file' && promptMenuMode === 'file') {
-        const replacement = selected.replacement;
-        if (replacement === undefined) return false;
-        const applied = applyWorkspaceCompletion(
-          input.plainText,
-          {
-            ...replacement,
-            query: input.plainText.slice(replacement.start + 1, replacement.end),
-            candidates: [selected.value],
-          },
-          selected.value,
-        );
-        input.setText(applied.text);
-        input.cursorOffset = applied.cursor;
-        return true;
-      }
       if (selected.kind !== 'slash' || promptMenuMode !== 'slash') return false;
       slashMenuDismissedInput = undefined;
       input.setText(`/${selected.value} `);
@@ -1802,7 +1744,7 @@ export async function createTuiScreen(
       if (key.name === 'tab') {
         if (promptMenuMode === 'command' && slashMenu.visible) return true;
         const source = input.plainText;
-        if (!/^\/[^\s/]*$/u.test(source) && promptMenuMode !== 'file') return false;
+        if (!/^\/[^\s/]*$/u.test(source)) return false;
         slashMenuDismissedInput = undefined;
         refreshComposerLayout();
         completeSelectedMenuItem();
@@ -1817,10 +1759,7 @@ export async function createTuiScreen(
         renderSlashRows(slashMenu.height);
         return true;
       }
-      if (
-        key.name === 'escape' &&
-        (promptMenuMode === 'slash' || promptMenuMode === 'file')
-      ) {
+      if (key.name === 'escape' && promptMenuMode === 'slash') {
         slashMenuDismissedInput = input.plainText;
         refreshComposerLayout();
         return true;
@@ -4259,7 +4198,7 @@ interface TuiControllerOptions {
 
 type TuiControllerRenderer =
   Pick<CliRenderer, 'keyInput' | 'idle' | 'destroy'> &
-  Partial<Pick<CliRenderer, 'suspend' | 'resume' | 'copyToClipboardOSC52'>>;
+  Partial<Pick<CliRenderer, 'copyToClipboardOSC52'>>;
 
 /**
  * 复用纯 TUI 交互决策，保证 prompt/steer/follow-up/审批语义集中定义。
@@ -4282,7 +4221,6 @@ export function runTuiController(
   const approvalQueue: string[] = [];
   const approvalEvents = new Map<string, ApprovalRequestEvent>();
   let closing = false;
-  let editing = false;
   let paletteReturnDraft: string | undefined;
   let latestPromptDraft = opts.presentation?.store.snapshot().draft ?? screen.getInput();
   let providerTaskDraft: string | undefined;
@@ -4438,36 +4376,6 @@ export function runTuiController(
       }
     });
 
-    const editComposerDraft = async (draft: string): Promise<void> => {
-      if (opts.presentation === undefined || editing) {
-        if (opts.presentation === undefined) {
-          screen.println('/edit is unavailable without presentation storage', 'warning');
-        }
-        return;
-      }
-      editing = true;
-      screen.setTransientStatus('editing draft in $EDITOR…');
-      renderer.suspend?.();
-      try {
-        const edited = await (
-          opts.presentation.editDraft?.(draft) ??
-          editDraftWithExternalEditor(draft, { cwd: opts.cwd ?? process.cwd() })
-        );
-        if (!closing) {
-          screen.setInput(edited);
-          screen.println('Draft returned from $EDITOR.', 'success');
-        }
-      } catch (error) {
-        if (!closing) {
-          screen.setInput(draft);
-          screen.println(`editor failed · ${sanitizeTerminalError(error)}`, 'danger');
-        }
-      } finally {
-        if (!closing) renderer.resume?.();
-        editing = false;
-      }
-    };
-
     const copyTranscript = async (mode: string): Promise<void> => {
       const normalized = mode === '' ? 'latest' : mode;
       if (normalized !== 'latest' && normalized !== 'raw') {
@@ -4586,21 +4494,14 @@ export function runTuiController(
             screen.println('Conversation compacted.', 'success');
             return;
           case 'fork':
-          case 'retry':
             if (command.turnId !== '' && !isTurnId(command.turnId)) {
-              screen.println(`usage: /${command.cmd} [turn-id]`, 'warning');
+              screen.println('usage: /fork [turn-id]', 'warning');
               return;
             }
             const targetTurnId = command.turnId === '' ? undefined : command.turnId;
-            if (command.cmd === 'fork') {
-              await transitionPresentation(() => workspace.forkConversation(
-                targetTurnId,
-              ));
-            } else {
-              await transitionPresentation(() => workspace.retryConversation(
-                targetTurnId,
-              ));
-            }
+            await transitionPresentation(() => workspace.forkConversation(
+              targetTurnId,
+            ));
             return;
           case 'review': {
             const snapshot = await workspace.reviewSnapshot();
@@ -4683,54 +4584,6 @@ export function runTuiController(
           return beginProviderCommand(command.cmd);
         case 'insert_mode':
           return beginInsertModePicker();
-        case 'edit':
-          void editComposerDraft(paletteReturnDraft ?? latestPromptDraft);
-          return paletteReturnDraft ?? latestPromptDraft;
-        case 'file_complete': {
-          const candidates = workspacePathCandidates(
-            opts.cwd ?? process.cwd(),
-            command.query,
-            50,
-          );
-          if (candidates.length === 0) screen.println('No matching workspace paths.', 'warning');
-          else candidates.forEach((candidate) => screen.println(`@${candidate}`, 'muted'));
-          return candidates.length === 1 ? `@${candidates[0]}` : (paletteReturnDraft ?? null);
-        }
-        case 'stash': {
-          if (opts.presentation === undefined) {
-            screen.println('/stash is unavailable without presentation storage', 'warning');
-            return paletteReturnDraft ?? null;
-          }
-          const draft = command.text || paletteReturnDraft || latestPromptDraft;
-          if (draft === '') {
-            screen.println('No draft to stash.', 'warning');
-            return null;
-          }
-          try {
-            opts.presentation.store.stash(persistableDraft(draft));
-            latestPromptDraft = '';
-            screen.println('Draft stashed for this thread.', 'success');
-            return '';
-          } catch (error) {
-            screen.println(`stash failed · ${sanitizeTerminalError(error)}`, 'danger');
-            return draft;
-          }
-        }
-        case 'restore': {
-          try {
-            const restored = opts.presentation?.store.restoreStash();
-            if (restored === undefined) {
-              screen.println('No stashed draft for this thread.', 'warning');
-              return paletteReturnDraft ?? null;
-            }
-            latestPromptDraft = restored.text;
-            screen.println('Draft restored.', 'success');
-            return restored.text;
-          } catch (error) {
-            screen.println(`restore failed · ${sanitizeTerminalError(error)}`, 'danger');
-            return paletteReturnDraft ?? latestPromptDraft;
-          }
-        }
         case 'transcript_search':
           if (command.query === '') screen.setTransientStatus('usage: /search <query>');
           else screen.searchTranscript(command.query);
@@ -4774,7 +4627,6 @@ export function runTuiController(
         case 'archive':
         case 'compact':
         case 'fork':
-        case 'retry':
         case 'review':
         case 'diff':
         case 'permissions':
@@ -4789,49 +4641,6 @@ export function runTuiController(
           screen.setVimEnabled(command.mode === 'on');
           screen.println(`Vim composer keys ${command.mode === 'on' ? 'enabled' : 'disabled'}.`, 'success');
           return paletteReturnDraft ?? null;
-        case 'draft': {
-          if (opts.presentation === undefined) {
-            screen.println('/draft is unavailable without presentation storage', 'warning');
-            return paletteReturnDraft ?? null;
-          }
-          const draft = opts.presentation.store.snapshot().draft;
-          if (command.action === 'show') {
-            screen.println(draft === '' ? 'No saved draft.' : `saved draft\n${draft}`, 'muted');
-            return paletteReturnDraft ?? null;
-          }
-          if (command.action === 'clear') {
-            opts.presentation.store.setDraft(persistableDraft(''));
-            latestPromptDraft = '';
-            screen.println('Saved draft cleared.', 'success');
-            return '';
-          }
-          if (command.action === 'send') {
-            if (draft === '') {
-              screen.println('No saved draft to send.', 'warning');
-              return paletteReturnDraft ?? null;
-            }
-            try {
-              if (interactionEnterState(session.interactionState()) === 'running') {
-                session.steer(draft);
-              } else {
-                session.prompt(draft).catch((error) => {
-                  printError(error);
-                  opts.presentation?.store.setDraft(persistableDraft(draft));
-                  if (screen.getInput() === '') screen.setInput(draft);
-                });
-              }
-              opts.presentation.store.setDraft(persistableDraft(''));
-              latestPromptDraft = '';
-              screen.markInteracted();
-              return '';
-            } catch (error) {
-              printError(error);
-              return draft;
-            }
-          }
-          screen.println('usage: /draft <show|send|clear>', 'warning');
-          return paletteReturnDraft ?? null;
-        }
         case 'unknown':
           screen.println(`unknown command: ${command.input} (try /help)`, 'warning');
           return null;
@@ -4951,10 +4760,6 @@ export function runTuiController(
 
     const onKeyPress = (key: KeyEvent): void => {
       if (closing) return;
-      if (editing) {
-        consume(key);
-        return;
-      }
       if (handlePendingApprovalKey(key)) return;
       const sessionPickerAction = screen.handleSessionPickerKey(key);
       if (sessionPickerAction.kind !== 'none') {
@@ -5057,31 +4862,6 @@ export function runTuiController(
         } else {
           screen.setInput(match);
           screen.setTransientStatus(`history match · Ctrl+R older · ${reverseSearchQuery}`);
-        }
-        consume(key);
-        return;
-      }
-      if (providerController?.active !== true && key.ctrl && key.name === 'o') {
-        void editComposerDraft(screen.getInput());
-        consume(key);
-        return;
-      }
-      if (providerController?.active !== true && key.meta && key.name === 's') {
-        const draft = screen.getInput();
-        if (opts.presentation === undefined || draft === '') {
-          screen.println(
-            draft === '' ? 'No draft to stash.' : 'Draft storage unavailable.',
-            'warning',
-          );
-        } else {
-          try {
-            opts.presentation.store.stash(persistableDraft(draft));
-            latestPromptDraft = '';
-            screen.clearInput();
-            screen.println('Draft stashed for this thread.', 'success');
-          } catch (error) {
-            screen.println(`stash failed · ${sanitizeTerminalError(error)}`, 'danger');
-          }
         }
         consume(key);
         return;
@@ -5237,7 +5017,6 @@ export function runTuiController(
         }
         await providerController?.close();
         await session.close();
-        if (editing) renderer.resume?.();
         // Working 动画持有 live-render 引用；cleanup 已退订 agent_end，必须在 idle 前释放。
         stopScreen();
         await renderer.idle();

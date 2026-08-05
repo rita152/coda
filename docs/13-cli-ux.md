@@ -10,7 +10,7 @@ pending control、usage 和 diagnostics。所有用户动作生成完整 Runtime
 run/queue。Esc/取消提交或触发目标 thread 的 abort，不直接操作 provider。
 
 普通 composer 状态下的无修饰 `↑`/`↓` 在当前 thread 的 prompt 历史中浏览并把选中项写回输入框；
-`Ctrl+R` 反向搜索同一历史。弹层（命令菜单、file/command picker、provider 输入、approval/session/diff
+`Ctrl+R` 反向搜索同一历史。弹层（命令菜单、command picker、provider 输入、approval/session/diff
 面板）可见时，`↑`/`↓` 仍归弹层所有，不做历史切换。
 
 control card 使用 Runtime 给出的 presentation；批准、拒绝和资源确认均提交带 requestId 的

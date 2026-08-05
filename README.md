@@ -86,21 +86,19 @@ workspace/Git、context 和 model；其中权限模式来自 Runtime workspace s
 
 - `Ctrl+K` 打开分类模糊 command palette；`↑/↓` 在 composer 中浏览当前 thread 的 prompt 历史，
   `Ctrl+R` 反向搜索同一历史。
-- `Ctrl+O` 用 `$VISUAL`/`$EDITOR` 编辑长 prompt，`Meta+S` stash 当前 draft。
-- 输入 `@路径` 后按 `Tab` 补全 workspace 文件或目录；可用 `/files [query]` 列出候选。
 - `Ctrl+F` 或 `/search <query>` 搜索 transcript，`/next`、`/previous` 切换，`End` 或 `/latest` 回到最新输出。
 - `/copy [latest|raw]` 复制内容；`/export [text|raw|latest] [path]` 以 0600 新文件安全导出且不覆盖已有文件。
 - `/review` 展开完整 reasoning/工具参数与输出；`/diff [turn|workspace]` 打开不截断的分组 diff viewer。
 - `/permissions` 查看 Runtime 权威 revision/ceiling；审批卡按 `v` 展开 capability、资源、风险和精确 scope。
 - `/vim on|off` 可选启用最小 Vim composer；默认关闭，不改变现有键位。
 
-draft、stash、搜索、Vim preference 和 OpenTUI stable scroll anchor 按 `(workspace, thread)` 保存。provider
+draft、搜索、Vim preference 和 OpenTUI stable scroll anchor 按 `(workspace, thread)` 保存。provider
 表单拥有独立的临时输入缓冲：name/base URL 等普通字段不会覆盖任务 draft，API key 等秘密输入也不会进入
-该存储、history、frame、transcript 或日志。显式 stash/restore 写盘失败时，界面保留当前 draft 并显示
-错误；退出 flush 失败会报告错误并返回非零，不会伪报保存成功。一次性人类输出与 headless
+该存储、history、frame、transcript 或日志。退出 flush 失败会报告错误并返回非零，不会伪报保存成功。
+一次性人类输出与 headless
 分别保留用于脚本和机器调用，但都不是长驻交互界面。
 尚未选模型时，draft 使用 workspace 内稳定的 pending presentation key 跨启动恢复，但不会创建 Runtime
-thread 或 journal；模型选择并成功 attachment 后才迁移到真实 thread。外部编辑器运行期间原 draft 仍保留。
+thread 或 journal；模型选择并成功 attachment 后才迁移到真实 thread。
 
 ## 恢复会话
 
@@ -127,8 +125,8 @@ coda --workspace=<workspace-id> --resume=<thread-id>
 ```
 
 draft、滚动位置和未读位置按 thread 独立保存；切换页面不会停止后台任务。审批和 abort 始终只作用于当前
-选中的 thread/run。`/compact` 做显式上下文压缩；`/fork [turn-id]` 复制已提交对话，`/retry [turn-id]`
-在安全 fork 中重试。fork/retry 不会回滚已经发生的文件、shell、网络或外部工具副作用。
+选中的 thread/run。`/compact` 做显式上下文压缩；`/fork [turn-id]` 复制已提交对话。fork 不会回滚已经发生的
+文件、shell、网络或外部工具副作用。
 
 ## 脚本与 CI
 

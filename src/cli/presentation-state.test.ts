@@ -80,45 +80,6 @@ describe('ThreadPresentationStore', () => {
     store.dispose();
   });
 
-  it('makes stash/restore durable and keeps presentation-only navigation state', () => {
-    const { root, store } = fixture();
-    store.stash(persistableDraft('long prompt'));
-    expect(JSON.parse(readFileSync(presentationStatePath(root, WORKSPACE, THREAD), 'utf8')).state).toMatchObject({
-      draft: '',
-      stashedDraft: 'long prompt',
-    });
-
-    store.setScrollState({
-      blockKey: 'message:u1',
-      logicalOffset: 2,
-      fallbackBlockKeys: ['message:a0'],
-      observedHighWaterSeq: 7,
-    }, 7);
-    store.setSearch({ query: 'needle', matchOrdinal: 1 });
-    store.setVimEnabled(true);
-    expect(store.restoreStash()).toEqual(persistableDraft('long prompt'));
-    store.dispose();
-
-    const restored = new ThreadPresentationStore({
-      root,
-      workspaceId: WORKSPACE,
-      threadId: THREAD,
-    });
-    expect(restored.snapshot()).toMatchObject({
-      draft: 'long prompt',
-      unreadAfterSeq: 7,
-      vimEnabled: true,
-      search: { query: 'needle', matchOrdinal: 1 },
-      scrollAnchor: {
-        blockKey: 'message:u1',
-        logicalOffset: 2,
-        observedHighWaterSeq: 7,
-      },
-    });
-    expect(restored.snapshot().stashedDraft).toBeUndefined();
-    restored.dispose();
-  });
-
   it('quarantines malformed or identity-mismatched state without blocking recovery', () => {
     const { root, store } = fixture({ now: () => 123 });
     const file = presentationStatePath(root, WORKSPACE, THREAD);
@@ -155,7 +116,6 @@ describe('ThreadPresentationStore', () => {
     const file = presentationStatePath(root, WORKSPACE, THREAD);
     const payload = JSON.parse(readFileSync(file, 'utf8'));
     payload.state.draft = 'tampered\u001b[2J draft';
-    payload.state.stashedDraft = 'stash\u009b31m';
     payload.state.search.query = 'query\u001b]0;title\u0007';
     writeFileSync(file, `${JSON.stringify(payload)}\n`);
     const restored = new ThreadPresentationStore({
@@ -165,7 +125,6 @@ describe('ThreadPresentationStore', () => {
     });
     expect(restored.snapshot()).toMatchObject({
       draft: 'tampered draft',
-      stashedDraft: 'stash',
       search: { query: 'query', matchOrdinal: 0 },
     });
     restored.dispose();
@@ -311,11 +270,10 @@ describe('ThreadPresentationStore', () => {
     });
     store.setDraft(persistableDraft('must survive'));
 
-    expect(() => store.stash(persistableDraft('must survive'))).toThrow(
+    expect(() => store.setVimEnabled(true)).toThrow(
       /presentation state could not be saved/,
     );
-    expect(store.snapshot()).toMatchObject({ draft: 'must survive' });
-    expect(store.snapshot().stashedDraft).toBeUndefined();
+    expect(store.snapshot()).toMatchObject({ draft: 'must survive', vimEnabled: false });
     expect(() => store.flush()).toThrow(/presentation state could not be saved/);
     expect(() => store.dispose()).toThrow(/presentation state could not be saved/);
     expect(() => store.setDraft(persistableDraft('must survive'))).not.toThrow();

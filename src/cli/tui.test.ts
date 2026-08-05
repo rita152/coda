@@ -11,7 +11,7 @@ import {
   TextareaRenderable,
 } from '@opentui/core';
 import { createTestRenderer, MockTreeSitterClient } from '@opentui/core/testing';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
@@ -1464,26 +1464,6 @@ describe('TUI presentation workflow', () => {
       await view.mockInput.typeText('srch');
       await view.flush();
       expect(view.frame()).not.toContain('unavailable: the transcr');
-    } finally {
-      await view.destroy();
-    }
-  });
-
-  it('@ completion includes files/directories and inserts the selected workspace path', async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'coda-tui-completion-'));
-    tempDirs.push(root);
-    mkdirSync(path.join(root, 'src', 'feature'), { recursive: true });
-    writeFileSync(path.join(root, 'src', 'feature.ts'), 'export {};\n');
-    const view = await setup(100, 24, () => {}, true, undefined, { cwd: root });
-    try {
-      view.screen.focusInput();
-      view.screen.setInput('inspect @src/fe');
-      await view.flush();
-      expect(view.frame()).toContain('@src/feature.ts');
-      expect(view.frame()).toContain('@src/feature/');
-      view.mockInput.pressTab();
-      await view.flush();
-      expect(view.screen.getInput()).toBe('inspect @src/feature/');
     } finally {
       await view.destroy();
     }
@@ -3322,7 +3302,6 @@ describe('TUI 控制器接线', () => {
       archiveSession: async () => undefined,
       compactConversation: async () => undefined,
       forkConversation: async () => threadId,
-      retryConversation: async () => threadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => {
         diffRequests++;
@@ -3403,7 +3382,6 @@ describe('TUI 控制器接线', () => {
       archiveSession: async () => undefined,
       compactConversation: async () => undefined,
       forkConversation: async () => currentThreadId,
-      retryConversation: async () => currentThreadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
       pendingApprovals: () => currentThreadId === 'thread-idle-b' && pendingOnTarget
@@ -3487,7 +3465,31 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
-  it('Ctrl+K/Ctrl+R/Ctrl+O 与 stash/restore 共用 per-thread presentation state', async () => {
+  it('旧 draft/file 快捷键不再拦截 composer，@ 路径保持普通文本', async () => {
+    const view = await setup(90, 28);
+    const controller = runTuiController(
+      idleCliSession(),
+      undefined,
+      view.screen,
+      view.renderer,
+      { installSignalHandlers: false },
+    );
+    view.screen.focusInput();
+    view.screen.setInput('inspect @src/feature');
+
+    view.mockInput.pressTab();
+    view.mockInput.pressKey('o', { ctrl: true });
+    view.mockInput.pressKey('s', { meta: true });
+    await view.flush();
+
+    expect(view.screen.getInput()).toBe('inspect @src/feature');
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('Ctrl+K palette 与 Ctrl+R 反向历史共用 per-thread 持久 draft', async () => {
     const dir = makeTempDir();
     const store = new ThreadPresentationStore({
       root: path.join(dir, 'presentation'),
@@ -3515,20 +3517,9 @@ describe('TUI 控制器接线', () => {
     });
     view.screen.restorePresentation(store.snapshot());
     view.screen.focusInput();
-    let resolvePaletteEdit!: (value: string) => void;
-    const pendingPaletteEdit = new Promise<string>((resolve) => {
-      resolvePaletteEdit = resolve;
-    });
-    let editCalls = 0;
     const controller = runTuiController(session, undefined, view.screen, view.renderer, {
       cwd: dir,
-      presentation: {
-        store,
-        editDraft: async (draft) => {
-          editCalls++;
-          return editCalls === 1 ? pendingPaletteEdit : `${draft}\nedited`;
-        },
-      },
+      presentation: { store },
       installSignalHandlers: false,
     });
 
@@ -3548,24 +3539,6 @@ describe('TUI 控制器接线', () => {
     view.mockInput.pressEnter();
     expect(view.screen.getInput()).toBe('palette survives');
 
-    view.mockInput.pressKey('k', { ctrl: true });
-    await view.mockInput.typeText('edit');
-    view.mockInput.pressEnter();
-    expect(view.screen.getInput()).toBe('palette survives');
-    expect(store.snapshot().draft).toBe('palette survives');
-    resolvePaletteEdit('palette survives\npalette edited');
-    for (let index = 0; index < 5; index++) await Promise.resolve();
-    expect(view.screen.getInput()).toBe('palette survives\npalette edited');
-
-    view.mockInput.pressKey('o', { ctrl: true });
-    for (let index = 0; index < 5; index++) await Promise.resolve();
-    expect(view.screen.getInput()).toBe('palette survives\npalette edited\nedited');
-    view.mockInput.pressKey('s', { meta: true });
-    expect(store.snapshot().stashedDraft).toBe('palette survives\npalette edited\nedited');
-    await view.mockInput.typeText('/restore');
-    view.mockInput.pressEnter();
-    expect(view.screen.getInput()).toBe('palette survives\npalette edited\nedited');
-
     view.screen.clearInput();
     await view.mockInput.typeText('/quit');
     view.mockInput.pressEnter();
@@ -3574,7 +3547,7 @@ describe('TUI 控制器接线', () => {
     await view.destroyHighlighter();
   });
 
-  it('stash 持久化失败时保留 composer，并让退出返回非零', async () => {
+  it('退出时 draft flush 失败保留 composer 并让退出返回非零', async () => {
     const dir = makeTempDir();
     const blockedRoot = path.join(dir, 'not-a-directory');
     writeFileSync(blockedRoot, 'blocked');
@@ -3605,12 +3578,9 @@ describe('TUI 控制器接线', () => {
     });
 
     await view.mockInput.typeText('draft must remain visible');
-    view.mockInput.pressKey('s', { meta: true });
     await view.flush();
     expect(view.screen.getInput()).toBe('draft must remain visible');
     expect(store.snapshot().draft).toBe('draft must remain visible');
-    expect(view.frame()).toContain('stash failed');
-    expect(view.frame()).not.toContain('Draft stashed for this thread.');
 
     view.mockInput.pressKey('k', { ctrl: true });
     await view.mockInput.typeText('quit');
@@ -3987,7 +3957,6 @@ describe('TUI 控制器接线', () => {
       archiveSession: async () => undefined,
       compactConversation: async () => undefined,
       forkConversation: async () => presentation.target.threadId,
-      retryConversation: async () => presentation.target.threadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
       pendingApprovals: () => [],
@@ -4067,7 +4036,6 @@ describe('TUI 控制器接线', () => {
       archiveSession: async () => undefined,
       compactConversation: async () => undefined,
       forkConversation: async () => threadId,
-      retryConversation: async () => threadId,
       reviewSnapshot: async () => undefined,
       diffSnapshot: async () => undefined,
       pendingApprovals: () => pending,

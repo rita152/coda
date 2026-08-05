@@ -72,7 +72,6 @@ describe('TUI slash command parsing', () => {
       path: 'report with spaces.txt',
     });
     expect(parseSlashCommand('/vim on')).toEqual({ cmd: 'vim', mode: 'on' });
-    expect(parseSlashCommand('/files src')).toEqual({ cmd: 'file_complete', query: 'src' });
   });
 
   it('解析审阅、恢复与 session 管理命令', () => {
@@ -83,7 +82,6 @@ describe('TUI slash command parsing', () => {
     expect(parseSlashCommand('/review')).toEqual({ cmd: 'review' });
     expect(parseSlashCommand('/permissions')).toEqual({ cmd: 'permissions' });
     expect(parseSlashCommand('/compact')).toEqual({ cmd: 'compact' });
-    expect(parseSlashCommand('/retry turn-1')).toEqual({ cmd: 'retry', turnId: 'turn-1' });
     expect(parseSlashCommand('/fork turn-2')).toEqual({ cmd: 'fork', turnId: 'turn-2' });
     expect(parseSlashCommand('/new')).toEqual({ cmd: 'new' });
     expect(parseSlashCommand('/sessions running')).toEqual({
@@ -110,13 +108,28 @@ describe('TUI slash command parsing', () => {
     expect(parseSlashCommand('/wat now')).toEqual({ cmd: 'unknown', input: '/wat now' });
   });
 
-  it('目录中的 canonical 命令与隐藏别名都由解析器识别', () => {
+  it('edit/files/stash/restore/draft/retry 解析为 unknown', () => {
+    expect(parseSlashCommand('/edit')).toEqual({ cmd: 'unknown', input: '/edit' });
+    expect(parseSlashCommand('/files src')).toEqual({
+      cmd: 'unknown',
+      input: '/files src',
+    });
+    expect(parseSlashCommand('/stash keep this')).toEqual({
+      cmd: 'unknown',
+      input: '/stash keep this',
+    });
+    expect(parseSlashCommand('/restore')).toEqual({ cmd: 'unknown', input: '/restore' });
+    expect(parseSlashCommand('/draft show')).toEqual({ cmd: 'unknown', input: '/draft show' });
+    expect(parseSlashCommand('/retry turn-1')).toEqual({
+      cmd: 'unknown',
+      input: '/retry turn-1',
+    });
+  });
+
+  it('目录中的 canonical 命令都由解析器识别', () => {
     for (const command of SLASH_COMMAND_SPECS) {
       const suffix = command.argumentHint === undefined ? '' : ' example';
       expect(parseSlashCommand(`/${command.name}${suffix}`)?.cmd).not.toBe('unknown');
-      for (const alias of command.aliases ?? []) {
-        expect(parseSlashCommand(`/${alias}${suffix}`)?.cmd).not.toBe('unknown');
-      }
     }
   });
 });

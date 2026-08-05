@@ -84,7 +84,6 @@ export interface CommandSpec {
   };
   readonly slash?: {
     readonly name: string;
-    readonly aliases?: readonly string[];
     readonly argumentHint?: string;
     readonly availableWhileRunning: boolean;
     readonly order: number;
@@ -102,7 +101,6 @@ export interface InteractiveCommandContext {
   readonly providerCommandsAvailable: boolean;
   readonly hasModel: boolean;
   readonly hasTranscript: boolean;
-  readonly hasStash: boolean;
 }
 
 export type CommandAvailability =
@@ -255,10 +253,6 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     slash: { name: 'compact', availableWhileRunning: false, order: 26 },
   },
   {
-    id: 'conversation.retry', category: 'task', summary: 'Retry the latest user turn in a safe fork',
-    slash: { name: 'retry', argumentHint: '[turn-id]', availableWhileRunning: false, order: 27 },
-  },
-  {
     id: 'conversation.fork', category: 'session', summary: 'Fork committed conversation context',
     slash: { name: 'fork', argumentHint: '[turn-id]', availableWhileRunning: false, order: 28 },
   },
@@ -291,31 +285,8 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette' }],
   },
   {
-    id: 'draft.edit', category: 'task', summary: 'Edit the current draft with $VISUAL or $EDITOR',
-    slash: { name: 'edit', availableWhileRunning: true, order: 15 },
-    shortcuts: [{ keys: 'Ctrl+O', summary: 'edit draft in $EDITOR' }],
-  },
-  {
-    id: 'draft.files', category: 'task', summary: 'Complete workspace files and directories',
-    slash: { name: 'files', argumentHint: '[query]', availableWhileRunning: true, order: 16 },
-    shortcuts: [{ keys: 'Tab after @', summary: 'complete workspace path' }],
-  },
-  {
-    id: 'draft.stash', category: 'task', summary: 'Stash the current thread draft durably',
-    slash: { name: 'stash', argumentHint: '[text]', availableWhileRunning: true, order: 17 },
-    shortcuts: [{ keys: 'Meta+S', summary: 'stash this thread draft' }],
-  },
-  {
-    id: 'draft.restore', category: 'task', summary: 'Restore this thread’s stashed draft',
-    slash: { name: 'restore', availableWhileRunning: true, order: 18 },
-  },
-  {
     id: 'settings.vim', category: 'settings', summary: 'Enable or disable optional Vim composer keys',
     slash: { name: 'vim', argumentHint: '<on|off>', availableWhileRunning: true, order: 20 },
-  },
-  {
-    id: 'draft.manage', category: 'task', summary: 'Show, send, or clear this thread’s durable draft',
-    slash: { name: 'draft', argumentHint: '<show|send|clear>', availableWhileRunning: true, order: 19 },
   },
   {
     id: 'transcript.search', category: 'review', summary: 'Search the current transcript',
@@ -918,7 +889,6 @@ export function renderCliUsageError(error: CliUsageError): string {
 
 export interface SlashCommandSpec {
   readonly name: string;
-  readonly aliases?: readonly string[];
   readonly description: string;
   readonly category: CommandCategory;
   readonly argumentHint?: string;
@@ -931,7 +901,6 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
   .flatMap((command): (SlashCommandSpec & { readonly order: number })[] =>
     command.slash === undefined ? [] : [{
       name: command.slash.name,
-      ...(command.slash.aliases === undefined ? {} : { aliases: command.slash.aliases }),
       description: command.summary,
       category: command.category,
       ...(command.slash.argumentHint === undefined ? {} : { argumentHint: command.slash.argumentHint }),
@@ -943,7 +912,6 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
   .sort((left, right) => left.order - right.order)
   .map((command) => ({
     name: command.name,
-    ...(command.aliases === undefined ? {} : { aliases: command.aliases }),
     description: command.description,
     category: command.category,
     ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
@@ -954,9 +922,7 @@ export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = COMMAND_SPECS
 
 export function findSlashCommand(name: string): SlashCommandSpec | undefined {
   const folded = name.toLocaleLowerCase('en-US');
-  return SLASH_COMMAND_SPECS.find(
-    (command) => command.name === folded || command.aliases?.includes(folded) === true,
-  );
+  return SLASH_COMMAND_SPECS.find((command) => command.name === folded);
 }
 
 /** One availability function feeds palette rendering and controller admission hints. */
@@ -992,13 +958,10 @@ export function interactiveCommandAvailability(
   ) {
     return { kind: 'disabled', reason: 'the transcript is empty' };
   }
-  if (command.actionId === 'draft.restore' && !context.hasStash) {
-    return { kind: 'disabled', reason: 'no stashed draft for this thread' };
-  }
   return { kind: 'enabled' };
 }
 
-/** Categorized fuzzy palette. Name/alias matches outrank description/category subsequences. */
+/** Categorized fuzzy palette. Name matches outrank description/category subsequences. */
 export function commandPaletteEntries(
   query: string,
   context: InteractiveCommandContext,
@@ -1018,17 +981,14 @@ export function fuzzyCommandScore(
   query: string,
 ): number | undefined {
   if (query === '') return SLASH_COMMAND_SPECS.indexOf(command) * 10;
-  const names = [command.name, ...(command.aliases ?? [])];
   const catalogOrder = Math.max(0, SLASH_COMMAND_SPECS.indexOf(command));
   let best = Number.POSITIVE_INFINITY;
-  for (const name of names) {
-    if (name === query) best = Math.min(best, 0);
-    else if (name.startsWith(query)) best = Math.min(best, 10 + catalogOrder);
-    const direct = name.indexOf(query);
-    if (direct >= 0) best = Math.min(best, 40 + direct * 5 + name.length);
-    const subsequence = subsequenceScore(name, query);
-    if (subsequence !== undefined) best = Math.min(best, 50 + subsequence);
-  }
+  if (command.name === query) best = 0;
+  else if (command.name.startsWith(query)) best = 10 + catalogOrder;
+  const direct = command.name.indexOf(query);
+  if (direct >= 0) best = Math.min(best, 40 + direct * 5 + command.name.length);
+  const nameSubsequence = subsequenceScore(command.name, query);
+  if (nameSubsequence !== undefined) best = Math.min(best, 50 + nameSubsequence);
   for (const text of [command.description, command.category]) {
     const subsequence = subsequenceScore(text.toLocaleLowerCase('en-US'), query);
     if (subsequence !== undefined) best = Math.min(best, 200 + subsequence);

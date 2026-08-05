@@ -12,6 +12,7 @@ import {
   renderInteractiveHelp,
   SLASH_COMMAND_SPECS,
 } from './command-catalog.js';
+import { parseSlashCommand } from './tui-controls.js';
 
 describe('canonical command catalog', () => {
   it('supports positional prompt, -p append, canonical resume, and headless flags', () => {
@@ -150,9 +151,8 @@ describe('canonical command catalog', () => {
     }
     expect(SLASH_COMMAND_SPECS.map((command) => command.name)).toEqual([
       'help', 'insert-mode', 'status', 'login', 'model', 'logout', 'auth',
-      'search', 'next', 'previous', 'latest', 'copy', 'export', 'edit',
-      'files', 'stash', 'restore', 'draft', 'vim', 'quit', 'doctor',
-      'diff', 'review', 'permissions', 'compact', 'retry', 'fork', 'new', 'sessions',
+      'search', 'next', 'previous', 'latest', 'copy', 'export', 'vim', 'quit', 'doctor',
+      'diff', 'review', 'permissions', 'compact', 'fork', 'new', 'sessions',
       'resume', 'switch', 'rename', 'archive',
     ]);
     expect(interactiveHelp).toContain('PageUp/PageDown: scroll output');
@@ -160,8 +160,8 @@ describe('canonical command catalog', () => {
     expect(interactiveHelp).toContain('Ctrl+K: open command palette');
     expect(interactiveHelp).toContain('Ctrl+R: search prompt history');
     expect(interactiveHelp).toContain('Esc: abort the current run');
-    expect(interactiveHelp).toContain('Ctrl+O: edit draft in $EDITOR');
-    expect(interactiveHelp).toContain('Meta+S: stash this thread draft');
+    expect(interactiveHelp).not.toContain('Ctrl+O');
+    expect(interactiveHelp).not.toContain('Meta+S');
     expect(interactiveHelp).not.toContain('/abort');
     expect(interactiveHelp).not.toContain('/history');
     expect(interactiveHelp).not.toContain('/auth-status');
@@ -182,7 +182,6 @@ describe('canonical command catalog', () => {
       providerCommandsAvailable: true,
       hasModel: true,
       hasTranscript: true,
-      hasStash: false,
     };
     expect(commandPaletteEntries('srch', base)[0]?.command.name).toBe('search');
     expect(commandPaletteEntries('doctor', base)[0]?.command.actionId).toBe('doctor.run');
@@ -190,10 +189,6 @@ describe('canonical command catalog', () => {
     expect(commandPaletteEntries('review', base).some(
       (entry) => entry.command.category === 'review',
     )).toBe(true);
-    expect(commandPaletteEntries('restore', base)[0]?.availability).toEqual({
-      kind: 'disabled',
-      reason: 'no stashed draft for this thread',
-    });
     expect(commandPaletteEntries('quit', { ...base, phase: 'running' })[0]?.availability)
       .toEqual({
         kind: 'disabled',
@@ -226,8 +221,6 @@ describe('canonical command catalog', () => {
     expect(findSlashCommand('f')).toBeUndefined();
     expect(SLASH_COMMAND_SPECS.some((command) => command.actionId === 'task.abort')).toBe(false);
     expect(SLASH_COMMAND_SPECS.some((command) => command.actionId === 'history.search')).toBe(false);
-    expect(SLASH_COMMAND_SPECS.flatMap((command) => command.aliases ?? []))
-      .toEqual(expect.not.arrayContaining(['auth-status', 'prev', 'q', 'f']));
     const help = renderInteractiveHelp().join('\n');
     expect(help).not.toContain('/abort');
     expect(help).not.toContain('/history');
@@ -246,12 +239,40 @@ describe('canonical command catalog', () => {
         providerCommandsAvailable: true,
         hasModel: true,
         hasTranscript: true,
-        hasStash: true,
       }).some((entry) => entry.command.name === name)).toBe(false);
     }
     expect(findSlashCommand('auth')?.actionId).toBe('auth.status');
     expect(findSlashCommand('previous')?.actionId).toBe('transcript.previous');
     expect(findSlashCommand('quit')?.actionId).toBe('app.quit');
+  });
+
+  it('edit/files/stash/restore/draft/retry 已从目录、帮助、palette 与快捷键移除', () => {
+    for (const name of ['edit', 'files', 'stash', 'restore', 'draft', 'retry']) {
+      expect(findSlashCommand(name)).toBeUndefined();
+      expect(SLASH_COMMAND_SPECS.some((command) => command.name === name)).toBe(false);
+      expect(parseSlashCommand(`/${name}`)).toEqual({ cmd: 'unknown', input: `/${name}` });
+      expect(commandPaletteEntries(name, {
+        phase: 'running',
+        approvalPending: false,
+        providerPromptActive: false,
+        providerCommandsAvailable: true,
+        hasModel: true,
+        hasTranscript: true,
+      }).some((entry) => entry.command.name === name)).toBe(false);
+    }
+    expect(SLASH_COMMAND_SPECS.flatMap((command) => command.shortcuts))
+      .not.toContain('Ctrl+O');
+    expect(SLASH_COMMAND_SPECS.flatMap((command) => command.shortcuts))
+      .not.toContain('Meta+S');
+    expect(SLASH_COMMAND_SPECS.flatMap((command) => command.shortcuts))
+      .not.toContain('Tab after @');
+    const help = renderInteractiveHelp().join('\n');
+    expect(help).not.toContain('/edit');
+    expect(help).not.toContain('/files');
+    expect(help).not.toContain('/stash');
+    expect(help).not.toContain('/restore');
+    expect(help).not.toContain('/draft');
+    expect(help).not.toContain('/retry');
   });
 
   it('insert-mode 取代 queue/followup 进入目录且各 phase 均可用', () => {
@@ -263,7 +284,6 @@ describe('canonical command catalog', () => {
       availableWhileRunning: true,
       category: 'task',
     });
-    expect(insertMode?.aliases).toBeUndefined();
     expect(SLASH_COMMAND_SPECS.some(
       (command) => command.actionId === 'task.queue' ||
         command.actionId === 'task.follow-up',
@@ -275,7 +295,6 @@ describe('canonical command catalog', () => {
       providerCommandsAvailable: true,
       hasModel: false,
       hasTranscript: false,
-      hasStash: false,
     };
     for (const phase of ['idle', 'running', 'compacting'] as const) {
       expect(commandPaletteEntries('insert-mode', { ...base, phase })[0]?.availability)

@@ -84,7 +84,6 @@ export interface RuntimeWorkspaceActions {
   archiveSession(archived?: boolean): Promise<void>;
   compactConversation(): Promise<void>;
   forkConversation(throughTurnId?: import('../protocol/index.js').TurnId): Promise<ThreadId>;
-  retryConversation(turnId?: import('../protocol/index.js').TurnId): Promise<ThreadId>;
   reviewSnapshot(): Promise<Readonly<RuntimeReviewSnapshot> | undefined>;
   diffSnapshot(scope: 'turn' | 'workspace'): Promise<Readonly<RuntimeDiffSnapshot> | undefined>;
   pendingApprovals(): readonly PendingApprovalView[];
@@ -384,25 +383,6 @@ export class RuntimeFrontendSession implements InteractiveSession, RuntimeWorksp
       threadId: target,
       model: model.ref,
       ...(throughTurnId === undefined ? {} : { throughTurnId }),
-    });
-    if (!receipt.accepted) throw new RuntimeFrontendOpRejectedError(receipt.opId, receipt.reason);
-    await this.switchSession(target);
-    return target;
-  }
-
-  async retryConversation(turnId?: import('../protocol/index.js').TurnId): Promise<ThreadId> {
-    this.#assertReady();
-    const model = this.#model;
-    if (model === undefined) throw new Error('尚未选择模型；请先运行 /model');
-    const target = this.#runtime.newThreadId();
-    const receipt = await this.#runtime.submit({
-      type: 'conversation_retry',
-      opId: this.#runtime.newOpId(),
-      workspaceId: this.#runtime.workspaceId,
-      sourceThreadId: this.#threadId,
-      threadId: target,
-      model: model.ref,
-      ...(turnId === undefined ? {} : { turnId }),
     });
     if (!receipt.accepted) throw new RuntimeFrontendOpRejectedError(receipt.opId, receipt.reason);
     await this.switchSession(target);

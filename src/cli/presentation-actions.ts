@@ -5,32 +5,15 @@
 import {
   closeSync,
   fsyncSync,
-  mkdtempSync,
   openSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, AssistantMessage, ThreadId } from '../protocol/index.js';
 import { sanitizeTerminalText } from './terminal-sanitize.js';
 
 export type TranscriptContentMode = 'latest' | 'text' | 'raw';
-
-export interface WorkspaceCompletion {
-  readonly start: number;
-  readonly end: number;
-  readonly query: string;
-  readonly candidates: readonly string[];
-}
-
-export interface ExternalEditorOptions {
-  readonly cwd: string;
-  readonly env?: Readonly<Record<string, string | undefined>>;
-}
 
 export interface TranscriptExportOptions {
   readonly cwd: string;
@@ -116,111 +99,6 @@ export function transcriptContent(
     (messages.length === 0 ? '' : '\n');
 }
 
-/** Bounded, symlink-safe workspace index used by @ completion. */
-export function workspacePathCandidates(
-  cwd: string,
-  query: string,
-  limit = 50,
-): readonly string[] {
-  const foldedQuery = normalizeCompletionQuery(query).toLocaleLowerCase('en-US');
-  const pending = [''];
-  const candidates: string[] = [];
-  let visited = 0;
-  while (pending.length > 0 && visited < 5_000) {
-    const relativeDirectory = pending.shift();
-    if (relativeDirectory === undefined) break;
-    let entries;
-    try {
-      entries = readdirSync(path.join(cwd, relativeDirectory), { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    entries.sort((left, right) => left.name.localeCompare(right.name, 'en'));
-    for (const entry of entries) {
-      visited++;
-      if (entry.name === '.git' || entry.name === 'node_modules') continue;
-      const relative = relativeDirectory === ''
-        ? entry.name
-        : `${relativeDirectory}/${entry.name}`;
-      if (entry.isDirectory()) pending.push(relative);
-      if (!entry.isDirectory() && !entry.isFile()) continue;
-      const display = entry.isDirectory() ? `${relative}/` : relative;
-      const score = fuzzyPathScore(display.toLocaleLowerCase('en-US'), foldedQuery);
-      if (score !== undefined) candidates.push(`${String(score).padStart(6, '0')}\0${display}`);
-    }
-  }
-  return candidates
-    .sort((left, right) => left.localeCompare(right, 'en'))
-    .slice(0, Math.max(1, limit))
-    .map((candidate) => candidate.slice(candidate.indexOf('\0') + 1));
-}
-
-export function workspaceCompletionAtCursor(
-  text: string,
-  cursor: number,
-  cwd: string,
-  limit = 50,
-): WorkspaceCompletion | undefined {
-  const safeCursor = Math.max(0, Math.min(text.length, cursor));
-  const before = text.slice(0, safeCursor);
-  const match = /(?:^|\s)@([^\s@]*)$/u.exec(before);
-  if (match === null) return undefined;
-  const query = match[1] ?? '';
-  const start = safeCursor - query.length - 1;
-  return {
-    start,
-    end: safeCursor,
-    query,
-    candidates: workspacePathCandidates(cwd, query, limit),
-  };
-}
-
-export function applyWorkspaceCompletion(
-  text: string,
-  completion: WorkspaceCompletion,
-  candidate: string,
-): { readonly text: string; readonly cursor: number } {
-  const inserted = `@${candidate}`;
-  return {
-    text: text.slice(0, completion.start) + inserted + text.slice(completion.end),
-    cursor: completion.start + inserted.length,
-  };
-}
-
-export async function editDraftWithExternalEditor(
-  draft: string,
-  options: ExternalEditorOptions,
-): Promise<string> {
-  const environment = options.env ?? Bun.env;
-  const editor = environment['VISUAL'] ?? environment['EDITOR'];
-  if (editor === undefined || editor.trim() === '') {
-    throw new Error('$VISUAL or $EDITOR is not configured');
-  }
-  const directory = mkdtempSync(path.join(os.tmpdir(), 'coda-editor-'));
-  const file = path.join(directory, 'prompt.md');
-  try {
-    writeFileSync(file, draft, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    const command = editorCommand(editor, file, environment);
-    const child = Bun.spawn(command, {
-      cwd: options.cwd,
-      env: {
-        ...environment,
-        CODA_EDITOR: editor,
-        CODA_DRAFT_FILE: file,
-      },
-      stdin: 'inherit',
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    const exitCode = await child.exited;
-    if (exitCode !== 0) throw new Error(`editor exited with status ${exitCode}`);
-    const edited = sanitizeTerminalText(readFileSync(file, 'utf8'));
-    return edited.endsWith('\n') ? edited.slice(0, -1) : edited;
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
 export async function copyTextToClipboard(text: string): Promise<void> {
   const commands = clipboardCommands();
   let lastError: unknown;
@@ -300,44 +178,6 @@ function formatMessageText(message: AgentMessage): string {
       .map((part) => part.type === 'text' ? part.text : `[image · ${part.mimeType}]`)
       .join('\n'),
   )}`;
-}
-
-function normalizeCompletionQuery(query: string): string {
-  return query.replace(/^@/u, '').replace(/^\.\//u, '');
-}
-
-function fuzzyPathScore(candidate: string, query: string): number | undefined {
-  if (query === '') return candidate.split('/').length * 100 + candidate.length;
-  const direct = candidate.indexOf(query);
-  if (direct >= 0) return direct * 10 + candidate.length;
-  let cursor = 0;
-  let score = 1_000;
-  for (const character of query) {
-    const found = candidate.indexOf(character, cursor);
-    if (found < 0) return undefined;
-    score += found - cursor;
-    cursor = found + 1;
-  }
-  return score + candidate.length;
-}
-
-function editorCommand(
-  editor: string,
-  file: string,
-  environment: Readonly<Record<string, string | undefined>>,
-): string[] {
-  if (process.platform === 'win32') {
-    const command = environment['COMSPEC'] ?? 'cmd.exe';
-    return [command, '/d', '/s', '/c', `${editor} "${file.replaceAll('"', '""')}"`];
-  }
-  const shell = environment['SHELL'] ?? '/bin/sh';
-  // EDITOR is an explicit user-controlled shell command (for example "code --wait"). Parse only
-  // that value, then pass the generated temporary path as a separate positional argument.
-  return [
-    shell,
-    '-c',
-    'eval "set -- $CODA_EDITOR"; exec "$@" "$CODA_DRAFT_FILE"',
-  ];
 }
 
 function clipboardCommands(): readonly string[][] {
