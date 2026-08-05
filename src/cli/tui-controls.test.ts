@@ -19,9 +19,8 @@ import {
 } from './tui-controls.js';
 
 describe('TUI slash command parsing', () => {
-  it('识别 canonical 命令及 /q 短别名', () => {
+  it('识别 canonical 命令', () => {
     expect(parseSlashCommand('/quit')).toEqual({ cmd: 'quit' });
-    expect(parseSlashCommand('/q')).toEqual({ cmd: 'quit' });
     expect(parseSlashCommand('/insert-mode')).toEqual({ cmd: 'insert_mode' });
     expect(parseSlashCommand('/status')).toEqual({ cmd: 'status' });
     expect(parseSlashCommand('/help')).toEqual({ cmd: 'help' });
@@ -29,11 +28,10 @@ describe('TUI slash command parsing', () => {
     expect(parseSlashCommand('/model')).toEqual({ cmd: 'model' });
     expect(parseSlashCommand('/logout')).toEqual({ cmd: 'logout' });
     expect(parseSlashCommand('/auth')).toEqual({ cmd: 'auth_status' });
-    expect(parseSlashCommand('/auth-status')).toEqual({ cmd: 'auth_status' });
     expect(parseSlashCommand('/doctor')).toEqual({ cmd: 'doctor' });
   });
 
-  it('/queue 与 /followup 已退役，解析为 unknown', () => {
+  it('/queue、/followup、/abort、/history 与已删别名解析为 unknown', () => {
     expect(parseSlashCommand('/queue')).toEqual({ cmd: 'unknown', input: '/queue' });
     expect(parseSlashCommand('/f 顺便改下颜色')).toEqual({
       cmd: 'unknown',
@@ -43,6 +41,17 @@ describe('TUI slash command parsing', () => {
       cmd: 'unknown',
       input: '/followup run tests',
     });
+    expect(parseSlashCommand('/abort')).toEqual({ cmd: 'unknown', input: '/abort' });
+    expect(parseSlashCommand('/history fix parser')).toEqual({
+      cmd: 'unknown',
+      input: '/history fix parser',
+    });
+    expect(parseSlashCommand('/auth-status')).toEqual({
+      cmd: 'unknown',
+      input: '/auth-status',
+    });
+    expect(parseSlashCommand('/prev')).toEqual({ cmd: 'unknown', input: '/prev' });
+    expect(parseSlashCommand('/q')).toEqual({ cmd: 'unknown', input: '/q' });
   });
 
   it('解析 presentation、搜索、copy/export 与 Vim 命令', () => {
@@ -50,7 +59,7 @@ describe('TUI slash command parsing', () => {
       cmd: 'transcript_search',
       query: 'tool call',
     });
-    expect(parseSlashCommand('/prev')).toEqual({ cmd: 'search_previous' });
+    expect(parseSlashCommand('/previous')).toEqual({ cmd: 'search_previous' });
     expect(parseSlashCommand('/copy raw')).toEqual({ cmd: 'copy', mode: 'raw' });
     expect(parseSlashCommand('/export raw report.jsonl')).toEqual({
       cmd: 'export',

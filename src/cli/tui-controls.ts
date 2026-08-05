@@ -52,7 +52,6 @@ export type SlashCommand =
   | {
       cmd:
         | 'quit'
-        | 'abort'
         | 'insert_mode'
         | 'status'
         | 'doctor'
@@ -71,7 +70,6 @@ export type SlashCommand =
         | 'compact'
         | 'new';
     }
-  | { cmd: 'history_search'; query: string }
   | { cmd: 'stash'; text: string }
   | { cmd: 'file_complete'; query: string }
   | { cmd: 'transcript_search'; query: string }
@@ -112,10 +110,6 @@ export function parseSlashCommand(text: string): SlashCommand | undefined {
       return { cmd: 'model' };
     case 'auth.logout':
       return { cmd: 'logout' };
-    case 'task.abort':
-      return { cmd: 'abort' };
-    case 'history.search':
-      return { cmd: 'history_search', query: rest };
     case 'draft.edit':
       return { cmd: 'edit' };
     case 'draft.files':

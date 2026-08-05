@@ -204,7 +204,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   {
     id: 'auth.status', category: 'provider', summary: 'Show saved authentication without secrets',
     cli: { path: ['auth', 'status'], optionIds: ['json'] },
-    slash: { name: 'auth', aliases: ['auth-status'], availableWhileRunning: true, order: 6 },
+    slash: { name: 'auth', availableWhileRunning: true, order: 6 },
   },
   {
     id: 'models.list', category: 'provider', summary: 'List cached models or explicitly select one',
@@ -229,7 +229,9 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [
       { keys: 'Enter', summary: 'send when idle; route by insert mode while running' },
       { keys: 'Shift+Enter', summary: 'insert a newline' },
-      { keys: 'Alt+Up/Down', summary: 'browse prompt history' },
+      { keys: 'Up/Down', summary: 'browse prompt history' },
+      { keys: 'Ctrl+R', summary: 'search prompt history' },
+      { keys: 'Esc', summary: 'abort the current run' },
     ],
   },
   {
@@ -289,11 +291,6 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     shortcuts: [{ keys: 'Ctrl+K', summary: 'open command palette' }],
   },
   {
-    id: 'history.search', category: 'task', summary: 'Search this thread prompt history',
-    slash: { name: 'history', argumentHint: '[query]', availableWhileRunning: true, order: 14 },
-    shortcuts: [{ keys: 'Ctrl+R', summary: 'search prompt history' }],
-  },
-  {
     id: 'draft.edit', category: 'task', summary: 'Edit the current draft with $VISUAL or $EDITOR',
     slash: { name: 'edit', availableWhileRunning: true, order: 15 },
     shortcuts: [{ keys: 'Ctrl+O', summary: 'edit draft in $EDITOR' }],
@@ -331,7 +328,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
   },
   {
     id: 'transcript.previous', category: 'review', summary: 'Jump to the previous transcript search match',
-    slash: { name: 'previous', aliases: ['prev'], availableWhileRunning: true, order: 10 },
+    slash: { name: 'previous', availableWhileRunning: true, order: 10 },
   },
   {
     id: 'transcript.latest', category: 'review', summary: 'Jump to the latest output and clear unread',
@@ -355,13 +352,8 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
     slash: { name: 'status', availableWhileRunning: true, order: 2 },
   },
   {
-    id: 'task.abort', category: 'task', summary: 'Abort only the current run',
-    slash: { name: 'abort', availableWhileRunning: true, order: 7 },
-    shortcuts: [{ keys: 'Esc', summary: 'abort the current run' }],
-  },
-  {
     id: 'app.quit', category: 'help', summary: 'Exit coda cleanly',
-    slash: { name: 'quit', aliases: ['q'], availableWhileRunning: false, order: 21 },
+    slash: { name: 'quit', availableWhileRunning: false, order: 21 },
     shortcuts: [
       { keys: 'Ctrl+C Ctrl+C', summary: 'exit' },
       { keys: 'Ctrl+D', summary: 'exit while idle with an empty draft' },
@@ -974,9 +966,7 @@ export function interactiveCommandAvailability(
 ): CommandAvailability {
   if (context.providerPromptActive) return { kind: 'hidden' };
   if (context.approvalPending) {
-    return command.actionId === 'task.abort'
-      ? { kind: 'enabled' }
-      : { kind: 'disabled', reason: 'approval is waiting; answer or abort first' };
+    return { kind: 'disabled', reason: 'approval is waiting; answer or abort first' };
   }
   const busy = context.phase !== 'idle';
   if (busy && !command.availableWhileRunning) {
@@ -990,9 +980,6 @@ export function interactiveCommandAvailability(
     !context.providerCommandsAvailable
   ) {
     return { kind: 'disabled', reason: 'provider management is unavailable on this surface' };
-  }
-  if (command.actionId === 'task.abort' && context.phase === 'idle') {
-    return { kind: 'disabled', reason: 'no active run' };
   }
   if (
     (command.actionId === 'transcript.search' ||

@@ -3,6 +3,7 @@ import {
   CliUsageError,
   COMMAND_SPECS,
   commandPaletteEntries,
+  findSlashCommand,
   OPTION_SPECS,
   parseCliInvocation,
   renderCliHelp,
@@ -148,18 +149,24 @@ describe('canonical command catalog', () => {
       expect(completion).toContain('login');
     }
     expect(SLASH_COMMAND_SPECS.map((command) => command.name)).toEqual([
-      'help', 'insert-mode', 'status', 'login', 'model', 'logout', 'auth', 'abort',
-      'search', 'next', 'previous', 'latest', 'copy', 'export', 'history', 'edit',
+      'help', 'insert-mode', 'status', 'login', 'model', 'logout', 'auth',
+      'search', 'next', 'previous', 'latest', 'copy', 'export', 'edit',
       'files', 'stash', 'restore', 'draft', 'vim', 'quit', 'doctor',
       'diff', 'review', 'permissions', 'compact', 'retry', 'fork', 'new', 'sessions',
       'resume', 'switch', 'rename', 'archive',
     ]);
     expect(interactiveHelp).toContain('PageUp/PageDown: scroll output');
-    expect(interactiveHelp).toContain('Alt+Up/Down: browse prompt history');
+    expect(interactiveHelp).toContain('Up/Down: browse prompt history');
     expect(interactiveHelp).toContain('Ctrl+K: open command palette');
     expect(interactiveHelp).toContain('Ctrl+R: search prompt history');
+    expect(interactiveHelp).toContain('Esc: abort the current run');
     expect(interactiveHelp).toContain('Ctrl+O: edit draft in $EDITOR');
     expect(interactiveHelp).toContain('Meta+S: stash this thread draft');
+    expect(interactiveHelp).not.toContain('/abort');
+    expect(interactiveHelp).not.toContain('/history');
+    expect(interactiveHelp).not.toContain('/auth-status');
+    expect(interactiveHelp).not.toMatch(/\/prev(?![a-z])/u);
+    expect(interactiveHelp).not.toMatch(/\/q(?![a-z])/u);
     expect(loginHelp).toContain('--preset <name>');
     expect(loginHelp).toContain('--api-key <key>');
     expect(loginHelp).not.toContain('--select');
@@ -208,6 +215,43 @@ describe('canonical command catalog', () => {
         reason: 'provider management is unavailable on this surface',
       });
     expect(commandPaletteEntries('', { ...base, providerPromptActive: true })).toEqual([]);
+  });
+
+  it('abort/history/别名已从目录、帮助与补全中移除', () => {
+    expect(findSlashCommand('abort')).toBeUndefined();
+    expect(findSlashCommand('history')).toBeUndefined();
+    expect(findSlashCommand('auth-status')).toBeUndefined();
+    expect(findSlashCommand('prev')).toBeUndefined();
+    expect(findSlashCommand('q')).toBeUndefined();
+    expect(findSlashCommand('f')).toBeUndefined();
+    expect(SLASH_COMMAND_SPECS.some((command) => command.actionId === 'task.abort')).toBe(false);
+    expect(SLASH_COMMAND_SPECS.some((command) => command.actionId === 'history.search')).toBe(false);
+    expect(SLASH_COMMAND_SPECS.flatMap((command) => command.aliases ?? []))
+      .toEqual(expect.not.arrayContaining(['auth-status', 'prev', 'q', 'f']));
+    const help = renderInteractiveHelp().join('\n');
+    expect(help).not.toContain('/abort');
+    expect(help).not.toContain('/history');
+    expect(help).not.toContain('/auth-status');
+    expect(help).not.toMatch(/\/prev(?![a-z])/u);
+    expect(help).not.toMatch(/\/q(?![a-z])/u);
+    for (const shell of ['bash', 'zsh', 'fish', 'powershell'] as const) {
+      expect(renderCompletion(shell)).not.toContain('/abort');
+      expect(renderCompletion(shell)).not.toContain('/history');
+    }
+    for (const name of ['abort', 'history', 'auth-status', 'prev', 'q', 'f']) {
+      expect(commandPaletteEntries(name, {
+        phase: 'running',
+        approvalPending: false,
+        providerPromptActive: false,
+        providerCommandsAvailable: true,
+        hasModel: true,
+        hasTranscript: true,
+        hasStash: true,
+      }).some((entry) => entry.command.name === name)).toBe(false);
+    }
+    expect(findSlashCommand('auth')?.actionId).toBe('auth.status');
+    expect(findSlashCommand('previous')?.actionId).toBe('transcript.previous');
+    expect(findSlashCommand('quit')?.actionId).toBe('app.quit');
   });
 
   it('insert-mode 取代 queue/followup 进入目录且各 phase 均可用', () => {

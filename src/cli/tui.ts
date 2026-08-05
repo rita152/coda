@@ -4646,10 +4646,6 @@ export function runTuiController(
         case 'quit':
           void shutdown(0);
           return null;
-        case 'abort':
-          if (interactionCanAbort(session.interactionState())) session.abort();
-          else screen.println('No active run to abort.', 'warning');
-          return null;
         case 'help':
           for (const line of renderInteractiveHelp()) screen.println(line, 'muted');
           return null;
@@ -4687,16 +4683,6 @@ export function runTuiController(
           return beginProviderCommand(command.cmd);
         case 'insert_mode':
           return beginInsertModePicker();
-        case 'history_search': {
-          const query = command.query === '' ? latestPromptDraft : command.query;
-          const match = history.reverseSearch(query);
-          if (match === undefined) {
-            screen.setTransientStatus(`no prompt history match · ${query}`);
-            return paletteReturnDraft ?? null;
-          }
-          screen.setTransientStatus(`history match · Ctrl+R older · ${query}`);
-          return match;
-        }
         case 'edit':
           void editComposerDraft(paletteReturnDraft ?? latestPromptDraft);
           return paletteReturnDraft ?? latestPromptDraft;
@@ -5111,8 +5097,16 @@ export function runTuiController(
         consume(key);
         return;
       }
-      if (key.meta && key.name === 'up') {
-        if (providerController?.active === true) {
+      if (
+        key.name === 'up' &&
+        !key.ctrl && !key.meta && !key.shift && !key.option && !key.super && !key.hyper
+      ) {
+        if (
+          providerController?.active === true ||
+          providerInputActive ||
+          insertModePickerActive ||
+          paletteReturnDraft !== undefined
+        ) {
           consume(key);
           return;
         }
@@ -5120,8 +5114,16 @@ export function runTuiController(
         consume(key);
         return;
       }
-      if (key.meta && key.name === 'down') {
-        if (providerController?.active === true) {
+      if (
+        key.name === 'down' &&
+        !key.ctrl && !key.meta && !key.shift && !key.option && !key.super && !key.hyper
+      ) {
+        if (
+          providerController?.active === true ||
+          providerInputActive ||
+          insertModePickerActive ||
+          paletteReturnDraft !== undefined
+        ) {
           consume(key);
           return;
         }

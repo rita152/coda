@@ -84,7 +84,8 @@ TUI 是唯一长驻交互面。stdin/stdout 不是完整 TTY、`TERM=dumb` 或 O
 OpenTUI 首屏显示 onboarding；开始输入后收缩成紧凑任务栏，底部持续显示 phase、thread、权限、队列、
 workspace/Git、context 和 model；其中权限模式来自 Runtime workspace snapshot。常用生产力入口：
 
-- `Ctrl+K` 打开分类模糊 command palette，`Ctrl+R` 搜索当前 thread 的 prompt 历史。
+- `Ctrl+K` 打开分类模糊 command palette；`↑/↓` 在 composer 中浏览当前 thread 的 prompt 历史，
+  `Ctrl+R` 反向搜索同一历史。
 - `Ctrl+O` 用 `$VISUAL`/`$EDITOR` 编辑长 prompt，`Meta+S` stash 当前 draft。
 - 输入 `@路径` 后按 `Tab` 补全 workspace 文件或目录；可用 `/files [query]` 列出候选。
 - `Ctrl+F` 或 `/search <query>` 搜索 transcript，`/next`、`/previous` 切换，`End` 或 `/latest` 回到最新输出。

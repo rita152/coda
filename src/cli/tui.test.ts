@@ -435,6 +435,15 @@ describe('全屏 OpenTUI 布局', () => {
       view.mockInput.pressTab();
       await view.flush();
       expect(view.screen.getInput()).toBe('/quit ');
+
+      view.screen.clearInput();
+      await view.mockInput.typeText('/');
+      await view.flush();
+      expect(view.frame()).not.toContain('/abort');
+      expect(view.frame()).not.toContain('/history');
+      expect(view.frame()).not.toContain('/auth-status');
+      expect(view.frame()).not.toMatch(/\/prev(?![a-z])/u);
+      expect(view.frame()).not.toMatch(/\/q(?![a-z])/u);
     } finally {
       await view.destroy();
     }
@@ -4369,6 +4378,191 @@ describe('TUI insert mode picker', () => {
     await view.destroyHighlighter();
   });
 });
+
+describe('TUI composer prompt history 按键', () => {
+  function historySession(prompts: string[]): CliSession {
+    return {
+      interactionState: () => 'idle',
+      currentModel: () => MODEL,
+      usage: () => ({ cumulative: { input: 0, output: 0 }, turns: 0, contextTokens: 0 }),
+      messages: [],
+      subscribe: () => () => undefined,
+      prompt: async (text) => { prompts.push(text); },
+      steer: () => undefined,
+      followUp: () => undefined,
+      abort: () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('普通 Up/Down 在 composer 浏览并写回 prompt 历史', async () => {
+    const prompts: string[] = [];
+    const view = await setup(90, 28);
+    const controller = runTuiController(historySession(prompts), undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('first prompt');
+    view.mockInput.pressEnter();
+    await view.flush();
+    view.screen.setInput('second prompt');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(prompts).toEqual(['first prompt', 'second prompt']);
+    view.screen.clearInput();
+
+    view.mockInput.pressArrow('up');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('second prompt');
+    view.mockInput.pressArrow('up');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('first prompt');
+    view.mockInput.pressArrow('down');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('second prompt');
+    view.mockInput.pressArrow('down');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('');
+
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('Alt+Up/Down 不再切换 prompt 历史；Esc 仍中止 active run', async () => {
+    let phase: CliInteractionState = 'running';
+    let abortCalls = 0;
+    const session: CliSession = {
+      ...historySession([]),
+      interactionState: () => phase,
+      abort: () => { abortCalls++; },
+    };
+    const view = await setup(90, 28);
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('history entry');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(abortCalls).toBe(0);
+    view.screen.setInput('current draft');
+    await view.mockInput.pressKeys(['\x1b[1;3A', '\x1b[1;3B']);
+    await view.flush();
+    expect(view.screen.getInput()).toBe('current draft');
+
+    view.mockInput.pressEscape();
+    await view.flush();
+    expect(abortCalls).toBe(1);
+
+    phase = 'idle';
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('命令菜单可见时 Up/Down 仍在菜单中移动，不浏览历史', async () => {
+    const prompts: string[] = [];
+    const view = await setup(90, 28);
+    const controller = runTuiController(historySession(prompts), undefined, view.screen, view.renderer, {
+      installSignalHandlers: false,
+    });
+    view.screen.focusInput();
+    view.screen.setInput('history entry');
+    view.mockInput.pressEnter();
+    await view.flush();
+
+    view.screen.clearInput();
+    await view.mockInput.typeText('/');
+    await view.flush();
+    view.mockInput.pressArrow('down');
+    await view.flush();
+    view.mockInput.pressTab();
+    await view.flush();
+    expect(view.screen.getInput()).toBe('/insert-mode ');
+
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+
+  it('provider 自由文本输入 active 时 Up/Down 不切换 prompt 历史', async () => {
+    const dir = makeTempDir();
+    const registry = new ProviderRegistry({
+      configPath: path.join(dir, 'providers.json'),
+      credentialsPath: path.join(dir, 'credentials.json'),
+      fetch: async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    });
+    let currentModel: ReturnType<InteractiveSession['currentModel']>;
+    const runtime: InteractiveSession = {
+      ...idleCliSession(),
+      currentModel: () => currentModel,
+      setModel: (model) => { currentModel = model.ref; },
+      clearModel: () => { currentModel = undefined; },
+      subscribeSessionAttached: () => () => undefined,
+    };
+    const prompts: string[] = [];
+    const session: CliSession = {
+      ...runtime,
+      prompt: async (text) => { prompts.push(text); },
+    };
+    const view = await setup(80, 24);
+    view.screen.focusInput();
+    const controller = runTuiController(session, undefined, view.screen, view.renderer, {
+      providerCommands: { registry, runtime },
+      installSignalHandlers: false,
+    });
+    await view.flush();
+
+    view.screen.setInput('history entry');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(prompts).toEqual(['history entry']);
+
+    view.screen.setInput('/login');
+    view.mockInput.pressEnter();
+    await view.flush();
+    expect(view.frame()).toContain('[步骤 1]');
+
+    view.screen.setInput('Custom');
+    view.mockInput.pressEnter();
+    await waitForTuiFrame(view, '[步骤 2] Custom provider name');
+
+    view.screen.setInput('my-provider-name');
+    await view.flush();
+    view.mockInput.pressArrow('up');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('my-provider-name');
+    view.mockInput.pressArrow('down');
+    await view.flush();
+    expect(view.screen.getInput()).toBe('my-provider-name');
+
+    for (let index = 0; index < 4; index++) view.mockInput.pressEscape();
+    await view.flush();
+    view.screen.setInput('/quit');
+    view.mockInput.pressEnter();
+    expect(await controller).toBe(0);
+    await view.destroyHighlighter();
+  });
+});
+
+async function waitForTuiFrame(
+  view: {
+    flush: () => Promise<void>;
+    frame: () => string;
+  },
+  text: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await Promise.resolve();
+    await view.flush();
+    if (view.frame().includes(text)) return;
+  }
+  throw new Error(`TUI frame did not contain ${text}`);
+}
 
 function approvalPresentationWithoutAlways(
   requestId: string,
