@@ -3,9 +3,17 @@
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"workspaces": [],
+	"workspaces": [
+		"packages/ai"
+	],
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"scripts": {}
+	"scripts": {
+		"build": "npm run build --workspace=@coda/ai",
+		"check": "npm run build && npm run check --workspaces --if-present",
+		"models:update": "npm run models:update --workspace=@coda/ai",
+		"test": "npm run build && npm run test --workspaces --if-present",
+		"pack:dry-run": "npm run build && npm run pack:dry-run --workspaces --if-present"
+	}
 }

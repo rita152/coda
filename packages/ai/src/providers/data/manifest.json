@@ -1,0 +1,15 @@
+{
+  "source": "https://models.dev/api.json",
+  "fetchedAt": "2026-08-08T07:32:59.039Z",
+  "etag": "W/\"d9e46ef40a88df88a67d7dd5d29c4447\"",
+  "sha256": "d9e46ef40a88df88a67d7dd5d29c4447ac5791259d671768273601b880f0a579",
+  "generatorVersion": 1,
+  "sourceRecordCount": 24,
+  "recordCount": 18,
+  "excludedCount": 6,
+  "routeCounts": {
+    "anthropic-messages": 4,
+    "openai-completions": 12,
+    "openai-responses": 2
+  }
+}

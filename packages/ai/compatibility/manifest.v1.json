@@ -1,0 +1,801 @@
+{
+  "baseline": {
+    "commit": "958c13f25080b59d4b736193f972a8502a7a2f8b",
+    "package": "@earendil-works/pi-ai@0.84.1"
+  },
+  "profile": "@coda/ai-milestone-1",
+  "version": 1,
+  "rootRuntime": {
+    "AssistantMessageEventStream": {
+      "status": "compatible",
+      "test": "test/event-stream.test.ts"
+    },
+    "EventStream": {
+      "status": "deliberate-deviation",
+      "test": "test/event-stream.test.ts"
+    },
+    "InMemoryCredentialStore": {
+      "status": "compatible",
+      "test": "test/credentials.test.ts"
+    },
+    "ModelsError": {
+      "status": "compatible",
+      "test": "test/models-error.test.ts"
+    },
+    "Type": {
+      "status": "compatible",
+      "test": "test/public-types.test.ts"
+    },
+    "createAssistantMessageEventStream": {
+      "status": "compatible",
+      "test": "test/event-stream.test.ts"
+    },
+    "createFauxCore": {
+      "status": "deliberate-deviation",
+      "test": "test/faux-provider.test.ts"
+    },
+    "createModels": {
+      "status": "deliberate-deviation",
+      "test": "test/models.test.ts"
+    },
+    "createProvider": {
+      "status": "compatible",
+      "test": "test/create-provider.test.ts"
+    },
+    "defaultProviderAuthContext": {
+      "status": "deliberate-deviation",
+      "test": "test/credentials.test.ts"
+    },
+    "envApiKeyAuth": {
+      "status": "compatible",
+      "test": "test/credentials.test.ts"
+    },
+    "fauxAssistantMessage": {
+      "status": "deliberate-deviation",
+      "test": "test/faux-provider.test.ts"
+    },
+    "fauxProvider": {
+      "status": "deliberate-deviation",
+      "test": "test/faux-provider.test.ts"
+    },
+    "fauxText": {
+      "status": "compatible",
+      "test": "test/faux-provider.test.ts"
+    },
+    "fauxThinking": {
+      "status": "compatible",
+      "test": "test/faux-provider.test.ts"
+    },
+    "fauxToolCall": {
+      "status": "deliberate-deviation",
+      "test": "test/faux-provider.test.ts"
+    },
+    "lazyApi": {
+      "status": "deliberate-deviation",
+      "test": "test/stream-contract.test.ts"
+    },
+    "lazyStream": {
+      "status": "deliberate-deviation",
+      "test": "test/stream-contract.test.ts"
+    },
+    "validateToolArguments": {
+      "status": "compatible",
+      "test": "test/tool-validation.test.ts"
+    },
+    "validateToolCall": {
+      "status": "compatible",
+      "test": "test/tool-validation.test.ts"
+    }
+  },
+  "rootTypes": {
+    "AnthropicEffort": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AnthropicMessagesCompat": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AnthropicOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AnthropicThinkingDisplay": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Api": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ApiKeyAuth": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ApiKeyCredential": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ApiOptionsMap": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ApiStreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AssistantMessage": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AssistantMessageDiagnostic": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AssistantMessageEvent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthCheck": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthContext": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthEvent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthInfoLink": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthInteraction": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthOperationOptions": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthPrompt": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthResult": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AuthType": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "AzureOpenAIResponsesOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "BedrockCompat": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "BedrockOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "BedrockThinkingDisplay": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "CacheRetention": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ChatTemplateKwargValue": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Clock": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ConstrainedSamplingConfig": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Context": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "CreateModelsOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "CreateProviderOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Credential": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "CredentialInfo": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "CredentialStore": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "DeferredCancelOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "DeferredFetchOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "DeferredHandle": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "DiagnosticErrorInfo": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxContentBlock": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxAssistantMessageOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxCore": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxModelDefinition": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxIdGenerator": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxProviderHandle": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxProviderOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxProviderState": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxResponseFactory": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxResponseStep": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FauxToolCallOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "FetchFunction": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "GoogleOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "GoogleThinkingLevel": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "GoogleVertexOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "GrammarFormat": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "GrammarVariants": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ImageContent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "JsonValue": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "KnownApi": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "KnownProvider": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "LazyApiCapabilities": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Message": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "MistralOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Model": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelAuth": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelCost": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelCostRates": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelCostTier": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelThinkingLevel": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Models": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsApiStreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsDeferredCancelOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsDeferredFetchOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsErrorCode": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsRefreshOptions": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsRefreshResult": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsRequestTransforms": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsSimpleStreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsStore": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsStoreEntry": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ModelsStoreOperationOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "MutableModels": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthAuth": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthAuthInfo": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthCredential": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthCredentials": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthDeviceCodeInfo": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthLoginCallbacks": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthPrompt": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthSelectOption": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OAuthSelectPrompt": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAICodexResponsesOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAICodexWebSocketDebugStats": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAICompletionsCompat": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAICompletionsOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAIResponsesCompat": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenAIResponsesOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "OpenRouterRouting": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "PiMessagesEvent": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "PiMessagesOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "PiMessagesRewriteImpact": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Provider": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderAuth": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderAuthInteraction": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderEnv": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderHeaders": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderId": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderRequestOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderResponse": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderStreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ProviderStreams": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "RefreshModelsContext": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "RandomSource": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "SessionAffinityFormat": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "SimpleStreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Static": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Sleeper": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "StopReason": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "StreamFunction": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "StreamOptions": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "TSchema": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "TextContent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "TextSignatureV1": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ThinkingBudgets": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ThinkingContent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ThinkingLevel": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ThinkingLevelMap": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "TimeRuntime": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Tool": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ToolCall": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "ToolResultMessage": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Transport": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "UnsupportedApiOptions": {
+      "status": "type-only",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Usage": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "UserMessage": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "VercelGatewayRouting": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    }
+  },
+  "subpaths": [
+    {
+      "path": ".",
+      "runtime": [
+        "AssistantMessageEventStream",
+        "EventStream",
+        "InMemoryCredentialStore",
+        "ModelsError",
+        "Type",
+        "createAssistantMessageEventStream",
+        "createFauxCore",
+        "createModels",
+        "createProvider",
+        "defaultProviderAuthContext",
+        "envApiKeyAuth",
+        "fauxAssistantMessage",
+        "fauxProvider",
+        "fauxText",
+        "fauxThinking",
+        "fauxToolCall",
+        "lazyApi",
+        "lazyStream",
+        "validateToolArguments",
+        "validateToolCall"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "path": "./api/anthropic-messages",
+      "runtime": [
+        "stream",
+        "streamSimple"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/anthropic-messages.test.ts"
+    },
+    {
+      "path": "./api/anthropic-messages.lazy",
+      "runtime": [
+        "anthropicMessagesApi"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/stream-contract.test.ts"
+    },
+    {
+      "path": "./api/openai-completions",
+      "runtime": [
+        "convertMessages",
+        "stream",
+        "streamSimple"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/openai-completions.test.ts"
+    },
+    {
+      "path": "./api/openai-completions.lazy",
+      "runtime": [
+        "openAICompletionsApi"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/stream-contract.test.ts"
+    },
+    {
+      "path": "./api/openai-responses",
+      "runtime": [
+        "stream",
+        "streamSimple"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/openai-responses.test.ts"
+    },
+    {
+      "path": "./api/openai-responses.lazy",
+      "runtime": [
+        "openAIResponsesApi"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/stream-contract.test.ts"
+    },
+    {
+      "path": "./providers/opencode-go",
+      "runtime": [
+        "opencodeGoProvider"
+      ],
+      "status": "deliberate-deviation",
+      "test": "test/opencode-go-provider.test.ts"
+    },
+    {
+      "path": "./providers/opencode-go.models",
+      "runtime": [
+        "OPENCODE_GO_MODELS"
+      ],
+      "status": "compatible",
+      "test": "test/opencode-go-models.test.ts"
+    }
+  ],
+  "exclusions": [
+    {
+      "kind": "subpath",
+      "name": "./compat",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "subpath",
+      "name": "./providers/*",
+      "status": "excluded",
+      "test": "test/exports-manifest.test.ts"
+    },
+    {
+      "kind": "subpath",
+      "name": "./api/*",
+      "status": "excluded",
+      "test": "test/exports-manifest.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "complete",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "completeSimple",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "stream",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "streamSimple",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "retryAssistantCall",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "InMemoryModelsStore",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "createImagesModels",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    },
+    {
+      "kind": "root",
+      "name": "lazyOAuth",
+      "status": "excluded",
+      "test": "test/root-exports.test.ts"
+    }
+  ]
+}
