@@ -1,0 +1,1083 @@
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type Context,
+	type ImageContent,
+	type Message,
+	type TextContent,
+	type ToolCall,
+	type ToolResultMessage,
+	type UserMessage,
+	validateToolArguments,
+} from "@coda/ai";
+import { AgentError } from "./errors.ts";
+import { isPersistenceSafeId } from "./identities.ts";
+import { cloneFrozen, deepFreeze } from "./immutable.ts";
+import { initialRuntimeState, type RuntimeState, reduceState } from "./reducer.ts";
+import { validateAgentSeed } from "./seed.ts";
+import type {
+	AgentEvent,
+	AgentEventListener,
+	AgentEventPayload,
+	AgentInput,
+	AgentMessage,
+	AgentOptions,
+	AgentState,
+	AgentTool,
+	AttemptId,
+	IdKind,
+	MessageDelta,
+	MessageId,
+	QueueItemId,
+	RunFailure,
+	RunId,
+	RunOutcome,
+	RunResult,
+	RunSource,
+	ToolExecutionOutcome,
+	ToolExecutionOutput,
+	ToolInvocation,
+	ToolInvocationId,
+	ToolPolicyDecision,
+	ToolRejectionReason,
+	TurnId,
+} from "./types.ts";
+
+class ListenerFailureSignal extends Error {}
+
+interface RunContext {
+	readonly id: RunId;
+	sequence: number;
+	readonly controller: AbortController;
+	readonly listenerFailures: unknown[];
+	systemPrompt?: string;
+}
+
+interface AttemptResult {
+	readonly attemptId: AttemptId;
+	readonly outcome: "success" | "error" | "aborted";
+	readonly message: AgentMessage<AssistantMessage>;
+}
+
+interface AcceptedTool {
+	readonly call: ToolCall;
+	readonly tool: AgentTool;
+	readonly arguments: Record<string, unknown>;
+	readonly invocation: ToolInvocation;
+}
+
+interface ToolSettlement {
+	readonly entry: AcceptedTool;
+	readonly outcome: ToolExecutionOutcome;
+	readonly result: AgentMessage<ToolResultMessage>;
+	readonly error?: unknown;
+}
+
+interface ToolBatchResult {
+	readonly outcome: RunOutcome;
+	readonly fatal?: unknown;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateInput(input: AgentInput): void {
+	if (typeof input === "string") {
+		if (input.trim().length === 0) throw new AgentError("invalid_input", "Agent input must not be empty");
+		return;
+	}
+	if (!Array.isArray(input) || input.length === 0) {
+		throw new AgentError("invalid_input", "Agent input must contain at least one content block");
+	}
+	for (const block of input) {
+		if (!isRecord(block) || (block.type !== "text" && block.type !== "image")) {
+			throw new AgentError("invalid_input", "Agent input contains an invalid content block");
+		}
+		if (block.type === "text" && (typeof block.text !== "string" || block.text.length === 0)) {
+			throw new AgentError("invalid_input", "Text input blocks must not be empty");
+		}
+		if (
+			block.type === "image" &&
+			(typeof block.data !== "string" || block.data.length === 0 || typeof block.mimeType !== "string")
+		) {
+			throw new AgentError("invalid_input", "Image input blocks require data and a MIME type");
+		}
+	}
+}
+
+function eventDelta(event: AssistantMessageEvent): MessageDelta | undefined {
+	switch (event.type) {
+		case "text_start":
+		case "thinking_start":
+		case "toolcall_start":
+			return { type: event.type, contentIndex: event.contentIndex };
+		case "text_delta":
+		case "thinking_delta":
+		case "toolcall_delta":
+			return { type: event.type, contentIndex: event.contentIndex, delta: event.delta };
+		case "text_end":
+		case "thinking_end":
+			return { type: event.type, contentIndex: event.contentIndex, content: event.content };
+		case "toolcall_end":
+			return {
+				type: event.type,
+				contentIndex: event.contentIndex,
+				toolCall: cloneFrozen(event.toolCall),
+			};
+		default:
+			return undefined;
+	}
+}
+
+function normalizedToolContent(content: ToolExecutionOutput["content"]): readonly (TextContent | ImageContent)[] {
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	if (!Array.isArray(content)) throw new Error("Tool output content must be a string or content block array");
+	return structuredClone(content) as (TextContent | ImageContent)[];
+}
+
+const RETRYABLE_TRANSPORT_CODES = new Set([
+	"ECONNABORTED",
+	"ECONNREFUSED",
+	"ECONNRESET",
+	"EHOSTUNREACH",
+	"ENETDOWN",
+	"ENETRESET",
+	"ENETUNREACH",
+	"ENOTFOUND",
+	"EPIPE",
+	"ETIMEDOUT",
+]);
+
+const RETRYABLE_ERROR_NAMES = new Set(["APIConnectionError", "APIConnectionTimeoutError", "TimeoutError"]);
+
+function isTransientAssistantFailure(message: AgentMessage<AssistantMessage>): boolean {
+	const neverRetryCodes = new Set([
+		"auth",
+		"oauth",
+		"quota",
+		"billing",
+		"validation",
+		"invalid_request",
+		"context_overflow",
+		"context_length_exceeded",
+	]);
+	for (const diagnostic of message.message.diagnostics ?? []) {
+		const code = diagnostic.error?.code;
+		if (typeof code === "string" && neverRetryCodes.has(code.toLowerCase())) return false;
+		const status = diagnostic.details?.status;
+		if (status === 400 || status === 401 || status === 402 || status === 403 || status === 404 || status === 413) {
+			return false;
+		}
+		if (diagnostic.details?.retryable !== true) continue;
+		if (
+			status === 408 ||
+			status === 409 ||
+			status === 429 ||
+			(typeof status === "number" && status >= 500 && status <= 599)
+		) {
+			return true;
+		}
+		if (typeof code === "string" && RETRYABLE_TRANSPORT_CODES.has(code.toUpperCase())) return true;
+		if (diagnostic.error?.name && RETRYABLE_ERROR_NAMES.has(diagnostic.error.name)) return true;
+	}
+	return false;
+}
+
+export class Agent {
+	readonly #options: AgentOptions;
+	readonly #listeners: AgentEventListener[] = [];
+	readonly #issuedIds = new Set<string>();
+	readonly #consumedQueueItems = new Set<string>();
+	readonly #toolsByName: ReadonlyMap<string, AgentTool>;
+	#runtimeState: RuntimeState;
+	#operation?: Promise<RunResult>;
+	#activeRun?: RunContext;
+
+	constructor(options: AgentOptions) {
+		if (
+			options.systemPrompt !== undefined &&
+			typeof options.systemPrompt !== "string" &&
+			typeof options.systemPrompt !== "function"
+		) {
+			throw new AgentError("invalid_input", "systemPrompt must be a string or factory");
+		}
+		const toolsByName = new Map<string, AgentTool>();
+		const tools: AgentTool[] = [];
+		for (const tool of options.tools) {
+			if (toolsByName.has(tool.name)) {
+				throw new AgentError("invalid_input", `Tool names must be unique; received "${tool.name}" more than once`);
+			}
+			const snapshot = { ...tool };
+			toolsByName.set(snapshot.name, snapshot);
+			tools.push(snapshot);
+		}
+		this.#options = { ...options, tools };
+		this.#toolsByName = toolsByName;
+		const seed =
+			options.seed === undefined ? { messages: [], pendingFollowUps: [] } : validateAgentSeed(options.seed);
+		for (const message of seed.messages) this.#issuedIds.add(message.id);
+		for (const followUp of seed.pendingFollowUps) this.#issuedIds.add(followUp.id);
+		this.#runtimeState = initialRuntimeState(seed.messages, seed.pendingFollowUps);
+	}
+
+	get state(): AgentState {
+		return this.#runtimeState.public;
+	}
+
+	onEvent(listener: AgentEventListener): () => void {
+		this.#listeners.push(listener);
+		return () => {
+			const index = this.#listeners.indexOf(listener);
+			if (index >= 0) this.#listeners.splice(index, 1);
+		};
+	}
+
+	prompt(input: AgentInput): Promise<RunResult> {
+		validateInput(input);
+		if (this.#operation) {
+			return Promise.reject(new AgentError("busy", "Agent is running; use steer() or followUp() for queued input"));
+		}
+		const runId = this.#allocate("run") as RunId;
+		const inputMessage = this.#createUserMessage(input);
+		let resolveOperation!: (result: RunResult) => void;
+		let rejectOperation!: (error: unknown) => void;
+		const operation = new Promise<RunResult>((resolve, reject) => {
+			resolveOperation = resolve;
+			rejectOperation = reject;
+		});
+		this.#operation = operation;
+		void this.#drive(runId, inputMessage).then(
+			(result) => {
+				if (this.#operation === operation) this.#operation = undefined;
+				resolveOperation(result);
+			},
+			(error) => {
+				if (this.#operation === operation) this.#operation = undefined;
+				rejectOperation(error);
+			},
+		);
+		return operation;
+	}
+
+	async waitForIdle(): Promise<void> {
+		await this.#operation;
+	}
+
+	abort(): void {
+		if (!this.#activeRun || this.#runtimeState.public.status !== "running") {
+			throw new AgentError("invalid_lifecycle", "Agent has no active Run to abort");
+		}
+		this.#runtimeState = reduceState(this.#runtimeState, { type: "clear_steering" });
+		this.#activeRun.controller.abort();
+	}
+
+	steer(input: AgentInput): QueueItemId {
+		validateInput(input);
+		if (!this.#activeRun || this.#runtimeState.public.status !== "running") {
+			throw new AgentError("invalid_lifecycle", "Steering requires an active Run");
+		}
+		if (this.#activeRun.controller.signal.aborted) {
+			throw new AgentError("invalid_lifecycle", "An aborted Run cannot accept Steering");
+		}
+		const id = this.#allocate("queue_item") as QueueItemId;
+		this.#runtimeState = reduceState(this.#runtimeState, {
+			type: "queue_steering",
+			item: cloneFrozen({ id, content: structuredClone(input) }),
+		});
+		return id;
+	}
+
+	followUp(input: AgentInput): QueueItemId {
+		validateInput(input);
+		if (!this.#activeRun) {
+			throw new AgentError("invalid_lifecycle", "Follow-up requires an active or settling Run");
+		}
+		const id = this.#allocate("queue_item") as QueueItemId;
+		this.#runtimeState = reduceState(this.#runtimeState, {
+			type: "queue_follow_up",
+			item: cloneFrozen({ id, content: structuredClone(input) }),
+		});
+		return id;
+	}
+
+	cancelQueueItem(id: QueueItemId): void {
+		const pending =
+			this.#runtimeState.public.pendingSteering.some((item) => item.id === id) ||
+			this.#runtimeState.public.pendingFollowUps.some((item) => item.id === id);
+		if (pending) {
+			this.#runtimeState = reduceState(this.#runtimeState, { type: "remove_queue_item", id });
+			return;
+		}
+		if (this.#consumedQueueItems.has(id)) {
+			throw new AgentError("queue_item_not_cancellable", `Queue item "${id}" has already been consumed`);
+		}
+		throw new AgentError("queue_item_not_found", `Queue item "${id}" was not found`);
+	}
+
+	#createUserMessage(input: AgentInput): AgentMessage<UserMessage> {
+		return cloneFrozen({
+			id: this.#allocate("message") as MessageId,
+			message: {
+				role: "user",
+				content: structuredClone(input),
+				timestamp: this.#options.clock.now(),
+			},
+		});
+	}
+
+	#allocate(kind: IdKind): string {
+		const value = this.#options.idGenerator.generate(kind);
+		if (!isPersistenceSafeId(value) || this.#issuedIds.has(value)) {
+			throw new AgentError("invalid_lifecycle", `IdGenerator returned an invalid or duplicate ${kind} ID`);
+		}
+		this.#issuedIds.add(value);
+		return value;
+	}
+
+	async #drive(runId: RunId, inputMessage: AgentMessage<UserMessage>): Promise<RunResult> {
+		const initialResult = await this.#run(runId, "prompt", inputMessage);
+		while (this.#runtimeState.public.pendingFollowUps.length > 0) {
+			const followUp = this.#runtimeState.public.pendingFollowUps[0]!;
+			const followUpRunId = this.#allocate("run") as RunId;
+			const followUpMessage = this.#createUserMessage(followUp.content as AgentInput);
+			this.#consumedQueueItems.add(followUp.id);
+			this.#runtimeState = reduceState(this.#runtimeState, { type: "remove_queue_item", id: followUp.id });
+			await this.#run(followUpRunId, "follow_up", followUpMessage, followUp.id);
+		}
+		return initialResult;
+	}
+
+	async #run(
+		runId: RunId,
+		source: RunSource,
+		inputMessage: AgentMessage<UserMessage>,
+		queueItemId?: QueueItemId,
+	): Promise<RunResult> {
+		const run: RunContext = {
+			id: runId,
+			sequence: 0,
+			controller: new AbortController(),
+			listenerFailures: [],
+		};
+		this.#activeRun = run;
+		let outcome: RunOutcome = "error";
+		let failure: RunFailure | undefined;
+		let finalMessageId: MessageId | undefined;
+		let activeTurnId: TurnId | undefined;
+		let turnEnded = true;
+		let unexpected: unknown;
+
+		try {
+			const systemPrompt =
+				typeof this.#options.systemPrompt === "function"
+					? this.#options.systemPrompt()
+					: this.#options.systemPrompt;
+			if (systemPrompt !== undefined && typeof systemPrompt !== "string") {
+				throw new AgentError("invalid_input", "System Prompt factory must return a string");
+			}
+			run.systemPrompt = systemPrompt;
+			await this.#emit(run, { type: "run_start", source, inputMessage, queueItemId });
+			while (true) {
+				if (run.controller.signal.aborted) {
+					outcome = "aborted";
+					break;
+				}
+				activeTurnId = this.#allocate("turn") as TurnId;
+				turnEnded = false;
+				const steeringMessages = this.#consumeSteering();
+				await this.#emit(run, { type: "turn_start", turnId: activeTurnId, steeringMessages });
+				if (run.controller.signal.aborted) {
+					outcome = "aborted";
+					await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
+					turnEnded = true;
+					break;
+				}
+
+				const attempt = await this.#streamTurn(run, activeTurnId);
+				outcome = attempt.outcome;
+				if (attempt.outcome !== "success") {
+					if (attempt.outcome === "error") {
+						failure = { kind: "model", message: attempt.message.message.errorMessage ?? "Model call failed" };
+					}
+					await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
+					turnEnded = true;
+					break;
+				}
+
+				finalMessageId = attempt.message.id;
+				await this.#emit(run, {
+					type: "message_end",
+					turnId: activeTurnId,
+					attemptId: attempt.attemptId,
+					message: attempt.message,
+				});
+				const toolCalls = attempt.message.message.content.filter(
+					(block): block is ToolCall => block.type === "toolCall",
+				);
+				if (toolCalls.length > 0) {
+					const batch = await this.#executeToolBatch(
+						run,
+						activeTurnId,
+						toolCalls,
+						attempt.message.message.stopReason === "length",
+					);
+					outcome = batch.outcome;
+					if (batch.fatal !== undefined) {
+						unexpected = batch.fatal;
+						failure = { kind: "tool", message: errorMessage(batch.fatal) };
+					}
+				} else {
+					outcome = run.controller.signal.aborted ? "aborted" : "success";
+				}
+
+				await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
+				turnEnded = true;
+				activeTurnId = undefined;
+				if (run.controller.signal.aborted) outcome = "aborted";
+				if (
+					outcome !== "success" ||
+					(toolCalls.length === 0 && this.#runtimeState.public.pendingSteering.length === 0)
+				) {
+					break;
+				}
+			}
+		} catch (error) {
+			if (error instanceof ListenerFailureSignal) {
+				run.controller.abort();
+				failure = { kind: "listener", message: "An Agent event listener failed" };
+			} else if (run.controller.signal.aborted) {
+				failure = undefined;
+			} else {
+				unexpected = error;
+				failure = { kind: "runtime", message: errorMessage(error) };
+			}
+			outcome = run.controller.signal.aborted && !(error instanceof ListenerFailureSignal) ? "aborted" : "error";
+		} finally {
+			if (activeTurnId && !turnEnded) {
+				await this.#emitCleanup(run, { type: "turn_end", turnId: activeTurnId, outcome });
+			}
+			await this.#emitCleanup(run, { type: "run_end", outcome, failure });
+			this.#runtimeState = reduceState(this.#runtimeState, { type: "settled" });
+			this.#activeRun = undefined;
+		}
+
+		if (run.listenerFailures.length > 0) {
+			throw new AgentError("listener_failed", "An Agent event listener failed", {
+				cause: run.listenerFailures[0],
+			});
+		}
+		if (unexpected !== undefined) throw unexpected;
+		return deepFreeze({ runId, outcome, failure, finalMessageId });
+	}
+
+	#consumeSteering(): AgentMessage<UserMessage>[] {
+		const queued = [...this.#runtimeState.public.pendingSteering];
+		const messages = queued.map((item) => this.#createUserMessage(item.content as AgentInput));
+		for (const item of queued) {
+			this.#consumedQueueItems.add(item.id);
+			this.#runtimeState = reduceState(this.#runtimeState, { type: "remove_queue_item", id: item.id });
+		}
+		return messages;
+	}
+
+	async #streamTurn(run: RunContext, turnId: TurnId): Promise<AttemptResult> {
+		let attempt = 1;
+		while (true) {
+			const result = await this.#streamAttempt(run, turnId, attempt);
+			if (result.outcome !== "error" || !this.#options.retry || !isTransientAssistantFailure(result.message)) {
+				return result;
+			}
+			const decision = await this.#options.retry.policy.decide(
+				deepFreeze({
+					runId: run.id,
+					turnId,
+					attemptId: result.attemptId,
+					attempt,
+					message: result.message,
+					transient: true,
+				}),
+			);
+			if (!decision.retry) return result;
+			if (!Number.isFinite(decision.delayMs) || decision.delayMs < 0 || decision.reason.length === 0) {
+				throw new Error("TurnRetryPolicy returned an invalid retry schedule");
+			}
+			if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+			await this.#emit(run, {
+				type: "retry_scheduled",
+				turnId,
+				attemptId: result.attemptId,
+				attempt,
+				delayMs: decision.delayMs,
+				reason: decision.reason,
+			});
+			try {
+				await this.#options.retry.delay.wait(decision.delayMs, run.controller.signal);
+			} catch (error) {
+				if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+				throw error;
+			}
+			if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+			attempt++;
+		}
+	}
+
+	async #streamAttempt(run: RunContext, turnId: TurnId, attempt: number): Promise<AttemptResult> {
+		const attemptId = this.#allocate("attempt") as AttemptId;
+		const messageId = this.#allocate("message") as MessageId;
+		await this.#emit(run, { type: "attempt_start", turnId, attemptId, messageId, attempt });
+
+		const context: Context = {
+			systemPrompt: run.systemPrompt,
+			messages: this.#runtimeState.public.messages.map(({ message }) => structuredClone(message) as Message),
+			tools: this.#options.tools.map(({ name, description, parameters, constrainedSampling }) => ({
+				name,
+				description,
+				parameters,
+				constrainedSampling,
+			})),
+		};
+		const stream = await this.#options.stream({
+			context,
+			signal: run.controller.signal,
+			runId: run.id,
+			turnId,
+			attemptId,
+		});
+		let terminal: AssistantMessageEvent | undefined;
+		for await (const event of stream) {
+			if (event.type === "start") {
+				await this.#emit(run, { type: "message_start", turnId, attemptId, messageId });
+				continue;
+			}
+			const delta = eventDelta(event);
+			if (delta) {
+				await this.#emit(run, { type: "message_update", turnId, attemptId, messageId, delta });
+				continue;
+			}
+			terminal = event;
+		}
+		if (!terminal || (terminal.type !== "done" && terminal.type !== "error")) {
+			throw new Error("Model stream ended without a terminal event");
+		}
+		const message = cloneFrozen({
+			id: messageId,
+			message: terminal.type === "done" ? terminal.message : terminal.error,
+		});
+		const outcome = terminal.type === "done" ? "success" : terminal.reason;
+		await this.#emit(run, {
+			type: "attempt_end",
+			turnId,
+			attemptId,
+			messageId,
+			attempt,
+			outcome,
+			discarded: outcome !== "success",
+			candidate: message,
+		});
+		return { attemptId, outcome, message };
+	}
+
+	async #executeToolBatch(
+		run: RunContext,
+		turnId: TurnId,
+		toolCalls: readonly ToolCall[],
+		truncated: boolean,
+	): Promise<ToolBatchResult> {
+		if (truncated) {
+			await this.#rejectTruncatedToolCalls(run, turnId, toolCalls);
+			return { outcome: run.controller.signal.aborted ? "aborted" : "success" };
+		}
+		const accepted = await this.#preflightTools(run, turnId, toolCalls);
+		let cursor = 0;
+		while (cursor < accepted.length) {
+			const first = accepted[cursor]!;
+			if (run.controller.signal.aborted) {
+				await this.#rejectUnstarted(run, turnId, accepted.slice(cursor), "aborted");
+				return { outcome: "aborted" };
+			}
+			const batch = [first];
+			if (first.tool.parallelSafe) {
+				let next = cursor + 1;
+				while (
+					next < accepted.length &&
+					accepted[next]!.tool.parallelSafe &&
+					accepted[next]!.invocation.sourceIndex === accepted[next - 1]!.invocation.sourceIndex + 1
+				) {
+					batch.push(accepted[next]!);
+					next++;
+				}
+			}
+
+			let batchResult: ToolBatchResult;
+			try {
+				batchResult =
+					batch.length === 1
+						? await this.#executeSingleTool(run, turnId, batch[0]!)
+						: await this.#executeParallelTools(run, turnId, batch);
+			} catch (error) {
+				run.controller.abort();
+				await this.#rejectUnstarted(run, turnId, accepted.slice(cursor + batch.length), "aborted", true);
+				throw error;
+			}
+			cursor += batch.length;
+			if (batchResult.fatal !== undefined) {
+				await this.#rejectUnstarted(run, turnId, accepted.slice(cursor), "not_started");
+				return { outcome: "error", fatal: batchResult.fatal };
+			}
+			if (batchResult.outcome === "aborted" || run.controller.signal.aborted) {
+				await this.#rejectUnstarted(run, turnId, accepted.slice(cursor), "aborted");
+				return { outcome: "aborted" };
+			}
+		}
+		return { outcome: run.controller.signal.aborted ? "aborted" : "success" };
+	}
+
+	async #rejectTruncatedToolCalls(run: RunContext, turnId: TurnId, toolCalls: readonly ToolCall[]): Promise<void> {
+		for (let sourceIndex = 0; sourceIndex < toolCalls.length; sourceIndex++) {
+			const call = toolCalls[sourceIndex]!;
+			const invocation = this.#invocation(
+				call,
+				sourceIndex,
+				this.#allocate("tool_invocation") as ToolInvocationId,
+				this.#allocate("message") as MessageId,
+				this.#toolsByName.get(call.name),
+			);
+			await this.#rejectDuringPreflight(
+				run,
+				turnId,
+				invocation,
+				"invalid",
+				`Tool "${call.name}" was not executed because the assistant response was truncated`,
+				[],
+				toolCalls,
+				sourceIndex + 1,
+			);
+		}
+	}
+
+	async #preflightTools(run: RunContext, turnId: TurnId, toolCalls: readonly ToolCall[]): Promise<AcceptedTool[]> {
+		const accepted: AcceptedTool[] = [];
+		for (let sourceIndex = 0; sourceIndex < toolCalls.length; sourceIndex++) {
+			const call = toolCalls[sourceIndex]!;
+			const invocationId = this.#allocate("tool_invocation") as ToolInvocationId;
+			const resultMessageId = this.#allocate("message") as MessageId;
+			const tool = this.#toolsByName.get(call.name);
+			if (!tool) {
+				const invocation = this.#invocation(call, sourceIndex, invocationId, resultMessageId);
+				await this.#rejectDuringPreflight(
+					run,
+					turnId,
+					invocation,
+					"missing",
+					`Tool "${call.name}" is not available`,
+					accepted,
+					toolCalls,
+					sourceIndex + 1,
+				);
+				continue;
+			}
+
+			let arguments_: Record<string, unknown>;
+			try {
+				arguments_ = validateToolArguments(tool, call) as Record<string, unknown>;
+			} catch (error) {
+				const invocation = this.#invocation(call, sourceIndex, invocationId, resultMessageId, tool);
+				await this.#rejectDuringPreflight(
+					run,
+					turnId,
+					invocation,
+					"invalid",
+					errorMessage(error),
+					accepted,
+					toolCalls,
+					sourceIndex + 1,
+				);
+				continue;
+			}
+			const invocation = this.#invocation(
+				{ ...call, arguments: arguments_ },
+				sourceIndex,
+				invocationId,
+				resultMessageId,
+				tool,
+			);
+			if (run.controller.signal.aborted) {
+				await this.#rejectDuringPreflight(
+					run,
+					turnId,
+					invocation,
+					"aborted",
+					`Tool "${call.name}" was not started`,
+					accepted,
+					toolCalls,
+					sourceIndex + 1,
+				);
+				continue;
+			}
+			let decision: ToolPolicyDecision | undefined;
+			try {
+				decision = await this.#options.policyGate.check({
+					runId: run.id,
+					turnId,
+					invocationId,
+					resultMessageId,
+					providerToolCallId: call.id,
+					toolName: call.name,
+					arguments: invocation.arguments,
+					replaySafety: tool.replaySafety,
+				});
+				if (decision.decision !== "allow" && decision.decision !== "reject") {
+					throw new Error("PolicyGate returned an invalid decision");
+				}
+			} catch (error) {
+				await this.#finishPreflightFailure(run, turnId, accepted, toolCalls, sourceIndex + 1, error, invocation);
+			}
+			if (decision === undefined) throw new Error("PolicyGate did not produce a decision");
+			if (run.controller.signal.aborted) {
+				await this.#rejectDuringPreflight(
+					run,
+					turnId,
+					invocation,
+					"aborted",
+					`Tool "${call.name}" was not started`,
+					accepted,
+					toolCalls,
+					sourceIndex + 1,
+				);
+				continue;
+			}
+			if (decision.decision === "reject") {
+				await this.#rejectDuringPreflight(
+					run,
+					turnId,
+					invocation,
+					"policy",
+					decision.reason,
+					accepted,
+					toolCalls,
+					sourceIndex + 1,
+				);
+				continue;
+			}
+			accepted.push({ call, tool, arguments: arguments_, invocation });
+		}
+		return accepted;
+	}
+
+	async #rejectDuringPreflight(
+		run: RunContext,
+		turnId: TurnId,
+		invocation: ToolInvocation,
+		reason: ToolRejectionReason,
+		message: string,
+		accepted: readonly AcceptedTool[],
+		toolCalls: readonly ToolCall[],
+		futureStartIndex: number,
+	): Promise<void> {
+		try {
+			await this.#rejectTool(run, turnId, invocation, reason, message);
+		} catch (error) {
+			await this.#finishPreflightFailure(run, turnId, accepted, toolCalls, futureStartIndex, error);
+		}
+	}
+
+	async #finishPreflightFailure(
+		run: RunContext,
+		turnId: TurnId,
+		accepted: readonly AcceptedTool[],
+		toolCalls: readonly ToolCall[],
+		futureStartIndex: number,
+		error: unknown,
+		current?: ToolInvocation,
+	): Promise<never> {
+		run.controller.abort();
+		await this.#rejectUnstarted(run, turnId, accepted, "aborted", true);
+		if (current) {
+			await this.#rejectTool(
+				run,
+				turnId,
+				current,
+				"not_started",
+				`Tool "${current.toolName}" was not started after policy preflight failed`,
+				true,
+			);
+		}
+		for (let sourceIndex = futureStartIndex; sourceIndex < toolCalls.length; sourceIndex++) {
+			const call = toolCalls[sourceIndex]!;
+			const tool = this.#toolsByName.get(call.name);
+			const invocation = this.#invocation(
+				call,
+				sourceIndex,
+				this.#allocate("tool_invocation") as ToolInvocationId,
+				this.#allocate("message") as MessageId,
+				tool,
+			);
+			await this.#rejectTool(
+				run,
+				turnId,
+				invocation,
+				"not_started",
+				`Tool "${call.name}" was not started after preflight failed`,
+				true,
+			);
+		}
+		throw error;
+	}
+
+	#invocation(
+		call: ToolCall,
+		sourceIndex: number,
+		id: ToolInvocationId,
+		resultMessageId: MessageId,
+		tool?: AgentTool,
+	): ToolInvocation {
+		return cloneFrozen({
+			id,
+			resultMessageId,
+			providerToolCallId: call.id,
+			toolName: call.name,
+			arguments: structuredClone(call.arguments),
+			sourceIndex,
+			replaySafety: tool?.replaySafety,
+		});
+	}
+
+	async #rejectUnstarted(
+		run: RunContext,
+		turnId: TurnId,
+		entries: readonly AcceptedTool[],
+		reason: Extract<ToolRejectionReason, "aborted" | "not_started">,
+		cleanup = false,
+	): Promise<void> {
+		for (const entry of entries) {
+			await this.#rejectTool(
+				run,
+				turnId,
+				entry.invocation,
+				reason,
+				reason === "aborted"
+					? `Tool "${entry.call.name}" was not started because the Run was aborted`
+					: `Tool "${entry.call.name}" was not started after another Tool failed`,
+				cleanup,
+			);
+		}
+	}
+
+	async #rejectTool(
+		run: RunContext,
+		turnId: TurnId,
+		invocation: ToolInvocation,
+		reason: ToolRejectionReason,
+		message: string,
+		cleanup = false,
+	): Promise<void> {
+		const result = this.#toolResult(invocation, {
+			content: message,
+			details: { status: "rejected", reason },
+			isError: true,
+		});
+		const payload = {
+			type: "tool_execution_rejected",
+			turnId,
+			invocation,
+			reason,
+			message,
+			result,
+		} as const;
+		if (cleanup) await this.#emitCleanup(run, payload);
+		else await this.#emit(run, payload);
+	}
+
+	async #executeSingleTool(run: RunContext, turnId: TurnId, entry: AcceptedTool): Promise<ToolBatchResult> {
+		try {
+			await this.#emit(run, { type: "tool_execution_start", turnId, invocation: entry.invocation });
+		} catch (error) {
+			run.controller.abort();
+			const settlement = this.#abortedSettlement(entry);
+			await this.#emitCleanup(run, {
+				type: "tool_execution_end",
+				turnId,
+				invocation: entry.invocation,
+				outcome: settlement.outcome,
+				result: settlement.result,
+			});
+			throw error;
+		}
+		const settlement = run.controller.signal.aborted
+			? this.#abortedSettlement(entry)
+			: await this.#settleTool(run, turnId, entry);
+		await this.#emit(run, {
+			type: "tool_execution_end",
+			turnId,
+			invocation: entry.invocation,
+			outcome: settlement.outcome,
+			result: settlement.result,
+		});
+		return settlement.error === undefined
+			? { outcome: settlement.outcome === "aborted" ? "aborted" : "success" }
+			: { outcome: "error", fatal: settlement.error };
+	}
+
+	async #executeParallelTools(
+		run: RunContext,
+		turnId: TurnId,
+		entries: readonly AcceptedTool[],
+	): Promise<ToolBatchResult> {
+		const completed: ToolSettlement[] = [];
+		let wake: (() => void) | undefined;
+		let launched = 0;
+		let dispatchFailure: unknown;
+		for (const [index, entry] of entries.entries()) {
+			if (run.controller.signal.aborted) break;
+			try {
+				await this.#emit(run, { type: "tool_execution_start", turnId, invocation: entry.invocation });
+			} catch (error) {
+				dispatchFailure = error;
+				run.controller.abort();
+				launched++;
+				completed.push(this.#abortedSettlement(entry));
+				await this.#rejectUnstarted(run, turnId, entries.slice(index + 1), "aborted", true);
+				break;
+			}
+			launched++;
+			const settlement = run.controller.signal.aborted
+				? Promise.resolve(this.#abortedSettlement(entry))
+				: this.#settleTool(run, turnId, entry);
+			void settlement.then((value) => {
+				completed.push(value);
+				wake?.();
+				wake = undefined;
+			});
+		}
+		if (dispatchFailure === undefined && launched < entries.length) {
+			await this.#rejectUnstarted(run, turnId, entries.slice(launched), "aborted");
+		}
+
+		let settled = 0;
+		let fatal: unknown;
+		while (settled < launched) {
+			if (completed.length === 0) {
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+			}
+			const next = completed.shift();
+			if (!next) continue;
+			settled++;
+			const payload = {
+				type: "tool_execution_end",
+				turnId,
+				invocation: next.entry.invocation,
+				outcome: next.outcome,
+				result: next.result,
+			} as const;
+			if (dispatchFailure !== undefined) {
+				await this.#emitCleanup(run, payload);
+			} else {
+				try {
+					await this.#emit(run, payload);
+				} catch (error) {
+					dispatchFailure = error;
+					run.controller.abort();
+				}
+			}
+			fatal ??= next.error;
+		}
+		if (dispatchFailure !== undefined) throw dispatchFailure;
+		if (fatal !== undefined) return { outcome: "error", fatal };
+		return { outcome: run.controller.signal.aborted ? "aborted" : "success" };
+	}
+
+	async #settleTool(run: RunContext, turnId: TurnId, entry: AcceptedTool): Promise<ToolSettlement> {
+		try {
+			const output = await entry.tool.execute(entry.arguments, {
+				signal: run.controller.signal,
+				runId: run.id,
+				turnId,
+				invocationId: entry.invocation.id,
+				resultMessageId: entry.invocation.resultMessageId,
+				providerToolCallId: entry.invocation.providerToolCallId,
+			});
+			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
+			return {
+				entry,
+				outcome: "success",
+				result: this.#toolResult(entry.invocation, output),
+			};
+		} catch (error) {
+			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
+			return {
+				entry,
+				outcome: "error",
+				error,
+				result: this.#toolResult(entry.invocation, {
+					content: `Tool "${entry.call.name}" failed: ${errorMessage(error)}`,
+					details: { status: "failed", error: { message: errorMessage(error) } },
+					isError: true,
+				}),
+			};
+		}
+	}
+
+	#abortedSettlement(entry: AcceptedTool): ToolSettlement {
+		return {
+			entry,
+			outcome: "aborted",
+			result: this.#toolResult(entry.invocation, {
+				content: `Tool "${entry.call.name}" was aborted`,
+				details: { status: "aborted" },
+				isError: true,
+			}),
+		};
+	}
+
+	#toolResult(invocation: ToolInvocation, output: ToolExecutionOutput): AgentMessage<ToolResultMessage> {
+		return cloneFrozen({
+			id: invocation.resultMessageId,
+			message: {
+				role: "toolResult",
+				toolCallId: invocation.providerToolCallId,
+				toolName: invocation.toolName,
+				content: normalizedToolContent(output.content),
+				details: structuredClone(output.details),
+				isError: output.isError ?? false,
+				timestamp: this.#options.clock.now(),
+			},
+		});
+	}
+
+	async #emit(run: RunContext, payload: AgentEventPayload): Promise<void> {
+		await this.#dispatch(run, payload);
+		if (run.listenerFailures.length > 0) throw new ListenerFailureSignal();
+	}
+
+	async #emitCleanup(run: RunContext, payload: AgentEventPayload): Promise<void> {
+		try {
+			await this.#dispatch(run, payload);
+		} catch (error) {
+			run.listenerFailures.push(error);
+		}
+	}
+
+	async #dispatch(run: RunContext, payload: AgentEventPayload): Promise<void> {
+		const event = deepFreeze({
+			...payload,
+			runId: run.id,
+			sequence: ++run.sequence,
+			timestamp: this.#options.clock.now(),
+		}) as AgentEvent;
+		this.#runtimeState = reduceState(this.#runtimeState, { type: "event", event });
+		for (const listener of [...this.#listeners]) {
+			try {
+				await listener(event);
+			} catch (error) {
+				run.listenerFailures.push(error);
+			}
+		}
+	}
+}
