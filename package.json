@@ -1,0 +1,11 @@
+{
+	"name": "coda",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"workspaces": [],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {}
+}
