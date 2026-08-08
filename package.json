@@ -4,13 +4,14 @@
 	"private": true,
 	"type": "module",
 	"workspaces": [
-		"packages/ai"
+		"packages/ai",
+		"packages/tui"
 	],
 	"engines": {
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"build": "npm run build --workspace=@coda/ai",
+		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui",
 		"check": "npm run build && npm run check --workspaces --if-present",
 		"models:update": "npm run models:update --workspace=@coda/ai",
 		"test": "npm run build && npm run test --workspaces --if-present",
