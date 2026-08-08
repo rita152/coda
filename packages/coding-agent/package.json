@@ -1,0 +1,40 @@
+{
+	"name": "@coda/coding-agent",
+	"version": "0.1.0",
+	"description": "Terminal Coding Agent application for Coda",
+	"private": true,
+	"type": "module",
+	"sideEffects": false,
+	"bin": {
+		"coda": "./dist/bin.js"
+	},
+	"exports": {},
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md",
+		"THIRD_PARTY_NOTICES.md"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json && node scripts/mark-bin-executable.mjs dist/bin.js",
+		"check": "tsc --noEmit -p tsconfig.json && biome check src test scripts vitest*.config.ts",
+		"test": "vitest run",
+		"test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
+		"pack:dry-run": "npm pack --dry-run"
+	},
+	"dependencies": {
+		"@coda/agent": "0.1.0",
+		"@coda/ai": "0.1.0",
+		"@coda/tui": "0.1.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "24.12.4",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"license": "MIT"
+}

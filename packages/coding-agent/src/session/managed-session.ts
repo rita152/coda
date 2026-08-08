@@ -1,0 +1,127 @@
+import type { Agent, AgentEvent } from "@coda/agent";
+import type { SessionRecord, SessionRecordType } from "./records.ts";
+import { eventRecordInputs, reduceSession } from "./records.ts";
+import type {
+	DetachSession,
+	RestoredSessionState,
+	Session,
+	SessionChange,
+	SessionDescriptor,
+	SessionRuntime,
+} from "./types.ts";
+
+export interface SessionJournal {
+	readonly descriptor: SessionDescriptor;
+	readonly records: readonly SessionRecord[];
+	append(record: SessionRecord): Promise<void>;
+	close(): Promise<void>;
+}
+
+function identity(runtime: SessionRuntime, prefix: string): string {
+	const value = runtime.idGenerator.generate("queue_item");
+	if (!value) throw new Error(`Could not allocate ${prefix} identity`);
+	return `${prefix}:${value}`;
+}
+
+export class ManagedSession implements Session {
+	readonly #journal: SessionJournal;
+	readonly #runtime: SessionRuntime;
+	readonly #seed;
+	readonly #restored: RestoredSessionState;
+	#sequence: number;
+	#previousRecordId: string | null;
+	#attached?: Agent;
+	#detach?: () => void;
+	#closed = false;
+	#preparedRun?: { readonly promptVersion: string; readonly promptSha256: string };
+
+	constructor(journal: SessionJournal, runtime: SessionRuntime) {
+		this.#journal = journal;
+		this.#runtime = runtime;
+		const reduced = reduceSession(journal.records);
+		this.#seed = structuredClone(reduced.seed);
+		this.#restored = structuredClone(reduced.restored);
+		const last = journal.records.at(-1);
+		this.#sequence = last?.sequence ?? 0;
+		this.#previousRecordId = last?.recordId ?? null;
+	}
+
+	get descriptor(): SessionDescriptor {
+		return this.#journal.descriptor;
+	}
+
+	get seed() {
+		return structuredClone(this.#seed);
+	}
+
+	get restored(): RestoredSessionState {
+		return structuredClone(this.#restored);
+	}
+
+	attach(agent: Agent): DetachSession {
+		this.#assertOpen();
+		if (this.#attached) throw new Error("Session is already attached to an Agent");
+		this.#attached = agent;
+		this.#detach = agent.onEvent((event) => this.#recordEvent(event));
+		return () => {
+			this.#detach?.();
+			this.#detach = undefined;
+			this.#attached = undefined;
+		};
+	}
+
+	async record(change: SessionChange): Promise<void> {
+		this.#assertOpen();
+		if (change.type === "prepare_run") {
+			this.#preparedRun = { promptVersion: change.promptVersion, promptSha256: change.promptSha256 };
+			return;
+		}
+		if (change.type === "model_selected") {
+			await this.#append("model_selected", { model: change.model, reasoning: change.reasoning });
+			return;
+		}
+		if (change.type === "project_trust_changed") {
+			await this.#append("project_trust_changed", { trust: change.trust });
+			return;
+		}
+		await this.#append(change.type, change.type === "follow_up_enqueued" ? { item: change.item } : { id: change.id });
+	}
+
+	async close(): Promise<void> {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#detach?.();
+		this.#detach = undefined;
+		this.#attached = undefined;
+		await this.#journal.close();
+	}
+
+	async #recordEvent(event: AgentEvent): Promise<void> {
+		for (const input of eventRecordInputs(event, this.#preparedRun)) {
+			await this.#append(input.type, input.payload, event);
+		}
+		if (event.type === "run_start") this.#preparedRun = undefined;
+	}
+
+	async #append(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
+		const recordId = identity(this.#runtime, "record");
+		const record: SessionRecord = {
+			type,
+			recordId,
+			sessionId: this.descriptor.id,
+			sequence: ++this.#sequence,
+			previousRecordId: this.#previousRecordId,
+			timestamp: event?.timestamp ?? this.#runtime.clock.now(),
+			runId: event?.runId,
+			turnId: event && "turnId" in event ? event.turnId : undefined,
+			attemptId: event && "attemptId" in event ? event.attemptId : undefined,
+			payload: structuredClone(payload),
+		};
+		await this.#journal.append(record);
+		this.#previousRecordId = recordId;
+	}
+
+	#assertOpen(): void {
+		if (this.#closed) throw new Error("Session is closed");
+	}
+}

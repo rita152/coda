@@ -1,0 +1,86 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { IdGenerator, IdKind } from "@coda/agent";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@coda/ai";
+import { afterEach, describe, expect, it } from "vitest";
+import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
+import { createNodeFileSystem } from "../src/host/node-file-system.ts";
+import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { testTimeRuntime } from "./time-runtime.ts";
+
+class BufferOutput implements ApplicationOutput {
+	readonly isTTY = false;
+	value = "";
+
+	write(chunk: string): void {
+		this.value += chunk;
+	}
+}
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+describe("Session application composition", () => {
+	it("resolves the restored Session Model before user settings and continues the transcript", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-session-app-"));
+		temporaryDirectories.push(workspace);
+		const canonicalWorkspace = await realpath(workspace);
+		const workspaceId = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 32);
+		let id = 0;
+		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };
+		const sessions = new InMemorySessionManager({ clock: { now: () => 1_300 }, idGenerator });
+		const existing = await sessions.open({
+			workspace: { id: workspaceId, path: canonicalWorkspace },
+			mode: "interactive",
+		});
+		await existing.record({
+			type: "model_selected",
+			model: { provider: "faux", id: "faux-1" },
+			reasoning: "off",
+		});
+		const sessionId = existing.descriptor.id;
+		await existing.close();
+
+		const faux = fauxProvider({ runtime: testTimeRuntime(1_300) });
+		faux.setResponses([fauxAssistantMessage("resumed", { timestamp: 1_300 })]);
+		const models = createModels({ runtime: testTimeRuntime(1_300) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		const application = createCodingAgentApplication({
+			models,
+			sessions,
+			settings: {
+				load: async () => ({ defaultModel: { provider: "missing", id: "wrong" } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout,
+				stderr,
+			},
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 1_300 },
+				idGenerator,
+			},
+		});
+
+		const exitCode = await application.run(["--print", "--resume", sessionId, "continue"]);
+
+		expect(exitCode).toBe(0);
+		expect(stdout.value).toBe("resumed\n");
+		expect(stderr.value).toBe("");
+	});
+});

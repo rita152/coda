@@ -4,18 +4,17 @@
 	"private": true,
 	"type": "module",
 	"workspaces": [
-		"packages/ai",
-		"packages/tui",
-		"packages/agent"
+		"packages/*"
 	],
 	"engines": {
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui && npm run build --workspace=@coda/agent",
+		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/coding-agent",
 		"check": "npm run build && npm run check --workspaces --if-present",
 		"models:update": "npm run models:update --workspace=@coda/ai",
 		"test": "npm run build && npm run test --workspaces --if-present",
+		"test:e2e": "npm run test:e2e --workspace=@coda/coding-agent",
 		"pack:dry-run": "npm run build && npm run pack:dry-run --workspaces --if-present"
 	}
 }
