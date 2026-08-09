@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	type Clock,
 	Component,
 	type CursorPlacement,
 	createSystemScheduler,
@@ -8,6 +9,8 @@ import {
 	type ProcessTerminalInput,
 	type ProcessTerminalOutput,
 	type RenderContext,
+	type ScheduledTask,
+	type Scheduler,
 	type Terminal,
 	type TerminalCapabilities,
 	type TerminalImageSurface,
@@ -16,6 +19,43 @@ import {
 	VirtualTerminal,
 } from "../src/index.ts";
 import { StrictScreen } from "./support/strict-screen.ts";
+
+class ManualTime implements Clock, Scheduler {
+	#now = 0;
+	readonly #tasks: Array<{
+		cancelled: boolean;
+		dueAt: number;
+		run: () => void | Promise<void>;
+	}> = [];
+
+	now(): number {
+		return this.#now;
+	}
+
+	schedule(delayMs: number, run: () => void | Promise<void>): ScheduledTask {
+		const task = { cancelled: false, dueAt: this.#now + delayMs, run };
+		this.#tasks.push(task);
+		return {
+			cancel: () => {
+				task.cancelled = true;
+			},
+		};
+	}
+
+	async advanceBy(delayMs: number): Promise<void> {
+		const target = this.#now + delayMs;
+		while (true) {
+			const next = this.#tasks
+				.filter((task) => !task.cancelled && task.dueAt <= target)
+				.sort((left, right) => left.dueAt - right.dueAt)[0];
+			if (!next) break;
+			next.cancelled = true;
+			this.#now = next.dueAt;
+			await next.run();
+		}
+		this.#now = target;
+	}
+}
 
 class TraceTerminal implements Terminal {
 	readonly available: boolean = true;
@@ -212,6 +252,150 @@ class FailingDisposeImageSurface extends TraceImageSurface {
 }
 
 describe("FullScreenTui", () => {
+	it("presents escaped diagnostics in a stable non-blocking footer overlay", async () => {
+		const terminal = new VirtualTerminal({ columns: 160, rows: 5 });
+		const screen = new StrictScreen(160, 5);
+		const time = new ManualTime();
+		const tui = new FullScreenTui({
+			terminal,
+			root: new MutableScreen(["root", "", "", "", "footer"]),
+			clock: time,
+			scheduler: time,
+			keybindings: [],
+		});
+		await tui.start();
+		screen.write(terminal.takeOutput());
+
+		tui.presentDiagnostic({
+			code: "terminal.unknown-input",
+			message: "Terminal emitted an unknown escape sequence",
+			details: { sequence: "\x1b[27;2;13~", c1: "\u009b2J" },
+		});
+		expect(screen.viewport().at(-1)).toBe("footer");
+
+		await time.advanceBy(150);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("[terminal.unknown-input]");
+		expect(screen.viewport().at(-1)).toContain('sequence="\\u001b[27;2;13~"');
+		expect(screen.viewport().at(-1)).toContain('c1="\\u009b2J"');
+
+		await time.advanceBy(3_999);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("[terminal.unknown-input]");
+
+		await time.advanceBy(1);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toBe("footer");
+		await tui.stop();
+	});
+
+	it("renders diagnostics without requiring an explicit flush", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 4 });
+		const tui = new FullScreenTui({
+			terminal,
+			root: new MutableScreen(["root", "", "", "footer"]),
+			clock: { now: () => 0 },
+			scheduler: createSystemScheduler(),
+			keybindings: [],
+		});
+		await tui.start();
+		terminal.clearOutput();
+
+		tui.presentDiagnostic({ code: "terminal.unknown-input", message: "unknown key" });
+		await new Promise<void>((resolve) => setTimeout(resolve, 250));
+
+		expect(terminal.readOutput()).toContain("[terminal.unknown-input] unknown key");
+		await tui.stop();
+	});
+
+	it("deduplicates diagnostic bursts and limits visible updates to once per second", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 4 });
+		const screen = new StrictScreen(80, 4);
+		const time = new ManualTime();
+		const tui = new FullScreenTui({
+			terminal,
+			root: new MutableScreen(["root", "", "", "footer"]),
+			clock: time,
+			scheduler: time,
+			keybindings: [],
+		});
+		await tui.start();
+		screen.write(terminal.takeOutput());
+		const repeated = { code: "terminal.unknown-input", message: "unknown A" };
+		tui.presentDiagnostic(repeated);
+		tui.presentDiagnostic(repeated);
+		tui.presentDiagnostic(repeated);
+		await time.advanceBy(150);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("unknown A ×3");
+
+		tui.presentDiagnostic({ code: "terminal.unknown-input", message: "unknown B" });
+		await time.advanceBy(999);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("unknown A ×3");
+
+		await time.advanceBy(1);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("unknown B");
+		await tui.stop();
+	});
+
+	it("does not postpone a diagnostic batch while new diagnostics keep arriving", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 4 });
+		const screen = new StrictScreen(80, 4);
+		const time = new ManualTime();
+		const tui = new FullScreenTui({
+			terminal,
+			root: new MutableScreen(["root", "", "", "footer"]),
+			clock: time,
+			scheduler: time,
+			keybindings: [],
+		});
+		await tui.start();
+		screen.write(terminal.takeOutput());
+
+		tui.presentDiagnostic({ code: "diagnostic.first", message: "first" });
+		await time.advanceBy(100);
+		tui.presentDiagnostic({ code: "diagnostic.latest", message: "latest" });
+		await time.advanceBy(50);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+
+		expect(screen.viewport().at(-1)).toContain("latest");
+		await tui.stop();
+	});
+
+	it("bounds the in-memory diagnostic queue and reports overflow", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 4 });
+		const screen = new StrictScreen(80, 4);
+		const time = new ManualTime();
+		const tui = new FullScreenTui({
+			terminal,
+			root: new MutableScreen(["root", "", "", "footer"]),
+			clock: time,
+			scheduler: time,
+			keybindings: [],
+		});
+		await tui.start();
+		screen.write(terminal.takeOutput());
+		for (let index = 0; index < 65; index++) {
+			tui.presentDiagnostic({ code: `diagnostic.${index}`, message: `message ${index}` });
+		}
+
+		await time.advanceBy(150);
+		await tui.flush();
+		screen.write(terminal.takeOutput());
+		expect(screen.viewport().at(-1)).toContain("message 64");
+		expect(screen.viewport().at(-1)).toContain("1 older dropped");
+		await tui.stop();
+	});
+
 	it("negotiates and restores Kitty keyboard flags on the alternate screen", async () => {
 		const input = new ScreenAwareInput();
 		const screen = new StrictScreen(80, 24);

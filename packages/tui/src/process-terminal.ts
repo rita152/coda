@@ -544,6 +544,11 @@ export class ProcessTerminal implements Terminal {
 			this.#queueInput(kitty);
 			return;
 		}
+		const xtermModified = parseXtermModifiedKey(sequence);
+		if (xtermModified) {
+			this.#queueInput(xtermModified);
+			return;
+		}
 
 		const legacy = LEGACY_KEYS.get(sequence);
 		if (legacy) {
@@ -706,6 +711,42 @@ function keyFromPlainSegment(segment: string): KeyInput | undefined {
 		}
 	}
 	return undefined;
+}
+
+function parseXtermModifiedKey(sequence: string): TerminalInput | undefined {
+	if (!sequence.startsWith("\x1b[")) return undefined;
+	const match = /^27;(\d+);(\d+)~$/.exec(sequence.slice(2));
+	if (!match) return undefined;
+	const modifier = Number.parseInt(match[1]!, 10);
+	const codePoint = Number.parseInt(match[2]!, 10);
+	if (!Number.isSafeInteger(modifier) || modifier < 1 || modifier > 16 || !Number.isSafeInteger(codePoint)) {
+		return undefined;
+	}
+	return inputFromCodePoint(codePoint, decodeModifiers(modifier));
+}
+
+function inputFromCodePoint(codePoint: number, modifiers: Modifiers): TerminalInput | undefined {
+	if (codePoint < 1 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return undefined;
+	const segment = String.fromCodePoint(codePoint);
+	const plain = keyFromPlainSegment(segment);
+	if (!plain) {
+		if (modifiers.control || modifiers.alt || modifiers.meta) return undefined;
+		return Object.freeze({ type: "text", text: segment });
+	}
+	const resolvedModifiers = {
+		shift: plain.shift || modifiers.shift,
+		control: plain.control || modifiers.control,
+		alt: plain.alt || modifiers.alt,
+		meta: plain.meta || modifiers.meta,
+	};
+	const insertable = !resolvedModifiers.control && !resolvedModifiers.alt && !resolvedModifiers.meta;
+	const text =
+		insertable && plain.text !== undefined
+			? resolvedModifiers.shift && /^[a-z]$/.test(plain.text)
+				? plain.text.toUpperCase()
+				: plain.text
+			: undefined;
+	return keyInput(plain.key, text, resolvedModifiers);
 }
 
 function parseKittyKey(sequence: string): KeyInput | undefined {

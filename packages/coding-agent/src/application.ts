@@ -13,6 +13,7 @@ import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
 import { InteractiveApprovalHandler } from "./interactive/approval.ts";
 import type { ChatAttachment } from "./interactive/chat-component.ts";
+import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { AttachmentTransaction } from "./interactive/input-controller.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
 import {
@@ -102,6 +103,7 @@ export interface CodingAgentApplicationOptions {
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
 	readonly io: ApplicationIO;
+	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly runtime: ApplicationRuntime;
 	readonly terminalFactory?: TerminalFactory;
 	readonly keybindings?: readonly Keybinding[];
@@ -386,6 +388,7 @@ function promptRuntime(options: CodingAgentApplicationOptions, terminal: Termina
 		scheduler: options.runtime.scheduler,
 		keybindings: options.keybindings ?? [],
 		diagnostics: options.diagnostics,
+		fullScreenOutput: options.fullScreenOutput,
 		lifecycle: options.runtime.interactiveLifecycle,
 	};
 }
@@ -469,7 +472,14 @@ async function selectModelInteractively(
 	return { provider: selected.slice(0, separator), id: selected.slice(separator + 1) };
 }
 
-export function createCodingAgentApplication(options: CodingAgentApplicationOptions): CodingAgentApplication {
+export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
+	const fullScreenOutput = providedOptions.fullScreenOutput ?? new FullScreenOutputGate(providedOptions.io);
+	const options: CodingAgentApplicationOptions = {
+		...providedOptions,
+		io: fullScreenOutput.io,
+		fullScreenOutput,
+		diagnostics: providedOptions.diagnostics ?? fullScreenOutput.diagnostics,
+	};
 	const sessions =
 		options.sessions ??
 		new InMemorySessionManager({ clock: options.runtime.clock, idGenerator: options.runtime.idGenerator });
@@ -796,6 +806,7 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 							imageSurface,
 							keybindings: options.keybindings ?? [],
 							diagnostics: options.diagnostics,
+							fullScreenOutput: options.fullScreenOutput,
 							approval: interactiveApproval,
 							modelLabel: `${model.provider}/${model.id}`,
 							workspaceLabel: basename(workspace.root) || workspace.root,

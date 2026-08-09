@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { StrictScreen } from "../../../tui/test/support/strict-screen.ts";
 
 const EXPECT = "/usr/bin/expect";
 const CLI = fileURLToPath(new URL("../../dist/bin.js", import.meta.url));
@@ -149,7 +150,7 @@ expect {
   eof { exit 75 }
 }
 send -i $spawn_id -- "first-line"
-send -i $spawn_id -- "\033\[13;2u"
+send -i $spawn_id -- "\033\[27;2;13~"
 send -i $spawn_id -- "second-line"
 expect {
   -exact "second-line" {}
@@ -294,7 +295,7 @@ async function writeEditorSession(home: string, workspace: string): Promise<void
 }
 
 describe.skipIf(process.platform !== "darwin")("coda interactive CLI", () => {
-	it("renders sent Prompt cards and accepts a real multiline Pi-style editor draft", async () => {
+	it("renders sent Prompt cards and accepts a real multiline xterm editor draft", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "coda-interactive-editor-e2e-"));
 		const home = join(directory, "home");
 		const workspace = join(directory, "workspace");
@@ -314,6 +315,18 @@ describe.skipIf(process.platform !== "darwin")("coda interactive CLI", () => {
 			expect(output).toContain("sent-e2e-prompt");
 			expect(output).toContain("first-line");
 			expect(output).toContain("second-line");
+			expect(output).not.toContain("[terminal.unknown-input]");
+			const alternateStart = output.indexOf("\x1b[?1049h");
+			const alternateEnd = output.indexOf("\x1b[?1049l", alternateStart);
+			expect(alternateStart).toBeGreaterThanOrEqual(0);
+			expect(alternateEnd).toBeGreaterThan(alternateStart);
+			const screen = new StrictScreen(60, 20);
+			screen.write(output.slice(alternateStart, alternateEnd));
+			const viewport = screen.viewport();
+			const firstRow = viewport.findIndex((line) => line.includes("first-line"));
+			const secondRow = viewport.findIndex((line) => line.includes("second-line"));
+			expect(firstRow).toBeGreaterThanOrEqual(0);
+			expect(secondRow).toBe(firstRow + 1);
 			expect(output).toContain("─".repeat(60));
 			expect(output).toContain("\x1b[?25h");
 		} finally {

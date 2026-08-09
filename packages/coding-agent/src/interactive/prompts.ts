@@ -2,14 +2,15 @@ import {
 	Component,
 	type ComponentInputContext,
 	type DiagnosticSink,
+	FullScreenTui,
 	type Keybinding,
 	type RenderContext,
 	type Scheduler,
 	type Terminal,
 	type TerminalInput,
-	Tui,
 	wrapAnsi,
 } from "@coda/tui";
+import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./process-lifecycle.ts";
 
 export interface PromptRuntime {
@@ -18,6 +19,7 @@ export interface PromptRuntime {
 	readonly scheduler: Scheduler;
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
+	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly lifecycle?: InteractiveProcessLifecycle;
 }
 
@@ -139,7 +141,7 @@ async function runPrompt(
 		settled = true;
 		resolveResult(value);
 	};
-	const tui = new Tui({
+	const tui = new FullScreenTui({
 		terminal: runtime.terminal,
 		root: create(finish),
 		clock: runtime.clock,
@@ -147,6 +149,11 @@ async function runPrompt(
 		keybindings: runtime.keybindings,
 		diagnostics: runtime.diagnostics,
 	});
+	const outputScope = new FullScreenOutputScope(runtime.fullScreenOutput, {
+		presentDiagnostic: (diagnostic) => tui.presentDiagnostic(diagnostic),
+	});
+	const startFullScreen = () => outputScope.start(() => tui.start());
+	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	let termination: InteractiveTerminationError | undefined;
 	let fatalFailure: { readonly error: unknown } | undefined;
 	let suspendTask: Promise<void> | undefined;
@@ -162,9 +169,9 @@ async function runPrompt(
 		suspend: () => {
 			if (suspendTask) return;
 			suspendTask = (async () => {
-				if (tui.started) await tui.stop();
+				if (tui.started) await stopFullScreen();
 				await runtime.lifecycle!.suspend();
-				if (!(await tui.start())) throw new Error("Terminal was unavailable after process resume");
+				if (!(await startFullScreen())) throw new Error("Terminal was unavailable after process resume");
 			})().catch((error: unknown) => {
 				fatalFailure ??= { error };
 				finish(undefined);
@@ -175,7 +182,7 @@ async function runPrompt(
 		},
 	});
 	try {
-		if (!(await tui.start())) {
+		if (!(await startFullScreen())) {
 			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
 		}
 		const value = await result;
@@ -187,7 +194,7 @@ async function runPrompt(
 		unsubscribeLifecycle?.();
 		finish(undefined);
 		if (suspendTask) await suspendTask;
-		await tui.stop();
+		await stopFullScreen();
 	}
 }
 

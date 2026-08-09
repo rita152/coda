@@ -1,6 +1,6 @@
-import { displayWidth, sliceAnsi } from "./ansi.ts";
+import { clipAnsi, displayWidth, sanitizeTerminalText, sliceAnsi } from "./ansi.ts";
 import {
-	type Component,
+	Component,
 	type CursorPlacement,
 	observeInvalidation,
 	type RenderContext,
@@ -16,6 +16,10 @@ import type { ImagePlacement, TerminalImageSurface } from "./terminal-image-surf
 
 const FRAME_INTERVAL_MS = 1000 / 60;
 const STYLE_BOUNDARY = "\x1b[0m";
+const DIAGNOSTIC_BATCH_MS = 150;
+const DIAGNOSTIC_UPDATE_MS = 1_000;
+const DIAGNOSTIC_VISIBLE_MS = 4_000;
+const DIAGNOSTIC_CAPACITY = 64;
 
 export interface OverlayPlacement {
 	readonly row?: number;
@@ -610,8 +614,145 @@ export class Tui {
 	}
 }
 
+class DiagnosticOverlay extends Component {
+	#message = "";
+
+	render(context: RenderContext): string[] {
+		return this.#message ? [clipAnsi(this.#message, context.width)] : [];
+	}
+
+	setMessage(message: string): void {
+		if (message === this.#message) return;
+		this.#message = message;
+		this.invalidate();
+	}
+}
+
+interface BufferedDiagnostic {
+	readonly diagnostic: Diagnostic;
+	readonly identity: string;
+	repeats: number;
+}
+
 /** The only interactive TUI mode. Named explicitly at the public seam. */
-export class FullScreenTui extends Tui {}
+export class FullScreenTui extends Tui {
+	readonly #diagnosticOverlay: DiagnosticOverlay;
+	readonly #diagnosticHandle: OverlayHandle;
+	readonly #clock: Clock;
+	readonly #scheduler: Scheduler;
+	readonly #diagnostics: BufferedDiagnostic[] = [];
+	#pendingDiagnostic?: BufferedDiagnostic;
+	#batchTask?: ScheduledTask;
+	#hideTask?: ScheduledTask;
+	#lastPresentationAt = Number.NEGATIVE_INFINITY;
+	#droppedDiagnostics = 0;
+
+	constructor(options: TuiOptions) {
+		super(options);
+		this.#clock = options.clock;
+		this.#scheduler = options.scheduler;
+		this.#diagnosticOverlay = new DiagnosticOverlay();
+		this.#diagnosticHandle = this.showOverlay(this.#diagnosticOverlay, {
+			layout: ({ columns, rows }) => ({ row: rows - 1, column: 0, width: columns, height: 1 }),
+		});
+		this.#diagnosticHandle.hide();
+	}
+
+	presentDiagnostic(diagnostic: Diagnostic): void {
+		const snapshot = Object.freeze({
+			...diagnostic,
+			...(diagnostic.details === undefined ? {} : { details: Object.freeze({ ...diagnostic.details }) }),
+		});
+		const identity = diagnosticIdentity(snapshot);
+		const previous = this.#diagnostics.at(-1);
+		let buffered: BufferedDiagnostic;
+		if (previous?.identity === identity) {
+			previous.repeats++;
+			buffered = previous;
+		} else {
+			buffered = { diagnostic: snapshot, identity, repeats: 1 };
+			this.#diagnostics.push(buffered);
+			if (this.#diagnostics.length > DIAGNOSTIC_CAPACITY) {
+				this.#diagnostics.shift();
+				this.#droppedDiagnostics++;
+			}
+		}
+		this.#pendingDiagnostic = buffered;
+		if (this.#batchTask) return;
+		const delayMs = Math.max(
+			DIAGNOSTIC_BATCH_MS,
+			this.#lastPresentationAt + DIAGNOSTIC_UPDATE_MS - this.#clock.now(),
+		);
+		this.#batchTask = this.#scheduler.schedule(delayMs, () => {
+			this.#batchTask = undefined;
+			const pending = this.#pendingDiagnostic;
+			this.#pendingDiagnostic = undefined;
+			if (!pending) return;
+			this.#lastPresentationAt = this.#clock.now();
+			this.#diagnosticOverlay.setMessage(
+				formatDiagnostic(pending.diagnostic, pending.repeats, this.#droppedDiagnostics),
+			);
+			this.#diagnosticHandle.show();
+			this.#hideTask?.cancel();
+			this.#hideTask = this.#scheduler.schedule(DIAGNOSTIC_VISIBLE_MS, () => {
+				this.#hideTask = undefined;
+				this.#diagnosticHandle.hide();
+			});
+		});
+	}
+
+	override async stop(): Promise<void> {
+		try {
+			await super.stop();
+		} finally {
+			this.#batchTask?.cancel();
+			this.#batchTask = undefined;
+			this.#hideTask?.cancel();
+			this.#hideTask = undefined;
+			this.#pendingDiagnostic = undefined;
+			this.#diagnostics.length = 0;
+			this.#droppedDiagnostics = 0;
+			this.#lastPresentationAt = Number.NEGATIVE_INFINITY;
+			this.#diagnosticOverlay.setMessage("");
+			this.#diagnosticHandle.hide();
+		}
+	}
+}
+
+function formatDiagnostic(diagnostic: Diagnostic, repeats: number, dropped: number): string {
+	const details = Object.entries(diagnostic.details ?? {})
+		.map(([name, value]) => `${name}=${jsonDiagnosticValue(value)}`)
+		.join(" ");
+	return sanitizeTerminalText(
+		`[${diagnostic.code}]${details ? ` ${details} ·` : ""} ${diagnostic.message}${repeats > 1 ? ` ×${repeats}` : ""}${dropped > 0 ? ` · ${dropped} older dropped` : ""}`,
+	).replace(/[\r\n]+/g, " ");
+}
+
+function diagnosticIdentity(diagnostic: Diagnostic): string {
+	return `${diagnostic.code}\0${diagnostic.message}\0${jsonDiagnosticValue(diagnostic.details ?? {})}`;
+}
+
+function jsonDiagnosticValue(value: unknown): string {
+	let serialized: string | undefined;
+	try {
+		serialized = JSON.stringify(value);
+	} catch {
+		// Fall through to a quoted string representation.
+	}
+	if (serialized === undefined) {
+		try {
+			serialized = JSON.stringify(String(value));
+		} catch {
+			serialized = '"[unserializable]"';
+		}
+	}
+	let escaped = "";
+	for (const character of serialized) {
+		const codePoint = character.codePointAt(0)!;
+		escaped += codePoint >= 0x7f && codePoint <= 0x9f ? `\\u${codePoint.toString(16).padStart(4, "0")}` : character;
+	}
+	return escaped;
+}
 
 function validateOverlayPlacement(placement: OverlayPlacement): ResolvedOverlayPlacement {
 	const row = placement.row ?? 0;

@@ -11,6 +11,7 @@ import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Session } from "../session/types.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
+import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
 import { type AttachmentTransaction, InteractiveInputController } from "./input-controller.ts";
 import {
 	type InteractiveProcessLifecycle,
@@ -28,6 +29,7 @@ export interface InteractiveRunOptions {
 	readonly imageSurface?: TerminalImageSurface;
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
+	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly approval?: InteractiveApprovalHandler;
 	readonly modelLabel: string;
 	readonly workspaceLabel?: string;
@@ -122,6 +124,11 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		keybindings: options.keybindings,
 		diagnostics: options.diagnostics,
 	});
+	const outputScope = new FullScreenOutputScope(options.fullScreenOutput, {
+		presentDiagnostic: (diagnostic) => tui.presentDiagnostic(diagnostic),
+	});
+	const startFullScreen = () => outputScope.start(() => tui.start());
+	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
 		if (options.agent.state.status === "running") {
@@ -148,9 +155,9 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		suspend: () => {
 			if (suspendTask) return;
 			suspendTask = (async () => {
-				if (tui.started) await tui.stop();
+				if (tui.started) await stopFullScreen();
 				await options.lifecycle!.suspend();
-				if (!(await tui.start())) throw new Error("Terminal was unavailable after process resume");
+				if (!(await startFullScreen())) throw new Error("Terminal was unavailable after process resume");
 			})().catch(requestFatalExit);
 			void suspendTask.finally(() => {
 				suspendTask = undefined;
@@ -162,7 +169,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		component.accept(event);
 	});
 	try {
-		if (!(await tui.start())) {
+		if (!(await startFullScreen())) {
 			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
 		}
 		if (options.initialPrompt !== undefined) {
@@ -184,7 +191,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		options.approval?.unbind();
 		detach();
 		const droppedShells = await inputController.dispose();
-		await tui.stop();
+		await stopFullScreen();
 		if (droppedShells > 0) {
 			await options.onWarning?.(
 				`Dropped ${droppedShells} queued local Shell command${droppedShells === 1 ? "" : "s"} on exit`,

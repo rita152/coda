@@ -3,7 +3,7 @@ import { homedir, hostname } from "node:os";
 import type { Clock, IdGenerator } from "@coda/agent";
 import { type CredentialStore, createModels, InMemoryCredentialStore, type Models, type TimeRuntime } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
-import { createSystemScheduler, type Diagnostic, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
+import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
 import {
 	type ApplicationIO,
 	type ApplicationOutput,
@@ -19,6 +19,7 @@ import { isFileSystemError } from "./host/file-system.ts";
 import { createNodeFileSystem } from "./host/node-file-system.ts";
 import { createNodeProcessRunner } from "./host/node-process-runner.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
+import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
@@ -171,7 +172,9 @@ export function createNodeCodingAgentApplication(
 	const stdin = options.stdin ?? process.stdin;
 	const stdout = options.stdout ?? process.stdout;
 	const stderr = options.stderr ?? process.stderr;
-	const io = options.io ?? processIo(stdin, stdout, stderr);
+	const rawIo = options.io ?? processIo(stdin, stdout, stderr);
+	const fullScreenOutput = new FullScreenOutputGate(rawIo);
+	const io = fullScreenOutput.io;
 	const platform = options.platform ?? process.platform;
 	const environment = options.environment ?? process.env;
 	const homeDirectory = options.homeDirectory ?? homedir();
@@ -210,9 +213,7 @@ export function createNodeCodingAgentApplication(
 			return registry;
 		})();
 	const settings = options.settings ?? new FileSettingsStore({ fileSystem, homeDirectory, idGenerator });
-	const diagnosticOutput = async (diagnostic: Diagnostic): Promise<void> => {
-		await io.stderr.write(`coda: [${diagnostic.code}] ${diagnostic.message}\n`);
-	};
+	const diagnosticOutput = fullScreenOutput.diagnostics;
 	let activeTerminal: Terminal | undefined;
 	const terminalFactory: TerminalFactory = {
 		create: (startup) => {
@@ -272,6 +273,7 @@ export function createNodeCodingAgentApplication(
 							scheduler,
 							keybindings: [],
 							diagnostics: diagnosticOutput,
+							fullScreenOutput,
 							lifecycle: interactiveLifecycle,
 						},
 						[
@@ -304,6 +306,7 @@ export function createNodeCodingAgentApplication(
 		fileSystem,
 		processRunner,
 		io,
+		fullScreenOutput,
 		terminalFactory,
 		sessions,
 		keybindings: [],

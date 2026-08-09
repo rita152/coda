@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	type DiagnosticSink,
+	Editor,
 	ProcessTerminal,
 	type ProcessTerminalInput,
 	type ProcessTerminalOutput,
@@ -411,6 +412,119 @@ describe("ProcessTerminal structured input", () => {
 			expect.objectContaining({ type: "key", key: "k", control: true, action: "press" }),
 			{ type: "text", text: "你好" },
 		]);
+	});
+
+	it("normalizes xterm modifyOtherKeys Shift+Enter without a diagnostic", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1b[27;2;");
+		result.input.emitData("13~");
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({
+				type: "key",
+				key: "enter",
+				shift: true,
+				control: false,
+				alt: false,
+				meta: false,
+				action: "press",
+			}),
+		]);
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("decodes every xterm modifier bit combination", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData(Array.from({ length: 16 }, (_, index) => `\x1b[27;${index + 1};13~`).join(""));
+		await result.terminal.flush();
+
+		expect(inputs).toHaveLength(16);
+		for (const [index, input] of inputs.entries()) {
+			const bits = index;
+			expect(input).toEqual(
+				expect.objectContaining({
+					type: "key",
+					key: "enter",
+					shift: (bits & 1) !== 0,
+					alt: (bits & 2) !== 0,
+					control: (bits & 4) !== 0,
+					meta: (bits & 8) !== 0,
+				}),
+			);
+		}
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("delivers an xterm multiline draft through ProcessTerminal into Editor", async () => {
+		const result = create();
+		const editor = new Editor();
+		result.terminal.onInput((input) => {
+			editor.handleInput(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("hello\x1b[27;2;13~coda");
+		await result.terminal.flush();
+
+		expect(editor.text).toBe("hello\ncoda");
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("normalizes xterm modifyOtherKeys special keys and insertable codepoints", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData(
+			"\x1b[27;2;9~\x1b[27;3;27~\x1b[27;5;127~\x1b[27;9;13~\x1b[27;6;13~\x1b[27;1;32~\x1b[27;2;97~\x1b[27;1;20320~",
+		);
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({ type: "key", key: "tab", shift: true }),
+			expect.objectContaining({ type: "key", key: "escape", alt: true }),
+			expect.objectContaining({ type: "key", key: "backspace", control: true }),
+			expect.objectContaining({ type: "key", key: "enter", meta: true }),
+			expect.objectContaining({ type: "key", key: "enter", shift: true, control: true }),
+			expect.objectContaining({ type: "key", key: "space", text: " " }),
+			expect.objectContaining({ type: "key", key: "a", shift: true, text: "A" }),
+			{ type: "text", text: "你" },
+		]);
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("diagnoses invalid xterm modifyOtherKeys fields without emitting input", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+		const invalid = ["\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;1;0~", "\x1b[27;1;55296~", "\x1b[27;1;1114112~"];
+
+		result.input.emitData(invalid.join(""));
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([]);
+		expect(result.diagnostics.mock.calls.map(([diagnostic]) => diagnostic)).toEqual(
+			invalid.map((sequence) => expect.objectContaining({ code: "terminal.unknown-input", details: { sequence } })),
+		);
 	});
 
 	it("uses Kitty text-as-codepoints and omits non-insertable modifier text", async () => {

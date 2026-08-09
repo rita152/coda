@@ -24,7 +24,7 @@ const DEFAULT_CAPABILITIES: TerminalCapabilities = {
 
 /** Deterministic Terminal implementation intended for tests and embedded renderers. */
 export class VirtualTerminal implements Terminal {
-	readonly available = true;
+	readonly available: boolean = true;
 	#started = false;
 	#size: TerminalSize;
 	#capabilities: TerminalCapabilities;
