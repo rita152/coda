@@ -42,9 +42,10 @@ class FakeLifecycle implements InteractiveProcessLifecycle {
 }
 
 async function until(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 100; attempt++) {
+	const deadline = Date.now() + 2_000;
+	while (Date.now() < deadline) {
 		if (predicate()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		await new Promise<void>((resolve) => setTimeout(resolve, 5));
 	}
 	throw new Error("Condition did not become true");
 }

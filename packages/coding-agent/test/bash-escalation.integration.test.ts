@@ -1,5 +1,4 @@
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,7 +26,9 @@ afterEach(async () => {
 
 integration("model Bash escalation", () => {
 	it("grants one reviewed unsandboxed command, retains Workspace, and never retries a later denial", async () => {
-		const fixture = await mkdtemp(join(tmpdir(), "coda-bash-escalation-"));
+		// Linux Workspace mode intentionally permits /tmp. Keep the fixture under
+		// the package so its sibling really is outside every writable root.
+		const fixture = await mkdtemp(join(process.cwd(), ".coda-bash-escalation-"));
 		temporaryDirectories.push(fixture);
 		const workspace = join(fixture, "workspace");
 		const outside = join(fixture, "outside");
