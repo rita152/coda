@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
+import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
 const EditParameters = Type.Object(
 	{
@@ -61,6 +62,7 @@ export function createEditTool(
 	workspace: Workspace,
 	fileSystem: FileSystem,
 	coordinator: TargetMutationCoordinator,
+	writer: AtomicMutationWriter,
 ): AgentTool<typeof EditParameters> {
 	return {
 		name: "edit",
@@ -69,7 +71,7 @@ export function createEditTool(
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
 			const initial = await workspace.resolvePath(arguments_.path, "write");
-			if (!hasWorkspacePathAccess(workspace, initial, context.invocationId, "edit", "write")) {
+			if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, "edit", "write")) {
 				throw new Error(`Path access was not granted: ${initial.canonicalPath}`);
 			}
 			if (!initial.exists) throw new Error(`File does not exist: ${initial.canonicalPath}`);
@@ -79,7 +81,7 @@ export function createEditTool(
 				if (
 					!current.exists ||
 					current.canonicalPath !== initial.canonicalPath ||
-					!hasWorkspacePathAccess(workspace, current, context.invocationId, "edit", "write")
+					!hasPermissionedPathAccess(workspace, current, context.invocationId, "edit", "write")
 				) {
 					throw new Error("Target changed before edit could begin");
 				}
@@ -109,7 +111,17 @@ export function createEditTool(
 					? before.split(oldText).join(newText)
 					: `${before.slice(0, occurrences[0])}${newText}${before.slice(occurrences[0]! + oldText.length)}`;
 				const afterBytes = encodeText(after, bom);
-				const result = await atomicWrite(workspace, fileSystem, current, afterBytes, context, "edit");
+				const beforeDigest = sha256(beforeBytes);
+				const result = await atomicWrite(
+					workspace,
+					fileSystem,
+					current,
+					afterBytes,
+					context,
+					"edit",
+					writer,
+					beforeDigest,
+				);
 				const replacements = arguments_.replaceAll ? occurrences.length : 1;
 				return {
 					content: `Edited ${arguments_.path}: ${replacements} replacement${replacements === 1 ? "" : "s"}.`,
@@ -119,7 +131,7 @@ export function createEditTool(
 						replacements,
 						previousBytes: result.previousSize,
 						bytes: result.size,
-						beforeSha256: sha256(beforeBytes),
+						beforeSha256: beforeDigest,
 						afterSha256: sha256(afterBytes),
 						diff: `--- ${arguments_.path}\n+++ ${arguments_.path}\n@@ exact replacement @@\n-${arguments_.oldText}\n+${arguments_.newText}`,
 					},

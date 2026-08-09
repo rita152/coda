@@ -21,12 +21,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+	const allowedKeys = new Set(allowed);
+	return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
 function validateSettings(value: unknown): UserSettings {
 	if (!isRecord(value) || value.version !== 1) throw new Error("Unsupported or invalid Coda settings format");
+	if (
+		!hasOnlyKeys(value, [
+			"version",
+			"defaultModel",
+			"defaultReasoning",
+			"shellEnvironmentAllowlist",
+			"projectTrust",
+			"ui",
+			"permissions",
+		])
+	) {
+		throw new Error("Coda settings contain an unknown field");
+	}
 	let defaultModel: UserSettings["defaultModel"];
 	if (value.defaultModel !== undefined) {
 		if (
 			!isRecord(value.defaultModel) ||
+			!hasOnlyKeys(value.defaultModel, ["provider", "id"]) ||
 			typeof value.defaultModel.provider !== "string" ||
 			value.defaultModel.provider.length === 0 ||
 			typeof value.defaultModel.id !== "string" ||
@@ -65,6 +84,7 @@ function validateSettings(value: unknown): UserSettings {
 			value.projectTrust.some(
 				(entry) =>
 					!isRecord(entry) ||
+					!hasOnlyKeys(entry, ["workspace", "path", "sha256"]) ||
 					typeof entry.workspace !== "string" ||
 					typeof entry.path !== "string" ||
 					typeof entry.sha256 !== "string" ||
@@ -83,10 +103,64 @@ function validateSettings(value: unknown): UserSettings {
 	}
 	let ui: UserSettings["ui"];
 	if (value.ui !== undefined) {
-		if (!isRecord(value.ui) || (value.ui.motion !== "full" && value.ui.motion !== "reduced")) {
+		if (
+			!isRecord(value.ui) ||
+			!hasOnlyKeys(value.ui, ["motion"]) ||
+			(value.ui.motion !== "full" && value.ui.motion !== "reduced")
+		) {
 			throw new Error("Coda settings contain an invalid UI motion setting");
 		}
 		ui = { motion: value.ui.motion };
+	}
+	let permissions: UserSettings["permissions"];
+	if (value.permissions !== undefined) {
+		if (!isRecord(value.permissions) || !hasOnlyKeys(value.permissions, ["profile", "approvalPolicy"])) {
+			throw new Error("Coda settings contain invalid Permissions");
+		}
+		const profile = value.permissions.profile;
+		if (profile !== undefined && profile !== "read-only" && profile !== "workspace" && profile !== "full-access") {
+			throw new Error("Coda settings contain an invalid Permission Profile");
+		}
+		const approvalPolicy = value.permissions.approvalPolicy;
+		if (
+			approvalPolicy !== undefined &&
+			approvalPolicy !== "unless-trusted" &&
+			approvalPolicy !== "on-request" &&
+			approvalPolicy !== "never" &&
+			(!isRecord(approvalPolicy) ||
+				!hasOnlyKeys(approvalPolicy, [
+					"mode",
+					"sandboxApproval",
+					"rules",
+					"skillApproval",
+					"requestPermissions",
+					"mcpElicitations",
+				]) ||
+				approvalPolicy.mode !== "granular" ||
+				["sandboxApproval", "rules", "skillApproval", "requestPermissions", "mcpElicitations"].some(
+					(key) => typeof approvalPolicy[key] !== "boolean",
+				))
+		) {
+			throw new Error("Coda settings contain an invalid Approval Policy");
+		}
+		permissions = {
+			...(profile ? { profile } : {}),
+			...(approvalPolicy
+				? {
+						approvalPolicy:
+							typeof approvalPolicy === "object"
+								? {
+										mode: "granular" as const,
+										sandboxApproval: approvalPolicy.sandboxApproval as boolean,
+										rules: approvalPolicy.rules as boolean,
+										skillApproval: approvalPolicy.skillApproval as boolean,
+										requestPermissions: approvalPolicy.requestPermissions as boolean,
+										mcpElicitations: approvalPolicy.mcpElicitations as boolean,
+									}
+								: approvalPolicy,
+					}
+				: {}),
+		};
 	}
 	return {
 		...(defaultModel ? { defaultModel } : {}),
@@ -94,6 +168,7 @@ function validateSettings(value: unknown): UserSettings {
 		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
 		...(ui ? { ui } : {}),
+		...(permissions ? { permissions } : {}),
 	};
 }
 

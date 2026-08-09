@@ -1,7 +1,7 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 
 const ReadParameters = Type.Object(
@@ -27,7 +27,7 @@ export function createReadTool(workspace: Workspace, fileSystem: FileSystem): Ag
 		execute: async (arguments_, context) => {
 			context.signal.throwIfAborted();
 			const resolved = await workspace.resolvePath(arguments_.path, "read");
-			if (!hasWorkspacePathAccess(workspace, resolved, context.invocationId, "read", "read")) {
+			if (!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "read", "read")) {
 				throw new Error(`Path access was not granted: ${resolved.canonicalPath}`);
 			}
 			if (!resolved.exists) throw new Error(`File does not exist: ${resolved.canonicalPath}`);

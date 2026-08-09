@@ -2,7 +2,7 @@ import { join, relative, sep } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".coda", "node_modules"]);
@@ -29,7 +29,7 @@ export async function walkEntries(
 	toolName: "find" | "grep",
 ): Promise<readonly WalkedEntry[]> {
 	const root = await workspace.resolvePath(requestedRoot, "read");
-	if (!hasWorkspacePathAccess(workspace, root, context.invocationId, toolName, "read")) {
+	if (!hasPermissionedPathAccess(workspace, root, context.invocationId, toolName, "read")) {
 		throw new Error(`Path access was not granted: ${root.canonicalPath}`);
 	}
 	if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
@@ -45,7 +45,7 @@ export async function walkEntries(
 			const resolved = await workspace.resolvePath(canonicalPath, "read");
 			if (
 				visitedFiles.has(canonicalPath) ||
-				!hasWorkspacePathAccess(workspace, resolved, context.invocationId, toolName, "read")
+				!hasPermissionedPathAccess(workspace, resolved, context.invocationId, toolName, "read")
 			) {
 				return;
 			}
@@ -64,7 +64,7 @@ export async function walkEntries(
 			const requestedChild = join(canonicalPath, entry.name);
 			try {
 				const child = await workspace.resolvePath(requestedChild, "read");
-				if (!child.exists || !hasWorkspacePathAccess(workspace, child, context.invocationId, toolName, "read")) {
+				if (!child.exists || !hasPermissionedPathAccess(workspace, child, context.invocationId, toolName, "read")) {
 					continue;
 				}
 				const childStatus = await fileSystem.stat(child.canonicalPath);

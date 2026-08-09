@@ -1,8 +1,9 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ProcessRunner } from "../host/process-runner.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
+import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { displayPath, readSearchableText, walkFiles } from "./search.ts";
@@ -23,7 +24,8 @@ const MAX_LINE_CHARACTERS = 500;
 export function createGrepTool(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ProcessRunner;
+	readonly processRunner: ModelProcessRunner;
+	readonly permissions: PermissionEngine;
 	readonly runtime: SearchExecutableRuntime;
 }): AgentTool<typeof GrepParameters> {
 	const { fileSystem, workspace } = options;
@@ -44,7 +46,7 @@ export function createGrepTool(options: {
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasWorkspacePathAccess(workspace, root, context.invocationId, "grep", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "grep", "read")) {
 				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
 			}
 			if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
@@ -93,11 +95,13 @@ export function createGrepTool(options: {
 					...(arguments_.ignoreCase ? ["--ignore-case"] : []),
 					"-e",
 					arguments_.pattern,
+					"--",
 					requestedRoot,
 				],
 				workspaceRoot: workspace.root,
 				fileSystem,
 				processRunner: options.processRunner,
+				permissions: options.permissions,
 				runtime: options.runtime,
 				context,
 			});
@@ -116,11 +120,24 @@ export function createGrepTool(options: {
 					const resolved = await workspace.resolvePath(match[1]!, "read");
 					if (
 						!resolved.exists ||
-						!hasWorkspacePathAccess(workspace, resolved, context.invocationId, "grep", "read")
+						!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "grep", "read")
 					) {
 						continue;
 					}
-					const result = `${displayPath(workspace, resolved.canonicalPath)}:${match[2]}:${match[3]}:${match[4]}`;
+					const text = await readSearchableText(fileSystem, resolved.canonicalPath);
+					if (text === undefined) continue;
+					const lineNumber = Number.parseInt(match[2]!, 10);
+					const reportedColumn = Number.parseInt(match[3]!, 10);
+					const currentLine = text.split(/\r?\n/)[lineNumber - 1];
+					if (currentLine === undefined) continue;
+					expression.lastIndex = 0;
+					const currentMatch = expression.exec(currentLine);
+					if (!currentMatch || currentMatch.index + 1 !== reportedColumn) continue;
+					const visibleLine =
+						currentLine.length > MAX_LINE_CHARACTERS
+							? `${currentLine.slice(0, MAX_LINE_CHARACTERS)}…`
+							: currentLine;
+					const result = `${displayPath(workspace, resolved.canonicalPath)}:${lineNumber}:${reportedColumn}:${visibleLine}`;
 					if (matches.length >= limit || visibleCharacters + result.length + 1 > MAX_VISIBLE_CHARACTERS) {
 						truncated = true;
 						break;

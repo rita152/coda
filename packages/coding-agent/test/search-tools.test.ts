@@ -24,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("search Tools", () => {
-	it("grep returns bounded relative matches without reading protected files", async () => {
+	it("grep returns bounded relative matches including dotfiles under full-disk read semantics", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-grep-"));
 		temporaryDirectories.push(workspace);
 		await mkdir(join(workspace, "src"));
@@ -47,8 +47,7 @@ describe("search Tools", () => {
 				});
 				const serialized = JSON.stringify(result);
 				expect(serialized).toContain("src/one.ts:2:7:const needle = true;");
-				expect(serialized).not.toContain(".env");
-				expect(serialized).not.toContain("secret-value");
+				expect(serialized).toContain(".env:1:1:needle=secret-value");
 				return fauxAssistantMessage("The search is clean.", { timestamp: 500 });
 			},
 		]);
@@ -84,7 +83,7 @@ describe("search Tools", () => {
 			"search for needle",
 		]);
 
-		expect(exitCode).toBe(0);
+		expect(exitCode, stderr.value).toBe(0);
 		expect(stdout.value).toBe("The search is clean.\n");
 		expect(stderr.value).toBe("");
 	});
@@ -151,7 +150,7 @@ describe("search Tools", () => {
 			"inspect the tree",
 		]);
 
-		expect(exitCode).toBe(0);
+		expect(exitCode, stderr.value).toBe(0);
 		expect(stdout.value).toBe("Directory search complete.\n");
 		expect(stderr.value).toBe("");
 	});

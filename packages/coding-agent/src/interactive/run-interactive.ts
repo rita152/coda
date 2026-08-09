@@ -1,4 +1,5 @@
 import type { Agent, AgentInput, QueueItemId } from "@coda/agent";
+import type { PermissionProfile } from "@coda/sandbox";
 import {
 	type DiagnosticSink,
 	FullScreenTui,
@@ -13,6 +14,7 @@ import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
 import { type AttachmentTransaction, InteractiveInputController } from "./input-controller.ts";
+import { InteractivePermissionSelector } from "./permission-selector.ts";
 import {
 	type InteractiveProcessLifecycle,
 	type InteractiveTerminationSignal,
@@ -33,6 +35,9 @@ export interface InteractiveRunOptions {
 	readonly approval?: InteractiveApprovalHandler;
 	readonly modelLabel: string;
 	readonly workspaceLabel?: string;
+	readonly permissionProfile: PermissionProfile;
+	readonly permissionLabel: string;
+	readonly onPermissionProfileChange: (profile: PermissionProfile) => Promise<string> | string;
 	readonly reasoning: string;
 	readonly motion: "full" | "reduced";
 	readonly initialPrompt?: AgentInput;
@@ -64,6 +69,8 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	let fatalError: unknown;
 	let suspendTask: Promise<void> | undefined;
 	let component!: ChatComponent;
+	let permissionSelector!: InteractivePermissionSelector;
+	let activePermissionProfile = options.permissionProfile;
 	const userShell = new UserShell({
 		processRunner: options.processRunner,
 		platform: options.platform,
@@ -83,6 +90,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	component = new ChatComponent({
 		modelLabel: options.modelLabel,
 		workspaceLabel: options.workspaceLabel,
+		permissionLabel: options.permissionLabel,
 		reasoning: options.reasoning,
 		colorLevel: options.terminal.capabilities.colorLevel,
 		motion: options.motion,
@@ -100,6 +108,13 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		onSteer: (text, attachmentIds, composerText) => inputController.steer(text, attachmentIds, composerText),
 		onFollowUp: (text, attachmentIds, composerText) => inputController.followUp(text, attachmentIds, composerText),
 		onUserShell: (command) => inputController.submitUserShell(command),
+		onPermissions: async () => {
+			const selected = await permissionSelector.select(activePermissionProfile);
+			if (!selected) return undefined;
+			const label = await options.onPermissionProfileChange(selected);
+			activePermissionProfile = selected;
+			return label;
+		},
 		onResumeFollowUps: () => inputController.resumeQueue(),
 		isQueuePaused: () => inputController.queuePaused,
 		onReclaimFollowUp: (queueItemId) => inputController.reclaimFollowUp(queueItemId as QueueItemId),
@@ -124,6 +139,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		keybindings: options.keybindings,
 		diagnostics: options.diagnostics,
 	});
+	permissionSelector = new InteractivePermissionSelector(tui);
 	const outputScope = new FullScreenOutputScope(options.fullScreenOutput, {
 		presentDiagnostic: (diagnostic) => tui.presentDiagnostic(diagnostic),
 	});

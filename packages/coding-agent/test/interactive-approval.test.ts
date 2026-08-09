@@ -14,6 +14,67 @@ class RootComponent extends Component {
 }
 
 describe("interactive approval overlay", () => {
+	it("queues concurrent approval requests instead of rejecting a later Tool", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const tui = new Tui({
+			terminal,
+			root: new RootComponent(),
+			clock: { now: () => 1_000 },
+			scheduler: createSystemScheduler(),
+			keybindings: [],
+		});
+		const approval = new InteractiveApprovalHandler();
+		approval.bind(tui, terminal);
+		await tui.start();
+		const request = {
+			kind: "command" as const,
+			runId: "run-1" as RunId,
+			turnId: "turn-1" as never,
+			invocationId: "invocation-1" as ToolInvocationId,
+			toolName: "bash",
+			reason: "command requires approval",
+			command: "first command",
+			cwd: "/workspace",
+		};
+		const first = approval.decide(request);
+		const second = approval.decide({
+			...request,
+			invocationId: "invocation-2" as ToolInvocationId,
+			command: "second command",
+		});
+		await tui.renderNow();
+		expect(stripAnsi(terminal.readOutput())).toContain("first command");
+
+		terminal.clearOutput();
+		await terminal.emit({
+			type: "key",
+			key: "1",
+			text: "1",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(first).resolves.toEqual({ type: "approved" });
+		await tui.renderNow();
+		expect(stripAnsi(terminal.readOutput())).toContain("second command");
+
+		await terminal.emit({
+			type: "key",
+			key: "a",
+			text: "a",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(second).resolves.toEqual({ type: "abort" });
+		approval.unbind();
+		await tui.stop();
+	});
+
 	it("shows authority and scope, returns the selected decision, and restores focus", async () => {
 		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
 		const root = new RootComponent();
@@ -29,19 +90,22 @@ describe("interactive approval overlay", () => {
 		await tui.start();
 
 		const pending = approval.decide({
+			kind: "command",
 			runId: "run-1" as RunId,
+			turnId: "turn-1" as never,
 			invocationId: "invocation-1" as ToolInvocationId,
 			toolName: "bash",
-			operation: "bash",
-			reason: "shell",
+			reason: "command requested additional Sandbox permissions",
 			command: "npm test",
 			cwd: "/workspace",
-			grantScope: "run",
-			hostAuthority: true,
+			sandboxPermissions: "use_default",
+			proposedCommandRule: ["npm", "test"],
 		});
 		await tui.renderNow();
 		expect(terminal.readOutput()).toContain("npm test");
-		expect(terminal.readOutput()).toContain("host-user authority");
+		expect(terminal.readOutput()).toContain("active OS Sandbox");
+		expect(terminal.readOutput()).toContain("save Command Rule");
+		expect(terminal.readOutput()).not.toContain("approve for session");
 		expect(tui.focused).not.toBe(root);
 
 		await terminal.emit({
@@ -54,14 +118,17 @@ describe("interactive approval overlay", () => {
 			meta: false,
 			action: "press",
 		});
-		await expect(pending).resolves.toBe("allow_run");
+		await expect(pending).resolves.toEqual({
+			type: "approved-execpolicy-amendment",
+			command: ["npm", "test"],
+		});
 		expect(tui.focused).toBe(root);
 
 		approval.unbind();
 		await tui.stop();
 	});
 
-	it("never widens an outside-Workspace grant to a Run", async () => {
+	it("can cache an exact filesystem approval for the process session", async () => {
 		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
 		const tui = new Tui({
 			terminal,
@@ -74,16 +141,16 @@ describe("interactive approval overlay", () => {
 		approval.bind(tui, terminal);
 		await tui.start();
 		const pending = approval.decide({
+			kind: "filesystem",
 			runId: "run-1" as RunId,
+			turnId: "turn-1" as never,
 			invocationId: "invocation-1" as ToolInvocationId,
 			toolName: "read",
 			operation: "read",
-			reason: "outside_workspace",
+			reason: "path is outside the configured writable roots",
 			requestedPath: "../outside.txt",
 			canonicalPath: "/outside.txt",
 			cwd: "/workspace",
-			grantScope: "operation",
-			hostAuthority: true,
 		});
 		await terminal.emit({
 			type: "key",
@@ -95,7 +162,7 @@ describe("interactive approval overlay", () => {
 			meta: false,
 			action: "press",
 		});
-		await expect(pending).resolves.toBe("allow_once");
+		await expect(pending).resolves.toEqual({ type: "approved-for-session" });
 		approval.unbind();
 		await tui.stop();
 	});
@@ -113,15 +180,15 @@ describe("interactive approval overlay", () => {
 		approval.bind(tui, terminal);
 		await tui.start();
 		const pending = approval.decide({
+			kind: "command",
 			runId: "run-1" as RunId,
+			turnId: "turn-1" as never,
 			invocationId: "invocation-1" as ToolInvocationId,
 			toolName: "bash",
-			operation: "bash",
-			reason: "shell",
+			reason: "command requested additional Sandbox permissions",
 			command: "npm run test --workspace=@coda/coding-agent",
 			cwd: "/workspace",
-			grantScope: "run",
-			hostAuthority: true,
+			sandboxPermissions: "require_escalated",
 		});
 
 		terminal.clearOutput();
@@ -129,7 +196,7 @@ describe("interactive approval overlay", () => {
 		const resized = stripAnsi(terminal.readOutput());
 		expect(resized).toContain("Authority:");
 		expect(resized).toContain("Grant:");
-		expect(resized).toContain("allow once");
+		expect(resized).toContain("approve once");
 
 		await terminal.emit({
 			type: "key",
@@ -140,7 +207,54 @@ describe("interactive approval overlay", () => {
 			meta: false,
 			action: "press",
 		});
-		await expect(pending).resolves.toBe("deny");
+		await expect(pending).resolves.toEqual({ type: "abort" });
+		approval.unbind();
+		await tui.stop();
+	});
+
+	it("offers only one-shot approval and abort for exact additional permissions", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const tui = new Tui({
+			terminal,
+			root: new RootComponent(),
+			clock: { now: () => 1_000 },
+			scheduler: createSystemScheduler(),
+			keybindings: [],
+		});
+		const approval = new InteractiveApprovalHandler();
+		approval.bind(tui, terminal);
+		await tui.start();
+		const pending = approval.decide({
+			kind: "command",
+			runId: "run-1" as RunId,
+			turnId: "turn-1" as never,
+			invocationId: "invocation-1" as ToolInvocationId,
+			reason: "command requested additional Sandbox permissions",
+			command: "npm install",
+			cwd: "/workspace",
+			sandboxPermissions: "with_additional_permissions",
+			additionalPermissions: { file_system: { write: ["/cache/npm"] } },
+			proposedCommandRule: ["npm", "install"],
+		});
+		await tui.renderNow();
+		const output = stripAnsi(terminal.readOutput());
+		expect(output).toContain("approve once");
+		expect(output).toContain("abort");
+		expect(output).toContain("only the displayed additional perm");
+		expect(output).not.toContain("approve for session");
+		expect(output).not.toContain("save Command Rule");
+
+		await terminal.emit({
+			type: "key",
+			key: "a",
+			text: "a",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(pending).resolves.toEqual({ type: "abort" });
 		approval.unbind();
 		await tui.stop();
 	});

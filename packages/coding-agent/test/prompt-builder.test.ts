@@ -13,8 +13,8 @@ describe("versioned System Prompt Builder", () => {
 			],
 			capabilities: {
 				interactionMode: "print" as const,
-				workspaceWrite: false,
-				bash: false,
+				permissionProfile: "read-only" as const,
+				approvalPolicy: "on-request",
 			},
 			projectInstructions: {
 				path: "/workspace/project/AGENTS.md",
@@ -27,7 +27,7 @@ describe("versioned System Prompt Builder", () => {
 		const second = buildSystemPrompt(structuredClone(input));
 
 		expect(first).toEqual(second);
-		expect(first.version).toBe("coda-system-prompt-v1");
+		expect(first.version).toBe("coda-system-prompt-v2");
 		expect(first.sha256).toMatch(/^[a-f0-9]{64}$/);
 		expect(first.text).toContain("Workspace: /workspace/project");
 		expect(first.text.indexOf("- read: Read a file")).toBeLessThan(first.text.indexOf("- write: Write a file"));
@@ -42,7 +42,11 @@ describe("versioned System Prompt Builder", () => {
 				platform: "darwin",
 				timestamp: 0,
 				tools: [],
-				capabilities: { interactionMode: "print", workspaceWrite: false, bash: false },
+				capabilities: {
+					interactionMode: "print",
+					permissionProfile: "read-only",
+					approvalPolicy: "on-request",
+				},
 				projectInstructions: {
 					path: "/workspace/AGENTS.md",
 					sha256: "hash",

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
+import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
 const WriteParameters = Type.Object(
 	{
@@ -22,6 +23,7 @@ export function createWriteTool(
 	workspace: Workspace,
 	fileSystem: FileSystem,
 	coordinator: TargetMutationCoordinator,
+	writer: AtomicMutationWriter,
 ): AgentTool<typeof WriteParameters> {
 	return {
 		name: "write",
@@ -30,12 +32,12 @@ export function createWriteTool(
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
 			const initial = await workspace.resolvePath(arguments_.path, "write");
-			if (!hasWorkspacePathAccess(workspace, initial, context.invocationId, "write", "write")) {
+			if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, "write", "write")) {
 				throw new Error(`Path access was not granted: ${initial.canonicalPath}`);
 			}
 			const bytes = new TextEncoder().encode(arguments_.content);
 			return coordinator.run(initial.canonicalPath, async () => {
-				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, "write");
+				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, "write", writer);
 				return {
 					content: `${result.created ? "Created" : "Overwrote"} ${arguments_.path} (${result.size} bytes).`,
 					details: {

@@ -2,8 +2,9 @@ import { basename } from "node:path";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ProcessRunner } from "../host/process-runner.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
+import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { displayPath, walkEntries } from "./search.ts";
@@ -41,7 +42,8 @@ function globExpression(glob: string): RegExp {
 export function createFindTool(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ProcessRunner;
+	readonly processRunner: ModelProcessRunner;
+	readonly permissions: PermissionEngine;
 	readonly runtime: SearchExecutableRuntime;
 }): AgentTool<typeof FindParameters> {
 	const { fileSystem, workspace } = options;
@@ -57,7 +59,7 @@ export function createFindTool(options: {
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasWorkspacePathAccess(workspace, root, context.invocationId, "find", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "find", "read")) {
 				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
 			}
 			if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
@@ -92,12 +94,14 @@ export function createFindTool(options: {
 					"node_modules",
 					"--glob",
 					...(kind === "any" ? [] : ["--type", kind === "file" ? "f" : "d"]),
+					"--",
 					arguments_.pattern,
 					requestedRoot,
 				],
 				workspaceRoot: workspace.root,
 				fileSystem,
 				processRunner: options.processRunner,
+				permissions: options.permissions,
 				runtime: options.runtime,
 				context,
 			});
@@ -113,7 +117,7 @@ export function createFindTool(options: {
 					const resolved = await workspace.resolvePath(candidate, "read");
 					if (
 						!resolved.exists ||
-						!hasWorkspacePathAccess(workspace, resolved, context.invocationId, "find", "read")
+						!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "find", "read")
 					) {
 						continue;
 					}

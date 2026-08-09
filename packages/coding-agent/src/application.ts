@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { Agent, type AgentInput, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
 import type { Api, AssistantMessage, AuthPrompt, ImageContent, Model, Models, ThinkingLevel } from "@coda/ai";
+import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import {
 	createTerminalImageSurface,
 	type DiagnosticSink,
@@ -27,7 +28,21 @@ import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
-import { type ApprovalHandler, createWorkspacePolicy } from "./policy.ts";
+import { type PermissionAuditSink, permissionConfigurationAuditEvent } from "./permissions/audit.ts";
+import {
+	createAuditedModelProcessRunner,
+	createModelProcessRunner,
+	type ModelProcessRunner,
+} from "./permissions/model-process-runner.ts";
+import {
+	type ApprovalPolicy,
+	type CommandRule,
+	createPermissionEngine,
+	type NetworkRule,
+	type PermissionApprovalHandler,
+} from "./permissions/permission-engine.ts";
+import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
+import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { assertContextFits, assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
@@ -65,6 +80,10 @@ export interface UserSettings {
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
 	readonly ui?: { readonly motion: "full" | "reduced" };
+	readonly permissions?: {
+		readonly profile?: PermissionProfile;
+		readonly approvalPolicy?: ApprovalPolicy;
+	};
 }
 
 export interface ProjectTrustRecord {
@@ -109,7 +128,9 @@ export interface CodingAgentApplicationOptions {
 	readonly keybindings?: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
 	readonly sessions?: SessionManager;
-	readonly approval?: ApprovalHandler;
+	readonly approval?: PermissionApprovalHandler;
+	readonly permissionRules?: PermissionRuleStore;
+	readonly modelProcessRunner?: ModelProcessRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 }
 
@@ -121,8 +142,10 @@ interface ParsedArguments {
 	readonly action: "cleanup" | "help" | "run" | "sessions" | "version";
 	readonly mode: "interactive" | "print";
 	readonly output: "json" | "text";
-	readonly allowWorkspaceWrite: boolean;
-	readonly allowBash: boolean;
+	readonly permissionProfile?: PermissionProfile;
+	readonly approvalPolicy?: ApprovalPolicy;
+	readonly additionalWritableRoots: readonly string[];
+	readonly dangerouslyBypassApprovalsAndSandbox: boolean;
 	readonly reasoning?: ThinkingLevel | "off";
 	readonly apiKey?: string;
 	readonly workspace?: string;
@@ -151,8 +174,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let action: ParsedArguments["action"] = "run";
 	let explicitMode: ParsedArguments["mode"] | undefined;
 	let output: ParsedArguments["output"] = "text";
-	let allowWorkspaceWrite = false;
-	let allowBash = false;
+	let permissionProfile: PermissionProfile | undefined;
+	let approvalPolicy: ApprovalPolicy | undefined;
+	let dangerouslyBypassApprovalsAndSandbox = false;
 	let reasoning: ThinkingLevel | "off" | undefined;
 	let apiKey: string | undefined;
 	let workspace: string | undefined;
@@ -167,6 +191,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let model: ModelSelection | undefined;
 	const promptParts: string[] = [];
 	const imagePaths: string[] = [];
+	const additionalWritableRoots: string[] = [];
 
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index]!;
@@ -208,12 +233,39 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			action = "version";
 			continue;
 		}
-		if (argument === "--allow-workspace-write") {
-			allowWorkspaceWrite = true;
+		if (argument === "--sandbox") {
+			const value = args[++index];
+			if (value === "read-only") permissionProfile = "read-only";
+			else if (value === "workspace-write") permissionProfile = "workspace";
+			else if (value === "danger-full-access") permissionProfile = "full-access";
+			else throw new Error("--sandbox requires read-only, workspace-write, or danger-full-access");
 			continue;
 		}
-		if (argument === "--allow-bash") {
-			allowBash = true;
+		if (argument === "--ask-for-approval") {
+			const value = args[++index];
+			if (value === "untrusted") approvalPolicy = "unless-trusted";
+			else if (value === "on-request") approvalPolicy = "on-request";
+			else if (value === "never") approvalPolicy = "never";
+			else if (value === "granular") {
+				approvalPolicy = {
+					mode: "granular",
+					sandboxApproval: true,
+					rules: true,
+					skillApproval: true,
+					requestPermissions: true,
+					mcpElicitations: true,
+				};
+			} else throw new Error("--ask-for-approval requires untrusted, on-request, granular, or never");
+			continue;
+		}
+		if (argument === "--add-dir") {
+			const value = args[++index];
+			if (!value) throw new Error("--add-dir requires a path");
+			additionalWritableRoots.push(value);
+			continue;
+		}
+		if (argument === "--dangerously-bypass-approvals-and-sandbox") {
+			dangerouslyBypassApprovalsAndSandbox = true;
 			continue;
 		}
 		if (argument === "--reasoning") {
@@ -290,8 +342,10 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		action,
 		mode,
 		output,
-		allowWorkspaceWrite,
-		allowBash,
+		permissionProfile: dangerouslyBypassApprovalsAndSandbox ? "full-access" : permissionProfile,
+		approvalPolicy: dangerouslyBypassApprovalsAndSandbox ? "never" : approvalPolicy,
+		additionalWritableRoots: Object.freeze([...additionalWritableRoots]),
+		dangerouslyBypassApprovalsAndSandbox,
 		reasoning,
 		apiKey,
 		workspace,
@@ -341,10 +395,13 @@ Model:
       --api-key <key>            Use a request-scoped API key
       --image <path>             Attach an image (repeatable)
 
-Workspace policy:
+Permissions:
       --workspace <path>         Select the Workspace root
-      --allow-workspace-write    Permit edit/write in print mode
-      --allow-bash               Permit bash in print mode
+      --sandbox <mode>           read-only|workspace-write|danger-full-access
+      --ask-for-approval <mode>  untrusted|on-request|granular|never
+      --add-dir <path>           Add an explicit writable root (repeatable)
+      --dangerously-bypass-approvals-and-sandbox
+                                 Disable approval prompts and the outer Sandbox
       --trust-project            Trust the current root AGENTS.md hash
 
 Session:
@@ -470,6 +527,39 @@ async function selectModelInteractively(
 	if (!selected) throw new Error("Model selection was cancelled");
 	const separator = selected.indexOf("\0");
 	return { provider: selected.slice(0, separator), id: selected.slice(separator + 1) };
+}
+
+function defaultApprovalPolicy(profile: PermissionProfile): ApprovalPolicy {
+	return profile === "full-access" ? "never" : "on-request";
+}
+
+async function canonicalDirectory(path: string, base: string, fileSystem: FileSystem): Promise<string> {
+	const candidate = isAbsolute(path) ? path : resolve(base, path);
+	const canonical = await fileSystem.realpath(candidate);
+	const status = await fileSystem.stat(canonical);
+	if (status.kind !== "directory") throw new Error(`Permission root is not a directory: ${path}`);
+	return canonical;
+}
+
+function approvalPolicyLabel(policy: ApprovalPolicy): string {
+	return typeof policy === "object" ? "granular" : policy;
+}
+
+function permissionProfileLabel(profile: PermissionProfile): string {
+	return profile === "read-only" ? "Read Only" : profile === "workspace" ? "Workspace" : "Full Access";
+}
+
+function approvalRequiredEvent(request: Parameters<PermissionApprovalHandler["decide"]>[0]): unknown {
+	return {
+		schemaVersion: 3,
+		type: "approval_required",
+		request: {
+			...request,
+			runId: String(request.runId),
+			turnId: String(request.turnId),
+			invocationId: String(request.invocationId),
+		},
+	};
 }
 
 export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
@@ -621,10 +711,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					);
 					const projectInstructions = await loadProjectInstructions(workspace, options.fileSystem);
 					const trustedProject = projectInstructions
-						? [
-								...(settings.projectTrust ?? []),
-								...(session.restored.projectTrust ? [session.restored.projectTrust] : []),
-							].some(
+						? (settings.projectTrust ?? []).some(
 								(entry) =>
 									entry.workspace === workspace.root &&
 									entry.path === projectInstructions.path &&
@@ -694,12 +781,122 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
 					}
 					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
+					const additionalWritableRoots = await Promise.all(
+						parsed.additionalWritableRoots.map((path) =>
+							canonicalDirectory(path, workspace.root, options.fileSystem),
+						),
+					);
+					const temporaryDirectory = await canonicalDirectory(
+						options.runtime.environment.TMPDIR ?? "/tmp",
+						workspace.root,
+						options.fileSystem,
+					);
+					const selectedProfile =
+						parsed.permissionProfile ??
+						settings.permissions?.profile ??
+						(projectInstructions ? "workspace" : "read-only");
+					const selectedApprovalPolicy =
+						parsed.approvalPolicy ??
+						settings.permissions?.approvalPolicy ??
+						defaultApprovalPolicy(selectedProfile);
+					const compiledProfile = compileSandboxPolicy({
+						profile: selectedProfile,
+						workspaceRoots: [workspace.root],
+						temporaryDirectory,
+						additionalWritableRoots,
+					});
+					const configuredShell = options.runtime.environment.SHELL;
+					const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
+					const interactiveApproval =
+						parsed.mode === "interactive" && !options.approval ? new InteractiveApprovalHandler() : undefined;
+					const rejectingApproval =
+						parsed.mode === "print" && !options.approval
+							? new RejectingApprovalHandler(async (request) => {
+									if (parsed.output === "json") {
+										await options.io.stdout.write(`${JSON.stringify(approvalRequiredEvent(request))}\n`);
+									} else {
+										const target = request.command ?? request.canonicalPath ?? request.host ?? request.kind;
+										await options.io.stderr.write(`coda: approval required for ${request.kind}: ${target}\n`);
+									}
+								})
+							: undefined;
+					const ruleStore = options.permissionRules ?? createInMemoryPermissionRuleStore();
+					const [commandPolicy, networkRules] = await Promise.all([
+						ruleStore.loadCommandPolicy(),
+						ruleStore.loadNetworkRules(),
+					]);
+					const audit: PermissionAuditSink = (event) =>
+						session.record({ type: "permission_audit_recorded", event });
+					const approvalHandler = options.approval ?? interactiveApproval ?? rejectingApproval!;
+					const auditedApproval: PermissionApprovalHandler = {
+						decide: async (request) => {
+							try {
+								const decision = await approvalHandler.decide(request);
+								await audit({ type: "approval_decision", request, decision });
+								return decision;
+							} catch (error) {
+								await audit({
+									type: "approval_decision",
+									request,
+									decision: {
+										type: "reviewer-failed",
+										message: error instanceof Error ? error.message : String(error),
+									},
+								});
+								throw error;
+							}
+						},
+					};
+					const persistRule = async (
+						kind: "command" | "network",
+						rule: CommandRule | NetworkRule,
+						persist: () => Promise<void>,
+					): Promise<void> => {
+						try {
+							await persist();
+						} catch (error) {
+							await audit({
+								type: "rule_persistence",
+								kind,
+								rule,
+								outcome: "failed",
+								error: error instanceof Error ? error.message : String(error),
+							});
+							throw error;
+						}
+						await audit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
+					};
+					const policy = createPermissionEngine({
+						cwd: workspace.root,
+						shellExecutable,
+						workspace,
+						profile: compiledProfile,
+						approvalPolicy: selectedApprovalPolicy,
+						approval: auditedApproval,
+						commandRules: commandPolicy.rules,
+						hostExecutables: commandPolicy.hostExecutables,
+						networkRules,
+						persistCommandRule: (rule) => persistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
+						persistNetworkRule: (rule) => persistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
+						onWarning: async (message) => {
+							await audit({ type: "warning", message });
+							await options.io.stderr.write(`coda: ${message}\n`);
+						},
+					});
+					await audit(permissionConfigurationAuditEvent("startup", compiledProfile, selectedApprovalPolicy));
+					const modelProcessRunner = createAuditedModelProcessRunner(
+						options.modelProcessRunner ?? createModelProcessRunner(),
+						audit,
+					);
 					const tools = createCodingTools({
 						workspace,
 						fileSystem: options.fileSystem,
-						processRunner: options.processRunner,
+						processRunner: modelProcessRunner,
+						permissions: policy,
+						shellExecutable,
 						runtime: options.runtime,
 						settings,
+						onAudit: audit,
 					});
 					const freezePrompt = () =>
 						buildSystemPrompt({
@@ -709,8 +906,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							tools: tools.map((tool) => ({ name: tool.name, description: tool.description })),
 							capabilities: {
 								interactionMode: parsed.mode,
-								workspaceWrite: parsed.mode === "interactive" || parsed.allowWorkspaceWrite,
-								bash: parsed.allowBash,
+								permissionProfile: policy.configuration().profile.profile,
+								approvalPolicy: approvalPolicyLabel(policy.configuration().approvalPolicy),
 							},
 							projectInstructions,
 						});
@@ -726,14 +923,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						type: "model_selected",
 						model: { provider: model.provider, id: model.id },
 						reasoning,
-					});
-					const interactiveApproval =
-						parsed.mode === "interactive" && !options.approval ? new InteractiveApprovalHandler() : undefined;
-					const policy = createWorkspacePolicy(workspace, {
-						mode: parsed.mode,
-						allowWorkspaceWrite: parsed.allowWorkspaceWrite,
-						allowBash: parsed.allowBash,
-						approval: options.approval ?? interactiveApproval,
 					});
 					const agent = new Agent({
 						clock: options.runtime.clock,
@@ -787,7 +976,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						);
 					const initialMessageCount = agent.state.messages.length;
 					agent.onEvent((event) => {
-						if (event.type === "tool_execution_rejected" && policy.consumeAbort(event.invocation.id)) {
+						if (
+							(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
+							policy.consumeAbort(event.invocation.id)
+						) {
 							agent.abort();
 						}
 					});
@@ -810,6 +1002,34 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							approval: interactiveApproval,
 							modelLabel: `${model.provider}/${model.id}`,
 							workspaceLabel: basename(workspace.root) || workspace.root,
+							permissionProfile: policy.configuration().profile.profile,
+							permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
+							onPermissionProfileChange: async (profile) => {
+								const previous = policy.configuration();
+								const next = {
+									profile: compileSandboxPolicy({
+										profile,
+										workspaceRoots: [workspace.root],
+										temporaryDirectory,
+										additionalWritableRoots,
+									}),
+									approvalPolicy: defaultApprovalPolicy(profile),
+								} as const;
+								policy.update(next);
+								try {
+									await audit(
+										permissionConfigurationAuditEvent(
+											"permissions-command",
+											next.profile,
+											next.approvalPolicy,
+										),
+									);
+								} catch (error) {
+									policy.update(previous);
+									throw error;
+								}
+								return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`;
+							},
 							reasoning,
 							motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 							lifecycle: options.runtime.interactiveLifecycle,
@@ -889,6 +1109,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											model: { provider: model.provider, id: model.id },
 											reasoning,
 											prompt: { version: promptSnapshot.version, sha256: promptSnapshot.sha256 },
+											permissions: {
+												profile: policy.configuration().profile.profile,
+												approvalPolicy: approvalPolicyLabel(policy.configuration().approvalPolicy),
+											},
 										}
 									: { schemaVersion: 2, ...event };
 							return options.io.stdout.write(
@@ -918,6 +1142,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const committed = agent.state.messages.find(({ id }) => id === result.finalMessageId)?.message;
 					if (!committed || committed.role !== "assistant") throw new Error("Final Assistant Message is missing");
 					if (parsed.output === "text") await options.io.stdout.write(`${finalText(committed)}\n`);
+					if (rejectingApproval && rejectingApproval.requests.length > 0) return 1;
 					return 0;
 				} finally {
 					await mediaLibrary.dispose();

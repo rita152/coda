@@ -16,7 +16,7 @@ import {
 	type TerminalInput,
 	wrapAnsi,
 } from "@coda/tui";
-import type { ApprovalRequest } from "../policy.ts";
+import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { ComposerHistory } from "./composer-history.ts";
 import type { ComposerSubmission, UserShellSubmission } from "./input-types.ts";
@@ -51,6 +51,7 @@ export interface ChatComponentOptions {
 	readonly modelLabel: string;
 	readonly workspaceLabel?: string;
 	readonly reasoning: string;
+	readonly permissionLabel?: string;
 	readonly onSubmit: (
 		input: string,
 		attachmentIds: readonly string[],
@@ -73,6 +74,7 @@ export interface ChatComponentOptions {
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly onResumeFollowUps?: () => Promise<void> | void;
+	readonly onPermissions?: () => Promise<string | undefined>;
 	/** Reads the controller-owned mixed Follow-up/User Shell queue state. */
 	readonly isQueuePaused?: () => boolean;
 	readonly onReclaimFollowUp?: (queueItemId: string) => Promise<void> | void;
@@ -177,6 +179,7 @@ export class ChatComponent extends Component {
 	#recoverableCards: RecoverablePromptCard[] = [];
 	#activeFollowUp?: RecoverablePromptCard;
 	#nextProvisionalId = 0;
+	#permissionLabel?: string;
 
 	constructor(options: ChatComponentOptions) {
 		super({ focusable: true });
@@ -184,6 +187,7 @@ export class ChatComponent extends Component {
 		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
 		this.#history = new ComposerHistory(options.composerSubmissions);
 		this.#theme = createCodaTheme(options.colorLevel ?? 0);
+		this.#permissionLabel = options.permissionLabel;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
 		this.#nextRunAttachments = options.initialAttachments;
 		for (const [messageId, attachments] of options.restoredAttachments ?? []) {
@@ -210,8 +214,8 @@ export class ChatComponent extends Component {
 		return this.#theme.colorLevel === 3 ? 80 : 600;
 	}
 
-	setAwaitingApproval(request: ApprovalRequest): void {
-		if (!this.#timeline.setAwaitingApproval(request.invocationId, request.toolName)) return;
+	setAwaitingApproval(request: PermissionApprovalRequest): void {
+		if (!this.#timeline.setAwaitingApproval(request.invocationId, request.toolName ?? request.kind)) return;
 		this.#viewport.noteUpdate();
 		this.invalidate();
 	}
@@ -386,6 +390,7 @@ export class ChatComponent extends Component {
 				this.#options.workspaceLabel,
 				this.#options.modelLabel,
 				this.#options.reasoning,
+				this.#permissionLabel,
 				this.#transcriptMode,
 			),
 			...transcript,
@@ -602,6 +607,33 @@ export class ChatComponent extends Component {
 				return;
 			}
 			this.#submitUserShell(value);
+			return;
+		}
+		if (value === "/permissions") {
+			if (this.running) {
+				this.#error = "Permissions can only be changed while the Agent is idle";
+				this.invalidate();
+				return;
+			}
+			if (!this.#options.onPermissions) {
+				this.#error = "Permission selection is unavailable";
+				this.invalidate();
+				return;
+			}
+			this.#editor.clear();
+			this.#history.reset();
+			this.#error = undefined;
+			this.invalidate();
+			void this.#options.onPermissions().then(
+				(label) => {
+					if (label) this.#permissionLabel = label;
+					this.invalidate();
+				},
+				(error: unknown) => {
+					this.#error = error instanceof Error ? error.message : String(error);
+					this.invalidate();
+				},
+			);
 			return;
 		}
 		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedQueue) {
@@ -1485,14 +1517,29 @@ function renderHeader(
 	workspace: string | undefined,
 	model: string,
 	reasoning: string,
+	permissionLabel: string | undefined,
 	transcriptMode: boolean,
 ): string {
 	const safeWorkspace = sanitizeTerminalText(workspace ?? "").replace(/\s+/g, " ");
 	const safeModel = sanitizeTerminalText(model).replace(/\s+/g, " ");
 	const safeReasoning = sanitizeTerminalText(reasoning).replace(/\s+/g, " ");
+	const safePermission = sanitizeTerminalText(permissionLabel ?? "").replace(/\s+/g, " ");
 	const fields = transcriptMode
-		? ["Coda", "Transcript", ...(safeWorkspace ? [safeWorkspace] : []), safeModel, `reasoning ${safeReasoning}`]
-		: ["Coda", ...(safeWorkspace ? [safeWorkspace] : []), safeModel, `reasoning ${safeReasoning}`];
+		? [
+				"Coda",
+				"Transcript",
+				...(safeWorkspace ? [safeWorkspace] : []),
+				safeModel,
+				`reasoning ${safeReasoning}`,
+				...(safePermission ? [safePermission] : []),
+			]
+		: [
+				"Coda",
+				...(safeWorkspace ? [safeWorkspace] : []),
+				safeModel,
+				`reasoning ${safeReasoning}`,
+				...(safePermission ? [safePermission] : []),
+			];
 	while (fields.length > 1 && displayWidth(fields.join(" • ")) > width) fields.pop();
 	return clipAnsi(fields.join(" • "), width);
 }

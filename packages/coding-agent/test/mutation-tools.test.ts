@@ -24,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("mutation Tools", () => {
-	it("atomically creates a Workspace file only when print-mode writes are explicitly enabled", async () => {
+	it("atomically creates a Workspace file under the explicit Workspace profile", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-write-"));
 		temporaryDirectories.push(workspace);
 
@@ -72,7 +72,8 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--allow-workspace-write",
+			"--sandbox",
+			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"create created.txt",
@@ -140,7 +141,8 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--allow-workspace-write",
+			"--sandbox",
+			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"edit existing.txt",

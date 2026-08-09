@@ -22,6 +22,7 @@ import type { ProcessRunner } from "./host/process-runner.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
+import { createPermissionRuleStore, defaultPermissionRulePaths } from "./permissions/rule-store.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
@@ -305,6 +306,7 @@ export function createNodeCodingAgentApplication(
 		settings,
 		fileSystem,
 		processRunner,
+		permissionRules: createPermissionRuleStore(defaultPermissionRulePaths(homeDirectory)),
 		io,
 		fullScreenOutput,
 		terminalFactory,

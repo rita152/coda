@@ -14,6 +14,7 @@ import type {
 import type { ThinkingLevel } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
+import type { PermissionAuditEvent } from "../permissions/audit.ts";
 
 declare const sessionIdBrand: unique symbol;
 export type SessionId = string & { readonly [sessionIdBrand]: "SessionId" };
@@ -34,7 +35,6 @@ export interface SessionDescriptor {
 export interface RestoredSessionState {
 	readonly model?: ModelSelection;
 	readonly reasoning?: ThinkingLevel | "off";
-	readonly projectTrust?: ProjectTrustRecord;
 }
 
 export interface SessionMediaRendition {
@@ -99,6 +99,7 @@ export type SessionChange =
 			readonly reasoning: ThinkingLevel | "off";
 	  }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
+	| { readonly type: "permission_audit_recorded"; readonly event: PermissionAuditEvent }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }
 	| { readonly type: "composer_submission_retracted"; readonly id: string }

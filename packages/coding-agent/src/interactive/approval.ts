@@ -12,22 +12,48 @@ import {
 	type Tui,
 	wrapAnsi,
 } from "@coda/tui";
-import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../policy.ts";
+import type {
+	ApprovalDecision,
+	PermissionApprovalHandler,
+	PermissionApprovalRequest,
+} from "../permissions/permission-engine.ts";
 
 interface ApprovalComponentOptions {
-	readonly request: ApprovalRequest;
+	readonly request: PermissionApprovalRequest;
 	readonly finish: (decision: ApprovalDecision) => void;
 }
 
-function describeReason(request: ApprovalRequest): string {
-	switch (request.reason) {
-		case "outside_workspace":
-			return "The requested path resolves outside the Workspace.";
-		case "protected_path":
-			return "The requested path is protected and may contain secrets or repository metadata.";
-		case "shell":
-			return "This command can read, write, execute, and access the network as your host user.";
+function persistentCommandDecision(request: PermissionApprovalRequest): ApprovalDecision | undefined {
+	return request.proposedCommandRule
+		? { type: "approved-execpolicy-amendment", command: request.proposedCommandRule }
+		: undefined;
+}
+
+function choiceFor(request: PermissionApprovalRequest, choice: string): ApprovalDecision | undefined {
+	if (choice === "1") return { type: "approved" };
+	if (request.kind === "network") {
+		if (choice === "2") return { type: "approved-for-session" };
+		if (choice === "3" && request.host) {
+			return { type: "network-policy-amendment", host: request.host, action: "allow" };
+		}
 	}
+	if (request.kind === "filesystem" && choice === "2") return { type: "approved-for-session" };
+	if (request.kind === "command" && !request.additionalPermissions && choice === "2") {
+		return persistentCommandDecision(request);
+	}
+	if (choice === "escape" || choice === "a") return { type: "abort" };
+	return undefined;
+}
+
+function choices(request: PermissionApprovalRequest): string {
+	const values = ["[1] approve once"];
+	if (request.kind === "filesystem" || request.kind === "network") values.push("[2] approve for session");
+	if (request.kind === "command" && !request.additionalPermissions && request.proposedCommandRule) {
+		values.push("[2] save Command Rule");
+	}
+	if (request.kind === "network") values.push("[3] always allow host");
+	values.push("[a] abort");
+	return values.join("  ");
 }
 
 class ApprovalComponent extends Component {
@@ -47,19 +73,9 @@ class ApprovalComponent extends Component {
 		let choice: string | undefined;
 		if (input.type === "text" || input.type === "paste") choice = input.text.trim().toLowerCase()[0];
 		else if (input.action !== "release") choice = input.key;
-		if (choice === "1") {
-			this.#options.finish("allow_once");
-			return;
-		}
-		if (choice === "2") {
-			this.#options.finish(this.#options.request.grantScope === "run" ? "allow_run" : "allow_once");
-			return;
-		}
-		if (choice === "d" || choice === "escape") {
-			this.#options.finish("deny");
-			return;
-		}
-		if (choice === "a") this.#options.finish("deny_and_abort");
+		if (!choice) return;
+		const decision = choiceFor(this.#options.request, choice);
+		if (decision) this.#options.finish(decision);
 	}
 }
 
@@ -68,12 +84,19 @@ interface PendingApproval {
 	readonly resolve: (decision: ApprovalDecision) => void;
 }
 
-export type ApprovalObserver = (request: ApprovalRequest) => void;
+interface QueuedApproval {
+	readonly request: PermissionApprovalRequest;
+	readonly resolve: (decision: ApprovalDecision) => void;
+	readonly reject: (error: unknown) => void;
+}
 
-export class InteractiveApprovalHandler implements ApprovalHandler {
+export type ApprovalObserver = (request: PermissionApprovalRequest) => void;
+
+export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 	#tui?: Tui;
 	#terminal?: Terminal;
 	#pending?: PendingApproval;
+	readonly #queue: QueuedApproval[] = [];
 	#observer?: ApprovalObserver;
 
 	bind(tui: Tui, terminal: Terminal, observer?: ApprovalObserver): void {
@@ -84,29 +107,46 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 	}
 
 	unbind(): void {
-		this.#finish("deny");
+		const decision = { type: "denied", rejection: "interactive approval closed" } as const;
+		const pending = this.#pending;
+		this.#pending = undefined;
+		pending?.handle.remove();
+		pending?.resolve(decision);
+		for (const queued of this.#queue.splice(0)) queued.resolve(decision);
 		this.#tui = undefined;
 		this.#terminal = undefined;
 		this.#observer = undefined;
 	}
 
-	decide(request: ApprovalRequest): Promise<ApprovalDecision> {
+	decide(request: PermissionApprovalRequest): Promise<ApprovalDecision> {
 		if (!this.#tui || !this.#terminal || !this.#tui.started) {
 			return Promise.reject(new Error("Interactive approval is unavailable"));
 		}
-		if (this.#pending) return Promise.reject(new Error("Another Tool approval is already pending"));
 		this.#observer?.(request);
-		return new Promise<ApprovalDecision>((resolve) => {
+		return new Promise<ApprovalDecision>((resolve, reject) => {
+			this.#queue.push({ request, resolve, reject });
+			this.#showNext();
+		});
+	}
+
+	#showNext(): void {
+		if (this.#pending) return;
+		const next = this.#queue.shift();
+		if (!next) return;
+		try {
 			const component = new ApprovalComponent({
-				request,
+				request: next.request,
 				finish: (decision) => this.#finish(decision),
 			});
 			const handle = this.#tui!.showOverlay(component, {
-				layout: ({ columns, rows }) => approvalPlacement(request, columns, rows),
+				layout: ({ columns, rows }) => approvalPlacement(next.request, columns, rows),
 				focus: true,
 			});
-			this.#pending = { handle, resolve };
-		});
+			this.#pending = { handle, resolve: next.resolve };
+		} catch (error) {
+			next.reject(error);
+			this.#showNext();
+		}
 	}
 
 	#finish(decision: ApprovalDecision): void {
@@ -115,11 +155,12 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 		this.#pending = undefined;
 		pending.handle.remove();
 		pending.resolve(decision);
+		this.#showNext();
 	}
 }
 
-function approvalPlacement(request: ApprovalRequest, columns: number, rows: number): OverlayPlacement {
-	const width = columns < 64 ? columns : Math.min(76, columns - 4);
+function approvalPlacement(request: PermissionApprovalRequest, columns: number, rows: number): OverlayPlacement {
+	const width = columns < 64 ? columns : Math.min(86, columns - 4);
 	const maxHeight = Math.max(1, rows < 12 ? rows : rows - 4);
 	const height = renderApprovalModal(request, width, maxHeight).length;
 	return {
@@ -130,39 +171,59 @@ function approvalPlacement(request: ApprovalRequest, columns: number, rows: numb
 	};
 }
 
-function renderApprovalModal(request: ApprovalRequest, width: number, maxHeight: number): string[] {
+function targetDescription(request: PermissionApprovalRequest): string {
+	if (request.command) return `Command: ${request.command}`;
+	if (request.kind === "network") {
+		return `Destination: ${request.protocol ?? "https"}://${request.host ?? "unknown"}:${request.port ?? "default"}`;
+	}
+	return `Path: ${request.requestedPath ?? "(not provided)"} -> ${request.canonicalPath ?? "(unresolved)"}`;
+}
+
+function authorityDescription(request: PermissionApprovalRequest): string {
+	if (request.sandboxPermissions === "require_escalated") return "Authority: Full Access for this exact command.";
+	if (request.sandboxPermissions === "with_additional_permissions") {
+		return `Authority: active Sandbox plus ${JSON.stringify(request.additionalPermissions)}`;
+	}
+	if (request.kind === "network") return "Authority: one managed-network destination.";
+	if (request.kind === "filesystem") return "Authority: one exact filesystem operation.";
+	return "Authority: active OS Sandbox; no implicit escalation.";
+}
+
+function grantDescription(request: PermissionApprovalRequest): string {
+	if (request.kind === "network") {
+		return "Grant: this request, this process session, or a persistent allow rule for the displayed host.";
+	}
+	if (request.kind === "filesystem") {
+		return "Grant: this exact operation or this process session.";
+	}
+	if (request.additionalPermissions)
+		return "Grant: this exact command with only the displayed additional permissions.";
+	if (request.proposedCommandRule) {
+		return "Grant: this exact command or the displayed persistent Command Rule.";
+	}
+	return "Grant: this exact command.";
+}
+
+function renderApprovalModal(request: PermissionApprovalRequest, width: number, maxHeight: number): string[] {
 	if (width < 4 || maxHeight < 3) {
 		return Array.from({ length: Math.max(1, maxHeight) }, (_, index) =>
 			clipAnsi(index === 0 ? "Approval required" : index === maxHeight - 1 ? "Esc denies" : "", width),
 		);
 	}
 	const innerWidth = width - 4;
-	const target = request.command
-		? `Command: ${request.command}`
-		: `Path: ${request.requestedPath ?? "(not provided)"} -> ${request.canonicalPath ?? "(unresolved)"}`;
-	const scope =
-		request.grantScope === "run"
-			? "[1] allow once  [2] allow for Run  [d] deny  [a] deny + abort"
-			: "[1] allow operation  [d] deny  [a] deny + abort";
 	const wrapLine = (line: string): string[] => {
 		const safe = sanitizeTerminalText(line).replace(/[\r\n]+/g, " ");
 		return safe ? wrapAnsi(safe, innerWidth) : [""];
 	};
-	const header = wrapLine(`Approval required — ${request.toolName} (${request.operation})`);
+	const header = wrapLine(`Approval required — ${request.kind}`);
 	const optional = [
-		describeReason(request),
-		target,
-		...(request.diff ? request.diff.split(/\r?\n/) : []),
+		request.reason,
+		targetDescription(request),
+		...(request.diff ? request.diff.split(/\r?\n/u) : []),
+		...(request.justification ? [`Justification: ${request.justification}`] : []),
 		`cwd: ${request.cwd}`,
 	].flatMap(wrapLine);
-	const required = [
-		request.hostAuthority
-			? "Authority: host-user authority; no filesystem or network sandbox."
-			: "Authority: restricted execution backend.",
-		`Grant: ${request.grantScope === "run" ? "current Run" : "one exact operation"}`,
-		"",
-		scope,
-	].flatMap(wrapLine);
+	const required = [authorityDescription(request), grantDescription(request), "", choices(request)].flatMap(wrapLine);
 	const available = maxHeight - 2;
 	let body: string[];
 	if (header.length + required.length <= available) {
@@ -177,9 +238,9 @@ function renderApprovalModal(request: ApprovalRequest, width: number, maxHeight:
 	} else {
 		body = [
 			clipAnsi(header.join(" "), innerWidth),
-			clipAnsi(required.find((line) => line.startsWith("Authority:")) ?? "Authority: unavailable", innerWidth),
-			clipAnsi(required.find((line) => line.startsWith("Grant:")) ?? "Grant: unavailable", innerWidth),
-			clipAnsi(scope, innerWidth),
+			clipAnsi(authorityDescription(request), innerWidth),
+			clipAnsi(grantDescription(request), innerWidth),
+			clipAnsi(choices(request), innerWidth),
 		].slice(0, available);
 	}
 	const top = `╭${"─".repeat(width - 2)}╮`;

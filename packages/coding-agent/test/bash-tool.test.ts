@@ -24,6 +24,81 @@ afterEach(async () => {
 });
 
 describe("bash Tool", () => {
+	it("reports a Sandbox denial as an error even when the child exits zero", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-denial-"));
+		temporaryDirectories.push(workspace);
+		const faux = fauxProvider({ runtime: testTimeRuntime(890) });
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "curl https://example.com" }, { id: "denied-bash" }), {
+				stopReason: "toolUse",
+				timestamp: 890,
+			}),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "denied-bash",
+					isError: true,
+					content: [
+						{
+							type: "text",
+							text: expect.stringContaining("Sandbox denied network access to https://example.com:443"),
+						},
+					],
+				});
+				return fauxAssistantMessage("The Sandbox denied the request.", { timestamp: 890 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(890) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			modelProcessRunner: {
+				run: async () => ({
+					exitCode: 0,
+					signal: null,
+					stdout: "",
+					stderr: "",
+					timedOut: false,
+					truncated: false,
+					backend: "macos-seatbelt",
+					denial: {
+						kind: "network",
+						backend: "managed-network-proxy",
+						environmentId: "local",
+						host: "example.com",
+						protocol: "https",
+						port: 443,
+						decision: "deny",
+						source: "user",
+						reason: "host was denied",
+						timestamp: 890,
+					},
+				}),
+			},
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: { SHELL: "/bin/sh" },
+				clock: { now: () => 890 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "try network"]),
+		).resolves.toBe(0);
+		expect(stdout.value).toBe("The Sandbox denied the request.\n");
+		expect(stderr.value).toBe("");
+	});
+
 	it("uses the Workspace cwd and strips provider secrets from a non-login Shell", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-"));
 		temporaryDirectories.push(workspace);
@@ -85,7 +160,6 @@ describe("bash Tool", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--allow-bash",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"run a safe shell check",

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasWorkspacePathAccess } from "../policy.ts";
+import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 
 const LsParameters = Type.Object(
@@ -23,7 +23,7 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 		parallelSafe: true,
 		execute: async (arguments_, context) => {
 			const root = await workspace.resolvePath(arguments_.path ?? ".", "read");
-			if (!hasWorkspacePathAccess(workspace, root, context.invocationId, "ls", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "ls", "read")) {
 				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
 			}
 			if (!root.exists) throw new Error(`Directory does not exist: ${root.canonicalPath}`);
@@ -42,7 +42,7 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 				for (const entry of entries) {
 					context.signal.throwIfAborted();
 					const child = await workspace.resolvePath(join(directory, entry.name), "read");
-					if (!child.exists || !hasWorkspacePathAccess(workspace, child, context.invocationId, "ls", "read")) {
+					if (!child.exists || !hasPermissionedPathAccess(workspace, child, context.invocationId, "ls", "read")) {
 						continue;
 					}
 					if (lines.length >= limit) {

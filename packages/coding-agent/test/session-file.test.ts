@@ -16,6 +16,61 @@ afterEach(async () => {
 });
 
 describe("JSONL File Session", () => {
+	it("persists permission audit facts without restoring them as authority", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-permissions-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_180 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+		});
+		await session.record({
+			type: "permission_audit_recorded",
+			event: {
+				type: "configuration",
+				source: "startup",
+				approvalPolicy: "never",
+				policy: {
+					profile: "full-access",
+					readAccess: "full-disk",
+					deniedReadRoots: [],
+					writableRoots: "full-disk",
+					protectedMetadataRoots: ["/canonical/workspace"],
+					protectedMetadataNames: [".git", ".agents", ".codex", ".coda"],
+					protectedMetadataPaths: [
+						"/canonical/workspace/.git",
+						"/canonical/workspace/.agents",
+						"/canonical/workspace/.codex",
+						"/canonical/workspace/.coda",
+					],
+					networkAccess: "enabled",
+				},
+			},
+		});
+		const sessionId = session.descriptor.id;
+		const sessionPath = session.descriptor.path!;
+		await session.close();
+
+		const journal = await readFile(sessionPath, "utf8");
+		expect(journal).toContain('"type":"permission_audit_recorded"');
+		expect(journal).toContain('"profile":"full-access"');
+		const restored = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.restored).toEqual({});
+		await restored.close();
+	});
+
 	it("indexes durable media attached to a paused Follow-up by queue identity", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-follow-up-media-"));
 		temporaryDirectories.push(homeDirectory);
@@ -126,7 +181,7 @@ describe("JSONL File Session", () => {
 			.trimEnd()
 			.split("\n")
 			.map((line) => JSON.parse(line));
-		expect(lines[0]).toMatchObject({ type: "session", version: 4, sessionId });
+		expect(lines[0]).toMatchObject({ type: "session", version: 5, sessionId });
 		const records = lines.slice(1);
 		expect(records.map((record) => record.sequence)).toEqual(records.map((_, index) => index + 1));
 		expect(records[0].previousRecordId).toBeNull();
@@ -149,7 +204,7 @@ describe("JSONL File Session", () => {
 		await restored.close();
 	});
 
-	it("atomically migrates v1 inline images to v4 media references while preserving a backup", async () => {
+	it("atomically migrates v1 inline images to v5 media references while preserving a backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -222,17 +277,17 @@ describe("JSONL File Session", () => {
 		await resumed.close();
 
 		const migrated = await readFile(path, "utf8");
-		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 4 });
+		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 5 });
 		expect(migrated).not.toContain(imageData);
 		expect(migrated).toContain('"type":"media"');
 		expect(await readFile(`${path}.v1.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v4");
+		expect(diagnostics).toContain("session.migrated-v5");
 		const mediaEntry = JSON.parse(migrated.split("\n")[1]!).payload.message.message.content[1];
 		const mediaPath = join(`${path}.media`, `${mediaEntry.digest}.model.png`);
 		expect((await stat(mediaPath)).mode & 0o777).toBe(0o600);
 	});
 
-	it("atomically upgrades a v2 journal to v4 before accepting reclaimed Follow-up records", async () => {
+	it("atomically upgrades a v2 journal to v5 before accepting reclaimed Follow-up records", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v3-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -269,12 +324,12 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 4 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 5 });
 		expect(await readFile(`${path}.v2.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v4");
+		expect(diagnostics).toContain("session.migrated-v5");
 	});
 
-	it("atomically upgrades a v3 journal to v4 and preserves a v3 backup", async () => {
+	it("atomically upgrades a v3 journal to v5 and preserves a v3 backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v4-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -311,9 +366,9 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 4 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 5 });
 		expect(await readFile(`${path}.v3.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v4");
+		expect(diagnostics).toContain("session.migrated-v5");
 	});
 
 	it("durably classifies an active Run as interrupted before resuming", async () => {

@@ -109,29 +109,57 @@ A staged Media Asset selected for the next User Message; it becomes Session-owne
 _Avoid_: prompt token, inline image
 
 **Policy Gate**:
-The Coding Agent boundary that approves or rejects a Tool Invocation before execution according to workspace and user policy.
-It does not mediate an explicit User Shell command, whose leading `!` is the user's direct authorization.
-_Avoid_: sandbox, Agent hook, User Shell confirmation
+The Coding Agent seam that resolves the authority for a model-requested Tool Invocation and, when policy permits, routes an Approval Request before execution.
+It never mediates a User Shell command, whose leading `!` is the user's direct authorization.
+_Avoid_: Sandbox, Agent hook, User Shell confirmation
+
+**Permission Profile**:
+The effective filesystem and network authority assigned to model-requested work. Coda's built-in Permission Profiles are Read Only, Workspace, and Full Access.
+_Avoid_: trust level, Approval Policy, Sandbox mode
+
+**Approval Policy**:
+The rule that decides when model-requested authority must be reviewed. The four policies are Unless Trusted, On Request, Granular, and Never.
+_Avoid_: Permission Profile, trust level, prompt mode
+
+**Approval Request**:
+A request to grant a precisely described command, filesystem, or network authority that the current Policy Decision does not already allow.
+_Avoid_: confirmation dialog, Sandbox escape, Path Grant
+
+**Additional Permission**:
+A model-declared, narrowly scoped extension to the current Permission Profile for one Tool Invocation.
+_Avoid_: Full Access, Path Grant, implicit retry
+
+**Session Approval**:
+A process-local approval remembered for matching commands or network hosts until the current Coda process exits.
+_Avoid_: persistent rule, Run grant, trust
+
+**Command Rule**:
+A persistent ordered-prefix decision used to allow, prompt for, or forbid matching model-requested commands.
+_Avoid_: shell alias, Session Approval, network rule
+
+**Network Rule**:
+A persistent host decision used by managed network access to allow, prompt for, or forbid matching destinations.
+_Avoid_: firewall rule, Command Rule, Session Approval
+
+**Sandbox**:
+The operating-system-enforced execution environment that limits model-requested processes to their effective Permission Profile and Additional Permissions.
+_Avoid_: Policy Gate, command classifier, User Shell
 
 **Workspace**:
 The canonical filesystem root that scopes a Coding Agent's Session, project context, and default Tool authority.
 _Avoid_: current directory, repository
 
-**Path Grant**:
-A user-approved, narrowly scoped exception allowing one operation on an exact canonical path outside the normal Workspace policy.
-_Avoid_: full access, trust
-
 **Project Trust**:
-Approval to load a specific version of Workspace instructions into model context; it never grants additional Tool authority.
-_Avoid_: Path Grant, approval mode
+The known or unknown decision to load a specific version of Workspace instructions into model Context. Its status participates in default Permission Profile selection but is never itself execution authority.
+_Avoid_: Permission Profile, Additional Permission, Approval Policy
 
 **Prompt Builder**:
 The versioned Coding Agent component that deterministically assembles one Run's system prompt from application policy, runtime capabilities, Workspace facts, and trusted project instructions.
 _Avoid_: Provider prompt, Agent global prompt
 
 **Policy Decision**:
-An explicit, scoped outcome allowing or rejecting one Tool Invocation, or a displayed class of Tool Invocations for the current Run.
-_Avoid_: trust, sandbox permission
+An explicit outcome that allows, rejects, or aborts model-requested work, optionally remembering or persisting the precisely displayed authority.
+_Avoid_: trust, Permission Profile, Sandbox
 
 **Context Overflow**:
 A model request that cannot fit within the selected Model's usable context window after accounting for Messages, Tools, and reserved output.

@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0034
 ---
 
 # Own the Coda contracts above the AI layer

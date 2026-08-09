@@ -84,7 +84,7 @@ describe("read Tool", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("fails closed on a sensitive path in non-interactive mode", async () => {
+	it("reads dotfiles and key-shaped paths because every profile has full-disk read access", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-sensitive-"));
 		temporaryDirectories.push(workspace);
 		await writeFile(join(workspace, ".env"), "SECRET=do-not-leak\n", "utf8");
@@ -101,11 +101,10 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-tool-sensitive",
 					toolName: "read",
-					isError: true,
+					isError: false,
+					content: [{ type: "text", text: "SECRET=do-not-leak\n" }],
 				});
-				expect(JSON.stringify(result)).toContain("approval");
-				expect(JSON.stringify(result)).not.toContain("do-not-leak");
-				return fauxAssistantMessage("The protected read was rejected.", { timestamp: 400 });
+				return fauxAssistantMessage("The dotfile is readable under this profile.", { timestamp: 400 });
 			},
 		]);
 		const models = createModels({ runtime: testTimeRuntime(400) });
@@ -141,7 +140,7 @@ describe("read Tool", () => {
 		]);
 
 		expect(exitCode).toBe(0);
-		expect(stdout.value).toBe("The protected read was rejected.\n");
+		expect(stdout.value).toBe("The dotfile is readable under this profile.\n");
 		expect(stderr.value).toBe("");
 	});
 });

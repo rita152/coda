@@ -44,10 +44,12 @@ without making a model request:
 npm run test:e2e
 ```
 
-## Initial capabilities
+## Capabilities
 
 - `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`
-- interactive approval for protected/outside paths and Shell
+- Read Only, Workspace, and Full Access Permission Profiles with Unless Trusted, On Request, Granular, and Never Approval Policies
+- exact filesystem, command-prefix, host-network, one-shot, process-local Session, and persistent-rule decisions
+- OS-enforced macOS/Linux Sandbox execution for every model-started process and exact approved file mutation
 - full-screen semantic Timeline with CommonMark/GFM Assistant and Thinking content
 - Codex-inspired structured Tool Invocation presentation and Transcript View
 - bounded image attachments with Kitty preview and system-viewer fallback
@@ -55,16 +57,14 @@ npm run test:e2e
 - current-Session Prompt History with visual-row Up/Down navigation and exact draft restoration
 - explicit `!command` User Shell mode with live bounded output and a mixed deferred FIFO
 - durable Steering/Follow-up input queues with pause, resume, failure recovery, and Alt+Up reclaim
-- append-only, workspace-scoped Session v4 resume with content-addressed Media Assets and Composer Submission facts
+- append-only, workspace-scoped Session v5 resume with content-addressed Media Assets, Composer facts, and non-authorizing Permission audit facts
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
 - transient whole-Turn retry at 2s, 4s, and 8s
 
-The Policy Gate is not a sandbox. The model-invoked `bash` Tool runs with
-host-user authority after approval and a minimal environment. Explicit
-interactive `!command` is direct user authority: it bypasses Tool approval,
-inherits the full environment, stays outside model Context and Session data, and
-uses bounded terminal-sanitized output, timeout, and process-group cancellation.
+The Policy Gate resolves authority before a model Tool can run. Model `bash`, native search helpers, and file mutation workers enter `@coda/sandbox` unless the effective reviewed authority is Full Access or an exact command rule/escalation permits an unsandboxed invocation. An ordinary Sandbox denial is returned to the model and never retries outside the Sandbox automatically.
+
+Explicit interactive `!command` remains a separate direct-user entry point: it bypasses model Tool approval and Sandbox, inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 
 RPC, client/server mode, public SDK and extension contracts, compaction, Session
 branching, autocomplete, selection, redo, durable drafts, syntax highlighting, and generic terminal-image

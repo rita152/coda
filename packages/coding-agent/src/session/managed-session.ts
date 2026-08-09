@@ -126,6 +126,10 @@ export class ManagedSession implements Session {
 			await this.#append("project_trust_changed", { trust: change.trust });
 			return;
 		}
+		if (change.type === "permission_audit_recorded") {
+			await this.#append("permission_audit_recorded", { event: change.event });
+			return;
+		}
 		if (change.type === "composer_submission_recorded") {
 			await this.#append("composer_submission_recorded", { submission: change.submission });
 			return;

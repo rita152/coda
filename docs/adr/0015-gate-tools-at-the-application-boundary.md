@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0034
 ---
 
 # Gate Tools at the application boundary

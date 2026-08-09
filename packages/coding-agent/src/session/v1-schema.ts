@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4;
+type SessionFormatVersion = 1 | 2 | 3 | 4 | 5;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -61,6 +61,106 @@ function isJsonValue(value: unknown): boolean {
 	if (typeof value === "number") return Number.isFinite(value);
 	if (Array.isArray(value)) return value.every(isJsonValue);
 	return isRecord(value) && Object.values(value).every(isJsonValue);
+}
+
+function isPermissionPolicySnapshot(value: unknown): boolean {
+	return (
+		exactRecord(value, [
+			"profile",
+			"readAccess",
+			"deniedReadRoots",
+			"writableRoots",
+			"protectedMetadataRoots",
+			"protectedMetadataNames",
+			"protectedMetadataPaths",
+			"networkAccess",
+		]) &&
+		(value.profile === "read-only" || value.profile === "workspace" || value.profile === "full-access") &&
+		value.readAccess === "full-disk" &&
+		isStringArray(value.deniedReadRoots) &&
+		(value.writableRoots === "full-disk" || isStringArray(value.writableRoots)) &&
+		isStringArray(value.protectedMetadataRoots) &&
+		isStringArray(value.protectedMetadataNames) &&
+		isStringArray(value.protectedMetadataPaths) &&
+		(value.networkAccess === "restricted" || value.networkAccess === "enabled")
+	);
+}
+
+function isApprovalPolicy(value: unknown): boolean {
+	return (
+		value === "unless-trusted" ||
+		value === "on-request" ||
+		value === "never" ||
+		(exactRecord(value, [
+			"mode",
+			"sandboxApproval",
+			"rules",
+			"skillApproval",
+			"requestPermissions",
+			"mcpElicitations",
+		]) &&
+			value.mode === "granular" &&
+			["sandboxApproval", "rules", "skillApproval", "requestPermissions", "mcpElicitations"].every(
+				(key) => typeof value[key] === "boolean",
+			))
+	);
+}
+
+function isPermissionAuditEvent(value: unknown): boolean {
+	if (!isRecord(value) || typeof value.type !== "string") return false;
+	switch (value.type) {
+		case "configuration":
+			return (
+				exactRecord(value, ["type", "source", "approvalPolicy", "policy"]) &&
+				(value.source === "startup" || value.source === "permissions-command") &&
+				isApprovalPolicy(value.approvalPolicy) &&
+				isPermissionPolicySnapshot(value.policy)
+			);
+		case "approval_decision":
+			return (
+				exactRecord(value, ["type", "request", "decision"]) &&
+				isRecord(value.request) &&
+				isJsonValue(value.request) &&
+				isRecord(value.decision) &&
+				isNonEmptyString(value.decision.type) &&
+				isJsonValue(value.decision)
+			);
+		case "rule_persistence":
+			return (
+				exactRecord(value, ["type", "kind", "rule", "outcome"], ["error"]) &&
+				(value.kind === "command" || value.kind === "network") &&
+				isRecord(value.rule) &&
+				isJsonValue(value.rule) &&
+				(value.outcome === "persisted" || value.outcome === "failed") &&
+				(value.error === undefined || typeof value.error === "string")
+			);
+		case "warning":
+			return exactRecord(value, ["type", "message"]) && isNonEmptyString(value.message);
+		case "sandbox_execution":
+			return (
+				exactRecord(
+					value,
+					["type", "invocationId", "toolName", "policy", "outcome"],
+					["backend", "exitCode", "signal", "denial", "error"],
+				) &&
+				isNonEmptyString(value.invocationId) &&
+				isNonEmptyString(value.toolName) &&
+				isPermissionPolicySnapshot(value.policy) &&
+				["success", "normal-failure", "sandbox-denial", "timed-out", "cancelled", "launch-failed"].includes(
+					String(value.outcome),
+				) &&
+				(value.backend === undefined ||
+					value.backend === "none" ||
+					value.backend === "macos-seatbelt" ||
+					value.backend === "linux-bwrap") &&
+				(value.exitCode === undefined || value.exitCode === null || Number.isSafeInteger(value.exitCode)) &&
+				(value.signal === undefined || value.signal === null || typeof value.signal === "string") &&
+				(value.denial === undefined || isJsonValue(value.denial)) &&
+				(value.error === undefined || typeof value.error === "string")
+			);
+		default:
+			return false;
+	}
 }
 
 function isTextContent(value: unknown): boolean {
@@ -296,7 +396,11 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 	return (
 		exactRecord(value, ["type", "version", "sessionId", "workspaceId", "workspacePath", "createdAt"]) &&
 		value.type === "session" &&
-		(value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4) &&
+		(value.version === 1 ||
+			value.version === 2 ||
+			value.version === 3 ||
+			value.version === 4 ||
+			value.version === 5) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -433,5 +537,7 @@ export function isSessionRecordPayload(
 				typeof payload.trust.sha256 === "string" &&
 				/^[a-f0-9]{64}$/.test(payload.trust.sha256)
 			);
+		case "permission_audit_recorded":
+			return version >= 5 && exactRecord(payload, ["event"]) && isPermissionAuditEvent(payload.event);
 	}
 }

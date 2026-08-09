@@ -9,7 +9,7 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
-import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
+import type { ModelSelection } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
@@ -31,13 +31,14 @@ export const SESSION_RECORD_TYPES = [
 	"composer_submission_retracted",
 	"model_selected",
 	"project_trust_changed",
+	"permission_audit_recorded",
 ] as const;
 
 export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4;
+	readonly version: 1 | 2 | 3 | 4 | 5;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -102,7 +103,6 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let firstComposerSubmissionSequence: number | undefined;
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
-	let projectTrust: ProjectTrustRecord | undefined;
 
 	for (const record of records) {
 		const payload = record.payload as Record<string, unknown>;
@@ -161,7 +161,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				reasoning = payload.reasoning as RestoredSessionState["reasoning"];
 				break;
 			case "project_trust_changed":
-				projectTrust = structuredClone(payload.trust as ProjectTrustRecord);
+				// Project Trust records are audit facts. Only current settings may authorize instructions.
 				break;
 			case "tool_started": {
 				const invocation = payload.invocation as ToolInvocation | undefined;
@@ -246,7 +246,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				.map(({ submission }) => submission),
 			...composerSubmissions.values(),
 		].map((submission) => structuredClone(submission)),
-		restored: { model, reasoning, projectTrust },
+		restored: { model, reasoning },
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,
@@ -340,7 +340,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 4,
+		version: 5,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

@@ -418,6 +418,81 @@ describe("interactive TUI mode", () => {
 		expect(prompts[0]).not.toBe(prompts[1]);
 	});
 
+	it("applies /permissions only to the active process and updates the visible profile", async () => {
+		const runtime = testTimeRuntime(3_500);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 140, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let saves = 0;
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => {
+					saves++;
+				},
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started && terminal.readOutput().includes("Read Only / on-request"));
+		terminal.clearOutput();
+		await terminal.emit({ type: "text", text: "/permissions" });
+		await terminal.emit({
+			type: "key",
+			key: "enter",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes("Select Permission Profile"));
+		await terminal.emit({
+			type: "key",
+			key: "2",
+			text: "2",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes("Workspace / on-request"));
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+
+		await expect(running).resolves.toBe(0);
+		expect(saves).toBe(0);
+		expect(stdout.value).toBe("");
+		expect(stderr.value).toBe("");
+	});
+
 	it("restores the terminal for SIGTERM and returns the conventional signal exit status", async () => {
 		const runtime = testTimeRuntime(4_000);
 		const faux = fauxProvider({ runtime });
