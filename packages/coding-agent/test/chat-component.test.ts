@@ -646,6 +646,47 @@ describe("ChatComponent terminal input", () => {
 		expect(plainFrame).not.toContain("\x1b[");
 	});
 
+	it("keeps Thinking muted across Markdown inline styles", () => {
+		const component = createComponent({ colorLevel: 1 });
+		const thinking = [
+			"plain thinking",
+			"",
+			"1. **Identity:** rest",
+			"",
+			"- `@coda/ai` — layer",
+			"",
+			"**outer *inner* outer-tail** final-tail",
+			"",
+			`**${"wrap ".repeat(8)}wrapped-strong** after-wrap`,
+		].join("\n");
+		const expectations = [
+			{ needle: "plain thinking", state: { muted: true, bold: false } },
+			{ needle: "Identity:", state: { muted: true, bold: true } },
+			{ needle: "rest", state: { muted: true, bold: false } },
+			{ needle: "@coda/ai", state: { muted: true, foreground: 36 } },
+			{ needle: "layer", state: { muted: true, foreground: undefined } },
+			{ needle: "inner", state: { muted: true, bold: true, italic: true } },
+			{ needle: "outer-tail", state: { muted: true, bold: true, italic: false } },
+			{ needle: "final-tail", state: { muted: true, bold: false } },
+			{ needle: "wrapped-strong", state: { muted: true, bold: true } },
+			{ needle: "after-wrap", state: { muted: true, bold: false } },
+		] as const;
+
+		const expectThinkingStyles = (phase: "streaming" | "complete") => {
+			const lines = component.render({ width: 40, height: 30, now: 0 });
+			for (const { needle, state } of expectations) {
+				const line = lines.find((candidate) => stripAnsi(candidate).includes(needle));
+				if (!line) throw new Error(`Missing ${phase} Thinking text: ${needle}`);
+				expect(sgrStateAt(line, needle)).toMatchObject(state);
+			}
+		};
+
+		component.accept(thinkingDeltaEvent(1, thinking));
+		expectThinkingStyles("streaming");
+		component.accept(assistantContentEvent(1, [{ type: "thinking", thinking }]));
+		expectThinkingStyles("complete");
+	});
+
 	it("requests one capability-aware animation interval only for active Tools", () => {
 		const full = createComponent({ colorLevel: 3, motion: "full" });
 		full.accept(toolStartEvent(1));
@@ -804,6 +845,56 @@ function assistantContentEvent(sequence: number, content: unknown[]): AgentEvent
 		},
 		sequence,
 	});
+}
+
+function thinkingDeltaEvent(sequence: number, thinking: string): AgentEvent {
+	return event({
+		type: "message_update",
+		turnId: "turn",
+		attemptId: `attempt-${sequence}`,
+		messageId: `message-${sequence}`,
+		delta: { type: "thinking_delta", contentIndex: 0, delta: thinking },
+		sequence,
+	});
+}
+
+interface SgrState {
+	bold: boolean;
+	muted: boolean;
+	italic: boolean;
+	strikethrough: boolean;
+	foreground?: number;
+}
+
+function sgrStateAt(line: string, needle: string): SgrState {
+	const offset = line.indexOf(needle);
+	if (offset < 0) throw new Error(`Missing terminal text: ${needle}`);
+	const state: SgrState = { bold: false, muted: false, italic: false, strikethrough: false };
+	// biome-ignore lint/complexity/useRegexLiterals: a literal is rejected because it contains the ESC control character.
+	const sgr = new RegExp("\\x1b\\[([0-9;]*)m", "g");
+	for (const match of line.slice(0, offset).matchAll(sgr)) {
+		const codes = (match[1] || "0").split(";").map(Number);
+		for (const code of codes) {
+			if (code === 0) {
+				state.bold = false;
+				state.muted = false;
+				state.italic = false;
+				state.strikethrough = false;
+				state.foreground = undefined;
+			} else if (code === 1) state.bold = true;
+			else if (code === 2) state.muted = true;
+			else if (code === 3) state.italic = true;
+			else if (code === 9) state.strikethrough = true;
+			else if (code === 22) {
+				state.bold = false;
+				state.muted = false;
+			} else if (code === 23) state.italic = false;
+			else if (code === 29) state.strikethrough = false;
+			else if (code === 39) state.foreground = undefined;
+			else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) state.foreground = code;
+		}
+	}
+	return state;
 }
 
 function toolStartEvent(sequence: number): AgentEvent {

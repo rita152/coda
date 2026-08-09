@@ -6,6 +6,7 @@ export {
 	sanitizeTerminalText,
 	sliceAnsi,
 	stripAnsi,
+	styleAnsi,
 	wrapAnsi,
 } from "./ansi.ts";
 export {

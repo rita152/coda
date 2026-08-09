@@ -6,7 +6,7 @@
 // See THIRD_PARTY_NOTICES.md.
 
 import { describe, expect, it } from "vitest";
-import { clipAnsi, displayWidth, sliceAnsi, stripAnsi, wrapAnsi } from "../src/index.ts";
+import { clipAnsi, displayWidth, sliceAnsi, stripAnsi, styleAnsi, wrapAnsi } from "../src/index.ts";
 
 describe("ANSI cell geometry", () => {
 	it("measures graphemes while ignoring terminal control sequences", () => {
@@ -57,5 +57,13 @@ describe("wrapAnsi", () => {
 	it("rejects invalid widths instead of risking a non-terminating wrap", () => {
 		expect(() => wrapAnsi("text", 0)).toThrow(RangeError);
 		expect(() => clipAnsi("text", -1)).toThrow(RangeError);
+	});
+});
+
+describe("styleAnsi", () => {
+	it("restores a parent style after a nested style resets", () => {
+		const nested = styleAnsi("2", `before ${styleAnsi("1", "bold")} after`);
+
+		expect(nested).toBe("\x1b[2mbefore \x1b[1mbold\x1b[0m\x1b[2m after\x1b[0m");
 	});
 });

@@ -11,6 +11,8 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const rgiEmoji = new RegExp("^\\p{RGI_Emoji}$", "v");
 const invisibleGrapheme = /^(?:\p{Control}|\p{Format}|\p{Mark})+$/u;
 const printableBase = /[^\p{Control}\p{Format}\p{Mark}]/u;
+// biome-ignore lint/complexity/useRegexLiterals: a literal is rejected because it contains the ESC control character.
+const sgrReset = new RegExp("\\x1b\\[(?:0)?m", "g");
 
 interface ControlToken {
 	readonly kind: "control";
@@ -181,6 +183,13 @@ export function stripAnsi(text: string): string {
 		.filter((token) => token.kind !== "control")
 		.map((token) => token.value)
 		.join("");
+}
+
+/** Applies trusted SGR parameters while restoring them after nested full resets. */
+export function styleAnsi(parameters: string, value: string): string {
+	if (value.length === 0) return value;
+	const open = `\x1b[${parameters}m`;
+	return `${open}${value.replace(sgrReset, (reset) => `${reset}${open}`)}\x1b[0m`;
 }
 
 /** Removes untrusted terminal controls before presentation code adds its own escapes. */

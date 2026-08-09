@@ -16,7 +16,7 @@ import type {
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { gfm } from "micromark-extension-gfm";
-import { clipAnsi, displayWidth, sanitizeTerminalText, wrapAnsi } from "./ansi.ts";
+import { clipAnsi, displayWidth, sanitizeTerminalText, styleAnsi, wrapAnsi } from "./ansi.ts";
 import type { ColorLevel } from "./terminal.ts";
 
 export interface MarkdownRenderOptions {
@@ -337,11 +337,11 @@ function markdownStyles(colorLevel: ColorLevel): MarkdownStyles {
 		return { heading: identity, strong: identity, emphasis: identity, deletion: identity, code: identity };
 	}
 	return {
-		heading: (value) => `\x1b[1;36m${value}\x1b[0m`,
-		strong: (value) => `\x1b[1m${value}\x1b[0m`,
-		emphasis: (value) => `\x1b[3m${value}\x1b[0m`,
-		deletion: (value) => `\x1b[9m${value}\x1b[0m`,
-		code: (value) => `\x1b[36m${value}\x1b[0m`,
+		heading: (value) => styleAnsi("1;36", value),
+		strong: (value) => styleAnsi("1", value),
+		emphasis: (value) => styleAnsi("3", value),
+		deletion: (value) => styleAnsi("9", value),
+		code: (value) => styleAnsi("36", value),
 	};
 }
 

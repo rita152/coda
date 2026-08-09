@@ -25,6 +25,7 @@ describe("@coda/tui public package contract", () => {
 			"sanitizeTerminalText",
 			"sliceAnsi",
 			"stripAnsi",
+			"styleAnsi",
 			"wrapAnsi",
 		]);
 		expect(typeof composeWithNodeStreams).toBe("function");

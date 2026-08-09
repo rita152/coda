@@ -1,4 +1,4 @@
-import type { ColorLevel } from "@coda/tui";
+import { type ColorLevel, styleAnsi } from "@coda/tui";
 
 export type ThemeTone = "accent" | "success" | "error" | "warning" | "muted" | "code";
 
@@ -47,8 +47,7 @@ const ANSI_16: readonly (readonly [number, number, number, number])[] = Object.f
 ]);
 
 export function createCodaTheme(colorLevel: ColorLevel): TuiTheme {
-	const style = (tone: ThemeTone, value: string) =>
-		colorLevel === 0 || value.length === 0 ? value : `\x1b[${SGR_BY_TONE[tone]}m${value}\x1b[0m`;
+	const style = (tone: ThemeTone, value: string) => (colorLevel === 0 ? value : styleAnsi(SGR_BY_TONE[tone], value));
 	return Object.freeze({
 		colorLevel,
 		style,
