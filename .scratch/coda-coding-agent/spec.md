@@ -1,6 +1,6 @@
 # `@coda/coding-agent` Initial Design Spec
 
-Status: Milestone 1 core implementation verified — remaining UX hardening tracked separately
+Status: Milestone 1 core and the TUI visual-refresh milestone are implemented and verified
 
 ## Objective
 
@@ -19,6 +19,14 @@ Compose Coda's AI, TUI, and Agent packages into the local terminal Coding Agent 
 - one-shot print mode for scripts, tests, and diagnosis
 
 Print mode exits after the requested Agent run settles.
+
+### Interactive Composer
+
+- The interactive Composer uses the application-neutral `@coda/tui` Editor while Coding Agent policy supplies Reasoning-level border color, queue commands, Attachments, and footer help.
+- Sent User Prompts use the same full-width horizontal-border geometry as the Composer and remain literal, unlabeled text. Assistant replies remain open and unlabeled.
+- Enter sends a Prompt while idle and queues Steering while running. Alt+Enter queues a durable Follow-up. Shift+Enter inserts a newline; `/follow-up` and backslash+Enter cover legacy terminals.
+- Aborted or failed Runs pause unconsumed Follow-ups. Empty Enter resumes FIFO; input typed while paused appends before resume; Alt+Up reclaims the newest pending or failed item for editing.
+- The InputQueueController is the application seam for media preparation, Agent mutation, Session facts, compensation, resume, and reclaim. Chat presentation never appends raw Session records.
 
 ### Print contract
 
@@ -165,13 +173,15 @@ Interactive approval returns `allow_once`, `allow_run`, `deny`, or `deny_and_abo
 - Streaming deltas, raw Provider responses, and complete environments are not persisted.
 - Overflow Shell logs are separate `0600` files; the Session contains only the truncated model-visible result and a reference.
 
-### Session v1 schema
+### Session v3 schema and compatibility
 
-The first JSONL line is a `session` header with `version: 1`, Session identity, Workspace identity and canonical path, and creation time. Every later Session Record contains its type, stable Record and Session identity, monotonically increasing Session sequence, `previousRecordId`, timestamp, optional Run/Turn/Attempt identity, and typed payload.
+The first JSONL line is a `session` header with `version: 3`, Session identity, Workspace identity and canonical path, and creation time. Every later Session Record contains its type, stable Record and Session identity, monotonically increasing Session sequence, `previousRecordId`, timestamp, optional Run/Turn/Attempt identity, and typed payload. Image content is stored as a validated Media Asset reference; bytes live in the mode-`0600` Session Media Store. All Agent-event and application writes are serialized through one append tail so physical order and predecessor identity cannot diverge.
+
+Version 1 and 2 journals remain readable. Opening v1 externalizes inline image bytes and migrates directly to v3; opening v2 upgrades to v3. Each migration writes and syncs a complete temporary journal, validates it, preserves a versioned backup, and atomically replaces the active journal before exposing the Session.
 
 `previousRecordId` deliberately names a linear predecessor rather than implying a tree parent.
 
-Allowed v1 Record types are:
+Allowed Record types are:
 
 ```text
 run_started
@@ -186,11 +196,13 @@ run_finished
 follow_up_enqueued
 follow_up_consumed
 follow_up_canceled
+follow_up_reclaimed
 model_selected
 project_trust_changed
 ```
 
-- Unconsumed Follow-up survives resume; Steering does not.
+- Unconsumed Follow-up survives resume; Steering does not. Restored unmatched items are Paused.
+- Failed Follow-ups are projected from `follow_up_enqueued`, `follow_up_consumed`, `run_started`, and `run_finished` facts and remain recoverable. `follow_up_reclaimed` is the durable tombstone used by Alt+Up.
 - A crashed active Run becomes interrupted, loses unconsumed Steering, and never restores pending approval or process state.
 - Streaming deltas, render events, and approval UI events are not Session Records.
 
@@ -218,6 +230,9 @@ interface SessionManager {
 interface Session {
   readonly descriptor: SessionDescriptor;
   readonly seed: AgentSeed;
+  readonly recoverableFollowUps: readonly RecoverableFollowUp[];
+  readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
+  registerMedia(registrations: readonly SessionMediaRegistration[]): void;
   attach(agent: Agent): DetachSession;
   record(change: SessionChange): Promise<void>;
   close(): Promise<void>;
@@ -260,6 +275,7 @@ interface Session {
 - Time and platform facts come from injected capabilities. Credentials, secret environment values, and unrelated host state never enter the prompt.
 - Project instructions are delimited with their canonical source path and content hash, and are capped at 64 KiB. Oversize input is a configuration error, never silently truncated.
 - `run_started` persists the Prompt Builder version and SHA-256, not a duplicate of the full prompt.
+- Agent invokes the Coding Agent's synchronous pre-Run preparation seam for every Prompt and Follow-up. Prompt freezing and conservative context checks therefore happen when a queued Run actually starts, after all earlier Runs have committed.
 
 ## Context Overflow
 
@@ -271,4 +287,4 @@ interface Session {
 
 ## Design status
 
-The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, and append-only Sessions. Rich editing, images, compaction, branching, RPC, extension APIs, and public release remain deferred.
+The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, append-only Sessions, a multiline Composer, and durable recoverable Follow-ups. Autocomplete, selection, redo, durable drafts, compaction, branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation enter the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.

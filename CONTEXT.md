@@ -32,6 +32,26 @@ _Avoid_: Follow-up, interrupt
 Input queued to begin a new Run after the current Run settles.
 _Avoid_: Steering, retry
 
+**Paused Follow-up**:
+A durable Follow-up that remains queued after restore, abort, interruption, or an earlier Run failure and requires an explicit resume before it can start.
+_Avoid_: draft, failed Run, Steering
+
+**Recoverable Follow-up**:
+The Session projection used to present and reclaim a Paused or failed Follow-up together with its original content and Attachments.
+_Avoid_: Agent Seed, retry, transcript Message
+
+**Composer**:
+The Coding Agent's bottom-docked input experience that combines the generic Editor with Attachments, queue commands, Reasoning-level styling, and submission policy.
+_Avoid_: Editor, Prompt Builder, User Message
+
+**Editor**:
+The application-neutral TUI component that owns text-buffer editing, wrapping, cursor placement, paste folding, and editor key behavior without knowledge of Agents or Sessions.
+_Avoid_: Composer, prompt card
+
+**Input Queue Controller**:
+The Coding Agent module that coordinates Composer acceptance, media preparation, Agent queue mutation, durable Session facts, resume, reclaim, and compensation.
+_Avoid_: Agent queue, Chat component, Session reducer
+
 **Tool Invocation**:
 One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
 _Avoid_: Tool, shell command
@@ -55,6 +75,26 @@ _Avoid_: Agent event, JSON line
 **Interrupted Tool Invocation**:
 A journaled Tool Invocation whose execution began but whose outcome was not durably recorded, leaving its external side effects unknown.
 _Avoid_: failed Tool, pending Tool
+
+**Timeline**:
+The ordered interactive presentation of committed Messages, Thinking Blocks, and Tool Invocations, including transient state for the active Run.
+_Avoid_: Session, transcript, event log
+
+**Transcript View**:
+The full-detail projection of a Timeline, including complete model-visible Tool results that the compact Timeline previews or truncates.
+_Avoid_: Session history, raw Provider log
+
+**Thinking Block**:
+Assistant content explicitly identified by the Provider as model reasoning, distinct from the requested Reasoning selection and from final Assistant text.
+_Avoid_: reasoning level, hidden state
+
+**Media Asset**:
+A validated, content-addressed image owned by a Session and referenced by User or Tool Result content without embedding its bytes in the Session journal.
+_Avoid_: attachment file, base64 payload
+
+**Attachment**:
+A staged Media Asset selected for the next User Message; it becomes Session-owned only when that Message commits.
+_Avoid_: prompt token, inline image
 
 **Policy Gate**:
 The Coding Agent boundary that approves or rejects a Tool Invocation before execution according to workspace and user policy.

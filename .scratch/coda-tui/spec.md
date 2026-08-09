@@ -1,6 +1,6 @@
 # `@coda/tui` Initial Design Spec
 
-Status: Milestone 1 implemented and verified
+Status: Milestone 1 and the full-screen visual-refresh milestone are implemented and verified
 
 ## Objective
 
@@ -37,7 +37,7 @@ Provide a reusable Node.js terminal rendering and interaction layer for macOS an
 
 ## Renderer and component rules
 
-- The first renderer targets the main screen only.
+- Interactive composition uses the alternate-screen `FullScreenTui`; terminal lifecycle and screen restoration remain hidden behind that Module.
 - `Component.invalidate()` is required and schedules a coalesced render.
 - Focus targets must be mounted and focusable.
 - Overlays use stable handles for visibility, focus, and removal.
@@ -62,16 +62,12 @@ Provide a reusable Node.js terminal rendering and interaction layer for macOS an
 
 ## Deferred
 
-- Markdown and rich text
-- images
-- a full editor
 - autocomplete
-- alternate-screen rendering
-- mouse handling
-- terminal images
+- Editor selection, redo, and durable draft storage
+- general mouse handling
 - OSC clipboard integration
 
-Deferred features may enter a second TUI milestone before `@coda/coding-agent` needs them.
+Alternate-screen rendering, Timeline wheel navigation, limited image-label mouse input, Markdown, a grapheme-safe multiline Editor, and terminal image previews enter the visual-refresh milestone. General mouse handling, inline Timeline images, autocomplete, selection, and clipboard integration remain deferred.
 
 ## Initial accessibility scope
 
@@ -88,4 +84,4 @@ deferred boundary above.
 
 Verification covers strict public-type consumption with Node streams, the root export surface, structured real and
 virtual Terminal input, lifecycle cleanup, capability negotiation and fallback, ANSI cell geometry, differential
-rendering, scheduling, non-reentrancy, keybindings, focus, and overlays. Default tests do not require a real terminal.
+rendering, scheduling, non-reentrancy, keybindings, focus, overlays, Editor behavior, and cursor placement. Default tests do not require a real terminal.
