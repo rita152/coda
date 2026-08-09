@@ -5,6 +5,52 @@ import type { SessionRecord } from "../src/session/records.ts";
 import type { SessionDescriptor } from "../src/session/types.ts";
 
 describe("ManagedSession", () => {
+	it("projects durable Composer submissions and filters retracted entries", () => {
+		const descriptor = {
+			id: "session:history",
+			workspace: { id: "workspace", path: "/workspace" },
+			createdAt: 1,
+			persistent: true,
+		} as SessionDescriptor;
+		const session = new ManagedSession(
+			{
+				descriptor,
+				records: linearRecords(descriptor, [
+					{
+						type: "message_committed",
+						payload: {
+							message: { id: "message:legacy", message: { role: "user", content: "!legacy", timestamp: 1 } },
+						},
+					},
+					{
+						type: "composer_submission_recorded",
+						payload: { submission: { id: "submission:1", kind: "steering", text: "new" } },
+					},
+					{
+						type: "composer_submission_recorded",
+						payload: {
+							submission: {
+								id: "submission:2",
+								kind: "follow_up",
+								text: "reclaimed",
+								queueItemId: "queue:2",
+							},
+						},
+					},
+					{ type: "composer_submission_retracted", payload: { id: "submission:2" } },
+				]),
+				append: async () => undefined,
+				close: async () => undefined,
+			},
+			{ clock: { now: () => 10 }, idGenerator: { generate: (kind) => `${kind}:new` } },
+		);
+
+		expect(session.composerSubmissions).toEqual([
+			{ id: "legacy:message:legacy", kind: "prompt", text: "\\!legacy" },
+			{ id: "submission:1", kind: "steering", text: "new" },
+		]);
+	});
+
 	it("projects failed Follow-ups for recovery until they are reclaimed", () => {
 		const descriptor = {
 			id: "session:test",

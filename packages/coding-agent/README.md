@@ -52,15 +52,19 @@ npm run test:e2e
 - Codex-inspired structured Tool Invocation presentation and Transcript View
 - bounded image attachments with Kitty preview and system-viewer fallback
 - Pi-style multiline Composer and matching sent-Prompt cards
+- current-Session Prompt History with visual-row Up/Down navigation and exact draft restoration
+- explicit `!command` User Shell mode with live bounded output and a mixed deferred FIFO
 - durable Steering/Follow-up input queues with pause, resume, failure recovery, and Alt+Up reclaim
-- append-only, workspace-scoped Session v3 resume with content-addressed Media Assets
+- append-only, workspace-scoped Session v4 resume with content-addressed Media Assets and Composer Submission facts
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
 - transient whole-Turn retry at 2s, 4s, and 8s
 
-The Policy Gate is not a sandbox. Shell runs with host-user authority after
-approval, with a minimal environment, bounded output, timeout, and process-group
-cancellation.
+The Policy Gate is not a sandbox. The model-invoked `bash` Tool runs with
+host-user authority after approval and a minimal environment. Explicit
+interactive `!command` is direct user authority: it bypasses Tool approval,
+inherits the full environment, stays outside model Context and Session data, and
+uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 
 RPC, client/server mode, public SDK and extension contracts, compaction, Session
 branching, autocomplete, selection, redo, durable drafts, syntax highlighting, and generic terminal-image

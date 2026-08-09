@@ -18,7 +18,10 @@ Status: private Milestone 1 package.
 - `Agent.prompt()` settles only after the final `run_end` listeners complete and
   the Agent is idle. `waitForIdle()` observes the same operation boundary.
 - Steering is consumed together at the next safe model-call boundary. Follow-up
-  items are consumed FIFO and each starts a new Run.
+  items are consumed FIFO and each starts a new Run. Automatic draining is the
+  default; an application scheduler may disable it and call
+  `runNextFollowUp()` to interleave other local work without moving that work
+  into Agent state.
 - Tools default to sequential execution. Only consecutive Tools marked
   `parallelSafe` may overlap, and every Tool declares `replaySafety`.
 - Whole-turn retry is disabled unless both a `TurnRetryPolicy` and cancellable

@@ -47,7 +47,12 @@ describe("SemanticTimeline", () => {
 		timeline.accept(delta("thinking_delta", 0, "considering", 2));
 		timeline.accept(delta("text_delta", 1, "draft answer", 3));
 
-		expect(timeline.entries.map((entry) => [entry.kind, entry.kind === "tool" ? entry.state : entry.text])).toEqual([
+		expect(
+			timeline.entries.map((entry) => [
+				entry.kind,
+				entry.kind === "tool" ? entry.state : entry.kind === "user_shell" ? entry.status : entry.text,
+			]),
+		).toEqual([
 			["thinking", "considering"],
 			["assistant", "draft answer"],
 		]);

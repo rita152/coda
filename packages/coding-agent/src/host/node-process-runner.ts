@@ -25,6 +25,10 @@ class OutputBudget {
 		this.#maxLines = maxLines;
 	}
 
+	get saturated(): boolean {
+		return this.#saturated;
+	}
+
 	take(text: string): VisibleSlice {
 		let visible = "";
 		let overflow = "";
@@ -78,10 +82,11 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 				let timedOut = false;
 				let aborted = false;
 				let settled = false;
+				let observerFailure: unknown;
 				let killTimer: NodeJS.Timeout | undefined;
 
 				const writeOverflow = (channel: "stderr" | "stdout", text: string): void => {
-					if (text.length === 0) return;
+					if (text.length === 0 || !request.overflowPath) return;
 					if (!overflow) {
 						overflow = createWriteStream(request.overflowPath, { flags: "wx", mode: 0o600 });
 						overflow.on("error", (error) => {
@@ -91,6 +96,12 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 					overflow.write(`\n[${channel}]\n${text}`);
 				};
 				const receive = (channel: "stderr" | "stdout", chunk: string): void => {
+					try {
+						request.onOutput?.({ channel, text: chunk });
+					} catch (error) {
+						observerFailure ??= error;
+						terminate();
+					}
 					const slice = budget.take(chunk);
 					(channel === "stdout" ? stdout : stderr).push(slice.visible);
 					writeOverflow(channel, slice.overflow);
@@ -146,6 +157,10 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 					if (options.platform !== "win32") signalProcess("SIGTERM");
 					void finishOverflow().then(
 						() => {
+							if (observerFailure !== undefined) {
+								reject(observerFailure);
+								return;
+							}
 							if (aborted) {
 								reject(abortError());
 								return;
@@ -156,7 +171,7 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 								stdout: stdout.join(""),
 								stderr: stderr.join(""),
 								timedOut,
-								truncated: overflow !== undefined,
+								truncated: budget.saturated,
 								overflowPath: overflow ? request.overflowPath : undefined,
 							});
 						},

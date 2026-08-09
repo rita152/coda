@@ -13,6 +13,7 @@ import type {
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
+import type { ComposerSubmission } from "../interactive/input-types.ts";
 
 declare const sessionIdBrand: unique symbol;
 export type SessionId = string & { readonly [sessionIdBrand]: "SessionId" };
@@ -99,6 +100,8 @@ export type SessionChange =
 	  }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
+	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }
+	| { readonly type: "composer_submission_retracted"; readonly id: string }
 	| {
 			readonly type: "follow_up_consumed" | "follow_up_canceled" | "follow_up_reclaimed";
 			readonly id: QueueItemId;
@@ -111,6 +114,7 @@ export interface Session {
 	readonly seed: AgentSeed;
 	readonly restored: RestoredSessionState;
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
+	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;

@@ -3,6 +3,7 @@ import type { ComponentInputContext, KeyInput, MarkdownRenderer, MouseButton } f
 import { stripAnsi } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { ChatComponent } from "../src/interactive/chat-component.ts";
+import type { UserShellSnapshot, UserShellStatus } from "../src/interactive/user-shell.ts";
 
 describe("ChatComponent terminal input", () => {
 	it("inserts printable text carried by a normalized KeyInput", () => {
@@ -314,6 +315,146 @@ describe("ChatComponent terminal input", () => {
 		const plain = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
 		expect(plain).toContain(`${"─".repeat(40)}\nship it\n${"─".repeat(40)}`);
 		expect(component.render({ width: 40, height: 12, now: 0 }).at(-3)).toBe("");
+	});
+
+	it("replays Prompt history only at visual boundaries and restores the exact draft", () => {
+		const component = createComponent({
+			colorLevel: 0,
+			composerSubmissions: [
+				{ id: "composer:1", kind: "prompt", text: "older" },
+				{ id: "composer:2", kind: "steering", text: "newer" },
+			],
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "draft\nsecond" }, context);
+		component.render({ width: 40, height: 12, now: 0 });
+
+		component.handleInput(key("up"), context);
+		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"))).toContain("draft\nsecond");
+		component.handleInput(key("up"), context);
+		expect(component.render({ width: 40, height: 12, now: 0 }).at(-3)).toBe("newer");
+
+		component.handleInput(key("down"), context);
+		component.handleInput({ type: "text", text: "X" }, context);
+		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"))).toContain("draftX\nsecond");
+	});
+
+	it("enters a red Shell mode by absorbing a leading bang and keeps a bare command editable", () => {
+		const onUserShell = vi.fn(() => ({ id: "user_shell:1", command: "echo hi" }));
+		const component = createComponent({ colorLevel: 1, onUserShell });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "!" }, context);
+		let frame = component.render({ width: 40, height: 12, now: 0 }).join("\n");
+		expect(stripAnsi(frame)).toContain("! \n");
+		expect(stripAnsi(frame)).toContain("Shell mode");
+		expect(frame).toContain(`\x1b[1;31m${"─".repeat(40)}\x1b[0m`);
+		expect(frame).toContain("\x1b[1;31m! \x1b[0m");
+
+		component.handleInput(key("enter"), context);
+		expect(onUserShell).not.toHaveBeenCalled();
+		frame = stripAnsi(component.render({ width: 60, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("Prefix a command with !");
+		expect(frame).toContain("Shell mode");
+
+		component.handleInput(key("backspace"), context);
+		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).at(-1) ?? "")).toContain("Enter sends");
+
+		component.handleInput({ type: "text", text: "!echo hi" }, context);
+		component.handleInput(key("home"), context);
+		component.handleInput(key("backspace"), context);
+		frame = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
+		expect(frame).not.toContain("Shell mode");
+		expect(frame).toContain("echo hi");
+	});
+
+	it("runs a Shell command without consuming staged attachments and can reclaim a queued command", async () => {
+		const onUserShell = vi.fn(async (command: string) => ({ id: "user_shell:queued", command }));
+		const onReclaimUserShell = vi.fn(async () => undefined);
+		const component = createComponent({
+			colorLevel: 0,
+			onAttach: async () => attachment("attachment:one", "photo.png"),
+			onUserShell,
+			onReclaimUserShell,
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
+		component.handleInput(key("enter"), context);
+		await vi.waitFor(() =>
+			expect(component.render({ width: 60, height: 14, now: 0 }).join("\n")).toContain("[photo.png]"),
+		);
+
+		component.handleInput({ type: "paste", text: "!echo queued" }, context);
+		component.handleInput(key("enter"), context);
+		await vi.waitFor(() => expect(onUserShell).toHaveBeenCalledWith("echo queued"));
+		expect(stripAnsi(component.render({ width: 60, height: 14, now: 0 }).join("\n"))).toContain("[photo.png]");
+
+		component.handleInput(key("up", { alt: true }), context);
+		await vi.waitFor(() => expect(onReclaimUserShell).toHaveBeenCalledWith("user_shell:queued"));
+		const recalled = stripAnsi(component.render({ width: 60, height: 14, now: 0 }).join("\n"));
+		expect(recalled).toContain("! echo queued");
+		expect(recalled).toContain("Shell mode");
+		expect(recalled.match(/\[photo\.png\]/g)).toHaveLength(1);
+	});
+
+	it("renders live local output, queues Composer input during Shell execution, and cancels with Ctrl-C", async () => {
+		const onFollowUp = vi.fn(() => "queue:after-shell");
+		const onAbortUserShell = vi.fn();
+		const component = createComponent({ colorLevel: 0, onFollowUp, onAbortUserShell });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.acceptUserShell(shellSnapshot({ status: "running", output: "first\nsecond" }));
+
+		let plain = stripAnsi(component.render({ width: 60, height: 14, now: 2_000 }).join("\n"));
+		expect(plain).toContain("Running printf hello (2.0s)");
+		expect(plain).toContain("└ first\n    second");
+		component.handleInput({ type: "text", text: "after shell" }, context);
+		component.handleInput(key("enter"), context);
+		await vi.waitFor(() => expect(onFollowUp).toHaveBeenCalledWith("after shell", []));
+		component.handleInput(key("c", { control: true }), context);
+		expect(onAbortUserShell).toHaveBeenCalledOnce();
+
+		component.acceptUserShell(shellSnapshot({ status: "success", output: "first\nsecond", durationMs: 2_000 }));
+		plain = stripAnsi(component.render({ width: 60, height: 14, now: 2_000 }).join("\n"));
+		expect(plain).toContain("You ran printf hello (2.0s)");
+	});
+
+	it("resumes a paused mixed queue when its only pending card is a local Shell command", async () => {
+		let queuePaused = true;
+		const onResumeFollowUps = vi.fn(() => {
+			queuePaused = false;
+		});
+		const component = createComponent({
+			colorLevel: 0,
+			isQueuePaused: () => queuePaused,
+			onResumeFollowUps,
+			onUserShell: () => ({ id: "user_shell:live", command: "printf hello" }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "!printf hello" }, context);
+		component.handleInput(key("enter"), context);
+		await vi.waitFor(() =>
+			expect(stripAnsi(component.render({ width: 60, height: 14, now: 0 }).join("\n"))).toContain("Enter resumes"),
+		);
+
+		component.handleInput(key("enter"), context);
+		expect(onResumeFollowUps).toHaveBeenCalledOnce();
+		component.acceptUserShell(shellSnapshot({ status: "running", output: "" }));
+		component.acceptUserShell(shellSnapshot({ status: "success", output: "done" }));
+		expect(component.running).toBe(false);
+	});
+
+	it("sends an escaped leading bang to the Model and recalls the escape without entering Shell mode", async () => {
+		const onSubmit = vi.fn(async () => ({ id: "composer:escaped", kind: "prompt" as const, text: "\\!model" }));
+		const component = createComponent({ colorLevel: 0, onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "\\!model" }, context);
+		component.handleInput(key("enter"), context);
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("!model", [], "\\!model"));
+
+		component.handleInput(key("up"), context);
+		const frame = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("\\!model");
+		expect(frame).not.toContain("Shell mode");
 	});
 
 	it("queues running Enter as Steering and Alt+Enter as a Follow-up", async () => {
@@ -712,6 +853,23 @@ function attachment(id: string, filename: string) {
 			width: 32,
 			height: 24,
 		},
+	};
+}
+
+function shellSnapshot(overrides: {
+	readonly status: UserShellStatus;
+	readonly output: string;
+	readonly durationMs?: number;
+}): UserShellSnapshot {
+	return {
+		id: "user_shell:live",
+		command: "printf hello",
+		cwd: "/workspace",
+		startedAt: 0,
+		truncated: false,
+		omittedBytes: 0,
+		omittedLines: 0,
+		...overrides,
 	};
 }
 

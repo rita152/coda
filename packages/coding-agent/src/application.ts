@@ -757,6 +757,7 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 						},
 						systemPrompt: () => promptSnapshot.text,
 						seed: session.seed,
+						autoDrainFollowUps: parsed.mode !== "interactive",
 					});
 					session.attach(agent);
 					const initialAttachments = await Promise.all(
@@ -801,6 +802,12 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 							reasoning,
 							motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 							lifecycle: options.runtime.interactiveLifecycle,
+							allocateId: () => options.runtime.idGenerator.generate("queue_item"),
+							processRunner: options.processRunner,
+							platform: options.runtime.platform,
+							environment: options.runtime.environment,
+							workspace: workspace.root,
+							onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
 							toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
 								.toolResultImages,
 							initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,

@@ -4,4 +4,8 @@ status: accepted
 
 # Version the linear Session Record schema
 
-Session v1 begins with an explicit versioned header and appends typed Records with stable identity, monotonic Session sequence, and `previousRecordId`. The name deliberately commits only to a linear predecessor, not a future tree model; semantic Run, Attempt, Message, Tool, Follow-up, Model, and Project Trust facts are durable while streaming, rendering, approval UI, Steering, and active process state are not.
+Session v1 begins with an explicit versioned header and appends typed Records with stable identity, monotonic Session sequence, and `previousRecordId`. The name deliberately commits only to a linear predecessor, not a future tree model.
+
+Session v4 adds `composer_submission_recorded` and `composer_submission_retracted`. A Composer Submission is recorded when interactive model-directed input is accepted, before later Agent consumption; this preserves Prompt History ordering without pretending it is Message ordering. Retraction removes a reclaimed, unconsumed Follow-up from the history projection without rewriting the journal. Legacy User Messages before the first v4 Composer fact are projected as history entries during migration.
+
+Semantic Run, Attempt, Message, Tool, Follow-up, Composer Submission, Model, and Project Trust facts are durable. Streaming, rendering, approval UI, active process state, and every User Shell command/output remain transient. Accepted Steering may appear in Prompt History but is never restored into an Agent queue.

@@ -34,6 +34,7 @@ export class ManagedSession implements Session {
 	readonly #seed;
 	readonly #restored: RestoredSessionState;
 	readonly #recoverableFollowUps;
+	readonly #composerSubmissions;
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#sequence: number;
@@ -51,6 +52,7 @@ export class ManagedSession implements Session {
 		this.#seed = structuredClone(reduced.seed);
 		this.#restored = structuredClone(reduced.restored);
 		this.#recoverableFollowUps = structuredClone(reduced.recoverableFollowUps);
+		this.#composerSubmissions = structuredClone(reduced.composerSubmissions);
 		this.#toolInvocations = structuredClone(reduced.toolInvocations);
 		this.#mediaReferences = new Map(
 			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
@@ -77,6 +79,10 @@ export class ManagedSession implements Session {
 
 	get recoverableFollowUps() {
 		return structuredClone(this.#recoverableFollowUps);
+	}
+
+	get composerSubmissions() {
+		return structuredClone(this.#composerSubmissions);
 	}
 
 	get toolInvocations(): readonly SessionToolLifecycle[] {
@@ -118,6 +124,14 @@ export class ManagedSession implements Session {
 		}
 		if (change.type === "project_trust_changed") {
 			await this.#append("project_trust_changed", { trust: change.trust });
+			return;
+		}
+		if (change.type === "composer_submission_recorded") {
+			await this.#append("composer_submission_recorded", { submission: change.submission });
+			return;
+		}
+		if (change.type === "composer_submission_retracted") {
+			await this.#append("composer_submission_retracted", { id: change.id });
 			return;
 		}
 		await this.#append(change.type, change.type === "follow_up_enqueued" ? { item: change.item } : { id: change.id });

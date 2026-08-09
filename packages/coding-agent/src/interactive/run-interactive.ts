@@ -7,6 +7,7 @@ import {
 	type Terminal,
 	type TerminalImageSurface,
 } from "@coda/tui";
+import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Session } from "../session/types.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
@@ -16,6 +17,7 @@ import {
 	type InteractiveTerminationSignal,
 	interactiveSignalExitCode,
 } from "./process-lifecycle.ts";
+import { UserShell } from "./user-shell.ts";
 
 export interface InteractiveRunOptions {
 	readonly agent: Agent;
@@ -42,6 +44,12 @@ export interface InteractiveRunOptions {
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly toolResultImagesSupported?: boolean;
 	readonly lifecycle?: InteractiveProcessLifecycle;
+	readonly allocateId: (kind: "composer_submission" | "user_shell") => string;
+	readonly processRunner: ProcessRunner;
+	readonly platform: NodeJS.Platform;
+	readonly environment: Readonly<Record<string, string | undefined>>;
+	readonly workspace: string;
+	readonly onWarning?: (message: string) => Promise<void> | void;
 }
 
 export async function runInteractive(options: InteractiveRunOptions): Promise<number> {
@@ -53,13 +61,24 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	let terminationSignal: InteractiveTerminationSignal | undefined;
 	let fatalError: unknown;
 	let suspendTask: Promise<void> | undefined;
+	let component!: ChatComponent;
+	const userShell = new UserShell({
+		processRunner: options.processRunner,
+		platform: options.platform,
+		workspace: options.workspace,
+		environment: options.environment,
+		clock: options.clock,
+		onUpdate: (snapshot) => component.acceptUserShell(snapshot),
+	});
 	const inputController = new InteractiveInputController({
 		agent: options.agent,
 		session: options.session,
 		buildInput: options.buildPrompt ?? (async (text) => text),
 		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
+		allocateId: options.allocateId,
+		userShell,
 	});
-	const component = new ChatComponent({
+	component = new ChatComponent({
 		modelLabel: options.modelLabel,
 		workspaceLabel: options.workspaceLabel,
 		reasoning: options.reasoning,
@@ -74,17 +93,24 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		restoredAttachments: options.restoredAttachments,
 		recoverableFollowUps: options.session.recoverableFollowUps,
 		restoredToolInvocations: options.session.toolInvocations,
-		onSubmit: (text, attachmentIds) => inputController.submit(text, attachmentIds),
-		onSteer: (text, attachmentIds) => inputController.steer(text, attachmentIds),
-		onFollowUp: (text, attachmentIds) => inputController.followUp(text, attachmentIds),
-		onResumeFollowUps: () => inputController.resumeFollowUps(),
+		composerSubmissions: options.session.composerSubmissions,
+		onSubmit: (text, attachmentIds, composerText) => inputController.submit(text, attachmentIds, composerText),
+		onSteer: (text, attachmentIds, composerText) => inputController.steer(text, attachmentIds, composerText),
+		onFollowUp: (text, attachmentIds, composerText) => inputController.followUp(text, attachmentIds, composerText),
+		onUserShell: (command) => inputController.submitUserShell(command),
+		onResumeFollowUps: () => inputController.resumeQueue(),
+		isQueuePaused: () => inputController.queuePaused,
 		onReclaimFollowUp: (queueItemId) => inputController.reclaimFollowUp(queueItemId as QueueItemId),
+		onReclaimUserShell: (id) => inputController.reclaimUserShell(id),
 		onAttach: options.onAttach,
 		onDetach: options.onDetach,
 		onOpenAttachment: options.onOpenAttachment,
 		imagePreviewSupported: options.imageSurface?.capability !== null,
 		toolResultImagesSupported: options.toolResultImagesSupported,
-		onAbort: () => inputController.abort(),
+		onAbort: () => inputController.abortAgent(),
+		onAbortUserShell: () => {
+			inputController.cancelUserShell();
+		},
 		onExit: resolveExit,
 	});
 	tui = new FullScreenTui({
@@ -103,6 +129,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 				options.agent.abort();
 			} catch {}
 		}
+		inputController.cancelUserShell();
 		resolveExit();
 	};
 	const requestFatalExit = (error: unknown): void => {
@@ -112,6 +139,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 				options.agent.abort();
 			} catch {}
 		}
+		inputController.cancelUserShell();
 		resolveExit();
 	};
 	const unsubscribeLifecycle = options.lifecycle?.subscribe({
@@ -155,8 +183,13 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		unsubscribeLifecycle?.();
 		options.approval?.unbind();
 		detach();
-		await inputController.dispose();
+		const droppedShells = await inputController.dispose();
 		await tui.stop();
+		if (droppedShells > 0) {
+			await options.onWarning?.(
+				`Dropped ${droppedShells} queued local Shell command${droppedShells === 1 ? "" : "s"} on exit`,
+			);
+		}
 	}
 }
 

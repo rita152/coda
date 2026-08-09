@@ -240,6 +240,7 @@ export class FileSessionManager implements SessionManager {
 				let parsed = await this.#readJournal(path);
 				if (parsed.header.version === 1) parsed = await this.#migrateV1(path, parsed, mediaCodec);
 				else if (parsed.header.version === 2) parsed = await this.#migrateV2(path, parsed);
+				else if (parsed.header.version === 3) parsed = await this.#migrateV3(path, parsed);
 				parsedMediaReferences = collectMediaReferences(parsed.records);
 				if (
 					parsed.header.workspaceId !== request.workspace.id ||
@@ -469,13 +470,17 @@ export class FileSessionManager implements SessionManager {
 		return this.#installMigration(path, legacy, legacy.records, 2);
 	}
 
+	async #migrateV3(path: string, legacy: ParsedJournal): Promise<ParsedJournal> {
+		return this.#installMigration(path, legacy, legacy.records, 3);
+	}
+
 	async #installMigration(
 		path: string,
 		legacy: ParsedJournal,
 		records: readonly SessionRecord[],
-		fromVersion: 1 | 2,
+		fromVersion: 1 | 2 | 3,
 	): Promise<ParsedJournal> {
-		const header: SessionHeader = { ...legacy.header, version: 3 };
+		const header: SessionHeader = { ...legacy.header, version: 4 };
 		const migratedText = `${[header, ...records].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 		const validated = parseJournal(migratedText, path, this.#diagnostics);
 		const token = safeIdentity(this.#runtime.idGenerator.generate("queue_item"));
@@ -497,7 +502,7 @@ export class FileSessionManager implements SessionManager {
 			if (await this.#exists(backupPath)) {
 				const existing = new TextDecoder().decode(await this.#fileSystem.readFile(backupPath));
 				if (existing !== legacy.sourceText)
-					throw new Error("Existing Session v1 backup does not match the journal");
+					throw new Error(`Existing Session v${fromVersion} backup does not match the journal`);
 			} else {
 				const backupHandle = await this.#fileSystem.open(backupPath, "wx", 0o600);
 				try {
@@ -521,11 +526,8 @@ export class FileSessionManager implements SessionManager {
 			}
 		}
 		await this.#diagnostics?.({
-			code: "session.migrated-v3",
-			message:
-				fromVersion === 1
-					? "Migrated a Session v1 journal to content-referenced Session v3"
-					: "Migrated a Session v2 journal to Session v3",
+			code: "session.migrated-v4",
+			message: `Migrated a Session v${fromVersion} journal to Session v4`,
 			details: { path, backupPath: `${path}.v${fromVersion}.backup`, fromVersion },
 		});
 		return validated;

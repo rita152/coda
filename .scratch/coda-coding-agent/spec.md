@@ -26,7 +26,9 @@ Print mode exits after the requested Agent run settles.
 - Sent User Prompts use the same full-width horizontal-border geometry as the Composer and remain literal, unlabeled text. Assistant replies remain open and unlabeled.
 - Enter sends a Prompt while idle and queues Steering while running. Alt+Enter queues a durable Follow-up. Shift+Enter inserts a newline; `/follow-up` and backslash+Enter cover legacy terminals.
 - Aborted or failed Runs pause unconsumed Follow-ups. Empty Enter resumes FIFO; input typed while paused appends before resume; Alt+Up reclaims the newest pending or failed item for editing.
-- The InputQueueController is the application seam for media preparation, Agent mutation, Session facts, compensation, resume, and reclaim. Chat presentation never appends raw Session records.
+- Plain Up/Down replays current-Session Prompt History directly into the Editor only at the first/last visual row. Entering history snapshots the exact draft state; moving beyond the newest entry restores text and cursor. History contains accepted Prompt, Steering, and Follow-up text, collapses adjacent duplicates, survives Session resume, and excludes User Shell commands.
+- A leading `!` enters Shell mode by moving the bang into a red bold prefix, turning the Composer border red, and showing a red `Shell mode` footer. `\!` sends a literal leading bang to the Model and remains escaped in Prompt History.
+- The InputQueueController is the application seam for media preparation, Agent mutation, User Shell scheduling, Session facts, compensation, resume, and reclaim. Chat presentation never appends raw Session records.
 
 ### Print contract
 
@@ -59,7 +61,7 @@ These are not required to validate the first useful Coding Agent and must not ex
 
 The first application provides `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`. Implementation proceeds through the four read-only Tools before mutation and Shell Tools. `read` is text-only initially; image reading is deferred.
 
-Direct user `!command` execution is deferred. The first application has only the model-invoked `bash` Tool; any later direct Shell mode must reuse the same Shell capability and Policy Gate.
+The interactive TUI also provides explicit User Shell mode. It is a separate, user-authorized local capability rather than an Agent Tool: commands never enter model Context, Tool policy, Prompt History, or Session persistence. Print and JSON modes continue to treat leading-bang input as ordinary model input.
 
 ## Model selection
 
@@ -131,6 +133,16 @@ Interactive approval returns `allow_once`, `allow_run`, `deny`, or `deny_and_abo
 - Model-visible output is capped at 2,000 lines or 50KB. Overflow is written to a `0600` temporary log with cleanup policy.
 - Shell networking is not sandboxed and approval UI states that fact.
 
+### Explicit User Shell execution
+
+- Only the interactive Composer recognizes a leading `!`; the bang is absorbed into Shell-mode presentation and Enter submits the remaining non-empty command.
+- Commands run from the Workspace through `$SHELL -lc`, falling back to `/bin/sh`, with the complete current environment and host-user authority. The explicit leading bang is the authorization; Policy Gate and approval overlays do not apply.
+- Execution is non-interactive with ignored stdin and no PTY. macOS and Unix are supported; Windows produces a clear local diagnostic.
+- User Shell work shares one strict process-local deferred FIFO with Agent Follow-ups. Steering still enters an active Agent Run immediately. Agent failure or abort pauses the FIFO; Shell failure, timeout, or cancellation continues it.
+- Live stdout and stderr are merged in Node callback-observation order. Output is terminal-sanitized, converts carriage returns to append-only lines, removes bidi overrides/isolates, and remains bounded in memory to 50 KiB and 2,000 normalized lines with a true head/tail omission marker.
+- Ctrl-C terminates the process group with SIGTERM and a one-second SIGKILL grace; timeout is one hour. No overflow file or Transcript View exists for User Shell output.
+- Pending User Shell commands disappear on process exit with a warning. They and their output are absent from Session, Agent Seed, model Context, and Prompt History.
+
 ### File mutation
 
 - `edit` validates expected old content and unique non-overlapping matches.
@@ -173,11 +185,11 @@ Interactive approval returns `allow_once`, `allow_run`, `deny`, or `deny_and_abo
 - Streaming deltas, raw Provider responses, and complete environments are not persisted.
 - Overflow Shell logs are separate `0600` files; the Session contains only the truncated model-visible result and a reference.
 
-### Session v3 schema and compatibility
+### Session v4 schema and compatibility
 
-The first JSONL line is a `session` header with `version: 3`, Session identity, Workspace identity and canonical path, and creation time. Every later Session Record contains its type, stable Record and Session identity, monotonically increasing Session sequence, `previousRecordId`, timestamp, optional Run/Turn/Attempt identity, and typed payload. Image content is stored as a validated Media Asset reference; bytes live in the mode-`0600` Session Media Store. All Agent-event and application writes are serialized through one append tail so physical order and predecessor identity cannot diverge.
+The first JSONL line is a `session` header with `version: 4`, Session identity, Workspace identity and canonical path, and creation time. Every later Session Record contains its type, stable Record and Session identity, monotonically increasing Session sequence, `previousRecordId`, timestamp, optional Run/Turn/Attempt identity, and typed payload. Image content is stored as a validated Media Asset reference; bytes live in the mode-`0600` Session Media Store. All Agent-event and application writes are serialized through one append tail so physical order and predecessor identity cannot diverge.
 
-Version 1 and 2 journals remain readable. Opening v1 externalizes inline image bytes and migrates directly to v3; opening v2 upgrades to v3. Each migration writes and syncs a complete temporary journal, validates it, preserves a versioned backup, and atomically replaces the active journal before exposing the Session.
+Version 1, 2, and 3 journals remain readable. Opening v1 externalizes inline image bytes; every older version migrates directly to v4. Each migration writes and syncs a complete temporary journal, validates it, preserves a versioned backup, and atomically replaces the active journal before exposing the Session.
 
 `previousRecordId` deliberately names a linear predecessor rather than implying a tree parent.
 
@@ -197,12 +209,15 @@ follow_up_enqueued
 follow_up_consumed
 follow_up_canceled
 follow_up_reclaimed
+composer_submission_recorded
+composer_submission_retracted
 model_selected
 project_trust_changed
 ```
 
 - Unconsumed Follow-up survives resume; Steering does not. Restored unmatched items are Paused.
 - Failed Follow-ups are projected from `follow_up_enqueued`, `follow_up_consumed`, `run_started`, and `run_finished` facts and remain recoverable. `follow_up_reclaimed` is the durable tombstone used by Alt+Up.
+- Composer Submission facts project current-Session Prompt History independently from Message commit order. Retraction removes a reclaimed, unconsumed Follow-up. User Shell is never a Session Record.
 - A crashed active Run becomes interrupted, loses unconsumed Steering, and never restores pending approval or process state.
 - Streaming deltas, render events, and approval UI events are not Session Records.
 
@@ -231,6 +246,8 @@ interface Session {
   readonly descriptor: SessionDescriptor;
   readonly seed: AgentSeed;
   readonly recoverableFollowUps: readonly RecoverableFollowUp[];
+  readonly composerSubmissions: readonly ComposerSubmission[];
+  readonly toolInvocations: readonly SessionToolLifecycle[];
   readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
   registerMedia(registrations: readonly SessionMediaRegistration[]): void;
   attach(agent: Agent): DetachSession;
@@ -287,4 +304,4 @@ interface Session {
 
 ## Design status
 
-The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, append-only Sessions, a multiline Composer, and durable recoverable Follow-ups. Autocomplete, selection, redo, durable drafts, compaction, branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation enter the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.
+The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, append-only Sessions, a multiline Composer, current-Session Prompt History, explicit User Shell mode, and durable recoverable Follow-ups. Autocomplete, selection, redo, durable drafts, compaction, branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation enter the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.

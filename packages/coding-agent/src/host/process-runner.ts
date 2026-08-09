@@ -7,7 +7,14 @@ export interface ProcessRunRequest {
 	readonly timeoutMs: number;
 	readonly maxOutputBytes: number;
 	readonly maxOutputLines: number;
-	readonly overflowPath: string;
+	readonly overflowPath?: string;
+	/** Observes decoded output in the order Node receives data from the two pipes. */
+	readonly onOutput?: (chunk: ProcessOutputChunk) => void;
+}
+
+export interface ProcessOutputChunk {
+	readonly channel: "stdout" | "stderr";
+	readonly text: string;
 }
 
 export interface ProcessRunResult {

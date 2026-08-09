@@ -148,7 +148,7 @@ describe("Coding Agent image attachments", () => {
 		expect(runStart.inputMessage.message.content[1].data).toMatch(/^[a-zA-Z0-9+/]+=*$/);
 	});
 
-	it("persists Session v3 media references and restores model-visible bytes on resume", async () => {
+	it("persists Session v4 media references and restores model-visible bytes on resume", async () => {
 		const fixture = await setup({ persistentSessions: true });
 		const imagePath = await fixture.image("durable image.png", "#223344");
 		let resumedImageData: string | undefined;
@@ -169,7 +169,7 @@ describe("Coding Agent image attachments", () => {
 		const [descriptor] = await fixture.sessions!.list(fixture.workspace);
 		expect(descriptor).toBeDefined();
 		const journal = await readFile(descriptor!.path!, "utf8");
-		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 3 });
+		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 4 });
 		expect(journal).toContain('"type":"media"');
 		expect(journal).not.toContain('"data":');
 		const reference = JSON.parse(journal.split("\n").find((line) => line.includes('"type":"media"'))!).payload.message

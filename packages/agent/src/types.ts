@@ -354,6 +354,8 @@ export interface AgentOptions {
 	readonly beforeRun?: BeforeRun;
 	readonly retry?: RetryOptions;
 	readonly seed?: AgentSeed;
+	/** Disable automatic Follow-up draining so an application scheduler can interleave other local operations. */
+	readonly autoDrainFollowUps?: boolean;
 }
 
 export interface RunResult {

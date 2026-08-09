@@ -10,6 +10,7 @@ import type {
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
+import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
 export const SESSION_RECORD_TYPES = [
@@ -26,6 +27,8 @@ export const SESSION_RECORD_TYPES = [
 	"follow_up_consumed",
 	"follow_up_canceled",
 	"follow_up_reclaimed",
+	"composer_submission_recorded",
+	"composer_submission_retracted",
 	"model_selected",
 	"project_trust_changed",
 ] as const;
@@ -34,7 +37,7 @@ export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3;
+	readonly version: 1 | 2 | 3 | 4;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -57,6 +60,7 @@ export interface SessionRecord {
 export interface ReducedSession {
 	readonly seed: AgentSeed;
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
+	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly restored: RestoredSessionState;
 	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly startedTools: ReadonlyMap<string, SessionRecord>;
@@ -93,6 +97,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	const startedTools = new Map<string, SessionRecord>();
 	const toolInvocations = new Map<string, SessionToolLifecycle>();
 	const activeRuns = new Set<string>();
+	const composerSubmissions = new Map<string, ComposerSubmission>();
+	const legacyComposerSubmissions: Array<{ readonly sequence: number; readonly submission: ComposerSubmission }> = [];
+	let firstComposerSubmissionSequence: number | undefined;
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
 	let projectTrust: ProjectTrustRecord | undefined;
@@ -109,9 +116,29 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 					if (followUp && followUp.messageId === undefined && message.message.role === "user") {
 						followUp.messageId = message.id;
 					}
+					const text = legacyComposerText(message);
+					if (text !== undefined) {
+						legacyComposerSubmissions.push({
+							sequence: record.sequence,
+							submission: {
+								id: `legacy:${message.id}`,
+								kind: "prompt",
+								text,
+							},
+						});
+					}
 				}
 				break;
 			}
+			case "composer_submission_recorded": {
+				firstComposerSubmissionSequence ??= record.sequence;
+				const submission = payload.submission as ComposerSubmission;
+				if (submission?.id) composerSubmissions.set(submission.id, structuredClone(submission));
+				break;
+			}
+			case "composer_submission_retracted":
+				if (typeof payload.id === "string") composerSubmissions.delete(payload.id);
+				break;
 			case "follow_up_enqueued": {
 				const item = payload.item as FollowUp;
 				if (item?.id) followUps.set(item.id, { item: structuredClone(item), state: "paused" });
@@ -210,6 +237,15 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 			...(failure ? { failure: structuredClone(failure) } : {}),
 			...(messageId ? { messageId } : {}),
 		})),
+		composerSubmissions: [
+			...legacyComposerSubmissions
+				.filter(
+					({ sequence }) =>
+						firstComposerSubmissionSequence === undefined || sequence < firstComposerSubmissionSequence,
+				)
+				.map(({ submission }) => submission),
+			...composerSubmissions.values(),
+		].map((submission) => structuredClone(submission)),
 		restored: { model, reasoning, projectTrust },
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
@@ -304,10 +340,24 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 3,
+		version: 4,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,
 		createdAt: descriptor.createdAt,
 	};
+}
+
+function legacyComposerText(message: AgentMessage<Message>): string | undefined {
+	if (message.message.role !== "user") return undefined;
+	const content = message.message.content;
+	const text =
+		typeof content === "string"
+			? content
+			: content
+					.filter((entry) => entry.type === "text")
+					.map((entry) => entry.text)
+					.join("");
+	if (text.trim().length === 0) return undefined;
+	return text.startsWith("!") ? `\\${text}` : text;
 }

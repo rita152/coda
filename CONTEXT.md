@@ -44,13 +44,25 @@ _Avoid_: Agent Seed, retry, transcript Message
 The Coding Agent's bottom-docked input experience that combines the generic Editor with Attachments, queue commands, Reasoning-level styling, and submission policy.
 _Avoid_: Editor, Prompt Builder, User Message
 
+**Composer Submission**:
+A durable fact that the interactive Composer accepted model-directed input, preserving the text as edited independently from when or whether the Agent later consumes it.
+_Avoid_: Message, Follow-up lifecycle, Shell command
+
+**Prompt History**:
+The current Session's ordered projection of active Composer Submissions, replayed directly into the Editor without creating Timeline UI.
+_Avoid_: Session transcript, draft store, User Shell history
+
 **Editor**:
 The application-neutral TUI component that owns text-buffer editing, wrapping, cursor placement, paste folding, and editor key behavior without knowledge of Agents or Sessions.
 _Avoid_: Composer, prompt card
 
 **Input Queue Controller**:
-The Coding Agent module that coordinates Composer acceptance, media preparation, Agent queue mutation, durable Session facts, resume, reclaim, and compensation.
+The Coding Agent module that coordinates Composer acceptance, media preparation, Agent queue mutation, User Shell scheduling, durable Session facts, resume, reclaim, and compensation across one deferred FIFO.
 _Avoid_: Agent queue, Chat component, Session reducer
+
+**User Shell**:
+An explicit `!command` submitted by the user for local host execution outside model Context, Tool policy, Prompt History, and Session persistence.
+_Avoid_: bash Tool, Tool Invocation, Prompt
 
 **Tool Invocation**:
 One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
@@ -77,7 +89,7 @@ A journaled Tool Invocation whose execution began but whose outcome was not dura
 _Avoid_: failed Tool, pending Tool
 
 **Timeline**:
-The ordered interactive presentation of committed Messages, Thinking Blocks, and Tool Invocations, including transient state for the active Run.
+The ordered interactive presentation of committed Messages, Thinking Blocks, Tool Invocations, and process-local User Shell activity, including transient active state.
 _Avoid_: Session, transcript, event log
 
 **Transcript View**:
@@ -98,7 +110,8 @@ _Avoid_: prompt token, inline image
 
 **Policy Gate**:
 The Coding Agent boundary that approves or rejects a Tool Invocation before execution according to workspace and user policy.
-_Avoid_: sandbox, Agent hook
+It does not mediate an explicit User Shell command, whose leading `!` is the user's direct authorization.
+_Avoid_: sandbox, Agent hook, User Shell confirmation
 
 **Workspace**:
 The canonical filesystem root that scopes a Coding Agent's Session, project context, and default Tool authority.

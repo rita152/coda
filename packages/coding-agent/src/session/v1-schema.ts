@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3;
+type SessionFormatVersion = 1 | 2 | 3 | 4;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -296,7 +296,7 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 	return (
 		exactRecord(value, ["type", "version", "sessionId", "workspaceId", "workspacePath", "createdAt"]) &&
 		value.type === "session" &&
-		(value.version === 1 || value.version === 2 || value.version === 3) &&
+		(value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -400,7 +400,22 @@ export function isSessionRecordPayload(
 		case "follow_up_canceled":
 			return exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
 		case "follow_up_reclaimed":
-			return version === 3 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
+			return version >= 3 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
+		case "composer_submission_recorded":
+			return (
+				version >= 4 &&
+				exactRecord(payload, ["submission"]) &&
+				exactRecord(payload.submission, ["id", "kind", "text"], ["queueItemId"]) &&
+				isNonEmptyString(payload.submission.id) &&
+				(payload.submission.kind === "prompt" ||
+					payload.submission.kind === "steering" ||
+					payload.submission.kind === "follow_up") &&
+				isNonEmptyString(payload.submission.text) &&
+				payload.submission.text.trim().length > 0 &&
+				(payload.submission.queueItemId === undefined || isNonEmptyString(payload.submission.queueItemId))
+			);
+		case "composer_submission_retracted":
+			return version >= 4 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
 		case "model_selected":
 			return (
 				exactRecord(payload, ["model", "reasoning"]) &&

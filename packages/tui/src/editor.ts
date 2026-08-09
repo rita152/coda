@@ -12,6 +12,8 @@ export interface EditorRenderOptions {
 	readonly focused: boolean;
 	readonly cursorMode: EditorCursorMode;
 	readonly styleBorder: (value: string) => string;
+	/** Optional first-line prompt prefix. Continuation rows receive an equal-width blank indent. */
+	readonly prefix?: string;
 }
 
 export interface EditorCursorPlacement {
@@ -30,6 +32,13 @@ export type EditorInputResult =
 	| { readonly type: "submit"; readonly text: string; readonly alternate?: true }
 	| { readonly type: "unhandled" };
 
+declare const editorStateBrand: unique symbol;
+
+/** Opaque Editor-owned state suitable for exact draft restoration. */
+export interface EditorState {
+	readonly [editorStateBrand]: true;
+}
+
 export class Editor {
 	#text = "";
 	#cursor = 0;
@@ -47,11 +56,59 @@ export class Editor {
 		return this.#text;
 	}
 
+	captureState(): EditorState {
+		return Object.freeze({
+			text: this.#text,
+			cursor: this.#cursor,
+			scrollTop: this.#scrollTop,
+			lastRenderWidth: this.#lastRenderWidth,
+			lastRenderHeight: this.#lastRenderHeight,
+			preferredColumn: this.#preferredColumn,
+			lastYank: this.#lastYank ? { ...this.#lastYank } : undefined,
+			pasteCounter: this.#pasteCounter,
+			pastes: new Map(this.#pastes),
+			undo: this.#undo.map(cloneSnapshot),
+			killRing: [...this.#killRing],
+		}) as unknown as EditorState;
+	}
+
+	restoreState(state: EditorState): void {
+		const snapshot = state as unknown as EditorStateSnapshot;
+		this.#text = snapshot.text;
+		this.#cursor = snapshot.cursor;
+		this.#scrollTop = snapshot.scrollTop;
+		this.#lastRenderWidth = snapshot.lastRenderWidth;
+		this.#lastRenderHeight = snapshot.lastRenderHeight;
+		this.#preferredColumn = snapshot.preferredColumn;
+		this.#lastYank = snapshot.lastYank ? { ...snapshot.lastYank } : undefined;
+		this.#pasteCounter = snapshot.pasteCounter;
+		this.#pastes = new Map(snapshot.pastes);
+		this.#undo.splice(0, this.#undo.length, ...snapshot.undo.map(cloneSnapshot));
+		this.#killRing.splice(0, this.#killRing.length, ...snapshot.killRing);
+	}
+
+	canMoveVertical(direction: -1 | 1): boolean {
+		const points = editorCursorPoints(this.#text, this.#lastRenderWidth);
+		const current = points.find((point) => point.offset === this.#cursor);
+		if (!current) return false;
+		const lastRow = points.at(-1)?.row ?? 0;
+		return direction < 0 ? current.row > 0 : current.row < lastRow;
+	}
+
 	setText(value: string): void {
 		this.#pushUndo();
 		this.#text = value;
 		this.#cursor = value.length;
 		this.#scrollTop = 0;
+	}
+
+	absorbPrefix(prefix: string): boolean {
+		if (!prefix || !this.#text.startsWith(prefix)) return false;
+		this.#text = this.#text.slice(prefix.length);
+		this.#cursor = Math.max(0, this.#cursor - prefix.length);
+		this.#scrollTop = 0;
+		this.#resetMovementState();
+		return true;
 	}
 
 	clear(): void {
@@ -234,9 +291,13 @@ export class Editor {
 		if (!Number.isInteger(options.width) || options.width < 1) {
 			throw new RangeError("Editor width must be a positive integer");
 		}
-		this.#lastRenderWidth = options.width;
+		const prefix = options.prefix ?? "";
+		const prefixWidth = displayWidth(prefix);
+		if (prefixWidth >= options.width) throw new RangeError("Editor prefix must leave at least one content column");
+		const contentWidth = options.width - prefixWidth;
+		this.#lastRenderWidth = contentWidth;
 		this.#lastRenderHeight = options.height;
-		const layout = layoutEditorText(this.#text, this.#cursor, options.width);
+		const layout = layoutEditorText(this.#text, this.#cursor, contentWidth);
 		const content = [...layout.lines];
 		if (options.focused && options.cursorMode === "software") {
 			const line = content[layout.cursorRow] ?? "";
@@ -256,13 +317,17 @@ export class Editor {
 		const hiddenBelow = Math.max(0, content.length - this.#scrollTop - visibleRows);
 		const topBorder = options.styleBorder(renderScrollBorder(options.width, "↑", hiddenAbove));
 		const bottomBorder = options.styleBorder(renderScrollBorder(options.width, "↓", hiddenBelow));
-		const visibleContent = content.slice(this.#scrollTop, this.#scrollTop + visibleRows);
+		const blankPrefix = " ".repeat(prefixWidth);
+		const visibleContent = content.slice(this.#scrollTop, this.#scrollTop + visibleRows).map((line, visibleIndex) => {
+			const absoluteIndex = this.#scrollTop + visibleIndex;
+			return `${absoluteIndex === 0 ? prefix : blankPrefix}${line}`;
+		});
 		return {
 			lines: Object.freeze([topBorder, ...visibleContent, bottomBorder]),
 			cursor: options.focused
 				? Object.freeze({
 						row: layout.cursorRow - this.#scrollTop + 1,
-						column: layout.cursorColumn,
+						column: prefixWidth + layout.cursorColumn,
 						visible: options.cursorMode === "native",
 					})
 				: undefined,
@@ -355,6 +420,25 @@ interface EditorSnapshot {
 	readonly scrollTop: number;
 	readonly pasteCounter: number;
 	readonly pastes: ReadonlyMap<string, string>;
+}
+
+interface EditorStateSnapshot extends EditorSnapshot {
+	readonly lastRenderWidth: number;
+	readonly lastRenderHeight: number;
+	readonly preferredColumn?: number;
+	readonly lastYank?: { readonly start: number; readonly end: number; readonly ringIndex: number };
+	readonly undo: readonly EditorSnapshot[];
+	readonly killRing: readonly string[];
+}
+
+function cloneSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
+	return {
+		text: snapshot.text,
+		cursor: snapshot.cursor,
+		scrollTop: snapshot.scrollTop,
+		pasteCounter: snapshot.pasteCounter,
+		pastes: new Map(snapshot.pastes),
+	};
 }
 
 function renderScrollBorder(width: number, direction: "↑" | "↓", hiddenRows: number): string {

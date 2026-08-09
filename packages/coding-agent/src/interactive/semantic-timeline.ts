@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentMessage, AgentSeed, AttemptId, Immutable, MessageId, ToolInvocation } from "@coda/agent";
 import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
 import type { SessionToolLifecycle } from "../session/types.ts";
+import type { UserShellSnapshot } from "./user-shell.ts";
 
 export type TimelineToolState =
 	| "awaiting_approval"
@@ -62,7 +63,16 @@ export interface TimelineToolEntry {
 	readonly result?: AgentMessage<ToolResultMessage>;
 }
 
-export type TimelineEntry = TimelineUserEntry | TimelineAssistantEntry | TimelineThinkingEntry | TimelineToolEntry;
+export interface TimelineUserShellEntry extends UserShellSnapshot {
+	readonly kind: "user_shell";
+}
+
+export type TimelineEntry =
+	| TimelineUserEntry
+	| TimelineAssistantEntry
+	| TimelineThinkingEntry
+	| TimelineToolEntry
+	| TimelineUserShellEntry;
 
 export interface TimelineMutation {
 	readonly changed: boolean;
@@ -71,6 +81,11 @@ export interface TimelineMutation {
 interface UserGroup {
 	readonly kind: "user";
 	readonly entry: TimelineUserEntry;
+}
+
+interface UserShellGroup {
+	readonly kind: "user_shell";
+	entry: TimelineUserShellEntry;
 }
 
 interface TextSlot {
@@ -107,7 +122,7 @@ interface AssistantGroup {
 	readonly slots: Map<number, AssistantSlot>;
 }
 
-type TimelineGroup = UserGroup | AssistantGroup;
+type TimelineGroup = UserGroup | UserShellGroup | AssistantGroup;
 
 /** Projects restored Messages and live Agent events into one presentation-neutral Timeline. */
 export class SemanticTimeline {
@@ -116,6 +131,7 @@ export class SemanticTimeline {
 	readonly #messageByAttempt = new Map<string, string>();
 	readonly #toolByProviderId = new Map<string, ToolSlot>();
 	readonly #toolByInvocationId = new Map<string, ToolSlot>();
+	readonly #userShellById = new Map<string, UserShellGroup>();
 	#cachedEntries?: readonly TimelineEntry[];
 
 	constructor(seed?: AgentSeed, toolInvocations: readonly SessionToolLifecycle[] = []) {
@@ -182,6 +198,19 @@ export class SemanticTimeline {
 		}
 		if (changed) this.#invalidate();
 		return Object.freeze({ changed });
+	}
+
+	acceptUserShell(snapshot: UserShellSnapshot): TimelineMutation {
+		const entry = Object.freeze({ kind: "user_shell" as const, ...structuredClone(snapshot) });
+		const existing = this.#userShellById.get(snapshot.id);
+		if (existing) existing.entry = entry;
+		else {
+			const group: UserShellGroup = { kind: "user_shell", entry };
+			this.#groups.push(group);
+			this.#userShellById.set(snapshot.id, group);
+		}
+		this.#invalidate();
+		return Object.freeze({ changed: true });
 	}
 
 	setAwaitingApproval(invocationId: string, toolName: string): boolean {
@@ -531,6 +560,10 @@ export class SemanticTimeline {
 		const entries: TimelineEntry[] = [];
 		for (const group of this.#groups) {
 			if (group.kind === "user") {
+				entries.push(group.entry);
+				continue;
+			}
+			if (group.kind === "user_shell") {
 				entries.push(group.entry);
 				continue;
 			}

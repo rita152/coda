@@ -24,6 +24,7 @@ export {
 	type EditorFrame,
 	type EditorInputResult,
 	type EditorRenderOptions,
+	type EditorState,
 } from "./editor.ts";
 export type {
 	DigitKey,

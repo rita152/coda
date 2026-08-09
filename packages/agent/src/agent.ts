@@ -286,6 +286,14 @@ export class Agent {
 	}
 
 	resumeFollowUps(): Promise<RunResult> {
+		return this.#startFollowUpDrain(Number.POSITIVE_INFINITY);
+	}
+
+	runNextFollowUp(): Promise<RunResult> {
+		return this.#startFollowUpDrain(1);
+	}
+
+	#startFollowUpDrain(limit: number): Promise<RunResult> {
 		if (this.#operation) {
 			return Promise.reject(new AgentError("busy", "Agent is already running"));
 		}
@@ -300,7 +308,7 @@ export class Agent {
 			rejectOperation = reject;
 		});
 		this.#operation = operation;
-		void this.#drainFollowUps().then(
+		void this.#drainFollowUps(limit).then(
 			(result) => {
 				if (this.#operation === operation) this.#operation = undefined;
 				resolveOperation(result);
@@ -331,7 +339,11 @@ export class Agent {
 
 	followUp(input: AgentInput): QueueItemId {
 		validateInput(input);
-		if (!this.#activeRun && this.#runtimeState.public.pendingFollowUps.length === 0) {
+		if (
+			!this.#activeRun &&
+			this.#runtimeState.public.pendingFollowUps.length === 0 &&
+			this.#options.autoDrainFollowUps !== false
+		) {
 			throw new AgentError("invalid_lifecycle", "Follow-up requires an active or settling Run");
 		}
 		const id = this.#allocate("queue_item") as QueueItemId;
@@ -379,15 +391,20 @@ export class Agent {
 	async #drive(runId: RunId, inputMessage: AgentMessage<UserMessage>): Promise<RunResult> {
 		const initialResult = await this.#run(runId, "prompt", inputMessage);
 		if (initialResult.outcome !== "success") this.#followUpsPaused = true;
-		if (!this.#followUpsPaused && this.#runtimeState.public.pendingFollowUps.length > 0) {
+		if (
+			this.#options.autoDrainFollowUps !== false &&
+			!this.#followUpsPaused &&
+			this.#runtimeState.public.pendingFollowUps.length > 0
+		) {
 			await this.#drainFollowUps();
 		}
 		return initialResult;
 	}
 
-	async #drainFollowUps(): Promise<RunResult> {
+	async #drainFollowUps(limit = Number.POSITIVE_INFINITY): Promise<RunResult> {
 		let firstResult: RunResult | undefined;
-		while (!this.#followUpsPaused && this.#runtimeState.public.pendingFollowUps.length > 0) {
+		let consumed = 0;
+		while (!this.#followUpsPaused && this.#runtimeState.public.pendingFollowUps.length > 0 && consumed < limit) {
 			const followUp = this.#runtimeState.public.pendingFollowUps[0]!;
 			const followUpRunId = this.#allocate("run") as RunId;
 			const followUpMessage = this.#createUserMessage(followUp.content as AgentInput);
@@ -405,6 +422,7 @@ export class Agent {
 				throw error;
 			}
 			firstResult ??= result;
+			consumed++;
 			if (result.outcome === "aborted") {
 				this.#followUpsPaused = true;
 			} else if (result.outcome === "error") {

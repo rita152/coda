@@ -18,10 +18,14 @@ import {
 } from "@coda/tui";
 import type { ApprovalRequest } from "../policy.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
+import { ComposerHistory } from "./composer-history.ts";
+import type { ComposerSubmission, UserShellSubmission } from "./input-types.ts";
 import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
 import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
 import { isExplorationTool, renderExplorationGroup, renderToolInvocation } from "./tool-presentation.ts";
+import type { UserShellSnapshot } from "./user-shell.ts";
+import { renderUserShellEntry } from "./user-shell-presentation.ts";
 
 const MINIMUM_COLUMNS = 40;
 const MINIMUM_ROWS = 10;
@@ -50,13 +54,27 @@ export interface ChatComponentOptions {
 	readonly onSubmit: (
 		input: string,
 		attachmentIds: readonly string[],
-	) => Promise<string | undefined> | string | undefined;
-	readonly onSteer?: (input: string, attachmentIds: readonly string[]) => Promise<string> | string;
-	readonly onFollowUp?: (input: string, attachmentIds: readonly string[]) => Promise<string> | string;
+		composerText?: string,
+	) => Promise<ComposerSubmission | string | undefined> | ComposerSubmission | string | undefined;
+	readonly onSteer?: (
+		input: string,
+		attachmentIds: readonly string[],
+		composerText?: string,
+	) => Promise<ComposerSubmission | string> | ComposerSubmission | string;
+	readonly onFollowUp?: (
+		input: string,
+		attachmentIds: readonly string[],
+		composerText?: string,
+	) => Promise<ComposerSubmission | string> | ComposerSubmission | string;
+	readonly onUserShell?: (command: string) => Promise<UserShellSubmission> | UserShellSubmission;
+	readonly onReclaimUserShell?: (id: string) => Promise<void> | void;
+	readonly onAbortUserShell?: () => void;
 	readonly onAttach?: (path: string) => Promise<ChatAttachment>;
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly onResumeFollowUps?: () => Promise<void> | void;
+	/** Reads the controller-owned mixed Follow-up/User Shell queue state. */
+	readonly isQueuePaused?: () => boolean;
 	readonly onReclaimFollowUp?: (queueItemId: string) => Promise<void> | void;
 	readonly imagePreviewSupported?: boolean;
 	readonly initialAttachments?: readonly ChatAttachment[];
@@ -66,6 +84,7 @@ export interface ChatComponentOptions {
 	readonly onAbort: () => void;
 	readonly onExit: () => void;
 	readonly seed?: AgentSeed;
+	readonly composerSubmissions?: readonly ComposerSubmission[];
 	readonly restoredToolInvocations?: readonly SessionToolLifecycle[];
 	readonly markdownRenderer?: MarkdownRenderer;
 	readonly colorLevel?: ColorLevel;
@@ -74,7 +93,7 @@ export interface ChatComponentOptions {
 
 interface ProvisionalPromptCard {
 	readonly id: string;
-	readonly kind: "prompt" | "steering" | "follow_up";
+	readonly kind: "prompt" | "steering" | "follow_up" | "user_shell";
 	readonly text: string;
 	readonly attachments: readonly ChatAttachment[];
 	readonly queueItemId?: string;
@@ -136,9 +155,12 @@ export class ChatComponent extends Component {
 		readonly blocks: readonly ViewportBlock[];
 	};
 	readonly #editor = new Editor();
+	readonly #history: ComposerHistory;
 	#lastCursor?: CursorPlacement;
 	#lastDockRows = 4;
 	#running = false;
+	#shellRunning = false;
+	#shellMode = false;
 	#transcriptMode = false;
 	#error?: string;
 	#attachments: ChatAttachment[] = [];
@@ -160,6 +182,7 @@ export class ChatComponent extends Component {
 		super({ focusable: true });
 		this.#options = options;
 		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
+		this.#history = new ComposerHistory(options.composerSubmissions);
 		this.#theme = createCodaTheme(options.colorLevel ?? 0);
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
 		this.#nextRunAttachments = options.initialAttachments;
@@ -178,7 +201,7 @@ export class ChatComponent extends Component {
 	}
 
 	get running(): boolean {
-		return this.#running;
+		return this.#running || this.#shellRunning;
 	}
 
 	override animationInterval(_context: RenderContext): number | undefined {
@@ -288,8 +311,30 @@ export class ChatComponent extends Component {
 		this.invalidate();
 	}
 
+	acceptUserShell(snapshot: UserShellSnapshot): void {
+		if (snapshot.status === "running") {
+			// A resumed mixed queue may optimistically mark an Agent Run as pending before
+			// discovering that its next item is a local Shell command.
+			this.#running = false;
+			const exact = this.#provisionalCards.findIndex(
+				(card) => card.kind === "user_shell" && card.queueItemId === snapshot.id,
+			);
+			const index =
+				exact >= 0
+					? exact
+					: this.#provisionalCards.findIndex(
+							(card) => card.kind === "user_shell" && card.queueItemId === undefined,
+						);
+			if (index >= 0) this.#provisionalCards.splice(index, 1);
+		}
+		this.#shellRunning = snapshot.status === "running";
+		this.#timeline.acceptUserShell(snapshot);
+		this.#viewport.noteUpdate();
+		this.invalidate();
+	}
+
 	render({ width, height, now }: RenderContext): string[] {
-		if (width < MINIMUM_COLUMNS || height < MINIMUM_ROWS) return renderTooSmall(width, height, this.#running);
+		if (width < MINIMUM_COLUMNS || height < MINIMUM_ROWS) return renderTooSmall(width, height, this.running);
 
 		const editorFocused = this.focused && this.#focusedAttachmentTarget === undefined && !this.#imageModal;
 		const editorFrame = this.#editor.render({
@@ -297,7 +342,11 @@ export class ChatComponent extends Component {
 			height,
 			focused: editorFocused,
 			cursorMode: this.#theme.colorLevel === 0 ? "native" : "software",
-			styleBorder: (value) => this.#theme.styleEditorBorder(this.#options.reasoning, editorFocused, value),
+			styleBorder: (value) =>
+				this.#shellMode
+					? this.#theme.style("error", value)
+					: this.#theme.styleEditorBorder(this.#options.reasoning, editorFocused, value),
+			...(this.#shellMode ? { prefix: this.#theme.style("error", "! ") } : {}),
 		});
 		const attachmentLayout = this.#layoutAttachmentRows(width);
 		const attachmentRows = attachmentLayout.lines.length;
@@ -456,33 +505,106 @@ export class ChatComponent extends Component {
 		}
 		if (input.type === "key" && input.action === "release") return;
 		if (input.type === "key" && input.alt && input.key === "up") {
-			void this.#reclaimLatestFollowUp();
+			void this.#reclaimLatestQueuedInput();
 			return;
 		}
 		if (input.type === "key" && input.control && input.key === "c") {
-			if (this.#running) this.#options.onAbort();
-			else if (this.#editor.text.length > 0) {
+			if (this.#shellRunning) this.#options.onAbortUserShell?.();
+			else if (this.#running) this.#options.onAbort();
+			else if (this.#shellMode || this.#editor.text.length > 0) {
 				this.#editor.clear();
+				this.#shellMode = false;
+				this.#history.reset();
 				this.invalidate();
 			} else this.#options.onExit();
 			return;
 		}
 		if (input.type === "key" && input.key === "escape") {
-			if (!this.#running && this.#editor.text.trim().length === 0) this.#options.onExit();
+			if (this.#shellMode) {
+				if (this.#editor.text.trim().length === 0) {
+					this.#shellMode = false;
+					this.#error = undefined;
+					this.invalidate();
+				}
+				return;
+			}
+			if (!this.running && this.#editor.text.trim().length === 0) this.#options.onExit();
 			return;
 		}
-		if (input.type === "key" && input.control && input.key === "d" && this.#editor.text.length === 0) {
+		if (
+			input.type === "key" &&
+			input.control &&
+			input.key === "d" &&
+			!this.#shellMode &&
+			!this.running &&
+			this.#editor.text.length === 0
+		) {
 			this.#options.onExit();
 			return;
 		}
-		const editorResult = this.#editor.handleInput(input);
+		if (
+			!this.#shellMode &&
+			input.type === "key" &&
+			(input.key === "up" || input.key === "down") &&
+			!input.control &&
+			!input.alt &&
+			!input.meta &&
+			this.#history.navigate(input.key === "up" ? -1 : 1, this.#editor)
+		) {
+			this.invalidate();
+			return;
+		}
+
+		let editorInput: TerminalInput = input;
+		if (!this.#shellMode && this.#editor.text.length === 0) {
+			const activation = shellActivation(input);
+			if (activation) {
+				this.#shellMode = true;
+				this.#history.reset();
+				this.#error = undefined;
+				if (!activation.remainder) {
+					this.invalidate();
+					return;
+				}
+				editorInput = activation.remainder;
+			}
+		}
+		if (this.#shellMode && editorInput.type === "key" && editorInput.key === "backspace") {
+			const before = this.#editor.text;
+			const result = this.#editor.handleInput(editorInput);
+			if (result.type === "handled" && this.#editor.text === before) {
+				this.#shellMode = false;
+				this.#error = undefined;
+			} else if (this.#editor.text !== before) this.#error = undefined;
+			this.invalidate();
+			return;
+		}
+		const before = this.#editor.text;
+		const editorResult = this.#editor.handleInput(editorInput);
 		if (editorResult.type === "handled") {
+			if (!this.#shellMode && this.#editor.absorbPrefix("!")) {
+				this.#shellMode = true;
+				this.#history.reset();
+				this.#error = undefined;
+			} else if (this.#editor.text !== before) {
+				this.#history.noteTextMutation();
+				if (this.#shellMode) this.#error = undefined;
+			}
 			this.invalidate();
 			return;
 		}
 		if (editorResult.type !== "submit" || this.#attaching) return;
 		const value = editorResult.text.trim();
-		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedFollowUps) {
+		if (this.#shellMode) {
+			if (!value) {
+				this.#error = "Prefix a command with ! to run it locally. Example: !ls";
+				this.invalidate();
+				return;
+			}
+			this.#submitUserShell(value);
+			return;
+		}
+		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedQueue) {
 			if (!this.#options.onResumeFollowUps) {
 				this.#error = "Follow-up recovery is unavailable";
 				this.invalidate();
@@ -509,21 +631,25 @@ export class ChatComponent extends Component {
 			const path = attachMatch[1]!.trim();
 			if (!path) return;
 			this.#editor.clear();
+			this.#history.reset();
 			this.#error = undefined;
 			this.#attaching = true;
 			this.invalidate();
 			void this.#attach(path, value);
 			return;
 		}
-		let submissionText = value;
-		const appendsPausedQueue = !this.#running && this.#hasPausedFollowUps;
-		let kind: ProvisionalPromptCard["kind"] = this.#running
+		const composerText = value;
+		let submissionText = value.startsWith("\\!") ? value.slice(1) : value;
+		const appendsPausedQueue = !this.#running && this.#hasPausedQueue;
+		let kind: Exclude<ProvisionalPromptCard["kind"], "user_shell"> = this.#running
 			? editorResult.alternate
 				? "follow_up"
 				: "steering"
-			: appendsPausedQueue
+			: this.#shellRunning
 				? "follow_up"
-				: "prompt";
+				: appendsPausedQueue
+					? "follow_up"
+					: "prompt";
 		if (this.#running && /^\/follow-up\s+/u.test(submissionText) && !submissionText.includes("\n")) {
 			kind = "follow_up";
 			submissionText = submissionText.replace(/^\/follow-up\s+/u, "").trim();
@@ -540,11 +666,12 @@ export class ChatComponent extends Component {
 		this.#provisionalCards.push(provisional);
 		if (kind === "prompt") this.#nextRunAttachments = submittedAttachments;
 		this.#editor.clear();
+		this.#history.reset();
 		this.#attachments = [];
 		this.#attachmentFocusKey = undefined;
 		this.#attachmentFocusOrigin = undefined;
 		this.#error = undefined;
-		if (!this.#running) this.#running = true;
+		if (!this.running && kind === "prompt") this.#running = true;
 		this.#viewport.jumpToEnd();
 		this.invalidate();
 		const attachmentIds = submittedAttachments.map((attachment) => attachment.id);
@@ -552,19 +679,33 @@ export class ChatComponent extends Component {
 			try {
 				if (kind === "steering") {
 					if (!this.#options.onSteer) throw new Error("Steering is unavailable");
-					return Promise.resolve(this.#options.onSteer(submissionText, attachmentIds));
+					return Promise.resolve(
+						composerText === submissionText
+							? this.#options.onSteer(submissionText, attachmentIds)
+							: this.#options.onSteer(submissionText, attachmentIds, composerText),
+					);
 				}
 				if (kind === "follow_up" && !appendsPausedQueue) {
 					if (!this.#options.onFollowUp) throw new Error("Follow-up is unavailable");
-					return Promise.resolve(this.#options.onFollowUp(submissionText, attachmentIds));
+					return Promise.resolve(
+						composerText === submissionText
+							? this.#options.onFollowUp(submissionText, attachmentIds)
+							: this.#options.onFollowUp(submissionText, attachmentIds, composerText),
+					);
 				}
-				return Promise.resolve(this.#options.onSubmit(submissionText, attachmentIds));
+				return Promise.resolve(
+					composerText === submissionText
+						? this.#options.onSubmit(submissionText, attachmentIds)
+						: this.#options.onSubmit(submissionText, attachmentIds, composerText),
+				);
 			} catch (error) {
 				return Promise.reject(error);
 			}
 		})();
 		void operation.then(
-			(queueItemId) => {
+			(result) => {
+				if (typeof result === "object") this.#history.record(result);
+				const queueItemId = typeof result === "string" ? result : result?.queueItemId;
 				if (kind !== "prompt" && typeof queueItemId === "string") {
 					this.#provisionalCards = this.#provisionalCards.map((card) =>
 						card.id === provisional.id ? Object.freeze({ ...card, queueItemId }) : card,
@@ -577,28 +718,77 @@ export class ChatComponent extends Component {
 				if (this.#nextRunAttachments === submittedAttachments) this.#nextRunAttachments = undefined;
 				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
 				this.#attachments = [...submittedAttachments, ...this.#attachments];
-				if (!this.#editor.text) this.#editor.setText(value);
+				if (!this.#editor.text) this.#editor.setText(composerText);
 				this.#error = error instanceof Error ? error.message : String(error);
 				this.invalidate();
 			},
 		);
 	}
 
-	get #hasPausedFollowUps(): boolean {
-		return this.#recoverableCards.some((card) => card.state === "paused");
+	get #hasPausedQueue(): boolean {
+		return this.#options.isQueuePaused?.() ?? this.#recoverableCards.some((card) => card.state === "paused");
 	}
 
-	async #reclaimLatestFollowUp(): Promise<void> {
+	#submitUserShell(command: string): void {
+		const provisional: ProvisionalPromptCard = Object.freeze({
+			id: `provisional:${++this.#nextProvisionalId}`,
+			kind: "user_shell",
+			text: `!${command}`,
+			attachments: Object.freeze([]),
+			status: "Shell queued",
+		});
+		this.#provisionalCards.push(provisional);
+		this.#editor.clear();
+		this.#shellMode = false;
+		this.#history.reset();
+		this.#error = undefined;
+		this.#viewport.jumpToEnd();
+		this.invalidate();
+		let operation: Promise<UserShellSubmission>;
+		try {
+			if (!this.#options.onUserShell) throw new Error("Local Shell mode is unavailable");
+			operation = Promise.resolve(this.#options.onUserShell(command));
+		} catch (error) {
+			operation = Promise.reject(error);
+		}
+		void operation.then(
+			(submission) => {
+				this.#provisionalCards = this.#provisionalCards.map((card) =>
+					card.id === provisional.id ? Object.freeze({ ...card, queueItemId: submission.id }) : card,
+				);
+				this.invalidate();
+			},
+			(error: unknown) => {
+				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
+				if (!this.#editor.text) this.#editor.setText(command);
+				this.#shellMode = true;
+				this.#error = error instanceof Error ? error.message : String(error);
+				this.invalidate();
+			},
+		);
+	}
+
+	async #reclaimLatestQueuedInput(): Promise<void> {
 		const provisional = [...this.#provisionalCards]
 			.reverse()
-			.find((card) => card.kind === "follow_up" && card.queueItemId !== undefined);
+			.find((card) => card.kind === "follow_up" || card.kind === "user_shell");
+		if (provisional && !provisional.queueItemId) return;
 		const recoverable = provisional ? undefined : this.#recoverableCards.at(-1);
 		const queueItemId = provisional?.queueItemId ?? recoverable?.item.id;
 		if (!queueItemId) return;
 		try {
-			if (!this.#options.onReclaimFollowUp) throw new Error("Follow-up recovery is unavailable");
-			await this.#options.onReclaimFollowUp(queueItemId);
-			const text = provisional?.text ?? (recoverable ? followUpText(recoverable.item) : "");
+			if (provisional?.kind === "user_shell") {
+				if (!this.#options.onReclaimUserShell) throw new Error("Local Shell queue recovery is unavailable");
+				await this.#options.onReclaimUserShell(queueItemId);
+			} else {
+				if (!this.#options.onReclaimFollowUp) throw new Error("Follow-up recovery is unavailable");
+				await this.#options.onReclaimFollowUp(queueItemId);
+				this.#history.retractByQueueItemId(queueItemId);
+			}
+			const text =
+				provisional?.kind === "user_shell"
+					? provisional.text.slice(1)
+					: (provisional?.text ?? (recoverable ? followUpText(recoverable.item) : ""));
 			const attachments = provisional?.attachments ?? recoverable?.attachments ?? [];
 			if (provisional) {
 				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
@@ -606,6 +796,8 @@ export class ChatComponent extends Component {
 				this.#recoverableCards = this.#recoverableCards.filter((card) => card !== recoverable);
 			}
 			this.#editor.setText(text);
+			this.#history.reset();
+			this.#shellMode = provisional?.kind === "user_shell";
 			const known = new Set(this.#attachments.map(({ id }) => id));
 			this.#attachments.push(...attachments.filter(({ id }) => !known.has(id)));
 			this.#attachmentFocusKey = undefined;
@@ -1012,6 +1204,7 @@ export class ChatComponent extends Component {
 					]);
 		}
 		if (this.#attaching) return fitFooter(width, ["Attaching image…"]);
+		if (this.#shellMode) return fitFooter(width, [this.#theme.style("error", "Shell mode")]);
 		const unread = this.#viewport.unreadUpdates;
 		if (unread > 0) return fitFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
 		if (this.#transcriptMode) {
@@ -1021,11 +1214,18 @@ export class ChatComponent extends Component {
 				"Transcript • Esc closes",
 			]);
 		}
-		if (!this.#running && this.#hasPausedFollowUps) {
+		if (!this.#running && this.#hasPausedQueue) {
 			return fitFooter(width, [
-				"Paused Follow-ups • Enter resumes • Alt+Up edits latest • typing appends",
+				"Paused queue • Enter resumes • Alt+Up edits latest • typing appends",
 				"Enter resumes • Alt+Up edits • typing appends",
 				"Enter resumes • Alt+Up edits",
+			]);
+		}
+		if (this.#shellRunning) {
+			return fitFooter(width, [
+				"Local command running • Enter queues • Alt+Up edits • Ctrl-C cancels",
+				"Enter queues • Alt+Up edits • Ctrl-C cancels",
+				"Ctrl-C cancels the command",
 			]);
 		}
 		return this.#running
@@ -1168,6 +1368,8 @@ function renderTimelineEntry(
 				motion,
 				toolResultImagesSupported,
 			});
+		case "user_shell":
+			return renderUserShellEntry(entry, { width, now, theme });
 	}
 }
 
@@ -1256,6 +1458,26 @@ function renderTimelineAttachments(
 
 function attachmentTargetKey(owner: string, attachmentId: string, index: number): string {
 	return `${owner}\u0000${attachmentId}\u0000${index}`;
+}
+
+function shellActivation(input: TerminalInput): { readonly remainder?: TerminalInput } | undefined {
+	if (input.type === "text" || input.type === "paste") {
+		if (!input.text.startsWith("!")) return undefined;
+		const remainder = input.text.slice(1);
+		return remainder ? { remainder: { ...input, text: remainder } } : {};
+	}
+	if (
+		input.type !== "key" ||
+		input.action === "release" ||
+		input.control ||
+		input.alt ||
+		input.meta ||
+		!input.text?.startsWith("!")
+	) {
+		return undefined;
+	}
+	const remainder = input.text.slice(1);
+	return remainder ? { remainder: { ...input, text: remainder } } : {};
 }
 
 function renderHeader(

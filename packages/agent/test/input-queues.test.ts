@@ -131,6 +131,73 @@ describe("Agent input queues", () => {
 		expect(agent.state.pendingFollowUps).toEqual([]);
 	});
 
+	it("lets an application scheduler drain one Follow-up at a time", async () => {
+		const clock = new TestClock();
+		let releasePrompt!: () => void;
+		const promptGate = new Promise<void>((resolve) => {
+			releasePrompt = resolve;
+		});
+		let promptStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			promptStarted = resolve;
+		});
+		const agent = new Agent({
+			...baseOptions(
+				[
+					async () => {
+						promptStarted();
+						await promptGate;
+						return response("initial done", clock);
+					},
+					response("follow one done", clock),
+					response("follow two done", clock),
+				],
+				{ clock },
+			),
+			autoDrainFollowUps: false,
+		});
+		const events: AgentEvent[] = [];
+		agent.onEvent((event) => events.push(event));
+
+		const prompt = agent.prompt("initial");
+		await started;
+		const followOne = agent.followUp("follow one");
+		const followTwo = agent.followUp("follow two");
+		releasePrompt();
+		await prompt;
+
+		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([followOne, followTwo]);
+		expect(events.filter((event) => event.type === "run_start").map(({ source }) => source)).toEqual(["prompt"]);
+
+		await agent.runNextFollowUp();
+		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([followTwo]);
+		expect(events.filter((event) => event.type === "run_start").map(({ source }) => source)).toEqual([
+			"prompt",
+			"follow_up",
+		]);
+
+		await agent.runNextFollowUp();
+		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(events.filter((event) => event.type === "run_start").map(({ source }) => source)).toEqual([
+			"prompt",
+			"follow_up",
+			"follow_up",
+		]);
+	});
+
+	it("accepts an idle Follow-up when automatic draining is application-controlled", async () => {
+		const clock = new TestClock();
+		const agent = new Agent({
+			...baseOptions([response("done", clock)], { clock }),
+			autoDrainFollowUps: false,
+		});
+
+		const followUp = agent.followUp("queued while idle");
+		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([followUp]);
+		await expect(agent.runNextFollowUp()).resolves.toMatchObject({ outcome: "success" });
+		expect(agent.state.pendingFollowUps).toEqual([]);
+	});
+
 	it("clears pending Steering on abort, pauses Follow-up, and resumes it explicitly", async () => {
 		const clock = new TestClock();
 		let toolStarted!: () => void;

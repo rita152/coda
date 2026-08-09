@@ -5,6 +5,37 @@ import { InMemorySessionManager } from "../src/session/memory-session-manager.ts
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("Session facade", () => {
+	it("restores Composer submission history independently from Agent Messages", async () => {
+		let id = 0;
+		const manager = new InMemorySessionManager({
+			clock: { now: () => 1_000 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+		});
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: { id: "submission:1", kind: "prompt", text: "kept" },
+		});
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: { id: "submission:2", kind: "follow_up", text: "removed", queueItemId: "queue:2" },
+		});
+		await session.record({ type: "composer_submission_retracted", id: "submission:2" });
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.composerSubmissions).toEqual([{ id: "submission:1", kind: "prompt", text: "kept" }]);
+		await restored.close();
+	});
+
 	it("persists reclaiming a failed Follow-up as a distinct recoverability tombstone", async () => {
 		let id = 0;
 		const manager = new InMemorySessionManager({

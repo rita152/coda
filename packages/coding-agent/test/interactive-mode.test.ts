@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import type { ProcessRunner, ProcessRunRequest } from "../src/host/process-runner.ts";
 import type {
 	InteractiveLifecycleHandlers,
 	InteractiveProcessLifecycle,
@@ -68,6 +69,87 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 describe("interactive TUI mode", () => {
+	it("runs a leading-bang command locally with live output and without invoking the Model", async () => {
+		const runtime = testTimeRuntime(1_300);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let request: ProcessRunRequest | undefined;
+		const processRunner: ProcessRunner = {
+			run: async (candidate) => {
+				request = candidate;
+				candidate.onOutput?.({ channel: "stdout", text: "local output\n" });
+				return {
+					exitCode: 0,
+					signal: null,
+					stdout: "",
+					stderr: "",
+					timedOut: false,
+					truncated: false,
+				};
+			},
+		};
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner,
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: { SHELL: "/bin/zsh", SECRET: "explicit-user-authority" },
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started);
+		await terminal.emit({ type: "text", text: "!printf hello" });
+		await terminal.emit({
+			type: "key",
+			key: "enter",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes("You ran printf hello"));
+		expect(terminal.readOutput()).toContain("local output");
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+
+		await expect(running).resolves.toBe(0);
+		expect(request).toMatchObject({
+			executable: "/bin/zsh",
+			args: ["-lc", "printf hello"],
+			environment: { SHELL: "/bin/zsh", SECRET: "explicit-user-authority" },
+		});
+		expect(request?.cwd).toMatch(/\/tmp$/);
+		expect(stdout.value).toBe("");
+		expect(stderr.value).toBe("");
+	});
+
 	it("accepts terminal text, renders Agent output, and exits cleanly on idle Ctrl-C", async () => {
 		const faux = fauxProvider({ runtime: testTimeRuntime(1_400) });
 		faux.setResponses([fauxAssistantMessage("interactive answer", { timestamp: 1_400 })]);

@@ -63,6 +63,34 @@ describe("Editor", () => {
 		expect(frame.cursor).toEqual({ row: 2, column: 0, visible: false });
 	});
 
+	it("reserves prefix width for wrapping and cursor placement", () => {
+		const editor = new Editor();
+		editor.handleInput({ type: "text", text: "abcdef" });
+
+		const frame = editor.render({
+			width: 6,
+			height: 20,
+			focused: true,
+			cursorMode: "native",
+			styleBorder: (value) => value,
+			prefix: "\x1b[1;31m! \x1b[0m",
+		});
+
+		expect(frame.lines.slice(1, -1).map(stripAnsi)).toEqual(["! abcd", "  ef"]);
+		expect(frame.cursor).toEqual({ row: 2, column: 4, visible: true });
+	});
+
+	it("removes an absorbed prefix while preserving the logical cursor position", () => {
+		const editor = new Editor();
+		editor.setText("command");
+		editor.handleInput(key("home"));
+		editor.handleInput({ type: "text", text: "!" });
+
+		expect(editor.absorbPrefix("!")).toBe(true);
+		editor.handleInput({ type: "text", text: "x" });
+		expect(editor.text).toBe("xcommand");
+	});
+
 	it("keeps the cursor visible and reports hidden visual rows in the border", () => {
 		const editor = new Editor();
 		editor.handleInput({ type: "text", text: "one\ntwo\nthree\nfour\nfive\nsix\nseven" });
@@ -145,6 +173,60 @@ describe("Editor", () => {
 		editor.handleInput(key("up"));
 		editor.handleInput(key("up"));
 		expect(render().cursor).toEqual({ row: 1, column: 2, visible: true });
+	});
+
+	it("reports visual movement boundaries using the rendered content width", () => {
+		const editor = new Editor();
+		editor.handleInput({ type: "text", text: "你🙂abc" });
+		editor.render({
+			width: 6,
+			height: 20,
+			focused: true,
+			cursorMode: "native",
+			styleBorder: (value) => value,
+			prefix: "! ",
+		});
+
+		expect(editor.canMoveVertical(-1)).toBe(true);
+		expect(editor.canMoveVertical(1)).toBe(false);
+		editor.handleInput(key("up"));
+		expect(editor.canMoveVertical(-1)).toBe(false);
+		expect(editor.canMoveVertical(1)).toBe(true);
+	});
+
+	it("captures and restores an exact editing state", () => {
+		const editor = new Editor();
+		editor.handleInput({ type: "text", text: "first\nsecond" });
+		editor.render({
+			width: 12,
+			height: 20,
+			focused: true,
+			cursorMode: "native",
+			styleBorder: (value) => value,
+		});
+		editor.handleInput(key("up"));
+		const state = editor.captureState();
+		const expectedCursor = editor.render({
+			width: 12,
+			height: 20,
+			focused: true,
+			cursorMode: "native",
+			styleBorder: (value) => value,
+		}).cursor;
+
+		editor.setText("replacement");
+		editor.restoreState(state);
+
+		expect(editor.text).toBe("first\nsecond");
+		expect(
+			editor.render({
+				width: 12,
+				height: 20,
+				focused: true,
+				cursorMode: "native",
+				styleBorder: (value) => value,
+			}).cursor,
+		).toEqual(expectedCursor);
 	});
 
 	it("word-wraps before hard-wrapping an overlong grapheme sequence", () => {
