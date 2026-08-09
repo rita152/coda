@@ -1,4 +1,16 @@
-import type { Agent, AgentSeed, Clock, FollowUp, IdGenerator, Immutable, MessageId, QueueItemId } from "@coda/agent";
+import type {
+	Agent,
+	AgentSeed,
+	Clock,
+	FollowUp,
+	IdGenerator,
+	Immutable,
+	MessageId,
+	QueueItemId,
+	RunFailure,
+	ToolInvocation,
+	ToolRejectionReason,
+} from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 
@@ -24,6 +36,48 @@ export interface RestoredSessionState {
 	readonly projectTrust?: ProjectTrustRecord;
 }
 
+export interface SessionMediaRendition {
+	readonly digest: string;
+	readonly mimeType: string;
+	readonly width: number;
+	readonly height: number;
+	readonly bytes: number;
+}
+
+export interface SessionMediaReference {
+	readonly type: "media";
+	readonly digest: string;
+	readonly filename: string;
+	readonly mimeType: string;
+	readonly width: number;
+	readonly height: number;
+	readonly bytes: number;
+	readonly rendition: SessionMediaRendition;
+}
+
+export interface SessionMediaRegistration {
+	readonly reference: SessionMediaReference;
+	readonly modelPath: string;
+}
+
+export interface RecoverableFollowUp {
+	readonly item: FollowUp;
+	readonly state: "paused" | "failed";
+	readonly failure?: RunFailure;
+	readonly messageId?: MessageId;
+}
+
+export interface SessionToolLifecycle {
+	readonly invocation: Immutable<ToolInvocation>;
+	readonly runId?: string;
+	readonly turnId?: string;
+	readonly startedAt?: number;
+	readonly finishedAt?: number;
+	readonly outcome?: "success" | "error" | "aborted" | "rejected" | "interrupted";
+	readonly rejectionReason?: ToolRejectionReason;
+	readonly resultMessageId?: MessageId;
+}
+
 export interface OpenSessionRequest {
 	readonly workspace: SessionWorkspace;
 	readonly mode: "interactive" | "print";
@@ -45,7 +99,10 @@ export type SessionChange =
 	  }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
-	| { readonly type: "follow_up_consumed" | "follow_up_canceled"; readonly id: QueueItemId };
+	| {
+			readonly type: "follow_up_consumed" | "follow_up_canceled" | "follow_up_reclaimed";
+			readonly id: QueueItemId;
+	  };
 
 export type DetachSession = () => void;
 
@@ -53,6 +110,10 @@ export interface Session {
 	readonly descriptor: SessionDescriptor;
 	readonly seed: AgentSeed;
 	readonly restored: RestoredSessionState;
+	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
+	readonly toolInvocations: readonly SessionToolLifecycle[];
+	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
+	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
 	attach(agent: Agent): DetachSession;
 	record(change: SessionChange): Promise<void>;
 	close(): Promise<void>;

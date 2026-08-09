@@ -1,7 +1,14 @@
-import { type Clock, Component, createSystemScheduler, ProcessTerminal, Tui } from "../src/index.ts";
+import {
+	type Clock,
+	Component,
+	createSystemScheduler,
+	ProcessTerminal,
+	type RenderContext,
+	Tui,
+} from "../src/index.ts";
 
 class EmptyComponent extends Component {
-	render(_width: number): string[] {
+	render(_context: RenderContext): string[] {
 		return [];
 	}
 }

@@ -14,7 +14,7 @@ describe("@coda/coding-agent package contract", () => {
 		expect(Object.keys(publicApi)).toEqual([]);
 	});
 
-	it("publishes one root entry, one coda executable, and composes exactly the three lower Coda packages", async () => {
+	it("publishes one root entry, one coda executable, and keeps application dependencies explicit", async () => {
 		const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 			private: boolean;
 			exports: Record<string, unknown>;
@@ -30,6 +30,7 @@ describe("@coda/coding-agent package contract", () => {
 			"@coda/agent": "0.1.0",
 			"@coda/ai": "0.1.0",
 			"@coda/tui": "0.1.0",
+			sharp: "0.34.4",
 		});
 		expect(packageJson.scripts.build).toContain("node scripts/mark-bin-executable.mjs dist/bin.js");
 	});

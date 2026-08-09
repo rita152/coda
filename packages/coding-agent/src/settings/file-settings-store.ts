@@ -81,11 +81,19 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain duplicate Project Trust records");
 		}
 	}
+	let ui: UserSettings["ui"];
+	if (value.ui !== undefined) {
+		if (!isRecord(value.ui) || (value.ui.motion !== "full" && value.ui.motion !== "reduced")) {
+			throw new Error("Coda settings contain an invalid UI motion setting");
+		}
+		ui = { motion: value.ui.motion };
+	}
 	return {
 		...(defaultModel ? { defaultModel } : {}),
 		...(defaultReasoning ? { defaultReasoning } : {}),
 		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
+		...(ui ? { ui } : {}),
 	};
 }
 

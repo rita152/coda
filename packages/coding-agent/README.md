@@ -4,7 +4,7 @@ Coda's private terminal Coding Agent application. It composes `@coda/ai`,
 `@coda/tui`, and `@coda/agent` while owning application policy and all host
 integration.
 
-Status: private Milestone 1 implementation.
+Status: private Milestone 1 plus full-screen visual-refresh implementation.
 
 This package is a CLI application, not an application SDK. Its npm export map is intentionally empty; composition seams under `src/` are private and may change without compatibility guarantees.
 
@@ -25,17 +25,20 @@ One-shot mode writes only the final assistant text to stdout:
 
 ```sh
 coda --print --model opencode-go/<model-id> "explain this repository"
+coda --print --image ./diagram.png "explain this image"
 coda --print --json "run the configured Model and emit Agent events"
 coda --no-tui "use print mode even when stdin and stdout are terminals"
 ```
 
-`--no-tui` is an explicit alias for print mode. `--no-color` disables color only for the current Terminal instance; `NO_COLOR` is also honored without mutating the process environment.
+`--no-tui` is an explicit alias for print mode. `--no-color` disables color only for the current Terminal instance; `NO_COLOR` is also honored without mutating the process environment. `--no-animations` selects reduced motion for one invocation.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`.
 
 The macOS pseudo-terminal E2E test launches the built CLI with an isolated home
-and Workspace, then verifies that an ASCII prompt typed into the interactive UI
-is rendered without making a model request:
+and Workspace, then verifies full-screen entry, input, resize, signal exit,
+Prompt-card geometry, multiline Editor input, Timeline wheel navigation, resize, signal exit,
+protocol cleanup, cooked-mode restoration, and a post-exit shell sentinel
+without making a model request:
 
 ```sh
 npm run test:e2e
@@ -45,8 +48,13 @@ npm run test:e2e
 
 - `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`
 - interactive approval for protected/outside paths and Shell
-- append-only, workspace-scoped Session resume
-- stable JSONL Agent events
+- full-screen semantic Timeline with CommonMark/GFM Assistant and Thinking content
+- Codex-inspired structured Tool Invocation presentation and Transcript View
+- bounded image attachments with Kitty preview and system-viewer fallback
+- Pi-style multiline Composer and matching sent-Prompt cards
+- durable Steering/Follow-up input queues with pause, resume, failure recovery, and Alt+Up reclaim
+- append-only, workspace-scoped Session v3 resume with content-addressed Media Assets
+- stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
 - transient whole-Turn retry at 2s, 4s, and 8s
 
@@ -54,5 +62,6 @@ The Policy Gate is not a sandbox. Shell runs with host-user authority after
 approval, with a minimal environment, bounded output, timeout, and process-group
 cancellation.
 
-RPC, client/server mode, public SDK and extension contracts, images, compaction,
-Session branching, and rich editor features remain deferred.
+RPC, client/server mode, public SDK and extension contracts, compaction, Session
+branching, autocomplete, selection, redo, durable drafts, syntax highlighting, and generic terminal-image
+protocol support remain deferred.

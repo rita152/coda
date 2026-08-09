@@ -3,12 +3,14 @@ import {
 	type ComponentInputContext,
 	type DiagnosticSink,
 	type Keybinding,
+	type RenderContext,
 	type Scheduler,
 	type Terminal,
 	type TerminalInput,
 	Tui,
 	wrapAnsi,
 } from "@coda/tui";
+import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./process-lifecycle.ts";
 
 export interface PromptRuntime {
 	readonly terminal: Terminal;
@@ -16,6 +18,7 @@ export interface PromptRuntime {
 	readonly scheduler: Scheduler;
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
+	readonly lifecycle?: InteractiveProcessLifecycle;
 }
 
 export interface PromptChoice {
@@ -37,7 +40,7 @@ class ChoiceComponent extends Component {
 		this.#finish = finish;
 	}
 
-	render(width: number): string[] {
+	render({ width }: RenderContext): string[] {
 		const lines = [
 			...this.#title.split(/\r?\n/),
 			"",
@@ -91,7 +94,7 @@ class TextPromptComponent extends Component {
 		this.#finish = finish;
 	}
 
-	render(width: number): string[] {
+	render({ width }: RenderContext): string[] {
 		const visible = this.#secret ? "•".repeat([...this.#value].length) : this.#value;
 		const input = visible || (this.#placeholder ? `(${this.#placeholder})` : "");
 		return [this.#message, "", `> ${input}`, "", "Enter confirms • Esc cancels"].flatMap((line) =>
@@ -100,7 +103,7 @@ class TextPromptComponent extends Component {
 	}
 
 	handleInput(input: TerminalInput, _context: ComponentInputContext): void {
-		if (input.type === "resize") return;
+		if (input.type === "resize" || input.type === "mouse") return;
 		if (input.type === "text" || input.type === "paste") {
 			this.#value += input.text;
 			this.invalidate();
@@ -144,11 +147,46 @@ async function runPrompt(
 		keybindings: runtime.keybindings,
 		diagnostics: runtime.diagnostics,
 	});
+	let termination: InteractiveTerminationError | undefined;
+	let fatalFailure: { readonly error: unknown } | undefined;
+	let suspendTask: Promise<void> | undefined;
+	const unsubscribeLifecycle = runtime.lifecycle?.subscribe({
+		terminate: (signal) => {
+			termination ??= new InteractiveTerminationError(signal);
+			finish(undefined);
+		},
+		fatal: (error) => {
+			fatalFailure ??= { error };
+			finish(undefined);
+		},
+		suspend: () => {
+			if (suspendTask) return;
+			suspendTask = (async () => {
+				if (tui.started) await tui.stop();
+				await runtime.lifecycle!.suspend();
+				if (!(await tui.start())) throw new Error("Terminal was unavailable after process resume");
+			})().catch((error: unknown) => {
+				fatalFailure ??= { error };
+				finish(undefined);
+			});
+			void suspendTask.finally(() => {
+				suspendTask = undefined;
+			});
+		},
+	});
 	try {
-		if (!(await tui.start())) throw new Error("Interactive prompt requires a TTY terminal");
-		return await result;
+		if (!(await tui.start())) {
+			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
+		}
+		const value = await result;
+		if (suspendTask) await suspendTask;
+		if (termination) throw termination;
+		if (fatalFailure) throw fatalFailure.error;
+		return value;
 	} finally {
+		unsubscribeLifecycle?.();
 		finish(undefined);
+		if (suspendTask) await suspendTask;
 		await tui.stop();
 	}
 }

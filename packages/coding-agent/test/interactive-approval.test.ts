@@ -1,5 +1,5 @@
 import type { RunId, ToolInvocationId } from "@coda/agent";
-import { Component, createSystemScheduler, Tui, VirtualTerminal } from "@coda/tui";
+import { Component, createSystemScheduler, stripAnsi, Tui, VirtualTerminal } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { InteractiveApprovalHandler } from "../src/interactive/approval.ts";
 
@@ -96,6 +96,51 @@ describe("interactive approval overlay", () => {
 			action: "press",
 		});
 		await expect(pending).resolves.toBe("allow_once");
+		approval.unbind();
+		await tui.stop();
+	});
+
+	it("reflows on resize without hiding authority or grant scope", async () => {
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const tui = new Tui({
+			terminal,
+			root: new RootComponent(),
+			clock: { now: () => 1_000 },
+			scheduler: createSystemScheduler(),
+			keybindings: [],
+		});
+		const approval = new InteractiveApprovalHandler();
+		approval.bind(tui, terminal);
+		await tui.start();
+		const pending = approval.decide({
+			runId: "run-1" as RunId,
+			invocationId: "invocation-1" as ToolInvocationId,
+			toolName: "bash",
+			operation: "bash",
+			reason: "shell",
+			command: "npm run test --workspace=@coda/coding-agent",
+			cwd: "/workspace",
+			grantScope: "run",
+			hostAuthority: true,
+		});
+
+		terminal.clearOutput();
+		await expect(terminal.emit({ type: "resize", columns: 40, rows: 12 })).resolves.toBeUndefined();
+		const resized = stripAnsi(terminal.readOutput());
+		expect(resized).toContain("Authority:");
+		expect(resized).toContain("Grant:");
+		expect(resized).toContain("allow once");
+
+		await terminal.emit({
+			type: "key",
+			key: "escape",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(pending).resolves.toBe("deny");
 		approval.unbind();
 		await tui.stop();
 	});

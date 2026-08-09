@@ -252,6 +252,29 @@ describe("ProcessTerminal lifecycle and capabilities", () => {
 		expect(flushed).toBe(true);
 	});
 
+	it("can flush rendered output from inside an input handler without awaiting that handler", async () => {
+		const result = create();
+		await startWithKitty(result);
+		result.output.deferCallbacks = true;
+		let rendered = false;
+		result.terminal.onInput(async (input) => {
+			if (input.type !== "resize") return;
+			result.terminal.write("resized frame");
+			await result.terminal.flushOutput();
+			rendered = true;
+		});
+
+		result.output.columns = 101;
+		result.output.rows = 31;
+		result.output.emitResize();
+		await Promise.resolve();
+		expect(rendered).toBe(false);
+
+		result.output.completeWrites();
+		await result.terminal.flush();
+		expect(rendered).toBe(true);
+	});
+
 	it("drains and restores every protocol and listener on idempotent stop", async () => {
 		const result = create();
 		await startWithKitty(result);
@@ -298,6 +321,50 @@ describe("ProcessTerminal lifecycle and capabilities", () => {
 });
 
 describe("ProcessTerminal structured input", () => {
+	it("normalizes SGR mouse press, release, and hover coordinates", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1b[<0;12;7M\x1b[<0;12;7m\x1b[<35;20;9M");
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			{
+				type: "mouse",
+				action: "press",
+				button: "left",
+				column: 11,
+				row: 6,
+				shift: false,
+				control: false,
+				alt: false,
+			},
+			expect.objectContaining({ type: "mouse", action: "release", button: "left", column: 11, row: 6 }),
+			expect.objectContaining({ type: "mouse", action: "move", button: "none", column: 19, row: 8 }),
+		]);
+	});
+
+	it("normalizes SGR mouse wheel input", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1b[<64;12;7M\x1b[<65;12;7M");
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({ type: "mouse", action: "press", button: "wheel-up", column: 11, row: 6 }),
+			expect.objectContaining({ type: "mouse", action: "press", button: "wheel-down", column: 11, row: 6 }),
+		]);
+	});
+
 	it("emits one PasteInput even when bracketed paste spans chunks", async () => {
 		const result = create();
 		const inputs: TerminalInput[] = [];

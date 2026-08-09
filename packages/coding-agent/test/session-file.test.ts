@@ -1,8 +1,9 @@
-import { access, appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentTool, type IdGenerator, type IdKind } from "@coda/agent";
+import { Agent, type AgentTool, type IdGenerator, type IdKind, type QueueItemId } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
+import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
@@ -15,6 +16,54 @@ afterEach(async () => {
 });
 
 describe("JSONL File Session", () => {
+	it("indexes durable media attached to a paused Follow-up by queue identity", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-follow-up-media-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_190 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+		});
+		const queueId = "queue:media" as QueueItemId;
+		const image = await sharp({ create: { width: 8, height: 9, channels: 3, background: "#123456" } })
+			.png()
+			.toBuffer();
+		await session.record({
+			type: "follow_up_enqueued",
+			item: {
+				id: queueId,
+				content: [
+					{ type: "text", text: "inspect" },
+					{ type: "image", data: image.toString("base64"), mimeType: "image/png" },
+				],
+			},
+		});
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.mediaReferences.get(queueId)).toEqual([
+			expect.objectContaining({ type: "media", width: 8, height: 9, mimeType: "image/png" }),
+		]);
+		expect(restored.seed.pendingFollowUps[0]?.content).toEqual([
+			{ type: "text", text: "inspect" },
+			{ type: "image", data: image.toString("base64"), mimeType: "image/png" },
+		]);
+		await restored.close();
+	});
+
 	it("writes private linear records and syncs tool_started before execute()", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-"));
 		temporaryDirectories.push(homeDirectory);
@@ -77,7 +126,7 @@ describe("JSONL File Session", () => {
 			.trimEnd()
 			.split("\n")
 			.map((line) => JSON.parse(line));
-		expect(lines[0]).toMatchObject({ type: "session", version: 1, sessionId });
+		expect(lines[0]).toMatchObject({ type: "session", version: 3, sessionId });
 		const records = lines.slice(1);
 		expect(records.map((record) => record.sequence)).toEqual(records.map((_, index) => index + 1));
 		expect(records[0].previousRecordId).toBeNull();
@@ -98,6 +147,131 @@ describe("JSONL File Session", () => {
 			"assistant",
 		]);
 		await restored.close();
+	});
+
+	it("atomically migrates v1 inline images to v3 media references while preserving a backup", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-migration-"));
+		temporaryDirectories.push(homeDirectory);
+		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
+		await mkdir(directory, { recursive: true });
+		const sessionId = "session-legacy";
+		const path = join(directory, `${sessionId}.jsonl`);
+		const imageBytes = await sharp({ create: { width: 32, height: 24, channels: 3, background: "#336699" } })
+			.png()
+			.toBuffer();
+		const imageData = imageBytes.toString("base64");
+		const legacyText = `${[
+			{
+				type: "session",
+				version: 1,
+				sessionId,
+				workspaceId: "workspace-hash",
+				workspacePath: "/canonical/workspace",
+				createdAt: 1_210,
+			},
+			{
+				type: "message_committed",
+				recordId: "record:legacy:1",
+				sessionId,
+				sequence: 1,
+				previousRecordId: null,
+				timestamp: 1_210,
+				payload: {
+					message: {
+						id: "message:legacy:user",
+						message: {
+							role: "user",
+							content: [
+								{ type: "text", text: "describe" },
+								{ type: "image", data: imageData, mimeType: "image/png" },
+							],
+							timestamp: 1_210,
+						},
+					},
+				},
+			},
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n")}\n`;
+		await writeFile(path, legacyText, { mode: 0o600 });
+		let id = 0;
+		const diagnostics: string[] = [];
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_220 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+			diagnostics: async (diagnostic) => {
+				diagnostics.push(diagnostic.code);
+			},
+		});
+
+		const resumed = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		const restoredContent = resumed.seed.messages[0]?.message.content;
+		expect(Array.isArray(restoredContent) ? restoredContent[1] : undefined).toEqual({
+			type: "image",
+			data: imageData,
+			mimeType: "image/png",
+		});
+		await resumed.close();
+
+		const migrated = await readFile(path, "utf8");
+		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 3 });
+		expect(migrated).not.toContain(imageData);
+		expect(migrated).toContain('"type":"media"');
+		expect(await readFile(`${path}.v1.backup`, "utf8")).toBe(legacyText);
+		expect(diagnostics).toContain("session.migrated-v3");
+		const mediaEntry = JSON.parse(migrated.split("\n")[1]!).payload.message.message.content[1];
+		const mediaPath = join(`${path}.media`, `${mediaEntry.digest}.model.png`);
+		expect((await stat(mediaPath)).mode & 0o777).toBe(0o600);
+	});
+
+	it("atomically upgrades a v2 journal to v3 before accepting reclaimed Follow-up records", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v3-migration-"));
+		temporaryDirectories.push(homeDirectory);
+		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
+		await mkdir(directory, { recursive: true });
+		const sessionId = "session-v2";
+		const path = join(directory, `${sessionId}.jsonl`);
+		const legacyText = `${JSON.stringify({
+			type: "session",
+			version: 2,
+			sessionId,
+			workspaceId: "workspace-hash",
+			workspacePath: "/canonical/workspace",
+			createdAt: 1_230,
+		})}\n`;
+		await writeFile(path, legacyText, { mode: 0o600 });
+		let id = 0;
+		const diagnostics: string[] = [];
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_231 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+			diagnostics: async (diagnostic) => {
+				diagnostics.push(diagnostic.code);
+			},
+		});
+
+		const resumed = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		await resumed.close();
+
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 3 });
+		expect(await readFile(`${path}.v2.backup`, "utf8")).toBe(legacyText);
+		expect(diagnostics).toContain("session.migrated-v3");
 	});
 
 	it("durably classifies an active Run as interrupted before resuming", async () => {

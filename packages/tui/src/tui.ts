@@ -1,20 +1,34 @@
 import { displayWidth, sliceAnsi } from "./ansi.ts";
-import { type Component, observeInvalidation, setComponentFocused } from "./component.ts";
+import {
+	type Component,
+	type CursorPlacement,
+	observeInvalidation,
+	type RenderContext,
+	setComponentFocused,
+} from "./component.ts";
 import type { Diagnostic, DiagnosticSink } from "./diagnostics.ts";
 import type { TerminalInput } from "./input.ts";
 import { type Keybinding, type KeybindingContext, matchesKeybinding } from "./keybindings.ts";
-import { MainScreenRenderer, RendererError, RendererInvariantError } from "./renderer.ts";
+import { FullScreenRenderer, RendererError, RendererInvariantError } from "./renderer.ts";
 import type { Clock, ScheduledTask, Scheduler } from "./runtime.ts";
-import type { Terminal } from "./terminal.ts";
+import type { Terminal, TerminalSize } from "./terminal.ts";
+import type { ImagePlacement, TerminalImageSurface } from "./terminal-image-surface.ts";
 
 const FRAME_INTERVAL_MS = 1000 / 60;
 const STYLE_BOUNDARY = "\x1b[0m";
 
-export interface OverlayOptions {
+export interface OverlayPlacement {
 	readonly row?: number;
 	readonly column?: number;
 	readonly width?: number;
+	readonly height?: number;
+}
+
+export type OverlayLayout = (viewport: TerminalSize) => OverlayPlacement;
+
+export interface OverlayOptions extends OverlayPlacement {
 	readonly focus?: boolean;
+	readonly layout?: OverlayLayout;
 }
 
 export interface OverlayHandle {
@@ -43,9 +57,16 @@ interface OverlayEntry {
 	readonly row: number;
 	readonly column: number;
 	readonly width?: number;
+	readonly height?: number;
+	readonly layout?: OverlayLayout;
 	visible: boolean;
 	removed: boolean;
 	previousFocus: Component | null;
+}
+
+interface ResolvedOverlayPlacement extends OverlayPlacement {
+	readonly row: number;
+	readonly column: number;
 }
 
 export interface TuiOptions {
@@ -55,6 +76,7 @@ export interface TuiOptions {
 	readonly scheduler: Scheduler;
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
+	readonly imageSurface?: TerminalImageSurface;
 }
 
 export class Tui {
@@ -64,7 +86,8 @@ export class Tui {
 	readonly #scheduler: Scheduler;
 	readonly #keybindings: readonly Keybinding[];
 	readonly #diagnostics?: DiagnosticSink;
-	readonly #renderer: MainScreenRenderer;
+	readonly #imageSurface?: TerminalImageSurface;
+	readonly #renderer: FullScreenRenderer;
 	readonly #mounted = new Set<Component>();
 	readonly #invalidationSubscriptions = new Map<Component, () => void>();
 	readonly #overlays: OverlayEntry[] = [];
@@ -74,6 +97,7 @@ export class Tui {
 	#stopPromise?: Promise<void>;
 	#unsubscribeInput?: () => void;
 	#scheduled?: ScheduledTask;
+	#animationTask?: ScheduledTask;
 	#scheduledRun?: Promise<void>;
 	#renderPromise?: Promise<void>;
 	#dirty = true;
@@ -88,7 +112,8 @@ export class Tui {
 		this.#scheduler = options.scheduler;
 		this.#keybindings = Object.freeze([...options.keybindings]);
 		this.#diagnostics = options.diagnostics;
-		this.#renderer = new MainScreenRenderer(options.terminal);
+		this.#imageSurface = options.imageSurface;
+		this.#renderer = new FullScreenRenderer(options.terminal);
 	}
 
 	get started(): boolean {
@@ -112,14 +137,11 @@ export class Tui {
 	}
 
 	async #performStart(): Promise<boolean> {
-		this.#unsubscribeInput = this.#terminal.onInput((input) => this.#handleInput(input));
 		try {
 			const available = await this.#terminal.start();
-			if (!available) {
-				this.#unsubscribeInput();
-				this.#unsubscribeInput = undefined;
-				return false;
-			}
+			if (!available) return false;
+			await this.#renderer.enter();
+			this.#unsubscribeInput = this.#terminal.onInput((input) => this.#handleInput(input));
 
 			this.#started = true;
 			this.#dirty = true;
@@ -164,13 +186,36 @@ export class Tui {
 	}
 
 	async #cleanupAfterFailedStart(): Promise<void> {
+		const failures: unknown[] = [];
 		this.#cancelScheduled();
+		this.#cancelAnimation();
 		this.#unsubscribeInput?.();
 		this.#unsubscribeInput = undefined;
 		this.#started = false;
 		this.#unmountAll();
-		this.#renderer.reset();
-		await this.#terminal.stop();
+		try {
+			await this.#imageSurface?.dispose();
+		} catch (error) {
+			failures.push(error);
+		}
+		try {
+			await this.#renderer.prepareToLeave();
+		} catch (error) {
+			failures.push(error);
+		}
+		try {
+			await this.#terminal.stop();
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			try {
+				await this.#renderer.leave();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, "Multiple TUI cleanup operations failed");
 	}
 
 	async stop(): Promise<void> {
@@ -203,15 +248,31 @@ export class Tui {
 			failure = error;
 		} finally {
 			this.#cancelScheduled();
+			this.#cancelAnimation();
 			this.#unsubscribeInput?.();
 			this.#unsubscribeInput = undefined;
 			this.#started = false;
 			this.#unmountAll();
-			this.#renderer.reset();
+			try {
+				await this.#imageSurface?.dispose();
+			} catch (error) {
+				failure ??= error;
+			}
+			try {
+				await this.#renderer.prepareToLeave();
+			} catch (error) {
+				failure ??= error;
+			}
 			try {
 				await this.#terminal.stop();
 			} catch (error) {
 				failure ??= error;
+			} finally {
+				try {
+					await this.#renderer.leave();
+				} catch (error) {
+					failure ??= error;
+				}
 			}
 		}
 		if (failure !== undefined) throw failure;
@@ -241,20 +302,18 @@ export class Tui {
 		if (component === this.#root || this.#overlays.some((entry) => entry.component === component && !entry.removed)) {
 			throw new Error("Component is already mounted in this TUI");
 		}
-		const row = options.row ?? 0;
-		const column = options.column ?? 0;
-		if (!Number.isSafeInteger(row) || row < 0 || !Number.isSafeInteger(column) || column < 0) {
-			throw new RangeError("Overlay row and column must be non-negative integers");
+		if (
+			options.layout &&
+			[options.row, options.column, options.width, options.height].some((value) => value !== undefined)
+		) {
+			throw new Error("Overlay layout cannot be combined with fixed placement");
 		}
-		if (options.width !== undefined && (!Number.isSafeInteger(options.width) || options.width < 1)) {
-			throw new RangeError("Overlay width must be a positive integer");
-		}
+		const placement = validateOverlayPlacement(options);
 
 		const entry: OverlayEntry = {
 			component,
-			row,
-			column,
-			width: options.width,
+			...placement,
+			layout: options.layout,
 			visible: true,
 			removed: false,
 			previousFocus: null,
@@ -376,32 +435,76 @@ export class Tui {
 		do {
 			this.#dirty = false;
 			this.#renderAgain = false;
-			await this.#renderer.render(this.#renderComponents());
+			const frame = this.#renderComponents();
+			await this.#renderer.render(frame.lines, frame.cursor);
+			await this.#imageSurface?.reconcile(frame.images);
 			this.#lastRenderAt = this.#clock.now();
+			this.#scheduleAnimation();
 		} while (this.#renderAgain || this.#dirty);
 	}
 
-	#renderComponents(): string[] {
-		const terminalWidth = this.#terminal.size.columns;
-		const lines = [...this.#root.render(terminalWidth)];
+	#renderComponents(): {
+		readonly lines: string[];
+		readonly images: readonly ImagePlacement[];
+		readonly cursor?: CursorPlacement;
+	} {
+		const { columns: terminalWidth, rows: terminalHeight } = this.#terminal.size;
+		const context: RenderContext = Object.freeze({
+			width: terminalWidth,
+			height: terminalHeight,
+			now: this.#clock.now(),
+		});
+		const lines = [...this.#root.render(context)];
+		const images: ImagePlacement[] = [...this.#root.imagePlacements(context)];
+		let cursor = this.#root.cursorPlacement(context);
 		for (const overlay of this.#overlays) {
 			if (!overlay.visible || overlay.removed) continue;
-			const width = overlay.width ?? terminalWidth - overlay.column;
-			if (width < 1 || overlay.column + width > terminalWidth) {
+			const dynamic = overlay.layout?.(Object.freeze({ columns: terminalWidth, rows: terminalHeight }));
+			const placement = dynamic ? validateOverlayPlacement(dynamic) : overlay;
+			const row = placement.row ?? 0;
+			const column = placement.column ?? 0;
+			const width = placement.width ?? terminalWidth - column;
+			const height = placement.height ?? terminalHeight - row;
+			if (width < 1 || column + width > terminalWidth) {
 				throw new RangeError("Overlay placement exceeds the terminal width");
 			}
-			const overlayLines = overlay.component.render(width);
+			if (height < 1 || row + height > terminalHeight) {
+				throw new RangeError("Overlay placement exceeds the terminal height");
+			}
+			const overlayContext = Object.freeze({
+				width,
+				height,
+				now: context.now,
+			});
+			const overlayLines = overlay.component.render(overlayContext);
+			if (overlayLines.length > height) throw new RangeError("Overlay content exceeds its placement height");
+			const overlayCursor = overlay.component.cursorPlacement(overlayContext);
+			if (overlayCursor) {
+				cursor = {
+					row: overlayCursor.row + row,
+					column: overlayCursor.column + column,
+					visible: overlayCursor.visible,
+				};
+			}
+			images.push(
+				...overlay.component.imagePlacements(overlayContext).map((placement) => ({
+					...placement,
+					row: placement.row + row,
+					column: placement.column + column,
+				})),
+			);
 			for (const [lineOffset, overlayLine] of overlayLines.entries()) {
-				const row = overlay.row + lineOffset;
+				const outputRow = row + lineOffset;
 				const actualWidth = displayWidth(overlayLine);
 				if (actualWidth > width) {
-					throw new RendererError({ actualWidth, availableWidth: width, row });
+					throw new RendererError({ actualWidth, availableWidth: width, row: outputRow });
 				}
-				const base = lines[row] ?? "";
-				lines[row] = compositeLine(base, overlayLine, overlay.column, width, terminalWidth);
+				while (lines.length <= outputRow) lines.push("");
+				const base = lines[outputRow] ?? "";
+				lines[outputRow] = compositeLine(base, overlayLine, column, width, terminalWidth);
 			}
 		}
-		return lines;
+		return { lines, images: Object.freeze(images), cursor };
 	}
 
 	async flush(): Promise<void> {
@@ -419,6 +522,36 @@ export class Tui {
 	#cancelScheduled(): void {
 		this.#scheduled?.cancel();
 		this.#scheduled = undefined;
+	}
+
+	#scheduleAnimation(): void {
+		this.#cancelAnimation();
+		if (!this.#started) return;
+		const { columns: width, rows: height } = this.#terminal.size;
+		const context: RenderContext = Object.freeze({ width, height, now: this.#clock.now() });
+		let interval: number | undefined;
+		const visible = [
+			this.#root,
+			...this.#overlays.filter((entry) => entry.visible && !entry.removed).map((entry) => entry.component),
+		];
+		for (const component of visible) {
+			const candidate = component.animationInterval(context);
+			if (candidate === undefined) continue;
+			if (!Number.isFinite(candidate) || candidate < FRAME_INTERVAL_MS) {
+				throw new RangeError(`Animation interval must be at least ${FRAME_INTERVAL_MS}ms`);
+			}
+			interval = interval === undefined ? candidate : Math.min(interval, candidate);
+		}
+		if (interval === undefined) return;
+		this.#animationTask = this.#scheduler.schedule(interval, async () => {
+			this.#animationTask = undefined;
+			await this.renderNow();
+		});
+	}
+
+	#cancelAnimation(): void {
+		this.#animationTask?.cancel();
+		this.#animationTask = undefined;
 	}
 
 	async #handleInput(input: TerminalInput): Promise<void> {
@@ -466,6 +599,31 @@ export class Tui {
 			// The original rendering failure remains authoritative.
 		}
 	}
+}
+
+/** The only interactive TUI mode. Named explicitly at the public seam. */
+export class FullScreenTui extends Tui {}
+
+function validateOverlayPlacement(placement: OverlayPlacement): ResolvedOverlayPlacement {
+	const row = placement.row ?? 0;
+	const column = placement.column ?? 0;
+	if (!Number.isSafeInteger(row) || row < 0 || !Number.isSafeInteger(column) || column < 0) {
+		throw new RangeError("Overlay row and column must be non-negative integers");
+	}
+	for (const [name, value] of [
+		["width", placement.width],
+		["height", placement.height],
+	] as const) {
+		if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+			throw new RangeError(`Overlay ${name} must be a positive integer`);
+		}
+	}
+	return {
+		row,
+		column,
+		...(placement.width === undefined ? {} : { width: placement.width }),
+		...(placement.height === undefined ? {} : { height: placement.height }),
+	};
 }
 
 function compositeLine(base: string, overlay: string, column: number, width: number, totalWidth: number): string {

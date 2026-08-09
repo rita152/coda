@@ -246,12 +246,12 @@ describe("Coding Agent print mode", () => {
 			.split("\n")
 			.map((line) => JSON.parse(line) as Record<string, unknown>);
 		expect(events[0]).toMatchObject({
-			schemaVersion: 1,
+			schemaVersion: 2,
 			type: "run_start",
 			model: { provider: faux.getModel().provider, id: faux.getModel().id },
 			reasoning: "off",
 		});
-		expect(events.at(-1)).toMatchObject({ schemaVersion: 1, type: "run_end", outcome: "success" });
+		expect(events.at(-1)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
 		expect(stdout.value).not.toContain("json answer\n");
 		expect(stderr.value).toBe("");
 	});

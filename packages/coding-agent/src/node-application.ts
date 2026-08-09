@@ -19,6 +19,7 @@ import { isFileSystemError } from "./host/file-system.ts";
 import { createNodeFileSystem } from "./host/node-file-system.ts";
 import { createNodeProcessRunner } from "./host/node-process-runner.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
+import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
@@ -93,6 +94,48 @@ function processIo(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, stderr:
 	};
 }
 
+function nodeInteractiveLifecycle(platform: NodeJS.Platform): InteractiveProcessLifecycle {
+	return {
+		subscribe: (handlers) => {
+			const terminate = (signal: InteractiveTerminationSignal) => () => handlers.terminate(signal);
+			const onSigterm = terminate("SIGTERM");
+			const onSighup = terminate("SIGHUP");
+			const onSigtstp = () => handlers.suspend();
+			const onUncaughtException = (error: Error) => handlers.fatal(error);
+			const onUnhandledRejection = (reason: unknown) => handlers.fatal(reason);
+			process.on("SIGTERM", onSigterm);
+			process.on("uncaughtException", onUncaughtException);
+			process.on("unhandledRejection", onUnhandledRejection);
+			if (platform !== "win32") {
+				process.on("SIGHUP", onSighup);
+				process.on("SIGTSTP", onSigtstp);
+			}
+			return () => {
+				process.off("SIGTERM", onSigterm);
+				process.off("uncaughtException", onUncaughtException);
+				process.off("unhandledRejection", onUnhandledRejection);
+				if (platform !== "win32") {
+					process.off("SIGHUP", onSighup);
+					process.off("SIGTSTP", onSigtstp);
+				}
+			};
+		},
+		suspend: async () => {
+			if (platform === "win32") throw new Error("Process suspension is unsupported on Windows");
+			await new Promise<void>((resolve, reject) => {
+				const onContinue = () => resolve();
+				process.once("SIGCONT", onContinue);
+				try {
+					process.kill(process.pid, "SIGSTOP");
+				} catch (error) {
+					process.off("SIGCONT", onContinue);
+					reject(error);
+				}
+			});
+		},
+	};
+}
+
 export function terminalEnvironmentForStartup(
 	environment: Readonly<Record<string, string | undefined>>,
 	noColor: boolean,
@@ -119,6 +162,7 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly models?: Models;
 	readonly terminalFactory?: TerminalFactory;
 	readonly sessions?: SessionManager;
+	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
 }
 
 export function createNodeCodingAgentApplication(
@@ -134,6 +178,7 @@ export function createNodeCodingAgentApplication(
 	const clock = options.clock ?? { now: () => Date.now() };
 	const idGenerator = options.idGenerator ?? new SystemIds();
 	const scheduler = options.scheduler ?? createSystemScheduler();
+	const interactiveLifecycle = options.interactiveLifecycle ?? nodeInteractiveLifecycle(platform);
 	const timeRuntime = systemTimeRuntime(clock, scheduler);
 	const fileSystem = options.fileSystem ?? createNodeFileSystem();
 	const processRunner = options.processRunner ?? createNodeProcessRunner({ platform });
@@ -227,6 +272,7 @@ export function createNodeCodingAgentApplication(
 							scheduler,
 							keybindings: [],
 							diagnostics: diagnosticOutput,
+							lifecycle: interactiveLifecycle,
 						},
 						[
 							"Interrupted Tool Invocation detected.",
@@ -270,6 +316,7 @@ export function createNodeCodingAgentApplication(
 			clock,
 			idGenerator,
 			scheduler,
+			interactiveLifecycle,
 		},
 	});
 }

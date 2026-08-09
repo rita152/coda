@@ -1,127 +1,1292 @@
-import type { AgentEvent } from "@coda/agent";
-import { Component, type ComponentInputContext, type TerminalInput, wrapAnsi } from "@coda/tui";
+import type { AgentEvent, AgentSeed, FollowUp } from "@coda/agent";
+import {
+	type ColorLevel,
+	Component,
+	type ComponentInputContext,
+	type CursorPlacement,
+	clipAnsi,
+	createMarkdownRenderer,
+	displayWidth,
+	Editor,
+	type ImagePlacement,
+	type MarkdownRenderer,
+	type RenderContext,
+	sanitizeTerminalText,
+	sliceAnsi,
+	type TerminalInput,
+	wrapAnsi,
+} from "@coda/tui";
+import type { ApprovalRequest } from "../policy.ts";
+import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
+import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
+import { createCodaTheme, type TuiTheme } from "./theme.ts";
+import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
+import { isExplorationTool, renderExplorationGroup, renderToolInvocation } from "./tool-presentation.ts";
+
+const MINIMUM_COLUMNS = 40;
+const MINIMUM_ROWS = 10;
+
+export interface ChatAttachmentPreview {
+	readonly png: Uint8Array;
+	readonly generation: string;
+	readonly width: number;
+	readonly height: number;
+}
+
+export interface ChatAttachment {
+	readonly id: string;
+	readonly filename: string;
+	readonly mimeType: string;
+	readonly width: number;
+	readonly height: number;
+	readonly bytes: number;
+	readonly preview?: ChatAttachmentPreview;
+}
 
 export interface ChatComponentOptions {
 	readonly modelLabel: string;
+	readonly workspaceLabel?: string;
 	readonly reasoning: string;
-	readonly onSubmit: (input: string) => Promise<void>;
+	readonly onSubmit: (
+		input: string,
+		attachmentIds: readonly string[],
+	) => Promise<string | undefined> | string | undefined;
+	readonly onSteer?: (input: string, attachmentIds: readonly string[]) => Promise<string> | string;
+	readonly onFollowUp?: (input: string, attachmentIds: readonly string[]) => Promise<string> | string;
+	readonly onAttach?: (path: string) => Promise<ChatAttachment>;
+	readonly onDetach?: (attachmentId: string) => Promise<void>;
+	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
+	readonly onResumeFollowUps?: () => Promise<void> | void;
+	readonly onReclaimFollowUp?: (queueItemId: string) => Promise<void> | void;
+	readonly imagePreviewSupported?: boolean;
+	readonly initialAttachments?: readonly ChatAttachment[];
+	readonly restoredAttachments?: ReadonlyMap<string, readonly ChatAttachment[]>;
+	readonly recoverableFollowUps?: readonly RecoverableFollowUp[];
+	readonly toolResultImagesSupported?: boolean;
 	readonly onAbort: () => void;
 	readonly onExit: () => void;
+	readonly seed?: AgentSeed;
+	readonly restoredToolInvocations?: readonly SessionToolLifecycle[];
+	readonly markdownRenderer?: MarkdownRenderer;
+	readonly colorLevel?: ColorLevel;
+	readonly motion?: "full" | "reduced";
 }
 
-function assistantText(event: Extract<AgentEvent, { type: "message_end" }>): string {
-	return event.message.message.content
-		.filter((block) => block.type === "text")
-		.map((block) => (block.type === "text" ? block.text : ""))
-		.join("");
+interface ProvisionalPromptCard {
+	readonly id: string;
+	readonly kind: "prompt" | "steering" | "follow_up";
+	readonly text: string;
+	readonly attachments: readonly ChatAttachment[];
+	readonly queueItemId?: string;
+	readonly status?: string;
+}
+
+interface RecoverablePromptCard {
+	readonly item: FollowUp;
+	readonly state: "paused" | "failed";
+	readonly attachments: readonly ChatAttachment[];
+	readonly messageId?: string;
+	readonly failure?: string;
+}
+
+interface AttachmentTarget {
+	readonly key: string;
+	readonly source: "composer" | "timeline";
+	readonly attachment: ChatAttachment;
+	readonly composerIndex?: number;
+}
+
+interface AttachmentHitRegion {
+	readonly targetKey: string;
+	readonly row: number;
+	readonly start: number;
+	readonly end: number;
+}
+
+interface LocalAttachmentHitRegion extends Omit<AttachmentHitRegion, "row"> {
+	readonly row: number;
+}
+
+interface CachedTimelineBlock {
+	readonly entry: TimelineEntry;
+	readonly width: number;
+	readonly transcriptMode: boolean;
+	readonly toolResultImagesSupported: boolean;
+	readonly attachments?: readonly ChatAttachment[];
+	readonly status?: string;
+	readonly attachmentFocusKey?: string;
+	readonly lines: readonly string[];
+	readonly regions: readonly LocalAttachmentHitRegion[];
 }
 
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
-	readonly #transcript: string[] = [];
-	#input = "";
-	#streaming = "";
+	readonly #timeline: SemanticTimeline;
+	readonly #markdown: MarkdownRenderer;
+	readonly #theme: TuiTheme;
+	readonly #viewport = new TimelineViewport();
+	#lastViewportBlocks: readonly ViewportBlock[] = [];
+	#lastViewportHeight = 0;
+	#cachedViewportBlocks?: {
+		readonly entries: readonly TimelineEntry[];
+		readonly width: number;
+		readonly transcriptMode: boolean;
+		readonly error?: string;
+		readonly attachmentFocusKey?: string;
+		readonly blocks: readonly ViewportBlock[];
+	};
+	readonly #editor = new Editor();
+	#lastCursor?: CursorPlacement;
+	#lastDockRows = 4;
 	#running = false;
+	#transcriptMode = false;
 	#error?: string;
+	#attachments: ChatAttachment[] = [];
+	#attachmentFocusKey?: string;
+	#attachmentFocusOrigin?: "keyboard" | "mouse";
+	#attachmentHitRegions: AttachmentHitRegion[] = [];
+	#timelineAttachmentHitRegions = new Map<string, readonly LocalAttachmentHitRegion[]>();
+	readonly #timelineBlockCache = new Map<string, CachedTimelineBlock>();
+	#imageModal = false;
+	#attaching = false;
+	#nextRunAttachments?: readonly ChatAttachment[];
+	readonly #messageAttachments = new Map<string, readonly ChatAttachment[]>();
+	#provisionalCards: ProvisionalPromptCard[] = [];
+	#recoverableCards: RecoverablePromptCard[] = [];
+	#activeFollowUp?: RecoverablePromptCard;
+	#nextProvisionalId = 0;
 
 	constructor(options: ChatComponentOptions) {
 		super({ focusable: true });
 		this.#options = options;
+		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
+		this.#theme = createCodaTheme(options.colorLevel ?? 0);
+		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
+		this.#nextRunAttachments = options.initialAttachments;
+		for (const [messageId, attachments] of options.restoredAttachments ?? []) {
+			this.#messageAttachments.set(messageId, [...attachments]);
+		}
+		this.#recoverableCards = (options.recoverableFollowUps ?? []).map((recoverable) =>
+			Object.freeze({
+				item: recoverable.item,
+				state: recoverable.state,
+				attachments: Object.freeze([...(options.restoredAttachments?.get(recoverable.item.id) ?? [])]),
+				...(recoverable.messageId ? { messageId: recoverable.messageId } : {}),
+				...(recoverable.failure ? { failure: recoverable.failure.message } : {}),
+			}),
+		);
 	}
 
 	get running(): boolean {
 		return this.#running;
 	}
 
+	override animationInterval(_context: RenderContext): number | undefined {
+		if (_context.width < MINIMUM_COLUMNS || _context.height < MINIMUM_ROWS) return undefined;
+		if ((this.#options.motion ?? "full") === "reduced" || !this.#timeline.hasActiveTools) return undefined;
+		return this.#theme.colorLevel === 3 ? 80 : 600;
+	}
+
+	setAwaitingApproval(request: ApprovalRequest): void {
+		if (!this.#timeline.setAwaitingApproval(request.invocationId, request.toolName)) return;
+		this.#viewport.noteUpdate();
+		this.invalidate();
+	}
+
 	accept(event: AgentEvent): void {
+		if (event.type === "run_start" && this.#nextRunAttachments && this.#nextRunAttachments.length > 0) {
+			this.#messageAttachments.set(event.inputMessage.id, this.#nextRunAttachments);
+			this.#nextRunAttachments = undefined;
+		}
+		if (event.type === "run_start") {
+			const exactIndex = this.#provisionalCards.findIndex((card) =>
+				event.source === "follow_up" ? card.queueItemId === event.queueItemId : card.kind === "prompt",
+			);
+			const index =
+				exactIndex >= 0 || event.source !== "follow_up"
+					? exactIndex
+					: this.#provisionalCards.findIndex(
+							(card) => card.kind === "follow_up" && card.queueItemId === undefined,
+						);
+			let provisional: ProvisionalPromptCard | undefined;
+			if (index >= 0) {
+				[provisional] = this.#provisionalCards.splice(index, 1);
+				if (event.source === "follow_up" && provisional && provisional.attachments.length > 0) {
+					this.#messageAttachments.set(event.inputMessage.id, provisional.attachments);
+				}
+			}
+			if (event.source === "follow_up" && event.queueItemId) {
+				const recoveryIndex = this.#recoverableCards.findIndex((card) => card.item.id === event.queueItemId);
+				const recovered = recoveryIndex >= 0 ? this.#recoverableCards.splice(recoveryIndex, 1)[0] : undefined;
+				const active = provisional
+					? {
+							item: { id: event.queueItemId, content: provisional.text },
+							state: "paused" as const,
+							attachments: provisional.attachments,
+							messageId: event.inputMessage.id,
+						}
+					: recovered
+						? { ...recovered, messageId: event.inputMessage.id }
+						: undefined;
+				if (active) {
+					this.#activeFollowUp = Object.freeze(active);
+					if (active.attachments.length > 0) {
+						this.#messageAttachments.set(event.inputMessage.id, active.attachments);
+					}
+				}
+			}
+		}
+		if (event.type === "turn_start") {
+			for (const message of event.steeringMessages) {
+				const index = this.#provisionalCards.findIndex((card) => card.kind === "steering");
+				if (index < 0) break;
+				const [card] = this.#provisionalCards.splice(index, 1);
+				if (card && card.attachments.length > 0) this.#messageAttachments.set(message.id, card.attachments);
+			}
+		}
+		const mutation = this.#timeline.accept(event);
 		switch (event.type) {
 			case "run_start":
 				this.#running = true;
 				break;
-			case "message_update":
-				if (event.delta.type === "text_delta") this.#streaming += event.delta.delta;
-				break;
-			case "message_end": {
-				const text = assistantText(event);
-				if (text.length > 0) this.#transcript.push(`Coda: ${text}`);
-				this.#streaming = "";
-				break;
-			}
-			case "tool_execution_start":
-				this.#transcript.push(`Tool ${event.invocation.toolName}: running`);
-				break;
-			case "tool_execution_end":
-				this.#transcript.push(`Tool ${event.invocation.toolName}: ${event.outcome}`);
-				break;
-			case "tool_execution_rejected":
-				this.#transcript.push(`Tool ${event.invocation.toolName}: rejected (${event.message})`);
-				break;
 			case "run_end":
 				this.#running = false;
-				if (event.outcome === "error") this.#error = event.failure?.message ?? "Run failed";
-				if (event.outcome === "aborted") this.#transcript.push("Run aborted.");
+				if (this.#activeFollowUp) {
+					if (event.outcome !== "success") {
+						this.#recoverableCards.push(
+							Object.freeze({
+								...this.#activeFollowUp,
+								state: event.outcome === "error" ? "failed" : "paused",
+								...(event.failure?.message ? { failure: event.failure.message } : {}),
+							}),
+						);
+					}
+					this.#activeFollowUp = undefined;
+				}
+				if (event.outcome !== "success") {
+					const paused = this.#provisionalCards.filter(
+						(card) => card.kind === "follow_up" && card.queueItemId !== undefined,
+					);
+					for (const card of paused) {
+						this.#recoverableCards.push(
+							Object.freeze({
+								item: { id: card.queueItemId as FollowUp["id"], content: card.text },
+								state: "paused",
+								attachments: card.attachments,
+							}),
+						);
+					}
+					const pausedIds = new Set(paused.map(({ id }) => id));
+					this.#provisionalCards = this.#provisionalCards.filter((card) => !pausedIds.has(card.id));
+				}
+				if (event.outcome === "error") {
+					this.#error = event.failure?.message ?? "Run failed";
+				}
 				break;
 		}
+		if (mutation.changed) this.#viewport.noteUpdate();
 		this.invalidate();
 	}
 
-	render(width: number): string[] {
-		const logical = [
-			`Coda • ${this.#options.modelLabel} • reasoning ${this.#options.reasoning}`,
-			"",
-			...this.#transcript,
-			...(this.#streaming ? [`Coda: ${this.#streaming}`] : []),
-			...(this.#error ? [`Error: ${this.#error}`] : []),
-			"",
-			`${this.#running ? "…" : ">"} ${this.#input}`,
-			this.#running ? "Ctrl-C aborts the Run" : "Enter sends • Ctrl-C exits",
+	render({ width, height, now }: RenderContext): string[] {
+		if (width < MINIMUM_COLUMNS || height < MINIMUM_ROWS) return renderTooSmall(width, height, this.#running);
+
+		const editorFocused = this.focused && this.#focusedAttachmentTarget === undefined && !this.#imageModal;
+		const editorFrame = this.#editor.render({
+			width,
+			height,
+			focused: editorFocused,
+			cursorMode: this.#theme.colorLevel === 0 ? "native" : "software",
+			styleBorder: (value) => this.#theme.styleEditorBorder(this.#options.reasoning, editorFocused, value),
+		});
+		const attachmentLayout = this.#layoutAttachmentRows(width);
+		const attachmentRows = attachmentLayout.lines.length;
+		const dockRows = editorFrame.lines.length + attachmentRows + 1;
+		this.#lastDockRows = dockRows;
+		const viewportHeight = height - 1 - dockRows;
+		const blocks = this.#renderViewportBlocks(width, now);
+		this.#lastViewportBlocks = blocks;
+		this.#lastViewportHeight = viewportHeight;
+		const viewport = this.#viewport.layout(blocks, viewportHeight);
+		const transcript = [...viewport.lines];
+		while (transcript.length < viewportHeight) transcript.push("");
+
+		const attachmentRow = height - dockRows;
+		this.#attachmentHitRegions = [
+			...viewport.sourceRows.flatMap((source, row) =>
+				(this.#timelineAttachmentHitRegions.get(source.blockId) ?? [])
+					.filter((region) => region.row === source.lineOffset)
+					.map((region) => ({ ...region, row: 1 + row })),
+			),
+			...attachmentLayout.regions.map((region) => ({
+				...region,
+				row: attachmentRow + region.row,
+			})),
 		];
-		return logical.flatMap((line) => (line.length === 0 ? [""] : wrapAnsi(line, width)));
+		const editorRow = 1 + viewportHeight + attachmentRows;
+		this.#lastCursor = editorFrame.cursor
+			? {
+					row: editorRow + editorFrame.cursor.row,
+					column: editorFrame.cursor.column,
+					visible: editorFrame.cursor.visible,
+				}
+			: undefined;
+		const frame = [
+			renderHeader(
+				width,
+				this.#options.workspaceLabel,
+				this.#options.modelLabel,
+				this.#options.reasoning,
+				this.#transcriptMode,
+			),
+			...transcript,
+			...attachmentLayout.lines,
+			...editorFrame.lines,
+			this.#renderFooter(width),
+		];
+		const geometry = this.#previewGeometry({ width, height, now });
+		return geometry ? renderPreviewOverlay(frame, geometry, this.#focusedAttachment!, width) : frame;
 	}
 
-	handleInput(input: TerminalInput, _context: ComponentInputContext): void {
+	override cursorPlacement(): CursorPlacement | undefined {
+		return this.#lastCursor;
+	}
+
+	override imagePlacements(context: RenderContext): readonly ImagePlacement[] {
+		if (!this.#options.imagePreviewSupported) return [];
+		const attachment = this.#focusedAttachment;
+		const geometry = attachment ? this.#previewGeometry(context) : undefined;
+		if (!attachment?.preview || !geometry) return [];
+		return [
+			{
+				stableKey: `attachment-preview:${attachment.id}`,
+				generation: attachment.preview.generation,
+				png: attachment.preview.png,
+				row: geometry.imageRow,
+				column: geometry.imageColumn,
+				width: geometry.imageWidth,
+				height: geometry.imageHeight,
+			},
+		];
+	}
+
+	handleInput(input: TerminalInput, context: ComponentInputContext): void {
 		if (input.type === "resize") return;
-		if (input.type === "text" || input.type === "paste") {
-			if (!this.#running) {
-				this.#input += input.text;
-				this.invalidate();
+		if (input.type === "mouse") {
+			this.#handleMouse(input, context);
+			return;
+		}
+		if (input.type === "key" && input.action !== "release" && this.#imageModal) {
+			if (input.key === "escape" || input.key === "q") {
+				this.#imageModal = false;
+				this.#requestNavigationRender(context);
 			}
 			return;
 		}
-		if (input.action === "release") return;
-		if (input.control && input.key === "c") {
+		if (input.type === "key" && input.action !== "release" && this.#focusedAttachmentTarget) {
+			if (input.key === "tab") {
+				this.#moveAttachmentFocus(input.shift ? -1 : 1);
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "left" || input.key === "right") {
+				this.#moveAttachmentFocus(input.key === "left" ? -1 : 1, true);
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "escape") {
+				this.#attachmentFocusKey = undefined;
+				this.#attachmentFocusOrigin = undefined;
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "delete" || input.key === "backspace") {
+				if (this.#focusedAttachmentTarget.source === "composer") void this.#detachFocused();
+				return;
+			}
+			if (input.key === "enter") {
+				if (this.#options.imagePreviewSupported && this.#focusedAttachment?.preview) {
+					this.#imageModal = true;
+					this.#requestNavigationRender(context);
+				} else if (this.#focusedAttachment && this.#options.onOpenAttachment) {
+					void this.#openFocusedAttachment();
+				}
+				return;
+			}
+			return;
+		}
+		if (input.type === "key" && input.action !== "release") {
+			const attachmentTargets = this.#attachmentTargets();
+			if (input.key === "tab" && attachmentTargets.length > 0) {
+				this.#attachmentFocusKey = input.shift ? attachmentTargets.at(-1)!.key : attachmentTargets[0]!.key;
+				this.#attachmentFocusOrigin = "keyboard";
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "page-up" && !input.control) {
+				this.#viewport.pageUp(this.#lastViewportBlocks, this.#lastViewportHeight);
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "page-down" && !input.control) {
+				this.#viewport.pageDown(this.#lastViewportBlocks, this.#lastViewportHeight);
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.control && input.key === "home") {
+				this.#viewport.jumpToStart(this.#lastViewportBlocks);
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.control && input.key === "end") {
+				this.#viewport.jumpToEnd();
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.control && input.key === "t") {
+				this.#transcriptMode = !this.#transcriptMode;
+				this.#requestNavigationRender(context);
+				return;
+			}
+			if (input.key === "escape" && this.#transcriptMode) {
+				this.#transcriptMode = false;
+				this.#requestNavigationRender(context);
+				return;
+			}
+		}
+		if (input.type === "key" && input.action === "release") return;
+		if (input.type === "key" && input.alt && input.key === "up") {
+			void this.#reclaimLatestFollowUp();
+			return;
+		}
+		if (input.type === "key" && input.control && input.key === "c") {
 			if (this.#running) this.#options.onAbort();
-			else this.#options.onExit();
+			else if (this.#editor.text.length > 0) {
+				this.#editor.clear();
+				this.invalidate();
+			} else this.#options.onExit();
 			return;
 		}
-		if (input.text !== undefined && !this.#running) {
-			this.#input += input.text;
-			this.invalidate();
+		if (input.type === "key" && input.key === "escape") {
+			if (!this.#running && this.#editor.text.trim().length === 0) this.#options.onExit();
 			return;
 		}
-		if (input.key === "escape" && !this.#running) {
+		if (input.type === "key" && input.control && input.key === "d" && this.#editor.text.length === 0) {
 			this.#options.onExit();
 			return;
 		}
-		if (input.key === "backspace" && !this.#running) {
-			const values = [...this.#input];
-			values.pop();
-			this.#input = values.join("");
+		const editorResult = this.#editor.handleInput(input);
+		if (editorResult.type === "handled") {
 			this.invalidate();
 			return;
 		}
-		if (input.key !== "enter" || this.#running) return;
-		const value = this.#input.trim();
-		if (value.length === 0) return;
-		this.#input = "";
+		if (editorResult.type !== "submit" || this.#attaching) return;
+		const value = editorResult.text.trim();
+		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedFollowUps) {
+			if (!this.#options.onResumeFollowUps) {
+				this.#error = "Follow-up recovery is unavailable";
+				this.invalidate();
+				return;
+			}
+			this.#running = true;
+			this.#error = undefined;
+			try {
+				const operation = Promise.resolve(this.#options.onResumeFollowUps());
+				void operation.catch((error: unknown) => {
+					this.#running = false;
+					this.#error = error instanceof Error ? error.message : String(error);
+					this.invalidate();
+				});
+			} catch (error) {
+				this.#running = false;
+				this.#error = error instanceof Error ? error.message : String(error);
+			}
+			this.invalidate();
+			return;
+		}
+		const attachMatch = /^\/attach ([^\r\n]+)$/u.exec(value);
+		if (attachMatch) {
+			const path = attachMatch[1]!.trim();
+			if (!path) return;
+			this.#editor.clear();
+			this.#error = undefined;
+			this.#attaching = true;
+			this.invalidate();
+			void this.#attach(path, value);
+			return;
+		}
+		let submissionText = value;
+		const appendsPausedQueue = !this.#running && this.#hasPausedFollowUps;
+		let kind: ProvisionalPromptCard["kind"] = this.#running
+			? editorResult.alternate
+				? "follow_up"
+				: "steering"
+			: appendsPausedQueue
+				? "follow_up"
+				: "prompt";
+		if (this.#running && /^\/follow-up\s+/u.test(submissionText) && !submissionText.includes("\n")) {
+			kind = "follow_up";
+			submissionText = submissionText.replace(/^\/follow-up\s+/u, "").trim();
+		}
+		if (submissionText.length === 0 && this.#attachments.length === 0) return;
+		const submittedAttachments = [...this.#attachments];
+		const provisional: ProvisionalPromptCard = Object.freeze({
+			id: `provisional:${++this.#nextProvisionalId}`,
+			kind,
+			text: submissionText,
+			attachments: Object.freeze(submittedAttachments),
+			status: kind === "steering" ? "Steering queued" : kind === "follow_up" ? "Follow-up queued" : undefined,
+		});
+		this.#provisionalCards.push(provisional);
+		if (kind === "prompt") this.#nextRunAttachments = submittedAttachments;
+		this.#editor.clear();
+		this.#attachments = [];
+		this.#attachmentFocusKey = undefined;
+		this.#attachmentFocusOrigin = undefined;
 		this.#error = undefined;
-		this.#running = true;
-		this.#transcript.push(`You: ${value}`);
+		if (!this.#running) this.#running = true;
+		this.#viewport.jumpToEnd();
 		this.invalidate();
-		void this.#options.onSubmit(value).catch((error: unknown) => {
-			this.#running = false;
+		const attachmentIds = submittedAttachments.map((attachment) => attachment.id);
+		const operation = (() => {
+			try {
+				if (kind === "steering") {
+					if (!this.#options.onSteer) throw new Error("Steering is unavailable");
+					return Promise.resolve(this.#options.onSteer(submissionText, attachmentIds));
+				}
+				if (kind === "follow_up" && !appendsPausedQueue) {
+					if (!this.#options.onFollowUp) throw new Error("Follow-up is unavailable");
+					return Promise.resolve(this.#options.onFollowUp(submissionText, attachmentIds));
+				}
+				return Promise.resolve(this.#options.onSubmit(submissionText, attachmentIds));
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		})();
+		void operation.then(
+			(queueItemId) => {
+				if (kind !== "prompt" && typeof queueItemId === "string") {
+					this.#provisionalCards = this.#provisionalCards.map((card) =>
+						card.id === provisional.id ? Object.freeze({ ...card, queueItemId }) : card,
+					);
+				}
+				this.invalidate();
+			},
+			(error: unknown) => {
+				if (kind === "prompt" || appendsPausedQueue) this.#running = false;
+				if (this.#nextRunAttachments === submittedAttachments) this.#nextRunAttachments = undefined;
+				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
+				this.#attachments = [...submittedAttachments, ...this.#attachments];
+				if (!this.#editor.text) this.#editor.setText(value);
+				this.#error = error instanceof Error ? error.message : String(error);
+				this.invalidate();
+			},
+		);
+	}
+
+	get #hasPausedFollowUps(): boolean {
+		return this.#recoverableCards.some((card) => card.state === "paused");
+	}
+
+	async #reclaimLatestFollowUp(): Promise<void> {
+		const provisional = [...this.#provisionalCards]
+			.reverse()
+			.find((card) => card.kind === "follow_up" && card.queueItemId !== undefined);
+		const recoverable = provisional ? undefined : this.#recoverableCards.at(-1);
+		const queueItemId = provisional?.queueItemId ?? recoverable?.item.id;
+		if (!queueItemId) return;
+		try {
+			if (!this.#options.onReclaimFollowUp) throw new Error("Follow-up recovery is unavailable");
+			await this.#options.onReclaimFollowUp(queueItemId);
+			const text = provisional?.text ?? (recoverable ? followUpText(recoverable.item) : "");
+			const attachments = provisional?.attachments ?? recoverable?.attachments ?? [];
+			if (provisional) {
+				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
+			} else {
+				this.#recoverableCards = this.#recoverableCards.filter((card) => card !== recoverable);
+			}
+			this.#editor.setText(text);
+			const known = new Set(this.#attachments.map(({ id }) => id));
+			this.#attachments.push(...attachments.filter(({ id }) => !known.has(id)));
+			this.#attachmentFocusKey = undefined;
+			this.#attachmentFocusOrigin = undefined;
+			this.#error = undefined;
+		} catch (error) {
+			this.#error = error instanceof Error ? error.message : String(error);
+		}
+		this.invalidate();
+	}
+
+	get #focusedAttachmentTarget(): AttachmentTarget | undefined {
+		if (!this.#attachmentFocusKey) return undefined;
+		return this.#attachmentTargets().find((target) => target.key === this.#attachmentFocusKey);
+	}
+
+	get #focusedAttachment(): ChatAttachment | undefined {
+		return this.#focusedAttachmentTarget?.attachment;
+	}
+
+	#attachmentTargets(): readonly AttachmentTarget[] {
+		const targets: AttachmentTarget[] = this.#attachments.map((attachment, composerIndex) => ({
+			key: attachmentTargetKey("composer", attachment.id, composerIndex),
+			source: "composer",
+			attachment,
+			composerIndex,
+		}));
+		const addTimeline = (blockId: string, attachments: readonly ChatAttachment[]): void => {
+			for (const [index, attachment] of attachments.entries()) {
+				targets.push({
+					key: attachmentTargetKey(blockId, attachment.id, index),
+					source: "timeline",
+					attachment,
+				});
+			}
+		};
+		for (const entry of this.#timeline.entries) {
+			if (entry.kind !== "user") continue;
+			const recovery =
+				this.#recoverableCards.find((card) => card.messageId === entry.messageId) ??
+				(this.#activeFollowUp?.messageId === entry.messageId ? this.#activeFollowUp : undefined);
+			addTimeline(entry.id, this.#messageAttachments.get(entry.messageId) ?? recovery?.attachments ?? []);
+		}
+		for (const card of this.#provisionalCards) addTimeline(card.id, card.attachments);
+		for (const card of this.#recoverableCards) {
+			if (!card.messageId) addTimeline(`recoverable:${card.item.id}`, card.attachments);
+		}
+		return targets;
+	}
+
+	async #attach(path: string, command: string): Promise<void> {
+		try {
+			if (!this.#options.onAttach) throw new Error("Image attachments are unavailable");
+			this.#attachments.push(await this.#options.onAttach(path));
+		} catch (error) {
+			if (!this.#editor.text) this.#editor.setText(command);
+			this.#error = error instanceof Error ? error.message : String(error);
+		} finally {
+			this.#attaching = false;
+			this.invalidate();
+		}
+	}
+
+	async #detachFocused(): Promise<void> {
+		const target = this.#focusedAttachmentTarget;
+		const index = target?.composerIndex;
+		const attachment = target?.attachment;
+		if (target?.source !== "composer" || index === undefined || !attachment) return;
+		try {
+			await this.#options.onDetach?.(attachment.id);
+			this.#attachments.splice(index, 1);
+			this.#imageModal = false;
+			const nextIndex = Math.min(index, this.#attachments.length - 1);
+			const next = this.#attachments[nextIndex];
+			this.#attachmentFocusKey = next ? attachmentTargetKey("composer", next.id, nextIndex) : undefined;
+			this.#attachmentFocusOrigin = this.#attachmentFocusKey === undefined ? undefined : "keyboard";
+		} catch (error) {
+			this.#error = error instanceof Error ? error.message : String(error);
+		}
+		this.invalidate();
+	}
+
+	async #openFocusedAttachment(): Promise<void> {
+		const attachment = this.#focusedAttachment;
+		if (!attachment || !this.#options.onOpenAttachment) return;
+		try {
+			await this.#options.onOpenAttachment(attachment.id);
+		} catch (error) {
 			this.#error = error instanceof Error ? error.message : String(error);
 			this.invalidate();
-		});
+		}
 	}
+
+	#moveAttachmentFocus(delta: number, wrap = false): void {
+		const targets = this.#attachmentTargets();
+		const current = targets.findIndex((target) => target.key === this.#attachmentFocusKey);
+		if (current < 0 || targets.length === 0) return;
+		const next = current + delta;
+		if (!wrap && (next < 0 || next >= targets.length)) {
+			this.#attachmentFocusKey = undefined;
+			this.#attachmentFocusOrigin = undefined;
+			return;
+		}
+		this.#attachmentFocusKey = targets[(next + targets.length) % targets.length]!.key;
+		this.#attachmentFocusOrigin = "keyboard";
+	}
+
+	#layoutAttachmentRows(width: number): {
+		readonly lines: readonly string[];
+		readonly regions: readonly LocalAttachmentHitRegion[];
+	} {
+		if (this.#attachments.length === 0) return { lines: [], regions: [] };
+		interface Token {
+			readonly targetKey: string;
+			readonly text: string;
+			readonly width: number;
+		}
+		const rows: Token[][] = [[]];
+		for (const [index, attachment] of this.#attachments.entries()) {
+			const targetKey = attachmentTargetKey("composer", attachment.id, index);
+			const focused = targetKey === this.#attachmentFocusKey;
+			const label = `[${sanitizeTerminalText(attachment.filename).replace(/[\r\n]+/g, " ")}]`;
+			const plain = clipAnsi(focused ? `›${label}` : label, width);
+			const token: Token = {
+				targetKey,
+				text: focused ? this.#theme.style("accent", plain) : plain,
+				width: displayWidth(plain),
+			};
+			let row = rows.at(-1)!;
+			const used = row.reduce((total, entry) => total + entry.width, Math.max(0, row.length - 1));
+			if (row.length > 0 && used + 1 + token.width > width) {
+				row = [];
+				rows.push(row);
+			}
+			row.push(token);
+		}
+
+		let hidden = rows.slice(2).reduce((total, row) => total + row.length, 0);
+		const visible = rows.slice(0, 2);
+		if (hidden > 0) {
+			const last = visible[1] ?? [];
+			if (!visible[1]) visible.push(last);
+			while (last.length > 0) {
+				const indicator = `… +${hidden}`;
+				const used = last.reduce((total, entry) => total + entry.width, Math.max(0, last.length - 1));
+				if (used + 1 + displayWidth(indicator) <= width) break;
+				last.pop();
+				hidden++;
+			}
+		}
+
+		const regions: LocalAttachmentHitRegion[] = [];
+		const lines = visible.map((row, rowIndex) => {
+			let column = 0;
+			const parts: string[] = [];
+			for (const token of row) {
+				if (parts.length > 0) column++;
+				parts.push(token.text);
+				regions.push({ targetKey: token.targetKey, row: rowIndex, start: column, end: column + token.width });
+				column += token.width;
+			}
+			if (hidden > 0 && rowIndex === visible.length - 1) parts.push(clipAnsi(`… +${hidden}`, width));
+			return clipAnsi(parts.join(" "), width);
+		});
+		return { lines, regions };
+	}
+
+	#handleMouse(input: Extract<TerminalInput, { type: "mouse" }>, context: ComponentInputContext): void {
+		if (this.#imageModal) return;
+		if (input.action === "press" && (input.button === "wheel-up" || input.button === "wheel-down")) {
+			this.#viewport.scrollBy(
+				this.#lastViewportBlocks,
+				this.#lastViewportHeight,
+				input.button === "wheel-up" ? -3 : 3,
+			);
+			this.#requestNavigationRender(context);
+			return;
+		}
+		const hit = this.#attachmentHitRegions.find(
+			(region) => region.row === input.row && input.column >= region.start && input.column < region.end,
+		);
+		if (input.action === "move") {
+			if (hit) {
+				this.#attachmentFocusKey = hit.targetKey;
+				this.#attachmentFocusOrigin = "mouse";
+			} else if (this.#attachmentFocusOrigin === "mouse") {
+				this.#attachmentFocusKey = undefined;
+				this.#attachmentFocusOrigin = undefined;
+			}
+			this.#requestNavigationRender(context);
+			return;
+		}
+		if (input.button !== "left" || !hit) return;
+		this.#attachmentFocusKey = hit.targetKey;
+		this.#attachmentFocusOrigin = "mouse";
+		this.#requestNavigationRender(context);
+		if (input.action === "release" && !this.#options.imagePreviewSupported) void this.#openFocusedAttachment();
+	}
+
+	#previewGeometry(context: RenderContext): PreviewGeometry | undefined {
+		const attachment = this.#focusedAttachment;
+		if (!attachment) return undefined;
+		return previewGeometry(context.width, context.height, this.#lastDockRows, attachment, this.#imageModal);
+	}
+
+	#renderViewportBlocks(width: number, now: number): readonly ViewportBlock[] {
+		const entries = this.#timeline.entries;
+		const cache = this.#cachedViewportBlocks;
+		if (
+			!this.#timeline.hasActiveTools &&
+			this.#provisionalCards.length === 0 &&
+			this.#recoverableCards.length === 0 &&
+			!this.#activeFollowUp &&
+			cache?.entries === entries &&
+			cache.width === width &&
+			cache.transcriptMode === this.#transcriptMode &&
+			cache.error === this.#error &&
+			cache.attachmentFocusKey === this.#attachmentFocusKey
+		) {
+			return cache.blocks;
+		}
+		this.#timelineAttachmentHitRegions = new Map();
+		const blocks: ViewportBlock[] = [];
+		for (let index = 0; index < entries.length; index++) {
+			const entry = entries[index];
+			if (!entry) continue;
+			if (!this.#transcriptMode && entry.kind === "tool" && isExplorationTool(entry)) {
+				const group = [entry];
+				while (index + 1 < entries.length) {
+					const candidate = entries[index + 1];
+					if (candidate?.kind !== "tool" || !isExplorationTool(candidate) || candidate.turnId !== entry.turnId) {
+						break;
+					}
+					group.push(candidate);
+					index++;
+				}
+				if (group.length > 1) {
+					blocks.push({
+						id: `exploration:${entry.id}`,
+						lines: renderExplorationGroup(group, {
+							width,
+							now,
+							transcript: false,
+							theme: this.#theme,
+							motion: this.#options.motion ?? "full",
+						}),
+					});
+					continue;
+				}
+			}
+			const recovery =
+				entry.kind === "user"
+					? (this.#recoverableCards.find((card) => card.messageId === entry.messageId) ??
+						(this.#activeFollowUp?.messageId === entry.messageId ? this.#activeFollowUp : undefined))
+					: undefined;
+			const rendered = this.#renderTimelineBlock(entry, recovery, width, now);
+			this.#timelineAttachmentHitRegions.set(entry.id, rendered.regions);
+			blocks.push({
+				id: entry.id,
+				lines: rendered.lines,
+			});
+		}
+		for (const card of this.#provisionalCards) {
+			const layout = renderUserCard(
+				card.text,
+				width,
+				this.#theme,
+				card.attachments,
+				card.status,
+				card.id,
+				this.#attachmentFocusKey,
+			);
+			this.#timelineAttachmentHitRegions.set(card.id, layout.regions);
+			blocks.push({
+				id: card.id,
+				lines: layout.lines,
+			});
+		}
+		for (const card of this.#recoverableCards) {
+			if (card.messageId) continue;
+			const blockId = `recoverable:${card.item.id}`;
+			const layout = renderUserCard(
+				followUpText(card.item),
+				width,
+				this.#theme,
+				card.attachments,
+				recoverableStatus(card),
+				blockId,
+				this.#attachmentFocusKey,
+			);
+			this.#timelineAttachmentHitRegions.set(blockId, layout.regions);
+			blocks.push({
+				id: blockId,
+				lines: layout.lines,
+			});
+		}
+		if (this.#error) {
+			blocks.push({
+				id: "run-error",
+				lines: wrapAnsi(this.#theme.style("error", `Error: ${sanitizeTerminalText(this.#error)}`), width),
+			});
+		}
+		const snapshot = Object.freeze(blocks);
+		if (
+			!this.#timeline.hasActiveTools &&
+			this.#provisionalCards.length === 0 &&
+			this.#recoverableCards.length === 0 &&
+			!this.#activeFollowUp
+		) {
+			this.#cachedViewportBlocks = Object.freeze({
+				entries,
+				width,
+				transcriptMode: this.#transcriptMode,
+				error: this.#error,
+				attachmentFocusKey: this.#attachmentFocusKey,
+				blocks: snapshot,
+			});
+		}
+		return snapshot;
+	}
+
+	#renderTimelineBlock(
+		entry: TimelineEntry,
+		recovery: RecoverablePromptCard | undefined,
+		width: number,
+		now: number,
+	): CachedTimelineBlock {
+		const attachments =
+			entry.kind === "user"
+				? (this.#messageAttachments.get(entry.messageId) ?? recovery?.attachments ?? [])
+				: undefined;
+		const status = recovery
+			? this.#activeFollowUp === recovery
+				? "Running"
+				: recoverableStatus(recovery)
+			: undefined;
+		const attachmentFocusKey = this.#attachmentFocusKey?.startsWith(`${entry.id}\u0000`)
+			? this.#attachmentFocusKey
+			: undefined;
+		const toolResultImagesSupported = this.#options.toolResultImagesSupported ?? false;
+		const animated =
+			entry.kind === "tool" &&
+			(entry.state === "running" || entry.state === "awaiting_approval") &&
+			(this.#options.motion ?? "full") === "full";
+		const cached = this.#timelineBlockCache.get(entry.id);
+		if (
+			!animated &&
+			cached?.entry === entry &&
+			cached.width === width &&
+			cached.transcriptMode === this.#transcriptMode &&
+			cached.toolResultImagesSupported === toolResultImagesSupported &&
+			cached.attachments === attachments &&
+			cached.status === status &&
+			cached.attachmentFocusKey === attachmentFocusKey
+		) {
+			return cached;
+		}
+		const layout =
+			entry.kind === "user"
+				? renderUserCard(entry.text, width, this.#theme, attachments, status, entry.id, attachmentFocusKey)
+				: {
+						lines: renderTimelineEntry(
+							entry,
+							width,
+							this.#transcriptMode,
+							this.#markdown,
+							this.#theme,
+							now,
+							this.#options.motion ?? "full",
+							toolResultImagesSupported,
+						),
+						regions: [],
+					};
+		const rendered = Object.freeze({
+			entry,
+			width,
+			transcriptMode: this.#transcriptMode,
+			toolResultImagesSupported,
+			attachments,
+			status,
+			attachmentFocusKey,
+			lines: layout.lines,
+			regions: layout.regions,
+		});
+		this.#timelineBlockCache.set(entry.id, rendered);
+		return rendered;
+	}
+
+	#renderFooter(width: number): string {
+		if (this.#imageModal) return fitFooter(width, ["Image preview • Esc/q closes"]);
+		const attachmentTarget = this.#focusedAttachmentTarget;
+		if (attachmentTarget) {
+			const canDetach = attachmentTarget.source === "composer";
+			return this.#options.imagePreviewSupported
+				? fitFooter(width, [
+						`Attachment • Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
+						`Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns`,
+						"Enter expands • Tab returns",
+					])
+				: fitFooter(width, [
+						`Attachment • Enter opens system viewer${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
+						`Enter opens viewer${canDetach ? " • Delete detaches" : ""} • Tab returns`,
+						"Enter opens viewer • Tab returns",
+					]);
+		}
+		if (this.#attaching) return fitFooter(width, ["Attaching image…"]);
+		const unread = this.#viewport.unreadUpdates;
+		if (unread > 0) return fitFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
+		if (this.#transcriptMode) {
+			return fitFooter(width, [
+				"Transcript • PgUp/PgDn scroll • Esc closes • Ctrl+End latest",
+				"Transcript • PgUp/PgDn • Esc closes",
+				"Transcript • Esc closes",
+			]);
+		}
+		if (!this.#running && this.#hasPausedFollowUps) {
+			return fitFooter(width, [
+				"Paused Follow-ups • Enter resumes • Alt+Up edits latest • typing appends",
+				"Enter resumes • Alt+Up edits • typing appends",
+				"Enter resumes • Alt+Up edits",
+			]);
+		}
+		return this.#running
+			? fitFooter(width, [
+					"Enter steers • Alt+Enter queues Follow-up • Alt+Up edits • Ctrl-C aborts",
+					"Enter steers • Alt+Enter queues • Ctrl-C aborts",
+					"Ctrl-C aborts the Run",
+				])
+			: fitFooter(width, [
+					"Enter sends • Ctrl-T transcript • Ctrl-C exits",
+					"Enter sends • Ctrl-C exits",
+					"Ctrl-C exits",
+				]);
+	}
+
+	#requestNavigationRender(context: ComponentInputContext): void {
+		this.invalidate();
+		context.requestImmediateRender();
+	}
+}
+
+interface PreviewGeometry {
+	readonly row: number;
+	readonly column: number;
+	readonly width: number;
+	readonly height: number;
+	readonly imageRow: number;
+	readonly imageColumn: number;
+	readonly imageWidth: number;
+	readonly imageHeight: number;
+	readonly modal: boolean;
+}
+
+function previewGeometry(
+	screenWidth: number,
+	screenHeight: number,
+	dockRows: number,
+	attachment: ChatAttachment,
+	modal: boolean,
+): PreviewGeometry | undefined {
+	const availableHeight = screenHeight - 1 - dockRows;
+	if (availableHeight < 4 || screenWidth < 8) return undefined;
+	const maximumWidth = modal ? Math.floor(screenWidth * 0.9) : Math.floor(screenWidth * 0.75);
+	const maximumHeight = modal ? Math.floor(availableHeight * 0.9) : Math.floor(availableHeight * 0.75);
+	const width = Math.min(screenWidth, Math.max(Math.min(28, screenWidth), maximumWidth));
+	const height = Math.min(availableHeight, Math.max(Math.min(8, availableHeight), maximumHeight));
+	const row = 1 + Math.floor((availableHeight - height) / 2);
+	const column = Math.floor((screenWidth - width) / 2);
+	const innerWidth = Math.max(1, width - 2);
+	const innerHeight = Math.max(1, height - 3);
+	const sourceWidth = attachment.preview?.width ?? attachment.width;
+	const sourceHeight = attachment.preview?.height ?? attachment.height;
+	const widthFromHeight = Math.max(1, Math.floor((innerHeight * sourceWidth * 2) / Math.max(1, sourceHeight)));
+	const imageWidth = Math.max(1, Math.min(innerWidth, widthFromHeight));
+	const imageHeight = Math.max(1, Math.min(innerHeight, Math.ceil((imageWidth * sourceHeight) / (sourceWidth * 2))));
+	return {
+		row,
+		column,
+		width,
+		height,
+		imageRow: row + 1 + Math.floor((innerHeight - imageHeight) / 2),
+		imageColumn: column + 1 + Math.floor((innerWidth - imageWidth) / 2),
+		imageWidth,
+		imageHeight,
+		modal,
+	};
+}
+
+function renderPreviewOverlay(
+	frame: readonly string[],
+	geometry: PreviewGeometry,
+	attachment: ChatAttachment,
+	screenWidth: number,
+): string[] {
+	const title = geometry.modal ? ` Image preview • ${attachment.filename} ` : ` ${attachment.filename} `;
+	const top = `┌${clipPlain(title, geometry.width - 2, "─")}┐`;
+	const bottom = `└${"─".repeat(Math.max(0, geometry.width - 2))}┘`;
+	const metadata = `${attachment.width}×${attachment.height} • ${attachment.mimeType} • ${formatBytes(attachment.bytes)}`;
+	const box = Array.from({ length: geometry.height }, (_, index) => {
+		if (index === 0) return top;
+		if (index === geometry.height - 1) return bottom;
+		if (index === geometry.height - 2) return `│${centerPlain(metadata, geometry.width - 2)}│`;
+		return `│${" ".repeat(Math.max(0, geometry.width - 2))}│`;
+	});
+	return frame.map((line, row) => {
+		const overlay = box[row - geometry.row];
+		if (overlay === undefined) return line;
+		const left = sliceAnsi(line, 0, geometry.column).padEnd(geometry.column);
+		const rightStart = geometry.column + geometry.width;
+		const right = sliceAnsi(line, rightStart, Math.max(0, screenWidth - rightStart));
+		return clipAnsi(`${left}${overlay}${right}`, screenWidth);
+	});
+}
+
+function clipPlain(value: string, width: number, fill: string): string {
+	const clipped = clipAnsi(sanitizeTerminalText(value).replace(/[\r\n]+/g, " "), Math.max(0, width));
+	return `${clipped}${fill.repeat(Math.max(0, width - displayWidth(clipped)))}`;
+}
+
+function centerPlain(value: string, width: number): string {
+	const clipped = clipAnsi(sanitizeTerminalText(value), Math.max(0, width));
+	const clippedWidth = displayWidth(clipped);
+	const left = Math.max(0, Math.floor((width - clippedWidth) / 2));
+	return `${" ".repeat(left)}${clipped}${" ".repeat(Math.max(0, width - left - clippedWidth))}`;
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1_024) return `${bytes} B`;
+	if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KiB`;
+	return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+}
+
+function renderTimelineEntry(
+	entry: TimelineEntry,
+	width: number,
+	transcriptMode: boolean,
+	markdown: MarkdownRenderer,
+	theme: TuiTheme,
+	now: number,
+	motion: "full" | "reduced",
+	toolResultImagesSupported: boolean,
+): readonly string[] {
+	switch (entry.kind) {
+		case "user":
+			return renderUserCard(entry.text, width, theme).lines;
+		case "assistant":
+			return markdown.render(entry.text, { width, phase: entry.phase });
+		case "thinking": {
+			const thinkingWidth = theme.colorLevel === 0 ? Math.max(1, width - 2) : width;
+			const lines = markdown.render(entry.text, { width: thinkingWidth, phase: entry.phase });
+			if (theme.colorLevel > 0) return lines.map((line) => theme.style("muted", line));
+			return ["Thinking", ...lines.map((line) => clipAnsi(`  ${line}`, width))];
+		}
+		case "tool":
+			return renderToolInvocation(entry, {
+				width,
+				now,
+				transcript: transcriptMode,
+				theme,
+				motion,
+				toolResultImagesSupported,
+			});
+	}
+}
+
+function renderUserCard(
+	source: string,
+	width: number,
+	theme: TuiTheme,
+	attachments: readonly ChatAttachment[] = [],
+	status?: string,
+	blockId = "user",
+	focusedAttachmentKey?: string,
+): { readonly lines: readonly string[]; readonly regions: readonly LocalAttachmentHitRegion[] } {
+	const safeSource = sanitizeTerminalText(source);
+	const lines = safeSource ? safeSource.split("\n").flatMap((line) => (line ? wrapAnsi(line, width) : [""])) : [];
+	const border = theme.style("muted", "─".repeat(width));
+	const bottom = status ? theme.style("muted", renderStatusBorder(width, status)) : border;
+	const attachmentLayout = renderTimelineAttachments(attachments, width, blockId, focusedAttachmentKey, theme);
+	return Object.freeze({
+		lines: Object.freeze([border, ...attachmentLayout.lines, ...lines, bottom]),
+		regions: Object.freeze(
+			attachmentLayout.regions.map((region) => Object.freeze({ ...region, row: region.row + 1 })),
+		),
+	});
+}
+
+function followUpText(item: FollowUp): string {
+	if (typeof item.content === "string") return item.content;
+	return item.content
+		.filter((block): block is Extract<(typeof item.content)[number], { type: "text" }> => block.type === "text")
+		.map((block) => block.text)
+		.join("");
+}
+
+function recoverableStatus(card: RecoverablePromptCard): string {
+	return card.state === "failed" ? `Failed${card.failure ? `: ${card.failure}` : ""}` : "Paused";
+}
+
+function renderStatusBorder(width: number, status: string): string {
+	const safeStatus = sanitizeTerminalText(status).replace(/[\r\n]+/g, " ");
+	if (displayWidth(safeStatus) + 3 > width) return clipAnsi(safeStatus, width);
+	return `${"─".repeat(width - displayWidth(safeStatus) - 2)} ${safeStatus} `;
+}
+
+function renderTimelineAttachments(
+	attachments: readonly ChatAttachment[],
+	width: number,
+	blockId: string,
+	focusedAttachmentKey: string | undefined,
+	theme: TuiTheme,
+): { readonly lines: readonly string[]; readonly regions: readonly LocalAttachmentHitRegion[] } {
+	if (attachments.length === 0) return { lines: [], regions: [] };
+	const lines: string[] = [];
+	const regions: LocalAttachmentHitRegion[] = [];
+	let tokens: Array<{ readonly targetKey: string; readonly text: string; readonly width: number }> = [];
+	const flush = (): void => {
+		if (tokens.length === 0) return;
+		let column = 0;
+		const row = lines.length;
+		lines.push(
+			tokens
+				.map((token) => {
+					const start = column;
+					column += token.width + 1;
+					regions.push({ targetKey: token.targetKey, row, start, end: start + token.width });
+					return token.text;
+				})
+				.join(" "),
+		);
+		tokens = [];
+	};
+	for (const [index, attachment] of attachments.entries()) {
+		const targetKey = attachmentTargetKey(blockId, attachment.id, index);
+		const focused = targetKey === focusedAttachmentKey;
+		const label = clipAnsi(
+			`${focused ? "›" : ""}[${sanitizeTerminalText(attachment.filename).replace(/[\r\n]+/g, " ")}]`,
+			width,
+		);
+		const labelWidth = displayWidth(label);
+		const used = tokens.reduce((total, token) => total + token.width, Math.max(0, tokens.length - 1));
+		if (tokens.length > 0 && used + 1 + labelWidth > width) flush();
+		tokens.push({ targetKey, text: focused ? theme.style("accent", label) : label, width: labelWidth });
+	}
+	flush();
+	return { lines, regions };
+}
+
+function attachmentTargetKey(owner: string, attachmentId: string, index: number): string {
+	return `${owner}\u0000${attachmentId}\u0000${index}`;
+}
+
+function renderHeader(
+	width: number,
+	workspace: string | undefined,
+	model: string,
+	reasoning: string,
+	transcriptMode: boolean,
+): string {
+	const safeWorkspace = sanitizeTerminalText(workspace ?? "").replace(/\s+/g, " ");
+	const safeModel = sanitizeTerminalText(model).replace(/\s+/g, " ");
+	const safeReasoning = sanitizeTerminalText(reasoning).replace(/\s+/g, " ");
+	const fields = transcriptMode
+		? ["Coda", "Transcript", ...(safeWorkspace ? [safeWorkspace] : []), safeModel, `reasoning ${safeReasoning}`]
+		: ["Coda", ...(safeWorkspace ? [safeWorkspace] : []), safeModel, `reasoning ${safeReasoning}`];
+	while (fields.length > 1 && displayWidth(fields.join(" • ")) > width) fields.pop();
+	return clipAnsi(fields.join(" • "), width);
+}
+
+function renderTooSmall(width: number, height: number, running: boolean): string[] {
+	const lines = [
+		"Coda",
+		"Terminal too small",
+		`Resize to at least ${MINIMUM_COLUMNS} x ${MINIMUM_ROWS}`,
+		"",
+		running ? "Ctrl-C aborts" : "Ctrl-C exits",
+	].map((line) => clipAnsi(line, width));
+	return Array.from({ length: height }, (_, row) => lines[row] ?? "");
+}
+
+function fitFooter(width: number, candidates: readonly string[]): string {
+	const candidate = candidates.find((value) => displayWidth(value) <= width) ?? candidates.at(-1) ?? "";
+	return clipAnsi(candidate, width);
 }

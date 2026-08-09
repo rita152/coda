@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import type {
+	InteractiveLifecycleHandlers,
+	InteractiveProcessLifecycle,
+	InteractiveTerminationSignal,
+} from "../src/interactive/process-lifecycle.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -15,10 +20,49 @@ class BufferOutput implements ApplicationOutput {
 	}
 }
 
+class FakeLifecycle implements InteractiveProcessLifecycle {
+	handlers?: InteractiveLifecycleHandlers;
+	suspendCalls = 0;
+
+	subscribe(handlers: InteractiveLifecycleHandlers): () => void {
+		this.handlers = handlers;
+		return () => {
+			this.handlers = undefined;
+		};
+	}
+
+	async suspend(): Promise<void> {
+		this.suspendCalls++;
+	}
+
+	terminate(signal: InteractiveTerminationSignal): void {
+		this.handlers?.terminate(signal);
+	}
+
+	requestSuspend(): void {
+		this.handlers?.suspend();
+	}
+}
+
+class TrackingTerminal extends VirtualTerminal {
+	startCalls = 0;
+	stopCalls = 0;
+
+	override async start(): Promise<boolean> {
+		this.startCalls++;
+		return super.start();
+	}
+
+	override async stop(): Promise<void> {
+		this.stopCalls++;
+		await super.stop();
+	}
+}
+
 async function until(predicate: () => boolean): Promise<void> {
 	for (let attempt = 0; attempt < 100; attempt++) {
 		if (predicate()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		await new Promise<void>((resolve) => setTimeout(resolve, 1));
 	}
 	throw new Error("Condition did not become true");
 }
@@ -89,6 +133,7 @@ describe("interactive TUI mode", () => {
 
 		await expect(running).resolves.toBe(0);
 		expect(terminal.started).toBe(false);
+		expect(stdout.value).toBe("interactive answer\n");
 		expect(stderr.value).toBe("");
 	});
 
@@ -178,5 +223,101 @@ describe("interactive TUI mode", () => {
 		expect(prompts[0]).toContain("1970-01-01T00:00:02.000Z");
 		expect(prompts[1]).toContain("1970-01-01T00:00:03.000Z");
 		expect(prompts[0]).not.toBe(prompts[1]);
+	});
+
+	it("restores the terminal for SIGTERM and returns the conventional signal exit status", async () => {
+		const runtime = testTimeRuntime(4_000);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new TrackingTerminal({ columns: 80, rows: 24 });
+		const lifecycle = new FakeLifecycle();
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+				interactiveLifecycle: lifecycle,
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-session"]);
+		await until(() => terminal.started && lifecycle.handlers !== undefined);
+		lifecycle.terminate("SIGTERM");
+
+		await expect(running).resolves.toBe(143);
+		expect(terminal.started).toBe(false);
+		expect(terminal.stopCalls).toBe(1);
+		expect(lifecycle.handlers).toBeUndefined();
+		expect(stderr.value).toBe("");
+	});
+
+	it("leaves full-screen while suspended and re-enters it on resume", async () => {
+		const runtime = testTimeRuntime(4_100);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new TrackingTerminal({ columns: 80, rows: 24 });
+		const lifecycle = new FakeLifecycle();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout: new BufferOutput(),
+				stderr: new BufferOutput(),
+			},
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+				interactiveLifecycle: lifecycle,
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-session"]);
+		await until(() => terminal.started && lifecycle.handlers !== undefined);
+		lifecycle.requestSuspend();
+		await until(() => lifecycle.suspendCalls === 1 && terminal.startCalls === 2 && terminal.started);
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+
+		await expect(running).resolves.toBe(0);
+		expect(terminal.stopCalls).toBe(2);
 	});
 });

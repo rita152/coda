@@ -1,10 +1,20 @@
 import { createHash } from "node:crypto";
-import { Agent, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
-import type { Api, AssistantMessage, AuthPrompt, Model, Models, ThinkingLevel } from "@coda/ai";
-import type { DiagnosticSink, Keybinding, Scheduler, Terminal } from "@coda/tui";
-import type { FileSystem } from "./host/file-system.ts";
+import { basename, join } from "node:path";
+import { Agent, type AgentInput, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
+import type { Api, AssistantMessage, AuthPrompt, ImageContent, Model, Models, ThinkingLevel } from "@coda/ai";
+import {
+	createTerminalImageSurface,
+	type DiagnosticSink,
+	type Keybinding,
+	type Scheduler,
+	type Terminal,
+} from "@coda/tui";
+import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
 import { InteractiveApprovalHandler } from "./interactive/approval.ts";
+import type { ChatAttachment } from "./interactive/chat-component.ts";
+import type { AttachmentTransaction } from "./interactive/input-controller.ts";
+import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
 import {
 	confirmFromTerminal,
 	type PromptRuntime,
@@ -12,14 +22,18 @@ import {
 	selectFromTerminal,
 } from "./interactive/prompts.ts";
 import { runInteractive } from "./interactive/run-interactive.ts";
+import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
+import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
+import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
 import { type ApprovalHandler, createWorkspacePolicy } from "./policy.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { assertContextFits, assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
 import { createCodingAgentRetry } from "./retry.ts";
+import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
-import type { SessionManager } from "./session/types.ts";
+import type { Session, SessionManager, SessionMediaReference, SessionMediaRegistration } from "./session/types.ts";
 import { createCodingTools } from "./tools/index.ts";
 import { createWorkspace } from "./workspace.ts";
 
@@ -49,6 +63,7 @@ export interface UserSettings {
 	readonly defaultReasoning?: ThinkingLevel | "off";
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
+	readonly ui?: { readonly motion: "full" | "reduced" };
 }
 
 export interface ProjectTrustRecord {
@@ -70,6 +85,7 @@ export interface ApplicationRuntime {
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly scheduler?: Scheduler;
+	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
 }
 
 export interface TerminalStartupOptions {
@@ -92,6 +108,7 @@ export interface CodingAgentApplicationOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly sessions?: SessionManager;
 	readonly approval?: ApprovalHandler;
+	readonly modelCapabilities?: ModelCapabilityResolver;
 }
 
 export interface CodingAgentApplication {
@@ -111,10 +128,13 @@ interface ParsedArguments {
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
+	readonly noAnimations: boolean;
+	readonly includeMediaData: boolean;
 	readonly resumeId?: string;
 	readonly forceUnlock: boolean;
 	readonly model?: ModelSelection;
 	readonly prompt: string;
+	readonly imagePaths: readonly string[];
 }
 
 function parseModel(value: string): ModelSelection {
@@ -138,10 +158,13 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
+	let noAnimations = false;
+	let includeMediaData = false;
 	let resumeId: string | undefined;
 	let forceUnlock = false;
 	let model: ModelSelection | undefined;
 	const promptParts: string[] = [];
+	const imagePaths: string[] = [];
 
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index]!;
@@ -165,6 +188,14 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		}
 		if (argument === "--no-color") {
 			noColor = true;
+			continue;
+		}
+		if (argument === "--no-animations") {
+			noAnimations = true;
+			continue;
+		}
+		if (argument === "--include-media-data") {
+			includeMediaData = true;
 			continue;
 		}
 		if (argument === "--help" || argument === "-h") {
@@ -235,14 +266,23 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			model = parseModel(value);
 			continue;
 		}
+		if (argument === "--image") {
+			const value = args[++index];
+			if (!value) throw new Error("--image requires a path");
+			imagePaths.push(value);
+			continue;
+		}
 		if (argument.startsWith("-")) throw new Error(`Unknown option: ${argument}`);
 		promptParts.push(argument);
 	}
 
 	if (output === "json" && explicitMode === "interactive") throw new Error("--json cannot be used with --interactive");
+	if (includeMediaData && output !== "json") throw new Error("--include-media-data requires --json");
 	const mode = explicitMode ?? (output === "json" || !io.stdin.isTTY || !io.stdout.isTTY ? "print" : "interactive");
 	let prompt = promptParts.join(" ").trim();
-	if (action !== "run" && prompt.length > 0) throw new Error(`${action} does not accept a prompt`);
+	if (action !== "run" && (prompt.length > 0 || imagePaths.length > 0)) {
+		throw new Error(`${action} does not accept a prompt or image`);
+	}
 	if (action === "run" && prompt.length === 0 && !io.stdin.isTTY) prompt = (await io.stdin.readAll()).trim();
 	return {
 		action,
@@ -257,10 +297,13 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		persistSession,
 		noSession,
 		noColor,
+		noAnimations,
+		includeMediaData,
 		resumeId,
 		forceUnlock,
 		model,
 		prompt,
+		imagePaths: Object.freeze([...imagePaths]),
 	};
 }
 
@@ -286,12 +329,15 @@ Modes:
   -i, --interactive              Start the interactive terminal UI
       --no-tui                   Alias for --print
       --no-color                 Disable color in this Coda invocation
+      --no-animations            Disable periodic TUI motion
       --json                     Emit stable JSONL Agent events
+      --include-media-data      Include base64 in JSON media descriptors
 
 Model:
       --model <provider/model>   Select an exact Model
       --reasoning <level>        off|minimal|low|medium|high|xhigh|max
       --api-key <key>            Use a request-scoped API key
+      --image <path>             Attach an image (repeatable)
 
 Workspace policy:
       --workspace <path>         Select the Workspace root
@@ -340,6 +386,7 @@ function promptRuntime(options: CodingAgentApplicationOptions, terminal: Termina
 		scheduler: options.runtime.scheduler,
 		keybindings: options.keybindings ?? [],
 		diagnostics: options.diagnostics,
+		lifecycle: options.runtime.interactiveLifecycle,
 	};
 }
 
@@ -441,13 +488,26 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 				const maintenanceDiagnostics: DiagnosticSink =
 					options.diagnostics ??
 					((diagnostic) => options.io.stderr.write(`coda: [${diagnostic.code}] ${diagnostic.message}\n`));
-				const cleanup = async () =>
-					cleanupTemporaryLogs({
-						fileSystem: options.fileSystem,
-						homeDirectory: options.runtime.homeDirectory,
-						now: options.runtime.clock.now(),
-						diagnostics: maintenanceDiagnostics,
-					});
+				const cleanup = async () => {
+					const [logs, media] = await Promise.all([
+						cleanupTemporaryLogs({
+							fileSystem: options.fileSystem,
+							homeDirectory: options.runtime.homeDirectory,
+							now: options.runtime.clock.now(),
+							diagnostics: maintenanceDiagnostics,
+						}),
+						cleanupSessionMedia({
+							fileSystem: options.fileSystem,
+							homeDirectory: options.runtime.homeDirectory,
+							now: options.runtime.clock.now(),
+							diagnostics: maintenanceDiagnostics,
+						}),
+					]);
+					return {
+						removed: [...logs.removed, ...media.removed],
+						retainedBytes: logs.retainedBytes + media.retainedBytes,
+					};
+				};
 				if (parsed.action === "cleanup") {
 					const result = await cleanup();
 					if (parsed.output === "json") {
@@ -456,7 +516,7 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 						);
 					} else {
 						await options.io.stdout.write(
-							`Removed ${result.removed.length} temporary log${result.removed.length === 1 ? "" : "s"}; ${result.retainedBytes} bytes retained.\n`,
+							`Removed ${result.removed.length} unreferenced artifact${result.removed.length === 1 ? "" : "s"}; ${result.retainedBytes} bytes retained.\n`,
 						);
 					}
 					return 0;
@@ -488,7 +548,9 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 					}
 					return 0;
 				}
-				if (parsed.mode === "print" && parsed.prompt.length === 0) throw new Error("Print mode requires a prompt");
+				if (parsed.mode === "print" && parsed.prompt.length === 0 && parsed.imagePaths.length === 0) {
+					throw new Error("Print mode requires a prompt or image");
+				}
 				let settings = await options.settings.load();
 				const terminal =
 					parsed.mode === "interactive"
@@ -508,6 +570,29 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 					resumeId: parsed.resumeId,
 					forceUnlock: parsed.forceUnlock,
 					persistent: parsed.persistSession || (parsed.mode === "interactive" && !parsed.noSession),
+				});
+				const mediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
+				const mediaLibrary = new MediaLibrary({
+					fileSystem: options.fileSystem,
+					stagingDirectory: join(
+						options.runtime.homeDirectory,
+						".coda",
+						"tmp",
+						"media",
+						pathSafeIdentity(session.descriptor.id),
+						mediaToken,
+					),
+					mediaDirectory: session.descriptor.path
+						? `${session.descriptor.path}.media`
+						: join(
+								options.runtime.homeDirectory,
+								".coda",
+								"tmp",
+								"media",
+								pathSafeIdentity(session.descriptor.id),
+								"committed",
+							),
+					idGenerator: options.runtime.idGenerator,
 				});
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
@@ -591,6 +676,14 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 						auth = await options.models.getAuth(model, { clock: options.runtime.clock });
 					}
 					if (!auth) throw new Error(`Model is not authenticated: ${model.provider}/${model.id}`);
+					if (parsed.imagePaths.length > 0 && !model.input.includes("image")) {
+						throw new Error(`Model does not support image input: ${model.provider}/${model.id}`);
+					}
+					const initialAttachmentIds: string[] = [];
+					for (const path of parsed.imagePaths) {
+						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
+					}
+					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
 					const tools = createCodingTools({
 						workspace,
 						fileSystem: options.fileSystem,
@@ -615,7 +708,7 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 					assertContextFits(
 						model,
 						promptSnapshot.text,
-						parsed.prompt,
+						initialInput,
 						tools,
 						session.seed.messages.map(({ message }) => message),
 					);
@@ -647,65 +740,158 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 								maxTokens: contextBudget.reservedOutputTokens,
 							});
 						},
+						beforeRun: ({ inputMessage }) => {
+							promptSnapshot = freezePrompt();
+							assertContextFits(
+								model,
+								promptSnapshot.text,
+								inputMessage.message.content,
+								tools,
+								agent.state.messages.map(({ message }) => message),
+							);
+							void session.record({
+								type: "prepare_run",
+								promptVersion: promptSnapshot.version,
+								promptSha256: promptSnapshot.sha256,
+							});
+						},
 						systemPrompt: () => promptSnapshot.text,
 						seed: session.seed,
 					});
 					session.attach(agent);
+					const initialAttachments = await Promise.all(
+						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
+					);
+					const restoredMedia = await restoredChatAttachments(
+						session.mediaReferences,
+						session.descriptor.path,
+						options.fileSystem,
+						new Set(session.recoverableFollowUps.map(({ item }) => item.id)),
+					);
+					const prepareAttachments = (attachmentIds: readonly string[]) =>
+						prepareAttachmentTransaction(
+							attachmentIds.filter((id) => !restoredMedia.contents.has(id)),
+							mediaLibrary,
+							session,
+						);
+					const initialMessageCount = agent.state.messages.length;
 					agent.onEvent((event) => {
 						if (event.type === "tool_execution_rejected" && policy.consumeAbort(event.invocation.id)) {
 							agent.abort();
 						}
 					});
 					if (parsed.mode === "interactive") {
-						return await runInteractive({
+						const imageSurface = createTerminalImageSurface({
+							terminal: interactiveRuntime!.terminal,
+							environment: options.runtime.environment,
+							allocateId: terminalImageIdAllocator(options.runtime.idGenerator),
+						});
+						const exitCode = await runInteractive({
 							agent,
+							session,
 							terminal: interactiveRuntime!.terminal,
 							clock: options.runtime.clock,
 							scheduler: interactiveRuntime!.scheduler,
+							imageSurface,
 							keybindings: options.keybindings ?? [],
 							diagnostics: options.diagnostics,
 							approval: interactiveApproval,
 							modelLabel: `${model.provider}/${model.id}`,
+							workspaceLabel: basename(workspace.root) || workspace.root,
 							reasoning,
-							initialPrompt: parsed.prompt || undefined,
-							beforePrompt: async (input) => {
-								promptSnapshot = freezePrompt();
-								assertContextFits(
-									model,
-									promptSnapshot.text,
-									input,
-									tools,
-									agent.state.messages.map(({ message }) => message),
-								);
-								await session.record({
-									type: "prepare_run",
-									promptVersion: promptSnapshot.version,
-									promptSha256: promptSnapshot.sha256,
-								});
+							motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
+							lifecycle: options.runtime.interactiveLifecycle,
+							toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
+								.toolResultImages,
+							initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,
+							initialAttachmentIds,
+							initialAttachments,
+							restoredAttachments: restoredMedia.attachments,
+							buildPrompt: async (text, attachmentIds) => {
+								if (attachmentIds.length > 0 && !model.input.includes("image")) {
+									throw new Error(`Model does not support image input: ${model.provider}/${model.id}`);
+								}
+								return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
+							},
+							prepareAttachments,
+							onAttach: async (path) => {
+								const attachment = await mediaLibrary.ingestPath(path);
+								return chatAttachment(mediaLibrary, attachment.id);
+							},
+							onDetach: (attachmentId) =>
+								restoredMedia.contents.has(attachmentId)
+									? Promise.resolve()
+									: mediaLibrary.detach(attachmentId),
+							onOpenAttachment: (attachmentId) => {
+								const restoredPath = restoredMedia.paths.get(attachmentId);
+								return restoredPath
+									? openPathInSystemViewer(
+											restoredPath,
+											options.processRunner,
+											options.runtime,
+											workspace.root,
+										)
+									: openAttachmentInSystemViewer(
+											mediaLibrary,
+											attachmentId,
+											options.processRunner,
+											options.runtime,
+											workspace.root,
+										);
 							},
 						});
+						const interactiveMessages = agent.state.messages.slice(initialMessageCount);
+						const finalAssistant = [...interactiveMessages]
+							.reverse()
+							.find(
+								({ message }) => message.role === "assistant" && finalText(message).trim().length > 0,
+							)?.message;
+						if (finalAssistant?.role === "assistant") {
+							await options.io.stdout.write(`${finalText(finalAssistant)}\n`);
+						}
+						if (session.descriptor.persistent) {
+							await options.io.stdout.write(
+								`Session ${session.descriptor.id} • resume with: coda --resume ${session.descriptor.id}\n`,
+							);
+						}
+						if (agent.state.lastRun && agent.state.lastRun.outcome !== "success") {
+							await options.io.stderr.write(
+								`coda: ${agent.state.lastRun.failure?.message ?? `Run ended with outcome ${agent.state.lastRun.outcome}`}\n`,
+							);
+						}
+						return exitCode;
 					}
-					await session.record({
-						type: "prepare_run",
-						promptVersion: promptSnapshot.version,
-						promptSha256: promptSnapshot.sha256,
-					});
 					if (parsed.output === "json") {
 						agent.onEvent((event) => {
 							const envelope =
 								event.type === "run_start"
 									? {
-											schemaVersion: 1,
+											schemaVersion: 2,
 											...event,
 											model: { provider: model.provider, id: model.id },
 											reasoning,
 											prompt: { version: promptSnapshot.version, sha256: promptSnapshot.sha256 },
 										}
-									: { schemaVersion: 1, ...event };
-							return options.io.stdout.write(`${JSON.stringify(envelope)}\n`);
+									: { schemaVersion: 2, ...event };
+							return options.io.stdout.write(
+								`${JSON.stringify(projectJsonMedia(envelope, mediaLibrary, parsed.includeMediaData))}\n`,
+							);
 						});
 					}
-					const result = await agent.prompt(parsed.prompt);
+					const initialMedia = await prepareAttachments(initialAttachmentIds);
+					let initialMediaCommitted = false;
+					const detachInitialMediaCommit = agent.onEvent(async (event) => {
+						if (event.type !== "run_start" || event.source !== "prompt" || initialMediaCommitted) return;
+						await initialMedia.commit();
+						initialMediaCommitted = true;
+					});
+					let result: Awaited<ReturnType<Agent["prompt"]>>;
+					try {
+						result = await agent.prompt(initialInput);
+					} finally {
+						detachInitialMediaCommit();
+						if (!initialMediaCommitted) await initialMedia.rollback();
+					}
 					if (result.outcome !== "success" || !result.finalMessageId) {
 						const detail = result.failure?.message ?? `Run ended with outcome ${result.outcome}`;
 						await options.io.stderr.write(`coda: ${detail}\n`);
@@ -716,13 +902,269 @@ export function createCodingAgentApplication(options: CodingAgentApplicationOpti
 					if (parsed.output === "text") await options.io.stdout.write(`${finalText(committed)}\n`);
 					return 0;
 				} finally {
+					await mediaLibrary.dispose();
 					await session.close();
 				}
 			} catch (error) {
+				if (error instanceof InteractiveTerminationError) return error.exitCode;
 				const message = error instanceof Error ? error.message : String(error);
 				await options.io.stderr.write(`coda: ${message}\n`);
 				return 1;
 			}
 		},
+	};
+}
+
+async function promptInput(
+	text: string,
+	attachmentIds: readonly string[],
+	mediaLibrary: MediaLibrary,
+	restoredContents: ReadonlyMap<string, ImageContent> = new Map(),
+): Promise<AgentInput> {
+	if (attachmentIds.length === 0) return text;
+	const content: Exclude<AgentInput, string> = [];
+	if (text.length > 0) content.push(Object.freeze({ type: "text", text }));
+	for (const attachmentId of attachmentIds) {
+		content.push(restoredContents.get(attachmentId) ?? (await mediaLibrary.modelContent(attachmentId)));
+	}
+	return content;
+}
+
+async function chatAttachment(mediaLibrary: MediaLibrary, attachmentId: string): Promise<ChatAttachment> {
+	const asset = mediaLibrary.resolve(attachmentId);
+	return Object.freeze({
+		id: attachmentId,
+		filename: asset.filename,
+		mimeType: asset.mimeType,
+		width: asset.width,
+		height: asset.height,
+		bytes: asset.bytes,
+		preview: Object.freeze({
+			png: await mediaLibrary.previewPng(attachmentId),
+			generation: asset.digest,
+			width: asset.preview.width,
+			height: asset.preview.height,
+		}),
+	});
+}
+
+function sessionMediaRegistration(asset: MediaAsset): SessionMediaRegistration {
+	return {
+		reference: {
+			type: "media",
+			digest: asset.digest,
+			filename: asset.filename,
+			mimeType: asset.mimeType,
+			width: asset.width,
+			height: asset.height,
+			bytes: asset.bytes,
+			rendition: {
+				digest: asset.modelDigest,
+				mimeType: asset.model.mimeType,
+				width: asset.model.width,
+				height: asset.model.height,
+				bytes: asset.model.bytes,
+			},
+		},
+		modelPath: asset.model.path,
+	};
+}
+
+async function prepareAttachmentTransaction(
+	attachmentIds: readonly string[],
+	mediaLibrary: MediaLibrary,
+	session: Session,
+): Promise<AttachmentTransaction> {
+	if (attachmentIds.length === 0) {
+		return {
+			commit: async () => undefined,
+			rollback: async () => undefined,
+		};
+	}
+	try {
+		if (session.descriptor.persistent) {
+			session.registerMedia(attachmentIds.map((id) => sessionMediaRegistration(mediaLibrary.resolve(id))));
+		}
+	} catch (error) {
+		for (const attachmentId of attachmentIds) await mediaLibrary.detach(attachmentId);
+		throw error;
+	}
+	let settled = false;
+	return {
+		commit: async () => {
+			if (settled) return;
+			settled = true;
+			try {
+				await mediaLibrary.commit(attachmentIds);
+			} finally {
+				for (const attachmentId of attachmentIds) await mediaLibrary.detach(attachmentId);
+			}
+		},
+		rollback: async () => {
+			if (settled) return;
+			settled = true;
+			for (const attachmentId of attachmentIds) await mediaLibrary.detach(attachmentId);
+		},
+	};
+}
+
+interface RestoredChatMedia {
+	readonly attachments: ReadonlyMap<string, readonly ChatAttachment[]>;
+	readonly contents: ReadonlyMap<string, ImageContent>;
+	readonly paths: ReadonlyMap<string, string>;
+}
+
+async function restoredChatAttachments(
+	references: ReadonlyMap<string, readonly SessionMediaReference[]>,
+	sessionPath: string | undefined,
+	fileSystem: FileSystem,
+	editableOwners: ReadonlySet<string>,
+): Promise<RestoredChatMedia> {
+	const result = new Map<string, readonly ChatAttachment[]>();
+	const contents = new Map<string, ImageContent>();
+	const paths = new Map<string, string>();
+	for (const [messageId, messageReferences] of references) {
+		const attachments: ChatAttachment[] = [];
+		for (const [index, reference] of messageReferences.entries()) {
+			let preview: ChatAttachment["preview"];
+			if (sessionPath) {
+				const previewPath = join(`${sessionPath}.media`, `${reference.digest}.preview.png`);
+				try {
+					preview = {
+						png: await fileSystem.readFile(previewPath),
+						generation: reference.digest,
+						width: reference.width,
+						height: reference.height,
+					};
+				} catch (error) {
+					if (!isFileSystemError(error, "ENOENT")) throw error;
+				}
+			}
+			const id = `restored:${messageId}:${index}:${reference.digest}`;
+			if (sessionPath && editableOwners.has(messageId)) {
+				const modelPath = sessionModelPath(sessionPath, reference);
+				const modelBytes = await fileSystem.readFile(modelPath);
+				contents.set(id, {
+					type: "image",
+					data: Buffer.from(modelBytes).toString("base64"),
+					mimeType: reference.rendition.mimeType,
+				});
+				paths.set(id, modelPath);
+			}
+			attachments.push({
+				id,
+				filename: reference.filename,
+				mimeType: reference.mimeType,
+				width: reference.width,
+				height: reference.height,
+				bytes: reference.bytes,
+				preview,
+			});
+		}
+		result.set(messageId, attachments);
+	}
+	return { attachments: result, contents, paths };
+}
+
+function sessionModelPath(sessionPath: string, reference: SessionMediaReference): string {
+	const extension = sessionMediaExtension(reference.rendition.mimeType);
+	return join(`${sessionPath}.media`, `${reference.digest}.model.${extension}`);
+}
+
+async function openAttachmentInSystemViewer(
+	mediaLibrary: MediaLibrary,
+	attachmentId: string,
+	processRunner: ProcessRunner,
+	runtime: ApplicationRuntime,
+	cwd: string,
+): Promise<void> {
+	const path = mediaLibrary.resolve(attachmentId).original.path;
+	return openPathInSystemViewer(path, processRunner, runtime, cwd);
+}
+
+async function openPathInSystemViewer(
+	path: string,
+	processRunner: ProcessRunner,
+	runtime: ApplicationRuntime,
+	cwd: string,
+): Promise<void> {
+	const command =
+		runtime.platform === "darwin"
+			? { executable: "/usr/bin/open", args: [path] }
+			: runtime.platform === "linux"
+				? { executable: "/usr/bin/xdg-open", args: [path] }
+				: undefined;
+	if (!command) throw new Error(`System image viewer is unsupported on ${runtime.platform}`);
+	const environment = Object.fromEntries(
+		Object.entries(runtime.environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
+	const result = await processRunner.run({
+		...command,
+		cwd,
+		environment,
+		signal: new AbortController().signal,
+		timeoutMs: 10_000,
+		maxOutputBytes: 64 * 1024,
+		maxOutputLines: 100,
+		overflowPath: join(runtime.homeDirectory, ".coda", "tmp", `media-open-${pathSafeIdentity(path)}.log`),
+	});
+	if (result.exitCode !== 0 || result.signal || result.timedOut) {
+		throw new Error(result.stderr.trim() || "System image viewer could not be opened");
+	}
+}
+
+function projectJsonMedia(value: unknown, mediaLibrary: MediaLibrary, includeData: boolean): unknown {
+	if (Array.isArray(value)) return value.map((entry) => projectJsonMedia(entry, mediaLibrary, includeData));
+	if (!value || typeof value !== "object") return value;
+	const record = value as Record<string, unknown>;
+	if (record.type === "image" && typeof record.data === "string" && typeof record.mimeType === "string") {
+		const bytes = Buffer.from(record.data, "base64");
+		const modelDigest = createHash("sha256").update(bytes).digest("hex");
+		const asset = mediaLibrary.describeImageContent({
+			type: "image",
+			data: record.data,
+			mimeType: record.mimeType,
+		});
+		const fallbackExtension = record.mimeType === "image/jpeg" ? "jpg" : "png";
+		return {
+			type: "media",
+			digest: asset?.digest ?? modelDigest,
+			filename: asset?.filename ?? `image-${modelDigest.slice(0, 12)}.${fallbackExtension}`,
+			mimeType: asset?.mimeType ?? record.mimeType,
+			bytes: asset?.bytes ?? bytes.byteLength,
+			...(asset ? { width: asset.width, height: asset.height } : {}),
+			rendition: {
+				digest: asset?.modelDigest ?? modelDigest,
+				mimeType: record.mimeType,
+				bytes: bytes.byteLength,
+				...(asset ? { width: asset.model.width, height: asset.model.height } : {}),
+			},
+			...(includeData ? { data: record.data } : {}),
+		};
+	}
+	return Object.fromEntries(
+		Object.entries(record).map(([key, entry]) => [key, projectJsonMedia(entry, mediaLibrary, includeData)]),
+	);
+}
+
+function hasAgentInput(input: AgentInput): boolean {
+	return typeof input === "string" ? input.trim().length > 0 : input.length > 0;
+}
+
+function pathSafeIdentity(value: string): string {
+	return value.replace(/[^a-zA-Z0-9._-]/g, "-");
+}
+
+function terminalImageIdAllocator(idGenerator: IdGenerator): () => number {
+	const allocated = new Set<number>();
+	return () => {
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const identity = idGenerator.generate("queue_item");
+			const id = createHash("sha256").update(identity).digest().readUInt32BE(0);
+			if (id === 0 || allocated.has(id)) continue;
+			allocated.add(id);
+			return id;
+		}
+		throw new Error("Could not allocate a unique terminal image ID");
 	};
 }

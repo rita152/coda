@@ -1,6 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
+type SessionFormatVersion = 1 | 2 | 3;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -77,6 +78,27 @@ function isImageContent(value: unknown): boolean {
 		value.type === "image" &&
 		typeof value.data === "string" &&
 		isNonEmptyString(value.mimeType)
+	);
+}
+
+function isMediaReference(value: unknown): boolean {
+	return (
+		exactRecord(value, ["type", "digest", "filename", "mimeType", "width", "height", "bytes", "rendition"]) &&
+		value.type === "media" &&
+		typeof value.digest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.digest) &&
+		isNonEmptyString(value.filename) &&
+		isNonEmptyString(value.mimeType) &&
+		isPositiveInteger(value.width) &&
+		isPositiveInteger(value.height) &&
+		isPositiveInteger(value.bytes) &&
+		exactRecord(value.rendition, ["digest", "mimeType", "width", "height", "bytes"]) &&
+		typeof value.rendition.digest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.rendition.digest) &&
+		isNonEmptyString(value.rendition.mimeType) &&
+		isPositiveInteger(value.rendition.width) &&
+		isPositiveInteger(value.rendition.height) &&
+		isPositiveInteger(value.rendition.bytes)
 	);
 }
 
@@ -163,13 +185,15 @@ function isDeferredHandle(value: unknown): boolean {
 	);
 }
 
-function isUserMessage(value: unknown): boolean {
+function isUserMessage(value: unknown, version: SessionFormatVersion): boolean {
 	return (
 		exactRecord(value, ["role", "content", "timestamp"]) &&
 		value.role === "user" &&
 		(typeof value.content === "string" ||
 			(Array.isArray(value.content) &&
-				value.content.every((entry) => isTextContent(entry) || isImageContent(entry)))) &&
+				value.content.every(
+					(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
+				))) &&
 		isFiniteNumber(value.timestamp)
 	);
 }
@@ -200,7 +224,7 @@ function isAssistantMessage(value: unknown): boolean {
 	);
 }
 
-function isToolResultMessage(value: unknown): boolean {
+function isToolResultMessage(value: unknown, version: SessionFormatVersion): boolean {
 	return (
 		exactRecord(
 			value,
@@ -211,7 +235,9 @@ function isToolResultMessage(value: unknown): boolean {
 		isNonEmptyString(value.toolCallId) &&
 		isNonEmptyString(value.toolName) &&
 		Array.isArray(value.content) &&
-		value.content.every((entry) => isTextContent(entry) || isImageContent(entry)) &&
+		value.content.every(
+			(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
+		) &&
 		typeof value.isError === "boolean" &&
 		isFiniteNumber(value.timestamp) &&
 		(value.details === undefined || isJsonValue(value.details)) &&
@@ -220,18 +246,23 @@ function isToolResultMessage(value: unknown): boolean {
 	);
 }
 
-function isAgentMessage(value: unknown): boolean {
+function isAgentMessage(value: unknown, version: SessionFormatVersion): boolean {
 	return (
 		exactRecord(value, ["id", "message"]) &&
 		isNonEmptyString(value.id) &&
-		(isUserMessage(value.message) || isAssistantMessage(value.message) || isToolResultMessage(value.message))
+		(isUserMessage(value.message, version) ||
+			isAssistantMessage(value.message) ||
+			isToolResultMessage(value.message, version))
 	);
 }
 
-function isAgentInput(value: unknown): boolean {
+function isAgentInput(value: unknown, version: SessionFormatVersion): boolean {
 	return (
 		typeof value === "string" ||
-		(Array.isArray(value) && value.every((entry) => isTextContent(entry) || isImageContent(entry)))
+		(Array.isArray(value) &&
+			value.every(
+				(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
+			))
 	);
 }
 
@@ -265,7 +296,7 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 	return (
 		exactRecord(value, ["type", "version", "sessionId", "workspaceId", "workspacePath", "createdAt"]) &&
 		value.type === "session" &&
-		value.version === 1 &&
+		(value.version === 1 || value.version === 2 || value.version === 3) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -292,7 +323,11 @@ export function isSessionRecordEnvelope(value: unknown): value is ValidSessionRe
 	);
 }
 
-export function isSessionRecordPayload(type: SessionRecordType, payload: unknown): boolean {
+export function isSessionRecordPayload(
+	type: SessionRecordType,
+	payload: unknown,
+	version: SessionFormatVersion = 1,
+): boolean {
 	switch (type) {
 		case "run_started":
 			return (
@@ -327,7 +362,7 @@ export function isSessionRecordPayload(type: SessionRecordType, payload: unknown
 				isNonEmptyString(payload.reason)
 			);
 		case "message_committed":
-			return exactRecord(payload, ["message"]) && isAgentMessage(payload.message);
+			return exactRecord(payload, ["message"]) && isAgentMessage(payload.message, version);
 		case "tool_started":
 			return exactRecord(payload, ["invocation"]) && isToolInvocation(payload.invocation);
 		case "tool_finished": {
@@ -359,11 +394,13 @@ export function isSessionRecordPayload(type: SessionRecordType, payload: unknown
 				exactRecord(payload, ["item"]) &&
 				exactRecord(payload.item, ["id", "content"]) &&
 				isNonEmptyString(payload.item.id) &&
-				isAgentInput(payload.item.content)
+				isAgentInput(payload.item.content, version)
 			);
 		case "follow_up_consumed":
 		case "follow_up_canceled":
 			return exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
+		case "follow_up_reclaimed":
+			return version === 3 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
 		case "model_selected":
 			return (
 				exactRecord(payload, ["model", "reasoning"]) &&

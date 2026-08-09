@@ -7,12 +7,17 @@ import type {
 	Session,
 	SessionChange,
 	SessionDescriptor,
+	SessionMediaReference,
+	SessionMediaRegistration,
 	SessionRuntime,
+	SessionToolLifecycle,
 } from "./types.ts";
 
 export interface SessionJournal {
 	readonly descriptor: SessionDescriptor;
 	readonly records: readonly SessionRecord[];
+	readonly mediaReferences?: ReadonlyMap<string, readonly SessionMediaReference[]>;
+	registerMedia?(registrations: readonly SessionMediaRegistration[]): void;
 	append(record: SessionRecord): Promise<void>;
 	close(): Promise<void>;
 }
@@ -28,12 +33,16 @@ export class ManagedSession implements Session {
 	readonly #runtime: SessionRuntime;
 	readonly #seed;
 	readonly #restored: RestoredSessionState;
+	readonly #recoverableFollowUps;
+	readonly #toolInvocations: readonly SessionToolLifecycle[];
+	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#sequence: number;
 	#previousRecordId: string | null;
 	#attached?: Agent;
 	#detach?: () => void;
 	#closed = false;
 	#preparedRun?: { readonly promptVersion: string; readonly promptSha256: string };
+	#appendTail: Promise<void> = Promise.resolve();
 
 	constructor(journal: SessionJournal, runtime: SessionRuntime) {
 		this.#journal = journal;
@@ -41,6 +50,14 @@ export class ManagedSession implements Session {
 		const reduced = reduceSession(journal.records);
 		this.#seed = structuredClone(reduced.seed);
 		this.#restored = structuredClone(reduced.restored);
+		this.#recoverableFollowUps = structuredClone(reduced.recoverableFollowUps);
+		this.#toolInvocations = structuredClone(reduced.toolInvocations);
+		this.#mediaReferences = new Map(
+			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
+				messageId,
+				structuredClone(references),
+			]),
+		);
 		const last = journal.records.at(-1);
 		this.#sequence = last?.sequence ?? 0;
 		this.#previousRecordId = last?.recordId ?? null;
@@ -56,6 +73,25 @@ export class ManagedSession implements Session {
 
 	get restored(): RestoredSessionState {
 		return structuredClone(this.#restored);
+	}
+
+	get recoverableFollowUps() {
+		return structuredClone(this.#recoverableFollowUps);
+	}
+
+	get toolInvocations(): readonly SessionToolLifecycle[] {
+		return structuredClone(this.#toolInvocations);
+	}
+
+	get mediaReferences(): ReadonlyMap<string, readonly SessionMediaReference[]> {
+		return new Map(
+			[...this.#mediaReferences].map(([messageId, references]) => [messageId, structuredClone(references)]),
+		);
+	}
+
+	registerMedia(registrations: readonly SessionMediaRegistration[]): void {
+		this.#assertOpen();
+		this.#journal.registerMedia?.(registrations);
 	}
 
 	attach(agent: Agent): DetachSession {
@@ -93,7 +129,18 @@ export class ManagedSession implements Session {
 		this.#detach?.();
 		this.#detach = undefined;
 		this.#attached = undefined;
-		await this.#journal.close();
+		let failure: unknown;
+		try {
+			await this.#appendTail;
+		} catch (error) {
+			failure = error;
+		}
+		try {
+			await this.#journal.close();
+		} catch (error) {
+			failure ??= error;
+		}
+		if (failure !== undefined) throw failure;
 	}
 
 	async #recordEvent(event: AgentEvent): Promise<void> {
@@ -103,7 +150,13 @@ export class ManagedSession implements Session {
 		if (event.type === "run_start") this.#preparedRun = undefined;
 	}
 
-	async #append(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
+	#append(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
+		const operation = this.#appendTail.then(() => this.#appendNow(type, payload, event));
+		this.#appendTail = operation;
+		return operation;
+	}
+
+	async #appendNow(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
 		const recordId = identity(this.#runtime, "record");
 		const record: SessionRecord = {
 			type,

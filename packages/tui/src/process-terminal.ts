@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { Diagnostic, DiagnosticSink } from "./diagnostics.ts";
-import type { KeyAction, KeyInput, LogicalKey, TerminalInput } from "./input.ts";
+import type { KeyAction, KeyInput, LogicalKey, MouseInput, TerminalInput } from "./input.ts";
 import type { ScheduledTask, Scheduler } from "./runtime.ts";
 import {
 	type ColorLevel,
@@ -242,7 +242,7 @@ export class ProcessTerminal implements Terminal {
 
 			const negotiation = this.#beginNegotiation();
 			this.write(START_SEQUENCES);
-			await Promise.all([negotiation, this.flush()]);
+			await Promise.all([negotiation, this.flushOutput()]);
 			this.#started = true;
 			return true;
 		} catch (error) {
@@ -423,9 +423,13 @@ export class ProcessTerminal implements Terminal {
 		while (true) {
 			const dispatch = this.#dispatchTail;
 			await dispatch;
-			await this.#waitForWrites();
+			await this.flushOutput();
 			if (dispatch === this.#dispatchTail && this.#pendingWrites === 0) return;
 		}
+	}
+
+	async flushOutput(): Promise<void> {
+		await this.#waitForWrites();
 	}
 
 	#waitForWrites(): Promise<void> {
@@ -520,6 +524,12 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (/^\?[\d;]*c$/.test(csi ?? "")) {
 			this.#settleNegotiation("legacy");
+			return;
+		}
+
+		const mouse = parseSgrMouse(sequence);
+		if (mouse) {
+			this.#queueInput(mouse);
 			return;
 		}
 
@@ -729,6 +739,40 @@ function parseKittyKey(sequence: string): KeyInput | undefined {
 		}
 	}
 	return keyInput(plain.key, text, resolvedModifiers, action);
+}
+
+function parseSgrMouse(sequence: string): MouseInput | undefined {
+	if (!sequence.startsWith("\x1b[")) return undefined;
+	const match = /^<(\d+);(\d+);(\d+)([Mm])$/.exec(sequence.slice(2));
+	if (!match) return undefined;
+	const encoded = Number.parseInt(match[1]!, 10);
+	const column = Number.parseInt(match[2]!, 10) - 1;
+	const row = Number.parseInt(match[3]!, 10) - 1;
+	if (![encoded, column, row].every(Number.isSafeInteger) || column < 0 || row < 0) return undefined;
+	const baseButton = encoded & 3;
+	const wheel = (encoded & 64) !== 0;
+	const motion = (encoded & 32) !== 0;
+	const button = wheel
+		? baseButton === 0
+			? "wheel-up"
+			: "wheel-down"
+		: baseButton === 0
+			? "left"
+			: baseButton === 1
+				? "middle"
+				: baseButton === 2
+					? "right"
+					: "none";
+	return Object.freeze({
+		type: "mouse",
+		action: motion ? "move" : match[4] === "m" ? "release" : "press",
+		button,
+		column,
+		row,
+		shift: (encoded & 4) !== 0,
+		alt: (encoded & 8) !== 0,
+		control: (encoded & 16) !== 0,
+	});
 }
 
 function decodeKittyText(field: string | undefined): string | undefined {

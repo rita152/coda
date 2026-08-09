@@ -1,7 +1,16 @@
-import type { AgentEvent, AgentMessage, AgentSeed, FollowUp } from "@coda/agent";
+import type {
+	AgentEvent,
+	AgentMessage,
+	AgentSeed,
+	FollowUp,
+	MessageId,
+	RunFailure,
+	ToolInvocation,
+	ToolRejectionReason,
+} from "@coda/agent";
 import type { Message } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
-import type { RestoredSessionState, SessionDescriptor } from "./types.ts";
+import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
 export const SESSION_RECORD_TYPES = [
 	"run_started",
@@ -16,6 +25,7 @@ export const SESSION_RECORD_TYPES = [
 	"follow_up_enqueued",
 	"follow_up_consumed",
 	"follow_up_canceled",
+	"follow_up_reclaimed",
 	"model_selected",
 	"project_trust_changed",
 ] as const;
@@ -24,7 +34,7 @@ export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1;
+	readonly version: 1 | 2 | 3;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -46,7 +56,9 @@ export interface SessionRecord {
 
 export interface ReducedSession {
 	readonly seed: AgentSeed;
+	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly restored: RestoredSessionState;
+	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly startedTools: ReadonlyMap<string, SessionRecord>;
 	readonly activeRuns: ReadonlySet<string>;
 }
@@ -68,8 +80,18 @@ export function messagePayload(message: AgentMessage): { readonly message: Agent
 
 export function reduceSession(records: readonly SessionRecord[]): ReducedSession {
 	const messages = new Map<string, AgentMessage>();
-	const followUps = new Map<string, FollowUp>();
+	const followUps = new Map<
+		string,
+		{
+			item: FollowUp;
+			state: "paused" | "consumed" | "running" | "failed";
+			failure?: RunFailure;
+			messageId?: MessageId;
+		}
+	>();
+	const followUpRuns = new Map<string, string>();
 	const startedTools = new Map<string, SessionRecord>();
+	const toolInvocations = new Map<string, SessionToolLifecycle>();
 	const activeRuns = new Set<string>();
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
@@ -80,16 +102,31 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 		switch (record.type) {
 			case "message_committed": {
 				const message = payload.message as AgentMessage<Message>;
-				if (message?.id) messages.set(message.id, structuredClone(message));
+				if (message?.id) {
+					messages.set(message.id, structuredClone(message));
+					const queueItemId = record.runId ? followUpRuns.get(record.runId) : undefined;
+					const followUp = queueItemId ? followUps.get(queueItemId) : undefined;
+					if (followUp && followUp.messageId === undefined && message.message.role === "user") {
+						followUp.messageId = message.id;
+					}
+				}
 				break;
 			}
 			case "follow_up_enqueued": {
 				const item = payload.item as FollowUp;
-				if (item?.id) followUps.set(item.id, structuredClone(item));
+				if (item?.id) followUps.set(item.id, { item: structuredClone(item), state: "paused" });
 				break;
 			}
-			case "follow_up_consumed":
+			case "follow_up_consumed": {
+				const id = payload.id;
+				if (typeof id === "string") {
+					const followUp = followUps.get(id);
+					if (followUp) followUp.state = "consumed";
+				}
+				break;
+			}
 			case "follow_up_canceled":
+			case "follow_up_reclaimed":
 				if (typeof payload.id === "string") followUps.delete(payload.id);
 				break;
 			case "model_selected":
@@ -100,30 +137,81 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				projectTrust = structuredClone(payload.trust as ProjectTrustRecord);
 				break;
 			case "tool_started": {
-				const invocationId = (payload.invocation as { id?: unknown } | undefined)?.id;
-				if (typeof invocationId === "string") startedTools.set(invocationId, record);
+				const invocation = payload.invocation as ToolInvocation | undefined;
+				if (typeof invocation?.id === "string") {
+					startedTools.set(invocation.id, record);
+					toolInvocations.set(invocation.id, {
+						invocation: structuredClone(invocation),
+						...(record.runId ? { runId: record.runId } : {}),
+						...(record.turnId ? { turnId: record.turnId } : {}),
+						startedAt: record.timestamp,
+					});
+				}
 				break;
 			}
 			case "tool_finished": {
-				const invocationId = (payload.invocation as { id?: unknown } | undefined)?.id;
-				if (typeof invocationId === "string") startedTools.delete(invocationId);
+				const invocation = payload.invocation as ToolInvocation | undefined;
+				if (typeof invocation?.id === "string") {
+					const started = toolInvocations.get(invocation.id);
+					const outcome = payload.outcome as SessionToolLifecycle["outcome"];
+					const rejectionReason = payload.reason as ToolRejectionReason | undefined;
+					toolInvocations.set(invocation.id, {
+						invocation: structuredClone(invocation),
+						...((record.runId ?? started?.runId) ? { runId: record.runId ?? started?.runId } : {}),
+						...((record.turnId ?? started?.turnId) ? { turnId: record.turnId ?? started?.turnId } : {}),
+						...(started?.startedAt !== undefined ? { startedAt: started.startedAt } : {}),
+						finishedAt: record.timestamp,
+						...(outcome ? { outcome } : {}),
+						...(rejectionReason ? { rejectionReason } : {}),
+						...(typeof payload.resultMessageId === "string"
+							? { resultMessageId: payload.resultMessageId as MessageId }
+							: {}),
+					});
+					startedTools.delete(invocation.id);
+				}
 				break;
 			}
-			case "run_started":
+			case "run_started": {
 				if (record.runId) activeRuns.add(record.runId);
+				if (record.runId && payload.source === "follow_up" && typeof payload.queueItemId === "string") {
+					followUpRuns.set(record.runId, payload.queueItemId);
+					const followUp = followUps.get(payload.queueItemId);
+					if (followUp) followUp.state = "running";
+				}
 				break;
-			case "run_finished":
+			}
+			case "run_finished": {
 				if (record.runId) activeRuns.delete(record.runId);
+				const queueItemId = record.runId ? followUpRuns.get(record.runId) : undefined;
+				const followUp = queueItemId ? followUps.get(queueItemId) : undefined;
+				if (followUp) {
+					if (payload.outcome === "success") followUps.delete(followUp.item.id);
+					else if (payload.outcome === "error") {
+						followUp.state = "failed";
+						followUp.failure = payload.failure as RunFailure | undefined;
+					} else followUp.state = "paused";
+				}
+				if (record.runId) followUpRuns.delete(record.runId);
 				break;
+			}
 		}
 	}
 	return {
 		seed: {
 			version: 1,
 			messages: [...messages.values()],
-			pendingFollowUps: [...followUps.values()],
+			pendingFollowUps: [...followUps.values()]
+				.filter(({ state }) => state !== "failed")
+				.map(({ item }) => structuredClone(item)),
 		},
+		recoverableFollowUps: [...followUps.values()].map(({ item, state, failure, messageId }) => ({
+			item: structuredClone(item),
+			state: state === "failed" ? "failed" : "paused",
+			...(failure ? { failure: structuredClone(failure) } : {}),
+			...(messageId ? { messageId } : {}),
+		})),
 		restored: { model, reasoning, projectTrust },
+		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,
 	};
@@ -134,8 +222,12 @@ export function eventRecordInputs(
 	preparedRun: { readonly promptVersion: string; readonly promptSha256: string } | undefined,
 ): readonly { type: SessionRecordType; payload: unknown }[] {
 	switch (event.type) {
-		case "run_start":
+		case "run_start": {
+			const lifecycle = event.queueItemId
+				? [{ type: "follow_up_consumed" as const, payload: { id: event.queueItemId } }]
+				: [];
 			return [
+				...lifecycle,
 				{
 					type: "run_started",
 					payload: {
@@ -147,6 +239,7 @@ export function eventRecordInputs(
 				},
 				{ type: "message_committed", payload: messagePayload(event.inputMessage) },
 			];
+		}
 		case "turn_start":
 			return event.steeringMessages.map((message) => ({
 				type: "message_committed" as const,
@@ -211,7 +304,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 1,
+		version: 3,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

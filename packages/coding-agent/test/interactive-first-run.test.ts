@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import type {
+	InteractiveLifecycleHandlers,
+	InteractiveProcessLifecycle,
+	InteractiveTerminationSignal,
+} from "../src/interactive/process-lifecycle.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -16,6 +21,23 @@ class BufferOutput implements ApplicationOutput {
 
 	write(chunk: string): void {
 		this.value += chunk;
+	}
+}
+
+class FakeLifecycle implements InteractiveProcessLifecycle {
+	handlers?: InteractiveLifecycleHandlers;
+
+	subscribe(handlers: InteractiveLifecycleHandlers): () => void {
+		this.handlers = handlers;
+		return () => {
+			this.handlers = undefined;
+		};
+	}
+
+	async suspend(): Promise<void> {}
+
+	terminate(signal: InteractiveTerminationSignal): void {
+		this.handlers?.terminate(signal);
 	}
 }
 
@@ -47,6 +69,56 @@ function key(key: "c" | "down" | "enter", control = false) {
 }
 
 describe("interactive first run", () => {
+	it("restores the terminal when SIGTERM interrupts Model selection", async () => {
+		const faux = fauxProvider({
+			runtime: testTimeRuntime(1_450),
+			models: [
+				{ id: "model-a", name: "Model A" },
+				{ id: "model-b", name: "Model B" },
+			],
+		});
+		const models = createModels({ runtime: testTimeRuntime(1_450) });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const lifecycle = new FakeLifecycle();
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout,
+				stderr,
+			},
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 1_450 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+				interactiveLifecycle: lifecycle,
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-session"]);
+		await until(() => terminal.readOutput().includes("Select a Model"));
+		lifecycle.terminate("SIGTERM");
+
+		await expect(running).resolves.toBe(143);
+		expect(terminal.started).toBe(false);
+		expect(terminal.readOutput()).toContain("\x1b[?1049l");
+		expect(terminal.readOutput()).toContain("\x1b[?7h");
+		expect(terminal.readOutput()).toContain("\x1b[?25h");
+		expect(stderr.value).toBe("");
+	});
+
 	it("requires an explicit catalog choice and saves it as the default Model", async () => {
 		const faux = fauxProvider({
 			runtime: testTimeRuntime(1_500),
@@ -89,7 +161,7 @@ describe("interactive first run", () => {
 		await terminal.emit(key("down"));
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
-		await until(() => terminal.readOutput().includes("Coda • faux/model-b • reasoning off"));
+		await until(() => terminal.readOutput().includes("faux/model-b • reasoning off"));
 		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);
@@ -139,7 +211,7 @@ describe("interactive first run", () => {
 		await until(() => terminal.readOutput().includes("Select a Model"));
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
-		await until(() => terminal.readOutput().includes("Coda • opencode-go/"));
+		await until(() => terminal.readOutput().includes("opencode-go/"));
 		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);
@@ -193,7 +265,7 @@ describe("interactive first run", () => {
 		await terminal.emit(key("down"));
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
-		await until(() => terminal.readOutput().includes("Coda • faux/faux-1"));
+		await until(() => terminal.readOutput().includes("faux/faux-1"));
 		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);

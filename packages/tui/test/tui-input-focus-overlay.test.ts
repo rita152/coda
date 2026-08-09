@@ -5,6 +5,7 @@ import {
 	type ComponentInputContext,
 	FocusError,
 	type Keybinding,
+	type RenderContext,
 	type ScheduledTask,
 	type Scheduler,
 	stripAnsi,
@@ -49,6 +50,15 @@ class InteractiveComponent extends Component {
 			this.lines = [input.type === "text" ? input.text : input.type];
 			context.requestImmediateRender();
 		}
+	}
+}
+
+class ContextOverlay extends Component {
+	readonly contexts: RenderContext[] = [];
+
+	render(context: RenderContext): string[] {
+		this.contexts.push(context);
+		return [`${context.width}x${context.height}`];
 	}
 }
 
@@ -125,6 +135,21 @@ describe("Tui input routing and focus", () => {
 });
 
 describe("stable overlay handles", () => {
+	it("recomputes dynamic placement from the current terminal size", async () => {
+		const root = new InteractiveComponent(["root"]);
+		const overlay = new ContextOverlay();
+		const { terminal, tui } = createTui(root);
+		tui.showOverlay(overlay, {
+			layout: ({ columns, rows }) => ({ row: rows - 2, column: 1, width: columns - 2, height: 2 }),
+		});
+		await tui.start();
+
+		expect(overlay.contexts.at(-1)).toMatchObject({ width: 10, height: 2 });
+		await terminal.emit({ type: "resize", columns: 8, rows: 4 });
+		expect(overlay.contexts.at(-1)).toMatchObject({ width: 6, height: 2 });
+		expect(stripAnsi(terminal.readOutput())).toContain("6x2");
+	});
+
 	it("composites overlays and lets each handle hide and show only its own target", async () => {
 		const root = new InteractiveComponent(["abcdefghij", "0123456789"]);
 		const first = new InteractiveComponent(["XX"]);

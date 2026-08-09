@@ -27,6 +27,9 @@ export interface Terminal {
 	start(): Promise<boolean>;
 	stop(): Promise<void>;
 	write(data: string): void;
+	/** Waits only for terminal writes; safe to call while handling terminal input. */
+	flushOutput(): Promise<void>;
+	/** Waits for queued input handlers and output writes. */
 	flush(): Promise<void>;
 	onInput(listener: TerminalInputListener): () => void;
 }

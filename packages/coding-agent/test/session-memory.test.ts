@@ -1,10 +1,35 @@
-import { Agent, type IdGenerator, type IdKind } from "@coda/agent";
+import { Agent, type IdGenerator, type IdKind, type QueueItemId } from "@coda/agent";
 import { fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("Session facade", () => {
+	it("persists reclaiming a failed Follow-up as a distinct recoverability tombstone", async () => {
+		let id = 0;
+		const manager = new InMemorySessionManager({
+			clock: { now: () => 1_050 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+		});
+		const queueId = "queue:failed" as QueueItemId;
+		await session.record({ type: "follow_up_enqueued", item: { id: queueId, content: "repair me" } });
+		await session.record({ type: "follow_up_reclaimed", id: queueId });
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.seed.pendingFollowUps).toEqual([]);
+		await restored.close();
+	});
+
 	it("records one attached Agent and restores only an idle Agent Seed plus application Model state", async () => {
 		let id = 0;
 		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };

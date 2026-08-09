@@ -1,7 +1,20 @@
 import type { TerminalInput } from "./input.ts";
+import type { ImagePlacement } from "./terminal-image-surface.ts";
 
 export interface ComponentOptions {
 	readonly focusable?: boolean;
+}
+
+export interface RenderContext {
+	readonly width: number;
+	readonly height: number;
+	readonly now: number;
+}
+
+export interface CursorPlacement {
+	readonly row: number;
+	readonly column: number;
+	readonly visible: boolean;
 }
 
 export interface ComponentInputContext {
@@ -25,7 +38,19 @@ export abstract class Component {
 		return focusStates.get(this) ?? false;
 	}
 
-	abstract render(width: number): string[];
+	abstract render(context: RenderContext): string[];
+
+	animationInterval(_context: RenderContext): number | undefined {
+		return undefined;
+	}
+
+	imagePlacements(_context: RenderContext): readonly ImagePlacement[] {
+		return [];
+	}
+
+	cursorPlacement(_context: RenderContext): CursorPlacement | undefined {
+		return undefined;
+	}
 
 	handleInput?(_input: TerminalInput, _context: ComponentInputContext): ComponentInputResult;
 

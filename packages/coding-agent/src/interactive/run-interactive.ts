@@ -1,20 +1,47 @@
-import type { Agent } from "@coda/agent";
-import { type DiagnosticSink, type Keybinding, type Scheduler, type Terminal, Tui } from "@coda/tui";
+import type { Agent, AgentInput, QueueItemId } from "@coda/agent";
+import {
+	type DiagnosticSink,
+	FullScreenTui,
+	type Keybinding,
+	type Scheduler,
+	type Terminal,
+	type TerminalImageSurface,
+} from "@coda/tui";
+import type { Session } from "../session/types.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
-import { ChatComponent } from "./chat-component.ts";
+import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
+import { type AttachmentTransaction, InteractiveInputController } from "./input-controller.ts";
+import {
+	type InteractiveProcessLifecycle,
+	type InteractiveTerminationSignal,
+	interactiveSignalExitCode,
+} from "./process-lifecycle.ts";
 
 export interface InteractiveRunOptions {
 	readonly agent: Agent;
+	readonly session: Session;
 	readonly terminal: Terminal;
 	readonly clock: { now(): number };
 	readonly scheduler: Scheduler;
+	readonly imageSurface?: TerminalImageSurface;
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
 	readonly approval?: InteractiveApprovalHandler;
 	readonly modelLabel: string;
+	readonly workspaceLabel?: string;
 	readonly reasoning: string;
-	readonly initialPrompt?: string;
-	readonly beforePrompt: (input: string) => Promise<void>;
+	readonly motion: "full" | "reduced";
+	readonly initialPrompt?: AgentInput;
+	readonly initialAttachmentIds?: readonly string[];
+	readonly initialAttachments?: readonly ChatAttachment[];
+	readonly restoredAttachments?: ReadonlyMap<string, readonly ChatAttachment[]>;
+	readonly buildPrompt?: (text: string, attachmentIds: readonly string[]) => Promise<AgentInput>;
+	readonly prepareAttachments?: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
+	readonly onAttach?: (path: string) => Promise<ChatAttachment>;
+	readonly onDetach?: (attachmentId: string) => Promise<void>;
+	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
+	readonly toolResultImagesSupported?: boolean;
+	readonly lifecycle?: InteractiveProcessLifecycle;
 }
 
 export async function runInteractive(options: InteractiveRunOptions): Promise<number> {
@@ -22,39 +49,120 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	const exited = new Promise<void>((resolve) => {
 		resolveExit = resolve;
 	});
-	let tui!: Tui;
-	const submit = async (input: string): Promise<void> => {
-		await options.beforePrompt(input);
-		await options.agent.prompt(input);
-	};
+	let tui!: FullScreenTui;
+	let terminationSignal: InteractiveTerminationSignal | undefined;
+	let fatalError: unknown;
+	let suspendTask: Promise<void> | undefined;
+	const inputController = new InteractiveInputController({
+		agent: options.agent,
+		session: options.session,
+		buildInput: options.buildPrompt ?? (async (text) => text),
+		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
+	});
 	const component = new ChatComponent({
 		modelLabel: options.modelLabel,
+		workspaceLabel: options.workspaceLabel,
 		reasoning: options.reasoning,
-		onSubmit: submit,
-		onAbort: () => options.agent.abort(),
+		colorLevel: options.terminal.capabilities.colorLevel,
+		motion: options.motion,
+		seed: {
+			version: 1,
+			messages: options.agent.state.messages,
+			pendingFollowUps: options.agent.state.pendingFollowUps,
+		},
+		initialAttachments: options.initialAttachments,
+		restoredAttachments: options.restoredAttachments,
+		recoverableFollowUps: options.session.recoverableFollowUps,
+		restoredToolInvocations: options.session.toolInvocations,
+		onSubmit: (text, attachmentIds) => inputController.submit(text, attachmentIds),
+		onSteer: (text, attachmentIds) => inputController.steer(text, attachmentIds),
+		onFollowUp: (text, attachmentIds) => inputController.followUp(text, attachmentIds),
+		onResumeFollowUps: () => inputController.resumeFollowUps(),
+		onReclaimFollowUp: (queueItemId) => inputController.reclaimFollowUp(queueItemId as QueueItemId),
+		onAttach: options.onAttach,
+		onDetach: options.onDetach,
+		onOpenAttachment: options.onOpenAttachment,
+		imagePreviewSupported: options.imageSurface?.capability !== null,
+		toolResultImagesSupported: options.toolResultImagesSupported,
+		onAbort: () => inputController.abort(),
 		onExit: resolveExit,
 	});
-	tui = new Tui({
+	tui = new FullScreenTui({
 		terminal: options.terminal,
 		root: component,
 		clock: options.clock,
 		scheduler: options.scheduler,
+		imageSurface: options.imageSurface,
 		keybindings: options.keybindings,
 		diagnostics: options.diagnostics,
 	});
-	options.approval?.bind(tui, options.terminal);
-	const detach = options.agent.onEvent(async (event) => {
+	const requestTermination = (signal: InteractiveTerminationSignal): void => {
+		terminationSignal ??= signal;
+		if (options.agent.state.status === "running") {
+			try {
+				options.agent.abort();
+			} catch {}
+		}
+		resolveExit();
+	};
+	const requestFatalExit = (error: unknown): void => {
+		fatalError ??= error;
+		if (options.agent.state.status === "running") {
+			try {
+				options.agent.abort();
+			} catch {}
+		}
+		resolveExit();
+	};
+	const unsubscribeLifecycle = options.lifecycle?.subscribe({
+		terminate: requestTermination,
+		fatal: requestFatalExit,
+		suspend: () => {
+			if (suspendTask) return;
+			suspendTask = (async () => {
+				if (tui.started) await tui.stop();
+				await options.lifecycle!.suspend();
+				if (!(await tui.start())) throw new Error("Terminal was unavailable after process resume");
+			})().catch(requestFatalExit);
+			void suspendTask.finally(() => {
+				suspendTask = undefined;
+			});
+		},
+	});
+	options.approval?.bind(tui, options.terminal, (request) => component.setAwaitingApproval(request));
+	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
-		await tui.renderNow();
 	});
 	try {
-		if (!(await tui.start())) throw new Error("Interactive mode requires a TTY terminal");
-		if (options.initialPrompt?.trim()) await submit(options.initialPrompt.trim());
+		if (!(await tui.start())) {
+			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
+		}
+		if (options.initialPrompt !== undefined) {
+			await inputController.submitInput(options.initialPrompt, options.initialAttachmentIds);
+		}
 		await exited;
-		return 0;
+		if (options.agent.state.status !== "idle") {
+			try {
+				await options.agent.waitForIdle();
+			} catch (error) {
+				fatalError ??= error;
+			}
+		}
+		await inputController.waitForIdle();
+		if (fatalError !== undefined) throw fatalError;
+		return terminationSignal ? interactiveSignalExitCode(terminationSignal) : 0;
 	} finally {
+		unsubscribeLifecycle?.();
 		options.approval?.unbind();
 		detach();
+		await inputController.dispose();
 		await tui.stop();
 	}
+}
+
+function emptyAttachmentTransaction(): AttachmentTransaction {
+	return {
+		commit: async () => undefined,
+		rollback: async () => undefined,
+	};
 }

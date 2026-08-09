@@ -27,12 +27,14 @@ describe("FileSettingsStore", () => {
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
+			ui: { motion: "reduced" },
 		});
 
 		await expect(store.load()).resolves.toEqual({
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
+			ui: { motion: "reduced" },
 		});
 		const settingsPath = join(homeDirectory, ".coda", "settings.json");
 		expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual({
@@ -40,6 +42,7 @@ describe("FileSettingsStore", () => {
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
+			ui: { motion: "reduced" },
 		});
 		expect((await stat(join(homeDirectory, ".coda"))).mode & 0o777).toBe(0o700);
 		expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);

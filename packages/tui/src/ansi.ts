@@ -183,6 +183,64 @@ export function stripAnsi(text: string): string {
 		.join("");
 }
 
+/** Removes untrusted terminal controls before presentation code adds its own escapes. */
+export function sanitizeTerminalText(text: string): string {
+	let output = "";
+	let offset = 0;
+	while (offset < text.length) {
+		const code = text.charCodeAt(offset);
+		if (code === 0x1b) {
+			const control = readControl(text, offset);
+			offset += control?.length ?? 1;
+			continue;
+		}
+		if (code === 0x9b) {
+			offset = skipCsi(text, offset + 1);
+			continue;
+		}
+		if (code === 0x90 || code === 0x98 || code === 0x9d || code === 0x9e || code === 0x9f) {
+			offset = skipControlString(text, offset + 1, code === 0x9d);
+			continue;
+		}
+		if (code === 0x0d) {
+			output += "\n";
+			offset += text.charCodeAt(offset + 1) === 0x0a ? 2 : 1;
+			continue;
+		}
+		if (code === 0x0a || code === 0x09) {
+			output += text[offset];
+			offset++;
+			continue;
+		}
+		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+			offset++;
+			continue;
+		}
+		const codePoint = text.codePointAt(offset);
+		if (codePoint === undefined) break;
+		output += String.fromCodePoint(codePoint);
+		offset += codePoint > 0xffff ? 2 : 1;
+	}
+	return output;
+}
+
+function skipCsi(text: string, offset: number): number {
+	for (let index = offset; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if (code >= 0x40 && code <= 0x7e) return index + 1;
+	}
+	return text.length;
+}
+
+function skipControlString(text: string, offset: number, bellTerminates: boolean): number {
+	for (let index = offset; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if ((bellTerminates && code === 0x07) || code === 0x9c) return index + 1;
+		if (code === 0x1b && text[index + 1] === "\\") return index + 2;
+	}
+	return text.length;
+}
+
 export function displayWidth(text: string, options: AnsiOptions = {}): number {
 	const tabWidth = normalizedTabWidth(options);
 	let column = 0;

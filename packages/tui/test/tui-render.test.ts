@@ -3,6 +3,7 @@ import {
 	type Clock,
 	Component,
 	type DiagnosticSink,
+	type RenderContext,
 	RendererError,
 	type ScheduledTask,
 	type Scheduler,
@@ -53,8 +54,8 @@ class Lines extends Component {
 		this.lines = lines;
 	}
 
-	render(width: number): string[] {
-		this.widths.push(width);
+	render(context: RenderContext): string[] {
+		this.widths.push(context.width);
 		return [...this.lines];
 	}
 
@@ -77,6 +78,16 @@ class ReentrantProbe extends Component {
 		request?.();
 		this.activeRenders--;
 		return ["probe"];
+	}
+}
+
+class AnimatedProbe extends Component {
+	render(context: RenderContext): string[] {
+		return [`frame ${context.now}`];
+	}
+
+	override animationInterval(): number {
+		return 100;
 	}
 }
 
@@ -128,7 +139,7 @@ function setup(lines: string[], terminal = new VirtualTerminal({ columns: 20, ro
 	return { clock, diagnostics, root, scheduler, terminal, tui };
 }
 
-describe("Tui main-screen rendering", () => {
+describe("Tui full-screen differential rendering", () => {
 	it("starts idempotently and only rewrites changed rows", async () => {
 		const { root, terminal, tui } = setup(["one", "two"]);
 
@@ -165,6 +176,23 @@ describe("Tui main-screen rendering", () => {
 		await scheduler.runNext(clock);
 		await tui.flush();
 		expect(terminal.readOutput()).toContain("second");
+	});
+
+	it("owns one cancellable animation loop for animated components", async () => {
+		const terminal = new VirtualTerminal({ columns: 20, rows: 5 });
+		const clock = new ManualClock();
+		const scheduler = new ManualScheduler();
+		const tui = new Tui({ clock, keybindings: [], root: new AnimatedProbe(), scheduler, terminal });
+
+		await tui.start();
+		expect(scheduler.pending).toBe(1);
+		terminal.clearOutput();
+		await scheduler.runNext(clock);
+		expect(terminal.readOutput()).toContain("frame 100");
+		expect(scheduler.pending).toBe(1);
+
+		await tui.stop();
+		expect(scheduler.pending).toBe(0);
 	});
 
 	it("flushes a scheduled frame deterministically without waiting for its timer", async () => {

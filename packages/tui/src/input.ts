@@ -113,4 +113,18 @@ export interface ResizeInput {
 	readonly rows: number;
 }
 
-export type TerminalInput = KeyInput | TextInput | PasteInput | ResizeInput;
+export type MouseButton = "left" | "middle" | "none" | "right" | "wheel-down" | "wheel-up";
+export type MouseAction = "move" | "press" | "release";
+
+export interface MouseInput {
+	readonly type: "mouse";
+	readonly action: MouseAction;
+	readonly button: MouseButton;
+	readonly column: number;
+	readonly row: number;
+	readonly shift: boolean;
+	readonly control: boolean;
+	readonly alt: boolean;
+}
+
+export type TerminalInput = KeyInput | MouseInput | TextInput | PasteInput | ResizeInput;

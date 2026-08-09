@@ -65,6 +65,8 @@ export class VirtualTerminal implements Terminal {
 
 	async flush(): Promise<void> {}
 
+	async flushOutput(): Promise<void> {}
+
 	onInput(listener: TerminalInputListener): () => void {
 		this.#listeners.add(listener);
 		return () => {

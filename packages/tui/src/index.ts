@@ -3,6 +3,7 @@ export {
 	type ClipAnsiOptions,
 	clipAnsi,
 	displayWidth,
+	sanitizeTerminalText,
 	sliceAnsi,
 	stripAnsi,
 	wrapAnsi,
@@ -12,8 +13,18 @@ export {
 	type ComponentInputContext,
 	type ComponentInputResult,
 	type ComponentOptions,
+	type CursorPlacement,
+	type RenderContext,
 } from "./component.ts";
 export type { Diagnostic, DiagnosticSink } from "./diagnostics.ts";
+export {
+	Editor,
+	type EditorCursorMode,
+	type EditorCursorPlacement,
+	type EditorFrame,
+	type EditorInputResult,
+	type EditorRenderOptions,
+} from "./editor.ts";
 export type {
 	DigitKey,
 	FunctionKey,
@@ -21,6 +32,9 @@ export type {
 	KeyInput,
 	LetterKey,
 	LogicalKey,
+	MouseAction,
+	MouseButton,
+	MouseInput,
 	PasteInput,
 	PunctuationKey,
 	ResizeInput,
@@ -33,6 +47,12 @@ export {
 	type KeybindingPattern,
 	matchesKeybinding,
 } from "./keybindings.ts";
+export {
+	createMarkdownRenderer,
+	type MarkdownRenderer,
+	type MarkdownRendererOptions,
+	type MarkdownRenderOptions,
+} from "./markdown.ts";
 export {
 	ProcessTerminal,
 	type ProcessTerminalInput,
@@ -56,9 +76,20 @@ export type {
 	TerminalSize,
 } from "./terminal.ts";
 export {
+	createTerminalImageSurface,
+	detectTerminalImageCapability,
+	type ImagePlacement,
+	type TerminalImageCapability,
+	type TerminalImageSurface,
+	type TerminalImageSurfaceOptions,
+} from "./terminal-image-surface.ts";
+export {
 	FocusError,
+	FullScreenTui,
 	type OverlayHandle,
+	type OverlayLayout,
 	type OverlayOptions,
+	type OverlayPlacement,
 	Tui,
 	type TuiOptions,
 } from "./tui.ts";

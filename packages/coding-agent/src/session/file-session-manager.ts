@@ -4,6 +4,7 @@ import type { DiagnosticSink } from "@coda/tui";
 import type { DirectoryEntry, FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { ManagedSession, type SessionJournal } from "./managed-session.ts";
+import { SessionMediaCodec } from "./media-codec.ts";
 import {
 	descriptorHeader,
 	messagePayload,
@@ -19,6 +20,7 @@ import type {
 	SessionDescriptor,
 	SessionId,
 	SessionManager,
+	SessionMediaReference,
 	SessionRuntime,
 	SessionWorkspace,
 } from "./types.ts";
@@ -63,6 +65,7 @@ interface LockFile extends SessionLockOwner {
 interface ParsedJournal {
 	readonly header: SessionHeader;
 	readonly records: readonly SessionRecord[];
+	readonly sourceText: string;
 }
 
 const RECORD_TYPES = new Set<string>(SESSION_RECORD_TYPES);
@@ -143,15 +146,49 @@ function parseJournal(text: string, path: string, diagnostics?: DiagnosticSink):
 		) {
 			throw new Error(`Session record ${index} violates the v1 linear schema`);
 		}
-		if (!isSessionRecordPayload(value.type as SessionRecordType, value.payload)) {
-			throw new Error(`Session record ${index} violates its v1 typed payload schema`);
+		if (!isSessionRecordPayload(value.type as SessionRecordType, value.payload, header.version)) {
+			throw new Error(`Session record ${index} violates its v${header.version} typed payload schema`);
 		}
 		if (recordIds.has(value.recordId)) throw new Error(`Session record ${index} repeats an identity`);
 		recordIds.add(value.recordId);
 		previousRecordId = value.recordId;
 		records.push(value as unknown as SessionRecord);
 	}
-	return { header, records };
+	return { header, records, sourceText: text };
+}
+
+function collectMediaReferences(
+	records: readonly SessionRecord[],
+): ReadonlyMap<string, readonly SessionMediaReference[]> {
+	const references = new Map<string, readonly SessionMediaReference[]>();
+	for (const record of records) {
+		let ownerId: string | undefined;
+		let content: unknown;
+		if (record.type === "message_committed") {
+			const message = (record.payload as { message?: { id?: unknown; message?: { content?: unknown } } }).message;
+			if (typeof message?.id === "string") {
+				ownerId = message.id;
+				content = message.message?.content;
+			}
+		} else if (record.type === "follow_up_enqueued") {
+			const item = (record.payload as { item?: { id?: unknown; content?: unknown } }).item;
+			if (typeof item?.id === "string") {
+				ownerId = item.id;
+				content = item.content;
+			}
+		}
+		if (!ownerId) continue;
+		const media = collectMediaFromValue(content);
+		if (media.length > 0) references.set(ownerId, structuredClone(media));
+	}
+	return references;
+}
+
+function collectMediaFromValue(value: unknown): SessionMediaReference[] {
+	if (Array.isArray(value)) return value.flatMap(collectMediaFromValue);
+	if (typeof value !== "object" || value === null) return [];
+	if ((value as { type?: unknown }).type === "media") return [value as SessionMediaReference];
+	return Object.values(value).flatMap(collectMediaFromValue);
 }
 
 export class FileSessionManager implements SessionManager {
@@ -181,11 +218,17 @@ export class FileSessionManager implements SessionManager {
 			: (`session-${safeIdentity(this.#runtime.idGenerator.generate("queue_item"))}` as SessionId);
 		const path = join(directory, `${sessionId}.jsonl`);
 		const lockPath = `${path}.lock`;
+		const mediaCodec = new SessionMediaCodec({
+			fileSystem: this.#fileSystem,
+			mediaDirectory: `${path}.media`,
+			idGenerator: this.#runtime.idGenerator,
+		});
 		await this.#acquireLock(lockPath, sessionId, request);
 		let appendHandle: WritableFile | undefined;
 		try {
 			let descriptor: SessionDescriptor;
 			let records: readonly SessionRecord[];
+			let parsedMediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]> = new Map();
 			let interruptedRunIds: readonly string[] = [];
 			const recoveryInputs: Array<{
 				type: "message_committed" | "tool_finished";
@@ -194,7 +237,10 @@ export class FileSessionManager implements SessionManager {
 				turnId?: string;
 			}> = [];
 			if (request.resumeId) {
-				const parsed = await this.#readJournal(path);
+				let parsed = await this.#readJournal(path);
+				if (parsed.header.version === 1) parsed = await this.#migrateV1(path, parsed, mediaCodec);
+				else if (parsed.header.version === 2) parsed = await this.#migrateV2(path, parsed);
+				parsedMediaReferences = collectMediaReferences(parsed.records);
 				if (
 					parsed.header.workspaceId !== request.workspace.id ||
 					parsed.header.workspacePath !== request.workspace.path ||
@@ -202,7 +248,9 @@ export class FileSessionManager implements SessionManager {
 				) {
 					throw new Error("Session belongs to a different Workspace");
 				}
-				const reduced = reduceSession(parsed.records);
+				const hydratedRecords: SessionRecord[] = [];
+				for (const record of parsed.records) hydratedRecords.push(await mediaCodec.hydrateRecord(record));
+				const reduced = reduceSession(hydratedRecords);
 				if (reduced.startedTools.size > 0) {
 					if (request.mode === "print" || !this.#interruptedToolRecovery) {
 						throw new Error(
@@ -273,7 +321,7 @@ export class FileSessionManager implements SessionManager {
 					persistent: true,
 					path,
 				};
-				records = parsed.records;
+				records = hydratedRecords;
 			} else {
 				descriptor = {
 					id: sessionId,
@@ -309,7 +357,7 @@ export class FileSessionManager implements SessionManager {
 						turnId: input.turnId,
 						payload: structuredClone(input.payload),
 					};
-					await appendHandle.write(`${JSON.stringify(record)}\n`);
+					await appendHandle.write(`${JSON.stringify(await mediaCodec.encodeRecord(record))}\n`);
 					await appendHandle.sync();
 					recovered.push(record);
 					previousRecordId = record.recordId;
@@ -325,7 +373,7 @@ export class FileSessionManager implements SessionManager {
 						runId,
 						payload: { outcome: "interrupted", reason: "process_ended_before_run_finished" },
 					};
-					await appendHandle.write(`${JSON.stringify(record)}\n`);
+					await appendHandle.write(`${JSON.stringify(await mediaCodec.encodeRecord(record))}\n`);
 					await appendHandle.sync();
 					recovered.push(record);
 					previousRecordId = record.recordId;
@@ -340,8 +388,10 @@ export class FileSessionManager implements SessionManager {
 			const journal: SessionJournal = {
 				descriptor,
 				records,
+				mediaReferences: parsedMediaReferences,
+				registerMedia: (registrations) => mediaCodec.register(registrations),
 				append: async (record) => {
-					await appendHandle?.write(`${JSON.stringify(record)}\n`);
+					await appendHandle?.write(`${JSON.stringify(await mediaCodec.encodeRecord(record))}\n`);
 					await appendHandle?.sync();
 				},
 				close: async () => {
@@ -407,6 +457,88 @@ export class FileSessionManager implements SessionManager {
 		await this.#fileSystem.setMode(join(this.#homeDirectory, ".coda"), 0o700);
 		await this.#fileSystem.setMode(join(this.#homeDirectory, ".coda", "sessions"), 0o700);
 		await this.#fileSystem.setMode(directory, 0o700);
+	}
+
+	async #migrateV1(path: string, legacy: ParsedJournal, mediaCodec: SessionMediaCodec): Promise<ParsedJournal> {
+		const records: SessionRecord[] = [];
+		for (const record of legacy.records) records.push(await mediaCodec.encodeRecord(record));
+		return this.#installMigration(path, legacy, records, 1);
+	}
+
+	async #migrateV2(path: string, legacy: ParsedJournal): Promise<ParsedJournal> {
+		return this.#installMigration(path, legacy, legacy.records, 2);
+	}
+
+	async #installMigration(
+		path: string,
+		legacy: ParsedJournal,
+		records: readonly SessionRecord[],
+		fromVersion: 1 | 2,
+	): Promise<ParsedJournal> {
+		const header: SessionHeader = { ...legacy.header, version: 3 };
+		const migratedText = `${[header, ...records].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+		const validated = parseJournal(migratedText, path, this.#diagnostics);
+		const token = safeIdentity(this.#runtime.idGenerator.generate("queue_item"));
+		const temporaryPath = `${path}.migrate-${token}.tmp`;
+		let temporaryHandle: WritableFile | undefined;
+		let installed = false;
+		try {
+			temporaryHandle = await this.#fileSystem.open(temporaryPath, "wx", 0o600);
+			await temporaryHandle.write(migratedText);
+			await temporaryHandle.sync();
+			await temporaryHandle.close();
+			temporaryHandle = undefined;
+			const temporaryText = new TextDecoder("utf-8", { fatal: true }).decode(
+				await this.#fileSystem.readFile(temporaryPath),
+			);
+			parseJournal(temporaryText, temporaryPath);
+
+			const backupPath = `${path}.v${fromVersion}.backup`;
+			if (await this.#exists(backupPath)) {
+				const existing = new TextDecoder().decode(await this.#fileSystem.readFile(backupPath));
+				if (existing !== legacy.sourceText)
+					throw new Error("Existing Session v1 backup does not match the journal");
+			} else {
+				const backupHandle = await this.#fileSystem.open(backupPath, "wx", 0o600);
+				try {
+					await backupHandle.write(legacy.sourceText);
+					await backupHandle.sync();
+				} finally {
+					await backupHandle.close();
+				}
+				await this.#fileSystem.setMode(backupPath, 0o600);
+			}
+
+			await this.#fileSystem.rename(temporaryPath, path);
+			await this.#fileSystem.setMode(path, 0o600);
+			installed = true;
+		} finally {
+			await temporaryHandle?.close().catch(() => undefined);
+			if (!installed) {
+				try {
+					await this.#fileSystem.removeFile(temporaryPath);
+				} catch {}
+			}
+		}
+		await this.#diagnostics?.({
+			code: "session.migrated-v3",
+			message:
+				fromVersion === 1
+					? "Migrated a Session v1 journal to content-referenced Session v3"
+					: "Migrated a Session v2 journal to Session v3",
+			details: { path, backupPath: `${path}.v${fromVersion}.backup`, fromVersion },
+		});
+		return validated;
+	}
+
+	async #exists(path: string): Promise<boolean> {
+		try {
+			await this.#fileSystem.stat(path);
+			return true;
+		} catch (error) {
+			if (isFileSystemError(error, "ENOENT")) return false;
+			throw error;
+		}
 	}
 
 	async #readJournal(path: string): Promise<ParsedJournal> {
