@@ -95,8 +95,10 @@ static void bring_loopback_up(void) {
     memset(&request, 0, sizeof(request));
     strncpy(request.ifr_name, "lo", IFNAMSIZ - 1);
     if (ioctl(fd, SIOCGIFFLAGS, &request) < 0) fail("could not read loopback flags");
-    request.ifr_flags |= (short)(IFF_UP | IFF_RUNNING);
-    if (ioctl(fd, SIOCSIFFLAGS, &request) < 0) fail("could not enable loopback");
+    if ((request.ifr_flags & IFF_UP) != IFF_UP) {
+        request.ifr_flags |= IFF_UP;
+        if (ioctl(fd, SIOCSIFFLAGS, &request) < 0) fail("could not enable loopback");
+    }
     close(fd);
 }
 
