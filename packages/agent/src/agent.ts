@@ -197,6 +197,7 @@ export class Agent {
 	#runtimeState: RuntimeState;
 	#operation?: Promise<RunResult>;
 	#activeRun?: RunContext;
+	#followUpsPaused: boolean;
 
 	constructor(options: AgentOptions) {
 		if (
@@ -223,6 +224,7 @@ export class Agent {
 		for (const message of seed.messages) this.#issuedIds.add(message.id);
 		for (const followUp of seed.pendingFollowUps) this.#issuedIds.add(followUp.id);
 		this.#runtimeState = initialRuntimeState(seed.messages, seed.pendingFollowUps);
+		this.#followUpsPaused = seed.pendingFollowUps.length > 0;
 	}
 
 	get state(): AgentState {
@@ -242,6 +244,12 @@ export class Agent {
 		if (this.#operation) {
 			return Promise.reject(new AgentError("busy", "Agent is running; use steer() or followUp() for queued input"));
 		}
+		if (this.#runtimeState.public.pendingFollowUps.length > 0) {
+			return Promise.reject(
+				new AgentError("invalid_lifecycle", "Pending Follow-ups must be resumed before starting a new Prompt"),
+			);
+		}
+		this.#followUpsPaused = false;
 		const runId = this.#allocate("run") as RunId;
 		const inputMessage = this.#createUserMessage(input);
 		let resolveOperation!: (result: RunResult) => void;
@@ -273,7 +281,36 @@ export class Agent {
 			throw new AgentError("invalid_lifecycle", "Agent has no active Run to abort");
 		}
 		this.#runtimeState = reduceState(this.#runtimeState, { type: "clear_steering" });
+		this.#followUpsPaused = true;
 		this.#activeRun.controller.abort();
+	}
+
+	resumeFollowUps(): Promise<RunResult> {
+		if (this.#operation) {
+			return Promise.reject(new AgentError("busy", "Agent is already running"));
+		}
+		if (this.#runtimeState.public.pendingFollowUps.length === 0) {
+			return Promise.reject(new AgentError("invalid_lifecycle", "Agent has no pending Follow-ups to resume"));
+		}
+		this.#followUpsPaused = false;
+		let resolveOperation!: (result: RunResult) => void;
+		let rejectOperation!: (error: unknown) => void;
+		const operation = new Promise<RunResult>((resolve, reject) => {
+			resolveOperation = resolve;
+			rejectOperation = reject;
+		});
+		this.#operation = operation;
+		void this.#drainFollowUps().then(
+			(result) => {
+				if (this.#operation === operation) this.#operation = undefined;
+				resolveOperation(result);
+			},
+			(error) => {
+				if (this.#operation === operation) this.#operation = undefined;
+				rejectOperation(error);
+			},
+		);
+		return operation;
 	}
 
 	steer(input: AgentInput): QueueItemId {
@@ -294,7 +331,7 @@ export class Agent {
 
 	followUp(input: AgentInput): QueueItemId {
 		validateInput(input);
-		if (!this.#activeRun) {
+		if (!this.#activeRun && this.#runtimeState.public.pendingFollowUps.length === 0) {
 			throw new AgentError("invalid_lifecycle", "Follow-up requires an active or settling Run");
 		}
 		const id = this.#allocate("queue_item") as QueueItemId;
@@ -341,15 +378,43 @@ export class Agent {
 
 	async #drive(runId: RunId, inputMessage: AgentMessage<UserMessage>): Promise<RunResult> {
 		const initialResult = await this.#run(runId, "prompt", inputMessage);
-		while (this.#runtimeState.public.pendingFollowUps.length > 0) {
+		if (initialResult.outcome !== "success") this.#followUpsPaused = true;
+		if (!this.#followUpsPaused && this.#runtimeState.public.pendingFollowUps.length > 0) {
+			await this.#drainFollowUps();
+		}
+		return initialResult;
+	}
+
+	async #drainFollowUps(): Promise<RunResult> {
+		let firstResult: RunResult | undefined;
+		while (!this.#followUpsPaused && this.#runtimeState.public.pendingFollowUps.length > 0) {
 			const followUp = this.#runtimeState.public.pendingFollowUps[0]!;
 			const followUpRunId = this.#allocate("run") as RunId;
 			const followUpMessage = this.#createUserMessage(followUp.content as AgentInput);
 			this.#consumedQueueItems.add(followUp.id);
 			this.#runtimeState = reduceState(this.#runtimeState, { type: "remove_queue_item", id: followUp.id });
-			await this.#run(followUpRunId, "follow_up", followUpMessage, followUp.id);
+			let result: RunResult;
+			try {
+				result = await this.#run(followUpRunId, "follow_up", followUpMessage, followUp.id);
+			} catch (error) {
+				if (!this.#runtimeState.public.messages.some(({ id }) => id === followUpMessage.id)) {
+					this.#consumedQueueItems.delete(followUp.id);
+					this.#runtimeState = reduceState(this.#runtimeState, { type: "restore_follow_up", item: followUp });
+				}
+				this.#followUpsPaused = true;
+				throw error;
+			}
+			firstResult ??= result;
+			if (result.outcome === "aborted") {
+				this.#followUpsPaused = true;
+			} else if (result.outcome === "error") {
+				this.#followUpsPaused = true;
+			}
 		}
-		return initialResult;
+		if (!firstResult) {
+			throw new AgentError("invalid_lifecycle", "Agent has no pending Follow-ups to resume");
+		}
+		return firstResult;
 	}
 
 	async #run(
@@ -373,6 +438,14 @@ export class Agent {
 		let unexpected: unknown;
 
 		try {
+			this.#options.beforeRun?.(
+				deepFreeze({
+					runId,
+					source,
+					inputMessage,
+					...(queueItemId === undefined ? {} : { queueItemId }),
+				}),
+			);
 			const systemPrompt =
 				typeof this.#options.systemPrompt === "function"
 					? this.#options.systemPrompt()
@@ -458,11 +531,13 @@ export class Agent {
 			}
 			outcome = run.controller.signal.aborted && !(error instanceof ListenerFailureSignal) ? "aborted" : "error";
 		} finally {
-			if (activeTurnId && !turnEnded) {
-				await this.#emitCleanup(run, { type: "turn_end", turnId: activeTurnId, outcome });
+			if (run.sequence > 0) {
+				if (activeTurnId && !turnEnded) {
+					await this.#emitCleanup(run, { type: "turn_end", turnId: activeTurnId, outcome });
+				}
+				await this.#emitCleanup(run, { type: "run_end", outcome, failure });
+				this.#runtimeState = reduceState(this.#runtimeState, { type: "settled" });
 			}
-			await this.#emitCleanup(run, { type: "run_end", outcome, failure });
-			this.#runtimeState = reduceState(this.#runtimeState, { type: "settled" });
 			this.#activeRun = undefined;
 		}
 

@@ -334,6 +334,16 @@ export interface RetryOptions {
 
 export type SystemPromptFactory = () => string;
 
+export interface RunPreparation {
+	readonly runId: RunId;
+	readonly source: RunSource;
+	readonly inputMessage: AgentMessage<UserMessage>;
+	readonly queueItemId?: QueueItemId;
+}
+
+/** Synchronously freezes application-owned state before the Run snapshot is created. */
+export type BeforeRun = (preparation: RunPreparation) => void;
+
 export interface AgentOptions {
 	readonly stream: ModelStream;
 	readonly tools: readonly AgentTool[];
@@ -341,6 +351,7 @@ export interface AgentOptions {
 	readonly idGenerator: IdGenerator;
 	readonly clock: Clock;
 	readonly systemPrompt?: string | SystemPromptFactory;
+	readonly beforeRun?: BeforeRun;
 	readonly retry?: RetryOptions;
 	readonly seed?: AgentSeed;
 }

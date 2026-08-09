@@ -131,7 +131,7 @@ describe("Agent input queues", () => {
 		expect(agent.state.pendingFollowUps).toEqual([]);
 	});
 
-	it("clears pending Steering on abort while preserving and running Follow-up", async () => {
+	it("clears pending Steering on abort, pauses Follow-up, and resumes it explicitly", async () => {
 		const clock = new TestClock();
 		let toolStarted!: () => void;
 		const started = new Promise<void>((resolve) => {
@@ -166,15 +166,82 @@ describe("Agent input queues", () => {
 
 		expect(result.outcome).toBe("aborted");
 		expect(agent.state.pendingSteering).toEqual([]);
-		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([follow]);
 		expect(
 			agent.state.messages.some(({ message }) => message.role === "user" && message.content === "discard this"),
 		).toBe(false);
 		expect(agent.state.messages.some(({ message }) => message.role === "user" && message.content === "recover")).toBe(
+			false,
+		);
+		expect(agent.state.lastRun).toMatchObject({ outcome: "aborted" });
+
+		const resumed = await agent.resumeFollowUps();
+		expect(resumed).toMatchObject({ outcome: "success" });
+		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(agent.state.messages.some(({ message }) => message.role === "user" && message.content === "recover")).toBe(
 			true,
 		);
-		expect(agent.state.lastRun).toMatchObject({ outcome: "success" });
 		expect(follow).toBeTruthy();
+	});
+
+	it("commits an aborted active Follow-up once without returning it to the pending queue", async () => {
+		const clock = new TestClock();
+		let toolStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const waitForAbort: AgentTool<typeof inputSchema> = {
+			name: "wait",
+			description: "wait until aborted",
+			parameters: inputSchema,
+			replaySafety: "safe",
+			async execute(_arguments, { signal }) {
+				toolStarted();
+				await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+				return { content: "settled" };
+			},
+		};
+		const calls = fauxAssistantMessage([fauxToolCall("wait", { value: "x" }, { id: "provider:wait" })], {
+			stopReason: "toolUse",
+			timestamp: clock.now(),
+		});
+		const queueId = "queue:restored" as import("../src/index.ts").QueueItemId;
+		const agent = new Agent({
+			...baseOptions([calls], { clock }),
+			tools: [waitForAbort],
+			seed: { version: 1, messages: [], pendingFollowUps: [{ id: queueId, content: "recover" }] },
+		});
+
+		const first = agent.resumeFollowUps();
+		await started;
+		agent.abort();
+		await expect(first).resolves.toMatchObject({ outcome: "aborted" });
+		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(
+			agent.state.messages.filter(({ message }) => message.role === "user" && message.content === "recover"),
+		).toHaveLength(1);
+		await expect(agent.resumeFollowUps()).rejects.toMatchObject({ code: "invalid_lifecycle" });
+	});
+
+	it("pauses queued Follow-ups when the current Prompt Run fails", async () => {
+		const clock = new TestClock();
+		const failure = fauxAssistantMessage("partial", {
+			stopReason: "error",
+			errorMessage: "provider unavailable",
+			timestamp: clock.now(),
+		});
+		const agent = new Agent(baseOptions([failure], { clock }));
+		let followUpId: import("../src/index.ts").QueueItemId | undefined;
+		agent.onEvent((event) => {
+			if (event.type === "run_start" && event.source === "prompt") followUpId = agent.followUp("later");
+		});
+
+		await expect(agent.prompt("initial")).resolves.toMatchObject({ outcome: "error" });
+
+		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([followUpId]);
+		expect(agent.state.messages.some(({ message }) => message.role === "user" && message.content === "later")).toBe(
+			false,
+		);
 	});
 
 	it("cancels pending queue items by stable ID and distinguishes consumed items", async () => {

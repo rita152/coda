@@ -18,6 +18,7 @@ export type StateAction =
 	| { readonly type: "settled" }
 	| { readonly type: "queue_steering"; readonly item: Steering }
 	| { readonly type: "queue_follow_up"; readonly item: FollowUp }
+	| { readonly type: "restore_follow_up"; readonly item: FollowUp }
 	| { readonly type: "remove_queue_item"; readonly id: string }
 	| { readonly type: "clear_steering" };
 
@@ -139,6 +140,15 @@ export function reduceState(state: RuntimeState, action: StateAction): RuntimeSt
 				public: {
 					...state.public,
 					pendingFollowUps: [...state.public.pendingFollowUps, action.item],
+				},
+			};
+			break;
+		case "restore_follow_up":
+			next = {
+				...state,
+				public: {
+					...state.public,
+					pendingFollowUps: [action.item, ...state.public.pendingFollowUps],
 				},
 			};
 			break;

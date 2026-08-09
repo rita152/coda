@@ -33,7 +33,7 @@ describe("Agent Seed", () => {
 		};
 		const contexts: import("@coda/ai").Context[] = [];
 		const agent = new Agent({
-			...baseOptions([response("new answer", clock), response("follow answer", clock)], { clock, contexts }),
+			...baseOptions([response("follow answer", clock)], { clock, contexts }),
 			seed,
 		});
 
@@ -42,12 +42,34 @@ describe("Agent Seed", () => {
 		expect(agent.state.pendingFollowUps).not.toBe(seed.pendingFollowUps);
 		expect(Object.isFrozen(agent.state.messages[0])).toBe(true);
 
-		await agent.prompt("new prompt");
+		await expect(agent.prompt("new prompt")).rejects.toMatchObject({ code: "invalid_lifecycle" });
+		await agent.resumeFollowUps();
 
-		expect(contexts).toHaveLength(2);
+		expect(contexts).toHaveLength(1);
 		expect(contexts[0]?.messages.map(({ role }) => role)).toEqual(["user", "assistant", "user"]);
-		expect(contexts[1]?.messages.map(({ role }) => role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
 		expect(agent.state.pendingFollowUps).toEqual([]);
+	});
+
+	it("returns to automatic Follow-up draining after a restored queue is canceled", async () => {
+		const clock = new TestClock();
+		const restoredId = "seed:queue:canceled" as QueueItemId;
+		const agent = new Agent({
+			...baseOptions([response("fresh answer", clock), response("queued answer", clock)], { clock }),
+			seed: { version: 1, messages: [], pendingFollowUps: [{ id: restoredId, content: "old" }] },
+		});
+		agent.cancelQueueItem(restoredId);
+		agent.onEvent((event) => {
+			if (event.type === "run_start" && event.source === "prompt") agent.followUp("queued during fresh run");
+		});
+
+		await agent.prompt("fresh");
+
+		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(
+			agent.state.messages.some(
+				({ message }) => message.role === "user" && message.content === "queued during fresh run",
+			),
+		).toBe(true);
 	});
 
 	it.each([
