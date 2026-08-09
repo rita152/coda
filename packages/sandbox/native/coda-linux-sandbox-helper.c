@@ -104,8 +104,17 @@ static void bring_loopback_up(void) {
 
 static void drop_capabilities(void) {
     for (int capability = 0; capability <= CAP_LAST_CAP; capability++) {
-        if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) < 0 && errno != EINVAL) {
+        int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
+        if (present < 0) {
+            if (errno == EINVAL) continue;
+            fail("could not inspect capability bounding set");
+        }
+        if (present == 0) continue;
+        if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) < 0) {
             fail("could not clear capability bounding set");
+        }
+        if (prctl(PR_CAPBSET_READ, capability, 0, 0, 0) != 0) {
+            fail("could not verify capability bounding set");
         }
     }
     struct __user_cap_header_struct header = {
