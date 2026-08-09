@@ -137,29 +137,38 @@ export class Tui {
 	}
 
 	async #performStart(): Promise<boolean> {
+		if (!this.#terminal.available) return false;
+		let failed = false;
+		let failure: unknown;
 		try {
-			const available = await this.#terminal.start();
-			if (!available) return false;
 			await this.#renderer.enter();
-			this.#unsubscribeInput = this.#terminal.onInput((input) => this.#handleInput(input));
+			const available = await this.#terminal.start();
+			if (available) {
+				this.#unsubscribeInput = this.#terminal.onInput((input) => this.#handleInput(input));
 
-			this.#started = true;
-			this.#dirty = true;
-			this.#mount(this.#root);
-			for (const overlay of this.#overlays) {
-				if (!overlay.removed) this.#mount(overlay.component);
+				this.#started = true;
+				this.#dirty = true;
+				this.#mount(this.#root);
+				for (const overlay of this.#overlays) {
+					if (!overlay.removed) this.#mount(overlay.component);
+				}
+				if (this.#root.focusable) this.focus(this.#root);
+				await this.renderNow();
+				return true;
 			}
-			if (this.#root.focusable) this.focus(this.#root);
-			await this.renderNow();
-			return true;
 		} catch (error) {
-			try {
-				await this.#cleanupAfterFailedStart();
-			} catch (cleanupError) {
-				throw new AggregateError([error, cleanupError], "TUI start and cleanup both failed");
-			}
-			throw error;
+			failed = true;
+			failure = error;
 		}
+
+		try {
+			await this.#cleanupAfterFailedStart();
+		} catch (cleanupError) {
+			if (failed) throw new AggregateError([failure, cleanupError], "TUI start and cleanup both failed");
+			throw cleanupError;
+		}
+		if (failed) throw failure;
+		return false;
 	}
 
 	#mount(component: Component): void {

@@ -12,6 +12,8 @@ export class StrictScreen {
 	#cursorColumn = 0;
 	#cursorVisible = true;
 	#autowrap = true;
+	readonly #mainKittyKeyboardStack = [0];
+	readonly #alternateKittyKeyboardStack = [0];
 
 	constructor(columns: number, rows: number) {
 		this.#columns = columns;
@@ -36,6 +38,13 @@ export class StrictScreen {
 		return this.#autowrap;
 	}
 
+	get kittyKeyboardFlags(): { readonly main: number; readonly alternate: number } {
+		return {
+			main: this.#mainKittyKeyboardStack.at(-1) ?? 0,
+			alternate: this.#alternateKittyKeyboardStack.at(-1) ?? 0,
+		};
+	}
+
 	resize(columns: number, rows: number): void {
 		this.#main = resizeGrid(this.#main, columns, rows);
 		this.#alternate = resizeGrid(this.#alternate, columns, rows);
@@ -45,11 +54,14 @@ export class StrictScreen {
 		this.#cursorColumn = Math.min(this.#cursorColumn, columns - 1);
 	}
 
-	write(output: string): void {
+	write(output: string): readonly string[] {
+		const responses: string[] = [];
 		let offset = 0;
 		while (offset < output.length) {
 			if (output[offset] === "\x1b") {
-				offset = this.#consumeEscape(output, offset);
+				const consumed = this.#consumeEscape(output, offset);
+				offset = consumed.offset;
+				if (consumed.response) responses.push(consumed.response);
 				continue;
 			}
 			const segment = segmenter.segment(output.slice(offset))[Symbol.iterator]().next().value?.segment;
@@ -57,28 +69,45 @@ export class StrictScreen {
 			this.#writeGrapheme(segment);
 			offset += segment.length;
 		}
+		return responses;
 	}
 
 	viewport(): string[] {
 		return this.#grid().map((row) => row.join("").trimEnd());
 	}
 
-	#consumeEscape(output: string, offset: number): number {
+	#consumeEscape(output: string, offset: number): { readonly offset: number; readonly response?: string } {
 		if (output[offset + 1] === "]") {
 			const bell = output.indexOf("\x07", offset + 2);
 			const stringTerminator = output.indexOf("\x1b\\", offset + 2);
 			const end = [bell, stringTerminator].filter((value) => value >= 0).sort((a, b) => a - b)[0];
 			if (end === undefined) throw new Error(`Unterminated OSC sequence at byte ${offset}`);
-			return end === bell ? end + 1 : end + 2;
+			return { offset: end === bell ? end + 1 : end + 2 };
 		}
 		if (output[offset + 1] !== "[") throw new Error(`Unsupported escape sequence at byte ${offset}`);
-		const match = /^([?]?[0-9;]*)([@-~])/.exec(output.slice(offset + 2));
+		const match = /^([?<>]?[0-9;]*)([@-~])/.exec(output.slice(offset + 2));
 		if (!match) throw new Error(`Malformed CSI sequence at byte ${offset}`);
-		this.#applyCsi(match[1] ?? "", match[2] ?? "");
-		return offset + 2 + match[0].length;
+		const response = this.#applyCsi(match[1] ?? "", match[2] ?? "");
+		return { offset: offset + 2 + match[0].length, ...(response ? { response } : {}) };
 	}
 
-	#applyCsi(parameters: string, final: string): void {
+	#applyCsi(parameters: string, final: string): string | undefined {
+		if (final === "u") {
+			const stack = this.#kittyKeyboardStack();
+			if (parameters === "?") return `\x1b[?${stack.at(-1) ?? 0}u`;
+			if (parameters.startsWith(">")) {
+				stack.push(Number(parameters.slice(1) || "0"));
+				return;
+			}
+			if (parameters.startsWith("<")) {
+				const count = Number(parameters.slice(1) || "1");
+				for (let index = 0; index < count; index++) {
+					if (stack.length > 1) stack.pop();
+					else stack[0] = 0;
+				}
+				return;
+			}
+		}
 		if (parameters.startsWith("?")) {
 			const enabled = final === "h";
 			if (final !== "h" && final !== "l") throw new Error(`Unsupported private CSI final ${final}`);
@@ -100,6 +129,7 @@ export class StrictScreen {
 				case "?2026":
 				case "?1003":
 				case "?1006":
+				case "?2004":
 					return;
 				default:
 					throw new Error(`Unsupported private CSI ${parameters}${final}`);
@@ -154,6 +184,10 @@ export class StrictScreen {
 
 	#grid(): string[][] {
 		return this.#usingAlternate ? this.#alternate : this.#main;
+	}
+
+	#kittyKeyboardStack(): number[] {
+		return this.#usingAlternate ? this.#alternateKittyKeyboardStack : this.#mainKittyKeyboardStack;
 	}
 
 	#replaceGrid(grid: string[][]): void {

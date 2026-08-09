@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
 	Component,
 	type CursorPlacement,
+	createSystemScheduler,
 	FullScreenTui,
+	ProcessTerminal,
+	type ProcessTerminalInput,
+	type ProcessTerminalOutput,
 	type RenderContext,
 	type Terminal,
 	type TerminalCapabilities,
@@ -14,6 +18,7 @@ import {
 import { StrictScreen } from "./support/strict-screen.ts";
 
 class TraceTerminal implements Terminal {
+	readonly available: boolean = true;
 	started = false;
 	readonly size: TerminalSize = Object.freeze({ columns: 80, rows: 24 });
 	readonly capabilities: TerminalCapabilities = Object.freeze({
@@ -60,9 +65,82 @@ class EnterFlushFailureTerminal extends TraceTerminal {
 }
 
 class UnavailableTerminal extends TraceTerminal {
+	override readonly available: boolean = false;
+
 	override async start(): Promise<boolean> {
 		this.trace.push("terminal.start");
 		return false;
+	}
+}
+
+class LateUnavailableTerminal extends TraceTerminal {
+	override async start(): Promise<boolean> {
+		this.trace.push("terminal.start");
+		return false;
+	}
+}
+
+class ScreenAwareInput implements ProcessTerminalInput {
+	isTTY = true;
+	isRaw = false;
+	readonly #listeners = new Set<(chunk: string | Uint8Array) => void>();
+
+	setRawMode(enabled: boolean): void {
+		this.isRaw = enabled;
+	}
+
+	setEncoding(): void {}
+
+	resume(): void {}
+
+	pause(): void {}
+
+	on(_event: "data", listener: (chunk: string | Uint8Array) => void): void {
+		this.#listeners.add(listener);
+	}
+
+	off(_event: "data", listener: (chunk: string | Uint8Array) => void): void {
+		this.#listeners.delete(listener);
+	}
+
+	read(): null {
+		return null;
+	}
+
+	emitData(chunk: string): void {
+		for (const listener of [...this.#listeners]) listener(chunk);
+	}
+}
+
+class ScreenAwareOutput implements ProcessTerminalOutput {
+	readonly isTTY = true;
+	readonly columns = 80;
+	readonly rows = 24;
+	readonly screen: StrictScreen;
+	readonly input: ScreenAwareInput;
+	readonly #resizeListeners = new Set<() => void>();
+
+	constructor(screen: StrictScreen, input: ScreenAwareInput) {
+		this.screen = screen;
+		this.input = input;
+	}
+
+	write(data: string, callback?: () => void): boolean {
+		for (const response of this.screen.write(data)) queueMicrotask(() => this.input.emitData(response));
+		callback?.();
+		return true;
+	}
+
+	on(_event: "resize", listener: () => void): void {
+		this.#resizeListeners.add(listener);
+	}
+
+	off(_event: "resize", listener: () => void): void {
+		this.#resizeListeners.delete(listener);
+	}
+
+	getColorDepth(): number {
+		return 24;
 	}
 }
 
@@ -134,6 +212,30 @@ class FailingDisposeImageSurface extends TraceImageSurface {
 }
 
 describe("FullScreenTui", () => {
+	it("negotiates and restores Kitty keyboard flags on the alternate screen", async () => {
+		const input = new ScreenAwareInput();
+		const screen = new StrictScreen(80, 24);
+		const output = new ScreenAwareOutput(screen, input);
+		const scheduler = createSystemScheduler();
+		const terminal = new ProcessTerminal({ environment: {}, input, output, scheduler });
+		const tui = new FullScreenTui({
+			terminal,
+			root: new ContextProbe(),
+			clock: { now: () => 0 },
+			scheduler,
+			keybindings: [],
+		});
+
+		await expect(tui.start()).resolves.toBe(true);
+		expect(screen.alternateScreen).toBe(true);
+		expect(screen.kittyKeyboardFlags).toEqual({ main: 0, alternate: 7 });
+
+		await tui.stop();
+		expect(screen.alternateScreen).toBe(false);
+		expect(screen.kittyKeyboardFlags).toEqual({ main: 0, alternate: 0 });
+		expect(input.isRaw).toBe(false);
+	});
+
 	it("owns alternate-screen ordering and supplies the full render context", async () => {
 		const terminal = new TraceTerminal();
 		const root = new ContextProbe();
@@ -146,8 +248,8 @@ describe("FullScreenTui", () => {
 		});
 
 		await expect(tui.start()).resolves.toBe(true);
-		expect(terminal.trace[0]).toBe("terminal.start");
-		expect(terminal.trace[1]).toContain("\x1b[?1049h");
+		expect(terminal.trace[0]).toContain("\x1b[?1049h");
+		expect(terminal.trace[1]).toBe("terminal.start");
 		expect(terminal.trace[2]).toBe("terminal.onInput");
 		expect(root.contexts.at(-1)).toEqual({ width: 80, height: 24, now: 123 });
 
@@ -169,7 +271,25 @@ describe("FullScreenTui", () => {
 		});
 
 		await expect(tui.start()).resolves.toBe(false);
-		expect(terminal.trace).toEqual(["terminal.start"]);
+		expect(terminal.trace).toEqual([]);
+		expect(tui.started).toBe(false);
+	});
+
+	it("leaves the alternate screen when terminal availability changes during startup", async () => {
+		const terminal = new LateUnavailableTerminal();
+		const tui = new FullScreenTui({
+			terminal,
+			root: new ContextProbe(),
+			clock: { now: () => 0 },
+			scheduler: { schedule: () => ({ cancel() {} }) },
+			keybindings: [],
+		});
+
+		await expect(tui.start()).resolves.toBe(false);
+		expect(terminal.trace[0]).toContain("\x1b[?1049h");
+		expect(terminal.trace).toContain("terminal.start");
+		expect(terminal.trace).toContain("terminal.stop");
+		expect(terminal.trace.at(-1)).toContain("\x1b[?1049l");
 		expect(tui.started).toBe(false);
 	});
 

@@ -19,11 +19,13 @@ export interface TerminalCapabilities {
 export type TerminalInputListener = (input: TerminalInput) => void | Promise<void>;
 
 export interface Terminal {
+	/** Synchronous preflight for whether writing interactive terminal controls is safe. */
+	readonly available: boolean;
 	readonly started: boolean;
 	readonly size: TerminalSize;
 	readonly capabilities: TerminalCapabilities;
 
-	/** Returns false when the adapter cannot start, such as on non-TTY streams. */
+	/** Returns false when the adapter cannot start, including after a successful preflight. */
 	start(): Promise<boolean>;
 	stop(): Promise<void>;
 	write(data: string): void;

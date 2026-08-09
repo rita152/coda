@@ -66,4 +66,6 @@ if (await tui.start()) {
 
 `start()` returns `false` when the supplied streams cannot support an interactive TUI. Callers may recommend an explicit print mode, but should not silently start a different terminal UI.
 
+`Terminal.available` is the synchronous preflight `FullScreenTui` uses before emitting alternate-screen controls. `Terminal.start()` remains authoritative and may still return `false` if availability changes during startup.
+
 `Terminal.flushOutput()` waits only for writes and is safe inside an input handler. `Terminal.flush()` additionally waits for queued input handlers and is intended for external settlement and tests.

@@ -198,6 +198,10 @@ export class ProcessTerminal implements Terminal {
 		this.#capabilities = this.#createCapabilities("legacy");
 	}
 
+	get available(): boolean {
+		return this.#input.isTTY === true && this.#output.isTTY === true && typeof this.#input.setRawMode === "function";
+	}
+
 	get started(): boolean {
 		return this.#started;
 	}
@@ -223,13 +227,14 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async #performStart(): Promise<boolean> {
-		if (!this.#input.isTTY || !this.#output.isTTY || typeof this.#input.setRawMode !== "function") return false;
+		const setRawMode = this.#input.setRawMode;
+		if (!this.available || !setRawMode) return false;
 		this.#starting = true;
 		this.#wasRaw = this.#input.isRaw ?? false;
 		try {
 			this.#input.on("data", this.#dataListener);
 			this.#output.on("resize", this.#resizeListener);
-			this.#input.setRawMode(true);
+			setRawMode.call(this.#input, true);
 			this.#input.setEncoding?.("utf8");
 			this.#input.resume?.();
 			if (this.#usedFallbackSize) {

@@ -190,6 +190,7 @@ describe("ProcessTerminal lifecycle and capabilities", () => {
 		const result = create();
 		result.input.isTTY = false;
 
+		expect(result.terminal.available).toBe(false);
 		await expect(result.terminal.start()).resolves.toBe(false);
 		expect(result.input.rawModes).toEqual([]);
 		expect(result.input.listenerCount).toBe(0);
@@ -205,6 +206,7 @@ describe("ProcessTerminal lifecycle and capabilities", () => {
 		};
 		const terminal = new ProcessTerminal({ environment: {}, input, output, scheduler: new ManualScheduler() });
 
+		expect(terminal.available).toBe(false);
 		await expect(terminal.start()).resolves.toBe(false);
 		expect(output.output).toBe("");
 	});

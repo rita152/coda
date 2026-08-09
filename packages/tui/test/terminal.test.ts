@@ -12,6 +12,7 @@ describe("VirtualTerminal public contract", () => {
 	it("has an asynchronous idempotent lifecycle and immutable instance snapshots", async () => {
 		const terminal = new VirtualTerminal({ columns: 100, rows: 30 });
 
+		expect(terminal.available).toBe(true);
 		await expect(terminal.start()).resolves.toBe(true);
 		await expect(terminal.start()).resolves.toBe(true);
 		expect(terminal.started).toBe(true);
