@@ -1361,6 +1361,8 @@ describe("Permission Engine filesystem matrix", () => {
 		await mkdir(metadataTarget);
 		await symlink(metadataTarget, join(root, ".git"));
 		const workspace = await createWorkspace(root, createNodeFileSystem());
+		const protectedAlias = join(workspace.root, ".git");
+		const canonicalMetadataTarget = await realpath(metadataTarget);
 		const requests: PermissionApprovalRequest[] = [];
 		const engine = createPermissionEngine({
 			cwd: workspace.root,
@@ -1391,8 +1393,8 @@ describe("Permission Engine filesystem matrix", () => {
 		]);
 		for (const request of [aliasRequest, targetRequest]) {
 			const policy = engine.sandboxPolicyFor(request.invocationId);
-			expect(policy?.protectedMetadataPaths).not.toContain(join(root, ".git"));
-			expect(policy?.protectedMetadataPaths).not.toContain(metadataTarget);
+			expect(policy?.protectedMetadataPaths).not.toContain(protectedAlias);
+			expect(policy?.protectedMetadataPaths).not.toContain(canonicalMetadataTarget);
 		}
 	});
 });

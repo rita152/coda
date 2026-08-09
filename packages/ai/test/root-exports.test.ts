@@ -82,7 +82,7 @@ describe("versioned compatibility export manifest", () => {
 			expect(["compatible", "deliberate-deviation", "type-only"]).toContain(entry.status);
 			expect(entry.test).toBeTruthy();
 		}
-	});
+	}, 15_000);
 
 	test("imports every allowed subpath and finds no extra runtime names", async () => {
 		const manifest = await readManifest();

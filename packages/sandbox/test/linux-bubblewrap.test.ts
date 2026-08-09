@@ -175,6 +175,7 @@ describe("Linux bubblewrap preparation", () => {
 		await writeFile(bundled, contents);
 		await chmod(bundled, 0o755);
 		const digest = createHash("sha256").update(contents).digest("hex");
+		const canonicalBundled = await realpath(bundled);
 
 		await expect(
 			resolveLinuxBubblewrap({
@@ -182,16 +183,16 @@ describe("Linux bubblewrap preparation", () => {
 				path: "/definitely/not/a/search/path",
 				bundledPath: bundled,
 				bundledSha256: digest,
-				probe: async () => true,
+				probe: async (candidate) => candidate === canonicalBundled,
 			}),
-		).resolves.toBe(await realpath(bundled));
+		).resolves.toBe(canonicalBundled);
 		await expect(
 			resolveLinuxBubblewrap({
 				cwd: directory,
 				path: "/definitely/not/a/search/path",
 				bundledPath: bundled,
 				bundledSha256: "0".repeat(64),
-				probe: async () => true,
+				probe: async (candidate) => candidate === canonicalBundled,
 			}),
 		).rejects.toThrow(/digest mismatch/);
 	});
@@ -204,15 +205,16 @@ describe("Linux bubblewrap preparation", () => {
 		await writeFile(bundled, contents);
 		await writeFile(`${bundled}.sha256`, `${createHash("sha256").update(contents).digest("hex")}\n`);
 		await chmod(bundled, 0o755);
+		const canonicalBundled = await realpath(bundled);
 
 		await expect(
 			resolveLinuxBubblewrap({
 				cwd: directory,
 				path: "/definitely/not/a/search/path",
 				bundledPath: bundled,
-				probe: async () => true,
+				probe: async (candidate) => candidate === canonicalBundled,
 			}),
-		).resolves.toBe(await realpath(bundled));
+		).resolves.toBe(canonicalBundled);
 
 		const replacement = "#!/bin/sh\nexit 42\n";
 		await writeFile(bundled, replacement);
@@ -223,7 +225,7 @@ describe("Linux bubblewrap preparation", () => {
 				cwd: directory,
 				path: "/definitely/not/a/search/path",
 				bundledPath: bundled,
-				probe: async () => true,
+				probe: async (candidate) => candidate === canonicalBundled,
 			}),
 		).rejects.toThrow(/digest mismatch/);
 	});

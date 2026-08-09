@@ -318,22 +318,33 @@ function profileAllowsWrite(policy: Readonly<CompiledSandboxPolicy>, canonicalPa
  * restriction. An approved protected-metadata mutation removes only the containing Workspace's
  * blanket metadata exclusion for this invocation; the helper still accepts exactly one target.
  */
-function exactMutationPolicy(
+async function exactMutationPolicy(
 	policy: Readonly<CompiledSandboxPolicy>,
 	canonicalPath: string,
 	lexicalPath: string,
-): Readonly<CompiledSandboxPolicy> {
+	workspace: Workspace,
+): Promise<Readonly<CompiledSandboxPolicy>> {
 	if (policy.writableRoots === "full-disk" || profileAllowsWrite(policy, canonicalPath)) return policy;
 	const targetDirectory = dirname(canonicalPath);
+	const coversMutation = (path: string) =>
+		isContained(path, canonicalPath) || isContained(path, targetDirectory) || isContained(path, lexicalPath);
+	const reopenedProtectedPaths = new Set<string>();
+	for (const path of policy.protectedMetadataPaths) {
+		if (coversMutation(path)) {
+			reopenedProtectedPaths.add(path);
+			continue;
+		}
+		try {
+			const canonicalProtectedPath = (await workspace.resolvePath(path, "read")).canonicalPath;
+			if (coversMutation(canonicalProtectedPath)) reopenedProtectedPaths.add(path);
+		} catch {
+			// A protected path that cannot be resolved remains protected (fail closed).
+		}
+	}
 	const protectedMetadataRoots = policy.protectedMetadataRoots.filter((root) =>
-		policy.protectedMetadataNames.every(
-			(name) => !isContained(join(root, name), canonicalPath) && !isContained(join(root, name), lexicalPath),
-		),
+		policy.protectedMetadataNames.every((name) => !reopenedProtectedPaths.has(join(root, name))),
 	);
-	const protectedMetadataPaths = policy.protectedMetadataPaths.filter(
-		(path) =>
-			!isContained(path, canonicalPath) && !isContained(path, targetDirectory) && !isContained(path, lexicalPath),
-	);
+	const protectedMetadataPaths = policy.protectedMetadataPaths.filter((path) => !reopenedProtectedPaths.has(path));
 	return Object.freeze({
 		...policy,
 		writableRoots: Object.freeze([...new Set([...policy.writableRoots, targetDirectory])]),
@@ -1255,7 +1266,16 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 				recursive: recursiveFileAccess(toolRequest.toolName),
 				resolved,
 			};
-			const grant = () => {
+			const grant = async () => {
+				const sandboxPolicy =
+					intent === "write"
+						? await exactMutationPolicy(
+								invocationProfile,
+								resolved.canonicalPath,
+								resolved.lexicalPath,
+								workspace,
+							)
+						: invocationProfile;
 				workspace.grantPath({
 					invocationId: toolRequest.invocationId,
 					toolName: toolRequest.toolName,
@@ -1263,15 +1283,10 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 					canonicalPath: resolved.canonicalPath,
 					recursive: parsed.recursive,
 				});
-				sandboxPolicies.set(
-					toolRequest.invocationId,
-					intent === "write"
-						? exactMutationPolicy(invocationProfile, resolved.canonicalPath, resolved.lexicalPath)
-						: invocationProfile,
-				);
+				sandboxPolicies.set(toolRequest.invocationId, sandboxPolicy);
 			};
 			if (intent === "read" || profileAllowsWrite(invocationProfile, resolved.canonicalPath)) {
-				grant();
+				await grant();
 				return { decision: "allow" };
 			}
 
@@ -1324,7 +1339,7 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 						return reject("Network Rule cannot approve filesystem access");
 				}
 			}
-			grant();
+			await grant();
 			return { decision: "allow" };
 		} catch (error) {
 			return reject(error instanceof Error ? error.message : String(error));
