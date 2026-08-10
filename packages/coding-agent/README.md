@@ -52,8 +52,11 @@ or `p` and its displayed number for an eligible process-local command-prefix
 approval. Choices are numbered sequentially, so denial is `2` when no prefix is
 available and `3` when one is. The feedback choice or Escape cancels the Run and
 returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
-a request. While the Agent is idle, `/approvals` lists and revokes process-local
-command approvals; `/permissions` changes the current process Permission Profile.
+a request. The Composer's borderless upper list exposes `/permission`, `/auth`,
+`/model`, `/session`, `/new`, and the running-Session-only `/follow-up` action;
+configuration commands open nested selectors and do not accept trailing arguments.
+`/permissions` remains a hidden compatibility alias, while `/approvals` and
+`/attach` are ordinary Prompt text.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`.
 
@@ -79,9 +82,13 @@ npm run test:e2e
 - bounded image attachments with Kitty preview and system-viewer fallback
 - Pi-style multiline Composer and matching sent-Prompt cards
 - current-Session Prompt History with visual-row Up/Down navigation and exact draft restoration
+- source-labelled, case-insensitive Slash completion with Pi-style borderless upper lists and shared nested command flows
+- global Provider authentication and Custom Provider discovery across the three supported Api protocols
+- per-Session Model and Permission selection with immutable Model/Credential/Permission snapshots for each Run
+- workspace-scoped concurrent Session runtimes with focus switching and background progress
 - explicit `!command` User Shell mode with live bounded output and a mixed deferred FIFO
 - durable Steering/Follow-up input queues with pause, resume, failure recovery, and Alt+Up reclaim
-- append-only, workspace-scoped Session v5 resume with content-addressed Media Assets, Composer facts, and non-authorizing Permission audit facts
+- append-only, workspace-scoped Session v6 resume with content-addressed Media Assets, Composer/Extension facts, selected high-level Permission Profile, and non-authorizing Permission audit facts
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
 - transient whole-Turn retry at 2s, 4s, and 8s
@@ -90,6 +97,6 @@ The Policy Gate resolves authority before a model Tool can run. Model `bash`, na
 
 Explicit interactive `!command` remains a separate direct-user entry point: it bypasses model Tool approval and Sandbox, inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 
-RPC, client/server mode, public SDK and extension contracts, compaction, Session
-branching, autocomplete, selection, redo, durable drafts, syntax highlighting, and generic terminal-image
-protocol support remain deferred.
+RPC, client/server mode, public SDK, Skill/MCP loading and execution, compaction,
+Session branching, rename/archive/delete, redo, durable drafts, syntax highlighting,
+and generic terminal-image protocol support remain deferred.

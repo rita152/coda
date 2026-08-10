@@ -36,6 +36,52 @@ describe("Session facade", () => {
 		await restored.close();
 	});
 
+	it("round-trips ordered v6 Skill and MCP references in Composer history", async () => {
+		let id = 0;
+		const manager = new InMemorySessionManager({
+			clock: { now: () => 1_025 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+		});
+		const references = [
+			{
+				id: "extension-reference:one",
+				commandId: "skill:review",
+				source: "skill" as const,
+				name: "review",
+				start: 4,
+				end: 11,
+			},
+			{
+				id: "extension-reference:two",
+				commandId: "mcp:search",
+				source: "mcp" as const,
+				name: "search",
+				start: 17,
+				end: 24,
+			},
+		];
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: { id: "submission:refs", kind: "prompt", text: "Use /review then /search", references },
+		});
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.composerSubmissions).toEqual([
+			{ id: "submission:refs", kind: "prompt", text: "Use /review then /search", references },
+		]);
+		await restored.close();
+	});
+
 	it("persists reclaiming a failed Follow-up as a distinct recoverability tombstone", async () => {
 		let id = 0;
 		const manager = new InMemorySessionManager({
@@ -77,6 +123,7 @@ describe("Session facade", () => {
 			model: { provider: "opencode-go", id: "kimi-k2.6" },
 			reasoning: "high",
 		});
+		await session.record({ type: "permission_selected", profile: "workspace" });
 		await session.record({
 			type: "prepare_run",
 			promptVersion: "coda-system-prompt-v1",
@@ -112,6 +159,7 @@ describe("Session facade", () => {
 		expect(restored.restored).toMatchObject({
 			model: { provider: "opencode-go", id: "kimi-k2.6" },
 			reasoning: "high",
+			permissionProfile: "workspace",
 		});
 		await restored.close();
 	});

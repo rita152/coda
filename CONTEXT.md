@@ -117,6 +117,10 @@ _Avoid_: Sandbox, Agent hook, User Shell confirmation
 The effective filesystem and network authority assigned to model-requested work. Coda's built-in Permission Profiles are Read Only, Workspace, and Full Access.
 _Avoid_: trust level, Approval Policy, Sandbox mode
 
+**Session Permission Selection**:
+A Session-owned choice of one built-in Permission Profile, distinct from the resolved authority frozen for a Run and from every grant or approval.
+_Avoid_: Permission audit, Session Approval, restored grant
+
 **Approval Policy**:
 The rule that decides when model-requested authority must be reviewed. The four policies are Unless Trusted, On Request, Granular, and Never.
 _Avoid_: Permission Profile, trust level, prompt mode

@@ -1,4 +1,5 @@
 import type { Editor } from "@coda/tui";
+import { restoreExtensionReferences } from "./extension-references.ts";
 import type { ComposerSubmission } from "./input-types.ts";
 
 /** Owns Prompt-history entries, navigation position, and exact draft restoration. */
@@ -38,12 +39,12 @@ export class ComposerHistory {
 			if (this.#index === undefined) {
 				this.#draft = editor.captureState();
 				this.#index = entries.length - 1;
-				editor.setText(entries[this.#index]!.text);
+				showSubmission(editor, entries[this.#index]!);
 				return true;
 			}
 			if (this.#index > 0) {
 				this.#index--;
-				editor.setText(entries[this.#index]!.text);
+				showSubmission(editor, entries[this.#index]!);
 			}
 			return true;
 		}
@@ -51,7 +52,7 @@ export class ComposerHistory {
 		if (this.#index === undefined) return false;
 		if (this.#index < entries.length - 1) {
 			this.#index++;
-			editor.setText(entries[this.#index]!.text);
+			showSubmission(editor, entries[this.#index]!);
 			return true;
 		}
 		if (this.#draft) editor.restoreState(this.#draft);
@@ -86,5 +87,15 @@ export class ComposerHistory {
 
 function freezeSubmission(submission: ComposerSubmission): ComposerSubmission {
 	if (submission.text.trim().length === 0) throw new Error("Composer history cannot record an empty submission");
-	return Object.freeze({ ...submission });
+	return Object.freeze({
+		...submission,
+		...(submission.references
+			? { references: Object.freeze(submission.references.map((reference) => Object.freeze({ ...reference }))) }
+			: {}),
+	});
+}
+
+function showSubmission(editor: Editor, submission: ComposerSubmission): void {
+	editor.setText(submission.text);
+	restoreExtensionReferences(editor, submission.references);
 }

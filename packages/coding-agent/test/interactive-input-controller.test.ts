@@ -6,6 +6,49 @@ import type { Session } from "../src/session/types.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("InteractiveInputController", () => {
+	it("records structured extension references with the Composer submission", async () => {
+		let id = 0;
+		const runtime = testTimeRuntime(90);
+		const faux = createFauxCore({ runtime });
+		faux.setResponses([fauxAssistantMessage("done", { timestamp: 90 })]);
+		const agent = new Agent({
+			clock: { now: () => 90 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			tools: [],
+			policyGate: { check: async () => ({ decision: "allow" }) },
+			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
+		});
+		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
+		const controller = new InteractiveInputController({
+			agent,
+			session: testSession(record),
+			buildInput: async (text) => text,
+			prepareAttachments: async () => emptyTransaction(),
+			allocateId: sequenceIds(),
+		});
+		const references = [
+			{
+				id: "extension-reference:one",
+				commandId: "skill:review",
+				source: "skill" as const,
+				name: "review",
+				start: 4,
+				end: 11,
+			},
+		];
+
+		await expect(controller.submit("Use /review", [], "Use /review", references)).resolves.toMatchObject({
+			kind: "prompt",
+			text: "Use /review",
+			references,
+		});
+		expect(record).toHaveBeenCalledWith({
+			type: "composer_submission_recorded",
+			submission: expect.objectContaining({ references }),
+		});
+		await controller.waitForIdle();
+	});
+
 	it("accepts a prompt before its Agent operation completes and durably enqueues Follow-ups", async () => {
 		let releaseModel!: () => void;
 		const modelGate = new Promise<void>((resolve) => {
@@ -278,6 +321,44 @@ describe("InteractiveInputController", () => {
 		expect(agent.state.pendingFollowUps).toEqual([]);
 		expect(record).toHaveBeenCalledWith({ type: "follow_up_reclaimed", id: queueId });
 		expect(record).toHaveBeenCalledWith({ type: "composer_submission_retracted", id: "composer:paused" });
+	});
+
+	it("discards every unstarted Follow-up when the CLI exits", async () => {
+		let id = 0;
+		const first = "queue:first" as QueueItemId;
+		const second = "queue:second" as QueueItemId;
+		const agent = new Agent({
+			clock: { now: () => 100 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			tools: [],
+			policyGate: { check: async () => ({ decision: "allow" }) },
+			stream: async () => {
+				throw new Error("not called");
+			},
+			seed: {
+				version: 1,
+				messages: [],
+				pendingFollowUps: [
+					{ id: first, content: "first" },
+					{ id: second, content: "second" },
+				],
+			},
+			autoDrainFollowUps: false,
+		});
+		const record = vi.fn(async () => undefined);
+		const controller = new InteractiveInputController({
+			agent,
+			session: testSession(record),
+			buildInput: async (text) => text,
+			prepareAttachments: async () => emptyTransaction(),
+			allocateId: sequenceIds(),
+		});
+
+		await controller.discardPendingFollowUps();
+
+		expect(agent.state.pendingFollowUps).toEqual([]);
+		expect(record).toHaveBeenCalledWith({ type: "follow_up_canceled", id: first });
+		expect(record).toHaveBeenCalledWith({ type: "follow_up_canceled", id: second });
 	});
 
 	it("commits staged Prompt attachments only after the User Message is accepted", async () => {

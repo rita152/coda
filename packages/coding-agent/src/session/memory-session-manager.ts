@@ -31,7 +31,11 @@ export class InMemorySessionManager implements SessionManager {
 	}
 
 	async open(request: OpenSessionRequest): Promise<Session> {
-		const data = request.resumeId ? this.#journals.get(request.resumeId) : this.#create(request.workspace);
+		if (request.resumeId && request.createId)
+			throw new Error("A Session cannot be resumed and created simultaneously");
+		const data = request.resumeId
+			? this.#journals.get(request.resumeId)
+			: this.#create(request.workspace, request.createId ? String(request.createId) : undefined);
 		if (!data) throw new Error(`Session not found: ${request.resumeId}`);
 		if (
 			data.descriptor.workspace.id !== request.workspace.id ||
@@ -64,9 +68,9 @@ export class InMemorySessionManager implements SessionManager {
 			.sort((left, right) => right.createdAt - left.createdAt);
 	}
 
-	#create(workspace: SessionWorkspace): MemoryJournalData {
+	#create(workspace: SessionWorkspace, requestedId?: string): MemoryJournalData {
 		const descriptor: SessionDescriptor = {
-			id: allocateSessionId(this.#runtime),
+			id: (requestedId || allocateSessionId(this.#runtime)) as SessionId,
 			workspace: structuredClone(workspace),
 			createdAt: this.#runtime.clock.now(),
 			persistent: false,

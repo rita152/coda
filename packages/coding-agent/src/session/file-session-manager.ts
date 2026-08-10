@@ -211,11 +211,15 @@ export class FileSessionManager implements SessionManager {
 	}
 
 	async open(request: OpenSessionRequest): Promise<Session> {
+		if (request.resumeId && request.createId)
+			throw new Error("A Session cannot be resumed and created simultaneously");
 		const directory = this.#workspaceDirectory(request.workspace);
 		await this.#prepareDirectory(directory);
 		const sessionId = request.resumeId
 			? this.#validateSessionId(String(request.resumeId))
-			: (`session-${safeIdentity(this.#runtime.idGenerator.generate("queue_item"))}` as SessionId);
+			: request.createId
+				? this.#validateSessionId(String(request.createId))
+				: (`session-${safeIdentity(this.#runtime.idGenerator.generate("queue_item"))}` as SessionId);
 		const path = join(directory, `${sessionId}.jsonl`);
 		const lockPath = `${path}.lock`;
 		const mediaCodec = new SessionMediaCodec({
@@ -242,6 +246,7 @@ export class FileSessionManager implements SessionManager {
 				else if (parsed.header.version === 2) parsed = await this.#migrateV2(path, parsed);
 				else if (parsed.header.version === 3) parsed = await this.#migrateV3(path, parsed);
 				else if (parsed.header.version === 4) parsed = await this.#migrateV4(path, parsed);
+				else if (parsed.header.version === 5) parsed = await this.#migrateV5(path, parsed);
 				parsedMediaReferences = collectMediaReferences(parsed.records);
 				if (
 					parsed.header.workspaceId !== request.workspace.id ||
@@ -479,13 +484,17 @@ export class FileSessionManager implements SessionManager {
 		return this.#installMigration(path, legacy, legacy.records, 4);
 	}
 
+	async #migrateV5(path: string, legacy: ParsedJournal): Promise<ParsedJournal> {
+		return this.#installMigration(path, legacy, legacy.records, 5);
+	}
+
 	async #installMigration(
 		path: string,
 		legacy: ParsedJournal,
 		records: readonly SessionRecord[],
-		fromVersion: 1 | 2 | 3 | 4,
+		fromVersion: 1 | 2 | 3 | 4 | 5,
 	): Promise<ParsedJournal> {
-		const header: SessionHeader = { ...legacy.header, version: 5 };
+		const header: SessionHeader = { ...legacy.header, version: 6 };
 		const migratedText = `${[header, ...records].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 		const validated = parseJournal(migratedText, path, this.#diagnostics);
 		const token = safeIdentity(this.#runtime.idGenerator.generate("queue_item"));
@@ -531,8 +540,8 @@ export class FileSessionManager implements SessionManager {
 			}
 		}
 		await this.#diagnostics?.({
-			code: "session.migrated-v5",
-			message: `Migrated a Session v${fromVersion} journal to Session v5`,
+			code: "session.migrated-v6",
+			message: `Migrated a Session v${fromVersion} journal to Session v6`,
 			details: { path, backupPath: `${path}.v${fromVersion}.backup`, fromVersion },
 		});
 		return validated;

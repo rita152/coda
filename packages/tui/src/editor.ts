@@ -27,9 +27,22 @@ export interface EditorFrame {
 	readonly cursor?: EditorCursorPlacement;
 }
 
+/** A logical range that follows non-overlapping edits and is removed when its text is edited. */
+export interface EditorMarker<T = unknown> {
+	readonly id: string;
+	readonly start: number;
+	readonly end: number;
+	readonly value: T;
+}
+
 export type EditorInputResult =
 	| { readonly type: "handled" }
-	| { readonly type: "submit"; readonly text: string; readonly alternate?: true }
+	| {
+			readonly type: "submit";
+			readonly text: string;
+			readonly alternate?: true;
+			readonly markers?: readonly EditorMarker[];
+	  }
 	| { readonly type: "unhandled" };
 
 declare const editorStateBrand: unique symbol;
@@ -49,11 +62,49 @@ export class Editor {
 	#lastYank?: { start: number; end: number; ringIndex: number };
 	#pasteCounter = 0;
 	#pastes = new Map<string, string>();
+	#markers: EditorMarker[] = [];
 	readonly #undo: EditorSnapshot[] = [];
 	readonly #killRing: string[] = [];
 
 	get text(): string {
 		return this.#text;
+	}
+
+	get cursorOffset(): number {
+		return this.#cursor;
+	}
+
+	get markers(): readonly EditorMarker[] {
+		return Object.freeze(this.#markers.map(cloneMarker));
+	}
+
+	addMarker<T>(marker: EditorMarker<T>): void {
+		if (!marker.id) throw new Error("Editor marker identity must not be empty");
+		if (
+			!Number.isInteger(marker.start) ||
+			!Number.isInteger(marker.end) ||
+			marker.start < 0 ||
+			marker.start >= marker.end ||
+			marker.end > this.#text.length
+		) {
+			throw new RangeError(`Invalid editor marker range: ${marker.start}..${marker.end}`);
+		}
+		if (this.#markers.some(({ id }) => id === marker.id)) {
+			throw new Error(`Editor marker identity already exists: ${marker.id}`);
+		}
+		this.#markers.push(Object.freeze({ ...marker }));
+		this.#markers.sort(compareMarkers);
+	}
+
+	replaceRange(start: number, end: number, value: string): void {
+		if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || end > this.#text.length) {
+			throw new RangeError(`Invalid editor range: ${start}..${end}`);
+		}
+		this.#pushUndo();
+		this.#replaceText(start, end, value);
+		this.#cursor = start + value.length;
+		this.#scrollTop = 0;
+		this.#resetMovementState();
 	}
 
 	captureState(): EditorState {
@@ -67,6 +118,7 @@ export class Editor {
 			lastYank: this.#lastYank ? { ...this.#lastYank } : undefined,
 			pasteCounter: this.#pasteCounter,
 			pastes: new Map(this.#pastes),
+			markers: this.#markers.map(cloneMarker),
 			undo: this.#undo.map(cloneSnapshot),
 			killRing: [...this.#killRing],
 		}) as unknown as EditorState;
@@ -83,6 +135,7 @@ export class Editor {
 		this.#lastYank = snapshot.lastYank ? { ...snapshot.lastYank } : undefined;
 		this.#pasteCounter = snapshot.pasteCounter;
 		this.#pastes = new Map(snapshot.pastes);
+		this.#markers = snapshot.markers.map(cloneMarker);
 		this.#undo.splice(0, this.#undo.length, ...snapshot.undo.map(cloneSnapshot));
 		this.#killRing.splice(0, this.#killRing.length, ...snapshot.killRing);
 	}
@@ -98,13 +151,14 @@ export class Editor {
 	setText(value: string): void {
 		this.#pushUndo();
 		this.#text = value;
+		this.#markers = [];
 		this.#cursor = value.length;
 		this.#scrollTop = 0;
 	}
 
 	absorbPrefix(prefix: string): boolean {
 		if (!prefix || !this.#text.startsWith(prefix)) return false;
-		this.#text = this.#text.slice(prefix.length);
+		this.#replaceText(0, prefix.length, "");
 		this.#cursor = Math.max(0, this.#cursor - prefix.length);
 		this.#scrollTop = 0;
 		this.#resetMovementState();
@@ -145,12 +199,17 @@ export class Editor {
 			const previous = this.#previousBoundary(this.#cursor);
 			if (!input.alt && this.#text.slice(previous, this.#cursor) === "\\") {
 				this.#pushUndo();
-				this.#text = `${this.#text.slice(0, previous)}${this.#text.slice(this.#cursor)}`;
+				this.#replaceText(previous, this.#cursor, "");
 				this.#cursor = previous;
 				this.#insert("\n");
 				return { type: "handled" };
 			}
-			const submission = { type: "submit" as const, text: this.#expandedText().trim() };
+			const expanded = this.#expandedSubmission();
+			const submission = {
+				type: "submit" as const,
+				text: expanded.text,
+				...(expanded.markers.length > 0 ? { markers: expanded.markers } : {}),
+			};
 			return input.alt ? { ...submission, alternate: true } : submission;
 		}
 		if (input.control && input.key === "hyphen") {
@@ -205,7 +264,7 @@ export class Editor {
 				if (start === this.#cursor) return { type: "handled" };
 				this.#pushUndo();
 				if (input.control || input.alt) this.#recordKill(this.#text.slice(start, this.#cursor));
-				this.#text = `${this.#text.slice(0, start)}${this.#text.slice(this.#cursor)}`;
+				this.#replaceText(start, this.#cursor, "");
 				this.#cursor = start;
 				this.#resetMovementState();
 				return { type: "handled" };
@@ -216,7 +275,7 @@ export class Editor {
 				if (start === this.#cursor) return { type: "handled" };
 				this.#pushUndo();
 				this.#recordKill(this.#text.slice(start, this.#cursor));
-				this.#text = `${this.#text.slice(0, start)}${this.#text.slice(this.#cursor)}`;
+				this.#replaceText(start, this.#cursor, "");
 				this.#cursor = start;
 				this.#resetMovementState();
 				return { type: "handled" };
@@ -233,7 +292,7 @@ export class Editor {
 					this.#pushUndo();
 					const ringIndex = (this.#lastYank.ringIndex + 1) % this.#killRing.length;
 					const value = this.#killRing[ringIndex]!;
-					this.#text = `${this.#text.slice(0, this.#lastYank.start)}${value}${this.#text.slice(this.#lastYank.end)}`;
+					this.#replaceText(this.#lastYank.start, this.#lastYank.end, value);
 					this.#cursor = this.#lastYank.start + value.length;
 					this.#lastYank = { start: this.#lastYank.start, end: this.#cursor, ringIndex };
 					return { type: "handled" };
@@ -247,7 +306,7 @@ export class Editor {
 				if (end === this.#cursor) return { type: "handled" };
 				this.#pushUndo();
 				if (input.alt) this.#recordKill(this.#text.slice(this.#cursor, end));
-				this.#text = `${this.#text.slice(0, this.#cursor)}${this.#text.slice(end)}`;
+				this.#replaceText(this.#cursor, end, "");
 				this.#resetMovementState();
 				return { type: "handled" };
 			}
@@ -277,7 +336,7 @@ export class Editor {
 				if (start === end) return { type: "handled" };
 				this.#pushUndo();
 				this.#recordKill(this.#text.slice(start, end));
-				this.#text = `${this.#text.slice(0, start)}${this.#text.slice(end)}`;
+				this.#replaceText(start, end, "");
 				this.#cursor = start;
 				this.#resetMovementState();
 				return { type: "handled" };
@@ -336,7 +395,7 @@ export class Editor {
 
 	#insert(value: string): void {
 		if (value.length === 0) return;
-		this.#text = `${this.#text.slice(0, this.#cursor)}${value}${this.#text.slice(this.#cursor)}`;
+		this.#replaceText(this.#cursor, this.#cursor, value);
 		this.#cursor += value.length;
 		this.#preferredColumn = undefined;
 		this.#lastYank = undefined;
@@ -376,10 +435,36 @@ export class Editor {
 		return nextGraphemeBoundary(this.#text, offset);
 	}
 
-	#expandedText(): string {
-		let expanded = this.#text;
-		for (const [marker, value] of this.#pastes) expanded = expanded.replaceAll(marker, value);
-		return expanded;
+	#expandedSubmission(): { readonly text: string; readonly markers: readonly EditorMarker[] } {
+		let text = this.#text;
+		let markers = this.#markers.map(cloneMarker);
+		for (const [pasteMarker, value] of this.#pastes) {
+			let searchFrom = 0;
+			while (true) {
+				const start = text.indexOf(pasteMarker, searchFrom);
+				if (start < 0) break;
+				const end = start + pasteMarker.length;
+				markers = transformMarkers(markers, start, end, value.length);
+				text = `${text.slice(0, start)}${value}${text.slice(end)}`;
+				searchFrom = start + value.length;
+			}
+		}
+		const trimmedStart = text.length - text.trimStart().length;
+		const trimmedEnd = text.trimEnd().length;
+		return Object.freeze({
+			text: text.slice(trimmedStart, trimmedEnd),
+			markers: Object.freeze(
+				markers
+					.filter((marker) => marker.start >= trimmedStart && marker.end <= trimmedEnd)
+					.map((marker) =>
+						Object.freeze({
+							...marker,
+							start: marker.start - trimmedStart,
+							end: marker.end - trimmedStart,
+						}),
+					),
+			),
+		});
 	}
 
 	#pushUndo(): void {
@@ -389,6 +474,7 @@ export class Editor {
 			scrollTop: this.#scrollTop,
 			pasteCounter: this.#pasteCounter,
 			pastes: new Map(this.#pastes),
+			markers: this.#markers.map(cloneMarker),
 		});
 		if (this.#undo.length > 100) this.#undo.shift();
 	}
@@ -399,6 +485,12 @@ export class Editor {
 		this.#scrollTop = snapshot.scrollTop;
 		this.#pasteCounter = snapshot.pasteCounter;
 		this.#pastes = new Map(snapshot.pastes);
+		this.#markers = snapshot.markers.map(cloneMarker);
+	}
+
+	#replaceText(start: number, end: number, value: string): void {
+		this.#markers = transformMarkers(this.#markers, start, end, value.length);
+		this.#text = `${this.#text.slice(0, start)}${value}${this.#text.slice(end)}`;
 	}
 
 	#recordKill(value: string): void {
@@ -420,6 +512,7 @@ interface EditorSnapshot {
 	readonly scrollTop: number;
 	readonly pasteCounter: number;
 	readonly pastes: ReadonlyMap<string, string>;
+	readonly markers: readonly EditorMarker[];
 }
 
 interface EditorStateSnapshot extends EditorSnapshot {
@@ -438,7 +531,36 @@ function cloneSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
 		scrollTop: snapshot.scrollTop,
 		pasteCounter: snapshot.pasteCounter,
 		pastes: new Map(snapshot.pastes),
+		markers: snapshot.markers.map(cloneMarker),
 	};
+}
+
+function cloneMarker<T>(marker: EditorMarker<T>): EditorMarker<T> {
+	return Object.freeze({ ...marker });
+}
+
+function compareMarkers(left: EditorMarker, right: EditorMarker): number {
+	return left.start - right.start || left.end - right.end || left.id.localeCompare(right.id);
+}
+
+function transformMarkers(
+	markers: readonly EditorMarker[],
+	start: number,
+	end: number,
+	replacementLength: number,
+): EditorMarker[] {
+	const delta = replacementLength - (end - start);
+	const transformed: EditorMarker[] = [];
+	for (const marker of markers) {
+		if (marker.end <= start) {
+			transformed.push(marker);
+			continue;
+		}
+		if (marker.start >= end) {
+			transformed.push(Object.freeze({ ...marker, start: marker.start + delta, end: marker.end + delta }));
+		}
+	}
+	return transformed;
 }
 
 function renderScrollBorder(width: number, direction: "↑" | "↓", hiddenRows: number): string {

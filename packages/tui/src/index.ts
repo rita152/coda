@@ -15,7 +15,9 @@ export {
 	type ComponentInputResult,
 	type ComponentOptions,
 	type CursorPlacement,
+	observeInvalidation,
 	type RenderContext,
+	setComponentFocused,
 } from "./component.ts";
 export type { Diagnostic, DiagnosticSink } from "./diagnostics.ts";
 export {
@@ -24,6 +26,7 @@ export {
 	type EditorCursorPlacement,
 	type EditorFrame,
 	type EditorInputResult,
+	type EditorMarker,
 	type EditorRenderOptions,
 	type EditorState,
 } from "./editor.ts";

@@ -47,6 +47,65 @@ describe("Editor", () => {
 		expect(editor.text).toBe("first\nsecond");
 	});
 
+	it("replaces a text range as one undoable edit", () => {
+		const editor = new Editor();
+		editor.setText("use /mo later");
+
+		editor.replaceRange(4, 7, "/model");
+
+		expect(editor.text).toBe("use /model later");
+		expect(editor.cursorOffset).toBe(10);
+
+		editor.handleInput(key("hyphen", { control: true }));
+
+		expect(editor.text).toBe("use /mo later");
+		expect(editor.cursorOffset).toBe(13);
+	});
+
+	it("tracks generic markers across surrounding edits and invalidates overlapping edits", () => {
+		const editor = new Editor();
+		editor.setText("Use /review now");
+		editor.addMarker({ id: "reference:1", start: 4, end: 11, value: { source: "skill" } });
+
+		editor.handleInput(key("home"));
+		editor.handleInput({ type: "text", text: "Please " });
+		expect(editor.markers).toEqual([{ id: "reference:1", start: 11, end: 18, value: { source: "skill" } }]);
+
+		editor.handleInput(key("end"));
+		for (let index = 0; index < 4; index++) editor.handleInput(key("left"));
+		editor.handleInput(key("backspace"));
+		expect(editor.markers).toEqual([]);
+
+		editor.handleInput(key("hyphen", { control: true }));
+		expect(editor.markers).toEqual([{ id: "reference:1", start: 11, end: 18, value: { source: "skill" } }]);
+	});
+
+	it("preserves markers in captured Editor state", () => {
+		const editor = new Editor();
+		editor.setText("/review");
+		editor.addMarker({ id: "reference:1", start: 0, end: 7, value: "opaque" });
+		const state = editor.captureState();
+
+		editor.setText("replacement");
+		expect(editor.markers).toEqual([]);
+		editor.restoreState(state);
+
+		expect(editor.text).toBe("/review");
+		expect(editor.markers).toEqual([{ id: "reference:1", start: 0, end: 7, value: "opaque" }]);
+	});
+
+	it("reports marker offsets against normalized submission text", () => {
+		const editor = new Editor();
+		editor.setText("  /review  ");
+		editor.addMarker({ id: "reference:1", start: 2, end: 9, value: "opaque" });
+
+		expect(editor.handleInput(key("enter"))).toEqual({
+			type: "submit",
+			text: "/review",
+			markers: [{ id: "reference:1", start: 0, end: 7, value: "opaque" }],
+		});
+	});
+
 	it("places the end-of-line cursor on a new visual row at the exact wrap boundary", () => {
 		const editor = new Editor();
 		editor.handleInput({ type: "text", text: "abcde" });

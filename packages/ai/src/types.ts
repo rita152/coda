@@ -285,7 +285,7 @@ export interface Usage {
 	cacheWrite1h?: number;
 	reasoning?: number;
 	totalTokens: number;
-	cost: {
+	cost?: {
 		input: number;
 		output: number;
 		cacheRead: number;
@@ -498,7 +498,8 @@ export interface Model<TApi extends Api = Api> {
 	reasoning: boolean;
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
-	cost: ModelCost;
+	/** Omitted when the Provider does not report reliable pricing. */
+	cost?: ModelCost;
 	contextWindow: number;
 	maxTokens: number;
 	samplingParams?: Record<string, unknown>;

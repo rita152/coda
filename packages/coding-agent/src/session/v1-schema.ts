@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4 | 5;
+type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -54,6 +54,36 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isComposerExtensionReferences(value: unknown, text: string): boolean {
+	if (!Array.isArray(value) || value.length === 0) return false;
+	const identities = new Set<string>();
+	let previousEnd = 0;
+	for (const reference of value) {
+		if (
+			!exactRecord(reference, ["id", "commandId", "source", "name", "start", "end"]) ||
+			!isNonEmptyString(reference.id) ||
+			identities.has(reference.id) ||
+			!isNonEmptyString(reference.commandId) ||
+			(reference.source !== "skill" && reference.source !== "mcp") ||
+			!isNonEmptyString(reference.name) ||
+			/[\s/]/u.test(reference.name) ||
+			!isNonNegativeInteger(reference.start) ||
+			!isNonNegativeInteger(reference.end) ||
+			reference.start < previousEnd ||
+			reference.start >= reference.end ||
+			reference.end > text.length ||
+			!reference.commandId.startsWith(`${reference.source}:`) ||
+			reference.commandId.length <= reference.source.length + 1 ||
+			text.slice(reference.start, reference.end) !== `/${reference.name}`
+		) {
+			return false;
+		}
+		identities.add(reference.id);
+		previousEnd = reference.end;
+	}
+	return true;
 }
 
 function isJsonValue(value: unknown): boolean {
@@ -263,8 +293,8 @@ function isUsage(value: unknown): boolean {
 	return (
 		exactRecord(
 			value,
-			["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"],
-			["cacheWrite1h", "reasoning"],
+			["input", "output", "cacheRead", "cacheWrite", "totalTokens"],
+			["cacheWrite1h", "reasoning", "cost"],
 		) &&
 		isFiniteNumber(value.input) &&
 		isFiniteNumber(value.output) &&
@@ -273,7 +303,7 @@ function isUsage(value: unknown): boolean {
 		isFiniteNumber(value.totalTokens) &&
 		(value.cacheWrite1h === undefined || isFiniteNumber(value.cacheWrite1h)) &&
 		(value.reasoning === undefined || isFiniteNumber(value.reasoning)) &&
-		isUsageCost(value.cost)
+		(value.cost === undefined || isUsageCost(value.cost))
 	);
 }
 
@@ -424,7 +454,8 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 			value.version === 2 ||
 			value.version === 3 ||
 			value.version === 4 ||
-			value.version === 5) &&
+			value.version === 5 ||
+			value.version === 6) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -530,17 +561,26 @@ export function isSessionRecordPayload(
 		case "follow_up_reclaimed":
 			return version >= 3 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
 		case "composer_submission_recorded":
+			if (version < 4 || !exactRecord(payload, ["submission"])) return false;
+			if (
+				!exactRecord(
+					payload.submission,
+					["id", "kind", "text"],
+					version >= 6 ? ["queueItemId", "references"] : ["queueItemId"],
+				)
+			) {
+				return false;
+			}
 			return (
-				version >= 4 &&
-				exactRecord(payload, ["submission"]) &&
-				exactRecord(payload.submission, ["id", "kind", "text"], ["queueItemId"]) &&
 				isNonEmptyString(payload.submission.id) &&
 				(payload.submission.kind === "prompt" ||
 					payload.submission.kind === "steering" ||
 					payload.submission.kind === "follow_up") &&
 				isNonEmptyString(payload.submission.text) &&
 				payload.submission.text.trim().length > 0 &&
-				(payload.submission.queueItemId === undefined || isNonEmptyString(payload.submission.queueItemId))
+				(payload.submission.queueItemId === undefined || isNonEmptyString(payload.submission.queueItemId)) &&
+				(payload.submission.references === undefined ||
+					(version >= 6 && isComposerExtensionReferences(payload.submission.references, payload.submission.text)))
 			);
 		case "composer_submission_retracted":
 			return version >= 4 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);
@@ -551,6 +591,12 @@ export function isSessionRecordPayload(
 				isNonEmptyString(payload.model.provider) &&
 				isNonEmptyString(payload.model.id) &&
 				REASONING_LEVELS.has(String(payload.reasoning))
+			);
+		case "permission_selected":
+			return (
+				version >= 6 &&
+				exactRecord(payload, ["profile"]) &&
+				(payload.profile === "read-only" || payload.profile === "workspace" || payload.profile === "full-access")
 			);
 		case "project_trust_changed":
 			return (

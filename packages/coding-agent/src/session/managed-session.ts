@@ -122,6 +122,10 @@ export class ManagedSession implements Session {
 			await this.#append("model_selected", { model: change.model, reasoning: change.reasoning });
 			return;
 		}
+		if (change.type === "permission_selected") {
+			await this.#append("permission_selected", { profile: change.profile });
+			return;
+		}
 		if (change.type === "project_trust_changed") {
 			await this.#append("project_trust_changed", { trust: change.trust });
 			return;

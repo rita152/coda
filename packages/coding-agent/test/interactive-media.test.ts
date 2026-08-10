@@ -26,7 +26,7 @@ class BufferOutput implements ApplicationOutput {
 }
 
 describe("interactive image attachments", () => {
-	it("keeps /attach chips until a multimodal prompt is committed", async () => {
+	it("sends removed /attach syntax as an ordinary User Prompt", async () => {
 		const root = await mkdtemp(join(tmpdir(), "coda-interactive-media-"));
 		temporaryDirectories.push(root);
 		const imagePath = join(root, "reference image.png");
@@ -42,7 +42,7 @@ describe("interactive image attachments", () => {
 		faux.setResponses([
 			(context) => {
 				observedContent = context.messages.at(-1)?.content;
-				return fauxAssistantMessage("interactive image answer", { timestamp: 500 });
+				return fauxAssistantMessage("attach syntax was prompt text", { timestamp: 500 });
 			},
 		]);
 		const models = createModels({ runtime });
@@ -80,19 +80,12 @@ describe("interactive image attachments", () => {
 		await until(() => terminal.started);
 		await terminal.emit({ type: "text", text: `/attach ${imagePath}` });
 		await terminal.emit(key("enter"));
-		await until(() => stripAnsi(terminal.readOutput()).includes("[reference image.png]"));
-
-		await terminal.emit({ type: "text", text: "describe it" });
-		await terminal.emit(key("enter"));
-		await until(() => stripAnsi(terminal.readOutput()).includes("interactive image answer"));
+		await until(() => stripAnsi(terminal.readOutput()).includes("attach syntax was prompt text"));
 		await terminal.emit(key("c", { control: true, text: "c" }));
 
 		await expect(running).resolves.toBe(0);
-		expect(observedContent).toEqual([
-			{ type: "text", text: "describe it" },
-			expect.objectContaining({ type: "image" }),
-		]);
-		expect(stdout.value).toBe("interactive image answer\n");
+		expect(observedContent).toBe(`/attach ${imagePath}`);
+		expect(stdout.value).toBe("attach syntax was prompt text\n");
 		expect(stderr.value).toBe("");
 	});
 });

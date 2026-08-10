@@ -2,18 +2,19 @@ import type { AgentEvent, AgentSeed, MessageId } from "@coda/agent";
 import type { ComponentInputContext, KeyInput, MarkdownRenderer, MouseButton } from "@coda/tui";
 import { stripAnsi } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
+import { createUnifiedCommandRegistry } from "../src/commands/unified-registry.ts";
 import { ChatComponent } from "../src/interactive/chat-component.ts";
+import type { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
+import type { ComposerExtensionReference } from "../src/interactive/input-types.ts";
 import type { UserShellSnapshot, UserShellStatus } from "../src/interactive/user-shell.ts";
 
 describe("ChatComponent terminal input", () => {
-	it("routes /approvals to process-local approval management instead of the Model", async () => {
-		const onApprovals = vi.fn(async () => undefined);
+	it("submits the removed /approvals command as an ordinary User Prompt", async () => {
 		const onSubmit = vi.fn();
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
 			reasoning: "off",
 			onSubmit,
-			onApprovals,
 			onAbort: vi.fn(),
 			onExit: vi.fn(),
 		});
@@ -22,8 +23,18 @@ describe("ChatComponent terminal input", () => {
 		component.handleInput({ type: "text", text: "/approvals" }, context);
 		component.handleInput(key("enter"), context);
 
-		await vi.waitFor(() => expect(onApprovals).toHaveBeenCalledOnce());
-		expect(onSubmit).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/approvals", []));
+	});
+
+	it("submits the removed /attach command as an ordinary User Prompt", async () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({ onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/attach /tmp/photo.png", []));
 	});
 
 	it("inserts printable text carried by a normalized KeyInput", () => {
@@ -68,6 +79,16 @@ describe("ChatComponent terminal input", () => {
 		expect(frame.at(-1)).toContain("Enter sends");
 	});
 
+	it("updates the session model presentation without rebuilding the Composer", () => {
+		const component = createComponent();
+
+		component.setModelPresentation("custom/new-model", "high");
+
+		const header = stripAnsi(component.render({ width: 80, height: 12, now: 0 })[0]!);
+		expect(header).toContain("custom/new-model");
+		expect(header).toContain("reasoning high");
+	});
+
 	it("renders a multiline Pi-style editor dock with full-width horizontal borders", () => {
 		const component = createComponent({ colorLevel: 0 });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
@@ -79,6 +100,124 @@ describe("ChatComponent terminal input", () => {
 		expect(frame).toHaveLength(12);
 		expect(frame.slice(-5)).toEqual(["─".repeat(40), "first", "second", "─".repeat(40), frame.at(-1)]);
 		expect(frame.at(-1)).toContain("Enter sends");
+	});
+
+	it("renders slash candidates in a borderless list above the Composer", () => {
+		const component = createComponent({ colorLevel: 0 });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/mo" }, context);
+
+		const frame = component.render({ width: 48, height: 12, now: 0 });
+		const plain = stripAnsi(frame.join("\n"));
+
+		expect(frame).toHaveLength(12);
+		expect(plain).toContain("→ /model <core>");
+		expect(plain).not.toContain("Commands");
+		expect(plain).not.toContain("Tab complete • Enter open • Esc close");
+	});
+
+	it("routes Tab to slash completion before the Editor", () => {
+		const component = createComponent({ colorLevel: 0 });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/mo" }, context);
+
+		component.handleInput(key("tab"), context);
+
+		const frame = stripAnsi(component.render({ width: 48, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("/model");
+		expect(frame).not.toContain("\n/mo\n");
+	});
+
+	it("opens a core command flow in the same upper drawer on Enter", () => {
+		const onSubmit = vi.fn();
+		const onCommand = vi.fn((commandId: string, flow: CommandFlowHost) => {
+			expect(commandId).toBe("core:model");
+			flow.open({
+				id: "model",
+				title: "Model",
+				items: [{ id: "opencode-go/model", label: "opencode-go/model" }],
+			});
+		});
+		const component = createComponent({ colorLevel: 0, onSubmit, onCommand });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/mo" }, context);
+
+		component.handleInput(key("enter"), context);
+
+		const frame = stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"));
+		expect(onCommand).toHaveBeenCalledOnce();
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(frame).toContain("Model");
+		expect(frame).toContain("opencode-go/model");
+	});
+
+	it("invokes the hidden /permissions alias through the command registry", () => {
+		const onSubmit = vi.fn();
+		const onCommand = vi.fn();
+		const component = createComponent({ onSubmit, onCommand });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "/permissions" }, context);
+		component.handleInput(key("enter"), context);
+
+		expect(onCommand).toHaveBeenCalledWith("core:permission", expect.anything());
+		expect(onSubmit).not.toHaveBeenCalled();
+	});
+
+	it("submits exact slash text as a raw prompt after the palette is dismissed", async () => {
+		const onSubmit = vi.fn();
+		const onCommand = vi.fn();
+		const component = createComponent({ onSubmit, onCommand });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/model" }, context);
+
+		component.handleInput(key("escape"), context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/model", []));
+		expect(onCommand).not.toHaveBeenCalled();
+	});
+
+	it("blocks an extension reference when no Skill or MCP loader is available", () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({
+			colorLevel: 0,
+			onSubmit,
+			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput(key("enter"), context);
+
+		component.handleInput(key("enter"), context);
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		const frame = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
+		expect(frame).toContain("Use /review");
+		expect(frame).toContain("Skill/MCP extension loading is unavailable");
+	});
+
+	it("loads and submits ordered extension references as structured data", async () => {
+		const onResolveExtensionReferences = vi.fn(
+			async (_references: readonly ComposerExtensionReference[]) => undefined,
+		);
+		const onSubmit = vi.fn(async () => undefined);
+		const component = createComponent({
+			onSubmit,
+			onResolveExtensionReferences,
+			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput(key("enter"), context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+		const references = onResolveExtensionReferences.mock.calls[0]![0];
+		expect(references).toMatchObject([
+			{ commandId: "skill:review", source: "skill", name: "review", start: 4, end: 11 },
+		]);
+		expect(onSubmit).toHaveBeenCalledWith("Use /review", [], "Use /review", references);
 	});
 
 	it("drops optional header and footer hints by priority on a narrow usable screen", () => {
@@ -393,16 +532,11 @@ describe("ChatComponent terminal input", () => {
 		const onReclaimUserShell = vi.fn(async () => undefined);
 		const component = createComponent({
 			colorLevel: 0,
-			onAttach: async () => attachment("attachment:one", "photo.png"),
 			onUserShell,
 			onReclaimUserShell,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
-		component.handleInput(key("enter"), context);
-		await vi.waitFor(() =>
-			expect(component.render({ width: 60, height: 14, now: 0 }).join("\n")).toContain("[photo.png]"),
-		);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
 
 		component.handleInput({ type: "paste", text: "!echo queued" }, context);
 		component.handleInput(key("enter"), context);
@@ -501,6 +635,48 @@ describe("ChatComponent terminal input", () => {
 		expect(plain).toContain("Steering queued");
 		expect(plain).toContain("Follow-up queued");
 		expect(component.render({ width: 50, height: 16, now: 0 }).at(-3)).toBe("");
+	});
+
+	it("matches the explicit /follow-up command without case sensitivity", async () => {
+		const onSteer = vi.fn();
+		const onFollowUp = vi.fn(() => "queue:follow-up");
+		const component = createComponent({ colorLevel: 0, onSteer, onFollowUp });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: { id: "user-1", message: { role: "user", content: "start", timestamp: 1 } },
+			}),
+		);
+
+		component.handleInput({ type: "text", text: "/FoLlOw-Up later" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onFollowUp).toHaveBeenCalledWith("later", [], "/FoLlOw-Up later"));
+		expect(onSteer).not.toHaveBeenCalled();
+	});
+
+	it("offers /follow-up only while the active Session is running", async () => {
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		const idleSubmit = vi.fn();
+		const idle = createComponent({ colorLevel: 0, onSubmit: idleSubmit });
+		idle.handleInput({ type: "text", text: "/fol" }, context);
+		expect(stripAnsi(idle.render({ width: 48, height: 12, now: 0 }).join("\n"))).not.toContain("/follow-up");
+		idle.handleInput({ type: "text", text: "low-up later" }, context);
+		idle.handleInput(key("enter"), context);
+		await vi.waitFor(() => expect(idleSubmit).toHaveBeenCalledWith("/follow-up later", []));
+
+		const running = createComponent({ colorLevel: 0 });
+		running.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: { id: "user-1", message: { role: "user", content: "start", timestamp: 1 } },
+			}),
+		);
+		running.handleInput({ type: "text", text: "/fol" }, context);
+		expect(stripAnsi(running.render({ width: 48, height: 12, now: 0 }).join("\n"))).toContain("/follow-up <core>");
 	});
 
 	it("marks unconsumed Follow-ups paused when the current Run is aborted", async () => {
@@ -718,18 +894,13 @@ describe("ChatComponent terminal input", () => {
 		expect(reduced.animationInterval({ width: 80, height: 24, now: 0 })).toBeUndefined();
 	});
 
-	it("stages /attach paths as filename chips and submits their stable identities", async () => {
+	it("stages externally resolved attachments as filename chips and submits their stable identities", async () => {
 		const onSubmit = vi.fn(async () => undefined);
-		const onAttach = vi.fn(async () => attachment("attachment:one", "photo.png"));
-		const component = createComponent({ onAttach, onSubmit });
+		const component = createComponent({ onSubmit });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 
-		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
-		component.handleInput(key("enter"), context);
-		await vi.waitFor(() => expect(onAttach).toHaveBeenCalledWith("/tmp/photo.png"));
-		await vi.waitFor(() =>
-			expect(component.render({ width: 80, height: 12, now: 0 }).join("\n")).toContain("[photo.png]"),
-		);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		expect(component.render({ width: 80, height: 12, now: 0 }).join("\n")).toContain("[photo.png]");
 
 		component.handleInput({ type: "text", text: "describe this" }, context);
 		component.handleInput(key("enter"), context);
@@ -741,16 +912,10 @@ describe("ChatComponent terminal input", () => {
 		});
 	});
 
-	it("wraps composer attachments to two rows and reports hidden overflow", async () => {
-		let attached = 0;
-		const component = createComponent({
-			onAttach: async () => attachment(`attachment:${++attached}`, `long-photo-${attached}.png`),
-		});
-		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+	it("wraps composer attachments to two rows and reports hidden overflow", () => {
+		const component = createComponent();
 		for (let index = 0; index < 6; index++) {
-			component.handleInput({ type: "text", text: `/attach /tmp/${index}.png` }, context);
-			component.handleInput(key("enter"), context);
-			await vi.waitFor(() => expect(attached).toBe(index + 1));
+			component.stageAttachment(attachment(`attachment:${index + 1}`, `long-photo-${index + 1}.png`));
 		}
 
 		const plain = stripAnsi(component.render({ width: 40, height: 14, now: 0 }).join("\n"));
@@ -763,15 +928,10 @@ describe("ChatComponent terminal input", () => {
 			throw new Error("Selected Model does not support image input");
 		});
 		const component = createComponent({
-			onAttach: async () => attachment("attachment:one", "photo.png"),
 			onSubmit,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
-		component.handleInput(key("enter"), context);
-		await vi.waitFor(() =>
-			expect(component.render({ width: 80, height: 12, now: 0 }).join("\n")).toContain("[photo.png]"),
-		);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
 
 		component.handleInput({ type: "text", text: "describe this" }, context);
 		component.handleInput(key("enter"), context);
@@ -786,16 +946,11 @@ describe("ChatComponent terminal input", () => {
 	it("provides keyboard attachment focus, modal preview, and detach", async () => {
 		const onDetach = vi.fn(async () => undefined);
 		const component = createComponent({
-			onAttach: async () => attachment("attachment:one", "photo.png"),
 			onDetach,
 			imagePreviewSupported: true,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
-		component.handleInput(key("enter"), context);
-		await vi.waitFor(() =>
-			expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("[photo.png]"),
-		);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
 
 		component.handleInput(key("tab"), context);
 		let frame = component.render({ width: 80, height: 20, now: 0 }).join("\n");
@@ -818,16 +973,12 @@ describe("ChatComponent terminal input", () => {
 	it("limits mouse hover and click handling to attachment label hit regions", async () => {
 		const onOpenAttachment = vi.fn(async () => undefined);
 		const component = createComponent({
-			onAttach: async () => attachment("attachment:one", "photo.png"),
 			onOpenAttachment,
 			imagePreviewSupported: false,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "/attach /tmp/photo.png" }, context);
-		component.handleInput(key("enter"), context);
-		await vi.waitFor(() =>
-			expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("[photo.png]"),
-		);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		component.render({ width: 80, height: 20, now: 0 });
 
 		component.handleInput(mouse("move", 2, 15), context);
 		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("32×24");

@@ -31,6 +31,7 @@ export const SESSION_RECORD_TYPES = [
 	"composer_submission_recorded",
 	"composer_submission_retracted",
 	"model_selected",
+	"permission_selected",
 	"project_trust_changed",
 	"permission_audit_recorded",
 ] as const;
@@ -39,7 +40,7 @@ export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4 | 5;
+	readonly version: 1 | 2 | 3 | 4 | 5 | 6;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -105,6 +106,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let firstComposerSubmissionSequence: number | undefined;
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
+	let permissionProfile: RestoredSessionState["permissionProfile"];
 
 	for (const record of records) {
 		const payload = record.payload as Record<string, unknown>;
@@ -161,6 +163,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 			case "model_selected":
 				model = structuredClone(payload.model as ModelSelection);
 				reasoning = payload.reasoning as RestoredSessionState["reasoning"];
+				break;
+			case "permission_selected":
+				permissionProfile = payload.profile as RestoredSessionState["permissionProfile"];
 				break;
 			case "project_trust_changed":
 				// Project Trust records are audit facts. Only current settings may authorize instructions.
@@ -265,7 +270,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				.map(({ submission }) => submission),
 			...composerSubmissions.values(),
 		].map((submission) => structuredClone(submission)),
-		restored: { model, reasoning },
+		restored: { model, reasoning, permissionProfile },
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,
@@ -359,7 +364,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 5,
+		version: 6,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

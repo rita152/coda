@@ -1,7 +1,13 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import type { Clock, IdGenerator } from "@coda/agent";
-import { type CredentialStore, createModels, InMemoryCredentialStore, type Models, type TimeRuntime } from "@coda/ai";
+import {
+	type CredentialStore,
+	createModels,
+	InMemoryCredentialStore,
+	type MutableModels,
+	type TimeRuntime,
+} from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
 import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
 import {
@@ -12,6 +18,7 @@ import {
 	type SettingsStore,
 	type TerminalFactory,
 } from "./application.ts";
+import type { CommandRegistry } from "./commands/registry.ts";
 import { KeychainCredentialStore } from "./credentials/keychain-store.ts";
 import { MacOsKeychainClient } from "./credentials/macos-keychain-client.ts";
 import type { FileSystem } from "./host/file-system.ts";
@@ -23,6 +30,7 @@ import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
 import { createPermissionRuleStore, defaultPermissionRulePaths } from "./permissions/rule-store.ts";
+import { ProviderManager } from "./providers/provider-manager.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
@@ -161,10 +169,12 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly processRunner?: ProcessRunner;
 	readonly credentialStore?: CredentialStore;
 	readonly settings?: SettingsStore;
-	readonly models?: Models;
+	readonly models?: MutableModels;
+	readonly commandRegistry?: CommandRegistry;
 	readonly terminalFactory?: TerminalFactory;
 	readonly sessions?: SessionManager;
 	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
+	readonly fetch?: typeof globalThis.fetch;
 }
 
 export function createNodeCodingAgentApplication(
@@ -214,6 +224,10 @@ export function createNodeCodingAgentApplication(
 			return registry;
 		})();
 	const settings = options.settings ?? new FileSettingsStore({ fileSystem, homeDirectory, idGenerator });
+	const providerManager = new ProviderManager({
+		models,
+		fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+	});
 	const diagnosticOutput = fullScreenOutput.diagnostics;
 	let activeTerminal: Terminal | undefined;
 	const terminalFactory: TerminalFactory = {
@@ -304,6 +318,8 @@ export function createNodeCodingAgentApplication(
 
 	return createCodingAgentApplication({
 		models,
+		providerManager,
+		commandRegistry: options.commandRegistry,
 		settings,
 		fileSystem,
 		processRunner,

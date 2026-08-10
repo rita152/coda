@@ -12,6 +12,7 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
+import type { PermissionProfile } from "@coda/sandbox";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
@@ -35,6 +36,7 @@ export interface SessionDescriptor {
 export interface RestoredSessionState {
 	readonly model?: ModelSelection;
 	readonly reasoning?: ThinkingLevel | "off";
+	readonly permissionProfile?: PermissionProfile;
 }
 
 export interface SessionMediaRendition {
@@ -84,6 +86,8 @@ export interface OpenSessionRequest {
 	readonly workspace: SessionWorkspace;
 	readonly mode: "interactive" | "print";
 	readonly resumeId?: SessionId | string;
+	/** Preallocated identity for a new lazily materialized Session. */
+	readonly createId?: SessionId | string;
 	readonly forceUnlock?: boolean;
 	readonly persistent?: boolean;
 }
@@ -99,6 +103,7 @@ export type SessionChange =
 			readonly model: ModelSelection;
 			readonly reasoning: ThinkingLevel | "off";
 	  }
+	| { readonly type: "permission_selected"; readonly profile: PermissionProfile }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "permission_audit_recorded"; readonly event: PermissionAuditEvent }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }

@@ -456,15 +456,17 @@ interface PendingApproval {
 	readonly handle: OverlayHandle;
 	readonly component: Component;
 	readonly resolve: (decision: ApprovalDecision) => void;
+	readonly sessionId?: string;
 }
 
 interface QueuedApproval {
 	readonly request: PermissionApprovalRequest;
 	readonly resolve: (decision: ApprovalDecision) => void;
 	readonly reject: (error: unknown) => void;
+	readonly sessionId?: string;
 }
 
-export type ApprovalObserver = (request: PermissionApprovalRequest) => void;
+export type ApprovalObserver = (request: PermissionApprovalRequest, sessionId?: string) => void;
 
 export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 	#tui?: Tui;
@@ -472,12 +474,30 @@ export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 	#pending?: PendingApproval;
 	readonly #queue: QueuedApproval[] = [];
 	#observer?: ApprovalObserver;
+	#activeSessionId?: string;
+
+	get pendingSessionIds(): readonly string[] {
+		return Object.freeze([
+			...new Set([this.#pending?.sessionId, ...this.#queue.map(({ sessionId }) => sessionId)].filter(isString)),
+		]);
+	}
 
 	bind(tui: Tui, terminal: Terminal, observer?: ApprovalObserver): void {
 		if (this.#tui && this.#tui !== tui) throw new Error("Approval handler is already bound to a TUI");
 		this.#tui = tui;
 		this.#terminal = terminal;
 		this.#observer = observer;
+	}
+
+	forSession(sessionId: string): PermissionApprovalHandler {
+		if (!sessionId) throw new Error("Approval Session identity must not be empty");
+		return Object.freeze({ decide: (request: PermissionApprovalRequest) => this.#decide(request, sessionId) });
+	}
+
+	setActiveSession(sessionId: string): void {
+		if (!sessionId) throw new Error("Active approval Session identity must not be empty");
+		this.#activeSessionId = sessionId;
+		this.#showNext();
 	}
 
 	unbind(): void {
@@ -490,16 +510,21 @@ export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 		this.#tui = undefined;
 		this.#terminal = undefined;
 		this.#observer = undefined;
+		this.#activeSessionId = undefined;
 	}
 
 	decide(request: PermissionApprovalRequest): Promise<ApprovalDecision> {
+		return this.#decide(request);
+	}
+
+	#decide(request: PermissionApprovalRequest, sessionId?: string): Promise<ApprovalDecision> {
 		if (!this.#tui || !this.#terminal || !this.#tui.started) {
 			return Promise.reject(new Error("Interactive approval is unavailable"));
 		}
 		const snapshot = snapshotRequest(request);
-		this.#observer?.(snapshot);
+		this.#observer?.(snapshot, sessionId);
 		return new Promise<ApprovalDecision>((resolve, reject) => {
-			this.#queue.push({ request: snapshot, resolve, reject });
+			this.#queue.push({ request: snapshot, resolve, reject, sessionId });
 			this.#pending?.component.invalidate();
 			this.#showNext();
 		});
@@ -507,7 +532,10 @@ export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 
 	#showNext(): void {
 		if (this.#pending) return;
-		const next = this.#queue.shift();
+		const index = this.#queue.findIndex(
+			({ sessionId }) => sessionId === undefined || sessionId === this.#activeSessionId,
+		);
+		const next = index < 0 ? undefined : this.#queue.splice(index, 1)[0];
 		if (!next) return;
 		try {
 			const component =
@@ -535,7 +563,7 @@ export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 						: legacyApprovalPlacement(next.request, columns, rows),
 				focus: true,
 			});
-			this.#pending = { handle, component, resolve: next.resolve };
+			this.#pending = { handle, component, resolve: next.resolve, sessionId: next.sessionId };
 		} catch (error) {
 			next.reject(error);
 			this.#showNext();
@@ -554,6 +582,10 @@ export class InteractiveApprovalHandler implements PermissionApprovalHandler {
 		}
 		this.#showNext();
 	}
+}
+
+function isString(value: string | undefined): value is string {
+	return value !== undefined;
 }
 
 function approvalBarPlacement(request: PermissionApprovalRequest, columns: number, rows: number): OverlayPlacement {

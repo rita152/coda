@@ -17,15 +17,16 @@ import type {
 	Usage,
 } from "../types.ts";
 
-export function emptyUsage(): Usage {
-	return {
+export function emptyUsage(includeCost = true): Usage {
+	const usage: Usage = {
 		input: 0,
 		output: 0,
 		cacheRead: 0,
 		cacheWrite: 0,
 		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+	if (includeCost) usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	return usage;
 }
 
 export function createOutput(model: Model, clock: Clock): AssistantMessage {
@@ -35,7 +36,7 @@ export function createOutput(model: Model, clock: Clock): AssistantMessage {
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: emptyUsage(),
+		usage: emptyUsage(model.cost !== undefined),
 		stopReason: "pending",
 		timestamp: clock.now(),
 	};
@@ -43,9 +44,14 @@ export function createOutput(model: Model, clock: Clock): AssistantMessage {
 
 export function calculateCost(model: Model, usage: Usage): Usage["cost"] {
 	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-	let rates = model.cost;
+	const baseRates = model.cost;
+	if (!baseRates) {
+		delete usage.cost;
+		return undefined;
+	}
+	let rates = baseRates;
 	let matchedThreshold = -1;
-	for (const tier of model.cost.tiers ?? []) {
+	for (const tier of baseRates.tiers ?? []) {
 		if (inputTokens > tier.inputTokensAbove && tier.inputTokensAbove > matchedThreshold) {
 			rates = tier;
 			matchedThreshold = tier.inputTokensAbove;
@@ -53,12 +59,14 @@ export function calculateCost(model: Model, usage: Usage): Usage["cost"] {
 	}
 	const longWrite = usage.cacheWrite1h ?? 0;
 	const shortWrite = usage.cacheWrite - longWrite;
-	usage.cost.input = (rates.input / 1_000_000) * usage.input;
-	usage.cost.output = (rates.output / 1_000_000) * usage.output;
-	usage.cost.cacheRead = (rates.cacheRead / 1_000_000) * usage.cacheRead;
-	usage.cost.cacheWrite = (rates.cacheWrite * shortWrite + rates.input * 2 * longWrite) / 1_000_000;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
-	return usage.cost;
+	const cost = usage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	cost.input = (rates.input / 1_000_000) * usage.input;
+	cost.output = (rates.output / 1_000_000) * usage.output;
+	cost.cacheRead = (rates.cacheRead / 1_000_000) * usage.cacheRead;
+	cost.cacheWrite = (rates.cacheWrite * shortWrite + rates.input * 2 * longWrite) / 1_000_000;
+	cost.total = cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
+	usage.cost = cost;
+	return cost;
 }
 
 export function requireApiKey(provider: string, apiKey: string | undefined): string {

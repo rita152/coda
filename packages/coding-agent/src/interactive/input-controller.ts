@@ -1,6 +1,11 @@
 import type { Agent, AgentEvent, AgentInput, QueueItemId, RunResult } from "@coda/agent";
 import type { Session } from "../session/types.ts";
-import type { ComposerSubmission, ComposerSubmissionKind, UserShellSubmission } from "./input-types.ts";
+import type {
+	ComposerExtensionReference,
+	ComposerSubmission,
+	ComposerSubmissionKind,
+	UserShellSubmission,
+} from "./input-types.ts";
 import type { UserShell } from "./user-shell.ts";
 
 const MAXIMUM_PENDING_FOLLOW_UPS = 32;
@@ -73,17 +78,23 @@ export class InteractiveInputController {
 		text: string,
 		attachmentIds: readonly string[],
 		composerText = text,
+		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | string | undefined> {
 		return this.#serializeAcceptance(async () => {
 			this.#assertCanSubmit();
 			const prepared = await this.#prepareInput(text, attachmentIds);
 			if (this.#shouldAppendDeferredQueue()) {
 				this.#validateFollowUp(followUpText(prepared.input));
-				const submission = await this.#enqueueFollowUp(composerText, prepared.input, prepared.transaction);
+				const submission = await this.#enqueueFollowUp(
+					composerText,
+					prepared.input,
+					prepared.transaction,
+					references,
+				);
 				this.resumeQueue();
 				return submission;
 			}
-			return this.#submitPrompt(composerText, prepared.input, prepared.transaction);
+			return this.#submitPrompt(composerText, prepared.input, prepared.transaction, references);
 		});
 	}
 
@@ -102,10 +113,15 @@ export class InteractiveInputController {
 		});
 	}
 
-	steer(text: string, attachmentIds: readonly string[], composerText = text): Promise<ComposerSubmission | string> {
+	steer(
+		text: string,
+		attachmentIds: readonly string[],
+		composerText = text,
+		references?: readonly ComposerExtensionReference[],
+	): Promise<ComposerSubmission | string> {
 		return this.#serializeAcceptance(async () => {
 			const prepared = await this.#prepareInput(text, attachmentIds);
-			const submission = await this.#recordComposerSubmission("steering", composerText);
+			const submission = await this.#recordComposerSubmission("steering", composerText, undefined, references);
 			try {
 				const id = this.#options.agent.steer(prepared.input);
 				this.#pendingSteering.set(id, {
@@ -121,11 +137,16 @@ export class InteractiveInputController {
 		});
 	}
 
-	followUp(text: string, attachmentIds: readonly string[], composerText = text): Promise<ComposerSubmission | string> {
+	followUp(
+		text: string,
+		attachmentIds: readonly string[],
+		composerText = text,
+		references?: readonly ComposerExtensionReference[],
+	): Promise<ComposerSubmission | string> {
 		return this.#serializeAcceptance(async () => {
 			this.#validateFollowUp(text);
 			const prepared = await this.#prepareInput(text, attachmentIds);
-			return this.#enqueueFollowUp(composerText, prepared.input, prepared.transaction);
+			return this.#enqueueFollowUp(composerText, prepared.input, prepared.transaction, references);
 		});
 	}
 
@@ -157,6 +178,22 @@ export class InteractiveInputController {
 			await this.#retractComposerSubmission(submissionId);
 			this.#submissionByQueueItemId.delete(id);
 		}
+	}
+
+	discardPendingFollowUps(): Promise<void> {
+		this.#queuePaused = true;
+		return this.#serializeAcceptance(async () => {
+			for (const { id } of [...this.#options.agent.state.pendingFollowUps]) {
+				this.#removeDeferred("follow_up", id);
+				this.#options.agent.cancelQueueItem(id);
+				await this.#options.session.record({ type: "follow_up_canceled", id });
+				const submissionId = this.#submissionByQueueItemId.get(id);
+				if (submissionId) {
+					await this.#retractComposerSubmission(submissionId);
+					this.#submissionByQueueItemId.delete(id);
+				}
+			}
+		});
 	}
 
 	reclaimUserShell(id: string): void {
@@ -206,8 +243,9 @@ export class InteractiveInputController {
 		composerText: string,
 		input: AgentInput,
 		transaction: AttachmentTransaction,
+		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | undefined> {
-		const submission = await this.#recordComposerSubmission("prompt", composerText);
+		const submission = await this.#recordComposerSubmission("prompt", composerText, undefined, references);
 		try {
 			this.#startPrompt(input, { transaction, ...(submission ? { submissionId: submission.id } : {}) });
 			return submission;
@@ -245,6 +283,7 @@ export class InteractiveInputController {
 		composerText: string,
 		input: AgentInput,
 		transaction: AttachmentTransaction,
+		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | string> {
 		let id: QueueItemId;
 		try {
@@ -256,7 +295,7 @@ export class InteractiveInputController {
 		const item = this.#retainedFollowUp(id);
 		let submission: ComposerSubmission | undefined;
 		try {
-			submission = await this.#recordComposerSubmission("follow_up", composerText, id);
+			submission = await this.#recordComposerSubmission("follow_up", composerText, id, references);
 			await this.#options.session.record({ type: "follow_up_enqueued", item });
 		} catch (error) {
 			this.#options.agent.cancelQueueItem(id);
@@ -303,6 +342,7 @@ export class InteractiveInputController {
 		kind: ComposerSubmissionKind,
 		text: string,
 		queueItemId?: QueueItemId,
+		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | undefined> {
 		const normalized = text.trim();
 		if (!normalized) return undefined;
@@ -310,6 +350,9 @@ export class InteractiveInputController {
 			id: this.#allocate("composer_submission"),
 			kind,
 			text: normalized,
+			...(references && references.length > 0
+				? { references: Object.freeze(references.map((reference) => Object.freeze({ ...reference }))) }
+				: {}),
 			...(queueItemId ? { queueItemId } : {}),
 		});
 		await this.#options.session.record({ type: "composer_submission_recorded", submission });

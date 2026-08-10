@@ -52,6 +52,8 @@ export interface ModelsRefreshResult {
 
 export interface ModelsRequestTransforms {
 	transformHeaders?: (headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>;
+	/** A previously resolved credential view that must remain stable for this request. */
+	authSnapshot?: AuthResult;
 }
 
 type ModelsRuntimeOverride = { runtime?: TimeRuntime };
@@ -356,19 +358,21 @@ class ModelsImpl implements MutableModels {
 		model: Model<Api>,
 		options: TOptions | undefined,
 	): Promise<{ model: Model<Api>; options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions }> {
-		const resolution = await this.getAuth(model, {
-			apiKey: options?.apiKey,
-			env: options?.env,
-			signal: options?.signal,
-			clock: options?.runtime?.clock ?? this.runtime.clock,
-		});
+		const resolution =
+			options?.authSnapshot ??
+			(await this.getAuth(model, {
+				apiKey: options?.apiKey,
+				env: options?.env,
+				signal: options?.signal,
+				clock: options?.runtime?.clock ?? this.runtime.clock,
+			}));
 		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 		let headers = mergeHeaders(resolution.auth.headers, options?.headers);
 		if (options?.transformHeaders) headers = await options.transformHeaders(headers ?? {});
 		const environment =
 			resolution.env || options?.env ? { ...(resolution.env ?? {}), ...(options?.env ?? {}) } : undefined;
 		const requestModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
-		const { transformHeaders: _transformHeaders, ...rest } = options ?? {};
+		const { authSnapshot: _authSnapshot, transformHeaders: _transformHeaders, ...rest } = options ?? {};
 		return {
 			model: requestModel,
 			options: {

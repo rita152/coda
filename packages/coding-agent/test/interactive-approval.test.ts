@@ -64,6 +64,30 @@ async function setup(columns = 80, rows = 24, appearance: "light" | "dark" | "un
 }
 
 describe("interactive Approval Bar", () => {
+	it("defers a background Session approval until that Session receives focus", async () => {
+		const { terminal, root, tui, approval } = await setup();
+		const observed: Array<{ readonly command?: string; readonly sessionId?: string }> = [];
+		approval.bind(tui, terminal, (request, sessionId) => observed.push({ command: request.command, sessionId }));
+		approval.setActiveSession("session-a");
+
+		const pending = approval.forSession("session-b").decide(commandRequest("background command"));
+		await tui.renderNow();
+		expect(stripAnsi(terminal.readOutput())).not.toContain("background command");
+		expect(tui.focused).toBe(root);
+		expect(approval.pendingSessionIds).toEqual(["session-b"]);
+		expect(observed).toEqual([{ command: "background command", sessionId: "session-b" }]);
+
+		terminal.clearOutput();
+		approval.setActiveSession("session-b");
+		await tui.renderNow();
+		expect(stripAnsi(terminal.readOutput())).toContain("background command");
+		await terminal.emit(key("enter"));
+		await expect(pending).resolves.toEqual({ type: "approved" });
+
+		approval.unbind();
+		await tui.stop();
+	});
+
 	it("is a full-width bottom overlay and reviews concurrent requests in FIFO order", async () => {
 		const { terminal, tui, approval } = await setup();
 		const first = approval.decide(commandRequest("first command"));

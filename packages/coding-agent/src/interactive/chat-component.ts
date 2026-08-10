@@ -16,11 +16,17 @@ import {
 	type TerminalInput,
 	wrapAnsi,
 } from "@coda/tui";
+import { createCoreCommandRegistry } from "../commands/core-commands.ts";
+import type { CommandRegistry } from "../commands/registry.ts";
+import type { CommandDefinition } from "../commands/types.ts";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
+import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
+import { CommandFlowHost, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
-import type { ComposerSubmission, UserShellSubmission } from "./input-types.ts";
+import { extensionReferencesFromMarkers } from "./extension-references.ts";
+import type { ComposerExtensionReference, ComposerSubmission, UserShellSubmission } from "./input-types.ts";
 import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
 import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
@@ -57,26 +63,30 @@ export interface ChatComponentOptions {
 		input: string,
 		attachmentIds: readonly string[],
 		composerText?: string,
+		references?: readonly ComposerExtensionReference[],
 	) => Promise<ComposerSubmission | string | undefined> | ComposerSubmission | string | undefined;
 	readonly onSteer?: (
 		input: string,
 		attachmentIds: readonly string[],
 		composerText?: string,
+		references?: readonly ComposerExtensionReference[],
 	) => Promise<ComposerSubmission | string> | ComposerSubmission | string;
 	readonly onFollowUp?: (
 		input: string,
 		attachmentIds: readonly string[],
 		composerText?: string,
+		references?: readonly ComposerExtensionReference[],
 	) => Promise<ComposerSubmission | string> | ComposerSubmission | string;
+	readonly onResolveExtensionReferences?: (
+		references: readonly ComposerExtensionReference[],
+		composerText: string,
+	) => Promise<void> | void;
 	readonly onUserShell?: (command: string) => Promise<UserShellSubmission> | UserShellSubmission;
 	readonly onReclaimUserShell?: (id: string) => Promise<void> | void;
 	readonly onAbortUserShell?: () => void;
-	readonly onAttach?: (path: string) => Promise<ChatAttachment>;
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly onResumeFollowUps?: () => Promise<void> | void;
-	readonly onPermissions?: () => Promise<string | undefined>;
-	readonly onApprovals?: () => Promise<void>;
 	/** Reads the controller-owned mixed Follow-up/User Shell queue state. */
 	readonly isQueuePaused?: () => boolean;
 	readonly onReclaimFollowUp?: (queueItemId: string) => Promise<void> | void;
@@ -93,6 +103,8 @@ export interface ChatComponentOptions {
 	readonly markdownRenderer?: MarkdownRenderer;
 	readonly colorLevel?: ColorLevel;
 	readonly motion?: "full" | "reduced";
+	readonly commandRegistry?: CommandRegistry;
+	readonly onCommand?: (commandId: string, flow: CommandFlowHost) => Promise<void> | void;
 }
 
 interface ProvisionalPromptCard {
@@ -159,6 +171,8 @@ export class ChatComponent extends Component {
 		readonly blocks: readonly ViewportBlock[];
 	};
 	readonly #editor = new Editor();
+	readonly #commands: CommandComposer;
+	readonly #commandFlow: CommandFlowHost;
 	readonly #history: ComposerHistory;
 	#lastCursor?: CursorPlacement;
 	#lastDockRows = 4;
@@ -174,7 +188,6 @@ export class ChatComponent extends Component {
 	#timelineAttachmentHitRegions = new Map<string, readonly LocalAttachmentHitRegion[]>();
 	readonly #timelineBlockCache = new Map<string, CachedTimelineBlock>();
 	#imageModal = false;
-	#attaching = false;
 	#nextRunAttachments?: readonly ChatAttachment[];
 	readonly #messageAttachments = new Map<string, readonly ChatAttachment[]>();
 	#provisionalCards: ProvisionalPromptCard[] = [];
@@ -182,6 +195,8 @@ export class ChatComponent extends Component {
 	#activeFollowUp?: RecoverablePromptCard;
 	#nextProvisionalId = 0;
 	#permissionLabel?: string;
+	#modelLabel: string;
+	#reasoning: string;
 
 	constructor(options: ChatComponentOptions) {
 		super({ focusable: true });
@@ -189,7 +204,19 @@ export class ChatComponent extends Component {
 		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
 		this.#history = new ComposerHistory(options.composerSubmissions);
 		this.#theme = createCodaTheme(options.colorLevel ?? 0);
+		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
+			isAvailable: (command) => command.id !== "core:follow-up" || this.#running,
+		});
+		this.#commandFlow = new CommandFlowHost({
+			onChange: () => this.invalidate(),
+			onError: (error) => {
+				this.#error = error instanceof Error ? error.message : String(error);
+				this.invalidate();
+			},
+		});
 		this.#permissionLabel = options.permissionLabel;
+		this.#modelLabel = options.modelLabel;
+		this.#reasoning = options.reasoning;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
 		this.#nextRunAttachments = options.initialAttachments;
 		for (const [messageId, attachments] of options.restoredAttachments ?? []) {
@@ -208,6 +235,28 @@ export class ChatComponent extends Component {
 
 	get running(): boolean {
 		return this.#running || this.#shellRunning;
+	}
+
+	setPermissionLabel(label: string): void {
+		this.#permissionLabel = label;
+		this.invalidate();
+	}
+
+	setModelPresentation(modelLabel: string, reasoning: string): void {
+		this.#modelLabel = modelLabel;
+		this.#reasoning = reasoning;
+		this.invalidate();
+	}
+
+	stageAttachment(attachment: ChatAttachment): void {
+		if (this.#attachments.some(({ id }) => id === attachment.id)) {
+			throw new Error(`Attachment is already staged: ${attachment.id}`);
+		}
+		this.#attachments.push(attachment);
+		this.#attachmentFocusKey = undefined;
+		this.#attachmentFocusOrigin = undefined;
+		this.#error = undefined;
+		this.invalidate();
 	}
 
 	override animationInterval(_context: RenderContext): number | undefined {
@@ -348,7 +397,11 @@ export class ChatComponent extends Component {
 	render({ width, height, now }: RenderContext): string[] {
 		if (width < MINIMUM_COLUMNS || height < MINIMUM_ROWS) return renderTooSmall(width, height, this.running);
 
-		const editorFocused = this.focused && this.#focusedAttachmentTarget === undefined && !this.#imageModal;
+		const editorFocused =
+			this.focused &&
+			this.#focusedAttachmentTarget === undefined &&
+			!this.#imageModal &&
+			this.#commandFlow.view === undefined;
 		const editorFrame = this.#editor.render({
 			width,
 			height,
@@ -357,12 +410,24 @@ export class ChatComponent extends Component {
 			styleBorder: (value) =>
 				this.#shellMode
 					? this.#theme.style("error", value)
-					: this.#theme.styleEditorBorder(this.#options.reasoning, editorFocused, value),
+					: this.#theme.styleEditorBorder(this.#reasoning, editorFocused, value),
 			...(this.#shellMode ? { prefix: this.#theme.style("error", "! ") } : {}),
 		});
 		const attachmentLayout = this.#layoutAttachmentRows(width);
 		const attachmentRows = attachmentLayout.lines.length;
-		const dockRows = editorFrame.lines.length + attachmentRows + 1;
+		const flowView = this.#commandFlow.view;
+		const palette = !flowView && !this.#shellMode ? this.#commands.palette : undefined;
+		const maximumDrawerItems = Math.max(0, Math.min(6, height - editorFrame.lines.length - attachmentRows - 5));
+		const drawerLines =
+			maximumDrawerItems === 0
+				? []
+				: flowView
+					? renderCommandFlow(flowView, width, maximumDrawerItems, this.#theme)
+					: palette
+						? renderCommandPalette(palette, width, maximumDrawerItems, this.#theme)
+						: [];
+		const drawerRows = drawerLines.length;
+		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + 1;
 		this.#lastDockRows = dockRows;
 		const viewportHeight = height - 1 - dockRows;
 		const blocks = this.#renderViewportBlocks(width, now);
@@ -372,7 +437,7 @@ export class ChatComponent extends Component {
 		const transcript = [...viewport.lines];
 		while (transcript.length < viewportHeight) transcript.push("");
 
-		const attachmentRow = height - dockRows;
+		const attachmentRow = height - dockRows + drawerRows;
 		this.#attachmentHitRegions = [
 			...viewport.sourceRows.flatMap((source, row) =>
 				(this.#timelineAttachmentHitRegions.get(source.blockId) ?? [])
@@ -384,7 +449,7 @@ export class ChatComponent extends Component {
 				row: attachmentRow + region.row,
 			})),
 		];
-		const editorRow = 1 + viewportHeight + attachmentRows;
+		const editorRow = 1 + viewportHeight + drawerRows + attachmentRows;
 		this.#lastCursor = editorFrame.cursor
 			? {
 					row: editorRow + editorFrame.cursor.row,
@@ -396,12 +461,13 @@ export class ChatComponent extends Component {
 			renderHeader(
 				width,
 				this.#options.workspaceLabel,
-				this.#options.modelLabel,
-				this.#options.reasoning,
+				this.#modelLabel,
+				this.#reasoning,
 				this.#permissionLabel,
 				this.#transcriptMode,
 			),
 			...transcript,
+			...drawerLines,
 			...attachmentLayout.lines,
 			...editorFrame.lines,
 			this.#renderFooter(width),
@@ -476,6 +542,24 @@ export class ChatComponent extends Component {
 				return;
 			}
 			return;
+		}
+		if (this.#commandFlow.view) {
+			this.#commandFlow.handleInput(input);
+			this.invalidate();
+			return;
+		}
+		if (!this.#shellMode) {
+			const before = this.#editor.text;
+			const commandResult = this.#commands.handleInput(input);
+			if (commandResult.type === "handled") {
+				if (this.#editor.text !== before) this.#history.noteTextMutation();
+				this.invalidate();
+				return;
+			}
+			if (commandResult.type === "invoke") {
+				this.#invokeCommand(commandResult.command);
+				return;
+			}
 		}
 		if (input.type === "key" && input.action !== "release") {
 			const attachmentTargets = this.#attachmentTargets();
@@ -606,8 +690,9 @@ export class ChatComponent extends Component {
 			this.invalidate();
 			return;
 		}
-		if (editorResult.type !== "submit" || this.#attaching) return;
+		if (editorResult.type !== "submit") return;
 		const value = editorResult.text.trim();
+		const extensionReferences = extensionReferencesFromMarkers(editorResult.markers ?? []);
 		if (this.#shellMode) {
 			if (!value) {
 				this.#error = "Prefix a command with ! to run it locally. Example: !ls";
@@ -617,55 +702,9 @@ export class ChatComponent extends Component {
 			this.#submitUserShell(value);
 			return;
 		}
-		if (value === "/permissions") {
-			if (this.running) {
-				this.#error = "Permissions can only be changed while the Agent is idle";
-				this.invalidate();
-				return;
-			}
-			if (!this.#options.onPermissions) {
-				this.#error = "Permission selection is unavailable";
-				this.invalidate();
-				return;
-			}
-			this.#editor.clear();
-			this.#history.reset();
-			this.#error = undefined;
-			this.invalidate();
-			void this.#options.onPermissions().then(
-				(label) => {
-					if (label) this.#permissionLabel = label;
-					this.invalidate();
-				},
-				(error: unknown) => {
-					this.#error = error instanceof Error ? error.message : String(error);
-					this.invalidate();
-				},
-			);
-			return;
-		}
-		if (value === "/approvals") {
-			if (this.running) {
-				this.#error = "Session Approvals can only be managed while the Agent is idle";
-				this.invalidate();
-				return;
-			}
-			if (!this.#options.onApprovals) {
-				this.#error = "Session Approval management is unavailable";
-				this.invalidate();
-				return;
-			}
-			this.#editor.clear();
-			this.#history.reset();
-			this.#error = undefined;
-			this.invalidate();
-			void this.#options.onApprovals().then(
-				() => this.invalidate(),
-				(error: unknown) => {
-					this.#error = error instanceof Error ? error.message : String(error);
-					this.invalidate();
-				},
-			);
+		const commandInvocation = this.#commands.resolveSubmission(value);
+		if (commandInvocation && commandInvocation.command.id !== "core:follow-up") {
+			this.#invokeCommand(commandInvocation.command);
 			return;
 		}
 		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedQueue) {
@@ -690,16 +729,9 @@ export class ChatComponent extends Component {
 			this.invalidate();
 			return;
 		}
-		const attachMatch = /^\/attach ([^\r\n]+)$/u.exec(value);
-		if (attachMatch) {
-			const path = attachMatch[1]!.trim();
-			if (!path) return;
-			this.#editor.clear();
-			this.#history.reset();
-			this.#error = undefined;
-			this.#attaching = true;
+		if (extensionReferences.length > 0 && !this.#options.onResolveExtensionReferences) {
+			this.#error = "Skill/MCP extension loading is unavailable";
 			this.invalidate();
-			void this.#attach(path, value);
 			return;
 		}
 		const composerText = value;
@@ -714,12 +746,13 @@ export class ChatComponent extends Component {
 				: appendsPausedQueue
 					? "follow_up"
 					: "prompt";
-		if (this.#running && /^\/follow-up\s+/u.test(submissionText) && !submissionText.includes("\n")) {
+		if (this.#running && /^\/follow-up\s+/iu.test(submissionText) && !submissionText.includes("\n")) {
 			kind = "follow_up";
-			submissionText = submissionText.replace(/^\/follow-up\s+/u, "").trim();
+			submissionText = submissionText.replace(/^\/follow-up\s+/iu, "").trim();
 		}
 		if (submissionText.length === 0 && this.#attachments.length === 0) return;
 		const submittedAttachments = [...this.#attachments];
+		const submittedComposerState = this.#editor.captureState();
 		const provisional: ProvisionalPromptCard = Object.freeze({
 			id: `provisional:${++this.#nextProvisionalId}`,
 			kind,
@@ -739,28 +772,44 @@ export class ChatComponent extends Component {
 		this.#viewport.jumpToEnd();
 		this.invalidate();
 		const attachmentIds = submittedAttachments.map((attachment) => attachment.id);
-		const operation = (() => {
+		const submitAccepted = () => {
 			try {
 				if (kind === "steering") {
 					if (!this.#options.onSteer) throw new Error("Steering is unavailable");
 					return Promise.resolve(
-						composerText === submissionText
-							? this.#options.onSteer(submissionText, attachmentIds)
-							: this.#options.onSteer(submissionText, attachmentIds, composerText),
+						extensionReferences.length > 0
+							? this.#options.onSteer(submissionText, attachmentIds, composerText, extensionReferences)
+							: composerText === submissionText
+								? this.#options.onSteer(submissionText, attachmentIds)
+								: this.#options.onSteer(submissionText, attachmentIds, composerText),
 					);
 				}
 				if (kind === "follow_up" && !appendsPausedQueue) {
 					if (!this.#options.onFollowUp) throw new Error("Follow-up is unavailable");
 					return Promise.resolve(
-						composerText === submissionText
-							? this.#options.onFollowUp(submissionText, attachmentIds)
-							: this.#options.onFollowUp(submissionText, attachmentIds, composerText),
+						extensionReferences.length > 0
+							? this.#options.onFollowUp(submissionText, attachmentIds, composerText, extensionReferences)
+							: composerText === submissionText
+								? this.#options.onFollowUp(submissionText, attachmentIds)
+								: this.#options.onFollowUp(submissionText, attachmentIds, composerText),
 					);
 				}
 				return Promise.resolve(
-					composerText === submissionText
-						? this.#options.onSubmit(submissionText, attachmentIds)
-						: this.#options.onSubmit(submissionText, attachmentIds, composerText),
+					extensionReferences.length > 0
+						? this.#options.onSubmit(submissionText, attachmentIds, composerText, extensionReferences)
+						: composerText === submissionText
+							? this.#options.onSubmit(submissionText, attachmentIds)
+							: this.#options.onSubmit(submissionText, attachmentIds, composerText),
+				);
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		};
+		const operation = (() => {
+			if (extensionReferences.length === 0) return submitAccepted();
+			try {
+				return Promise.resolve(this.#options.onResolveExtensionReferences!(extensionReferences, composerText)).then(
+					submitAccepted,
 				);
 			} catch (error) {
 				return Promise.reject(error);
@@ -782,7 +831,7 @@ export class ChatComponent extends Component {
 				if (this.#nextRunAttachments === submittedAttachments) this.#nextRunAttachments = undefined;
 				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
 				this.#attachments = [...submittedAttachments, ...this.#attachments];
-				if (!this.#editor.text) this.#editor.setText(composerText);
+				if (!this.#editor.text) this.#editor.restoreState(submittedComposerState);
 				this.#error = error instanceof Error ? error.message : String(error);
 				this.invalidate();
 			},
@@ -910,19 +959,6 @@ export class ChatComponent extends Component {
 			if (!card.messageId) addTimeline(`recoverable:${card.item.id}`, card.attachments);
 		}
 		return targets;
-	}
-
-	async #attach(path: string, command: string): Promise<void> {
-		try {
-			if (!this.#options.onAttach) throw new Error("Image attachments are unavailable");
-			this.#attachments.push(await this.#options.onAttach(path));
-		} catch (error) {
-			if (!this.#editor.text) this.#editor.setText(command);
-			this.#error = error instanceof Error ? error.message : String(error);
-		} finally {
-			this.#attaching = false;
-			this.invalidate();
-		}
 	}
 
 	async #detachFocused(): Promise<void> {
@@ -1267,7 +1303,6 @@ export class ChatComponent extends Component {
 						"Enter opens viewer • Tab returns",
 					]);
 		}
-		if (this.#attaching) return fitFooter(width, ["Attaching image…"]);
 		if (this.#shellMode) return fitFooter(width, [this.#theme.style("error", "Shell mode")]);
 		const unread = this.#viewport.unreadUpdates;
 		if (unread > 0) return fitFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
@@ -1303,6 +1338,28 @@ export class ChatComponent extends Component {
 					"Enter sends • Ctrl-C exits",
 					"Ctrl-C exits",
 				]);
+	}
+
+	#invokeCommand(command: CommandDefinition): void {
+		this.#editor.clear();
+		this.#history.reset();
+		this.#error = undefined;
+		const operation = (() => {
+			try {
+				if (!this.#options.onCommand) throw new Error(`${command.title} is unavailable`);
+				return Promise.resolve(this.#options.onCommand(command.id, this.#commandFlow));
+			} catch (error) {
+				return Promise.reject(error);
+			}
+		})();
+		void operation.then(
+			() => this.invalidate(),
+			(error: unknown) => {
+				this.#error = error instanceof Error ? error.message : String(error);
+				this.invalidate();
+			},
+		);
+		this.invalidate();
 	}
 
 	#requestNavigationRender(context: ComponentInputContext): void {

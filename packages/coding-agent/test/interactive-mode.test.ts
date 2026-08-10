@@ -1,6 +1,6 @@
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
-import { createSystemScheduler, VirtualTerminal } from "@coda/tui";
-import { describe, expect, it } from "vitest";
+import { createModels, createProvider, fauxAssistantMessage, fauxProvider, fauxToolCall, lazyStream } from "@coda/ai";
+import { createSystemScheduler, type KeyInput, VirtualTerminal } from "@coda/tui";
+import { describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
@@ -11,6 +11,7 @@ import type {
 	InteractiveProcessLifecycle,
 	InteractiveTerminationSignal,
 } from "../src/interactive/process-lifecycle.ts";
+import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -507,11 +508,19 @@ describe("interactive TUI mode", () => {
 			meta: false,
 			action: "press",
 		});
-		await until(() => terminal.readOutput().includes("Select Permission Profile"));
+		await until(() => terminal.readOutput().includes("Permission"));
 		await terminal.emit({
 			type: "key",
-			key: "2",
-			text: "2",
+			key: "down",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await terminal.emit({
+			type: "key",
+			key: "enter",
 			shift: false,
 			control: false,
 			alt: false,
@@ -534,6 +543,239 @@ describe("interactive TUI mode", () => {
 		expect(saves).toBe(0);
 		expect(stdout.value).toBe("");
 		expect(stderr.value).toBe("");
+	});
+
+	it("selects a model from the session pool without changing the global default", async () => {
+		const runtime = testTimeRuntime(3_600);
+		const faux = fauxProvider({
+			runtime,
+			models: [
+				{ id: "alpha", name: "Alpha" },
+				{ id: "beta", name: "Beta" },
+			],
+		});
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 140, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let saves = 0;
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: "alpha" } }),
+				save: async () => {
+					saves++;
+				},
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started && terminal.readOutput().includes(`${faux.getModel().provider}/alpha`));
+		await terminal.emit({ type: "text", text: "/model" });
+		await terminal.emit({
+			type: "key",
+			key: "enter",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes(`${faux.getModel().provider}/beta`));
+		terminal.clearOutput();
+		await terminal.emit({
+			type: "key",
+			key: "down",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await terminal.emit({
+			type: "key",
+			key: "enter",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes(`${faux.getModel().provider}/beta`));
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+
+		await expect(running).resolves.toBe(0);
+		expect(saves).toBe(0);
+	});
+
+	it("keeps the former Session running while /new and /session change foreground focus", async () => {
+		const runtime = testTimeRuntime(3_750);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			fauxAssistantMessage("new session answer", { timestamp: 3_750 }),
+			fauxAssistantMessage("old session answer", { timestamp: 3_751 }),
+		]);
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		const streamSignals: Array<AbortSignal | undefined> = [];
+		const gatedProvider = createProvider({
+			id: faux.provider.id,
+			name: faux.provider.name,
+			auth: faux.provider.auth,
+			models: faux.provider.getModels(),
+			api: {
+				stream: (model, context, streamOptions) => faux.provider.stream(model, context, streamOptions),
+				streamSimple: (model, context, streamOptions) => {
+					streamSignals.push(streamOptions.signal);
+					if (streamSignals.length !== 1) {
+						return faux.provider.streamSimple(model, context, streamOptions);
+					}
+					return lazyStream(
+						model,
+						async () => {
+							await firstGate;
+							return faux.provider.streamSimple(model, context, streamOptions);
+						},
+						streamOptions,
+					);
+				},
+			},
+		});
+		const models = createModels({ runtime });
+		models.setProvider(gatedProvider);
+		const terminal = new VirtualTerminal({ columns: 90, rows: 28 });
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout: new BufferOutput(),
+				stderr: new BufferOutput(),
+			},
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started);
+		await terminal.emit({ type: "text", text: "first" });
+		await terminal.emit(key("enter"));
+		await until(() => streamSignals.length === 1);
+
+		terminal.clearOutput();
+		await terminal.emit({ type: "text", text: "/new" });
+		await terminal.emit(key("enter"));
+		await new Promise<void>((resolve) => setTimeout(resolve, 50));
+		await terminal.emit({ type: "text", text: "second" });
+		await terminal.emit(key("enter"));
+		await until(() => streamSignals.length === 2 && terminal.readOutput().includes("new session answer"));
+		expect(streamSignals[0]?.aborted).toBe(false);
+
+		terminal.clearOutput();
+		await terminal.emit({ type: "text", text: "/session" });
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes("Session"));
+		await terminal.emit(key("enter"));
+		await new Promise<void>((resolve) => setTimeout(resolve, 50));
+		expect(terminal.readOutput()).toContain("first");
+		expect(terminal.readOutput()).toContain("Ctrl-C aborts");
+		expect(streamSignals[0]?.aborted).toBe(false);
+
+		releaseFirst();
+		await until(() => terminal.readOutput().includes("old session answer"));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+
+		await expect(running).resolves.toBe(0);
+	});
+
+	it("keeps an empty /new Session as an unmaterialized process-local Draft", async () => {
+		const runtime = testTimeRuntime(3_800);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		let id = 0;
+		const idGenerator = { generate: (kind: string) => `${kind}:${++id}` };
+		const backingSessions = new InMemorySessionManager({ clock: runtime.clock, idGenerator });
+		const openSession = vi.fn((request: Parameters<typeof backingSessions.open>[0]) => backingSessions.open(request));
+		const application = createCodingAgentApplication({
+			models,
+			sessions: { open: openSession, list: (workspace) => backingSessions.list(workspace) },
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout: new BufferOutput(),
+				stderr: new BufferOutput(),
+			},
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator,
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started);
+		expect(openSession).toHaveBeenCalledOnce();
+
+		await terminal.emit({ type: "text", text: "/new" });
+		await terminal.emit(key("enter"));
+		await new Promise<void>((resolve) => setTimeout(resolve, 50));
+		expect(openSession).toHaveBeenCalledOnce();
+
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await expect(running).resolves.toBe(0);
+		expect(openSession).toHaveBeenCalledOnce();
 	});
 
 	it("restores the terminal for SIGTERM and returns the conventional signal exit status", async () => {
@@ -718,3 +960,16 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("suspended\nresumed\n");
 	});
 });
+
+function key(keyName: KeyInput["key"], overrides: Partial<KeyInput> = {}): KeyInput {
+	return {
+		type: "key",
+		key: keyName,
+		shift: false,
+		control: false,
+		alt: false,
+		meta: false,
+		action: "press",
+		...overrides,
+	};
+}

@@ -1,7 +1,17 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { Agent, type AgentInput, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
-import type { Api, AssistantMessage, AuthPrompt, ImageContent, Model, Models, ThinkingLevel } from "@coda/ai";
+import type {
+	Api,
+	AssistantMessage,
+	AuthPrompt,
+	AuthResult,
+	ImageContent,
+	Model,
+	Models,
+	MutableModels,
+	ThinkingLevel,
+} from "@coda/ai";
 import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import {
 	createTerminalImageSurface,
@@ -11,6 +21,8 @@ import {
 	type Terminal,
 	type TerminalColorScheme,
 } from "@coda/tui";
+import type { ModelCommandEntry } from "./commands/model-flow.ts";
+import type { CommandRegistry } from "./commands/registry.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
@@ -25,7 +37,7 @@ import {
 	promptTextFromTerminal,
 	selectFromTerminal,
 } from "./interactive/prompts.ts";
-import { runInteractive } from "./interactive/run-interactive.ts";
+import { type InteractiveSessionOptions, runInteractive } from "./interactive/run-interactive.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
@@ -46,16 +58,29 @@ import {
 	createPermissionEngine,
 	type NetworkRule,
 	type PermissionApprovalHandler,
+	type PermissionEngine,
 } from "./permissions/permission-engine.ts";
 import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
 import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { assertContextFits, assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
+import { ProviderManager } from "./providers/provider-manager.ts";
+import type { CustomProviderConfig } from "./providers/types.ts";
 import { createCodingAgentRetry } from "./retry.ts";
+import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
+import { RunPermissionRouter } from "./runtime/run-permission-router.ts";
+import { RunRuntimeSlot } from "./runtime/run-runtime-slot.ts";
+import { DraftSession } from "./session/draft-session.ts";
 import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
-import type { Session, SessionManager, SessionMediaReference, SessionMediaRegistration } from "./session/types.ts";
+import type {
+	Session,
+	SessionId,
+	SessionManager,
+	SessionMediaReference,
+	SessionMediaRegistration,
+} from "./session/types.ts";
 import { createCodingTools } from "./tools/index.ts";
 import { createWorkspace } from "./workspace.ts";
 
@@ -80,9 +105,17 @@ export interface ModelSelection {
 	readonly id: string;
 }
 
+interface PreparedRunRuntime {
+	readonly model: Model<Api>;
+	readonly reasoning: ThinkingLevel | "off";
+	readonly authSnapshot: AuthResult | undefined;
+	readonly permission: PermissionEngine;
+}
+
 export interface UserSettings {
 	readonly defaultModel?: ModelSelection;
 	readonly defaultReasoning?: ThinkingLevel | "off";
+	readonly customProviders?: readonly CustomProviderConfig[];
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
 	readonly ui?: {
@@ -127,7 +160,9 @@ export interface TerminalFactory {
 }
 
 export interface CodingAgentApplicationOptions {
-	readonly models: Models;
+	readonly models: MutableModels;
+	readonly providerManager?: ProviderManager;
+	readonly commandRegistry?: CommandRegistry;
 	readonly settings: SettingsStore;
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
@@ -595,6 +630,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 	const sessions =
 		options.sessions ??
 		new InMemorySessionManager({ clock: options.runtime.clock, idGenerator: options.runtime.idGenerator });
+	const providerManager =
+		providedOptions.providerManager ??
+		new ProviderManager({ models: providedOptions.models, fetch: unavailableProviderDiscoveryFetch });
+	let providersRestored = false;
 	return {
 		run: async (args) => {
 			try {
@@ -674,6 +713,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					throw new Error("Print mode requires a prompt or image");
 				}
 				let settings = await options.settings.load();
+				if (!providersRestored) {
+					providerManager.restore(settings.customProviders ?? []);
+					providersRestored = true;
+				}
 				const terminal =
 					parsed.mode === "interactive"
 						? options.terminalFactory?.create({
@@ -816,6 +859,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					);
 					const selectedProfile =
 						parsed.permissionProfile ??
+						session.restored.permissionProfile ??
 						settings.permissions?.profile ??
 						(projectInstructions ? "workspace" : "read-only");
 					const selectedApprovalPolicy =
@@ -850,7 +894,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					]);
 					const audit: PermissionAuditSink = (event) =>
 						session.record({ type: "permission_audit_recorded", event });
-					const approvalHandler = options.approval ?? interactiveApproval ?? rejectingApproval!;
+					const approvalHandler =
+						options.approval ?? interactiveApproval?.forSession(session.descriptor.id) ?? rejectingApproval!;
 					const auditedApproval: PermissionApprovalHandler = {
 						decide: async (request) => {
 							try {
@@ -887,31 +932,48 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						await audit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
 					};
-					const policy = createPermissionEngine({
-						cwd: workspace.root,
-						shellExecutable,
-						workspace,
-						profile: compiledProfile,
-						approvalPolicy: selectedApprovalPolicy,
-						approval: auditedApproval,
-						resolveExecutable: createExecutableIdentityResolver({
-							fileSystem: options.fileSystem,
-							path: options.runtime.environment.PATH,
-							pathExtensions: options.runtime.environment.PATHEXT,
-							platform: options.runtime.platform,
-						}),
-						onSessionApprovalUsed: audit,
-						commandRules: commandPolicy.rules,
-						hostExecutables: commandPolicy.hostExecutables,
-						networkRules,
-						persistCommandRule: (rule) => persistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
-						persistNetworkRule: (rule) => persistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
-						onWarning: async (message) => {
-							await audit({ type: "warning", message });
-							await options.io.stderr.write(`coda: ${message}\n`);
-						},
+					const createPolicy = (
+						profile: ReturnType<typeof compileSandboxPolicy>,
+						approvalPolicy: ApprovalPolicy,
+					): PermissionEngine =>
+						createPermissionEngine({
+							cwd: workspace.root,
+							shellExecutable,
+							workspace,
+							profile,
+							approvalPolicy,
+							approval: auditedApproval,
+							resolveExecutable: createExecutableIdentityResolver({
+								fileSystem: options.fileSystem,
+								path: options.runtime.environment.PATH,
+								pathExtensions: options.runtime.environment.PATHEXT,
+								platform: options.runtime.platform,
+							}),
+							onSessionApprovalUsed: audit,
+							commandRules: commandPolicy.rules,
+							hostExecutables: commandPolicy.hostExecutables,
+							networkRules,
+							persistCommandRule: (rule) =>
+								persistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
+							persistNetworkRule: (rule) =>
+								persistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
+							onWarning: async (message) => {
+								await audit({ type: "warning", message });
+								await options.io.stderr.write(`coda: ${message}\n`);
+							},
+						});
+					const initialPermission = createPolicy(compiledProfile, selectedApprovalPolicy);
+					const runRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
+						model,
+						reasoning,
+						authSnapshot: auth,
+						permission: initialPermission,
 					});
+					const policy = new RunPermissionRouter(runRuntime, ({ permission }) => permission);
 					await audit(permissionConfigurationAuditEvent("startup", compiledProfile, selectedApprovalPolicy));
+					if (!session.restored.permissionProfile || parsed.permissionProfile) {
+						await session.record({ type: "permission_selected", profile: selectedProfile });
+					}
 					const modelProcessRunner = createAuditedModelProcessRunner(
 						options.modelProcessRunner ?? createModelProcessRunner(),
 						audit,
@@ -940,6 +1002,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							projectInstructions,
 						});
 					let promptSnapshot = freezePrompt();
+					let activeRuntimeId: number | undefined;
 					assertContextFits(
 						model,
 						promptSnapshot.text,
@@ -959,28 +1022,41 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						policyGate: policy,
 						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
 						stream: ({ context, signal }) => {
-							const contextBudget = assertModelContextFits(model, context);
-							return options.models.streamSimple(model, context, {
+							const runtime = runRuntime.active?.value;
+							if (!runtime) throw new Error("A Model stream was requested outside an active Run runtime");
+							if (!runtime.authSnapshot) {
+								throw new Error(`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`);
+							}
+							const contextBudget = assertModelContextFits(runtime.model, context);
+							return options.models.streamSimple(runtime.model, context, {
 								signal,
-								apiKey: parsed.apiKey,
-								reasoning: reasoning === "off" ? undefined : reasoning,
+								authSnapshot: runtime.authSnapshot,
+								reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
 								maxTokens: contextBudget.reservedOutputTokens,
 							});
 						},
 						beforeRun: ({ inputMessage }) => {
-							promptSnapshot = freezePrompt();
-							assertContextFits(
-								model,
-								promptSnapshot.text,
-								inputMessage.message.content,
-								tools,
-								agent.state.messages.map(({ message }) => message),
-							);
-							void session.record({
-								type: "prepare_run",
-								promptVersion: promptSnapshot.version,
-								promptSha256: promptSnapshot.sha256,
-							});
+							const runtime = runRuntime.begin();
+							activeRuntimeId = runtime.id;
+							try {
+								promptSnapshot = freezePrompt();
+								assertContextFits(
+									runtime.value.model,
+									promptSnapshot.text,
+									inputMessage.message.content,
+									tools,
+									agent.state.messages.map(({ message }) => message),
+								);
+								void session.record({
+									type: "prepare_run",
+									promptVersion: promptSnapshot.version,
+									promptSha256: promptSnapshot.sha256,
+								});
+							} catch (error) {
+								runRuntime.end(runtime.id);
+								activeRuntimeId = undefined;
+								throw error;
+							}
 						},
 						systemPrompt: () => promptSnapshot.text,
 						seed: session.seed,
@@ -1010,104 +1086,623 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						) {
 							agent.abort();
 						}
+						if (event.type === "run_end" && activeRuntimeId !== undefined) {
+							runRuntime.end(activeRuntimeId);
+							activeRuntimeId = undefined;
+						}
 					});
 					if (parsed.mode === "interactive") {
+						const persistCustomProviders = async (): Promise<void> => {
+							settings = { ...settings, customProviders: providerManager.configurations };
+							await options.settings.save(settings);
+						};
+						const sessionRunRuntimes = new Map<
+							string,
+							{ readonly runtime: RunRuntimeSlot<PreparedRunRuntime>; readonly apiKey: string | undefined }
+						>([[session.descriptor.id, { runtime: runRuntime, apiKey: parsed.apiKey }]]);
+						const refreshProviderAuth = async (providerId: string): Promise<void> => {
+							for (const { runtime, apiKey } of sessionRunRuntimes.values()) {
+								if (runtime.selected.model.provider !== providerId) continue;
+								const authSnapshot = await options.models.getAuth(runtime.selected.model, {
+									apiKey,
+									clock: options.runtime.clock,
+								});
+								runtime.select({ ...runtime.selected, authSnapshot });
+							}
+						};
 						const imageSurface = createTerminalImageSurface({
 							terminal: interactiveRuntime!.terminal,
 							environment: options.runtime.environment,
 							allocateId: terminalImageIdAllocator(options.runtime.idGenerator),
 						});
-						const exitCode = await runInteractive({
-							agent,
-							session,
-							terminal: interactiveRuntime!.terminal,
-							clock: options.runtime.clock,
-							scheduler: interactiveRuntime!.scheduler,
-							imageSurface,
-							keybindings: options.keybindings ?? [],
-							diagnostics: options.diagnostics,
-							fullScreenOutput: options.fullScreenOutput,
-							approval: interactiveApproval,
-							approvalManagement: policy,
-							approvalFor: policy.approvalFor,
-							modelLabel: `${model.provider}/${model.id}`,
-							workspaceLabel: basename(workspace.root) || workspace.root,
-							permissionProfile: policy.configuration().profile.profile,
-							permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
-							onPermissionProfileChange: async (profile) => {
-								const previous = policy.configuration();
-								const next = {
-									profile: compileSandboxPolicy({
+						const listModelEntries = async (): Promise<readonly ModelCommandEntry[]> => {
+							const configuredProviders = new Set(
+								(
+									await Promise.all(
+										options.models.getProviders().map(async (provider) => {
+											try {
+												return (await options.models.checkAuth(provider.id)) ? provider.id : undefined;
+											} catch {
+												return undefined;
+											}
+										}),
+									)
+								).filter((providerId): providerId is string => providerId !== undefined),
+							);
+							return options.models.getModels().map(
+								(modelEntry): ModelCommandEntry => ({
+									catalog:
+										providerManager.catalogModel(modelEntry.provider, modelEntry.id) ??
+										catalogModelFromRuntime(modelEntry),
+									auth: configuredProviders.has(modelEntry.provider)
+										? "configured"
+										: "authentication_required",
+								}),
+							);
+						};
+						const authCommand = {
+							providers: () => providerManager.authenticationEntries(),
+							updateApiKey: async (providerId: string, apiKey: string) => {
+								await providerManager.updateApiKey(providerId, apiKey);
+								await persistCustomProviders();
+								await refreshProviderAuth(providerId);
+							},
+							logout: async (providerId: string) => {
+								await providerManager.logout(providerId);
+								await refreshProviderAuth(providerId);
+							},
+							addCustomProvider: async (input: Parameters<ProviderManager["addCustomProvider"]>[0]) => {
+								await providerManager.addCustomProvider(input);
+								await persistCustomProviders();
+							},
+						};
+						const secondaryResources = new Map<
+							string,
+							{ readonly session: Session; readonly mediaLibrary: MediaLibrary }
+						>();
+						const createSecondarySessionOptions = async (
+							targetSession: Session,
+							fresh: boolean,
+						): Promise<InteractiveSessionOptions> => {
+							const targetMediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
+							const targetMediaLibrary = new MediaLibrary({
+								fileSystem: options.fileSystem,
+								stagingDirectory: join(
+									options.runtime.homeDirectory,
+									".coda",
+									"tmp",
+									"media",
+									pathSafeIdentity(targetSession.descriptor.id),
+									targetMediaToken,
+								),
+								mediaDirectory: targetSession.descriptor.path
+									? `${targetSession.descriptor.path}.media`
+									: join(
+											options.runtime.homeDirectory,
+											".coda",
+											"tmp",
+											"media",
+											pathSafeIdentity(targetSession.descriptor.id),
+											"committed",
+										),
+								idGenerator: options.runtime.idGenerator,
+							});
+							try {
+								const targetSelection = targetSession.restored.model ?? settings.defaultModel;
+								if (!targetSelection) throw new Error("A new Session requires a configured default Model");
+								const targetModel = findModel(options.models, targetSelection);
+								const targetReasoning = effectiveReasoning(
+									targetModel,
+									targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
+								);
+								const targetAuth = await options.models.getAuth(targetModel, { clock: options.runtime.clock });
+								const targetProfile = compileSandboxPolicy({
+									profile: fresh ? "read-only" : (targetSession.restored.permissionProfile ?? "read-only"),
+									workspaceRoots: [workspace.root],
+									temporaryDirectory,
+									additionalWritableRoots,
+								});
+								const targetApprovalPolicy = defaultApprovalPolicy(targetProfile.profile);
+								const targetAudit: PermissionAuditSink = (event) =>
+									targetSession.record({ type: "permission_audit_recorded", event });
+								const targetAuditedApproval: PermissionApprovalHandler = {
+									decide: async (request) => {
+										try {
+											const targetApprovalHandler =
+												options.approval ??
+												interactiveApproval?.forSession(targetSession.descriptor.id) ??
+												approvalHandler;
+											const decision = await targetApprovalHandler.decide(request);
+											await targetAudit(approvalDecisionAuditEvent(request, decision));
+											return decision;
+										} catch (error) {
+											await targetAudit(
+												approvalDecisionAuditEvent(request, {
+													type: "reviewer-failed",
+													message: error instanceof Error ? error.message : String(error),
+												}),
+											);
+											throw error;
+										}
+									},
+								};
+								const targetPersistRule = async (
+									kind: "command" | "network",
+									rule: CommandRule | NetworkRule,
+									persist: () => Promise<void>,
+								): Promise<void> => {
+									try {
+										await persist();
+									} catch (error) {
+										await targetAudit({
+											type: "rule_persistence",
+											kind,
+											rule,
+											outcome: "failed",
+											error: error instanceof Error ? error.message : String(error),
+										});
+										throw error;
+									}
+									await targetAudit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
+								};
+								const targetCreatePolicy = (
+									profile: ReturnType<typeof compileSandboxPolicy>,
+									approvalPolicy: ApprovalPolicy,
+								): PermissionEngine =>
+									createPermissionEngine({
+										cwd: workspace.root,
+										shellExecutable,
+										workspace,
+										profile,
+										approvalPolicy,
+										approval: targetAuditedApproval,
+										resolveExecutable: createExecutableIdentityResolver({
+											fileSystem: options.fileSystem,
+											path: options.runtime.environment.PATH,
+											pathExtensions: options.runtime.environment.PATHEXT,
+											platform: options.runtime.platform,
+										}),
+										onSessionApprovalUsed: targetAudit,
+										commandRules: commandPolicy.rules,
+										hostExecutables: commandPolicy.hostExecutables,
+										networkRules,
+										persistCommandRule: (rule) =>
+											targetPersistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
+										persistNetworkRule: (rule) =>
+											targetPersistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
+										onWarning: async (message) => {
+											await targetAudit({ type: "warning", message });
+											await options.io.stderr.write(`coda: ${message}\n`);
+										},
+									});
+								const targetPermission = targetCreatePolicy(targetProfile, targetApprovalPolicy);
+								const targetRunRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
+									model: targetModel,
+									reasoning: targetReasoning,
+									authSnapshot: targetAuth,
+									permission: targetPermission,
+								});
+								sessionRunRuntimes.set(targetSession.descriptor.id, {
+									runtime: targetRunRuntime,
+									apiKey: undefined,
+								});
+								const targetPolicy = new RunPermissionRouter(targetRunRuntime, ({ permission }) => permission);
+								const startupPermissionAudit = permissionConfigurationAuditEvent(
+									"startup",
+									targetProfile,
+									targetApprovalPolicy,
+								);
+								if (fresh && targetSession instanceof DraftSession) {
+									targetSession.stageInitialChanges([
+										{ type: "permission_audit_recorded", event: startupPermissionAudit },
+										{ type: "permission_selected", profile: targetProfile.profile },
+									]);
+								} else {
+									await targetAudit(startupPermissionAudit);
+									if (!targetSession.restored.permissionProfile) {
+										await targetSession.record({
+											type: "permission_selected",
+											profile: targetProfile.profile,
+										});
+									}
+								}
+								const targetTools = createCodingTools({
+									workspace,
+									fileSystem: options.fileSystem,
+									processRunner: modelProcessRunner,
+									permissions: targetPolicy,
+									shellExecutable,
+									runtime: options.runtime,
+									settings,
+									onAudit: targetAudit,
+								});
+								const targetFreezePrompt = () =>
+									buildSystemPrompt({
+										workspace: workspace.root,
+										platform: options.runtime.platform,
+										timestamp: options.runtime.clock.now(),
+										tools: targetTools.map((tool) => ({ name: tool.name, description: tool.description })),
+										capabilities: {
+											interactionMode: "interactive",
+											permissionProfile: targetPolicy.configuration().profile.profile,
+											approvalPolicy: approvalPolicyLabel(targetPolicy.configuration().approvalPolicy),
+										},
+										projectInstructions,
+									});
+								let targetPromptSnapshot = targetFreezePrompt();
+								let targetActiveRuntimeId: number | undefined;
+								assertContextFits(
+									targetModel,
+									targetPromptSnapshot.text,
+									"",
+									targetTools,
+									targetSession.seed.messages.map(({ message }) => message),
+								);
+								if (!targetSession.restored.model) {
+									const initialModelSelection = {
+										type: "model_selected",
+										model: { provider: targetModel.provider, id: targetModel.id },
+										reasoning: targetReasoning,
+									} as const;
+									if (fresh && targetSession instanceof DraftSession) {
+										targetSession.stageInitialChanges([initialModelSelection]);
+									} else {
+										await targetSession.record(initialModelSelection);
+									}
+								}
+								const targetAgent = new Agent({
+									clock: options.runtime.clock,
+									idGenerator: options.runtime.idGenerator,
+									tools: targetTools,
+									policyGate: targetPolicy,
+									retry: options.runtime.scheduler
+										? createCodingAgentRetry(options.runtime.scheduler)
+										: undefined,
+									stream: ({ context, signal }) => {
+										const runtime = targetRunRuntime.active?.value;
+										if (!runtime)
+											throw new Error("A Model stream was requested outside an active Run runtime");
+										if (!runtime.authSnapshot) {
+											throw new Error(
+												`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`,
+											);
+										}
+										const contextBudget = assertModelContextFits(runtime.model, context);
+										return options.models.streamSimple(runtime.model, context, {
+											signal,
+											authSnapshot: runtime.authSnapshot,
+											reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
+											maxTokens: contextBudget.reservedOutputTokens,
+										});
+									},
+									beforeRun: ({ inputMessage }) => {
+										const runtime = targetRunRuntime.begin();
+										targetActiveRuntimeId = runtime.id;
+										try {
+											targetPromptSnapshot = targetFreezePrompt();
+											assertContextFits(
+												runtime.value.model,
+												targetPromptSnapshot.text,
+												inputMessage.message.content,
+												targetTools,
+												targetAgent.state.messages.map(({ message }) => message),
+											);
+											void targetSession.record({
+												type: "prepare_run",
+												promptVersion: targetPromptSnapshot.version,
+												promptSha256: targetPromptSnapshot.sha256,
+											});
+										} catch (error) {
+											targetRunRuntime.end(runtime.id);
+											targetActiveRuntimeId = undefined;
+											throw error;
+										}
+									},
+									systemPrompt: () => targetPromptSnapshot.text,
+									seed: targetSession.seed,
+									autoDrainFollowUps: false,
+								});
+								targetSession.attach(targetAgent);
+								const targetRestoredMedia = await restoredChatAttachments(
+									targetSession.mediaReferences,
+									targetSession.descriptor.path,
+									options.fileSystem,
+									new Set(targetSession.recoverableFollowUps.map(({ item }) => item.id)),
+								);
+								const targetPrepareAttachments = (attachmentIds: readonly string[]) =>
+									prepareAttachmentTransaction(
+										attachmentIds.filter((id) => !targetRestoredMedia.contents.has(id)),
+										targetMediaLibrary,
+										targetSession,
+									);
+								targetAgent.onEvent((event) => {
+									if (
+										(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
+										targetPolicy.consumeAbort(event.invocation.id)
+									) {
+										targetAgent.abort();
+									}
+									if (event.type === "run_end" && targetActiveRuntimeId !== undefined) {
+										targetRunRuntime.end(targetActiveRuntimeId);
+										targetActiveRuntimeId = undefined;
+									}
+								});
+								secondaryResources.set(targetSession.descriptor.id, {
+									session: targetSession,
+									mediaLibrary: targetMediaLibrary,
+								});
+								return {
+									agent: targetAgent,
+									session: targetSession,
+									approvalFor: (invocationId) => targetPolicy.approvalFor(invocationId),
+									modelLabel: `${targetModel.provider}/${targetModel.id}`,
+									permissionProfile: targetProfile.profile,
+									permissionLabel: `${permissionProfileLabel(targetProfile.profile)} / ${approvalPolicyLabel(targetApprovalPolicy)}`,
+									onPermissionProfileChange: async (profile) => {
+										const nextProfile = compileSandboxPolicy({
+											profile,
+											workspaceRoots: [workspace.root],
+											temporaryDirectory,
+											additionalWritableRoots,
+										});
+										const nextApprovalPolicy = defaultApprovalPolicy(profile);
+										const nextPermission = targetCreatePolicy(nextProfile, nextApprovalPolicy);
+										await targetAudit(
+											permissionConfigurationAuditEvent(
+												"permissions-command",
+												nextProfile,
+												nextApprovalPolicy,
+											),
+										);
+										await targetSession.record({ type: "permission_selected", profile });
+										targetRunRuntime.select({ ...targetRunRuntime.selected, permission: nextPermission });
+										return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(nextApprovalPolicy)}`;
+									},
+									modelCommand: {
+										currentKey: () =>
+											`${targetRunRuntime.selected.model.provider}/${targetRunRuntime.selected.model.id}`,
+										list: listModelEntries,
+										select: async (selected) => {
+											const authSnapshot = await options.models.getAuth(selected.runtime, {
+												clock: options.runtime.clock,
+											});
+											if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
+											const nextReasoning = effectiveReasoning(
+												selected.runtime,
+												targetRunRuntime.selected.reasoning,
+											);
+											await targetSession.record({
+												type: "model_selected",
+												model: { provider: selected.providerId, id: selected.id },
+												reasoning: nextReasoning,
+											});
+											targetRunRuntime.select({
+												...targetRunRuntime.selected,
+												model: selected.runtime,
+												reasoning: nextReasoning,
+												authSnapshot,
+											});
+											return { modelLabel: selected.key, reasoning: nextReasoning };
+										},
+										authenticate: (providerId) => {
+											throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
+										},
+									},
+									authCommand,
+									reasoning: targetReasoning,
+									restoredAttachments: targetRestoredMedia.attachments,
+									buildPrompt: async (text, attachmentIds) => {
+										const selectedModel = targetRunRuntime.selected.model;
+										if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
+											throw new Error(
+												`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
+											);
+										}
+										return promptInput(text, attachmentIds, targetMediaLibrary, targetRestoredMedia.contents);
+									},
+									prepareAttachments: targetPrepareAttachments,
+									onDetach: (attachmentId) =>
+										targetRestoredMedia.contents.has(attachmentId)
+											? Promise.resolve()
+											: targetMediaLibrary.detach(attachmentId),
+									onOpenAttachment: (attachmentId) => {
+										const restoredPath = targetRestoredMedia.paths.get(attachmentId);
+										return restoredPath
+											? openPathInSystemViewer(
+													restoredPath,
+													options.processRunner,
+													options.runtime,
+													workspace.root,
+												)
+											: openAttachmentInSystemViewer(
+													targetMediaLibrary,
+													attachmentId,
+													options.processRunner,
+													options.runtime,
+													workspace.root,
+												);
+									},
+									toolResultImagesSupported: resolveModelRuntimeCapabilities(
+										targetModel,
+										options.modelCapabilities,
+									).toolResultImages,
+								};
+							} catch (error) {
+								sessionRunRuntimes.delete(targetSession.descriptor.id);
+								await targetMediaLibrary.dispose().catch(() => undefined);
+								await targetSession.close().catch(() => undefined);
+								throw error;
+							}
+						};
+						let exitCode: number;
+						try {
+							exitCode = await runInteractive({
+								agent,
+								session,
+								terminal: interactiveRuntime!.terminal,
+								clock: options.runtime.clock,
+								scheduler: interactiveRuntime!.scheduler,
+								imageSurface,
+								keybindings: options.keybindings ?? [],
+								diagnostics: options.diagnostics,
+								fullScreenOutput: options.fullScreenOutput,
+								approval: interactiveApproval,
+								approvalFor: (invocationId) => policy.approvalFor(invocationId),
+								modelLabel: `${model.provider}/${model.id}`,
+								workspaceLabel: basename(workspace.root) || workspace.root,
+								permissionProfile: policy.configuration().profile.profile,
+								permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
+								onPermissionProfileChange: async (profile) => {
+									const nextProfile = compileSandboxPolicy({
 										profile,
 										workspaceRoots: [workspace.root],
 										temporaryDirectory,
 										additionalWritableRoots,
-									}),
-									approvalPolicy: defaultApprovalPolicy(profile),
-								} as const;
-								policy.update(next);
-								try {
+									});
+									const nextApprovalPolicy = defaultApprovalPolicy(profile);
+									const nextPermission = createPolicy(nextProfile, nextApprovalPolicy);
 									await audit(
-										permissionConfigurationAuditEvent(
-											"permissions-command",
-											next.profile,
-											next.approvalPolicy,
-										),
+										permissionConfigurationAuditEvent("permissions-command", nextProfile, nextApprovalPolicy),
 									);
-								} catch (error) {
-									policy.update(previous);
-									throw error;
-								}
-								return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`;
-							},
-							reasoning,
-							motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
-							lifecycle: options.runtime.interactiveLifecycle,
-							allocateId: () => options.runtime.idGenerator.generate("queue_item"),
-							processRunner: options.processRunner,
-							platform: options.runtime.platform,
-							environment: options.runtime.environment,
-							workspace: workspace.root,
-							onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
-							toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
-								.toolResultImages,
-							initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,
-							initialAttachmentIds,
-							initialAttachments,
-							restoredAttachments: restoredMedia.attachments,
-							buildPrompt: async (text, attachmentIds) => {
-								if (attachmentIds.length > 0 && !model.input.includes("image")) {
-									throw new Error(`Model does not support image input: ${model.provider}/${model.id}`);
-								}
-								return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
-							},
-							prepareAttachments,
-							onAttach: async (path) => {
-								const attachment = await mediaLibrary.ingestPath(path);
-								return chatAttachment(mediaLibrary, attachment.id);
-							},
-							onDetach: (attachmentId) =>
-								restoredMedia.contents.has(attachmentId)
-									? Promise.resolve()
-									: mediaLibrary.detach(attachmentId),
-							onOpenAttachment: (attachmentId) => {
-								const restoredPath = restoredMedia.paths.get(attachmentId);
-								return restoredPath
-									? openPathInSystemViewer(
-											restoredPath,
-											options.processRunner,
-											options.runtime,
-											workspace.root,
-										)
-									: openAttachmentInSystemViewer(
-											mediaLibrary,
-											attachmentId,
-											options.processRunner,
-											options.runtime,
-											workspace.root,
+									await session.record({ type: "permission_selected", profile });
+									runRuntime.select({ ...runRuntime.selected, permission: nextPermission });
+									return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(nextApprovalPolicy)}`;
+								},
+								modelCommand: {
+									currentKey: () => `${runRuntime.selected.model.provider}/${runRuntime.selected.model.id}`,
+									list: listModelEntries,
+									select: async (selected) => {
+										const authSnapshot = await options.models.getAuth(selected.runtime, {
+											apiKey: selected.providerId === model.provider ? parsed.apiKey : undefined,
+											clock: options.runtime.clock,
+										});
+										if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
+										const nextReasoning = effectiveReasoning(selected.runtime, runRuntime.selected.reasoning);
+										await session.record({
+											type: "model_selected",
+											model: { provider: selected.providerId, id: selected.id },
+											reasoning: nextReasoning,
+										});
+										runRuntime.select({
+											...runRuntime.selected,
+											model: selected.runtime,
+											reasoning: nextReasoning,
+											authSnapshot,
+										});
+										return { modelLabel: selected.key, reasoning: nextReasoning };
+									},
+									authenticate: (providerId) => {
+										throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
+									},
+								},
+								authCommand,
+								reasoning,
+								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
+								commandRegistry: options.commandRegistry,
+								sessionCommand: {
+									list: async () =>
+										(await sessions.list({ id: workspaceId, path: workspace.root })).map((descriptor) => ({
+											id: descriptor.id,
+											label: descriptor.id,
+											description: new Date(descriptor.createdAt).toISOString(),
+										})),
+									open: async (sessionId) => {
+										const targetSession = await sessions.open({
+											workspace: { id: workspaceId, path: workspace.root },
+											mode: "interactive",
+											resumeId: sessionId,
+											persistent: session.descriptor.persistent,
+										});
+										return createSecondarySessionOptions(targetSession, false);
+									},
+									create: async () => {
+										const draftId = `session-${pathSafeIdentity(
+											options.runtime.idGenerator.generate("queue_item"),
+										)}` as SessionId;
+										const targetSession = new DraftSession({
+											descriptor: {
+												id: draftId,
+												workspace: { id: workspaceId, path: workspace.root },
+												createdAt: options.runtime.clock.now(),
+												persistent: session.descriptor.persistent,
+											},
+											materialize: () =>
+												sessions.open({
+													workspace: { id: workspaceId, path: workspace.root },
+													mode: "interactive",
+													persistent: session.descriptor.persistent,
+													createId: draftId,
+												}),
+										});
+										return createSecondarySessionOptions(targetSession, true);
+									},
+								},
+								lifecycle: options.runtime.interactiveLifecycle,
+								allocateId: () => options.runtime.idGenerator.generate("queue_item"),
+								processRunner: options.processRunner,
+								platform: options.runtime.platform,
+								environment: options.runtime.environment,
+								workspace: workspace.root,
+								onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
+								toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
+									.toolResultImages,
+								initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,
+								initialAttachmentIds,
+								initialAttachments,
+								restoredAttachments: restoredMedia.attachments,
+								buildPrompt: async (text, attachmentIds) => {
+									const selectedModel = runRuntime.selected.model;
+									if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
+										throw new Error(
+											`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
 										);
-							},
-						});
+									}
+									return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
+								},
+								prepareAttachments,
+								onDetach: (attachmentId) =>
+									restoredMedia.contents.has(attachmentId)
+										? Promise.resolve()
+										: mediaLibrary.detach(attachmentId),
+								onOpenAttachment: (attachmentId) => {
+									const restoredPath = restoredMedia.paths.get(attachmentId);
+									return restoredPath
+										? openPathInSystemViewer(
+												restoredPath,
+												options.processRunner,
+												options.runtime,
+												workspace.root,
+											)
+										: openAttachmentInSystemViewer(
+												mediaLibrary,
+												attachmentId,
+												options.processRunner,
+												options.runtime,
+												workspace.root,
+											);
+								},
+							});
+						} finally {
+							await Promise.all(
+								[...secondaryResources.values()].map(async (resource) => {
+									const failures: unknown[] = [];
+									try {
+										await resource.mediaLibrary.dispose();
+									} catch (error) {
+										failures.push(error);
+									}
+									try {
+										await resource.session.close();
+									} catch (error) {
+										failures.push(error);
+									}
+									if (failures.length === 1) throw failures[0];
+									if (failures.length > 1) {
+										throw new AggregateError(failures, "Could not close an interactive Session runtime");
+									}
+								}),
+							);
+						}
 						const interactiveMessages = agent.state.messages.slice(initialMessageCount);
 						const finalAssistant = [...interactiveMessages]
 							.reverse()
@@ -1187,6 +1782,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 		},
 	};
 }
+
+const unavailableProviderDiscoveryFetch: typeof globalThis.fetch = async () => {
+	throw new Error("Custom Provider discovery requires an injected fetch adapter");
+};
 
 async function promptInput(
 	text: string,

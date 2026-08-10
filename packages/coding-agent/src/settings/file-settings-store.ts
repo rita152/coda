@@ -4,6 +4,7 @@ import type { ThinkingLevel } from "@coda/ai";
 import type { SettingsStore, UserSettings } from "../application.ts";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
+import { AUTH_API_PROTOCOLS } from "../providers/types.ts";
 
 const REASONING_LEVELS = new Set<ThinkingLevel | "off">(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -33,6 +34,7 @@ function validateSettings(value: unknown): UserSettings {
 			"version",
 			"defaultModel",
 			"defaultReasoning",
+			"customProviders",
 			"shellEnvironmentAllowlist",
 			"projectTrust",
 			"ui",
@@ -64,6 +66,57 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain an invalid default reasoning level");
 		}
 		defaultReasoning = value.defaultReasoning as ThinkingLevel | "off";
+	}
+	let customProviders: UserSettings["customProviders"];
+	if (value.customProviders !== undefined) {
+		if (!Array.isArray(value.customProviders)) {
+			throw new Error("Coda settings contain invalid custom Providers");
+		}
+		const providerIds = new Set<string>();
+		customProviders = value.customProviders.map((entry) => {
+			if (
+				!isRecord(entry) ||
+				!hasOnlyKeys(entry, ["id", "name", "apiProtocol", "baseUrl", "discovery", "models"]) ||
+				typeof entry.id !== "string" ||
+				!/^custom-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(entry.id) ||
+				providerIds.has(entry.id) ||
+				typeof entry.name !== "string" ||
+				entry.name.trim().length === 0 ||
+				typeof entry.apiProtocol !== "string" ||
+				!AUTH_API_PROTOCOLS.includes(entry.apiProtocol as (typeof AUTH_API_PROTOCOLS)[number]) ||
+				typeof entry.baseUrl !== "string" ||
+				!validProviderBaseUrl(entry.baseUrl) ||
+				(entry.discovery !== "ready" && entry.discovery !== "needs_attention") ||
+				!Array.isArray(entry.models)
+			) {
+				throw new Error("Coda settings contain invalid custom Providers");
+			}
+			providerIds.add(entry.id);
+			const modelIds = new Set<string>();
+			const models = entry.models.map((model) => {
+				if (
+					!isRecord(model) ||
+					!hasOnlyKeys(model, ["id", "name"]) ||
+					typeof model.id !== "string" ||
+					model.id.trim().length === 0 ||
+					modelIds.has(model.id) ||
+					typeof model.name !== "string" ||
+					model.name.trim().length === 0
+				) {
+					throw new Error("Coda settings contain invalid custom Provider models");
+				}
+				modelIds.add(model.id);
+				return { id: model.id, name: model.name };
+			});
+			return {
+				id: entry.id,
+				name: entry.name,
+				apiProtocol: entry.apiProtocol as (typeof AUTH_API_PROTOCOLS)[number],
+				baseUrl: entry.baseUrl,
+				discovery: entry.discovery,
+				models,
+			};
+		});
 	}
 	let shellEnvironmentAllowlist: readonly string[] | undefined;
 	if (value.shellEnvironmentAllowlist !== undefined) {
@@ -172,11 +225,27 @@ function validateSettings(value: unknown): UserSettings {
 	return {
 		...(defaultModel ? { defaultModel } : {}),
 		...(defaultReasoning ? { defaultReasoning } : {}),
+		...(customProviders ? { customProviders } : {}),
 		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
 		...(ui ? { ui } : {}),
 		...(permissions ? { permissions } : {}),
 	};
+}
+
+function validProviderBaseUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return (
+			(url.protocol === "https:" || url.protocol === "http:") &&
+			!url.username &&
+			!url.password &&
+			!url.search &&
+			!url.hash
+		);
+	} catch {
+		return false;
+	}
 }
 
 function settingsFile(settings: UserSettings): SettingsFile {

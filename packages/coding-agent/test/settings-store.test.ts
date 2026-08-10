@@ -26,6 +26,16 @@ describe("FileSettingsStore", () => {
 		await store.save({
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
+			customProviders: [
+				{
+					id: "custom-acme",
+					name: "Acme",
+					apiProtocol: "openai.responses",
+					baseUrl: "https://api.acme.test/v1",
+					discovery: "ready",
+					models: [{ id: "acme-one", name: "Acme One" }],
+				},
+			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
@@ -44,6 +54,16 @@ describe("FileSettingsStore", () => {
 		await expect(store.load()).resolves.toEqual({
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
+			customProviders: [
+				{
+					id: "custom-acme",
+					name: "Acme",
+					apiProtocol: "openai.responses",
+					baseUrl: "https://api.acme.test/v1",
+					discovery: "ready",
+					models: [{ id: "acme-one", name: "Acme One" }],
+				},
+			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
@@ -63,6 +83,16 @@ describe("FileSettingsStore", () => {
 			version: 1,
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
+			customProviders: [
+				{
+					id: "custom-acme",
+					name: "Acme",
+					apiProtocol: "openai.responses",
+					baseUrl: "https://api.acme.test/v1",
+					discovery: "ready",
+					models: [{ id: "acme-one", name: "Acme One" }],
+				},
+			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {

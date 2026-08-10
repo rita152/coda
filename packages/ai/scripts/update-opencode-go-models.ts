@@ -12,7 +12,13 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 
-import type { Model, OpenAICompletionsCompat, OpenAIResponsesCompat, ThinkingLevelMap } from "../src/types.ts";
+import type {
+	Model,
+	ModelCost,
+	OpenAICompletionsCompat,
+	OpenAIResponsesCompat,
+	ThinkingLevelMap,
+} from "../src/types.ts";
 
 const GENERATOR_VERSION = 1;
 const DEFAULT_SOURCE_URL = "https://models.dev/api.json";
@@ -208,7 +214,7 @@ function effortMap(source: SourceModel): ThinkingLevelMap | undefined {
 	return map;
 }
 
-function normalizeCost(source: SourceModel): Model<SupportedApi>["cost"] {
+function normalizeCost(source: SourceModel): ModelCost {
 	const tiers = source.cost?.tiers?.flatMap((tier) => {
 		if (tier.tier?.type !== "context" || tier.tier.size === undefined) return [];
 		return [
@@ -265,6 +271,7 @@ function validateModel(model: Model<SupportedApi>): void {
 	}
 	if (!Number.isFinite(model.maxTokens) || model.maxTokens <= 0)
 		throw new Error(`Invalid output limit for ${model.id}`);
+	if (!model.cost) throw new Error(`Missing cost for generated Model ${model.id}`);
 	for (const value of Object.values(model.cost)) {
 		if (typeof value === "number" && (!Number.isFinite(value) || value < 0)) {
 			throw new Error(`Invalid cost for ${model.id}`);

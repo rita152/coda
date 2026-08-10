@@ -83,6 +83,32 @@ describe("Models (upstream: /packages/ai/test/models-runtime.test.ts)", () => {
 		expect(keys).toEqual(["request", "stored", "request-env", "ambient"]);
 	});
 
+	test("uses an explicit auth snapshot without re-reading changed credentials", async () => {
+		const keys: Array<string | undefined> = [];
+		const credentials = new InMemoryCredentialStore();
+		const models = createModels({
+			runtime: testTimeRuntime(),
+			credentials,
+			authContext: { env: async () => undefined, fileExists: async () => false },
+		});
+		models.setProvider(
+			createProvider({
+				id: "opencode-go",
+				auth: { apiKey: envApiKeyAuth("OpenCode Go API key", []) },
+				models: [testModel],
+				api: successfulStreams(keys),
+			}),
+		);
+		await credentials.modify("opencode-go", async () => ({ type: "api_key", key: "run-a" }));
+		const authSnapshot = await models.getAuth(testModel);
+		await credentials.modify("opencode-go", async () => ({ type: "api_key", key: "run-b" }));
+
+		await models.completeSimple(testModel, { messages: [] }, { authSnapshot });
+		await models.completeSimple(testModel, { messages: [] });
+
+		expect(keys).toEqual(["run-a", "run-b"]);
+	});
+
 	test("fails closed on an incompatible stored Credential and attaches a safe Diagnostic", async () => {
 		const keys: Array<string | undefined> = [];
 		const credentials = new InMemoryCredentialStore();

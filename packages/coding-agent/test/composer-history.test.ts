@@ -61,6 +61,32 @@ describe("ComposerHistory", () => {
 		expect(history.navigate(-1, editor)).toBe(true);
 		expect(editor.text).toBe("same");
 	});
+
+	it("restores structured extension references with recalled history and the exact draft", () => {
+		const reference = {
+			id: "extension-reference:history",
+			commandId: "skill:review",
+			source: "skill" as const,
+			name: "review",
+			start: 4,
+			end: 11,
+		};
+		const history = new ComposerHistory([
+			{ id: "submission:1", kind: "prompt", text: "Use /review", references: [reference] },
+		]);
+		const editor = new Editor();
+		editor.setText("draft");
+		editor.addMarker({ id: "draft-marker", start: 0, end: 5, value: "draft" });
+		render(editor, 20);
+
+		expect(history.navigate(-1, editor)).toBe(true);
+		expect(editor.markers).toMatchObject([{ id: reference.id, start: 4, end: 11 }]);
+
+		render(editor, 20);
+		expect(history.navigate(1, editor)).toBe(true);
+		expect(editor.text).toBe("draft");
+		expect(editor.markers).toEqual([{ id: "draft-marker", start: 0, end: 5, value: "draft" }]);
+	});
 });
 
 function render(editor: Editor, width: number): void {
