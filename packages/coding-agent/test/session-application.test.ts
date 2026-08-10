@@ -184,11 +184,8 @@ describe("Session application composition", () => {
 				}),
 				expect.objectContaining({
 					type: "approval_decision",
-					request: expect.objectContaining({
-						sandboxPermissions: "require_escalated",
-						justification: "Exercise the reviewed escalation path",
-					}),
-					decision: { type: "approved" },
+					kind: "command",
+					outcome: "approved-once",
 				}),
 				expect.objectContaining({
 					type: "sandbox_execution",

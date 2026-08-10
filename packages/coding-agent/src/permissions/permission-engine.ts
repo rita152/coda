@@ -8,6 +8,7 @@ import type {
 } from "@coda/sandbox";
 import { normalizeNetworkHost, PROTECTED_METADATA_NAMES } from "@coda/sandbox";
 import type { PathIntent, ResolvedWorkspacePath, Workspace } from "../workspace.ts";
+import { type ApprovalDecisionAuditEvent, approvalDecisionAuditEvent } from "./audit.ts";
 import {
 	type CommandRule,
 	type CommandRuleDecision,
@@ -135,6 +136,7 @@ export interface AdditionalPermissionProfile {
 export type ApprovalDecision =
 	| { readonly type: "approved" }
 	| { readonly type: "approved-for-session" }
+	| { readonly type: "approved-command-prefix-for-session"; readonly command: readonly string[] }
 	| { readonly type: "approved-execpolicy-amendment"; readonly command: readonly string[] }
 	| {
 			readonly type: "network-policy-amendment";
@@ -163,6 +165,8 @@ export interface PermissionApprovalRequest {
 	readonly additionalPermissions?: AdditionalPermissionProfile;
 	readonly sandboxPermissions?: SandboxPermissions;
 	readonly proposedCommandRule?: readonly string[];
+	readonly proposedSessionCommandRule?: readonly string[];
+	readonly executableIdentity?: ExecutableIdentity;
 	readonly environmentId?: string;
 	readonly host?: string;
 	readonly protocol?: "http" | "https";
@@ -187,6 +191,10 @@ export interface PermissionEngine extends PolicyGate {
 	sandboxPolicyFor(invocationId: ToolInvocationId): Readonly<CompiledSandboxPolicy> | undefined;
 	configuration(): PermissionConfiguration;
 	update(configuration: PermissionConfiguration): void;
+	approvalFor(invocationId: ToolInvocationId): ApprovalDecisionAuditEvent | undefined;
+	listSessionApprovals(): readonly CommandSessionApproval[];
+	revokeSessionApproval(id: string): boolean;
+	revokeAllSessionApprovals(): number;
 	consumeAbort(invocationId: ToolInvocationId): boolean;
 	requestGenericApproval(request: GenericPermissionRequest): Promise<ToolPolicyDecision>;
 }
@@ -206,6 +214,35 @@ export interface PermissionConfiguration {
 	readonly approvalPolicy: ApprovalPolicy;
 }
 
+export interface ExecutableIdentity {
+	readonly path: string;
+	readonly device: string;
+	readonly inode: string;
+	readonly size: number;
+	readonly modifiedAt: number;
+}
+
+export interface ExecutableResolutionRequest {
+	readonly executable: string;
+	readonly cwd: string;
+}
+
+export type ExecutableIdentityResolver = (
+	request: ExecutableResolutionRequest,
+) => Promise<ExecutableIdentity | undefined>;
+
+export interface CommandSessionApproval {
+	readonly id: string;
+	readonly command: readonly string[];
+	readonly environmentId: string;
+	readonly cwd: string;
+	readonly shellExecutable: string;
+	readonly permissionProfile: CompiledSandboxPolicy["profile"];
+	readonly approvalPolicy: string;
+	readonly sandboxPermissions: SandboxPermissions;
+	readonly executable: ExecutableIdentity;
+}
+
 export interface PermissionEngineOptions {
 	readonly cwd: string;
 	/** Stable execution-environment identity included in Session approval keys. */
@@ -216,6 +253,10 @@ export interface PermissionEngineOptions {
 	readonly profile: Readonly<CompiledSandboxPolicy>;
 	readonly approvalPolicy: ApprovalPolicy;
 	readonly approval: PermissionApprovalHandler;
+	/** Resolves a command's first token to the exact executable identity used for Session Approvals. */
+	readonly resolveExecutable?: ExecutableIdentityResolver;
+	/** Records a prompt suppressed by an active process-local Session Approval. */
+	readonly onSessionApprovalUsed?: (event: ApprovalDecisionAuditEvent) => void | Promise<void>;
 	readonly commandRules?: readonly CommandRule[];
 	readonly hostExecutables?: readonly HostExecutable[];
 	readonly persistCommandRule?: (rule: CommandRule) => Promise<void>;
@@ -236,6 +277,7 @@ interface ParsedShellRequest {
 	readonly commandWords: readonly string[];
 	readonly approvalCommand: readonly string[];
 	readonly commands: readonly (readonly string[])[];
+	readonly literalCommands: readonly (readonly string[])[];
 	readonly complexParsing: boolean;
 	readonly sandboxPermissions: SandboxPermissions;
 	readonly justification?: string;
@@ -248,6 +290,10 @@ interface ParsedFileRequest {
 	readonly intent: PathIntent;
 	readonly recursive: boolean;
 	readonly resolved: ResolvedWorkspacePath;
+}
+
+interface StoredCommandSessionApproval extends CommandSessionApproval {
+	readonly configurationKey: string;
 }
 
 function reject(reason: string): ToolPolicyDecision {
@@ -942,6 +988,7 @@ function parseShellRequest(request: ToolPolicyRequest, shellExecutable: string):
 		Array.isArray(rawPrefix) &&
 		rawPrefix.length > 0 &&
 		!parsedCommands.complex &&
+		parsedCommands.commands.length === 1 &&
 		!BANNED_PREFIX_SUGGESTIONS.has(JSON.stringify(rawPrefix)) &&
 		parsedCommands.commands.every((candidate) => amendmentMatches(rawPrefix as string[], candidate))
 	) {
@@ -952,6 +999,7 @@ function parseShellRequest(request: ToolPolicyRequest, shellExecutable: string):
 		commandWords,
 		approvalCommand,
 		commands: parsedCommands.commands,
+		literalCommands: parsedCommands.literalCommands,
 		complexParsing: parsedCommands.complex,
 		sandboxPermissions,
 		justification,
@@ -1029,10 +1077,33 @@ function approvalCacheKey(environmentId: string, cwd: string, request: ParsedShe
 
 function amendmentMatches(command: readonly string[], words: readonly string[]): boolean {
 	if (command.length === 0 || words.length < command.length) return false;
-	return command.every((token, index) => {
-		const word = words[index];
-		return word !== undefined && (index === 0 ? token === word || token === basename(word) : token === word);
-	});
+	return command.every((token, index) => token === words[index]);
+}
+
+function executableIdentityMatches(left: ExecutableIdentity, right: ExecutableIdentity): boolean {
+	return (
+		left.path === right.path &&
+		left.device === right.device &&
+		left.inode === right.inode &&
+		left.size === right.size &&
+		left.modifiedAt === right.modifiedAt
+	);
+}
+
+function validExecutableIdentity(identity: ExecutableIdentity | undefined): identity is ExecutableIdentity {
+	return Boolean(
+		identity &&
+			isAbsolute(identity.path) &&
+			identity.device.length > 0 &&
+			identity.inode.length > 0 &&
+			Number.isFinite(identity.size) &&
+			identity.size >= 0 &&
+			Number.isFinite(identity.modifiedAt),
+	);
+}
+
+function permissionConfigurationKey(profile: Readonly<CompiledSandboxPolicy>, approvalPolicy: ApprovalPolicy): string {
+	return JSON.stringify([profile, approvalPolicy]);
 }
 
 function networkHost(host: string): string {
@@ -1063,6 +1134,15 @@ function promptRequirement(
 			return { forbidden: "approval policy disallowed sandbox approval prompt" };
 		}
 		return { prompt: true, reason: "command matched the dangerous command classifier" };
+	}
+	if (request.complexParsing) {
+		if (approvalPolicy === "never") {
+			return { forbidden: "complex Shell command requires interactive approval; approval policy is never" };
+		}
+		if (!granularAllowsSandbox(approvalPolicy)) {
+			return { forbidden: "approval policy disallowed sandbox approval prompt" };
+		}
+		return { prompt: true, reason: "complex Shell command could not be classified safely" };
 	}
 	if (request.sandboxPermissions !== "use_default") {
 		if (profile.profile === "full-access") return { prompt: false };
@@ -1099,6 +1179,9 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 	const sandboxPolicies = new Map<ToolInvocationId, Readonly<CompiledSandboxPolicy>>();
 	const aborts = new Set<ToolInvocationId>();
 	const sessionApprovals = new Set<string>();
+	const approvalResults = new Map<ToolInvocationId, ApprovalDecisionAuditEvent>();
+	const commandSessionApprovals = new Map<string, StoredCommandSessionApproval>();
+	let nextCommandSessionApproval = 1;
 	const commandRules = [...(options.commandRules ?? [])];
 	const hostExecutables = [...(options.hostExecutables ?? [])];
 	const networkRules = [...(options.networkRules ?? [])];
@@ -1110,6 +1193,42 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 		} catch {
 			// A secondary presentation or audit failure must not revoke the approval being reported.
 		}
+	};
+	const resolveExecutable = async (words: readonly string[]): Promise<ExecutableIdentity | undefined> => {
+		const executable = words[0];
+		if (!executable || !options.resolveExecutable) return undefined;
+		try {
+			const identity = await options.resolveExecutable({ executable, cwd: options.cwd });
+			return validExecutableIdentity(identity) ? Object.freeze({ ...identity }) : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	const commandSessionApprovalMatches = async (
+		request: ParsedShellRequest,
+	): Promise<StoredCommandSessionApproval | undefined> => {
+		if (request.complexParsing || request.additionalPermissions || request.commands.length !== 1) return undefined;
+		const command = request.commands[0]!;
+		const configurationKey = permissionConfigurationKey(activeProfile, activeApprovalPolicy);
+		for (const [id, approval] of commandSessionApprovals) {
+			if (
+				approval.environmentId !== environmentId ||
+				approval.cwd !== options.cwd ||
+				approval.shellExecutable !== shellExecutable ||
+				approval.sandboxPermissions !== request.sandboxPermissions ||
+				approval.configurationKey !== configurationKey ||
+				!amendmentMatches(approval.command, command)
+			) {
+				continue;
+			}
+			const current = await resolveExecutable(command);
+			if (current && executableIdentityMatches(approval.executable, current)) return approval;
+			commandSessionApprovals.delete(id);
+			await warnBestEffort(
+				`Revoked Session Approval for ${approval.command.join(" ")} because the executable identity changed`,
+			);
+		}
+		return undefined;
 	};
 	const requestGenericApproval = async (request: GenericPermissionRequest): Promise<ToolPolicyDecision> => {
 		if (activeApprovalPolicy === "never") return reject("approval policy is never");
@@ -1153,6 +1272,8 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 				return reject(decision.rejection);
 			case "timed-out":
 				return reject("approval request timed out");
+			case "approved-command-prefix-for-session":
+				return reject("Command Session Approval cannot approve a generic permission request");
 			case "approved-execpolicy-amendment":
 				return reject("Command Rule cannot approve a generic permission request");
 			case "network-policy-amendment":
@@ -1240,6 +1361,12 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 					return { action: "deny", source: "user", reason: decision.rejection };
 				case "timed-out":
 					return { action: "deny", source: "reviewer", reason: "approval request timed out" };
+				case "approved-command-prefix-for-session":
+					return {
+						action: "deny",
+						source: "reviewer",
+						reason: "Command Session Approval cannot approve network access",
+					};
 				case "approved-execpolicy-amendment":
 					return { action: "deny", source: "reviewer", reason: "Command Rule cannot approve network access" };
 			}
@@ -1333,6 +1460,8 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 						return reject(decision.rejection);
 					case "timed-out":
 						return reject("approval request timed out");
+					case "approved-command-prefix-for-session":
+						return reject("Command Session Approval cannot approve filesystem access");
 					case "approved-execpolicy-amendment":
 						return reject("Command Rule cannot approve filesystem access");
 					case "network-policy-amendment":
@@ -1373,52 +1502,94 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 				);
 			}
 			const ruleEvaluation = evaluateCommandRules(commandRules, hostExecutables, parsed.commands);
-			if (ruleEvaluation?.decision === "forbidden") {
-				const justification = ruleEvaluation.rules.find((rule) => rule.decision === "forbidden")?.justification;
+			const literalRuleEvaluation = evaluateCommandRules(commandRules, hostExecutables, parsed.literalCommands);
+			const matchedRules = [...new Set([...ruleEvaluation.rules, ...literalRuleEvaluation.rules])];
+			if (ruleEvaluation.decision === "forbidden" || literalRuleEvaluation.decision === "forbidden") {
+				const justification = matchedRules.find((rule) => rule.decision === "forbidden")?.justification;
 				return reject(justification ?? `Command rejected by rule: ${parsed.commandWords.join(" ")}`);
 			}
-			if (ruleEvaluation?.decision === "prompt" && !rulesAllowPrompt(activeApprovalPolicy)) {
+			const matchedPromptRule = matchedRules.find((rule) => rule.decision === "prompt");
+			if (matchedPromptRule && !rulesAllowPrompt(activeApprovalPolicy)) {
 				return reject(
 					typeof activeApprovalPolicy === "object"
 						? "approval policy disallowed rules approval prompt"
 						: "approval policy is never",
 				);
 			}
-			const requirement = ruleEvaluation.allExplicitlyAllowed
-				? ({ prompt: false } as const)
-				: ruleEvaluation.decision === "prompt"
-					? ({ prompt: true, reason: "command matched a prompt rule" } as const)
+			const requirement = matchedPromptRule
+				? ({ prompt: true, reason: "command matched a prompt rule" } as const)
+				: ruleEvaluation.allExplicitlyAllowed
+					? ({ prompt: false } as const)
 					: promptRequirement(parsed, activeProfile, activeApprovalPolicy, ruleEvaluation.fallbackCommands);
 			if ("forbidden" in requirement) return reject(requirement.forbidden);
 			const reviewedCommandRule =
-				ruleEvaluation.rules.length === 0
+				matchedRules.length === 0
 					? parsed.proposedCommandRule
-					: ruleEvaluation.decision === "prompt"
-						? ruleEvaluation.rules
-								.find((rule) => rule.decision === "prompt")
-								?.pattern.flatMap((token) => (typeof token === "string" ? [token] : [token[0] ?? ""]))
+					: matchedPromptRule
+						? matchedPromptRule.pattern.flatMap((token) =>
+								typeof token === "string" ? [token] : [token[0] ?? ""],
+							)
 						: undefined;
 			const cacheKey = approvalCacheKey(environmentId, options.cwd, parsed);
-			if (requirement.prompt && !sessionApprovals.has(cacheKey)) {
-				let decision: ApprovalDecision;
+			const exactSessionApproval = sessionApprovals.has(cacheKey);
+			const prefixSessionApproval =
+				requirement.prompt && !exactSessionApproval ? await commandSessionApprovalMatches(parsed) : undefined;
+			if (requirement.prompt && (exactSessionApproval || prefixSessionApproval)) {
+				const reusedApproval = Object.freeze({
+					type: "approval_decision" as const,
+					invocationId: String(toolRequest.invocationId),
+					kind: "command" as const,
+					outcome: "allowed-by-process" as const,
+					...(prefixSessionApproval ? { commandPrefix: Object.freeze([...prefixSessionApproval.command]) } : {}),
+				});
+				approvalResults.set(toolRequest.invocationId, reusedApproval);
 				try {
-					decision = await options.approval.decide({
-						kind: "command",
-						runId: toolRequest.runId,
-						turnId: toolRequest.turnId,
-						invocationId: toolRequest.invocationId,
-						command: parsed.command,
-						commandWords: parsed.commandWords,
-						cwd: options.cwd,
-						reason: requirement.reason,
-						justification: parsed.justification,
-						additionalPermissions: parsed.additionalPermissions,
-						sandboxPermissions: parsed.sandboxPermissions,
-						proposedCommandRule: reviewedCommandRule,
-					});
+					await options.onSessionApprovalUsed?.(reusedApproval);
 				} catch {
+					// A Session audit failure cannot revoke authority that was already granted.
+				}
+			}
+			if (requirement.prompt && !exactSessionApproval && !prefixSessionApproval) {
+				const proposedSessionExecutable =
+					parsed.proposedCommandRule &&
+					!parsed.complexParsing &&
+					!parsed.additionalPermissions &&
+					parsed.commands.length === 1
+						? await resolveExecutable(parsed.commands[0]!)
+						: undefined;
+				const proposedSessionCommandRule = proposedSessionExecutable ? parsed.proposedCommandRule : undefined;
+				const approvalRequest: PermissionApprovalRequest = {
+					kind: "command",
+					runId: toolRequest.runId,
+					turnId: toolRequest.turnId,
+					invocationId: toolRequest.invocationId,
+					command: parsed.command,
+					commandWords: parsed.commandWords,
+					cwd: options.cwd,
+					environmentId,
+					reason: requirement.reason,
+					justification: parsed.justification,
+					additionalPermissions: parsed.additionalPermissions,
+					sandboxPermissions: parsed.sandboxPermissions,
+					proposedCommandRule: reviewedCommandRule,
+					proposedSessionCommandRule,
+					executableIdentity: proposedSessionExecutable,
+				};
+				let decision: ApprovalDecision;
+				let reviewerFailure: { readonly type: "reviewer-failed"; readonly message: string } | undefined;
+				try {
+					decision = await options.approval.decide(approvalRequest);
+				} catch (error) {
+					reviewerFailure = {
+						type: "reviewer-failed",
+						message: error instanceof Error ? error.message : String(error),
+					};
 					decision = { type: "denied", rejection: "approval reviewer failed" };
 				}
+				approvalResults.set(
+					toolRequest.invocationId,
+					approvalDecisionAuditEvent(approvalRequest, reviewerFailure ?? decision),
+				);
 				if (decision.type === "abort") {
 					aborts.add(toolRequest.invocationId);
 					return reject("approval request aborted");
@@ -1429,6 +1600,35 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 					return reject("network policy decision cannot approve a command request");
 				}
 				if (decision.type === "approved-for-session") sessionApprovals.add(cacheKey);
+				if (decision.type === "approved-command-prefix-for-session") {
+					if (
+						!proposedSessionCommandRule ||
+						!proposedSessionExecutable ||
+						JSON.stringify(decision.command) !== JSON.stringify(proposedSessionCommandRule)
+					) {
+						return reject("approved Session command prefix must exactly match the reviewed rule proposal");
+					}
+					const currentExecutable = await resolveExecutable(parsed.commands[0]!);
+					if (!currentExecutable || !executableIdentityMatches(proposedSessionExecutable, currentExecutable)) {
+						return reject("command executable identity changed during approval");
+					}
+					const id = `command-session-approval:${nextCommandSessionApproval++}`;
+					commandSessionApprovals.set(
+						id,
+						Object.freeze({
+							id,
+							command: Object.freeze([...decision.command]),
+							environmentId,
+							cwd: options.cwd,
+							shellExecutable,
+							permissionProfile: activeProfile.profile,
+							approvalPolicy: approvalPolicyName(activeApprovalPolicy),
+							sandboxPermissions: parsed.sandboxPermissions,
+							executable: currentExecutable,
+							configurationKey: permissionConfigurationKey(activeProfile, activeApprovalPolicy),
+						}),
+					);
+				}
 				if (decision.type === "approved-execpolicy-amendment") {
 					if (
 						!reviewedCommandRule ||
@@ -1479,10 +1679,36 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 		},
 		authorizationFor: (invocationId) => authorizations.get(invocationId),
 		sandboxPolicyFor: (invocationId) => sandboxPolicies.get(invocationId),
+		approvalFor: (invocationId) => approvalResults.get(invocationId),
 		configuration: () => Object.freeze({ profile: activeProfile, approvalPolicy: activeApprovalPolicy }),
 		update: (configuration) => {
 			activeProfile = configuration.profile;
 			activeApprovalPolicy = configuration.approvalPolicy;
+			sessionApprovals.clear();
+			sessionApprovedHosts.clear();
+			commandSessionApprovals.clear();
+		},
+		listSessionApprovals: () =>
+			Object.freeze(
+				[...commandSessionApprovals.values()].map((approval) =>
+					Object.freeze({
+						id: approval.id,
+						command: approval.command,
+						environmentId: approval.environmentId,
+						cwd: approval.cwd,
+						shellExecutable: approval.shellExecutable,
+						permissionProfile: approval.permissionProfile,
+						approvalPolicy: approval.approvalPolicy,
+						sandboxPermissions: approval.sandboxPermissions,
+						executable: approval.executable,
+					}),
+				),
+			),
+		revokeSessionApproval: (id) => commandSessionApprovals.delete(id),
+		revokeAllSessionApprovals: () => {
+			const count = commandSessionApprovals.size;
+			commandSessionApprovals.clear();
+			return count;
 		},
 		consumeAbort: (invocationId) => aborts.delete(invocationId),
 		requestGenericApproval,

@@ -30,7 +30,30 @@ coda --print --json "run the configured Model and emit Agent events"
 coda --no-tui "use print mode even when stdin and stdout are terminals"
 ```
 
-`--no-tui` is an explicit alias for print mode. `--no-color` disables color only for the current Terminal instance; `NO_COLOR` is also honored without mutating the process environment. `--no-animations` selects reduced motion for one invocation.
+`--no-tui` is an explicit alias for print mode. `--color-scheme auto|light|dark`
+controls terminal appearance detection; `--no-color` and `NO_COLOR` take
+precedence and emit no color sequences. `--no-animations` selects reduced
+motion for one invocation. Persistent UI defaults can be set in
+`~/.coda/settings.json`:
+
+```json
+{
+  "version": 1,
+  "ui": {
+    "colorScheme": "auto",
+    "motion": "full"
+  }
+}
+```
+
+Interactive command Approval Requests use the Codex bottom-pane layout with the
+first choice selected. Use Up/Down and Enter, `y` or `1` for one-time approval,
+or `p` and its displayed number for an eligible process-local command-prefix
+approval. Choices are numbered sequentially, so denial is `2` when no prefix is
+available and `3` when one is. The feedback choice or Escape cancels the Run and
+returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
+a request. While the Agent is idle, `/approvals` lists and revokes process-local
+command approvals; `/permissions` changes the current process Permission Profile.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`.
 
@@ -49,6 +72,7 @@ npm run test:e2e
 - `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`
 - Read Only, Workspace, and Full Access Permission Profiles with Unless Trusted, On Request, Granular, and Never Approval Policies
 - exact filesystem, command-prefix, host-network, one-shot, process-local Session, and persistent-rule decisions
+- appearance-aware Codex-layout command Approval Bar with safe prefix grants, cancel-to-feedback, and compact Tool Timeline audit
 - OS-enforced macOS/Linux Sandbox execution for every model-started process and exact approved file mutation
 - full-screen semantic Timeline with CommonMark/GFM Assistant and Thinking content
 - Codex-inspired structured Tool Invocation presentation and Transcript View

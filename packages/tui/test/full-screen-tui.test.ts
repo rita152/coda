@@ -62,6 +62,7 @@ class TraceTerminal implements Terminal {
 	started = false;
 	readonly size: TerminalSize = Object.freeze({ columns: 80, rows: 24 });
 	readonly capabilities: TerminalCapabilities = Object.freeze({
+		appearance: "unknown",
 		keyboardProtocol: "legacy",
 		colorLevel: 1,
 		synchronizedOutput: false,

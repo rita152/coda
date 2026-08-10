@@ -14,7 +14,7 @@ import type {
 import type { ThinkingLevel } from "@coda/ai";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
-import type { PermissionAuditEvent } from "../permissions/audit.ts";
+import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
 
 declare const sessionIdBrand: unique symbol;
 export type SessionId = string & { readonly [sessionIdBrand]: "SessionId" };
@@ -77,6 +77,7 @@ export interface SessionToolLifecycle {
 	readonly outcome?: "success" | "error" | "aborted" | "rejected" | "interrupted";
 	readonly rejectionReason?: ToolRejectionReason;
 	readonly resultMessageId?: MessageId;
+	readonly approval?: ApprovalDecisionAuditEvent;
 }
 
 export interface OpenSessionRequest {

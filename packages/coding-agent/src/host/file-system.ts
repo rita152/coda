@@ -5,6 +5,10 @@ export interface FileStatus {
 	readonly size: number;
 	readonly mode: number;
 	readonly modifiedAt: number;
+	/** Stable device identity when the host filesystem exposes it. */
+	readonly device?: string;
+	/** Stable inode/file identity when the host filesystem exposes it. */
+	readonly inode?: string;
 }
 
 export interface DirectoryEntry {

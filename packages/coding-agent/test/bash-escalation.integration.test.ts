@@ -60,7 +60,7 @@ integration("model Bash escalation", () => {
 				return fauxAssistantMessage(
 					fauxToolCall(
 						"bash",
-						{ command: `printf escaped > ${JSON.stringify(deniedTarget)}` },
+						{ command: `touch ${JSON.stringify(deniedTarget)}` },
 						{ id: "provider-default-denied" },
 					),
 					{ stopReason: "toolUse", timestamp: 920 },

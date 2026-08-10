@@ -1,5 +1,6 @@
 import type { AgentEvent, AgentMessage, AgentSeed, AttemptId, Immutable, MessageId, ToolInvocation } from "@coda/agent";
 import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
+import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
 
@@ -61,6 +62,14 @@ export interface TimelineToolEntry {
 	readonly startedAt?: number;
 	readonly endedAt?: number;
 	readonly result?: AgentMessage<ToolResultMessage>;
+	readonly approval?: TimelineApproval;
+}
+
+export interface TimelineApproval {
+	readonly outcome: ApprovalDecisionAuditEvent["outcome"];
+	readonly commandPrefix?: readonly string[];
+	readonly denial?: ApprovalDecisionAuditEvent["denial"];
+	readonly expired?: boolean;
 }
 
 export interface TimelineUserShellEntry extends UserShellSnapshot {
@@ -107,6 +116,7 @@ interface ToolSlot {
 	startedAt?: number;
 	endedAt?: number;
 	result?: AgentMessage<ToolResultMessage>;
+	approval?: TimelineApproval;
 	projected?: TimelineToolEntry;
 }
 
@@ -238,6 +248,15 @@ export class SemanticTimeline {
 		return true;
 	}
 
+	setApprovalResult(invocationId: string, approval: ApprovalDecisionAuditEvent): boolean {
+		const slot = this.#toolByInvocationId.get(invocationId);
+		if (!slot) return false;
+		slot.approval = timelineApproval(approval, false);
+		slot.projected = undefined;
+		this.#invalidate();
+		return true;
+	}
+
 	#hydrate(message: AgentMessage): void {
 		switch (message.message.role) {
 			case "user":
@@ -272,6 +291,7 @@ export class SemanticTimeline {
 		slot.startedAt = lifecycle.startedAt;
 		slot.endedAt = lifecycle.finishedAt;
 		slot.state = restoredToolState(lifecycle);
+		slot.approval = lifecycle.approval ? timelineApproval(lifecycle.approval, true) : undefined;
 		slot.projected = undefined;
 	}
 
@@ -580,6 +600,7 @@ export class SemanticTimeline {
 						startedAt: slot.startedAt,
 						endedAt: slot.endedAt,
 						result: slot.result,
+						approval: slot.approval,
 					});
 					entries.push(slot.projected);
 					continue;
@@ -619,6 +640,17 @@ function userText(message: Immutable<UserMessage>): string {
 		.filter((block) => block.type === "text")
 		.map((block) => (block.type === "text" ? block.text : ""))
 		.join("");
+}
+
+function timelineApproval(approval: ApprovalDecisionAuditEvent, restored: boolean): TimelineApproval {
+	return Object.freeze({
+		outcome: approval.outcome,
+		...(approval.commandPrefix ? { commandPrefix: Object.freeze([...approval.commandPrefix]) } : {}),
+		...(approval.denial ? { denial: Object.freeze({ ...approval.denial }) } : {}),
+		...(restored && (approval.outcome === "approved-for-process" || approval.outcome === "allowed-by-process")
+			? { expired: true }
+			: {}),
+	});
 }
 
 function freezeInvocation(invocation: {

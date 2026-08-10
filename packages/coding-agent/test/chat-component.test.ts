@@ -6,6 +6,26 @@ import { ChatComponent } from "../src/interactive/chat-component.ts";
 import type { UserShellSnapshot, UserShellStatus } from "../src/interactive/user-shell.ts";
 
 describe("ChatComponent terminal input", () => {
+	it("routes /approvals to process-local approval management instead of the Model", async () => {
+		const onApprovals = vi.fn(async () => undefined);
+		const onSubmit = vi.fn();
+		const component = new ChatComponent({
+			modelLabel: "provider/model",
+			reasoning: "off",
+			onSubmit,
+			onApprovals,
+			onAbort: vi.fn(),
+			onExit: vi.fn(),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "/approvals" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onApprovals).toHaveBeenCalledOnce());
+		expect(onSubmit).not.toHaveBeenCalled();
+	});
+
 	it("inserts printable text carried by a normalized KeyInput", () => {
 		const component = new ChatComponent({
 			modelLabel: "provider/model",

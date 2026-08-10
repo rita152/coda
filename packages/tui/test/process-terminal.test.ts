@@ -131,7 +131,9 @@ class FakeOutput implements ProcessTerminalOutput {
 	}
 }
 
-function create(options: { noColor?: boolean; input?: FakeInput; output?: FakeOutput } = {}) {
+function create(
+	options: { noColor?: boolean; input?: FakeInput; output?: FakeOutput; colorScheme?: "auto" | "light" | "dark" } = {},
+) {
 	const input = options.input ?? new FakeInput();
 	const output = options.output ?? new FakeOutput();
 	const scheduler = new ManualScheduler();
@@ -143,6 +145,7 @@ function create(options: { noColor?: boolean; input?: FakeInput; output?: FakeOu
 		output,
 		scheduler,
 		synchronizedOutput: true,
+		colorScheme: options.colorScheme ?? "dark",
 	});
 	return { diagnostics, input, output, scheduler, terminal };
 }
@@ -155,6 +158,101 @@ async function startWithKitty(result: ReturnType<typeof create>): Promise<void> 
 }
 
 describe("ProcessTerminal lifecycle and capabilities", () => {
+	it("resolves auto appearance from an OSC 11 response before start completes", async () => {
+		const result = create({ colorScheme: "auto" });
+		const starting = result.terminal.start();
+		await Promise.resolve();
+
+		expect(result.output.output).toContain("\x1b]11;?\x1b\\");
+		result.input.emitData("\x1b[?7u\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+		await starting;
+
+		expect(result.terminal.capabilities.appearance).toBe("light");
+		expect(Object.isFrozen(result.terminal.capabilities)).toBe(true);
+		expect(result.diagnostics).not.toHaveBeenCalledWith(expect.objectContaining({ code: "terminal.unknown-input" }));
+	});
+
+	it("accepts a BEL-terminated OSC 11 response", async () => {
+		const result = create({ colorScheme: "auto" });
+		const starting = result.terminal.start();
+		await Promise.resolve();
+		result.input.emitData("\x1b[?7u\x1b]11;rgb:0000/0000/0000\x07");
+		await starting;
+
+		expect(result.terminal.capabilities.appearance).toBe("dark");
+		await result.terminal.stop();
+	});
+
+	it("keeps the startup appearance across stop/start instead of querying as a live Theme switch", async () => {
+		const result = create({ colorScheme: "auto" });
+		const firstStart = result.terminal.start();
+		await Promise.resolve();
+		result.input.emitData("\x1b[?7u\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+		await firstStart;
+		await result.terminal.stop();
+
+		const secondStart = result.terminal.start();
+		await Promise.resolve();
+		const restartNegotiation = result.scheduler.tasks.at(-1);
+		result.input.emitData("\x1b[?7u");
+
+		expect(restartNegotiation?.cancelled).toBe(true);
+		expect(result.output.output.split("\x1b]11;?")).toHaveLength(2);
+		expect(result.terminal.capabilities.appearance).toBe("light");
+		await expect(secondStart).resolves.toBe(true);
+		await result.terminal.stop();
+	});
+
+	it("falls back to unknown appearance after malformed and timed-out OSC 11 responses", async () => {
+		const result = create({ colorScheme: "auto" });
+		const starting = result.terminal.start();
+		await Promise.resolve();
+		result.input.emitData("\x1b[?7u\x1b]11;not-a-color\x07");
+
+		await result.scheduler.runNext();
+		await starting;
+
+		expect(result.terminal.capabilities.appearance).toBe("unknown");
+		expect(result.diagnostics).toHaveBeenCalledWith(
+			expect.objectContaining({ code: "terminal.invalid-background-response" }),
+		);
+
+		result.input.emitData("\x1b]11;rgb:0000/0000/0000\x07");
+		await result.terminal.flush();
+		expect(result.terminal.capabilities.appearance).toBe("unknown");
+	});
+
+	it("bounds an unterminated OSC response so later keyboard input is not trapped", async () => {
+		const result = create({ colorScheme: "auto" });
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		const starting = result.terminal.start();
+		await Promise.resolve();
+		const negotiation = result.scheduler.tasks.at(-1);
+		result.input.emitData(`\x1b[?7u\x1b]11;rgb:${"f".repeat(5_000)}`);
+		await negotiation?.run();
+		await starting;
+
+		result.input.emitData("y");
+		await result.terminal.flush();
+
+		expect(inputs).toContainEqual(expect.objectContaining({ type: "key", key: "y", text: "y" }));
+		expect(result.diagnostics).toHaveBeenCalledWith(
+			expect.objectContaining({ code: "terminal.escape-sequence-too-long" }),
+		);
+	});
+
+	it("uses an explicit appearance without sending an OSC 11 query", async () => {
+		const result = create({ colorScheme: "light" });
+
+		await startWithKitty(result);
+
+		expect(result.terminal.capabilities.appearance).toBe("light");
+		expect(result.output.output).not.toContain("\x1b]11;?");
+	});
+
 	it("negotiates Kitty capabilities before start resolves", async () => {
 		const result = create();
 
@@ -166,6 +264,7 @@ describe("ProcessTerminal lifecycle and capabilities", () => {
 		expect(result.output.output).toContain("\x1b[?2004h");
 		expect(result.output.output).toContain("\x1b[>7u\x1b[?u");
 		expect(result.terminal.capabilities).toEqual({
+			appearance: "dark",
 			keyboardProtocol: "kitty",
 			colorLevel: 3,
 			synchronizedOutput: true,
@@ -411,6 +510,62 @@ describe("ProcessTerminal structured input", () => {
 			expect.objectContaining({ type: "key", key: "up", action: "press" }),
 			expect.objectContaining({ type: "key", key: "k", control: true, action: "press" }),
 			{ type: "text", text: "你好" },
+		]);
+	});
+
+	it("normalizes application-cursor arrows used by legacy terminals", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1bO");
+		result.input.emitData("A\x1bOB");
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({ type: "key", key: "up", action: "press" }),
+			expect.objectContaining({ type: "key", key: "down", action: "press" }),
+		]);
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("normalizes eventful Kitty cursor keys emitted by Ghostty", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1b[1;1:1A\x1b[1;1:3A\x1b[1;1:1B\x1b[1;1:3B");
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({ type: "key", key: "up", action: "press" }),
+			expect.objectContaining({ type: "key", key: "up", action: "release" }),
+			expect.objectContaining({ type: "key", key: "down", action: "press" }),
+			expect.objectContaining({ type: "key", key: "down", action: "release" }),
+		]);
+		expect(result.diagnostics).not.toHaveBeenCalled();
+	});
+
+	it("keeps Alt+Shift+O distinct from a split application-cursor sequence", async () => {
+		const result = create();
+		const inputs: TerminalInput[] = [];
+		result.terminal.onInput((input) => {
+			inputs.push(input);
+		});
+		await startWithKitty(result);
+
+		result.input.emitData("\x1bO");
+		await result.scheduler.runNext();
+		await result.terminal.flush();
+
+		expect(inputs).toEqual([
+			expect.objectContaining({ type: "key", key: "o", shift: true, alt: true, action: "press" }),
 		]);
 	});
 

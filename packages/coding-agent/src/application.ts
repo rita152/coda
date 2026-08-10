@@ -9,7 +9,9 @@ import {
 	type Keybinding,
 	type Scheduler,
 	type Terminal,
+	type TerminalColorScheme,
 } from "@coda/tui";
+import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
 import { InteractiveApprovalHandler } from "./interactive/approval.ts";
@@ -28,7 +30,11 @@ import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
-import { type PermissionAuditSink, permissionConfigurationAuditEvent } from "./permissions/audit.ts";
+import {
+	approvalDecisionAuditEvent,
+	type PermissionAuditSink,
+	permissionConfigurationAuditEvent,
+} from "./permissions/audit.ts";
 import {
 	createAuditedModelProcessRunner,
 	createModelProcessRunner,
@@ -79,7 +85,10 @@ export interface UserSettings {
 	readonly defaultReasoning?: ThinkingLevel | "off";
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
-	readonly ui?: { readonly motion: "full" | "reduced" };
+	readonly ui?: {
+		readonly motion?: "full" | "reduced";
+		readonly colorScheme?: TerminalColorScheme;
+	};
 	readonly permissions?: {
 		readonly profile?: PermissionProfile;
 		readonly approvalPolicy?: ApprovalPolicy;
@@ -110,6 +119,7 @@ export interface ApplicationRuntime {
 
 export interface TerminalStartupOptions {
 	readonly noColor: boolean;
+	readonly colorScheme: TerminalColorScheme;
 }
 
 export interface TerminalFactory {
@@ -153,6 +163,7 @@ interface ParsedArguments {
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
+	readonly colorScheme?: TerminalColorScheme;
 	readonly noAnimations: boolean;
 	readonly includeMediaData: boolean;
 	readonly resumeId?: string;
@@ -184,6 +195,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
+	let colorScheme: TerminalColorScheme | undefined;
 	let noAnimations = false;
 	let includeMediaData = false;
 	let resumeId: string | undefined;
@@ -215,6 +227,14 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		}
 		if (argument === "--no-color") {
 			noColor = true;
+			continue;
+		}
+		if (argument === "--color-scheme") {
+			const value = args[++index];
+			if (value !== "auto" && value !== "light" && value !== "dark") {
+				throw new Error("--color-scheme requires auto, light, or dark");
+			}
+			colorScheme = value;
 			continue;
 		}
 		if (argument === "--no-animations") {
@@ -353,6 +373,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		persistSession,
 		noSession,
 		noColor,
+		colorScheme,
 		noAnimations,
 		includeMediaData,
 		resumeId,
@@ -385,6 +406,7 @@ Modes:
   -i, --interactive              Start the interactive terminal UI
       --no-tui                   Alias for --print
       --no-color                 Disable color in this Coda invocation
+      --color-scheme <scheme>    Terminal appearance: auto, light, or dark
       --no-animations            Disable periodic TUI motion
       --json                     Emit stable JSONL Agent events
       --include-media-data      Include base64 in JSON media descriptors
@@ -656,6 +678,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					parsed.mode === "interactive"
 						? options.terminalFactory?.create({
 								noColor: parsed.noColor || options.runtime.environment.NO_COLOR !== undefined,
+								colorScheme: parsed.colorScheme ?? settings.ui?.colorScheme ?? "auto",
 							})
 						: undefined;
 				if (parsed.mode === "interactive" && !terminal) {
@@ -832,17 +855,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						decide: async (request) => {
 							try {
 								const decision = await approvalHandler.decide(request);
-								await audit({ type: "approval_decision", request, decision });
+								await audit(approvalDecisionAuditEvent(request, decision));
 								return decision;
 							} catch (error) {
-								await audit({
-									type: "approval_decision",
-									request,
-									decision: {
+								await audit(
+									approvalDecisionAuditEvent(request, {
 										type: "reviewer-failed",
 										message: error instanceof Error ? error.message : String(error),
-									},
-								});
+									}),
+								);
 								throw error;
 							}
 						},
@@ -873,6 +894,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						profile: compiledProfile,
 						approvalPolicy: selectedApprovalPolicy,
 						approval: auditedApproval,
+						resolveExecutable: createExecutableIdentityResolver({
+							fileSystem: options.fileSystem,
+							path: options.runtime.environment.PATH,
+							pathExtensions: options.runtime.environment.PATHEXT,
+							platform: options.runtime.platform,
+						}),
+						onSessionApprovalUsed: audit,
 						commandRules: commandPolicy.rules,
 						hostExecutables: commandPolicy.hostExecutables,
 						networkRules,
@@ -1000,6 +1028,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							diagnostics: options.diagnostics,
 							fullScreenOutput: options.fullScreenOutput,
 							approval: interactiveApproval,
+							approvalManagement: policy,
+							approvalFor: policy.approvalFor,
 							modelLabel: `${model.provider}/${model.id}`,
 							workspaceLabel: basename(workspace.root) || workspace.root,
 							permissionProfile: policy.configuration().profile.profile,

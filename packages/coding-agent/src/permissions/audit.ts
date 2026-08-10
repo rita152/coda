@@ -1,4 +1,5 @@
 import type { CompiledSandboxPolicy, SandboxBackend, SandboxViolation } from "@coda/sandbox";
+import { sanitizeTerminalText } from "@coda/tui";
 import type {
 	ApprovalDecision,
 	ApprovalPolicy,
@@ -18,6 +19,31 @@ export interface PermissionPolicyAuditSnapshot {
 	readonly networkAccess: CompiledSandboxPolicy["networkAccess"];
 }
 
+export type ApprovalAuditOutcome =
+	| "approved-once"
+	| "approved-for-process"
+	| "allowed-by-process"
+	| "denied"
+	| "aborted"
+	| "timed-out"
+	| "persistent-rule"
+	| "reviewer-failed";
+
+export interface ApprovalAuditDenial {
+	readonly type: "plain" | "feedback" | "reviewer-failed";
+	readonly characterCount: number;
+	readonly summary: string;
+}
+
+export interface ApprovalDecisionAuditEvent {
+	readonly type: "approval_decision";
+	readonly invocationId: string;
+	readonly kind: PermissionApprovalRequest["kind"];
+	readonly outcome: ApprovalAuditOutcome;
+	readonly commandPrefix?: readonly string[];
+	readonly denial?: ApprovalAuditDenial;
+}
+
 export type PermissionAuditEvent =
 	| {
 			readonly type: "configuration";
@@ -25,11 +51,7 @@ export type PermissionAuditEvent =
 			readonly approvalPolicy: ApprovalPolicy;
 			readonly policy: PermissionPolicyAuditSnapshot;
 	  }
-	| {
-			readonly type: "approval_decision";
-			readonly request: PermissionApprovalRequest;
-			readonly decision: ApprovalDecision | { readonly type: "reviewer-failed"; readonly message: string };
-	  }
+	| ApprovalDecisionAuditEvent
 	| {
 			readonly type: "rule_persistence";
 			readonly kind: "command" | "network";
@@ -58,6 +80,55 @@ export type PermissionAuditEvent =
 	  };
 
 export type PermissionAuditSink = (event: PermissionAuditEvent) => Promise<void> | void;
+
+function denialAudit(type: ApprovalAuditDenial["type"], value: string): ApprovalAuditDenial {
+	const sanitized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+	return Object.freeze({
+		type,
+		characterCount: Array.from(value).length,
+		summary: Array.from(sanitized).slice(0, 160).join(""),
+	});
+}
+
+export function approvalDecisionAuditEvent(
+	request: PermissionApprovalRequest,
+	decision: ApprovalDecision | { readonly type: "reviewer-failed"; readonly message: string },
+): ApprovalDecisionAuditEvent {
+	const base = {
+		type: "approval_decision" as const,
+		invocationId: String(request.invocationId),
+		kind: request.kind,
+	};
+	switch (decision.type) {
+		case "approved":
+			return Object.freeze({ ...base, outcome: "approved-once" });
+		case "approved-for-session":
+			return Object.freeze({ ...base, outcome: "approved-for-process" });
+		case "approved-command-prefix-for-session":
+			return Object.freeze({
+				...base,
+				outcome: "approved-for-process",
+				commandPrefix: Object.freeze([...decision.command]),
+			});
+		case "approved-execpolicy-amendment":
+		case "network-policy-amendment":
+			return Object.freeze({ ...base, outcome: "persistent-rule" });
+		case "denied": {
+			const type = decision.rejection === "user denied the approval request" ? "plain" : "feedback";
+			return Object.freeze({ ...base, outcome: "denied", denial: denialAudit(type, decision.rejection) });
+		}
+		case "timed-out":
+			return Object.freeze({ ...base, outcome: "timed-out" });
+		case "abort":
+			return Object.freeze({ ...base, outcome: "aborted" });
+		case "reviewer-failed":
+			return Object.freeze({
+				...base,
+				outcome: "reviewer-failed",
+				denial: denialAudit("reviewer-failed", decision.message),
+			});
+	}
+}
 
 export function permissionPolicyAuditSnapshot(policy: Readonly<CompiledSandboxPolicy>): PermissionPolicyAuditSnapshot {
 	return Object.freeze({

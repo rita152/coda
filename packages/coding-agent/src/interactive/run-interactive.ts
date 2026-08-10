@@ -9,8 +9,10 @@ import {
 	type TerminalImageSurface,
 } from "@coda/tui";
 import type { ProcessRunner } from "../host/process-runner.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Session } from "../session/types.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
+import { InteractiveApprovalManager, type SessionApprovalManagement } from "./approval-manager.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
 import { type AttachmentTransaction, InteractiveInputController } from "./input-controller.ts";
@@ -33,6 +35,8 @@ export interface InteractiveRunOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly approval?: InteractiveApprovalHandler;
+	readonly approvalManagement?: SessionApprovalManagement;
+	readonly approvalFor?: PermissionEngine["approvalFor"];
 	readonly modelLabel: string;
 	readonly workspaceLabel?: string;
 	readonly permissionProfile: PermissionProfile;
@@ -70,6 +74,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	let suspendTask: Promise<void> | undefined;
 	let component!: ChatComponent;
 	let permissionSelector!: InteractivePermissionSelector;
+	let approvalManager: InteractiveApprovalManager | undefined;
 	let activePermissionProfile = options.permissionProfile;
 	const userShell = new UserShell({
 		processRunner: options.processRunner,
@@ -115,6 +120,11 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 			activePermissionProfile = selected;
 			return label;
 		},
+		...(options.approvalManagement
+			? {
+					onApprovals: () => approvalManager!.manage(),
+				}
+			: {}),
 		onResumeFollowUps: () => inputController.resumeQueue(),
 		isQueuePaused: () => inputController.queuePaused,
 		onReclaimFollowUp: (queueItemId) => inputController.reclaimFollowUp(queueItemId as QueueItemId),
@@ -140,6 +150,9 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		diagnostics: options.diagnostics,
 	});
 	permissionSelector = new InteractivePermissionSelector(tui);
+	approvalManager = options.approvalManagement
+		? new InteractiveApprovalManager(tui, options.approvalManagement)
+		: undefined;
 	const outputScope = new FullScreenOutputScope(options.fullScreenOutput, {
 		presentDiagnostic: (diagnostic) => tui.presentDiagnostic(diagnostic),
 	});
@@ -147,6 +160,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
+		options.approval?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
 				options.agent.abort();
@@ -157,6 +171,7 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
+		options.approval?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
 				options.agent.abort();
@@ -181,8 +196,17 @@ export async function runInteractive(options: InteractiveRunOptions): Promise<nu
 		},
 	});
 	options.approval?.bind(tui, options.terminal, (request) => component.setAwaitingApproval(request));
+	if (terminationSignal || fatalError !== undefined) options.approval?.unbind();
 	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
+		if (
+			event.type === "tool_execution_start" ||
+			event.type === "tool_execution_end" ||
+			event.type === "tool_execution_rejected"
+		) {
+			const approval = options.approvalFor?.(event.invocation.id);
+			if (approval) component.setApprovalResult(event.invocation.id, approval);
+		}
 	});
 	try {
 		if (!(await startFullScreen())) {

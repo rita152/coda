@@ -1,12 +1,64 @@
-import { type ColorLevel, styleAnsi } from "@coda/tui";
+import { type ColorLevel, styleAnsi, type TerminalAppearance } from "@coda/tui";
 
 export type ThemeTone = "accent" | "success" | "error" | "warning" | "muted" | "code";
+export type ThemeSurface = "panel" | "selection";
+export type ThemeSurfaceTone = "normal" | "muted" | "accent" | "warning" | "strong" | "emphasis" | "code";
 
 export interface TuiTheme {
 	readonly colorLevel: ColorLevel;
+	readonly appearance: TerminalAppearance;
+	readonly surfaceFilled: boolean;
 	style(tone: ThemeTone, value: string): string;
+	styleOnSurface(surface: ThemeSurface, tone: ThemeSurfaceTone, value: string): string;
 	styleEditorBorder(reasoning: string, focused: boolean, value: string): string;
 }
+
+type Rgb = readonly [number, number, number];
+
+interface SurfaceColors {
+	readonly background: Rgb;
+	readonly normal: Rgb;
+	readonly muted: Rgb;
+	readonly accent: Rgb;
+	readonly warning: Rgb;
+}
+
+const SURFACE_COLORS = {
+	dark: {
+		panel: {
+			background: [66, 70, 78],
+			normal: [220, 223, 228],
+			muted: [172, 177, 185],
+			accent: [114, 224, 207],
+			warning: [255, 211, 105],
+		},
+		selection: {
+			background: [66, 70, 78],
+			normal: [220, 223, 228],
+			muted: [172, 177, 185],
+			accent: [114, 224, 207],
+			warning: [255, 224, 145],
+		},
+	},
+	light: {
+		panel: {
+			background: [245, 245, 245],
+			normal: [32, 36, 43],
+			muted: [91, 97, 107],
+			accent: [0, 95, 135],
+			warning: [122, 76, 0],
+		},
+		selection: {
+			background: [245, 245, 245],
+			normal: [32, 36, 43],
+			muted: [91, 97, 107],
+			accent: [0, 95, 135],
+			warning: [105, 65, 0],
+		},
+	},
+} as const satisfies Readonly<
+	Record<Exclude<TerminalAppearance, "unknown">, Readonly<Record<ThemeSurface, SurfaceColors>>>
+>;
 
 const SGR_BY_TONE: Readonly<Record<ThemeTone, string>> = Object.freeze({
 	accent: "36",
@@ -46,11 +98,30 @@ const ANSI_16: readonly (readonly [number, number, number, number])[] = Object.f
 	[255, 255, 255, 97],
 ]);
 
-export function createCodaTheme(colorLevel: ColorLevel): TuiTheme {
+export function createCodaTheme(colorLevel: ColorLevel, appearance: TerminalAppearance = "unknown"): TuiTheme {
 	const style = (tone: ThemeTone, value: string) => (colorLevel === 0 ? value : styleAnsi(SGR_BY_TONE[tone], value));
 	return Object.freeze({
 		colorLevel,
+		appearance,
+		surfaceFilled: colorLevel > 0 && appearance !== "unknown",
 		style,
+		styleOnSurface: (surface: ThemeSurface, tone: ThemeSurfaceTone, value: string) => {
+			if (colorLevel === 0 || value.length === 0) return value;
+			const colorTone = tone === "strong" || tone === "emphasis" ? "normal" : tone === "code" ? "accent" : tone;
+			const modifier = tone === "strong" || tone === "accent" ? "1" : tone === "emphasis" ? "3" : undefined;
+			if (appearance === "unknown") {
+				const foreground =
+					colorTone === "accent" ? "36" : colorTone === "warning" ? "33" : colorTone === "muted" ? "2" : undefined;
+				const parameters = [modifier, foreground].filter(Boolean).join(";");
+				return parameters ? styleAnsi(parameters, value) : value;
+			}
+			const colors = SURFACE_COLORS[appearance][surface];
+			const foreground = foregroundSgr(colors[colorTone], colorLevel);
+			return styleAnsi(
+				`${modifier ? `${modifier};` : ""}${foreground};${backgroundSgr(colors.background, colorLevel)}`,
+				value,
+			);
+		},
 		styleEditorBorder: (reasoning: string, focused: boolean, value: string) => {
 			if (!focused) return style("muted", value);
 			if (colorLevel === 0 || value.length === 0) return value;
@@ -64,6 +135,18 @@ export function createCodaTheme(colorLevel: ColorLevel): TuiTheme {
 			return `\x1b[${foreground}m${value}\x1b[0m`;
 		},
 	});
+}
+
+function foregroundSgr([red, green, blue]: Rgb, colorLevel: Exclude<ColorLevel, 0>): string {
+	if (colorLevel === 3) return `38;2;${red};${green};${blue}`;
+	if (colorLevel === 2) return `38;5;${nearestAnsi256(red, green, blue)}`;
+	return nearestAnsi16(red, green, blue).toString();
+}
+
+function backgroundSgr([red, green, blue]: Rgb, colorLevel: Exclude<ColorLevel, 0>): string {
+	if (colorLevel === 3) return `48;2;${red};${green};${blue}`;
+	if (colorLevel === 2) return `48;5;${nearestAnsi256(red, green, blue)}`;
+	return (nearestAnsi16(red, green, blue) + 10).toString();
 }
 
 function nearestAnsi256(red: number, green: number, blue: number): number {

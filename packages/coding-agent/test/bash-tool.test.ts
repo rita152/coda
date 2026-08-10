@@ -109,7 +109,9 @@ describe("bash Tool", () => {
 			fauxAssistantMessage(
 				fauxToolCall(
 					"bash",
-					{ command: `printf "%s|%s" "$PWD" "\${OPENCODE_API_KEY-unset}"` },
+					{
+						command: `${JSON.stringify(process.execPath)} -e 'process.stdout.write(process.cwd()+"|"+(process.env.OPENCODE_API_KEY??"unset"))'`,
+					},
 					{ id: "provider-bash-1" },
 				),
 				{ stopReason: "toolUse", timestamp: 900 },

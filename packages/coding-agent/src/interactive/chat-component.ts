@@ -16,6 +16,7 @@ import {
 	type TerminalInput,
 	wrapAnsi,
 } from "@coda/tui";
+import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { ComposerHistory } from "./composer-history.ts";
@@ -75,6 +76,7 @@ export interface ChatComponentOptions {
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly onResumeFollowUps?: () => Promise<void> | void;
 	readonly onPermissions?: () => Promise<string | undefined>;
+	readonly onApprovals?: () => Promise<void>;
 	/** Reads the controller-owned mixed Follow-up/User Shell queue state. */
 	readonly isQueuePaused?: () => boolean;
 	readonly onReclaimFollowUp?: (queueItemId: string) => Promise<void> | void;
@@ -216,6 +218,12 @@ export class ChatComponent extends Component {
 
 	setAwaitingApproval(request: PermissionApprovalRequest): void {
 		if (!this.#timeline.setAwaitingApproval(request.invocationId, request.toolName ?? request.kind)) return;
+		this.#viewport.noteUpdate();
+		this.invalidate();
+	}
+
+	setApprovalResult(invocationId: string, approval: ApprovalDecisionAuditEvent): void {
+		if (!this.#timeline.setApprovalResult(invocationId, approval)) return;
 		this.#viewport.noteUpdate();
 		this.invalidate();
 	}
@@ -629,6 +637,30 @@ export class ChatComponent extends Component {
 					if (label) this.#permissionLabel = label;
 					this.invalidate();
 				},
+				(error: unknown) => {
+					this.#error = error instanceof Error ? error.message : String(error);
+					this.invalidate();
+				},
+			);
+			return;
+		}
+		if (value === "/approvals") {
+			if (this.running) {
+				this.#error = "Session Approvals can only be managed while the Agent is idle";
+				this.invalidate();
+				return;
+			}
+			if (!this.#options.onApprovals) {
+				this.#error = "Session Approval management is unavailable";
+				this.invalidate();
+				return;
+			}
+			this.#editor.clear();
+			this.#history.reset();
+			this.#error = undefined;
+			this.invalidate();
+			void this.#options.onApprovals().then(
+				() => this.invalidate(),
 				(error: unknown) => {
 					this.#error = error instanceof Error ? error.message : String(error);
 					this.invalidate();

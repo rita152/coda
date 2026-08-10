@@ -119,8 +119,9 @@ function actionTitle(entry: TimelineToolEntry, completed: boolean): string {
 
 function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRenderOptions): string[] {
 	const details = record(entry.result?.message.details);
+	const approval = approvalDetails(entry, width);
 	if (entry.invocation.toolName === "edit") {
-		return renderDiff(entry, width, options.theme);
+		return [...approval, ...renderDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "read" && !options.transcript && details) {
 		const start = numberField(details, "startLine");
@@ -128,18 +129,21 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		const total = numberField(details, "totalLines");
 		if (start !== undefined && end !== undefined && total !== undefined) {
 			const truncated = details.truncated === true ? " • truncated" : "";
-			return wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width);
+			return [...approval, ...wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width)];
 		}
 	}
 	if (entry.invocation.toolName === "write" && details) {
 		const operation = stringField(details, "operation");
 		const bytes = numberField(details, "bytes");
 		if (operation || bytes !== undefined) {
-			return wrapDetail(`${operation ?? "write"}${bytes === undefined ? "" : ` • ${bytes} bytes`}`, width);
+			return [
+				...approval,
+				...wrapDetail(`${operation ?? "write"}${bytes === undefined ? "" : ` • ${bytes} bytes`}`, width),
+			];
 		}
 	}
 
-	const lines = normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false);
+	const lines = [...approval, ...normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false)];
 	if (entry.invocation.toolName === "bash" && details) {
 		const metadata = bashMetadata(details);
 		for (const value of metadata) lines.push(...wrapDetail(value, width));
@@ -160,6 +164,40 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		}
 	}
 	return lines;
+}
+
+function approvalDetails(entry: TimelineToolEntry, width: number): string[] {
+	const approval = entry.approval;
+	if (!approval) return [];
+	let label: string;
+	switch (approval.outcome) {
+		case "approved-once":
+			label = "approved once";
+			break;
+		case "approved-for-process":
+			label = `this process${approval.expired ? " • expired" : ""}`;
+			break;
+		case "allowed-by-process":
+			label = `allowed by this process${approval.expired ? " • expired" : ""}`;
+			break;
+		case "denied":
+			label = approval.denial?.type === "feedback" ? "denied with feedback" : "denied";
+			break;
+		case "aborted":
+			label = "aborted";
+			break;
+		case "timed-out":
+			label = "timed out";
+			break;
+		case "persistent-rule":
+			label = "persistent rule";
+			break;
+		case "reviewer-failed":
+			label = "reviewer failed";
+			break;
+	}
+	const prefix = approval.commandPrefix ? ` • prefix ${approval.commandPrefix.join(" ")}` : "";
+	return wrapDetail(`Approval: ${label}${prefix}`, width);
 }
 
 function normalizedResultLines(entry: TimelineToolEntry, width: number, toolResultImagesSupported: boolean): string[] {

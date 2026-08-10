@@ -171,6 +171,20 @@ describe("ManagedSession", () => {
 			{
 				descriptor,
 				records: linearRecords(descriptor, [
+					{
+						type: "permission_audit_recorded",
+						runId: "run:1",
+						turnId: "turn:1",
+						payload: {
+							event: {
+								type: "approval_decision",
+								invocationId: "invocation:denied",
+								kind: "command",
+								outcome: "approved-for-process",
+								commandPrefix: ["npm", "test"],
+							},
+						},
+					},
 					{ type: "tool_started", runId: "run:1", turnId: "turn:1", payload: { invocation } },
 					{
 						type: "tool_finished",
@@ -200,6 +214,13 @@ describe("ManagedSession", () => {
 				outcome: "rejected",
 				rejectionReason: "policy",
 				resultMessageId: "message:result",
+				approval: {
+					type: "approval_decision",
+					invocationId: "invocation:denied",
+					kind: "command",
+					outcome: "approved-for-process",
+					commandPrefix: ["npm", "test"],
+				},
 			},
 		]);
 	});

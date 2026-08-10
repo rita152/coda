@@ -15,6 +15,7 @@ export interface VirtualTerminalOptions {
 }
 
 const DEFAULT_CAPABILITIES: TerminalCapabilities = {
+	appearance: "unknown",
 	keyboardProtocol: "kitty",
 	colorLevel: 3,
 	synchronizedOutput: true,

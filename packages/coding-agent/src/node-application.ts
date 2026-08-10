@@ -228,6 +228,7 @@ export function createNodeCodingAgentApplication(
 					scheduler,
 					diagnostics: diagnosticOutput,
 					synchronizedOutput: true,
+					colorScheme: startup.colorScheme,
 				});
 			return activeTerminal;
 		},

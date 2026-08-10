@@ -1,7 +1,8 @@
 import { compileSandboxPolicy } from "@coda/sandbox";
 import { describe, expect, it } from "vitest";
-import type { PermissionAuditEvent } from "../src/permissions/audit.ts";
+import { approvalDecisionAuditEvent, type PermissionAuditEvent } from "../src/permissions/audit.ts";
 import { createAuditedModelProcessRunner, type ModelProcessRunner } from "../src/permissions/model-process-runner.ts";
+import { isSessionRecordPayload } from "../src/session/v1-schema.ts";
 
 const policy = compileSandboxPolicy({
 	profile: "workspace",
@@ -21,6 +22,51 @@ const request = {
 };
 
 describe("Permission audit", () => {
+	it("stores denial metadata and a bounded sanitized summary instead of full feedback", () => {
+		const feedback = `Run npm pack first\n\u001b[31m${"inspect ".repeat(40)}`;
+		const event = approvalDecisionAuditEvent(
+			{
+				kind: "command",
+				runId: "run:1" as never,
+				turnId: "turn:1" as never,
+				invocationId: "invocation:1" as never,
+				cwd: "/workspace",
+				reason: "command requires approval",
+			},
+			{ type: "denied", rejection: feedback },
+		);
+
+		expect(event).toEqual({
+			type: "approval_decision",
+			invocationId: "invocation:1",
+			kind: "command",
+			outcome: "denied",
+			denial: {
+				type: "feedback",
+				characterCount: Array.from(feedback).length,
+				summary: expect.any(String),
+			},
+		});
+		if (event.type !== "approval_decision" || !event.denial) throw new Error("expected denial projection");
+		expect(event.denial.summary.length).toBeLessThanOrEqual(160);
+		expect(event.denial.summary).not.toContain("\u001b");
+		expect(JSON.stringify(event)).not.toContain(feedback);
+
+		const unicode = approvalDecisionAuditEvent(
+			{
+				kind: "command",
+				runId: "run:2" as never,
+				turnId: "turn:2" as never,
+				invocationId: "invocation:2" as never,
+				cwd: "/workspace",
+				reason: "command requires approval",
+			},
+			{ type: "denied", rejection: "🙂".repeat(200) },
+		);
+		expect(Array.from(unicode.denial?.summary ?? "")).toHaveLength(160);
+		expect(isSessionRecordPayload("permission_audit_recorded", { event: unicode }, 5)).toBe(true);
+	});
+
 	it("records the effective backend, roots, and normal process outcome", async () => {
 		const events: PermissionAuditEvent[] = [];
 		const delegate: ModelProcessRunner = {

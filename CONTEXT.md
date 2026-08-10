@@ -130,7 +130,7 @@ A model-declared, narrowly scoped extension to the current Permission Profile fo
 _Avoid_: Full Access, Path Grant, implicit retry
 
 **Session Approval**:
-A process-local approval remembered for matching commands or network hosts until the current Coda process exits.
+A process-local approval remembered until the current Coda process exits. A command Session Approval uses a displayed, validated token prefix bound to its effective Sandbox context and executable identity; reuse suppresses only the matching prompt and never changes execution authority.
 _Avoid_: persistent rule, Run grant, trust
 
 **Command Rule**:

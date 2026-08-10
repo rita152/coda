@@ -41,7 +41,7 @@ export function matchingCommandRules(
 	if (!isAbsolute(executable)) return Object.freeze([]);
 	const name = basename(executable);
 	const reviewed = [...hostExecutables].reverse().find((entry) => entry.name === name);
-	if (reviewed && !reviewed.paths.includes(executable)) return Object.freeze([]);
+	if (!reviewed || !reviewed.paths.includes(executable)) return Object.freeze([]);
 	const resolvedWords = [name, ...words.slice(1)];
 	return Object.freeze(rules.filter((rule) => patternMatches(rule, resolvedWords)));
 }

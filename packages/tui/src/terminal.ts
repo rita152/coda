@@ -2,6 +2,8 @@ import type { TerminalInput } from "./input.ts";
 
 export type ColorLevel = 0 | 1 | 2 | 3;
 export type KeyboardProtocol = "kitty" | "legacy";
+export type TerminalAppearance = "light" | "dark" | "unknown";
+export type TerminalColorScheme = "auto" | "light" | "dark";
 
 export interface TerminalSize {
 	readonly columns: number;
@@ -9,6 +11,7 @@ export interface TerminalSize {
 }
 
 export interface TerminalCapabilities {
+	readonly appearance: TerminalAppearance;
 	readonly keyboardProtocol: KeyboardProtocol;
 	readonly colorLevel: ColorLevel;
 	readonly synchronizedOutput: boolean;

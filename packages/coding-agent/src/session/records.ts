@@ -11,6 +11,7 @@ import type {
 import type { Message } from "@coda/ai";
 import type { ModelSelection } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
+import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
 export const SESSION_RECORD_TYPES = [
@@ -97,6 +98,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	const followUpRuns = new Map<string, string>();
 	const startedTools = new Map<string, SessionRecord>();
 	const toolInvocations = new Map<string, SessionToolLifecycle>();
+	const toolApprovals = new Map<string, ApprovalDecisionAuditEvent>();
 	const activeRuns = new Set<string>();
 	const composerSubmissions = new Map<string, ComposerSubmission>();
 	const legacyComposerSubmissions: Array<{ readonly sequence: number; readonly submission: ComposerSubmission }> = [];
@@ -163,6 +165,17 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 			case "project_trust_changed":
 				// Project Trust records are audit facts. Only current settings may authorize instructions.
 				break;
+			case "permission_audit_recorded": {
+				const event = payload.event as ApprovalDecisionAuditEvent | undefined;
+				if (event?.type === "approval_decision" && typeof event.invocationId === "string") {
+					toolApprovals.set(event.invocationId, structuredClone(event));
+					const existing = toolInvocations.get(event.invocationId);
+					if (existing) {
+						toolInvocations.set(event.invocationId, { ...existing, approval: structuredClone(event) });
+					}
+				}
+				break;
+			}
 			case "tool_started": {
 				const invocation = payload.invocation as ToolInvocation | undefined;
 				if (typeof invocation?.id === "string") {
@@ -172,6 +185,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...(record.runId ? { runId: record.runId } : {}),
 						...(record.turnId ? { turnId: record.turnId } : {}),
 						startedAt: record.timestamp,
+						...(toolApprovals.get(invocation.id)
+							? { approval: structuredClone(toolApprovals.get(invocation.id)!) }
+							: {}),
 					});
 				}
 				break;
@@ -192,6 +208,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...(rejectionReason ? { rejectionReason } : {}),
 						...(typeof payload.resultMessageId === "string"
 							? { resultMessageId: payload.resultMessageId as MessageId }
+							: {}),
+						...((started?.approval ?? toolApprovals.get(invocation.id))
+							? { approval: structuredClone(started?.approval ?? toolApprovals.get(invocation.id)!) }
 							: {}),
 					});
 					startedTools.delete(invocation.id);

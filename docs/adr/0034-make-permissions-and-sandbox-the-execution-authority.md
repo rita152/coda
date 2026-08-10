@@ -10,4 +10,4 @@ The semantic oracle is the public Codex checkout at commit `f93109615ff27ab58007
 
 ## Consequences
 
-The package graph becomes `agent → ai` and `coding-agent → ai, tui, agent, sandbox`; `ai`, `tui`, and `sandbox` are workspace leaves. Project Trust may select a default Permission Profile but never serves as execution authority. Transient approvals and `/permissions` overrides are process-local, while only explicit Command Rules and Network Rules persist.
+The package graph becomes `agent → ai` and `coding-agent → ai, tui, agent, sandbox`; `ai`, `tui`, and `sandbox` are workspace leaves. Project Trust may select a default Permission Profile but never serves as execution authority. Transient approvals and `/permissions` overrides are process-local, while only explicit Command Rules and Network Rules persist. A command Session Approval may suppress a future prompt only for the displayed, validated token prefix under the same effective Sandbox context and executable identity; it neither persists nor changes execution authority.

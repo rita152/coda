@@ -197,4 +197,17 @@ describe("stable overlay handles", () => {
 		expect(tui.focused).toBe(root);
 		expect(() => handle.show()).toThrowError(/removed/);
 	});
+
+	it("restores focus to a visible overlay across a terminal stop and restart", async () => {
+		const root = new InteractiveComponent(["root"]);
+		const overlay = new InteractiveComponent(["approval"]);
+		const { tui } = createTui(root);
+		await tui.start();
+		tui.showOverlay(overlay, { focus: true, row: 1, column: 1, width: 8 });
+
+		await tui.stop();
+		await tui.start();
+
+		expect(tui.focused).toBe(overlay);
+	});
 });

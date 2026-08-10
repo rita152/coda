@@ -105,12 +105,19 @@ function validateSettings(value: unknown): UserSettings {
 	if (value.ui !== undefined) {
 		if (
 			!isRecord(value.ui) ||
-			!hasOnlyKeys(value.ui, ["motion"]) ||
-			(value.ui.motion !== "full" && value.ui.motion !== "reduced")
+			!hasOnlyKeys(value.ui, ["motion", "colorScheme"]) ||
+			(value.ui.motion !== undefined && value.ui.motion !== "full" && value.ui.motion !== "reduced") ||
+			(value.ui.colorScheme !== undefined &&
+				value.ui.colorScheme !== "auto" &&
+				value.ui.colorScheme !== "light" &&
+				value.ui.colorScheme !== "dark")
 		) {
-			throw new Error("Coda settings contain an invalid UI motion setting");
+			throw new Error("Coda settings contain an invalid UI setting");
 		}
-		ui = { motion: value.ui.motion };
+		ui = {
+			...(value.ui.motion ? { motion: value.ui.motion } : {}),
+			...(value.ui.colorScheme ? { colorScheme: value.ui.colorScheme } : {}),
+		};
 	}
 	let permissions: UserSettings["permissions"];
 	if (value.permissions !== undefined) {

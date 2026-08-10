@@ -163,6 +163,36 @@ describe("SemanticTimeline", () => {
 		]);
 	});
 
+	it("restores process-only approval history as expired without restoring authority", () => {
+		const seed: AgentSeed = {
+			version: 1,
+			pendingFollowUps: [],
+			messages: [
+				assistant("assistant-restored", [
+					{ type: "toolCall", id: "provider-approved", name: "bash", arguments: { command: "npm test" } },
+				]),
+			],
+		};
+		const lifecycle: SessionToolLifecycle = {
+			...restoredTool("invocation-approved", "provider-approved", 0, "bash", "success"),
+			approval: {
+				type: "approval_decision",
+				invocationId: "invocation-approved",
+				kind: "command",
+				outcome: "approved-for-process",
+				commandPrefix: ["npm", "test"],
+			},
+		};
+
+		const timeline = new SemanticTimeline(seed, [lifecycle]);
+
+		expect(toolEntries(timeline)[0]?.approval).toEqual({
+			outcome: "approved-for-process",
+			commandPrefix: ["npm", "test"],
+			expired: true,
+		});
+	});
+
 	it("preserves unchanged entry identities when a streaming tail advances", () => {
 		const timeline = new SemanticTimeline({
 			version: 1,

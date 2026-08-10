@@ -73,7 +73,9 @@ export type {
 	ColorLevel,
 	KeyboardProtocol,
 	Terminal,
+	TerminalAppearance,
 	TerminalCapabilities,
+	TerminalColorScheme,
 	TerminalInputListener,
 	TerminalSize,
 } from "./terminal.ts";

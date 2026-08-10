@@ -5,10 +5,12 @@ import type { ToolPolicyRequest } from "@coda/agent";
 import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
+import type { ApprovalDecisionAuditEvent } from "../src/permissions/audit.ts";
 import {
 	type ApprovalDecision,
 	type ApprovalPolicy,
 	createPermissionEngine,
+	type ExecutableIdentity,
 	type PermissionApprovalRequest,
 } from "../src/permissions/permission-engine.ts";
 import { createWorkspace } from "../src/workspace.ts";
@@ -228,6 +230,24 @@ describe("Permission Engine command rules", () => {
 		expect(engine.authorizationFor(unreviewed.invocationId)).toMatchObject({ execution: "sandboxed" });
 	});
 
+	it("does not trust an absolute executable by basename when no host executable was reviewed", async () => {
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "on-request",
+			approval: { decide: async () => ({ type: "approved" }) },
+			commandRules: [{ pattern: ["git", "status"], decision: "allow" }],
+		});
+		const invocation = shellRequest("/tmp/git status");
+
+		await expect(engine.check(invocation)).resolves.toEqual({ decision: "allow" });
+		expect(engine.authorizationFor(invocation.invocationId)).toMatchObject({ execution: "sandboxed" });
+	});
+
 	it.each([
 		{
 			name: "a forbidden rule remains a hard deny in Full Access",
@@ -394,6 +414,84 @@ describe("Permission Engine multi-command rules", () => {
 	});
 
 	it.each([
+		"git push origin main > /tmp/out",
+		"sh -c 'git push origin main'",
+		"printf '%s' \"$(git push origin main)\"",
+	])("applies forbidden rules to literal commands nested in complex Shell syntax: %s", async (command) => {
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+			commandRules: [{ pattern: ["git", "push"], decision: "forbidden", justification: "push is blocked" }],
+			approval: { decide: async () => ({ type: "approved" }) },
+		});
+
+		await expect(engine.check(shellRequest(command))).resolves.toEqual({
+			decision: "reject",
+			reason: "push is blocked",
+		});
+	});
+
+	it.each(["printf ready > /tmp/out", 'printf "%s" "$PWD"'])(
+		"prompts for unclassified complex Shell syntax under On Request: %s",
+		async (command) => {
+			const approvals: PermissionApprovalRequest[] = [];
+			const engine = createPermissionEngine({
+				cwd: "/workspace",
+				profile: compileSandboxPolicy({
+					profile: "workspace",
+					workspaceRoots: ["/workspace"],
+					temporaryDirectory: "/tmp",
+				}),
+				approvalPolicy: "on-request",
+				approval: {
+					decide: async (request) => {
+						approvals.push(request);
+						return { type: "approved" };
+					},
+				},
+			});
+			const invocation = shellRequest(command);
+
+			await expect(engine.check(invocation)).resolves.toEqual({ decision: "allow" });
+			expect(approvals).toHaveLength(1);
+			expect(approvals[0]).toMatchObject({
+				kind: "command",
+				reason: "complex Shell command could not be classified safely",
+			});
+		},
+	);
+
+	it("rejects unclassified complex Shell syntax under Never", async () => {
+		let prompts = 0;
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+			approval: {
+				decide: async () => {
+					prompts++;
+					return { type: "approved" };
+				},
+			},
+		});
+
+		await expect(engine.check(shellRequest("printf ready > /tmp/out"))).resolves.toEqual({
+			decision: "reject",
+			reason: "complex Shell command requires interactive approval; approval policy is never",
+		});
+		expect(prompts).toBe(0);
+	});
+
+	it.each([
 		"sh -c 'rm -rf build'",
 		"printf '%s' \"$(rm --force build/file)\"",
 		"printf x | rm -rf build",
@@ -478,6 +576,190 @@ describe("Permission Engine multi-command rules", () => {
 });
 
 describe("Permission Engine approval memory", () => {
+	it("reuses and exposes a reviewed command prefix only for this process", async () => {
+		let prompts = 0;
+		const reuseAudits: ApprovalDecisionAuditEvent[] = [];
+		const executable: ExecutableIdentity = {
+			path: "/usr/local/bin/npm",
+			device: "1",
+			inode: "42",
+			size: 512,
+			modifiedAt: 1_000,
+		};
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "on-request",
+			onSessionApprovalUsed: (event) => {
+				reuseAudits.push(event);
+			},
+			resolveExecutable: async ({ executable: name, cwd }) => {
+				expect(name).toBe("npm");
+				expect(cwd).toBe("/workspace");
+				return executable;
+			},
+			approval: {
+				decide: async (request) => {
+					prompts++;
+					return prompts === 1
+						? { type: "approved-command-prefix-for-session", command: request.proposedSessionCommandRule! }
+						: { type: "denied", rejection: "grant was revoked" };
+				},
+			},
+		});
+		const first = {
+			...shellRequest("npm publish --tag next", "require_escalated"),
+			arguments: {
+				command: "npm publish --tag next",
+				sandbox_permissions: "require_escalated",
+				justification: "publish the prerelease",
+				prefix_rule: ["npm", "publish"],
+			},
+		};
+		const second = {
+			...shellRequest("npm publish --tag latest", "require_escalated"),
+			invocationId: "invocation:second-prefix-use" as never,
+		};
+
+		await expect(engine.check(first)).resolves.toEqual({ decision: "allow" });
+		await expect(engine.check(second)).resolves.toEqual({ decision: "allow" });
+		expect(prompts).toBe(1);
+		expect(engine.approvalFor(first.invocationId)).toMatchObject({
+			outcome: "approved-for-process",
+			commandPrefix: ["npm", "publish"],
+		});
+		expect(engine.approvalFor(second.invocationId)).toMatchObject({
+			outcome: "allowed-by-process",
+			commandPrefix: ["npm", "publish"],
+		});
+		expect(reuseAudits).toEqual([engine.approvalFor(second.invocationId)]);
+		expect(engine.listSessionApprovals()).toEqual([
+			expect.objectContaining({
+				id: "command-session-approval:1",
+				command: ["npm", "publish"],
+				environmentId: "local",
+				cwd: "/workspace",
+				shellExecutable: "/bin/sh",
+				sandboxPermissions: "require_escalated",
+				executable,
+			}),
+		]);
+
+		expect(engine.revokeSessionApproval("command-session-approval:1")).toBe(true);
+		expect(engine.listSessionApprovals()).toEqual([]);
+		const afterRevoke = {
+			...shellRequest("npm publish --tag stable", "require_escalated"),
+			invocationId: "invocation:after-prefix-revoke" as never,
+		};
+		await expect(engine.check(afterRevoke)).resolves.toEqual({ decision: "reject", reason: "grant was revoked" });
+		expect(prompts).toBe(2);
+	});
+
+	it("revokes a command prefix approval when the resolved executable identity drifts", async () => {
+		const warnings: string[] = [];
+		let prompts = 0;
+		let executable: ExecutableIdentity = {
+			path: "/usr/local/bin/npm",
+			device: "1",
+			inode: "42",
+			size: 512,
+			modifiedAt: 1_000,
+		};
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "on-request",
+			resolveExecutable: async () => executable,
+			onWarning: (warning) => {
+				warnings.push(warning);
+			},
+			approval: {
+				decide: async (request) => {
+					prompts++;
+					return prompts === 1
+						? { type: "approved-command-prefix-for-session", command: request.proposedSessionCommandRule! }
+						: { type: "denied", rejection: "executable changed" };
+				},
+			},
+		});
+		const first = {
+			...shellRequest("npm publish", "require_escalated"),
+			arguments: {
+				command: "npm publish",
+				sandbox_permissions: "require_escalated",
+				justification: "publish",
+				prefix_rule: ["npm", "publish"],
+			},
+		};
+
+		await expect(engine.check(first)).resolves.toEqual({ decision: "allow" });
+		executable = { ...executable, inode: "99", modifiedAt: 2_000 };
+		const second = {
+			...shellRequest("npm publish --tag latest", "require_escalated"),
+			invocationId: "invocation:identity-drift" as never,
+		};
+		await expect(engine.check(second)).resolves.toEqual({ decision: "reject", reason: "executable changed" });
+
+		expect(prompts).toBe(2);
+		expect(engine.listSessionApprovals()).toEqual([]);
+		expect(warnings).toEqual(["Revoked Session Approval for npm publish because the executable identity changed"]);
+	});
+
+	it("revokes every command Session Approval when the Permission configuration changes", async () => {
+		const workspaceProfile = compileSandboxPolicy({
+			profile: "workspace",
+			workspaceRoots: ["/workspace"],
+			temporaryDirectory: "/tmp",
+		});
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: workspaceProfile,
+			approvalPolicy: "on-request",
+			resolveExecutable: async () => ({
+				path: "/usr/local/bin/npm",
+				device: "1",
+				inode: "42",
+				size: 512,
+				modifiedAt: 1_000,
+			}),
+			approval: {
+				decide: async (request) => ({
+					type: "approved-command-prefix-for-session",
+					command: request.proposedSessionCommandRule!,
+				}),
+			},
+		});
+		const request = {
+			...shellRequest("npm publish", "require_escalated"),
+			arguments: {
+				command: "npm publish",
+				sandbox_permissions: "require_escalated",
+				justification: "publish",
+				prefix_rule: ["npm", "publish"],
+			},
+		};
+
+		await engine.check(request);
+		expect(engine.listSessionApprovals()).toHaveLength(1);
+		engine.update({
+			profile: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+		});
+		expect(engine.listSessionApprovals()).toEqual([]);
+	});
+
 	it.each<{
 		name: string;
 		review: ApprovalDecision;
@@ -1092,6 +1374,45 @@ describe("Permission Engine model escalation protocol", () => {
 		expect(prompts).toBe(1);
 		expect(requests[0]?.proposedCommandRule).toBeUndefined();
 		expect(engine.authorizationFor(broadPrefix.invocationId)).toMatchObject({ execution: "unsandboxed" });
+	});
+
+	it("never offers a prefix grant for a pipeline even when every command shares the proposed prefix", async () => {
+		const requests: PermissionApprovalRequest[] = [];
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "on-request",
+			resolveExecutable: async () => ({
+				path: "/usr/local/bin/npm",
+				device: "1",
+				inode: "42",
+				size: 512,
+				modifiedAt: 1_000,
+			}),
+			approval: {
+				decide: async (request) => {
+					requests.push(request);
+					return { type: "approved" };
+				},
+			},
+		});
+		const pipeline = {
+			...shellRequest("npm test | npm run summarize", "require_escalated"),
+			arguments: {
+				command: "npm test | npm run summarize",
+				sandbox_permissions: "require_escalated",
+				justification: "run and summarize",
+				prefix_rule: ["npm"],
+			},
+		};
+
+		await expect(engine.check(pipeline)).resolves.toEqual({ decision: "allow" });
+		expect(requests[0]?.proposedCommandRule).toBeUndefined();
+		expect(requests[0]?.proposedSessionCommandRule).toBeUndefined();
 	});
 
 	it("accepts empty or omitted justification with an explicit sandbox override", async () => {

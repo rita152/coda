@@ -5,7 +5,9 @@ import type { ScheduledTask, Scheduler } from "./runtime.ts";
 import {
 	type ColorLevel,
 	type Terminal,
+	type TerminalAppearance,
 	type TerminalCapabilities,
+	type TerminalColorScheme,
 	type TerminalInputListener,
 	type TerminalSize,
 	terminalCapabilities,
@@ -18,6 +20,8 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const KITTY_FLAGS = 7;
 const KITTY_QUERY = `\x1b[>${KITTY_FLAGS}u\x1b[?u`;
+const BACKGROUND_QUERY = "\x1b]11;?\x1b\\";
+const MAX_ESCAPE_SEQUENCE_LENGTH = 4_096;
 const START_SEQUENCES = `\x1b[?25l\x1b[?2004h${KITTY_QUERY}`;
 const STOP_SEQUENCES = "\x1b[<u\x1b[?2004l\x1b[?25h";
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -53,6 +57,7 @@ export interface ProcessTerminalOptions {
 	readonly synchronizedOutput?: boolean;
 	readonly keyboardNegotiationTimeoutMs?: number;
 	readonly escapeSequenceTimeoutMs?: number;
+	readonly colorScheme?: TerminalColorScheme;
 }
 
 interface Modifiers {
@@ -110,6 +115,12 @@ const LEGACY_KEYS = new Map<string, LogicalKey>([
 	["\x1b[D", "left"],
 	["\x1b[H", "home"],
 	["\x1b[F", "end"],
+	["\x1bOA", "up"],
+	["\x1bOB", "down"],
+	["\x1bOC", "right"],
+	["\x1bOD", "left"],
+	["\x1bOH", "home"],
+	["\x1bOF", "end"],
 	["\x1b[1~", "home"],
 	["\x1b[2~", "insert"],
 	["\x1b[3~", "delete"],
@@ -155,6 +166,19 @@ const KITTY_FUNCTIONAL_KEYS = new Map<number, LogicalKey>([
 	[57375, "f12"],
 ]);
 
+const CSI_SPECIAL_KEYS = new Map<string, LogicalKey>([
+	["A", "up"],
+	["B", "down"],
+	["C", "right"],
+	["D", "left"],
+	["H", "home"],
+	["F", "end"],
+	["P", "f1"],
+	["Q", "f2"],
+	["R", "f3"],
+	["S", "f4"],
+]);
+
 export class ProcessTerminal implements Terminal {
 	readonly #input: ProcessTerminalInput;
 	readonly #output: ProcessTerminalOutput;
@@ -164,6 +188,7 @@ export class ProcessTerminal implements Terminal {
 	readonly #synchronizedOutput: boolean;
 	readonly #negotiationTimeoutMs: number;
 	readonly #escapeSequenceTimeoutMs: number;
+	readonly #colorScheme: TerminalColorScheme;
 	readonly #listeners = new Set<TerminalInputListener>();
 	readonly #dataListener = (chunk: string | Uint8Array): void => this.#receive(chunk);
 	readonly #resizeListener = (): void => this.#receiveResize();
@@ -182,6 +207,10 @@ export class ProcessTerminal implements Terminal {
 	#negotiationTask?: ScheduledTask;
 	#escapeTask?: ScheduledTask;
 	#resolveNegotiation?: () => void;
+	#keyboardSettled = false;
+	#appearanceSettled = false;
+	#appearanceResolved = false;
+	#appearance: TerminalAppearance;
 
 	constructor(options: ProcessTerminalOptions) {
 		this.#input = options.input;
@@ -192,6 +221,8 @@ export class ProcessTerminal implements Terminal {
 		this.#synchronizedOutput = options.synchronizedOutput ?? false;
 		this.#negotiationTimeoutMs = options.keyboardNegotiationTimeoutMs ?? 100;
 		this.#escapeSequenceTimeoutMs = options.escapeSequenceTimeoutMs ?? 10;
+		this.#colorScheme = options.colorScheme ?? "auto";
+		this.#appearance = this.#colorScheme === "auto" ? "unknown" : this.#colorScheme;
 		const initialSize = readSize(options.output);
 		this.#usedFallbackSize = initialSize === undefined;
 		this.#size = initialSize ?? terminalSize(DEFAULT_COLUMNS, DEFAULT_ROWS);
@@ -246,7 +277,7 @@ export class ProcessTerminal implements Terminal {
 			}
 
 			const negotiation = this.#beginNegotiation();
-			this.write(START_SEQUENCES);
+			this.write(`${START_SEQUENCES}${this.#shouldQueryAppearance() ? BACKGROUND_QUERY : ""}`);
 			await Promise.all([negotiation, this.flushOutput()]);
 			this.#started = true;
 			return true;
@@ -260,25 +291,52 @@ export class ProcessTerminal implements Terminal {
 
 	#beginNegotiation(): Promise<void> {
 		return new Promise<void>((resolve) => {
+			this.#keyboardSettled = false;
+			this.#appearanceSettled = !this.#shouldQueryAppearance();
 			this.#resolveNegotiation = resolve;
 			this.#negotiationTask = this.#scheduler.schedule(this.#negotiationTimeoutMs, () => {
-				this.#settleNegotiation("legacy");
+				this.#settleKeyboardNegotiation("legacy");
+				this.#settleAppearanceNegotiation("unknown");
 			});
 		});
 	}
 
-	#settleNegotiation(protocol: "kitty" | "legacy"): void {
-		if (!this.#resolveNegotiation) return;
+	#settleKeyboardNegotiation(protocol: "kitty" | "legacy"): void {
+		if (!this.#resolveNegotiation || this.#keyboardSettled) return;
+		this.#keyboardSettled = true;
+		this.#capabilities = this.#createCapabilities(protocol);
+		this.#finishNegotiation();
+	}
+
+	#settleAppearanceNegotiation(appearance: TerminalAppearance): void {
+		if (!this.#resolveNegotiation || this.#appearanceSettled) return;
+		this.#appearanceSettled = true;
+		this.#appearanceResolved = true;
+		this.#appearance = appearance;
+		this.#capabilities = this.#createCapabilities(this.#capabilities.keyboardProtocol);
+		this.#finishNegotiation();
+	}
+
+	#finishNegotiation(): void {
+		if (!this.#resolveNegotiation || !this.#keyboardSettled || !this.#appearanceSettled) return;
 		this.#negotiationTask?.cancel();
 		this.#negotiationTask = undefined;
-		this.#capabilities = this.#createCapabilities(protocol);
 		const resolve = this.#resolveNegotiation;
 		this.#resolveNegotiation = undefined;
 		resolve();
 	}
 
+	#shouldQueryAppearance(): boolean {
+		return (
+			this.#colorScheme === "auto" &&
+			!this.#appearanceResolved &&
+			detectColorLevel(this.#output, this.#environment) > 0
+		);
+	}
+
 	#createCapabilities(protocol: "kitty" | "legacy"): TerminalCapabilities {
 		return terminalCapabilities({
+			appearance: this.#appearance,
 			keyboardProtocol: protocol,
 			colorLevel: detectColorLevel(this.#output, this.#environment),
 			synchronizedOutput: this.#synchronizedOutput,
@@ -299,7 +357,8 @@ export class ProcessTerminal implements Terminal {
 
 	async #settleStartAndStop(): Promise<void> {
 		if (this.#startPromise && !this.#started) {
-			this.#settleNegotiation("legacy");
+			this.#settleKeyboardNegotiation("legacy");
+			this.#settleAppearanceNegotiation("unknown");
 			try {
 				await this.#startPromise;
 			} catch {
@@ -317,7 +376,8 @@ export class ProcessTerminal implements Terminal {
 		} catch (error) {
 			failure = error;
 		} finally {
-			this.#settleNegotiation("legacy");
+			this.#settleKeyboardNegotiation("legacy");
+			this.#settleAppearanceNegotiation("unknown");
 			this.#escapeTask?.cancel();
 			this.#escapeTask = undefined;
 			try {
@@ -360,7 +420,8 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async #restoreAfterFailure(): Promise<void> {
-		this.#settleNegotiation("legacy");
+		this.#settleKeyboardNegotiation("legacy");
+		this.#settleAppearanceNegotiation("unknown");
 		this.#escapeTask?.cancel();
 		this.#escapeTask = undefined;
 		try {
@@ -454,18 +515,22 @@ export class ProcessTerminal implements Terminal {
 		this.#parseBuffer();
 	}
 
+	#scheduleAmbiguousEscape(sequence: string): void {
+		this.#escapeTask ??= this.#scheduler.schedule(this.#escapeSequenceTimeoutMs, () => {
+			this.#escapeTask = undefined;
+			if (this.#rawBuffer === sequence) {
+				this.#rawBuffer = "";
+				this.#parseEscape(sequence);
+			} else {
+				this.#parseBuffer();
+			}
+		});
+	}
+
 	#parseBuffer(): void {
 		while (this.#rawBuffer.length > 0) {
 			if (this.#rawBuffer === "\x1b") {
-				this.#escapeTask ??= this.#scheduler.schedule(this.#escapeSequenceTimeoutMs, () => {
-					this.#escapeTask = undefined;
-					if (this.#rawBuffer === "\x1b") {
-						this.#rawBuffer = "";
-						this.#parseEscape("\x1b");
-					} else {
-						this.#parseBuffer();
-					}
-				});
+				this.#scheduleAmbiguousEscape("\x1b");
 				return;
 			}
 			if (this.#rawBuffer.startsWith(BRACKETED_PASTE_START)) {
@@ -487,7 +552,21 @@ export class ProcessTerminal implements Terminal {
 			}
 
 			const sequence = readEscapeSequence(this.#rawBuffer);
-			if (!sequence) return;
+			if (!sequence) {
+				if (this.#rawBuffer === "\x1bO") this.#scheduleAmbiguousEscape("\x1bO");
+				if (this.#rawBuffer.length > MAX_ESCAPE_SEQUENCE_LENGTH) {
+					const osc11 = this.#rawBuffer.startsWith("\x1b]11;");
+					const length = this.#rawBuffer.length;
+					this.#rawBuffer = "";
+					this.#queueDiagnostic({
+						code: "terminal.escape-sequence-too-long",
+						message: "Discarded an unterminated terminal escape sequence",
+						details: { length, maximum: MAX_ESCAPE_SEQUENCE_LENGTH },
+					});
+					if (osc11) this.#settleAppearanceNegotiation("unknown");
+				}
+				return;
+			}
 			this.#rawBuffer = this.#rawBuffer.slice(sequence.length);
 			this.#parseEscape(sequence);
 		}
@@ -521,14 +600,25 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#parseEscape(sequence: string): void {
+		if (sequence.startsWith("\x1b]11;")) {
+			const appearance = parseOsc11Appearance(sequence);
+			if (appearance) this.#settleAppearanceNegotiation(appearance);
+			else if (this.#resolveNegotiation && !this.#appearanceSettled) {
+				this.#queueDiagnostic({
+					code: "terminal.invalid-background-response",
+					message: "Terminal emitted an invalid OSC 11 background response",
+				});
+			}
+			return;
+		}
 		const csi = sequence.startsWith("\x1b[") ? sequence.slice(2) : undefined;
 		const negotiation = /^\?(\d+)u$/.exec(csi ?? "");
 		if (negotiation) {
-			this.#settleNegotiation(Number.parseInt(negotiation[1]!, 10) > 0 ? "kitty" : "legacy");
+			this.#settleKeyboardNegotiation(Number.parseInt(negotiation[1]!, 10) > 0 ? "kitty" : "legacy");
 			return;
 		}
 		if (/^\?[\d;]*c$/.test(csi ?? "")) {
-			this.#settleNegotiation("legacy");
+			this.#settleKeyboardNegotiation("legacy");
 			return;
 		}
 
@@ -542,6 +632,12 @@ export class ProcessTerminal implements Terminal {
 		if (kitty) {
 			if (!this.#capabilities.keyRelease && kitty.action !== "press") return;
 			this.#queueInput(kitty);
+			return;
+		}
+		const csiSpecial = parseCsiSpecialKey(sequence);
+		if (csiSpecial) {
+			if (!this.#capabilities.keyRelease && csiSpecial.action !== "press") return;
+			this.#queueInput(csiSpecial);
 			return;
 		}
 		const xtermModified = parseXtermModifiedKey(sequence);
@@ -558,23 +654,6 @@ export class ProcessTerminal implements Terminal {
 		if (sequence === "\x1b[Z") {
 			this.#queueInput(keyInput("tab", undefined, { ...NO_MODIFIERS, shift: true }));
 			return;
-		}
-
-		const modifiedLegacy = /^1;(\d+)([ABCDHF])$/.exec(csi ?? "");
-		if (modifiedLegacy) {
-			const names: Readonly<Record<string, LogicalKey>> = {
-				A: "up",
-				B: "down",
-				C: "right",
-				D: "left",
-				H: "home",
-				F: "end",
-			};
-			const key = names[modifiedLegacy[2]!];
-			if (key) {
-				this.#queueInput(keyInput(key, undefined, decodeModifiers(Number.parseInt(modifiedLegacy[1]!, 10))));
-				return;
-			}
 		}
 
 		if (sequence === "\x1b") {
@@ -666,9 +745,35 @@ function detectColorLevel(
 	return 0;
 }
 
+function parseOsc11Appearance(sequence: string): TerminalAppearance | undefined {
+	const payload = sequence.endsWith("\x07")
+		? sequence.slice(0, -1)
+		: sequence.endsWith("\x1b\\")
+			? sequence.slice(0, -2)
+			: sequence;
+	const prefix = "\x1b]11;rgb:";
+	if (!payload.startsWith(prefix)) return undefined;
+	const match = /^([\da-f]{1,4})\/([\da-f]{1,4})\/([\da-f]{1,4})$/i.exec(payload.slice(prefix.length));
+	if (!match) return undefined;
+	const channels = match.slice(1).map((value) => {
+		const maximum = 16 ** value!.length - 1;
+		return Number.parseInt(value!, 16) / maximum;
+	});
+	const linear = channels.map((channel) =>
+		channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+	);
+	const luminance = 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+	return luminance >= 0.5 ? "light" : "dark";
+}
+
 function readEscapeSequence(buffer: string): string | undefined {
 	if (buffer === "\x1b") return buffer;
 	const introducer = buffer[1];
+	if (introducer === "O") {
+		if (buffer.length < 3) return undefined;
+		const final = buffer.charCodeAt(2);
+		return final >= 0x40 && final <= 0x7e ? buffer.slice(0, 3) : buffer.slice(0, 2);
+	}
 	if (introducer === "[") {
 		for (let index = 2; index < buffer.length; index++) {
 			const code = buffer.charCodeAt(index);
@@ -723,6 +828,18 @@ function parseXtermModifiedKey(sequence: string): TerminalInput | undefined {
 		return undefined;
 	}
 	return inputFromCodePoint(codePoint, decodeModifiers(modifier));
+}
+
+function parseCsiSpecialKey(sequence: string): KeyInput | undefined {
+	if (!sequence.startsWith("\x1b[")) return undefined;
+	const match = /^1;(\d+)(?::([123]))?([ABCDHFPQRS])$/.exec(sequence.slice(2));
+	if (!match) return undefined;
+	const modifier = Number.parseInt(match[1]!, 10);
+	if (!Number.isSafeInteger(modifier) || modifier < 1 || modifier > 16) return undefined;
+	const key = CSI_SPECIAL_KEYS.get(match[3]!);
+	if (!key) return undefined;
+	const action: KeyAction = match[2] === "2" ? "repeat" : match[2] === "3" ? "release" : "press";
+	return keyInput(key, undefined, decodeModifiers(modifier), action);
 }
 
 function inputFromCodePoint(codePoint: number, modifiers: Modifiers): TerminalInput | undefined {

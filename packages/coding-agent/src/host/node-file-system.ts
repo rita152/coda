@@ -15,6 +15,8 @@ function snapshot(status: Stats): FileStatus {
 		size: status.size,
 		mode: status.mode,
 		modifiedAt: status.mtimeMs,
+		device: String(status.dev),
+		inode: String(status.ino),
 	};
 }
 

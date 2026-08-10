@@ -118,12 +118,36 @@ function isPermissionAuditEvent(value: unknown): boolean {
 			);
 		case "approval_decision":
 			return (
-				exactRecord(value, ["type", "request", "decision"]) &&
-				isRecord(value.request) &&
-				isJsonValue(value.request) &&
-				isRecord(value.decision) &&
-				isNonEmptyString(value.decision.type) &&
-				isJsonValue(value.decision)
+				(exactRecord(value, ["type", "invocationId", "kind", "outcome"], ["commandPrefix", "denial"]) &&
+					isNonEmptyString(value.invocationId) &&
+					["command", "filesystem", "network", "skill", "mcp"].includes(String(value.kind)) &&
+					[
+						"approved-once",
+						"approved-for-process",
+						"allowed-by-process",
+						"denied",
+						"aborted",
+						"timed-out",
+						"persistent-rule",
+						"reviewer-failed",
+					].includes(String(value.outcome)) &&
+					(value.commandPrefix === undefined ||
+						(Array.isArray(value.commandPrefix) &&
+							value.commandPrefix.length > 0 &&
+							value.commandPrefix.every(isNonEmptyString))) &&
+					(value.denial === undefined ||
+						(exactRecord(value.denial, ["type", "characterCount", "summary"]) &&
+							["plain", "feedback", "reviewer-failed"].includes(String(value.denial.type)) &&
+							Number.isSafeInteger(value.denial.characterCount) &&
+							Number(value.denial.characterCount) >= 0 &&
+							typeof value.denial.summary === "string" &&
+							Array.from(value.denial.summary).length <= 160))) ||
+				(exactRecord(value, ["type", "request", "decision"]) &&
+					isRecord(value.request) &&
+					isJsonValue(value.request) &&
+					isRecord(value.decision) &&
+					isNonEmptyString(value.decision.type) &&
+					isJsonValue(value.decision))
 			);
 		case "rule_persistence":
 			return (

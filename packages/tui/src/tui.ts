@@ -96,6 +96,7 @@ export class Tui {
 	readonly #invalidationSubscriptions = new Map<Component, () => void>();
 	readonly #overlays: OverlayEntry[] = [];
 	#focused: Component | null = null;
+	#restartFocus?: Component;
 	#started = false;
 	#startPromise?: Promise<boolean>;
 	#stopPromise?: Promise<void>;
@@ -156,8 +157,10 @@ export class Tui {
 				for (const overlay of this.#overlays) {
 					if (!overlay.removed) this.#mount(overlay.component);
 				}
-				if (this.#root.focusable) this.focus(this.#root);
+				if (this.#restartFocus && this.#canFocus(this.#restartFocus)) this.focus(this.#restartFocus);
+				else if (this.#root.focusable) this.focus(this.#root);
 				await this.renderNow();
+				this.#restartFocus = undefined;
 				return true;
 			}
 		} catch (error) {
@@ -265,6 +268,7 @@ export class Tui {
 			this.#unsubscribeInput?.();
 			this.#unsubscribeInput = undefined;
 			this.#started = false;
+			this.#restartFocus = this.#focused ?? undefined;
 			this.#unmountAll();
 			try {
 				await this.#imageSurface?.dispose();

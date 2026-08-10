@@ -1,4 +1,4 @@
-import { createModels, fauxAssistantMessage, fauxProvider } from "@coda/ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import { createSystemScheduler, VirtualTerminal } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
@@ -76,6 +76,49 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 describe("interactive TUI mode", () => {
+	it("lets the CLI color scheme override user settings before Terminal startup", async () => {
+		const runtime = testTimeRuntime(1_050);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new UnavailableTerminal({ columns: 80, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let startup: unknown;
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({
+					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+					ui: { motion: "full", colorScheme: "dark" },
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: {
+				create: (options) => {
+					startup = options;
+					return terminal;
+				},
+			},
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		await expect(application.run(["--interactive", "--color-scheme", "light", "--no-session"])).resolves.toBe(1);
+		expect(startup).toEqual({ noColor: false, colorScheme: "light" });
+	});
+
 	it("releases the output gate after full-screen startup is unavailable", async () => {
 		const runtime = testTimeRuntime(1_100);
 		const faux = fauxProvider({ runtime });
@@ -534,6 +577,85 @@ describe("interactive TUI mode", () => {
 		expect(terminal.stopCalls).toBe(1);
 		expect(lifecycle.handlers).toBeUndefined();
 		expect(stderr.value).toBe("");
+	});
+
+	it("resolves a pending Approval Request as abort when the process terminates", async () => {
+		const runtime = testTimeRuntime(4_050);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("bash", { command: "printf ready > /tmp/coda-approval-termination" }, { id: "approval" }),
+				{ stopReason: "toolUse", timestamp: 4_050 },
+			),
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new TrackingTerminal({ columns: 80, rows: 24 });
+		const lifecycle = new FakeLifecycle();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({
+					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+					permissions: { profile: "workspace", approvalPolicy: "on-request" },
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout: new BufferOutput(),
+				stderr: new BufferOutput(),
+			},
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+				interactiveLifecycle: lifecycle,
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-session", "trigger approval"]);
+		await until(() => terminal.readOutput().includes("Would you like to run the following command?"));
+		terminal.clearOutput();
+		await terminal.emit({
+			type: "key",
+			key: "down",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await until(() => terminal.readOutput().includes("› 2. No, and tell Coda what to do differently"));
+		lifecycle.terminate("SIGTERM");
+		const outcome = await Promise.race([
+			running.then((code) => ({ code })),
+			new Promise<{ readonly timeout: true }>((resolve) => setTimeout(() => resolve({ timeout: true }), 500)),
+		]);
+		if ("timeout" in outcome) {
+			await terminal.emit({
+				type: "key",
+				key: "c",
+				text: "c",
+				shift: false,
+				control: true,
+				alt: false,
+				meta: false,
+				action: "press",
+			});
+			await running;
+		}
+
+		expect(outcome).toEqual({ code: 143 });
+		expect(terminal.started).toBe(false);
 	});
 
 	it("leaves full-screen while suspended and re-enters it on resume", async () => {

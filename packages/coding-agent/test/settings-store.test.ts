@@ -27,7 +27,7 @@ describe("FileSettingsStore", () => {
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			ui: { motion: "reduced" },
+			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
 				profile: "workspace",
 				approvalPolicy: {
@@ -45,7 +45,7 @@ describe("FileSettingsStore", () => {
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			ui: { motion: "reduced" },
+			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
 				profile: "workspace",
 				approvalPolicy: {
@@ -64,7 +64,7 @@ describe("FileSettingsStore", () => {
 			defaultModel: { provider: "opencode-go", id: "kimi-k2.6" },
 			defaultReasoning: "high",
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			ui: { motion: "reduced" },
+			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
 				profile: "workspace",
 				approvalPolicy: {
