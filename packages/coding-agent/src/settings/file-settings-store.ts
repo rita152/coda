@@ -4,6 +4,7 @@ import type { ThinkingLevel } from "@coda/ai";
 import type { SettingsStore, UserSettings } from "../application.ts";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
+import { parseMcpServerConfigurations } from "../mcp/config.ts";
 import { AUTH_API_PROTOCOLS } from "../providers/types.ts";
 
 const REASONING_LEVELS = new Set<ThinkingLevel | "off">(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -38,6 +39,8 @@ function validateSettings(value: unknown): UserSettings {
 			"shellEnvironmentAllowlist",
 			"projectTrust",
 			"workspaceSkillsTrust",
+			"mcpServers",
+			"workspaceMcpTrust",
 			"ui",
 			"permissions",
 		])
@@ -200,6 +203,35 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain duplicate Workspace Skills Trust records");
 		}
 	}
+	let mcpServers: UserSettings["mcpServers"];
+	if (value.mcpServers !== undefined) {
+		mcpServers = parseMcpServerConfigurations(value.mcpServers, "Coda settings MCP Servers");
+	}
+	let workspaceMcpTrust: UserSettings["workspaceMcpTrust"];
+	if (value.workspaceMcpTrust !== undefined) {
+		if (!Array.isArray(value.workspaceMcpTrust)) {
+			throw new Error("Coda settings contain invalid Workspace MCP Trust records");
+		}
+		workspaceMcpTrust = value.workspaceMcpTrust.map((entry) => {
+			if (
+				!isRecord(entry) ||
+				!hasOnlyKeys(entry, ["workspace", "path", "sha256"]) ||
+				typeof entry.workspace !== "string" ||
+				!isAbsolute(entry.workspace) ||
+				typeof entry.path !== "string" ||
+				!isAbsolute(entry.path) ||
+				typeof entry.sha256 !== "string" ||
+				!/^[a-f0-9]{64}$/u.test(entry.sha256)
+			) {
+				throw new Error("Coda settings contain invalid Workspace MCP Trust records");
+			}
+			return { workspace: entry.workspace, path: entry.path, sha256: entry.sha256 };
+		});
+		workspaceMcpTrust = [...workspaceMcpTrust].sort((left, right) => left.workspace.localeCompare(right.workspace));
+		if (new Set(workspaceMcpTrust.map(({ workspace }) => workspace)).size !== workspaceMcpTrust.length) {
+			throw new Error("Coda settings contain duplicate Workspace MCP Trust records");
+		}
+	}
 	if (value.ui !== undefined) {
 		if (
 			!isRecord(value.ui) ||
@@ -274,6 +306,8 @@ function validateSettings(value: unknown): UserSettings {
 		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
 		...(workspaceSkillsTrust ? { workspaceSkillsTrust } : {}),
+		...(mcpServers ? { mcpServers } : {}),
+		...(workspaceMcpTrust ? { workspaceMcpTrust } : {}),
 		...(ui ? { ui } : {}),
 		...(permissions ? { permissions } : {}),
 	};

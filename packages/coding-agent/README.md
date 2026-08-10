@@ -53,9 +53,10 @@ approval. Choices are numbered sequentially, so denial is `2` when no prefix is
 available and `3` when one is. The feedback choice or Escape cancels the Run and
 returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
 a request. The Composer's borderless upper list exposes `/permission`, `/auth`,
-`/model`, `/skills`, `/session`, `/new`, and the running-Session-only
-`/follow-up` action;
-configuration commands open nested selectors and do not accept trailing arguments.
+`/model`, `/skills`, `/mcp`, `/session`, `/new`, and the running-Session-only
+`/follow-up` action. Selector commands open nested menus and do not accept
+trailing arguments; `/mcp` instead accepts `status`, `doctor`, `inspect`,
+`reload`, and `reconnect` operations.
 `/permissions` remains a hidden compatibility alias, while `/approvals` and
 `/attach` are ordinary Prompt text.
 
@@ -72,6 +73,74 @@ This trust admits instructions to Context but never grants Tool, filesystem,
 process, or network authority. Explicit Composer Skill references are
 user-selected context; model-selected Skills use the `skill` Tool and the active
 Skill Approval policy.
+
+## MCP Servers
+
+Coda can act as an MCP Host and expose external Server Tools to the Coding
+Agent. User-managed Server Definitions live in `~/.coda/settings.json` under
+`mcpServers`. Workspace Definitions live in `<Workspace>/.coda/mcp.json` and
+remain inert until the exact file hash is reviewed interactively or admitted
+with `--trust-project-mcp`. A changed Workspace file requires review again.
+
+```json
+{
+  "version": 1,
+  "mcpServers": [
+    {
+      "id": "docs",
+      "transport": {
+        "kind": "http",
+        "url": "https://docs.example.com/mcp",
+        "bearerTokenEnvironment": "DOCS_MCP_TOKEN"
+      },
+      "tools": { "include": ["search*"] }
+    },
+    {
+      "id": "local-tools",
+      "protocol": "2026-07-28",
+      "transport": {
+        "kind": "stdio",
+        "command": "/absolute/path/to/node",
+        "args": ["/absolute/path/to/server.mjs"],
+        "cwd": ".",
+        "environmentFrom": ["PATH"]
+      }
+    }
+  ]
+}
+```
+
+A Workspace file uses the same Server objects:
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "workspace-tools",
+      "transport": {
+        "kind": "stdio",
+        "command": "/absolute/path/to/server",
+        "args": []
+      }
+    }
+  ]
+}
+```
+
+HTTP defaults to modern discovery with legacy fallback; stdio defaults to an
+explicit `2026-07-28` pin. Set `protocol` to `auto` or `legacy` only when the
+Server requires it. A stdio child receives only `environment` plus variables
+named in `environmentFrom`; ambient credentials are not inherited. HTTP bearer
+tokens are read from the named Coda process environment variable and are never
+stored in the Definition.
+
+Every admitted Tool is namespaced as `mcp__<server>__<tool>`, frozen for one
+Run, and independently permission-gated. Server annotations do not grant
+authority. Form and URL Elicitation identify the requesting Server; Coda never
+prefetches or opens an Elicitation URL. Print mode declines Elicitation.
+Use `/mcp status`, `/mcp doctor`, `/mcp inspect`, `/mcp reload`, and
+`/mcp reconnect` for read-only inspection and operational control.
 
 The macOS pseudo-terminal E2E test launches the built CLI with an isolated home
 and Workspace, then verifies full-screen entry, input, resize, signal exit,
@@ -105,12 +174,13 @@ npm run test:e2e
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
 - Agent Skills standard validation and official compatible loading from project/global `.agents/skills`, with bounded discovery, exact-revision activation, project-first collision handling, independent Workspace Skills Trust, and immutable per-Run catalogs
+- MCP 2026-07-28 Host/Client Tools over stdio and Streamable HTTP, with legacy negotiation, exact Workspace configuration trust, immutable per-Run catalogs, subscriptions, cancellation, progress, and form/URL Elicitation
 - transient whole-Turn retry at 2s, 4s, and 8s
 
 The Policy Gate resolves authority before a model Tool can run. Model `bash`, native search helpers, and file mutation workers enter `@coda/sandbox` unless the effective reviewed authority is Full Access or an exact command rule/escalation permits an unsandboxed invocation. An ordinary Sandbox denial is returned to the model and never retries outside the Sandbox automatically.
 
 Explicit interactive `!command` remains a separate direct-user entry point: it bypasses model Tool approval and Sandbox, inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 
-RPC, client/server mode, public SDK, remote Skill installation/registries, MCP loading and execution, compaction,
+RPC, client/server mode, public SDK, remote Skill installation/registries, MCP Resources, Prompts, complete OAuth, legacy HTTP+SSE, compaction,
 Session branching, rename/archive/delete, redo, durable drafts, syntax highlighting,
 and generic terminal-image protocol support remain deferred.

@@ -36,6 +36,7 @@ import type {
 	RunSource,
 	ToolExecutionOutcome,
 	ToolExecutionOutput,
+	ToolExecutionProgress,
 	ToolInvocation,
 	ToolInvocationId,
 	ToolPolicyDecision,
@@ -1103,6 +1104,27 @@ export class Agent {
 	}
 
 	async #settleTool(run: RunContext, turnId: TurnId, entry: AcceptedTool): Promise<ToolSettlement> {
+		let acceptsProgress = true;
+		let progressFailure: unknown;
+		let progressQueue = Promise.resolve();
+		const reportProgress = (progress: ToolExecutionProgress): void => {
+			if (!acceptsProgress || run.controller.signal.aborted) return;
+			const snapshot = cloneFrozen(progress);
+			progressQueue = progressQueue.then(async () => {
+				if (run.controller.signal.aborted) return;
+				try {
+					await this.#emit(run, {
+						type: "tool_execution_progress",
+						turnId,
+						invocation: entry.invocation,
+						progress: snapshot,
+					});
+				} catch (error) {
+					progressFailure ??= error;
+					run.controller.abort();
+				}
+			});
+		};
 		try {
 			const output = await entry.tool.execute(entry.arguments, {
 				signal: run.controller.signal,
@@ -1111,7 +1133,11 @@ export class Agent {
 				invocationId: entry.invocation.id,
 				resultMessageId: entry.invocation.resultMessageId,
 				providerToolCallId: entry.invocation.providerToolCallId,
+				reportProgress,
 			});
+			acceptsProgress = false;
+			await progressQueue;
+			if (progressFailure !== undefined) throw progressFailure;
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			return {
 				entry,
@@ -1119,6 +1145,8 @@ export class Agent {
 				result: this.#toolResult(entry.invocation, output),
 			};
 		} catch (error) {
+			acceptsProgress = false;
+			await progressQueue;
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			return {
 				entry,

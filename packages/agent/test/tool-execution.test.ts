@@ -135,6 +135,41 @@ describe("Agent Tool execution", () => {
 		expect(order).toEqual(["first:start", "first:end", "second:start"]);
 	});
 
+	it("emits ordered Tool progress before the terminal event", async () => {
+		const clock = new TestClock();
+		const events: AgentEvent[] = [];
+		const reporting = tool("reporting", (_arguments, context) => {
+			context.reportProgress?.({ progress: 1, total: 2, message: "reading" });
+			context.reportProgress?.({ progress: 2, total: 2, message: "done" });
+			return { content: "complete" };
+		});
+		const calls = fauxAssistantMessage([fauxToolCall("reporting", { path: "a" }, { id: "call:progress" })], {
+			stopReason: "toolUse",
+			timestamp: clock.now(),
+		});
+		const agent = new Agent({
+			...baseOptions([calls, response("done", clock)], { clock }),
+			tools: [reporting],
+		});
+		agent.onEvent((event) => events.push(event));
+
+		await agent.prompt("report progress");
+
+		const lifecycle = events.filter((event) => event.type.startsWith("tool_execution_"));
+		expect(lifecycle.map(({ type }) => type)).toEqual([
+			"tool_execution_start",
+			"tool_execution_progress",
+			"tool_execution_progress",
+			"tool_execution_end",
+		]);
+		expect(
+			lifecycle.filter((event) => event.type === "tool_execution_progress").map(({ progress }) => progress),
+		).toEqual([
+			{ progress: 1, total: 2, message: "reading" },
+			{ progress: 2, total: 2, message: "done" },
+		]);
+	});
+
 	it("runs only explicitly safe consecutive Tools concurrently and commits results in source order", async () => {
 		const clock = new TestClock();
 		const events: AgentEvent[] = [];

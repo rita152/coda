@@ -1,4 +1,13 @@
-import type { AgentEvent, AgentMessage, AgentSeed, AttemptId, Immutable, MessageId, ToolInvocation } from "@coda/agent";
+import type {
+	AgentEvent,
+	AgentMessage,
+	AgentSeed,
+	AttemptId,
+	Immutable,
+	MessageId,
+	ToolExecutionProgress,
+	ToolInvocation,
+} from "@coda/agent";
 import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
@@ -61,6 +70,7 @@ export interface TimelineToolEntry {
 	readonly state: TimelineToolState;
 	readonly startedAt?: number;
 	readonly endedAt?: number;
+	readonly progress?: Immutable<ToolExecutionProgress>;
 	readonly result?: AgentMessage<ToolResultMessage>;
 	readonly approval?: TimelineApproval;
 }
@@ -115,6 +125,7 @@ interface ToolSlot {
 	state: TimelineToolState;
 	startedAt?: number;
 	endedAt?: number;
+	progress?: Immutable<ToolExecutionProgress>;
 	result?: AgentMessage<ToolResultMessage>;
 	approval?: TimelineApproval;
 	projected?: TimelineToolEntry;
@@ -192,6 +203,10 @@ export class SemanticTimeline {
 				break;
 			case "tool_execution_start":
 				this.#startTool(event.invocation, event.timestamp, event.turnId);
+				changed = true;
+				break;
+			case "tool_execution_progress":
+				this.#progressTool(event.invocation, event.progress, event.turnId);
 				changed = true;
 				break;
 			case "tool_execution_end":
@@ -464,6 +479,18 @@ export class SemanticTimeline {
 		this.#attachInvocation(slot, invocation);
 		slot.state = "running";
 		slot.startedAt = timestamp;
+		slot.progress = undefined;
+		slot.projected = undefined;
+	}
+
+	#progressTool(
+		invocation: Immutable<ToolInvocation>,
+		progress: Immutable<ToolExecutionProgress>,
+		turnId: string,
+	): void {
+		const slot = this.#findOrCreateTool(invocation, turnId);
+		this.#attachInvocation(slot, invocation);
+		slot.progress = clone(progress);
 		slot.projected = undefined;
 	}
 
@@ -478,6 +505,7 @@ export class SemanticTimeline {
 		this.#attachInvocation(slot, invocation);
 		slot.state = outcome === "success" ? "success" : outcome === "error" ? "failed" : "aborted";
 		slot.endedAt = timestamp;
+		slot.progress = undefined;
 		if (result.message.role === "toolResult") slot.result = clone(result as AgentMessage<ToolResultMessage>);
 		slot.projected = undefined;
 	}
@@ -500,6 +528,7 @@ export class SemanticTimeline {
 						? "skipped"
 						: "failed";
 		slot.endedAt = timestamp;
+		slot.progress = undefined;
 		if (result.message.role === "toolResult") slot.result = clone(result as AgentMessage<ToolResultMessage>);
 		slot.projected = undefined;
 	}
@@ -599,6 +628,7 @@ export class SemanticTimeline {
 						state: slot.state,
 						startedAt: slot.startedAt,
 						endedAt: slot.endedAt,
+						progress: slot.progress,
 						result: slot.result,
 						approval: slot.approval,
 					});

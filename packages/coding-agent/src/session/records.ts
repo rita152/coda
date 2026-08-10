@@ -33,6 +33,7 @@ export const SESSION_RECORD_TYPES = [
 	"model_selected",
 	"permission_selected",
 	"project_trust_changed",
+	"mcp_trust_changed",
 	"permission_audit_recorded",
 ] as const;
 
@@ -78,7 +79,50 @@ function persistedMessage(message: AgentMessage): AgentMessage {
 			if (diagnostic.error) delete diagnostic.error.stack;
 		}
 	}
+	if (snapshot.message.role === "toolResult" && isMcpToolName(snapshot.message.toolName)) {
+		const mutable = snapshot.message as typeof snapshot.message & { details?: unknown };
+		mutable.details = persistedMcpDetails(mutable.details);
+	}
 	return snapshot;
+}
+
+function isMcpToolName(toolName: string): boolean {
+	return toolName.startsWith("mcp__");
+}
+
+function persistedMcpInvocation(invocation: ToolInvocation): ToolInvocation {
+	if (!isMcpToolName(invocation.toolName)) return invocation;
+	const keys = Object.keys(invocation.arguments).sort();
+	return {
+		...invocation,
+		arguments: {
+			_codaMcpRedacted: true,
+			keys: keys.slice(0, 64),
+			keyCount: keys.length,
+		},
+	};
+}
+
+function persistedMcpDetails(value: unknown): unknown {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const details = value as Record<string, unknown>;
+	return {
+		...(details.kind === "mcp" ? { kind: "mcp" } : {}),
+		...(typeof details.catalogRevision === "number" ? { catalogRevision: details.catalogRevision } : {}),
+		...(typeof details.serverId === "string" ? { serverId: details.serverId.slice(0, 64) } : {}),
+		...(typeof details.remoteToolName === "string" ? { remoteToolName: details.remoteToolName.slice(0, 256) } : {}),
+		...(Array.isArray(details.contentTypes)
+			? {
+					contentTypes: details.contentTypes
+						.filter((item): item is string => typeof item === "string")
+						.slice(0, 16),
+				}
+			: {}),
+		...(typeof details.hasStructuredContent === "boolean"
+			? { hasStructuredContent: details.hasStructuredContent }
+			: {}),
+		...(typeof details.truncated === "boolean" ? { truncated: details.truncated } : {}),
+	};
 }
 
 export function messagePayload(message: AgentMessage): { readonly message: AgentMessage } {
@@ -168,7 +212,8 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				permissionProfile = payload.profile as RestoredSessionState["permissionProfile"];
 				break;
 			case "project_trust_changed":
-				// Project Trust records are audit facts. Only current settings may authorize instructions.
+			case "mcp_trust_changed":
+				// Trust records are audit facts. Only current settings may authorize local content or processes.
 				break;
 			case "permission_audit_recorded": {
 				const event = payload.event as ApprovalDecisionAuditEvent | undefined;
@@ -330,12 +375,16 @@ export function eventRecordInputs(
 		case "message_end":
 			return [{ type: "message_committed", payload: messagePayload(event.message) }];
 		case "tool_execution_start":
-			return [{ type: "tool_started", payload: { invocation: event.invocation } }];
+			return [{ type: "tool_started", payload: { invocation: persistedMcpInvocation(event.invocation) } }];
 		case "tool_execution_end":
 			return [
 				{
 					type: "tool_finished",
-					payload: { invocation: event.invocation, outcome: event.outcome, resultMessageId: event.result.id },
+					payload: {
+						invocation: persistedMcpInvocation(event.invocation),
+						outcome: event.outcome,
+						resultMessageId: event.result.id,
+					},
 				},
 				{ type: "message_committed", payload: messagePayload(event.result) },
 			];
@@ -344,7 +393,7 @@ export function eventRecordInputs(
 				{
 					type: "tool_finished",
 					payload: {
-						invocation: event.invocation,
+						invocation: persistedMcpInvocation(event.invocation),
 						outcome: "rejected",
 						reason: event.reason,
 						resultMessageId: event.result.id,

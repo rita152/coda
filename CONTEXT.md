@@ -68,6 +68,30 @@ _Avoid_: bash Tool, Tool Invocation, Prompt
 One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
 _Avoid_: Tool, shell command
 
+**MCP Host**:
+The Coding Agent facility that discovers and invokes Tools offered by configured external MCP Servers.
+_Avoid_: MCP Server, plugin host, Extension loader
+
+**MCP Server Definition**:
+A user- or Workspace-scoped declaration with stable identity, transport, protocol policy, and Tool visibility rules for one external MCP Server.
+_Avoid_: connection, Tool Catalog, credential
+
+**MCP Server Trust**:
+The decision to admit MCP Server Definitions from one exact Workspace configuration revision; it is independent of Tool execution authority.
+_Avoid_: Project Trust, Permission Profile, Tool approval
+
+**MCP Tool Catalog**:
+The deterministic, diagnostic-bearing collection of Tools discovered from the currently ready MCP Servers.
+_Avoid_: Tool Snapshot, MCP Server Definition, Model Catalog
+
+**MCP Tool Snapshot**:
+The immutable model-visible projection of one MCP Tool Catalog frozen for a Run.
+_Avoid_: MCP Tool Catalog, live Server state
+
+**MCP Elicitation**:
+A Server-identified request for explicit user input while an MCP Tool Invocation is active, answered with accept, decline, or cancel.
+_Avoid_: Approval Request, model prompt, OAuth callback
+
 **Attempt**:
 One model invocation within a Turn; transient failure may lead to a later Attempt without replaying completed Tool Invocations.
 _Avoid_: Retry, Turn, Run

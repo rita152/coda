@@ -120,8 +120,9 @@ function actionTitle(entry: TimelineToolEntry, completed: boolean): string {
 function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRenderOptions): string[] {
 	const details = record(entry.result?.message.details);
 	const approval = approvalDetails(entry, width);
+	const progress = progressDetails(entry, width);
 	if (entry.invocation.toolName === "edit") {
-		return [...approval, ...renderDiff(entry, width, options.theme)];
+		return [...approval, ...progress, ...renderDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "read" && !options.transcript && details) {
 		const start = numberField(details, "startLine");
@@ -129,7 +130,7 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		const total = numberField(details, "totalLines");
 		if (start !== undefined && end !== undefined && total !== undefined) {
 			const truncated = details.truncated === true ? " • truncated" : "";
-			return [...approval, ...wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width)];
+			return [...approval, ...progress, ...wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width)];
 		}
 	}
 	if (entry.invocation.toolName === "write" && details) {
@@ -138,12 +139,17 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		if (operation || bytes !== undefined) {
 			return [
 				...approval,
+				...progress,
 				...wrapDetail(`${operation ?? "write"}${bytes === undefined ? "" : ` • ${bytes} bytes`}`, width),
 			];
 		}
 	}
 
-	const lines = [...approval, ...normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false)];
+	const lines = [
+		...approval,
+		...progress,
+		...normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false),
+	];
 	if (entry.invocation.toolName === "bash" && details) {
 		const metadata = bashMetadata(details);
 		for (const value of metadata) lines.push(...wrapDetail(value, width));
@@ -164,6 +170,24 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		}
 	}
 	return lines;
+}
+
+function progressDetails(entry: TimelineToolEntry, width: number): string[] {
+	const progress = entry.progress;
+	if (!progress) return [];
+	const message = progress.message ? sanitizeInline(progress.message).slice(0, 512) : "";
+	const value = Number.isFinite(progress.progress) ? progress.progress : undefined;
+	const total = progress.total !== undefined && Number.isFinite(progress.total) ? progress.total : undefined;
+	let measurement = "";
+	if (value !== undefined && total !== undefined) {
+		const ratio = `${value}/${total}`;
+		const percentage = total === 0 ? undefined : (value / total) * 100;
+		measurement = Number.isFinite(percentage) ? `${Math.round(percentage!)}% (${ratio})` : ratio;
+	} else if (value !== undefined) {
+		measurement = String(value);
+	}
+	const summary = [message, measurement].filter(Boolean).join(" • ");
+	return summary ? wrapDetail(`Progress: ${summary}`, width) : [];
 }
 
 function approvalDetails(entry: TimelineToolEntry, width: number): string[] {

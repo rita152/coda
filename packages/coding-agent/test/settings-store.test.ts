@@ -50,6 +50,23 @@ describe("FileSettingsStore", () => {
 					],
 				},
 			],
+			mcpServers: [
+				{
+					id: "docs",
+					transport: {
+						kind: "http",
+						url: "https://docs.example.test/mcp",
+						bearerTokenEnvironment: "DOCS_TOKEN",
+					},
+				},
+			],
+			workspaceMcpTrust: [
+				{
+					workspace: "/workspace",
+					path: "/workspace/.coda/mcp.json",
+					sha256: "d".repeat(64),
+				},
+			],
 			ui: { motion: "reduced", colorScheme: "light" },
 			permissions: {
 				profile: "workspace",
@@ -89,6 +106,23 @@ describe("FileSettingsStore", () => {
 							revision: "c".repeat(64),
 						},
 					],
+				},
+			],
+			mcpServers: [
+				{
+					id: "docs",
+					transport: {
+						kind: "http",
+						url: "https://docs.example.test/mcp",
+						bearerTokenEnvironment: "DOCS_TOKEN",
+					},
+				},
+			],
+			workspaceMcpTrust: [
+				{
+					workspace: "/workspace",
+					path: "/workspace/.coda/mcp.json",
+					sha256: "d".repeat(64),
 				},
 			],
 			ui: { motion: "reduced", colorScheme: "light" },
@@ -131,6 +165,23 @@ describe("FileSettingsStore", () => {
 							revision: "c".repeat(64),
 						},
 					],
+				},
+			],
+			mcpServers: [
+				{
+					id: "docs",
+					transport: {
+						kind: "http",
+						url: "https://docs.example.test/mcp",
+						bearerTokenEnvironment: "DOCS_TOKEN",
+					},
+				},
+			],
+			workspaceMcpTrust: [
+				{
+					workspace: "/workspace",
+					path: "/workspace/.coda/mcp.json",
+					sha256: "d".repeat(64),
 				},
 			],
 			ui: { motion: "reduced", colorScheme: "light" },

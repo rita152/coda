@@ -607,6 +607,16 @@ export function isSessionRecordPayload(
 				typeof payload.trust.sha256 === "string" &&
 				/^[a-f0-9]{64}$/.test(payload.trust.sha256)
 			);
+		case "mcp_trust_changed":
+			return (
+				version >= 6 &&
+				exactRecord(payload, ["trust"]) &&
+				exactRecord(payload.trust, ["workspace", "path", "sha256"]) &&
+				isNonEmptyString(payload.trust.workspace) &&
+				isNonEmptyString(payload.trust.path) &&
+				typeof payload.trust.sha256 === "string" &&
+				/^[a-f0-9]{64}$/.test(payload.trust.sha256)
+			);
 		case "permission_audit_recorded":
 			return version >= 5 && exactRecord(payload, ["event"]) && isPermissionAuditEvent(payload.event);
 	}

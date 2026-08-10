@@ -118,6 +118,12 @@ export interface ToolExecutionOutput<TDetails = unknown> {
 	readonly isError?: boolean;
 }
 
+export interface ToolExecutionProgress {
+	readonly progress: number;
+	readonly total?: number;
+	readonly message?: string;
+}
+
 export interface ToolExecutionContext {
 	readonly signal: AbortSignal;
 	readonly runId: RunId;
@@ -125,6 +131,7 @@ export interface ToolExecutionContext {
 	readonly invocationId: ToolInvocationId;
 	readonly resultMessageId: MessageId;
 	readonly providerToolCallId: string;
+	readonly reportProgress?: (progress: ToolExecutionProgress) => void;
 }
 
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unknown> extends Tool<TParameters> {
@@ -261,6 +268,13 @@ interface ToolExecutionStartPayload {
 	readonly invocation: ToolInvocation;
 }
 
+interface ToolExecutionProgressPayload {
+	readonly type: "tool_execution_progress";
+	readonly turnId: TurnId;
+	readonly invocation: ToolInvocation;
+	readonly progress: ToolExecutionProgress;
+}
+
 interface ToolExecutionEndPayload {
 	readonly type: "tool_execution_end";
 	readonly turnId: TurnId;
@@ -292,6 +306,7 @@ export type AgentEventPayload =
 	| MessageEndPayload
 	| ToolExecutionRejectedPayload
 	| ToolExecutionStartPayload
+	| ToolExecutionProgressPayload
 	| ToolExecutionEndPayload
 	| TurnEndPayload
 	| RunEndPayload;

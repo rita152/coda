@@ -15,6 +15,7 @@ import type { ThinkingLevel } from "@coda/ai";
 import type { PermissionProfile } from "@coda/sandbox";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
+import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
 
 declare const sessionIdBrand: unique symbol;
@@ -105,6 +106,7 @@ export type SessionChange =
 	  }
 	| { readonly type: "permission_selected"; readonly profile: PermissionProfile }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
+	| { readonly type: "mcp_trust_changed"; readonly trust: WorkspaceMcpTrustRecord }
 	| { readonly type: "permission_audit_recorded"; readonly event: PermissionAuditEvent }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }

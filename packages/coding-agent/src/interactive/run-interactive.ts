@@ -14,6 +14,7 @@ import {
 	createAuthCommandFlow,
 	createProviderAuthFlow,
 } from "../commands/auth-flow.ts";
+import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
@@ -36,6 +37,7 @@ import {
 	type InteractiveInputControllerOptions,
 } from "./input-controller.ts";
 import type { ComposerExtensionReference } from "./input-types.ts";
+import type { InteractiveMcpElicitationHandler } from "./mcp-elicitation.ts";
 import {
 	type InteractiveProcessLifecycle,
 	type InteractiveTerminationSignal,
@@ -69,6 +71,7 @@ export interface InteractiveSessionOptions {
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
 		readonly trust: () => Promise<CodingSkillsSnapshot>;
 	};
+	readonly mcpCommand?: McpCommandFlowOptions;
 	readonly reasoning: string;
 	readonly initialPrompt?: AgentInput;
 	readonly initialAttachmentIds?: readonly string[];
@@ -100,6 +103,7 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly approval?: InteractiveApprovalHandler;
+	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
 	readonly workspaceLabel?: string;
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
@@ -187,6 +191,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		root.select(pane.component);
 		pane.needsAttention = false;
 		options.approval?.setActiveSession(pane.id);
+		options.mcpElicitation?.setActiveSession(pane.id);
 		await startPane(pane);
 	};
 
@@ -195,6 +200,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		root.select(result.runtime.component);
 		result.runtime.needsAttention = false;
 		options.approval?.setActiveSession(result.runtime.id);
+		options.mcpElicitation?.setActiveSession(result.runtime.id);
 		await startPane(result.runtime);
 	};
 
@@ -243,7 +249,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 			onFollowUp: (text, attachmentIds, composerText, references) =>
 				input.followUp(text, attachmentIds, composerText, references),
 			onUserShell: (command) => input.submitUserShell(command),
-			onCommand: async (commandId, flow) => {
+			onCommand: async (commandId, flow, argument) => {
 				if (commandId === "core:permission") {
 					flow.open(
 						createPermissionCommandFlow({
@@ -294,6 +300,11 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 							onTrust: sessionOptions.skillsCommand.trust,
 						}),
 					);
+					return;
+				}
+				if (commandId === "core:mcp") {
+					if (!sessionOptions.mcpCommand) throw new Error("MCP management is unavailable");
+					await openMcpCommand(flow, argument, sessionOptions.mcpCommand);
 					return;
 				}
 				if (commandId === "core:session") {
@@ -393,12 +404,14 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
 	};
@@ -423,8 +436,13 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		pane.component.setAwaitingApproval(request);
 		if (pane !== runtimes.active) pane.needsAttention = true;
 	});
+	options.mcpElicitation?.bind(tui, options.terminal);
 	options.approval?.setActiveSession(initialPane.id);
-	if (terminationSignal || fatalError !== undefined) options.approval?.unbind();
+	options.mcpElicitation?.setActiveSession(initialPane.id);
+	if (terminationSignal || fatalError !== undefined) {
+		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
+	}
 	try {
 		if (!(await startFullScreen())) {
 			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
@@ -446,6 +464,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 	} finally {
 		unsubscribeLifecycle?.();
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		let droppedShells = 0;
 		for (const pane of runtimes.open) {
 			pane.detachAgent();
@@ -523,7 +542,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		onFollowUp: (text, attachmentIds, composerText, references) =>
 			inputController.followUp(text, attachmentIds, composerText, references),
 		onUserShell: (command) => inputController.submitUserShell(command),
-		onCommand: async (commandId, flow) => {
+		onCommand: async (commandId, flow, argument) => {
 			if (commandId === "core:permission") {
 				flow.open(
 					createPermissionCommandFlow({
@@ -576,6 +595,11 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 				);
 				return;
 			}
+			if (commandId === "core:mcp") {
+				if (!options.mcpCommand) throw new Error("MCP management is unavailable");
+				await openMcpCommand(flow, argument, options.mcpCommand);
+				return;
+			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},
 		onResumeFollowUps: () => inputController.resumeQueue(),
@@ -609,6 +633,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
 				options.agent.abort();
@@ -620,6 +645,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
 				options.agent.abort();
@@ -644,7 +670,12 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		},
 	});
 	options.approval?.bind(tui, options.terminal, (request) => component.setAwaitingApproval(request));
-	if (terminationSignal || fatalError !== undefined) options.approval?.unbind();
+	options.mcpElicitation?.bind(tui, options.terminal);
+	options.mcpElicitation?.setActiveSession(options.session.descriptor.id);
+	if (terminationSignal || fatalError !== undefined) {
+		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
+	}
 	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
 		if (
@@ -677,6 +708,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	} finally {
 		unsubscribeLifecycle?.();
 		options.approval?.unbind();
+		options.mcpElicitation?.unbind();
 		detach();
 		const droppedShells = await inputController.dispose();
 		await stopFullScreen();

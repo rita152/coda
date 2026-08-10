@@ -118,6 +118,25 @@ describe("Tool Invocation presentation", () => {
 		expect(render(reusedAfterRestore)).toContain("Approval: allowed by this process • expired • prefix npm test");
 	});
 
+	it("renders bounded live Tool progress", () => {
+		const entry: TimelineToolEntry = {
+			...toolEntry("mcp__docs__index", {}, "running", ""),
+			result: undefined,
+			endedAt: undefined,
+			progress: { progress: 3, total: 10, message: "Indexing\u001b[2J docs" },
+		};
+		const lines = renderToolInvocation(entry, {
+			width: 80,
+			now: 2_000,
+			transcript: false,
+			theme: createCodaTheme(0),
+		});
+		const plain = lines.map(stripAnsi).join("\n");
+
+		expect(plain).toContain("Progress: Indexing docs • 30% (3/10)");
+		expect(lines.join("")).not.toContain("\u001b[2J");
+	});
+
 	it("normalizes multiline edits into an actual prefixed diff", () => {
 		const entry = toolEntry(
 			"edit",

@@ -12,6 +12,7 @@ import type {
 	MutableModels,
 	ThinkingLevel,
 } from "@coda/ai";
+import { createMcpHost, type McpConnector, type McpElicitationResult, type McpToolSnapshot } from "@coda/mcp";
 import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
@@ -34,6 +35,7 @@ import type { ChatAttachment } from "./interactive/chat-component.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { AttachmentTransaction } from "./interactive/input-controller.ts";
 import type { ComposerExtensionReference } from "./interactive/input-types.ts";
+import { InteractiveMcpElicitationHandler } from "./interactive/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
 import {
 	confirmFromTerminal,
@@ -44,6 +46,14 @@ import {
 import { type InteractiveSessionOptions, runInteractive } from "./interactive/run-interactive.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
+import {
+	inspectMcpConfiguration,
+	type McpServerConfiguration,
+	type WorkspaceMcpConfigurationSnapshot,
+	type WorkspaceMcpTrustRecord,
+} from "./mcp/config.ts";
+import { CodingMcpRegistry } from "./mcp/registry.ts";
+import { createMcpAgentTools, type McpAgentElicitation } from "./mcp/tools.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
 import {
@@ -129,6 +139,7 @@ interface PreparedRunRuntime {
 	readonly authSnapshot: AuthResult | undefined;
 	readonly permission: PermissionEngine;
 	readonly skills: CodingSkillsSnapshot;
+	readonly mcp: McpToolSnapshot;
 	readonly tools: readonly AgentTool[];
 }
 
@@ -139,6 +150,8 @@ export interface UserSettings {
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
 	readonly workspaceSkillsTrust?: readonly WorkspaceSkillsTrustRecord[];
+	readonly mcpServers?: readonly McpServerConfiguration[];
+	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
 	readonly ui?: {
 		readonly motion?: "full" | "reduced";
 		readonly colorScheme?: TerminalColorScheme;
@@ -199,6 +212,8 @@ export interface CodingAgentApplicationOptions {
 	readonly modelProcessRunner?: ModelProcessRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
+	readonly mcpConnector?: McpConnector;
+	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
 }
 
 export interface CodingAgentApplication {
@@ -218,6 +233,7 @@ interface ParsedArguments {
 	readonly workspace?: string;
 	readonly trustProject: boolean;
 	readonly trustProjectSkills: boolean;
+	readonly trustProjectMcp: boolean;
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
@@ -252,6 +268,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let workspace: string | undefined;
 	let trustProject = false;
 	let trustProjectSkills = false;
+	let trustProjectMcp = false;
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
@@ -383,6 +400,10 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			trustProjectSkills = true;
 			continue;
 		}
+		if (argument === "--trust-project-mcp") {
+			trustProjectMcp = true;
+			continue;
+		}
 		if (argument === "--session") {
 			if (noSession) throw new Error("--session and --no-session cannot be combined");
 			persistSession = true;
@@ -448,6 +469,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		workspace,
 		trustProject,
 		trustProjectSkills,
+		trustProjectMcp,
 		persistSession,
 		noSession,
 		noColor,
@@ -505,6 +527,7 @@ Permissions:
                                  Disable approval prompts and the outer Sandbox
       --trust-project            Trust the current root AGENTS.md hash
       --trust-project-skills     Trust the exact current Workspace Skills inventory
+      --trust-project-mcp        Trust the exact current Workspace MCP configuration
 
 Session:
       --session                  Persist this Session (print mode is memory-only by default)
@@ -663,6 +686,41 @@ function approvalRequiredEvent(request: Parameters<PermissionApprovalHandler["de
 			invocationId: String(request.invocationId),
 		},
 	};
+}
+
+function emptyMcpToolSnapshot(): McpToolSnapshot {
+	return Object.freeze({
+		revision: 0,
+		servers: Object.freeze([]),
+		tools: Object.freeze([]),
+		callTool: async () => {
+			throw new Error("No MCP Tools are available");
+		},
+	});
+}
+
+function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapshot): string {
+	const serverPreview = snapshot.servers.slice(0, 50).map((server) => {
+		const target =
+			server.transport.kind === "stdio"
+				? `${server.transport.command} ${(server.transport.args ?? []).join(" ")}`.trim()
+				: server.transport.url;
+		return `- ${server.id} (${server.transport.kind}): ${target}`;
+	});
+	return sanitizeTerminalText(
+		[
+			"Trust this Workspace MCP configuration?",
+			`Path: ${snapshot.path}`,
+			`SHA-256: ${snapshot.sha256}`,
+			`Servers: ${snapshot.serverCount}`,
+			"The exact file hash is stored separately from AGENTS.md and Skills trust; any change requires review again.",
+			"Trusting a stdio Server allows Coda to launch its configured executable. Tool calls still require Permission decisions.",
+			"HTTP credentials are resolved outside this file and are never shown here.",
+			"",
+			...serverPreview,
+			...(snapshot.servers.length > serverPreview.length ? ["… (Server preview truncated)"] : []),
+		].join("\n"),
+	);
 }
 
 function workspaceSkillsReviewText(snapshot: CodingSkillsSnapshot): string {
@@ -921,6 +979,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				});
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
+				let mcpRegistry: CodingMcpRegistry | undefined;
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -1028,6 +1087,66 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							);
 						}
 					}
+					let mcpConfiguration = await inspectMcpConfiguration({
+						workspace: workspace.root,
+						fileSystem: options.fileSystem,
+						userServers: settings.mcpServers ?? [],
+						workspaceTrust: settings.workspaceMcpTrust ?? [],
+						environment: options.runtime.environment,
+					});
+					if (mcpConfiguration.workspace?.trust === "untrusted") {
+						const trustedInteractively =
+							!parsed.trustProjectMcp && interactiveRuntime
+								? await confirmFromTerminal(
+										interactiveRuntime,
+										workspaceMcpReviewText(mcpConfiguration.workspace),
+									)
+								: false;
+						if (parsed.trustProjectMcp || trustedInteractively) {
+							const trust: WorkspaceMcpTrustRecord = {
+								workspace: workspace.root,
+								path: mcpConfiguration.workspace.path,
+								sha256: mcpConfiguration.workspace.sha256,
+							};
+							settings = {
+								...settings,
+								workspaceMcpTrust: [
+									...(settings.workspaceMcpTrust ?? []).filter((entry) => entry.workspace !== workspace.root),
+									trust,
+								].sort((left, right) => left.workspace.localeCompare(right.workspace)),
+							};
+							await options.settings.save(settings);
+							await session.record({ type: "mcp_trust_changed", trust });
+							mcpConfiguration = await inspectMcpConfiguration({
+								workspace: workspace.root,
+								fileSystem: options.fileSystem,
+								userServers: settings.mcpServers ?? [],
+								workspaceTrust: settings.workspaceMcpTrust ?? [],
+								environment: options.runtime.environment,
+							});
+						} else if (!interactiveRuntime) {
+							await options.io.stderr.write(
+								`coda: Workspace MCP configuration ${mcpConfiguration.workspace.sha256} is untrusted; its Servers were omitted\n`,
+							);
+						}
+					}
+					if (mcpConfiguration.definitions.length > 0 && !options.mcpConnector) {
+						throw new Error("MCP Servers are configured but no MCP connector is available");
+					}
+					if (options.mcpConnector) {
+						mcpRegistry = new CodingMcpRegistry({
+							host: createMcpHost({ connector: options.mcpConnector }),
+							...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
+						});
+						const mcpSnapshot = await mcpRegistry.reload(mcpConfiguration.definitions);
+						for (const server of mcpSnapshot.servers) {
+							if (server.status === "degraded") {
+								await options.io.stderr.write(
+									`coda: MCP Server ${server.id} is unavailable: ${server.error ?? "unknown error"}\n`,
+								);
+							}
+						}
+					}
 					const commandRegistry = options.commandRegistry ?? createCoreCommandRegistry();
 					skillRegistryBinding = new SkillCommandRegistryBinding(commandRegistry);
 					skillRegistryBinding.sync(skillsSnapshot);
@@ -1064,6 +1183,43 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						snapshot: refreshSkills,
 						refresh: refreshSkills,
 						trust: trustSkills,
+					};
+					const mcpCommandSnapshot = () => ({
+						host:
+							mcpRegistry?.snapshot() ?? Object.freeze({ revision: 0, servers: [], tools: [], diagnostics: [] }),
+						...(mcpConfiguration.workspace ? { workspace: mcpConfiguration.workspace } : {}),
+					});
+					const reloadMcp = async () => {
+						const latestSettings = await options.settings.load();
+						settings = {
+							...settings,
+							mcpServers: latestSettings.mcpServers,
+							workspaceMcpTrust: latestSettings.workspaceMcpTrust,
+						};
+						mcpConfiguration = await inspectMcpConfiguration({
+							workspace: workspace.root,
+							fileSystem: options.fileSystem,
+							userServers: settings.mcpServers ?? [],
+							workspaceTrust: settings.workspaceMcpTrust ?? [],
+							environment: options.runtime.environment,
+						});
+						if (!mcpRegistry) {
+							if (mcpConfiguration.definitions.length > 0) {
+								throw new Error("MCP Servers are configured but no MCP connector is available");
+							}
+							return mcpCommandSnapshot();
+						}
+						await mcpRegistry.reload(mcpConfiguration.definitions);
+						return mcpCommandSnapshot();
+					};
+					const mcpCommand = {
+						snapshot: mcpCommandSnapshot,
+						reload: reloadMcp,
+						reconnect: async (serverId: string) => {
+							if (!mcpRegistry) throw new Error("MCP is unavailable");
+							await mcpRegistry.reconnect(serverId);
+							return mcpCommandSnapshot();
+						},
 					};
 					let auth = await options.models.getAuth(model, {
 						apiKey: parsed.apiKey,
@@ -1111,6 +1267,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
 					const interactiveApproval =
 						parsed.mode === "interactive" && !options.approval ? new InteractiveApprovalHandler() : undefined;
+					const interactiveMcpElicitation =
+						parsed.mode === "interactive" && !options.mcpElicitation
+							? new InteractiveMcpElicitationHandler()
+							: undefined;
+					const primaryMcpElicitation =
+						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
 					const rejectingApproval =
 						parsed.mode === "print" && !options.approval
 							? new RejectingApprovalHandler(async (request) => {
@@ -1180,17 +1342,26 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							approvalPolicy,
 							approval: auditedApproval,
 							genericApprovalForTool: (request) => {
-								if (request.toolName !== "skill" || typeof request.arguments.skill !== "string") {
-									return undefined;
+								if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
+								if (request.toolName === "skill" && typeof request.arguments.skill === "string") {
+									const id = skillIdFromCommandId(request.arguments.skill);
+									const resolved = id ? runRuntimeForApproval?.active?.value.skills.byId.get(id) : undefined;
+									return {
+										kind: "skill",
+										reason: resolved
+											? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
+											: `Activate unavailable Skill ${request.arguments.skill}`,
+									};
 								}
-								const id = skillIdFromCommandId(request.arguments.skill);
-								const resolved = id ? runRuntimeForApproval?.active?.value.skills.byId.get(id) : undefined;
-								return {
-									kind: "skill",
-									reason: resolved
-										? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
-										: `Activate unavailable Skill ${request.arguments.skill}`,
-								};
+								const mcpTool = runRuntimeForApproval?.active?.value.mcp.tools.find(
+									(tool) => tool.name === request.toolName,
+								);
+								return mcpTool
+									? {
+											kind: "mcp",
+											reason: `Call MCP Tool ${mcpTool.serverId}/${mcpTool.remoteName}`,
+										}
+									: undefined;
 							},
 							resolveExecutable: createExecutableIdentityResolver({
 								fileSystem: options.fileSystem,
@@ -1212,12 +1383,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							},
 						});
 					const initialPermission = createPolicy(compiledProfile, selectedApprovalPolicy);
+					const initialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 					const runRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
 						model,
 						reasoning,
 						authSnapshot: auth,
 						permission: initialPermission,
 						skills: skillsSnapshot,
+						mcp: initialMcp,
 						tools: Object.freeze([]),
 					});
 					runRuntimeForApproval = runRuntime;
@@ -1240,11 +1413,30 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						settings,
 						onAudit: audit,
 					});
-					const toolsForSkills = (snapshot: CodingSkillsSnapshot): readonly AgentTool[] => {
+					const toolsForRun = (snapshot: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
 						const skillTool = createSkillTool(snapshot);
-						return Object.freeze([...baseTools, ...(skillTool ? [skillTool] : [])]);
+						const mcpTools = createMcpAgentTools({
+							snapshot: mcp,
+							elicit: async (request) => {
+								if (!primaryMcpElicitation) return { action: "decline" };
+								if (parsed.dangerouslyBypassApprovalsAndSandbox) return primaryMcpElicitation(request);
+								const decision = await policy.requestGenericApproval({
+									kind: "mcp",
+									runId: request.execution.runId,
+									turnId: request.execution.turnId,
+									invocationId: request.execution.invocationId,
+									toolName: request.tool.name,
+									reason: `Allow ${request.server.server?.name ?? request.server.id} to request ${request.request.mode} Elicitation for ${request.tool.remoteName}`,
+								});
+								return decision.decision === "allow" ? primaryMcpElicitation(request) : { action: "decline" };
+							},
+						});
+						return Object.freeze([...baseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
 					};
-					runRuntime.select({ ...runRuntime.selected, tools: toolsForSkills(skillsSnapshot) });
+					runRuntime.select({
+						...runRuntime.selected,
+						tools: toolsForRun(skillsSnapshot, initialMcp),
+					});
 					const runSkills = new RunSkillsCoordinator();
 					const freezePrompt = (runtime: PreparedRunRuntime) =>
 						buildSystemPrompt({
@@ -1302,11 +1494,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							const nextSkills =
 								runSkills.consume(inputMessage.message.content) ??
 								(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+							if (mcpRegistry) await mcpRegistry.refresh();
+							const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 							skillRegistryBinding!.sync(nextSkills);
 							runRuntime.select({
 								...runRuntime.selected,
 								skills: nextSkills,
-								tools: toolsForSkills(nextSkills),
+								mcp: nextMcp,
+								tools: toolsForRun(nextSkills, nextMcp),
 							});
 							const runtime = runRuntime.begin();
 							activeRuntimeId = runtime.id;
@@ -1436,6 +1631,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							targetSession: Session,
 							fresh: boolean,
 						): Promise<InteractiveSessionOptions> => {
+							const targetMcpElicitation =
+								options.mcpElicitation ?? interactiveMcpElicitation?.forSession(targetSession.descriptor.id);
 							const targetMediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
 							const targetMediaLibrary = new MediaLibrary({
 								fileSystem: options.fileSystem,
@@ -1530,19 +1727,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										approvalPolicy,
 										approval: targetAuditedApproval,
 										genericApprovalForTool: (request) => {
-											if (request.toolName !== "skill" || typeof request.arguments.skill !== "string") {
-												return undefined;
+											if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
+											if (request.toolName === "skill" && typeof request.arguments.skill === "string") {
+												const id = skillIdFromCommandId(request.arguments.skill);
+												const resolved = id
+													? targetRunRuntimeForApproval?.active?.value.skills.byId.get(id)
+													: undefined;
+												return {
+													kind: "skill",
+													reason: resolved
+														? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
+														: `Activate unavailable Skill ${request.arguments.skill}`,
+												};
 											}
-											const id = skillIdFromCommandId(request.arguments.skill);
-											const resolved = id
-												? targetRunRuntimeForApproval?.active?.value.skills.byId.get(id)
+											const mcpTool = targetRunRuntimeForApproval?.active?.value.mcp.tools.find(
+												(tool) => tool.name === request.toolName,
+											);
+											return mcpTool
+												? {
+														kind: "mcp",
+														reason: `Call MCP Tool ${mcpTool.serverId}/${mcpTool.remoteName}`,
+													}
 												: undefined;
-											return {
-												kind: "skill",
-												reason: resolved
-													? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
-													: `Activate unavailable Skill ${request.arguments.skill}`,
-											};
 										},
 										resolveExecutable: createExecutableIdentityResolver({
 											fileSystem: options.fileSystem,
@@ -1564,12 +1770,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										},
 									});
 								const targetPermission = targetCreatePolicy(targetProfile, targetApprovalPolicy);
+								const targetInitialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 								const targetRunRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
 									model: targetModel,
 									reasoning: targetReasoning,
 									authSnapshot: targetAuth,
 									permission: targetPermission,
 									skills: skillsManager.current ?? skillsSnapshot,
+									mcp: targetInitialMcp,
 									tools: Object.freeze([]),
 								});
 								targetRunRuntimeForApproval = targetRunRuntime;
@@ -1607,13 +1815,36 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									settings,
 									onAudit: targetAudit,
 								});
-								const targetToolsForSkills = (snapshot: CodingSkillsSnapshot): readonly AgentTool[] => {
+								const targetToolsForRun = (
+									snapshot: CodingSkillsSnapshot,
+									mcp: McpToolSnapshot,
+								): readonly AgentTool[] => {
 									const skillTool = createSkillTool(snapshot);
-									return Object.freeze([...targetBaseTools, ...(skillTool ? [skillTool] : [])]);
+									const mcpTools = createMcpAgentTools({
+										snapshot: mcp,
+										elicit: async (request) => {
+											if (!targetMcpElicitation) return { action: "decline" };
+											if (parsed.dangerouslyBypassApprovalsAndSandbox) {
+												return targetMcpElicitation(request);
+											}
+											const decision = await targetPolicy.requestGenericApproval({
+												kind: "mcp",
+												runId: request.execution.runId,
+												turnId: request.execution.turnId,
+												invocationId: request.execution.invocationId,
+												toolName: request.tool.name,
+												reason: `Allow ${request.server.server?.name ?? request.server.id} to request ${request.request.mode} Elicitation for ${request.tool.remoteName}`,
+											});
+											return decision.decision === "allow"
+												? targetMcpElicitation(request)
+												: { action: "decline" };
+										},
+									});
+									return Object.freeze([...targetBaseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
 								};
 								targetRunRuntime.select({
 									...targetRunRuntime.selected,
-									tools: targetToolsForSkills(targetRunRuntime.selected.skills),
+									tools: targetToolsForRun(targetRunRuntime.selected.skills, targetInitialMcp),
 								});
 								const targetRunSkills = new RunSkillsCoordinator();
 								const targetFreezePrompt = (runtime: PreparedRunRuntime) =>
@@ -1684,11 +1915,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										const nextSkills =
 											targetRunSkills.consume(inputMessage.message.content) ??
 											(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+										if (mcpRegistry) await mcpRegistry.refresh();
+										const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 										skillRegistryBinding!.sync(nextSkills);
 										targetRunRuntime.select({
 											...targetRunRuntime.selected,
 											skills: nextSkills,
-											tools: targetToolsForSkills(nextSkills),
+											mcp: nextMcp,
+											tools: targetToolsForRun(nextSkills, nextMcp),
 										});
 										const runtime = targetRunRuntime.begin();
 										targetActiveRuntimeId = runtime.id;
@@ -1804,6 +2038,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									},
 									authCommand,
 									skillsCommand,
+									mcpCommand,
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
@@ -1901,6 +2136,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								diagnostics: options.diagnostics,
 								fullScreenOutput: options.fullScreenOutput,
 								approval: interactiveApproval,
+								mcpElicitation: interactiveMcpElicitation,
 								approvalFor: (invocationId) => policy.approvalFor(invocationId),
 								modelLabel: `${model.provider}/${model.id}`,
 								workspaceLabel: basename(workspace.root) || workspace.root,
@@ -1951,6 +2187,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								},
 								authCommand,
 								skillsCommand,
+								mcpCommand,
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 								commandRegistry,
@@ -2159,8 +2396,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				} finally {
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
-					await mediaLibrary.dispose();
-					await session.close();
+					try {
+						await mcpRegistry?.close();
+					} finally {
+						try {
+							await mediaLibrary.dispose();
+						} finally {
+							await session.close();
+						}
+					}
 				}
 			} catch (error) {
 				if (error instanceof InteractiveTerminationError) return error.exitCode;

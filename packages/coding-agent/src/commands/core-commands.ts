@@ -32,6 +32,14 @@ const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:mcp",
+		name: "mcp",
+		title: "MCP",
+		description: "Inspect and operate configured MCP Servers and Tools",
+		kind: "control",
+		arguments: { kind: "tail", required: false },
+	}),
+	coreCommand({
 		id: "core:session",
 		name: "session",
 		title: "Session",

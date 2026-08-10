@@ -1,0 +1,45 @@
+{
+	"name": "@coda/mcp",
+	"version": "0.1.0",
+	"description": "Model Context Protocol client runtime for Coda",
+	"private": true,
+	"type": "module",
+	"sideEffects": false,
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md",
+		"THIRD_PARTY_NOTICES.md"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"check": "tsc --noEmit -p tsconfig.json && biome check src test vitest.config.ts",
+		"test": "vitest run",
+		"test:conformance": "npm run build && node test/conformance/run.mjs",
+		"pack:dry-run": "npm pack --dry-run"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/client": "2.0.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@modelcontextprotocol/conformance": "0.2.0-alpha.10",
+		"@modelcontextprotocol/server": "2.0.0",
+		"@types/node": "24.12.4",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9",
+		"zod": "4.4.3"
+	},
+	"license": "MIT"
+}

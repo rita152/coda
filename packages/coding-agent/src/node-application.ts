@@ -9,6 +9,7 @@ import {
 	type TimeRuntime,
 } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
+import { createSdkMcpConnector, type McpConnector } from "@coda/mcp";
 import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
 import {
 	type ApplicationIO,
@@ -177,6 +178,7 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
 	readonly fetch?: typeof globalThis.fetch;
 	readonly skillWatcher?: SkillWatcherFactory;
+	readonly mcpConnector?: McpConnector;
 }
 
 export function createNodeCodingAgentApplication(
@@ -323,6 +325,18 @@ export function createNodeCodingAgentApplication(
 		providerManager,
 		commandRegistry: options.commandRegistry,
 		skillWatcher: options.skillWatcher ?? createNodeSkillWatcherFactory(),
+		mcpConnector:
+			options.mcpConnector ??
+			createSdkMcpConnector({
+				fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+				onError: (serverId, error) => {
+					void diagnosticOutput({
+						code: "mcp.protocol-error",
+						message: error.message,
+						details: { serverId },
+					});
+				},
+			}),
 		settings,
 		fileSystem,
 		processRunner,

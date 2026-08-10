@@ -104,7 +104,7 @@ export interface ChatComponentOptions {
 	readonly colorLevel?: ColorLevel;
 	readonly motion?: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
-	readonly onCommand?: (commandId: string, flow: CommandFlowHost) => Promise<void> | void;
+	readonly onCommand?: (commandId: string, flow: CommandFlowHost, argument?: string) => Promise<void> | void;
 }
 
 interface ProvisionalPromptCard {
@@ -704,7 +704,7 @@ export class ChatComponent extends Component {
 		}
 		const commandInvocation = this.#commands.resolveSubmission(value);
 		if (commandInvocation && commandInvocation.command.id !== "core:follow-up") {
-			this.#invokeCommand(commandInvocation.command);
+			this.#invokeCommand(commandInvocation.command, commandInvocation.argument);
 			return;
 		}
 		if (value.length === 0 && this.#attachments.length === 0 && this.#hasPausedQueue) {
@@ -1340,14 +1340,18 @@ export class ChatComponent extends Component {
 				]);
 	}
 
-	#invokeCommand(command: CommandDefinition): void {
+	#invokeCommand(command: CommandDefinition, argument?: string): void {
 		this.#editor.clear();
 		this.#history.reset();
 		this.#error = undefined;
 		const operation = (() => {
 			try {
 				if (!this.#options.onCommand) throw new Error(`${command.title} is unavailable`);
-				return Promise.resolve(this.#options.onCommand(command.id, this.#commandFlow));
+				return Promise.resolve(
+					argument === undefined
+						? this.#options.onCommand(command.id, this.#commandFlow)
+						: this.#options.onCommand(command.id, this.#commandFlow, argument),
+				);
 			} catch (error) {
 				return Promise.reject(error);
 			}

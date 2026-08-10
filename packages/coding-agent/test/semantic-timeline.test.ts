@@ -33,6 +33,34 @@ describe("SemanticTimeline", () => {
 		]);
 	});
 
+	it("projects live Tool progress and clears it when execution finishes", () => {
+		const timeline = new SemanticTimeline();
+		timeline.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-1",
+				attemptId: "attempt-1",
+				message: assistant("assistant-1", [{ type: "toolCall", id: "provider-a", name: "custom", arguments: {} }]),
+			}),
+		);
+		const start = toolStart("tool-a", "provider-a", 0, "", 20);
+		timeline.accept(start);
+		timeline.accept(
+			event({
+				type: "tool_execution_progress",
+				turnId: "turn-1",
+				sequence: 21,
+				invocation: start.invocation,
+				progress: { progress: 3, total: 10, message: "Indexing" },
+			}),
+		);
+
+		expect(toolEntries(timeline)[0]?.progress).toEqual({ progress: 3, total: 10, message: "Indexing" });
+
+		timeline.accept(toolEnd("tool-a", "provider-a", 0, "", "success", 30));
+		expect(toolEntries(timeline)[0]?.progress).toBeUndefined();
+	});
+
 	it("shows ordered streaming Thinking and Assistant blocks, then removes a discarded attempt", () => {
 		const timeline = new SemanticTimeline();
 		timeline.accept(
@@ -284,7 +312,13 @@ function delta(
 	});
 }
 
-function toolStart(id: string, providerId: string, sourceIndex: number, path: string, sequence: number): AgentEvent {
+function toolStart(
+	id: string,
+	providerId: string,
+	sourceIndex: number,
+	path: string,
+	sequence: number,
+): Extract<AgentEvent, { type: "tool_execution_start" }> {
 	return event({
 		type: "tool_execution_start",
 		turnId: "turn-1",
@@ -297,7 +331,7 @@ function toolStart(id: string, providerId: string, sourceIndex: number, path: st
 			arguments: { path },
 			sourceIndex,
 		},
-	});
+	}) as Extract<AgentEvent, { type: "tool_execution_start" }>;
 }
 
 function toolEnd(
