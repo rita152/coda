@@ -36,6 +36,7 @@ import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
 import type { SessionManager } from "./session/types.ts";
 import { FileSettingsStore } from "./settings/file-settings-store.ts";
+import { createNodeSkillWatcherFactory, type SkillWatcherFactory } from "./skills/watcher.ts";
 
 class SystemIds implements IdGenerator {
 	generate(kind: Parameters<IdGenerator["generate"]>[0]): string {
@@ -175,6 +176,7 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly sessions?: SessionManager;
 	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
 	readonly fetch?: typeof globalThis.fetch;
+	readonly skillWatcher?: SkillWatcherFactory;
 }
 
 export function createNodeCodingAgentApplication(
@@ -320,6 +322,7 @@ export function createNodeCodingAgentApplication(
 		models,
 		providerManager,
 		commandRegistry: options.commandRegistry,
+		skillWatcher: options.skillWatcher ?? createNodeSkillWatcherFactory(),
 		settings,
 		fileSystem,
 		processRunner,

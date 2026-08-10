@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
@@ -477,6 +477,145 @@ describe("Coding Agent print mode", () => {
 			expect(stderr.value).toContain("Run ended with outcome aborted");
 		} finally {
 			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
+	it("catalogs a user Skill and revision-binds model activation to Skill Approval", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-print-skill-"));
+		try {
+			const workspace = join(fixture, "workspace");
+			const home = join(fixture, "home");
+			const skillDirectory = join(home, ".agents", "skills", "inspect");
+			await Promise.all([mkdir(workspace, { recursive: true }), mkdir(skillDirectory, { recursive: true })]);
+			await writeFile(
+				join(skillDirectory, "SKILL.md"),
+				"---\nname: inspect\ndescription: Inspect the current change\n---\n\nFollow the inspection checklist.\n",
+			);
+			const faux = fauxProvider({ runtime: testTimeRuntime(245) });
+			let selectedSkillId = "";
+			faux.setResponses([
+				(context) => {
+					expect(context.systemPrompt).toContain("Available Skills (metadata only)");
+					expect(context.systemPrompt).toContain("Inspect the current change");
+					selectedSkillId = JSON.stringify(context.tools).match(/skill:[a-f0-9]{32}/u)?.[0] ?? "";
+					expect(selectedSkillId).not.toBe("");
+					return fauxAssistantMessage(
+						fauxToolCall("skill", { skill: selectedSkillId, arguments: "focus here" }, { id: "skill-call" }),
+						{ stopReason: "toolUse", timestamp: 245 },
+					);
+				},
+				(context) => {
+					expect(JSON.stringify(context.messages)).toContain("Follow the inspection checklist");
+					expect(JSON.stringify(context.messages)).toContain("focus here");
+					return fauxAssistantMessage("inspection complete", { timestamp: 245 });
+				},
+			]);
+			const models = createModels({ runtime: testTimeRuntime(245) });
+			models.setProvider(faux.provider);
+			const approvals: Array<{ kind: string; reason: string }> = [];
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let id = 0;
+			const application = createCodingAgentApplication({
+				models,
+				settings,
+				fileSystem: createNodeFileSystem(),
+				processRunner: createNodeProcessRunner({ platform: "darwin" }),
+				approval: {
+					decide: async (request) => {
+						approvals.push({ kind: request.kind, reason: request.reason });
+						return { type: "approved-for-session" };
+					},
+				},
+				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory: home,
+					platform: "darwin",
+					environment: {},
+					clock: { now: () => 245 },
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				},
+			});
+
+			await expect(
+				application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "inspect"]),
+			).resolves.toBe(0);
+			expect(approvals).toHaveLength(1);
+			expect(approvals[0]).toMatchObject({ kind: "skill" });
+			expect(approvals[0]!.reason).toContain(selectedSkillId);
+			expect(approvals[0]!.reason).toMatch(/revision [a-f0-9]{64}/u);
+			expect(stdout.value).toBe("inspection complete\n");
+			expect(stderr.value).toBe("");
+		} finally {
+			await rm(fixture, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps Workspace Skills Trust separate and admits only the exact inventory after --trust-project-skills", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-workspace-skill-trust-"));
+		try {
+			const workspace = join(fixture, "workspace");
+			const home = join(fixture, "home");
+			const skillDirectory = join(workspace, ".agents", "skills", "workspace-review");
+			await Promise.all([mkdir(skillDirectory, { recursive: true }), mkdir(home, { recursive: true })]);
+			await writeFile(
+				join(skillDirectory, "SKILL.md"),
+				"---\nname: workspace-review\ndescription: Workspace-only review\n---\n\nReview the workspace.\n",
+			);
+			const faux = fauxProvider({ runtime: testTimeRuntime(246) });
+			const skillVisibility: boolean[] = [];
+			faux.setResponses([
+				(context) => {
+					skillVisibility.push(context.tools?.some(({ name }) => name === "skill") ?? false);
+					return fauxAssistantMessage("untrusted omitted", { timestamp: 246 });
+				},
+				(context) => {
+					skillVisibility.push(context.tools?.some(({ name }) => name === "skill") ?? false);
+					return fauxAssistantMessage("trusted admitted", { timestamp: 246 });
+				},
+			]);
+			const models = createModels({ runtime: testTimeRuntime(246) });
+			models.setProvider(faux.provider);
+			let storedSettings: Awaited<ReturnType<SettingsStore["load"]>> = {};
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let id = 0;
+			const application = createCodingAgentApplication({
+				models,
+				settings: {
+					load: async () => storedSettings,
+					save: async (next) => {
+						storedSettings = next;
+					},
+				},
+				fileSystem: createNodeFileSystem(),
+				processRunner: createNodeProcessRunner({ platform: "darwin" }),
+				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory: home,
+					platform: "darwin",
+					environment: {},
+					clock: { now: () => 246 },
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				},
+			});
+			const model = `${faux.getModel().provider}/${faux.getModel().id}`;
+
+			await expect(application.run(["--print", "--model", model, "first"])).resolves.toBe(0);
+			expect(storedSettings.workspaceSkillsTrust).toBeUndefined();
+			await expect(application.run(["--print", "--trust-project-skills", "--model", model, "second"])).resolves.toBe(
+				0,
+			);
+
+			expect(skillVisibility).toEqual([false, true]);
+			expect(storedSettings.workspaceSkillsTrust).toHaveLength(1);
+			expect(storedSettings.workspaceSkillsTrust![0]).toMatchObject({ workspace: await realpath(workspace) });
+			expect(storedSettings.projectTrust).toBeUndefined();
+			expect(stderr.value).toContain("Workspace Skills inventory");
+		} finally {
+			await rm(fixture, { recursive: true, force: true });
 		}
 	});
 

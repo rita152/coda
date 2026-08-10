@@ -157,6 +157,34 @@ _Avoid_: current directory, repository
 The known or unknown decision to load a specific version of Workspace instructions into model Context. Its status participates in default Permission Profile selection but is never itself execution authority.
 _Avoid_: Permission Profile, Additional Permission, Approval Policy
 
+**Skill**:
+A portable instruction bundle rooted at an Agent Skills-compatible `SKILL.md`, with optional files that remain inert until explicitly read or invoked through ordinary Tools.
+_Avoid_: command, plugin, permission
+
+**Skill Candidate**:
+One discovered version of a Skill with canonical identity, content revision, and source provenance, before trust, precedence, and model visibility are applied.
+_Avoid_: loaded Skill, catalog entry
+
+**Skill Inventory**:
+The deterministic collection of discovered Skill Candidates and diagnostics produced by one refresh; a Workspace inventory has an exact hash used by Workspace Skills Trust.
+_Avoid_: Skill Catalog, Skill Snapshot
+
+**Workspace Skills Trust**:
+The known or unknown decision to admit one exact Workspace Skill Inventory into model Context. It is independent of Project Trust and is never execution authority.
+_Avoid_: Project Trust, Skill Approval, Permission Profile
+
+**Skill Snapshot**:
+The immutable, admitted set of Skill Candidates and name resolutions frozen for one Run.
+_Avoid_: Skill Inventory, watcher cache
+
+**Skill Catalog**:
+The bounded model-visible projection of one Skill Snapshot containing invocation identity and discovery metadata but not Skill bodies.
+_Avoid_: Model Catalog, Skill Inventory
+
+**Skill Activation**:
+The exact-revision Skill body, base directory, arguments, and bounded resource references admitted through an explicit user reference or an authorized model Tool Invocation.
+_Avoid_: script execution, Skill Catalog, permission grant
+
 **Prompt Builder**:
 The versioned Coding Agent component that deterministically assembles one Run's system prompt from application policy, runtime capabilities, Workspace facts, and trusted project instructions.
 _Avoid_: Provider prompt, Agent global prompt

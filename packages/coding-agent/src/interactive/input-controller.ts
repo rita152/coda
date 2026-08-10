@@ -14,7 +14,15 @@ const MAXIMUM_FOLLOW_UP_TEXT_BYTES = 1_048_576;
 export interface InteractiveInputControllerOptions {
 	readonly agent: Agent;
 	readonly session: Pick<Session, "composerSubmissions" | "record">;
-	readonly buildInput: (text: string, attachmentIds: readonly string[]) => Promise<AgentInput>;
+	readonly buildInput: (
+		text: string,
+		attachmentIds: readonly string[],
+		context: {
+			readonly kind: ComposerSubmissionKind;
+			readonly composerText: string;
+			readonly references: readonly ComposerExtensionReference[];
+		},
+	) => Promise<AgentInput>;
 	readonly prepareAttachments: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
 	readonly allocateId: (kind: "composer_submission" | "user_shell") => string;
 	readonly userShell?: Pick<UserShell, "cancel" | "run" | "running">;
@@ -82,8 +90,15 @@ export class InteractiveInputController {
 	): Promise<ComposerSubmission | string | undefined> {
 		return this.#serializeAcceptance(async () => {
 			this.#assertCanSubmit();
-			const prepared = await this.#prepareInput(text, attachmentIds);
-			if (this.#shouldAppendDeferredQueue()) {
+			const deferred = this.#shouldAppendDeferredQueue();
+			const prepared = await this.#prepareInput(
+				text,
+				attachmentIds,
+				deferred ? "follow_up" : "prompt",
+				composerText,
+				references,
+			);
+			if (deferred) {
 				this.#validateFollowUp(followUpText(prepared.input));
 				const submission = await this.#enqueueFollowUp(
 					composerText,
@@ -120,7 +135,7 @@ export class InteractiveInputController {
 		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | string> {
 		return this.#serializeAcceptance(async () => {
-			const prepared = await this.#prepareInput(text, attachmentIds);
+			const prepared = await this.#prepareInput(text, attachmentIds, "steering", composerText, references);
 			const submission = await this.#recordComposerSubmission("steering", composerText, undefined, references);
 			try {
 				const id = this.#options.agent.steer(prepared.input);
@@ -145,7 +160,7 @@ export class InteractiveInputController {
 	): Promise<ComposerSubmission | string> {
 		return this.#serializeAcceptance(async () => {
 			this.#validateFollowUp(text);
-			const prepared = await this.#prepareInput(text, attachmentIds);
+			const prepared = await this.#prepareInput(text, attachmentIds, "follow_up", composerText, references);
 			return this.#enqueueFollowUp(composerText, prepared.input, prepared.transaction, references);
 		});
 	}
@@ -381,8 +396,15 @@ export class InteractiveInputController {
 	async #prepareInput(
 		text: string,
 		attachmentIds: readonly string[],
+		kind: ComposerSubmissionKind,
+		composerText: string,
+		references: readonly ComposerExtensionReference[] = [],
 	): Promise<{ readonly input: AgentInput; readonly transaction: AttachmentTransaction }> {
-		const input = await this.#options.buildInput(text, attachmentIds);
+		const input = await this.#options.buildInput(text, attachmentIds, {
+			kind,
+			composerText,
+			references,
+		});
 		const transaction = await this.#options.prepareAttachments(attachmentIds);
 		return { input, transaction };
 	}

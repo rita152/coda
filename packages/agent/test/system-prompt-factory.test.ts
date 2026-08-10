@@ -1,4 +1,4 @@
-import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
+import { createFauxCore, fauxAssistantMessage, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index.ts";
 import { TestIds, testTimeRuntime } from "./helpers.ts";
@@ -34,6 +34,53 @@ describe("System Prompt factory", () => {
 
 		expect(contexts).toEqual(["snapshot-1", "snapshot-2"]);
 		expect(snapshots).toBe(2);
+	});
+
+	it("awaits preparation and freezes a dynamic Tool set once per Run", async () => {
+		const contexts: string[][] = [];
+		const clock = { now: () => 10 };
+		const runtime = testTimeRuntime(clock);
+		const faux = createFauxCore({ runtime });
+		faux.setResponses([
+			(context) => {
+				contexts.push(context.tools?.map(({ name }) => name) ?? []);
+				return fauxAssistantMessage("first", { timestamp: 10 });
+			},
+			(context) => {
+				contexts.push(context.tools?.map(({ name }) => name) ?? []);
+				return fauxAssistantMessage("second", { timestamp: 10 });
+			},
+		]);
+		let prepared = 0;
+		let factories = 0;
+		const agent = new Agent({
+			clock,
+			idGenerator: new TestIds(),
+			beforeRun: async () => {
+				await Promise.resolve();
+				prepared++;
+			},
+			tools: () => {
+				factories++;
+				return [
+					{
+						name: `run_tool_${prepared}`,
+						description: "Run-local Tool",
+						parameters: Type.Object({}, { additionalProperties: false }),
+						replaySafety: "safe",
+						execute: async () => ({ content: "ok" }),
+					},
+				];
+			},
+			policyGate: { check: async () => ({ decision: "allow" }) },
+			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
+		});
+
+		await agent.prompt("one");
+		await agent.prompt("two");
+
+		expect(contexts).toEqual([["run_tool_1"], ["run_tool_2"]]);
+		expect(factories).toBe(2);
 	});
 
 	it("prepares a fresh snapshot before every queued Follow-up Run", async () => {

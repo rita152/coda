@@ -53,12 +53,25 @@ approval. Choices are numbered sequentially, so denial is `2` when no prefix is
 available and `3` when one is. The feedback choice or Escape cancels the Run and
 returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
 a request. The Composer's borderless upper list exposes `/permission`, `/auth`,
-`/model`, `/session`, `/new`, and the running-Session-only `/follow-up` action;
+`/model`, `/skills`, `/session`, `/new`, and the running-Session-only
+`/follow-up` action;
 configuration commands open nested selectors and do not accept trailing arguments.
 `/permissions` remains a hidden compatibility alias, while `/approvals` and
 `/attach` are ordinary Prompt text.
 
-Useful maintenance commands are `coda sessions` and `coda cleanup`.
+Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
+`coda skills validate <path>` for strict Agent Skills validation without a Model
+or Session.
+
+Local Agent Skills are discovered only from `<Workspace>/.agents/skills` and
+`~/.agents/skills`; Coda does not scan client-specific or ancestor directories.
+The project root has deterministic precedence over the global root. Global Skills
+are user-managed. Workspace Skills use a separate exact-inventory trust
+record: review them in `/skills` or pass `--trust-project-skills` after review.
+This trust admits instructions to Context but never grants Tool, filesystem,
+process, or network authority. Explicit Composer Skill references are
+user-selected context; model-selected Skills use the `skill` Tool and the active
+Skill Approval policy.
 
 The macOS pseudo-terminal E2E test launches the built CLI with an isolated home
 and Workspace, then verifies full-screen entry, input, resize, signal exit,
@@ -91,12 +104,13 @@ npm run test:e2e
 - append-only, workspace-scoped Session v6 resume with content-addressed Media Assets, Composer/Extension facts, selected high-level Permission Profile, and non-authorizing Permission audit facts
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
+- Agent Skills standard validation and official compatible loading from project/global `.agents/skills`, with bounded discovery, exact-revision activation, project-first collision handling, independent Workspace Skills Trust, and immutable per-Run catalogs
 - transient whole-Turn retry at 2s, 4s, and 8s
 
 The Policy Gate resolves authority before a model Tool can run. Model `bash`, native search helpers, and file mutation workers enter `@coda/sandbox` unless the effective reviewed authority is Full Access or an exact command rule/escalation permits an unsandboxed invocation. An ordinary Sandbox denial is returned to the model and never retries outside the Sandbox automatically.
 
 Explicit interactive `!command` remains a separate direct-user entry point: it bypasses model Tool approval and Sandbox, inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 
-RPC, client/server mode, public SDK, Skill/MCP loading and execution, compaction,
+RPC, client/server mode, public SDK, remote Skill installation/registries, MCP loading and execution, compaction,
 Session branching, rename/archive/delete, redo, durable drafts, syntax highlighting,
 and generic terminal-image protocol support remain deferred.

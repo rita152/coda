@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { basename, isAbsolute, join, resolve } from "node:path";
-import { Agent, type AgentInput, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { Agent, type AgentInput, type AgentTool, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -13,14 +13,17 @@ import type {
 	ThinkingLevel,
 } from "@coda/ai";
 import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
+import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
 	createTerminalImageSurface,
 	type DiagnosticSink,
 	type Keybinding,
 	type Scheduler,
+	sanitizeTerminalText,
 	type Terminal,
 	type TerminalColorScheme,
 } from "@coda/tui";
+import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
@@ -30,6 +33,7 @@ import { InteractiveApprovalHandler } from "./interactive/approval.ts";
 import type { ChatAttachment } from "./interactive/chat-component.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { AttachmentTransaction } from "./interactive/input-controller.ts";
+import type { ComposerExtensionReference } from "./interactive/input-types.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
 import {
 	confirmFromTerminal,
@@ -81,6 +85,20 @@ import type {
 	SessionMediaReference,
 	SessionMediaRegistration,
 } from "./session/types.ts";
+import { promptSkillCatalog } from "./skills/catalog.ts";
+import {
+	activateExplicitSkillReferences,
+	prependSkillContext,
+	renderExplicitSkillContext,
+	sharedSkillArguments,
+} from "./skills/context.ts";
+import { workspaceSkillsTrustRecord } from "./skills/inventory.ts";
+import { CodingSkillsManager, SkillCommandRegistryBinding, skillIdFromCommandId } from "./skills/manager.ts";
+import { collectSkillRoots } from "./skills/roots.ts";
+import { RunSkillsCoordinator } from "./skills/run-coordinator.ts";
+import { createSkillTool } from "./skills/tool.ts";
+import type { CodingSkillsSnapshot, WorkspaceSkillsTrustRecord } from "./skills/types.ts";
+import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
 import { createCodingTools } from "./tools/index.ts";
 import { createWorkspace } from "./workspace.ts";
 
@@ -110,6 +128,8 @@ interface PreparedRunRuntime {
 	readonly reasoning: ThinkingLevel | "off";
 	readonly authSnapshot: AuthResult | undefined;
 	readonly permission: PermissionEngine;
+	readonly skills: CodingSkillsSnapshot;
+	readonly tools: readonly AgentTool[];
 }
 
 export interface UserSettings {
@@ -118,6 +138,7 @@ export interface UserSettings {
 	readonly customProviders?: readonly CustomProviderConfig[];
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
+	readonly workspaceSkillsTrust?: readonly WorkspaceSkillsTrustRecord[];
 	readonly ui?: {
 		readonly motion?: "full" | "reduced";
 		readonly colorScheme?: TerminalColorScheme;
@@ -177,6 +198,7 @@ export interface CodingAgentApplicationOptions {
 	readonly permissionRules?: PermissionRuleStore;
 	readonly modelProcessRunner?: ModelProcessRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
+	readonly skillWatcher?: SkillWatcherFactory;
 }
 
 export interface CodingAgentApplication {
@@ -184,7 +206,7 @@ export interface CodingAgentApplication {
 }
 
 interface ParsedArguments {
-	readonly action: "cleanup" | "help" | "run" | "sessions" | "version";
+	readonly action: "cleanup" | "help" | "run" | "sessions" | "skills-validate" | "version";
 	readonly mode: "interactive" | "print";
 	readonly output: "json" | "text";
 	readonly permissionProfile?: PermissionProfile;
@@ -195,6 +217,7 @@ interface ParsedArguments {
 	readonly apiKey?: string;
 	readonly workspace?: string;
 	readonly trustProject: boolean;
+	readonly trustProjectSkills: boolean;
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
@@ -206,6 +229,7 @@ interface ParsedArguments {
 	readonly model?: ModelSelection;
 	readonly prompt: string;
 	readonly imagePaths: readonly string[];
+	readonly skillsPath?: string;
 }
 
 function parseModel(value: string): ModelSelection {
@@ -227,6 +251,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let apiKey: string | undefined;
 	let workspace: string | undefined;
 	let trustProject = false;
+	let trustProjectSkills = false;
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
@@ -239,11 +264,18 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	const promptParts: string[] = [];
 	const imagePaths: string[] = [];
 	const additionalWritableRoots: string[] = [];
+	let skillsPath: string | undefined;
 
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index]!;
 		if (index === 0 && (argument === "cleanup" || argument === "sessions")) {
 			action = argument;
+			continue;
+		}
+		if (index === 0 && argument === "skills") {
+			if (args[index + 1] !== "validate") throw new Error("skills requires: validate <path>");
+			action = "skills-validate";
+			index++;
 			continue;
 		}
 		if (argument === "--print" || argument === "-p" || argument === "--no-tui") {
@@ -347,6 +379,10 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			trustProject = true;
 			continue;
 		}
+		if (argument === "--trust-project-skills") {
+			trustProjectSkills = true;
+			continue;
+		}
 		if (argument === "--session") {
 			if (noSession) throw new Error("--session and --no-session cannot be combined");
 			persistSession = true;
@@ -382,6 +418,11 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			continue;
 		}
 		if (argument.startsWith("-")) throw new Error(`Unknown option: ${argument}`);
+		if (action === "skills-validate") {
+			if (skillsPath !== undefined) throw new Error("skills validate accepts exactly one path");
+			skillsPath = argument;
+			continue;
+		}
 		promptParts.push(argument);
 	}
 
@@ -392,6 +433,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	if (action !== "run" && (prompt.length > 0 || imagePaths.length > 0)) {
 		throw new Error(`${action} does not accept a prompt or image`);
 	}
+	if (action === "skills-validate" && !skillsPath) throw new Error("skills validate requires a path");
 	if (action === "run" && prompt.length === 0 && !io.stdin.isTTY) prompt = (await io.stdin.readAll()).trim();
 	return {
 		action,
@@ -405,6 +447,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		apiKey,
 		workspace,
 		trustProject,
+		trustProjectSkills,
 		persistSession,
 		noSession,
 		noColor,
@@ -416,6 +459,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		model,
 		prompt,
 		imagePaths: Object.freeze([...imagePaths]),
+		...(skillsPath ? { skillsPath } : {}),
 	};
 }
 
@@ -460,6 +504,7 @@ Permissions:
       --dangerously-bypass-approvals-and-sandbox
                                  Disable approval prompts and the outer Sandbox
       --trust-project            Trust the current root AGENTS.md hash
+      --trust-project-skills     Trust the exact current Workspace Skills inventory
 
 Session:
       --session                  Persist this Session (print mode is memory-only by default)
@@ -470,6 +515,7 @@ Session:
 Commands:
   sessions                       List Sessions for the selected Workspace
   cleanup                        Remove expired, unreferenced temporary logs
+  skills validate <path>         Strictly validate one Agent Skill without starting a Session
 
 Other:
   -h, --help                     Show this help
@@ -619,6 +665,116 @@ function approvalRequiredEvent(request: Parameters<PermissionApprovalHandler["de
 	};
 }
 
+function workspaceSkillsReviewText(snapshot: CodingSkillsSnapshot): string {
+	const diff = snapshot.inventory.diff;
+	const reviewValue = (value: string) => JSON.stringify(sanitizeTerminalText(value).replace(/\s+/gu, " ").trim());
+	const changes = [
+		...diff.added.map((item) => `+ ${reviewValue(item.path)}\n  ${item.id} @ ${item.revision}`),
+		...diff.removed.map((item) => `- ${reviewValue(item.path)}\n  ${item.id} @ ${item.revision}`),
+		...diff.changed.map(
+			({ before, after }) =>
+				`~ ${reviewValue(after.path)}\n  ${after.id}: ${before.revision.slice(0, 12)} -> ${after.revision.slice(0, 12)}`,
+		),
+	];
+	const changePreview = changes.slice(0, 50);
+	const workspaceCandidates = snapshot.candidates.filter((candidate) =>
+		candidate.provenance.some(({ origin }) => origin.scope === "workspace"),
+	);
+	const candidates = workspaceCandidates
+		.slice(0, 50)
+		.map(
+			(candidate) =>
+				`- ${reviewValue(candidate.metadata.name)}: ${sanitizeTerminalText(candidate.metadata.description).replace(/\s+/gu, " ").slice(0, 160)}\n  ${reviewValue(candidate.skillFile)}\n  ${candidate.id} @ ${candidate.revision}`,
+		);
+	return sanitizeTerminalText(
+		[
+			"Trust this Workspace Skills inventory?",
+			`Workspace: ${reviewValue(snapshot.inventory.workspace)}`,
+			`Inventory SHA-256: ${snapshot.inventory.sha256}`,
+			`Changes: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length}`,
+			"The exact inventory hash is stored separately from AGENTS.md trust. Any Skill change requires approval again.",
+			"Trust does not grant filesystem, process, Tool, or network authority.",
+			"",
+			"Inventory changes:",
+			...(changePreview.length > 0 ? changePreview : ["(none)"]),
+			...(changes.length > changePreview.length ? ["… (change preview truncated)"] : []),
+			"",
+			"Discovered Workspace Skills:",
+			...(candidates.length > 0 ? candidates : ["(none)"]),
+			...(workspaceCandidates.length > candidates.length ? ["… (inventory preview truncated)"] : []),
+		].join("\n"),
+	);
+}
+
+async function validateSkillPath(
+	path: string,
+	options: Pick<CodingAgentApplicationOptions, "fileSystem" | "io" | "runtime">,
+	output: "json" | "text",
+): Promise<number> {
+	const requested = isAbsolute(path) ? path : resolve(options.runtime.cwd, path);
+	const canonical = await options.fileSystem.realpath(requested);
+	const status = await options.fileSystem.stat(canonical);
+	const skillFile = status.kind === "directory" ? join(canonical, "SKILL.md") : canonical;
+	if (status.kind !== "directory" && status.kind !== "file") {
+		throw new Error(`Skill validation path is not a regular file or directory: ${path}`);
+	}
+	if (status.kind === "file" && basename(skillFile) !== "SKILL.md") {
+		throw new Error("Skill validation file must be named exactly SKILL.md");
+	}
+	const skillStatus = await options.fileSystem.stat(skillFile);
+	if (skillStatus.kind !== "file") throw new Error(`Skill manifest is not a regular file: ${skillFile}`);
+	if (skillStatus.size > DEFAULT_SKILL_LIMITS.maxSkillFileBytes) {
+		throw new Error(`SKILL.md exceeds the ${DEFAULT_SKILL_LIMITS.maxSkillFileBytes}-byte limit`);
+	}
+	const bytes = await options.fileSystem.readFile(skillFile);
+	if (bytes.byteLength > DEFAULT_SKILL_LIMITS.maxSkillFileBytes) {
+		throw new Error(`SKILL.md exceeds the ${DEFAULT_SKILL_LIMITS.maxSkillFileBytes}-byte limit`);
+	}
+	let text: string;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch {
+		throw new Error("SKILL.md is not valid UTF-8");
+	}
+	const result = validateAgentSkill({
+		text,
+		directoryName: basename(dirname(skillFile)),
+		path: skillFile,
+	});
+	const validationLine = (value: string) => sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+	if (output === "json") {
+		await options.io.stdout.write(
+			`${JSON.stringify({ schemaVersion: 1, type: "skill_validation", path: skillFile, valid: result.valid, diagnostics: result.diagnostics })}\n`,
+		);
+	} else {
+		await options.io.stdout.write(
+			`${result.valid ? "Valid Agent Skill" : "Invalid Agent Skill"}: ${validationLine(skillFile)}\n`,
+		);
+		for (const diagnostic of result.diagnostics) {
+			await options.io.stdout.write(
+				`${validationLine(`[${diagnostic.severity}] ${diagnostic.code}${diagnostic.field ? ` (${diagnostic.field})` : ""}: ${diagnostic.message}`)}\n`,
+			);
+		}
+	}
+	return result.valid ? 0 : 1;
+}
+
+function assertSkillReferencesAvailable(
+	snapshot: CodingSkillsSnapshot,
+	references: readonly ComposerExtensionReference[],
+): void {
+	for (const reference of references) {
+		if (reference.source !== "skill") {
+			throw new Error(`Extension reference loading is unavailable for source: ${reference.source}`);
+		}
+		const id = skillIdFromCommandId(reference.commandId);
+		const resolved = id ? snapshot.byId.get(id) : undefined;
+		if (!resolved) {
+			throw new Error(`Selected Skill is no longer trusted or available: ${reference.name}`);
+		}
+	}
+}
+
 export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
 	const fullScreenOutput = providedOptions.fullScreenOutput ?? new FullScreenOutputGate(providedOptions.io);
 	const options: CodingAgentApplicationOptions = {
@@ -645,6 +801,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				if (parsed.action === "version") {
 					await options.io.stdout.write("0.1.0\n");
 					return 0;
+				}
+				if (parsed.action === "skills-validate") {
+					return validateSkillPath(parsed.skillsPath!, options, parsed.output);
 				}
 				const maintenanceDiagnostics: DiagnosticSink =
 					options.diagnostics ??
@@ -760,6 +919,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							),
 					idGenerator: options.runtime.idGenerator,
 				});
+				let skillWatcher: SkillWatcher | undefined;
+				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -830,6 +991,80 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							},
 						});
 					}
+					const skillRoots = await collectSkillRoots({
+						workspace: workspace.root,
+						homeDirectory: options.runtime.homeDirectory,
+					});
+					const skillsManager = new CodingSkillsManager({
+						fileSystem: options.fileSystem,
+						workspace: workspace.root,
+						roots: skillRoots,
+					});
+					let skillsSnapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+					if (skillsSnapshot.inventory.trust === "incomplete" && parsed.trustProjectSkills) {
+						throw new Error("Cannot trust Workspace Skills because discovery hit a hard limit");
+					}
+					if (skillsSnapshot.inventory.trust === "untrusted") {
+						const trustedInteractively =
+							!parsed.trustProjectSkills && interactiveRuntime
+								? await confirmFromTerminal(interactiveRuntime, workspaceSkillsReviewText(skillsSnapshot))
+								: false;
+						if (parsed.trustProjectSkills || trustedInteractively) {
+							const trust = workspaceSkillsTrustRecord(skillsSnapshot);
+							settings = {
+								...settings,
+								workspaceSkillsTrust: [
+									...(settings.workspaceSkillsTrust ?? []).filter(
+										(entry) => entry.workspace !== workspace.root,
+									),
+									trust,
+								].sort((left, right) => left.workspace.localeCompare(right.workspace)),
+							};
+							await options.settings.save(settings);
+							skillsSnapshot = await skillsManager.refresh(settings.workspaceSkillsTrust, { rescan: false });
+						} else if (!interactiveRuntime) {
+							await options.io.stderr.write(
+								`coda: Workspace Skills inventory ${skillsSnapshot.inventory.sha256} is untrusted; Skills were omitted\n`,
+							);
+						}
+					}
+					const commandRegistry = options.commandRegistry ?? createCoreCommandRegistry();
+					skillRegistryBinding = new SkillCommandRegistryBinding(commandRegistry);
+					skillRegistryBinding.sync(skillsSnapshot);
+					if (interactiveRuntime && options.skillWatcher) {
+						skillWatcher = options.skillWatcher.watch(
+							skillRoots.map(({ path }) => path),
+							() => skillsManager.markDirty(),
+							(error) => {
+								void maintenanceDiagnostics({ code: "skills.watcher-failed", message: error.message });
+							},
+						);
+					}
+					const refreshSkills = async (): Promise<CodingSkillsSnapshot> => {
+						const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+						skillRegistryBinding!.sync(snapshot);
+						return snapshot;
+					};
+					const trustSkills = async (): Promise<CodingSkillsSnapshot> => {
+						const reviewed = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+						const trust = workspaceSkillsTrustRecord(reviewed);
+						settings = {
+							...settings,
+							workspaceSkillsTrust: [
+								...(settings.workspaceSkillsTrust ?? []).filter((entry) => entry.workspace !== workspace.root),
+								trust,
+							].sort((left, right) => left.workspace.localeCompare(right.workspace)),
+						};
+						await options.settings.save(settings);
+						const trusted = await skillsManager.refresh(settings.workspaceSkillsTrust, { rescan: false });
+						skillRegistryBinding!.sync(trusted);
+						return trusted;
+					};
+					const skillsCommand = {
+						snapshot: refreshSkills,
+						refresh: refreshSkills,
+						trust: trustSkills,
+					};
 					let auth = await options.models.getAuth(model, {
 						apiKey: parsed.apiKey,
 						clock: options.runtime.clock,
@@ -932,6 +1167,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						await audit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
 					};
+					let runRuntimeForApproval: RunRuntimeSlot<PreparedRunRuntime> | undefined;
 					const createPolicy = (
 						profile: ReturnType<typeof compileSandboxPolicy>,
 						approvalPolicy: ApprovalPolicy,
@@ -943,6 +1179,19 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							profile,
 							approvalPolicy,
 							approval: auditedApproval,
+							genericApprovalForTool: (request) => {
+								if (request.toolName !== "skill" || typeof request.arguments.skill !== "string") {
+									return undefined;
+								}
+								const id = skillIdFromCommandId(request.arguments.skill);
+								const resolved = id ? runRuntimeForApproval?.active?.value.skills.byId.get(id) : undefined;
+								return {
+									kind: "skill",
+									reason: resolved
+										? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
+										: `Activate unavailable Skill ${request.arguments.skill}`,
+								};
+							},
 							resolveExecutable: createExecutableIdentityResolver({
 								fileSystem: options.fileSystem,
 								path: options.runtime.environment.PATH,
@@ -968,7 +1217,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						reasoning,
 						authSnapshot: auth,
 						permission: initialPermission,
+						skills: skillsSnapshot,
+						tools: Object.freeze([]),
 					});
+					runRuntimeForApproval = runRuntime;
 					const policy = new RunPermissionRouter(runRuntime, ({ permission }) => permission);
 					await audit(permissionConfigurationAuditEvent("startup", compiledProfile, selectedApprovalPolicy));
 					if (!session.restored.permissionProfile || parsed.permissionProfile) {
@@ -978,7 +1230,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						options.modelProcessRunner ?? createModelProcessRunner(),
 						audit,
 					);
-					const tools = createCodingTools({
+					const baseTools = createCodingTools({
 						workspace,
 						fileSystem: options.fileSystem,
 						processRunner: modelProcessRunner,
@@ -988,26 +1240,33 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						settings,
 						onAudit: audit,
 					});
-					const freezePrompt = () =>
+					const toolsForSkills = (snapshot: CodingSkillsSnapshot): readonly AgentTool[] => {
+						const skillTool = createSkillTool(snapshot);
+						return Object.freeze([...baseTools, ...(skillTool ? [skillTool] : [])]);
+					};
+					runRuntime.select({ ...runRuntime.selected, tools: toolsForSkills(skillsSnapshot) });
+					const runSkills = new RunSkillsCoordinator();
+					const freezePrompt = (runtime: PreparedRunRuntime) =>
 						buildSystemPrompt({
 							workspace: workspace.root,
 							platform: options.runtime.platform,
 							timestamp: options.runtime.clock.now(),
-							tools: tools.map((tool) => ({ name: tool.name, description: tool.description })),
+							tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
 							capabilities: {
 								interactionMode: parsed.mode,
-								permissionProfile: policy.configuration().profile.profile,
-								approvalPolicy: approvalPolicyLabel(policy.configuration().approvalPolicy),
+								permissionProfile: runtime.permission.configuration().profile.profile,
+								approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
 							},
 							projectInstructions,
+							skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
 						});
-					let promptSnapshot = freezePrompt();
+					let promptSnapshot = freezePrompt(runRuntime.selected);
 					let activeRuntimeId: number | undefined;
 					assertContextFits(
 						model,
 						promptSnapshot.text,
 						initialInput,
-						tools,
+						runRuntime.selected.tools,
 						session.seed.messages.map(({ message }) => message),
 					);
 					await session.record({
@@ -1018,7 +1277,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const agent = new Agent({
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
-						tools,
+						tools: () => {
+							const runtime = runRuntime.active?.value;
+							if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
+							return runtime.tools;
+						},
 						policyGate: policy,
 						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
 						stream: ({ context, signal }) => {
@@ -1035,19 +1298,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								maxTokens: contextBudget.reservedOutputTokens,
 							});
 						},
-						beforeRun: ({ inputMessage }) => {
+						beforeRun: async ({ inputMessage }) => {
+							const nextSkills =
+								runSkills.consume(inputMessage.message.content) ??
+								(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+							skillRegistryBinding!.sync(nextSkills);
+							runRuntime.select({
+								...runRuntime.selected,
+								skills: nextSkills,
+								tools: toolsForSkills(nextSkills),
+							});
 							const runtime = runRuntime.begin();
 							activeRuntimeId = runtime.id;
 							try {
-								promptSnapshot = freezePrompt();
+								promptSnapshot = freezePrompt(runtime.value);
 								assertContextFits(
 									runtime.value.model,
 									promptSnapshot.text,
 									inputMessage.message.content,
-									tools,
+									runtime.value.tools,
 									agent.state.messages.map(({ message }) => message),
 								);
-								void session.record({
+								await session.record({
 									type: "prepare_run",
 									promptVersion: promptSnapshot.version,
 									promptSha256: promptSnapshot.sha256,
@@ -1245,6 +1517,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									}
 									await targetAudit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
 								};
+								let targetRunRuntimeForApproval: RunRuntimeSlot<PreparedRunRuntime> | undefined;
 								const targetCreatePolicy = (
 									profile: ReturnType<typeof compileSandboxPolicy>,
 									approvalPolicy: ApprovalPolicy,
@@ -1256,6 +1529,21 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										profile,
 										approvalPolicy,
 										approval: targetAuditedApproval,
+										genericApprovalForTool: (request) => {
+											if (request.toolName !== "skill" || typeof request.arguments.skill !== "string") {
+												return undefined;
+											}
+											const id = skillIdFromCommandId(request.arguments.skill);
+											const resolved = id
+												? targetRunRuntimeForApproval?.active?.value.skills.byId.get(id)
+												: undefined;
+											return {
+												kind: "skill",
+												reason: resolved
+													? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
+													: `Activate unavailable Skill ${request.arguments.skill}`,
+											};
+										},
 										resolveExecutable: createExecutableIdentityResolver({
 											fileSystem: options.fileSystem,
 											path: options.runtime.environment.PATH,
@@ -1281,7 +1569,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									reasoning: targetReasoning,
 									authSnapshot: targetAuth,
 									permission: targetPermission,
+									skills: skillsManager.current ?? skillsSnapshot,
+									tools: Object.freeze([]),
 								});
+								targetRunRuntimeForApproval = targetRunRuntime;
 								sessionRunRuntimes.set(targetSession.descriptor.id, {
 									runtime: targetRunRuntime,
 									apiKey: undefined,
@@ -1306,7 +1597,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										});
 									}
 								}
-								const targetTools = createCodingTools({
+								const targetBaseTools = createCodingTools({
 									workspace,
 									fileSystem: options.fileSystem,
 									processRunner: modelProcessRunner,
@@ -1316,26 +1607,36 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									settings,
 									onAudit: targetAudit,
 								});
-								const targetFreezePrompt = () =>
+								const targetToolsForSkills = (snapshot: CodingSkillsSnapshot): readonly AgentTool[] => {
+									const skillTool = createSkillTool(snapshot);
+									return Object.freeze([...targetBaseTools, ...(skillTool ? [skillTool] : [])]);
+								};
+								targetRunRuntime.select({
+									...targetRunRuntime.selected,
+									tools: targetToolsForSkills(targetRunRuntime.selected.skills),
+								});
+								const targetRunSkills = new RunSkillsCoordinator();
+								const targetFreezePrompt = (runtime: PreparedRunRuntime) =>
 									buildSystemPrompt({
 										workspace: workspace.root,
 										platform: options.runtime.platform,
 										timestamp: options.runtime.clock.now(),
-										tools: targetTools.map((tool) => ({ name: tool.name, description: tool.description })),
+										tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
 										capabilities: {
 											interactionMode: "interactive",
-											permissionProfile: targetPolicy.configuration().profile.profile,
-											approvalPolicy: approvalPolicyLabel(targetPolicy.configuration().approvalPolicy),
+											permissionProfile: runtime.permission.configuration().profile.profile,
+											approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
 										},
 										projectInstructions,
+										skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
 									});
-								let targetPromptSnapshot = targetFreezePrompt();
+								let targetPromptSnapshot = targetFreezePrompt(targetRunRuntime.selected);
 								let targetActiveRuntimeId: number | undefined;
 								assertContextFits(
 									targetModel,
 									targetPromptSnapshot.text,
 									"",
-									targetTools,
+									targetRunRuntime.selected.tools,
 									targetSession.seed.messages.map(({ message }) => message),
 								);
 								if (!targetSession.restored.model) {
@@ -1353,7 +1654,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								const targetAgent = new Agent({
 									clock: options.runtime.clock,
 									idGenerator: options.runtime.idGenerator,
-									tools: targetTools,
+									tools: () => {
+										const runtime = targetRunRuntime.active?.value;
+										if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
+										return runtime.tools;
+									},
 									policyGate: targetPolicy,
 									retry: options.runtime.scheduler
 										? createCodingAgentRetry(options.runtime.scheduler)
@@ -1375,19 +1680,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											maxTokens: contextBudget.reservedOutputTokens,
 										});
 									},
-									beforeRun: ({ inputMessage }) => {
+									beforeRun: async ({ inputMessage }) => {
+										const nextSkills =
+											targetRunSkills.consume(inputMessage.message.content) ??
+											(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+										skillRegistryBinding!.sync(nextSkills);
+										targetRunRuntime.select({
+											...targetRunRuntime.selected,
+											skills: nextSkills,
+											tools: targetToolsForSkills(nextSkills),
+										});
 										const runtime = targetRunRuntime.begin();
 										targetActiveRuntimeId = runtime.id;
 										try {
-											targetPromptSnapshot = targetFreezePrompt();
+											targetPromptSnapshot = targetFreezePrompt(runtime.value);
 											assertContextFits(
 												runtime.value.model,
 												targetPromptSnapshot.text,
 												inputMessage.message.content,
-												targetTools,
+												runtime.value.tools,
 												targetAgent.state.messages.map(({ message }) => message),
 											);
-											void targetSession.record({
+											await targetSession.record({
 												type: "prepare_run",
 												promptVersion: targetPromptSnapshot.version,
 												promptSha256: targetPromptSnapshot.sha256,
@@ -1489,16 +1803,56 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										},
 									},
 									authCommand,
+									skillsCommand,
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
-									buildPrompt: async (text, attachmentIds) => {
+									resolveExtensionReferences: async (references) => {
+										const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+										assertSkillReferencesAvailable(snapshot, references);
+									},
+									buildPrompt: async (text, attachmentIds, inputContext) => {
 										const selectedModel = targetRunRuntime.selected.model;
 										if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
 											throw new Error(
 												`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
 											);
 										}
-										return promptInput(text, attachmentIds, targetMediaLibrary, targetRestoredMedia.contents);
+										const skillReferences = inputContext.references.filter(
+											({ source }) => source === "skill",
+										);
+										if (skillReferences.length === 0) {
+											return promptInput(
+												text,
+												attachmentIds,
+												targetMediaLibrary,
+												targetRestoredMedia.contents,
+											);
+										}
+										const snapshot =
+											inputContext.kind === "steering"
+												? (targetRunRuntime.active?.value.skills ?? targetRunRuntime.selected.skills)
+												: (skillsManager.current ?? targetRunRuntime.selected.skills);
+										assertSkillReferencesAvailable(snapshot, inputContext.references);
+										const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
+										const input = await promptInput(
+											taskText,
+											attachmentIds,
+											targetMediaLibrary,
+											targetRestoredMedia.contents,
+										);
+										const activations = await activateExplicitSkillReferences({
+											snapshot,
+											references: skillReferences,
+											composerText: inputContext.composerText,
+										});
+										const snapshotBinding =
+											inputContext.kind === "steering" ? undefined : targetRunSkills.createBinding();
+										const prepared = prependSkillContext(
+											input,
+											renderExplicitSkillContext(activations, snapshotBinding),
+										);
+										if (snapshotBinding) targetRunSkills.prepare(prepared, snapshot, snapshotBinding);
+										return prepared;
 									},
 									prepareAttachments: targetPrepareAttachments,
 									onDetach: (attachmentId) =>
@@ -1596,9 +1950,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									},
 								},
 								authCommand,
+								skillsCommand,
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
-								commandRegistry: options.commandRegistry,
+								commandRegistry,
 								sessionCommand: {
 									list: async () =>
 										(await sessions.list({ id: workspaceId, path: workspace.root })).map((descriptor) => ({
@@ -1650,14 +2005,46 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								initialAttachmentIds,
 								initialAttachments,
 								restoredAttachments: restoredMedia.attachments,
-								buildPrompt: async (text, attachmentIds) => {
+								resolveExtensionReferences: async (references) => {
+									const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+									assertSkillReferencesAvailable(snapshot, references);
+								},
+								buildPrompt: async (text, attachmentIds, inputContext) => {
 									const selectedModel = runRuntime.selected.model;
 									if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
 										throw new Error(
 											`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
 										);
 									}
-									return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
+									const skillReferences = inputContext.references.filter(({ source }) => source === "skill");
+									if (skillReferences.length === 0) {
+										return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
+									}
+									const snapshot =
+										inputContext.kind === "steering"
+											? (runRuntime.active?.value.skills ?? runRuntime.selected.skills)
+											: (skillsManager.current ?? runRuntime.selected.skills);
+									assertSkillReferencesAvailable(snapshot, inputContext.references);
+									const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
+									const input = await promptInput(
+										taskText,
+										attachmentIds,
+										mediaLibrary,
+										restoredMedia.contents,
+									);
+									const activations = await activateExplicitSkillReferences({
+										snapshot,
+										references: skillReferences,
+										composerText: inputContext.composerText,
+									});
+									const snapshotBinding =
+										inputContext.kind === "steering" ? undefined : runSkills.createBinding();
+									const prepared = prependSkillContext(
+										input,
+										renderExplicitSkillContext(activations, snapshotBinding),
+									);
+									if (snapshotBinding) runSkills.prepare(prepared, snapshot, snapshotBinding);
+									return prepared;
 								},
 								prepareAttachments,
 								onDetach: (attachmentId) =>
@@ -1770,6 +2157,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					if (rejectingApproval && rejectingApproval.requests.length > 0) return 1;
 					return 0;
 				} finally {
+					skillWatcher?.dispose();
+					skillRegistryBinding?.dispose();
 					await mediaLibrary.dispose();
 					await session.close();
 				}

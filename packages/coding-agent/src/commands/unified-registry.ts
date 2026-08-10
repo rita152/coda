@@ -16,9 +16,17 @@ export interface UnifiedCommandRegistryOptions {
 
 export function createUnifiedCommandRegistry(options: UnifiedCommandRegistryOptions = {}): CommandRegistry {
 	const registry = createCoreCommandRegistry();
-	for (const entry of options.skills ?? []) registry.register(extensionCommand("skill", entry));
-	for (const entry of options.mcp ?? []) registry.register(extensionCommand("mcp", entry));
+	for (const entry of options.skills ?? []) registerSlashExtension(registry, "skill", entry);
+	for (const entry of options.mcp ?? []) registerSlashExtension(registry, "mcp", entry);
 	return registry;
+}
+
+export function registerSlashExtension(
+	registry: CommandRegistry,
+	source: Exclude<CommandSource, "core">,
+	entry: SlashExtensionEntry,
+): () => void {
+	return registry.register(extensionCommand(source, entry));
 }
 
 function extensionCommand(source: Exclude<CommandSource, "core">, entry: SlashExtensionEntry): CommandDefinition {

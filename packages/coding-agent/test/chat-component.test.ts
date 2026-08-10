@@ -220,6 +220,30 @@ describe("ChatComponent terminal input", () => {
 		expect(onSubmit).toHaveBeenCalledWith("Use /review", [], "Use /review", references);
 	});
 
+	it("restores the exact draft when extension reference resolution fails", async () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({
+			colorLevel: 0,
+			onSubmit,
+			onResolveExtensionReferences: vi.fn(async () => {
+				throw new Error("Skill changed before activation");
+			}),
+			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput(key("enter"), context);
+		component.handleInput({ type: "text", text: "carefully" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => {
+			const frame = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
+			expect(frame).toContain("Use /review carefully");
+			expect(frame).toContain("Skill changed before activation");
+		});
+		expect(onSubmit).not.toHaveBeenCalled();
+	});
+
 	it("drops optional header and footer hints by priority on a narrow usable screen", () => {
 		const component = createComponent({ workspaceLabel: "project", modelLabel: "provider/model-1234" });
 		const frame = component.render({ width: 40, height: 10, now: 0 });

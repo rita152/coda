@@ -341,12 +341,15 @@ export interface RunPreparation {
 	readonly queueItemId?: QueueItemId;
 }
 
-/** Synchronously freezes application-owned state before the Run snapshot is created. */
-export type BeforeRun = (preparation: RunPreparation) => void;
+/** Freezes application-owned state before the Run snapshot is created. */
+export type BeforeRun = (preparation: RunPreparation) => Promise<void> | void;
+
+/** Produces the immutable Tool set for one Run after `beforeRun` has completed. */
+export type AgentToolsFactory = () => readonly AgentTool[];
 
 export interface AgentOptions {
 	readonly stream: ModelStream;
-	readonly tools: readonly AgentTool[];
+	readonly tools: readonly AgentTool[] | AgentToolsFactory;
 	readonly policyGate: PolicyGate;
 	readonly idGenerator: IdGenerator;
 	readonly clock: Clock;

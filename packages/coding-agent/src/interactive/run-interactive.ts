@@ -18,17 +18,23 @@ import { createModelCommandFlow, type ModelCommandEntry } from "../commands/mode
 import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
+import { createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
 import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
 import type { Session } from "../session/types.ts";
+import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
-import { type AttachmentTransaction, InteractiveInputController } from "./input-controller.ts";
+import {
+	type AttachmentTransaction,
+	InteractiveInputController,
+	type InteractiveInputControllerOptions,
+} from "./input-controller.ts";
 import type { ComposerExtensionReference } from "./input-types.ts";
 import {
 	type InteractiveProcessLifecycle,
@@ -58,12 +64,17 @@ export interface InteractiveSessionOptions {
 		readonly logout: (providerId: string) => Promise<void> | void;
 		readonly addCustomProvider: (input: CustomProviderInput) => Promise<void> | void;
 	};
+	readonly skillsCommand?: {
+		readonly snapshot: () => Promise<CodingSkillsSnapshot>;
+		readonly refresh: () => Promise<CodingSkillsSnapshot>;
+		readonly trust: () => Promise<CodingSkillsSnapshot>;
+	};
 	readonly reasoning: string;
 	readonly initialPrompt?: AgentInput;
 	readonly initialAttachmentIds?: readonly string[];
 	readonly initialAttachments?: readonly ChatAttachment[];
 	readonly restoredAttachments?: ReadonlyMap<string, readonly ChatAttachment[]>;
-	readonly buildPrompt?: (text: string, attachmentIds: readonly string[]) => Promise<AgentInput>;
+	readonly buildPrompt?: InteractiveInputControllerOptions["buildInput"];
 	readonly prepareAttachments?: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
@@ -270,6 +281,17 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 								if (!provider) throw new Error(`Unknown provider: ${providerId}`);
 								navigation.push(createProviderAuthFlow(provider, authOptions));
 							},
+						}),
+					);
+					return;
+				}
+				if (commandId === "core:skills") {
+					if (!sessionOptions.skillsCommand) throw new Error("Skills management is unavailable");
+					flow.open(
+						createSkillsCommandFlow({
+							snapshot: await sessionOptions.skillsCommand.snapshot(),
+							onRefresh: sessionOptions.skillsCommand.refresh,
+							onTrust: sessionOptions.skillsCommand.trust,
 						}),
 					);
 					return;
@@ -539,6 +561,17 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 							if (!provider) throw new Error(`Unknown provider: ${providerId}`);
 							navigation.push(createProviderAuthFlow(provider, authOptions));
 						},
+					}),
+				);
+				return;
+			}
+			if (commandId === "core:skills") {
+				if (!options.skillsCommand) throw new Error("Skills management is unavailable");
+				flow.open(
+					createSkillsCommandFlow({
+						snapshot: await options.skillsCommand.snapshot(),
+						onRefresh: options.skillsCommand.refresh,
+						onTrust: options.skillsCommand.trust,
 					}),
 				);
 				return;

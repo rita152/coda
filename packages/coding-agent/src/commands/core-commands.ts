@@ -25,6 +25,13 @@ const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:skills",
+		name: "skills",
+		title: "Skills",
+		description: "Inspect, refresh, and trust local Skills inventories",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:session",
 		name: "session",
 		title: "Session",

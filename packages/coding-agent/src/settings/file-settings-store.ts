@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
 import type { SettingsStore, UserSettings } from "../application.ts";
@@ -37,6 +37,7 @@ function validateSettings(value: unknown): UserSettings {
 			"customProviders",
 			"shellEnvironmentAllowlist",
 			"projectTrust",
+			"workspaceSkillsTrust",
 			"ui",
 			"permissions",
 		])
@@ -155,6 +156,50 @@ function validateSettings(value: unknown): UserSettings {
 		}
 	}
 	let ui: UserSettings["ui"];
+	let workspaceSkillsTrust: UserSettings["workspaceSkillsTrust"];
+	if (value.workspaceSkillsTrust !== undefined) {
+		if (!Array.isArray(value.workspaceSkillsTrust)) {
+			throw new Error("Coda settings contain invalid Workspace Skills Trust records");
+		}
+		const parsedTrust = value.workspaceSkillsTrust.map((entry) => {
+			if (
+				!isRecord(entry) ||
+				!hasOnlyKeys(entry, ["workspace", "sha256", "inventory"]) ||
+				typeof entry.workspace !== "string" ||
+				!isAbsolute(entry.workspace) ||
+				typeof entry.sha256 !== "string" ||
+				!/^[a-f0-9]{64}$/u.test(entry.sha256) ||
+				!Array.isArray(entry.inventory)
+			) {
+				throw new Error("Coda settings contain invalid Workspace Skills Trust records");
+			}
+			const inventory = entry.inventory.map((item) => {
+				if (
+					!isRecord(item) ||
+					!hasOnlyKeys(item, ["id", "path", "revision"]) ||
+					typeof item.id !== "string" ||
+					!/^skill:[a-f0-9]{32}$/u.test(item.id) ||
+					typeof item.path !== "string" ||
+					!isAbsolute(item.path) ||
+					typeof item.revision !== "string" ||
+					!/^[a-f0-9]{64}$/u.test(item.revision)
+				) {
+					throw new Error("Coda settings contain invalid Workspace Skills Trust inventory entries");
+				}
+				return { id: item.id, path: item.path, revision: item.revision };
+			});
+			inventory.sort((left, right) => left.path.localeCompare(right.path) || left.id.localeCompare(right.id));
+			if (new Set(inventory.map(({ id }) => id)).size !== inventory.length) {
+				throw new Error("Coda settings contain duplicate Workspace Skills Trust inventory entries");
+			}
+			return { workspace: entry.workspace, sha256: entry.sha256, inventory };
+		});
+		parsedTrust.sort((left, right) => left.workspace.localeCompare(right.workspace));
+		workspaceSkillsTrust = parsedTrust;
+		if (new Set(parsedTrust.map(({ workspace }) => workspace)).size !== parsedTrust.length) {
+			throw new Error("Coda settings contain duplicate Workspace Skills Trust records");
+		}
+	}
 	if (value.ui !== undefined) {
 		if (
 			!isRecord(value.ui) ||
@@ -228,6 +273,7 @@ function validateSettings(value: unknown): UserSettings {
 		...(customProviders ? { customProviders } : {}),
 		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
+		...(workspaceSkillsTrust ? { workspaceSkillsTrust } : {}),
 		...(ui ? { ui } : {}),
 		...(permissions ? { permissions } : {}),
 	};

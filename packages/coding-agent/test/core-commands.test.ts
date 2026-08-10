@@ -10,6 +10,7 @@ describe("core commands", () => {
 			"permission",
 			"auth",
 			"model",
+			"skills",
 			"session",
 			"new",
 			"follow-up",

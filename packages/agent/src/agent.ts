@@ -50,6 +50,8 @@ interface RunContext {
 	sequence: number;
 	readonly controller: AbortController;
 	readonly listenerFailures: unknown[];
+	tools: readonly AgentTool[];
+	toolsByName: ReadonlyMap<string, AgentTool>;
 	systemPrompt?: string;
 }
 
@@ -188,12 +190,29 @@ function isTransientAssistantFailure(message: AgentMessage<AssistantMessage>): b
 	return false;
 }
 
+function snapshotTools(input: readonly AgentTool[]): {
+	readonly tools: readonly AgentTool[];
+	readonly byName: ReadonlyMap<string, AgentTool>;
+} {
+	if (!Array.isArray(input)) throw new AgentError("invalid_input", "Agent Tools factory must return an array");
+	const byName = new Map<string, AgentTool>();
+	const tools: AgentTool[] = [];
+	for (const tool of input) {
+		if (byName.has(tool.name)) {
+			throw new AgentError("invalid_input", `Tool names must be unique; received "${tool.name}" more than once`);
+		}
+		const snapshot = Object.freeze({ ...tool });
+		byName.set(snapshot.name, snapshot);
+		tools.push(snapshot);
+	}
+	return Object.freeze({ tools: Object.freeze(tools), byName });
+}
+
 export class Agent {
 	readonly #options: AgentOptions;
 	readonly #listeners: AgentEventListener[] = [];
 	readonly #issuedIds = new Set<string>();
 	readonly #consumedQueueItems = new Set<string>();
-	readonly #toolsByName: ReadonlyMap<string, AgentTool>;
 	#runtimeState: RuntimeState;
 	#operation?: Promise<RunResult>;
 	#activeRun?: RunContext;
@@ -207,18 +226,8 @@ export class Agent {
 		) {
 			throw new AgentError("invalid_input", "systemPrompt must be a string or factory");
 		}
-		const toolsByName = new Map<string, AgentTool>();
-		const tools: AgentTool[] = [];
-		for (const tool of options.tools) {
-			if (toolsByName.has(tool.name)) {
-				throw new AgentError("invalid_input", `Tool names must be unique; received "${tool.name}" more than once`);
-			}
-			const snapshot = { ...tool };
-			toolsByName.set(snapshot.name, snapshot);
-			tools.push(snapshot);
-		}
+		const tools = typeof options.tools === "function" ? options.tools : snapshotTools(options.tools).tools;
 		this.#options = { ...options, tools };
-		this.#toolsByName = toolsByName;
 		const seed =
 			options.seed === undefined ? { messages: [], pendingFollowUps: [] } : validateAgentSeed(options.seed);
 		for (const message of seed.messages) this.#issuedIds.add(message.id);
@@ -446,6 +455,8 @@ export class Agent {
 			sequence: 0,
 			controller: new AbortController(),
 			listenerFailures: [],
+			tools: [],
+			toolsByName: new Map(),
 		};
 		this.#activeRun = run;
 		let outcome: RunOutcome = "error";
@@ -456,7 +467,7 @@ export class Agent {
 		let unexpected: unknown;
 
 		try {
-			this.#options.beforeRun?.(
+			await this.#options.beforeRun?.(
 				deepFreeze({
 					runId,
 					source,
@@ -464,6 +475,11 @@ export class Agent {
 					...(queueItemId === undefined ? {} : { queueItemId }),
 				}),
 			);
+			const runTools = snapshotTools(
+				typeof this.#options.tools === "function" ? this.#options.tools() : this.#options.tools,
+			);
+			run.tools = runTools.tools;
+			run.toolsByName = runTools.byName;
 			const systemPrompt =
 				typeof this.#options.systemPrompt === "function"
 					? this.#options.systemPrompt()
@@ -627,7 +643,7 @@ export class Agent {
 		const context: Context = {
 			systemPrompt: run.systemPrompt,
 			messages: this.#runtimeState.public.messages.map(({ message }) => structuredClone(message) as Message),
-			tools: this.#options.tools.map(({ name, description, parameters, constrainedSampling }) => ({
+			tools: run.tools.map(({ name, description, parameters, constrainedSampling }) => ({
 				name,
 				description,
 				parameters,
@@ -738,7 +754,7 @@ export class Agent {
 				sourceIndex,
 				this.#allocate("tool_invocation") as ToolInvocationId,
 				this.#allocate("message") as MessageId,
-				this.#toolsByName.get(call.name),
+				run.toolsByName.get(call.name),
 			);
 			await this.#rejectDuringPreflight(
 				run,
@@ -759,7 +775,7 @@ export class Agent {
 			const call = toolCalls[sourceIndex]!;
 			const invocationId = this.#allocate("tool_invocation") as ToolInvocationId;
 			const resultMessageId = this.#allocate("message") as MessageId;
-			const tool = this.#toolsByName.get(call.name);
+			const tool = run.toolsByName.get(call.name);
 			if (!tool) {
 				const invocation = this.#invocation(call, sourceIndex, invocationId, resultMessageId);
 				await this.#rejectDuringPreflight(
@@ -902,7 +918,7 @@ export class Agent {
 		}
 		for (let sourceIndex = futureStartIndex; sourceIndex < toolCalls.length; sourceIndex++) {
 			const call = toolCalls[sourceIndex]!;
-			const tool = this.#toolsByName.get(call.name);
+			const tool = run.toolsByName.get(call.name);
 			const invocation = this.#invocation(
 				call,
 				sourceIndex,

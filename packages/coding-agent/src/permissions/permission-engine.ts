@@ -263,6 +263,14 @@ export interface PermissionEngineOptions {
 	readonly networkRules?: readonly NetworkRule[];
 	readonly persistNetworkRule?: (rule: NetworkRule) => Promise<void>;
 	readonly onWarning?: (warning: string) => void | Promise<void>;
+	/** Maps a product Tool Invocation onto the existing generic Skill/MCP approval protocol. */
+	readonly genericApprovalForTool?: (request: ToolPolicyRequest) => GenericToolApproval | undefined;
+}
+
+export interface GenericToolApproval {
+	readonly kind: "skill" | "mcp";
+	readonly reason: string;
+	readonly justification?: string;
 }
 
 export interface NetworkRule {
@@ -1477,6 +1485,18 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 	return {
 		check: async (toolRequest) => {
 			if (FILE_TOOLS.has(toolRequest.toolName)) return checkFile(toolRequest);
+			const generic = options.genericApprovalForTool?.(toolRequest);
+			if (generic) {
+				const decision = await requestGenericApproval({
+					...generic,
+					runId: toolRequest.runId,
+					turnId: toolRequest.turnId,
+					invocationId: toolRequest.invocationId,
+					toolName: toolRequest.toolName,
+				});
+				if (decision.decision === "allow") sandboxPolicies.set(toolRequest.invocationId, activeProfile);
+				return decision;
+			}
 			if (toolRequest.toolName !== "bash") {
 				sandboxPolicies.set(toolRequest.invocationId, activeProfile);
 				return { decision: "allow" };

@@ -1547,6 +1547,91 @@ describe("Permission Engine generic approval protocol", () => {
 		).resolves.toMatchObject({ decision: "reject" });
 		expect(prompts).toBe(1);
 	});
+
+	it("routes a model Skill Tool through exact revision-bound Session approval", async () => {
+		let prompts = 0;
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "on-request",
+			approval: {
+				decide: async () => {
+					prompts++;
+					return { type: "approved-for-session" };
+				},
+			},
+			genericApprovalForTool: (request) =>
+				request.toolName === "skill"
+					? {
+							kind: "skill",
+							reason: `activate ${String(request.arguments.skill)} at ${String(request.arguments.revision)}`,
+						}
+					: undefined,
+		});
+		const request = {
+			runId: "run-1" as never,
+			turnId: "turn-1" as never,
+			invocationId: "skill-1" as never,
+			resultMessageId: "result-1" as never,
+			providerToolCallId: "provider-1",
+			toolName: "skill",
+			arguments: { skill: "skill:a", revision: "revision-1" },
+			replaySafety: "safe" as const,
+		};
+
+		await expect(engine.check(request)).resolves.toEqual({ decision: "allow" });
+		await expect(
+			engine.check({ ...request, invocationId: "skill-2" as never, resultMessageId: "result-2" as never }),
+		).resolves.toEqual({ decision: "allow" });
+		await expect(
+			engine.check({
+				...request,
+				invocationId: "skill-3" as never,
+				resultMessageId: "result-3" as never,
+				arguments: { skill: "skill:a", revision: "revision-2" },
+			}),
+		).resolves.toEqual({ decision: "allow" });
+		expect(prompts).toBe(2);
+	});
+
+	it("rejects autonomous Skill Tool activation under Approval Policy never", async () => {
+		let prompts = 0;
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+			approval: {
+				decide: async () => {
+					prompts++;
+					return { type: "approved" };
+				},
+			},
+			genericApprovalForTool: (request) =>
+				request.toolName === "skill" ? { kind: "skill", reason: "activate exact revision" } : undefined,
+		});
+
+		await expect(
+			engine.check({
+				runId: "run-1" as never,
+				turnId: "turn-1" as never,
+				invocationId: "skill-1" as never,
+				resultMessageId: "result-1" as never,
+				providerToolCallId: "provider-1",
+				toolName: "skill",
+				arguments: { skill: "skill:a" },
+				replaySafety: "safe",
+			}),
+		).resolves.toEqual({ decision: "reject", reason: "approval policy is never" });
+		expect(prompts).toBe(0);
+	});
 });
 
 describe("Permission Engine filesystem matrix", () => {
