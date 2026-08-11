@@ -108,7 +108,12 @@ export interface ChatComponentOptions {
 	readonly colorLevel?: ColorLevel;
 	readonly motion?: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
-	readonly onCommand?: (commandId: string, flow: CommandFlowHost, argument?: string) => Promise<void> | void;
+	readonly onCommand?: (
+		commandId: string,
+		flow: CommandFlowHost,
+		argument?: string,
+		// biome-ignore lint/suspicious/noConfusingVoidType: Existing command handlers may synchronously return void.
+	) => Promise<string | undefined> | string | void;
 }
 
 interface ProvisionalPromptCard {
@@ -171,6 +176,7 @@ export class ChatComponent extends Component {
 		readonly width: number;
 		readonly transcriptMode: boolean;
 		readonly error?: string;
+		readonly notice?: string;
 		readonly attachmentFocusKey?: string;
 		readonly blocks: readonly ViewportBlock[];
 	};
@@ -186,6 +192,7 @@ export class ChatComponent extends Component {
 	#transcriptMode = false;
 	#lastIdleCtrlCAt?: number;
 	#error?: string;
+	#notice?: string;
 	#attachments: ChatAttachment[] = [];
 	#attachmentFocusKey?: string;
 	#attachmentFocusOrigin?: "keyboard" | "mouse";
@@ -344,6 +351,7 @@ export class ChatComponent extends Component {
 		switch (event.type) {
 			case "run_start":
 				this.#running = true;
+				this.#notice = undefined;
 				break;
 			case "run_end":
 				this.#running = false;
@@ -803,6 +811,7 @@ export class ChatComponent extends Component {
 		this.#attachmentFocusKey = undefined;
 		this.#attachmentFocusOrigin = undefined;
 		this.#error = undefined;
+		this.#notice = undefined;
 		if (!this.running && kind === "prompt") this.#running = true;
 		this.#viewport.jumpToEnd();
 		this.invalidate();
@@ -1150,6 +1159,7 @@ export class ChatComponent extends Component {
 			cache.width === width &&
 			cache.transcriptMode === this.#transcriptMode &&
 			cache.error === this.#error &&
+			cache.notice === this.#notice &&
 			cache.attachmentFocusKey === this.#attachmentFocusKey
 		) {
 			return cache.blocks;
@@ -1235,6 +1245,12 @@ export class ChatComponent extends Component {
 				lines: wrapAnsi(this.#theme.style("error", `Error: ${sanitizeTerminalText(this.#error)}`), width),
 			});
 		}
+		if (this.#notice) {
+			blocks.push({
+				id: "command-notice",
+				lines: wrapAnsi(this.#theme.style("success", sanitizeTerminalText(this.#notice)), width),
+			});
+		}
 		const snapshot = Object.freeze(blocks);
 		if (
 			!this.#timeline.hasActiveTools &&
@@ -1247,6 +1263,7 @@ export class ChatComponent extends Component {
 				width,
 				transcriptMode: this.#transcriptMode,
 				error: this.#error,
+				notice: this.#notice,
 				attachmentFocusKey: this.#attachmentFocusKey,
 				blocks: snapshot,
 			});
@@ -1379,6 +1396,7 @@ export class ChatComponent extends Component {
 		this.#editor.clear();
 		this.#history.reset();
 		this.#error = undefined;
+		this.#notice = undefined;
 		const operation = (() => {
 			try {
 				if (!this.#options.onCommand) throw new Error(`${command.title} is unavailable`);
@@ -1392,8 +1410,12 @@ export class ChatComponent extends Component {
 			}
 		})();
 		void operation.then(
-			() => this.invalidate(),
+			(notice) => {
+				this.#notice = notice || undefined;
+				this.invalidate();
+			},
 			(error: unknown) => {
+				this.#notice = undefined;
 				this.#error = error instanceof Error ? error.message : String(error);
 				this.invalidate();
 			},

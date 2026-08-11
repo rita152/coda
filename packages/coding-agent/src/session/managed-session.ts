@@ -1,6 +1,7 @@
 import type { Agent, AgentEvent } from "@coda/agent";
+import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
-import { eventRecordInputs, reduceSession } from "./records.ts";
+import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import type {
 	DetachSession,
 	RestoredSessionState,
@@ -37,6 +38,7 @@ export class ManagedSession implements Session {
 	readonly #composerSubmissions;
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
+	#compactionCheckpoint?: CompactionCheckpoint;
 	#sequence: number;
 	#previousRecordId: string | null;
 	#attached?: Agent;
@@ -54,6 +56,9 @@ export class ManagedSession implements Session {
 		this.#recoverableFollowUps = structuredClone(reduced.recoverableFollowUps);
 		this.#composerSubmissions = structuredClone(reduced.composerSubmissions);
 		this.#toolInvocations = structuredClone(reduced.toolInvocations);
+		this.#compactionCheckpoint = reduced.compactionCheckpoint
+			? structuredClone(reduced.compactionCheckpoint)
+			: undefined;
 		this.#mediaReferences = new Map(
 			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
 				messageId,
@@ -87,6 +92,10 @@ export class ManagedSession implements Session {
 
 	get toolInvocations(): readonly SessionToolLifecycle[] {
 		return structuredClone(this.#toolInvocations);
+	}
+
+	get compactionCheckpoint(): CompactionCheckpoint | undefined {
+		return this.#compactionCheckpoint ? structuredClone(this.#compactionCheckpoint) : undefined;
 	}
 
 	get mediaReferences(): ReadonlyMap<string, readonly SessionMediaReference[]> {
@@ -136,6 +145,12 @@ export class ManagedSession implements Session {
 		}
 		if (change.type === "permission_audit_recorded") {
 			await this.#append("permission_audit_recorded", { event: change.event });
+			return;
+		}
+		if (change.type === "context_compacted") {
+			const payload = compactionPayload(change.checkpoint);
+			await this.#append("context_compacted", payload);
+			this.#compactionCheckpoint = structuredClone(payload.checkpoint);
 			return;
 		}
 		if (change.type === "composer_submission_recorded") {

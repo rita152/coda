@@ -58,6 +58,10 @@ export class DraftSession implements Session {
 		return structuredClone(this.#session?.toolInvocations ?? []);
 	}
 
+	get compactionCheckpoint() {
+		return this.#session?.compactionCheckpoint ? structuredClone(this.#session.compactionCheckpoint) : undefined;
+	}
+
 	get mediaReferences() {
 		return new Map(this.#session?.mediaReferences ?? []);
 	}

@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
+import { type Context, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
@@ -26,21 +26,30 @@ afterEach(async () => {
 });
 
 describe("model-call context preflight", () => {
-	it("checks the actual transcript again after a Tool result before the next model call", async () => {
+	it("chunks an oversized Tool result through Auto-Compaction before the next model call", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-context-overflow-"));
 		temporaryDirectories.push(workspace);
-		await writeFile(join(workspace, "large.txt"), "x".repeat(60_000), "utf8");
+		await writeFile(join(workspace, "large.txt"), `oversized-tool-result:${"x".repeat(60_000)}`, "utf8");
 		const runtime = testTimeRuntime(2_000);
 		const faux = fauxProvider({
 			runtime,
 			models: [{ id: "bounded", contextWindow: 4_000, maxTokens: 512 }],
 		});
+		const summarizeOrContinue = (context: Context) => {
+			const serialized = JSON.stringify(context.messages);
+			if (serialized.includes("Create a durable conversation checkpoint")) {
+				return fauxAssistantMessage(validSummary(), { timestamp: 2_000 });
+			}
+			expect(serialized).toContain("<conversation-checkpoint");
+			expect(serialized).not.toContain("oversized-tool-result:");
+			return fauxAssistantMessage("continued after chunked compaction", { timestamp: 2_000 });
+		};
 		faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("read", { path: "large.txt" }, { id: "provider:read-large" }), {
 				stopReason: "toolUse",
 				timestamp: 2_000,
 			}),
-			fauxAssistantMessage("must not be requested", { timestamp: 2_000 }),
+			...Array.from({ length: 64 }, () => summarizeOrContinue),
 		]);
 		const models = createModels({ runtime });
 		models.setProvider(faux.provider);
@@ -67,9 +76,30 @@ describe("model-call context preflight", () => {
 			},
 		});
 
-		await expect(application.run(["--print", "--model", "faux/bounded", "read the large file"])).resolves.toBe(1);
-		expect(faux.state.callCount).toBe(1);
-		expect(stdout.value).toBe("");
-		expect(stderr.value).toContain("Context Overflow");
+		await expect(application.run(["--print", "--model", "faux/bounded", "read the large file"])).resolves.toBe(0);
+		expect(faux.state.callCount).toBeGreaterThan(3);
+		expect(stdout.value).toBe("continued after chunked compaction\n");
+		expect(stderr.value).toBe("");
 	});
 });
+
+function validSummary(): string {
+	return [
+		"## Objective",
+		"- Continue reading the file.",
+		"## Constraints",
+		"- Preserve state.",
+		"## Decisions",
+		"- The oversized result was reduced in stages.",
+		"## Completed",
+		"- Read large.txt.",
+		"## Current State",
+		"- Ready.",
+		"## Next Steps",
+		"- Continue.",
+		"## Relevant Files and Commands",
+		"- large.txt",
+		"## Errors and Open Questions",
+		"- None.",
+	].join("\n");
+}

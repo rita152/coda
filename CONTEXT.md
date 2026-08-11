@@ -217,6 +217,22 @@ _Avoid_: trust, Permission Profile, Sandbox
 A model request that cannot fit within the selected Model's usable context window after accounting for Messages, Tools, and reserved output.
 _Avoid_: compaction, truncation
 
+**Context Window**:
+The model-visible conversation projection carried across model invocations, distinct from the complete Session history and from the one-invocation Context assembled from it.
+_Avoid_: Session, transcript, Context
+
+**Compaction**:
+A loss-aware transition that creates a new Context Window from a structured summary and an exact recent Message tail without rewriting the Session's durable history.
+_Avoid_: truncation, pruning, new Session
+
+**Auto-Compaction**:
+The Coding Agent entry point that requests Compaction at a safe model-call point when the active Context Window reaches its configured threshold or no longer fits the selected Model.
+_Avoid_: automatic truncation, background summary, retry
+
+**Compaction Checkpoint**:
+The durable Session fact that identifies a Context Window and deterministically describes its replacement Message history and the Session history it covers.
+_Avoid_: summary, Session snapshot, backup
+
 ### Model access
 
 **Api**:

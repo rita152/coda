@@ -71,6 +71,9 @@ export interface InteractiveSessionOptions {
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
 	};
 	readonly mcpCommand?: McpCommandFlowOptions;
+	readonly compactCommand?: {
+		readonly run: (focus?: string) => Promise<string> | string;
+	};
 	readonly reasoning: string;
 	readonly initialPrompt?: AgentInput;
 	readonly initialAttachmentIds?: readonly string[];
@@ -331,6 +334,10 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 				if (commandId === "core:new") {
 					await createSession();
 					return;
+				}
+				if (commandId === "core:compact") {
+					if (!sessionOptions.compactCommand) throw new Error("Context compaction is unavailable");
+					return sessionOptions.compactCommand.run(argument);
 				}
 				throw new Error(`Command is not available yet: ${commandId}`);
 			},
@@ -624,6 +631,10 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 				if (!options.mcpCommand) throw new Error("MCP management is unavailable");
 				await openMcpCommand(flow, argument, options.mcpCommand);
 				return;
+			}
+			if (commandId === "core:compact") {
+				if (!options.compactCommand) throw new Error("Context compaction is unavailable");
+				return options.compactCommand.run(argument);
 			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},

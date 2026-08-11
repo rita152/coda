@@ -62,6 +62,14 @@ const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "action",
 	}),
 	coreCommand({
+		id: "core:compact",
+		name: "compact",
+		title: "Compact context",
+		description: "Compress older conversation context, optionally preserving a focus",
+		kind: "action",
+		arguments: { kind: "tail", required: false },
+	}),
+	coreCommand({
 		id: "core:follow-up",
 		name: "follow-up",
 		title: "Queue follow-up",

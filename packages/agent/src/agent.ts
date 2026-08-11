@@ -606,11 +606,41 @@ export class Agent {
 
 	async #streamTurn(run: RunContext, turnId: TurnId): Promise<AttemptResult> {
 		let attempt = 1;
+		let recoveryUsed = false;
 		while (true) {
 			const result = await this.#streamAttempt(run, turnId, attempt);
-			if (result.outcome !== "error" || !this.#options.retry || !isTransientAssistantFailure(result.message)) {
-				return result;
+			if (result.outcome !== "error") return result;
+			const transient = isTransientAssistantFailure(result.message);
+			if (!recoveryUsed && this.#options.recoverFailedAttempt) {
+				const recovery = await this.#options.recoverFailedAttempt(
+					deepFreeze({
+						runId: run.id,
+						turnId,
+						attemptId: result.attemptId,
+						attempt,
+						message: result.message,
+						transient,
+					}),
+				);
+				if (recovery.retry) {
+					recoveryUsed = true;
+					if (recovery.reason.length === 0) {
+						throw new Error("FailedAttemptRecovery returned an empty retry reason");
+					}
+					if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+					await this.#emit(run, {
+						type: "retry_scheduled",
+						turnId,
+						attemptId: result.attemptId,
+						attempt,
+						delayMs: 0,
+						reason: recovery.reason,
+					});
+					attempt++;
+					continue;
+				}
 			}
+			if (!this.#options.retry || !transient) return result;
 			const decision = await this.#options.retry.policy.decide(
 				deepFreeze({
 					runId: run.id,

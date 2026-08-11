@@ -27,6 +27,23 @@ function transientFailure(clock: TestClock, retryable = true): AssistantMessage 
 	return message;
 }
 
+function contextOverflow(clock: TestClock): AssistantMessage {
+	const message = fauxAssistantMessage([], {
+		stopReason: "error",
+		errorMessage: "maximum context window exceeded",
+		timestamp: clock.now(),
+	});
+	message.diagnostics = [
+		{
+			type: "stream_error",
+			timestamp: clock.now(),
+			error: { message: message.errorMessage!, code: "context_overflow" },
+			details: { phase: "stream", provider: "faux", api: "faux", retryable: false },
+		},
+	];
+	return message;
+}
+
 describe("Agent whole-turn retry", () => {
 	it("is disabled by default", async () => {
 		const clock = new TestClock();
@@ -115,6 +132,56 @@ describe("Agent whole-turn retry", () => {
 
 		expect(result.outcome).toBe("error");
 		expect([decisions, waits]).toEqual([0, 0]);
+	});
+
+	it("allows one application recovery Attempt and never loops on a repeated failure", async () => {
+		const clock = new TestClock();
+		const contexts: Context[] = [];
+		let recoveries = 0;
+		const agent = new Agent({
+			...baseOptions([contextOverflow(clock), contextOverflow(clock), response("must remain unused", clock)], {
+				clock,
+				contexts,
+			}),
+			recoverFailedAttempt: () => {
+				recoveries++;
+				return { retry: true, reason: "application changed context" };
+			},
+		});
+		const events: AgentEvent[] = [];
+		agent.onEvent((event) => events.push(event));
+
+		const result = await agent.prompt("recover once");
+
+		expect(result.outcome).toBe("error");
+		expect(recoveries).toBe(1);
+		expect(contexts).toHaveLength(2);
+		expect(events.filter((event) => event.type === "retry_scheduled")).toMatchObject([
+			{ delayMs: 0, reason: "application changed context", attempt: 1 },
+		]);
+	});
+
+	it("still allows recovery after an earlier failure used the ordinary retry policy", async () => {
+		const clock = new TestClock();
+		let recovered = 0;
+		const agent = new Agent({
+			...baseOptions([transientFailure(clock), contextOverflow(clock), response("recovered", clock)], { clock }),
+			retry: {
+				policy: { decide: () => ({ retry: true, delayMs: 0, reason: "transport retry" }) },
+				delay: { wait: async () => undefined },
+			},
+			recoverFailedAttempt: ({ message }) => {
+				const overflow = message.message.diagnostics?.some(
+					(diagnostic) => diagnostic.error?.code === "context_overflow",
+				);
+				if (!overflow) return { retry: false };
+				recovered++;
+				return { retry: true, reason: "context changed" };
+			},
+		});
+
+		await expect(agent.prompt("recover after retry")).resolves.toMatchObject({ outcome: "success" });
+		expect(recovered).toBe(1);
 	});
 
 	it("ignores an unrecognized failure even when a provider marks it retryable", async () => {

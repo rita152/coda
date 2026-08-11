@@ -14,6 +14,7 @@ describe("core commands", () => {
 			"mcp",
 			"session",
 			"new",
+			"compact",
 			"follow-up",
 		]);
 		expect(resolveCommandInvocation(registry, "/skill")?.command.id).toBe("core:skill");

@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6;
+type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -474,7 +474,8 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 			value.version === 3 ||
 			value.version === 4 ||
 			value.version === 5 ||
-			value.version === 6) &&
+			value.version === 6 ||
+			value.version === 7) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -638,5 +639,63 @@ export function isSessionRecordPayload(
 			);
 		case "permission_audit_recorded":
 			return version >= 5 && exactRecord(payload, ["event"]) && isPermissionAuditEvent(payload.event);
+		case "context_compacted":
+			return (
+				version >= 7 && exactRecord(payload, ["checkpoint"]) && isCompactionCheckpoint(payload.checkpoint, version)
+			);
 	}
+}
+
+function isCompactionCheckpoint(value: unknown, version: SessionFormatVersion): boolean {
+	return (
+		exactRecord(
+			value,
+			[
+				"version",
+				"windowId",
+				"reason",
+				"summary",
+				"coveredThroughMessageId",
+				"coveredMessageIds",
+				"retainedMessageIds",
+				"replacementHistory",
+				"model",
+				"usage",
+				"summaryPrompt",
+				"createdAt",
+			],
+			["previousWindowId", "focus"],
+		) &&
+		value.version === 1 &&
+		isNonEmptyString(value.windowId) &&
+		(value.previousWindowId === undefined || isNonEmptyString(value.previousWindowId)) &&
+		(value.reason === "manual" || value.reason === "auto" || value.reason === "overflow") &&
+		isNonEmptyString(value.summary) &&
+		(value.focus === undefined || isNonEmptyString(value.focus)) &&
+		isNonEmptyString(value.coveredThroughMessageId) &&
+		isStringArray(value.coveredMessageIds) &&
+		isStringArray(value.retainedMessageIds) &&
+		Array.isArray(value.replacementHistory) &&
+		value.replacementHistory.length > 0 &&
+		value.replacementHistory.every((message) => isAgentMessage(message, version)) &&
+		exactRecord(value.model, ["provider", "id", "contextWindow", "maxTokens"]) &&
+		isNonEmptyString(value.model.provider) &&
+		isNonEmptyString(value.model.id) &&
+		isPositiveInteger(value.model.contextWindow) &&
+		isPositiveInteger(value.model.maxTokens) &&
+		exactRecord(value.usage, [
+			"beforeEstimatedTokens",
+			"afterEstimatedTokens",
+			"summaryInputTokens",
+			"summaryOutputTokens",
+			"summaryTotalTokens",
+		]) &&
+		Object.values(value.usage).every((entry) => isFiniteNumber(entry) && entry >= 0) &&
+		exactRecord(value.summaryPrompt, ["version", "sha256", "calls"]) &&
+		value.summaryPrompt.version === "1" &&
+		typeof value.summaryPrompt.sha256 === "string" &&
+		/^[a-f0-9]{64}$/.test(value.summaryPrompt.sha256) &&
+		isPositiveInteger(value.summaryPrompt.calls) &&
+		isFiniteNumber(value.createdAt)
+	);
 }

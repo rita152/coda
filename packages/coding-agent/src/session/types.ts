@@ -14,6 +14,7 @@ import type {
 import type { ThinkingLevel } from "@coda/ai";
 import type { PermissionProfile } from "@coda/sandbox";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
+import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
@@ -108,6 +109,7 @@ export type SessionChange =
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "mcp_trust_changed"; readonly trust: WorkspaceMcpTrustRecord }
 	| { readonly type: "permission_audit_recorded"; readonly event: PermissionAuditEvent }
+	| { readonly type: "context_compacted"; readonly checkpoint: CompactionCheckpoint }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }
 	| { readonly type: "composer_submission_retracted"; readonly id: string }
@@ -125,6 +127,7 @@ export interface Session {
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly toolInvocations: readonly SessionToolLifecycle[];
+	readonly compactionCheckpoint?: CompactionCheckpoint;
 	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
 	attach(agent: Agent): DetachSession;

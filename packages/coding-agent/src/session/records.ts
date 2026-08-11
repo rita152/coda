@@ -10,6 +10,7 @@ import type {
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
 import type { ModelSelection } from "../application.ts";
+import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
@@ -35,13 +36,14 @@ export const SESSION_RECORD_TYPES = [
 	"project_trust_changed",
 	"mcp_trust_changed",
 	"permission_audit_recorded",
+	"context_compacted",
 ] as const;
 
 export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4 | 5 | 6;
+	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -69,6 +71,7 @@ export interface ReducedSession {
 	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly startedTools: ReadonlyMap<string, SessionRecord>;
 	readonly activeRuns: ReadonlySet<string>;
+	readonly compactionCheckpoint?: CompactionCheckpoint;
 }
 
 function persistedMessage(message: AgentMessage): AgentMessage {
@@ -129,6 +132,15 @@ export function messagePayload(message: AgentMessage): { readonly message: Agent
 	return { message: persistedMessage(message) };
 }
 
+export function compactionPayload(checkpoint: CompactionCheckpoint): { readonly checkpoint: CompactionCheckpoint } {
+	return {
+		checkpoint: {
+			...structuredClone(checkpoint),
+			replacementHistory: checkpoint.replacementHistory.map((message) => persistedMessage(message)),
+		},
+	};
+}
+
 export function reduceSession(records: readonly SessionRecord[]): ReducedSession {
 	const messages = new Map<string, AgentMessage>();
 	const followUps = new Map<
@@ -151,6 +163,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
 	let permissionProfile: RestoredSessionState["permissionProfile"];
+	let compactionCheckpoint: CompactionCheckpoint | undefined;
 
 	for (const record of records) {
 		const payload = record.payload as Record<string, unknown>;
@@ -224,6 +237,11 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						toolInvocations.set(event.invocationId, { ...existing, approval: structuredClone(event) });
 					}
 				}
+				break;
+			}
+			case "context_compacted": {
+				const checkpoint = payload.checkpoint as CompactionCheckpoint | undefined;
+				if (checkpoint) compactionCheckpoint = structuredClone(checkpoint);
 				break;
 			}
 			case "tool_started": {
@@ -319,6 +337,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,
+		...(compactionCheckpoint ? { compactionCheckpoint: structuredClone(compactionCheckpoint) } : {}),
 	};
 }
 
@@ -413,7 +432,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 6,
+		version: 7,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

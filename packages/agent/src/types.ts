@@ -338,6 +338,15 @@ export interface TurnRetryPolicy {
 	decide(context: TurnRetryContext): RetryDecision | Promise<RetryDecision>;
 }
 
+export type FailedAttemptRecoveryDecision =
+	| { readonly retry: false }
+	| { readonly retry: true; readonly reason: string };
+
+/** Application-owned recovery that must materially change the next Attempt's input. */
+export type FailedAttemptRecovery = (
+	context: TurnRetryContext,
+) => FailedAttemptRecoveryDecision | Promise<FailedAttemptRecoveryDecision>;
+
 export interface RetryDelay {
 	wait(delayMs: number, signal: AbortSignal): Promise<void>;
 }
@@ -371,6 +380,7 @@ export interface AgentOptions {
 	readonly systemPrompt?: string | SystemPromptFactory;
 	readonly beforeRun?: BeforeRun;
 	readonly retry?: RetryOptions;
+	readonly recoverFailedAttempt?: FailedAttemptRecovery;
 	readonly seed?: AgentSeed;
 	/** Disable automatic Follow-up draining so an application scheduler can interleave other local operations. */
 	readonly autoDrainFollowUps?: boolean;

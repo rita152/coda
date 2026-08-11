@@ -27,6 +27,7 @@ import {
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
+import { ContextWindowController } from "./context-window/context-window.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
@@ -77,7 +78,7 @@ import {
 import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
 import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
-import { assertContextFits, assertModelContextFits } from "./prompt/context-budget.ts";
+import { assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
 import type { CustomProviderConfig } from "./providers/types.ts";
@@ -141,6 +142,26 @@ interface PreparedRunRuntime {
 	readonly skills: CodingSkillsSnapshot;
 	readonly mcp: McpToolSnapshot;
 	readonly tools: readonly AgentTool[];
+}
+
+function isRecoverableContextOverflow(message: Immutable<AssistantMessage>): boolean {
+	if (message.content.length > 0) return false;
+	if (
+		(message.diagnostics ?? []).some((diagnostic) => {
+			const code = diagnostic.error?.code;
+			return (
+				typeof code === "string" &&
+				["context_overflow", "context_length_exceeded", "context_window_exceeded"].includes(code.toLowerCase())
+			);
+		})
+	) {
+		return true;
+	}
+	const error = message.errorMessage?.toLowerCase() ?? "";
+	return (
+		(error.includes("context length") || error.includes("context window")) &&
+		(error.includes("exceed") || error.includes("too long") || error.includes("maximum"))
+	);
 }
 
 export interface UserSettings {
@@ -1360,13 +1381,17 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						});
 					let promptSnapshot = freezePrompt(runRuntime.selected);
 					let activeRuntimeId: number | undefined;
-					assertContextFits(
-						model,
-						promptSnapshot.text,
-						initialInput,
-						runRuntime.selected.tools,
-						session.seed.messages.map(({ message }) => message),
-					);
+					const contextWindow = new ContextWindowController({
+						models: options.models,
+						clock: options.runtime.clock,
+						idGenerator: options.runtime.idGenerator,
+						runtime: () => {
+							const runtime = runRuntime.active?.value ?? runRuntime.selected;
+							return { model: runtime.model, authSnapshot: runtime.authSnapshot };
+						},
+						commit: (checkpoint) => session.record({ type: "context_compacted", checkpoint }),
+						checkpoint: session.compactionCheckpoint,
+					});
 					await session.record({
 						type: "model_selected",
 						model: { provider: model.provider, id: model.id },
@@ -1382,14 +1407,24 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						},
 						policyGate: policy,
 						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
-						stream: ({ context, signal }) => {
+						recoverFailedAttempt: async ({ message }) => {
+							if (!isRecoverableContextOverflow(message.message)) return { retry: false };
+							if (!contextWindow.canCompact(agent.state.messages)) return { retry: false };
+							await contextWindow.compact({
+								messages: agent.state.messages,
+								reason: "overflow",
+							});
+							return { retry: true, reason: "context overflow compacted" };
+						},
+						stream: async ({ context, signal }) => {
 							const runtime = runRuntime.active?.value;
 							if (!runtime) throw new Error("A Model stream was requested outside an active Run runtime");
 							if (!runtime.authSnapshot) {
 								throw new Error(`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`);
 							}
-							const contextBudget = assertModelContextFits(runtime.model, context);
-							return options.models.streamSimple(runtime.model, context, {
+							const preparedContext = await contextWindow.prepare(context, agent.state.messages, signal);
+							const contextBudget = assertModelContextFits(runtime.model, preparedContext);
+							return options.models.streamSimple(runtime.model, preparedContext, {
 								signal,
 								authSnapshot: runtime.authSnapshot,
 								reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
@@ -1412,13 +1447,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							activeRuntimeId = runtime.id;
 							try {
 								promptSnapshot = freezePrompt(runtime.value);
-								assertContextFits(
-									runtime.value.model,
-									promptSnapshot.text,
-									inputMessage.message.content,
-									runtime.value.tools,
-									agent.state.messages.map(({ message }) => message),
-								);
 								await session.record({
 									type: "prepare_run",
 									promptVersion: promptSnapshot.version,
@@ -1458,9 +1486,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						) {
 							agent.abort();
 						}
-						if (event.type === "run_end" && activeRuntimeId !== undefined) {
-							runRuntime.end(activeRuntimeId);
-							activeRuntimeId = undefined;
+						if (event.type === "run_end") {
+							void contextWindow.flushManual(agent.state.messages).catch(() => undefined);
+							if (activeRuntimeId !== undefined) {
+								runRuntime.end(activeRuntimeId);
+								activeRuntimeId = undefined;
+							}
 						}
 					});
 					if (parsed.mode === "interactive") {
@@ -1768,13 +1799,17 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									});
 								let targetPromptSnapshot = targetFreezePrompt(targetRunRuntime.selected);
 								let targetActiveRuntimeId: number | undefined;
-								assertContextFits(
-									targetModel,
-									targetPromptSnapshot.text,
-									"",
-									targetRunRuntime.selected.tools,
-									targetSession.seed.messages.map(({ message }) => message),
-								);
+								const targetContextWindow = new ContextWindowController({
+									models: options.models,
+									clock: options.runtime.clock,
+									idGenerator: options.runtime.idGenerator,
+									runtime: () => {
+										const runtime = targetRunRuntime.active?.value ?? targetRunRuntime.selected;
+										return { model: runtime.model, authSnapshot: runtime.authSnapshot };
+									},
+									commit: (checkpoint) => targetSession.record({ type: "context_compacted", checkpoint }),
+									checkpoint: targetSession.compactionCheckpoint,
+								});
 								if (!targetSession.restored.model) {
 									const initialModelSelection = {
 										type: "model_selected",
@@ -1799,7 +1834,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									retry: options.runtime.scheduler
 										? createCodingAgentRetry(options.runtime.scheduler)
 										: undefined,
-									stream: ({ context, signal }) => {
+									recoverFailedAttempt: async ({ message }) => {
+										if (!isRecoverableContextOverflow(message.message)) return { retry: false };
+										if (!targetContextWindow.canCompact(targetAgent.state.messages)) return { retry: false };
+										await targetContextWindow.compact({
+											messages: targetAgent.state.messages,
+											reason: "overflow",
+										});
+										return { retry: true, reason: "context overflow compacted" };
+									},
+									stream: async ({ context, signal }) => {
 										const runtime = targetRunRuntime.active?.value;
 										if (!runtime)
 											throw new Error("A Model stream was requested outside an active Run runtime");
@@ -1808,8 +1852,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`,
 											);
 										}
-										const contextBudget = assertModelContextFits(runtime.model, context);
-										return options.models.streamSimple(runtime.model, context, {
+										const preparedContext = await targetContextWindow.prepare(
+											context,
+											targetAgent.state.messages,
+											signal,
+										);
+										const contextBudget = assertModelContextFits(runtime.model, preparedContext);
+										return options.models.streamSimple(runtime.model, preparedContext, {
 											signal,
 											authSnapshot: runtime.authSnapshot,
 											reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
@@ -1833,13 +1882,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										targetActiveRuntimeId = runtime.id;
 										try {
 											targetPromptSnapshot = targetFreezePrompt(runtime.value);
-											assertContextFits(
-												runtime.value.model,
-												targetPromptSnapshot.text,
-												inputMessage.message.content,
-												runtime.value.tools,
-												targetAgent.state.messages.map(({ message }) => message),
-											);
 											await targetSession.record({
 												type: "prepare_run",
 												promptVersion: targetPromptSnapshot.version,
@@ -1875,9 +1917,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									) {
 										targetAgent.abort();
 									}
-									if (event.type === "run_end" && targetActiveRuntimeId !== undefined) {
-										targetRunRuntime.end(targetActiveRuntimeId);
-										targetActiveRuntimeId = undefined;
+									if (event.type === "run_end") {
+										void targetContextWindow.flushManual(targetAgent.state.messages).catch(() => undefined);
+										if (targetActiveRuntimeId !== undefined) {
+											targetRunRuntime.end(targetActiveRuntimeId);
+											targetActiveRuntimeId = undefined;
+										}
 									}
 								});
 								secondaryResources.set(targetSession.descriptor.id, {
@@ -1944,6 +1989,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									authCommand,
 									skillsCommand,
 									mcpCommand,
+									compactCommand: {
+										run: async (focus) => {
+											await targetContextWindow.requestManual(targetAgent.state.messages, {
+												focus,
+												defer: targetAgent.state.status === "running",
+											});
+											return "Context compacted";
+										},
+									},
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
@@ -2094,6 +2148,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								authCommand,
 								skillsCommand,
 								mcpCommand,
+								compactCommand: {
+									run: async (focus) => {
+										await contextWindow.requestManual(agent.state.messages, {
+											focus,
+											defer: agent.state.status === "running",
+										});
+										return "Context compacted";
+									},
+								},
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 								commandRegistry,
