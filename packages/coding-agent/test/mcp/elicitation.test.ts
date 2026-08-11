@@ -1,7 +1,10 @@
 import type { ToolExecutionContext } from "@coda/agent";
 import { Component, createSystemScheduler, stripAnsi, type TerminalInput, Tui, VirtualTerminal } from "@coda/tui";
-import { describe, expect, it } from "vitest";
-import { InteractiveMcpElicitationHandler } from "../../src/interactive/mcp-elicitation.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+	InteractiveMcpElicitationHandler,
+	type McpElicitationWaitListener,
+} from "../../src/interactive/mcp-elicitation.ts";
 import type { McpAgentElicitation } from "../../src/mcp/tools.ts";
 
 class RootComponent extends Component {
@@ -62,7 +65,7 @@ function request(
 	};
 }
 
-async function setup() {
+async function setup(onWait?: McpElicitationWaitListener) {
 	const terminal = new VirtualTerminal({ columns: 100, rows: 30 });
 	const root = new RootComponent();
 	const tui = new Tui({
@@ -73,12 +76,31 @@ async function setup() {
 		keybindings: [],
 	});
 	const handler = new InteractiveMcpElicitationHandler();
-	handler.bind(tui, terminal);
+	handler.bind(tui, terminal, onWait);
 	await tui.start();
 	return { terminal, root, tui, handler };
 }
 
 describe("interactive MCP Elicitation", () => {
+	it("reports session-scoped actionable waits until the Elicitation resolves", async () => {
+		const onWait = vi.fn<McpElicitationWaitListener>();
+		const { terminal, tui, handler } = await setup(onWait);
+		const elicitation = request({
+			mode: "form",
+			message: "Choose a target",
+			requestedSchema: { type: "object", properties: {} },
+		});
+		handler.setActiveSession("session-1");
+		const pending = handler.forSession("session-1")(elicitation);
+
+		expect(onWait).toHaveBeenLastCalledWith(elicitation, "session-1", true);
+		await terminal.emit(key("escape"));
+		await expect(pending).resolves.toEqual({ action: "cancel" });
+		expect(onWait).toHaveBeenLastCalledWith(elicitation, "session-1", false);
+		handler.unbind();
+		await tui.stop();
+	});
+
 	it("shows the full URL and Server identity without opening it, then accepts explicit completion", async () => {
 		const { terminal, tui, handler } = await setup();
 		const pending = handler.request(

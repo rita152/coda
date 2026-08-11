@@ -283,7 +283,9 @@ describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-p
 			},
 		);
 		await thinking.result();
-		expect(thinkingPayload).toMatchObject({ thinking: { type: "enabled", budget_tokens: 2_048 } });
+		expect(thinkingPayload).toMatchObject({
+			thinking: { type: "enabled", budget_tokens: 2_048, display: "summarized" },
+		});
 		expect(thinkingPayload).not.toHaveProperty("temperature");
 	});
 });

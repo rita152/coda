@@ -264,6 +264,71 @@ describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-
 		]);
 	});
 
+	test("reconciles unfinished streamed items from the terminal Response output", async () => {
+		const reasoningItem = {
+			id: "reasoning_terminal",
+			type: "reasoning",
+			status: null,
+			summary: [{ type: "summary_text", text: "Inspecting the project" }],
+			content: null,
+			encrypted_content: "encrypted-terminal",
+		};
+		const response = {
+			id: "resp_terminal_output",
+			model: "gpt-5.6-luna",
+			status: "completed",
+			incomplete_details: null,
+			usage: null,
+			output: [reasoningItem],
+		};
+		const sse = [
+			event("response.created", { sequence_number: 0, response: { ...response, status: "in_progress" } }),
+			event("response.output_item.added", {
+				sequence_number: 1,
+				output_index: 0,
+				item: { ...reasoningItem, summary: [], encrypted_content: null },
+			}),
+			event("response.reasoning_summary_text.delta", {
+				sequence_number: 2,
+				output_index: 0,
+				summary_index: 0,
+				item_id: reasoningItem.id,
+				delta: "Inspecting the project",
+			}),
+			event("response.completed", { sequence_number: 3, response }),
+			"data: [DONE]\n\n",
+		].join("");
+		const output = stream(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(),
+				apiKey: "test-key",
+				fetch: async () => new Response(sse, { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+		const events: AssistantMessageEvent[] = [];
+		for await (const streamEvent of output) events.push(streamEvent);
+
+		expect(await output.result()).toMatchObject({
+			stopReason: "stop",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Inspecting the project",
+					thinkingSignature: JSON.stringify(reasoningItem),
+				},
+			],
+		});
+		expect(events.map((streamEvent) => streamEvent.type)).toEqual([
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_end",
+			"done",
+		]);
+	});
+
 	test("maps incomplete, failed, and missing-terminal streams explicitly", async () => {
 		const response = {
 			id: "resp_terminal",

@@ -64,4 +64,6 @@ SOFTWARE.
 
 Coda's Permission Profiles, approval routing, command rules, Sandbox behavior, and main-Timeline Tool presentation were independently designed against the public OpenAI Codex implementation at commit `f93109615ff27ab58007601434b27c940d5500c7` (OpenAI Codex, Copyright 2025 OpenAI). Coda does not mechanically translate or link Codex source. Codex is distributed under Apache License 2.0; the full license and detailed attribution are included in `packages/sandbox/resources/CODEX_LICENSE` and `packages/sandbox/THIRD_PARTY_NOTICES.md`.
 
+Coda's CLI runtime-activity shimmer is a behavioral reimplementation of the public Codex status shimmer at commit `8f4a2c99dd56e136894c2ef2221bd7f24f760dd7`; Coda retains its own activity model, renderer, terminal palette, and reduced-motion behavior.
+
 Linux distributions may also package bubblewrap under the GNU Library General Public License version 2. Its license, provenance requirements, and source offer are included under `packages/sandbox/resources/`.

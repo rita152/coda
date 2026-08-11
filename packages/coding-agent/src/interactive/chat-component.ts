@@ -14,6 +14,7 @@ import {
 	type RenderContext,
 	sanitizeTerminalText,
 	sliceAnsi,
+	type TerminalAppearance,
 	type TerminalInput,
 	wrapAnsi,
 } from "@coda/tui";
@@ -24,6 +25,8 @@ import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
+import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
+import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
@@ -112,7 +115,9 @@ export interface ChatComponentOptions {
 	readonly restoredToolInvocations?: readonly SessionToolLifecycle[];
 	readonly markdownRenderer?: MarkdownRenderer;
 	readonly colorLevel?: ColorLevel;
+	readonly appearance?: TerminalAppearance;
 	readonly motion?: "full" | "reduced";
+	readonly activitySummaryMode?: ActivitySummaryMode;
 	readonly commandRegistry?: CommandRegistry;
 	readonly onCommand?: (
 		commandId: string,
@@ -172,6 +177,7 @@ interface CachedTimelineBlock {
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
 	readonly #timeline: SemanticTimeline;
+	readonly #activity: ActivityProjection;
 	readonly #markdown: MarkdownRenderer;
 	readonly #theme: TuiTheme;
 	readonly #viewport = new TimelineViewport();
@@ -220,8 +226,9 @@ export class ChatComponent extends Component {
 		super({ focusable: true });
 		this.#options = options;
 		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
+		this.#activity = new ActivityProjection(options.activitySummaryMode);
 		this.#history = new ComposerHistory(options.composerSubmissions);
-		this.#theme = createCodaTheme(options.colorLevel ?? 0);
+		this.#theme = createCodaTheme(options.colorLevel ?? 0, options.appearance);
 		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
 			isAvailable: (command) => command.id !== "core:follow-up" || this.#running,
 		});
@@ -260,9 +267,10 @@ export class ChatComponent extends Component {
 		this.invalidate();
 	}
 
-	setModelPresentation(modelLabel: string, reasoning: string): void {
+	setModelPresentation(modelLabel: string, reasoning: string, activitySummaryMode?: ActivitySummaryMode): void {
 		this.#modelLabel = modelLabel;
 		this.#reasoning = reasoning;
+		if (activitySummaryMode) this.#activity.setSummaryMode(activitySummaryMode);
 		this.invalidate();
 	}
 
@@ -284,25 +292,51 @@ export class ChatComponent extends Component {
 		this.invalidate();
 	}
 
-	override animationInterval(_context: RenderContext): number | undefined {
-		if (_context.width < MINIMUM_COLUMNS || _context.height < MINIMUM_ROWS) return undefined;
-		if ((this.#options.motion ?? "full") === "reduced" || !this.#timeline.hasActiveTools) return undefined;
-		return this.#theme.colorLevel === 3 ? 80 : 600;
+	override animationInterval(context: RenderContext): number | undefined {
+		if (context.width < MINIMUM_COLUMNS || context.height < MINIMUM_ROWS) return undefined;
+		const intervals: number[] = [];
+		const activity = this.#activity.status(context.now);
+		if (activity) {
+			intervals.push(1_000);
+			if (
+				(this.#options.motion ?? "full") === "full" &&
+				activity.motion === "active" &&
+				this.#theme.colorLevel > 0
+			) {
+				intervals.push(32);
+			}
+		}
+		if (
+			(this.#options.motion ?? "full") === "full" &&
+			activity?.motion !== "waiting" &&
+			this.#timeline.hasActiveTools
+		) {
+			intervals.push(this.#theme.colorLevel === 3 ? 80 : 600);
+		}
+		return intervals.length > 0 ? Math.min(...intervals) : undefined;
 	}
 
 	setAwaitingApproval(request: PermissionApprovalRequest): void {
-		if (!this.#timeline.setAwaitingApproval(request.invocationId, request.toolName ?? request.kind)) return;
-		this.#viewport.noteUpdate();
+		this.#activity.setAwaitingApproval(request, this.#options.clock.now());
+		if (this.#timeline.setAwaitingApproval(request.invocationId, request.toolName ?? request.kind)) {
+			this.#viewport.noteUpdate();
+		}
 		this.invalidate();
 	}
 
 	setApprovalResult(invocationId: string, approval: ApprovalDecisionAuditEvent): void {
-		if (!this.#timeline.setApprovalResult(invocationId, approval)) return;
-		this.#viewport.noteUpdate();
+		this.#activity.setApprovalResult(invocationId, this.#options.clock.now());
+		if (this.#timeline.setApprovalResult(invocationId, approval)) this.#viewport.noteUpdate();
+		this.invalidate();
+	}
+
+	setActivityOverride(key: string, text: string, present: boolean, motion: "active" | "waiting" = "waiting"): void {
+		this.#activity.setOverride(key, text, present, this.#options.clock.now(), motion);
 		this.invalidate();
 	}
 
 	accept(event: AgentEvent): void {
+		this.#activity.accept(event);
 		if (event.type === "run_start" && this.#nextRunAttachments && this.#nextRunAttachments.length > 0) {
 			this.#messageAttachments.set(event.inputMessage.id, this.#nextRunAttachments);
 			this.#nextRunAttachments = undefined;
@@ -399,6 +433,7 @@ export class ChatComponent extends Component {
 	}
 
 	acceptUserShell(snapshot: UserShellSnapshot): void {
+		this.#activity.acceptUserShell(snapshot, this.#options.clock.now());
 		if (snapshot.status === "running") {
 			// A resumed mixed queue may optimistically mark an Agent Run as pending before
 			// discovering that its next item is a local Shell command.
@@ -453,7 +488,9 @@ export class ChatComponent extends Component {
 						? renderCommandPalette(palette, width, maximumDrawerItems, this.#theme)
 						: [];
 		const drawerRows = drawerLines.length;
-		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + 1;
+		const activity = this.#activity.status(now);
+		const activityRows = activity ? 1 : 0;
+		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + 1;
 		this.#lastDockRows = dockRows;
 		const viewportHeight = height - 1 - dockRows;
 		const blocks = this.#renderViewportBlocks(width, now);
@@ -475,7 +512,7 @@ export class ChatComponent extends Component {
 				row: attachmentRow + region.row,
 			})),
 		];
-		const editorRow = 1 + viewportHeight + drawerRows + attachmentRows;
+		const editorRow = 1 + viewportHeight + drawerRows + attachmentRows + activityRows;
 		this.#lastCursor = editorFrame.cursor
 			? {
 					row: editorRow + editorFrame.cursor.row,
@@ -495,6 +532,16 @@ export class ChatComponent extends Component {
 			...transcript,
 			...drawerLines,
 			...attachmentLayout.lines,
+			...(activity
+				? [
+						renderActivityStatus(activity, {
+							width,
+							now,
+							theme: this.#theme,
+							motion: this.#options.motion ?? "full",
+						}),
+					]
+				: []),
 			...editorFrame.lines,
 			this.#renderFooter(width),
 		];
@@ -763,16 +810,19 @@ export class ChatComponent extends Component {
 				return;
 			}
 			this.#running = true;
+			this.#activity.beginPreparation(this.#options.clock.now());
 			this.#error = undefined;
 			try {
 				const operation = Promise.resolve(this.#options.onResumeFollowUps());
 				void operation.catch((error: unknown) => {
 					this.#running = false;
+					this.#activity.cancelPreparation();
 					this.#error = error instanceof Error ? error.message : String(error);
 					this.invalidate();
 				});
 			} catch (error) {
 				this.#running = false;
+				this.#activity.cancelPreparation();
 				this.#error = error instanceof Error ? error.message : String(error);
 			}
 			this.invalidate();
@@ -818,7 +868,10 @@ export class ChatComponent extends Component {
 		this.#attachmentFocusOrigin = undefined;
 		this.#error = undefined;
 		this.#notice = undefined;
-		if (!this.running && kind === "prompt") this.#running = true;
+		if (!this.running && kind === "prompt") {
+			this.#running = true;
+			this.#activity.beginPreparation(this.#options.clock.now());
+		}
 		this.#viewport.jumpToEnd();
 		this.invalidate();
 		const attachmentIds = submittedAttachments.map((attachment) => attachment.id);
@@ -877,7 +930,10 @@ export class ChatComponent extends Component {
 				this.invalidate();
 			},
 			(error: unknown) => {
-				if (kind === "prompt" || appendsPausedQueue) this.#running = false;
+				if (kind === "prompt" || appendsPausedQueue) {
+					this.#running = false;
+					this.#activity.cancelPreparation();
+				}
 				if (this.#nextRunAttachments === submittedAttachments) this.#nextRunAttachments = undefined;
 				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
 				this.#attachments = [...submittedAttachments, ...this.#attachments];

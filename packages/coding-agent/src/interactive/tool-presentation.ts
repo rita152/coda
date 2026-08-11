@@ -11,6 +11,11 @@ export interface ToolRenderOptions {
 	readonly toolResultImagesSupported?: boolean;
 }
 
+export interface ToolActionInvocation {
+	readonly toolName: string;
+	readonly arguments: Readonly<Record<string, unknown>>;
+}
+
 const MAIN_PREVIEW_ROWS = 5;
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
@@ -86,8 +91,8 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 }
 
 function styledStatusTitle(entry: TimelineToolEntry, theme: TuiTheme): string {
-	const present = actionParts(entry, false);
-	const past = actionParts(entry, true);
+	const present = actionParts(entry.invocation, false);
+	const past = actionParts(entry.invocation, true);
 	const action = (parts: ToolActionParts) => {
 		const subject = parts.code ? theme.style("code", parts.subject) : parts.subject;
 		return `${theme.style("strong", parts.verb)}${subject ? ` ${subject}` : ""}`;
@@ -118,8 +123,8 @@ interface ToolActionParts {
 	readonly code?: boolean;
 }
 
-function actionParts(entry: TimelineToolEntry, completed: boolean): ToolActionParts {
-	const { arguments: arguments_, toolName } = entry.invocation;
+function actionParts(invocation: ToolActionInvocation, completed: boolean): ToolActionParts {
+	const { arguments: arguments_, toolName } = invocation;
 	const path = argumentString(arguments_, "path", ".");
 	switch (toolName) {
 		case "read":
@@ -195,8 +200,8 @@ function renderExplorationDetail(entry: TimelineToolEntry, width: number, theme:
 }
 
 function statusTitle(entry: TimelineToolEntry): string {
-	const present = actionTitle(entry, false);
-	const past = actionTitle(entry, true);
+	const present = toolActionTitle(entry.invocation, false);
+	const past = toolActionTitle(entry.invocation, true);
 	switch (entry.state) {
 		case "awaiting_approval":
 			return `Awaiting approval — ${present}`;
@@ -217,8 +222,9 @@ function statusTitle(entry: TimelineToolEntry): string {
 	}
 }
 
-function actionTitle(entry: TimelineToolEntry, completed: boolean): string {
-	const { arguments: arguments_, toolName } = entry.invocation;
+/** A bounded caller can reuse the same present/past action language outside the Timeline. */
+export function toolActionTitle(invocation: ToolActionInvocation, completed = false): string {
+	const { arguments: arguments_, toolName } = invocation;
 	const path = argumentString(arguments_, "path", ".");
 	switch (toolName) {
 		case "read":
@@ -477,6 +483,7 @@ function styledStatusGlyph(state: TimelineToolState, options: ToolRenderOptions)
 	if (state !== "running" && state !== "awaiting_approval") {
 		return options.theme.style(stateTone(state), statusGlyph(state, options.transcript));
 	}
+	if (state === "awaiting_approval") return options.theme.style("warning", "•");
 	if ((options.motion ?? "reduced") === "reduced") return options.theme.style("muted", "•");
 	if (options.theme.colorLevel === 3) {
 		const phase = Math.floor(options.now / 80) % 8;

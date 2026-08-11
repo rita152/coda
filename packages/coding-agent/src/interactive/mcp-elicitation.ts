@@ -362,17 +362,25 @@ interface PendingElicitation {
 	readonly handle: OverlayHandle;
 }
 
+export type McpElicitationWaitListener = (
+	request: McpAgentElicitation,
+	sessionId: string | undefined,
+	waiting: boolean,
+) => void;
+
 export class InteractiveMcpElicitationHandler {
 	#tui?: Tui;
 	#terminal?: Terminal;
 	#activeSessionId?: string;
 	#pending?: PendingElicitation;
+	#onWait?: McpElicitationWaitListener;
 	readonly #queue: QueuedElicitation[] = [];
 
-	bind(tui: Tui, terminal: Terminal): void {
+	bind(tui: Tui, terminal: Terminal, onWait?: McpElicitationWaitListener): void {
 		if (this.#tui && this.#tui !== tui) throw new Error("MCP Elicitation handler is already bound to a TUI");
 		this.#tui = tui;
 		this.#terminal = terminal;
+		this.#onWait = onWait;
 	}
 
 	forSession(sessionId: string): (request: McpAgentElicitation) => Promise<McpElicitationResult> {
@@ -401,14 +409,17 @@ export class InteractiveMcpElicitationHandler {
 		this.#pending = undefined;
 		pending?.handle.remove();
 		pending?.queued.detachAbort();
+		if (pending) this.#notifyWait(pending.queued, false);
 		pending?.queued.resolve({ action: "cancel" });
 		for (const queued of this.#queue.splice(0)) {
 			queued.detachAbort();
+			this.#notifyWait(queued, false);
 			queued.resolve({ action: "cancel" });
 		}
 		this.#tui = undefined;
 		this.#terminal = undefined;
 		this.#activeSessionId = undefined;
+		this.#onWait = undefined;
 	}
 
 	#request(request: McpAgentElicitation, sessionId?: string): Promise<McpElicitationResult> {
@@ -444,6 +455,7 @@ export class InteractiveMcpElicitationHandler {
 			}
 			request.execution.signal.addEventListener("abort", onAbort, { once: true });
 			this.#queue.push(queued);
+			this.#notifyWait(queued, true);
 			this.#showNext();
 		});
 	}
@@ -468,6 +480,7 @@ export class InteractiveMcpElicitationHandler {
 			this.#pending = { queued: next, handle };
 		} catch {
 			next.detachAbort();
+			this.#notifyWait(next, false);
 			next.resolve({ action: "decline" });
 			this.#showNext();
 		}
@@ -479,6 +492,7 @@ export class InteractiveMcpElicitationHandler {
 		this.#pending = undefined;
 		pending.handle.remove();
 		pending.queued.detachAbort();
+		this.#notifyWait(pending.queued, false);
 		pending.queued.resolve(result);
 		this.#showNext();
 	}
@@ -492,7 +506,12 @@ export class InteractiveMcpElicitationHandler {
 		if (index < 0) return;
 		this.#queue.splice(index, 1);
 		target.detachAbort();
+		this.#notifyWait(target, false);
 		target.resolve({ action: "cancel" });
+	}
+
+	#notifyWait(queued: QueuedElicitation, waiting: boolean): void {
+		this.#onWait?.(queued.request, queued.sessionId, waiting);
 	}
 }
 

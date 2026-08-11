@@ -81,6 +81,49 @@ describe("ChatComponent terminal input", () => {
 		expect(frame.at(-1)).toContain("Enter sends");
 	});
 
+	it("shows the focused Run activity immediately above the Composer and hides it after Run end", () => {
+		const component = createComponent({
+			activitySummaryMode: "native",
+			colorLevel: 0,
+			motion: "reduced",
+		});
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: { id: "user-status", message: { role: "user", content: "start", timestamp: 1 } },
+				timestamp: 1,
+			}),
+		);
+		component.accept(thinkingDeltaEvent(2, "**Proposing concurrent tool status formatting**"));
+
+		let frame = component.render({ width: 80, height: 12, now: 3_001 }).map(stripAnsi);
+		expect(frame.at(-5)).toBe("Proposing concurrent tool status formatting · 3s · updated 3s ago");
+		expect(frame.at(-5)).not.toContain("Thinking");
+		expect(frame.at(-4)).toBe("─".repeat(80));
+
+		component.accept(event({ type: "run_end", outcome: "success", timestamp: 3_100 }));
+		frame = component.render({ width: 80, height: 12, now: 3_100 }).map(stripAnsi);
+		expect(frame.at(-4)).toBe("─".repeat(80));
+		expect(frame.join("\n")).not.toContain("Proposing concurrent tool status formatting ·");
+	});
+
+	it("keeps Chat Completions-compatible Thinking out of the activity row", () => {
+		const component = createComponent({ activitySummaryMode: "fallback", colorLevel: 0, motion: "reduced" });
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: { id: "user-fallback", message: { role: "user", content: "start", timestamp: 1 } },
+			}),
+		);
+		component.accept(thinkingDeltaEvent(2, "private compatibility reasoning"));
+
+		const frame = component.render({ width: 60, height: 12, now: 2_000 }).map(stripAnsi);
+		expect(frame.at(-5)).toContain("Working...");
+		expect(frame.at(-5)).not.toContain("private compatibility reasoning");
+	});
+
 	it("updates the session model presentation without rebuilding the Composer", () => {
 		const component = createComponent();
 
@@ -1087,15 +1130,31 @@ describe("ChatComponent terminal input", () => {
 		expectThinkingStyles("complete");
 	});
 
-	it("requests one capability-aware animation interval only for active Tools", () => {
+	it("requests high-frequency shimmer frames for active work and one-second static timing frames", () => {
 		const full = createComponent({ colorLevel: 3, motion: "full" });
+		full.accept(runStartEvent());
 		full.accept(toolStartEvent(1));
-		expect(full.animationInterval({ width: 80, height: 24, now: 0 })).toBe(80);
+		expect(full.animationInterval({ width: 80, height: 24, now: 0 })).toBe(32);
 		expect(full.animationInterval({ width: 30, height: 5, now: 0 })).toBeUndefined();
 
 		const reduced = createComponent({ colorLevel: 3, motion: "reduced" });
+		reduced.accept(runStartEvent());
 		reduced.accept(toolStartEvent(1));
-		expect(reduced.animationInterval({ width: 80, height: 24, now: 0 })).toBeUndefined();
+		expect(reduced.animationInterval({ width: 80, height: 24, now: 0 })).toBe(1_000);
+
+		const waiting = createComponent({ colorLevel: 3, motion: "full" });
+		waiting.accept(runStartEvent());
+		waiting.accept(toolStartEvent(1));
+		waiting.setAwaitingApproval({
+			kind: "command",
+			runId: "run" as never,
+			turnId: "turn" as never,
+			invocationId: "tool-1" as never,
+			command: "sleep 1",
+			cwd: "/workspace",
+			reason: "requires approval",
+		});
+		expect(waiting.animationInterval({ width: 80, height: 24, now: 0 })).toBe(1_000);
 	});
 
 	it("stages externally resolved attachments as filename chips and submits their stable identities", async () => {
@@ -1285,6 +1344,17 @@ function toolStartEvent(sequence: number): AgentEvent {
 			toolName: "bash",
 			arguments: { command: "sleep 1" },
 			sourceIndex: 0,
+		},
+	});
+}
+
+function runStartEvent(): AgentEvent {
+	return event({
+		type: "run_start",
+		source: "prompt",
+		inputMessage: {
+			id: "user-activity",
+			message: { role: "user", content: "start", timestamp: 1 },
 		},
 	});
 }

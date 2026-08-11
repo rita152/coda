@@ -338,6 +338,18 @@ function finalizeResponse(
 	}
 }
 
+function reconcileTerminalOutput(
+	items: readonly ResponseOutputItem[],
+	output: AssistantMessage,
+	events: AssistantMessageEventStream,
+	slots: Map<number, OutputSlot>,
+): void {
+	for (const outputIndex of [...slots.keys()]) {
+		const item = items[outputIndex];
+		if (item) finalizeItem(outputIndex, item, output, events, slots);
+	}
+}
+
 async function processStream(
 	openAIStream: AsyncIterable<ResponseStreamEvent>,
 	model: Model<"openai-responses">,
@@ -407,6 +419,7 @@ async function processStream(
 			finalizeItem(streamEvent.output_index, streamEvent.item, output, events, slots);
 		} else if (streamEvent.type === "response.completed" || streamEvent.type === "response.incomplete") {
 			terminal = true;
+			reconcileTerminalOutput(streamEvent.response.output, output, events, slots);
 			finalizeResponse(streamEvent.response, model, output);
 		} else if (streamEvent.type === "response.failed") {
 			terminal = true;

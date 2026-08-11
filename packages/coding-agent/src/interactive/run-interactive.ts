@@ -27,6 +27,7 @@ import type { CatalogModel } from "../runtime/model-catalog.ts";
 import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
 import type { Session } from "../session/types.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import type { ActivitySummaryMode } from "./activity-status.ts";
 import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
@@ -51,13 +52,18 @@ export interface InteractiveSessionOptions {
 	readonly session: Session;
 	readonly approvalFor?: PermissionEngine["approvalFor"];
 	readonly modelLabel: string;
+	readonly activitySummaryMode?: ActivitySummaryMode;
 	readonly permissionProfile: PermissionProfile;
 	readonly permissionLabel: string;
 	readonly onPermissionProfileChange: (profile: PermissionProfile) => Promise<string> | string;
 	readonly modelCommand?: {
 		readonly list: () => Promise<readonly ModelCommandEntry[]>;
 		readonly currentKey: () => string;
-		readonly select: (model: CatalogModel) => Promise<{ readonly modelLabel: string; readonly reasoning: string }>;
+		readonly select: (model: CatalogModel) => Promise<{
+			readonly modelLabel: string;
+			readonly reasoning: string;
+			readonly activitySummaryMode: ActivitySummaryMode;
+		}>;
 		readonly authenticate: (providerId: string, navigation: CommandFlowNavigation) => Promise<void> | void;
 	};
 	readonly authCommand?: {
@@ -227,11 +233,13 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		});
 		component = new ChatComponent({
 			modelLabel: sessionOptions.modelLabel,
+			activitySummaryMode: sessionOptions.activitySummaryMode,
 			workspaceLabel: options.workspaceLabel,
 			permissionLabel: sessionOptions.permissionLabel,
 			reasoning: sessionOptions.reasoning,
 			clock: options.clock,
 			colorLevel: options.terminal.capabilities.colorLevel,
+			appearance: options.terminal.capabilities.appearance,
 			motion: options.motion,
 			commandRegistry: options.commandRegistry,
 			seed: {
@@ -278,7 +286,11 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 							models: await sessionOptions.modelCommand.list(),
 							onSelect: async (selected) => {
 								const presentation = await sessionOptions.modelCommand!.select(selected);
-								component.setModelPresentation(presentation.modelLabel, presentation.reasoning);
+								component.setModelPresentation(
+									presentation.modelLabel,
+									presentation.reasoning,
+									presentation.activitySummaryMode,
+								);
 							},
 							onAuthenticate: async (providerId, navigation) => {
 								if (!sessionOptions.authCommand) {
@@ -337,7 +349,12 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 				}
 				if (commandId === "core:compact") {
 					if (!sessionOptions.compactCommand) throw new Error("Context compaction is unavailable");
-					return sessionOptions.compactCommand.run(argument);
+					component.setActivityOverride("command:compact", "Compacting context...", true, "active");
+					try {
+						return await sessionOptions.compactCommand.run(argument);
+					} finally {
+						component.setActivityOverride("command:compact", "", false);
+					}
 				}
 				throw new Error(`Command is not available yet: ${commandId}`);
 			},
@@ -455,7 +472,16 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		pane.component.setAwaitingApproval(request);
 		if (pane !== runtimes.active) pane.needsAttention = true;
 	});
-	options.mcpElicitation?.bind(tui, options.terminal);
+	options.mcpElicitation?.bind(tui, options.terminal, (request, sessionId, waiting) => {
+		const pane = sessionId ? runtimes.get(sessionId) : runtimes.active;
+		if (!pane) return;
+		pane.component.setActivityOverride(
+			`mcp:${request.execution.invocationId}`,
+			`Waiting for MCP input — ${request.tool.remoteName}`,
+			waiting,
+		);
+		if (waiting && pane !== runtimes.active) pane.needsAttention = true;
+	});
 	options.approval?.setActiveSession(initialPane.id);
 	options.mcpElicitation?.setActiveSession(initialPane.id);
 	if (terminationSignal || fatalError !== undefined) {
@@ -537,11 +563,13 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	});
 	component = new ChatComponent({
 		modelLabel: options.modelLabel,
+		activitySummaryMode: options.activitySummaryMode,
 		workspaceLabel: options.workspaceLabel,
 		permissionLabel: options.permissionLabel,
 		reasoning: options.reasoning,
 		clock: options.clock,
 		colorLevel: options.terminal.capabilities.colorLevel,
+		appearance: options.terminal.capabilities.appearance,
 		motion: options.motion,
 		commandRegistry: options.commandRegistry,
 		seed: {
@@ -588,7 +616,11 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 						models: await options.modelCommand.list(),
 						onSelect: async (selected) => {
 							const presentation = await options.modelCommand!.select(selected);
-							component.setModelPresentation(presentation.modelLabel, presentation.reasoning);
+							component.setModelPresentation(
+								presentation.modelLabel,
+								presentation.reasoning,
+								presentation.activitySummaryMode,
+							);
 						},
 						onAuthenticate: async (providerId, navigation) => {
 							if (!options.authCommand) {
@@ -634,7 +666,12 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 			}
 			if (commandId === "core:compact") {
 				if (!options.compactCommand) throw new Error("Context compaction is unavailable");
-				return options.compactCommand.run(argument);
+				component.setActivityOverride("command:compact", "Compacting context...", true, "active");
+				try {
+					return await options.compactCommand.run(argument);
+				} finally {
+					component.setActivityOverride("command:compact", "", false);
+				}
 			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},
@@ -706,7 +743,13 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		},
 	});
 	options.approval?.bind(tui, options.terminal, (request) => component.setAwaitingApproval(request));
-	options.mcpElicitation?.bind(tui, options.terminal);
+	options.mcpElicitation?.bind(tui, options.terminal, (request, _sessionId, waiting) => {
+		component.setActivityOverride(
+			`mcp:${request.execution.invocationId}`,
+			`Waiting for MCP input — ${request.tool.remoteName}`,
+			waiting,
+		);
+	});
 	options.mcpElicitation?.setActiveSession(options.session.descriptor.id);
 	if (terminationSignal || fatalError !== undefined) {
 		options.approval?.unbind();

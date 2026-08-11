@@ -31,6 +31,7 @@ import { ContextWindowController } from "./context-window/context-window.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
+import { activitySummaryModeForApi } from "./interactive/activity-status.ts";
 import { InteractiveApprovalHandler } from "./interactive/approval.ts";
 import type { ChatAttachment } from "./interactive/chat-component.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
@@ -1934,6 +1935,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									session: targetSession,
 									approvalFor: (invocationId) => targetPolicy.approvalFor(invocationId),
 									modelLabel: `${targetModel.provider}/${targetModel.id}`,
+									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
 									permissionProfile: targetProfile.profile,
 									permissionLabel: `${permissionProfileLabel(targetProfile.profile)} / ${approvalPolicyLabel(targetApprovalPolicy)}`,
 									onPermissionProfileChange: async (profile) => {
@@ -1980,7 +1982,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												reasoning: nextReasoning,
 												authSnapshot,
 											});
-											return { modelLabel: selected.key, reasoning: nextReasoning };
+											return {
+												modelLabel: selected.key,
+												reasoning: nextReasoning,
+												activitySummaryMode: activitySummaryModeForApi(selected.runtime.api),
+											};
 										},
 										authenticate: (providerId) => {
 											throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
@@ -2099,6 +2105,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								mcpElicitation: interactiveMcpElicitation,
 								approvalFor: (invocationId) => policy.approvalFor(invocationId),
 								modelLabel: `${model.provider}/${model.id}`,
+								activitySummaryMode: activitySummaryModeForApi(model.api),
 								workspaceLabel: basename(workspace.root) || workspace.root,
 								permissionProfile: policy.configuration().profile.profile,
 								permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
@@ -2139,7 +2146,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											reasoning: nextReasoning,
 											authSnapshot,
 										});
-										return { modelLabel: selected.key, reasoning: nextReasoning };
+										return {
+											modelLabel: selected.key,
+											reasoning: nextReasoning,
+											activitySummaryMode: activitySummaryModeForApi(selected.runtime.api),
+										};
 									},
 									authenticate: (providerId) => {
 										throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
