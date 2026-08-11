@@ -4,6 +4,7 @@ import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
+import { toolFailure } from "./failure.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
 import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
@@ -72,9 +73,17 @@ export function createEditTool(
 		execute: async (arguments_, context) => {
 			const initial = await workspace.resolvePath(arguments_.path, "write");
 			if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, "edit", "write")) {
-				throw new Error(`Path access was not granted: ${initial.canonicalPath}`);
+				return toolFailure(`Path access was not granted: ${initial.canonicalPath}`, {
+					code: "access_denied",
+					path: initial.canonicalPath,
+				});
 			}
-			if (!initial.exists) throw new Error(`File does not exist: ${initial.canonicalPath}`);
+			if (!initial.exists) {
+				return toolFailure(`File does not exist: ${initial.canonicalPath}`, {
+					code: "not_found",
+					path: initial.canonicalPath,
+				});
+			}
 			return coordinator.run(initial.canonicalPath, async () => {
 				context.signal.throwIfAborted();
 				const current = await workspace.resolvePath(arguments_.path, "write");
@@ -83,28 +92,60 @@ export function createEditTool(
 					current.canonicalPath !== initial.canonicalPath ||
 					!hasPermissionedPathAccess(workspace, current, context.invocationId, "edit", "write")
 				) {
-					throw new Error("Target changed before edit could begin");
+					return toolFailure("Target changed before edit could begin", {
+						code: "target_changed",
+						path: initial.canonicalPath,
+					});
 				}
 				const status = await fileSystem.stat(current.canonicalPath);
-				if (status.kind !== "file") throw new Error(`Path is not a file: ${current.canonicalPath}`);
-				if (status.size > 2 * 1024 * 1024) throw new Error("Text file exceeds the 2 MiB edit limit");
+				if (status.kind !== "file") {
+					return toolFailure(`Path is not a file: ${current.canonicalPath}`, {
+						code: "not_file",
+						path: current.canonicalPath,
+					});
+				}
+				if (status.size > 2 * 1024 * 1024) {
+					return toolFailure("Text file exceeds the 2 MiB edit limit", {
+						code: "too_large",
+						path: current.canonicalPath,
+						limitBytes: 2 * 1024 * 1024,
+					});
+				}
 				const beforeBytes = await fileSystem.readFile(current.canonicalPath);
 				const bom = hasBom(beforeBytes);
 				let before: string;
 				try {
 					before = new TextDecoder("utf-8", { fatal: true }).decode(bom ? beforeBytes.slice(3) : beforeBytes);
 				} catch {
-					throw new Error("edit supports UTF-8 text files only");
+					return toolFailure("edit supports UTF-8 text files only", {
+						code: "invalid_utf8",
+						path: current.canonicalPath,
+					});
 				}
-				if (before.includes("\0")) throw new Error("edit supports text files only");
+				if (before.includes("\0")) {
+					return toolFailure("edit supports text files only", {
+						code: "not_text",
+						path: current.canonicalPath,
+					});
+				}
 				const newline = newlineStyle(before);
 				const oldText = normalizeNewlines(arguments_.oldText, newline);
 				const newText = normalizeNewlines(arguments_.newText, newline);
 				const occurrences = occurrenceIndexes(before, oldText);
-				if (occurrences.length === 0) throw new Error("Expected oldText was not found");
+				if (occurrences.length === 0) {
+					return toolFailure("Expected oldText was not found", {
+						code: "no_match",
+						path: current.canonicalPath,
+					});
+				}
 				if (occurrences.length > 1 && !arguments_.replaceAll) {
-					throw new Error(
+					return toolFailure(
 						`Expected oldText is not unique (${occurrences.length} matches); use replaceAll explicitly`,
+						{
+							code: "ambiguous_match",
+							path: current.canonicalPath,
+							matches: occurrences.length,
+						},
 					);
 				}
 				const after = arguments_.replaceAll

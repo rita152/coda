@@ -154,4 +154,121 @@ describe("search Tools", () => {
 		expect(stdout.value).toBe("Directory search complete.\n");
 		expect(stderr.value).toBe("");
 	});
+
+	it("returns recoverable search failures to the Model and continues the Run", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-missing-directory-"));
+		temporaryDirectories.push(workspace);
+		await writeFile(join(workspace, "plain.txt"), "plain\n", "utf8");
+
+		const faux = fauxProvider({ runtime: testTimeRuntime(700) });
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("ls", { path: "src" }, { id: "provider-ls-missing" }), {
+				stopReason: "toolUse",
+				timestamp: 700,
+			}),
+			(context) => {
+				const result = context.messages.at(-1);
+				expect(result).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-ls-missing",
+					toolName: "ls",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("Directory does not exist") }],
+					details: { status: "failed", code: "not_found", path: expect.stringContaining("/src") },
+				});
+				return fauxAssistantMessage(
+					fauxToolCall("find", { pattern: "*.ts", path: "generated" }, { id: "provider-find-missing" }),
+					{ stopReason: "toolUse", timestamp: 700 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-find-missing",
+					toolName: "find",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("Path does not exist") }],
+					details: { status: "failed", code: "not_found", path: expect.stringContaining("/generated") },
+				});
+				return fauxAssistantMessage(
+					fauxToolCall("grep", { pattern: "needle", path: "build" }, { id: "provider-grep-missing" }),
+					{ stopReason: "toolUse", timestamp: 700 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-grep-missing",
+					toolName: "grep",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("Path does not exist") }],
+					details: { status: "failed", code: "not_found", path: expect.stringContaining("/build") },
+				});
+				return fauxAssistantMessage(
+					fauxToolCall("grep", { pattern: "[", path: "." }, { id: "provider-grep-invalid" }),
+					{ stopReason: "toolUse", timestamp: 700 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-grep-invalid",
+					toolName: "grep",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("Invalid search pattern") }],
+					details: { status: "failed", code: "invalid_pattern", pattern: "[" },
+				});
+				return fauxAssistantMessage(fauxToolCall("ls", { path: "plain.txt" }, { id: "provider-ls-file" }), {
+					stopReason: "toolUse",
+					timestamp: 700,
+				});
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-ls-file",
+					toolName: "ls",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("Path is not a directory") }],
+					details: { status: "failed", code: "not_directory", path: expect.stringContaining("/plain.txt") },
+				});
+				return fauxAssistantMessage("The requested search roots are absent.", { timestamp: 700 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(700) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout,
+				stderr,
+			},
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 700 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		const exitCode = await application.run([
+			"--print",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"inspect src",
+		]);
+
+		expect(exitCode, stderr.value).toBe(0);
+		expect(stdout.value).toBe("The requested search roots are absent.\n");
+		expect(stderr.value).toBe("");
+	});
 });

@@ -170,6 +170,43 @@ describe("Agent Tool execution", () => {
 		]);
 	});
 
+	it("returns model-visible Tool errors to the next Turn without failing the Run", async () => {
+		const clock = new TestClock();
+		const contexts: Context[] = [];
+		const events: AgentEvent[] = [];
+		const missing = tool("missing", ({ path }) => ({
+			content: `Path does not exist: ${path}`,
+			details: { status: "failed", code: "not_found", path },
+			isError: true,
+		}));
+		const calls = fauxAssistantMessage([fauxToolCall("missing", { path: "src" }, { id: "call:missing" })], {
+			stopReason: "toolUse",
+			timestamp: clock.now(),
+		});
+		const agent = new Agent({
+			...baseOptions([calls, response("recovered", clock)], { clock, contexts }),
+			tools: [missing],
+		});
+		agent.onEvent((event) => events.push(event));
+
+		const result = await agent.prompt("inspect");
+
+		expect(result.outcome).toBe("success");
+		expect(events.filter((event) => event.type === "tool_execution_end")).toMatchObject([
+			{
+				type: "tool_execution_end",
+				outcome: "error",
+				result: { message: { role: "toolResult", toolCallId: "call:missing", isError: true } },
+			},
+		]);
+		expect(contexts).toHaveLength(2);
+		expect(contexts[1]?.messages.at(-1)).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call:missing",
+			isError: true,
+		});
+	});
+
 	it("runs only explicitly safe consecutive Tools concurrently and commits results in source order", async () => {
 		const clock = new TestClock();
 		const events: AgentEvent[] = [];

@@ -7,6 +7,7 @@ import type { ModelProcessRunner } from "../permissions/model-process-runner.ts"
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
+import { toolFailure } from "./failure.ts";
 import { displayPath, walkEntries } from "./search.ts";
 
 const FindParameters = Type.Object(
@@ -60,9 +61,17 @@ export function createFindTool(options: {
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
 			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "find", "read")) {
-				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
+				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
+					code: "access_denied",
+					path: root.canonicalPath,
+				});
 			}
-			if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
+			if (!root.exists) {
+				return toolFailure(`Path does not exist: ${root.canonicalPath}`, {
+					code: "not_found",
+					path: root.canonicalPath,
+				});
+			}
 			const protectedRootGranted = workspace.isPathGranted(context.invocationId, "find", "read", root.canonicalPath);
 			const protectedExclusions = protectedRootGranted
 				? []
@@ -106,9 +115,15 @@ export function createFindTool(options: {
 				context,
 			});
 			if (external) {
-				if (external.timedOut) throw new Error("fd search timed out");
+				if (external.timedOut) {
+					return toolFailure("fd search timed out", { code: "timeout", engine: "fd" });
+				}
 				if (external.exitCode !== 0) {
-					throw new Error(`fd search failed: ${external.stderr.trim() || `exit ${external.exitCode}`}`);
+					return toolFailure(`fd search failed: ${external.stderr.trim() || `exit ${external.exitCode}`}`, {
+						code: "search_failed",
+						engine: "fd",
+						exitCode: external.exitCode,
+					});
 				}
 				const matches: string[] = [];
 				for (const line of external.stdout.split(/\r?\n/)) {

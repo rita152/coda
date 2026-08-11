@@ -6,6 +6,7 @@ import type { ModelProcessRunner } from "../permissions/model-process-runner.ts"
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
+import { toolFailure } from "./failure.ts";
 import { displayPath, readSearchableText, walkFiles } from "./search.ts";
 
 const GrepParameters = Type.Object(
@@ -40,16 +41,27 @@ export function createGrepTool(options: {
 			try {
 				expression = new RegExp(arguments_.pattern, arguments_.ignoreCase ? "gi" : "g");
 			} catch (error) {
-				throw new Error(`Invalid search pattern: ${error instanceof Error ? error.message : String(error)}`);
+				return toolFailure(`Invalid search pattern: ${error instanceof Error ? error.message : String(error)}`, {
+					code: "invalid_pattern",
+					pattern: arguments_.pattern,
+				});
 			}
 
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
 			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "grep", "read")) {
-				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
+				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
+					code: "access_denied",
+					path: root.canonicalPath,
+				});
 			}
-			if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
+			if (!root.exists) {
+				return toolFailure(`Path does not exist: ${root.canonicalPath}`, {
+					code: "not_found",
+					path: root.canonicalPath,
+				});
+			}
 			const protectedRootGranted = workspace.isPathGranted(context.invocationId, "grep", "read", root.canonicalPath);
 			const protectedExclusions = protectedRootGranted
 				? []
@@ -106,9 +118,15 @@ export function createGrepTool(options: {
 				context,
 			});
 			if (external) {
-				if (external.timedOut) throw new Error("rg search timed out");
+				if (external.timedOut) {
+					return toolFailure("rg search timed out", { code: "timeout", engine: "rg" });
+				}
 				if (external.exitCode !== 0 && external.exitCode !== 1) {
-					throw new Error(`rg search failed: ${external.stderr.trim() || `exit ${external.exitCode}`}`);
+					return toolFailure(`rg search failed: ${external.stderr.trim() || `exit ${external.exitCode}`}`, {
+						code: "search_failed",
+						engine: "rg",
+						exitCode: external.exitCode,
+					});
 				}
 				const matches: string[] = [];
 				let visibleCharacters = 0;

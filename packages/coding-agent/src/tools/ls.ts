@@ -4,6 +4,7 @@ import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
+import { toolFailure } from "./failure.ts";
 
 const LsParameters = Type.Object(
 	{
@@ -24,11 +25,24 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 		execute: async (arguments_, context) => {
 			const root = await workspace.resolvePath(arguments_.path ?? ".", "read");
 			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "ls", "read")) {
-				throw new Error(`Path access was not granted: ${root.canonicalPath}`);
+				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
+					code: "access_denied",
+					path: root.canonicalPath,
+				});
 			}
-			if (!root.exists) throw new Error(`Directory does not exist: ${root.canonicalPath}`);
+			if (!root.exists) {
+				return toolFailure(`Directory does not exist: ${root.canonicalPath}`, {
+					code: "not_found",
+					path: root.canonicalPath,
+				});
+			}
 			const status = await fileSystem.stat(root.canonicalPath);
-			if (status.kind !== "directory") throw new Error(`Path is not a directory: ${root.canonicalPath}`);
+			if (status.kind !== "directory") {
+				return toolFailure(`Path is not a directory: ${root.canonicalPath}`, {
+					code: "not_directory",
+					path: root.canonicalPath,
+				});
+			}
 
 			const maxDepth = arguments_.depth ?? 1;
 			const limit = arguments_.limit ?? 500;

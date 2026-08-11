@@ -1150,7 +1150,7 @@ export class Agent {
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			return {
 				entry,
-				outcome: "success",
+				outcome: output.isError ? "error" : "success",
 				result: this.#toolResult(entry.invocation, output),
 			};
 		} catch (error) {

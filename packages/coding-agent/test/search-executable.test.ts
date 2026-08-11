@@ -159,6 +159,74 @@ describe("optional search executables", () => {
 		);
 		expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual(["--", "*.ts", "src"]);
 	});
+
+	it("returns an rg timeout as a model-visible Tool failure", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-rg-timeout-"));
+		temporaryDirectories.push(root);
+		const fileSystem = createNodeFileSystem();
+		const workspace = await createWorkspace(root, fileSystem);
+		const tools = await trustedSearchDirectory("rg");
+		const permissions = await searchPermissions(workspace, "grep", { pattern: "needle", path: "." });
+		const tool = createGrepTool({
+			workspace,
+			fileSystem,
+			processRunner: {
+				run: async () => ({
+					exitCode: null,
+					signal: "SIGTERM",
+					stdout: "",
+					stderr: "",
+					timedOut: true,
+					truncated: false,
+					backend: "macos-seatbelt",
+				}),
+			},
+			permissions,
+			runtime: { homeDirectory: root, environment: { PATH: tools } },
+		});
+
+		const result = await tool.execute({ pattern: "needle", path: "." }, context());
+
+		expect(result).toMatchObject({
+			content: "rg search timed out",
+			details: { status: "failed", code: "timeout", engine: "rg" },
+			isError: true,
+		});
+	});
+
+	it("returns an fd process failure as a model-visible Tool failure", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-fd-failure-"));
+		temporaryDirectories.push(root);
+		const fileSystem = createNodeFileSystem();
+		const workspace = await createWorkspace(root, fileSystem);
+		const tools = await trustedSearchDirectory("fd");
+		const permissions = await searchPermissions(workspace, "find", { pattern: "*.ts", path: "." });
+		const tool = createFindTool({
+			workspace,
+			fileSystem,
+			processRunner: {
+				run: async () => ({
+					exitCode: 2,
+					signal: null,
+					stdout: "",
+					stderr: "bad query",
+					timedOut: false,
+					truncated: false,
+					backend: "macos-seatbelt",
+				}),
+			},
+			permissions,
+			runtime: { homeDirectory: root, environment: { PATH: tools } },
+		});
+
+		const result = await tool.execute({ pattern: "*.ts", path: "." }, context());
+
+		expect(result).toMatchObject({
+			content: "fd search failed: bad query",
+			details: { status: "failed", code: "search_failed", engine: "fd", exitCode: 2 },
+			isError: true,
+		});
+	});
 });
 
 async function trustedSearchDirectory(name: "fd" | "rg"): Promise<string> {
