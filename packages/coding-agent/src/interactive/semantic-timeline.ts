@@ -8,7 +8,7 @@ import type {
 	ToolExecutionProgress,
 	ToolInvocation,
 } from "@coda/agent";
-import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
+import type { AssistantMessage, TextSignatureV1, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
@@ -39,6 +39,7 @@ export interface TimelineAssistantEntry {
 	readonly messageId: string;
 	readonly contentIndex: number;
 	readonly text: string;
+	readonly textPhase?: NonNullable<TextSignatureV1["phase"]>;
 	readonly phase: "streaming" | "complete";
 	readonly timestamp: number;
 }
@@ -112,6 +113,7 @@ interface TextSlot {
 	readonly kind: "assistant" | "thinking";
 	readonly contentIndex: number;
 	text: string;
+	textPhase?: NonNullable<TextSignatureV1["phase"]>;
 	redacted: boolean;
 	projected?: TimelineAssistantEntry | TimelineThinkingEntry;
 }
@@ -443,10 +445,12 @@ export class SemanticTimeline {
 	): void {
 		for (const [contentIndex, block] of content.entries()) {
 			if (block.type === "text") {
+				const textPhase = decodeTextPhase(block.textSignature);
 				group.slots.set(contentIndex, {
 					kind: "assistant",
 					contentIndex,
 					text: block.text,
+					...(textPhase ? { textPhase } : {}),
 					redacted: false,
 				});
 			} else if (block.type === "thinking") {
@@ -647,7 +651,11 @@ export class SemanticTimeline {
 					} as const;
 					slot.projected =
 						slot.kind === "assistant"
-							? Object.freeze({ kind: "assistant", ...common })
+							? Object.freeze({
+									kind: "assistant",
+									...common,
+									...(slot.textPhase ? { textPhase: slot.textPhase } : {}),
+								})
 							: Object.freeze({ kind: "thinking", ...common, redacted: slot.redacted });
 				}
 				entries.push(slot.projected);
@@ -667,6 +675,17 @@ export class SemanticTimeline {
 
 function userText(message: Immutable<UserMessage>): string {
 	return renderVisibleUserText(message.content);
+}
+
+function decodeTextPhase(signature: string | undefined): NonNullable<TextSignatureV1["phase"]> | undefined {
+	if (!signature?.startsWith("{")) return undefined;
+	try {
+		const parsed = JSON.parse(signature) as Partial<TextSignatureV1>;
+		if (parsed.v !== 1 || typeof parsed.id !== "string") return undefined;
+		return parsed.phase === "commentary" || parsed.phase === "final_answer" ? parsed.phase : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function timelineApproval(approval: ApprovalDecisionAuditEvent, restored: boolean): TimelineApproval {

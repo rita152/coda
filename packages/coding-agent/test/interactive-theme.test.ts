@@ -39,4 +39,12 @@ describe("Coda interactive Theme", () => {
 		expect(createCodaTheme(1).styleEditorBorder("max", true, "─")).toBe("\x1b[95m─\x1b[0m");
 		expect(createCodaTheme(0).styleEditorBorder("max", true, "─")).toBe("─");
 	});
+
+	it("provides Codex-aligned strong text and full visible Thinking styles", () => {
+		const theme = createCodaTheme(1);
+
+		expect(theme.style("strong", "Ran")).toBe("\x1b[1mRan\x1b[0m");
+		expect(theme.style("thinking", "reasoning")).toBe("\x1b[2;3mreasoning\x1b[0m");
+		expect(createCodaTheme(0).style("thinking", "reasoning")).toBe("reasoning");
+	});
 });

@@ -52,21 +52,32 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 
 - User text remains literal and renders between full-width muted horizontal borders without a label. Attachments render before text inside the same card.
 - Assistant text renders as unlabeled open Markdown.
-- Thinking Blocks render as full streaming Markdown in original content order, using muted foreground while Assistant text uses normal foreground. NO_COLOR adds a non-color Thinking marker.
+- Thinking Blocks render as full streaming Markdown in original content order, using dim italic text while Assistant text uses normal foreground. NO_COLOR adds a non-color Thinking marker.
 - Only committed Assistant content enters the durable Timeline. Discarded retry, failure, and abort partials are removed.
 - CommonMark plus GFM covers headings, emphasis, lists, quotes, fenced code, tables, task lists, deletion, and autolinks. Raw HTML is literal text.
 - Fenced code shows its language and soft-wraps with a continuation gutter; full syntax highlighting is deferred.
 - Tables align when they fit and degrade to stacked `column: value` rows when they do not.
 - Coda generates safe OSC 8 links only for http, https, and mailto destinations. Markdown images remain alt text plus URL and are never fetched.
 
+### Main Timeline rhythm
+
+- Main Timeline blocks retain exact event order and near-equal information weight; no final-answer-first regrouping is allowed.
+- One blank display row separates adjacent visible blocks only when their semantic content type changes. Consecutive blocks of the same type remain compact.
+- User, Thinking, Exploring, general Tool, Assistant commentary, Assistant final answer, User Shell, error, and notice are distinct spacing types. A User card therefore has one ordinary type-change gap before following model content.
+- Internal Turn boundaries never create spacing by themselves. If content also changes type at that boundary, only the ordinary type-change gap appears.
+- OpenAI text-signature phases preserve commentary and final answer as distinct spacing types without changing their near-equal Markdown treatment. Providers without a phase use the generic Assistant type.
+- Empty streaming blocks do not create or suppress gaps. Spacer rows have stable viewport identities so scroll anchoring and attachment hit regions remain correct.
+- Ctrl+T Transcript View retains its existing dense layout; the new rhythm applies only to the main Timeline.
+
 ## Tool Invocation presentation
 
-- Main Timeline uses a borderless tree with bullet, vertical, and branch glyphs. Transcript View may use success/failure glyphs.
+- Main Timeline Tool geometry is behaviorally aligned with OpenAI Codex commit `f93109615ff27ab58007601434b27c940d5500c7`; Coda retains its own semantic lifecycle and does not port Codex's scrollback architecture.
+- Main Timeline uses a borderless tree with a state bullet, bold action word, dim gutter and result text, and code-styled command text. Transcript View retains its existing success/failure glyphs and detail layout.
 - Action language is Reading/Read, Searching/Searched, Editing/Edited, Writing/Wrote, Running/Ran, and Exploring/Explored.
 - States are awaiting approval, running, success, failed, denied, aborted, skipped, and interrupted. Interrupted states state that side effects are unknown.
 - Approval state is supplied by the interactive Policy Gate composition; it is not persisted as an Agent event.
-- Consecutive read, grep, find, and ls invocations in one Turn form an Exploring group without losing child identity, order, concurrency, or error state.
-- Preview output is at most five display rows, preserving head and tail with an omitted-row marker. Transcript View shows the complete normalized model-visible result, not raw Provider payloads or hidden overflow data.
+- One or more consecutive read, grep, find, and ls invocations in one Turn form an Exploring/Explored group without losing child identity, order, concurrency, or error state. The group uses one dim branch followed by aligned Read, List, and Search actions.
+- Preview output is at most five display rows, preserving head and tail with an omitted-row marker and the Codex-aligned `ctrl + t to view transcript` hint. Transcript View shows the complete normalized model-visible result, not raw Provider payloads or hidden overflow data.
 - Tool text is stripped of ANSI, OSC, C0, and C1 controls before presentation.
 - read/grep/find/ls render compact path/query/count/truncation summaries; edit renders a bounded before/after diff; write renders operation/path/bytes; bash renders command, bounded output, exit/signal/timeout/truncation, and duration.
 - Unknown tools use Calling/Called with compact arguments and bounded normalized output.

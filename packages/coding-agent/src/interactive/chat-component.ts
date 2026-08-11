@@ -31,6 +31,12 @@ import { extensionReferencesFromMarkers } from "./extension-references.ts";
 import type { ComposerExtensionReference, ComposerSubmission, UserShellSubmission } from "./input-types.ts";
 import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
+import {
+	type MainTimelineBlock,
+	type MainTimelineContentType,
+	spaceMainTimelineBlocks,
+	timelineEntryContentType,
+} from "./timeline-presentation.ts";
 import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
 import { isExplorationTool, renderExplorationGroup, renderToolInvocation } from "./tool-presentation.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
@@ -1165,7 +1171,10 @@ export class ChatComponent extends Component {
 			return cache.blocks;
 		}
 		this.#timelineAttachmentHitRegions = new Map();
-		const blocks: ViewportBlock[] = [];
+		const presentationBlocks: MainTimelineBlock[] = [];
+		const appendBlock = (block: ViewportBlock, contentType: MainTimelineContentType): void => {
+			presentationBlocks.push({ ...block, contentType });
+		};
 		for (let index = 0; index < entries.length; index++) {
 			const entry = entries[index];
 			if (!entry) continue;
@@ -1179,8 +1188,8 @@ export class ChatComponent extends Component {
 					group.push(candidate);
 					index++;
 				}
-				if (group.length > 1) {
-					blocks.push({
+				appendBlock(
+					{
 						id: `exploration:${entry.id}`,
 						lines: renderExplorationGroup(group, {
 							width,
@@ -1189,9 +1198,10 @@ export class ChatComponent extends Component {
 							theme: this.#theme,
 							motion: this.#options.motion ?? "full",
 						}),
-					});
-					continue;
-				}
+					},
+					"exploration",
+				);
+				continue;
 			}
 			const recovery =
 				entry.kind === "user"
@@ -1200,10 +1210,7 @@ export class ChatComponent extends Component {
 					: undefined;
 			const rendered = this.#renderTimelineBlock(entry, recovery, width, now);
 			this.#timelineAttachmentHitRegions.set(entry.id, rendered.regions);
-			blocks.push({
-				id: entry.id,
-				lines: rendered.lines,
-			});
+			appendBlock({ id: entry.id, lines: rendered.lines }, timelineEntryContentType(entry));
 		}
 		for (const card of this.#provisionalCards) {
 			const layout = renderUserCard(
@@ -1216,10 +1223,7 @@ export class ChatComponent extends Component {
 				this.#attachmentFocusKey,
 			);
 			this.#timelineAttachmentHitRegions.set(card.id, layout.regions);
-			blocks.push({
-				id: card.id,
-				lines: layout.lines,
-			});
+			appendBlock({ id: card.id, lines: layout.lines }, card.kind === "user_shell" ? "user_shell" : "user");
 		}
 		for (const card of this.#recoverableCards) {
 			if (card.messageId) continue;
@@ -1234,24 +1238,30 @@ export class ChatComponent extends Component {
 				this.#attachmentFocusKey,
 			);
 			this.#timelineAttachmentHitRegions.set(blockId, layout.regions);
-			blocks.push({
-				id: blockId,
-				lines: layout.lines,
-			});
+			appendBlock({ id: blockId, lines: layout.lines }, "user");
 		}
 		if (this.#error) {
-			blocks.push({
-				id: "run-error",
-				lines: wrapAnsi(this.#theme.style("error", `Error: ${sanitizeTerminalText(this.#error)}`), width),
-			});
+			appendBlock(
+				{
+					id: "run-error",
+					lines: wrapAnsi(this.#theme.style("error", `Error: ${sanitizeTerminalText(this.#error)}`), width),
+				},
+				"error",
+			);
 		}
 		if (this.#notice) {
-			blocks.push({
-				id: "command-notice",
-				lines: wrapAnsi(this.#theme.style("success", sanitizeTerminalText(this.#notice)), width),
-			});
+			appendBlock(
+				{
+					id: "command-notice",
+					lines: wrapAnsi(this.#theme.style("success", sanitizeTerminalText(this.#notice)), width),
+				},
+				"notice",
+			);
 		}
-		const snapshot = Object.freeze(blocks);
+		const blocks: readonly ViewportBlock[] = this.#transcriptMode
+			? presentationBlocks
+			: spaceMainTimelineBlocks(presentationBlocks);
+		const snapshot = Object.freeze([...blocks]);
 		if (
 			!this.#timeline.hasActiveTools &&
 			this.#provisionalCards.length === 0 &&
@@ -1538,7 +1548,7 @@ function renderTimelineEntry(
 		case "thinking": {
 			const thinkingWidth = theme.colorLevel === 0 ? Math.max(1, width - 2) : width;
 			const lines = markdown.render(entry.text, { width: thinkingWidth, phase: entry.phase });
-			if (theme.colorLevel > 0) return lines.map((line) => theme.style("muted", line));
+			if (theme.colorLevel > 0) return lines.map((line) => theme.style("thinking", line));
 			return ["Thinking", ...lines.map((line) => clipAnsi(`  ${line}`, width))];
 		}
 		case "tool":

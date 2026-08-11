@@ -14,6 +14,9 @@ export interface ToolRenderOptions {
 const MAIN_PREVIEW_ROWS = 5;
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
+// Main-Timeline geometry follows OpenAI Codex f93109615ff2. Coda retains its own Tool lifecycle,
+// approval, ordering, and Transcript View semantics rather than translating Codex's scrollback cells.
+
 export function isExplorationTool(entry: TimelineToolEntry): boolean {
 	return EXPLORATION_TOOLS.has(entry.invocation.toolName);
 }
@@ -24,24 +27,17 @@ export function renderExplorationGroup(
 ): readonly string[] {
 	if (entries.length === 0) return [];
 	const active = entries.some((entry) => entry.state === "running" || entry.state === "awaiting_approval");
-	const failures = entries.filter((entry) => entry.state !== "running" && entry.state !== "success").length;
-	const aggregateState: TimelineToolState = active ? "running" : failures > 0 ? "failed" : "success";
-	const glyph = styledStatusGlyph(aggregateState, options);
-	const title = `${active ? "Exploring" : "Explored"}${failures > 0 ? ` — ${failures} issue${failures === 1 ? "" : "s"}` : ""}`;
-	const lines = prefixedWrap(title, options.width, `${glyph} `, "  │ ");
-	for (const [index, entry] of entries.entries()) {
-		const terminal = entry.state !== "running" && entry.state !== "awaiting_approval";
-		const suffix = childStateSuffix(entry.state);
-		const branch = index === entries.length - 1 ? "  └ " : "  ├ ";
-		lines.push(
-			...prefixedWrap(
-				`${actionTitle(entry, terminal)}${suffix}`,
-				options.width,
-				options.theme.style(entry.state === "failed" ? "error" : "accent", branch),
-				"  │ ",
-			),
-		);
-	}
+	const failed = entries.some((entry) => entry.state !== "running" && entry.state !== "success");
+	const glyph = active ? styledStatusGlyph("running", options) : options.theme.style(failed ? "error" : "muted", "•");
+	const title = options.theme.style("strong", active ? "Exploring" : "Explored");
+	const lines = prefixedWrap(title, options.width, `${glyph} `, options.theme.style("muted", "  │ "));
+	const detailWidth = Math.max(1, options.width - 4);
+	const details = entries.flatMap((entry) => renderExplorationDetail(entry, detailWidth, options.theme));
+	lines.push(
+		...details.map((line, index) =>
+			clipAnsi(`${index === 0 ? options.theme.style("muted", "  └ ") : "    "}${line}`, options.width),
+		),
+	);
 	return lines;
 }
 
@@ -50,16 +46,152 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 		throw new RangeError("Tool presentation width must be a positive integer");
 	}
 	const bullet = styledStatusGlyph(entry.state, options);
-	const title = `${statusTitle(entry)}${durationSuffix(entry, options.now)}`;
-	const titleLines = prefixedWrap(title, options.width, `${bullet} `, "  │ ");
+	const duration = durationSuffix(entry, options.now);
+	const title = options.transcript
+		? `${statusTitle(entry)}${duration}`
+		: `${styledStatusTitle(entry, options.theme)}${duration ? options.theme.style("muted", duration) : ""}`;
+	const titleLines = prefixedWrap(
+		title,
+		options.width,
+		`${bullet} `,
+		options.transcript ? "  │ " : options.theme.style("muted", "  │ "),
+	);
 	const detailWidth = Math.max(1, options.width - 4);
 	let details = renderDetails(entry, detailWidth, options);
-	if (!options.transcript) details = truncatePreview(details, detailWidth);
+	if (!options.transcript) {
+		if (
+			details.length === 0 &&
+			entry.invocation.toolName === "bash" &&
+			entry.result &&
+			entry.state !== "running" &&
+			entry.state !== "awaiting_approval"
+		) {
+			details = ["(no output)"];
+		}
+		details = truncatePreview(details, detailWidth);
+		if (entry.invocation.toolName !== "edit") {
+			details = details.map((line) => options.theme.style("muted", line));
+		}
+	}
 	if (details.length === 0) return titleLines;
 	return [
 		...titleLines,
-		...details.map((line, index) => clipAnsi(`${index === 0 ? "  └ " : "    "}${line}`, options.width)),
+		...details.map((line, index) =>
+			clipAnsi(
+				`${index === 0 && !options.transcript ? options.theme.style("muted", "  └ ") : index === 0 ? "  └ " : "    "}${line}`,
+				options.width,
+			),
+		),
 	];
+}
+
+function styledStatusTitle(entry: TimelineToolEntry, theme: TuiTheme): string {
+	const present = actionParts(entry, false);
+	const past = actionParts(entry, true);
+	const action = (parts: ToolActionParts) => {
+		const subject = parts.code ? theme.style("code", parts.subject) : parts.subject;
+		return `${theme.style("strong", parts.verb)}${subject ? ` ${subject}` : ""}`;
+	};
+	switch (entry.state) {
+		case "awaiting_approval":
+			return `${theme.style("strong", "Awaiting approval")} — ${action(present)}`;
+		case "running":
+			return action(present);
+		case "success":
+			return action(past);
+		case "failed":
+			return `${action(past)} ${theme.style("error", "— failed")}`;
+		case "denied":
+			return `${theme.style("strong", "Denied")} — ${action(present)}`;
+		case "aborted":
+			return `${theme.style("strong", "Aborted")} — ${action(present)}`;
+		case "skipped":
+			return `${theme.style("strong", "Skipped")} — ${action(present)}`;
+		case "interrupted":
+			return `${theme.style("strong", "Interrupted")} — ${action(present)}; side effects unknown`;
+	}
+}
+
+interface ToolActionParts {
+	readonly verb: string;
+	readonly subject: string;
+	readonly code?: boolean;
+}
+
+function actionParts(entry: TimelineToolEntry, completed: boolean): ToolActionParts {
+	const { arguments: arguments_, toolName } = entry.invocation;
+	const path = argumentString(arguments_, "path", ".");
+	switch (toolName) {
+		case "read":
+			return { verb: completed ? "Read" : "Reading", subject: path };
+		case "grep": {
+			const pattern = argumentString(arguments_, "pattern", "");
+			return { verb: completed ? "Searched" : "Searching", subject: `“${pattern}” in ${path}` };
+		}
+		case "find": {
+			const pattern = argumentString(arguments_, "pattern", "*");
+			return { verb: completed ? "Explored" : "Exploring", subject: `${pattern} in ${path}` };
+		}
+		case "ls":
+			return { verb: completed ? "Explored" : "Exploring", subject: path };
+		case "edit":
+			return { verb: completed ? "Edited" : "Editing", subject: path };
+		case "write":
+			return { verb: completed ? "Wrote" : "Writing", subject: path };
+		case "bash":
+			return {
+				verb: completed ? "Ran" : "Running",
+				subject: sanitizeInline(argumentString(arguments_, "command", "(empty command)")),
+				code: true,
+			};
+		default: {
+			const name = sanitizeInline(toolName);
+			const argumentsSummary = compactArguments(arguments_);
+			return {
+				verb: completed ? "Called" : "Calling",
+				subject: `${name}${argumentsSummary ? ` ${argumentsSummary}` : ""}`,
+			};
+		}
+	}
+}
+
+function renderExplorationDetail(entry: TimelineToolEntry, width: number, theme: TuiTheme): string[] {
+	const { arguments: arguments_, toolName } = entry.invocation;
+	const path = argumentString(arguments_, "path", ".");
+	let verb: string;
+	let subject: string;
+	switch (toolName) {
+		case "read":
+			verb = "Read";
+			subject = path;
+			break;
+		case "grep": {
+			verb = "Search";
+			const pattern = argumentString(arguments_, "pattern", "");
+			subject = `${pattern}${theme.style("muted", " in ")}${path}`;
+			break;
+		}
+		case "find": {
+			verb = "List";
+			const pattern = argumentString(arguments_, "pattern", "*");
+			subject = `${pattern}${theme.style("muted", " in ")}${path}`;
+			break;
+		}
+		case "ls":
+			verb = "List";
+			subject = path;
+			break;
+		default:
+			verb = "Run";
+			subject = sanitizeInline(toolName);
+	}
+	const suffix = childStateSuffix(entry.state);
+	const suffixTone: ThemeTone = entry.state === "failed" ? "error" : "warning";
+	const styledSuffix = suffix ? theme.style(suffixTone, suffix) : "";
+	const prefix = `${theme.style("accent", verb)} `;
+	const prefixWidth = displayWidth(prefix);
+	const wrapped = wrapAnsi(`${subject}${styledSuffix}`, Math.max(1, width - prefixWidth));
+	return wrapped.map((line, index) => `${index === 0 ? prefix : " ".repeat(prefixWidth)}${line}`);
 }
 
 function statusTitle(entry: TimelineToolEntry): string {
@@ -296,7 +428,7 @@ function truncatePreview(lines: readonly string[], width: number): string[] {
 	return [
 		lines[0] ?? "",
 		lines[1] ?? "",
-		clipAnsi(`… +${hidden} lines (Ctrl+T for transcript)`, width),
+		clipAnsi(`… +${hidden} lines (ctrl + t to view transcript)`, width),
 		lines.at(-2) ?? "",
 		lines.at(-1) ?? "",
 	];
@@ -304,7 +436,7 @@ function truncatePreview(lines: readonly string[], width: number): string[] {
 
 function prefixedWrap(value: string, width: number, firstPrefix: string, continuationPrefix: string): string[] {
 	const contentWidth = Math.max(1, width - Math.max(displayWidth(firstPrefix), displayWidth(continuationPrefix)));
-	const wrapped = wrapAnsi(sanitizeTerminalText(value), contentWidth);
+	const wrapped = wrapAnsi(value, contentWidth);
 	return wrapped.map((line, index) => clipAnsi(`${index === 0 ? firstPrefix : continuationPrefix}${line}`, width));
 }
 

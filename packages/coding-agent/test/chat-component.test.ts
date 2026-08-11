@@ -360,6 +360,128 @@ describe("ChatComponent terminal input", () => {
 		expect(plain).not.toContain("Coda: rich assistant");
 	});
 
+	it("spaces semantic type changes only in the main Timeline", () => {
+		const markdown: MarkdownRenderer = { render: (source) => [source] };
+		const component = createComponent({ colorLevel: 1, markdownRenderer: markdown });
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: {
+					id: "user-spacing",
+					message: { role: "user", content: "question", timestamp: 1 },
+				},
+			}),
+		);
+		component.accept(
+			assistantContentEvent(1, [
+				{ type: "thinking", thinking: "reasoning" },
+				{
+					type: "text",
+					text: "commentary",
+					textSignature: '{"v":1,"id":"commentary","phase":"commentary"}',
+				},
+				{
+					type: "text",
+					text: "final",
+					textSignature: '{"v":1,"id":"final","phase":"final_answer"}',
+				},
+			]),
+		);
+
+		const border = "─".repeat(40);
+		const main = stripAnsi(component.render({ width: 40, height: 20, now: 0 }).join("\n"));
+		expect(main).toContain([border, "question", border, "", "reasoning", "", "commentary", "", "final"].join("\n"));
+
+		component.handleInput(key("t", { control: true }), { requestImmediateRender: vi.fn() });
+		const transcript = stripAnsi(component.render({ width: 40, height: 20, now: 0 }).join("\n"));
+		expect(transcript).toContain([border, "question", border, "reasoning", "commentary", "final"].join("\n"));
+	});
+
+	it("does not add spacing solely for internal Turn boundaries", () => {
+		const markdown: MarkdownRenderer = { render: (source) => [source] };
+		const component = createComponent({ markdownRenderer: markdown });
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-1",
+				attemptId: "attempt-1",
+				message: {
+					id: "message-turn-1",
+					message: { role: "assistant", content: [{ type: "text", text: "first" }] },
+				},
+			}),
+		);
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-2",
+				attemptId: "attempt-2",
+				message: {
+					id: "message-turn-2",
+					message: { role: "assistant", content: [{ type: "text", text: "second" }] },
+				},
+			}),
+		);
+
+		const plain = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
+		expect(plain).toContain("first\nsecond");
+		expect(plain).not.toContain("first\n\nsecond");
+	});
+
+	it("renders even one read-only Tool Invocation as a Codex-style Explored batch", () => {
+		const component = createComponent({ colorLevel: 0 });
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-read",
+				attemptId: "attempt-read",
+				message: {
+					id: "message-read",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "provider-read", name: "read", arguments: { path: "a.ts" } }],
+					},
+				},
+			}),
+		);
+		const invocation = {
+			id: "tool-read",
+			resultMessageId: "result-read",
+			providerToolCallId: "provider-read",
+			toolName: "read",
+			arguments: { path: "a.ts" },
+			sourceIndex: 0,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-read", invocation }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-read",
+				invocation,
+				outcome: "success",
+				result: {
+					id: "result-read",
+					message: {
+						role: "toolResult",
+						toolCallId: "provider-read",
+						toolName: "read",
+						content: [{ type: "text", text: "contents" }],
+						isError: false,
+						timestamp: 2,
+					},
+				},
+			}),
+		);
+
+		const main = stripAnsi(component.render({ width: 40, height: 12, now: 2 }).join("\n"));
+		expect(main).toContain("• Explored\n  └ Read a.ts");
+
+		component.handleInput(key("t", { control: true }), { requestImmediateRender: vi.fn() });
+		const transcript = stripAnsi(component.render({ width: 40, height: 12, now: 2 }).join("\n"));
+		expect(transcript).toContain("✓ Read a.ts");
+	});
+
 	it("renders a submitted multiline User Prompt in a muted border card without a label", () => {
 		const component = createComponent({ colorLevel: 0 });
 		component.accept(
@@ -905,7 +1027,7 @@ describe("ChatComponent terminal input", () => {
 		expect(plain.match(/repair me/g)).toHaveLength(2);
 	});
 
-	it("distinguishes Thinking by muted color or a NO_COLOR marker", () => {
+	it("distinguishes Thinking by dim italic text or a NO_COLOR marker", () => {
 		const colored = createComponent({ colorLevel: 1 });
 		colored.accept(
 			assistantContentEvent(1, [
@@ -914,7 +1036,7 @@ describe("ChatComponent terminal input", () => {
 			]),
 		);
 		const coloredFrame = colored.render({ width: 60, height: 10, now: 0 }).join("\n");
-		expect(coloredFrame).toContain("\x1b[2m");
+		expect(coloredFrame).toContain("\x1b[2;3m");
 		expect(stripAnsi(coloredFrame)).toContain("considering");
 
 		const noColor = createComponent({ colorLevel: 0 });
@@ -944,7 +1066,7 @@ describe("ChatComponent terminal input", () => {
 			{ needle: "@coda/ai", state: { muted: true, foreground: 36 } },
 			{ needle: "layer", state: { muted: true, foreground: undefined } },
 			{ needle: "inner", state: { muted: true, bold: true, italic: true } },
-			{ needle: "outer-tail", state: { muted: true, bold: true, italic: false } },
+			{ needle: "outer-tail", state: { muted: true, bold: true, italic: true } },
 			{ needle: "final-tail", state: { muted: true, bold: false } },
 			{ needle: "wrapped-strong", state: { muted: true, bold: true } },
 			{ needle: "after-wrap", state: { muted: true, bold: false } },

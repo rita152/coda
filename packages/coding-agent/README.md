@@ -157,8 +157,8 @@ npm run test:e2e
 - exact filesystem, command-prefix, host-network, one-shot, process-local Session, and persistent-rule decisions
 - appearance-aware Codex-layout command Approval Bar with safe prefix grants, cancel-to-feedback, and compact Tool Timeline audit
 - OS-enforced macOS/Linux Sandbox execution for every model-started process and exact approved file mutation
-- full-screen semantic Timeline with CommonMark/GFM Assistant and Thinking content
-- Codex-inspired structured Tool Invocation presentation and Transcript View
+- full-screen semantic Timeline with type-aware main-view rhythm, CommonMark/GFM Assistant content, and full dim-italic Thinking content
+- source-pinned Codex-aligned main-view Tool/Explored presentation and a dense full-detail Transcript View
 - bounded image attachments with Kitty preview and system-viewer fallback
 - Pi-style multiline Composer and matching sent-Prompt cards
 - current-Session Prompt History with visual-row Up/Down navigation and exact draft restoration

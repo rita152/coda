@@ -45,7 +45,7 @@ describe("Tool Invocation presentation", () => {
 		expect(plain.slice(1)).toEqual([
 			"  └ line 1",
 			"    line 2",
-			"    … +6 lines (Ctrl+T for transcript)",
+			"    … +6 lines (ctrl + t to view transcript)",
 			"    line 9",
 			"    line 10",
 		]);
@@ -165,18 +165,40 @@ describe("Tool Invocation presentation", () => {
 			...toolEntry("grep", { pattern: "TODO", path: "src" }, "failed"),
 			turnId: "turn-1",
 		};
-		const plain = renderExplorationGroup([read, grep], {
+		const rendered = renderExplorationGroup([read, grep], {
 			width: 60,
 			now: 1_000,
 			transcript: false,
 			theme: createCodaTheme(0),
-		})
-			.map(stripAnsi)
-			.join("\n");
+		}).map(stripAnsi);
 
-		expect(plain).toContain("• Explored — 1 issue");
-		expect(plain).toContain("├ Read a.ts");
-		expect(plain).toContain("└ Searched “TODO” in src — failed");
+		expect(rendered).toEqual(["• Explored", "  └ Read a.ts", "    Search TODO in src — failed"]);
+	});
+
+	it("matches Codex emphasis for action headers, command text, gutters, and output", () => {
+		const lines = renderToolInvocation(toolEntry("bash", { command: "npm test" }, "success", "passed"), {
+			width: 60,
+			now: 1_000,
+			transcript: false,
+			theme: createCodaTheme(1),
+		});
+
+		expect(lines[0]).toContain("\x1b[1mRan\x1b[0m");
+		expect(lines[0]).toContain("\x1b[36mnpm test\x1b[0m");
+		expect(lines[0]).toContain("\x1b[1;32m•\x1b[0m");
+		expect(lines[1]).toContain("\x1b[2m  └ \x1b[0m");
+		expect(lines[1]).toContain("\x1b[2mpassed\x1b[0m");
+	});
+
+	it("shows the Codex no-output affordance for a completed command in the main Timeline", () => {
+		const lines = renderToolInvocation(toolEntry("bash", { command: "true" }, "success", ""), {
+			width: 40,
+			now: 1_000,
+			transcript: false,
+			theme: createCodaTheme(0),
+		}).map(stripAnsi);
+
+		expect(lines).toEqual(["• Ran true", "  └ (no output)"]);
 	});
 
 	it("synthesizes Tool Result image filenames and warns when the Provider only sends placeholders", () => {

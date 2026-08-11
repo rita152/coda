@@ -1,6 +1,6 @@
 import { type ColorLevel, styleAnsi, type TerminalAppearance } from "@coda/tui";
 
-export type ThemeTone = "accent" | "success" | "error" | "warning" | "muted" | "code";
+export type ThemeTone = "accent" | "success" | "error" | "warning" | "muted" | "code" | "strong" | "thinking";
 export type ThemeSurface = "panel" | "selection";
 export type ThemeSurfaceTone = "normal" | "muted" | "accent" | "warning" | "strong" | "emphasis" | "code";
 
@@ -67,6 +67,8 @@ const SGR_BY_TONE: Readonly<Record<ThemeTone, string>> = Object.freeze({
 	warning: "33",
 	muted: "2",
 	code: "36",
+	strong: "1",
+	thinking: "2;3",
 });
 
 const EDITOR_BORDER_RGB: Readonly<Record<string, readonly [number, number, number]>> = Object.freeze({

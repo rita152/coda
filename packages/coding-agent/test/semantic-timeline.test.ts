@@ -113,6 +113,40 @@ describe("SemanticTimeline", () => {
 		expect(timeline.entries.map((entry) => entry.kind)).toEqual(["thinking", "assistant"]);
 	});
 
+	it("preserves commentary and final-answer phases from versioned text signatures", () => {
+		const timeline = new SemanticTimeline();
+		timeline.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-1",
+				attemptId: "attempt-1",
+				message: assistant("assistant-1", [
+					{
+						type: "text",
+						text: "Checking",
+						textSignature: '{"v":1,"id":"commentary-1","phase":"commentary"}',
+					},
+					{
+						type: "text",
+						text: "Complete",
+						textSignature: '{"v":1,"id":"final-1","phase":"final_answer"}',
+					},
+					{ type: "text", text: "Fallback", textSignature: "legacy-provider-id" },
+				]),
+			}),
+		);
+
+		expect(
+			timeline.entries.map((entry) =>
+				entry.kind === "assistant" ? [entry.text, entry.textPhase] : [entry.kind, undefined],
+			),
+		).toEqual([
+			["Checking", "commentary"],
+			["Complete", "final_answer"],
+			["Fallback", undefined],
+		]);
+	});
+
 	it("hydrates committed history without exposing Tool Result messages as duplicate cards", () => {
 		const seed: AgentSeed = {
 			version: 1,
