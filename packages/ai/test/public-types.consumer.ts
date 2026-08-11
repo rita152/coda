@@ -114,6 +114,7 @@ import type {
 	RefreshModelsContext,
 	SessionAffinityFormat,
 	SimpleStreamOptions,
+	SkillReferenceContent,
 	Sleeper,
 	Static,
 	StopReason,
@@ -269,6 +270,7 @@ export interface PublicTypeConsumption {
 	readonly RefreshModelsContext: RefreshModelsContext;
 	readonly SessionAffinityFormat: SessionAffinityFormat;
 	readonly SimpleStreamOptions: SimpleStreamOptions;
+	readonly SkillReferenceContent: SkillReferenceContent;
 	readonly Sleeper: Sleeper;
 	readonly Static: Static<TSchema>;
 	readonly StopReason: StopReason;

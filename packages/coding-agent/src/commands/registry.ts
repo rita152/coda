@@ -36,10 +36,16 @@ export class CommandRegistry {
 		};
 	}
 
+	findById(id: string): CommandDefinition | undefined {
+		return this.#commands.get(id)?.command;
+	}
+
 	search(query: string, options: CommandSearchOptions = { location: "composer_start" }): readonly CommandMatch[] {
 		const normalizedQuery = normalize(query);
 		const matches = [...this.#commands.values()]
-			.filter((registered) => isEligible(registered.command, options))
+			.filter(
+				(registered) => registered.command.visibleInPalette !== false && isEligible(registered.command, options),
+			)
 			.flatMap((registered) => {
 				const kind = matchKind(registered.command.name, normalizedQuery);
 				return kind ? [{ ...registered, kind }] : [];

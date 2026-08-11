@@ -78,11 +78,14 @@ function responseCallId(id: string): { callId: string; itemId?: string } {
 
 function inputText(content: Extract<Context["messages"][number], { role: "user" }>["content"]): unknown[] {
 	if (typeof content === "string") return [{ type: "input_text", text: content }];
-	return content.map((block) =>
-		block.type === "text"
-			? { type: "input_text", text: block.text }
-			: { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}`, detail: "auto" },
-	);
+	return content.flatMap((block) => {
+		if (block.type === "skill") return [];
+		return [
+			block.type === "text"
+				? { type: "input_text", text: block.text }
+				: { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}`, detail: "auto" },
+		];
+	});
 }
 
 function convertInput(context: Context): ResponseInput {

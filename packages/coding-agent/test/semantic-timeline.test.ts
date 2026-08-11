@@ -147,6 +147,60 @@ describe("SemanticTimeline", () => {
 		expect(tool?.result?.message.content).toEqual([{ type: "text", text: "contents" }]);
 	});
 
+	it("hides explicit Skill context from the user-facing text while retaining the Agent message", () => {
+		const content = [
+			"BEGIN USER-SELECTED SKILL CONTEXT",
+			'{"name":"code-review"}',
+			"private Skill guidance",
+			"END USER-SELECTED SKILL CONTEXT",
+			"review this project",
+		].join("\n");
+		const timeline = new SemanticTimeline({
+			version: 1,
+			pendingFollowUps: [],
+			messages: [
+				{
+					id: "user-skill" as MessageId,
+					message: { role: "user", content, timestamp: 1 },
+				},
+			],
+		});
+
+		const [entry] = timeline.entries;
+		expect(entry).toMatchObject({ kind: "user", text: "review this project" });
+		if (entry?.kind !== "user") throw new Error("Expected a user timeline entry");
+		expect(entry.message.content).toBe(content);
+	});
+
+	it("keeps a directly referenced Skill visible while hiding its injected body", () => {
+		const context = [
+			"BEGIN USER-SELECTED SKILL CONTEXT",
+			'{"name":"grillme","path":"/workspace/.agents/skills/grillme/SKILL.md"}',
+			"private Skill guidance",
+			"END USER-SELECTED SKILL CONTEXT",
+		].join("\n");
+		const content = [
+			{ type: "skill" as const, name: "grillme", path: "/workspace/.agents/skills/grillme/SKILL.md" },
+			{ type: "text" as const, text: context },
+			{ type: "text" as const, text: "review this project" },
+		];
+		const timeline = new SemanticTimeline({
+			version: 1,
+			pendingFollowUps: [],
+			messages: [
+				{
+					id: "user-grillme" as MessageId,
+					message: { role: "user", content, timestamp: 1 },
+				},
+			],
+		});
+
+		const [entry] = timeline.entries;
+		expect(entry).toMatchObject({ kind: "user", text: "$grillme review this project" });
+		if (entry?.kind !== "user") throw new Error("Expected a user timeline entry");
+		expect(entry.message.content).toEqual(content);
+	});
+
 	it("does not fabricate a Coda Tool Invocation identity for provider-only restored calls", () => {
 		const timeline = new SemanticTimeline({
 			version: 1,

@@ -4,7 +4,16 @@
 // SPDX-License-Identifier: MIT
 // See THIRD_PARTY_NOTICES.md.
 
-import type { AssistantMessage, Context, ImageContent, Message, TextContent, Tool, Usage } from "../types.ts";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	SkillReferenceContent,
+	TextContent,
+	Tool,
+	Usage,
+} from "../types.ts";
 
 export interface ContextUsageEstimate {
 	tokens: number;
@@ -28,10 +37,15 @@ function safeJsonStringify(value: unknown): string {
 	}
 }
 
-function estimateTextAndImageContentChars(content: string | Array<TextContent | ImageContent>): number {
+function estimateTextAndImageContentChars(
+	content: string | Array<TextContent | ImageContent | SkillReferenceContent>,
+): number {
 	if (typeof content === "string") return content.length;
 	let chars = 0;
-	for (const block of content) chars += block.type === "text" ? block.text.length : ESTIMATED_IMAGE_CHARS;
+	for (const block of content) {
+		if (block.type === "text") chars += block.text.length;
+		else if (block.type === "image") chars += ESTIMATED_IMAGE_CHARS;
+	}
 	return chars;
 }
 
@@ -39,7 +53,9 @@ function estimateTextTokens(text: string): number {
 	return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
-function estimateTextAndImageContentTokens(content: string | Array<TextContent | ImageContent>): number {
+function estimateTextAndImageContentTokens(
+	content: string | Array<TextContent | ImageContent | SkillReferenceContent>,
+): number {
 	return Math.ceil(estimateTextAndImageContentChars(content) / CHARS_PER_TOKEN);
 }
 

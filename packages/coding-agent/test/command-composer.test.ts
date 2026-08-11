@@ -101,6 +101,26 @@ describe("CommandComposer", () => {
 		]);
 	});
 
+	it("inserts a selected Skill as a Codex-style $ mention with a structured reference", () => {
+		const registry = new CommandRegistry();
+		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));
+		const editor = new Editor();
+		const composer = new CommandComposer(registry, editor);
+
+		composer.insertSkillReference("skill:review");
+
+		expect(editor.text).toBe("$review ");
+		expect(composer.extensionReferences).toMatchObject([
+			{
+				commandId: "skill:review",
+				source: "skill",
+				name: "review",
+				start: 0,
+				end: "$review".length,
+			},
+		]);
+	});
+
 	it("invalidates an edited extension token and restores its identity on undo", () => {
 		const registry = new CommandRegistry();
 		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));

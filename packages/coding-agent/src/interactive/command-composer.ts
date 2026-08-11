@@ -54,6 +54,22 @@ export class CommandComposer {
 		return extensionReferencesFromMarkers(this.#editor.markers);
 	}
 
+	/** Inserts a selected Skill as a visible mention while retaining its structured command identity. */
+	insertSkillReference(commandId: string): void {
+		const command = this.#registry.findById(commandId);
+		if (!command || command.source !== "skill" || command.kind !== "extension") {
+			throw new Error(`Unknown Skill command: ${commandId}`);
+		}
+		const start = this.#editor.cursorOffset;
+		const prefix = start > 0 && !/\s/u.test(this.#editor.text[start - 1] ?? "") ? " " : "";
+		const token = `$${command.name}`;
+		this.#editor.replaceRange(start, start, `${prefix}${token} `);
+		addExtensionReference(this.#editor, command, start + prefix.length, start + prefix.length + token.length);
+		this.#selectionKey = undefined;
+		this.#dismissedKey = undefined;
+		this.#rawPromptSignature = this.#editorSignature();
+	}
+
 	get palette(): CommandPalette | undefined {
 		const active = this.#activePalette();
 		if (!active) return undefined;

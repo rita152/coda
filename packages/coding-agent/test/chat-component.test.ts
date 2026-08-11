@@ -151,6 +151,44 @@ describe("ChatComponent terminal input", () => {
 		expect(frame).toContain("opencode-go/model");
 	});
 
+	it("opens /skill as a picker and writes the selected Skill mention into the Composer", () => {
+		let component!: ChatComponent;
+		const onCommand = vi.fn((commandId: string, flow: CommandFlowHost) => {
+			expect(commandId).toBe("core:skill");
+			flow.open({
+				id: "skill-selection",
+				title: "Select Skill",
+				items: [
+					{
+						id: "review",
+						label: "$review",
+						onSelect: (navigation) => {
+							component.insertSkillReference("skill:review");
+							navigation.close();
+						},
+					},
+				],
+			});
+		});
+		component = createComponent({
+			colorLevel: 0,
+			onCommand,
+			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "/skill" }, context);
+		component.handleInput(key("enter"), context);
+		expect(onCommand).toHaveBeenCalledOnce();
+		expect(stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"))).toContain("Select Skill");
+
+		component.handleInput(key("enter"), context);
+
+		const frame = stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("$review");
+		expect(frame).not.toContain("Select Skill");
+	});
+
 	it("invokes the hidden /permissions alias through the command registry", () => {
 		const onSubmit = vi.fn();
 		const onCommand = vi.fn();

@@ -3,19 +3,17 @@ import { createSkills } from "@coda/skills";
 import type { CommandRegistry } from "../commands/registry.ts";
 import type { SlashExtensionEntry } from "../commands/unified-registry.ts";
 import { registerSlashExtension } from "../commands/unified-registry.ts";
-import { createCodingSkillsSnapshot } from "./inventory.ts";
-import type { CodingSkillOrigin, CodingSkillsSnapshot, WorkspaceSkillsTrustRecord } from "./types.ts";
+import { createCodingSkillsSnapshot } from "./snapshot.ts";
+import type { CodingSkillOrigin, CodingSkillsSnapshot } from "./types.ts";
 
 export interface CodingSkillsManagerOptions {
 	readonly fileSystem: SkillFileSystem;
-	readonly workspace: string;
 	readonly roots: readonly SkillRoot<CodingSkillOrigin>[];
 	readonly limits?: Parameters<typeof createSkills>[0]["limits"];
 }
 
 export class CodingSkillsManager {
 	readonly #runtime: Skills<CodingSkillOrigin>;
-	readonly #workspace: string;
 	readonly #roots: readonly SkillRoot<CodingSkillOrigin>[];
 	#current?: CodingSkillsSnapshot;
 	#dirty = true;
@@ -27,7 +25,6 @@ export class CodingSkillsManager {
 			fileSystem: options.fileSystem,
 			...(options.limits ? { limits: options.limits } : {}),
 		});
-		this.#workspace = options.workspace;
 		this.#roots = Object.freeze([...options.roots]);
 	}
 
@@ -44,22 +41,14 @@ export class CodingSkillsManager {
 		this.#dirtyGeneration++;
 	}
 
-	/**
-	 * Rescans by default so correctness never depends on watcher delivery. Callers may
-	 * reuse the loader snapshot after a trust-only settings change.
-	 */
+	/** Rescans by default so correctness never depends on watcher delivery. */
 	async refresh(
-		trustRecords: readonly WorkspaceSkillsTrustRecord[] = [],
 		options: { readonly rescan?: boolean; readonly signal?: AbortSignal } = {},
 	): Promise<CodingSkillsSnapshot> {
 		const operation = this.#refreshTail.then(async () => {
 			const rescan = options.rescan ?? true;
 			if (!rescan && !this.#dirty && this.#current) {
-				this.#current = createCodingSkillsSnapshot({
-					workspace: this.#workspace,
-					loader: this.#current.loader,
-					trustRecords,
-				});
+				this.#current = createCodingSkillsSnapshot({ loader: this.#current.loader });
 				return this.#current;
 			}
 			const dirtyGeneration = this.#dirtyGeneration;
@@ -69,9 +58,7 @@ export class CodingSkillsManager {
 				...(options.signal ? { signal: options.signal } : {}),
 			});
 			const snapshot = createCodingSkillsSnapshot({
-				workspace: this.#workspace,
 				loader,
-				trustRecords,
 			});
 			this.#current = snapshot;
 			this.#dirty = this.#dirtyGeneration !== dirtyGeneration;
@@ -92,13 +79,13 @@ function slashCompatible(name: string): boolean {
 /** Returns stable Composer entries: short winners and qualified collision alternatives. */
 export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly SlashExtensionEntry[] {
 	const shortAliasByName = new Map<string, SkillId>();
-	for (const entry of snapshot.admitted) {
+	for (const entry of snapshot.resolved) {
 		if (!shortAliasByName.has(entry.candidate.metadata.name)) {
 			shortAliasByName.set(entry.candidate.metadata.name, entry.candidate.id);
 		}
 	}
 	return Object.freeze(
-		snapshot.admitted.flatMap((entry) => {
+		snapshot.resolved.flatMap((entry) => {
 			const surfaceWinner = shortAliasByName.get(entry.candidate.metadata.name) === entry.candidate.id;
 			const name = surfaceWinner ? entry.candidate.metadata.name : entry.qualifiedName;
 			if (!slashCompatible(name)) return [];

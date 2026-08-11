@@ -76,7 +76,7 @@ function isComposerExtensionReferences(value: unknown, text: string): boolean {
 			reference.end > text.length ||
 			!reference.commandId.startsWith(`${reference.source}:`) ||
 			reference.commandId.length <= reference.source.length + 1 ||
-			text.slice(reference.start, reference.end) !== `/${reference.name}`
+			!isComposerReferenceToken(text.slice(reference.start, reference.end), reference.source, reference.name)
 		) {
 			return false;
 		}
@@ -84,6 +84,10 @@ function isComposerExtensionReferences(value: unknown, text: string): boolean {
 		previousEnd = reference.end;
 	}
 	return true;
+}
+
+function isComposerReferenceToken(text: string, source: "skill" | "mcp", name: string): boolean {
+	return text === `/${name}` || (source === "skill" && text === `$${name}`);
 }
 
 function isJsonValue(value: unknown): boolean {
@@ -235,6 +239,15 @@ function isImageContent(value: unknown): boolean {
 	);
 }
 
+function isSkillReferenceContent(value: unknown): boolean {
+	return (
+		exactRecord(value, ["type", "name", "path"]) &&
+		value.type === "skill" &&
+		isNonEmptyString(value.name) &&
+		isNonEmptyString(value.path)
+	);
+}
+
 function isMediaReference(value: unknown): boolean {
 	return (
 		exactRecord(value, ["type", "digest", "filename", "mimeType", "width", "height", "bytes", "rendition"]) &&
@@ -346,7 +359,10 @@ function isUserMessage(value: unknown, version: SessionFormatVersion): boolean {
 		(typeof value.content === "string" ||
 			(Array.isArray(value.content) &&
 				value.content.every(
-					(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
+					(entry) =>
+						isTextContent(entry) ||
+						isSkillReferenceContent(entry) ||
+						(version === 1 ? isImageContent(entry) : isMediaReference(entry)),
 				))) &&
 		isFiniteNumber(value.timestamp)
 	);
@@ -415,7 +431,10 @@ function isAgentInput(value: unknown, version: SessionFormatVersion): boolean {
 		typeof value === "string" ||
 		(Array.isArray(value) &&
 			value.every(
-				(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
+				(entry) =>
+					isTextContent(entry) ||
+					isSkillReferenceContent(entry) ||
+					(version === 1 ? isImageContent(entry) : isMediaReference(entry)),
 			))
 	);
 }

@@ -19,7 +19,7 @@ import { createModelCommandFlow, type ModelCommandEntry } from "../commands/mode
 import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
-import { createSkillsCommandFlow } from "../commands/skills-flow.ts";
+import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
@@ -69,7 +69,6 @@ export interface InteractiveSessionOptions {
 	readonly skillsCommand?: {
 		readonly snapshot: () => Promise<CodingSkillsSnapshot>;
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
-		readonly trust: () => Promise<CodingSkillsSnapshot>;
 	};
 	readonly mcpCommand?: McpCommandFlowOptions;
 	readonly reasoning: string;
@@ -297,7 +296,19 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 						createSkillsCommandFlow({
 							snapshot: await sessionOptions.skillsCommand.snapshot(),
 							onRefresh: sessionOptions.skillsCommand.refresh,
-							onTrust: sessionOptions.skillsCommand.trust,
+						}),
+					);
+					return;
+				}
+				if (commandId === "core:skill") {
+					if (!sessionOptions.skillsCommand) throw new Error("Skill selection is unavailable");
+					flow.open(
+						createSkillSelectionCommandFlow({
+							snapshot: await sessionOptions.skillsCommand.snapshot(),
+							onSelect: (selectedCommandId, navigation) => {
+								component.insertSkillReference(selectedCommandId);
+								navigation.close();
+							},
 						}),
 					);
 					return;
@@ -590,7 +601,19 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 					createSkillsCommandFlow({
 						snapshot: await options.skillsCommand.snapshot(),
 						onRefresh: options.skillsCommand.refresh,
-						onTrust: options.skillsCommand.trust,
+					}),
+				);
+				return;
+			}
+			if (commandId === "core:skill") {
+				if (!options.skillsCommand) throw new Error("Skill selection is unavailable");
+				flow.open(
+					createSkillSelectionCommandFlow({
+						snapshot: await options.skillsCommand.snapshot(),
+						onSelect: (selectedCommandId, navigation) => {
+							component.insertSkillReference(selectedCommandId);
+							navigation.close();
+						},
 					}),
 				);
 				return;

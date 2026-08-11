@@ -16,36 +16,6 @@ export interface CodingSkillOrigin {
 	readonly priority: number;
 }
 
-export interface WorkspaceSkillInventoryItem {
-	readonly id: string;
-	readonly path: string;
-	readonly revision: string;
-}
-
-export interface WorkspaceSkillsTrustRecord {
-	readonly workspace: string;
-	readonly sha256: string;
-	readonly inventory: readonly WorkspaceSkillInventoryItem[];
-}
-
-export interface WorkspaceSkillsInventoryDiff {
-	readonly added: readonly WorkspaceSkillInventoryItem[];
-	readonly removed: readonly WorkspaceSkillInventoryItem[];
-	readonly changed: readonly {
-		readonly before: WorkspaceSkillInventoryItem;
-		readonly after: WorkspaceSkillInventoryItem;
-	}[];
-}
-
-export interface WorkspaceSkillsInventory {
-	readonly workspace: string;
-	readonly sha256: string;
-	readonly complete: boolean;
-	readonly items: readonly WorkspaceSkillInventoryItem[];
-	readonly trust: "not-required" | "trusted" | "untrusted" | "incomplete";
-	readonly diff: WorkspaceSkillsInventoryDiff;
-}
-
 export interface ResolvedCodingSkill {
 	readonly candidate: SkillCandidate<CodingSkillOrigin>;
 	readonly origin: CodingSkillOrigin;
@@ -66,9 +36,8 @@ export interface CodingSkillDiagnostic {
 
 export interface CodingSkillsSnapshot {
 	readonly loader: SkillsSnapshot<CodingSkillOrigin>;
-	readonly inventory: WorkspaceSkillsInventory;
 	readonly candidates: readonly SkillCandidate<CodingSkillOrigin>[];
-	readonly admitted: readonly ResolvedCodingSkill[];
+	readonly resolved: readonly ResolvedCodingSkill[];
 	readonly byId: ReadonlyMap<SkillId, ResolvedCodingSkill>;
 	readonly diagnostics: readonly (CodingSkillDiagnostic | SkillDiagnostic<CodingSkillOrigin>)[];
 	activate(

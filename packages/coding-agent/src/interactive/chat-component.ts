@@ -22,6 +22,7 @@ import type { CommandDefinition } from "../commands/types.ts";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
+import { renderVisibleUserText } from "../skills/context.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
@@ -245,6 +246,13 @@ export class ChatComponent extends Component {
 	setModelPresentation(modelLabel: string, reasoning: string): void {
 		this.#modelLabel = modelLabel;
 		this.#reasoning = reasoning;
+		this.invalidate();
+	}
+
+	insertSkillReference(commandId: string): void {
+		this.#commands.insertSkillReference(commandId);
+		this.#history.noteTextMutation();
+		this.#error = undefined;
 		this.invalidate();
 	}
 
@@ -1521,11 +1529,7 @@ function renderUserCard(
 }
 
 function followUpText(item: FollowUp): string {
-	if (typeof item.content === "string") return item.content;
-	return item.content
-		.filter((block): block is Extract<(typeof item.content)[number], { type: "text" }> => block.type === "text")
-		.map((block) => block.text)
-		.join("");
+	return renderVisibleUserText(item.content);
 }
 
 function recoverableStatus(card: RecoverablePromptCard): string {

@@ -6,8 +6,8 @@ import type { CodingSkillsSnapshot } from "../../src/skills/types.ts";
 describe("RunSkillsCoordinator", () => {
 	it("uses a unique in-band binding so an abandoned identical activation cannot steal a later snapshot", () => {
 		const coordinator = new RunSkillsCoordinator();
-		const first = { inventory: { sha256: "first" } } as CodingSkillsSnapshot;
-		const second = { inventory: { sha256: "second" } } as CodingSkillsSnapshot;
+		const first = {} as CodingSkillsSnapshot;
+		const second = {} as CodingSkillsSnapshot;
 		const firstBinding = coordinator.createBinding();
 		const firstInput = `context ${firstBinding}\nsame task`;
 		coordinator.prepare(firstInput, first, firstBinding);

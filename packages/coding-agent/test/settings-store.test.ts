@@ -37,19 +37,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			workspaceSkillsTrust: [
-				{
-					workspace: "/workspace",
-					sha256: "a".repeat(64),
-					inventory: [
-						{
-							id: `skill:${"b".repeat(32)}`,
-							path: "/workspace/.agents/skills/review/SKILL.md",
-							revision: "c".repeat(64),
-						},
-					],
-				},
-			],
 			mcpServers: [
 				{
 					id: "docs",
@@ -95,19 +82,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			workspaceSkillsTrust: [
-				{
-					workspace: "/workspace",
-					sha256: "a".repeat(64),
-					inventory: [
-						{
-							id: `skill:${"b".repeat(32)}`,
-							path: "/workspace/.agents/skills/review/SKILL.md",
-							revision: "c".repeat(64),
-						},
-					],
-				},
-			],
 			mcpServers: [
 				{
 					id: "docs",
@@ -154,19 +128,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
-			workspaceSkillsTrust: [
-				{
-					workspace: "/workspace",
-					sha256: "a".repeat(64),
-					inventory: [
-						{
-							id: `skill:${"b".repeat(32)}`,
-							path: "/workspace/.agents/skills/review/SKILL.md",
-							revision: "c".repeat(64),
-						},
-					],
-				},
-			],
 			mcpServers: [
 				{
 					id: "docs",

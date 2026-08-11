@@ -27,6 +27,7 @@ function validInput(value: unknown): boolean {
 	return value.every((block) => {
 		if (!isRecord(block)) return false;
 		if (block.type === "text") return isNonEmptyString(block.text);
+		if (block.type === "skill") return isNonEmptyString(block.name) && isNonEmptyString(block.path);
 		return block.type === "image" && isNonEmptyString(block.data) && isNonEmptyString(block.mimeType);
 	});
 }

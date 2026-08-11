@@ -25,10 +25,18 @@ const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:skill",
+		name: "skill",
+		title: "Select Skill",
+		description: "Insert a Skill reference into the Composer",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:skills",
 		name: "skills",
 		title: "Skills",
-		description: "Inspect, refresh, and trust local Skills inventories",
+		description: "Inspect and refresh local Skills",
+		visibleInPalette: false,
 		kind: "control",
 	}),
 	coreCommand({
@@ -71,7 +79,7 @@ export function createCoreCommandRegistry(): CommandRegistry {
 
 function coreCommand(
 	options: Pick<CommandDefinition, "id" | "name" | "title" | "kind"> &
-		Partial<Pick<CommandDefinition, "aliases" | "description" | "arguments">>,
+		Partial<Pick<CommandDefinition, "aliases" | "description" | "arguments" | "visibleInPalette">>,
 ): CommandDefinition {
 	return Object.freeze({
 		...options,

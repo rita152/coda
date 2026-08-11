@@ -123,6 +123,32 @@ function reasoningSse(): string {
 // /packages/ai/test/openai-completions-reasoning-details.test.ts
 // /packages/ai/test/openai-completions-response-model.test.ts
 describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)", () => {
+	test("keeps injected Skill context but omits the structured Skill reference from provider input", () => {
+		const messages = convertMessages(model, {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "skill", name: "grillme", path: "/workspace/.agents/skills/grillme/SKILL.md" },
+						{ type: "text", text: "<skill>private guidance</skill>" },
+						{ type: "text", text: "review this project" },
+					],
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "<skill>private guidance</skill>" },
+					{ type: "text", text: "review this project" },
+				],
+			},
+		]);
+	});
+
 	test("streams text and tool calls through the pinned SDK using corrected compatibility fields", async () => {
 		let requestBody: Record<string, unknown> | undefined;
 		const mockFetch: FetchFunction = async (input, init) => {

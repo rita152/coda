@@ -6,10 +6,11 @@ import { createNodeFileSystem } from "../../src/host/node-file-system.ts";
 import { promptSkillCatalog } from "../../src/skills/catalog.ts";
 import {
 	activateExplicitSkillReferences,
+	prependSkillContext,
 	renderExplicitSkillContext,
+	renderExplicitSkillReferences,
 	sharedSkillArguments,
 } from "../../src/skills/context.ts";
-import { workspaceSkillsTrustRecord } from "../../src/skills/inventory.ts";
 import { CodingSkillsManager, skillExtensionEntries } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
 import { createSkillTool, modelVisibleSkillIds } from "../../src/skills/tool.ts";
@@ -36,7 +37,7 @@ async function fixture() {
 	await Promise.all([mkdir(workspace), mkdir(home)]);
 	const fileSystem = createNodeFileSystem();
 	const roots = await collectSkillRoots({ workspace, homeDirectory: home });
-	const manager = new CodingSkillsManager({ fileSystem, workspace, roots });
+	const manager = new CodingSkillsManager({ fileSystem, roots });
 	return { workspace, home, fileSystem, manager };
 }
 
@@ -47,8 +48,8 @@ describe("Skill activation context", () => {
 		await writeSkill(root, "one", "First body");
 		await writeSkill(root, "two", "Second body");
 		const snapshot = await value.manager.refresh();
-		const one = snapshot.admitted.find(({ candidate }) => candidate.metadata.name === "one")!;
-		const two = snapshot.admitted.find(({ candidate }) => candidate.metadata.name === "two")!;
+		const one = snapshot.resolved.find(({ candidate }) => candidate.metadata.name === "one")!;
+		const two = snapshot.resolved.find(({ candidate }) => candidate.metadata.name === "two")!;
 		const composerText = "/one /two do the work";
 		const references = [
 			{
@@ -73,13 +74,35 @@ describe("Skill activation context", () => {
 		const activations = await activateExplicitSkillReferences({ snapshot, references, composerText });
 		expect(activations.map(({ activation }) => activation.arguments)).toEqual(["do the work", "do the work"]);
 		const context = renderExplicitSkillContext(activations);
+		const input = prependSkillContext("do the work", context, renderExplicitSkillReferences(activations));
+		expect(input).toEqual([
+			{ type: "skill", name: "one", path: one.candidate.skillFile },
+			{ type: "skill", name: "two", path: two.candidate.skillFile },
+			{ type: "text", text: context },
+			{ type: "text", text: "do the work" },
+		]);
 		expect(context).toContain("First body");
 		expect(context).toContain("Second body");
 		expect(context).not.toContain("description: one workflow");
 		expect(context).toContain(String(one.candidate.revision));
 	});
 
-	it("exposes every admitted standard Skill and returns exact activation provenance", async () => {
+	it("accepts the Codex-style $ Skill mention token for a structured reference", () => {
+		expect(
+			sharedSkillArguments("$review finish the work", [
+				{
+					id: "ref:review",
+					commandId: `skill:${"1".repeat(32)}`,
+					source: "skill",
+					name: "review",
+					start: 0,
+					end: "$review".length,
+				},
+			]),
+		).toBe("finish the work");
+	});
+
+	it("exposes every discovered standard Skill and returns exact activation provenance", async () => {
 		const value = await fixture();
 		const root = join(value.home, ".agents", "skills");
 		await writeSkill(root, "visible", "Visible body");
@@ -108,7 +131,7 @@ describe("Skill activation context", () => {
 		const value = await fixture();
 		const path = await writeSkill(join(value.home, ".agents", "skills"), "stale", "Original body");
 		const snapshot = await value.manager.refresh();
-		const skill = snapshot.admitted[0]!;
+		const skill = snapshot.resolved[0]!;
 		await writeFile(path, "---\nname: stale\ndescription: changed\n---\n\nChanged body\n");
 
 		await expect(snapshot.activate(skill.candidate.id)).rejects.toThrow("changed after this snapshot");
@@ -124,7 +147,7 @@ describe("Skill activation context", () => {
 		);
 		const snapshot = await value.manager.refresh();
 
-		expect(modelVisibleSkillIds(snapshot)).toEqual([snapshot.admitted[0]!.candidate.id]);
+		expect(modelVisibleSkillIds(snapshot)).toEqual([snapshot.resolved[0]!.candidate.id]);
 		expect(skillExtensionEntries(snapshot).map(({ name }) => name)).toEqual(["portable"]);
 		expect(snapshot.diagnostics.filter(({ code }) => code === "unknown-field")).toHaveLength(2);
 	});
@@ -147,8 +170,7 @@ describe("Skill activation context", () => {
 		const value = await fixture();
 		await writeSkill(join(value.workspace, ".agents", "skills"), "shared", "Project body");
 		await writeSkill(join(value.home, ".agents", "skills"), "shared", "User body");
-		const untrusted = await value.manager.refresh();
-		const snapshot = await value.manager.refresh([workspaceSkillsTrustRecord(untrusted)], { rescan: false });
+		const snapshot = await value.manager.refresh();
 
 		const catalog = promptSkillCatalog(snapshot, 128_000).entries.filter(({ name }) => name === "shared");
 		expect(catalog).toHaveLength(2);

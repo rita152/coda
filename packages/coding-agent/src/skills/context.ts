@@ -1,7 +1,11 @@
 import type { AgentInput } from "@coda/agent";
+import type { ImageContent, SkillReferenceContent, TextContent } from "@coda/ai";
 import type { SkillActivation, SkillId } from "@coda/skills";
 import type { ComposerExtensionReference } from "../interactive/input-types.ts";
 import type { CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
+
+const USER_SELECTED_SKILL_CONTEXT_PATTERN =
+	/BEGIN USER-SELECTED SKILL CONTEXT[\s\S]*?END USER-SELECTED SKILL CONTEXT(?:\r?\n)*/gu;
 
 function header(
 	activation: SkillActivation<CodingSkillOrigin>,
@@ -44,6 +48,21 @@ export function renderExplicitSkillContext(
 	return `${sections.join("\n")}\n`;
 }
 
+/** Projects activated Skills into the user-message reference blocks shown by the Composer. */
+export function renderExplicitSkillReferences(
+	entries: readonly { readonly activation: SkillActivation<CodingSkillOrigin> }[],
+): readonly SkillReferenceContent[] {
+	return Object.freeze(
+		entries.map(({ activation }) =>
+			Object.freeze({
+				type: "skill" as const,
+				name: activation.candidate.metadata.name,
+				path: activation.candidate.skillFile,
+			}),
+		),
+	);
+}
+
 export function renderModelSkillResult(
 	activation: SkillActivation<CodingSkillOrigin>,
 	resolved: ResolvedCodingSkill,
@@ -57,7 +76,29 @@ export function renderModelSkillResult(
 	].join("\n");
 }
 
-/** Removes only structured Skill tokens; plain text that merely looks like a slash command is retained. */
+/** Removes the internal explicit-Skill envelope from user-facing text without changing the Agent input. */
+export function stripUserSelectedSkillContext(text: string): string {
+	return text.replace(USER_SELECTED_SKILL_CONTEXT_PATTERN, "");
+}
+
+/** Renders the user-facing projection of text, images, and direct Skill references. */
+export function renderVisibleUserText(
+	content: string | readonly (TextContent | ImageContent | SkillReferenceContent)[],
+): string {
+	if (typeof content === "string") return stripUserSelectedSkillContext(content);
+	return content
+		.map((block) =>
+			block.type === "skill"
+				? `$${block.name} `
+				: block.type === "text"
+					? stripUserSelectedSkillContext(block.text)
+					: "",
+		)
+		.join("")
+		.trimEnd();
+}
+
+/** Removes only structured Skill tokens; plain text that merely looks like a command is retained. */
 export function sharedSkillArguments(
 	composerText: string,
 	references: readonly ComposerExtensionReference[],
@@ -67,6 +108,7 @@ export function sharedSkillArguments(
 		.sort((left, right) => left.start - right.start || left.end - right.end);
 	let previousEnd = 0;
 	for (const reference of skillReferences) {
+		const token = composerText.slice(reference.start, reference.end);
 		if (
 			!Number.isSafeInteger(reference.start) ||
 			!Number.isSafeInteger(reference.end) ||
@@ -74,7 +116,7 @@ export function sharedSkillArguments(
 			reference.start < 0 ||
 			reference.start >= reference.end ||
 			reference.end > composerText.length ||
-			composerText.slice(reference.start, reference.end) !== `/${reference.name}`
+			(token !== `/${reference.name}` && token !== `$${reference.name}`)
 		) {
 			throw new Error("Skill reference range does not identify an ordered Composer token");
 		}
@@ -116,8 +158,12 @@ export async function activateExplicitSkillReferences(options: {
 	return Object.freeze(activations);
 }
 
-export function prependSkillContext(input: AgentInput, context: string): AgentInput {
-	if (!context) return input;
-	if (typeof input === "string") return `${context}\n${input}`;
-	return [{ type: "text" as const, text: context }, ...input];
+export function prependSkillContext(
+	input: AgentInput,
+	context: string,
+	references: readonly SkillReferenceContent[] = [],
+): AgentInput {
+	if (!context && references.length === 0) return input;
+	const inputBlocks = typeof input === "string" ? (input ? [{ type: "text" as const, text: input }] : []) : [...input];
+	return [...references, ...(context ? [{ type: "text" as const, text: context }] : []), ...inputBlocks];
 }

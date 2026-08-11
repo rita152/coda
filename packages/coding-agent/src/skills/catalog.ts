@@ -6,7 +6,7 @@ export function promptSkillCatalog(
 	contextWindow: number | undefined,
 ): PromptSkillCatalog {
 	const fullEntryByName = new Map<string, string>();
-	for (const entry of snapshot.admitted) {
+	for (const entry of snapshot.resolved) {
 		if (!fullEntryByName.has(entry.candidate.metadata.name)) {
 			fullEntryByName.set(entry.candidate.metadata.name, String(entry.candidate.id));
 		}
@@ -14,7 +14,7 @@ export function promptSkillCatalog(
 	return Object.freeze({
 		...(contextWindow === undefined ? {} : { contextWindow }),
 		entries: Object.freeze(
-			snapshot.admitted.map((entry) => {
+			snapshot.resolved.map((entry) => {
 				const surfaceWinner = fullEntryByName.get(entry.candidate.metadata.name) === String(entry.candidate.id);
 				return Object.freeze({
 					id: String(entry.candidate.id),

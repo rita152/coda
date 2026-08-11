@@ -16,7 +16,7 @@ export interface SkillToolDetails {
 }
 
 export function modelVisibleSkillIds(snapshot: CodingSkillsSnapshot): readonly SkillId[] {
-	return Object.freeze(snapshot.admitted.map(({ candidate }) => candidate.id));
+	return Object.freeze(snapshot.resolved.map(({ candidate }) => candidate.id));
 }
 
 export function createSkillTool(snapshot: CodingSkillsSnapshot): AgentTool<TSchema, SkillToolDetails> | undefined {
@@ -31,7 +31,7 @@ export function createSkillTool(snapshot: CodingSkillsSnapshot): AgentTool<TSche
 	);
 	return Object.freeze({
 		name: "skill",
-		description: "Load one trusted Skill from this Run's catalog by its exact stable id.",
+		description: "Load one available Skill from this Run's catalog by its exact stable id.",
 		parameters,
 		replaySafety: "safe",
 		parallelSafe: true,

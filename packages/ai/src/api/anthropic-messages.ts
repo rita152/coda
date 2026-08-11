@@ -20,7 +20,6 @@ import type {
 	AnthropicOptions,
 	AssistantMessage,
 	Context,
-	ImageContent,
 	Model,
 	SimpleStreamOptions,
 	StreamFunction,
@@ -28,6 +27,7 @@ import type {
 	ThinkingContent,
 	ToolCall,
 	ToolResultMessage,
+	UserMessage,
 } from "../types.ts";
 import {
 	calculateCost,
@@ -53,20 +53,23 @@ function anthropicHeaders(model: Model<"anthropic-messages">, options?: Anthropi
 	return mergeProviderHeaders(affinity, model.headers, options?.headers);
 }
 
-function userContent(content: string | (TextContent | ImageContent)[]): MessageParam["content"] {
+function userContent(content: UserMessage["content"]): MessageParam["content"] {
 	if (typeof content === "string") return content;
-	return content.map((block) =>
-		block.type === "text"
-			? { type: "text" as const, text: block.text }
-			: {
-					type: "image" as const,
-					source: {
-						type: "base64" as const,
-						media_type: block.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-						data: block.data,
+	return content.flatMap((block): ContentBlockParam[] => {
+		if (block.type === "skill") return [];
+		return block.type === "text"
+			? [{ type: "text" as const, text: block.text }]
+			: [
+					{
+						type: "image" as const,
+						source: {
+							type: "base64" as const,
+							media_type: block.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+							data: block.data,
+						},
 					},
-				},
-	);
+				];
+	});
 }
 
 function assistantContent(message: AssistantMessage): ContentBlockParam[] {

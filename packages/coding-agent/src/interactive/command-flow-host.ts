@@ -4,6 +4,7 @@ import type { TuiTheme } from "./theme.ts";
 
 export interface CommandFlowNavigation {
 	push(screen: CommandFlowScreen): void;
+	replace?(screen: CommandFlowScreen): void;
 	back(): void;
 	close(): void;
 }
@@ -68,6 +69,7 @@ export class CommandFlowHost {
 	readonly #onError: (error: unknown) => void;
 	readonly #navigation: CommandFlowNavigation = Object.freeze({
 		push: (screen: CommandFlowScreen) => this.push(screen),
+		replace: (screen: CommandFlowScreen) => this.replace(screen),
 		back: () => this.back(),
 		close: () => this.close(),
 	});
@@ -114,6 +116,15 @@ export class CommandFlowHost {
 
 	push(screen: CommandFlowScreen): void {
 		this.#stack.push(createFrame(screen));
+		this.#onChange();
+	}
+
+	replace(screen: CommandFlowScreen): void {
+		if (this.#stack.length === 0) {
+			this.open(screen);
+			return;
+		}
+		this.#stack[this.#stack.length - 1] = createFrame(screen);
 		this.#onChange();
 	}
 

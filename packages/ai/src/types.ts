@@ -269,6 +269,13 @@ export interface ImageContent {
 	mimeType: string;
 }
 
+/** A user-selected Skill reference; its body is injected into model context separately. */
+export interface SkillReferenceContent {
+	type: "skill";
+	name: string;
+	path: string;
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -310,7 +317,7 @@ export interface DeferredHandle {
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | ImageContent | SkillReferenceContent)[];
 	timestamp: number;
 }
 

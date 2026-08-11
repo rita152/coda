@@ -80,11 +80,14 @@ function userContent(
 	message: Extract<Context["messages"][number], { role: "user" }>,
 ): string | ChatCompletionContentPart[] {
 	if (typeof message.content === "string") return message.content;
-	return message.content.map(
-		(block): ChatCompletionContentPart =>
-			block.type === "text"
-				? { type: "text", text: block.text }
-				: { type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } },
+	return message.content.flatMap((block): ChatCompletionContentPart[] =>
+		block.type === "skill"
+			? []
+			: [
+					block.type === "text"
+						? { type: "text", text: block.text }
+						: { type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } },
+				],
 	);
 }
 

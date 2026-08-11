@@ -11,6 +11,7 @@ import type {
 import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
+import { renderVisibleUserText } from "../skills/context.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
 
 export type TimelineToolState =
@@ -665,11 +666,7 @@ export class SemanticTimeline {
 }
 
 function userText(message: Immutable<UserMessage>): string {
-	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => (block.type === "text" ? block.text : ""))
-		.join("");
+	return renderVisibleUserText(message.content);
 }
 
 function timelineApproval(approval: ApprovalDecisionAuditEvent, restored: boolean): TimelineApproval {

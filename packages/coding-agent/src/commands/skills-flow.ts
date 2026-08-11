@@ -1,10 +1,43 @@
 import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
+import { skillExtensionEntries } from "../skills/manager.ts";
 import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "../skills/types.ts";
 
 export interface SkillsCommandFlowOptions {
 	readonly snapshot: CodingSkillsSnapshot;
 	readonly onRefresh: () => Promise<CodingSkillsSnapshot>;
-	readonly onTrust: () => Promise<CodingSkillsSnapshot>;
+}
+
+export interface SkillSelectionCommandFlowOptions {
+	readonly snapshot: CodingSkillsSnapshot;
+	readonly onSelect: (commandId: string, navigation: CommandFlowNavigation) => Promise<void> | void;
+}
+
+/** Lists every discovered Skill for insertion into the Composer. */
+export function createSkillSelectionCommandFlow(options: SkillSelectionCommandFlowOptions): CommandFlowMenu {
+	const entries = skillExtensionEntries(options.snapshot);
+	return Object.freeze({
+		id: "skill-selection",
+		title: "Select Skill",
+		filterable: true,
+		items: Object.freeze(
+			entries.length > 0
+				? entries.map((entry) =>
+						Object.freeze({
+							id: `skill:${entry.id}`,
+							label: `$${entry.name}`,
+							description: [entry.title, entry.description].filter(Boolean).join(" • "),
+							onSelect: (navigation: CommandFlowNavigation) => options.onSelect(`skill:${entry.id}`, navigation),
+						}),
+					)
+				: [
+						Object.freeze({
+							id: "none",
+							label: "No available Skills",
+							disabledReason: "No Skills were discovered in the configured Skill roots",
+						}),
+					],
+		),
+	});
 }
 
 function reopen(
@@ -63,80 +96,15 @@ function diagnosticsMenu(snapshot: CodingSkillsSnapshot): CommandFlowMenu {
 	});
 }
 
-function trustConfirmation(options: SkillsCommandFlowOptions): CommandFlowMenu {
-	const diff = options.snapshot.inventory.diff;
-	const changes = [
-		...diff.added.map((item, index) =>
-			Object.freeze({
-				id: `added:${index}`,
-				label: `Added ${item.id}`,
-				description: `${item.path} • ${item.revision.slice(0, 12)}`,
-			}),
-		),
-		...diff.removed.map((item, index) =>
-			Object.freeze({
-				id: `removed:${index}`,
-				label: `Removed ${item.id}`,
-				description: `${item.path} • ${item.revision.slice(0, 12)}`,
-			}),
-		),
-		...diff.changed.map(({ before, after }, index) =>
-			Object.freeze({
-				id: `changed:${index}`,
-				label: `Changed ${after.id}`,
-				description: `${after.path} • ${before.revision.slice(0, 12)} -> ${after.revision.slice(0, 12)}`,
-			}),
-		),
-	];
-	const preview = changes.slice(0, 50);
-	return Object.freeze({
-		id: "skills:trust",
-		title: "Trust Workspace Skills",
-		items: Object.freeze([
-			Object.freeze({
-				id: "summary",
-				label: `Inventory ${options.snapshot.inventory.sha256.slice(0, 12)}`,
-				description: `+${diff.added.length} -${diff.removed.length} ~${diff.changed.length}; trust grants no execution authority`,
-			}),
-			...preview,
-			...(changes.length > preview.length
-				? [
-						Object.freeze({
-							id: "changes-truncated",
-							label: `… ${changes.length - preview.length} more changes`,
-						}),
-					]
-				: []),
-			Object.freeze({
-				id: "confirm",
-				label: "Trust exact inventory",
-				description: "Any content or membership change requires trust again",
-				onSelect: (navigation: CommandFlowNavigation) => reopen(options.onTrust(), options, navigation),
-			}),
-			Object.freeze({
-				id: "cancel",
-				label: "Cancel",
-				onSelect: (navigation: CommandFlowNavigation) => navigation.back(),
-			}),
-		]),
-	});
-}
-
 export function createSkillsCommandFlow(options: SkillsCommandFlowOptions): CommandFlowMenu {
-	const inventory = options.snapshot.inventory;
-	const admittedIds = new Set(options.snapshot.admitted.map(({ candidate }) => candidate.id));
-	const candidates = options.snapshot.candidates.map((candidate) => {
-		const resolved = options.snapshot.byId.get(candidate.id);
+	const candidates = options.snapshot.resolved.map((resolved) => {
+		const candidate = resolved.candidate;
 		return Object.freeze({
 			id: String(candidate.id),
 			label: candidate.metadata.name,
-			description: resolved
-				? `${resolved.sourceLabel} • ${candidate.conformant ? "conformant" : "compatible"}${resolved.collisionCount > 1 ? ` • collision ${resolved.winner ? "winner" : "alternative"}` : ""}`
-				: `${candidate.skillFile} • omitted (${inventory.trust})`,
-			status: admittedIds.has(candidate.id) ? "available" : "omitted",
-			...(resolved
-				? { onSelect: (navigation: CommandFlowNavigation) => navigation.push(skillDetail(resolved)) }
-				: {}),
+			description: `${resolved.sourceLabel} • ${candidate.conformant ? "conformant" : "compatible"}${resolved.collisionCount > 1 ? ` • collision ${resolved.winner ? "winner" : "alternative"}` : ""}`,
+			status: "available",
+			onSelect: (navigation: CommandFlowNavigation) => navigation.push(skillDetail(resolved)),
 		});
 	});
 	return Object.freeze({
@@ -144,11 +112,6 @@ export function createSkillsCommandFlow(options: SkillsCommandFlowOptions): Comm
 		title: "Skills",
 		filterable: true,
 		items: Object.freeze([
-			Object.freeze({
-				id: "inventory",
-				label: `Workspace inventory: ${inventory.trust}`,
-				description: `${inventory.items.length} Skill(s) • ${inventory.sha256.slice(0, 12)}`,
-			}),
 			Object.freeze({
 				id: "diagnostics",
 				label: "Diagnostics",
@@ -161,16 +124,6 @@ export function createSkillsCommandFlow(options: SkillsCommandFlowOptions): Comm
 				description: "Rescan all bounded local Skill roots",
 				onSelect: (navigation: CommandFlowNavigation) => reopen(options.onRefresh(), options, navigation),
 			}),
-			...(inventory.trust === "untrusted"
-				? [
-						Object.freeze({
-							id: "trust",
-							label: "Review and trust Workspace inventory",
-							description: `+${inventory.diff.added.length} -${inventory.diff.removed.length} ~${inventory.diff.changed.length}`,
-							onSelect: (navigation: CommandFlowNavigation) => navigation.push(trustConfirmation(options)),
-						}),
-					]
-				: []),
 			...candidates,
 		]),
 	});

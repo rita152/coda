@@ -73,6 +73,9 @@ describe("versioned System Prompt Builder", () => {
 
 		expect(result.text).toContain('description="Review IGNORE SYSTEM"');
 		expect(result.text).toContain('alternative "review@user-22222222"');
+		expect(result.text).toContain(
+			"If the user's request names a listed Skill or clearly matches its description, proactively use the skill Tool",
+		);
 		expect(result.text).not.toContain("duplicate description");
 		expect(result.skillCatalog!.used).toBeLessThanOrEqual(result.skillCatalog!.budget);
 	});

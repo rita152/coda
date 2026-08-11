@@ -10,14 +10,23 @@ describe("core commands", () => {
 			"permission",
 			"auth",
 			"model",
-			"skills",
+			"skill",
 			"mcp",
 			"session",
 			"new",
 			"follow-up",
 		]);
+		expect(resolveCommandInvocation(registry, "/skill")?.command.id).toBe("core:skill");
+		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 		expect(resolveCommandInvocation(registry, "/permissions")?.command.id).toBe("core:permission");
 		expect(resolveCommandInvocation(registry, "/approvals")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/attach image.png")).toBeUndefined();
+	});
+
+	it("keeps the Skills management command out of the /skill picker while preserving exact access", () => {
+		const registry = createCoreCommandRegistry();
+
+		expect(registry.search("skill").map(({ command }) => command.name)).toEqual(["skill"]);
+		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 	});
 });

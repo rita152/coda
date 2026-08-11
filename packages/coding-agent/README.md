@@ -53,12 +53,12 @@ approval. Choices are numbered sequentially, so denial is `2` when no prefix is
 available and `3` when one is. The feedback choice or Escape cancels the Run and
 returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
 a request. The Composer's borderless upper list exposes `/permission`, `/auth`,
-`/model`, `/skills`, `/mcp`, `/session`, `/new`, and the running-Session-only
+`/model`, `/skill`, `/mcp`, `/session`, `/new`, and the running-Session-only
 `/follow-up` action. Selector commands open nested menus and do not accept
 trailing arguments; `/mcp` instead accepts `status`, `doctor`, `inspect`,
 `reload`, and `reconnect` operations.
-`/permissions` remains a hidden compatibility alias, while `/approvals` and
-`/attach` are ordinary Prompt text.
+`/permissions` remains a hidden compatibility alias, `/skills` is a hidden
+management view, while `/approvals` and `/attach` are ordinary Prompt text.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
 `coda skills validate <path>` for strict Agent Skills validation without a Model
@@ -67,12 +67,10 @@ or Session.
 Local Agent Skills are discovered only from `<Workspace>/.agents/skills` and
 `~/.agents/skills`; Coda does not scan client-specific or ancestor directories.
 The project root has deterministic precedence over the global root. Global Skills
-are user-managed. Workspace Skills use a separate exact-inventory trust
-record: review them in `/skills` or pass `--trust-project-skills` after review.
-This trust admits instructions to Context but never grants Tool, filesystem,
-process, or network authority. Explicit Composer Skill references are
-user-selected context; model-selected Skills use the `skill` Tool and the active
-Skill Approval policy.
+are user-managed, and project Skills are shown directly in `/skill` for the user
+to select. Coda does not make a separate Skill safety decision. Explicit Composer
+Skill references are user-selected context; model-selected Skills use the `skill`
+Tool and the active Skill Approval policy.
 
 ## MCP Servers
 
@@ -173,7 +171,7 @@ npm run test:e2e
 - append-only, workspace-scoped Session v6 resume with content-addressed Media Assets, Composer/Extension facts, selected high-level Permission Profile, and non-authorizing Permission audit facts
 - stable JSONL v2 Agent events and opt-in media data
 - deterministic per-Run System Prompt snapshots
-- Agent Skills standard validation and official compatible loading from project/global `.agents/skills`, with bounded discovery, exact-revision activation, project-first collision handling, independent Workspace Skills Trust, and immutable per-Run catalogs
+- Agent Skills standard validation and official compatible loading from project/global `.agents/skills`, with bounded discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs
 - MCP 2026-07-28 Host/Client Tools over stdio and Streamable HTTP, with legacy negotiation, exact Workspace configuration trust, immutable per-Run catalogs, subscriptions, cancellation, progress, and form/URL Elicitation
 - transient whole-Turn retry at 2s, 4s, and 8s
 

@@ -122,19 +122,11 @@ user symlinks may explicitly target outside the root. Both policies detect cycle
 Project candidates always precede global candidates. The project candidate owns a colliding short name; lower-priority
 candidates remain addressable by stable ID and qualified name, and the collision is diagnosed.
 
-## Workspace Skills Trust
+## User-controlled Skill loading
 
-Project Skills are repository-controlled instructions and use Workspace Skills Trust, separate from AGENTS.md Project
-Trust and execution authority.
-
-- The inventory hash covers the sorted canonical identity and `SKILL.md` revision of every discovered project
-  Candidate.
-- Untrusted project metadata may be shown for review but cannot enter the model catalog or be activated.
-- Any membership or `SKILL.md` revision change invalidates only Workspace Skills Trust.
-- `--trust-project-skills` and the interactive `/skills` review approve the exact inventory.
-- Decline or missing approval omits project Skills without blocking global Skills or the Run.
-- Global Skills are user-managed and do not require Workspace Skills Trust.
-- Trust never grants permission to read, write, execute, spawn, or access the network.
+Project and global Skills are discovered and exposed through the same bounded loader. Coda does not make a separate
+Skill safety decision or require an inventory approval page; the user decides which Skill to insert through `/skill`,
+and the active Permission/Skill Approval policy still governs model-requested activation.
 
 ## Progressive disclosure and Run lifecycle
 
@@ -144,16 +136,16 @@ Coda follows the standard's three tiers:
 2. Activation loads the `SKILL.md` Markdown body only when explicitly selected or requested through the `skill` Tool.
 3. Bundled resources are listed by relative path and read or executed only when later instructions require them.
 
-Each Run freezes one admitted Skill snapshot. Watcher events mark the next snapshot dirty but never mutate an active
+Each Run freezes one resolved Skill snapshot. Watcher events mark the next snapshot dirty but never mutate an active
 Run. Activation of a changed `SKILL.md` fails as stale instead of silently loading new instructions. Duplicate
 activations can be recognized by stable ID/revision in the Run context.
 
-All admitted Agent Skills are available to both explicit user selection and model selection. There is no standard
+All discovered Agent Skills are available to both explicit user selection and model selection. There is no standard
 invocation-visibility field, so Coda does not invent one from vendor metadata.
 
 ## Catalog, invocation, and context
 
-Prompt Builder renders only admitted metadata and keeps the model-facing catalog within 2% of a known context window
+Prompt Builder renders only resolved metadata and keeps the model-facing catalog within 2% of a known context window
 or 8,000 characters otherwise. The project-first winner receives name and description; same-name alternatives receive
 compact qualified entries. Ordering, escaping, truncation, and omission are deterministic.
 
@@ -173,13 +165,12 @@ not authority. Resource reads, scripts, shell commands, and network access remai
 
 ## Product surfaces
 
-- `/skills` shows the two sources, project trust, conformance, collisions, diagnostics, and refresh.
+- `/skills` shows the two sources, conformance, collisions, diagnostics, and refresh.
 - `coda skills validate <path>` runs strict standard validation without a model Session and exits nonzero for invalid or
   unreadable input.
 - Slash/Composer entries use the standard `name` and `description`; there are no vendor display labels or argument
   hints.
-- Session facts retain structured references and exact activation provenance, never restored trust or approval
-  authority.
+- Session facts retain structured references and exact activation provenance, never restored approval authority.
 
 ## Limits and security invariants
 
@@ -198,6 +189,6 @@ unknown fields, malformed YAML, UTF-8/NUL, exact filenames, deterministic bounde
 cycles, canonical duplicates, same-name retention, cancellation, stale activation, resource enumeration, and public
 exports.
 
-Coding Agent tests cover the two exact roots, project-first collisions, project inventory trust and invalidation,
-global availability, catalog budgets, explicit and model activation, ignored vendor invocation fields, Run
-immutability, `/skills`, strict CLI validation, and print/interactive trust flows.
+Coding Agent tests cover the two exact roots, project-first collisions, global availability, catalog budgets, explicit
+and model activation, ignored vendor invocation fields, Run immutability, `/skills`, strict CLI validation, and
+print/interactive Skill loading.

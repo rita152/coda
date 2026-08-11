@@ -548,6 +548,10 @@
       "status": "deliberate-deviation",
       "test": "test/public-types.consumer.ts"
     },
+    "SkillReferenceContent": {
+      "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
     "Static": {
       "status": "compatible",
       "test": "test/public-types.consumer.ts"

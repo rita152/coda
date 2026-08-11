@@ -98,8 +98,17 @@ function validateInput(input: AgentInput): void {
 		throw new AgentError("invalid_input", "Agent input must contain at least one content block");
 	}
 	for (const block of input) {
-		if (!isRecord(block) || (block.type !== "text" && block.type !== "image")) {
+		if (!isRecord(block) || (block.type !== "text" && block.type !== "image" && block.type !== "skill")) {
 			throw new AgentError("invalid_input", "Agent input contains an invalid content block");
+		}
+		if (
+			block.type === "skill" &&
+			(typeof block.name !== "string" ||
+				block.name.length === 0 ||
+				typeof block.path !== "string" ||
+				block.path.length === 0)
+		) {
+			throw new AgentError("invalid_input", "Skill input blocks require a name and path");
 		}
 		if (block.type === "text" && (typeof block.text !== "string" || block.text.length === 0)) {
 			throw new AgentError("invalid_input", "Text input blocks must not be empty");

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
@@ -552,8 +552,8 @@ describe("Coding Agent print mode", () => {
 		}
 	});
 
-	it("keeps Workspace Skills Trust separate and admits only the exact inventory after --trust-project-skills", async () => {
-		const fixture = await mkdtemp(join(tmpdir(), "coda-workspace-skill-trust-"));
+	it("loads workspace Skills without a trust prompt or CLI flag", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-workspace-skill-discovery-"));
 		try {
 			const workspace = join(fixture, "workspace");
 			const home = join(fixture, "home");
@@ -568,11 +568,7 @@ describe("Coding Agent print mode", () => {
 			faux.setResponses([
 				(context) => {
 					skillVisibility.push(context.tools?.some(({ name }) => name === "skill") ?? false);
-					return fauxAssistantMessage("untrusted omitted", { timestamp: 246 });
-				},
-				(context) => {
-					skillVisibility.push(context.tools?.some(({ name }) => name === "skill") ?? false);
-					return fauxAssistantMessage("trusted admitted", { timestamp: 246 });
+					return fauxAssistantMessage("workspace Skill available", { timestamp: 246 });
 				},
 			]);
 			const models = createModels({ runtime: testTimeRuntime(246) });
@@ -604,16 +600,11 @@ describe("Coding Agent print mode", () => {
 			const model = `${faux.getModel().provider}/${faux.getModel().id}`;
 
 			await expect(application.run(["--print", "--model", model, "first"])).resolves.toBe(0);
-			expect(storedSettings.workspaceSkillsTrust).toBeUndefined();
-			await expect(application.run(["--print", "--trust-project-skills", "--model", model, "second"])).resolves.toBe(
-				0,
-			);
 
-			expect(skillVisibility).toEqual([false, true]);
-			expect(storedSettings.workspaceSkillsTrust).toHaveLength(1);
-			expect(storedSettings.workspaceSkillsTrust![0]).toMatchObject({ workspace: await realpath(workspace) });
+			expect(skillVisibility).toEqual([true]);
+			expect(storedSettings).toEqual({});
 			expect(storedSettings.projectTrust).toBeUndefined();
-			expect(stderr.value).toContain("Workspace Skills inventory");
+			expect(stderr.value).toBe("");
 		} finally {
 			await rm(fixture, { recursive: true, force: true });
 		}

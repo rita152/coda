@@ -100,14 +100,14 @@ import {
 	activateExplicitSkillReferences,
 	prependSkillContext,
 	renderExplicitSkillContext,
+	renderExplicitSkillReferences,
 	sharedSkillArguments,
 } from "./skills/context.ts";
-import { workspaceSkillsTrustRecord } from "./skills/inventory.ts";
 import { CodingSkillsManager, SkillCommandRegistryBinding, skillIdFromCommandId } from "./skills/manager.ts";
 import { collectSkillRoots } from "./skills/roots.ts";
 import { RunSkillsCoordinator } from "./skills/run-coordinator.ts";
 import { createSkillTool } from "./skills/tool.ts";
-import type { CodingSkillsSnapshot, WorkspaceSkillsTrustRecord } from "./skills/types.ts";
+import type { CodingSkillsSnapshot } from "./skills/types.ts";
 import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
 import { createCodingTools } from "./tools/index.ts";
 import { createWorkspace } from "./workspace.ts";
@@ -149,7 +149,6 @@ export interface UserSettings {
 	readonly customProviders?: readonly CustomProviderConfig[];
 	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
-	readonly workspaceSkillsTrust?: readonly WorkspaceSkillsTrustRecord[];
 	readonly mcpServers?: readonly McpServerConfiguration[];
 	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
 	readonly ui?: {
@@ -232,7 +231,6 @@ interface ParsedArguments {
 	readonly apiKey?: string;
 	readonly workspace?: string;
 	readonly trustProject: boolean;
-	readonly trustProjectSkills: boolean;
 	readonly trustProjectMcp: boolean;
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
@@ -267,7 +265,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let apiKey: string | undefined;
 	let workspace: string | undefined;
 	let trustProject = false;
-	let trustProjectSkills = false;
 	let trustProjectMcp = false;
 	let persistSession = false;
 	let noSession = false;
@@ -396,10 +393,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			trustProject = true;
 			continue;
 		}
-		if (argument === "--trust-project-skills") {
-			trustProjectSkills = true;
-			continue;
-		}
 		if (argument === "--trust-project-mcp") {
 			trustProjectMcp = true;
 			continue;
@@ -468,7 +461,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		apiKey,
 		workspace,
 		trustProject,
-		trustProjectSkills,
 		trustProjectMcp,
 		persistSession,
 		noSession,
@@ -526,7 +518,6 @@ Permissions:
       --dangerously-bypass-approvals-and-sandbox
                                  Disable approval prompts and the outer Sandbox
       --trust-project            Trust the current root AGENTS.md hash
-      --trust-project-skills     Trust the exact current Workspace Skills inventory
       --trust-project-mcp        Trust the exact current Workspace MCP configuration
 
 Session:
@@ -723,47 +714,6 @@ function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapshot): st
 	);
 }
 
-function workspaceSkillsReviewText(snapshot: CodingSkillsSnapshot): string {
-	const diff = snapshot.inventory.diff;
-	const reviewValue = (value: string) => JSON.stringify(sanitizeTerminalText(value).replace(/\s+/gu, " ").trim());
-	const changes = [
-		...diff.added.map((item) => `+ ${reviewValue(item.path)}\n  ${item.id} @ ${item.revision}`),
-		...diff.removed.map((item) => `- ${reviewValue(item.path)}\n  ${item.id} @ ${item.revision}`),
-		...diff.changed.map(
-			({ before, after }) =>
-				`~ ${reviewValue(after.path)}\n  ${after.id}: ${before.revision.slice(0, 12)} -> ${after.revision.slice(0, 12)}`,
-		),
-	];
-	const changePreview = changes.slice(0, 50);
-	const workspaceCandidates = snapshot.candidates.filter((candidate) =>
-		candidate.provenance.some(({ origin }) => origin.scope === "workspace"),
-	);
-	const candidates = workspaceCandidates
-		.slice(0, 50)
-		.map(
-			(candidate) =>
-				`- ${reviewValue(candidate.metadata.name)}: ${sanitizeTerminalText(candidate.metadata.description).replace(/\s+/gu, " ").slice(0, 160)}\n  ${reviewValue(candidate.skillFile)}\n  ${candidate.id} @ ${candidate.revision}`,
-		);
-	return sanitizeTerminalText(
-		[
-			"Trust this Workspace Skills inventory?",
-			`Workspace: ${reviewValue(snapshot.inventory.workspace)}`,
-			`Inventory SHA-256: ${snapshot.inventory.sha256}`,
-			`Changes: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length}`,
-			"The exact inventory hash is stored separately from AGENTS.md trust. Any Skill change requires approval again.",
-			"Trust does not grant filesystem, process, Tool, or network authority.",
-			"",
-			"Inventory changes:",
-			...(changePreview.length > 0 ? changePreview : ["(none)"]),
-			...(changes.length > changePreview.length ? ["… (change preview truncated)"] : []),
-			"",
-			"Discovered Workspace Skills:",
-			...(candidates.length > 0 ? candidates : ["(none)"]),
-			...(workspaceCandidates.length > candidates.length ? ["… (inventory preview truncated)"] : []),
-		].join("\n"),
-	);
-}
-
 async function validateSkillPath(
 	path: string,
 	options: Pick<CodingAgentApplicationOptions, "fileSystem" | "io" | "runtime">,
@@ -828,7 +778,7 @@ function assertSkillReferencesAvailable(
 		const id = skillIdFromCommandId(reference.commandId);
 		const resolved = id ? snapshot.byId.get(id) : undefined;
 		if (!resolved) {
-			throw new Error(`Selected Skill is no longer trusted or available: ${reference.name}`);
+			throw new Error(`Selected Skill is no longer available: ${reference.name}`);
 		}
 	}
 }
@@ -1056,37 +1006,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					});
 					const skillsManager = new CodingSkillsManager({
 						fileSystem: options.fileSystem,
-						workspace: workspace.root,
 						roots: skillRoots,
 					});
-					let skillsSnapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
-					if (skillsSnapshot.inventory.trust === "incomplete" && parsed.trustProjectSkills) {
-						throw new Error("Cannot trust Workspace Skills because discovery hit a hard limit");
-					}
-					if (skillsSnapshot.inventory.trust === "untrusted") {
-						const trustedInteractively =
-							!parsed.trustProjectSkills && interactiveRuntime
-								? await confirmFromTerminal(interactiveRuntime, workspaceSkillsReviewText(skillsSnapshot))
-								: false;
-						if (parsed.trustProjectSkills || trustedInteractively) {
-							const trust = workspaceSkillsTrustRecord(skillsSnapshot);
-							settings = {
-								...settings,
-								workspaceSkillsTrust: [
-									...(settings.workspaceSkillsTrust ?? []).filter(
-										(entry) => entry.workspace !== workspace.root,
-									),
-									trust,
-								].sort((left, right) => left.workspace.localeCompare(right.workspace)),
-							};
-							await options.settings.save(settings);
-							skillsSnapshot = await skillsManager.refresh(settings.workspaceSkillsTrust, { rescan: false });
-						} else if (!interactiveRuntime) {
-							await options.io.stderr.write(
-								`coda: Workspace Skills inventory ${skillsSnapshot.inventory.sha256} is untrusted; Skills were omitted\n`,
-							);
-						}
-					}
+					const skillsSnapshot = await skillsManager.refresh();
 					let mcpConfiguration = await inspectMcpConfiguration({
 						workspace: workspace.root,
 						fileSystem: options.fileSystem,
@@ -1160,29 +1082,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						);
 					}
 					const refreshSkills = async (): Promise<CodingSkillsSnapshot> => {
-						const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+						const snapshot = await skillsManager.refresh();
 						skillRegistryBinding!.sync(snapshot);
 						return snapshot;
-					};
-					const trustSkills = async (): Promise<CodingSkillsSnapshot> => {
-						const reviewed = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
-						const trust = workspaceSkillsTrustRecord(reviewed);
-						settings = {
-							...settings,
-							workspaceSkillsTrust: [
-								...(settings.workspaceSkillsTrust ?? []).filter((entry) => entry.workspace !== workspace.root),
-								trust,
-							].sort((left, right) => left.workspace.localeCompare(right.workspace)),
-						};
-						await options.settings.save(settings);
-						const trusted = await skillsManager.refresh(settings.workspaceSkillsTrust, { rescan: false });
-						skillRegistryBinding!.sync(trusted);
-						return trusted;
 					};
 					const skillsCommand = {
 						snapshot: refreshSkills,
 						refresh: refreshSkills,
-						trust: trustSkills,
 					};
 					const mcpCommandSnapshot = () => ({
 						host:
@@ -1492,8 +1398,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						},
 						beforeRun: async ({ inputMessage }) => {
 							const nextSkills =
-								runSkills.consume(inputMessage.message.content) ??
-								(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+								runSkills.consume(inputMessage.message.content) ?? (await skillsManager.refresh());
 							if (mcpRegistry) await mcpRegistry.refresh();
 							const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 							skillRegistryBinding!.sync(nextSkills);
@@ -1914,7 +1819,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									beforeRun: async ({ inputMessage }) => {
 										const nextSkills =
 											targetRunSkills.consume(inputMessage.message.content) ??
-											(await skillsManager.refresh(settings.workspaceSkillsTrust ?? []));
+											(await skillsManager.refresh());
 										if (mcpRegistry) await mcpRegistry.refresh();
 										const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 										skillRegistryBinding!.sync(nextSkills);
@@ -2042,7 +1947,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
-										const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+										const snapshot = await skillsManager.refresh();
 										assertSkillReferencesAvailable(snapshot, references);
 									},
 									buildPrompt: async (text, attachmentIds, inputContext) => {
@@ -2085,6 +1990,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										const prepared = prependSkillContext(
 											input,
 											renderExplicitSkillContext(activations, snapshotBinding),
+											renderExplicitSkillReferences(activations),
 										);
 										if (snapshotBinding) targetRunSkills.prepare(prepared, snapshot, snapshotBinding);
 										return prepared;
@@ -2243,7 +2149,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								initialAttachments,
 								restoredAttachments: restoredMedia.attachments,
 								resolveExtensionReferences: async (references) => {
-									const snapshot = await skillsManager.refresh(settings.workspaceSkillsTrust ?? []);
+									const snapshot = await skillsManager.refresh();
 									assertSkillReferencesAvailable(snapshot, references);
 								},
 								buildPrompt: async (text, attachmentIds, inputContext) => {
@@ -2279,6 +2185,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									const prepared = prependSkillContext(
 										input,
 										renderExplicitSkillContext(activations, snapshotBinding),
+										renderExplicitSkillReferences(activations),
 									);
 									if (snapshotBinding) runSkills.prepare(prepared, snapshot, snapshotBinding);
 									return prepared;

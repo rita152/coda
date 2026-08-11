@@ -10,6 +10,7 @@ export interface CommandDefinition {
 	readonly id: string;
 	readonly name: string;
 	readonly aliases?: readonly string[];
+	readonly visibleInPalette?: boolean;
 	readonly title: string;
 	readonly description?: string;
 	readonly source: CommandSource;
