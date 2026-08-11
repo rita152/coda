@@ -14,6 +14,7 @@ describe("ChatComponent terminal input", () => {
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
 			reasoning: "off",
+			clock: { now: () => 0 },
 			onSubmit,
 			onAbort: vi.fn(),
 			onExit: vi.fn(),
@@ -41,6 +42,7 @@ describe("ChatComponent terminal input", () => {
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
 			reasoning: "off",
+			clock: { now: () => 0 },
 			onSubmit: vi.fn(),
 			onAbort: vi.fn(),
 			onExit: vi.fn(),
@@ -289,7 +291,7 @@ describe("ChatComponent terminal input", () => {
 		expect(frame[0]).toContain("project");
 		expect(frame[0]).toContain("provider/model-1234");
 		expect(frame[0]).not.toContain("reasoning");
-		expect(frame.at(-1)).toContain("Ctrl-C exits");
+		expect(frame.at(-1)).toContain("Ctrl-C twice exits");
 		expect(frame.at(-1)).not.toContain("Ctrl-T transcript");
 	});
 
@@ -299,7 +301,7 @@ describe("ChatComponent terminal input", () => {
 
 		expect(frame).toHaveLength(5);
 		expect(frame.join("\n")).toContain("Terminal too small");
-		expect(frame.join("\n")).toContain("Ctrl-C exits");
+		expect(frame.join("\n")).toContain("Ctrl-C twice exits");
 	});
 
 	it("keeps manual scroll position, reports unseen updates, and lets Ctrl-End resume tail-follow", () => {
@@ -474,16 +476,34 @@ describe("ChatComponent terminal input", () => {
 		expect(onAbort).toHaveBeenCalledOnce();
 	});
 
-	it("keeps idle Escape as an explicit empty-composer exit", () => {
+	it("requires two idle Ctrl-C presses and never exits on Escape", () => {
 		const onExit = vi.fn();
 		const component = createComponent({ onExit });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 
 		component.handleInput(key("escape"), context);
-		expect(onExit).toHaveBeenCalledOnce();
+		expect(onExit).not.toHaveBeenCalled();
 
-		component.handleInput({ type: "text", text: "draft" }, context);
-		component.handleInput(key("escape"), context);
+		component.handleInput(key("c", { control: true }), context);
+		expect(onExit).not.toHaveBeenCalled();
+		component.handleInput(key("c", { control: true, action: "release" }), context);
+
+		component.handleInput(key("c", { control: true }), context);
+		expect(onExit).toHaveBeenCalledOnce();
+	});
+
+	it("requires the second idle Ctrl-C to arrive within the confirmation window", () => {
+		let now = 0;
+		const onExit = vi.fn();
+		const component = createComponent({ onExit, clock: { now: () => now } });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput(key("c", { control: true }), context);
+		now = 501;
+		component.handleInput(key("c", { control: true }), context);
+		expect(onExit).not.toHaveBeenCalled();
+
+		component.handleInput(key("c", { control: true }), context);
 		expect(onExit).toHaveBeenCalledOnce();
 	});
 
@@ -1056,6 +1076,7 @@ function createComponent(overrides: Partial<ConstructorParameters<typeof ChatCom
 	return new ChatComponent({
 		modelLabel: "provider/model",
 		reasoning: "off",
+		clock: { now: () => 0 },
 		onSubmit: vi.fn(),
 		onAbort: vi.fn(),
 		onExit: vi.fn(),

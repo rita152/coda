@@ -164,6 +164,7 @@ describe("interactive first run", () => {
 		terminal.clearOutput();
 		await until(() => terminal.readOutput().includes("faux/model-b • reasoning off"));
 		await terminal.emit(key("c", true));
+		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);
 		expect(save).toHaveBeenCalledWith({ defaultModel: { provider: "faux", id: "model-b" } });
@@ -213,6 +214,7 @@ describe("interactive first run", () => {
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
 		await until(() => terminal.readOutput().includes("opencode-go/"));
+		await terminal.emit(key("c", true));
 		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);
@@ -267,6 +269,7 @@ describe("interactive first run", () => {
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
 		await until(() => terminal.readOutput().includes("faux/faux-1"));
+		await terminal.emit(key("c", true));
 		await terminal.emit(key("c", true));
 
 		await expect(running).resolves.toBe(0);

@@ -218,6 +218,16 @@ describe("interactive TUI mode", () => {
 			meta: false,
 			action: "press",
 		});
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 
 		await expect(running).resolves.toBe(0);
 		expect(stdout.value).toBe("buffered stdout\n");
@@ -293,6 +303,16 @@ describe("interactive TUI mode", () => {
 			meta: false,
 			action: "press",
 		});
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 
 		await expect(running).resolves.toBe(0);
 		expect(request).toMatchObject({
@@ -305,7 +325,7 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("accepts terminal text, renders Agent output, and exits cleanly on idle Ctrl-C", async () => {
+	it("accepts terminal text, renders Agent output, and exits cleanly on double idle Ctrl-C", async () => {
 		const faux = fauxProvider({ runtime: testTimeRuntime(1_400) });
 		faux.setResponses([fauxAssistantMessage("interactive answer", { timestamp: 1_400 })]);
 		const models = createModels({ runtime: testTimeRuntime(1_400) });
@@ -357,6 +377,16 @@ describe("interactive TUI mode", () => {
 			action: "press",
 		});
 		await until(() => terminal.readOutput().includes("interactive answer"));
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 		await terminal.emit({
 			type: "key",
 			key: "c",
@@ -455,6 +485,16 @@ describe("interactive TUI mode", () => {
 			meta: false,
 			action: "press",
 		});
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 		await expect(running).resolves.toBe(0);
 
 		expect(prompts[0]).toContain("1970-01-01T00:00:02.000Z");
@@ -528,6 +568,16 @@ describe("interactive TUI mode", () => {
 			action: "press",
 		});
 		await until(() => terminal.readOutput().includes("Workspace / on-request"));
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 		await terminal.emit({
 			type: "key",
 			key: "c",
@@ -617,6 +667,16 @@ describe("interactive TUI mode", () => {
 			action: "press",
 		});
 		await until(() => terminal.readOutput().includes(`${faux.getModel().provider}/beta`));
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 		await terminal.emit({
 			type: "key",
 			key: "c",
@@ -724,6 +784,7 @@ describe("interactive TUI mode", () => {
 		releaseFirst();
 		await until(() => terminal.readOutput().includes("old session answer"));
 		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("c", { control: true, text: "c" }));
 
 		await expect(running).resolves.toBe(0);
 	});
@@ -773,6 +834,7 @@ describe("interactive TUI mode", () => {
 		await new Promise<void>((resolve) => setTimeout(resolve, 50));
 		expect(openSession).toHaveBeenCalledOnce();
 
+		await terminal.emit(key("c", { control: true, text: "c" }));
 		await terminal.emit(key("c", { control: true, text: "c" }));
 		await expect(running).resolves.toBe(0);
 		expect(openSession).toHaveBeenCalledOnce();
@@ -943,6 +1005,16 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("suspended\n");
 		await fullScreenOutput.io.stderr.write("resumed\n");
 		expect(stderr.value).toBe("suspended\n");
+		await terminal.emit({
+			type: "key",
+			key: "c",
+			text: "c",
+			shift: false,
+			control: true,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
 		await terminal.emit({
 			type: "key",
 			key: "c",

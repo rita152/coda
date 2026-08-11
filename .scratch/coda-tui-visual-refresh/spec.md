@@ -44,7 +44,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 - Unseen entry additions or updates display `down N updates - Ctrl+End` in the dock.
 - PageUp/PageDown page the viewport; Ctrl+PageUp/Ctrl+PageDown move through the Editor; the terminal mouse wheel scrolls by physical rows; Ctrl+Home/Ctrl+End jump to the ends. Submitting a prompt returns to tail-follow.
 - Ctrl+T toggles Transcript View. Escape returns from Transcript View before it can exit the main screen.
-- Running Ctrl+C aborts; idle Ctrl+C or Escape exits.
+- Running Ctrl+C aborts; idle Escape is ignored and two idle Ctrl+C presses within 500ms exit.
 - Command Approval uses the full-width bottom Approval Bar specified by `.scratch/coda-approval-bar/spec.md`; later Approval Request kinds may retain bounded overlays until migrated.
 - Mouse support is limited to Timeline wheel navigation and image-label button/hover events; keyboard access is complete and native terminal selection remains available through the terminal's modifier behavior.
 

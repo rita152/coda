@@ -82,6 +82,7 @@ describe("interactive image attachments", () => {
 		await terminal.emit(key("enter"));
 		await until(() => stripAnsi(terminal.readOutput()).includes("attach syntax was prompt text"));
 		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("c", { control: true, text: "c" }));
 
 		await expect(running).resolves.toBe(0);
 		expect(observedContent).toBe(`/attach ${imagePath}`);

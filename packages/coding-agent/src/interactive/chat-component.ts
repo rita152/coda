@@ -1,5 +1,6 @@
 import type { AgentEvent, AgentSeed, FollowUp } from "@coda/agent";
 import {
+	type Clock,
 	type ColorLevel,
 	Component,
 	type ComponentInputContext,
@@ -37,6 +38,7 @@ import { renderUserShellEntry } from "./user-shell-presentation.ts";
 
 const MINIMUM_COLUMNS = 40;
 const MINIMUM_ROWS = 10;
+const IDLE_CTRL_C_CONFIRMATION_WINDOW_MS = 500;
 
 export interface ChatAttachmentPreview {
 	readonly png: Uint8Array;
@@ -59,6 +61,7 @@ export interface ChatComponentOptions {
 	readonly modelLabel: string;
 	readonly workspaceLabel?: string;
 	readonly reasoning: string;
+	readonly clock: Clock;
 	readonly permissionLabel?: string;
 	readonly onSubmit: (
 		input: string,
@@ -181,6 +184,7 @@ export class ChatComponent extends Component {
 	#shellRunning = false;
 	#shellMode = false;
 	#transcriptMode = false;
+	#lastIdleCtrlCAt?: number;
 	#error?: string;
 	#attachments: ChatAttachment[] = [];
 	#attachmentFocusKey?: string;
@@ -507,6 +511,21 @@ export class ChatComponent extends Component {
 	}
 
 	handleInput(input: TerminalInput, context: ComponentInputContext): void {
+		const idleCtrlCPress =
+			input.type === "key" &&
+			input.action === "press" &&
+			input.control &&
+			input.key === "c" &&
+			!this.running &&
+			!this.#shellMode &&
+			!this.#transcriptMode &&
+			!this.#imageModal &&
+			this.#focusedAttachmentTarget === undefined &&
+			this.#commandFlow.view === undefined &&
+			this.#editor.text.trim().length === 0;
+		if (input.type !== "key" || input.action !== "release") {
+			if (!idleCtrlCPress) this.#lastIdleCtrlCAt = undefined;
+		}
 		if (input.type === "resize") return;
 		if (input.type === "mouse") {
 			this.#handleMouse(input, context);
@@ -621,7 +640,16 @@ export class ChatComponent extends Component {
 				this.#shellMode = false;
 				this.#history.reset();
 				this.invalidate();
-			} else this.#options.onExit();
+			} else if (input.action === "press") {
+				const now = this.#options.clock.now();
+				const previous = this.#lastIdleCtrlCAt;
+				if (previous !== undefined && now >= previous && now - previous <= IDLE_CTRL_C_CONFIRMATION_WINDOW_MS) {
+					this.#lastIdleCtrlCAt = undefined;
+					this.#options.onExit();
+				} else {
+					this.#lastIdleCtrlCAt = now;
+				}
+			}
 			return;
 		}
 		if (input.type === "key" && input.key === "escape") {
@@ -633,7 +661,6 @@ export class ChatComponent extends Component {
 				}
 				return;
 			}
-			if (!this.running && this.#editor.text.trim().length === 0) this.#options.onExit();
 			return;
 		}
 		if (
@@ -1342,9 +1369,9 @@ export class ChatComponent extends Component {
 					"Ctrl-C aborts the Run",
 				])
 			: fitFooter(width, [
-					"Enter sends • Ctrl-T transcript • Ctrl-C exits",
-					"Enter sends • Ctrl-C exits",
-					"Ctrl-C exits",
+					"Enter sends • Ctrl-T transcript • Ctrl-C twice exits",
+					"Enter sends • Ctrl-C twice exits",
+					"Ctrl-C twice exits",
 				]);
 	}
 
@@ -1647,7 +1674,7 @@ function renderTooSmall(width: number, height: number, running: boolean): string
 		"Terminal too small",
 		`Resize to at least ${MINIMUM_COLUMNS} x ${MINIMUM_ROWS}`,
 		"",
-		running ? "Ctrl-C aborts" : "Ctrl-C exits",
+		running ? "Ctrl-C aborts" : "Ctrl-C twice exits",
 	].map((line) => clipAnsi(line, width));
 	return Array.from({ length: height }, (_, row) => lines[row] ?? "");
 }
