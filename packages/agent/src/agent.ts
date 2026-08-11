@@ -4,8 +4,10 @@ import {
 	type Context,
 	type ImageContent,
 	type Message,
+	resolveToolObservation,
 	type TextContent,
 	type ToolCall,
+	type ToolObservation,
 	type ToolResultMessage,
 	type UserMessage,
 	validateToolArguments,
@@ -37,6 +39,7 @@ import type {
 	ToolExecutionOutcome,
 	ToolExecutionOutput,
 	ToolExecutionProgress,
+	ToolExecutionSettlement,
 	ToolInvocation,
 	ToolInvocationId,
 	ToolPolicyDecision,
@@ -71,6 +74,7 @@ interface AcceptedTool {
 
 interface ToolSettlement {
 	readonly entry: AcceptedTool;
+	readonly settlement: ToolExecutionSettlement;
 	readonly outcome: ToolExecutionOutcome;
 	readonly result: AgentMessage<ToolResultMessage>;
 	readonly error?: unknown;
@@ -83,6 +87,12 @@ interface ToolBatchResult {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function toolExecutionOutcome(status: ToolObservation["status"]): ToolExecutionOutcome {
+	if (status === "ok") return "success";
+	if (status === "aborted") return "aborted";
+	return "error";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1027,6 +1037,12 @@ export class Agent {
 	): Promise<void> {
 		const result = this.#toolResult(invocation, {
 			content: message,
+			observation: {
+				status:
+					reason === "policy" ? "denied" : reason === "aborted" || reason === "not_started" ? "aborted" : "error",
+				truncated: false,
+				facts: { reason },
+			},
 			details: { status: "rejected", reason },
 			isError: true,
 		});
@@ -1052,6 +1068,7 @@ export class Agent {
 				type: "tool_execution_end",
 				turnId,
 				invocation: entry.invocation,
+				settlement: settlement.settlement,
 				outcome: settlement.outcome,
 				result: settlement.result,
 			});
@@ -1064,6 +1081,7 @@ export class Agent {
 			type: "tool_execution_end",
 			turnId,
 			invocation: entry.invocation,
+			settlement: settlement.settlement,
 			outcome: settlement.outcome,
 			result: settlement.result,
 		});
@@ -1122,6 +1140,7 @@ export class Agent {
 				type: "tool_execution_end",
 				turnId,
 				invocation: next.entry.invocation,
+				settlement: next.settlement,
 				outcome: next.outcome,
 				result: next.result,
 			} as const;
@@ -1178,10 +1197,12 @@ export class Agent {
 			await progressQueue;
 			if (progressFailure !== undefined) throw progressFailure;
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
+			const result = this.#toolResult(entry.invocation, output);
 			return {
 				entry,
-				outcome: output.isError ? "error" : "success",
-				result: this.#toolResult(entry.invocation, output),
+				settlement: "returned",
+				outcome: toolExecutionOutcome(resolveToolObservation(result.message).status),
+				result,
 			};
 		} catch (error) {
 			acceptsProgress = false;
@@ -1189,10 +1210,12 @@ export class Agent {
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			return {
 				entry,
+				settlement: "threw",
 				outcome: "error",
 				error,
 				result: this.#toolResult(entry.invocation, {
 					content: `Tool "${entry.call.name}" failed: ${errorMessage(error)}`,
+					observation: { status: "error", truncated: false },
 					details: { status: "failed", error: { message: errorMessage(error) } },
 					isError: true,
 				}),
@@ -1203,9 +1226,11 @@ export class Agent {
 	#abortedSettlement(entry: AcceptedTool): ToolSettlement {
 		return {
 			entry,
+			settlement: "aborted",
 			outcome: "aborted",
 			result: this.#toolResult(entry.invocation, {
 				content: `Tool "${entry.call.name}" was aborted`,
+				observation: { status: "aborted", truncated: false },
 				details: { status: "aborted" },
 				isError: true,
 			}),
@@ -1213,6 +1238,7 @@ export class Agent {
 	}
 
 	#toolResult(invocation: ToolInvocation, output: ToolExecutionOutput): AgentMessage<ToolResultMessage> {
+		const observation = resolveToolObservation(output);
 		return cloneFrozen({
 			id: invocation.resultMessageId,
 			message: {
@@ -1220,8 +1246,9 @@ export class Agent {
 				toolCallId: invocation.providerToolCallId,
 				toolName: invocation.toolName,
 				content: normalizedToolContent(output.content),
+				observation,
 				details: structuredClone(output.details),
-				isError: output.isError ?? false,
+				isError: observation.status !== "ok",
 				timestamp: this.#options.clock.now(),
 			},
 		});

@@ -124,6 +124,46 @@ function responsesSse(): string {
 // /packages/ai/test/openai-responses-message-id.test.ts
 // /packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts
 describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-terminal-event.test.ts)", () => {
+	test("projects authoritative Tool observations into function_call_output", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		const output = stream(
+			model,
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call:denied",
+						toolName: "bash",
+						content: [{ type: "text", text: "command returned zero" }],
+						observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			{
+				runtime: testTimeRuntime(123),
+				apiKey: "test-key",
+				maxRetries: 0,
+				fetch: async (input, init) => {
+					requestBody = (await new Request(input, init).clone().json()) as Record<string, unknown>;
+					return new Response(responsesSse(), { status: 200, headers: { "content-type": "text/event-stream" } });
+				},
+			},
+		);
+		await output.result();
+
+		expect(requestBody).toMatchObject({
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call:denied",
+					output: expect.stringContaining('{"status":"denied","truncated":false,"facts":{"exitCode":0}}'),
+				},
+			],
+		});
+	});
+
 	test("streams output items and preserves the Pi provider tool-call identifier", async () => {
 		let requestBody: Record<string, unknown> | undefined;
 		const mockFetch: FetchFunction = async (input, init) => {

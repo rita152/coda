@@ -123,6 +123,28 @@ function reasoningSse(): string {
 // /packages/ai/test/openai-completions-reasoning-details.test.ts
 // /packages/ai/test/openai-completions-response-model.test.ts
 describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)", () => {
+	test("projects authoritative Tool observations into model-visible Tool output", () => {
+		const messages = convertMessages(model, {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call:denied",
+					toolName: "bash",
+					content: [{ type: "text", text: "command returned zero" }],
+					observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+					isError: false,
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(messages[0]).toMatchObject({
+			role: "tool",
+			content: expect.stringContaining('{"status":"denied","truncated":false,"facts":{"exitCode":0}}'),
+		});
+		expect(messages[0]).toMatchObject({ content: expect.stringContaining("command returned zero") });
+	});
+
 	test("keeps injected Skill context but omits the structured Skill reference from provider input", () => {
 		const messages = convertMessages(model, {
 			messages: [

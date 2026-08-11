@@ -100,6 +100,14 @@ export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readon
 							: [{ type: "text" as const, text: "[MCP Tool completed with no model-visible content]" }];
 					return {
 						content,
+						observation: {
+							status: projection.isError ? "error" : "ok",
+							truncated: projection.details.truncated,
+							facts: {
+								contentTypes: [...projection.details.contentTypes],
+								hasStructuredContent: projection.details.hasStructuredContent,
+							},
+						},
 						isError: projection.isError,
 						details: Object.freeze({
 							kind: "mcp" as const,

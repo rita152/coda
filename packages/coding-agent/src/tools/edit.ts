@@ -166,6 +166,11 @@ export function createEditTool(
 				const replacements = arguments_.replaceAll ? occurrences.length : 1;
 				return {
 					content: `Edited ${arguments_.path}: ${replacements} replacement${replacements === 1 ? "" : "s"}.`,
+					observation: {
+						status: "ok",
+						truncated: false,
+						facts: { replacements, bytes: result.size },
+					},
 					details: {
 						requestedPath: arguments_.path,
 						path: current.canonicalPath,

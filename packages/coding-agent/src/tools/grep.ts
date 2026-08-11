@@ -165,6 +165,7 @@ export function createGrepTool(options: {
 				}
 				return {
 					content: matches.length === 0 ? "(no matches)" : matches.join("\n"),
+					observation: { status: "ok", truncated, facts: { count: matches.length, engine: "rg" } },
 					details: { count: matches.length, truncated, engine: "rg" },
 				};
 			}
@@ -197,6 +198,7 @@ export function createGrepTool(options: {
 
 			return {
 				content: matches.length === 0 ? "(no matches)" : matches.join("\n"),
+				observation: { status: "ok", truncated, facts: { count: matches.length, engine: "node" } },
 				details: { count: matches.length, truncated, engine: "node" },
 			};
 		},

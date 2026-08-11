@@ -8,7 +8,14 @@ import type {
 	ToolExecutionProgress,
 	ToolInvocation,
 } from "@coda/agent";
-import type { AssistantMessage, TextSignatureV1, ToolCall, ToolResultMessage, UserMessage } from "@coda/ai";
+import {
+	type AssistantMessage,
+	resolveToolObservation,
+	type TextSignatureV1,
+	type ToolCall,
+	type ToolResultMessage,
+	type UserMessage,
+} from "@coda/ai";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
@@ -293,7 +300,7 @@ export class SemanticTimeline {
 				const slot = this.#toolByProviderId.get(result.message.toolCallId);
 				if (slot) {
 					slot.result = clone(result);
-					slot.state = result.message.isError ? "failed" : "success";
+					slot.state = observationToolState(result.message);
 					slot.endedAt = result.message.timestamp;
 					slot.projected = undefined;
 				}
@@ -508,7 +515,14 @@ export class SemanticTimeline {
 	): void {
 		const slot = this.#findOrCreateTool(invocation, turnId);
 		this.#attachInvocation(slot, invocation);
-		slot.state = outcome === "success" ? "success" : outcome === "error" ? "failed" : "aborted";
+		slot.state =
+			result.message.role === "toolResult"
+				? observationToolState(result.message)
+				: outcome === "success"
+					? "success"
+					: outcome === "error"
+						? "failed"
+						: "aborted";
 		slot.endedAt = timestamp;
 		slot.progress = undefined;
 		if (result.message.role === "toolResult") slot.result = clone(result as AgentMessage<ToolResultMessage>);
@@ -733,6 +747,19 @@ function restoredToolState(lifecycle: SessionToolLifecycle): TimelineToolState {
 		case "interrupted":
 		case undefined:
 			return "interrupted";
+	}
+}
+
+function observationToolState(message: Parameters<typeof resolveToolObservation>[0]): TimelineToolState {
+	switch (resolveToolObservation(message).status) {
+		case "ok":
+			return "success";
+		case "denied":
+			return "denied";
+		case "aborted":
+			return "aborted";
+		case "error":
+			return "failed";
 	}
 }
 

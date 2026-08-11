@@ -85,12 +85,12 @@ describe("JSONL File Session", () => {
 		await restored.close();
 	});
 
-	it("keeps empty Session v1 through v6 journals readable while upgrading them to v7", async () => {
+	it("keeps empty Session v1 through v7 journals readable while upgrading them to v8", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-all-migrations-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
 		await mkdir(directory, { recursive: true });
-		for (const version of [1, 2, 3, 4, 5, 6] as const) {
+		for (const version of [1, 2, 3, 4, 5, 6, 7] as const) {
 			const sessionId = `session-v${version}`;
 			await writeFile(
 				join(directory, `${sessionId}.jsonl`),
@@ -115,7 +115,7 @@ describe("JSONL File Session", () => {
 			processInspector: { status: async () => "alive" },
 		});
 
-		for (const version of [1, 2, 3, 4, 5, 6] as const) {
+		for (const version of [1, 2, 3, 4, 5, 6, 7] as const) {
 			const sessionId = `session-v${version}`;
 			const restored = await manager.open({
 				workspace: { id: "workspace-hash", path: "/canonical/workspace" },
@@ -125,7 +125,7 @@ describe("JSONL File Session", () => {
 			expect(restored.composerSubmissions).toEqual([]);
 			await restored.close();
 			expect(JSON.parse((await readFile(join(directory, `${sessionId}.jsonl`), "utf8")).trim())).toMatchObject({
-				version: 7,
+				version: 8,
 			});
 		}
 	});
@@ -295,13 +295,22 @@ describe("JSONL File Session", () => {
 			.trimEnd()
 			.split("\n")
 			.map((line) => JSON.parse(line));
-		expect(lines[0]).toMatchObject({ type: "session", version: 7, sessionId });
+		expect(lines[0]).toMatchObject({ type: "session", version: 8, sessionId });
 		const records = lines.slice(1);
 		expect(records.map((record) => record.sequence)).toEqual(records.map((_, index) => index + 1));
 		expect(records[0].previousRecordId).toBeNull();
 		for (let index = 1; index < records.length; index++) {
 			expect(records[index].previousRecordId).toBe(records[index - 1].recordId);
 		}
+		expect(records.find((record) => record.type === "tool_finished")?.payload).toMatchObject({
+			settlement: "returned",
+			outcome: "success",
+		});
+		expect(
+			records.find(
+				(record) => record.type === "message_committed" && record.payload?.message?.message?.role === "toolResult",
+			)?.payload,
+		).toMatchObject({ message: { message: { observation: { status: "ok", truncated: false } } } });
 		await expect(access(`${sessionPath}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
 
 		const restored = await manager.open({
@@ -315,10 +324,13 @@ describe("JSONL File Session", () => {
 			"toolResult",
 			"assistant",
 		]);
+		expect(restored.seed.messages.find(({ message }) => message.role === "toolResult")?.message).toMatchObject({
+			observation: { status: "ok", truncated: false },
+		});
 		await restored.close();
 	});
 
-	it("atomically migrates v1 inline images to v7 media references while preserving a backup", async () => {
+	it("atomically migrates v1 inline images to v8 media references while preserving a backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -391,17 +403,17 @@ describe("JSONL File Session", () => {
 		await resumed.close();
 
 		const migrated = await readFile(path, "utf8");
-		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 7 });
+		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 8 });
 		expect(migrated).not.toContain(imageData);
 		expect(migrated).toContain('"type":"media"');
 		expect(await readFile(`${path}.v1.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v7");
+		expect(diagnostics).toContain("session.migrated-v8");
 		const mediaEntry = JSON.parse(migrated.split("\n")[1]!).payload.message.message.content[1];
 		const mediaPath = join(`${path}.media`, `${mediaEntry.digest}.model.png`);
 		expect((await stat(mediaPath)).mode & 0o777).toBe(0o600);
 	});
 
-	it("atomically upgrades a v2 journal to v7 before accepting reclaimed Follow-up records", async () => {
+	it("atomically upgrades a v2 journal to v8 before accepting reclaimed Follow-up records", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v3-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -438,12 +450,12 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 7 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 8 });
 		expect(await readFile(`${path}.v2.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v7");
+		expect(diagnostics).toContain("session.migrated-v8");
 	});
 
-	it("atomically upgrades a v3 journal to v7 and preserves a v3 backup", async () => {
+	it("atomically upgrades a v3 journal to v8 and preserves a v3 backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v4-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -480,9 +492,9 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 7 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 8 });
 		expect(await readFile(`${path}.v3.backup`, "utf8")).toBe(legacyText);
-		expect(diagnostics).toContain("session.migrated-v7");
+		expect(diagnostics).toContain("session.migrated-v8");
 	});
 
 	it("durably classifies an active Run as interrupted before resuming", async () => {

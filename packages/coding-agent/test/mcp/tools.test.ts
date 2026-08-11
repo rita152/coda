@@ -83,6 +83,11 @@ describe("MCP Agent Tools", () => {
 				{ type: "text", text: "[MCP audio: audio/wav, 5 bytes; binary payload omitted from model content]" },
 				{ type: "text", text: '[MCP structured content]\n{\n  "count": 1\n}' },
 			],
+			observation: {
+				status: "ok",
+				truncated: false,
+				facts: { contentTypes: ["text", "audio"], hasStructuredContent: true },
+			},
 			isError: false,
 			details: {
 				kind: "mcp",

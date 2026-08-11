@@ -47,6 +47,14 @@ export function createSkillTool(snapshot: CodingSkillsSnapshot): AgentTool<TSche
 			});
 			return {
 				content: renderModelSkillResult(activation, resolved),
+				observation: {
+					status: "ok",
+					truncated: false,
+					facts: {
+						resourceCount: activation.resources.length,
+						diagnosticCount: activation.diagnostics.length,
+					},
+				},
 				details: Object.freeze({
 					id: String(id),
 					revision: String(activation.revision),

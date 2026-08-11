@@ -78,6 +78,7 @@ export interface SessionToolLifecycle {
 	readonly turnId?: string;
 	readonly startedAt?: number;
 	readonly finishedAt?: number;
+	readonly settlement?: "returned" | "threw" | "aborted";
 	readonly outcome?: "success" | "error" | "aborted" | "rejected" | "interrupted";
 	readonly rejectionReason?: ToolRejectionReason;
 	readonly resultMessageId?: MessageId;

@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -20,6 +20,7 @@ const STOP_REASONS = new Set(["pending", "stop", "length", "toolUse", "error", "
 const REASONING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const RUN_OUTCOMES = new Set(["success", "error", "aborted"]);
 const TOOL_OUTCOMES = new Set(["success", "error", "aborted", "rejected", "interrupted"]);
+const TOOL_SETTLEMENTS = new Set(["returned", "threw", "aborted"]);
 const TOOL_REASONS = new Set(["missing", "invalid", "policy", "aborted", "not_started", "skipped_by_user"]);
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -394,12 +395,22 @@ function isAssistantMessage(value: unknown): boolean {
 	);
 }
 
+function isToolObservation(value: unknown): boolean {
+	return (
+		exactRecord(value, ["status", "truncated"], ["facts", "outputRef"]) &&
+		(value.status === "ok" || value.status === "error" || value.status === "denied" || value.status === "aborted") &&
+		typeof value.truncated === "boolean" &&
+		(value.facts === undefined || (isRecord(value.facts) && isJsonValue(value.facts))) &&
+		(value.outputRef === undefined || (isNonEmptyString(value.outputRef) && value.outputRef.length <= 512))
+	);
+}
+
 function isToolResultMessage(value: unknown, version: SessionFormatVersion): boolean {
 	return (
 		exactRecord(
 			value,
 			["role", "toolCallId", "toolName", "content", "isError", "timestamp"],
-			["details", "usage", "addedToolNames"],
+			["details", "usage", "addedToolNames", ...(version >= 8 ? ["observation"] : [])],
 		) &&
 		value.role === "toolResult" &&
 		isNonEmptyString(value.toolCallId) &&
@@ -410,6 +421,9 @@ function isToolResultMessage(value: unknown, version: SessionFormatVersion): boo
 		) &&
 		typeof value.isError === "boolean" &&
 		isFiniteNumber(value.timestamp) &&
+		(value.observation === undefined || (version >= 8 && isToolObservation(value.observation))) &&
+		(value.observation === undefined ||
+			(isRecord(value.observation) && value.isError === (value.observation.status !== "ok"))) &&
 		(value.details === undefined || isJsonValue(value.details)) &&
 		(value.usage === undefined || isUsage(value.usage)) &&
 		(value.addedToolNames === undefined || isStringArray(value.addedToolNames))
@@ -475,7 +489,8 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 			value.version === 4 ||
 			value.version === 5 ||
 			value.version === 6 ||
-			value.version === 7) &&
+			value.version === 7 ||
+			value.version === 8) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -546,10 +561,15 @@ export function isSessionRecordPayload(
 			return exactRecord(payload, ["invocation"]) && isToolInvocation(payload.invocation);
 		case "tool_finished": {
 			if (
-				!exactRecord(payload, ["invocation", "outcome", "resultMessageId"], ["reason"]) ||
+				!exactRecord(
+					payload,
+					["invocation", "outcome", "resultMessageId"],
+					["reason", ...(version >= 8 ? ["settlement"] : [])],
+				) ||
 				!isToolInvocation(payload.invocation) ||
 				!TOOL_OUTCOMES.has(String(payload.outcome)) ||
 				!isNonEmptyString(payload.resultMessageId) ||
+				(payload.settlement !== undefined && !TOOL_SETTLEMENTS.has(String(payload.settlement))) ||
 				(payload.reason !== undefined && !TOOL_REASONS.has(String(payload.reason)))
 			) {
 				return false;

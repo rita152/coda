@@ -15,6 +15,7 @@ import { parse } from "partial-json";
 
 import { AssistantMessageEventStream } from "../event-stream.ts";
 import { retryProviderRequest } from "../provider-retry.ts";
+import { modelToolResultText } from "../tool-observation.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -100,9 +101,7 @@ function convertInput(context: Context): ResponseInput {
 			input.push({
 				type: "function_call_output",
 				call_id: responseCallId(message.toolCallId).callId,
-				output: message.content
-					.map((block) => (block.type === "text" ? block.text : `[image: ${block.mimeType}]`))
-					.join("\n"),
+				output: modelToolResultText(message),
 			});
 			continue;
 		}

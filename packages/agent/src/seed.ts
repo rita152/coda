@@ -63,6 +63,25 @@ function validateToolResultMessage(message: Record<string, unknown>): void {
 	if (!Array.isArray(message.content) || typeof message.isError !== "boolean") {
 		invalid("Agent Seed contains an invalid Tool Result Message");
 	}
+	if (message.observation !== undefined) {
+		if (
+			!isRecord(message.observation) ||
+			(message.observation.status !== "ok" &&
+				message.observation.status !== "error" &&
+				message.observation.status !== "denied" &&
+				message.observation.status !== "aborted") ||
+			typeof message.observation.truncated !== "boolean" ||
+			(message.observation.outputRef !== undefined &&
+				(typeof message.observation.outputRef !== "string" ||
+					message.observation.outputRef.length === 0 ||
+					message.observation.outputRef.length > 512))
+		) {
+			invalid("Agent Seed contains an invalid Tool observation");
+		}
+		if (message.isError !== (message.observation.status !== "ok")) {
+			invalid("Agent Seed Tool isError must be derived from its observation status");
+		}
+	}
 }
 
 function validateMessage(value: unknown): asserts value is Message {

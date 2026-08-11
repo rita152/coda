@@ -31,7 +31,18 @@ describe("ContextWindowController", () => {
 
 	it("retains a Tool-pair-safe exact tail and records complete checkpoint provenance", async () => {
 		const fixture = await controllerFixture();
-		fixture.faux.setResponses([fauxAssistantMessage(summary("safe tail"), { timestamp: 10_000 })]);
+		fixture.faux.setResponses([
+			(context) => {
+				const prompt = context.messages
+					.map((message) =>
+						typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+					)
+					.join("\n");
+				expect(prompt).toContain('"observation":{"status":"error","truncated":true');
+				expect(prompt).not.toContain("SECRET_PRESENTATION_DETAIL");
+				return fauxAssistantMessage(summary("safe tail"), { timestamp: 10_000 });
+			},
+		]);
 		const messages: AgentMessage[] = [
 			user("message:u1", "inspect"),
 			{
@@ -48,7 +59,9 @@ describe("ContextWindowController", () => {
 					toolCallId: "provider:read",
 					toolName: "read",
 					content: [{ type: "text", text: `discarded-result:${"x".repeat(100_000)}` }],
-					isError: false,
+					observation: { status: "error", truncated: true, facts: { code: "partial_read" } },
+					details: { internal: "SECRET_PRESENTATION_DETAIL" },
+					isError: true,
 					timestamp: 10_000,
 				},
 			},

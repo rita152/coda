@@ -1,16 +1,29 @@
-import { join } from "node:path";
 import type { AgentTool } from "@coda/agent";
-import { Type } from "@coda/ai";
+import { type JsonValue, Type } from "@coda/ai";
 import type { ApplicationRuntime, UserSettings } from "../application.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
+import { createToolOutputCapture, discardStoredToolOutput, type StoredToolOutput } from "./tool-output-store.ts";
 
 const BashParameters = Type.Object(
 	{
 		command: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 120_000 })),
+		preview: Type.Optional(
+			Type.Object(
+				{
+					mode: Type.Union([Type.Literal("head"), Type.Literal("tail")]),
+					lines: Type.Integer({ minimum: 1, maximum: 2_000 }),
+				},
+				{
+					additionalProperties: false,
+					description:
+						"Select a model-visible head or tail preview after execution. This never changes the Shell command or its exit status.",
+				},
+			),
+		),
 		sandbox_permissions: Type.Optional(
 			Type.Union(
 				[
@@ -81,19 +94,44 @@ function shellEnvironment(
 	return { environment, stripped: stripped.sort() };
 }
 
-function visibleOutput(stdout: string, stderr: string, overflowPath?: string): string {
+function visibleOutput(stdout: string, stderr: string): string {
 	const sections: string[] = [];
 	if (stdout.length > 0) sections.push(stdout);
 	if (stderr.length > 0) sections.push(`${sections.length > 0 ? "\n" : ""}[stderr]\n${stderr}`);
-	if (overflowPath) sections.push(`${sections.length > 0 ? "\n" : ""}[output truncated; full log: ${overflowPath}]`);
 	return sections.join("") || "(no output)";
+}
+
+function lineChunks(value: string): string[] {
+	return value.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+
+function selectPreview(
+	value: string,
+	preview: { readonly mode: "head" | "tail"; readonly lines: number },
+): { readonly text: string; readonly omitted: boolean } {
+	const lines = lineChunks(value);
+	const selected = preview.mode === "head" ? lines.slice(0, preview.lines) : lines.slice(-preview.lines);
+	return { text: selected.join("") || "(no output)", omitted: lines.length > selected.length };
+}
+
+async function storedText(fileSystem: FileSystem, stored: StoredToolOutput | undefined): Promise<string | undefined> {
+	if (!stored || stored.storedBytes === 0) return undefined;
+	try {
+		return new TextDecoder("utf-8").decode(await fileSystem.readFile(stored.overflowPath));
+	} catch {
+		return undefined;
+	}
+}
+
+function capturedVisibleOutput(value: string): string {
+	return value.startsWith("[stdout]\n") ? value.slice("[stdout]\n".length) : value;
 }
 
 function denialNotice(denial: NonNullable<Awaited<ReturnType<ModelProcessRunner["run"]>>["denial"]>): string {
 	if (denial.kind === "network") {
-		return `Sandbox denied network access to ${denial.protocol}://${denial.host}:${denial.port}: ${denial.reason}`;
+		return `Sandbox denied network access to ${denial.protocol}://${denial.host}:${denial.port}: ${denial.reason}. If this access is intended, retry with sandbox_permissions "with_additional_permissions" and additional_permissions.network.enabled true.`;
 	}
-	return `Sandbox denied filesystem access${denial.path ? ` to ${denial.path}` : ""}: ${denial.reason}`;
+	return `Sandbox denied filesystem access${denial.path ? ` to ${denial.path}` : ""}: ${denial.reason}. If this access is intended, retry with the narrow path under additional_permissions.file_system.`;
 }
 
 export function createBashTool(options: {
@@ -107,50 +145,136 @@ export function createBashTool(options: {
 }): AgentTool<typeof BashParameters> {
 	return {
 		name: "bash",
-		description: "Run one non-interactive Shell command under the active Permission Profile.",
+		description:
+			"Run one non-interactive Shell command under the active Permission Profile. Use preview instead of piping to head/tail so display limiting cannot mask the command exit status.",
 		parameters: BashParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
-			const temporaryDirectory = join(options.runtime.homeDirectory, ".coda", "tmp");
-			await options.fileSystem.makeDirectory(temporaryDirectory, { recursive: true, mode: 0o700 });
-			await options.fileSystem.setMode(temporaryDirectory, 0o700);
-			const safeInvocationId = context.invocationId.replace(/[^a-zA-Z0-9_-]/g, "-");
-			const overflowPath = join(temporaryDirectory, `shell-${safeInvocationId}.log`);
-			const inherited = shellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
 			const authorization = options.permissions.authorizationFor(context.invocationId);
 			if (!authorization) throw new Error("Bash execution was not authorized by the Permission Engine");
-			const result = await options.processRunner.run(
-				{
-					executable: options.shellExecutable,
-					args: ["-c", arguments_.command],
-					cwd: options.workspace.root,
-					environment: inherited.environment,
-					signal: context.signal,
-					timeoutMs: arguments_.timeoutMs ?? 120_000,
-					maxOutputBytes: 50 * 1024,
-					maxOutputLines: 2_000,
-					overflowPath,
-				},
-				{
-					policy: authorization.policy,
-					managedNetwork: authorization.managedNetwork,
-					auditContext: { invocationId: context.invocationId, toolName: "bash" },
-				},
+			const inherited = shellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
+			const capture = await createToolOutputCapture(
+				options.fileSystem,
+				options.runtime.homeDirectory,
+				context.invocationId,
 			);
-			const output = visibleOutput(result.stdout, result.stderr, result.overflowPath);
+			let result: Awaited<ReturnType<ModelProcessRunner["run"]>>;
+			let stored: StoredToolOutput | undefined;
+			let observedStderr = false;
+			try {
+				result = await options.processRunner.run(
+					{
+						executable: options.shellExecutable,
+						args: ["-c", arguments_.command],
+						cwd: options.workspace.root,
+						environment: inherited.environment,
+						signal: context.signal,
+						timeoutMs: arguments_.timeoutMs ?? 120_000,
+						maxOutputBytes: 50 * 1024,
+						maxOutputLines: 2_000,
+						onOutput: (chunk) => {
+							if (chunk.channel === "stderr" && chunk.text.length > 0) observedStderr = true;
+							capture?.append(chunk);
+						},
+					},
+					{
+						policy: authorization.policy,
+						managedNetwork: authorization.managedNetwork,
+						auditContext: { invocationId: context.invocationId, toolName: "bash" },
+					},
+				);
+				stored = await capture?.finish();
+			} catch (error) {
+				stored = await capture?.finish();
+				if (stored) await discardStoredToolOutput(options.fileSystem, stored);
+				throw error;
+			}
+			if (stored?.storedBytes === 0 && (result.truncated || result.stdout.length > 0 || result.stderr.length > 0)) {
+				await discardStoredToolOutput(options.fileSystem, stored);
+				stored = undefined;
+			}
+
+			const bounded = visibleOutput(result.stdout, result.stderr);
+			let output = bounded;
+			let previewComplete = true;
+			let truncated = result.truncated;
+			if (arguments_.preview) {
+				const captured =
+					arguments_.preview.mode === "tail" ? await storedText(options.fileSystem, stored) : undefined;
+				const source = captured === undefined ? bounded : capturedVisibleOutput(captured);
+				const preview = selectPreview(source, arguments_.preview);
+				output = preview.text;
+				previewComplete =
+					captured !== undefined
+						? stored?.storedTruncated !== true
+						: !result.truncated ||
+							(arguments_.preview.mode === "head" && lineChunks(bounded).length > arguments_.preview.lines);
+				truncated = preview.omitted || !previewComplete;
+				if (!previewComplete && arguments_.preview.mode === "tail") {
+					output = `${output}\n[tail preview is incomplete because full output capture was unavailable]`;
+				}
+			}
+			if (stored && !truncated) {
+				await discardStoredToolOutput(options.fileSystem, stored);
+				stored = undefined;
+			}
+			if (truncated) {
+				output += stored
+					? `\n[output omitted; continue with read_tool_output using ref ${JSON.stringify(stored.outputRef)}]`
+					: "\n[output omitted; no recoverable output reference is available]";
+			}
+			const status = result.denial ? "denied" : result.timedOut || result.exitCode !== 0 ? "error" : "ok";
+			const facts: Record<string, JsonValue> = {
+				exitCode: result.exitCode,
+				exitCodeScope: "shell-command",
+				signal: result.signal,
+				timedOut: result.timedOut,
+				stderrPresent: observedStderr || result.stderr.length > 0,
+				backend: result.backend,
+				outputRefAvailable: stored !== undefined,
+				strippedEnvironmentVariableCount: inherited.stripped.length,
+				...(arguments_.preview
+					? { previewMode: arguments_.preview.mode, previewLines: arguments_.preview.lines, previewComplete }
+					: {}),
+				...(result.denial?.kind === "network"
+					? {
+							denialKind: "network",
+							deniedHost: result.denial.host,
+							deniedPort: result.denial.port,
+							deniedProtocol: result.denial.protocol,
+							requiredPermission: "network",
+						}
+					: result.denial
+						? {
+								denialKind: "filesystem",
+								...(result.denial.path ? { deniedPath: result.denial.path } : {}),
+								requiredPermission: "filesystem",
+							}
+						: {}),
+			};
 			return {
 				content: result.denial ? `${output}\n[${denialNotice(result.denial)}]` : output,
-				isError: Boolean(result.denial) || result.timedOut || result.exitCode !== 0,
+				observation: {
+					status,
+					truncated,
+					facts,
+					...(stored ? { outputRef: stored.outputRef } : {}),
+				},
+				isError: status !== "ok",
 				details: {
 					exitCode: result.exitCode,
 					signal: result.signal,
 					timedOut: result.timedOut,
-					truncated: result.truncated,
-					overflowPath: result.overflowPath,
+					truncated,
+					outputRef: stored?.outputRef,
+					overflowPath: stored?.overflowPath,
 					cwd: options.workspace.root,
-					strippedEnvironmentVariables: inherited.stripped,
+					strippedEnvironmentVariableCount: inherited.stripped.length,
 					backend: result.backend,
 					denial: result.denial,
+					preview: arguments_.preview,
+					previewComplete,
+					outputStoredTruncated: stored?.storedTruncated,
 				},
 			};
 		},

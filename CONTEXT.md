@@ -68,6 +68,14 @@ _Avoid_: bash Tool, Tool Invocation, Prompt
 One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
 _Avoid_: Tool, shell command
 
+**Tool Observation**:
+The authoritative structured account of a Tool operation's status, completeness, safe facts, and any continuation reference, distinct from both its output data and how execution settled.
+_Avoid_: Tool output, details, isError
+
+**Tool Settlement**:
+The executor boundary outcome stating whether a Tool returned, threw, or was aborted, independent of whether the returned operation itself succeeded, failed, or was denied.
+_Avoid_: Tool Observation, exit status, Tool result
+
 **MCP Host**:
 The Coding Agent facility that discovers and invokes Tools offered by configured external MCP Servers.
 _Avoid_: MCP Server, plugin host, Extension loader

@@ -54,4 +54,31 @@ describe("Session message schema", () => {
 			),
 		).toBe(true);
 	});
+
+	it("persists authoritative Tool observations in v8 while keeping v7 messages readable", () => {
+		const toolResult = {
+			message: {
+				id: "message:tool-result",
+				message: {
+					role: "toolResult",
+					toolCallId: "call:1",
+					toolName: "bash",
+					content: [{ type: "text", text: "denied" }],
+					isError: true,
+					timestamp: 1,
+				},
+			},
+		};
+
+		expect(isSessionRecordPayload("message_committed", toolResult, 7)).toBe(true);
+		const observed = structuredClone(toolResult);
+		Object.assign(observed.message.message, {
+			observation: { status: "denied", truncated: false, facts: { requiredPermission: "network" } },
+		});
+		expect(isSessionRecordPayload("message_committed", observed, 8)).toBe(true);
+		expect(isSessionRecordPayload("message_committed", observed, 7)).toBe(false);
+
+		observed.message.message.isError = false;
+		expect(isSessionRecordPayload("message_committed", observed, 8)).toBe(false);
+	});
 });

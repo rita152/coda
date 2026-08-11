@@ -8,6 +8,7 @@ import type {
 	TextContent,
 	Tool,
 	ToolCall,
+	ToolObservation,
 	TSchema,
 	UserMessage,
 } from "@coda/ai";
@@ -114,7 +115,10 @@ export type ToolReplaySafety = "never" | "safe";
 
 export interface ToolExecutionOutput<TDetails = unknown> {
 	readonly content: string | readonly (TextContent | ImageContent)[];
+	readonly observation?: ToolObservation;
+	/** Host-only presentation/audit metadata, not a model semantic channel. */
 	readonly details?: TDetails;
+	/** @deprecated Compatibility input. New Tools should set observation.status. */
 	readonly isError?: boolean;
 }
 
@@ -173,7 +177,9 @@ export interface ToolInvocation {
 }
 
 export type ToolRejectionReason = "missing" | "invalid" | "policy" | "aborted" | "not_started";
+/** Compatibility event projection derived from the Tool Observation status. */
 export type ToolExecutionOutcome = "success" | "error" | "aborted";
+export type ToolExecutionSettlement = "returned" | "threw" | "aborted";
 
 export type MessageDelta =
 	| { readonly type: "text_start"; readonly contentIndex: number }
@@ -279,6 +285,7 @@ interface ToolExecutionEndPayload {
 	readonly type: "tool_execution_end";
 	readonly turnId: TurnId;
 	readonly invocation: ToolInvocation;
+	readonly settlement: ToolExecutionSettlement;
 	readonly outcome: ToolExecutionOutcome;
 	readonly result: AgentMessage;
 }

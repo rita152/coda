@@ -123,6 +123,11 @@ describe("Skill activation context", () => {
 			},
 		);
 		expect(result.content).toContain("Visible body");
+		expect(result.observation).toMatchObject({
+			status: "ok",
+			truncated: false,
+			facts: { resourceCount: 0, diagnosticCount: 0 },
+		});
 		expect(result.details).toMatchObject({ id: String(id), name: "visible", arguments: "focus" });
 		expect(result.details!.revision).toMatch(/^[a-f0-9]{64}$/u);
 	});

@@ -75,15 +75,25 @@ export function createReadTool(workspace: Workspace, fileSystem: FileSystem): Ag
 			const start = (arguments_.offset ?? 1) - 1;
 			const limit = arguments_.limit ?? 2_000;
 			const selected = lines.slice(start, start + limit).join("");
+			const truncated = start > 0 || start + limit < lines.length;
 			return {
 				content: selected,
+				observation: {
+					status: "ok",
+					truncated,
+					facts: {
+						startLine: start + 1,
+						endLine: Math.min(start + limit, lines.length),
+						totalLines: lines.length,
+					},
+				},
 				details: {
 					requestedPath: arguments_.path,
 					path: resolved.canonicalPath,
 					startLine: start + 1,
 					endLine: Math.min(start + limit, lines.length),
 					totalLines: lines.length,
-					truncated: start > 0 || start + limit < lines.length,
+					truncated,
 				},
 			};
 		},

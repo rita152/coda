@@ -78,6 +78,10 @@
       "status": "deliberate-deviation",
       "test": "test/stream-contract.test.ts"
     },
+    "resolveToolObservation": {
+      "status": "deliberate-deviation",
+      "test": "test/tool-observation.test.ts"
+    },
     "validateToolArguments": {
       "status": "compatible",
       "test": "test/tool-validation.test.ts"
@@ -612,6 +616,10 @@
       "status": "compatible",
       "test": "test/public-types.consumer.ts"
     },
+    "ToolObservation": {
+      "status": "deliberate-deviation",
+      "test": "test/tool-observation.test.ts"
+    },
     "ToolResultMessage": {
       "status": "compatible",
       "test": "test/public-types.consumer.ts"
@@ -659,6 +667,7 @@
         "fauxToolCall",
         "lazyApi",
         "lazyStream",
+        "resolveToolObservation",
         "validateToolArguments",
         "validateToolCall"
       ],

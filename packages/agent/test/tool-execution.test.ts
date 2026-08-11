@@ -176,8 +176,9 @@ describe("Agent Tool execution", () => {
 		const events: AgentEvent[] = [];
 		const missing = tool("missing", ({ path }) => ({
 			content: `Path does not exist: ${path}`,
+			observation: { status: "error", truncated: false, facts: { code: "not_found" } },
 			details: { status: "failed", code: "not_found", path },
-			isError: true,
+			isError: false,
 		}));
 		const calls = fauxAssistantMessage([fauxToolCall("missing", { path: "src" }, { id: "call:missing" })], {
 			stopReason: "toolUse",
@@ -195,8 +196,16 @@ describe("Agent Tool execution", () => {
 		expect(events.filter((event) => event.type === "tool_execution_end")).toMatchObject([
 			{
 				type: "tool_execution_end",
+				settlement: "returned",
 				outcome: "error",
-				result: { message: { role: "toolResult", toolCallId: "call:missing", isError: true } },
+				result: {
+					message: {
+						role: "toolResult",
+						toolCallId: "call:missing",
+						observation: { status: "error", truncated: false, facts: { code: "not_found" } },
+						isError: true,
+					},
+				},
 			},
 		]);
 		expect(contexts).toHaveLength(2);
@@ -338,6 +347,9 @@ describe("Agent Tool execution", () => {
 		expect(events.at(-1)?.type).toBe("run_end");
 		expect(events.filter((event) => event.type === "tool_execution_rejected").map(({ reason }) => reason)).toEqual([
 			"not_started",
+		]);
+		expect(events.filter((event) => event.type === "tool_execution_end")).toMatchObject([
+			{ settlement: "threw", outcome: "error" },
 		]);
 		expect(agent.state.messages.map(({ message }) => message.role)).toEqual([
 			"user",

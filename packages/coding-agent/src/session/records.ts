@@ -43,7 +43,7 @@ export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -265,6 +265,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				if (typeof invocation?.id === "string") {
 					const started = toolInvocations.get(invocation.id);
 					const outcome = payload.outcome as SessionToolLifecycle["outcome"];
+					const settlement = payload.settlement as SessionToolLifecycle["settlement"];
 					const rejectionReason = payload.reason as ToolRejectionReason | undefined;
 					toolInvocations.set(invocation.id, {
 						invocation: structuredClone(invocation),
@@ -272,6 +273,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...((record.turnId ?? started?.turnId) ? { turnId: record.turnId ?? started?.turnId } : {}),
 						...(started?.startedAt !== undefined ? { startedAt: started.startedAt } : {}),
 						finishedAt: record.timestamp,
+						...(settlement ? { settlement } : {}),
 						...(outcome ? { outcome } : {}),
 						...(rejectionReason ? { rejectionReason } : {}),
 						...(typeof payload.resultMessageId === "string"
@@ -401,6 +403,7 @@ export function eventRecordInputs(
 					type: "tool_finished",
 					payload: {
 						invocation: persistedMcpInvocation(event.invocation),
+						settlement: event.settlement,
 						outcome: event.outcome,
 						resultMessageId: event.result.id,
 					},
@@ -432,7 +435,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 7,
+		version: 8,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

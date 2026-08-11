@@ -38,6 +38,11 @@ describe("bash Tool", () => {
 					role: "toolResult",
 					toolCallId: "denied-bash",
 					isError: true,
+					observation: {
+						status: "denied",
+						truncated: false,
+						facts: { denialKind: "network", requiredPermission: "network", exitCode: 0 },
+					},
 					content: [
 						{
 							type: "text",
@@ -123,6 +128,7 @@ describe("bash Tool", () => {
 					toolCallId: "provider-bash-1",
 					toolName: "bash",
 					isError: false,
+					observation: { status: "ok", truncated: false, facts: { exitCode: 0 } },
 					content: [{ type: "text", text: `${canonicalWorkspace}|unset` }],
 					details: { exitCode: 0, timedOut: false, truncated: false },
 				});
@@ -169,6 +175,171 @@ describe("bash Tool", () => {
 
 		expect(exitCode, stderr.value).toBe(0);
 		expect(stdout.value).toBe("The command was isolated from provider secrets.\n");
+		expect(stderr.value).toBe("");
+	});
+
+	it("selects a tail preview without masking exit status and exposes recoverable output", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-preview-"));
+		temporaryDirectories.push(workspace);
+		let outputRef = "";
+		const faux = fauxProvider({ runtime: testTimeRuntime(910) });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall(
+					"bash",
+					{ command: "printf 'one\\ntwo\\nthree\\nfour\\n'; exit 7", preview: { mode: "tail", lines: 2 } },
+					{ id: "preview-bash" },
+				),
+				{ stopReason: "toolUse", timestamp: 910 },
+			),
+			(context) => {
+				const result = context.messages.at(-1);
+				expect(result).toMatchObject({
+					role: "toolResult",
+					isError: true,
+					content: [{ type: "text", text: expect.stringContaining("three\nfour") }],
+					observation: {
+						status: "error",
+						truncated: true,
+						facts: { exitCode: 7, previewMode: "tail", previewComplete: true },
+						outputRef: expect.any(String),
+					},
+				});
+				if (result?.role !== "toolResult") throw new Error("Expected a Tool Result");
+				expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("one\ntwo");
+				outputRef = result.observation?.outputRef ?? "";
+				return fauxAssistantMessage(
+					fauxToolCall("read_tool_output", { ref: outputRef }, { id: "read-preview-output" }),
+					{ stopReason: "toolUse", timestamp: 910 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolName: "read_tool_output",
+					isError: false,
+					content: [{ type: "text", text: expect.stringContaining("one\ntwo\nthree\nfour") }],
+				});
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"bash",
+						{ command: "printf 'alpha\\nbeta\\n'", preview: { mode: "head", lines: 1 } },
+						{ id: "head-preview-bash" },
+					),
+					{ stopReason: "toolUse", timestamp: 910 },
+				);
+			},
+			(context) => {
+				const result = context.messages.at(-1);
+				expect(result).toMatchObject({
+					role: "toolResult",
+					isError: false,
+					observation: {
+						status: "ok",
+						truncated: true,
+						facts: { exitCode: 0, previewMode: "head", previewComplete: true },
+					},
+				});
+				if (result?.role !== "toolResult") throw new Error("Expected a Tool Result");
+				expect(result.content[0]?.type === "text" ? result.content[0].text : "").toMatch(/^alpha\n/);
+				expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("[stdout]");
+				return fauxAssistantMessage("Recovered the complete output and kept exit 7.", { timestamp: 910 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(910) });
+		models.setProvider(faux.provider);
+		const runner = createNodeProcessRunner({ platform: process.platform });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: runner,
+			modelProcessRunner: {
+				run: async (request) => ({ ...(await runner.run(request)), backend: "none" }),
+			},
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: process.platform,
+				environment: { HOME: workspace, PATH: process.env.PATH, SHELL: "/bin/sh", USER: "tester" },
+				clock: { now: () => 910 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "preview"]),
+		).resolves.toBe(0);
+		expect(outputRef).toMatch(/^tool-output:v1:/);
+		expect(stdout.value).toBe("Recovered the complete output and kept exit 7.\n");
+		expect(stderr.value).toBe("");
+	});
+
+	it("keeps Bash usable when its optional output store cannot be created", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-output-store-failure-"));
+		temporaryDirectories.push(workspace);
+		const baseFileSystem = createNodeFileSystem();
+		const fileSystem = {
+			...baseFileSystem,
+			makeDirectory: async (path: string, options?: { recursive?: boolean; mode?: number }) => {
+				if (path.endsWith(join(".coda", "tmp"))) {
+					throw Object.assign(new Error("output store denied"), { code: "EPERM" });
+				}
+				await baseFileSystem.makeDirectory(path, options);
+			},
+		};
+		const faux = fauxProvider({ runtime: testTimeRuntime(920) });
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "printf usable" }, { id: "bash-no-store" }), {
+				stopReason: "toolUse",
+				timestamp: 920,
+			}),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					content: [{ type: "text", text: "usable" }],
+					observation: {
+						status: "ok",
+						truncated: false,
+						facts: { exitCode: 0, outputRefAvailable: false },
+					},
+				});
+				return fauxAssistantMessage("Bash remained usable.", { timestamp: 920 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(920) });
+		models.setProvider(faux.provider);
+		const runner = createNodeProcessRunner({ platform: process.platform });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem,
+			processRunner: runner,
+			modelProcessRunner: {
+				run: async (request) => ({ ...(await runner.run(request)), backend: "none" }),
+			},
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: process.platform,
+				environment: { HOME: workspace, PATH: process.env.PATH, SHELL: "/bin/sh", USER: "tester" },
+				clock: { now: () => 920 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "run"]),
+		).resolves.toBe(0);
+		expect(stdout.value).toBe("Bash remained usable.\n");
 		expect(stderr.value).toBe("");
 	});
 });

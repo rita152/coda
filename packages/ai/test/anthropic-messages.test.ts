@@ -87,6 +87,60 @@ function anthropicSse(): string {
 }
 
 describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-parsing.test.ts)", () => {
+	test("projects authoritative Tool observations into Tool Result blocks", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		const output = stream(
+			model,
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call:denied",
+						toolName: "bash",
+						content: [{ type: "text", text: "command returned zero" }],
+						observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			{
+				runtime: testTimeRuntime(123),
+				apiKey: "test-key",
+				maxRetries: 0,
+				fetch: async (input, init) => {
+					requestBody = (await new Request(input, init).clone().json()) as Record<string, unknown>;
+					return new Response(anthropicSse(), { status: 200, headers: { "content-type": "text/event-stream" } });
+				},
+			},
+		);
+		await output.result();
+
+		expect(requestBody).toMatchObject({
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "call:denied",
+							is_error: true,
+							content: [
+								{
+									type: "text",
+									text: expect.stringContaining(
+										'{"status":"denied","truncated":false,"facts":{"exitCode":0}}',
+									),
+								},
+								{ type: "text", text: "command returned zero" },
+							],
+						},
+					],
+				},
+			],
+		});
+	});
+
 	test("streams text and tool calls through the pinned SDK with a Pi-compatible payload", async () => {
 		let requestBody: Record<string, unknown> | undefined;
 		const mockFetch: FetchFunction = async (input, init) => {

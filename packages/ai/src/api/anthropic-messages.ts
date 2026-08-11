@@ -16,6 +16,7 @@ import { parse } from "partial-json";
 
 import { AssistantMessageEventStream } from "../event-stream.ts";
 import { retryProviderRequest } from "../provider-retry.ts";
+import { modelToolResultContent, toolResultIsError } from "../tool-observation.ts";
 import type {
 	AnthropicOptions,
 	AssistantMessage,
@@ -88,8 +89,8 @@ function toolResultContent(message: ToolResultMessage): ContentBlockParam[] {
 		{
 			type: "tool_result",
 			tool_use_id: message.toolCallId,
-			is_error: message.isError,
-			content: message.content.map((block) =>
+			is_error: toolResultIsError(message),
+			content: modelToolResultContent(message).map((block) =>
 				block.type === "text"
 					? { type: "text" as const, text: block.text }
 					: {

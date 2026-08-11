@@ -53,6 +53,11 @@ export function createWriteTool(
 				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, "write", writer);
 				return {
 					content: `${result.created ? "Created" : "Overwrote"} ${arguments_.path} (${result.size} bytes).`,
+					observation: {
+						status: "ok",
+						truncated: false,
+						facts: { operation: result.created ? "create" : "overwrite", bytes: result.size },
+					},
 					details: {
 						requestedPath: arguments_.path,
 						path: initial.canonicalPath,

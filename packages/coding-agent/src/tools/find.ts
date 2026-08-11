@@ -144,11 +144,13 @@ export function createFindTool(options: {
 				}
 				matches.sort((left, right) => left.localeCompare(right));
 				const visible = matches.slice(0, limit);
+				const truncated = external.truncated || matches.length > visible.length;
 				return {
 					content: visible.length === 0 ? "(no matches)" : visible.join("\n"),
+					observation: { status: "ok", truncated, facts: { count: visible.length, engine: "fd" } },
 					details: {
 						count: visible.length,
-						truncated: external.truncated || matches.length > visible.length,
+						truncated,
 						engine: "fd",
 					},
 				};
@@ -162,9 +164,11 @@ export function createFindTool(options: {
 			const visible = matches
 				.slice(0, limit)
 				.map((entry) => (entry.kind === "directory" ? `${entry.relativePath}/` : entry.relativePath));
+			const truncated = matches.length > visible.length;
 			return {
 				content: visible.length === 0 ? "(no matches)" : visible.join("\n"),
-				details: { count: visible.length, truncated: matches.length > visible.length, engine: "node" },
+				observation: { status: "ok", truncated, facts: { count: visible.length, engine: "node" } },
+				details: { count: visible.length, truncated, engine: "node" },
 			};
 		},
 	};

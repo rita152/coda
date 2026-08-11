@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage, Clock, IdGenerator, MessageId } from "@coda/agent";
-import type { Api, AssistantMessage, AuthResult, Context, Message, Model, Models } from "@coda/ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type AuthResult,
+	type Context,
+	type Message,
+	type Model,
+	type Models,
+	resolveToolObservation,
+} from "@coda/ai";
 import type { CompactionCheckpoint, CompactionReason } from "./types.ts";
 
 const SUMMARY_HEADINGS = [
@@ -531,6 +540,18 @@ function splitText(value: string, maximumCharacters: number): readonly string[] 
 
 function safeSerializeMessages(messages: readonly AgentMessage[]): string {
 	return JSON.stringify(messages, (_key, value: unknown) => {
+		if (typeof value === "object" && value !== null && (value as { role?: unknown }).role === "toolResult") {
+			const message = value as Extract<Message, { role: "toolResult" }>;
+			return {
+				role: message.role,
+				toolCallId: message.toolCallId,
+				toolName: message.toolName,
+				content: message.content,
+				observation: resolveToolObservation(message),
+				...(message.addedToolNames ? { addedToolNames: message.addedToolNames } : {}),
+				timestamp: message.timestamp,
+			};
+		}
 		if (typeof value === "object" && value !== null && (value as { type?: unknown }).type === "image") {
 			return { type: "image", omitted: true };
 		}

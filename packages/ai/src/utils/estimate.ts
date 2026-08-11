@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 // See THIRD_PARTY_NOTICES.md.
 
+import { modelToolObservationPreamble } from "../tool-observation.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -60,7 +61,12 @@ function estimateTextAndImageContentTokens(
 }
 
 function estimateMessageTokens(message: Message): number {
-	if (message.role === "user" || message.role === "toolResult") {
+	if (message.role === "toolResult") {
+		return (
+			estimateTextAndImageContentTokens(message.content) + estimateTextTokens(modelToolObservationPreamble(message))
+		);
+	}
+	if (message.role === "user") {
 		return estimateTextAndImageContentTokens(message.content);
 	}
 

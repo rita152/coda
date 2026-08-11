@@ -81,6 +81,7 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 			await visit(root.canonicalPath, "", 1);
 			return {
 				content: lines.length === 0 ? "(empty directory)" : lines.join("\n"),
+				observation: { status: "ok", truncated, facts: { count: lines.length } },
 				details: { count: lines.length, truncated },
 			};
 		},

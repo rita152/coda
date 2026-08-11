@@ -305,6 +305,15 @@ export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+/** Authoritative, Provider-neutral semantics for one Tool operation. */
+export interface ToolObservation {
+	readonly status: "ok" | "error" | "denied" | "aborted";
+	readonly truncated: boolean;
+	readonly facts?: Readonly<Record<string, JsonValue>>;
+	/** Opaque reference accepted by a Tool that can continue reading omitted output. */
+	readonly outputRef?: string;
+}
+
 export interface DeferredHandle {
 	provider: string;
 	modelId: string;
@@ -343,9 +352,13 @@ export interface ToolResultMessage<TDetails = any> {
 	toolCallId: string;
 	toolName: string;
 	content: (TextContent | ImageContent)[];
+	/** Present on new Messages; legacy Sessions are normalized at their consumption boundary. */
+	observation?: ToolObservation;
+	/** Host presentation/audit metadata. Api Adapters must not project this field automatically. */
 	details?: TDetails;
 	usage?: Usage;
 	addedToolNames?: string[];
+	/** Compatibility projection; new Messages derive this from observation.status. */
 	isError: boolean;
 	timestamp: number;
 }
