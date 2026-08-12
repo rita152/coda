@@ -10,6 +10,7 @@ describe("core commands", () => {
 			"permission",
 			"auth",
 			"model",
+			"effort",
 			"skill",
 			"mcp",
 			"session",
@@ -18,6 +19,7 @@ describe("core commands", () => {
 			"follow-up",
 		]);
 		expect(resolveCommandInvocation(registry, "/skill")?.command.id).toBe("core:skill");
+		expect(resolveCommandInvocation(registry, "/effort")?.command.id).toBe("core:effort");
 		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 		expect(resolveCommandInvocation(registry, "/permissions")?.command.id).toBe("core:permission");
 		expect(resolveCommandInvocation(registry, "/approvals")).toBeUndefined();

@@ -288,4 +288,43 @@ describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-p
 		});
 		expect(thinkingPayload).not.toHaveProperty("temperature");
 	});
+
+	test("maps simple reasoning selection to Messages thinking controls", async () => {
+		let budgetPayload: Record<string, unknown> | undefined;
+		const budgetOutput = streamSimple(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(),
+				apiKey: "test-key",
+				reasoning: "low",
+				onPayload: (payload) => {
+					budgetPayload = payload as Record<string, unknown>;
+				},
+				fetch: async () => new Response(anthropicSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+		await budgetOutput.result();
+		expect(budgetPayload).toMatchObject({ thinking: { type: "enabled", budget_tokens: 2_048 } });
+
+		let adaptivePayload: Record<string, unknown> | undefined;
+		const adaptiveOutput = streamSimple(
+			{ ...model, compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { high: "high" } },
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(),
+				apiKey: "test-key",
+				reasoning: "high",
+				onPayload: (payload) => {
+					adaptivePayload = payload as Record<string, unknown>;
+				},
+				fetch: async () => new Response(anthropicSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+		await adaptiveOutput.result();
+		expect(adaptivePayload).toMatchObject({
+			thinking: { type: "adaptive" },
+			output_config: { effort: "high" },
+		});
+	});
 });

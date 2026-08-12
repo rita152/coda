@@ -85,6 +85,7 @@ import { assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
 import type { CustomProviderConfig } from "./providers/types.ts";
+import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./reasoning-effort.ts";
 import { createCodingAgentRetry } from "./retry.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
 import { RunPermissionRouter } from "./runtime/run-permission-router.ts";
@@ -395,7 +396,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		}
 		if (argument === "--reasoning") {
 			const value = args[++index];
-			if (!value || !THINKING_LEVELS.includes(value as ThinkingLevel | "off")) {
+			if (!value || !REASONING_EFFORTS.includes(value as ThinkingLevel | "off")) {
 				throw new Error("--reasoning requires off, minimal, low, medium, high, xhigh, or max");
 			}
 			reasoning = value as ThinkingLevel | "off";
@@ -514,8 +515,6 @@ function finalText(message: Immutable<AssistantMessage>): string {
 		.join("");
 }
 
-const THINKING_LEVELS: readonly (ThinkingLevel | "off")[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
 const HELP = `Usage: coda [options] [prompt]
 
 Modes:
@@ -560,20 +559,32 @@ Other:
   -v, --version                  Show the Coda version
 `;
 
-function effectiveReasoning(model: Model<Api>, requested: ThinkingLevel | "off"): ThinkingLevel | "off" {
-	if (!model.reasoning) return "off";
-	const supported = THINKING_LEVELS.filter((level) => {
-		const mapping = model.thinkingLevelMap?.[level];
-		if (mapping === null) return false;
-		return level !== "xhigh" && level !== "max" ? true : mapping !== undefined;
-	});
-	if (supported.includes(requested)) return requested;
-	const requestedIndex = THINKING_LEVELS.indexOf(requested);
-	return (
-		supported.find((candidate) => THINKING_LEVELS.indexOf(candidate) > requestedIndex) ??
-		[...supported].reverse().find((candidate) => THINKING_LEVELS.indexOf(candidate) < requestedIndex) ??
-		"off"
-	);
+function createEffortCommand(
+	session: Session,
+	runRuntime: RunRuntimeSlot<PreparedRunRuntime>,
+): NonNullable<InteractiveSessionOptions["effortCommand"]> {
+	return {
+		snapshot: () => ({
+			current: runRuntime.selected.reasoning,
+			available: availableReasoningEfforts(runRuntime.selected.model),
+		}),
+		select: async (effort) => {
+			const selected = runRuntime.selected;
+			const reasoning = effectiveReasoningEffort(selected.model, effort);
+			if (reasoning !== effort) {
+				throw new Error(
+					`Reasoning effort ${effort} is not supported by ${selected.model.provider}/${selected.model.id}`,
+				);
+			}
+			await session.record({
+				type: "model_selected",
+				model: { provider: selected.model.provider, id: selected.model.id },
+				reasoning,
+			});
+			runRuntime.select({ ...selected, reasoning });
+			return reasoning;
+		},
+	};
 }
 
 function promptRuntime(options: CodingAgentApplicationOptions, terminal: Terminal): PromptRuntime {
@@ -1013,7 +1024,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						await options.settings.save(settings);
 					}
 					const model = findModel(options.models, selection);
-					const reasoning = effectiveReasoning(
+					const reasoning = effectiveReasoningEffort(
 						model,
 						parsed.reasoning ?? session.restored.reasoning ?? settings.defaultReasoning ?? "medium",
 					);
@@ -1647,7 +1658,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								const targetSelection = targetSession.restored.model ?? settings.defaultModel;
 								if (!targetSelection) throw new Error("A new Session requires a configured default Model");
 								const targetModel = findModel(options.models, targetSelection);
-								const targetReasoning = effectiveReasoning(
+								const targetReasoning = effectiveReasoningEffort(
 									targetModel,
 									targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
 								);
@@ -2025,7 +2036,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												clock: options.runtime.clock,
 											});
 											if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
-											const nextReasoning = effectiveReasoning(
+											const nextReasoning = effectiveReasoningEffort(
 												selected.runtime,
 												targetRunRuntime.selected.reasoning,
 											);
@@ -2050,6 +2061,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
 										},
 									},
+									effortCommand: createEffortCommand(targetSession, targetRunRuntime),
 									authCommand,
 									skillsCommand,
 									mcpCommand,
@@ -2199,7 +2211,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											clock: options.runtime.clock,
 										});
 										if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
-										const nextReasoning = effectiveReasoning(selected.runtime, runRuntime.selected.reasoning);
+										const nextReasoning = effectiveReasoningEffort(
+											selected.runtime,
+											runRuntime.selected.reasoning,
+										);
 										await session.record({
 											type: "model_selected",
 											model: { provider: selected.providerId, id: selected.id },
@@ -2221,6 +2236,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
 									},
 								},
+								effortCommand: createEffortCommand(session, runRuntime),
 								authCommand,
 								skillsCommand,
 								mcpCommand,

@@ -306,6 +306,26 @@ describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)
 		});
 	});
 
+	test("maps simple reasoning selection to Chat Completions reasoning_effort", async () => {
+		let payload: Record<string, unknown> | undefined;
+		const output = streamSimple(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(),
+				apiKey: "test-key",
+				reasoning: "high",
+				onPayload: (value) => {
+					payload = value as Record<string, unknown>;
+				},
+				fetch: async () => new Response(completionsSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+
+		await output.result();
+		expect(payload).toMatchObject({ reasoning_effort: "high" });
+	});
+
 	test("applies Kimi and Qwen thinking controls and preserves reasoning for replay", async () => {
 		const kimi: Model<"openai-completions"> = {
 			...model,

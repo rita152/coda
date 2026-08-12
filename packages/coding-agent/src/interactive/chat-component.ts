@@ -279,6 +279,11 @@ export class ChatComponent extends Component {
 		this.invalidate();
 	}
 
+	setReasoning(reasoning: string): void {
+		this.#reasoning = reasoning;
+		this.invalidate();
+	}
+
 	insertSkillReference(commandId: string): void {
 		this.#commands.insertSkillReference(commandId);
 		this.#history.noteTextMutation();

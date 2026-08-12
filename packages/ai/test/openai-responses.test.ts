@@ -489,4 +489,27 @@ describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-
 			repetition_penalty: 1.1,
 		});
 	});
+
+	test("maps simple reasoning selection to Responses reasoning effort", async () => {
+		let payload: Record<string, unknown> | undefined;
+		const output = streamSimple(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(),
+				apiKey: "test-key",
+				reasoning: "high",
+				onPayload: (value) => {
+					payload = value as Record<string, unknown>;
+				},
+				fetch: async () => new Response(responsesSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+
+		await output.result();
+		expect(payload).toMatchObject({
+			reasoning: { effort: "high", summary: "auto" },
+			include: ["reasoning.encrypted_content"],
+		});
+	});
 });

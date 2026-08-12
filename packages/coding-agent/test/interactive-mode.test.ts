@@ -693,6 +693,69 @@ describe("interactive TUI mode", () => {
 		expect(saves).toBe(0);
 	});
 
+	it("selects the current model's reasoning effort for future Runs", async () => {
+		const runtime = testTimeRuntime(3_650);
+		const faux = fauxProvider({
+			runtime,
+			models: [{ id: "reasoner", name: "Reasoner", reasoning: true }],
+		});
+		let requestedReasoning: string | undefined;
+		faux.setResponses([
+			(_context, options) => {
+				requestedReasoning = options.reasoning;
+				return fauxAssistantMessage("reasoned answer", { timestamp: 3_650 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 140, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({
+					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started && terminal.readOutput().includes(`${faux.getModel().provider}/reasoner`));
+		await terminal.emit({ type: "text", text: "/effort" });
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes("Reasoning Effort"));
+		for (let index = 0; index < 4; index++) await terminal.emit(key("down"));
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes(`${faux.getModel().provider}/reasoner(high)`));
+
+		await terminal.emit({ type: "text", text: "use the selected effort" });
+		await terminal.emit(key("enter"));
+		await until(() => faux.state.callCount === 1 && terminal.readOutput().includes("reasoned answer"));
+		await terminal.emit(key("c", { text: "c", control: true }));
+		await terminal.emit(key("c", { text: "c", control: true }));
+
+		await expect(running).resolves.toBe(0);
+		expect(requestedReasoning).toBe("high");
+		expect(stdout.value).toContain("reasoned answer");
+		expect(stderr.value).toBe("");
+	});
+
 	it("keeps the former Session running while /new and /session change foreground focus", async () => {
 		const runtime = testTimeRuntime(3_750);
 		const faux = fauxProvider({ runtime });

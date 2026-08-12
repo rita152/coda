@@ -25,6 +25,13 @@ const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:effort",
+		name: "effort",
+		title: "Reasoning Effort",
+		description: "Choose the reasoning effort for future Runs in this session",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:skill",
 		name: "skill",
 		title: "Select Skill",

@@ -1,4 +1,5 @@
 import type { Agent, AgentInput, QueueItemId } from "@coda/agent";
+import type { ModelThinkingLevel } from "@coda/ai";
 import type { PermissionProfile } from "@coda/sandbox";
 import {
 	type DiagnosticSink,
@@ -14,6 +15,7 @@ import {
 	createAuthCommandFlow,
 	createProviderAuthFlow,
 } from "../commands/auth-flow.ts";
+import { createEffortCommandFlow } from "../commands/effort-flow.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
@@ -68,6 +70,13 @@ export interface InteractiveSessionOptions {
 			readonly activitySummaryMode: ActivitySummaryMode;
 		}>;
 		readonly authenticate: (providerId: string, navigation: CommandFlowNavigation) => Promise<void> | void;
+	};
+	readonly effortCommand?: {
+		readonly snapshot: () => {
+			readonly current: ModelThinkingLevel;
+			readonly available: readonly ModelThinkingLevel[];
+		};
+		readonly select: (effort: ModelThinkingLevel) => Promise<ModelThinkingLevel> | ModelThinkingLevel;
 	};
 	readonly authCommand?: {
 		readonly providers: () => Promise<readonly AuthProviderEntry[]>;
@@ -326,6 +335,20 @@ async function runMultiSessionInteractive(
 								const provider = authOptions.providers.find(({ id }) => id === providerId);
 								if (!provider) throw new Error(`Unknown provider: ${providerId}`);
 								navigation.push(createProviderAuthFlow(provider, authOptions));
+							},
+						}),
+					);
+					return;
+				}
+				if (commandId === "core:effort") {
+					if (!sessionOptions.effortCommand) throw new Error("Reasoning effort selection is unavailable");
+					const snapshot = sessionOptions.effortCommand.snapshot();
+					flow.open(
+						createEffortCommandFlow({
+							...snapshot,
+							onSelect: async (selected) => {
+								const reasoning = await sessionOptions.effortCommand!.select(selected);
+								component.setReasoning(reasoning);
 							},
 						}),
 					);
@@ -667,6 +690,20 @@ async function runSingleSessionInteractive(
 							const provider = authOptions.providers.find(({ id }) => id === providerId);
 							if (!provider) throw new Error(`Unknown provider: ${providerId}`);
 							navigation.push(createProviderAuthFlow(provider, authOptions));
+						},
+					}),
+				);
+				return;
+			}
+			if (commandId === "core:effort") {
+				if (!options.effortCommand) throw new Error("Reasoning effort selection is unavailable");
+				const snapshot = options.effortCommand.snapshot();
+				flow.open(
+					createEffortCommandFlow({
+						...snapshot,
+						onSelect: async (selected) => {
+							const reasoning = await options.effortCommand!.select(selected);
+							component.setReasoning(reasoning);
 						},
 					}),
 				);

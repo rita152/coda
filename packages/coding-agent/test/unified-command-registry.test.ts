@@ -13,5 +13,6 @@ describe("createUnifiedCommandRegistry", () => {
 			expect.objectContaining({ id: "mcp:review", source: "mcp", kind: "extension" }),
 		]);
 		expect(registry.search("mo", { location: "composer_start" })[0]?.command.id).toBe("core:model");
+		expect(registry.search("eff", { location: "composer_start" })[0]?.command.id).toBe("core:effort");
 	});
 });

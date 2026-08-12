@@ -53,10 +53,13 @@ approval. Choices are numbered sequentially, so denial is `2` when no prefix is
 available and `3` when one is. The feedback choice or Escape cancels the Run and
 returns focus to the Composer; Ctrl-C does the same. Pasted input never approves
 a request. The Composer's borderless upper list exposes `/permission`, `/auth`,
-`/model`, `/skill`, `/mcp`, `/session`, `/new`, and the running-Session-only
+`/model`, `/effort`, `/skill`, `/mcp`, `/session`, `/new`, and the running-Session-only
 `/follow-up` action. Selector commands open nested menus and do not accept
 trailing arguments; `/mcp` instead accepts `status`, `doctor`, `inspect`,
 `reload`, and `reconnect` operations.
+`/effort` lists the Reasoning Effort levels supported by the current Model and
+applies the selected level to future Runs in the Session. The selection is
+translated for OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses.
 `/permissions` remains a hidden compatibility alias, `/skills` is a hidden
 management view, while `/approvals` and `/attach` are ordinary Prompt text.
 
