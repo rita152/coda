@@ -47,6 +47,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: npm run eval:offline
       - run: npm run test:conformance
       - run: npm run test:integration
       - run: npm run test:e2e
