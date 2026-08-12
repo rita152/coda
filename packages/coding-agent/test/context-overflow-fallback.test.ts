@@ -3,12 +3,13 @@ import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IdGenerator, IdKind } from "@coda/agent";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@coda/ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import { createSystemScheduler, type KeyInput, stripAnsi, VirtualTerminal } from "@coda/tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import type { ModelProcessSessionRunner } from "../src/permissions/model-process-runner.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
 import type { SessionWorkspace } from "../src/session/types.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
@@ -140,6 +141,50 @@ describe("Context Overflow empty-Session fallback", () => {
 		expect(fixture.stderr.value).toBe("");
 	}, 15_000);
 
+	it("retires the overflowed Session's background processes before closing its journal", async () => {
+		const controlled = controlledBackgroundRunner();
+		const fixture = await createFixture(
+			{ contextWindow: 128_000, maxTokens: 16_384 },
+			undefined,
+			true,
+			controlled.runner,
+		);
+		fixture.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("process_start", { command: "long-running" }, { id: "start:old" }), {
+				stopReason: "toolUse",
+				timestamp: 10_000,
+			}),
+			fauxAssistantMessage([], {
+				stopReason: "error",
+				errorMessage: "maximum context window exceeded",
+				timestamp: 10_001,
+			}),
+		]);
+
+		const running = fixture.application.run([
+			"--interactive",
+			"--no-color",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--session",
+			"start then overflow",
+		]);
+		await until(() => stripAnsi(fixture.terminal.readOutput()).includes("Open a new empty Session"));
+		const [oldDescriptor] = await fixture.sessions.list(fixture.workspace);
+		expect(oldDescriptor?.path).toBeDefined();
+
+		await fixture.terminal.emit(key("down"));
+		await fixture.terminal.emit(key("enter"));
+		await until(() => fileMissing(`${oldDescriptor!.path!}.lock`));
+
+		expect(controlled.stopCount()).toBe(1);
+		const oldJournal = await readFile(oldDescriptor!.path!, "utf8");
+		expect(oldJournal).toContain('"toolName":"process_start"');
+		expect(oldJournal).toContain('"type":"sandbox_execution"');
+		await exit(fixture.terminal);
+		await expect(running).resolves.toBe(0);
+		expect(controlled.stopCount()).toBe(1);
+	}, 15_000);
+
 	it("keeps the overflowed Session active when replacement construction fails", async () => {
 		let failReplacementIdentity = false;
 		const fixture = await createFixture({ contextWindow: 128_000, maxTokens: 16_384 }, () => failReplacementIdentity);
@@ -196,6 +241,7 @@ async function createFixture(
 	model: { readonly contextWindow: number; readonly maxTokens: number },
 	shouldFailIdentity?: () => boolean,
 	isTTY = true,
+	modelProcessSessionRunner?: ModelProcessSessionRunner,
 ): Promise<OverflowFixture> {
 	const fixture = await mkdtemp(join(tmpdir(), "coda-overflow-fallback-"));
 	temporaryDirectories.push(fixture);
@@ -235,6 +281,7 @@ async function createFixture(
 		},
 		fileSystem: createNodeFileSystem(),
 		processRunner: createNodeProcessRunner({ platform: "darwin" }),
+		modelProcessSessionRunner,
 		terminalFactory: { create: () => terminal },
 		io: { stdin: { isTTY, readAll: async () => "" }, stdout, stderr },
 		runtime: {
@@ -248,6 +295,44 @@ async function createFixture(
 		},
 	});
 	return { application, faux, idGenerator, sessions, stderr, stdout, terminal, workspace };
+}
+
+function controlledBackgroundRunner(): {
+	readonly runner: ModelProcessSessionRunner;
+	readonly stopCount: () => number;
+} {
+	let stops = 0;
+	return {
+		stopCount: () => stops,
+		runner: {
+			start: async () => {
+				const stopped = {
+					exitCode: null,
+					signal: "SIGTERM" as const,
+					stdout: "",
+					stderr: "",
+					timedOut: false,
+					truncated: false,
+					backend: "none" as const,
+				};
+				let settle!: (result: typeof stopped) => void;
+				const completion = new Promise<typeof stopped>((resolve) => {
+					settle = resolve;
+				});
+				return {
+					backend: "none",
+					completion,
+					write: async () => undefined,
+					closeStdin: async () => undefined,
+					stop: async () => {
+						stops++;
+						settle(stopped);
+						return completion;
+					},
+				};
+			},
+		},
+	};
 }
 
 function workspaceIdentity(path: string): string {

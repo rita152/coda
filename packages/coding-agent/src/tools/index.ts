@@ -34,6 +34,7 @@ export function createCodingTools(options: {
 	readonly settings: UserSettings;
 	readonly sessionHistory: SessionHistoryReadPort;
 	readonly onAudit?: PermissionAuditSink;
+	readonly sessionId: string;
 }): readonly AgentTool[] {
 	const mutations = new TargetMutationCoordinator();
 	const mutationWriter = createSandboxedMutationWriter({
@@ -73,6 +74,7 @@ export function createCodingTools(options: {
 			runtime: options.runtime,
 			settings: options.settings,
 			onAudit: options.onAudit,
+			sessionId: options.sessionId,
 		}),
 	];
 	for (const [index, expectedName] of BUILT_IN_CODING_TOOL_NAMES.entries()) {

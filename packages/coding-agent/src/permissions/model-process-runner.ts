@@ -14,6 +14,7 @@ export interface ModelProcessAuthority {
 	readonly managedNetwork?: ManagedNetworkPolicy;
 	readonly auditContext?: { readonly invocationId: string; readonly toolName: string };
 	readonly audit?: PermissionAuditSink;
+	readonly sessionId?: string;
 }
 
 export interface ModelProcessRunResult extends ProcessRunResult {

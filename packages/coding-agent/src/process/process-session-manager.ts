@@ -53,6 +53,7 @@ export interface ProcessSessionStartRequest {
 
 interface ProcessRecord {
 	readonly id: string;
+	readonly sessionId: string | undefined;
 	readonly handle: ModelProcessSession;
 	readonly output: IncrementalOutputWindow;
 	capture: ToolOutputCapture | undefined;
@@ -214,6 +215,7 @@ export class ProcessSessionManager {
 
 		const record: ProcessRecord = {
 			id,
+			sessionId: authority.sessionId,
 			handle,
 			output,
 			capture,
@@ -295,10 +297,18 @@ export class ProcessSessionManager {
 		return this.#snapshot(record, true, true);
 	}
 
+	async retireSession(sessionId: string): Promise<void> {
+		const records = [...this.#sessions.values()].filter((record) => record.sessionId === sessionId);
+		await this.#retire(records);
+	}
+
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
-		const records = [...this.#sessions.values()];
+		await this.#retire([...this.#sessions.values()]);
+	}
+
+	async #retire(records: readonly ProcessRecord[]): Promise<void> {
 		await Promise.all(
 			records.map(async (record) => {
 				if (!record.terminal) {
@@ -309,9 +319,9 @@ export class ProcessSessionManager {
 				if (record.stored && (!record.outputOmitted || !record.captureUsable)) {
 					await discardStoredToolOutput(this.#fileSystem, record.stored);
 				}
+				if (this.#sessions.get(record.id) === record) this.#sessions.delete(record.id);
 			}),
 		);
-		this.#sessions.clear();
 	}
 
 	async #snapshot(

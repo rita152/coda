@@ -1435,6 +1435,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						settings,
 						sessionHistory: session.history,
 						onAudit: audit,
+						sessionId: session.descriptor.id,
 					});
 					const toolsForRun = (snapshot: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
 						const skillTool = createSkillTool(snapshot);
@@ -1855,6 +1856,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									settings,
 									sessionHistory: targetSession.history,
 									onAudit: targetAudit,
+									sessionId: targetSession.descriptor.id,
 								});
 								const targetToolsForRun = (
 									snapshot: CodingSkillsSnapshot,
@@ -2194,6 +2196,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										targetModel,
 										options.modelCapabilities,
 									).toolResultImages,
+									onRetire: () => activeProcessSessionManager.retireSession(targetSession.descriptor.id),
 								};
 							} catch (error) {
 								sessionRunRuntimes.delete(targetSession.descriptor.id);
@@ -2295,6 +2298,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									},
 								},
 								contextOverflowRecovery,
+								onRetire: () => activeProcessSessionManager.retireSession(session.descriptor.id),
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 								commandRegistry,

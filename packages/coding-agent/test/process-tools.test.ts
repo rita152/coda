@@ -237,6 +237,7 @@ describe("process lifecycle Tools", () => {
 			controlled.starts.every(({ authority }) => authority.readAccessPolicy.sandboxPolicy.profile === "full-access"),
 		).toBe(true);
 		expect(controlled.starts.every(({ authority }) => typeof authority.audit === "function")).toBe(true);
+		expect(controlled.starts.every(({ authority }) => typeof authority.sessionId === "string")).toBe(true);
 		expect(controlled.stopCount()).toBe(2);
 		expect(stdout.value).toBe("Process lifecycle complete.\n");
 		expect(stderr.value).toBe("");

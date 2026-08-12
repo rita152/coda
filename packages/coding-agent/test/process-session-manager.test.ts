@@ -238,6 +238,19 @@ describe("ProcessSessionManager", () => {
 		await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
+	it("retires only processes owned by the closing Session", async () => {
+		const { manager, workspace, authority } = await fixture();
+		const script = "setInterval(() => {}, 1000)";
+		const first = await manager.start(request(workspace, script), { ...authority, sessionId: "session:first" });
+		const second = await manager.start(request(workspace, script), { ...authority, sessionId: "session:second" });
+
+		await manager.retireSession("session:first");
+
+		await expect(manager.poll(first.processId)).resolves.toMatchObject({ state: "stale" });
+		await expect(manager.poll(second.processId)).resolves.toMatchObject({ state: "running" });
+		await manager.stop(second.processId);
+	});
+
 	it("cleans up descendants when the direct child exits", async () => {
 		const { manager, workspace, authority } = await fixture();
 		const sentinel = join(workspace, "exit-descendant.txt");

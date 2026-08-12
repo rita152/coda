@@ -146,6 +146,7 @@ export function createProcessTools(options: {
 	readonly runtime: ApplicationRuntime;
 	readonly settings: UserSettings;
 	readonly onAudit?: PermissionAuditSink;
+	readonly sessionId: string;
 }): readonly AgentTool[] {
 	const start: AgentTool<typeof ProcessStartParameters> = {
 		name: "process_start",
@@ -172,6 +173,7 @@ export function createProcessTools(options: {
 						managedNetwork: authorization.managedNetwork,
 						auditContext: { invocationId: context.invocationId, toolName: "process_start" },
 						audit: options.onAudit,
+						sessionId: options.sessionId,
 					},
 				);
 				const result = snapshotOutput(snapshot, false);

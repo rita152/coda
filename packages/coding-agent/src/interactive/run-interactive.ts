@@ -107,6 +107,7 @@ export interface InteractiveSessionOptions {
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly toolResultImagesSupported?: boolean;
+	readonly onRetire?: () => Promise<void> | void;
 	readonly resolveExtensionReferences?: (
 		references: readonly ComposerExtensionReference[],
 		composerText: string,
@@ -300,6 +301,11 @@ async function runMultiSessionInteractive(
 		let droppedShells = 0;
 		try {
 			droppedShells = await pane.input.dispose();
+		} catch (error) {
+			failures.push(error);
+		}
+		try {
+			await pane.options.onRetire?.();
 		} catch (error) {
 			failures.push(error);
 		}
