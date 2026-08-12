@@ -118,6 +118,80 @@ describe("Context Window Compaction", () => {
 		expect(stderr.value).toBe("");
 	});
 
+	it("lets the Agent recover an omitted pre-Compaction constraint from Session history", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-history-recovery-"));
+		temporaryDirectories.push(workspace);
+		const runtime = testTimeRuntime(5_500);
+		const faux = fauxProvider({
+			runtime,
+			models: [{ id: "history-recovery", contextWindow: 128_000, maxTokens: 16_384 }],
+		});
+		const exactConstraint = "Never modify generated-lock.json.";
+		faux.setResponses([
+			fauxAssistantMessage("constraint accepted", { timestamp: 5_500 }),
+			fauxAssistantMessage(validSummary("The exact protected filename was deliberately omitted."), {
+				timestamp: 5_500,
+			}),
+			(context) => {
+				expect(JSON.stringify(context.messages)).not.toContain(exactConstraint);
+				expect(context.tools?.map(({ name }) => name)).toContain("read_session_history");
+				return fauxAssistantMessage(
+					fauxToolCall("read_session_history", { limit: 20 }, { id: "provider:session-history" }),
+					{ stopReason: "toolUse", timestamp: 5_500 },
+				);
+			},
+			(context) => {
+				const result = context.messages.find(
+					(message) => message.role === "toolResult" && message.toolName === "read_session_history",
+				);
+				expect(result).toBeDefined();
+				expect(JSON.stringify(result)).toContain(exactConstraint);
+				return fauxAssistantMessage(`Recovered constraint: ${exactConstraint}`, { timestamp: 5_500 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 100, rows: 28 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({
+					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session", exactConstraint]);
+		await until(() => terminal.readOutput().includes("constraint accepted"));
+		await submit(terminal, "/compact omit the exact constraint wording");
+		await until(() => terminal.readOutput().includes("Context compacted"));
+		await submit(terminal, "Recover my exact pre-compaction constraint from Session history.");
+		await until(() => terminal.readOutput().includes(`Recovered constraint: ${exactConstraint}`));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+
+		await expect(running).resolves.toBe(0);
+		expect(faux.state.callCount).toBe(4);
+		expect(stderr.value).toBe("");
+	});
+
 	it("auto-compacts a large Tool result before the next model call", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-auto-compaction-"));
 		temporaryDirectories.push(workspace);

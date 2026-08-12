@@ -4,6 +4,7 @@ import type { FileSystem } from "../host/file-system.ts";
 import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { SessionHistoryReadPort } from "../session/session-history-reader.ts";
 import type { Workspace } from "../workspace.ts";
 import { createBashTool } from "./bash.ts";
 import { createEditTool } from "./edit.ts";
@@ -12,6 +13,7 @@ import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
 import { TargetMutationCoordinator } from "./mutation.ts";
 import { createReadTool } from "./read.ts";
+import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
 import { createSandboxedMutationWriter } from "./sandboxed-mutation-writer.ts";
 import { createWriteTool } from "./write.ts";
@@ -24,6 +26,7 @@ export function createCodingTools(options: {
 	readonly shellExecutable: string;
 	readonly runtime: ApplicationRuntime;
 	readonly settings: UserSettings;
+	readonly sessionHistory: SessionHistoryReadPort;
 	readonly onAudit?: PermissionAuditSink;
 }): readonly AgentTool[] {
 	const mutations = new TargetMutationCoordinator();
@@ -33,6 +36,7 @@ export function createCodingTools(options: {
 		onAudit: options.onAudit,
 	});
 	return [
+		createReadSessionHistoryTool(options.sessionHistory),
 		createReadTool(options.workspace, options.fileSystem, options.permissions),
 		createReadToolOutputTool({ fileSystem: options.fileSystem, homeDirectory: options.runtime.homeDirectory }),
 		createGrepTool({

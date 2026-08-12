@@ -1417,6 +1417,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						shellExecutable,
 						runtime: options.runtime,
 						settings,
+						sessionHistory: session.history,
 						onAudit: audit,
 					});
 					const toolsForRun = (snapshot: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
@@ -1829,6 +1830,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									shellExecutable,
 									runtime: options.runtime,
 									settings,
+									sessionHistory: targetSession.history,
 									onAudit: targetAudit,
 								});
 								const targetToolsForRun = (
