@@ -155,6 +155,8 @@ describe("JSONL File Session", () => {
 				policy: {
 					profile: "full-access",
 					readAccess: "full-disk",
+					readableRoots: [],
+					approvedReadRoots: [],
 					deniedReadRoots: [],
 					writableRoots: "full-disk",
 					protectedMetadataRoots: ["/canonical/workspace"],

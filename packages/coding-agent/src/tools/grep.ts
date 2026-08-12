@@ -50,7 +50,7 @@ export function createGrepTool(options: {
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "grep", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "grep", "read", options.permissions)) {
 				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
 					code: "access_denied",
 					path: root.canonicalPath,
@@ -138,7 +138,14 @@ export function createGrepTool(options: {
 					const resolved = await workspace.resolvePath(match[1]!, "read");
 					if (
 						!resolved.exists ||
-						!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "grep", "read")
+						!hasPermissionedPathAccess(
+							workspace,
+							resolved,
+							context.invocationId,
+							"grep",
+							"read",
+							options.permissions,
+						)
 					) {
 						continue;
 					}
@@ -169,7 +176,14 @@ export function createGrepTool(options: {
 					details: { count: matches.length, truncated, engine: "rg" },
 				};
 			}
-			const files = await walkFiles(workspace, fileSystem, arguments_.path ?? ".", context, "grep");
+			const files = await walkFiles(
+				workspace,
+				fileSystem,
+				arguments_.path ?? ".",
+				context,
+				"grep",
+				options.permissions,
+			);
 			const matches: string[] = [];
 			let visibleCharacters = 0;
 			let truncated = false;

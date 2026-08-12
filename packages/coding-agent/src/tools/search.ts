@@ -3,6 +3,7 @@ import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".coda", "node_modules"]);
@@ -27,9 +28,10 @@ export async function walkEntries(
 	requestedRoot: string,
 	context: Pick<ToolExecutionContext, "invocationId" | "signal">,
 	toolName: "find" | "grep",
+	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
 ): Promise<readonly WalkedEntry[]> {
 	const root = await workspace.resolvePath(requestedRoot, "read");
-	if (!hasPermissionedPathAccess(workspace, root, context.invocationId, toolName, "read")) {
+	if (!hasPermissionedPathAccess(workspace, root, context.invocationId, toolName, "read", permissions)) {
 		throw new Error(`Path access was not granted: ${root.canonicalPath}`);
 	}
 	if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
@@ -45,7 +47,7 @@ export async function walkEntries(
 			const resolved = await workspace.resolvePath(canonicalPath, "read");
 			if (
 				visitedFiles.has(canonicalPath) ||
-				!hasPermissionedPathAccess(workspace, resolved, context.invocationId, toolName, "read")
+				!hasPermissionedPathAccess(workspace, resolved, context.invocationId, toolName, "read", permissions)
 			) {
 				return;
 			}
@@ -64,7 +66,10 @@ export async function walkEntries(
 			const requestedChild = join(canonicalPath, entry.name);
 			try {
 				const child = await workspace.resolvePath(requestedChild, "read");
-				if (!child.exists || !hasPermissionedPathAccess(workspace, child, context.invocationId, toolName, "read")) {
+				if (
+					!child.exists ||
+					!hasPermissionedPathAccess(workspace, child, context.invocationId, toolName, "read", permissions)
+				) {
 					continue;
 				}
 				const childStatus = await fileSystem.stat(child.canonicalPath);
@@ -92,8 +97,9 @@ export async function walkFiles(
 	requestedRoot: string,
 	context: Pick<ToolExecutionContext, "invocationId" | "signal">,
 	toolName: "find" | "grep",
+	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
 ): Promise<readonly WalkedFile[]> {
-	return (await walkEntries(workspace, fileSystem, requestedRoot, context, toolName)).filter(
+	return (await walkEntries(workspace, fileSystem, requestedRoot, context, toolName, permissions)).filter(
 		(entry) => entry.kind === "file",
 	);
 }

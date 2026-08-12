@@ -99,25 +99,45 @@ function isJsonValue(value: unknown): boolean {
 }
 
 function isPermissionPolicySnapshot(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	const record: Record<string, unknown> = value;
+	const exactKeys = (required: readonly string[]): boolean => {
+		const allowed = new Set(required);
+		return required.every((key) => key in record) && Object.keys(record).every((key) => allowed.has(key));
+	};
+	const legacy = exactKeys([
+		"profile",
+		"readAccess",
+		"deniedReadRoots",
+		"writableRoots",
+		"protectedMetadataRoots",
+		"protectedMetadataNames",
+		"protectedMetadataPaths",
+		"networkAccess",
+	]);
+	const rootScoped = exactKeys([
+		"profile",
+		"readAccess",
+		"readableRoots",
+		"approvedReadRoots",
+		"deniedReadRoots",
+		"writableRoots",
+		"protectedMetadataRoots",
+		"protectedMetadataNames",
+		"protectedMetadataPaths",
+		"networkAccess",
+	]);
 	return (
-		exactRecord(value, [
-			"profile",
-			"readAccess",
-			"deniedReadRoots",
-			"writableRoots",
-			"protectedMetadataRoots",
-			"protectedMetadataNames",
-			"protectedMetadataPaths",
-			"networkAccess",
-		]) &&
-		(value.profile === "read-only" || value.profile === "workspace" || value.profile === "full-access") &&
-		value.readAccess === "full-disk" &&
-		isStringArray(value.deniedReadRoots) &&
-		(value.writableRoots === "full-disk" || isStringArray(value.writableRoots)) &&
-		isStringArray(value.protectedMetadataRoots) &&
-		isStringArray(value.protectedMetadataNames) &&
-		isStringArray(value.protectedMetadataPaths) &&
-		(value.networkAccess === "restricted" || value.networkAccess === "enabled")
+		(legacy || rootScoped) &&
+		(record.profile === "read-only" || record.profile === "workspace" || record.profile === "full-access") &&
+		(record.readAccess === "root-scoped" || record.readAccess === "full-disk") &&
+		(legacy || (isStringArray(record.readableRoots) && isStringArray(record.approvedReadRoots))) &&
+		isStringArray(record.deniedReadRoots) &&
+		(record.writableRoots === "full-disk" || isStringArray(record.writableRoots)) &&
+		isStringArray(record.protectedMetadataRoots) &&
+		isStringArray(record.protectedMetadataNames) &&
+		isStringArray(record.protectedMetadataPaths) &&
+		(record.networkAccess === "restricted" || record.networkAccess === "enabled")
 	);
 }
 
@@ -183,6 +203,26 @@ function isPermissionAuditEvent(value: unknown): boolean {
 					isRecord(value.decision) &&
 					isNonEmptyString(value.decision.type) &&
 					isJsonValue(value.decision))
+			);
+		case "read_access":
+			return (
+				exactRecord(
+					value,
+					["type", "invocationId", "toolName", "requestedPath", "canonicalPath", "recursive", "outcome"],
+					["source", "reason"],
+				) &&
+				isNonEmptyString(value.invocationId) &&
+				isNonEmptyString(value.toolName) &&
+				isNonEmptyString(value.requestedPath) &&
+				isNonEmptyString(value.canonicalPath) &&
+				typeof value.recursive === "boolean" &&
+				(value.outcome === "allowed" || value.outcome === "denied") &&
+				(value.source === undefined ||
+					["full-access", "readable-root", "approved-root", "review"].includes(String(value.source))) &&
+				(value.reason === undefined ||
+					["outside-readable-roots", "denied-read-root", "invalid-path", "approval-unavailable"].includes(
+						String(value.reason),
+					))
 			);
 		case "rule_persistence":
 			return (

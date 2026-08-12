@@ -5,7 +5,7 @@ import type { ToolPolicyRequest } from "@coda/agent";
 import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
-import type { ApprovalDecisionAuditEvent } from "../src/permissions/audit.ts";
+import type { ApprovalDecisionAuditEvent, ReadAccessAuditEvent } from "../src/permissions/audit.ts";
 import {
 	type ApprovalDecision,
 	type ApprovalPolicy,
@@ -72,12 +72,12 @@ describe("Permission Engine command matrix", () => {
 			prompts: 1,
 		},
 		{
-			name: "On Request grants an explicit escalated request outside the Sandbox",
+			name: "On Request reviews escalation while preserving restricted read enforcement",
 			profile: "workspace",
 			approvalPolicy: "on-request",
 			command: "npm publish",
 			sandboxPermissions: "require_escalated",
-			expected: "unsandboxed",
+			expected: "sandboxed",
 			prompts: 1,
 		},
 		{
@@ -132,7 +132,7 @@ describe("Permission Engine command matrix", () => {
 		} else {
 			expect(decision).toEqual({ decision: "allow" });
 			expect(engine.authorizationFor(invocation.invocationId)).toMatchObject({ execution: expected });
-			expect(engine.authorizationFor(invocation.invocationId)?.policy.profile).toBe(
+			expect(engine.authorizationFor(invocation.invocationId)?.readAccessPolicy.sandboxPolicy.profile).toBe(
 				expected === "unsandboxed" ? "full-access" : profile,
 			);
 		}
@@ -202,7 +202,7 @@ describe("Permission Engine command matrix", () => {
 					: 0;
 		expect(prompts).toBe(expectedPrompts);
 		expect(engine.authorizationFor(invocation.invocationId)?.execution).toBe(
-			profile === "full-access" || request === "escalated" ? "unsandboxed" : "sandboxed",
+			profile === "full-access" ? "unsandboxed" : "sandboxed",
 		);
 	});
 });
@@ -226,7 +226,7 @@ describe("Permission Engine command rules", () => {
 
 		await expect(engine.check(reviewed)).resolves.toEqual({ decision: "allow" });
 		await expect(engine.check(unreviewed)).resolves.toEqual({ decision: "allow" });
-		expect(engine.authorizationFor(reviewed.invocationId)).toMatchObject({ execution: "unsandboxed" });
+		expect(engine.authorizationFor(reviewed.invocationId)).toMatchObject({ execution: "sandboxed" });
 		expect(engine.authorizationFor(unreviewed.invocationId)).toMatchObject({ execution: "sandboxed" });
 	});
 
@@ -259,12 +259,12 @@ describe("Permission Engine command rules", () => {
 			prompts: 0,
 		},
 		{
-			name: "an explicit allow rule bypasses the Sandbox",
+			name: "an explicit allow rule skips review but preserves the Sandbox",
 			profile: "workspace" as const,
 			approvalPolicy: "on-request" as const,
 			rules: [{ pattern: ["npm", "test"], decision: "allow" as const }],
 			command: "npm test -- --runInBand",
-			expected: "unsandboxed",
+			expected: "sandboxed",
 			prompts: 0,
 		},
 		{
@@ -323,7 +323,7 @@ describe("Permission Engine command rules", () => {
 		} else {
 			expect(decision).toEqual({ decision: "allow" });
 			expect(engine.authorizationFor(invocation.invocationId)).toMatchObject({ execution: expected });
-			expect(engine.authorizationFor(invocation.invocationId)?.policy.profile).toBe(
+			expect(engine.authorizationFor(invocation.invocationId)?.readAccessPolicy.sandboxPolicy.profile).toBe(
 				expected === "unsandboxed" ? "full-access" : profile,
 			);
 		}
@@ -830,7 +830,7 @@ describe("Permission Engine approval memory", () => {
 		await expect(engine.check(second)).resolves.toEqual({ decision: "allow" });
 
 		expect(prompts).toBe(1);
-		expect(engine.authorizationFor(second.invocationId)).toMatchObject({ execution: "unsandboxed" });
+		expect(engine.authorizationFor(second.invocationId)).toMatchObject({ execution: "sandboxed" });
 	});
 
 	it("does not reuse a Session approval across shell scripts with different quoted semantics", async () => {
@@ -970,7 +970,7 @@ describe("Permission Engine approval memory", () => {
 		expect(prompts).toBe(1);
 		expect(persisted).toEqual([{ pattern: ["npm", "publish"], decision: "allow" }]);
 		expect(engine.authorizationFor(first.invocationId)).toMatchObject({ execution: "sandboxed" });
-		expect(engine.authorizationFor(second.invocationId)).toMatchObject({ execution: "unsandboxed" });
+		expect(engine.authorizationFor(second.invocationId)).toMatchObject({ execution: "sandboxed" });
 	});
 });
 
@@ -1229,7 +1229,7 @@ describe("Permission Engine model escalation protocol", () => {
 
 		await expect(engine.check(invocation)).resolves.toEqual({ decision: "allow" });
 		expect(requests[0]?.additionalPermissions?.file_system?.write).toEqual([canonicalCache]);
-		const policy = engine.authorizationFor(invocation.invocationId)?.policy;
+		const policy = engine.authorizationFor(invocation.invocationId)?.readAccessPolicy.sandboxPolicy;
 		expect(policy?.writableRoots).toEqual([canonicalCache]);
 		expect(policy?.protectedMetadataRoots).toEqual([canonicalCache]);
 		expect(policy?.protectedMetadataPaths).toContain(join(canonicalCache, ".git"));
@@ -1263,18 +1263,21 @@ describe("Permission Engine model escalation protocol", () => {
 		const authorization = engine.authorizationFor(invocation.invocationId);
 		expect(authorization).toMatchObject({
 			execution: "sandboxed",
-			policy: { profile: "read-only", networkAccess: "enabled", writableRoots: ["/cache/npm"] },
+			readAccessPolicy: {
+				sandboxPolicy: { profile: "read-only", networkAccess: "enabled", writableRoots: ["/cache/npm"] },
+			},
 		});
 		expect(authorization?.managedNetwork).toBeUndefined();
 	});
 
-	it("preserves reviewed read roots without exposing internal deny entries", async () => {
+	it("preserves a reviewed read root while keeping its protected descendants denied", async () => {
 		const engine = createPermissionEngine({
 			cwd: "/workspace",
 			profile: compileSandboxPolicy({
 				profile: "read-only",
 				workspaceRoots: ["/workspace"],
 				temporaryDirectory: "/tmp",
+				deniedReadRoots: ["/shared/.ssh"],
 			}),
 			approvalPolicy: "on-request",
 			approval: { decide: async () => ({ type: "approved" }) },
@@ -1295,7 +1298,15 @@ describe("Permission Engine model escalation protocol", () => {
 		expect(engine.authorizationFor(invocation.invocationId)).toMatchObject({
 			execution: "sandboxed",
 			additionalPermissions: { file_system: { read: ["/shared"] } },
-			policy: { profile: "read-only", deniedReadRoots: [] },
+			readAccessPolicy: {
+				sandboxPolicy: { profile: "read-only", approvedReadRoots: ["/shared"] },
+			},
+		});
+		const readPolicy = engine.authorizationFor(invocation.invocationId)?.readAccessPolicy;
+		expect(readPolicy?.evaluate("/shared/input")).toMatchObject({ decision: "allow" });
+		expect(readPolicy?.evaluate("/shared/.ssh/id_ed25519")).toEqual({
+			decision: "deny",
+			reason: "denied-read-root",
 		});
 	});
 
@@ -1373,7 +1384,7 @@ describe("Permission Engine model escalation protocol", () => {
 		await expect(engine.check(broadPrefix)).resolves.toEqual({ decision: "allow" });
 		expect(prompts).toBe(1);
 		expect(requests[0]?.proposedCommandRule).toBeUndefined();
-		expect(engine.authorizationFor(broadPrefix.invocationId)).toMatchObject({ execution: "unsandboxed" });
+		expect(engine.authorizationFor(broadPrefix.invocationId)).toMatchObject({ execution: "sandboxed" });
 	});
 
 	it("never offers a prefix grant for a pipeline even when every command shares the proposed prefix", async () => {
@@ -1635,7 +1646,7 @@ describe("Permission Engine generic approval protocol", () => {
 });
 
 describe("Permission Engine filesystem matrix", () => {
-	it("allows full-disk reads without secret-name exceptions", async () => {
+	it("allows Workspace reads and reviews external or protected Credential roots", async () => {
 		const fixture = await mkdtemp(join(tmpdir(), "coda-permission-files-"));
 		temporaryDirectories.push(fixture);
 		const root = join(fixture, "workspace");
@@ -1646,6 +1657,7 @@ describe("Permission Engine filesystem matrix", () => {
 		await writeFile(outside, "outside-readable\n");
 		const workspace = await createWorkspace(root, createNodeFileSystem());
 		let prompts = 0;
+		const readEvents: ReadAccessAuditEvent[] = [];
 		const engine = createPermissionEngine({
 			cwd: workspace.root,
 			workspace,
@@ -1653,6 +1665,7 @@ describe("Permission Engine filesystem matrix", () => {
 				profile: "read-only",
 				workspaceRoots: [workspace.root],
 				temporaryDirectory: "/tmp",
+				deniedReadRoots: [join(workspace.root, ".ssh")],
 			}),
 			approvalPolicy: "on-request",
 			approval: {
@@ -1661,12 +1674,29 @@ describe("Permission Engine filesystem matrix", () => {
 					return { type: "approved" };
 				},
 			},
+			onReadAccessDecision: (event) => {
+				readEvents.push(event);
+			},
 		});
 
 		for (const [index, path] of [".env", ".ssh/id_ed25519", outside].entries()) {
 			await expect(engine.check(fileRequest("read", path, index))).resolves.toEqual({ decision: "allow" });
 		}
-		expect(prompts).toBe(0);
+		expect(prompts).toBe(2);
+		expect(readEvents).toEqual([
+			expect.objectContaining({
+				outcome: "allowed",
+				source: "readable-root",
+				canonicalPath: join(workspace.root, ".env"),
+			}),
+			expect.objectContaining({
+				outcome: "allowed",
+				source: "review",
+				canonicalPath: join(workspace.root, ".ssh", "id_ed25519"),
+			}),
+			expect.objectContaining({ outcome: "allowed", source: "review", canonicalPath: await realpath(outside) }),
+		]);
+		for (const event of readEvents) expect(event).not.toHaveProperty("contents");
 	});
 
 	it.each([
@@ -1754,7 +1784,7 @@ describe("Permission Engine filesystem matrix", () => {
 		const request = fileRequest("write", ".git/config", 8);
 
 		await expect(engine.check(request)).resolves.toEqual({ decision: "allow" });
-		const policy = engine.sandboxPolicyFor(request.invocationId);
+		const policy = engine.readAccessPolicyFor(request.invocationId)?.sandboxPolicy;
 		expect(policy?.writableRoots).toContain(join(workspace.root, ".git"));
 		expect(policy?.protectedMetadataRoots).not.toContain(workspace.root);
 		expect(engine.configuration().profile.protectedMetadataRoots).toContain(workspace.root);
@@ -1798,7 +1828,7 @@ describe("Permission Engine filesystem matrix", () => {
 			expect.objectContaining({ kind: "filesystem", reason: expect.stringContaining("protected metadata") }),
 		]);
 		for (const request of [aliasRequest, targetRequest]) {
-			const policy = engine.sandboxPolicyFor(request.invocationId);
+			const policy = engine.readAccessPolicyFor(request.invocationId)?.sandboxPolicy;
 			expect(policy?.protectedMetadataPaths).not.toContain(protectedAlias);
 			expect(policy?.protectedMetadataPaths).not.toContain(canonicalMetadataTarget);
 		}

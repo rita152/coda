@@ -24,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("search Tools", () => {
-	it("grep returns bounded relative matches including dotfiles under full-disk read semantics", async () => {
+	it("grep returns bounded relative matches including dotfiles inside the Workspace", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-grep-"));
 		temporaryDirectories.push(workspace);
 		await mkdir(join(workspace, "src"));

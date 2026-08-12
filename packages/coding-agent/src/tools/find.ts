@@ -60,7 +60,7 @@ export function createFindTool(options: {
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
 			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "find", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "find", "read", options.permissions)) {
 				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
 					code: "access_denied",
 					path: root.canonicalPath,
@@ -132,7 +132,14 @@ export function createFindTool(options: {
 					const resolved = await workspace.resolvePath(candidate, "read");
 					if (
 						!resolved.exists ||
-						!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "find", "read")
+						!hasPermissionedPathAccess(
+							workspace,
+							resolved,
+							context.invocationId,
+							"find",
+							"read",
+							options.permissions,
+						)
 					) {
 						continue;
 					}
@@ -155,7 +162,7 @@ export function createFindTool(options: {
 					},
 				};
 			}
-			const entries = await walkEntries(workspace, fileSystem, requestedRoot, context, "find");
+			const entries = await walkEntries(workspace, fileSystem, requestedRoot, context, "find", options.permissions);
 			const matchAgainstPath = arguments_.pattern.includes("/");
 			const matches = entries.filter((entry) => {
 				if (kind !== "any" && entry.kind !== kind) return false;

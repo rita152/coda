@@ -2,6 +2,7 @@ import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { toolFailure } from "./failure.ts";
 
@@ -18,7 +19,11 @@ function lineChunks(value: string): string[] {
 	return value.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }
 
-export function createReadTool(workspace: Workspace, fileSystem: FileSystem): AgentTool<typeof ReadParameters> {
+export function createReadTool(
+	workspace: Workspace,
+	fileSystem: FileSystem,
+	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
+): AgentTool<typeof ReadParameters> {
 	return {
 		name: "read",
 		description: "Read UTF-8 text from a file. Paths are resolved from the Workspace root.",
@@ -28,7 +33,7 @@ export function createReadTool(workspace: Workspace, fileSystem: FileSystem): Ag
 		execute: async (arguments_, context) => {
 			context.signal.throwIfAborted();
 			const resolved = await workspace.resolvePath(arguments_.path, "read");
-			if (!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "read", "read")) {
+			if (!hasPermissionedPathAccess(workspace, resolved, context.invocationId, "read", "read", permissions)) {
 				return toolFailure(`Path access was not granted: ${resolved.canonicalPath}`, {
 					code: "access_denied",
 					path: resolved.canonicalPath,

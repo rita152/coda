@@ -33,7 +33,7 @@ export function createCodingTools(options: {
 		onAudit: options.onAudit,
 	});
 	return [
-		createReadTool(options.workspace, options.fileSystem),
+		createReadTool(options.workspace, options.fileSystem, options.permissions),
 		createReadToolOutputTool({ fileSystem: options.fileSystem, homeDirectory: options.runtime.homeDirectory }),
 		createGrepTool({
 			workspace: options.workspace,
@@ -49,7 +49,7 @@ export function createCodingTools(options: {
 			permissions: options.permissions,
 			runtime: options.runtime,
 		}),
-		createLsTool(options.workspace, options.fileSystem),
+		createLsTool(options.workspace, options.fileSystem, options.permissions),
 		createEditTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createWriteTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createBashTool(options),

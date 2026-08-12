@@ -65,7 +65,11 @@ describe("optional search executables", () => {
 				args: expect.arrayContaining(["--no-heading", "--color", "never", "-e", "needle", "."]),
 				environment: { LC_ALL: "C", PATH: tools },
 			}),
-			expect.objectContaining({ policy: expect.objectContaining({ profile: "workspace" }) }),
+			expect.objectContaining({
+				readAccessPolicy: expect.objectContaining({
+					sandboxPolicy: expect.objectContaining({ profile: "workspace" }),
+				}),
+			}),
 		);
 		expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual(["needle", "--", "."]);
 	});
@@ -155,7 +159,11 @@ describe("optional search executables", () => {
 				executable: join(tools, "fd"),
 				args: expect.arrayContaining(["--glob", "--type", "f", "*.ts", "src"]),
 			}),
-			expect.objectContaining({ policy: expect.objectContaining({ profile: "workspace" }) }),
+			expect.objectContaining({
+				readAccessPolicy: expect.objectContaining({
+					sandboxPolicy: expect.objectContaining({ profile: "workspace" }),
+				}),
+			}),
 		);
 		expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual(["--", "*.ts", "src"]);
 	});

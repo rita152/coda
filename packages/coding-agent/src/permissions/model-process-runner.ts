@@ -1,10 +1,10 @@
 import { createWriteStream, type WriteStream } from "node:fs";
-import { type CompiledSandboxPolicy, execute, type ManagedNetworkPolicy, type SandboxViolation } from "@coda/sandbox";
+import { execute, type ManagedNetworkPolicy, type ReadAccessPolicy, type SandboxViolation } from "@coda/sandbox";
 import type { ProcessOutputChunk, ProcessRunRequest, ProcessRunResult } from "../host/process-runner.ts";
 import { type PermissionAuditSink, permissionPolicyAuditSnapshot } from "./audit.ts";
 
 export interface ModelProcessAuthority {
-	readonly policy: Readonly<CompiledSandboxPolicy>;
+	readonly readAccessPolicy: ReadAccessPolicy;
 	readonly managedNetwork?: ManagedNetworkPolicy;
 	readonly auditContext?: { readonly invocationId: string; readonly toolName: string };
 }
@@ -33,7 +33,7 @@ export function createAuditedModelProcessRunner(
 						type: "sandbox_execution",
 						invocationId: context.invocationId,
 						toolName: context.toolName,
-						policy: permissionPolicyAuditSnapshot(authority.policy),
+						policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
 						backend: result.backend,
 						outcome: result.denial
 							? "sandbox-denial"
@@ -55,7 +55,7 @@ export function createAuditedModelProcessRunner(
 						type: "sandbox_execution",
 						invocationId: context.invocationId,
 						toolName: context.toolName,
-						policy: permissionPolicyAuditSnapshot(authority.policy),
+						policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
 						outcome: cancelled ? "cancelled" : "launch-failed",
 						error: error instanceof Error ? error.message : String(error),
 					}),
@@ -149,7 +149,7 @@ export function createModelProcessRunner(): ModelProcessRunner {
 						command: [request.executable, ...request.args],
 						cwd: request.cwd,
 						environment: request.environment,
-						policy: authority.policy,
+						policy: authority.readAccessPolicy.sandboxPolicy,
 						timeoutMs: request.timeoutMs,
 						signal: request.signal,
 						managedNetwork: authority.managedNetwork,

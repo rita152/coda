@@ -5,10 +5,11 @@ import type {
 	ManagedNetworkDecision,
 	ManagedNetworkDestination,
 	ManagedNetworkPolicy,
+	ReadAccessPolicy,
 } from "@coda/sandbox";
-import { normalizeNetworkHost, PROTECTED_METADATA_NAMES } from "@coda/sandbox";
+import { createReadAccessPolicy, normalizeNetworkHost, PROTECTED_METADATA_NAMES } from "@coda/sandbox";
 import type { PathIntent, ResolvedWorkspacePath, Workspace } from "../workspace.ts";
-import { type ApprovalDecisionAuditEvent, approvalDecisionAuditEvent } from "./audit.ts";
+import { type ApprovalDecisionAuditEvent, approvalDecisionAuditEvent, type ReadAccessAuditEvent } from "./audit.ts";
 import {
 	type CommandRule,
 	type CommandRuleDecision,
@@ -179,7 +180,7 @@ export interface PermissionApprovalHandler {
 
 export interface ShellAuthorization {
 	readonly execution: "sandboxed" | "unsandboxed";
-	readonly policy: Readonly<CompiledSandboxPolicy>;
+	readonly readAccessPolicy: ReadAccessPolicy;
 	readonly sandboxPermissions: SandboxPermissions;
 	readonly additionalPermissions?: AdditionalPermissionProfile;
 	readonly commandWords: readonly string[];
@@ -188,7 +189,7 @@ export interface ShellAuthorization {
 
 export interface PermissionEngine extends PolicyGate {
 	authorizationFor(invocationId: ToolInvocationId): ShellAuthorization | undefined;
-	sandboxPolicyFor(invocationId: ToolInvocationId): Readonly<CompiledSandboxPolicy> | undefined;
+	readAccessPolicyFor(invocationId: ToolInvocationId): ReadAccessPolicy | undefined;
 	configuration(): PermissionConfiguration;
 	update(configuration: PermissionConfiguration): void;
 	approvalFor(invocationId: ToolInvocationId): ApprovalDecisionAuditEvent | undefined;
@@ -257,6 +258,8 @@ export interface PermissionEngineOptions {
 	readonly resolveExecutable?: ExecutableIdentityResolver;
 	/** Records a prompt suppressed by an active process-local Session Approval. */
 	readonly onSessionApprovalUsed?: (event: ApprovalDecisionAuditEvent) => void | Promise<void>;
+	/** Records the final read decision without ever including file contents. */
+	readonly onReadAccessDecision?: (event: ReadAccessAuditEvent) => void | Promise<void>;
 	readonly commandRules?: readonly CommandRule[];
 	readonly hostExecutables?: readonly HostExecutable[];
 	readonly persistCommandRule?: (rule: CommandRule) => Promise<void>;
@@ -925,13 +928,17 @@ function effectiveSandboxPolicy(
 			...protectedMetadataRoots.flatMap((root) => PROTECTED_METADATA_NAMES.map((name) => join(root, name))),
 		]),
 	]);
-	return Object.freeze({
+	const expanded = Object.freeze({
 		...base,
 		writableRoots,
 		protectedMetadataRoots,
 		protectedMetadataPaths,
 		networkAccess: permissions.network?.enabled ? "enabled" : base.networkAccess,
 	});
+	return createReadAccessPolicy(expanded).withApprovedRoots([
+		...(permissions.file_system?.read ?? []),
+		...(permissions.file_system?.write ?? []),
+	]).sandboxPolicy;
 }
 
 function fullAccessPolicy(base: Readonly<CompiledSandboxPolicy>): Readonly<CompiledSandboxPolicy> {
@@ -939,6 +946,10 @@ function fullAccessPolicy(base: Readonly<CompiledSandboxPolicy>): Readonly<Compi
 	return Object.freeze({
 		...base,
 		profile: "full-access",
+		readAccess: "full-disk",
+		readableRoots: Object.freeze([]),
+		approvedReadRoots: Object.freeze([]),
+		deniedReadRoots: Object.freeze([]),
 		writableRoots: "full-disk",
 		protectedMetadataRoots: Object.freeze([]),
 		protectedMetadataPaths: Object.freeze([]),
@@ -960,7 +971,7 @@ function parseShellRequest(request: ToolPolicyRequest, shellExecutable: string):
 		return "justification must be a string";
 	}
 	if (justification !== undefined && rawPermissions === undefined) {
-		return '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.';
+		return '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` to request command approval, or omit `justification`.';
 	}
 	const additionalPermissions = parseAdditionalPermissions(request.arguments.additional_permissions);
 	if (typeof additionalPermissions === "string") return additionalPermissions;
@@ -1184,7 +1195,7 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 	let activeProfile = options.profile;
 	let activeApprovalPolicy = options.approvalPolicy;
 	const authorizations = new Map<ToolInvocationId, ShellAuthorization>();
-	const sandboxPolicies = new Map<ToolInvocationId, Readonly<CompiledSandboxPolicy>>();
+	const readAccessPolicies = new Map<ToolInvocationId, ReadAccessPolicy>();
 	const aborts = new Set<ToolInvocationId>();
 	const sessionApprovals = new Set<string>();
 	const approvalResults = new Map<ToolInvocationId, ApprovalDecisionAuditEvent>();
@@ -1200,6 +1211,13 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 			await options.onWarning?.(message);
 		} catch {
 			// A secondary presentation or audit failure must not revoke the approval being reported.
+		}
+	};
+	const auditReadBestEffort = async (event: ReadAccessAuditEvent): Promise<void> => {
+		try {
+			await options.onReadAccessDecision?.(event);
+		} catch {
+			// Audit persistence is not execution authority and cannot change a read decision.
 		}
 	};
 	const resolveExecutable = async (words: readonly string[]): Promise<ExecutableIdentity | undefined> => {
@@ -1395,13 +1413,31 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 			const intent = fileIntent(toolRequest.toolName);
 			const resolved = await workspace.resolvePath(requestedPath, intent);
 			const invocationProfile = await materializeProtectedMetadataPolicy(activeProfile, workspace);
+			const baseReadAccess = createReadAccessPolicy(invocationProfile);
+			const readDecision = baseReadAccess.evaluate(resolved.canonicalPath);
 			const parsed: ParsedFileRequest = {
 				requestedPath,
 				intent,
 				recursive: recursiveFileAccess(toolRequest.toolName),
 				resolved,
 			};
-			const grant = async () => {
+			const auditRead = async (
+				outcome: ReadAccessAuditEvent["outcome"],
+				details: Pick<ReadAccessAuditEvent, "source"> | Pick<ReadAccessAuditEvent, "reason">,
+			): Promise<void> => {
+				if (intent !== "read") return;
+				await auditReadBestEffort({
+					type: "read_access",
+					invocationId: String(toolRequest.invocationId),
+					toolName: toolRequest.toolName,
+					requestedPath,
+					canonicalPath: resolved.canonicalPath,
+					recursive: parsed.recursive,
+					outcome,
+					...details,
+				});
+			};
+			const grant = async (reviewed: boolean) => {
 				const sandboxPolicy =
 					intent === "write"
 						? await exactMutationPolicy(
@@ -1411,6 +1447,9 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 								workspace,
 							)
 						: invocationProfile;
+				const readAccessPolicy = createReadAccessPolicy(sandboxPolicy).withApprovedRoots(
+					reviewed ? [intent === "write" ? dirname(resolved.canonicalPath) : resolved.canonicalPath] : [],
+				);
 				workspace.grantPath({
 					invocationId: toolRequest.invocationId,
 					toolName: toolRequest.toolName,
@@ -1418,21 +1457,42 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 					canonicalPath: resolved.canonicalPath,
 					recursive: parsed.recursive,
 				});
-				sandboxPolicies.set(toolRequest.invocationId, sandboxPolicy);
+				readAccessPolicies.set(toolRequest.invocationId, readAccessPolicy);
 			};
-			if (intent === "read" || profileAllowsWrite(invocationProfile, resolved.canonicalPath)) {
-				await grant();
+			const profileAllowsOperation =
+				intent === "read"
+					? readDecision.decision === "allow"
+					: profileAllowsWrite(invocationProfile, resolved.canonicalPath) &&
+						(readDecision.decision === "allow" || readDecision.reason !== "denied-read-root");
+			if (profileAllowsOperation) {
+				await grant(false);
+				if (readDecision.decision === "allow") {
+					await auditRead("allowed", { source: readDecision.source });
+				}
 				return { decision: "allow" };
 			}
 
 			const protectedMetadata = protectedByPolicy(invocationProfile, resolved.canonicalPath);
-			const reason = protectedMetadata
-				? "protected metadata is read-only in this permission profile"
-				: activeProfile.profile === "read-only"
-					? "Read Only does not permit writes"
-					: "path is outside the configured writable roots";
-			if (activeApprovalPolicy === "never") return reject(`${reason}; approval policy is never`);
+			const reason =
+				readDecision.decision === "deny" && readDecision.reason === "denied-read-root"
+					? "path is within a protected Credential root"
+					: intent === "read"
+						? "path is outside the configured readable roots"
+						: protectedMetadata
+							? "protected metadata is read-only in this permission profile"
+							: activeProfile.profile === "read-only"
+								? "Read Only does not permit writes"
+								: "path is outside the configured writable roots";
+			if (activeApprovalPolicy === "never") {
+				await auditRead("denied", {
+					reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+				});
+				return reject(`${reason}; approval policy is never`);
+			}
 			if (!granularAllowsSandbox(activeApprovalPolicy)) {
+				await auditRead("denied", {
+					reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+				});
 				return reject(`${reason}; approval policy disallowed sandbox approval prompt`);
 			}
 			const cacheKey = fileApprovalCacheKey(toolRequest, parsed);
@@ -1463,20 +1523,29 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 						break;
 					case "abort":
 						aborts.add(toolRequest.invocationId);
+						await auditRead("denied", { reason: "approval-unavailable" });
 						return reject("approval request aborted");
 					case "denied":
+						await auditRead("denied", {
+							reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+						});
 						return reject(decision.rejection);
 					case "timed-out":
+						await auditRead("denied", { reason: "approval-unavailable" });
 						return reject("approval request timed out");
 					case "approved-command-prefix-for-session":
+						await auditRead("denied", { reason: "approval-unavailable" });
 						return reject("Command Session Approval cannot approve filesystem access");
 					case "approved-execpolicy-amendment":
+						await auditRead("denied", { reason: "approval-unavailable" });
 						return reject("Command Rule cannot approve filesystem access");
 					case "network-policy-amendment":
+						await auditRead("denied", { reason: "approval-unavailable" });
 						return reject("Network Rule cannot approve filesystem access");
 				}
 			}
-			await grant();
+			await grant(true);
+			await auditRead("allowed", { source: "review" });
 			return { decision: "allow" };
 		} catch (error) {
 			return reject(error instanceof Error ? error.message : String(error));
@@ -1494,11 +1563,13 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 					invocationId: toolRequest.invocationId,
 					toolName: toolRequest.toolName,
 				});
-				if (decision.decision === "allow") sandboxPolicies.set(toolRequest.invocationId, activeProfile);
+				if (decision.decision === "allow") {
+					readAccessPolicies.set(toolRequest.invocationId, createReadAccessPolicy(activeProfile));
+				}
 				return decision;
 			}
 			if (toolRequest.toolName !== "bash") {
-				sandboxPolicies.set(toolRequest.invocationId, activeProfile);
+				readAccessPolicies.set(toolRequest.invocationId, createReadAccessPolicy(activeProfile));
 				return { decision: "allow" };
 			}
 			const parsedResult = parseShellRequest(toolRequest, shellExecutable);
@@ -1676,15 +1747,16 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 				activeProfile.profile === "full-access" ||
 				parsed.sandboxPermissions === "require_escalated" ||
 				ruleEvaluation.allExplicitlyAllowed;
-			const bypassSandbox = requestedBypass && requestedPolicy.deniedReadRoots.length === 0;
+			const bypassSandbox = requestedBypass && requestedPolicy.readAccess === "full-disk";
 			const effectivePolicy = bypassSandbox ? fullAccessPolicy(requestedPolicy) : requestedPolicy;
+			const readAccessPolicy = createReadAccessPolicy(effectivePolicy);
 			authorizations.set(
 				toolRequest.invocationId,
 				Object.freeze({
 					execution: bypassSandbox ? "unsandboxed" : "sandboxed",
 					sandboxPermissions: parsed.sandboxPermissions,
 					additionalPermissions: parsed.additionalPermissions,
-					policy: effectivePolicy,
+					readAccessPolicy,
 					commandWords: parsed.commandWords,
 					managedNetwork:
 						effectivePolicy.networkAccess === "restricted"
@@ -1698,7 +1770,7 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 			return { decision: "allow" };
 		},
 		authorizationFor: (invocationId) => authorizations.get(invocationId),
-		sandboxPolicyFor: (invocationId) => sandboxPolicies.get(invocationId),
+		readAccessPolicyFor: (invocationId) => readAccessPolicies.get(invocationId),
 		approvalFor: (invocationId) => approvalResults.get(invocationId),
 		configuration: () => Object.freeze({ profile: activeProfile, approvalPolicy: activeApprovalPolicy }),
 		update: (configuration) => {

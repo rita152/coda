@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext, ToolPolicyRequest } from "@coda/agent";
-import { compileSandboxPolicy } from "@coda/sandbox";
+import { compileSandboxPolicy, createReadAccessPolicy } from "@coda/sandbox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createPermissionEngine } from "../src/permissions/permission-engine.ts";
@@ -91,7 +91,7 @@ integration("sandboxed file-mutation boundary", () => {
 		const target = join(originalParent, "escape.txt");
 		const writer = createSandboxedMutationWriter({
 			workspace,
-			permissions: { sandboxPolicyFor: () => policy },
+			permissions: { readAccessPolicyFor: () => createReadAccessPolicy(policy) },
 			beforeLaunch: async () => {
 				await rename(originalParent, parkedParent);
 				await symlink(canonicalOutside, originalParent, "dir");

@@ -33,12 +33,14 @@ const BashParameters = Type.Object(
 				],
 				{
 					description:
-						"Per-command sandbox override. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions`, or `require_escalated` for unsandboxed execution.",
+						"Per-command permission request. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions`, or `require_escalated` for explicit command approval. Restricted read roots remain enforced.",
 				},
 			),
 		),
 		justification: Type.Optional(
-			Type.String({ description: "User-facing approval question for `require_escalated`; omit otherwise." }),
+			Type.String({
+				description: "User-facing approval question for an explicit permission request; omit otherwise.",
+			}),
 		),
 		prefix_rule: Type.Optional(
 			Type.Array(Type.String(), {
@@ -178,7 +180,7 @@ export function createBashTool(options: {
 						},
 					},
 					{
-						policy: authorization.policy,
+						readAccessPolicy: authorization.readAccessPolicy,
 						managedNetwork: authorization.managedNetwork,
 						auditContext: { invocationId: context.invocationId, toolName: "bash" },
 					},

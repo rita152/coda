@@ -83,8 +83,9 @@ export async function runOptionalSearchExecutable(options: {
 	const environment: Record<string, string> = { LC_ALL: "C" };
 	if (options.runtime.environment.PATH) environment.PATH = options.runtime.environment.PATH;
 	try {
-		const policy = options.permissions.sandboxPolicyFor(options.context.invocationId);
-		if (!policy) throw new Error("Search helper was not authorized by the Permission Engine");
+		const readAccessPolicy = options.permissions.readAccessPolicyFor(options.context.invocationId);
+		if (!readAccessPolicy) throw new Error("Search helper was not authorized by the Permission Engine");
+		const policy = readAccessPolicy.sandboxPolicy;
 		const executable = await resolveSearchExecutable({
 			name: options.executable,
 			path: options.runtime.environment.PATH,
@@ -107,7 +108,7 @@ export async function runOptionalSearchExecutable(options: {
 				overflowPath: path,
 			},
 			{
-				policy,
+				readAccessPolicy,
 				auditContext: { invocationId: options.context.invocationId, toolName: options.executable },
 			},
 		);

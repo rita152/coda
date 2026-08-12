@@ -11,6 +11,8 @@ import type {
 export interface PermissionPolicyAuditSnapshot {
 	readonly profile: CompiledSandboxPolicy["profile"];
 	readonly readAccess: CompiledSandboxPolicy["readAccess"];
+	readonly readableRoots: readonly string[];
+	readonly approvedReadRoots: readonly string[];
 	readonly deniedReadRoots: readonly string[];
 	readonly writableRoots: readonly string[] | "full-disk";
 	readonly protectedMetadataRoots: readonly string[];
@@ -44,6 +46,18 @@ export interface ApprovalDecisionAuditEvent {
 	readonly denial?: ApprovalAuditDenial;
 }
 
+export interface ReadAccessAuditEvent {
+	readonly type: "read_access";
+	readonly invocationId: string;
+	readonly toolName: string;
+	readonly requestedPath: string;
+	readonly canonicalPath: string;
+	readonly recursive: boolean;
+	readonly outcome: "allowed" | "denied";
+	readonly source?: "full-access" | "readable-root" | "approved-root" | "review";
+	readonly reason?: "outside-readable-roots" | "denied-read-root" | "invalid-path" | "approval-unavailable";
+}
+
 export type PermissionAuditEvent =
 	| {
 			readonly type: "configuration";
@@ -52,6 +66,7 @@ export type PermissionAuditEvent =
 			readonly policy: PermissionPolicyAuditSnapshot;
 	  }
 	| ApprovalDecisionAuditEvent
+	| ReadAccessAuditEvent
 	| {
 			readonly type: "rule_persistence";
 			readonly kind: "command" | "network";
@@ -134,6 +149,8 @@ export function permissionPolicyAuditSnapshot(policy: Readonly<CompiledSandboxPo
 	return Object.freeze({
 		profile: policy.profile,
 		readAccess: policy.readAccess,
+		readableRoots: Object.freeze([...policy.readableRoots]),
+		approvedReadRoots: Object.freeze([...policy.approvedReadRoots]),
 		deniedReadRoots: Object.freeze([...policy.deniedReadRoots]),
 		writableRoots: policy.writableRoots === "full-disk" ? "full-disk" : Object.freeze([...policy.writableRoots]),
 		protectedMetadataRoots: Object.freeze([...policy.protectedMetadataRoots]),

@@ -88,7 +88,7 @@ describe("Session application composition", () => {
 		expect(faux.state.callCount).toBe(0);
 	});
 
-	it("audits precise escalation and Sandbox execution without restoring authority on cold resume", async () => {
+	it("audits explicit command review and restricted Sandbox execution without restoring authority", async () => {
 		const fixture = await mkdtemp(join(tmpdir(), "coda-session-permission-audit-"));
 		temporaryDirectories.push(fixture);
 		const workspace = await mkdtemp(join(fixture, "workspace-"));
@@ -126,7 +126,11 @@ describe("Session application composition", () => {
 		const stderr = new BufferOutput();
 		const modelProcessRunner: ModelProcessRunner = {
 			run: async (_request, authority) => {
-				expect(authority.policy).toMatchObject({ profile: "full-access", writableRoots: "full-disk" });
+				expect(authority.readAccessPolicy.sandboxPolicy).toMatchObject({
+					profile: "workspace",
+					readAccess: "root-scoped",
+					writableRoots: expect.arrayContaining([canonicalWorkspace]),
+				});
 				return {
 					exitCode: 0,
 					signal: null,
@@ -134,7 +138,7 @@ describe("Session application composition", () => {
 					stderr: "",
 					timedOut: false,
 					truncated: false,
-					backend: "none",
+					backend: "macos-seatbelt",
 				};
 			},
 		};
@@ -189,9 +193,13 @@ describe("Session application composition", () => {
 				}),
 				expect.objectContaining({
 					type: "sandbox_execution",
-					backend: "none",
+					backend: "macos-seatbelt",
 					outcome: "success",
-					policy: expect.objectContaining({ profile: "full-access", writableRoots: "full-disk" }),
+					policy: expect.objectContaining({
+						profile: "workspace",
+						readAccess: "root-scoped",
+						writableRoots: expect.arrayContaining([canonicalWorkspace]),
+					}),
 				}),
 			]),
 		);

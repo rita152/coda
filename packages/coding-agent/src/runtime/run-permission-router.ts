@@ -21,10 +21,10 @@ export class RunPermissionRouter<T> implements PermissionEngine {
 		return this.#current().authorizationFor(...parameters);
 	}
 
-	sandboxPolicyFor(
-		...parameters: Parameters<PermissionEngine["sandboxPolicyFor"]>
-	): ReturnType<PermissionEngine["sandboxPolicyFor"]> {
-		return this.#current().sandboxPolicyFor(...parameters);
+	readAccessPolicyFor(
+		...parameters: Parameters<PermissionEngine["readAccessPolicyFor"]>
+	): ReturnType<PermissionEngine["readAccessPolicyFor"]> {
+		return this.#current().readAccessPolicyFor(...parameters);
 	}
 
 	configuration(): ReturnType<PermissionEngine["configuration"]> {

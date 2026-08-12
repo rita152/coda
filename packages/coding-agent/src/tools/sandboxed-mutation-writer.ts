@@ -149,7 +149,7 @@ function parseResponse(stdout: string): MutationWorkerResponse {
 
 export function createSandboxedMutationWriter(options: {
 	readonly workspace: Pick<Workspace, "root">;
-	readonly permissions: Pick<PermissionEngine, "sandboxPolicyFor">;
+	readonly permissions: Pick<PermissionEngine, "readAccessPolicyFor">;
 	readonly onAudit?: PermissionAuditSink;
 	/** Deterministic race-test seam; production composition leaves this undefined. */
 	readonly beforeLaunch?: () => Promise<void> | void;
@@ -159,8 +159,9 @@ export function createSandboxedMutationWriter(options: {
 			if (!isAbsolute(request.target) || normalize(request.target) !== request.target) {
 				throw new Error("Sandboxed mutation target must be a canonical absolute path");
 			}
-			const policy = options.permissions.sandboxPolicyFor(context.invocationId);
-			if (!policy) throw new Error("File mutation was not authorized by the Permission Engine");
+			const readAccessPolicy = options.permissions.readAccessPolicyFor(context.invocationId);
+			if (!readAccessPolicy) throw new Error("File mutation was not authorized by the Permission Engine");
+			const policy = readAccessPolicy.sandboxPolicy;
 			const invocation = context.invocationId.replace(/[^A-Za-z0-9_-]/gu, "-");
 			const parentPath = dirname(request.target);
 			const canonicalParent = await realpath(parentPath);

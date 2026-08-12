@@ -3,6 +3,7 @@ import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
+import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { toolFailure } from "./failure.ts";
 
@@ -15,7 +16,11 @@ const LsParameters = Type.Object(
 	{ additionalProperties: false },
 );
 
-export function createLsTool(workspace: Workspace, fileSystem: FileSystem): AgentTool<typeof LsParameters> {
+export function createLsTool(
+	workspace: Workspace,
+	fileSystem: FileSystem,
+	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
+): AgentTool<typeof LsParameters> {
 	return {
 		name: "ls",
 		description: "List directory entries in stable name order.",
@@ -24,7 +29,7 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 		parallelSafe: true,
 		execute: async (arguments_, context) => {
 			const root = await workspace.resolvePath(arguments_.path ?? ".", "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "ls", "read")) {
+			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "ls", "read", permissions)) {
 				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
 					code: "access_denied",
 					path: root.canonicalPath,
@@ -56,7 +61,10 @@ export function createLsTool(workspace: Workspace, fileSystem: FileSystem): Agen
 				for (const entry of entries) {
 					context.signal.throwIfAborted();
 					const child = await workspace.resolvePath(join(directory, entry.name), "read");
-					if (!child.exists || !hasPermissionedPathAccess(workspace, child, context.invocationId, "ls", "read")) {
+					if (
+						!child.exists ||
+						!hasPermissionedPathAccess(workspace, child, context.invocationId, "ls", "read", permissions)
+					) {
 						continue;
 					}
 					if (lines.length >= limit) {

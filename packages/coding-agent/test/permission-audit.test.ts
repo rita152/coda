@@ -1,4 +1,4 @@
-import { compileSandboxPolicy } from "@coda/sandbox";
+import { compileSandboxPolicy, createReadAccessPolicy } from "@coda/sandbox";
 import { describe, expect, it } from "vitest";
 import { approvalDecisionAuditEvent, type PermissionAuditEvent } from "../src/permissions/audit.ts";
 import { createAuditedModelProcessRunner, type ModelProcessRunner } from "../src/permissions/model-process-runner.ts";
@@ -22,6 +22,28 @@ const request = {
 };
 
 describe("Permission audit", () => {
+	it("accepts content-free native read decisions in the Session schema", () => {
+		const event: PermissionAuditEvent = {
+			type: "read_access",
+			invocationId: "invocation:read",
+			toolName: "read",
+			requestedPath: "../credentials.json",
+			canonicalPath: "/home/user/.config/gcloud/credentials.json",
+			recursive: false,
+			outcome: "denied",
+			reason: "denied-read-root",
+		};
+
+		expect(isSessionRecordPayload("permission_audit_recorded", { event }, 5)).toBe(true);
+		expect(
+			isSessionRecordPayload(
+				"permission_audit_recorded",
+				{ event: { ...event, contents: "must not be persisted" } },
+				5,
+			),
+		).toBe(false);
+	});
+
 	it("stores denial metadata and a bounded sanitized summary instead of full feedback", () => {
 		const feedback = `Run npm pack first\n\u001b[31m${"inspect ".repeat(40)}`;
 		const event = approvalDecisionAuditEvent(
@@ -85,7 +107,7 @@ describe("Permission audit", () => {
 		});
 
 		await audited.run(request, {
-			policy,
+			readAccessPolicy: createReadAccessPolicy(policy),
 			auditContext: { invocationId: "invocation:1", toolName: "bash" },
 		});
 
@@ -117,7 +139,7 @@ describe("Permission audit", () => {
 
 		await expect(
 			audited.run(request, {
-				policy,
+				readAccessPolicy: createReadAccessPolicy(policy),
 				auditContext: { invocationId: "invocation:2", toolName: "find" },
 			}),
 		).rejects.toThrow("Sandbox backend unavailable");
