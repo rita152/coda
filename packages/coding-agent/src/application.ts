@@ -36,6 +36,7 @@ import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { ContextWindowController } from "./context-window/context-window.ts";
+import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
@@ -94,7 +95,6 @@ import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./p
 import { resolveDefaultDeniedReadRoots } from "./permissions/sensitive-read-roots.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
-import { assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
 import type { CustomProviderConfig } from "./providers/types.ts";
@@ -169,27 +169,6 @@ const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 		maxConsecutiveEquivalentToolBatches: 4,
 	}),
 });
-
-function isRecoverableContextOverflow(message: Immutable<AssistantMessage>): boolean {
-	if (message.content.length > 0) return false;
-	if (
-		(message.diagnostics ?? []).some((diagnostic) => {
-			const code = diagnostic.error?.code;
-			return (
-				typeof code === "string" &&
-				["context_overflow", "context_length_exceeded", "context_window_exceeded"].includes(code.toLowerCase())
-			);
-		})
-	) {
-		return true;
-	}
-	const error = message.errorMessage?.toLowerCase() ?? "";
-	return (
-		(error.includes("context length") || error.includes("context window")) &&
-		(error.includes("exceed") || error.includes("too long") || error.includes("maximum"))
-	);
-}
-
 export interface UserSettings {
 	readonly defaultModel?: ModelSelection;
 	readonly defaultReasoning?: ThinkingLevel | "off";
@@ -1510,12 +1489,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						commit: (checkpoint) => session.record({ type: "context_compacted", checkpoint }),
 						checkpoint: session.compactionCheckpoint,
 					});
+					const contextOverflowRecovery = new ContextOverflowRecovery({
+						contextWindow,
+						model: () => (runRuntime.active?.value ?? runRuntime.selected).model,
+					});
 					await session.record({
 						type: "model_selected",
 						model: { provider: model.provider, id: model.id },
 						reasoning,
 					});
-					const agent = new Agent({
+					const agent: Agent = new Agent({
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
 						runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
@@ -1526,28 +1509,20 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						},
 						policyGate: policy,
 						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
-						recoverFailedAttempt: async ({ message }) => {
-							if (!isRecoverableContextOverflow(message.message)) return { retry: false };
-							if (!contextWindow.canCompact(agent.state.messages)) return { retry: false };
-							await contextWindow.compact({
-								messages: agent.state.messages,
-								reason: "overflow",
-							});
-							return { retry: true, reason: "context overflow compacted" };
-						},
+						recoverFailedAttempt: (attempt) =>
+							contextOverflowRecovery.recoverFailedAttempt(attempt, agent.state.messages),
 						stream: async ({ context, signal }) => {
 							const runtime = runRuntime.active?.value;
 							if (!runtime) throw new Error("A Model stream was requested outside an active Run runtime");
 							if (!runtime.authSnapshot) {
 								throw new Error(`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`);
 							}
-							const preparedContext = await contextWindow.prepare(context, agent.state.messages, signal);
-							const contextBudget = assertModelContextFits(runtime.model, preparedContext);
-							return options.models.streamSimple(runtime.model, preparedContext, {
+							const prepared = await contextOverflowRecovery.prepare(context, agent.state.messages, signal);
+							return options.models.streamSimple(runtime.model, prepared.context, {
 								signal,
 								authSnapshot: runtime.authSnapshot,
 								reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
-								maxTokens: contextBudget.reservedOutputTokens,
+								maxTokens: prepared.reservedOutputTokens,
 							});
 						},
 						beforeRun: async ({ inputMessage }) => {
@@ -1941,6 +1916,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									commit: (checkpoint) => targetSession.record({ type: "context_compacted", checkpoint }),
 									checkpoint: targetSession.compactionCheckpoint,
 								});
+								const targetContextOverflowRecovery = new ContextOverflowRecovery({
+									contextWindow: targetContextWindow,
+									model: () => (targetRunRuntime.active?.value ?? targetRunRuntime.selected).model,
+								});
 								if (!targetSession.restored.model) {
 									const initialModelSelection = {
 										type: "model_selected",
@@ -1953,7 +1932,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										await targetSession.record(initialModelSelection);
 									}
 								}
-								const targetAgent = new Agent({
+								const targetAgent: Agent = new Agent({
 									clock: options.runtime.clock,
 									idGenerator: options.runtime.idGenerator,
 									runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
@@ -1966,15 +1945,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									retry: options.runtime.scheduler
 										? createCodingAgentRetry(options.runtime.scheduler)
 										: undefined,
-									recoverFailedAttempt: async ({ message }) => {
-										if (!isRecoverableContextOverflow(message.message)) return { retry: false };
-										if (!targetContextWindow.canCompact(targetAgent.state.messages)) return { retry: false };
-										await targetContextWindow.compact({
-											messages: targetAgent.state.messages,
-											reason: "overflow",
-										});
-										return { retry: true, reason: "context overflow compacted" };
-									},
+									recoverFailedAttempt: (attempt) =>
+										targetContextOverflowRecovery.recoverFailedAttempt(attempt, targetAgent.state.messages),
 									stream: async ({ context, signal }) => {
 										const runtime = targetRunRuntime.active?.value;
 										if (!runtime)
@@ -1984,17 +1956,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`,
 											);
 										}
-										const preparedContext = await targetContextWindow.prepare(
+										const prepared = await targetContextOverflowRecovery.prepare(
 											context,
 											targetAgent.state.messages,
 											signal,
 										);
-										const contextBudget = assertModelContextFits(runtime.model, preparedContext);
-										return options.models.streamSimple(runtime.model, preparedContext, {
+										return options.models.streamSimple(runtime.model, prepared.context, {
 											signal,
 											authSnapshot: runtime.authSnapshot,
 											reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
-											maxTokens: contextBudget.reservedOutputTokens,
+											maxTokens: prepared.reservedOutputTokens,
 										});
 									},
 									beforeRun: async ({ inputMessage }) => {
@@ -2145,6 +2116,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											return "Context compacted";
 										},
 									},
+									contextOverflowRecovery: targetContextOverflowRecovery,
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
@@ -2231,6 +2203,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							}
 						};
 						let exitCode: number;
+						let overflowReplacement: InteractiveSessionOptions | undefined;
 						try {
 							exitCode = await runInteractive({
 								agent,
@@ -2321,6 +2294,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										return "Context compacted";
 									},
 								},
+								contextOverflowRecovery,
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 								commandRegistry,
@@ -2361,6 +2335,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										});
 										return createSecondarySessionOptions(targetSession, true);
 									},
+								},
+								onContextOverflowReplacement: (replacement) => {
+									overflowReplacement = replacement;
 								},
 								lifecycle: options.runtime.interactiveLifecycle,
 								allocateId: () => options.runtime.idGenerator.generate("queue_item"),
@@ -2462,7 +2439,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								}),
 							);
 						}
-						const interactiveMessages = agent.state.messages.slice(initialMessageCount);
+						const finalAgent = overflowReplacement?.agent ?? agent;
+						const finalSession = overflowReplacement?.session ?? session;
+						const interactiveMessages = finalAgent.state.messages.slice(
+							overflowReplacement ? 0 : initialMessageCount,
+						);
 						const finalAssistant = [...interactiveMessages]
 							.reverse()
 							.find(
@@ -2471,14 +2452,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						if (finalAssistant?.role === "assistant") {
 							await options.io.stdout.write(`${finalText(finalAssistant)}\n`);
 						}
-						if (session.descriptor.persistent) {
+						if (finalSession.descriptor.persistent && finalSession.descriptor.path) {
 							await options.io.stdout.write(
-								`Session ${session.descriptor.id} • resume with: coda --resume ${session.descriptor.id}\n`,
+								`Session ${finalSession.descriptor.id} • resume with: coda --resume ${finalSession.descriptor.id}\n`,
 							);
 						}
-						if (agent.state.lastRun && agent.state.lastRun.outcome !== "success") {
+						if (finalAgent.state.lastRun && finalAgent.state.lastRun.outcome !== "success") {
 							await options.io.stderr.write(
-								`coda: ${agent.state.lastRun.failure?.message ?? `Run ended with outcome ${agent.state.lastRun.outcome}`}\n`,
+								`coda: ${finalAgent.state.lastRun.failure?.message ?? `Run ended with outcome ${finalAgent.state.lastRun.outcome}`}\n`,
 							);
 						}
 						return exitCode;

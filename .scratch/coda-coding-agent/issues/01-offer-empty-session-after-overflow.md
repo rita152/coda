@@ -1,6 +1,6 @@
 # Offer an empty Session after Context Overflow
 
-Status: ready-for-agent
+Status: resolved
 
 Interactive Context Overflow currently fails closed and leaves the user in the
 same oversized Session. Add an explicit action that closes the current Session,
@@ -18,3 +18,16 @@ Acceptance criteria:
 ## Comments
 
 Created from the initial `@coda/coding-agent` implementation pass.
+
+Resolved on 2026-08-12. Auto-Compaction and the single safe Provider-overflow
+retry remain first. When they cannot recover, interactive mode now offers only
+cancel or a fresh empty Session in the same Workspace, closes the old Session
+only after replacement construction succeeds, and carries no summary, Messages,
+attachments, approvals, or queued input into the replacement. Print mode still
+exits `1` without starting a terminal prompt.
+
+Verified with VirtualTerminal and FileSessionManager integration coverage for
+local overflow, Provider overflow, cancel, replacement, and replacement failure;
+the old journal is compared byte-for-byte across cancellation and replacement.
+The complete `@coda/coding-agent` test suite and repository-wide `npm run check`
+both pass.
