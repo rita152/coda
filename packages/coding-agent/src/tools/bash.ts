@@ -77,7 +77,7 @@ const BashParameters = Type.Object(
 
 const AUTOMATIC_ENVIRONMENT = new Set(["HOME", "LANG", "LANGUAGE", "PATH", "SHELL", "TMPDIR", "USER"]);
 
-function shellEnvironment(
+export function modelShellEnvironment(
 	runtime: ApplicationRuntime,
 	allowlist: readonly string[],
 ): { environment: Record<string, string>; stripped: readonly string[] } {
@@ -129,7 +129,9 @@ function capturedVisibleOutput(value: string): string {
 	return value.startsWith("[stdout]\n") ? value.slice("[stdout]\n".length) : value;
 }
 
-function denialNotice(denial: NonNullable<Awaited<ReturnType<ModelProcessRunner["run"]>>["denial"]>): string {
+export function modelProcessDenialNotice(
+	denial: NonNullable<Awaited<ReturnType<ModelProcessRunner["run"]>>["denial"]>,
+): string {
 	if (denial.kind === "network") {
 		return `Sandbox denied network access to ${denial.protocol}://${denial.host}:${denial.port}: ${denial.reason}. If this access is intended, retry with sandbox_permissions "with_additional_permissions" and additional_permissions.network.enabled true.`;
 	}
@@ -154,7 +156,7 @@ export function createBashTool(options: {
 		execute: async (arguments_, context) => {
 			const authorization = options.permissions.authorizationFor(context.invocationId);
 			if (!authorization) throw new Error("Bash execution was not authorized by the Permission Engine");
-			const inherited = shellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
+			const inherited = modelShellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
 			const capture = await createToolOutputCapture(
 				options.fileSystem,
 				options.runtime.homeDirectory,
@@ -255,7 +257,7 @@ export function createBashTool(options: {
 						: {}),
 			};
 			return {
-				content: result.denial ? `${output}\n[${denialNotice(result.denial)}]` : output,
+				content: result.denial ? `${output}\n[${modelProcessDenialNotice(result.denial)}]` : output,
 				observation: {
 					status,
 					truncated,

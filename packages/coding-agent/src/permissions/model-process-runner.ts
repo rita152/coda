@@ -1,5 +1,11 @@
 import { createWriteStream, type WriteStream } from "node:fs";
-import { execute, type ManagedNetworkPolicy, type ReadAccessPolicy, type SandboxViolation } from "@coda/sandbox";
+import {
+	execute,
+	type ManagedNetworkPolicy,
+	type ReadAccessPolicy,
+	type SandboxViolation,
+	startProcess,
+} from "@coda/sandbox";
 import type { ProcessOutputChunk, ProcessRunRequest, ProcessRunResult } from "../host/process-runner.ts";
 import { type PermissionAuditSink, permissionPolicyAuditSnapshot } from "./audit.ts";
 
@@ -18,50 +24,118 @@ export interface ModelProcessRunner {
 	run(request: ProcessRunRequest, authority: ModelProcessAuthority): Promise<ModelProcessRunResult>;
 }
 
+export interface ModelProcessSession {
+	readonly backend: ModelProcessRunResult["backend"];
+	readonly completion: Promise<ModelProcessRunResult>;
+	write(input: string | Uint8Array): Promise<void>;
+	closeStdin(input?: string | Uint8Array): Promise<void>;
+	stop(): Promise<ModelProcessRunResult>;
+}
+
+export interface ModelProcessSessionRunner {
+	start(request: ProcessRunRequest, authority: ModelProcessAuthority): Promise<ModelProcessSession>;
+}
+
+async function auditProcessResult(
+	result: ModelProcessRunResult,
+	authority: ModelProcessAuthority,
+	audit: PermissionAuditSink,
+): Promise<void> {
+	const context = authority.auditContext;
+	if (!context) return;
+	await audit(
+		Object.freeze({
+			type: "sandbox_execution",
+			invocationId: context.invocationId,
+			toolName: context.toolName,
+			policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
+			backend: result.backend,
+			outcome: result.denial
+				? "sandbox-denial"
+				: result.timedOut
+					? "timed-out"
+					: result.exitCode === 0
+						? "success"
+						: "normal-failure",
+			exitCode: result.exitCode,
+			signal: result.signal,
+			...(result.denial ? { denial: result.denial } : {}),
+		}),
+	);
+}
+
+async function auditProcessFailure(
+	error: unknown,
+	authority: ModelProcessAuthority,
+	audit: PermissionAuditSink,
+): Promise<void> {
+	const context = authority.auditContext;
+	if (!context) return;
+	const cancelled = error instanceof Error && error.name === "AbortError";
+	await audit(
+		Object.freeze({
+			type: "sandbox_execution",
+			invocationId: context.invocationId,
+			toolName: context.toolName,
+			policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
+			outcome: cancelled ? "cancelled" : "launch-failed",
+			error: error instanceof Error ? error.message : String(error),
+		}),
+	);
+}
+
 export function createAuditedModelProcessRunner(
 	delegate: ModelProcessRunner,
 	audit: PermissionAuditSink,
 ): ModelProcessRunner {
 	return {
 		run: async (request, authority) => {
-			const context = authority.auditContext;
-			if (!context) return delegate.run(request, authority);
 			try {
 				const result = await delegate.run(request, authority);
-				await audit(
-					Object.freeze({
-						type: "sandbox_execution",
-						invocationId: context.invocationId,
-						toolName: context.toolName,
-						policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
-						backend: result.backend,
-						outcome: result.denial
-							? "sandbox-denial"
-							: result.timedOut
-								? "timed-out"
-								: result.exitCode === 0
-									? "success"
-									: "normal-failure",
-						exitCode: result.exitCode,
-						signal: result.signal,
-						...(result.denial ? { denial: result.denial } : {}),
-					}),
-				);
+				await auditProcessResult(result, authority, audit);
 				return result;
 			} catch (error) {
-				const cancelled = error instanceof Error && error.name === "AbortError";
-				await audit(
-					Object.freeze({
-						type: "sandbox_execution",
-						invocationId: context.invocationId,
-						toolName: context.toolName,
-						policy: permissionPolicyAuditSnapshot(authority.readAccessPolicy.sandboxPolicy),
-						outcome: cancelled ? "cancelled" : "launch-failed",
-						error: error instanceof Error ? error.message : String(error),
-					}),
-				);
+				await auditProcessFailure(error, authority, audit);
 				throw error;
 			}
+		},
+	};
+}
+
+export function createAuditedModelProcessSessionRunner(
+	delegate: ModelProcessSessionRunner,
+	audit: PermissionAuditSink,
+): ModelProcessSessionRunner {
+	return {
+		start: async (request, authority) => {
+			let session: ModelProcessSession;
+			try {
+				session = await delegate.start(request, authority);
+			} catch (error) {
+				await auditProcessFailure(error, authority, audit);
+				throw error;
+			}
+			const completion = session.completion.then(
+				async (result) => {
+					await auditProcessResult(result, authority, audit);
+					return result;
+				},
+				async (error) => {
+					await auditProcessFailure(error, authority, audit);
+					throw error;
+				},
+			);
+			void completion.catch(() => undefined);
+			return Object.freeze({
+				backend: session.backend,
+				completion,
+				write: (input: string | Uint8Array) => session.write(input),
+				closeStdin: (input?: string | Uint8Array) => session.closeStdin(input),
+				stop: async () => {
+					await session.stop();
+					return completion;
+				},
+			});
 		},
 	};
 }
@@ -173,6 +247,49 @@ export function createModelProcessRunner(): ModelProcessRunner {
 				backend: result.backend,
 				denial: result.status === "denied" ? result.denial : undefined,
 			};
+		},
+	};
+}
+
+export function createModelProcessSessionRunner(): ModelProcessSessionRunner {
+	return {
+		start: async (request, authority) => {
+			const session = await startProcess(
+				{
+					command: [request.executable, ...request.args],
+					cwd: request.cwd,
+					environment: request.environment,
+					policy: authority.readAccessPolicy.sandboxPolicy,
+					timeoutMs: request.timeoutMs,
+					signal: request.signal,
+					managedNetwork: authority.managedNetwork,
+					maxOutputBytes: Math.max(request.maxOutputBytes, 64 * 1024),
+				},
+				{ onOutput: request.onOutput },
+			);
+			const completion = session.completion.then(
+				(result): ModelProcessRunResult => ({
+					exitCode: result.exitCode,
+					signal: result.signal,
+					stdout: result.stdout,
+					stderr: result.stderr,
+					timedOut: result.status === "timed-out",
+					truncated: result.truncated,
+					backend: result.backend,
+					denial: result.status === "denied" ? result.denial : undefined,
+				}),
+			);
+			void completion.catch(() => undefined);
+			return Object.freeze({
+				backend: session.backend,
+				completion,
+				write: (input: string | Uint8Array) => session.write(input),
+				closeStdin: (input?: string | Uint8Array) => session.closeStdin(input),
+				stop: async () => {
+					await session.stop();
+					return completion;
+				},
+			});
 		},
 	};
 }

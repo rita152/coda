@@ -21,6 +21,7 @@ export type { CommandRule, CommandRuleDecision, CommandRulePatternToken, HostExe
 
 const FILE_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
 const MUTATION_TOOLS = new Set(["edit", "write"]);
+const SHELL_TOOLS = new Set(["bash", "process_start"]);
 const BANNED_PREFIX_SUGGESTIONS = new Set(
 	[
 		["/bin/bash"],
@@ -248,7 +249,7 @@ export interface PermissionEngineOptions {
 	readonly cwd: string;
 	/** Stable execution-environment identity included in Session approval keys. */
 	readonly environmentId?: string;
-	/** Exact shell executable used by the model Bash Tool. */
+	/** Exact shell executable used by model Shell Tools. */
 	readonly shellExecutable?: string;
 	readonly workspace?: Workspace;
 	readonly profile: Readonly<CompiledSandboxPolicy>;
@@ -959,7 +960,7 @@ function fullAccessPolicy(base: Readonly<CompiledSandboxPolicy>): Readonly<Compi
 
 function parseShellRequest(request: ToolPolicyRequest, shellExecutable: string): ParsedShellRequest | string {
 	const command = request.arguments.command;
-	if (typeof command !== "string" || command.trim() === "") return "bash command must be a non-empty string";
+	if (typeof command !== "string" || command.trim() === "") return "Shell command must be a non-empty string";
 	const rawPermissions = request.arguments.sandbox_permissions;
 	const sandboxPermissions: SandboxPermissions =
 		rawPermissions === undefined ? "use_default" : (rawPermissions as SandboxPermissions);
@@ -1568,7 +1569,7 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 				}
 				return decision;
 			}
-			if (toolRequest.toolName !== "bash") {
+			if (!SHELL_TOOLS.has(toolRequest.toolName)) {
 				readAccessPolicies.set(toolRequest.invocationId, createReadAccessPolicy(activeProfile));
 				return { decision: "allow" };
 			}

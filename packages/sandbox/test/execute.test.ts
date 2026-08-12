@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { compileSandboxPolicy, execute, normalizeNetworkHost } from "../src/index.ts";
+import { compileSandboxPolicy, execute, normalizeNetworkHost, startProcess } from "../src/index.ts";
 
 const canonicalTemporaryDirectory = process.platform === "darwin" ? "/private/tmp" : "/tmp";
 const fullAccess = compileSandboxPolicy({
@@ -135,6 +135,29 @@ describe("execute", () => {
 		});
 
 		expect(result).toMatchObject({ status: "exited", exitCode: 0, stdout: "EXACT PAYLOAD" });
+	});
+
+	it("keeps session stdin open for incremental writes without exposing a PID", async () => {
+		const session = await startProcess({
+			command: [
+				process.execPath,
+				"-e",
+				"process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => process.stdout.write(chunk.toUpperCase()))",
+			],
+			cwd: canonicalTemporaryDirectory,
+			environment: {},
+			policy: fullAccess,
+			timeoutMs: 5_000,
+		});
+
+		expect(Object.keys(session).sort()).toEqual(["backend", "closeStdin", "completion", "stop", "write"]);
+		await session.write("first ");
+		await session.closeStdin("second");
+		await expect(session.completion).resolves.toMatchObject({
+			status: "exited",
+			exitCode: 0,
+			stdout: "FIRST SECOND",
+		});
 	});
 
 	it("returns typed timeout and pre-launch cancellation states", async () => {

@@ -1,7 +1,12 @@
 import { compileSandboxPolicy, createReadAccessPolicy } from "@coda/sandbox";
 import { describe, expect, it } from "vitest";
 import { approvalDecisionAuditEvent, type PermissionAuditEvent } from "../src/permissions/audit.ts";
-import { createAuditedModelProcessRunner, type ModelProcessRunner } from "../src/permissions/model-process-runner.ts";
+import {
+	createAuditedModelProcessRunner,
+	createAuditedModelProcessSessionRunner,
+	type ModelProcessRunner,
+	type ModelProcessSessionRunner,
+} from "../src/permissions/model-process-runner.ts";
 import { isSessionRecordPayload } from "../src/session/v1-schema.ts";
 
 const policy = compileSandboxPolicy({
@@ -150,6 +155,49 @@ describe("Permission audit", () => {
 				toolName: "find",
 				outcome: "launch-failed",
 				error: "Sandbox backend unavailable",
+			}),
+		]);
+	});
+
+	it("audits a background process through completion using its start invocation", async () => {
+		const events: PermissionAuditEvent[] = [];
+		const delegate: ModelProcessSessionRunner = {
+			start: async () => {
+				const completion = Promise.resolve({
+					exitCode: 0,
+					signal: null,
+					stdout: "done",
+					stderr: "",
+					timedOut: false,
+					truncated: false,
+					backend: "macos-seatbelt" as const,
+				});
+				return {
+					backend: "macos-seatbelt",
+					completion,
+					write: async () => undefined,
+					closeStdin: async () => undefined,
+					stop: () => completion,
+				};
+			},
+		};
+		const audited = createAuditedModelProcessSessionRunner(delegate, (event) => {
+			events.push(event);
+		});
+
+		const processSession = await audited.start(request, {
+			policy,
+			auditContext: { invocationId: "invocation:process", toolName: "process_start" },
+		});
+		await processSession.completion;
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				type: "sandbox_execution",
+				invocationId: "invocation:process",
+				toolName: "process_start",
+				backend: "macos-seatbelt",
+				outcome: "success",
 			}),
 		]);
 	});

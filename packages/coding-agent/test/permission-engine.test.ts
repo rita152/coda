@@ -138,6 +138,31 @@ describe("Permission Engine command matrix", () => {
 		}
 	});
 
+	it("applies Bash command policy and denial semantics to process_start", async () => {
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "workspace",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+			approval: { decide: async () => ({ type: "approved" }) },
+		});
+		const bash = shellRequest("npm test");
+		const processStart = shellRequest("npm test", undefined, "process_start");
+		const denied = shellRequest("rm -rf build", undefined, "process_start");
+
+		await expect(engine.check(bash)).resolves.toEqual({ decision: "allow" });
+		await expect(engine.check(processStart)).resolves.toEqual({ decision: "allow" });
+		expect(engine.authorizationFor(processStart.invocationId)).toMatchObject({
+			execution: "sandboxed",
+			commandWords: ["npm", "test"],
+		});
+		await expect(engine.check(denied)).resolves.toMatchObject({ decision: "reject" });
+		expect(engine.authorizationFor(denied.invocationId)).toBeUndefined();
+	});
+
 	it.each(
 		(["read-only", "workspace", "full-access"] as const).flatMap((profile) =>
 			(
@@ -1835,14 +1860,18 @@ describe("Permission Engine filesystem matrix", () => {
 	});
 });
 
-function shellRequest(command: string, sandboxPermissions?: "require_escalated"): ToolPolicyRequest {
+function shellRequest(
+	command: string,
+	sandboxPermissions?: "require_escalated",
+	toolName: "bash" | "process_start" = "bash",
+): ToolPolicyRequest {
 	return {
 		runId: "run-1" as ToolPolicyRequest["runId"],
 		turnId: "turn-1" as ToolPolicyRequest["turnId"],
-		invocationId: `invocation:${command}` as ToolPolicyRequest["invocationId"],
+		invocationId: `invocation:${toolName}:${command}` as ToolPolicyRequest["invocationId"],
 		resultMessageId: "message-1" as ToolPolicyRequest["resultMessageId"],
 		providerToolCallId: "provider-call-1",
-		toolName: "bash",
+		toolName,
 		arguments: {
 			command,
 			...(sandboxPermissions

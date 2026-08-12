@@ -11,8 +11,11 @@ export {
 	type SandboxExecutionResult,
 	type SandboxExitedResult,
 	type SandboxOutputChunk,
+	type SandboxProcess,
+	type SandboxStartRequest,
 	type SandboxTimedOutResult,
 	type SandboxViolation,
+	startProcess,
 } from "./execute.ts";
 export type {
 	ManagedNetworkDecision,

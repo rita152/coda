@@ -42,12 +42,17 @@ export class ToolOutputCapture {
 	#storedTruncated = false;
 	#failure: unknown;
 	#queue = Promise.resolve();
+	#finished: Promise<StoredToolOutput | undefined> | undefined;
 
 	constructor(fileSystem: FileSystem, file: WritableFile, path: string, outputRef: string) {
 		this.#fileSystem = fileSystem;
 		this.#file = file;
 		this.#path = path;
 		this.#ref = outputRef;
+	}
+
+	get outputRef(): string {
+		return this.#ref;
 	}
 
 	append(chunk: ProcessOutputChunk): void {
@@ -69,23 +74,31 @@ export class ToolOutputCapture {
 			});
 	}
 
-	async finish(): Promise<StoredToolOutput | undefined> {
+	async flush(): Promise<boolean> {
 		await this.#queue;
-		try {
-			await this.#file.close();
-		} catch (error) {
-			this.#failure ??= error;
-		}
-		if (this.#failure !== undefined) {
-			await this.#fileSystem.removeFile(this.#path).catch(() => undefined);
-			return undefined;
-		}
-		return {
-			outputRef: this.#ref,
-			overflowPath: this.#path,
-			storedBytes: this.#storedBytes,
-			storedTruncated: this.#storedTruncated,
-		};
+		return this.#failure === undefined;
+	}
+
+	finish(): Promise<StoredToolOutput | undefined> {
+		this.#finished ??= (async () => {
+			await this.#queue;
+			try {
+				await this.#file.close();
+			} catch (error) {
+				this.#failure ??= error;
+			}
+			if (this.#failure !== undefined) {
+				await this.#fileSystem.removeFile(this.#path).catch(() => undefined);
+				return undefined;
+			}
+			return {
+				outputRef: this.#ref,
+				overflowPath: this.#path,
+				storedBytes: this.#storedBytes,
+				storedTruncated: this.#storedTruncated,
+			};
+		})();
+		return this.#finished;
 	}
 }
 

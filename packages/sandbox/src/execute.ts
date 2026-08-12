@@ -34,9 +34,20 @@ export interface SandboxExecuteRequest {
 	readonly maxOutputBytes?: number;
 }
 
+export type SandboxStartRequest = Omit<SandboxExecuteRequest, "stdin">;
+
 export interface SandboxExecuteCallbacks {
 	readonly onOutput?: (chunk: SandboxOutputChunk) => void;
 	readonly onViolation?: (violation: SandboxViolation) => void;
+}
+
+/** A process-local handle that never exposes the child PID as authority. */
+export interface SandboxProcess {
+	readonly backend: SandboxBackend;
+	readonly completion: Promise<SandboxExecutionResult>;
+	write(input: string | Uint8Array): Promise<void>;
+	closeStdin(input?: string | Uint8Array): Promise<void>;
+	stop(): Promise<SandboxExecutionResult>;
 }
 
 interface SandboxExecutionBase {
@@ -282,6 +293,12 @@ function preLaunchCancellation(): SandboxCancelledResult {
 	};
 }
 
+function preLaunchAbortError(): Error {
+	const error = new Error("Sandbox process launch was aborted");
+	error.name = "AbortError";
+	return error;
+}
+
 async function materializeProtectedMetadataTargets(
 	policy: Readonly<CompiledSandboxPolicy>,
 ): Promise<Readonly<CompiledSandboxPolicy>> {
@@ -411,12 +428,11 @@ function classifyViolation(
 	return undefined;
 }
 
-export async function execute(
-	request: SandboxExecuteRequest,
-	callbacks: SandboxExecuteCallbacks = {},
-): Promise<SandboxExecutionResult> {
-	await validateRequest(request);
-	if (request.signal?.aborted) return preLaunchCancellation();
+async function startValidatedProcess(
+	request: SandboxStartRequest,
+	callbacks: SandboxExecuteCallbacks,
+): Promise<SandboxProcess> {
+	if (request.signal?.aborted) throw preLaunchAbortError();
 	const policy = await materializeProtectedMetadataTargets(request.policy);
 	if (request.managedNetwork && policy.networkAccess !== "restricted") {
 		throw new SandboxExecutionError(
@@ -504,69 +520,68 @@ export async function execute(
 		throw new SandboxExecutionError("backend_unavailable", "Sandbox preparation failed closed", error);
 	}
 	if (request.signal?.aborted) {
-		const cancelledResult = preLaunchCancellation();
 		await platformCleanup?.();
 		await managedProxy?.close();
-		return cancelledResult;
+		throw preLaunchAbortError();
 	}
 
 	const startedAt = Date.now();
-	const execution = new Promise<SandboxExecutionResult>((resolve, reject) => {
-		const [executable, ...args] = command;
-		const child = spawn(executable, args, {
-			cwd: request.cwd,
-			env: { ...request.environment, ...managedProxy?.environment },
-			stdio: ["pipe", "pipe", "pipe"],
-			detached: true,
-			shell: false,
-		});
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-		const output = new OutputCollector(request.maxOutputBytes ?? 4 * 1024 * 1024);
-		let timedOut = false;
-		let cancelled = false;
-		let settled = false;
-		let killTimer: NodeJS.Timeout | undefined;
+	const [executable, ...args] = command;
+	const child = spawn(executable, args, {
+		cwd: request.cwd,
+		env: { ...request.environment, ...managedProxy?.environment },
+		stdio: ["pipe", "pipe", "pipe"],
+		detached: true,
+		shell: false,
+	});
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	const output = new OutputCollector(request.maxOutputBytes ?? 4 * 1024 * 1024);
+	let timedOut = false;
+	let cancelled = false;
+	let settled = false;
+	let stdinClosed = false;
+	let killTimer: NodeJS.Timeout | undefined;
 
-		const terminate = (): void => {
-			signalProcessTree(child.pid, "SIGTERM");
-			killTimer ??= setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), CANCELLATION_TERMINATION_GRACE_MS);
-			killTimer.unref();
-		};
-		child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-			if (error.code === "EPIPE") return;
+	const terminate = (): void => {
+		signalProcessTree(child.pid, "SIGTERM");
+		killTimer ??= setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), CANCELLATION_TERMINATION_GRACE_MS);
+		killTimer.unref();
+	};
+	child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+		if (error.code === "EPIPE") return;
+		observerFailure ??= error;
+		terminate();
+	});
+	const receive = (channel: SandboxOutputChunk["channel"], text: string): void => {
+		output.add(channel, text);
+		try {
+			callbacks.onOutput?.(Object.freeze({ channel, text }));
+		} catch (error) {
 			observerFailure ??= error;
 			terminate();
-		});
-		child.stdin.end(request.stdin);
-		const receive = (channel: SandboxOutputChunk["channel"], text: string): void => {
-			output.add(channel, text);
-			try {
-				callbacks.onOutput?.(Object.freeze({ channel, text }));
-			} catch (error) {
-				observerFailure ??= error;
-				terminate();
-			}
-		};
-		child.stdout.on("data", (text: string) => receive("stdout", text));
-		child.stderr.on("data", (text: string) => receive("stderr", text));
+		}
+	};
+	child.stdout.on("data", (text: string) => receive("stdout", text));
+	child.stderr.on("data", (text: string) => receive("stderr", text));
 
-		const onAbort = (): void => {
-			cancelled = true;
-			terminate();
-		};
-		request.signal?.addEventListener("abort", onAbort, { once: true });
-		const timeout = setTimeout(() => {
-			timedOut = true;
-			signalProcessTree(child.pid, "SIGKILL");
-		}, request.timeoutMs);
-		timeout.unref();
+	const onAbort = (): void => {
+		cancelled = true;
+		terminate();
+	};
+	request.signal?.addEventListener("abort", onAbort, { once: true });
+	const timeout = setTimeout(() => {
+		timedOut = true;
+		signalProcessTree(child.pid, "SIGKILL");
+	}, request.timeoutMs);
+	timeout.unref();
 
-		const cleanup = (): void => {
-			clearTimeout(timeout);
-			if (killTimer) clearTimeout(killTimer);
-			request.signal?.removeEventListener("abort", onAbort);
-		};
+	const cleanup = (): void => {
+		clearTimeout(timeout);
+		if (killTimer) clearTimeout(killTimer);
+		request.signal?.removeEventListener("abort", onAbort);
+	};
+	const rawCompletion = new Promise<SandboxExecutionResult>((resolve, reject) => {
 		child.once("error", (error) => {
 			if (settled) return;
 			settled = true;
@@ -578,7 +593,7 @@ export async function execute(
 			settled = true;
 			cleanup();
 			// A shell can exit while TERM-ignoring descendants remain in its process group.
-			// Always hard-kill any survivors before reporting the one-shot execution complete.
+			// Always hard-kill any survivors before reporting execution complete.
 			signalProcessTree(child.pid, "SIGKILL");
 			if (observerFailure !== undefined) {
 				reject(new SandboxExecutionError("observer_failed", "Sandbox output observer failed", observerFailure));
@@ -628,8 +643,89 @@ export async function execute(
 			resolve({ status: "exited", ...common });
 		});
 	});
-	return execution.finally(async () => {
+	const completion = rawCompletion.finally(async () => {
 		await platformCleanup?.();
 		await managedProxy?.close();
 	});
+	void completion.catch(() => undefined);
+
+	const spawned = new Promise<void>((resolve, reject) => {
+		child.once("spawn", resolve);
+		child.once("error", (error) =>
+			reject(new SandboxExecutionError("launch_failed", `Failed to launch ${executable}`, error)),
+		);
+	});
+	try {
+		await spawned;
+	} catch (error) {
+		await completion.catch(() => undefined);
+		throw error;
+	}
+
+	const write = (input: string | Uint8Array): Promise<void> => {
+		if (stdinClosed || settled || !child.stdin.writable) return Promise.reject(new Error("Process stdin is closed"));
+		return new Promise<void>((resolve, reject) => {
+			child.stdin.write(input, (error) => {
+				if (error) reject(error);
+				else resolve();
+			});
+		});
+	};
+	const closeStdin = (input?: string | Uint8Array): Promise<void> => {
+		if (stdinClosed || settled || !child.stdin.writable) return Promise.resolve();
+		stdinClosed = true;
+		return new Promise<void>((resolve, reject) => {
+			const onError = (error: Error) => {
+				child.stdin.off("error", onError);
+				reject(error);
+			};
+			child.stdin.once("error", onError);
+			child.stdin.end(input, () => {
+				child.stdin.off("error", onError);
+				resolve();
+			});
+		});
+	};
+	return Object.freeze({
+		backend,
+		completion,
+		write,
+		closeStdin,
+		stop: () => {
+			if (!settled) {
+				cancelled = true;
+				terminate();
+			}
+			return completion;
+		},
+	});
+}
+
+export async function startProcess(
+	request: SandboxStartRequest,
+	callbacks: SandboxExecuteCallbacks = {},
+): Promise<SandboxProcess> {
+	await validateRequest(request);
+	return startValidatedProcess(request, callbacks);
+}
+
+export async function execute(
+	request: SandboxExecuteRequest,
+	callbacks: SandboxExecuteCallbacks = {},
+): Promise<SandboxExecutionResult> {
+	await validateRequest(request);
+	if (request.signal?.aborted) return preLaunchCancellation();
+	let processHandle: SandboxProcess;
+	try {
+		processHandle = await startValidatedProcess(request, callbacks);
+	} catch (error) {
+		if (error instanceof Error && error.name === "AbortError") return preLaunchCancellation();
+		throw error;
+	}
+	try {
+		await processHandle.closeStdin(request.stdin);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPIPE") throw error;
+	}
+	return processHandle.completion;
 }

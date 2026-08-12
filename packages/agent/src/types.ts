@@ -24,7 +24,7 @@ export type MessageId = OpaqueId<"MessageId">;
 export type ToolInvocationId = OpaqueId<"ToolInvocationId">;
 export type QueueItemId = OpaqueId<"QueueItemId">;
 
-export type IdKind = "run" | "turn" | "attempt" | "message" | "tool_invocation" | "queue_item";
+export type IdKind = "run" | "turn" | "attempt" | "message" | "tool_invocation" | "queue_item" | "process_session";
 
 export interface IdGenerator {
 	generate(kind: IdKind): string;
