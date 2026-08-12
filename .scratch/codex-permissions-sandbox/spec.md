@@ -50,7 +50,7 @@ Interactive Full Access selection first chooses the profile and then shows one w
 
 ## Approval Policies and decisions
 
-Coda supports Unless Trusted, On Request, Granular, and Never with Codex-equivalent command routing. Granular retains Codex's fields for Sandbox approval, Command Rule prompts, Skill approval, standalone permission requests, and MCP elicitations. Managed-network host review remains available for every policy except Never. Skill and MCP have generic protocol types but no product implementations in this milestone, and inline model elevation remains an On Request flow.
+Coda supports Unless Trusted, On Request, Granular, and Never with Codex-equivalent command routing. Granular retains Codex's fields for Sandbox approval, Command Rule prompts, Skill approval, standalone permission requests, and MCP elicitations. Managed-network host review remains available for every policy except Never. Agent Skills and the MCP Host use these application-owned approval seams without turning instruction or Server trust into execution authority, and inline model elevation remains an On Request flow.
 
 An Approval Request may be approved once, approved for the process-local Session cache, persisted as a Command Rule, persisted as a Network Rule, denied while allowing the model to continue, or denied while aborting the current Run. Approval timeout is a reserved typed outcome. Persistence failure warns but does not revoke the current approval.
 
@@ -68,7 +68,7 @@ Print mode uses the same Policy Gate and Sandbox with a rejecting approval adapt
 
 ## Execution provenance
 
-- model shell, model-triggered search executables, and every future model process use the Sandbox execution capability;
+- model shell, Session-owned background processes, model-triggered search executables, and file-mutation workers use the Sandbox execution capability;
 - built-in read, grep, find, and ls Tools evaluate canonical paths through the same Read Access Policy compiled for model-started Sandbox processes, including every traversed child;
 - explicit interactive User Shell remains unsandboxed and is reachable only through a distinct host execution capability that no model Tool receives;
 - the fixed macOS Keychain helper and explicit user image viewer remain trusted host paths.
@@ -77,7 +77,7 @@ Print mode uses the same Policy Gate and Sandbox with a rejecting approval adapt
 
 macOS uses fixed `/usr/bin/sandbox-exec` and generated Seatbelt policy. Linux uses bubblewrap with user, mount, PID, and appropriate network namespaces, `no_new_privs`, seccomp, and the managed proxy route. Coda prefers a capable system bubblewrap and otherwise uses a bundled, checksum-validated build with its license and provenance retained.
 
-The supported matrix is macOS arm64/x64 and Linux arm64/x64. WSL2 is Linux; WSL1 and native Windows are unsupported. This milestone adds no PTY, background terminal, terminal recovery, or remote execution.
+The supported matrix is macOS arm64/x64 and Linux arm64/x64. WSL2 is Linux; WSL1 and native Windows are unsupported. Process Sessions are bounded and non-interactive; this milestone adds no PTY, restorable background terminal, terminal recovery, or remote execution.
 
 ## Configuration and lifecycle
 

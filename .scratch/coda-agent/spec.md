@@ -21,6 +21,7 @@ Provide Coda's headless, model-driven Agent runtime without terminal, coding-too
 - stable Message identity
 - cancellation
 - steering and follow-up queues
+- optional immutable per-Run execution budgets
 - explicit capabilities and future persistence seams
 - no reliance on in-memory object identity for restore or replay semantics
 - ownership of whole-assistant-call retry, because only the Agent can reason about transcript state, Tool idempotency, and cancellation
@@ -53,6 +54,13 @@ run_start
 - Listener dispatch and state cleanup are protected by `finally`; even a `run_end` listener failure leaves the Agent idle and rejects `prompt()` with `AgentError("listener_failed")`.
 - `run_end` means the Run will emit no further events.
 - `prompt()` and `waitForIdle()` resolve only after `run_end` listeners finish and Agent state becomes idle.
+
+## Run budgets
+
+- A caller may inject one immutable `RunBudget`; the package default remains unbounded.
+- Positive limits independently bound Turns, Model Attempts, Tool Invocations, elapsed wall time, total tokens, optional recorded USD cost, and consecutive equivalent Tool batches.
+- Accounting includes discarded retry Attempts. A Tool batch that would exceed its Invocation or repetition limit is rejected in full before policy checks or side effects begin.
+- Exhaustion emits `run_budget_exhausted`, settles the current Turn and Run as a budget failure, clears unconsumed Steering, pauses later Follow-ups, and leaves every later Follow-up with fresh accounting.
 
 ## Tool scheduling
 
@@ -158,7 +166,7 @@ The first-milestone design frontier is closed and implemented in `packages/agent
 
 - `@coda/agent` is a private, ESM-only workspace package whose only Coda dependency is `@coda/ai`.
 - The root runtime surface is limited to `Agent` and `AgentError`; all identities, events, Tool capabilities, retry seams, Seed types, and state snapshots are type exports.
-- The runtime implements in-memory Runs and Turns, immutable streaming events, stable identities, cancellation, ordered listener dispatch, Tool preflight/execution, Steering, Follow-up, validated idle Seeds, and opt-in transient whole-turn retry.
+- The runtime implements in-memory Runs and Turns, immutable streaming events, stable identities, cancellation, ordered listener dispatch, Tool preflight/execution, Steering, Follow-up, validated idle Seeds, opt-in transient whole-turn retry, and opt-in bounded Run execution.
 - Tool execution is sequential unless consecutive Tools explicitly declare `parallelSafe`. Completion events retain completion order while the reducer commits Tool Results in model-source order.
 - Listener failures prevent later model or Tool effects, cancel and await already-running parallel Tools, complete Tool Result relationships best-effort, emit final lifecycle events, restore idle state, and reject through `AgentError("listener_failed")`.
 - The package does not expose reducer/dispatch internals and does not implement sessions, durable operations, compaction, filesystem, shell, coding Tools, terminal behavior, credentials, settings, or Model selection.

@@ -23,11 +23,14 @@ Resolved on 2026-08-12. Auto-Compaction and the single safe Provider-overflow
 retry remain first. When they cannot recover, interactive mode now offers only
 cancel or a fresh empty Session in the same Workspace, closes the old Session
 only after replacement construction succeeds, and carries no summary, Messages,
-attachments, approvals, or queued input into the replacement. Print mode still
-exits `1` without starting a terminal prompt.
+attachments, approvals, queued input, Run evidence, Compaction Checkpoint, Tool
+state, or background process into the replacement. The old Session's owned
+processes settle and write their audit facts before its journal closes. Print
+mode still exits `1` without starting a terminal prompt.
 
 Verified with VirtualTerminal and FileSessionManager integration coverage for
 local overflow, Provider overflow, cancel, replacement, and replacement failure;
-the old journal is compared byte-for-byte across cancellation and replacement.
+the old journal is compared byte-for-byte across cancellation and replacement,
+and a live background-process fixture verifies Session-scoped retirement.
 The complete `@coda/coding-agent` test suite and repository-wide `npm run check`
 both pass.

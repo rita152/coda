@@ -20,6 +20,10 @@ _Avoid_: Coding Agent, TUI, session store
 One settled Agent operation beginning with accepted input and ending only after its final event observers complete.
 _Avoid_: Session, process
 
+**Run Budget**:
+An immutable per-Run set of execution limits whose accounting includes every Attempt and Tool Invocation, including discarded retries.
+_Avoid_: timeout, quota, Session limit
+
 **Turn**:
 One assistant response together with the complete batch of Tool Invocations requested by that response.
 _Avoid_: Run, Message
@@ -63,6 +67,10 @@ _Avoid_: Agent queue, Chat component, Session reducer
 **User Shell**:
 An explicit `!command` submitted by the user for local host execution outside model Context, Tool policy, Prompt History, and Session persistence.
 _Avoid_: bash Tool, Tool Invocation, Prompt
+
+**Process Session**:
+A bounded, non-interactive background process owned by its creating Session and addressed through opaque process-local identity while that Session remains open.
+_Avoid_: User Shell, terminal Session, restorable job
 
 **Tool Invocation**:
 One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
@@ -115,6 +123,10 @@ _Avoid_: Session log, Agent event
 **Session Record**:
 An immutable semantic fact appended to a Session's linear history and linked to the immediately preceding Record.
 _Avoid_: Agent event, JSON line
+
+**Run Evidence**:
+A bounded, sanitized projection of one settled Run's lifecycle and authoritative Tool Observations, suitable for presentation and evaluation without treating assistant claims as proof.
+_Avoid_: transcript summary, log, benchmark score
 
 **Interrupted Tool Invocation**:
 A journaled Tool Invocation whose execution began but whose outcome was not durably recorded, leaving its external side effects unknown.
@@ -225,6 +237,10 @@ _Avoid_: script execution, Skill Catalog, permission grant
 The versioned Coding Agent component that deterministically assembles one Run's system prompt from application policy, runtime capabilities, Workspace facts, and trusted project instructions.
 _Avoid_: Provider prompt, Agent global prompt
 
+**Capability Manifest**:
+The generated, versioned inventory that combines hand-reviewed product capability classifications with executable runtime facts and verification sources.
+_Avoid_: roadmap, package export list, hand-written status page
+
 **Policy Decision**:
 An explicit outcome that allows, rejects, or aborts model-requested work, optionally remembering or persisting the precisely displayed authority.
 _Avoid_: trust, Permission Profile, Sandbox
@@ -270,6 +286,10 @@ _Avoid_: model list, catalog
 **Model Catalog**:
 The collection of serializable Model descriptions offered by a Provider at a recorded point in time.
 _Avoid_: Models, runtime registry
+
+**Model Metadata**:
+A source-labelled Model fact such as context limit, output limit, input modality, reasoning support, status, or tiered price, resolved field by field without fabricating Provider claims.
+_Avoid_: runtime default, Provider response, settings blob
 
 **Api Adapter**:
 The runtime implementation that translates a provider-neutral invocation to one Api and normalizes its response into an Event Stream.
