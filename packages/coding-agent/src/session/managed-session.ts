@@ -1,7 +1,8 @@
-import type { Agent, AgentEvent } from "@coda/agent";
+import type { Agent, AgentEvent, AgentMessage } from "@coda/agent";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
+import { SessionHistoryReader } from "./session-history-reader.ts";
 import type {
 	DetachSession,
 	RestoredSessionState,
@@ -37,6 +38,8 @@ export class ManagedSession implements Session {
 	readonly #recoverableFollowUps;
 	readonly #composerSubmissions;
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
+	readonly #historyMessages: AgentMessage[];
+	readonly #history: SessionHistoryReader;
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#compactionCheckpoint?: CompactionCheckpoint;
 	#discardedModelCost?: number;
@@ -57,6 +60,11 @@ export class ManagedSession implements Session {
 		this.#recoverableFollowUps = structuredClone(reduced.recoverableFollowUps);
 		this.#composerSubmissions = structuredClone(reduced.composerSubmissions);
 		this.#toolInvocations = structuredClone(reduced.toolInvocations);
+		this.#historyMessages = [...structuredClone(reduced.seed.messages)];
+		this.#history = new SessionHistoryReader({
+			sessionId: journal.descriptor.id,
+			messages: () => this.#historyMessages,
+		});
 		this.#compactionCheckpoint = reduced.compactionCheckpoint
 			? structuredClone(reduced.compactionCheckpoint)
 			: undefined;
@@ -94,6 +102,10 @@ export class ManagedSession implements Session {
 
 	get toolInvocations(): readonly SessionToolLifecycle[] {
 		return structuredClone(this.#toolInvocations);
+	}
+
+	get history(): SessionHistoryReader {
+		return this.#history;
 	}
 
 	get compactionCheckpoint(): CompactionCheckpoint | undefined {
@@ -223,6 +235,10 @@ export class ManagedSession implements Session {
 			payload: structuredClone(payload),
 		};
 		await this.#journal.append(record);
+		if (type === "message_committed") {
+			const message = (payload as { readonly message?: AgentMessage }).message;
+			if (message) this.#historyMessages.push(structuredClone(message));
+		}
 		this.#previousRecordId = recordId;
 	}
 

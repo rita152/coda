@@ -18,6 +18,7 @@ import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
+import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
 declare const sessionIdBrand: unique symbol;
 export type SessionId = string & { readonly [sessionIdBrand]: "SessionId" };
@@ -128,6 +129,7 @@ export interface Session {
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly toolInvocations: readonly SessionToolLifecycle[];
+	readonly history: SessionHistoryReadPort;
 	readonly compactionCheckpoint?: CompactionCheckpoint;
 	/** Cost of discarded Model attempts, omitted when historical pricing was not recorded. */
 	readonly discardedModelCost?: number;

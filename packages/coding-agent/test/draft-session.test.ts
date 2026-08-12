@@ -1,6 +1,7 @@
-import type { AgentSeed } from "@coda/agent";
+import type { AgentSeed, MessageId } from "@coda/agent";
 import { describe, expect, it, vi } from "vitest";
 import { DraftSession } from "../src/session/draft-session.ts";
+import { SessionHistoryReader } from "../src/session/session-history-reader.ts";
 import type { Session, SessionDescriptor, SessionId } from "../src/session/types.ts";
 
 describe("DraftSession", () => {
@@ -58,6 +59,27 @@ describe("DraftSession", () => {
 		await draft.close();
 		expect(target.close).toHaveBeenCalledOnce();
 	});
+
+	it("keeps a captured history reader bound across materialization", async () => {
+		const seed: AgentSeed = {
+			version: 1,
+			messages: [
+				{
+					id: "message:restored" as MessageId,
+					message: { role: "user", content: "restored constraint", timestamp: 1 },
+				},
+			],
+			pendingFollowUps: [],
+		};
+		const target = fauxSession(descriptor(), seed);
+		const draft = new DraftSession({ descriptor: descriptor(), materialize: async () => target });
+		const history = draft.history;
+
+		expect(history.read().messages).toEqual([]);
+		await draft.record({ type: "permission_selected", profile: "read-only" });
+		expect(history.read().messages).toMatchObject([{ id: "message:restored", role: "user" }]);
+		await draft.close();
+	});
 });
 
 function descriptor(): SessionDescriptor {
@@ -69,8 +91,10 @@ function descriptor(): SessionDescriptor {
 	};
 }
 
-function fauxSession(sessionDescriptor: SessionDescriptor): Session {
-	const seed: AgentSeed = { version: 1, messages: [], pendingFollowUps: [] };
+function fauxSession(
+	sessionDescriptor: SessionDescriptor,
+	seed: AgentSeed = { version: 1, messages: [], pendingFollowUps: [] },
+): Session {
 	return {
 		descriptor: sessionDescriptor,
 		seed,
@@ -78,6 +102,7 @@ function fauxSession(sessionDescriptor: SessionDescriptor): Session {
 		recoverableFollowUps: [],
 		composerSubmissions: [],
 		toolInvocations: [],
+		history: new SessionHistoryReader({ sessionId: sessionDescriptor.id, messages: () => seed.messages }),
 		mediaReferences: new Map(),
 		registerMedia: vi.fn(),
 		attach: vi.fn(() => () => undefined),

@@ -1,4 +1,5 @@
 import type { Agent, AgentSeed } from "@coda/agent";
+import { SessionHistoryReader, type SessionHistoryReadPort } from "./session-history-reader.ts";
 import type { DetachSession, Session, SessionChange, SessionDescriptor, SessionMediaRegistration } from "./types.ts";
 
 export interface DraftSessionOptions {
@@ -24,10 +25,19 @@ export class DraftSession implements Session {
 	#registrations: SessionMediaRegistration[] = [];
 	#initialChanges: SessionChange[] = [];
 	#closed = false;
+	readonly #emptyHistory: SessionHistoryReader;
+	readonly #history: SessionHistoryReadPort;
 
 	constructor(options: DraftSessionOptions) {
 		this.#draftDescriptor = structuredClone(options.descriptor);
 		this.#factory = options.materialize;
+		this.#emptyHistory = new SessionHistoryReader({
+			sessionId: options.descriptor.id,
+			messages: () => [],
+		});
+		this.#history = {
+			read: (request) => (this.#session?.history ?? this.#emptyHistory).read(request),
+		};
 	}
 
 	get materialized(): boolean {
@@ -56,6 +66,10 @@ export class DraftSession implements Session {
 
 	get toolInvocations() {
 		return structuredClone(this.#session?.toolInvocations ?? []);
+	}
+
+	get history(): SessionHistoryReadPort {
+		return this.#history;
 	}
 
 	get compactionCheckpoint() {
