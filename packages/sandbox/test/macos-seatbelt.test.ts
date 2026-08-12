@@ -71,4 +71,18 @@ describe("macOS Seatbelt policy", () => {
 			'(require-all (require-any (literal (param "APPROVED_READ_ROOT_0")) (subpath (param "APPROVED_READ_ROOT_0"))) (require-not (literal (param "DENIED_ROOT_0"))) (require-not (subpath (param "DENIED_ROOT_0"))))',
 		);
 	});
+
+	it("grants only metadata reads on canonical ancestors of admitted roots", () => {
+		const policy = compileSandboxPolicy({
+			profile: "read-only",
+			workspaceRoots: ["/Users/user/project"],
+			temporaryDirectory: "/private/tmp",
+		});
+		const generated = buildMacosSeatbeltPolicy(policy, { readAncestorPathCount: 2 });
+
+		expect(generated).toContain("(allow file-read-metadata");
+		expect(generated).toContain('literal (param "READ_ANCESTOR_0")');
+		expect(generated).toContain('literal (param "READ_ANCESTOR_1")');
+		expect(generated).not.toContain('(allow file-read* (literal (param "READ_ANCESTOR_0")))');
+	});
 });

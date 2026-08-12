@@ -12,6 +12,50 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== "darwin")("macOS Sandbox", () => {
+	it("admits the standard macOS shell selector as runtime support", async () => {
+		const { canonicalTmp, canonicalWorkspace } = await fixtureWorkspace();
+		const result = await execute({
+			command: ["/bin/sh", "-c", "printf ready"],
+			cwd: canonicalWorkspace,
+			environment: { PATH: "/usr/bin:/bin" },
+			policy: compileSandboxPolicy({
+				profile: "read-only",
+				workspaceRoots: [canonicalWorkspace],
+				temporaryDirectory: canonicalTmp,
+			}),
+			timeoutMs: 5_000,
+		});
+
+		expect(result).toMatchObject({ status: "exited", exitCode: 0, stdout: "ready", stderr: "" });
+	});
+
+	it("allows canonical root resolution through metadata-only ancestor access", async () => {
+		const { canonicalTmp, canonicalWorkspace } = await fixtureWorkspace();
+		const result = await execute({
+			command: [
+				process.execPath,
+				"--input-type=module",
+				"--eval",
+				"import { realpath } from 'node:fs/promises'; process.stdout.write(await realpath(process.cwd()))",
+			],
+			cwd: canonicalWorkspace,
+			environment: {},
+			policy: compileSandboxPolicy({
+				profile: "read-only",
+				workspaceRoots: [canonicalWorkspace],
+				temporaryDirectory: canonicalTmp,
+			}),
+			timeoutMs: 5_000,
+		});
+
+		expect(result).toMatchObject({
+			status: "exited",
+			exitCode: 0,
+			stdout: canonicalWorkspace,
+			stderr: "",
+		});
+	});
+
 	it("enforces a denied read root without leaking its contents", async () => {
 		const fixture = await mkdtemp(join(tmpdir(), "coda-sandbox-deny-read-"));
 		artifacts.push(fixture);

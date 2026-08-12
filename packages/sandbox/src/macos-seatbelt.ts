@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { isAbsolute, relative, sep } from "node:path";
+import { dirname, isAbsolute, relative, sep } from "node:path";
 import type { CompiledSandboxPolicy } from "./policy.ts";
 
 export const MACOS_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
@@ -26,6 +26,33 @@ function roots(prefix: string, count: number): string {
 		qualifiers.push(`(subpath (param "${prefix}_${index}"))`);
 	}
 	return `(require-any ${qualifiers.join(" ")})`;
+}
+
+function literalRoots(prefix: string, count: number): string {
+	return `(require-any ${Array.from({ length: count }, (_, index) => `(literal (param "${prefix}_${index}"))`).join(" ")})`;
+}
+
+function readAncestorPaths(
+	policy: Readonly<CompiledSandboxPolicy>,
+	runtimeReadPaths: readonly string[],
+): readonly string[] {
+	const roots = [
+		...policy.readableRoots,
+		...policy.approvedReadRoots,
+		...(policy.writableRoots === "full-disk" ? [] : policy.writableRoots),
+		...runtimeReadPaths,
+	];
+	const ancestors = new Set<string>();
+	for (const root of roots) {
+		let ancestor = dirname(root);
+		while (ancestor !== "/") {
+			ancestors.add(ancestor);
+			const parent = dirname(ancestor);
+			if (parent === ancestor) break;
+			ancestor = parent;
+		}
+	}
+	return Object.freeze([...ancestors]);
 }
 
 function isContained(root: string, target: string): boolean {
@@ -75,12 +102,13 @@ const MACOS_RUNTIME_READ_RULES = Object.freeze([
 	'(subpath "/System")',
 	'(subpath "/Library")',
 	'(subpath "/private/etc")',
+	'(subpath "/private/var/select")',
 	'(subpath "/opt")',
 ]);
 
 export function buildMacosSeatbeltPolicy(
 	policy: Readonly<CompiledSandboxPolicy>,
-	options: { readonly runtimeReadPathCount?: number } = {},
+	options: { readonly runtimeReadPathCount?: number; readonly readAncestorPathCount?: number } = {},
 ): string {
 	const sections = [
 		"(version 1)",
@@ -108,6 +136,11 @@ export function buildMacosSeatbeltPolicy(
 		}
 		if ((options.runtimeReadPathCount ?? 0) > 0) {
 			sections.push(`(allow file-read* ${roots("RUNTIME_READ_PATH", options.runtimeReadPathCount ?? 0)})`);
+		}
+		if ((options.readAncestorPathCount ?? 0) > 0) {
+			sections.push(
+				`(allow file-read-metadata ${literalRoots("READ_ANCESTOR", options.readAncestorPathCount ?? 0)})`,
+			);
 		}
 	}
 	if (policy.writableRoots === "full-disk") {
@@ -161,7 +194,11 @@ export function prepareMacosSeatbelt(
 ): PreparedSandboxCommand | undefined {
 	if (!existsSync(MACOS_SANDBOX_EXECUTABLE)) return undefined;
 	const runtimeReadPaths = options.runtimeReadPaths ?? [];
-	let policyText = buildMacosSeatbeltPolicy(policy, { runtimeReadPathCount: runtimeReadPaths.length });
+	const ancestorPaths = readAncestorPaths(policy, runtimeReadPaths);
+	let policyText = buildMacosSeatbeltPolicy(policy, {
+		runtimeReadPathCount: runtimeReadPaths.length,
+		readAncestorPathCount: ancestorPaths.length,
+	});
 	for (const port of options.managedProxyPorts ?? []) {
 		policyText += `\n(allow network-outbound (remote ip "localhost:${port}"))`;
 	}
@@ -192,6 +229,10 @@ export function prepareMacosSeatbelt(
 	for (let index = 0; index < runtimeReadPaths.length; index++) {
 		const path = runtimeReadPaths[index];
 		if (path !== undefined) args.push(`-DRUNTIME_READ_PATH_${index}=${path}`);
+	}
+	for (let index = 0; index < ancestorPaths.length; index++) {
+		const path = ancestorPaths[index];
+		if (path !== undefined) args.push(`-DREAD_ANCESTOR_${index}=${path}`);
 	}
 	args.push("--", ...command);
 	return Object.freeze({ backend: "macos-seatbelt", executable: MACOS_SANDBOX_EXECUTABLE, args });
