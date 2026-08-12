@@ -16,6 +16,7 @@ import { AgentError } from "./errors.ts";
 import { isPersistenceSafeId } from "./identities.ts";
 import { cloneFrozen, deepFreeze } from "./immutable.ts";
 import { initialRuntimeState, type RuntimeState, reduceState } from "./reducer.ts";
+import { RunBudgetMeter, runBudgetFailure, snapshotRunBudget } from "./run-budget.ts";
 import { validateAgentSeed } from "./seed.ts";
 import type {
 	AgentEvent,
@@ -31,6 +32,7 @@ import type {
 	MessageDelta,
 	MessageId,
 	QueueItemId,
+	RunBudgetExhaustion,
 	RunFailure,
 	RunId,
 	RunOutcome,
@@ -54,6 +56,7 @@ interface RunContext {
 	sequence: number;
 	readonly controller: AbortController;
 	readonly listenerFailures: unknown[];
+	readonly budget?: RunBudgetMeter;
 	tools: readonly AgentTool[];
 	toolsByName: ReadonlyMap<string, AgentTool>;
 	systemPrompt?: string;
@@ -63,6 +66,12 @@ interface AttemptResult {
 	readonly attemptId: AttemptId;
 	readonly outcome: "success" | "error" | "aborted";
 	readonly message: AgentMessage<AssistantMessage>;
+	readonly budgetExhaustion?: RunBudgetExhaustion;
+}
+
+interface BudgetResult {
+	readonly outcome: "budget";
+	readonly exhaustion: RunBudgetExhaustion;
 }
 
 interface AcceptedTool {
@@ -83,6 +92,7 @@ interface ToolSettlement {
 interface ToolBatchResult {
 	readonly outcome: RunOutcome;
 	readonly fatal?: unknown;
+	readonly budgetExhaustion?: RunBudgetExhaustion;
 }
 
 function errorMessage(error: unknown): string {
@@ -247,7 +257,7 @@ export class Agent {
 			throw new AgentError("invalid_input", "systemPrompt must be a string or factory");
 		}
 		const tools = typeof options.tools === "function" ? options.tools : snapshotTools(options.tools).tools;
-		this.#options = { ...options, tools };
+		this.#options = { ...options, tools, runBudget: snapshotRunBudget(options.runBudget) };
 		const seed =
 			options.seed === undefined ? { messages: [], pendingFollowUps: [] } : validateAgentSeed(options.seed);
 		for (const message of seed.messages) this.#issuedIds.add(message.id);
@@ -475,6 +485,10 @@ export class Agent {
 			sequence: 0,
 			controller: new AbortController(),
 			listenerFailures: [],
+			budget:
+				this.#options.runBudget === undefined
+					? undefined
+					: new RunBudgetMeter(this.#options.runBudget, this.#options.clock.now()),
 			tools: [],
 			toolsByName: new Map(),
 		};
@@ -508,10 +522,22 @@ export class Agent {
 				throw new AgentError("invalid_input", "System Prompt factory must return a string");
 			}
 			run.systemPrompt = systemPrompt;
-			await this.#emit(run, { type: "run_start", source, inputMessage, queueItemId });
+			await this.#emit(run, {
+				type: "run_start",
+				source,
+				inputMessage,
+				queueItemId,
+				...(run.budget ? { budget: run.budget.budget } : {}),
+			});
 			while (true) {
 				if (run.controller.signal.aborted) {
 					outcome = "aborted";
+					break;
+				}
+				const turnBudgetExhaustion = run.budget?.beginTurn(this.#options.clock.now());
+				if (turnBudgetExhaustion) {
+					outcome = "error";
+					failure = await this.#recordBudgetExhaustion(run, turnBudgetExhaustion);
 					break;
 				}
 				activeTurnId = this.#allocate("turn") as TurnId;
@@ -526,9 +552,25 @@ export class Agent {
 				}
 
 				const attempt = await this.#streamTurn(run, activeTurnId);
+				if (attempt.outcome === "budget") {
+					outcome = "error";
+					failure = await this.#recordBudgetExhaustion(run, attempt.exhaustion);
+					await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
+					turnEnded = true;
+					break;
+				}
 				outcome = attempt.outcome;
+				if (run.controller.signal.aborted) {
+					outcome = "aborted";
+					await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
+					turnEnded = true;
+					break;
+				}
 				if (attempt.outcome !== "success") {
-					if (attempt.outcome === "error") {
+					if (attempt.budgetExhaustion) {
+						outcome = "error";
+						failure = await this.#recordBudgetExhaustion(run, attempt.budgetExhaustion);
+					} else if (attempt.outcome === "error") {
 						failure = { kind: "model", message: attempt.message.message.errorMessage ?? "Model call failed" };
 					}
 					await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });
@@ -546,7 +588,17 @@ export class Agent {
 				const toolCalls = attempt.message.message.content.filter(
 					(block): block is ToolCall => block.type === "toolCall",
 				);
-				if (toolCalls.length > 0) {
+				if (attempt.budgetExhaustion && !run.controller.signal.aborted) {
+					if (toolCalls.length > 0) {
+						await this.#rejectBudgetToolCalls(run, activeTurnId, toolCalls, attempt.budgetExhaustion);
+					}
+					if (run.controller.signal.aborted) {
+						outcome = "aborted";
+					} else {
+						outcome = "error";
+						failure = await this.#recordBudgetExhaustion(run, attempt.budgetExhaustion);
+					}
+				} else if (toolCalls.length > 0) {
 					const batch = await this.#executeToolBatch(
 						run,
 						activeTurnId,
@@ -554,11 +606,14 @@ export class Agent {
 						attempt.message.message.stopReason === "length",
 					);
 					outcome = batch.outcome;
-					if (batch.fatal !== undefined) {
+					if (batch.budgetExhaustion !== undefined) {
+						failure = await this.#recordBudgetExhaustion(run, batch.budgetExhaustion);
+					} else if (batch.fatal !== undefined) {
 						unexpected = batch.fatal;
 						failure = { kind: "tool", message: errorMessage(batch.fatal) };
 					}
 				} else {
+					run.budget?.completeWithoutToolBatch();
 					outcome = run.controller.signal.aborted ? "aborted" : "success";
 				}
 
@@ -604,6 +659,13 @@ export class Agent {
 		return deepFreeze({ runId, outcome, failure, finalMessageId });
 	}
 
+	async #recordBudgetExhaustion(run: RunContext, exhaustion: RunBudgetExhaustion): Promise<RunFailure> {
+		this.#runtimeState = reduceState(this.#runtimeState, { type: "clear_steering" });
+		await this.#emit(run, { type: "run_budget_exhausted", exhaustion });
+		this.#runtimeState = reduceState(this.#runtimeState, { type: "clear_steering" });
+		return runBudgetFailure(exhaustion);
+	}
+
 	#consumeSteering(): AgentMessage<UserMessage>[] {
 		const queued = [...this.#runtimeState.public.pendingSteering];
 		const messages = queued.map((item) => this.#createUserMessage(item.content as AgentInput));
@@ -614,11 +676,14 @@ export class Agent {
 		return messages;
 	}
 
-	async #streamTurn(run: RunContext, turnId: TurnId): Promise<AttemptResult> {
+	async #streamTurn(run: RunContext, turnId: TurnId): Promise<AttemptResult | BudgetResult> {
 		let attempt = 1;
 		let recoveryUsed = false;
 		while (true) {
+			const attemptBudgetExhaustion = run.budget?.beginModelAttempt(this.#options.clock.now());
+			if (attemptBudgetExhaustion) return { outcome: "budget", exhaustion: attemptBudgetExhaustion };
 			const result = await this.#streamAttempt(run, turnId, attempt);
+			if (result.budgetExhaustion) return result;
 			if (result.outcome !== "error") return result;
 			const transient = isTransientAssistantFailure(result.message);
 			if (!recoveryUsed && this.#options.recoverFailedAttempt) {
@@ -638,6 +703,8 @@ export class Agent {
 						throw new Error("FailedAttemptRecovery returned an empty retry reason");
 					}
 					if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+					const exhaustion = run.budget?.checkModelAttempt(this.#options.clock.now());
+					if (exhaustion) return { outcome: "budget", exhaustion };
 					await this.#emit(run, {
 						type: "retry_scheduled",
 						turnId,
@@ -666,6 +733,8 @@ export class Agent {
 				throw new Error("TurnRetryPolicy returned an invalid retry schedule");
 			}
 			if (run.controller.signal.aborted) return { ...result, outcome: "aborted" };
+			const exhaustion = run.budget?.checkModelAttempt(this.#options.clock.now());
+			if (exhaustion) return { outcome: "budget", exhaustion };
 			await this.#emit(run, {
 				type: "retry_scheduled",
 				turnId,
@@ -738,10 +807,37 @@ export class Agent {
 			discarded: outcome !== "success",
 			candidate: message,
 		});
-		return { attemptId, outcome, message };
+		const budgetExhaustion = run.budget?.completeModelAttempt(message.message.usage, this.#options.clock.now());
+		return {
+			attemptId,
+			outcome,
+			message,
+			...(budgetExhaustion && outcome !== "aborted" && !run.controller.signal.aborted ? { budgetExhaustion } : {}),
+		};
 	}
 
 	async #executeToolBatch(
+		run: RunContext,
+		turnId: TurnId,
+		toolCalls: readonly ToolCall[],
+		truncated: boolean,
+	): Promise<ToolBatchResult> {
+		if (!run.controller.signal.aborted) {
+			const exhaustion = run.budget?.beginToolBatch(toolCalls, this.#options.clock.now());
+			if (exhaustion) {
+				await this.#rejectBudgetToolCalls(run, turnId, toolCalls, exhaustion);
+				return run.controller.signal.aborted
+					? { outcome: "aborted" }
+					: { outcome: "error", budgetExhaustion: exhaustion };
+			}
+		}
+		const result = await this.#executeToolBatchWithinBudget(run, turnId, toolCalls, truncated);
+		if (result.outcome !== "success" || run.controller.signal.aborted) return result;
+		const exhaustion = run.budget?.completeToolBatch(this.#options.clock.now());
+		return exhaustion ? { outcome: "error", budgetExhaustion: exhaustion } : result;
+	}
+
+	async #executeToolBatchWithinBudget(
 		run: RunContext,
 		turnId: TurnId,
 		toolCalls: readonly ToolCall[],
@@ -794,6 +890,34 @@ export class Agent {
 			}
 		}
 		return { outcome: run.controller.signal.aborted ? "aborted" : "success" };
+	}
+
+	async #rejectBudgetToolCalls(
+		run: RunContext,
+		turnId: TurnId,
+		toolCalls: readonly ToolCall[],
+		exhaustion: RunBudgetExhaustion,
+	): Promise<void> {
+		for (let sourceIndex = 0; sourceIndex < toolCalls.length; sourceIndex++) {
+			const call = toolCalls[sourceIndex]!;
+			const invocation = this.#invocation(
+				call,
+				sourceIndex,
+				this.#allocate("tool_invocation") as ToolInvocationId,
+				this.#allocate("message") as MessageId,
+				run.toolsByName.get(call.name),
+			);
+			await this.#rejectDuringPreflight(
+				run,
+				turnId,
+				invocation,
+				"budget",
+				`Tool "${call.name}" was not started because ${runBudgetFailure(exhaustion).message}`,
+				[],
+				toolCalls,
+				sourceIndex + 1,
+			);
+		}
 	}
 
 	async #rejectTruncatedToolCalls(run: RunContext, turnId: TurnId, toolCalls: readonly ToolCall[]): Promise<void> {

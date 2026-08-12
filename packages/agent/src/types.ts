@@ -72,15 +72,53 @@ export interface AgentSeed {
 export type RunSource = "prompt" | "follow_up";
 export type RunOutcome = "success" | "error" | "aborted";
 
-export interface RunFailure {
-	readonly kind: "model" | "tool" | "runtime" | "listener";
-	readonly message: string;
+export interface RunLimits {
+	readonly maxTurns?: number;
+	readonly maxModelAttempts?: number;
+	readonly maxToolInvocations?: number;
+	readonly maxElapsedMs?: number;
+	readonly maxTotalTokens?: number;
+	readonly maxTotalCostUsd?: number;
+	readonly maxConsecutiveEquivalentToolBatches?: number;
 }
+
+/** Immutable limits frozen for one Run. Accounting starts fresh for every Run. */
+export interface RunBudget {
+	readonly limits: RunLimits;
+}
+
+export type RunLimitKind =
+	| "turns"
+	| "model_attempts"
+	| "tool_invocations"
+	| "elapsed_ms"
+	| "total_tokens"
+	| "total_cost_usd"
+	| "consecutive_equivalent_tool_batches";
+
+export interface RunBudgetExhaustion {
+	readonly limit: RunLimitKind;
+	readonly maximum: number;
+	readonly observed: number;
+}
+
+export type RunFailure =
+	| {
+			readonly kind: "model" | "tool" | "runtime" | "listener";
+			readonly message: string;
+	  }
+	| {
+			readonly kind: "budget";
+			readonly message: string;
+			readonly exhaustion: RunBudgetExhaustion;
+	  };
 
 export interface ActiveRun {
 	readonly id: RunId;
 	readonly source: RunSource;
 	readonly queueItemId?: QueueItemId;
+	readonly budget?: RunBudget;
+	readonly budgetExhaustion?: RunBudgetExhaustion;
 }
 
 export interface RunSummary {
@@ -176,7 +214,7 @@ export interface ToolInvocation {
 	readonly replaySafety?: ToolReplaySafety;
 }
 
-export type ToolRejectionReason = "missing" | "invalid" | "policy" | "aborted" | "not_started";
+export type ToolRejectionReason = "missing" | "invalid" | "policy" | "aborted" | "not_started" | "budget";
 /** Compatibility event projection derived from the Tool Observation status. */
 export type ToolExecutionOutcome = "success" | "error" | "aborted";
 export type ToolExecutionSettlement = "returned" | "threw" | "aborted";
@@ -201,6 +239,7 @@ interface RunStartPayload {
 	readonly source: RunSource;
 	readonly queueItemId?: QueueItemId;
 	readonly inputMessage: AgentMessage<UserMessage>;
+	readonly budget?: RunBudget;
 }
 
 interface TurnStartPayload {
@@ -296,6 +335,11 @@ interface TurnEndPayload {
 	readonly outcome: RunOutcome;
 }
 
+interface RunBudgetExhaustedPayload {
+	readonly type: "run_budget_exhausted";
+	readonly exhaustion: RunBudgetExhaustion;
+}
+
 interface RunEndPayload {
 	readonly type: "run_end";
 	readonly outcome: RunOutcome;
@@ -316,6 +360,7 @@ export type AgentEventPayload =
 	| ToolExecutionProgressPayload
 	| ToolExecutionEndPayload
 	| TurnEndPayload
+	| RunBudgetExhaustedPayload
 	| RunEndPayload;
 
 export type AgentEvent = Immutable<
@@ -388,6 +433,7 @@ export interface AgentOptions {
 	readonly beforeRun?: BeforeRun;
 	readonly retry?: RetryOptions;
 	readonly recoverFailedAttempt?: FailedAttemptRecovery;
+	readonly runBudget?: RunBudget;
 	readonly seed?: AgentSeed;
 	/** Disable automatic Follow-up draining so an application scheduler can interleave other local operations. */
 	readonly autoDrainFollowUps?: boolean;

@@ -27,4 +27,31 @@ describe("internal Agent state reduction", () => {
 		});
 		expect(Object.isFrozen(replayed.public)).toBe(true);
 	});
+
+	it("reconstructs budget exhaustion from the public Run event sequence", async () => {
+		let now = 0;
+		const agent = new Agent({
+			...baseOptions([]),
+			clock: { now: () => now },
+			beforeRun: () => {
+				now = 2;
+			},
+			runBudget: { limits: { maxElapsedMs: 1 } },
+		});
+		const events: AgentEvent[] = [];
+		agent.onEvent((event) => events.push(event));
+
+		await expect(agent.prompt("replay a limit")).resolves.toMatchObject({
+			outcome: "error",
+			failure: { kind: "budget", exhaustion: { limit: "elapsed_ms", maximum: 1, observed: 2 } },
+		});
+
+		let replayed = initialRuntimeState();
+		for (const event of events) {
+			replayed = reduceState(replayed, { type: "event", event });
+			if (event.type === "run_end") replayed = reduceState(replayed, { type: "settled" });
+		}
+		expect(events.map(({ type }) => type)).toEqual(["run_start", "run_budget_exhausted", "run_end"]);
+		expect(replayed.public).toEqual(agent.state);
+	});
 });

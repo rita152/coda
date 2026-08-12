@@ -70,7 +70,12 @@ function reduceEvent(state: RuntimeState, event: AgentEvent): RuntimeState {
 				public: {
 					...state.public,
 					status: "running",
-					activeRun: { id: event.runId, source: event.source, queueItemId: event.queueItemId },
+					activeRun: {
+						id: event.runId,
+						source: event.source,
+						queueItemId: event.queueItemId,
+						...(event.budget ? { budget: event.budget } : {}),
+					},
 					messages: [...state.public.messages, event.inputMessage],
 				},
 			};
@@ -98,6 +103,15 @@ function reduceEvent(state: RuntimeState, event: AgentEvent): RuntimeState {
 				throw new Error("A successful Turn cannot end with unresolved Tool results");
 			}
 			return { public: { ...state.public, activeTurnId: undefined } };
+		case "run_budget_exhausted":
+			if (!state.public.activeRun) throw new Error("Run budget exhausted without an active Run");
+			return {
+				...state,
+				public: {
+					...state.public,
+					activeRun: { ...state.public.activeRun, budgetExhaustion: event.exhaustion },
+				},
+			};
 		case "run_end":
 			return {
 				...state,

@@ -24,6 +24,10 @@ Status: private Milestone 1 package.
   into Agent state.
 - Tools default to sequential execution. Only consecutive Tools marked
   `parallelSafe` may overlap, and every Tool declares `replaySafety`.
+- An optional immutable `RunBudget` bounds Turns, model Attempts, Tool
+  Invocations, elapsed wall time, total tokens, optional recorded USD cost, and
+  consecutive equivalent Tool batches. Limits are checked only between model
+  or Tool effects; every Follow-up starts with fresh accounting.
 - Whole-turn retry is disabled unless both a `TurnRetryPolicy` and cancellable
   `RetryDelay` capability are supplied.
 
