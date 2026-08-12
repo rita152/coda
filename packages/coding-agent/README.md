@@ -17,9 +17,10 @@ node_modules/.bin/coda
 ```
 
 The first interactive launch explicitly authenticates OpenCode Go when needed,
-asks the user to select a Model, and saves that selection. On macOS, persisted
-Credentials use Keychain service `coda.cli.credentials.v1`; they are never
-written to settings or Session files.
+asks the user to select a Model, and saves that selection. Persisted Credentials
+use macOS Keychain service `coda.cli.credentials.v1` or Linux Secret Service via
+`secret-tool`; they are never written to settings or Session files. If Secret
+Service is unavailable, Coda reports that Credentials remain process-local.
 
 One-shot mode writes only the final assistant text to stdout:
 

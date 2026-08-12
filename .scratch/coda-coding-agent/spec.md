@@ -160,11 +160,12 @@ Interactive approval returns `allow_once`, `allow_run`, `deny`, or `deny_and_abo
 ## Credential persistence
 
 - macOS uses Keychain service `coda.cli.credentials.v1` with Provider ID as account.
+- Linux uses Secret Service through `secret-tool`, with the Credential supplied only through stdin.
 - Interactive flows may prompt and save; print mode never prompts.
 - Explicit request key and `OPENCODE_API_KEY` remain available through the AI credential precedence.
 - Session, settings, diagnostics, and logs never contain the secret.
-- Logout removes the Keychain entry.
-- Linux and Windows use environment credentials until a secure platform store exists; there is no plaintext auth-file fallback.
+- Logout removes the secure platform entry.
+- If Linux Secret Service is unavailable, Coda reports that Credentials remain process-local; Windows also remains process-local. There is no plaintext auth-file fallback.
 
 ## Initial Session policy
 
@@ -304,4 +305,4 @@ interface Session {
 
 ## Design status
 
-The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, append-only Sessions, a multiline Composer, current-Session Prompt History, explicit User Shell mode, and durable recoverable Follow-ups. Autocomplete, selection, redo, durable drafts, compaction, branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation enter the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.
+The first-release design frontier is closed. The private Milestone 1 core now composes `@coda/ai`, `@coda/tui`, and `@coda/agent` with both interaction modes, all seven initial Tools, Keychain-backed macOS Credentials, Secret Service-backed Linux Credentials, scoped approvals, deterministic per-Run prompts, context checks, retry, append-only Sessions, a multiline Composer, current-Session Prompt History, explicit User Shell mode, and durable recoverable Follow-ups. Autocomplete, selection, redo, durable drafts, compaction, branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation enter the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.

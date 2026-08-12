@@ -1,13 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import type { Clock, IdGenerator } from "@coda/agent";
-import {
-	type CredentialStore,
-	createModels,
-	InMemoryCredentialStore,
-	type MutableModels,
-	type TimeRuntime,
-} from "@coda/ai";
+import { type CredentialStore, createModels, type MutableModels, type TimeRuntime } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
 import { createSdkMcpConnector, type McpConnector } from "@coda/mcp";
 import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
@@ -20,8 +14,7 @@ import {
 	type TerminalFactory,
 } from "./application.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
-import { KeychainCredentialStore } from "./credentials/keychain-store.ts";
-import { MacOsKeychainClient } from "./credentials/macos-keychain-client.ts";
+import { createNodeCredentialStore } from "./credentials/node-credential-store.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import { isFileSystemError } from "./host/file-system.ts";
 import { createNodeFileSystem } from "./host/node-file-system.ts";
@@ -190,6 +183,7 @@ export function createNodeCodingAgentApplication(
 	const rawIo = options.io ?? processIo(stdin, stdout, stderr);
 	const fullScreenOutput = new FullScreenOutputGate(rawIo);
 	const io = fullScreenOutput.io;
+	const diagnosticOutput = fullScreenOutput.diagnostics;
 	const platform = options.platform ?? process.platform;
 	const environment = options.environment ?? process.env;
 	const homeDirectory = options.homeDirectory ?? homedir();
@@ -202,9 +196,18 @@ export function createNodeCodingAgentApplication(
 	const processRunner = options.processRunner ?? createNodeProcessRunner({ platform });
 	const credentials =
 		options.credentialStore ??
-		(platform === "darwin"
-			? new KeychainCredentialStore(new MacOsKeychainClient(), ["opencode-go"])
-			: new InMemoryCredentialStore());
+		createNodeCredentialStore({
+			platform,
+			environment,
+			providerIds: ["opencode-go"],
+			onSecretServiceUnavailable: () =>
+				diagnosticOutput({
+					code: "credentials.secret-service-unavailable",
+					message:
+						"Linux Secret Service is unavailable; Provider Credentials are not persistent and will be kept only for this Coda process.",
+					details: { backend: "secret-service", persistence: "process-local" },
+				}),
+		});
 	const models =
 		options.models ??
 		(() => {
@@ -232,7 +235,6 @@ export function createNodeCodingAgentApplication(
 		models,
 		fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
 	});
-	const diagnosticOutput = fullScreenOutput.diagnostics;
 	let activeTerminal: Terminal | undefined;
 	const terminalFactory: TerminalFactory = {
 		create: (startup) => {
