@@ -197,18 +197,27 @@ This status block is generated from executable runtime contracts. See the
 
 ### Runtime-supported
 
+- **Bounded Agent Runs** (@coda/agent) — Immutable per-Run budgets cap Turns, Model Attempts, Tool invocations, elapsed time, token and USD usage, and repeated equivalent Tool batches with explicit exhaustion events.
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, and opt-in whole-Turn retry.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
-- **Built-in Tools** (@coda/coding-agent) — Workspace-aware reading, search, mutation, Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read`, `read_tool_output`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`.
+- **Built-in Tools** (@coda/coding-agent) — Workspace-aware reading, search, mutation, Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `process_start`, `process_poll`, `process_write`, and `process_stop`.
 - **Durable Context Compaction** (@coda/coding-agent) — Auto-Compaction and `/compact [focus]` share one Tool-pair-safe implementation and persist Compaction Checkpoints before replacing the model-visible Context Window.
+- **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
 - **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
+- **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, approvals, queues, Tool state, or Run evidence.
 - **Permissions and Sandbox** (@coda/coding-agent) — Read Only, Workspace, and Full Access Permission Profiles; four Approval Policies; exact grants and rules; and OS-enforced macOS or Linux Sandbox execution.
+- **Long-running process Sessions** (@coda/coding-agent) — Process-local background Shell Sessions support bounded start, poll, stdin, and stop operations under the active Permission and Sandbox authority with recoverable omitted output and Session-scoped audit events.
 - **Prompt and event formats** (@coda/coding-agent) — Deterministic per-Run System Prompt snapshots and stable opt-in JSONL v2 Agent events with optional media data.
+- **Custom Provider metadata** (@coda/coding-agent) — Custom Provider models retain configured context, output, image-input, reasoning, status, and tiered-cost metadata across settings, catalog refresh, selection, and runtime consumers.
+- **Canonical model-read protection** (@coda/coding-agent) — Native read and search Tools plus model-launched processes share canonical root-scoped read authority, protected metadata exclusions, explicit reviewed grants, Sandbox enforcement, and content-free audit decisions.
+- **Objective Run evidence** (@coda/coding-agent) — Completed Runs project bounded, sanitized evidence from lifecycle events and authoritative Tool Observations, including paths, commands, failures, retries, token usage, and price-data completeness.
+- **Bounded Session history recovery** (@coda/coding-agent) — The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.
 - **Durable Sessions** (@coda/coding-agent) — Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model and Permission selection, Tool Observations, and Compaction Checkpoints. Current Session format: v9.
 - **Agent Skills** (@coda/skills) — Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.
 - **Terminal experience** (@coda/tui) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.
 - **User Shell and input queues** (@coda/coding-agent) — Explicit `!command` User Shell execution remains outside model Context and Session persistence; the Input Queue Controller orders Steering, durable Follow-ups, and User Shell work in one deferred FIFO.
+- **Offline Agent evaluation harness** (@coda/evals) — Eight deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, permission handling, sensitive-read resistance, latency, tokens, and price data without network access.
 
 ### Type-only (not runtime support)
 

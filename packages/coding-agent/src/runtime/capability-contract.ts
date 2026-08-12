@@ -61,6 +61,16 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: ["packages/agent/test/agent-run.test.ts", "packages/agent/test/input-queues.test.ts"],
 	}),
 	capability({
+		id: "agent.run-budget",
+		package: "@coda/agent",
+		status: "runtime-supported",
+		title: "Bounded Agent Runs",
+		summary:
+			"Immutable per-Run budgets cap Turns, Model Attempts, Tool invocations, elapsed time, token and USD usage, and repeated equivalent Tool batches with explicit exhaustion events.",
+		sources: ["packages/agent/src/run-budget.ts", "packages/agent/src/agent.ts", "packages/agent/src/types.ts"],
+		tests: ["packages/agent/test/run-budget.test.ts", "packages/agent/test/reducer-replay.test.ts"],
+	}),
+	capability({
 		id: "ai.model-access",
 		package: "@coda/ai",
 		status: "runtime-supported",
@@ -69,6 +79,24 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh.",
 		sources: ["packages/ai/src/providers/opencode-go.ts", "packages/coding-agent/src/providers/provider-manager.ts"],
 		tests: ["packages/ai/test/opencode-go-provider.test.ts", "packages/coding-agent/test/provider-manager.test.ts"],
+	}),
+	capability({
+		id: "coding-agent.provider-metadata",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Custom Provider metadata",
+		summary:
+			"Custom Provider models retain configured context, output, image-input, reasoning, status, and tiered-cost metadata across settings, catalog refresh, selection, and runtime consumers.",
+		sources: [
+			"packages/coding-agent/src/providers/custom-model-metadata.ts",
+			"packages/coding-agent/src/runtime/model-metadata.ts",
+			"packages/coding-agent/src/settings/file-settings-store.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/provider-manager.test.ts",
+			"packages/coding-agent/test/settings-store.test.ts",
+			"packages/coding-agent/test/model-command-flow.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.built-in-tools",
@@ -83,6 +111,41 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/search-tools.test.ts",
 			"packages/coding-agent/test/mutation-tools.test.ts",
 			"packages/coding-agent/test/bash-tool.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.session-history",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Bounded Session history recovery",
+		summary:
+			"The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.",
+		sources: [
+			"packages/coding-agent/src/session/session-history-reader.ts",
+			"packages/coding-agent/src/tools/read-session-history.ts",
+			"packages/coding-agent/src/session/managed-session.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/session-history-reader.test.ts",
+			"packages/coding-agent/test/draft-session.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.process-sessions",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Long-running process Sessions",
+		summary:
+			"Process-local background Shell Sessions support bounded start, poll, stdin, and stop operations under the active Permission and Sandbox authority with recoverable omitted output and Session-scoped audit events.",
+		sources: [
+			"packages/coding-agent/src/process/process-session-manager.ts",
+			"packages/coding-agent/src/process/tools.ts",
+			"packages/coding-agent/src/permissions/model-process-runner.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/process-session-manager.test.ts",
+			"packages/coding-agent/test/process-tools.test.ts",
+			"packages/coding-agent/test/permission-audit.test.ts",
 		],
 	}),
 	capability({
@@ -101,6 +164,41 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/compaction.test.ts",
 			"packages/coding-agent/test/context-overflow.test.ts",
 			"packages/coding-agent/test/context-window.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.overflow-fallback",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Context Overflow fallback",
+		summary:
+			"After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, approvals, queues, Tool state, or Run evidence.",
+		sources: [
+			"packages/coding-agent/src/context-window/overflow-recovery.ts",
+			"packages/coding-agent/src/interactive/run-interactive.ts",
+			"packages/coding-agent/src/runtime/workspace-session-runtimes.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/context-overflow-recovery.test.ts",
+			"packages/coding-agent/test/context-overflow-fallback.test.ts",
+			"packages/coding-agent/test/workspace-session-runtimes.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.run-evidence",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Objective Run evidence",
+		summary:
+			"Completed Runs project bounded, sanitized evidence from lifecycle events and authoritative Tool Observations, including paths, commands, failures, retries, token usage, and price-data completeness.",
+		sources: [
+			"packages/coding-agent/src/run-evidence/run-evidence.ts",
+			"packages/coding-agent/src/run-evidence/presentation.ts",
+			"packages/coding-agent/src/session/managed-session.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/run-evidence.test.ts",
+			"packages/coding-agent/test/run-evidence-presentation.test.ts",
 		],
 	}),
 	capability({
@@ -135,6 +233,42 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"Read Only, Workspace, and Full Access Permission Profiles; four Approval Policies; exact grants and rules; and OS-enforced macOS or Linux Sandbox execution.",
 		sources: ["packages/coding-agent/src/permissions/permission-engine.ts", "packages/sandbox/src/execute.ts"],
 		tests: ["packages/coding-agent/test/permission-engine.test.ts", "packages/sandbox/test/execute.test.ts"],
+	}),
+	capability({
+		id: "coding-agent.read-protection",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Canonical model-read protection",
+		summary:
+			"Native read and search Tools plus model-launched processes share canonical root-scoped read authority, protected metadata exclusions, explicit reviewed grants, Sandbox enforcement, and content-free audit decisions.",
+		sources: [
+			"packages/sandbox/src/read-access-policy.ts",
+			"packages/coding-agent/src/permissions/file-access.ts",
+			"packages/coding-agent/src/permissions/permission-engine.ts",
+		],
+		tests: [
+			"packages/sandbox/test/read-access-policy.test.ts",
+			"packages/coding-agent/test/read-access-tools.test.ts",
+			"packages/coding-agent/test/permission-audit.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.credential-storage",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Secure platform Credential storage",
+		summary:
+			"API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.",
+		sources: [
+			"packages/coding-agent/src/credentials/node-credential-store.ts",
+			"packages/coding-agent/src/credentials/keychain-store.ts",
+			"packages/coding-agent/src/credentials/secret-service-store.ts",
+			"packages/coding-agent/src/credentials/secret-tool-client.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/credential-store.test.ts",
+			"packages/coding-agent/test/secret-service-credential-store.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.prompt-events",
@@ -197,6 +331,16 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/user-shell.test.ts",
 			"packages/coding-agent/test/interactive-input-controller.test.ts",
 		],
+	}),
+	capability({
+		id: "evals.offline-agent",
+		package: "@coda/evals",
+		status: "runtime-supported",
+		title: "Offline Agent evaluation harness",
+		summary:
+			"Eight deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, permission handling, sensitive-read resistance, latency, tokens, and price data without network access.",
+		sources: ["packages/evals/src/suite.ts", "packages/evals/src/scoring.ts", "packages/evals/src/trajectory.ts"],
+		tests: ["packages/evals/test/evaluation-suite.test.ts"],
 	}),
 	capability({
 		id: "ai.selected-type-closure",
