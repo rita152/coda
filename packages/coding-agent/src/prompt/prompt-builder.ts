@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const SYSTEM_PROMPT_VERSION = "coda-system-prompt-v3";
+export const SYSTEM_PROMPT_VERSION = "coda-system-prompt-v4";
 const MAX_PROJECT_INSTRUCTIONS_BYTES = 64 * 1024;
 const MAX_SKILL_CATALOG_CHARACTERS = 8_000;
 
@@ -46,6 +46,11 @@ export interface SystemPromptInput {
 		readonly interactionMode: "interactive" | "print";
 		readonly permissionProfile: "read-only" | "workspace" | "full-access";
 		readonly approvalPolicy: string;
+		readonly readAccess: {
+			readonly mode: "root-scoped" | "full-disk";
+			readonly roots: readonly string[];
+			readonly protectedRootCount: number;
+		};
 	};
 	readonly projectInstructions?: TrustedProjectInstructions;
 	readonly skills?: PromptSkillCatalog;
@@ -154,8 +159,24 @@ function renderSkillCatalog(catalog: PromptSkillCatalog): {
 	});
 }
 
+function readAccessFact(capability: SystemPromptInput["capabilities"]["readAccess"]): string {
+	if (capability.mode === "full-disk") {
+		return "- Read access: full disk through the explicit Full Access bypass.";
+	}
+	const roots =
+		capability.roots.length === 0 ? "none" : capability.roots.map((root) => JSON.stringify(root)).join(", ");
+	const protectedLabel = capability.protectedRootCount === 1 ? "Credential Root" : "Credential Roots";
+	return `- Read access: root-scoped to ${roots}; ${capability.protectedRootCount} protected ${protectedLabel} require exact or narrower review.`;
+}
+
 export function buildSystemPrompt(input: SystemPromptInput): SystemPromptSnapshot {
 	if (!Number.isFinite(input.timestamp)) throw new Error("System Prompt timestamp must be finite");
+	if (
+		!Number.isSafeInteger(input.capabilities.readAccess.protectedRootCount) ||
+		input.capabilities.readAccess.protectedRootCount < 0
+	) {
+		throw new Error("System Prompt protected Credential Root count must be a non-negative integer");
+	}
 	if (
 		input.projectInstructions &&
 		Buffer.byteLength(input.projectInstructions.content, "utf8") > MAX_PROJECT_INSTRUCTIONS_BYTES
@@ -179,10 +200,11 @@ export function buildSystemPrompt(input: SystemPromptInput): SystemPromptSnapsho
 		`- Interaction mode: ${input.capabilities.interactionMode}`,
 		`- Permission Profile: ${input.capabilities.permissionProfile}`,
 		`- Approval Policy: ${input.capabilities.approvalPolicy}`,
-		"- Files are readable from the full disk. Writes are limited by the active profile and exact approvals.",
+		readAccessFact(input.capabilities.readAccess),
+		"- Native Workspace-external reads require filesystem approval and fail closed when approval is unavailable.",
 		"- Bash uses the active OS Sandbox by default. Direct network access is blocked outside Full Access.",
-		"- When an operation truly needs broader authority, set sandbox_permissions to require_escalated or with_additional_permissions. Include a concise justification when it helps the user review the request.",
-		"- Prefer with_additional_permissions with canonical absolute paths over require_escalated. A proposed prefix_rule must be a true prefix of the reviewed command.",
+		"- Use with_additional_permissions and canonical absolute paths for precise filesystem or network expansion. Include a concise justification for review.",
+		"- require_escalated requests explicit command review but does not bypass restricted read roots; only Full Access bypasses the Sandbox. A proposed prefix_rule must be a true prefix of the reviewed command.",
 		"",
 		"Available Tool capabilities:",
 		...(tools.length === 0 ? ["- none"] : tools.map((tool) => `- ${tool.name}: ${tool.description}`)),

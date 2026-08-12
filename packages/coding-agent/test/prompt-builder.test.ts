@@ -15,6 +15,11 @@ describe("versioned System Prompt Builder", () => {
 				interactionMode: "print" as const,
 				permissionProfile: "read-only" as const,
 				approvalPolicy: "on-request",
+				readAccess: {
+					mode: "root-scoped" as const,
+					roots: ["/workspace/project"],
+					protectedRootCount: 4,
+				},
 			},
 			projectInstructions: {
 				path: "/workspace/project/AGENTS.md",
@@ -27,12 +32,34 @@ describe("versioned System Prompt Builder", () => {
 		const second = buildSystemPrompt(structuredClone(input));
 
 		expect(first).toEqual(second);
-		expect(first.version).toBe("coda-system-prompt-v3");
+		expect(first.version).toBe("coda-system-prompt-v4");
 		expect(first.sha256).toMatch(/^[a-f0-9]{64}$/);
 		expect(first.text).toContain("Workspace: /workspace/project");
 		expect(first.text.indexOf("- read: Read a file")).toBeLessThan(first.text.indexOf("- write: Write a file"));
 		expect(first.text).toContain("BEGIN TRUSTED PROJECT INSTRUCTIONS");
 		expect(first.text).toContain("SHA-256: abc123");
+		expect(first.text).toContain('Read access: root-scoped to "/workspace/project"');
+		expect(first.text).toContain("4 protected Credential Roots require exact or narrower review");
+		expect(first.text).toContain("Workspace-external reads require filesystem approval");
+		expect(first.text).toContain("require_escalated requests explicit command review");
+	});
+
+	it("states that Full Access is the explicit full-disk read bypass", () => {
+		const result = buildSystemPrompt({
+			workspace: "/workspace",
+			platform: "linux",
+			timestamp: 0,
+			tools: [],
+			capabilities: {
+				interactionMode: "interactive",
+				permissionProfile: "full-access",
+				approvalPolicy: "never",
+				readAccess: { mode: "full-disk", roots: [], protectedRootCount: 0 },
+			},
+		});
+
+		expect(result.text).toContain("Read access: full disk through the explicit Full Access bypass");
+		expect(result.text).toContain("only Full Access bypasses the Sandbox");
 	});
 
 	it("renders an escaped, budgeted Skill Catalog with compact collision alternatives", () => {
@@ -45,6 +72,7 @@ describe("versioned System Prompt Builder", () => {
 				interactionMode: "print",
 				permissionProfile: "read-only",
 				approvalPolicy: "on-request",
+				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: {
 				contextWindow: 128_000,
@@ -90,6 +118,7 @@ describe("versioned System Prompt Builder", () => {
 				interactionMode: "print",
 				permissionProfile: "read-only",
 				approvalPolicy: "on-request",
+				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: {
 				contextWindow: 4_000,
@@ -121,6 +150,7 @@ describe("versioned System Prompt Builder", () => {
 					interactionMode: "print",
 					permissionProfile: "read-only",
 					approvalPolicy: "on-request",
+					readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 				},
 				projectInstructions: {
 					path: "/workspace/AGENTS.md",
@@ -141,6 +171,7 @@ describe("versioned System Prompt Builder", () => {
 				interactionMode: "print",
 				permissionProfile: "read-only",
 				approvalPolicy: "on-request",
+				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: { entries: [] },
 		});

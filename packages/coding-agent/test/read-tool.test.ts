@@ -84,7 +84,7 @@ describe("read Tool", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("reads dotfiles and key-shaped paths because every profile has full-disk read access", async () => {
+	it("reads ordinary dotfiles inside the Workspace under a restricted profile", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-sensitive-"));
 		temporaryDirectories.push(workspace);
 		await writeFile(join(workspace, ".env"), "SECRET=do-not-leak\n", "utf8");

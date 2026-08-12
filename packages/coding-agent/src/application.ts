@@ -88,6 +88,7 @@ import {
 } from "./permissions/permission-engine.ts";
 import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
 import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
+import { resolveDefaultDeniedReadRoots } from "./permissions/sensitive-read-roots.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
@@ -718,6 +719,18 @@ function permissionProfileLabel(profile: PermissionProfile): string {
 	return profile === "read-only" ? "Read Only" : profile === "workspace" ? "Workspace" : "Full Access";
 }
 
+function promptReadAccess(profile: ReturnType<typeof compileSandboxPolicy>): {
+	readonly mode: "root-scoped" | "full-disk";
+	readonly roots: readonly string[];
+	readonly protectedRootCount: number;
+} {
+	return Object.freeze({
+		mode: profile.readAccess,
+		roots: Object.freeze([...new Set([...profile.readableRoots, ...profile.approvedReadRoots])]),
+		protectedRootCount: profile.deniedReadRoots.length,
+	});
+}
+
 function interactiveStatusLineSnapshot(
 	runtime: PreparedRunRuntime,
 	agent: Agent,
@@ -1254,6 +1267,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						workspace.root,
 						options.fileSystem,
 					);
+					const deniedReadRoots = await resolveDefaultDeniedReadRoots(
+						options.runtime.homeDirectory,
+						workspace,
+						options.runtime.environment,
+					);
 					const selectedProfile =
 						parsed.permissionProfile ??
 						session.restored.permissionProfile ??
@@ -1268,6 +1286,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						workspaceRoots: [workspace.root],
 						temporaryDirectory,
 						additionalWritableRoots,
+						deniedReadRoots,
 					});
 					const configuredShell = options.runtime.environment.SHELL;
 					const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
@@ -1376,6 +1395,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								platform: options.runtime.platform,
 							}),
 							onSessionApprovalUsed: audit,
+							onReadAccessDecision: audit,
 							commandRules: commandPolicy.rules,
 							hostExecutables: commandPolicy.hostExecutables,
 							networkRules,
@@ -1455,6 +1475,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								interactionMode: parsed.mode,
 								permissionProfile: runtime.permission.configuration().profile.profile,
 								approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
+								readAccess: promptReadAccess(runtime.permission.configuration().profile),
 							},
 							projectInstructions,
 							skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
@@ -1687,6 +1708,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									workspaceRoots: [workspace.root],
 									temporaryDirectory,
 									additionalWritableRoots,
+									deniedReadRoots,
 								});
 								const targetApprovalPolicy = defaultApprovalPolicy(targetProfile.profile);
 								const targetAudit: PermissionAuditSink = (event) =>
@@ -1774,6 +1796,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											platform: options.runtime.platform,
 										}),
 										onSessionApprovalUsed: targetAudit,
+										onReadAccessDecision: targetAudit,
 										commandRules: commandPolicy.rules,
 										hostExecutables: commandPolicy.hostExecutables,
 										networkRules,
@@ -1875,6 +1898,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											interactionMode: "interactive",
 											permissionProfile: runtime.permission.configuration().profile.profile,
 											approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
+											readAccess: promptReadAccess(runtime.permission.configuration().profile),
 										},
 										projectInstructions,
 										skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
@@ -2034,6 +2058,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											workspaceRoots: [workspace.root],
 											temporaryDirectory,
 											additionalWritableRoots,
+											deniedReadRoots,
 										});
 										const nextApprovalPolicy = defaultApprovalPolicy(profile);
 										const nextPermission = targetCreatePolicy(nextProfile, nextApprovalPolicy);
@@ -2213,6 +2238,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										workspaceRoots: [workspace.root],
 										temporaryDirectory,
 										additionalWritableRoots,
+										deniedReadRoots,
 									});
 									const nextApprovalPolicy = defaultApprovalPolicy(profile);
 									const nextPermission = createPolicy(nextProfile, nextApprovalPolicy);

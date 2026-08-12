@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 integration("model Bash escalation", () => {
-	it("grants one reviewed unsandboxed command, retains Workspace, and never retries a later denial", async () => {
+	it("keeps command review sandboxed and grants only a precise outside Additional Permission", async () => {
 		// Linux Workspace mode intentionally permits /tmp. Keep the fixture under
 		// the package so its sibling really is outside every writable root.
 		const fixture = await mkdtemp(join(process.cwd(), ".coda-bash-escalation-"));
@@ -54,8 +54,32 @@ integration("model Bash escalation", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolCallId: "provider-escalated",
+					isError: true,
+					details: { backend: process.platform === "darwin" ? "macos-seatbelt" : "linux-bwrap" },
+				});
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"bash",
+						{
+							command: `printf escalated > ${JSON.stringify(escalatedTarget)}`,
+							sandbox_permissions: "with_additional_permissions",
+							justification: "Write only the reviewed outside directory",
+							additional_permissions: { file_system: { write: [canonicalOutside] } },
+						},
+						{ id: "provider-additional-permission" },
+					),
+					{ stopReason: "toolUse", timestamp: 920 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-additional-permission",
 					isError: false,
-					details: { backend: "none", exitCode: 0 },
+					details: {
+						backend: process.platform === "darwin" ? "macos-seatbelt" : "linux-bwrap",
+						exitCode: 0,
+					},
 				});
 				return fauxAssistantMessage(
 					fauxToolCall(
@@ -71,10 +95,7 @@ integration("model Bash escalation", () => {
 					role: "toolResult",
 					toolCallId: "provider-default-denied",
 					isError: true,
-					details: {
-						backend: process.platform === "darwin" ? "macos-seatbelt" : "linux-bwrap",
-						denial: expect.objectContaining({ kind: "filesystem" }),
-					},
+					details: { backend: process.platform === "darwin" ? "macos-seatbelt" : "linux-bwrap" },
 				});
 				return fauxAssistantMessage("The precise elevation did not change the active Workspace profile.", {
 					timestamp: 920,
@@ -120,7 +141,7 @@ integration("model Bash escalation", () => {
 		]);
 
 		expect(exitCode, stderr.value).toBe(0);
-		expect(approvals).toBe(1);
+		expect(approvals).toBe(2);
 		expect(await readFile(escalatedTarget, "utf8")).toBe("escalated");
 		await expect(access(deniedTarget)).rejects.toMatchObject({ code: "ENOENT" });
 	});

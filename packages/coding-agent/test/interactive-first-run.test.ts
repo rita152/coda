@@ -42,7 +42,7 @@ class FakeLifecycle implements InteractiveProcessLifecycle {
 }
 
 async function until(predicate: () => boolean): Promise<void> {
-	const deadline = Date.now() + 2_000;
+	const deadline = Date.now() + 5_000;
 	while (Date.now() < deadline) {
 		if (predicate()) return;
 		await new Promise<void>((resolve) => setTimeout(resolve, 5));

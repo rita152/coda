@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
@@ -396,6 +396,118 @@ describe("Coding Agent print mode", () => {
 			expect(stderr.value).toBe("");
 		} finally {
 			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed on external and default Credential Root reads when approval is unavailable", async () => {
+		const fixture = await mkdtemp(join(process.cwd(), ".coda-print-external-read-"));
+		try {
+			const workspace = join(fixture, "workspace");
+			const outside = join(fixture, "outside.txt");
+			const credential = join(workspace, ".ssh", "id_ed25519");
+			await mkdir(join(workspace, ".ssh"), { recursive: true });
+			await writeFile(outside, "classified-read-content\n");
+			await writeFile(credential, "classified-credential-content\n");
+			const canonicalOutside = await realpath(outside);
+			const canonicalCredential = await realpath(credential);
+			const faux = fauxProvider({ runtime: testTimeRuntime(237) });
+			faux.setResponses([
+				fauxAssistantMessage(fauxToolCall("read", { path: outside }, { id: "read-external" }), {
+					stopReason: "toolUse",
+					timestamp: 237,
+				}),
+				(context) => {
+					const result = context.messages.at(-1);
+					expect(result).toMatchObject({
+						role: "toolResult",
+						toolCallId: "read-external",
+						isError: true,
+					});
+					expect(JSON.stringify(result)).not.toContain("classified-read-content");
+					return fauxAssistantMessage(
+						fauxToolCall("read", { path: ".ssh/id_ed25519" }, { id: "read-credential" }),
+						{
+							stopReason: "toolUse",
+							timestamp: 237,
+						},
+					);
+				},
+				(context) => {
+					const result = context.messages.at(-1);
+					expect(result).toMatchObject({
+						role: "toolResult",
+						toolCallId: "read-credential",
+						isError: true,
+					});
+					expect(JSON.stringify(result)).not.toContain("classified-credential-content");
+					return fauxAssistantMessage("Both reads require approval.", { timestamp: 237 });
+				},
+			]);
+			const models = createModels({ runtime: testTimeRuntime(237) });
+			models.setProvider(faux.provider);
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let id = 0;
+			const application = createCodingAgentApplication({
+				models,
+				settings: {
+					load: async () => ({ permissions: { profile: "workspace", approvalPolicy: "on-request" } }),
+					save: async () => undefined,
+				},
+				fileSystem: createNodeFileSystem(),
+				processRunner: createNodeProcessRunner({ platform: "darwin" }),
+				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory: workspace,
+					platform: "darwin",
+					environment: {},
+					clock: { now: () => 237 },
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				},
+			});
+
+			const exitCode = await application.run([
+				"--print",
+				"--json",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"read the external file",
+			]);
+			const events = stdout.value
+				.trimEnd()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+
+			expect(exitCode).toBe(1);
+			expect(events).toContainEqual(
+				expect.objectContaining({
+					type: "approval_required",
+					request: expect.objectContaining({
+						kind: "filesystem",
+						toolName: "read",
+						operation: "read",
+						canonicalPath: canonicalOutside,
+					}),
+				}),
+			);
+			expect(events).toContainEqual(
+				expect.objectContaining({
+					type: "approval_required",
+					request: expect.objectContaining({
+						kind: "filesystem",
+						toolName: "read",
+						operation: "read",
+						canonicalPath: canonicalCredential,
+						reason: "path is within a protected Credential root",
+					}),
+				}),
+			);
+			expect(stdout.value).not.toContain("classified-read-content");
+			expect(stdout.value).not.toContain("classified-credential-content");
+			expect(stderr.value).toBe("");
+		} finally {
+			await rm(fixture, { recursive: true, force: true });
 		}
 	});
 
