@@ -1,8 +1,14 @@
-import { createProvider, envApiKeyAuth, type Model, type MutableModels, type ProviderStreams } from "@coda/ai";
+import { createProvider, envApiKeyAuth, type MutableModels, type ProviderStreams } from "@coda/ai";
 import { anthropicMessagesApi } from "@coda/ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@coda/ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@coda/ai/api/openai-responses.lazy";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
+import {
+	customProviderCatalogModel,
+	discoverCustomProviderModels,
+	mergeDiscoveredCustomProviderModels,
+	parseCustomProviderModelConfig,
+} from "./custom-model-metadata.ts";
 import type {
 	AuthApiProtocol,
 	CustomProviderConfig,
@@ -22,9 +28,6 @@ interface ProtocolRuntime {
 	readonly api: CustomProviderApi;
 	readonly streams: ProviderStreams;
 }
-
-const COMPATIBILITY_CONTEXT_WINDOW = 16_384;
-const COMPATIBILITY_MAX_TOKENS = 4_096;
 
 /**
  * Owns custom-provider identity, credentials, discovery, and runtime registration.
@@ -60,13 +63,20 @@ export class ProviderManager {
 				throw new Error(`Custom provider id conflicts with an existing provider: ${input.id}`);
 			}
 			seen.add(input.id);
+			const modelIds = new Set<string>();
+			const configuredModels = input.models.map((model) => {
+				const parsed = parseCustomProviderModelConfig(model);
+				if (modelIds.has(parsed.id)) throw new Error(`Duplicate custom Provider Model id: ${parsed.id}`);
+				modelIds.add(parsed.id);
+				return parsed;
+			});
 			const config: CustomProviderConfig = Object.freeze({
 				id: input.id,
 				name: normalizeProviderName(input.name),
 				apiProtocol: input.apiProtocol,
 				baseUrl: normalizeBaseUrl(input.baseUrl),
 				discovery: input.discovery,
-				models: Object.freeze(input.models.map((model) => Object.freeze({ ...model }))),
+				models: Object.freeze(configuredModels),
 			});
 			this.#register(config);
 		}
@@ -171,20 +181,7 @@ export class ProviderManager {
 			headers: discoveryHeaders(apiProtocol, apiKey),
 		});
 		if (!response.ok) throw new Error(`Model discovery failed with HTTP ${response.status}`);
-		const body: unknown = await response.json();
-		if (!isRecord(body) || !Array.isArray(body.data)) {
-			throw new Error("Model discovery response must contain a data array");
-		}
-		const seen = new Set<string>();
-		const models: CustomProviderModelConfig[] = [];
-		for (const entry of body.data) {
-			if (!isRecord(entry) || typeof entry.id !== "string") continue;
-			const id = entry.id.trim();
-			if (!id || seen.has(id)) continue;
-			seen.add(id);
-			models.push(Object.freeze({ id, name: id }));
-		}
-		return models;
+		return discoverCustomProviderModels(await response.json());
 	}
 
 	async #refreshWithKey(providerId: string, apiKey: string): Promise<CustomProviderConfig> {
@@ -202,36 +199,23 @@ export class ProviderManager {
 			return needsAttention;
 		}
 
-		const discoveredIds = new Set(discovered.map((model) => model.id));
-		const missing = current.models.filter((model) => !discoveredIds.has(model.id));
+		const models = mergeDiscoveredCustomProviderModels(discovered, current.models);
 		const refreshed: CustomProviderConfig = Object.freeze({
 			...current,
 			discovery: "ready",
-			models: Object.freeze([...discovered, ...missing]),
+			models,
 		});
 		this.#register(refreshed);
-		this.#markStale(
-			providerId,
-			missing.map((model) => model.id),
-		);
 		return refreshed;
-	}
-
-	#markStale(providerId: string, modelIds: readonly string[]): void {
-		for (const modelId of modelIds) {
-			const key = modelKey(providerId, modelId);
-			const catalog = this.#catalog.get(key);
-			if (catalog) this.#catalog.set(key, Object.freeze({ ...catalog, stale: true }));
-		}
 	}
 
 	#register(config: CustomProviderConfig, runtime = runtimeForProtocol(config.apiProtocol)): void {
 		for (const key of this.#catalog.keys()) {
 			if (key.startsWith(`${config.id}/`)) this.#catalog.delete(key);
 		}
-		const models =
+		const catalogModels =
 			config.discovery === "ready"
-				? config.models.map((entry) => compatibilityRuntimeModel(config, entry, runtime.api))
+				? config.models.map((entry) => customProviderCatalogModel(config, entry, runtime.api))
 				: [];
 		this.#models.setProvider(
 			createProvider({
@@ -239,57 +223,15 @@ export class ProviderManager {
 				name: config.name,
 				baseUrl: config.baseUrl,
 				auth: { apiKey: envApiKeyAuth(`${config.name} API key`, []) },
-				models,
+				models: catalogModels.map((model) => model.runtime),
 				api: runtime.streams,
 			}),
 		);
 		this.#configs.set(config.id, Object.freeze(config));
-		for (const model of models) {
-			this.#catalog.set(modelKey(config.id, model.id), unknownCatalogModel(model));
+		for (const model of catalogModels) {
+			this.#catalog.set(model.key, model);
 		}
 	}
-}
-
-function compatibilityRuntimeModel(
-	config: CustomProviderConfig,
-	entry: CustomProviderModelConfig,
-	api: CustomProviderApi,
-): Model<CustomProviderApi> {
-	return Object.freeze({
-		id: entry.id,
-		name: entry.name,
-		api,
-		provider: config.id,
-		baseUrl: config.baseUrl,
-		reasoning: false,
-		input: ["text"] as ("text" | "image")[],
-		contextWindow: COMPATIBILITY_CONTEXT_WINDOW,
-		maxTokens: COMPATIBILITY_MAX_TOKENS,
-	});
-}
-
-function unknownCatalogModel(runtime: Model<CustomProviderApi>): CatalogModel {
-	return Object.freeze({
-		key: modelKey(runtime.provider, runtime.id),
-		providerId: runtime.provider,
-		id: runtime.id,
-		name: runtime.name,
-		runtime,
-		metadata: Object.freeze({
-			contextWindow: "unknown",
-			maxOutputTokens: "unknown",
-			reasoning: "unknown",
-			imageInput: "unknown",
-			price: "unknown",
-		}),
-		compatibility: Object.freeze({
-			contextWindow: COMPATIBILITY_CONTEXT_WINDOW,
-			maxOutputTokens: COMPATIBILITY_MAX_TOKENS,
-			reasoning: false,
-			imageInput: false,
-			price: "unreported",
-		}),
-	});
 }
 
 function runtimeForProtocol(apiProtocol: AuthApiProtocol): ProtocolRuntime {
@@ -337,8 +279,4 @@ function slugify(value: string): string {
 
 function modelKey(providerId: string, modelId: string): string {
 	return `${providerId}/${modelId}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
 }

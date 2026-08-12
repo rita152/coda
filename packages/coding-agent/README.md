@@ -46,6 +46,30 @@ motion for one invocation. Persistent UI defaults can be set in
 }
 ```
 
+Custom Provider Model metadata is persisted beside the discovered Model ID and
+labels every value as either `provider` discovery or an explicit `user`
+override. Missing fields stay omitted; Coda applies source-labelled
+Compatibility Mode caps at runtime without serializing them as Provider facts.
+Prices are USD per million tokens, matching `@coda/ai` Model pricing:
+
+```json
+{
+  "id": "model-a",
+  "name": "Model A",
+  "contextWindow": { "source": "provider", "value": 128000 },
+  "maxTokens": { "source": "user", "value": 16384 },
+  "reasoning": { "source": "provider", "value": true },
+  "input": { "source": "user", "value": ["text", "image"] },
+  "price": {
+    "source": "user",
+    "value": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25 }
+  }
+}
+```
+
+Credentials remain in the injected Credential Store and are never valid Model
+configuration fields.
+
 Interactive command Approval Requests use the Codex bottom-pane layout with the
 first choice selected. Use Up/Down and Enter, `y` or `1` for one-time approval,
 or `p` and its displayed number for an eligible process-local command-prefix

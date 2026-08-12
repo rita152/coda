@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createModelCommandFlow } from "../src/commands/model-flow.ts";
 import { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
 import type { CatalogModel } from "../src/runtime/model-catalog.ts";
+import { type ModelMetadataSource, modelMetadataValue } from "../src/runtime/model-metadata.ts";
 
 describe("model command flow", () => {
 	it("lists a cross-provider pool truthfully and routes unauthenticated models into auth", () => {
@@ -14,20 +15,8 @@ describe("model command flow", () => {
 			createModelCommandFlow({
 				currentKey: "opencode-go/known",
 				models: [
-					entry("opencode-go", "known", "configured", {
-						contextWindow: 128_000,
-						maxOutputTokens: 32_000,
-						reasoning: true,
-						imageInput: true,
-						price: "unknown",
-					}),
-					entry("custom", "discovered", "authentication_required", {
-						contextWindow: "unknown",
-						maxOutputTokens: "unknown",
-						reasoning: "unknown",
-						imageInput: "unknown",
-						price: "unknown",
-					}),
+					entry("opencode-go", "known", "configured", metadata("provider")),
+					entry("custom", "discovered", "authentication_required", metadata("compatibility")),
 				],
 				onSelect,
 				onAuthenticate,
@@ -45,13 +34,7 @@ describe("model command flow", () => {
 	it("requires an explicit Compatibility Mode step for configured models with unknown metadata", () => {
 		const onSelect = vi.fn();
 		const host = new CommandFlowHost();
-		const unknown = entry("custom", "discovered", "configured", {
-			contextWindow: "unknown",
-			maxOutputTokens: "unknown",
-			reasoning: "unknown",
-			imageInput: "unknown",
-			price: "unknown",
-		});
+		const unknown = entry("custom", "discovered", "configured", metadata("compatibility"));
 		host.open(
 			createModelCommandFlow({
 				currentKey: "opencode-go/known",
@@ -70,6 +53,31 @@ describe("model command flow", () => {
 		host.handleInput(key("enter"));
 		expect(onSelect).toHaveBeenCalledWith(unknown.catalog);
 		expect(host.view).toBeUndefined();
+	});
+
+	it("labels known sources and discloses only field-level Compatibility Mode fallbacks", () => {
+		const host = new CommandFlowHost();
+		const partial = entry("custom", "partial", "configured", {
+			contextWindow: modelMetadataValue(128_000, "provider"),
+			maxOutputTokens: modelMetadataValue(4_096, "compatibility"),
+			reasoning: modelMetadataValue(true, "user"),
+			input: modelMetadataValue(["text", "image"] as const, "provider"),
+			price: modelMetadataValue("unreported" as const, "compatibility"),
+		});
+		host.open(
+			createModelCommandFlow({
+				currentKey: "opencode-go/known",
+				models: [partial],
+				onSelect: vi.fn(),
+				onAuthenticate: vi.fn(),
+			}),
+		);
+
+		expect(host.view?.items[0]?.description).toContain("context 128,000 (Provider)");
+		expect(host.view?.items[0]?.description).toContain("reasoning yes (configured)");
+		host.handleInput(key("enter"));
+
+		expect(host.view?.items[0]?.description).toBe("output cap 4,096 • price unreported");
 	});
 });
 
@@ -99,20 +107,19 @@ function entry(
 			name: id,
 			runtime: model,
 			metadata,
-			...(Object.values(metadata).includes("unknown")
-				? {
-						compatibility: {
-							contextWindow: 16_384,
-							maxOutputTokens: 4_096,
-							reasoning: false as const,
-							imageInput: false as const,
-							price: "unreported" as const,
-						},
-					}
-				: {}),
 		},
 		auth,
 	} as const;
+}
+
+function metadata(source: ModelMetadataSource): CatalogModel["metadata"] {
+	return {
+		contextWindow: modelMetadataValue(source === "compatibility" ? 16_384 : 128_000, source),
+		maxOutputTokens: modelMetadataValue(source === "compatibility" ? 4_096 : 32_000, source),
+		reasoning: modelMetadataValue(source === "provider", source),
+		input: modelMetadataValue(source === "provider" ? (["text", "image"] as const) : (["text"] as const), source),
+		price: modelMetadataValue("unreported" as const, source),
+	};
 }
 
 function key(keyName: KeyInput["key"], overrides: Partial<KeyInput> = {}): KeyInput {

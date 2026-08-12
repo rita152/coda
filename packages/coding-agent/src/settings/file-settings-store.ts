@@ -5,6 +5,7 @@ import type { SettingsStore, UserSettings } from "../application.ts";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { parseMcpServerConfigurations } from "../mcp/config.ts";
+import { parseCustomProviderModelConfig } from "../providers/custom-model-metadata.ts";
 import { AUTH_API_PROTOCOLS } from "../providers/types.ts";
 
 const REASONING_LEVELS = new Set<ThinkingLevel | "off">(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -97,19 +98,15 @@ function validateSettings(value: unknown): UserSettings {
 			providerIds.add(entry.id);
 			const modelIds = new Set<string>();
 			const models = entry.models.map((model) => {
-				if (
-					!isRecord(model) ||
-					!hasOnlyKeys(model, ["id", "name"]) ||
-					typeof model.id !== "string" ||
-					model.id.trim().length === 0 ||
-					modelIds.has(model.id) ||
-					typeof model.name !== "string" ||
-					model.name.trim().length === 0
-				) {
+				let parsed: ReturnType<typeof parseCustomProviderModelConfig>;
+				try {
+					parsed = parseCustomProviderModelConfig(model);
+				} catch {
 					throw new Error("Coda settings contain invalid custom Provider models");
 				}
-				modelIds.add(model.id);
-				return { id: model.id, name: model.name };
+				if (modelIds.has(parsed.id)) throw new Error("Coda settings contain invalid custom Provider models");
+				modelIds.add(parsed.id);
+				return parsed;
 			});
 			return {
 				id: entry.id,

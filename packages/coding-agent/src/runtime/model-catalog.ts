@@ -1,22 +1,14 @@
 import type { Api, Model, ModelCost } from "@coda/ai";
+import { type ModelMetadataValue, modelMetadataValue } from "./model-metadata.ts";
 
-export type CatalogValue<T> = T | "unknown";
+export type CatalogValue<T> = ModelMetadataValue<T>;
 
 export interface CatalogModelMetadata {
 	readonly contextWindow: CatalogValue<number>;
 	readonly maxOutputTokens: CatalogValue<number>;
 	readonly reasoning: CatalogValue<boolean>;
-	readonly imageInput: CatalogValue<boolean>;
-	readonly price: CatalogValue<ModelCost>;
-}
-
-/** Conservative local execution constraints, never claimed as Provider metadata. */
-export interface CompatibilityModelConstraints {
-	readonly contextWindow: number;
-	readonly maxOutputTokens: number;
-	readonly reasoning: false;
-	readonly imageInput: false;
-	readonly price: "unreported";
+	readonly input: CatalogValue<readonly ("text" | "image")[]>;
+	readonly price: CatalogValue<ModelCost | "unreported">;
 }
 
 export interface CatalogModel {
@@ -26,11 +18,11 @@ export interface CatalogModel {
 	readonly name: string;
 	readonly runtime: Model<Api>;
 	readonly metadata: CatalogModelMetadata;
-	readonly compatibility?: CompatibilityModelConstraints;
 	readonly stale?: boolean;
 }
 
 export function catalogModelFromRuntime(model: Model<Api>): CatalogModel {
+	const price: ModelCost | "unreported" = model.cost ?? "unreported";
 	return Object.freeze({
 		key: `${model.provider}/${model.id}`,
 		providerId: model.provider,
@@ -38,11 +30,11 @@ export function catalogModelFromRuntime(model: Model<Api>): CatalogModel {
 		name: model.name,
 		runtime: model,
 		metadata: Object.freeze({
-			contextWindow: model.contextWindow,
-			maxOutputTokens: model.maxTokens,
-			reasoning: model.reasoning,
-			imageInput: model.input.includes("image"),
-			price: model.cost ?? "unknown",
+			contextWindow: modelMetadataValue(model.contextWindow, "provider"),
+			maxOutputTokens: modelMetadataValue(model.maxTokens, "provider"),
+			reasoning: modelMetadataValue(model.reasoning, "provider"),
+			input: modelMetadataValue(Object.freeze([...model.input]), "provider"),
+			price: modelMetadataValue(price, "provider"),
 		}),
 	});
 }

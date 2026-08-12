@@ -162,6 +162,92 @@ describe("FileSettingsStore", () => {
 		expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
 	});
 
+	it("round-trips source-labelled Custom Provider metadata without serializing Credentials", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-model-metadata-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "metadata" },
+		});
+		const customProviders = [
+			{
+				id: "custom-acme",
+				name: "Acme",
+				apiProtocol: "openai.responses" as const,
+				baseUrl: "https://api.acme.test/v1",
+				discovery: "ready" as const,
+				models: [
+					{
+						id: "acme-one",
+						name: "Acme One",
+						contextWindow: { source: "provider" as const, value: 128_000 },
+						maxTokens: { source: "user" as const, value: 16_384 },
+						reasoning: { source: "provider" as const, value: true },
+						input: { source: "user" as const, value: ["text", "image"] as const },
+						price: {
+							source: "user" as const,
+							value: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
+						},
+						stale: true,
+					},
+				],
+			},
+		];
+
+		await store.save({ customProviders });
+
+		await expect(store.load()).resolves.toEqual({ customProviders });
+		const serialized = await readFile(join(homeDirectory, ".coda", "settings.json"), "utf8");
+		expect(JSON.parse(serialized)).toEqual({ version: 1, customProviders });
+		expect(serialized).not.toContain("apiKey");
+	});
+
+	it.each([
+		{
+			label: "non-positive context window",
+			metadata: { contextWindow: { source: "user", value: 0 } },
+		},
+		{
+			label: "output greater than context",
+			metadata: {
+				contextWindow: { source: "user", value: 8_192 },
+				maxTokens: { source: "user", value: 16_384 },
+			},
+		},
+		{
+			label: "serialized fallback source",
+			metadata: { reasoning: { source: "compatibility", value: false } },
+		},
+	])("rejects invalid Custom Provider Model bounds and sources: $label", async ({ metadata }) => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-model-metadata-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		await mkdir(join(homeDirectory, ".coda"));
+		await writeFile(
+			join(homeDirectory, ".coda", "settings.json"),
+			JSON.stringify({
+				version: 1,
+				customProviders: [
+					{
+						id: "custom-acme",
+						name: "Acme",
+						apiProtocol: "openai.responses",
+						baseUrl: "https://api.acme.test/v1",
+						discovery: "ready",
+						models: [{ id: "invalid", name: "Invalid", ...metadata }],
+					},
+				],
+			}),
+		);
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "unused" },
+		});
+
+		await expect(store.load()).rejects.toThrow("invalid custom Provider models");
+	});
+
 	it("rejects incomplete granular approval settings instead of guessing defaults", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-settings-"));
 		temporaryDirectories.push(homeDirectory);

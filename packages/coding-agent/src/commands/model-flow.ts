@@ -1,5 +1,6 @@
 import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
 import type { CatalogModel, CatalogModelMetadata, CatalogValue } from "../runtime/model-catalog.ts";
+import { isCompatibilityValue } from "../runtime/model-metadata.ts";
 
 export interface ModelCommandEntry {
 	readonly catalog: CatalogModel;
@@ -67,19 +68,21 @@ function createCompatibilityModeMenu(
 }
 
 function describeCompatibilityMode(catalog: CatalogModel): string {
-	const compatibility = catalog.compatibility;
-	if (!compatibility) return "Some limits, capabilities, or price metadata are unknown";
-	return [
-		`context cap ${compatibility.contextWindow.toLocaleString("en-US")}`,
-		`output cap ${compatibility.maxOutputTokens.toLocaleString("en-US")}`,
-		"text only",
-		"reasoning off",
-		"price unreported",
-	].join(" • ");
+	const constraints: string[] = [];
+	if (isCompatibilityValue(catalog.metadata.contextWindow)) {
+		constraints.push(`context cap ${catalog.metadata.contextWindow.value.toLocaleString("en-US")}`);
+	}
+	if (isCompatibilityValue(catalog.metadata.maxOutputTokens)) {
+		constraints.push(`output cap ${catalog.metadata.maxOutputTokens.value.toLocaleString("en-US")}`);
+	}
+	if (isCompatibilityValue(catalog.metadata.input)) constraints.push("text only");
+	if (isCompatibilityValue(catalog.metadata.reasoning)) constraints.push("reasoning off");
+	if (isCompatibilityValue(catalog.metadata.price)) constraints.push("price unreported");
+	return constraints.join(" • ") || "Provider and configured metadata are complete";
 }
 
 function requiresCompatibilityMode(metadata: CatalogModelMetadata): boolean {
-	return Object.values(metadata).some((value) => value === "unknown");
+	return Object.values(metadata).some(isCompatibilityValue);
 }
 
 function finishSelection(result: Promise<unknown> | unknown, navigation: CommandFlowNavigation): Promise<void> | void {
@@ -92,17 +95,30 @@ function describeMetadata(metadata: CatalogModelMetadata): string {
 		`context ${formatCount(metadata.contextWindow)}`,
 		`output ${formatCount(metadata.maxOutputTokens)}`,
 		`reasoning ${formatCapability(metadata.reasoning)}`,
-		`image ${formatCapability(metadata.imageInput)}`,
-		`price ${metadata.price === "unknown" ? "unknown" : "known"}`,
+		`input ${formatInput(metadata.input)}`,
+		`price ${formatPrice(metadata.price)}`,
 	].join(" • ");
 }
 
 function formatCount(value: CatalogValue<number>): string {
-	return value === "unknown" ? value : value.toLocaleString("en-US");
+	return isCompatibilityValue(value) ? "unknown" : `${value.value.toLocaleString("en-US")} (${sourceLabel(value)})`;
 }
 
 function formatCapability(value: CatalogValue<boolean>): string {
-	return value === "unknown" ? value : value ? "yes" : "no";
+	return isCompatibilityValue(value) ? "unknown" : `${value.value ? "yes" : "no"} (${sourceLabel(value)})`;
+}
+
+function formatInput(value: CatalogModelMetadata["input"]): string {
+	return isCompatibilityValue(value) ? "unknown" : `${value.value.join("+")} (${sourceLabel(value)})`;
+}
+
+function formatPrice(value: CatalogModelMetadata["price"]): string {
+	if (isCompatibilityValue(value)) return "unknown";
+	return `${value.value === "unreported" ? "unreported" : "known"} (${sourceLabel(value)})`;
+}
+
+function sourceLabel(value: CatalogValue<unknown>): string {
+	return value.source === "provider" ? "Provider" : "configured";
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
