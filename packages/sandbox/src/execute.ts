@@ -204,8 +204,10 @@ async function validateRequest(request: SandboxExecuteRequest): Promise<void> {
 	if (
 		!isCompiledSandboxPolicy(policy) ||
 		!(["read-only", "workspace", "full-access"] as const).includes(policy.profile as never) ||
-		policy.readAccess !== "full-disk" ||
+		!(["root-scoped", "full-disk"] as const).includes(policy.readAccess as never) ||
 		!(["restricted", "enabled"] as const).includes(policy.networkAccess as never) ||
+		!Array.isArray(policy.readableRoots) ||
+		!Array.isArray(policy.approvedReadRoots) ||
 		!Array.isArray(policy.deniedReadRoots) ||
 		!(policy.writableRoots === "full-disk" || Array.isArray(policy.writableRoots)) ||
 		!Array.isArray(policy.protectedMetadataRoots) ||
@@ -216,8 +218,12 @@ async function validateRequest(request: SandboxExecuteRequest): Promise<void> {
 	}
 	if (
 		(policy.profile === "full-access" &&
-			(policy.writableRoots !== "full-disk" || policy.networkAccess !== "enabled")) ||
-		(policy.profile !== "full-access" && policy.writableRoots === "full-disk")
+			(policy.readAccess !== "full-disk" ||
+				policy.writableRoots !== "full-disk" ||
+				policy.networkAccess !== "enabled" ||
+				policy.deniedReadRoots.length > 0)) ||
+		(policy.profile !== "full-access" &&
+			(policy.readAccess !== "root-scoped" || policy.writableRoots === "full-disk"))
 	) {
 		throw new SandboxExecutionError(
 			"invalid_request",
@@ -236,6 +242,8 @@ async function validateRequest(request: SandboxExecuteRequest): Promise<void> {
 	}
 	await assertCanonicalPath(request.cwd, "cwd");
 	const roots = [
+		...policy.readableRoots,
+		...policy.approvedReadRoots,
 		...policy.protectedMetadataRoots,
 		...policy.deniedReadRoots,
 		...(policy.writableRoots === "full-disk" ? [] : policy.writableRoots),
@@ -439,6 +447,7 @@ export async function execute(
 	let platformCleanup: (() => Promise<void>) | undefined;
 	try {
 		if (
+			policy.readAccess !== "full-disk" ||
 			policy.writableRoots !== "full-disk" ||
 			policy.deniedReadRoots.length > 0 ||
 			policy.networkAccess === "restricted"
@@ -446,6 +455,7 @@ export async function execute(
 			if (process.platform === "darwin") {
 				const prepared = prepareMacosSeatbelt(request.command, policy, {
 					managedProxyPorts: managedProxy?.port === undefined ? [] : [managedProxy.port],
+					runtimeReadPaths: isAbsolute(request.command[0]) ? [request.command[0]] : [],
 				});
 				if (!prepared) {
 					throw new SandboxExecutionError(

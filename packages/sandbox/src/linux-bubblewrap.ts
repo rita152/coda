@@ -1,7 +1,20 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, readFile, realpath, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import {
+	access,
+	chmod,
+	lstat,
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	rm,
+	rmdir,
+	stat,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +22,17 @@ import type { CompiledSandboxPolicy } from "./policy.ts";
 
 const BWRAP_PROBE_TIMEOUT_MS = 2_000;
 const TRUSTED_FALLBACK_SEARCH_PATHS = Object.freeze(["/usr/bin", "/bin", "/usr/local/bin"]);
+const LINUX_RUNTIME_READ_ROOTS = Object.freeze([
+	"/bin",
+	"/sbin",
+	"/usr",
+	"/lib",
+	"/lib64",
+	"/etc",
+	"/opt",
+	"/nix/store",
+	"/run/current-system",
+]);
 const bundledDigestExpectations = new Map<string, string>();
 
 export interface LinuxBubblewrapResolutionOptions {
@@ -47,6 +71,31 @@ interface PreparedDeniedReadMasks {
 function isContained(root: string, target: string): boolean {
 	const fromRoot = relative(root, target);
 	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
+}
+
+function overlaps(left: string, right: string): boolean {
+	return isContained(left, right) || isContained(right, left);
+}
+
+function shallowRoots(roots: readonly string[]): readonly string[] {
+	return Object.freeze(
+		[...new Set(roots)].sort(
+			(left, right) => left.split(sep).length - right.split(sep).length || left.localeCompare(right),
+		),
+	);
+}
+
+async function existingRoots(roots: readonly string[]): Promise<readonly string[]> {
+	const existing: string[] = [];
+	for (const root of shallowRoots(roots)) {
+		try {
+			await lstat(root);
+			existing.push(root);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+	return Object.freeze(existing);
 }
 
 async function isTrustedExecutable(path: string): Promise<boolean> {
@@ -296,8 +345,10 @@ async function cleanupDeniedReadMasks(prepared: PreparedDeniedReadMasks | undefi
 	let cleanupError: unknown;
 	for (const mount of [...prepared.mounts].reverse()) {
 		try {
-			if (mount.sourceIsDirectory) await rmdir(mount.source);
-			else await unlink(mount.source);
+			if (mount.sourceIsDirectory) {
+				await chmod(mount.source, 0o700);
+				await rm(mount.source, { recursive: true, force: true });
+			} else await unlink(mount.source);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError ??= error;
 		}
@@ -317,6 +368,39 @@ async function cleanupDeniedReadMasks(prepared: PreparedDeniedReadMasks | undefi
 	if (cleanupError) throw cleanupError;
 }
 
+async function prepareDeniedDirectoryMask(
+	source: string,
+	target: string,
+	approvedReadRoots: readonly string[],
+): Promise<void> {
+	const descendants: Array<{ readonly root: string; readonly directory: boolean }> = [];
+	for (const root of approvedReadRoots) {
+		if (root === target || !isContained(target, root)) continue;
+		try {
+			descendants.push({ root, directory: (await lstat(root)).isDirectory() });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+	if (descendants.length === 0) {
+		await mkdir(source, { mode: 0o000 });
+		return;
+	}
+	await mkdir(source, { mode: 0o700 });
+	for (const descendant of descendants) {
+		const names = relative(target, descendant.root).split(sep);
+		let parent = source;
+		for (const name of names.slice(0, -1)) {
+			parent = join(parent, name);
+			await mkdir(parent, { mode: 0o700, recursive: true });
+		}
+		const mountpoint = join(parent, names.at(-1)!);
+		if (descendant.directory) await mkdir(mountpoint, { mode: 0o000 });
+		else await writeFile(mountpoint, "", { mode: 0o000 });
+	}
+	await chmod(source, 0o111);
+}
+
 async function prepareDeniedReadMasks(policy: Readonly<CompiledSandboxPolicy>): Promise<PreparedDeniedReadMasks> {
 	const roots = minimalDeniedReadRoots(policy.deniedReadRoots);
 	if (roots.length === 0) return { mounts: [], synthetic: [] };
@@ -329,7 +413,7 @@ async function prepareDeniedReadMasks(policy: Readonly<CompiledSandboxPolicy>): 
 			const target = await resolveDeniedReadTarget(deniedRoot);
 			if (target.synthetic) synthetic.push(target.synthetic);
 			const source = join(root, `mask-${index}`);
-			if (target.isDirectory) await mkdir(source, { mode: 0o000 });
+			if (target.isDirectory) await prepareDeniedDirectoryMask(source, target.path, policy.approvedReadRoots);
 			else await writeFile(source, "", { mode: 0o000 });
 			mounts.push({ source, target: target.path, sourceIsDirectory: target.isDirectory });
 		}
@@ -354,13 +438,25 @@ export async function prepareLinuxBubblewrap(
 	const protectedTargets = await prepareProtectedTargets(policy);
 	let deniedReadMasks: PreparedDeniedReadMasks | undefined;
 	try {
-		deniedReadMasks = await prepareDeniedReadMasks(policy);
+		const ordinaryExposedRoots = [
+			...policy.readableRoots,
+			...(policy.writableRoots === "full-disk" ? ["/"] : policy.writableRoots),
+		];
+		const relevantDeniedReadRoots = policy.deniedReadRoots.filter(
+			(deniedRoot) =>
+				!policy.approvedReadRoots.includes(deniedRoot) &&
+				(ordinaryExposedRoots.some((root) => overlaps(root, deniedRoot)) ||
+					policy.approvedReadRoots.some((approvedRoot) => isContained(approvedRoot, deniedRoot))),
+		);
+		deniedReadMasks = await prepareDeniedReadMasks(
+			Object.freeze({ ...policy, deniedReadRoots: Object.freeze(relevantDeniedReadRoots) }),
+		);
 		const args: string[] = [
 			"--new-session",
 			"--die-with-parent",
-			policy.writableRoots === "full-disk" ? "--bind" : "--ro-bind",
-			"/",
-			"/",
+			...(policy.readAccess === "full-disk"
+				? [policy.writableRoots === "full-disk" ? "--bind" : "--ro-bind", "/", "/"]
+				: ["--tmpfs", "/"]),
 			"--dev",
 			"/dev",
 			"--unshare-user",
@@ -370,6 +466,20 @@ export async function prepareLinuxBubblewrap(
 		];
 		if (options.isolateNetwork) args.push("--unshare-net");
 		args.push("--proc", "/proc");
+		if (policy.readAccess === "root-scoped") {
+			const runtimeReadRoots = await existingRoots([
+				...LINUX_RUNTIME_READ_ROOTS,
+				...(isAbsolute(command[0]) ? [command[0]] : []),
+				...(options.helper && isAbsolute(options.helper[0]) ? [options.helper[0]] : []),
+			]);
+			for (const root of runtimeReadRoots) args.push("--ro-bind", root, root);
+			for (const root of await existingRoots(policy.readableRoots)) args.push("--ro-bind", root, root);
+			for (const root of await existingRoots(policy.approvedReadRoots)) {
+				if (!relevantDeniedReadRoots.some((deniedRoot) => isContained(deniedRoot, root))) {
+					args.push("--ro-bind", root, root);
+				}
+			}
+		}
 		if (policy.writableRoots !== "full-disk") {
 			const roots = [...policy.writableRoots].sort(
 				(left, right) => left.split(sep).length - right.split(sep).length,
@@ -379,8 +489,6 @@ export async function prepareLinuxBubblewrap(
 			);
 			for (const root of roots) {
 				args.push("--bind", root, root);
-				// A later, narrower writable root intentionally reopens only that
-				// reviewed subtree, matching Codex's path-specific precedence.
 				for (const path of protectedPaths) {
 					if (path !== root && isContained(root, path)) args.push("--ro-bind", path, path);
 				}
@@ -389,6 +497,15 @@ export async function prepareLinuxBubblewrap(
 		if (deniedReadMasks.root) {
 			args.push("--ro-bind", deniedReadMasks.root, deniedReadMasks.root);
 			for (const mount of deniedReadMasks.mounts) args.push("--ro-bind", mount.source, mount.target);
+		}
+		if (policy.readAccess === "root-scoped") {
+			for (const root of await existingRoots(policy.approvedReadRoots)) {
+				if (!relevantDeniedReadRoots.some((deniedRoot) => isContained(deniedRoot, root))) continue;
+				const reviewedWrite =
+					policy.writableRoots !== "full-disk" &&
+					policy.writableRoots.some((writableRoot) => writableRoot === root);
+				args.push(reviewedWrite ? "--bind" : "--ro-bind", root, root);
+			}
 		}
 		args.push("--chdir", cwd, "--");
 		args.push(...(options.helper ?? command));

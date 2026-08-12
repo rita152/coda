@@ -19,18 +19,46 @@ function exclusions(prefix: string, count: number): string[] {
 	return qualifiers;
 }
 
+function roots(prefix: string, count: number): string {
+	const qualifiers: string[] = [];
+	for (let index = 0; index < count; index++) {
+		qualifiers.push(`(literal (param "${prefix}_${index}"))`);
+		qualifiers.push(`(subpath (param "${prefix}_${index}"))`);
+	}
+	return `(require-any ${qualifiers.join(" ")})`;
+}
+
 function isContained(root: string, target: string): boolean {
 	const fromRoot = relative(root, target);
 	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
 }
 
-function accessRule(rootIndex: number, protectedPathIndices: readonly number[], deniedReadRootCount: number): string {
+function accessRule(
+	rootIndex: number,
+	protectedPathIndices: readonly number[],
+	deniedReadRootIndices: readonly number[],
+): string {
 	const qualifiers = [`(subpath (param "WRITABLE_ROOT_${rootIndex}"))`];
 	for (const index of protectedPathIndices) {
 		qualifiers.push(`(require-not (literal (param "PROTECTED_PATH_${index}")))`);
 		qualifiers.push(`(require-not (subpath (param "PROTECTED_PATH_${index}")))`);
 	}
-	qualifiers.push(...exclusions("DENIED_ROOT", deniedReadRootCount));
+	for (const index of deniedReadRootIndices) {
+		qualifiers.push(`(require-not (literal (param "DENIED_ROOT_${index}")))`);
+		qualifiers.push(`(require-not (subpath (param "DENIED_ROOT_${index}")))`);
+	}
+	return `(require-all ${qualifiers.join(" ")})`;
+}
+
+function approvedReadRule(rootIndex: number, root: string, deniedReadRoots: readonly string[]): string {
+	const qualifiers = [
+		`(require-any (literal (param "APPROVED_READ_ROOT_${rootIndex}")) (subpath (param "APPROVED_READ_ROOT_${rootIndex}")))`,
+	];
+	for (const [deniedIndex, deniedRoot] of deniedReadRoots.entries()) {
+		if (isContained(deniedRoot, root)) continue;
+		qualifiers.push(`(require-not (literal (param "DENIED_ROOT_${deniedIndex}")))`);
+		qualifiers.push(`(require-not (subpath (param "DENIED_ROOT_${deniedIndex}")))`);
+	}
 	return `(require-all ${qualifiers.join(" ")})`;
 }
 
@@ -39,33 +67,83 @@ function fullDiskRule(operation: "file-read*" | "file-write*", deniedReadRootCou
 	return `(allow ${operation} (require-all ${exclusions("DENIED_ROOT", deniedReadRootCount).join(" ")}))`;
 }
 
-export function buildMacosSeatbeltPolicy(policy: Readonly<CompiledSandboxPolicy>): string {
+const MACOS_RUNTIME_READ_RULES = Object.freeze([
+	'(literal "/")',
+	'(subpath "/bin")',
+	'(subpath "/sbin")',
+	'(subpath "/usr")',
+	'(subpath "/System")',
+	'(subpath "/Library")',
+	'(subpath "/private/etc")',
+	'(subpath "/opt")',
+]);
+
+export function buildMacosSeatbeltPolicy(
+	policy: Readonly<CompiledSandboxPolicy>,
+	options: { readonly runtimeReadPathCount?: number } = {},
+): string {
 	const sections = [
 		"(version 1)",
 		"(deny default)",
 		"(allow process*)",
 		"(allow signal (target same-sandbox))",
-		fullDiskRule("file-read*", policy.deniedReadRoots.length),
 		'(allow file-write-data (literal "/dev/null"))',
 		"(allow sysctl-read)",
 	];
+	if (policy.readAccess === "full-disk") {
+		sections.push(fullDiskRule("file-read*", policy.deniedReadRoots.length));
+	} else {
+		sections.push(`(allow file-read* (require-any ${MACOS_RUNTIME_READ_RULES.join(" ")}))`);
+		if (policy.readableRoots.length > 0) {
+			sections.push(
+				`(allow file-read* (require-all ${roots("READABLE_ROOT", policy.readableRoots.length)} ${exclusions("DENIED_ROOT", policy.deniedReadRoots.length).join(" ")}))`,
+			);
+		}
+		if (policy.approvedReadRoots.length > 0) {
+			sections.push(
+				`(allow file-read* ${policy.approvedReadRoots
+					.map((root, index) => approvedReadRule(index, root, policy.deniedReadRoots))
+					.join(" ")})`,
+			);
+		}
+		if ((options.runtimeReadPathCount ?? 0) > 0) {
+			sections.push(`(allow file-read* ${roots("RUNTIME_READ_PATH", options.runtimeReadPathCount ?? 0)})`);
+		}
+	}
 	if (policy.writableRoots === "full-disk") {
 		sections.push(fullDiskRule("file-write*", policy.deniedReadRoots.length));
 	} else if (policy.writableRoots.length > 0) {
-		sections.push(
-			`(allow file-write*\n${policy.writableRoots
-				.map((root, index) =>
-					accessRule(
-						index,
-						policy.protectedMetadataPaths
-							.map((path, pathIndex) => ({ path, pathIndex }))
-							.filter(({ path }) => path !== root && isContained(root, path))
-							.map(({ pathIndex }) => pathIndex),
-						policy.deniedReadRoots.length,
-					),
-				)
-				.join("\n")}\n)`,
-		);
+		const allDeniedReadRootIndices = policy.deniedReadRoots.map((_, index) => index);
+		const writeRules = policy.writableRoots
+			.map((root, index) =>
+				accessRule(
+					index,
+					policy.protectedMetadataPaths
+						.map((path, pathIndex) => ({ path, pathIndex }))
+						.filter(({ path }) => path !== root && isContained(root, path))
+						.map(({ pathIndex }) => pathIndex),
+					allDeniedReadRootIndices,
+				),
+			)
+			.join("\n");
+		const reviewedWriteRules = policy.writableRoots
+			.map((root, index) => ({ root, index }))
+			.filter(({ root }) => policy.approvedReadRoots.includes(root))
+			.map(({ root, index }) =>
+				accessRule(
+					index,
+					policy.protectedMetadataPaths
+						.map((path, pathIndex) => ({ path, pathIndex }))
+						.filter(({ path }) => path !== root && isContained(root, path))
+						.map(({ pathIndex }) => pathIndex),
+					policy.deniedReadRoots
+						.map((deniedRoot, deniedIndex) => ({ deniedRoot, deniedIndex }))
+						.filter(({ deniedRoot }) => !isContained(deniedRoot, root))
+						.map(({ deniedIndex }) => deniedIndex),
+				),
+			)
+			.join("\n");
+		sections.push(`(allow file-write*\n${writeRules}${reviewedWriteRules ? `\n${reviewedWriteRules}` : ""}\n)`);
 	}
 	if (policy.networkAccess === "enabled") {
 		sections.push("(allow network-outbound)", "(allow network-inbound)");
@@ -76,10 +154,14 @@ export function buildMacosSeatbeltPolicy(policy: Readonly<CompiledSandboxPolicy>
 export function prepareMacosSeatbelt(
 	command: readonly [string, ...string[]],
 	policy: Readonly<CompiledSandboxPolicy>,
-	options: { readonly managedProxyPorts?: readonly number[] } = {},
+	options: {
+		readonly managedProxyPorts?: readonly number[];
+		readonly runtimeReadPaths?: readonly string[];
+	} = {},
 ): PreparedSandboxCommand | undefined {
 	if (!existsSync(MACOS_SANDBOX_EXECUTABLE)) return undefined;
-	let policyText = buildMacosSeatbeltPolicy(policy);
+	const runtimeReadPaths = options.runtimeReadPaths ?? [];
+	let policyText = buildMacosSeatbeltPolicy(policy, { runtimeReadPathCount: runtimeReadPaths.length });
 	for (const port of options.managedProxyPorts ?? []) {
 		policyText += `\n(allow network-outbound (remote ip "localhost:${port}"))`;
 	}
@@ -98,6 +180,18 @@ export function prepareMacosSeatbelt(
 	for (let index = 0; index < policy.deniedReadRoots.length; index++) {
 		const root = policy.deniedReadRoots[index];
 		if (root !== undefined) args.push(`-DDENIED_ROOT_${index}=${root}`);
+	}
+	for (let index = 0; index < policy.readableRoots.length; index++) {
+		const root = policy.readableRoots[index];
+		if (root !== undefined) args.push(`-DREADABLE_ROOT_${index}=${root}`);
+	}
+	for (let index = 0; index < policy.approvedReadRoots.length; index++) {
+		const root = policy.approvedReadRoots[index];
+		if (root !== undefined) args.push(`-DAPPROVED_READ_ROOT_${index}=${root}`);
+	}
+	for (let index = 0; index < runtimeReadPaths.length; index++) {
+		const path = runtimeReadPaths[index];
+		if (path !== undefined) args.push(`-DRUNTIME_READ_PATH_${index}=${path}`);
 	}
 	args.push("--", ...command);
 	return Object.freeze({ backend: "macos-seatbelt", executable: MACOS_SANDBOX_EXECUTABLE, args });

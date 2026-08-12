@@ -11,14 +11,22 @@ export interface SandboxPolicyInput {
 	readonly profile: PermissionProfile;
 	readonly workspaceRoots: readonly string[];
 	readonly temporaryDirectory: string;
+	/** Explicit user-configured roots that may be read outside the Workspace. */
+	readonly additionalReadableRoots?: readonly string[];
 	readonly additionalWritableRoots?: readonly string[];
+	/** Canonical roots whose contents stay unreadable until a narrower read is reviewed. */
+	readonly deniedReadRoots?: readonly string[];
 }
 
 export interface CompiledSandboxPolicy {
 	readonly [COMPILED_SANDBOX_POLICY]: true;
 	readonly profile: PermissionProfile;
-	readonly readAccess: "full-disk";
-	/** Exact path roots that remain unreadable even when the profile otherwise permits full-disk reads. */
+	readonly readAccess: "root-scoped" | "full-disk";
+	/** Ordinary roots admitted by the active Permission Profile. */
+	readonly readableRoots: readonly string[];
+	/** Explicitly configured or reviewed roots that take precedence over a containing denied root. */
+	readonly approvedReadRoots: readonly string[];
+	/** Roots whose contents remain unreadable through broader ordinary readable roots. */
 	readonly deniedReadRoots: readonly string[];
 	readonly writableRoots: readonly string[] | "full-disk";
 	readonly protectedMetadataRoots: readonly string[];
@@ -59,14 +67,22 @@ export function isCompiledSandboxPolicy(value: unknown): value is Readonly<Compi
 export function compileSandboxPolicy(input: SandboxPolicyInput): Readonly<CompiledSandboxPolicy> {
 	const workspaceRoots = input.workspaceRoots.map((root) => canonicalAbsolute(root, "workspace root"));
 	const temporaryDirectory = canonicalAbsolute(input.temporaryDirectory, "temporary directory");
-	const additionalRoots = (input.additionalWritableRoots ?? []).map((root) =>
+	const additionalReadableRoots = (input.additionalReadableRoots ?? []).map((root) =>
+		canonicalAbsolute(root, "additional readable root"),
+	);
+	const additionalWritableRoots = (input.additionalWritableRoots ?? []).map((root) =>
 		canonicalAbsolute(root, "additional writable root"),
 	);
+	const deniedReadRoots = (input.deniedReadRoots ?? []).map((root) => canonicalAbsolute(root, "denied read root"));
+	const ordinaryWorkspaceRoots = uniqueRoots([
+		...workspaceRoots,
+		...(input.profile === "workspace" ? [SYSTEM_TEMPORARY_DIRECTORY, temporaryDirectory] : []),
+	]);
 	const writableRoots =
 		input.profile === "full-access"
 			? "full-disk"
 			: input.profile === "workspace"
-				? uniqueRoots([...workspaceRoots, SYSTEM_TEMPORARY_DIRECTORY, temporaryDirectory, ...additionalRoots])
+				? uniqueRoots([...ordinaryWorkspaceRoots, ...additionalWritableRoots])
 				: Object.freeze([]);
 	// Every restricted writable root gets the same protected-name carve-outs.
 	// A more specific reviewed write root can reopen an exact descendant later,
@@ -79,8 +95,13 @@ export function compileSandboxPolicy(input: SandboxPolicyInput): Readonly<Compil
 	return Object.freeze({
 		[COMPILED_SANDBOX_POLICY]: true as const,
 		profile: input.profile,
-		readAccess: "full-disk",
-		deniedReadRoots: Object.freeze([]),
+		readAccess: input.profile === "full-access" ? "full-disk" : "root-scoped",
+		readableRoots: input.profile === "full-access" ? Object.freeze([]) : ordinaryWorkspaceRoots,
+		approvedReadRoots:
+			input.profile === "full-access"
+				? Object.freeze([])
+				: uniqueRoots([...additionalReadableRoots, ...additionalWritableRoots]),
+		deniedReadRoots: input.profile === "full-access" ? Object.freeze([]) : uniqueRoots(deniedReadRoots),
 		writableRoots,
 		protectedMetadataRoots,
 		protectedMetadataNames: PROTECTED_METADATA_NAMES,

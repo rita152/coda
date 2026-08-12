@@ -75,25 +75,25 @@ describe("Linux bubblewrap preparation", () => {
 		await prepared.cleanup();
 	});
 
-	it("keeps Full Access writable while masking explicit deny-read roots", async () => {
+	it("masks denied roots after broader readable and writable mounts", async () => {
 		const root = await mkdtemp(join(tmpdir(), "coda-linux-deny-read-"));
 		temporaryDirectories.push(root);
 		const secret = join(root, "secret.txt");
 		await writeFile(secret, "classified");
 		const canonicalRoot = await realpath(root);
 		const canonicalSecret = await realpath(secret);
-		const base = compileSandboxPolicy({
-			profile: "full-access",
+		const policy = compileSandboxPolicy({
+			profile: "workspace",
 			workspaceRoots: [canonicalRoot],
 			temporaryDirectory: "/tmp",
+			deniedReadRoots: [canonicalSecret],
 		});
-		const policy = Object.freeze({ ...base, deniedReadRoots: Object.freeze([canonicalSecret]) });
 
 		const prepared = await prepareLinuxBubblewrap("/usr/bin/bwrap", ["/bin/true"], canonicalRoot, policy, {
 			isolateNetwork: false,
 		});
 
-		expect(flagPairs(prepared.args, "--bind")).toContainEqual(["/", "/"]);
+		expect(prepared.args).toContain("--tmpfs");
 		const deniedMount = flagPairs(prepared.args, "--ro-bind").find(([, target]) => target === canonicalSecret);
 		expect(deniedMount).toBeDefined();
 		const maskSource = deniedMount![0];
@@ -101,6 +101,64 @@ describe("Linux bubblewrap preparation", () => {
 		await prepared.cleanup();
 		await expect(access(maskSource)).rejects.toMatchObject({ code: "ENOENT" });
 		await expect(access(secret)).resolves.toBeUndefined();
+	});
+
+	it("reopens only a reviewed descendant after masking its denied ancestor", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-linux-reviewed-read-"));
+		temporaryDirectories.push(root);
+		const sensitive = join(root, ".ssh");
+		const reviewed = join(sensitive, "config");
+		await mkdir(sensitive);
+		await writeFile(reviewed, "Host example");
+		const canonicalRoot = await realpath(root);
+		const canonicalSensitive = await realpath(sensitive);
+		const canonicalReviewed = await realpath(reviewed);
+		const policy = compileSandboxPolicy({
+			profile: "read-only",
+			workspaceRoots: [canonicalRoot],
+			temporaryDirectory: "/tmp",
+			additionalReadableRoots: [canonicalReviewed],
+			deniedReadRoots: [canonicalSensitive],
+		});
+
+		const prepared = await prepareLinuxBubblewrap("/usr/bin/bwrap", ["/bin/true"], canonicalRoot, policy, {
+			isolateNetwork: true,
+		});
+
+		const deniedMount = flagPairs(prepared.args, "--ro-bind").find(([, target]) => target === canonicalSensitive);
+		expect(deniedMount).toBeDefined();
+		const deniedIndex = mountTargetIndex(prepared.args, "--ro-bind", canonicalSensitive);
+		const reviewedIndex = mountIndex(prepared.args, "--ro-bind", canonicalReviewed, deniedIndex + 1);
+		expect(deniedIndex).toBeLessThan(reviewedIndex);
+		expect((await lstat(deniedMount![0])).mode & 0o777).toBe(0o111);
+		expect((await lstat(join(deniedMount![0], "config"))).mode & 0o777).toBe(0);
+		await prepared.cleanup();
+	});
+
+	it("mounts a broad reviewed parent before masking its protected descendant", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-linux-broad-reviewed-read-"));
+		temporaryDirectories.push(fixture);
+		const home = join(fixture, "home");
+		const sensitive = join(home, ".ssh");
+		await mkdir(sensitive, { recursive: true });
+		const canonicalHome = await realpath(home);
+		const canonicalSensitive = await realpath(sensitive);
+		const policy = compileSandboxPolicy({
+			profile: "read-only",
+			workspaceRoots: ["/workspace"],
+			temporaryDirectory: "/tmp",
+			additionalReadableRoots: [canonicalHome],
+			deniedReadRoots: [canonicalSensitive],
+		});
+
+		const prepared = await prepareLinuxBubblewrap("/usr/bin/bwrap", ["/bin/true"], "/workspace", policy, {
+			isolateNetwork: true,
+		});
+
+		const parentIndex = mountIndex(prepared.args, "--ro-bind", canonicalHome);
+		const deniedIndex = mountTargetIndex(prepared.args, "--ro-bind", canonicalSensitive);
+		expect(parentIndex).toBeLessThan(deniedIndex);
+		await prepared.cleanup();
 	});
 
 	it("fails closed on a protected path reached through a replaceable writable symlink", async () => {
@@ -244,4 +302,11 @@ function mountIndex(args: readonly string[], flag: string, path: string, from = 
 		if (args[index] === flag && args[index + 1] === path && args[index + 2] === path) return index;
 	}
 	throw new Error(`Missing ${flag} mount for ${path}`);
+}
+
+function mountTargetIndex(args: readonly string[], flag: string, target: string, from = 0): number {
+	for (let index = from; index < args.length - 2; index++) {
+		if (args[index] === flag && args[index + 2] === target) return index;
+	}
+	throw new Error(`Missing ${flag} target mount for ${target}`);
 }

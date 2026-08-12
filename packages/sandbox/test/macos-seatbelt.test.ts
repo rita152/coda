@@ -4,6 +4,27 @@ import { compileSandboxPolicy, PROTECTED_METADATA_NAMES } from "../src/index.ts"
 import { buildMacosSeatbeltPolicy } from "../src/macos-seatbelt.ts";
 
 describe("macOS Seatbelt policy", () => {
+	it("allows only configured roots, masks denied roots, and reopens reviewed descendants", () => {
+		const base = compileSandboxPolicy({
+			profile: "read-only",
+			workspaceRoots: ["/Users/user/project"],
+			temporaryDirectory: "/private/tmp",
+			deniedReadRoots: ["/Users/user/project/.ssh"],
+		});
+		const policy = Object.freeze({
+			...base,
+			approvedReadRoots: Object.freeze(["/Users/user/project/.ssh/config"]),
+		});
+
+		const generated = buildMacosSeatbeltPolicy(policy, { runtimeReadPathCount: 1 });
+
+		expect(generated).toContain('param "READABLE_ROOT_0"');
+		expect(generated).toContain('param "DENIED_ROOT_0"');
+		expect(generated).toContain('param "APPROVED_READ_ROOT_0"');
+		expect(generated).toContain('param "RUNTIME_READ_PATH_0"');
+		expect(generated).not.toContain("(allow file-read*)");
+	});
+
 	it("lets a narrower reviewed root reopen only its protected ancestor", () => {
 		const root = "/workspace";
 		const protectedRoot = join(root, ".git");
@@ -33,5 +54,21 @@ describe("macOS Seatbelt policy", () => {
 
 		expect(outerRule).toContain(`PROTECTED_PATH_${protectedIndex}`);
 		expect(reviewedRule).not.toContain(`PROTECTED_PATH_${protectedIndex}`);
+	});
+
+	it("keeps a protected descendant excluded from a broad reviewed parent", () => {
+		const base = compileSandboxPolicy({
+			profile: "read-only",
+			workspaceRoots: ["/workspace"],
+			temporaryDirectory: "/private/tmp",
+			additionalReadableRoots: ["/Users/user"],
+			deniedReadRoots: ["/Users/user/.ssh"],
+		});
+
+		const generated = buildMacosSeatbeltPolicy(base);
+
+		expect(generated).toContain(
+			'(require-all (require-any (literal (param "APPROVED_READ_ROOT_0")) (subpath (param "APPROVED_READ_ROOT_0"))) (require-not (literal (param "DENIED_ROOT_0"))) (require-not (subpath (param "DENIED_ROOT_0"))))',
+		);
 	});
 });

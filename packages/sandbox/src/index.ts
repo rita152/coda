@@ -31,3 +31,8 @@ export {
 	SandboxPolicyError,
 	type SandboxPolicyInput,
 } from "./policy.ts";
+export {
+	createReadAccessPolicy,
+	type ReadAccessDecision,
+	type ReadAccessPolicy,
+} from "./read-access-policy.ts";

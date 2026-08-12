@@ -36,17 +36,18 @@ describe.skipIf(process.platform !== "linux")("Linux Sandbox", () => {
 		expect(result.stdout).toMatch(/^NoNewPrivs:\s+1$/mu);
 	});
 
-	it("enforces a deny-read carveout even when the base profile is Full Access", async () => {
+	it("enforces a denied read root without leaking its contents", async () => {
 		const { canonicalTmp, canonicalWorkspace, fixture } = await fixtureWorkspace();
 		const secret = join(fixture, "secret.txt");
 		await writeFile(secret, "classified");
 		const canonicalSecret = await realpath(secret);
-		const base = compileSandboxPolicy({
-			profile: "full-access",
+		const policy = compileSandboxPolicy({
+			profile: "workspace",
 			workspaceRoots: [canonicalWorkspace],
 			temporaryDirectory: canonicalTmp,
+			additionalReadableRoots: [fixture],
+			deniedReadRoots: [canonicalSecret],
 		});
-		const policy = Object.freeze({ ...base, deniedReadRoots: Object.freeze([canonicalSecret]) });
 
 		const result = await execute({
 			command: ["/bin/cat", secret],
@@ -58,6 +59,28 @@ describe.skipIf(process.platform !== "linux")("Linux Sandbox", () => {
 
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stdout).not.toContain("classified");
+	});
+
+	it("keeps Full Access as an explicit read bypass", async () => {
+		const { canonicalTmp, canonicalWorkspace, fixture } = await fixtureWorkspace();
+		const secret = join(fixture, "secret.txt");
+		await writeFile(secret, "classified");
+
+		const result = await execute({
+			command: ["/bin/cat", secret],
+			cwd: canonicalWorkspace,
+			environment: { PATH: "/usr/bin:/bin" },
+			policy: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: [canonicalWorkspace],
+				temporaryDirectory: canonicalTmp,
+				deniedReadRoots: [await realpath(secret)],
+			}),
+			timeoutMs: 5_000,
+		});
+
+		expect(result).toMatchObject({ status: "exited", backend: "none", exitCode: 0 });
+		expect(result.stdout).toBe("classified");
 	});
 
 	it("ships and verifies the current architecture's bubblewrap fallback", async () => {

@@ -12,19 +12,19 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== "darwin")("macOS Sandbox", () => {
-	it("enforces a deny-read carveout even when the base profile is Full Access", async () => {
+	it("enforces a denied read root without leaking its contents", async () => {
 		const fixture = await mkdtemp(join(tmpdir(), "coda-sandbox-deny-read-"));
 		artifacts.push(fixture);
 		const secret = join(fixture, "secret.txt");
 		await writeFile(secret, "classified");
 		const canonicalFixture = await realpath(fixture);
 		const canonicalSecret = await realpath(secret);
-		const base = compileSandboxPolicy({
-			profile: "full-access",
+		const policy = compileSandboxPolicy({
+			profile: "workspace",
 			workspaceRoots: [canonicalFixture],
 			temporaryDirectory: await realpath(tmpdir()),
+			deniedReadRoots: [canonicalSecret],
 		});
-		const policy = Object.freeze({ ...base, deniedReadRoots: Object.freeze([canonicalSecret]) });
 
 		const result = await execute({
 			command: ["/bin/cat", secret],
@@ -36,6 +36,30 @@ describe.skipIf(process.platform !== "darwin")("macOS Sandbox", () => {
 
 		expect(result).toMatchObject({ status: "denied", backend: "macos-seatbelt" });
 		expect(result.stdout).not.toContain("classified");
+	});
+
+	it("keeps Full Access as an explicit read bypass", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-sandbox-full-read-"));
+		artifacts.push(fixture);
+		const secret = join(fixture, "secret.txt");
+		await writeFile(secret, "classified");
+		const canonicalFixture = await realpath(fixture);
+
+		const result = await execute({
+			command: ["/bin/cat", secret],
+			cwd: canonicalFixture,
+			environment: { PATH: "/usr/bin:/bin" },
+			policy: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: [canonicalFixture],
+				temporaryDirectory: await realpath(tmpdir()),
+				deniedReadRoots: [await realpath(secret)],
+			}),
+			timeoutMs: 5_000,
+		});
+
+		expect(result).toMatchObject({ status: "exited", backend: "none", exitCode: 0 });
+		expect(result.stdout).toBe("classified");
 	});
 
 	it("denies a descendant write outside every canonical Workspace root", async () => {
