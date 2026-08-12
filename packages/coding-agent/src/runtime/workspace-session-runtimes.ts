@@ -68,4 +68,19 @@ export class WorkspaceSessionRuntimes<TRuntime> {
 		this.#active = runtime;
 		return { runtime, created: true };
 	}
+
+	/** Atomically replaces the foreground runtime after its successor is ready. */
+	replaceActive(replacement: TRuntime): TRuntime {
+		if (!this.#identity.isEmpty(replacement)) throw new Error("Replacement Session runtime is not empty");
+		const replacementId = this.#identity.id(replacement);
+		const activeId = this.#identity.id(this.#active);
+		if (replacementId === activeId || this.#open.has(replacementId)) {
+			throw new Error(`Replacement Session runtime identity is already open: ${replacementId}`);
+		}
+		const replaced = this.#active;
+		this.#open.delete(activeId);
+		this.#open.set(replacementId, replacement);
+		this.#active = replacement;
+		return replaced;
+	}
 }

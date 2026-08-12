@@ -28,7 +28,7 @@ import { renderVisibleUserText } from "../skills/context.ts";
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
-import { CommandFlowHost, renderCommandFlow } from "./command-flow-host.ts";
+import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
 import { extensionReferencesFromMarkers } from "./extension-references.ts";
 import type { ComposerExtensionReference, ComposerSubmission, UserShellSubmission } from "./input-types.ts";
@@ -282,6 +282,10 @@ export class ChatComponent extends Component {
 	setReasoning(reasoning: string): void {
 		this.#reasoning = reasoning;
 		this.invalidate();
+	}
+
+	openCommandFlow(screen: CommandFlowScreen): void {
+		this.#commandFlow.open(screen);
 	}
 
 	insertSkillReference(commandId: string): void {

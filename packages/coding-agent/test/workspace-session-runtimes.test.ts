@@ -53,4 +53,40 @@ describe("WorkspaceSessionRuntimes", () => {
 		expect(right).toBe(second);
 		expect(load).toHaveBeenCalledTimes(1);
 	});
+
+	it("replaces only the active runtime after an empty successor is ready", async () => {
+		const first: FauxRuntime = { id: "a", empty: false, running: false };
+		const background: FauxRuntime = { id: "b", empty: false, running: true };
+		const replacement: FauxRuntime = { id: "c", empty: true, running: false };
+		const runtimes = new WorkspaceSessionRuntimes(first, {
+			id: (runtime) => runtime.id,
+			isEmpty: (runtime) => runtime.empty,
+		});
+
+		await runtimes.focus("b", async () => background);
+		await runtimes.focus("a", async () => first);
+		const replaced = runtimes.replaceActive(replacement);
+
+		expect(replaced).toBe(first);
+		expect(runtimes.active).toBe(replacement);
+		expect(runtimes.open).toEqual([background, replacement]);
+		expect(runtimes.get("a")).toBeUndefined();
+	});
+
+	it("rejects a non-empty or duplicate replacement without changing active state", () => {
+		const first: FauxRuntime = { id: "a", empty: false, running: false };
+		const runtimes = new WorkspaceSessionRuntimes(first, {
+			id: (runtime) => runtime.id,
+			isEmpty: (runtime) => runtime.empty,
+		});
+
+		expect(() => runtimes.replaceActive({ id: "b", empty: false, running: false })).toThrow(
+			"Replacement Session runtime is not empty",
+		);
+		expect(() => runtimes.replaceActive({ id: "a", empty: true, running: false })).toThrow(
+			"Replacement Session runtime identity is already open",
+		);
+		expect(runtimes.active).toBe(first);
+		expect(runtimes.open).toEqual([first]);
+	});
 });

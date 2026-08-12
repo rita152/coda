@@ -15,6 +15,7 @@ import {
 	createAuthCommandFlow,
 	createProviderAuthFlow,
 } from "../commands/auth-flow.ts";
+import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts";
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
@@ -22,6 +23,7 @@ import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
 import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
+import { isContextOverflowError, isProviderContextOverflow } from "../context-window/overflow-recovery.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
@@ -92,6 +94,9 @@ export interface InteractiveSessionOptions {
 	readonly compactCommand?: {
 		readonly run: (focus?: string) => Promise<string> | string;
 	};
+	readonly contextOverflowRecovery?: {
+		takeUnrecoverable(): boolean;
+	};
 	readonly reasoning: string;
 	readonly initialPrompt?: AgentInput;
 	readonly initialAttachmentIds?: readonly string[];
@@ -127,6 +132,7 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
 	readonly sessionCommand?: InteractiveSessionCommand;
+	readonly onContextOverflowReplacement?: (replacement: InteractiveSessionOptions) => Promise<void> | void;
 	readonly lifecycle?: InteractiveProcessLifecycle;
 	readonly allocateId: (kind: "composer_submission" | "user_shell") => string;
 	readonly processRunner: ProcessRunner;
@@ -165,6 +171,10 @@ interface InteractivePane {
 	readonly detachAgent: () => void;
 	initialStarted: boolean;
 	needsAttention: boolean;
+	contextOverflowPending: boolean;
+	contextOverflowOffered: boolean;
+	providerOverflowObserved: boolean;
+	replacement?: Promise<void>;
 }
 
 async function runMultiSessionInteractive(
@@ -231,6 +241,7 @@ async function runMultiSessionInteractive(
 		options.approval?.setActiveSession(pane.id);
 		options.mcpElicitation?.setActiveSession(pane.id);
 		await startPane(pane);
+		if (pane.contextOverflowPending) offerContextOverflowRecovery(pane);
 	};
 
 	const createSession = async (): Promise<void> => {
@@ -240,6 +251,70 @@ async function runMultiSessionInteractive(
 		options.approval?.setActiveSession(result.runtime.id);
 		options.mcpElicitation?.setActiveSession(result.runtime.id);
 		await startPane(result.runtime);
+	};
+
+	const replaceAfterContextOverflow = async (pane: InteractivePane): Promise<void> => {
+		if (pane.replacement) return pane.replacement;
+		const operation = (async () => {
+			const replacementOptions = await sessionCommand.create();
+			assertEmptyReplacementSession(pane.options, replacementOptions);
+			const replacement = createPane(replacementOptions);
+			const replaced = runtimes.replaceActive(replacement);
+			if (replaced !== pane) throw new Error("Context Overflow replacement no longer matches the active Session");
+			root.select(replacement.component);
+			replacement.needsAttention = false;
+			options.approval?.setActiveSession(replacement.id);
+			options.mcpElicitation?.setActiveSession(replacement.id);
+			await startPane(replacement);
+			await options.onContextOverflowReplacement?.(replacement.options);
+			try {
+				await retirePane(pane);
+			} catch (error) {
+				await options.onWarning?.(
+					`Could not fully close overflowed Session ${pane.id}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		})();
+		pane.replacement = operation;
+		try {
+			await operation;
+		} finally {
+			if (pane.replacement === operation) pane.replacement = undefined;
+		}
+	};
+
+	const offerContextOverflowRecovery = (pane: InteractivePane): void => {
+		if (pane.contextOverflowOffered) return;
+		pane.contextOverflowOffered = true;
+		pane.component.openCommandFlow(
+			createContextOverflowFlow({
+				openEmptySession: () => replaceAfterContextOverflow(pane),
+			}),
+		);
+	};
+
+	const retirePane = async (pane: InteractivePane): Promise<void> => {
+		pane.detachAgent();
+		components.delete(pane.component);
+		const failures: unknown[] = [];
+		let droppedShells = 0;
+		try {
+			droppedShells = await pane.input.dispose();
+		} catch (error) {
+			failures.push(error);
+		}
+		try {
+			await pane.options.session.close();
+		} catch (error) {
+			failures.push(error);
+		}
+		if (droppedShells > 0) {
+			await options.onWarning?.(
+				`Dropped ${droppedShells} queued local Shell command${droppedShells === 1 ? "" : "s"} from overflowed Session ${pane.id}`,
+			);
+		}
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, "Could not retire overflowed Session runtime");
 	};
 
 	const createPane = (sessionOptions: InteractiveSessionOptions): InteractivePane => {
@@ -421,9 +496,38 @@ async function runMultiSessionInteractive(
 			onExit: resolveExit,
 		});
 		components.add(component);
+		let pane!: InteractivePane;
 		const detachAgent = sessionOptions.agent.onEvent((event) => {
 			component.accept(event);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
+			if (event.type === "run_start") {
+				pane.contextOverflowPending = false;
+				pane.contextOverflowOffered = false;
+				pane.providerOverflowObserved = false;
+			}
+			if (
+				event.type === "attempt_end" &&
+				event.outcome === "error" &&
+				isProviderContextOverflow(event.candidate.message)
+			) {
+				pane.providerOverflowObserved = true;
+			}
+			if (event.type === "retry_scheduled" && event.reason === "context overflow compacted") {
+				pane.providerOverflowObserved = false;
+			}
+			if (event.type === "run_end") {
+				const runtimeOverflow = sessionOptions.contextOverflowRecovery?.takeUnrecoverable() ?? false;
+				if (
+					event.outcome === "error" &&
+					(pane.providerOverflowObserved ||
+						runtimeOverflow ||
+						isContextOverflowError(event.failure?.message ?? ""))
+				) {
+					pane.contextOverflowPending = true;
+					if (pane === runtimes.active) offerContextOverflowRecovery(pane);
+					else pane.needsAttention = true;
+				}
+			}
 			if (
 				(event.type === "tool_execution_start" ||
 					event.type === "tool_execution_end" ||
@@ -434,7 +538,7 @@ async function runMultiSessionInteractive(
 				if (approval) component.setApprovalResult(event.invocation.id, approval);
 			}
 		});
-		return {
+		pane = {
 			id: sessionOptions.session.descriptor.id,
 			options: sessionOptions,
 			component,
@@ -443,7 +547,11 @@ async function runMultiSessionInteractive(
 			detachAgent,
 			initialStarted: false,
 			needsAttention: false,
+			contextOverflowPending: false,
+			contextOverflowOffered: false,
+			providerOverflowObserved: false,
 		};
+		return pane;
 	};
 
 	const startPane = async (pane: InteractivePane): Promise<void> => {
@@ -872,6 +980,44 @@ async function runSingleSessionInteractive(
 				`Dropped ${droppedShells} queued local Shell command${droppedShells === 1 ? "" : "s"} on exit`,
 			);
 		}
+	}
+}
+
+function assertEmptyReplacementSession(
+	current: InteractiveSessionOptions,
+	replacement: InteractiveSessionOptions,
+): void {
+	if (replacement.session.descriptor.id === current.session.descriptor.id) {
+		throw new Error("Context Overflow replacement must have a fresh Session identity");
+	}
+	if (
+		replacement.session.descriptor.workspace.id !== current.session.descriptor.workspace.id ||
+		replacement.session.descriptor.workspace.path !== current.session.descriptor.workspace.path
+	) {
+		throw new Error("Context Overflow replacement must belong to the same Workspace");
+	}
+	const restoredAttachmentCount = [...(replacement.restoredAttachments?.values() ?? [])].reduce(
+		(total, attachments) => total + attachments.length,
+		0,
+	);
+	if (
+		replacement.agent.state.status !== "idle" ||
+		replacement.agent.state.messages.length > 0 ||
+		replacement.agent.state.pendingSteering.length > 0 ||
+		replacement.agent.state.pendingFollowUps.length > 0 ||
+		replacement.session.seed.messages.length > 0 ||
+		replacement.session.seed.pendingFollowUps.length > 0 ||
+		replacement.session.recoverableFollowUps.length > 0 ||
+		replacement.session.composerSubmissions.length > 0 ||
+		replacement.session.toolInvocations.length > 0 ||
+		replacement.session.compactionCheckpoint !== undefined ||
+		replacement.session.mediaReferences.size > 0 ||
+		replacement.initialPrompt !== undefined ||
+		(replacement.initialAttachmentIds?.length ?? 0) > 0 ||
+		(replacement.initialAttachments?.length ?? 0) > 0 ||
+		restoredAttachmentCount > 0
+	) {
+		throw new Error("Context Overflow replacement Session runtime is not empty");
 	}
 }
 
