@@ -7,6 +7,7 @@ import type {
 	MessageId,
 	ToolExecutionProgress,
 	ToolInvocation,
+	ToolRejectionReason,
 } from "@coda/agent";
 import {
 	type AssistantMessage,
@@ -531,7 +532,7 @@ export class SemanticTimeline {
 
 	#rejectTool(
 		invocation: Immutable<ToolInvocation>,
-		reason: "missing" | "invalid" | "policy" | "aborted" | "not_started",
+		reason: ToolRejectionReason,
 		result: AgentMessage,
 		timestamp: number,
 		turnId: string,

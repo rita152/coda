@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { Agent, type AgentInput, type AgentTool, type Clock, type IdGenerator, type Immutable } from "@coda/agent";
+import {
+	Agent,
+	type AgentInput,
+	type AgentTool,
+	type Clock,
+	type IdGenerator,
+	type Immutable,
+	type RunBudget,
+} from "@coda/agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -147,6 +155,15 @@ interface PreparedRunRuntime {
 	readonly mcp: McpToolSnapshot;
 	readonly tools: readonly AgentTool[];
 }
+
+const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
+	limits: Object.freeze({
+		maxTurns: 64,
+		maxToolInvocations: 256,
+		maxElapsedMs: 60 * 60 * 1_000,
+		maxConsecutiveEquivalentToolBatches: 4,
+	}),
+});
 
 function isRecoverableContextOverflow(message: Immutable<AssistantMessage>): boolean {
 	if (message.content.length > 0) return false;
@@ -1462,6 +1479,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const agent = new Agent({
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
+						runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
 						tools: () => {
 							const runtime = runRuntime.active?.value;
 							if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
@@ -1887,6 +1905,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								const targetAgent = new Agent({
 									clock: options.runtime.clock,
 									idGenerator: options.runtime.idGenerator,
+									runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
 									tools: () => {
 										const runtime = targetRunRuntime.active?.value;
 										if (!runtime) throw new Error("Tools were requested outside an active Run runtime");

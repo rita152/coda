@@ -21,7 +21,16 @@ const REASONING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xh
 const RUN_OUTCOMES = new Set(["success", "error", "aborted"]);
 const TOOL_OUTCOMES = new Set(["success", "error", "aborted", "rejected", "interrupted"]);
 const TOOL_SETTLEMENTS = new Set(["returned", "threw", "aborted"]);
-const TOOL_REASONS = new Set(["missing", "invalid", "policy", "aborted", "not_started", "skipped_by_user"]);
+const TOOL_REASONS = new Set(["missing", "invalid", "policy", "aborted", "not_started", "budget", "skipped_by_user"]);
+const RUN_LIMITS = new Set([
+	"turns",
+	"model_attempts",
+	"tool_invocations",
+	"elapsed_ms",
+	"total_tokens",
+	"total_cost_usd",
+	"consecutive_equivalent_tool_batches",
+]);
 
 function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -512,6 +521,20 @@ function isToolInvocation(value: unknown): boolean {
 }
 
 function isRunFailure(value: unknown): boolean {
+	if (
+		exactRecord(value, ["kind", "message", "exhaustion"]) &&
+		value.kind === "budget" &&
+		typeof value.message === "string"
+	) {
+		return (
+			exactRecord(value.exhaustion, ["limit", "maximum", "observed"]) &&
+			RUN_LIMITS.has(String(value.exhaustion.limit)) &&
+			isFiniteNumber(value.exhaustion.maximum) &&
+			value.exhaustion.maximum > 0 &&
+			isFiniteNumber(value.exhaustion.observed) &&
+			value.exhaustion.observed >= 0
+		);
+	}
 	return (
 		exactRecord(value, ["kind", "message"]) &&
 		(value.kind === "model" || value.kind === "tool" || value.kind === "runtime" || value.kind === "listener") &&

@@ -276,6 +276,14 @@ describe("Coding Agent print mode", () => {
 		expect(events[0]).toMatchObject({
 			schemaVersion: 2,
 			type: "run_start",
+			budget: {
+				limits: {
+					maxTurns: 64,
+					maxToolInvocations: 256,
+					maxElapsedMs: 3_600_000,
+					maxConsecutiveEquivalentToolBatches: 4,
+				},
+			},
 			model: { provider: faux.getModel().provider, id: faux.getModel().id },
 			reasoning: "off",
 			permissions: { profile: "read-only", approvalPolicy: "on-request" },

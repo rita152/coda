@@ -101,4 +101,41 @@ describe("Session message schema", () => {
 		expect(isSessionRecordPayload("attempt_finished", payload, 9)).toBe(true);
 		expect(isSessionRecordPayload("attempt_finished", payload, 8)).toBe(false);
 	});
+
+	it("persists budget failures and budget-rejected Tool Invocations", () => {
+		const failure = {
+			kind: "budget",
+			message: "Run budget exhausted: turns (maximum 64, observed 64)",
+			exhaustion: { limit: "turns", maximum: 64, observed: 64 },
+		};
+		expect(isSessionRecordPayload("run_finished", { outcome: "error", failure }, 9)).toBe(true);
+		expect(
+			isSessionRecordPayload(
+				"run_finished",
+				{ outcome: "error", failure: { ...failure, exhaustion: { ...failure.exhaustion, limit: "unknown" } } },
+				9,
+			),
+		).toBe(false);
+
+		expect(
+			isSessionRecordPayload(
+				"tool_finished",
+				{
+					invocation: {
+						id: "invocation:budget",
+						resultMessageId: "message:budget",
+						providerToolCallId: "call:budget",
+						toolName: "bash",
+						arguments: {},
+						sourceIndex: 0,
+						replaySafety: "never",
+					},
+					outcome: "rejected",
+					reason: "budget",
+					resultMessageId: "message:budget",
+				},
+				9,
+			),
+		).toBe(true);
+	});
 });
