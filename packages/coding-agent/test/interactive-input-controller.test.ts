@@ -456,6 +456,37 @@ describe("InteractiveInputController", () => {
 		expect(commit).not.toHaveBeenCalled();
 		expect(rollback).toHaveBeenCalledOnce();
 	});
+
+	it("keeps an acknowledged Agent runtime failure recoverable by the interactive UI", async () => {
+		let id = 0;
+		const agent = new Agent({
+			clock: { now: () => 100 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			tools: [],
+			policyGate: { check: async () => ({ decision: "allow" }) },
+			stream: async () => {
+				throw new Error("Context Overflow: local preflight failed");
+			},
+			autoDrainFollowUps: false,
+		});
+		const controller = new InteractiveInputController({
+			agent,
+			session: testSession(async () => undefined),
+			buildInput: async (text) => text,
+			prepareAttachments: async () => emptyTransaction(),
+			allocateId: sequenceIds(),
+		});
+		agent.onEvent((event) => {
+			if (event.type === "run_end" && event.failure?.kind === "runtime") {
+				controller.acknowledgeAgentRuntimeFailure();
+			}
+		});
+
+		await controller.submit("oversized", []);
+
+		await expect(controller.waitForIdle()).resolves.toBeUndefined();
+		expect(controller.queuePaused).toBe(false);
+	});
 });
 
 function emptyTransaction() {

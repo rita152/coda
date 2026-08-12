@@ -62,6 +62,7 @@ export class InteractiveInputController {
 	#pump?: Promise<void>;
 	#acceptanceTail: Promise<void> = Promise.resolve();
 	#driverFailure?: unknown;
+	#acknowledgedAgentRuntimeFailure = false;
 	readonly #detachAgent: () => void;
 
 	constructor(options: InteractiveInputControllerOptions) {
@@ -225,10 +226,22 @@ export class InteractiveInputController {
 		this.#options.agent.abort();
 	}
 
+	/** Keeps an expected, user-recoverable Agent runtime rejection from becoming a fatal TUI driver error. */
+	acknowledgeAgentRuntimeFailure(): void {
+		this.#acknowledgedAgentRuntimeFailure = true;
+		this.#driverFailure = undefined;
+	}
+
 	async waitForIdle(): Promise<void> {
 		await this.#acceptanceTail;
 		while (this.#activeAgent || this.#pump) {
-			await Promise.all([this.#activeAgent?.then(() => undefined), this.#pump]);
+			await Promise.all([
+				this.#activeAgent?.then(
+					() => undefined,
+					() => undefined,
+				),
+				this.#pump,
+			]);
 		}
 		if (this.#driverFailure !== undefined) {
 			const failure = this.#driverFailure;
@@ -273,6 +286,7 @@ export class InteractiveInputController {
 
 	#startPrompt(input: AgentInput, pending: PendingPrompt): void {
 		this.#pendingPrompt = pending;
+		this.#acknowledgedAgentRuntimeFailure = false;
 		let operation: Promise<RunResult>;
 		try {
 			operation = this.#options.agent.prompt(input);
@@ -455,7 +469,7 @@ export class InteractiveInputController {
 				},
 				(error: unknown) => {
 					this.#queuePaused = true;
-					this.#driverFailure ??= error;
+					if (!this.#consumeAcknowledgedAgentRuntimeFailure()) this.#driverFailure ??= error;
 				},
 			)
 			.finally(() => {
@@ -496,16 +510,29 @@ export class InteractiveInputController {
 				continue;
 			}
 			if (!this.#options.agent.state.pendingFollowUps.some(({ id }) => id === item.id)) continue;
+			this.#acknowledgedAgentRuntimeFailure = false;
 			const operation = this.#options.agent.runNextFollowUp();
 			this.#activeAgent = operation;
 			let result: RunResult;
 			try {
 				result = await operation;
+			} catch (error) {
+				if (this.#consumeAcknowledgedAgentRuntimeFailure()) {
+					this.#queuePaused = true;
+					return;
+				}
+				throw error;
 			} finally {
 				if (this.#activeAgent === operation) this.#activeAgent = undefined;
 			}
 			if (result.outcome !== "success") this.#queuePaused = true;
 		}
+	}
+
+	#consumeAcknowledgedAgentRuntimeFailure(): boolean {
+		const acknowledged = this.#acknowledgedAgentRuntimeFailure;
+		this.#acknowledgedAgentRuntimeFailure = false;
+		return acknowledged;
 	}
 
 	#removeDeferred(kind: DeferredInput["kind"], id: string): void {

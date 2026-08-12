@@ -523,6 +523,7 @@ async function runMultiSessionInteractive(
 						runtimeOverflow ||
 						isContextOverflowError(event.failure?.message ?? ""))
 				) {
+					if (event.failure?.kind === "runtime") pane.input.acknowledgeAgentRuntimeFailure();
 					pane.contextOverflowPending = true;
 					if (pane === runtimes.active) offerContextOverflowRecovery(pane);
 					else pane.needsAttention = true;
