@@ -128,6 +128,7 @@ describe("Context Overflow empty-Session fallback", () => {
 			expect(restored.recoverableFollowUps).toEqual([]);
 			expect(restored.composerSubmissions.map(({ text }) => text)).toEqual(["fresh request"]);
 			expect(restored.toolInvocations).toEqual([]);
+			expect(restored.runEvidence).toHaveLength(1);
 			expect(restored.compactionCheckpoint).toBeUndefined();
 			expect(restored.mediaReferences.size).toBe(0);
 		} finally {

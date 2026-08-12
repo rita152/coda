@@ -2,6 +2,7 @@ import type { AgentTool } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
 import type { ApplicationRuntime, UserSettings } from "../application.ts";
 import type { FileSystem } from "../host/file-system.ts";
+import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
@@ -146,6 +147,7 @@ export function createBashTool(options: {
 	readonly shellExecutable: string;
 	readonly runtime: ApplicationRuntime;
 	readonly settings: UserSettings;
+	readonly onAudit?: PermissionAuditSink;
 }): AgentTool<typeof BashParameters> {
 	return {
 		name: "bash",
@@ -185,6 +187,7 @@ export function createBashTool(options: {
 						readAccessPolicy: authorization.readAccessPolicy,
 						managedNetwork: authorization.managedNetwork,
 						auditContext: { invocationId: context.invocationId, toolName: "bash" },
+						audit: options.onAudit,
 					},
 				);
 				stored = await capture?.finish();

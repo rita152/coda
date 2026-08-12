@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import type { IdGenerator, ToolExecutionContext } from "@coda/agent";
-import { compileSandboxPolicy } from "@coda/sandbox";
+import { compileSandboxPolicy, createReadAccessPolicy } from "@coda/sandbox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import {
@@ -58,11 +58,13 @@ async function fixture(
 		manager,
 		workspace,
 		authority: {
-			policy: compileSandboxPolicy({
-				profile: "full-access",
-				workspaceRoots: [workspace],
-				temporaryDirectory: await realpath(tmpdir()),
-			}),
+			readAccessPolicy: createReadAccessPolicy(
+				compileSandboxPolicy({
+					profile: "full-access",
+					workspaceRoots: [workspace],
+					temporaryDirectory: await realpath(tmpdir()),
+				}),
+			),
 		},
 	};
 }

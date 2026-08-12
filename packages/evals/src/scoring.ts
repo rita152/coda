@@ -239,10 +239,18 @@ function aggregateUsage(messages: readonly AssistantMessage[], priceDataExpected
 		cacheReadTokens: sum((entry) => entry.cacheRead),
 		cacheWriteTokens: sum((entry) => entry.cacheWrite),
 		reasoningTokens: sum((entry) => entry.reasoning),
-		totalTokens: sum((entry) => entry.totalTokens || entry.input + entry.output + entry.cacheRead + entry.cacheWrite),
+		totalTokens: sum((entry) => usageTotalTokens(entry)),
 		priceDataAvailable,
 		...(priceDataAvailable ? { priceUsd: sum((entry) => entry.cost?.total) } : {}),
 	};
+}
+
+export function usageTotalTokens(usage: Usage): number {
+	if (usage.totalTokens > 0 && Number.isFinite(usage.totalTokens)) return usage.totalTokens;
+	return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].reduce(
+		(total, value) => total + (Number.isFinite(value) && value > 0 ? value : 0),
+		0,
+	);
 }
 
 function claimReports(trace: EvaluationTrace, fileState: FinalFileStateReport): FinalClaimReport {

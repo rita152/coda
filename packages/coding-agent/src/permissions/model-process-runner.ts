@@ -13,6 +13,7 @@ export interface ModelProcessAuthority {
 	readonly readAccessPolicy: ReadAccessPolicy;
 	readonly managedNetwork?: ManagedNetworkPolicy;
 	readonly auditContext?: { readonly invocationId: string; readonly toolName: string };
+	readonly audit?: PermissionAuditSink;
 }
 
 export interface ModelProcessRunResult extends ProcessRunResult {
@@ -90,12 +91,13 @@ export function createAuditedModelProcessRunner(
 ): ModelProcessRunner {
 	return {
 		run: async (request, authority) => {
+			const effectiveAudit = authority.audit ?? audit;
 			try {
 				const result = await delegate.run(request, authority);
-				await auditProcessResult(result, authority, audit);
+				await auditProcessResult(result, authority, effectiveAudit);
 				return result;
 			} catch (error) {
-				await auditProcessFailure(error, authority, audit);
+				await auditProcessFailure(error, authority, effectiveAudit);
 				throw error;
 			}
 		},
@@ -108,20 +110,21 @@ export function createAuditedModelProcessSessionRunner(
 ): ModelProcessSessionRunner {
 	return {
 		start: async (request, authority) => {
+			const effectiveAudit = authority.audit ?? audit;
 			let session: ModelProcessSession;
 			try {
 				session = await delegate.start(request, authority);
 			} catch (error) {
-				await auditProcessFailure(error, authority, audit);
+				await auditProcessFailure(error, authority, effectiveAudit);
 				throw error;
 			}
 			const completion = session.completion.then(
 				async (result) => {
-					await auditProcessResult(result, authority, audit);
+					await auditProcessResult(result, authority, effectiveAudit);
 					return result;
 				},
 				async (error) => {
-					await auditProcessFailure(error, authority, audit);
+					await auditProcessFailure(error, authority, effectiveAudit);
 					throw error;
 				},
 			);

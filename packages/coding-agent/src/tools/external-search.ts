@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunResult } from "../host/process-runner.ts";
+import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 
@@ -74,6 +75,7 @@ export async function runOptionalSearchExecutable(options: {
 	readonly permissions: PermissionEngine;
 	readonly runtime: SearchExecutableRuntime;
 	readonly context: Pick<ToolExecutionContext, "invocationId" | "signal">;
+	readonly onAudit?: PermissionAuditSink;
 }): Promise<ProcessRunResult | undefined> {
 	const temporaryDirectory = join(options.runtime.homeDirectory, ".coda", "tmp");
 	await options.fileSystem.makeDirectory(temporaryDirectory, { recursive: true, mode: 0o700 });
@@ -110,6 +112,7 @@ export async function runOptionalSearchExecutable(options: {
 			{
 				readAccessPolicy,
 				auditContext: { invocationId: options.context.invocationId, toolName: options.executable },
+				audit: options.onAudit,
 			},
 		);
 		if (result.exitCode !== 0 && /(?:execvp\(\)|exec):?.*(?:no such file|not found)/iu.test(result.stderr)) {

@@ -1015,6 +1015,7 @@ function assertEmptyReplacementSession(
 		replacement.session.recoverableFollowUps.length > 0 ||
 		replacement.session.composerSubmissions.length > 0 ||
 		replacement.session.toolInvocations.length > 0 ||
+		replacement.session.runEvidence.length > 0 ||
 		replacement.session.compactionCheckpoint !== undefined ||
 		replacement.session.mediaReferences.size > 0 ||
 		replacement.initialPrompt !== undefined ||

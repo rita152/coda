@@ -161,6 +161,7 @@ describe("Permission audit", () => {
 
 	it("audits a background process through completion using its start invocation", async () => {
 		const events: PermissionAuditEvent[] = [];
+		const defaultEvents: PermissionAuditEvent[] = [];
 		const delegate: ModelProcessSessionRunner = {
 			start: async () => {
 				const completion = Promise.resolve({
@@ -182,15 +183,19 @@ describe("Permission audit", () => {
 			},
 		};
 		const audited = createAuditedModelProcessSessionRunner(delegate, (event) => {
-			events.push(event);
+			defaultEvents.push(event);
 		});
 
 		const processSession = await audited.start(request, {
-			policy,
+			readAccessPolicy: createReadAccessPolicy(policy),
 			auditContext: { invocationId: "invocation:process", toolName: "process_start" },
+			audit: (event) => {
+				events.push(event);
+			},
 		});
 		await processSession.completion;
 
+		expect(defaultEvents).toEqual([]);
 		expect(events).toEqual([
 			expect.objectContaining({
 				type: "sandbox_execution",

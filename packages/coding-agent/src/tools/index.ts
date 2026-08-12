@@ -51,6 +51,7 @@ export function createCodingTools(options: {
 			processRunner: options.processRunner,
 			permissions: options.permissions,
 			runtime: options.runtime,
+			onAudit: options.onAudit,
 		}),
 		createFindTool({
 			workspace: options.workspace,
@@ -58,6 +59,7 @@ export function createCodingTools(options: {
 			processRunner: options.processRunner,
 			permissions: options.permissions,
 			runtime: options.runtime,
+			onAudit: options.onAudit,
 		}),
 		createLsTool(options.workspace, options.fileSystem, options.permissions),
 		createEditTool(options.workspace, options.fileSystem, mutations, mutationWriter),
@@ -70,6 +72,7 @@ export function createCodingTools(options: {
 			shellExecutable: options.shellExecutable,
 			runtime: options.runtime,
 			settings: options.settings,
+			onAudit: options.onAudit,
 		}),
 	];
 	for (const [index, expectedName] of BUILT_IN_CODING_TOOL_NAMES.entries()) {

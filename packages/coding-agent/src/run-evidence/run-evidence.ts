@@ -634,14 +634,19 @@ function projectUsage(attempts: readonly AttemptEvidence[], retries: number): Ru
 function usageSnapshot(value: unknown): UsageSnapshot {
 	const usage = asRecord(value) as (Record<string, unknown> & Partial<Usage>) | undefined;
 	const cost = asRecord(usage?.cost);
+	const input = nonNegativeNumber(usage?.input);
+	const output = nonNegativeNumber(usage?.output);
+	const cacheRead = nonNegativeNumber(usage?.cacheRead);
+	const cacheWrite = nonNegativeNumber(usage?.cacheWrite);
+	const reportedTotal = nonNegativeNumber(usage?.totalTokens);
 	return {
-		input: nonNegativeNumber(usage?.input),
-		output: nonNegativeNumber(usage?.output),
-		cacheRead: nonNegativeNumber(usage?.cacheRead),
-		cacheWrite: nonNegativeNumber(usage?.cacheWrite),
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
 		cacheWrite1h: nonNegativeNumber(usage?.cacheWrite1h),
 		reasoning: nonNegativeNumber(usage?.reasoning),
-		totalTokens: nonNegativeNumber(usage?.totalTokens),
+		totalTokens: reportedTotal > 0 ? reportedTotal : input + output + cacheRead + cacheWrite,
 		...(typeof cost?.total === "number" && Number.isFinite(cost.total) ? { costTotal: Math.max(0, cost.total) } : {}),
 	};
 }

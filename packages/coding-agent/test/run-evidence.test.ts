@@ -46,7 +46,7 @@ describe("RunEvidence projection", () => {
 				attempt: 2,
 				outcome: "success",
 				discarded: false,
-				candidate: assistantMessage(usage({ input: 20, output: 5, totalTokens: 25 })),
+				candidate: assistantMessage(usage({ input: 20, output: 5, totalTokens: 0 })),
 				timestamp: 140,
 			}),
 		);

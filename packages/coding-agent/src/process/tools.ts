@@ -1,6 +1,7 @@
 import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
 import type { ApplicationRuntime, UserSettings } from "../application.ts";
+import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import { modelProcessDenialNotice, modelShellEnvironment } from "../tools/bash.ts";
 import type { Workspace } from "../workspace.ts";
@@ -144,6 +145,7 @@ export function createProcessTools(options: {
 	readonly shellExecutable: string;
 	readonly runtime: ApplicationRuntime;
 	readonly settings: UserSettings;
+	readonly onAudit?: PermissionAuditSink;
 }): readonly AgentTool[] {
 	const start: AgentTool<typeof ProcessStartParameters> = {
 		name: "process_start",
@@ -169,6 +171,7 @@ export function createProcessTools(options: {
 						readAccessPolicy: authorization.readAccessPolicy,
 						managedNetwork: authorization.managedNetwork,
 						auditContext: { invocationId: context.invocationId, toolName: "process_start" },
+						audit: options.onAudit,
 					},
 				);
 				const result = snapshotOutput(snapshot, false);

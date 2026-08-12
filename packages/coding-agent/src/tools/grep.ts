@@ -1,6 +1,7 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
+import type { PermissionAuditSink } from "../permissions/audit.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
@@ -28,6 +29,7 @@ export function createGrepTool(options: {
 	readonly processRunner: ModelProcessRunner;
 	readonly permissions: PermissionEngine;
 	readonly runtime: SearchExecutableRuntime;
+	readonly onAudit?: PermissionAuditSink;
 }): AgentTool<typeof GrepParameters> {
 	const { fileSystem, workspace } = options;
 	return {
@@ -116,6 +118,7 @@ export function createGrepTool(options: {
 				permissions: options.permissions,
 				runtime: options.runtime,
 				context,
+				onAudit: options.onAudit,
 			});
 			if (external) {
 				if (external.timedOut) {

@@ -1,12 +1,27 @@
 import type { ModelStream } from "@coda/agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatHumanReport, runLiveEvaluationSuite, runOfflineEvaluationSuite } from "../src/index.ts";
+import { usageTotalTokens } from "../src/scoring.ts";
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("Agent evaluation Interface", () => {
+	it("uses the RunBudget token fallback for missing or invalid totals", () => {
+		expect(usageTotalTokens({ input: 10, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 0 })).toBe(19);
+		expect(usageTotalTokens({ input: 10, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 23 })).toBe(23);
+		expect(
+			usageTotalTokens({
+				input: Number.NaN,
+				output: -2,
+				cacheRead: 3,
+				cacheWrite: 4,
+				totalTokens: Number.POSITIVE_INFINITY,
+			}),
+		).toBe(7);
+	});
+
 	it("runs all eight deterministic Faux Model fixtures and scores observable behavior", async () => {
 		const fetch = vi
 			.spyOn(globalThis, "fetch")
