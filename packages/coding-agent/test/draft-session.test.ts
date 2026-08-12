@@ -103,6 +103,7 @@ function fauxSession(
 		composerSubmissions: [],
 		toolInvocations: [],
 		history: new SessionHistoryReader({ sessionId: sessionDescriptor.id, messages: () => seed.messages }),
+		runEvidence: [],
 		mediaReferences: new Map(),
 		registerMedia: vi.fn(),
 		attach: vi.fn(() => () => undefined),

@@ -1,5 +1,10 @@
 import type { Agent, AgentEvent, AgentMessage } from "@coda/agent";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
+import {
+	projectSessionRunEvidence,
+	type RunEvidenceEnvelope,
+	RunEvidenceProjection,
+} from "../run-evidence/run-evidence.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import { SessionHistoryReader } from "./session-history-reader.ts";
@@ -40,6 +45,8 @@ export class ManagedSession implements Session {
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
 	readonly #historyMessages: AgentMessage[];
 	readonly #history: SessionHistoryReader;
+	readonly #liveRunEvidence = new RunEvidenceProjection();
+	readonly #runEvidence: RunEvidenceEnvelope[];
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#compactionCheckpoint?: CompactionCheckpoint;
 	#discardedModelCost?: number;
@@ -65,6 +72,7 @@ export class ManagedSession implements Session {
 			sessionId: journal.descriptor.id,
 			messages: () => this.#historyMessages,
 		});
+		this.#runEvidence = [...structuredClone(projectSessionRunEvidence(journal.records))];
 		this.#compactionCheckpoint = reduced.compactionCheckpoint
 			? structuredClone(reduced.compactionCheckpoint)
 			: undefined;
@@ -106,6 +114,10 @@ export class ManagedSession implements Session {
 
 	get history(): SessionHistoryReader {
 		return this.#history;
+	}
+
+	get runEvidence(): readonly RunEvidenceEnvelope[] {
+		return structuredClone(this.#runEvidence);
 	}
 
 	get compactionCheckpoint(): CompactionCheckpoint | undefined {
@@ -211,6 +223,8 @@ export class ManagedSession implements Session {
 		for (const input of eventRecordInputs(event, this.#preparedRun)) {
 			await this.#append(input.type, input.payload, event);
 		}
+		const evidence = this.#liveRunEvidence.accept(event);
+		if (evidence) this.#runEvidence.push(evidence);
 		if (event.type === "run_start") this.#preparedRun = undefined;
 	}
 

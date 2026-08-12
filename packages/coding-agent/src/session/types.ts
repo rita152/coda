@@ -18,6 +18,7 @@ import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
+import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
 declare const sessionIdBrand: unique symbol;
@@ -130,6 +131,8 @@ export interface Session {
 	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly history: SessionHistoryReadPort;
+	/** Completed Run evidence projected from this Session's existing semantic facts. */
+	readonly runEvidence: readonly RunEvidenceEnvelope[];
 	readonly compactionCheckpoint?: CompactionCheckpoint;
 	/** Cost of discarded Model attempts, omitted when historical pricing was not recorded. */
 	readonly discardedModelCost?: number;

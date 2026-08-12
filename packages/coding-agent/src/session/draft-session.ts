@@ -72,6 +72,10 @@ export class DraftSession implements Session {
 		return this.#history;
 	}
 
+	get runEvidence() {
+		return structuredClone(this.#session?.runEvidence ?? []);
+	}
+
 	get compactionCheckpoint() {
 		return this.#session?.compactionCheckpoint ? structuredClone(this.#session.compactionCheckpoint) : undefined;
 	}
