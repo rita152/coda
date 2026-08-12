@@ -4,7 +4,7 @@ Status: Confirmed for implementation on 2026-08-10
 
 ## Objective
 
-Replace Coda's existing advisory Tool policy with an end-to-end permission engine and real operating-system Sandbox whose observable behavior for the three built-in Permission Profiles matches the local Codex checkout at commit `f93109615ff27ab58007601434b27c940d5500c7`.
+Replace Coda's existing advisory Tool policy with an end-to-end permission engine and real operating-system Sandbox whose observable behavior for the three built-in Permission Profiles matches the local Codex checkout at commit `f93109615ff27ab58007601434b27c940d5500c7`, except for the intentionally root-scoped read semantics superseded by ADR-0040.
 
 The implementation is behaviorally redesigned for Coda in TypeScript. It does not mechanically translate Rust and has no build or runtime dependency on `/Users/zp/Desktop/codex`. A small auditable native Linux launcher is permitted only where process setup ordering cannot be made safe from Node.js.
 
@@ -22,14 +22,16 @@ The Sandbox has internal platform seams with a production and conformance adapte
 
 ### Read Only
 
-- the filesystem is readable by default;
+- the canonical Workspace and explicitly configured or reviewed read roots are readable;
+- common Credential Roots remain denied inside broader readable roots unless the exact root or a narrower descendant is reviewed;
 - there are no writable roots;
 - managed network access is restricted;
 - the preset Approval Policy is On Request.
 
 ### Workspace
 
-- the filesystem is readable by default;
+- the canonical Workspace, writable temporary roots, and explicitly configured or reviewed read roots are readable;
+- common Credential Roots remain denied inside broader readable roots unless the exact root or a narrower descendant is reviewed;
 - every explicitly configured canonical workspace root, `/tmp`, and canonical `$TMPDIR` is writable;
 - `.git`, `.agents`, `.codex`, and `.coda` directly below every restricted writable root are protected read-only, including deny-create behavior when absent;
 - managed network access is restricted;
@@ -52,7 +54,7 @@ Coda supports Unless Trusted, On Request, Granular, and Never with Codex-equival
 
 An Approval Request may be approved once, approved for the process-local Session cache, persisted as a Command Rule, persisted as a Network Rule, denied while allowing the model to continue, or denied while aborting the current Run. Approval timeout is a reserved typed outcome. Persistence failure warns but does not revoke the current approval.
 
-The model shell protocol supports default execution, execution with precise Additional Permissions, and require-escalated execution with an optional justification and optional proposed command prefix. A normal Sandbox denial is returned to the model and never causes an automatic unsandboxed retry. The model must explicitly request escalation. A recognized managed-network denial alone may enter the host approval flow.
+The model shell protocol supports default execution, execution with precise Additional Permissions, and require-escalated command review with an optional justification and optional proposed command prefix. A normal Sandbox denial is returned to the model and never causes an automatic unsandboxed retry. Restricted reads and writes expand only through precise Additional Permissions; command review does not bypass them. A recognized managed-network denial alone may enter the host approval flow.
 
 Print mode uses the same Policy Gate and Sandbox with a rejecting approval adapter. It never reads stdin, never hangs, emits an `approval_required` Tool result and JSON event, permits the model to choose another approach, and exits nonzero if the Run cannot ultimately complete.
 
@@ -67,7 +69,7 @@ Print mode uses the same Policy Gate and Sandbox with a rejecting approval adapt
 ## Execution provenance
 
 - model shell, model-triggered search executables, and every future model process use the Sandbox execution capability;
-- built-in File Tools use a centralized canonical, descriptor-safe permission evaluator and never rely on a pre-check followed by an unrestricted pathname operation;
+- built-in read, grep, find, and ls Tools evaluate canonical paths through the same Read Access Policy compiled for model-started Sandbox processes, including every traversed child;
 - explicit interactive User Shell remains unsandboxed and is reachable only through a distinct host execution capability that no model Tool receives;
 - the fixed macOS Keychain helper and explicit user image viewer remain trusted host paths.
 

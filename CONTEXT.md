@@ -165,6 +165,14 @@ _Avoid_: confirmation dialog, Sandbox escape, Path Grant
 A model-declared, narrowly scoped extension to the current Permission Profile for one Tool Invocation.
 _Avoid_: Full Access, Path Grant, implicit retry
 
+**Read Access Policy**:
+The immutable per-invocation authority that evaluates canonical paths for native File Tools and carries the identical root policy enforced for model-started Sandbox processes.
+_Avoid_: Path Grant, Permission Profile, advisory read check
+
+**Credential Root**:
+A canonical file or directory containing authentication material that remains unreadable inside a broader ordinary or reviewed parent until that exact root or a narrower descendant is explicitly reviewed.
+_Avoid_: protected metadata, Project Trust, secret scanner
+
 **Session Approval**:
 A process-local approval remembered until the current Coda process exits. A command Session Approval uses a displayed, validated token prefix bound to its effective Sandbox context and executable identity; reuse suppresses only the matching prompt and never changes execution authority.
 _Avoid_: persistent rule, Run grant, trust
