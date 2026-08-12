@@ -14,6 +14,7 @@ describe("ChatComponent terminal input", () => {
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
 			reasoning: "off",
+			statusLine: defaultStatusLine,
 			clock: { now: () => 0 },
 			onSubmit,
 			onAbort: vi.fn(),
@@ -42,6 +43,7 @@ describe("ChatComponent terminal input", () => {
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
 			reasoning: "off",
+			statusLine: defaultStatusLine,
 			clock: { now: () => 0 },
 			onSubmit: vi.fn(),
 			onAbort: vi.fn(),
@@ -65,20 +67,21 @@ describe("ChatComponent terminal input", () => {
 			context,
 		);
 
-		expect(component.render({ width: 80, height: 24, now: 0 }).at(-3)).toBe("a");
+		expect(component.render({ width: 80, height: 24, now: 0 }).at(-4)).toBe("a");
 	});
 
 	it("fills the full screen with a fixed header, transcript viewport, and dock", () => {
-		const component = createComponent({ workspaceLabel: "coda" });
+		const component = createComponent();
 		const frame = component.render({ width: 80, height: 12, now: 0 });
 
 		expect(frame).toHaveLength(12);
-		expect(frame[0]).toContain("Coda");
-		expect(frame[0]).toContain("coda");
-		expect(frame.at(-4)).toBe("─".repeat(80));
-		expect(frame.at(-3)).toBe("");
-		expect(frame.at(-2)).toBe("─".repeat(80));
-		expect(frame.at(-1)).toContain("Enter sends");
+		expect(frame[0]).toBe("Coda");
+		expect(frame.at(-5)).toBe("─".repeat(80));
+		expect(frame.at(-4)).toBe("");
+		expect(frame.at(-3)).toBe("─".repeat(80));
+		expect(frame.at(-2)).toContain("~/coda (main)");
+		expect(frame.at(-1)).toContain("$1.23 · 128k/1m");
+		expect(frame.at(-1)).toContain("provider/model(off)");
 	});
 
 	it("shows the focused Run activity immediately above the Composer and hides it after Run end", () => {
@@ -98,14 +101,26 @@ describe("ChatComponent terminal input", () => {
 		component.accept(thinkingDeltaEvent(2, "**Proposing concurrent tool status formatting**"));
 
 		let frame = component.render({ width: 80, height: 12, now: 3_001 }).map(stripAnsi);
-		expect(frame.at(-5)).toBe("Proposing concurrent tool status formatting · 3s · updated 3s ago");
-		expect(frame.at(-5)).not.toContain("Thinking");
-		expect(frame.at(-4)).toBe("─".repeat(80));
+		expect(frame.at(-6)).toBe("Proposing concurrent tool status formatting · 3s · updated 3s ago");
+		expect(frame.at(-6)).not.toContain("Thinking");
+		expect(frame.at(-5)).toBe("─".repeat(80));
 
 		component.accept(event({ type: "run_end", outcome: "success", timestamp: 3_100 }));
 		frame = component.render({ width: 80, height: 12, now: 3_100 }).map(stripAnsi);
-		expect(frame.at(-4)).toBe("─".repeat(80));
+		expect(frame.at(-5)).toBe("─".repeat(80));
 		expect(frame.join("\n")).not.toContain("Proposing concurrent tool status formatting ·");
+	});
+
+	it("keeps the ambient statusline below the Composer while a Run is active", () => {
+		const component = createComponent({ colorLevel: 0, motion: "reduced" });
+		component.accept(runStartEvent());
+
+		const frame = component.render({ width: 80, height: 12, now: 1 }).map(stripAnsi);
+
+		expect(frame.at(-2)).toContain("~/coda (main)");
+		expect(frame.at(-1)).toContain("$1.23 · 128k/1m");
+		expect(frame.at(-1)).toContain("provider/model(off)");
+		expect(frame.join("\n")).not.toContain("Enter steers");
 	});
 
 	it("keeps Chat Completions-compatible Thinking out of the activity row", () => {
@@ -120,8 +135,8 @@ describe("ChatComponent terminal input", () => {
 		component.accept(thinkingDeltaEvent(2, "private compatibility reasoning"));
 
 		const frame = component.render({ width: 60, height: 12, now: 2_000 }).map(stripAnsi);
-		expect(frame.at(-5)).toContain("Working...");
-		expect(frame.at(-5)).not.toContain("private compatibility reasoning");
+		expect(frame.at(-6)).toContain("Working...");
+		expect(frame.at(-6)).not.toContain("private compatibility reasoning");
 	});
 
 	it("updates the session model presentation without rebuilding the Composer", () => {
@@ -129,9 +144,9 @@ describe("ChatComponent terminal input", () => {
 
 		component.setModelPresentation("custom/new-model", "high");
 
-		const header = stripAnsi(component.render({ width: 80, height: 12, now: 0 })[0]!);
-		expect(header).toContain("custom/new-model");
-		expect(header).toContain("reasoning high");
+		const frame = component.render({ width: 80, height: 12, now: 0 }).map(stripAnsi);
+		expect(frame[0]).toBe("Coda");
+		expect(frame.at(-1)).toContain("custom/new-model(high)");
 	});
 
 	it("renders a multiline Pi-style editor dock with full-width horizontal borders", () => {
@@ -143,8 +158,14 @@ describe("ChatComponent terminal input", () => {
 
 		const frame = component.render({ width: 40, height: 12, now: 0 });
 		expect(frame).toHaveLength(12);
-		expect(frame.slice(-5)).toEqual(["─".repeat(40), "first", "second", "─".repeat(40), frame.at(-1)]);
-		expect(frame.at(-1)).toContain("Enter sends");
+		expect(frame.slice(-6)).toEqual([
+			"─".repeat(40),
+			"first",
+			"second",
+			"─".repeat(40),
+			"~/coda (main)",
+			"$1.23 · 128k/1m      provider/model(off)",
+		]);
 	});
 
 	it("renders slash candidates in a borderless list above the Composer", () => {
@@ -328,14 +349,17 @@ describe("ChatComponent terminal input", () => {
 	});
 
 	it("drops optional header and footer hints by priority on a narrow usable screen", () => {
-		const component = createComponent({ workspaceLabel: "project", modelLabel: "provider/model-1234" });
+		const component = createComponent({
+			modelLabel: "provider/model-1234",
+			statusLine: () => ({ ...defaultStatusLine(), workspacePath: "/home/test/project" }),
+		});
 		const frame = component.render({ width: 40, height: 10, now: 0 });
 
-		expect(frame[0]).toContain("project");
-		expect(frame[0]).toContain("provider/model-1234");
-		expect(frame[0]).not.toContain("reasoning");
-		expect(frame.at(-1)).toContain("Ctrl-C twice exits");
-		expect(frame.at(-1)).not.toContain("Ctrl-T transcript");
+		expect(frame[0]).toBe("Coda");
+		expect(frame.at(-2)).toContain("project");
+		expect(frame.at(-1)).toContain("model-1234(off)");
+		expect(frame.join("\n")).not.toContain("Enter sends");
+		expect(frame.join("\n")).not.toContain("Ctrl-T transcript");
 	});
 
 	it("shows an operable static view below the minimum terminal size", () => {
@@ -395,7 +419,7 @@ describe("ChatComponent terminal input", () => {
 			}),
 		);
 		component.accept(assistantEvent(2, "**rich assistant**"));
-		const plain = stripAnsi(component.render({ width: 60, height: 10, now: 0 }).join("\n"));
+		const plain = stripAnsi(component.render({ width: 60, height: 12, now: 0 }).join("\n"));
 
 		expect(plain).toContain("**literal user**");
 		expect(plain).toContain("rich assistant");
@@ -720,7 +744,7 @@ describe("ChatComponent terminal input", () => {
 		expect(onSubmit).toHaveBeenCalledWith("ship it", []);
 		const plain = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
 		expect(plain).toContain(`${"─".repeat(40)}\nship it\n${"─".repeat(40)}`);
-		expect(component.render({ width: 40, height: 12, now: 0 }).at(-3)).toBe("");
+		expect(component.render({ width: 40, height: 12, now: 0 }).at(-4)).toBe("");
 	});
 
 	it("replays Prompt history only at visual boundaries and restores the exact draft", () => {
@@ -738,7 +762,7 @@ describe("ChatComponent terminal input", () => {
 		component.handleInput(key("up"), context);
 		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"))).toContain("draft\nsecond");
 		component.handleInput(key("up"), context);
-		expect(component.render({ width: 40, height: 12, now: 0 }).at(-3)).toBe("newer");
+		expect(component.render({ width: 40, height: 12, now: 0 }).at(-4)).toBe("newer");
 
 		component.handleInput(key("down"), context);
 		component.handleInput({ type: "text", text: "X" }, context);
@@ -764,7 +788,9 @@ describe("ChatComponent terminal input", () => {
 		expect(frame).toContain("Shell mode");
 
 		component.handleInput(key("backspace"), context);
-		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).at(-1) ?? "")).toContain("Enter sends");
+		expect(stripAnsi(component.render({ width: 40, height: 12, now: 0 }).at(-1) ?? "")).toContain(
+			"provider/model(off)",
+		);
 
 		component.handleInput({ type: "text", text: "!echo hi" }, context);
 		component.handleInput(key("home"), context);
@@ -881,7 +907,7 @@ describe("ChatComponent terminal input", () => {
 		const plain = stripAnsi(component.render({ width: 50, height: 16, now: 0 }).join("\n"));
 		expect(plain).toContain("Steering queued");
 		expect(plain).toContain("Follow-up queued");
-		expect(component.render({ width: 50, height: 16, now: 0 }).at(-3)).toBe("");
+		expect(component.render({ width: 50, height: 16, now: 0 }).at(-4)).toBe("");
 	});
 
 	it("matches the explicit /follow-up command without case sensitivity", async () => {
@@ -1243,9 +1269,9 @@ describe("ChatComponent terminal input", () => {
 		component.stageAttachment(attachment("attachment:one", "photo.png"));
 		component.render({ width: 80, height: 20, now: 0 });
 
-		component.handleInput(mouse("move", 2, 15), context);
+		component.handleInput(mouse("move", 2, 14), context);
 		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("32×24");
-		component.handleInput(mouse("release", 2, 15, "left"), context);
+		component.handleInput(mouse("release", 2, 14, "left"), context);
 		await vi.waitFor(() => expect(onOpenAttachment).toHaveBeenCalledWith("attachment:one"));
 
 		component.handleInput(mouse("move", 40, 1), context);
@@ -1257,12 +1283,24 @@ function createComponent(overrides: Partial<ConstructorParameters<typeof ChatCom
 	return new ChatComponent({
 		modelLabel: "provider/model",
 		reasoning: "off",
+		statusLine: defaultStatusLine,
 		clock: { now: () => 0 },
 		onSubmit: vi.fn(),
 		onAbort: vi.fn(),
 		onExit: vi.fn(),
 		...overrides,
 	});
+}
+
+function defaultStatusLine() {
+	return {
+		workspacePath: "/home/test/coda",
+		homePath: "/home/test",
+		git: { branch: "main", dirty: false },
+		modelSupportsReasoning: true,
+		context: { usedTokens: 128_000, windowTokens: 1_000_000, estimated: false },
+		cost: { usd: 1.23 },
+	};
 }
 
 function assistantEvent(sequence: number, text: string): AgentEvent {

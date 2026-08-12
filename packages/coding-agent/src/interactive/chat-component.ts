@@ -33,6 +33,7 @@ import { ComposerHistory } from "./composer-history.ts";
 import { extensionReferencesFromMarkers } from "./extension-references.ts";
 import type { ComposerExtensionReference, ComposerSubmission, UserShellSubmission } from "./input-types.ts";
 import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
+import { renderStatusLine, type StatusLineSnapshot } from "./status-line.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
 import {
 	type MainTimelineBlock,
@@ -68,10 +69,11 @@ export interface ChatAttachment {
 
 export interface ChatComponentOptions {
 	readonly modelLabel: string;
-	readonly workspaceLabel?: string;
 	readonly reasoning: string;
 	readonly clock: Clock;
 	readonly permissionLabel?: string;
+	readonly permissionWarning?: boolean;
+	readonly statusLine: () => StatusLineSnapshot;
 	readonly onSubmit: (
 		input: string,
 		attachmentIds: readonly string[],
@@ -197,7 +199,7 @@ export class ChatComponent extends Component {
 	readonly #commandFlow: CommandFlowHost;
 	readonly #history: ComposerHistory;
 	#lastCursor?: CursorPlacement;
-	#lastDockRows = 4;
+	#lastDockRows = 5;
 	#running = false;
 	#shellRunning = false;
 	#shellMode = false;
@@ -219,6 +221,7 @@ export class ChatComponent extends Component {
 	#activeFollowUp?: RecoverablePromptCard;
 	#nextProvisionalId = 0;
 	#permissionLabel?: string;
+	#permissionWarning = false;
 	#modelLabel: string;
 	#reasoning: string;
 
@@ -240,6 +243,7 @@ export class ChatComponent extends Component {
 			},
 		});
 		this.#permissionLabel = options.permissionLabel;
+		this.#permissionWarning = options.permissionWarning ?? riskyPermissionLabel(options.permissionLabel);
 		this.#modelLabel = options.modelLabel;
 		this.#reasoning = options.reasoning;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
@@ -262,8 +266,9 @@ export class ChatComponent extends Component {
 		return this.#running || this.#shellRunning;
 	}
 
-	setPermissionLabel(label: string): void {
+	setPermissionLabel(label: string, warning = riskyPermissionLabel(label)): void {
 		this.#permissionLabel = label;
+		this.#permissionWarning = warning;
 		this.invalidate();
 	}
 
@@ -312,6 +317,10 @@ export class ChatComponent extends Component {
 			this.#timeline.hasActiveTools
 		) {
 			intervals.push(this.#theme.colorLevel === 3 ? 80 : 600);
+		}
+		if (this.#lastIdleCtrlCAt !== undefined) {
+			const remaining = IDLE_CTRL_C_CONFIRMATION_WINDOW_MS - (context.now - this.#lastIdleCtrlCAt);
+			if (remaining > 0) intervals.push(remaining);
 		}
 		return intervals.length > 0 ? Math.min(...intervals) : undefined;
 	}
@@ -490,7 +499,8 @@ export class ChatComponent extends Component {
 		const drawerRows = drawerLines.length;
 		const activity = this.#activity.status(now);
 		const activityRows = activity ? 1 : 0;
-		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + 1;
+		const footerLines = this.#renderFooter(width, now);
+		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + footerLines.length;
 		this.#lastDockRows = dockRows;
 		const viewportHeight = height - 1 - dockRows;
 		const blocks = this.#renderViewportBlocks(width, now);
@@ -521,14 +531,7 @@ export class ChatComponent extends Component {
 				}
 			: undefined;
 		const frame = [
-			renderHeader(
-				width,
-				this.#options.workspaceLabel,
-				this.#modelLabel,
-				this.#reasoning,
-				this.#permissionLabel,
-				this.#transcriptMode,
-			),
+			renderHeader(width, this.#transcriptMode),
 			...transcript,
 			...drawerLines,
 			...attachmentLayout.lines,
@@ -543,7 +546,7 @@ export class ChatComponent extends Component {
 					]
 				: []),
 			...editorFrame.lines,
-			this.#renderFooter(width),
+			...footerLines,
 		];
 		const geometry = this.#previewGeometry({ width, height, now });
 		return geometry ? renderPreviewOverlay(frame, geometry, this.#focusedAttachment!, width) : frame;
@@ -709,6 +712,7 @@ export class ChatComponent extends Component {
 					this.#options.onExit();
 				} else {
 					this.#lastIdleCtrlCAt = now;
+					this.invalidate();
 				}
 			}
 			return;
@@ -1404,58 +1408,65 @@ export class ChatComponent extends Component {
 		return rendered;
 	}
 
-	#renderFooter(width: number): string {
-		if (this.#imageModal) return fitFooter(width, ["Image preview • Esc/q closes"]);
+	#renderFooter(width: number, now: number): readonly string[] {
+		if (this.#imageModal) return actionFooter(width, ["Image preview • Esc/q closes"]);
 		const attachmentTarget = this.#focusedAttachmentTarget;
 		if (attachmentTarget) {
 			const canDetach = attachmentTarget.source === "composer";
 			return this.#options.imagePreviewSupported
-				? fitFooter(width, [
+				? actionFooter(width, [
 						`Attachment • Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
 						`Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns`,
 						"Enter expands • Tab returns",
 					])
-				: fitFooter(width, [
+				: actionFooter(width, [
 						`Attachment • Enter opens system viewer${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
 						`Enter opens viewer${canDetach ? " • Delete detaches" : ""} • Tab returns`,
 						"Enter opens viewer • Tab returns",
 					]);
 		}
-		if (this.#shellMode) return fitFooter(width, [this.#theme.style("error", "Shell mode")]);
+		if (this.#shellMode) return actionFooter(width, [this.#theme.style("error", "Shell mode")]);
 		const unread = this.#viewport.unreadUpdates;
-		if (unread > 0) return fitFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
+		if (unread > 0) return actionFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
 		if (this.#transcriptMode) {
-			return fitFooter(width, [
+			return actionFooter(width, [
 				"Transcript • PgUp/PgDn scroll • Esc closes • Ctrl+End latest",
 				"Transcript • PgUp/PgDn • Esc closes",
 				"Transcript • Esc closes",
 			]);
 		}
 		if (!this.#running && this.#hasPausedQueue) {
-			return fitFooter(width, [
+			return actionFooter(width, [
 				"Paused queue • Enter resumes • Alt+Up edits latest • typing appends",
 				"Enter resumes • Alt+Up edits • typing appends",
 				"Enter resumes • Alt+Up edits",
 			]);
 		}
 		if (this.#shellRunning) {
-			return fitFooter(width, [
+			return actionFooter(width, [
 				"Local command running • Enter queues • Alt+Up edits • Ctrl-C cancels",
 				"Enter queues • Alt+Up edits • Ctrl-C cancels",
 				"Ctrl-C cancels the command",
 			]);
 		}
-		return this.#running
-			? fitFooter(width, [
-					"Enter steers • Alt+Enter queues Follow-up • Alt+Up edits • Ctrl-C aborts",
-					"Enter steers • Alt+Enter queues • Ctrl-C aborts",
-					"Ctrl-C aborts the Run",
-				])
-			: fitFooter(width, [
-					"Enter sends • Ctrl-T transcript • Ctrl-C twice exits",
-					"Enter sends • Ctrl-C twice exits",
-					"Ctrl-C twice exits",
-				]);
+		if (
+			this.#lastIdleCtrlCAt !== undefined &&
+			now >= this.#lastIdleCtrlCAt &&
+			now - this.#lastIdleCtrlCAt < IDLE_CTRL_C_CONFIRMATION_WINDOW_MS
+		) {
+			return actionFooter(width, ["Press Ctrl-C again to exit"]);
+		}
+		return renderStatusLine(
+			this.#options.statusLine(),
+			{
+				modelLabel: this.#modelLabel,
+				reasoning: this.#reasoning,
+				permissionLabel: this.#permissionLabel,
+				permissionWarning: this.#permissionWarning,
+			},
+			width,
+			this.#theme,
+		);
 	}
 
 	#invokeCommand(command: CommandDefinition, argument?: string): void {
@@ -1724,36 +1735,8 @@ function shellActivation(input: TerminalInput): { readonly remainder?: TerminalI
 	return remainder ? { remainder: { ...input, text: remainder } } : {};
 }
 
-function renderHeader(
-	width: number,
-	workspace: string | undefined,
-	model: string,
-	reasoning: string,
-	permissionLabel: string | undefined,
-	transcriptMode: boolean,
-): string {
-	const safeWorkspace = sanitizeTerminalText(workspace ?? "").replace(/\s+/g, " ");
-	const safeModel = sanitizeTerminalText(model).replace(/\s+/g, " ");
-	const safeReasoning = sanitizeTerminalText(reasoning).replace(/\s+/g, " ");
-	const safePermission = sanitizeTerminalText(permissionLabel ?? "").replace(/\s+/g, " ");
-	const fields = transcriptMode
-		? [
-				"Coda",
-				"Transcript",
-				...(safeWorkspace ? [safeWorkspace] : []),
-				safeModel,
-				`reasoning ${safeReasoning}`,
-				...(safePermission ? [safePermission] : []),
-			]
-		: [
-				"Coda",
-				...(safeWorkspace ? [safeWorkspace] : []),
-				safeModel,
-				`reasoning ${safeReasoning}`,
-				...(safePermission ? [safePermission] : []),
-			];
-	while (fields.length > 1 && displayWidth(fields.join(" • ")) > width) fields.pop();
-	return clipAnsi(fields.join(" • "), width);
+function renderHeader(width: number, transcriptMode: boolean): string {
+	return clipAnsi(transcriptMode ? "Coda • Transcript" : "Coda", width);
 }
 
 function renderTooSmall(width: number, height: number, running: boolean): string[] {
@@ -1770,4 +1753,12 @@ function renderTooSmall(width: number, height: number, running: boolean): string
 function fitFooter(width: number, candidates: readonly string[]): string {
 	const candidate = candidates.find((value) => displayWidth(value) <= width) ?? candidates.at(-1) ?? "";
 	return clipAnsi(candidate, width);
+}
+
+function actionFooter(width: number, candidates: readonly string[]): readonly [string, string] {
+	return [fitFooter(width, candidates), ""];
+}
+
+function riskyPermissionLabel(label: string | undefined): boolean {
+	return /(?:Full Access|\/\s*never$)/iu.test(label ?? "");
 }

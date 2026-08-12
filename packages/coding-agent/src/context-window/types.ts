@@ -26,6 +26,10 @@ export interface CompactionCheckpoint {
 		readonly summaryInputTokens: number;
 		readonly summaryOutputTokens: number;
 		readonly summaryTotalTokens: number;
+		/** Exact cost of the Model calls used to create this checkpoint, when priced. */
+		readonly summaryCost?: number;
+		/** Exact cumulative cost of every compaction committed through this checkpoint. */
+		readonly cumulativeCost?: number;
 	};
 	readonly summaryPrompt: {
 		readonly version: "1";

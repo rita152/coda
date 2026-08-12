@@ -81,4 +81,24 @@ describe("Session message schema", () => {
 		observed.message.message.isError = false;
 		expect(isSessionRecordPayload("message_committed", observed, 8)).toBe(false);
 	});
+
+	it("persists discarded attempt usage only in v9", () => {
+		const payload = {
+			messageId: "message:attempt",
+			attempt: 1,
+			outcome: "error",
+			discarded: true,
+			usage: {
+				input: 100,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 100,
+				cost: { input: 0.2, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.2 },
+			},
+		};
+
+		expect(isSessionRecordPayload("attempt_finished", payload, 9)).toBe(true);
+		expect(isSessionRecordPayload("attempt_finished", payload, 8)).toBe(false);
+	});
 });

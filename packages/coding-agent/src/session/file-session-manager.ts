@@ -249,6 +249,7 @@ export class FileSessionManager implements SessionManager {
 				else if (parsed.header.version === 5) parsed = await this.#migrateV5(path, parsed);
 				else if (parsed.header.version === 6) parsed = await this.#migrateV6(path, parsed);
 				else if (parsed.header.version === 7) parsed = await this.#migrateV7(path, parsed);
+				else if (parsed.header.version === 8) parsed = await this.#migrateV8(path, parsed);
 				parsedMediaReferences = collectMediaReferences(parsed.records);
 				if (
 					parsed.header.workspaceId !== request.workspace.id ||
@@ -498,13 +499,17 @@ export class FileSessionManager implements SessionManager {
 		return this.#installMigration(path, legacy, legacy.records, 7);
 	}
 
+	async #migrateV8(path: string, legacy: ParsedJournal): Promise<ParsedJournal> {
+		return this.#installMigration(path, legacy, legacy.records, 8);
+	}
+
 	async #installMigration(
 		path: string,
 		legacy: ParsedJournal,
 		records: readonly SessionRecord[],
-		fromVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7,
+		fromVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
 	): Promise<ParsedJournal> {
-		const header: SessionHeader = { ...legacy.header, version: 8 };
+		const header: SessionHeader = { ...legacy.header, version: 9 };
 		const migratedText = `${[header, ...records].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 		const validated = parseJournal(migratedText, path, this.#diagnostics);
 		const token = safeIdentity(this.#runtime.idGenerator.generate("queue_item"));
@@ -550,8 +555,8 @@ export class FileSessionManager implements SessionManager {
 			}
 		}
 		await this.#diagnostics?.({
-			code: "session.migrated-v8",
-			message: `Migrated a Session v${fromVersion} journal to Session v8`,
+			code: "session.migrated-v9",
+			message: `Migrated a Session v${fromVersion} journal to Session v9`,
 			details: { path, backupPath: `${path}.v${fromVersion}.backup`, fromVersion },
 		});
 		return validated;

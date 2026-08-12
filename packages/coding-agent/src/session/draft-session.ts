@@ -62,6 +62,10 @@ export class DraftSession implements Session {
 		return this.#session?.compactionCheckpoint ? structuredClone(this.#session.compactionCheckpoint) : undefined;
 	}
 
+	get discardedModelCost() {
+		return this.#session ? this.#session.discardedModelCost : 0;
+	}
+
 	get mediaReferences() {
 		return new Map(this.#session?.mediaReferences ?? []);
 	}

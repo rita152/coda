@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	type AuthResult,
 	type Context,
+	estimateContextTokens,
 	type Message,
 	type Model,
 	type Models,
@@ -62,6 +63,12 @@ interface SummaryResult {
 	readonly inputTokens: number;
 	readonly outputTokens: number;
 	readonly totalTokens: number;
+	readonly cost?: number;
+}
+
+export interface ContextWindowUsage {
+	readonly usedTokens: number;
+	readonly estimated: boolean;
 }
 
 interface ReductionDocument {
@@ -91,6 +98,11 @@ export class ContextWindowController {
 		return this.#checkpoint ? structuredClone(this.#checkpoint) : undefined;
 	}
 
+	get compactionCost(): number | undefined {
+		if (!this.#checkpoint) return 0;
+		return this.#checkpoint.usage.cumulativeCost;
+	}
+
 	canCompact(messages: readonly AgentMessage[]): boolean {
 		return this.project(messages).length > 1;
 	}
@@ -103,6 +115,33 @@ export class ContextWindowController {
 			throw new Error("Compaction checkpoint boundary is missing from the Session transcript");
 		}
 		return [...structuredClone(checkpoint.replacementHistory), ...structuredClone(messages.slice(boundary + 1))];
+	}
+
+	usage(context: Omit<Context, "messages">, messages: readonly AgentMessage[]): ContextWindowUsage {
+		const projected = this.project(messages);
+		const trustedIds = this.#trustedUsageMessageIds(messages);
+		const projectedContext: Context = {
+			...context,
+			messages: projected.map(({ id, message }) => {
+				const snapshot = structuredClone(message) as Message;
+				if (snapshot.role !== "assistant" || trustedIds === undefined || trustedIds.has(id)) return snapshot;
+				return {
+					...snapshot,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+					},
+				};
+			}),
+		};
+		const estimate = estimateContextTokens(projectedContext);
+		return {
+			usedTokens: estimate.tokens,
+			estimated: estimate.lastUsageIndex === null || estimate.trailingTokens > 0,
+		};
 	}
 
 	/** Runs Auto-Compaction at a model-call safe point, then returns the projected Context. */
@@ -203,6 +242,11 @@ export class ContextWindowController {
 			...(this.#checkpoint?.coveredMessageIds ?? []),
 			...source.map(({ id }) => id),
 		]);
+		const previousCompactionCost = this.#checkpoint ? this.#checkpoint.usage.cumulativeCost : 0;
+		const cumulativeCost =
+			previousCompactionCost === undefined || summarized.cost === undefined
+				? undefined
+				: previousCompactionCost + summarized.cost;
 		const checkpoint: CompactionCheckpoint = {
 			version: 1,
 			windowId: `context-window:${this.#options.idGenerator.generate("queue_item")}`,
@@ -226,6 +270,8 @@ export class ContextWindowController {
 				summaryInputTokens: summarized.inputTokens,
 				summaryOutputTokens: summarized.outputTokens,
 				summaryTotalTokens: summarized.totalTokens,
+				...(summarized.cost !== undefined ? { summaryCost: summarized.cost } : {}),
+				...(cumulativeCost !== undefined ? { cumulativeCost } : {}),
 			},
 			summaryPrompt: {
 				version: "1",
@@ -246,6 +292,16 @@ export class ContextWindowController {
 			...context,
 			messages: messages.map(({ message }) => structuredClone(message) as Message),
 		};
+	}
+
+	#trustedUsageMessageIds(messages: readonly AgentMessage[]): ReadonlySet<MessageId> | undefined {
+		const checkpoint = this.#checkpoint;
+		if (!checkpoint) return undefined;
+		const boundary = messages.findIndex(({ id }) => id === checkpoint.coveredThroughMessageId);
+		if (boundary < 0) {
+			throw new Error("Compaction checkpoint boundary is missing from the Session transcript");
+		}
+		return new Set(messages.slice(boundary + 1).map(({ id }) => id));
 	}
 }
 
@@ -354,6 +410,7 @@ async function summarizeHistory(options: {
 	let inputTokens = 0;
 	let outputTokens = 0;
 	let totalTokens = 0;
+	let cost: number | undefined = 0;
 	const sourceDocuments = historyDocuments(options.messages, options.previousSummary);
 	const source = renderDocuments(sourceDocuments);
 
@@ -373,6 +430,7 @@ async function summarizeHistory(options: {
 		inputTokens += response.usage.input + response.usage.cacheRead + response.usage.cacheWrite;
 		outputTokens += response.usage.output;
 		totalTokens += response.usage.totalTokens;
+		cost = cost === undefined || response.usage.cost === undefined ? undefined : cost + response.usage.cost.total;
 		if (response.stopReason !== "stop") {
 			throw new Error(`Compaction model did not finish the checkpoint (stop reason: ${response.stopReason})`);
 		}
@@ -390,6 +448,7 @@ async function summarizeHistory(options: {
 			inputTokens,
 			outputTokens,
 			totalTokens,
+			...(cost !== undefined ? { cost } : {}),
 		};
 	}
 
@@ -419,6 +478,7 @@ async function summarizeHistory(options: {
 				inputTokens,
 				outputTokens,
 				totalTokens,
+				...(cost !== undefined ? { cost } : {}),
 			};
 		}
 		fragments = packDocuments(mergedDocuments, options.model, maxTokens, options.focus);

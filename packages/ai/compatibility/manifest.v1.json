@@ -50,6 +50,10 @@
       "status": "compatible",
       "test": "test/credentials.test.ts"
     },
+    "estimateContextTokens": {
+      "status": "compatible",
+      "test": "test/context-estimate.test.ts"
+    },
     "fauxAssistantMessage": {
       "status": "deliberate-deviation",
       "test": "test/faux-provider.test.ts"
@@ -211,6 +215,10 @@
     "Context": {
       "status": "compatible",
       "test": "test/public-types.consumer.ts"
+    },
+    "ContextUsageEstimate": {
+      "status": "compatible",
+      "test": "test/context-estimate.test.ts"
     },
     "CreateModelsOptions": {
       "status": "deliberate-deviation",
@@ -660,6 +668,7 @@
         "createProvider",
         "defaultProviderAuthContext",
         "envApiKeyAuth",
+        "estimateContextTokens",
         "fauxAssistantMessage",
         "fauxProvider",
         "fauxText",

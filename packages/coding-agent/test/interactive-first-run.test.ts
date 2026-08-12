@@ -162,7 +162,7 @@ describe("interactive first run", () => {
 		await terminal.emit(key("down"));
 		await terminal.emit(key("enter"));
 		terminal.clearOutput();
-		await until(() => terminal.readOutput().includes("faux/model-b • reasoning off"));
+		await until(() => terminal.readOutput().includes("faux/model-b"));
 		await terminal.emit(key("c", true));
 		await terminal.emit(key("c", true));
 

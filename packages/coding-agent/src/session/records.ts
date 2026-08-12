@@ -43,7 +43,7 @@ export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -72,6 +72,7 @@ export interface ReducedSession {
 	readonly startedTools: ReadonlyMap<string, SessionRecord>;
 	readonly activeRuns: ReadonlySet<string>;
 	readonly compactionCheckpoint?: CompactionCheckpoint;
+	readonly discardedModelCost?: number;
 }
 
 function persistedMessage(message: AgentMessage): AgentMessage {
@@ -164,6 +165,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let reasoning: RestoredSessionState["reasoning"];
 	let permissionProfile: RestoredSessionState["permissionProfile"];
 	let compactionCheckpoint: CompactionCheckpoint | undefined;
+	let discardedModelCost: number | undefined = 0;
 
 	for (const record of records) {
 		const payload = record.payload as Record<string, unknown>;
@@ -189,6 +191,13 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						});
 					}
 				}
+				break;
+			}
+			case "attempt_finished": {
+				if (payload.discarded !== true) break;
+				const usage = payload.usage as Extract<Message, { role: "assistant" }>["usage"] | undefined;
+				if (!usage || !usage.cost) discardedModelCost = undefined;
+				else if (discardedModelCost !== undefined) discardedModelCost += usage.cost.total;
 				break;
 			}
 			case "composer_submission_recorded": {
@@ -339,6 +348,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,
+		...(discardedModelCost !== undefined ? { discardedModelCost } : {}),
 		...(compactionCheckpoint ? { compactionCheckpoint: structuredClone(compactionCheckpoint) } : {}),
 	};
 }
@@ -383,6 +393,7 @@ export function eventRecordInputs(
 						outcome: event.outcome,
 						discarded: event.discarded,
 						errorMessage: event.candidate.message.errorMessage,
+						usage: event.candidate.message.usage,
 					},
 				},
 			];
@@ -435,7 +446,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 8,
+		version: 9,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

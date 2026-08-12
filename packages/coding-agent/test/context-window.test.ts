@@ -1,5 +1,6 @@
 import type { AgentMessage, MessageId } from "@coda/agent";
 import {
+	type AssistantMessage,
 	type Context,
 	createModels,
 	fauxAssistantMessage,
@@ -145,6 +146,55 @@ describe("ContextWindowController", () => {
 		expect(JSON.stringify(prepared.messages)).toContain("<conversation-checkpoint");
 		expect(JSON.stringify(prepared.messages)).not.toContain("downshift-large-input:");
 	});
+
+	it("reports exact Provider usage plus estimated trailing Context", async () => {
+		const fixture = await controllerFixture();
+		const controller = fixture.controller({ commit: async () => undefined });
+		const response = assistant("message:a1", "answer", usage(12_000, 0.4));
+		const exact = controller.usage({ systemPrompt: "system" }, [user("message:u1", "question"), response]);
+		const trailing = controller.usage({ systemPrompt: "system" }, [
+			user("message:u1", "question"),
+			response,
+			user("message:u2", "x".repeat(400)),
+		]);
+
+		expect(exact).toEqual({ usedTokens: 12_000, estimated: false });
+		expect(trailing.usedTokens).toBe(12_100);
+		expect(trailing.estimated).toBe(true);
+	});
+
+	it("re-estimates a compacted projection until fresh Provider usage arrives", async () => {
+		const fixture = await controllerFixture();
+		fixture.faux.setResponses([fauxAssistantMessage(summary("compact estimate"), { timestamp: 10_000 })]);
+		const controller = fixture.controller({ commit: async () => undefined });
+		const old = assistant("message:a1", "old answer", usage(90_000, 0.9));
+		const compacted = [user("message:u1", "old question"), old];
+
+		await controller.compact({ messages: compacted, reason: "manual" });
+		const estimated = controller.usage({ systemPrompt: "system" }, compacted);
+		const fresh = assistant("message:a2", "fresh answer", usage(4_000, 0.04));
+		const authoritative = controller.usage({ systemPrompt: "system" }, [...compacted, fresh]);
+
+		expect(estimated.usedTokens).toBeLessThan(10_000);
+		expect(estimated.estimated).toBe(true);
+		expect(authoritative).toEqual({ usedTokens: 4_000, estimated: false });
+	});
+
+	it("persists cumulative compaction cost in the checkpoint", async () => {
+		const fixture = await controllerFixture();
+		const response = fauxAssistantMessage(summary("priced checkpoint"), { timestamp: 10_000 });
+		response.usage = usage(1_000, 0.25);
+		fixture.faux.setResponses([response]);
+		const controller = fixture.controller({ commit: async () => undefined });
+
+		const checkpoint = await controller.compact({
+			messages: [user("message:u1", "question"), assistant("message:a1", "answer")],
+			reason: "manual",
+		});
+
+		expect(checkpoint.usage).toMatchObject({ summaryCost: 0.25, cumulativeCost: 0.25 });
+		expect(controller.compactionCost).toBe(0.25);
+	});
 });
 
 async function controllerFixture(
@@ -183,10 +233,27 @@ function user(id: string, content: string): AgentMessage {
 	};
 }
 
-function assistant(id: string, content: string): AgentMessage {
+function assistant(
+	id: string,
+	content: string,
+	customUsage?: AssistantMessage["usage"],
+): AgentMessage<AssistantMessage> {
+	const message = fauxAssistantMessage(content, { timestamp: 10_000 });
+	if (customUsage) message.usage = customUsage;
 	return {
 		id: id as MessageId,
-		message: fauxAssistantMessage(content, { timestamp: 10_000 }),
+		message,
+	};
+}
+
+function usage(totalTokens: number, cost: number) {
+	return {
+		input: totalTokens,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens,
+		cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
 	};
 }
 

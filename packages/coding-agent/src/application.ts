@@ -46,6 +46,8 @@ import {
 	selectFromTerminal,
 } from "./interactive/prompts.ts";
 import { type InteractiveSessionOptions, runInteractive } from "./interactive/run-interactive.ts";
+import { sessionCostSnapshot } from "./interactive/session-status.ts";
+import type { SessionStatusLineSnapshot } from "./interactive/status-line.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import {
@@ -686,6 +688,54 @@ function approvalPolicyLabel(policy: ApprovalPolicy): string {
 
 function permissionProfileLabel(profile: PermissionProfile): string {
 	return profile === "read-only" ? "Read Only" : profile === "workspace" ? "Workspace" : "Full Access";
+}
+
+function interactiveStatusLineSnapshot(
+	runtime: PreparedRunRuntime,
+	agent: Agent,
+	session: Session,
+	contextWindow: ContextWindowController,
+	systemPrompt: string,
+): SessionStatusLineSnapshot {
+	const context = contextWindow.usage(
+		{
+			systemPrompt,
+			tools: runtime.tools.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				parameters: tool.parameters,
+			})),
+		},
+		agent.state.messages,
+	);
+	const cost = sessionCostSnapshot(
+		agent.state.messages,
+		contextWindow.compactionCost,
+		session.discardedModelCost,
+		runtime.model.cost !== undefined,
+	);
+	return {
+		modelSupportsReasoning: runtime.model.reasoning,
+		context: {
+			usedTokens: context.usedTokens,
+			windowTokens: runtime.model.contextWindow,
+			estimated: context.estimated || latestUsageComesFromAnotherModel(agent, runtime.model),
+		},
+		...(cost ? { cost } : {}),
+	};
+}
+
+function latestUsageComesFromAnotherModel(agent: Agent, model: Model<Api>): boolean {
+	for (let index = agent.state.messages.length - 1; index >= 0; index--) {
+		const message = agent.state.messages[index]?.message;
+		if (message?.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
+		const usageTokens =
+			message.usage.totalTokens ||
+			message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
+		if (usageTokens === 0) continue;
+		return message.provider !== model.provider || message.model !== model.id;
+	}
+	return false;
 }
 
 function approvalRequiredEvent(request: Parameters<PermissionApprovalHandler["decide"]>[0]): unknown {
@@ -1938,6 +1988,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
 									permissionProfile: targetProfile.profile,
 									permissionLabel: `${permissionProfileLabel(targetProfile.profile)} / ${approvalPolicyLabel(targetApprovalPolicy)}`,
+									statusLine: () =>
+										interactiveStatusLineSnapshot(
+											targetRunRuntime.active?.value ?? targetRunRuntime.selected,
+											targetAgent,
+											targetSession,
+											targetContextWindow,
+											targetPromptSnapshot.text,
+										),
 									onPermissionProfileChange: async (profile) => {
 										const nextProfile = compileSandboxPolicy({
 											profile,
@@ -2106,9 +2164,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								approvalFor: (invocationId) => policy.approvalFor(invocationId),
 								modelLabel: `${model.provider}/${model.id}`,
 								activitySummaryMode: activitySummaryModeForApi(model.api),
-								workspaceLabel: basename(workspace.root) || workspace.root,
 								permissionProfile: policy.configuration().profile.profile,
 								permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
+								statusLine: () =>
+									interactiveStatusLineSnapshot(
+										runRuntime.active?.value ?? runRuntime.selected,
+										agent,
+										session,
+										contextWindow,
+										promptSnapshot.text,
+									),
 								onPermissionProfileChange: async (profile) => {
 									const nextProfile = compileSandboxPolicy({
 										profile,
@@ -2215,6 +2280,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								platform: options.runtime.platform,
 								environment: options.runtime.environment,
 								workspace: workspace.root,
+								homePath: options.runtime.homeDirectory,
 								onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
 								toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
 									.toolResultImages,

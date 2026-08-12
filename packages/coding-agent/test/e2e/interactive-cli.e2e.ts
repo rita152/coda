@@ -30,7 +30,7 @@ expect {
 }
 send -i $spawn_id -- "$env(CODA_E2E_LAUNCH_COMMAND)\r"
 expect {
-  -exact "Enter sends" {}
+  -exact "Coda" {}
   timeout {
     send -- "\003"
     expect eof
@@ -147,7 +147,7 @@ expect {
   eof { exit 73 }
 }
 expect {
-  -exact "Enter sends" {}
+  -exact "opencode-go/minimax-m3(medium)" {}
   timeout { exit 74 }
   eof { exit 75 }
 }

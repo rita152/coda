@@ -1,7 +1,7 @@
 import type { SessionHeader, SessionRecordType } from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -490,7 +490,8 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 			value.version === 5 ||
 			value.version === 6 ||
 			value.version === 7 ||
-			value.version === 8) &&
+			value.version === 8 ||
+			value.version === 9) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&
@@ -540,12 +541,17 @@ export function isSessionRecordPayload(
 			);
 		case "attempt_finished":
 			return (
-				exactRecord(payload, ["messageId", "attempt", "outcome", "discarded"], ["errorMessage"]) &&
+				exactRecord(
+					payload,
+					["messageId", "attempt", "outcome", "discarded"],
+					["errorMessage", ...(version >= 9 ? ["usage"] : [])],
+				) &&
 				isNonEmptyString(payload.messageId) &&
 				isPositiveInteger(payload.attempt) &&
 				RUN_OUTCOMES.has(String(payload.outcome)) &&
 				typeof payload.discarded === "boolean" &&
-				(payload.errorMessage === undefined || typeof payload.errorMessage === "string")
+				(payload.errorMessage === undefined || typeof payload.errorMessage === "string") &&
+				(payload.usage === undefined || (version >= 9 && isUsage(payload.usage)))
 			);
 		case "retry_scheduled":
 			return (
@@ -703,13 +709,17 @@ function isCompactionCheckpoint(value: unknown, version: SessionFormatVersion): 
 		isNonEmptyString(value.model.id) &&
 		isPositiveInteger(value.model.contextWindow) &&
 		isPositiveInteger(value.model.maxTokens) &&
-		exactRecord(value.usage, [
-			"beforeEstimatedTokens",
-			"afterEstimatedTokens",
-			"summaryInputTokens",
-			"summaryOutputTokens",
-			"summaryTotalTokens",
-		]) &&
+		exactRecord(
+			value.usage,
+			[
+				"beforeEstimatedTokens",
+				"afterEstimatedTokens",
+				"summaryInputTokens",
+				"summaryOutputTokens",
+				"summaryTotalTokens",
+			],
+			["summaryCost", "cumulativeCost"],
+		) &&
 		Object.values(value.usage).every((entry) => isFiniteNumber(entry) && entry >= 0) &&
 		exactRecord(value.summaryPrompt, ["version", "sha256", "calls"]) &&
 		value.summaryPrompt.version === "1" &&

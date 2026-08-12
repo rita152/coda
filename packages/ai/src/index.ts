@@ -49,4 +49,5 @@ export type { ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions } from 
 export { type CreateProviderOptions, createProvider, type Provider, type RefreshModelsContext } from "./provider.ts";
 export { resolveToolObservation } from "./tool-observation.ts";
 export type * from "./types.ts";
+export { type ContextUsageEstimate, estimateContextTokens } from "./utils/estimate.ts";
 export { validateToolArguments, validateToolCall } from "./validation.ts";

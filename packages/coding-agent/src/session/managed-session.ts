@@ -39,6 +39,7 @@ export class ManagedSession implements Session {
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#compactionCheckpoint?: CompactionCheckpoint;
+	#discardedModelCost?: number;
 	#sequence: number;
 	#previousRecordId: string | null;
 	#attached?: Agent;
@@ -59,6 +60,7 @@ export class ManagedSession implements Session {
 		this.#compactionCheckpoint = reduced.compactionCheckpoint
 			? structuredClone(reduced.compactionCheckpoint)
 			: undefined;
+		this.#discardedModelCost = reduced.discardedModelCost;
 		this.#mediaReferences = new Map(
 			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
 				messageId,
@@ -96,6 +98,10 @@ export class ManagedSession implements Session {
 
 	get compactionCheckpoint(): CompactionCheckpoint | undefined {
 		return this.#compactionCheckpoint ? structuredClone(this.#compactionCheckpoint) : undefined;
+	}
+
+	get discardedModelCost(): number | undefined {
+		return this.#discardedModelCost;
 	}
 
 	get mediaReferences(): ReadonlyMap<string, readonly SessionMediaReference[]> {
@@ -185,6 +191,11 @@ export class ManagedSession implements Session {
 	}
 
 	async #recordEvent(event: AgentEvent): Promise<void> {
+		if (event.type === "attempt_end" && event.discarded) {
+			const cost = event.candidate.message.usage.cost?.total;
+			this.#discardedModelCost =
+				this.#discardedModelCost === undefined || cost === undefined ? undefined : this.#discardedModelCost + cost;
+		}
 		for (const input of eventRecordInputs(event, this.#preparedRun)) {
 			await this.#append(input.type, input.payload, event);
 		}

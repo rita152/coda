@@ -1,5 +1,5 @@
 import { createModels, createProvider, fauxAssistantMessage, fauxProvider, fauxToolCall, lazyStream } from "@coda/ai";
-import { createSystemScheduler, type KeyInput, VirtualTerminal } from "@coda/tui";
+import { createSystemScheduler, type KeyInput, stripAnsi, VirtualTerminal } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
@@ -193,7 +193,7 @@ describe("interactive TUI mode", () => {
 		});
 
 		const running = application.run(["--interactive", "--no-color", "--no-session"]);
-		await until(() => terminal.started && terminal.readOutput().includes("Enter sends"));
+		await until(() => terminal.started && terminal.readOutput().includes("faux/faux-1"));
 		await fullScreenOutput.io.stdout.write("buffered stdout\n");
 		await fullScreenOutput.io.stderr.write("buffered stderr\n");
 		await fullScreenOutput.diagnostics({
@@ -242,10 +242,10 @@ describe("interactive TUI mode", () => {
 		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
 		const stdout = new BufferOutput();
 		const stderr = new BufferOutput();
-		let request: ProcessRunRequest | undefined;
+		const requests: ProcessRunRequest[] = [];
 		const processRunner: ProcessRunner = {
 			run: async (candidate) => {
-				request = candidate;
+				requests.push(candidate);
 				candidate.onOutput?.({ channel: "stdout", text: "local output\n" });
 				return {
 					exitCode: 0,
@@ -315,6 +315,7 @@ describe("interactive TUI mode", () => {
 		});
 
 		await expect(running).resolves.toBe(0);
+		const request = requests.find(({ executable }) => executable === "/bin/zsh");
 		expect(request).toMatchObject({
 			executable: "/bin/zsh",
 			args: ["-lc", "printf hello"],
@@ -536,7 +537,7 @@ describe("interactive TUI mode", () => {
 		});
 
 		const running = application.run(["--interactive", "--no-color", "--no-session"]);
-		await until(() => terminal.started && terminal.readOutput().includes("Read Only / on-request"));
+		await until(() => terminal.started && terminal.readOutput().includes("Read Only / On Request"));
 		terminal.clearOutput();
 		await terminal.emit({ type: "text", text: "/permissions" });
 		await terminal.emit({
@@ -567,7 +568,7 @@ describe("interactive TUI mode", () => {
 			meta: false,
 			action: "press",
 		});
-		await until(() => terminal.readOutput().includes("Workspace / on-request"));
+		await until(() => terminal.readOutput().includes("Workspace / On Request"));
 		await terminal.emit({
 			type: "key",
 			key: "c",
@@ -778,7 +779,7 @@ describe("interactive TUI mode", () => {
 		await terminal.emit(key("enter"));
 		await new Promise<void>((resolve) => setTimeout(resolve, 50));
 		expect(terminal.readOutput()).toContain("first");
-		expect(terminal.readOutput()).toContain("Ctrl-C aborts");
+		expect(stripAnsi(terminal.readOutput())).toContain("Working...");
 		expect(streamSignals[0]?.aborted).toBe(false);
 
 		releaseFirst();

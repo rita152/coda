@@ -129,6 +129,8 @@ export interface Session {
 	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly toolInvocations: readonly SessionToolLifecycle[];
 	readonly compactionCheckpoint?: CompactionCheckpoint;
+	/** Cost of discarded Model attempts, omitted when historical pricing was not recorded. */
+	readonly discardedModelCost?: number;
 	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
 	attach(agent: Agent): DetachSession;

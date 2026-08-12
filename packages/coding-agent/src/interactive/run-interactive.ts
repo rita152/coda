@@ -32,6 +32,7 @@ import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
+import { WorkspaceGitStatus } from "./git-status.ts";
 import {
 	type AttachmentTransaction,
 	InteractiveInputController,
@@ -44,6 +45,7 @@ import {
 	type InteractiveTerminationSignal,
 	interactiveSignalExitCode,
 } from "./process-lifecycle.ts";
+import type { SessionStatusLineSnapshot, StatusLineSnapshot } from "./status-line.ts";
 import { SwitchableComponent } from "./switchable-component.ts";
 import { UserShell } from "./user-shell.ts";
 
@@ -55,6 +57,7 @@ export interface InteractiveSessionOptions {
 	readonly activitySummaryMode?: ActivitySummaryMode;
 	readonly permissionProfile: PermissionProfile;
 	readonly permissionLabel: string;
+	readonly statusLine: () => SessionStatusLineSnapshot;
 	readonly onPermissionProfileChange: (profile: PermissionProfile) => Promise<string> | string;
 	readonly modelCommand?: {
 		readonly list: () => Promise<readonly ModelCommandEntry[]>;
@@ -112,7 +115,6 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly approval?: InteractiveApprovalHandler;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
-	readonly workspaceLabel?: string;
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
 	readonly sessionCommand?: InteractiveSessionCommand;
@@ -122,12 +124,27 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly platform: NodeJS.Platform;
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly workspace: string;
+	readonly homePath?: string;
 	readonly onWarning?: (message: string) => Promise<void> | void;
 }
 
 export async function runInteractive(options: InteractiveRunOptions): Promise<number> {
-	if (options.sessionCommand) return runMultiSessionInteractive(options);
-	return runSingleSessionInteractive(options);
+	const components = new Set<ChatComponent>();
+	const git = new WorkspaceGitStatus({
+		processRunner: options.processRunner,
+		workspace: options.workspace,
+		environment: options.environment,
+		scheduler: options.scheduler,
+		onChange: () => {
+			for (const component of components) component.invalidate();
+		},
+	});
+	try {
+		if (options.sessionCommand) return await runMultiSessionInteractive(options, git, components);
+		return await runSingleSessionInteractive(options, git, components);
+	} finally {
+		git.dispose();
+	}
 }
 
 interface InteractivePane {
@@ -141,7 +158,11 @@ interface InteractivePane {
 	needsAttention: boolean;
 }
 
-async function runMultiSessionInteractive(options: InteractiveRunOptions): Promise<number> {
+async function runMultiSessionInteractive(
+	options: InteractiveRunOptions,
+	git: WorkspaceGitStatus,
+	components: Set<ChatComponent>,
+): Promise<number> {
 	const sessionCommand = options.sessionCommand!;
 	let resolveExit!: () => void;
 	const exited = new Promise<void>((resolve) => {
@@ -221,7 +242,10 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 			workspace: options.workspace,
 			environment: options.environment,
 			clock: options.clock,
-			onUpdate: (snapshot) => component.acceptUserShell(snapshot),
+			onUpdate: (snapshot) => {
+				component.acceptUserShell(snapshot);
+				if (snapshot.status !== "running") void git.refresh();
+			},
 		});
 		const input = new InteractiveInputController({
 			agent: sessionOptions.agent,
@@ -234,9 +258,10 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		component = new ChatComponent({
 			modelLabel: sessionOptions.modelLabel,
 			activitySummaryMode: sessionOptions.activitySummaryMode,
-			workspaceLabel: options.workspaceLabel,
 			permissionLabel: sessionOptions.permissionLabel,
+			permissionWarning: sessionOptions.permissionProfile === "full-access",
 			reasoning: sessionOptions.reasoning,
+			statusLine: () => statusLineSnapshot(options, sessionOptions, git),
 			clock: options.clock,
 			colorLevel: options.terminal.capabilities.colorLevel,
 			appearance: options.terminal.capabilities.appearance,
@@ -268,7 +293,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 							onSelect: async (selected) => {
 								const label = await sessionOptions.onPermissionProfileChange(selected);
 								activePermissionProfile = selected;
-								component.setPermissionLabel(label);
+								component.setPermissionLabel(label, selected === "full-access");
 							},
 						}),
 					);
@@ -372,8 +397,10 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 			},
 			onExit: resolveExit,
 		});
+		components.add(component);
 		const detachAgent = sessionOptions.agent.onEvent((event) => {
 			component.accept(event);
+			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 			if (
 				(event.type === "tool_execution_start" ||
 					event.type === "tool_execution_end" ||
@@ -492,6 +519,7 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 		if (!(await startFullScreen())) {
 			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
 		}
+		git.start();
 		await startPane(initialPane);
 		await exited;
 		abortAll();
@@ -525,7 +553,11 @@ async function runMultiSessionInteractive(options: InteractiveRunOptions): Promi
 	}
 }
 
-async function runSingleSessionInteractive(options: InteractiveRunOptions): Promise<number> {
+async function runSingleSessionInteractive(
+	options: InteractiveRunOptions,
+	git: WorkspaceGitStatus,
+	components: Set<ChatComponent>,
+): Promise<number> {
 	let resolveExit!: () => void;
 	const exited = new Promise<void>((resolve) => {
 		resolveExit = resolve;
@@ -551,7 +583,10 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		workspace: options.workspace,
 		environment: options.environment,
 		clock: options.clock,
-		onUpdate: (snapshot) => component.acceptUserShell(snapshot),
+		onUpdate: (snapshot) => {
+			component.acceptUserShell(snapshot);
+			if (snapshot.status !== "running") void git.refresh();
+		},
 	});
 	const inputController = new InteractiveInputController({
 		agent: options.agent,
@@ -564,9 +599,10 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	component = new ChatComponent({
 		modelLabel: options.modelLabel,
 		activitySummaryMode: options.activitySummaryMode,
-		workspaceLabel: options.workspaceLabel,
 		permissionLabel: options.permissionLabel,
+		permissionWarning: options.permissionProfile === "full-access",
 		reasoning: options.reasoning,
+		statusLine: () => statusLineSnapshot(options, options, git),
 		clock: options.clock,
 		colorLevel: options.terminal.capabilities.colorLevel,
 		appearance: options.terminal.capabilities.appearance,
@@ -598,7 +634,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 						onSelect: async (selected) => {
 							const label = await options.onPermissionProfileChange(selected);
 							activePermissionProfile = selected;
-							component.setPermissionLabel(label);
+							component.setPermissionLabel(label, selected === "full-access");
 						},
 					}),
 				);
@@ -689,6 +725,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		},
 		onExit: resolveExit,
 	});
+	components.add(component);
 	tui = new FullScreenTui({
 		terminal: options.terminal,
 		root: component,
@@ -757,6 +794,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 	}
 	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
+		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 		if (
 			event.type === "tool_execution_start" ||
 			event.type === "tool_execution_end" ||
@@ -770,6 +808,7 @@ async function runSingleSessionInteractive(options: InteractiveRunOptions): Prom
 		if (!(await startFullScreen())) {
 			throw new Error("Interactive full-screen mode is unavailable; use --no-tui for print mode");
 		}
+		git.start();
 		if (options.initialPrompt !== undefined) {
 			await inputController.submitInput(options.initialPrompt, options.initialAttachmentIds);
 		}
@@ -803,5 +842,20 @@ function emptyAttachmentTransaction(): AttachmentTransaction {
 	return {
 		commit: async () => undefined,
 		rollback: async () => undefined,
+	};
+}
+
+function statusLineSnapshot(
+	run: InteractiveRunOptions,
+	session: InteractiveSessionOptions,
+	git: WorkspaceGitStatus,
+): StatusLineSnapshot {
+	return {
+		...session.statusLine(),
+		workspacePath: run.workspace,
+		...(run.homePath || run.environment.HOME || run.environment.USERPROFILE
+			? { homePath: run.homePath ?? run.environment.HOME ?? run.environment.USERPROFILE }
+			: {}),
+		...(git.snapshot ? { git: git.snapshot } : {}),
 	};
 }
