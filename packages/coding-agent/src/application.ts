@@ -1608,11 +1608,18 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						const refreshProviderAuth = async (providerId: string): Promise<void> => {
 							for (const { runtime, apiKey } of sessionRunRuntimes.values()) {
 								if (runtime.selected.model.provider !== providerId) continue;
-								const authSnapshot = await options.models.getAuth(runtime.selected.model, {
+								const selected = runtime.selected;
+								const model = options.models.getModel(providerId, selected.model.id) ?? selected.model;
+								const authSnapshot = await options.models.getAuth(model, {
 									apiKey,
 									clock: options.runtime.clock,
 								});
-								runtime.select({ ...runtime.selected, authSnapshot });
+								runtime.select({
+									...selected,
+									model,
+									reasoning: effectiveReasoningEffort(model, selected.reasoning),
+									authSnapshot,
+								});
 							}
 						};
 						const imageSurface = createTerminalImageSurface({
