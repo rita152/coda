@@ -6,6 +6,7 @@ import { isFileSystemError } from "../host/file-system.ts";
 import { ManagedSession, type SessionJournal } from "./managed-session.ts";
 import { SessionMediaCodec } from "./media-codec.ts";
 import {
+	CURRENT_SESSION_FORMAT_VERSION,
 	descriptorHeader,
 	messagePayload,
 	reduceSession,
@@ -509,7 +510,7 @@ export class FileSessionManager implements SessionManager {
 		records: readonly SessionRecord[],
 		fromVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8,
 	): Promise<ParsedJournal> {
-		const header: SessionHeader = { ...legacy.header, version: 9 };
+		const header: SessionHeader = { ...legacy.header, version: CURRENT_SESSION_FORMAT_VERSION };
 		const migratedText = `${[header, ...records].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 		const validated = parseJournal(migratedText, path, this.#diagnostics);
 		const token = safeIdentity(this.#runtime.idGenerator.generate("queue_item"));

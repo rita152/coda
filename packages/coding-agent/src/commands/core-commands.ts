@@ -1,7 +1,7 @@
 import { CommandRegistry } from "./registry.ts";
 import type { CommandArgumentPolicy, CommandDefinition } from "./types.ts";
 
-const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
+export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 	coreCommand({
 		id: "core:permission",
 		name: "permission",

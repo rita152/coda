@@ -41,9 +41,13 @@ export const SESSION_RECORD_TYPES = [
 
 export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
 
+export const SUPPORTED_SESSION_FORMAT_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+export type SessionFormatVersion = (typeof SUPPORTED_SESSION_FORMAT_VERSIONS)[number];
+export const CURRENT_SESSION_FORMAT_VERSION = 9 satisfies SessionFormatVersion;
+
 export interface SessionHeader {
 	readonly type: "session";
-	readonly version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+	readonly version: SessionFormatVersion;
 	readonly sessionId: string;
 	readonly workspaceId: string;
 	readonly workspacePath: string;
@@ -446,7 +450,7 @@ export function eventRecordInputs(
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {
 	return {
 		type: "session",
-		version: 9,
+		version: CURRENT_SESSION_FORMAT_VERSION,
 		sessionId: descriptor.id,
 		workspaceId: descriptor.workspace.id,
 		workspacePath: descriptor.workspace.path,

@@ -1,7 +1,11 @@
-import type { SessionHeader, SessionRecordType } from "./records.ts";
+import {
+	type SessionFormatVersion,
+	type SessionHeader,
+	type SessionRecordType,
+	SUPPORTED_SESSION_FORMAT_VERSIONS,
+} from "./records.ts";
 
 type JsonRecord = Record<string, unknown>;
-type SessionFormatVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 export interface ValidSessionRecordEnvelope extends JsonRecord {
 	readonly type: string;
@@ -546,15 +550,7 @@ export function isSessionHeader(value: unknown): value is SessionHeader {
 	return (
 		exactRecord(value, ["type", "version", "sessionId", "workspaceId", "workspacePath", "createdAt"]) &&
 		value.type === "session" &&
-		(value.version === 1 ||
-			value.version === 2 ||
-			value.version === 3 ||
-			value.version === 4 ||
-			value.version === 5 ||
-			value.version === 6 ||
-			value.version === 7 ||
-			value.version === 8 ||
-			value.version === 9) &&
+		(SUPPORTED_SESSION_FORMAT_VERSIONS as readonly unknown[]).includes(value.version) &&
 		isNonEmptyString(value.sessionId) &&
 		isNonEmptyString(value.workspaceId) &&
 		isNonEmptyString(value.workspacePath) &&

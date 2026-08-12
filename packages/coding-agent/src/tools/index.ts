@@ -9,6 +9,7 @@ import { createProcessTools } from "../process/tools.ts";
 import type { SessionHistoryReadPort } from "../session/session-history-reader.ts";
 import type { Workspace } from "../workspace.ts";
 import { createBashTool } from "./bash.ts";
+import { BUILT_IN_CODING_TOOL_NAMES } from "./contracts.ts";
 import { createEditTool } from "./edit.ts";
 import { createFindTool } from "./find.ts";
 import { createGrepTool } from "./grep.ts";
@@ -19,6 +20,8 @@ import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
 import { createSandboxedMutationWriter } from "./sandboxed-mutation-writer.ts";
 import { createWriteTool } from "./write.ts";
+
+export { BUILT_IN_CODING_TOOL_NAMES } from "./contracts.ts";
 
 export function createCodingTools(options: {
 	readonly workspace: Workspace;
@@ -38,7 +41,7 @@ export function createCodingTools(options: {
 		permissions: options.permissions,
 		onAudit: options.onAudit,
 	});
-	return [
+	const tools = [
 		createReadSessionHistoryTool(options.sessionHistory),
 		createReadTool(options.workspace, options.fileSystem, options.permissions),
 		createReadToolOutputTool({ fileSystem: options.fileSystem, homeDirectory: options.runtime.homeDirectory }),
@@ -69,4 +72,10 @@ export function createCodingTools(options: {
 			settings: options.settings,
 		}),
 	];
+	for (const [index, expectedName] of BUILT_IN_CODING_TOOL_NAMES.entries()) {
+		if (tools[index]?.name !== expectedName) {
+			throw new Error(`Built-in Tool contract mismatch: expected ${expectedName} at index ${index}`);
+		}
+	}
+	return tools;
 }
