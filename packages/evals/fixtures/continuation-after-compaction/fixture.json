@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "continuation-after-compaction",
+	"title": "Continue pending work after Compaction",
+	"category": "continuation-after-compaction",
+	"prompt": "Continue from the Compaction checkpoint, complete the pending implementation, and run the acceptance tests.",
+	"compaction": {
+		"summary": "The user requested calculateSubtotal in src/cart.ts. Exploration established that each line contributes price * quantity and test/cart.test.ts expects 13. The edit and acceptance-test run remain pending.",
+		"retainedUserMessage": "Please implement calculateSubtotal and cover the current cart test.",
+		"retainedAssistantMessage": "I inspected src/cart.ts and test/cart.test.ts; the pending implementation must sum price times quantity."
+	},
+	"acceptance": {
+		"expectedStatus": "passed",
+		"requireToolRun": true,
+		"checks": [
+			{ "id": "subtotal-implemented", "kind": "contains", "path": "src/cart.ts", "value": "line.price * line.quantity" },
+			{ "id": "todo-removed", "kind": "not-contains", "path": "src/cart.ts", "value": "TODO" }
+		]
+	},
+	"limits": {
+		"maxTurns": 4,
+		"maxTools": 3,
+		"maxRepeatedToolBatches": 0,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 800,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}

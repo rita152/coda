@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"id": "cross-file-bug-fix",
+	"title": "Repair percentage conversion across invoice modules",
+	"category": "cross-file-bug-fix",
+	"prompt": "Fix the discounted invoice calculation across the relevant files and run the acceptance tests.",
+	"acceptance": {
+		"expectedStatus": "passed",
+		"requireToolRun": true,
+		"checks": [
+			{
+				"id": "rate-converts-percent",
+				"kind": "contains",
+				"path": "src/discount.ts",
+				"value": "return percent / 100;"
+			},
+			{
+				"id": "invoice-uses-rate-once",
+				"kind": "contains",
+				"path": "src/invoice.ts",
+				"value": "1 - percentageToRate(percent)"
+			},
+			{
+				"id": "invoice-removes-double-conversion",
+				"kind": "not-contains",
+				"path": "src/invoice.ts",
+				"value": "percentageToRate(percent) / 100"
+			}
+		]
+	},
+	"limits": {
+		"maxTurns": 5,
+		"maxTools": 6,
+		"maxRepeatedToolBatches": 0,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 1000,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}

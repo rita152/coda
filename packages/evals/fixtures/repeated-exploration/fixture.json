@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "repeated-exploration",
+	"title": "Measure repeated repository exploration",
+	"category": "repeated-exploration",
+	"prompt": "Make sum([]) return zero, run the acceptance tests, and avoid unnecessary exploration.",
+	"acceptance": {
+		"expectedStatus": "passed",
+		"requireToolRun": true,
+		"checks": [
+			{ "id": "reduce-has-initial-value", "kind": "contains", "path": "src/sum.ts", "value": ", 0);" }
+		]
+	},
+	"limits": {
+		"maxTurns": 6,
+		"maxTools": 7,
+		"maxRepeatedToolBatches": 1,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 1100,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}

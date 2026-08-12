@@ -1,0 +1,20 @@
+[
+	{
+		"elapsedMs": 35,
+		"content": [
+			{ "type": "toolCall", "id": "diagnose-read-source", "name": "read_file", "arguments": { "path": "src/cache.ts" } },
+			{ "type": "toolCall", "id": "diagnose-read-test", "name": "read_file", "arguments": { "path": "test/cache.test.ts" } }
+		],
+		"usage": { "input": 70, "output": 20, "priceUsd": 0.00009 }
+	},
+	{
+		"elapsedMs": 25,
+		"content": [{ "type": "toolCall", "id": "diagnose-tests", "name": "run_tests", "arguments": {} }],
+		"usage": { "input": 125, "output": 14, "priceUsd": 0.00014 }
+	},
+	{
+		"elapsedMs": 30,
+		"content": [{ "type": "text", "text": "Diagnosis: elapsed milliseconds are compared directly with ttlSeconds, so entries expire about 1,000 times too early. I made no changes; tests still fail." }],
+		"usage": { "input": 155, "output": 34, "reasoning": 8, "priceUsd": 0.00019 }
+	}
+]

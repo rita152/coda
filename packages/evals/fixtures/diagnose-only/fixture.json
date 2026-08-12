@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "diagnose-only",
+	"title": "Diagnose cache expiry without mutation",
+	"category": "diagnose-only",
+	"prompt": "Diagnose why the cache expiry test fails. Do not edit any files; report the cause and current test outcome.",
+	"permissions": { "denyWrites": true },
+	"acceptance": {
+		"expectedStatus": "failed",
+		"requireToolRun": true,
+		"checks": [
+			{ "id": "ttl-converts-to-ms", "kind": "contains", "path": "src/cache.ts", "value": "ttlSeconds * 1_000" }
+		]
+	},
+	"limits": {
+		"maxTurns": 4,
+		"maxTools": 4,
+		"maxRepeatedToolBatches": 0,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 800,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}

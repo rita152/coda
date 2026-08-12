@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "tool-failure-recovery",
+	"title": "Recover from a missing-file Tool result",
+	"category": "tool-failure-recovery",
+	"prompt": "Fix the misspelled production environment value and run the acceptance tests. Recover if an explored path is missing.",
+	"acceptance": {
+		"expectedStatus": "passed",
+		"requireToolRun": true,
+		"checks": [
+			{ "id": "production-spelling", "kind": "contains", "path": "src/settings.ts", "value": "return \"production\";" },
+			{ "id": "old-spelling-removed", "kind": "not-contains", "path": "src/settings.ts", "value": "prodution" }
+		]
+	},
+	"limits": {
+		"maxTurns": 6,
+		"maxTools": 5,
+		"maxRepeatedToolBatches": 0,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 1000,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}

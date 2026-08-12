@@ -1,0 +1,37 @@
+[
+	{
+		"elapsedMs": 20,
+		"content": [{ "type": "toolCall", "id": "failure-missing", "name": "read_file", "arguments": { "path": "src/config.ts" } }],
+		"usage": { "input": 55, "output": 13, "priceUsd": 0.00007 }
+	},
+	{
+		"elapsedMs": 25,
+		"content": [{ "type": "toolCall", "id": "failure-recover", "name": "read_file", "arguments": { "path": "src/settings.ts" } }],
+		"usage": { "input": 92, "output": 14, "priceUsd": 0.00011 }
+	},
+	{
+		"elapsedMs": 35,
+		"content": [
+			{
+				"type": "toolCall",
+				"id": "failure-write",
+				"name": "write_file",
+				"arguments": {
+					"path": "src/settings.ts",
+					"content": "export function environmentName(): string {\n\treturn \"production\";\n}\n"
+				}
+			}
+		],
+		"usage": { "input": 130, "output": 34, "priceUsd": 0.00016 }
+	},
+	{
+		"elapsedMs": 20,
+		"content": [{ "type": "toolCall", "id": "failure-tests", "name": "run_tests", "arguments": {} }],
+		"usage": { "input": 160, "output": 12, "priceUsd": 0.00017 }
+	},
+	{
+		"elapsedMs": 20,
+		"content": [{ "type": "text", "text": "Recovered from the missing path, fixed the production spelling, and verified the result. Tests pass." }],
+		"usage": { "input": 184, "output": 22, "priceUsd": 0.00021 }
+	}
+]

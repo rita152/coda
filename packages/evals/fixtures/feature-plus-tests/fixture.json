@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"id": "feature-plus-tests",
+	"title": "Add stable tag de-duplication with tests",
+	"category": "feature-plus-tests",
+	"prompt": "Add uniqueTags so normalized tags are de-duplicated in first-seen order, add tests, and run them.",
+	"acceptance": {
+		"expectedStatus": "passed",
+		"requireToolRun": true,
+		"checks": [
+			{ "id": "feature-exported", "kind": "contains", "path": "src/tags.ts", "value": "export function uniqueTags" },
+			{ "id": "stable-set", "kind": "contains", "path": "src/tags.ts", "value": "if (!result.includes(normalized))" },
+			{ "id": "feature-tested", "kind": "contains", "path": "test/tags.test.ts", "value": "first-seen order" }
+		]
+	},
+	"limits": {
+		"maxTurns": 5,
+		"maxTools": 6,
+		"maxRepeatedToolBatches": 0,
+		"maxPermissionEscalationAttempts": 0,
+		"maxElapsedMs": 1000,
+		"minScore": 90
+	},
+	"toolElapsedMs": 10
+}
