@@ -33,7 +33,7 @@ describe("model-call context preflight", () => {
 		const runtime = testTimeRuntime(2_000);
 		const faux = fauxProvider({
 			runtime,
-			models: [{ id: "bounded", contextWindow: 4_000, maxTokens: 512 }],
+			models: [{ id: "bounded", contextWindow: 8_000, maxTokens: 512 }],
 		});
 		const summarizeOrContinue = (context: Context) => {
 			const serialized = JSON.stringify(context.messages);
