@@ -12,6 +12,7 @@ export type MainTimelineContentType =
 	| "tool"
 	| "user_shell"
 	| "error"
+	| "evidence"
 	| "notice";
 
 export interface MainTimelineBlock extends ViewportBlock {

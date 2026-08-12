@@ -379,6 +379,7 @@ describe("interactive TUI mode", () => {
 			action: "press",
 		});
 		await until(() => terminal.readOutput().includes("interactive answer"));
+		await until(() => terminal.readOutput().includes("Evidence · 0 inspected · 0 changed"));
 		await terminal.emit({
 			type: "key",
 			key: "c",

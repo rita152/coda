@@ -288,7 +288,17 @@ describe("Coding Agent print mode", () => {
 			reasoning: "off",
 			permissions: { profile: "read-only", approvalPolicy: "on-request" },
 		});
-		expect(events.at(-1)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
+		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
+		expect(events.at(-1)).toMatchObject({
+			schemaVersion: 1,
+			type: "run_evidence",
+			outcome: "success",
+			paths: { inspected: [], changed: [] },
+			commands: [],
+			toolIssues: [],
+			unresolvedFailures: [],
+		});
+		expect(events.at(-1)?.runId).toBe(events.at(-2)?.runId);
 		expect(stdout.value).not.toContain("json answer\n");
 		expect(stderr.value).toBe("");
 	});
@@ -390,6 +400,14 @@ describe("Coding Agent print mode", () => {
 					schemaVersion: 3,
 					type: "approval_required",
 					request: expect.objectContaining({ kind: "filesystem", toolName: "write" }),
+				}),
+			);
+			expect(events).toContainEqual(
+				expect.objectContaining({
+					schemaVersion: 1,
+					type: "run_evidence",
+					toolIssues: [expect.objectContaining({ toolName: "write", status: "denied" })],
+					unresolvedFailures: [expect.objectContaining({ kind: "tool", status: "denied" })],
 				}),
 			);
 			await expect(readFile(join(workspace, "denied.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
@@ -593,7 +611,8 @@ describe("Coding Agent print mode", () => {
 
 			expect(exitCode).toBe(1);
 			expect(faux.state.callCount).toBe(1);
-			expect(events.at(-1)).toMatchObject({ type: "run_end", outcome: "aborted" });
+			expect(events.at(-2)).toMatchObject({ type: "run_end", outcome: "aborted" });
+			expect(events.at(-1)).toMatchObject({ type: "run_evidence", outcome: "aborted" });
 			expect(stderr.value).toContain("Run ended with outcome aborted");
 		} finally {
 			await rm(workspace, { recursive: true, force: true });

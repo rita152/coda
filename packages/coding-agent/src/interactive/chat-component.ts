@@ -23,6 +23,8 @@ import type { CommandRegistry } from "../commands/registry.ts";
 import type { CommandDefinition } from "../commands/types.ts";
 import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
+import { renderRunEvidenceSummary } from "../run-evidence/presentation.ts";
+import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
@@ -191,6 +193,7 @@ export class ChatComponent extends Component {
 		readonly transcriptMode: boolean;
 		readonly error?: string;
 		readonly notice?: string;
+		readonly runEvidence?: RunEvidenceEnvelope;
 		readonly attachmentFocusKey?: string;
 		readonly blocks: readonly ViewportBlock[];
 	};
@@ -207,6 +210,7 @@ export class ChatComponent extends Component {
 	#lastIdleCtrlCAt?: number;
 	#error?: string;
 	#notice?: string;
+	#runEvidence?: RunEvidenceEnvelope;
 	#attachments: ChatAttachment[] = [];
 	#attachmentFocusKey?: string;
 	#attachmentFocusOrigin?: "keyboard" | "mouse";
@@ -353,6 +357,11 @@ export class ChatComponent extends Component {
 		this.invalidate();
 	}
 
+	acceptRunEvidence(evidence: RunEvidenceEnvelope): void {
+		this.#runEvidence = structuredClone(evidence);
+		this.invalidate();
+	}
+
 	accept(event: AgentEvent): void {
 		this.#activity.accept(event);
 		if (event.type === "run_start" && this.#nextRunAttachments && this.#nextRunAttachments.length > 0) {
@@ -410,6 +419,7 @@ export class ChatComponent extends Component {
 			case "run_start":
 				this.#running = true;
 				this.#notice = undefined;
+				this.#runEvidence = undefined;
 				break;
 			case "run_end":
 				this.#running = false;
@@ -1235,6 +1245,7 @@ export class ChatComponent extends Component {
 			cache.transcriptMode === this.#transcriptMode &&
 			cache.error === this.#error &&
 			cache.notice === this.#notice &&
+			cache.runEvidence === this.#runEvidence &&
 			cache.attachmentFocusKey === this.#attachmentFocusKey
 		) {
 			return cache.blocks;
@@ -1318,6 +1329,17 @@ export class ChatComponent extends Component {
 				"error",
 			);
 		}
+		if (this.#runEvidence) {
+			appendBlock(
+				{
+					id: `run-evidence:${this.#runEvidence.runId}`,
+					lines: renderRunEvidenceSummary(this.#runEvidence, width).map((line) =>
+						this.#theme.style("muted", line),
+					),
+				},
+				"evidence",
+			);
+		}
 		if (this.#notice) {
 			appendBlock(
 				{
@@ -1343,6 +1365,7 @@ export class ChatComponent extends Component {
 				transcriptMode: this.#transcriptMode,
 				error: this.#error,
 				notice: this.#notice,
+				runEvidence: this.#runEvidence,
 				attachmentFocusKey: this.#attachmentFocusKey,
 				blocks: snapshot,
 			});

@@ -2465,7 +2465,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						return exitCode;
 					}
 					if (parsed.output === "json") {
-						agent.onEvent((event) => {
+						agent.onEvent(async (event) => {
 							const envelope =
 								event.type === "run_start"
 									? {
@@ -2480,9 +2480,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											},
 										}
 									: { schemaVersion: 2, ...event };
-							return options.io.stdout.write(
+							await options.io.stdout.write(
 								`${JSON.stringify(projectJsonMedia(envelope, mediaLibrary, parsed.includeMediaData))}\n`,
 							);
+							if (event.type === "run_end") {
+								const evidence = session.runEvidence.at(-1);
+								if (!evidence || evidence.runId !== event.runId) {
+									throw new Error(`Run evidence was unavailable after completed Run ${event.runId}`);
+								}
+								await options.io.stdout.write(`${JSON.stringify(evidence)}\n`);
+							}
 						});
 					}
 					const initialMedia = await prepareAttachments(initialAttachmentIds);

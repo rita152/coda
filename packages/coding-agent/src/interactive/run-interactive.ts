@@ -495,10 +495,12 @@ async function runMultiSessionInteractive(
 			},
 			onExit: resolveExit,
 		});
+		acceptLatestRunEvidence(component, sessionOptions.session);
 		components.add(component);
 		let pane!: InteractivePane;
 		const detachAgent = sessionOptions.agent.onEvent((event) => {
 			component.accept(event);
+			if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 			if (event.type === "run_start") {
 				pane.contextOverflowPending = false;
@@ -871,6 +873,7 @@ async function runSingleSessionInteractive(
 		},
 		onExit: resolveExit,
 	});
+	acceptLatestRunEvidence(component, options.session);
 	components.add(component);
 	tui = new FullScreenTui({
 		terminal: options.terminal,
@@ -940,6 +943,7 @@ async function runSingleSessionInteractive(
 	}
 	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
+		if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
 		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 		if (
 			event.type === "tool_execution_start" ||
@@ -1020,6 +1024,11 @@ function assertEmptyReplacementSession(
 	) {
 		throw new Error("Context Overflow replacement Session runtime is not empty");
 	}
+}
+
+function acceptLatestRunEvidence(component: ChatComponent, session: Session, runId?: string): void {
+	const evidence = session.runEvidence.at(-1);
+	if (evidence && (runId === undefined || evidence.runId === runId)) component.acceptRunEvidence(evidence);
 }
 
 function emptyAttachmentTransaction(): AttachmentTransaction {
