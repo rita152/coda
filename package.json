@@ -11,7 +11,9 @@
 	},
 	"scripts": {
 		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/sandbox && npm run build --workspace=@coda/skills && npm run build --workspace=@coda/mcp && npm run build --workspace=@coda/coding-agent && npm run build --workspace=@coda/evals",
-		"check": "npm run build && npm run check --workspaces --if-present",
+		"capabilities:update": "tsx packages/coding-agent/scripts/generate-capabilities.ts --write",
+		"capabilities:check": "tsx packages/coding-agent/scripts/generate-capabilities.ts --check",
+		"check": "npm run capabilities:check && npm run build && npm run check --workspaces --if-present",
 		"eval:offline": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run eval:offline --workspace=@coda/evals",
 		"eval:live": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run eval:live --workspace=@coda/evals",
 		"models:update": "npm run models:update --workspace=@coda/ai",
@@ -20,5 +22,8 @@
 		"test:integration": "npm run build && npm run test:integration --workspaces --if-present",
 		"test:e2e": "npm run test:e2e --workspace=@coda/coding-agent",
 		"pack:dry-run": "npm run build && npm run pack:dry-run --workspaces --if-present"
+	},
+	"devDependencies": {
+		"tsx": "4.22.1"
 	}
 }

@@ -45,7 +45,8 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: npm ci
-      - run: npm run check
+      - name: Check source and generated capability documentation
+        run: npm run check
       - run: npm test
       - run: npm run eval:offline
       - run: npm run test:conformance

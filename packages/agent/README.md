@@ -34,8 +34,10 @@ Status: private Milestone 1 package.
 The public package has one root entry. Reducer, dispatch, scheduling, and Seed
 validation internals are deliberately not exported.
 
-## Deferred
+## Package boundary
 
-Session repositories, durable operations, compaction, filesystem and shell
-access, coding Tools, model selection, credentials, settings, and terminal UI
-belong to later packages or milestones.
+Session repositories, durable operations, Context Compaction, filesystem and
+Shell access, coding Tools, Model selection, Credentials, settings, and terminal
+UI do not belong to `@coda/agent`. The upper `@coda/coding-agent` package now
+implements the durable Session and Context Compaction capabilities while this
+package remains an in-memory Agent runtime.
