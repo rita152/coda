@@ -75,8 +75,11 @@ import {
 } from "./permissions/audit.ts";
 import {
 	createAuditedModelProcessRunner,
+	createAuditedModelProcessSessionRunner,
 	createModelProcessRunner,
+	createModelProcessSessionRunner,
 	type ModelProcessRunner,
+	type ModelProcessSessionRunner,
 } from "./permissions/model-process-runner.ts";
 import {
 	type ApprovalPolicy,
@@ -89,6 +92,7 @@ import {
 import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
 import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
 import { resolveDefaultDeniedReadRoots } from "./permissions/sensitive-read-roots.ts";
+import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { assertModelContextFits } from "./prompt/context-budget.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
@@ -252,6 +256,7 @@ export interface CodingAgentApplicationOptions {
 	readonly approval?: PermissionApprovalHandler;
 	readonly permissionRules?: PermissionRuleStore;
 	readonly modelProcessRunner?: ModelProcessRunner;
+	readonly modelProcessSessionRunner?: ModelProcessSessionRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
 	readonly mcpConnector?: McpConnector;
@@ -1043,6 +1048,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				let mcpRegistry: CodingMcpRegistry | undefined;
+				let processSessionManager: ProcessSessionManager | undefined;
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -1429,10 +1435,21 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						options.modelProcessRunner ?? createModelProcessRunner(),
 						audit,
 					);
+					const activeProcessSessionManager = new ProcessSessionManager({
+						fileSystem: options.fileSystem,
+						homeDirectory: options.runtime.homeDirectory,
+						runner: createAuditedModelProcessSessionRunner(
+							options.modelProcessSessionRunner ?? createModelProcessSessionRunner(),
+							audit,
+						),
+						idGenerator: options.runtime.idGenerator,
+					});
+					processSessionManager = activeProcessSessionManager;
 					const baseTools = createCodingTools({
 						workspace,
 						fileSystem: options.fileSystem,
 						processRunner: modelProcessRunner,
+						processSessionManager: activeProcessSessionManager,
 						permissions: policy,
 						shellExecutable,
 						runtime: options.runtime,
@@ -1856,6 +1873,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									workspace,
 									fileSystem: options.fileSystem,
 									processRunner: modelProcessRunner,
+									processSessionManager: activeProcessSessionManager,
 									permissions: targetPolicy,
 									shellExecutable,
 									runtime: options.runtime,
@@ -2514,12 +2532,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
 					try {
-						await mcpRegistry?.close();
+						await processSessionManager?.close();
 					} finally {
 						try {
-							await mediaLibrary.dispose();
+							await mcpRegistry?.close();
 						} finally {
-							await session.close();
+							try {
+								await mediaLibrary.dispose();
+							} finally {
+								await session.close();
+							}
 						}
 					}
 				}

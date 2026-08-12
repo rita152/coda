@@ -4,6 +4,8 @@ import type { FileSystem } from "../host/file-system.ts";
 import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { ProcessSessionManager } from "../process/process-session-manager.ts";
+import { createProcessTools } from "../process/tools.ts";
 import type { SessionHistoryReadPort } from "../session/session-history-reader.ts";
 import type { Workspace } from "../workspace.ts";
 import { createBashTool } from "./bash.ts";
@@ -22,6 +24,7 @@ export function createCodingTools(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ModelProcessRunner;
+	readonly processSessionManager: ProcessSessionManager;
 	readonly permissions: PermissionEngine;
 	readonly shellExecutable: string;
 	readonly runtime: ApplicationRuntime;
@@ -57,5 +60,13 @@ export function createCodingTools(options: {
 		createEditTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createWriteTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createBashTool(options),
+		...createProcessTools({
+			workspace: options.workspace,
+			manager: options.processSessionManager,
+			permissions: options.permissions,
+			shellExecutable: options.shellExecutable,
+			runtime: options.runtime,
+			settings: options.settings,
+		}),
 	];
 }

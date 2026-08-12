@@ -33,7 +33,10 @@ function context(): ToolExecutionContext {
 	};
 }
 
-async function fixture(runner: ModelProcessSessionRunner = createModelProcessSessionRunner()): Promise<{
+async function fixture(
+	runner: ModelProcessSessionRunner = createModelProcessSessionRunner(),
+	limits: { readonly maxPollOutputBytes?: number; readonly maxPollOutputLines?: number } = {},
+): Promise<{
 	readonly manager: ProcessSessionManager;
 	readonly workspace: string;
 	readonly authority: ModelProcessAuthority;
@@ -48,6 +51,7 @@ async function fixture(runner: ModelProcessSessionRunner = createModelProcessSes
 		homeDirectory: workspace,
 		runner,
 		idGenerator,
+		...limits,
 	});
 	managers.push(manager);
 	return {
@@ -141,7 +145,10 @@ describe("ProcessSessionManager", () => {
 	});
 
 	it("bounds each poll and exposes omitted output through read_tool_output", async () => {
-		const { manager, workspace, authority } = await fixture();
+		const { manager, workspace, authority } = await fixture(createModelProcessSessionRunner(), {
+			maxPollOutputBytes: 64,
+			maxPollOutputLines: 5,
+		});
 		const started = await manager.start(
 			request(workspace, "for (let index = 0; index < 4000; index++) console.log('line-' + index)"),
 			authority,
@@ -151,7 +158,7 @@ describe("ProcessSessionManager", () => {
 		for (let attempt = 0; attempt < 100; attempt++) {
 			result = await manager.poll(started.processId);
 			observedTruncation ||= result.truncated;
-			expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(50 * 1024);
+			expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(64);
 			if (result.state !== "running") break;
 			await wait(10);
 		}

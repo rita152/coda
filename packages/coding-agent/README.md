@@ -180,7 +180,7 @@ npm run test:e2e
 
 ## Capabilities
 
-- `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`
+- `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and process lifecycle Tools
 - Read Only, Workspace, and Full Access Permission Profiles with Unless Trusted, On Request, Granular, and Never Approval Policies
 - exact filesystem, command-prefix, host-network, one-shot, process-local Session, and persistent-rule decisions
 - one canonical Read Access Policy for native File Tools and model-started processes, with reviewed external roots and protected Credential Roots
@@ -204,7 +204,7 @@ npm run test:e2e
 - MCP 2026-07-28 Host/Client Tools over stdio and Streamable HTTP, with legacy negotiation, exact Workspace configuration trust, immutable per-Run catalogs, subscriptions, cancellation, progress, and form/URL Elicitation
 - transient whole-Turn retry at 2s, 4s, and 8s
 
-The Policy Gate resolves authority before a model Tool can run. Native File Tools and model-started processes share one canonical Read Access Policy. Model `bash`, native search helpers, and file mutation workers enter `@coda/sandbox` for every restricted Permission Profile; only Full Access bypasses the outer Sandbox. An ordinary Sandbox denial is returned to the model and never retries outside the Sandbox automatically. Workspace-external authority uses a precise Additional Permission or, for native File Tools, an explicit filesystem Approval Request.
+The Policy Gate resolves authority before a model Tool can run. Native File Tools and model-started processes share one canonical Read Access Policy. Model `bash`, `process_start`, native search helpers, and file mutation workers enter `@coda/sandbox` for every restricted Permission Profile; only Full Access bypasses the outer Sandbox. An ordinary Sandbox denial is returned to the model and never retries outside the Sandbox automatically. Workspace-external authority uses a precise Additional Permission or, for native File Tools, an explicit filesystem Approval Request. Long-running processes use opaque process-local identities with `process_poll`, `process_write`, and `process_stop`; they cannot be restored as live after restart.
 
 Explicit interactive `!command` remains a separate direct-user entry point: it bypasses model Tool approval and Sandbox, inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
 

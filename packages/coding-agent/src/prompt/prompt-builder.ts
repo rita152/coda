@@ -202,7 +202,7 @@ export function buildSystemPrompt(input: SystemPromptInput): SystemPromptSnapsho
 		`- Approval Policy: ${input.capabilities.approvalPolicy}`,
 		readAccessFact(input.capabilities.readAccess),
 		"- Native Workspace-external reads require filesystem approval and fail closed when approval is unavailable.",
-		"- Bash uses the active OS Sandbox by default. Direct network access is blocked outside Full Access.",
+		"- Bash and process_start use the active OS Sandbox by default. Direct network access is blocked outside Full Access.",
 		"- Use with_additional_permissions and canonical absolute paths for precise filesystem or network expansion. Include a concise justification for review.",
 		"- require_escalated requests explicit command review but does not bypass restricted read roots; only Full Access bypasses the Sandbox. A proposed prefix_rule must be a true prefix of the reviewed command.",
 		"",
