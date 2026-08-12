@@ -11,6 +11,7 @@ import {
 	type Models,
 	resolveToolObservation,
 } from "@coda/ai";
+import { reserveModelOutputTokens } from "../prompt/context-budget.ts";
 import type { CompactionCheckpoint, CompactionReason } from "./types.ts";
 
 const SUMMARY_HEADINGS = [
@@ -39,6 +40,7 @@ export interface ContextWindowControllerOptions {
 	readonly runtime: () => ContextWindowRuntime;
 	readonly commit: (checkpoint: CompactionCheckpoint) => Promise<void>;
 	readonly checkpoint?: CompactionCheckpoint;
+	readonly maxOutputTokens?: number;
 }
 
 export interface CompactContextRequest {
@@ -150,7 +152,11 @@ export class ContextWindowController {
 		await this.flushManual(messages, signal);
 		let projected = this.#contextWithMessages(context, this.project(messages));
 		const { model } = this.#options.runtime();
-		for (let pass = 0; pass < 3 && this.canCompact(messages) && shouldAutoCompact(model, projected); pass++) {
+		for (
+			let pass = 0;
+			pass < 3 && this.canCompact(messages) && shouldAutoCompact(model, projected, this.#options.maxOutputTokens);
+			pass++
+		) {
 			const beforeTokens = estimateSerializedTokens(projected);
 			await this.compact({ messages, reason: "auto", signal });
 			projected = this.#contextWithMessages(context, this.project(messages));
@@ -305,8 +311,8 @@ export class ContextWindowController {
 	}
 }
 
-export function shouldAutoCompact(model: Model<Api>, context: Context): boolean {
-	const reservedOutput = Math.max(1, Math.min(model.maxTokens, 16_384, Math.floor(model.contextWindow / 4)));
+export function shouldAutoCompact(model: Model<Api>, context: Context, maxOutputTokens?: number): boolean {
+	const reservedOutput = reserveModelOutputTokens(model, maxOutputTokens);
 	const usableInput = Math.max(1, model.contextWindow - reservedOutput);
 	const buffer = Math.min(
 		AUTO_BUFFER_CEILING_TOKENS,

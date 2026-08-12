@@ -1,0 +1,688 @@
+import { basename, isAbsolute } from "node:path";
+
+export const DEEP_SWE_VERSION = "v1.1";
+export const DEEP_SWE_DATASET_REVISION = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9";
+export const DEEP_SWE_PIER_VERSION = "0.3.1";
+export const DEEP_SWE_PIER_REVISION = "df89f994623a0a6a57229103b6fe910766693c30";
+export const DEEP_SWE_DEFAULT_MODEL = "opencode-go/deepseek-v4-flash";
+export const DEEP_SWE_DEFAULT_REASONING = "max";
+export const DEEP_SWE_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+export const DEEP_SWE_DEFAULT_MAX_TURNS = 64;
+export const DEEP_SWE_PROVIDER_HOST = "opencode.ai";
+
+export interface DeepSweImageLock {
+	readonly taskId: string;
+	readonly image: string;
+	readonly digest: `sha256:${string}`;
+}
+
+const DEEP_SWE_IMAGE_REPOSITORY = "public.ecr.aws/d3j8x8q7/swe-bench-202605";
+const OPENCODE_API_KEY_TEMPLATE = `\${OPENCODE_API_KEY}`;
+
+export const DEEP_SWE_FIRST_20_IMAGE_LOCKS: readonly DeepSweImageLock[] = Object.freeze([
+	{
+		taskId: "abs-module-cache-flags",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1`,
+		digest: "sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1",
+	},
+	{
+		taskId: "abs-stepped-slices",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh7d5m4ed35zfp7gyhx7wdahed82yw72-v1.1`,
+		digest: "sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1",
+	},
+	{
+		taskId: "actionlint-action-pinning-lint",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh79dnvkvq8j9bs22ededmsc79823akj-v1.1`,
+		digest: "sha256:522a6e93a31656d03cc79474dafc5542bb27109051914d5566d7d29789c2a1a6",
+	},
+	{
+		taskId: "adaptix-name-mapping-aliases",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh73dq4n55jdxasppe6jjmth4183d47n-v1.1`,
+		digest: "sha256:528654670f3c591e6491fc6fa01a0b8905bc8dee1b0557c5e76231bcc206f8fe",
+	},
+	{
+		taskId: "aiomonitor-task-snapshots-diff",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh75rc2q0zhmsqwk7wewfwwtrx830v2n-v1.1`,
+		digest: "sha256:e0c8b4e4044d5831693b4f6a6da483b255a889b71376574fba9e3c93d36ceb7c",
+	},
+	{
+		taskId: "anko-default-function-arguments",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh7fj3hc92zehtc8azrm32xzb182w9dr-v1.1`,
+		digest: "sha256:31c8dce39317314800d1200610475ba27b98c71350d524d25e7df71d80c5752a",
+	},
+	{
+		taskId: "anko-typed-variable-bindings",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh79betfed7ets4an20cr4j57182y9wt-v1.1`,
+		digest: "sha256:4fb704fd8dff600f6d028c20ae4aca5e1261968bb615bb41c01a111dd371255b",
+	},
+	{
+		taskId: "arcane-drift-detection-baselines",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh70nj38qyatmsmj1d5zh57j25820vrx-v1.1`,
+		digest: "sha256:1d4ad8d6deb37c92a9bbb550cf3cc127f916e340f35f29b72948ccb571197c42",
+	},
+	{
+		taskId: "arktype-json-schema-refs-dependencies",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh771gpr8crkjsnt9pj81bafgs8229em-v1.1`,
+		digest: "sha256:e0b0410d828b816474cfb89a448c448f15cf7d617c3fbddfacd45a1c1b232ef9",
+	},
+	{
+		taskId: "awilix-async-container-initialization",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh70bg8gy4xks4eyh1s71ecmk9822p9c-v1.1`,
+		digest: "sha256:748294a8ece567691f0a628d03c3531024d9f5e1acd13d5c6dd1ecba490831e6",
+	},
+	{
+		taskId: "bandit-incremental-cache-control",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh7drfg2vkvdvfh9xx0nfd5pz9821xr7-v1.1`,
+		digest: "sha256:f22b38f03dfbe2ca76f5019a1ef94953f700d51312fe47693ecba7d18f544d94",
+	},
+	{
+		taskId: "bandit-interprocedural-taint-checks",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh77yap0nc4zwm5bysc954xbr182tptg-v1.1`,
+		digest: "sha256:7207179b09db76a8a3864b9e69c5fdf10e0d41a5bba242854216f18aa90ac7b1",
+	},
+	{
+		taskId: "bandit-structured-nosec-directives",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh757d8ggvnfaszv8zcav3msy982ma7f-v1.1`,
+		digest: "sha256:2f6978cf88228baa0d3323e4f139ee222f5886218d86ca1d327bcae3711f4b6a",
+	},
+	{
+		taskId: "boa-hierarchical-evaluation-cancellation",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh71kat2v58yys3pnyybkgycax832vj2-v1.1`,
+		digest: "sha256:9ab97da2ebb88bc71beeb2434d198d4adca6e1abe14f45d52250666249fb7a1e",
+	},
+	{
+		taskId: "cattrs-partial-structuring-recovery",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh7f7cahc5ddm1qzpxz13kpmrh8235pc-v1.1`,
+		digest: "sha256:443a3534dab64283e5a9dedf3b7ac8867ed7d5dabcde39bc39c77ab5a909176a",
+	},
+	{
+		taskId: "clack-async-autocomplete-options",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh78c5dwwna57y757p2y5ktw79836dnv-v1.1`,
+		digest: "sha256:32a72ef7d4a9d3ae8937aef9c42e18166284c817c8edf137d66772e4f34abf74",
+	},
+	{
+		taskId: "claude-code-by-agents-recursive-delegation",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh734ehfw2s3bztf7pzc9xf3x18212bs-v1.1`,
+		digest: "sha256:4baf10f1e66f9ab4d82991e538c13620c387c862974ec36dd5bd5d52f635920e",
+	},
+	{
+		taskId: "cliffy-config-file-parsing",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh72088pg9vkc6peacnkc35yy9832jff-v1.1`,
+		digest: "sha256:0a8dd8f1270ec4bb88efadad3021762e1d07274f686276c8a484d26a00bd91b5",
+	},
+	{
+		taskId: "csstree-shorthand-expansion-compression",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh72qraccnjwdet6ynagsccr4x82y65c-v1.1`,
+		digest: "sha256:df2cc59d679c908f8f13f68fc59231a5d6f0c2bcec4b7b26fdf9489eb824a8b2",
+	},
+	{
+		taskId: "dasel-html-document-format",
+		image: `${DEEP_SWE_IMAGE_REPOSITORY}:kh7c7rrg3zke74w7068nawak9x82t6am-v1.1`,
+		digest: "sha256:0529d5659b2d11ee76e3ba13a877043b3e43bcf123f36a840f9cf5b5ade09b78",
+	},
+]);
+
+export const DEEP_SWE_FIRST_20_TASK_IDS: readonly string[] = Object.freeze(
+	DEEP_SWE_FIRST_20_IMAGE_LOCKS.map(({ taskId }) => taskId),
+);
+
+export interface DeepSwePierJobOptions {
+	readonly datasetDir: string;
+	readonly runtimeDir: string;
+	readonly jobsDir: string;
+	readonly harnessRevision: string;
+	readonly round: number;
+	readonly concurrency: number;
+	readonly taskIds?: readonly string[];
+	readonly model?: string;
+	readonly reasoningEffort?: string;
+	readonly maxOutputTokens?: number;
+	readonly maxTurns?: number;
+	readonly disableRunBudget?: boolean;
+	readonly allowAllCommands?: boolean;
+	readonly adapterImportPath?: string;
+	readonly quiet?: boolean;
+}
+
+export interface DeepSwePierJobConfig {
+	readonly job_name: string;
+	readonly jobs_dir: string;
+	readonly n_attempts: 1;
+	readonly n_concurrent_trials: number;
+	readonly quiet: boolean;
+	readonly retry: { readonly max_retries: 0 };
+	readonly environment: {
+		readonly type: "docker";
+		readonly force_build: false;
+		readonly delete: true;
+		readonly cpu_enforcement_policy: "auto";
+		readonly memory_enforcement_policy: "auto";
+	};
+	readonly verifier: { readonly disable: false };
+	readonly agents: readonly [
+		{
+			readonly import_path: string;
+			readonly model_name: string;
+			readonly override_setup_timeout_sec: 900;
+			readonly max_timeout_sec: 5400;
+			readonly kwargs: {
+				readonly runtime_dir: string;
+				readonly reasoning_effort: string;
+				readonly max_output_tokens: number;
+				readonly run_budget_enabled: boolean;
+				readonly max_turns?: number;
+				readonly allow_all_commands: boolean;
+				readonly harness_revision: string;
+			};
+			readonly env: {
+				readonly OPENCODE_API_KEY: "${OPENCODE_API_KEY}";
+				readonly NODE_USE_ENV_PROXY: "1";
+				readonly NODE_USE_SYSTEM_CA: "1";
+			};
+		},
+	];
+	readonly datasets: readonly [{ readonly path: string; readonly task_names: readonly string[] }];
+}
+
+export interface DeepSweRunLock {
+	readonly schemaVersion: 1;
+	readonly campaignKind: "development-round";
+	readonly dataset: {
+		readonly name: "datacurve/deep-swe-1-1";
+		readonly version: typeof DEEP_SWE_VERSION;
+		readonly sourceRevision: typeof DEEP_SWE_DATASET_REVISION;
+	};
+	readonly pier: {
+		readonly version: typeof DEEP_SWE_PIER_VERSION;
+		readonly sourceRevision: typeof DEEP_SWE_PIER_REVISION;
+	};
+	readonly harness: {
+		readonly name: "coda";
+		readonly revision: string;
+		readonly model: string;
+		readonly reasoningEffort: string;
+		readonly maxOutputTokens: number;
+		readonly runBudgetEnabled: boolean;
+		readonly maxTurns?: number;
+		readonly allowAllCommands: boolean;
+	};
+	readonly execution: {
+		readonly round: number;
+		readonly concurrency: number;
+		readonly taskIds: readonly string[];
+		readonly providerAllowlist: readonly [typeof DEEP_SWE_PROVIDER_HOST];
+	};
+	readonly images: readonly DeepSweImageLock[];
+}
+
+export interface DeepSweTrialReport {
+	readonly taskId: string;
+	readonly trialName: string;
+	readonly status: "passed" | "failed" | "error";
+	readonly reward?: number;
+	readonly f2p?: number;
+	readonly f2pPassed?: number;
+	readonly f2pTotal?: number;
+	readonly p2p?: number;
+	readonly p2pPassed?: number;
+	readonly p2pTotal?: number;
+	readonly partial?: number;
+	readonly applyFailed?: number;
+	readonly exceptionType?: string;
+	readonly exceptionMessage?: string;
+	readonly elapsedMs?: number;
+	readonly inputTokens?: number;
+	readonly cacheTokens?: number;
+	readonly outputTokens?: number;
+	readonly costUsd?: number;
+	readonly codaExitCode?: number;
+	readonly committed?: boolean;
+	readonly runOutcome?: string;
+	readonly turnCount?: number;
+	readonly peakContextTokens?: number;
+	readonly agentElapsedMs?: number;
+	readonly changedPathCount?: number;
+	readonly toolIssueCount?: number;
+	readonly toolRejectionCount?: number;
+	readonly policyRejectionCount?: number;
+	readonly invalidToolCallCount?: number;
+	readonly unresolvedFailureCount?: number;
+	readonly lengthTruncationCount?: number;
+	readonly budgetExhaustionLimits?: readonly string[];
+}
+
+export interface DeepSweEvaluationReport {
+	readonly schemaVersion: 1;
+	readonly benchmark: "deep-swe";
+	readonly summary: {
+		readonly trials: number;
+		readonly passed: number;
+		readonly failed: number;
+		readonly errors: number;
+		readonly passRate: number;
+		readonly f2pPassed: number;
+		readonly f2pTotal: number;
+		readonly p2pPassed: number;
+		readonly p2pTotal: number;
+		readonly averagePartial: number;
+		readonly elapsedMs: number;
+		readonly inputTokens: number;
+		readonly cacheTokens: number;
+		readonly outputTokens: number;
+		readonly costUsd: number;
+		readonly turnCount: number;
+		readonly agentElapsedMs: number;
+		readonly committedTrials: number;
+		readonly nonzeroCodaExits: number;
+		readonly toolIssueCount: number;
+		readonly toolRejectionCount: number;
+		readonly policyRejectionCount: number;
+		readonly invalidToolCallCount: number;
+		readonly unresolvedFailureCount: number;
+		readonly lengthTruncationCount: number;
+		readonly budgetExhaustedTrials: number;
+	};
+	readonly trials: readonly DeepSweTrialReport[];
+}
+
+export interface DeepSweRoundReport {
+	readonly round: number;
+	readonly harnessRevision: string;
+	readonly maxOutputTokens?: number;
+	readonly maxTurns?: number;
+	readonly runBudgetEnabled?: boolean;
+	readonly allowAllCommands?: boolean;
+	readonly report: DeepSweEvaluationReport;
+}
+
+export interface DeepSweCampaignReport {
+	readonly schemaVersion: 1;
+	readonly benchmark: "deep-swe";
+	readonly campaignKind: "development-rounds";
+	readonly rounds: readonly {
+		readonly round: number;
+		readonly harnessRevision: string;
+		readonly maxOutputTokens?: number;
+		readonly maxTurns?: number;
+		readonly runBudgetEnabled?: boolean;
+		readonly allowAllCommands?: boolean;
+		readonly summary: DeepSweEvaluationReport["summary"];
+		readonly deltaPassedFromPrevious: number;
+		readonly deltaPassRateFromPrevious: number;
+		readonly deltaAveragePartialFromPrevious: number;
+	}[];
+	readonly tasks: readonly {
+		readonly taskId: string;
+		readonly rounds: readonly {
+			readonly round: number;
+			readonly status: DeepSweTrialReport["status"];
+			readonly reward?: number;
+			readonly partial?: number;
+			readonly costUsd?: number;
+			readonly turnCount?: number;
+		}[];
+	}[];
+}
+
+function positiveInteger(value: number, name: string): number {
+	if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+	return value;
+}
+
+function absolutePath(value: string, name: string): string {
+	if (!isAbsolute(value)) throw new Error(`${name} must be an absolute path`);
+	return value;
+}
+
+function taskSelection(taskIds: readonly string[] | undefined): readonly string[] {
+	const selection = [...(taskIds ?? DEEP_SWE_FIRST_20_TASK_IDS)];
+	if (selection.length === 0) throw new Error("taskIds must contain at least one task id");
+	if (selection.some((taskId) => !/^[a-z0-9][a-z0-9-]*$/.test(taskId))) {
+		throw new Error("taskIds must contain literal DeepSWE task ids, not globs or paths");
+	}
+	if (new Set(selection).size !== selection.length) throw new Error("taskIds must be unique");
+	return Object.freeze(selection);
+}
+
+function harnessRevision(value: string): string {
+	if (!/^[a-zA-Z0-9._-]{7,128}$/.test(value)) {
+		throw new Error("harnessRevision must be a 7-128 character revision or content digest");
+	}
+	return value;
+}
+
+function jobName(round: number, revision: string): string {
+	return `coda-deep-swe-r${String(round).padStart(2, "0")}-${revision.slice(0, 12).toLowerCase()}`;
+}
+
+export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): DeepSwePierJobConfig {
+	const round = positiveInteger(options.round, "round");
+	const concurrency = positiveInteger(options.concurrency, "concurrency");
+	const revision = harnessRevision(options.harnessRevision);
+	const taskIds = taskSelection(options.taskIds);
+	const model = options.model ?? DEEP_SWE_DEFAULT_MODEL;
+	const reasoningEffort = options.reasoningEffort ?? DEEP_SWE_DEFAULT_REASONING;
+	const maxOutputTokens = positiveInteger(
+		options.maxOutputTokens ?? DEEP_SWE_DEFAULT_MAX_OUTPUT_TOKENS,
+		"maxOutputTokens",
+	);
+	const runBudgetEnabled = options.disableRunBudget !== true;
+	const maxTurns = runBudgetEnabled
+		? positiveInteger(options.maxTurns ?? DEEP_SWE_DEFAULT_MAX_TURNS, "maxTurns")
+		: undefined;
+	if (!model.includes("/")) throw new Error("model must use provider/model form");
+	if (!reasoningEffort.trim()) throw new Error("reasoningEffort must not be empty");
+
+	const config: DeepSwePierJobConfig = {
+		job_name: jobName(round, revision),
+		jobs_dir: absolutePath(options.jobsDir, "jobsDir"),
+		n_attempts: 1,
+		n_concurrent_trials: concurrency,
+		quiet: options.quiet ?? false,
+		retry: { max_retries: 0 },
+		environment: {
+			type: "docker",
+			force_build: false,
+			delete: true,
+			cpu_enforcement_policy: "auto",
+			memory_enforcement_policy: "auto",
+		},
+		verifier: { disable: false },
+		agents: [
+			{
+				import_path: options.adapterImportPath ?? "coda_agent:CodaAgent",
+				model_name: model,
+				override_setup_timeout_sec: 900,
+				max_timeout_sec: 5400,
+				kwargs: {
+					runtime_dir: absolutePath(options.runtimeDir, "runtimeDir"),
+					reasoning_effort: reasoningEffort,
+					max_output_tokens: maxOutputTokens,
+					run_budget_enabled: runBudgetEnabled,
+					...(maxTurns !== undefined ? { max_turns: maxTurns } : {}),
+					allow_all_commands: options.allowAllCommands ?? false,
+					harness_revision: revision,
+				},
+				env: {
+					OPENCODE_API_KEY: OPENCODE_API_KEY_TEMPLATE,
+					NODE_USE_ENV_PROXY: "1",
+					NODE_USE_SYSTEM_CA: "1",
+				},
+			},
+		],
+		datasets: [{ path: absolutePath(options.datasetDir, "datasetDir"), task_names: taskIds }],
+	};
+	return Object.freeze(config);
+}
+
+export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRunLock {
+	const config = createDeepSwePierJobConfig(options);
+	const selected = new Set(config.datasets[0].task_names);
+	const lock: DeepSweRunLock = {
+		schemaVersion: 1,
+		campaignKind: "development-round",
+		dataset: {
+			name: "datacurve/deep-swe-1-1",
+			version: DEEP_SWE_VERSION,
+			sourceRevision: DEEP_SWE_DATASET_REVISION,
+		},
+		pier: { version: DEEP_SWE_PIER_VERSION, sourceRevision: DEEP_SWE_PIER_REVISION },
+		harness: {
+			name: "coda",
+			revision: config.agents[0].kwargs.harness_revision,
+			model: config.agents[0].model_name,
+			reasoningEffort: config.agents[0].kwargs.reasoning_effort,
+			maxOutputTokens: config.agents[0].kwargs.max_output_tokens,
+			runBudgetEnabled: config.agents[0].kwargs.run_budget_enabled,
+			...(config.agents[0].kwargs.max_turns !== undefined ? { maxTurns: config.agents[0].kwargs.max_turns } : {}),
+			allowAllCommands: config.agents[0].kwargs.allow_all_commands,
+		},
+		execution: {
+			round: options.round,
+			concurrency: config.n_concurrent_trials,
+			taskIds: config.datasets[0].task_names,
+			providerAllowlist: [DEEP_SWE_PROVIDER_HOST],
+		},
+		images: DEEP_SWE_FIRST_20_IMAGE_LOCKS.filter(({ taskId }) => selected.has(taskId)),
+	};
+	return Object.freeze(lock);
+}
+
+export function formatDeepSweImageLockTsv(locks: readonly DeepSweImageLock[] = DEEP_SWE_FIRST_20_IMAGE_LOCKS): string {
+	return `${locks.map(({ taskId, image, digest }) => `${taskId}\t${image}\t${digest}`).join("\n")}\n`;
+}
+
+export function assertDeepSwePaidRun(options: {
+	readonly allowPaidRequests: boolean;
+	readonly confirmed: boolean;
+	readonly hasApiKey: boolean;
+}): void {
+	if (!options.allowPaidRequests) throw new Error("Set CODA_EVALS_DEEP_SWE=1 to opt in to paid DeepSWE calls");
+	if (!options.confirmed) throw new Error("Pass --confirm-spend to acknowledge paid DeepSWE Provider calls");
+	if (!options.hasApiKey) throw new Error("DeepSWE evaluation requires OPENCODE_API_KEY");
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function textValue(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function textArray(value: unknown): readonly string[] | undefined {
+	if (!Array.isArray(value) || value.some((item) => textValue(item) === undefined)) return undefined;
+	return value as string[];
+}
+
+function dateMs(value: unknown): number | undefined {
+	const text = textValue(value);
+	if (!text) return undefined;
+	const parsed = Date.parse(text);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function sumOptional(values: readonly (number | undefined)[]): number {
+	return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+}
+
+export function summarizeDeepSweJobResult(input: unknown): DeepSweEvaluationReport {
+	const result = record(input);
+	if (!result || !Array.isArray(result.trial_results)) throw new Error("Pier result must contain trial_results");
+
+	const trials = result.trial_results.map<DeepSweTrialReport>((value, index) => {
+		const trial = record(value);
+		if (!trial) throw new Error(`Pier trial_results[${index}] must be an object`);
+		const taskPath = textValue(record(trial.task_id)?.path);
+		const taskName = textValue(trial.task_name);
+		const taskId = taskPath ? basename(taskPath) : taskName?.split("/").at(-1);
+		const trialName = textValue(trial.trial_name);
+		if (!taskId || !trialName) throw new Error(`Pier trial_results[${index}] is missing task_name or trial_name`);
+		const verifier = record(trial.verifier_result);
+		const rewards = record(verifier?.rewards);
+		const reward = finiteNumber(rewards?.reward);
+		const f2p = finiteNumber(rewards?.f2p);
+		const f2pPassed = finiteNumber(rewards?.f2p_passed);
+		const f2pTotal = finiteNumber(rewards?.f2p_total);
+		const p2p = finiteNumber(rewards?.p2p);
+		const p2pPassed = finiteNumber(rewards?.p2p_passed);
+		const p2pTotal = finiteNumber(rewards?.p2p_total);
+		const partial = finiteNumber(rewards?.partial);
+		const applyFailed = finiteNumber(rewards?.apply_failed);
+		const exception = record(trial.exception_info);
+		const agent = record(trial.agent_result);
+		const metadata = record(agent?.metadata);
+		const changedPaths = Array.isArray(metadata?.changed_paths) ? metadata.changed_paths : undefined;
+		const budgetExhaustionLimits = textArray(metadata?.budget_exhaustion_limits);
+		const startedAt = dateMs(trial.started_at);
+		const finishedAt = dateMs(trial.finished_at);
+		const elapsedMs =
+			startedAt !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - startedAt) : undefined;
+		const exceptionType = textValue(exception?.exception_type);
+		return {
+			taskId,
+			trialName,
+			status: exceptionType ? "error" : reward === 1 ? "passed" : "failed",
+			...(reward !== undefined ? { reward } : {}),
+			...(f2p !== undefined ? { f2p } : {}),
+			...(f2pPassed !== undefined ? { f2pPassed } : {}),
+			...(f2pTotal !== undefined ? { f2pTotal } : {}),
+			...(p2p !== undefined ? { p2p } : {}),
+			...(p2pPassed !== undefined ? { p2pPassed } : {}),
+			...(p2pTotal !== undefined ? { p2pTotal } : {}),
+			...(partial !== undefined ? { partial } : {}),
+			...(applyFailed !== undefined ? { applyFailed } : {}),
+			...(exceptionType ? { exceptionType } : {}),
+			...(textValue(exception?.exception_message)
+				? { exceptionMessage: textValue(exception?.exception_message)! }
+				: {}),
+			...(elapsedMs !== undefined ? { elapsedMs } : {}),
+			...(finiteNumber(agent?.n_input_tokens) !== undefined
+				? { inputTokens: finiteNumber(agent?.n_input_tokens)! }
+				: {}),
+			...(finiteNumber(agent?.n_cache_tokens) !== undefined
+				? { cacheTokens: finiteNumber(agent?.n_cache_tokens)! }
+				: {}),
+			...(finiteNumber(agent?.n_output_tokens) !== undefined
+				? { outputTokens: finiteNumber(agent?.n_output_tokens)! }
+				: {}),
+			...(finiteNumber(agent?.cost_usd) !== undefined ? { costUsd: finiteNumber(agent?.cost_usd)! } : {}),
+			...(finiteNumber(metadata?.coda_exit_code) !== undefined
+				? { codaExitCode: finiteNumber(metadata?.coda_exit_code)! }
+				: {}),
+			...(typeof metadata?.committed === "boolean" || changedPaths
+				? { committed: metadata?.committed === true || Boolean(changedPaths?.length) }
+				: {}),
+			...(textValue(metadata?.run_outcome) ? { runOutcome: textValue(metadata?.run_outcome)! } : {}),
+			...(finiteNumber(agent?.n_agent_steps) !== undefined
+				? { turnCount: finiteNumber(agent?.n_agent_steps)! }
+				: {}),
+			...(finiteNumber(agent?.peak_context_tokens) !== undefined
+				? { peakContextTokens: finiteNumber(agent?.peak_context_tokens)! }
+				: {}),
+			...(finiteNumber(metadata?.elapsed_ms) !== undefined
+				? { agentElapsedMs: finiteNumber(metadata?.elapsed_ms)! }
+				: {}),
+			...(changedPaths ? { changedPathCount: changedPaths.length } : {}),
+			...(finiteNumber(metadata?.tool_issue_count) !== undefined
+				? { toolIssueCount: finiteNumber(metadata?.tool_issue_count)! }
+				: {}),
+			...(finiteNumber(metadata?.tool_rejection_count) !== undefined
+				? { toolRejectionCount: finiteNumber(metadata?.tool_rejection_count)! }
+				: {}),
+			...(finiteNumber(metadata?.policy_rejection_count) !== undefined
+				? { policyRejectionCount: finiteNumber(metadata?.policy_rejection_count)! }
+				: {}),
+			...(finiteNumber(metadata?.invalid_tool_call_count) !== undefined
+				? { invalidToolCallCount: finiteNumber(metadata?.invalid_tool_call_count)! }
+				: {}),
+			...(finiteNumber(metadata?.unresolved_failure_count) !== undefined
+				? { unresolvedFailureCount: finiteNumber(metadata?.unresolved_failure_count)! }
+				: {}),
+			...(finiteNumber(metadata?.length_truncation_count) !== undefined
+				? { lengthTruncationCount: finiteNumber(metadata?.length_truncation_count)! }
+				: {}),
+			...(budgetExhaustionLimits ? { budgetExhaustionLimits } : {}),
+		};
+	});
+	const ordered = [...trials].sort((left, right) => left.taskId.localeCompare(right.taskId));
+	const passed = ordered.filter(({ status }) => status === "passed").length;
+	const errors = ordered.filter(({ status }) => status === "error").length;
+	const failed = ordered.length - passed - errors;
+	const partials = ordered.flatMap(({ partial }) => (partial === undefined ? [] : [partial]));
+
+	return Object.freeze({
+		schemaVersion: 1,
+		benchmark: "deep-swe",
+		summary: {
+			trials: ordered.length,
+			passed,
+			failed,
+			errors,
+			passRate: ordered.length === 0 ? 0 : passed / ordered.length,
+			f2pPassed: sumOptional(ordered.map(({ f2pPassed }) => f2pPassed)),
+			f2pTotal: sumOptional(ordered.map(({ f2pTotal }) => f2pTotal)),
+			p2pPassed: sumOptional(ordered.map(({ p2pPassed }) => p2pPassed)),
+			p2pTotal: sumOptional(ordered.map(({ p2pTotal }) => p2pTotal)),
+			averagePartial: partials.length === 0 ? 0 : sumOptional(partials) / partials.length,
+			elapsedMs: sumOptional(ordered.map(({ elapsedMs }) => elapsedMs)),
+			inputTokens: sumOptional(ordered.map(({ inputTokens }) => inputTokens)),
+			cacheTokens: sumOptional(ordered.map(({ cacheTokens }) => cacheTokens)),
+			outputTokens: sumOptional(ordered.map(({ outputTokens }) => outputTokens)),
+			costUsd: sumOptional(ordered.map(({ costUsd }) => costUsd)),
+			turnCount: sumOptional(ordered.map(({ turnCount }) => turnCount)),
+			agentElapsedMs: sumOptional(ordered.map(({ agentElapsedMs }) => agentElapsedMs)),
+			committedTrials: ordered.filter(({ committed }) => committed).length,
+			nonzeroCodaExits: ordered.filter(({ codaExitCode }) => codaExitCode !== undefined && codaExitCode !== 0)
+				.length,
+			toolIssueCount: sumOptional(ordered.map(({ toolIssueCount }) => toolIssueCount)),
+			toolRejectionCount: sumOptional(ordered.map(({ toolRejectionCount }) => toolRejectionCount)),
+			policyRejectionCount: sumOptional(ordered.map(({ policyRejectionCount }) => policyRejectionCount)),
+			invalidToolCallCount: sumOptional(ordered.map(({ invalidToolCallCount }) => invalidToolCallCount)),
+			unresolvedFailureCount: sumOptional(ordered.map(({ unresolvedFailureCount }) => unresolvedFailureCount)),
+			lengthTruncationCount: sumOptional(ordered.map(({ lengthTruncationCount }) => lengthTruncationCount)),
+			budgetExhaustedTrials: ordered.filter(({ budgetExhaustionLimits }) => Boolean(budgetExhaustionLimits?.length))
+				.length,
+		},
+		trials: ordered,
+	});
+}
+
+export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): DeepSweCampaignReport {
+	if (inputs.length === 0) throw new Error("DeepSWE comparison requires at least one round");
+	const ordered = [...inputs].sort((left, right) => left.round - right.round);
+	if (new Set(ordered.map(({ round }) => round)).size !== ordered.length) {
+		throw new Error("DeepSWE comparison round numbers must be unique");
+	}
+	for (const input of ordered) positiveInteger(input.round, "round");
+
+	const taskIds = [...new Set(ordered.flatMap(({ report }) => report.trials.map(({ taskId }) => taskId)))].sort();
+	return Object.freeze({
+		schemaVersion: 1,
+		benchmark: "deep-swe",
+		campaignKind: "development-rounds",
+		rounds: ordered.map((current, index) => {
+			const previous = ordered[index - 1];
+			return {
+				round: current.round,
+				harnessRevision: current.harnessRevision,
+				...(current.maxOutputTokens !== undefined ? { maxOutputTokens: current.maxOutputTokens } : {}),
+				...(current.maxTurns !== undefined ? { maxTurns: current.maxTurns } : {}),
+				...(current.runBudgetEnabled !== undefined ? { runBudgetEnabled: current.runBudgetEnabled } : {}),
+				...(current.allowAllCommands !== undefined ? { allowAllCommands: current.allowAllCommands } : {}),
+				summary: current.report.summary,
+				deltaPassedFromPrevious: previous ? current.report.summary.passed - previous.report.summary.passed : 0,
+				deltaPassRateFromPrevious: previous
+					? current.report.summary.passRate - previous.report.summary.passRate
+					: 0,
+				deltaAveragePartialFromPrevious: previous
+					? current.report.summary.averagePartial - previous.report.summary.averagePartial
+					: 0,
+			};
+		}),
+		tasks: taskIds.map((taskId) => ({
+			taskId,
+			rounds: ordered.flatMap(({ round, report }) => {
+				const trial = report.trials.find((candidate) => candidate.taskId === taskId);
+				return trial
+					? [
+							{
+								round,
+								status: trial.status,
+								...(trial.reward !== undefined ? { reward: trial.reward } : {}),
+								...(trial.partial !== undefined ? { partial: trial.partial } : {}),
+								...(trial.costUsd !== undefined ? { costUsd: trial.costUsd } : {}),
+								...(trial.turnCount !== undefined ? { turnCount: trial.turnCount } : {}),
+							},
+						]
+					: [];
+			}),
+		})),
+	});
+}

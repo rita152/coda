@@ -11,7 +11,7 @@ import { createToolOutputCapture, discardStoredToolOutput, type StoredToolOutput
 const BashParameters = Type.Object(
 	{
 		command: Type.String({ minLength: 1 }),
-		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 120_000 })),
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 5_400_000 })),
 		preview: Type.Optional(
 			Type.Object(
 				{

@@ -1,9 +1,22 @@
 import { fauxProvider } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { assertContextFits } from "../src/prompt/context-budget.ts";
+import { assertContextFits, assertModelContextFits } from "../src/prompt/context-budget.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("multimodal context budgeting", () => {
+	it("honors an explicit output-token reservation instead of the legacy 16k default", () => {
+		const faux = fauxProvider({
+			runtime: testTimeRuntime(),
+			models: [{ id: "reasoner", contextWindow: 1_000_000, maxTokens: 384_000 }],
+		});
+		const model = faux.getModel();
+
+		expect(assertModelContextFits(model, { messages: [] }).reservedOutputTokens).toBe(16_384);
+		expect(assertModelContextFits(model, { messages: [] }, 32_768).reservedOutputTokens).toBe(32_768);
+		expect(assertModelContextFits(model, { messages: [] }, 384_000).reservedOutputTokens).toBe(384_000);
+		expect(assertModelContextFits(model, { messages: [] }, 500_000).reservedOutputTokens).toBe(384_000);
+	});
+
 	it("budgets image content by a conservative image allowance rather than base64 text length", () => {
 		const faux = fauxProvider({
 			runtime: testTimeRuntime(),

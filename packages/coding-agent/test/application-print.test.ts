@@ -188,6 +188,113 @@ describe("Coding Agent print mode", () => {
 		expect(faux.state.callCount).toBe(1);
 	});
 
+	it("passes explicit output-token and Run-turn budgets", async () => {
+		const runtime = testTimeRuntime(125);
+		const faux = fauxProvider({
+			runtime,
+			models: [{ id: "reasoner", contextWindow: 1_000_000, maxTokens: 384_000 }],
+		});
+		let observedMaxTokens: number | undefined;
+		faux.setResponses([
+			(_context, options) => {
+				observedMaxTokens = options.maxTokens;
+				return fauxAssistantMessage("budgeted output", { timestamp: 125 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings,
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run([
+				"--print",
+				"--json",
+				"--max-output-tokens",
+				"32768",
+				"--max-turns",
+				"96",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"solve the task",
+			]),
+		).resolves.toBe(0);
+		expect(observedMaxTokens).toBe(32_768);
+		expect(JSON.parse(stdout.value.split("\n")[0]!)).toMatchObject({
+			type: "run_start",
+			budget: { limits: { maxTurns: 96 } },
+		});
+		expect(stderr.value).toBe("");
+	});
+
+	it("passes the model's full explicit output limit with no Run budget", async () => {
+		const runtime = testTimeRuntime(126);
+		const faux = fauxProvider({
+			runtime,
+			models: [{ id: "unbounded-reasoner", contextWindow: 1_000_000, maxTokens: 384_000 }],
+		});
+		let observedMaxTokens: number | undefined;
+		faux.setResponses([
+			(_context, options) => {
+				observedMaxTokens = options.maxTokens;
+				return fauxAssistantMessage("unbudgeted output", { timestamp: 126 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings,
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run([
+				"--print",
+				"--json",
+				"--max-output-tokens",
+				"384000",
+				"--no-run-budget",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"solve the task",
+			]),
+		).resolves.toBe(0);
+		expect(observedMaxTokens).toBe(384_000);
+		expect(JSON.parse(stdout.value.split("\n")[0]!)).toMatchObject({ type: "run_start" });
+		expect(JSON.parse(stdout.value.split("\n")[0]!)).not.toHaveProperty("budget");
+		expect(stderr.value).toBe("");
+	});
+
 	it("treats --no-tui as print mode without constructing a Terminal", async () => {
 		const runtime = testTimeRuntime(150);
 		const faux = fauxProvider({ runtime });

@@ -614,7 +614,14 @@ export class Agent {
 					}
 				} else {
 					run.budget?.completeWithoutToolBatch();
-					outcome = run.controller.signal.aborted ? "aborted" : "success";
+					if (run.controller.signal.aborted) {
+						outcome = "aborted";
+					} else if (attempt.message.message.stopReason === "length") {
+						outcome = "error";
+						failure = { kind: "model", message: "Model response was truncated before it completed" };
+					} else {
+						outcome = "success";
+					}
 				}
 
 				await this.#emit(run, { type: "turn_end", turnId: activeTurnId, outcome });

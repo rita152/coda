@@ -390,4 +390,23 @@ describe("Agent Tool execution", () => {
 			"invalid",
 		]);
 	});
+
+	it("fails closed when a length-truncated response contains only Thinking", async () => {
+		const clock = new TestClock();
+		const truncated = fauxAssistantMessage(
+			[{ type: "thinking", thinking: "I still need to edit the repository", thinkingSignature: "reasoning" }],
+			{ stopReason: "length", timestamp: clock.now() },
+		);
+		const events: AgentEvent[] = [];
+		const agent = new Agent(baseOptions([truncated], { clock }));
+		agent.onEvent((event) => events.push(event));
+
+		const result = await agent.prompt("implement the change");
+
+		expect(result).toMatchObject({
+			outcome: "error",
+			failure: { kind: "model", message: "Model response was truncated before it completed" },
+		});
+		expect(events.at(-1)).toMatchObject({ type: "run_end", outcome: "error" });
+	});
 });

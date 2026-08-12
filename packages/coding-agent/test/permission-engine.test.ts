@@ -516,6 +516,39 @@ describe("Permission Engine multi-command rules", () => {
 		expect(prompts).toBe(0);
 	});
 
+	it("allows every Shell command without classification when the explicit bypass is active", async () => {
+		let prompts = 0;
+		const engine = createPermissionEngine({
+			cwd: "/workspace",
+			profile: compileSandboxPolicy({
+				profile: "full-access",
+				workspaceRoots: ["/workspace"],
+				temporaryDirectory: "/tmp",
+			}),
+			approvalPolicy: "never",
+			bypassApprovalsAndSandbox: true,
+			commandRules: [{ pattern: ["rm"], decision: "forbidden", justification: "blocked by test" }],
+			approval: {
+				decide: async () => {
+					prompts++;
+					return { type: "denied", rejection: "must not be consulted" };
+				},
+			},
+		});
+		const bash = shellRequest("rm -rf build | tee /tmp/log > /tmp/out && printf done");
+		const processStart = shellRequest("rm --force output", "require_escalated", "process_start");
+
+		await expect(engine.check(bash)).resolves.toEqual({ decision: "allow" });
+		await expect(engine.check(processStart)).resolves.toEqual({ decision: "allow" });
+		expect(prompts).toBe(0);
+		for (const request of [bash, processStart]) {
+			expect(engine.authorizationFor(request.invocationId)).toMatchObject({
+				execution: "unsandboxed",
+				readAccessPolicy: { sandboxPolicy: { profile: "full-access", readAccess: "full-disk" } },
+			});
+		}
+	});
+
 	it.each([
 		"sh -c 'rm -rf build'",
 		"printf '%s' \"$(rm --force build/file)\"",

@@ -169,6 +169,14 @@ const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 		maxConsecutiveEquivalentToolBatches: 4,
 	}),
 });
+
+function codingAgentRunBudget(maxTurns: number | undefined, disabled: boolean): RunBudget | undefined {
+	if (disabled) return undefined;
+	if (maxTurns === undefined) return DEFAULT_CODING_AGENT_RUN_BUDGET;
+	return Object.freeze({
+		limits: Object.freeze({ ...DEFAULT_CODING_AGENT_RUN_BUDGET.limits, maxTurns }),
+	});
+}
 export interface UserSettings {
 	readonly defaultModel?: ModelSelection;
 	readonly defaultReasoning?: ThinkingLevel | "off";
@@ -255,6 +263,9 @@ interface ParsedArguments {
 	readonly additionalWritableRoots: readonly string[];
 	readonly dangerouslyBypassApprovalsAndSandbox: boolean;
 	readonly reasoning?: ThinkingLevel | "off";
+	readonly maxOutputTokens?: number;
+	readonly maxTurns?: number;
+	readonly disableRunBudget: boolean;
 	readonly apiKey?: string;
 	readonly workspace?: string;
 	readonly trustProject: boolean;
@@ -289,6 +300,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let approvalPolicy: ApprovalPolicy | undefined;
 	let dangerouslyBypassApprovalsAndSandbox = false;
 	let reasoning: ThinkingLevel | "off" | undefined;
+	let maxOutputTokens: number | undefined;
+	let maxTurns: number | undefined;
+	let disableRunBudget = false;
 	let apiKey: string | undefined;
 	let workspace: string | undefined;
 	let trustProject = false;
@@ -404,6 +418,26 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			reasoning = value as ThinkingLevel | "off";
 			continue;
 		}
+		if (argument === "--max-output-tokens") {
+			const value = Number(args[++index]);
+			if (!Number.isSafeInteger(value) || value < 1) {
+				throw new Error("--max-output-tokens requires a positive integer");
+			}
+			maxOutputTokens = value;
+			continue;
+		}
+		if (argument === "--max-turns") {
+			const value = Number(args[++index]);
+			if (!Number.isSafeInteger(value) || value < 1) {
+				throw new Error("--max-turns requires a positive integer");
+			}
+			maxTurns = value;
+			continue;
+		}
+		if (argument === "--no-run-budget") {
+			disableRunBudget = true;
+			continue;
+		}
 		if (argument === "--api-key") {
 			const value = args[++index];
 			if (!value) throw new Error("--api-key requires a non-empty value");
@@ -469,6 +503,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 
 	if (output === "json" && explicitMode === "interactive") throw new Error("--json cannot be used with --interactive");
 	if (includeMediaData && output !== "json") throw new Error("--include-media-data requires --json");
+	if (disableRunBudget && maxTurns !== undefined) {
+		throw new Error("--no-run-budget and --max-turns cannot be combined");
+	}
 	const mode = explicitMode ?? (output === "json" || !io.stdin.isTTY || !io.stdout.isTTY ? "print" : "interactive");
 	let prompt = promptParts.join(" ").trim();
 	if (action !== "run" && (prompt.length > 0 || imagePaths.length > 0)) {
@@ -485,6 +522,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		additionalWritableRoots: Object.freeze([...additionalWritableRoots]),
 		dangerouslyBypassApprovalsAndSandbox,
 		reasoning,
+		maxOutputTokens,
+		maxTurns,
+		disableRunBudget,
 		apiKey,
 		workspace,
 		trustProject,
@@ -532,6 +572,9 @@ Modes:
 Model:
       --model <provider/model>   Select an exact Model
       --reasoning <level>        off|minimal|low|medium|high|xhigh|max
+      --max-output-tokens <n>    Reserve at most n output tokens (default: 16384)
+      --max-turns <n>            Limit one Run to n model Turns (default: 64)
+      --no-run-budget            Disable all Coda Run limits for this invocation
       --api-key <key>            Use a request-scoped API key
       --image <path>             Attach an image (repeatable)
 
@@ -1350,6 +1393,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							workspace,
 							profile,
 							approvalPolicy,
+							bypassApprovalsAndSandbox: parsed.dangerouslyBypassApprovalsAndSandbox,
 							approval: auditedApproval,
 							genericApprovalForTool: (request) => {
 								if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
@@ -1489,10 +1533,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						},
 						commit: (checkpoint) => session.record({ type: "context_compacted", checkpoint }),
 						checkpoint: session.compactionCheckpoint,
+						maxOutputTokens: parsed.maxOutputTokens,
 					});
 					const contextOverflowRecovery = new ContextOverflowRecovery({
 						contextWindow,
 						model: () => (runRuntime.active?.value ?? runRuntime.selected).model,
+						maxOutputTokens: parsed.maxOutputTokens,
 					});
 					await session.record({
 						type: "model_selected",
@@ -1502,7 +1548,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const agent: Agent = new Agent({
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
-						runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
+						runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
 						tools: () => {
 							const runtime = runRuntime.active?.value;
 							if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
@@ -1764,6 +1810,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										workspace,
 										profile,
 										approvalPolicy,
+										bypassApprovalsAndSandbox: parsed.dangerouslyBypassApprovalsAndSandbox,
 										approval: targetAuditedApproval,
 										genericApprovalForTool: (request) => {
 											if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
@@ -1917,10 +1964,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									},
 									commit: (checkpoint) => targetSession.record({ type: "context_compacted", checkpoint }),
 									checkpoint: targetSession.compactionCheckpoint,
+									maxOutputTokens: parsed.maxOutputTokens,
 								});
 								const targetContextOverflowRecovery = new ContextOverflowRecovery({
 									contextWindow: targetContextWindow,
 									model: () => (targetRunRuntime.active?.value ?? targetRunRuntime.selected).model,
+									maxOutputTokens: parsed.maxOutputTokens,
 								});
 								if (!targetSession.restored.model) {
 									const initialModelSelection = {
@@ -1937,7 +1986,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								const targetAgent: Agent = new Agent({
 									clock: options.runtime.clock,
 									idGenerator: options.runtime.idGenerator,
-									runBudget: DEFAULT_CODING_AGENT_RUN_BUDGET,
+									runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
 									tools: () => {
 										const runtime = targetRunRuntime.active?.value;
 										if (!runtime) throw new Error("Tools were requested outside an active Run runtime");

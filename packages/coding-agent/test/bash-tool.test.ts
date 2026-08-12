@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
@@ -24,6 +24,62 @@ afterEach(async () => {
 });
 
 describe("bash Tool", () => {
+	it("executes compound Shell syntax under the explicit approval and Sandbox bypass", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-bypass-"));
+		temporaryDirectories.push(workspace);
+		const faux = fauxProvider({ runtime: testTimeRuntime(880) });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("bash", { command: "printf allowed > bypass.txt && cat bypass.txt" }, { id: "bypass-bash" }),
+				{ stopReason: "toolUse", timestamp: 880 },
+			),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "bypass-bash",
+					isError: false,
+					content: [{ type: "text", text: "allowed" }],
+				});
+				return fauxAssistantMessage("Compound command executed.", { timestamp: 880 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(880) });
+		models.setProvider(faux.provider);
+		const runner = createNodeProcessRunner({ platform: process.platform });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: runner,
+			modelProcessRunner: { run: async (request) => ({ ...(await runner.run(request)), backend: "none" }) },
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: process.platform,
+				environment: { HOME: workspace, PATH: process.env.PATH, SHELL: "/bin/sh", USER: "tester" },
+				clock: { now: () => 880 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run([
+				"--print",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"run compound command",
+			]),
+		).resolves.toBe(0);
+		expect(await readFile(join(workspace, "bypass.txt"), "utf8")).toBe("allowed");
+		expect(stdout.value).toBe("Compound command executed.\n");
+		expect(stderr.value).toBe("");
+	});
+
 	it("reports a Sandbox denial as an error even when the child exits zero", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-bash-denial-"));
 		temporaryDirectories.push(workspace);

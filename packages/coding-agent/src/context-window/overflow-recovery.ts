@@ -8,6 +8,7 @@ const CONTEXT_OVERFLOW_CODES = new Set(["context_length_exceeded", "context_over
 export interface ContextOverflowRecoveryOptions {
 	readonly contextWindow: Pick<ContextWindowController, "canCompact" | "compact" | "prepare" | "project">;
 	readonly model: () => Model<Api>;
+	readonly maxOutputTokens?: number;
 }
 
 export interface PreparedModelContext {
@@ -23,11 +24,13 @@ export interface PreparedModelContext {
 export class ContextOverflowRecovery {
 	readonly #contextWindow: ContextOverflowRecoveryOptions["contextWindow"];
 	readonly #model: () => Model<Api>;
+	readonly #maxOutputTokens: number | undefined;
 	#unrecoverable = false;
 
 	constructor(options: ContextOverflowRecoveryOptions) {
 		this.#contextWindow = options.contextWindow;
 		this.#model = options.model;
+		this.#maxOutputTokens = options.maxOutputTokens;
 	}
 
 	async prepare(
@@ -41,10 +44,10 @@ export class ContextOverflowRecovery {
 			messages: this.#contextWindow.project(messages).map(({ message }) => structuredClone(message) as Message),
 		};
 		const autoCompactionRequired =
-			this.#contextWindow.canCompact(messages) && shouldAutoCompact(model, projectedContext);
+			this.#contextWindow.canCompact(messages) && shouldAutoCompact(model, projectedContext, this.#maxOutputTokens);
 		try {
 			const prepared = await this.#contextWindow.prepare(context, messages, signal);
-			const budget = assertModelContextFits(model, prepared);
+			const budget = assertModelContextFits(model, prepared, this.#maxOutputTokens);
 			return { context: prepared, reservedOutputTokens: budget.reservedOutputTokens };
 		} catch (error) {
 			if (autoCompactionRequired || isContextOverflowError(error)) this.#unrecoverable = true;

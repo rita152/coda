@@ -254,6 +254,8 @@ export interface PermissionEngineOptions {
 	readonly workspace?: Workspace;
 	readonly profile: Readonly<CompiledSandboxPolicy>;
 	readonly approvalPolicy: ApprovalPolicy;
+	/** Explicitly authorizes all Shell Tools without command classification or an outer Sandbox. */
+	readonly bypassApprovalsAndSandbox?: boolean;
 	readonly approval: PermissionApprovalHandler;
 	/** Resolves a command's first token to the exact executable identity used for Session Approvals. */
 	readonly resolveExecutable?: ExecutableIdentityResolver;
@@ -1554,6 +1556,23 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 	};
 	return {
 		check: async (toolRequest) => {
+			if (options.bypassApprovalsAndSandbox && SHELL_TOOLS.has(toolRequest.toolName)) {
+				const command = toolRequest.arguments.command;
+				if (typeof command !== "string" || command.length === 0) {
+					return reject("Shell command must be a non-empty string");
+				}
+				const readAccessPolicy = createReadAccessPolicy(fullAccessPolicy(activeProfile));
+				authorizations.set(
+					toolRequest.invocationId,
+					Object.freeze({
+						execution: "unsandboxed",
+						readAccessPolicy,
+						sandboxPermissions: "use_default",
+						commandWords: Object.freeze([shellExecutable, "-c", command]),
+					}),
+				);
+				return { decision: "allow" };
+			}
 			if (FILE_TOOLS.has(toolRequest.toolName)) return checkFile(toolRequest);
 			const generic = options.genericApprovalForTool?.(toolRequest);
 			if (generic) {
