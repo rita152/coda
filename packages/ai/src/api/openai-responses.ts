@@ -32,7 +32,9 @@ import type {
 import {
 	calculateCost,
 	createOutput,
+	finalToolArguments,
 	mergeProviderHeaders,
+	prematureStreamEndError,
 	requestHeaders,
 	requireApiKey,
 	responseMetadata,
@@ -217,14 +219,6 @@ function partialArguments(value: string): Record<string, any> {
 	}
 }
 
-function finalArguments(value: string): Record<string, any> {
-	if (!value) return {};
-	const result: unknown = JSON.parse(value);
-	if (!result || typeof result !== "object" || Array.isArray(result))
-		throw new Error("Tool arguments must be an object");
-	return result as Record<string, any>;
-}
-
 function createSlot(
 	outputIndex: number,
 	item: ResponseOutputItem,
@@ -288,7 +282,7 @@ function finalizeItem(
 		});
 	} else if (item.type === "function_call" && slot.type === "toolCall") {
 		slot.block.partialJson = item.arguments || slot.block.partialJson;
-		slot.block.arguments = finalArguments(slot.block.partialJson);
+		slot.block.arguments = finalToolArguments(slot.block.partialJson);
 		delete (slot.block as { partialJson?: string }).partialJson;
 		events.push({ type: "toolcall_end", contentIndex: slot.contentIndex, toolCall: slot.block, partial: output });
 	}
@@ -472,7 +466,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			phase = "stream";
 			await processStream(response.data, model, output, events);
 			options?.signal?.throwIfAborted();
-			if (output.stopReason === "pending") throw new Error("OpenAI Responses stream ended without a stop reason");
+			if (output.stopReason === "pending") {
+				throw prematureStreamEndError("OpenAI Responses stream ended without a stop reason");
+			}
 			if (output.stopReason === "error") throw new Error(output.errorMessage ?? "OpenAI Responses request failed");
 			stripStreamingState(output);
 			const reason = output.stopReason;

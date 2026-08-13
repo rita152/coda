@@ -31,7 +31,9 @@ import type {
 import {
 	calculateCost,
 	createOutput,
+	finalToolArguments,
 	mergeProviderHeaders,
+	prematureStreamEndError,
 	requestHeaders,
 	requireApiKey,
 	responseMetadata,
@@ -229,14 +231,6 @@ function partialArguments(value: string): Record<string, any> {
 	}
 }
 
-function finalArguments(value: string): Record<string, any> {
-	if (!value) return {};
-	const result: unknown = JSON.parse(value);
-	if (!result || typeof result !== "object" || Array.isArray(result))
-		throw new Error("Tool arguments must be an object");
-	return result as Record<string, any>;
-}
-
 function mapStopReason(reason: string | null | undefined): AssistantMessage["stopReason"] {
 	if (reason === "tool_calls" || reason === "function_call") return "toolUse";
 	if (reason === "length") return "length";
@@ -261,7 +255,7 @@ function endToolCalls(output: AssistantMessage, events: AssistantMessageEventStr
 	for (let index = 0; index < output.content.length; index++) {
 		const block = output.content[index] as TextBlock | ThinkingBlock | StreamingToolCall;
 		if (block.type !== "toolCall" || block.ended) continue;
-		block.arguments = finalArguments(block.partialJson);
+		block.arguments = finalToolArguments(block.partialJson);
 		block.ended = true;
 		const toolCall: ToolCall = { type: "toolCall", id: block.id, name: block.name, arguments: block.arguments };
 		events.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
@@ -420,7 +414,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			options?.signal?.throwIfAborted();
 			endTextOrThinking(output, events);
 			endToolCalls(output, events);
-			if (output.stopReason === "pending") throw new Error("OpenAI Completions stream ended without a stop reason");
+			if (output.stopReason === "pending") {
+				throw prematureStreamEndError("OpenAI Completions stream ended without a stop reason");
+			}
 			if (output.stopReason === "error")
 				throw new Error(`OpenAI finish reason: ${output.rawStopReason ?? "unknown"}`);
 			stripStreamingState(output);

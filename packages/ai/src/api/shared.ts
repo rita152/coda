@@ -96,6 +96,28 @@ export function responseMetadata(response: Response): ProviderResponse {
 	return { status: response.status, headers: Object.fromEntries(response.headers.entries()) };
 }
 
+export function prematureStreamEndError(message: string): Error {
+	return Object.assign(new Error(message), { code: "EPIPE", retryable: true });
+}
+
+export function finalToolArguments(value: string): Record<string, any> {
+	if (!value) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw Object.assign(new Error(`Malformed streamed Tool arguments: ${detail}`), {
+			code: "EPROTO",
+			retryable: true,
+		});
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("Tool arguments must be an object");
+	}
+	return parsed as Record<string, any>;
+}
+
 export function terminateStream(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,

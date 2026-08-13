@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "campaignKind": "development-round",
+  "dataset": {
+    "name": "datacurve/deep-swe-1-1",
+    "version": "v1.1",
+    "sourceRevision": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9"
+  },
+  "pier": {
+    "version": "0.3.1",
+    "sourceRevision": "df89f994623a0a6a57229103b6fe910766693c30"
+  },
+  "harness": {
+    "name": "coda",
+    "revision": "b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac",
+    "model": "opencode-go/deepseek-v4-flash",
+    "reasoningEffort": "max",
+    "maxOutputTokens": 384000,
+    "runBudgetEnabled": false,
+    "allowAllCommands": true
+  },
+  "execution": {
+    "round": 7,
+    "concurrency": 10,
+    "taskIds": [
+      "abs-module-cache-flags",
+      "abs-stepped-slices",
+      "actionlint-action-pinning-lint",
+      "adaptix-name-mapping-aliases",
+      "aiomonitor-task-snapshots-diff",
+      "anko-default-function-arguments",
+      "anko-typed-variable-bindings",
+      "arcane-drift-detection-baselines",
+      "arktype-json-schema-refs-dependencies",
+      "awilix-async-container-initialization",
+      "bandit-incremental-cache-control",
+      "bandit-interprocedural-taint-checks",
+      "bandit-structured-nosec-directives",
+      "boa-hierarchical-evaluation-cancellation",
+      "cattrs-partial-structuring-recovery",
+      "clack-async-autocomplete-options",
+      "claude-code-by-agents-recursive-delegation",
+      "cliffy-config-file-parsing",
+      "csstree-shorthand-expansion-compression",
+      "dasel-html-document-format"
+    ],
+    "providerAllowlist": [
+      "opencode.ai"
+    ]
+  },
+  "images": [
+    {
+      "taskId": "abs-module-cache-flags",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1",
+      "digest": "sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1"
+    },
+    {
+      "taskId": "abs-stepped-slices",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7d5m4ed35zfp7gyhx7wdahed82yw72-v1.1",
+      "digest": "sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1"
+    },
+    {
+      "taskId": "actionlint-action-pinning-lint",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh79dnvkvq8j9bs22ededmsc79823akj-v1.1",
+      "digest": "sha256:522a6e93a31656d03cc79474dafc5542bb27109051914d5566d7d29789c2a1a6"
+    },
+    {
+      "taskId": "adaptix-name-mapping-aliases",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh73dq4n55jdxasppe6jjmth4183d47n-v1.1",
+      "digest": "sha256:528654670f3c591e6491fc6fa01a0b8905bc8dee1b0557c5e76231bcc206f8fe"
+    },
+    {
+      "taskId": "aiomonitor-task-snapshots-diff",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75rc2q0zhmsqwk7wewfwwtrx830v2n-v1.1",
+      "digest": "sha256:e0c8b4e4044d5831693b4f6a6da483b255a889b71376574fba9e3c93d36ceb7c"
+    },
+    {
+      "taskId": "anko-default-function-arguments",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7fj3hc92zehtc8azrm32xzb182w9dr-v1.1",
+      "digest": "sha256:31c8dce39317314800d1200610475ba27b98c71350d524d25e7df71d80c5752a"
+    },
+    {
+      "taskId": "anko-typed-variable-bindings",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh79betfed7ets4an20cr4j57182y9wt-v1.1",
+      "digest": "sha256:4fb704fd8dff600f6d028c20ae4aca5e1261968bb615bb41c01a111dd371255b"
+    },
+    {
+      "taskId": "arcane-drift-detection-baselines",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70nj38qyatmsmj1d5zh57j25820vrx-v1.1",
+      "digest": "sha256:1d4ad8d6deb37c92a9bbb550cf3cc127f916e340f35f29b72948ccb571197c42"
+    },
+    {
+      "taskId": "arktype-json-schema-refs-dependencies",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh771gpr8crkjsnt9pj81bafgs8229em-v1.1",
+      "digest": "sha256:e0b0410d828b816474cfb89a448c448f15cf7d617c3fbddfacd45a1c1b232ef9"
+    },
+    {
+      "taskId": "awilix-async-container-initialization",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70bg8gy4xks4eyh1s71ecmk9822p9c-v1.1",
+      "digest": "sha256:748294a8ece567691f0a628d03c3531024d9f5e1acd13d5c6dd1ecba490831e6"
+    },
+    {
+      "taskId": "bandit-incremental-cache-control",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7drfg2vkvdvfh9xx0nfd5pz9821xr7-v1.1",
+      "digest": "sha256:f22b38f03dfbe2ca76f5019a1ef94953f700d51312fe47693ecba7d18f544d94"
+    },
+    {
+      "taskId": "bandit-interprocedural-taint-checks",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh77yap0nc4zwm5bysc954xbr182tptg-v1.1",
+      "digest": "sha256:7207179b09db76a8a3864b9e69c5fdf10e0d41a5bba242854216f18aa90ac7b1"
+    },
+    {
+      "taskId": "bandit-structured-nosec-directives",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh757d8ggvnfaszv8zcav3msy982ma7f-v1.1",
+      "digest": "sha256:2f6978cf88228baa0d3323e4f139ee222f5886218d86ca1d327bcae3711f4b6a"
+    },
+    {
+      "taskId": "boa-hierarchical-evaluation-cancellation",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh71kat2v58yys3pnyybkgycax832vj2-v1.1",
+      "digest": "sha256:9ab97da2ebb88bc71beeb2434d198d4adca6e1abe14f45d52250666249fb7a1e"
+    },
+    {
+      "taskId": "cattrs-partial-structuring-recovery",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7f7cahc5ddm1qzpxz13kpmrh8235pc-v1.1",
+      "digest": "sha256:443a3534dab64283e5a9dedf3b7ac8867ed7d5dabcde39bc39c77ab5a909176a"
+    },
+    {
+      "taskId": "clack-async-autocomplete-options",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh78c5dwwna57y757p2y5ktw79836dnv-v1.1",
+      "digest": "sha256:32a72ef7d4a9d3ae8937aef9c42e18166284c817c8edf137d66772e4f34abf74"
+    },
+    {
+      "taskId": "claude-code-by-agents-recursive-delegation",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh734ehfw2s3bztf7pzc9xf3x18212bs-v1.1",
+      "digest": "sha256:4baf10f1e66f9ab4d82991e538c13620c387c862974ec36dd5bd5d52f635920e"
+    },
+    {
+      "taskId": "cliffy-config-file-parsing",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh72088pg9vkc6peacnkc35yy9832jff-v1.1",
+      "digest": "sha256:0a8dd8f1270ec4bb88efadad3021762e1d07274f686276c8a484d26a00bd91b5"
+    },
+    {
+      "taskId": "csstree-shorthand-expansion-compression",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh72qraccnjwdet6ynagsccr4x82y65c-v1.1",
+      "digest": "sha256:df2cc59d679c908f8f13f68fc59231a5d6f0c2bcec4b7b26fdf9489eb824a8b2"
+    },
+    {
+      "taskId": "dasel-html-document-format",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7c7rrg3zke74w7068nawak9x82t6am-v1.1",
+      "digest": "sha256:0529d5659b2d11ee76e3ba13a877043b3e43bcf123f36a840f9cf5b5ade09b78"
+    }
+  ]
+}

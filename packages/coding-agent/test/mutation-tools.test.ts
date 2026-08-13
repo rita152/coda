@@ -85,6 +85,72 @@ describe("mutation Tools", () => {
 		expect(stderr.value).toBe("");
 	});
 
+	it("atomically creates missing parent directories for a Workspace file", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-write-nested-"));
+		temporaryDirectories.push(workspace);
+
+		const faux = fauxProvider({ runtime: testTimeRuntime(750) });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall(
+					"write",
+					{ path: "generated/parser/table.ts", content: "export const table = [];\n" },
+					{ id: "provider-write-nested" },
+				),
+				{ stopReason: "toolUse", timestamp: 750 },
+			),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-write-nested",
+					toolName: "write",
+					isError: false,
+				});
+				return fauxAssistantMessage("The nested file was created.", { timestamp: 750 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(750) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout,
+				stderr,
+			},
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 750 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		const exitCode = await application.run([
+			"--print",
+			"--sandbox",
+			"workspace-write",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"create generated/parser/table.ts",
+		]);
+
+		expect(exitCode, stderr.value).toBe(0);
+		expect(await readFile(join(workspace, "generated", "parser", "table.ts"), "utf8")).toBe(
+			"export const table = [];\n",
+		);
+		expect(stdout.value).toBe("The nested file was created.\n");
+		expect(stderr.value).toBe("");
+	});
+
 	it("edits an exact unique match while preserving BOM, CRLF, and file mode", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-edit-"));
 		temporaryDirectories.push(workspace);
@@ -94,14 +160,21 @@ describe("mutation Tools", () => {
 
 		const faux = fauxProvider({ runtime: testTimeRuntime(800) });
 		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall(
-					"edit",
-					{ path: "existing.txt", oldText: "old\n", newText: "new\n" },
-					{ id: "provider-edit-1" },
-				),
-				{ stopReason: "toolUse", timestamp: 800 },
-			),
+			(context) => {
+				const edit = context.tools?.find(({ name }) => name === "edit");
+				expect(edit?.description).toContain("Always include path");
+				expect(
+					(edit?.parameters as { properties?: { path?: { description?: string } } }).properties?.path?.description,
+				).toContain("Required on every edit call");
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"edit",
+						{ path: "existing.txt", oldText: "old\n", newText: "new\n" },
+						{ id: "provider-edit-1" },
+					),
+					{ stopReason: "toolUse", timestamp: 800 },
+				);
+			},
 			(context) => {
 				const result = context.messages.at(-1);
 				expect(result).toMatchObject({

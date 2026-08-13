@@ -10,7 +10,10 @@ import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
 const EditParameters = Type.Object(
 	{
-		path: Type.String({ minLength: 1 }),
+		path: Type.String({
+			minLength: 1,
+			description: "Required on every edit call: the Workspace-relative or absolute path of the file to edit.",
+		}),
 		oldText: Type.String({ minLength: 1 }),
 		newText: Type.String(),
 		replaceAll: Type.Optional(Type.Boolean()),
@@ -67,7 +70,8 @@ export function createEditTool(
 ): AgentTool<typeof EditParameters> {
 	return {
 		name: "edit",
-		description: "Atomically replace an exact text match while preserving file encoding style and mode.",
+		description:
+			"Atomically replace an exact text match while preserving file encoding style and mode. Always include path, oldText, and newText in every call.",
 		parameters: EditParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {

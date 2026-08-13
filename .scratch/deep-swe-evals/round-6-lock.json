@@ -1,0 +1,890 @@
+{
+    "schema_version": 1,
+    "created_at": "2026-08-12T18:03:27.340547Z",
+    "pier": {
+        "version": "0.3.1"
+    },
+    "invocation": [
+        "/home/esp/.local/share/uv/tools/datacurve-pier/bin/pier",
+        "run",
+        "--config",
+        "/home/esp/coda-evals/jobs/.coda-configs/coda-deep-swe-r06-fbd2dda72569.json",
+        "--yes"
+    ],
+    "n_concurrent_trials": 10,
+    "retry": {
+        "max_retries": 0,
+        "exclude_exceptions": [
+            "AgentTimeoutError",
+            "RewardFileEmptyError",
+            "VerifierOutputParseError",
+            "VerifierTimeoutError",
+            "RewardFileNotFoundError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "trials": [
+        {
+            "task": {
+                "name": "awilix-async-container-initialization",
+                "type": "local",
+                "digest": "sha256:c729cd72ea0ce5228808e5243431d299becf832c793b3fa7b5059f77ac3491fd",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/awilix-async-container-initialization"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "csstree-shorthand-expansion-compression",
+                "type": "local",
+                "digest": "sha256:efa4bf017d2a5c59780214004e794daca16ba4d582e3d984bc438e60792bed4d",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/csstree-shorthand-expansion-compression"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "bandit-interprocedural-taint-checks",
+                "type": "local",
+                "digest": "sha256:3030cc44c310f588c0ca8d86fb71ebc422dfaad8788a05395853429177b95a27",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-interprocedural-taint-checks"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "claude-code-by-agents-recursive-delegation",
+                "type": "local",
+                "digest": "sha256:182ea32a26b2a345edd063b0c7f3b6c99cebe27cc6f41b1a904ac046a083d3bc",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/claude-code-by-agents-recursive-delegation"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "actionlint-action-pinning-lint",
+                "type": "local",
+                "digest": "sha256:b5f0ceadad3d9831ef533622f5aa775197f7b9eb36594f62320bd86c58e7e7ba",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/actionlint-action-pinning-lint"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "clack-async-autocomplete-options",
+                "type": "local",
+                "digest": "sha256:eb0754ef3ae5b7cb6c8b05fe408361f83cee33534d6b8f720ee345a32d1fbce9",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/clack-async-autocomplete-options"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "bandit-structured-nosec-directives",
+                "type": "local",
+                "digest": "sha256:02100aa6037bd5507e32084b0dc2b7b6604a8ddaeb3d1981390e4e624b2ae6a6",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-structured-nosec-directives"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "aiomonitor-task-snapshots-diff",
+                "type": "local",
+                "digest": "sha256:ce3f056e44967f0d630a353cecde5d37eb5a0777152584568b35fb39cbd7b4d7",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/aiomonitor-task-snapshots-diff"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "cattrs-partial-structuring-recovery",
+                "type": "local",
+                "digest": "sha256:3b85d4688fee27ac616aa3d4aa9f7921830b965762ceeac8fe540f63aeef62a0",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/cattrs-partial-structuring-recovery"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "anko-typed-variable-bindings",
+                "type": "local",
+                "digest": "sha256:344fecb3d9ca0952ee65aafa5ea6c1fef3a6c2bfb8069f55f07e36f5652fe571",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/anko-typed-variable-bindings"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "anko-default-function-arguments",
+                "type": "local",
+                "digest": "sha256:1fa0144a44ee36dfb840fde4bff9a57570d045f152160d13967e96c26738a9fe",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/anko-default-function-arguments"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "arktype-json-schema-refs-dependencies",
+                "type": "local",
+                "digest": "sha256:7a8f8c27b6dafd67c20daae7304f6f2357a268a351bcdf1e8a420f9aaa143f0a",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/arktype-json-schema-refs-dependencies"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "arcane-drift-detection-baselines",
+                "type": "local",
+                "digest": "sha256:d41368a6b9cd4878667e2ab9412b39ddd55720f3f6a62e03d013d0a6d80f6f9d",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/arcane-drift-detection-baselines"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "adaptix-name-mapping-aliases",
+                "type": "local",
+                "digest": "sha256:315b1f90b8dc123f3c88f826da2dc05775f715de8baadd3d2e17896b75547b14",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/adaptix-name-mapping-aliases"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "boa-hierarchical-evaluation-cancellation",
+                "type": "local",
+                "digest": "sha256:f508cfe5031fa76ffe641c902842d3fad8e608feb0a5a42fabd4c4bb8dd2d00e",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/boa-hierarchical-evaluation-cancellation"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "dasel-html-document-format",
+                "type": "local",
+                "digest": "sha256:4679196c45caf80f4a1053f1f91725df82389cb0ff9fe0a9147c8d50e326023e",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/dasel-html-document-format"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "abs-module-cache-flags",
+                "type": "local",
+                "digest": "sha256:23c073496f4618a42206e1bb8a3b4c31b3a3c000760aee2cdc8719892ca02c3a",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/abs-module-cache-flags"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "bandit-incremental-cache-control",
+                "type": "local",
+                "digest": "sha256:8b11352e75c01fc3cb16da93019640299e15f8066daba168d04b86da19b98a43",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-incremental-cache-control"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "cliffy-config-file-parsing",
+                "type": "local",
+                "digest": "sha256:2518c285f5ecd92bb0335c1d93cf500dbb17694a2cb7aaed3efea35bf9796dac",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/cliffy-config-file-parsing"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "abs-stepped-slices",
+                "type": "local",
+                "digest": "sha256:d09fe947eaecca61fff84c2b0e1e1aadbcf46237971d4990ba1f811ee6c73e71",
+                "source": "tasks",
+                "path": "/home/esp/coda-evals/deep-swe/tasks/abs-stepped-slices"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "coda_agent:CodaAgent",
+                "model_name": "opencode-go/deepseek-v4-flash",
+                "override_setup_timeout_sec": 900.0,
+                "max_timeout_sec": 5400.0,
+                "kwargs": {
+                    "runtime_dir": "/home/esp/coda-evals/runtimes/fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b",
+                    "reasoning_effort": "max",
+                    "max_output_tokens": 384000,
+                    "run_budget_enabled": false,
+                    "allow_all_commands": true,
+                    "harness_revision": "fbd2dda725691cfc6d37fc85705fa40d9b8f898150c1c7186accbd33d5298b2b"
+                },
+                "env": {
+                    "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_USE_SYSTEM_CA": "1"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        }
+    ]
+}

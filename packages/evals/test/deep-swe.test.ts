@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	assertDeepSwePaidRun,
@@ -24,6 +25,23 @@ const OPTIONS = {
 } as const;
 
 describe("DeepSWE evaluation runner", () => {
+	it("configures the task repository Git identity before Coda starts", () => {
+		const adapter = readFileSync(new URL("../pier/coda_agent.py", import.meta.url), "utf8");
+		const commandStart = adapter.indexOf('command = f"""');
+		const agentStart = adapter.indexOf("{shlex.quote(node)} {shlex.quote(entry)}", commandStart);
+		const userName = adapter.indexOf("git -C /app config user.name coda-evals", commandStart);
+		const userEmail = adapter.indexOf("git -C /app config user.email coda-evals@localhost", commandStart);
+
+		expect(commandStart).toBeGreaterThanOrEqual(0);
+		expect(agentStart).toBeGreaterThan(commandStart);
+		expect(userName).toBeGreaterThan(commandStart);
+		expect(userEmail).toBeGreaterThan(userName);
+		expect(userName).toBeLessThan(agentStart);
+		expect(userEmail).toBeLessThan(agentStart);
+		expect(adapter.indexOf("git -C /app config user.name coda-evals", userName + 1)).toBe(-1);
+		expect(adapter.indexOf("git -C /app config user.email coda-evals@localhost", userEmail + 1)).toBe(-1);
+	});
+
 	it("pins the current v1.1 dataset and selects the first 20 tasks explicitly", () => {
 		expect(DEEP_SWE_DATASET_REVISION).toBe("435ee89ec2f2e2289f33b0da4f992f0b7b7266b9");
 		expect(DEEP_SWE_FIRST_20_TASK_IDS).toHaveLength(20);

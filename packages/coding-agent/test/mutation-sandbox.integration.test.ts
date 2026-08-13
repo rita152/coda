@@ -103,4 +103,36 @@ integration("sandboxed file-mutation boundary", () => {
 		).rejects.toThrow(/Sandbox|parent|mutation/iu);
 		await expect(readFile(join(canonicalOutside, "escape.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 	});
+
+	it("fails closed when a missing parent is replaced by an outside symlink after authorization", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-mutation-missing-parent-race-"));
+		temporaryDirectories.push(fixture);
+		const workspacePath = join(fixture, "workspace");
+		const outsidePath = join(fixture, "outside");
+		await Promise.all([mkdir(workspacePath), mkdir(outsidePath)]);
+		const workspace = await createWorkspace(workspacePath, createNodeFileSystem());
+		const canonicalTmp = await realpath(tmpdir());
+		const canonicalOutside = await realpath(outsidePath);
+		const policy = compileSandboxPolicy({
+			profile: "workspace",
+			workspaceRoots: [workspace.root],
+			temporaryDirectory: canonicalTmp,
+		});
+		const missingParent = join(workspace.root, "generated");
+		const target = join(missingParent, "parser", "escape.txt");
+		const writer = createSandboxedMutationWriter({
+			workspace,
+			permissions: { readAccessPolicyFor: () => createReadAccessPolicy(policy) },
+			beforeLaunch: async () => {
+				await symlink(canonicalOutside, missingParent, "dir");
+			},
+		});
+
+		await expect(
+			writer.write({ target, data: Buffer.from("must not escape"), expectedExists: false }, context("missing-race")),
+		).rejects.toThrow(/Sandbox|parent|canonical|mutation/iu);
+		await expect(readFile(join(canonicalOutside, "parser", "escape.txt"), "utf8")).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
 });

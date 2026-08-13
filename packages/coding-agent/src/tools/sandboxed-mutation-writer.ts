@@ -31,8 +31,8 @@ interface MutationWorkerResponse extends AtomicMutationResult {
 // that can write dependency files must not be able to replace the reference monitor used for writes.
 const MUTATION_WORKER_SOURCE = String.raw`
 import { createHash } from 'node:crypto';
-import { lstat, open, readFile, realpath, rename, stat, unlink, chmod } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 
 async function optionalLstat(path) {
   try { return await lstat(path, { bigint: true }); }
@@ -59,8 +59,40 @@ function validate(request) {
   if (request.expectedSha256 !== undefined && (typeof request.expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedSha256))) {
     throw new Error('invalid expected content digest');
   }
-  if (!request.parent || typeof request.parent.path !== 'string' || typeof request.parent.device !== 'string' || typeof request.parent.inode !== 'string') {
+  if (!request.parent || typeof request.parent.path !== 'string' || !request.parent.existing ||
+      typeof request.parent.existing.path !== 'string' || typeof request.parent.existing.device !== 'string' ||
+      typeof request.parent.existing.inode !== 'string') {
     throw new Error('invalid parent identity');
+  }
+}
+
+function isContained(root, target) {
+  const fromRoot = relative(root, target);
+  return fromRoot === '' || (!fromRoot.startsWith('..' + sep) && fromRoot !== '..' && !isAbsolute(fromRoot));
+}
+
+async function ensureTargetParent(request, targetParent) {
+  const existing = request.parent.existing;
+  if (request.parent.path !== targetParent || !isContained(existing.path, targetParent)) {
+    throw new Error('invalid target parent');
+  }
+  if (await realpath(existing.path) !== existing.path) throw new Error('target parent ancestor changed before mutation');
+  const ancestor = await stat(existing.path, { bigint: true });
+  if (!ancestor.isDirectory() || String(ancestor.dev) !== existing.device || String(ancestor.ino) !== existing.inode) {
+    throw new Error('target parent ancestor identity changed before mutation');
+  }
+  const suffix = relative(existing.path, targetParent);
+  let current = existing.path;
+  for (const segment of suffix === '' ? [] : suffix.split(sep)) {
+    current = join(current, segment);
+    if (!(await optionalLstat(current))) {
+      try { await mkdir(current, { mode: 0o755 }); }
+      catch (error) { if (!error || error.code !== 'EEXIST') throw error; }
+    }
+    const directory = await lstat(current, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink() || await realpath(current) !== current) {
+      throw new Error('target parent traverses a non-canonical directory');
+    }
   }
 }
 
@@ -71,13 +103,7 @@ async function main() {
   const request = JSON.parse(input);
   validate(request);
   const targetParent = dirname(request.target);
-  if (request.parent.path !== targetParent || await realpath(targetParent) !== targetParent) {
-    throw new Error('target parent changed before mutation');
-  }
-  const parent = await stat(targetParent, { bigint: true });
-  if (!parent.isDirectory() || String(parent.dev) !== request.parent.device || String(parent.ino) !== request.parent.inode) {
-    throw new Error('target parent identity changed before mutation');
-  }
+  await ensureTargetParent(request, targetParent);
   const data = Buffer.from(request.data, 'base64');
   const before = await optionalLstat(request.target);
   if (Boolean(before) !== request.expectedExists) throw new Error('target existence changed before mutation');
@@ -147,6 +173,28 @@ function parseResponse(stdout: string): MutationWorkerResponse {
 	return candidate as MutationWorkerResponse;
 }
 
+async function existingParentIdentity(parentPath: string): Promise<{
+	readonly path: string;
+	readonly device: string;
+	readonly inode: string;
+}> {
+	let candidate = parentPath;
+	for (;;) {
+		try {
+			const canonical = await realpath(candidate);
+			if (canonical !== candidate) throw new Error("Sandboxed mutation parent must remain canonical");
+			const status = await stat(candidate, { bigint: true });
+			if (!status.isDirectory()) throw new Error("Sandboxed mutation parent ancestor is not a directory");
+			return { path: candidate, device: String(status.dev), inode: String(status.ino) };
+		} catch (error) {
+			if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+			const parent = dirname(candidate);
+			if (parent === candidate) throw new Error(`Sandboxed mutation parent has no existing ancestor: ${parentPath}`);
+			candidate = parent;
+		}
+	}
+}
+
 export function createSandboxedMutationWriter(options: {
 	readonly workspace: Pick<Workspace, "root">;
 	readonly permissions: Pick<PermissionEngine, "readAccessPolicyFor">;
@@ -164,10 +212,7 @@ export function createSandboxedMutationWriter(options: {
 			const policy = readAccessPolicy.sandboxPolicy;
 			const invocation = context.invocationId.replace(/[^A-Za-z0-9_-]/gu, "-");
 			const parentPath = dirname(request.target);
-			const canonicalParent = await realpath(parentPath);
-			if (canonicalParent !== parentPath) throw new Error("Sandboxed mutation parent must remain canonical");
-			const parentStatus = await stat(parentPath, { bigint: true });
-			if (!parentStatus.isDirectory()) throw new Error("Sandboxed mutation parent is not a directory");
+			const existingParent = await existingParentIdentity(parentPath);
 			await options.beforeLaunch?.();
 			let result: Awaited<ReturnType<typeof execute>>;
 			try {
@@ -188,8 +233,7 @@ export function createSandboxedMutationWriter(options: {
 						expectedSha256: request.expectedSha256,
 						parent: {
 							path: parentPath,
-							device: String(parentStatus.dev),
-							inode: String(parentStatus.ino),
+							existing: existingParent,
 						},
 						data: Buffer.from(request.data).toString("base64"),
 					}),

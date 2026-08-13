@@ -32,7 +32,7 @@ describe("versioned System Prompt Builder", () => {
 		const second = buildSystemPrompt(structuredClone(input));
 
 		expect(first).toEqual(second);
-		expect(first.version).toBe("coda-system-prompt-v4");
+		expect(first.version).toBe("coda-system-prompt-v6");
 		expect(first.sha256).toMatch(/^[a-f0-9]{64}$/);
 		expect(first.text).toContain("Workspace: /workspace/project");
 		expect(first.text.indexOf("- read: Read a file")).toBeLessThan(first.text.indexOf("- write: Write a file"));
@@ -42,6 +42,12 @@ describe("versioned System Prompt Builder", () => {
 		expect(first.text).toContain("4 protected Credential Roots require exact or narrower review");
 		expect(first.text).toContain("Workspace-external reads require filesystem approval");
 		expect(first.text).toContain("require_escalated requests explicit command review");
+		expect(first.text).toContain("Turn every stated requirement into an implementation and verification checklist");
+		expect(first.text).toContain("Run the broadest feasible regression suite after the final edit");
+		expect(first.text).toContain("Do not claim a check passed unless you actually ran it successfully");
+		expect(first.text).toContain(
+			"Do not filter verification commands through a pipeline that can hide an upstream failure",
+		);
 	});
 
 	it("states that Full Access is the explicit full-disk read bypass", () => {

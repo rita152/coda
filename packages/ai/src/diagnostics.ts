@@ -74,7 +74,7 @@ export function createStreamDiagnostic(
 	const retryable =
 		!contextOverflow &&
 		metadata.retryable !== false &&
-		(retryableStatus || isRetryableTransportError(candidate, code));
+		(metadata.retryable === true || retryableStatus || isRetryableTransportError(candidate, code));
 	const errorInfo: DiagnosticErrorInfo = { name: candidate.name, message: candidate.message, code };
 	if (options.debug && candidate.stack) errorInfo.stack = candidate.stack;
 	return {

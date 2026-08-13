@@ -1,0 +1,68 @@
+{
+  "job_name": "coda-deep-swe-r11-a683d6820615",
+  "jobs_dir": "/home/esp/coda-evals/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 10,
+  "quiet": false,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "type": "docker",
+    "force_build": false,
+    "delete": true,
+    "cpu_enforcement_policy": "auto",
+    "memory_enforcement_policy": "auto"
+  },
+  "verifier": {
+    "disable": false
+  },
+  "agents": [
+    {
+      "import_path": "coda_agent:CodaAgent",
+      "model_name": "opencode-go/deepseek-v4-flash",
+      "override_setup_timeout_sec": 900,
+      "max_timeout_sec": 5400,
+      "kwargs": {
+        "runtime_dir": "/home/esp/coda-evals/runtimes/a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+        "reasoning_effort": "max",
+        "max_output_tokens": 384000,
+        "run_budget_enabled": false,
+        "allow_all_commands": true,
+        "harness_revision": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8"
+      },
+      "env": {
+        "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+        "NODE_USE_ENV_PROXY": "1",
+        "NODE_USE_SYSTEM_CA": "1"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "path": "/home/esp/coda-evals/deep-swe/tasks",
+      "task_names": [
+        "abs-module-cache-flags",
+        "abs-stepped-slices",
+        "actionlint-action-pinning-lint",
+        "adaptix-name-mapping-aliases",
+        "aiomonitor-task-snapshots-diff",
+        "anko-default-function-arguments",
+        "anko-typed-variable-bindings",
+        "arcane-drift-detection-baselines",
+        "arktype-json-schema-refs-dependencies",
+        "awilix-async-container-initialization",
+        "bandit-incremental-cache-control",
+        "bandit-interprocedural-taint-checks",
+        "bandit-structured-nosec-directives",
+        "boa-hierarchical-evaluation-cancellation",
+        "cattrs-partial-structuring-recovery",
+        "clack-async-autocomplete-options",
+        "claude-code-by-agents-recursive-delegation",
+        "cliffy-config-file-parsing",
+        "csstree-shorthand-expansion-compression",
+        "dasel-html-document-format"
+      ]
+    }
+  ]
+}

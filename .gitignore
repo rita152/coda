@@ -3,4 +3,6 @@ dist/
 coverage/
 *.tgz
 .DS_Store
+__pycache__/
+*.py[cod]
 .agents/skills/

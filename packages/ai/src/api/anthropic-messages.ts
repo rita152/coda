@@ -33,7 +33,9 @@ import type {
 import {
 	calculateCost,
 	createOutput,
+	finalToolArguments,
 	mergeProviderHeaders,
+	prematureStreamEndError,
 	requestHeaders,
 	requireApiKey,
 	responseMetadata,
@@ -189,14 +191,6 @@ function partialArguments(value: string): Record<string, any> {
 	return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 }
 
-function finalArguments(value: string): Record<string, any> {
-	if (!value) return {};
-	const parsed: unknown = JSON.parse(value);
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-		throw new Error("Tool arguments must be an object");
-	return parsed as Record<string, any>;
-}
-
 function mapStopReason(
 	reason: string | null | undefined,
 	stopDetails?: { explanation?: string } | null,
@@ -259,7 +253,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (m
 			const blocks = output.content as StreamingBlock[];
 			for await (const event of response.data) processEvent(event, model, output, blocks, events);
 			options?.signal?.throwIfAborted();
-			if (output.stopReason === "pending") throw new Error("Anthropic stream ended without a stop reason");
+			if (output.stopReason === "pending") {
+				throw prematureStreamEndError("Anthropic stream ended without a stop reason");
+			}
 			if (output.stopReason === "error") throw new Error(output.errorMessage ?? "Anthropic request failed");
 			stripStreamingState(output);
 			const reason = output.stopReason;
@@ -347,7 +343,7 @@ function processEvent(
 		} else if (block.type === "thinking") {
 			events.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
 		} else {
-			block.arguments = finalArguments(block.partialJson);
+			block.arguments = finalToolArguments(block.partialJson);
 			const toolCall: ToolCall = { type: "toolCall", id: block.id, name: block.name, arguments: block.arguments };
 			events.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
 		}

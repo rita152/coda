@@ -119,6 +119,52 @@ function reasoningSse(): string {
 	return `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
 }
 
+function prematurelyEndedSse(): string {
+	const chunk = {
+		id: "chatcmpl_incomplete",
+		object: "chat.completion.chunk",
+		created: 1,
+		model: "hy3",
+		choices: [{ index: 0, delta: { reasoning_content: "partial plan" }, finish_reason: null }],
+	};
+	return `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`;
+}
+
+function truncatedToolArgumentsSse(): string {
+	const chunks = [
+		{
+			id: "chatcmpl_truncated_tool",
+			object: "chat.completion.chunk",
+			created: 1,
+			model: "hy3",
+			choices: [
+				{
+					index: 0,
+					delta: {
+						tool_calls: [
+							{
+								index: 0,
+								id: "provider_call_truncated",
+								type: "function",
+								function: { name: "read", arguments: '{"path":"unterminated' },
+							},
+						],
+					},
+					finish_reason: null,
+				},
+			],
+		},
+		{
+			id: "chatcmpl_truncated_tool",
+			object: "chat.completion.chunk",
+			created: 1,
+			model: "hy3",
+			choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+		},
+	];
+	return `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
+}
+
 // Additional upstream cases:
 // /packages/ai/test/openai-completions-reasoning-details.test.ts
 // /packages/ai/test/openai-completions-response-model.test.ts
@@ -272,6 +318,54 @@ describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)
 			],
 		});
 		expect(result.diagnostics?.[0]?.error).not.toHaveProperty("stack");
+	});
+
+	test("marks a stream that ends without a stop reason as a retryable broken pipe", async () => {
+		const output = stream(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(456),
+				apiKey: "test-key",
+				fetch: async () =>
+					new Response(prematurelyEndedSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+
+		await expect(output.result()).resolves.toMatchObject({
+			stopReason: "error",
+			content: [{ type: "thinking", thinking: "partial plan" }],
+			usage: { totalTokens: 0 },
+			diagnostics: [
+				{
+					error: { code: "EPIPE" },
+					details: { phase: "stream", retryable: true },
+				},
+			],
+		});
+	});
+
+	test("marks truncated streamed Tool arguments as a retryable protocol error", async () => {
+		const output = stream(
+			model,
+			{ messages: [] },
+			{
+				runtime: testTimeRuntime(456),
+				apiKey: "test-key",
+				fetch: async () =>
+					new Response(truncatedToolArgumentsSse(), { headers: { "content-type": "text/event-stream" } }),
+			},
+		);
+
+		await expect(output.result()).resolves.toMatchObject({
+			stopReason: "error",
+			diagnostics: [
+				{
+					error: { code: "EPROTO" },
+					details: { phase: "stream", retryable: true },
+				},
+			],
+		});
 	});
 
 	test("normalizes provider context-limit failures to non-retryable context_overflow", async () => {

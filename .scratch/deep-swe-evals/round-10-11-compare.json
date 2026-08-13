@@ -1,0 +1,503 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "deep-swe",
+  "campaignKind": "development-rounds",
+  "rounds": [
+    {
+      "round": 10,
+      "harnessRevision": "af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3",
+      "maxOutputTokens": 384000,
+      "runBudgetEnabled": false,
+      "allowAllCommands": true,
+      "summary": {
+        "trials": 20,
+        "passed": 10,
+        "failed": 10,
+        "errors": 0,
+        "passRate": 0.5,
+        "f2pPassed": 900,
+        "f2pTotal": 980,
+        "p2pPassed": 24670,
+        "p2pTotal": 24672,
+        "averagePartial": 0.9506558353102605,
+        "elapsedMs": 34228199,
+        "inputTokens": 371759720,
+        "cacheTokens": 369872128,
+        "outputTokens": 2504662,
+        "costUsd": 1.0006050992000002,
+        "turnCount": 2787,
+        "agentElapsedMs": 32587613,
+        "committedTrials": 20,
+        "nonzeroCodaExits": 1,
+        "toolIssueCount": 326,
+        "toolRejectionCount": 1,
+        "policyRejectionCount": 0,
+        "invalidToolCallCount": 1,
+        "unresolvedFailureCount": 121,
+        "lengthTruncationCount": 0,
+        "budgetExhaustedTrials": 0
+      },
+      "deltaPassedFromPrevious": 0,
+      "deltaPassRateFromPrevious": 0,
+      "deltaAveragePartialFromPrevious": 0
+    },
+    {
+      "round": 11,
+      "harnessRevision": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+      "maxOutputTokens": 384000,
+      "runBudgetEnabled": false,
+      "allowAllCommands": true,
+      "summary": {
+        "trials": 20,
+        "passed": 9,
+        "failed": 10,
+        "errors": 1,
+        "passRate": 0.45,
+        "f2pPassed": 916,
+        "f2pTotal": 980,
+        "p2pPassed": 24671,
+        "p2pTotal": 24672,
+        "averagePartial": 0.9911345986663822,
+        "elapsedMs": 32376354,
+        "inputTokens": 302659283,
+        "cacheTokens": 300962944,
+        "outputTokens": 2068967,
+        "costUsd": 0.8297472315999999,
+        "turnCount": 2464,
+        "agentElapsedMs": 25284177,
+        "committedTrials": 19,
+        "nonzeroCodaExits": 0,
+        "toolIssueCount": 249,
+        "toolRejectionCount": 0,
+        "policyRejectionCount": 0,
+        "invalidToolCallCount": 0,
+        "unresolvedFailureCount": 127,
+        "lengthTruncationCount": 0,
+        "budgetExhaustedTrials": 0
+      },
+      "deltaPassedFromPrevious": -1,
+      "deltaPassRateFromPrevious": -0.04999999999999999,
+      "deltaAveragePartialFromPrevious": 0.04047876335612166
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "abs-module-cache-flags",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.01787222079999999,
+          "turnCount": 79
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.02487628919999999,
+          "turnCount": 95
+        }
+      ]
+    },
+    {
+      "taskId": "abs-stepped-slices",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.0332491292,
+          "turnCount": 112
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.033316922799999996,
+          "turnCount": 113
+        }
+      ]
+    },
+    {
+      "taskId": "actionlint-action-pinning-lint",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.06055623279999997,
+          "turnCount": 140
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.043929275599999984,
+          "turnCount": 126
+        }
+      ]
+    },
+    {
+      "taskId": "adaptix-name-mapping-aliases",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.07013154679999999,
+          "turnCount": 217
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.05936560279999999,
+          "turnCount": 161
+        }
+      ]
+    },
+    {
+      "taskId": "aiomonitor-task-snapshots-diff",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.030834084399999982,
+          "turnCount": 104
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9672131147540983,
+          "costUsd": 0.049351660400000004,
+          "turnCount": 135
+        }
+      ]
+    },
+    {
+      "taskId": "anko-default-function-arguments",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9917355371900827,
+          "costUsd": 0.17998154160000016,
+          "turnCount": 315
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9917355371900827,
+          "costUsd": 0.07002234399999997,
+          "turnCount": 188
+        }
+      ]
+    },
+    {
+      "taskId": "anko-typed-variable-bindings",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9902912621359223,
+          "costUsd": 0.03330857320000001,
+          "turnCount": 102
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.028826260399999987,
+          "turnCount": 86
+        }
+      ]
+    },
+    {
+      "taskId": "arcane-drift-detection-baselines",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.033140452800000005,
+          "turnCount": 112
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.06941115160000001,
+          "turnCount": 204
+        }
+      ]
+    },
+    {
+      "taskId": "arktype-json-schema-refs-dependencies",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.11429457479999999,
+          "turnCount": 313
+        },
+        {
+          "round": 11,
+          "status": "error",
+          "reward": 0,
+          "partial": 0.9853286384976526
+        }
+      ]
+    },
+    {
+      "taskId": "awilix-async-container-initialization",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.05584964559999999,
+          "turnCount": 156
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9946236559139785,
+          "costUsd": 0.03347022280000002,
+          "turnCount": 109
+        }
+      ]
+    },
+    {
+      "taskId": "bandit-incremental-cache-control",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9972451790633609,
+          "costUsd": 0.0390013568,
+          "turnCount": 147
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9807162534435262,
+          "costUsd": 0.04379949000000002,
+          "turnCount": 156
+        }
+      ]
+    },
+    {
+      "taskId": "bandit-interprocedural-taint-checks",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.0276214736,
+          "turnCount": 108
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9944289693593314,
+          "costUsd": 0.049633424399999994,
+          "turnCount": 136
+        }
+      ]
+    },
+    {
+      "taskId": "bandit-structured-nosec-directives",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9886039886039886,
+          "costUsd": 0.029992673200000007,
+          "turnCount": 100
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9971509971509972,
+          "costUsd": 0.034972126,
+          "turnCount": 104
+        }
+      ]
+    },
+    {
+      "taskId": "boa-hierarchical-evaluation-cancellation",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.2916666666666667,
+          "costUsd": 0.06622200480000003,
+          "turnCount": 195
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.06263488280000001,
+          "turnCount": 188
+        }
+      ]
+    },
+    {
+      "taskId": "cattrs-partial-structuring-recovery",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9736842105263158,
+          "costUsd": 0.05155305400000001,
+          "turnCount": 124
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9342105263157895,
+          "costUsd": 0.04943842959999998,
+          "turnCount": 166
+        }
+      ]
+    },
+    {
+      "taskId": "clack-async-autocomplete-options",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9875862068965517,
+          "costUsd": 0.030099832,
+          "turnCount": 68
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.983448275862069,
+          "costUsd": 0.03468628799999999,
+          "turnCount": 96
+        }
+      ]
+    },
+    {
+      "taskId": "claude-code-by-agents-recursive-delegation",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.868421052631579,
+          "costUsd": 0.017999290400000003,
+          "turnCount": 63
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.03435913879999998,
+          "turnCount": 102
+        }
+      ]
+    },
+    {
+      "taskId": "cliffy-config-file-parsing",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9241803278688525,
+          "costUsd": 0.04968992559999998,
+          "turnCount": 151
+        },
+        {
+          "round": 11,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.0522567136,
+          "turnCount": 141
+        }
+      ]
+    },
+    {
+      "taskId": "csstree-shorthand-expansion-compression",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9997022746218888,
+          "costUsd": 0.0320689964,
+          "turnCount": 84
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9998809098487556,
+          "costUsd": 0.032831943200000005,
+          "turnCount": 75
+        }
+      ]
+    },
+    {
+      "taskId": "dasel-html-document-format",
+      "rounds": [
+        {
+          "round": 10,
+          "status": "passed",
+          "reward": 1,
+          "partial": 1,
+          "costUsd": 0.027138490399999993,
+          "turnCount": 97
+        },
+        {
+          "round": 11,
+          "status": "failed",
+          "reward": 0,
+          "partial": 0.9939550949913645,
+          "costUsd": 0.022565065600000007,
+          "turnCount": 83
+        }
+      ]
+    }
+  ]
+}

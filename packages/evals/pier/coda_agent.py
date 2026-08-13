@@ -114,6 +114,8 @@ class CodaAgent(BaseAgent):
         command = f"""
 set +e
 initial_head=$(git -C /app rev-parse HEAD)
+git -C /app config user.name coda-evals
+git -C /app config user.email coda-evals@localhost
 {shlex.quote(node)} {shlex.quote(entry)} \\
   --print --json --no-color \\
   --workspace /app \\
@@ -128,8 +130,6 @@ initial_head=$(git -C /app rev-parse HEAD)
   2> {shlex.quote(f'{agent_dir}/coda.stderr')}
 coda_status=$?
 commit_status=0
-git -C /app config user.name coda-evals
-git -C /app config user.email coda-evals@localhost
 if ! git -C /app diff --quiet || ! git -C /app diff --cached --quiet || \\
    test -n "$(git -C /app ls-files --others --exclude-standard)"; then
   git -C /app add -A

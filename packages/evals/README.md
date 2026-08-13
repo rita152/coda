@@ -40,7 +40,9 @@ The DeepSWE path is a separate, paid opt-in runner for evaluating the Coda Codin
 environments. It pins Datacurve DeepSWE v1.1 to commit
 `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`, pins `datacurve-pier==0.3.1`, and ships a Coda-specific Pier adapter in
 `pier/coda_agent.py`. The adapter runs Coda in `/app`, records JSONL Run Evidence and an ATIF trajectory, and commits
-workspace changes before the v1.1 collect hook. It does not use Pier's OpenCode adapter.
+workspace changes before the v1.1 collect hook. It configures a repository-local evaluation identity before Coda
+starts so tasks that commit their own work do not fail on a missing container identity. It does not use Pier's
+OpenCode adapter.
 
 Generate the frozen image lock or a secret-free job config without making Provider calls:
 
