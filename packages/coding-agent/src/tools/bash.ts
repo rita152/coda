@@ -6,6 +6,7 @@ import type { PermissionAuditSink } from "../permissions/audit.ts";
 import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
+import { planShellExecution, SHELL_EXECUTION_FACTS_VERSION } from "./shell-execution.ts";
 import { createToolOutputCapture, discardStoredToolOutput, type StoredToolOutput } from "./tool-output-store.ts";
 
 const BashParameters = Type.Object(
@@ -152,12 +153,43 @@ export function createBashTool(options: {
 	return {
 		name: "bash",
 		description:
-			"Run one non-interactive Shell command under the active Permission Profile. Use preview instead of piping to head/tail so display limiting cannot mask the command exit status.",
+			"Run one non-interactive Shell command under the active Permission Profile. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status.",
 		parameters: BashParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
 			const authorization = options.permissions.authorizationFor(context.invocationId);
 			if (!authorization) throw new Error("Bash execution was not authorized by the Permission Engine");
+			const shellExecution = planShellExecution(options.shellExecutable, arguments_.command);
+			if (shellExecution.kind === "reject") {
+				return {
+					content: shellExecution.diagnostic,
+					observation: {
+						status: "error",
+						truncated: false,
+						facts: {
+							shellExecutionFactsVersion: SHELL_EXECUTION_FACTS_VERSION,
+							exitCode: 2,
+							exitCodeScope: "coda-shell-policy",
+							shell: shellExecution.shell,
+							shellDialect: shellExecution.shellDialect,
+							pipelineDetected: shellExecution.pipelineDetected,
+							pipelineStatusMode: shellExecution.pipelineStatusMode,
+						},
+					},
+					isError: true,
+					details: {
+						exitCode: 2,
+						signal: null,
+						timedOut: false,
+						truncated: false,
+						cwd: options.workspace.root,
+						shell: shellExecution.shell,
+						shellDialect: shellExecution.shellDialect,
+						pipelineStatusMode: shellExecution.pipelineStatusMode,
+						pipelineRejected: true,
+					},
+				};
+			}
 			const inherited = modelShellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
 			const capture = await createToolOutputCapture(
 				options.fileSystem,
@@ -170,8 +202,8 @@ export function createBashTool(options: {
 			try {
 				result = await options.processRunner.run(
 					{
-						executable: options.shellExecutable,
-						args: ["-c", arguments_.command],
+						executable: shellExecution.shell,
+						args: shellExecution.args,
 						cwd: options.workspace.root,
 						environment: inherited.environment,
 						signal: context.signal,
@@ -232,8 +264,13 @@ export function createBashTool(options: {
 			}
 			const status = result.denial ? "denied" : result.timedOut || result.exitCode !== 0 ? "error" : "ok";
 			const facts: Record<string, JsonValue> = {
+				shellExecutionFactsVersion: SHELL_EXECUTION_FACTS_VERSION,
 				exitCode: result.exitCode,
 				exitCodeScope: "shell-command",
+				shell: shellExecution.shell,
+				shellDialect: shellExecution.shellDialect,
+				pipelineDetected: shellExecution.pipelineDetected,
+				pipelineStatusMode: shellExecution.pipelineStatusMode,
 				signal: result.signal,
 				timedOut: result.timedOut,
 				stderrPresent: observedStderr || result.stderr.length > 0,
@@ -279,6 +316,9 @@ export function createBashTool(options: {
 					cwd: options.workspace.root,
 					strippedEnvironmentVariableCount: inherited.stripped.length,
 					backend: result.backend,
+					shell: shellExecution.shell,
+					shellDialect: shellExecution.shellDialect,
+					pipelineStatusMode: shellExecution.pipelineStatusMode,
 					denial: result.denial,
 					preview: arguments_.preview,
 					previewComplete,
