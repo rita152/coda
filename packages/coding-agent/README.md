@@ -38,6 +38,11 @@ retaining Run, Turn, Attempt, terminal Message, Tool lifecycle, and Run Evidence
 events. Use `--json --json-mode raw` when diagnostics explicitly require every
 delta.
 
+`--run-control-work-ms` and `--run-control-grace-ms` opt into a two-phase wall-clock envelope; optional
+`--run-control-stationary-turns` can request the same bounded finalization after consecutive no-progress Turns.
+RunControl remains active with `--no-run-budget`. Controlled JSON event envelopes use schema v3 and their Run
+Evidence uses schema v4; unconfigured Agent output remains JSON v2 and Run Evidence v3.
+
 `--no-tui` is an explicit alias for print mode. `--color-scheme auto|light|dark`
 controls terminal appearance detection; `--no-color` and `NO_COLOR` take
 precedence and emit no color sequences. `--no-animations` selects reduced

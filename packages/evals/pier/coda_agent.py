@@ -40,6 +40,11 @@ class CodaAgent(BaseAgent):
         event_stream_mode: str = "semantic",
         max_turns: int = 64,
         run_budget_enabled: bool = True,
+        run_control_work_sec: int = 4_500,
+        run_control_grace_sec: int = 600,
+        run_control_stationary_turns: int = 4,
+        adapter_finalize_margin_sec: int = 240,
+        pier_hard_timeout_sec: int = 5_400,
         allow_all_commands: bool = False,
         harness_revision: str = "unknown",
         extra_env: dict[str, str] | None = None,
@@ -63,6 +68,25 @@ class CodaAgent(BaseAgent):
         if self._run_budget_enabled and max_turns < 1:
             raise ValueError("CodaAgent max_turns must be positive")
         self._max_turns = int(max_turns)
+        self._run_control_work_sec = self._positive_int(run_control_work_sec, "run_control_work_sec")
+        self._run_control_grace_sec = self._positive_int(run_control_grace_sec, "run_control_grace_sec")
+        self._run_control_stationary_turns = self._positive_int(
+            run_control_stationary_turns, "run_control_stationary_turns"
+        )
+        self._adapter_finalize_margin_sec = self._positive_int(
+            adapter_finalize_margin_sec, "adapter_finalize_margin_sec"
+        )
+        self._pier_hard_timeout_sec = self._positive_int(pier_hard_timeout_sec, "pier_hard_timeout_sec")
+        reserved_sec = (
+            self._run_control_work_sec
+            + self._run_control_grace_sec
+            + self._adapter_finalize_margin_sec
+        )
+        if reserved_sec >= self._pier_hard_timeout_sec:
+            raise ValueError(
+                "CodaAgent requires run_control_work_sec + run_control_grace_sec + "
+                "adapter_finalize_margin_sec < pier_hard_timeout_sec"
+            )
         self._allow_all_commands = bool(allow_all_commands)
         self._harness_revision = harness_revision
         self._extra_env = dict(extra_env or {})
@@ -73,6 +97,8 @@ class CodaAgent(BaseAgent):
             raise ValueError("CodaAgent cancel_finalize_timeout_sec must be positive")
         self._artifact_finalize_timeout_sec = float(artifact_finalize_timeout_sec)
         self._cancel_finalize_timeout_sec = float(cancel_finalize_timeout_sec)
+        if self._agent_timeout_sec is not None and reserved_sec >= self._agent_timeout_sec:
+            raise ValueError("CodaAgent RunControl and finalize margin must fit inside agent_timeout_sec")
 
     @staticmethod
     def name() -> str:
@@ -240,6 +266,11 @@ class CodaAgent(BaseAgent):
             max_turns=self._max_turns,
             allow_all_commands=self._allow_all_commands,
             event_stream_mode=self._event_stream_mode,
+            run_control_work_sec=self._run_control_work_sec,
+            run_control_grace_sec=self._run_control_grace_sec,
+            run_control_stationary_turns=self._run_control_stationary_turns,
+            adapter_finalize_margin_sec=self._adapter_finalize_margin_sec,
+            pier_hard_timeout_sec=self._pier_hard_timeout_sec,
             workspace_dir=self.WORKSPACE_DIR,
         )
 
@@ -275,6 +306,9 @@ set +e
   --reasoning {shlex.quote(self._reasoning_effort)} \\
   --max-output-tokens {self._max_output_tokens} \\
   {run_budget_args} \\
+  --run-control-work-ms {self._run_control_work_sec * 1000} \\
+  --run-control-grace-ms {self._run_control_grace_sec * 1000} \\
+  --run-control-stationary-turns {self._run_control_stationary_turns} \\
   {permission_args} \\
   --trust-project --no-session \\
   < {shlex.quote(f'{agent_dir}/instruction.md')} \\
@@ -305,3 +339,9 @@ exit 0
             if line.startswith(prefix):
                 return line[len(prefix) :]
         return None
+
+    @staticmethod
+    def _positive_int(value: Any, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"CodaAgent {name} must be a positive integer")
+        return value

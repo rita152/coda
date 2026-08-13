@@ -106,6 +106,8 @@ import { ProviderManager } from "./providers/provider-manager.ts";
 import type { CustomProviderConfig } from "./providers/types.ts";
 import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./reasoning-effort.ts";
 import { createCodingAgentRetry } from "./retry.ts";
+import { type AgentRunControlBinding, bindAgentRunControl, type RunControlConfiguration } from "./run-control/index.ts";
+import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
 import { RunPermissionRouter } from "./runtime/run-permission-router.ts";
@@ -276,6 +278,9 @@ interface ParsedArguments {
 	readonly maxOutputTokens?: number;
 	readonly maxTurns?: number;
 	readonly disableRunBudget: boolean;
+	readonly runControlWorkMs?: number;
+	readonly runControlGraceMs?: number;
+	readonly runControlStationaryTurns?: number;
 	readonly apiKey?: string;
 	readonly workspace?: string;
 	readonly trustProject: boolean;
@@ -315,6 +320,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let maxOutputTokens: number | undefined;
 	let maxTurns: number | undefined;
 	let disableRunBudget = false;
+	let runControlWorkMs: number | undefined;
+	let runControlGraceMs: number | undefined;
+	let runControlStationaryTurns: number | undefined;
 	let apiKey: string | undefined;
 	let workspace: string | undefined;
 	let trustProject = false;
@@ -459,6 +467,30 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 			disableRunBudget = true;
 			continue;
 		}
+		if (argument === "--run-control-work-ms") {
+			const value = Number(args[++index]);
+			if (!Number.isSafeInteger(value) || value < 1) {
+				throw new Error("--run-control-work-ms requires a positive integer");
+			}
+			runControlWorkMs = value;
+			continue;
+		}
+		if (argument === "--run-control-grace-ms") {
+			const value = Number(args[++index]);
+			if (!Number.isSafeInteger(value) || value < 1) {
+				throw new Error("--run-control-grace-ms requires a positive integer");
+			}
+			runControlGraceMs = value;
+			continue;
+		}
+		if (argument === "--run-control-stationary-turns") {
+			const value = Number(args[++index]);
+			if (!Number.isSafeInteger(value) || value < 1) {
+				throw new Error("--run-control-stationary-turns requires a positive integer");
+			}
+			runControlStationaryTurns = value;
+			continue;
+		}
 		if (argument === "--api-key") {
 			const value = args[++index];
 			if (!value) throw new Error("--api-key requires a non-empty value");
@@ -528,6 +560,12 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	if (disableRunBudget && maxTurns !== undefined) {
 		throw new Error("--no-run-budget and --max-turns cannot be combined");
 	}
+	if ((runControlWorkMs === undefined) !== (runControlGraceMs === undefined)) {
+		throw new Error("--run-control-work-ms and --run-control-grace-ms must be configured together");
+	}
+	if (runControlStationaryTurns !== undefined && runControlWorkMs === undefined) {
+		throw new Error("--run-control-stationary-turns requires RunControl work and grace deadlines");
+	}
 	const mode = explicitMode ?? (output === "json" || !io.stdin.isTTY || !io.stdout.isTTY ? "print" : "interactive");
 	let prompt = promptParts.join(" ").trim();
 	if (action !== "run" && (prompt.length > 0 || imagePaths.length > 0)) {
@@ -548,6 +586,9 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		maxOutputTokens,
 		maxTurns,
 		disableRunBudget,
+		runControlWorkMs,
+		runControlGraceMs,
+		runControlStationaryTurns,
 		apiKey,
 		workspace,
 		trustProject,
@@ -598,7 +639,11 @@ Model:
       --reasoning <level>        off|minimal|low|medium|high|xhigh|max
       --max-output-tokens <n>    Reserve at most n output tokens (default: 16384)
       --max-turns <n>            Limit one Run to n model Turns (default: 64)
-      --no-run-budget            Disable all Coda Run limits for this invocation
+	  --no-run-budget            Disable economic RunBudget limits for this invocation
+      --run-control-work-ms <n>  Request finalization after this work duration
+      --run-control-grace-ms <n> Abort after this additional finalization grace
+      --run-control-stationary-turns <n>
+                                 Request finalization after n no-progress Turns
       --api-key <key>            Use a request-scoped API key
       --image <path>             Attach an image (repeatable)
 
@@ -627,6 +672,17 @@ Other:
   -h, --help                     Show this help
   -v, --version                  Show the Coda version
 `;
+
+function runControlConfiguration(parsed: ParsedArguments): RunControlConfiguration | undefined {
+	if (parsed.runControlWorkMs === undefined || parsed.runControlGraceMs === undefined) return undefined;
+	return Object.freeze({
+		workDurationMs: parsed.runControlWorkMs,
+		graceDurationMs: parsed.runControlGraceMs,
+		...(parsed.runControlStationaryTurns !== undefined
+			? { maxStationaryTurns: parsed.runControlStationaryTurns }
+			: {}),
+	});
+}
 
 function createEffortCommand(
 	session: Session,
@@ -966,6 +1022,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 		run: async (args) => {
 			try {
 				const parsed = await parseArguments(args, options.io);
+				const configuredRunControl = runControlConfiguration(parsed);
+				if (configuredRunControl && !options.runtime.scheduler) {
+					throw new Error("Configured RunControl requires an injected Scheduler");
+				}
 				if (parsed.action === "help") {
 					await options.io.stdout.write(HELP);
 					return 0;
@@ -1131,6 +1191,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				let mcpRegistry: CodingMcpRegistry | undefined;
 				let processSessionManager: ProcessSessionManager | undefined;
+				let runControlBinding: AgentRunControlBinding | undefined;
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -1663,6 +1724,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						seed: session.seed,
 						autoDrainFollowUps: parsed.mode !== "interactive",
 					});
+					runControlBinding = configuredRunControl
+						? bindAgentRunControl({
+								agent,
+								configuration: configuredRunControl,
+								clock: options.runtime.clock,
+								scheduler: options.runtime.scheduler!,
+							})
+						: undefined;
 					session.attach(agent);
 					const initialAttachments = await Promise.all(
 						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
@@ -1792,7 +1861,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						};
 						const secondaryResources = new Map<
 							string,
-							{ readonly session: Session; readonly mediaLibrary: MediaLibrary }
+							{
+								readonly session: Session;
+								readonly mediaLibrary: MediaLibrary;
+								readonly runControl?: AgentRunControlBinding;
+							}
 						>();
 						const createSecondarySessionOptions = async (
 							targetSession: Session,
@@ -2134,6 +2207,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									seed: targetSession.seed,
 									autoDrainFollowUps: false,
 								});
+								const targetRunControl = configuredRunControl
+									? bindAgentRunControl({
+											agent: targetAgent,
+											configuration: configuredRunControl,
+											clock: options.runtime.clock,
+											scheduler: options.runtime.scheduler!,
+										})
+									: undefined;
 								targetSession.attach(targetAgent);
 								const targetRestoredMedia = await restoredChatAttachments(
 									targetSession.mediaReferences,
@@ -2166,6 +2247,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								secondaryResources.set(targetSession.descriptor.id, {
 									session: targetSession,
 									mediaLibrary: targetMediaLibrary,
+									...(targetRunControl ? { runControl: targetRunControl } : {}),
 								});
 								return {
 									agent: targetAgent,
@@ -2559,6 +2641,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							await Promise.all(
 								[...secondaryResources.values()].map(async (resource) => {
 									const failures: unknown[] = [];
+									resource.runControl?.dispose();
 									try {
 										await resource.mediaLibrary.dispose();
 									} catch (error) {
@@ -2604,6 +2687,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 					if (jsonEventWriter) {
 						agent.onEvent(async (event) => {
+							const runControl =
+								event.type === "run_start" || event.type === "run_end"
+									? runControlBinding?.reportForRun(String(event.runId))
+									: undefined;
 							await jsonEventWriter.writeAgentEvent(
 								event,
 								event.type === "run_start"
@@ -2617,13 +2704,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											},
 										}
 									: undefined,
+								runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
 							);
 							if (event.type === "run_end") {
 								const evidence = session.runEvidence.at(-1);
 								if (!evidence || evidence.runId !== event.runId) {
 									throw new Error(`Run evidence was unavailable after completed Run ${event.runId}`);
 								}
-								await jsonEventWriter.writeRecord(evidence);
+								const outputEvidence = runControl ? withRunControlEvidence(evidence, runControl) : evidence;
+								await jsonEventWriter.writeRecord(outputEvidence);
 								const disposition = completionController?.get(event.runId);
 								if (!disposition) {
 									throw new Error(`Completion disposition was unavailable after completed Run ${event.runId}`);
@@ -2668,6 +2757,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					if (rejectingApproval && rejectingApproval.requests.length > 0) return 1;
 					return 0;
 				} finally {
+					runControlBinding?.dispose();
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
 					try {

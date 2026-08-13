@@ -84,9 +84,12 @@ artifact into memory; recovered values use source `terminal_events` and remain `
 development rounds 5–11 remain valid report/compare inputs and are upgraded in memory without inventing wall time.
 
 `--no-run-budget` is mutually exclusive with `--max-turns` and disables the complete Coda Run Budget rather than
-substituting a large numeric limit. Pier's agent timeout remains an infrastructure failure boundary. Explicit
-`--max-output-tokens` values can use a model's full declared output limit; for example, the pinned OpenCode Go catalog
-declares `deepseek-v4-flash` with a 1,000,000-token context window and a 384,000-token output limit.
+substituting a large numeric limit. It does not disable the independent RunControl envelope. DeepSWE defaults to a
+4,500-second work window, a 600-second finalization grace, and four stationary Turns; the 240-second adapter finalize
+margin is validated together with those windows against Pier's 5,400-second hard timeout. The corresponding
+`--run-control-*`, `--adapter-finalize-margin-sec`, and `--pier-hard-timeout-sec` options are recorded in the v2 run
+lock. Explicit `--max-output-tokens` values can use a model's full declared output limit; for example, the pinned
+OpenCode Go catalog declares `deepseek-v4-flash` with a 1,000,000-token context window and a 384,000-token output limit.
 
 The Pier adapter creates a versioned, atomically replaced `adapter-status.json` before launching Coda, then runs
 workspace/event finalization as a separate idempotent phase. Normal exits, adapter timeouts, and cancellation all

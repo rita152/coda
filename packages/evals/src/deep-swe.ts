@@ -12,6 +12,11 @@ export const DEEP_SWE_PROVIDER_HOST = "opencode.ai";
 export const DEEP_SWE_EVENT_STREAM_MODE = "semantic";
 /** Must match the semantic selection policy owned by Coding Agent's JsonEventWriter. */
 export const DEEP_SWE_EVENT_STREAM_SCHEMA_VERSION = 1;
+export const DEEP_SWE_PIER_HARD_TIMEOUT_SEC = 5_400;
+export const DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC = 4_500;
+export const DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC = 600;
+export const DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS = 4;
+export const DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC = 240;
 
 export interface DeepSweImageLock {
 	readonly taskId: string;
@@ -142,6 +147,11 @@ export interface DeepSwePierJobOptions {
 	readonly maxOutputTokens?: number;
 	readonly maxTurns?: number;
 	readonly disableRunBudget?: boolean;
+	readonly runControlWorkSec?: number;
+	readonly runControlGraceSec?: number;
+	readonly runControlStationaryTurns?: number;
+	readonly adapterFinalizeMarginSec?: number;
+	readonly pierHardTimeoutSec?: number;
 	readonly allowAllCommands?: boolean;
 	readonly adapterImportPath?: string;
 	readonly quiet?: boolean;
@@ -167,7 +177,7 @@ export interface DeepSwePierJobConfig {
 			readonly import_path: string;
 			readonly model_name: string;
 			readonly override_setup_timeout_sec: 900;
-			readonly max_timeout_sec: 5400;
+			readonly max_timeout_sec: number;
 			readonly kwargs: {
 				readonly runtime_dir: string;
 				readonly reasoning_effort: string;
@@ -175,6 +185,11 @@ export interface DeepSwePierJobConfig {
 				readonly event_stream_mode: typeof DEEP_SWE_EVENT_STREAM_MODE;
 				readonly run_budget_enabled: boolean;
 				readonly max_turns?: number;
+				readonly run_control_work_sec: number;
+				readonly run_control_grace_sec: number;
+				readonly run_control_stationary_turns: number;
+				readonly adapter_finalize_margin_sec: number;
+				readonly pier_hard_timeout_sec: number;
 				readonly allow_all_commands: boolean;
 				readonly harness_revision: string;
 			};
@@ -212,6 +227,13 @@ export interface DeepSweRunLock {
 		};
 		readonly runBudgetEnabled: boolean;
 		readonly maxTurns?: number;
+		readonly runControl: {
+			readonly workSec: number;
+			readonly graceSec: number;
+			readonly maxStationaryTurns: number;
+			readonly adapterFinalizeMarginSec: number;
+			readonly pierHardTimeoutSec: number;
+		};
 		readonly allowAllCommands: boolean;
 	};
 	readonly execution: {
@@ -226,6 +248,28 @@ export interface DeepSweRunLock {
 function positiveInteger(value: number, name: string): number {
 	if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
 	return value;
+}
+
+export interface DeepSweRunControlEnvelope {
+	readonly workSec: number;
+	readonly graceSec: number;
+	readonly adapterFinalizeMarginSec: number;
+	readonly pierHardTimeoutSec: number;
+}
+
+export function validateDeepSweRunControlEnvelope(
+	input: DeepSweRunControlEnvelope,
+): Readonly<DeepSweRunControlEnvelope> {
+	const envelope = Object.freeze({
+		workSec: positiveInteger(input.workSec, "runControlWorkSec"),
+		graceSec: positiveInteger(input.graceSec, "runControlGraceSec"),
+		adapterFinalizeMarginSec: positiveInteger(input.adapterFinalizeMarginSec, "adapterFinalizeMarginSec"),
+		pierHardTimeoutSec: positiveInteger(input.pierHardTimeoutSec, "pierHardTimeoutSec"),
+	});
+	if (envelope.workSec + envelope.graceSec + envelope.adapterFinalizeMarginSec >= envelope.pierHardTimeoutSec) {
+		throw new Error("RunControl requires workSec + graceSec + adapterFinalizeMarginSec < pierHardTimeoutSec");
+	}
+	return envelope;
 }
 
 function absolutePath(value: string, name: string): string {
@@ -269,6 +313,16 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 	const maxTurns = runBudgetEnabled
 		? positiveInteger(options.maxTurns ?? DEEP_SWE_DEFAULT_MAX_TURNS, "maxTurns")
 		: undefined;
+	const runControl = validateDeepSweRunControlEnvelope({
+		workSec: options.runControlWorkSec ?? DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+		graceSec: options.runControlGraceSec ?? DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+		adapterFinalizeMarginSec: options.adapterFinalizeMarginSec ?? DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
+		pierHardTimeoutSec: options.pierHardTimeoutSec ?? DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
+	});
+	const runControlStationaryTurns = positiveInteger(
+		options.runControlStationaryTurns ?? DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS,
+		"runControlStationaryTurns",
+	);
 	if (!model.includes("/")) throw new Error("model must use provider/model form");
 	if (!reasoningEffort.trim()) throw new Error("reasoningEffort must not be empty");
 
@@ -292,7 +346,7 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 				import_path: options.adapterImportPath ?? "coda_agent:CodaAgent",
 				model_name: model,
 				override_setup_timeout_sec: 900,
-				max_timeout_sec: 5400,
+				max_timeout_sec: runControl.pierHardTimeoutSec,
 				kwargs: {
 					runtime_dir: absolutePath(options.runtimeDir, "runtimeDir"),
 					reasoning_effort: reasoningEffort,
@@ -300,6 +354,11 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 					event_stream_mode: DEEP_SWE_EVENT_STREAM_MODE,
 					run_budget_enabled: runBudgetEnabled,
 					...(maxTurns !== undefined ? { max_turns: maxTurns } : {}),
+					run_control_work_sec: runControl.workSec,
+					run_control_grace_sec: runControl.graceSec,
+					run_control_stationary_turns: runControlStationaryTurns,
+					adapter_finalize_margin_sec: runControl.adapterFinalizeMarginSec,
+					pier_hard_timeout_sec: runControl.pierHardTimeoutSec,
 					allow_all_commands: options.allowAllCommands ?? false,
 					harness_revision: revision,
 				},
@@ -339,6 +398,13 @@ export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRun
 			},
 			runBudgetEnabled: config.agents[0].kwargs.run_budget_enabled,
 			...(config.agents[0].kwargs.max_turns !== undefined ? { maxTurns: config.agents[0].kwargs.max_turns } : {}),
+			runControl: {
+				workSec: config.agents[0].kwargs.run_control_work_sec,
+				graceSec: config.agents[0].kwargs.run_control_grace_sec,
+				maxStationaryTurns: config.agents[0].kwargs.run_control_stationary_turns,
+				adapterFinalizeMarginSec: config.agents[0].kwargs.adapter_finalize_margin_sec,
+				pierHardTimeoutSec: config.agents[0].kwargs.pier_hard_timeout_sec,
+			},
 			allowAllCommands: config.agents[0].kwargs.allow_all_commands,
 		},
 		execution: {

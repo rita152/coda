@@ -1,6 +1,8 @@
 import type { ToolObservation } from "@coda/ai";
+import type { RunControlReport } from "../run-control/types.ts";
 
 export const RUN_EVIDENCE_SCHEMA_VERSION = 3 as const;
+export const RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION = 4 as const;
 export const RUN_EVIDENCE_TOOL_FACTS_VERSION = 1 as const;
 
 export type RunEvidenceOutcome = "success" | "error" | "aborted" | "interrupted";
@@ -245,4 +247,13 @@ export interface RunEvidenceEnvelope {
 		readonly openFailures: number;
 		readonly unresolvedFailures: number;
 	};
+}
+
+/**
+ * Controlled JSONL projection. Unconfigured Runs retain the v3 envelope while
+ * configured Runs advance to v4 and add orthogonal RunControl lifecycle facts.
+ */
+export interface RunEvidenceWithRunControlEnvelope extends Omit<RunEvidenceEnvelope, "schemaVersion"> {
+	readonly schemaVersion: typeof RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION;
+	readonly runControl: RunControlReport;
 }

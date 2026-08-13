@@ -7,10 +7,15 @@ import {
 	compareDeepSweRounds,
 	createDeepSwePierJobConfig,
 	createDeepSweRunLock,
+	DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
 	DEEP_SWE_DEFAULT_MAX_OUTPUT_TOKENS,
 	DEEP_SWE_DEFAULT_MAX_TURNS,
 	DEEP_SWE_DEFAULT_MODEL,
 	DEEP_SWE_DEFAULT_REASONING,
+	DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+	DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS,
+	DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+	DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
 	type DeepSwePierJobOptions,
 	type DeepSweRoundReport,
 	formatDeepSweImageLockTsv,
@@ -41,6 +46,11 @@ interface ParsedArguments {
 	readonly maxOutputTokens: number;
 	readonly maxTurns: number;
 	readonly disableRunBudget: boolean;
+	readonly runControlWorkSec: number;
+	readonly runControlGraceSec: number;
+	readonly runControlStationaryTurns: number;
+	readonly adapterFinalizeMarginSec: number;
+	readonly pierHardTimeoutSec: number;
 	readonly allowAllCommands: boolean;
 	readonly adapterDir?: string;
 	readonly pierCommand: string;
@@ -70,7 +80,14 @@ Run/config options:
   --reasoning <level>                 Default: ${DEEP_SWE_DEFAULT_REASONING}
   --max-output-tokens <positive-int>  Default: ${DEEP_SWE_DEFAULT_MAX_OUTPUT_TOKENS}
   --max-turns <positive-int>          Default: ${DEEP_SWE_DEFAULT_MAX_TURNS}
-  --no-run-budget                     Disable all Coda Run limits
+	--no-run-budget                     Disable economic Coda RunBudget limits
+  --run-control-work-sec <positive-int>
+                                      Default: ${DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC}
+  --run-control-grace-sec <positive-int>
+                                      Default: ${DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC}
+  --run-control-stationary-turns <n>  Default: ${DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS}
+  --adapter-finalize-margin-sec <n>   Default: ${DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC}
+  --pier-hard-timeout-sec <n>         Default: ${DEEP_SWE_PIER_HARD_TIMEOUT_SEC}
   --allow-all-commands                Bypass Coda command classification and the outer Sandbox
   --adapter-dir <absolute-path>       Directory containing coda_agent.py (run only)
   --pier-command <path-or-name>       Default: pier
@@ -113,6 +130,11 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 	let maxTurns = DEEP_SWE_DEFAULT_MAX_TURNS;
 	let maxTurnsExplicit = false;
 	let disableRunBudget = false;
+	let runControlWorkSec = DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC;
+	let runControlGraceSec = DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC;
+	let runControlStationaryTurns = DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS;
+	let adapterFinalizeMarginSec = DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC;
+	let pierHardTimeoutSec = DEEP_SWE_PIER_HARD_TIMEOUT_SEC;
 	let allowAllCommands = false;
 	let adapterDir: string | undefined;
 	let pierCommand = "pier";
@@ -145,6 +167,16 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 			maxTurns = parsePositiveInteger(arguments_[++index], argument);
 			maxTurnsExplicit = true;
 		} else if (argument === "--no-run-budget") disableRunBudget = true;
+		else if (argument === "--run-control-work-sec")
+			runControlWorkSec = parsePositiveInteger(arguments_[++index], argument);
+		else if (argument === "--run-control-grace-sec")
+			runControlGraceSec = parsePositiveInteger(arguments_[++index], argument);
+		else if (argument === "--run-control-stationary-turns")
+			runControlStationaryTurns = parsePositiveInteger(arguments_[++index], argument);
+		else if (argument === "--adapter-finalize-margin-sec")
+			adapterFinalizeMarginSec = parsePositiveInteger(arguments_[++index], argument);
+		else if (argument === "--pier-hard-timeout-sec")
+			pierHardTimeoutSec = parsePositiveInteger(arguments_[++index], argument);
 		else if (argument === "--allow-all-commands") allowAllCommands = true;
 		else if (argument === "--adapter-dir") adapterDir = valueAfter(index++, argument);
 		else if (argument === "--pier-command") pierCommand = valueAfter(index++, argument);
@@ -173,6 +205,11 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 		maxOutputTokens,
 		maxTurns,
 		disableRunBudget,
+		runControlWorkSec,
+		runControlGraceSec,
+		runControlStationaryTurns,
+		adapterFinalizeMarginSec,
+		pierHardTimeoutSec,
 		allowAllCommands,
 		...(adapterDir ? { adapterDir } : {}),
 		pierCommand,
@@ -203,6 +240,11 @@ function jobOptions(arguments_: ParsedArguments): DeepSwePierJobOptions {
 		maxOutputTokens: arguments_.maxOutputTokens,
 		maxTurns: arguments_.maxTurns,
 		disableRunBudget: arguments_.disableRunBudget,
+		runControlWorkSec: arguments_.runControlWorkSec,
+		runControlGraceSec: arguments_.runControlGraceSec,
+		runControlStationaryTurns: arguments_.runControlStationaryTurns,
+		adapterFinalizeMarginSec: arguments_.adapterFinalizeMarginSec,
+		pierHardTimeoutSec: arguments_.pierHardTimeoutSec,
 		allowAllCommands: arguments_.allowAllCommands,
 		quiet: arguments_.quiet,
 	};

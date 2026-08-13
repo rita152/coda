@@ -6,12 +6,17 @@ import {
 	createDeepSwePierJobConfig,
 	createDeepSweRunLock,
 	DEEP_SWE_DATASET_REVISION,
+	DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
+	DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+	DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
 	DEEP_SWE_FIRST_20_IMAGE_LOCKS,
 	DEEP_SWE_FIRST_20_TASK_IDS,
+	DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
 	formatDeepSweImageLockTsv,
 	readDeepSweEvaluationReport,
 	reduceDeepSweJsonlLines,
 	summarizeDeepSweJobResult,
+	validateDeepSweRunControlEnvelope,
 } from "../src/index.ts";
 
 const OPTIONS = {
@@ -46,6 +51,10 @@ describe("DeepSWE evaluation runner", () => {
 		expect(adapter.indexOf("config user.email coda-evals@localhost", userEmail + 1)).toBe(-1);
 		expect(adapter).toContain('event_stream_mode: str = "semantic"');
 		expect(adapter).toContain("--json-mode {shlex.quote(self._event_stream_mode)}");
+		expect(adapter).toContain("--run-control-work-ms {self._run_control_work_sec * 1000}");
+		expect(adapter).toContain("--run-control-grace-ms {self._run_control_grace_sec * 1000}");
+		expect(adapter).toContain("artifacts.finalize(");
+		expect(adapter).not.toContain("def _write_trajectory(");
 	});
 
 	it("pins the current v1.1 dataset and selects the first 20 tasks explicitly", () => {
@@ -73,10 +82,16 @@ describe("DeepSWE evaluation runner", () => {
 				max_output_tokens: 32_768,
 				event_stream_mode: "semantic",
 				max_turns: 96,
+				run_control_work_sec: DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+				run_control_grace_sec: DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+				run_control_stationary_turns: 4,
+				adapter_finalize_margin_sec: DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
+				pier_hard_timeout_sec: DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
 				allow_all_commands: true,
 			},
 			env: { OPENCODE_API_KEY: `$${"{OPENCODE_API_KEY}"}`, NODE_USE_ENV_PROXY: "1" },
 		});
+		expect(config.agents[0].max_timeout_sec).toBe(DEEP_SWE_PIER_HARD_TIMEOUT_SEC);
 		expect(config.datasets[0]).toEqual({ path: OPTIONS.datasetDir, task_names: ["abs-stepped-slices"] });
 		expect(JSON.stringify(config)).not.toContain("sk-");
 	});
@@ -89,6 +104,13 @@ describe("DeepSWE evaluation runner", () => {
 		expect(lock.harness.eventStream).toEqual({ mode: "semantic", schemaVersion: 1 });
 		expect(lock.harness.maxTurns).toBe(96);
 		expect(lock.harness.allowAllCommands).toBe(true);
+		expect(lock.harness.runControl).toEqual({
+			workSec: DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+			graceSec: DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+			maxStationaryTurns: 4,
+			adapterFinalizeMarginSec: DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
+			pierHardTimeoutSec: DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
+		});
 		expect(lock.execution).toMatchObject({ round: 4, concurrency: 5, providerAllowlist: ["opencode.ai"] });
 		expect(lock.execution.taskIds).toEqual(DEEP_SWE_FIRST_20_TASK_IDS);
 		expect(lock.images).toHaveLength(20);
@@ -107,6 +129,8 @@ describe("DeepSWE evaluation runner", () => {
 		expect(config.agents[0].kwargs).toMatchObject({
 			max_output_tokens: 384_000,
 			run_budget_enabled: false,
+			run_control_work_sec: DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+			run_control_grace_sec: DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
 		});
 		expect(config.agents[0].kwargs).not.toHaveProperty("max_turns");
 		expect(lock.harness).toMatchObject({
@@ -123,6 +147,31 @@ describe("DeepSWE evaluation runner", () => {
 			createDeepSwePierJobConfig({ ...OPTIONS, taskIds: ["abs-stepped-slices", "abs-stepped-slices"] }),
 		).toThrow("unique");
 		expect(() => createDeepSwePierJobConfig({ ...OPTIONS, jobsDir: "jobs" })).toThrow("absolute");
+	});
+
+	it("requires work + grace + adapter finalize margin to remain below Pier's hard timeout", () => {
+		expect(
+			validateDeepSweRunControlEnvelope({
+				workSec: DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
+				graceSec: DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
+				adapterFinalizeMarginSec: DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
+				pierHardTimeoutSec: DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
+			}),
+		).toEqual({
+			workSec: 4_500,
+			graceSec: 600,
+			adapterFinalizeMarginSec: 240,
+			pierHardTimeoutSec: 5_400,
+		});
+		expect(() =>
+			createDeepSwePierJobConfig({
+				...OPTIONS,
+				runControlWorkSec: 4_500,
+				runControlGraceSec: 600,
+				adapterFinalizeMarginSec: 300,
+				pierHardTimeoutSec: 5_400,
+			}),
+		).toThrow("workSec + graceSec + adapterFinalizeMarginSec < pierHardTimeoutSec");
 	});
 
 	it("fails closed before paid requests unless all three opt-ins are present", () => {

@@ -11,6 +11,7 @@ import {
 	fauxProvider,
 	fauxToolCall,
 } from "@coda/ai";
+import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication, type SettingsStore } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
@@ -28,6 +29,20 @@ class BufferOutput implements ApplicationOutput {
 
 	write(chunk: string): void {
 		this.value += chunk;
+	}
+}
+
+class RecordingScheduler implements Scheduler {
+	readonly tasks: Array<{ cancelled: boolean; readonly delayMs: number }> = [];
+
+	schedule(delayMs: number, _run: () => void | Promise<void>): ScheduledTask {
+		const task = { cancelled: false, delayMs };
+		this.tasks.push(task);
+		return {
+			cancel: () => {
+				task.cancelled = true;
+			},
+		};
 	}
 }
 
@@ -293,6 +308,84 @@ describe("Coding Agent print mode", () => {
 		expect(observedMaxTokens).toBe(384_000);
 		expect(JSON.parse(stdout.value.split("\n")[0]!)).toMatchObject({ type: "run_start" });
 		expect(JSON.parse(stdout.value.split("\n")[0]!)).not.toHaveProperty("budget");
+		expect(stderr.value).toBe("");
+	});
+
+	it("keeps configured RunControl active with --no-run-budget and exposes terminal status in JSON and evidence", async () => {
+		const runtime = testTimeRuntime(127);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([fauxAssistantMessage("controlled output", { timestamp: 127 })]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const scheduler = new RecordingScheduler();
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings,
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler,
+			},
+		});
+
+		await expect(
+			application.run([
+				"--print",
+				"--json",
+				"--no-run-budget",
+				"--run-control-work-ms",
+				"1000",
+				"--run-control-grace-ms",
+				"200",
+				"--run-control-stationary-turns",
+				"4",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"solve the task",
+			]),
+		).resolves.toBe(0);
+		const events = stdout.value
+			.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(events[0]).toMatchObject({
+			schemaVersion: 3,
+			type: "run_start",
+			runControl: {
+				schemaVersion: 1,
+				phase: "running",
+				configured: { workDurationMs: 1_000, graceDurationMs: 200, maxStationaryTurns: 4 },
+			},
+		});
+		expect(events[0]).not.toHaveProperty("budget");
+		expect(events.at(-3)).toMatchObject({
+			schemaVersion: 3,
+			type: "run_end",
+			outcome: "success",
+			runControl: { phase: "terminal", reason: "run_ended", trigger: null },
+		});
+		expect(events.at(-2)).toMatchObject({
+			schemaVersion: 4,
+			type: "run_evidence",
+			outcome: "success",
+			runControl: { phase: "terminal", reason: "run_ended", trigger: null },
+		});
+		expect(events.at(-1)).toMatchObject({
+			schemaVersion: 1,
+			type: "completion_disposition",
+			disposition: "verified",
+		});
+		expect(scheduler.tasks).toEqual([{ delayMs: 1_000, cancelled: true }]);
 		expect(stderr.value).toBe("");
 	});
 

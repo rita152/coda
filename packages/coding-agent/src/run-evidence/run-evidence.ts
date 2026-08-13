@@ -1,11 +1,13 @@
 import type { AgentEvent, ToolInvocation } from "@coda/agent";
 import { resolveToolObservation, type ToolObservation, type ToolResultMessage, type Usage } from "@coda/ai";
+import type { RunControlReport } from "../run-control/types.ts";
 import {
 	type MutationFacts,
 	mutationFactsFromObservation,
 	mutationRequestMetadata,
 } from "../tools/mutation-contract.ts";
 import {
+	RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION,
 	RUN_EVIDENCE_SCHEMA_VERSION,
 	type RunEvidenceChangedPath,
 	type RunEvidenceChangedPathProvenance,
@@ -25,6 +27,7 @@ import {
 	type RunEvidenceToolIssueV1,
 	type RunEvidenceUsage,
 	type RunEvidenceV1Projection,
+	type RunEvidenceWithRunControlEnvelope,
 	type RunEvidenceWorkspaceDiffSupplement,
 } from "./contracts.ts";
 import {
@@ -799,6 +802,18 @@ export function supplementRunEvidenceWorkspaceDiff(
 				changed: nativeOmitted + workspaceOmitted,
 			},
 		},
+	});
+}
+
+/** Adds RunControl to JSON output without changing persisted Session evidence. */
+export function withRunControlEvidence(
+	evidence: RunEvidenceEnvelope,
+	runControl: RunControlReport,
+): RunEvidenceWithRunControlEnvelope {
+	return deepFreeze({
+		...evidence,
+		schemaVersion: RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION,
+		runControl,
 	});
 }
 

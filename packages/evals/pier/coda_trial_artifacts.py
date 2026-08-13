@@ -22,7 +22,7 @@ from typing import Any, Callable, Protocol
 
 from coda_trajectory import TrajectoryArtifactSummary, write_coda_trajectory
 
-STATUS_SCHEMA_VERSION = "coda-adapter-status-v2"
+STATUS_SCHEMA_VERSION = "coda-adapter-status-v3"
 EVIDENCE_SCHEMA_VERSION = "coda-artifact-evidence-v1"
 FINALIZE_MARKER = "CODA_FINALIZE_V1"
 TRANSIENT_EVENT_TYPES = {
@@ -141,6 +141,11 @@ class CodaTrialArtifacts:
         max_turns: int,
         allow_all_commands: bool,
         event_stream_mode: str = "semantic",
+        run_control_work_sec: int | None = None,
+        run_control_grace_sec: int | None = None,
+        run_control_stationary_turns: int | None = None,
+        adapter_finalize_margin_sec: int | None = None,
+        pier_hard_timeout_sec: int | None = None,
         workspace_dir: str = "/app",
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -154,6 +159,11 @@ class CodaTrialArtifacts:
         self.max_turns = max_turns
         self.allow_all_commands = allow_all_commands
         self.event_stream_mode = event_stream_mode
+        self.run_control_work_sec = run_control_work_sec
+        self.run_control_grace_sec = run_control_grace_sec
+        self.run_control_stationary_turns = run_control_stationary_turns
+        self.adapter_finalize_margin_sec = adapter_finalize_margin_sec
+        self.pier_hard_timeout_sec = pier_hard_timeout_sec
         self.workspace_dir = workspace_dir
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -190,6 +200,7 @@ class CodaTrialArtifacts:
                 "error_type": None,
                 "error": None,
             },
+            "run_control": None,
             "workspace": {
                 "initial_head": None,
                 "current_head": None,
@@ -324,6 +335,7 @@ class CodaTrialArtifacts:
             deadline=max(time.monotonic(), deadline - min(0.25, timeout_sec * 0.1)),
         )
         usage = recover_usage(event_log)
+        run_control = _run_control_report(event_log.events)
         artifact_paths = {
             "events": "coda.jsonl",
             "trajectory": None,
@@ -357,6 +369,7 @@ class CodaTrialArtifacts:
             artifact_paths["model_patch"] = "artifacts/model.patch"
 
         status = self._require_status()
+        status["run_control"] = run_control
         if workspace is not None:
             status["commit_exit_code"] = workspace.commit_exit_code
             status["committed"] = workspace.committed
@@ -520,6 +533,12 @@ exit 0
                 "max_turns": self.max_turns if self.run_budget_enabled else None,
                 "allow_all_commands": self.allow_all_commands,
                 "event_stream_mode": self.event_stream_mode,
+                "run_control_work_sec": self.run_control_work_sec,
+                "run_control_grace_sec": self.run_control_grace_sec,
+                "run_control_stationary_turns": self.run_control_stationary_turns,
+                "adapter_finalize_margin_sec": self.adapter_finalize_margin_sec,
+                "pier_hard_timeout_sec": self.pier_hard_timeout_sec,
+                "run_control": _run_control_report(event_log.events),
                 "artifact_status": event_log.status,
                 "run_end_present": event_log.run_end_present,
                 "event_scan_complete": event_log.scan_complete,
@@ -815,7 +834,18 @@ def populate_context(
         "priced_attempt_count": usage.priced_attempts,
         "unpriced_attempt_count": usage.unpriced_attempts,
         "known_cost_usd": usage.known_cost_usd,
+        "run_control": _run_control_report(event_log.events),
     }
+
+
+def _run_control_report(events: tuple[dict[str, Any], ...]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event.get("type") not in {"run_evidence", "run_end"}:
+            continue
+        run_control = event.get("runControl")
+        if isinstance(run_control, dict):
+            return dict(run_control)
+    return None
 
 
 def classify_run_exception(error: BaseException) -> str:
