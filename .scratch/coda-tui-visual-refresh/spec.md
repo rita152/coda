@@ -22,7 +22,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 
 ### SemanticTimeline
 
-`@coda/coding-agent` owns Message, Thinking Block, Tool Invocation, approval, and Attachment presentation policy. One reducer hydrates a Session semantic history snapshot and consumes live Agent events. Stable Tool identity is `invocation.id`; display order is Turn plus `sourceIndex`, never completion order.
+`@coda/coding-agent` owns Message, Thinking Block, Tool Invocation, MCP Elicitation, and Attachment presentation policy. One reducer hydrates a Session semantic history snapshot and consumes live Agent events. Stable Tool identity is `invocation.id`; display order is Turn plus `sourceIndex`, never completion order.
 
 ### MediaLibrary and TerminalImageSurface
 
@@ -45,7 +45,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 - PageUp/PageDown page the viewport; Ctrl+PageUp/Ctrl+PageDown move through the Editor; the terminal mouse wheel scrolls by physical rows; Ctrl+Home/Ctrl+End jump to the ends. Submitting a prompt returns to tail-follow.
 - Ctrl+T toggles Transcript View. Escape returns from Transcript View before it can exit the main screen.
 - Running Ctrl+C aborts; idle Escape is ignored and two idle Ctrl+C presses within 500ms exit.
-- Command Approval uses the full-width bottom Approval Bar specified by `.scratch/coda-approval-bar/spec.md`; later Approval Request kinds may retain bounded overlays until migrated.
+- MCP Elicitation uses a bounded input overlay owned by the active Session.
 - Mouse support is limited to Timeline wheel navigation and image-label button/hover events; keyboard access is complete and native terminal selection remains available through the terminal's modifier behavior.
 
 ## Messages and Markdown
@@ -74,8 +74,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 - Main Timeline Tool geometry is behaviorally aligned with OpenAI Codex commit `f93109615ff27ab58007601434b27c940d5500c7`; Coda retains its own semantic lifecycle and does not port Codex's scrollback architecture.
 - Main Timeline uses a borderless tree with a state bullet, bold action word, dim gutter and result text, and code-styled command text. Transcript View retains its existing success/failure glyphs and detail layout.
 - Action language is Reading/Read, Searching/Searched, Editing/Edited, Writing/Wrote, Running/Ran, and Exploring/Explored.
-- States are awaiting approval, running, success, failed, denied, aborted, skipped, and interrupted. Interrupted states state that side effects are unknown.
-- Approval state is supplied by the interactive Policy Gate composition; it is not persisted as an Agent event.
+- States are awaiting input, running, success, failed, aborted, skipped, and interrupted. Interrupted states state that side effects are unknown.
 - One or more consecutive read, grep, find, and ls invocations in one Turn form an Exploring/Explored group without losing child identity, order, concurrency, or error state. The group uses one dim branch followed by aligned Read, List, and Search actions.
 - Preview output is at most five display rows, preserving head and tail with an omitted-row marker and the Codex-aligned `ctrl + t to view transcript` hint. Transcript View shows the complete normalized model-visible result, not raw Provider payloads or hidden overflow data.
 - Tool text is stripped of ANSI, OSC, C0, and C1 controls before presentation.
@@ -85,7 +84,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 
 ## Theme and motion
 
-- The default terminal background/foreground remain the unknown-appearance fallback. `ui.colorScheme` and `--color-scheme` resolve `auto | light | dark`, and semantic Theme tokens include appearance-aware surfaces as specified by `.scratch/coda-approval-bar/spec.md`.
+- The default terminal background/foreground remain the unknown-appearance fallback. `ui.colorScheme` and `--color-scheme` resolve `auto | light | dark`, and semantic Theme tokens include appearance-aware surfaces for input overlays.
 - Running uses accent motion, success green, execution failure red, and denied/aborted/skipped warning yellow. Text and glyphs retain meaning without color.
 - True-color terminals use bullet shimmer; lower color levels use a bullet pulse. `ui.motion` is `full | reduced`, and `--no-animations` overrides it.
 - Coda ships one semantic Theme with light, dark, and unknown-appearance mappings; user-authored custom Themes remain deferred.
@@ -126,7 +125,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 - Every interaction is keyboard-operable. Image clicking is an enhancement, not the only path.
 - NO_COLOR emits no SGR. Reduced motion starts no periodic animation tasks.
 - Model, Tool, Markdown, filename, command, and media metadata text is sanitized before terminal rendering.
-- Main Timeline uses requested workspace-relative paths; canonical paths remain limited to approval and diagnostic contexts.
+- Main Timeline uses requested workspace-relative paths; canonical paths remain limited to diagnostic contexts.
 
 ## Performance contract
 

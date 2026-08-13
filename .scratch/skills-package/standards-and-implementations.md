@@ -70,6 +70,6 @@ Specification **不规定 skill roots**，只规定目录内部。官方客户�
 | Limits | 规范给出正文 token/行数建议；指南给出扫描 depth/dir bounds 和大目录资源列表 cap 的建议。 | 文件字节、目录数、条目数、深度、并发和资源枚举上限均须由客户端定值。 |
 | Symlinks | 规范和指南均未规定 follow/ignore、循环检测或 root containment。 | 必须由客户端显式选择并测试；不能声称某种 symlink 行为是标准要求。 |
 | Activation | 规范只规定 progressive disclosure 时机；指南描述 model-driven file read、dedicated tool 和用户显式激活，具体语法由客户端决定。 | catalog、触发、注入包装、去重和 compaction 生命周期属于客户端。 |
-| Security | 指南建议对项目 skill 做 trust check；dedicated activation tool 可执行权限/同意检查，并建议在已有文件权限系统时 allowlist skill 目录。`allowed-tools` 仍只是实验字段。 | 这些来源没有定义完整通用的 sandbox 或执行授权模型；信任、权限、路径约束及资源/脚本执行政策必须由客户端补齐。 |
+| Security | 指南建议对项目 skill 做 trust check；dedicated activation tool 可执行客户端自定义检查。`allowed-tools` 仍只是实验字段。 | 这些来源不定义 Tool 执行行为；客户端必须自行决定信任、路径约束及资源/脚本处理方式。 |
 
-客户端还应区分两条路径：兼容加载器按指南尽量读取并输出诊断；独立严格 validator 执行六字段、名称和目录一致性等规范约束。来源：[official client implementation guide — trust, activation, resources, permissions, and context lifecycle](https://agentskills.io/client-implementation/adding-skills-support)、[specification — validation and experimental `allowed-tools`](https://agentskills.io/specification)
+客户端还应区分两条路径：兼容加载器按指南尽量读取并输出诊断；独立严格 validator 执行六字段、名称和目录一致性等规范约束。来源：[official client implementation guide — trust, activation, resources, and context lifecycle](https://agentskills.io/client-implementation/adding-skills-support)、[specification — validation and experimental `allowed-tools`](https://agentskills.io/specification)

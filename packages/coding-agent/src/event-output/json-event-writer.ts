@@ -18,10 +18,6 @@ export interface JsonRunStartMetadata {
 		readonly version: string;
 		readonly sha256: string;
 	};
-	readonly permissions: {
-		readonly profile: string;
-		readonly approvalPolicy: string;
-	};
 }
 
 export interface JsonAgentEventControlMetadata {

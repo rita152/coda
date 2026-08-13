@@ -21,7 +21,7 @@ const MAIN_PREVIEW_ROWS = 5;
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 // Main-Timeline geometry follows OpenAI Codex f93109615ff2. Coda retains its own Tool lifecycle,
-// approval, ordering, and Transcript View semantics rather than translating Codex's scrollback cells.
+// ordering, and Transcript View semantics rather than translating Codex's scrollback cells.
 
 export function isExplorationTool(entry: TimelineToolEntry): boolean {
 	return EXPLORATION_TOOLS.has(entry.invocation.toolName);
@@ -32,7 +32,7 @@ export function renderExplorationGroup(
 	options: ToolRenderOptions,
 ): readonly string[] {
 	if (entries.length === 0) return [];
-	const active = entries.some((entry) => entry.state === "running" || entry.state === "awaiting_approval");
+	const active = entries.some((entry) => entry.state === "running");
 	const failed = entries.some((entry) => entry.state !== "running" && entry.state !== "success");
 	const glyph = active ? styledStatusGlyph("running", options) : options.theme.style(failed ? "error" : "muted", "•");
 	const title = options.theme.style("strong", active ? "Exploring" : "Explored");
@@ -65,13 +65,7 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 	const detailWidth = Math.max(1, options.width - 4);
 	let details = renderDetails(entry, detailWidth, options);
 	if (!options.transcript) {
-		if (
-			details.length === 0 &&
-			entry.invocation.toolName === "bash" &&
-			entry.result &&
-			entry.state !== "running" &&
-			entry.state !== "awaiting_approval"
-		) {
+		if (details.length === 0 && entry.invocation.toolName === "bash" && entry.result && entry.state !== "running") {
 			details = ["(no output)"];
 		}
 		details = truncatePreview(details, detailWidth);
@@ -99,16 +93,12 @@ function styledStatusTitle(entry: TimelineToolEntry, theme: TuiTheme): string {
 		return `${theme.style("strong", parts.verb)}${subject ? ` ${subject}` : ""}`;
 	};
 	switch (entry.state) {
-		case "awaiting_approval":
-			return `${theme.style("strong", "Awaiting approval")} — ${action(present)}`;
 		case "running":
 			return action(present);
 		case "success":
 			return action(past);
 		case "failed":
 			return `${action(past)} ${theme.style("error", "— failed")}`;
-		case "denied":
-			return `${theme.style("strong", "Denied")} — ${action(present)}`;
 		case "aborted":
 			return `${theme.style("strong", "Aborted")} — ${action(present)}`;
 		case "skipped":
@@ -204,16 +194,12 @@ function statusTitle(entry: TimelineToolEntry): string {
 	const present = toolActionTitle(entry.invocation, false);
 	const past = toolActionTitle(entry.invocation, true);
 	switch (entry.state) {
-		case "awaiting_approval":
-			return `Awaiting approval — ${present}`;
 		case "running":
 			return present;
 		case "success":
 			return past;
 		case "failed":
 			return `${past} — failed`;
-		case "denied":
-			return `Denied — ${present}`;
 		case "aborted":
 			return `Aborted — ${present}`;
 		case "skipped":
@@ -256,10 +242,9 @@ export function toolActionTitle(invocation: ToolActionInvocation, completed = fa
 
 function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRenderOptions): string[] {
 	const details = record(entry.result?.message.details);
-	const approval = approvalDetails(entry, width);
 	const progress = progressDetails(entry, width);
 	if (entry.invocation.toolName === "edit") {
-		return [...approval, ...progress, ...renderDiff(entry, width, options.theme)];
+		return [...progress, ...renderDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "patch") {
 		const committed = details ? arrayField(details, "committedPaths").length : 0;
@@ -271,7 +256,7 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 						width,
 					)
 				: [];
-		return [...approval, ...progress, ...application, ...renderPatchDiff(entry, width, options.theme)];
+		return [...progress, ...application, ...renderPatchDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "read" && !options.transcript && details) {
 		const start = numberField(details, "startLine");
@@ -279,7 +264,7 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		const total = numberField(details, "totalLines");
 		if (start !== undefined && end !== undefined && total !== undefined) {
 			const truncated = details.truncated === true ? " • truncated" : "";
-			return [...approval, ...progress, ...wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width)];
+			return [...progress, ...wrapDetail(`${start}–${end} of ${total} lines${truncated}`, width)];
 		}
 	}
 	if (entry.invocation.toolName === "write" && details) {
@@ -287,18 +272,13 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 		const bytes = numberField(details, "bytes");
 		if (operation || bytes !== undefined) {
 			return [
-				...approval,
 				...progress,
 				...wrapDetail(`${operation ?? "write"}${bytes === undefined ? "" : ` • ${bytes} bytes`}`, width),
 			];
 		}
 	}
 
-	const lines = [
-		...approval,
-		...progress,
-		...normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false),
-	];
+	const lines = [...progress, ...normalizedResultLines(entry, width, options.toolResultImagesSupported ?? false)];
 	if (entry.invocation.toolName === "bash" && details) {
 		const metadata = bashMetadata(details);
 		for (const value of metadata) lines.push(...wrapDetail(value, width));
@@ -337,40 +317,6 @@ function progressDetails(entry: TimelineToolEntry, width: number): string[] {
 	}
 	const summary = [message, measurement].filter(Boolean).join(" • ");
 	return summary ? wrapDetail(`Progress: ${summary}`, width) : [];
-}
-
-function approvalDetails(entry: TimelineToolEntry, width: number): string[] {
-	const approval = entry.approval;
-	if (!approval) return [];
-	let label: string;
-	switch (approval.outcome) {
-		case "approved-once":
-			label = "approved once";
-			break;
-		case "approved-for-process":
-			label = `this process${approval.expired ? " • expired" : ""}`;
-			break;
-		case "allowed-by-process":
-			label = `allowed by this process${approval.expired ? " • expired" : ""}`;
-			break;
-		case "denied":
-			label = approval.denial?.type === "feedback" ? "denied with feedback" : "denied";
-			break;
-		case "aborted":
-			label = "aborted";
-			break;
-		case "timed-out":
-			label = "timed out";
-			break;
-		case "persistent-rule":
-			label = "persistent rule";
-			break;
-		case "reviewer-failed":
-			label = "reviewer failed";
-			break;
-	}
-	const prefix = approval.commandPrefix ? ` • prefix ${approval.commandPrefix.join(" ")}` : "";
-	return wrapDetail(`Approval: ${label}${prefix}`, width);
 }
 
 function normalizedResultLines(entry: TimelineToolEntry, width: number, toolResultImagesSupported: boolean): string[] {
@@ -504,7 +450,6 @@ function statusGlyph(state: TimelineToolState, transcript: boolean): string {
 			return "✓";
 		case "failed":
 			return "✗";
-		case "denied":
 		case "aborted":
 		case "skipped":
 		case "interrupted":
@@ -515,10 +460,9 @@ function statusGlyph(state: TimelineToolState, transcript: boolean): string {
 }
 
 function styledStatusGlyph(state: TimelineToolState, options: ToolRenderOptions): string {
-	if (state !== "running" && state !== "awaiting_approval") {
+	if (state !== "running") {
 		return options.theme.style(stateTone(state), statusGlyph(state, options.transcript));
 	}
-	if (state === "awaiting_approval") return options.theme.style("warning", "•");
 	if ((options.motion ?? "reduced") === "reduced") return options.theme.style("muted", "•");
 	if (options.theme.colorLevel === 3) {
 		const phase = Math.floor(options.now / 80) % 8;
@@ -535,7 +479,6 @@ function stateTone(state: TimelineToolState): ThemeTone {
 			return "success";
 		case "failed":
 			return "error";
-		case "denied":
 		case "aborted":
 		case "skipped":
 		case "interrupted":
@@ -549,8 +492,6 @@ function childStateSuffix(state: TimelineToolState): string {
 	switch (state) {
 		case "failed":
 			return " — failed";
-		case "denied":
-			return " — denied";
 		case "aborted":
 			return " — aborted";
 		case "skipped":

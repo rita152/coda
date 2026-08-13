@@ -97,41 +97,6 @@ describe("runtime activity projection", () => {
 		});
 		projection.setOverride("mcp:tool-read", "", false, 2_275);
 
-		projection.setAwaitingApproval(
-			{
-				kind: "command",
-				runId: "run" as never,
-				turnId: "turn" as never,
-				invocationId: bash.id,
-				command: "npm test",
-				cwd: "/workspace",
-				reason: "requires approval",
-			},
-			2_300,
-		);
-		expect(projection.status(2_300)).toMatchObject({
-			text: "Waiting for approval — Running npm test",
-			motion: "waiting",
-		});
-		projection.setAwaitingApproval(
-			{
-				kind: "filesystem",
-				runId: "run" as never,
-				turnId: "turn" as never,
-				invocationId: read.id,
-				operation: "read",
-				requestedPath: "src/app.ts",
-				cwd: "/workspace",
-				reason: "requires approval",
-			},
-			2_350,
-		);
-		expect(projection.status(2_350)?.text).toBe("Waiting for approval — Running npm test");
-
-		projection.setApprovalResult(bash.id, 2_400);
-		expect(projection.status(2_400)?.text).toBe("Waiting for approval — Reading src/app.ts");
-		projection.setApprovalResult(read.id, 2_450);
-		expect(projection.status(2_450)?.text).toBe("Planning tests");
 		projection.accept(toolEvent("tool_execution_end", read, 2_500));
 		projection.accept(toolEvent("tool_execution_end", bash, 2_600));
 		expect(projection.status(2_600)?.text).toBe("Planning tests");
@@ -241,7 +206,7 @@ describe("runtime activity presentation", () => {
 		const reducedB = renderActivityStatus(active, { width: 40, now: 200, theme: low, motion: "reduced" });
 		expect(reducedA).toBe(reducedB);
 
-		const waiting = { ...active, text: "Waiting for approval", motion: "waiting" as const };
+		const waiting = { ...active, text: "Waiting for input", motion: "waiting" as const };
 		const waitingA = renderActivityStatus(waiting, { width: 40, now: 100, theme: low, motion: "full" });
 		const waitingB = renderActivityStatus(waiting, { width: 40, now: 200, theme: low, motion: "full" });
 		expect(waitingA).toBe(waitingB);

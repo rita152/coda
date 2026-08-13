@@ -4,7 +4,7 @@ Type: task
 Status: resolved
 Blocked by: 03, 04
 
-Build Codex-inspired tree presentation, lifecycle state updates, approval state composition, read-only Exploring groups, dedicated built-in Tool formatters, bounded previews, Transcript View detail, Theme tokens, and activity motion.
+Build Codex-inspired tree presentation, lifecycle state updates, read-only Exploring groups, dedicated built-in Tool formatters, bounded previews, Transcript View detail, Theme tokens, and activity motion.
 
 ## Acceptance
 

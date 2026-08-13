@@ -1,5 +1,4 @@
 import { isAbsolute, normalize, sep, win32 } from "node:path";
-import { PROTECTED_METADATA_NAMES } from "@coda/sandbox";
 
 export const MAX_PATCH_CHARACTERS = 2 * 1024 * 1024;
 export const MAX_PATCH_FILES = 50;
@@ -175,13 +174,6 @@ function validatePatchPath(value: string, line: number): string {
 	const components = value.split(/[\\/]/gu);
 	if (components.some((component) => component === "" || component === "." || component === "..")) {
 		throw new PatchParseError("File path traversal and empty path components are not allowed", line);
-	}
-	if (
-		components.some((component) =>
-			PROTECTED_METADATA_NAMES.some((name) => name.toLowerCase() === component.toLowerCase()),
-		)
-	) {
-		throw new PatchParseError("Protected Workspace metadata cannot be patched", line);
 	}
 	if (normalize(value) !== value) throw new PatchParseError("File path must be lexically normalized", line);
 	return value;

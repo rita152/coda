@@ -12,7 +12,7 @@ import { loadFixtures } from "./fixtures.ts";
 import { FixtureRepository } from "./repository.ts";
 import { scoreFixture } from "./scoring.ts";
 import { DeterministicTimeRuntime } from "./time.ts";
-import { createEvaluationPolicy, createEvaluationTools } from "./tools.ts";
+import { createEvaluationTools } from "./tools.ts";
 import { createModelCallLimitStream, createOfflineModelStream } from "./trajectory.ts";
 import type {
 	EvaluationMode,
@@ -92,7 +92,6 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 	const agent = new Agent({
 		stream: options.stream,
 		tools,
-		policyGate: createEvaluationPolicy(options.fixture.manifest),
 		idGenerator: fixtureIdGenerator(options.fixture),
 		clock: options.clock,
 		systemPrompt: fixtureSystemPrompt(options.fixture),
@@ -151,10 +150,6 @@ function suiteReport(mode: EvaluationMode, fixtures: readonly FixtureEvaluationR
 			turnCount: fixtures.reduce((total, fixture) => total + fixture.metrics.turnCount, 0),
 			toolCount: fixtures.reduce((total, fixture) => total + fixture.metrics.toolCount, 0),
 			repeatedToolBatches: fixtures.reduce((total, fixture) => total + fixture.metrics.repeatedToolBatches, 0),
-			permissionEscalationAttempts: fixtures.reduce(
-				(total, fixture) => total + fixture.metrics.permissionEscalationAttempts,
-				0,
-			),
 			elapsedMs: fixtures.reduce((total, fixture) => total + fixture.metrics.elapsedMs, 0),
 			usage: aggregateUsage(fixtures),
 		},

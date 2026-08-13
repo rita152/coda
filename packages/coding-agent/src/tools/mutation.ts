@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { ResolvedWorkspacePath, Workspace } from "../workspace.ts";
-import type { MutationToolName } from "./mutation-contract.ts";
-import type { AtomicMutationWriter, MutationTargetIdentity } from "./sandboxed-mutation-writer.ts";
+import type { AtomicMutationWriter, MutationTargetIdentity } from "./atomic-mutation-writer.ts";
 
 export class TargetMutationCoordinator {
 	readonly #tails = new Map<string, Promise<unknown>>();
@@ -42,33 +40,26 @@ export async function atomicWrite(
 	initial: ResolvedWorkspacePath,
 	data: Uint8Array,
 	context: ToolExecutionContext,
-	toolName: MutationToolName,
 	writer: AtomicMutationWriter,
 	expectedSha256?: string,
 	expectedIdentity?: MutationTargetIdentity,
 ): Promise<AtomicWriteResult> {
-	if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, toolName, "write")) {
-		throw new Error(`Path access was not granted: ${initial.canonicalPath}`);
-	}
 	const previous = initial.exists ? await fileSystem.stat(initial.canonicalPath) : undefined;
 	if (previous && previous.kind !== "file") throw new Error(`Path is not a file: ${initial.canonicalPath}`);
 	if (expectedIdentity && !identityMatches(previous, expectedIdentity)) {
-		throw new Error("Target identity changed before mutation containment check");
+		throw new Error("Target identity changed before mutation identity check");
 	}
 	context.signal.throwIfAborted();
-	const rechecked = await workspace.resolvePath(initial.requestedPath, "write");
-	if (
-		rechecked.canonicalPath !== initial.canonicalPath ||
-		!hasPermissionedPathAccess(workspace, rechecked, context.invocationId, toolName, "write")
-	) {
-		throw new Error("Target changed during mutation containment check");
+	const rechecked = await workspace.resolvePath(initial.requestedPath);
+	if (rechecked.canonicalPath !== initial.canonicalPath) {
+		throw new Error("Target changed during mutation identity check");
 	}
 	if (!initial.exists && rechecked.exists)
 		throw new Error("Target was created concurrently; refusing to overwrite it");
 	if (expectedSha256 && initial.exists) {
 		const current = await fileSystem.readFile(rechecked.canonicalPath);
 		if (createHash("sha256").update(current).digest("hex") !== expectedSha256) {
-			throw new Error("Target content changed before mutation containment check");
+			throw new Error("Target content changed before mutation identity check");
 		}
 	}
 	return writer.write(
@@ -92,32 +83,24 @@ export async function atomicDelete(
 	fileSystem: FileSystem,
 	initial: ResolvedWorkspacePath,
 	context: ToolExecutionContext,
-	toolName: MutationToolName,
 	writer: AtomicMutationWriter,
 	expectedSha256: string,
 	expectedIdentity?: MutationTargetIdentity,
 ): Promise<AtomicDeleteResult> {
-	if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, toolName, "write")) {
-		throw new Error(`Path access was not granted: ${initial.canonicalPath}`);
-	}
 	if (!initial.exists) throw new Error(`Target does not exist: ${initial.canonicalPath}`);
 	const previous = await fileSystem.stat(initial.canonicalPath);
 	if (previous.kind !== "file") throw new Error(`Path is not a file: ${initial.canonicalPath}`);
 	if (expectedIdentity && !identityMatches(previous, expectedIdentity)) {
-		throw new Error("Target identity changed before mutation containment check");
+		throw new Error("Target identity changed before mutation identity check");
 	}
 	context.signal.throwIfAborted();
-	const rechecked = await workspace.resolvePath(initial.requestedPath, "write");
-	if (
-		!rechecked.exists ||
-		rechecked.canonicalPath !== initial.canonicalPath ||
-		!hasPermissionedPathAccess(workspace, rechecked, context.invocationId, toolName, "write")
-	) {
-		throw new Error("Target changed during mutation containment check");
+	const rechecked = await workspace.resolvePath(initial.requestedPath);
+	if (!rechecked.exists || rechecked.canonicalPath !== initial.canonicalPath) {
+		throw new Error("Target changed during mutation identity check");
 	}
 	const current = await fileSystem.readFile(rechecked.canonicalPath);
 	if (createHash("sha256").update(current).digest("hex") !== expectedSha256) {
-		throw new Error("Target content changed before mutation containment check");
+		throw new Error("Target content changed before mutation identity check");
 	}
 	return writer.delete(
 		{

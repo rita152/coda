@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
@@ -109,7 +109,6 @@ describe("Coding Agent print mode", () => {
 
 		await expect(application.run(["--help"])).resolves.toBe(0);
 		expect(stdout.value).toContain("Usage: coda");
-		expect(stdout.value).toContain("--sandbox <mode>");
 		expect(stdout.value).toContain("--json-mode <mode>");
 		expect(stderr.value).toBe("");
 		expect(settingsLoaded).toBe(false);
@@ -516,7 +515,6 @@ describe("Coding Agent print mode", () => {
 			},
 			model: { provider: faux.getModel().provider, id: faux.getModel().id },
 			reasoning: "off",
-			permissions: { profile: "read-only", approvalPolicy: "on-request" },
 		});
 		expect(events.at(-3)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
 		expect(events.at(-2)).toMatchObject({
@@ -661,6 +659,19 @@ describe("Coding Agent print mode", () => {
 				fileSystem: createNodeFileSystem(),
 				processRunner: {
 					run: async (request) => {
+						if (request.executable !== "git") {
+							if (request.args.at(-1)?.includes("printf shell")) {
+								await writeFile(join(workspace, "shell-created.txt"), "shell");
+							}
+							return {
+								exitCode: 0,
+								signal: null,
+								stdout: "",
+								stderr: "",
+								timedOut: false,
+								truncated: false,
+							};
+						}
 						if (request.args[0] === "rev-parse") {
 							expect(request).toMatchObject({
 								executable: "git",
@@ -700,22 +711,6 @@ describe("Coding Agent print mode", () => {
 						};
 					},
 				},
-				modelProcessRunner: {
-					run: async (request) => {
-						if (request.args.at(-1)?.includes("printf shell")) {
-							await writeFile(join(workspace, "shell-created.txt"), "shell");
-						}
-						return {
-							exitCode: 0,
-							signal: null,
-							stdout: "",
-							stderr: "",
-							timedOut: false,
-							truncated: false,
-							backend: "none",
-						};
-					},
-				},
 				completionWorkspaceEvidence: {
 					capture: async () => {
 						const changed = workspaceCaptures++ > 0;
@@ -749,7 +744,6 @@ describe("Coding Agent print mode", () => {
 				application.run([
 					"--print",
 					"--json",
-					"--dangerously-bypass-approvals-and-sandbox",
 					"--model",
 					`${faux.getModel().provider}/${faux.getModel().id}`,
 					"mutate through Shell",
@@ -780,328 +774,7 @@ describe("Coding Agent print mode", () => {
 		}
 	});
 
-	it("lets CLI Permission options override settings", async () => {
-		const faux = fauxProvider({ runtime: testTimeRuntime(225) });
-		faux.setResponses([fauxAssistantMessage("permission snapshot", { timestamp: 225 })]);
-		const models = createModels({ runtime: testTimeRuntime(225) });
-		models.setProvider(faux.provider);
-		const stdout = new BufferOutput();
-		const stderr = new BufferOutput();
-		let id = 0;
-		const application = createCodingAgentApplication({
-			models,
-			fileSystem: createNodeFileSystem(),
-			processRunner: createNodeProcessRunner({ platform: "darwin" }),
-			settings: {
-				load: async () => ({ permissions: { profile: "full-access", approvalPolicy: "never" } }),
-				save: async () => undefined,
-			},
-			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
-			runtime: {
-				cwd: "/tmp",
-				homeDirectory: "/home/test",
-				platform: "darwin",
-				environment: {},
-				clock: { now: () => 225 },
-				idGenerator: { generate: (kind) => `${kind}:${++id}` },
-			},
-		});
-
-		const exitCode = await application.run([
-			"--print",
-			"--json",
-			"--sandbox",
-			"read-only",
-			"--ask-for-approval",
-			"on-request",
-			"--model",
-			`${faux.getModel().provider}/${faux.getModel().id}`,
-			"inspect permissions",
-		]);
-
-		expect(exitCode).toBe(0);
-		expect(JSON.parse(stdout.value.split("\n")[0]!)).toMatchObject({
-			type: "run_start",
-			permissions: { profile: "read-only", approvalPolicy: "on-request" },
-		});
-		expect(stderr.value).toBe("");
-	});
-
-	it("reports unresolved print-mode approval as structured output and a nonzero exit", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-print-approval-"));
-		try {
-			const faux = fauxProvider({ runtime: testTimeRuntime(235) });
-			faux.setResponses([
-				fauxAssistantMessage(
-					fauxToolCall("write", { path: "denied.txt", content: "must not be written" }, { id: "write-denied" }),
-					{ stopReason: "toolUse", timestamp: 235 },
-				),
-				fauxAssistantMessage("I could not write without approval.", { timestamp: 235 }),
-			]);
-			const models = createModels({ runtime: testTimeRuntime(235) });
-			models.setProvider(faux.provider);
-			const stdout = new BufferOutput();
-			const stderr = new BufferOutput();
-			let id = 0;
-			const application = createCodingAgentApplication({
-				models,
-				settings,
-				fileSystem: createNodeFileSystem(),
-				processRunner: createNodeProcessRunner({ platform: "darwin" }),
-				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
-				runtime: {
-					cwd: workspace,
-					homeDirectory: tmpdir(),
-					platform: "darwin",
-					environment: {},
-					clock: { now: () => 235 },
-					idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				},
-			});
-
-			const exitCode = await application.run([
-				"--print",
-				"--json",
-				"--model",
-				`${faux.getModel().provider}/${faux.getModel().id}`,
-				"write denied.txt",
-			]);
-			const events = stdout.value
-				.trimEnd()
-				.split("\n")
-				.map((line) => JSON.parse(line) as Record<string, unknown>);
-
-			expect(exitCode).toBe(1);
-			expect(events).toContainEqual(
-				expect.objectContaining({
-					schemaVersion: 3,
-					type: "approval_required",
-					request: expect.objectContaining({ kind: "filesystem", toolName: "write" }),
-				}),
-			);
-			expect(events).toContainEqual(
-				expect.objectContaining({
-					schemaVersion: 3,
-					type: "run_evidence",
-					toolIssues: [expect.objectContaining({ toolName: "write", status: "denied" })],
-					unresolvedFailures: [expect.objectContaining({ kind: "tool", status: "denied" })],
-				}),
-			);
-			await expect(readFile(join(workspace, "denied.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-			expect(stderr.value).toBe("");
-		} finally {
-			await rm(workspace, { recursive: true, force: true });
-		}
-	});
-
-	it("fails closed on external and default Credential Root reads when approval is unavailable", async () => {
-		const fixture = await mkdtemp(join(process.cwd(), ".coda-print-external-read-"));
-		try {
-			const workspace = join(fixture, "workspace");
-			const outside = join(fixture, "outside.txt");
-			const credential = join(workspace, ".ssh", "id_ed25519");
-			await mkdir(join(workspace, ".ssh"), { recursive: true });
-			await writeFile(outside, "classified-read-content\n");
-			await writeFile(credential, "classified-credential-content\n");
-			const canonicalOutside = await realpath(outside);
-			const canonicalCredential = await realpath(credential);
-			const faux = fauxProvider({ runtime: testTimeRuntime(237) });
-			faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("read", { path: outside }, { id: "read-external" }), {
-					stopReason: "toolUse",
-					timestamp: 237,
-				}),
-				(context) => {
-					const result = context.messages.at(-1);
-					expect(result).toMatchObject({
-						role: "toolResult",
-						toolCallId: "read-external",
-						isError: true,
-					});
-					expect(JSON.stringify(result)).not.toContain("classified-read-content");
-					return fauxAssistantMessage(
-						fauxToolCall("read", { path: ".ssh/id_ed25519" }, { id: "read-credential" }),
-						{
-							stopReason: "toolUse",
-							timestamp: 237,
-						},
-					);
-				},
-				(context) => {
-					const result = context.messages.at(-1);
-					expect(result).toMatchObject({
-						role: "toolResult",
-						toolCallId: "read-credential",
-						isError: true,
-					});
-					expect(JSON.stringify(result)).not.toContain("classified-credential-content");
-					return fauxAssistantMessage("Both reads require approval.", { timestamp: 237 });
-				},
-			]);
-			const models = createModels({ runtime: testTimeRuntime(237) });
-			models.setProvider(faux.provider);
-			const stdout = new BufferOutput();
-			const stderr = new BufferOutput();
-			let id = 0;
-			const application = createCodingAgentApplication({
-				models,
-				settings: {
-					load: async () => ({ permissions: { profile: "workspace", approvalPolicy: "on-request" } }),
-					save: async () => undefined,
-				},
-				fileSystem: createNodeFileSystem(),
-				processRunner: createNodeProcessRunner({ platform: "darwin" }),
-				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
-				runtime: {
-					cwd: workspace,
-					homeDirectory: workspace,
-					platform: "darwin",
-					environment: {},
-					clock: { now: () => 237 },
-					idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				},
-			});
-
-			const exitCode = await application.run([
-				"--print",
-				"--json",
-				"--model",
-				`${faux.getModel().provider}/${faux.getModel().id}`,
-				"read the external file",
-			]);
-			const events = stdout.value
-				.trimEnd()
-				.split("\n")
-				.map((line) => JSON.parse(line) as Record<string, unknown>);
-
-			expect(exitCode).toBe(1);
-			expect(events).toContainEqual(
-				expect.objectContaining({
-					type: "approval_required",
-					request: expect.objectContaining({
-						kind: "filesystem",
-						toolName: "read",
-						operation: "read",
-						canonicalPath: canonicalOutside,
-					}),
-				}),
-			);
-			expect(events).toContainEqual(
-				expect.objectContaining({
-					type: "approval_required",
-					request: expect.objectContaining({
-						kind: "filesystem",
-						toolName: "read",
-						operation: "read",
-						canonicalPath: canonicalCredential,
-						reason: "path is within a protected Credential root",
-					}),
-				}),
-			);
-			expect(stdout.value).not.toContain("classified-read-content");
-			expect(stdout.value).not.toContain("classified-credential-content");
-			expect(stderr.value).toBe("");
-		} finally {
-			await rm(fixture, { recursive: true, force: true });
-		}
-	});
-
-	it("aborts the current Run when an in-flight managed-network review chooses abort", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-network-abort-"));
-		try {
-			const faux = fauxProvider({ runtime: testTimeRuntime(240) });
-			faux.setResponses([
-				fauxAssistantMessage(
-					fauxToolCall("bash", { command: "curl https://example.com" }, { id: "network-abort" }),
-					{ stopReason: "toolUse", timestamp: 240 },
-				),
-				fauxAssistantMessage("this response must not be requested", { timestamp: 240 }),
-			]);
-			const models = createModels({ runtime: testTimeRuntime(240) });
-			models.setProvider(faux.provider);
-			const stdout = new BufferOutput();
-			const stderr = new BufferOutput();
-			let id = 0;
-			const application = createCodingAgentApplication({
-				models,
-				settings,
-				fileSystem: createNodeFileSystem(),
-				processRunner: createNodeProcessRunner({ platform: "darwin" }),
-				approval: {
-					decide: async (request) => {
-						expect(request.kind).toBe("network");
-						return { type: "abort" };
-					},
-				},
-				modelProcessRunner: {
-					run: async (_request, authority) => {
-						const destination = {
-							environmentId: "local",
-							host: "example.com",
-							protocol: "https" as const,
-							port: 443,
-						};
-						const decision = await authority.managedNetwork?.decide(destination);
-						if (!decision || decision.action !== "deny") throw new Error("expected network denial");
-						return {
-							exitCode: 1,
-							signal: null,
-							stdout: "",
-							stderr: "network denied",
-							timedOut: false,
-							truncated: false,
-							backend: "macos-seatbelt",
-							denial: {
-								kind: "network",
-								backend: "managed-network-proxy",
-								...destination,
-								decision: "deny",
-								source: decision.source,
-								reason: decision.reason,
-								timestamp: 240,
-							},
-						};
-					},
-				},
-				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
-				runtime: {
-					cwd: workspace,
-					homeDirectory: tmpdir(),
-					platform: "darwin",
-					environment: {},
-					clock: { now: () => 240 },
-					idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				},
-			});
-
-			const exitCode = await application.run([
-				"--print",
-				"--json",
-				"--model",
-				`${faux.getModel().provider}/${faux.getModel().id}`,
-				"try the network",
-			]);
-			const events = stdout.value
-				.trimEnd()
-				.split("\n")
-				.map((line) => JSON.parse(line) as Record<string, unknown>);
-
-			expect(exitCode).toBe(1);
-			expect(faux.state.callCount).toBe(1);
-			expect(events.at(-3)).toMatchObject({ type: "run_end", outcome: "aborted" });
-			expect(events.at(-2)).toMatchObject({ type: "run_evidence", outcome: "aborted" });
-			expect(events.at(-1)).toMatchObject({
-				type: "completion_disposition",
-				disposition: "partial",
-				modelTermination: "interrupted",
-			});
-			expect(stderr.value).toContain("Run ended with outcome aborted");
-		} finally {
-			await rm(workspace, { recursive: true, force: true });
-		}
-	});
-
-	it("catalogs a user Skill and revision-binds model activation to Skill Approval", async () => {
+	it("catalogs a user Skill and loads its revision-bound instructions", async () => {
 		const fixture = await mkdtemp(join(tmpdir(), "coda-print-skill-"));
 		try {
 			const workspace = join(fixture, "workspace");
@@ -1133,7 +806,6 @@ describe("Coding Agent print mode", () => {
 			]);
 			const models = createModels({ runtime: testTimeRuntime(245) });
 			models.setProvider(faux.provider);
-			const approvals: Array<{ kind: string; reason: string }> = [];
 			const stdout = new BufferOutput();
 			const stderr = new BufferOutput();
 			let id = 0;
@@ -1142,12 +814,6 @@ describe("Coding Agent print mode", () => {
 				settings,
 				fileSystem: createNodeFileSystem(),
 				processRunner: createNodeProcessRunner({ platform: "darwin" }),
-				approval: {
-					decide: async (request) => {
-						approvals.push({ kind: request.kind, reason: request.reason });
-						return { type: "approved-for-session" };
-					},
-				},
 				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
 				runtime: {
 					cwd: workspace,
@@ -1162,10 +828,6 @@ describe("Coding Agent print mode", () => {
 			await expect(
 				application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "inspect"]),
 			).resolves.toBe(0);
-			expect(approvals).toHaveLength(1);
-			expect(approvals[0]).toMatchObject({ kind: "skill" });
-			expect(approvals[0]!.reason).toContain(selectedSkillId);
-			expect(approvals[0]!.reason).toMatch(/revision [a-f0-9]{64}/u);
 			expect(stdout.value).toBe("inspection complete\n");
 			expect(stderr.value).toBe("");
 		} finally {

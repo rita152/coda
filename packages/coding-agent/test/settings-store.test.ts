@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 describe("FileSettingsStore", () => {
-	it("atomically stores a versioned non-secret settings file with private permissions", async () => {
+	it("atomically stores a versioned non-secret settings file with private mode bits", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-settings-"));
 		temporaryDirectories.push(homeDirectory);
 		let id = 0;
@@ -36,7 +36,6 @@ describe("FileSettingsStore", () => {
 					models: [{ id: "acme-one", name: "Acme One" }],
 				},
 			],
-			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			mcpServers: [
 				{
 					id: "docs",
@@ -55,17 +54,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			ui: { motion: "reduced", colorScheme: "light" },
-			permissions: {
-				profile: "workspace",
-				approvalPolicy: {
-					mode: "granular",
-					sandboxApproval: true,
-					rules: false,
-					skillApproval: true,
-					requestPermissions: false,
-					mcpElicitations: true,
-				},
-			},
 		});
 
 		await expect(store.load()).resolves.toEqual({
@@ -81,7 +69,6 @@ describe("FileSettingsStore", () => {
 					models: [{ id: "acme-one", name: "Acme One" }],
 				},
 			],
-			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			mcpServers: [
 				{
 					id: "docs",
@@ -100,17 +87,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			ui: { motion: "reduced", colorScheme: "light" },
-			permissions: {
-				profile: "workspace",
-				approvalPolicy: {
-					mode: "granular",
-					sandboxApproval: true,
-					rules: false,
-					skillApproval: true,
-					requestPermissions: false,
-					mcpElicitations: true,
-				},
-			},
 		});
 		const settingsPath = join(homeDirectory, ".coda", "settings.json");
 		expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual({
@@ -127,7 +103,6 @@ describe("FileSettingsStore", () => {
 					models: [{ id: "acme-one", name: "Acme One" }],
 				},
 			],
-			shellEnvironmentAllowlist: ["CODA_PUBLIC_FLAG"],
 			mcpServers: [
 				{
 					id: "docs",
@@ -146,17 +121,6 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			ui: { motion: "reduced", colorScheme: "light" },
-			permissions: {
-				profile: "workspace",
-				approvalPolicy: {
-					mode: "granular",
-					sandboxApproval: true,
-					rules: false,
-					skillApproval: true,
-					requestPermissions: false,
-					mcpElicitations: true,
-				},
-			},
 		});
 		expect((await stat(join(homeDirectory, ".coda"))).mode & 0o777).toBe(0o700);
 		expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
@@ -248,58 +212,20 @@ describe("FileSettingsStore", () => {
 		await expect(store.load()).rejects.toThrow("invalid custom Provider models");
 	});
 
-	it("rejects incomplete granular approval settings instead of guessing defaults", async () => {
-		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-settings-"));
-		temporaryDirectories.push(homeDirectory);
-		await mkdir(join(homeDirectory, ".coda"));
-		await writeFile(
-			join(homeDirectory, ".coda", "settings.json"),
-			JSON.stringify({
-				version: 1,
-				permissions: {
-					profile: "workspace",
-					approvalPolicy: { mode: "granular", sandboxApproval: true },
-				},
-			}),
-		);
-		const store = new FileSettingsStore({
-			fileSystem: createNodeFileSystem(),
-			homeDirectory,
-			idGenerator: { generate: () => "unused" },
-		});
+	it.each([{ unknownSetting: true }, { obsoleteModelSetting: "fixture" }])(
+		"rejects unknown settings instead of silently ignoring them",
+		async (unknown) => {
+			const homeDirectory = await mkdtemp(join(tmpdir(), "coda-legacy-settings-"));
+			temporaryDirectories.push(homeDirectory);
+			await mkdir(join(homeDirectory, ".coda"));
+			await writeFile(join(homeDirectory, ".coda", "settings.json"), JSON.stringify({ version: 1, ...unknown }));
+			const store = new FileSettingsStore({
+				fileSystem: createNodeFileSystem(),
+				homeDirectory,
+				idGenerator: { generate: () => "unused" },
+			});
 
-		await expect(store.load()).rejects.toThrow("invalid Approval Policy");
-	});
-
-	it.each([
-		{ allowBash: true },
-		{ allowWorkspaceWrite: true },
-		{ permissions: { profile: "workspace", approvalPolicy: "on-request", allowBash: true } },
-		{
-			permissions: {
-				profile: "workspace",
-				approvalPolicy: {
-					mode: "granular",
-					sandboxApproval: true,
-					rules: true,
-					skillApproval: true,
-					requestPermissions: true,
-					mcpElicitations: true,
-					network: true,
-				},
-			},
+			await expect(store.load()).rejects.toThrow("unknown field");
 		},
-	])("rejects unknown or removed authority settings instead of silently ignoring them", async (legacy) => {
-		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-legacy-settings-"));
-		temporaryDirectories.push(homeDirectory);
-		await mkdir(join(homeDirectory, ".coda"));
-		await writeFile(join(homeDirectory, ".coda", "settings.json"), JSON.stringify({ version: 1, ...legacy }));
-		const store = new FileSettingsStore({
-			fileSystem: createNodeFileSystem(),
-			homeDirectory,
-			idGenerator: { generate: () => "unused" },
-		});
-
-		await expect(store.load()).rejects.toThrow(/unknown field|invalid Permissions|invalid Approval Policy/u);
-	});
+	);
 });

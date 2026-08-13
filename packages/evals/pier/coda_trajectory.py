@@ -629,13 +629,11 @@ def _terminal_projection(event: Mapping[str, Any]) -> dict[str, Any]:
     event_type = event.get("type")
     rejection_reason = _safe_string(event.get("reason")) or None
     status = _value(observation, "status")
-    if status not in {"ok", "error", "denied", "aborted"}:
+    if status not in {"ok", "error", "aborted"}:
         outcome = event.get("outcome")
         if event_type == "tool_execution_rejected":
             status = (
-                "denied"
-                if rejection_reason == "policy"
-                else "aborted"
+                "aborted"
                 if rejection_reason in {"aborted", "not_started"}
                 else "error"
             )

@@ -23,9 +23,9 @@ Resolved on 2026-08-12. Auto-Compaction and the single safe Provider-overflow
 retry remain first. When they cannot recover, interactive mode now offers only
 cancel or a fresh empty Session in the same Workspace, closes the old Session
 only after replacement construction succeeds, and carries no summary, Messages,
-attachments, approvals, queued input, Run evidence, Compaction Checkpoint, Tool
+	attachments, queued input, Run evidence, Compaction Checkpoint, Tool
 state, or background process into the replacement. The old Session's owned
-processes settle and write their audit facts before its journal closes. Print
+processes settle before its journal closes. Print
 mode still exits `1` without starting a terminal prompt.
 
 Verified with VirtualTerminal and FileSessionManager integration coverage for

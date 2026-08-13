@@ -16,7 +16,7 @@
 
 1. 采用 Codex/Pi 的 Composer 上方独立活动行；
 2. 采用 Gemini 的“可操作状态优先”规则；
-3. 从 Coda 已有的权威 `AgentEvent`、Tool Invocation、Approval 和 User Shell 状态投影，不另造一份独立 busy map；
+3. 从 Coda 已有的权威 `AgentEvent`、Tool Invocation、MCP Elicitation 和 User Shell 状态投影，不另造一份独立 busy map；
 4. 第一版显示可核实的阶段、阶段耗时和可选的“距上次语义事件多久”，不声称自动判定“卡住”；
 5. 模型自行生成的自然语言进度可以以后作为次要说明，但不应成为主状态或 liveness 依据。
 
@@ -43,7 +43,7 @@ Coda 当前的数据已经足够做一个有用的第一版，通常不需要先
 
 ### Chat 和 Timeline 已消费同一事件源
 
-`ChatComponent.accept()` 已经接收全部 `AgentEvent`，把它们交给 `SemanticTimeline`，并在 `run_start`/`run_end` 上维护现有 `#running`。`SemanticTimeline` 已记录 Tool 的 `state`、`startedAt`、`endedAt`、`progress` 与 Approval 状态，还能查询是否存在 active Tool。
+`ChatComponent.accept()` 已经接收全部 `AgentEvent`，把它们交给 `SemanticTimeline`，并在 `run_start`/`run_end` 上维护现有 `#running`。`SemanticTimeline` 已记录 Tool 的 `state`、`startedAt`、`endedAt` 与 `progress`，还能查询是否存在 active Tool。
 
 证据：
 
@@ -201,7 +201,7 @@ TUI 在非 idle 时显示 spinner；retry 时额外显示截断后的错误、�
 ● Thinking · 28s
 ● Running pnpm test · 1m 14s
 ● Calling mcp__server__tool · 18s · 40% (2/5)
-◌ Waiting for approval — bash · 34s
+◌ Waiting for input — MCP · 34s
 ↻ Retrying in 6s · attempt 2
 ```
 
@@ -212,13 +212,13 @@ TUI 在非 idle 时显示 spinner；retry 时额外显示截断后的错误、�
 建议在 `@coda/coding-agent` 新建 presentation-owned、纯状态机式的 `ActivityProjection`（最终名称待设计），消费：
 
 - `AgentEvent`
-- Approval/MCP Elicitation 的 composition 状态
+- MCP Elicitation 的 composition 状态
 - `UserShellSnapshot`
 - 必要时由 Input Queue Controller 提供的 pre-Run `Preparing` 和 post-Run `Settling` 信号
 
 推荐优先级：
 
-1. 等待用户操作：Approval、MCP Elicitation、interactive process input
+1. 等待用户操作：MCP Elicitation、interactive process input
 2. retry/backoff
 3. active Tool Invocation；并发时聚合数量并选一个主动作
 4. message delta：Thinking、Responding、Preparing tool call
@@ -244,7 +244,7 @@ TUI 在非 idle 时显示 spinner；retry 时额外显示截断后的错误、�
 - reduced motion 使用静态 glyph，但仍每秒刷新 elapsed/countdown。
 - NO_COLOR 下 glyph 和文字仍表达状态，不依赖颜色。
 - `<40x10` 继续使用现有 too-small view，不启动活动动画。
-- modal/Approval 展示时，不应同时显示误导性的 `Thinking`；应切换为 `Waiting for ...` 或让 modal 成为唯一活动表面。
+- modal 展示时，不应同时显示误导性的 `Thinking`；应切换为 `Waiting for ...` 或让 modal 成为唯一活动表面。
 
 ### 验证重点
 

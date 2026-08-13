@@ -74,8 +74,6 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--sandbox",
-			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"create created.txt",
@@ -139,8 +137,6 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--sandbox",
-			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"create generated/parser/table.ts",
@@ -218,8 +214,6 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--sandbox",
-			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"edit existing.txt",
@@ -290,21 +284,23 @@ describe("mutation Tools", () => {
 		const stdout = new BufferOutput();
 		const stderr = new BufferOutput();
 		let id = 0;
+		const runner = createNodeProcessRunner({ platform: "darwin" });
 		const application = createCodingAgentApplication({
 			models,
 			settings: { load: async () => ({}), save: async () => undefined },
 			fileSystem: createNodeFileSystem(),
-			processRunner: createNodeProcessRunner({ platform: "darwin" }),
-			modelProcessRunner: {
-				run: async () => ({
-					exitCode: 0,
-					signal: null,
-					stdout: "tests passed",
-					stderr: "",
-					timedOut: false,
-					truncated: false,
-					backend: "none",
-				}),
+			processRunner: {
+				run: async (request) =>
+					request.executable === "git"
+						? runner.run(request)
+						: {
+								exitCode: 0,
+								signal: null,
+								stdout: "tests passed",
+								stderr: "",
+								timedOut: false,
+								truncated: false,
+							},
 			},
 			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(850),
 			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
@@ -320,8 +316,6 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--sandbox",
-			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"apply the patch",
@@ -530,8 +524,6 @@ describe("mutation Tools", () => {
 
 		const exitCode = await application.run([
 			"--print",
-			"--sandbox",
-			"workspace-write",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
 			"edit missing.txt",

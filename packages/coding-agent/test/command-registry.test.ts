@@ -20,12 +20,12 @@ describe("CommandRegistry", () => {
 
 	it("excludes Core commands from an inline Extension query", () => {
 		const registry = new CommandRegistry();
-		registry.register(command("core:permission", "permission", "core"));
-		registry.register(command("skill:permission", "permission", "skill"));
+		registry.register(command("core:inspect", "inspect", "core"));
+		registry.register(command("skill:inspect", "inspect", "skill"));
 
-		expect(
-			registry.search("permission", { location: "token_boundary" }).map(({ command: match }) => match.id),
-		).toEqual(["skill:permission"]);
+		expect(registry.search("inspect", { location: "token_boundary" }).map(({ command: match }) => match.id)).toEqual([
+			"skill:inspect",
+		]);
 	});
 });
 

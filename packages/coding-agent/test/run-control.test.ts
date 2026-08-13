@@ -260,7 +260,6 @@ describe("RunControl", () => {
 			idGenerator: new TestIds(),
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			tools: [slowTool],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 		});
 		const binding = bindAgentRunControl({
 			agent,
@@ -332,7 +331,6 @@ describe("RunControl", () => {
 			idGenerator: new TestIds(),
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			tools: [slowTool],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 		});
 		const binding = bindAgentRunControl({
 			agent,

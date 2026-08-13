@@ -11,7 +11,6 @@ const RUN_START_METADATA: JsonRunStartMetadata = {
 	model: { provider: "fixture", id: "model" },
 	reasoning: "high",
 	prompt: { version: "fixture-prompt-v1", sha256: "prompt-sha256" },
-	permissions: { profile: "workspace", approvalPolicy: "never" },
 };
 
 const TOOL_CALL = {
@@ -113,7 +112,7 @@ describe("JsonEventWriter", () => {
 			outcome: "success",
 		});
 		expect(stressed.lines.find((line) => line.type === "tool_execution_rejected")).toMatchObject({
-			reason: "policy",
+			reason: "invalid",
 			invocation: { id: "invocation-2", toolName: "write" },
 		});
 		expect(stressed.lines.at(-2)).toMatchObject({ type: "run_end", outcome: "success" });
@@ -210,14 +209,19 @@ async function semanticFixture(deltaCount: number) {
 			id: "invocation-2",
 			providerToolCallId: "provider-call-2",
 			toolName: "write",
-			arguments: { path: "denied.txt", content: "denied" },
+			arguments: { path: "invalid.txt", content: "invalid" },
 			sourceIndex: 1,
 		},
-		reason: "policy",
-		message: "denied",
+		reason: "invalid",
+		message: "invalid arguments",
 		result: {
 			id: "message-result-2",
-			message: { role: "toolResult", toolCallId: "provider-call-2", toolName: "write", content: "denied" },
+			message: {
+				role: "toolResult",
+				toolCallId: "provider-call-2",
+				toolName: "write",
+				content: "invalid arguments",
+			},
 		},
 	});
 	await write("turn_end", { turnId: "turn-1", outcome: "success" });

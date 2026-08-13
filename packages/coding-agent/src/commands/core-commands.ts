@@ -3,14 +3,6 @@ import type { CommandArgumentPolicy, CommandDefinition } from "./types.ts";
 
 export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 	coreCommand({
-		id: "core:permission",
-		name: "permission",
-		aliases: ["permissions"],
-		title: "Permission",
-		description: "Choose the permission level for future Runs in this session",
-		kind: "control",
-	}),
-	coreCommand({
 		id: "core:auth",
 		name: "auth",
 		title: "Authentication",

@@ -12,17 +12,17 @@ describe("CommandFlowHost", () => {
 	it("navigates nested menus with Enter and unwinds them one level at a time with Escape", () => {
 		const host = new CommandFlowHost();
 		const confirmation: CommandFlowMenu = {
-			id: "permission:confirm",
-			title: "Confirm Full Access",
+			id: "settings:confirm",
+			title: "Confirm Reset",
 			items: [{ id: "confirm", label: "Confirm" }],
 		};
 		const root: CommandFlowMenu = {
-			id: "permission",
-			title: "Permission",
+			id: "settings",
+			title: "Settings",
 			items: [
 				{
-					id: "full-access",
-					label: "Full Access",
+					id: "reset",
+					label: "Reset",
 					onSelect: (navigation: CommandFlowNavigation) => navigation.push(confirmation),
 				},
 			],
@@ -30,10 +30,10 @@ describe("CommandFlowHost", () => {
 		host.open(root);
 
 		expect(host.handleInput(key("enter"))).toEqual({ type: "handled" });
-		expect(host.view?.breadcrumb).toEqual(["Permission", "Confirm Full Access"]);
+		expect(host.view?.breadcrumb).toEqual(["Settings", "Confirm Reset"]);
 
 		expect(host.handleInput(key("escape"))).toEqual({ type: "handled" });
-		expect(host.view?.breadcrumb).toEqual(["Permission"]);
+		expect(host.view?.breadcrumb).toEqual(["Settings"]);
 
 		expect(host.handleInput(key("escape"))).toEqual({ type: "handled" });
 		expect(host.view).toBeUndefined();

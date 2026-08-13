@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  permissions-and-sandbox:
+  cross-platform:
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -35,21 +35,11 @@ jobs:
         with:
           node-version: 22.19.0
           cache: npm
-      - name: Install Linux sandbox prerequisites
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap build-essential curl
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
       - run: npm ci
       - name: Check source and generated capability documentation
         run: npm run check
       - run: npm test
       - run: npm run eval:offline
       - run: npm run test:conformance
-      - run: npm run test:integration
       - run: npm run test:e2e
       - run: npm run pack:dry-run

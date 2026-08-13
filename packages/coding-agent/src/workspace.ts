@@ -1,9 +1,6 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { ToolInvocationId } from "@coda/agent";
 import type { FileSystem } from "./host/file-system.ts";
 import { isFileSystemError } from "./host/file-system.ts";
-
-export type PathIntent = "read" | "write";
 
 export interface ResolvedWorkspacePath {
 	readonly requestedPath: string;
@@ -13,19 +10,9 @@ export interface ResolvedWorkspacePath {
 	readonly insideWorkspace: boolean;
 }
 
-export interface WorkspacePathGrant {
-	readonly invocationId: ToolInvocationId;
-	readonly toolName: string;
-	readonly intent: PathIntent;
-	readonly canonicalPath: string;
-	readonly recursive: boolean;
-}
-
 export interface Workspace {
 	readonly root: string;
-	resolvePath(requestedPath: string, intent: PathIntent): Promise<ResolvedWorkspacePath>;
-	grantPath(grant: WorkspacePathGrant): void;
-	isPathGranted(invocationId: ToolInvocationId, toolName: string, intent: PathIntent, canonicalPath: string): boolean;
+	resolvePath(requestedPath: string): Promise<ResolvedWorkspacePath>;
 }
 
 function isContained(root: string, target: string): boolean {
@@ -76,8 +63,6 @@ export async function createWorkspace(root: string, fileSystem: FileSystem): Pro
 	const canonicalRoot = await fileSystem.realpath(resolve(root));
 	const rootStatus = await fileSystem.stat(canonicalRoot);
 	if (rootStatus.kind !== "directory") throw new Error(`Workspace is not a directory: ${root}`);
-	const grants = new Map<ToolInvocationId, WorkspacePathGrant[]>();
-
 	return {
 		root: canonicalRoot,
 		resolvePath: async (requestedPath) => {
@@ -91,35 +76,6 @@ export async function createWorkspace(root: string, fileSystem: FileSystem): Pro
 				exists: canonical.exists,
 				insideWorkspace: isContained(canonicalRoot, canonical.canonicalPath),
 			};
-		},
-		grantPath: (grant) => {
-			const invocationGrants = grants.get(grant.invocationId) ?? [];
-			if (
-				invocationGrants.some(
-					(existing) =>
-						existing.toolName === grant.toolName &&
-						existing.intent === grant.intent &&
-						existing.canonicalPath === grant.canonicalPath &&
-						existing.recursive === grant.recursive,
-				)
-			) {
-				return;
-			}
-			invocationGrants.push(Object.freeze({ ...grant }));
-			grants.set(grant.invocationId, invocationGrants);
-		},
-		isPathGranted: (invocationId, toolName, intent, canonicalPath) => {
-			return (
-				grants
-					.get(invocationId)
-					?.some(
-						(grant) =>
-							grant.toolName === toolName &&
-							grant.intent === intent &&
-							(canonicalPath === grant.canonicalPath ||
-								(grant.recursive && isContained(grant.canonicalPath, canonicalPath))),
-					) ?? false
-			);
 		},
 	};
 }

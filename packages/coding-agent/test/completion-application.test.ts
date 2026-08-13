@@ -4,12 +4,7 @@ import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type ApplicationOutput,
-	type CodingAgentApplicationOptions,
-	createCodingAgentApplication,
-	type SettingsStore,
-} from "../src/application.ts";
+import { type ApplicationOutput, createCodingAgentApplication, type SettingsStore } from "../src/application.ts";
 import type { CompletionWorkspaceEvidenceProvider, WorkspaceEvidenceSnapshot } from "../src/completion/types.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
@@ -346,64 +341,6 @@ describe("Coding Agent completion integration", () => {
 		});
 	});
 
-	it("emits blocked while retaining an earlier patch when a later mutation is denied", async () => {
-		const fixture = await createFixture();
-		await writeFile(join(fixture.workspace, "value.ts"), "before\n");
-		const faux = fauxProvider({ runtime: testTimeRuntime(1_290) });
-		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("edit", { path: "value.ts", oldText: "before", newText: "after" }, { id: "edit-approved" }),
-				{ stopReason: "toolUse", timestamp: 1_290 },
-			),
-			fauxAssistantMessage(
-				fauxToolCall("edit", { path: "value.ts", oldText: "after", newText: "denied" }, { id: "edit-denied" }),
-				{ stopReason: "toolUse", timestamp: 1_290 },
-			),
-			fauxAssistantMessage("The second mutation was blocked.", { timestamp: 1_290 }),
-		]);
-		let approvals = 0;
-		const harness = createHarness(
-			fixture,
-			faux,
-			workspaceEvidence([snapshot("before", false, []), snapshot("after", true, ["value.ts"])]),
-			{
-				settings: {
-					load: async () => ({ permissions: { profile: "read-only", approvalPolicy: "on-request" } }),
-					save: async () => undefined,
-				},
-				approval: {
-					decide: async () => (++approvals === 1 ? { type: "approved" } : { type: "denied", rejection: "stop" }),
-				},
-			},
-		);
-
-		const exitCode = await harness.application.run([
-			"--print",
-			"--json",
-			"--model",
-			`${faux.getModel().provider}/${faux.getModel().id}`,
-			"attempt two changes",
-		]);
-		const events = jsonLines(harness.stdout.value);
-
-		expect(exitCode).toBe(1);
-		expect(approvals).toBe(2);
-		expect(await readFile(join(fixture.workspace, "value.ts"), "utf8")).toBe("after\n");
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				type: "run_evidence",
-				paths: expect.objectContaining({ changed: ["value.ts"] }),
-				toolIssues: [expect.objectContaining({ status: "denied" })],
-			}),
-		);
-		expect(events.at(-1)).toMatchObject({
-			type: "completion_disposition",
-			disposition: "blocked",
-			evidence: { openFailureCount: 1 },
-			workspace: { changedPaths: ["value.ts"] },
-		});
-	});
-
 	it("re-captures the final patch when a repair mutates and then the model fails", async () => {
 		const fixture = await createFixture();
 		await writeFile(join(fixture.workspace, "value.ts"), "before\n");
@@ -524,7 +461,6 @@ function createHarness(
 	completionWorkspaceEvidence: CompletionWorkspaceEvidenceProvider,
 	options: {
 		readonly settings?: SettingsStore;
-		readonly approval?: CodingAgentApplicationOptions["approval"];
 		readonly scheduler?: Scheduler;
 		readonly now?: () => number;
 	} = {},
@@ -535,7 +471,7 @@ function createHarness(
 	const stderr = new BufferOutput();
 	let id = 0;
 	const settings: SettingsStore = options.settings ?? {
-		load: async () => ({ permissions: { profile: "full-access", approvalPolicy: "never" } }),
+		load: async () => ({}),
 		save: async () => undefined,
 	};
 	return {
@@ -547,7 +483,6 @@ function createHarness(
 			fileSystem: createNodeFileSystem(),
 			processRunner: createNodeProcessRunner({ platform: "darwin" }),
 			completionWorkspaceEvidence,
-			approval: options.approval,
 			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
 			runtime: {
 				cwd: fixture.workspace,

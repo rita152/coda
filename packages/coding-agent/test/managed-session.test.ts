@@ -160,7 +160,7 @@ describe("ManagedSession", () => {
 			persistent: true,
 		} as SessionDescriptor;
 		const invocation = {
-			id: "invocation:denied",
+			id: "invocation:rejected",
 			resultMessageId: "message:result",
 			providerToolCallId: "provider:call",
 			toolName: "write",
@@ -171,20 +171,6 @@ describe("ManagedSession", () => {
 			{
 				descriptor,
 				records: linearRecords(descriptor, [
-					{
-						type: "permission_audit_recorded",
-						runId: "run:1",
-						turnId: "turn:1",
-						payload: {
-							event: {
-								type: "approval_decision",
-								invocationId: "invocation:denied",
-								kind: "command",
-								outcome: "approved-for-process",
-								commandPrefix: ["npm", "test"],
-							},
-						},
-					},
 					{ type: "tool_started", runId: "run:1", turnId: "turn:1", payload: { invocation } },
 					{
 						type: "tool_finished",
@@ -193,7 +179,7 @@ describe("ManagedSession", () => {
 						payload: {
 							invocation,
 							outcome: "rejected",
-							reason: "policy",
+							reason: "not_started",
 							resultMessageId: "message:result",
 						},
 					},
@@ -212,15 +198,8 @@ describe("ManagedSession", () => {
 				startedAt: 10,
 				finishedAt: 10,
 				outcome: "rejected",
-				rejectionReason: "policy",
+				rejectionReason: "not_started",
 				resultMessageId: "message:result",
-				approval: {
-					type: "approval_decision",
-					invocationId: "invocation:denied",
-					kind: "command",
-					outcome: "approved-for-process",
-					commandPrefix: ["npm", "test"],
-				},
 			},
 		]);
 	});

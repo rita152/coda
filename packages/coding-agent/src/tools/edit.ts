@@ -1,12 +1,11 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
+import type { AtomicMutationWriter } from "./atomic-mutation-writer.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
 import { mutationFacts, mutationObservationFacts } from "./mutation-contract.ts";
-import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 import { decodeTextFile, encodeTextFile, normalizeNewlines, sha256 } from "./text-mutation.ts";
 
 const EditParameters = Type.Object(
@@ -47,13 +46,7 @@ export function createEditTool(
 		parameters: EditParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
-			const initial = await workspace.resolvePath(arguments_.path, "write");
-			if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, "edit", "write")) {
-				return toolFailure(`Path access was not granted: ${initial.canonicalPath}`, {
-					code: "access_denied",
-					path: initial.canonicalPath,
-				});
-			}
+			const initial = await workspace.resolvePath(arguments_.path);
 			if (!initial.exists) {
 				return toolFailure(`File does not exist: ${initial.canonicalPath}`, {
 					code: "not_found",
@@ -62,12 +55,8 @@ export function createEditTool(
 			}
 			return coordinator.run(initial.canonicalPath, async () => {
 				context.signal.throwIfAborted();
-				const current = await workspace.resolvePath(arguments_.path, "write");
-				if (
-					!current.exists ||
-					current.canonicalPath !== initial.canonicalPath ||
-					!hasPermissionedPathAccess(workspace, current, context.invocationId, "edit", "write")
-				) {
+				const current = await workspace.resolvePath(arguments_.path);
+				if (!current.exists || current.canonicalPath !== initial.canonicalPath) {
 					return toolFailure("Target changed before edit could begin", {
 						code: "target_changed",
 						path: initial.canonicalPath,
@@ -129,16 +118,7 @@ export function createEditTool(
 					: `${before.slice(0, occurrences[0])}${newText}${before.slice(occurrences[0]! + oldText.length)}`;
 				const afterBytes = encodeTextFile(after, decoded.bom);
 				const beforeDigest = sha256(beforeBytes);
-				const result = await atomicWrite(
-					workspace,
-					fileSystem,
-					current,
-					afterBytes,
-					context,
-					"edit",
-					writer,
-					beforeDigest,
-				);
+				const result = await atomicWrite(workspace, fileSystem, current, afterBytes, context, writer, beforeDigest);
 				const replacements = arguments_.replaceAll ? occurrences.length : 1;
 				const afterDigest = sha256(afterBytes);
 				const mutation = mutationFacts({

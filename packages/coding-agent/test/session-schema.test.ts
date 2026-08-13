@@ -73,7 +73,7 @@ describe("Session message schema", () => {
 		expect(isSessionRecordPayload("message_committed", toolResult, 7)).toBe(true);
 		const observed = structuredClone(toolResult);
 		Object.assign(observed.message.message, {
-			observation: { status: "denied", truncated: false, facts: { requiredPermission: "network" } },
+			observation: { status: "error", truncated: false, facts: { exitCode: 1 } },
 		});
 		expect(isSessionRecordPayload("message_committed", observed, 8)).toBe(true);
 		expect(isSessionRecordPayload("message_committed", observed, 7)).toBe(false);

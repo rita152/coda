@@ -69,6 +69,5 @@ export function baseOptions(
 		idGenerator,
 		stream: createFauxRuntime(responses, clock, options.contexts),
 		tools: [],
-		policyGate: { check: async () => ({ decision: "allow" }) },
 	};
 }

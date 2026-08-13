@@ -47,10 +47,7 @@ describe("native patch parser", () => {
 		["absolute Windows path", "C:\\escape.txt"],
 		["parent traversal", "../escape.txt"],
 		["embedded traversal", "src/../escape.txt"],
-		["protected Git metadata", ".git/config"],
-		["case-variant protected Git metadata", ".GIT/config"],
-		["protected Coda metadata", "src/.coda/state"],
-	])("rejects %s before permission review", (_label, path) => {
+	])("rejects %s during parsing", (_label, path) => {
 		expect(() =>
 			parsePatch(`*** Begin Patch
 *** Add File: ${path}

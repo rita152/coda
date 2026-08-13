@@ -15,7 +15,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 90 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
@@ -63,7 +62,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator,
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async ({ context, signal }) => {
 				await modelGate;
 				return faux.streamSimple(faux.getModel(), context, { signal, runtime });
@@ -110,7 +108,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator,
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			seed: {
 				version: 1,
@@ -165,7 +162,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async ({ context, signal }) => {
 				modelStarted();
 				await modelGate;
@@ -236,7 +232,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async ({ context, signal }) => {
 				if (context.messages.length === 1) {
 					promptStarted();
@@ -295,7 +290,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				throw new Error("not called");
 			},
@@ -331,7 +325,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				throw new Error("not called");
 			},
@@ -371,7 +364,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			autoDrainFollowUps: false,
 		});
@@ -408,7 +400,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			autoDrainFollowUps: false,
 		});
@@ -434,7 +425,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: () => "" },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				throw new Error("stream must not start");
 			},
@@ -463,7 +453,6 @@ describe("InteractiveInputController", () => {
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				throw new Error("Context Overflow: local preflight failed");
 			},

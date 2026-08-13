@@ -12,12 +12,10 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
-import type { PermissionProfile } from "@coda/sandbox";
 import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
-import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
@@ -40,7 +38,6 @@ export interface SessionDescriptor {
 export interface RestoredSessionState {
 	readonly model?: ModelSelection;
 	readonly reasoning?: ThinkingLevel | "off";
-	readonly permissionProfile?: PermissionProfile;
 }
 
 export interface SessionMediaRendition {
@@ -84,7 +81,6 @@ export interface SessionToolLifecycle {
 	readonly outcome?: "success" | "error" | "aborted" | "rejected" | "interrupted";
 	readonly rejectionReason?: ToolRejectionReason;
 	readonly resultMessageId?: MessageId;
-	readonly approval?: ApprovalDecisionAuditEvent;
 }
 
 export interface OpenSessionRequest {
@@ -108,10 +104,8 @@ export type SessionChange =
 			readonly model: ModelSelection;
 			readonly reasoning: ThinkingLevel | "off";
 	  }
-	| { readonly type: "permission_selected"; readonly profile: PermissionProfile }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "mcp_trust_changed"; readonly trust: WorkspaceMcpTrustRecord }
-	| { readonly type: "permission_audit_recorded"; readonly event: PermissionAuditEvent }
 	| { readonly type: "context_compacted"; readonly checkpoint: CompactionCheckpoint }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }

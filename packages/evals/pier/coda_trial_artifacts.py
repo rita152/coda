@@ -139,7 +139,6 @@ class CodaTrialArtifacts:
         max_output_tokens: int,
         run_budget_enabled: bool,
         max_turns: int,
-        allow_all_commands: bool,
         event_stream_mode: str = "semantic",
         run_control_work_sec: int | None = None,
         run_control_grace_sec: int | None = None,
@@ -157,7 +156,6 @@ class CodaTrialArtifacts:
         self.max_output_tokens = max_output_tokens
         self.run_budget_enabled = run_budget_enabled
         self.max_turns = max_turns
-        self.allow_all_commands = allow_all_commands
         self.event_stream_mode = event_stream_mode
         self.run_control_work_sec = run_control_work_sec
         self.run_control_grace_sec = run_control_grace_sec
@@ -531,7 +529,6 @@ exit 0
                 "max_output_tokens": self.max_output_tokens,
                 "run_budget_enabled": self.run_budget_enabled,
                 "max_turns": self.max_turns if self.run_budget_enabled else None,
-                "allow_all_commands": self.allow_all_commands,
                 "event_stream_mode": self.event_stream_mode,
                 "run_control_work_sec": self.run_control_work_sec,
                 "run_control_grace_sec": self.run_control_grace_sec,
@@ -801,9 +798,6 @@ def populate_context(
         if isinstance(evidence.get("toolIssues"), list)
         else 0,
         "tool_rejection_count": len(rejected),
-        "policy_rejection_count": sum(
-            1 for event in rejected if event.get("reason") == "policy"
-        ),
         "invalid_tool_call_count": sum(
             1 for event in rejected if event.get("reason") == "invalid"
         ),

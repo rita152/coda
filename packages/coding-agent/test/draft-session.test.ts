@@ -40,10 +40,18 @@ describe("DraftSession", () => {
 			modelPath: "/tmp/model.png",
 		};
 		draft.registerMedia([registration]);
-		draft.stageInitialChanges([{ type: "permission_selected", profile: "read-only" }]);
+		draft.stageInitialChanges([
+			{
+				type: "project_trust_changed",
+				trust: { workspace: "/workspace", path: "/workspace/AGENTS.md", sha256: "a".repeat(64) },
+			},
+		]);
 
 		await Promise.all([
-			draft.record({ type: "permission_selected", profile: "read-only" }),
+			draft.record({
+				type: "project_trust_changed",
+				trust: { workspace: "/workspace", path: "/workspace/AGENTS.md", sha256: "b".repeat(64) },
+			}),
 			draft.record({
 				type: "model_selected",
 				model: { provider: "provider", id: "model" },
@@ -55,7 +63,7 @@ describe("DraftSession", () => {
 		expect(draft.materialized).toBe(true);
 		expect(target.registerMedia).toHaveBeenCalledWith([registration]);
 		expect(target.record).toHaveBeenCalledTimes(3);
-		expect(target.record).toHaveBeenNthCalledWith(1, { type: "permission_selected", profile: "read-only" });
+		expect(target.record).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "project_trust_changed" }));
 		await draft.close();
 		expect(target.close).toHaveBeenCalledOnce();
 	});
@@ -76,7 +84,11 @@ describe("DraftSession", () => {
 		const history = draft.history;
 
 		expect(history.read().messages).toEqual([]);
-		await draft.record({ type: "permission_selected", profile: "read-only" });
+		await draft.record({
+			type: "model_selected",
+			model: { provider: "provider", id: "model" },
+			reasoning: "medium",
+		});
 		expect(history.read().messages).toMatchObject([{ id: "message:restored", role: "user" }]);
 		await draft.close();
 	});

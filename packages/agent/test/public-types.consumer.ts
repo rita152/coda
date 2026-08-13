@@ -42,7 +42,6 @@ export function composeAgent(clock: Clock, idGenerator: IdGenerator): Agent {
 	return new Agent({
 		clock,
 		idGenerator,
-		policyGate: { check: async () => ({ decision: "allow" }) },
 		stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		tools: [lookup],
 	});

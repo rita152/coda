@@ -1,10 +1,7 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import type { PermissionAuditSink } from "../permissions/audit.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
-import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { toolFailure } from "./failure.ts";
@@ -26,10 +23,8 @@ const MAX_LINE_CHARACTERS = 500;
 export function createGrepTool(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ModelProcessRunner;
-	readonly permissions: PermissionEngine;
+	readonly processRunner: ProcessRunner;
 	readonly runtime: SearchExecutableRuntime;
-	readonly onAudit?: PermissionAuditSink;
 }): AgentTool<typeof GrepParameters> {
 	const { fileSystem, workspace } = options;
 	return {
@@ -51,48 +46,13 @@ export function createGrepTool(options: {
 
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
-			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "grep", "read", options.permissions)) {
-				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
-					code: "access_denied",
-					path: root.canonicalPath,
-				});
-			}
+			const root = await workspace.resolvePath(requestedRoot);
 			if (!root.exists) {
 				return toolFailure(`Path does not exist: ${root.canonicalPath}`, {
 					code: "not_found",
 					path: root.canonicalPath,
 				});
 			}
-			const protectedRootGranted = workspace.isPathGranted(context.invocationId, "grep", "read", root.canonicalPath);
-			const protectedExclusions = protectedRootGranted
-				? []
-				: [
-						"--glob",
-						"!.git/**",
-						"--glob",
-						"!.coda/**",
-						"--glob",
-						"!.ssh/**",
-						"--glob",
-						"!.env",
-						"--glob",
-						"!.env.*",
-						"--glob",
-						".env.example",
-						...[
-							"id_dsa",
-							"id_ecdsa",
-							"id_ed25519",
-							"id_rsa",
-							"*.cer",
-							"*.crt",
-							"*.key",
-							"*.p12",
-							"*.pem",
-							"*.pfx",
-						].flatMap((pattern) => ["--glob", `!${pattern}`]),
-					];
 			const external = await runOptionalSearchExecutable({
 				executable: "rg",
 				args: [
@@ -103,7 +63,6 @@ export function createGrepTool(options: {
 					"--color",
 					"never",
 					"--hidden",
-					...protectedExclusions,
 					"--glob",
 					"!node_modules/**",
 					...(arguments_.ignoreCase ? ["--ignore-case"] : []),
@@ -115,10 +74,8 @@ export function createGrepTool(options: {
 				workspaceRoot: workspace.root,
 				fileSystem,
 				processRunner: options.processRunner,
-				permissions: options.permissions,
 				runtime: options.runtime,
 				context,
-				onAudit: options.onAudit,
 			});
 			if (external) {
 				if (external.timedOut) {
@@ -138,20 +95,8 @@ export function createGrepTool(options: {
 					if (!line) continue;
 					const match = /^(.+?):(\d+):(\d+):(.*)$/.exec(line);
 					if (!match) continue;
-					const resolved = await workspace.resolvePath(match[1]!, "read");
-					if (
-						!resolved.exists ||
-						!hasPermissionedPathAccess(
-							workspace,
-							resolved,
-							context.invocationId,
-							"grep",
-							"read",
-							options.permissions,
-						)
-					) {
-						continue;
-					}
+					const resolved = await workspace.resolvePath(match[1]!);
+					if (!resolved.exists) continue;
 					const text = await readSearchableText(fileSystem, resolved.canonicalPath);
 					if (text === undefined) continue;
 					const lineNumber = Number.parseInt(match[2]!, 10);
@@ -179,14 +124,7 @@ export function createGrepTool(options: {
 					details: { count: matches.length, truncated, engine: "rg" },
 				};
 			}
-			const files = await walkFiles(
-				workspace,
-				fileSystem,
-				arguments_.path ?? ".",
-				context,
-				"grep",
-				options.permissions,
-			);
+			const files = await walkFiles(workspace, fileSystem, arguments_.path ?? ".", context);
 			const matches: string[] = [];
 			let visibleCharacters = 0;
 			let truncated = false;

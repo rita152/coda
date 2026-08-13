@@ -2,8 +2,6 @@ import { join, relative, sep } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".coda", "node_modules"]);
@@ -26,14 +24,9 @@ export async function walkEntries(
 	workspace: Workspace,
 	fileSystem: FileSystem,
 	requestedRoot: string,
-	context: Pick<ToolExecutionContext, "invocationId" | "signal">,
-	toolName: "find" | "grep",
-	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
+	context: Pick<ToolExecutionContext, "signal">,
 ): Promise<readonly WalkedEntry[]> {
-	const root = await workspace.resolvePath(requestedRoot, "read");
-	if (!hasPermissionedPathAccess(workspace, root, context.invocationId, toolName, "read", permissions)) {
-		throw new Error(`Path access was not granted: ${root.canonicalPath}`);
-	}
+	const root = await workspace.resolvePath(requestedRoot);
 	if (!root.exists) throw new Error(`Path does not exist: ${root.canonicalPath}`);
 
 	const entries: WalkedEntry[] = [];
@@ -44,13 +37,7 @@ export async function walkEntries(
 		context.signal.throwIfAborted();
 		const status = await fileSystem.stat(canonicalPath);
 		if (status.kind === "file") {
-			const resolved = await workspace.resolvePath(canonicalPath, "read");
-			if (
-				visitedFiles.has(canonicalPath) ||
-				!hasPermissionedPathAccess(workspace, resolved, context.invocationId, toolName, "read", permissions)
-			) {
-				return;
-			}
+			if (visitedFiles.has(canonicalPath)) return;
 			visitedFiles.add(canonicalPath);
 			entries.push({ canonicalPath, relativePath: displayPath(workspace, canonicalPath), kind: "file" });
 			return;
@@ -65,13 +52,8 @@ export async function walkEntries(
 			if (entry.kind === "directory" && IGNORED_DIRECTORY_NAMES.has(entry.name)) continue;
 			const requestedChild = join(canonicalPath, entry.name);
 			try {
-				const child = await workspace.resolvePath(requestedChild, "read");
-				if (
-					!child.exists ||
-					!hasPermissionedPathAccess(workspace, child, context.invocationId, toolName, "read", permissions)
-				) {
-					continue;
-				}
+				const child = await workspace.resolvePath(requestedChild);
+				if (!child.exists) continue;
 				const childStatus = await fileSystem.stat(child.canonicalPath);
 				if (childStatus.kind === "directory" && !visitedDirectories.has(child.canonicalPath)) {
 					entries.push({
@@ -95,13 +77,9 @@ export async function walkFiles(
 	workspace: Workspace,
 	fileSystem: FileSystem,
 	requestedRoot: string,
-	context: Pick<ToolExecutionContext, "invocationId" | "signal">,
-	toolName: "find" | "grep",
-	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
+	context: Pick<ToolExecutionContext, "signal">,
 ): Promise<readonly WalkedFile[]> {
-	return (await walkEntries(workspace, fileSystem, requestedRoot, context, toolName, permissions)).filter(
-		(entry) => entry.kind === "file",
-	);
+	return (await walkEntries(workspace, fileSystem, requestedRoot, context)).filter((entry) => entry.kind === "file");
 }
 
 export async function readSearchableText(fileSystem: FileSystem, path: string): Promise<string | undefined> {

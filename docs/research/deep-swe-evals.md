@@ -143,8 +143,6 @@ coda --print --json \
   --model opencode-go/deepseek-v4-flash \
   --reasoning max \
   --workspace /app \
-  --sandbox danger-full-access \
-  --ask-for-approval never \
   '<instruction>'
 ```
 

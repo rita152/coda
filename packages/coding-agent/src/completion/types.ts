@@ -52,7 +52,7 @@ export interface CompletionVerificationEvidence extends CompletionEvidencePoint 
 export interface CompletionRelevantFailure {
 	readonly key: string;
 	readonly kind: "evidence" | "mutation" | "verification";
-	readonly status: "error" | "denied" | "aborted" | "infra_error";
+	readonly status: "error" | "aborted" | "infra_error";
 	readonly sequence: number;
 	readonly invocationId: string;
 	readonly summary: string;

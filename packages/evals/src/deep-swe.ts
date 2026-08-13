@@ -155,7 +155,6 @@ export interface DeepSwePierJobOptions {
 	readonly runControlStationaryTurns?: number;
 	readonly adapterFinalizeMarginSec?: number;
 	readonly pierHardTimeoutSec?: number;
-	readonly allowAllCommands?: boolean;
 	readonly adapterImportPath?: string;
 	readonly quiet?: boolean;
 }
@@ -193,7 +192,6 @@ export interface DeepSwePierJobConfig {
 				readonly run_control_stationary_turns: number;
 				readonly adapter_finalize_margin_sec: number;
 				readonly pier_hard_timeout_sec: number;
-				readonly allow_all_commands: boolean;
 				readonly harness_revision: string;
 			};
 			readonly env: {
@@ -237,7 +235,6 @@ export interface DeepSweRunLock {
 			readonly adapterFinalizeMarginSec: number;
 			readonly pierHardTimeoutSec: number;
 		};
-		readonly allowAllCommands: boolean;
 	};
 	readonly execution: {
 		readonly round: number;
@@ -385,7 +382,6 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 					run_control_stationary_turns: runControlStationaryTurns,
 					adapter_finalize_margin_sec: runControl.adapterFinalizeMarginSec,
 					pier_hard_timeout_sec: runControl.pierHardTimeoutSec,
-					allow_all_commands: options.allowAllCommands ?? false,
 					harness_revision: revision,
 				},
 				env: {
@@ -441,7 +437,6 @@ export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRun
 				adapterFinalizeMarginSec: config.agents[0].kwargs.adapter_finalize_margin_sec,
 				pierHardTimeoutSec: config.agents[0].kwargs.pier_hard_timeout_sec,
 			},
-			allowAllCommands: config.agents[0].kwargs.allow_all_commands,
 		},
 		execution: {
 			round: options.round,

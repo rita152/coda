@@ -11,7 +11,7 @@ Constraints:
 
 - never replay automatically;
 - `replay: never` remains skip-only;
-- re-run lookup, schema validation, Policy Gate approval, and cancellation;
+- re-run lookup, schema validation, execution, and cancellation;
 - allocate a new Tool Invocation identity while preserving the Provider Tool
   Call relationship required by the transcript;
 - journal the new start before side effects and finish immediately after

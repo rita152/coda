@@ -2,10 +2,7 @@ import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ProcessRunResult } from "../host/process-runner.ts";
-import type { PermissionAuditSink } from "../permissions/audit.ts";
-import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { ProcessRunner, ProcessRunResult } from "../host/process-runner.ts";
 
 export interface SearchExecutableRuntime {
 	readonly homeDirectory: string;
@@ -38,7 +35,6 @@ async function resolveSearchExecutable(options: {
 	readonly name: "fd" | "rg";
 	readonly path: string | undefined;
 	readonly workspaceRoot: string;
-	readonly writableRoots: readonly string[] | "full-disk";
 	readonly temporaryDirectory: string | undefined;
 	readonly fileSystem: FileSystem;
 }): Promise<string | undefined> {
@@ -47,7 +43,6 @@ async function resolveSearchExecutable(options: {
 		tmpdir(),
 		"/tmp",
 		...(options.temporaryDirectory ? [options.temporaryDirectory] : []),
-		...(options.writableRoots === "full-disk" ? [] : options.writableRoots),
 	]);
 	for (const directory of (options.path ?? "").split(delimiter)) {
 		if (!isAbsolute(directory)) continue;
@@ -71,11 +66,9 @@ export async function runOptionalSearchExecutable(options: {
 	readonly args: readonly string[];
 	readonly workspaceRoot: string;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ModelProcessRunner;
-	readonly permissions: PermissionEngine;
+	readonly processRunner: ProcessRunner;
 	readonly runtime: SearchExecutableRuntime;
 	readonly context: Pick<ToolExecutionContext, "invocationId" | "signal">;
-	readonly onAudit?: PermissionAuditSink;
 }): Promise<ProcessRunResult | undefined> {
 	const temporaryDirectory = join(options.runtime.homeDirectory, ".coda", "tmp");
 	await options.fileSystem.makeDirectory(temporaryDirectory, { recursive: true, mode: 0o700 });
@@ -85,36 +78,25 @@ export async function runOptionalSearchExecutable(options: {
 	const environment: Record<string, string> = { LC_ALL: "C" };
 	if (options.runtime.environment.PATH) environment.PATH = options.runtime.environment.PATH;
 	try {
-		const readAccessPolicy = options.permissions.readAccessPolicyFor(options.context.invocationId);
-		if (!readAccessPolicy) throw new Error("Search helper was not authorized by the Permission Engine");
-		const policy = readAccessPolicy.sandboxPolicy;
 		const executable = await resolveSearchExecutable({
 			name: options.executable,
 			path: options.runtime.environment.PATH,
 			workspaceRoot: options.workspaceRoot,
-			writableRoots: policy.writableRoots,
 			temporaryDirectory: options.runtime.environment.TMPDIR,
 			fileSystem: options.fileSystem,
 		});
 		if (!executable) return undefined;
-		const result = await options.processRunner.run(
-			{
-				executable,
-				args: options.args,
-				cwd: options.workspaceRoot,
-				environment,
-				signal: options.context.signal,
-				timeoutMs: 30_000,
-				maxOutputBytes: 512 * 1024,
-				maxOutputLines: 4_000,
-				overflowPath: path,
-			},
-			{
-				readAccessPolicy,
-				auditContext: { invocationId: options.context.invocationId, toolName: options.executable },
-				audit: options.onAudit,
-			},
-		);
+		const result = await options.processRunner.run({
+			executable,
+			args: options.args,
+			cwd: options.workspaceRoot,
+			environment,
+			signal: options.context.signal,
+			timeoutMs: 30_000,
+			maxOutputBytes: 512 * 1024,
+			maxOutputLines: 4_000,
+			overflowPath: path,
+		});
 		if (result.exitCode !== 0 && /(?:execvp\(\)|exec):?.*(?:no such file|not found)/iu.test(result.stderr)) {
 			return undefined;
 		}

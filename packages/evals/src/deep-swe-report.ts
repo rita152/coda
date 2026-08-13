@@ -75,7 +75,6 @@ export interface DeepSweTrialReport {
 	readonly changedPathCount?: number;
 	readonly toolIssueCount?: number;
 	readonly toolRejectionCount?: number;
-	readonly policyRejectionCount?: number;
 	readonly invalidToolCallCount?: number;
 	readonly unresolvedFailureCount?: number;
 	readonly lengthTruncationCount?: number;
@@ -111,7 +110,6 @@ export interface DeepSweEvaluationReport {
 		readonly nonzeroCodaExits: number;
 		readonly toolIssueCount: number;
 		readonly toolRejectionCount: number;
-		readonly policyRejectionCount: number;
 		readonly invalidToolCallCount: number;
 		readonly unresolvedFailureCount: number;
 		readonly lengthTruncationCount: number;
@@ -136,7 +134,6 @@ export interface DeepSweRoundReport {
 	readonly maxOutputTokens?: number;
 	readonly maxTurns?: number;
 	readonly runBudgetEnabled?: boolean;
-	readonly allowAllCommands?: boolean;
 	readonly experiment?: DeepSweExperimentPlan;
 	readonly report: DeepSweEvaluationReport;
 }
@@ -156,7 +153,6 @@ export interface DeepSweCampaignReport {
 		readonly maxOutputTokens?: number;
 		readonly maxTurns?: number;
 		readonly runBudgetEnabled?: boolean;
-		readonly allowAllCommands?: boolean;
 		readonly experiment?: DeepSweExperimentPlan;
 		readonly summary: DeepSweEvaluationReport["summary"];
 		readonly deltaPassedFromPrevious: number;
@@ -506,9 +502,6 @@ function projectPierTrial(
 		...(finiteNumber(metadata?.tool_rejection_count) !== undefined
 			? { toolRejectionCount: finiteNumber(metadata?.tool_rejection_count)! }
 			: {}),
-		...(finiteNumber(metadata?.policy_rejection_count) !== undefined
-			? { policyRejectionCount: finiteNumber(metadata?.policy_rejection_count)! }
-			: {}),
 		...(finiteNumber(metadata?.invalid_tool_call_count) !== undefined
 			? { invalidToolCallCount: finiteNumber(metadata?.invalid_tool_call_count)! }
 			: {}),
@@ -652,7 +645,6 @@ function buildReport(
 				.length,
 			toolIssueCount: sumKnown(ordered.map(({ toolIssueCount }) => toolIssueCount)),
 			toolRejectionCount: sumKnown(ordered.map(({ toolRejectionCount }) => toolRejectionCount)),
-			policyRejectionCount: sumKnown(ordered.map(({ policyRejectionCount }) => policyRejectionCount)),
 			invalidToolCallCount: sumKnown(ordered.map(({ invalidToolCallCount }) => invalidToolCallCount)),
 			unresolvedFailureCount: sumKnown(ordered.map(({ unresolvedFailureCount }) => unresolvedFailureCount)),
 			lengthTruncationCount: sumKnown(ordered.map(({ lengthTruncationCount }) => lengthTruncationCount)),
@@ -776,7 +768,6 @@ function projectStoredTrial(
 		...optionalNumber("changedPathCount"),
 		...optionalNumber("toolIssueCount"),
 		...optionalNumber("toolRejectionCount"),
-		...optionalNumber("policyRejectionCount"),
 		...optionalNumber("invalidToolCallCount"),
 		...optionalNumber("unresolvedFailureCount"),
 		...optionalNumber("lengthTruncationCount"),
@@ -855,7 +846,6 @@ function experimentRoundInput(input: DeepSweRoundReport): DeepSweExperimentRound
 			maxOutputTokens: input.maxOutputTokens,
 			runBudgetEnabled: input.runBudgetEnabled,
 			maxTurns: input.runBudgetEnabled === false ? "disabled" : input.maxTurns,
-			allowAllCommands: input.allowAllCommands,
 			timeBlock: experiment?.timeBlock,
 			attemptIdentityScheme: experiment?.attemptIdentityScheme,
 			seedAvailability: experiment?.seed.availability,
@@ -906,7 +896,6 @@ export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): Dee
 				...(current.maxOutputTokens !== undefined ? { maxOutputTokens: current.maxOutputTokens } : {}),
 				...(current.maxTurns !== undefined ? { maxTurns: current.maxTurns } : {}),
 				...(current.runBudgetEnabled !== undefined ? { runBudgetEnabled: current.runBudgetEnabled } : {}),
-				...(current.allowAllCommands !== undefined ? { allowAllCommands: current.allowAllCommands } : {}),
 				...(current.experiment !== undefined ? { experiment: current.experiment } : {}),
 				summary: current.report.summary,
 				deltaPassedFromPrevious: previous ? current.report.summary.passed - previous.report.summary.passed : 0,

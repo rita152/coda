@@ -45,7 +45,6 @@ class CodaAgent(BaseAgent):
         run_control_stationary_turns: int = 4,
         adapter_finalize_margin_sec: int = 240,
         pier_hard_timeout_sec: int = 5_400,
-        allow_all_commands: bool = False,
         harness_revision: str = "unknown",
         extra_env: dict[str, str] | None = None,
         agent_timeout_sec: float | None = None,
@@ -87,7 +86,6 @@ class CodaAgent(BaseAgent):
                 "CodaAgent requires run_control_work_sec + run_control_grace_sec + "
                 "adapter_finalize_margin_sec < pier_hard_timeout_sec"
             )
-        self._allow_all_commands = bool(allow_all_commands)
         self._harness_revision = harness_revision
         self._extra_env = dict(extra_env or {})
         self._agent_timeout_sec = int(agent_timeout_sec) if agent_timeout_sec else None
@@ -264,7 +262,6 @@ class CodaAgent(BaseAgent):
             max_output_tokens=self._max_output_tokens,
             run_budget_enabled=self._run_budget_enabled,
             max_turns=self._max_turns,
-            allow_all_commands=self._allow_all_commands,
             event_stream_mode=self._event_stream_mode,
             run_control_work_sec=self._run_control_work_sec,
             run_control_grace_sec=self._run_control_grace_sec,
@@ -287,11 +284,6 @@ printf '{PREPARE_MARKER}\t%s\n' "$initial_head"
     def _coda_command(self, agent_dir: str) -> str:
         node = "/installed-agent/coda/node/bin/node"
         entry = "/installed-agent/coda/packages/coding-agent/dist/bin.js"
-        permission_args = (
-            "--dangerously-bypass-approvals-and-sandbox"
-            if self._allow_all_commands
-            else "--sandbox danger-full-access --ask-for-approval never"
-        )
         run_budget_args = (
             f"--max-turns {self._max_turns}"
             if self._run_budget_enabled
@@ -309,7 +301,6 @@ set +e
   --run-control-work-ms {self._run_control_work_sec * 1000} \\
   --run-control-grace-ms {self._run_control_grace_sec * 1000} \\
   --run-control-stationary-turns {self._run_control_stationary_turns} \\
-  {permission_args} \\
   --trust-project --no-session \\
   < {shlex.quote(f'{agent_dir}/instruction.md')} \\
   >> {shlex.quote(f'{agent_dir}/coda.jsonl')} \\

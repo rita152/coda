@@ -21,8 +21,6 @@ import {
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import type { CommandDefinition } from "../commands/types.ts";
-import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
-import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
 import { renderRunEvidenceSummary } from "../run-evidence/presentation.ts";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
@@ -73,8 +71,6 @@ export interface ChatComponentOptions {
 	readonly modelLabel: string;
 	readonly reasoning: string;
 	readonly clock: Clock;
-	readonly permissionLabel?: string;
-	readonly permissionWarning?: boolean;
 	readonly statusLine: () => StatusLineSnapshot;
 	readonly onSubmit: (
 		input: string,
@@ -224,8 +220,6 @@ export class ChatComponent extends Component {
 	#recoverableCards: RecoverablePromptCard[] = [];
 	#activeFollowUp?: RecoverablePromptCard;
 	#nextProvisionalId = 0;
-	#permissionLabel?: string;
-	#permissionWarning = false;
 	#modelLabel: string;
 	#reasoning: string;
 
@@ -246,8 +240,6 @@ export class ChatComponent extends Component {
 				this.invalidate();
 			},
 		});
-		this.#permissionLabel = options.permissionLabel;
-		this.#permissionWarning = options.permissionWarning ?? riskyPermissionLabel(options.permissionLabel);
 		this.#modelLabel = options.modelLabel;
 		this.#reasoning = options.reasoning;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
@@ -268,12 +260,6 @@ export class ChatComponent extends Component {
 
 	get running(): boolean {
 		return this.#running || this.#shellRunning;
-	}
-
-	setPermissionLabel(label: string, warning = riskyPermissionLabel(label)): void {
-		this.#permissionLabel = label;
-		this.#permissionWarning = warning;
-		this.invalidate();
 	}
 
 	setModelPresentation(modelLabel: string, reasoning: string, activitySummaryMode?: ActivitySummaryMode): void {
@@ -336,20 +322,6 @@ export class ChatComponent extends Component {
 			if (remaining > 0) intervals.push(remaining);
 		}
 		return intervals.length > 0 ? Math.min(...intervals) : undefined;
-	}
-
-	setAwaitingApproval(request: PermissionApprovalRequest): void {
-		this.#activity.setAwaitingApproval(request, this.#options.clock.now());
-		if (this.#timeline.setAwaitingApproval(request.invocationId, request.toolName ?? request.kind)) {
-			this.#viewport.noteUpdate();
-		}
-		this.invalidate();
-	}
-
-	setApprovalResult(invocationId: string, approval: ApprovalDecisionAuditEvent): void {
-		this.#activity.setApprovalResult(invocationId, this.#options.clock.now());
-		if (this.#timeline.setApprovalResult(invocationId, approval)) this.#viewport.noteUpdate();
-		this.invalidate();
 	}
 
 	setActivityOverride(key: string, text: string, present: boolean, motion: "active" | "waiting" = "waiting"): void {
@@ -1393,9 +1365,7 @@ export class ChatComponent extends Component {
 			: undefined;
 		const toolResultImagesSupported = this.#options.toolResultImagesSupported ?? false;
 		const animated =
-			entry.kind === "tool" &&
-			(entry.state === "running" || entry.state === "awaiting_approval") &&
-			(this.#options.motion ?? "full") === "full";
+			entry.kind === "tool" && entry.state === "running" && (this.#options.motion ?? "full") === "full";
 		const cached = this.#timelineBlockCache.get(entry.id);
 		if (
 			!animated &&
@@ -1490,12 +1460,7 @@ export class ChatComponent extends Component {
 		}
 		return renderStatusLine(
 			this.#options.statusLine(),
-			{
-				modelLabel: this.#modelLabel,
-				reasoning: this.#reasoning,
-				permissionLabel: this.#permissionLabel,
-				permissionWarning: this.#permissionWarning,
-			},
+			{ modelLabel: this.#modelLabel, reasoning: this.#reasoning },
 			width,
 			this.#theme,
 		);
@@ -1789,8 +1754,4 @@ function fitFooter(width: number, candidates: readonly string[]): string {
 
 function actionFooter(width: number, candidates: readonly string[]): readonly [string, string] {
 	return [fitFooter(width, candidates), ""];
-}
-
-function riskyPermissionLabel(label: string | undefined): boolean {
-	return /(?:Full Access|\/\s*never$)/iu.test(label ?? "");
 }

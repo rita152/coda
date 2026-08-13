@@ -1,8 +1,6 @@
-import type { AgentEvent, ToolInvocation } from "@coda/agent";
+import type { AgentEvent } from "@coda/agent";
 import type { Api } from "@coda/ai";
 import { sanitizeTerminalText } from "@coda/tui";
-import type { PermissionApprovalRequest } from "../permissions/permission-engine.ts";
-import { toolActionTitle } from "./tool-presentation.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
 
 export type ActivitySummaryMode = "native" | "fallback";
@@ -14,20 +12,9 @@ export interface ActivityStatus {
 	readonly lastEventAt: number;
 }
 
-interface ToolActivity {
-	readonly invocation: ToolInvocation;
-}
-
 interface ThinkingActivity {
 	text: string;
 	readonly startedAt: number;
-}
-
-interface ApprovalActivity {
-	readonly invocationId: string;
-	readonly action: string;
-	readonly startedAt: number;
-	readonly order: number;
 }
 
 interface RetryActivity {
@@ -75,9 +62,6 @@ export class ActivityProjection {
 	#summary?: string;
 	#summaryStartedAt?: number;
 	readonly #thinking = new Map<number, ThinkingActivity>();
-	readonly #tools = new Map<string, ToolActivity>();
-	readonly #approvals = new Map<string, ApprovalActivity>();
-	#approvalOrder = 0;
 	#retry?: RetryActivity;
 	#shell?: ShellActivity;
 	readonly #overrides = new Map<string, ActivityOverride>();
@@ -139,41 +123,12 @@ export class ActivityProjection {
 				this.#clearSummary();
 				break;
 			case "tool_execution_start":
-				this.#tools.set(event.invocation.id, {
-					invocation: event.invocation,
-				});
 				this.#retry = undefined;
-				break;
-			case "tool_execution_progress":
-				this.#tools.set(event.invocation.id, {
-					invocation: event.invocation,
-				});
-				break;
-			case "tool_execution_end":
-			case "tool_execution_rejected":
-				this.#tools.delete(event.invocation.id);
-				this.#approvals.delete(event.invocation.id);
 				break;
 			case "run_end":
 				this.#finishRun();
 				break;
 		}
-	}
-
-	setAwaitingApproval(request: PermissionApprovalRequest, at: number): void {
-		const invocation = this.#tools.get(request.invocationId)?.invocation;
-		this.#approvals.set(request.invocationId, {
-			invocationId: request.invocationId,
-			action: invocation ? toolActionTitle(invocation) : approvalAction(request),
-			startedAt: at,
-			order: ++this.#approvalOrder,
-		});
-		this.#noteEvent(at);
-	}
-
-	setApprovalResult(invocationId: string, at: number): void {
-		this.#approvals.delete(invocationId);
-		this.#noteEvent(at);
 	}
 
 	setOverride(
@@ -226,17 +181,6 @@ export class ActivityProjection {
 				lastEventAt,
 			};
 		}
-		if (this.#approvals.size > 0) {
-			const approval = [...this.#approvals.values()].reduce((earliest, candidate) =>
-				candidate.order < earliest.order ? candidate : earliest,
-			);
-			return {
-				text: `Waiting for approval — ${boundedInline(approval.action, 512)}`,
-				motion: "waiting",
-				startedAt: approval.startedAt,
-				lastEventAt,
-			};
-		}
 		if (this.#shell) {
 			return {
 				text: `Running ${this.#shell.command || "command"}`,
@@ -273,8 +217,6 @@ export class ActivityProjection {
 		this.#runSummaryMode ??= this.#selectedSummaryMode;
 		this.#preparingStartedAt = undefined;
 		this.#phaseStartedAt = at;
-		this.#tools.clear();
-		this.#approvals.clear();
 		this.#retry = undefined;
 		this.#shell = undefined;
 		this.#clearSummary();
@@ -285,8 +227,6 @@ export class ActivityProjection {
 		this.#runSummaryMode = undefined;
 		this.#preparingStartedAt = undefined;
 		this.#phaseStartedAt = undefined;
-		this.#tools.clear();
-		this.#approvals.clear();
 		this.#retry = undefined;
 		this.#overrides.clear();
 		this.#clearSummary();
@@ -388,21 +328,6 @@ function cleanSummaryText(value: string): string {
 function conciseSummaryCandidate(value: string): string | undefined {
 	if (!value || Array.from(value).length > MAX_PROVIDER_SUMMARY_CHARACTERS) return undefined;
 	return boundedInline(value, MAX_PROVIDER_SUMMARY_CHARACTERS);
-}
-
-function approvalAction(request: PermissionApprovalRequest): string {
-	if (request.command) return `Running ${boundedInline(request.command, 512)}`;
-	if (request.requestedPaths || request.canonicalPaths) {
-		const count = Math.max(request.requestedPaths?.length ?? 0, request.canonicalPaths?.length ?? 0);
-		const verb = request.operation === "write" ? "Writing" : "Reading";
-		return `${verb} ${count} path${count === 1 ? "" : "s"}`;
-	}
-	if (request.requestedPath || request.canonicalPath) {
-		const verb = request.operation === "write" ? "Writing" : "Reading";
-		return `${verb} ${boundedInline(request.requestedPath ?? request.canonicalPath ?? "path", 512)}`;
-	}
-	if (request.host) return `Connecting to ${boundedInline(request.host, 256)}`;
-	return `Calling ${boundedInline(request.toolName ?? request.kind, 256)}`;
 }
 
 function boundedInline(value: string, maximumCharacters: number): string {

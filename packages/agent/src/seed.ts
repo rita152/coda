@@ -68,7 +68,6 @@ function validateToolResultMessage(message: Record<string, unknown>): void {
 			!isRecord(message.observation) ||
 			(message.observation.status !== "ok" &&
 				message.observation.status !== "error" &&
-				message.observation.status !== "denied" &&
 				message.observation.status !== "aborted") ||
 			typeof message.observation.truncated !== "boolean" ||
 			(message.observation.outputRef !== undefined &&

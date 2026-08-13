@@ -11,7 +11,7 @@ Implement the public Command Registry, parser, ranked search, source labels, and
 - Core commands are eligible only from Composer offset zero; Extension candidates are eligible at offset zero or after whitespace.
 - Duplicate visible names remain separate by Command ID and source.
 - Tab completes, Enter dispatches the selected candidate, and Escape preserves raw Prompt submission.
-- `/permissions` remains a hidden alias; `/approvals` and `/attach` are removed.
+- Unknown Slash commands fall back to ordinary Prompt submission.
 - `/follow-up <text>` remains available only while the active Session is running.
 - Tests observe behavior through Registry, Parser, and Composer seams.
 

@@ -24,7 +24,6 @@ describe("System Prompt factory", () => {
 			clock: { now: () => 10 },
 			idGenerator: new TestIds(),
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			systemPrompt: () => `snapshot-${++snapshots}`,
 		});
@@ -72,7 +71,6 @@ describe("System Prompt factory", () => {
 					},
 				];
 			},
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		});
 
@@ -103,7 +101,6 @@ describe("System Prompt factory", () => {
 			clock,
 			idGenerator: new TestIds(),
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			beforeRun: ({ source, inputMessage }) => {
 				const content = inputMessage.message.content;
@@ -126,7 +123,6 @@ describe("System Prompt factory", () => {
 			clock: { now: () => 10 },
 			idGenerator: new TestIds(),
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				throw new Error("stream must not start");
 			},

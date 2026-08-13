@@ -129,7 +129,7 @@ interface AgentSeed {
 }
 ```
 
-The Seed contains no Model, Credential, active operation, Steering, pending Tool, approval, or persistence detail. Session recovery resolves interrupted Tools and Message/ToolResult relationships before creating it, and the Agent validates it again.
+The Seed contains no Model, Credential, active operation, Steering, pending Tool, or persistence detail. Session recovery resolves interrupted Tools and Message/ToolResult relationships before creating it, and the Agent validates it again.
 
 ## Deferred
 

@@ -132,10 +132,10 @@ describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-
 				messages: [
 					{
 						role: "toolResult",
-						toolCallId: "call:denied",
+						toolCallId: "call:error",
 						toolName: "bash",
 						content: [{ type: "text", text: "command returned zero" }],
-						observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+						observation: { status: "error", truncated: false, facts: { exitCode: 0 } },
 						isError: false,
 						timestamp: 1,
 					},
@@ -157,8 +157,8 @@ describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-
 			input: [
 				{
 					type: "function_call_output",
-					call_id: "call:denied",
-					output: expect.stringContaining('{"status":"denied","truncated":false,"facts":{"exitCode":0}}'),
+					call_id: "call:error",
+					output: expect.stringContaining('{"status":"error","truncated":false,"facts":{"exitCode":0}}'),
 				},
 			],
 		});

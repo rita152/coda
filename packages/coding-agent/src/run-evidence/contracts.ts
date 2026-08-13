@@ -125,7 +125,7 @@ export interface RunEvidenceToolIssue extends RunEvidenceToolIssueV1 {
 export interface RunEvidenceFailureV1 {
 	readonly kind: "attempt" | "tool" | "run";
 	readonly id: string;
-	readonly status: "error" | "denied" | "aborted" | "interrupted";
+	readonly status: "error" | "aborted" | "interrupted";
 	readonly summary: string;
 }
 

@@ -125,7 +125,7 @@ describe("CodingCompletionGate", () => {
 		);
 		const blocked = gate().evaluate(
 			input({
-				activity: failureActivity(failure("denied", "mutation")),
+				activity: failureActivity(failure("aborted", "mutation")),
 				finalWorkspace: workspace("after", true, ["src/value.ts"]),
 				repairAttempts: 1,
 			}),

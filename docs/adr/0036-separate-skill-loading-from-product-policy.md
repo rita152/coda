@@ -4,7 +4,7 @@ status: accepted
 
 # Separate Skill loading from product policy
 
-Coda implements Agent Skills format handling, bounded local discovery, canonical identity, strict validation, and exact-revision activation in a new leaf `@coda/skills` package. `@coda/coding-agent` continues to own roots, precedence, Workspace Skills Trust, model catalog rendering, invocation, approvals, Run snapshots, watchers, and UI. This boundary was chosen over both a fully stage-pluggable source pipeline and a host-owned local inventory because it keeps the common runtime interface deep without turning Coda policy or speculative remote distribution into the loader's public contract.
+Coda implements Agent Skills format handling, bounded local discovery, canonical identity, strict validation, and exact-revision activation in a new leaf `@coda/skills` package. `@coda/coding-agent` continues to own roots, precedence, model catalog rendering, invocation, Run snapshots, watchers, and UI. This boundary was chosen over both a fully stage-pluggable source pipeline and a host-owned local inventory because it keeps the common runtime interface deep without turning Coda product behavior or speculative remote distribution into the loader's public contract.
 
 The neutral Agent Skills specification and its official client guide are the sole compatibility target. Coda discovers only `<Workspace>/.agents/skills` and `~/.agents/skills`, with project precedence, and does not scan `.coda`, Codex, Pi, Grok Build, OpenCode, ancestor, or other client-specific roots. The loader interprets only standard frontmatter fields; non-standard top-level fields and companion vendor manifests have no product semantics.
 

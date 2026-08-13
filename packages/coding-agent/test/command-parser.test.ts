@@ -15,20 +15,20 @@ describe("parseCommandQuery", () => {
 			range: { start: 4, end: 7 },
 		});
 		expect(parseCommandQuery("use/path", 8)).toBeUndefined();
-		expect(parseCommandQuery(" /permission", 12)).toEqual({
+		expect(parseCommandQuery(" /model", 7)).toEqual({
 			location: "token_boundary",
-			query: "permission",
-			range: { start: 1, end: 12 },
+			query: "model",
+			range: { start: 1, end: 7 },
 		});
 	});
 
 	it("resolves only Core submissions allowed by the command argument policy", () => {
 		const registry = new CommandRegistry();
 		registry.register({
-			id: "core:permission",
-			name: "permission",
-			aliases: ["permissions"],
-			title: "Permission",
+			id: "core:model",
+			name: "model",
+			aliases: ["models"],
+			title: "Model",
 			source: "core",
 			kind: "control",
 			triggerScope: "composer_start",
@@ -44,16 +44,16 @@ describe("parseCommandQuery", () => {
 			arguments: { kind: "tail", required: true },
 		});
 
-		expect(resolveCommandInvocation(registry, "/PERMISSIONS")).toMatchObject({
-			command: { id: "core:permission" },
+		expect(resolveCommandInvocation(registry, "/MODELS")).toMatchObject({
+			command: { id: "core:model" },
 			argument: undefined,
 		});
-		expect(resolveCommandInvocation(registry, "/permission workspace")).toBeUndefined();
+		expect(resolveCommandInvocation(registry, "/model extra")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/follow-up check the tests")).toMatchObject({
 			command: { id: "core:follow-up" },
 			argument: "check the tests",
 		});
 		expect(resolveCommandInvocation(registry, "/follow-up")).toBeUndefined();
-		expect(resolveCommandInvocation(registry, " /permission")).toBeUndefined();
+		expect(resolveCommandInvocation(registry, " /model")).toBeUndefined();
 	});
 });

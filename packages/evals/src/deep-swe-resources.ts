@@ -41,7 +41,6 @@ export interface DeepSweJsonlReduction {
 	readonly lengthTruncationCount: number;
 	readonly budgetExhaustionLimits: readonly string[];
 	readonly toolRejectionCount: number;
-	readonly policyRejectionCount: number;
 	readonly invalidToolCallCount: number;
 }
 
@@ -121,7 +120,6 @@ export class DeepSweEventResourceReducer {
 	#latestEventAt: number | undefined;
 	#lengthTruncationCount = 0;
 	#toolRejectionCount = 0;
-	#policyRejectionCount = 0;
 	#invalidToolCallCount = 0;
 
 	accept(value: unknown): void {
@@ -155,7 +153,6 @@ export class DeepSweEventResourceReducer {
 			}
 			case "tool_execution_rejected":
 				this.#toolRejectionCount++;
-				if (event.reason === "policy") this.#policyRejectionCount++;
 				if (event.reason === "invalid") this.#invalidToolCallCount++;
 				break;
 		}
@@ -168,7 +165,6 @@ export class DeepSweEventResourceReducer {
 			lengthTruncationCount: this.#lengthTruncationCount,
 			budgetExhaustionLimits: [...this.#budgetExhaustionLimits],
 			toolRejectionCount: this.#toolRejectionCount,
-			policyRejectionCount: this.#policyRejectionCount,
 			invalidToolCallCount: this.#invalidToolCallCount,
 		};
 	}

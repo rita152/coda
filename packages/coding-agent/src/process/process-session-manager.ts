@@ -1,13 +1,11 @@
 import type { IdGenerator } from "@coda/agent";
-import type { SandboxViolation } from "@coda/sandbox";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ProcessOutputChunk } from "../host/process-runner.ts";
 import type {
-	ModelProcessAuthority,
-	ModelProcessRunResult,
-	ModelProcessSession,
-	ModelProcessSessionRunner,
-} from "../permissions/model-process-runner.ts";
+	ProcessOutputChunk,
+	ProcessRunResult,
+	ProcessSession,
+	ProcessSessionRunner,
+} from "../host/process-runner.ts";
 import {
 	createToolOutputCapture,
 	discardStoredToolOutput,
@@ -18,7 +16,7 @@ import {
 const DEFAULT_MAX_POLL_OUTPUT_BYTES = 50 * 1024;
 const DEFAULT_MAX_POLL_OUTPUT_LINES = 2_000;
 
-export type ProcessSessionState = "running" | "completed" | "failed" | "denied" | "stopped" | "stale";
+export type ProcessSessionState = "running" | "completed" | "failed" | "stopped" | "stale";
 
 export interface ProcessSessionSnapshot {
 	readonly processId: string;
@@ -31,8 +29,6 @@ export interface ProcessSessionSnapshot {
 	readonly signal?: NodeJS.Signals | null;
 	readonly timedOut: boolean;
 	readonly stderrPresent: boolean;
-	readonly backend?: ModelProcessRunResult["backend"];
-	readonly denial?: SandboxViolation;
 	readonly failure?: string;
 }
 
@@ -54,12 +50,12 @@ export interface ProcessSessionStartRequest {
 interface ProcessRecord {
 	readonly id: string;
 	readonly sessionId: string | undefined;
-	readonly handle: ModelProcessSession;
+	readonly handle: ProcessSession;
 	readonly output: IncrementalOutputWindow;
 	capture: ToolOutputCapture | undefined;
 	captureUsable: boolean;
 	stored: StoredToolOutput | undefined;
-	result: ModelProcessRunResult | undefined;
+	result: ProcessRunResult | undefined;
 	failure: string | undefined;
 	terminal: boolean;
 	explicitlyStopped: boolean;
@@ -141,7 +137,7 @@ function staleSnapshot(processId: string): ProcessSessionSnapshot {
 export class ProcessSessionManager {
 	readonly #fileSystem: FileSystem;
 	readonly #homeDirectory: string;
-	readonly #runner: ModelProcessSessionRunner;
+	readonly #runner: ProcessSessionRunner;
 	readonly #idGenerator: IdGenerator;
 	readonly #maxOutputBytes: number;
 	readonly #maxOutputLines: number;
@@ -152,7 +148,7 @@ export class ProcessSessionManager {
 	constructor(options: {
 		readonly fileSystem: FileSystem;
 		readonly homeDirectory: string;
-		readonly runner: ModelProcessSessionRunner;
+		readonly runner: ProcessSessionRunner;
 		readonly idGenerator: IdGenerator;
 		readonly maxPollOutputBytes?: number;
 		readonly maxPollOutputLines?: number;
@@ -171,7 +167,7 @@ export class ProcessSessionManager {
 		}
 	}
 
-	async start(request: ProcessSessionStartRequest, authority: ModelProcessAuthority): Promise<ProcessSessionSnapshot> {
+	async start(request: ProcessSessionStartRequest, sessionId?: string): Promise<ProcessSessionSnapshot> {
 		if (this.#closed) throw new Error("ProcessSessionManager is closed");
 		request.signal.throwIfAborted();
 		const id = this.#idGenerator.generate("process_session");
@@ -186,25 +182,22 @@ export class ProcessSessionManager {
 		const lifetime = new AbortController();
 		const abortLaunch = () => lifetime.abort();
 		request.signal.addEventListener("abort", abortLaunch, { once: true });
-		let handle: ModelProcessSession;
+		let handle: ProcessSession;
 		try {
-			handle = await this.#runner.start(
-				{
-					...request,
-					signal: lifetime.signal,
-					maxOutputBytes: this.#maxOutputBytes,
-					maxOutputLines: this.#maxOutputLines,
-					onOutput: (chunk) => {
-						if (chunk.channel === "stderr" && chunk.text.length > 0) {
-							stderrPresent = true;
-							if (activeRecord) activeRecord.stderrPresent = true;
-						}
-						output.append(chunk);
-						capture?.append(chunk);
-					},
+			handle = await this.#runner.start({
+				...request,
+				signal: lifetime.signal,
+				maxOutputBytes: this.#maxOutputBytes,
+				maxOutputLines: this.#maxOutputLines,
+				onOutput: (chunk) => {
+					if (chunk.channel === "stderr" && chunk.text.length > 0) {
+						stderrPresent = true;
+						if (activeRecord) activeRecord.stderrPresent = true;
+					}
+					output.append(chunk);
+					capture?.append(chunk);
 				},
-				authority,
-			);
+			});
 		} catch (error) {
 			const stored = await capture?.finish();
 			if (stored) await discardStoredToolOutput(this.#fileSystem, stored);
@@ -215,7 +208,7 @@ export class ProcessSessionManager {
 
 		const record: ProcessRecord = {
 			id,
-			sessionId: authority.sessionId,
+			sessionId,
 			handle,
 			output,
 			capture,
@@ -341,13 +334,11 @@ export class ProcessSessionManager {
 			? "running"
 			: record.failure
 				? "failed"
-				: result?.denial
-					? "denied"
-					: record.explicitlyStopped
-						? "stopped"
-						: result?.timedOut || (result?.exitCode !== 0 && result?.exitCode !== undefined)
-							? "failed"
-							: "completed";
+				: record.explicitlyStopped
+					? "stopped"
+					: result?.timedOut || (result?.exitCode !== 0 && result?.exitCode !== undefined)
+						? "failed"
+						: "completed";
 		const storedTruncated = record.outputOmitted && record.stored?.storedTruncated === true;
 		const truncated = output.truncated || storedTruncated;
 		const outputRef =
@@ -364,8 +355,6 @@ export class ProcessSessionManager {
 			...(record.terminal ? { exitCode: result?.exitCode ?? null, signal: result?.signal ?? null } : {}),
 			timedOut: result?.timedOut ?? false,
 			stderrPresent: record.stderrPresent,
-			backend: record.handle.backend,
-			...(result?.denial ? { denial: result.denial } : {}),
 			...(record.failure ? { failure: record.failure } : {}),
 		});
 		if (consumeTerminal && record.terminal) {

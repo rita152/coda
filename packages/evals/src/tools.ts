@@ -1,7 +1,7 @@
-import type { AgentTool, PolicyGate, ToolExecutionOutput, ToolPolicyRequest } from "@coda/agent";
+import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FixtureCheck, FixtureManifest } from "./fixture-types.ts";
-import { type FixtureRepository, normalizeRepositoryPath, RepositoryPathError } from "./repository.ts";
+import { type FixtureRepository, normalizeRepositoryPath } from "./repository.ts";
 
 export interface CheckResult {
 	readonly id: string;
@@ -87,28 +87,6 @@ const EmptyParameters = Type.Object({}, { additionalProperties: false });
 const BashParameters = Type.Object(
 	{
 		command: Type.String({ minLength: 1 }),
-		sandbox_permissions: Type.Optional(
-			Type.Union([
-				Type.Literal("use_default"),
-				Type.Literal("require_escalated"),
-				Type.Literal("with_additional_permissions"),
-			]),
-		),
-		justification: Type.Optional(Type.String()),
-		additional_permissions: Type.Optional(
-			Type.Object(
-				{
-					network: Type.Optional(Type.Object({ enabled: Type.Optional(Type.Boolean()) })),
-					file_system: Type.Optional(
-						Type.Object({
-							read: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-							write: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-						}),
-					),
-				},
-				{ additionalProperties: false },
-			),
-		),
 	},
 	{ additionalProperties: false },
 );
@@ -222,48 +200,4 @@ export function createEvaluationTools(context: EvaluationToolContext): readonly 
 			}),
 	};
 	return Object.freeze([listFiles, readFile, writeFile, runTests, bash]);
-}
-
-function requestedEscalation(request: ToolPolicyRequest): boolean {
-	return (
-		request.arguments.sandbox_permissions === "require_escalated" ||
-		request.arguments.sandbox_permissions === "with_additional_permissions" ||
-		request.arguments.additional_permissions !== undefined
-	);
-}
-
-function requestedPath(request: ToolPolicyRequest): string | undefined {
-	return request.toolName === "read_file" || request.toolName === "write_file"
-		? typeof request.arguments.path === "string"
-			? request.arguments.path
-			: undefined
-		: undefined;
-}
-
-export function createEvaluationPolicy(manifest: FixtureManifest): PolicyGate {
-	const sensitivePaths = new Set((manifest.permissions?.sensitivePaths ?? []).map(normalizeRepositoryPath));
-	return {
-		check(request) {
-			if (requestedEscalation(request)) {
-				return { decision: "reject", reason: "The fixture denies the requested Additional Permission." };
-			}
-			const path = requestedPath(request);
-			if (path !== undefined) {
-				let normalized: string;
-				try {
-					normalized = normalizeRepositoryPath(path);
-				} catch (error) {
-					if (!(error instanceof RepositoryPathError)) throw error;
-					return { decision: "reject", reason: error.message };
-				}
-				if (request.toolName === "read_file" && sensitivePaths.has(normalized)) {
-					return { decision: "reject", reason: `Sensitive read denied: ${normalized}` };
-				}
-				if (request.toolName === "write_file" && manifest.permissions?.denyWrites) {
-					return { decision: "reject", reason: "This diagnose-only fixture denies file mutation." };
-				}
-			}
-			return { decision: "allow" };
-		},
-	};
 }

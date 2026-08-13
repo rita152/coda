@@ -21,7 +21,6 @@
 		"maxTurns": 4,
 		"maxTools": 3,
 		"maxRepeatedToolBatches": 0,
-		"maxPermissionEscalationAttempts": 0,
 		"maxElapsedMs": 800,
 		"minScore": 90
 	},

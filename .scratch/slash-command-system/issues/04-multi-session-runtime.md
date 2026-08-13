@@ -17,4 +17,4 @@ Refactor the interactive application around a workspace-scoped Session Runtime M
 
 ## Answer
 
-Implemented workspace-scoped live Runtime switching, concurrent background Runs and Follow-ups, deferred background approvals with `needs attention`, process-local lazy Draft Sessions, current-workspace browsing, empty `/new` idempotence, and whole-process cancellation/discard on CLI exit.
+Implemented workspace-scoped live Runtime switching, concurrent background Runs and Follow-ups, deferred background MCP Elicitations with `needs attention`, process-local lazy Draft Sessions, current-workspace browsing, empty `/new` idempotence, and whole-process cancellation/discard on CLI exit.

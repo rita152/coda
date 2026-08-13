@@ -1,31 +1,17 @@
 import { createHash } from "node:crypto";
-import {
-	chmod,
-	lstat,
-	mkdtemp,
-	readFile,
-	realpath,
-	rename,
-	rm,
-	stat,
-	symlink,
-	unlink,
-	writeFile,
-} from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ToolExecutionContext, ToolPolicyRequest } from "@coda/agent";
-import { compileSandboxPolicy } from "@coda/sandbox";
+import type { ToolExecutionContext } from "@coda/agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
-import { createPermissionEngine, type PermissionEngine } from "../src/permissions/permission-engine.ts";
-import { TargetMutationCoordinator } from "../src/tools/mutation.ts";
-import { createPatchTool } from "../src/tools/patch.ts";
 import type {
 	AtomicDeletionRequest,
 	AtomicMutationRequest,
 	AtomicMutationWriter,
-} from "../src/tools/sandboxed-mutation-writer.ts";
+} from "../src/tools/atomic-mutation-writer.ts";
+import { TargetMutationCoordinator } from "../src/tools/mutation.ts";
+import { createPatchTool } from "../src/tools/patch.ts";
 import { createWorkspace, type Workspace } from "../src/workspace.ts";
 
 const temporaryDirectories: string[] = [];
@@ -224,31 +210,6 @@ describe("native patch Tool", () => {
 		expect(await readFile(join(harness.root, "first.txt"), "utf8")).toBe("ONE\n");
 		expect(await readFile(join(harness.root, "second.txt"), "utf8")).toBe("two\n");
 	});
-
-	it("rejects a symlink target swap after authorization", async () => {
-		const calls: string[] = [];
-		const harness = await createHarness({ calls });
-		await writeFile(join(harness.root, "original.txt"), "old\n");
-		await writeFile(join(harness.root, "replacement.txt"), "old\n");
-		const alias = join(harness.root, "alias.txt");
-		await symlink("original.txt", alias);
-		const patch = `*** Begin Patch
-*** Update File: alias.txt
--old
-+new
-*** End Patch`;
-		const execution = context("patch:symlink-swap");
-		await expect(harness.permissions.check(policyRequest(patch, execution))).resolves.toEqual({ decision: "allow" });
-		await unlink(alias);
-		await symlink("replacement.txt", alias);
-
-		const output = await harness.tool.execute({ patch }, execution);
-
-		expect(output).toMatchObject({ isError: true, details: { phase: "preflight", committedPaths: [] } });
-		expect(calls).toEqual([]);
-		expect(await readFile(join(harness.root, "original.txt"), "utf8")).toBe("old\n");
-		expect(await readFile(join(harness.root, "replacement.txt"), "utf8")).toBe("old\n");
-	});
 });
 
 interface MutationHookInput {
@@ -260,7 +221,6 @@ interface MutationHookInput {
 interface PatchHarness {
 	readonly root: string;
 	readonly workspace: Workspace;
-	readonly permissions: PermissionEngine;
 	readonly tool: ReturnType<typeof createPatchTool>;
 }
 
@@ -274,30 +234,16 @@ async function createHarness(
 	temporaryDirectories.push(root);
 	const fileSystem = createNodeFileSystem();
 	const workspace = await createWorkspace(root, fileSystem);
-	const permissions = createPermissionEngine({
-		cwd: workspace.root,
-		workspace,
-		profile: compileSandboxPolicy({
-			profile: "workspace",
-			workspaceRoots: [workspace.root],
-			temporaryDirectory: await realpath(tmpdir()),
-		}),
-		approvalPolicy: "on-request",
-		approval: { decide: async () => ({ type: "approved" }) },
-	});
 	const writer = hostMutationWriter(options);
 	return {
 		root: workspace.root,
 		workspace,
-		permissions,
 		tool: createPatchTool(workspace, fileSystem, new TargetMutationCoordinator(), writer),
 	};
 }
 
 async function runPatch(harness: PatchHarness, patch: string, invocationId: string) {
-	const execution = context(invocationId);
-	await expect(harness.permissions.check(policyRequest(patch, execution))).resolves.toEqual({ decision: "allow" });
-	return harness.tool.execute({ patch }, execution);
+	return harness.tool.execute({ patch }, context(invocationId));
 }
 
 function context(invocationId: string): ToolExecutionContext {
@@ -308,15 +254,6 @@ function context(invocationId: string): ToolExecutionContext {
 		invocationId: invocationId as ToolExecutionContext["invocationId"],
 		resultMessageId: `result:${invocationId}` as ToolExecutionContext["resultMessageId"],
 		providerToolCallId: `provider:${invocationId}`,
-	};
-}
-
-function policyRequest(patch: string, execution: ToolExecutionContext): ToolPolicyRequest {
-	return {
-		...execution,
-		toolName: "patch",
-		arguments: { patch },
-		replaySafety: "never",
 	};
 }
 

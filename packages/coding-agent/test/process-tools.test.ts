@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
-import type { ModelProcessAuthority, ModelProcessSessionRunner } from "../src/permissions/model-process-runner.ts";
+import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -25,14 +25,11 @@ afterEach(async () => {
 });
 
 function controlledRunner() {
-	const starts: Array<{
-		readonly request: Parameters<ModelProcessSessionRunner["start"]>[0];
-		readonly authority: ModelProcessAuthority;
-	}> = [];
+	const starts: Array<{ readonly request: Parameters<ProcessSessionRunner["start"]>[0] }> = [];
 	let stopCount = 0;
-	const runner: ModelProcessSessionRunner = {
-		start: async (request, authority) => {
-			starts.push({ request, authority });
+	const runner: ProcessSessionRunner = {
+		start: async (request) => {
+			starts.push({ request });
 			request.onOutput?.({
 				channel: "stdout",
 				text: `${request.environment.SECRET ?? "unset"}|${request.environment.CUSTOM ?? "unset"}\n`,
@@ -48,7 +45,6 @@ function controlledRunner() {
 				resolveCompletion?.(completionResult(stopped));
 			};
 			return {
-				backend: "none",
 				completion,
 				write: async (input) => {
 					request.onOutput?.({ channel: "stdout", text: String(input) });
@@ -76,12 +72,11 @@ function completionResult(stopped: boolean) {
 		stderr: "",
 		timedOut: false,
 		truncated: false,
-		backend: "none" as const,
 	};
 }
 
 describe("process lifecycle Tools", () => {
-	it("wires start, write, poll, stop, stale handling, filtering, and shutdown cleanup", async () => {
+	it("wires start, write, poll, stop, stale handling, environment inheritance, and shutdown cleanup", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-process-tools-"));
 		temporaryDirectories.push(workspace);
 		const controlled = controlledRunner();
@@ -133,7 +128,7 @@ describe("process lifecycle Tools", () => {
 					toolName: "process_poll",
 					isError: false,
 					observation: { status: "ok", truncated: false, facts: { state: "completed", exitCode: 0 } },
-					content: [{ type: "text", text: expect.stringContaining("unset|allowed\nhello") }],
+					content: [{ type: "text", text: expect.stringContaining("inherited|allowed\nhello") }],
 				});
 				return fauxAssistantMessage(fauxToolCall("process_start", { command: "worker-two" }, { id: "start-two" }), {
 					stopReason: "toolUse",
@@ -192,12 +187,12 @@ describe("process lifecycle Tools", () => {
 		const application = createCodingAgentApplication({
 			models,
 			settings: {
-				load: async () => ({ shellEnvironmentAllowlist: ["CUSTOM"] }),
+				load: async () => ({}),
 				save: async () => undefined,
 			},
 			fileSystem: createNodeFileSystem(),
 			processRunner: createNodeProcessRunner({ platform: process.platform }),
-			modelProcessSessionRunner: controlled.runner,
+			processSessionRunner: controlled.runner,
 			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
 			runtime: {
 				cwd: workspace,
@@ -208,7 +203,7 @@ describe("process lifecycle Tools", () => {
 					PATH: process.env.PATH,
 					SHELL: "/bin/sh",
 					CUSTOM: "allowed",
-					SECRET: "stripped",
+					SECRET: "inherited",
 				},
 				clock: { now: () => 1_300 },
 				idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
@@ -218,7 +213,6 @@ describe("process lifecycle Tools", () => {
 		await expect(
 			application.run([
 				"--print",
-				"--dangerously-bypass-approvals-and-sandbox",
 				"--model",
 				`${faux.getModel().provider}/${faux.getModel().id}`,
 				"exercise process lifecycle",
@@ -229,15 +223,10 @@ describe("process lifecycle Tools", () => {
 		expect(shutdownProcessId).not.toBe("");
 		expect(controlled.starts).toHaveLength(3);
 		expect(controlled.starts.map(({ request }) => request.environment.SECRET)).toEqual([
-			undefined,
-			undefined,
-			undefined,
+			"inherited",
+			"inherited",
+			"inherited",
 		]);
-		expect(
-			controlled.starts.every(({ authority }) => authority.readAccessPolicy.sandboxPolicy.profile === "full-access"),
-		).toBe(true);
-		expect(controlled.starts.every(({ authority }) => typeof authority.audit === "function")).toBe(true);
-		expect(controlled.starts.every(({ authority }) => typeof authority.sessionId === "string")).toBe(true);
 		expect(controlled.stopCount()).toBe(2);
 		expect(stdout.value).toBe("Process lifecycle complete.\n");
 		expect(stderr.value).toBe("");

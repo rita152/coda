@@ -307,7 +307,7 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [key:
 
 /** Authoritative, Provider-neutral semantics for one Tool operation. */
 export interface ToolObservation {
-	readonly status: "ok" | "error" | "denied" | "aborted";
+	readonly status: "ok" | "error" | "aborted";
 	readonly truncated: boolean;
 	readonly facts?: Readonly<Record<string, JsonValue>>;
 	/** Opaque reference accepted by a Tool that can continue reading omitted output. */

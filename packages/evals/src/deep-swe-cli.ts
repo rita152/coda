@@ -65,7 +65,6 @@ interface ParsedArguments {
 	readonly runControlStationaryTurns: number;
 	readonly adapterFinalizeMarginSec: number;
 	readonly pierHardTimeoutSec: number;
-	readonly allowAllCommands: boolean;
 	readonly adapterDir?: string;
 	readonly pierCommand: string;
 	readonly configOutput?: string;
@@ -104,7 +103,6 @@ Run/config options:
   --run-control-stationary-turns <n>  Default: ${DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS}
   --adapter-finalize-margin-sec <n>   Default: ${DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC}
   --pier-hard-timeout-sec <n>         Default: ${DEEP_SWE_PIER_HARD_TIMEOUT_SEC}
-  --allow-all-commands                Bypass Coda command classification and the outer Sandbox
   --adapter-dir <absolute-path>       Directory containing coda_agent.py (run only)
   --pier-command <path-or-name>       Default: pier
   --config-output <path>              Generated config destination
@@ -155,7 +153,6 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 	let runControlStationaryTurns = DEEP_SWE_DEFAULT_RUN_CONTROL_STATIONARY_TURNS;
 	let adapterFinalizeMarginSec = DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC;
 	let pierHardTimeoutSec = DEEP_SWE_PIER_HARD_TIMEOUT_SEC;
-	let allowAllCommands = false;
 	let adapterDir: string | undefined;
 	let pierCommand = "pier";
 	let configOutput: string | undefined;
@@ -201,7 +198,6 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 			adapterFinalizeMarginSec = parsePositiveInteger(arguments_[++index], argument);
 		else if (argument === "--pier-hard-timeout-sec")
 			pierHardTimeoutSec = parsePositiveInteger(arguments_[++index], argument);
-		else if (argument === "--allow-all-commands") allowAllCommands = true;
 		else if (argument === "--adapter-dir") adapterDir = valueAfter(index++, argument);
 		else if (argument === "--pier-command") pierCommand = valueAfter(index++, argument);
 		else if (argument === "--config-output") configOutput = valueAfter(index++, argument);
@@ -237,7 +233,6 @@ function parseArguments(arguments_: readonly string[]): ParsedArguments {
 		runControlStationaryTurns,
 		adapterFinalizeMarginSec,
 		pierHardTimeoutSec,
-		allowAllCommands,
 		...(adapterDir ? { adapterDir } : {}),
 		pierCommand,
 		...(configOutput ? { configOutput } : {}),
@@ -274,7 +269,6 @@ function jobOptions(arguments_: ParsedArguments): DeepSwePierJobOptions {
 		runControlStationaryTurns: arguments_.runControlStationaryTurns,
 		adapterFinalizeMarginSec: arguments_.adapterFinalizeMarginSec,
 		pierHardTimeoutSec: arguments_.pierHardTimeoutSec,
-		allowAllCommands: arguments_.allowAllCommands,
 		quiet: arguments_.quiet,
 	};
 }
@@ -373,7 +367,6 @@ async function enrichTrialDiagnostics(
 				length_truncation_count: metadata.length_truncation_count ?? reduction.lengthTruncationCount,
 				budget_exhaustion_limits: metadata.budget_exhaustion_limits ?? reduction.budgetExhaustionLimits,
 				tool_rejection_count: metadata.tool_rejection_count ?? reduction.toolRejectionCount,
-				policy_rejection_count: metadata.policy_rejection_count ?? reduction.policyRejectionCount,
 				invalid_tool_call_count: metadata.invalid_tool_call_count ?? reduction.invalidToolCallCount,
 				[DEEP_SWE_REPORT_RECOVERY_METADATA_KEY]: reduction,
 			},
@@ -494,7 +487,6 @@ async function readRoundReport(path: string): Promise<DeepSweRoundReport> {
 	const runBudgetEnabled = kwargs.run_budget_enabled !== false;
 	const maxTurns =
 		runBudgetEnabled && typeof kwargs.max_turns === "number" ? kwargs.max_turns : DEEP_SWE_DEFAULT_MAX_TURNS;
-	const allowAllCommands = kwargs.allow_all_commands === true;
 	const concurrency =
 		typeof config.n_concurrent_trials === "number" &&
 		Number.isInteger(config.n_concurrent_trials) &&
@@ -543,7 +535,6 @@ async function readRoundReport(path: string): Promise<DeepSweRoundReport> {
 		maxOutputTokens,
 		runBudgetEnabled,
 		...(runBudgetEnabled ? { maxTurns } : {}),
-		allowAllCommands,
 		...(summaryExperiment ? { experiment: summaryExperiment } : {}),
 		report,
 	};

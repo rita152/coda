@@ -22,7 +22,7 @@ export async function loadProjectInstructions(
 	if (status.kind === "symbolic-link") throw new Error("Workspace root AGENTS.md must not be a symbolic link");
 	if (status.kind !== "file") throw new Error("Workspace root AGENTS.md is not a regular file");
 	if (status.size > MAX_PROJECT_INSTRUCTIONS_BYTES) throw new Error("AGENTS.md exceeds the 64 KiB limit");
-	const resolved = await workspace.resolvePath(requestedPath, "read");
+	const resolved = await workspace.resolvePath(requestedPath);
 	if (!resolved.insideWorkspace || resolved.canonicalPath !== requestedPath) {
 		throw new Error("Workspace root AGENTS.md failed its canonical path check");
 	}

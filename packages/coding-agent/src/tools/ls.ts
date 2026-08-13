@@ -2,8 +2,6 @@ import { join } from "node:path";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { Workspace } from "../workspace.ts";
 import { toolFailure } from "./failure.ts";
 
@@ -16,11 +14,7 @@ const LsParameters = Type.Object(
 	{ additionalProperties: false },
 );
 
-export function createLsTool(
-	workspace: Workspace,
-	fileSystem: FileSystem,
-	permissions: Pick<PermissionEngine, "readAccessPolicyFor">,
-): AgentTool<typeof LsParameters> {
+export function createLsTool(workspace: Workspace, fileSystem: FileSystem): AgentTool<typeof LsParameters> {
 	return {
 		name: "ls",
 		description: "List directory entries in stable name order.",
@@ -28,13 +22,7 @@ export function createLsTool(
 		replaySafety: "safe",
 		parallelSafe: true,
 		execute: async (arguments_, context) => {
-			const root = await workspace.resolvePath(arguments_.path ?? ".", "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "ls", "read", permissions)) {
-				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
-					code: "access_denied",
-					path: root.canonicalPath,
-				});
-			}
+			const root = await workspace.resolvePath(arguments_.path ?? ".");
 			if (!root.exists) {
 				return toolFailure(`Directory does not exist: ${root.canonicalPath}`, {
 					code: "not_found",
@@ -60,13 +48,8 @@ export function createLsTool(
 				);
 				for (const entry of entries) {
 					context.signal.throwIfAborted();
-					const child = await workspace.resolvePath(join(directory, entry.name), "read");
-					if (
-						!child.exists ||
-						!hasPermissionedPathAccess(workspace, child, context.invocationId, "ls", "read", permissions)
-					) {
-						continue;
-					}
+					const child = await workspace.resolvePath(join(directory, entry.name));
+					if (!child.exists) continue;
 					if (lines.length >= limit) {
 						truncated = true;
 						return;

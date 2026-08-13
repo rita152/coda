@@ -21,116 +21,82 @@ afterEach(async () => {
 });
 
 describe("MCP application composition", () => {
-	it.each([
-		{
-			label: "permission-gates ordinary MCP calls",
-			extraArguments: [] as string[],
-			expectsApproval: true,
-		},
-		{
-			label: "honors the explicit dangerous approval bypass for MCP calls",
-			extraArguments: ["--dangerously-bypass-approvals-and-sandbox"],
-			expectsApproval: false,
-		},
-	])(
-		"discovers an MCP Tool, freezes it into the Run, $label, and returns its result",
-		async ({ extraArguments, expectsApproval }) => {
-			const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-"));
-			temporaryDirectories.push(workspace);
-			const runtime = testTimeRuntime(500);
-			const faux = fauxProvider({ runtime });
-			faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("mcp__docs__search", { query: "MCP" }, { id: "provider-mcp-call" }), {
-					stopReason: "toolUse",
-					timestamp: 500,
-				}),
-				fauxAssistantMessage("used external docs", { timestamp: 500 }),
-			]);
-			const models = createModels({ runtime });
-			models.setProvider(faux.provider);
-			const calls: unknown[] = [];
-			const connection: McpConnection = {
-				info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
-				listTools: async () => [
-					{
-						name: "search",
-						description: "Search external docs",
-						inputSchema: {
-							type: "object",
-							properties: { query: { type: "string" } },
-							required: ["query"],
+	it("discovers an MCP Tool, freezes it into the Run, and returns its result", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-"));
+		temporaryDirectories.push(workspace);
+		const runtime = testTimeRuntime(500);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("mcp__docs__search", { query: "MCP" }, { id: "provider-mcp-call" }), {
+				stopReason: "toolUse",
+				timestamp: 500,
+			}),
+			fauxAssistantMessage("used external docs", { timestamp: 500 }),
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const calls: unknown[] = [];
+		const connection: McpConnection = {
+			info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+			listTools: async () => [
+				{
+					name: "search",
+					description: "Search external docs",
+					inputSchema: {
+						type: "object",
+						properties: { query: { type: "string" } },
+						required: ["query"],
+					},
+				},
+			],
+			callTool: async (request) => {
+				calls.push(request);
+				return { isError: false, content: [{ type: "text", text: "external result" }] };
+			},
+			close: async () => undefined,
+		};
+		const connector: McpConnector = { connect: async () => connection };
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			mcpConnector: connector,
+			settings: {
+				load: async () => ({
+					mcpServers: [
+						{
+							id: "docs",
+							transport: { kind: "http", url: "https://docs.example.test/mcp" },
 						},
-					},
-				],
-				callTool: async (request) => {
-					calls.push(request);
-					return { isError: false, content: [{ type: "text", text: "external result" }] };
-				},
-				close: async () => undefined,
-			};
-			const connector: McpConnector = { connect: async () => connection };
-			const stdout = new BufferOutput();
-			const stderr = new BufferOutput();
-			const approvals: unknown[] = [];
-			let id = 0;
-			const application = createCodingAgentApplication({
-				models,
-				mcpConnector: connector,
-				settings: {
-					load: async () => ({
-						mcpServers: [
-							{
-								id: "docs",
-								transport: { kind: "http", url: "https://docs.example.test/mcp" },
-							},
-						],
-						permissions: { profile: "read-only", approvalPolicy: "on-request" },
-					}),
-					save: async () => undefined,
-				},
-				approval: {
-					decide: async (request) => {
-						approvals.push(request);
-						return { type: "approved" };
-					},
-				},
-				fileSystem: createNodeFileSystem(),
-				processRunner: createNodeProcessRunner({ platform: "darwin" }),
-				io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
-				runtime: {
-					cwd: workspace,
-					homeDirectory: workspace,
-					platform: "darwin",
-					environment: {},
-					clock: runtime.clock,
-					idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				},
-			});
+					],
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
 
-			const exitCode = await application.run([
-				"--print",
-				...extraArguments,
-				"--model",
-				`${faux.getModel().provider}/${faux.getModel().id}`,
-				"search docs",
-			]);
-			expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
-			expect(stdout.value).toBe("used external docs\n");
-			expect(calls).toEqual([{ name: "search", arguments: { query: "MCP" } }]);
-			expect(approvals).toEqual(
-				expectsApproval
-					? [
-							expect.objectContaining({
-								kind: "mcp",
-								toolName: "mcp__docs__search",
-								reason: "Call MCP Tool docs/search",
-							}),
-						]
-					: [],
-			);
-			expect(faux.state.callCount).toBe(2);
-		},
-	);
+		const exitCode = await application.run([
+			"--print",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"search docs",
+		]);
+		expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
+		expect(stdout.value).toBe("used external docs\n");
+		expect(calls).toEqual([{ name: "search", arguments: { query: "MCP" } }]);
+		expect(faux.state.callCount).toBe(2);
+	});
 });
 
 import { mkdtemp, rm } from "node:fs/promises";

@@ -12,7 +12,6 @@ import type { Message } from "@coda/ai";
 import type { ModelSelection } from "../application.ts";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
-import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
 export const SESSION_RECORD_TYPES = [
@@ -32,10 +31,8 @@ export const SESSION_RECORD_TYPES = [
 	"composer_submission_recorded",
 	"composer_submission_retracted",
 	"model_selected",
-	"permission_selected",
 	"project_trust_changed",
 	"mcp_trust_changed",
-	"permission_audit_recorded",
 	"context_compacted",
 ] as const;
 
@@ -160,14 +157,12 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	const followUpRuns = new Map<string, string>();
 	const startedTools = new Map<string, SessionRecord>();
 	const toolInvocations = new Map<string, SessionToolLifecycle>();
-	const toolApprovals = new Map<string, ApprovalDecisionAuditEvent>();
 	const activeRuns = new Set<string>();
 	const composerSubmissions = new Map<string, ComposerSubmission>();
 	const legacyComposerSubmissions: Array<{ readonly sequence: number; readonly submission: ComposerSubmission }> = [];
 	let firstComposerSubmissionSequence: number | undefined;
 	let model: ModelSelection | undefined;
 	let reasoning: RestoredSessionState["reasoning"];
-	let permissionProfile: RestoredSessionState["permissionProfile"];
 	let compactionCheckpoint: CompactionCheckpoint | undefined;
 	let discardedModelCost: number | undefined = 0;
 
@@ -234,24 +229,10 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				model = structuredClone(payload.model as ModelSelection);
 				reasoning = payload.reasoning as RestoredSessionState["reasoning"];
 				break;
-			case "permission_selected":
-				permissionProfile = payload.profile as RestoredSessionState["permissionProfile"];
-				break;
 			case "project_trust_changed":
 			case "mcp_trust_changed":
 				// Trust records are audit facts. Only current settings may authorize local content or processes.
 				break;
-			case "permission_audit_recorded": {
-				const event = payload.event as ApprovalDecisionAuditEvent | undefined;
-				if (event?.type === "approval_decision" && typeof event.invocationId === "string") {
-					toolApprovals.set(event.invocationId, structuredClone(event));
-					const existing = toolInvocations.get(event.invocationId);
-					if (existing) {
-						toolInvocations.set(event.invocationId, { ...existing, approval: structuredClone(event) });
-					}
-				}
-				break;
-			}
 			case "context_compacted": {
 				const checkpoint = payload.checkpoint as CompactionCheckpoint | undefined;
 				if (checkpoint) compactionCheckpoint = structuredClone(checkpoint);
@@ -266,9 +247,6 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...(record.runId ? { runId: record.runId } : {}),
 						...(record.turnId ? { turnId: record.turnId } : {}),
 						startedAt: record.timestamp,
-						...(toolApprovals.get(invocation.id)
-							? { approval: structuredClone(toolApprovals.get(invocation.id)!) }
-							: {}),
 					});
 				}
 				break;
@@ -291,9 +269,6 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...(rejectionReason ? { rejectionReason } : {}),
 						...(typeof payload.resultMessageId === "string"
 							? { resultMessageId: payload.resultMessageId as MessageId }
-							: {}),
-						...((started?.approval ?? toolApprovals.get(invocation.id))
-							? { approval: structuredClone(started?.approval ?? toolApprovals.get(invocation.id)!) }
 							: {}),
 					});
 					startedTools.delete(invocation.id);
@@ -348,7 +323,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				.map(({ submission }) => submission),
 			...composerSubmissions.values(),
 		].map((submission) => structuredClone(submission)),
-		restored: { model, reasoning, permissionProfile },
+		restored: { model, reasoning },
 		toolInvocations: [...toolInvocations.values()].map((lifecycle) => structuredClone(lifecycle)),
 		startedTools,
 		activeRuns,

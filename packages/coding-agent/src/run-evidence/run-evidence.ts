@@ -501,9 +501,7 @@ function fallbackObservation(outcome: unknown, rejectionReason?: string): Observ
 			? "ok"
 			: outcome === "aborted" || rejectionReason === "aborted" || rejectionReason === "not_started"
 				? "aborted"
-				: rejectionReason === "policy"
-					? "denied"
-					: "error";
+				: "error";
 	return {
 		status,
 		truncated: false,

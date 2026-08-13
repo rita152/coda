@@ -13,8 +13,8 @@ npm run eval:offline
 The command makes no network requests. Machine-readable schema-v1 JSON is written to stdout and a concise report is
 written to stderr. It exits non-zero when a fixture misses its acceptance, state, safety, claim, or budget contract.
 
-The eight checked-in fixtures cover a cross-file bug fix, a feature plus tests, diagnose-only work, Tool failure
-recovery, repeated exploration, permission denial, a prompt-injection/sensitive-read attempt, and continuation after
+The seven checked-in fixtures cover a cross-file bug fix, a feature plus tests, diagnose-only work, Tool failure
+recovery, repeated exploration, a prompt-injection/sensitive-read attempt, and continuation after
 Compaction.
 
 ## Opt-in live Provider run
@@ -107,11 +107,6 @@ salvage `workspace.patch`, partial ATIF, terminal-event evidence, and known usag
 cancellation is re-raised. A normal/internal-deadline path gets the full finalization timeout; cancellation gets only
 a short shielded best-effort window because Pier may immediately tear down the environment. Reliable hard-timeout
 recovery therefore still requires the run-control deadline to leave a margin before Pier's outer timeout.
-
-`--allow-all-commands` is an explicit evaluation-only authority switch. It invokes Coda's full approval/Sandbox
-bypass so Bash and background Shell commands execute without command classification, dangerous-command rules, or
-interactive review. Pier's container-level no-network boundary remains in force, and Coda still strips the Provider
-key and proxy variables from Tool subprocess environments. The generated lock records whether this switch was used.
 
 A real run requires all three explicit inputs below. The key is resolved only from the process environment and the
 generated Pier config retains the literal `${OPENCODE_API_KEY}` placeholder.

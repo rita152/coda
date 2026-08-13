@@ -174,10 +174,10 @@ describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)
 			messages: [
 				{
 					role: "toolResult",
-					toolCallId: "call:denied",
+					toolCallId: "call:error",
 					toolName: "bash",
 					content: [{ type: "text", text: "command returned zero" }],
-					observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+					observation: { status: "error", truncated: false, facts: { exitCode: 0 } },
 					isError: false,
 					timestamp: 1,
 				},
@@ -186,7 +186,7 @@ describe("openai-completions adapter (upstream: packages/ai/test/stream.test.ts)
 
 		expect(messages[0]).toMatchObject({
 			role: "tool",
-			content: expect.stringContaining('{"status":"denied","truncated":false,"facts":{"exitCode":0}}'),
+			content: expect.stringContaining('{"status":"error","truncated":false,"facts":{"exitCode":0}}'),
 		});
 		expect(messages[0]).toMatchObject({ content: expect.stringContaining("command returned zero") });
 	});

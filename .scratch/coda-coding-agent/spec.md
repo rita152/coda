@@ -8,7 +8,7 @@ Compose Coda's AI, TUI, and Agent packages into the local terminal Coding Agent 
 
 ## Package boundary
 
-- The package composes `@coda/ai`, `@coda/tui`, `@coda/agent`, `@coda/sandbox`, `@coda/skills`, and `@coda/mcp`.
+- The package composes `@coda/ai`, `@coda/tui`, `@coda/agent`, `@coda/skills`, and `@coda/mcp`.
 - It owns application policy: model selection, Credential persistence, settings, sessions, coding Tools, filesystem and Shell integration, prompts, and terminal composition.
 - Lower packages do not import this package or know its configuration paths.
 - All dependencies enter through explicit factories or constructors; importing the package has no process-global side effects.
@@ -63,7 +63,7 @@ The first application provides `read`, `grep`, `find`, `ls`, `edit`, `write`, an
 
 The current built-in Tool contract also includes `read_session_history`, `read_tool_output`, `process_start`, `process_poll`, `process_write`, and `process_stop`. Session-history pages contain only bounded committed Messages, including detail omitted from the active Context Window, and never pending Draft state. Background processes are non-interactive, process-local, owned by their creating Session while it is open, and retired before an overflowed Session closes; they are never restored as live after process restart.
 
-The interactive TUI also provides explicit User Shell mode. It is a separate, user-authorized local capability rather than an Agent Tool: commands never enter model Context, Tool policy, Prompt History, or Session persistence. Print and JSON modes continue to treat leading-bang input as ordinary model input.
+The interactive TUI also provides explicit User Shell mode. It is a separate local capability rather than an Agent Tool: commands never enter model Context, Prompt History, or Session persistence. Print and JSON modes continue to treat leading-bang input as ordinary model input.
 
 ## Model selection
 
@@ -85,28 +85,12 @@ Custom Provider discovery retains source-labelled context-window, maximum-output
 - The effective value is visible in the TUI, JSON `run_start`, and Session history.
 - Interactive changes are Session-local unless the user separately saves a global default.
 
-## Default security posture
+## Host execution model
 
-- `@coda/coding-agent` owns the Policy Gate, Permission Profiles, Approval Policies, audit routing, and the application-facing Sandbox composition; lower packages do not own user policy.
-- Read Only, Workspace, and Full Access are the three built-in Permission Profiles. Unless Trusted, On Request, Granular, and Never independently control when additional authority is reviewed.
-- Native File Tools and every model-started process share one canonical Read Access Policy. Common Credential Roots remain denied inside broader roots until that exact root or a narrower descendant is reviewed.
-- Restricted model processes always enter the operating-system Sandbox and fail closed if its macOS or Linux backend is unavailable. Full Access is the only outer Sandbox bypass.
-- Interactive mode may review precise authority. Print mode uses the same Policy Gate with a rejecting reviewer and never treats missing approval as consent.
-
-### Path containment
-
-- The Workspace root and every policy root are absolute canonical paths fixed before authority is granted.
-- Existing targets and symlink targets use realpath. Nonexistent targets anchor to their nearest canonical existing ancestor and are checked again around mutation commit.
-- Native recursive Tools reevaluate each canonical child; protected roots are excluded unless that exact root or a narrower descendant was reviewed.
-- Workspace-external native reads may request one exact reviewed root. Model processes must declare precise filesystem expansion in Additional Permissions before launch.
-- Audit facts retain requested and canonical paths, source or denial reason, and effective roots, but never denied file contents.
-
-### Approval and audit contract
-
-- A review may approve once, remember the exact decision for the current process, persist an eligible Command or Network Rule, deny while allowing model recovery, or cancel the Run.
-- Command review never converts a restricted Permission Profile into unsandboxed execution. Filesystem and network expansion stays precise and invocation-scoped.
-- Session approval caches and temporary grants are process-local and never restore from Session records. Persisted audit records are evidence, not authority.
-- Sandbox denial, timeout, launch failure, normal process failure, and cancellation remain distinct observations and audit outcomes.
+- Built-in File Tools accept Workspace-relative paths and explicit absolute paths.
+- Model-requested Shell commands, native search helpers, mutation workers, and background processes execute directly as the current host user.
+- Workspace is a resolution base and Session scope, not an access boundary.
+- Atomic file replacement, precondition checks, process-group ownership, output bounds, and secret-environment stripping remain data-integrity and lifecycle guarantees rather than access controls.
 
 ### Shell execution
 
@@ -118,12 +102,11 @@ Custom Provider discovery retains source-labelled context-window, maximum-output
 - Default timeout is 120 seconds. Abort and timeout terminate the whole process group.
 - `process_start` creates a bounded non-interactive background process with opaque process-local identity; poll, stdin, stop, Session retirement, and application shutdown own the full descendant process tree.
 - Model-visible output is capped at 2,000 lines or 50KB. Overflow is written to a `0600` temporary log with cleanup policy.
-- Restricted Shell networking uses managed destination policy inside the Sandbox; Full Access alone bypasses the outer network Sandbox.
 
 ### Explicit User Shell execution
 
 - Only the interactive Composer recognizes a leading `!`; the bang is absorbed into Shell-mode presentation and Enter submits the remaining non-empty command.
-- Commands run from the Workspace through `$SHELL -lc`, falling back to `/bin/sh`, with the complete current environment and host-user authority. The explicit leading bang is the authorization; Policy Gate and approval overlays do not apply.
+- Commands run from the Workspace through `$SHELL -lc`, falling back to `/bin/sh`, with the complete current environment and host-user authority.
 - Execution is non-interactive with ignored stdin and no PTY. macOS and Unix are supported; Windows produces a clear local diagnostic.
 - User Shell work shares one strict process-local deferred FIFO with Agent Follow-ups. Steering still enters an active Agent Run immediately. Agent failure or abort pauses the FIFO; Shell failure, timeout, or cancellation continues it.
 - Live stdout and stderr are merged in Node callback-observation order. Output is terminal-sanitized, converts carriage returns to append-only lines, removes bidi overrides/isolates, and remains bounded in memory to 50 KiB and 2,000 normalized lines with a true head/tail omission marker.
@@ -137,7 +120,7 @@ Custom Provider discovery retains source-labelled context-window, maximum-output
 - Existing mode, BOM, and newline style are retained when editing.
 - Mutations serialize per canonical target.
 - Abort before commit preserves the target; a completed atomic rename reports success even if cancellation arrives afterward.
-- Containment is rechecked around commit and results include a structured diff or create/overwrite summary.
+- Preconditions are rechecked around commit and results include a structured diff or create/overwrite summary.
 - Cross-file transactions and rollback are not promised.
 
 ### Search executables
@@ -200,19 +183,17 @@ follow_up_reclaimed
 composer_submission_recorded
 composer_submission_retracted
 model_selected
-permission_selected
 project_trust_changed
 mcp_trust_changed
-permission_audit_recorded
 context_compacted
 ```
 
 - Unconsumed Follow-up survives resume; Steering does not. Restored unmatched items are Paused.
 - Failed Follow-ups are projected from `follow_up_enqueued`, `follow_up_consumed`, `run_started`, and `run_finished` facts and remain recoverable. `follow_up_reclaimed` is the durable tombstone used by Alt+Up.
 - Composer Submission facts project current-Session Prompt History independently from Message commit order. Retraction removes a reclaimed, unconsumed Follow-up. User Shell is never a Session Record.
-- A crashed active Run becomes interrupted, loses unconsumed Steering, and never restores pending approval or process state.
-- Permission selection, MCP Server Trust, permission audits, Tool Observations, Compaction Checkpoints, and completed Run evidence restore as facts only; none restores live authority or process handles.
-- Streaming deltas, render events, and approval UI events are not Session Records.
+- A crashed active Run becomes interrupted, loses unconsumed Steering, and never restores process state.
+- MCP Server Trust, Tool Observations, Compaction Checkpoints, and completed Run evidence restore as facts only; none restores live process handles.
+- Streaming deltas and render events are not Session Records.
 
 ### Tool crash barrier
 
@@ -281,7 +262,7 @@ interface Session {
 - Trust is bound to canonical Workspace path and file SHA-256.
 - Interactive mode asks on first discovery and whenever content changes.
 - Print mode fails on untrusted or changed instructions unless `--trust-project` is explicit.
-- Project Trust permits context loading only and never relaxes Policy Gate decisions.
+- Project Trust permits context loading only and never changes Tool execution.
 - Events and Sessions record path and hash, not a second metadata copy of the instruction text.
 
 ## System Prompt
@@ -300,15 +281,15 @@ interface Session {
 - Definite overflow first attempts safe Compaction. Provider-reported overflow may compact and retry exactly once only before Provider output or Tool execution; the ordinary whole-Turn retry policy still treats overflow as non-retryable.
 - Coda never silently drops, truncates, or rewrites Session history. Failed Attempt partial output is not committed, and `read_session_history` can recover bounded omitted Messages from the unchanged journal.
 - When Compaction cannot recover, interactive mode offers cancel or a fresh empty Session in the same Workspace; print mode exits `1`.
-- The replacement inherits no Messages, summary, Media Assets, approvals, queue items, Tool state, Run evidence, Compaction Checkpoint, or background process. The old Session remains durable and closes only after replacement construction and retirement of its owned processes succeed.
+- The replacement inherits no Messages, summary, Media Assets, queue items, Tool state, Run evidence, Compaction Checkpoint, or background process. The old Session remains durable and closes only after replacement construction and retirement of its owned processes succeed.
 
 ## Bounded execution, evidence, evaluation, and capability reporting
 
 - Coding Agent injects a default per-Run budget of 64 Turns, 256 Tool Invocations, one hour, and four consecutive equivalent Tool batches. The Agent accounts for all Attempts, including discarded retries, and rejects an over-budget Tool batch before any member starts.
 - Every completed Run projects one bounded `RunEvidenceEnvelope` from lifecycle events and authoritative Tool Observations. Evidence records outcome, commands, paths, retries, failures, token use, cost only when pricing is complete, and any budget exhaustion without treating claims in assistant prose as proof.
-- `@coda/evals` provides an eight-fixture deterministic offline gate over the real Agent Interface and Faux Model trajectories. Live Provider evaluation is separately opt-in and spend-bounded.
+- `@coda/evals` provides a seven-fixture deterministic offline gate over the real Agent Interface and Faux Model trajectories. Live Provider evaluation is separately opt-in and spend-bounded.
 - The hand-reviewed capability contract is combined with executable runtime facts to generate `capabilities.v1.json` and only the marked README section. `npm run capabilities:check` fails on stale generated artifacts.
 
 ## Design status
 
-The private Coding Agent composes both interaction modes, 13 built-in Tools, Agent Skills, the MCP Host, OS-enforced Permissions and Sandbox policy, secure macOS and Linux Credentials, Provider metadata, bounded Runs, deterministic per-Run prompts, Context Compaction and overflow recovery, v9 append-only Sessions, bounded history recovery, Session-owned background processes, objective Run evidence, and generated capability reporting. Autocomplete, selection, redo, durable drafts, Session branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation are implemented through the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.
+The private Coding Agent composes both interaction modes, 13 built-in Tools with direct host execution, Agent Skills, the MCP Host, secure macOS and Linux Credentials, Provider metadata, bounded Runs, deterministic per-Run prompts, Context Compaction and overflow recovery, v9 append-only Sessions, bounded history recovery, Session-owned background processes, objective Run evidence, and generated capability reporting. Autocomplete, selection, redo, durable drafts, Session branching, RPC, extension APIs, and public release remain deferred. Markdown presentation, image attachments, terminal previews, and structured Tool Invocation presentation are implemented through the visual-refresh milestone specified in `.scratch/coda-tui-visual-refresh/spec.md`.

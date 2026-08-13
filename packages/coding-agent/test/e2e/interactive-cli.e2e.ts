@@ -9,7 +9,6 @@ import { StrictScreen } from "../../../tui/test/support/strict-screen.ts";
 
 const EXPECT = "/usr/bin/expect";
 const CLI = fileURLToPath(new URL("../../dist/bin.js", import.meta.url));
-const APPROVAL_FIXTURE = fileURLToPath(new URL("./fixtures/approval-bar.mjs", import.meta.url));
 const PROMPT = "coda-e2e-ascii-prompt";
 const COOKED_INPUT = "coda-e2e-cooked-input";
 const SHELL_PROMPT = "CODA_E2E_SHELL> ";
@@ -18,7 +17,6 @@ const EDITOR_SESSION = "session-editor-e2e";
 const LAUNCH_COMMAND = `before=$(stty -g); "$CODA_E2E_CLI" --interactive --no-session --workspace "$CODA_E2E_WORKSPACE" --model opencode-go/minimax-m3 --api-key coda-e2e-test-key; coda_status=$?`;
 const SCROLL_LAUNCH_COMMAND = `"$CODA_E2E_CLI" --interactive --resume "$CODA_E2E_SESSION" --workspace "$CODA_E2E_WORKSPACE" --model opencode-go/minimax-m3 --api-key coda-e2e-test-key; coda_status=$?`;
 const VERIFY_COMMAND = String.raw`after=$(stty -g); if [[ "$before" == "$after" ]]; then tty_state=restored; else tty_state=changed; fi; printf '\nCODA_E2E_EXIT=%s\nCODA_E2E_TTY=%s\nCODA_E2E_READY\n' "$coda_status" "$tty_state"; IFS= read -r cooked_input; printf 'CODA_E2E_COOKED=%s\n' "$cooked_input"`;
-const APPROVAL_LAUNCH_COMMAND = String.raw`before=$(stty -g); "$CODA_E2E_NODE" "$CODA_E2E_APPROVAL_FIXTURE"; coda_status=$?; after=$(stty -g); if [[ "$before" == "$after" ]]; then tty_state=restored; else tty_state=changed; fi; printf 'CODA_E2E_APPROVAL_EXIT=%s\nCODA_E2E_APPROVAL_TTY=%s\n' "$coda_status" "$tty_state"`;
 const EXPECT_PROGRAM = String.raw`
 set timeout 8
 log_user 1
@@ -172,62 +170,6 @@ expect eof
 exit 0
 `;
 
-const APPROVAL_EXPECT_PROGRAM = String.raw`
-set timeout 8
-log_user 1
-spawn -noecho /bin/zsh -dfi
-expect {
-  -exact $env(CODA_E2E_SHELL_PROMPT) {}
-  timeout { exit 80 }
-  eof { exit 81 }
-}
-stty rows 24 columns 90 < $spawn_out(slave,name)
-send -i $spawn_id -- "$env(CODA_E2E_APPROVAL_LAUNCH_COMMAND)\r"
-expect {
-  -exact "\033\[?u" {}
-  timeout { exit 92 }
-  eof { exit 93 }
-}
-send -i $spawn_id -- "\033\[?7u"
-expect {
-  -exact "Would you like to run the following command?" {}
-  timeout { exit 82 }
-  eof { exit 83 }
-}
-expect {
-  -exact "npm test -- --runInBand" {}
-  timeout { exit 84 }
-  eof { exit 85 }
-}
-send -i $spawn_id -- $env(CODA_E2E_APPROVAL_PASTE)
-after 100
-send -i $spawn_id -- "\033\[1;1:1B\033\[1;1:3B"
-after 50
-send -i $spawn_id -- "\033\[1;1:1A\033\[1;1:3A"
-after 50
-send -i $spawn_id -- "\033\[1;1:1B\033\[1;1:3B"
-after 50
-send -i $spawn_id -- "\r"
-expect {
-  -exact $env(CODA_E2E_APPROVAL_RESULT) {}
-  timeout { exit 86 }
-  eof { exit 87 }
-}
-expect {
-  -exact "CODA_E2E_APPROVAL_TTY=restored" {}
-  timeout { exit 88 }
-  eof { exit 89 }
-}
-expect {
-  -exact $env(CODA_E2E_SHELL_PROMPT) {}
-  timeout { exit 90 }
-  eof { exit 91 }
-}
-send -i $spawn_id -- "exit\r"
-expect eof
-exit 0
-`;
-
 async function runCli(
 	workspace: string,
 	home: string,
@@ -242,18 +184,12 @@ async function runCli(
 			cwd: workspace,
 			env: {
 				CODA_E2E_CLI: CLI,
-				CODA_E2E_APPROVAL_FIXTURE: APPROVAL_FIXTURE,
-				CODA_E2E_APPROVAL_LAUNCH_COMMAND: APPROVAL_LAUNCH_COMMAND,
-				CODA_E2E_APPROVAL_PASTE: "\x1b[200~1\x1b[201~",
-				CODA_E2E_APPROVAL_RESULT:
-					'CODA_E2E_APPROVAL_RESULT={"type":"approved-command-prefix-for-session","command":["npm","test"]}',
 				CODA_E2E_COOKED: COOKED_INPUT,
 				CODA_E2E_LAUNCH_COMMAND: LAUNCH_COMMAND,
 				CODA_E2E_PROMPT: PROMPT,
 				CODA_E2E_SHELL_PROMPT: SHELL_PROMPT,
 				CODA_E2E_VERIFY_COMMAND: VERIFY_COMMAND,
 				CODA_E2E_WORKSPACE: workspace,
-				CODA_E2E_NODE: process.execPath,
 				HOME: home,
 				LANG: "en_US.UTF-8",
 				NO_COLOR: "1",
@@ -359,41 +295,6 @@ async function writeEditorSession(home: string, workspace: string): Promise<void
 }
 
 describe.skipIf(process.platform !== "darwin")("coda interactive CLI", () => {
-	it("renders and safely accepts the command Approval Bar through a real pseudo-terminal", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "coda-interactive-approval-e2e-"));
-		const home = join(directory, "home");
-		const workspace = join(directory, "workspace");
-		await Promise.all([mkdir(home), mkdir(workspace)]);
-
-		try {
-			const canonicalWorkspace = await realpath(workspace);
-			const output = await runCli(canonicalWorkspace, home, directory, { program: APPROVAL_EXPECT_PROGRAM });
-			expect(output).toContain("Would you like to run the following command?");
-			expect(output).toContain("commands that start with `npm test` (p)");
-			expect(output).toContain("› 1. Yes, proceed (y)");
-			expect(output).toContain("› 2. Yes, and don't ask again");
-			expect(output).toContain("Press enter to confirm or esc to cancel");
-			expect(output).toContain("CODA_E2E_APPROVAL_EXIT=0");
-			expect(output).toContain("CODA_E2E_APPROVAL_TTY=restored");
-
-			const alternateStart = output.indexOf("\x1b[?1049h");
-			const approvalFrameEnd = output.indexOf("Press enter to confirm or esc to cancel", alternateStart);
-			expect(alternateStart).toBeGreaterThanOrEqual(0);
-			expect(approvalFrameEnd).toBeGreaterThan(alternateStart);
-			const screen = new StrictScreen(90, 24);
-			screen.write(
-				output.slice(alternateStart, approvalFrameEnd + "Press enter to confirm or esc to cancel".length),
-			);
-			const viewport = screen.viewport();
-			expect(viewport.findIndex((line) => line.includes("Would you like to run"))).toBe(11);
-			const helpRow = viewport.findIndex((line) => line.includes("Press enter to confirm"));
-			expect(helpRow).toBeGreaterThanOrEqual(22);
-			expect(helpRow).toBeLessThanOrEqual(23);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
 	it("renders sent Prompt cards and accepts a real multiline xterm editor draft", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "coda-interactive-editor-e2e-"));
 		const home = join(directory, "home");

@@ -3,11 +3,10 @@ import { createCoreCommandRegistry } from "../src/commands/core-commands.ts";
 import { resolveCommandInvocation } from "../src/commands/parser.ts";
 
 describe("core commands", () => {
-	it("publishes the confirmed command surface and only keeps /permissions as a hidden alias", () => {
+	it("publishes the confirmed command surface", () => {
 		const registry = createCoreCommandRegistry();
 
 		expect(registry.search("").map(({ command }) => command.name)).toEqual([
-			"permission",
 			"auth",
 			"model",
 			"effort",
@@ -21,8 +20,7 @@ describe("core commands", () => {
 		expect(resolveCommandInvocation(registry, "/skill")?.command.id).toBe("core:skill");
 		expect(resolveCommandInvocation(registry, "/effort")?.command.id).toBe("core:effort");
 		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
-		expect(resolveCommandInvocation(registry, "/permissions")?.command.id).toBe("core:permission");
-		expect(resolveCommandInvocation(registry, "/approvals")).toBeUndefined();
+		expect(resolveCommandInvocation(registry, "/legacy")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/attach image.png")).toBeUndefined();
 	});
 

@@ -190,11 +190,10 @@ describe("Agent RunBudget", () => {
 		]);
 	});
 
-	it("rejects an entire Tool batch before policy or side effects when it exceeds the Invocation limit", async () => {
+	it("rejects an entire Tool batch before side effects when it exceeds the Invocation limit", async () => {
 		const clock = new TestClock();
 		const events: AgentEvent[] = [];
 		const executed: string[] = [];
-		let policyChecks = 0;
 		const calls = fauxAssistantMessage(
 			[
 				fauxToolCall("step", { value: "one" }, { id: "call:one" }),
@@ -210,12 +209,6 @@ describe("Agent RunBudget", () => {
 					return { content: value };
 				}),
 			],
-			policyGate: {
-				check: async () => {
-					policyChecks++;
-					return { decision: "allow" };
-				},
-			},
 			runBudget: budget({ maxToolInvocations: 1 }),
 		});
 		agent.onEvent((event) => events.push(event));
@@ -227,7 +220,6 @@ describe("Agent RunBudget", () => {
 			failure: { kind: "budget", exhaustion: { limit: "tool_invocations", maximum: 1, observed: 2 } },
 		});
 		expect(executed).toEqual([]);
-		expect(policyChecks).toBe(0);
 		expect(events.filter(({ type }) => type === "tool_execution_start")).toEqual([]);
 		expect(events.filter((event) => event.type === "tool_execution_rejected").map(({ reason }) => reason)).toEqual([
 			"budget",

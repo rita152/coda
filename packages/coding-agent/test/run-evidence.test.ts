@@ -510,7 +510,6 @@ describe("RunEvidence projection", () => {
 			clock: { now: () => 1_000 },
 			idGenerator,
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				const faux = createFauxCore({ runtime });
 				faux.setResponses(responses.splice(0));

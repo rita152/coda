@@ -34,8 +34,6 @@ export interface StatusLineSnapshot extends SessionStatusLineSnapshot {
 export interface StatusLinePresentation {
 	readonly modelLabel: string;
 	readonly reasoning: string;
-	readonly permissionLabel?: string;
-	readonly permissionWarning?: boolean;
 }
 
 interface RenderedText {
@@ -55,7 +53,7 @@ export function renderStatusLine(
 	theme: TuiTheme,
 ): readonly [string, string] {
 	const safeWidth = Math.max(0, width);
-	const first = renderStatusRow(selectWorkspaceRow(snapshot, presentation, safeWidth, theme), safeWidth);
+	const first = renderStatusRow(selectWorkspaceRow(snapshot, safeWidth, theme), safeWidth);
 	const second = renderStatusRow(selectUsageRow(snapshot, presentation, safeWidth, theme), safeWidth);
 	return [first, second];
 }
@@ -76,35 +74,21 @@ export function formatStatusLineCost(cost: StatusLineCostSnapshot): string | und
 	return dollar;
 }
 
-function selectWorkspaceRow(
-	snapshot: StatusLineSnapshot,
-	presentation: StatusLinePresentation,
-	width: number,
-	theme: TuiTheme,
-): StatusRow {
+function selectWorkspaceRow(snapshot: StatusLineSnapshot, width: number, theme: TuiTheme): StatusRow {
 	const paths = workspacePathCandidates(snapshot.workspacePath, snapshot.homePath).map((value) =>
 		styled(theme, "muted", value),
 	);
 	const branch = gitPresentation(snapshot.git, theme);
-	const permissionValue = formatPermissionLabel(presentation.permissionLabel);
-	const permission = permissionValue
-		? styled(
-				theme,
-				presentation.permissionWarning || /(?:Full Access|\/ Never)$/u.test(permissionValue) ? "warning" : "muted",
-				permissionValue,
-			)
-		: undefined;
 	const withBranch = paths.map((path) => joinRendered([path, branch], " "));
 
 	for (const left of withBranch) {
-		if (fits(left, permission, width)) return { left, right: permission };
+		if (fits(left, undefined, width)) return { left };
 	}
 	if (branch) {
 		for (const path of [...paths].reverse()) {
-			if (fits(path, permission, width)) return { left: path, right: permission };
+			if (fits(path, undefined, width)) return { left: path };
 		}
 	}
-	if (permission && displayWidth(permission.plain) <= width) return { right: permission };
 	const compact = withBranch.at(-1) ?? paths.at(-1);
 	return compact ? { left: truncateRendered(compact, width, theme, "muted") } : {};
 }
@@ -240,21 +224,6 @@ function truncateRendered(
 	tone: Parameters<TuiTheme["style"]>[0],
 ): RenderedText {
 	return styled(theme, tone, truncatePlain(value.plain, width));
-}
-
-function formatPermissionLabel(label: string | undefined): string | undefined {
-	const value = singleLine(label ?? "");
-	if (!value) return undefined;
-	return value
-		.split(/\s*\/\s*/u)
-		.map((part) =>
-			part
-				.split(/[-\s]+/u)
-				.filter(Boolean)
-				.map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1).toLowerCase()}`)
-				.join(" "),
-		)
-		.join(" / ");
 }
 
 function formatUsd(value: number): string {

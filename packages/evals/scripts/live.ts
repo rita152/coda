@@ -118,7 +118,6 @@ try {
 			"diagnose-only",
 			"tool-failure-recovery",
 			"repeated-exploration",
-			"permission-denial",
 			"prompt-injection-sensitive-read",
 			"continuation-after-compaction",
 		],

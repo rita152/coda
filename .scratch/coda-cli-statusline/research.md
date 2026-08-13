@@ -10,13 +10,13 @@
 
 ## 执行摘要
 
-1. Coda 已经拥有全部核心数据，但它们目前分散在两个 UI 位置：顶部 Header 常驻显示 Workspace basename、`provider/model`、Reasoning 和 Permission；Composer 下方 Footer 显示动态操作提示。新增 statusline 的首要视觉问题因此是信息迁移与底部提示的优先级，而不是能否取得数据。
+1. Coda 已经拥有全部核心数据，但它们目前分散在两个 UI 位置：顶部 Header 常驻显示 Workspace basename、`provider/model` 和 Reasoning；Composer 下方 Footer 显示动态操作提示。新增 statusline 的首要视觉问题因此是信息迁移与底部提示的优先级，而不是能否取得数据。
 2. Coda 的完整 Session 历史和模型可见 Context Window 明确分离。Context 经过 compaction 后必须按当前投影计算，不能用整段 Session token 累计量代替；切换 Model 后分母也必须随新的 `contextWindow` 改变。
 3. OpenAI Codex 最接近目标几何：默认 statusline 仅有 `model-with-reasoning` 与 `current-dir`，使用紧凑单行、` · ` 分隔，并在退出提示、搜索、快捷键等行动信息出现时让位。
 4. Gemini CLI 最值得借鉴响应式策略：路径先语义缩短，再按配置顺序丢弃放不下的整段，末尾用 `…` 表示省略；它同时提供两行带标签与单行无标签两种密度。
 5. Claude Code 证明 Context、Model、目录、Git、成本等都适合 statusline，但它允许脚本任意输出多行/ANSI；这种开放性不是第一版必需条件。单行内建字段更可预测、更易测试。
 6. 在核对的 Claude Code、Codex CLI、Gemini CLI 中，Provider 都不是内建 statusline 字段。Coda 如果常驻展示 Provider，是一项有意的产品差异；最紧凑的表达是与 Model 合为 `provider/model`，避免重复标签。
-7. 推荐的默认视觉基线是单行 ambient status：`provider/model effort · Context N% left · ~/workspace`。Permission/Approval、Git branch 等是否加入默认集合属于产品内容决策；总 token、成本、版本、Session ID、API protocol 不宜默认堆入。
+7. 推荐的默认视觉基线是单行 ambient status：`provider/model effort · Context N% left · ~/workspace`。Git branch 等是否加入默认集合属于产品内容决策；总 token、成本、版本、Session ID、API protocol 不宜默认堆入。
 
 ## Coda 当前实现
 
@@ -48,7 +48,6 @@
 - Workspace label；
 - `provider/model`；
 - `reasoning <level>`；
-- Permission Profile / Approval Policy；
 - Transcript mode 时额外显示 `Transcript`。
 
 它按尾部逐项删除的方式适配窄屏。证据：`packages/coding-agent/src/interactive/chat-component.ts:1727-1756`；窄屏测试：`packages/coding-agent/test/chat-component.test.ts:330-339`。
@@ -195,7 +194,7 @@ Coda Theme 已提供 muted、accent、warning、error 等语义 tone；Reasoning
 1. Statusline 是 application-owned ambient presentation；`@coda/tui` 继续只提供通用宽度、布局和 ANSI primitive。
 2. 数据来自每个 focused Session 的结构化 runtime，不从 Header 文本或 Session JSONL 反向解析。
 3. Context 使用当前 Model-visible projection，兼容 compaction 和 Model switch，并对估算/未知保持诚实。
-4. 行动信息（Approval、错误、搜索、退出确认、queue 操作等）高于 ambient statusline。
+4. 行动信息（错误、搜索、退出确认、queue 操作等）高于 ambient statusline。
 5. 所有字段必须 terminal-sanitize、grapheme/display-width safe；NO_COLOR 与 reduced/too-small 分支继续有效。
 6. 不把任意外部 command hook 作为第一版前提；配置入口和持久化形式由实现设计决定。
 
@@ -203,7 +202,7 @@ Coda Theme 已提供 muted、accent、warning、error 等语义 tone；Reasoning
 
 第一轮根节点：
 
-1. 默认显示字段集合：最小、平衡或 diagnostics；Permission/Approval 与 Git 是否默认加入。
+1. 默认显示字段集合：最小、平衡或 diagnostics；Git 是否默认加入。
 2. 单行无标签还是两行带标签。
 3. Model、Provider、Reasoning 是合并为一个 identity segment，还是拆成多个字段；用稳定 ID 还是 display name。
 4. Context 显示 remaining / used / 两者，以及 percent / tokens / bar。

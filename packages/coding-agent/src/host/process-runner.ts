@@ -30,3 +30,14 @@ export interface ProcessRunResult {
 export interface ProcessRunner {
 	run(request: ProcessRunRequest): Promise<ProcessRunResult>;
 }
+
+export interface ProcessSession {
+	readonly completion: Promise<ProcessRunResult>;
+	write(input: string | Uint8Array): Promise<void>;
+	closeStdin(input?: string | Uint8Array): Promise<void>;
+	stop(): Promise<ProcessRunResult>;
+}
+
+export interface ProcessSessionRunner {
+	start(request: ProcessRunRequest): Promise<ProcessSession>;
+}

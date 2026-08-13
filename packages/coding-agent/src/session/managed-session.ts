@@ -171,20 +171,12 @@ export class ManagedSession implements Session {
 			await this.#append("model_selected", { model: change.model, reasoning: change.reasoning });
 			return;
 		}
-		if (change.type === "permission_selected") {
-			await this.#append("permission_selected", { profile: change.profile });
-			return;
-		}
 		if (change.type === "project_trust_changed") {
 			await this.#append("project_trust_changed", { trust: change.trust });
 			return;
 		}
 		if (change.type === "mcp_trust_changed") {
 			await this.#append("mcp_trust_changed", { trust: change.trust });
-			return;
-		}
-		if (change.type === "permission_audit_recorded") {
-			await this.#append("permission_audit_recorded", { event: change.event });
 			return;
 		}
 		if (change.type === "context_compacted") {

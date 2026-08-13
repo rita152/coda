@@ -1,5 +1,5 @@
 import type { ToolExecutionOutput } from "@coda/agent";
-import type { JsonValue, ToolObservation } from "@coda/ai";
+import type { JsonValue } from "@coda/ai";
 
 const FACT_NAMES = new Set(["code", "engine", "exitCode", "limitBytes", "matches"]);
 
@@ -24,10 +24,9 @@ export function toolFailure<TDetails extends Record<string, unknown>>(
 		legacyFacts || additionalFacts
 			? Object.freeze({ ...(legacyFacts ?? {}), ...(additionalFacts ?? {}) })
 			: undefined;
-	const status: ToolObservation["status"] = details.code === "access_denied" ? "denied" : "error";
 	return {
 		content,
-		observation: { status, truncated: false, ...(facts ? { facts } : {}) },
+		observation: { status: "error", truncated: false, ...(facts ? { facts } : {}) },
 		details: { ...details, status: "failed" },
 		isError: true,
 	};

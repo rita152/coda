@@ -2,11 +2,9 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
-import { compileSandboxPolicy } from "@coda/sandbox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
-import type { ModelProcessRunner } from "../src/permissions/model-process-runner.ts";
-import { createPermissionEngine, type PermissionEngine } from "../src/permissions/permission-engine.ts";
+import type { ProcessRunner } from "../src/host/process-runner.ts";
 import { createFindTool } from "../src/tools/find.ts";
 import { createGrepTool } from "../src/tools/grep.ts";
 import { createWorkspace } from "../src/workspace.ts";
@@ -29,7 +27,7 @@ function context(): ToolExecutionContext {
 }
 
 describe("optional search executables", () => {
-	it("prefers installed rg with an argument vector and sanitizes the result through Workspace policy", async () => {
+	it("prefers installed rg with an argument vector and validates results against the Workspace", async () => {
 		const root = await mkdtemp(join(tmpdir(), "coda-rg-"));
 		temporaryDirectories.push(root);
 		await mkdir(join(root, "src"));
@@ -37,21 +35,18 @@ describe("optional search executables", () => {
 		const fileSystem = createNodeFileSystem();
 		const workspace = await createWorkspace(root, fileSystem);
 		const tools = await trustedSearchDirectory("rg");
-		const permissions = await searchPermissions(workspace, "grep", { pattern: "needle", path: ".", limit: 20 });
-		const run = vi.fn<ModelProcessRunner["run"]>(async () => ({
+		const run = vi.fn<ProcessRunner["run"]>(async () => ({
 			exitCode: 0,
 			signal: null,
 			stdout: "src/hit.ts:1:7:leaked-private-key\n.env:1:1:needle=secret\n",
 			stderr: "",
 			timedOut: false,
 			truncated: false,
-			backend: "macos-seatbelt",
 		}));
 		const tool = createGrepTool({
 			workspace,
 			fileSystem,
 			processRunner: { run },
-			permissions,
 			runtime: { homeDirectory: root, environment: { PATH: tools } },
 		});
 
@@ -65,11 +60,6 @@ describe("optional search executables", () => {
 				args: expect.arrayContaining(["--no-heading", "--color", "never", "-e", "needle", "."]),
 				environment: { LC_ALL: "C", PATH: tools },
 			}),
-			expect.objectContaining({
-				readAccessPolicy: expect.objectContaining({
-					sandboxPolicy: expect.objectContaining({ profile: "workspace" }),
-				}),
-			}),
 		);
 		expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual(["needle", "--", "."]);
 	});
@@ -80,13 +70,11 @@ describe("optional search executables", () => {
 		await writeFile(join(root, "hit.txt"), "needle\n", "utf8");
 		const fileSystem = createNodeFileSystem();
 		const workspace = await createWorkspace(root, fileSystem);
-		const permissions = await searchPermissions(workspace, "grep", { pattern: "needle", path: ".", limit: 20 });
 		const missing = Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
 		const tool = createGrepTool({
 			workspace,
 			fileSystem,
 			processRunner: { run: async () => Promise.reject(missing) },
-			permissions,
 			runtime: { homeDirectory: root, environment: {} },
 		});
 
@@ -104,15 +92,13 @@ describe("optional search executables", () => {
 		const fileSystem = createNodeFileSystem();
 		await fileSystem.setMode(join(root, "rg"), 0o755);
 		const workspace = await createWorkspace(root, fileSystem);
-		const permissions = await searchPermissions(workspace, "grep", { pattern: "needle", path: ".", limit: 20 });
-		const run = vi.fn<ModelProcessRunner["run"]>(async () => {
+		const run = vi.fn<ProcessRunner["run"]>(async () => {
 			throw new Error("Workspace search helper must not execute");
 		});
 		const tool = createGrepTool({
 			workspace,
 			fileSystem,
 			processRunner: { run },
-			permissions,
 			runtime: { homeDirectory: root, environment: { PATH: root } },
 		});
 
@@ -132,21 +118,18 @@ describe("optional search executables", () => {
 		const fileSystem = createNodeFileSystem();
 		const workspace = await createWorkspace(root, fileSystem);
 		const tools = await trustedSearchDirectory("fd");
-		const permissions = await searchPermissions(workspace, "find", { pattern: "*.ts", path: "src", type: "file" });
-		const run = vi.fn<ModelProcessRunner["run"]>(async () => ({
+		const run = vi.fn<ProcessRunner["run"]>(async () => ({
 			exitCode: 0,
 			signal: null,
 			stdout: "src/z.ts\nsrc/a.ts\nsrc/nested\n",
 			stderr: "",
 			timedOut: false,
 			truncated: false,
-			backend: "macos-seatbelt",
 		}));
 		const tool = createFindTool({
 			workspace,
 			fileSystem,
 			processRunner: { run },
-			permissions,
 			runtime: { homeDirectory: root, environment: { PATH: tools } },
 		});
 
@@ -159,11 +142,6 @@ describe("optional search executables", () => {
 				executable: join(tools, "fd"),
 				args: expect.arrayContaining(["--glob", "--type", "f", "*.ts", "src"]),
 			}),
-			expect.objectContaining({
-				readAccessPolicy: expect.objectContaining({
-					sandboxPolicy: expect.objectContaining({ profile: "workspace" }),
-				}),
-			}),
 		);
 		expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual(["--", "*.ts", "src"]);
 	});
@@ -174,7 +152,6 @@ describe("optional search executables", () => {
 		const fileSystem = createNodeFileSystem();
 		const workspace = await createWorkspace(root, fileSystem);
 		const tools = await trustedSearchDirectory("rg");
-		const permissions = await searchPermissions(workspace, "grep", { pattern: "needle", path: "." });
 		const tool = createGrepTool({
 			workspace,
 			fileSystem,
@@ -186,10 +163,8 @@ describe("optional search executables", () => {
 					stderr: "",
 					timedOut: true,
 					truncated: false,
-					backend: "macos-seatbelt",
 				}),
 			},
-			permissions,
 			runtime: { homeDirectory: root, environment: { PATH: tools } },
 		});
 
@@ -208,7 +183,6 @@ describe("optional search executables", () => {
 		const fileSystem = createNodeFileSystem();
 		const workspace = await createWorkspace(root, fileSystem);
 		const tools = await trustedSearchDirectory("fd");
-		const permissions = await searchPermissions(workspace, "find", { pattern: "*.ts", path: "." });
 		const tool = createFindTool({
 			workspace,
 			fileSystem,
@@ -220,10 +194,8 @@ describe("optional search executables", () => {
 					stderr: "bad query",
 					timedOut: false,
 					truncated: false,
-					backend: "macos-seatbelt",
 				}),
 			},
-			permissions,
 			runtime: { homeDirectory: root, environment: { PATH: tools } },
 		});
 
@@ -244,33 +216,4 @@ async function trustedSearchDirectory(name: "fd" | "rg"): Promise<string> {
 	await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
 	await chmod(executable, 0o755);
 	return directory;
-}
-
-async function searchPermissions(
-	workspace: Awaited<ReturnType<typeof createWorkspace>>,
-	toolName: "find" | "grep",
-	arguments_: Record<string, unknown>,
-): Promise<PermissionEngine> {
-	const permissions = createPermissionEngine({
-		cwd: workspace.root,
-		workspace,
-		profile: compileSandboxPolicy({
-			profile: "workspace",
-			workspaceRoots: [workspace.root],
-			temporaryDirectory: "/tmp",
-		}),
-		approvalPolicy: "never",
-		approval: { decide: async () => ({ type: "denied", rejection: "unexpected" }) },
-	});
-	await permissions.check({
-		runId: "run-1" as never,
-		turnId: "turn-1" as never,
-		invocationId: "invocation-1" as never,
-		resultMessageId: "message-1" as never,
-		providerToolCallId: "provider-1",
-		toolName,
-		arguments: arguments_,
-		replaySafety: "safe",
-	});
-	return permissions;
 }

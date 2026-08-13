@@ -21,7 +21,6 @@ import type {
 	ThinkingLevel,
 } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult, type McpToolSnapshot } from "@coda/mcp";
-import { compileSandboxPolicy, type PermissionProfile } from "@coda/sandbox";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
 	createTerminalImageSurface,
@@ -43,11 +42,9 @@ import {
 import { ContextWindowController } from "./context-window/context-window.ts";
 import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
 import { type JsonEventStreamMode, JsonEventWriter } from "./event-output/json-event-writer.ts";
-import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
-import type { ProcessRunner } from "./host/process-runner.ts";
+import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { activitySummaryModeForApi } from "./interactive/activity-status.ts";
-import { InteractiveApprovalHandler } from "./interactive/approval.ts";
 import type { ChatAttachment } from "./interactive/chat-component.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { AttachmentTransaction } from "./interactive/input-controller.ts";
@@ -75,30 +72,6 @@ import { CodingMcpRegistry } from "./mcp/registry.ts";
 import { createMcpAgentTools, type McpAgentElicitation } from "./mcp/tools.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
-import {
-	approvalDecisionAuditEvent,
-	type PermissionAuditSink,
-	permissionConfigurationAuditEvent,
-} from "./permissions/audit.ts";
-import {
-	createAuditedModelProcessRunner,
-	createAuditedModelProcessSessionRunner,
-	createModelProcessRunner,
-	createModelProcessSessionRunner,
-	type ModelProcessRunner,
-	type ModelProcessSessionRunner,
-} from "./permissions/model-process-runner.ts";
-import {
-	type ApprovalPolicy,
-	type CommandRule,
-	createPermissionEngine,
-	type NetworkRule,
-	type PermissionApprovalHandler,
-	type PermissionEngine,
-} from "./permissions/permission-engine.ts";
-import { RejectingApprovalHandler } from "./permissions/rejecting-approval.ts";
-import { createInMemoryPermissionRuleStore, type PermissionRuleStore } from "./permissions/rule-store.ts";
-import { resolveDefaultDeniedReadRoots } from "./permissions/sensitive-read-roots.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
 import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
@@ -110,7 +83,6 @@ import { type AgentRunControlBinding, bindAgentRunControl, type RunControlConfig
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
-import { RunPermissionRouter } from "./runtime/run-permission-router.ts";
 import { RunRuntimeSlot } from "./runtime/run-runtime-slot.ts";
 import { DraftSession } from "./session/draft-session.ts";
 import { sessionMediaExtension } from "./session/media-codec.ts";
@@ -164,7 +136,6 @@ interface PreparedRunRuntime {
 	readonly model: Model<Api>;
 	readonly reasoning: ThinkingLevel | "off";
 	readonly authSnapshot: AuthResult | undefined;
-	readonly permission: PermissionEngine;
 	readonly skills: CodingSkillsSnapshot;
 	readonly mcp: McpToolSnapshot;
 	readonly tools: readonly AgentTool[];
@@ -179,6 +150,12 @@ const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 	}),
 });
 
+const unavailableProcessSessionRunner: ProcessSessionRunner = Object.freeze({
+	start: async () => {
+		throw new Error("Process sessions require a configured ProcessSessionRunner");
+	},
+});
+
 function codingAgentRunBudget(maxTurns: number | undefined, disabled: boolean): RunBudget | undefined {
 	if (disabled) return undefined;
 	if (maxTurns === undefined) return DEFAULT_CODING_AGENT_RUN_BUDGET;
@@ -190,17 +167,12 @@ export interface UserSettings {
 	readonly defaultModel?: ModelSelection;
 	readonly defaultReasoning?: ThinkingLevel | "off";
 	readonly customProviders?: readonly CustomProviderConfig[];
-	readonly shellEnvironmentAllowlist?: readonly string[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
 	readonly mcpServers?: readonly McpServerConfiguration[];
 	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
 	readonly ui?: {
 		readonly motion?: "full" | "reduced";
 		readonly colorScheme?: TerminalColorScheme;
-	};
-	readonly permissions?: {
-		readonly profile?: PermissionProfile;
-		readonly approvalPolicy?: ApprovalPolicy;
 	};
 }
 
@@ -249,10 +221,7 @@ export interface CodingAgentApplicationOptions {
 	readonly keybindings?: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
 	readonly sessions?: SessionManager;
-	readonly approval?: PermissionApprovalHandler;
-	readonly permissionRules?: PermissionRuleStore;
-	readonly modelProcessRunner?: ModelProcessRunner;
-	readonly modelProcessSessionRunner?: ModelProcessSessionRunner;
+	readonly processSessionRunner?: ProcessSessionRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
 	readonly mcpConnector?: McpConnector;
@@ -270,10 +239,6 @@ interface ParsedArguments {
 	readonly mode: "interactive" | "print";
 	readonly output: "json" | "text";
 	readonly jsonEventStream: JsonEventStreamMode;
-	readonly permissionProfile?: PermissionProfile;
-	readonly approvalPolicy?: ApprovalPolicy;
-	readonly additionalWritableRoots: readonly string[];
-	readonly dangerouslyBypassApprovalsAndSandbox: boolean;
 	readonly reasoning?: ThinkingLevel | "off";
 	readonly maxOutputTokens?: number;
 	readonly maxTurns?: number;
@@ -313,9 +278,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let output: ParsedArguments["output"] = "text";
 	let jsonEventStream: JsonEventStreamMode = "raw";
 	let jsonEventStreamExplicit = false;
-	let permissionProfile: PermissionProfile | undefined;
-	let approvalPolicy: ApprovalPolicy | undefined;
-	let dangerouslyBypassApprovalsAndSandbox = false;
 	let reasoning: ThinkingLevel | "off" | undefined;
 	let maxOutputTokens: number | undefined;
 	let maxTurns: number | undefined;
@@ -338,7 +300,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let model: ModelSelection | undefined;
 	const promptParts: string[] = [];
 	const imagePaths: string[] = [];
-	const additionalWritableRoots: string[] = [];
 	let skillsPath: string | undefined;
 
 	for (let index = 0; index < args.length; index++) {
@@ -402,41 +363,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		}
 		if (argument === "--version" || argument === "-v") {
 			action = "version";
-			continue;
-		}
-		if (argument === "--sandbox") {
-			const value = args[++index];
-			if (value === "read-only") permissionProfile = "read-only";
-			else if (value === "workspace-write") permissionProfile = "workspace";
-			else if (value === "danger-full-access") permissionProfile = "full-access";
-			else throw new Error("--sandbox requires read-only, workspace-write, or danger-full-access");
-			continue;
-		}
-		if (argument === "--ask-for-approval") {
-			const value = args[++index];
-			if (value === "untrusted") approvalPolicy = "unless-trusted";
-			else if (value === "on-request") approvalPolicy = "on-request";
-			else if (value === "never") approvalPolicy = "never";
-			else if (value === "granular") {
-				approvalPolicy = {
-					mode: "granular",
-					sandboxApproval: true,
-					rules: true,
-					skillApproval: true,
-					requestPermissions: true,
-					mcpElicitations: true,
-				};
-			} else throw new Error("--ask-for-approval requires untrusted, on-request, granular, or never");
-			continue;
-		}
-		if (argument === "--add-dir") {
-			const value = args[++index];
-			if (!value) throw new Error("--add-dir requires a path");
-			additionalWritableRoots.push(value);
-			continue;
-		}
-		if (argument === "--dangerously-bypass-approvals-and-sandbox") {
-			dangerouslyBypassApprovalsAndSandbox = true;
 			continue;
 		}
 		if (argument === "--reasoning") {
@@ -578,10 +504,6 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		mode,
 		output,
 		jsonEventStream,
-		permissionProfile: dangerouslyBypassApprovalsAndSandbox ? "full-access" : permissionProfile,
-		approvalPolicy: dangerouslyBypassApprovalsAndSandbox ? "never" : approvalPolicy,
-		additionalWritableRoots: Object.freeze([...additionalWritableRoots]),
-		dangerouslyBypassApprovalsAndSandbox,
 		reasoning,
 		maxOutputTokens,
 		maxTurns,
@@ -647,13 +569,8 @@ Model:
       --api-key <key>            Use a request-scoped API key
       --image <path>             Attach an image (repeatable)
 
-Permissions:
+Workspace:
       --workspace <path>         Select the Workspace root
-      --sandbox <mode>           read-only|workspace-write|danger-full-access
-      --ask-for-approval <mode>  untrusted|on-request|granular|never
-      --add-dir <path>           Add an explicit writable root (repeatable)
-      --dangerously-bypass-approvals-and-sandbox
-                                 Disable approval prompts and the outer Sandbox
       --trust-project            Trust the current root AGENTS.md hash
       --trust-project-mcp        Trust the exact current Workspace MCP configuration
 
@@ -806,38 +723,6 @@ async function selectModelInteractively(
 	return { provider: selected.slice(0, separator), id: selected.slice(separator + 1) };
 }
 
-function defaultApprovalPolicy(profile: PermissionProfile): ApprovalPolicy {
-	return profile === "full-access" ? "never" : "on-request";
-}
-
-async function canonicalDirectory(path: string, base: string, fileSystem: FileSystem): Promise<string> {
-	const candidate = isAbsolute(path) ? path : resolve(base, path);
-	const canonical = await fileSystem.realpath(candidate);
-	const status = await fileSystem.stat(canonical);
-	if (status.kind !== "directory") throw new Error(`Permission root is not a directory: ${path}`);
-	return canonical;
-}
-
-function approvalPolicyLabel(policy: ApprovalPolicy): string {
-	return typeof policy === "object" ? "granular" : policy;
-}
-
-function permissionProfileLabel(profile: PermissionProfile): string {
-	return profile === "read-only" ? "Read Only" : profile === "workspace" ? "Workspace" : "Full Access";
-}
-
-function promptReadAccess(profile: ReturnType<typeof compileSandboxPolicy>): {
-	readonly mode: "root-scoped" | "full-disk";
-	readonly roots: readonly string[];
-	readonly protectedRootCount: number;
-} {
-	return Object.freeze({
-		mode: profile.readAccess,
-		roots: Object.freeze([...new Set([...profile.readableRoots, ...profile.approvedReadRoots])]),
-		protectedRootCount: profile.deniedReadRoots.length,
-	});
-}
-
 function interactiveStatusLineSnapshot(
 	runtime: PreparedRunRuntime,
 	agent: Agent,
@@ -886,19 +771,6 @@ function latestUsageComesFromAnotherModel(agent: Agent, model: Model<Api>): bool
 	return false;
 }
 
-function approvalRequiredEvent(request: Parameters<PermissionApprovalHandler["decide"]>[0]): unknown {
-	return {
-		schemaVersion: 3,
-		type: "approval_required",
-		request: {
-			...request,
-			runId: String(request.runId),
-			turnId: String(request.turnId),
-			invocationId: String(request.invocationId),
-		},
-	};
-}
-
 function emptyMcpToolSnapshot(): McpToolSnapshot {
 	return Object.freeze({
 		revision: 0,
@@ -925,7 +797,7 @@ function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapshot): st
 			`SHA-256: ${snapshot.sha256}`,
 			`Servers: ${snapshot.serverCount}`,
 			"The exact file hash is stored separately from AGENTS.md and Skills trust; any change requires review again.",
-			"Trusting a stdio Server allows Coda to launch its configured executable. Tool calls still require Permission decisions.",
+			"Trusting a stdio Server allows Coda to launch its configured executable and call its Tools.",
 			"HTTP credentials are resolved outside this file and are never shown here.",
 			"",
 			...serverPreview,
@@ -1225,7 +1097,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											"Trust this project instruction file?",
 											`Path: ${projectInstructions.path}`,
 											`SHA-256: ${projectInstructions.sha256}`,
-											"The exact hash will be bound to this Workspace; any change requires approval again.",
+											"The exact hash will be bound to this Workspace; any change requires review again.",
 											"",
 											"Content preview:",
 											projectInstructions.content.slice(0, 2_000),
@@ -1406,200 +1278,38 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
 					}
 					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
-					const additionalWritableRoots = await Promise.all(
-						parsed.additionalWritableRoots.map((path) =>
-							canonicalDirectory(path, workspace.root, options.fileSystem),
-						),
-					);
-					const temporaryDirectory = await canonicalDirectory(
-						options.runtime.environment.TMPDIR ?? "/tmp",
-						workspace.root,
-						options.fileSystem,
-					);
-					const deniedReadRoots = await resolveDefaultDeniedReadRoots(
-						options.runtime.homeDirectory,
-						workspace,
-						options.runtime.environment,
-					);
-					const selectedProfile =
-						parsed.permissionProfile ??
-						session.restored.permissionProfile ??
-						settings.permissions?.profile ??
-						(projectInstructions ? "workspace" : "read-only");
-					const selectedApprovalPolicy =
-						parsed.approvalPolicy ??
-						settings.permissions?.approvalPolicy ??
-						defaultApprovalPolicy(selectedProfile);
-					const compiledProfile = compileSandboxPolicy({
-						profile: selectedProfile,
-						workspaceRoots: [workspace.root],
-						temporaryDirectory,
-						additionalWritableRoots,
-						deniedReadRoots,
-					});
 					const configuredShell = options.runtime.environment.SHELL;
 					const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
-					const interactiveApproval =
-						parsed.mode === "interactive" && !options.approval ? new InteractiveApprovalHandler() : undefined;
 					const interactiveMcpElicitation =
 						parsed.mode === "interactive" && !options.mcpElicitation
 							? new InteractiveMcpElicitationHandler()
 							: undefined;
 					const primaryMcpElicitation =
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
-					const rejectingApproval =
-						parsed.mode === "print" && !options.approval
-							? new RejectingApprovalHandler(async (request) => {
-									if (jsonEventWriter) {
-										await jsonEventWriter.writeRecord(approvalRequiredEvent(request));
-									} else {
-										const target = request.command ?? request.canonicalPath ?? request.host ?? request.kind;
-										await options.io.stderr.write(`coda: approval required for ${request.kind}: ${target}\n`);
-									}
-								})
-							: undefined;
-					const ruleStore = options.permissionRules ?? createInMemoryPermissionRuleStore();
-					const [commandPolicy, networkRules] = await Promise.all([
-						ruleStore.loadCommandPolicy(),
-						ruleStore.loadNetworkRules(),
-					]);
-					const audit: PermissionAuditSink = (event) =>
-						session.record({ type: "permission_audit_recorded", event });
-					const approvalHandler =
-						options.approval ?? interactiveApproval?.forSession(session.descriptor.id) ?? rejectingApproval!;
-					const auditedApproval: PermissionApprovalHandler = {
-						decide: async (request) => {
-							try {
-								const decision = await approvalHandler.decide(request);
-								await audit(approvalDecisionAuditEvent(request, decision));
-								return decision;
-							} catch (error) {
-								await audit(
-									approvalDecisionAuditEvent(request, {
-										type: "reviewer-failed",
-										message: error instanceof Error ? error.message : String(error),
-									}),
-								);
-								throw error;
-							}
-						},
-					};
-					const persistRule = async (
-						kind: "command" | "network",
-						rule: CommandRule | NetworkRule,
-						persist: () => Promise<void>,
-					): Promise<void> => {
-						try {
-							await persist();
-						} catch (error) {
-							await audit({
-								type: "rule_persistence",
-								kind,
-								rule,
-								outcome: "failed",
-								error: error instanceof Error ? error.message : String(error),
-							});
-							throw error;
-						}
-						await audit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
-					};
-					let runRuntimeForApproval: RunRuntimeSlot<PreparedRunRuntime> | undefined;
-					const createPolicy = (
-						profile: ReturnType<typeof compileSandboxPolicy>,
-						approvalPolicy: ApprovalPolicy,
-					): PermissionEngine =>
-						createPermissionEngine({
-							cwd: workspace.root,
-							shellExecutable,
-							workspace,
-							profile,
-							approvalPolicy,
-							bypassApprovalsAndSandbox: parsed.dangerouslyBypassApprovalsAndSandbox,
-							approval: auditedApproval,
-							genericApprovalForTool: (request) => {
-								if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
-								if (request.toolName === "skill" && typeof request.arguments.skill === "string") {
-									const id = skillIdFromCommandId(request.arguments.skill);
-									const resolved = id ? runRuntimeForApproval?.active?.value.skills.byId.get(id) : undefined;
-									return {
-										kind: "skill",
-										reason: resolved
-											? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
-											: `Activate unavailable Skill ${request.arguments.skill}`,
-									};
-								}
-								const mcpTool = runRuntimeForApproval?.active?.value.mcp.tools.find(
-									(tool) => tool.name === request.toolName,
-								);
-								return mcpTool
-									? {
-											kind: "mcp",
-											reason: `Call MCP Tool ${mcpTool.serverId}/${mcpTool.remoteName}`,
-										}
-									: undefined;
-							},
-							resolveExecutable: createExecutableIdentityResolver({
-								fileSystem: options.fileSystem,
-								path: options.runtime.environment.PATH,
-								pathExtensions: options.runtime.environment.PATHEXT,
-								platform: options.runtime.platform,
-							}),
-							onSessionApprovalUsed: audit,
-							onReadAccessDecision: audit,
-							commandRules: commandPolicy.rules,
-							hostExecutables: commandPolicy.hostExecutables,
-							networkRules,
-							persistCommandRule: (rule) =>
-								persistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
-							persistNetworkRule: (rule) =>
-								persistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
-							onWarning: async (message) => {
-								await audit({ type: "warning", message });
-								await options.io.stderr.write(`coda: ${message}\n`);
-							},
-						});
-					const initialPermission = createPolicy(compiledProfile, selectedApprovalPolicy);
 					const initialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 					const runRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
 						model,
 						reasoning,
 						authSnapshot: auth,
-						permission: initialPermission,
 						skills: skillsSnapshot,
 						mcp: initialMcp,
 						tools: Object.freeze([]),
 					});
-					runRuntimeForApproval = runRuntime;
-					const policy = new RunPermissionRouter(runRuntime, ({ permission }) => permission);
-					await audit(permissionConfigurationAuditEvent("startup", compiledProfile, selectedApprovalPolicy));
-					if (!session.restored.permissionProfile || parsed.permissionProfile) {
-						await session.record({ type: "permission_selected", profile: selectedProfile });
-					}
-					const modelProcessRunner = createAuditedModelProcessRunner(
-						options.modelProcessRunner ?? createModelProcessRunner(),
-						audit,
-					);
 					const activeProcessSessionManager = new ProcessSessionManager({
 						fileSystem: options.fileSystem,
 						homeDirectory: options.runtime.homeDirectory,
-						runner: createAuditedModelProcessSessionRunner(
-							options.modelProcessSessionRunner ?? createModelProcessSessionRunner(),
-							audit,
-						),
+						runner: options.processSessionRunner ?? unavailableProcessSessionRunner,
 						idGenerator: options.runtime.idGenerator,
 					});
 					processSessionManager = activeProcessSessionManager;
 					const baseTools = createCodingTools({
 						workspace,
 						fileSystem: options.fileSystem,
-						processRunner: modelProcessRunner,
+						processRunner: options.processRunner,
 						processSessionManager: activeProcessSessionManager,
-						permissions: policy,
 						shellExecutable,
 						runtime: options.runtime,
-						settings,
 						sessionHistory: session.history,
-						onAudit: audit,
 						sessionId: session.descriptor.id,
 					});
 					const toolsForRun = (snapshot: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
@@ -1608,16 +1318,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							snapshot: mcp,
 							elicit: async (request) => {
 								if (!primaryMcpElicitation) return { action: "decline" };
-								if (parsed.dangerouslyBypassApprovalsAndSandbox) return primaryMcpElicitation(request);
-								const decision = await policy.requestGenericApproval({
-									kind: "mcp",
-									runId: request.execution.runId,
-									turnId: request.execution.turnId,
-									invocationId: request.execution.invocationId,
-									toolName: request.tool.name,
-									reason: `Allow ${request.server.server?.name ?? request.server.id} to request ${request.request.mode} Elicitation for ${request.tool.remoteName}`,
-								});
-								return decision.decision === "allow" ? primaryMcpElicitation(request) : { action: "decline" };
+								return primaryMcpElicitation(request);
 							},
 						});
 						return Object.freeze([...baseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
@@ -1633,12 +1334,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							platform: options.runtime.platform,
 							timestamp: options.runtime.clock.now(),
 							tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-							capabilities: {
-								interactionMode: parsed.mode,
-								permissionProfile: runtime.permission.configuration().profile.profile,
-								approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
-								readAccess: promptReadAccess(runtime.permission.configuration().profile),
-							},
+							capabilities: { interactionMode: parsed.mode },
 							projectInstructions,
 							skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
 						});
@@ -1675,7 +1371,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
 							return runtime.tools;
 						},
-						policyGate: policy,
 						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
 						recoverFailedAttempt: (attempt) =>
 							contextOverflowRecovery.recoverFailedAttempt(attempt, agent.state.messages),
@@ -1750,12 +1445,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						);
 					const initialMessageCount = agent.state.messages.length;
 					agent.onEvent(async (event) => {
-						if (
-							(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
-							policy.consumeAbort(event.invocation.id)
-						) {
-							agent.abort();
-						}
 						if (event.type === "run_end") {
 							void contextWindow.flushManual(agent.state.messages).catch(() => undefined);
 							if (activeRuntimeId !== undefined) {
@@ -1905,160 +1594,27 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
 								);
 								const targetAuth = await options.models.getAuth(targetModel, { clock: options.runtime.clock });
-								const targetProfile = compileSandboxPolicy({
-									profile: fresh ? "read-only" : (targetSession.restored.permissionProfile ?? "read-only"),
-									workspaceRoots: [workspace.root],
-									temporaryDirectory,
-									additionalWritableRoots,
-									deniedReadRoots,
-								});
-								const targetApprovalPolicy = defaultApprovalPolicy(targetProfile.profile);
-								const targetAudit: PermissionAuditSink = (event) =>
-									targetSession.record({ type: "permission_audit_recorded", event });
-								const targetAuditedApproval: PermissionApprovalHandler = {
-									decide: async (request) => {
-										try {
-											const targetApprovalHandler =
-												options.approval ??
-												interactiveApproval?.forSession(targetSession.descriptor.id) ??
-												approvalHandler;
-											const decision = await targetApprovalHandler.decide(request);
-											await targetAudit(approvalDecisionAuditEvent(request, decision));
-											return decision;
-										} catch (error) {
-											await targetAudit(
-												approvalDecisionAuditEvent(request, {
-													type: "reviewer-failed",
-													message: error instanceof Error ? error.message : String(error),
-												}),
-											);
-											throw error;
-										}
-									},
-								};
-								const targetPersistRule = async (
-									kind: "command" | "network",
-									rule: CommandRule | NetworkRule,
-									persist: () => Promise<void>,
-								): Promise<void> => {
-									try {
-										await persist();
-									} catch (error) {
-										await targetAudit({
-											type: "rule_persistence",
-											kind,
-											rule,
-											outcome: "failed",
-											error: error instanceof Error ? error.message : String(error),
-										});
-										throw error;
-									}
-									await targetAudit({ type: "rule_persistence", kind, rule, outcome: "persisted" });
-								};
-								let targetRunRuntimeForApproval: RunRuntimeSlot<PreparedRunRuntime> | undefined;
-								const targetCreatePolicy = (
-									profile: ReturnType<typeof compileSandboxPolicy>,
-									approvalPolicy: ApprovalPolicy,
-								): PermissionEngine =>
-									createPermissionEngine({
-										cwd: workspace.root,
-										shellExecutable,
-										workspace,
-										profile,
-										approvalPolicy,
-										bypassApprovalsAndSandbox: parsed.dangerouslyBypassApprovalsAndSandbox,
-										approval: targetAuditedApproval,
-										genericApprovalForTool: (request) => {
-											if (parsed.dangerouslyBypassApprovalsAndSandbox) return undefined;
-											if (request.toolName === "skill" && typeof request.arguments.skill === "string") {
-												const id = skillIdFromCommandId(request.arguments.skill);
-												const resolved = id
-													? targetRunRuntimeForApproval?.active?.value.skills.byId.get(id)
-													: undefined;
-												return {
-													kind: "skill",
-													reason: resolved
-														? `Activate Skill ${resolved.candidate.metadata.name} (${resolved.candidate.id}, revision ${resolved.candidate.revision})`
-														: `Activate unavailable Skill ${request.arguments.skill}`,
-												};
-											}
-											const mcpTool = targetRunRuntimeForApproval?.active?.value.mcp.tools.find(
-												(tool) => tool.name === request.toolName,
-											);
-											return mcpTool
-												? {
-														kind: "mcp",
-														reason: `Call MCP Tool ${mcpTool.serverId}/${mcpTool.remoteName}`,
-													}
-												: undefined;
-										},
-										resolveExecutable: createExecutableIdentityResolver({
-											fileSystem: options.fileSystem,
-											path: options.runtime.environment.PATH,
-											pathExtensions: options.runtime.environment.PATHEXT,
-											platform: options.runtime.platform,
-										}),
-										onSessionApprovalUsed: targetAudit,
-										onReadAccessDecision: targetAudit,
-										commandRules: commandPolicy.rules,
-										hostExecutables: commandPolicy.hostExecutables,
-										networkRules,
-										persistCommandRule: (rule) =>
-											targetPersistRule("command", rule, () => ruleStore.appendCommandRule(rule)),
-										persistNetworkRule: (rule) =>
-											targetPersistRule("network", rule, () => ruleStore.appendNetworkRule(rule)),
-										onWarning: async (message) => {
-											await targetAudit({ type: "warning", message });
-											await options.io.stderr.write(`coda: ${message}\n`);
-										},
-									});
-								const targetPermission = targetCreatePolicy(targetProfile, targetApprovalPolicy);
 								const targetInitialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 								const targetRunRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
 									model: targetModel,
 									reasoning: targetReasoning,
 									authSnapshot: targetAuth,
-									permission: targetPermission,
 									skills: skillsManager.current ?? skillsSnapshot,
 									mcp: targetInitialMcp,
 									tools: Object.freeze([]),
 								});
-								targetRunRuntimeForApproval = targetRunRuntime;
 								sessionRunRuntimes.set(targetSession.descriptor.id, {
 									runtime: targetRunRuntime,
 									apiKey: undefined,
 								});
-								const targetPolicy = new RunPermissionRouter(targetRunRuntime, ({ permission }) => permission);
-								const startupPermissionAudit = permissionConfigurationAuditEvent(
-									"startup",
-									targetProfile,
-									targetApprovalPolicy,
-								);
-								if (fresh && targetSession instanceof DraftSession) {
-									targetSession.stageInitialChanges([
-										{ type: "permission_audit_recorded", event: startupPermissionAudit },
-										{ type: "permission_selected", profile: targetProfile.profile },
-									]);
-								} else {
-									await targetAudit(startupPermissionAudit);
-									if (!targetSession.restored.permissionProfile) {
-										await targetSession.record({
-											type: "permission_selected",
-											profile: targetProfile.profile,
-										});
-									}
-								}
 								const targetBaseTools = createCodingTools({
 									workspace,
 									fileSystem: options.fileSystem,
-									processRunner: modelProcessRunner,
+									processRunner: options.processRunner,
 									processSessionManager: activeProcessSessionManager,
-									permissions: targetPolicy,
 									shellExecutable,
 									runtime: options.runtime,
-									settings,
 									sessionHistory: targetSession.history,
-									onAudit: targetAudit,
 									sessionId: targetSession.descriptor.id,
 								});
 								const targetToolsForRun = (
@@ -2070,20 +1626,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										snapshot: mcp,
 										elicit: async (request) => {
 											if (!targetMcpElicitation) return { action: "decline" };
-											if (parsed.dangerouslyBypassApprovalsAndSandbox) {
-												return targetMcpElicitation(request);
-											}
-											const decision = await targetPolicy.requestGenericApproval({
-												kind: "mcp",
-												runId: request.execution.runId,
-												turnId: request.execution.turnId,
-												invocationId: request.execution.invocationId,
-												toolName: request.tool.name,
-												reason: `Allow ${request.server.server?.name ?? request.server.id} to request ${request.request.mode} Elicitation for ${request.tool.remoteName}`,
-											});
-											return decision.decision === "allow"
-												? targetMcpElicitation(request)
-												: { action: "decline" };
+											return targetMcpElicitation(request);
 										},
 									});
 									return Object.freeze([...targetBaseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
@@ -2099,12 +1642,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										platform: options.runtime.platform,
 										timestamp: options.runtime.clock.now(),
 										tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-										capabilities: {
-											interactionMode: "interactive",
-											permissionProfile: runtime.permission.configuration().profile.profile,
-											approvalPolicy: approvalPolicyLabel(runtime.permission.configuration().approvalPolicy),
-											readAccess: promptReadAccess(runtime.permission.configuration().profile),
-										},
+										capabilities: { interactionMode: "interactive" },
 										projectInstructions,
 										skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
 									});
@@ -2148,7 +1686,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
 										return runtime.tools;
 									},
-									policyGate: targetPolicy,
 									retry: options.runtime.scheduler
 										? createCodingAgentRetry(options.runtime.scheduler)
 										: undefined,
@@ -2229,12 +1766,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										targetSession,
 									);
 								targetAgent.onEvent(async (event) => {
-									if (
-										(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
-										targetPolicy.consumeAbort(event.invocation.id)
-									) {
-										targetAgent.abort();
-									}
 									if (event.type === "run_end") {
 										void targetContextWindow.flushManual(targetAgent.state.messages).catch(() => undefined);
 										if (targetActiveRuntimeId !== undefined) {
@@ -2252,11 +1783,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								return {
 									agent: targetAgent,
 									session: targetSession,
-									approvalFor: (invocationId) => targetPolicy.approvalFor(invocationId),
 									modelLabel: `${targetModel.provider}/${targetModel.id}`,
 									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
-									permissionProfile: targetProfile.profile,
-									permissionLabel: `${permissionProfileLabel(targetProfile.profile)} / ${approvalPolicyLabel(targetApprovalPolicy)}`,
 									statusLine: () =>
 										interactiveStatusLineSnapshot(
 											targetRunRuntime.active?.value ?? targetRunRuntime.selected,
@@ -2265,27 +1793,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											targetContextWindow,
 											targetPromptSnapshot.text,
 										),
-									onPermissionProfileChange: async (profile) => {
-										const nextProfile = compileSandboxPolicy({
-											profile,
-											workspaceRoots: [workspace.root],
-											temporaryDirectory,
-											additionalWritableRoots,
-											deniedReadRoots,
-										});
-										const nextApprovalPolicy = defaultApprovalPolicy(profile);
-										const nextPermission = targetCreatePolicy(nextProfile, nextApprovalPolicy);
-										await targetAudit(
-											permissionConfigurationAuditEvent(
-												"permissions-command",
-												nextProfile,
-												nextApprovalPolicy,
-											),
-										);
-										await targetSession.record({ type: "permission_selected", profile });
-										targetRunRuntime.select({ ...targetRunRuntime.selected, permission: nextPermission });
-										return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(nextApprovalPolicy)}`;
-									},
 									modelCommand: {
 										currentKey: () =>
 											`${targetRunRuntime.selected.model.provider}/${targetRunRuntime.selected.model.id}`,
@@ -2433,13 +1940,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								keybindings: options.keybindings ?? [],
 								diagnostics: options.diagnostics,
 								fullScreenOutput: options.fullScreenOutput,
-								approval: interactiveApproval,
 								mcpElicitation: interactiveMcpElicitation,
-								approvalFor: (invocationId) => policy.approvalFor(invocationId),
 								modelLabel: `${model.provider}/${model.id}`,
 								activitySummaryMode: activitySummaryModeForApi(model.api),
-								permissionProfile: policy.configuration().profile.profile,
-								permissionLabel: `${permissionProfileLabel(policy.configuration().profile.profile)} / ${approvalPolicyLabel(policy.configuration().approvalPolicy)}`,
 								statusLine: () =>
 									interactiveStatusLineSnapshot(
 										runRuntime.active?.value ?? runRuntime.selected,
@@ -2448,23 +1951,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										contextWindow,
 										promptSnapshot.text,
 									),
-								onPermissionProfileChange: async (profile) => {
-									const nextProfile = compileSandboxPolicy({
-										profile,
-										workspaceRoots: [workspace.root],
-										temporaryDirectory,
-										additionalWritableRoots,
-										deniedReadRoots,
-									});
-									const nextApprovalPolicy = defaultApprovalPolicy(profile);
-									const nextPermission = createPolicy(nextProfile, nextApprovalPolicy);
-									await audit(
-										permissionConfigurationAuditEvent("permissions-command", nextProfile, nextApprovalPolicy),
-									);
-									await session.record({ type: "permission_selected", profile });
-									runRuntime.select({ ...runRuntime.selected, permission: nextPermission });
-									return `${permissionProfileLabel(profile)} / ${approvalPolicyLabel(nextApprovalPolicy)}`;
-								},
 								modelCommand: {
 									currentKey: () => `${runRuntime.selected.model.provider}/${runRuntime.selected.model.id}`,
 									list: listModelEntries,
@@ -2698,10 +2184,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											model: { provider: model.provider, id: model.id },
 											reasoning,
 											prompt: { version: promptSnapshot.version, sha256: promptSnapshot.sha256 },
-											permissions: {
-												profile: policy.configuration().profile.profile,
-												approvalPolicy: approvalPolicyLabel(policy.configuration().approvalPolicy),
-											},
 										}
 									: undefined,
 								runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
@@ -2754,7 +2236,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						return 1;
 					}
-					if (rejectingApproval && rejectingApproval.requests.length > 0) return 1;
 					return 0;
 				} finally {
 					runControlBinding?.dispose();

@@ -123,7 +123,6 @@ describe("Session facade", () => {
 			model: { provider: "opencode-go", id: "kimi-k2.6" },
 			reasoning: "high",
 		});
-		await session.record({ type: "permission_selected", profile: "workspace" });
 		await session.record({
 			type: "prepare_run",
 			promptVersion: "coda-system-prompt-v1",
@@ -135,7 +134,6 @@ describe("Session facade", () => {
 			clock: { now: () => 1_100 },
 			idGenerator,
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: async () => {
 				const { createFauxCore } = await import("@coda/ai");
 				const faux = createFauxCore({ runtime });
@@ -159,7 +157,6 @@ describe("Session facade", () => {
 		expect(restored.restored).toMatchObject({
 			model: { provider: "opencode-go", id: "kimi-k2.6" },
 			reasoning: "high",
-			permissionProfile: "workspace",
 		});
 		await restored.close();
 	});

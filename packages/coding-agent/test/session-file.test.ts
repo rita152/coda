@@ -130,63 +130,6 @@ describe("JSONL File Session", () => {
 		}
 	});
 
-	it("persists permission audit facts without restoring them as authority", async () => {
-		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-permissions-"));
-		temporaryDirectories.push(homeDirectory);
-		let id = 0;
-		const manager = new FileSessionManager({
-			fileSystem: createNodeFileSystem(),
-			homeDirectory,
-			clock: { now: () => 1_180 },
-			idGenerator: { generate: (kind) => `${kind}:${++id}` },
-			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
-			processInspector: { status: async () => "alive" },
-		});
-		const session = await manager.open({
-			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
-			mode: "interactive",
-		});
-		await session.record({
-			type: "permission_audit_recorded",
-			event: {
-				type: "configuration",
-				source: "startup",
-				approvalPolicy: "never",
-				policy: {
-					profile: "full-access",
-					readAccess: "full-disk",
-					readableRoots: [],
-					approvedReadRoots: [],
-					deniedReadRoots: [],
-					writableRoots: "full-disk",
-					protectedMetadataRoots: ["/canonical/workspace"],
-					protectedMetadataNames: [".git", ".agents", ".codex", ".coda"],
-					protectedMetadataPaths: [
-						"/canonical/workspace/.git",
-						"/canonical/workspace/.agents",
-						"/canonical/workspace/.codex",
-						"/canonical/workspace/.coda",
-					],
-					networkAccess: "enabled",
-				},
-			},
-		});
-		const sessionId = session.descriptor.id;
-		const sessionPath = session.descriptor.path!;
-		await session.close();
-
-		const journal = await readFile(sessionPath, "utf8");
-		expect(journal).toContain('"type":"permission_audit_recorded"');
-		expect(journal).toContain('"profile":"full-access"');
-		const restored = await manager.open({
-			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
-			mode: "interactive",
-			resumeId: sessionId,
-		});
-		expect(restored.restored).toEqual({});
-		await restored.close();
-	});
-
 	it("indexes durable media attached to a paused Follow-up by queue identity", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-follow-up-media-"));
 		temporaryDirectories.push(homeDirectory);
@@ -283,7 +226,6 @@ describe("JSONL File Session", () => {
 			clock: { now: () => 1_200 },
 			idGenerator,
 			tools: [tool],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		});
 		session.attach(agent);

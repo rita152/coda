@@ -36,7 +36,6 @@ const OPTIONS = {
 	concurrency: 5,
 	maxOutputTokens: 32_768,
 	maxTurns: 96,
-	allowAllCommands: true,
 } as const;
 
 const SAME_REVISION_FIXTURE = JSON.parse(
@@ -100,7 +99,6 @@ describe("DeepSWE evaluation runner", () => {
 				run_control_stationary_turns: 4,
 				adapter_finalize_margin_sec: DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
 				pier_hard_timeout_sec: DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
-				allow_all_commands: true,
 			},
 			env: { OPENCODE_API_KEY: `$${"{OPENCODE_API_KEY}"}`, NODE_USE_ENV_PROXY: "1" },
 		});
@@ -255,7 +253,6 @@ describe("DeepSWE evaluation runner", () => {
 		expect(lock.harness.maxOutputTokens).toBe(32_768);
 		expect(lock.harness.eventStream).toEqual({ mode: "semantic", schemaVersion: 1 });
 		expect(lock.harness.maxTurns).toBe(96);
-		expect(lock.harness.allowAllCommands).toBe(true);
 		expect(lock.harness.runControl).toEqual({
 			workSec: DEEP_SWE_DEFAULT_RUN_CONTROL_WORK_SEC,
 			graceSec: DEEP_SWE_DEFAULT_RUN_CONTROL_GRACE_SEC,
@@ -620,7 +617,6 @@ describe("DeepSWE evaluation runner", () => {
 							changed_paths: ["src/index.ts"],
 							tool_issue_count: 2,
 							tool_rejection_count: 3,
-							policy_rejection_count: 2,
 							invalid_tool_call_count: 1,
 							unresolved_failure_count: 1,
 						},
@@ -696,7 +692,6 @@ describe("DeepSWE evaluation runner", () => {
 			nonzeroCodaExits: 1,
 			toolIssueCount: 2,
 			toolRejectionCount: 3,
-			policyRejectionCount: 2,
 			invalidToolCallCount: 1,
 			unresolvedFailureCount: 1,
 			lengthTruncationCount: 1,
@@ -712,7 +707,6 @@ describe("DeepSWE evaluation runner", () => {
 			changedPathCount: 1,
 			toolIssueCount: 2,
 			toolRejectionCount: 3,
-			policyRejectionCount: 2,
 			invalidToolCallCount: 1,
 			unresolvedFailureCount: 1,
 			lengthTruncationCount: 1,
@@ -800,7 +794,6 @@ describe("DeepSWE evaluation runner", () => {
 			maxOutputTokens: 32_768,
 			maxTurns: 64,
 			runBudgetEnabled: true,
-			allowAllCommands: false,
 			experiment,
 		} as const;
 		const comparison = compareDeepSweRounds([
@@ -905,7 +898,6 @@ describe("DeepSWE evaluation runner", () => {
 			maxOutputTokens: 32_768,
 			maxTurns: 64,
 			runBudgetEnabled: true,
-			allowAllCommands: false,
 		} as const;
 		const comparison = compareDeepSweRounds([
 			{
@@ -969,7 +961,6 @@ describe("DeepSWE evaluation runner", () => {
 			maxOutputTokens: 32_768,
 			maxTurns: 64,
 			runBudgetEnabled: true,
-			allowAllCommands: false,
 		} as const;
 		const comparison = compareDeepSweRounds([
 			{
@@ -1027,7 +1018,6 @@ describe("DeepSWE evaluation runner", () => {
 				harnessRevision: "revision-two",
 				maxOutputTokens: 32_768,
 				maxTurns: 96,
-				allowAllCommands: true,
 				report: improved,
 			},
 			{ round: 1, harnessRevision: "revision-one", maxOutputTokens: 16_384, maxTurns: 64, report: base },
@@ -1038,7 +1028,6 @@ describe("DeepSWE evaluation runner", () => {
 		expect(comparison.rounds[1]).toMatchObject({
 			maxOutputTokens: 32_768,
 			maxTurns: 96,
-			allowAllCommands: true,
 			deltaPassedFromPrevious: 1,
 			deltaPassRateFromPrevious: 1,
 			deltaAveragePartialFromPrevious: 0.75,

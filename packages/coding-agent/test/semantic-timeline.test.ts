@@ -255,7 +255,7 @@ describe("SemanticTimeline", () => {
 			pendingFollowUps: [],
 			messages: [
 				assistant("assistant-restored", [
-					{ type: "toolCall", id: "provider-denied", name: "write", arguments: { path: "a" } },
+					{ type: "toolCall", id: "provider-failed", name: "write", arguments: { path: "a" } },
 					{ type: "toolCall", id: "provider-aborted", name: "bash", arguments: { command: "x" } },
 					{ type: "toolCall", id: "provider-skipped", name: "edit", arguments: { path: "b" } },
 					{ type: "toolCall", id: "provider-interrupted", name: "write", arguments: { path: "c" } },
@@ -263,7 +263,7 @@ describe("SemanticTimeline", () => {
 			],
 		};
 		const lifecycle = [
-			restoredTool("invocation-denied", "provider-denied", 0, "write", "rejected", "policy"),
+			restoredTool("invocation-failed", "provider-failed", 0, "write", "error"),
 			restoredTool("invocation-aborted", "provider-aborted", 1, "bash", "aborted"),
 			restoredTool("invocation-skipped", "provider-skipped", 2, "edit", "rejected", "not_started"),
 			restoredTool("invocation-interrupted", "provider-interrupted", 3, "write", "interrupted"),
@@ -272,41 +272,11 @@ describe("SemanticTimeline", () => {
 		const timeline = new SemanticTimeline(seed, lifecycle);
 
 		expect(toolEntries(timeline).map(({ invocation, state }) => [invocation.id, state])).toEqual([
-			["invocation-denied", "denied"],
+			["invocation-failed", "failed"],
 			["invocation-aborted", "aborted"],
 			["invocation-skipped", "skipped"],
 			["invocation-interrupted", "interrupted"],
 		]);
-	});
-
-	it("restores process-only approval history as expired without restoring authority", () => {
-		const seed: AgentSeed = {
-			version: 1,
-			pendingFollowUps: [],
-			messages: [
-				assistant("assistant-restored", [
-					{ type: "toolCall", id: "provider-approved", name: "bash", arguments: { command: "npm test" } },
-				]),
-			],
-		};
-		const lifecycle: SessionToolLifecycle = {
-			...restoredTool("invocation-approved", "provider-approved", 0, "bash", "success"),
-			approval: {
-				type: "approval_decision",
-				invocationId: "invocation-approved",
-				kind: "command",
-				outcome: "approved-for-process",
-				commandPrefix: ["npm", "test"],
-			},
-		};
-
-		const timeline = new SemanticTimeline(seed, [lifecycle]);
-
-		expect(toolEntries(timeline)[0]?.approval).toEqual({
-			outcome: "approved-for-process",
-			commandPrefix: ["npm", "test"],
-			expired: true,
-		});
 	});
 
 	it("preserves unchanged entry identities when a streaming tail advances", () => {
@@ -333,7 +303,7 @@ function restoredTool(
 	sourceIndex: number,
 	toolName: string,
 	outcome: "success" | "error" | "aborted" | "interrupted" | "rejected",
-	reason?: "policy" | "not_started",
+	reason?: "not_started",
 ): SessionToolLifecycle {
 	return {
 		invocation: {

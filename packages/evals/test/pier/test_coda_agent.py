@@ -507,7 +507,6 @@ class CodaAgentArtifactTests(unittest.IsolatedAsyncioTestCase):
             max_output_tokens=32_768,
             run_budget_enabled=True,
             max_turns=64,
-            allow_all_commands=False,
             workspace_dir=self.workspace.as_posix(),
         )
 

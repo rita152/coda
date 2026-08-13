@@ -2,10 +2,7 @@ import { basename } from "node:path";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import type { PermissionAuditSink } from "../permissions/audit.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
-import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { toolFailure } from "./failure.ts";
@@ -44,10 +41,8 @@ function globExpression(glob: string): RegExp {
 export function createFindTool(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ModelProcessRunner;
-	readonly permissions: PermissionEngine;
+	readonly processRunner: ProcessRunner;
 	readonly runtime: SearchExecutableRuntime;
-	readonly onAudit?: PermissionAuditSink;
 }): AgentTool<typeof FindParameters> {
 	const { fileSystem, workspace } = options;
 	return {
@@ -61,46 +56,19 @@ export function createFindTool(options: {
 			const kind = arguments_.type ?? "file";
 			const limit = arguments_.limit ?? 200;
 			const requestedRoot = arguments_.path ?? ".";
-			const root = await workspace.resolvePath(requestedRoot, "read");
-			if (!hasPermissionedPathAccess(workspace, root, context.invocationId, "find", "read", options.permissions)) {
-				return toolFailure(`Path access was not granted: ${root.canonicalPath}`, {
-					code: "access_denied",
-					path: root.canonicalPath,
-				});
-			}
+			const root = await workspace.resolvePath(requestedRoot);
 			if (!root.exists) {
 				return toolFailure(`Path does not exist: ${root.canonicalPath}`, {
 					code: "not_found",
 					path: root.canonicalPath,
 				});
 			}
-			const protectedRootGranted = workspace.isPathGranted(context.invocationId, "find", "read", root.canonicalPath);
-			const protectedExclusions = protectedRootGranted
-				? []
-				: [
-						".git",
-						".coda",
-						".ssh",
-						".env",
-						".env.*",
-						"id_dsa",
-						"id_ecdsa",
-						"id_ed25519",
-						"id_rsa",
-						"*.cer",
-						"*.crt",
-						"*.key",
-						"*.p12",
-						"*.pem",
-						"*.pfx",
-					].flatMap((pattern) => ["--exclude", pattern]);
 			const external = await runOptionalSearchExecutable({
 				executable: "fd",
 				args: [
 					"--color",
 					"never",
 					"--hidden",
-					...protectedExclusions,
 					"--exclude",
 					"node_modules",
 					"--glob",
@@ -112,10 +80,8 @@ export function createFindTool(options: {
 				workspaceRoot: workspace.root,
 				fileSystem,
 				processRunner: options.processRunner,
-				permissions: options.permissions,
 				runtime: options.runtime,
 				context,
-				onAudit: options.onAudit,
 			});
 			if (external) {
 				if (external.timedOut) {
@@ -132,20 +98,8 @@ export function createFindTool(options: {
 				for (const line of external.stdout.split(/\r?\n/)) {
 					const candidate = line.replace(/[\\/]$/, "");
 					if (!candidate) continue;
-					const resolved = await workspace.resolvePath(candidate, "read");
-					if (
-						!resolved.exists ||
-						!hasPermissionedPathAccess(
-							workspace,
-							resolved,
-							context.invocationId,
-							"find",
-							"read",
-							options.permissions,
-						)
-					) {
-						continue;
-					}
+					const resolved = await workspace.resolvePath(candidate);
+					if (!resolved.exists) continue;
 					const status = await fileSystem.stat(resolved.canonicalPath);
 					if (status.kind !== "file" && status.kind !== "directory") continue;
 					if (kind !== "any" && status.kind !== kind) continue;
@@ -165,7 +119,7 @@ export function createFindTool(options: {
 					},
 				};
 			}
-			const entries = await walkEntries(workspace, fileSystem, requestedRoot, context, "find", options.permissions);
+			const entries = await walkEntries(workspace, fileSystem, requestedRoot, context);
 			const matchAgainstPath = arguments_.pattern.includes("/");
 			const matches = entries.filter((entry) => {
 				if (kind !== "any" && entry.kind !== kind) return false;

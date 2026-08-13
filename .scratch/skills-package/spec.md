@@ -45,8 +45,7 @@ validation rejects them. Coda does not expose an arbitrary top-level extension b
 interpret `disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `effort`, `when-to-use`, `paths`, or
 any companion `agents/openai.yaml` file. A file with that name, if present, is only an ordinary bundled resource.
 
-`allowed-tools` is preserved as experimental metadata. It does not grant Coda Tool, filesystem, process, network, or
-sandbox authority; those decisions remain with the Policy Gate and Permission Profile.
+`allowed-tools` is preserved as experimental metadata. Coda does not interpret it or change Tool behavior from it.
 
 ## Package boundary
 
@@ -66,7 +65,7 @@ It does not own:
 - default roots, source precedence, Workspace Skills Trust, or settings;
 - collision presentation and name resolution;
 - model catalog rendering, context budgets, Composer syntax, or the `skill` Tool;
-- prompt roles, Session records, approvals, watchers, or UI;
+- prompt roles, Session records, watchers, or UI;
 - resource execution, remote sources, or installation.
 
 ## Public loader contract
@@ -125,8 +124,8 @@ candidates remain addressable by stable ID and qualified name, and the collision
 ## User-controlled Skill loading
 
 Project and global Skills are discovered and exposed through the same bounded loader. Coda does not make a separate
-Skill safety decision or require an inventory approval page; the user decides which Skill to insert through `/skill`,
-and the active Permission/Skill Approval policy still governs model-requested activation.
+Skill safety decision or require an inventory review page; the user decides which Skill to insert through `/skill`,
+and model-requested activation uses the exact ID from the current Run snapshot.
 
 ## Progressive disclosure and Run lifecycle
 
@@ -154,8 +153,7 @@ Activation paths are:
 1. A structured Composer Skill reference, resolved before submission as user-selected context.
 2. A model-requested `skill` Tool call constrained to exact IDs in the current Run snapshot.
 
-Model activation uses the existing Skill Approval policy. Under `never`, autonomous activation is rejected while an
-explicit user reference remains available. Arguments are product metadata: explicit selections receive the Composer
+Model activation loads exact-revision instructions through the `skill` Tool. Arguments are product metadata: explicit selections receive the Composer
 text after all structured Skill tokens are removed; the Tool accepts an optional argument string. No argument syntax or
 text substitution is attributed to the Agent Skills standard.
 
@@ -170,7 +168,7 @@ not authority. Resource reads, scripts, shell commands, and network access remai
   unreadable input.
 - Slash/Composer entries use the standard `name` and `description`; there are no vendor display labels or argument
   hints.
-- Session facts retain structured references and exact activation provenance, never restored approval authority.
+- Session facts retain structured references and exact activation provenance.
 
 ## Limits and security invariants
 

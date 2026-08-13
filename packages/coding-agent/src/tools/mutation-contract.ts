@@ -34,13 +34,13 @@ export interface MutationRequestMetadata {
 	readonly subject: string;
 }
 
-const MAX_PERMISSION_PREVIEW_CHARACTERS = 4_096;
+const MAX_MUTATION_PREVIEW_CHARACTERS = 4_096;
 
 export function isMutationToolName(value: string): value is MutationToolName {
 	return (MUTATION_TOOL_NAMES as readonly string[]).includes(value);
 }
 
-/** The only model-argument projection used by Permission review and mutation presentation. */
+/** Projects model arguments into bounded mutation presentation metadata. */
 export function mutationRequestMetadata(
 	toolName: string,
 	arguments_: Readonly<Record<string, unknown>>,
@@ -172,8 +172,8 @@ function validDeltaDigests(operation: MutationOperation, before: string | null, 
 
 function boundedPreview(value: string): string {
 	const characters = Array.from(value);
-	if (characters.length <= MAX_PERMISSION_PREVIEW_CHARACTERS) return value;
-	return `${characters.slice(0, MAX_PERMISSION_PREVIEW_CHARACTERS - 1).join("")}…`;
+	if (characters.length <= MAX_MUTATION_PREVIEW_CHARACTERS) return value;
+	return `${characters.slice(0, MAX_MUTATION_PREVIEW_CHARACTERS - 1).join("")}…`;
 }
 
 function stringArray(value: JsonValue | undefined): value is string[] {

@@ -13,13 +13,6 @@ describe("versioned System Prompt Builder", () => {
 			],
 			capabilities: {
 				interactionMode: "print" as const,
-				permissionProfile: "read-only" as const,
-				approvalPolicy: "on-request",
-				readAccess: {
-					mode: "root-scoped" as const,
-					roots: ["/workspace/project"],
-					protectedRootCount: 4,
-				},
 			},
 			projectInstructions: {
 				path: "/workspace/project/AGENTS.md",
@@ -32,40 +25,20 @@ describe("versioned System Prompt Builder", () => {
 		const second = buildSystemPrompt(structuredClone(input));
 
 		expect(first).toEqual(second);
-		expect(first.version).toBe("coda-system-prompt-v6");
+		expect(first.version).toBe("coda-system-prompt-v7");
 		expect(first.sha256).toMatch(/^[a-f0-9]{64}$/);
 		expect(first.text).toContain("Workspace: /workspace/project");
 		expect(first.text.indexOf("- read: Read a file")).toBeLessThan(first.text.indexOf("- write: Write a file"));
 		expect(first.text).toContain("BEGIN TRUSTED PROJECT INSTRUCTIONS");
 		expect(first.text).toContain("SHA-256: abc123");
-		expect(first.text).toContain('Read access: root-scoped to "/workspace/project"');
-		expect(first.text).toContain("4 protected Credential Roots require exact or narrower review");
-		expect(first.text).toContain("Workspace-external reads require filesystem approval");
-		expect(first.text).toContain("require_escalated requests explicit command review");
+		expect(first.text).toContain("File Tools resolve relative paths from the Workspace");
+		expect(first.text).toContain("Bash and process_start execute directly on the host as the current user");
 		expect(first.text).toContain("Turn every stated requirement into an implementation and verification checklist");
 		expect(first.text).toContain("Run the broadest feasible regression suite after the final edit");
 		expect(first.text).toContain("Do not claim a check passed unless you actually ran it successfully");
 		expect(first.text).toContain(
 			"Do not filter verification commands through a pipeline that can hide an upstream failure",
 		);
-	});
-
-	it("states that Full Access is the explicit full-disk read bypass", () => {
-		const result = buildSystemPrompt({
-			workspace: "/workspace",
-			platform: "linux",
-			timestamp: 0,
-			tools: [],
-			capabilities: {
-				interactionMode: "interactive",
-				permissionProfile: "full-access",
-				approvalPolicy: "never",
-				readAccess: { mode: "full-disk", roots: [], protectedRootCount: 0 },
-			},
-		});
-
-		expect(result.text).toContain("Read access: full disk through the explicit Full Access bypass");
-		expect(result.text).toContain("only Full Access bypasses the Sandbox");
 	});
 
 	it("renders an escaped, budgeted Skill Catalog with compact collision alternatives", () => {
@@ -76,9 +49,6 @@ describe("versioned System Prompt Builder", () => {
 			tools: [{ name: "skill", description: "Load a Skill" }],
 			capabilities: {
 				interactionMode: "print",
-				permissionProfile: "read-only",
-				approvalPolicy: "on-request",
-				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: {
 				contextWindow: 128_000,
@@ -122,9 +92,6 @@ describe("versioned System Prompt Builder", () => {
 			tools: [],
 			capabilities: {
 				interactionMode: "print",
-				permissionProfile: "read-only",
-				approvalPolicy: "on-request",
-				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: {
 				contextWindow: 4_000,
@@ -154,9 +121,6 @@ describe("versioned System Prompt Builder", () => {
 				tools: [],
 				capabilities: {
 					interactionMode: "print",
-					permissionProfile: "read-only",
-					approvalPolicy: "on-request",
-					readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 				},
 				projectInstructions: {
 					path: "/workspace/AGENTS.md",
@@ -175,9 +139,6 @@ describe("versioned System Prompt Builder", () => {
 			tools: [],
 			capabilities: {
 				interactionMode: "print",
-				permissionProfile: "read-only",
-				approvalPolicy: "on-request",
-				readAccess: { mode: "root-scoped", roots: ["/workspace"], protectedRootCount: 4 },
 			},
 			skills: { entries: [] },
 		});

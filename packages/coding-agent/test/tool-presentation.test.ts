@@ -96,35 +96,6 @@ describe("Tool Invocation presentation", () => {
 		expect(lines.join("")).not.toContain("\x1b[");
 	});
 
-	it("renders compact approval scope and marks restored process grants expired", () => {
-		const active: TimelineToolEntry = {
-			...toolEntry("bash", { command: "npm test" }),
-			approval: { outcome: "approved-for-process", commandPrefix: ["npm", "test"] },
-		};
-		const restored: TimelineToolEntry = {
-			...active,
-			approval: { ...active.approval!, expired: true },
-		};
-		const reusedAfterRestore: TimelineToolEntry = {
-			...active,
-			approval: { outcome: "allowed-by-process", commandPrefix: ["npm", "test"], expired: true },
-		};
-
-		const render = (entry: TimelineToolEntry) =>
-			renderToolInvocation(entry, {
-				width: 80,
-				now: 2_000,
-				transcript: false,
-				theme: createCodaTheme(0),
-			})
-				.map(stripAnsi)
-				.join("\n");
-
-		expect(render(active)).toContain("Approval: this process • prefix npm test");
-		expect(render(restored)).toContain("Approval: this process • expired • prefix npm test");
-		expect(render(reusedAfterRestore)).toContain("Approval: allowed by this process • expired • prefix npm test");
-	});
-
 	it("renders bounded live Tool progress", () => {
 		const entry: TimelineToolEntry = {
 			...toolEntry("mcp__docs__index", {}, "running", ""),

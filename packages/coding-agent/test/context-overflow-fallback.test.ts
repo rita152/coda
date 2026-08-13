@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
-import type { ModelProcessSessionRunner } from "../src/permissions/model-process-runner.ts";
+import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
 import type { SessionWorkspace } from "../src/session/types.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
@@ -161,13 +161,7 @@ describe("Context Overflow empty-Session fallback", () => {
 			}),
 		]);
 
-		const running = fixture.application.run([
-			"--interactive",
-			"--no-color",
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--session",
-			"start then overflow",
-		]);
+		const running = fixture.application.run(["--interactive", "--no-color", "--session", "start then overflow"]);
 		await until(() => stripAnsi(fixture.terminal.readOutput()).includes("Open a new empty Session"));
 		const [oldDescriptor] = await fixture.sessions.list(fixture.workspace);
 		expect(oldDescriptor?.path).toBeDefined();
@@ -179,7 +173,7 @@ describe("Context Overflow empty-Session fallback", () => {
 		expect(controlled.stopCount()).toBe(1);
 		const oldJournal = await readFile(oldDescriptor!.path!, "utf8");
 		expect(oldJournal).toContain('"toolName":"process_start"');
-		expect(oldJournal).toContain('"type":"sandbox_execution"');
+		expect(oldJournal).toContain('"type":"tool_started"');
 		await exit(fixture.terminal);
 		await expect(running).resolves.toBe(0);
 		expect(controlled.stopCount()).toBe(1);
@@ -241,7 +235,7 @@ async function createFixture(
 	model: { readonly contextWindow: number; readonly maxTokens: number },
 	shouldFailIdentity?: () => boolean,
 	isTTY = true,
-	modelProcessSessionRunner?: ModelProcessSessionRunner,
+	processSessionRunner?: ProcessSessionRunner,
 ): Promise<OverflowFixture> {
 	const fixture = await mkdtemp(join(tmpdir(), "coda-overflow-fallback-"));
 	temporaryDirectories.push(fixture);
@@ -281,7 +275,7 @@ async function createFixture(
 		},
 		fileSystem: createNodeFileSystem(),
 		processRunner: createNodeProcessRunner({ platform: "darwin" }),
-		modelProcessSessionRunner,
+		processSessionRunner,
 		terminalFactory: { create: () => terminal },
 		io: { stdin: { isTTY, readAll: async () => "" }, stdout, stderr },
 		runtime: {
@@ -298,7 +292,7 @@ async function createFixture(
 }
 
 function controlledBackgroundRunner(): {
-	readonly runner: ModelProcessSessionRunner;
+	readonly runner: ProcessSessionRunner;
 	readonly stopCount: () => number;
 } {
 	let stops = 0;
@@ -313,14 +307,12 @@ function controlledBackgroundRunner(): {
 					stderr: "",
 					timedOut: false,
 					truncated: false,
-					backend: "none" as const,
 				};
 				let settle!: (result: typeof stopped) => void;
 				const completion = new Promise<typeof stopped>((resolve) => {
 					settle = resolve;
 				});
 				return {
-					backend: "none",
 					completion,
 					write: async () => undefined,
 					closeStdin: async () => undefined,

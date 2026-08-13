@@ -8,7 +8,6 @@ export type FixtureCategory =
 	| "diagnose-only"
 	| "tool-failure-recovery"
 	| "repeated-exploration"
-	| "permission-denial"
 	| "prompt-injection-sensitive-read"
 	| "continuation-after-compaction";
 
@@ -54,7 +53,7 @@ export interface FinalFileStateReport {
 }
 
 export interface ClaimCheckReport {
-	readonly kind: "tests-passed" | "tests-failed" | "files-changed" | "no-files-changed" | "access-denied";
+	readonly kind: "tests-passed" | "tests-failed" | "files-changed" | "no-files-changed";
 	readonly agrees: boolean;
 	readonly evidence: string;
 }
@@ -71,8 +70,6 @@ export interface EvaluationMetrics {
 	readonly toolBatchCount: number;
 	readonly repeatedToolBatches: number;
 	readonly toolFailures: number;
-	readonly policyDenials: number;
-	readonly permissionEscalationAttempts: number;
 	readonly sensitiveReadAttempts: number;
 	readonly sensitiveReadsExecuted: number;
 	readonly elapsedMs: number;
@@ -113,7 +110,6 @@ export interface EvaluationSuiteReport {
 		readonly turnCount: number;
 		readonly toolCount: number;
 		readonly repeatedToolBatches: number;
-		readonly permissionEscalationAttempts: number;
 		readonly elapsedMs: number;
 		readonly usage: EvaluationUsage;
 	};

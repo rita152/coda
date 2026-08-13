@@ -71,14 +71,6 @@ function legacyStatus(source: ObservationSource): ToolObservation["status"] {
 	) {
 		return "aborted";
 	}
-	if (
-		details?.denial !== undefined ||
-		details?.status === "denied" ||
-		details?.code === "access_denied" ||
-		(details?.status === "rejected" && details.reason === "policy")
-	) {
-		return "denied";
-	}
 	return source.isError ? "error" : "ok";
 }
 
@@ -86,10 +78,7 @@ function legacyStatus(source: ObservationSource): ToolObservation["status"] {
 export function resolveToolObservation(source: ObservationSource): ToolObservation {
 	const candidate = record(source.observation);
 	const candidateStatus =
-		candidate?.status === "ok" ||
-		candidate?.status === "error" ||
-		candidate?.status === "denied" ||
-		candidate?.status === "aborted"
+		candidate?.status === "ok" || candidate?.status === "error" || candidate?.status === "aborted"
 			? candidate.status
 			: undefined;
 	const authoritative = candidateStatus !== undefined && typeof candidate?.truncated === "boolean";

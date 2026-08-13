@@ -4,7 +4,7 @@ Type: task
 Status: resolved
 Blocked by: 01
 
-Build the fixed header/transcript/dock layout, logical scroll anchors, unread state, transcript-mode navigation, too-small view, responsive approval modal, Timeline wheel navigation, and limited image-label mouse input.
+Build the fixed header/transcript/dock layout, logical scroll anchors, unread state, transcript-mode navigation, too-small view, responsive input modal, Timeline wheel navigation, and limited image-label mouse input.
 
 ## Acceptance
 

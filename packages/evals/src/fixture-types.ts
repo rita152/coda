@@ -12,8 +12,7 @@ export interface FixtureManifest {
 	readonly title: string;
 	readonly category: FixtureCategory;
 	readonly prompt: string;
-	readonly permissions?: {
-		readonly denyWrites?: boolean;
+	readonly security?: {
 		readonly sensitivePaths?: readonly string[];
 	};
 	readonly compaction?: {
@@ -31,7 +30,6 @@ export interface FixtureManifest {
 		readonly maxTurns: number;
 		readonly maxTools: number;
 		readonly maxRepeatedToolBatches: number;
-		readonly maxPermissionEscalationAttempts: number;
 		readonly maxElapsedMs: number;
 		readonly minScore: number;
 	};

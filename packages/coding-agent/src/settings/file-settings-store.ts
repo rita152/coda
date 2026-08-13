@@ -37,12 +37,10 @@ function validateSettings(value: unknown): UserSettings {
 			"defaultModel",
 			"defaultReasoning",
 			"customProviders",
-			"shellEnvironmentAllowlist",
 			"projectTrust",
 			"mcpServers",
 			"workspaceMcpTrust",
 			"ui",
-			"permissions",
 		])
 	) {
 		throw new Error("Coda settings contain an unknown field");
@@ -118,18 +116,6 @@ function validateSettings(value: unknown): UserSettings {
 			};
 		});
 	}
-	let shellEnvironmentAllowlist: readonly string[] | undefined;
-	if (value.shellEnvironmentAllowlist !== undefined) {
-		if (
-			!Array.isArray(value.shellEnvironmentAllowlist) ||
-			value.shellEnvironmentAllowlist.some(
-				(name) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
-			)
-		) {
-			throw new Error("Coda settings contain an invalid Shell environment allowlist");
-		}
-		shellEnvironmentAllowlist = [...new Set(value.shellEnvironmentAllowlist as string[])].sort();
-	}
 	let projectTrust: UserSettings["projectTrust"];
 	if (value.projectTrust !== undefined) {
 		if (
@@ -201,66 +187,14 @@ function validateSettings(value: unknown): UserSettings {
 			...(value.ui.colorScheme ? { colorScheme: value.ui.colorScheme } : {}),
 		};
 	}
-	let permissions: UserSettings["permissions"];
-	if (value.permissions !== undefined) {
-		if (!isRecord(value.permissions) || !hasOnlyKeys(value.permissions, ["profile", "approvalPolicy"])) {
-			throw new Error("Coda settings contain invalid Permissions");
-		}
-		const profile = value.permissions.profile;
-		if (profile !== undefined && profile !== "read-only" && profile !== "workspace" && profile !== "full-access") {
-			throw new Error("Coda settings contain an invalid Permission Profile");
-		}
-		const approvalPolicy = value.permissions.approvalPolicy;
-		if (
-			approvalPolicy !== undefined &&
-			approvalPolicy !== "unless-trusted" &&
-			approvalPolicy !== "on-request" &&
-			approvalPolicy !== "never" &&
-			(!isRecord(approvalPolicy) ||
-				!hasOnlyKeys(approvalPolicy, [
-					"mode",
-					"sandboxApproval",
-					"rules",
-					"skillApproval",
-					"requestPermissions",
-					"mcpElicitations",
-				]) ||
-				approvalPolicy.mode !== "granular" ||
-				["sandboxApproval", "rules", "skillApproval", "requestPermissions", "mcpElicitations"].some(
-					(key) => typeof approvalPolicy[key] !== "boolean",
-				))
-		) {
-			throw new Error("Coda settings contain an invalid Approval Policy");
-		}
-		permissions = {
-			...(profile ? { profile } : {}),
-			...(approvalPolicy
-				? {
-						approvalPolicy:
-							typeof approvalPolicy === "object"
-								? {
-										mode: "granular" as const,
-										sandboxApproval: approvalPolicy.sandboxApproval as boolean,
-										rules: approvalPolicy.rules as boolean,
-										skillApproval: approvalPolicy.skillApproval as boolean,
-										requestPermissions: approvalPolicy.requestPermissions as boolean,
-										mcpElicitations: approvalPolicy.mcpElicitations as boolean,
-									}
-								: approvalPolicy,
-					}
-				: {}),
-		};
-	}
 	return {
 		...(defaultModel ? { defaultModel } : {}),
 		...(defaultReasoning ? { defaultReasoning } : {}),
 		...(customProviders ? { customProviders } : {}),
-		...(shellEnvironmentAllowlist ? { shellEnvironmentAllowlist } : {}),
 		...(projectTrust ? { projectTrust } : {}),
 		...(mcpServers ? { mcpServers } : {}),
 		...(workspaceMcpTrust ? { workspaceMcpTrust } : {}),
 		...(ui ? { ui } : {}),
-		...(permissions ? { permissions } : {}),
 	};
 }
 

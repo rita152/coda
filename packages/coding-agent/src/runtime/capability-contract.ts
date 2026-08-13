@@ -104,7 +104,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Built-in Tools",
 		summary:
-			"Workspace-aware reading and search, permission-aware single-file and structured multi-file mutation, Shell execution, and recoverable continuation of omitted Tool output.",
+			"Workspace-relative and absolute-path reading, search, atomic single-file and structured multi-file mutation, direct host Shell execution, and recoverable continuation of omitted Tool output.",
 		sources: [
 			"packages/coding-agent/src/tools/index.ts",
 			"packages/coding-agent/src/tools/mutation-contract.ts",
@@ -142,16 +142,15 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Long-running process Sessions",
 		summary:
-			"Process-local background Shell Sessions support bounded start, poll, stdin, and stop operations under the active Permission and Sandbox authority with recoverable omitted output and Session-scoped audit events.",
+			"Process-local background Shell Sessions execute directly on the host and support bounded start, poll, stdin, stop, and recoverable omitted output.",
 		sources: [
 			"packages/coding-agent/src/process/process-session-manager.ts",
 			"packages/coding-agent/src/process/tools.ts",
-			"packages/coding-agent/src/permissions/model-process-runner.ts",
+			"packages/coding-agent/src/host/node-process-session-runner.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/process-session-manager.test.ts",
 			"packages/coding-agent/test/process-tools.test.ts",
-			"packages/coding-agent/test/permission-audit.test.ts",
 		],
 	}),
 	capability({
@@ -178,7 +177,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Context Overflow fallback",
 		summary:
-			"After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, approvals, queues, Tool state, or Run evidence.",
+			"After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.",
 		sources: [
 			"packages/coding-agent/src/context-window/overflow-recovery.ts",
 			"packages/coding-agent/src/interactive/run-interactive.ts",
@@ -255,42 +254,6 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: ["packages/mcp/test/host.test.ts", "packages/coding-agent/test/mcp/application.test.ts"],
 	}),
 	capability({
-		id: "coding-agent.permissions",
-		package: "@coda/coding-agent",
-		status: "runtime-supported",
-		title: "Permissions and Sandbox",
-		summary:
-			"Read Only, Workspace, and Full Access Permission Profiles; four Approval Policies; exact invocation-scoped single- and multi-target grants and rules; and OS-enforced macOS or Linux Sandbox execution.",
-		sources: [
-			"packages/coding-agent/src/permissions/permission-engine.ts",
-			"packages/coding-agent/src/tools/mutation-contract.ts",
-			"packages/sandbox/src/execute.ts",
-		],
-		tests: [
-			"packages/coding-agent/test/permission-engine.test.ts",
-			"packages/coding-agent/test/patch-permission.test.ts",
-			"packages/sandbox/test/execute.test.ts",
-		],
-	}),
-	capability({
-		id: "coding-agent.read-protection",
-		package: "@coda/coding-agent",
-		status: "runtime-supported",
-		title: "Canonical model-read protection",
-		summary:
-			"Native read and search Tools plus model-launched processes share canonical root-scoped read authority, protected metadata exclusions, explicit reviewed grants, Sandbox enforcement, and content-free audit decisions.",
-		sources: [
-			"packages/sandbox/src/read-access-policy.ts",
-			"packages/coding-agent/src/permissions/file-access.ts",
-			"packages/coding-agent/src/permissions/permission-engine.ts",
-		],
-		tests: [
-			"packages/sandbox/test/read-access-policy.test.ts",
-			"packages/coding-agent/test/read-access-tools.test.ts",
-			"packages/coding-agent/test/permission-audit.test.ts",
-		],
-	}),
-	capability({
 		id: "coding-agent.credential-storage",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",
@@ -327,7 +290,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Durable Sessions",
 		summary:
-			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model and Permission selection, Tool Observations, and Compaction Checkpoints.",
+			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, and Compaction Checkpoints.",
 		sources: [
 			"packages/coding-agent/src/session/records.ts",
 			"packages/coding-agent/src/session/file-session-manager.ts",
@@ -376,7 +339,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Offline Agent evaluation harness",
 		summary:
-			"Eight deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, permission handling, sensitive-read resistance, latency, tokens, and price data without network access.",
+			"Deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, latency, tokens, and price data without network access.",
 		sources: ["packages/evals/src/suite.ts", "packages/evals/src/scoring.ts", "packages/evals/src/trajectory.ts"],
 		tests: ["packages/evals/test/evaluation-suite.test.ts"],
 	}),

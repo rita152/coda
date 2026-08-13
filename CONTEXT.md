@@ -65,7 +65,7 @@ The Coding Agent module that coordinates Composer acceptance, media preparation,
 _Avoid_: Agent queue, Chat component, Session reducer
 
 **User Shell**:
-An explicit `!command` submitted by the user for local host execution outside model Context, Tool policy, Prompt History, and Session persistence.
+An explicit `!command` submitted by the user for local host execution outside model Context, Prompt History, and Session persistence.
 _Avoid_: bash Tool, Tool Invocation, Prompt
 
 **Process Session**:
@@ -73,7 +73,7 @@ A bounded, non-interactive background process owned by its creating Session and 
 _Avoid_: User Shell, terminal Session, restorable job
 
 **Tool Invocation**:
-One Agent-owned attempt to validate, authorize, and possibly execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
+One Agent-owned attempt to validate and execute a model-requested Tool call, identified independently from the Provider's tool-call identifier.
 _Avoid_: Tool, shell command
 
 **Tool Observation**:
@@ -81,7 +81,7 @@ The authoritative structured account of a Tool operation's status, completeness,
 _Avoid_: Tool output, details, isError
 
 **Tool Settlement**:
-The executor boundary outcome stating whether a Tool returned, threw, or was aborted, independent of whether the returned operation itself succeeded, failed, or was denied.
+The executor boundary outcome stating whether a Tool returned, threw, or was aborted, independent of whether the returned operation itself succeeded or failed.
 _Avoid_: Tool Observation, exit status, Tool result
 
 **MCP Host**:
@@ -93,8 +93,8 @@ A user- or Workspace-scoped declaration with stable identity, transport, protoco
 _Avoid_: connection, Tool Catalog, credential
 
 **MCP Server Trust**:
-The decision to admit MCP Server Definitions from one exact Workspace configuration revision; it is independent of Tool execution authority.
-_Avoid_: Project Trust, Permission Profile, Tool approval
+The decision to admit MCP Server Definitions from one exact Workspace configuration revision; it is independent of later Tool calls.
+_Avoid_: Project Trust, MCP Tool Snapshot
 
 **MCP Tool Catalog**:
 The deterministic, diagnostic-bearing collection of Tools discovered from the currently ready MCP Servers.
@@ -106,7 +106,7 @@ _Avoid_: MCP Tool Catalog, live Server state
 
 **MCP Elicitation**:
 A Server-identified request for explicit user input while an MCP Tool Invocation is active, answered with accept, decline, or cancel.
-_Avoid_: Approval Request, model prompt, OAuth callback
+_Avoid_: model prompt, OAuth callback
 
 **Attempt**:
 One model invocation within a Turn; transient failure may lead to a later Attempt without replaying completed Tool Invocations.
@@ -152,66 +152,17 @@ _Avoid_: attachment file, base64 payload
 A staged Media Asset selected for the next User Message; it becomes Session-owned only when that Message commits.
 _Avoid_: prompt token, inline image
 
-**Policy Gate**:
-The Coding Agent seam that resolves the authority for a model-requested Tool Invocation and, when policy permits, routes an Approval Request before execution.
-It never mediates a User Shell command, whose leading `!` is the user's direct authorization.
-_Avoid_: Sandbox, Agent hook, User Shell confirmation
-
-**Permission Profile**:
-The effective filesystem and network authority assigned to model-requested work. Coda's built-in Permission Profiles are Read Only, Workspace, and Full Access.
-_Avoid_: trust level, Approval Policy, Sandbox mode
-
-**Session Permission Selection**:
-A Session-owned choice of one built-in Permission Profile, distinct from the resolved authority frozen for a Run and from every grant or approval.
-_Avoid_: Permission audit, Session Approval, restored grant
-
-**Approval Policy**:
-The rule that decides when model-requested authority must be reviewed. The four policies are Unless Trusted, On Request, Granular, and Never.
-_Avoid_: Permission Profile, trust level, prompt mode
-
-**Approval Request**:
-A request to grant a precisely described command, filesystem, or network authority that the current Policy Decision does not already allow.
-_Avoid_: confirmation dialog, Sandbox escape, Path Grant
-
-**Additional Permission**:
-A model-declared, narrowly scoped extension to the current Permission Profile for one Tool Invocation.
-_Avoid_: Full Access, Path Grant, implicit retry
-
-**Read Access Policy**:
-The immutable per-invocation authority that evaluates canonical paths for native File Tools and carries the identical root policy enforced for model-started Sandbox processes.
-_Avoid_: Path Grant, Permission Profile, advisory read check
-
-**Credential Root**:
-A canonical file or directory containing authentication material that remains unreadable inside a broader ordinary or reviewed parent until that exact root or a narrower descendant is explicitly reviewed.
-_Avoid_: protected metadata, Project Trust, secret scanner
-
-**Session Approval**:
-A process-local approval remembered until the current Coda process exits. A command Session Approval uses a displayed, validated token prefix bound to its effective Sandbox context and executable identity; reuse suppresses only the matching prompt and never changes execution authority.
-_Avoid_: persistent rule, Run grant, trust
-
-**Command Rule**:
-A persistent ordered-prefix decision used to allow, prompt for, or forbid matching model-requested commands.
-_Avoid_: shell alias, Session Approval, network rule
-
-**Network Rule**:
-A persistent host decision used by managed network access to allow, prompt for, or forbid matching destinations.
-_Avoid_: firewall rule, Command Rule, Session Approval
-
-**Sandbox**:
-The operating-system-enforced execution environment that limits model-requested processes to their effective Permission Profile and Additional Permissions.
-_Avoid_: Policy Gate, command classifier, User Shell
-
 **Workspace**:
-The canonical filesystem root that scopes a Coding Agent's Session, project context, and default Tool authority.
+The canonical filesystem root that scopes a Coding Agent's Session, project context, and relative Tool paths.
 _Avoid_: current directory, repository
 
 **Project Trust**:
-The known or unknown decision to load a specific version of Workspace instructions into model Context. Its status participates in default Permission Profile selection but is never itself execution authority.
-_Avoid_: Permission Profile, Additional Permission, Approval Policy
+The known or unknown decision to load a specific version of Workspace instructions into model Context; it never changes how Tools execute.
+_Avoid_: MCP Server Trust, Tool Invocation
 
 **Skill**:
 A portable instruction bundle rooted at an Agent Skills-compatible `SKILL.md`, with optional files that remain inert until explicitly read or invoked through ordinary Tools.
-_Avoid_: command, plugin, permission
+_Avoid_: command, plugin, Tool
 
 **Skill Candidate**:
 One discovered version of a Skill with canonical identity, content revision, and source provenance, before precedence and model visibility are applied.
@@ -230,20 +181,16 @@ The bounded model-visible projection of one Skill Snapshot containing invocation
 _Avoid_: Model Catalog, Skill Inventory
 
 **Skill Activation**:
-The exact-revision Skill body, base directory, arguments, and bounded resource references loaded through an explicit user reference or an authorized model Tool Invocation.
-_Avoid_: script execution, Skill Catalog, permission grant
+The exact-revision Skill body, base directory, arguments, and bounded resource references loaded through an explicit user reference or model Tool Invocation.
+_Avoid_: script execution, Skill Catalog, Tool execution
 
 **Prompt Builder**:
-The versioned Coding Agent component that deterministically assembles one Run's system prompt from application policy, runtime capabilities, Workspace facts, and trusted project instructions.
+The versioned Coding Agent component that deterministically assembles one Run's system prompt from runtime capabilities, Workspace facts, and trusted project instructions.
 _Avoid_: Provider prompt, Agent global prompt
 
 **Capability Manifest**:
 The generated, versioned inventory that combines hand-reviewed product capability classifications with executable runtime facts and verification sources.
 _Avoid_: roadmap, package export list, hand-written status page
-
-**Policy Decision**:
-An explicit outcome that allows, rejects, or aborts model-requested work, optionally remembering or persisting the precisely displayed authority.
-_Avoid_: trust, Permission Profile, Sandbox
 
 **Context Overflow**:
 A model request that cannot fit within the selected Model's usable context window after accounting for Messages, Tools, and reserved output.

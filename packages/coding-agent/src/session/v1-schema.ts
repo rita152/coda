@@ -25,7 +25,7 @@ const REASONING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xh
 const RUN_OUTCOMES = new Set(["success", "error", "aborted"]);
 const TOOL_OUTCOMES = new Set(["success", "error", "aborted", "rejected", "interrupted"]);
 const TOOL_SETTLEMENTS = new Set(["returned", "threw", "aborted"]);
-const TOOL_REASONS = new Set(["missing", "invalid", "policy", "aborted", "not_started", "budget", "skipped_by_user"]);
+const TOOL_REASONS = new Set(["missing", "invalid", "aborted", "not_started", "budget", "skipped_by_user"]);
 const RUN_LIMITS = new Set([
 	"turns",
 	"model_attempts",
@@ -109,170 +109,6 @@ function isJsonValue(value: unknown): boolean {
 	if (typeof value === "number") return Number.isFinite(value);
 	if (Array.isArray(value)) return value.every(isJsonValue);
 	return isRecord(value) && Object.values(value).every(isJsonValue);
-}
-
-function isPermissionPolicySnapshot(value: unknown): boolean {
-	if (!isRecord(value)) return false;
-	const record: Record<string, unknown> = value;
-	const exactKeys = (required: readonly string[]): boolean => {
-		const allowed = new Set(required);
-		return required.every((key) => key in record) && Object.keys(record).every((key) => allowed.has(key));
-	};
-	const legacy = exactKeys([
-		"profile",
-		"readAccess",
-		"deniedReadRoots",
-		"writableRoots",
-		"protectedMetadataRoots",
-		"protectedMetadataNames",
-		"protectedMetadataPaths",
-		"networkAccess",
-	]);
-	const rootScoped = exactKeys([
-		"profile",
-		"readAccess",
-		"readableRoots",
-		"approvedReadRoots",
-		"deniedReadRoots",
-		"writableRoots",
-		"protectedMetadataRoots",
-		"protectedMetadataNames",
-		"protectedMetadataPaths",
-		"networkAccess",
-	]);
-	return (
-		(legacy || rootScoped) &&
-		(record.profile === "read-only" || record.profile === "workspace" || record.profile === "full-access") &&
-		(record.readAccess === "root-scoped" || record.readAccess === "full-disk") &&
-		(legacy || (isStringArray(record.readableRoots) && isStringArray(record.approvedReadRoots))) &&
-		isStringArray(record.deniedReadRoots) &&
-		(record.writableRoots === "full-disk" || isStringArray(record.writableRoots)) &&
-		isStringArray(record.protectedMetadataRoots) &&
-		isStringArray(record.protectedMetadataNames) &&
-		isStringArray(record.protectedMetadataPaths) &&
-		(record.networkAccess === "restricted" || record.networkAccess === "enabled")
-	);
-}
-
-function isApprovalPolicy(value: unknown): boolean {
-	return (
-		value === "unless-trusted" ||
-		value === "on-request" ||
-		value === "never" ||
-		(exactRecord(value, [
-			"mode",
-			"sandboxApproval",
-			"rules",
-			"skillApproval",
-			"requestPermissions",
-			"mcpElicitations",
-		]) &&
-			value.mode === "granular" &&
-			["sandboxApproval", "rules", "skillApproval", "requestPermissions", "mcpElicitations"].every(
-				(key) => typeof value[key] === "boolean",
-			))
-	);
-}
-
-function isPermissionAuditEvent(value: unknown): boolean {
-	if (!isRecord(value) || typeof value.type !== "string") return false;
-	switch (value.type) {
-		case "configuration":
-			return (
-				exactRecord(value, ["type", "source", "approvalPolicy", "policy"]) &&
-				(value.source === "startup" || value.source === "permissions-command") &&
-				isApprovalPolicy(value.approvalPolicy) &&
-				isPermissionPolicySnapshot(value.policy)
-			);
-		case "approval_decision":
-			return (
-				(exactRecord(value, ["type", "invocationId", "kind", "outcome"], ["commandPrefix", "denial"]) &&
-					isNonEmptyString(value.invocationId) &&
-					["command", "filesystem", "network", "skill", "mcp"].includes(String(value.kind)) &&
-					[
-						"approved-once",
-						"approved-for-process",
-						"allowed-by-process",
-						"denied",
-						"aborted",
-						"timed-out",
-						"persistent-rule",
-						"reviewer-failed",
-					].includes(String(value.outcome)) &&
-					(value.commandPrefix === undefined ||
-						(Array.isArray(value.commandPrefix) &&
-							value.commandPrefix.length > 0 &&
-							value.commandPrefix.every(isNonEmptyString))) &&
-					(value.denial === undefined ||
-						(exactRecord(value.denial, ["type", "characterCount", "summary"]) &&
-							["plain", "feedback", "reviewer-failed"].includes(String(value.denial.type)) &&
-							Number.isSafeInteger(value.denial.characterCount) &&
-							Number(value.denial.characterCount) >= 0 &&
-							typeof value.denial.summary === "string" &&
-							Array.from(value.denial.summary).length <= 160))) ||
-				(exactRecord(value, ["type", "request", "decision"]) &&
-					isRecord(value.request) &&
-					isJsonValue(value.request) &&
-					isRecord(value.decision) &&
-					isNonEmptyString(value.decision.type) &&
-					isJsonValue(value.decision))
-			);
-		case "read_access":
-			return (
-				exactRecord(
-					value,
-					["type", "invocationId", "toolName", "requestedPath", "canonicalPath", "recursive", "outcome"],
-					["source", "reason"],
-				) &&
-				isNonEmptyString(value.invocationId) &&
-				isNonEmptyString(value.toolName) &&
-				isNonEmptyString(value.requestedPath) &&
-				isNonEmptyString(value.canonicalPath) &&
-				typeof value.recursive === "boolean" &&
-				(value.outcome === "allowed" || value.outcome === "denied") &&
-				(value.source === undefined ||
-					["full-access", "readable-root", "approved-root", "review"].includes(String(value.source))) &&
-				(value.reason === undefined ||
-					["outside-readable-roots", "denied-read-root", "invalid-path", "approval-unavailable"].includes(
-						String(value.reason),
-					))
-			);
-		case "rule_persistence":
-			return (
-				exactRecord(value, ["type", "kind", "rule", "outcome"], ["error"]) &&
-				(value.kind === "command" || value.kind === "network") &&
-				isRecord(value.rule) &&
-				isJsonValue(value.rule) &&
-				(value.outcome === "persisted" || value.outcome === "failed") &&
-				(value.error === undefined || typeof value.error === "string")
-			);
-		case "warning":
-			return exactRecord(value, ["type", "message"]) && isNonEmptyString(value.message);
-		case "sandbox_execution":
-			return (
-				exactRecord(
-					value,
-					["type", "invocationId", "toolName", "policy", "outcome"],
-					["backend", "exitCode", "signal", "denial", "error"],
-				) &&
-				isNonEmptyString(value.invocationId) &&
-				isNonEmptyString(value.toolName) &&
-				isPermissionPolicySnapshot(value.policy) &&
-				["success", "normal-failure", "sandbox-denial", "timed-out", "cancelled", "launch-failed"].includes(
-					String(value.outcome),
-				) &&
-				(value.backend === undefined ||
-					value.backend === "none" ||
-					value.backend === "macos-seatbelt" ||
-					value.backend === "linux-bwrap") &&
-				(value.exitCode === undefined || value.exitCode === null || Number.isSafeInteger(value.exitCode)) &&
-				(value.signal === undefined || value.signal === null || typeof value.signal === "string") &&
-				(value.denial === undefined || isJsonValue(value.denial)) &&
-				(value.error === undefined || typeof value.error === "string")
-			);
-		default:
-			return false;
-	}
 }
 
 function isTextContent(value: unknown): boolean {
@@ -451,7 +287,7 @@ function isAssistantMessage(value: unknown): boolean {
 function isToolObservation(value: unknown): boolean {
 	return (
 		exactRecord(value, ["status", "truncated"], ["facts", "outputRef"]) &&
-		(value.status === "ok" || value.status === "error" || value.status === "denied" || value.status === "aborted") &&
+		(value.status === "ok" || value.status === "error" || value.status === "aborted") &&
 		typeof value.truncated === "boolean" &&
 		(value.facts === undefined || (isRecord(value.facts) && isJsonValue(value.facts))) &&
 		(value.outputRef === undefined || (isNonEmptyString(value.outputRef) && value.outputRef.length <= 512))
@@ -697,12 +533,6 @@ export function isSessionRecordPayload(
 				isNonEmptyString(payload.model.id) &&
 				REASONING_LEVELS.has(String(payload.reasoning))
 			);
-		case "permission_selected":
-			return (
-				version >= 6 &&
-				exactRecord(payload, ["profile"]) &&
-				(payload.profile === "read-only" || payload.profile === "workspace" || payload.profile === "full-access")
-			);
 		case "project_trust_changed":
 			return (
 				exactRecord(payload, ["trust"]) &&
@@ -722,8 +552,6 @@ export function isSessionRecordPayload(
 				typeof payload.trust.sha256 === "string" &&
 				/^[a-f0-9]{64}$/.test(payload.trust.sha256)
 			);
-		case "permission_audit_recorded":
-			return version >= 5 && exactRecord(payload, ["event"]) && isPermissionAuditEvent(payload.event);
 		case "context_compacted":
 			return (
 				version >= 7 && exactRecord(payload, ["checkpoint"]) && isCompactionCheckpoint(payload.checkpoint, version)

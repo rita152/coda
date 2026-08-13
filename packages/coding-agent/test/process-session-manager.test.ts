@@ -1,264 +1,162 @@
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as wait } from "node:timers/promises";
-import type { IdGenerator, ToolExecutionContext } from "@coda/agent";
-import { compileSandboxPolicy, createReadAccessPolicy } from "@coda/sandbox";
+import type { IdGenerator } from "@coda/agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
-import {
-	createModelProcessSessionRunner,
-	type ModelProcessAuthority,
-	type ModelProcessSessionRunner,
-} from "../src/permissions/model-process-runner.ts";
-import { ProcessSessionManager, type ProcessSessionSnapshot } from "../src/process/process-session-manager.ts";
-import { createReadToolOutputTool } from "../src/tools/read-tool-output.ts";
+import type {
+	ProcessRunRequest,
+	ProcessRunResult,
+	ProcessSession,
+	ProcessSessionRunner,
+} from "../src/host/process-runner.ts";
+import { ProcessSessionManager } from "../src/process/process-session-manager.ts";
 
 const temporaryDirectories: string[] = [];
-const managers: ProcessSessionManager[] = [];
 
 afterEach(async () => {
-	await Promise.all(managers.splice(0).map((manager) => manager.close()));
 	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-function context(): ToolExecutionContext {
-	return {
-		signal: new AbortController().signal,
-		runId: "run:process" as ToolExecutionContext["runId"],
-		turnId: "turn:process" as ToolExecutionContext["turnId"],
-		invocationId: "invocation:process" as ToolExecutionContext["invocationId"],
-		resultMessageId: "message:process" as ToolExecutionContext["resultMessageId"],
-		providerToolCallId: "provider:process",
-	};
-}
-
-async function fixture(
-	runner: ModelProcessSessionRunner = createModelProcessSessionRunner(),
-	limits: { readonly maxPollOutputBytes?: number; readonly maxPollOutputLines?: number } = {},
-): Promise<{
-	readonly manager: ProcessSessionManager;
-	readonly workspace: string;
-	readonly authority: ModelProcessAuthority;
-}> {
-	const directory = await mkdtemp(join(tmpdir(), "coda-process-session-"));
-	temporaryDirectories.push(directory);
-	const workspace = await realpath(directory);
-	let nextId = 0;
-	const idGenerator: IdGenerator = { generate: (kind) => `${kind}:${++nextId}` };
-	const manager = new ProcessSessionManager({
-		fileSystem: createNodeFileSystem(),
-		homeDirectory: workspace,
-		runner,
-		idGenerator,
-		...limits,
-	});
-	managers.push(manager);
-	return {
-		manager,
-		workspace,
-		authority: {
-			readAccessPolicy: createReadAccessPolicy(
-				compileSandboxPolicy({
-					profile: "full-access",
-					workspaceRoots: [workspace],
-					temporaryDirectory: await realpath(tmpdir()),
-				}),
-			),
-		},
-	};
-}
-
-function request(workspace: string, script: string, timeoutMs = 5_000) {
-	return {
-		executable: process.execPath,
-		args: ["-e", script],
-		cwd: workspace,
-		environment: {},
-		signal: new AbortController().signal,
-		timeoutMs,
-	};
-}
-
-async function terminal(
-	manager: ProcessSessionManager,
-	processId: string,
-): Promise<{
-	readonly snapshot: ProcessSessionSnapshot;
-	readonly output: string;
-}> {
-	let output = "";
-	for (let attempt = 0; attempt < 100; attempt++) {
-		const snapshot = await manager.poll(processId);
-		output += snapshot.output;
-		if (snapshot.state !== "running") return { snapshot, output };
-		await wait(10);
-	}
-	throw new Error(`Process ${processId} did not settle`);
-}
-
-async function waitForOutput(manager: ProcessSessionManager, processId: string, expected: string): Promise<string> {
-	let output = "";
-	for (let attempt = 0; attempt < 100; attempt++) {
-		const snapshot = await manager.poll(processId);
-		output += snapshot.output;
-		if (output.includes(expected)) return output;
-		if (snapshot.state !== "running") throw new Error(`Process exited before producing ${expected}`);
-		await wait(10);
-	}
-	throw new Error(`Process ${processId} did not produce ${expected}`);
-}
-
-function descendantScript(sentinel: string, parentExits: boolean): string {
-	const child = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'leaked'), 300); setInterval(() => {}, 1000)`;
-	return [
-		"const { spawn } = require('node:child_process');",
-		`spawn(process.execPath, ['-e', ${JSON.stringify(child)}], { stdio: 'ignore' }).unref();`,
-		"process.stdout.write('ready');",
-		parentExits ? "" : "setInterval(() => {}, 1000);",
-	].join("\n");
-}
-
 describe("ProcessSessionManager", () => {
-	it("runs concurrent processes with independent incremental stdin and output", async () => {
-		const { manager, workspace, authority } = await fixture();
-		const echo =
-			"process.stdin.setEncoding('utf8'); process.stdin.on('data', value => process.stdout.write(value)); process.stdin.on('end', () => process.exit(0))";
-		const [first, second] = await Promise.all([
-			manager.start(request(workspace, echo), authority),
-			manager.start(request(workspace, echo), authority),
-		]);
+	it("starts, streams, writes, closes stdin, and reports completion", async () => {
+		const controlled = controlledRunner();
+		const { manager, root } = await fixture(controlled.runner);
+		const started = await manager.start(request(root), "session:a");
 
-		expect(first.processId).not.toBe(second.processId);
-		await Promise.all([
-			manager.write(first.processId, "first", true),
-			manager.write(second.processId, "second", true),
-		]);
-		const [firstResult, secondResult] = await Promise.all([
-			terminal(manager, first.processId),
-			terminal(manager, second.processId),
-		]);
+		expect(started).toMatchObject({ state: "running", output: "", timedOut: false });
+		controlled.emit("stdout", "hello\n");
+		controlled.emit("stderr", "warning\n");
+		await expect(manager.write(started.processId, "input")).resolves.toMatchObject({ accepted: true });
+		await expect(manager.write(started.processId, "done", true)).resolves.toMatchObject({ accepted: true });
+		expect(controlled.inputs()).toEqual(["input", "done"]);
 
-		expect(firstResult.snapshot.state).toBe("completed");
-		expect(secondResult.snapshot.state).toBe("completed");
-		expect(firstResult.output).toContain("first");
-		expect(firstResult.output).not.toContain("second");
-		expect(secondResult.output).toContain("second");
-	});
+		const running = await manager.poll(started.processId);
+		expect(running).toMatchObject({ state: "running", stderrPresent: true });
+		expect(running.output).toContain("hello");
+		expect(running.output).toContain("warning");
 
-	it("bounds each poll and exposes omitted output through read_tool_output", async () => {
-		const { manager, workspace, authority } = await fixture(createModelProcessSessionRunner(), {
-			maxPollOutputBytes: 64,
-			maxPollOutputLines: 5,
+		controlled.finish({
+			exitCode: 0,
+			signal: null,
+			stdout: "hello\n",
+			stderr: "warning\n",
+			timedOut: false,
+			truncated: false,
 		});
-		const started = await manager.start(
-			request(workspace, "for (let index = 0; index < 4000; index++) console.log('line-' + index)"),
-			authority,
-		);
-		let result: ProcessSessionSnapshot | undefined;
-		let observedTruncation = false;
-		for (let attempt = 0; attempt < 100; attempt++) {
-			result = await manager.poll(started.processId);
-			observedTruncation ||= result.truncated;
-			expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(64);
-			if (result.state !== "running") break;
-			await wait(10);
-		}
-		if (!result) throw new Error("Process did not produce a poll result");
-		expect(result.state).toBe("completed");
-		expect(observedTruncation).toBe(true);
-		expect(result.outputRef).toMatch(/^tool-output:v1:/u);
-
-		const read = createReadToolOutputTool({ fileSystem: createNodeFileSystem(), homeDirectory: workspace });
-		const recovered = await read.execute({ ref: result.outputRef!, offset: 3_500, limit: 1_000 }, context());
-		expect(recovered.content).toContain("line-3999");
-	});
-
-	it("reports timeout, Sandbox denial, and stale identities as explicit states", async () => {
-		const live = await fixture();
-		const timed = await live.manager.start(
-			request(live.workspace, "setInterval(() => {}, 1000)", 25),
-			live.authority,
-		);
-		const timedResult = await terminal(live.manager, timed.processId);
-		expect(timedResult.snapshot).toMatchObject({ state: "failed", timedOut: true });
-
-		const denialRunner: ModelProcessSessionRunner = {
-			start: async (processRequest) => {
-				processRequest.onOutput?.({ channel: "stderr", text: "permission denied" });
-				const completion = Promise.resolve({
-					exitCode: 1,
-					signal: null,
-					stdout: "",
-					stderr: "permission denied",
-					timedOut: false,
-					truncated: false,
-					backend: "macos-seatbelt" as const,
-					denial: {
-						kind: "filesystem" as const,
-						backend: "seatbelt" as const,
-						reason: "permission_denied" as const,
-						path: "/outside",
-						outputSnippet: "permission denied",
-					},
-				});
-				return {
-					backend: "macos-seatbelt",
-					completion,
-					write: async () => undefined,
-					closeStdin: async () => undefined,
-					stop: () => completion,
-				};
-			},
-		};
-		const denied = await fixture(denialRunner);
-		const deniedStart = await denied.manager.start(request(denied.workspace, "ignored"), denied.authority);
-		await wait(0);
-		const deniedResult = await denied.manager.poll(deniedStart.processId);
-		expect(deniedResult).toMatchObject({
-			state: "denied",
-			denial: { kind: "filesystem", path: "/outside" },
+		await controlled.completion();
+		await expect(manager.poll(started.processId)).resolves.toMatchObject({
+			state: "completed",
+			exitCode: 0,
+			stderrPresent: true,
 		});
-		expect(await denied.manager.poll(deniedStart.processId)).toMatchObject({ state: "stale" });
-		expect(await denied.manager.poll("process_session:from-an-earlier-process")).toMatchObject({ state: "stale" });
+		await manager.close();
 	});
 
-	it.each(["stop", "close"] as const)("kills descendants on explicit %s", async (operation) => {
-		const { manager, workspace, authority } = await fixture();
-		const sentinel = join(workspace, `${operation}-descendant.txt`);
-		const started = await manager.start(request(workspace, descendantScript(sentinel, false)), authority);
-		await waitForOutput(manager, started.processId, "ready");
+	it("stops only processes owned by the retired Session", async () => {
+		const first = controlledRunner();
+		const second = controlledRunner();
+		let starts = 0;
+		const { manager, root } = await fixture({
+			start: (processRequest) =>
+				starts++ === 0 ? first.runner.start(processRequest) : second.runner.start(processRequest),
+		});
+		const owned = await manager.start(request(root), "session:a");
+		const retained = await manager.start(request(root), "session:b");
 
-		if (operation === "stop") {
-			await expect(manager.stop(started.processId)).resolves.toMatchObject({ state: "stopped" });
-		} else {
-			await manager.close();
-		}
-		await wait(450);
-		await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+		await manager.retireSession("session:a");
+
+		expect(first.stopCount()).toBe(1);
+		expect(second.stopCount()).toBe(0);
+		await expect(manager.poll(owned.processId)).resolves.toMatchObject({ state: "stale" });
+		await expect(manager.poll(retained.processId)).resolves.toMatchObject({ state: "running" });
+		await manager.close();
+		expect(second.stopCount()).toBe(1);
 	});
 
-	it("retires only processes owned by the closing Session", async () => {
-		const { manager, workspace, authority } = await fixture();
-		const script = "setInterval(() => {}, 1000)";
-		const first = await manager.start(request(workspace, script), { ...authority, sessionId: "session:first" });
-		const second = await manager.start(request(workspace, script), { ...authority, sessionId: "session:second" });
-
-		await manager.retireSession("session:first");
-
-		await expect(manager.poll(first.processId)).resolves.toMatchObject({ state: "stale" });
-		await expect(manager.poll(second.processId)).resolves.toMatchObject({ state: "running" });
-		await manager.stop(second.processId);
-	});
-
-	it("cleans up descendants when the direct child exits", async () => {
-		const { manager, workspace, authority } = await fixture();
-		const sentinel = join(workspace, "exit-descendant.txt");
-		const started = await manager.start(request(workspace, descendantScript(sentinel, true)), authority);
-		const result = await terminal(manager, started.processId);
-
-		expect(result.snapshot.state).toBe("completed");
-		await wait(450);
-		await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+	it("returns a stale snapshot for unknown process identities", async () => {
+		const controlled = controlledRunner();
+		const { manager } = await fixture(controlled.runner);
+		await expect(manager.poll("missing")).resolves.toMatchObject({ state: "stale", processId: "missing" });
+		await manager.close();
 	});
 });
+
+async function fixture(runner: ProcessSessionRunner) {
+	const root = await mkdtemp(join(tmpdir(), "coda-process-manager-"));
+	temporaryDirectories.push(root);
+	let id = 0;
+	const idGenerator: IdGenerator = { generate: () => `process:${++id}` };
+	return {
+		root,
+		manager: new ProcessSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory: root,
+			runner,
+			idGenerator,
+		}),
+	};
+}
+
+function request(cwd: string): Omit<ProcessRunRequest, "maxOutputBytes" | "maxOutputLines" | "onOutput"> {
+	return {
+		executable: "/bin/sh",
+		args: ["-c", "echo test"],
+		cwd,
+		environment: {},
+		signal: new AbortController().signal,
+		timeoutMs: 10_000,
+	};
+}
+
+function controlledRunner(): {
+	readonly runner: ProcessSessionRunner;
+	emit(channel: "stdout" | "stderr", text: string): void;
+	finish(result: ProcessRunResult): void;
+	completion(): Promise<ProcessRunResult>;
+	inputs(): readonly string[];
+	stopCount(): number;
+} {
+	let activeRequest: ProcessRunRequest | undefined;
+	let settle!: (result: ProcessRunResult) => void;
+	const completion = new Promise<ProcessRunResult>((resolve) => {
+		settle = resolve;
+	});
+	const inputs: string[] = [];
+	let stops = 0;
+	const stopped: ProcessRunResult = {
+		exitCode: null,
+		signal: "SIGTERM",
+		stdout: "",
+		stderr: "",
+		timedOut: false,
+		truncated: false,
+	};
+	const handle: ProcessSession = {
+		completion,
+		write: async (input) => {
+			inputs.push(String(input));
+		},
+		closeStdin: async (input) => {
+			if (input !== undefined) inputs.push(String(input));
+		},
+		stop: async () => {
+			stops++;
+			settle(stopped);
+			return completion;
+		},
+	};
+	return {
+		runner: {
+			start: async (processRequest) => {
+				activeRequest = processRequest;
+				return handle;
+			},
+		},
+		emit: (channel, text) => activeRequest?.onOutput?.({ channel, text }),
+		finish: settle,
+		completion: () => completion,
+		inputs: () => inputs,
+		stopCount: () => stops,
+	};
+}

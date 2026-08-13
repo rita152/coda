@@ -117,11 +117,10 @@ async function runConversation(options: {
 		models,
 		settings: { load: async () => ({}), save: async () => undefined },
 		fileSystem: createNodeFileSystem(),
-		processRunner: runner,
-		modelProcessRunner: {
+		processRunner: {
 			run: async (request) => {
-				launches.push([request.executable, ...request.args]);
-				return { ...(await runner.run(request)), backend: "none" };
+				if (request.executable !== "git") launches.push([request.executable, ...request.args]);
+				return runner.run(request);
 			},
 		},
 		io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
@@ -137,7 +136,6 @@ async function runConversation(options: {
 
 	const exitCode = await application.run([
 		"--print",
-		"--dangerously-bypass-approvals-and-sandbox",
 		"--model",
 		`${options.faux.getModel().provider}/${options.faux.getModel().id}`,
 		options.prompt,

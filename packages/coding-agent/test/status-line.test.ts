@@ -24,13 +24,12 @@ describe("status line presentation", () => {
 			{
 				modelLabel: "opencode-go/deepseek-v4-flash",
 				reasoning: "max",
-				permissionLabel: "Workspace / on-request",
 			},
 			80,
 			createCodaTheme(0),
 		);
 
-		expect(lines[0]).toMatch(/^~\/Desktop\/coda \(main\*\) +Workspace \/ On Request$/u);
+		expect(lines[0]).toBe("~/Desktop/coda (main*)");
 		expect(lines[1]).toMatch(/^\$1\.23 · 128k\/1m +opencode-go\/deepseek-v4-flash\(max\)$/u);
 		expect(lines.every((line) => displayWidth(line) <= 80)).toBe(true);
 	});
@@ -41,13 +40,12 @@ describe("status line presentation", () => {
 			{
 				modelLabel: "opencode-go/deepseek-v4-flash",
 				reasoning: "max",
-				permissionLabel: "Workspace / on-request",
 			},
 			40,
 			createCodaTheme(0),
 		);
 
-		expect(lines[0]).toMatch(/^~\/…\/coda \(main\*\) +Workspace \/ On Request$/u);
+		expect(lines[0]).toBe("~/Desktop/coda (main*)");
 		expect(lines[1]).toMatch(/^128k\/1m +deepseek-v4-flash\(max\)$/u);
 		expect(lines.join("\n")).not.toContain("$1.23");
 		expect(lines.join("\n")).not.toContain("opencode-go/");
@@ -99,8 +97,6 @@ describe("status line presentation", () => {
 			{
 				modelLabel: "opencode-go/deepseek-v4-flash",
 				reasoning: "max",
-				permissionLabel: "Full Access / never",
-				permissionWarning: true,
 			},
 			100,
 			createCodaTheme(1),
@@ -113,8 +109,6 @@ describe("status line presentation", () => {
 			{
 				modelLabel: "opencode-go/deepseek-v4-flash",
 				reasoning: "max",
-				permissionLabel: "Full Access / never",
-				permissionWarning: true,
 			},
 			100,
 			createCodaTheme(0),

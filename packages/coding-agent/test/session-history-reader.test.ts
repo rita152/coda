@@ -87,7 +87,7 @@ describe("SessionHistoryReader", () => {
 					},
 					details: {
 						journalPath: "/journal/private/session.jsonl",
-						permissionAudit: "full-access",
+						unsupportedLegacyFact: "discarded",
 						credential: "credential-secret",
 					},
 					isError: true,
@@ -117,7 +117,7 @@ describe("SessionHistoryReader", () => {
 		expect(serialized).not.toContain("private-reasoning");
 		expect(serialized).not.toContain("credential-secret");
 		expect(serialized).not.toContain(imageData.slice(0, 100));
-		expect(serialized).not.toContain("permissionAudit");
+		expect(serialized).not.toContain("unsupportedLegacyFact");
 	});
 
 	it("returns the same committed history after Session resume", async () => {
@@ -135,7 +135,6 @@ describe("SessionHistoryReader", () => {
 			clock: runtime.clock,
 			idGenerator,
 			tools: [],
-			policyGate: { check: async () => ({ decision: "allow" }) },
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { runtime, signal }),
 		});
 		session.attach(agent);

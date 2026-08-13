@@ -1,6 +1,5 @@
 import type { Agent, AgentInput, QueueItemId } from "@coda/agent";
 import type { ModelThinkingLevel } from "@coda/ai";
-import type { PermissionProfile } from "@coda/sandbox";
 import {
 	type DiagnosticSink,
 	FullScreenTui,
@@ -19,20 +18,17 @@ import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts"
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
-import { createPermissionCommandFlow } from "../commands/permission-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
 import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import { isContextOverflowError, isProviderContextOverflow } from "../context-window/overflow-recovery.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
 import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
 import type { Session } from "../session/types.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
-import type { InteractiveApprovalHandler } from "./approval.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
@@ -56,13 +52,9 @@ import { UserShell } from "./user-shell.ts";
 export interface InteractiveSessionOptions {
 	readonly agent: Agent;
 	readonly session: Session;
-	readonly approvalFor?: PermissionEngine["approvalFor"];
 	readonly modelLabel: string;
 	readonly activitySummaryMode?: ActivitySummaryMode;
-	readonly permissionProfile: PermissionProfile;
-	readonly permissionLabel: string;
 	readonly statusLine: () => SessionStatusLineSnapshot;
-	readonly onPermissionProfileChange: (profile: PermissionProfile) => Promise<string> | string;
 	readonly modelCommand?: {
 		readonly list: () => Promise<readonly ModelCommandEntry[]>;
 		readonly currentKey: () => string;
@@ -128,7 +120,6 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly keybindings: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
-	readonly approval?: InteractiveApprovalHandler;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
@@ -239,7 +230,6 @@ async function runMultiSessionInteractive(
 		const pane = await runtimes.focus(sessionId, async () => createPane(await sessionCommand.open(sessionId)));
 		root.select(pane.component);
 		pane.needsAttention = false;
-		options.approval?.setActiveSession(pane.id);
 		options.mcpElicitation?.setActiveSession(pane.id);
 		await startPane(pane);
 		if (pane.contextOverflowPending) offerContextOverflowRecovery(pane);
@@ -249,7 +239,6 @@ async function runMultiSessionInteractive(
 		const result = await runtimes.create(async () => createPane(await sessionCommand.create()));
 		root.select(result.runtime.component);
 		result.runtime.needsAttention = false;
-		options.approval?.setActiveSession(result.runtime.id);
 		options.mcpElicitation?.setActiveSession(result.runtime.id);
 		await startPane(result.runtime);
 	};
@@ -264,7 +253,6 @@ async function runMultiSessionInteractive(
 			if (replaced !== pane) throw new Error("Context Overflow replacement no longer matches the active Session");
 			root.select(replacement.component);
 			replacement.needsAttention = false;
-			options.approval?.setActiveSession(replacement.id);
 			options.mcpElicitation?.setActiveSession(replacement.id);
 			await startPane(replacement);
 			await options.onContextOverflowReplacement?.(replacement.options);
@@ -325,7 +313,6 @@ async function runMultiSessionInteractive(
 
 	const createPane = (sessionOptions: InteractiveSessionOptions): InteractivePane => {
 		let component!: ChatComponent;
-		let activePermissionProfile = sessionOptions.permissionProfile;
 		const userShell = new UserShell({
 			processRunner: options.processRunner,
 			platform: options.platform,
@@ -348,8 +335,6 @@ async function runMultiSessionInteractive(
 		component = new ChatComponent({
 			modelLabel: sessionOptions.modelLabel,
 			activitySummaryMode: sessionOptions.activitySummaryMode,
-			permissionLabel: sessionOptions.permissionLabel,
-			permissionWarning: sessionOptions.permissionProfile === "full-access",
 			reasoning: sessionOptions.reasoning,
 			statusLine: () => statusLineSnapshot(options, sessionOptions, git),
 			clock: options.clock,
@@ -376,19 +361,6 @@ async function runMultiSessionInteractive(
 				input.followUp(text, attachmentIds, composerText, references),
 			onUserShell: (command) => input.submitUserShell(command),
 			onCommand: async (commandId, flow, argument) => {
-				if (commandId === "core:permission") {
-					flow.open(
-						createPermissionCommandFlow({
-							current: activePermissionProfile,
-							onSelect: async (selected) => {
-								const label = await sessionOptions.onPermissionProfileChange(selected);
-								activePermissionProfile = selected;
-								component.setPermissionLabel(label, selected === "full-access");
-							},
-						}),
-					);
-					return;
-				}
 				if (commandId === "core:auth") {
 					flow.open(createAuthCommandFlow(await authOptionsFor(sessionOptions)));
 					return;
@@ -537,15 +509,6 @@ async function runMultiSessionInteractive(
 					else pane.needsAttention = true;
 				}
 			}
-			if (
-				(event.type === "tool_execution_start" ||
-					event.type === "tool_execution_end" ||
-					event.type === "tool_execution_rejected") &&
-				sessionOptions.approvalFor
-			) {
-				const approval = sessionOptions.approvalFor(event.invocation.id);
-				if (approval) component.setApprovalResult(event.invocation.id, approval);
-			}
 		});
 		pane = {
 			id: sessionOptions.session.descriptor.id,
@@ -606,14 +569,12 @@ async function runMultiSessionInteractive(
 	};
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
@@ -633,12 +594,6 @@ async function runMultiSessionInteractive(
 			});
 		},
 	});
-	options.approval?.bind(tui, options.terminal, (request, sessionId) => {
-		const pane = sessionId ? runtimes.get(sessionId) : runtimes.active;
-		if (!pane) return;
-		pane.component.setAwaitingApproval(request);
-		if (pane !== runtimes.active) pane.needsAttention = true;
-	});
 	options.mcpElicitation?.bind(tui, options.terminal, (request, sessionId, waiting) => {
 		const pane = sessionId ? runtimes.get(sessionId) : runtimes.active;
 		if (!pane) return;
@@ -649,10 +604,8 @@ async function runMultiSessionInteractive(
 		);
 		if (waiting && pane !== runtimes.active) pane.needsAttention = true;
 	});
-	options.approval?.setActiveSession(initialPane.id);
 	options.mcpElicitation?.setActiveSession(initialPane.id);
 	if (terminationSignal || fatalError !== undefined) {
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 	}
 	try {
@@ -676,7 +629,6 @@ async function runMultiSessionInteractive(
 		return terminationSignal ? interactiveSignalExitCode(terminationSignal) : 0;
 	} finally {
 		unsubscribeLifecycle?.();
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		let droppedShells = 0;
 		for (const pane of runtimes.open) {
@@ -707,7 +659,6 @@ async function runSingleSessionInteractive(
 	let fatalError: unknown;
 	let suspendTask: Promise<void> | undefined;
 	let component!: ChatComponent;
-	let activePermissionProfile = options.permissionProfile;
 	const authFlowOptions = async (): Promise<AuthCommandFlowOptions> => {
 		if (!options.authCommand) throw new Error("Authentication management is unavailable");
 		return {
@@ -739,8 +690,6 @@ async function runSingleSessionInteractive(
 	component = new ChatComponent({
 		modelLabel: options.modelLabel,
 		activitySummaryMode: options.activitySummaryMode,
-		permissionLabel: options.permissionLabel,
-		permissionWarning: options.permissionProfile === "full-access",
 		reasoning: options.reasoning,
 		statusLine: () => statusLineSnapshot(options, options, git),
 		clock: options.clock,
@@ -767,19 +716,6 @@ async function runSingleSessionInteractive(
 			inputController.followUp(text, attachmentIds, composerText, references),
 		onUserShell: (command) => inputController.submitUserShell(command),
 		onCommand: async (commandId, flow, argument) => {
-			if (commandId === "core:permission") {
-				flow.open(
-					createPermissionCommandFlow({
-						current: activePermissionProfile,
-						onSelect: async (selected) => {
-							const label = await options.onPermissionProfileChange(selected);
-							activePermissionProfile = selected;
-							component.setPermissionLabel(label, selected === "full-access");
-						},
-					}),
-				);
-				return;
-			}
 			if (commandId === "core:auth") {
 				flow.open(createAuthCommandFlow(await authFlowOptions()));
 				return;
@@ -897,7 +833,6 @@ async function runSingleSessionInteractive(
 	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
@@ -909,7 +844,6 @@ async function runSingleSessionInteractive(
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		if (options.agent.state.status === "running") {
 			try {
@@ -934,7 +868,6 @@ async function runSingleSessionInteractive(
 			});
 		},
 	});
-	options.approval?.bind(tui, options.terminal, (request) => component.setAwaitingApproval(request));
 	options.mcpElicitation?.bind(tui, options.terminal, (request, _sessionId, waiting) => {
 		component.setActivityOverride(
 			`mcp:${request.execution.invocationId}`,
@@ -944,21 +877,12 @@ async function runSingleSessionInteractive(
 	});
 	options.mcpElicitation?.setActiveSession(options.session.descriptor.id);
 	if (terminationSignal || fatalError !== undefined) {
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 	}
 	const detach = options.agent.onEvent((event) => {
 		component.accept(event);
 		if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
 		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
-		if (
-			event.type === "tool_execution_start" ||
-			event.type === "tool_execution_end" ||
-			event.type === "tool_execution_rejected"
-		) {
-			const approval = options.approvalFor?.(event.invocation.id);
-			if (approval) component.setApprovalResult(event.invocation.id, approval);
-		}
 	});
 	try {
 		if (!(await startFullScreen())) {
@@ -981,7 +905,6 @@ async function runSingleSessionInteractive(
 		return terminationSignal ? interactiveSignalExitCode(terminationSignal) : 0;
 	} finally {
 		unsubscribeLifecycle?.();
-		options.approval?.unbind();
 		options.mcpElicitation?.unbind();
 		detach();
 		const droppedShells = await inputController.dispose();

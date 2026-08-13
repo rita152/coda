@@ -1,10 +1,8 @@
 import type { AgentTool } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
-import type { ApplicationRuntime, UserSettings } from "../application.ts";
+import type { ApplicationRuntime } from "../application.ts";
 import type { FileSystem } from "../host/file-system.ts";
-import type { PermissionAuditSink } from "../permissions/audit.ts";
-import type { ModelProcessRunner } from "../permissions/model-process-runner.ts";
-import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../workspace.ts";
 import { planShellExecution, SHELL_EXECUTION_FACTS_VERSION } from "./shell-execution.ts";
 import { createToolOutputCapture, discardStoredToolOutput, type StoredToolOutput } from "./tool-output-store.ts";
@@ -26,76 +24,17 @@ const BashParameters = Type.Object(
 				},
 			),
 		),
-		sandbox_permissions: Type.Optional(
-			Type.Union(
-				[
-					Type.Literal("use_default"),
-					Type.Literal("require_escalated"),
-					Type.Literal("with_additional_permissions"),
-				],
-				{
-					description:
-						"Per-command permission request. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions`, or `require_escalated` for explicit command approval. Restricted read roots remain enforced.",
-				},
-			),
-		),
-		justification: Type.Optional(
-			Type.String({
-				description: "User-facing approval question for an explicit permission request; omit otherwise.",
-			}),
-		),
-		prefix_rule: Type.Optional(
-			Type.Array(Type.String(), {
-				description:
-					'Reusable approval prefix for `command`, only with `sandbox_permissions: "require_escalated"`; for example ["git", "pull"].',
-			}),
-		),
-		additional_permissions: Type.Optional(
-			Type.Object(
-				{
-					network: Type.Optional(
-						Type.Object({ enabled: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
-					),
-					file_system: Type.Optional(
-						Type.Object(
-							{
-								read: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-								write: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-							},
-							{ additionalProperties: false },
-						),
-					),
-				},
-				{
-					additionalProperties: false,
-					description:
-						'Sandboxed filesystem or network access for this command; only with `sandbox_permissions: "with_additional_permissions"`.',
-				},
-			),
-		),
 	},
 	{ additionalProperties: false },
 );
 
-const AUTOMATIC_ENVIRONMENT = new Set(["HOME", "LANG", "LANGUAGE", "PATH", "SHELL", "TMPDIR", "USER"]);
-
-export function modelShellEnvironment(
-	runtime: ApplicationRuntime,
-	allowlist: readonly string[],
-): { environment: Record<string, string>; stripped: readonly string[] } {
-	const allowed = new Set([...AUTOMATIC_ENVIRONMENT, ...allowlist]);
-	for (const name of Object.keys(runtime.environment)) {
-		if (/^LC_[A-Z0-9_]+$/.test(name)) allowed.add(name);
-	}
+export function hostProcessEnvironment(runtime: ApplicationRuntime): Record<string, string> {
 	const environment: Record<string, string> = {};
-	const stripped: string[] = [];
 	for (const [name, value] of Object.entries(runtime.environment)) {
-		if (value === undefined) continue;
-		if (allowed.has(name) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) environment[name] = value;
-		else stripped.push(name);
+		if (value !== undefined) environment[name] = value;
 	}
 	environment.HOME ??= runtime.homeDirectory;
-	return { environment, stripped: stripped.sort() };
+	return environment;
 }
 
 function visibleOutput(stdout: string, stderr: string): string {
@@ -131,34 +70,20 @@ function capturedVisibleOutput(value: string): string {
 	return value.startsWith("[stdout]\n") ? value.slice("[stdout]\n".length) : value;
 }
 
-export function modelProcessDenialNotice(
-	denial: NonNullable<Awaited<ReturnType<ModelProcessRunner["run"]>>["denial"]>,
-): string {
-	if (denial.kind === "network") {
-		return `Sandbox denied network access to ${denial.protocol}://${denial.host}:${denial.port}: ${denial.reason}. If this access is intended, retry with sandbox_permissions "with_additional_permissions" and additional_permissions.network.enabled true.`;
-	}
-	return `Sandbox denied filesystem access${denial.path ? ` to ${denial.path}` : ""}: ${denial.reason}. If this access is intended, retry with the narrow path under additional_permissions.file_system.`;
-}
-
 export function createBashTool(options: {
 	readonly workspace: Workspace;
 	readonly fileSystem: FileSystem;
-	readonly processRunner: ModelProcessRunner;
-	readonly permissions: PermissionEngine;
+	readonly processRunner: ProcessRunner;
 	readonly shellExecutable: string;
 	readonly runtime: ApplicationRuntime;
-	readonly settings: UserSettings;
-	readonly onAudit?: PermissionAuditSink;
 }): AgentTool<typeof BashParameters> {
 	return {
 		name: "bash",
 		description:
-			"Run one non-interactive Shell command under the active Permission Profile. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status.",
+			"Run one non-interactive Shell command directly on the host. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status.",
 		parameters: BashParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
-			const authorization = options.permissions.authorizationFor(context.invocationId);
-			if (!authorization) throw new Error("Bash execution was not authorized by the Permission Engine");
 			const shellExecution = planShellExecution(options.shellExecutable, arguments_.command);
 			if (shellExecution.kind === "reject") {
 				return {
@@ -194,38 +119,30 @@ export function createBashTool(options: {
 					},
 				};
 			}
-			const inherited = modelShellEnvironment(options.runtime, options.settings.shellEnvironmentAllowlist ?? []);
+			const environment = hostProcessEnvironment(options.runtime);
 			const capture = await createToolOutputCapture(
 				options.fileSystem,
 				options.runtime.homeDirectory,
 				context.invocationId,
 			);
-			let result: Awaited<ReturnType<ModelProcessRunner["run"]>>;
+			let result: Awaited<ReturnType<ProcessRunner["run"]>>;
 			let stored: StoredToolOutput | undefined;
 			let observedStderr = false;
 			try {
-				result = await options.processRunner.run(
-					{
-						executable: shellExecution.shell,
-						args: shellExecution.args,
-						cwd: options.workspace.root,
-						environment: inherited.environment,
-						signal: context.signal,
-						timeoutMs: arguments_.timeoutMs ?? 120_000,
-						maxOutputBytes: 50 * 1024,
-						maxOutputLines: 2_000,
-						onOutput: (chunk) => {
-							if (chunk.channel === "stderr" && chunk.text.length > 0) observedStderr = true;
-							capture?.append(chunk);
-						},
+				result = await options.processRunner.run({
+					executable: shellExecution.shell,
+					args: shellExecution.args,
+					cwd: options.workspace.root,
+					environment,
+					signal: context.signal,
+					timeoutMs: arguments_.timeoutMs ?? 120_000,
+					maxOutputBytes: 50 * 1024,
+					maxOutputLines: 2_000,
+					onOutput: (chunk) => {
+						if (chunk.channel === "stderr" && chunk.text.length > 0) observedStderr = true;
+						capture?.append(chunk);
 					},
-					{
-						readAccessPolicy: authorization.readAccessPolicy,
-						managedNetwork: authorization.managedNetwork,
-						auditContext: { invocationId: context.invocationId, toolName: "bash" },
-						audit: options.onAudit,
-					},
-				);
+				});
 				stored = await capture?.finish();
 			} catch (error) {
 				stored = await capture?.finish();
@@ -266,7 +183,7 @@ export function createBashTool(options: {
 					? `\n[output omitted; continue with read_tool_output using ref ${JSON.stringify(stored.outputRef)}]`
 					: "\n[output omitted; no recoverable output reference is available]";
 			}
-			const status = result.denial ? "denied" : result.timedOut || result.exitCode !== 0 ? "error" : "ok";
+			const status = result.timedOut || result.exitCode !== 0 ? "error" : "ok";
 			const facts: Record<string, JsonValue> = {
 				shellExecutionFactsVersion: SHELL_EXECUTION_FACTS_VERSION,
 				exitCode: result.exitCode,
@@ -278,31 +195,14 @@ export function createBashTool(options: {
 				signal: result.signal,
 				timedOut: result.timedOut,
 				stderrPresent: observedStderr || result.stderr.length > 0,
-				backend: result.backend,
 				outputRefAvailable: stored !== undefined,
 				outputRefComplete: stored !== undefined && stored.storedTruncated !== true,
-				strippedEnvironmentVariableCount: inherited.stripped.length,
 				...(arguments_.preview
 					? { previewMode: arguments_.preview.mode, previewLines: arguments_.preview.lines, previewComplete }
 					: {}),
-				...(result.denial?.kind === "network"
-					? {
-							denialKind: "network",
-							deniedHost: result.denial.host,
-							deniedPort: result.denial.port,
-							deniedProtocol: result.denial.protocol,
-							requiredPermission: "network",
-						}
-					: result.denial
-						? {
-								denialKind: "filesystem",
-								...(result.denial.path ? { deniedPath: result.denial.path } : {}),
-								requiredPermission: "filesystem",
-							}
-						: {}),
 			};
 			return {
-				content: result.denial ? `${output}\n[${modelProcessDenialNotice(result.denial)}]` : output,
+				content: output,
 				observation: {
 					status,
 					truncated,
@@ -318,12 +218,9 @@ export function createBashTool(options: {
 					outputRef: stored?.outputRef,
 					overflowPath: stored?.overflowPath,
 					cwd: options.workspace.root,
-					strippedEnvironmentVariableCount: inherited.stripped.length,
-					backend: result.backend,
 					shell: shellExecution.shell,
 					shellDialect: shellExecution.shellDialect,
 					pipelineStatusMode: shellExecution.pipelineStatusMode,
-					denial: result.denial,
 					preview: arguments_.preview,
 					previewComplete,
 					outputStoredTruncated: stored?.storedTruncated,

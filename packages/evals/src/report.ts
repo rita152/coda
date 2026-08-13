@@ -10,7 +10,7 @@ export function formatHumanReport(report: EvaluationSuiteReport): string {
 	const header = [
 		`${status} Coda Agent evaluation (${report.mode})`,
 		`${report.summary.passed}/${report.summary.fixtures} fixtures passed · score ${report.summary.averageScore.toFixed(1)} · ${report.summary.turnCount} Turns · ${report.summary.toolCount} Tools`,
-		`${report.summary.repeatedToolBatches} repeated Tool batches · ${report.summary.permissionEscalationAttempts} permission escalations · ${report.summary.elapsedMs}ms · ${usageSummary(report.summary.usage)}`,
+		`${report.summary.repeatedToolBatches} repeated Tool batches · ${report.summary.elapsedMs}ms · ${usageSummary(report.summary.usage)}`,
 	];
 	const fixtures = report.fixtures.map((fixture) => {
 		const result = fixture.passed ? "PASS" : "FAIL";

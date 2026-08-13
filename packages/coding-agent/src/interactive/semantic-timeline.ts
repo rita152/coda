@@ -17,20 +17,11 @@ import {
 	type ToolResultMessage,
 	type UserMessage,
 } from "@coda/ai";
-import type { ApprovalDecisionAuditEvent } from "../permissions/audit.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
 
-export type TimelineToolState =
-	| "awaiting_approval"
-	| "running"
-	| "success"
-	| "failed"
-	| "denied"
-	| "aborted"
-	| "skipped"
-	| "interrupted";
+export type TimelineToolState = "running" | "success" | "failed" | "aborted" | "skipped" | "interrupted";
 
 export interface TimelineUserEntry {
 	readonly kind: "user";
@@ -82,14 +73,6 @@ export interface TimelineToolEntry {
 	readonly endedAt?: number;
 	readonly progress?: Immutable<ToolExecutionProgress>;
 	readonly result?: AgentMessage<ToolResultMessage>;
-	readonly approval?: TimelineApproval;
-}
-
-export interface TimelineApproval {
-	readonly outcome: ApprovalDecisionAuditEvent["outcome"];
-	readonly commandPrefix?: readonly string[];
-	readonly denial?: ApprovalDecisionAuditEvent["denial"];
-	readonly expired?: boolean;
 }
 
 export interface TimelineUserShellEntry extends UserShellSnapshot {
@@ -138,7 +121,6 @@ interface ToolSlot {
 	endedAt?: number;
 	progress?: Immutable<ToolExecutionProgress>;
 	result?: AgentMessage<ToolResultMessage>;
-	approval?: TimelineApproval;
 	projected?: TimelineToolEntry;
 }
 
@@ -177,9 +159,7 @@ export class SemanticTimeline {
 	}
 
 	get hasActiveTools(): boolean {
-		return [...this.#toolByProviderId.values()].some(
-			(slot) => slot.invocation && (slot.state === "running" || slot.state === "awaiting_approval"),
-		);
+		return [...this.#toolByProviderId.values()].some((slot) => slot.invocation && slot.state === "running");
 	}
 
 	accept(event: AgentEvent): TimelineMutation {
@@ -249,40 +229,6 @@ export class SemanticTimeline {
 		return Object.freeze({ changed: true });
 	}
 
-	setAwaitingApproval(invocationId: string, toolName: string): boolean {
-		let slot = this.#toolByInvocationId.get(invocationId);
-		if (!slot) {
-			slot = [...this.#toolByProviderId.values()].find(
-				(candidate) => !candidate.invocation && candidate.toolName === toolName,
-			);
-		}
-		if (!slot) return false;
-		if (!slot.invocation) {
-			slot.invocation = freezeInvocation({
-				id: invocationId,
-				resultMessageId: `pending:${invocationId}`,
-				providerToolCallId: slot.providerToolCallId,
-				toolName: slot.toolName,
-				arguments: slot.arguments,
-				sourceIndex: slot.contentIndex,
-			});
-			this.#toolByInvocationId.set(invocationId, slot);
-		}
-		slot.state = "awaiting_approval";
-		slot.projected = undefined;
-		this.#invalidate();
-		return true;
-	}
-
-	setApprovalResult(invocationId: string, approval: ApprovalDecisionAuditEvent): boolean {
-		const slot = this.#toolByInvocationId.get(invocationId);
-		if (!slot) return false;
-		slot.approval = timelineApproval(approval, false);
-		slot.projected = undefined;
-		this.#invalidate();
-		return true;
-	}
-
 	#hydrate(message: AgentMessage): void {
 		switch (message.message.role) {
 			case "user":
@@ -317,7 +263,6 @@ export class SemanticTimeline {
 		slot.startedAt = lifecycle.startedAt;
 		slot.endedAt = lifecycle.finishedAt;
 		slot.state = restoredToolState(lifecycle);
-		slot.approval = lifecycle.approval ? timelineApproval(lifecycle.approval, true) : undefined;
 		slot.projected = undefined;
 	}
 
@@ -539,14 +484,7 @@ export class SemanticTimeline {
 	): void {
 		const slot = this.#findOrCreateTool(invocation, turnId);
 		this.#attachInvocation(slot, invocation);
-		slot.state =
-			reason === "policy"
-				? "denied"
-				: reason === "aborted"
-					? "aborted"
-					: reason === "not_started"
-						? "skipped"
-						: "failed";
+		slot.state = reason === "aborted" ? "aborted" : reason === "not_started" ? "skipped" : "failed";
 		slot.endedAt = timestamp;
 		slot.progress = undefined;
 		if (result.message.role === "toolResult") slot.result = clone(result as AgentMessage<ToolResultMessage>);
@@ -650,7 +588,6 @@ export class SemanticTimeline {
 						endedAt: slot.endedAt,
 						progress: slot.progress,
 						result: slot.result,
-						approval: slot.approval,
 					});
 					entries.push(slot.projected);
 					continue;
@@ -703,17 +640,6 @@ function decodeTextPhase(signature: string | undefined): NonNullable<TextSignatu
 	}
 }
 
-function timelineApproval(approval: ApprovalDecisionAuditEvent, restored: boolean): TimelineApproval {
-	return Object.freeze({
-		outcome: approval.outcome,
-		...(approval.commandPrefix ? { commandPrefix: Object.freeze([...approval.commandPrefix]) } : {}),
-		...(approval.denial ? { denial: Object.freeze({ ...approval.denial }) } : {}),
-		...(restored && (approval.outcome === "approved-for-process" || approval.outcome === "allowed-by-process")
-			? { expired: true }
-			: {}),
-	});
-}
-
 function freezeInvocation(invocation: {
 	readonly id: string;
 	readonly resultMessageId: string;
@@ -741,7 +667,6 @@ function restoredToolState(lifecycle: SessionToolLifecycle): TimelineToolState {
 		case "aborted":
 			return "aborted";
 		case "rejected":
-			if (lifecycle.rejectionReason === "policy") return "denied";
 			if (lifecycle.rejectionReason === "aborted") return "aborted";
 			if (lifecycle.rejectionReason === "not_started") return "skipped";
 			return "failed";
@@ -755,8 +680,6 @@ function observationToolState(message: Parameters<typeof resolveToolObservation>
 	switch (resolveToolObservation(message).status) {
 		case "ok":
 			return "success";
-		case "denied":
-			return "denied";
 		case "aborted":
 			return "aborted";
 		case "error":

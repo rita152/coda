@@ -95,10 +95,10 @@ describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-p
 				messages: [
 					{
 						role: "toolResult",
-						toolCallId: "call:denied",
+						toolCallId: "call:error",
 						toolName: "bash",
 						content: [{ type: "text", text: "command returned zero" }],
-						observation: { status: "denied", truncated: false, facts: { exitCode: 0 } },
+						observation: { status: "error", truncated: false, facts: { exitCode: 0 } },
 						isError: false,
 						timestamp: 1,
 					},
@@ -123,14 +123,12 @@ describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-p
 					content: [
 						{
 							type: "tool_result",
-							tool_use_id: "call:denied",
+							tool_use_id: "call:error",
 							is_error: true,
 							content: [
 								{
 									type: "text",
-									text: expect.stringContaining(
-										'{"status":"denied","truncated":false,"facts":{"exitCode":0}}',
-									),
+									text: expect.stringContaining('{"status":"error","truncated":false,"facts":{"exitCode":0}}'),
 								},
 								{ type: "text", text: "command returned zero" },
 							],

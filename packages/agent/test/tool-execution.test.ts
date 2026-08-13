@@ -1,6 +1,6 @@
 import { type Context, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { Agent, type AgentEvent, type AgentTool, type PolicyGate } from "../src/index.ts";
+import { Agent, type AgentEvent, type AgentTool } from "../src/index.ts";
 import { baseOptions, response, TestClock } from "./helpers.ts";
 
 const pathSchema = Type.Object({ path: Type.String() }, { additionalProperties: false });
@@ -21,33 +21,25 @@ function tool(
 }
 
 describe("Agent Tool execution", () => {
-	it("preflights lookup, validation, and policy in model order without false start events", async () => {
+	it("preflights lookup and validation in model order without false start events", async () => {
 		const clock = new TestClock();
 		const contexts: Context[] = [];
 		const executed: string[] = [];
-		const policyChecks: string[] = [];
 		const reader = tool("read", ({ path }) => {
 			executed.push(path);
 			return { content: path };
 		});
-		const policyGate: PolicyGate = {
-			check: async (request) => {
-				policyChecks.push(String(request.arguments.path));
-				return { decision: "reject", reason: "outside workspace" };
-			},
-		};
 		const first = fauxAssistantMessage(
 			[
 				fauxToolCall("missing", { path: "a" }, { id: "provider:missing" }),
 				fauxToolCall("read", {}, { id: "provider:invalid" }),
-				fauxToolCall("read", { path: "/private" }, { id: "provider:blocked" }),
+				fauxToolCall("read", { path: "/private" }, { id: "provider:valid" }),
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
 		const agent = new Agent({
 			...baseOptions([first, response("finished", clock)], { clock, contexts }),
 			tools: [reader],
-			policyGate,
 		});
 		const events: AgentEvent[] = [];
 		agent.onEvent((event) => events.push(event));
@@ -55,15 +47,13 @@ describe("Agent Tool execution", () => {
 		const result = await agent.prompt("inspect");
 
 		expect(result.outcome).toBe("success");
-		expect(executed).toEqual([]);
-		expect(policyChecks).toEqual(["/private"]);
-		expect(events.filter(({ type }) => type === "tool_execution_start")).toEqual([]);
+		expect(executed).toEqual(["/private"]);
+		expect(events.filter(({ type }) => type === "tool_execution_start")).toHaveLength(1);
 		const rejected = events.filter((event) => event.type === "tool_execution_rejected");
-		expect(rejected.map(({ reason }) => reason)).toEqual(["missing", "invalid", "policy"]);
+		expect(rejected.map(({ reason }) => reason)).toEqual(["missing", "invalid"]);
 		expect(rejected.map(({ invocation }) => invocation.providerToolCallId)).toEqual([
 			"provider:missing",
 			"provider:invalid",
-			"provider:blocked",
 		]);
 		expect(rejected.every(({ invocation }) => invocation.id !== invocation.providerToolCallId)).toBe(true);
 		expect(agent.state.messages.map(({ message }) => message.role)).toEqual([
@@ -80,9 +70,9 @@ describe("Agent Tool execution", () => {
 		expect(toolResults.map(({ toolCallId }) => toolCallId)).toEqual([
 			"provider:missing",
 			"provider:invalid",
-			"provider:blocked",
+			"provider:valid",
 		]);
-		expect(toolResults.every(({ isError }) => isError)).toBe(true);
+		expect(toolResults.map(({ isError }) => isError ?? false)).toEqual([true, true, false]);
 		expect(contexts).toHaveLength(2);
 		expect(contexts[1]?.messages.map(({ role }) => role)).toEqual([
 			"user",

@@ -44,7 +44,6 @@ import type {
 	ToolExecutionSettlement,
 	ToolInvocation,
 	ToolInvocationId,
-	ToolPolicyDecision,
 	ToolRejectionReason,
 	TurnId,
 } from "./types.ts";
@@ -1009,51 +1008,6 @@ export class Agent {
 				);
 				continue;
 			}
-			let decision: ToolPolicyDecision | undefined;
-			try {
-				decision = await this.#options.policyGate.check({
-					runId: run.id,
-					turnId,
-					invocationId,
-					resultMessageId,
-					providerToolCallId: call.id,
-					toolName: call.name,
-					arguments: invocation.arguments,
-					replaySafety: tool.replaySafety,
-				});
-				if (decision.decision !== "allow" && decision.decision !== "reject") {
-					throw new Error("PolicyGate returned an invalid decision");
-				}
-			} catch (error) {
-				await this.#finishPreflightFailure(run, turnId, accepted, toolCalls, sourceIndex + 1, error, invocation);
-			}
-			if (decision === undefined) throw new Error("PolicyGate did not produce a decision");
-			if (run.controller.signal.aborted) {
-				await this.#rejectDuringPreflight(
-					run,
-					turnId,
-					invocation,
-					"aborted",
-					`Tool "${call.name}" was not started`,
-					accepted,
-					toolCalls,
-					sourceIndex + 1,
-				);
-				continue;
-			}
-			if (decision.decision === "reject") {
-				await this.#rejectDuringPreflight(
-					run,
-					turnId,
-					invocation,
-					"policy",
-					decision.reason,
-					accepted,
-					toolCalls,
-					sourceIndex + 1,
-				);
-				continue;
-			}
 			accepted.push({ call, tool, arguments: arguments_, invocation });
 		}
 		return accepted;
@@ -1093,7 +1047,7 @@ export class Agent {
 				turnId,
 				current,
 				"not_started",
-				`Tool "${current.toolName}" was not started after policy preflight failed`,
+				`Tool "${current.toolName}" was not started after preflight failed`,
 				true,
 			);
 		}
@@ -1169,8 +1123,7 @@ export class Agent {
 		const result = this.#toolResult(invocation, {
 			content: message,
 			observation: {
-				status:
-					reason === "policy" ? "denied" : reason === "aborted" || reason === "not_started" ? "aborted" : "error",
+				status: reason === "aborted" || reason === "not_started" ? "aborted" : "error",
 				truncated: false,
 				facts: { reason },
 			},

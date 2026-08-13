@@ -185,25 +185,6 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = unk
 	): ToolExecutionOutput<TDetails> | Promise<ToolExecutionOutput<TDetails>>;
 }
 
-export interface ToolPolicyRequest {
-	readonly runId: RunId;
-	readonly turnId: TurnId;
-	readonly invocationId: ToolInvocationId;
-	readonly resultMessageId: MessageId;
-	readonly providerToolCallId: string;
-	readonly toolName: string;
-	readonly arguments: Immutable<Record<string, unknown>>;
-	readonly replaySafety: ToolReplaySafety;
-}
-
-export type ToolPolicyDecision =
-	| { readonly decision: "allow" }
-	| { readonly decision: "reject"; readonly reason: string };
-
-export interface PolicyGate {
-	check(request: ToolPolicyRequest): ToolPolicyDecision | Promise<ToolPolicyDecision>;
-}
-
 export interface ToolInvocation {
 	readonly id: ToolInvocationId;
 	readonly resultMessageId: MessageId;
@@ -214,7 +195,7 @@ export interface ToolInvocation {
 	readonly replaySafety?: ToolReplaySafety;
 }
 
-export type ToolRejectionReason = "missing" | "invalid" | "policy" | "aborted" | "not_started" | "budget";
+export type ToolRejectionReason = "missing" | "invalid" | "aborted" | "not_started" | "budget";
 /** Compatibility event projection derived from the Tool Observation status. */
 export type ToolExecutionOutcome = "success" | "error" | "aborted";
 export type ToolExecutionSettlement = "returned" | "threw" | "aborted";
@@ -426,7 +407,6 @@ export type AgentToolsFactory = () => readonly AgentTool[];
 export interface AgentOptions {
 	readonly stream: ModelStream;
 	readonly tools: readonly AgentTool[] | AgentToolsFactory;
-	readonly policyGate: PolicyGate;
 	readonly idGenerator: IdGenerator;
 	readonly clock: Clock;
 	readonly systemPrompt?: string | SystemPromptFactory;

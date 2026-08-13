@@ -1,8 +1,8 @@
 import type { AgentTool, ToolExecutionContext } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { ResolvedWorkspacePath, Workspace } from "../workspace.ts";
+import type { AtomicMutationWriter, MutationTargetIdentity } from "./atomic-mutation-writer.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicDelete, atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
 import {
@@ -12,7 +12,6 @@ import {
 	mutationObservationFacts,
 } from "./mutation-contract.ts";
 import { MAX_PATCH_CHARACTERS, type PatchChunk, type PatchFileOperation, parsePatch } from "./patch/parser.ts";
-import type { AtomicMutationWriter, MutationTargetIdentity } from "./sandboxed-mutation-writer.ts";
 import { decodeTextFile, encodeTextFile, normalizeNewlines, sha256 } from "./text-mutation.ts";
 
 const MAX_PATCH_TARGET_BYTES = 2 * 1024 * 1024;
@@ -50,7 +49,7 @@ export function createPatchTool(
 	return {
 		name: "patch",
 		description:
-			"Apply one permission-reviewed, multi-file patch with Add, Update, and Delete File sections. Prefer patch for related multi-hunk or multi-file edits. All files are preflighted before writes; each file commits atomically, but a later race can leave an explicitly reported partial application.",
+			"Apply one multi-file patch with Add, Update, and Delete File sections. Prefer patch for related multi-hunk or multi-file edits. All files are preflighted before writes; each file commits atomically, but a later race can leave an explicitly reported partial application.",
 		parameters: PatchParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
@@ -64,10 +63,7 @@ export function createPatchTool(
 			const initialTargets: ResolvedWorkspacePath[] = [];
 			try {
 				for (const operation of operations) {
-					const target = await workspace.resolvePath(operation.path, "write");
-					if (!hasPermissionedPathAccess(workspace, target, context.invocationId, "patch", "write")) {
-						throw new Error(`Path access was not granted: ${target.canonicalPath}`);
-					}
+					const target = await workspace.resolvePath(operation.path);
 					initialTargets.push(target);
 				}
 				assertUniqueCanonicalTargets(initialTargets);
@@ -96,7 +92,6 @@ export function createPatchTool(
 									fileSystem,
 									plan.target,
 									context,
-									"patch",
 									writer,
 									plan.beforeSha256!,
 									plan.expectedIdentity,
@@ -108,7 +103,6 @@ export function createPatchTool(
 									plan.target,
 									plan.data!,
 									context,
-									"patch",
 									writer,
 									plan.beforeSha256 ?? undefined,
 									plan.expectedIdentity,
@@ -155,12 +149,8 @@ async function preflightPatch(
 	for (const [index, operation] of operations.entries()) {
 		context.signal.throwIfAborted();
 		const initial = initialTargets[index]!;
-		const target = await workspace.resolvePath(operation.path, "write");
-		if (
-			target.canonicalPath !== initial.canonicalPath ||
-			target.exists !== initial.exists ||
-			!hasPermissionedPathAccess(workspace, target, context.invocationId, "patch", "write")
-		) {
+		const target = await workspace.resolvePath(operation.path);
+		if (target.canonicalPath !== initial.canonicalPath || target.exists !== initial.exists) {
 			throw new Error(`Target changed before patch preflight: ${operation.path}`);
 		}
 		if (operation.operation === "add") {

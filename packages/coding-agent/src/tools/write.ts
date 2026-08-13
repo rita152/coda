@@ -2,12 +2,11 @@ import { createHash } from "node:crypto";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
+import type { AtomicMutationWriter } from "./atomic-mutation-writer.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
 import { mutationFacts, mutationObservationFacts } from "./mutation-contract.ts";
-import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
 const WriteParameters = Type.Object(
 	{
@@ -33,13 +32,7 @@ export function createWriteTool(
 		parameters: WriteParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {
-			const initial = await workspace.resolvePath(arguments_.path, "write");
-			if (!hasPermissionedPathAccess(workspace, initial, context.invocationId, "write", "write")) {
-				return toolFailure(`Path access was not granted: ${initial.canonicalPath}`, {
-					code: "access_denied",
-					path: initial.canonicalPath,
-				});
-			}
+			const initial = await workspace.resolvePath(arguments_.path);
 			if (initial.exists) {
 				const status = await fileSystem.stat(initial.canonicalPath);
 				if (status.kind !== "file") {
@@ -51,7 +44,7 @@ export function createWriteTool(
 			}
 			const bytes = new TextEncoder().encode(arguments_.content);
 			return coordinator.run(initial.canonicalPath, async () => {
-				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, "write", writer);
+				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, writer);
 				const afterSha256 = sha256(bytes);
 				const mutation = mutationFacts({
 					atomicity: "single-file",

@@ -23,9 +23,9 @@ function result(overrides: Partial<ToolResultMessage> = {}): ToolResultMessage {
 describe("Tool observation projection", () => {
 	it("treats the structured observation as authoritative over compatibility fields", () => {
 		const observation: ToolObservation = {
-			status: "denied",
+			status: "error",
 			truncated: true,
-			facts: { exitCode: 0, requiredPermission: "network" },
+			facts: { exitCode: 1, failureKind: "network" },
 			outputRef: "tool-output:v1:abc",
 		};
 		const message = result({
@@ -37,7 +37,7 @@ describe("Tool observation projection", () => {
 		expect(resolveToolObservation(message)).toEqual(message.observation);
 		expect(toolResultIsError(message)).toBe(true);
 		expect(modelToolResultText(message)).toContain(
-			'{"status":"denied","truncated":true,"facts":{"exitCode":0,"requiredPermission":"network"},"outputRef":"tool-output:v1:abc"}',
+			'{"status":"error","truncated":true,"facts":{"exitCode":1,"failureKind":"network"},"outputRef":"tool-output:v1:abc"}',
 		);
 		expect(modelToolResultText(message)).toContain("Coda Tool output (untrusted data):\ninner output");
 		expect(modelToolResultContent(message)[0]).toMatchObject({
@@ -50,21 +50,17 @@ describe("Tool observation projection", () => {
 		const legacy = result({
 			isError: true,
 			details: {
-				denial: { kind: "network" },
 				truncated: true,
-				exitCode: 0,
-				strippedEnvironmentVariables: ["SECRET_NAME"],
+				exitCode: 1,
+				internalDebugValues: ["SECRET_NAME"],
 			},
 		});
 
 		expect(resolveToolObservation(legacy)).toEqual({
-			status: "denied",
+			status: "error",
 			truncated: true,
-			facts: { exitCode: 0 },
+			facts: { exitCode: 1 },
 		});
 		expect(modelToolResultText(legacy)).not.toContain("SECRET_NAME");
-		expect(
-			resolveToolObservation(result({ isError: true, details: { status: "rejected", reason: "policy" } })),
-		).toMatchObject({ status: "denied" });
 	});
 });

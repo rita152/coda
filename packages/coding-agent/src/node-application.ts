@@ -19,11 +19,11 @@ import type { FileSystem } from "./host/file-system.ts";
 import { isFileSystemError } from "./host/file-system.ts";
 import { createNodeFileSystem } from "./host/node-file-system.ts";
 import { createNodeProcessRunner } from "./host/node-process-runner.ts";
-import type { ProcessRunner } from "./host/process-runner.ts";
+import { createNodeProcessSessionRunner } from "./host/node-process-session-runner.ts";
+import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
-import { createPermissionRuleStore, defaultPermissionRulePaths } from "./permissions/rule-store.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
@@ -162,6 +162,7 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly scheduler?: Scheduler;
 	readonly fileSystem?: FileSystem;
 	readonly processRunner?: ProcessRunner;
+	readonly processSessionRunner?: ProcessSessionRunner;
 	readonly credentialStore?: CredentialStore;
 	readonly settings?: SettingsStore;
 	readonly models?: MutableModels;
@@ -194,6 +195,7 @@ export function createNodeCodingAgentApplication(
 	const timeRuntime = systemTimeRuntime(clock, scheduler);
 	const fileSystem = options.fileSystem ?? createNodeFileSystem();
 	const processRunner = options.processRunner ?? createNodeProcessRunner({ platform });
+	const processSessionRunner = options.processSessionRunner ?? createNodeProcessSessionRunner({ platform });
 	const credentials =
 		options.credentialStore ??
 		createNodeCredentialStore({
@@ -342,7 +344,7 @@ export function createNodeCodingAgentApplication(
 		settings,
 		fileSystem,
 		processRunner,
-		permissionRules: createPermissionRuleStore(defaultPermissionRulePaths(homeDirectory)),
+		processSessionRunner,
 		io,
 		fullScreenOutput,
 		terminalFactory,

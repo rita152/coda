@@ -9,7 +9,7 @@ import type { ComposerExtensionReference } from "../src/interactive/input-types.
 import type { UserShellSnapshot, UserShellStatus } from "../src/interactive/user-shell.ts";
 
 describe("ChatComponent terminal input", () => {
-	it("submits the removed /approvals command as an ordinary User Prompt", async () => {
+	it("submits an unknown slash command as an ordinary User Prompt", async () => {
 		const onSubmit = vi.fn();
 		const component = new ChatComponent({
 			modelLabel: "provider/model",
@@ -22,10 +22,10 @@ describe("ChatComponent terminal input", () => {
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 
-		component.handleInput({ type: "text", text: "/approvals" }, context);
+		component.handleInput({ type: "text", text: "/unknown" }, context);
 		component.handleInput(key("enter"), context);
 
-		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/approvals", []));
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/unknown", []));
 	});
 
 	it("submits the removed /attach command as an ordinary User Prompt", async () => {
@@ -253,19 +253,6 @@ describe("ChatComponent terminal input", () => {
 		const frame = stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"));
 		expect(frame).toContain("$review");
 		expect(frame).not.toContain("Select Skill");
-	});
-
-	it("invokes the hidden /permissions alias through the command registry", () => {
-		const onSubmit = vi.fn();
-		const onCommand = vi.fn();
-		const component = createComponent({ onSubmit, onCommand });
-		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-
-		component.handleInput({ type: "text", text: "/permissions" }, context);
-		component.handleInput(key("enter"), context);
-
-		expect(onCommand).toHaveBeenCalledWith("core:permission", expect.anything());
-		expect(onSubmit).not.toHaveBeenCalled();
 	});
 
 	it("submits exact slash text as a raw prompt after the palette is dismissed", async () => {
@@ -1167,20 +1154,6 @@ describe("ChatComponent terminal input", () => {
 		reduced.accept(runStartEvent());
 		reduced.accept(toolStartEvent(1));
 		expect(reduced.animationInterval({ width: 80, height: 24, now: 0 })).toBe(1_000);
-
-		const waiting = createComponent({ colorLevel: 3, motion: "full" });
-		waiting.accept(runStartEvent());
-		waiting.accept(toolStartEvent(1));
-		waiting.setAwaitingApproval({
-			kind: "command",
-			runId: "run" as never,
-			turnId: "turn" as never,
-			invocationId: "tool-1" as never,
-			command: "sleep 1",
-			cwd: "/workspace",
-			reason: "requires approval",
-		});
-		expect(waiting.animationInterval({ width: 80, height: 24, now: 0 })).toBe(1_000);
 	});
 
 	it("stages externally resolved attachments as filename chips and submits their stable identities", async () => {
