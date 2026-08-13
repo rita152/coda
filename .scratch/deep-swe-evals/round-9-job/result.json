@@ -1,0 +1,423 @@
+{
+    "id": "a3e93009-f40e-4dba-a227-7e6b68412ec5",
+    "started_at": "2026-08-13T06:41:12.620641",
+    "updated_at": "2026-08-13T08:12:40.297973",
+    "finished_at": "2026-08-13T08:12:40.297973",
+    "n_total_trials": 20,
+    "stats": {
+        "n_completed_trials": 20,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "coda__deepseek-v4-flash__tasks": {
+                "n_trials": 20,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "f2p": 0.8889083202653392,
+                        "f2p_passed": 44.95,
+                        "f2p_total": 49.0,
+                        "p2p": 0.999655172413793,
+                        "p2p_passed": 1233.55,
+                        "p2p_total": 1233.6,
+                        "partial": 0.9792880656856011,
+                        "reward": 0.45
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "1": [
+                            "awilix-async-container-initializ__prn9WaW",
+                            "claude-code-by-agents-recursive__A84qdiZ",
+                            "clack-async-autocomplete-options__8TJ7rmd",
+                            "bandit-structured-nosec-directiv__KtQiGjF",
+                            "aiomonitor-task-snapshots-diff__ua3aEKh",
+                            "anko-typed-variable-bindings__yL84kof",
+                            "adaptix-name-mapping-aliases__eEEKddw",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg",
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "0": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE",
+                            "bandit-interprocedural-taint-che__bbnVxBv",
+                            "actionlint-action-pinning-lint__6WoXfF5",
+                            "cattrs-partial-structuring-recov__rUgT4ge",
+                            "anko-default-function-arguments__LBdNAdz",
+                            "arktype-json-schema-refs-depende__xTiqUwA",
+                            "arcane-drift-detection-baselines__mw44Gdz",
+                            "dasel-html-document-format__NmGNTsC",
+                            "bandit-incremental-cache-control__swfXgpB",
+                            "cliffy-config-file-parsing__mimXkbX",
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "f2p_total": {
+                        "24": [
+                            "awilix-async-container-initializ__prn9WaW"
+                        ],
+                        "79": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "66": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "7": [
+                            "claude-code-by-agents-recursive__A84qdiZ"
+                        ],
+                        "55": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ],
+                        "82": [
+                            "clack-async-autocomplete-options__8TJ7rmd",
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "69": [
+                            "bandit-structured-nosec-directiv__KtQiGjF",
+                            "cattrs-partial-structuring-recov__rUgT4ge"
+                        ],
+                        "53": [
+                            "aiomonitor-task-snapshots-diff__ua3aEKh"
+                        ],
+                        "9": [
+                            "anko-typed-variable-bindings__yL84kof"
+                        ],
+                        "2": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "25": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "44": [
+                            "adaptix-name-mapping-aliases__eEEKddw"
+                        ],
+                        "17": [
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg"
+                        ],
+                        "146": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "20": [
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "88": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "37": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "f2p_passed": {
+                        "24": [
+                            "awilix-async-container-initializ__prn9WaW"
+                        ],
+                        "74": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "64": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "7": [
+                            "claude-code-by-agents-recursive__A84qdiZ"
+                        ],
+                        "55": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ],
+                        "82": [
+                            "clack-async-autocomplete-options__8TJ7rmd"
+                        ],
+                        "69": [
+                            "bandit-structured-nosec-directiv__KtQiGjF"
+                        ],
+                        "53": [
+                            "aiomonitor-task-snapshots-diff__ua3aEKh"
+                        ],
+                        "68": [
+                            "cattrs-partial-structuring-recov__rUgT4ge"
+                        ],
+                        "9": [
+                            "anko-typed-variable-bindings__yL84kof"
+                        ],
+                        "1": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "23": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "67": [
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "44": [
+                            "adaptix-name-mapping-aliases__eEEKddw"
+                        ],
+                        "17": [
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg"
+                        ],
+                        "144": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "20": [
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "73": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "0": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "5": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "p2p_total": {
+                        "162": [
+                            "awilix-async-container-initializ__prn9WaW"
+                        ],
+                        "16715": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "293": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "31": [
+                            "claude-code-by-agents-recursive__A84qdiZ"
+                        ],
+                        "145": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ],
+                        "643": [
+                            "clack-async-autocomplete-options__8TJ7rmd"
+                        ],
+                        "282": [
+                            "bandit-structured-nosec-directiv__KtQiGjF"
+                        ],
+                        "8": [
+                            "aiomonitor-task-snapshots-diff__ua3aEKh"
+                        ],
+                        "7": [
+                            "cattrs-partial-structuring-recov__rUgT4ge",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg"
+                        ],
+                        "94": [
+                            "anko-typed-variable-bindings__yL84kof"
+                        ],
+                        "119": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "1679": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "2": [
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "2738": [
+                            "adaptix-name-mapping-aliases__eEEKddw"
+                        ],
+                        "1012": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "3": [
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "275": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "451": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "p2p_passed": {
+                        "162": [
+                            "awilix-async-container-initializ__prn9WaW"
+                        ],
+                        "16715": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "293": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "31": [
+                            "claude-code-by-agents-recursive__A84qdiZ"
+                        ],
+                        "144": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ],
+                        "643": [
+                            "clack-async-autocomplete-options__8TJ7rmd"
+                        ],
+                        "282": [
+                            "bandit-structured-nosec-directiv__KtQiGjF"
+                        ],
+                        "8": [
+                            "aiomonitor-task-snapshots-diff__ua3aEKh"
+                        ],
+                        "7": [
+                            "cattrs-partial-structuring-recov__rUgT4ge",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg"
+                        ],
+                        "94": [
+                            "anko-typed-variable-bindings__yL84kof"
+                        ],
+                        "119": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "1679": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "2": [
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "2738": [
+                            "adaptix-name-mapping-aliases__eEEKddw"
+                        ],
+                        "1012": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "3": [
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "275": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "451": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "f2p": {
+                        "1.0": [
+                            "awilix-async-container-initializ__prn9WaW",
+                            "claude-code-by-agents-recursive__A84qdiZ",
+                            "actionlint-action-pinning-lint__6WoXfF5",
+                            "clack-async-autocomplete-options__8TJ7rmd",
+                            "bandit-structured-nosec-directiv__KtQiGjF",
+                            "aiomonitor-task-snapshots-diff__ua3aEKh",
+                            "anko-typed-variable-bindings__yL84kof",
+                            "adaptix-name-mapping-aliases__eEEKddw",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg",
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "0.9367088607594937": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "0.9696969696969697": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "0.9855072463768116": [
+                            "cattrs-partial-structuring-recov__rUgT4ge"
+                        ],
+                        "0.5": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "0.92": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "0.8170731707317073": [
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "0.9863013698630136": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "0.8295454545454546": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "0.0": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "0.8333333333333334": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    },
+                    "p2p": {
+                        "1.0": [
+                            "awilix-async-container-initializ__prn9WaW",
+                            "csstree-shorthand-expansion-comp__aLG5vCE",
+                            "bandit-interprocedural-taint-che__bbnVxBv",
+                            "claude-code-by-agents-recursive__A84qdiZ",
+                            "clack-async-autocomplete-options__8TJ7rmd",
+                            "bandit-structured-nosec-directiv__KtQiGjF",
+                            "aiomonitor-task-snapshots-diff__ua3aEKh",
+                            "cattrs-partial-structuring-recov__rUgT4ge",
+                            "anko-typed-variable-bindings__yL84kof",
+                            "anko-default-function-arguments__LBdNAdz",
+                            "arktype-json-schema-refs-depende__xTiqUwA",
+                            "arcane-drift-detection-baselines__mw44Gdz",
+                            "adaptix-name-mapping-aliases__eEEKddw",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg",
+                            "dasel-html-document-format__NmGNTsC",
+                            "abs-module-cache-flags__xwuGgq8",
+                            "bandit-incremental-cache-control__swfXgpB",
+                            "cliffy-config-file-parsing__mimXkbX",
+                            "abs-stepped-slices__Gq6kHQP"
+                        ],
+                        "0.993103448275862": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ]
+                    },
+                    "partial": {
+                        "1.0": [
+                            "awilix-async-container-initializ__prn9WaW",
+                            "claude-code-by-agents-recursive__A84qdiZ",
+                            "clack-async-autocomplete-options__8TJ7rmd",
+                            "bandit-structured-nosec-directiv__KtQiGjF",
+                            "aiomonitor-task-snapshots-diff__ua3aEKh",
+                            "anko-typed-variable-bindings__yL84kof",
+                            "adaptix-name-mapping-aliases__eEEKddw",
+                            "boa-hierarchical-evaluation-canc__Mi6xoYg",
+                            "abs-module-cache-flags__xwuGgq8"
+                        ],
+                        "0.9997022746218888": [
+                            "csstree-shorthand-expansion-comp__aLG5vCE"
+                        ],
+                        "0.9944289693593314": [
+                            "bandit-interprocedural-taint-che__bbnVxBv"
+                        ],
+                        "0.995": [
+                            "actionlint-action-pinning-lint__6WoXfF5"
+                        ],
+                        "0.9868421052631579": [
+                            "cattrs-partial-structuring-recov__rUgT4ge"
+                        ],
+                        "0.9917355371900827": [
+                            "anko-default-function-arguments__LBdNAdz"
+                        ],
+                        "0.9988262910798122": [
+                            "arktype-json-schema-refs-depende__xTiqUwA"
+                        ],
+                        "0.8214285714285714": [
+                            "arcane-drift-detection-baselines__mw44Gdz"
+                        ],
+                        "0.998272884283247": [
+                            "dasel-html-document-format__NmGNTsC"
+                        ],
+                        "0.9586776859504132": [
+                            "bandit-incremental-cache-control__swfXgpB"
+                        ],
+                        "0.9241803278688525": [
+                            "cliffy-config-file-parsing__mimXkbX"
+                        ],
+                        "0.9166666666666666": [
+                            "abs-stepped-slices__Gq6kHQP"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": 387006123,
+        "n_cache_tokens": 385146752,
+        "n_output_tokens": 2462445,
+        "cost_usd": 1.0141037228
+    }
+}

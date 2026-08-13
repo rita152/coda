@@ -1,0 +1,112 @@
+{
+    "job_name": "coda-deep-swe-r10-af7d243525ba",
+    "jobs_dir": "/home/esp/coda-evals/jobs",
+    "n_attempts": 1,
+    "timeout_multiplier": 1.0,
+    "agent_timeout_multiplier": null,
+    "verifier_timeout_multiplier": null,
+    "agent_setup_timeout_multiplier": null,
+    "environment_build_timeout_multiplier": null,
+    "debug": false,
+    "n_concurrent_trials": 10,
+    "quiet": false,
+    "retry": {
+        "max_retries": 0,
+        "include_exceptions": null,
+        "exclude_exceptions": [
+            "AgentTimeoutError",
+            "RewardFileNotFoundError",
+            "VerifierTimeoutError",
+            "VerifierOutputParseError",
+            "RewardFileEmptyError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "environment": {
+        "type": "docker",
+        "import_path": null,
+        "force_build": false,
+        "delete": true,
+        "cpu_enforcement_policy": "auto",
+        "memory_enforcement_policy": "auto",
+        "override_cpus": null,
+        "override_memory_mb": null,
+        "override_storage_mb": null,
+        "override_gpus": null,
+        "suppress_override_warnings": false,
+        "mounts": null,
+        "env": {},
+        "kwargs": {}
+    },
+    "verifier": {
+        "override_timeout_sec": null,
+        "max_timeout_sec": null,
+        "env": {},
+        "disable": false
+    },
+    "metrics": [],
+    "agents": [
+        {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "af7d243525baab55c4121e9850d282a222afb8f0b9734e5e7c7aed64b6d6bad3"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        }
+    ],
+    "datasets": [
+        {
+            "path": "/home/esp/coda-evals/deep-swe/tasks",
+            "name": null,
+            "version": null,
+            "ref": null,
+            "registry_url": null,
+            "registry_path": null,
+            "overwrite": false,
+            "download_dir": null,
+            "task_names": [
+                "abs-module-cache-flags",
+                "abs-stepped-slices",
+                "actionlint-action-pinning-lint",
+                "adaptix-name-mapping-aliases",
+                "aiomonitor-task-snapshots-diff",
+                "anko-default-function-arguments",
+                "anko-typed-variable-bindings",
+                "arcane-drift-detection-baselines",
+                "arktype-json-schema-refs-dependencies",
+                "awilix-async-container-initialization",
+                "bandit-incremental-cache-control",
+                "bandit-interprocedural-taint-checks",
+                "bandit-structured-nosec-directives",
+                "boa-hierarchical-evaluation-cancellation",
+                "cattrs-partial-structuring-recovery",
+                "clack-async-autocomplete-options",
+                "claude-code-by-agents-recursive-delegation",
+                "cliffy-config-file-parsing",
+                "csstree-shorthand-expansion-compression",
+                "dasel-html-document-format"
+            ],
+            "exclude_task_names": null,
+            "n_tasks": null,
+            "sample_seed": null
+        }
+    ],
+    "tasks": [],
+    "artifacts": []
+}

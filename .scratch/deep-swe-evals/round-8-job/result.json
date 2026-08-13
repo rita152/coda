@@ -1,0 +1,419 @@
+{
+    "id": "def473bd-a609-4782-8522-a717a3210d98",
+    "started_at": "2026-08-13T04:54:51.834595",
+    "updated_at": "2026-08-13T06:35:23.013101",
+    "finished_at": "2026-08-13T06:35:23.013101",
+    "n_total_trials": 20,
+    "stats": {
+        "n_completed_trials": 20,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "coda__deepseek-v4-flash__tasks": {
+                "n_trials": 20,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "f2p": 0.9027119001132536,
+                        "f2p_passed": 47.25,
+                        "f2p_total": 49.0,
+                        "p2p": 0.9707272727272727,
+                        "p2p_passed": 1225.55,
+                        "p2p_total": 1233.6,
+                        "partial": 0.9360694948118352,
+                        "reward": 0.5
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "1": [
+                            "awilix-async-container-initializ__USDDMbv",
+                            "csstree-shorthand-expansion-comp__jrPfMDs",
+                            "claude-code-by-agents-recursive__M8QXHvk",
+                            "actionlint-action-pinning-lint__TFimXui",
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "bandit-structured-nosec-directiv__rmL8QKA",
+                            "arcane-drift-detection-baselines__ECK7gyt",
+                            "dasel-html-document-format__WnXaAEd",
+                            "abs-module-cache-flags__tL2VJs3",
+                            "abs-stepped-slices__Xwj2dLP"
+                        ],
+                        "0": [
+                            "bandit-interprocedural-taint-che__H2VmtoL",
+                            "aiomonitor-task-snapshots-diff__mZo7JPB",
+                            "cattrs-partial-structuring-recov__5ZjhHNh",
+                            "anko-typed-variable-bindings__6fCSYrm",
+                            "anko-default-function-arguments__Y35FyoG",
+                            "arktype-json-schema-refs-depende__LcuF9E7",
+                            "adaptix-name-mapping-aliases__tCbug5u",
+                            "boa-hierarchical-evaluation-canc__t6TeUeG",
+                            "bandit-incremental-cache-control__5BTY2YG",
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ]
+                    },
+                    "f2p_total": {
+                        "24": [
+                            "awilix-async-container-initializ__USDDMbv"
+                        ],
+                        "79": [
+                            "csstree-shorthand-expansion-comp__jrPfMDs"
+                        ],
+                        "66": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "7": [
+                            "claude-code-by-agents-recursive__M8QXHvk"
+                        ],
+                        "55": [
+                            "actionlint-action-pinning-lint__TFimXui"
+                        ],
+                        "82": [
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "arcane-drift-detection-baselines__ECK7gyt"
+                        ],
+                        "69": [
+                            "bandit-structured-nosec-directiv__rmL8QKA",
+                            "cattrs-partial-structuring-recov__5ZjhHNh"
+                        ],
+                        "53": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "9": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "2": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "25": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "44": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "17": [
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "146": [
+                            "dasel-html-document-format__WnXaAEd"
+                        ],
+                        "20": [
+                            "abs-module-cache-flags__tL2VJs3"
+                        ],
+                        "88": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "37": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Xwj2dLP"
+                        ]
+                    },
+                    "f2p_passed": {
+                        "24": [
+                            "awilix-async-container-initializ__USDDMbv"
+                        ],
+                        "79": [
+                            "csstree-shorthand-expansion-comp__jrPfMDs"
+                        ],
+                        "65": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "7": [
+                            "claude-code-by-agents-recursive__M8QXHvk"
+                        ],
+                        "55": [
+                            "actionlint-action-pinning-lint__TFimXui"
+                        ],
+                        "82": [
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "arcane-drift-detection-baselines__ECK7gyt"
+                        ],
+                        "69": [
+                            "bandit-structured-nosec-directiv__rmL8QKA"
+                        ],
+                        "51": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "64": [
+                            "cattrs-partial-structuring-recov__5ZjhHNh"
+                        ],
+                        "8": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "1": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "23": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "40": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "0": [
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "146": [
+                            "dasel-html-document-format__WnXaAEd"
+                        ],
+                        "20": [
+                            "abs-module-cache-flags__tL2VJs3"
+                        ],
+                        "87": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "36": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Xwj2dLP"
+                        ]
+                    },
+                    "p2p_total": {
+                        "162": [
+                            "awilix-async-container-initializ__USDDMbv"
+                        ],
+                        "16715": [
+                            "csstree-shorthand-expansion-comp__jrPfMDs"
+                        ],
+                        "293": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "31": [
+                            "claude-code-by-agents-recursive__M8QXHvk"
+                        ],
+                        "145": [
+                            "actionlint-action-pinning-lint__TFimXui"
+                        ],
+                        "643": [
+                            "clack-async-autocomplete-options__K3xTPyq"
+                        ],
+                        "282": [
+                            "bandit-structured-nosec-directiv__rmL8QKA"
+                        ],
+                        "8": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "7": [
+                            "cattrs-partial-structuring-recov__5ZjhHNh",
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "94": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "119": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "1679": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "2": [
+                            "arcane-drift-detection-baselines__ECK7gyt"
+                        ],
+                        "2738": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "1012": [
+                            "dasel-html-document-format__WnXaAEd"
+                        ],
+                        "3": [
+                            "abs-module-cache-flags__tL2VJs3"
+                        ],
+                        "275": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "451": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Xwj2dLP"
+                        ]
+                    },
+                    "p2p_passed": {
+                        "162": [
+                            "awilix-async-container-initializ__USDDMbv"
+                        ],
+                        "16715": [
+                            "csstree-shorthand-expansion-comp__jrPfMDs"
+                        ],
+                        "293": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "31": [
+                            "claude-code-by-agents-recursive__M8QXHvk"
+                        ],
+                        "145": [
+                            "actionlint-action-pinning-lint__TFimXui"
+                        ],
+                        "643": [
+                            "clack-async-autocomplete-options__K3xTPyq"
+                        ],
+                        "282": [
+                            "bandit-structured-nosec-directiv__rmL8QKA"
+                        ],
+                        "8": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "7": [
+                            "cattrs-partial-structuring-recov__5ZjhHNh",
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "94": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "119": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "1679": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "2": [
+                            "arcane-drift-detection-baselines__ECK7gyt"
+                        ],
+                        "2738": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "1012": [
+                            "dasel-html-document-format__WnXaAEd"
+                        ],
+                        "3": [
+                            "abs-module-cache-flags__tL2VJs3"
+                        ],
+                        "114": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "451": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ],
+                        "6": [
+                            "abs-stepped-slices__Xwj2dLP"
+                        ]
+                    },
+                    "f2p": {
+                        "1.0": [
+                            "awilix-async-container-initializ__USDDMbv",
+                            "csstree-shorthand-expansion-comp__jrPfMDs",
+                            "claude-code-by-agents-recursive__M8QXHvk",
+                            "actionlint-action-pinning-lint__TFimXui",
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "bandit-structured-nosec-directiv__rmL8QKA",
+                            "arcane-drift-detection-baselines__ECK7gyt",
+                            "dasel-html-document-format__WnXaAEd",
+                            "abs-module-cache-flags__tL2VJs3",
+                            "abs-stepped-slices__Xwj2dLP"
+                        ],
+                        "0.9848484848484849": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "0.9622641509433962": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "0.927536231884058": [
+                            "cattrs-partial-structuring-recov__5ZjhHNh"
+                        ],
+                        "0.8888888888888888": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "0.5": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "0.92": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "0.9090909090909091": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "0.0": [
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "0.9886363636363636": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "0.972972972972973": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ]
+                    },
+                    "p2p": {
+                        "1.0": [
+                            "awilix-async-container-initializ__USDDMbv",
+                            "csstree-shorthand-expansion-comp__jrPfMDs",
+                            "bandit-interprocedural-taint-che__H2VmtoL",
+                            "claude-code-by-agents-recursive__M8QXHvk",
+                            "actionlint-action-pinning-lint__TFimXui",
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "bandit-structured-nosec-directiv__rmL8QKA",
+                            "aiomonitor-task-snapshots-diff__mZo7JPB",
+                            "cattrs-partial-structuring-recov__5ZjhHNh",
+                            "anko-typed-variable-bindings__6fCSYrm",
+                            "anko-default-function-arguments__Y35FyoG",
+                            "arktype-json-schema-refs-depende__LcuF9E7",
+                            "arcane-drift-detection-baselines__ECK7gyt",
+                            "adaptix-name-mapping-aliases__tCbug5u",
+                            "boa-hierarchical-evaluation-canc__t6TeUeG",
+                            "dasel-html-document-format__WnXaAEd",
+                            "abs-module-cache-flags__tL2VJs3",
+                            "cliffy-config-file-parsing__wysZFvN",
+                            "abs-stepped-slices__Xwj2dLP"
+                        ],
+                        "0.41454545454545455": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ]
+                    },
+                    "partial": {
+                        "1.0": [
+                            "awilix-async-container-initializ__USDDMbv",
+                            "csstree-shorthand-expansion-comp__jrPfMDs",
+                            "claude-code-by-agents-recursive__M8QXHvk",
+                            "actionlint-action-pinning-lint__TFimXui",
+                            "clack-async-autocomplete-options__K3xTPyq",
+                            "bandit-structured-nosec-directiv__rmL8QKA",
+                            "arcane-drift-detection-baselines__ECK7gyt",
+                            "dasel-html-document-format__WnXaAEd",
+                            "abs-module-cache-flags__tL2VJs3",
+                            "abs-stepped-slices__Xwj2dLP"
+                        ],
+                        "0.9972144846796658": [
+                            "bandit-interprocedural-taint-che__H2VmtoL"
+                        ],
+                        "0.9672131147540983": [
+                            "aiomonitor-task-snapshots-diff__mZo7JPB"
+                        ],
+                        "0.9342105263157895": [
+                            "cattrs-partial-structuring-recov__5ZjhHNh"
+                        ],
+                        "0.9902912621359223": [
+                            "anko-typed-variable-bindings__6fCSYrm"
+                        ],
+                        "0.9917355371900827": [
+                            "anko-default-function-arguments__Y35FyoG"
+                        ],
+                        "0.9988262910798122": [
+                            "arktype-json-schema-refs-depende__LcuF9E7"
+                        ],
+                        "0.9985621854780733": [
+                            "adaptix-name-mapping-aliases__tCbug5u"
+                        ],
+                        "0.2916666666666667": [
+                            "boa-hierarchical-evaluation-canc__t6TeUeG"
+                        ],
+                        "0.5537190082644629": [
+                            "bandit-incremental-cache-control__5BTY2YG"
+                        ],
+                        "0.9979508196721312": [
+                            "cliffy-config-file-parsing__wysZFvN"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": 291462169,
+        "n_cache_tokens": 289801216,
+        "n_output_tokens": 2420665,
+        "cost_usd": 0.8608815124000002
+    }
+}

