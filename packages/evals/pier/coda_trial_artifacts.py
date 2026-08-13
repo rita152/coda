@@ -20,8 +20,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from coda_trajectory import TrajectoryArtifactSummary, write_coda_trajectory
 
-STATUS_SCHEMA_VERSION = "coda-adapter-status-v1"
+STATUS_SCHEMA_VERSION = "coda-adapter-status-v2"
 EVIDENCE_SCHEMA_VERSION = "coda-artifact-evidence-v1"
 FINALIZE_MARKER = "CODA_FINALIZE_V1"
 TRANSIENT_EVENT_TYPES = {
@@ -139,6 +140,7 @@ class CodaTrialArtifacts:
         run_budget_enabled: bool,
         max_turns: int,
         allow_all_commands: bool,
+        event_stream_mode: str = "semantic",
         workspace_dir: str = "/app",
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -151,6 +153,7 @@ class CodaTrialArtifacts:
         self.run_budget_enabled = run_budget_enabled
         self.max_turns = max_turns
         self.allow_all_commands = allow_all_commands
+        self.event_stream_mode = event_stream_mode
         self.workspace_dir = workspace_dir
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -206,9 +209,18 @@ class CodaTrialArtifacts:
             "artifacts": {
                 "events": "coda.jsonl",
                 "trajectory": None,
+                "tool_evidence": None,
                 "evidence": None,
                 "patch": None,
                 "model_patch": None,
+            },
+            "trajectory": {
+                "status": "pending",
+                "step_count": 0,
+                "tool_call_count": 0,
+                "terminal_tool_count": 0,
+                "pending_tool_count": 0,
+                "parse_error_count": 0,
             },
         }
         self._write_status(status)
@@ -315,10 +327,12 @@ class CodaTrialArtifacts:
         artifact_paths = {
             "events": "coda.jsonl",
             "trajectory": None,
+            "tool_evidence": None,
             "evidence": None,
             "patch": None,
             "model_patch": None,
         }
+        trajectory_summary: TrajectoryArtifactSummary | None = None
 
         try:
             populate_context(context, event_log, usage, status, workspace)
@@ -326,8 +340,9 @@ class CodaTrialArtifacts:
             errors.append(f"context recovery failed: {_safe_error(error)}")
 
         try:
-            self.write_trajectory(event_log, context)
+            trajectory_summary = self.write_trajectory(event_log, context)
             artifact_paths["trajectory"] = "trajectory.json"
+            artifact_paths["tool_evidence"] = "tool-evidence.jsonl"
         except Exception as error:
             errors.append(f"trajectory recovery failed: {_safe_error(error)}")
 
@@ -368,6 +383,26 @@ class CodaTrialArtifacts:
             "run_evidence_present": event_log.run_evidence is not None,
         }
         status["artifacts"] = artifact_paths
+        status["trajectory"] = (
+            {
+                "status": "complete" if trajectory_summary.complete else "partial",
+                "step_count": trajectory_summary.step_count,
+                "tool_call_count": trajectory_summary.tool_call_count,
+                "terminal_tool_count": trajectory_summary.terminal_tool_count,
+                "pending_tool_count": trajectory_summary.pending_tool_count,
+                "parse_error_count": trajectory_summary.parse_error_count,
+                "evidence_sha256": trajectory_summary.evidence_sha256,
+            }
+            if trajectory_summary is not None
+            else {
+                "status": "missing",
+                "step_count": 0,
+                "tool_call_count": 0,
+                "terminal_tool_count": 0,
+                "pending_tool_count": 0,
+                "parse_error_count": event_log.malformed_lines,
+            }
+        )
         status["cleanup_errors"] = _append_unique(status.get("cleanup_errors"), *errors)
         status["outcome"] = _terminal_outcome(status, event_log, workspace, errors)
         status["phase"] = "terminal"
@@ -466,75 +501,42 @@ printf '{FINALIZE_MARKER}\t%s\t%s\t%s\t%s\t%s\t%s\n' \\
 exit 0
 """.strip()
 
-    def write_trajectory(self, event_log: EventLog, context: ArtifactContext) -> None:
-        """Project retained terminal events into the adapter's ATIF artifact."""
+    def write_trajectory(
+        self, event_log: EventLog, context: ArtifactContext
+    ) -> TrajectoryArtifactSummary:
+        """Project retained terminal events into ATIF and paged Tool evidence."""
 
-        steps: list[dict[str, Any]] = [
-            {"step_id": 1, "source": "user", "message": self.instruction}
-        ]
-        for event in event_log.events:
-            if event.get("type") != "attempt_end":
-                continue
-            candidate = _mapping(event.get("candidate"))
-            message = _mapping(candidate.get("message"))
-            usage = _mapping(message.get("usage"))
-            steps.append(
-                {
-                    "step_id": len(steps) + 1,
-                    "source": "agent",
-                    "model_name": self.model_name,
-                    "reasoning_effort": self.reasoning_effort,
-                    "message": _message_text(message.get("content")),
-                    "llm_call_count": 1,
-                    "metrics": {
-                        "prompt_tokens": _non_negative_int(usage.get("input"))
-                        + _non_negative_int(usage.get("cacheRead"))
-                        + _non_negative_int(usage.get("cacheWrite")),
-                        "completion_tokens": _non_negative_int(usage.get("output")),
-                        "cached_tokens": _non_negative_int(usage.get("cacheRead")),
-                    },
-                    "extra": {
-                        "outcome": event.get("outcome"),
-                        "discarded": event.get("discarded") is True,
-                    },
-                }
-            )
-
-        session_id = next(
-            (
-                str(event.get("runId"))
-                for event in event_log.events
-                if event.get("type") == "run_start" and event.get("runId") is not None
-            ),
-            "unknown",
-        )
-        trajectory = {
-            "schema_version": "ATIF-v1.7",
-            "session_id": session_id,
-            "agent": {
-                "name": "coda",
-                "version": self.harness_revision,
-                "model_name": self.model_name,
-                "extra": {
-                    "reasoning_effort": self.reasoning_effort,
-                    "max_output_tokens": self.max_output_tokens,
-                    "run_budget_enabled": self.run_budget_enabled,
-                    "max_turns": self.max_turns if self.run_budget_enabled else None,
-                    "allow_all_commands": self.allow_all_commands,
-                    "artifact_status": event_log.status,
-                    "run_end_present": event_log.run_end_present,
-                },
+        return write_coda_trajectory(
+            event_log.events,
+            self.logs_dir,
+            instruction=self.instruction,
+            agent_version=self.harness_revision,
+            model_name=self.model_name,
+            reasoning_effort=self.reasoning_effort,
+            agent_extra={
+                "reasoning_effort": self.reasoning_effort,
+                "max_output_tokens": self.max_output_tokens,
+                "run_budget_enabled": self.run_budget_enabled,
+                "max_turns": self.max_turns if self.run_budget_enabled else None,
+                "allow_all_commands": self.allow_all_commands,
+                "event_stream_mode": self.event_stream_mode,
+                "artifact_status": event_log.status,
+                "run_end_present": event_log.run_end_present,
+                "event_scan_complete": event_log.scan_complete,
+                "malformed_event_lines": event_log.malformed_lines,
             },
-            "steps": steps,
-            "final_metrics": {
+            final_metrics={
                 "total_prompt_tokens": context.n_input_tokens,
                 "total_completion_tokens": context.n_output_tokens,
                 "total_cached_tokens": context.n_cache_tokens,
                 "total_cost_usd": context.cost_usd,
-                "total_steps": len(steps),
             },
-        }
-        _atomic_write_json(self.logs_dir / "trajectory.json", trajectory)
+            source_line_count=len(event_log.events)
+            + event_log.omitted_transient_events
+            + event_log.malformed_lines,
+            source_parse_error_count=event_log.malformed_lines,
+            source_scan_complete=event_log.scan_complete,
+        )
 
     def write_evidence(self, event_log: EventLog, usage: RecoveredUsage) -> None:
         """Write the versioned completeness/resource recovery sidecar."""
@@ -883,21 +885,6 @@ def _peak_context_tokens(events: tuple[dict[str, Any], ...]) -> int | None:
             + _non_negative_int(usage.get("cacheWrite"))
         )
     return max(values) if values else None
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        text = item.get("text")
-        if item.get("type") == "text" and isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts)
 
 
 def _mapping(value: Any) -> dict[str, Any]:

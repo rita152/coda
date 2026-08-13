@@ -239,6 +239,7 @@ class CodaAgent(BaseAgent):
             run_budget_enabled=self._run_budget_enabled,
             max_turns=self._max_turns,
             allow_all_commands=self._allow_all_commands,
+            event_stream_mode=self._event_stream_mode,
             workspace_dir=self.WORKSPACE_DIR,
         )
 

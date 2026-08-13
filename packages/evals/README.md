@@ -39,10 +39,13 @@ Use `--all` instead of `--fixture` only when the intended spend covers all fixtu
 The DeepSWE path is a separate, paid opt-in runner for evaluating the Coda Coding Agent in Pier-managed Docker task
 environments. It pins Datacurve DeepSWE v1.1 to commit
 `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`, pins `datacurve-pier==0.3.1`, and ships a Coda-specific Pier adapter in
-`pier/coda_agent.py`. The adapter runs Coda in `/app`, records the semantic JSONL event stream, Run Evidence, and an
-ATIF trajectory, and commits workspace changes before the v1.1 collect hook. It configures a repository-local
-evaluation identity before Coda starts so tasks that commit their own work do not fail on a missing container identity.
-It does not use Pier's OpenCode adapter.
+`pier/coda_agent.py`. The adapter runs Coda in `/app`, records the semantic JSONL event stream and Run Evidence, and
+transactionally derives an ATIF-v1.7 trajectory before the v1.1 collect hook. Tool calls and their terminal
+observations remain first-class ATIF data. Full redacted call/result records live in the versioned, append-readable
+`agent/tool-evidence.jsonl` sidecar; bounded ATIF previews link to fixed-size pages by stable Tool Invocation ref and
+SHA-256. A stream without `run_end` still produces an explicitly partial trajectory with pending calls identified. The
+adapter configures a repository-local evaluation identity before Coda starts so tasks that commit their own work do not
+fail on a missing container identity. It does not use Pier's OpenCode adapter.
 
 Generate the frozen image lock or a secret-free job config without making Provider calls:
 
