@@ -39,10 +39,10 @@ Use `--all` instead of `--fixture` only when the intended spend covers all fixtu
 The DeepSWE path is a separate, paid opt-in runner for evaluating the Coda Coding Agent in Pier-managed Docker task
 environments. It pins Datacurve DeepSWE v1.1 to commit
 `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`, pins `datacurve-pier==0.3.1`, and ships a Coda-specific Pier adapter in
-`pier/coda_agent.py`. The adapter runs Coda in `/app`, records JSONL Run Evidence and an ATIF trajectory, and commits
-workspace changes before the v1.1 collect hook. It configures a repository-local evaluation identity before Coda
-starts so tasks that commit their own work do not fail on a missing container identity. It does not use Pier's
-OpenCode adapter.
+`pier/coda_agent.py`. The adapter runs Coda in `/app`, records the semantic JSONL event stream, Run Evidence, and an
+ATIF trajectory, and commits workspace changes before the v1.1 collect hook. It configures a repository-local
+evaluation identity before Coda starts so tasks that commit their own work do not fail on a missing container identity.
+It does not use Pier's OpenCode adapter.
 
 Generate the frozen image lock or a secret-free job config without making Provider calls:
 
@@ -68,6 +68,10 @@ defaults it to 32,768 so `max` reasoning is not silently constrained by Coda's c
 `--max-turns` controls the Run turn budget and defaults to Coda's normal 64. Round reports also count policy and
 validation rejections, length-truncated Attempts, and Run-budget-exhausted trials; `compare` keeps these diagnostics
 beside pass rate, partial reward, usage, and cost.
+
+Every generated Pier config and version-2 run lock selects semantic JSONL mode explicitly. The adapter therefore
+retains terminal assistant candidates, Tool lifecycle, Run boundaries, and Run Evidence without writing token-level
+message deltas. Raw v2 events remain available through Coda's explicit `--json --json-mode raw` diagnostics path.
 
 `--no-run-budget` is mutually exclusive with `--max-turns` and disables the complete Coda Run Budget rather than
 substituting a large numeric limit. Pier's agent timeout remains an infrastructure failure boundary. Explicit

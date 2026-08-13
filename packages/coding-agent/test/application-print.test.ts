@@ -95,6 +95,7 @@ describe("Coding Agent print mode", () => {
 		await expect(application.run(["--help"])).resolves.toBe(0);
 		expect(stdout.value).toContain("Usage: coda");
 		expect(stdout.value).toContain("--sandbox <mode>");
+		expect(stdout.value).toContain("--json-mode <mode>");
 		expect(stderr.value).toBe("");
 		expect(settingsLoaded).toBe(false);
 	});
@@ -406,8 +407,85 @@ describe("Coding Agent print mode", () => {
 			unresolvedFailures: [],
 		});
 		expect(events.at(-1)?.runId).toBe(events.at(-2)?.runId);
+		expect(events.some((event) => event.type === "message_update")).toBe(true);
 		expect(stdout.value).not.toContain("json answer\n");
 		expect(stderr.value).toBe("");
+	});
+
+	it("emits terminal Agent events without transient deltas in semantic JSON mode", async () => {
+		const faux = fauxProvider({ runtime: testTimeRuntime(210) });
+		faux.setResponses([fauxAssistantMessage("semantic answer", { timestamp: 210 })]);
+		const models = createModels({ runtime: testTimeRuntime(210) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings,
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 210 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		await expect(
+			application.run([
+				"--print",
+				"--json",
+				"--json-mode",
+				"semantic",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				"answer semantically",
+			]),
+		).resolves.toBe(0);
+		const events = stdout.value
+			.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+
+		expect(events.some((event) => event.type === "message_update")).toBe(false);
+		expect(events.some((event) => event.type === "attempt_end")).toBe(true);
+		expect(events.some((event) => event.type === "message_end")).toBe(true);
+		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
+		expect(events.at(-1)).toMatchObject({ schemaVersion: 1, type: "run_evidence", outcome: "success" });
+		const terminal = [...events].reverse().find((event) => event.type === "attempt_end");
+		expect(terminal).toMatchObject({
+			candidate: { message: { content: [{ type: "text", text: "semantic answer" }] } },
+		});
+		expect(stderr.value).toBe("");
+	});
+
+	it("requires an explicit JSON output stream for --json-mode", async () => {
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		const application = createCodingAgentApplication({
+			models: createModels({ runtime: testTimeRuntime() }),
+			settings,
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 0 },
+				idGenerator: { generate: (kind) => `${kind}:unused` },
+			},
+		});
+
+		await expect(application.run(["--print", "--json-mode", "semantic", "prompt"])).resolves.toBe(1);
+		expect(stderr.value).toContain("--json-mode requires --json");
+		expect(stdout.value).toBe("");
 	});
 
 	it("lets CLI Permission options override settings", async () => {

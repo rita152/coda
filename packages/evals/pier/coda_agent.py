@@ -37,6 +37,7 @@ class CodaAgent(BaseAgent):
         runtime_dir: str | Path | None = None,
         reasoning_effort: str = "max",
         max_output_tokens: int = 32_768,
+        event_stream_mode: str = "semantic",
         max_turns: int = 64,
         run_budget_enabled: bool = True,
         allow_all_commands: bool = False,
@@ -55,6 +56,9 @@ class CodaAgent(BaseAgent):
         if max_output_tokens < 1:
             raise ValueError("CodaAgent max_output_tokens must be positive")
         self._max_output_tokens = int(max_output_tokens)
+        if event_stream_mode not in {"raw", "semantic"}:
+            raise ValueError("CodaAgent event_stream_mode must be raw or semantic")
+        self._event_stream_mode = event_stream_mode
         self._run_budget_enabled = bool(run_budget_enabled)
         if self._run_budget_enabled and max_turns < 1:
             raise ValueError("CodaAgent max_turns must be positive")
@@ -264,7 +268,7 @@ printf '{PREPARE_MARKER}\t%s\n' "$initial_head"
         return f"""
 set +e
 {shlex.quote(node)} {shlex.quote(entry)} \\
-  --print --json --no-color \\
+  --print --json --json-mode {shlex.quote(self._event_stream_mode)} --no-color \\
   --workspace {shlex.quote(self.WORKSPACE_DIR)} \\
   --model {shlex.quote(self.model_name or '')} \\
   --reasoning {shlex.quote(self._reasoning_effort)} \\

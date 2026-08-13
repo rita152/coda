@@ -42,6 +42,8 @@ describe("DeepSWE evaluation runner", () => {
 		expect(userEmail).toBeGreaterThan(userName);
 		expect(adapter.indexOf("config user.name coda-evals", userName + 1)).toBe(-1);
 		expect(adapter.indexOf("config user.email coda-evals@localhost", userEmail + 1)).toBe(-1);
+		expect(adapter).toContain('event_stream_mode: str = "semantic"');
+		expect(adapter).toContain("--json-mode {shlex.quote(self._event_stream_mode)}");
 	});
 
 	it("pins the current v1.1 dataset and selects the first 20 tasks explicitly", () => {
@@ -67,6 +69,7 @@ describe("DeepSWE evaluation runner", () => {
 			kwargs: {
 				reasoning_effort: "max",
 				max_output_tokens: 32_768,
+				event_stream_mode: "semantic",
 				max_turns: 96,
 				allow_all_commands: true,
 			},
@@ -78,8 +81,10 @@ describe("DeepSWE evaluation runner", () => {
 
 	it("records each round separately and labels repeated tasks as development data", () => {
 		const lock = createDeepSweRunLock({ ...OPTIONS, round: 4 });
+		expect(lock.schemaVersion).toBe(2);
 		expect(lock.campaignKind).toBe("development-round");
 		expect(lock.harness.maxOutputTokens).toBe(32_768);
+		expect(lock.harness.eventStream).toEqual({ mode: "semantic", schemaVersion: 1 });
 		expect(lock.harness.maxTurns).toBe(96);
 		expect(lock.harness.allowAllCommands).toBe(true);
 		expect(lock.execution).toMatchObject({ round: 4, concurrency: 5, providerAllowlist: ["opencode.ai"] });

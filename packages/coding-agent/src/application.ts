@@ -37,6 +37,7 @@ import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { ContextWindowController } from "./context-window/context-window.ts";
 import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
+import { type JsonEventStreamMode, JsonEventWriter } from "./event-output/json-event-writer.ts";
 import { createExecutableIdentityResolver } from "./host/executable-identity.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner } from "./host/process-runner.ts";
@@ -258,6 +259,7 @@ interface ParsedArguments {
 	readonly action: "cleanup" | "help" | "run" | "sessions" | "skills-validate" | "version";
 	readonly mode: "interactive" | "print";
 	readonly output: "json" | "text";
+	readonly jsonEventStream: JsonEventStreamMode;
 	readonly permissionProfile?: PermissionProfile;
 	readonly approvalPolicy?: ApprovalPolicy;
 	readonly additionalWritableRoots: readonly string[];
@@ -296,6 +298,8 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	let action: ParsedArguments["action"] = "run";
 	let explicitMode: ParsedArguments["mode"] | undefined;
 	let output: ParsedArguments["output"] = "text";
+	let jsonEventStream: JsonEventStreamMode = "raw";
+	let jsonEventStreamExplicit = false;
 	let permissionProfile: PermissionProfile | undefined;
 	let approvalPolicy: ApprovalPolicy | undefined;
 	let dangerouslyBypassApprovalsAndSandbox = false;
@@ -345,6 +349,15 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		}
 		if (argument === "--json") {
 			output = "json";
+			continue;
+		}
+		if (argument === "--json-mode") {
+			const value = args[++index];
+			if (value !== "raw" && value !== "semantic") {
+				throw new Error("--json-mode requires raw or semantic");
+			}
+			jsonEventStream = value;
+			jsonEventStreamExplicit = true;
 			continue;
 		}
 		if (argument === "--no-color") {
@@ -502,6 +515,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 	}
 
 	if (output === "json" && explicitMode === "interactive") throw new Error("--json cannot be used with --interactive");
+	if (jsonEventStreamExplicit && output !== "json") throw new Error("--json-mode requires --json");
 	if (includeMediaData && output !== "json") throw new Error("--include-media-data requires --json");
 	if (disableRunBudget && maxTurns !== undefined) {
 		throw new Error("--no-run-budget and --max-turns cannot be combined");
@@ -517,6 +531,7 @@ async function parseArguments(args: readonly string[], io: ApplicationIO): Promi
 		action,
 		mode,
 		output,
+		jsonEventStream,
 		permissionProfile: dangerouslyBypassApprovalsAndSandbox ? "full-access" : permissionProfile,
 		approvalPolicy: dangerouslyBypassApprovalsAndSandbox ? "never" : approvalPolicy,
 		additionalWritableRoots: Object.freeze([...additionalWritableRoots]),
@@ -567,7 +582,8 @@ Modes:
       --color-scheme <scheme>    Terminal appearance: auto, light, or dark
       --no-animations            Disable periodic TUI motion
       --json                     Emit stable JSONL Agent events
-      --include-media-data      Include base64 in JSON media descriptors
+      --json-mode <mode>         raw|semantic (default: raw)
+      --include-media-data       Include base64 in JSON media descriptors
 
 Model:
       --model <provider/model>   Select an exact Model
@@ -1067,6 +1083,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							),
 					idGenerator: options.runtime.idGenerator,
 				});
+				const jsonEventWriter =
+					parsed.output === "json"
+						? new JsonEventWriter({
+								mode: parsed.jsonEventStream,
+								output: options.io.stdout,
+								project: (value) => projectJsonMedia(value, mediaLibrary, parsed.includeMediaData),
+							})
+						: undefined;
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				let mcpRegistry: CodingMcpRegistry | undefined;
@@ -1329,8 +1353,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const rejectingApproval =
 						parsed.mode === "print" && !options.approval
 							? new RejectingApprovalHandler(async (request) => {
-									if (parsed.output === "json") {
-										await options.io.stdout.write(`${JSON.stringify(approvalRequiredEvent(request))}\n`);
+									if (jsonEventWriter) {
+										await jsonEventWriter.writeRecord(approvalRequiredEvent(request));
 									} else {
 										const target = request.command ?? request.canonicalPath ?? request.host ?? request.kind;
 										await options.io.stderr.write(`coda: approval required for ${request.kind}: ${target}\n`);
@@ -2517,13 +2541,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						return exitCode;
 					}
-					if (parsed.output === "json") {
+					if (jsonEventWriter) {
 						agent.onEvent(async (event) => {
-							const envelope =
+							await jsonEventWriter.writeAgentEvent(
+								event,
 								event.type === "run_start"
 									? {
-											schemaVersion: 2,
-											...event,
 											model: { provider: model.provider, id: model.id },
 											reasoning,
 											prompt: { version: promptSnapshot.version, sha256: promptSnapshot.sha256 },
@@ -2532,16 +2555,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												approvalPolicy: approvalPolicyLabel(policy.configuration().approvalPolicy),
 											},
 										}
-									: { schemaVersion: 2, ...event };
-							await options.io.stdout.write(
-								`${JSON.stringify(projectJsonMedia(envelope, mediaLibrary, parsed.includeMediaData))}\n`,
+									: undefined,
 							);
 							if (event.type === "run_end") {
 								const evidence = session.runEvidence.at(-1);
 								if (!evidence || evidence.runId !== event.runId) {
 									throw new Error(`Run evidence was unavailable after completed Run ${event.runId}`);
 								}
-								await options.io.stdout.write(`${JSON.stringify(evidence)}\n`);
+								await jsonEventWriter.writeRecord(evidence);
 							}
 						});
 					}

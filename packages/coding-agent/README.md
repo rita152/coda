@@ -28,8 +28,15 @@ One-shot mode writes only the final assistant text to stdout:
 coda --print --model opencode-go/<model-id> "explain this repository"
 coda --print --image ./diagram.png "explain this image"
 coda --print --json "run the configured Model and emit Agent events"
+coda --print --json --json-mode semantic "emit compact terminal events for evaluation"
 coda --no-tui "use print mode even when stdin and stdout are terminals"
 ```
+
+`--json` retains the raw JSONL v2 contract, including incremental message and
+Tool progress events. `--json-mode semantic` omits those transient deltas while
+retaining Run, Turn, Attempt, terminal Message, Tool lifecycle, and Run Evidence
+events. Use `--json --json-mode raw` when diagnostics explicitly require every
+delta.
 
 `--no-tui` is an explicit alias for print mode. `--color-scheme auto|light|dark`
 controls terminal appearance detection; `--no-color` and `NO_COLOR` take

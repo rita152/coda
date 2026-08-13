@@ -9,6 +9,9 @@ export const DEEP_SWE_DEFAULT_REASONING = "max";
 export const DEEP_SWE_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEP_SWE_DEFAULT_MAX_TURNS = 64;
 export const DEEP_SWE_PROVIDER_HOST = "opencode.ai";
+export const DEEP_SWE_EVENT_STREAM_MODE = "semantic";
+/** Must match the semantic selection policy owned by Coding Agent's JsonEventWriter. */
+export const DEEP_SWE_EVENT_STREAM_SCHEMA_VERSION = 1;
 
 export interface DeepSweImageLock {
 	readonly taskId: string;
@@ -169,6 +172,7 @@ export interface DeepSwePierJobConfig {
 				readonly runtime_dir: string;
 				readonly reasoning_effort: string;
 				readonly max_output_tokens: number;
+				readonly event_stream_mode: typeof DEEP_SWE_EVENT_STREAM_MODE;
 				readonly run_budget_enabled: boolean;
 				readonly max_turns?: number;
 				readonly allow_all_commands: boolean;
@@ -185,7 +189,7 @@ export interface DeepSwePierJobConfig {
 }
 
 export interface DeepSweRunLock {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 2;
 	readonly campaignKind: "development-round";
 	readonly dataset: {
 		readonly name: "datacurve/deep-swe-1-1";
@@ -202,6 +206,10 @@ export interface DeepSweRunLock {
 		readonly model: string;
 		readonly reasoningEffort: string;
 		readonly maxOutputTokens: number;
+		readonly eventStream: {
+			readonly mode: typeof DEEP_SWE_EVENT_STREAM_MODE;
+			readonly schemaVersion: typeof DEEP_SWE_EVENT_STREAM_SCHEMA_VERSION;
+		};
 		readonly runBudgetEnabled: boolean;
 		readonly maxTurns?: number;
 		readonly allowAllCommands: boolean;
@@ -398,6 +406,7 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 					runtime_dir: absolutePath(options.runtimeDir, "runtimeDir"),
 					reasoning_effort: reasoningEffort,
 					max_output_tokens: maxOutputTokens,
+					event_stream_mode: DEEP_SWE_EVENT_STREAM_MODE,
 					run_budget_enabled: runBudgetEnabled,
 					...(maxTurns !== undefined ? { max_turns: maxTurns } : {}),
 					allow_all_commands: options.allowAllCommands ?? false,
@@ -419,7 +428,7 @@ export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRun
 	const config = createDeepSwePierJobConfig(options);
 	const selected = new Set(config.datasets[0].task_names);
 	const lock: DeepSweRunLock = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		campaignKind: "development-round",
 		dataset: {
 			name: "datacurve/deep-swe-1-1",
@@ -433,6 +442,10 @@ export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRun
 			model: config.agents[0].model_name,
 			reasoningEffort: config.agents[0].kwargs.reasoning_effort,
 			maxOutputTokens: config.agents[0].kwargs.max_output_tokens,
+			eventStream: {
+				mode: config.agents[0].kwargs.event_stream_mode,
+				schemaVersion: DEEP_SWE_EVENT_STREAM_SCHEMA_VERSION,
+			},
 			runBudgetEnabled: config.agents[0].kwargs.run_budget_enabled,
 			...(config.agents[0].kwargs.max_turns !== undefined ? { maxTurns: config.agents[0].kwargs.max_turns } : {}),
 			allowAllCommands: config.agents[0].kwargs.allow_all_commands,
