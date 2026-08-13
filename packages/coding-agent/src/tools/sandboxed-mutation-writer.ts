@@ -11,6 +11,18 @@ export interface AtomicMutationRequest {
 	readonly data: Uint8Array;
 	readonly expectedExists: boolean;
 	readonly expectedSha256?: string;
+	readonly expectedIdentity?: MutationTargetIdentity;
+}
+
+export interface AtomicDeletionRequest {
+	readonly target: string;
+	readonly expectedSha256: string;
+	readonly expectedIdentity?: MutationTargetIdentity;
+}
+
+export interface MutationTargetIdentity {
+	readonly device: string;
+	readonly inode: string;
 }
 
 export interface AtomicMutationResult {
@@ -19,13 +31,18 @@ export interface AtomicMutationResult {
 	readonly size: number;
 }
 
-export interface AtomicMutationWriter {
-	write(request: AtomicMutationRequest, context: ToolExecutionContext): Promise<AtomicMutationResult>;
+export interface AtomicDeletionResult {
+	readonly previousSize: number;
 }
 
-interface MutationWorkerResponse extends AtomicMutationResult {
-	readonly version: 1;
+export interface AtomicMutationWriter {
+	write(request: AtomicMutationRequest, context: ToolExecutionContext): Promise<AtomicMutationResult>;
+	delete(request: AtomicDeletionRequest, context: ToolExecutionContext): Promise<AtomicDeletionResult>;
 }
+
+type MutationWorkerResponse =
+	| (AtomicMutationResult & { readonly version: 1; readonly operation: "write" })
+	| (AtomicDeletionResult & { readonly version: 1; readonly operation: "delete" });
 
 // This is deliberately an inline, immutable program rather than a Workspace-loaded helper. A model
 // that can write dependency files must not be able to replace the reference monitor used for writes.
@@ -47,17 +64,20 @@ function digest(bytes) {
 }
 
 function validate(request) {
-  if (!request || request.version !== 1 || request.operation !== 'atomic-write') throw new Error('invalid mutation protocol');
+  if (!request || request.version !== 1 || (request.operation !== 'atomic-write' && request.operation !== 'atomic-delete')) throw new Error('invalid mutation protocol');
   if (typeof request.target !== 'string' || !isAbsolute(request.target) || normalize(request.target) !== request.target || request.target.includes('\0')) {
     throw new Error('target must be a canonical absolute path');
   }
   if (typeof request.invocation !== 'string' || !/^[A-Za-z0-9_-]+$/.test(request.invocation)) throw new Error('invalid invocation identity');
-  if (typeof request.expectedExists !== 'boolean') throw new Error('invalid expectedExists');
-  if (typeof request.data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(request.data)) {
+  if (request.operation === 'atomic-write' && typeof request.expectedExists !== 'boolean') throw new Error('invalid expectedExists');
+  if (request.operation === 'atomic-write' && (typeof request.data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(request.data))) {
     throw new Error('invalid base64 mutation payload');
   }
-  if (request.expectedSha256 !== undefined && (typeof request.expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedSha256))) {
+  if ((request.operation === 'atomic-delete' || request.expectedSha256 !== undefined) && (typeof request.expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedSha256))) {
     throw new Error('invalid expected content digest');
+  }
+  if (request.expectedIdentity !== undefined && (!request.expectedIdentity || typeof request.expectedIdentity.device !== 'string' || request.expectedIdentity.device.length === 0 || typeof request.expectedIdentity.inode !== 'string' || request.expectedIdentity.inode.length === 0)) {
+    throw new Error('invalid expected target identity');
   }
   if (!request.parent || typeof request.parent.path !== 'string' || !request.parent.existing ||
       typeof request.parent.existing.path !== 'string' || typeof request.parent.existing.device !== 'string' ||
@@ -104,14 +124,28 @@ async function main() {
   validate(request);
   const targetParent = dirname(request.target);
   await ensureTargetParent(request, targetParent);
-  const data = Buffer.from(request.data, 'base64');
   const before = await optionalLstat(request.target);
-  if (Boolean(before) !== request.expectedExists) throw new Error('target existence changed before mutation');
+  if (request.operation === 'atomic-delete' && !before) throw new Error('target existence changed before mutation');
+  if (request.operation === 'atomic-write' && Boolean(before) !== request.expectedExists) throw new Error('target existence changed before mutation');
   if (before && !before.isFile()) throw new Error('target is not a regular file');
+  if (request.expectedIdentity !== undefined && (!before || String(before.dev) !== request.expectedIdentity.device || String(before.ino) !== request.expectedIdentity.inode)) {
+    throw new Error('target identity changed before mutation');
+  }
   if (request.expectedSha256 !== undefined && digest(await readFile(request.target)) !== request.expectedSha256) {
     throw new Error('target content changed before mutation');
   }
   const previousSize = before ? Number(before.size) : 0;
+  if (request.operation === 'atomic-delete') {
+    const current = await optionalLstat(request.target);
+    if (!current || !before || current.dev !== before.dev || current.ino !== before.ino || !current.isFile()) {
+      throw new Error('target identity changed during mutation');
+    }
+    if (digest(await readFile(request.target)) !== request.expectedSha256) throw new Error('target content changed during mutation');
+    await unlink(request.target);
+    process.stdout.write(JSON.stringify({ version: 1, operation: 'delete', previousSize }));
+    return;
+  }
+  const data = Buffer.from(request.data, 'base64');
   const mode = before ? Number(before.mode & 0o7777n) : 0o644;
   const temporary = join(dirname(request.target), '.' + basename(request.target) + '.coda-' + request.invocation + '.tmp');
   let handle;
@@ -133,7 +167,7 @@ async function main() {
     }
     await rename(temporary, request.target);
     committed = true;
-    process.stdout.write(JSON.stringify({ version: 1, created: !before, previousSize, size: data.byteLength }));
+    process.stdout.write(JSON.stringify({ version: 1, operation: 'write', created: !before, previousSize, size: data.byteLength }));
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     if (!committed) await unlink(temporary).catch((error) => { if (!error || error.code !== 'ENOENT') throw error; });
@@ -164,9 +198,16 @@ function parseResponse(stdout: string): MutationWorkerResponse {
 		!candidate ||
 		typeof candidate !== "object" ||
 		(candidate as { version?: unknown }).version !== 1 ||
-		typeof (candidate as { created?: unknown }).created !== "boolean" ||
-		!Number.isSafeInteger((candidate as { previousSize?: unknown }).previousSize) ||
-		!Number.isSafeInteger((candidate as { size?: unknown }).size)
+		((candidate as { operation?: unknown }).operation !== "write" &&
+			(candidate as { operation?: unknown }).operation !== "delete") ||
+		!Number.isSafeInteger((candidate as { previousSize?: unknown }).previousSize)
+	) {
+		throw new Error("Sandboxed file mutation returned an invalid response");
+	}
+	if (
+		(candidate as { operation?: unknown }).operation === "write" &&
+		(typeof (candidate as { created?: unknown }).created !== "boolean" ||
+			!Number.isSafeInteger((candidate as { size?: unknown }).size))
 	) {
 		throw new Error("Sandboxed file mutation returned an invalid response");
 	}
@@ -202,83 +243,107 @@ export function createSandboxedMutationWriter(options: {
 	/** Deterministic race-test seam; production composition leaves this undefined. */
 	readonly beforeLaunch?: () => Promise<void> | void;
 }): AtomicMutationWriter {
-	return {
-		write: async (request, context) => {
-			if (!isAbsolute(request.target) || normalize(request.target) !== request.target) {
-				throw new Error("Sandboxed mutation target must be a canonical absolute path");
-			}
-			const readAccessPolicy = options.permissions.readAccessPolicyFor(context.invocationId);
-			if (!readAccessPolicy) throw new Error("File mutation was not authorized by the Permission Engine");
-			const policy = readAccessPolicy.sandboxPolicy;
-			const invocation = context.invocationId.replace(/[^A-Za-z0-9_-]/gu, "-");
-			const parentPath = dirname(request.target);
-			const existingParent = await existingParentIdentity(parentPath);
-			await options.beforeLaunch?.();
-			let result: Awaited<ReturnType<typeof execute>>;
-			try {
-				result = await execute({
-					command: [process.execPath, "--input-type=module", "--eval", MUTATION_WORKER_SOURCE],
-					cwd: options.workspace.root,
-					environment: {},
-					policy,
-					timeoutMs: 30_000,
-					signal: context.signal,
-					maxOutputBytes: 64 * 1024,
-					stdin: JSON.stringify({
-						version: 1,
-						operation: "atomic-write",
-						target: request.target,
-						invocation,
-						expectedExists: request.expectedExists,
-						expectedSha256: request.expectedSha256,
-						parent: {
-							path: parentPath,
-							existing: existingParent,
-						},
-						data: Buffer.from(request.data).toString("base64"),
-					}),
-				});
-			} catch (error) {
-				await options.onAudit?.({
-					type: "sandbox_execution",
-					invocationId: context.invocationId,
-					toolName: "file-mutation",
-					policy: permissionPolicyAuditSnapshot(policy),
-					outcome: "launch-failed",
-					error: error instanceof Error ? error.message : String(error),
-				});
-				throw error;
-			}
+	const run = async (
+		request:
+			| { readonly operation: "atomic-write"; readonly mutation: AtomicMutationRequest }
+			| { readonly operation: "atomic-delete"; readonly mutation: AtomicDeletionRequest },
+		context: ToolExecutionContext,
+	): Promise<MutationWorkerResponse> => {
+		const mutation = request.mutation;
+		if (!isAbsolute(mutation.target) || normalize(mutation.target) !== mutation.target) {
+			throw new Error("Sandboxed mutation target must be a canonical absolute path");
+		}
+		const readAccessPolicy = options.permissions.readAccessPolicyFor(context.invocationId);
+		if (!readAccessPolicy) throw new Error("File mutation was not authorized by the Permission Engine");
+		const policy = readAccessPolicy.sandboxPolicy;
+		const invocation = context.invocationId.replace(/[^A-Za-z0-9_-]/gu, "-");
+		const parentPath = dirname(mutation.target);
+		const existingParent = await existingParentIdentity(parentPath);
+		await options.beforeLaunch?.();
+		let result: Awaited<ReturnType<typeof execute>>;
+		try {
+			result = await execute({
+				command: [process.execPath, "--input-type=module", "--eval", MUTATION_WORKER_SOURCE],
+				cwd: options.workspace.root,
+				environment: {},
+				policy,
+				timeoutMs: 30_000,
+				signal: context.signal,
+				maxOutputBytes: 64 * 1024,
+				stdin: JSON.stringify({
+					version: 1,
+					operation: request.operation,
+					target: mutation.target,
+					invocation,
+					...(request.operation === "atomic-write"
+						? {
+								expectedExists: request.mutation.expectedExists,
+								expectedSha256: request.mutation.expectedSha256,
+								expectedIdentity: request.mutation.expectedIdentity,
+								data: Buffer.from(request.mutation.data).toString("base64"),
+							}
+						: {
+								expectedSha256: request.mutation.expectedSha256,
+								expectedIdentity: request.mutation.expectedIdentity,
+							}),
+					parent: {
+						path: parentPath,
+						existing: existingParent,
+					},
+				}),
+			});
+		} catch (error) {
 			await options.onAudit?.({
 				type: "sandbox_execution",
 				invocationId: context.invocationId,
 				toolName: "file-mutation",
 				policy: permissionPolicyAuditSnapshot(policy),
-				backend: result.backend,
-				outcome:
-					result.status === "denied"
-						? "sandbox-denial"
-						: result.status === "timed-out"
-							? "timed-out"
-							: result.status === "cancelled"
-								? "cancelled"
-								: result.exitCode === 0
-									? "success"
-									: "normal-failure",
-				exitCode: result.exitCode,
-				signal: result.signal,
-				...(result.status === "denied" ? { denial: result.denial } : {}),
+				outcome: "launch-failed",
+				error: error instanceof Error ? error.message : String(error),
 			});
-			if (result.status === "cancelled") throw abortError();
-			if (result.status === "timed-out") throw new Error("Sandboxed file mutation timed out");
-			if (result.status === "denied") {
-				const path = result.denial.kind === "filesystem" ? result.denial.path : undefined;
-				throw new Error(`Sandbox denied file mutation: ${result.denial.reason}${path ? ` (${path})` : ""}`);
-			}
-			if (result.exitCode !== 0) {
-				throw new Error(result.stderr.trim() || `Sandboxed file mutation exited with ${result.exitCode}`);
-			}
-			return parseResponse(result.stdout);
+			throw error;
+		}
+		await options.onAudit?.({
+			type: "sandbox_execution",
+			invocationId: context.invocationId,
+			toolName: "file-mutation",
+			policy: permissionPolicyAuditSnapshot(policy),
+			backend: result.backend,
+			outcome:
+				result.status === "denied"
+					? "sandbox-denial"
+					: result.status === "timed-out"
+						? "timed-out"
+						: result.status === "cancelled"
+							? "cancelled"
+							: result.exitCode === 0
+								? "success"
+								: "normal-failure",
+			exitCode: result.exitCode,
+			signal: result.signal,
+			...(result.status === "denied" ? { denial: result.denial } : {}),
+		});
+		if (result.status === "cancelled") throw abortError();
+		if (result.status === "timed-out") throw new Error("Sandboxed file mutation timed out");
+		if (result.status === "denied") {
+			const path = result.denial.kind === "filesystem" ? result.denial.path : undefined;
+			throw new Error(`Sandbox denied file mutation: ${result.denial.reason}${path ? ` (${path})` : ""}`);
+		}
+		if (result.exitCode !== 0) {
+			throw new Error(result.stderr.trim() || `Sandboxed file mutation exited with ${result.exitCode}`);
+		}
+		return parseResponse(result.stdout);
+	};
+	return {
+		write: async (request, context) => {
+			const response = await run({ operation: "atomic-write", mutation: request }, context);
+			if (response.operation !== "write") throw new Error("Sandboxed file mutation returned the wrong operation");
+			return response;
+		},
+		delete: async (request, context) => {
+			const response = await run({ operation: "atomic-delete", mutation: request }, context);
+			if (response.operation !== "delete") throw new Error("Sandboxed file mutation returned the wrong operation");
+			return response;
 		},
 	};
 }

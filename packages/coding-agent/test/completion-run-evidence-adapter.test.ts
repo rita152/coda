@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { completionActivityFromRunEvidence } from "../src/completion/run-evidence-adapter.ts";
 import type { CompletionRunEvidence, CompletionTemporalSnapshot } from "../src/completion/types.ts";
-import type { RunEvidenceOperation } from "../src/run-evidence/contracts.ts";
+import { RUN_EVIDENCE_SCHEMA_VERSION, type RunEvidenceOperation } from "../src/run-evidence/contracts.ts";
 
 describe("completion RunEvidence adapter", () => {
 	it("derives mutation and verification ordering from public v2 operations", () => {
@@ -25,7 +25,8 @@ describe("completion RunEvidence adapter", () => {
 			sequence: 20,
 			resolutionKey: "command:test",
 		};
-		const activity = completionActivityFromRunEvidence(temporal(),
+		const activity = completionActivityFromRunEvidence(
+			temporal(),
 			evidence({
 				operations: [mutation, verification],
 				commands: [command("tool:test", 20, "npm test", true)],
@@ -149,14 +150,20 @@ function command(invocationId: string, sequence: number, value: string, failed: 
 
 function evidence(overrides: Partial<CompletionRunEvidence> = {}): CompletionRunEvidence {
 	return {
-		schemaVersion: 2,
+		schemaVersion: RUN_EVIDENCE_SCHEMA_VERSION,
 		type: "run_evidence",
 		runId: "run:test",
 		outcome: "success",
 		startedAt: 0,
 		completedAt: 100,
 		elapsedMs: 100,
-		paths: { inspected: [], changed: [], omitted: { inspected: 0, changed: 0 } },
+		paths: {
+			inspected: [],
+			changed: [],
+			changedWithProvenance: [],
+			workspaceDiff: { status: "unavailable", omitted: 0 },
+			omitted: { inspected: 0, changed: 0 },
+		},
 		operations: [],
 		observations: {
 			counts: { complete: 0, windowed: 0, "recoverable-overflow": 0, "lossy-overflow": 0 },

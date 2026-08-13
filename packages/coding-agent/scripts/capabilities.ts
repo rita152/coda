@@ -143,6 +143,7 @@ export async function generateCapabilityArtifacts(
 			"packages/coding-agent/src/runtime/capability-contract.ts",
 			"packages/coding-agent/src/session/records.ts",
 			"packages/coding-agent/src/tools/contracts.ts",
+			"packages/coding-agent/src/tools/mutation-contract.ts",
 		],
 		runtimeFacts,
 		capabilities,

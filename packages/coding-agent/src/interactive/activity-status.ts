@@ -392,6 +392,11 @@ function conciseSummaryCandidate(value: string): string | undefined {
 
 function approvalAction(request: PermissionApprovalRequest): string {
 	if (request.command) return `Running ${boundedInline(request.command, 512)}`;
+	if (request.requestedPaths || request.canonicalPaths) {
+		const count = Math.max(request.requestedPaths?.length ?? 0, request.canonicalPaths?.length ?? 0);
+		const verb = request.operation === "write" ? "Writing" : "Reading";
+		return `${verb} ${count} path${count === 1 ? "" : "s"}`;
+	}
 	if (request.requestedPath || request.canonicalPath) {
 		const verb = request.operation === "write" ? "Writing" : "Reading";
 		return `${verb} ${boundedInline(request.requestedPath ?? request.canonicalPath ?? "path", 512)}`;

@@ -398,7 +398,7 @@ describe("Coding Agent print mode", () => {
 		});
 		expect(events.at(-3)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
 		expect(events.at(-2)).toMatchObject({
-			schemaVersion: 2,
+			schemaVersion: 3,
 			type: "run_evidence",
 			outcome: "success",
 			paths: { inspected: [], changed: [] },
@@ -465,7 +465,7 @@ describe("Coding Agent print mode", () => {
 		expect(events.some((event) => event.type === "attempt_end")).toBe(true);
 		expect(events.some((event) => event.type === "message_end")).toBe(true);
 		expect(events.at(-3)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
-		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_evidence", outcome: "success" });
+		expect(events.at(-2)).toMatchObject({ schemaVersion: 3, type: "run_evidence", outcome: "success" });
 		expect(events.at(-1)).toMatchObject({ schemaVersion: 1, type: "completion_disposition" });
 		const terminal = [...events].reverse().find((event) => event.type === "attempt_end");
 		expect(terminal).toMatchObject({
@@ -496,6 +496,166 @@ describe("Coding Agent print mode", () => {
 		await expect(application.run(["--print", "--json-mode", "semantic", "prompt"])).resolves.toBe(1);
 		expect(stderr.value).toContain("--json-mode requires --json");
 		expect(stdout.value).toBe("");
+	});
+
+	it("supplements native evidence with final Git-visible Shell mutations", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-shell-evidence-"));
+		try {
+			const canonicalWorkspace = await realpath(workspace);
+			const faux = fauxProvider({ runtime: testTimeRuntime(215) });
+			faux.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("bash", { command: "printf shell > shell-created.txt" }, { id: "shell-mutation" }),
+					{ stopReason: "toolUse", timestamp: 215 },
+				),
+				(context) => {
+					expect(context.messages.at(-1)).toMatchObject({
+						role: "toolResult",
+						toolName: "bash",
+						isError: false,
+					});
+					return fauxAssistantMessage("Shell mutation complete.", { timestamp: 215 });
+				},
+				(context) => {
+					expect(JSON.stringify(context.messages)).toContain(
+						"run a focused verification after the latest mutation",
+					);
+					return fauxAssistantMessage(
+						fauxToolCall("bash", { command: "npm test" }, { id: "shell-verification" }),
+						{ stopReason: "toolUse", timestamp: 215 },
+					);
+				},
+				fauxAssistantMessage("Shell mutation verified.", { timestamp: 215 }),
+			]);
+			const models = createModels({ runtime: testTimeRuntime(215) });
+			models.setProvider(faux.provider);
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let id = 0;
+			let workspaceCaptures = 0;
+			const application = createCodingAgentApplication({
+				models,
+				settings,
+				fileSystem: createNodeFileSystem(),
+				processRunner: {
+					run: async (request) => {
+						if (request.args[0] === "rev-parse") {
+							expect(request).toMatchObject({
+								executable: "git",
+								args: ["rev-parse", "--show-prefix"],
+								cwd: canonicalWorkspace,
+							});
+							return {
+								exitCode: 0,
+								signal: null,
+								stdout: "\n",
+								stderr: "",
+								timedOut: false,
+								truncated: false,
+							};
+						}
+						expect(request).toMatchObject({
+							executable: "git",
+							args: [
+								"-c",
+								"core.fsmonitor=false",
+								"status",
+								"--porcelain=v1",
+								"-z",
+								"--untracked-files=all",
+								"--",
+								".",
+							],
+							cwd: canonicalWorkspace,
+						});
+						return {
+							exitCode: 0,
+							signal: null,
+							stdout: "?? shell-created.txt\0",
+							stderr: "",
+							timedOut: false,
+							truncated: false,
+						};
+					},
+				},
+				modelProcessRunner: {
+					run: async (request) => {
+						if (request.args.at(-1)?.includes("printf shell")) {
+							await writeFile(join(workspace, "shell-created.txt"), "shell");
+						}
+						return {
+							exitCode: 0,
+							signal: null,
+							stdout: "",
+							stderr: "",
+							timedOut: false,
+							truncated: false,
+							backend: "none",
+						};
+					},
+				},
+				completionWorkspaceEvidence: {
+					capture: async () => {
+						const changed = workspaceCaptures++ > 0;
+						return {
+							schemaVersion: 1,
+							status: "complete" as const,
+							capturedAt: 215,
+							dirty: changed,
+							changedPaths: changed ? ["shell-created.txt"] : [],
+							omittedChangedPaths: 0,
+							statusSha256: changed ? "changed:status" : "baseline:status",
+							diffSha256: changed ? "changed:diff" : "baseline:diff",
+							untrackedSha256: changed ? "changed:untracked" : "baseline:untracked",
+							fingerprint: changed ? "changed" : "baseline",
+							diagnostics: [],
+						};
+					},
+				},
+				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory: workspace,
+					platform: "darwin",
+					environment: {},
+					clock: { now: () => 215 },
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				},
+			});
+
+			await expect(
+				application.run([
+					"--print",
+					"--json",
+					"--dangerously-bypass-approvals-and-sandbox",
+					"--model",
+					`${faux.getModel().provider}/${faux.getModel().id}`,
+					"mutate through Shell",
+				]),
+			).resolves.toBe(0);
+			const events = stdout.value
+				.trimEnd()
+				.split("\n")
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+			expect(events.at(-2)).toMatchObject({
+				schemaVersion: 3,
+				type: "run_evidence",
+				paths: {
+					changed: ["shell-created.txt"],
+					changedWithProvenance: [{ path: "shell-created.txt", provenance: ["workspace-diff"] }],
+					workspaceDiff: { status: "complete", omitted: 0 },
+				},
+			});
+			expect(events.at(-1)).toMatchObject({
+				type: "completion_disposition",
+				disposition: "verified",
+				verification: { result: "passed", afterLatestMutation: true },
+				repair: { attempts: 1, maxAttempts: 1 },
+			});
+			expect(stderr.value).toBe("");
+		} finally {
+			await rm(workspace, { recursive: true, force: true });
+		}
 	});
 
 	it("lets CLI Permission options override settings", async () => {
@@ -599,7 +759,7 @@ describe("Coding Agent print mode", () => {
 			);
 			expect(events).toContainEqual(
 				expect.objectContaining({
-					schemaVersion: 2,
+					schemaVersion: 3,
 					type: "run_evidence",
 					toolIssues: [expect.objectContaining({ toolName: "write", status: "denied" })],
 					unresolvedFailures: [expect.objectContaining({ kind: "tool", status: "denied" })],

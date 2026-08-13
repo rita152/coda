@@ -1,4 +1,5 @@
 import { clipAnsi, displayWidth, sanitizeTerminalText, wrapAnsi } from "@coda/tui";
+import { mutationRequestMetadata } from "../tools/mutation-contract.ts";
 import type { TimelineToolEntry, TimelineToolState } from "./semantic-timeline.ts";
 import type { ThemeTone, TuiTheme } from "./theme.ts";
 
@@ -74,7 +75,7 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 			details = ["(no output)"];
 		}
 		details = truncatePreview(details, detailWidth);
-		if (entry.invocation.toolName !== "edit") {
+		if (entry.invocation.toolName !== "edit" && entry.invocation.toolName !== "patch") {
 			details = details.map((line) => options.theme.style("muted", line));
 		}
 	}
@@ -125,6 +126,10 @@ interface ToolActionParts {
 
 function actionParts(invocation: ToolActionInvocation, completed: boolean): ToolActionParts {
 	const { arguments: arguments_, toolName } = invocation;
+	const mutation = safeMutationMetadata(invocation);
+	if (mutation) {
+		return { verb: completed ? mutation.pastVerb : mutation.presentVerb, subject: mutation.subject };
+	}
 	const path = argumentString(arguments_, "path", ".");
 	switch (toolName) {
 		case "read":
@@ -139,10 +144,6 @@ function actionParts(invocation: ToolActionInvocation, completed: boolean): Tool
 		}
 		case "ls":
 			return { verb: completed ? "Explored" : "Exploring", subject: path };
-		case "edit":
-			return { verb: completed ? "Edited" : "Editing", subject: path };
-		case "write":
-			return { verb: completed ? "Wrote" : "Writing", subject: path };
 		case "bash":
 			return {
 				verb: completed ? "Ran" : "Running",
@@ -225,6 +226,8 @@ function statusTitle(entry: TimelineToolEntry): string {
 /** A bounded caller can reuse the same present/past action language outside the Timeline. */
 export function toolActionTitle(invocation: ToolActionInvocation, completed = false): string {
 	const { arguments: arguments_, toolName } = invocation;
+	const mutation = safeMutationMetadata(invocation);
+	if (mutation) return `${completed ? mutation.pastVerb : mutation.presentVerb} ${mutation.subject}`;
 	const path = argumentString(arguments_, "path", ".");
 	switch (toolName) {
 		case "read":
@@ -239,10 +242,6 @@ export function toolActionTitle(invocation: ToolActionInvocation, completed = fa
 		}
 		case "ls":
 			return `${completed ? "Explored" : "Exploring"} ${path}`;
-		case "edit":
-			return `${completed ? "Edited" : "Editing"} ${path}`;
-		case "write":
-			return `${completed ? "Wrote" : "Writing"} ${path}`;
 		case "bash": {
 			const command = argumentString(arguments_, "command", "(empty command)");
 			return `${completed ? "Ran" : "Running"} ${command}`;
@@ -261,6 +260,18 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 	const progress = progressDetails(entry, width);
 	if (entry.invocation.toolName === "edit") {
 		return [...approval, ...progress, ...renderDiff(entry, width, options.theme)];
+	}
+	if (entry.invocation.toolName === "patch") {
+		const committed = details ? arrayField(details, "committedPaths").length : 0;
+		const attempted = details ? arrayField(details, "attemptedPaths").length : 0;
+		const application =
+			attempted > 0
+				? wrapDetail(
+						`${committed}/${attempted} files committed • per-file atomic${committed < attempted ? " • partial application" : ""}`,
+						width,
+					)
+				: [];
+		return [...approval, ...progress, ...application, ...renderPatchDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "read" && !options.transcript && details) {
 		const start = numberField(details, "startLine");
@@ -417,6 +428,30 @@ function renderDiff(entry: TimelineToolEntry, width: number, theme: TuiTheme): s
 	});
 }
 
+function renderPatchDiff(entry: TimelineToolEntry, width: number, theme: TuiTheme): string[] {
+	const source = argumentText(entry.invocation.arguments, "patch", "");
+	const lines = source.split(/\r?\n/gu).slice(0, 400);
+	return lines.flatMap((line) => {
+		const tone: ThemeTone =
+			line.startsWith("***") || line.startsWith("@@")
+				? "muted"
+				: line.startsWith("+")
+					? "success"
+					: line.startsWith("-")
+						? "error"
+						: "muted";
+		return wrapAnsi(theme.style(tone, line), width);
+	});
+}
+
+function safeMutationMetadata(invocation: ToolActionInvocation) {
+	try {
+		return mutationRequestMetadata(invocation.toolName, invocation.arguments);
+	} catch {
+		return undefined;
+	}
+}
+
 function bashMetadata(details: Record<string, unknown>): string[] {
 	const lines: string[] = [];
 	const exitCode = numberField(details, "exitCode");
@@ -568,4 +603,8 @@ function numberField(value: Record<string, unknown>, key: string): number | unde
 
 function stringField(value: Record<string, unknown>, key: string): string | undefined {
 	return typeof value[key] === "string" ? sanitizeInline(value[key] as string) : undefined;
+}
+
+function arrayField(value: Record<string, unknown>, key: string): readonly unknown[] {
+	return Array.isArray(value[key]) ? value[key] : [];
 }

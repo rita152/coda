@@ -17,8 +17,13 @@ function failureFacts(details: Record<string, unknown>): Readonly<Record<string,
 export function toolFailure<TDetails extends Record<string, unknown>>(
 	content: string,
 	details: TDetails,
+	additionalFacts?: Readonly<Record<string, JsonValue>>,
 ): ToolExecutionOutput<TDetails & { readonly status: "failed" }> {
-	const facts = failureFacts(details);
+	const legacyFacts = failureFacts(details);
+	const facts =
+		legacyFacts || additionalFacts
+			? Object.freeze({ ...(legacyFacts ?? {}), ...(additionalFacts ?? {}) })
+			: undefined;
 	const status: ToolObservation["status"] = details.code === "access_denied" ? "denied" : "error";
 	return {
 		content,

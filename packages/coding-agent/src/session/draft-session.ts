@@ -1,4 +1,5 @@
 import type { Agent, AgentSeed } from "@coda/agent";
+import type { RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import { SessionHistoryReader, type SessionHistoryReadPort } from "./session-history-reader.ts";
 import type { DetachSession, Session, SessionChange, SessionDescriptor, SessionMediaRegistration } from "./types.ts";
 
@@ -95,6 +96,11 @@ export class DraftSession implements Session {
 			return;
 		}
 		this.#registrations.push(...structuredClone(registrations));
+	}
+
+	supplementRunEvidence(runId: string, supplement: RunEvidenceWorkspaceDiffSupplement): void {
+		this.#assertOpen();
+		this.#session?.supplementRunEvidence(runId, supplement);
 	}
 
 	stageInitialChanges(changes: readonly SessionChange[]): void {

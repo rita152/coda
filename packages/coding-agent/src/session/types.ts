@@ -18,7 +18,7 @@ import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ApprovalDecisionAuditEvent, PermissionAuditEvent } from "../permissions/audit.ts";
-import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
+import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
 declare const sessionIdBrand: unique symbol;
@@ -138,6 +138,8 @@ export interface Session {
 	readonly discardedModelCost?: number;
 	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
+	/** Adds final Workspace facts after the Agent's terminal event has projected native evidence. */
+	supplementRunEvidence(runId: string, supplement: RunEvidenceWorkspaceDiffSupplement): void;
 	attach(agent: Agent): DetachSession;
 	record(change: SessionChange): Promise<void>;
 	close(): Promise<void>;

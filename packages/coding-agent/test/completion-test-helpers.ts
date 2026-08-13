@@ -3,6 +3,7 @@ import type {
 	CompletionWorkspaceEvidenceProvider,
 	WorkspaceEvidenceSnapshot,
 } from "../src/completion/types.ts";
+import { RUN_EVIDENCE_SCHEMA_VERSION } from "../src/run-evidence/contracts.ts";
 
 /** Deterministic evidence for tests whose exercised command leaves the Workspace unchanged. */
 export function stableCompletionWorkspaceEvidence(capturedAt: number): CompletionWorkspaceEvidenceProvider {
@@ -13,14 +14,20 @@ export function stableCompletionWorkspaceEvidence(capturedAt: number): Completio
 
 export function completionRunEvidence(overrides: Partial<CompletionRunEvidence> = {}): CompletionRunEvidence {
 	return {
-		schemaVersion: 2,
+		schemaVersion: RUN_EVIDENCE_SCHEMA_VERSION,
 		type: "run_evidence",
 		runId: "run:test",
 		outcome: "success",
 		startedAt: 0,
 		completedAt: 100,
 		elapsedMs: 100,
-		paths: { inspected: [], changed: [], omitted: { inspected: 0, changed: 0 } },
+		paths: {
+			inspected: [],
+			changed: [],
+			changedWithProvenance: [],
+			workspaceDiff: { status: "unavailable", omitted: 0 },
+			omitted: { inspected: 0, changed: 0 },
+		},
 		operations: [],
 		observations: {
 			counts: { complete: 0, windowed: 0, "recoverable-overflow": 0, "lossy-overflow": 0 },

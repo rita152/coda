@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import { stableCompletionWorkspaceEvidence } from "./completion-test-helpers.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -229,6 +230,108 @@ describe("mutation Tools", () => {
 		expect((await stat(target)).mode & 0o777).toBe(0o640);
 		expect(stdout.value).toBe("The edit was applied.\n");
 		expect(stderr.value).toContain("coda: completion unverified");
+	});
+
+	it("registers patch before edit/write and applies a structured multi-file mutation", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-patch-application-"));
+		temporaryDirectories.push(workspace);
+		await writeFile(join(workspace, "existing.txt"), "before\n");
+		await writeFile(join(workspace, "obsolete.txt"), "obsolete\n");
+		const patch = `*** Begin Patch
+*** Update File: existing.txt
+-before
++after
+*** Add File: added.txt
++added
+*** Delete File: obsolete.txt
+*** End Patch`;
+		const faux = fauxProvider({ runtime: testTimeRuntime(850) });
+		faux.setResponses([
+			(context) => {
+				const names = context.tools?.map(({ name }) => name) ?? [];
+				expect(names.slice(names.indexOf("ls") + 1, names.indexOf("bash"))).toEqual(["patch", "edit", "write"]);
+				expect(context.tools?.find(({ name }) => name === "patch")?.description).toContain(
+					"each file commits atomically",
+				);
+				return fauxAssistantMessage(fauxToolCall("patch", { patch }, { id: "provider-patch-1" }), {
+					stopReason: "toolUse",
+					timestamp: 850,
+				});
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-patch-1",
+					toolName: "patch",
+					isError: false,
+					observation: {
+						status: "ok",
+						facts: {
+							mutation: {
+								atomicity: "per-file",
+								committedPaths: ["existing.txt", "added.txt", "obsolete.txt"],
+							},
+						},
+					},
+				});
+				return fauxAssistantMessage("The patch was applied.", { timestamp: 850 });
+			},
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain("run a focused verification after the latest mutation");
+				return fauxAssistantMessage(
+					fauxToolCall("bash", { command: "npm test" }, { id: "provider-patch-verification" }),
+					{ stopReason: "toolUse", timestamp: 850 },
+				);
+			},
+			fauxAssistantMessage("The patch was applied and verified.", { timestamp: 850 }),
+		]);
+		const models = createModels({ runtime: testTimeRuntime(850) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			modelProcessRunner: {
+				run: async () => ({
+					exitCode: 0,
+					signal: null,
+					stdout: "tests passed",
+					stderr: "",
+					timedOut: false,
+					truncated: false,
+					backend: "none",
+				}),
+			},
+			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(850),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 850 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		const exitCode = await application.run([
+			"--print",
+			"--sandbox",
+			"workspace-write",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"apply the patch",
+		]);
+		expect(exitCode, stderr.value).toBe(0);
+		expect(await readFile(join(workspace, "existing.txt"), "utf8")).toBe("after\n");
+		expect(await readFile(join(workspace, "added.txt"), "utf8")).toBe("added\n");
+		await expect(readFile(join(workspace, "obsolete.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect(stdout.value).toBe("The patch was applied and verified.\n");
+		expect(stderr.value).toBe("");
 	});
 
 	it("returns recoverable mutation failures to the Model and continues the Run", async () => {

@@ -1,7 +1,14 @@
 import type { AgentEvent, ToolInvocation } from "@coda/agent";
 import { resolveToolObservation, type ToolObservation, type ToolResultMessage, type Usage } from "@coda/ai";
 import {
+	type MutationFacts,
+	mutationFactsFromObservation,
+	mutationRequestMetadata,
+} from "../tools/mutation-contract.ts";
+import {
 	RUN_EVIDENCE_SCHEMA_VERSION,
+	type RunEvidenceChangedPath,
+	type RunEvidenceChangedPathProvenance,
 	type RunEvidenceCommand,
 	type RunEvidenceCommandV1,
 	type RunEvidenceEnvelope,
@@ -18,6 +25,7 @@ import {
 	type RunEvidenceToolIssueV1,
 	type RunEvidenceUsage,
 	type RunEvidenceV1Projection,
+	type RunEvidenceWorkspaceDiffSupplement,
 } from "./contracts.ts";
 import {
 	commandResolutionKey,
@@ -44,7 +52,6 @@ const MAX_ID_CHARACTERS = 128;
 const MAX_TOOL_NAME_CHARACTERS = 128;
 
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls"]);
-const MUTATION_TOOLS = new Set(["edit", "write"]);
 
 /** Minimal structural view of a private Session Record used for reconstruction. */
 export interface RunEvidenceSessionRecord {
@@ -91,6 +98,7 @@ interface ObservationEvidence {
 	readonly exitCode?: number;
 	readonly signal?: string;
 	readonly timedOut: boolean;
+	readonly mutation?: MutationFacts;
 }
 
 interface ToolEvidence {
@@ -101,6 +109,7 @@ interface ToolEvidence {
 	readonly pathKind?: "inspected" | "changed";
 	readonly path?: string;
 	readonly resolutionTarget?: RunEvidenceResolutionTarget;
+	readonly legacyMutationPaths?: readonly string[];
 	readonly command?: string;
 	readonly rawCommand?: string;
 	settlement?: "returned" | "threw" | "aborted";
@@ -246,7 +255,13 @@ export class RunEvidenceProjection {
 		completedAt: number,
 		outcome: RunEvidenceOutcome = "success",
 	): RunEvidenceEnvelope | undefined {
-		return this.#reducer.snapshotRun(runId, { outcome, completedAt });
+		return this.#reducer.snapshotRun(runId, {
+			outcome,
+			completedAt,
+			// A live completion snapshot has no lifecycle event sequence. This
+			// sentinel is observable only for a synthetic interrupted snapshot.
+			sequence: Number.MAX_SAFE_INTEGER,
+		});
 	}
 
 	accept(event: AgentEvent): RunEvidenceEnvelope | undefined {
@@ -382,23 +397,44 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 	if (!invocation || typeof invocation.id !== "string" || typeof invocation.toolName !== "string") return undefined;
 	const arguments_ = asRecord(invocation.arguments);
 	const toolName = boundedText(invocation.toolName, MAX_TOOL_NAME_CHARACTERS);
-	const requestedPath =
-		INSPECTION_TOOLS.has(toolName) || MUTATION_TOOLS.has(toolName)
-			? typeof arguments_?.path === "string"
-				? arguments_.path
-				: toolName === "grep" || toolName === "find" || toolName === "ls"
-					? "."
-					: undefined
-			: undefined;
+	const requestedPath = INSPECTION_TOOLS.has(toolName)
+		? typeof arguments_?.path === "string"
+			? arguments_.path
+			: toolName === "grep" || toolName === "find" || toolName === "ls"
+				? "."
+				: undefined
+		: undefined;
+	let legacyMutationPaths: readonly string[] | undefined;
+	if (arguments_) {
+		try {
+			legacyMutationPaths = mutationRequestMetadata(toolName, arguments_)?.requestedPaths;
+		} catch {
+			legacyMutationPaths = undefined;
+		}
+	}
+	const mutationTarget = legacyMutationPaths
+		? {
+				kind: legacyMutationPaths.length === 1 ? ("path" as const) : ("opaque" as const),
+				value: legacyMutationPaths.length === 1 ? legacyMutationPaths[0]! : JSON.stringify(legacyMutationPaths),
+			}
+		: undefined;
 	return {
 		invocationId: boundedText(invocation.id, MAX_ID_CHARACTERS),
 		toolName,
 		order,
 		...(requestedPath !== undefined
 			? {
-					pathKind: MUTATION_TOOLS.has(toolName) ? ("changed" as const) : ("inspected" as const),
+					pathKind: "inspected" as const,
 					path: safeText(requestedPath, MAX_PATH_CHARACTERS),
 					resolutionTarget: { kind: "path" as const, value: requestedPath },
+				}
+			: {}),
+		...(legacyMutationPaths
+			? {
+					legacyMutationPaths: Object.freeze(
+						legacyMutationPaths.map((path) => safeText(path, MAX_PATH_CHARACTERS)),
+					),
+					resolutionTarget: mutationTarget,
 				}
 			: {}),
 		...(toolName === "bash" && typeof arguments_?.command === "string"
@@ -430,6 +466,7 @@ function observationFromResult(message: unknown): ObservationEvidence {
 
 function observationEvidence(observation: ToolObservation): ObservationEvidence {
 	const facts = asRecord(observation.facts);
+	const mutation = mutationFactsFromObservation(observation.facts);
 	const outputRecoverable = typeof observation.outputRef === "string" && observation.outputRef.length > 0;
 	const semantics = resolveObservationSemantics({
 		truncated: observation.truncated,
@@ -451,6 +488,7 @@ function observationEvidence(observation: ToolObservation): ObservationEvidence 
 			? { signal: safeText(facts.signal, MAX_SUMMARY_CHARACTERS) }
 			: {}),
 		timedOut: facts?.timedOut === true,
+		...(mutation ? { mutation } : {}),
 	};
 }
 
@@ -478,7 +516,7 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 	const attempts = [...state.attempts.values()].sort((left, right) => left.order - right.order);
 	const tools = [...state.tools.values()].sort((left, right) => left.order - right.order);
 	const inspectedPaths: string[] = [];
-	const changedPaths: string[] = [];
+	const changedPaths = new Map<string, Set<RunEvidenceChangedPathProvenance>>();
 	let omittedInspectedPaths = 0;
 	let omittedChangedPaths = 0;
 	const operations: RunEvidenceOperation[] = [];
@@ -504,7 +542,7 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 		omittedChangedPaths += observation.omittedPaths.changed;
 		for (const path of paths) {
 			if (path.effect === "inspected") inspectedPaths.push(path.path);
-			else changedPaths.push(path.path);
+			else noteChangedPath(changedPaths, path.path, "native");
 		}
 		operations.push(
 			deepFreeze({
@@ -640,7 +678,7 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 	terminalFailures.sort((left, right) => left.sequence - right.sequence);
 	const { recoveredFailures, openFailures } = reconcileFailures(resolutionEvents);
 	const inspected = boundedUnique(inspectedPaths, MAX_PATHS);
-	const changed = boundedUnique(changedPaths, MAX_PATHS);
+	const changed = boundedChangedPaths(changedPaths, MAX_PATHS);
 	const boundedOperations = boundedList(operations, MAX_OPERATIONS);
 	const boundedCommands = boundedList(commands, MAX_COMMANDS);
 	const boundedLimitations = boundedList(observationLimitations, MAX_OBSERVATION_LIMITATIONS);
@@ -659,7 +697,9 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 		elapsedMs: Math.max(0, finished.completedAt - state.startedAt),
 		paths: {
 			inspected: inspected.values,
-			changed: changed.values,
+			changed: changed.values.map(({ path }) => path),
+			changedWithProvenance: changed.values,
+			workspaceDiff: { status: "unavailable" as const, omitted: 0 },
 			omitted: {
 				inspected: inspected.omitted + omittedInspectedPaths,
 				changed: changed.omitted + omittedChangedPaths,
@@ -703,7 +743,11 @@ export function projectRunEvidenceV1(evidence: RunEvidenceEnvelope): RunEvidence
 		startedAt: evidence.startedAt,
 		completedAt: evidence.completedAt,
 		elapsedMs: evidence.elapsedMs,
-		paths: evidence.paths,
+		paths: {
+			inspected: evidence.paths.inspected,
+			changed: evidence.paths.changed,
+			omitted: evidence.paths.omitted,
+		},
 		commands: evidence.commands.map(commandV1),
 		toolIssues: evidence.toolIssues.map(toolIssueV1),
 		unresolvedFailures: evidence.unresolvedFailures.map(failureV1),
@@ -712,6 +756,48 @@ export function projectRunEvidenceV1(evidence: RunEvidenceEnvelope): RunEvidence
 			commands: evidence.omitted.commands,
 			toolIssues: evidence.omitted.toolIssues,
 			unresolvedFailures: evidence.omitted.unresolvedFailures,
+		},
+	});
+}
+
+/** Adds final Workspace facts without reinterpreting native Tool observations. */
+export function supplementRunEvidenceWorkspaceDiff(
+	evidence: RunEvidenceEnvelope,
+	supplement: RunEvidenceWorkspaceDiffSupplement,
+): RunEvidenceEnvelope {
+	const changed = new Map<string, Set<RunEvidenceChangedPathProvenance>>();
+	for (const entry of evidence.paths.changedWithProvenance) {
+		for (const provenance of entry.provenance) noteChangedPath(changed, entry.path, provenance);
+	}
+	if (supplement.status !== "unavailable") {
+		for (const path of supplement.paths)
+			noteChangedPath(changed, safeText(path, MAX_PATH_CHARACTERS), "workspace-diff");
+	}
+	const bounded = boundedChangedPaths(changed, MAX_PATHS);
+	const representedWorkspacePaths = new Set(
+		bounded.values.filter(({ provenance }) => provenance.includes("workspace-diff")).map(({ path }) => path),
+	);
+	const workspaceOmitted =
+		Math.max(0, supplement.omitted ?? 0) +
+		new Set(
+			supplement.status === "unavailable"
+				? []
+				: supplement.paths
+						.map((path) => safeText(path, MAX_PATH_CHARACTERS))
+						.filter((path) => !representedWorkspacePaths.has(path)),
+		).size;
+	const nativeOmitted = Math.max(0, evidence.paths.omitted.changed - evidence.paths.workspaceDiff.omitted);
+	return deepFreeze({
+		...evidence,
+		paths: {
+			...evidence.paths,
+			changed: bounded.values.map(({ path }) => path),
+			changedWithProvenance: bounded.values,
+			workspaceDiff: { status: supplement.status, omitted: workspaceOmitted },
+			omitted: {
+				...evidence.paths.omitted,
+				changed: nativeOmitted + workspaceOmitted,
+			},
 		},
 	});
 }
@@ -762,12 +848,29 @@ function operationPaths(
 		effect: path.effect,
 		provenance: "tool-observation" as const,
 	}));
-	const paths =
-		declared.length > 0
-			? declared
-			: observation.status === "ok" && tool.path && tool.pathKind
-				? [{ path: tool.path, effect: tool.pathKind, provenance: "invocation-argument" as const }]
-				: [];
+	const nativeMutationPaths = (observation.mutation?.committedPaths ?? []).map((path) => ({
+		path: safeText(path, MAX_PATH_CHARACTERS),
+		effect: "changed" as const,
+		provenance: "tool-observation" as const,
+	}));
+	const legacyMutationPaths =
+		!observation.mutation && observation.status === "ok"
+			? (tool.legacyMutationPaths ?? []).map((path) => ({
+					path,
+					effect: "changed" as const,
+					provenance: "invocation-argument" as const,
+				}))
+			: [];
+	const fallbackPath =
+		observation.status === "ok" && tool.path && tool.pathKind
+			? [{ path: tool.path, effect: tool.pathKind, provenance: "invocation-argument" as const }]
+			: [];
+	const paths = [
+		...declared,
+		...nativeMutationPaths,
+		...legacyMutationPaths,
+		...(declared.length ? [] : fallbackPath),
+	];
 	const unique = new Map(paths.map((path) => [`${path.effect}\0${path.path}`, path]));
 	return deepFreeze([...unique.values()]);
 }
@@ -1029,6 +1132,26 @@ function boundedUnique(
 ): { readonly values: readonly string[]; readonly omitted: number } {
 	const unique = [...new Set(values)];
 	return deepFreeze({ values: unique.slice(0, limit), omitted: Math.max(0, unique.length - limit) });
+}
+
+function noteChangedPath(
+	paths: Map<string, Set<RunEvidenceChangedPathProvenance>>,
+	path: string,
+	provenance: RunEvidenceChangedPathProvenance,
+): void {
+	const sources = paths.get(path) ?? new Set<RunEvidenceChangedPathProvenance>();
+	sources.add(provenance);
+	paths.set(path, sources);
+}
+
+function boundedChangedPaths(
+	paths: ReadonlyMap<string, ReadonlySet<RunEvidenceChangedPathProvenance>>,
+	limit: number,
+): { readonly values: readonly RunEvidenceChangedPath[]; readonly omitted: number } {
+	const values = [...paths].map(([path, provenance]) =>
+		deepFreeze({ path, provenance: Object.freeze([...provenance]) }),
+	);
+	return deepFreeze({ values: values.slice(0, limit), omitted: Math.max(0, values.length - limit) });
 }
 
 function boundedList<T>(

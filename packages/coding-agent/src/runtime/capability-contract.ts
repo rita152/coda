@@ -104,12 +104,18 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Built-in Tools",
 		summary:
-			"Workspace-aware reading, search, mutation, Shell execution, and recoverable continuation of omitted Tool output.",
-		sources: ["packages/coding-agent/src/tools/index.ts"],
+			"Workspace-aware reading and search, permission-aware single-file and structured multi-file mutation, Shell execution, and recoverable continuation of omitted Tool output.",
+		sources: [
+			"packages/coding-agent/src/tools/index.ts",
+			"packages/coding-agent/src/tools/mutation-contract.ts",
+			"packages/coding-agent/src/tools/patch.ts",
+		],
 		tests: [
 			"packages/coding-agent/test/read-tool.test.ts",
 			"packages/coding-agent/test/search-tools.test.ts",
 			"packages/coding-agent/test/mutation-tools.test.ts",
+			"packages/coding-agent/test/patch-parser.test.ts",
+			"packages/coding-agent/test/patch-tool.test.ts",
 			"packages/coding-agent/test/bash-tool.test.ts",
 		],
 	}),
@@ -190,12 +196,13 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Objective Run evidence",
 		summary:
-			"Completed Runs project bounded, sanitized evidence from lifecycle events and authoritative Tool Observations, separating observation completeness, terminal/recovered/open failures, pending operations, retries, token usage, and price-data completeness.",
+			"Completed Runs project bounded, sanitized evidence from lifecycle events, authoritative Tool Observations, generic mutation facts, and the final Git-visible Workspace diff, separating completeness, changed-path provenance, terminal/recovered/open failures, pending operations, retries, token usage, and price-data completeness.",
 		sources: [
 			"packages/coding-agent/src/run-evidence/contracts.ts",
 			"packages/coding-agent/src/run-evidence/failure-semantics.ts",
 			"packages/coding-agent/src/run-evidence/observation-semantics.ts",
 			"packages/coding-agent/src/run-evidence/run-evidence.ts",
+			"packages/coding-agent/src/run-evidence/workspace-diff.ts",
 			"packages/coding-agent/src/run-evidence/presentation.ts",
 			"packages/coding-agent/src/session/managed-session.ts",
 		],
@@ -203,6 +210,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/read-tool.test.ts",
 			"packages/coding-agent/test/run-evidence.test.ts",
 			"packages/coding-agent/test/run-evidence-presentation.test.ts",
+			"packages/coding-agent/test/workspace-diff.test.ts",
 		],
 	}),
 	capability({
@@ -252,9 +260,17 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Permissions and Sandbox",
 		summary:
-			"Read Only, Workspace, and Full Access Permission Profiles; four Approval Policies; exact grants and rules; and OS-enforced macOS or Linux Sandbox execution.",
-		sources: ["packages/coding-agent/src/permissions/permission-engine.ts", "packages/sandbox/src/execute.ts"],
-		tests: ["packages/coding-agent/test/permission-engine.test.ts", "packages/sandbox/test/execute.test.ts"],
+			"Read Only, Workspace, and Full Access Permission Profiles; four Approval Policies; exact invocation-scoped single- and multi-target grants and rules; and OS-enforced macOS or Linux Sandbox execution.",
+		sources: [
+			"packages/coding-agent/src/permissions/permission-engine.ts",
+			"packages/coding-agent/src/tools/mutation-contract.ts",
+			"packages/sandbox/src/execute.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/permission-engine.test.ts",
+			"packages/coding-agent/test/patch-permission.test.ts",
+			"packages/sandbox/test/execute.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.read-protection",

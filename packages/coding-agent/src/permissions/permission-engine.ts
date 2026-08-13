@@ -8,6 +8,7 @@ import type {
 	ReadAccessPolicy,
 } from "@coda/sandbox";
 import { createReadAccessPolicy, normalizeNetworkHost, PROTECTED_METADATA_NAMES } from "@coda/sandbox";
+import { isMutationToolName, MUTATION_TOOL_NAMES, mutationRequestMetadata } from "../tools/mutation-contract.ts";
 import type { PathIntent, ResolvedWorkspacePath, Workspace } from "../workspace.ts";
 import { type ApprovalDecisionAuditEvent, approvalDecisionAuditEvent, type ReadAccessAuditEvent } from "./audit.ts";
 import {
@@ -19,8 +20,7 @@ import {
 
 export type { CommandRule, CommandRuleDecision, CommandRulePatternToken, HostExecutable } from "./command-policy.ts";
 
-const FILE_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
-const MUTATION_TOOLS = new Set(["edit", "write"]);
+const FILE_TOOLS = new Set(["read", "grep", "find", "ls", ...MUTATION_TOOL_NAMES]);
 const SHELL_TOOLS = new Set(["bash", "process_start"]);
 const BANNED_PREFIX_SUGGESTIONS = new Set(
 	[
@@ -162,6 +162,9 @@ export interface PermissionApprovalRequest {
 	readonly operation?: "read" | "write";
 	readonly requestedPath?: string;
 	readonly canonicalPath?: string;
+	/** Exact target set for a permission-reviewed multi-file mutation. */
+	readonly requestedPaths?: readonly string[];
+	readonly canonicalPaths?: readonly string[];
 	readonly diff?: string;
 	readonly justification?: string;
 	readonly additionalPermissions?: AdditionalPermissionProfile;
@@ -299,11 +302,16 @@ interface ParsedShellRequest {
 	readonly proposedCommandRule?: readonly string[];
 }
 
-interface ParsedFileRequest {
+interface ParsedFileTarget {
 	readonly requestedPath: string;
+	readonly resolved: ResolvedWorkspacePath;
+}
+
+interface ParsedFileRequest {
 	readonly intent: PathIntent;
 	readonly recursive: boolean;
-	readonly resolved: ResolvedWorkspacePath;
+	readonly targets: readonly ParsedFileTarget[];
+	readonly preview?: string;
 }
 
 interface StoredCommandSessionApproval extends CommandSessionApproval {
@@ -319,37 +327,41 @@ function isContained(root: string, target: string): boolean {
 	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
 }
 
-function filePath(request: ToolPolicyRequest): string | undefined {
+function filePaths(request: ToolPolicyRequest): readonly string[] | undefined {
 	if (!FILE_TOOLS.has(request.toolName)) return undefined;
+	const mutation = mutationRequestMetadata(request.toolName, request.arguments);
+	if (mutation) return mutation.requestedPaths;
 	const path = request.arguments.path;
-	if (typeof path === "string") return path;
-	return request.toolName === "grep" || request.toolName === "find" || request.toolName === "ls" ? "." : undefined;
+	if (typeof path === "string") return Object.freeze([path]);
+	return request.toolName === "grep" || request.toolName === "find" || request.toolName === "ls"
+		? Object.freeze(["."])
+		: undefined;
 }
 
 function fileIntent(toolName: string): PathIntent {
-	return MUTATION_TOOLS.has(toolName) ? "write" : "read";
+	return isMutationToolName(toolName) ? "write" : "read";
 }
 
 function recursiveFileAccess(toolName: string): boolean {
 	return toolName === "grep" || toolName === "find" || toolName === "ls";
 }
 
-function mutationPreview(request: ToolPolicyRequest): string | undefined {
-	if (request.toolName === "edit") {
-		const oldText = typeof request.arguments.oldText === "string" ? request.arguments.oldText : "";
-		const newText = typeof request.arguments.newText === "string" ? request.arguments.newText : "";
-		return `--- current\n+++ proposed\n-${oldText}\n+${newText}`.slice(0, 4_096);
-	}
-	if (request.toolName === "write") {
-		const content = typeof request.arguments.content === "string" ? request.arguments.content : "";
-		return `Write ${content.length} characters${content ? `:\n${content}` : ""}`.slice(0, 4_096);
-	}
-	return undefined;
-}
-
 function protectedByPolicy(policy: Readonly<CompiledSandboxPolicy>, canonicalPath: string): boolean {
 	if (policy.writableRoots === "full-disk") return false;
 	return policy.protectedMetadataPaths.some((path) => isContained(path, canonicalPath));
+}
+
+function isProtectedPatchTarget(workspaceRoot: string, requestedPath: string, canonicalPath: string): boolean {
+	const protectedNames = new Set<string>(PROTECTED_METADATA_NAMES.map((name) => name.toLowerCase()));
+	const requestedProtected = requestedPath
+		.split(/[\\/]/gu)
+		.some((component) => protectedNames.has(component.toLowerCase()));
+	if (requestedProtected) return true;
+	const canonicalRelative = relative(workspaceRoot, canonicalPath);
+	if (canonicalRelative === ".." || canonicalRelative.startsWith(`..${sep}`) || isAbsolute(canonicalRelative)) {
+		return false;
+	}
+	return canonicalRelative.split(sep).some((component) => protectedNames.has(component.toLowerCase()));
 }
 
 async function materializeProtectedMetadataPolicy(
@@ -414,7 +426,12 @@ async function exactMutationPolicy(
 }
 
 function fileApprovalCacheKey(request: ToolPolicyRequest, parsed: ParsedFileRequest): string {
-	return JSON.stringify([request.toolName, parsed.intent, parsed.resolved.canonicalPath, parsed.recursive]);
+	return JSON.stringify([
+		request.toolName,
+		parsed.intent,
+		parsed.targets.map(({ resolved }) => resolved.canonicalPath).sort(),
+		parsed.recursive,
+	]);
 }
 
 function shellWords(command: string, shellExecutable: string): readonly string[] {
@@ -1410,91 +1427,132 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 	const checkFile = async (toolRequest: ToolPolicyRequest): Promise<ToolPolicyDecision> => {
 		const workspace = options.workspace;
 		if (!workspace) return reject("filesystem permission checking requires a Workspace");
-		const requestedPath = filePath(toolRequest);
-		if (requestedPath === undefined) return reject(`${toolRequest.toolName} path must be a non-empty string`);
 		try {
 			const intent = fileIntent(toolRequest.toolName);
-			const resolved = await workspace.resolvePath(requestedPath, intent);
+			const requestedPaths = filePaths(toolRequest);
+			if (!requestedPaths || requestedPaths.length === 0) {
+				return reject(`${toolRequest.toolName} path must be a non-empty string`);
+			}
+			const targets = await Promise.all(
+				requestedPaths.map(async (requestedPath) => ({
+					requestedPath,
+					resolved: await workspace.resolvePath(requestedPath, intent),
+				})),
+			);
+			const canonicalPaths = targets.map(({ resolved }) => resolved.canonicalPath);
+			if (new Set(canonicalPaths).size !== canonicalPaths.length) {
+				return reject("File targets resolve to a conflicting canonical path");
+			}
 			const invocationProfile = await materializeProtectedMetadataPolicy(activeProfile, workspace);
 			const baseReadAccess = createReadAccessPolicy(invocationProfile);
-			const readDecision = baseReadAccess.evaluate(resolved.canonicalPath);
+			const readDecisions = targets.map(({ resolved }) => baseReadAccess.evaluate(resolved.canonicalPath));
+			if (
+				toolRequest.toolName === "patch" &&
+				targets.some(({ requestedPath, resolved }) =>
+					isProtectedPatchTarget(workspace.root, requestedPath, resolved.canonicalPath),
+				)
+			) {
+				return reject("Protected Workspace metadata cannot be patched");
+			}
+			const mutation = mutationRequestMetadata(toolRequest.toolName, toolRequest.arguments);
 			const parsed: ParsedFileRequest = {
-				requestedPath,
 				intent,
 				recursive: recursiveFileAccess(toolRequest.toolName),
-				resolved,
+				targets: Object.freeze(targets),
+				...(mutation ? { preview: mutation.preview } : {}),
 			};
 			const auditRead = async (
 				outcome: ReadAccessAuditEvent["outcome"],
 				details: Pick<ReadAccessAuditEvent, "source"> | Pick<ReadAccessAuditEvent, "reason">,
 			): Promise<void> => {
 				if (intent !== "read") return;
-				await auditReadBestEffort({
-					type: "read_access",
-					invocationId: String(toolRequest.invocationId),
-					toolName: toolRequest.toolName,
-					requestedPath,
-					canonicalPath: resolved.canonicalPath,
-					recursive: parsed.recursive,
-					outcome,
-					...details,
-				});
+				await Promise.all(
+					targets.map(({ requestedPath, resolved }) =>
+						auditReadBestEffort({
+							type: "read_access",
+							invocationId: String(toolRequest.invocationId),
+							toolName: toolRequest.toolName,
+							requestedPath,
+							canonicalPath: resolved.canonicalPath,
+							recursive: parsed.recursive,
+							outcome,
+							...details,
+						}),
+					),
+				);
 			};
 			const grant = async (reviewed: boolean) => {
-				const sandboxPolicy =
-					intent === "write"
-						? await exactMutationPolicy(
-								invocationProfile,
-								resolved.canonicalPath,
-								resolved.lexicalPath,
-								workspace,
-							)
-						: invocationProfile;
+				let sandboxPolicy = invocationProfile;
+				if (intent === "write") {
+					for (const { resolved } of targets) {
+						sandboxPolicy = await exactMutationPolicy(
+							sandboxPolicy,
+							resolved.canonicalPath,
+							resolved.lexicalPath,
+							workspace,
+						);
+					}
+				}
 				const readAccessPolicy = createReadAccessPolicy(sandboxPolicy).withApprovedRoots(
-					reviewed ? [intent === "write" ? dirname(resolved.canonicalPath) : resolved.canonicalPath] : [],
+					reviewed
+						? targets.map(({ resolved }) =>
+								intent === "write" ? dirname(resolved.canonicalPath) : resolved.canonicalPath,
+							)
+						: [],
 				);
-				workspace.grantPath({
-					invocationId: toolRequest.invocationId,
-					toolName: toolRequest.toolName,
-					intent,
-					canonicalPath: resolved.canonicalPath,
-					recursive: parsed.recursive,
-				});
+				for (const { resolved } of targets) {
+					workspace.grantPath({
+						invocationId: toolRequest.invocationId,
+						toolName: toolRequest.toolName,
+						intent,
+						canonicalPath: resolved.canonicalPath,
+						recursive: parsed.recursive,
+					});
+				}
 				readAccessPolicies.set(toolRequest.invocationId, readAccessPolicy);
 			};
 			const profileAllowsOperation =
 				intent === "read"
-					? readDecision.decision === "allow"
-					: profileAllowsWrite(invocationProfile, resolved.canonicalPath) &&
-						(readDecision.decision === "allow" || readDecision.reason !== "denied-read-root");
+					? readDecisions.every(({ decision }) => decision === "allow")
+					: targets.every(
+							({ resolved }, index) =>
+								profileAllowsWrite(invocationProfile, resolved.canonicalPath) &&
+								(readDecisions[index]!.decision === "allow" ||
+									readDecisions[index]!.reason !== "denied-read-root"),
+						);
 			if (profileAllowsOperation) {
 				await grant(false);
-				if (readDecision.decision === "allow") {
-					await auditRead("allowed", { source: readDecision.source });
+				const source = readDecisions[0]?.decision === "allow" ? readDecisions[0].source : undefined;
+				if (source) {
+					await auditRead("allowed", { source });
 				}
 				return { decision: "allow" };
 			}
 
-			const protectedMetadata = protectedByPolicy(invocationProfile, resolved.canonicalPath);
-			const reason =
-				readDecision.decision === "deny" && readDecision.reason === "denied-read-root"
-					? "path is within a protected Credential root"
-					: intent === "read"
-						? "path is outside the configured readable roots"
-						: protectedMetadata
-							? "protected metadata is read-only in this permission profile"
-							: activeProfile.profile === "read-only"
-								? "Read Only does not permit writes"
-								: "path is outside the configured writable roots";
+			const deniedRead = readDecisions.find(
+				(decision) => decision.decision === "deny" && decision.reason === "denied-read-root",
+			);
+			const protectedMetadata = targets.some(({ resolved }) =>
+				protectedByPolicy(invocationProfile, resolved.canonicalPath),
+			);
+			const reason = deniedRead
+				? "path is within a protected Credential root"
+				: intent === "read"
+					? "path is outside the configured readable roots"
+					: protectedMetadata
+						? "protected metadata is read-only in this permission profile"
+						: activeProfile.profile === "read-only"
+							? "Read Only does not permit writes"
+							: "path is outside the configured writable roots";
 			if (activeApprovalPolicy === "never") {
 				await auditRead("denied", {
-					reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+					reason: deniedRead ? "denied-read-root" : "approval-unavailable",
 				});
 				return reject(`${reason}; approval policy is never`);
 			}
 			if (!granularAllowsSandbox(activeApprovalPolicy)) {
 				await auditRead("denied", {
-					reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+					reason: deniedRead ? "denied-read-root" : "approval-unavailable",
 				});
 				return reject(`${reason}; approval policy disallowed sandbox approval prompt`);
 			}
@@ -1511,9 +1569,16 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 						reason,
 						toolName: toolRequest.toolName,
 						operation: intent,
-						requestedPath,
-						canonicalPath: resolved.canonicalPath,
-						diff: mutationPreview(toolRequest),
+						...(targets.length === 1
+							? {
+									requestedPath: targets[0]!.requestedPath,
+									canonicalPath: targets[0]!.resolved.canonicalPath,
+								}
+							: {
+									requestedPaths: Object.freeze(targets.map(({ requestedPath }) => requestedPath)),
+									canonicalPaths: Object.freeze(canonicalPaths),
+								}),
+						diff: parsed.preview,
 					});
 				} catch {
 					decision = { type: "denied", rejection: "approval reviewer failed" };
@@ -1530,7 +1595,7 @@ export function createPermissionEngine(options: PermissionEngineOptions): Permis
 						return reject("approval request aborted");
 					case "denied":
 						await auditRead("denied", {
-							reason: readDecision.decision === "deny" ? readDecision.reason : "approval-unavailable",
+							reason: deniedRead ? "denied-read-root" : "approval-unavailable",
 						});
 						return reject(decision.rejection);
 					case "timed-out":

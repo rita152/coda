@@ -77,7 +77,7 @@ export interface CompletionActivitySnapshot extends CompletionTemporalSnapshot {
 	readonly openFailures: readonly CompletionRelevantFailure[];
 }
 
-/** The completion gate consumes the public v2 evidence contract directly. */
+/** The completion gate consumes the current public evidence contract directly. */
 export type CompletionRunEvidence = RunEvidenceEnvelope;
 
 export interface CompletionDisposition {

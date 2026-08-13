@@ -1,8 +1,4 @@
-import type {
-	RunEvidenceEnvelope,
-	RunEvidenceFailure,
-	RunEvidenceOperation,
-} from "../run-evidence/contracts.ts";
+import type { RunEvidenceEnvelope, RunEvidenceFailure, RunEvidenceOperation } from "../run-evidence/contracts.ts";
 import { classifyShellCommand, sanitizeCompletionCommand } from "./completion-evidence.ts";
 import type {
 	CompletionActivitySnapshot,
@@ -13,7 +9,7 @@ import type {
 } from "./types.ts";
 
 /**
- * Adapts the public RunEvidence v2 operation chronology and open-failure set to
+ * Adapts the public RunEvidence operation chronology and open-failure set to
  * completion policy. Failure reconciliation remains exclusively owned by RunEvidence.
  */
 export function completionActivityFromRunEvidence(
@@ -44,10 +40,7 @@ function activityFromOperations(
 		const succeeded = operation.status === "ok" && operation.settlement === "returned";
 		const changed = operation.paths.filter(({ effect }) => effect === "changed");
 		if (succeeded && changed.length > 0) {
-			latestMutation = point(
-				operation,
-				changed.map(({ path }) => path).join(", ") || "workspace mutation",
-			);
+			latestMutation = point(operation, changed.map(({ path }) => path).join(", ") || "workspace mutation");
 		}
 		if (operation.command && commandEffect === "verification") {
 			const command = sanitizeCompletionCommand(operation.command);
@@ -60,8 +53,8 @@ function activityFromOperations(
 					operation.status === "ok" && operation.settlement === "returned"
 						? "passed"
 						: operation.status === "error" &&
-							operation.settlement === "returned" &&
-							commandEvidence?.timedOut !== true
+								operation.settlement === "returned" &&
+								commandEvidence?.timedOut !== true
 							? "failed"
 							: "infra_error",
 				command,
@@ -78,17 +71,11 @@ function activityFromOperations(
 	};
 }
 
-function isCompletionRelevant(
-	failure: RunEvidenceFailure,
-	operation: RunEvidenceOperation | undefined,
-): boolean {
+function isCompletionRelevant(failure: RunEvidenceFailure, operation: RunEvidenceOperation | undefined): boolean {
 	if (failure.kind !== "tool" || !operation) return true;
 	if (failure.status !== "error" || operation.settlement !== "returned") return true;
 	if (operation.command) return classifyShellCommand(operation.command) !== "read_only";
-	return !(
-		operation.paths.length > 0 &&
-		operation.paths.every(({ effect }) => effect === "inspected")
-	);
+	return !(operation.paths.length > 0 && operation.paths.every(({ effect }) => effect === "inspected"));
 }
 
 function relevantFailure(

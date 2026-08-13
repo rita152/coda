@@ -48,6 +48,8 @@ function snapshotRequest(request: PermissionApprovalRequest): PermissionApproval
 	return Object.freeze({
 		...request,
 		commandWords: request.commandWords ? Object.freeze([...request.commandWords]) : undefined,
+		requestedPaths: request.requestedPaths ? Object.freeze([...request.requestedPaths]) : undefined,
+		canonicalPaths: request.canonicalPaths ? Object.freeze([...request.canonicalPaths]) : undefined,
 		proposedCommandRule: request.proposedCommandRule ? Object.freeze([...request.proposedCommandRule]) : undefined,
 		proposedSessionCommandRule: request.proposedSessionCommandRule
 			? Object.freeze([...request.proposedSessionCommandRule])
@@ -609,6 +611,15 @@ function legacyTarget(request: PermissionApprovalRequest): string {
 	if (request.kind === "network") {
 		return `Destination: ${request.protocol ?? "https"}://${request.host ?? "unknown"}:${request.port ?? "default"}`;
 	}
+	if (request.requestedPaths || request.canonicalPaths) {
+		const requested = request.requestedPaths ?? [];
+		const canonical = request.canonicalPaths ?? [];
+		const targets = Array.from(
+			{ length: Math.max(requested.length, canonical.length) },
+			(_, index) => `${requested[index] ?? "(not provided)"} -> ${canonical[index] ?? "(unresolved)"}`,
+		);
+		return `Targets (${targets.length}): ${targets.join(", ")}`;
+	}
 	return `Path: ${request.requestedPath ?? "(not provided)"} -> ${request.canonicalPath ?? "(unresolved)"}`;
 }
 
@@ -623,13 +634,21 @@ function renderLegacyApproval(request: PermissionApprovalRequest, width: number,
 		const safe = visibleUntrustedText(line).replace(/[\r\n]+/gu, " ");
 		return safe ? wrapAnsi(safe, innerWidth) : [""];
 	};
+	const preview = request.diff
+		? request.diff
+				.split(/\r?\n/gu)
+				.flatMap((line, index) => wrapLine(`${index === 0 ? "Patch preview: " : ""}${line}`))
+		: [];
+	const choices = wrapLine(legacyChoices(request));
+	const availableBodyRows = Math.max(0, maxHeight - 2 - choices.length);
 	const body = [
 		...wrapLine(`Approval required — ${request.kind}`),
 		...wrapLine(request.reason),
 		...wrapLine(legacyTarget(request)),
 		...wrapLine(`cwd: ${request.cwd}`),
-		...wrapLine(legacyChoices(request)),
-	].slice(0, maxHeight - 2);
+		...preview,
+	].slice(0, availableBodyRows);
+	body.push(...choices.slice(0, Math.max(0, maxHeight - 2 - body.length)));
 	return [
 		`╭${"─".repeat(width - 2)}╮`,
 		...body.map((line) => {

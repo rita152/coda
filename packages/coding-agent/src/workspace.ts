@@ -76,7 +76,7 @@ export async function createWorkspace(root: string, fileSystem: FileSystem): Pro
 	const canonicalRoot = await fileSystem.realpath(resolve(root));
 	const rootStatus = await fileSystem.stat(canonicalRoot);
 	if (rootStatus.kind !== "directory") throw new Error(`Workspace is not a directory: ${root}`);
-	const grants = new Map<ToolInvocationId, WorkspacePathGrant>();
+	const grants = new Map<ToolInvocationId, WorkspacePathGrant[]>();
 
 	return {
 		root: canonicalRoot,
@@ -93,14 +93,32 @@ export async function createWorkspace(root: string, fileSystem: FileSystem): Pro
 			};
 		},
 		grantPath: (grant) => {
-			grants.set(grant.invocationId, Object.freeze({ ...grant }));
+			const invocationGrants = grants.get(grant.invocationId) ?? [];
+			if (
+				invocationGrants.some(
+					(existing) =>
+						existing.toolName === grant.toolName &&
+						existing.intent === grant.intent &&
+						existing.canonicalPath === grant.canonicalPath &&
+						existing.recursive === grant.recursive,
+				)
+			) {
+				return;
+			}
+			invocationGrants.push(Object.freeze({ ...grant }));
+			grants.set(grant.invocationId, invocationGrants);
 		},
 		isPathGranted: (invocationId, toolName, intent, canonicalPath) => {
-			const grant = grants.get(invocationId);
-			if (!grant || grant.toolName !== toolName || grant.intent !== intent) return false;
 			return (
-				canonicalPath === grant.canonicalPath ||
-				(grant.recursive && isContained(grant.canonicalPath, canonicalPath))
+				grants
+					.get(invocationId)
+					?.some(
+						(grant) =>
+							grant.toolName === toolName &&
+							grant.intent === intent &&
+							(canonicalPath === grant.canonicalPath ||
+								(grant.recursive && isContained(grant.canonicalPath, canonicalPath))),
+					) ?? false
 			);
 		},
 	};

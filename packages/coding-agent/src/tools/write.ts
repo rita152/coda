@@ -6,6 +6,7 @@ import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { Workspace } from "../workspace.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
+import { mutationFacts, mutationObservationFacts } from "./mutation-contract.ts";
 import type { AtomicMutationWriter } from "./sandboxed-mutation-writer.ts";
 
 const WriteParameters = Type.Object(
@@ -51,12 +52,30 @@ export function createWriteTool(
 			const bytes = new TextEncoder().encode(arguments_.content);
 			return coordinator.run(initial.canonicalPath, async () => {
 				const result = await atomicWrite(workspace, fileSystem, initial, bytes, context, "write", writer);
+				const afterSha256 = sha256(bytes);
+				const mutation = mutationFacts({
+					atomicity: "single-file",
+					attemptedPaths: [arguments_.path],
+					committedDelta: [
+						{
+							path: arguments_.path,
+							operation: result.created ? "add" : "update",
+							beforeSha256: null,
+							afterSha256,
+							previousBytes: result.previousSize,
+							bytes: result.size,
+						},
+					],
+				});
 				return {
 					content: `${result.created ? "Created" : "Overwrote"} ${arguments_.path} (${result.size} bytes).`,
 					observation: {
 						status: "ok",
 						truncated: false,
-						facts: { operation: result.created ? "create" : "overwrite", bytes: result.size },
+						facts: mutationObservationFacts(mutation, {
+							operation: result.created ? "create" : "overwrite",
+							bytes: result.size,
+						}),
 					},
 					details: {
 						requestedPath: arguments_.path,
@@ -64,7 +83,7 @@ export function createWriteTool(
 						operation: result.created ? "create" : "overwrite",
 						previousBytes: result.previousSize,
 						bytes: result.size,
-						sha256: sha256(bytes),
+						sha256: afterSha256,
 					},
 				};
 			});

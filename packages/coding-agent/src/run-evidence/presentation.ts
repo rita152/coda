@@ -9,15 +9,15 @@ export function renderRunEvidenceSummary(evidence: ReadableRunEvidence, width: n
 	const commands = evidence.commands.length + evidence.omitted.commands;
 	const issues = evidence.toolIssues.length + evidence.omitted.toolIssues;
 	const open =
-		evidence.schemaVersion === 2
+		evidence.schemaVersion !== 1
 			? evidence.openFailures.length + evidence.omitted.openFailures
 			: evidence.unresolvedFailures.length + evidence.omitted.unresolvedFailures;
 	const recovered =
-		evidence.schemaVersion === 2 ? evidence.recoveredFailures.length + evidence.omitted.recoveredFailures : 0;
+		evidence.schemaVersion !== 1 ? evidence.recoveredFailures.length + evidence.omitted.recoveredFailures : 0;
 	const pending =
-		evidence.schemaVersion === 2 ? evidence.pendingOperations.length + evidence.omitted.pendingOperations : 0;
+		evidence.schemaVersion !== 1 ? evidence.pendingOperations.length + evidence.omitted.pendingOperations : 0;
 	const observationSegments =
-		evidence.schemaVersion === 2
+		evidence.schemaVersion !== 1
 			? [
 					evidence.observations.counts.windowed > 0
 						? count(evidence.observations.counts.windowed, "windowed")

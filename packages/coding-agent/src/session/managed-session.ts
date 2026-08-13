@@ -4,6 +4,8 @@ import {
 	projectSessionRunEvidence,
 	type RunEvidenceEnvelope,
 	RunEvidenceProjection,
+	type RunEvidenceWorkspaceDiffSupplement,
+	supplementRunEvidenceWorkspaceDiff,
 } from "../run-evidence/run-evidence.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
@@ -137,6 +139,14 @@ export class ManagedSession implements Session {
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void {
 		this.#assertOpen();
 		this.#journal.registerMedia?.(registrations);
+	}
+
+	supplementRunEvidence(runId: string, supplement: RunEvidenceWorkspaceDiffSupplement): void {
+		this.#assertOpen();
+		let index = this.#runEvidence.length - 1;
+		while (index >= 0 && this.#runEvidence[index]?.runId !== runId) index--;
+		if (index < 0) return;
+		this.#runEvidence[index] = supplementRunEvidenceWorkspaceDiff(this.#runEvidence[index]!, supplement);
 	}
 
 	attach(agent: Agent): DetachSession {

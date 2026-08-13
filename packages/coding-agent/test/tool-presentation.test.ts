@@ -11,6 +11,13 @@ describe("Tool Invocation presentation", () => {
 		["grep", { pattern: "TODO", path: "src" }, "Searched “TODO” in src"],
 		["find", { pattern: "*.ts", path: "." }, "Explored *.ts in ."],
 		["ls", { path: "src" }, "Explored src"],
+		[
+			"patch",
+			{
+				patch: "*** Begin Patch\n*** Add File: one.txt\n+one\n*** Delete File: two.txt\n*** End Patch",
+			},
+			"Patched 2 files",
+		],
 		["edit", { path: "src/a.ts", oldText: "a", newText: "b" }, "Edited src/a.ts"],
 		["write", { path: "new.ts", content: "hello" }, "Wrote new.ts"],
 		["bash", { command: "npm test" }, "Ran npm test"],
@@ -157,6 +164,35 @@ describe("Tool Invocation presentation", () => {
 		expect(plain).toContain("-old two");
 		expect(plain).toContain("+new one");
 		expect(plain).toContain("+new two");
+	});
+
+	it("shows per-file atomicity and partial application for patch failures", () => {
+		const patch = `*** Begin Patch
+*** Update File: one.txt
+-one
++ONE
+*** Update File: two.txt
+-two
++TWO\u001b[2J
+*** End Patch`;
+		const entry = toolEntry("patch", { patch }, "failed", "partial", {
+			attemptedPaths: ["one.txt", "two.txt"],
+			committedPaths: ["one.txt"],
+			notAppliedPaths: ["two.txt"],
+			atomicity: "per-file",
+		});
+		const rendered = renderToolInvocation(entry, {
+			width: 80,
+			now: 2_000,
+			transcript: true,
+			theme: createCodaTheme(0),
+		});
+		const plain = rendered.map(stripAnsi).join("\n");
+
+		expect(plain).toContain("Patched 2 files — failed");
+		expect(plain).toContain("1/2 files committed • per-file atomic • partial application");
+		expect(plain).toContain("*** Update File: one.txt");
+		expect(rendered.join("")).not.toContain("\u001b[2J");
 	});
 
 	it("groups consecutive read-only exploration while retaining child state", () => {

@@ -1,6 +1,6 @@
 import type { ToolObservation } from "@coda/ai";
 
-export const RUN_EVIDENCE_SCHEMA_VERSION = 2 as const;
+export const RUN_EVIDENCE_SCHEMA_VERSION = 3 as const;
 export const RUN_EVIDENCE_TOOL_FACTS_VERSION = 1 as const;
 
 export type RunEvidenceOutcome = "success" | "error" | "aborted" | "interrupted";
@@ -41,6 +41,7 @@ export interface RunEvidenceResolutionTarget {
 }
 
 export type RunEvidencePathProvenance = "tool-observation" | "invocation-argument" | "workspace-diff";
+export type RunEvidenceChangedPathProvenance = "native" | "workspace-diff";
 
 export interface RunEvidenceOperationPath extends RunEvidenceToolFactPath {
 	readonly provenance: RunEvidencePathProvenance;
@@ -154,13 +155,34 @@ export interface RunEvidenceUsage {
 	};
 }
 
-export interface RunEvidencePaths {
+export interface RunEvidencePathsV1 {
 	readonly inspected: readonly string[];
 	readonly changed: readonly string[];
 	readonly omitted: {
 		readonly inspected: number;
 		readonly changed: number;
 	};
+}
+
+export interface RunEvidenceChangedPath {
+	readonly path: string;
+	readonly provenance: readonly RunEvidenceChangedPathProvenance[];
+}
+
+export interface RunEvidenceWorkspaceDiff {
+	readonly status: "complete" | "partial" | "unavailable";
+	readonly omitted: number;
+}
+
+export interface RunEvidenceWorkspaceDiffSupplement {
+	readonly status: RunEvidenceWorkspaceDiff["status"];
+	readonly paths: readonly string[];
+	readonly omitted?: number;
+}
+
+export interface RunEvidencePaths extends RunEvidencePathsV1 {
+	readonly changedWithProvenance: readonly RunEvidenceChangedPath[];
+	readonly workspaceDiff: RunEvidenceWorkspaceDiff;
 }
 
 /** Strict v1 shape available to readers that have not adopted v2 semantics. */
@@ -172,7 +194,7 @@ export interface RunEvidenceV1Projection {
 	readonly startedAt: number;
 	readonly completedAt: number;
 	readonly elapsedMs: number;
-	readonly paths: RunEvidencePaths;
+	readonly paths: RunEvidencePathsV1;
 	readonly commands: readonly RunEvidenceCommandV1[];
 	readonly toolIssues: readonly RunEvidenceToolIssueV1[];
 	readonly unresolvedFailures: readonly RunEvidenceFailureV1[];
@@ -185,10 +207,11 @@ export interface RunEvidenceV1Projection {
 }
 
 /**
- * Stable v2 JSONL envelope emitted after one completed Run.
+ * Stable v3 JSONL envelope emitted after one completed Run.
  *
  * The v1 field names remain in place for tolerant readers; strict v1 consumers can
- * use `projectRunEvidenceV1` while migrating to the explicit v2 categories.
+ * use `projectRunEvidenceV1` while migrating to explicit failure/completeness and
+ * changed-path provenance categories.
  */
 export interface RunEvidenceEnvelope {
 	readonly schemaVersion: typeof RUN_EVIDENCE_SCHEMA_VERSION;

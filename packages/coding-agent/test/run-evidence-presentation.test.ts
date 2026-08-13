@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { renderRunEvidenceSummary } from "../src/run-evidence/presentation.ts";
-import { projectRunEvidenceV1, type RunEvidenceEnvelope } from "../src/run-evidence/run-evidence.ts";
+import {
+	projectRunEvidenceV1,
+	RUN_EVIDENCE_SCHEMA_VERSION,
+	type RunEvidenceEnvelope,
+} from "../src/run-evidence/run-evidence.ts";
 
 describe("Run evidence interactive presentation", () => {
 	it("presents concise aggregate evidence without projecting paths or commands", () => {
@@ -94,7 +98,7 @@ function evidence(): RunEvidenceEnvelope {
 		resolutionKey: "command:v1:open",
 	};
 	return {
-		schemaVersion: 2,
+		schemaVersion: RUN_EVIDENCE_SCHEMA_VERSION,
 		type: "run_evidence",
 		runId: "run:1",
 		outcome: "success",
@@ -104,6 +108,8 @@ function evidence(): RunEvidenceEnvelope {
 		paths: {
 			inspected: ["malicious\u001b[31m/path", "second"],
 			changed: ["secret/path"],
+			changedWithProvenance: [{ path: "secret/path", provenance: ["native"] }],
+			workspaceDiff: { status: "complete", omitted: 0 },
 			omitted: { inspected: 0, changed: 0 },
 		},
 		operations: [],

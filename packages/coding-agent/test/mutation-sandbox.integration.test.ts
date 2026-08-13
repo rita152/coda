@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext, ToolPolicyRequest } from "@coda/agent";
@@ -134,5 +135,43 @@ integration("sandboxed file-mutation boundary", () => {
 		await expect(readFile(join(canonicalOutside, "parser", "escape.txt"), "utf8")).rejects.toMatchObject({
 			code: "ENOENT",
 		});
+	});
+
+	it("rejects a same-content target identity replacement before commit", async () => {
+		const workspacePath = await mkdtemp(join(tmpdir(), "coda-mutation-identity-race-"));
+		temporaryDirectories.push(workspacePath);
+		const workspace = await createWorkspace(workspacePath, createNodeFileSystem());
+		const target = join(workspace.root, "target.txt");
+		const parked = join(workspace.root, "target.parked.txt");
+		const content = Buffer.from("same content\n");
+		await writeFile(target, content);
+		const before = await lstat(target);
+		const policy = compileSandboxPolicy({
+			profile: "workspace",
+			workspaceRoots: [workspace.root],
+			temporaryDirectory: await realpath(tmpdir()),
+		});
+		const writer = createSandboxedMutationWriter({
+			workspace,
+			permissions: { readAccessPolicyFor: () => createReadAccessPolicy(policy) },
+			beforeLaunch: async () => {
+				await rename(target, parked);
+				await writeFile(target, content);
+			},
+		});
+
+		await expect(
+			writer.write(
+				{
+					target,
+					data: Buffer.from("replacement\n"),
+					expectedExists: true,
+					expectedSha256: createHash("sha256").update(content).digest("hex"),
+					expectedIdentity: { device: String(before.dev), inode: String(before.ino) },
+				},
+				context("identity-race"),
+			),
+		).rejects.toThrow(/identity changed/iu);
+		expect(await readFile(target, "utf8")).toBe("same content\n");
 	});
 });

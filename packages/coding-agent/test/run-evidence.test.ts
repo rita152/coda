@@ -5,6 +5,7 @@ import {
 	projectRunEvidenceV1,
 	projectSessionRunEvidence,
 	RunEvidenceProjection,
+	supplementRunEvidenceWorkspaceDiff,
 } from "../src/run-evidence/run-evidence.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
@@ -57,7 +58,7 @@ describe("RunEvidence projection", () => {
 		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 160 }));
 
 		expect(evidence).toMatchObject({
-			schemaVersion: 2,
+			schemaVersion: 3,
 			type: "run_evidence",
 			outcome: "success",
 			startedAt: 100,
@@ -125,6 +126,8 @@ describe("RunEvidence projection", () => {
 		expect(evidence.paths).toEqual({
 			inspected: ["src/first.ts", "src/second"],
 			changed: ["src/changed.ts"],
+			changedWithProvenance: [{ path: "src/changed.ts", provenance: ["native"] }],
+			workspaceDiff: { status: "unavailable", omitted: 0 },
 			omitted: { inspected: 0, changed: 0 },
 		});
 		expect(evidence.commands).toEqual([expect.objectContaining({ status: "error", exitCode: 7, truncated: false })]);
@@ -360,6 +363,67 @@ describe("RunEvidence projection", () => {
 		expect(evidence.omitted.openFailures).toBe(6);
 		expect(evidence.unresolvedFailures).toHaveLength(64);
 		expect(evidence.omitted.unresolvedFailures).toBe(6);
+	});
+
+	it("unions generic partial mutation facts with final Workspace provenance", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 910 }));
+		const mutation = invocation("invocation:future-mutation", "future_mutation", {}, 0);
+		projection.accept(toolStart(mutation, 911));
+		projection.accept(
+			toolEnd(
+				mutation,
+				observation("error", {
+					facts: {
+						code: "partial_application",
+						mutation: {
+							schemaVersion: 1,
+							atomicity: "per-file",
+							attemptedPaths: ["native.txt", "not-applied.txt"],
+							committedPaths: ["native.txt"],
+							committedDelta: [
+								{
+									path: "native.txt",
+									operation: "update",
+									beforeSha256: "a".repeat(64),
+									afterSha256: "b".repeat(64),
+									previousBytes: 4,
+									bytes: 5,
+								},
+							],
+						},
+					},
+				}),
+				912,
+			),
+		);
+		const native = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 913 }))!;
+		const supplemented = supplementRunEvidenceWorkspaceDiff(native, {
+			status: "complete",
+			paths: ["native.txt", "shell.txt"],
+		});
+
+		expect(supplemented.schemaVersion).toBe(3);
+		expect(supplemented.operations[0]?.paths).toEqual([
+			{ path: "native.txt", effect: "changed", provenance: "tool-observation" },
+		]);
+		expect(supplemented.paths).toMatchObject({
+			changed: ["native.txt", "shell.txt"],
+			changedWithProvenance: [
+				{ path: "native.txt", provenance: ["native", "workspace-diff"] },
+				{ path: "shell.txt", provenance: ["workspace-diff"] },
+			],
+			workspaceDiff: { status: "complete", omitted: 0 },
+		});
+		expect(supplemented.paths.changed).not.toContain("not-applied.txt");
+		expect(supplemented.openFailures).toEqual([
+			expect.objectContaining({ kind: "tool", id: mutation.id, status: "error" }),
+		]);
+		expect(projectRunEvidenceV1(supplemented).paths).toEqual({
+			inspected: [],
+			changed: ["native.txt", "shell.txt"],
+			omitted: { inspected: 0, changed: 0 },
+		});
 	});
 
 	it("keeps an aborted Run objective without treating cancellation as a Model failure", () => {

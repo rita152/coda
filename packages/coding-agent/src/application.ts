@@ -106,6 +106,7 @@ import { ProviderManager } from "./providers/provider-manager.ts";
 import type { CustomProviderConfig } from "./providers/types.ts";
 import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./reasoning-effort.ts";
 import { createCodingAgentRetry } from "./retry.ts";
+import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
 import { RunPermissionRouter } from "./runtime/run-permission-router.ts";
 import { RunRuntimeSlot } from "./runtime/run-runtime-slot.ts";
@@ -1067,6 +1068,34 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					forceUnlock: parsed.forceUnlock,
 					persistent: parsed.persistSession || (parsed.mode === "interactive" && !parsed.noSession),
 				});
+				const pendingWorkspaceDiffs = new Map<string, Set<Promise<void>>>();
+				const beginWorkspaceDiffSupplement = (targetSession: Session, runId: string): Promise<void> => {
+					const operation = (async () => {
+						const diff = await collectWorkspaceDiff({
+							processRunner: options.processRunner,
+							workspace: workspace.root,
+							environment: options.runtime.environment,
+						});
+						targetSession.supplementRunEvidence(runId, diff);
+					})();
+					const key = targetSession.descriptor.id;
+					const pending = pendingWorkspaceDiffs.get(key) ?? new Set<Promise<void>>();
+					pending.add(operation);
+					pendingWorkspaceDiffs.set(key, pending);
+					const remove = () => {
+						pending.delete(operation);
+						if (pending.size === 0) pendingWorkspaceDiffs.delete(key);
+					};
+					void operation.then(remove, remove);
+					return operation;
+				};
+				const drainWorkspaceDiffSupplements = async (targetSession: Session): Promise<void> => {
+					for (;;) {
+						const pending = [...(pendingWorkspaceDiffs.get(targetSession.descriptor.id) ?? [])];
+						if (pending.length === 0) return;
+						await Promise.allSettled(pending);
+					}
+				};
 				const mediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
 				const mediaLibrary = new MediaLibrary({
 					fileSystem: options.fileSystem,
@@ -1651,7 +1680,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							session,
 						);
 					const initialMessageCount = agent.state.messages.length;
-					agent.onEvent((event) => {
+					agent.onEvent(async (event) => {
 						if (
 							(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
 							policy.consumeAbort(event.invocation.id)
@@ -1664,6 +1693,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								runRuntime.end(activeRuntimeId);
 								activeRuntimeId = undefined;
 							}
+							const supplement = beginWorkspaceDiffSupplement(session, event.runId);
+							if (parsed.mode === "interactive") void supplement.catch(() => undefined);
+							else await supplement;
 						}
 					});
 					const completionController =
@@ -2115,7 +2147,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										targetMediaLibrary,
 										targetSession,
 									);
-								targetAgent.onEvent((event) => {
+								targetAgent.onEvent(async (event) => {
 									if (
 										(event.type === "tool_execution_rejected" || event.type === "tool_execution_end") &&
 										targetPolicy.consumeAbort(event.invocation.id)
@@ -2128,6 +2160,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											targetRunRuntime.end(targetActiveRuntimeId);
 											targetActiveRuntimeId = undefined;
 										}
+										void beginWorkspaceDiffSupplement(targetSession, event.runId).catch(() => undefined);
 									}
 								});
 								secondaryResources.set(targetSession.descriptor.id, {
@@ -2532,6 +2565,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										failures.push(error);
 									}
 									try {
+										await drainWorkspaceDiffSupplements(resource.session);
 										await resource.session.close();
 									} catch (error) {
 										failures.push(error);
@@ -2645,6 +2679,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							try {
 								await mediaLibrary.dispose();
 							} finally {
+								await drainWorkspaceDiffSupplements(session);
 								await session.close();
 							}
 						}

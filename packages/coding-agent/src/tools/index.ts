@@ -15,6 +15,7 @@ import { createFindTool } from "./find.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
 import { TargetMutationCoordinator } from "./mutation.ts";
+import { createPatchTool } from "./patch.ts";
 import { createReadTool } from "./read.ts";
 import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
@@ -63,6 +64,7 @@ export function createCodingTools(options: {
 			onAudit: options.onAudit,
 		}),
 		createLsTool(options.workspace, options.fileSystem, options.permissions),
+		createPatchTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createEditTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createWriteTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createBashTool(options),
