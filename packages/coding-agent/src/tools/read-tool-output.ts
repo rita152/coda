@@ -2,6 +2,7 @@ import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
+import { createRunEvidenceToolFacts } from "../run-evidence/observation-semantics.ts";
 import { toolFailure } from "./failure.ts";
 import { toolOutputPathForRef } from "./tool-output-store.ts";
 
@@ -58,13 +59,27 @@ export function createReadToolOutputTool(options: {
 			const start = (arguments_.offset ?? 1) - 1;
 			const limit = arguments_.limit ?? 2_000;
 			const end = Math.min(start + limit, lines.length);
-			const truncated = start > 0 || end < lines.length;
+			const hasPrevious = start > 0;
+			const hasMore = end < lines.length;
+			const truncated = hasPrevious || hasMore;
+			const completeness = truncated ? "windowed" : "complete";
 			return {
 				content: lines.slice(start, end).join("") || "(no output)",
 				observation: {
 					status: "ok",
 					truncated,
-					facts: { startLine: start + 1, endLine: end, totalLines: lines.length },
+					facts: {
+						startLine: start + 1,
+						endLine: end,
+						totalLines: lines.length,
+						hasPrevious,
+						hasMore,
+						runEvidence: createRunEvidenceToolFacts({
+							completeness,
+							...(truncated ? { limitationReason: "pagination" as const } : {}),
+							resolutionTarget: { kind: "opaque", value: arguments_.ref },
+						}),
+					},
 					...(truncated ? { outputRef: arguments_.ref } : {}),
 				},
 				details: {
@@ -72,6 +87,9 @@ export function createReadToolOutputTool(options: {
 					startLine: start + 1,
 					endLine: end,
 					totalLines: lines.length,
+					hasPrevious,
+					hasMore,
+					completeness,
 					truncated,
 				},
 			};

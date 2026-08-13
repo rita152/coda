@@ -1,10 +1,42 @@
 import type { AgentEvent, ToolInvocation } from "@coda/agent";
 import { resolveToolObservation, type ToolObservation, type ToolResultMessage, type Usage } from "@coda/ai";
+import {
+	RUN_EVIDENCE_SCHEMA_VERSION,
+	type RunEvidenceCommand,
+	type RunEvidenceCommandV1,
+	type RunEvidenceEnvelope,
+	type RunEvidenceFailure,
+	type RunEvidenceFailureV1,
+	type RunEvidenceObservationCompleteness,
+	type RunEvidenceObservationLimitation,
+	type RunEvidenceOperation,
+	type RunEvidenceOperationPath,
+	type RunEvidenceOutcome,
+	type RunEvidencePendingOperation,
+	type RunEvidenceResolutionTarget,
+	type RunEvidenceToolIssue,
+	type RunEvidenceToolIssueV1,
+	type RunEvidenceUsage,
+	type RunEvidenceV1Projection,
+} from "./contracts.ts";
+import {
+	commandResolutionKey,
+	type FailureResolutionEvent,
+	reconcileFailures,
+	resolutionScope,
+} from "./failure-semantics.ts";
+import { resolveObservationSemantics } from "./observation-semantics.ts";
+
+export * from "./contracts.ts";
+export { normalizeRunEvidenceCommand } from "./failure-semantics.ts";
 
 const MAX_PATHS = 50;
+const MAX_OPERATIONS = 128;
 const MAX_COMMANDS = 32;
+const MAX_OBSERVATION_LIMITATIONS = 64;
 const MAX_TOOL_ISSUES = 64;
-const MAX_UNRESOLVED_FAILURES = 64;
+const MAX_FAILURES = 64;
+const MAX_PENDING_OPERATIONS = 64;
 const MAX_PATH_CHARACTERS = 256;
 const MAX_COMMAND_CHARACTERS = 512;
 const MAX_SUMMARY_CHARACTERS = 240;
@@ -13,86 +45,6 @@ const MAX_TOOL_NAME_CHARACTERS = 128;
 
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const MUTATION_TOOLS = new Set(["edit", "write"]);
-
-export type RunEvidenceOutcome = "success" | "error" | "aborted" | "interrupted";
-
-export interface RunEvidenceCommand {
-	readonly invocationId: string;
-	readonly command: string;
-	readonly status: ToolObservation["status"];
-	readonly exitCode: number | null;
-	readonly signal: string | null;
-	readonly timedOut: boolean;
-	readonly truncated: boolean;
-}
-
-export interface RunEvidenceToolIssue {
-	readonly invocationId: string;
-	readonly toolName: string;
-	readonly status: ToolObservation["status"];
-	readonly settlement: "returned" | "threw" | "aborted" | null;
-	readonly truncated: boolean;
-	readonly outputRecoverable: boolean;
-	readonly reason: string | null;
-}
-
-export interface RunEvidenceFailure {
-	readonly kind: "attempt" | "tool" | "run";
-	readonly id: string;
-	readonly status: "error" | "denied" | "aborted" | "interrupted";
-	readonly summary: string;
-}
-
-export interface RunEvidenceUsage {
-	readonly attempts: number;
-	readonly retries: number;
-	readonly discardedAttempts: number;
-	readonly inputTokens: number;
-	readonly outputTokens: number;
-	readonly cacheReadTokens: number;
-	readonly cacheWriteTokens: number;
-	readonly cacheWrite1hTokens: number;
-	readonly reasoningTokens: number;
-	readonly totalTokens: number;
-	readonly cost: {
-		readonly currency: "USD";
-		readonly status: "complete" | "partial" | "unavailable";
-		/** Null unless every completed Attempt carried historical price data. */
-		readonly totalUsd: number | null;
-		/** Sum of recorded prices; useful when status is partial. */
-		readonly knownTotalUsd: number;
-		readonly pricedAttempts: number;
-		readonly unpricedAttempts: number;
-	};
-}
-
-/** Stable JSONL envelope emitted after one completed Run. */
-export interface RunEvidenceEnvelope {
-	readonly schemaVersion: 1;
-	readonly type: "run_evidence";
-	readonly runId: string;
-	readonly outcome: RunEvidenceOutcome;
-	readonly startedAt: number;
-	readonly completedAt: number;
-	readonly elapsedMs: number;
-	readonly paths: {
-		readonly inspected: readonly string[];
-		readonly changed: readonly string[];
-		readonly omitted: {
-			readonly inspected: number;
-			readonly changed: number;
-		};
-	};
-	readonly commands: readonly RunEvidenceCommand[];
-	readonly toolIssues: readonly RunEvidenceToolIssue[];
-	readonly unresolvedFailures: readonly RunEvidenceFailure[];
-	readonly usage: RunEvidenceUsage;
-	readonly omitted: {
-		readonly commands: number;
-		readonly toolIssues: number;
-		readonly unresolvedFailures: number;
-	};
-}
 
 /** Minimal structural view of a private Session Record used for reconstruction. */
 export interface RunEvidenceSessionRecord {
@@ -118,6 +70,7 @@ interface UsageSnapshot {
 
 interface AttemptEvidence {
 	readonly id: string;
+	readonly turnId?: string;
 	readonly order: number;
 	readonly outcome: "success" | "error" | "aborted";
 	readonly discarded: boolean;
@@ -129,6 +82,11 @@ interface ObservationEvidence {
 	readonly status: ToolObservation["status"];
 	readonly truncated: boolean;
 	readonly outputRecoverable: boolean;
+	readonly completeness: RunEvidenceObservationCompleteness;
+	readonly limitationReason?: RunEvidenceObservationLimitation["reason"];
+	readonly paths: readonly { readonly path: string; readonly effect: "inspected" | "changed" }[];
+	readonly omittedPaths: { readonly inspected: number; readonly changed: number };
+	readonly resolutionTarget?: RunEvidenceResolutionTarget;
 	readonly code?: string;
 	readonly exitCode?: number;
 	readonly signal?: string;
@@ -139,9 +97,12 @@ interface ToolEvidence {
 	readonly invocationId: string;
 	readonly toolName: string;
 	readonly order: number;
+	completedOrder?: number;
 	readonly pathKind?: "inspected" | "changed";
 	readonly path?: string;
+	readonly resolutionTarget?: RunEvidenceResolutionTarget;
 	readonly command?: string;
+	readonly rawCommand?: string;
 	settlement?: "returned" | "threw" | "aborted";
 	outcome?: "success" | "error" | "aborted" | "rejected" | "interrupted";
 	rejectionReason?: string;
@@ -152,7 +113,6 @@ interface RunState {
 	readonly runId: string;
 	startedAt: number;
 	readonly attempts: Map<string, AttemptEvidence>;
-	readonly retriedAttempts: Set<string>;
 	retries: number;
 	readonly tools: Map<string, ToolEvidence>;
 }
@@ -160,8 +120,20 @@ interface RunState {
 interface FinishedRun {
 	readonly outcome: RunEvidenceOutcome;
 	readonly completedAt: number;
+	readonly sequence: number;
 	readonly failure?: { readonly kind: string; readonly message: string };
 	readonly interruptionReason?: string;
+}
+
+interface ProjectedToolEvidence {
+	readonly tool: ToolEvidence;
+	readonly observation: ObservationEvidence;
+	readonly completedSequence: number;
+	readonly settled: boolean;
+	readonly paths: readonly RunEvidenceOperationPath[];
+	readonly commandKey?: string;
+	readonly failure?: RunEvidenceFailure;
+	readonly resolutionScope?: string;
 }
 
 class EvidenceReducer {
@@ -181,6 +153,7 @@ class EvidenceReducer {
 		timestamp: number,
 		attempt: {
 			readonly id: string;
+			readonly turnId?: string;
 			readonly order: number;
 			readonly outcome: "success" | "error" | "aborted";
 			readonly discarded: boolean;
@@ -191,6 +164,7 @@ class EvidenceReducer {
 		const state = this.#ensureRun(runId, timestamp);
 		state.attempts.set(attempt.id, {
 			id: boundedText(attempt.id, MAX_ID_CHARACTERS),
+			...(attempt.turnId ? { turnId: boundedText(attempt.turnId, MAX_ID_CHARACTERS) } : {}),
 			order: attempt.order,
 			outcome: attempt.outcome,
 			discarded: attempt.discarded,
@@ -199,9 +173,8 @@ class EvidenceReducer {
 		});
 	}
 
-	noteRetry(runId: string, timestamp: number, attemptId: string): void {
+	noteRetry(runId: string, timestamp: number): void {
 		const state = this.#ensureRun(runId, timestamp);
-		state.retriedAttempts.add(attemptId);
 		state.retries++;
 	}
 
@@ -230,6 +203,7 @@ class EvidenceReducer {
 		const tool = existing ?? seed;
 		if (isSettlement(finish.settlement)) tool.settlement = finish.settlement;
 		if (isToolOutcome(finish.outcome)) tool.outcome = finish.outcome;
+		tool.completedOrder = order;
 		if (typeof finish.rejectionReason === "string") {
 			tool.rejectionReason = safeText(finish.rejectionReason, MAX_SUMMARY_CHARACTERS);
 		}
@@ -265,6 +239,7 @@ export class RunEvidenceProjection {
 			case "attempt_end":
 				this.#reducer.finishAttempt(event.runId, event.timestamp, {
 					id: event.attemptId,
+					turnId: event.turnId,
 					order: event.sequence,
 					outcome: event.outcome,
 					discarded: event.discarded,
@@ -273,7 +248,7 @@ export class RunEvidenceProjection {
 				});
 				break;
 			case "retry_scheduled":
-				this.#reducer.noteRetry(event.runId, event.timestamp, event.attemptId);
+				this.#reducer.noteRetry(event.runId, event.timestamp);
 				break;
 			case "tool_execution_start":
 				this.#reducer.startTool(event.runId, event.timestamp, event.sequence, event.invocation);
@@ -296,6 +271,7 @@ export class RunEvidenceProjection {
 				return this.#reducer.finishRun(event.runId, event.timestamp, {
 					outcome: event.outcome,
 					completedAt: event.timestamp,
+					sequence: event.sequence,
 					failure: event.failure,
 				});
 		}
@@ -326,6 +302,7 @@ export function projectSessionRunEvidence(
 						(typeof payload?.messageId === "string"
 							? `message:${payload.messageId}`
 							: `record:${record.sequence}`),
+					...(record.turnId ? { turnId: record.turnId } : {}),
 					order: record.sequence,
 					outcome,
 					discarded: payload?.discarded === true,
@@ -335,7 +312,7 @@ export function projectSessionRunEvidence(
 				break;
 			}
 			case "retry_scheduled":
-				if (record.attemptId) reducer.noteRetry(record.runId, record.timestamp, record.attemptId);
+				if (record.attemptId) reducer.noteRetry(record.runId, record.timestamp);
 				break;
 			case "tool_started":
 				reducer.startTool(record.runId, record.timestamp, record.sequence, payload?.invocation);
@@ -358,6 +335,7 @@ export function projectSessionRunEvidence(
 					reducer.finishRun(record.runId, record.timestamp, {
 						outcome,
 						completedAt: record.timestamp,
+						sequence: record.sequence,
 						...(typeof failure?.kind === "string" && typeof failure.message === "string"
 							? { failure: { kind: failure.kind, message: failure.message } }
 							: {}),
@@ -376,7 +354,6 @@ function createRunState(runId: string, timestamp: number): RunState {
 		runId,
 		startedAt: timestamp,
 		attempts: new Map(),
-		retriedAttempts: new Set(),
 		retries: 0,
 		tools: new Map(),
 	};
@@ -403,10 +380,14 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 			? {
 					pathKind: MUTATION_TOOLS.has(toolName) ? ("changed" as const) : ("inspected" as const),
 					path: safeText(requestedPath, MAX_PATH_CHARACTERS),
+					resolutionTarget: { kind: "path" as const, value: requestedPath },
 				}
 			: {}),
 		...(toolName === "bash" && typeof arguments_?.command === "string"
-			? { command: safeText(arguments_.command, MAX_COMMAND_CHARACTERS) }
+			? {
+					command: safeText(arguments_.command, MAX_COMMAND_CHARACTERS),
+					rawCommand: arguments_.command,
+				}
 			: {}),
 	};
 }
@@ -431,10 +412,21 @@ function observationFromResult(message: unknown): ObservationEvidence {
 
 function observationEvidence(observation: ToolObservation): ObservationEvidence {
 	const facts = asRecord(observation.facts);
+	const outputRecoverable = typeof observation.outputRef === "string" && observation.outputRef.length > 0;
+	const semantics = resolveObservationSemantics({
+		truncated: observation.truncated,
+		outputRecoverable,
+		facts,
+	});
 	return {
 		status: observation.status,
 		truncated: observation.truncated,
-		outputRecoverable: typeof observation.outputRef === "string" && observation.outputRef.length > 0,
+		outputRecoverable,
+		completeness: semantics.completeness,
+		...(semantics.limitationReason ? { limitationReason: semantics.limitationReason } : {}),
+		paths: semantics.paths,
+		omittedPaths: semantics.omittedPaths,
+		...(semantics.resolutionTarget ? { resolutionTarget: semantics.resolutionTarget } : {}),
 		...(typeof facts?.code === "string" ? { code: safeText(facts.code, MAX_SUMMARY_CHARACTERS) } : {}),
 		...(Number.isSafeInteger(facts?.exitCode) ? { exitCode: Number(facts?.exitCode) } : {}),
 		...(typeof facts?.signal === "string" && facts.signal.length > 0
@@ -453,7 +445,15 @@ function fallbackObservation(outcome: unknown, rejectionReason?: string): Observ
 				: rejectionReason === "policy"
 					? "denied"
 					: "error";
-	return { status, truncated: false, outputRecoverable: false, timedOut: false };
+	return {
+		status,
+		truncated: false,
+		outputRecoverable: false,
+		completeness: "complete",
+		paths: Object.freeze([]),
+		omittedPaths: Object.freeze({ inspected: 0, changed: 0 }),
+		timedOut: false,
+	};
 }
 
 function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnvelope {
@@ -461,38 +461,78 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 	const tools = [...state.tools.values()].sort((left, right) => left.order - right.order);
 	const inspectedPaths: string[] = [];
 	const changedPaths: string[] = [];
+	let omittedInspectedPaths = 0;
+	let omittedChangedPaths = 0;
+	const operations: RunEvidenceOperation[] = [];
 	const commands: RunEvidenceCommand[] = [];
+	const observationLimitations: RunEvidenceObservationLimitation[] = [];
 	const toolIssues: RunEvidenceToolIssue[] = [];
-	const failures: RunEvidenceFailure[] = [];
+	const terminalFailures: RunEvidenceFailure[] = [];
+	const resolutionEvents: FailureResolutionEvent[] = [];
+	const observationCounts: Record<RunEvidenceObservationCompleteness, number> = {
+		complete: 0,
+		windowed: 0,
+		"recoverable-overflow": 0,
+		"lossy-overflow": 0,
+	};
+	const projectedTools = tools.filter(isTerminalTool).map(projectToolEvidence);
+	const pendingOperations = tools.filter((tool) => !isTerminalTool(tool)).map(projectPendingOperation);
 
-	for (const tool of tools) {
-		const observation = tool.observation ?? fallbackObservation(tool.outcome, tool.rejectionReason);
-		const settled = tool.settlement !== "threw" && tool.settlement !== "aborted";
-		if (observation.status === "ok" && settled && tool.path && tool.pathKind === "inspected") {
-			inspectedPaths.push(tool.path);
+	for (const projected of projectedTools) {
+		const { tool, observation, completedSequence, paths, commandKey } = projected;
+		const boundedOperationPaths = boundedList(paths, MAX_PATHS);
+		observationCounts[observation.completeness]++;
+		omittedInspectedPaths += observation.omittedPaths.inspected;
+		omittedChangedPaths += observation.omittedPaths.changed;
+		for (const path of paths) {
+			if (path.effect === "inspected") inspectedPaths.push(path.path);
+			else changedPaths.push(path.path);
 		}
-		if (observation.status === "ok" && settled && tool.path && tool.pathKind === "changed") {
-			changedPaths.push(tool.path);
+		operations.push(
+			deepFreeze({
+				invocationId: tool.invocationId,
+				toolName: tool.toolName,
+				startedSequence: tool.order,
+				completedSequence,
+				status: observation.status,
+				settlement: tool.settlement ?? null,
+				completeness: observation.completeness,
+				code: observation.code ?? null,
+				command: tool.command ?? null,
+				commandKey: commandKey ?? null,
+				paths: boundedOperationPaths.values,
+				omittedPaths:
+					boundedOperationPaths.omitted + observation.omittedPaths.inspected + observation.omittedPaths.changed,
+			}),
+		);
+		if (observation.completeness !== "complete") {
+			observationLimitations.push(
+				deepFreeze({
+					invocationId: tool.invocationId,
+					toolName: tool.toolName,
+					sequence: completedSequence,
+					completeness: observation.completeness,
+					reason: observation.limitationReason ?? "output-overflow",
+				}),
+			);
 		}
 		if (tool.command !== undefined) {
 			commands.push(
 				deepFreeze({
 					invocationId: tool.invocationId,
+					sequence: completedSequence,
 					command: tool.command,
+					commandKey: commandKey!,
 					status: observation.status,
 					exitCode: observation.exitCode ?? null,
 					signal: observation.signal ?? null,
 					timedOut: observation.timedOut,
 					truncated: observation.truncated,
+					completeness: observation.completeness,
 				}),
 			);
 		}
-		if (
-			observation.status !== "ok" ||
-			observation.truncated ||
-			tool.settlement === "threw" ||
-			tool.settlement === "aborted"
-		) {
+		if (isToolIssue(projected)) {
 			const reason = toolIssueReason(tool, observation);
 			toolIssues.push(
 				deepFreeze({
@@ -502,65 +542,97 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 					settlement: tool.settlement ?? null,
 					truncated: observation.truncated,
 					outputRecoverable: observation.outputRecoverable,
+					completeness: observation.completeness,
 					reason,
 				}),
 			);
 		}
-		if (observation.status !== "ok" || tool.settlement === "threw") {
-			const status = observation.status === "ok" || tool.settlement === "threw" ? "error" : observation.status;
-			failures.push(
-				deepFreeze({
-					kind: "tool" as const,
-					id: tool.invocationId,
-					status,
-					summary: toolFailureSummary(tool, observation),
-				}),
-			);
+		if (projected.failure) {
+			terminalFailures.push(projected.failure);
+			resolutionEvents.push({
+				sequence: completedSequence,
+				failure: projected.failure,
+				...(projected.resolutionScope ? { resolutionScope: projected.resolutionScope } : {}),
+			});
+		} else if (observation.status === "ok" && projected.settled) {
+			const scopes = successResolutionScopes(projected);
+			if (scopes.length > 0) {
+				resolutionEvents.push({
+					sequence: completedSequence,
+					recoveredById: tool.invocationId,
+					resolutionScopes: scopes,
+				});
+			}
 		}
 	}
 
 	for (const attempt of attempts) {
-		if (attempt.outcome !== "error" || state.retriedAttempts.has(attempt.id)) continue;
-		failures.push(
-			deepFreeze({
+		const attemptScope = attempt.turnId ? resolutionScope("attempt", attempt.turnId) : undefined;
+		if (attempt.outcome === "error") {
+			const failure = deepFreeze({
 				kind: "attempt" as const,
 				id: attempt.id,
 				status: "error" as const,
 				summary: attempt.error || "Model Attempt failed",
-			}),
-		);
+				sequence: attempt.order,
+				resolutionKey: attemptScope ?? null,
+			});
+			terminalFailures.push(failure);
+			resolutionEvents.push({
+				sequence: attempt.order,
+				failure,
+				...(attemptScope ? { resolutionScope: attemptScope } : {}),
+			});
+		} else if (attempt.outcome === "success" && attemptScope) {
+			resolutionEvents.push({
+				sequence: attempt.order,
+				recoveredById: attempt.id,
+				resolutionScopes: [attemptScope],
+			});
+		}
 	}
 
 	if (finished.failure) {
-		failures.push(
-			deepFreeze({
-				kind: "run" as const,
-				id: boundedText(finished.failure.kind, MAX_ID_CHARACTERS),
-				status: "error" as const,
-				summary: safeText(finished.failure.message, MAX_SUMMARY_CHARACTERS),
-			}),
-		);
+		const failure = deepFreeze({
+			kind: "run" as const,
+			id: boundedText(finished.failure.kind, MAX_ID_CHARACTERS),
+			status: "error" as const,
+			summary: safeText(finished.failure.message, MAX_SUMMARY_CHARACTERS),
+			sequence: finished.sequence,
+			resolutionKey: null,
+		});
+		terminalFailures.push(failure);
+		resolutionEvents.push({ sequence: finished.sequence, failure });
 	} else if (finished.outcome === "interrupted") {
-		failures.push(
-			deepFreeze({
-				kind: "run" as const,
-				id: "interrupted",
-				status: "interrupted" as const,
-				summary:
-					finished.interruptionReason === "process_ended_before_run_finished"
-						? "Process ended before Run finished"
-						: "Run was interrupted",
-			}),
-		);
+		const failure = deepFreeze({
+			kind: "run" as const,
+			id: "interrupted",
+			status: "interrupted" as const,
+			summary:
+				finished.interruptionReason === "process_ended_before_run_finished"
+					? "Process ended before Run finished"
+					: "Run was interrupted",
+			sequence: finished.sequence,
+			resolutionKey: null,
+		});
+		terminalFailures.push(failure);
+		resolutionEvents.push({ sequence: finished.sequence, failure });
 	}
 
+	terminalFailures.sort((left, right) => left.sequence - right.sequence);
+	const { recoveredFailures, openFailures } = reconcileFailures(resolutionEvents);
 	const inspected = boundedUnique(inspectedPaths, MAX_PATHS);
 	const changed = boundedUnique(changedPaths, MAX_PATHS);
+	const boundedOperations = boundedList(operations, MAX_OPERATIONS);
 	const boundedCommands = boundedList(commands, MAX_COMMANDS);
+	const boundedLimitations = boundedList(observationLimitations, MAX_OBSERVATION_LIMITATIONS);
 	const boundedIssues = boundedList(toolIssues, MAX_TOOL_ISSUES);
-	const boundedFailures = boundedList(failures, MAX_UNRESOLVED_FAILURES);
+	const boundedTerminalFailures = boundedList(terminalFailures, MAX_FAILURES);
+	const boundedRecoveredFailures = boundedList(recoveredFailures, MAX_FAILURES);
+	const boundedPendingOperations = boundedList(pendingOperations, MAX_PENDING_OPERATIONS);
+	const boundedOpenFailures = boundedList(openFailures, MAX_FAILURES);
 	return deepFreeze({
-		schemaVersion: 1 as const,
+		schemaVersion: RUN_EVIDENCE_SCHEMA_VERSION,
 		type: "run_evidence" as const,
 		runId: state.runId,
 		outcome: finished.outcome,
@@ -570,18 +642,205 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 		paths: {
 			inspected: inspected.values,
 			changed: changed.values,
-			omitted: { inspected: inspected.omitted, changed: changed.omitted },
+			omitted: {
+				inspected: inspected.omitted + omittedInspectedPaths,
+				changed: changed.omitted + omittedChangedPaths,
+			},
+		},
+		operations: boundedOperations.values,
+		observations: {
+			counts: observationCounts,
+			limitations: boundedLimitations.values,
+			omittedLimitations: boundedLimitations.omitted,
 		},
 		commands: boundedCommands.values,
 		toolIssues: boundedIssues.values,
-		unresolvedFailures: boundedFailures.values,
+		terminalFailures: boundedTerminalFailures.values,
+		recoveredFailures: boundedRecoveredFailures.values,
+		pendingOperations: boundedPendingOperations.values,
+		openFailures: boundedOpenFailures.values,
+		unresolvedFailures: boundedOpenFailures.values,
 		usage: projectUsage(attempts, state.retries),
 		omitted: {
+			operations: boundedOperations.omitted,
 			commands: boundedCommands.omitted,
+			observationLimitations: boundedLimitations.omitted,
 			toolIssues: boundedIssues.omitted,
-			unresolvedFailures: boundedFailures.omitted,
+			terminalFailures: boundedTerminalFailures.omitted,
+			recoveredFailures: boundedRecoveredFailures.omitted,
+			pendingOperations: boundedPendingOperations.omitted,
+			openFailures: boundedOpenFailures.omitted,
+			unresolvedFailures: boundedOpenFailures.omitted,
 		},
 	});
+}
+
+/** Produces the strict v1 compatibility shape retained by existing summary readers. */
+export function projectRunEvidenceV1(evidence: RunEvidenceEnvelope): RunEvidenceV1Projection {
+	return deepFreeze({
+		schemaVersion: 1 as const,
+		type: evidence.type,
+		runId: evidence.runId,
+		outcome: evidence.outcome,
+		startedAt: evidence.startedAt,
+		completedAt: evidence.completedAt,
+		elapsedMs: evidence.elapsedMs,
+		paths: evidence.paths,
+		commands: evidence.commands.map(commandV1),
+		toolIssues: evidence.toolIssues.map(toolIssueV1),
+		unresolvedFailures: evidence.unresolvedFailures.map(failureV1),
+		usage: evidence.usage,
+		omitted: {
+			commands: evidence.omitted.commands,
+			toolIssues: evidence.omitted.toolIssues,
+			unresolvedFailures: evidence.omitted.unresolvedFailures,
+		},
+	});
+}
+
+function isTerminalTool(tool: ToolEvidence): boolean {
+	return tool.completedOrder !== undefined;
+}
+
+function projectToolEvidence(tool: ToolEvidence): ProjectedToolEvidence {
+	const observation = tool.observation ?? fallbackObservation(tool.outcome, tool.rejectionReason);
+	const completedSequence = tool.completedOrder ?? tool.order;
+	const settled = tool.settlement !== "threw" && tool.settlement !== "aborted";
+	const paths = operationPaths(tool, observation, settled);
+	const commandKey = tool.rawCommand === undefined ? undefined : commandResolutionKey(tool.rawCommand);
+	const status = toolFailureStatus(tool, observation);
+	const identity = failureResolutionIdentity(tool, observation, commandKey);
+	const failure =
+		status === undefined
+			? undefined
+			: deepFreeze({
+					kind: "tool" as const,
+					id: tool.invocationId,
+					status,
+					summary: toolFailureSummary(tool, observation),
+					sequence: completedSequence,
+					resolutionKey: identity.resolutionKey ?? null,
+				});
+	return {
+		tool,
+		observation,
+		completedSequence,
+		settled,
+		paths,
+		...(commandKey ? { commandKey } : {}),
+		...(failure ? { failure } : {}),
+		...(identity.resolutionScope ? { resolutionScope: identity.resolutionScope } : {}),
+	};
+}
+
+function operationPaths(
+	tool: ToolEvidence,
+	observation: ObservationEvidence,
+	settled: boolean,
+): readonly RunEvidenceOperationPath[] {
+	if (!settled) return Object.freeze([]);
+	const declared = observation.paths.map((path) => ({
+		path: safeText(path.path, MAX_PATH_CHARACTERS),
+		effect: path.effect,
+		provenance: "tool-observation" as const,
+	}));
+	const paths =
+		declared.length > 0
+			? declared
+			: observation.status === "ok" && tool.path && tool.pathKind
+				? [{ path: tool.path, effect: tool.pathKind, provenance: "invocation-argument" as const }]
+				: [];
+	const unique = new Map(paths.map((path) => [`${path.effect}\0${path.path}`, path]));
+	return deepFreeze([...unique.values()]);
+}
+
+function projectPendingOperation(tool: ToolEvidence): RunEvidencePendingOperation {
+	const target = tool.resolutionTarget
+		? {
+				kind: tool.resolutionTarget.kind,
+				value: safeText(tool.resolutionTarget.value, MAX_PATH_CHARACTERS),
+			}
+		: null;
+	return deepFreeze({
+		invocationId: tool.invocationId,
+		toolName: tool.toolName,
+		startedSequence: tool.order,
+		target,
+	});
+}
+
+function isToolIssue(projected: ProjectedToolEvidence): boolean {
+	return (
+		projected.failure !== undefined ||
+		projected.tool.settlement === "aborted" ||
+		projected.observation.completeness === "recoverable-overflow" ||
+		projected.observation.completeness === "lossy-overflow"
+	);
+}
+
+function toolFailureStatus(
+	tool: ToolEvidence,
+	observation: ObservationEvidence,
+): RunEvidenceFailure["status"] | undefined {
+	if (tool.settlement === "aborted") return "aborted";
+	if (tool.settlement === "threw" || observation.status === "ok") {
+		return tool.settlement === "threw" ? "error" : undefined;
+	}
+	return observation.status;
+}
+
+function failureResolutionIdentity(
+	tool: ToolEvidence,
+	observation: ObservationEvidence,
+	commandKey: string | undefined,
+): { readonly resolutionKey?: string; readonly resolutionScope?: string } {
+	if (commandKey) return { resolutionKey: commandKey, resolutionScope: commandKey };
+	const target = observation.resolutionTarget ?? tool.resolutionTarget;
+	if (!target) return {};
+	const scope = resolutionScope("tool-target", [tool.toolName, target.kind, target.value].join("\0"));
+	const code = observation.code ?? toolIssueReason(tool, observation) ?? observation.status;
+	return {
+		resolutionKey: resolutionScope("tool-failure", `${scope}\0${code}`),
+		resolutionScope: scope,
+	};
+}
+
+function successResolutionScopes(projected: ProjectedToolEvidence): readonly string[] {
+	const scopes: string[] = [];
+	if (projected.commandKey) scopes.push(projected.commandKey);
+	const target = projected.observation.resolutionTarget ?? projected.tool.resolutionTarget;
+	if (target) {
+		scopes.push(resolutionScope("tool-target", [projected.tool.toolName, target.kind, target.value].join("\0")));
+	}
+	return Object.freeze(scopes);
+}
+
+function commandV1(command: RunEvidenceCommand): RunEvidenceCommandV1 {
+	return {
+		invocationId: command.invocationId,
+		command: command.command,
+		status: command.status,
+		exitCode: command.exitCode,
+		signal: command.signal,
+		timedOut: command.timedOut,
+		truncated: command.truncated,
+	};
+}
+
+function toolIssueV1(issue: RunEvidenceToolIssue): RunEvidenceToolIssueV1 {
+	return {
+		invocationId: issue.invocationId,
+		toolName: issue.toolName,
+		status: issue.status,
+		settlement: issue.settlement,
+		truncated: issue.truncated,
+		outputRecoverable: issue.outputRecoverable,
+		reason: issue.reason,
+	};
+}
+
+function failureV1(failure: RunEvidenceFailure): RunEvidenceFailureV1 {
+	return { kind: failure.kind, id: failure.id, status: failure.status, summary: failure.summary };
 }
 
 function projectUsage(attempts: readonly AttemptEvidence[], retries: number): RunEvidenceUsage {
@@ -658,7 +917,9 @@ function toolIssueReason(tool: ToolEvidence, observation: ObservationEvidence): 
 	if (observation.exitCode !== undefined && observation.exitCode !== 0) return `exit_${observation.exitCode}`;
 	if (tool.settlement === "threw") return "implementation_threw";
 	if (tool.settlement === "aborted") return "settlement_aborted";
-	if (observation.truncated) return "output_truncated";
+	if (observation.completeness === "recoverable-overflow" || observation.completeness === "lossy-overflow") {
+		return "output_truncated";
+	}
 	return null;
 }
 

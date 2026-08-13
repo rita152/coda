@@ -190,13 +190,17 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Objective Run evidence",
 		summary:
-			"Completed Runs project bounded, sanitized evidence from lifecycle events and authoritative Tool Observations, including paths, commands, failures, retries, token usage, and price-data completeness.",
+			"Completed Runs project bounded, sanitized evidence from lifecycle events and authoritative Tool Observations, separating observation completeness, terminal/recovered/open failures, pending operations, retries, token usage, and price-data completeness.",
 		sources: [
+			"packages/coding-agent/src/run-evidence/contracts.ts",
+			"packages/coding-agent/src/run-evidence/failure-semantics.ts",
+			"packages/coding-agent/src/run-evidence/observation-semantics.ts",
 			"packages/coding-agent/src/run-evidence/run-evidence.ts",
 			"packages/coding-agent/src/run-evidence/presentation.ts",
 			"packages/coding-agent/src/session/managed-session.ts",
 		],
 		tests: [
+			"packages/coding-agent/test/read-tool.test.ts",
 			"packages/coding-agent/test/run-evidence.test.ts",
 			"packages/coding-agent/test/run-evidence-presentation.test.ts",
 		],

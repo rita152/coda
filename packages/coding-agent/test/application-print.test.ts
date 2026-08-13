@@ -397,7 +397,7 @@ describe("Coding Agent print mode", () => {
 		});
 		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
 		expect(events.at(-1)).toMatchObject({
-			schemaVersion: 1,
+			schemaVersion: 2,
 			type: "run_evidence",
 			outcome: "success",
 			paths: { inspected: [], changed: [] },
@@ -511,7 +511,7 @@ describe("Coding Agent print mode", () => {
 			);
 			expect(events).toContainEqual(
 				expect.objectContaining({
-					schemaVersion: 1,
+					schemaVersion: 2,
 					type: "run_evidence",
 					toolIssues: [expect.objectContaining({ toolName: "write", status: "denied" })],
 					unresolvedFailures: [expect.objectContaining({ kind: "tool", status: "denied" })],

@@ -257,7 +257,12 @@ describe("bash Tool", () => {
 					observation: {
 						status: "error",
 						truncated: true,
-						facts: { exitCode: 7, previewMode: "tail", previewComplete: true },
+						facts: {
+							exitCode: 7,
+							previewMode: "tail",
+							previewComplete: true,
+							outputRefComplete: true,
+						},
 						outputRef: expect.any(String),
 					},
 				});
@@ -293,7 +298,12 @@ describe("bash Tool", () => {
 					observation: {
 						status: "ok",
 						truncated: true,
-						facts: { exitCode: 0, previewMode: "head", previewComplete: true },
+						facts: {
+							exitCode: 0,
+							previewMode: "head",
+							previewComplete: true,
+							outputRefComplete: true,
+						},
 					},
 				});
 				if (result?.role !== "toolResult") throw new Error("Expected a Tool Result");
@@ -361,7 +371,7 @@ describe("bash Tool", () => {
 					observation: {
 						status: "ok",
 						truncated: false,
-						facts: { exitCode: 0, outputRefAvailable: false },
+						facts: { exitCode: 0, outputRefAvailable: false, outputRefComplete: false },
 					},
 				});
 				return fauxAssistantMessage("Bash remained usable.", { timestamp: 920 });

@@ -239,6 +239,7 @@ export function createBashTool(options: {
 				stderrPresent: observedStderr || result.stderr.length > 0,
 				backend: result.backend,
 				outputRefAvailable: stored !== undefined,
+				outputRefComplete: stored !== undefined && stored.storedTruncated !== true,
 				strippedEnvironmentVariableCount: inherited.stripped.length,
 				...(arguments_.preview
 					? { previewMode: arguments_.preview.mode, previewLines: arguments_.preview.lines, previewComplete }

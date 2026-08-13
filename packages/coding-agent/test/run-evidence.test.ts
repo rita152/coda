@@ -1,7 +1,11 @@
 import { Agent, type AgentEvent, type IdGenerator, type IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, type ToolObservation, type Usage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { projectSessionRunEvidence, RunEvidenceProjection } from "../src/run-evidence/run-evidence.ts";
+import {
+	projectRunEvidenceV1,
+	projectSessionRunEvidence,
+	RunEvidenceProjection,
+} from "../src/run-evidence/run-evidence.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
@@ -53,6 +57,7 @@ describe("RunEvidence projection", () => {
 		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 160 }));
 
 		expect(evidence).toMatchObject({
+			schemaVersion: 2,
 			type: "run_evidence",
 			outcome: "success",
 			startedAt: 100,
@@ -73,8 +78,14 @@ describe("RunEvidence projection", () => {
 					unpricedAttempts: 1,
 				},
 			},
+			terminalFailures: [expect.objectContaining({ id: "attempt:1", kind: "attempt" })],
+			recoveredFailures: [expect.objectContaining({ id: "attempt:1", recoveredById: "attempt:2" })],
+			openFailures: [],
 			unresolvedFailures: [],
 		});
+		const legacy = projectRunEvidenceV1(evidence!);
+		expect(legacy).toMatchObject({ schemaVersion: 1, unresolvedFailures: [] });
+		expect(legacy).not.toHaveProperty("terminalFailures");
 		const json = JSON.stringify(evidence);
 		expect(json).not.toContain("malicious Assistant prose");
 		expect(json).not.toContain("super-secret");
@@ -142,6 +153,213 @@ describe("RunEvidence projection", () => {
 		expect(json).not.toContain("abcdefghijk");
 		expect(json).not.toContain("\u001b");
 		expect(json).not.toContain("owned");
+	});
+
+	it("separates windowed observations from recoverable and lossy overflow", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 270 }));
+		const read = invocation("invocation:windowed-read", "read", { path: "src/page.ts", offset: 2, limit: 1 }, 0);
+		const preview = invocation(
+			"invocation:preview",
+			"bash",
+			{ command: "npm test", preview: { mode: "tail", lines: 20 } },
+			1,
+		);
+		const recoverable = invocation("invocation:recoverable", "bash", { command: "npm run check" }, 2);
+		const lossy = invocation("invocation:lossy", "find", { path: "src" }, 3);
+		const patch = invocation("invocation:patch", "patch", { patch: "ignored" }, 4);
+		for (const [tool, result, timestamp] of [
+			[
+				read,
+				observation("ok", {
+					truncated: true,
+					facts: {
+						runEvidence: {
+							schemaVersion: 1,
+							completeness: "windowed",
+							limitationReason: "pagination",
+							paths: [{ path: "src/page.ts", effect: "inspected" }],
+							resolutionTarget: { kind: "path", value: "src/page.ts" },
+						},
+					},
+				}),
+				271,
+			],
+			[
+				preview,
+				observation("ok", {
+					truncated: true,
+					outputRef: "opaque:preview",
+					facts: { previewMode: "tail", previewComplete: true, exitCode: 0 },
+				}),
+				272,
+			],
+			[
+				recoverable,
+				observation("ok", { truncated: true, outputRef: "opaque:overflow", facts: { exitCode: 0 } }),
+				273,
+			],
+			[
+				lossy,
+				observation("ok", {
+					truncated: true,
+					outputRef: "opaque:partial-overflow",
+					facts: { outputRefComplete: false },
+				}),
+				274,
+			],
+			[
+				patch,
+				observation("ok", {
+					facts: {
+						runEvidence: {
+							schemaVersion: 1,
+							completeness: "complete",
+							paths: [{ path: "src/changed.ts", effect: "changed" }],
+							omittedPaths: { inspected: 0, changed: 2 },
+						},
+					},
+				}),
+				275,
+			],
+		] as const) {
+			projection.accept(toolStart(tool, timestamp));
+			projection.accept(toolEnd(tool, result, timestamp + 10));
+		}
+		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 300 }))!;
+
+		expect(evidence.observations.counts).toEqual({
+			complete: 1,
+			windowed: 2,
+			"recoverable-overflow": 1,
+			"lossy-overflow": 1,
+		});
+		expect(evidence.observations.limitations).toEqual([
+			expect.objectContaining({ invocationId: read.id, completeness: "windowed", reason: "pagination" }),
+			expect.objectContaining({ invocationId: preview.id, completeness: "windowed", reason: "user-preview" }),
+			expect.objectContaining({
+				invocationId: recoverable.id,
+				completeness: "recoverable-overflow",
+			}),
+			expect.objectContaining({ invocationId: lossy.id, completeness: "lossy-overflow" }),
+		]);
+		expect(evidence.toolIssues.map(({ invocationId }) => invocationId)).toEqual([recoverable.id, lossy.id]);
+		expect(evidence.paths).toMatchObject({
+			inspected: ["src/page.ts", "src"],
+			changed: ["src/changed.ts"],
+			omitted: { inspected: 0, changed: 2 },
+		});
+		expect(evidence.operations.find(({ invocationId }) => invocationId === patch.id)).toMatchObject({
+			status: "ok",
+			paths: [{ path: "src/changed.ts", effect: "changed", provenance: "tool-observation" }],
+			omittedPaths: 2,
+		});
+	});
+
+	it("recovers failures only through stable Tool targets or normalized commands", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 310 }));
+		const failedEdit = invocation("edit:failed", "edit", { path: "src/edit.ts" }, 0);
+		const unrelatedRead = invocation("read:unrelated", "read", { path: "src/edit.ts" }, 1);
+		const failedRecoveredEdit = invocation("edit:recovered-failure", "edit", { path: "src/fixed.ts" }, 2);
+		const recoveredEdit = invocation("edit:recovered", "edit", { path: "src/fixed.ts" }, 3);
+		const failedRead = invocation("read:failed", "read", { path: "src/read.ts" }, 4);
+		const recoveredRead = invocation("read:recovered", "read", { path: "src/read.ts" }, 5);
+		const failedCommand = invocation("bash:open", "bash", { command: "npm test" }, 6);
+		const unrelatedCommand = invocation("bash:unrelated", "bash", { command: "npm test -- --run" }, 7);
+		const normalizedFailure = invocation("bash:normalized-failure", "bash", { command: "  npm run lint\r\n" }, 8);
+		const normalizedSuccess = invocation("bash:normalized-success", "bash", { command: "npm run lint\n" }, 9);
+		const cases = [
+			[failedEdit, observation("error", { facts: { code: "no_match" } })],
+			[unrelatedRead, observation("ok")],
+			[failedRecoveredEdit, observation("error", { facts: { code: "no_match" } })],
+			[recoveredEdit, observation("ok")],
+			[failedRead, observation("error", { facts: { code: "not_found" } })],
+			[recoveredRead, observation("ok")],
+			[failedCommand, observation("error", { facts: { exitCode: 1 } })],
+			[unrelatedCommand, observation("ok", { facts: { exitCode: 0 } })],
+			[normalizedFailure, observation("error", { facts: { exitCode: 2 } })],
+			[normalizedSuccess, observation("ok", { facts: { exitCode: 0 } })],
+		] as const;
+		for (const [index, [tool, result]] of cases.entries()) {
+			projection.accept(toolStart(tool, 311 + index * 2));
+			projection.accept(toolEnd(tool, result, 312 + index * 2));
+		}
+		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 340 }))!;
+
+		expect(evidence.terminalFailures.map(({ id }) => id)).toEqual([
+			failedEdit.id,
+			failedRecoveredEdit.id,
+			failedRead.id,
+			failedCommand.id,
+			normalizedFailure.id,
+		]);
+		expect(evidence.recoveredFailures).toEqual([
+			expect.objectContaining({ id: failedRecoveredEdit.id, recoveredById: recoveredEdit.id }),
+			expect.objectContaining({ id: failedRead.id, recoveredById: recoveredRead.id }),
+			expect.objectContaining({ id: normalizedFailure.id, recoveredById: normalizedSuccess.id }),
+		]);
+		expect(evidence.openFailures).toEqual([
+			expect.objectContaining({ id: failedEdit.id, resolutionKey: expect.any(String) }),
+			expect.objectContaining({ id: failedCommand.id, resolutionKey: expect.any(String) }),
+		]);
+		expect(evidence.unresolvedFailures).toEqual(evidence.openFailures);
+		expect(evidence.commands.find(({ invocationId }) => invocationId === normalizedFailure.id)?.commandKey).toBe(
+			evidence.commands.find(({ invocationId }) => invocationId === normalizedSuccess.id)?.commandKey,
+		);
+	});
+
+	it("keeps start-only Tool Invocations pending instead of fabricating failures", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 350 }));
+		const pending = invocation("read:pending", "read", { path: "src/pending.ts" }, 0);
+		projection.accept(toolStart(pending, 351));
+		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 360 }))!;
+
+		expect(evidence.pendingOperations).toEqual([
+			{
+				invocationId: pending.id,
+				toolName: "read",
+				startedSequence: expect.any(Number),
+				target: { kind: "path", value: "src/pending.ts" },
+			},
+		]);
+		expect(evidence.terminalFailures).toEqual([]);
+		expect(evidence.openFailures).toEqual([]);
+		expect(evidence.toolIssues).toEqual([]);
+		expect(evidence.observations.counts).toEqual({
+			complete: 0,
+			windowed: 0,
+			"recoverable-overflow": 0,
+			"lossy-overflow": 0,
+		});
+	});
+
+	it("bounds historical, recovered, and open failures with independent omission counts", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 370 }));
+		const failures = Array.from({ length: 140 }, (_, index) =>
+			invocation(`read:failure:${index}`, "read", { path: `src/failure-${index}.ts` }, index),
+		);
+		for (const [index, tool] of failures.entries()) {
+			projection.accept(toolStart(tool, 371 + index * 2));
+			projection.accept(toolEnd(tool, observation("error", { facts: { code: "not_found" } }), 372 + index * 2));
+		}
+		for (const [index, failed] of failures.slice(0, 70).entries()) {
+			const recovered = invocation(`read:success:${index}`, "read", { path: failed.arguments.path }, 140 + index);
+			projection.accept(toolStart(recovered, 700 + index * 2));
+			projection.accept(toolEnd(recovered, observation("ok"), 701 + index * 2));
+		}
+		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 900 }))!;
+
+		expect(evidence.terminalFailures).toHaveLength(64);
+		expect(evidence.omitted.terminalFailures).toBe(76);
+		expect(evidence.recoveredFailures).toHaveLength(64);
+		expect(evidence.omitted.recoveredFailures).toBe(6);
+		expect(evidence.openFailures).toHaveLength(64);
+		expect(evidence.omitted.openFailures).toBe(6);
+		expect(evidence.unresolvedFailures).toHaveLength(64);
+		expect(evidence.omitted.unresolvedFailures).toBe(6);
 	});
 
 	it("keeps an aborted Run objective without treating cancellation as a Model failure", () => {

@@ -84,6 +84,122 @@ describe("read Tool", () => {
 		expect(stderr.value).toBe("");
 	});
 
+	it("marks offset/limit pagination as windowed evidence with accurate page facts", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-read-windowed-"));
+		temporaryDirectories.push(workspace);
+		await writeFile(join(workspace, "notes.txt"), "first\nsecond\nthird\nfourth\n", "utf8");
+
+		const faux = fauxProvider({ runtime: testTimeRuntime(350) });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("read", { path: "notes.txt", offset: 3, limit: 2 }, { id: "provider-tool-windowed" }),
+				{ stopReason: "toolUse", timestamp: 350 },
+			),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-tool-windowed",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "third\nfourth\n" }],
+					observation: {
+						status: "ok",
+						truncated: true,
+						facts: {
+							startLine: 3,
+							endLine: 4,
+							totalLines: 4,
+							hasPrevious: true,
+							hasMore: false,
+							runEvidence: {
+								schemaVersion: 1,
+								completeness: "windowed",
+								limitationReason: "pagination",
+							},
+						},
+					},
+					details: { hasPrevious: true, hasMore: false, completeness: "windowed" },
+				});
+				return fauxAssistantMessage(
+					fauxToolCall("read", { path: "notes.txt", limit: 2 }, { id: "provider-tool-limited" }),
+					{ stopReason: "toolUse", timestamp: 350 },
+				);
+			},
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "provider-tool-limited",
+					content: [{ type: "text", text: "first\nsecond\n" }],
+					observation: {
+						status: "ok",
+						truncated: true,
+						facts: {
+							startLine: 1,
+							endLine: 2,
+							totalLines: 4,
+							hasPrevious: false,
+							hasMore: true,
+							runEvidence: {
+								schemaVersion: 1,
+								completeness: "windowed",
+								limitationReason: "pagination",
+							},
+						},
+					},
+					details: { hasPrevious: false, hasMore: true, completeness: "windowed" },
+				});
+				return fauxAssistantMessage("I read the requested window.", { timestamp: 350 });
+			},
+		]);
+		const models = createModels({ runtime: testTimeRuntime(350) });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: {
+				stdin: { isTTY: true, readAll: async () => "" },
+				stdout,
+				stderr,
+			},
+			runtime: {
+				cwd: workspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 350 },
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		const exitCode = await application.run([
+			"--print",
+			"--json",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"read a window from notes.txt",
+		]);
+		const events = stdout.value
+			.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+
+		expect(exitCode).toBe(0);
+		expect(events.at(-1)).toMatchObject({
+			schemaVersion: 2,
+			type: "run_evidence",
+			observations: {
+				counts: { complete: 0, windowed: 2, "recoverable-overflow": 0, "lossy-overflow": 0 },
+			},
+			toolIssues: [],
+		});
+		expect(stderr.value).toBe("");
+	});
+
 	it("reads ordinary dotfiles inside the Workspace under a restricted profile", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-sensitive-"));
 		temporaryDirectories.push(workspace);

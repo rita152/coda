@@ -3,6 +3,7 @@ import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { hasPermissionedPathAccess } from "../permissions/file-access.ts";
 import type { PermissionEngine } from "../permissions/permission-engine.ts";
+import { createRunEvidenceToolFacts } from "../run-evidence/observation-semantics.ts";
 import type { Workspace } from "../workspace.ts";
 import { toolFailure } from "./failure.ts";
 
@@ -79,8 +80,12 @@ export function createReadTool(
 			const lines = lineChunks(text);
 			const start = (arguments_.offset ?? 1) - 1;
 			const limit = arguments_.limit ?? 2_000;
-			const selected = lines.slice(start, start + limit).join("");
-			const truncated = start > 0 || start + limit < lines.length;
+			const end = Math.min(start + limit, lines.length);
+			const selected = lines.slice(start, end).join("");
+			const hasPrevious = start > 0;
+			const hasMore = end < lines.length;
+			const truncated = hasPrevious || hasMore;
+			const completeness = truncated ? "windowed" : "complete";
 			return {
 				content: selected,
 				observation: {
@@ -88,16 +93,27 @@ export function createReadTool(
 					truncated,
 					facts: {
 						startLine: start + 1,
-						endLine: Math.min(start + limit, lines.length),
+						endLine: end,
 						totalLines: lines.length,
+						hasPrevious,
+						hasMore,
+						runEvidence: createRunEvidenceToolFacts({
+							completeness,
+							...(truncated ? { limitationReason: "pagination" as const } : {}),
+							paths: [{ path: arguments_.path, effect: "inspected" }],
+							resolutionTarget: { kind: "path", value: arguments_.path },
+						}),
 					},
 				},
 				details: {
 					requestedPath: arguments_.path,
 					path: resolved.canonicalPath,
 					startLine: start + 1,
-					endLine: Math.min(start + limit, lines.length),
+					endLine: end,
 					totalLines: lines.length,
+					hasPrevious,
+					hasMore,
+					completeness,
 					truncated,
 				},
 			};
