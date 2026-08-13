@@ -396,8 +396,8 @@ describe("Coding Agent print mode", () => {
 			reasoning: "off",
 			permissions: { profile: "read-only", approvalPolicy: "on-request" },
 		});
-		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
-		expect(events.at(-1)).toMatchObject({
+		expect(events.at(-3)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
+		expect(events.at(-2)).toMatchObject({
 			schemaVersion: 2,
 			type: "run_evidence",
 			outcome: "success",
@@ -406,8 +406,17 @@ describe("Coding Agent print mode", () => {
 			toolIssues: [],
 			unresolvedFailures: [],
 		});
+		expect(events.at(-1)).toMatchObject({
+			schemaVersion: 1,
+			type: "completion_disposition",
+			disposition: "verified",
+			modelTermination: "completed",
+			evidenceCompleteness: "complete",
+			verification: { result: "not_run", hiddenVerifier: "not_evaluated" },
+		});
 		expect(events.at(-1)?.runId).toBe(events.at(-2)?.runId);
 		expect(events.some((event) => event.type === "message_update")).toBe(true);
+		expect(events.at(-2)?.runId).toBe(events.at(-3)?.runId);
 		expect(stdout.value).not.toContain("json answer\n");
 		expect(stderr.value).toBe("");
 	});
@@ -455,8 +464,9 @@ describe("Coding Agent print mode", () => {
 		expect(events.some((event) => event.type === "message_update")).toBe(false);
 		expect(events.some((event) => event.type === "attempt_end")).toBe(true);
 		expect(events.some((event) => event.type === "message_end")).toBe(true);
-		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
-		expect(events.at(-1)).toMatchObject({ schemaVersion: 1, type: "run_evidence", outcome: "success" });
+		expect(events.at(-3)).toMatchObject({ schemaVersion: 2, type: "run_end", outcome: "success" });
+		expect(events.at(-2)).toMatchObject({ schemaVersion: 2, type: "run_evidence", outcome: "success" });
+		expect(events.at(-1)).toMatchObject({ schemaVersion: 1, type: "completion_disposition" });
 		const terminal = [...events].reverse().find((event) => event.type === "attempt_end");
 		expect(terminal).toMatchObject({
 			candidate: { message: { content: [{ type: "text", text: "semantic answer" }] } },
@@ -796,8 +806,13 @@ describe("Coding Agent print mode", () => {
 
 			expect(exitCode).toBe(1);
 			expect(faux.state.callCount).toBe(1);
-			expect(events.at(-2)).toMatchObject({ type: "run_end", outcome: "aborted" });
-			expect(events.at(-1)).toMatchObject({ type: "run_evidence", outcome: "aborted" });
+			expect(events.at(-3)).toMatchObject({ type: "run_end", outcome: "aborted" });
+			expect(events.at(-2)).toMatchObject({ type: "run_evidence", outcome: "aborted" });
+			expect(events.at(-1)).toMatchObject({
+				type: "completion_disposition",
+				disposition: "partial",
+				modelTermination: "interrupted",
+			});
 			expect(stderr.value).toContain("Run ended with outcome aborted");
 		} finally {
 			await rm(workspace, { recursive: true, force: true });

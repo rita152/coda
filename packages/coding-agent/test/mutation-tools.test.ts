@@ -44,6 +44,7 @@ describe("mutation Tools", () => {
 				});
 				return fauxAssistantMessage("The file was created.", { timestamp: 700 });
 			},
+			fauxAssistantMessage("The file was created.", { timestamp: 700 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(700) });
 		models.setProvider(faux.provider);
@@ -79,10 +80,10 @@ describe("mutation Tools", () => {
 			"create created.txt",
 		]);
 
-		expect(exitCode).toBe(0);
+		expect(exitCode).toBe(1);
 		expect(await readFile(join(workspace, "created.txt"), "utf8")).toBe("created by Coda\n");
 		expect(stdout.value).toBe("The file was created.\n");
-		expect(stderr.value).toBe("");
+		expect(stderr.value).toContain("coda: completion unverified");
 	});
 
 	it("atomically creates missing parent directories for a Workspace file", async () => {
@@ -108,6 +109,7 @@ describe("mutation Tools", () => {
 				});
 				return fauxAssistantMessage("The nested file was created.", { timestamp: 750 });
 			},
+			fauxAssistantMessage("The nested file was created.", { timestamp: 750 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(750) });
 		models.setProvider(faux.provider);
@@ -143,12 +145,12 @@ describe("mutation Tools", () => {
 			"create generated/parser/table.ts",
 		]);
 
-		expect(exitCode, stderr.value).toBe(0);
+		expect(exitCode, stderr.value).toBe(1);
 		expect(await readFile(join(workspace, "generated", "parser", "table.ts"), "utf8")).toBe(
 			"export const table = [];\n",
 		);
 		expect(stdout.value).toBe("The nested file was created.\n");
-		expect(stderr.value).toBe("");
+		expect(stderr.value).toContain("coda: completion unverified");
 	});
 
 	it("edits an exact unique match while preserving BOM, CRLF, and file mode", async () => {
@@ -186,6 +188,7 @@ describe("mutation Tools", () => {
 				});
 				return fauxAssistantMessage("The edit was applied.", { timestamp: 800 });
 			},
+			fauxAssistantMessage("The edit was applied.", { timestamp: 800 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(800) });
 		models.setProvider(faux.provider);
@@ -221,11 +224,11 @@ describe("mutation Tools", () => {
 			"edit existing.txt",
 		]);
 
-		expect(exitCode).toBe(0);
+		expect(exitCode).toBe(1);
 		expect(await readFile(target)).toEqual(Buffer.from("\uFEFFalpha\r\nnew\r\nomega\r\n", "utf8"));
 		expect((await stat(target)).mode & 0o777).toBe(0o640);
 		expect(stdout.value).toBe("The edit was applied.\n");
-		expect(stderr.value).toBe("");
+		expect(stderr.value).toContain("coda: completion unverified");
 	});
 
 	it("returns recoverable mutation failures to the Model and continues the Run", async () => {
@@ -395,6 +398,7 @@ describe("mutation Tools", () => {
 				});
 				return fauxAssistantMessage("The edit target is absent.", { timestamp: 900 });
 			},
+			fauxAssistantMessage("The edit target is still absent.", { timestamp: 900 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(900) });
 		models.setProvider(faux.provider);
@@ -430,8 +434,8 @@ describe("mutation Tools", () => {
 			"edit missing.txt",
 		]);
 
-		expect(exitCode, stderr.value).toBe(0);
-		expect(stdout.value).toBe("The edit target is absent.\n");
-		expect(stderr.value).toBe("");
+		expect(exitCode, stderr.value).toBe(1);
+		expect(stdout.value).toBe("The edit target is still absent.\n");
+		expect(stderr.value).toContain("coda: completion partial");
 	});
 });

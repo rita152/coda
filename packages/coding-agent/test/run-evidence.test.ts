@@ -405,6 +405,29 @@ describe("RunEvidence projection", () => {
 		expect(evidence.omitted.commands).toBe(3);
 	});
 
+	it("projects a non-destructive live snapshot for application-owned completion gates", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 810 }));
+		const write = invocation("write:live", "write", { path: "src/live.ts", content: "value" }, 0);
+		projection.accept(toolStart(write, 820));
+		projection.accept(toolEnd(write, observation("ok"), 830));
+
+		const live = projection.snapshot("run:test", 840);
+		expect(live).toMatchObject({
+			type: "run_evidence",
+			outcome: "success",
+			completedAt: 840,
+			paths: { changed: ["src/live.ts"] },
+		});
+
+		const command = invocation("bash:after-snapshot", "bash", { command: "git diff --check" }, 1);
+		projection.accept(toolStart(command, 850));
+		projection.accept(toolEnd(command, observation("ok", { facts: { exitCode: 0 } }), 860));
+		const completed = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 870 }))!;
+		expect(completed.paths.changed).toEqual(["src/live.ts"]);
+		expect(completed.commands).toEqual([expect.objectContaining({ command: "git diff --check", status: "ok" })]);
+	});
+
 	it("reconstructs completed evidence after a Session resumes", async () => {
 		let id = 0;
 		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };

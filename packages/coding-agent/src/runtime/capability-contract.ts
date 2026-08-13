@@ -206,6 +206,24 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		],
 	}),
 	capability({
+		id: "coding-agent.completion-gate",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Evidence-backed print completion",
+		summary:
+			"Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.",
+		sources: [
+			"packages/coding-agent/src/completion/completion-gate.ts",
+			"packages/coding-agent/src/completion/completion-controller.ts",
+			"packages/coding-agent/src/completion/run-evidence-adapter.ts",
+			"packages/coding-agent/src/completion/workspace-evidence.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/completion-gate.test.ts",
+			"packages/coding-agent/test/completion-application.test.ts",
+		],
+	}),
+	capability({
 		id: "coding-agent.media",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",

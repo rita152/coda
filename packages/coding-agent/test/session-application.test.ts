@@ -11,6 +11,7 @@ import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ModelProcessRunner } from "../src/permissions/model-process-runner.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { stableCompletionWorkspaceEvidence } from "./completion-test-helpers.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -153,6 +154,7 @@ describe("Session application composition", () => {
 			modelProcessRunner,
 			fileSystem: createNodeFileSystem(),
 			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(1_290),
 			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
 			runtime: {
 				cwd: workspace,

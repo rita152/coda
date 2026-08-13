@@ -217,6 +217,11 @@ class EvidenceReducer {
 		return projectEnvelope(state, finished);
 	}
 
+	snapshotRun(runId: string, finished: FinishedRun): RunEvidenceEnvelope | undefined {
+		const state = this.#runs.get(runId);
+		return state ? projectEnvelope(state, finished) : undefined;
+	}
+
 	#ensureRun(runId: string, timestamp: number): RunState {
 		let state = this.#runs.get(runId);
 		if (!state) {
@@ -230,6 +235,19 @@ class EvidenceReducer {
 /** Incremental, side-effect-free projection over immutable live Agent Events. */
 export class RunEvidenceProjection {
 	readonly #reducer = new EvidenceReducer();
+
+	/**
+	 * Projects the evidence observed so far without settling or deleting the Run.
+	 * Application-owned gates may use this only at a safe Agent event boundary;
+	 * the completed `run_evidence` envelope remains authoritative after `run_end`.
+	 */
+	snapshot(
+		runId: string,
+		completedAt: number,
+		outcome: RunEvidenceOutcome = "success",
+	): RunEvidenceEnvelope | undefined {
+		return this.#reducer.snapshotRun(runId, { outcome, completedAt });
+	}
 
 	accept(event: AgentEvent): RunEvidenceEnvelope | undefined {
 		switch (event.type) {

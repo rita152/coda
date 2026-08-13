@@ -140,7 +140,8 @@ integration("model Bash escalation", () => {
 			"perform one reviewed outside write",
 		]);
 
-		expect(exitCode, stderr.value).toBe(0);
+		expect(exitCode, stderr.value).toBe(1);
+		expect(stderr.value).toContain("coda: completion blocked");
 		expect(approvals).toBe(2);
 		expect(await readFile(escalatedTarget, "utf8")).toBe("escalated");
 		await expect(access(deniedTarget)).rejects.toMatchObject({ code: "ENOENT" });

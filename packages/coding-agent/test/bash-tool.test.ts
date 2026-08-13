@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
+import { stableCompletionWorkspaceEvidence } from "./completion-test-helpers.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -42,6 +43,7 @@ describe("bash Tool", () => {
 				});
 				return fauxAssistantMessage("Compound command executed.", { timestamp: 880 });
 			},
+			fauxAssistantMessage("Compound command executed without post-change verification.", { timestamp: 880 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(880) });
 		models.setProvider(faux.provider);
@@ -74,10 +76,10 @@ describe("bash Tool", () => {
 				`${faux.getModel().provider}/${faux.getModel().id}`,
 				"run compound command",
 			]),
-		).resolves.toBe(0);
+		).resolves.toBe(1);
 		expect(await readFile(join(workspace, "bypass.txt"), "utf8")).toBe("allowed");
-		expect(stdout.value).toBe("Compound command executed.\n");
-		expect(stderr.value).toBe("");
+		expect(stdout.value).toBe("Compound command executed without post-change verification.\n");
+		expect(stderr.value).toContain("coda: completion unverified");
 	});
 
 	it("reports a Sandbox denial as an error even when the child exits zero", async () => {
@@ -155,9 +157,9 @@ describe("bash Tool", () => {
 
 		await expect(
 			application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "try network"]),
-		).resolves.toBe(0);
+		).resolves.toBe(1);
 		expect(stdout.value).toBe("The Sandbox denied the request.\n");
-		expect(stderr.value).toBe("");
+		expect(stderr.value).toContain("coda: completion blocked");
 	});
 
 	it("uses the Workspace cwd and strips provider secrets from a non-login Shell", async () => {
@@ -201,6 +203,7 @@ describe("bash Tool", () => {
 			settings: { load: async () => ({}), save: async () => undefined },
 			fileSystem: createNodeFileSystem(),
 			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(900),
 			io: {
 				stdin: { isTTY: true, readAll: async () => "" },
 				stdout,
@@ -311,6 +314,7 @@ describe("bash Tool", () => {
 				expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("[stdout]");
 				return fauxAssistantMessage("Recovered the complete output and kept exit 7.", { timestamp: 910 });
 			},
+			fauxAssistantMessage("The original exit 7 remains unresolved.", { timestamp: 910 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(910) });
 		models.setProvider(faux.provider);
@@ -339,10 +343,10 @@ describe("bash Tool", () => {
 
 		await expect(
 			application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "preview"]),
-		).resolves.toBe(0);
+		).resolves.toBe(1);
 		expect(outputRef).toMatch(/^tool-output:v1:/);
-		expect(stdout.value).toBe("Recovered the complete output and kept exit 7.\n");
-		expect(stderr.value).toBe("");
+		expect(stdout.value).toBe("The original exit 7 remains unresolved.\n");
+		expect(stderr.value).toContain("coda: completion partial");
 	});
 
 	it("keeps Bash usable when its optional output store cannot be created", async () => {
@@ -388,6 +392,7 @@ describe("bash Tool", () => {
 			settings: { load: async () => ({}), save: async () => undefined },
 			fileSystem,
 			processRunner: runner,
+			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(920),
 			modelProcessRunner: {
 				run: async (request) => ({ ...(await runner.run(request)), backend: "none" }),
 			},

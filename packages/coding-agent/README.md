@@ -54,6 +54,31 @@ motion for one invocation. Persistent UI defaults can be set in
 }
 ```
 
+### Print completion semantics
+
+Print mode keeps Agent lifecycle settlement separate from evidence-backed task
+completion. `RunOutcome.success` still means that the Run ended normally; it
+does not claim that a hidden evaluator will accept the work. After every
+`run_evidence` record, `--json` emits a versioned
+`completion_disposition` record with independent `modelTermination`,
+`evidenceCompleteness`, and local `verification.result` fields. Its
+`verification.hiddenVerifier` is always `not_evaluated`.
+
+The v1 dispositions are `verified`, `partial`, `blocked`, and `unverified`.
+A read-only or diagnosis Run may be `verified` without a test command when its
+public evidence is complete and it has no relevant open failure. A mutating Run
+requires a relevant successful local verification after the latest mutation
+and complete final Git diff/status evidence. Assistant phrases such as “Done”
+are never parsed as proof. When a terminal candidate lacks actionable
+post-mutation evidence, Coda injects at most one completion-repair Steering by
+default; reaching the bound settles and emits the remaining disposition.
+
+Text print mode continues to write the final assistant text to stdout. It exits
+0 only for `verified`; lifecycle failure, unresolved Approval, `partial`,
+`blocked`, or `unverified` exits 1. Non-verified text runs add a concise status
+to stderr, while their workspace patch and Run Evidence remain intact.
+Interactive behavior is unchanged by this gate.
+
 Custom Provider Model metadata is persisted beside the discovered Model ID and
 labels every value as either `provider` discovery or an explicit `user`
 override. Missing fields stay omitted; Coda applies source-labelled
@@ -208,6 +233,7 @@ This status block is generated from executable runtime contracts. See the
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, and opt-in whole-Turn retry.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
 - **Built-in Tools** (@coda/coding-agent) — Workspace-aware reading, search, mutation, Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `process_start`, `process_poll`, `process_write`, and `process_stop`.
+- **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/coding-agent) — Auto-Compaction and `/compact [focus]` share one Tool-pair-safe implementation and persist Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
 - **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.

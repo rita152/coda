@@ -35,6 +35,11 @@ import {
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
+import {
+	CodingCompletionController,
+	type CompletionWorkspaceEvidenceProvider,
+	createGitWorkspaceEvidenceProvider,
+} from "./completion/index.ts";
 import { ContextWindowController } from "./context-window/context-window.ts";
 import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
 import { type JsonEventStreamMode, JsonEventWriter } from "./event-output/json-event-writer.ts";
@@ -249,6 +254,8 @@ export interface CodingAgentApplicationOptions {
 	readonly skillWatcher?: SkillWatcherFactory;
 	readonly mcpConnector?: McpConnector;
 	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
+	/** Private deterministic seam for completion-gate integration tests. */
+	readonly completionWorkspaceEvidence?: CompletionWorkspaceEvidenceProvider;
 }
 
 export interface CodingAgentApplication {
@@ -1659,6 +1666,26 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							}
 						}
 					});
+					const completionController =
+						parsed.mode === "print"
+							? new CodingCompletionController({
+									workspaceEvidence:
+										options.completionWorkspaceEvidence ??
+										createGitWorkspaceEvidenceProvider({
+											processRunner: options.processRunner,
+											fileSystem: options.fileSystem,
+											workspace: workspace.root,
+											environment: options.runtime.environment,
+											now: () => options.runtime.clock.now(),
+										}),
+									steer: (message) => {
+										agent.steer(message);
+									},
+								})
+							: undefined;
+					if (completionController) {
+						agent.onEvent((event) => completionController.accept(event));
+					}
 					if (parsed.mode === "interactive") {
 						const persistCustomProviders = async (): Promise<void> => {
 							settings = { ...settings, customProviders: providerManager.configurations };
@@ -2563,6 +2590,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									throw new Error(`Run evidence was unavailable after completed Run ${event.runId}`);
 								}
 								await jsonEventWriter.writeRecord(evidence);
+								const disposition = completionController?.get(event.runId);
+								if (!disposition) {
+									throw new Error(`Completion disposition was unavailable after completed Run ${event.runId}`);
+								}
+								await jsonEventWriter.writeRecord(disposition);
 							}
 						});
 					}
@@ -2588,6 +2620,17 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const committed = agent.state.messages.find(({ id }) => id === result.finalMessageId)?.message;
 					if (!committed || committed.role !== "assistant") throw new Error("Final Assistant Message is missing");
 					if (parsed.output === "text") await options.io.stdout.write(`${finalText(committed)}\n`);
+					const disposition = completionController?.get(result.runId);
+					if (!disposition)
+						throw new Error(`Completion disposition was unavailable after completed Run ${result.runId}`);
+					if (disposition.disposition !== "verified") {
+						if (parsed.output === "text") {
+							await options.io.stderr.write(
+								`coda: completion ${disposition.disposition} (${disposition.reasons.join(", ")})\n`,
+							);
+						}
+						return 1;
+					}
 					if (rejectingApproval && rejectingApproval.requests.length > 0) return 1;
 					return 0;
 				} finally {
