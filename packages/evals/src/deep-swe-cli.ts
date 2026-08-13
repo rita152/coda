@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	assertDeepSwePaidRun,
@@ -14,8 +14,14 @@ import {
 	type DeepSwePierJobOptions,
 	type DeepSweRoundReport,
 	formatDeepSweImageLockTsv,
+	readDeepSweEvaluationReport,
 	summarizeDeepSweJobResult,
 } from "./deep-swe.ts";
+import {
+	DEEP_SWE_REPORT_RECOVERY_METADATA_KEY,
+	type DeepSweJsonlReduction,
+	reduceDeepSweJsonlFile,
+} from "./deep-swe-resources.ts";
 
 type DeepSweCommand = "compare" | "config" | "images" | "report" | "run";
 
@@ -209,9 +215,20 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 
 async function readPierJobResult(path: string): Promise<unknown> {
 	const result = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-	if (Array.isArray(result.trial_results)) return result;
+	if (Array.isArray(result.trial_results)) {
+		const trialResults = await Promise.all(
+			result.trial_results.map(async (value) => {
+				if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+				const trial = value as Record<string, unknown>;
+				return typeof trial.trial_name === "string"
+					? enrichTrialDiagnostics(trial, join(dirname(path), trial.trial_name))
+					: trial;
+			}),
+		);
+		return { ...result, trial_results: trialResults };
+	}
 	if (typeof result.task_name === "string") {
-		return { trial_results: [await enrichTrialDiagnostics(result, dirname(path))] };
+		return { ...result, trial_results: [await enrichTrialDiagnostics(result, dirname(path))] };
 	}
 
 	const jobDir = dirname(path);
@@ -239,43 +256,14 @@ async function enrichTrialDiagnostics(
 	trial: Record<string, unknown>,
 	trialDir: string,
 ): Promise<Record<string, unknown>> {
-	let lines: readonly string[];
+	let reduction: DeepSweJsonlReduction;
 	try {
-		lines = (await readFile(join(trialDir, "agent", "coda.jsonl"), "utf8")).split("\n");
+		reduction = await reduceDeepSweJsonlFile(join(trialDir, "agent", "coda.jsonl"));
 	} catch (error) {
 		const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
 		if (code === "ENOENT") return trial;
 		throw error;
 	}
-	const events = lines.flatMap((line): Record<string, unknown>[] => {
-		if (!line) return [];
-		try {
-			const event: unknown = JSON.parse(line);
-			return typeof event === "object" && event !== null && !Array.isArray(event)
-				? [event as Record<string, unknown>]
-				: [];
-		} catch {
-			return [];
-		}
-	});
-	const lengthTruncationCount = events.filter((event) => {
-		if (event.type !== "attempt_end" || typeof event.candidate !== "object" || event.candidate === null) return false;
-		const message = (event.candidate as Record<string, unknown>).message;
-		return (
-			typeof message === "object" && message !== null && (message as Record<string, unknown>).stopReason === "length"
-		);
-	}).length;
-	const budgetExhaustionLimits = events.flatMap((event): string[] => {
-		if (event.type !== "run_budget_exhausted" || typeof event.exhaustion !== "object" || !event.exhaustion) {
-			return [];
-		}
-		const limit = (event.exhaustion as Record<string, unknown>).limit;
-		return typeof limit === "string" ? [limit] : [];
-	});
-	const rejected = events.filter((event) => event.type === "tool_execution_rejected");
-	const toolRejectionCount = rejected.length;
-	const policyRejectionCount = rejected.filter((event) => event.reason === "policy").length;
-	const invalidToolCallCount = rejected.filter((event) => event.reason === "invalid").length;
 	const agent =
 		typeof trial.agent_result === "object" && trial.agent_result !== null
 			? (trial.agent_result as Record<string, unknown>)
@@ -288,22 +276,59 @@ async function enrichTrialDiagnostics(
 			...agent,
 			metadata: {
 				...metadata,
-				length_truncation_count: metadata.length_truncation_count ?? lengthTruncationCount,
-				budget_exhaustion_limits: metadata.budget_exhaustion_limits ?? budgetExhaustionLimits,
-				tool_rejection_count: metadata.tool_rejection_count ?? toolRejectionCount,
-				policy_rejection_count: metadata.policy_rejection_count ?? policyRejectionCount,
-				invalid_tool_call_count: metadata.invalid_tool_call_count ?? invalidToolCallCount,
+				length_truncation_count: metadata.length_truncation_count ?? reduction.lengthTruncationCount,
+				budget_exhaustion_limits: metadata.budget_exhaustion_limits ?? reduction.budgetExhaustionLimits,
+				tool_rejection_count: metadata.tool_rejection_count ?? reduction.toolRejectionCount,
+				policy_rejection_count: metadata.policy_rejection_count ?? reduction.policyRejectionCount,
+				invalid_tool_call_count: metadata.invalid_tool_call_count ?? reduction.invalidToolCallCount,
+				[DEEP_SWE_REPORT_RECOVERY_METADATA_KEY]: reduction,
 			},
 		},
 	};
 }
 
+function isVersionedDeepSweReport(value: unknown): boolean {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const report = value as Record<string, unknown>;
+	return (
+		report.benchmark === "deep-swe" &&
+		(report.schemaVersion === 1 || report.schemaVersion === 2) &&
+		Array.isArray(report.trials)
+	);
+}
+
+async function readEvaluationReport(path: string) {
+	const input: unknown = JSON.parse(await readFile(path, "utf8"));
+	return isVersionedDeepSweReport(input)
+		? readDeepSweEvaluationReport(input)
+		: summarizeDeepSweJobResult(await readPierJobResult(path));
+}
+
+async function tryReadJson(path: string): Promise<Record<string, unknown> | undefined> {
+	try {
+		const value: unknown = JSON.parse(await readFile(path, "utf8"));
+		return typeof value === "object" && value !== null && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: undefined;
+	} catch (error) {
+		const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+		if (code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 async function readRoundReport(path: string): Promise<DeepSweRoundReport> {
 	const jobDir = dirname(path);
-	const config = JSON.parse(await readFile(join(jobDir, "config.json"), "utf8")) as Record<string, unknown>;
+	const pathRound = /(?:^|-)round-(\d+)(?:-|\.)/.exec(basename(path));
+	const adjacentConfig = pathRound ? join(jobDir, `round-${pathRound[1]}-config.json`) : undefined;
+	const config =
+		(await tryReadJson(join(jobDir, "config.json"))) ??
+		(adjacentConfig ? await tryReadJson(adjacentConfig) : undefined) ??
+		{};
 	const name = typeof config.job_name === "string" ? config.job_name : "";
-	const match = /(?:^|-)r(\d+)(?:-|$)/.exec(name);
-	if (!match) throw new Error(`Could not determine round number from Pier job name: ${name || jobDir}`);
+	const nameRound = /(?:^|-)r(\d+)(?:-|$)/.exec(name);
+	const roundText = nameRound?.[1] ?? pathRound?.[1];
+	if (!roundText) throw new Error(`Could not determine round number from Pier job or report name: ${name || path}`);
 	const agents = Array.isArray(config.agents) ? config.agents : [];
 	const agent = typeof agents[0] === "object" && agents[0] !== null ? (agents[0] as Record<string, unknown>) : {};
 	const kwargs =
@@ -315,13 +340,13 @@ async function readRoundReport(path: string): Promise<DeepSweRoundReport> {
 		runBudgetEnabled && typeof kwargs.max_turns === "number" ? kwargs.max_turns : DEEP_SWE_DEFAULT_MAX_TURNS;
 	const allowAllCommands = kwargs.allow_all_commands === true;
 	return {
-		round: Number(match[1]),
+		round: Number(roundText),
 		harnessRevision,
 		maxOutputTokens,
 		runBudgetEnabled,
 		...(runBudgetEnabled ? { maxTurns } : {}),
 		allowAllCommands,
-		report: summarizeDeepSweJobResult(await readPierJobResult(path)),
+		report: await readEvaluationReport(path),
 	};
 }
 
@@ -386,9 +411,7 @@ export async function runDeepSweCli(arguments_: readonly string[]): Promise<numb
 	if (parsed.command === "report") {
 		const resultPath = parsed.resultPaths[0];
 		if (!resultPath || parsed.resultPaths.length !== 1) throw new Error("report requires exactly one --result");
-		process.stdout.write(
-			`${JSON.stringify(summarizeDeepSweJobResult(await readPierJobResult(resultPath)), undefined, 2)}\n`,
-		);
+		process.stdout.write(`${JSON.stringify(await readEvaluationReport(resultPath), undefined, 2)}\n`);
 		return 0;
 	}
 	if (parsed.command === "compare") {

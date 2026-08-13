@@ -76,6 +76,13 @@ Every generated Pier config and version-2 run lock selects semantic JSONL mode e
 retains terminal assistant candidates, Tool lifecycle, Run boundaries, and Run Evidence without writing token-level
 message deltas. Raw v2 events remain available through Coda's explicit `--json --json-mode raw` diagnostics path.
 
+DeepSWE report schema v2 separates job `wallElapsedMs` from cumulative trial and Agent time. Token, cost, step, and
+cumulative-time totals include their known total, observed/expected trial coverage, and a
+`complete | partial | unavailable` status. Cost also reports priced/unpriced Attempt coverage. The report command
+streams `coda.jsonl` and can recover lower-bound usage from `attempt_end` records after a timeout without loading the
+artifact into memory; recovered values use source `terminal_events` and remain `partial`. Schema-v1 summaries from
+development rounds 5–11 remain valid report/compare inputs and are upgraded in memory without inventing wall time.
+
 `--no-run-budget` is mutually exclusive with `--max-turns` and disables the complete Coda Run Budget rather than
 substituting a large numeric limit. Pier's agent timeout remains an infrastructure failure boundary. Explicit
 `--max-output-tokens` values can use a model's full declared output limit; for example, the pinned OpenCode Go catalog

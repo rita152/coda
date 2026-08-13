@@ -9,6 +9,8 @@ import {
 	DEEP_SWE_FIRST_20_IMAGE_LOCKS,
 	DEEP_SWE_FIRST_20_TASK_IDS,
 	formatDeepSweImageLockTsv,
+	readDeepSweEvaluationReport,
+	reduceDeepSweJsonlLines,
 	summarizeDeepSweJobResult,
 } from "../src/index.ts";
 
@@ -136,8 +138,234 @@ describe("DeepSWE evaluation runner", () => {
 		expect(() => assertDeepSwePaidRun({ allowPaidRequests: true, confirmed: true, hasApiKey: true })).not.toThrow();
 	});
 
+	it("separates job wall time from concurrent cumulative trial time", () => {
+		const report = summarizeDeepSweJobResult({
+			started_at: "2026-08-12T00:00:00Z",
+			finished_at: "2026-08-12T00:01:40Z",
+			trial_results: [
+				{
+					task_name: "a-task",
+					trial_name: "a-task__one",
+					started_at: "2026-08-12T00:00:05Z",
+					finished_at: "2026-08-12T00:01:25Z",
+					agent_result: { metadata: { run_outcome: "success", elapsed_ms: 80_000 } },
+				},
+				{
+					task_name: "b-task",
+					trial_name: "b-task__one",
+					started_at: "2026-08-12T00:00:15Z",
+					finished_at: "2026-08-12T00:01:35Z",
+					agent_result: { metadata: { run_outcome: "success", elapsed_ms: 80_000 } },
+				},
+			],
+		});
+
+		expect(report.summary.wallElapsedMs).toBe(100_000);
+		expect(report.summary.cumulativeTrialElapsedMs).toEqual({
+			knownTotal: 160_000,
+			observedTrials: 2,
+			expectedTrials: 2,
+			status: "complete",
+			sources: ["pier_result"],
+		});
+		expect(report.summary.cumulativeAgentElapsedMs).toEqual({
+			knownTotal: 160_000,
+			observedTrials: 2,
+			expectedTrials: 2,
+			status: "complete",
+			sources: ["run_evidence"],
+		});
+	});
+
+	it("distinguishes a measured zero from missing resource data", () => {
+		const completeZero = summarizeDeepSweJobResult({
+			trial_results: [
+				{
+					task_name: "zero-task",
+					trial_name: "zero-task__one",
+					agent_result: {
+						n_input_tokens: 0,
+						n_cache_tokens: 0,
+						n_output_tokens: 0,
+						cost_usd: 0,
+						n_agent_steps: 0,
+						metadata: { run_outcome: "success", elapsed_ms: 0 },
+					},
+				},
+			],
+		});
+		expect(completeZero.summary.inputTokens).toMatchObject({
+			knownTotal: 0,
+			observedTrials: 1,
+			status: "complete",
+		});
+		expect(completeZero.summary.costUsd).toMatchObject({ knownTotalUsd: 0, status: "complete" });
+		expect(completeZero.summary.turnCount).toMatchObject({ knownTotal: 0, status: "complete" });
+		expect(completeZero.summary.cumulativeAgentElapsedMs).toMatchObject({ knownTotal: 0, status: "complete" });
+
+		const unavailable = summarizeDeepSweJobResult({
+			trial_results: [{ task_name: "missing-task", trial_name: "missing-task__one" }],
+		});
+		expect(unavailable.summary.inputTokens).toMatchObject({
+			knownTotal: null,
+			observedTrials: 0,
+			status: "unavailable",
+		});
+		expect(unavailable.summary.costUsd).toMatchObject({ knownTotalUsd: null, status: "unavailable" });
+	});
+
+	it("keeps pass rate on observed trials while exposing an incomplete expected count", () => {
+		const report = summarizeDeepSweJobResult({
+			n_total_trials: 2,
+			trial_results: [
+				{
+					task_name: "observed-task",
+					trial_name: "observed-task__one",
+					verifier_result: { rewards: { reward: 1 } },
+				},
+			],
+		});
+		expect(report.summary).toMatchObject({ trials: 1, expectedTrials: 2, passRate: 1 });
+		expect(report.summary.inputTokens).toMatchObject({ expectedTrials: 2, status: "unavailable" });
+	});
+
+	it("recovers partial Attempt resources with a constant-space line reducer", async () => {
+		async function* eventLines(): AsyncGenerator<string> {
+			yield JSON.stringify({ type: "run_start", timestamp: 1_000 });
+			for (let index = 0; index < 10_000; index++) {
+				yield JSON.stringify({ type: "message_update", timestamp: 1_001, delta: { type: "text_delta" } });
+			}
+			yield JSON.stringify({ type: "turn_start", timestamp: 1_100 });
+			yield JSON.stringify({
+				type: "attempt_end",
+				timestamp: 2_000,
+				candidate: {
+					message: {
+						stopReason: "length",
+						usage: {
+							input: 10,
+							cacheRead: 3,
+							cacheWrite: 2,
+							output: 4,
+							cost: { total: 0.1 },
+						},
+					},
+				},
+			});
+			yield JSON.stringify({
+				type: "attempt_end",
+				timestamp: 3_000,
+				candidate: {
+					message: {
+						usage: { input: 20, output: 6 },
+					},
+				},
+			});
+			yield "{truncated";
+		}
+
+		const reduction = await reduceDeepSweJsonlLines(eventLines());
+		expect(reduction.resources.inputTokens).toEqual({
+			knownTotal: 35,
+			status: "partial",
+			source: "terminal_events",
+		});
+		expect(reduction.resources.cacheTokens.knownTotal).toBe(3);
+		expect(reduction.resources.outputTokens.knownTotal).toBe(10);
+		expect(reduction.resources.costUsd).toEqual({
+			knownTotalUsd: 0.1,
+			status: "partial",
+			source: "terminal_events",
+			pricedAttempts: 1,
+			unpricedAttempts: 1,
+			attemptCoverage: "partial",
+		});
+		expect(reduction.resources.turnCount).toMatchObject({ knownTotal: 1, status: "partial" });
+		expect(reduction.resources.agentElapsedMs).toMatchObject({ knownTotal: 2_000, status: "partial" });
+		expect(reduction.lengthTruncationCount).toBe(1);
+
+		async function* zeroStepRun(): AsyncGenerator<string> {
+			yield JSON.stringify({ type: "run_start", timestamp: 5_000 });
+		}
+		const zeroStepReduction = await reduceDeepSweJsonlLines(zeroStepRun());
+		expect(zeroStepReduction.resources.turnCount).toEqual({
+			knownTotal: 0,
+			status: "partial",
+			source: "terminal_events",
+		});
+	});
+
+	it("keeps partial Run Evidence cost explicitly incomplete", async () => {
+		async function* eventLines(): AsyncGenerator<string> {
+			yield JSON.stringify({ type: "run_start", timestamp: 1_000 });
+			yield JSON.stringify({ type: "turn_start", timestamp: 1_100 });
+			yield JSON.stringify({
+				type: "run_evidence",
+				elapsedMs: 500,
+				usage: {
+					inputTokens: 4,
+					cacheReadTokens: 5,
+					cacheWriteTokens: 6,
+					outputTokens: 7,
+					cost: {
+						status: "partial",
+						knownTotalUsd: 0.25,
+						pricedAttempts: 1,
+						unpricedAttempts: 2,
+					},
+				},
+			});
+		}
+
+		const reduction = await reduceDeepSweJsonlLines(eventLines());
+		expect(reduction.resources.inputTokens).toEqual({
+			knownTotal: 15,
+			status: "complete",
+			source: "run_evidence",
+		});
+		expect(reduction.resources.costUsd).toMatchObject({
+			knownTotalUsd: 0.25,
+			status: "partial",
+			pricedAttempts: 1,
+			unpricedAttempts: 2,
+			attemptCoverage: "complete",
+		});
+	});
+
+	it("upgrades round 5-11 schema-v1 reports without interpreting absent values as zero", () => {
+		for (let round = 5; round <= 11; round++) {
+			const report = readDeepSweEvaluationReport({
+				schemaVersion: 1,
+				benchmark: "deep-swe",
+				summary: { trials: 2, elapsedMs: 80_000, inputTokens: 10 },
+				trials: [
+					{
+						taskId: `known-${round}`,
+						trialName: `known-${round}__one`,
+						status: "passed",
+						inputTokens: 10,
+						costUsd: 0,
+						elapsedMs: 80_000,
+					},
+					{ taskId: `missing-${round}`, trialName: `missing-${round}__one`, status: "error" },
+				],
+			});
+			expect(report.schemaVersion).toBe(2);
+			expect(report.summary.inputTokens).toMatchObject({
+				knownTotal: 10,
+				observedTrials: 1,
+				expectedTrials: 2,
+				status: "partial",
+			});
+			expect(report.summary.costUsd).toMatchObject({ knownTotalUsd: 0, status: "partial" });
+			expect(report.summary.wallElapsedMs).toBeNull();
+		}
+	});
+
 	it("aggregates rewards, infrastructure errors, Coda metadata, usage, cost, and duration", () => {
 		const report = summarizeDeepSweJobResult({
+			started_at: "2026-08-12T00:00:00Z",
+			finished_at: "2026-08-12T00:00:05Z",
 			trial_results: [
 				{
 					task_name: "datacurve/b-task",
@@ -214,8 +442,10 @@ describe("DeepSWE evaluation runner", () => {
 		});
 
 		expect(report.trials.map(({ taskId }) => taskId)).toEqual(["a-task", "b-task", "c-task"]);
-		expect(report.summary).toEqual({
+		expect(report.schemaVersion).toBe(2);
+		expect(report.summary).toMatchObject({
 			trials: 3,
+			expectedTrials: 3,
 			passed: 1,
 			failed: 1,
 			errors: 1,
@@ -225,13 +455,25 @@ describe("DeepSWE evaluation runner", () => {
 			p2pPassed: 7,
 			p2pTotal: 7,
 			averagePartial: 0.8,
-			elapsedMs: 5_000,
-			inputTokens: 30,
-			cacheTokens: 3,
-			outputTokens: 10,
-			costUsd: 0.75,
-			turnCount: 11,
-			agentElapsedMs: 2_500,
+			wallElapsedMs: 5_000,
+			cumulativeTrialElapsedMs: {
+				knownTotal: 5_000,
+				observedTrials: 2,
+				expectedTrials: 3,
+				status: "partial",
+				sources: ["pier_result"],
+			},
+			inputTokens: { knownTotal: 30, observedTrials: 2, expectedTrials: 3, status: "partial" },
+			cacheTokens: { knownTotal: 3, observedTrials: 1, expectedTrials: 3, status: "partial" },
+			outputTokens: { knownTotal: 10, observedTrials: 2, expectedTrials: 3, status: "partial" },
+			costUsd: { knownTotalUsd: 0.75, observedTrials: 2, expectedTrials: 3, status: "partial" },
+			turnCount: { knownTotal: 11, observedTrials: 2, expectedTrials: 3, status: "partial" },
+			cumulativeAgentElapsedMs: {
+				knownTotal: 2_500,
+				observedTrials: 2,
+				expectedTrials: 3,
+				status: "partial",
+			},
 			committedTrials: 2,
 			nonzeroCodaExits: 1,
 			toolIssueCount: 2,
@@ -257,6 +499,10 @@ describe("DeepSWE evaluation runner", () => {
 			unresolvedFailureCount: 1,
 			lengthTruncationCount: 1,
 			budgetExhaustionLimits: ["turns"],
+			resources: {
+				inputTokens: { knownTotal: 10, status: "complete", source: "run_evidence" },
+				costUsd: { knownTotalUsd: 0.25, status: "complete", source: "run_evidence" },
+			},
 		});
 	});
 

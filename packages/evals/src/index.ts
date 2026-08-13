@@ -1,12 +1,15 @@
 export type {
 	DeepSweCampaignReport,
+	DeepSweCostAggregate,
 	DeepSweEvaluationReport,
 	DeepSweImageLock,
 	DeepSwePierJobConfig,
 	DeepSwePierJobOptions,
+	DeepSweResourceAggregate,
 	DeepSweRoundReport,
 	DeepSweRunLock,
 	DeepSweTrialReport,
+	DeepSweTrialResources,
 } from "./deep-swe.ts";
 export {
 	assertDeepSwePaidRun,
@@ -25,10 +28,24 @@ export {
 	DEEP_SWE_PIER_REVISION,
 	DEEP_SWE_PIER_VERSION,
 	DEEP_SWE_PROVIDER_HOST,
+	DEEP_SWE_REPORT_SCHEMA_VERSION,
 	DEEP_SWE_VERSION,
 	formatDeepSweImageLockTsv,
+	readDeepSweEvaluationReport,
 	summarizeDeepSweJobResult,
 } from "./deep-swe.ts";
+export type {
+	DeepSweCoverageStatus,
+	DeepSweJsonlReduction,
+	DeepSweResourceSource,
+	DeepSweTrialCostTotal,
+	DeepSweTrialResourceTotal,
+} from "./deep-swe-resources.ts";
+export {
+	DeepSweEventResourceReducer,
+	reduceDeepSweJsonlFile,
+	reduceDeepSweJsonlLines,
+} from "./deep-swe-resources.ts";
 export { formatHumanReport } from "./report.ts";
 export { runLiveEvaluationSuite, runOfflineEvaluationSuite } from "./suite.ts";
 export type {
