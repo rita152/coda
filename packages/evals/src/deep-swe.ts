@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { createDeepSweExperimentPlan, type DeepSweExperimentPlan } from "./deep-swe-experiment.ts";
 
 export const DEEP_SWE_VERSION = "v1.1";
 export const DEEP_SWE_DATASET_REVISION = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9";
@@ -141,6 +142,8 @@ export interface DeepSwePierJobOptions {
 	readonly harnessRevision: string;
 	readonly round: number;
 	readonly concurrency: number;
+	readonly attempts?: number;
+	readonly timeBlock?: string;
 	readonly taskIds?: readonly string[];
 	readonly model?: string;
 	readonly reasoningEffort?: string;
@@ -160,7 +163,7 @@ export interface DeepSwePierJobOptions {
 export interface DeepSwePierJobConfig {
 	readonly job_name: string;
 	readonly jobs_dir: string;
-	readonly n_attempts: 1;
+	readonly n_attempts: number;
 	readonly n_concurrent_trials: number;
 	readonly quiet: boolean;
 	readonly retry: { readonly max_retries: 0 };
@@ -204,7 +207,7 @@ export interface DeepSwePierJobConfig {
 }
 
 export interface DeepSweRunLock {
-	readonly schemaVersion: 2;
+	readonly schemaVersion: 3;
 	readonly campaignKind: "development-round";
 	readonly dataset: {
 		readonly name: "datacurve/deep-swe-1-1";
@@ -240,9 +243,21 @@ export interface DeepSweRunLock {
 		readonly round: number;
 		readonly concurrency: number;
 		readonly taskIds: readonly string[];
+		readonly attempts: number;
+		readonly agentCount: number;
+		readonly totalPlannedPaidTrials: number;
+		readonly timeBlock: string;
 		readonly providerAllowlist: readonly [typeof DEEP_SWE_PROVIDER_HOST];
 	};
+	readonly experiment: DeepSweExperimentPlan;
 	readonly images: readonly DeepSweImageLock[];
+}
+
+export interface DeepSwePaidTrialPlan {
+	readonly tasks: number;
+	readonly attempts: number;
+	readonly agents: number;
+	readonly totalPlannedPaidTrials: number;
 }
 
 function positiveInteger(value: number, name: string): number {
@@ -294,15 +309,26 @@ function harnessRevision(value: string): string {
 	return value;
 }
 
-function jobName(round: number, revision: string): string {
-	return `coda-deep-swe-r${String(round).padStart(2, "0")}-${revision.slice(0, 12).toLowerCase()}`;
+function experimentTimeBlock(value: string | undefined, round: number): string {
+	const timeBlock = value ?? `round-${String(round).padStart(2, "0")}`;
+	if (!/^[a-zA-Z0-9._:-]{1,128}$/u.test(timeBlock)) {
+		throw new Error("timeBlock must be a 1-128 character stable experiment label");
+	}
+	return timeBlock;
+}
+
+function jobName(round: number, revision: string, attempts: number): string {
+	const base = `coda-deep-swe-r${String(round).padStart(2, "0")}-${revision.slice(0, 12).toLowerCase()}`;
+	return attempts === 1 ? base : `${base}-a${attempts}`;
 }
 
 export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): DeepSwePierJobConfig {
 	const round = positiveInteger(options.round, "round");
 	const concurrency = positiveInteger(options.concurrency, "concurrency");
+	const attempts = positiveInteger(options.attempts ?? 1, "attempts");
 	const revision = harnessRevision(options.harnessRevision);
 	const taskIds = taskSelection(options.taskIds);
+	experimentTimeBlock(options.timeBlock, round);
 	const model = options.model ?? DEEP_SWE_DEFAULT_MODEL;
 	const reasoningEffort = options.reasoningEffort ?? DEEP_SWE_DEFAULT_REASONING;
 	const maxOutputTokens = positiveInteger(
@@ -327,9 +353,9 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 	if (!reasoningEffort.trim()) throw new Error("reasoningEffort must not be empty");
 
 	const config: DeepSwePierJobConfig = {
-		job_name: jobName(round, revision),
+		job_name: jobName(round, revision, attempts),
 		jobs_dir: absolutePath(options.jobsDir, "jobsDir"),
-		n_attempts: 1,
+		n_attempts: attempts,
 		n_concurrent_trials: concurrency,
 		quiet: options.quiet ?? false,
 		retry: { max_retries: 0 },
@@ -377,8 +403,18 @@ export function createDeepSwePierJobConfig(options: DeepSwePierJobOptions): Deep
 export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRunLock {
 	const config = createDeepSwePierJobConfig(options);
 	const selected = new Set(config.datasets[0].task_names);
+	const experiment = createDeepSweExperimentPlan({
+		taskIds: config.datasets[0].task_names,
+		attempts: config.n_attempts,
+		agentCount: config.agents.length,
+		timeBlock: experimentTimeBlock(options.timeBlock, options.round),
+		seed: {
+			availability: "unavailable",
+			reason: "the Coda model request and pinned Pier adapter do not expose a Provider sampling seed",
+		},
+	});
 	const lock: DeepSweRunLock = {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		campaignKind: "development-round",
 		dataset: {
 			name: "datacurve/deep-swe-1-1",
@@ -411,11 +447,48 @@ export function createDeepSweRunLock(options: DeepSwePierJobOptions): DeepSweRun
 			round: options.round,
 			concurrency: config.n_concurrent_trials,
 			taskIds: config.datasets[0].task_names,
+			attempts: experiment.attempts,
+			agentCount: experiment.agentCount,
+			totalPlannedPaidTrials: experiment.totalPlannedPaidTrials,
+			timeBlock: experiment.timeBlock,
 			providerAllowlist: [DEEP_SWE_PROVIDER_HOST],
 		},
+		experiment,
 		images: DEEP_SWE_FIRST_20_IMAGE_LOCKS.filter(({ taskId }) => selected.has(taskId)),
 	};
 	return Object.freeze(lock);
+}
+
+export function createDeepSwePaidTrialPlan(options: DeepSwePierJobOptions): DeepSwePaidTrialPlan {
+	const config = createDeepSwePierJobConfig(options);
+	const tasks = config.datasets[0].task_names.length;
+	const attempts = config.n_attempts;
+	const agents = config.agents.length;
+	const totalPlannedPaidTrials = tasks * attempts * agents;
+	if (!Number.isSafeInteger(totalPlannedPaidTrials)) {
+		throw new Error("total planned paid trials exceeds the safe integer range");
+	}
+	return Object.freeze({ tasks, attempts, agents, totalPlannedPaidTrials });
+}
+
+export function formatDeepSwePaidTrialPlan(plan: DeepSwePaidTrialPlan): string {
+	const taskLabel = plan.tasks === 1 ? "task" : "tasks";
+	const attemptLabel = plan.attempts === 1 ? "attempt" : "attempts";
+	const agentLabel = plan.agents === 1 ? "agent" : "agents";
+	return `${plan.tasks} ${taskLabel} × ${plan.attempts} ${attemptLabel} × ${plan.agents} ${agentLabel} = ${plan.totalPlannedPaidTrials} planned paid trials`;
+}
+
+export function assertDeepSwePaidTrialPlan(plan: DeepSwePaidTrialPlan, confirmedPaidTrials: number | undefined): void {
+	if (confirmedPaidTrials !== undefined && confirmedPaidTrials !== plan.totalPlannedPaidTrials) {
+		throw new Error(
+			`--confirm-trials must equal ${plan.totalPlannedPaidTrials} (${formatDeepSwePaidTrialPlan(plan)})`,
+		);
+	}
+	if (plan.attempts > 1 && confirmedPaidTrials === undefined) {
+		throw new Error(
+			`Repeated paid sampling requires --confirm-trials ${plan.totalPlannedPaidTrials} (${formatDeepSwePaidTrialPlan(plan)})`,
+		);
+	}
 }
 
 export function formatDeepSweImageLockTsv(locks: readonly DeepSweImageLock[] = DEEP_SWE_FIRST_20_IMAGE_LOCKS): string {
@@ -438,6 +511,7 @@ export type {
 	DeepSweEvaluationReport,
 	DeepSweResourceAggregate,
 	DeepSweRoundReport,
+	DeepSweSummaryOptions,
 	DeepSweTrialReport,
 	DeepSweTrialResources,
 } from "./deep-swe-report.ts";

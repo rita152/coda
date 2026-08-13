@@ -62,9 +62,10 @@ npm run eval:deep-swe -- config \
 ```
 
 The default selection is an explicit, immutable list of the first twenty lexicographic task IDs. Use repeated
-`--task <literal-id>` options for another selection; `--concurrency` accepts any positive integer. Each optimization
-round must use a new `--round` value rather than Pier's `--n-attempts`, so its harness revision, raw artifacts, lock,
-and summary remain independent.
+`--task <literal-id>` options for another selection; `--concurrency` accepts any positive integer. `--attempts`
+controls Pier trial repetitions and defaults to 1. Each optimization treatment still uses a distinct `--round` so
+its harness revision, raw artifacts, lock, and summary remain independent. Baseline and candidate rounds intended
+for comparison should share an explicit `--time-block` value.
 
 `--max-output-tokens` controls Coda's per-model-call output reservation and is recorded in the run lock. DeepSWE
 defaults it to 32,768 so `max` reasoning is not silently constrained by Coda's conservative interactive default.
@@ -72,22 +73,31 @@ defaults it to 32,768 so `max` reasoning is not silently constrained by Coda's c
 validation rejections, length-truncated Attempts, and Run-budget-exhausted trials; `compare` keeps these diagnostics
 beside pass rate, partial reward, usage, and cost.
 
-Every generated Pier config and version-2 run lock selects semantic JSONL mode explicitly. The adapter therefore
+Every generated Pier config and version-3 run lock selects semantic JSONL mode explicitly. The adapter therefore
 retains terminal assistant candidates, Tool lifecycle, Run boundaries, and Run Evidence without writing token-level
 message deltas. Raw v2 events remain available through Coda's explicit `--json --json-mode raw` diagnostics path.
 
-DeepSWE report schema v2 separates job `wallElapsedMs` from cumulative trial and Agent time. Token, cost, step, and
+DeepSWE report schema v3 separates job `wallElapsedMs` from cumulative trial and Agent time. Token, cost, step, and
 cumulative-time totals include their known total, observed/expected trial coverage, and a
 `complete | partial | unavailable` status. Cost also reports priced/unpriced Attempt coverage. The report command
 streams `coda.jsonl` and can recover lower-bound usage from `attempt_end` records after a timeout without loading the
 artifact into memory; recovered values use source `terminal_events` and remain `partial`. Schema-v1 summaries from
 development rounds 5–11 remain valid report/compare inputs and are upgraded in memory without inventing wall time.
+Both historical coverage-v2 and sampling-v2 reports are also recognized despite their former version-number
+collision.
+
+The v3 report retains every repeated trial in a separately versioned `sampling` namespace. Per-task summaries report
+observed `n`, mean verifier success, a two-sided 95% Wilson interval, and empirical pass@k for draws without
+replacement from the observed trials. Compare uses stable task/attempt/agent identities, reports matched, unmatched,
+and missing observations, and emits both identity-paired and equal-task-weighted stratified aggregates only when
+recorded controls are compatible. See [the repeated-sampling experiment protocol](docs/deep-swe-experiment-design.md)
+for definitions and A/B rules.
 
 `--no-run-budget` is mutually exclusive with `--max-turns` and disables the complete Coda Run Budget rather than
 substituting a large numeric limit. It does not disable the independent RunControl envelope. DeepSWE defaults to a
 4,500-second work window, a 600-second finalization grace, and four stationary Turns; the 240-second adapter finalize
 margin is validated together with those windows against Pier's 5,400-second hard timeout. The corresponding
-`--run-control-*`, `--adapter-finalize-margin-sec`, and `--pier-hard-timeout-sec` options are recorded in the v2 run
+`--run-control-*`, `--adapter-finalize-margin-sec`, and `--pier-hard-timeout-sec` options are recorded in the v3 run
 lock. Explicit `--max-output-tokens` values can use a model's full declared output limit; for example, the pinned
 OpenCode Go catalog declares `deepseek-v4-flash` with a 1,000,000-token context window and a 384,000-token output limit.
 
@@ -117,14 +127,23 @@ npm run eval:deep-swe -- run \
   --adapter-dir /path/to/packages/evals/pier \
   --harness-revision <content-digest> \
   --round 1 \
+  --attempts 3 \
+  --time-block ab-2026-08-13-am \
   --concurrency 5 \
   --model opencode-go/deepseek-v4-flash \
   --reasoning max \
   --max-output-tokens 32768 \
-  --max-turns 64
+  --max-turns 64 \
+  --confirm-trials 60
 ```
+
+Immediately before the paid opt-in checks, `run` prints `tasks × attempts × agents` and the total planned paid
+trials. When `--attempts` is greater than 1, `--confirm-trials` must exactly match that total; this prevents a copied
+single-sample command from silently multiplying spend. The default `--attempts 1` confirmation flow is unchanged.
 
 DeepSWE declares agent and verifier task networks as disabled. The adapter asks Pier for filtered inference egress to
 `opencode.ai` only and enables Node's environment-proxy support; it never enables general task internet access.
 Repeated tuning on the same twenty public tasks is recorded as `development-round` in every run lock, not presented
-as an unbiased holdout score.
+as an unbiased holdout score. The historical 56/120 adjacent-round status flips crossed harness revisions and are
+therefore labeled observed cross-revision instability, never a pure sampling flip rate. Same-revision variability is
+tested with a synthetic, zero-Provider fixture.

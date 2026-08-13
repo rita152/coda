@@ -1,5 +1,15 @@
 import { basename } from "node:path";
 import {
+	compareDeepSweExperimentRounds,
+	createDeepSweAttemptId,
+	type DeepSweExperimentComparison,
+	type DeepSweExperimentPlan,
+	type DeepSweExperimentRoundInput,
+	type DeepSweRepeatedSamplingSummary,
+	type DeepSweTaskSamplingSummary,
+	summarizeDeepSweRepeatedTrials,
+} from "./deep-swe-experiment.ts";
+import {
 	DEEP_SWE_REPORT_RECOVERY_METADATA_KEY,
 	type DeepSweCoverageStatus,
 	type DeepSweRecoveredTrialResources,
@@ -8,7 +18,7 @@ import {
 	type DeepSweTrialResourceTotal,
 } from "./deep-swe-resources.ts";
 
-export const DEEP_SWE_REPORT_SCHEMA_VERSION = 2 as const;
+export const DEEP_SWE_REPORT_SCHEMA_VERSION = 3 as const;
 
 export interface DeepSweResourceAggregate {
 	readonly knownTotal: number | null;
@@ -36,6 +46,9 @@ export interface DeepSweTrialResources extends DeepSweRecoveredTrialResources {
 export interface DeepSweTrialReport {
 	readonly taskId: string;
 	readonly trialName: string;
+	readonly attemptIndex: number;
+	readonly attemptId: string;
+	readonly attemptIdentitySource: "reported" | "derived";
 	readonly status: "passed" | "failed" | "error";
 	readonly reward?: number;
 	readonly f2p?: number;
@@ -104,16 +117,27 @@ export interface DeepSweEvaluationReport {
 		readonly lengthTruncationCount: number;
 		readonly budgetExhaustedTrials: number;
 	};
+	readonly sampling: DeepSweRepeatedSamplingSummary;
 	readonly trials: readonly DeepSweTrialReport[];
+}
+
+export interface DeepSweSummaryOptions {
+	readonly experiment?: DeepSweExperimentPlan;
 }
 
 export interface DeepSweRoundReport {
 	readonly round: number;
 	readonly harnessRevision: string;
+	readonly concurrency?: number;
+	readonly model?: string;
+	readonly reasoningEffort?: string;
+	readonly datasetRevision?: string;
+	readonly pierRevision?: string;
 	readonly maxOutputTokens?: number;
 	readonly maxTurns?: number;
 	readonly runBudgetEnabled?: boolean;
 	readonly allowAllCommands?: boolean;
+	readonly experiment?: DeepSweExperimentPlan;
 	readonly report: DeepSweEvaluationReport;
 }
 
@@ -124,10 +148,16 @@ export interface DeepSweCampaignReport {
 	readonly rounds: readonly {
 		readonly round: number;
 		readonly harnessRevision: string;
+		readonly concurrency?: number;
+		readonly model?: string;
+		readonly reasoningEffort?: string;
+		readonly datasetRevision?: string;
+		readonly pierRevision?: string;
 		readonly maxOutputTokens?: number;
 		readonly maxTurns?: number;
 		readonly runBudgetEnabled?: boolean;
 		readonly allowAllCommands?: boolean;
+		readonly experiment?: DeepSweExperimentPlan;
 		readonly summary: DeepSweEvaluationReport["summary"];
 		readonly deltaPassedFromPrevious: number;
 		readonly deltaPassRateFromPrevious: number;
@@ -137,13 +167,21 @@ export interface DeepSweCampaignReport {
 		readonly taskId: string;
 		readonly rounds: readonly {
 			readonly round: number;
-			readonly status: DeepSweTrialReport["status"];
-			readonly reward?: number;
-			readonly partial?: number;
-			readonly costUsd?: number;
-			readonly turnCount?: number;
+			readonly sampling: DeepSweTaskSamplingSummary;
+			readonly trials: readonly {
+				readonly attemptIndex: number;
+				readonly attemptId: string;
+				readonly attemptIdentitySource: DeepSweTrialReport["attemptIdentitySource"];
+				readonly trialName: string;
+				readonly status: DeepSweTrialReport["status"];
+				readonly reward?: number;
+				readonly partial?: number;
+				readonly costUsd?: number;
+				readonly turnCount?: number;
+			}[];
 		}[];
 	}[];
+	readonly comparisons: readonly DeepSweExperimentComparison[];
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -337,7 +375,61 @@ function completeCostAlias(resource: DeepSweTrialCostTotal): number | undefined 
 	return resource.status === "complete" && resource.knownTotalUsd !== null ? resource.knownTotalUsd : undefined;
 }
 
-function projectPierTrial(value: unknown, index: number): DeepSweTrialReport {
+interface AttemptIdentity {
+	readonly attemptIndex: number;
+	readonly attemptId: string;
+	readonly attemptIdentitySource: "reported" | "derived";
+}
+
+function claimAttemptIdentity(
+	trial: Record<string, unknown>,
+	index: number,
+	taskId: string,
+	usedAttemptIndexes: Map<string, Set<number>>,
+	label: string,
+): AttemptIdentity {
+	const taskIndexes = usedAttemptIndexes.get(taskId) ?? new Set<number>();
+	const reportedAttemptIndex = finiteNumber(trial.attempt_index ?? trial.attemptIndex);
+	if (
+		(trial.attempt_index !== undefined || trial.attemptIndex !== undefined) &&
+		(reportedAttemptIndex === undefined || !Number.isInteger(reportedAttemptIndex) || reportedAttemptIndex < 1)
+	) {
+		throw new Error(`${label}[${index}].attempt_index must be a positive integer`);
+	}
+	let attemptIndex = reportedAttemptIndex;
+	if (attemptIndex === undefined) {
+		attemptIndex = 1;
+		while (taskIndexes.has(attemptIndex)) attemptIndex++;
+	}
+	if (taskIndexes.has(attemptIndex)) {
+		throw new Error(`${label} task ${taskId} contains duplicate attempt_index ${attemptIndex}`);
+	}
+	taskIndexes.add(attemptIndex);
+	usedAttemptIndexes.set(taskId, taskIndexes);
+	const rawAttemptId = trial.attempt_id ?? trial.attemptId;
+	const reportedAttemptId = textValue(rawAttemptId);
+	if (rawAttemptId !== undefined && reportedAttemptId === undefined) {
+		throw new Error(`${label}[${index}].attempt_id must be a non-empty string`);
+	}
+	const storedSource =
+		trial.attemptIdentitySource === "reported" || trial.attemptIdentitySource === "derived"
+			? trial.attemptIdentitySource
+			: undefined;
+	return {
+		attemptIndex,
+		attemptId: reportedAttemptId ?? createDeepSweAttemptId(taskId, attemptIndex, 1),
+		attemptIdentitySource:
+			storedSource ?? (reportedAttemptId || reportedAttemptIndex !== undefined
+				? "reported"
+				: "derived"),
+	};
+}
+
+function projectPierTrial(
+	value: unknown,
+	index: number,
+	usedAttemptIndexes: Map<string, Set<number>>,
+): DeepSweTrialReport {
 	const trial = record(value);
 	if (!trial) throw new Error(`Pier trial_results[${index}] must be an object`);
 	const taskPath = textValue(record(trial.task_id)?.path);
@@ -345,6 +437,7 @@ function projectPierTrial(value: unknown, index: number): DeepSweTrialReport {
 	const taskId = taskPath ? basename(taskPath) : taskName?.split("/").at(-1);
 	const trialName = textValue(trial.trial_name);
 	if (!taskId || !trialName) throw new Error(`Pier trial_results[${index}] is missing task_name or trial_name`);
+	const attemptIdentity = claimAttemptIdentity(trial, index, taskId, usedAttemptIndexes, "Pier trial_results");
 	const verifier = record(trial.verifier_result);
 	const rewards = record(verifier?.rewards);
 	const reward = finiteNumber(rewards?.reward);
@@ -376,6 +469,7 @@ function projectPierTrial(value: unknown, index: number): DeepSweTrialReport {
 	return {
 		taskId,
 		trialName,
+		...attemptIdentity,
 		status: exceptionType ? "error" : reward === 1 ? "passed" : "failed",
 		...(reward !== undefined ? { reward } : {}),
 		...(f2p !== undefined ? { f2p } : {}),
@@ -511,9 +605,13 @@ function buildReport(
 	trials: readonly DeepSweTrialReport[],
 	expectedTrials: number,
 	wallElapsedMs: number | undefined,
+	options: DeepSweSummaryOptions = {},
 ): DeepSweEvaluationReport {
 	const ordered = [...trials].sort(
-		(left, right) => left.taskId.localeCompare(right.taskId) || left.trialName.localeCompare(right.trialName),
+		(left, right) =>
+			left.taskId.localeCompare(right.taskId) ||
+			left.attemptIndex - right.attemptIndex ||
+			left.trialName.localeCompare(right.trialName),
 	);
 	const passed = ordered.filter(({ status }) => status === "passed").length;
 	const errors = ordered.filter(({ status }) => status === "error").length;
@@ -563,21 +661,30 @@ function buildReport(
 			budgetExhaustedTrials: ordered.filter(({ budgetExhaustionLimits }) => Boolean(budgetExhaustionLimits?.length))
 				.length,
 		},
+		sampling: summarizeDeepSweRepeatedTrials(ordered, options.experiment?.plannedTrials),
 		trials: ordered,
 	});
 }
 
 /** Projects raw Pier job/trial JSON into the coverage-aware report schema. */
-export function summarizeDeepSweJobResult(input: unknown): DeepSweEvaluationReport {
+export function summarizeDeepSweJobResult(
+	input: unknown,
+	options: DeepSweSummaryOptions = {},
+): DeepSweEvaluationReport {
 	const result = record(input);
 	if (!result || !Array.isArray(result.trial_results)) throw new Error("Pier result must contain trial_results");
-	const trials = result.trial_results.map(projectPierTrial);
-	const expectedTrials = Math.max(positiveInteger(result.n_total_trials) ?? trials.length, trials.length);
+	const usedAttemptIndexes = new Map<string, Set<number>>();
+	const trials = result.trial_results.map((trial, index) => projectPierTrial(trial, index, usedAttemptIndexes));
+	const expectedTrials = Math.max(
+		positiveInteger(result.n_total_trials) ?? 0,
+		options.experiment?.plannedTrials.length ?? 0,
+		trials.length,
+	);
 	const startedAt = dateMs(result.started_at);
 	const finishedAt = dateMs(result.finished_at);
 	const wallElapsedMs =
 		startedAt !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - startedAt) : undefined;
-	return buildReport(trials, expectedTrials, wallElapsedMs);
+	return buildReport(trials, expectedTrials, wallElapsedMs, options);
 }
 
 function legacyStatus(value: unknown): DeepSweTrialReport["status"] | undefined {
@@ -592,12 +699,33 @@ function legacyCost(value: unknown): DeepSweTrialCostTotal {
 	return trialCost(value, "complete", "legacy_report");
 }
 
-function projectLegacyTrial(value: unknown, index: number): DeepSweTrialReport {
+function parseCoverageResources(value: unknown, index: number): DeepSweTrialResources {
+	const resources = record(value);
+	const trialElapsedMs = parseTrialResource(resources?.trialElapsedMs);
+	const inputTokens = parseTrialResource(resources?.inputTokens);
+	const cacheTokens = parseTrialResource(resources?.cacheTokens);
+	const outputTokens = parseTrialResource(resources?.outputTokens);
+	const costUsd = parseTrialCost(resources?.costUsd);
+	const turnCount = parseTrialResource(resources?.turnCount);
+	const agentElapsedMs = parseTrialResource(resources?.agentElapsedMs);
+	if (!trialElapsedMs || !inputTokens || !cacheTokens || !outputTokens || !costUsd || !turnCount || !agentElapsedMs) {
+		throw new Error(`DeepSWE schema v2 report trial[${index}].resources is invalid`);
+	}
+	return { trialElapsedMs, inputTokens, cacheTokens, outputTokens, costUsd, turnCount, agentElapsedMs };
+}
+
+function projectStoredTrial(
+	value: unknown,
+	index: number,
+	usedAttemptIndexes: Map<string, Set<number>>,
+	coverageAware: boolean,
+): DeepSweTrialReport {
 	const trial = record(value);
 	const taskId = textValue(trial?.taskId);
 	const trialName = textValue(trial?.trialName);
 	const status = legacyStatus(trial?.status);
-	if (!trial || !taskId || !trialName || !status) throw new Error(`Legacy DeepSWE report trial[${index}] is invalid`);
+	if (!trial || !taskId || !trialName || !status) throw new Error(`Stored DeepSWE report trial[${index}] is invalid`);
+	const attemptIdentity = claimAttemptIdentity(trial, index, taskId, usedAttemptIndexes, "DeepSWE report trial");
 	const elapsedMs = nonNegativeNumber(trial.elapsedMs);
 	const inputTokens = nonNegativeNumber(trial.inputTokens);
 	const cacheTokens = nonNegativeNumber(trial.cacheTokens);
@@ -605,15 +733,17 @@ function projectLegacyTrial(value: unknown, index: number): DeepSweTrialReport {
 	const costUsd = nonNegativeNumber(trial.costUsd);
 	const turnCount = nonNegativeNumber(trial.turnCount);
 	const agentElapsedMs = nonNegativeNumber(trial.agentElapsedMs);
-	const resources: DeepSweTrialResources = {
-		trialElapsedMs: legacyResource(elapsedMs),
-		inputTokens: legacyResource(inputTokens),
-		cacheTokens: legacyResource(cacheTokens),
-		outputTokens: legacyResource(outputTokens),
-		costUsd: legacyCost(costUsd),
-		turnCount: legacyResource(turnCount),
-		agentElapsedMs: legacyResource(agentElapsedMs),
-	};
+	const resources: DeepSweTrialResources = coverageAware
+		? parseCoverageResources(trial.resources, index)
+		: {
+				trialElapsedMs: legacyResource(elapsedMs),
+				inputTokens: legacyResource(inputTokens),
+				cacheTokens: legacyResource(cacheTokens),
+				outputTokens: legacyResource(outputTokens),
+				costUsd: legacyCost(costUsd),
+				turnCount: legacyResource(turnCount),
+				agentElapsedMs: legacyResource(agentElapsedMs),
+			};
 	const optionalNumber = <TKey extends keyof DeepSweTrialReport>(key: TKey): Record<string, number> => {
 		const number = finiteNumber(trial[key as string]);
 		return number === undefined ? {} : { [key]: number };
@@ -621,6 +751,7 @@ function projectLegacyTrial(value: unknown, index: number): DeepSweTrialReport {
 	return {
 		taskId,
 		trialName,
+		...attemptIdentity,
 		status,
 		...optionalNumber("reward"),
 		...optionalNumber("f2p"),
@@ -658,25 +789,83 @@ function projectLegacyTrial(value: unknown, index: number): DeepSweTrialReport {
 	};
 }
 
-/** Reads schema v2 reports and upgrades schema v1 round 5-11 summaries. */
+/** Reads schema v3 reports and upgrades coverage-aware v2 plus legacy round 5-11 schema v1. */
 export function readDeepSweEvaluationReport(input: unknown): DeepSweEvaluationReport {
 	const report = record(input);
 	if (!report || report.benchmark !== "deep-swe") throw new Error("DeepSWE report must use benchmark deep-swe");
-	if (report.schemaVersion === 2) {
-		if (!record(report.summary) || !Array.isArray(report.trials))
-			throw new Error("DeepSWE schema v2 report is invalid");
+	if (report.schemaVersion === DEEP_SWE_REPORT_SCHEMA_VERSION) {
+		if (!record(report.summary) || !record(report.sampling) || !Array.isArray(report.trials)) {
+			throw new Error("DeepSWE schema v3 report is invalid");
+		}
 		return report as unknown as DeepSweEvaluationReport;
 	}
-	if (report.schemaVersion !== 1 || !Array.isArray(report.trials)) {
+	if ((report.schemaVersion !== 1 && report.schemaVersion !== 2) || !Array.isArray(report.trials)) {
 		throw new Error(`Unsupported DeepSWE report schema version: ${String(report.schemaVersion)}`);
 	}
-	const trials = report.trials.map(projectLegacyTrial);
-	const expectedTrials = Math.max(positiveInteger(record(report.summary)?.trials) ?? trials.length, trials.length);
-	return buildReport(trials, expectedTrials, undefined);
+	const usedAttemptIndexes = new Map<string, Set<number>>();
+	const trials = report.trials.map((trial, index) =>
+		projectStoredTrial(
+			trial,
+			index,
+			usedAttemptIndexes,
+			report.schemaVersion === 2 && record(trial)?.resources !== undefined,
+		),
+	);
+	const summary = record(report.summary);
+	const sampling = record(report.sampling);
+	const expectedTrials = Math.max(
+		positiveInteger(summary?.expectedTrials) ?? 0,
+		positiveInteger(sampling?.expectedTrials) ?? 0,
+		positiveInteger(summary?.trials) ?? 0,
+		trials.length,
+	);
+	const wallElapsedMs =
+		summary?.wallElapsedStatus === "complete" ? nonNegativeNumber(summary.wallElapsedMs) : undefined;
+	return buildReport(trials, expectedTrials, wallElapsedMs);
 }
 
 function requirePositiveRound(value: number): void {
 	if (!Number.isInteger(value) || value < 1) throw new Error("round must be a positive integer");
+}
+
+function experimentRoundInput(input: DeepSweRoundReport): DeepSweExperimentRoundInput {
+	const experiment = input.experiment;
+	const plannedTrials =
+		experiment?.plannedTrials ??
+		input.report.trials.map(({ attemptId: id, taskId, attemptIndex }) => ({
+			id,
+			taskId,
+			attemptIndex,
+			agentIndex: 1,
+		}));
+	const seedScheme =
+		experiment?.seed.availability === "available"
+			? experiment.seed.scheme
+			: experiment?.seed.availability === "unavailable"
+				? "unavailable"
+				: undefined;
+	return {
+		round: input.round,
+		harnessRevision: input.harnessRevision,
+		controls: {
+			harnessRevisionRecorded: input.harnessRevision === "unknown" ? undefined : true,
+			datasetRevision: input.datasetRevision,
+			pierRevision: input.pierRevision,
+			concurrency: input.concurrency,
+			model: input.model,
+			reasoningEffort: input.reasoningEffort,
+			maxOutputTokens: input.maxOutputTokens,
+			runBudgetEnabled: input.runBudgetEnabled,
+			maxTurns: input.runBudgetEnabled === false ? "disabled" : input.maxTurns,
+			allowAllCommands: input.allowAllCommands,
+			timeBlock: experiment?.timeBlock,
+			attemptIdentityScheme: experiment?.attemptIdentityScheme,
+			seedAvailability: experiment?.seed.availability,
+			seedScheme,
+		},
+		plannedTrials,
+		trials: input.report.trials,
+	};
 }
 
 export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): DeepSweCampaignReport {
@@ -687,7 +876,21 @@ export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): Dee
 	}
 	for (const input of ordered) requirePositiveRound(input.round);
 
-	const taskIds = [...new Set(ordered.flatMap(({ report }) => report.trials.map(({ taskId }) => taskId)))].sort();
+	const taskIds = [
+		...new Set(ordered.flatMap(({ report }) => report.sampling.tasks.map(({ taskId }) => taskId))),
+	].sort();
+	const trialsByRoundAndTask = new Map<number, ReadonlyMap<string, readonly DeepSweTrialReport[]>>();
+	const samplingByRoundAndTask = new Map<number, ReadonlyMap<string, DeepSweTaskSamplingSummary>>();
+	for (const { round, report } of ordered) {
+		const trialsByTask = new Map<string, DeepSweTrialReport[]>();
+		for (const trial of report.trials) {
+			const taskTrials = trialsByTask.get(trial.taskId) ?? [];
+			taskTrials.push(trial);
+			trialsByTask.set(trial.taskId, taskTrials);
+		}
+		trialsByRoundAndTask.set(round, trialsByTask);
+		samplingByRoundAndTask.set(round, new Map(report.sampling.tasks.map((sampling) => [sampling.taskId, sampling])));
+	}
 	return Object.freeze({
 		schemaVersion: DEEP_SWE_REPORT_SCHEMA_VERSION,
 		benchmark: "deep-swe",
@@ -697,10 +900,16 @@ export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): Dee
 			return {
 				round: current.round,
 				harnessRevision: current.harnessRevision,
+				...(current.concurrency !== undefined ? { concurrency: current.concurrency } : {}),
+				...(current.model !== undefined ? { model: current.model } : {}),
+				...(current.reasoningEffort !== undefined ? { reasoningEffort: current.reasoningEffort } : {}),
+				...(current.datasetRevision !== undefined ? { datasetRevision: current.datasetRevision } : {}),
+				...(current.pierRevision !== undefined ? { pierRevision: current.pierRevision } : {}),
 				...(current.maxOutputTokens !== undefined ? { maxOutputTokens: current.maxOutputTokens } : {}),
 				...(current.maxTurns !== undefined ? { maxTurns: current.maxTurns } : {}),
 				...(current.runBudgetEnabled !== undefined ? { runBudgetEnabled: current.runBudgetEnabled } : {}),
 				...(current.allowAllCommands !== undefined ? { allowAllCommands: current.allowAllCommands } : {}),
+				...(current.experiment !== undefined ? { experiment: current.experiment } : {}),
 				summary: current.report.summary,
 				deltaPassedFromPrevious: previous ? current.report.summary.passed - previous.report.summary.passed : 0,
 				deltaPassRateFromPrevious: previous
@@ -713,21 +922,29 @@ export function compareDeepSweRounds(inputs: readonly DeepSweRoundReport[]): Dee
 		}),
 		tasks: taskIds.map((taskId) => ({
 			taskId,
-			rounds: ordered.flatMap(({ round, report }) => {
-				const trial = report.trials.find((candidate) => candidate.taskId === taskId);
-				return trial
-					? [
-							{
-								round,
-								status: trial.status,
-								...(trial.reward !== undefined ? { reward: trial.reward } : {}),
-								...(trial.partial !== undefined ? { partial: trial.partial } : {}),
-								...(trial.costUsd !== undefined ? { costUsd: trial.costUsd } : {}),
-								...(trial.turnCount !== undefined ? { turnCount: trial.turnCount } : {}),
-							},
-						]
-					: [];
+			rounds: ordered.flatMap(({ round }) => {
+				const sampling = samplingByRoundAndTask.get(round)?.get(taskId);
+				if (!sampling) return [];
+				const trials = trialsByRoundAndTask.get(round)?.get(taskId) ?? [];
+				return [
+					{
+						round,
+						sampling,
+						trials: trials.map((trial) => ({
+							attemptIndex: trial.attemptIndex,
+							attemptId: trial.attemptId,
+							attemptIdentitySource: trial.attemptIdentitySource,
+							trialName: trial.trialName,
+							status: trial.status,
+							...(trial.reward !== undefined ? { reward: trial.reward } : {}),
+							...(trial.partial !== undefined ? { partial: trial.partial } : {}),
+							...(trial.costUsd !== undefined ? { costUsd: trial.costUsd } : {}),
+							...(trial.turnCount !== undefined ? { turnCount: trial.turnCount } : {}),
+						})),
+					},
+				];
 			}),
 		})),
+		comparisons: compareDeepSweExperimentRounds(ordered.map(experimentRoundInput)),
 	});
 }

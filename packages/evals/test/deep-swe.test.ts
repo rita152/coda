@@ -1,8 +1,14 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { runDeepSweCli } from "../src/deep-swe-cli.ts";
 import {
 	assertDeepSwePaidRun,
+	assertDeepSwePaidTrialPlan,
 	compareDeepSweRounds,
+	createDeepSweExperimentPlan,
+	createDeepSwePaidTrialPlan,
 	createDeepSwePierJobConfig,
 	createDeepSweRunLock,
 	DEEP_SWE_DATASET_REVISION,
@@ -12,7 +18,9 @@ import {
 	DEEP_SWE_FIRST_20_IMAGE_LOCKS,
 	DEEP_SWE_FIRST_20_TASK_IDS,
 	DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
+	DEEP_SWE_PIER_REVISION,
 	formatDeepSweImageLockTsv,
+	formatDeepSwePaidTrialPlan,
 	readDeepSweEvaluationReport,
 	reduceDeepSweJsonlLines,
 	summarizeDeepSweJobResult,
@@ -30,6 +38,10 @@ const OPTIONS = {
 	maxTurns: 96,
 	allowAllCommands: true,
 } as const;
+
+const SAME_REVISION_FIXTURE = JSON.parse(
+	readFileSync(new URL("./fixtures/deep-swe-same-revision-repeated.json", import.meta.url), "utf8"),
+) as { readonly baseline: unknown; readonly repeat: unknown };
 
 describe("DeepSWE evaluation runner", () => {
 	it("prepares status and the task Git identity before Coda starts", () => {
@@ -74,6 +86,7 @@ describe("DeepSWE evaluation runner", () => {
 
 		expect(config.n_concurrent_trials).toBe(7);
 		expect(config.n_attempts).toBe(1);
+		expect(config.job_name).toBe("coda-deep-swe-r01-abc1234-runt");
 		expect(config.agents[0]).toMatchObject({
 			import_path: "coda_agent:CodaAgent",
 			model_name: "opencode-go/deepseek-v4-flash",
@@ -96,9 +109,148 @@ describe("DeepSWE evaluation runner", () => {
 		expect(JSON.stringify(config)).not.toContain("sk-");
 	});
 
+	it("configures --attempts and requires an exact acknowledgement of repeated paid trials", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "coda-deep-swe-attempts-"));
+		const configPath = join(directory, "config.json");
+		const lockPath = join(directory, "lock.json");
+		const output: string[] = [];
+		const originalWrite = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			output.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			await runDeepSweCli([
+				"config",
+				"--dataset-dir",
+				OPTIONS.datasetDir,
+				"--runtime-dir",
+				OPTIONS.runtimeDir,
+				"--jobs-dir",
+				OPTIONS.jobsDir,
+				"--harness-revision",
+				OPTIONS.harnessRevision,
+				"--round",
+				"4",
+				"--attempts",
+				"3",
+				"--time-block",
+				"ab-2026-08-13-am",
+				"--task",
+				"abs-module-cache-flags",
+				"--task",
+				"abs-stepped-slices",
+				"--config-output",
+				configPath,
+				"--lock-output",
+				lockPath,
+			]);
+		} finally {
+			process.stdout.write = originalWrite;
+		}
+
+		const config = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+		const lock = JSON.parse(readFileSync(lockPath, "utf8")) as {
+			schemaVersion: number;
+			execution: {
+				attempts: number;
+				agentCount: number;
+				totalPlannedPaidTrials: number;
+				timeBlock: string;
+			};
+			experiment: {
+				attempts: number;
+				agentCount: number;
+				totalPlannedPaidTrials: number;
+				timeBlock: string;
+				plannedTrials: unknown[];
+				seed: { availability: string };
+			};
+		};
+		expect(config.n_attempts).toBe(3);
+		expect(config.job_name).toBe("coda-deep-swe-r04-abc1234-runt-a3");
+		expect(lock).toMatchObject({
+			schemaVersion: 3,
+			execution: {
+				attempts: 3,
+				agentCount: 1,
+				totalPlannedPaidTrials: 6,
+				timeBlock: "ab-2026-08-13-am",
+			},
+			experiment: {
+				attempts: 3,
+				agentCount: 1,
+				totalPlannedPaidTrials: 6,
+				timeBlock: "ab-2026-08-13-am",
+				seed: { availability: "unavailable" },
+			},
+		});
+		expect(lock.experiment.plannedTrials).toHaveLength(6);
+		expect(JSON.parse(output.join("")).jobName).toBe("coda-deep-swe-r04-abc1234-runt-a3");
+		rmSync(directory, { recursive: true, force: true });
+	});
+
+	it("shows tasks × attempts × agents and guards accidental paid-trial multiplication", () => {
+		const repeated = createDeepSwePaidTrialPlan({
+			...OPTIONS,
+			taskIds: ["abs-module-cache-flags", "abs-stepped-slices"],
+			attempts: 3,
+		});
+		expect(repeated).toEqual({ tasks: 2, attempts: 3, agents: 1, totalPlannedPaidTrials: 6 });
+		expect(formatDeepSwePaidTrialPlan(repeated)).toBe("2 tasks × 3 attempts × 1 agent = 6 planned paid trials");
+		expect(() => assertDeepSwePaidTrialPlan(repeated, undefined)).toThrow("--confirm-trials 6");
+		expect(() => assertDeepSwePaidTrialPlan(repeated, 5)).toThrow("must equal 6");
+		expect(() => assertDeepSwePaidTrialPlan(repeated, 6)).not.toThrow();
+
+		const compatibleSingle = createDeepSwePaidTrialPlan({
+			...OPTIONS,
+			taskIds: ["abs-module-cache-flags", "abs-stepped-slices"],
+		});
+		expect(() => assertDeepSwePaidTrialPlan(compatibleSingle, undefined)).not.toThrow();
+	});
+
+	it("prints the complete paid plan before rejecting an unconfirmed run", async () => {
+		const output: string[] = [];
+		const originalWrite = process.stderr.write;
+		const originalOptIn = process.env.CODA_EVALS_DEEP_SWE;
+		delete process.env.CODA_EVALS_DEEP_SWE;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			output.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await expect(
+				runDeepSweCli([
+					"run",
+					"--dataset-dir",
+					OPTIONS.datasetDir,
+					"--runtime-dir",
+					OPTIONS.runtimeDir,
+					"--jobs-dir",
+					OPTIONS.jobsDir,
+					"--harness-revision",
+					OPTIONS.harnessRevision,
+					"--attempts",
+					"3",
+					"--task",
+					"abs-module-cache-flags",
+					"--task",
+					"abs-stepped-slices",
+				]),
+			).rejects.toThrow("CODA_EVALS_DEEP_SWE");
+		} finally {
+			process.stderr.write = originalWrite;
+			if (originalOptIn === undefined) delete process.env.CODA_EVALS_DEEP_SWE;
+			else process.env.CODA_EVALS_DEEP_SWE = originalOptIn;
+		}
+		expect(output.join("")).toContain(
+			"DeepSWE paid trial plan: 2 tasks × 3 attempts × 1 agent = 6 planned paid trials",
+		);
+	});
+
 	it("records each round separately and labels repeated tasks as development data", () => {
 		const lock = createDeepSweRunLock({ ...OPTIONS, round: 4 });
-		expect(lock.schemaVersion).toBe(2);
+		expect(lock.schemaVersion).toBe(3);
 		expect(lock.campaignKind).toBe("development-round");
 		expect(lock.harness.maxOutputTokens).toBe(32_768);
 		expect(lock.harness.eventStream).toEqual({ mode: "semantic", schemaVersion: 1 });
@@ -111,8 +263,25 @@ describe("DeepSWE evaluation runner", () => {
 			adapterFinalizeMarginSec: DEEP_SWE_DEFAULT_ADAPTER_FINALIZE_MARGIN_SEC,
 			pierHardTimeoutSec: DEEP_SWE_PIER_HARD_TIMEOUT_SEC,
 		});
-		expect(lock.execution).toMatchObject({ round: 4, concurrency: 5, providerAllowlist: ["opencode.ai"] });
+		expect(lock.execution).toMatchObject({
+			round: 4,
+			concurrency: 5,
+			attempts: 1,
+			agentCount: 1,
+			totalPlannedPaidTrials: 20,
+			timeBlock: "round-04",
+			providerAllowlist: ["opencode.ai"],
+		});
 		expect(lock.execution.taskIds).toEqual(DEEP_SWE_FIRST_20_TASK_IDS);
+		expect(lock.experiment).toMatchObject({
+			timeBlock: "round-04",
+			attempts: 1,
+			agentCount: 1,
+			totalPlannedPaidTrials: 20,
+			attemptIdentityScheme: "task-attempt-agent-v1",
+			seed: { availability: "unavailable" },
+		});
+		expect(lock.experiment.plannedTrials).toHaveLength(20);
 		expect(lock.images).toHaveLength(20);
 	});
 
@@ -399,7 +568,7 @@ describe("DeepSWE evaluation runner", () => {
 					{ taskId: `missing-${round}`, trialName: `missing-${round}__one`, status: "error" },
 				],
 			});
-			expect(report.schemaVersion).toBe(2);
+			expect(report.schemaVersion).toBe(3);
 			expect(report.summary.inputTokens).toMatchObject({
 				knownTotal: 10,
 				observedTrials: 1,
@@ -491,7 +660,7 @@ describe("DeepSWE evaluation runner", () => {
 		});
 
 		expect(report.trials.map(({ taskId }) => taskId)).toEqual(["a-task", "b-task", "c-task"]);
-		expect(report.schemaVersion).toBe(2);
+		expect(report.schemaVersion).toBe(3);
 		expect(report.summary).toMatchObject({
 			trials: 3,
 			expectedTrials: 3,
@@ -555,6 +724,263 @@ describe("DeepSWE evaluation runner", () => {
 		});
 	});
 
+	it("retains two tasks × three attempts and estimates same-revision variability", () => {
+		const experiment = createDeepSweExperimentPlan({
+			taskIds: ["task-a", "task-b"],
+			attempts: 3,
+			agentCount: 1,
+			timeBlock: "synthetic-same-revision-block",
+			seed: {
+				availability: "unavailable",
+				reason: "synthetic fixture models the production Provider contract",
+			},
+		});
+		const baseline = summarizeDeepSweJobResult(SAME_REVISION_FIXTURE.baseline, { experiment });
+		const repeat = summarizeDeepSweJobResult(SAME_REVISION_FIXTURE.repeat, { experiment });
+
+		expect(baseline.schemaVersion).toBe(3);
+		expect(baseline.trials).toHaveLength(6);
+		expect(new Set(baseline.trials.map(({ trialName }) => trialName)).size).toBe(6);
+		expect(baseline.sampling).toMatchObject({
+			expectedTrials: 6,
+			observedTrials: 6,
+			missingTrials: 0,
+			unplannedTrials: 0,
+			successes: 3,
+			microMeanSuccess: 0.5,
+			macroMeanSuccess: 0.5,
+		});
+		const samplingByTask = new Map(baseline.sampling.tasks.map((task) => [task.taskId, task]));
+		const taskA = samplingByTask.get("task-a");
+		expect(taskA).toMatchObject({
+			expectedN: 3,
+			n: 3,
+			successes: 2,
+			meanSuccess: 2 / 3,
+			sampleVariance: 1 / 3,
+		});
+		expect(taskA?.interval?.method).toBe("wilson-score");
+		expect(taskA?.interval?.lower).toBeCloseTo(0.207_659_600_8);
+		expect(taskA?.interval?.upper).toBeCloseTo(0.938_508_055_3);
+		expect(taskA?.passAtK).toEqual([
+			{ k: 1, value: 2 / 3 },
+			{ k: 2, value: 1 },
+			{ k: 3, value: 1 },
+		]);
+		expect(baseline.sampling.definitions.passAtK).toContain("without replacement");
+
+		const commonRound = {
+			harnessRevision: "same-revision-123",
+			concurrency: 2,
+			model: "opencode-go/deepseek-v4-flash",
+			reasoningEffort: "max",
+			datasetRevision: DEEP_SWE_DATASET_REVISION,
+			pierRevision: DEEP_SWE_PIER_REVISION,
+			maxOutputTokens: 32_768,
+			maxTurns: 64,
+			runBudgetEnabled: true,
+			allowAllCommands: false,
+			experiment,
+		} as const;
+		const comparison = compareDeepSweRounds([
+			{ ...commonRound, round: 1, report: baseline },
+			{ ...commonRound, round: 2, report: repeat },
+		]);
+
+		expect(comparison.schemaVersion).toBe(3);
+		expect(comparison.tasks.map(({ rounds }) => rounds.map(({ trials }) => trials.length))).toEqual([
+			[3, 3],
+			[3, 3],
+		]);
+		const paired = comparison.comparisons[0];
+		expect(paired?.compatibility).toEqual({ compatible: true, mismatches: [] });
+		expect(paired?.matching.matched).toHaveLength(6);
+		expect(paired?.matching.unmatched).toEqual({ baseline: [], candidate: [] });
+		expect(paired?.matching.missing).toEqual({ baseline: [], candidate: [] });
+		expect(paired?.paired).toMatchObject({
+			status: "available",
+			eligiblePairs: 6,
+			baselineMeanSuccess: 0.5,
+			candidateMeanSuccess: 2 / 3,
+			meanDifference: 1 / 6,
+			transitions: {
+				bothPassed: 2,
+				bothNotPassed: 1,
+				baselineOnlyPassed: 1,
+				candidateOnlyPassed: 2,
+			},
+		});
+		expect(paired?.stratified).toMatchObject({
+			status: "available",
+			taskStrata: 2,
+			baselineMacroMeanSuccess: 0.5,
+			candidateMacroMeanSuccess: 2 / 3,
+		});
+		expect(paired?.stratified.macroMeanDifference).toBeCloseTo(1 / 6);
+		expect(paired?.instability).toMatchObject({
+			kind: "same-revision-variability-estimate",
+			matchedTrials: 6,
+			statusFlips: 3,
+			observedFlipRate: 0.5,
+			estimatesPureSamplingVariability: true,
+		});
+	});
+
+	it("reports matched, unmatched, and missing repeated trials without discarding observations", () => {
+		const baselineExperiment = createDeepSweExperimentPlan({
+			taskIds: ["task-a", "task-b"],
+			attempts: 2,
+			agentCount: 1,
+			timeBlock: "paired-block",
+			seed: { availability: "unavailable", reason: "Provider seed unsupported" },
+		});
+		const candidateExperiment = createDeepSweExperimentPlan({
+			taskIds: ["task-a", "task-c"],
+			attempts: 2,
+			agentCount: 1,
+			timeBlock: "paired-block",
+			seed: { availability: "unavailable", reason: "Provider seed unsupported" },
+		});
+		const result = (
+			entries: readonly (readonly [taskId: string, attemptIndex: number, reward: number])[],
+			label: string,
+		) => ({
+			trial_results: entries.map(([taskId, attemptIndex, reward]) => ({
+				task_name: `synthetic/${taskId}`,
+				trial_name: `${taskId}__${label}-${attemptIndex}`,
+				attempt_index: attemptIndex,
+				verifier_result: { rewards: { reward } },
+			})),
+		});
+		const baseline = summarizeDeepSweJobResult(
+			result(
+				[
+					["task-a", 1, 0],
+					["task-b", 1, 1],
+					["task-a", 2, 1],
+					["task-b", 2, 0],
+				],
+				"base",
+			),
+			{ experiment: baselineExperiment },
+		);
+		const candidate = summarizeDeepSweJobResult(
+			result(
+				[
+					["task-a", 1, 1],
+					["task-c", 1, 0],
+					["task-a", 2, 1],
+				],
+				"candidate",
+			),
+			{ experiment: candidateExperiment },
+		);
+		const controls = {
+			concurrency: 2,
+			model: "opencode-go/deepseek-v4-flash",
+			reasoningEffort: "max",
+			datasetRevision: DEEP_SWE_DATASET_REVISION,
+			pierRevision: DEEP_SWE_PIER_REVISION,
+			maxOutputTokens: 32_768,
+			maxTurns: 64,
+			runBudgetEnabled: true,
+			allowAllCommands: false,
+		} as const;
+		const comparison = compareDeepSweRounds([
+			{
+				...controls,
+				round: 1,
+				harnessRevision: "baseline-revision",
+				experiment: baselineExperiment,
+				report: baseline,
+			},
+			{
+				...controls,
+				round: 2,
+				harnessRevision: "candidate-revision",
+				experiment: candidateExperiment,
+				report: candidate,
+			},
+		]).comparisons[0];
+
+		expect(candidate.sampling).toMatchObject({ expectedTrials: 4, observedTrials: 3, missingTrials: 1 });
+		expect(comparison?.compatibility.compatible).toBe(true);
+		expect(comparison?.matching.matched).toHaveLength(2);
+		expect(comparison?.matching.unmatched.baseline).toHaveLength(2);
+		expect(comparison?.matching.unmatched.candidate).toHaveLength(1);
+		expect(comparison?.matching.missing.baseline).toHaveLength(0);
+		expect(comparison?.matching.missing.candidate).toMatchObject([{ taskId: "task-c", attemptIndex: 2 }]);
+		expect(comparison?.paired).toMatchObject({ status: "available", eligiblePairs: 2 });
+		expect(comparison?.stratified).toMatchObject({ status: "available", taskStrata: 1 });
+	});
+
+	it("refuses paired aggregates when model, reasoning, or time block is incompatible", () => {
+		const baselineExperiment = createDeepSweExperimentPlan({
+			taskIds: ["task-a"],
+			attempts: 1,
+			agentCount: 1,
+			timeBlock: "morning",
+			seed: { availability: "unavailable", reason: "Provider seed unsupported" },
+		});
+		const candidateExperiment = createDeepSweExperimentPlan({
+			taskIds: ["task-a"],
+			attempts: 1,
+			agentCount: 1,
+			timeBlock: "evening",
+			seed: { availability: "unavailable", reason: "Provider seed unsupported" },
+		});
+		const input = {
+			trial_results: [
+				{
+					task_name: "synthetic/task-a",
+					trial_name: "task-a__one",
+					attempt_index: 1,
+					verifier_result: { rewards: { reward: 1 } },
+				},
+			],
+		};
+		const baseline = summarizeDeepSweJobResult(input, { experiment: baselineExperiment });
+		const candidate = summarizeDeepSweJobResult(input, { experiment: candidateExperiment });
+		const common = {
+			concurrency: 1,
+			datasetRevision: DEEP_SWE_DATASET_REVISION,
+			pierRevision: DEEP_SWE_PIER_REVISION,
+			maxOutputTokens: 32_768,
+			maxTurns: 64,
+			runBudgetEnabled: true,
+			allowAllCommands: false,
+		} as const;
+		const comparison = compareDeepSweRounds([
+			{
+				...common,
+				round: 1,
+				harnessRevision: "baseline-revision",
+				model: "provider/model-a",
+				reasoningEffort: "max",
+				experiment: baselineExperiment,
+				report: baseline,
+			},
+			{
+				...common,
+				round: 2,
+				harnessRevision: "candidate-revision",
+				model: "provider/model-b",
+				reasoningEffort: "high",
+				experiment: candidateExperiment,
+				report: candidate,
+			},
+		]).comparisons[0];
+		const mismatchFields = comparison?.compatibility.mismatches.map(({ field }) => field);
+
+		expect(mismatchFields).toEqual(expect.arrayContaining(["model", "reasoningEffort", "timeBlock"]));
+		expect(comparison?.paired).toEqual({ status: "incompatible", eligiblePairs: 0 });
+		expect(comparison?.stratified).toEqual({ status: "incompatible", taskStrata: 0, tasks: [] });
+		expect(comparison?.instability).toMatchObject({
+			kind: "observed-cross-revision-instability",
+			estimatesPureSamplingVariability: false,
+		});
+	});
+
 	it("compares independently versioned development rounds and per-task movement", () => {
 		const base = summarizeDeepSweJobResult({
 			trial_results: [
@@ -596,6 +1022,12 @@ describe("DeepSWE evaluation runner", () => {
 			deltaPassRateFromPrevious: 1,
 			deltaAveragePartialFromPrevious: 0.75,
 		});
-		expect(comparison.tasks[0]?.rounds.map(({ reward }) => reward)).toEqual([0, 1]);
+		expect(comparison.tasks[0]?.rounds.flatMap(({ trials }) => trials.map(({ reward }) => reward))).toEqual([0, 1]);
+		expect(comparison.comparisons[0]?.instability).toMatchObject({
+			kind: "observed-cross-revision-instability",
+			matchedTrials: 1,
+			statusFlips: 1,
+			estimatesPureSamplingVariability: false,
+		});
 	});
 });

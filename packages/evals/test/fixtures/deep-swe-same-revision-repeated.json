@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic zero-provider fixture for same-revision repeated-trial variability",
+  "baseline": {
+    "trial_results": [
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__baseline-1",
+        "attempt_index": 1,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__baseline-1",
+        "attempt_index": 1,
+        "verifier_result": { "rewards": { "reward": 0, "partial": 0.8 } }
+      },
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__baseline-2",
+        "attempt_index": 2,
+        "verifier_result": { "rewards": { "reward": 0, "partial": 0.9 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__baseline-2",
+        "attempt_index": 2,
+        "verifier_result": { "rewards": { "reward": 0, "partial": 0.7 } }
+      },
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__baseline-3",
+        "attempt_index": 3,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__baseline-3",
+        "attempt_index": 3,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      }
+    ]
+  },
+  "repeat": {
+    "trial_results": [
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__repeat-1",
+        "attempt_index": 1,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__repeat-1",
+        "attempt_index": 1,
+        "verifier_result": { "rewards": { "reward": 0, "partial": 0.85 } }
+      },
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__repeat-2",
+        "attempt_index": 2,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__repeat-2",
+        "attempt_index": 2,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      },
+      {
+        "task_name": "synthetic/task-a",
+        "trial_name": "task-a__repeat-3",
+        "attempt_index": 3,
+        "verifier_result": { "rewards": { "reward": 0, "partial": 0.9 } }
+      },
+      {
+        "task_name": "synthetic/task-b",
+        "trial_name": "task-b__repeat-3",
+        "attempt_index": 3,
+        "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
+      }
+    ]
+  }
+}

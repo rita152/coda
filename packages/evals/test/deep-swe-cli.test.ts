@@ -106,7 +106,7 @@ describe("DeepSWE report CLI", () => {
 		expect(await runDeepSweCli(["report", "--result", join(jobDir, "result.json")])).toBe(0);
 		const report = JSON.parse(stdout.output()) as DeepSweEvaluationReport;
 
-		expect(report.schemaVersion).toBe(2);
+		expect(report.schemaVersion).toBe(3);
 		expect(report.summary.wallElapsedMs).toBe(5_500_000);
 		expect(report.summary.inputTokens).toMatchObject({
 			knownTotal: 105,
@@ -165,7 +165,7 @@ describe("DeepSWE report CLI", () => {
 		expect(await runDeepSweCli(["report", "--result", path])).toBe(0);
 		const report = JSON.parse(stdout.output()) as DeepSweEvaluationReport;
 
-		expect(report.schemaVersion).toBe(2);
+		expect(report.schemaVersion).toBe(3);
 		expect(report.summary.inputTokens).toMatchObject({ knownTotal: 0, status: "complete" });
 		expect(report.summary.costUsd).toMatchObject({ knownTotalUsd: 0, status: "complete" });
 	});
