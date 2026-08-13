@@ -16,7 +16,7 @@
 	"files": [
 		"dist",
 		"fixtures",
-		"pier",
+		"pier/*.py",
 		"README.md"
 	],
 	"engines": {
@@ -25,7 +25,8 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
 		"check": "tsc --noEmit -p tsconfig.json && biome check src test scripts vitest.config.ts",
-		"test": "vitest run",
+		"test": "vitest run && npm run test:pier",
+		"test:pier": "python3 -B -m unittest discover -s test/pier -p 'test_*.py'",
 		"eval:deep-swe": "tsx scripts/deep-swe.ts",
 		"eval:offline": "tsx scripts/offline.ts",
 		"eval:live": "tsx scripts/live.ts"

@@ -74,6 +74,13 @@ substituting a large numeric limit. Pier's agent timeout remains an infrastructu
 `--max-output-tokens` values can use a model's full declared output limit; for example, the pinned OpenCode Go catalog
 declares `deepseek-v4-flash` with a 1,000,000-token context window and a 384,000-token output limit.
 
+The Pier adapter creates a versioned, atomically replaced `adapter-status.json` before launching Coda, then runs
+workspace/event finalization as a separate idempotent phase. Normal exits, adapter timeouts, and cancellation all
+salvage `workspace.patch`, partial ATIF, terminal-event evidence, and known usage before the original timeout or
+cancellation is re-raised. A normal/internal-deadline path gets the full finalization timeout; cancellation gets only
+a short shielded best-effort window because Pier may immediately tear down the environment. Reliable hard-timeout
+recovery therefore still requires the run-control deadline to leave a margin before Pier's outer timeout.
+
 `--allow-all-commands` is an explicit evaluation-only authority switch. It invokes Coda's full approval/Sandbox
 bypass so Bash and background Shell commands execute without command classification, dangerous-command rules, or
 interactive review. Pier's container-level no-network boundary remains in force, and Coda still strips the Provider

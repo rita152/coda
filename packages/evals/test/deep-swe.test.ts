@@ -25,21 +25,23 @@ const OPTIONS = {
 } as const;
 
 describe("DeepSWE evaluation runner", () => {
-	it("configures the task repository Git identity before Coda starts", () => {
+	it("prepares status and the task Git identity before Coda starts", () => {
 		const adapter = readFileSync(new URL("../pier/coda_agent.py", import.meta.url), "utf8");
-		const commandStart = adapter.indexOf('command = f"""');
-		const agentStart = adapter.indexOf("{shlex.quote(node)} {shlex.quote(entry)}", commandStart);
-		const userName = adapter.indexOf("git -C /app config user.name coda-evals", commandStart);
-		const userEmail = adapter.indexOf("git -C /app config user.email coda-evals@localhost", commandStart);
+		const prepareStatus = adapter.indexOf("artifacts.prepare()");
+		const preflight = adapter.indexOf("command=self._repository_preflight_command()", prepareStatus);
+		const markRunning = adapter.indexOf("artifacts.mark_running()", preflight);
+		const agentStart = adapter.indexOf("command=self._coda_command(agent_dir)", markRunning);
+		const userName = adapter.indexOf("config user.name coda-evals");
+		const userEmail = adapter.indexOf("config user.email coda-evals@localhost");
 
-		expect(commandStart).toBeGreaterThanOrEqual(0);
-		expect(agentStart).toBeGreaterThan(commandStart);
-		expect(userName).toBeGreaterThan(commandStart);
+		expect(prepareStatus).toBeGreaterThanOrEqual(0);
+		expect(preflight).toBeGreaterThan(prepareStatus);
+		expect(markRunning).toBeGreaterThan(preflight);
+		expect(agentStart).toBeGreaterThan(markRunning);
+		expect(userName).toBeGreaterThan(agentStart);
 		expect(userEmail).toBeGreaterThan(userName);
-		expect(userName).toBeLessThan(agentStart);
-		expect(userEmail).toBeLessThan(agentStart);
-		expect(adapter.indexOf("git -C /app config user.name coda-evals", userName + 1)).toBe(-1);
-		expect(adapter.indexOf("git -C /app config user.email coda-evals@localhost", userEmail + 1)).toBe(-1);
+		expect(adapter.indexOf("config user.name coda-evals", userName + 1)).toBe(-1);
+		expect(adapter.indexOf("config user.email coda-evals@localhost", userEmail + 1)).toBe(-1);
 	});
 
 	it("pins the current v1.1 dataset and selects the first 20 tasks explicitly", () => {

@@ -2,24 +2,33 @@
 
 The adapter copies a prebuilt Linux runtime into the task container, gives only
 the model request process Pier's filtered-egress proxy variables, preserves Coda
-JSONL, and commits workspace edits for DeepSWE v1.1's collect hook.
+JSONL, and transactionally salvages workspace and event artifacts for DeepSWE.
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import shlex
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
+from coda_trial_artifacts import ArtifactFinalizationError, CodaTrialArtifacts
 from pier.agents.base import BaseAgent
 from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.network import NetworkAllowlist
 
 
+PREPARE_MARKER = "CODA_PREPARE_V1"
+RUN_MARKER = "CODA_RUN_V1"
+
+
 class CodaAgent(BaseAgent):
     SUPPORTS_ATIF = True
+    WORKSPACE_DIR = "/app"
+    DEFAULT_FINALIZE_TIMEOUT_SEC = 30.0
+    DEFAULT_CANCEL_FINALIZE_TIMEOUT_SEC = 5.0
 
     def __init__(
         self,
@@ -34,6 +43,8 @@ class CodaAgent(BaseAgent):
         harness_revision: str = "unknown",
         extra_env: dict[str, str] | None = None,
         agent_timeout_sec: float | None = None,
+        artifact_finalize_timeout_sec: float = DEFAULT_FINALIZE_TIMEOUT_SEC,
+        cancel_finalize_timeout_sec: float = DEFAULT_CANCEL_FINALIZE_TIMEOUT_SEC,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
@@ -52,6 +63,12 @@ class CodaAgent(BaseAgent):
         self._harness_revision = harness_revision
         self._extra_env = dict(extra_env or {})
         self._agent_timeout_sec = int(agent_timeout_sec) if agent_timeout_sec else None
+        if artifact_finalize_timeout_sec <= 0:
+            raise ValueError("CodaAgent artifact_finalize_timeout_sec must be positive")
+        if cancel_finalize_timeout_sec <= 0:
+            raise ValueError("CodaAgent cancel_finalize_timeout_sec must be positive")
+        self._artifact_finalize_timeout_sec = float(artifact_finalize_timeout_sec)
+        self._cancel_finalize_timeout_sec = float(cancel_finalize_timeout_sec)
 
     @staticmethod
     def name() -> str:
@@ -84,7 +101,8 @@ class CodaAgent(BaseAgent):
         )
         if result.return_code != 0:
             raise RuntimeError(
-                f"Coda runtime validation failed ({result.return_code}): {result.stderr or result.stdout}"
+                f"Coda runtime validation failed ({result.return_code}): "
+                f"{result.stderr or result.stdout}"
             )
 
     async def run(
@@ -96,9 +114,141 @@ class CodaAgent(BaseAgent):
         if not self.model_name or "/" not in self.model_name:
             raise ValueError("CodaAgent model_name must use provider/model form")
 
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        (self.logs_dir / "instruction.md").write_text(instruction, encoding="utf-8")
+        artifacts = self._trial_artifacts(instruction)
+        artifacts.prepare()
         agent_dir = environment.env_paths.agent_dir.as_posix()
+        run_error: BaseException | None = None
+        run_traceback: TracebackType | None = None
+
+        try:
+            preparation = await environment.exec(
+                command=self._repository_preflight_command(),
+                cwd=self.WORKSPACE_DIR,
+                timeout_sec=min(self._artifact_finalize_timeout_sec, 30.0),
+            )
+            if preparation.return_code != 0:
+                raise RuntimeError(
+                    f"Coda repository preparation failed ({preparation.return_code}): "
+                    f"{preparation.stderr or preparation.stdout}"
+                )
+            initial_head = self._marker_value(preparation.stdout, PREPARE_MARKER)
+            if not initial_head:
+                raise RuntimeError("Coda repository preparation did not report initial HEAD")
+            artifacts.record_initial_head(initial_head)
+            artifacts.mark_running()
+
+            result = await environment.exec(
+                command=self._coda_command(agent_dir),
+                cwd=self.WORKSPACE_DIR,
+                env=environment.agent_process_env(self._process_env()),
+                timeout_sec=self._agent_timeout_sec,
+            )
+            coda_status = self._marker_value(result.stdout, RUN_MARKER)
+            coda_exit_code = int(coda_status) if coda_status is not None else -1
+            artifacts.record_run_completed(coda_exit_code)
+        except BaseException as error:
+            run_error = error
+            run_traceback = error.__traceback__
+            try:
+                artifacts.record_run_exception(error)
+            except BaseException:
+                pass
+
+        try:
+            finalize_error = await self._finalize(
+                artifacts=artifacts,
+                environment=environment,
+                agent_dir=agent_dir,
+                context=context,
+                externally_cancelled=isinstance(run_error, asyncio.CancelledError),
+            )
+        except BaseException as error:
+            finalize_error = error
+
+        if run_error is not None:
+            raise run_error.with_traceback(run_traceback)
+        if finalize_error is not None:
+            raise finalize_error
+
+    async def _finalize(
+        self,
+        *,
+        artifacts: CodaTrialArtifacts,
+        environment: BaseEnvironment,
+        agent_dir: str,
+        context: AgentContext,
+        externally_cancelled: bool,
+    ) -> BaseException | None:
+        timeout_sec = (
+            self._cancel_finalize_timeout_sec
+            if externally_cancelled
+            else self._artifact_finalize_timeout_sec
+        )
+        task = asyncio.create_task(
+            artifacts.finalize(
+                environment=environment,
+                agent_dir=agent_dir,
+                context=context,
+                timeout_sec=timeout_sec,
+            )
+        )
+        task.add_done_callback(self._consume_cleanup_result)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_sec)
+            return None
+        except BaseException as error:
+            if not task.done():
+                task.cancel()
+                self._record_cleanup_failure(
+                    artifacts,
+                    f"artifact finalization exceeded {timeout_sec:g}s",
+                )
+            elif not isinstance(error, ArtifactFinalizationError):
+                self._record_cleanup_failure(artifacts, error)
+            return error
+
+    @staticmethod
+    def _record_cleanup_failure(
+        artifacts: CodaTrialArtifacts,
+        error: BaseException | str,
+    ) -> None:
+        try:
+            artifacts.record_cleanup_failure(error)
+        except BaseException:
+            pass
+
+    @staticmethod
+    def _consume_cleanup_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+    def _trial_artifacts(self, instruction: str) -> CodaTrialArtifacts:
+        return CodaTrialArtifacts(
+            logs_dir=self.logs_dir,
+            instruction=instruction,
+            model_name=self.model_name,
+            reasoning_effort=self._reasoning_effort,
+            harness_revision=self._harness_revision,
+            max_output_tokens=self._max_output_tokens,
+            run_budget_enabled=self._run_budget_enabled,
+            max_turns=self._max_turns,
+            allow_all_commands=self._allow_all_commands,
+            workspace_dir=self.WORKSPACE_DIR,
+        )
+
+    def _repository_preflight_command(self) -> str:
+        workspace = shlex.quote(self.WORKSPACE_DIR)
+        return f"""
+set -e
+git -C {workspace} config user.name coda-evals
+git -C {workspace} config user.email coda-evals@localhost
+initial_head=$(git -C {workspace} rev-parse HEAD)
+printf '{PREPARE_MARKER}\t%s\n' "$initial_head"
+""".strip()
+
+    def _coda_command(self, agent_dir: str) -> str:
         node = "/installed-agent/coda/node/bin/node"
         entry = "/installed-agent/coda/packages/coding-agent/dist/bin.js"
         permission_args = (
@@ -111,40 +261,27 @@ class CodaAgent(BaseAgent):
             if self._run_budget_enabled
             else "--no-run-budget"
         )
-        command = f"""
+        return f"""
 set +e
-initial_head=$(git -C /app rev-parse HEAD)
-git -C /app config user.name coda-evals
-git -C /app config user.email coda-evals@localhost
 {shlex.quote(node)} {shlex.quote(entry)} \\
   --print --json --no-color \\
-  --workspace /app \\
-  --model {shlex.quote(self.model_name)} \\
+  --workspace {shlex.quote(self.WORKSPACE_DIR)} \\
+  --model {shlex.quote(self.model_name or '')} \\
   --reasoning {shlex.quote(self._reasoning_effort)} \\
   --max-output-tokens {self._max_output_tokens} \\
   {run_budget_args} \\
   {permission_args} \\
   --trust-project --no-session \\
   < {shlex.quote(f'{agent_dir}/instruction.md')} \\
-  > {shlex.quote(f'{agent_dir}/coda.jsonl')} \\
+  >> {shlex.quote(f'{agent_dir}/coda.jsonl')} \\
   2> {shlex.quote(f'{agent_dir}/coda.stderr')}
 coda_status=$?
-commit_status=0
-if ! git -C /app diff --quiet || ! git -C /app diff --cached --quiet || \\
-   test -n "$(git -C /app ls-files --others --exclude-standard)"; then
-  git -C /app add -A
-  git -C /app commit -m 'Coda DeepSWE submission' \\
-    > {shlex.quote(f'{agent_dir}/commit.log')} 2>&1
-  commit_status=$?
-fi
-committed=false
-if test "$(git -C /app rev-parse HEAD)" != "$initial_head"; then committed=true; fi
-printf '{{"coda_exit_code":%s,"commit_exit_code":%s,"committed":%s}}\\n' \\
-  "$coda_status" "$commit_status" "$committed" \\
-  > {shlex.quote(f'{agent_dir}/adapter-status.json')}
+printf '{RUN_MARKER}\t%s\n' "$coda_status"
 exit 0
 """.strip()
-        process_env = {
+
+    def _process_env(self) -> dict[str, str]:
+        return {
             **self._extra_env,
             "HOME": "/tmp/coda-home",
             "XDG_CONFIG_HOME": "/tmp/coda-home/.config",
@@ -155,204 +292,11 @@ exit 0
             "CI": "1",
             "TERM": "dumb",
         }
-        await environment.exec(
-            command=command,
-            cwd="/app",
-            env=environment.agent_process_env(process_env),
-            timeout_sec=self._agent_timeout_sec,
-        )
-
-        events = self._read_events()
-        status = self._read_status()
-        self._populate_context(context, events, status)
-        self._write_trajectory(instruction, events, context)
-        if status.get("commit_exit_code", 0) != 0:
-            raise RuntimeError(f"Coda workspace commit failed with exit {status['commit_exit_code']}")
-
-    def _read_events(self) -> list[dict[str, Any]]:
-        path = self.logs_dir / "coda.jsonl"
-        events: list[dict[str, Any]] = []
-        if not path.exists():
-            return events
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                events.append(value)
-        return events
-
-    def _read_status(self) -> dict[str, Any]:
-        path = self.logs_dir / "adapter-status.json"
-        if not path.exists():
-            return {"coda_exit_code": -1, "commit_exit_code": -1, "committed": False}
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {"coda_exit_code": -1, "commit_exit_code": -1, "committed": False}
-
-    def _populate_context(
-        self,
-        context: AgentContext,
-        events: list[dict[str, Any]],
-        status: dict[str, Any],
-    ) -> None:
-        evidence = next(
-            (event for event in reversed(events) if event.get("type") == "run_evidence"),
-            {},
-        )
-        usage = evidence.get("usage") if isinstance(evidence.get("usage"), dict) else {}
-        input_tokens = self._number(usage.get("inputTokens"))
-        cache_read = self._number(usage.get("cacheReadTokens"))
-        cache_write = self._number(usage.get("cacheWriteTokens"))
-        context.n_input_tokens = input_tokens + cache_read + cache_write
-        context.n_cache_tokens = cache_read
-        context.n_output_tokens = self._number(usage.get("outputTokens"))
-        cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
-        total_usd = cost.get("totalUsd")
-        context.cost_usd = float(total_usd) if isinstance(total_usd, (int, float)) else None
-        context.n_agent_steps = sum(1 for event in events if event.get("type") == "turn_start")
-        context.peak_context_tokens = self._peak_context_tokens(events)
-        paths = evidence.get("paths") if isinstance(evidence.get("paths"), dict) else {}
-        length_truncation_count = sum(
-            1
-            for event in events
-            if event.get("type") == "attempt_end"
-            and isinstance(event.get("candidate"), dict)
-            and isinstance(event["candidate"].get("message"), dict)
-            and event["candidate"]["message"].get("stopReason") == "length"
-        )
-        budget_exhaustion_limits = [
-            str(event["exhaustion"]["limit"])
-            for event in events
-            if event.get("type") == "run_budget_exhausted"
-            and isinstance(event.get("exhaustion"), dict)
-            and isinstance(event["exhaustion"].get("limit"), str)
-        ]
-        rejected = [event for event in events if event.get("type") == "tool_execution_rejected"]
-        context.metadata = {
-            "coda_exit_code": self._number(status.get("coda_exit_code"), default=-1),
-            "commit_exit_code": self._number(status.get("commit_exit_code"), default=-1),
-            "committed": status.get("committed") is True,
-            "run_outcome": evidence.get("outcome"),
-            "elapsed_ms": self._number(evidence.get("elapsedMs")),
-            "changed_paths": paths.get("changed") if isinstance(paths.get("changed"), list) else [],
-            "tool_issue_count": len(evidence.get("toolIssues", []))
-            if isinstance(evidence.get("toolIssues"), list)
-            else 0,
-            "tool_rejection_count": len(rejected),
-            "policy_rejection_count": sum(
-                1 for event in rejected if event.get("reason") == "policy"
-            ),
-            "invalid_tool_call_count": sum(
-                1 for event in rejected if event.get("reason") == "invalid"
-            ),
-            "unresolved_failure_count": len(evidence.get("unresolvedFailures", []))
-            if isinstance(evidence.get("unresolvedFailures"), list)
-            else 0,
-            "length_truncation_count": length_truncation_count,
-            "budget_exhaustion_limits": budget_exhaustion_limits,
-        }
-
-    def _write_trajectory(
-        self,
-        instruction: str,
-        events: list[dict[str, Any]],
-        context: AgentContext,
-    ) -> None:
-        steps: list[dict[str, Any]] = [{"step_id": 1, "source": "user", "message": instruction}]
-        for event in events:
-            if event.get("type") != "attempt_end":
-                continue
-            candidate = event.get("candidate") if isinstance(event.get("candidate"), dict) else {}
-            message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
-            usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
-            steps.append(
-                {
-                    "step_id": len(steps) + 1,
-                    "source": "agent",
-                    "model_name": self.model_name,
-                    "reasoning_effort": self._reasoning_effort,
-                    "message": self._message_text(message.get("content")),
-                    "llm_call_count": 1,
-                    "metrics": {
-                        "prompt_tokens": self._number(usage.get("input"))
-                        + self._number(usage.get("cacheRead"))
-                        + self._number(usage.get("cacheWrite")),
-                        "completion_tokens": self._number(usage.get("output")),
-                        "cached_tokens": self._number(usage.get("cacheRead")),
-                    },
-                    "extra": {
-                        "outcome": event.get("outcome"),
-                        "discarded": event.get("discarded") is True,
-                    },
-                }
-            )
-        trajectory = {
-            "schema_version": "ATIF-v1.7",
-            "session_id": next(
-                (str(event.get("runId")) for event in events if event.get("type") == "run_start"),
-                "unknown",
-            ),
-            "agent": {
-                "name": "coda",
-                "version": self._harness_revision,
-                "model_name": self.model_name,
-                "extra": {
-                    "reasoning_effort": self._reasoning_effort,
-                    "max_output_tokens": self._max_output_tokens,
-                    "run_budget_enabled": self._run_budget_enabled,
-                    "max_turns": self._max_turns if self._run_budget_enabled else None,
-                    "allow_all_commands": self._allow_all_commands,
-                },
-            },
-            "steps": steps,
-            "final_metrics": {
-                "total_prompt_tokens": context.n_input_tokens,
-                "total_completion_tokens": context.n_output_tokens,
-                "total_cached_tokens": context.n_cache_tokens,
-                "total_cost_usd": context.cost_usd,
-                "total_steps": len(steps),
-            },
-        }
-        (self.logs_dir / "trajectory.json").write_text(
-            json.dumps(trajectory, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
 
     @staticmethod
-    def _number(value: Any, default: int = 0) -> int:
-        return int(value) if isinstance(value, (int, float)) and value >= 0 else default
-
-    @classmethod
-    def _peak_context_tokens(cls, events: list[dict[str, Any]]) -> int | None:
-        values: list[int] = []
-        for event in events:
-            if event.get("type") != "attempt_end":
-                continue
-            candidate = event.get("candidate") if isinstance(event.get("candidate"), dict) else {}
-            message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
-            usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
-            values.append(
-                cls._number(usage.get("input"))
-                + cls._number(usage.get("cacheRead"))
-                + cls._number(usage.get("cacheWrite"))
-            )
-        return max(values) if values else None
-
-    @staticmethod
-    def _message_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return ""
-        parts: list[str] = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text")
-            if item.get("type") == "text" and isinstance(text, str):
-                parts.append(text)
-        return "\n".join(parts)
+    def _marker_value(output: str | None, marker: str) -> str | None:
+        for line in reversed((output or "").splitlines()):
+            prefix = f"{marker}\t"
+            if line.startswith(prefix):
+                return line[len(prefix) :]
+        return None
