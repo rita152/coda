@@ -82,13 +82,21 @@ function conversation(
 					shellDialect,
 					pipelineDetected: testCase.pipelineDetected,
 					pipelineStatusMode: testCase.pipelineStatusMode,
+					outputRefComplete: expect.any(Boolean),
 				},
 			},
 		});
 		const next = cases[index + 1];
 		return next ? toolCall(next, index + 1) : fauxAssistantMessage(finalText, { timestamp: 870 });
 	});
-	return [toolCall(cases[0]!, 0), ...checks];
+	return [
+		toolCall(cases[0]!, 0),
+		...checks,
+		(context) => {
+			expect(JSON.stringify(context.messages.at(-1))).toContain("Completion evidence is not sufficient yet");
+			return fauxAssistantMessage(finalText, { timestamp: 870 });
+		},
+	];
 }
 
 async function runConversation(options: {
@@ -127,15 +135,14 @@ async function runConversation(options: {
 		},
 	});
 
-	await expect(
-		application.run([
-			"--print",
-			"--dangerously-bypass-approvals-and-sandbox",
-			"--model",
-			`${options.faux.getModel().provider}/${options.faux.getModel().id}`,
-			options.prompt,
-		]),
-	).resolves.toBe(0);
+	const exitCode = await application.run([
+		"--print",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model",
+		`${options.faux.getModel().provider}/${options.faux.getModel().id}`,
+		options.prompt,
+	]);
+	expect(exitCode, stderr.value).toBe(1);
 	return { stdout: stdout.value, stderr: stderr.value, launches };
 }
 
@@ -247,7 +254,7 @@ describe("bash Tool strict pipeline semantics", () => {
 			expect(launch).toEqual(["/bin/bash", "-o", "pipefail", "-c", cases[index]!.command]);
 		}
 		expect(result.stdout).toBe("Strict pipeline checks completed.\n");
-		expect(result.stderr).toBe("");
+		expect(result.stderr).toContain("coda: completion partial");
 	});
 
 	it("rejects unsupported pipelines before launch and preserves non-pipeline commands", async () => {
@@ -288,6 +295,6 @@ describe("bash Tool strict pipeline semantics", () => {
 			["/bin/sh", "-c", cases[2].command],
 		]);
 		expect(result.stdout).toBe("Unsupported shell handling completed.\n");
-		expect(result.stderr).toBe("");
+		expect(result.stderr).toContain("coda: completion partial");
 	});
 });

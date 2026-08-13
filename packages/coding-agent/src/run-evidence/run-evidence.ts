@@ -539,6 +539,7 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 
 	for (const projected of projectedTools) {
 		const { tool, observation, completedSequence, paths, commandKey } = projected;
+		const mutation = operationMutation(tool, observation);
 		const boundedOperationPaths = boundedList(paths, MAX_PATHS);
 		observationCounts[observation.completeness]++;
 		omittedInspectedPaths += observation.omittedPaths.inspected;
@@ -559,6 +560,7 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 				code: observation.code ?? null,
 				command: tool.command ?? null,
 				commandKey: commandKey ?? null,
+				...(mutation ? { mutation } : {}),
 				paths: boundedOperationPaths.values,
 				omittedPaths:
 					boundedOperationPaths.omitted + observation.omittedPaths.inspected + observation.omittedPaths.changed,
@@ -888,6 +890,15 @@ function operationPaths(
 	];
 	const unique = new Map(paths.map((path) => [`${path.effect}\0${path.path}`, path]));
 	return deepFreeze([...unique.values()]);
+}
+
+function operationMutation(tool: ToolEvidence, observation: ObservationEvidence): RunEvidenceOperation["mutation"] {
+	const attemptedPaths = observation.mutation?.attemptedPaths ?? tool.legacyMutationPaths;
+	if (!attemptedPaths) return undefined;
+	return deepFreeze({
+		attemptedPaths: attemptedPaths.map((path) => safeText(path, MAX_PATH_CHARACTERS)),
+		committedPaths: (observation.mutation?.committedPaths ?? []).map((path) => safeText(path, MAX_PATH_CHARACTERS)),
+	});
 }
 
 function projectPendingOperation(tool: ToolEvidence): RunEvidencePendingOperation {

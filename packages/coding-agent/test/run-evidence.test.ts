@@ -407,6 +407,10 @@ describe("RunEvidence projection", () => {
 		expect(supplemented.operations[0]?.paths).toEqual([
 			{ path: "native.txt", effect: "changed", provenance: "tool-observation" },
 		]);
+		expect(supplemented.operations[0]?.mutation).toEqual({
+			attemptedPaths: ["native.txt", "not-applied.txt"],
+			committedPaths: ["native.txt"],
+		});
 		expect(supplemented.paths).toMatchObject({
 			changed: ["native.txt", "shell.txt"],
 			changedWithProvenance: [

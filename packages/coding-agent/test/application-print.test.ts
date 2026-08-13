@@ -311,10 +311,24 @@ describe("Coding Agent print mode", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("keeps configured RunControl active with --no-run-budget and exposes terminal status in JSON and evidence", async () => {
+	it("emits one semantic stream with Tool lifecycle, terminal candidate, evidence, completion, and RunControl", async () => {
 		const runtime = testTimeRuntime(127);
 		const faux = fauxProvider({ runtime });
-		faux.setResponses([fauxAssistantMessage("controlled output", { timestamp: 127 })]);
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "package.json" }, { id: "controlled-read" }), {
+				stopReason: "toolUse",
+				timestamp: 127,
+			}),
+			(context) => {
+				expect(context.messages.at(-1)).toMatchObject({
+					role: "toolResult",
+					toolCallId: "controlled-read",
+					toolName: "read",
+					isError: false,
+				});
+				return fauxAssistantMessage("controlled output", { timestamp: 127 });
+			},
+		]);
 		const models = createModels({ runtime });
 		models.setProvider(faux.provider);
 		const scheduler = new RecordingScheduler();
@@ -328,7 +342,7 @@ describe("Coding Agent print mode", () => {
 			processRunner: createNodeProcessRunner({ platform: "darwin" }),
 			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
 			runtime: {
-				cwd: "/tmp",
+				cwd: process.cwd(),
 				homeDirectory: "/home/test",
 				platform: "darwin",
 				environment: {},
@@ -342,6 +356,8 @@ describe("Coding Agent print mode", () => {
 			application.run([
 				"--print",
 				"--json",
+				"--json-mode",
+				"semantic",
 				"--no-run-budget",
 				"--run-control-work-ms",
 				"1000",
@@ -368,6 +384,12 @@ describe("Coding Agent print mode", () => {
 			},
 		});
 		expect(events[0]).not.toHaveProperty("budget");
+		expect(events.some(({ type }) => type === "message_update")).toBe(false);
+		expect(events.some(({ type }) => type === "tool_execution_start")).toBe(true);
+		expect(events.some(({ type }) => type === "tool_execution_end")).toBe(true);
+		expect([...events].reverse().find(({ type }) => type === "attempt_end")).toMatchObject({
+			candidate: { message: { content: [{ type: "text", text: "controlled output" }] } },
+		});
 		expect(events.at(-3)).toMatchObject({
 			schemaVersion: 3,
 			type: "run_end",
@@ -378,6 +400,13 @@ describe("Coding Agent print mode", () => {
 			schemaVersion: 4,
 			type: "run_evidence",
 			outcome: "success",
+			operations: [
+				expect.objectContaining({
+					toolName: "read",
+					status: "ok",
+					paths: [expect.objectContaining({ path: "package.json", effect: "inspected" })],
+				}),
+			],
 			runControl: { phase: "terminal", reason: "run_ended", trigger: null },
 		});
 		expect(events.at(-1)).toMatchObject({

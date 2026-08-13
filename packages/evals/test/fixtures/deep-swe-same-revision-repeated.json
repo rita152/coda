@@ -1,18 +1,28 @@
 {
-  "schemaVersion": 1,
-  "description": "Synthetic zero-provider fixture for same-revision repeated-trial variability",
+  "schemaVersion": 2,
+  "description": "Synthetic zero-provider fixture for combined coverage-aware repeated-trial reporting",
   "baseline": {
+    "started_at": "2026-08-13T00:00:00Z",
+    "finished_at": "2026-08-13T00:00:10Z",
     "trial_results": [
       {
         "task_name": "synthetic/task-a",
         "trial_name": "task-a__baseline-1",
         "attempt_index": 1,
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:02Z",
+        "agent_result": {
+          "cost_usd": 0.25,
+          "metadata": { "elapsed_ms": 1500 }
+        },
         "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
       },
       {
         "task_name": "synthetic/task-b",
         "trial_name": "task-b__baseline-1",
         "attempt_index": 1,
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:03Z",
         "verifier_result": { "rewards": { "reward": 0, "partial": 0.8 } }
       },
       {
@@ -42,11 +52,19 @@
     ]
   },
   "repeat": {
+    "started_at": "2026-08-13T01:00:00Z",
+    "finished_at": "2026-08-13T01:00:12Z",
     "trial_results": [
       {
         "task_name": "synthetic/task-a",
         "trial_name": "task-a__repeat-1",
         "attempt_index": 1,
+        "started_at": "2026-08-13T01:00:00Z",
+        "finished_at": "2026-08-13T01:00:04Z",
+        "agent_result": {
+          "cost_usd": 0.3,
+          "metadata": { "elapsed_ms": 2000 }
+        },
         "verifier_result": { "rewards": { "reward": 1, "partial": 1 } }
       },
       {

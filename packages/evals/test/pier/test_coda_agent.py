@@ -167,7 +167,77 @@ class CodaAgentArtifactTests(unittest.IsolatedAsyncioTestCase):
             (self.workspace / "timed-out.txt").write_text(
                 "valuable partial work\n", encoding="utf-8"
             )
-            self._write_events(self._partial_events(), truncated_tail=True)
+            events = self._partial_events()
+            invocation = {
+                "id": "inv-timeout-read",
+                "resultMessageId": "result-timeout-read",
+                "providerToolCallId": "provider-timeout-read",
+                "toolName": "read",
+                "arguments": {"path": "README.md"},
+                "sourceIndex": 0,
+                "replaySafety": "safe",
+            }
+            candidate = events[-1]["candidate"]["message"]
+            candidate["content"].append(
+                {
+                    "type": "toolCall",
+                    "id": invocation["providerToolCallId"],
+                    "name": invocation["toolName"],
+                    "arguments": invocation["arguments"],
+                }
+            )
+            candidate["stopReason"] = "toolUse"
+            events.extend(
+                [
+                    {
+                        "schemaVersion": 2,
+                        "type": "tool_execution_start",
+                        "runId": "run-1",
+                        "sequence": 6,
+                        "timestamp": 1_310,
+                        "turnId": "turn-2",
+                        "invocation": invocation,
+                    },
+                    {
+                        "schemaVersion": 2,
+                        "type": "tool_execution_end",
+                        "runId": "run-1",
+                        "sequence": 7,
+                        "timestamp": 1_320,
+                        "turnId": "turn-2",
+                        "invocation": invocation,
+                        "settlement": "returned",
+                        "outcome": "success",
+                        "result": {
+                            "id": invocation["resultMessageId"],
+                            "message": {
+                                "role": "toolResult",
+                                "toolCallId": invocation["providerToolCallId"],
+                                "toolName": invocation["toolName"],
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "1: base",
+                                    }
+                                ],
+                                "observation": {
+                                    "status": "ok",
+                                    "truncated": False,
+                                    "facts": {
+                                        "path": "README.md",
+                                        "lineStart": 1,
+                                        "lineEnd": 1,
+                                        "totalLines": 1,
+                                    },
+                                },
+                                "isError": False,
+                                "timestamp": 1_320,
+                            },
+                        },
+                    },
+                ]
+            )
+            self._write_events(events, truncated_tail=True)
             raise TimeoutError("fixture internal deadline")
 
         context = StubAgentContext()
@@ -214,6 +284,19 @@ class CodaAgentArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trajectory["agent"]["extra"]["run_end_present"])
         self.assertEqual(len(trajectory["steps"]), 3)
         self.assertTrue((self.logs_dir / "tool-evidence.jsonl").is_file())
+        tool_step = trajectory["steps"][2]
+        self.assertEqual(tool_step["tool_calls"][0]["function_name"], "read")
+        self.assertEqual(tool_step["tool_calls"][0]["tool_call_id"], "inv-timeout-read")
+        tool_result = tool_step["observation"]["results"][0]
+        self.assertEqual(tool_result["source_call_id"], "inv-timeout-read")
+        evidence_ref = tool_result["extra"]["evidence_ref"]
+        evidence_records = [
+            json.loads(line)
+            for line in (self.logs_dir / "tool-evidence.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertTrue(any(record.get("ref") == evidence_ref for record in evidence_records))
         evidence = self._json_artifact("artifact-evidence.json")
         self.assertEqual(evidence["status"], "partial")
         self.assertEqual(evidence["source"], "terminal_events")

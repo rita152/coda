@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
+import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type ApplicationOutput,
@@ -157,6 +158,80 @@ describe("Coding Agent completion integration", () => {
 				afterLatestMutation: true,
 			},
 		});
+	});
+
+	it("keeps the completion gate active when RunControl requests wrap-up after a mutation", async () => {
+		const fixture = await createFixture();
+		await Promise.all([
+			writeFile(join(fixture.workspace, "value.ts"), "before\n"),
+			writeFile(
+				join(fixture.workspace, "package.json"),
+				JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }),
+			),
+		]);
+		const time = new ControlledTime(1_225);
+		const faux = fauxProvider({ runtime: testTimeRuntime(1_225) });
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("edit", { path: "value.ts", oldText: "before", newText: "after" }, { id: "edit-value" }),
+				{ stopReason: "toolUse", timestamp: 1_225 },
+			),
+			async () => {
+				await time.runNext();
+				return fauxAssistantMessage("Wrapped up at the work deadline.", { timestamp: time.now() });
+			},
+			(context) => {
+				const messages = JSON.stringify(context.messages);
+				expect(messages).toContain("RunControl requested finalization");
+				expect(messages).toContain("run a focused verification after the latest mutation");
+				return fauxAssistantMessage(fauxToolCall("bash", { command: "npm test" }, { id: "verify-value" }), {
+					stopReason: "toolUse",
+					timestamp: time.now(),
+				});
+			},
+			fauxAssistantMessage("Wrapped up after post-mutation verification.", { timestamp: 1_325 }),
+		]);
+		const harness = createHarness(
+			fixture,
+			faux,
+			workspaceEvidence([
+				snapshot("before", false, []),
+				snapshot("after", true, ["value.ts"]),
+				snapshot("after", true, ["value.ts"]),
+				snapshot("after", true, ["value.ts"]),
+			]),
+			{ scheduler: time, now: () => time.now() },
+		);
+
+		const exitCode = await harness.application.run([
+			"--print",
+			"--json",
+			"--json-mode",
+			"semantic",
+			"--run-control-work-ms",
+			"100",
+			"--run-control-grace-ms",
+			"500",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"change and verify value.ts before wrapping up",
+		]);
+		const events = jsonLines(harness.stdout.value);
+
+		expect(exitCode).toBe(0);
+		expect(faux.state.callCount).toBe(4);
+		expect(events.find((event) => event.type === "run_end")).toMatchObject({
+			schemaVersion: 3,
+			outcome: "success",
+			runControl: { phase: "terminal", reason: "run_ended", trigger: "work_deadline" },
+		});
+		expect(events.at(-1)).toMatchObject({
+			type: "completion_disposition",
+			disposition: "verified",
+			verification: { result: "passed", afterLatestMutation: true },
+			repair: { attempts: 1, maxAttempts: 1, exhausted: false },
+		});
+		expect(time.pending).toBe(0);
 	});
 
 	it("invalidates fake-model verification evidence when a later mutation occurs", async () => {
@@ -450,6 +525,8 @@ function createHarness(
 	options: {
 		readonly settings?: SettingsStore;
 		readonly approval?: CodingAgentApplicationOptions["approval"];
+		readonly scheduler?: Scheduler;
+		readonly now?: () => number;
 	} = {},
 ) {
 	const models = createModels({ runtime: testTimeRuntime(1_000) });
@@ -477,8 +554,9 @@ function createHarness(
 				homeDirectory: fixture.home,
 				platform: "darwin",
 				environment: { PATH: process.env.PATH, SHELL: "/bin/sh", TMPDIR: tmpdir() },
-				clock: { now: () => 1_000 },
+				clock: { now: options.now ?? (() => 1_000) },
 				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				...(options.scheduler ? { scheduler: options.scheduler } : {}),
 			},
 		}),
 	};
@@ -520,5 +598,53 @@ class BufferOutput implements ApplicationOutput {
 
 	write(chunk: string): void {
 		this.value += chunk;
+	}
+}
+
+interface ControlledTask extends ScheduledTask {
+	readonly dueAt: number;
+	readonly run: () => void | Promise<void>;
+	cancelled: boolean;
+	ran: boolean;
+}
+
+class ControlledTime implements Scheduler {
+	#now: number;
+	readonly #tasks: ControlledTask[] = [];
+
+	constructor(now: number) {
+		this.#now = now;
+	}
+
+	now(): number {
+		return this.#now;
+	}
+
+	schedule(delayMs: number, run: () => void | Promise<void>): ScheduledTask {
+		const task: ControlledTask = {
+			dueAt: this.#now + delayMs,
+			run,
+			cancelled: false,
+			ran: false,
+			cancel() {
+				this.cancelled = true;
+			},
+		};
+		this.#tasks.push(task);
+		return task;
+	}
+
+	get pending(): number {
+		return this.#tasks.filter((task) => !task.cancelled && !task.ran).length;
+	}
+
+	async runNext(): Promise<void> {
+		const task = this.#tasks
+			.filter((candidate) => !candidate.cancelled && !candidate.ran)
+			.sort((left, right) => left.dueAt - right.dueAt)[0];
+		if (!task) throw new Error("No scheduled task is pending");
+		this.#now = task.dueAt;
+		task.ran = true;
+		await task.run();
 	}
 }

@@ -419,9 +419,7 @@ function claimAttemptIdentity(
 		attemptIndex,
 		attemptId: reportedAttemptId ?? createDeepSweAttemptId(taskId, attemptIndex, 1),
 		attemptIdentitySource:
-			storedSource ?? (reportedAttemptId || reportedAttemptIndex !== undefined
-				? "reported"
-				: "derived"),
+			storedSource ?? (reportedAttemptId || reportedAttemptIndex !== undefined ? "reported" : "derived"),
 	};
 }
 

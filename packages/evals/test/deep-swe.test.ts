@@ -724,7 +724,7 @@ describe("DeepSWE evaluation runner", () => {
 		});
 	});
 
-	it("retains two tasks × three attempts and estimates same-revision variability", () => {
+	it("combines partial resource coverage with repeated sampling and paired comparison", () => {
 		const experiment = createDeepSweExperimentPlan({
 			taskIds: ["task-a", "task-b"],
 			attempts: 3,
@@ -741,6 +741,27 @@ describe("DeepSWE evaluation runner", () => {
 		expect(baseline.schemaVersion).toBe(3);
 		expect(baseline.trials).toHaveLength(6);
 		expect(new Set(baseline.trials.map(({ trialName }) => trialName)).size).toBe(6);
+		expect(baseline.summary).toMatchObject({
+			wallElapsedMs: 10_000,
+			cumulativeTrialElapsedMs: {
+				knownTotal: 5_000,
+				observedTrials: 2,
+				expectedTrials: 6,
+				status: "partial",
+			},
+			costUsd: {
+				knownTotalUsd: 0.25,
+				observedTrials: 1,
+				expectedTrials: 6,
+				status: "partial",
+			},
+			cumulativeAgentElapsedMs: {
+				knownTotal: 1_500,
+				observedTrials: 1,
+				expectedTrials: 6,
+				status: "partial",
+			},
+		});
 		expect(baseline.sampling).toMatchObject({
 			expectedTrials: 6,
 			observedTrials: 6,

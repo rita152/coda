@@ -49,6 +49,11 @@ export interface RunEvidenceOperationPath extends RunEvidenceToolFactPath {
 	readonly provenance: RunEvidencePathProvenance;
 }
 
+export interface RunEvidenceOperationMutation {
+	readonly attemptedPaths: readonly string[];
+	readonly committedPaths: readonly string[];
+}
+
 /** Generic, completion-policy-free operation facts for issues 01 and 05. */
 export interface RunEvidenceOperation {
 	readonly invocationId: string;
@@ -61,6 +66,7 @@ export interface RunEvidenceOperation {
 	readonly code: string | null;
 	readonly command: string | null;
 	readonly commandKey: string | null;
+	readonly mutation?: RunEvidenceOperationMutation;
 	readonly paths: readonly RunEvidenceOperationPath[];
 	readonly omittedPaths: number;
 }

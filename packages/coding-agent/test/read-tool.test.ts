@@ -189,13 +189,18 @@ describe("read Tool", () => {
 			.map((line) => JSON.parse(line) as Record<string, unknown>);
 
 		expect(exitCode).toBe(0);
-		expect(events.at(-1)).toMatchObject({
-			schemaVersion: 2,
+		expect(events.find(({ type }) => type === "run_evidence")).toMatchObject({
+			schemaVersion: 3,
 			type: "run_evidence",
 			observations: {
 				counts: { complete: 0, windowed: 2, "recoverable-overflow": 0, "lossy-overflow": 0 },
 			},
 			toolIssues: [],
+		});
+		expect(events.at(-1)).toMatchObject({
+			schemaVersion: 1,
+			type: "completion_disposition",
+			disposition: "verified",
 		});
 		expect(stderr.value).toBe("");
 	});

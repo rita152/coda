@@ -174,6 +174,8 @@ export function createBashTool(options: {
 							shellDialect: shellExecution.shellDialect,
 							pipelineDetected: shellExecution.pipelineDetected,
 							pipelineStatusMode: shellExecution.pipelineStatusMode,
+							outputRefAvailable: false,
+							outputRefComplete: false,
 						},
 					},
 					isError: true,
@@ -187,6 +189,8 @@ export function createBashTool(options: {
 						shellDialect: shellExecution.shellDialect,
 						pipelineStatusMode: shellExecution.pipelineStatusMode,
 						pipelineRejected: true,
+						outputRef: undefined,
+						outputStoredTruncated: undefined,
 					},
 				};
 			}

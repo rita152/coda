@@ -74,6 +74,36 @@ describe("completion RunEvidence adapter", () => {
 		expect(activity.openFailures).toEqual([]);
 	});
 
+	it("filters ordinary non-mutation Tool misses but retains generic failed mutation facts", () => {
+		const read = operation({
+			invocationId: "tool:native-read",
+			toolName: "read",
+			completedSequence: 5,
+			status: "error",
+		});
+		const mutation = operation({
+			invocationId: "tool:generic-mutation",
+			toolName: "custom-writer",
+			completedSequence: 6,
+			status: "error",
+			mutation: { attemptedPaths: ["src/value.ts"], committedPaths: [] },
+		});
+		const readFailure = failure("tool:native-read", 5);
+		const mutationFailure = failure("tool:generic-mutation", 6);
+		const activity = completionActivityFromRunEvidence(
+			temporal(),
+			evidence({
+				operations: [read, mutation],
+				terminalFailures: [readFailure, mutationFailure],
+				openFailures: [readFailure, mutationFailure],
+			}),
+		);
+
+		expect(activity.openFailures).toEqual([
+			expect.objectContaining({ invocationId: "tool:generic-mutation", kind: "mutation" }),
+		]);
+	});
+
 	it("uses only openFailures and never resurrects recovered history", () => {
 		const historical = {
 			kind: "tool" as const,
@@ -145,6 +175,17 @@ function command(invocationId: string, sequence: number, value: string, failed: 
 		timedOut,
 		truncated: false,
 		completeness: "complete" as const,
+	};
+}
+
+function failure(id: string, sequence: number) {
+	return {
+		kind: "tool" as const,
+		id,
+		status: "error" as const,
+		summary: `${id} failed`,
+		sequence,
+		resolutionKey: `failure:${id}`,
 	};
 }
 

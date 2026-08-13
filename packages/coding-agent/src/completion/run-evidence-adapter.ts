@@ -74,8 +74,9 @@ function activityFromOperations(
 function isCompletionRelevant(failure: RunEvidenceFailure, operation: RunEvidenceOperation | undefined): boolean {
 	if (failure.kind !== "tool" || !operation) return true;
 	if (failure.status !== "error" || operation.settlement !== "returned") return true;
+	if (operation.mutation) return true;
 	if (operation.command) return classifyShellCommand(operation.command) !== "read_only";
-	return !(operation.paths.length > 0 && operation.paths.every(({ effect }) => effect === "inspected"));
+	return false;
 }
 
 function relevantFailure(
@@ -94,7 +95,7 @@ function relevantFailure(
 
 function failureKind(operation: RunEvidenceOperation | undefined): CompletionRelevantFailure["kind"] {
 	if (!operation) return "evidence";
-	if (operation.paths.some(({ effect }) => effect === "changed")) return "mutation";
+	if (operation.mutation || operation.paths.some(({ effect }) => effect === "changed")) return "mutation";
 	if (!operation.command) return "evidence";
 	const effect = classifyShellCommand(operation.command);
 	return effect === "verification" ? "verification" : effect === "potential_mutation" ? "mutation" : "evidence";
