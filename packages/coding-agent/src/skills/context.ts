@@ -2,7 +2,7 @@ import type { AgentInput } from "@coda/agent";
 import type { ImageContent, SkillReferenceContent, TextContent } from "@coda/ai";
 import type { CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "@coda/runtime";
 import type { SkillActivation, SkillId } from "@coda/skills";
-import type { ComposerExtensionReference } from "../interactive/input-types.ts";
+import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 
 const USER_SELECTED_SKILL_CONTEXT_PATTERN =
 	/BEGIN USER-SELECTED SKILL CONTEXT[\s\S]*?END USER-SELECTED SKILL CONTEXT(?:\r?\n)*/gu;

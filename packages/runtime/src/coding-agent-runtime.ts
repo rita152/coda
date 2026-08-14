@@ -14,6 +14,12 @@ import type { McpElicitationResult, McpToolSnapshot } from "@coda/mcp";
 import { ContextWindowController } from "./context-window/context-window.ts";
 import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
 import type { CompactionCheckpoint } from "./context-window/types.ts";
+import {
+	type RuntimeFollowUpChange,
+	type RuntimeInputLifecycle,
+	type RuntimeInputPort,
+	RuntimeInputQueue,
+} from "./input-queue.ts";
 import { createMcpAgentTools, type McpAgentElicitation } from "./mcp/tools.ts";
 import {
 	buildSystemPrompt,
@@ -48,7 +54,10 @@ export interface CodingPreparedRunSnapshot {
 	readonly prompt: SystemPromptSnapshot;
 }
 
+export type CodingRuntimePromptPreparer = (runtime: Omit<CodingPreparedRunSnapshot, "prompt">) => SystemPromptSnapshot;
+
 export type CodingRuntimeSessionChange =
+	| RuntimeFollowUpChange
 	| {
 			readonly type: "prepare_run";
 			readonly promptVersion: string;
@@ -100,6 +109,8 @@ export interface CodingRuntimeEventContext {
 export interface CodingAgentRuntime {
 	readonly runtimeId: string;
 	readonly sessionId: string;
+	/** Instance-owned durable input lifecycle used by interactive and headless Adapters. */
+	readonly input: RuntimeInputLifecycle;
 	snapshot(): CodingAgentRuntimeSnapshot;
 	select(selection: CodingRuntimeSelection): void;
 	selectReasoning(reasoning: ThinkingLevel | "off"): void;
@@ -127,7 +138,7 @@ export interface OpenCodingAgentRuntimeOptions {
 	readonly runtimeId?: string;
 	readonly session: CodingRuntimeSession;
 	readonly selection: CodingRuntimeSelection;
-	readonly models: Models;
+	readonly models: Pick<Models, "completeSimple" | "streamSimple">;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly scheduler?: RuntimeScheduler;
@@ -138,6 +149,8 @@ export interface OpenCodingAgentRuntimeOptions {
 	readonly workspaceRoot: string;
 	readonly platform: NodeJS.Platform;
 	readonly projectInstructions?: TrustedProjectInstructions;
+	/** Optional product Adapter for consumers with their own deterministic prompt policy. */
+	readonly preparePrompt?: CodingRuntimePromptPreparer;
 	readonly baseTools: readonly AgentTool[];
 	readonly skills: CodingRuntimeSkillsSource;
 	readonly mcp: CodingRuntimeMcpSource;
@@ -178,15 +191,18 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 		maxOutputTokens: options.maxOutputTokens,
 	});
 	const freezePrompt = (runtime: Omit<CodingPreparedRunSnapshot, "prompt">): SystemPromptSnapshot =>
-		buildSystemPrompt({
-			workspace: options.workspaceRoot,
-			platform: options.platform,
-			timestamp: options.clock.now(),
-			tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-			capabilities: { interactionMode: options.interactionMode },
-			projectInstructions: options.projectInstructions,
-			skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
-		});
+		Object.freeze(
+			options.preparePrompt?.(runtime) ??
+				buildSystemPrompt({
+					workspace: options.workspaceRoot,
+					platform: options.platform,
+					timestamp: options.clock.now(),
+					tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
+					capabilities: { interactionMode: options.interactionMode },
+					projectInstructions: options.projectInstructions,
+					skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
+				}),
+		);
 
 	internal = await openAgentRuntime({
 		runtimeId: options.runtimeId ?? `runtime:${options.idGenerator.generate("queue_item")}`,
@@ -262,9 +278,24 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 					)
 				: undefined,
 		);
+	const inputPort: RuntimeInputPort = Object.freeze({
+		snapshot: () => core.snapshot(),
+		prompt: (input: AgentInput) => core.prompt(input),
+		steer: (input: AgentInput) => core.steer(input),
+		followUp: (input: AgentInput) => core.followUp(input),
+		cancel: (queueItemId?: QueueItemId) => core.cancel(queueItemId),
+		dispatch: (command: RuntimeCommand) => core.dispatch(command),
+		subscribe: (listener: (event: AgentEvent) => Promise<void> | void) =>
+			core.subscribe((event) => (event.type === "agent" ? listener(event.event) : undefined)),
+	});
+	const input = new RuntimeInputQueue({
+		runtime: inputPort,
+		journal: { record: (change) => options.session.record(change) },
+	});
 	const facade: CodingAgentRuntime = {
 		runtimeId: core.runtimeId,
 		sessionId: core.sessionId,
+		input,
 		snapshot: () => {
 			const snapshot = core.snapshot();
 			return Object.freeze({
@@ -332,7 +363,21 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 		},
 		createSkillSnapshotBinding: () => runSkills.createBinding(),
 		prepareSkillSnapshot: (input, snapshot, binding) => runSkills.prepare(input, snapshot, binding),
-		close: () => core.close(),
+		close: async () => {
+			const failures: unknown[] = [];
+			try {
+				await input.dispose();
+			} catch (error) {
+				failures.push(error);
+			}
+			try {
+				await core.close();
+			} catch (error) {
+				failures.push(error);
+			}
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) throw new AggregateError(failures, "Coding Agent Runtime close failed");
+		},
 	};
 	core.subscribe(async (event) => {
 		if (event.type === "agent" && event.event.type === "run_end") {

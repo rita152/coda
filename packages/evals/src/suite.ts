@@ -1,9 +1,9 @@
 import type { AgentEvent, AgentSeed, IdGenerator, MessageId, ModelStream } from "@coda/agent";
 import type { AssistantMessage, UserMessage } from "@coda/ai";
-import { openAgentRuntime, type RuntimeSession } from "@coda/runtime";
 import type { LoadedFixture } from "./fixture-types.ts";
 import { loadFixtures } from "./fixtures.ts";
 import { FixtureRepository } from "./repository.ts";
+import { openEvaluationRuntime } from "./runtime-adapter.ts";
 import { scoreFixture } from "./scoring.ts";
 import { DeterministicTimeRuntime } from "./time.ts";
 import { createEvaluationTools } from "./tools.ts";
@@ -72,20 +72,6 @@ interface FixtureRunOptions {
 	readonly priceDataAvailable: boolean;
 }
 
-class EvaluationRuntimeSession implements RuntimeSession {
-	readonly id: string;
-	readonly seed?: AgentSeed;
-
-	constructor(id: string, seed: AgentSeed | undefined) {
-		this.id = id;
-		this.seed = seed;
-	}
-
-	accept(_event: AgentEvent): void {}
-
-	async close(): Promise<void> {}
-}
-
 async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluationReport> {
 	const repository = new FixtureRepository(options.fixture.initialFiles);
 	const seed = compactionSeed(options.fixture, options.clock.now());
@@ -97,24 +83,17 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		advanceTime: options.advanceTime,
 	});
 	const events: AgentEvent[] = [];
-	const runtime = await openAgentRuntime({
-		runtimeId: `eval:${options.fixture.manifest.id}`,
-		session: new EvaluationRuntimeSession(`eval-session:${options.fixture.manifest.id}`, seed),
-		configuration: Object.freeze({ fixtureId: options.fixture.manifest.id }),
+	const runtime = await openEvaluationRuntime({
+		id: options.fixture.manifest.id,
+		seed,
+		stream: options.stream,
+		tools,
+		systemPrompt: fixtureSystemPrompt(options.fixture),
 		idGenerator: fixtureIdGenerator(options.fixture),
 		clock: options.clock,
-		prepareRun: () => ({
-			snapshot: Object.freeze({
-				fixtureId: options.fixture.manifest.id,
-				toolNames: Object.freeze(tools.map(({ name }) => name)),
-			}),
-			stream: options.stream,
-			tools,
-			systemPrompt: fixtureSystemPrompt(options.fixture),
-		}),
 	});
 	runtime.subscribe((event) => {
-		if (event.type === "agent") events.push(event.event);
+		events.push(event);
 	});
 	let runOutcome = runtime.snapshot().agent.lastRun?.outcome ?? "error";
 	let runtimeFailure: string | undefined;

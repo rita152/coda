@@ -13,7 +13,7 @@ import type {
 } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult, type McpToolSnapshot } from "@coda/mcp";
 import type { CodingSkillsSnapshot, McpAgentElicitation } from "@coda/runtime";
-import { type CodingAgentRuntime, CodingMcpRegistry, type ModelSelection, openCodingAgentRuntime } from "@coda/runtime";
+import { type CodingAgentRuntime, CodingMcpRegistry, type ModelSelection } from "@coda/runtime";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
 	createTerminalImageSurface,
@@ -40,7 +40,6 @@ import { activitySummaryModeForApi } from "./interactive/activity-status.ts";
 import type { ChatAttachment } from "./interactive/chat-component.ts";
 import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { AttachmentTransaction } from "./interactive/input-controller.ts";
-import type { ComposerExtensionReference } from "./interactive/input-types.ts";
 import { InteractiveMcpElicitationHandler } from "./interactive/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
 import {
@@ -69,7 +68,8 @@ import { type AgentRunControlBinding, bindAgentRunControl, type RunControlConfig
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
-import { createWorkspaceRuntimeServices } from "./runtime/workspace-runtime-services.ts";
+import { createWorkspaceAgentRuntimeFactory } from "./runtime/workspace-agent-runtime-factory.ts";
+import type { ComposerExtensionReference } from "./session/composer-submission.ts";
 import { DraftSession } from "./session/draft-session.ts";
 import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
@@ -1252,39 +1252,38 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						idGenerator: options.runtime.idGenerator,
 					});
 					processSessionManager = activeProcessSessionManager;
+					const agentRuntimeFactory = createWorkspaceAgentRuntimeFactory({
+						workspace,
+						fileSystem: options.fileSystem,
+						processRunner: options.processRunner,
+						processSessionManager: activeProcessSessionManager,
+						shellExecutable,
+						hostRuntime: options.runtime,
+						skillsManager,
+						initialSkills: skillsSnapshot,
+						skillRegistryBinding: skillRegistryBinding!,
+						mcpRegistry,
+						initialMcp,
+						models: options.models,
+						clock: options.runtime.clock,
+						idGenerator: options.runtime.idGenerator,
+						runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
+						maxOutputTokens: parsed.maxOutputTokens,
+						platform: options.runtime.platform,
+						projectInstructions,
+						...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
+					});
 					await session.record({
 						type: "model_selected",
 						model: { provider: model.provider, id: model.id },
 						reasoning,
 					});
-					const agentRuntime = await openCodingAgentRuntime({
-						...createWorkspaceRuntimeServices({
-							session,
-							workspace,
-							fileSystem: options.fileSystem,
-							processRunner: options.processRunner,
-							processSessionManager: activeProcessSessionManager,
-							shellExecutable,
-							applicationRuntime: options.runtime,
-							skillsManager,
-							initialSkills: skillsSnapshot,
-							skillRegistryBinding: skillRegistryBinding!,
-							mcpRegistry,
-							initialMcp,
-						}),
+					const agentRuntime = await agentRuntimeFactory.open({
+						session,
 						selection: { model, reasoning, authSnapshot: auth },
-						models: options.models,
-						clock: options.runtime.clock,
-						idGenerator: options.runtime.idGenerator,
-						runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
 						autoDrainFollowUps: parsed.mode !== "interactive",
 						interactionMode: parsed.mode,
-						maxOutputTokens: parsed.maxOutputTokens,
-						workspaceRoot: workspace.root,
-						platform: options.runtime.platform,
-						projectInstructions,
 						mcpElicitation: primaryMcpElicitation,
-						...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
 					});
 					runtimeToClose = agentRuntime;
 					runControlBinding = configuredRunControl
@@ -1462,7 +1461,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
 								);
 								const targetAuth = await options.models.getAuth(targetModel, { clock: options.runtime.clock });
-								const targetInitialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 								if (!targetSession.restored.model) {
 									const initialModelSelection = {
 										type: "model_selected",
@@ -1475,38 +1473,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										await targetSession.record(initialModelSelection);
 									}
 								}
-								const targetRuntime = await openCodingAgentRuntime({
-									...createWorkspaceRuntimeServices({
-										session: targetSession,
-										workspace,
-										fileSystem: options.fileSystem,
-										processRunner: options.processRunner,
-										processSessionManager: activeProcessSessionManager,
-										shellExecutable,
-										applicationRuntime: options.runtime,
-										skillsManager,
-										initialSkills: skillsManager.current ?? skillsSnapshot,
-										skillRegistryBinding: skillRegistryBinding!,
-										mcpRegistry,
-										initialMcp: targetInitialMcp,
-									}),
+								const targetRuntime = await agentRuntimeFactory.open({
+									session: targetSession,
 									selection: {
 										model: targetModel,
 										reasoning: targetReasoning,
 										authSnapshot: targetAuth,
 									},
-									models: options.models,
-									clock: options.runtime.clock,
-									idGenerator: options.runtime.idGenerator,
-									runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
 									autoDrainFollowUps: false,
 									interactionMode: "interactive",
-									maxOutputTokens: parsed.maxOutputTokens,
-									workspaceRoot: workspace.root,
-									platform: options.runtime.platform,
-									projectInstructions,
 									mcpElicitation: targetMcpElicitation,
-									...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
 								});
 								targetRuntimeToClose = targetRuntime;
 								sessionRunRuntimes.set(targetSession.descriptor.id, {

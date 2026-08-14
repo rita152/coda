@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Editor, EditorMarker } from "@coda/tui";
 import type { CommandDefinition } from "../commands/types.ts";
-import type { ComposerExtensionReference } from "./input-types.ts";
+import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 
 const EXTENSION_MARKER_KIND = "slash-command-extension";
 

@@ -1,6 +1,6 @@
 import type { Editor } from "@coda/tui";
+import type { ComposerSubmission } from "../session/composer-submission.ts";
 import { restoreExtensionReferences } from "./extension-references.ts";
-import type { ComposerSubmission } from "./input-types.ts";
 
 /** Owns Prompt-history entries, navigation position, and exact draft restoration. */
 export class ComposerHistory {

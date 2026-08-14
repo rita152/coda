@@ -32,6 +32,28 @@ export interface RuntimeInputPort {
 	subscribe(listener: (event: AgentEvent) => Promise<void> | void): () => void;
 }
 
+export interface RuntimeInputLifecycle {
+	readonly queuePaused: boolean;
+	readonly shouldDeferPrompt: boolean;
+	readonly pendingExternalCount: number;
+	startPrompt(input: AgentInput, transaction: RuntimeResourceTransaction): Promise<RunResult>;
+	steer(input: AgentInput, transaction: RuntimeResourceTransaction): QueueItemId;
+	enqueueFollowUp(
+		input: AgentInput,
+		transaction: RuntimeResourceTransaction,
+		lifecycle?: RuntimeQueueItemLifecycle,
+	): Promise<QueueItemId>;
+	enqueueExternal(id: string, run: () => Promise<void>): void;
+	reclaimExternal(id: string): void;
+	resume(): void;
+	reclaimFollowUp(id: QueueItemId): Promise<void>;
+	discardPendingFollowUps(): Promise<readonly QueueItemId[]>;
+	abort(): void;
+	acknowledgeRuntimeFailure(): void;
+	waitForIdle(): Promise<void>;
+	dispose(): Promise<number>;
+}
+
 interface PendingResource {
 	readonly transaction: RuntimeResourceTransaction;
 }
@@ -44,7 +66,7 @@ type DeferredWork =
  * Owns the non-UI lifecycle around Prompt resources, Steering resources, durable
  * Follow-ups, and serial deferred work. Adapters only translate user actions.
  */
-export class RuntimeInputQueue {
+export class RuntimeInputQueue implements RuntimeInputLifecycle {
 	readonly #runtime: RuntimeInputPort;
 	readonly #journal: RuntimeInputQueueJournal;
 	#pendingPrompt?: PendingResource;
@@ -56,6 +78,7 @@ export class RuntimeInputQueue {
 	#driverFailure?: unknown;
 	#acknowledgedRuntimeFailure = false;
 	readonly #detach: () => void;
+	#disposeOperation?: Promise<number>;
 
 	constructor(options: { readonly runtime: RuntimeInputPort; readonly journal: RuntimeInputQueueJournal }) {
 		this.#runtime = options.runtime;
@@ -212,20 +235,25 @@ export class RuntimeInputQueue {
 		}
 	}
 
-	async dispose(): Promise<number> {
-		this.#detach();
-		const transactions = [
-			...(this.#pendingPrompt ? [this.#pendingPrompt.transaction] : []),
-			...[...this.#pendingSteering.values()].map(({ transaction }) => transaction),
-		];
-		this.#pendingPrompt = undefined;
-		this.#pendingSteering.clear();
-		for (const transaction of transactions) await transaction.rollback();
-		const dropped = this.pendingExternalCount;
-		for (let index = this.#deferred.length - 1; index >= 0; index--) {
-			if (this.#deferred[index]?.kind === "external") this.#deferred.splice(index, 1);
-		}
-		return dropped;
+	dispose(): Promise<number> {
+		if (this.#disposeOperation) return this.#disposeOperation;
+		const operation = (async () => {
+			this.#detach();
+			const transactions = [
+				...(this.#pendingPrompt ? [this.#pendingPrompt.transaction] : []),
+				...[...this.#pendingSteering.values()].map(({ transaction }) => transaction),
+			];
+			this.#pendingPrompt = undefined;
+			this.#pendingSteering.clear();
+			for (const transaction of transactions) await transaction.rollback();
+			const dropped = this.pendingExternalCount;
+			for (let index = this.#deferred.length - 1; index >= 0; index--) {
+				if (this.#deferred[index]?.kind === "external") this.#deferred.splice(index, 1);
+			}
+			return dropped;
+		})();
+		this.#disposeOperation = operation;
+		return operation;
 	}
 
 	async #accept(event: AgentEvent): Promise<void> {

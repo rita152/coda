@@ -1,5 +1,10 @@
 import { Agent, type AgentOptions, prepareStaticRun, type StaticRunPreparation } from "@coda/agent";
-import type { RuntimeInputPort } from "@coda/runtime";
+import {
+	type RuntimeFollowUpChange,
+	type RuntimeInputLifecycle,
+	type RuntimeInputPort,
+	RuntimeInputQueue,
+} from "@coda/runtime";
 
 export type TestAgentOptions = Omit<AgentOptions, "prepareRun"> & StaticRunPreparation;
 
@@ -46,4 +51,14 @@ export function agentRuntimePort(agent: Agent): RuntimeInputPort {
 		},
 		subscribe: (listener) => agent.onEvent(listener),
 	};
+}
+
+export function agentRuntimeInput(
+	agent: Agent,
+	record: (change: RuntimeFollowUpChange) => Promise<void>,
+): RuntimeInputLifecycle {
+	return new RuntimeInputQueue({
+		runtime: agentRuntimePort(agent),
+		journal: { record },
+	});
 }

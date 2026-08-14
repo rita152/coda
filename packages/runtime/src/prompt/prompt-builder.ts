@@ -50,7 +50,7 @@ export interface SystemPromptInput {
 }
 
 export interface SystemPromptSnapshot {
-	readonly version: typeof SYSTEM_PROMPT_VERSION;
+	readonly version: string;
 	readonly sha256: string;
 	readonly text: string;
 	readonly skillCatalog?: SkillCatalogDiagnostics;

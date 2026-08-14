@@ -7,9 +7,9 @@ import {
 } from "../commands/parser.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import type { CommandDefinition, CommandMatch, CommandSource } from "../commands/types.ts";
+import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import { renderCommandList } from "./command-list.ts";
 import { addExtensionReference, extensionReferencesFromMarkers } from "./extension-references.ts";
-import type { ComposerExtensionReference } from "./input-types.ts";
 import type { TuiTheme } from "./theme.ts";
 
 export interface CommandPaletteItem {

@@ -1,21 +1,16 @@
 import type { AgentInput, QueueItemId } from "@coda/agent";
-import {
-	type RuntimeInputPort,
-	RuntimeInputQueue,
-	type RuntimeQueueItemLifecycle,
-	type RuntimeResourceTransaction,
-} from "@coda/runtime";
-import type { Session } from "../session/types.ts";
+import type { RuntimeInputLifecycle, RuntimeQueueItemLifecycle, RuntimeResourceTransaction } from "@coda/runtime";
 import type {
 	ComposerExtensionReference,
 	ComposerSubmission,
 	ComposerSubmissionKind,
-	UserShellSubmission,
-} from "./input-types.ts";
+} from "../session/composer-submission.ts";
+import type { Session } from "../session/types.ts";
+import type { UserShellSubmission } from "./input-types.ts";
 import type { UserShell } from "./user-shell.ts";
 
 export interface InteractiveInputControllerOptions {
-	readonly runtime: RuntimeInputPort;
+	readonly input: RuntimeInputLifecycle;
 	readonly session: Pick<Session, "composerSubmissions" | "record">;
 	readonly buildInput: (
 		text: string,
@@ -36,7 +31,7 @@ export interface AttachmentTransaction extends RuntimeResourceTransaction {}
 /** Thin interactive Adapter over the headless Runtime's input lifecycle. */
 export class InteractiveInputController {
 	readonly #options: InteractiveInputControllerOptions;
-	readonly #queue: RuntimeInputQueue;
+	readonly #queue: RuntimeInputLifecycle;
 	readonly #submissionByQueueItemId = new Map<string, string>();
 	#acceptanceTail: Promise<void> = Promise.resolve();
 
@@ -45,10 +40,7 @@ export class InteractiveInputController {
 		for (const submission of options.session.composerSubmissions ?? []) {
 			if (submission.queueItemId) this.#submissionByQueueItemId.set(submission.queueItemId, submission.id);
 		}
-		this.#queue = new RuntimeInputQueue({
-			runtime: options.runtime,
-			journal: { record: (change) => options.session.record(change) },
-		});
+		this.#queue = options.input;
 	}
 
 	get queuePaused(): boolean {
@@ -66,7 +58,6 @@ export class InteractiveInputController {
 		references?: readonly ComposerExtensionReference[],
 	): Promise<ComposerSubmission | string | undefined> {
 		return this.#serializeAcceptance(async () => {
-			this.#assertCanSubmit();
 			const deferred = this.#queue.shouldDeferPrompt;
 			const prepared = await this.#prepareInput(
 				text,
@@ -86,7 +77,6 @@ export class InteractiveInputController {
 
 	submitInput(input: AgentInput, attachmentIds: readonly string[] = []): Promise<QueueItemId | undefined> {
 		return this.#serializeAcceptance(async () => {
-			this.#assertCanSubmit();
 			const transaction = await this.#options.prepareAttachments(attachmentIds);
 			if (this.#queue.shouldDeferPrompt) {
 				const id = await this.#queue.enqueueFollowUp(input, transaction);
@@ -288,10 +278,6 @@ export class InteractiveInputController {
 		});
 		const transaction = await this.#options.prepareAttachments(attachmentIds);
 		return { input, transaction };
-	}
-
-	#assertCanSubmit(): void {
-		if (this.#options.runtime.snapshot().agent.status !== "idle") throw new Error("Agent is already running");
 	}
 
 	#serializeAcceptance<T>(operation: () => Promise<T>): Promise<T> {

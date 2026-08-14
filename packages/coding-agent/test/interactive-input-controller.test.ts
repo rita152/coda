@@ -3,7 +3,7 @@ import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveInputController } from "../src/interactive/input-controller.ts";
 import type { Session } from "../src/session/types.ts";
-import { agentRuntimePort, createTestAgent } from "./agent-runtime-adapter.ts";
+import { agentRuntimeInput, createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("InteractiveInputController", () => {
@@ -20,7 +20,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -71,7 +71,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -119,7 +119,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -177,7 +177,7 @@ describe("InteractiveInputController", () => {
 			return {};
 		});
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, async () => undefined),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -259,7 +259,7 @@ describe("InteractiveInputController", () => {
 			},
 		};
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, async () => undefined),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => {
 				if (text === "first") await firstInputGate;
@@ -303,7 +303,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record, [
 				{ id: "composer:paused", kind: "follow_up", text: "edit me", queueItemId: queueId },
 			]),
@@ -341,7 +341,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -372,7 +372,7 @@ describe("InteractiveInputController", () => {
 			if (event.type === "run_start") order.push("run_start");
 		});
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, async () => undefined),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({
@@ -407,7 +407,7 @@ describe("InteractiveInputController", () => {
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const commit = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, record),
 			session: testSession(record),
 			buildInput: async () => [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
 			prepareAttachments: async () => ({ commit, rollback: async () => undefined }),
@@ -434,7 +434,7 @@ describe("InteractiveInputController", () => {
 		const commit = vi.fn(async () => undefined);
 		const rollback = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, async () => undefined),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({ commit, rollback }),
@@ -460,7 +460,7 @@ describe("InteractiveInputController", () => {
 			autoDrainFollowUps: false,
 		});
 		const controller = new InteractiveInputController({
-			runtime: agentRuntimePort(agent),
+			input: agentRuntimeInput(agent, async () => undefined),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),

@@ -34,7 +34,7 @@ export interface ContextWindowRuntime {
 }
 
 export interface ContextWindowControllerOptions {
-	readonly models: Models;
+	readonly models: Pick<Models, "completeSimple">;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly runtime: () => ContextWindowRuntime;
@@ -401,7 +401,7 @@ function summaryPrompt(options: {
 }
 
 async function summarizeHistory(options: {
-	readonly models: Models;
+	readonly models: Pick<Models, "completeSimple">;
 	readonly clock: Clock;
 	readonly model: Model<Api>;
 	readonly authSnapshot: AuthResult;

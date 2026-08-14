@@ -27,6 +27,7 @@ import type { ProcessRunner } from "../host/process-runner.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
 import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
+import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import type { Session } from "../session/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
@@ -38,7 +39,6 @@ import {
 	InteractiveInputController,
 	type InteractiveInputControllerOptions,
 } from "./input-controller.ts";
-import type { ComposerExtensionReference } from "./input-types.ts";
 import type { InteractiveMcpElicitationHandler } from "./mcp-elicitation.ts";
 import {
 	type InteractiveProcessLifecycle,
@@ -325,7 +325,7 @@ async function runMultiSessionInteractive(
 			},
 		});
 		const input = new InteractiveInputController({
-			runtime: sessionOptions.runtime,
+			input: sessionOptions.runtime.input,
 			session: sessionOptions.session,
 			buildInput: sessionOptions.buildPrompt ?? (async (text) => text),
 			prepareAttachments: sessionOptions.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
@@ -680,7 +680,7 @@ async function runSingleSessionInteractive(
 		},
 	});
 	const inputController = new InteractiveInputController({
-		runtime: options.runtime,
+		input: options.runtime.input,
 		session: options.session,
 		buildInput: options.buildPrompt ?? (async (text) => text),
 		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),

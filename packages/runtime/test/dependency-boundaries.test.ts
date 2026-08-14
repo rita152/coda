@@ -31,9 +31,32 @@ describe("Runtime dependency boundaries", () => {
 		expect(application).not.toMatch(
 			/new Agent\b|createCodingTools|ContextWindowController|ContextOverflowRecovery|RunRuntimeSlot|\.attach\(agent/u,
 		);
-		expect(application).toMatch(/openCodingAgentRuntime[\s\S]*from "@coda\/runtime"/u);
-		// One shared primary path covers print and interactive; the second opens secondary Sessions.
-		expect(application.match(/openCodingAgentRuntime\(\{/gu)).toHaveLength(2);
+		expect(application).not.toMatch(/openCodingAgentRuntime/u);
+		const factory = await readFile(
+			new URL("../../coding-agent/src/runtime/workspace-agent-runtime-factory.ts", import.meta.url),
+			"utf8",
+		);
+		expect(factory.match(/openCodingAgentRuntime\(\{/gu)).toHaveLength(1);
+		expect(application).toMatch(/createWorkspaceAgentRuntimeFactory/u);
+		expect(application.match(/agentRuntimeFactory\.open\(\{/gu)).toHaveLength(2);
+	});
+
+	it("keeps the durable input lifecycle owned by each complete Runtime instance", async () => {
+		const runtime = await readFile(new URL("../src/coding-agent-runtime.ts", import.meta.url), "utf8");
+		const interactive = await readFile(
+			new URL("../../coding-agent/src/interactive/input-controller.ts", import.meta.url),
+			"utf8",
+		);
+		expect(runtime).toMatch(/new RuntimeInputQueue/u);
+		expect(interactive).not.toMatch(/new RuntimeInputQueue/u);
+	});
+
+	it("proves the complete Runtime Seam through the non-CLI evaluation Adapter", async () => {
+		const evaluation = await readFile(new URL("../../evals/src/runtime-adapter.ts", import.meta.url), "utf8");
+		const suite = await readFile(new URL("../../evals/src/suite.ts", import.meta.url), "utf8");
+		expect(evaluation).toMatch(/openCodingAgentRuntime/u);
+		expect(evaluation).not.toMatch(/openAgentRuntime/u);
+		expect(suite).not.toMatch(/new Agent\b|openAgentRuntime/u);
 	});
 
 	it("removes the mutable RunRuntimeSlot Seam", async () => {

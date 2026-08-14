@@ -10,7 +10,7 @@ import type {
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
 import type { CompactionCheckpoint, ModelSelection } from "@coda/runtime";
-import type { ComposerSubmission } from "../interactive/input-types.ts";
+import type { ComposerSubmission } from "./composer-submission.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
 export const SESSION_RECORD_TYPES = [
