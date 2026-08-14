@@ -15,6 +15,14 @@
 		"./worker-fact": {
 			"types": "./dist/work-graph/worker-fact.d.ts",
 			"import": "./dist/work-graph/worker-fact.js"
+		},
+		"./work-graph-fact": {
+			"types": "./dist/work-graph/work-graph-fact.d.ts",
+			"import": "./dist/work-graph/work-graph-fact.js"
+		},
+		"./work-graph-aggregate": {
+			"types": "./dist/work-graph/work-graph-aggregate.d.ts",
+			"import": "./dist/work-graph/work-graph-aggregate.js"
 		}
 	},
 	"files": [
