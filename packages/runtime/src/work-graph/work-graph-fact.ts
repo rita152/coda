@@ -429,13 +429,17 @@ function assertArtifact(value: unknown, field: string, type: string): void {
 function assertPublication(value: unknown, type: string): void {
 	if (!isRecord(value) || typeof value.state !== "string") invalid(type, "publication must be an object");
 	if (value.state === "not_required") {
-		assertExactKeys(value, ["state"], type);
+		assertExactKeys(value, ["state", "publicationId", "targetPlacementId", "targetIdentity"], type, [
+			"publicationId",
+			"targetPlacementId",
+			"targetIdentity",
+		]);
 	} else if (value.state === "published") {
 		assertExactKeys(value, ["state", "publicationId", "targetPlacementId", "targetIdentity"], type, [
 			"publicationId",
+			"targetPlacementId",
+			"targetIdentity",
 		]);
-		assertIdentity(value.targetPlacementId, "publication.targetPlacementId", type, MAXIMUM_DERIVED_IDENTITY_LENGTH);
-		assertText(value.targetIdentity, "publication.targetIdentity", type, MAXIMUM_REFERENCE_LENGTH);
 	} else if (value.state === "not_published") {
 		assertExactKeys(value, ["state", "publicationId", "targetPlacementId", "reason", "diagnostic"], type, [
 			"publicationId",

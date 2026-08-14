@@ -1,6 +1,5 @@
 import { decodeWorkspaceLedger, emptyWorkspaceLedger, encodeWorkspaceLedger } from "./persistence-codec.ts";
 import type {
-	WorkGraphRecord,
 	WorkGraphStore,
 	WorkspaceLedger,
 	WorkspaceLedgerAcceptance,
@@ -11,32 +10,16 @@ import type {
 	WorkspaceTargetIdentity,
 } from "./ports.ts";
 import type { WorkGraphId } from "./types.ts";
+import { type WorkGraphFact, WorkGraphFactCodec } from "./work-graph-fact.ts";
 
 interface GraphMemory {
-	readonly records: WorkGraphRecord[];
+	readonly segments: WorkGraphFact[][];
 	archived: boolean;
 }
 
 export interface MemoryWorkspacePersistenceSeed {
 	readonly ledger?: WorkspaceLedgerRestore;
-	readonly graphs?: ReadonlyMap<WorkGraphId, readonly WorkGraphRecord[]>;
-}
-
-function recordGraphId(record: WorkGraphRecord): WorkGraphId {
-	if (record.type !== "batch_accepted") return record.graphId;
-	const payload = record.payload;
-	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-		throw new Error("Memory Work Graph batch has no Graph identity");
-	}
-	const graphs = Array.isArray(payload.graphs) ? payload.graphs : [];
-	const items = Array.isArray(payload.items) ? payload.items : [];
-	const candidate = graphs[0] ?? items[0];
-	if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
-		throw new Error("Memory Work Graph batch has no Graph identity");
-	}
-	const graphId = candidate.graphId;
-	if (typeof graphId !== "string") throw new Error("Memory Work Graph batch has an invalid Graph identity");
-	return graphId as WorkGraphId;
+	readonly graphs?: ReadonlyMap<WorkGraphId, readonly WorkGraphFact[]>;
 }
 
 function clone<T>(value: T): T {
@@ -48,29 +31,38 @@ function validatedLedger(state: WorkspaceLedgerRestore): WorkspaceLedgerRestore 
 }
 
 class MemoryWorkGraphStore implements WorkGraphStore {
+	readonly #graphId: WorkGraphId;
 	readonly #memory: GraphMemory;
 	readonly #readOnly: boolean;
 	#closed = false;
 	#failure?: unknown;
 	#tail: Promise<void> = Promise.resolve();
 
-	constructor(memory: GraphMemory, readOnly = false) {
+	constructor(graphId: WorkGraphId, memory: GraphMemory, readOnly = false) {
+		this.#graphId = graphId;
 		this.#memory = memory;
 		this.#readOnly = readOnly;
 	}
 
 	load() {
 		if (this.#closed) return Promise.reject(new Error("Work Graph store is closed"));
-		return Promise.resolve({ records: Object.freeze(clone(this.#memory.records)), diagnostics: Object.freeze([]) });
+		return Promise.resolve({
+			facts: Object.freeze(clone(this.#memory.segments.flat())),
+			diagnostics: Object.freeze([]),
+		});
 	}
 
-	append(record: WorkGraphRecord): Promise<void> {
+	append(facts: readonly WorkGraphFact[]): Promise<void> {
 		if (this.#readOnly) return Promise.reject(new Error("Historical Work Graph store is read-only"));
 		if (this.#closed) return Promise.reject(new Error("Work Graph store is closed"));
-		const durable = clone(record);
+		if (facts.length === 0) return Promise.reject(new Error("A Work Graph segment must contain Facts"));
+		const durable = facts.map((fact) => WorkGraphFactCodec.decode(fact));
+		if (durable.some((fact) => fact.graphId !== this.#graphId)) {
+			return Promise.reject(new Error(`Work Graph store ${this.#graphId} cannot append Facts for another Graph`));
+		}
 		const operation = this.#tail.then(() => {
 			if (this.#failure) throw this.#failure;
-			this.#memory.records.push(durable);
+			this.#memory.segments.push(durable);
 		});
 		this.#tail = operation.catch((error) => {
 			this.#failure ??= error;
@@ -99,14 +91,14 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 	#leased = false;
 	#nextEpoch = 0;
 
-	constructor(seed: MemoryWorkspacePersistenceSeed | readonly WorkGraphRecord[] = {}) {
+	constructor(seed: MemoryWorkspacePersistenceSeed | readonly WorkGraphFact[] = {}) {
 		if (Array.isArray(seed)) {
-			const grouped = new Map<WorkGraphId, WorkGraphRecord[]>();
-			for (const record of seed) {
-				const graphId = recordGraphId(record);
-				const records = grouped.get(graphId) ?? [];
-				records.push(clone(record));
-				grouped.set(graphId, records);
+			const grouped = new Map<WorkGraphId, WorkGraphFact[]>();
+			for (const fact of seed) {
+				const durable = WorkGraphFactCodec.decode(fact);
+				const facts = grouped.get(durable.graphId) ?? [];
+				facts.push(durable);
+				grouped.set(durable.graphId, facts);
 			}
 			const activeGraphs = [...grouped.keys()].map((graphId, order) => ({ graphId, order }));
 			this.#state = Object.freeze({
@@ -114,27 +106,32 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 				activeGraphs: Object.freeze(activeGraphs),
 				nextGraphOrder: activeGraphs.length,
 			});
-			for (const [graphId, records] of grouped) {
-				this.#graphs.set(graphId, { records, archived: false });
+			for (const [graphId, facts] of grouped) {
+				this.#graphs.set(graphId, { segments: facts.map((fact) => [fact]), archived: false });
 			}
 			return;
 		}
 		const configured = seed as MemoryWorkspacePersistenceSeed;
 		this.#state = validatedLedger(configured.ledger ?? emptyWorkspaceLedger());
-		for (const [graphId, records] of configured.graphs ?? []) {
-			this.#graphs.set(graphId, { records: clone([...records]), archived: false });
+		for (const [graphId, facts] of configured.graphs ?? []) {
+			this.#graphs.set(graphId, {
+				segments: facts.map((fact) => [WorkGraphFactCodec.decode(fact)]),
+				archived: false,
+			});
 		}
 	}
 
-	get records(): readonly WorkGraphRecord[] {
+	get facts(): readonly WorkGraphFact[] {
 		return Object.freeze([
-			...[...this.#graphs.values()].flatMap(({ records }) => clone(records)),
-			...[...this.#orphans.values()].flatMap((memories) => memories.flatMap(({ records }) => clone(records))),
+			...[...this.#graphs.values()].flatMap(({ segments }) => clone(segments.flat())),
+			...[...this.#orphans.values()].flatMap((memories) =>
+				memories.flatMap(({ segments }) => clone(segments.flat())),
+			),
 		]);
 	}
 
-	graphRecords(graphId: WorkGraphId): readonly WorkGraphRecord[] {
-		return Object.freeze(clone(this.#graphs.get(graphId)?.records ?? []));
+	graphFacts(graphId: WorkGraphId): readonly WorkGraphFact[] {
+		return Object.freeze(clone(this.#graphs.get(graphId)?.segments.flat() ?? []));
 	}
 
 	ledgerSnapshot(): WorkspaceLedgerRestore {
@@ -145,7 +142,7 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 		if (this.#leased) throw new Error("Workspace persistence lease is already held");
 		const active = new Set(this.#state.activeGraphs.map(({ graphId }) => graphId));
 		for (const [graphId, memory] of this.#graphs) {
-			if (active.has(graphId) || memory.archived || memory.records.length === 0) continue;
+			if (active.has(graphId) || memory.archived || memory.segments.length === 0) continue;
 			memory.archived = true;
 			const orphans = this.#orphans.get(graphId) ?? [];
 			orphans.push(memory);
@@ -231,9 +228,9 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 				if (current) return current;
 				let memory = this.#graphs.get(graphId);
 				if (memory?.archived) throw new Error(`Work Graph is archived: ${graphId}`);
-				memory ??= { records: [], archived: false };
+				memory ??= { segments: [], archived: false };
 				this.#graphs.set(graphId, memory);
-				const store = new MemoryWorkGraphStore(memory);
+				const store = new MemoryWorkGraphStore(graphId, memory);
 				stores.set(graphId, store);
 				return store;
 			},
@@ -242,7 +239,7 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 				const memory = this.#graphs.get(graphId);
 				const orphan = this.#orphans.get(graphId)?.at(-1);
 				const historical = memory?.archived ? memory : orphan;
-				return historical ? new MemoryWorkGraphStore(historical, true) : undefined;
+				return historical ? new MemoryWorkGraphStore(graphId, historical, true) : undefined;
 			},
 			archiveGraph: async (graphId: WorkGraphId) => {
 				if (closed) throw new Error("Workspace persistence lease is closed");

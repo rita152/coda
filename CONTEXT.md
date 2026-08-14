@@ -24,20 +24,32 @@ _Avoid_: Run, Turn, subagent, thread
 A private Agent Runtime exclusively owned by one Work Item and attached to that Work Item's Session for its lifetime.
 _Avoid_: child Agent, shared Runtime, worker process
 
-**Work Journal**:
-The durable record of Work Graph causality, Work Item state, ownership, results, and Publication, distinct from every Work Item's conversational Session.
-_Avoid_: Session, transcript, event stream
+**Workspace Ledger**:
+The small durable record of facts that must be ordered across a Workspace: active Work Graph identities, Session ownership, Publication ordinals, and settled target identities.
+_Avoid_: Work Graph history, Session journal, global event log
+
+**Work Graph Store**:
+The isolated durable history of one Work Graph, composed of atomically appended Work Graph Fact segments and archived after terminal settlement.
+_Avoid_: Workspace Ledger, Session journal, monolithic Work Journal
+
+**Work Graph Fact**:
+A versioned semantic fact in the closed algebra that defines durable Work Graph state and is interpreted identically during live execution and recovery.
+_Avoid_: Worker Fact, Worker Observation, persistence payload
+
+**Work Graph Aggregate**:
+The authoritative immutable state obtained by applying a Work Graph's ordered Facts; runtime handles and process-local activity are not part of it.
+_Avoid_: Coordinator state, mutable cache, recovery projection
 
 **Worker Fact**:
-A bounded semantic fact required to recover Work Item orchestration or to place Worker Control after a durable lifecycle point; it is the only Worker Runtime data admitted to the Work Journal.
+A bounded semantic fact required to recover Work Item orchestration or to place Worker Control after a durable lifecycle point; it is the only Worker Runtime data nested in a Work Graph Fact.
 _Avoid_: Worker Observation, Agent event, Session Record
 
 **Worker Observation**:
-A full-fidelity, best-effort projection of live Worker Runtime activity delivered through a bounded asynchronous sequencer and the Coding Agent Observation stream without entering Session or Work Journal persistence barriers.
+A full-fidelity, best-effort projection of live Worker Runtime activity delivered through a bounded asynchronous sequencer and the Coding Agent Observation stream without entering Session or Work Graph persistence barriers.
 _Avoid_: Worker Fact, Worker Control, event log
 
 **Work Result**:
-The structured settled outcome of one Work Item, including its Run outcome, evidence, any Workspace Artifact, and whether its terminal boundary is journal-confirmed or only process-local and unknown; assistant prose alone is not a Work Result.
+The structured settled outcome of one Work Item, including its Run outcome, evidence, any Workspace Artifact, and whether its terminal boundary is durably confirmed or only process-local and unknown; assistant prose alone is not a Work Result.
 _Avoid_: final message, summary, Run
 
 **Workspace Placement**:
@@ -65,8 +77,12 @@ The private per-Work-Item composition of an Agent with Model and authentication 
 _Avoid_: public Coding Agent Interface, Agent, CLI application, TUI controller
 
 **Prepared Run**:
-The immutable execution capability frozen exactly once before a Run starts, including its Event Stream driver, Tools, system prompt, and failed-Attempt recovery state.
+The immutable execution capability frozen exactly once before a Run starts, including its Run Capability Lease and failed-Attempt recovery state.
 _Avoid_: desired configuration, Run Runtime Slot, live catalog
+
+**Run Capability Lease**:
+The executable Model driver, Tools, deterministic prompt contributions, and exact catalog revisions retained for one Run until that Run disposes them.
+_Avoid_: capability snapshot, live registry, generic plugin container
 
 **Desired Runtime Configuration**:
 The mutable selection intended for the next Run of one Worker Runtime; changes never alter its active Prepared Run.
@@ -121,7 +137,7 @@ A serializable public command that delivers Prompt, Steering, or Follow-up conte
 _Avoid_: Runtime input queue, Composer Submission, cross-Work-Item message
 
 **Worker Control**:
-An ordered, failure-isolated control projection that may submit a Work Item Input before later Agent progression, used for causal policies such as bounded completion repair after the lifecycle event is journaled.
+An ordered, failure-isolated control projection that may submit a Work Item Input before later Agent progression, used for causal policies such as bounded completion repair after the lifecycle Fact is durable.
 _Avoid_: Observation, persistence barrier, direct Agent access
 
 **Interactive Input Adapter**:

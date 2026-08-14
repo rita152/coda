@@ -1,5 +1,4 @@
 import type { AgentInput, AgentSeed, AgentTool, Clock, IdGenerator, RunBudget } from "@coda/agent";
-import type { JsonValue } from "@coda/ai";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { RuntimeScheduler } from "../retry.ts";
 import type { RunCapabilityHost, RunModelSelection, RunToolContribution } from "../run-capabilities.ts";
@@ -15,7 +14,7 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
-import type { WorkerFact } from "./worker-fact.ts";
+import type { WorkGraphFact } from "./work-graph-fact.ts";
 import type { WorkerControlEvent, WorkerSessionEvent } from "./worker-protocol.ts";
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
@@ -142,89 +141,15 @@ export interface InputResourceStore {
 	}): Promise<InputResourceReservation>;
 }
 
-export type WorkGraphRecord =
-	| {
-			readonly type: "batch_accepted";
-			readonly batchId: string;
-			readonly acceptedAt: number;
-			readonly payload: JsonValue;
-	  }
-	| {
-			readonly type: "input_resources_settled";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly deliveryId: string;
-			readonly outcome: "committed" | "failed";
-			readonly timestamp: number;
-			readonly diagnostic?: string;
-	  }
-	| {
-			readonly type: "item_transition";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly from: string;
-			readonly to: string;
-			readonly timestamp: number;
-			readonly payload?: JsonValue;
-	  }
-	| {
-			readonly type: "worker_fact";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly runtimeId: string;
-			readonly sessionId: string;
-			readonly fact: WorkerFact;
-	  }
-	| {
-			readonly type: "item_result";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly timestamp: number;
-			readonly payload: JsonValue;
-	  }
-	| {
-			readonly type: "graph_result";
-			readonly graphId: WorkGraphId;
-			readonly timestamp: number;
-			readonly payload: JsonValue;
-	  }
-	| {
-			readonly type: "cancellation_requested";
-			readonly graphId: WorkGraphId;
-			readonly itemId?: WorkItemId;
-			readonly timestamp: number;
-	  }
-	| {
-			readonly type: "publication";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly timestamp: number;
-			readonly payload: JsonValue;
-	  }
-	| {
-			readonly type: "ownership_released";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly timestamp: number;
-			readonly preservePlacement: boolean;
-	  }
-	| {
-			readonly type: "recovery_interrupted";
-			readonly graphId: WorkGraphId;
-			readonly itemId: WorkItemId;
-			readonly timestamp: number;
-			readonly reasons: readonly string[];
-			readonly payload: JsonValue;
-	  };
-
 export interface WorkGraphStoreRestore {
-	readonly records: readonly WorkGraphRecord[];
+	readonly facts: readonly WorkGraphFact[];
 	readonly diagnostics: readonly string[];
 }
 
 export interface WorkGraphStore {
 	load(): Promise<WorkGraphStoreRestore>;
-	append(record: WorkGraphRecord): Promise<void>;
+	/** Appends one atomic semantic segment; recovery sees all Facts or none. */
+	append(facts: readonly WorkGraphFact[]): Promise<void>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 }

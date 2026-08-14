@@ -7,7 +7,7 @@ import {
 	emptyWorkspaceLedger,
 	encodeWorkGraphEnvelope,
 	encodeWorkspaceLedger,
-	type WorkGraphRecord,
+	type WorkGraphFact,
 	type WorkGraphStore,
 	type WorkGraphStoreRestore,
 	type WorkspaceLedger,
@@ -79,11 +79,12 @@ async function exists(fileSystem: FileSystem, path: string): Promise<boolean> {
 
 class FileWorkGraphStore implements WorkGraphStore {
 	readonly #fileSystem: FileSystem;
+	readonly #graphId: WorkGraphId;
 	readonly #path: string;
 	readonly #mustExist: boolean;
 	readonly #readOnly: boolean;
 	#loadOperation?: Promise<void>;
-	readonly #records: WorkGraphRecord[] = [];
+	readonly #facts: WorkGraphFact[] = [];
 	readonly #diagnostics: string[] = [];
 	#handle?: WritableFile;
 	#sequence = 0;
@@ -91,8 +92,14 @@ class FileWorkGraphStore implements WorkGraphStore {
 	#failure?: unknown;
 	#closed = false;
 
-	constructor(fileSystem: FileSystem, path: string, options: { mustExist: boolean; readOnly?: boolean }) {
+	constructor(
+		fileSystem: FileSystem,
+		graphId: WorkGraphId,
+		path: string,
+		options: { mustExist: boolean; readOnly?: boolean },
+	) {
 		this.#fileSystem = fileSystem;
+		this.#graphId = graphId;
 		this.#path = path;
 		this.#mustExist = options.mustExist;
 		this.#readOnly = options.readOnly ?? false;
@@ -102,23 +109,27 @@ class FileWorkGraphStore implements WorkGraphStore {
 		if (this.#closed) throw new Error("Work Graph store is closed");
 		await this.#ensureLoaded();
 		return {
-			records: Object.freeze(clone(this.#records)),
+			facts: Object.freeze(clone(this.#facts)),
 			diagnostics: Object.freeze([...this.#diagnostics]),
 		};
 	}
 
-	async append(record: WorkGraphRecord): Promise<void> {
+	async append(facts: readonly WorkGraphFact[]): Promise<void> {
 		if (this.#readOnly) throw new Error("Historical Work Graph store is read-only");
 		if (this.#closed) throw new Error("Work Graph store is closed");
 		await this.#ensureLoaded();
-		const durable = clone(record);
+		const durable = clone([...facts]);
+		encodeWorkGraphEnvelope(durable, 1);
+		if (durable.some((fact) => fact.graphId !== this.#graphId)) {
+			throw new Error(`Work Graph store ${this.#graphId} cannot append Facts for another Graph`);
+		}
 		await this.#enqueue(async () => {
 			const sequence = this.#sequence + 1;
 			const handle = await this.#fileHandle();
 			await handle.write(`${encodeWorkGraphEnvelope(durable, sequence)}\n`);
 			await handle.sync();
 			this.#sequence = sequence;
-			this.#records.push(durable);
+			this.#facts.push(...durable);
 		});
 	}
 
@@ -172,12 +183,15 @@ class FileWorkGraphStore implements WorkGraphStore {
 		const lines = source.split("\n");
 		const hasPartialTail = lines.at(-1)?.length !== 0;
 		if (!hasPartialTail) lines.pop();
-		const records: WorkGraphRecord[] = [];
+		const facts: WorkGraphFact[] = [];
 		let repaired = false;
 		for (const [index, line] of lines.entries()) {
 			try {
 				const envelope = decodeWorkGraphEnvelope(line, index + 1);
-				records.push(envelope.record);
+				if (envelope.facts.some((fact) => fact.graphId !== this.#graphId)) {
+					throw new Error(`Work Graph store ${this.#graphId} contains Facts for another Graph`);
+				}
+				facts.push(...envelope.facts);
 				this.#sequence = envelope.sequence;
 			} catch (error) {
 				if (hasPartialTail && index === lines.length - 1) {
@@ -193,10 +207,10 @@ class FileWorkGraphStore implements WorkGraphStore {
 			}
 		}
 		if (repaired && !this.#readOnly) {
-			const encoded = lines.slice(0, records.length).join("\n");
+			const encoded = lines.slice(0, this.#sequence).join("\n");
 			await this.#replace(encoded.length > 0 ? `${encoded}\n` : "");
 		}
-		this.#records.push(...records);
+		this.#facts.push(...facts);
 		this.#diagnostics.push(...diagnostics);
 	}
 
@@ -490,7 +504,7 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 				if (await exists(this.#fileSystem, archivePath(graphId))) {
 					throw new Error(`Work Graph is archived: ${graphId}`);
 				}
-				const store = new FileWorkGraphStore(this.#fileSystem, activePath(graphId), {
+				const store = new FileWorkGraphStore(this.#fileSystem, graphId, activePath(graphId), {
 					mustExist: ledger.isActive(graphId),
 				});
 				stores.set(graphId, store);
@@ -500,14 +514,19 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 				if (closed) throw new Error("Workspace persistence lease is closed");
 				const archived = archivePath(graphId);
 				if (await exists(this.#fileSystem, archived)) {
-					return new FileWorkGraphStore(this.#fileSystem, archived, { mustExist: true, readOnly: true });
+					return new FileWorkGraphStore(this.#fileSystem, graphId, archived, { mustExist: true, readOnly: true });
 				}
 				const unrelocated = activePath(graphId);
 				if (!ledger.isActive(graphId) && (await exists(this.#fileSystem, unrelocated))) {
-					return new FileWorkGraphStore(this.#fileSystem, unrelocated, { mustExist: true, readOnly: true });
+					return new FileWorkGraphStore(this.#fileSystem, graphId, unrelocated, {
+						mustExist: true,
+						readOnly: true,
+					});
 				}
 				const orphan = await orphanPath(graphId);
-				if (orphan) return new FileWorkGraphStore(this.#fileSystem, orphan, { mustExist: true, readOnly: true });
+				if (orphan) {
+					return new FileWorkGraphStore(this.#fileSystem, graphId, orphan, { mustExist: true, readOnly: true });
+				}
 				return undefined;
 			},
 			archiveGraph: async (graphId: WorkGraphId) => {

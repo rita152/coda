@@ -4,6 +4,8 @@ status: accepted
 
 # Persist Worker Facts, not Worker Observations
 
+ADR-0046 supersedes this decision's references to a fatal Workspace-global Work Journal; Worker Facts now enter their owning Graph's Work Graph Fact stream.
+
 Coda separates Worker Runtime output into three closed algebras with different ordering semantics. A Worker Fact is bounded orchestration data admitted to the fatal Work Journal barrier. A Worker Observation is best-effort presentation data published through a bounded, non-throwing path. A Worker Control event is the semantic subset that may causally submit Work Item Input and is invoked only after all applicable Session and Work Journal barriers have succeeded. One generic `WorkerRuntimeEvent` must not cross all three seams.
 
 The Work Journal stores a closed Worker Fact union rather than serialized Agent events. Facts cover Run lifecycle points needed by Worker Control, the bounded active-Run descriptor used by snapshots, Attempt start and settlement for budget recovery, Tool Invocation start and settlement for external-effect recovery, and Run Budget exhaustion. Snapshot active-Run state is derived only from the committed Worker Fact projection, never from Agent live state. Facts never contain Messages, Message deltas, Tool progress, Tool arguments, Tool results, arbitrary details, or preparation status. The file journal uses a new schema version and intentionally rejects the former `worker_event` representation; no compatibility decoder or migration is retained.

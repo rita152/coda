@@ -1,30 +1,17 @@
 import type {
-	WorkGraphRecord,
 	WorkspaceGraphIndexEntry,
 	WorkspaceLedgerRestore,
 	WorkspaceSessionOwner,
 	WorkspaceTargetIdentity,
 } from "./ports.ts";
-import { assertWorkerFact } from "./worker-fact.ts";
+import { type WorkGraphFact, WorkGraphFactCodec } from "./work-graph-fact.ts";
 
-const RECORD_TYPES = new Set<WorkGraphRecord["type"]>([
-	"batch_accepted",
-	"input_resources_settled",
-	"item_transition",
-	"worker_fact",
-	"item_result",
-	"graph_result",
-	"cancellation_requested",
-	"publication",
-	"ownership_released",
-	"recovery_interrupted",
-]);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
 export interface WorkGraphEnvelope {
 	readonly version: 1;
 	readonly sequence: number;
-	readonly record: WorkGraphRecord;
+	readonly facts: readonly WorkGraphFact[];
 }
 
 interface EncodedWorkspaceLedger {
@@ -54,24 +41,21 @@ function nonNegativeInteger(value: unknown, label: string): number {
 	return value as number;
 }
 
-function assertWorkGraphRecord(value: unknown): asserts value is WorkGraphRecord {
-	if (!isRecord(value) || typeof value.type !== "string" || !RECORD_TYPES.has(value.type as WorkGraphRecord["type"])) {
-		throw new Error("Invalid Work Graph record");
+function facts(value: unknown): readonly WorkGraphFact[] {
+	if (!Array.isArray(value) || value.length === 0) throw new Error("A Work Graph segment must contain Facts");
+	const decoded = value.map((fact) => WorkGraphFactCodec.decode(fact));
+	const graphId = decoded[0]!.graphId;
+	if (decoded.some((fact) => fact.graphId !== graphId)) {
+		throw new Error("A Work Graph segment cannot span Graph identities");
 	}
-	if (value.type !== "batch_accepted") identity(value.graphId, "Work Graph");
-	if ("itemId" in value && value.itemId !== undefined) identity(value.itemId, "Work Item");
-	if (value.type === "worker_fact") {
-		identity(value.runtimeId, "Worker Runtime");
-		identity(value.sessionId, "Session");
-		assertWorkerFact(value.fact);
-	}
+	return Object.freeze(decoded);
 }
 
-export function encodeWorkGraphEnvelope(record: WorkGraphRecord, sequence: number): string {
-	assertWorkGraphRecord(record);
+export function encodeWorkGraphEnvelope(segment: readonly WorkGraphFact[], sequence: number): string {
 	nonNegativeInteger(sequence, "Work Graph sequence");
 	if (sequence === 0) throw new Error("Work Graph sequence must start at one");
-	return JSON.stringify({ version: 1, sequence, record } satisfies WorkGraphEnvelope);
+	const durable = facts(segment);
+	return JSON.stringify({ version: 1, sequence, facts: durable } satisfies WorkGraphEnvelope);
 }
 
 export function decodeWorkGraphEnvelope(line: string, expectedSequence: number): WorkGraphEnvelope {
@@ -79,8 +63,7 @@ export function decodeWorkGraphEnvelope(line: string, expectedSequence: number):
 	if (!isRecord(value) || value.version !== 1 || value.sequence !== expectedSequence) {
 		throw new Error(`Invalid Work Graph record envelope at sequence ${expectedSequence}`);
 	}
-	assertWorkGraphRecord(value.record);
-	return value as unknown as WorkGraphEnvelope;
+	return Object.freeze({ version: 1, sequence: expectedSequence, facts: facts(value.facts) });
 }
 
 export function emptyWorkspaceLedger(): WorkspaceLedgerRestore {

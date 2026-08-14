@@ -3,7 +3,6 @@ import {
 	createFauxCore,
 	fauxAssistantMessage,
 	fauxToolCall,
-	type JsonValue,
 	type Model,
 	type Models,
 	type ModelsSimpleStreamOptions,
@@ -20,15 +19,11 @@ import {
 	type WorkGraphId,
 	type WorkGraphResult,
 	type WorkItemId,
-	type WorkResult,
 } from "../src/index.ts";
 import { MemoryWorkspacePersistence } from "../src/work-graph/memory-workspace-persistence.ts";
-import type {
-	WorkGraphRecord,
-	WorkGraphStore,
-	WorkspacePersistence,
-	WorkspacePersistenceLease,
-} from "../src/work-graph/ports.ts";
+import type { WorkGraphStore, WorkspacePersistence, WorkspacePersistenceLease } from "../src/work-graph/ports.ts";
+import { WorkGraphAggregate } from "../src/work-graph/work-graph-aggregate.ts";
+import type { WorkGraphFact } from "../src/work-graph/work-graph-fact.ts";
 
 class TestIds implements IdGenerator {
 	#next = 0;
@@ -260,7 +255,7 @@ class MemoryWorkspaceExecution {
 
 function interceptGraphStores(
 	lease: WorkspacePersistenceLease,
-	beforeAppend: (record: WorkGraphRecord) => Promise<void> | void,
+	beforeAppend: (record: WorkGraphFact) => Promise<void> | void,
 ): WorkspacePersistenceLease {
 	const stores = new Map<WorkGraphId, WorkGraphStore>();
 	return Object.freeze({
@@ -271,9 +266,9 @@ function interceptGraphStores(
 			const underlying = await lease.openGraph(graphId);
 			const store: WorkGraphStore = Object.freeze({
 				load: () => underlying.load(),
-				append: async (record: WorkGraphRecord) => {
-					await beforeAppend(record);
-					await underlying.append(record);
+				append: async (facts: readonly WorkGraphFact[]) => {
+					for (const fact of facts) await beforeAppend(fact);
+					await underlying.append(facts);
 				},
 				flush: () => underlying.flush(),
 				close: () => underlying.close(),
@@ -286,11 +281,11 @@ function interceptGraphStores(
 
 class FailOnceGraphPersistence implements WorkspacePersistence {
 	readonly memory = new MemoryWorkspacePersistence();
-	readonly attempts: WorkGraphRecord[] = [];
-	readonly #fail: (record: WorkGraphRecord) => boolean;
+	readonly attempts: WorkGraphFact[] = [];
+	readonly #fail: (record: WorkGraphFact) => boolean;
 	#failed = false;
 
-	constructor(fail: (record: WorkGraphRecord) => boolean) {
+	constructor(fail: (record: WorkGraphFact) => boolean) {
 		this.#fail = fail;
 	}
 
@@ -309,9 +304,9 @@ class GatedGraphPersistence implements WorkspacePersistence {
 	readonly memory = new MemoryWorkspacePersistence();
 	readonly started = deferred();
 	readonly release = deferred();
-	readonly #gate: (record: WorkGraphRecord) => boolean;
+	readonly #gate: (record: WorkGraphFact) => boolean;
 
-	constructor(gate: (record: WorkGraphRecord) => boolean) {
+	constructor(gate: (record: WorkGraphFact) => boolean) {
 		this.#gate = gate;
 	}
 
@@ -548,15 +543,13 @@ async function waitForPersistedGraphResult(
 	graphId: string,
 ): Promise<WorkGraphResult> {
 	await vi.waitFor(() => {
-		expect(persistence.records.some((record) => record.type === "graph_result" && record.graphId === graphId)).toBe(
-			true,
-		);
+		expect(
+			persistence.facts.some((record) => record.type === "graph_result_recorded" && record.graphId === graphId),
+		).toBe(true);
 	});
-	const record = [...persistence.records]
-		.reverse()
-		.find((candidate) => candidate.type === "graph_result" && candidate.graphId === graphId);
-	if (record?.type !== "graph_result") throw new Error(`Persisted Work Graph result not found: ${graphId}`);
-	return record.payload as unknown as WorkGraphResult;
+	const result = WorkGraphAggregate.replay(persistence.graphFacts(graphId as WorkGraphId)).snapshot().graph?.result;
+	if (!result) throw new Error(`Persisted Work Graph result not found: ${graphId}`);
+	return result;
 }
 
 async function observeGraphEvents(
@@ -691,7 +684,9 @@ describe("Work Graph public Interface", () => {
 		]);
 		expect(result.effectiveConcurrency).toBe(1);
 		expect(modelCalls).toHaveLength(5);
-		expect(journal.records.filter(({ type }) => type === "batch_accepted")).toHaveLength(3);
+		expect(journal.facts.filter(({ type }) => type === "graph_accepted" || type === "items_accepted")).toHaveLength(
+			3,
+		);
 		expect(modelContexts.join("\n")).toContain('"itemId":"child"');
 		expect(modelContexts.join("\n")).toContain('"itemId":"grandchild"');
 		expect(workspace.boundToolNames).toEqual([["delegate"], ["delegate"], ["delegate"]]);
@@ -789,7 +784,7 @@ describe("Work Graph public Interface", () => {
 		expect(result.results[0]).toMatchObject({ state: "canceled", run: { outcome: "aborted" } });
 		expect(modelCalls).toEqual([]);
 		await expect(preparation).resolves.toEqual({ started: true, outcome: "canceled" });
-		expect(journal.records.filter((record) => record.type === "worker_fact")).toEqual([]);
+		expect(journal.facts.filter((record) => record.type === "worker_fact_recorded")).toEqual([]);
 		expect(sessions.acceptedEventTypes).toEqual([]);
 		expect(controlTypes).toEqual([]);
 		refreshGate.resolve();
@@ -998,7 +993,7 @@ describe("Work Graph public Interface", () => {
 			},
 		});
 		expect(
-			journal.records.some((record) => record.type === "worker_fact" && record.fact.type === "tool_settled"),
+			journal.facts.some((record) => record.type === "worker_fact_recorded" && record.fact.type === "tool_settled"),
 		).toBe(true);
 		await agent.close();
 	});
@@ -1039,7 +1034,7 @@ describe("Work Graph public Interface", () => {
 		await expect(slow.next()).resolves.toMatchObject({
 			value: { type: "resync_required", reason: "slow_consumer" },
 		});
-		const streamedFacts = journal.records.filter((record) => record.type === "worker_fact");
+		const streamedFacts = journal.facts.filter((record) => record.type === "worker_fact_recorded");
 		expect(streamedFacts).toHaveLength(10);
 		expect(JSON.stringify(streamedFacts)).not.toContain("stream-token");
 		expect(Math.max(...streamedFacts.map((record) => JSON.stringify(record).length))).toBeLessThan(1_024);
@@ -1116,8 +1111,8 @@ describe("Work Graph public Interface", () => {
 		expect(progressTwo.results[0]?.state).toBe("succeeded");
 		expect(progressReports).toBe(20_000);
 		await expect(slowProgress.next()).resolves.toMatchObject({ value: { type: "resync_required" } });
-		expect(JSON.stringify(progressJournal.records)).not.toContain("progress:9999");
-		expect(progressJournal.records.filter((record) => record.type === "worker_fact")).toHaveLength(20);
+		expect(JSON.stringify(progressJournal.facts)).not.toContain("progress:9999");
+		expect(progressJournal.facts.filter((record) => record.type === "worker_fact_recorded")).toHaveLength(20);
 		expect(progressed.sessions.acceptedEventTypes).not.toContain("tool_execution_progress");
 		expect(progressControls).not.toContain("tool_execution_progress");
 		await progressed.agent.close();
@@ -1125,7 +1120,7 @@ describe("Work Graph public Interface", () => {
 
 	it("does not call the Model until attempt_started is durably appended", async () => {
 		const journal = new GatedGraphPersistence(
-			(record) => record.type === "worker_fact" && record.fact.type === "attempt_started",
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "attempt_started",
 		);
 		const { agent, modelCalls } = await harness([{}], { persistence: journal });
 		await agent.submit({ commands: [start("graph:gated-attempt", 1)] });
@@ -1140,7 +1135,7 @@ describe("Work Graph public Interface", () => {
 
 	it("does not call a Tool until tool_started is durably appended", async () => {
 		const journal = new GatedGraphPersistence(
-			(record) => record.type === "worker_fact" && record.fact.type === "tool_started",
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "tool_started",
 		);
 		let executions = 0;
 		const workspace = new MemoryWorkspaceExecution();
@@ -1194,7 +1189,9 @@ describe("Work Graph public Interface", () => {
 				const expectedFact = factForControl[event.type];
 				if (expectedFact) {
 					expect(
-						journal.records.some((record) => record.type === "worker_fact" && record.fact.type === expectedFact),
+						journal.facts.some(
+							(record) => record.type === "worker_fact_recorded" && record.fact.type === expectedFact,
+						),
 					).toBe(true);
 					controlledFacts.push(expectedFact);
 				}
@@ -1513,7 +1510,7 @@ describe("Work Graph public Interface", () => {
 		const journal: WorkspacePersistence = {
 			acquire: async () =>
 				interceptGraphStores(await memory.acquire(), async (record) => {
-					if (record.type === "graph_result") {
+					if (record.type === "graph_result_recorded") {
 						graphResultAppends++;
 						graphResultStarted.resolve();
 						await releaseGraphResult.promise;
@@ -1557,7 +1554,7 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 		await observation;
 
-		expect(memory.records.filter(({ type }) => type === "graph_result")).toHaveLength(1);
+		expect(memory.facts.filter(({ type }) => type === "graph_result_recorded")).toHaveLength(1);
 		expect(settledObservations).toHaveLength(1);
 	});
 
@@ -1635,7 +1632,7 @@ describe("Work Graph public Interface", () => {
 			rejection: { code: "invalid_command", message: expect.stringContaining("exactly one Work Graph") },
 		});
 		expect(persistence.ledgerSnapshot().activeGraphs).toEqual([]);
-		expect(persistence.records).toEqual([]);
+		expect(persistence.facts).toEqual([]);
 		expect(workspace.reserved).toEqual([]);
 		await agent.close();
 	});
@@ -1824,7 +1821,7 @@ describe("Work Graph public Interface", () => {
 		let commits = 0;
 		let rollbacks = 0;
 		const journal = new FailOnceGraphPersistence(
-			(record) => record.type === "batch_accepted" && record.batchId === "batch:resource-rejected",
+			(record) => record.type === "input_accepted" && record.batchId === "batch:resource-rejected",
 		);
 		const { agent, modelCalls } = await harness([{ gate: run.promise }], {
 			persistence: journal,
@@ -1923,7 +1920,51 @@ describe("Work Graph public Interface", () => {
 		expect(modelCalls).toHaveLength(2);
 		expect(modelContexts.at(-1)).toContain("settled resource prompt");
 		expect(modelContexts.at(-1)).not.toContain("fallback objective must remain held");
-		expect(journal.records.map(({ type }) => type)).toContain("input_resources_settled");
+		expect(journal.facts.map(({ type }) => type)).toContain("input_resources_settled");
+		await agent.close();
+	});
+
+	it("keeps Workspace admission free while a Graph-local settlement Fact fsyncs", async () => {
+		const persistence = new GatedGraphPersistence(
+			(fact) => fact.graphId === "graph:local-fsync" && fact.type === "input_resources_settled",
+		);
+		const { agent } = await harness([{}, {}], {
+			persistence,
+			resources: {
+				reserve: async () => ({ commit: () => Promise.resolve(), rollback: () => Promise.resolve() }),
+			},
+		});
+		const slowResult = waitForGraphResult(agent, "graph:local-fsync");
+		const slow = agent.submit({
+			commands: [
+				start("graph:local-fsync", 1),
+				{
+					type: "deliver_work_item_input",
+					graphId: "graph:local-fsync",
+					itemId: "root",
+					kind: "prompt",
+					input: "settle locally",
+					resources: ["resource:local-fsync"],
+				},
+			],
+		});
+		await persistence.started.promise;
+
+		const unrelatedResult = waitForGraphResult(agent, "graph:local-fsync-unrelated");
+		let unrelatedAccepted = false;
+		const unrelated = agent.submit({ commands: [start("graph:local-fsync-unrelated", 1)] }).then((receipt) => {
+			unrelatedAccepted = true;
+			return receipt;
+		});
+		try {
+			await vi.waitFor(() => expect(unrelatedAccepted).toBe(true));
+		} finally {
+			persistence.release.resolve();
+		}
+		await expect(unrelated).resolves.toMatchObject({ status: "accepted" });
+		expect((await unrelatedResult).results[0]?.state).toBe("succeeded");
+		await expect(slow).resolves.toMatchObject({ status: "accepted" });
+		await slowResult;
 		await agent.close();
 	});
 
@@ -2018,7 +2059,7 @@ describe("Work Graph public Interface", () => {
 		resourceCommit.resolve();
 		await expect(submission).resolves.toMatchObject({ status: "accepted" });
 		await expect(closing).resolves.toMatchObject({ unknownWork: [] });
-		expect(journal.records.some(({ type }) => type === "input_resources_settled")).toBe(true);
+		expect(journal.facts.some(({ type }) => type === "input_resources_settled")).toBe(true);
 	});
 
 	it("accepts durably but interrupts Work before the Model when input resource commit fails", async () => {
@@ -2063,7 +2104,7 @@ describe("Work Graph public Interface", () => {
 			diagnostics: [{ code: "input_resource_commit_failed" }],
 		});
 		expect(
-			journal.records.some((record) => record.type === "input_resources_settled" && record.outcome === "failed"),
+			journal.facts.some((record) => record.type === "input_resources_settled" && record.outcome === "failed"),
 		).toBe(true);
 		await agent.close();
 	});
@@ -2099,9 +2140,9 @@ describe("Work Graph public Interface", () => {
 			],
 		});
 		await resourceCommitStarted.promise;
-		expect(liveJournal.records.map(({ type }) => type)).toEqual(["batch_accepted"]);
+		expect(liveJournal.facts.map(({ type }) => type)).toEqual(["graph_accepted", "input_accepted"]);
 
-		const recoveredJournal = new MemoryWorkspacePersistence(liveJournal.records);
+		const recoveredJournal = new MemoryWorkspacePersistence(liveJournal.facts);
 		const recovered = await harness([], { persistence: recoveredJournal });
 		const result = await waitForPersistedGraphResult(recoveredJournal, "graph:resource-recovery");
 		expect(recovered.modelCalls).toEqual([]);
@@ -2163,19 +2204,19 @@ describe("Work Graph public Interface", () => {
 		});
 		await reservationStarted.promise;
 		run.resolve();
-		await vi.waitFor(() => expect(journal.records.some((record) => record.type === "item_result")).toBe(true));
+		await vi.waitFor(() => expect(journal.facts.some((record) => record.type === "item_result_recorded")).toBe(true));
 		reservation.resolve();
 
 		await expect(delivery).resolves.toMatchObject({ status: "rejected", rejection: { code: "invalid_state" } });
 		expect({ commits, rollbacks }).toEqual({ commits: 0, rollbacks: 1 });
-		expect(
-			journal.records.some((record) => record.type === "batch_accepted" && record.batchId === "batch:resource-race"),
-		).toBe(false);
+		expect(journal.facts.some((record) => "batchId" in record && record.batchId === "batch:resource-race")).toBe(
+			false,
+		);
 		await graphResult;
 		await agent.close();
 	});
 
-	it("never reports a durable accepted batch as rejected when later cancellation bookkeeping fails", async () => {
+	it("rejects a cancellation batch without exposing a partial cancellation", async () => {
 		const root = deferred();
 		const journal = new FailOnceGraphPersistence((record) => record.type === "cancellation_requested");
 		const { agent } = await harness([{ gate: root.promise }], { persistence: journal });
@@ -2196,19 +2237,23 @@ describe("Work Graph public Interface", () => {
 				},
 			],
 		});
-		await expect(
-			agent.submit({
-				commands: [
-					{
-						type: "cancel_work",
-						target: { type: "item", graphId: "graph:accepted-barrier", itemId: "pending-child" },
-					},
-				],
-			}),
-		).resolves.toMatchObject({ status: "accepted" });
+		const resultPromise = waitForGraphResult(agent, "graph:accepted-barrier");
+		const cancellation = {
+			commands: [
+				{
+					type: "cancel_work" as const,
+					target: { type: "item" as const, graphId: "graph:accepted-barrier", itemId: "pending-child" },
+				},
+			],
+		};
+		await expect(agent.submit(cancellation)).resolves.toMatchObject({
+			status: "rejected",
+			rejection: { code: "graph_store_failed" },
+		});
+		expect(journal.memory.facts.some(({ type }) => type === "cancellation_requested")).toBe(false);
 		root.resolve();
-		const result = await waitForGraphResult(agent, "graph:accepted-barrier");
-		expect(result.results.find(({ itemId }) => itemId === "pending-child")?.state).toBe("canceled");
+		const result = await resultPromise;
+		expect(result.results.find(({ itemId }) => itemId === "pending-child")?.state).toBe("interrupted");
 		await agent.close();
 	});
 
@@ -2342,7 +2387,7 @@ describe("Work Graph public Interface", () => {
 
 	it("classifies fatal journal barriers by whether an external effect may already have begun", async () => {
 		const beforeEffectJournal = new FailOnceGraphPersistence(
-			(record) => record.type === "worker_fact" && record.fact.type === "run_started",
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "run_started",
 		);
 		const beforeEffect = await harness([], { persistence: beforeEffectJournal });
 		const failedResult = waitForGraphResult(beforeEffect.agent, "graph:barrier-before");
@@ -2365,14 +2410,7 @@ describe("Work Graph public Interface", () => {
 
 		const workspace = new MemoryWorkspaceExecution();
 		workspace.captureArtifacts = true;
-		const afterEffectJournal = new FailOnceGraphPersistence(
-			(record) =>
-				record.type === "publication" &&
-				typeof record.payload === "object" &&
-				record.payload !== null &&
-				!Array.isArray(record.payload) &&
-				record.payload.phase === "settled",
-		);
+		const afterEffectJournal = new FailOnceGraphPersistence((record) => record.type === "publication_settled");
 		const afterEffect = await harness([{}], { persistence: afterEffectJournal, workspace });
 		const interruptedResult = waitForGraphResult(afterEffect.agent, "graph:barrier-after");
 		await afterEffect.agent.submit({ commands: [start("graph:barrier-after")] });
@@ -2385,7 +2423,7 @@ describe("Work Graph public Interface", () => {
 		});
 		await afterEffect.agent.close();
 
-		const resultJournal = new FailOnceGraphPersistence((record) => record.type === "item_result");
+		const resultJournal = new FailOnceGraphPersistence((record) => record.type === "item_result_recorded");
 		const resultBarrier = await harness([{}], { persistence: resultJournal });
 		const undurableResult = waitForGraphResult(resultBarrier.agent, "graph:result-barrier");
 		await resultBarrier.agent.submit({ commands: [start("graph:result-barrier")] });
@@ -2394,7 +2432,7 @@ describe("Work Graph public Interface", () => {
 			durability: "unknown",
 			results: [{ durability: "unknown", state: "interrupted" }],
 		});
-		const resultRecoveryRecords = structuredClone(resultJournal.memory.records);
+		const resultRecoveryRecords = structuredClone(resultJournal.memory.facts);
 		await expect(resultBarrier.agent.close()).resolves.toMatchObject({
 			unknownWork: [{ itemId: "root", phase: "result" }],
 		});
@@ -2445,7 +2483,7 @@ describe("Work Graph public Interface", () => {
 			diagnostics: [{ code: "session_barrier_failed", message: expect.stringContaining("run_start") }],
 		});
 		expect(modelCalls).toEqual([]);
-		expect(journal.records.filter((record) => record.type === "worker_fact")).toEqual([]);
+		expect(journal.facts.filter((record) => record.type === "worker_fact_recorded")).toEqual([]);
 		expect(controlTypes).toEqual([]);
 		expect(diagnostics.filter((code) => code === "session_barrier_failed")).toHaveLength(1);
 		await agent.close();
@@ -2466,14 +2504,14 @@ describe("Work Graph public Interface", () => {
 			diagnostics: [{ code: "worker_failed" }, { code: "worker_effect_window_unclosed" }],
 		});
 		expect(
-			journal.records.filter((record) => record.type === "worker_fact").map((record) => record.fact.type),
+			journal.facts.filter((record) => record.type === "worker_fact_recorded").map((record) => record.fact.type),
 		).toEqual(["run_started", "attempt_started", "turn_settled", "run_settled"]);
 		await agent.close();
 	});
 
 	it("derives Tool barrier classification from parallel open windows", async () => {
 		const firstStartFailure = new FailOnceGraphPersistence(
-			(record) => record.type === "worker_fact" && record.fact.type === "tool_started",
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "tool_started",
 		);
 		let firstExecutions = 0;
 		const firstWorkspace = new MemoryWorkspaceExecution();
@@ -2505,14 +2543,14 @@ describe("Work Graph public Interface", () => {
 		expect(safelyFailed.results[0]?.state).toBe("failed");
 		expect(firstExecutions).toBe(0);
 		expect(firstStartFailure.attempts.at(-1)).toMatchObject({
-			type: "worker_fact",
+			type: "worker_fact_recorded",
 			fact: { type: "tool_started", toolName: "first_tool" },
 		});
 		await first.agent.close();
 
 		const secondStartFailure = new FailOnceGraphPersistence(
 			(record) =>
-				record.type === "worker_fact" &&
+				record.type === "worker_fact_recorded" &&
 				record.fact.type === "tool_started" &&
 				record.fact.toolName === "parallel_two",
 		);
@@ -2553,11 +2591,11 @@ describe("Work Graph public Interface", () => {
 		expect(interrupted.results[0]?.state).toBe("interrupted");
 		expect(executions).toEqual(["parallel_one"]);
 		expect(secondStartFailure.attempts.at(-1)).toMatchObject({
-			type: "worker_fact",
+			type: "worker_fact_recorded",
 			fact: { type: "tool_started", toolName: "parallel_two" },
 		});
-		expect(secondStartFailure.memory.records.at(-1)).toMatchObject({
-			type: "worker_fact",
+		expect(secondStartFailure.memory.facts.at(-1)).toMatchObject({
+			type: "worker_fact_recorded",
 			fact: { type: "tool_started", toolName: "parallel_one" },
 		});
 		await parallel.agent.close();
@@ -2566,7 +2604,7 @@ describe("Work Graph public Interface", () => {
 	it("does not share an append or flush tail across Work Graph stores", async () => {
 		const persistence = new GatedGraphPersistence(
 			(record) =>
-				record.type === "worker_fact" &&
+				record.type === "worker_fact_recorded" &&
 				record.graphId === "graph:slow-store" &&
 				record.fact.type === "attempt_started",
 		);
@@ -2592,7 +2630,7 @@ describe("Work Graph public Interface", () => {
 	it("isolates one Work Graph store failure and one Session failure from sibling Graphs", async () => {
 		const persistence = new FailOnceGraphPersistence(
 			(record) =>
-				record.type === "worker_fact" &&
+				record.type === "worker_fact_recorded" &&
 				record.graphId === "graph:store-poison" &&
 				record.fact.type === "tool_started",
 		);
@@ -2781,8 +2819,8 @@ describe("Work Graph public Interface", () => {
 			rejection: { code: "ledger_failed" },
 		});
 		expect(persistence.memory.ledgerSnapshot().activeGraphs).toEqual([]);
-		expect(persistence.memory.graphRecords("graph:index-failure" as WorkGraphId)).toEqual([
-			expect.objectContaining({ type: "batch_accepted" }),
+		expect(persistence.memory.graphFacts("graph:index-failure" as WorkGraphId)).toEqual([
+			expect.objectContaining({ type: "graph_accepted" }),
 		]);
 		await rejected.agent.close();
 
@@ -2794,15 +2832,15 @@ describe("Work Graph public Interface", () => {
 		expect((await result).results[0]?.state).toBe("succeeded");
 		expect(
 			persistence.memory
-				.graphRecords("graph:index-failure" as WorkGraphId)
-				.filter((record) => record.type === "batch_accepted"),
+				.graphFacts("graph:index-failure" as WorkGraphId)
+				.filter((record) => record.type === "graph_accepted"),
 		).toHaveLength(1);
 		await nextEpoch.agent.close();
 	});
 
 	it("projects active Run state only after the run_started Fact commits", async () => {
 		const journal = new GatedGraphPersistence(
-			(record) => record.type === "worker_fact" && record.fact.type === "run_started",
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "run_started",
 		);
 		const model = deferred();
 		const { agent } = await harness([{ gate: model.promise }], { persistence: journal });
@@ -2844,8 +2882,8 @@ describe("Work Graph public Interface", () => {
 
 		const lease = await persistence.acquire();
 		const historical = await lease.openHistoricalGraph("graph:archived" as WorkGraphId);
-		expect((await historical?.load())?.records.at(-1)).toMatchObject({
-			type: "graph_result",
+		expect((await historical?.load())?.facts.at(-1)).toMatchObject({
+			type: "graph_result_recorded",
 			graphId: "graph:archived",
 		});
 		await historical?.close();
@@ -2881,8 +2919,8 @@ describe("Work Graph public Interface", () => {
 			nextPublicationOrder: 2,
 		});
 		const acceptedFacts = livePersistence
-			.graphRecords("graph:ordinal-recovery" as WorkGraphId)
-			.filter((record) => record.type === "batch_accepted");
+			.graphFacts("graph:ordinal-recovery" as WorkGraphId)
+			.filter((record) => record.type === "graph_accepted" || record.type === "items_accepted");
 		expect(acceptedFacts).toHaveLength(2);
 
 		const recoveredPersistence = new MemoryWorkspacePersistence({
@@ -2913,13 +2951,12 @@ describe("Work Graph public Interface", () => {
 			status: "accepted",
 		});
 		const newAcceptance = recoveredPersistence
-			.graphRecords("graph:after-recovery" as WorkGraphId)
-			.find((record) => record.type === "batch_accepted");
+			.graphFacts("graph:after-recovery" as WorkGraphId)
+			.find((record) => record.type === "graph_accepted");
 		expect(newAcceptance).toMatchObject({
-			payload: {
-				graphs: [{ graphId: "graph:after-recovery", order: 1 }],
-				items: [{ graphId: "graph:after-recovery", publicationOrder: 2 }],
-			},
+			graphId: "graph:after-recovery",
+			order: 1,
+			root: { publicationOrder: 2 },
 		});
 		await expect(
 			recovered.agent.submit({
@@ -2957,21 +2994,22 @@ describe("Work Graph public Interface", () => {
 		await live.agent.submit({ commands: [start("graph:fact-recovery", 1)] });
 		await vi.waitFor(() =>
 			expect(
-				liveJournal.records.some(
-					(record) => record.type === "worker_fact" && record.fact.type === "attempt_started",
+				liveJournal.facts.some(
+					(record) => record.type === "worker_fact_recorded" && record.fact.type === "attempt_started",
 				),
 			).toBe(true),
 		);
 
-		const firstAttemptIndex = liveJournal.records.findIndex(
-			(record) => record.type === "worker_fact" && record.fact.type === "attempt_started",
+		const firstAttemptIndex = liveJournal.facts.findIndex(
+			(record) => record.type === "worker_fact_recorded" && record.fact.type === "attempt_started",
 		);
-		const recoveryRecords = structuredClone(liveJournal.records.slice(0, firstAttemptIndex + 1));
+		const recoveryRecords = structuredClone(liveJournal.facts.slice(0, firstAttemptIndex + 1));
 		const firstAttempt = recoveryRecords.at(-1);
-		if (firstAttempt?.type !== "worker_fact" || firstAttempt.fact.type !== "attempt_started") {
+		if (firstAttempt?.type !== "worker_fact_recorded" || firstAttempt.fact.type !== "attempt_started") {
 			throw new Error("The live journal did not reach attempt_started");
 		}
 		const recordIdentity = {
+			version: firstAttempt.version,
 			graphId: firstAttempt.graphId,
 			itemId: firstAttempt.itemId,
 			runtimeId: firstAttempt.runtimeId,
@@ -2979,8 +3017,9 @@ describe("Work Graph public Interface", () => {
 		};
 		recoveryRecords.push(
 			{
-				type: "worker_fact",
+				type: "worker_fact_recorded",
 				...recordIdentity,
+				timestamp: 2_000,
 				fact: {
 					type: "attempt_settled",
 					runId: firstAttempt.fact.runId,
@@ -2995,8 +3034,9 @@ describe("Work Graph public Interface", () => {
 				},
 			},
 			{
-				type: "worker_fact",
+				type: "worker_fact_recorded",
 				...recordIdentity,
+				timestamp: 2_001,
 				fact: {
 					type: "attempt_started",
 					runId: firstAttempt.fact.runId,
@@ -3008,8 +3048,9 @@ describe("Work Graph public Interface", () => {
 				},
 			},
 			{
-				type: "worker_fact",
+				type: "worker_fact_recorded",
 				...recordIdentity,
+				timestamp: 2_002,
 				fact: {
 					type: "tool_started",
 					runId: firstAttempt.fact.runId,
@@ -3021,8 +3062,9 @@ describe("Work Graph public Interface", () => {
 				},
 			},
 			{
-				type: "worker_fact",
+				type: "worker_fact_recorded",
 				...recordIdentity,
+				timestamp: 2_003,
 				fact: {
 					type: "budget_exhausted",
 					runId: firstAttempt.fact.runId,
@@ -3052,44 +3094,20 @@ describe("Work Graph public Interface", () => {
 			],
 		});
 		expect(result.results[0]?.diagnostics[0]?.message).toContain("unclosed_tool_invocation");
-		expect(recoveredJournal.records.find((record) => record.type === "recovery_interrupted")).toMatchObject({
+		expect(recoveredJournal.facts.find((record) => record.type === "recovery_interrupted")).toMatchObject({
 			reasons: expect.arrayContaining(["unclosed_model_attempt", "unclosed_tool_invocation"]),
 		});
 		await recovered.agent.close();
 
+		const liveResultPromise = waitForGraphResult(live.agent, "graph:fact-recovery");
 		gate.resolve();
-		await waitForGraphResult(live.agent, "graph:fact-recovery");
+		const liveResult = await liveResultPromise;
 		await live.agent.close();
 
-		const authoritativeRecords = liveJournal.records
-			.filter((record) => record.type !== "graph_result")
-			.map((record): WorkGraphRecord => {
-				if (record.type !== "item_result") return structuredClone(record);
-				const payload = record.payload as unknown as WorkResult;
-				return {
-					...record,
-					payload: {
-						...payload,
-						budget: {
-							modelAttempts: 91,
-							toolInvocations: 82,
-							totalTokens: 73,
-							elapsedMs: 64,
-							exhaustion: { limit: "total_tokens", maximum: 72, observed: 73 },
-						},
-					} as unknown as JsonValue,
-				};
-			});
-		const authoritativePersistence = new MemoryWorkspacePersistence(authoritativeRecords);
+		const authoritativePersistence = new MemoryWorkspacePersistence(liveJournal.facts);
 		const authoritative = await harness([], { persistence: authoritativePersistence });
 		const authoritativeResult = await waitForPersistedGraphResult(authoritativePersistence, "graph:fact-recovery");
-		expect(authoritativeResult.results[0]?.budget).toEqual({
-			modelAttempts: 91,
-			toolInvocations: 82,
-			totalTokens: 73,
-			elapsedMs: 64,
-			exhaustion: { limit: "total_tokens", maximum: 72, observed: 73 },
-		});
+		expect(authoritativeResult).toEqual(liveResult);
 		await authoritative.agent.close();
 	});
 
@@ -3115,27 +3133,31 @@ describe("Work Graph public Interface", () => {
 			],
 		});
 		await waitForState(live.agent, "graph:recovery", "root", "running");
-		const acceptance = liveJournal.records.find((record) => record.type === "batch_accepted");
+		const acceptance = liveJournal.facts.find((record) => record.type === "graph_accepted");
 		expect(acceptance).toMatchObject({
-			payload: {
-				schemaVersion: 1,
-				items: [
-					{
-						runtimeId: expect.stringContaining("worker:graph:recovery:root"),
-						sessionId: "session:graph:recovery",
-						placement: { placementId: "placement:graph:recovery:root" },
-					},
-				],
+			root: {
+				runtimeId: expect.stringContaining("worker:graph:recovery:root"),
+				sessionId: "session:graph:recovery",
+				placement: { placementId: "placement:graph:recovery:root" },
 			},
 		});
-		const interruptedRecords: WorkGraphRecord[] = structuredClone([...liveJournal.records]);
-		interruptedRecords.push({
-			type: "publication",
-			graphId: "graph:recovery" as WorkGraphId,
-			itemId: "root" as WorkItemId,
-			timestamp: 2_000,
-			payload: {
-				phase: "started",
+		const interruptedRecords: WorkGraphFact[] = structuredClone([...liveJournal.facts]);
+		interruptedRecords.push(
+			{
+				version: 1,
+				type: "item_transitioned",
+				graphId: "graph:recovery" as WorkGraphId,
+				itemId: "root" as WorkItemId,
+				from: "running",
+				to: "settling",
+				timestamp: 1_999,
+			},
+			{
+				version: 1,
+				type: "publication_started",
+				graphId: "graph:recovery" as WorkGraphId,
+				itemId: "root" as WorkItemId,
+				timestamp: 2_000,
 				artifact: {
 					artifactId: "artifact:recovery",
 					placementId: "placement:graph:recovery:root",
@@ -3143,10 +3165,10 @@ describe("Work Graph public Interface", () => {
 					kind: "memory",
 				},
 			},
-		});
+		);
 		const recoveredJournal = new MemoryWorkspacePersistence(interruptedRecords);
 		const recovered = await harness([], { persistence: recoveredJournal });
-		const result = await waitForGraphResult(recovered.agent, "graph:recovery");
+		const result = await waitForPersistedGraphResult(recoveredJournal, "graph:recovery");
 		expect(recovered.modelCalls).toEqual([]);
 		expect(result.outcome).toBe("interrupted");
 		expect(result.results[0]).toMatchObject({
@@ -3167,8 +3189,8 @@ describe("Work Graph public Interface", () => {
 				expectedTargetIdentity: "target:placement:graph:recovery:root:accepted",
 			}),
 		]);
-		expect(recoveredJournal.records.some((record) => record.type === "recovery_interrupted")).toBe(true);
-		expect(recoveredJournal.records.at(-1)?.type).toBe("graph_result");
+		expect(recoveredJournal.facts.some((record) => record.type === "recovery_interrupted")).toBe(true);
+		expect(recoveredJournal.facts.at(-1)?.type).toBe("graph_result_recorded");
 		await recovered.agent.close();
 
 		gate.resolve();

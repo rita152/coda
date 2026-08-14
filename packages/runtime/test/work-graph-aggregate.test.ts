@@ -459,6 +459,16 @@ describe("WorkGraphFact codec", () => {
 			"only blocked results may carry blockedBy",
 		);
 		const publication = codecFacts()[9] as Extract<WorkGraphFact, { readonly type: "publication_settled" }>;
+		expect(
+			WorkGraphFactCodec.decode({
+				...publication,
+				publication: {
+					state: "not_required",
+					targetPlacementId: "target:source",
+					targetIdentity: "unchanged",
+				},
+			}),
+		).toMatchObject({ publication: { state: "not_required", targetPlacementId: "target:source" } });
 		expect(() =>
 			WorkGraphFactCodec.decode({ ...publication, publication: { ...publication.publication, secret: true } }),
 		).toThrow("unexpected field secret");
@@ -470,6 +480,14 @@ describe("WorkGraphFact codec", () => {
 });
 
 describe("WorkGraphAggregate", () => {
+	it("makes failed input settlement part of the authoritative cancellation state", () => {
+		const snapshot = reduce(codecFacts().slice(0, 4)).snapshot().graph;
+		expect(snapshot?.items[0]).toMatchObject({
+			cancellationRequested: true,
+			inputs: [{ deliveryId: "delivery:1", settlement: "failed", diagnostic: "resource commit failed" }],
+		});
+	});
+
 	it("reduces the complete lifecycle into structured durable state without runtime handles", () => {
 		const aggregate = reduce(sequence(6, ["succeeded", "canceled"]));
 		const snapshot = aggregate.snapshot();
@@ -570,17 +588,16 @@ describe("WorkGraphAggregate", () => {
 			expect(() => aggregate.apply(fact), fact.type).toThrow();
 			expect(aggregate.snapshot(), fact.type).toBe(before);
 		}
-		expect(() =>
-			aggregate.apply({
-				version: 1,
-				type: "item_transitioned",
-				graphId,
-				timestamp: 0,
-				itemId: accepted.root.itemId,
-				from: "pending",
-				to: "ready",
-			}),
-		).toThrow("precedes");
+		const reordered = aggregate.apply({
+			version: 1,
+			type: "item_transitioned",
+			graphId,
+			timestamp: 0,
+			itemId: accepted.root.itemId,
+			from: "pending",
+			to: "ready",
+		});
+		expect(reordered.snapshot().lastTimestamp).toBe(1);
 	});
 
 	it("rejects recovery ownership mismatches and malformed effect ordering", () => {

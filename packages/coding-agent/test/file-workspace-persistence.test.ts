@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { WorkGraphId, WorkItemId } from "@coda/runtime";
 import {
 	MemoryWorkspacePersistence,
-	type WorkGraphRecord,
+	type WorkGraphFact,
 	type WorkspacePersistence,
 } from "@coda/runtime/workspace-persistence";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,12 +22,14 @@ function graphId(value: string): WorkGraphId {
 	return value as WorkGraphId;
 }
 
-function record(graph: string, timestamp: number): WorkGraphRecord {
+function fact(graph: string, timestamp: number): WorkGraphFact {
 	return {
+		version: 1,
 		type: "cancellation_requested",
 		graphId: graphId(graph),
-		itemId: "item:contract" as WorkItemId,
 		timestamp,
+		batchId: `batch:${timestamp}`,
+		target: { type: "graph" },
 	};
 }
 
@@ -53,14 +55,14 @@ function workspacePersistenceContract(
 			await second.close();
 		});
 
-		it("keeps Graph records independent and archives them outside the active index", async () => {
+		it("keeps Graph facts independent and archives them outside the active index", async () => {
 			const { persistence } = await fixture();
 			const first = await persistence.acquire();
 			const graphA = graphId("graph:contract-a");
 			const graphB = graphId("graph:contract-b");
 			const storeA = await first.openGraph(graphA);
 			const storeB = await first.openGraph(graphB);
-			await Promise.all([storeA.append(record(graphA, 1)), storeB.append(record(graphB, 2))]);
+			await Promise.all([storeA.append([fact(graphA, 1)]), storeB.append([fact(graphB, 2)])]);
 			await first.ledger.accept({
 				activeGraphs: [
 					{ graphId: graphA, order: 4 },
@@ -80,14 +82,14 @@ function workspacePersistenceContract(
 				targetPlacementId: "placement:target",
 				targetIdentity: "target:fingerprint",
 			});
-			await expect(storeA.load()).resolves.toMatchObject({ records: [record(graphA, 1)] });
-			await expect(storeB.load()).resolves.toMatchObject({ records: [record(graphB, 2)] });
+			await expect(storeA.load()).resolves.toMatchObject({ facts: [fact(graphA, 1)] });
+			await expect(storeB.load()).resolves.toMatchObject({ facts: [fact(graphB, 2)] });
 
 			await first.ledger.archiveGraph(graphA);
 			await first.archiveGraph(graphA);
 			await expect(first.openGraph(graphA)).rejects.toThrow(/archived/u);
 			const historical = await first.openHistoricalGraph(graphA);
-			await expect(historical?.load()).resolves.toMatchObject({ records: [record(graphA, 1)] });
+			await expect(historical?.load()).resolves.toMatchObject({ facts: [fact(graphA, 1)] });
 			await historical?.close();
 			await first.close();
 
@@ -106,7 +108,7 @@ function workspacePersistenceContract(
 				targetIdentities: [{ targetPlacementId: "placement:target", targetIdentity: "target:fingerprint" }],
 			});
 			await expect((await reopened.openGraph(graphB)).load()).resolves.toMatchObject({
-				records: [record(graphB, 2)],
+				facts: [fact(graphB, 2)],
 			});
 			await reopened.ledger.releaseSession({
 				sessionId: "session:contract-b",
@@ -117,18 +119,29 @@ function workspacePersistenceContract(
 			await reopened.close();
 		});
 
+		it("rejects Facts addressed to a different Graph at the store boundary", async () => {
+			const { persistence } = await fixture();
+			const lease = await persistence.acquire();
+			const graphA = graphId("graph:contract-address-a");
+			const graphB = graphId("graph:contract-address-b");
+			const store = await lease.openGraph(graphA);
+			await expect(store.append([fact(graphB, 1)])).rejects.toThrow("cannot append Facts for another Graph");
+			await expect(store.load()).resolves.toMatchObject({ facts: [] });
+			await lease.close();
+		});
+
 		it("quarantines an unindexed initial segment before reusing its Graph identity", async () => {
 			const { persistence } = await fixture();
 			const graph = graphId("graph:orphan-reuse");
 			const crashedEpoch = await persistence.acquire();
-			await (await crashedEpoch.openGraph(graph)).append(record(graph, 1));
+			await (await crashedEpoch.openGraph(graph)).append([fact(graph, 1)]);
 			await crashedEpoch.close();
 
 			const nextEpoch = await persistence.acquire();
 			expect((await nextEpoch.ledger.load()).activeGraphs).toEqual([]);
 			const replacement = await nextEpoch.openGraph(graph);
-			await expect(replacement.load()).resolves.toMatchObject({ records: [] });
-			await replacement.append(record(graph, 2));
+			await expect(replacement.load()).resolves.toMatchObject({ facts: [] });
+			await replacement.append([fact(graph, 2)]);
 			await nextEpoch.ledger.accept({
 				activeGraphs: [{ graphId: graph, order: 0 }],
 				nextGraphOrder: 1,
@@ -136,8 +149,8 @@ function workspacePersistenceContract(
 				sessionOwners: [],
 			});
 			const orphan = await nextEpoch.openHistoricalGraph(graph);
-			await expect(orphan?.load()).resolves.toMatchObject({ records: [record(graph, 1)] });
-			await expect(replacement.load()).resolves.toMatchObject({ records: [record(graph, 2)] });
+			await expect(orphan?.load()).resolves.toMatchObject({ facts: [fact(graph, 1)] });
+			await expect(replacement.load()).resolves.toMatchObject({ facts: [fact(graph, 2)] });
 			await orphan?.close();
 			await nextEpoch.close();
 		});
@@ -212,11 +225,11 @@ describe("Node filesystem Workspace persistence", () => {
 		const independentGraph = graphId("graph:independent-file");
 		const slowStore = await lease.openGraph(slowGraph);
 		const independentStore = await lease.openGraph(independentGraph);
-		const pendingSlowAppend = slowStore.append(record(slowGraph, 1));
+		const pendingSlowAppend = slowStore.append([fact(slowGraph, 1)]);
 		await slowStarted;
-		await independentStore.append(record(independentGraph, 2));
+		await independentStore.append([fact(independentGraph, 2)]);
 		await independentStore.flush();
-		await expect(independentStore.load()).resolves.toMatchObject({ records: [record(independentGraph, 2)] });
+		await expect(independentStore.load()).resolves.toMatchObject({ facts: [fact(independentGraph, 2)] });
 		releaseSlow();
 		await pendingSlowAppend;
 		await lease.close();
@@ -245,16 +258,16 @@ describe("Node filesystem Workspace persistence", () => {
 		const failedStore = await lease.openGraph(failedGraph);
 		const siblingGraph = graphId("graph:healthy-file");
 		const siblingStore = await lease.openGraph(siblingGraph);
-		await expect(failedStore.append(record(failedGraph, 1))).rejects.toThrow("injected Graph write failure");
-		await expect(failedStore.append(record(failedGraph, 2))).rejects.toThrow("injected Graph write failure");
-		await siblingStore.append(record(siblingGraph, 3));
+		await expect(failedStore.append([fact(failedGraph, 1)])).rejects.toThrow("injected Graph write failure");
+		await expect(failedStore.append([fact(failedGraph, 2)])).rejects.toThrow("injected Graph write failure");
+		await siblingStore.append([fact(siblingGraph, 3)]);
 		await lease.ledger.accept({
 			activeGraphs: [{ graphId: siblingGraph, order: 0 }],
 			nextGraphOrder: 1,
 			nextPublicationOrder: 1,
 			sessionOwners: [],
 		});
-		await expect(siblingStore.load()).resolves.toMatchObject({ records: [record(siblingGraph, 3)] });
+		await expect(siblingStore.load()).resolves.toMatchObject({ facts: [fact(siblingGraph, 3)] });
 		await expect(lease.close()).rejects.toThrow("injected Graph write failure");
 	});
 
@@ -289,7 +302,7 @@ describe("Node filesystem Workspace persistence", () => {
 		const { persistence, root } = await fileFixture("coda-workspace-persistence-repair-");
 		const graph = graphId("graph:repair-file");
 		const first = await persistence.acquire();
-		await (await first.openGraph(graph)).append(record(graph, 1));
+		await (await first.openGraph(graph)).append([fact(graph, 1)]);
 		await first.ledger.accept({
 			activeGraphs: [{ graphId: graph, order: 0 }],
 			nextGraphOrder: 1,
@@ -303,7 +316,7 @@ describe("Node filesystem Workspace persistence", () => {
 
 		const repairedLease = await persistence.acquire();
 		await expect((await repairedLease.openGraph(graph)).load()).resolves.toEqual({
-			records: [record(graph, 1)],
+			facts: [fact(graph, 1)],
 			diagnostics: ["Ignored incomplete Work Graph tail at sequence 2"],
 		});
 		await repairedLease.close();

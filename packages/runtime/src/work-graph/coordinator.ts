@@ -5,7 +5,6 @@ import { MemoryWorkspacePersistence } from "./memory-workspace-persistence.ts";
 import type {
 	InputResourceReservation,
 	OpenCodingAgentOptions,
-	WorkGraphRecord,
 	WorkGraphStore,
 	WorkSessionReservation,
 	WorkspaceLedger,
@@ -19,7 +18,6 @@ import type {
 	AddWorkItemSpecification,
 	CodingAgent,
 	CodingAgentCloseResult,
-	CodingAgentCommand,
 	CodingAgentCommandBatch,
 	CodingAgentObservation,
 	CodingAgentReceipt,
@@ -47,10 +45,11 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
+import { WorkGraphAggregate } from "./work-graph-aggregate.ts";
+import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
 import { WorkScheduler } from "./work-scheduler.ts";
 import {
 	INITIAL_WORKER_FACT_PROJECTION,
-	reduceWorkerFact,
 	type WorkerFact,
 	type WorkerFactProjection,
 	workerFactHasOpenEffects,
@@ -89,10 +88,6 @@ function jsonValue(value: unknown): JsonValue {
 	const text = JSON.stringify(value);
 	if (text === undefined) return null;
 	return JSON.parse(text) as JsonValue;
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function graphId(value: string): WorkGraphId {
@@ -209,7 +204,7 @@ interface ItemRecord {
 	readonly dependencies: readonly WorkItemId[];
 	readonly objective: string;
 	readonly executionMode: "read_only" | "write";
-	readonly acceptedAt: number;
+	acceptedAt: number;
 	readonly publicationOrder: number;
 	readonly runtimeId: string;
 	desiredConfiguration: DesiredRuntimeConfiguration;
@@ -251,13 +246,14 @@ interface GraphRecord {
 	readonly objective: string;
 	readonly rootId: WorkItemId;
 	readonly maximumConcurrency: number;
-	readonly acceptedAt: number;
+	acceptedAt: number;
 	readonly items: Map<WorkItemId, ItemRecord>;
 	readonly itemOrder: ItemRecord[];
 	nextItemOrder: number;
 	activeConcurrency: number;
 	effectiveConcurrency: number;
 	cancellationRequested: boolean;
+	aggregate: WorkGraphAggregate;
 	result?: WorkGraphResult;
 	settlement?: Promise<void>;
 }
@@ -289,6 +285,7 @@ interface NewItemPlan {
 }
 
 interface BatchPlan {
+	readonly batchId: string;
 	readonly targetGraphId: WorkGraphId;
 	readonly newGraphs: GraphRecord[];
 	readonly newItems: NewItemPlan[];
@@ -305,44 +302,6 @@ interface Subscriber {
 	readonly waiters: Array<(value: IteratorResult<CodingAgentObservation>) => void>;
 	closed: boolean;
 	resync: boolean;
-}
-
-interface PersistedGraphDefinition {
-	readonly graphId: string;
-	readonly order: number;
-	readonly objective: string;
-	readonly rootItemId: string;
-	readonly maximumConcurrency: number;
-	readonly acceptedAt: number;
-}
-
-interface PersistedItemDefinition {
-	readonly graphId: string;
-	readonly itemId: string;
-	readonly order: number;
-	readonly parentItemId?: string;
-	readonly dependencies: readonly string[];
-	readonly objective: string;
-	readonly executionMode: "read_only" | "write";
-	readonly desiredConfiguration: DesiredRuntimeConfiguration;
-	readonly acceptedAt: number;
-	readonly publicationOrder: number;
-	readonly runtimeId: string;
-	readonly sessionId: string;
-	readonly placement: WorkspacePlacementDescriptor;
-}
-
-interface PersistedBatch {
-	readonly schemaVersion: 1;
-	readonly commands: readonly CodingAgentCommand[];
-	readonly graphs: readonly PersistedGraphDefinition[];
-	readonly items: readonly PersistedItemDefinition[];
-}
-
-interface RecoveredPendingInput {
-	readonly graph: GraphRecord;
-	readonly item: ItemRecord;
-	readonly command: DeliverWorkItemInput;
 }
 
 function makeItem(input: {
@@ -445,7 +404,6 @@ class WorkCoordinator implements CodingAgent {
 		for (const owner of ledgerRestore.sessionOwners) {
 			this.#sessionLeases.set(owner.sessionId, { graphId: owner.graphId, itemId: owner.itemId });
 		}
-		const restoredRecords: WorkGraphRecord[] = [];
 		for (const entry of [...ledgerRestore.activeGraphs].sort((left, right) => left.order - right.order)) {
 			try {
 				const store = await lease.openGraph(entry.graphId);
@@ -454,7 +412,13 @@ class WorkCoordinator implements CodingAgent {
 				for (const diagnostic of restored.diagnostics) {
 					this.#diagnose({ code: "work_graph_recovery", message: diagnostic }, entry.graphId);
 				}
-				restoredRecords.push(...restored.records);
+				const aggregate = WorkGraphAggregate.replay(restored.facts);
+				const graph = this.#restoreAggregate(aggregate);
+				if (graph.id !== entry.graphId || graph.order !== entry.order) {
+					throw new Error(`Workspace Ledger index does not match Work Graph ${entry.graphId}`);
+				}
+				this.#graphs.set(graph.id, graph);
+				this.#graphOrder.push(graph);
 			} catch (error) {
 				this.#graphFailures.set(entry.graphId, error);
 				this.#diagnose(
@@ -463,11 +427,15 @@ class WorkCoordinator implements CodingAgent {
 				);
 			}
 		}
-		if (restoredRecords.length === 0) return;
+		if (this.#graphOrder.length === 0) return;
 		const openPublications = new Set<string>();
 		const publicationArtifacts = new Map<string, WorkspaceArtifact>();
-		const settledTargetIdentities = new Map<string, string>();
-		const pendingResourceInputs = new Map<string, RecoveredPendingInput>();
+		const settledTargetIdentities = new Map(
+			ledgerRestore.targetIdentities.map(({ targetPlacementId, targetIdentity }) => [
+				targetPlacementId,
+				targetIdentity,
+			]),
+		);
 		const resourceRecoveryFailures = new Map<string, string[]>();
 		const itemKey = (graph: WorkGraphId, item: WorkItemId): string => `${graph}\0${item}`;
 		const recordResourceFailure = (graph: WorkGraphId, item: WorkItemId, reason: string): void => {
@@ -476,136 +444,40 @@ class WorkCoordinator implements CodingAgent {
 			reasons.push(reason);
 			resourceRecoveryFailures.set(key, reasons);
 		};
-		for (const record of restoredRecords) {
-			switch (record.type) {
-				case "batch_accepted":
-					this.#restoreAcceptedBatch(record.payload, record.batchId, pendingResourceInputs);
-					break;
-				case "input_resources_settled": {
-					const pending = pendingResourceInputs.get(record.deliveryId);
-					if (!pending) throw new Error(`Restored input resource delivery not found: ${record.deliveryId}`);
-					if (pending.graph.id !== record.graphId || pending.item.id !== record.itemId) {
-						throw new Error(`Restored input resource delivery target changed: ${record.deliveryId}`);
-					}
-					pendingResourceInputs.delete(record.deliveryId);
-					const failures = this.#settleInputAdmission(
-						pending.item,
-						record.deliveryId,
-						record.outcome,
-						record.diagnostic,
-					);
-					for (const failure of failures) recordResourceFailure(record.graphId, record.itemId, failure);
-					break;
+		for (const graph of this.#graphOrder) {
+			const snapshot = graph.aggregate.snapshot().graph!;
+			for (const aggregateItem of snapshot.items) {
+				const key = itemKey(graph.id, aggregateItem.itemId);
+				if (aggregateItem.publication?.phase === "started") {
+					openPublications.add(key);
+					publicationArtifacts.set(key, aggregateItem.publication.artifact);
 				}
-				case "item_transition": {
-					const item = this.#restoredItem(record);
-					if (item.state !== record.from) {
-						throw new Error(
-							`Work Graph transition mismatch for ${record.graphId}/${record.itemId}: expected ${item.state}, found ${record.from}`,
+				if (aggregateItem.publication?.phase === "settled") {
+					const publication = aggregateItem.publication.publication;
+					if (
+						(publication.state === "published" || publication.state === "not_required") &&
+						publication.targetPlacementId &&
+						publication.targetIdentity
+					) {
+						settledTargetIdentities.set(publication.targetPlacementId, publication.targetIdentity);
+					}
+				}
+				for (const input of aggregateItem.inputs) {
+					if (input.settlement === "pending") {
+						recordResourceFailure(
+							graph.id,
+							aggregateItem.itemId,
+							`input_resource_settlement_unknown:${input.deliveryId}`,
+						);
+					} else if (input.settlement === "failed") {
+						recordResourceFailure(
+							graph.id,
+							aggregateItem.itemId,
+							`input_resource_commit_failed:${input.diagnostic ?? input.deliveryId}`,
 						);
 					}
-					item.state = record.to as WorkItemState;
-					break;
-				}
-				case "worker_fact": {
-					const item = this.#restoredItem(record);
-					item.factProjection = reduceWorkerFact(item.factProjection, record.fact);
-					if (record.fact.type === "run_started") {
-						if (item.state === "preparing") item.state = "running";
-						else if (item.state !== "running") {
-							throw new Error(
-								`Work Graph run_started state mismatch for ${record.graphId}/${record.itemId}: ${item.state}`,
-							);
-						}
-					}
-					break;
-				}
-				case "item_result": {
-					const item = this.#restoredItem(record);
-					const result = record.payload as unknown as WorkResult;
-					if (
-						String(result.itemId) !== String(item.id) ||
-						!isTerminal(result.state) ||
-						result.durability !== "confirmed"
-					) {
-						throw new Error(`Invalid restored Work Result for ${record.graphId}/${record.itemId}`);
-					}
-					item.result = immutableData(result);
-					item.state = result.state;
-					item.factProjection = Object.freeze({
-						modelAttempts: result.budget.modelAttempts,
-						toolInvocations: result.budget.toolInvocations,
-						totalTokens: result.budget.totalTokens,
-						...(result.budget.exhaustion ? { exhaustion: result.budget.exhaustion } : {}),
-						openAttempts: Object.freeze([]),
-						openTools: Object.freeze([]),
-					});
-					break;
-				}
-				case "graph_result": {
-					const graph = this.#graphs.get(record.graphId);
-					if (!graph) throw new Error(`Restored Work Graph not found: ${record.graphId}`);
-					const result = record.payload as unknown as WorkGraphResult;
-					if (String(result.graphId) !== String(graph.id) || result.durability !== "confirmed") {
-						throw new Error(`Invalid restored Work Graph Result for ${record.graphId}`);
-					}
-					graph.result = immutableData(result);
-					graph.effectiveConcurrency = result.effectiveConcurrency;
-					break;
-				}
-				case "cancellation_requested": {
-					const graph = this.#graphs.get(record.graphId);
-					if (!graph) throw new Error(`Restored Work Graph not found: ${record.graphId}`);
-					if (record.itemId) {
-						const target = graph.items.get(record.itemId);
-						if (!target) throw new Error(`Restored Work Item not found: ${record.itemId}`);
-						for (const item of graph.itemOrder) {
-							if (item.id === target.id || this.#isDescendant(graph, item, target.id))
-								item.cancellationRequested = true;
-						}
-					} else {
-						graph.cancellationRequested = true;
-						for (const item of graph.itemOrder) item.cancellationRequested = true;
-					}
-					break;
-				}
-				case "publication": {
-					const key = itemKey(record.graphId, record.itemId);
-					const payload = record.payload;
-					if (!isRecordValue(payload)) throw new Error(`Invalid Publication record for ${key}`);
-					if (payload.phase === "started") {
-						openPublications.add(key);
-						if (isRecordValue(payload.artifact)) {
-							publicationArtifacts.set(key, payload.artifact as unknown as WorkspaceArtifact);
-						}
-					} else if (payload.phase === "settled") {
-						openPublications.delete(key);
-						const publication = payload.publication;
-						if (
-							isRecordValue(publication) &&
-							(publication.state === "published" || publication.state === "not_required") &&
-							typeof publication.targetPlacementId === "string" &&
-							typeof publication.targetIdentity === "string"
-						) {
-							settledTargetIdentities.set(publication.targetPlacementId, publication.targetIdentity);
-						}
-					}
-					break;
-				}
-				case "ownership_released":
-					this.#restoredItem(record).resourcesReleased = true;
-					break;
-				case "recovery_interrupted": {
-					const item = this.#restoredItem(record);
-					const result = record.payload as unknown as WorkResult;
-					item.state = "interrupted";
-					item.result = immutableData(result);
-					break;
 				}
 			}
-		}
-		for (const [deliveryId, pending] of pendingResourceInputs) {
-			recordResourceFailure(pending.graph.id, pending.item.id, `input_resource_settlement_unknown:${deliveryId}`);
 		}
 
 		this.#graphOrder.sort((left, right) => left.order - right.order);
@@ -708,135 +580,82 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	#restoreAcceptedBatch(
-		value: JsonValue,
-		batchId: string,
-		pendingResourceInputs: Map<string, RecoveredPendingInput>,
-	): void {
-		if (
-			!isRecordValue(value) ||
-			value.schemaVersion !== 1 ||
-			!Array.isArray(value.graphs) ||
-			!Array.isArray(value.items)
-		) {
-			throw new Error("Invalid accepted Work Graph batch payload");
+	#restoreAggregate(aggregate: WorkGraphAggregate): GraphRecord {
+		const snapshot = aggregate.snapshot().graph;
+		if (!snapshot) throw new Error("Active Work Graph store has no graph_accepted Fact");
+		if (snapshot.maximumConcurrency > this.#capacity.graphMaximumConcurrency) {
+			throw new Error(`Restored Work Graph exceeds the configured Graph capacity: ${snapshot.graphId}`);
 		}
-		const batch = value as unknown as PersistedBatch;
-		for (const definition of batch.graphs) {
-			const id = graphId(assertIdentity(definition.graphId, "graph"));
-			if (this.#graphs.has(id)) throw new Error(`Duplicate restored Work Graph: ${id}`);
-			if (
-				!Number.isSafeInteger(definition.order) ||
-				!Number.isSafeInteger(definition.maximumConcurrency) ||
-				definition.maximumConcurrency < 1 ||
-				definition.maximumConcurrency > this.#capacity.graphMaximumConcurrency
-			) {
-				throw new Error(`Invalid restored Work Graph definition: ${id}`);
-			}
-			const graph: GraphRecord = {
-				id,
-				order: definition.order,
-				objective: assertObjective(definition.objective, "Restored Work Graph objective"),
-				rootId: itemId(assertIdentity(definition.rootItemId, "item")),
-				maximumConcurrency: definition.maximumConcurrency,
-				acceptedAt: definition.acceptedAt,
-				items: new Map(),
-				itemOrder: [],
-				nextItemOrder: 0,
-				activeConcurrency: 0,
-				effectiveConcurrency: 0,
-				cancellationRequested: false,
-			};
-			this.#graphs.set(id, graph);
-			this.#graphOrder.push(graph);
-		}
-		for (const definition of batch.items) {
-			const graph = this.#graphs.get(graphId(definition.graphId));
-			if (!graph) throw new Error(`Restored Work Graph not found for Work Item: ${definition.graphId}`);
-			const id = itemId(assertIdentity(definition.itemId, "item"));
-			if (graph.items.has(id)) throw new Error(`Duplicate restored Work Item: ${graph.id}/${id}`);
-			const sessionId = assertIdentity(definition.sessionId, "session");
-			if (!isRecordValue(definition.placement)) throw new Error(`Invalid restored Workspace Placement for ${id}`);
+		const graph: GraphRecord = {
+			id: snapshot.graphId,
+			order: snapshot.order,
+			objective: snapshot.objective,
+			rootId: snapshot.rootItemId,
+			maximumConcurrency: snapshot.maximumConcurrency,
+			acceptedAt: snapshot.acceptedAt,
+			items: new Map(),
+			itemOrder: [],
+			nextItemOrder: snapshot.items.length,
+			activeConcurrency: 0,
+			effectiveConcurrency: snapshot.result?.effectiveConcurrency ?? 0,
+			cancellationRequested: snapshot.cancellationRequested,
+			aggregate,
+			...(snapshot.result ? { result: snapshot.result } : {}),
+		};
+		for (const state of [...snapshot.items].sort((left, right) => left.order - right.order)) {
 			const item = makeItem({
 				graphId: graph.id,
-				itemId: id,
-				order: definition.order,
-				...(definition.parentItemId ? { parentId: itemId(definition.parentItemId) } : {}),
-				dependencies: definition.dependencies.map(itemId),
-				objective: definition.objective,
-				executionMode: definition.executionMode,
-				configuration: definition.desiredConfiguration,
-				acceptedAt: definition.acceptedAt,
-				publicationOrder: definition.publicationOrder,
-				runtimeId: definition.runtimeId,
+				itemId: state.itemId,
+				order: state.order,
+				...(state.parentItemId ? { parentId: state.parentItemId } : {}),
+				dependencies: state.dependencies,
+				objective: state.objective,
+				executionMode: state.executionMode,
+				configuration: state.desiredConfiguration,
+				acceptedAt: state.acceptedAt,
+				publicationOrder: state.publicationOrder,
+				runtimeId: state.runtimeId,
 			});
-			item.sessionId = sessionId;
-			item.placementDescriptor = immutableData(definition.placement);
-			graph.items.set(id, item);
-			graph.itemOrder.push(item);
-			graph.nextItemOrder = Math.max(graph.nextItemOrder, item.order + 1);
-		}
-		if (!Array.isArray(batch.commands)) throw new Error("Restored Work Graph batch has no command list");
-		for (const [commandIndex, command] of batch.commands.entries()) {
-			switch (command.type) {
-				case "configure_work_item": {
-					const graph = this.#graphs.get(graphId(String(command.graphId)));
-					const item = graph?.items.get(itemId(String(command.itemId)));
-					if (!item) throw new Error(`Restored ConfigureWorkItem target not found: ${command.itemId}`);
-					item.desiredConfiguration = immutableData(command.configuration);
-					break;
+			item.sessionId = state.sessionId;
+			item.placementDescriptor = state.placement;
+			item.state = state.state;
+			item.cancellationRequested = state.cancellationRequested;
+			item.startedAt = state.startedAt;
+			item.factProjection = state.worker;
+			item.resourcesReleased = state.ownershipReleased !== undefined;
+			item.promptAccepted = state.inputs.some(({ kind }) => kind === "prompt");
+			if (state.result) {
+				item.result = state.result;
+				item.diagnostics.push(...state.result.diagnostics);
+			} else {
+				for (const input of state.inputs) {
+					const command: DeliverWorkItemInput = {
+						type: "deliver_work_item_input",
+						graphId: graph.id,
+						itemId: item.id,
+						kind: input.kind,
+						input: input.input,
+						...(input.resourceReferences.length > 0 ? { resources: input.resourceReferences } : {}),
+					};
+					item.inputAdmissions.push({
+						deliveryId: input.deliveryId,
+						command,
+						...(input.settlement === "pending"
+							? {}
+							: {
+									settlement: {
+										outcome: input.settlement,
+										...(input.diagnostic ? { diagnostic: input.diagnostic } : {}),
+									},
+								}),
+					});
 				}
-				case "deliver_work_item_input": {
-					const graph = this.#graphs.get(graphId(String(command.graphId)));
-					const item = graph?.items.get(itemId(String(command.itemId)));
-					if (!item) throw new Error(`Restored DeliverWorkItemInput target not found: ${command.itemId}`);
-					const deliveryId = `${batchId}:${commandIndex}`;
-					this.#restoreInputAdmission(item, command, deliveryId);
-					if ((command.resources?.length ?? 0) > 0) {
-						pendingResourceInputs.set(deliveryId, { graph: graph!, item, command });
-					}
-					break;
-				}
-				case "cancel_work": {
-					const graph = this.#graphs.get(graphId(String(command.target.graphId)));
-					if (!graph) throw new Error(`Restored CancelWork target not found: ${command.target.graphId}`);
-					if (command.target.type === "graph") {
-						graph.cancellationRequested = true;
-						for (const item of graph.itemOrder) item.cancellationRequested = true;
-					} else {
-						const target = graph.items.get(itemId(String(command.target.itemId)));
-						if (!target) throw new Error(`Restored CancelWork target not found: ${command.target.itemId}`);
-						for (const item of graph.itemOrder) {
-							if (item.id === target.id || this.#isDescendant(graph, item, target.id))
-								item.cancellationRequested = true;
-						}
-					}
-					break;
-				}
-				case "start_work_graph":
-				case "add_work_items":
-					break;
+				this.#drainInputAdmissions(item);
 			}
+			graph.items.set(item.id, item);
+			graph.itemOrder.push(item);
 		}
-	}
-
-	#restoreInputAdmission(item: ItemRecord, command: DeliverWorkItemInput, deliveryId: string): void {
-		if (command.kind === "prompt") {
-			if (item.promptAccepted) throw new Error(`Restored Work Item has duplicate Prompt input: ${item.id}`);
-			item.promptAccepted = true;
-		}
-		item.inputAdmissions.push({
-			deliveryId,
-			command,
-			...((command.resources?.length ?? 0) === 0 ? { settlement: { outcome: "committed" as const } } : {}),
-		});
-		this.#drainInputAdmissions(item);
-	}
-
-	#restoredItem(record: { readonly graphId: WorkGraphId; readonly itemId: WorkItemId }): ItemRecord {
-		const item = this.#graphs.get(record.graphId)?.items.get(record.itemId);
-		if (!item) throw new Error(`Restored Work Item not found: ${record.graphId}/${record.itemId}`);
-		return item;
+		return graph;
 	}
 
 	async #recoverOwnership(graph: GraphRecord, item: ItemRecord, expectedTargetIdentity?: string): Promise<void> {
@@ -893,27 +712,23 @@ class WorkCoordinator implements CodingAgent {
 		artifact?: WorkspaceArtifact,
 	): Promise<void> {
 		const from = item.state;
-		item.state = "interrupted";
+		await this.#appendGraphFacts(graph, [
+			{
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "recovery_interrupted",
+				graphId: graph.id,
+				itemId: item.id,
+				timestamp: Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+				from,
+				reasons: [...reasons],
+				...(artifact ? { artifact } : {}),
+			},
+		]);
+		const state = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!;
+		item.state = state.state;
 		item.resourcesReleased = true;
-		item.diagnostics.push({
-			code: "recovered_interruption",
-			message: `Work Item was not replayed after recovery: ${reasons.join(", ")}`,
-		});
-		const publication: PublicationOutcome = {
-			state: "not_published",
-			reason: "interrupted",
-			diagnostic: reasons.join(", "),
-		};
-		const result = this.#makeResult(item, "interrupted", publication, artifact);
-		await this.#appendGraphRecord(graph.id, {
-			type: "recovery_interrupted",
-			graphId: graph.id,
-			itemId: item.id,
-			timestamp: result.timing.settledAt,
-			reasons: [...reasons],
-			payload: jsonValue(result),
-		});
-		item.result = result;
+		item.result = state.result;
+		item.diagnostics.splice(0, item.diagnostics.length, ...(state.result?.diagnostics ?? []));
 		this.#publish((sequence) => ({
 			type: "item_state_changed",
 			sequence,
@@ -922,7 +737,12 @@ class WorkCoordinator implements CodingAgent {
 			from,
 			to: "interrupted",
 		}));
-		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
+		this.#publish((sequence) => ({
+			type: "work_item_settled",
+			sequence,
+			graphId: graph.id,
+			result: state.result!,
+		}));
 	}
 
 	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
@@ -1021,23 +841,19 @@ class WorkCoordinator implements CodingAgent {
 			await this.#mutationFence.run(() =>
 				this.#graphMutation(plan!.targetGraphId, async () => {
 					this.#revalidate(plan!);
+					const graph = plan!.newGraphs[0] ?? this.#graphs.get(plan!.targetGraphId)!;
 					if (plan!.newGraphs.length === 0 && plan!.newItems.length > 0) {
 						await this.#acceptWorkspaceGraphs(plan!);
 					}
-					await this.#appendGraphRecord(plan!.targetGraphId, {
-						type: "batch_accepted",
-						batchId,
-						acceptedAt: this.#options.clock.now(),
-						payload: this.#acceptedBatchPayload(batch, plan!, plan!.targetGraphId),
-					});
+					await this.#appendGraphFacts(graph, this.#acceptedFacts(plan!));
 					if (plan!.newGraphs.length > 0) {
 						await this.#graphStores.get(plan!.targetGraphId)!.flush();
 						await this.#acceptWorkspaceGraphs(plan!);
 					}
 					durablyAccepted = true;
 					this.#accept(plan!);
-					this.#acceptOperations(plan!);
 					this.#acceptInputAdmissions(plan!);
+					this.#acceptOperations(plan!);
 					sequence = this.#publish((value) => ({
 						type: "batch_accepted",
 						sequence: value,
@@ -1077,8 +893,8 @@ class WorkCoordinator implements CodingAgent {
 		admission.release();
 		this.#requestSchedule();
 
-		// batch_accepted is the linearization point. Once that fatal barrier
-		// succeeds, this command can never be reported as rejected or rolled back.
+		// The atomic Fact segment plus any required Ledger index is the durable
+		// acceptance point. Later bookkeeping cannot turn it into a rejection.
 		try {
 			await this.#applyAcceptedOperations(plan);
 		} catch (error) {
@@ -1240,6 +1056,7 @@ class WorkCoordinator implements CodingAgent {
 						activeConcurrency: 0,
 						effectiveConcurrency: 0,
 						cancellationRequested: false,
+						aggregate: WorkGraphAggregate.empty(),
 					};
 					const root = makeItem({
 						graphId: id,
@@ -1371,7 +1188,17 @@ class WorkCoordinator implements CodingAgent {
 		}
 		const targetGraphId = [...targetGraphIds][0]!;
 		if (!graphIds.includes(targetGraphId)) graphIds.push(targetGraphId);
-		return { targetGraphId, newGraphs, newItems, deliveries, configurations, cancellations, graphIds, itemIds };
+		return {
+			batchId,
+			targetGraphId,
+			newGraphs,
+			newItems,
+			deliveries,
+			configurations,
+			cancellations,
+			graphIds,
+			itemIds,
+		};
 	}
 
 	#planAddedItem(input: {
@@ -1729,20 +1556,24 @@ class WorkCoordinator implements CodingAgent {
 
 		let failures: readonly string[] = [];
 		try {
-			failures = await this.#mutationFence.run(() =>
-				this.#graphMutation(delivery.graph.id, async () => {
-					await this.#appendGraphRecord(delivery.graph.id, {
+			failures = await this.#graphMutation(delivery.graph.id, async () => {
+				await this.#appendGraphFacts(delivery.graph, [
+					{
+						version: WORK_GRAPH_FACT_VERSION,
 						type: "input_resources_settled",
 						graphId: delivery.graph.id,
 						itemId: delivery.item.id,
 						deliveryId: delivery.deliveryId,
 						outcome,
-						timestamp: this.#options.clock.now(),
-						...(diagnostic ? { diagnostic } : {}),
-					});
-					return this.#settleInputAdmission(delivery.item, delivery.deliveryId, outcome, diagnostic);
-				}),
-			);
+						timestamp: Math.max(
+							this.#options.clock.now(),
+							delivery.graph.aggregate.snapshot().lastTimestamp ?? 0,
+						),
+						...(outcome === "failed" ? { diagnostic: diagnostic ?? "Input resource commit failed" } : {}),
+					},
+				]);
+				return this.#settleInputAdmission(delivery.item, delivery.deliveryId, outcome, diagnostic);
+			});
 		} catch (error) {
 			this.#diagnose(
 				{
@@ -1791,10 +1622,14 @@ class WorkCoordinator implements CodingAgent {
 
 	#accept(plan: BatchPlan): void {
 		for (const graph of plan.newGraphs) {
+			graph.acceptedAt = graph.aggregate.snapshot().graph!.acceptedAt;
 			this.#graphs.set(graph.id, graph);
 			this.#graphOrder.push(graph);
 		}
 		for (const entry of plan.newItems) {
+			entry.item.acceptedAt = entry.graph.aggregate
+				.snapshot()
+				.graph!.items.find(({ itemId }) => itemId === entry.item.id)!.acceptedAt;
 			entry.graph.items.set(entry.item.id, entry.item);
 			entry.graph.itemOrder.push(entry.item);
 		}
@@ -1872,38 +1707,94 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	#acceptedBatchPayload(batch: CodingAgentCommandBatch, plan: BatchPlan, targetGraphId: WorkGraphId): JsonValue {
-		return jsonValue({
-			schemaVersion: 1,
-			commands: batch.commands,
-			graphs: plan.newGraphs
-				.filter((graph) => graph.id === targetGraphId)
-				.map((graph) => ({
-					graphId: graph.id,
-					order: graph.order,
-					objective: graph.objective,
-					rootItemId: graph.rootId,
-					maximumConcurrency: graph.maximumConcurrency,
-					acceptedAt: graph.acceptedAt,
-				})),
-			items: plan.newItems
-				.filter(({ graph }) => graph.id === targetGraphId)
-				.map(({ item }) => ({
-					graphId: item.graphId,
-					itemId: item.id,
-					order: item.order,
-					parentItemId: item.parentId,
-					dependencies: item.dependencies,
-					objective: item.objective,
-					executionMode: item.executionMode,
-					desiredConfiguration: item.desiredConfiguration,
-					acceptedAt: item.acceptedAt,
-					publicationOrder: item.publicationOrder,
-					runtimeId: item.runtimeId,
-					sessionId: item.sessionId,
-					placement: item.placementDescriptor,
-				})),
-		});
+	#itemDefinition(item: ItemRecord): WorkGraphItemDefinition {
+		if (!item.sessionId || !item.placementDescriptor) {
+			throw new Error(`Accepted Work Item ${item.id} has incomplete ownership`);
+		}
+		return {
+			itemId: item.id,
+			order: item.order,
+			...(item.parentId ? { parentItemId: item.parentId } : {}),
+			dependencies: item.dependencies,
+			objective: item.objective,
+			executionMode: item.executionMode,
+			desiredConfiguration: item.desiredConfiguration,
+			publicationOrder: item.publicationOrder,
+			runtimeId: item.runtimeId,
+			sessionId: item.sessionId,
+			placement: item.placementDescriptor,
+		};
+	}
+
+	#acceptedFacts(plan: BatchPlan): readonly WorkGraphFact[] {
+		const graph = plan.newGraphs[0] ?? this.#graphs.get(plan.targetGraphId);
+		if (!graph) throw new Error(`Accepted Work Graph is unavailable: ${plan.targetGraphId}`);
+		const timestamp = Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0);
+		const facts: WorkGraphFact[] = [];
+		const root =
+			plan.newGraphs.length > 0 ? plan.newItems.find(({ item }) => item.id === graph.rootId)?.item : undefined;
+		if (plan.newGraphs.length > 0) {
+			if (!root) throw new Error(`Accepted Work Graph ${graph.id} has no root Work Item`);
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "graph_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				order: graph.order,
+				objective: graph.objective,
+				maximumConcurrency: graph.maximumConcurrency,
+				root: this.#itemDefinition(root),
+			});
+		}
+		const added = plan.newItems.filter(({ item }) => item !== root).map(({ item }) => this.#itemDefinition(item));
+		if (added.length > 0) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "items_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				items: added,
+			});
+		}
+		for (const { deliveryId, command, item } of plan.deliveries) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "input_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				deliveryId,
+				itemId: item.id,
+				kind: command.kind,
+				input: command.input,
+				resourceReferences: command.resources ?? [],
+			});
+		}
+		for (const { command, item } of plan.configurations) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "item_configuration_changed",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				itemId: item.id,
+				configuration: command.configuration,
+			});
+		}
+		for (const cancellation of plan.cancellations) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "cancellation_requested",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				target: cancellation.item ? { type: "item", itemId: cancellation.item.id } : { type: "graph" },
+			});
+		}
+		if (facts.length === 0) throw new Error(`Accepted batch ${plan.batchId} produced no Work Graph Facts`);
+		return facts;
 	}
 
 	async #acceptWorkspaceGraphs(plan: BatchPlan): Promise<void> {
@@ -2338,22 +2229,26 @@ class WorkCoordinator implements CodingAgent {
 	): Promise<WorkerFactProjection> {
 		return this.#graphMutation(graph.id, async () => {
 			this.#assertWorkerOwnership(item, runtimeId, sessionId);
-			const nextProjection = reduceWorkerFact(item.factProjection, fact);
 			const transitionFrom = fact.type === "run_started" && item.state === "preparing" ? "preparing" : undefined;
 			if (fact.type === "run_started" && !transitionFrom && item.state !== "running") {
 				throw new Error(`Work Item ${item.id} cannot start a Run in ${item.state}`);
 			}
-			await this.#appendGraphRecord(graph.id, {
-				type: "worker_fact",
-				graphId: graph.id,
-				itemId: item.id,
-				runtimeId,
-				sessionId,
-				fact,
-			});
-			item.factProjection = nextProjection;
+			await this.#appendGraphFacts(graph, [
+				{
+					version: WORK_GRAPH_FACT_VERSION,
+					type: "worker_fact_recorded",
+					graphId: graph.id,
+					timestamp: fact.timestamp,
+					itemId: item.id,
+					runtimeId,
+					sessionId,
+					fact,
+				},
+			]);
+			const aggregateItem = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!;
+			item.factProjection = aggregateItem.worker;
 			if (transitionFrom) {
-				item.state = "running";
+				item.state = aggregateItem.state;
 				this.#publish((sequence) => ({
 					type: "item_state_changed",
 					sequence,
@@ -2363,7 +2258,7 @@ class WorkCoordinator implements CodingAgent {
 					to: "running",
 				}));
 			}
-			return nextProjection;
+			return item.factProjection;
 		});
 	}
 
@@ -2552,13 +2447,20 @@ class WorkCoordinator implements CodingAgent {
 					try {
 						publicationStarted = await this.#graphMutation(graph.id, async () => {
 							if (item.cancellationRequested || graph.cancellationRequested) return false;
-							await this.#appendGraphRecord(graph.id, {
-								type: "publication",
-								graphId: graph.id,
-								itemId: item.id,
-								timestamp: this.#options.clock.now(),
-								payload: jsonValue({ phase: "started", artifact, target }),
-							});
+							await this.#appendGraphFacts(graph, [
+								{
+									version: WORK_GRAPH_FACT_VERSION,
+									type: "publication_started",
+									graphId: graph.id,
+									itemId: item.id,
+									timestamp: Math.max(
+										this.#options.clock.now(),
+										graph.aggregate.snapshot().lastTimestamp ?? 0,
+									),
+									artifact: artifact!,
+									...(target ? { target } : {}),
+								},
+							]);
 							return true;
 						});
 					} catch (error) {
@@ -2575,7 +2477,7 @@ class WorkCoordinator implements CodingAgent {
 							publication = await this.#options.workspaceExecution.publish({
 								graphId: graph.id,
 								itemId: item.id,
-								artifact,
+								artifact: artifact!,
 								placement,
 								...(target ? { target } : {}),
 								signal: item.controller?.signal ?? new AbortController().signal,
@@ -2588,13 +2490,19 @@ class WorkCoordinator implements CodingAgent {
 					}
 				}
 				try {
-					await this.#appendGraphRecord(graph.id, {
-						type: "publication",
-						graphId: graph.id,
-						itemId: item.id,
-						timestamp: this.#options.clock.now(),
-						payload: jsonValue({ phase: "settled", artifact, publication }),
-					});
+					await this.#graphMutation(graph.id, () =>
+						this.#appendGraphFacts(graph, [
+							{
+								version: WORK_GRAPH_FACT_VERSION,
+								type: "publication_settled",
+								graphId: graph.id,
+								itemId: item.id,
+								timestamp: Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+								artifact: artifact!,
+								publication,
+							},
+						]),
+					);
 					if (
 						(publication.state === "published" || publication.state === "not_required") &&
 						publication.targetPlacementId &&
@@ -2702,15 +2610,29 @@ class WorkCoordinator implements CodingAgent {
 			if (result.durability !== "confirmed") {
 				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Graph store`);
 			}
-			await this.#appendGraphRecord(graph.id, {
-				type: "item_result",
+			await this.#appendGraphFacts(graph, [
+				{
+					version: WORK_GRAPH_FACT_VERSION,
+					type: "item_result_recorded",
+					graphId: graph.id,
+					itemId: item.id,
+					timestamp: result.timing.settledAt,
+					state: result.state,
+					...(result.run ? { run: result.run } : {}),
+					...(result.evidence ? { evidence: result.evidence } : {}),
+					diagnostics: result.diagnostics,
+					...(result.blockedBy ? { blockedBy: result.blockedBy } : {}),
+				},
+			]);
+			const authoritative = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!
+				.result!;
+			item.result = authoritative;
+			this.#publish((sequence) => ({
+				type: "work_item_settled",
+				sequence,
 				graphId: graph.id,
-				itemId: item.id,
-				timestamp: result.timing.settledAt,
-				payload: jsonValue(result),
-			});
-			item.result = result;
-			this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
+				result: authoritative,
+			}));
 		});
 	}
 
@@ -2744,13 +2666,21 @@ class WorkCoordinator implements CodingAgent {
 			return;
 		}
 		try {
-			await this.#appendGraphRecord(graph.id, {
-				type: "ownership_released",
-				graphId: graph.id,
-				itemId: item.id,
-				timestamp: this.#options.clock.now(),
-				preservePlacement: preserve,
-			});
+			const durableItem = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!;
+			if (durableItem.result) {
+				await this.#graphMutation(graph.id, () =>
+					this.#appendGraphFacts(graph, [
+						{
+							version: WORK_GRAPH_FACT_VERSION,
+							type: "ownership_released",
+							graphId: graph.id,
+							itemId: item.id,
+							timestamp: Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+							preservePlacement: preserve,
+						},
+					]),
+				);
+			}
 			if (item.sessionId) {
 				await this.#releaseWorkspaceSession({
 					sessionId: item.sessionId,
@@ -2920,70 +2850,73 @@ class WorkCoordinator implements CodingAgent {
 		if (graph.result || graph.itemOrder.length === 0) return;
 		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
 		if (graph.settlement) return graph.settlement;
-		const operation = this.#mutationFence.run(() =>
-			this.#graphMutation(graph.id, async () => {
-				if (graph.result || graph.itemOrder.length === 0) return;
-				if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
-				const root = graph.items.get(graph.rootId);
-				if (!root?.result) return;
-				const results = graph.itemOrder.map((item) => item.result!);
-				const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
-					? "interrupted"
-					: graph.cancellationRequested || root.result.state === "canceled"
-						? "canceled"
-						: root.result.state === "failed" || root.result.state === "blocked"
-							? "failed"
-							: results.some((result) => result.state !== "succeeded")
-								? "partial"
-								: "succeeded";
-				const publications = results.map((result) => result.publication.state);
-				const finalPublication = publications.includes("not_published")
-					? publications.includes("published")
-						? "mixed"
-						: "not_published"
-					: publications.includes("published")
-						? "published"
-						: "not_required";
-				let result: WorkGraphResult = immutableData({
-					durability:
-						this.#ledgerFailure ||
-						this.#graphFailures.has(graph.id) ||
-						results.some(({ durability }) => durability === "unknown")
-							? "unknown"
-							: "confirmed",
-					graphId: graph.id,
-					rootItemId: graph.rootId,
-					objective: graph.objective,
-					outcome,
-					maximumConcurrency: graph.maximumConcurrency,
-					effectiveConcurrency: graph.effectiveConcurrency,
-					results,
-					cancellationRequested: graph.cancellationRequested,
-					acceptedAt: graph.acceptedAt,
-					settledAt: this.#options.clock.now(),
-					finalPublication,
-				});
-				if (result.durability === "confirmed") {
-					try {
-						await this.#appendGraphRecord(graph.id, {
-							type: "graph_result",
+		const operation = this.#graphMutation(graph.id, async () => {
+			if (graph.result || graph.itemOrder.length === 0) return;
+			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+			const root = graph.items.get(graph.rootId);
+			if (!root?.result) return;
+			const results = graph.itemOrder.map((item) => item.result!);
+			const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
+				? "interrupted"
+				: graph.cancellationRequested || root.result.state === "canceled"
+					? "canceled"
+					: root.result.state === "failed" || root.result.state === "blocked"
+						? "failed"
+						: results.some((result) => result.state !== "succeeded")
+							? "partial"
+							: "succeeded";
+			const publications = results.map((result) => result.publication.state);
+			const finalPublication = publications.includes("not_published")
+				? publications.includes("published")
+					? "mixed"
+					: "not_published"
+				: publications.includes("published")
+					? "published"
+					: "not_required";
+			const settledAt = Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0);
+			let result: WorkGraphResult = immutableData({
+				durability:
+					this.#ledgerFailure ||
+					this.#graphFailures.has(graph.id) ||
+					results.some(({ durability }) => durability === "unknown")
+						? "unknown"
+						: "confirmed",
+				graphId: graph.id,
+				rootItemId: graph.rootId,
+				objective: graph.objective,
+				outcome,
+				maximumConcurrency: graph.maximumConcurrency,
+				effectiveConcurrency: graph.effectiveConcurrency,
+				results,
+				cancellationRequested: graph.cancellationRequested,
+				acceptedAt: graph.acceptedAt,
+				settledAt,
+				finalPublication,
+			});
+			if (result.durability === "confirmed") {
+				try {
+					await this.#appendGraphFacts(graph, [
+						{
+							version: WORK_GRAPH_FACT_VERSION,
+							type: "graph_result_recorded",
 							graphId: graph.id,
-							timestamp: result.settledAt,
-							payload: jsonValue(result),
-						});
-						await this.#archiveDurableGraph(graph);
-					} catch {
-						if (!this.#ledgerFailure && !this.#graphFailures.has(graph.id)) {
-							throw new Error("Work Graph result persistence failed");
-						}
-						result = immutableData({ ...result, durability: "unknown" });
+							timestamp: settledAt,
+							effectiveConcurrency: graph.effectiveConcurrency,
+						},
+					]);
+					result = graph.aggregate.snapshot().graph!.result!;
+					await this.#archiveDurableGraph(graph);
+				} catch {
+					if (!this.#ledgerFailure && !this.#graphFailures.has(graph.id)) {
+						throw new Error("Work Graph result persistence failed");
 					}
+					result = immutableData({ ...result, durability: "unknown" });
 				}
-				graph.result = result;
-				this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
-				this.#notifySettlementWaiters();
-			}),
-		);
+			}
+			graph.result = result;
+			this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
+			this.#notifySettlementWaiters();
+		});
 		graph.settlement = operation;
 		try {
 			await operation;
@@ -3010,15 +2943,18 @@ class WorkCoordinator implements CodingAgent {
 			if (!this.#transitionPermitted(from, to)) {
 				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
 			}
-			await this.#appendGraphRecord(graph.id, {
-				type: "item_transition",
-				graphId: graph.id,
-				itemId: item.id,
-				from,
-				to,
-				timestamp: this.#options.clock.now(),
-			});
-			item.state = to;
+			await this.#appendGraphFacts(graph, [
+				{
+					version: WORK_GRAPH_FACT_VERSION,
+					type: "item_transitioned",
+					graphId: graph.id,
+					itemId: item.id,
+					from,
+					to,
+					timestamp: Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+				},
+			]);
+			item.state = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!.state;
 			this.#publish((sequence) => ({
 				type: "item_state_changed",
 				sequence,
@@ -3200,13 +3136,20 @@ class WorkCoordinator implements CodingAgent {
 		return store;
 	}
 
-	async #appendGraphRecord(graphId: WorkGraphId, record: WorkGraphRecord): Promise<void> {
-		const failure = this.#graphFailures.get(graphId);
+	async #appendGraphFacts(graph: GraphRecord, facts: readonly WorkGraphFact[]): Promise<void> {
+		if (facts.length === 0) throw new Error("A Work Graph segment must contain Facts");
+		if (facts.some(({ graphId }) => graphId !== graph.id)) {
+			throw new Error(`A Work Graph segment cannot cross Graph ${graph.id}`);
+		}
+		let aggregate = graph.aggregate;
+		for (const fact of facts) aggregate = aggregate.apply(fact);
+		const failure = this.#graphFailures.get(graph.id);
 		if (failure) throw failure;
 		try {
-			await (await this.#openGraphStore(graphId)).append(record);
+			await (await this.#openGraphStore(graph.id)).append(facts);
+			graph.aggregate = aggregate;
 		} catch (error) {
-			this.#latchGraphFailure(graphId, error);
+			this.#latchGraphFailure(graph.id, error);
 			throw error;
 		}
 	}
@@ -3306,16 +3249,19 @@ class WorkCoordinator implements CodingAgent {
 				continue;
 			}
 			try {
-				await this.#mutationFence.run(() =>
-					this.#graphMutation(graph.id, async () => {
-						await this.#appendGraphRecord(graph.id, {
+				await this.#graphMutation(graph.id, async () => {
+					await this.#appendGraphFacts(graph, [
+						{
+							version: WORK_GRAPH_FACT_VERSION,
 							type: "cancellation_requested",
 							graphId: graph.id,
-							timestamp: this.#options.clock.now(),
-						});
-						this.#markCancellation(graph);
-					}),
-				);
+							timestamp: Math.max(this.#options.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+							batchId: "batch:close",
+							target: { type: "graph" },
+						},
+					]);
+					this.#markCancellation(graph);
+				});
 				await this.#applyCancellation(graph);
 			} catch (error) {
 				this.#diagnose({ code: "close_cancellation_failed", message: errorMessage(error) }, graph.id);

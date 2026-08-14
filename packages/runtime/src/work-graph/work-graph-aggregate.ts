@@ -338,9 +338,6 @@ function finalPublication(results: readonly WorkResult[]): WorkGraphResult["fina
 }
 
 function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGraphFact): WorkGraphAggregateSnapshot {
-	if (snapshot.lastTimestamp !== undefined && fact.timestamp < snapshot.lastTimestamp) {
-		invalid(fact, `timestamp ${fact.timestamp} precedes ${snapshot.lastTimestamp}`);
-	}
 	if (fact.type === "graph_accepted") {
 		if (snapshot.graph) invalid(fact, `Work Graph ${snapshot.graph.graphId} is already accepted`);
 		if (fact.root.parentItemId !== undefined) invalid(fact, "root Work Item cannot have a parent");
@@ -406,6 +403,7 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 			if (input.settlement !== "pending") invalid(fact, `input delivery ${fact.deliveryId} is already settled`);
 			nextGraph = replaceItem(graph, item.itemId, {
 				...item,
+				...(fact.outcome === "failed" ? { cancellationRequested: true } : {}),
 				inputs: item.inputs.map((candidate) =>
 					candidate.deliveryId === fact.deliveryId
 						? {
@@ -479,7 +477,9 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 			}
 			if (item.result) invalid(fact, `Work Item ${item.itemId} is already settled`);
 			if (fact.fact.type === "run_started") {
-				if (item.state !== "preparing") invalid(fact, `Run cannot start in ${item.state}`);
+				if (item.state !== "preparing" && item.state !== "running") {
+					invalid(fact, `Run cannot start in ${item.state}`);
+				}
 			} else if (item.state !== "running") invalid(fact, `Worker Fact cannot be recorded in ${item.state}`);
 			const worker = reduceWorkerFact(item.worker, fact.fact);
 			nextGraph = replaceItem(graph, item.itemId, {
@@ -693,7 +693,7 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 	}
 	return {
 		version: WORK_GRAPH_FACT_VERSION,
-		lastTimestamp: fact.timestamp,
+		lastTimestamp: Math.max(snapshot.lastTimestamp ?? 0, fact.timestamp),
 		graph: nextGraph,
 	};
 }

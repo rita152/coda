@@ -87,6 +87,7 @@ describe("Work Graph dependency boundaries", () => {
 
 		const worker = await readFile(new URL("../src/work-graph/worker-runtime.ts", import.meta.url), "utf8");
 		const ports = await readFile(new URL("../src/work-graph/ports.ts", import.meta.url), "utf8");
+		const facts = await readFile(new URL("../src/work-graph/work-graph-fact.ts", import.meta.url), "utf8");
 		const sessionController = await readFile(
 			new URL("../../coding-agent/src/runtime/session-work-controller.ts", import.meta.url),
 			"utf8",
@@ -94,7 +95,7 @@ describe("Work Graph dependency boundaries", () => {
 		expect(worker).toMatch(/routeWorkerEvent\(event\)/u);
 		expect(worker).toMatch(/readonly commitFact: \(fact: WorkerFact,/u);
 		expect(worker).toMatch(/readonly publishObservation: \(observation: WorkerObservation,/u);
-		expect(ports).toMatch(/readonly type: "worker_fact"/u);
+		expect(facts).toMatch(/readonly type: "worker_fact_recorded"/u);
 		expect(ports).not.toMatch(/AgentEvent/u);
 		expect(sessionController).toMatch(/capacity \?\? 256/u);
 		expect(sessionController).toMatch(/type: "resync_required"/u);

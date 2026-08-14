@@ -9,7 +9,6 @@ export {
 	encodeWorkspaceLedger,
 } from "./work-graph/persistence-codec.ts";
 export type {
-	WorkGraphRecord,
 	WorkGraphStore,
 	WorkGraphStoreRestore,
 	WorkspaceGraphIndexEntry,
@@ -21,3 +20,4 @@ export type {
 	WorkspaceSessionOwner,
 	WorkspaceTargetIdentity,
 } from "./work-graph/ports.ts";
+export type { WorkGraphFact } from "./work-graph/work-graph-fact.ts";
