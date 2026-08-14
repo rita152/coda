@@ -43,7 +43,14 @@ export function routeWorkerEvent(event: AgentEvent): WorkerEventDisposition {
 		case "run_start":
 			return disposition(event, {
 				session: session(event),
-				fact: { type: "run_started", runId: String(event.runId), timestamp: event.timestamp },
+				fact: {
+					type: "run_started",
+					runId: String(event.runId),
+					source: event.source,
+					...(event.queueItemId ? { queueItemId: String(event.queueItemId) } : {}),
+					...(event.budget ? { budget: event.budget } : {}),
+					timestamp: event.timestamp,
+				},
 				control: control(event),
 			});
 		case "turn_start":

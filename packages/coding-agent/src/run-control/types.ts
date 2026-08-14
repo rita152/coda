@@ -2,7 +2,7 @@ export type RunControlPhase = "running" | "wrap_up_requested" | "finalizing" | "
 
 export type RunControlTrigger = "work_deadline" | "stagnation";
 
-export type RunControlReason = RunControlTrigger | "grace_deadline_exceeded" | "run_ended";
+export type RunControlReason = RunControlTrigger | "grace_deadline_exceeded" | "run_ended" | "work_item_settled";
 
 export interface RunControlConfiguration {
 	readonly workDurationMs: number;

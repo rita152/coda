@@ -8,7 +8,7 @@ import {
 	type RetryDelay,
 	type TurnRetryPolicy,
 } from "../src/index.ts";
-import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 function transientFailure(clock: TestClock, retryable = true): AssistantMessage {
 	const message = fauxAssistantMessage("discarded partial", {
@@ -80,7 +80,7 @@ describe("Agent whole-turn retry", () => {
 			retry: { policy, delay },
 		});
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("retry");
 
@@ -153,7 +153,7 @@ describe("Agent whole-turn retry", () => {
 			),
 		);
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("recover once");
 
@@ -269,10 +269,10 @@ describe("Agent listener failure containment", () => {
 		const contexts: Context[] = [];
 		const agent = new Agent(baseOptions([], { clock, contexts }));
 		const observed: AgentEvent["type"][] = [];
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start") throw new Error("listener broke");
 		});
-		agent.onEvent((event) => observed.push(event.type));
+		agent.onSemanticEvent((event) => observed.push(event.type));
 
 		const prompt = agent.prompt("fail listener");
 		const idle = agent.waitForIdle();
@@ -304,7 +304,7 @@ describe("Agent listener failure containment", () => {
 			timestamp: clock.now(),
 		});
 		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [dangerous] }));
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "tool_execution_start") throw new Error("sink unavailable");
 		});
 
@@ -321,7 +321,7 @@ describe("Agent listener failure containment", () => {
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
 		const agent = new Agent(baseOptions([calls], { clock }));
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "tool_execution_rejected" && event.invocation.providerToolCallId === "missing:1") {
 				throw new Error("rejection listener failed");
 			}
@@ -384,7 +384,7 @@ describe("Agent listener failure containment", () => {
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
 		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [first, second] }));
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "tool_execution_start" && event.invocation.toolName === "second") {
 				throw new Error("second start listener failed");
 			}
@@ -413,7 +413,7 @@ describe("Agent listener failure containment", () => {
 	it("restores idle state even when the run_end listener itself fails", async () => {
 		const clock = new TestClock();
 		const agent = new Agent(baseOptions([response("done", clock)], { clock }));
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_end") throw new Error("final listener failed");
 		});
 

@@ -1,7 +1,7 @@
 import { createFauxCore, fauxAssistantMessage, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index.ts";
-import { TestIds, testTimeRuntime } from "./helpers.ts";
+import { observeAgentEvents, TestIds, testTimeRuntime } from "./helpers.ts";
 
 describe("atomic Prepared Runs", () => {
 	it("freezes one snapshot for each Run", async () => {
@@ -135,7 +135,7 @@ describe("atomic Prepared Runs", () => {
 				};
 			},
 		});
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start" && event.source === "prompt") agent.followUp("two");
 		});
 
@@ -155,7 +155,7 @@ describe("atomic Prepared Runs", () => {
 			seed: { version: 1, messages: [], pendingFollowUps: [{ id: queueId, content: "too large" }] },
 		});
 		const events: string[] = [];
-		agent.onEvent((event) => events.push(event.type));
+		observeAgentEvents(agent, (event) => events.push(event.type));
 
 		await expect(agent.resumeFollowUps()).rejects.toThrow("Context Overflow");
 		expect(agent.state.pendingFollowUps.map(({ id }) => id)).toEqual([queueId]);

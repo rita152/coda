@@ -412,7 +412,11 @@ export function createWorkspaceWorkCoordinator(options: {
 					if (observation.type !== "work_item_event") continue;
 					const event = agentEvent(observation.event);
 					if (!event) continue;
-					controllers.get(observation.sessionId)?.acceptWorkerEvent(event);
+					controllers.get(observation.sessionId)?.acceptWorkerEvent(event, {
+						graphId: observation.graphId,
+						itemId: observation.itemId,
+						runtimeId: observation.runtimeId,
+					});
 				}
 			}
 		})().catch(() => undefined);

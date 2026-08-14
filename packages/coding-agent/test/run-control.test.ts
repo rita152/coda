@@ -1,5 +1,6 @@
 import type { AgentTool, Clock, IdGenerator, IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type TimeRuntime, Type } from "@coda/ai";
+import type { WorkerControlEvent } from "@coda/runtime";
 import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { bindAgentRunControl, RunControl, RunProgressTracker } from "../src/run-control/index.ts";
@@ -149,6 +150,98 @@ describe("RunControl", () => {
 		});
 	});
 
+	it("drives wrap-up and hard-stop from the reliable Control lifecycle alone", async () => {
+		const time = new ManualTime();
+		const deliveries: string[] = [];
+		let cancellations = 0;
+		let listener!: (event: WorkerControlEvent) => Promise<void> | void;
+		const binding = bindAgentRunControl({
+			work: {
+				deliver: async (_kind, input) => {
+					deliveries.push(String(input));
+				},
+				cancel: async () => {
+					cancellations++;
+				},
+				subscribeControl: (next) => {
+					listener = next;
+					return () => undefined;
+				},
+				subscribeResult: () => () => undefined,
+			},
+			configuration: { workDurationMs: 100, graceDurationMs: 25 },
+			clock: time,
+			scheduler: time,
+		});
+		listener({
+			type: "run_start",
+			runId: "run:control",
+			sequence: 1,
+			timestamp: 0,
+			source: "prompt",
+			inputMessage: {
+				id: "message:control",
+				message: { role: "user", content: "start", timestamp: 0 },
+			},
+		} as unknown as WorkerControlEvent);
+
+		await time.advanceBy(100);
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]).toContain("RunControl requested finalization");
+		await time.advanceBy(25);
+		expect(cancellations).toBe(1);
+		binding.dispose();
+	});
+
+	it("closes the active Control when its Work Item settles without a durable run_end Control event", async () => {
+		const time = new ManualTime();
+		let listener!: (event: WorkerControlEvent) => Promise<void> | void;
+		let settle!: (result: import("@coda/runtime").WorkResult) => Promise<void> | void;
+		let deliveries = 0;
+		let cancellations = 0;
+		const binding = bindAgentRunControl({
+			work: {
+				deliver: async () => {
+					deliveries++;
+				},
+				cancel: async () => {
+					cancellations++;
+				},
+				subscribeControl: (next) => {
+					listener = next;
+					return () => undefined;
+				},
+				subscribeResult: (next) => {
+					settle = next;
+					return () => undefined;
+				},
+			},
+			configuration: { workDurationMs: 100, graceDurationMs: 25 },
+			clock: time,
+			scheduler: time,
+		});
+		listener({
+			type: "run_start",
+			runId: "run:barrier-failed",
+			sequence: 1,
+			timestamp: 0,
+			source: "prompt",
+			inputMessage: { id: "message:1", message: { role: "user", content: "start", timestamp: 0 } },
+		} as unknown as WorkerControlEvent);
+		settle({ timing: { acceptedAt: 0, settledAt: 10 } } as import("@coda/runtime").WorkResult);
+
+		await time.advanceBy(1_000);
+		expect(deliveries).toBe(0);
+		expect(cancellations).toBe(0);
+		expect(binding.reportForRun("run:barrier-failed")).toMatchObject({
+			phase: "terminal",
+			reason: "work_item_settled",
+			terminalAt: 10,
+		});
+		expect(time.pending).toBe(0);
+		binding.dispose();
+	});
+
 	it("resets stationarity only for novel workspace, verification, read, failure, or requirement evidence", () => {
 		const tracker = new RunProgressTracker();
 		const settle = () => {
@@ -269,7 +362,7 @@ describe("RunControl", () => {
 			scheduler: time,
 		});
 		const phases: string[] = [];
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "turn_start") phases.push(binding.reportForRun(String(event.runId))?.phase ?? "missing");
 		});
 
@@ -343,7 +436,7 @@ describe("RunControl", () => {
 			workspace: { id: "workspace", path: "/workspace" },
 			mode: "interactive",
 		});
-		agent.onEvent((event) => session.accept(event));
+		agent.onSemanticEvent((event) => session.accept(event));
 
 		const operation = agent.prompt("start");
 		await toolStarted;

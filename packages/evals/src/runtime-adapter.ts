@@ -18,13 +18,40 @@ type WorkerSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["rese
 class EvaluationSession implements WorkerSession {
 	readonly id: string;
 	readonly seed?: AgentSeed;
+	readonly #events: AgentEvent[] = [];
 
 	constructor(id: string, seed: AgentSeed | undefined) {
 		this.id = id;
 		this.seed = seed;
 	}
 
-	accept(_event: AgentEvent): void {}
+	accept(event: AgentEvent): void {
+		switch (event.type) {
+			case "run_start":
+			case "turn_start":
+			case "attempt_end":
+			case "message_end":
+			case "tool_execution_rejected":
+			case "tool_execution_end":
+			case "run_end":
+				this.#events.push(structuredClone(event));
+				return;
+			case "attempt_start":
+			case "retry_scheduled":
+			case "tool_execution_start":
+			case "turn_end":
+				return;
+			case "message_start":
+			case "message_update":
+			case "tool_execution_progress":
+			case "run_budget_exhausted":
+				return;
+		}
+	}
+
+	get events(): readonly AgentEvent[] {
+		return Object.freeze(structuredClone(this.#events));
+	}
 
 	record(_change: Parameters<WorkerSession["record"]>[0]): Promise<void> {
 		return Promise.resolve();
@@ -101,22 +128,27 @@ function evaluationModels(stream: ModelStream): Pick<Models, "completeSimple" | 
 	});
 }
 
-function agentEvent(value: unknown): AgentEvent | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value) || !("runId" in value)) return undefined;
-	return value as AgentEvent;
-}
-
-async function waitForGraph(agent: CodingAgent, graphId: string, events: AgentEvent[]): Promise<WorkGraphResult> {
-	for await (const observation of agent.observe({ capacity: 4_096 })) {
-		if (observation.type === "work_item_event" && observation.graphId === graphId) {
-			const event = agentEvent(observation.event);
-			if (event) events.push(event);
+async function waitForGraph(agent: CodingAgent, graphId: string): Promise<WorkGraphResult> {
+	for (;;) {
+		let resynchronize = false;
+		for await (const observation of agent.observe({ capacity: 64 })) {
+			if (observation.type === "snapshot") {
+				const result = observation.snapshot.graphs.find((graph) => graph.graphId === graphId)?.result;
+				if (result) return result;
+			}
+			if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
+				return observation.result;
+			}
+			if (observation.type === "resync_required") {
+				resynchronize = true;
+				break;
+			}
+			if (observation.type === "closed") {
+				throw new Error(`Evaluation Work Graph closed before ${graphId} settled`);
+			}
 		}
-		if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
-			return observation.result;
-		}
+		if (!resynchronize) throw new Error(`Evaluation Work Graph closed before ${graphId} settled`);
 	}
-	throw new Error(`Evaluation Work Graph closed before ${graphId} settled`);
 }
 
 export interface EvaluationWorkGraph {
@@ -138,7 +170,6 @@ export async function openEvaluationWorkGraph(options: {
 	const skills = emptySkills();
 	const mcp = emptyMcp();
 	const session = new EvaluationSession(`eval-session:${options.id}`, options.seed);
-	const events: AgentEvent[] = [];
 	const promptSha256 = createHash("sha256").update(options.systemPrompt, "utf8").digest("hex");
 	const workspaceExecution: OpenCodingAgentOptions["workspaceExecution"] = {
 		reserve: async (request) => ({
@@ -192,13 +223,13 @@ export async function openEvaluationWorkGraph(options: {
 	let used = false;
 	return Object.freeze({
 		get events() {
-			return Object.freeze([...events]);
+			return session.events;
 		},
 		run: async (input: string) => {
 			if (used) throw new Error("Evaluation Work Graph can run only once");
 			used = true;
 			const graphId = `evaluation:${options.id}`;
-			const result = waitForGraph(agent, graphId, events);
+			const result = waitForGraph(agent, graphId);
 			const receipt = await agent.submit({
 				commands: [
 					{

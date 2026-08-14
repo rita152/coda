@@ -8,6 +8,8 @@ import {
 	type TimeRuntime,
 } from "@coda/ai";
 import {
+	type Agent,
+	type AgentEvent,
 	type AgentOptions,
 	type IdGenerator,
 	type IdKind,
@@ -16,6 +18,24 @@ import {
 	prepareStaticRun,
 	type RunPreparation,
 } from "../src/index.ts";
+
+/** Test-only composite capture; production callers must choose semantic or Observation semantics. */
+export function observeAgentEvents(agent: Agent, listener: (event: AgentEvent) => unknown): () => void {
+	const detachSemantic = agent.onSemanticEvent(listener);
+	const detachObservations = agent.subscribeObservations(
+		{
+			accept: async (event) => {
+				await listener(event);
+			},
+			resynchronize: () => undefined,
+		},
+		{ capacity: 4_096 },
+	);
+	return () => {
+		detachSemantic();
+		detachObservations();
+	};
+}
 
 export class TestClock implements Clock {
 	#value: number;

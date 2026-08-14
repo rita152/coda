@@ -58,7 +58,7 @@ describe("Agent Seed", () => {
 			seed: { version: 1, messages: [], pendingFollowUps: [{ id: restoredId, content: "old" }] },
 		});
 		agent.cancelQueueItem(restoredId);
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start" && event.source === "prompt") agent.followUp("queued during fresh run");
 		});
 

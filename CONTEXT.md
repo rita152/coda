@@ -33,11 +33,11 @@ A bounded semantic fact required to recover Work Item orchestration or to place 
 _Avoid_: Worker Observation, Agent event, Session Record
 
 **Worker Observation**:
-A full-fidelity, best-effort projection of live Worker Runtime activity delivered through the Coding Agent Observation stream without entering Session or Work Journal persistence barriers.
+A full-fidelity, best-effort projection of live Worker Runtime activity delivered through a bounded asynchronous sequencer and the Coding Agent Observation stream without entering Session or Work Journal persistence barriers.
 _Avoid_: Worker Fact, Worker Control, event log
 
 **Work Result**:
-The structured settled outcome of one Work Item, including its Run outcome, evidence, and any Workspace Artifact; assistant prose alone is not a Work Result.
+The structured settled outcome of one Work Item, including its Run outcome, evidence, any Workspace Artifact, and whether its terminal boundary is journal-confirmed or only process-local and unknown; assistant prose alone is not a Work Result.
 _Avoid_: final message, summary, Run
 
 **Workspace Placement**:

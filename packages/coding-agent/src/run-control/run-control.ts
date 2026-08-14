@@ -127,11 +127,14 @@ export class RunControl {
 		return true;
 	}
 
-	complete(timestamp = this.#clock.now()): void {
+	complete(
+		timestamp = this.#clock.now(),
+		reason: Extract<RunControlReason, "run_ended" | "work_item_settled"> = "run_ended",
+	): void {
 		this.#cancelTimers();
 		if (this.#phase === "terminal") return;
 		this.#phase = "terminal";
-		this.#reason = "run_ended";
+		this.#reason = reason;
 		this.#terminalAt = timestamp;
 	}
 

@@ -9,7 +9,7 @@ import {
 	type RunBudget,
 	type RunLimits,
 } from "../src/index.ts";
-import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const valueSchema = Type.Object({ value: Type.String() }, { additionalProperties: false });
 
@@ -97,7 +97,7 @@ describe("Agent RunBudget", () => {
 		);
 		mutableLimits.maxTurns = 10;
 		let snapshot: RunBudget | undefined;
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start") snapshot = event.budget;
 		});
 
@@ -136,7 +136,7 @@ describe("Agent RunBudget", () => {
 			),
 		);
 		let exhaustionVisibleFromState = false;
-		agent.onEvent((event) => {
+		observeAgentEvents(agent, (event) => {
 			events.push(event);
 			if (event.type === "tool_execution_start") agent.steer("must not leak");
 			if (event.type === "run_budget_exhausted") {
@@ -173,7 +173,7 @@ describe("Agent RunBudget", () => {
 				delay: { wait: async () => undefined },
 			},
 		});
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("retry once");
 
@@ -216,7 +216,7 @@ describe("Agent RunBudget", () => {
 				},
 			),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("too many Tools");
 
@@ -276,7 +276,7 @@ describe("Agent RunBudget", () => {
 				},
 			),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const prompt = agent.prompt("wait safely");
 		await toolStarted;
@@ -307,7 +307,7 @@ describe("Agent RunBudget", () => {
 				delay: { wait: async () => undefined },
 			},
 		});
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("meter retries");
 
@@ -435,7 +435,7 @@ describe("Agent RunBudget", () => {
 		});
 		let firstFollowUp: string | undefined;
 		let secondFollowUp: string | undefined;
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type !== "run_start" || event.source !== "prompt") return;
 			firstFollowUp = agent.followUp("first");
 			secondFollowUp = agent.followUp("second");
@@ -476,7 +476,7 @@ describe("Agent RunBudget", () => {
 				{ tools: [wait] },
 			),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const prompt = agent.prompt("cancel");
 		await toolStarted;

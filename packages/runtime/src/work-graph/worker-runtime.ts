@@ -32,6 +32,7 @@ import {
 	type WorkerFactProjection,
 	workerFactHasOpenEffects,
 } from "./worker-fact.ts";
+import { WorkerObservationChannel } from "./worker-observation-channel.ts";
 import type {
 	WorkerBarrierFailure,
 	WorkerControlEvent,
@@ -144,24 +145,33 @@ export async function openPrivateWorkerRuntime(request: {
 	readonly runtimeId: string;
 	readonly mode: WorkExecutionMode;
 	readonly configuration: DesiredRuntimeConfiguration;
+	readonly signal: AbortSignal;
 	readonly session: WorkSessionReservation;
 	readonly placement: WorkspacePlacementReservation;
 	readonly coordinatorTools?: readonly AgentTool[];
 	readonly commitFact: (fact: WorkerFact, runtimeId: string, sessionId: string) => Promise<WorkerFactProjection>;
 	readonly publishObservation: (observation: WorkerObservation, runtimeId: string, sessionId: string) => void;
+	readonly resynchronizeObservations: (runtimeId: string, sessionId: string) => void;
 	readonly controlWorker: (event: WorkerControlEvent, runtimeId: string, sessionId: string) => Promise<void> | void;
 	readonly barrierFailed: (failure: WorkerBarrierFailure, runtimeId: string, sessionId: string) => void;
 	readonly assertProgressAllowed: () => void;
 }): Promise<PrivateWorkerRuntime> {
 	const { options } = request;
+	if (request.signal.aborted) throw aborted(request.signal);
+	request.assertProgressAllowed();
 	const sessionId = String(request.session.session.id);
-	const contributions = await options.workspaceExecution.tools({
-		graphId: request.graphId,
-		itemId: request.itemId,
-		sessionId,
-		placement: request.placement.placement,
-		mode: request.mode,
-	});
+	const contributions = await awaitPreparation(
+		options.workspaceExecution.tools({
+			graphId: request.graphId,
+			itemId: request.itemId,
+			sessionId,
+			placement: request.placement.placement,
+			mode: request.mode,
+		}),
+		request.signal,
+		undefined,
+		options.clock.now,
+	);
 	const visibleContributions = contributions.filter(({ effect }) => request.mode === "write" || effect === "read");
 	const bindRequest = {
 		graphId: request.graphId,
@@ -177,7 +187,12 @@ export async function openPrivateWorkerRuntime(request: {
 	);
 	let desired: FrozenConfiguration = Object.freeze({
 		desired: request.configuration,
-		selection: await options.resolveConfiguration(request.configuration),
+		selection: await awaitPreparation(
+			options.resolveConfiguration(request.configuration),
+			request.signal,
+			undefined,
+			options.clock.now,
+		),
 	});
 	let activeSelection: WorkerSelection | undefined;
 	let promptSubmission: WorkerSubmission | undefined;
@@ -187,11 +202,11 @@ export async function openPrivateWorkerRuntime(request: {
 	let factProjection = INITIAL_WORKER_FACT_PROJECTION;
 	let fatalFailure: WorkerBarrierFailure | undefined;
 	let agent!: Agent;
-	const publish = (observation: WorkerObservation): void => {
-		try {
-			request.publishObservation(observation, request.runtimeId, sessionId);
-		} catch {}
-	};
+	const observations = new WorkerObservationChannel({
+		capacity: 256,
+		publish: (observation) => request.publishObservation(observation, request.runtimeId, sessionId),
+		resynchronize: () => request.resynchronizeObservations(request.runtimeId, sessionId),
+	});
 	const latchFailure = (
 		barrier: WorkerBarrierFailure["barrier"],
 		source: WorkerBarrierFailure["source"],
@@ -279,7 +294,7 @@ export async function openPrivateWorkerRuntime(request: {
 			const submission = submissionFor(preparation);
 			const configuration = desired;
 			const deadline = preparationDeadline(preparation, configuration.desired, options);
-			publish({
+			observations.publishPreparation({
 				type: "preparation_started",
 				preparationId: submission.preparationId,
 				submissionKind: submission.kind,
@@ -327,7 +342,7 @@ export async function openPrivateWorkerRuntime(request: {
 					deadline,
 					options.clock.now,
 				);
-				publish({
+				observations.publishPreparation({
 					type: "preparation_settled",
 					preparationId: submission.preparationId,
 					outcome: "prepared",
@@ -363,12 +378,15 @@ export async function openPrivateWorkerRuntime(request: {
 						disposed = true;
 						if (activeSelection === selection) activeSelection = undefined;
 						if (preparation.queueItemId) followUps.delete(preparation.queueItemId);
-						publish({ type: "prepared_run_disposed", preparationId: submission.preparationId });
+						observations.publishPreparation({
+							type: "prepared_run_disposed",
+							preparationId: submission.preparationId,
+						});
 					},
 				};
 				return Object.freeze(preparedRun);
 			} catch (error) {
-				publish({
+				observations.publishPreparation({
 					type: "preparation_settled",
 					preparationId: submission.preparationId,
 					outcome: preparation.signal.aborted ? "canceled" : "failed",
@@ -379,16 +397,25 @@ export async function openPrivateWorkerRuntime(request: {
 		},
 	});
 
+	const detachAgentObservations = agent.subscribeObservations(
+		{
+			accept: (event) => observations.publishTransient(routeWorkerEvent(event).observation),
+			resynchronize: ({ runId, sequence }) => observations.resynchronizeAgent(String(runId), sequence),
+		},
+		{ capacity: 256 },
+	);
+
 	const handleSemanticEvent = async (disposition: ReturnType<typeof routeWorkerEvent>): Promise<void> => {
 		const { observation } = disposition;
 		if (fatalFailure) {
-			publish(observation);
+			observations.publishSemantic(observation);
 			return;
 		}
 		if (disposition.session) {
 			try {
 				await request.session.session.accept(disposition.session as WorkerSessionEvent);
 			} catch (error) {
+				observations.skipAgent(String(observation.runId), observation.sequence);
 				latchFailure("session", disposition.session.type, error);
 				throw error;
 			}
@@ -397,11 +424,12 @@ export async function openPrivateWorkerRuntime(request: {
 			try {
 				factProjection = await request.commitFact(disposition.fact, request.runtimeId, sessionId);
 			} catch (error) {
+				observations.skipAgent(String(observation.runId), observation.sequence);
 				latchFailure("work_journal", disposition.fact.type, error);
 				throw error;
 			}
 		}
-		publish(observation);
+		observations.publishSemantic(observation);
 		if (disposition.control) {
 			try {
 				await request.controlWorker(disposition.control, request.runtimeId, sessionId);
@@ -410,18 +438,9 @@ export async function openPrivateWorkerRuntime(request: {
 		request.assertProgressAllowed();
 	};
 
-	agent.onEvent((event) => {
+	agent.onSemanticEvent((event) => {
 		if (event.type === "turn_start") steering.clear();
 		const disposition = routeWorkerEvent(event);
-		if (
-			!fatalFailure &&
-			disposition.session === undefined &&
-			disposition.fact === undefined &&
-			disposition.control === undefined
-		) {
-			publish(disposition.observation);
-			return;
-		}
 		return handleSemanticEvent(disposition);
 	});
 
@@ -483,6 +502,8 @@ export async function openPrivateWorkerRuntime(request: {
 				} catch (error) {
 					failures.push(error);
 				}
+				detachAgentObservations();
+				observations.invalidateAndClose();
 				const droppedExternalWork = steering.size + followUps.size;
 				steering.clear();
 				followUps.clear();

@@ -142,7 +142,7 @@ describe("Session facade", () => {
 				return faux.streamSimple(faux.getModel(), { messages: [] }, { runtime });
 			},
 		});
-		agent.onEvent((event) => session.accept(event));
+		agent.onSemanticEvent((event) => session.accept(event));
 		await agent.prompt("persist me");
 		const sessionId = session.descriptor.id;
 		await session.close();

@@ -1,7 +1,7 @@
 import { type Context, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, type AgentEvent, type AgentTool } from "../src/index.ts";
-import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const pathSchema = Type.Object({ path: Type.String() }, { additionalProperties: false });
 
@@ -41,7 +41,7 @@ describe("Agent Tool execution", () => {
 			withPreparedRun(baseOptions([first, response("finished", clock)], { clock, contexts }), { tools: [reader] }),
 		);
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("inspect");
 
@@ -125,7 +125,7 @@ describe("Agent Tool execution", () => {
 		expect(order).toEqual(["first:start", "first:end", "second:start"]);
 	});
 
-	it("emits ordered Tool progress before the terminal event", async () => {
+	it("assigns Tool progress an ordered sequence before the terminal event", async () => {
 		const clock = new TestClock();
 		const events: AgentEvent[] = [];
 		const reporting = tool("reporting", (_arguments, context) => {
@@ -140,11 +140,13 @@ describe("Agent Tool execution", () => {
 		const agent = new Agent(
 			withPreparedRun(baseOptions([calls, response("done", clock)], { clock }), { tools: [reporting] }),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		await agent.prompt("report progress");
 
-		const lifecycle = events.filter((event) => event.type.startsWith("tool_execution_"));
+		const lifecycle = events
+			.filter((event) => event.type.startsWith("tool_execution_"))
+			.sort((left, right) => left.sequence - right.sequence);
 		expect(lifecycle.map(({ type }) => type)).toEqual([
 			"tool_execution_start",
 			"tool_execution_progress",
@@ -178,7 +180,7 @@ describe("Agent Tool execution", () => {
 				tools: [missing],
 			}),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("inspect");
 
@@ -242,7 +244,7 @@ describe("Agent Tool execution", () => {
 		const sawSecondEnd = new Promise<void>((resolve) => {
 			secondEnded = resolve;
 		});
-		agent.onEvent((event) => {
+		observeAgentEvents(agent, (event) => {
 			events.push(event);
 			if (event.type === "tool_execution_end" && event.invocation.toolName === "second") secondEnded();
 		});
@@ -288,7 +290,7 @@ describe("Agent Tool execution", () => {
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
 		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [running, never] }));
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const prompt = agent.prompt("abort tools");
 		await started;
@@ -330,7 +332,7 @@ describe("Agent Tool execution", () => {
 		);
 		const events: AgentEvent[] = [];
 		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [broken, later] }));
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		await expect(agent.prompt("fault")).rejects.toThrow("disk vanished");
 
@@ -369,7 +371,7 @@ describe("Agent Tool execution", () => {
 		const agent = new Agent(
 			withPreparedRun(baseOptions([truncated, response("recovered", clock)], { clock }), { tools: [reader] }),
 		);
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("run");
 
@@ -389,7 +391,7 @@ describe("Agent Tool execution", () => {
 		);
 		const events: AgentEvent[] = [];
 		const agent = new Agent(baseOptions([truncated], { clock }));
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("implement the change");
 

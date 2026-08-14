@@ -1,4 +1,4 @@
-import type { AgentInput, RunBudgetExhaustion, RunFailure, RunLimits } from "@coda/agent";
+import type { ActiveRun, AgentInput, RunBudgetExhaustion, RunFailure, RunLimits } from "@coda/agent";
 import type { JsonValue, ThinkingLevel } from "@coda/ai";
 
 declare const workIdentity: unique symbol;
@@ -203,6 +203,8 @@ export interface WorkDiagnostic {
 }
 
 export interface WorkResult {
+	/** Whether the terminal boundary is present in the Work Journal. */
+	readonly durability: "confirmed" | "unknown";
 	readonly itemId: WorkItemId;
 	readonly parentItemId?: WorkItemId;
 	readonly dependencies: readonly WorkItemId[];
@@ -233,6 +235,7 @@ export interface WorkItemSnapshot {
 	readonly state: WorkItemState;
 	readonly desiredConfiguration: DesiredRuntimeConfiguration;
 	readonly runtimeId?: string;
+	readonly activeRun?: ActiveRun;
 	readonly sessionId: string;
 	readonly placement: WorkspacePlacementDescriptor;
 	readonly cancellationRequested: boolean;
@@ -240,6 +243,8 @@ export interface WorkItemSnapshot {
 }
 
 export interface WorkGraphResult {
+	/** `unknown` means this is only a process-local fail-stop outcome and may be recovered again. */
+	readonly durability: "confirmed" | "unknown";
 	readonly graphId: WorkGraphId;
 	readonly rootItemId: WorkItemId;
 	readonly objective: string;
@@ -314,7 +319,11 @@ export type CodingAgentObservation =
 			readonly graphId?: WorkGraphId;
 			readonly itemId?: WorkItemId;
 	  }
-	| { readonly type: "resync_required"; readonly sequence: number; readonly reason: "slow_consumer" }
+	| {
+			readonly type: "resync_required";
+			readonly sequence: number;
+			readonly reason: "slow_consumer" | "upstream_overflow";
+	  }
 	| { readonly type: "closed"; readonly sequence: number; readonly result: CodingAgentCloseResult };
 
 export interface ObservationOptions {
@@ -327,7 +336,7 @@ export interface CodingAgentCloseResult {
 	readonly unknownWork: readonly {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;
-		readonly phase: "preparing" | "running" | "settling" | "publication";
+		readonly phase: "pending" | "ready" | "preparing" | "running" | "settling" | "result" | "publication";
 	}[];
 }
 

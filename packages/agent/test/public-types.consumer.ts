@@ -2,7 +2,6 @@ import type { TimeRuntime } from "@coda/ai";
 import { createFauxCore, fauxAssistantMessage, Type } from "@coda/ai";
 import {
 	Agent,
-	type AgentEvent,
 	type AgentTool,
 	type AttemptId,
 	type Clock,
@@ -51,8 +50,16 @@ export function composeAgent(clock: Clock, idGenerator: IdGenerator): Agent {
 }
 
 export function consumeRun(agent: Agent): Promise<RunResult> {
-	agent.onEvent((event: AgentEvent) => {
-		if (event.type === "message_update") void event.delta;
+	agent.subscribeObservations({
+		accept: (event) => {
+			if (event.type === "message_update") void event.delta;
+		},
+		resynchronize: ({ state }) => {
+			void state.messages;
+		},
+	});
+	agent.onSemanticEvent((event) => {
+		void event.timestamp;
 	});
 	return agent.prompt("hello");
 }

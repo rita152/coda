@@ -15,7 +15,7 @@ import type {
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls", "read_tool_output", "read_session_history"]);
 
 export interface AgentRunControlBindingOptions {
-	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "state" | "subscribeControl">;
+	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "subscribeControl" | "subscribeResult">;
 	readonly configuration: RunControlConfiguration;
 	readonly clock: Clock;
 	readonly scheduler: Scheduler;
@@ -39,15 +39,13 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 		while (completed.size > 128) completed.delete(completed.keys().next().value!);
 	};
 	const requestWrapUp = (runId: string, trigger: RunControlTrigger): void => {
-		const state = options.work.state();
-		if (state.activeRun?.id !== runId || state.status !== "running") return;
+		if (active?.runId !== runId) return;
 		void options.work
 			.deliver("steering", wrapUpSteering(trigger, options.configuration.graceDurationMs))
 			.catch(() => undefined);
 	};
 	const hardStop = (runId: string): void => {
-		const state = options.work.state();
-		if (state.activeRun?.id !== runId || state.status !== "running") return;
+		if (active?.runId !== runId) return;
 		void options.work.cancel().catch(() => undefined);
 	};
 	const beginControl = (runId: string, startedAt: number): void => {
@@ -62,7 +60,13 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 		});
 		active = { runId, control };
 	};
-	const detach = options.work.subscribeControl((event) => {
+	const finishActive = (timestamp: number, reason: "run_ended" | "work_item_settled"): void => {
+		if (!active) return;
+		active.control.complete(timestamp, reason);
+		remember(active.runId, active.control.report());
+		active = undefined;
+	};
+	const detachControl = options.work.subscribeControl((event) => {
 		if (event.type === "run_start") {
 			const runId = String(event.runId);
 			beginControl(runId, event.timestamp);
@@ -82,18 +86,20 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 				active.control.finishTurn(event.timestamp);
 				break;
 			case "run_end": {
-				active.control.complete(event.timestamp);
-				remember(active.runId, active.control.report());
-				active = undefined;
+				finishActive(event.timestamp, "run_ended");
 				break;
 			}
 		}
+	});
+	const detachResult = options.work.subscribeResult((result) => {
+		finishActive(result.timing.settledAt, "work_item_settled");
 	});
 	return {
 		reportForRun: (runId) => (active?.runId === runId ? active.control.report() : completed.get(runId)),
 		observe: (fact) => active?.control.observe(fact) ?? false,
 		dispose: () => {
-			detach();
+			detachControl();
+			detachResult();
 			active?.control.dispose();
 			active = undefined;
 		},

@@ -229,7 +229,7 @@ describe("JSONL File Session", () => {
 			tools: [tool],
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		});
-		agent.onEvent((event) => session.accept(event));
+		agent.onSemanticEvent((event) => session.accept(event));
 		await agent.prompt("persist tool lifecycle");
 		const sessionId = session.descriptor.id;
 		const sessionPath = session.descriptor.path!;

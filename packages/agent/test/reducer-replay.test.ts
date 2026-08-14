@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { Agent, type AgentEvent } from "../src/index.ts";
 import { initialRuntimeState, reduceState } from "../src/reducer.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock } from "./helpers.ts";
 
 describe("internal Agent state reduction", () => {
 	it("reconstructs the settled public state from a valid immutable Run event sequence", async () => {
 		const clock = new TestClock();
 		const agent = new Agent(baseOptions([response("replay me", clock)], { clock }));
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		await agent.prompt("record me");
 
@@ -40,7 +40,7 @@ describe("internal Agent state reduction", () => {
 			runBudget: { limits: { maxElapsedMs: 1 } },
 		});
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		await expect(agent.prompt("replay a limit")).resolves.toMatchObject({
 			outcome: "error",

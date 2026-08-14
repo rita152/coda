@@ -11,6 +11,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
+		},
+		"./worker-fact": {
+			"types": "./dist/work-graph/worker-fact.d.ts",
+			"import": "./dist/work-graph/worker-fact.js"
 		}
 	},
 	"files": [

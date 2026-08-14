@@ -131,7 +131,7 @@ describe("SessionHistoryReader", () => {
 			tools: [],
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { runtime, signal }),
 		});
-		agent.onEvent((event) => session.accept(event));
+		agent.onSemanticEvent((event) => session.accept(event));
 		await agent.prompt("Never modify the generated lockfile.");
 		const beforeResume = session.history.read({ limit: 20 });
 		const sessionId = session.descriptor.id;

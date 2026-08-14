@@ -6,14 +6,14 @@ import {
 } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, AgentError, type AgentEvent, type ModelStream } from "../src/index.ts";
-import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 describe("Agent cancellation and failure outcomes", () => {
 	it("classifies caller cancellation as aborted and discards partial assistant output", async () => {
 		const clock = new TestClock();
 		const agent = new Agent(baseOptions([response("a response long enough to interrupt", clock)], { clock }));
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => {
+		observeAgentEvents(agent, (event) => {
 			events.push(event);
 			if (event.type === "message_update" && event.delta.type === "text_delta") agent.abort();
 		});
@@ -75,7 +75,7 @@ describe("Agent cancellation and failure outcomes", () => {
 		let reentrant!: Promise<unknown>;
 		let idle!: Promise<void>;
 		let idleResolvedAfter: AgentEvent["type"] | undefined;
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			seen.push(event.type);
 			if (event.type !== "run_start") return;
 			reentrant = agent.prompt("must be busy");
@@ -105,7 +105,7 @@ describe("Agent cancellation and failure outcomes", () => {
 		});
 		let promptSettled = false;
 		let idleSettled = false;
-		agent.onEvent(async (event) => {
+		agent.onSemanticEvent(async (event) => {
 			if (event.type !== "run_end") return;
 			expect(agent.state.status).toBe("settling");
 			enteredRunEnd();

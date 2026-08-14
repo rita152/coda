@@ -28,6 +28,7 @@ type AgentWorkPort = Pick<
 	| "state"
 	| "subscribe"
 	| "subscribeControl"
+	| "subscribeResult"
 	| "waitForIdle"
 >;
 
@@ -44,33 +45,35 @@ const model = Object.freeze({
 }) as Model;
 
 export function agentWorkPort(agent: Agent): AgentWorkPort {
+	const resultListeners = new Set<(result: WorkResult) => Promise<void> | void>();
 	const prompt: SessionWorkController["prompt"] = (input) => {
 		const operation = agent.prompt(input);
-		return operation.then(
-			(result) =>
-				({
-					itemId: "root",
-					dependencies: [],
-					runtimeId: "test-worker",
-					sessionId: "test-session",
-					state: result.outcome === "success" ? "succeeded" : result.outcome === "aborted" ? "canceled" : "failed",
-					run: {
-						runId: result.runId,
-						outcome: result.outcome,
-						...(result.failure ? { failure: result.failure } : {}),
-					},
-					placement: {
-						placementId: "test-placement",
-						root: "/test",
-						baseIdentity: "test",
-						kind: "memory",
-					},
-					publication: { state: "not_required" },
-					diagnostics: [],
-					timing: { acceptedAt: 0, settledAt: 0 },
-					budget: { modelAttempts: 0, toolInvocations: 0, totalTokens: 0, elapsedMs: 0 },
-				}) as unknown as WorkResult,
-		);
+		return operation.then((result) => {
+			const workResult = {
+				itemId: "root",
+				dependencies: [],
+				runtimeId: "test-worker",
+				sessionId: "test-session",
+				state: result.outcome === "success" ? "succeeded" : result.outcome === "aborted" ? "canceled" : "failed",
+				run: {
+					runId: result.runId,
+					outcome: result.outcome,
+					...(result.failure ? { failure: result.failure } : {}),
+				},
+				placement: {
+					placementId: "test-placement",
+					root: "/test",
+					baseIdentity: "test",
+					kind: "memory",
+				},
+				publication: { state: "not_required" },
+				diagnostics: [],
+				timing: { acceptedAt: 0, settledAt: 0 },
+				budget: { modelAttempts: 0, toolInvocations: 0, totalTokens: 0, elapsedMs: 0 },
+			} as unknown as WorkResult;
+			for (const listener of resultListeners) void listener(workResult);
+			return workResult;
+		});
 	};
 	return {
 		state: () => ({
@@ -98,9 +101,19 @@ export function agentWorkPort(agent: Agent): AgentWorkPort {
 			}
 		},
 		waitForIdle: () => agent.waitForIdle(),
-		subscribe: (observer) => agent.onEvent((event) => observer.accept(event)),
+		subscribe: (observer) => {
+			const detachSemantic = agent.onSemanticEvent((event) => observer.accept(event));
+			const detachObservations = agent.subscribeObservations({
+				accept: (event) => observer.accept(event),
+				resynchronize: () => undefined,
+			});
+			return () => {
+				detachSemantic();
+				detachObservations();
+			};
+		},
 		subscribeControl: (listener) =>
-			agent.onEvent((event) => {
+			agent.onSemanticEvent((event) => {
 				switch (event.type) {
 					case "run_start":
 					case "turn_start":
@@ -114,12 +127,13 @@ export function agentWorkPort(agent: Agent): AgentWorkPort {
 					case "run_end":
 						return listener(event);
 					case "attempt_start":
-					case "message_start":
-					case "message_update":
-					case "tool_execution_progress":
 					case "run_budget_exhausted":
 						return;
 				}
 			}),
+		subscribeResult: (listener) => {
+			resultListeners.add(listener);
+			return () => resultListeners.delete(listener);
+		},
 	};
 }

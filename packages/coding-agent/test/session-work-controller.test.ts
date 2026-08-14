@@ -260,6 +260,7 @@ describe("Session Work Controller", () => {
 				reasoning: "off",
 			},
 			runtimeId: observerResult.runtimeId,
+			activeRun: { id: "run:resynchronized", source: "prompt" },
 			sessionId: observerResult.sessionId,
 			placement: observerResult.placement,
 			cancellationRequested: false,
@@ -274,6 +275,7 @@ describe("Session Work Controller", () => {
 			activeGraphId: observerGraphId,
 			activeItemId: observerResult.itemId,
 			activePlacement: observerResult.placement,
+			activeRun: { id: "run:resynchronized", source: "prompt" },
 		});
 		first.resynchronize({
 			closed: false,

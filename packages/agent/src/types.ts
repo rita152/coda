@@ -352,7 +352,30 @@ export type AgentEvent = Immutable<
 	}
 >;
 
-export type AgentEventListener = (event: AgentEvent) => unknown;
+export type AgentObservationEvent = Extract<
+	AgentEvent,
+	{ readonly type: "message_start" | "message_update" | "tool_execution_progress" }
+>;
+
+export type AgentSemanticEvent = Exclude<AgentEvent, AgentObservationEvent>;
+
+export type AgentSemanticEventListener = (event: AgentSemanticEvent) => unknown;
+
+export interface AgentObservationResynchronization {
+	readonly reason: "slow_consumer";
+	readonly runId: RunId;
+	readonly sequence: number;
+	readonly state: AgentState;
+}
+
+export interface AgentObservationObserver {
+	accept(event: AgentObservationEvent): Promise<void> | void;
+	resynchronize(snapshot: AgentObservationResynchronization): Promise<void> | void;
+}
+
+export interface AgentObservationOptions {
+	readonly capacity?: number;
+}
 
 export type RetryDecision =
 	| { readonly retry: false }

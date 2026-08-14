@@ -72,6 +72,12 @@ export interface SessionWorkObservationOptions {
 type ControlListener = (event: WorkerControlEvent) => Promise<void> | void;
 type WorkResultListener = (result: WorkResult) => Promise<void> | void;
 
+export interface WorkerObservationIdentity {
+	readonly graphId: WorkGraphId;
+	readonly itemId: WorkItemId;
+	readonly runtimeId: string;
+}
+
 const TERMINAL_WORK_STATES: ReadonlySet<string> = new Set([
 	"succeeded",
 	"failed",
@@ -154,6 +160,7 @@ export class SessionWorkController {
 	#status: AgentState["status"] = "idle";
 	#activeGraphId?: WorkGraphId;
 	#activeItemId?: WorkItemId;
+	#activeRuntimeId?: string;
 	#activePlacement?: WorkspacePlacementDescriptor;
 	#activeRun?: AgentState["activeRun"];
 	#lastRun?: RunSummary;
@@ -214,6 +221,7 @@ export class SessionWorkController {
 		const itemId = "root" as WorkItemId;
 		this.#activeGraphId = graphId;
 		this.#activeItemId = itemId;
+		this.#activeRuntimeId = undefined;
 		const receipt = await this.#host.agent.submit({
 			batchId: `batch:${token}`,
 			commands: [
@@ -239,6 +247,7 @@ export class SessionWorkController {
 		if (receipt.status === "rejected") {
 			this.#activeGraphId = undefined;
 			this.#activeItemId = undefined;
+			this.#activeRuntimeId = undefined;
 			throw rejected(receipt);
 		}
 		const operation = waitForGraph(this.#host.agent, graphId)
@@ -253,6 +262,7 @@ export class SessionWorkController {
 				if (this.#activeGraphId === graphId) {
 					this.#activeGraphId = undefined;
 					this.#activeItemId = undefined;
+					this.#activeRuntimeId = undefined;
 					this.#activePlacement = undefined;
 					this.#activeRun = undefined;
 					this.#status = "idle";
@@ -374,8 +384,16 @@ export class SessionWorkController {
 		this.#activePlacement = structuredClone(placement);
 	}
 
-	acceptWorkerEvent(event: AgentEvent): void {
-		if (this.#closed) return;
+	acceptWorkerEvent(event: AgentEvent, identity: WorkerObservationIdentity): void {
+		if (
+			this.#closed ||
+			this.#activeGraphId !== identity.graphId ||
+			this.#activeItemId !== identity.itemId ||
+			(this.#activeRuntimeId !== undefined && this.#activeRuntimeId !== identity.runtimeId)
+		) {
+			return;
+		}
+		this.#activeRuntimeId = identity.runtimeId;
 		switch (event.type) {
 			case "run_start": {
 				this.#status = "running";
@@ -429,14 +447,17 @@ export class SessionWorkController {
 		if (active) {
 			this.#activeGraphId = active.graph.graphId;
 			this.#activeItemId = active.item.itemId;
+			this.#activeRuntimeId = active.item.runtimeId;
 			this.#activePlacement = structuredClone(active.item.placement);
 			this.#status =
 				active.item.state === "settling" ? "settling" : active.item.state === "running" ? "running" : "idle";
+			this.#activeRun = active.item.activeRun ? Object.freeze(structuredClone(active.item.activeRun)) : undefined;
 		} else if (this.#activeGraphId) {
 			const graph = snapshot.graphs.find(({ graphId }) => graphId === this.#activeGraphId);
 			if (graph?.result) {
 				this.#activeGraphId = undefined;
 				this.#activeItemId = undefined;
+				this.#activeRuntimeId = undefined;
 				this.#activePlacement = undefined;
 				this.#activeRun = undefined;
 				this.#status = "idle";

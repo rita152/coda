@@ -243,7 +243,7 @@ describe("InteractiveInputController", () => {
 			},
 			autoDrainFollowUps: true,
 		});
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start") order.push(`agent:${String(event.inputMessage.message.content)}`);
 		});
 		let shellRunning = false;
@@ -373,7 +373,7 @@ describe("InteractiveInputController", () => {
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			autoDrainFollowUps: false,
 		});
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start") order.push("run_start");
 		});
 		const controller = new InteractiveInputController({
@@ -471,7 +471,7 @@ describe("InteractiveInputController", () => {
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
 		});
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_end" && event.failure?.kind === "runtime") {
 				controller.acknowledgeAgentRuntimeFailure();
 			}

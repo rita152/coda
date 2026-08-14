@@ -178,7 +178,14 @@ describe("Worker Fact reducer", () => {
 		let projection = reduceWorkerFact(INITIAL_WORKER_FACT_PROJECTION, {
 			type: "run_started",
 			runId: "run:1",
+			source: "prompt",
+			budget: { limits: { maxTurns: 4 } },
 			timestamp: 1,
+		});
+		expect(projection.activeRun).toMatchObject({
+			id: "run:1",
+			source: "prompt",
+			budget: { limits: { maxTurns: 4 } },
 		});
 		projection = reduceWorkerFact(projection, {
 			type: "attempt_started",

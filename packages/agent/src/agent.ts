@@ -20,11 +20,15 @@ import { RunBudgetMeter, runBudgetFailure, snapshotRunBudget } from "./run-budge
 import { validateAgentSeed } from "./seed.ts";
 import type {
 	AgentEvent,
-	AgentEventListener,
 	AgentEventPayload,
 	AgentInput,
 	AgentMessage,
+	AgentObservationEvent,
+	AgentObservationObserver,
+	AgentObservationOptions,
 	AgentOptions,
+	AgentSemanticEvent,
+	AgentSemanticEventListener,
 	AgentState,
 	AgentTool,
 	AttemptId,
@@ -50,6 +54,18 @@ import type {
 } from "./types.ts";
 
 class ListenerFailureSignal extends Error {}
+
+type ObservationDelivery =
+	| { readonly type: "event"; readonly event: AgentObservationEvent }
+	| { readonly type: "resynchronize"; readonly runId: RunId; readonly sequence: number };
+
+interface ObservationSubscriber {
+	readonly observer: AgentObservationObserver;
+	readonly capacity: number;
+	readonly queue: ObservationDelivery[];
+	running: boolean;
+	closed: boolean;
+}
 
 interface RunContext {
 	readonly id: RunId;
@@ -272,7 +288,8 @@ function snapshotPreparedRun(
 
 export class Agent {
 	readonly #options: AgentOptions;
-	readonly #listeners: AgentEventListener[] = [];
+	readonly #semanticListeners: AgentSemanticEventListener[] = [];
+	readonly #observationSubscribers = new Set<ObservationSubscriber>();
 	readonly #issuedIds = new Set<string>();
 	readonly #consumedQueueItems = new Set<string>();
 	#runtimeState: RuntimeState;
@@ -297,12 +314,28 @@ export class Agent {
 		return this.#runtimeState.public;
 	}
 
-	onEvent(listener: AgentEventListener): () => void {
-		this.#listeners.push(listener);
+	onSemanticEvent(listener: AgentSemanticEventListener): () => void {
+		this.#semanticListeners.push(listener);
 		return () => {
-			const index = this.#listeners.indexOf(listener);
-			if (index >= 0) this.#listeners.splice(index, 1);
+			const index = this.#semanticListeners.indexOf(listener);
+			if (index >= 0) this.#semanticListeners.splice(index, 1);
 		};
+	}
+
+	subscribeObservations(observer: AgentObservationObserver, options: AgentObservationOptions = {}): () => void {
+		const capacity = options.capacity ?? 256;
+		if (!Number.isSafeInteger(capacity) || capacity < 1) {
+			throw new AgentError("invalid_input", "Agent Observation capacity must be a positive safe integer");
+		}
+		const subscriber: ObservationSubscriber = {
+			observer,
+			capacity,
+			queue: [],
+			running: false,
+			closed: false,
+		};
+		this.#observationSubscribers.add(subscriber);
+		return () => this.#removeObservationSubscriber(subscriber);
 	}
 
 	prompt(input: AgentInput): Promise<RunResult> {
@@ -1376,21 +1409,56 @@ export class Agent {
 			timestamp: this.#options.clock.now(),
 		}) as AgentEvent;
 		this.#runtimeState = reduceState(this.#runtimeState, { type: "event", event });
-		for (const listener of [...this.#listeners]) {
-			try {
-				const result = listener(event);
-				if (result && typeof (result as PromiseLike<unknown>).then === "function") {
-					void Promise.resolve(result).catch(() => this.#removeListener(listener));
+		const observation = event as AgentObservationEvent;
+		for (const subscriber of this.#observationSubscribers) {
+			this.#enqueueObservation(subscriber, observation);
+		}
+	}
+
+	#enqueueObservation(subscriber: ObservationSubscriber, event: AgentObservationEvent): void {
+		if (subscriber.closed) return;
+		if (subscriber.queue.length >= subscriber.capacity) {
+			subscriber.queue.splice(0);
+			subscriber.queue.push({ type: "resynchronize", runId: event.runId, sequence: event.sequence });
+		} else {
+			subscriber.queue.push({ type: "event", event });
+		}
+		if (subscriber.running) return;
+		subscriber.running = true;
+		queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
+	}
+
+	async #drainObservationSubscriber(subscriber: ObservationSubscriber): Promise<void> {
+		try {
+			while (!subscriber.closed) {
+				const delivery = subscriber.queue.shift();
+				if (!delivery) return;
+				if (delivery.type === "event") await subscriber.observer.accept(delivery.event);
+				else {
+					await subscriber.observer.resynchronize({
+						reason: "slow_consumer",
+						runId: delivery.runId,
+						sequence: delivery.sequence,
+						state: this.#runtimeState.public,
+					});
 				}
-			} catch {
-				this.#removeListener(listener);
+			}
+		} catch {
+			this.#removeObservationSubscriber(subscriber);
+		} finally {
+			subscriber.running = false;
+			if (!subscriber.closed && subscriber.queue.length > 0) {
+				subscriber.running = true;
+				queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
 			}
 		}
 	}
 
-	#removeListener(listener: AgentEventListener): void {
-		const index = this.#listeners.indexOf(listener);
-		if (index >= 0) this.#listeners.splice(index, 1);
+	#removeObservationSubscriber(subscriber: ObservationSubscriber): void {
+		if (subscriber.closed) return;
+		subscriber.closed = true;
+		subscriber.queue.splice(0);
+		this.#observationSubscribers.delete(subscriber);
 	}
 
 	async #dispatch(run: RunContext, payload: AgentEventPayload): Promise<void> {
@@ -1401,9 +1469,9 @@ export class Agent {
 			timestamp: this.#options.clock.now(),
 		}) as AgentEvent;
 		this.#runtimeState = reduceState(this.#runtimeState, { type: "event", event });
-		for (const listener of [...this.#listeners]) {
+		for (const listener of [...this.#semanticListeners]) {
 			try {
-				await listener(event);
+				await listener(event as AgentSemanticEvent);
 			} catch (error) {
 				run.listenerFailures.push(error);
 			}

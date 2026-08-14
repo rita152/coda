@@ -139,13 +139,21 @@ describe("file Work Journal Adapter", () => {
 		await expect(restored.load()).rejects.toThrow("unexpected field event");
 	});
 
-	it("rejects v1 journals explicitly without decoding or migration", async () => {
+	it("rejects v1 journals explicitly with or without a trailing newline", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "coda-work-journal-v1-"));
 		temporaryDirectories.push(directory);
-		const path = join(directory, "work.jsonl");
-		await writeFile(path, `${JSON.stringify({ version: 1, sequence: 1, record: record(1) })}\n`);
-		const journal = createFileWorkJournal(createNodeFileSystem(), path);
-		await expect(journal.load()).rejects.toThrow("Unsupported Work Journal version 1; this build requires version 2");
+		const encoded = JSON.stringify({ version: 1, sequence: 1, record: record(1) });
+		for (const [name, contents] of [
+			["terminated.jsonl", `${encoded}\n`],
+			["unterminated.jsonl", encoded],
+		] as const) {
+			const path = join(directory, name);
+			await writeFile(path, contents);
+			const journal = createFileWorkJournal(createNodeFileSystem(), path);
+			await expect(journal.load()).rejects.toThrow(
+				"Unsupported Work Journal version 1; this build requires version 2",
+			);
+		}
 	});
 
 	it("serializes concurrent fatal-barrier appends", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Agent, type AgentEvent } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock } from "./helpers.ts";
 
 describe("Agent run lifecycle", () => {
 	it("commits a user message and a successful streamed assistant message", async () => {
@@ -8,7 +8,7 @@ describe("Agent run lifecycle", () => {
 		const options = baseOptions([response("hello", clock)], { clock });
 		const agent = new Agent(options);
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const result = await agent.prompt("hi");
 
@@ -47,13 +47,13 @@ describe("Agent run lifecycle", () => {
 			release = resolve;
 		});
 
-		agent.onEvent(async (event) => {
+		agent.onSemanticEvent(async (event) => {
 			if (event.type !== "run_start") return;
 			observations.push(`${agent.state.status}:${agent.state.messages.length}:first`);
 			await gate;
 			observations.push("first:done");
 		});
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start") observations.push("second");
 		});
 
@@ -69,7 +69,7 @@ describe("Agent run lifecycle", () => {
 		const clock = new TestClock();
 		const agent = new Agent(baseOptions([response("immutable", clock)], { clock }));
 		const seen: AgentEvent[] = [];
-		agent.onEvent((event) => seen.push(event));
+		observeAgentEvents(agent, (event) => seen.push(event));
 
 		await agent.prompt("protect me");
 
@@ -81,5 +81,45 @@ describe("Agent run lifecycle", () => {
 		}
 		expect(Object.isFrozen(agent.state)).toBe(true);
 		expect(Object.isFrozen(agent.state.messages)).toBe(true);
+	});
+
+	it("bounds a stalled Observation consumer without delaying Agent progression", async () => {
+		const clock = new TestClock();
+		const agent = new Agent(baseOptions([response("observation".repeat(64), clock)], { clock }));
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let started!: () => void;
+		const observationStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let resynchronized!: () => void;
+		const resynchronization = new Promise<void>((resolve) => {
+			resynchronized = resolve;
+		});
+		let first = true;
+		agent.subscribeObservations(
+			{
+				accept: async () => {
+					if (!first) return;
+					first = false;
+					started();
+					await gate;
+				},
+				resynchronize: ({ reason, state }) => {
+					expect(reason).toBe("slow_consumer");
+					expect(state.status).toBe("idle");
+					resynchronized();
+				},
+			},
+			{ capacity: 2 },
+		);
+
+		const operation = agent.prompt("keep progressing");
+		await observationStarted;
+		await expect(operation).resolves.toMatchObject({ outcome: "success" });
+		release();
+		await resynchronization;
 	});
 });

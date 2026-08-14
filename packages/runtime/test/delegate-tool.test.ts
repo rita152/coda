@@ -16,6 +16,7 @@ function context(): ToolExecutionContext {
 
 function result(): WorkResult {
 	return {
+		durability: "confirmed",
 		itemId: "child" as WorkItemId,
 		parentItemId: "root" as WorkItemId,
 		dependencies: [],

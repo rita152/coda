@@ -1,7 +1,11 @@
 import type {
+	ActiveRun,
+	RunBudget,
 	RunBudgetExhaustion,
 	RunFailure,
+	RunLimits,
 	RunOutcome,
+	RunSource,
 	ToolExecutionOutcome,
 	ToolExecutionSettlement,
 } from "@coda/agent";
@@ -15,7 +19,12 @@ interface FactBase {
 }
 
 export type WorkerFact =
-	| (FactBase & { readonly type: "run_started" })
+	| (FactBase & {
+			readonly type: "run_started";
+			readonly source: RunSource;
+			readonly queueItemId?: string;
+			readonly budget?: RunBudget;
+	  })
 	| (FactBase & {
 			readonly type: "attempt_started";
 			readonly turnId: string;
@@ -77,7 +86,7 @@ export interface OpenToolEffect {
 }
 
 export interface WorkerFactProjection {
-	readonly activeRunId?: string;
+	readonly activeRun?: ActiveRun;
 	readonly modelAttempts: number;
 	readonly toolInvocations: number;
 	readonly totalTokens: number;
@@ -95,7 +104,7 @@ export const INITIAL_WORKER_FACT_PROJECTION: WorkerFactProjection = Object.freez
 });
 
 const FACT_KEYS = {
-	run_started: ["type", "runId", "timestamp"],
+	run_started: ["type", "runId", "source", "queueItemId", "budget", "timestamp"],
 	attempt_started: ["type", "runId", "turnId", "attemptId", "messageId", "attempt", "timestamp"],
 	attempt_settled: [
 		"type",
@@ -124,14 +133,50 @@ function invalid(type: string, diagnostic: string): never {
 	throw new Error(`Invalid Worker Fact ${type}: ${diagnostic}`);
 }
 
-function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], type: string): void {
+function assertExactKeys(
+	value: Record<string, unknown>,
+	allowed: readonly string[],
+	type: string,
+	optional: readonly string[] = [],
+): void {
 	const admitted = new Set(allowed);
+	const omitted = new Set(optional);
 	for (const key of Object.keys(value)) {
 		if (!admitted.has(key)) invalid(type, `unexpected field ${key}`);
 	}
 	for (const key of allowed) {
-		if (key === "failureKind") continue;
+		if (omitted.has(key)) continue;
 		if (!(key in value)) invalid(type, `missing field ${key}`);
+	}
+}
+
+const RUN_LIMIT_KEYS = [
+	"maxTurns",
+	"maxModelAttempts",
+	"maxToolInvocations",
+	"maxElapsedMs",
+	"maxTotalTokens",
+	"maxTotalCostUsd",
+	"maxConsecutiveEquivalentToolBatches",
+] as const satisfies readonly (keyof RunLimits)[];
+
+function assertRunBudget(value: unknown, type: string): asserts value is RunBudget {
+	if (!isRecord(value)) invalid(type, "budget must be an object");
+	assertExactKeys(value, ["limits"], type);
+	if (!isRecord(value.limits)) invalid(type, "budget.limits must be an object");
+	assertExactKeys(value.limits, RUN_LIMIT_KEYS, type, RUN_LIMIT_KEYS);
+	for (const key of RUN_LIMIT_KEYS) {
+		const limit = value.limits[key];
+		if (limit === undefined) continue;
+		if (key === "maxTotalCostUsd") {
+			if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
+				invalid(type, `budget.limits.${key} must be a positive finite number`);
+			}
+			continue;
+		}
+		if (!Number.isSafeInteger(limit) || (limit as number) <= 0) {
+			invalid(type, `budget.limits.${key} must be a positive safe integer`);
+		}
 	}
 }
 
@@ -189,11 +234,19 @@ export function assertWorkerFact(value: unknown): asserts value is WorkerFact {
 		invalid("unknown", "unsupported fact type");
 	}
 	const type = value.type as WorkerFact["type"];
-	assertExactKeys(value, FACT_KEYS[type], type);
+	assertExactKeys(
+		value,
+		FACT_KEYS[type],
+		type,
+		type === "run_started" ? ["queueItemId", "budget"] : type === "run_settled" ? ["failureKind"] : [],
+	);
 	assertId(value.runId, "runId", type);
 	assertTimestamp(value.timestamp, type);
 	switch (type) {
 		case "run_started":
+			assertOneOf(value.source, "source", type, ["prompt", "follow_up"]);
+			if (value.queueItemId !== undefined) assertId(value.queueItemId, "queueItemId", type);
+			if (value.budget !== undefined) assertRunBudget(value.budget, type);
 			return;
 		case "attempt_started":
 			assertId(value.turnId, "turnId", type);
@@ -253,14 +306,27 @@ function nextCounter(current: number, increment: number, field: string, type: Wo
 }
 
 function activeRun(projection: WorkerFactProjection, fact: WorkerFact): void {
-	if (projection.activeRunId !== fact.runId) {
-		invalid(fact.type, `active Run is ${projection.activeRunId ?? "absent"}, not ${fact.runId}`);
+	if (String(projection.activeRun?.id ?? "") !== fact.runId) {
+		invalid(fact.type, `active Run is ${String(projection.activeRun?.id ?? "absent")}, not ${fact.runId}`);
 	}
 }
 
 function freezeProjection(value: WorkerFactProjection): WorkerFactProjection {
 	return Object.freeze({
 		...value,
+		...(value.activeRun
+			? {
+					activeRun: Object.freeze({
+						...value.activeRun,
+						...(value.activeRun.budget
+							? { budget: Object.freeze({ limits: Object.freeze({ ...value.activeRun.budget.limits }) }) }
+							: {}),
+						...(value.activeRun.budgetExhaustion
+							? { budgetExhaustion: Object.freeze({ ...value.activeRun.budgetExhaustion }) }
+							: {}),
+					}),
+				}
+			: {}),
 		openAttempts: Object.freeze(value.openAttempts.map((entry) => Object.freeze({ ...entry }))),
 		openTools: Object.freeze(value.openTools.map((entry) => Object.freeze({ ...entry }))),
 		...(value.exhaustion ? { exhaustion: Object.freeze({ ...value.exhaustion }) } : {}),
@@ -272,13 +338,22 @@ export function reduceWorkerFact(projection: WorkerFactProjection, fact: WorkerF
 	assertWorkerFact(fact);
 	switch (fact.type) {
 		case "run_started":
-			if (projection.activeRunId !== undefined) {
-				invalid(fact.type, `Run ${projection.activeRunId} has not settled`);
+			if (projection.activeRun !== undefined) {
+				invalid(fact.type, `Run ${String(projection.activeRun.id)} has not settled`);
 			}
 			if (projection.openAttempts.length > 0 || projection.openTools.length > 0) {
 				invalid(fact.type, "a new Run cannot begin with open effects");
 			}
-			return freezeProjection({ ...projection, activeRunId: fact.runId, exhaustion: undefined });
+			return freezeProjection({
+				...projection,
+				activeRun: {
+					id: fact.runId as ActiveRun["id"],
+					source: fact.source,
+					...(fact.queueItemId ? { queueItemId: fact.queueItemId as ActiveRun["queueItemId"] } : {}),
+					...(fact.budget ? { budget: fact.budget } : {}),
+				},
+				exhaustion: undefined,
+			});
 		case "attempt_started":
 			activeRun(projection, fact);
 			if (projection.openAttempts.some(({ attemptId }) => attemptId === fact.attemptId)) {
@@ -346,10 +421,14 @@ export function reduceWorkerFact(projection: WorkerFactProjection, fact: WorkerF
 			return projection;
 		case "budget_exhausted":
 			activeRun(projection, fact);
-			return freezeProjection({ ...projection, exhaustion: fact.exhaustion });
+			return freezeProjection({
+				...projection,
+				exhaustion: fact.exhaustion,
+				activeRun: { ...projection.activeRun!, budgetExhaustion: fact.exhaustion },
+			});
 		case "run_settled":
 			activeRun(projection, fact);
-			return freezeProjection({ ...projection, activeRunId: undefined });
+			return freezeProjection({ ...projection, activeRun: undefined });
 	}
 }
 

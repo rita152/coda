@@ -1,7 +1,7 @@
 import { type Context, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, AgentError, type AgentEvent, type AgentTool } from "../src/index.ts";
-import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
+import { baseOptions, observeAgentEvents, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const inputSchema = Type.Object({ value: Type.String() });
 
@@ -38,7 +38,7 @@ describe("Agent input queues", () => {
 			}),
 		);
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const prompt = agent.prompt("start");
 		await started;
@@ -97,7 +97,7 @@ describe("Agent input queues", () => {
 			),
 		);
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		let settled = false;
 		const prompt = agent.prompt("initial").then((result) => {
@@ -158,7 +158,7 @@ describe("Agent input queues", () => {
 			autoDrainFollowUps: false,
 		});
 		const events: AgentEvent[] = [];
-		agent.onEvent((event) => events.push(event));
+		observeAgentEvents(agent, (event) => events.push(event));
 
 		const prompt = agent.prompt("initial");
 		await started;
@@ -305,7 +305,7 @@ describe("Agent input queues", () => {
 		});
 		const agent = new Agent(baseOptions([failure], { clock }));
 		let followUpId: import("../src/index.ts").QueueItemId | undefined;
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start" && event.source === "prompt") followUpId = agent.followUp("later");
 		});
 
@@ -353,7 +353,7 @@ describe("Agent input queues", () => {
 
 		const consumedFollow = agent.followUp("consume follow");
 		let consumedError: unknown;
-		agent.onEvent((event) => {
+		agent.onSemanticEvent((event) => {
 			if (event.type === "run_start" && event.queueItemId === consumedFollow) {
 				try {
 					agent.cancelQueueItem(consumedFollow);
