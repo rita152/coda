@@ -51,7 +51,6 @@ export interface RuntimeInputLifecycle {
 	abort(): void;
 	acknowledgeRuntimeFailure(): void;
 	waitForIdle(): Promise<void>;
-	dispose(): Promise<number>;
 }
 
 interface PendingResource {

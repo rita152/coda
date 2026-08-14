@@ -258,7 +258,11 @@ describe("Coding Agent Runtime", () => {
 		]);
 		expect(alpha.snapshot().agent.messages.every(({ id }) => String(id).startsWith("alpha:"))).toBe(true);
 		expect(beta.snapshot().agent.messages.every(({ id }) => String(id).startsWith("beta:"))).toBe(true);
-		await Promise.all([alpha.close(), beta.close()]);
+		expect(alpha.input).not.toHaveProperty("dispose");
+		await expect(Promise.all([alpha.close(), beta.close()])).resolves.toEqual([
+			{ droppedExternalWork: 0 },
+			{ droppedExternalWork: 0 },
+		]);
 		expect(alphaSession.closed).toBe(true);
 		expect(betaSession.closed).toBe(true);
 	});

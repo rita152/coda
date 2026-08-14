@@ -19,6 +19,8 @@ import {
 	type RuntimeInputLifecycle,
 	type RuntimeInputPort,
 	RuntimeInputQueue,
+	type RuntimeQueueItemLifecycle,
+	type RuntimeResourceTransaction,
 } from "./input-queue.ts";
 import { createMcpAgentTools, type McpAgentElicitation } from "./mcp/tools.ts";
 import {
@@ -105,6 +107,10 @@ export interface CodingRuntimeEventContext {
 	readonly runId: string;
 }
 
+export interface CodingRuntimeCloseResult {
+	readonly droppedExternalWork: number;
+}
+
 /** Complete headless Runtime Interface. The serial Agent kernel remains private. */
 export interface CodingAgentRuntime {
 	readonly runtimeId: string;
@@ -131,7 +137,7 @@ export interface CodingAgentRuntime {
 	readonly compactionCost: number | undefined;
 	createSkillSnapshotBinding(): string;
 	prepareSkillSnapshot(input: AgentInput, snapshot: CodingSkillsSnapshot, binding: string): void;
-	close(): Promise<void>;
+	close(): Promise<CodingRuntimeCloseResult>;
 }
 
 export interface OpenCodingAgentRuntimeOptions {
@@ -292,10 +298,38 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 		runtime: inputPort,
 		journal: { record: (change) => options.session.record(change) },
 	});
+	const inputLifecycle: RuntimeInputLifecycle = Object.freeze({
+		get queuePaused() {
+			return input.queuePaused;
+		},
+		get shouldDeferPrompt() {
+			return input.shouldDeferPrompt;
+		},
+		get pendingExternalCount() {
+			return input.pendingExternalCount;
+		},
+		startPrompt: (runtimeInput: AgentInput, transaction: RuntimeResourceTransaction) =>
+			input.startPrompt(runtimeInput, transaction),
+		steer: (runtimeInput: AgentInput, transaction: RuntimeResourceTransaction) =>
+			input.steer(runtimeInput, transaction),
+		enqueueFollowUp: (
+			runtimeInput: AgentInput,
+			transaction: RuntimeResourceTransaction,
+			lifecycle?: RuntimeQueueItemLifecycle,
+		) => input.enqueueFollowUp(runtimeInput, transaction, lifecycle),
+		enqueueExternal: (id: string, run: () => Promise<void>) => input.enqueueExternal(id, run),
+		reclaimExternal: (id: string) => input.reclaimExternal(id),
+		resume: () => input.resume(),
+		reclaimFollowUp: (id: QueueItemId) => input.reclaimFollowUp(id),
+		discardPendingFollowUps: () => input.discardPendingFollowUps(),
+		abort: () => input.abort(),
+		acknowledgeRuntimeFailure: () => input.acknowledgeRuntimeFailure(),
+		waitForIdle: () => input.waitForIdle(),
+	});
 	const facade: CodingAgentRuntime = {
 		runtimeId: core.runtimeId,
 		sessionId: core.sessionId,
-		input,
+		input: inputLifecycle,
 		snapshot: () => {
 			const snapshot = core.snapshot();
 			return Object.freeze({
@@ -365,8 +399,9 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 		prepareSkillSnapshot: (input, snapshot, binding) => runSkills.prepare(input, snapshot, binding),
 		close: async () => {
 			const failures: unknown[] = [];
+			let droppedExternalWork = 0;
 			try {
-				await input.dispose();
+				droppedExternalWork = await input.dispose();
 			} catch (error) {
 				failures.push(error);
 			}
@@ -377,6 +412,7 @@ export async function openCodingAgentRuntime(options: OpenCodingAgentRuntimeOpti
 			}
 			if (failures.length === 1) throw failures[0];
 			if (failures.length > 1) throw new AggregateError(failures, "Coding Agent Runtime close failed");
+			return Object.freeze({ droppedExternalWork });
 		},
 	};
 	core.subscribe(async (event) => {

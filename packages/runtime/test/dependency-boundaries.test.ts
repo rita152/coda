@@ -44,11 +44,13 @@ describe("Runtime dependency boundaries", () => {
 	it("keeps the durable input lifecycle owned by each complete Runtime instance", async () => {
 		const runtime = await readFile(new URL("../src/coding-agent-runtime.ts", import.meta.url), "utf8");
 		const interactive = await readFile(
-			new URL("../../coding-agent/src/interactive/input-controller.ts", import.meta.url),
+			new URL("../../coding-agent/src/interactive/run-interactive.ts", import.meta.url),
 			"utf8",
 		);
 		expect(runtime).toMatch(/new RuntimeInputQueue/u);
 		expect(interactive).not.toMatch(/new RuntimeInputQueue/u);
+		expect(interactive).not.toMatch(/\.input\.dispose\(/u);
+		expect(interactive).toMatch(/\.runtime\.close\(\)/u);
 	});
 
 	it("proves the complete Runtime Seam through the non-CLI evaluation Adapter", async () => {

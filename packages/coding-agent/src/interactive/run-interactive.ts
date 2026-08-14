@@ -288,17 +288,12 @@ async function runMultiSessionInteractive(
 		const failures: unknown[] = [];
 		let droppedShells = 0;
 		try {
-			droppedShells = await pane.input.dispose();
+			droppedShells = (await pane.options.runtime.close()).droppedExternalWork;
 		} catch (error) {
 			failures.push(error);
 		}
 		try {
 			await pane.options.onRetire?.();
-		} catch (error) {
-			failures.push(error);
-		}
-		try {
-			await pane.options.runtime.close();
 		} catch (error) {
 			failures.push(error);
 		}
@@ -633,7 +628,7 @@ async function runMultiSessionInteractive(
 		let droppedShells = 0;
 		for (const pane of runtimes.open) {
 			pane.detachAgent();
-			droppedShells += await pane.input.dispose();
+			droppedShells += (await pane.options.runtime.close()).droppedExternalWork;
 		}
 		root.dispose();
 		await stopFullScreen();
@@ -907,7 +902,7 @@ async function runSingleSessionInteractive(
 		unsubscribeLifecycle?.();
 		options.mcpElicitation?.unbind();
 		detach();
-		const droppedShells = await inputController.dispose();
+		const droppedShells = (await options.runtime.close()).droppedExternalWork;
 		await stopFullScreen();
 		if (droppedShells > 0) {
 			await options.onWarning?.(

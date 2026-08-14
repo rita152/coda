@@ -184,11 +184,6 @@ export class InteractiveInputController {
 		await this.#queue.waitForIdle();
 	}
 
-	async dispose(): Promise<number> {
-		await this.#acceptanceTail;
-		return this.#queue.dispose();
-	}
-
 	async #submitPrompt(
 		composerText: string,
 		input: AgentInput,
