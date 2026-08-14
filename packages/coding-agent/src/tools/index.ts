@@ -1,7 +1,7 @@
 import type { AgentTool } from "@coda/agent";
-import type { ApplicationRuntime } from "../application.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
+import type { HostProcessRuntime } from "../host/runtime.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
 import { createProcessTools } from "../process/tools.ts";
 import type { SessionHistoryReadPort } from "../session/session-history-reader.ts";
@@ -28,7 +28,7 @@ export function createCodingTools(options: {
 	readonly processRunner: ProcessRunner;
 	readonly processSessionManager: ProcessSessionManager;
 	readonly shellExecutable: string;
-	readonly runtime: ApplicationRuntime;
+	readonly runtime: HostProcessRuntime;
 	readonly sessionHistory: SessionHistoryReadPort;
 	readonly sessionId: string;
 }): readonly AgentTool[] {

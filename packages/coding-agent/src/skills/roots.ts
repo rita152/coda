@@ -1,6 +1,6 @@
 import { isAbsolute, join } from "node:path";
+import type { CodingSkillOrigin } from "@coda/runtime";
 import type { SkillRoot } from "@coda/skills";
-import type { CodingSkillOrigin } from "./types.ts";
 
 export interface CollectSkillRootsOptions {
 	readonly workspace: string;

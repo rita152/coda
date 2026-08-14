@@ -10,13 +10,13 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/skills && npm run build --workspace=@coda/mcp && npm run build --workspace=@coda/coding-agent && npm run build --workspace=@coda/evals",
+		"build": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/tui && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/skills && npm run build --workspace=@coda/mcp && npm run build --workspace=@coda/runtime && npm run build --workspace=@coda/coding-agent && npm run build --workspace=@coda/evals",
 		"capabilities:update": "tsx packages/coding-agent/scripts/generate-capabilities.ts --write",
 		"capabilities:check": "tsx packages/coding-agent/scripts/generate-capabilities.ts --check",
 		"check": "npm run capabilities:check && npm run build && npm run check --workspaces --if-present",
-		"eval:offline": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run eval:offline --workspace=@coda/evals",
+		"eval:offline": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/runtime && npm run eval:offline --workspace=@coda/evals",
 		"eval:deep-swe": "npm run build && npm run eval:deep-swe --workspace=@coda/evals --",
-		"eval:live": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run eval:live --workspace=@coda/evals",
+		"eval:live": "npm run build --workspace=@coda/ai && npm run build --workspace=@coda/agent && npm run build --workspace=@coda/runtime && npm run eval:live --workspace=@coda/evals",
 		"models:update": "npm run models:update --workspace=@coda/ai",
 		"test": "npm run build && npm run test --workspaces --if-present",
 		"test:conformance": "npm run test:conformance --workspace=@coda/mcp",

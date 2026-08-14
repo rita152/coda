@@ -1,5 +1,6 @@
-import { type Agent, AgentError, type AgentEvent, type Clock } from "@coda/agent";
+import { AgentError, type AgentEvent, type Clock } from "@coda/agent";
 import { resolveToolObservation } from "@coda/ai";
+import type { RuntimeInputPort } from "@coda/runtime";
 import type { Scheduler } from "@coda/tui";
 import { mutationFactsFromObservation } from "../tools/mutation-contract.ts";
 import { RunControl } from "./run-control.ts";
@@ -14,7 +15,7 @@ import type {
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls", "read_tool_output", "read_session_history"]);
 
 export interface AgentRunControlBindingOptions {
-	readonly agent: Agent;
+	readonly runtime: Pick<RuntimeInputPort, "cancel" | "snapshot" | "steer" | "subscribe">;
 	readonly configuration: RunControlConfiguration;
 	readonly clock: Clock;
 	readonly scheduler: Scheduler;
@@ -38,19 +39,21 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 		while (completed.size > 128) completed.delete(completed.keys().next().value!);
 	};
 	const requestWrapUp = (runId: string, trigger: RunControlTrigger): void => {
-		if (options.agent.state.activeRun?.id !== runId || options.agent.state.status !== "running") return;
+		const state = options.runtime.snapshot().agent;
+		if (state.activeRun?.id !== runId || state.status !== "running") return;
 		try {
-			options.agent.steer(wrapUpSteering(trigger, options.configuration.graceDurationMs));
+			options.runtime.steer(wrapUpSteering(trigger, options.configuration.graceDurationMs));
 		} catch (error) {
 			if (error instanceof AgentError && error.code === "invalid_lifecycle") return;
 			throw error;
 		}
 	};
 	const hardStop = (runId: string): void => {
-		if (options.agent.state.activeRun?.id !== runId || options.agent.state.status !== "running") return;
-		options.agent.abort();
+		const state = options.runtime.snapshot().agent;
+		if (state.activeRun?.id !== runId || state.status !== "running") return;
+		options.runtime.cancel();
 	};
-	const detach = options.agent.onEvent((event) => {
+	const detach = options.runtime.subscribe((event) => {
 		if (event.type === "run_start") {
 			const runId = String(event.runId);
 			const control = new RunControl({

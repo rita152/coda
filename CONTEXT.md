@@ -13,8 +13,20 @@ The user-facing collaborator that works with a developer on a local codebase thr
 _Avoid_: chatbot, AI wrapper
 
 **Agent**:
-The headless runtime that owns an in-memory transcript, model turns, tool execution, events, cancellation, and steering queues.
-_Avoid_: Coding Agent, TUI, session store
+The serial kernel that owns one in-memory transcript, model turns, Tool execution, events, cancellation, and steering queues.
+_Avoid_: Agent Runtime, Coding Agent, TUI, Session store
+
+**Agent Runtime**:
+One independently instantiable headless runtime that composes an Agent with Model and authentication selection, Run preparation, Tools, Skills and MCP snapshots, Session persistence, Context Window recovery, input queues, events, and lifecycle cleanup.
+_Avoid_: Agent, CLI application, TUI controller
+
+**Prepared Run**:
+The immutable execution capability frozen exactly once before a Run starts, including its Event Stream driver, Tools, system prompt, and failed-Attempt recovery state.
+_Avoid_: desired configuration, Run Runtime Slot, live catalog
+
+**Desired Runtime Configuration**:
+The mutable selection intended for the next Run of one Agent Runtime; changes never alter its active Prepared Run.
+_Avoid_: Prepared Run, global selected Model
 
 **Run**:
 One settled Agent operation beginning with accepted input and ending only after its final event observers complete.
@@ -61,8 +73,12 @@ The application-neutral TUI component that owns text-buffer editing, wrapping, c
 _Avoid_: Composer, prompt card
 
 **Input Queue Controller**:
-The Coding Agent module that coordinates Composer acceptance, media preparation, Agent queue mutation, User Shell scheduling, durable Session facts, resume, reclaim, and compensation across one deferred FIFO.
-_Avoid_: Agent queue, Chat component, Session reducer
+The headless Agent Runtime component that coordinates resource transactions, Agent queue mutation, durable Follow-up facts, resume, reclaim, compensation, and generic deferred work across one FIFO.
+_Avoid_: Composer controller, Agent queue, Session reducer
+
+**Interactive Input Adapter**:
+The Coding Agent UI adapter that translates Composer and User Shell actions into Input Queue commands and projects Runtime events back into presentation state.
+_Avoid_: Input Queue Controller, Agent Runtime, Composer
 
 **User Shell**:
 An explicit `!command` submitted by the user for local host execution outside model Context, Prompt History, and Session persistence.

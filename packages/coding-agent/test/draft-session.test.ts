@@ -119,7 +119,7 @@ function fauxSession(
 		mediaReferences: new Map(),
 		registerMedia: vi.fn(),
 		supplementRunEvidence: vi.fn(),
-		attach: vi.fn(() => () => undefined),
+		accept: vi.fn(async () => undefined),
 		record: vi.fn(async () => undefined),
 		close: vi.fn(async () => undefined),
 	};

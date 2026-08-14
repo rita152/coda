@@ -1,5 +1,7 @@
-import type { Agent, AgentInput, QueueItemId } from "@coda/agent";
+import type { AgentInput, QueueItemId } from "@coda/agent";
 import type { ModelThinkingLevel } from "@coda/ai";
+import type { CodingAgentRuntime, CodingSkillsSnapshot } from "@coda/runtime";
+import { isContextOverflowError, isProviderContextOverflow } from "@coda/runtime";
 import {
 	type DiagnosticSink,
 	FullScreenTui,
@@ -21,13 +23,11 @@ import { createModelCommandFlow, type ModelCommandEntry } from "../commands/mode
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
 import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
-import { isContextOverflowError, isProviderContextOverflow } from "../context-window/overflow-recovery.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
 import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
 import type { Session } from "../session/types.ts";
-import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
@@ -50,7 +50,7 @@ import { SwitchableComponent } from "./switchable-component.ts";
 import { UserShell } from "./user-shell.ts";
 
 export interface InteractiveSessionOptions {
-	readonly agent: Agent;
+	readonly runtime: CodingAgentRuntime;
 	readonly session: Session;
 	readonly modelLabel: string;
 	readonly activitySummaryMode?: ActivitySummaryMode;
@@ -219,7 +219,7 @@ async function runMultiSessionInteractive(
 						? "current"
 						: open?.needsAttention
 							? "needs attention"
-							: open?.options.agent.state.status === "running"
+							: open?.options.runtime.snapshot().agent.status === "running"
 								? "running"
 								: "idle",
 			});
@@ -298,7 +298,7 @@ async function runMultiSessionInteractive(
 			failures.push(error);
 		}
 		try {
-			await pane.options.session.close();
+			await pane.options.runtime.close();
 		} catch (error) {
 			failures.push(error);
 		}
@@ -325,7 +325,7 @@ async function runMultiSessionInteractive(
 			},
 		});
 		const input = new InteractiveInputController({
-			agent: sessionOptions.agent,
+			runtime: sessionOptions.runtime,
 			session: sessionOptions.session,
 			buildInput: sessionOptions.buildPrompt ?? (async (text) => text),
 			prepareAttachments: sessionOptions.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
@@ -344,8 +344,8 @@ async function runMultiSessionInteractive(
 			commandRegistry: options.commandRegistry,
 			seed: {
 				version: 1,
-				messages: sessionOptions.agent.state.messages,
-				pendingFollowUps: sessionOptions.agent.state.pendingFollowUps,
+				messages: sessionOptions.runtime.snapshot().agent.messages,
+				pendingFollowUps: sessionOptions.runtime.snapshot().agent.pendingFollowUps,
 			},
 			initialAttachments: sessionOptions.initialAttachments,
 			restoredAttachments: sessionOptions.restoredAttachments,
@@ -476,7 +476,7 @@ async function runMultiSessionInteractive(
 		acceptLatestRunEvidence(component, sessionOptions.session);
 		components.add(component);
 		let pane!: InteractivePane;
-		const detachAgent = sessionOptions.agent.onEvent((event) => {
+		const detachAgent = sessionOptions.runtime.subscribe((event) => {
 			component.accept(event);
 			if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
@@ -538,9 +538,9 @@ async function runMultiSessionInteractive(
 	runtimes = new WorkspaceSessionRuntimes(initialPane, {
 		id: (pane) => pane.id,
 		isEmpty: (pane) =>
-			pane.options.agent.state.status === "idle" &&
-			pane.options.agent.state.messages.length === 0 &&
-			pane.options.agent.state.pendingFollowUps.length === 0,
+			pane.options.runtime.snapshot().agent.status === "idle" &&
+			pane.options.runtime.snapshot().agent.messages.length === 0 &&
+			pane.options.runtime.snapshot().agent.pendingFollowUps.length === 0,
 	});
 	root = new SwitchableComponent(initialPane.component);
 	tui = new FullScreenTui({
@@ -559,9 +559,9 @@ async function runMultiSessionInteractive(
 	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const abortAll = (): void => {
 		for (const pane of runtimes.open) {
-			if (pane.options.agent.state.status === "running") {
+			if (pane.options.runtime.snapshot().agent.status === "running") {
 				try {
-					pane.options.agent.abort();
+					pane.options.runtime.cancel();
 				} catch {}
 			}
 			pane.input.cancelUserShell();
@@ -619,7 +619,7 @@ async function runMultiSessionInteractive(
 		for (const pane of runtimes.open) {
 			try {
 				await pane.input.discardPendingFollowUps();
-				if (pane.options.agent.state.status !== "idle") await pane.options.agent.waitForIdle();
+				if (pane.options.runtime.snapshot().agent.status !== "idle") await pane.options.runtime.waitForIdle();
 				await pane.input.waitForIdle();
 			} catch (error) {
 				fatalError ??= error;
@@ -680,7 +680,7 @@ async function runSingleSessionInteractive(
 		},
 	});
 	const inputController = new InteractiveInputController({
-		agent: options.agent,
+		runtime: options.runtime,
 		session: options.session,
 		buildInput: options.buildPrompt ?? (async (text) => text),
 		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
@@ -699,8 +699,8 @@ async function runSingleSessionInteractive(
 		commandRegistry: options.commandRegistry,
 		seed: {
 			version: 1,
-			messages: options.agent.state.messages,
-			pendingFollowUps: options.agent.state.pendingFollowUps,
+			messages: options.runtime.snapshot().agent.messages,
+			pendingFollowUps: options.runtime.snapshot().agent.pendingFollowUps,
 		},
 		initialAttachments: options.initialAttachments,
 		restoredAttachments: options.restoredAttachments,
@@ -834,9 +834,9 @@ async function runSingleSessionInteractive(
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
 		options.mcpElicitation?.unbind();
-		if (options.agent.state.status === "running") {
+		if (options.runtime.snapshot().agent.status === "running") {
 			try {
-				options.agent.abort();
+				options.runtime.cancel();
 			} catch {}
 		}
 		inputController.cancelUserShell();
@@ -845,9 +845,9 @@ async function runSingleSessionInteractive(
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
 		options.mcpElicitation?.unbind();
-		if (options.agent.state.status === "running") {
+		if (options.runtime.snapshot().agent.status === "running") {
 			try {
-				options.agent.abort();
+				options.runtime.cancel();
 			} catch {}
 		}
 		inputController.cancelUserShell();
@@ -879,7 +879,7 @@ async function runSingleSessionInteractive(
 	if (terminationSignal || fatalError !== undefined) {
 		options.mcpElicitation?.unbind();
 	}
-	const detach = options.agent.onEvent((event) => {
+	const detach = options.runtime.subscribe((event) => {
 		component.accept(event);
 		if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
 		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
@@ -893,9 +893,9 @@ async function runSingleSessionInteractive(
 			await inputController.submitInput(options.initialPrompt, options.initialAttachmentIds);
 		}
 		await exited;
-		if (options.agent.state.status !== "idle") {
+		if (options.runtime.snapshot().agent.status !== "idle") {
 			try {
-				await options.agent.waitForIdle();
+				await options.runtime.waitForIdle();
 			} catch (error) {
 				fatalError ??= error;
 			}
@@ -935,10 +935,10 @@ function assertEmptyReplacementSession(
 		0,
 	);
 	if (
-		replacement.agent.state.status !== "idle" ||
-		replacement.agent.state.messages.length > 0 ||
-		replacement.agent.state.pendingSteering.length > 0 ||
-		replacement.agent.state.pendingFollowUps.length > 0 ||
+		replacement.runtime.snapshot().agent.status !== "idle" ||
+		replacement.runtime.snapshot().agent.messages.length > 0 ||
+		replacement.runtime.snapshot().agent.pendingSteering.length > 0 ||
+		replacement.runtime.snapshot().agent.pendingFollowUps.length > 0 ||
 		replacement.session.seed.messages.length > 0 ||
 		replacement.session.seed.pendingFollowUps.length > 0 ||
 		replacement.session.recoverableFollowUps.length > 0 ||

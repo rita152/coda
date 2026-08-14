@@ -1,0 +1,43 @@
+{
+	"name": "@coda/runtime",
+	"version": "0.1.0",
+	"description": "Reusable headless Agent Runtime for Coda",
+	"private": true,
+	"type": "module",
+	"sideEffects": false,
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"check": "tsc --noEmit -p tsconfig.json && biome check src test vitest.config.ts",
+		"test": "vitest run",
+		"pack:dry-run": "npm pack --dry-run"
+	},
+	"dependencies": {
+		"@coda/agent": "0.1.0",
+		"@coda/ai": "0.1.0",
+		"@coda/mcp": "0.1.0",
+		"@coda/skills": "0.1.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "24.12.4",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"license": "MIT"
+}

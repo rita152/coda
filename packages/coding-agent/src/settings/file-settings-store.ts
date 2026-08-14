@@ -1,12 +1,12 @@
 import { isAbsolute, join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
-import type { SettingsStore, UserSettings } from "../application.ts";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { parseMcpServerConfigurations } from "../mcp/config.ts";
 import { parseCustomProviderModelConfig } from "../providers/custom-model-metadata.ts";
 import { AUTH_API_PROTOCOLS } from "../providers/types.ts";
+import type { SettingsStore, UserSettings } from "./types.ts";
 
 const REASONING_LEVELS = new Set<ThinkingLevel | "off">(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 

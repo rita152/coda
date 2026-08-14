@@ -1,6 +1,6 @@
 import type { McpHost, McpHostSnapshot } from "@coda/mcp";
 import { describe, expect, it, vi } from "vitest";
-import { CodingMcpRegistry } from "../../src/mcp/registry.ts";
+import { CodingMcpRegistry } from "../src/mcp/registry.ts";
 
 function snapshot(status: "ready" | "degraded", revision: number): McpHostSnapshot {
 	return {

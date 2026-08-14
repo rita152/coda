@@ -1,7 +1,8 @@
-import { Agent, type IdGenerator, type IdKind, type QueueItemId } from "@coda/agent";
+import type { IdGenerator, IdKind, QueueItemId } from "@coda/agent";
 import { fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("Session facade", () => {
@@ -130,7 +131,7 @@ describe("Session facade", () => {
 		});
 		const responses = [fauxAssistantMessage("persisted answer", { timestamp: 1_100 })];
 		const runtime = testTimeRuntime(1_100);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 1_100 },
 			idGenerator,
 			tools: [],
@@ -141,7 +142,7 @@ describe("Session facade", () => {
 				return faux.streamSimple(faux.getModel(), { messages: [] }, { runtime });
 			},
 		});
-		session.attach(agent);
+		agent.onEvent((event) => session.accept(event));
 		await agent.prompt("persist me");
 		const sessionId = session.descriptor.id;
 		await session.close();

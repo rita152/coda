@@ -1,6 +1,6 @@
+import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "@coda/runtime";
 import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
 import { skillExtensionEntries } from "../skills/manager.ts";
-import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "../skills/types.ts";
 
 export interface SkillsCommandFlowOptions {
 	readonly snapshot: CodingSkillsSnapshot;

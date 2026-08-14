@@ -1,5 +1,5 @@
 import type {
-	Agent,
+	AgentEvent,
 	AgentSeed,
 	Clock,
 	FollowUp,
@@ -12,11 +12,11 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
-import type { ModelSelection, ProjectTrustRecord } from "../application.ts";
-import type { CompactionCheckpoint } from "../context-window/types.ts";
+import type { CompactionCheckpoint, ModelSelection } from "@coda/runtime";
 import type { ComposerSubmission } from "../interactive/input-types.ts";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
+import type { ProjectTrustRecord } from "../settings/types.ts";
 import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
 declare const sessionIdBrand: unique symbol;
@@ -115,8 +115,6 @@ export type SessionChange =
 			readonly id: QueueItemId;
 	  };
 
-export type DetachSession = () => void;
-
 export interface Session {
 	readonly descriptor: SessionDescriptor;
 	readonly seed: AgentSeed;
@@ -134,7 +132,7 @@ export interface Session {
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
 	/** Adds final Workspace facts after the Agent's terminal event has projected native evidence. */
 	supplementRunEvidence(runId: string, supplement: RunEvidenceWorkspaceDiffSupplement): void;
-	attach(agent: Agent): DetachSession;
+	accept(event: AgentEvent): Promise<void>;
 	record(change: SessionChange): Promise<void>;
 	close(): Promise<void>;
 }

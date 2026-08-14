@@ -389,8 +389,6 @@ export interface RetryOptions {
 	readonly delay: RetryDelay;
 }
 
-export type SystemPromptFactory = () => string;
-
 export interface RunPreparation {
 	readonly runId: RunId;
 	readonly source: RunSource;
@@ -398,21 +396,28 @@ export interface RunPreparation {
 	readonly queueItemId?: QueueItemId;
 }
 
-/** Freezes application-owned state before the Run snapshot is created. */
-export type BeforeRun = (preparation: RunPreparation) => Promise<void> | void;
+/**
+ * The complete immutable execution capability for one Run. The Agent calls
+ * `prepareRun` exactly once and retains this snapshot until the Run settles.
+ */
+export interface PreparedRun {
+	readonly stream: ModelStream;
+	readonly tools: readonly AgentTool[];
+	readonly systemPrompt?: string;
+	readonly recoverFailedAttempt?: FailedAttemptRecovery;
+	readonly dispose?: () => Promise<void> | void;
+}
 
-/** Produces the immutable Tool set for one Run after `beforeRun` has completed. */
-export type AgentToolsFactory = () => readonly AgentTool[];
+export type PrepareRun = (preparation: RunPreparation) => PreparedRun | Promise<PreparedRun>;
+
+/** Static convenience input for tests and consumers without per-Run state. */
+export type StaticRunPreparation = Omit<PreparedRun, "dispose">;
 
 export interface AgentOptions {
-	readonly stream: ModelStream;
-	readonly tools: readonly AgentTool[] | AgentToolsFactory;
+	readonly prepareRun: PrepareRun;
 	readonly idGenerator: IdGenerator;
 	readonly clock: Clock;
-	readonly systemPrompt?: string | SystemPromptFactory;
-	readonly beforeRun?: BeforeRun;
 	readonly retry?: RetryOptions;
-	readonly recoverFailedAttempt?: FailedAttemptRecovery;
 	readonly runBudget?: RunBudget;
 	readonly seed?: AgentSeed;
 	/** Disable automatic Follow-up draining so an application scheduler can interleave other local operations. */

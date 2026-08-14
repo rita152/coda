@@ -1,5 +1,5 @@
-import type { Agent, AgentEvent, AgentMessage } from "@coda/agent";
-import type { CompactionCheckpoint } from "../context-window/types.ts";
+import type { AgentEvent, AgentMessage } from "@coda/agent";
+import type { CompactionCheckpoint } from "@coda/runtime";
 import {
 	projectSessionRunEvidence,
 	type RunEvidenceEnvelope,
@@ -11,7 +11,6 @@ import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import { SessionHistoryReader } from "./session-history-reader.ts";
 import type {
-	DetachSession,
 	RestoredSessionState,
 	Session,
 	SessionChange,
@@ -54,8 +53,6 @@ export class ManagedSession implements Session {
 	#discardedModelCost?: number;
 	#sequence: number;
 	#previousRecordId: string | null;
-	#attached?: Agent;
-	#detach?: () => void;
 	#closed = false;
 	#preparedRun?: { readonly promptVersion: string; readonly promptSha256: string };
 	#appendTail: Promise<void> = Promise.resolve();
@@ -149,16 +146,9 @@ export class ManagedSession implements Session {
 		this.#runEvidence[index] = supplementRunEvidenceWorkspaceDiff(this.#runEvidence[index]!, supplement);
 	}
 
-	attach(agent: Agent): DetachSession {
+	accept(event: AgentEvent): Promise<void> {
 		this.#assertOpen();
-		if (this.#attached) throw new Error("Session is already attached to an Agent");
-		this.#attached = agent;
-		this.#detach = agent.onEvent((event) => this.#recordEvent(event));
-		return () => {
-			this.#detach?.();
-			this.#detach = undefined;
-			this.#attached = undefined;
-		};
+		return this.#recordEvent(event);
 	}
 
 	async record(change: SessionChange): Promise<void> {
@@ -199,9 +189,6 @@ export class ManagedSession implements Session {
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#detach?.();
-		this.#detach = undefined;
-		this.#attached = undefined;
 		let failure: unknown;
 		try {
 			await this.#appendTail;

@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent, type IdGenerator, type IdKind } from "@coda/agent";
+import type { AgentEvent, IdGenerator, IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, type ToolObservation, type Usage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,6 +8,7 @@ import {
 	supplementRunEvidenceWorkspaceDiff,
 } from "../src/run-evidence/run-evidence.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("RunEvidence projection", () => {
@@ -506,7 +507,7 @@ describe("RunEvidence projection", () => {
 		});
 		const runtime = testTimeRuntime(1_000);
 		const responses = [fauxAssistantMessage("persisted answer", { timestamp: 1_000 })];
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 1_000 },
 			idGenerator,
 			tools: [],
@@ -516,7 +517,7 @@ describe("RunEvidence projection", () => {
 				return faux.streamSimple(faux.getModel(), { messages: [] }, { runtime });
 			},
 		});
-		session.attach(agent);
+		agent.onEvent((event) => session.accept(event));
 		await agent.prompt("persist evidence");
 		expect(session.runEvidence).toHaveLength(1);
 		const sessionId = session.descriptor.id;

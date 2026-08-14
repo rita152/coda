@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../../src/host/node-file-system.ts";
-import { promptSkillCatalog } from "../../src/skills/catalog.ts";
 import {
 	activateExplicitSkillReferences,
 	prependSkillContext,
@@ -13,7 +12,6 @@ import {
 } from "../../src/skills/context.ts";
 import { CodingSkillsManager, skillExtensionEntries } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
-import { createSkillTool, modelVisibleSkillIds } from "../../src/skills/tool.ts";
 
 const temporary: string[] = [];
 
@@ -108,28 +106,12 @@ describe("Skill activation context", () => {
 		await writeSkill(root, "visible", "Visible body");
 		const snapshot = await value.manager.refresh();
 
-		expect(modelVisibleSkillIds(snapshot)).toHaveLength(1);
-		const tool = createSkillTool(snapshot)!;
-		const id = modelVisibleSkillIds(snapshot)[0]!;
-		const result = await tool.execute(
-			{ skill: String(id), arguments: "focus" },
-			{
-				signal: new AbortController().signal,
-				runId: "run:1" as never,
-				turnId: "turn:1" as never,
-				invocationId: "invocation:1" as never,
-				resultMessageId: "message:1" as never,
-				providerToolCallId: "provider:1",
-			},
-		);
-		expect(result.content).toContain("Visible body");
-		expect(result.observation).toMatchObject({
-			status: "ok",
-			truncated: false,
-			facts: { resourceCount: 0, diagnosticCount: 0 },
-		});
-		expect(result.details).toMatchObject({ id: String(id), name: "visible", arguments: "focus" });
-		expect(result.details!.revision).toMatch(/^[a-f0-9]{64}$/u);
+		expect(snapshot.resolved).toHaveLength(1);
+		const id = snapshot.resolved[0]!.candidate.id;
+		const activation = await snapshot.activate(id, { arguments: "focus" });
+		expect(activation.body).toContain("Visible body");
+		expect(activation.arguments).toBe("focus");
+		expect(String(activation.revision)).toMatch(/^[a-f0-9]{64}$/u);
 	});
 
 	it("fails stale activation instead of reading changed instructions", async () => {
@@ -152,7 +134,7 @@ describe("Skill activation context", () => {
 		);
 		const snapshot = await value.manager.refresh();
 
-		expect(modelVisibleSkillIds(snapshot)).toEqual([snapshot.resolved[0]!.candidate.id]);
+		expect(snapshot.resolved.map(({ candidate }) => candidate.id)).toEqual([snapshot.resolved[0]!.candidate.id]);
 		expect(skillExtensionEntries(snapshot).map(({ name }) => name)).toEqual(["portable"]);
 		expect(snapshot.diagnostics.filter(({ code }) => code === "unknown-field")).toHaveLength(2);
 	});
@@ -177,9 +159,9 @@ describe("Skill activation context", () => {
 		await writeSkill(join(value.home, ".agents", "skills"), "shared", "User body");
 		const snapshot = await value.manager.refresh();
 
-		const catalog = promptSkillCatalog(snapshot, 128_000).entries.filter(({ name }) => name === "shared");
+		const catalog = snapshot.resolved.filter(({ candidate }) => candidate.metadata.name === "shared");
 		expect(catalog).toHaveLength(2);
-		expect(catalog[0]).toMatchObject({ winner: true, qualifiedName: "shared", source: "./.agents/skills" });
+		expect(catalog[0]).toMatchObject({ winner: true, sourceLabel: "./.agents/skills" });
 		expect(skillExtensionEntries(snapshot)[0]).toMatchObject({ name: "shared" });
 	});
 });

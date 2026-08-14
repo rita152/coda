@@ -1,12 +1,6 @@
-import {
-	Agent,
-	type AgentEvent,
-	type AgentSeed,
-	type IdGenerator,
-	type MessageId,
-	type ModelStream,
-} from "@coda/agent";
+import type { AgentEvent, AgentSeed, IdGenerator, MessageId, ModelStream } from "@coda/agent";
 import type { AssistantMessage, UserMessage } from "@coda/ai";
+import { openAgentRuntime, type RuntimeSession } from "@coda/runtime";
 import type { LoadedFixture } from "./fixture-types.ts";
 import { loadFixtures } from "./fixtures.ts";
 import { FixtureRepository } from "./repository.ts";
@@ -78,6 +72,20 @@ interface FixtureRunOptions {
 	readonly priceDataAvailable: boolean;
 }
 
+class EvaluationRuntimeSession implements RuntimeSession {
+	readonly id: string;
+	readonly seed?: AgentSeed;
+
+	constructor(id: string, seed: AgentSeed | undefined) {
+		this.id = id;
+		this.seed = seed;
+	}
+
+	accept(_event: AgentEvent): void {}
+
+	async close(): Promise<void> {}
+}
+
 async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluationReport> {
 	const repository = new FixtureRepository(options.fixture.initialFiles);
 	const seed = compactionSeed(options.fixture, options.clock.now());
@@ -89,26 +97,36 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		advanceTime: options.advanceTime,
 	});
 	const events: AgentEvent[] = [];
-	const agent = new Agent({
-		stream: options.stream,
-		tools,
+	const runtime = await openAgentRuntime({
+		runtimeId: `eval:${options.fixture.manifest.id}`,
+		session: new EvaluationRuntimeSession(`eval-session:${options.fixture.manifest.id}`, seed),
+		configuration: Object.freeze({ fixtureId: options.fixture.manifest.id }),
 		idGenerator: fixtureIdGenerator(options.fixture),
 		clock: options.clock,
-		systemPrompt: fixtureSystemPrompt(options.fixture),
-		...(seed ? { seed } : {}),
+		prepareRun: () => ({
+			snapshot: Object.freeze({
+				fixtureId: options.fixture.manifest.id,
+				toolNames: Object.freeze(tools.map(({ name }) => name)),
+			}),
+			stream: options.stream,
+			tools,
+			systemPrompt: fixtureSystemPrompt(options.fixture),
+		}),
 	});
-	agent.onEvent((event) => events.push(event));
-	let runOutcome = agent.state.lastRun?.outcome ?? "error";
+	runtime.subscribe((event) => {
+		if (event.type === "agent") events.push(event.event);
+	});
+	let runOutcome = runtime.snapshot().agent.lastRun?.outcome ?? "error";
 	let runtimeFailure: string | undefined;
 	try {
-		const result = await agent.prompt(options.fixture.manifest.prompt);
+		const result = await runtime.prompt(options.fixture.manifest.prompt);
 		runOutcome = result.outcome;
 	} catch (error) {
-		runOutcome = agent.state.lastRun?.outcome ?? "error";
+		runOutcome = runtime.snapshot().agent.lastRun?.outcome ?? "error";
 		runtimeFailure =
 			error instanceof Error ? `runtime failure: ${error.message}` : `runtime failure: ${String(error)}`;
 	}
-	return scoreFixture({
+	const report = scoreFixture({
 		fixture: options.fixture,
 		repository,
 		events,
@@ -116,6 +134,8 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		priceDataAvailable: options.priceDataAvailable,
 		...(runtimeFailure ? { runtimeFailure } : {}),
 	});
+	await runtime.close();
+	return report;
 }
 
 function aggregateUsage(fixtures: readonly FixtureEvaluationReport[]): EvaluationUsage {

@@ -1,6 +1,5 @@
 import { createModels, InMemoryCredentialStore } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
-import { assertModelContextFits } from "../src/prompt/context-budget.ts";
 import { ProviderManager } from "../src/providers/provider-manager.ts";
 import type { CustomProviderConfig, CustomProviderModelConfig } from "../src/providers/types.ts";
 import { effectiveReasoningEffort } from "../src/reasoning-effort.ts";
@@ -262,8 +261,8 @@ describe("ProviderManager", () => {
 		const text = models.getModel("custom-acme", "text")!;
 		const vision = models.getModel("custom-acme", "vision")!;
 
-		expect(assertModelContextFits(text, { messages: [] }).reservedOutputTokens).toBe(4_096);
-		expect(assertModelContextFits(vision, { messages: [] }).reservedOutputTokens).toBe(16_384);
+		expect(text.maxTokens).toBe(4_096);
+		expect(vision.maxTokens).toBe(20_000);
 		expect(text.input.includes("image")).toBe(false);
 		expect(vision.input.includes("image")).toBe(true);
 		expect(effectiveReasoningEffort(text, "high")).toBe("off");

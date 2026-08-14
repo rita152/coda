@@ -7,7 +7,15 @@ import {
 	fauxAssistantMessage,
 	type TimeRuntime,
 } from "@coda/ai";
-import type { AgentOptions, IdGenerator, IdKind, ModelStream } from "../src/index.ts";
+import {
+	type AgentOptions,
+	type IdGenerator,
+	type IdKind,
+	type ModelStream,
+	type PreparedRun,
+	prepareStaticRun,
+	type RunPreparation,
+} from "../src/index.ts";
 
 export class TestClock implements Clock {
 	#value: number;
@@ -67,7 +75,25 @@ export function baseOptions(
 	return {
 		clock,
 		idGenerator,
-		stream: createFauxRuntime(responses, clock, options.contexts),
-		tools: [],
+		prepareRun: prepareStaticRun({
+			stream: createFauxRuntime(responses, clock, options.contexts),
+			tools: [],
+		}),
 	};
+}
+
+export function withPreparedRun<TOptions extends AgentOptions>(
+	options: TOptions,
+	override:
+		| Partial<PreparedRun>
+		| ((preparation: RunPreparation) => Partial<PreparedRun> | Promise<Partial<PreparedRun>>),
+): TOptions {
+	const prepareBase = options.prepareRun;
+	return {
+		...options,
+		prepareRun: async (preparation) => ({
+			...(await prepareBase(preparation)),
+			...(typeof override === "function" ? await override(preparation) : override),
+		}),
+	} as TOptions;
 }

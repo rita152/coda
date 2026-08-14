@@ -1,0 +1,29 @@
+import type { ThinkingLevel } from "@coda/ai";
+import type { ModelSelection } from "@coda/runtime";
+import type { TerminalColorScheme } from "@coda/tui";
+import type { McpServerConfiguration, WorkspaceMcpTrustRecord } from "../mcp/config.ts";
+import type { CustomProviderConfig } from "../providers/types.ts";
+
+export interface ProjectTrustRecord {
+	readonly workspace: string;
+	readonly path: string;
+	readonly sha256: string;
+}
+
+export interface UserSettings {
+	readonly defaultModel?: ModelSelection;
+	readonly defaultReasoning?: ThinkingLevel | "off";
+	readonly customProviders?: readonly CustomProviderConfig[];
+	readonly projectTrust?: readonly ProjectTrustRecord[];
+	readonly mcpServers?: readonly McpServerConfiguration[];
+	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
+	readonly ui?: {
+		readonly motion?: "full" | "reduced";
+		readonly colorScheme?: TerminalColorScheme;
+	};
+}
+
+export interface SettingsStore {
+	load(): Promise<UserSettings>;
+	save(settings: UserSettings): Promise<void>;
+}

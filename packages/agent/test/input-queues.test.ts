@@ -1,7 +1,7 @@
 import { type Context, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, AgentError, type AgentEvent, type AgentTool } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const inputSchema = Type.Object({ value: Type.String() });
 
@@ -32,10 +32,11 @@ describe("Agent input queues", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls, response("after steering", clock)], { clock, contexts }),
-			tools: [pause],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("after steering", clock)], { clock, contexts }), {
+				tools: [pause],
+			}),
+		);
 		const events: AgentEvent[] = [];
 		agent.onEvent((event) => events.push(event));
 
@@ -219,10 +220,11 @@ describe("Agent input queues", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls, response("follow-up recovered", clock)], { clock }),
-			tools: [waitForAbort],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("follow-up recovered", clock)], { clock }), {
+				tools: [waitForAbort],
+			}),
+		);
 
 		const prompt = agent.prompt("initial");
 		await started;
@@ -273,11 +275,15 @@ describe("Agent input queues", () => {
 			timestamp: clock.now(),
 		});
 		const queueId = "queue:restored" as import("../src/index.ts").QueueItemId;
-		const agent = new Agent({
-			...baseOptions([calls], { clock }),
-			tools: [waitForAbort],
-			seed: { version: 1, messages: [], pendingFollowUps: [{ id: queueId, content: "recover" }] },
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{
+					...baseOptions([calls], { clock }),
+					seed: { version: 1, messages: [], pendingFollowUps: [{ id: queueId, content: "recover" }] },
+				},
+				{ tools: [waitForAbort] },
+			),
+		);
 
 		const first = agent.resumeFollowUps();
 		await started;

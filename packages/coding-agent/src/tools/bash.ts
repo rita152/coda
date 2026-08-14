@@ -1,8 +1,8 @@
 import type { AgentTool } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
-import type { ApplicationRuntime } from "../application.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
+import type { HostProcessRuntime } from "../host/runtime.ts";
 import type { Workspace } from "../workspace.ts";
 import { planShellExecution, SHELL_EXECUTION_FACTS_VERSION } from "./shell-execution.ts";
 import { createToolOutputCapture, discardStoredToolOutput, type StoredToolOutput } from "./tool-output-store.ts";
@@ -28,7 +28,7 @@ const BashParameters = Type.Object(
 	{ additionalProperties: false },
 );
 
-export function hostProcessEnvironment(runtime: ApplicationRuntime): Record<string, string> {
+export function hostProcessEnvironment(runtime: HostProcessRuntime): Record<string, string> {
 	const environment: Record<string, string> = {};
 	for (const [name, value] of Object.entries(runtime.environment)) {
 		if (value !== undefined) environment[name] = value;
@@ -75,7 +75,7 @@ export function createBashTool(options: {
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
 	readonly shellExecutable: string;
-	readonly runtime: ApplicationRuntime;
+	readonly runtime: HostProcessRuntime;
 }): AgentTool<typeof BashParameters> {
 	return {
 		name: "bash",

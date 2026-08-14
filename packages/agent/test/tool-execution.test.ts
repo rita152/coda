@@ -1,7 +1,7 @@
 import { type Context, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, type AgentEvent, type AgentTool } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const pathSchema = Type.Object({ path: Type.String() }, { additionalProperties: false });
 
@@ -37,10 +37,9 @@ describe("Agent Tool execution", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({
-			...baseOptions([first, response("finished", clock)], { clock, contexts }),
-			tools: [reader],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([first, response("finished", clock)], { clock, contexts }), { tools: [reader] }),
+		);
 		const events: AgentEvent[] = [];
 		agent.onEvent((event) => events.push(event));
 
@@ -112,10 +111,11 @@ describe("Agent Tool execution", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({
-			...baseOptions([calls, response("done", clock)], { clock }),
-			tools: [firstTool, secondTool],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("done", clock)], { clock }), {
+				tools: [firstTool, secondTool],
+			}),
+		);
 
 		const prompt = agent.prompt("run");
 		await started;
@@ -137,10 +137,9 @@ describe("Agent Tool execution", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls, response("done", clock)], { clock }),
-			tools: [reporting],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("done", clock)], { clock }), { tools: [reporting] }),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		await agent.prompt("report progress");
@@ -174,10 +173,11 @@ describe("Agent Tool execution", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls, response("recovered", clock)], { clock, contexts }),
-			tools: [missing],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("recovered", clock)], { clock, contexts }), {
+				tools: [missing],
+			}),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		const result = await agent.prompt("inspect");
@@ -233,10 +233,11 @@ describe("Agent Tool execution", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({
-			...baseOptions([calls, response("done", clock)], { clock }),
-			tools: [parallel("first"), parallel("second")],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([calls, response("done", clock)], { clock }), {
+				tools: [parallel("first"), parallel("second")],
+			}),
+		);
 		let secondEnded!: () => void;
 		const sawSecondEnd = new Promise<void>((resolve) => {
 			secondEnded = resolve;
@@ -286,7 +287,7 @@ describe("Agent Tool execution", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({ ...baseOptions([calls], { clock }), tools: [running, never] });
+		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [running, never] }));
 		agent.onEvent((event) => events.push(event));
 
 		const prompt = agent.prompt("abort tools");
@@ -328,7 +329,7 @@ describe("Agent Tool execution", () => {
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
 		const events: AgentEvent[] = [];
-		const agent = new Agent({ ...baseOptions([calls], { clock }), tools: [broken, later] });
+		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [broken, later] }));
 		agent.onEvent((event) => events.push(event));
 
 		await expect(agent.prompt("fault")).rejects.toThrow("disk vanished");
@@ -365,10 +366,9 @@ describe("Agent Tool execution", () => {
 			},
 		);
 		const events: AgentEvent[] = [];
-		const agent = new Agent({
-			...baseOptions([truncated, response("recovered", clock)], { clock }),
-			tools: [reader],
-		});
+		const agent = new Agent(
+			withPreparedRun(baseOptions([truncated, response("recovered", clock)], { clock }), { tools: [reader] }),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		const result = await agent.prompt("run");

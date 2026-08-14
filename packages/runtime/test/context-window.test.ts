@@ -9,10 +9,18 @@ import {
 	type Message,
 	type Model,
 } from "@coda/ai";
+import type { CompactionCheckpoint } from "@coda/runtime";
 import { describe, expect, it } from "vitest";
 import { ContextWindowController } from "../src/context-window/context-window.ts";
-import type { CompactionCheckpoint } from "../src/context-window/types.ts";
-import { testTimeRuntime } from "./time-runtime.ts";
+
+function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
+	const clock = typeof clockOrValue === "number" ? { now: () => clockOrValue } : clockOrValue;
+	return {
+		clock,
+		random: { next: () => 0 },
+		sleep: { wait: async () => {} },
+	};
+}
 
 describe("ContextWindowController", () => {
 	it("does not activate a checkpoint when the durable commit fails", async () => {

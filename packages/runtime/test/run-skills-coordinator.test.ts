@@ -1,7 +1,7 @@
 import type { AgentInput, Immutable } from "@coda/agent";
+import type { CodingSkillsSnapshot } from "@coda/runtime";
 import { describe, expect, it } from "vitest";
-import { RunSkillsCoordinator } from "../../src/skills/run-coordinator.ts";
-import type { CodingSkillsSnapshot } from "../../src/skills/types.ts";
+import { RunSkillsCoordinator } from "../src/skills/run-coordinator.ts";
 
 describe("RunSkillsCoordinator", () => {
 	it("uses a unique in-band binding so an abandoned identical activation cannot steal a later snapshot", () => {

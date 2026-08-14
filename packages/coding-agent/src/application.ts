@@ -1,19 +1,10 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import {
-	Agent,
-	type AgentInput,
-	type AgentTool,
-	type Clock,
-	type IdGenerator,
-	type Immutable,
-	type RunBudget,
-} from "@coda/agent";
+import type { AgentInput, Clock, IdGenerator, Immutable, RunBudget } from "@coda/agent";
 import type {
 	Api,
 	AssistantMessage,
 	AuthPrompt,
-	AuthResult,
 	ImageContent,
 	Model,
 	Models,
@@ -21,6 +12,8 @@ import type {
 	ThinkingLevel,
 } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult, type McpToolSnapshot } from "@coda/mcp";
+import type { CodingSkillsSnapshot, McpAgentElicitation } from "@coda/runtime";
+import { type CodingAgentRuntime, CodingMcpRegistry, type ModelSelection, openCodingAgentRuntime } from "@coda/runtime";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
 	createTerminalImageSurface,
@@ -39,9 +32,8 @@ import {
 	type CompletionWorkspaceEvidenceProvider,
 	createGitWorkspaceEvidenceProvider,
 } from "./completion/index.ts";
-import { ContextWindowController } from "./context-window/context-window.ts";
-import { ContextOverflowRecovery } from "./context-window/overflow-recovery.ts";
 import { type JsonEventStreamMode, JsonEventWriter } from "./event-output/json-event-writer.ts";
+import type { ApplicationIO } from "./host/application-io.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { activitySummaryModeForApi } from "./interactive/activity-status.ts";
@@ -64,26 +56,20 @@ import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import {
 	inspectMcpConfiguration,
-	type McpServerConfiguration,
 	type WorkspaceMcpConfigurationSnapshot,
 	type WorkspaceMcpTrustRecord,
 } from "./mcp/config.ts";
-import { CodingMcpRegistry } from "./mcp/registry.ts";
-import { createMcpAgentTools, type McpAgentElicitation } from "./mcp/tools.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import { loadProjectInstructions } from "./project/project-context.ts";
-import { buildSystemPrompt } from "./prompt/prompt-builder.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
-import type { CustomProviderConfig } from "./providers/types.ts";
 import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./reasoning-effort.ts";
-import { createCodingAgentRetry } from "./retry.ts";
 import { type AgentRunControlBinding, bindAgentRunControl, type RunControlConfiguration } from "./run-control/index.ts";
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
 import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
-import { RunRuntimeSlot } from "./runtime/run-runtime-slot.ts";
+import { createWorkspaceRuntimeServices } from "./runtime/workspace-runtime-services.ts";
 import { DraftSession } from "./session/draft-session.ts";
 import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
@@ -94,7 +80,7 @@ import type {
 	SessionMediaReference,
 	SessionMediaRegistration,
 } from "./session/types.ts";
-import { promptSkillCatalog } from "./skills/catalog.ts";
+import type { SettingsStore } from "./settings/types.ts";
 import {
 	activateExplicitSkillReferences,
 	prependSkillContext,
@@ -104,42 +90,12 @@ import {
 } from "./skills/context.ts";
 import { CodingSkillsManager, SkillCommandRegistryBinding, skillIdFromCommandId } from "./skills/manager.ts";
 import { collectSkillRoots } from "./skills/roots.ts";
-import { RunSkillsCoordinator } from "./skills/run-coordinator.ts";
-import { createSkillTool } from "./skills/tool.ts";
-import type { CodingSkillsSnapshot } from "./skills/types.ts";
 import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
-import { createCodingTools } from "./tools/index.ts";
 import { createWorkspace } from "./workspace.ts";
 
-export interface ApplicationInput {
-	readonly isTTY: boolean;
-	readAll(): Promise<string>;
-}
-
-export interface ApplicationOutput {
-	readonly isTTY: boolean;
-	write(chunk: string): void | Promise<void>;
-}
-
-export interface ApplicationIO {
-	readonly stdin: ApplicationInput;
-	readonly stdout: ApplicationOutput;
-	readonly stderr: ApplicationOutput;
-}
-
-export interface ModelSelection {
-	readonly provider: string;
-	readonly id: string;
-}
-
-interface PreparedRunRuntime {
-	readonly model: Model<Api>;
-	readonly reasoning: ThinkingLevel | "off";
-	readonly authSnapshot: AuthResult | undefined;
-	readonly skills: CodingSkillsSnapshot;
-	readonly mcp: McpToolSnapshot;
-	readonly tools: readonly AgentTool[];
-}
+export type { ModelSelection } from "@coda/runtime";
+export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
+export type { ProjectTrustRecord, SettingsStore, UserSettings } from "./settings/types.ts";
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 	limits: Object.freeze({
@@ -163,30 +119,6 @@ function codingAgentRunBudget(maxTurns: number | undefined, disabled: boolean): 
 		limits: Object.freeze({ ...DEFAULT_CODING_AGENT_RUN_BUDGET.limits, maxTurns }),
 	});
 }
-export interface UserSettings {
-	readonly defaultModel?: ModelSelection;
-	readonly defaultReasoning?: ThinkingLevel | "off";
-	readonly customProviders?: readonly CustomProviderConfig[];
-	readonly projectTrust?: readonly ProjectTrustRecord[];
-	readonly mcpServers?: readonly McpServerConfiguration[];
-	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
-	readonly ui?: {
-		readonly motion?: "full" | "reduced";
-		readonly colorScheme?: TerminalColorScheme;
-	};
-}
-
-export interface ProjectTrustRecord {
-	readonly workspace: string;
-	readonly path: string;
-	readonly sha256: string;
-}
-
-export interface SettingsStore {
-	load(): Promise<UserSettings>;
-	save(settings: UserSettings): Promise<void>;
-}
-
 export interface ApplicationRuntime {
 	readonly cwd: string;
 	readonly homeDirectory: string;
@@ -603,15 +535,15 @@ function runControlConfiguration(parsed: ParsedArguments): RunControlConfigurati
 
 function createEffortCommand(
 	session: Session,
-	runRuntime: RunRuntimeSlot<PreparedRunRuntime>,
+	runtime: CodingAgentRuntime,
 ): NonNullable<InteractiveSessionOptions["effortCommand"]> {
 	return {
 		snapshot: () => ({
-			current: runRuntime.selected.reasoning,
-			available: availableReasoningEfforts(runRuntime.selected.model),
+			current: runtime.snapshot().desired.reasoning,
+			available: availableReasoningEfforts(runtime.snapshot().desired.model),
 		}),
 		select: async (effort) => {
-			const selected = runRuntime.selected;
+			const selected = runtime.snapshot().desired;
 			const reasoning = effectiveReasoningEffort(selected.model, effort);
 			if (reasoning !== effort) {
 				throw new Error(
@@ -623,7 +555,7 @@ function createEffortCommand(
 				model: { provider: selected.model.provider, id: selected.model.id },
 				reasoning,
 			});
-			runRuntime.select({ ...selected, reasoning });
+			runtime.selectReasoning(reasoning);
 			return reasoning;
 		},
 	};
@@ -723,44 +655,33 @@ async function selectModelInteractively(
 	return { provider: selected.slice(0, separator), id: selected.slice(separator + 1) };
 }
 
-function interactiveStatusLineSnapshot(
-	runtime: PreparedRunRuntime,
-	agent: Agent,
-	session: Session,
-	contextWindow: ContextWindowController,
-	systemPrompt: string,
-): SessionStatusLineSnapshot {
-	const context = contextWindow.usage(
-		{
-			systemPrompt,
-			tools: runtime.tools.map((tool) => ({
-				name: tool.name,
-				description: tool.description,
-				parameters: tool.parameters,
-			})),
-		},
-		agent.state.messages,
-	);
+function interactiveStatusLineSnapshot(runtime: CodingAgentRuntime, session: Session): SessionStatusLineSnapshot {
+	const snapshot = runtime.snapshot();
+	const selected = snapshot.activeRun?.prepared ?? snapshot.desired;
+	const context = runtime.contextUsage();
 	const cost = sessionCostSnapshot(
-		agent.state.messages,
-		contextWindow.compactionCost,
+		snapshot.agent.messages,
+		runtime.compactionCost,
 		session.discardedModelCost,
-		runtime.model.cost !== undefined,
+		selected.model.cost !== undefined,
 	);
 	return {
-		modelSupportsReasoning: runtime.model.reasoning,
+		modelSupportsReasoning: selected.model.reasoning,
 		context: {
 			usedTokens: context.usedTokens,
-			windowTokens: runtime.model.contextWindow,
-			estimated: context.estimated || latestUsageComesFromAnotherModel(agent, runtime.model),
+			windowTokens: context.windowTokens,
+			estimated: context.estimated || latestUsageComesFromAnotherModel(snapshot.agent.messages, selected.model),
 		},
 		...(cost ? { cost } : {}),
 	};
 }
 
-function latestUsageComesFromAnotherModel(agent: Agent, model: Model<Api>): boolean {
-	for (let index = agent.state.messages.length - 1; index >= 0; index--) {
-		const message = agent.state.messages[index]?.message;
+function latestUsageComesFromAnotherModel(
+	messages: import("@coda/agent").AgentState["messages"],
+	model: Model<Api>,
+): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]?.message;
 		if (message?.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
 		const usageTokens =
 			message.usage.totalTokens ||
@@ -1064,6 +985,43 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				let mcpRegistry: CodingMcpRegistry | undefined;
 				let processSessionManager: ProcessSessionManager | undefined;
 				let runControlBinding: AgentRunControlBinding | undefined;
+				let runtimeToClose: CodingAgentRuntime | undefined;
+				const closeRuntimeResources = async (): Promise<void> => {
+					const failures: unknown[] = [];
+					try {
+						await drainWorkspaceDiffSupplements(session);
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						if (runtimeToClose) await runtimeToClose.close();
+						else await session.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await drainWorkspaceDiffSupplements(session);
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await processSessionManager?.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await mcpRegistry?.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await mediaLibrary.dispose();
+					} catch (error) {
+						failures.push(error);
+					}
+					if (failures.length === 1) throw failures[0];
+					if (failures.length > 1) throw new AggregateError(failures, "Could not close the Agent runtime");
+				};
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -1287,14 +1245,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const primaryMcpElicitation =
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
 					const initialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
-					const runRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
-						model,
-						reasoning,
-						authSnapshot: auth,
-						skills: skillsSnapshot,
-						mcp: initialMcp,
-						tools: Object.freeze([]),
-					});
 					const activeProcessSessionManager = new ProcessSessionManager({
 						fileSystem: options.fileSystem,
 						homeDirectory: options.runtime.homeDirectory,
@@ -1302,132 +1252,49 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						idGenerator: options.runtime.idGenerator,
 					});
 					processSessionManager = activeProcessSessionManager;
-					const baseTools = createCodingTools({
-						workspace,
-						fileSystem: options.fileSystem,
-						processRunner: options.processRunner,
-						processSessionManager: activeProcessSessionManager,
-						shellExecutable,
-						runtime: options.runtime,
-						sessionHistory: session.history,
-						sessionId: session.descriptor.id,
-					});
-					const toolsForRun = (snapshot: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
-						const skillTool = createSkillTool(snapshot);
-						const mcpTools = createMcpAgentTools({
-							snapshot: mcp,
-							elicit: async (request) => {
-								if (!primaryMcpElicitation) return { action: "decline" };
-								return primaryMcpElicitation(request);
-							},
-						});
-						return Object.freeze([...baseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
-					};
-					runRuntime.select({
-						...runRuntime.selected,
-						tools: toolsForRun(skillsSnapshot, initialMcp),
-					});
-					const runSkills = new RunSkillsCoordinator();
-					const freezePrompt = (runtime: PreparedRunRuntime) =>
-						buildSystemPrompt({
-							workspace: workspace.root,
-							platform: options.runtime.platform,
-							timestamp: options.runtime.clock.now(),
-							tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-							capabilities: { interactionMode: parsed.mode },
-							projectInstructions,
-							skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
-						});
-					let promptSnapshot = freezePrompt(runRuntime.selected);
-					let activeRuntimeId: number | undefined;
-					const contextWindow = new ContextWindowController({
-						models: options.models,
-						clock: options.runtime.clock,
-						idGenerator: options.runtime.idGenerator,
-						runtime: () => {
-							const runtime = runRuntime.active?.value ?? runRuntime.selected;
-							return { model: runtime.model, authSnapshot: runtime.authSnapshot };
-						},
-						commit: (checkpoint) => session.record({ type: "context_compacted", checkpoint }),
-						checkpoint: session.compactionCheckpoint,
-						maxOutputTokens: parsed.maxOutputTokens,
-					});
-					const contextOverflowRecovery = new ContextOverflowRecovery({
-						contextWindow,
-						model: () => (runRuntime.active?.value ?? runRuntime.selected).model,
-						maxOutputTokens: parsed.maxOutputTokens,
-					});
 					await session.record({
 						type: "model_selected",
 						model: { provider: model.provider, id: model.id },
 						reasoning,
 					});
-					const agent: Agent = new Agent({
+					const agentRuntime = await openCodingAgentRuntime({
+						...createWorkspaceRuntimeServices({
+							session,
+							workspace,
+							fileSystem: options.fileSystem,
+							processRunner: options.processRunner,
+							processSessionManager: activeProcessSessionManager,
+							shellExecutable,
+							applicationRuntime: options.runtime,
+							skillsManager,
+							initialSkills: skillsSnapshot,
+							skillRegistryBinding: skillRegistryBinding!,
+							mcpRegistry,
+							initialMcp,
+						}),
+						selection: { model, reasoning, authSnapshot: auth },
+						models: options.models,
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
 						runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
-						tools: () => {
-							const runtime = runRuntime.active?.value;
-							if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
-							return runtime.tools;
-						},
-						retry: options.runtime.scheduler ? createCodingAgentRetry(options.runtime.scheduler) : undefined,
-						recoverFailedAttempt: (attempt) =>
-							contextOverflowRecovery.recoverFailedAttempt(attempt, agent.state.messages),
-						stream: async ({ context, signal }) => {
-							const runtime = runRuntime.active?.value;
-							if (!runtime) throw new Error("A Model stream was requested outside an active Run runtime");
-							if (!runtime.authSnapshot) {
-								throw new Error(`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`);
-							}
-							const prepared = await contextOverflowRecovery.prepare(context, agent.state.messages, signal);
-							return options.models.streamSimple(runtime.model, prepared.context, {
-								signal,
-								authSnapshot: runtime.authSnapshot,
-								reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
-								maxTokens: prepared.reservedOutputTokens,
-							});
-						},
-						beforeRun: async ({ inputMessage }) => {
-							const nextSkills =
-								runSkills.consume(inputMessage.message.content) ?? (await skillsManager.refresh());
-							if (mcpRegistry) await mcpRegistry.refresh();
-							const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
-							skillRegistryBinding!.sync(nextSkills);
-							runRuntime.select({
-								...runRuntime.selected,
-								skills: nextSkills,
-								mcp: nextMcp,
-								tools: toolsForRun(nextSkills, nextMcp),
-							});
-							const runtime = runRuntime.begin();
-							activeRuntimeId = runtime.id;
-							try {
-								promptSnapshot = freezePrompt(runtime.value);
-								await session.record({
-									type: "prepare_run",
-									promptVersion: promptSnapshot.version,
-									promptSha256: promptSnapshot.sha256,
-								});
-							} catch (error) {
-								runRuntime.end(runtime.id);
-								activeRuntimeId = undefined;
-								throw error;
-							}
-						},
-						systemPrompt: () => promptSnapshot.text,
-						seed: session.seed,
 						autoDrainFollowUps: parsed.mode !== "interactive",
+						interactionMode: parsed.mode,
+						maxOutputTokens: parsed.maxOutputTokens,
+						workspaceRoot: workspace.root,
+						platform: options.runtime.platform,
+						projectInstructions,
+						mcpElicitation: primaryMcpElicitation,
+						...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
 					});
+					runtimeToClose = agentRuntime;
 					runControlBinding = configuredRunControl
 						? bindAgentRunControl({
-								agent,
+								runtime: agentRuntime,
 								configuration: configuredRunControl,
 								clock: options.runtime.clock,
 								scheduler: options.runtime.scheduler!,
 							})
 						: undefined;
-					session.attach(agent);
 					const initialAttachments = await Promise.all(
 						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
 					);
@@ -1443,17 +1310,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							mediaLibrary,
 							session,
 						);
-					const initialMessageCount = agent.state.messages.length;
-					agent.onEvent(async (event) => {
+					const initialMessageCount = agentRuntime.snapshot().agent.messages.length;
+					agentRuntime.subscribe(async (event) => {
 						if (event.type === "run_end") {
-							void contextWindow.flushManual(agent.state.messages).catch(() => undefined);
-							if (activeRuntimeId !== undefined) {
-								runRuntime.end(activeRuntimeId);
-								activeRuntimeId = undefined;
-							}
 							const supplement = beginWorkspaceDiffSupplement(session, event.runId);
-							if (parsed.mode === "interactive") void supplement.catch(() => undefined);
-							else await supplement;
+							if (parsed.mode === "interactive" && !agentRuntime.snapshot().closed) {
+								void supplement.catch(() => undefined);
+							} else {
+								await supplement;
+							}
 						}
 					});
 					const completionController =
@@ -1469,12 +1334,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											now: () => options.runtime.clock.now(),
 										}),
 									steer: (message) => {
-										agent.steer(message);
+										agentRuntime.steer(message);
 									},
 								})
 							: undefined;
 					if (completionController) {
-						agent.onEvent((event) => completionController.accept(event));
+						agentRuntime.subscribe((event) => completionController.accept(event));
 					}
 					if (parsed.mode === "interactive") {
 						const persistCustomProviders = async (): Promise<void> => {
@@ -1483,12 +1348,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						};
 						const sessionRunRuntimes = new Map<
 							string,
-							{ readonly runtime: RunRuntimeSlot<PreparedRunRuntime>; readonly apiKey: string | undefined }
-						>([[session.descriptor.id, { runtime: runRuntime, apiKey: parsed.apiKey }]]);
+							{ readonly runtime: CodingAgentRuntime; readonly apiKey: string | undefined }
+						>([[session.descriptor.id, { runtime: agentRuntime, apiKey: parsed.apiKey }]]);
 						const refreshProviderAuth = async (providerId: string): Promise<void> => {
 							for (const { runtime, apiKey } of sessionRunRuntimes.values()) {
-								if (runtime.selected.model.provider !== providerId) continue;
-								const selected = runtime.selected;
+								const selected = runtime.snapshot().desired;
+								if (selected.model.provider !== providerId) continue;
 								const model = options.models.getModel(providerId, selected.model.id) ?? selected.model;
 								const authSnapshot = await options.models.getAuth(model, {
 									apiKey,
@@ -1552,6 +1417,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							string,
 							{
 								readonly session: Session;
+								readonly runtime: CodingAgentRuntime;
 								readonly mediaLibrary: MediaLibrary;
 								readonly runControl?: AgentRunControlBinding;
 							}
@@ -1585,6 +1451,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										),
 								idGenerator: options.runtime.idGenerator,
 							});
+							let targetRuntimeToClose: CodingAgentRuntime | undefined;
+							let targetRunControlToDispose: AgentRunControlBinding | undefined;
 							try {
 								const targetSelection = targetSession.restored.model ?? settings.defaultModel;
 								if (!targetSelection) throw new Error("A new Session requires a configured default Model");
@@ -1595,76 +1463,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								);
 								const targetAuth = await options.models.getAuth(targetModel, { clock: options.runtime.clock });
 								const targetInitialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
-								const targetRunRuntime = new RunRuntimeSlot<PreparedRunRuntime>({
-									model: targetModel,
-									reasoning: targetReasoning,
-									authSnapshot: targetAuth,
-									skills: skillsManager.current ?? skillsSnapshot,
-									mcp: targetInitialMcp,
-									tools: Object.freeze([]),
-								});
-								sessionRunRuntimes.set(targetSession.descriptor.id, {
-									runtime: targetRunRuntime,
-									apiKey: undefined,
-								});
-								const targetBaseTools = createCodingTools({
-									workspace,
-									fileSystem: options.fileSystem,
-									processRunner: options.processRunner,
-									processSessionManager: activeProcessSessionManager,
-									shellExecutable,
-									runtime: options.runtime,
-									sessionHistory: targetSession.history,
-									sessionId: targetSession.descriptor.id,
-								});
-								const targetToolsForRun = (
-									snapshot: CodingSkillsSnapshot,
-									mcp: McpToolSnapshot,
-								): readonly AgentTool[] => {
-									const skillTool = createSkillTool(snapshot);
-									const mcpTools = createMcpAgentTools({
-										snapshot: mcp,
-										elicit: async (request) => {
-											if (!targetMcpElicitation) return { action: "decline" };
-											return targetMcpElicitation(request);
-										},
-									});
-									return Object.freeze([...targetBaseTools, ...(skillTool ? [skillTool] : []), ...mcpTools]);
-								};
-								targetRunRuntime.select({
-									...targetRunRuntime.selected,
-									tools: targetToolsForRun(targetRunRuntime.selected.skills, targetInitialMcp),
-								});
-								const targetRunSkills = new RunSkillsCoordinator();
-								const targetFreezePrompt = (runtime: PreparedRunRuntime) =>
-									buildSystemPrompt({
-										workspace: workspace.root,
-										platform: options.runtime.platform,
-										timestamp: options.runtime.clock.now(),
-										tools: runtime.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-										capabilities: { interactionMode: "interactive" },
-										projectInstructions,
-										skills: promptSkillCatalog(runtime.skills, runtime.model.contextWindow),
-									});
-								let targetPromptSnapshot = targetFreezePrompt(targetRunRuntime.selected);
-								let targetActiveRuntimeId: number | undefined;
-								const targetContextWindow = new ContextWindowController({
-									models: options.models,
-									clock: options.runtime.clock,
-									idGenerator: options.runtime.idGenerator,
-									runtime: () => {
-										const runtime = targetRunRuntime.active?.value ?? targetRunRuntime.selected;
-										return { model: runtime.model, authSnapshot: runtime.authSnapshot };
-									},
-									commit: (checkpoint) => targetSession.record({ type: "context_compacted", checkpoint }),
-									checkpoint: targetSession.compactionCheckpoint,
-									maxOutputTokens: parsed.maxOutputTokens,
-								});
-								const targetContextOverflowRecovery = new ContextOverflowRecovery({
-									contextWindow: targetContextWindow,
-									model: () => (targetRunRuntime.active?.value ?? targetRunRuntime.selected).model,
-									maxOutputTokens: parsed.maxOutputTokens,
-								});
 								if (!targetSession.restored.model) {
 									const initialModelSelection = {
 										type: "model_selected",
@@ -1677,82 +1475,53 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										await targetSession.record(initialModelSelection);
 									}
 								}
-								const targetAgent: Agent = new Agent({
+								const targetRuntime = await openCodingAgentRuntime({
+									...createWorkspaceRuntimeServices({
+										session: targetSession,
+										workspace,
+										fileSystem: options.fileSystem,
+										processRunner: options.processRunner,
+										processSessionManager: activeProcessSessionManager,
+										shellExecutable,
+										applicationRuntime: options.runtime,
+										skillsManager,
+										initialSkills: skillsManager.current ?? skillsSnapshot,
+										skillRegistryBinding: skillRegistryBinding!,
+										mcpRegistry,
+										initialMcp: targetInitialMcp,
+									}),
+									selection: {
+										model: targetModel,
+										reasoning: targetReasoning,
+										authSnapshot: targetAuth,
+									},
+									models: options.models,
 									clock: options.runtime.clock,
 									idGenerator: options.runtime.idGenerator,
 									runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
-									tools: () => {
-										const runtime = targetRunRuntime.active?.value;
-										if (!runtime) throw new Error("Tools were requested outside an active Run runtime");
-										return runtime.tools;
-									},
-									retry: options.runtime.scheduler
-										? createCodingAgentRetry(options.runtime.scheduler)
-										: undefined,
-									recoverFailedAttempt: (attempt) =>
-										targetContextOverflowRecovery.recoverFailedAttempt(attempt, targetAgent.state.messages),
-									stream: async ({ context, signal }) => {
-										const runtime = targetRunRuntime.active?.value;
-										if (!runtime)
-											throw new Error("A Model stream was requested outside an active Run runtime");
-										if (!runtime.authSnapshot) {
-											throw new Error(
-												`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`,
-											);
-										}
-										const prepared = await targetContextOverflowRecovery.prepare(
-											context,
-											targetAgent.state.messages,
-											signal,
-										);
-										return options.models.streamSimple(runtime.model, prepared.context, {
-											signal,
-											authSnapshot: runtime.authSnapshot,
-											reasoning: runtime.reasoning === "off" ? undefined : runtime.reasoning,
-											maxTokens: prepared.reservedOutputTokens,
-										});
-									},
-									beforeRun: async ({ inputMessage }) => {
-										const nextSkills =
-											targetRunSkills.consume(inputMessage.message.content) ??
-											(await skillsManager.refresh());
-										if (mcpRegistry) await mcpRegistry.refresh();
-										const nextMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
-										skillRegistryBinding!.sync(nextSkills);
-										targetRunRuntime.select({
-											...targetRunRuntime.selected,
-											skills: nextSkills,
-											mcp: nextMcp,
-											tools: targetToolsForRun(nextSkills, nextMcp),
-										});
-										const runtime = targetRunRuntime.begin();
-										targetActiveRuntimeId = runtime.id;
-										try {
-											targetPromptSnapshot = targetFreezePrompt(runtime.value);
-											await targetSession.record({
-												type: "prepare_run",
-												promptVersion: targetPromptSnapshot.version,
-												promptSha256: targetPromptSnapshot.sha256,
-											});
-										} catch (error) {
-											targetRunRuntime.end(runtime.id);
-											targetActiveRuntimeId = undefined;
-											throw error;
-										}
-									},
-									systemPrompt: () => targetPromptSnapshot.text,
-									seed: targetSession.seed,
 									autoDrainFollowUps: false,
+									interactionMode: "interactive",
+									maxOutputTokens: parsed.maxOutputTokens,
+									workspaceRoot: workspace.root,
+									platform: options.runtime.platform,
+									projectInstructions,
+									mcpElicitation: targetMcpElicitation,
+									...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
+								});
+								targetRuntimeToClose = targetRuntime;
+								sessionRunRuntimes.set(targetSession.descriptor.id, {
+									runtime: targetRuntime,
+									apiKey: undefined,
 								});
 								const targetRunControl = configuredRunControl
 									? bindAgentRunControl({
-											agent: targetAgent,
+											runtime: targetRuntime,
 											configuration: configuredRunControl,
 											clock: options.runtime.clock,
 											scheduler: options.runtime.scheduler!,
 										})
 									: undefined;
-								targetSession.attach(targetAgent);
+								targetRunControlToDispose = targetRunControl;
 								const targetRestoredMedia = await restoredChatAttachments(
 									targetSession.mediaReferences,
 									targetSession.descriptor.path,
@@ -1765,37 +1534,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										targetMediaLibrary,
 										targetSession,
 									);
-								targetAgent.onEvent(async (event) => {
+								targetRuntime.subscribe(async (event) => {
 									if (event.type === "run_end") {
-										void targetContextWindow.flushManual(targetAgent.state.messages).catch(() => undefined);
-										if (targetActiveRuntimeId !== undefined) {
-											targetRunRuntime.end(targetActiveRuntimeId);
-											targetActiveRuntimeId = undefined;
-										}
-										void beginWorkspaceDiffSupplement(targetSession, event.runId).catch(() => undefined);
+										const supplement = beginWorkspaceDiffSupplement(targetSession, event.runId);
+										if (targetRuntime.snapshot().closed) await supplement;
+										else void supplement.catch(() => undefined);
 									}
 								});
 								secondaryResources.set(targetSession.descriptor.id, {
 									session: targetSession,
+									runtime: targetRuntime,
 									mediaLibrary: targetMediaLibrary,
 									...(targetRunControl ? { runControl: targetRunControl } : {}),
 								});
 								return {
-									agent: targetAgent,
+									runtime: targetRuntime,
 									session: targetSession,
 									modelLabel: `${targetModel.provider}/${targetModel.id}`,
 									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
-									statusLine: () =>
-										interactiveStatusLineSnapshot(
-											targetRunRuntime.active?.value ?? targetRunRuntime.selected,
-											targetAgent,
-											targetSession,
-											targetContextWindow,
-											targetPromptSnapshot.text,
-										),
+									statusLine: () => interactiveStatusLineSnapshot(targetRuntime, targetSession),
 									modelCommand: {
 										currentKey: () =>
-											`${targetRunRuntime.selected.model.provider}/${targetRunRuntime.selected.model.id}`,
+											`${targetRuntime.snapshot().desired.model.provider}/${targetRuntime.snapshot().desired.model.id}`,
 										list: listModelEntries,
 										select: async (selected) => {
 											const authSnapshot = await options.models.getAuth(selected.runtime, {
@@ -1804,15 +1564,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
 											const nextReasoning = effectiveReasoningEffort(
 												selected.runtime,
-												targetRunRuntime.selected.reasoning,
+												targetRuntime.snapshot().desired.reasoning,
 											);
 											await targetSession.record({
 												type: "model_selected",
 												model: { provider: selected.providerId, id: selected.id },
 												reasoning: nextReasoning,
 											});
-											targetRunRuntime.select({
-												...targetRunRuntime.selected,
+											targetRuntime.select({
 												model: selected.runtime,
 												reasoning: nextReasoning,
 												authSnapshot,
@@ -1827,20 +1586,19 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
 										},
 									},
-									effortCommand: createEffortCommand(targetSession, targetRunRuntime),
+									effortCommand: createEffortCommand(targetSession, targetRuntime),
 									authCommand,
 									skillsCommand,
 									mcpCommand,
 									compactCommand: {
 										run: async (focus) => {
-											await targetContextWindow.requestManual(targetAgent.state.messages, {
-												focus,
-												defer: targetAgent.state.status === "running",
-											});
+											await targetRuntime.requestCompaction(focus);
 											return "Context compacted";
 										},
 									},
-									contextOverflowRecovery: targetContextOverflowRecovery,
+									contextOverflowRecovery: {
+										takeUnrecoverable: () => targetRuntime.takeUnrecoverableOverflow(),
+									},
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
@@ -1848,7 +1606,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										assertSkillReferencesAvailable(snapshot, references);
 									},
 									buildPrompt: async (text, attachmentIds, inputContext) => {
-										const selectedModel = targetRunRuntime.selected.model;
+										const selectedModel = targetRuntime.snapshot().desired.model;
 										if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
 											throw new Error(
 												`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
@@ -1867,8 +1625,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										}
 										const snapshot =
 											inputContext.kind === "steering"
-												? (targetRunRuntime.active?.value.skills ?? targetRunRuntime.selected.skills)
-												: (skillsManager.current ?? targetRunRuntime.selected.skills);
+												? (targetRuntime.snapshot().activeRun?.prepared.skills ??
+													skillsManager.current ??
+													skillsSnapshot)
+												: (skillsManager.current ??
+													targetRuntime.snapshot().activeRun?.prepared.skills ??
+													skillsSnapshot);
 										assertSkillReferencesAvailable(snapshot, inputContext.references);
 										const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
 										const input = await promptInput(
@@ -1883,13 +1645,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 											composerText: inputContext.composerText,
 										});
 										const snapshotBinding =
-											inputContext.kind === "steering" ? undefined : targetRunSkills.createBinding();
+											inputContext.kind === "steering"
+												? undefined
+												: targetRuntime.createSkillSnapshotBinding();
 										const prepared = prependSkillContext(
 											input,
 											renderExplicitSkillContext(activations, snapshotBinding),
 											renderExplicitSkillReferences(activations),
 										);
-										if (snapshotBinding) targetRunSkills.prepare(prepared, snapshot, snapshotBinding);
+										if (snapshotBinding)
+											targetRuntime.prepareSkillSnapshot(prepared, snapshot, snapshotBinding);
 										return prepared;
 									},
 									prepareAttachments: targetPrepareAttachments,
@@ -1922,8 +1687,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								};
 							} catch (error) {
 								sessionRunRuntimes.delete(targetSession.descriptor.id);
+								targetRunControlToDispose?.dispose();
+								if (targetRuntimeToClose) await targetRuntimeToClose.close().catch(() => undefined);
+								else await targetSession.close().catch(() => undefined);
 								await targetMediaLibrary.dispose().catch(() => undefined);
-								await targetSession.close().catch(() => undefined);
 								throw error;
 							}
 						};
@@ -1931,7 +1698,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						let overflowReplacement: InteractiveSessionOptions | undefined;
 						try {
 							exitCode = await runInteractive({
-								agent,
+								runtime: agentRuntime,
 								session,
 								terminal: interactiveRuntime!.terminal,
 								clock: options.runtime.clock,
@@ -1943,16 +1710,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								mcpElicitation: interactiveMcpElicitation,
 								modelLabel: `${model.provider}/${model.id}`,
 								activitySummaryMode: activitySummaryModeForApi(model.api),
-								statusLine: () =>
-									interactiveStatusLineSnapshot(
-										runRuntime.active?.value ?? runRuntime.selected,
-										agent,
-										session,
-										contextWindow,
-										promptSnapshot.text,
-									),
+								statusLine: () => interactiveStatusLineSnapshot(agentRuntime, session),
 								modelCommand: {
-									currentKey: () => `${runRuntime.selected.model.provider}/${runRuntime.selected.model.id}`,
+									currentKey: () =>
+										`${agentRuntime.snapshot().desired.model.provider}/${agentRuntime.snapshot().desired.model.id}`,
 									list: listModelEntries,
 									select: async (selected) => {
 										const authSnapshot = await options.models.getAuth(selected.runtime, {
@@ -1962,15 +1723,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
 										const nextReasoning = effectiveReasoningEffort(
 											selected.runtime,
-											runRuntime.selected.reasoning,
+											agentRuntime.snapshot().desired.reasoning,
 										);
 										await session.record({
 											type: "model_selected",
 											model: { provider: selected.providerId, id: selected.id },
 											reasoning: nextReasoning,
 										});
-										runRuntime.select({
-											...runRuntime.selected,
+										agentRuntime.select({
 											model: selected.runtime,
 											reasoning: nextReasoning,
 											authSnapshot,
@@ -1985,20 +1745,17 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
 									},
 								},
-								effortCommand: createEffortCommand(session, runRuntime),
+								effortCommand: createEffortCommand(session, agentRuntime),
 								authCommand,
 								skillsCommand,
 								mcpCommand,
 								compactCommand: {
 									run: async (focus) => {
-										await contextWindow.requestManual(agent.state.messages, {
-											focus,
-											defer: agent.state.status === "running",
-										});
+										await agentRuntime.requestCompaction(focus);
 										return "Context compacted";
 									},
 								},
-								contextOverflowRecovery,
+								contextOverflowRecovery: { takeUnrecoverable: () => agentRuntime.takeUnrecoverableOverflow() },
 								onRetire: () => activeProcessSessionManager.retireSession(session.descriptor.id),
 								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
@@ -2063,7 +1820,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									assertSkillReferencesAvailable(snapshot, references);
 								},
 								buildPrompt: async (text, attachmentIds, inputContext) => {
-									const selectedModel = runRuntime.selected.model;
+									const selectedModel = agentRuntime.snapshot().desired.model;
 									if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
 										throw new Error(
 											`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
@@ -2075,8 +1832,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									}
 									const snapshot =
 										inputContext.kind === "steering"
-											? (runRuntime.active?.value.skills ?? runRuntime.selected.skills)
-											: (skillsManager.current ?? runRuntime.selected.skills);
+											? (agentRuntime.snapshot().activeRun?.prepared.skills ??
+												skillsManager.current ??
+												skillsSnapshot)
+											: (skillsManager.current ??
+												agentRuntime.snapshot().activeRun?.prepared.skills ??
+												skillsSnapshot);
 									assertSkillReferencesAvailable(snapshot, inputContext.references);
 									const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
 									const input = await promptInput(
@@ -2091,13 +1852,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										composerText: inputContext.composerText,
 									});
 									const snapshotBinding =
-										inputContext.kind === "steering" ? undefined : runSkills.createBinding();
+										inputContext.kind === "steering" ? undefined : agentRuntime.createSkillSnapshotBinding();
 									const prepared = prependSkillContext(
 										input,
 										renderExplicitSkillContext(activations, snapshotBinding),
 										renderExplicitSkillReferences(activations),
 									);
-									if (snapshotBinding) runSkills.prepare(prepared, snapshot, snapshotBinding);
+									if (snapshotBinding) agentRuntime.prepareSkillSnapshot(prepared, snapshot, snapshotBinding);
 									return prepared;
 								},
 								prepareAttachments,
@@ -2129,13 +1890,22 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									const failures: unknown[] = [];
 									resource.runControl?.dispose();
 									try {
-										await resource.mediaLibrary.dispose();
+										await drainWorkspaceDiffSupplements(resource.session);
+									} catch (error) {
+										failures.push(error);
+									}
+									try {
+										await resource.runtime.close();
 									} catch (error) {
 										failures.push(error);
 									}
 									try {
 										await drainWorkspaceDiffSupplements(resource.session);
-										await resource.session.close();
+									} catch (error) {
+										failures.push(error);
+									}
+									try {
+										await resource.mediaLibrary.dispose();
 									} catch (error) {
 										failures.push(error);
 									}
@@ -2146,11 +1916,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								}),
 							);
 						}
-						const finalAgent = overflowReplacement?.agent ?? agent;
+						const finalRuntime = overflowReplacement?.runtime ?? agentRuntime;
+						const finalAgent = finalRuntime.snapshot().agent;
 						const finalSession = overflowReplacement?.session ?? session;
-						const interactiveMessages = finalAgent.state.messages.slice(
-							overflowReplacement ? 0 : initialMessageCount,
-						);
+						const interactiveMessages = finalAgent.messages.slice(overflowReplacement ? 0 : initialMessageCount);
 						const finalAssistant = [...interactiveMessages]
 							.reverse()
 							.find(
@@ -2164,15 +1933,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								`Session ${finalSession.descriptor.id} • resume with: coda --resume ${finalSession.descriptor.id}\n`,
 							);
 						}
-						if (finalAgent.state.lastRun && finalAgent.state.lastRun.outcome !== "success") {
+						if (finalAgent.lastRun && finalAgent.lastRun.outcome !== "success") {
 							await options.io.stderr.write(
-								`coda: ${finalAgent.state.lastRun.failure?.message ?? `Run ended with outcome ${finalAgent.state.lastRun.outcome}`}\n`,
+								`coda: ${finalAgent.lastRun.failure?.message ?? `Run ended with outcome ${finalAgent.lastRun.outcome}`}\n`,
 							);
 						}
 						return exitCode;
 					}
 					if (jsonEventWriter) {
-						agent.onEvent(async (event) => {
+						agentRuntime.subscribe(async (event) => {
 							const runControl =
 								event.type === "run_start" || event.type === "run_end"
 									? runControlBinding?.reportForRun(String(event.runId))
@@ -2180,11 +1949,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							await jsonEventWriter.writeAgentEvent(
 								event,
 								event.type === "run_start"
-									? {
-											model: { provider: model.provider, id: model.id },
-											reasoning,
-											prompt: { version: promptSnapshot.version, sha256: promptSnapshot.sha256 },
-										}
+									? (() => {
+											const prepared = agentRuntime.snapshot().activeRun?.prepared;
+											if (!prepared) throw new Error(`Prepared Run ${event.runId} is unavailable`);
+											return {
+												model: { provider: prepared.model.provider, id: prepared.model.id },
+												reasoning: prepared.reasoning,
+												prompt: { version: prepared.prompt.version, sha256: prepared.prompt.sha256 },
+											};
+										})()
 									: undefined,
 								runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
 							);
@@ -2205,14 +1978,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 					const initialMedia = await prepareAttachments(initialAttachmentIds);
 					let initialMediaCommitted = false;
-					const detachInitialMediaCommit = agent.onEvent(async (event) => {
+					const detachInitialMediaCommit = agentRuntime.subscribe(async (event) => {
 						if (event.type !== "run_start" || event.source !== "prompt" || initialMediaCommitted) return;
 						await initialMedia.commit();
 						initialMediaCommitted = true;
 					});
-					let result: Awaited<ReturnType<Agent["prompt"]>>;
+					let result: Awaited<ReturnType<CodingAgentRuntime["prompt"]>>;
 					try {
-						result = await agent.prompt(initialInput);
+						result = await agentRuntime.prompt(initialInput);
 					} finally {
 						detachInitialMediaCommit();
 						if (!initialMediaCommitted) await initialMedia.rollback();
@@ -2222,7 +1995,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						await options.io.stderr.write(`coda: ${detail}\n`);
 						return 1;
 					}
-					const committed = agent.state.messages.find(({ id }) => id === result.finalMessageId)?.message;
+					const committed = agentRuntime
+						.snapshot()
+						.agent.messages.find(({ id }) => id === result.finalMessageId)?.message;
 					if (!committed || committed.role !== "assistant") throw new Error("Final Assistant Message is missing");
 					if (parsed.output === "text") await options.io.stdout.write(`${finalText(committed)}\n`);
 					const disposition = completionController?.get(result.runId);
@@ -2241,20 +2016,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					runControlBinding?.dispose();
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
-					try {
-						await processSessionManager?.close();
-					} finally {
-						try {
-							await mcpRegistry?.close();
-						} finally {
-							try {
-								await mediaLibrary.dispose();
-							} finally {
-								await drainWorkspaceDiffSupplements(session);
-								await session.close();
-							}
-						}
-					}
+					await closeRuntimeResources();
 				}
 			} catch (error) {
 				if (error instanceof InteractiveTerminationError) return error.exitCode;

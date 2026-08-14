@@ -9,7 +9,7 @@ import {
 	type RunBudget,
 	type RunLimits,
 } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 const valueSchema = Type.Object({ value: Type.String() }, { additionalProperties: false });
 
@@ -89,11 +89,12 @@ describe("Agent RunBudget", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls], { clock }),
-			tools: [testTool("step", () => ({ content: "done" }))],
-			runBudget: { limits: mutableLimits },
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{ ...baseOptions([calls], { clock }), runBudget: { limits: mutableLimits } },
+				{ tools: [testTool("step", () => ({ content: "done" }))] },
+			),
+		);
 		mutableLimits.maxTurns = 10;
 		let snapshot: RunBudget | undefined;
 		agent.onEvent((event) => {
@@ -128,11 +129,12 @@ describe("Agent RunBudget", () => {
 			timestamp: clock.now(),
 		});
 		const events: AgentEvent[] = [];
-		const agent = new Agent({
-			...baseOptions([calls], { clock }),
-			tools: [testTool("step", () => ({ content: "done" }))],
-			runBudget: budget({ maxTurns: 1 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{ ...baseOptions([calls], { clock }), runBudget: budget({ maxTurns: 1 }) },
+				{ tools: [testTool("step", () => ({ content: "done" }))] },
+			),
+		);
 		let exhaustionVisibleFromState = false;
 		agent.onEvent((event) => {
 			events.push(event);
@@ -201,16 +203,19 @@ describe("Agent RunBudget", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({
-			...baseOptions([calls], { clock }),
-			tools: [
-				testTool("step", ({ value }) => {
-					executed.push(value);
-					return { content: value };
-				}),
-			],
-			runBudget: budget({ maxToolInvocations: 1 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{ ...baseOptions([calls], { clock }), runBudget: budget({ maxToolInvocations: 1 }) },
+				{
+					tools: [
+						testTool("step", ({ value }) => {
+							executed.push(value);
+							return { content: value };
+						}),
+					],
+				},
+			),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		const result = await agent.prompt("too many Tools");
@@ -256,19 +261,21 @@ describe("Agent RunBudget", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls]),
-			clock,
-			tools: [
-				testTool("wait", async (_arguments, { signal }) => {
-					toolSignal = signal;
-					started();
-					await gate;
-					return { content: "settled" };
-				}),
-			],
-			runBudget: budget({ maxElapsedMs: 50 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{ ...baseOptions([calls]), clock, runBudget: budget({ maxElapsedMs: 50 }) },
+				{
+					tools: [
+						testTool("wait", async (_arguments, { signal }) => {
+							toolSignal = signal;
+							started();
+							await gate;
+							return { content: "settled" };
+						}),
+					],
+				},
+			),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		const prompt = agent.prompt("wait safely");
@@ -362,11 +369,15 @@ describe("Agent RunBudget", () => {
 			[fauxToolCall("inspect", { nested: { right: 3, left: 2 }, alpha: 1 }, { id: "call:second" })],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({
-			...baseOptions([first, reordered], { clock }),
-			tools: [inspect],
-			runBudget: budget({ maxConsecutiveEquivalentToolBatches: 1 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{
+					...baseOptions([first, reordered], { clock }),
+					runBudget: budget({ maxConsecutiveEquivalentToolBatches: 1 }),
+				},
+				{ tools: [inspect] },
+			),
+		);
 
 		const result = await agent.prompt("detect a loop");
 
@@ -396,13 +407,18 @@ describe("Agent RunBudget", () => {
 				stopReason: "toolUse",
 				timestamp: clock.now(),
 			});
-		const agent = new Agent({
-			...baseOptions([call("a", "call:a1"), call("b", "call:b"), call("a", "call:a2"), response("done", clock)], {
-				clock,
-			}),
-			tools: [step],
-			runBudget: budget({ maxConsecutiveEquivalentToolBatches: 1 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{
+					...baseOptions(
+						[call("a", "call:a1"), call("b", "call:b"), call("a", "call:a2"), response("done", clock)],
+						{ clock },
+					),
+					runBudget: budget({ maxConsecutiveEquivalentToolBatches: 1 }),
+				},
+				{ tools: [step] },
+			),
+		);
 
 		await expect(agent.prompt("no loop")).resolves.toMatchObject({ outcome: "success" });
 		expect(executions).toEqual(["a", "b", "a"]);
@@ -454,12 +470,12 @@ describe("Agent RunBudget", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({
-			...baseOptions([calls]),
-			clock,
-			tools: [wait],
-			runBudget: budget({ maxElapsedMs: 50 }),
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{ ...baseOptions([calls]), clock, runBudget: budget({ maxElapsedMs: 50 }) },
+				{ tools: [wait] },
+			),
+		);
 		agent.onEvent((event) => events.push(event));
 
 		const prompt = agent.prompt("cancel");

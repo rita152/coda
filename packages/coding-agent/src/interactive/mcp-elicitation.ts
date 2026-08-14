@@ -1,4 +1,5 @@
 import type { McpElicitationResult } from "@coda/mcp";
+import type { McpAgentElicitation } from "@coda/runtime";
 import {
 	Component,
 	type ComponentInputContext,
@@ -13,7 +14,6 @@ import {
 	type Tui,
 	wrapAnsi,
 } from "@coda/tui";
-import type { McpAgentElicitation } from "../mcp/tools.ts";
 
 type ElicitationScalar = string | number | boolean;
 

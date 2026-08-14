@@ -1,6 +1,6 @@
 import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
-import type { ApplicationRuntime } from "../application.ts";
+import type { HostProcessRuntime } from "../host/runtime.ts";
 import { hostProcessEnvironment } from "../tools/bash.ts";
 import type { Workspace } from "../workspace.ts";
 import type { ProcessSessionManager, ProcessSessionSnapshot, ProcessSessionState } from "./process-session-manager.ts";
@@ -77,7 +77,7 @@ export function createProcessTools(options: {
 	readonly workspace: Workspace;
 	readonly manager: ProcessSessionManager;
 	readonly shellExecutable: string;
-	readonly runtime: ApplicationRuntime;
+	readonly runtime: HostProcessRuntime;
 	readonly sessionId: string;
 }): readonly AgentTool[] {
 	const start: AgentTool<typeof ProcessStartParameters> = {

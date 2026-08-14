@@ -8,7 +8,7 @@ import {
 	type RetryDelay,
 	type TurnRetryPolicy,
 } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 function transientFailure(clock: TestClock, retryable = true): AssistantMessage {
 	const message = fauxAssistantMessage("discarded partial", {
@@ -138,16 +138,20 @@ describe("Agent whole-turn retry", () => {
 		const clock = new TestClock();
 		const contexts: Context[] = [];
 		let recoveries = 0;
-		const agent = new Agent({
-			...baseOptions([contextOverflow(clock), contextOverflow(clock), response("must remain unused", clock)], {
-				clock,
-				contexts,
-			}),
-			recoverFailedAttempt: () => {
-				recoveries++;
-				return { retry: true, reason: "application changed context" };
-			},
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				baseOptions([contextOverflow(clock), contextOverflow(clock), response("must remain unused", clock)], {
+					clock,
+					contexts,
+				}),
+				{
+					recoverFailedAttempt: () => {
+						recoveries++;
+						return { retry: true, reason: "application changed context" };
+					},
+				},
+			),
+		);
 		const events: AgentEvent[] = [];
 		agent.onEvent((event) => events.push(event));
 
@@ -164,21 +168,29 @@ describe("Agent whole-turn retry", () => {
 	it("still allows recovery after an earlier failure used the ordinary retry policy", async () => {
 		const clock = new TestClock();
 		let recovered = 0;
-		const agent = new Agent({
-			...baseOptions([transientFailure(clock), contextOverflow(clock), response("recovered", clock)], { clock }),
-			retry: {
-				policy: { decide: () => ({ retry: true, delayMs: 0, reason: "transport retry" }) },
-				delay: { wait: async () => undefined },
-			},
-			recoverFailedAttempt: ({ message }) => {
-				const overflow = message.message.diagnostics?.some(
-					(diagnostic) => diagnostic.error?.code === "context_overflow",
-				);
-				if (!overflow) return { retry: false };
-				recovered++;
-				return { retry: true, reason: "context changed" };
-			},
-		});
+		const agent = new Agent(
+			withPreparedRun(
+				{
+					...baseOptions([transientFailure(clock), contextOverflow(clock), response("recovered", clock)], {
+						clock,
+					}),
+					retry: {
+						policy: { decide: () => ({ retry: true, delayMs: 0, reason: "transport retry" }) },
+						delay: { wait: async () => undefined },
+					},
+				},
+				{
+					recoverFailedAttempt: ({ message }) => {
+						const overflow = message.message.diagnostics?.some(
+							(diagnostic) => diagnostic.error?.code === "context_overflow",
+						);
+						if (!overflow) return { retry: false };
+						recovered++;
+						return { retry: true, reason: "context changed" };
+					},
+				},
+			),
+		);
 
 		await expect(agent.prompt("recover after retry")).resolves.toMatchObject({ outcome: "success" });
 		expect(recovered).toBe(1);
@@ -291,7 +303,7 @@ describe("Agent listener failure containment", () => {
 			stopReason: "toolUse",
 			timestamp: clock.now(),
 		});
-		const agent = new Agent({ ...baseOptions([calls], { clock }), tools: [dangerous] });
+		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [dangerous] }));
 		agent.onEvent((event) => {
 			if (event.type === "tool_execution_start") throw new Error("sink unavailable");
 		});
@@ -371,7 +383,7 @@ describe("Agent listener failure containment", () => {
 			],
 			{ stopReason: "toolUse", timestamp: clock.now() },
 		);
-		const agent = new Agent({ ...baseOptions([calls], { clock }), tools: [first, second] });
+		const agent = new Agent(withPreparedRun(baseOptions([calls], { clock }), { tools: [first, second] }));
 		agent.onEvent((event) => {
 			if (event.type === "tool_execution_start" && event.invocation.toolName === "second") {
 				throw new Error("second start listener failed");

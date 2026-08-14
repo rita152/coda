@@ -1,10 +1,11 @@
-import { Agent, type AgentTool, type Clock, type IdGenerator, type IdKind } from "@coda/agent";
+import type { AgentTool, Clock, IdGenerator, IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type TimeRuntime, Type } from "@coda/ai";
 import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { bindAgentRunControl, RunControl, RunProgressTracker } from "../src/run-control/index.ts";
 import { withRunControlEvidence } from "../src/run-evidence/run-evidence.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { agentRuntimePort, createTestAgent } from "./agent-runtime-adapter.ts";
 
 interface ManualTask extends ScheduledTask {
 	readonly dueAt: number;
@@ -255,14 +256,14 @@ describe("RunControl", () => {
 				return fauxAssistantMessage("wrapped up", { timestamp: time.now() });
 			},
 		]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: time,
 			idGenerator: new TestIds(),
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			tools: [slowTool],
 		});
 		const binding = bindAgentRunControl({
-			agent,
+			runtime: agentRuntimePort(agent),
 			configuration: { workDurationMs: 100, graceDurationMs: 500, maxStationaryTurns: 4 },
 			clock: time,
 			scheduler: time,
@@ -326,14 +327,14 @@ describe("RunControl", () => {
 				timestamp: 0,
 			}),
 		]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: time,
 			idGenerator: new TestIds(),
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 			tools: [slowTool],
 		});
 		const binding = bindAgentRunControl({
-			agent,
+			runtime: agentRuntimePort(agent),
 			configuration: { workDurationMs: 100, graceDurationMs: 25 },
 			clock: time,
 			scheduler: time,
@@ -342,7 +343,7 @@ describe("RunControl", () => {
 			workspace: { id: "workspace", path: "/workspace" },
 			mode: "interactive",
 		});
-		session.attach(agent);
+		agent.onEvent((event) => session.accept(event));
 
 		const operation = agent.prompt("start");
 		await toolStarted;

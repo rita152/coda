@@ -1,7 +1,7 @@
-import type { Agent, AgentSeed } from "@coda/agent";
+import type { AgentEvent, AgentSeed } from "@coda/agent";
 import type { RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import { SessionHistoryReader, type SessionHistoryReadPort } from "./session-history-reader.ts";
-import type { DetachSession, Session, SessionChange, SessionDescriptor, SessionMediaRegistration } from "./types.ts";
+import type { Session, SessionChange, SessionDescriptor, SessionMediaRegistration } from "./types.ts";
 
 export interface DraftSessionOptions {
 	readonly descriptor: SessionDescriptor;
@@ -21,8 +21,6 @@ export class DraftSession implements Session {
 	#session?: Session;
 	#materialization?: Promise<Session>;
 	#materializationFailure?: unknown;
-	#agent?: Agent;
-	#detachAgent?: DetachSession;
 	#registrations: SessionMediaRegistration[] = [];
 	#initialChanges: SessionChange[] = [];
 	#closed = false;
@@ -109,17 +107,10 @@ export class DraftSession implements Session {
 		this.#initialChanges.push(...structuredClone(changes));
 	}
 
-	attach(agent: Agent): DetachSession {
+	async accept(event: AgentEvent): Promise<void> {
 		this.#assertOpen();
-		if (this.#agent) throw new Error("Session is already attached to an Agent");
-		this.#agent = agent;
-		if (this.#session) this.#detachAgent = this.#session.attach(agent);
-		return () => {
-			if (this.#agent !== agent) return;
-			this.#detachAgent?.();
-			this.#detachAgent = undefined;
-			this.#agent = undefined;
-		};
+		const session = await this.#ensureMaterialized();
+		await session.accept(event);
 	}
 
 	async record(change: SessionChange): Promise<void> {
@@ -169,7 +160,6 @@ export class DraftSession implements Session {
 			this.#registrations = [];
 			for (const change of this.#initialChanges) await session.record(change);
 			this.#initialChanges = [];
-			if (this.#agent) this.#detachAgent = session.attach(this.#agent);
 			return session;
 		} catch (error) {
 			this.#session = undefined;

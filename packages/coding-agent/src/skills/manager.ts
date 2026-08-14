@@ -1,10 +1,9 @@
+import { type CodingSkillOrigin, type CodingSkillsSnapshot, createCodingSkillsSnapshot } from "@coda/runtime";
 import type { SkillFileSystem, SkillId, SkillRoot, Skills } from "@coda/skills";
 import { createSkills } from "@coda/skills";
 import type { CommandRegistry } from "../commands/registry.ts";
 import type { SlashExtensionEntry } from "../commands/unified-registry.ts";
 import { registerSlashExtension } from "../commands/unified-registry.ts";
-import { createCodingSkillsSnapshot } from "./snapshot.ts";
-import type { CodingSkillOrigin, CodingSkillsSnapshot } from "./types.ts";
 
 export interface CodingSkillsManagerOptions {
 	readonly fileSystem: SkillFileSystem;

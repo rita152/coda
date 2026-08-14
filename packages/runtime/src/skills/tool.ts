@@ -1,7 +1,7 @@
 import type { AgentTool } from "@coda/agent";
 import { type TSchema, Type } from "@coda/ai";
 import type { SkillId } from "@coda/skills";
-import { renderModelSkillResult } from "./context.ts";
+import { renderModelSkillResult } from "./render.ts";
 import type { CodingSkillsSnapshot } from "./types.ts";
 
 export interface SkillToolDetails {

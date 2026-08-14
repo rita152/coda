@@ -2,12 +2,12 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import * as publicApi from "../src/index.ts";
 import { Agent, AgentError, type AgentTool, type QueueItemId } from "../src/index.ts";
-import { baseOptions, TestIds } from "./helpers.ts";
+import { baseOptions, TestIds, withPreparedRun } from "./helpers.ts";
 import { composeAgent, consumeRun } from "./public-types.consumer.ts";
 
 describe("@coda/agent public package contract", () => {
 	it("exports only the Milestone 1 runtime values from the root", () => {
-		expect(Object.keys(publicApi).sort()).toEqual(["Agent", "AgentError"]);
+		expect(Object.keys(publicApi).sort()).toEqual(["Agent", "AgentError", "prepareStaticRun"]);
 		expect(typeof composeAgent).toBe("function");
 		expect(typeof consumeRun).toBe("function");
 	});
@@ -24,7 +24,7 @@ describe("@coda/agent public package contract", () => {
 		expect(packageJson.dependencies).toEqual({ "@coda/ai": "0.1.0" });
 	});
 
-	it("uses stable AgentError codes for control-plane failures", () => {
+	it("uses stable AgentError codes for control-plane failures", async () => {
 		const agent = new Agent(baseOptions([]));
 		expect(() => agent.prompt("   ")).toThrowError(AgentError);
 		try {
@@ -46,7 +46,8 @@ describe("@coda/agent public package contract", () => {
 			replaySafety: "never",
 			execute: () => ({ content: "unused" }),
 		};
-		expect(() => new Agent({ ...baseOptions([]), tools: [duplicate, duplicate] })).toThrowError(AgentError);
+		const duplicateAgent = new Agent(withPreparedRun(baseOptions([]), { tools: [duplicate, duplicate] }));
+		await expect(duplicateAgent.prompt("validate tools")).rejects.toThrowError(AgentError);
 	});
 
 	it("fails closed when an IdGenerator repeats an identity", () => {

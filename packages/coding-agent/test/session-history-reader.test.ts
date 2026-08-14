@@ -1,11 +1,4 @@
-import {
-	Agent,
-	type AgentMessage,
-	type IdGenerator,
-	type IdKind,
-	type MessageId,
-	type ToolExecutionContext,
-} from "@coda/agent";
+import type { AgentMessage, IdGenerator, IdKind, MessageId, ToolExecutionContext } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
@@ -15,6 +8,7 @@ import {
 	SessionHistoryReader,
 } from "../src/session/session-history-reader.ts";
 import { createReadSessionHistoryTool } from "../src/tools/read-session-history.ts";
+import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("SessionHistoryReader", () => {
@@ -131,13 +125,13 @@ describe("SessionHistoryReader", () => {
 		const runtime = testTimeRuntime(1_000);
 		const faux = createFauxCore({ runtime });
 		faux.setResponses([fauxAssistantMessage("constraint acknowledged", { timestamp: 1_000 })]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: runtime.clock,
 			idGenerator,
 			tools: [],
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { runtime, signal }),
 		});
-		session.attach(agent);
+		agent.onEvent((event) => session.accept(event));
 		await agent.prompt("Never modify the generated lockfile.");
 		const beforeResume = session.history.read({ limit: 20 });
 		const sessionId = session.descriptor.id;

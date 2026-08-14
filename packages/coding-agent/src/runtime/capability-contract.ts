@@ -61,6 +61,24 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: ["packages/agent/test/agent-run.test.ts", "packages/agent/test/input-queues.test.ts"],
 	}),
 	capability({
+		id: "runtime.headless-agent-runtime",
+		package: "@coda/runtime",
+		status: "runtime-supported",
+		title: "Reusable headless Agent Runtime",
+		summary:
+			"Instance-local Runtime assembly with atomic Prepared Run snapshots, durable Session attachment, Context Window recovery, Skills and MCP catalogs, input queues, lifecycle events, and independent parallel instances.",
+		sources: [
+			"packages/runtime/src/runtime.ts",
+			"packages/runtime/src/coding-agent-runtime.ts",
+			"packages/runtime/src/input-queue.ts",
+		],
+		tests: [
+			"packages/runtime/test/runtime-isolation.test.ts",
+			"packages/runtime/test/coding-agent-runtime.test.ts",
+			"packages/runtime/test/dependency-boundaries.test.ts",
+		],
+	}),
+	capability({
 		id: "agent.run-budget",
 		package: "@coda/agent",
 		status: "runtime-supported",
@@ -155,20 +173,20 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 	}),
 	capability({
 		id: "coding-agent.context-compaction",
-		package: "@coda/coding-agent",
+		package: "@coda/runtime",
 		status: "runtime-supported",
 		title: "Durable Context Compaction",
 		summary:
 			"Auto-Compaction and `/compact [focus]` share one Tool-pair-safe implementation and persist Compaction Checkpoints before replacing the model-visible Context Window.",
 		sources: [
-			"packages/coding-agent/src/context-window/context-window.ts",
+			"packages/runtime/src/context-window/context-window.ts",
 			"packages/coding-agent/src/commands/core-commands.ts",
 			"packages/coding-agent/src/session/records.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/compaction.test.ts",
 			"packages/coding-agent/test/context-overflow.test.ts",
-			"packages/coding-agent/test/context-window.test.ts",
+			"packages/runtime/test/context-window.test.ts",
 		],
 	}),
 	capability({
@@ -179,12 +197,12 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary:
 			"After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.",
 		sources: [
-			"packages/coding-agent/src/context-window/overflow-recovery.ts",
+			"packages/runtime/src/context-window/overflow-recovery.ts",
 			"packages/coding-agent/src/interactive/run-interactive.ts",
 			"packages/coding-agent/src/runtime/workspace-session-runtimes.ts",
 		],
 		tests: [
-			"packages/coding-agent/test/context-overflow-recovery.test.ts",
+			"packages/runtime/test/context-overflow-recovery.test.ts",
 			"packages/coding-agent/test/context-overflow-fallback.test.ts",
 			"packages/coding-agent/test/workspace-session-runtimes.test.ts",
 		],
@@ -250,7 +268,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "MCP Host",
 		summary:
 			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.",
-		sources: ["packages/mcp/src/host.ts", "packages/coding-agent/src/mcp/registry.ts"],
+		sources: ["packages/mcp/src/host.ts", "packages/runtime/src/mcp/registry.ts"],
 		tests: ["packages/mcp/test/host.test.ts", "packages/coding-agent/test/mcp/application.test.ts"],
 	}),
 	capability({
@@ -278,11 +296,8 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Prompt and event formats",
 		summary:
 			"Deterministic per-Run System Prompt snapshots and stable opt-in JSONL v2 Agent events with optional media data.",
-		sources: ["packages/coding-agent/src/prompt/prompt-builder.ts", "packages/coding-agent/src/application.ts"],
-		tests: [
-			"packages/coding-agent/test/prompt-builder.test.ts",
-			"packages/coding-agent/test/application-print.test.ts",
-		],
+		sources: ["packages/runtime/src/prompt/prompt-builder.ts", "packages/runtime/src/coding-agent-runtime.ts"],
+		tests: ["packages/runtime/test/prompt-builder.test.ts", "packages/coding-agent/test/application-print.test.ts"],
 	}),
 	capability({
 		id: "coding-agent.sessions",
@@ -321,12 +336,13 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		id: "coding-agent.user-shell-and-queues",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",
-		title: "User Shell and input queues",
+		title: "User Shell Adapter and input queues",
 		summary:
-			"Explicit `!command` User Shell execution remains outside model Context and Session persistence; the Input Queue Controller orders Steering, durable Follow-ups, and User Shell work in one deferred FIFO.",
+			"Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter maps it into the Runtime-owned resource, Follow-up, and generic deferred-work FIFO.",
 		sources: [
 			"packages/coding-agent/src/interactive/user-shell.ts",
 			"packages/coding-agent/src/interactive/input-controller.ts",
+			"packages/runtime/src/input-queue.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/user-shell.test.ts",

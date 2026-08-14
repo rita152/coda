@@ -8,6 +8,7 @@ import {
 	type Clock,
 	type IdGenerator,
 	type MessageId,
+	prepareStaticRun,
 	type QueueItemId,
 	type RunId,
 	type RunResult,
@@ -42,8 +43,10 @@ export function composeAgent(clock: Clock, idGenerator: IdGenerator): Agent {
 	return new Agent({
 		clock,
 		idGenerator,
-		stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
-		tools: [lookup],
+		prepareRun: prepareStaticRun({
+			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
+			tools: [lookup],
+		}),
 	});
 }
 

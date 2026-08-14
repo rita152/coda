@@ -31,6 +31,7 @@ import type {
 	IdKind,
 	MessageDelta,
 	MessageId,
+	PreparedRun,
 	QueueItemId,
 	RunBudgetExhaustion,
 	RunFailure,
@@ -56,9 +57,9 @@ interface RunContext {
 	readonly controller: AbortController;
 	readonly listenerFailures: unknown[];
 	readonly budget?: RunBudgetMeter;
-	tools: readonly AgentTool[];
-	toolsByName: ReadonlyMap<string, AgentTool>;
-	systemPrompt?: string;
+	prepared?: PreparedRun;
+	disposePrepared?: () => Promise<void> | void;
+	toolsByName?: ReadonlyMap<string, AgentTool>;
 }
 
 interface AttemptResult {
@@ -223,7 +224,7 @@ function snapshotTools(input: readonly AgentTool[]): {
 	readonly tools: readonly AgentTool[];
 	readonly byName: ReadonlyMap<string, AgentTool>;
 } {
-	if (!Array.isArray(input)) throw new AgentError("invalid_input", "Agent Tools factory must return an array");
+	if (!Array.isArray(input)) throw new AgentError("invalid_input", "PreparedRun tools must be an array");
 	const byName = new Map<string, AgentTool>();
 	const tools: AgentTool[] = [];
 	for (const tool of input) {
@@ -237,6 +238,35 @@ function snapshotTools(input: readonly AgentTool[]): {
 	return Object.freeze({ tools: Object.freeze(tools), byName });
 }
 
+function snapshotPreparedRun(
+	input: PreparedRun,
+): PreparedRun & { readonly toolsByName: ReadonlyMap<string, AgentTool> } {
+	if (typeof input !== "object" || input === null) {
+		throw new AgentError("invalid_input", "prepareRun must return a PreparedRun object");
+	}
+	if (typeof input.stream !== "function") {
+		throw new AgentError("invalid_input", "PreparedRun stream must be a function");
+	}
+	if (input.systemPrompt !== undefined && typeof input.systemPrompt !== "string") {
+		throw new AgentError("invalid_input", "PreparedRun systemPrompt must be a string");
+	}
+	if (input.recoverFailedAttempt !== undefined && typeof input.recoverFailedAttempt !== "function") {
+		throw new AgentError("invalid_input", "PreparedRun recoverFailedAttempt must be a function");
+	}
+	if (input.dispose !== undefined && typeof input.dispose !== "function") {
+		throw new AgentError("invalid_input", "PreparedRun dispose must be a function");
+	}
+	const tools = snapshotTools(input.tools);
+	return Object.freeze({
+		stream: input.stream,
+		tools: tools.tools,
+		toolsByName: tools.byName,
+		...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
+		...(input.recoverFailedAttempt === undefined ? {} : { recoverFailedAttempt: input.recoverFailedAttempt }),
+		...(input.dispose === undefined ? {} : { dispose: input.dispose }),
+	});
+}
+
 export class Agent {
 	readonly #options: AgentOptions;
 	readonly #listeners: AgentEventListener[] = [];
@@ -248,15 +278,10 @@ export class Agent {
 	#followUpsPaused: boolean;
 
 	constructor(options: AgentOptions) {
-		if (
-			options.systemPrompt !== undefined &&
-			typeof options.systemPrompt !== "string" &&
-			typeof options.systemPrompt !== "function"
-		) {
-			throw new AgentError("invalid_input", "systemPrompt must be a string or factory");
+		if (typeof options.prepareRun !== "function") {
+			throw new AgentError("invalid_input", "Agent requires a prepareRun function");
 		}
-		const tools = typeof options.tools === "function" ? options.tools : snapshotTools(options.tools).tools;
-		this.#options = { ...options, tools, runBudget: snapshotRunBudget(options.runBudget) };
+		this.#options = { ...options, runBudget: snapshotRunBudget(options.runBudget) };
 		const seed =
 			options.seed === undefined ? { messages: [], pendingFollowUps: [] } : validateAgentSeed(options.seed);
 		for (const message of seed.messages) this.#issuedIds.add(message.id);
@@ -488,8 +513,6 @@ export class Agent {
 				this.#options.runBudget === undefined
 					? undefined
 					: new RunBudgetMeter(this.#options.runBudget, this.#options.clock.now()),
-			tools: [],
-			toolsByName: new Map(),
 		};
 		this.#activeRun = run;
 		let outcome: RunOutcome = "error";
@@ -500,7 +523,7 @@ export class Agent {
 		let unexpected: unknown;
 
 		try {
-			await this.#options.beforeRun?.(
+			const candidate = await this.#options.prepareRun(
 				deepFreeze({
 					runId,
 					source,
@@ -508,19 +531,12 @@ export class Agent {
 					...(queueItemId === undefined ? {} : { queueItemId }),
 				}),
 			);
-			const runTools = snapshotTools(
-				typeof this.#options.tools === "function" ? this.#options.tools() : this.#options.tools,
-			);
-			run.tools = runTools.tools;
-			run.toolsByName = runTools.byName;
-			const systemPrompt =
-				typeof this.#options.systemPrompt === "function"
-					? this.#options.systemPrompt()
-					: this.#options.systemPrompt;
-			if (systemPrompt !== undefined && typeof systemPrompt !== "string") {
-				throw new AgentError("invalid_input", "System Prompt factory must return a string");
+			if (typeof candidate === "object" && candidate !== null && typeof candidate.dispose === "function") {
+				run.disposePrepared = candidate.dispose;
 			}
-			run.systemPrompt = systemPrompt;
+			const prepared = snapshotPreparedRun(candidate);
+			run.prepared = prepared;
+			run.toolsByName = prepared.toolsByName;
 			await this.#emit(run, {
 				type: "run_start",
 				source,
@@ -654,6 +670,11 @@ export class Agent {
 				this.#runtimeState = reduceState(this.#runtimeState, { type: "settled" });
 			}
 			this.#activeRun = undefined;
+			try {
+				await run.disposePrepared?.();
+			} catch (error) {
+				unexpected ??= error;
+			}
 		}
 
 		if (run.listenerFailures.length > 0) {
@@ -692,8 +713,8 @@ export class Agent {
 			if (result.budgetExhaustion) return result;
 			if (result.outcome !== "error") return result;
 			const transient = isTransientAssistantFailure(result.message);
-			if (!recoveryUsed && this.#options.recoverFailedAttempt) {
-				const recovery = await this.#options.recoverFailedAttempt(
+			if (!recoveryUsed && run.prepared?.recoverFailedAttempt) {
+				const recovery = await run.prepared.recoverFailedAttempt(
 					deepFreeze({
 						runId: run.id,
 						turnId,
@@ -766,16 +787,17 @@ export class Agent {
 		await this.#emit(run, { type: "attempt_start", turnId, attemptId, messageId, attempt });
 
 		const context: Context = {
-			systemPrompt: run.systemPrompt,
+			systemPrompt: run.prepared?.systemPrompt,
 			messages: this.#runtimeState.public.messages.map(({ message }) => structuredClone(message) as Message),
-			tools: run.tools.map(({ name, description, parameters, constrainedSampling }) => ({
+			tools: (run.prepared?.tools ?? []).map(({ name, description, parameters, constrainedSampling }) => ({
 				name,
 				description,
 				parameters,
 				constrainedSampling,
 			})),
 		};
-		const stream = await this.#options.stream({
+		if (!run.prepared) throw new Error("Run preparation is unavailable");
+		const stream = await run.prepared.stream({
 			context,
 			signal: run.controller.signal,
 			runId: run.id,
@@ -911,7 +933,7 @@ export class Agent {
 				sourceIndex,
 				this.#allocate("tool_invocation") as ToolInvocationId,
 				this.#allocate("message") as MessageId,
-				run.toolsByName.get(call.name),
+				run.toolsByName?.get(call.name),
 			);
 			await this.#rejectDuringPreflight(
 				run,
@@ -934,7 +956,7 @@ export class Agent {
 				sourceIndex,
 				this.#allocate("tool_invocation") as ToolInvocationId,
 				this.#allocate("message") as MessageId,
-				run.toolsByName.get(call.name),
+				run.toolsByName?.get(call.name),
 			);
 			await this.#rejectDuringPreflight(
 				run,
@@ -955,7 +977,7 @@ export class Agent {
 			const call = toolCalls[sourceIndex]!;
 			const invocationId = this.#allocate("tool_invocation") as ToolInvocationId;
 			const resultMessageId = this.#allocate("message") as MessageId;
-			const tool = run.toolsByName.get(call.name);
+			const tool = run.toolsByName?.get(call.name);
 			if (!tool) {
 				const invocation = this.#invocation(call, sourceIndex, invocationId, resultMessageId);
 				await this.#rejectDuringPreflight(
@@ -1053,7 +1075,7 @@ export class Agent {
 		}
 		for (let sourceIndex = futureStartIndex; sourceIndex < toolCalls.length; sourceIndex++) {
 			const call = toolCalls[sourceIndex]!;
-			const tool = run.toolsByName.get(call.name);
+			const tool = run.toolsByName?.get(call.name);
 			const invocation = this.#invocation(
 				call,
 				sourceIndex,

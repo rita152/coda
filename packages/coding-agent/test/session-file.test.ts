@@ -1,12 +1,13 @@
 import { access, appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentTool, type IdGenerator, type IdKind, type QueueItemId } from "@coda/agent";
+import type { AgentTool, IdGenerator, IdKind, QueueItemId } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, Type } from "@coda/ai";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
+import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 const temporaryDirectories: string[] = [];
@@ -222,13 +223,13 @@ describe("JSONL File Session", () => {
 			}),
 			fauxAssistantMessage("done", { timestamp: 1_200 }),
 		]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 1_200 },
 			idGenerator,
 			tools: [tool],
 			stream: ({ context, signal }) => faux.streamSimple(faux.getModel(), context, { signal, runtime }),
 		});
-		session.attach(agent);
+		agent.onEvent((event) => session.accept(event));
 		await agent.prompt("persist tool lifecycle");
 		const sessionId = session.descriptor.id;
 		const sessionPath = session.descriptor.path!;

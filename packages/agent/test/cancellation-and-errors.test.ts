@@ -6,7 +6,7 @@ import {
 } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { Agent, AgentError, type AgentEvent, type ModelStream } from "../src/index.ts";
-import { baseOptions, response, TestClock } from "./helpers.ts";
+import { baseOptions, response, TestClock, withPreparedRun } from "./helpers.ts";
 
 describe("Agent cancellation and failure outcomes", () => {
 	it("classifies caller cancellation as aborted and discards partial assistant output", async () => {
@@ -59,7 +59,7 @@ describe("Agent cancellation and failure outcomes", () => {
 			stream = createAssistantMessageEventStream();
 			return stream;
 		};
-		const agent = new Agent({ ...baseOptions([], { clock }), stream: modelStream });
+		const agent = new Agent(withPreparedRun(baseOptions([], { clock }), { stream: modelStream }));
 		const first = agent.prompt("first");
 		await Promise.resolve();
 
@@ -135,7 +135,7 @@ describe("Agent cancellation and failure outcomes", () => {
 			queueMicrotask(() => stream.end(fauxAssistantMessage("hidden result", { timestamp: clock.now() })));
 			return stream;
 		};
-		const agent = new Agent({ ...baseOptions([], { clock }), stream: streamWithoutTerminal });
+		const agent = new Agent(withPreparedRun(baseOptions([], { clock }), { stream: streamWithoutTerminal }));
 
 		await expect(agent.prompt("go")).rejects.toThrow("without a terminal event");
 		expect(agent.state.status).toBe("idle");

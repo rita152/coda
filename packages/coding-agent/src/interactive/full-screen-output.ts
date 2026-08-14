@@ -1,5 +1,5 @@
 import { type Diagnostic, type DiagnosticSink, sanitizeTerminalText } from "@coda/tui";
-import type { ApplicationIO, ApplicationOutput } from "../application.ts";
+import type { ApplicationIO, ApplicationOutput } from "../host/application-io.ts";
 
 const DEFERRED_DIAGNOSTIC_CAPACITY = 64;
 

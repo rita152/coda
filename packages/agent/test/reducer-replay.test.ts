@@ -33,8 +33,9 @@ describe("internal Agent state reduction", () => {
 		const agent = new Agent({
 			...baseOptions([]),
 			clock: { now: () => now },
-			beforeRun: () => {
+			prepareRun: () => {
 				now = 2;
+				return { stream: async () => Promise.reject(new Error("unreachable")), tools: [] };
 			},
 			runBudget: { limits: { maxElapsedMs: 1 } },
 		});

@@ -1,7 +1,7 @@
 import type { ToolExecutionContext } from "@coda/agent";
 import type { McpElicitationRequest, McpToolCallRequest, McpToolSnapshot } from "@coda/mcp";
 import { describe, expect, it } from "vitest";
-import { createMcpAgentTools } from "../../src/mcp/tools.ts";
+import { createMcpAgentTools } from "../src/mcp/tools.ts";
 
 const executionContext: ToolExecutionContext = {
 	signal: new AbortController().signal,

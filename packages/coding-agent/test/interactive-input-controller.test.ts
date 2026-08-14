@@ -1,8 +1,9 @@
-import { Agent, type IdGenerator, type IdKind, type QueueItemId } from "@coda/agent";
+import type { IdGenerator, IdKind, QueueItemId } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveInputController } from "../src/interactive/input-controller.ts";
 import type { Session } from "../src/session/types.ts";
+import { agentRuntimePort, createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("InteractiveInputController", () => {
@@ -11,7 +12,7 @@ describe("InteractiveInputController", () => {
 		const runtime = testTimeRuntime(90);
 		const faux = createFauxCore({ runtime });
 		faux.setResponses([fauxAssistantMessage("done", { timestamp: 90 })]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 90 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -19,7 +20,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -58,7 +59,7 @@ describe("InteractiveInputController", () => {
 		const runtime = testTimeRuntime(100);
 		const faux = createFauxCore({ runtime });
 		faux.setResponses([fauxAssistantMessage("done", { timestamp: 100 })]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator,
 			tools: [],
@@ -70,7 +71,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -104,7 +105,7 @@ describe("InteractiveInputController", () => {
 			fauxAssistantMessage("restored done", { timestamp: 100 }),
 			fauxAssistantMessage("new done", { timestamp: 101 }),
 		]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator,
 			tools: [],
@@ -118,7 +119,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -158,7 +159,7 @@ describe("InteractiveInputController", () => {
 			}),
 			fauxAssistantMessage("recovered", { timestamp: 101 }),
 		]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -176,7 +177,7 @@ describe("InteractiveInputController", () => {
 			return {};
 		});
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -228,7 +229,7 @@ describe("InteractiveInputController", () => {
 			fauxAssistantMessage("second done", { timestamp: 102 }),
 		]);
 		const order: string[] = [];
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -258,7 +259,7 @@ describe("InteractiveInputController", () => {
 			},
 		};
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => {
 				if (text === "first") await firstInputGate;
@@ -286,7 +287,7 @@ describe("InteractiveInputController", () => {
 	it("reclaims a paused Follow-up into editable input and writes a durable tombstone", async () => {
 		let id = 0;
 		const queueId = "queue:paused" as QueueItemId;
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -302,7 +303,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record, [
 				{ id: "composer:paused", kind: "follow_up", text: "edit me", queueItemId: queueId },
 			]),
@@ -321,7 +322,7 @@ describe("InteractiveInputController", () => {
 		let id = 0;
 		const first = "queue:first" as QueueItemId;
 		const second = "queue:second" as QueueItemId;
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -340,7 +341,7 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -360,7 +361,7 @@ describe("InteractiveInputController", () => {
 		const faux = createFauxCore({ runtime });
 		faux.setResponses([fauxAssistantMessage("done", { timestamp: 100 })]);
 		const order: string[] = [];
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -371,7 +372,7 @@ describe("InteractiveInputController", () => {
 			if (event.type === "run_start") order.push("run_start");
 		});
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({
@@ -396,7 +397,7 @@ describe("InteractiveInputController", () => {
 		const runtime = testTimeRuntime(100);
 		const faux = createFauxCore({ runtime });
 		faux.setResponses([fauxAssistantMessage("done", { timestamp: 100 })]);
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -406,7 +407,7 @@ describe("InteractiveInputController", () => {
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const commit = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(record),
 			buildInput: async () => [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
 			prepareAttachments: async () => ({ commit, rollback: async () => undefined }),
@@ -421,7 +422,7 @@ describe("InteractiveInputController", () => {
 	});
 
 	it("rolls back staged attachments when Agent mutation is rejected", async () => {
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: () => "" },
 			tools: [],
@@ -433,7 +434,7 @@ describe("InteractiveInputController", () => {
 		const commit = vi.fn(async () => undefined);
 		const rollback = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({ commit, rollback }),
@@ -449,7 +450,7 @@ describe("InteractiveInputController", () => {
 
 	it("keeps an acknowledged Agent runtime failure recoverable by the interactive UI", async () => {
 		let id = 0;
-		const agent = new Agent({
+		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
 			tools: [],
@@ -459,7 +460,7 @@ describe("InteractiveInputController", () => {
 			autoDrainFollowUps: false,
 		});
 		const controller = new InteractiveInputController({
-			agent,
+			runtime: agentRuntimePort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
