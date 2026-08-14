@@ -3,12 +3,11 @@ import type { AgentMessage, Clock, IdGenerator, MessageId } from "@coda/agent";
 import {
 	type Api,
 	type AssistantMessage,
-	type AuthResult,
 	type Context,
 	estimateContextTokens,
 	type Message,
 	type Model,
-	type Models,
+	type ModelsSimpleStreamOptions,
 	resolveToolObservation,
 } from "@coda/ai";
 import { reserveModelOutputTokens } from "../prompt/context-budget.ts";
@@ -30,11 +29,13 @@ const AUTO_BUFFER_CEILING_TOKENS = 20_000;
 
 export interface ContextWindowRuntime {
 	readonly model: Model<Api>;
-	readonly authSnapshot?: AuthResult;
+	complete(
+		context: Context,
+		options?: Omit<ModelsSimpleStreamOptions, "authSnapshot" | "reasoning">,
+	): Promise<AssistantMessage>;
 }
 
 export interface ContextWindowControllerOptions {
-	readonly models: Pick<Models, "completeSimple">;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly runtime: () => ContextWindowRuntime;
@@ -167,19 +168,15 @@ export class ContextWindowController {
 	async #compact(request: CompactContextRequest): Promise<CompactionCheckpoint> {
 		if (request.messages.length === 0) throw new Error("There is no conversation context to compact");
 		const runtime = this.#options.runtime();
-		if (!runtime.authSnapshot) {
-			throw new Error(`Model is not authenticated: ${runtime.model.provider}/${runtime.model.id}`);
-		}
 		const active = this.project(request.messages);
 		const { head, tail } = splitForCompaction(active, runtime.model);
 		const previousCheckpointId = this.#checkpoint?.replacementHistory[0]?.id;
 		const source = previousCheckpointId ? head.filter(({ id }) => id !== previousCheckpointId) : head;
 		const focus = normalizeFocus(request.focus);
 		const summarized = await summarizeHistory({
-			models: this.#options.models,
 			clock: this.#options.clock,
 			model: runtime.model,
-			authSnapshot: runtime.authSnapshot,
+			complete: runtime.complete,
 			messages: source,
 			previousSummary: this.#checkpoint?.summary,
 			focus,
@@ -353,10 +350,9 @@ function summaryPrompt(options: {
 }
 
 async function summarizeHistory(options: {
-	readonly models: Pick<Models, "completeSimple">;
 	readonly clock: Clock;
 	readonly model: Model<Api>;
-	readonly authSnapshot: AuthResult;
+	readonly complete: ContextWindowRuntime["complete"];
 	readonly messages: readonly AgentMessage[];
 	readonly previousSummary?: string;
 	readonly focus?: string;
@@ -379,8 +375,7 @@ async function summarizeHistory(options: {
 		assertSummaryInputFits(options.model, context, maxTokens);
 		promptDigest.update(`${Buffer.byteLength(prompt, "utf8")}:`);
 		promptDigest.update(prompt);
-		const response = await options.models.completeSimple(options.model, context, {
-			authSnapshot: options.authSnapshot,
+		const response = await options.complete(context, {
 			maxTokens,
 			signal: options.signal,
 		});

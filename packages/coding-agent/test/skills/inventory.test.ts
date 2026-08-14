@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../../src/host/node-file-system.ts";
 import { CodingSkillsManager, skillExtensionEntries } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
+import { createSkillsCapabilitySource } from "../../src/skills/run-capability.ts";
 
 const temporary: string[] = [];
 
@@ -110,5 +111,54 @@ describe("CodingSkills discovery and precedence", () => {
 		await expect(second.activate(second.resolved[0]!.candidate.id)).resolves.toMatchObject({
 			body: expect.stringContaining("Use watched"),
 		});
+	});
+
+	it("coalesces concurrent refreshes of one dirty generation and reuses the clean snapshot", async () => {
+		const value = await fixture();
+		const root = join(value.workspace, ".agents", "skills");
+		await writeSkill(root, "coalesced", "coalesced", "Coalesced scan");
+		let skillFileReads = 0;
+		const fileSystem = {
+			...value.fileSystem,
+			readFile: async (path: string) => {
+				if (path.endsWith("/SKILL.md")) skillFileReads++;
+				return value.fileSystem.readFile(path);
+			},
+		};
+		const manager = new CodingSkillsManager({ fileSystem, roots: value.roots });
+		await manager.refresh();
+		const readsPerScan = skillFileReads;
+		expect(readsPerScan).toBeGreaterThan(0);
+		const source = createSkillsCapabilitySource(manager);
+		const acquisition = {
+			model: {
+				id: "skills-test",
+				name: "Skills test",
+				api: "test",
+				provider: "test",
+				baseUrl: "http://localhost.invalid",
+				reasoning: false,
+				input: ["text" as const],
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			},
+			signal: new AbortController().signal,
+		};
+		await (await source.acquire(acquisition)).dispose();
+		await (await source.acquire(acquisition)).dispose();
+		expect(skillFileReads).toBe(readsPerScan);
+
+		manager.markDirty();
+		const leases = await Promise.all([
+			source.acquire(acquisition),
+			source.acquire(acquisition),
+			source.acquire(acquisition),
+		]);
+
+		expect(skillFileReads).toBe(readsPerScan * 2);
+		expect([...new Set(leases.map(({ revision }) => revision))]).toHaveLength(1);
+		await Promise.all(leases.map((lease) => lease.dispose()));
+		await (await source.acquire(acquisition)).dispose();
+		expect(skillFileReads).toBe(readsPerScan * 2);
 	});
 });

@@ -1,3 +1,18 @@
+export type {
+	CreateRunCapabilityHostOptions,
+	ModelDriverLease,
+	ModelDriverSource,
+	RunCapabilityAcquireContext,
+	RunCapabilityContributionLease,
+	RunCapabilityHost,
+	RunCapabilityLease,
+	RunCapabilityRevisionDescriptor,
+	RunCapabilitySource,
+	RunModelSelection,
+	RunPromptFragment,
+	RunToolContribution,
+} from "./run-capabilities.ts";
+export { createRunCapabilityHost } from "./run-capabilities.ts";
 export { openCodingAgent } from "./work-graph/coordinator.ts";
 export type { OpenCodingAgentOptions } from "./work-graph/ports.ts";
 export type * from "./work-graph/types.ts";

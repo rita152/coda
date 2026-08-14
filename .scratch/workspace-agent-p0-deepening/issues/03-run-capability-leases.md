@@ -1,6 +1,6 @@
 # Bind executable capabilities to each Run
 
-Status: ready-for-agent
+Status: resolved
 
 Implement `RunCapabilityHost` and `RunCapabilityLease` as described in `../spec.md`.
 
@@ -19,3 +19,4 @@ Do not introduce dynamic untrusted plugin loading, a generic DI container, sched
 
 ## Comments
 
+Implemented a generic Runtime Run capability lease with bound Model drivers, deterministic trusted contributors, and idempotent rollback/disposal. MCP now retains connection generations across reload, Skills acquisitions coalesce dirty-generation scans without Worker-owned UI mutation, and focused tests cover provider replacement, reload lifetimes, refresh concurrency, and success/failure/cancellation/preparation disposal paths.

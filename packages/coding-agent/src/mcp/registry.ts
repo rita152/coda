@@ -1,4 +1,4 @@
-import type { McpHost, McpHostSnapshot, McpServerDefinition, McpToolSnapshot } from "@coda/mcp";
+import type { McpHost, McpHostSnapshot, McpServerDefinition, McpToolLease } from "@coda/mcp";
 
 export interface McpRegistryScheduler {
 	schedule(delayMs: number, task: () => void): { cancel(): void };
@@ -58,9 +58,9 @@ export class CodingMcpRegistry {
 		return this.#host.snapshot();
 	}
 
-	freezeTools(): McpToolSnapshot {
+	acquireTools(): McpToolLease {
 		this.#assertOpen();
-		return this.#host.freezeTools();
+		return this.#host.acquireTools();
 	}
 
 	onDidChange(listener: (snapshot: McpHostSnapshot) => void): () => void {

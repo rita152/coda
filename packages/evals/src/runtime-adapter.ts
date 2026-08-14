@@ -10,8 +10,15 @@ import type {
 	RunId,
 	TurnId,
 } from "@coda/agent";
-import type { Api, Context, Model, Models, ModelsSimpleStreamOptions } from "@coda/ai";
-import { type CodingAgent, type OpenCodingAgentOptions, openCodingAgent, type WorkGraphResult } from "@coda/runtime";
+import type { Api, Model } from "@coda/ai";
+import {
+	type CodingAgent,
+	createRunCapabilityHost,
+	type ModelDriverLease,
+	type OpenCodingAgentOptions,
+	openCodingAgent,
+	type WorkGraphResult,
+} from "@coda/runtime";
 
 type WorkerSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["reserve"]>>["session"];
 
@@ -62,36 +69,6 @@ class EvaluationSession implements WorkerSession {
 	}
 }
 
-function emptySkills(): OpenCodingAgentOptions["skills"]["initial"] {
-	return Object.freeze({
-		loader: Object.freeze({
-			candidates: Object.freeze([]),
-			diagnostics: Object.freeze([]),
-			activate: async () => {
-				throw new Error("Evaluation Work Graph has no Skills");
-			},
-		}),
-		candidates: Object.freeze([]),
-		resolved: Object.freeze([]),
-		byId: new Map(),
-		diagnostics: Object.freeze([]),
-		activate: async () => {
-			throw new Error("Evaluation Work Graph has no Skills");
-		},
-	});
-}
-
-function emptyMcp(): ReturnType<OpenCodingAgentOptions["mcp"]["current"]> {
-	return Object.freeze({
-		revision: 0,
-		servers: Object.freeze([]),
-		tools: Object.freeze([]),
-		callTool: async () => {
-			throw new Error("Evaluation Work Graph has no MCP Tools");
-		},
-	});
-}
-
 function evaluationModel(id: string): Model<Api> {
 	return Object.freeze({
 		id,
@@ -103,28 +80,6 @@ function evaluationModel(id: string): Model<Api> {
 		input: ["text"] as ("image" | "text")[],
 		contextWindow: 1_000_000_000,
 		maxTokens: 128_000,
-	});
-}
-
-function evaluationModels(stream: ModelStream): Pick<Models, "completeSimple" | "streamSimple"> {
-	let call = 0;
-	const streamSimple = (_model: Model<Api>, context: Context, options: ModelsSimpleStreamOptions = {}) => {
-		call++;
-		const result = stream({
-			context,
-			signal: options.signal ?? new AbortController().signal,
-			runId: `evaluation:model-run:${call}` as RunId,
-			turnId: `evaluation:model-turn:${call}` as TurnId,
-			attemptId: `evaluation:model-attempt:${call}` as AttemptId,
-		});
-		if (result instanceof Promise) {
-			throw new Error("Evaluation ModelStream must return its event stream synchronously");
-		}
-		return result;
-	};
-	return Object.freeze({
-		streamSimple,
-		completeSimple: (model, context, options) => streamSimple(model, context, options).result(),
 	});
 }
 
@@ -167,10 +122,46 @@ export async function openEvaluationWorkGraph(options: {
 	readonly idGenerator: IdGenerator;
 }): Promise<EvaluationWorkGraph> {
 	const model = evaluationModel(`evaluation:${options.id}`);
-	const skills = emptySkills();
-	const mcp = emptyMcp();
 	const session = new EvaluationSession(`eval-session:${options.id}`, options.seed);
 	const promptSha256 = createHash("sha256").update(options.systemPrompt, "utf8").digest("hex");
+	let modelCall = 0;
+	const runCapabilities = createRunCapabilityHost({
+		model: {
+			acquire: (selection) => {
+				const stream: ModelDriverLease["stream"] = (context, streamOptions = {}) => {
+					modelCall++;
+					const result = options.stream({
+						context,
+						signal: streamOptions.signal ?? new AbortController().signal,
+						runId: `evaluation:model-run:${modelCall}` as RunId,
+						turnId: `evaluation:model-turn:${modelCall}` as TurnId,
+						attemptId: `evaluation:model-attempt:${modelCall}` as AttemptId,
+					});
+					if (result instanceof Promise) {
+						throw new Error("Evaluation ModelStream must return its event stream synchronously");
+					}
+					return result;
+				};
+				const driver: ModelDriverLease = {
+					model: selection.model,
+					revision: `evaluation:${options.id}`,
+					stream,
+					complete: (context, streamOptions) => stream(context, streamOptions).result(),
+					dispose: () => undefined,
+				};
+				return Object.freeze(driver);
+			},
+		},
+		contributors: [],
+		now: options.clock.now,
+		platform: "linux",
+		interactionMode: "evaluation",
+		systemPrompt: {
+			version: "evaluation-system-prompt-v1",
+			sha256: promptSha256,
+			text: options.systemPrompt,
+		},
+	});
 	const workspaceExecution: OpenCodingAgentOptions["workspaceExecution"] = {
 		reserve: async (request) => ({
 			placement: {
@@ -205,20 +196,13 @@ export async function openEvaluationWorkGraph(options: {
 				evidence: () => undefined,
 			}),
 		},
-		models: evaluationModels(options.stream),
+		runCapabilities,
 		resolveConfiguration: () => ({ model, reasoning: "off", authSnapshot: { auth: {} } }),
 		clock: options.clock,
 		idGenerator: options.idGenerator,
 		processMaximumConcurrency: 1,
 		platform: "linux",
 		interactionMode: "evaluation",
-		skills: { initial: skills, current: () => skills, refresh: async () => skills },
-		mcp: { current: () => mcp },
-		systemPrompt: {
-			version: "evaluation-system-prompt-v1",
-			sha256: promptSha256,
-			text: options.systemPrompt,
-		},
 	});
 	let used = false;
 	return Object.freeze({

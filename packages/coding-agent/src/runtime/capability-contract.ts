@@ -69,6 +69,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.",
 		sources: [
 			"packages/runtime/src/index.ts",
+			"packages/runtime/src/run-capabilities.ts",
 			"packages/runtime/src/work-graph/coordinator.ts",
 			"packages/runtime/src/work-graph/types.ts",
 			"packages/coding-agent/src/runtime/direct-workspace-execution.ts",
@@ -80,6 +81,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: [
 			"packages/runtime/test/dependency-boundaries.test.ts",
 			"packages/runtime/test/public-contract.test.ts",
+			"packages/runtime/test/run-capabilities.test.ts",
 			"packages/runtime/test/work-graph.test.ts",
 			"packages/coding-agent/test/direct-workspace-execution.test.ts",
 			"packages/coding-agent/test/file-workspace-persistence.test.ts",
@@ -280,7 +282,11 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "MCP Host",
 		summary:
 			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.",
-		sources: ["packages/mcp/src/host.ts", "packages/coding-agent/src/mcp/registry.ts"],
+		sources: [
+			"packages/mcp/src/host.ts",
+			"packages/coding-agent/src/mcp/registry.ts",
+			"packages/coding-agent/src/mcp/run-capability.ts",
+		],
 		tests: ["packages/mcp/test/host.test.ts", "packages/coding-agent/test/mcp/application.test.ts"],
 	}),
 	capability({
@@ -331,8 +337,16 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Agent Skills",
 		summary:
 			"Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.",
-		sources: ["packages/skills/src/loader.ts", "packages/coding-agent/src/skills/manager.ts"],
-		tests: ["packages/skills/test/loader.test.ts", "packages/coding-agent/test/skills-cli.test.ts"],
+		sources: [
+			"packages/skills/src/loader.ts",
+			"packages/coding-agent/src/skills/manager.ts",
+			"packages/coding-agent/src/skills/run-capability.ts",
+		],
+		tests: [
+			"packages/skills/test/loader.test.ts",
+			"packages/coding-agent/test/skills-cli.test.ts",
+			"packages/coding-agent/test/skills/inventory.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.terminal",

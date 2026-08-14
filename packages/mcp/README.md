@@ -18,7 +18,7 @@ wire era. Legacy compatibility is tested for `2025-11-25` and `2025-06-18`.
   transports.
 - `createMcpHost()` owns isolated Server connections and the live Tool
   catalog.
-- `host.freezeTools()` returns an immutable, revision-bound Run snapshot.
+- `host.acquireTools()` returns an immutable, revision-bound Run lease that retains its connection generation until disposal.
 - `projectMcpToolResult()` converts the typed MCP result into bounded text and
   image model content while explicitly describing unsupported content.
 

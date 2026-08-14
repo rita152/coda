@@ -5,11 +5,16 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentEvent, AgentSeed, AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@coda/ai";
-import { type CodingAgent, type OpenCodingAgentOptions, openCodingAgent, type WorkGraphResult } from "@coda/runtime";
+import {
+	type CodingAgent,
+	createRunCapabilityHost,
+	type OpenCodingAgentOptions,
+	openCodingAgent,
+	type WorkGraphResult,
+} from "@coda/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import { createGitWorktreeWorkspaceExecution } from "../src/runtime/git-worktree-workspace-execution.ts";
-import { createCodingSkillsSnapshot } from "../src/skills/snapshot.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 const executeFile = promisify(execFile);
@@ -140,15 +145,6 @@ describe("Git worktree Work Graph end to end", () => {
 			]);
 			const models = createModels({ runtime: time });
 			models.setProvider(faux.provider);
-			const initialSkills = createCodingSkillsSnapshot({
-				loader: {
-					candidates: [],
-					diagnostics: [],
-					activate: async () => {
-						throw new Error("No Skills are expected");
-					},
-				},
-			});
 			const leasedSessions = new Set<string>();
 			const sessions: OpenCodingAgentOptions["sessions"] = {
 				reserve: async (request) => {
@@ -176,31 +172,34 @@ describe("Git worktree Work Graph end to end", () => {
 				},
 			};
 			let nextId = 0;
+			const runCapabilities = createRunCapabilityHost({
+				model: {
+					acquire: (selection) => {
+						const driver = models.bindSimple(selection.model, selection.authSnapshot ?? { auth: {} });
+						return {
+							model: driver.model,
+							revision: String(driver.providerGeneration),
+							stream: driver.stream,
+							complete: driver.complete,
+							dispose: () => undefined,
+						};
+					},
+				},
+				contributors: [],
+				now: time.clock.now,
+				platform: process.platform,
+				interactionMode: "evaluation",
+			});
 			const agent = await openCodingAgent({
 				workspaceExecution,
 				sessions,
-				models,
+				runCapabilities,
 				resolveConfiguration: () => ({ model: faux.getModel(), reasoning: "off", authSnapshot: { auth: {} } }),
 				clock: time.clock,
 				idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
 				processMaximumConcurrency: 3,
 				platform: process.platform,
 				interactionMode: "evaluation",
-				skills: {
-					initial: initialSkills,
-					current: () => initialSkills,
-					refresh: async () => initialSkills,
-				},
-				mcp: {
-					current: () => ({
-						revision: 0,
-						servers: [],
-						tools: [],
-						callTool: async () => {
-							throw new Error("No MCP calls are expected");
-						},
-					}),
-				},
 			});
 			await agent.submit({
 				commands: [

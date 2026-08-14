@@ -4,14 +4,13 @@ import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import type { CodingAgentSnapshot } from "@coda/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createCoreCommandRegistry } from "../src/commands/core-commands.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
 import { ProcessSessionManager } from "../src/process/process-session-manager.ts";
 import { createWorkspaceWorkCoordinator } from "../src/runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
-import { CodingSkillsManager, SkillCommandRegistryBinding } from "../src/skills/manager.ts";
+import { CodingSkillsManager } from "../src/skills/manager.ts";
 import { createWorkspace } from "../src/workspace.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
@@ -116,8 +115,7 @@ describe("Session Work Controller", () => {
 			mode: "print",
 		});
 		const skillsManager = new CodingSkillsManager({ fileSystem, roots: [] });
-		const initialSkills = await skillsManager.refresh();
-		const skillRegistryBinding = new SkillCommandRegistryBinding(createCoreCommandRegistry());
+		await skillsManager.refresh();
 		const processSessionRunner: ProcessSessionRunner = {
 			start: async () => {
 				throw new Error("No Process starts are expected");
@@ -140,16 +138,6 @@ describe("Session Work Controller", () => {
 				environment,
 			},
 			skillsManager,
-			initialSkills,
-			skillRegistryBinding,
-			initialMcp: {
-				revision: 0,
-				servers: [],
-				tools: [],
-				callTool: async () => {
-					throw new Error("No MCP calls are expected");
-				},
-			},
 			models,
 			clock: time.clock,
 			idGenerator,

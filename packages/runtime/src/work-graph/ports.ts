@@ -1,20 +1,8 @@
-import type {
-	AgentInput,
-	AgentSeed,
-	AgentTool,
-	Clock,
-	IdGenerator,
-	RunBudget,
-	ToolExecutionContext,
-	ToolExecutionOutput,
-} from "@coda/agent";
-import type { Api, AuthResult, JsonValue, Model, Models, ThinkingLevel } from "@coda/ai";
-import type { McpElicitationResult, McpToolSnapshot } from "@coda/mcp";
+import type { AgentInput, AgentSeed, AgentTool, Clock, IdGenerator, RunBudget } from "@coda/agent";
+import type { JsonValue } from "@coda/ai";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
-import type { McpAgentElicitation } from "../mcp/tools.ts";
-import type { SystemPromptSnapshot, TrustedProjectInstructions } from "../prompt/prompt-builder.ts";
 import type { RuntimeScheduler } from "../retry.ts";
-import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import type { RunCapabilityHost, RunModelSelection, RunToolContribution } from "../run-capabilities.ts";
 import type {
 	DesiredRuntimeConfiguration,
 	PublicationOutcome,
@@ -31,11 +19,7 @@ import type { WorkerControlEvent, WorkerSessionEvent } from "./worker-protocol.t
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
 
-export interface WorkerSelection {
-	readonly model: Model<Api>;
-	readonly reasoning: ThinkingLevel | "off";
-	readonly authSnapshot?: AuthResult;
-}
+export type WorkerSelection = RunModelSelection;
 
 export type WorkerSessionChange =
 	| {
@@ -54,28 +38,7 @@ export interface WorkerSession {
 	close(): Promise<void>;
 }
 
-export interface WorkerSkillsSource {
-	readonly initial: CodingSkillsSnapshot;
-	current(): CodingSkillsSnapshot | undefined;
-	refresh(): Promise<CodingSkillsSnapshot>;
-	synchronize?(snapshot: CodingSkillsSnapshot): void;
-}
-
-export interface WorkerMcpSource {
-	current(): McpToolSnapshot;
-	refresh?(): Promise<void>;
-}
-
-export interface WorkspaceToolContribution {
-	readonly tool: AgentTool;
-	readonly effect: WorkspaceEffect;
-	/** Reuse an already retained Workspace lease, such as control of a running background Process. */
-	readonly leaseIdentity?: (arguments_: unknown) => string | undefined;
-	readonly retainLease?: (
-		output: ToolExecutionOutput,
-		context: ToolExecutionContext,
-	) => { readonly identity: string; readonly settled: Promise<void> } | undefined;
-}
+export type WorkspaceToolContribution = RunToolContribution;
 
 export interface WorkSessionReservation {
 	readonly session: WorkerSession;
@@ -327,10 +290,10 @@ export interface OpenCodingAgentOptions {
 	readonly sessions: WorkSessionStore;
 	readonly resources?: InputResourceStore;
 	readonly persistence?: WorkspacePersistence;
-	readonly models: Pick<Models, "completeSimple" | "streamSimple">;
 	readonly resolveConfiguration: (
 		configuration: DesiredRuntimeConfiguration,
 	) => WorkerSelection | Promise<WorkerSelection>;
+	readonly runCapabilities: RunCapabilityHost;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly processMaximumConcurrency?: number;
@@ -339,13 +302,6 @@ export interface OpenCodingAgentOptions {
 	readonly maxOutputTokens?: number;
 	readonly platform: NodeJS.Platform;
 	readonly interactionMode: "interactive" | "print" | "evaluation";
-	readonly projectInstructions?: (
-		placement: WorkspacePlacementDescriptor,
-	) => TrustedProjectInstructions | undefined | Promise<TrustedProjectInstructions | undefined>;
-	readonly systemPrompt?: SystemPromptSnapshot;
-	readonly skills: WorkerSkillsSource;
-	readonly mcp: WorkerMcpSource;
-	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
 	readonly controlWorker?: (event: {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;

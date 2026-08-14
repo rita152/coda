@@ -8,15 +8,10 @@ import {
 	type RunResult,
 	type ToolExecutionContext,
 } from "@coda/agent";
-import type { McpToolSnapshot } from "@coda/mcp";
 import { ContextWindowController } from "../context-window/context-window.ts";
 import { ContextOverflowRecovery } from "../context-window/overflow-recovery.ts";
-import { createMcpAgentTools } from "../mcp/tools.ts";
-import { buildSystemPrompt } from "../prompt/prompt-builder.ts";
 import { createCodingAgentRetry } from "../retry.ts";
-import { promptSkillCatalog } from "../skills/catalog.ts";
-import { createSkillTool } from "../skills/tool.ts";
-import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import type { RunCapabilityLease, RunToolContribution } from "../run-capabilities.ts";
 import type {
 	OpenCodingAgentOptions,
 	WorkerSelection,
@@ -172,19 +167,20 @@ export async function openPrivateWorkerRuntime(request: {
 		undefined,
 		options.clock.now,
 	);
-	const visibleContributions = contributions.filter(({ effect }) => request.mode === "write" || effect === "read");
 	const bindRequest = {
 		graphId: request.graphId,
 		itemId: request.itemId,
 		sessionId,
 		placement: request.placement.placement,
 	};
-	const baseTools = Object.freeze(
-		[
-			...options.workspaceExecution.bindTools({ ...bindRequest, contributions: visibleContributions }),
-			...(request.coordinatorTools ?? []),
-		].map((tool) => gatedTool(tool, request.assertProgressAllowed)),
-	);
+	const baseTools: readonly RunToolContribution[] = Object.freeze([
+		...contributions,
+		...(request.coordinatorTools ?? []).map((tool) => Object.freeze({ tool, effect: "read" as const })),
+	]);
+	const bindTools = (runContributions: readonly RunToolContribution[]): readonly AgentTool[] =>
+		options.workspaceExecution
+			.bindTools({ ...bindRequest, contributions: runContributions })
+			.map((tool) => gatedTool(tool, request.assertProgressAllowed));
 	let desired: FrozenConfiguration = Object.freeze({
 		desired: request.configuration,
 		selection: await awaitPreparation(
@@ -194,7 +190,7 @@ export async function openPrivateWorkerRuntime(request: {
 			options.clock.now,
 		),
 	});
-	let activeSelection: WorkerSelection | undefined;
+	let activeCapabilities: RunCapabilityLease | undefined;
 	let promptSubmission: WorkerSubmission | undefined;
 	const steering = new Map<QueueItemId, WorkerSubmission>();
 	const followUps = new Map<QueueItemId, WorkerSubmission>();
@@ -235,14 +231,13 @@ export async function openPrivateWorkerRuntime(request: {
 			throw error;
 		}
 	};
-	const currentSelection = (): WorkerSelection => activeSelection ?? desired.selection;
 	const contextWindow = new ContextWindowController({
-		models: options.models,
 		clock: options.clock,
 		idGenerator: options.idGenerator,
 		runtime: () => {
-			const selection = currentSelection();
-			return { model: selection.model, authSnapshot: selection.authSnapshot };
+			const capabilities = activeCapabilities;
+			if (!capabilities) throw new Error("Context Window requires an active Run capability lease");
+			return { model: capabilities.model.model, complete: capabilities.model.complete };
 		},
 		commit: (checkpoint) => recordSessionChange({ type: "context_compacted", checkpoint }),
 		checkpoint: request.session.session.compactionCheckpoint,
@@ -250,7 +245,10 @@ export async function openPrivateWorkerRuntime(request: {
 	});
 	const overflowRecovery = new ContextOverflowRecovery({
 		contextWindow,
-		model: () => currentSelection().model,
+		model: () => {
+			if (!activeCapabilities) throw new Error("Context Overflow recovery requires an active Run capability lease");
+			return activeCapabilities.model.model;
+		},
 		maxOutputTokens: options.maxOutputTokens,
 	});
 	const submissionFor = (preparation: RunPreparation): WorkerSubmission => {
@@ -268,21 +266,6 @@ export async function openPrivateWorkerRuntime(request: {
 		}
 		return submission;
 	};
-	const dynamicTools = (skills: CodingSkillsSnapshot, mcp: McpToolSnapshot): readonly AgentTool[] => {
-		const skill = createSkillTool(skills);
-		const mcpTools = createMcpAgentTools({
-			snapshot: mcp,
-			elicit: async (elicitation) => options.mcpElicitation?.(elicitation) ?? { action: "decline" },
-		});
-		const dynamic = [
-			...(skill ? [{ tool: skill, effect: "read" as const }] : []),
-			...mcpTools.map((tool) => ({ tool, effect: "unknown" as const })),
-		].filter(({ effect }) => request.mode === "write" || effect === "read");
-		return options.workspaceExecution
-			.bindTools({ ...bindRequest, contributions: dynamic })
-			.map((tool) => gatedTool(tool, request.assertProgressAllowed));
-	};
-
 	agent = new Agent({
 		clock: options.clock,
 		idGenerator: options.idGenerator,
@@ -301,42 +284,22 @@ export async function openPrivateWorkerRuntime(request: {
 				resourceReferences: submission.resourceReferences,
 				...(deadline === undefined ? {} : { deadline }),
 			});
+			let capabilities: RunCapabilityLease | undefined;
 			try {
-				const skills = await awaitPreparation(
-					options.skills.refresh(),
-					preparation.signal,
-					deadline,
-					options.clock.now,
-				);
-				await awaitPreparation(options.mcp.refresh?.(), preparation.signal, deadline, options.clock.now);
-				const mcp = options.mcp.current();
-				options.skills.synchronize?.(skills);
-				const tools = Object.freeze([...baseTools, ...dynamicTools(skills, mcp)]);
-				const projectInstructions = await awaitPreparation(
-					options.projectInstructions?.(request.placement.placement),
-					preparation.signal,
-					deadline,
-					options.clock.now,
-				);
-				const prompt = Object.freeze(
-					options.systemPrompt ??
-						buildSystemPrompt({
-							workspace: request.placement.placement.root,
-							platform: options.platform,
-							timestamp: options.clock.now(),
-							tools: tools.map((tool) => ({ name: tool.name, description: tool.description })),
-							capabilities: {
-								interactionMode: options.interactionMode === "interactive" ? "interactive" : "print",
-							},
-							...(projectInstructions === undefined ? {} : { projectInstructions }),
-							skills: promptSkillCatalog(skills, configuration.selection.model.contextWindow),
-						}),
-				);
+				capabilities = await options.runCapabilities.acquire({
+					selection: configuration.selection,
+					placement: request.placement.placement,
+					mode: request.mode,
+					baseTools,
+					bindTools,
+					signal: preparation.signal,
+					...(deadline === undefined ? {} : { deadline }),
+				});
 				await awaitPreparation(
 					recordSessionChange({
 						type: "prepare_run",
-						promptVersion: prompt.version,
-						promptSha256: prompt.sha256,
+						promptVersion: capabilities.prompt.version,
+						promptSha256: capabilities.prompt.sha256,
 					}),
 					preparation.signal,
 					deadline,
@@ -347,12 +310,11 @@ export async function openPrivateWorkerRuntime(request: {
 					preparationId: submission.preparationId,
 					outcome: "prepared",
 				});
-				const selection = configuration.selection;
-				activeSelection = selection;
-				let disposed = false;
+				activeCapabilities = capabilities;
+				let disposeOperation: Promise<void> | undefined;
 				const preparedRun: PreparedRun = {
-					tools,
-					systemPrompt: prompt.text,
+					tools: capabilities.tools,
+					systemPrompt: capabilities.prompt.text,
 					...(configuration.desired.runLimits
 						? { runBudget: { limits: configuration.desired.runLimits } }
 						: options.runBudget
@@ -360,32 +322,35 @@ export async function openPrivateWorkerRuntime(request: {
 							: {}),
 					recoverFailedAttempt: (attempt) => overflowRecovery.recoverFailedAttempt(attempt, agent.state.messages),
 					stream: async ({ context, signal }) => {
-						if (!selection.authSnapshot) {
-							throw new Error(`Model is not authenticated: ${selection.model.provider}/${selection.model.id}`);
-						}
 						const prepared = await overflowRecovery.prepare(context, agent.state.messages, signal);
 						request.assertProgressAllowed();
 						if (signal.aborted) throw aborted(signal);
-						return options.models.streamSimple(selection.model, prepared.context, {
+						return capabilities!.model.stream(prepared.context, {
 							signal,
-							authSnapshot: selection.authSnapshot,
-							reasoning: selection.reasoning === "off" ? undefined : selection.reasoning,
 							maxTokens: prepared.reservedOutputTokens,
 						});
 					},
 					dispose: () => {
-						if (disposed) return;
-						disposed = true;
-						if (activeSelection === selection) activeSelection = undefined;
-						if (preparation.queueItemId) followUps.delete(preparation.queueItemId);
-						observations.publishPreparation({
-							type: "prepared_run_disposed",
-							preparationId: submission.preparationId,
+						if (disposeOperation) return disposeOperation;
+						disposeOperation = capabilities!.dispose().finally(() => {
+							if (activeCapabilities === capabilities) activeCapabilities = undefined;
+							if (preparation.queueItemId) followUps.delete(preparation.queueItemId);
+							observations.publishPreparation({
+								type: "prepared_run_disposed",
+								preparationId: submission.preparationId,
+							});
 						});
+						return disposeOperation;
 					},
 				};
 				return Object.freeze(preparedRun);
 			} catch (error) {
+				if (capabilities) {
+					try {
+						await capabilities.dispose();
+					} catch {}
+					if (activeCapabilities === capabilities) activeCapabilities = undefined;
+				}
 				observations.publishPreparation({
 					type: "preparation_settled",
 					preparationId: submission.preparationId,

@@ -1,17 +1,25 @@
 import type { AgentTool, ToolExecutionContext } from "@coda/agent";
 import type { TSchema } from "@coda/ai";
-import {
-	type McpElicitationRequest,
-	type McpElicitationResult,
-	type McpProgress,
-	type McpServerSnapshot,
-	type McpToolDescriptor,
-	type McpToolResult,
-	type McpToolSnapshot,
-	projectMcpToolResult,
+import type {
+	McpElicitationRequest,
+	McpElicitationResult,
+	McpProgress,
+	McpServerSnapshot,
+	McpToolDescriptor,
+	McpToolLease,
+	McpToolResult,
 } from "@coda/mcp";
+import { projectMcpToolResult } from "@coda/mcp";
+import type { RunCapabilitySource } from "@coda/runtime";
 
-export interface McpAgentToolDetails {
+export interface McpAgentElicitation {
+	readonly server: McpServerSnapshot;
+	readonly tool: McpToolDescriptor;
+	readonly request: McpElicitationRequest;
+	readonly execution: ToolExecutionContext;
+}
+
+interface McpAgentToolDetails {
 	readonly kind: "mcp";
 	readonly catalogRevision: number;
 	readonly serverId: string;
@@ -21,30 +29,13 @@ export interface McpAgentToolDetails {
 	readonly truncated: boolean;
 }
 
-export interface McpAgentElicitation {
-	readonly server: McpServerSnapshot;
-	readonly tool: McpToolDescriptor;
-	readonly request: McpElicitationRequest;
-	readonly execution: ToolExecutionContext;
-}
-
-export interface McpAgentProgress {
-	readonly server: McpServerSnapshot;
-	readonly tool: McpToolDescriptor;
-	readonly progress: McpProgress;
-	readonly execution: ToolExecutionContext;
-}
-
-export interface CreateMcpAgentToolsOptions {
-	readonly snapshot: McpToolSnapshot;
+function createMcpTools(options: {
+	readonly lease: McpToolLease;
 	readonly elicit?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
-	readonly onProgress?: (progress: McpAgentProgress) => void;
-}
-
-export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readonly AgentTool[] {
-	const servers = new Map(options.snapshot.servers.map((server) => [server.id, server]));
+}): readonly AgentTool[] {
+	const servers = new Map(options.lease.servers.map((server) => [server.id, server]));
 	return Object.freeze(
-		options.snapshot.tools.map((descriptor) => {
+		options.lease.tools.map((descriptor) => {
 			const server = servers.get(descriptor.serverId);
 			if (!server) throw new Error(`MCP Tool references an unknown Server: ${descriptor.serverId}`);
 			return Object.freeze({
@@ -65,17 +56,12 @@ export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readon
 						: execution;
 					let result: McpToolResult;
 					try {
-						result = await options.snapshot.callTool({
+						result = await options.lease.callTool({
 							toolId: descriptor.id,
 							arguments: structuredClone(arguments_),
 							signal: execution.signal,
-							...(execution.reportProgress || options.onProgress
-								? {
-										onProgress: (progress: McpProgress) => {
-											execution.reportProgress?.(progress);
-											options.onProgress?.({ server, tool: descriptor, progress, execution });
-										},
-									}
+							...(execution.reportProgress
+								? { onProgress: (progress: McpProgress) => execution.reportProgress?.(progress) }
 								: {}),
 							...(options.elicit
 								? {
@@ -94,12 +80,11 @@ export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readon
 						elicitationController?.abort(new DOMException("MCP Tool execution settled", "AbortError"));
 					}
 					const projection = projectMcpToolResult(result);
-					const content =
-						projection.content.length > 0
-							? projection.content
-							: [{ type: "text" as const, text: "[MCP Tool completed with no model-visible content]" }];
 					return {
-						content,
+						content:
+							projection.content.length > 0
+								? projection.content
+								: [{ type: "text" as const, text: "[MCP Tool completed with no model-visible content]" }],
 						observation: {
 							status: projection.isError ? "error" : "ok",
 							truncated: projection.details.truncated,
@@ -111,7 +96,7 @@ export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readon
 						isError: projection.isError,
 						details: Object.freeze({
 							kind: "mcp" as const,
-							catalogRevision: options.snapshot.revision,
+							catalogRevision: options.lease.revision,
 							serverId: descriptor.serverId,
 							remoteToolName: descriptor.remoteName,
 							contentTypes: projection.details.contentTypes,
@@ -123,4 +108,28 @@ export function createMcpAgentTools(options: CreateMcpAgentToolsOptions): readon
 			} as AgentTool<TSchema, McpAgentToolDetails>);
 		}),
 	);
+}
+
+export function createMcpCapabilitySource(options: {
+	readonly acquire: (signal: AbortSignal) => McpToolLease | Promise<McpToolLease>;
+	readonly elicit?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
+}): RunCapabilitySource {
+	return Object.freeze({
+		id: "mcp",
+		acquire: async ({ signal }: Parameters<RunCapabilitySource["acquire"]>[0]) => {
+			const lease = await options.acquire(signal);
+			try {
+				const tools = createMcpTools({ lease, ...(options.elicit ? { elicit: options.elicit } : {}) });
+				return Object.freeze({
+					revision: String(lease.revision),
+					tools: Object.freeze(tools.map((tool) => Object.freeze({ tool, effect: "unknown" as const }))),
+					promptFragments: Object.freeze([]),
+					dispose: () => lease.dispose(),
+				});
+			} catch (error) {
+				await lease.dispose().catch(() => undefined);
+				throw error;
+			}
+		},
+	});
 }

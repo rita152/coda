@@ -225,6 +225,10 @@ export interface McpToolSnapshot {
 	callTool(request: McpToolCallRequest): Promise<McpToolResult>;
 }
 
+export interface McpToolLease extends McpToolSnapshot {
+	dispose(): Promise<void>;
+}
+
 export interface McpToolCallRequest extends McpCallContext {
 	readonly toolId: string;
 	readonly arguments: Readonly<Record<string, unknown>>;
@@ -238,7 +242,7 @@ export interface McpHost {
 	refresh(context?: { readonly signal?: AbortSignal }): Promise<McpHostSnapshot>;
 	reconnect(serverId: string, context?: { readonly signal?: AbortSignal }): Promise<McpHostSnapshot>;
 	snapshot(): McpHostSnapshot;
-	freezeTools(): McpToolSnapshot;
+	acquireTools(): McpToolLease;
 	onDidChange(listener: (snapshot: McpHostSnapshot) => void): () => void;
 	callTool(request: McpToolCallRequest): Promise<McpToolResult>;
 	close(): Promise<void>;

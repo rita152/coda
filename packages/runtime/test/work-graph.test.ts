@@ -6,21 +6,22 @@ import {
 	type JsonValue,
 	type Model,
 	type Models,
-	type SimpleStreamOptions,
+	type ModelsSimpleStreamOptions,
 	Type,
 } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
 import {
 	type CodingAgent,
 	type CodingAgentObservation,
+	createRunCapabilityHost,
 	type OpenCodingAgentOptions,
 	openCodingAgent,
+	type RunCapabilitySource,
 	type WorkGraphId,
 	type WorkGraphResult,
 	type WorkItemId,
 	type WorkResult,
 } from "../src/index.ts";
-import { createCodingSkillsSnapshot } from "../src/skills/snapshot.ts";
 import { MemoryWorkspacePersistence } from "../src/work-graph/memory-workspace-persistence.ts";
 import type {
 	WorkGraphRecord,
@@ -53,6 +54,7 @@ class MemorySessions {
 	sharedSessionId?: string;
 	failItemId?: string;
 	failAcceptEventType?: AgentEvent["type"];
+	failRecord = false;
 	failEvidence = false;
 	failClose = false;
 	#acceptFailed = false;
@@ -82,7 +84,8 @@ class MemorySessions {
 						this.acceptedEventTypes.push(event.type);
 						events.push(event);
 					},
-					record: (_change: unknown) => Promise.resolve(),
+					record: (_change: unknown) =>
+						this.failRecord ? Promise.reject(new Error("scripted Session record failure")) : Promise.resolve(),
 					close: async () => {
 						if (closed) return;
 						if (this.failClose) throw new Error("scripted Session close failure");
@@ -369,29 +372,17 @@ class PoisonedLedgerPersistence implements WorkspacePersistence {
 	}
 }
 
-function emptySkills() {
-	return createCodingSkillsSnapshot({
-		loader: Object.freeze({
-			candidates: Object.freeze([]),
-			diagnostics: Object.freeze([]),
-			activate: async () => {
-				throw new Error("No Skills in Work Graph tests");
-			},
-		}),
+function emptyCapabilitySource(): RunCapabilitySource {
+	return Object.freeze({
+		id: "test",
+		acquire: () =>
+			Object.freeze({
+				revision: "0",
+				tools: Object.freeze([]),
+				promptFragments: Object.freeze([]),
+				dispose: () => undefined,
+			}),
 	});
-}
-
-function emptyMcp(): OpenCodingAgentOptions["mcp"] {
-	return {
-		current: () => ({
-			revision: 0,
-			servers: [],
-			tools: [],
-			callTool: async () => {
-				throw new Error("No MCP Tools in Work Graph tests");
-			},
-		}),
-	};
 }
 
 interface ResponsePlan {
@@ -406,7 +397,7 @@ async function harness(
 		readonly sessions?: MemorySessions;
 		readonly workspace?: MemoryWorkspaceExecution;
 		readonly processMaximumConcurrency?: number;
-		readonly skills?: OpenCodingAgentOptions["skills"];
+		readonly capabilitySource?: RunCapabilitySource;
 		readonly controlWorker?: OpenCodingAgentOptions["controlWorker"];
 		readonly chunkCharacters?: number;
 		readonly modelStreamFailure?: Error;
@@ -442,27 +433,40 @@ async function harness(
 			},
 		]);
 	}
-	const models = {
-		streamSimple: (model: Model, context: Parameters<Models["streamSimple"]>[1], options: SimpleStreamOptions) => {
-			modelCalls.push(model.id);
-			toolCatalogs.push(context.tools?.map(({ name }) => name) ?? []);
-			modelContexts.push(JSON.stringify(context));
-			if (overrides.modelStreamFailure) throw overrides.modelStreamFailure;
-			return faux.streamSimple(model, context, { ...options, runtime });
-		},
-	} as unknown as Pick<Models, "completeSimple" | "streamSimple">;
+	const stream = (
+		model: Model,
+		context: Parameters<Models["streamSimple"]>[1],
+		options: ModelsSimpleStreamOptions,
+	) => {
+		modelCalls.push(model.id);
+		toolCatalogs.push(context.tools?.map(({ name }) => name) ?? []);
+		modelContexts.push(JSON.stringify(context));
+		if (overrides.modelStreamFailure) throw overrides.modelStreamFailure;
+		return faux.streamSimple(model, context, { ...options, runtime });
+	};
 	const sessions = overrides.sessions ?? new MemorySessions();
 	const workspace = overrides.workspace ?? new MemoryWorkspaceExecution();
-	const initialSkills = emptySkills();
-	const skills =
-		overrides.skills ??
-		({ initial: initialSkills, current: () => initialSkills, refresh: async () => initialSkills } as const);
+	const runCapabilities = createRunCapabilityHost({
+		model: {
+			acquire: (selection) => ({
+				model: selection.model,
+				revision: `test:${selection.model.id}`,
+				stream: (context, options) => stream(selection.model, context, options ?? {}),
+				complete: (context, options) => stream(selection.model, context, options ?? {}).result(),
+				dispose: () => undefined,
+			}),
+		},
+		contributors: [overrides.capabilitySource ?? emptyCapabilitySource()],
+		now: clock.now,
+		platform: "linux",
+		interactionMode: "evaluation",
+	});
 	const agent = await openCodingAgent({
 		workspaceExecution: workspace.adapter,
 		sessions: sessions.adapter,
 		...(overrides.resources ? { resources: overrides.resources } : {}),
 		...(overrides.persistence ? { persistence: overrides.persistence } : {}),
-		models,
+		runCapabilities,
 		resolveConfiguration: (configuration) => ({
 			model: faux.getModel(configuration.model.id)!,
 			reasoning: configuration.reasoning,
@@ -473,8 +477,6 @@ async function harness(
 		processMaximumConcurrency: overrides.processMaximumConcurrency ?? 8,
 		platform: "linux",
 		interactionMode: "evaluation",
-		skills,
-		mcp: emptyMcp(),
 		...(overrides.controlWorker ? { controlWorker: overrides.controlWorker } : {}),
 	});
 	return { agent, modelCalls, toolCatalogs, modelContexts, sessions, workspace };
@@ -656,7 +658,7 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 	});
 
-	it("supports nested bound delegation under a shared concurrency budget without Runtime identity escape", async () => {
+	it("routes built-in delegation through the deterministic bound Tool assembly", async () => {
 		const journal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
 		const { agent, modelCalls, modelContexts } = await harness(
@@ -689,7 +691,7 @@ describe("Work Graph public Interface", () => {
 		expect(journal.records.filter(({ type }) => type === "batch_accepted")).toHaveLength(3);
 		expect(modelContexts.join("\n")).toContain('"itemId":"child"');
 		expect(modelContexts.join("\n")).toContain('"itemId":"grandchild"');
-		expect(workspace.boundToolNames.flat()).not.toContain("delegate");
+		expect(workspace.boundToolNames).toEqual([["delegate"], ["delegate"], ["delegate"]]);
 		await agent.close();
 	});
 
@@ -725,19 +727,25 @@ describe("Work Graph public Interface", () => {
 	it("cancels observable preparation without starting a Model or leaking executable capabilities", async () => {
 		const refreshGate = deferred();
 		const journal = new MemoryWorkspacePersistence();
-		const skills = emptySkills();
 		const controlTypes: AgentEvent["type"][] = [];
+		let capabilityDisposals = 0;
 		const { agent, modelCalls, sessions } = await harness([], {
 			persistence: journal,
 			controlWorker: ({ event }) => {
 				controlTypes.push(event.type);
 			},
-			skills: {
-				initial: skills,
-				current: () => skills,
-				refresh: async () => {
+			capabilitySource: {
+				id: "gated",
+				acquire: async () => {
 					await refreshGate.promise;
-					return skills;
+					return {
+						revision: "gated",
+						tools: [],
+						promptFragments: [],
+						dispose: () => {
+							capabilityDisposals++;
+						},
+					};
 				},
 			},
 		});
@@ -781,7 +789,36 @@ describe("Work Graph public Interface", () => {
 		expect(sessions.acceptedEventTypes).toEqual([]);
 		expect(controlTypes).toEqual([]);
 		refreshGate.resolve();
+		await vi.waitFor(() => expect(capabilityDisposals).toBe(1));
 		await agent.close();
+		expect(capabilityDisposals).toBe(1);
+	});
+
+	it("disposes acquired capabilities exactly once when Session preparation fails", async () => {
+		const sessions = new MemorySessions();
+		sessions.failRecord = true;
+		let capabilityDisposals = 0;
+		const { agent } = await harness([], {
+			sessions,
+			capabilitySource: {
+				id: "counted",
+				acquire: () => ({
+					revision: "counted:1",
+					tools: [],
+					promptFragments: [],
+					dispose: () => {
+						capabilityDisposals++;
+					},
+				}),
+			},
+		});
+
+		await agent.submit({ commands: [start("graph:prepare-record-failure", 1)] });
+		const result = await waitForGraphResult(agent, "graph:prepare-record-failure");
+		expect(result.results[0]?.state).toBe("failed");
+		expect(capabilityDisposals).toBe(1);
+		await agent.close();
+		expect(capabilityDisposals).toBe(1);
 	});
 
 	it("cancels an active Tool Invocation through the Work Item AbortSignal", async () => {

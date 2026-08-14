@@ -325,6 +325,7 @@
       "summary": "MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.",
       "sources": [
         "packages/coding-agent/src/mcp/registry.ts",
+        "packages/coding-agent/src/mcp/run-capability.ts",
         "packages/mcp/src/host.ts"
       ],
       "tests": [
@@ -487,10 +488,12 @@
       "summary": "Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.",
       "sources": [
         "packages/coding-agent/src/skills/manager.ts",
+        "packages/coding-agent/src/skills/run-capability.ts",
         "packages/skills/src/loader.ts"
       ],
       "tests": [
         "packages/coding-agent/test/skills-cli.test.ts",
+        "packages/coding-agent/test/skills/inventory.test.ts",
         "packages/skills/test/loader.test.ts"
       ]
     },
@@ -553,6 +556,7 @@
         "packages/coding-agent/src/runtime/workspace-input-resources.ts",
         "packages/coding-agent/src/runtime/workspace-work-coordinator.ts",
         "packages/runtime/src/index.ts",
+        "packages/runtime/src/run-capabilities.ts",
         "packages/runtime/src/work-graph/coordinator.ts",
         "packages/runtime/src/work-graph/types.ts"
       ],
@@ -566,6 +570,7 @@
         "packages/coding-agent/test/workspace-work-sessions.test.ts",
         "packages/runtime/test/dependency-boundaries.test.ts",
         "packages/runtime/test/public-contract.test.ts",
+        "packages/runtime/test/run-capabilities.test.ts",
         "packages/runtime/test/work-graph.test.ts"
       ]
     },

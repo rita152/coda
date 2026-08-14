@@ -2,19 +2,28 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { AgentEvent, AgentMessage, AgentSeed, Clock, IdGenerator, RunBudget } from "@coda/agent";
 import type { AuthResult, JsonValue, Models, ThinkingLevel } from "@coda/ai";
-import type { McpElicitationResult, McpToolSnapshot } from "@coda/mcp";
-import { type CodingAgent, type OpenCodingAgentOptions, openCodingAgent, type WorkRunEvidence } from "@coda/runtime";
+import type { McpElicitationResult, McpToolLease } from "@coda/mcp";
+import {
+	type CodingAgent,
+	createRunCapabilityHost,
+	type ModelDriverLease,
+	type OpenCodingAgentOptions,
+	openCodingAgent,
+	type RunModelSelection,
+	type WorkRunEvidence,
+} from "@coda/runtime";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
 import type { CodingMcpRegistry } from "../mcp/registry.ts";
+import { createMcpCapabilitySource, type McpAgentElicitation } from "../mcp/run-capability.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
 import type { TrustedProjectInstructions } from "../project/project-context.ts";
 import { RunEvidenceProjection } from "../run-evidence/run-evidence.ts";
 import { SessionHistoryReader, type SessionHistoryReadPort } from "../session/session-history-reader.ts";
 import type { Session } from "../session/types.ts";
-import type { CodingSkillsManager, SkillCommandRegistryBinding } from "../skills/manager.ts";
-import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import type { CodingSkillsManager } from "../skills/manager.ts";
+import { createSkillsCapabilitySource } from "../skills/run-capability.ts";
 import { createCodingToolContributions } from "../tools/index.ts";
 import { TargetMutationCoordinator } from "../tools/mutation.ts";
 import type { Workspace } from "../workspace.ts";
@@ -23,7 +32,6 @@ import { createDirectWorkspaceExecution } from "./direct-workspace-execution.ts"
 import { createGitWorktreeWorkspaceExecution } from "./git-worktree-workspace-execution.ts";
 import { SessionWorkController, type SessionWorkHost, type SessionWorkSelection } from "./session-work-controller.ts";
 
-type McpAgentElicitation = Parameters<NonNullable<OpenCodingAgentOptions["mcpElicitation"]>>[0];
 type WorkSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["reserve"]>>["session"];
 type WorkSessionChange = Parameters<WorkSession["record"]>[0];
 type WorkSessionStore = OpenCodingAgentOptions["sessions"];
@@ -52,6 +60,18 @@ function json(value: unknown): JsonValue {
 function agentEvent(value: JsonValue): AgentEvent | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value) || !("runId" in value)) return undefined;
 	return value as unknown as AgentEvent;
+}
+
+function emptyMcpLease(): McpToolLease {
+	return Object.freeze({
+		revision: 0,
+		servers: Object.freeze([]),
+		tools: Object.freeze([]),
+		callTool: async () => {
+			throw new Error("No MCP Tools are available");
+		},
+		dispose: () => Promise.resolve(),
+	});
 }
 
 class EphemeralWorkSession {
@@ -277,10 +297,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly shellExecutable: string;
 	readonly hostRuntime: HostProcessRuntime;
 	readonly skillsManager: CodingSkillsManager;
-	readonly initialSkills: CodingSkillsSnapshot;
-	readonly skillRegistryBinding: SkillCommandRegistryBinding;
 	readonly mcpRegistry?: CodingMcpRegistry;
-	readonly initialMcp: McpToolSnapshot;
 	readonly models: Models;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
@@ -393,6 +410,45 @@ export function createWorkspaceWorkCoordinator(options: {
 	const registerSelection = (selection: SessionWorkSelection): void => {
 		drivers.set(driverKey(selection.model.provider, selection.model.id), Object.freeze({ ...selection }));
 	};
+	const runCapabilities = createRunCapabilityHost({
+		model: {
+			acquire: (selection: RunModelSelection) => {
+				if (!selection.authSnapshot) {
+					throw new Error(`Model is not authenticated: ${selection.model.provider}/${selection.model.id}`);
+				}
+				const driver = options.models.bindSimple(selection.model, selection.authSnapshot);
+				const reasoning = selection.reasoning === "off" ? undefined : selection.reasoning;
+				return Object.freeze({
+					model: driver.model,
+					revision: `${driver.model.provider}:${driver.providerGeneration}`,
+					stream: (...[context, streamOptions]: Parameters<ModelDriverLease["stream"]>) =>
+						driver.stream(context, { ...streamOptions, reasoning }),
+					complete: (...[context, streamOptions]: Parameters<ModelDriverLease["complete"]>) =>
+						driver.complete(context, { ...streamOptions, reasoning }),
+					dispose: () => undefined,
+				});
+			},
+		},
+		contributors: [
+			createSkillsCapabilitySource(options.skillsManager),
+			createMcpCapabilitySource({
+				acquire: async (signal) => {
+					if (!options.mcpRegistry) return emptyMcpLease();
+					await options.mcpRegistry.refresh({ signal });
+					if (signal.aborted) throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
+					return options.mcpRegistry.acquireTools();
+				},
+				elicit: async (request) => {
+					const owner = sessionByRun.get(String(request.execution.runId));
+					return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
+				},
+			}),
+		],
+		now: options.clock.now,
+		platform: options.platform,
+		interactionMode: options.interactionMode,
+		...(options.projectInstructions ? { projectInstructions: () => options.projectInstructions } : {}),
+	});
 	const startObservationPump = (openedAgent: CodingAgent): void => {
 		if (observationPump) return;
 		observationPump = (async () => {
@@ -431,7 +487,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					sessions: sessions.adapter,
 					...(options.resources ? { resources: options.resources } : {}),
 					...(options.persistence ? { persistence: options.persistence } : {}),
-					models: options.models,
+					runCapabilities,
 					resolveConfiguration: async (configuration) => {
 						const cached = drivers.get(driverKey(configuration.model.provider, configuration.model.id));
 						const model =
@@ -455,21 +511,6 @@ export function createWorkspaceWorkCoordinator(options: {
 					...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
 					platform: options.platform,
 					interactionMode: options.interactionMode,
-					...(options.projectInstructions ? { projectInstructions: () => options.projectInstructions } : {}),
-					skills: {
-						initial: options.initialSkills,
-						current: () => options.skillsManager.current,
-						refresh: () => options.skillsManager.refresh(),
-						synchronize: (snapshot) => options.skillRegistryBinding.sync(snapshot),
-					},
-					mcp: {
-						current: () => options.mcpRegistry?.freezeTools() ?? options.initialMcp,
-						...(options.mcpRegistry ? { refresh: async () => void (await options.mcpRegistry!.refresh()) } : {}),
-					},
-					mcpElicitation: async (request) => {
-						const owner = sessionByRun.get(String(request.execution.runId));
-						return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
-					},
 					controlWorker: ({ sessionId, placement, event }) => {
 						if (!("runId" in event)) return;
 						const runId = String(event.runId);

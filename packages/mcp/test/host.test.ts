@@ -94,6 +94,56 @@ describe("MCP Host", () => {
 		await host.close();
 	});
 
+	it("retains a leased connection generation across reload until exactly-once disposal", async () => {
+		const closes = [0, 0];
+		const calls: string[] = [];
+		let connectionGeneration = 0;
+		const connector: McpConnector = {
+			connect: async () => {
+				const generation = connectionGeneration++;
+				const remoteName = generation === 0 ? "old" : "new";
+				return {
+					info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+					listTools: async () => [{ name: remoteName, inputSchema: { type: "object", properties: {} } }],
+					callTool: async ({ name }) => {
+						calls.push(`${generation}:${name}`);
+						return { isError: false, content: [{ type: "text", text: remoteName }] };
+					},
+					close: async () => {
+						closes[generation] = (closes[generation] ?? 0) + 1;
+					},
+				};
+			},
+		};
+		const definition: McpServerDefinition = {
+			id: "generation",
+			protocol: "2026-07-28",
+			transport: { kind: "http", url: "https://generation.example.test/mcp" },
+		};
+		const host = createMcpHost({ connector });
+		await host.reload([definition]);
+		const activeRun = host.acquireTools();
+
+		await host.reload([definition]);
+		const nextRun = host.acquireTools();
+
+		expect(closes).toEqual([0, 0]);
+		expect(activeRun.revision).toBe(1);
+		expect(activeRun.tools.map(({ remoteName }) => remoteName)).toEqual(["old"]);
+		expect(nextRun.revision).toBe(2);
+		expect(nextRun.tools.map(({ remoteName }) => remoteName)).toEqual(["new"]);
+		await activeRun.callTool({ toolId: activeRun.tools[0]!.id, arguments: {} });
+		await nextRun.callTool({ toolId: nextRun.tools[0]!.id, arguments: {} });
+		expect(calls).toEqual(["0:old", "1:new"]);
+
+		await Promise.all([activeRun.dispose(), activeRun.dispose(), activeRun.dispose()]);
+		expect(closes).toEqual([1, 0]);
+		await nextRun.dispose();
+		expect(closes).toEqual([1, 0]);
+		await host.close();
+		expect(closes).toEqual([1, 1]);
+	});
+
 	it("isolates a failed Server while keeping healthy Tools available", async () => {
 		const healthy: McpConnection = {
 			info: { protocolEra: "legacy", protocolVersion: "2025-11-25" },
@@ -511,7 +561,7 @@ describe("MCP Host", () => {
 				transport: { kind: "http", url: "https://snapshot.example.test/mcp" },
 			},
 		]);
-		const runTools = host.freezeTools();
+		const runTools = host.acquireTools();
 
 		generation = 2;
 		changed?.();
@@ -526,6 +576,7 @@ describe("MCP Host", () => {
 			content: [{ type: "text", text: "first" }],
 		});
 		expect(calls).toEqual(["first"]);
+		await runTools.dispose();
 		await host.close();
 	});
 

@@ -1,14 +1,17 @@
 # `@coda/runtime`
 
-Durable, headless Work Graph orchestration for Coda. The public Interface is one
-`openCodingAgent()` construction function plus serializable Work Graph data and
-the closed `submit`, `observe`, and `close` operations.
+Durable, headless Work Graph orchestration for Coda. `openCodingAgent()` exposes
+the closed `submit`, `observe`, and `close` Work Graph operations, while
+`createRunCapabilityHost()` deterministically binds trusted executable
+contributions to one disposable Run lease.
 
 Each Work Item privately owns one serial Worker Runtime, one exclusively leased
 Session, and one Workspace Placement. The Module coordinates deterministic DAG
 scheduling, bounded concurrency, cancellation, durable recovery, structured Work
 Results, nested delegation, and Publication without exposing Agent instances,
-input queues, Prepared Run capabilities, or Context Window controllers.
+input queues, or Context Window controllers. Each Prepared Run owns its bound
+Model driver, Tools, Prompt fragments, and contributor revisions until its lease
+is disposed.
 
 Session and per-Graph store writes are ordered fatal barriers. Presentation,
 JSON, evaluation, telemetry, and Extension consumers are isolated observations

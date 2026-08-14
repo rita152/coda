@@ -224,10 +224,12 @@ async function controllerFixture(
 		},
 		controller({ commit }: { commit: (checkpoint: CompactionCheckpoint) => Promise<void> }) {
 			return new ContextWindowController({
-				models,
 				clock: runtime.clock,
 				idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				runtime: () => ({ model: selected as Model, authSnapshot: { auth: {} } }),
+				runtime: () => {
+					const driver = models.bindSimple(selected as Model, { auth: {} });
+					return { model: selected as Model, complete: driver.complete };
+				},
 				commit,
 			});
 		},

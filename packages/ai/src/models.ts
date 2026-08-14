@@ -95,6 +95,19 @@ export interface Models {
 	): Promise<AssistantMessage>;
 	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream;
 	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage>;
+	/**
+	 * Captures the currently registered Provider implementation and authentication
+	 * snapshot so later registry replacement cannot change an active Run.
+	 */
+	bindSimple(
+		model: Model<Api>,
+		authSnapshot: AuthResult,
+	): {
+		readonly model: Model<Api>;
+		readonly providerGeneration: number;
+		stream(context: Context, options?: Omit<ModelsSimpleStreamOptions, "authSnapshot">): AssistantMessageEventStream;
+		complete(context: Context, options?: Omit<ModelsSimpleStreamOptions, "authSnapshot">): Promise<AssistantMessage>;
+	};
 	fetchDeferred(
 		model: Model<Api>,
 		handle: DeferredHandle,
@@ -133,9 +146,11 @@ function mergeHeaders(
 
 class ModelsImpl implements MutableModels {
 	private readonly providers = new Map<string, Provider>();
+	private readonly providerGenerations = new WeakMap<Provider, number>();
 	private readonly credentials: CredentialStore;
 	private readonly authContext: AuthContext;
 	private readonly runtime: TimeRuntime;
+	private nextProviderGeneration = 0;
 
 	constructor(options: CreateModelsOptions) {
 		this.credentials = options.credentials ?? new InMemoryCredentialStore();
@@ -145,6 +160,7 @@ class ModelsImpl implements MutableModels {
 
 	setProvider(provider: Provider): void {
 		this.providers.set(provider.id, provider);
+		this.providerGenerations.set(provider, ++this.nextProviderGeneration);
 	}
 
 	deleteProvider(id: string): void {
@@ -318,6 +334,33 @@ class ModelsImpl implements MutableModels {
 
 	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
 		return this.streamSimple(model, context, options).result();
+	}
+
+	bindSimple(model: Model<Api>, authSnapshot: AuthResult) {
+		const provider = this.requireProvider(model);
+		const providerGeneration = this.providerGenerations.get(provider);
+		if (providerGeneration === undefined) {
+			throw new ModelsError("provider", `Provider generation is unavailable: ${model.provider}`);
+		}
+		const stream = (
+			context: Context,
+			options?: Omit<ModelsSimpleStreamOptions, "authSnapshot">,
+		): AssistantMessageEventStream =>
+			lazyStream(
+				model,
+				async () => {
+					const applied = await this.applyAuth(model, { ...options, authSnapshot });
+					return provider.streamSimple(applied.model, context, applied.options as SimpleStreamOptions);
+				},
+				{ ...options, runtime: options?.runtime ?? this.runtime, phase: "auth" },
+			);
+		return Object.freeze({
+			model,
+			providerGeneration,
+			stream,
+			complete: (context: Context, options?: Omit<ModelsSimpleStreamOptions, "authSnapshot">) =>
+				stream(context, options).result(),
+		});
 	}
 
 	async fetchDeferred(

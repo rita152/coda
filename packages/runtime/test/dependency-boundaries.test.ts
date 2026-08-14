@@ -17,13 +17,17 @@ describe("Work Graph dependency boundaries", () => {
 		const root = new URL("../src", import.meta.url).pathname;
 		for (const file of await sourceFiles(root)) {
 			const source = await readFile(file, "utf8");
-			expect(source, file).not.toMatch(/@coda\/tui|@coda\/coding-agent|packages\/coding-agent|coding-agent\/src/u);
+			expect(source, file).not.toMatch(
+				/@coda\/(?:tui|coding-agent|mcp|skills)|packages\/coding-agent|coding-agent\/src/u,
+			);
 		}
 		const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 			dependencies?: Record<string, string>;
 		};
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/tui");
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/coding-agent");
+		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/mcp");
+		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/skills");
 	});
 
 	it("keeps application composition above the one public Work Graph factory", async () => {
@@ -52,7 +56,8 @@ describe("Work Graph dependency boundaries", () => {
 		expect(publicIndex).not.toMatch(/worker-runtime|PreparedRun|ContextWindowController|RuntimeInput/u);
 		expect(ports).not.toMatch(/WorkerPromptPreparer|preparePrompt/u);
 		expect(ports).not.toMatch(/observeWorkerEvent/u);
-		expect(ports).toMatch(/readonly systemPrompt\?: SystemPromptSnapshot/u);
+		expect(ports).toMatch(/readonly runCapabilities: RunCapabilityHost/u);
+		expect(publicIndex).toMatch(/createRunCapabilityHost/u);
 
 		for (const obsolete of ["coding-agent-runtime.ts", "runtime.ts", "input-queue.ts", "types.ts"]) {
 			await expect(access(new URL(`../src/${obsolete}`, import.meta.url))).rejects.toThrow();

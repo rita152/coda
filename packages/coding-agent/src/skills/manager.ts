@@ -18,7 +18,8 @@ export class CodingSkillsManager {
 	#current?: CodingSkillsSnapshot;
 	#dirty = true;
 	#dirtyGeneration = 0;
-	#refreshTail: Promise<void> = Promise.resolve();
+	#publishedGeneration = -1;
+	readonly #refreshes = new Map<number, Promise<CodingSkillsSnapshot>>();
 
 	constructor(options: CodingSkillsManagerOptions) {
 		this.#runtime = createSkills<CodingSkillOrigin>({
@@ -41,34 +42,43 @@ export class CodingSkillsManager {
 		this.#dirtyGeneration++;
 	}
 
-	/** Rescans by default so correctness never depends on watcher delivery. */
+	/** Concurrent refreshes of one dirty generation share a single loader scan. */
 	async refresh(
 		options: { readonly rescan?: boolean; readonly signal?: AbortSignal } = {},
 	): Promise<CodingSkillsSnapshot> {
-		const operation = this.#refreshTail.then(async () => {
-			const rescan = options.rescan ?? true;
-			if (!rescan && !this.#dirty && this.#current) {
-				this.#current = createCodingSkillsSnapshot({ loader: this.#current.loader });
-				return this.#current;
-			}
-			const dirtyGeneration = this.#dirtyGeneration;
-			const loader = await this.#runtime.snapshot({
-				roots: this.#roots,
-				profile: "compatible",
-				...(options.signal ? { signal: options.signal } : {}),
-			});
-			const snapshot = createCodingSkillsSnapshot({
-				loader,
-			});
-			this.#current = snapshot;
-			this.#dirty = this.#dirtyGeneration !== dirtyGeneration;
-			return snapshot;
+		if (options.signal?.aborted)
+			throw options.signal.reason ?? new DOMException("Skill refresh aborted", "AbortError");
+		if ((options.rescan ?? true) && !this.#dirty) {
+			this.#dirty = true;
+			this.#dirtyGeneration++;
+		}
+		if (!this.#dirty && this.#current) return this.#current;
+		const generation = this.#dirtyGeneration;
+		let operation = this.#refreshes.get(generation);
+		if (!operation) {
+			operation = this.#runtime
+				.snapshot({ roots: this.#roots, profile: "compatible" })
+				.then((loader) => {
+					const snapshot = createCodingSkillsSnapshot({ loader });
+					if (generation >= this.#publishedGeneration) {
+						this.#current = snapshot;
+						this.#publishedGeneration = generation;
+					}
+					if (this.#dirtyGeneration === generation && this.#publishedGeneration === generation) {
+						this.#dirty = false;
+					}
+					return snapshot;
+				})
+				.finally(() => this.#refreshes.delete(generation));
+			this.#refreshes.set(generation, operation);
+		}
+		if (!options.signal) return operation;
+		return new Promise<CodingSkillsSnapshot>((resolve, reject) => {
+			const onAbort = () =>
+				reject(options.signal!.reason ?? new DOMException("Skill refresh aborted", "AbortError"));
+			options.signal!.addEventListener("abort", onAbort, { once: true });
+			operation!.then(resolve, reject).finally(() => options.signal!.removeEventListener("abort", onAbort));
 		});
-		this.#refreshTail = operation.then(
-			() => undefined,
-			() => undefined,
-		);
-		return operation;
 	}
 }
 

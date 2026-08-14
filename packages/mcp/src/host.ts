@@ -12,8 +12,8 @@ import type {
 	McpServerSnapshot,
 	McpToolCallRequest,
 	McpToolDescriptor,
+	McpToolLease,
 	McpToolResult,
-	McpToolSnapshot,
 } from "./types.ts";
 
 const SERVER_ID_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/u;
@@ -254,6 +254,9 @@ export function createMcpHost(options: {
 	const listeners = new Set<(snapshot: McpHostSnapshot) => void>();
 	let transitionTail: Promise<void> = Promise.resolve();
 	let closed = false;
+	const connectionLeaseCounts = new Map<McpConnection, number>();
+	const retiredConnections = new Map<McpConnection, boolean>();
+	const connectionCloseOperations = new Map<McpConnection, Promise<void>>();
 
 	const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
 		const result = transitionTail.then(operation, operation);
@@ -271,6 +274,59 @@ export function createMcpHost(options: {
 		const results = await Promise.allSettled([...closing].map((connection) => connection.close()));
 		const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
 		if (failure) throw failure.reason;
+	};
+	const closeConnectionOnce = (connection: McpConnection): Promise<void> => {
+		let operation = connectionCloseOperations.get(connection);
+		if (!operation) {
+			operation = Promise.resolve().then(() => connection.close());
+			connectionCloseOperations.set(connection, operation);
+		}
+		return operation;
+	};
+	const currentConnections = (): Set<McpConnection> => new Set(connections.values());
+	const settleRetiredConnection = async (connection: McpConnection): Promise<void> => {
+		if (currentConnections().has(connection) || (connectionLeaseCounts.get(connection) ?? 0) > 0) return;
+		const shouldClose = retiredConnections.get(connection);
+		if (shouldClose === undefined) return;
+		retiredConnections.delete(connection);
+		connectionLeaseCounts.delete(connection);
+		if (shouldClose) await closeConnectionOnce(connection);
+	};
+	const retireConnections = async (retiring: Iterable<McpConnection>, shouldClose = true): Promise<void> => {
+		const active = currentConnections();
+		const operations: Promise<void>[] = [];
+		for (const connection of new Set(retiring)) {
+			if (active.has(connection)) continue;
+			retiredConnections.set(connection, (retiredConnections.get(connection) ?? false) || shouldClose);
+			operations.push(settleRetiredConnection(connection));
+		}
+		const results = await Promise.allSettled(operations);
+		const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failure) throw failure.reason;
+	};
+	const retainConnections = (retained: ReadonlySet<McpConnection>): void => {
+		for (const connection of retained) {
+			connectionLeaseCounts.set(connection, (connectionLeaseCounts.get(connection) ?? 0) + 1);
+		}
+	};
+	const releaseConnections = async (retained: ReadonlySet<McpConnection>): Promise<void> => {
+		const operations: Promise<void>[] = [];
+		for (const connection of retained) {
+			const count = connectionLeaseCounts.get(connection);
+			if (count === undefined || count < 1) throw new Error("MCP connection lease underflow");
+			if (count === 1) connectionLeaseCounts.delete(connection);
+			else connectionLeaseCounts.set(connection, count - 1);
+			operations.push(settleRetiredConnection(connection));
+		}
+		const results = await Promise.allSettled(operations);
+		const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failures.length === 1) throw failures[0]!.reason;
+		if (failures.length > 1) {
+			throw new AggregateError(
+				failures.map(({ reason }) => reason),
+				"MCP connection lease disposal failed",
+			);
+		}
 	};
 	const publish = (snapshot: McpHostSnapshot): McpHostSnapshot => {
 		current = snapshot;
@@ -299,7 +355,9 @@ export function createMcpHost(options: {
 		const serverIndex = current.servers.findIndex((server) => server.id === serverId);
 		if (serverIndex < 0) return;
 		const message = error?.message || "connection closed";
+		const unavailableConnection = connections.get(serverId);
 		connections.delete(serverId);
+		if (unavailableConnection) void retireConnections([unavailableConnection], false).catch(() => undefined);
 		dirtyServers.delete(serverId);
 		rememberUnavailableTools(serverId, message);
 		const serverStates = current.servers.map((server, index) =>
@@ -534,7 +592,7 @@ export function createMcpHost(options: {
 					diagnostics: projected.diagnostics,
 				});
 				const published = publish(snapshot);
-				await closeConnections(previousConnections.values()).catch(() => undefined);
+				await retireConnections(previousConnections.values()).catch(() => undefined);
 				return published;
 			});
 		},
@@ -659,13 +717,14 @@ export function createMcpHost(options: {
 						}),
 					);
 					if (previousConnection && previousConnection !== connection) {
-						await previousConnection.close().catch(() => undefined);
+						await retireConnections([previousConnection]).catch(() => undefined);
 					}
 					return snapshot;
 				} catch (error) {
 					await connection?.close().catch(() => undefined);
 					if (previousConnection && previousConnection !== connection) {
-						await previousConnection.close().catch(() => undefined);
+						connections.delete(serverId);
+						await retireConnections([previousConnection]).catch(() => undefined);
 					}
 					const normalized = error instanceof Error ? error : new Error(String(error));
 					if (previousConnection) connections.delete(serverId);
@@ -679,10 +738,13 @@ export function createMcpHost(options: {
 			});
 		},
 		snapshot: () => current,
-		freezeTools(): McpToolSnapshot {
+		acquireTools(): McpToolLease {
 			assertOpen();
 			const frozenRevision = current.revision;
 			const frozenTools = new Map(tools);
+			const retainedConnections = new Set(connections.values());
+			retainConnections(retainedConnections);
+			let disposeOperation: Promise<void> | undefined;
 			return Object.freeze({
 				revision: frozenRevision,
 				servers: current.servers,
@@ -691,6 +753,10 @@ export function createMcpHost(options: {
 					const resolved = frozenTools.get(request.toolId);
 					if (!resolved) throw new Error(`Unknown MCP Tool "${request.toolId}" in revision ${frozenRevision}`);
 					return callConnectedTool(resolved, request);
+				},
+				dispose: () => {
+					if (!disposeOperation) disposeOperation = releaseConnections(retainedConnections);
+					return disposeOperation;
 				},
 			});
 		},
@@ -722,7 +788,7 @@ export function createMcpHost(options: {
 				unavailableTools = new Map();
 				dirtyServers.clear();
 				current = deepFreeze({ revision: ++revision, servers: [], tools: [], diagnostics: [] });
-				await closeConnections(closing.values());
+				await retireConnections(closing.values());
 			});
 		},
 	};

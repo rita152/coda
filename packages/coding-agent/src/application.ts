@@ -11,7 +11,7 @@ import type {
 	MutableModels,
 	ThinkingLevel,
 } from "@coda/ai";
-import { createMcpHost, type McpConnector, type McpElicitationResult, type McpToolSnapshot } from "@coda/mcp";
+import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
@@ -58,6 +58,7 @@ import {
 	type WorkspaceMcpTrustRecord,
 } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
+import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
 import type { ModelSelection } from "./model-selection.ts";
@@ -100,8 +101,6 @@ import { createWorkspace } from "./workspace.ts";
 export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
 export type { ModelSelection } from "./model-selection.ts";
 export type { ProjectTrustRecord, SettingsStore, UserSettings } from "./settings/types.ts";
-
-type McpAgentElicitation = Parameters<NonNullable<OpenCodingAgentOptions["mcpElicitation"]>>[0];
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 	limits: Object.freeze({
@@ -719,17 +718,6 @@ function latestUsageComesFromAnotherModel(
 	return false;
 }
 
-function emptyMcpToolSnapshot(): McpToolSnapshot {
-	return Object.freeze({
-		revision: 0,
-		servers: Object.freeze([]),
-		tools: Object.freeze([]),
-		callTool: async () => {
-			throw new Error("No MCP Tools are available");
-		},
-	});
-}
-
 function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapshot): string {
 	const serverPreview = snapshot.servers.slice(0, 50).map((server) => {
 		const target =
@@ -1009,6 +997,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						: undefined;
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
+				let skillUiClosed = false;
 				let mcpRegistry: CodingMcpRegistry | undefined;
 				let processSessionManager: ProcessSessionManager | undefined;
 				let runControlBinding: AgentRunControlBinding | undefined;
@@ -1194,7 +1183,20 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					if (interactiveRuntime && options.skillWatcher) {
 						skillWatcher = options.skillWatcher.watch(
 							skillRoots.map(({ path }) => path),
-							() => skillsManager.markDirty(),
+							() => {
+								skillsManager.markDirty();
+								void skillsManager
+									.refresh({ rescan: false })
+									.then((snapshot) => {
+										if (!skillUiClosed) skillRegistryBinding!.sync(skillsManager.current ?? snapshot);
+									})
+									.catch((error: unknown) =>
+										maintenanceDiagnostics({
+											code: "skills.refresh-failed",
+											message: error instanceof Error ? error.message : String(error),
+										}),
+									);
+							},
 							(error) => {
 								void maintenanceDiagnostics({ code: "skills.watcher-failed", message: error.message });
 							},
@@ -1202,8 +1204,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 					const refreshSkills = async (): Promise<CodingSkillsSnapshot> => {
 						const snapshot = await skillsManager.refresh();
-						skillRegistryBinding!.sync(snapshot);
-						return snapshot;
+						const current = skillsManager.current ?? snapshot;
+						skillRegistryBinding!.sync(current);
+						return current;
 					};
 					const skillsCommand = {
 						snapshot: refreshSkills,
@@ -1271,7 +1274,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							: undefined;
 					const primaryMcpElicitation =
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
-					const initialMcp = mcpRegistry?.freezeTools() ?? emptyMcpToolSnapshot();
 					const activeProcessSessionManager = new ProcessSessionManager({
 						fileSystem: options.fileSystem,
 						homeDirectory: options.runtime.homeDirectory,
@@ -1292,10 +1294,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						shellExecutable,
 						hostRuntime: options.runtime,
 						skillsManager,
-						initialSkills: skillsSnapshot,
-						skillRegistryBinding: skillRegistryBinding!,
 						mcpRegistry,
-						initialMcp,
 						models: options.models,
 						clock: options.runtime.clock,
 						idGenerator: options.runtime.idGenerator,
@@ -1604,7 +1603,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									reasoning: targetReasoning,
 									restoredAttachments: targetRestoredMedia.attachments,
 									resolveExtensionReferences: async (references) => {
-										const snapshot = await skillsManager.refresh();
+										const snapshot = await skillsManager.refresh({ rescan: false });
 										assertSkillReferencesAvailable(snapshot, references);
 									},
 									buildPrompt: async (text, attachmentIds, inputContext) => {
@@ -1797,7 +1796,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								initialAttachments,
 								restoredAttachments: restoredMedia.attachments,
 								resolveExtensionReferences: async (references) => {
-									const snapshot = await skillsManager.refresh();
+									const snapshot = await skillsManager.refresh({ rescan: false });
 									assertSkillReferencesAvailable(snapshot, references);
 								},
 								buildPrompt: async (text, attachmentIds, inputContext) => {
@@ -2008,6 +2007,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					return 0;
 				} finally {
 					runControlBinding?.dispose();
+					skillUiClosed = true;
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
 					await closeRuntimeResources();

@@ -109,6 +109,38 @@ describe("Models (upstream: /packages/ai/test/models-runtime.test.ts)", () => {
 		expect(keys).toEqual(["run-a", "run-b"]);
 	});
 
+	test("keeps a bound driver on its Provider generation after registry replacement", async () => {
+		const oldProviderCalls: Array<string | undefined> = [];
+		const newProviderCalls: Array<string | undefined> = [];
+		const models = createModels({ runtime: testTimeRuntime() });
+		models.setProvider(
+			createProvider({
+				id: "opencode-go",
+				auth: { apiKey: envApiKeyAuth("old", []) },
+				models: [testModel],
+				api: successfulStreams(oldProviderCalls),
+			}),
+		);
+		const activeRun = models.bindSimple(testModel, { auth: { apiKey: "run-old" } });
+
+		models.setProvider(
+			createProvider({
+				id: "opencode-go",
+				auth: { apiKey: envApiKeyAuth("new", []) },
+				models: [testModel],
+				api: successfulStreams(newProviderCalls),
+			}),
+		);
+		const nextRun = models.bindSimple(testModel, { auth: { apiKey: "run-new" } });
+
+		await activeRun.complete({ messages: [] });
+		await nextRun.complete({ messages: [] });
+
+		expect(oldProviderCalls).toEqual(["run-old"]);
+		expect(newProviderCalls).toEqual(["run-new"]);
+		expect(nextRun.providerGeneration).toBeGreaterThan(activeRun.providerGeneration);
+	});
+
 	test("fails closed on an incompatible stored Credential and attaches a safe Diagnostic", async () => {
 		const keys: Array<string | undefined> = [];
 		const credentials = new InMemoryCredentialStore();
