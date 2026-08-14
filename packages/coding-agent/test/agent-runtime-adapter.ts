@@ -1,10 +1,7 @@
-import { Agent, type AgentOptions, prepareStaticRun, type StaticRunPreparation } from "@coda/agent";
-import {
-	type RuntimeFollowUpChange,
-	type RuntimeInputLifecycle,
-	type RuntimeInputPort,
-	RuntimeInputQueue,
-} from "@coda/runtime";
+import { Agent, AgentError, type AgentOptions, prepareStaticRun, type StaticRunPreparation } from "@coda/agent";
+import type { Model } from "@coda/ai";
+import type { WorkResult } from "@coda/runtime";
+import type { SessionWorkController } from "../src/runtime/session-work-controller.ts";
 
 export type TestAgentOptions = Omit<AgentOptions, "prepareRun"> & StaticRunPreparation;
 
@@ -21,44 +18,78 @@ export function createTestAgent(options: TestAgentOptions): Agent {
 	});
 }
 
-export function agentRuntimePort(agent: Agent): RuntimeInputPort {
+type AgentWorkPort = Pick<
+	SessionWorkController,
+	"beginPrompt" | "cancel" | "deliver" | "isBusy" | "prompt" | "state" | "subscribe" | "waitForIdle"
+>;
+
+const model = Object.freeze({
+	id: "test",
+	name: "Test",
+	api: "faux",
+	provider: "faux",
+	baseUrl: "http://localhost.invalid",
+	reasoning: false,
+	input: ["text"],
+	contextWindow: 128_000,
+	maxTokens: 16_000,
+}) as Model;
+
+export function agentWorkPort(agent: Agent): AgentWorkPort {
+	const prompt: SessionWorkController["prompt"] = (input) => {
+		const operation = agent.prompt(input);
+		return operation.then(
+			(result) =>
+				({
+					itemId: "root",
+					dependencies: [],
+					runtimeId: "test-worker",
+					sessionId: "test-session",
+					state: result.outcome === "success" ? "succeeded" : result.outcome === "aborted" ? "canceled" : "failed",
+					run: {
+						runId: result.runId,
+						outcome: result.outcome,
+						...(result.failure ? { failure: result.failure } : {}),
+					},
+					placement: {
+						placementId: "test-placement",
+						root: "/test",
+						baseIdentity: "test",
+						kind: "memory",
+					},
+					publication: { state: "not_required" },
+					diagnostics: [],
+					timing: { acceptedAt: 0, settledAt: 0 },
+					budget: { modelAttempts: 0, toolInvocations: 0, totalTokens: 0, elapsedMs: 0 },
+				}) as unknown as WorkResult,
+		);
+	};
 	return {
-		snapshot: () => ({ agent: agent.state }),
-		prompt: (input) => agent.prompt(input),
-		steer: (input) => agent.steer(input),
-		followUp: (input) => agent.followUp(input),
-		cancel: (queueItemId) => {
-			if (queueItemId === undefined) agent.abort();
-			else agent.cancelQueueItem(queueItemId);
+		state: () => ({
+			closed: false,
+			status: agent.state.status,
+			...(agent.state.activeRun ? { activeRun: agent.state.activeRun } : {}),
+			messages: agent.state.messages,
+			pendingSteering: agent.state.pendingSteering,
+			pendingFollowUps: agent.state.pendingFollowUps,
+			...(agent.state.lastRun ? { lastRun: agent.state.lastRun } : {}),
+			selection: { model, reasoning: "off" },
+		}),
+		isBusy: () => agent.state.status !== "idle",
+		beginPrompt: async (input, resources) => ({ result: prompt(input, resources) }),
+		prompt,
+		deliver: async (kind, input) => {
+			if (kind === "steering") agent.steer(input);
+			else agent.followUp(input);
 		},
-		dispatch: async (command) => {
-			switch (command.type) {
-				case "prompt":
-					return agent.prompt(command.input);
-				case "steer":
-					return agent.steer(command.input);
-				case "follow_up":
-					return agent.followUp(command.input);
-				case "run_next_follow_up":
-					return agent.runNextFollowUp();
-				case "resume_follow_ups":
-					return agent.resumeFollowUps();
-				case "cancel":
-					if (command.queueItemId === undefined) agent.abort();
-					else agent.cancelQueueItem(command.queueItemId);
-					return undefined;
+		cancel: async () => {
+			try {
+				agent.abort();
+			} catch (error) {
+				if (!(error instanceof AgentError && error.code === "invalid_lifecycle")) throw error;
 			}
 		},
+		waitForIdle: () => agent.waitForIdle(),
 		subscribe: (listener) => agent.onEvent(listener),
 	};
-}
-
-export function agentRuntimeInput(
-	agent: Agent,
-	record: (change: RuntimeFollowUpChange) => Promise<void>,
-): RuntimeInputLifecycle {
-	return new RuntimeInputQueue({
-		runtime: agentRuntimePort(agent),
-		journal: { record },
-	});
 }

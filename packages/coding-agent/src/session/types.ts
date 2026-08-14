@@ -12,10 +12,11 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
-import type { CompactionCheckpoint, ModelSelection } from "@coda/runtime";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
+import type { ModelSelection } from "../model-selection.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import type { ProjectTrustRecord } from "../settings/types.ts";
+import type { CompactionCheckpoint } from "./compaction.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
 import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 

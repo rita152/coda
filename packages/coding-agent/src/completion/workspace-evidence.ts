@@ -17,20 +17,28 @@ const MAX_UNTRACKED_TOTAL_BYTES = 8 * 1024 * 1024;
 export interface GitWorkspaceEvidenceOptions {
 	readonly processRunner: ProcessRunner;
 	readonly fileSystem: FileSystem;
-	readonly workspace: string;
+	readonly workspace: string | (() => string);
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly now: () => number;
 }
+
+type ResolvedGitWorkspaceEvidenceOptions = Omit<GitWorkspaceEvidenceOptions, "workspace"> & {
+	readonly workspace: string;
+};
 
 export function createGitWorkspaceEvidenceProvider(
 	options: GitWorkspaceEvidenceOptions,
 ): CompletionWorkspaceEvidenceProvider {
 	return {
-		capture: async () => captureGitWorkspace(options),
+		capture: async () =>
+			captureGitWorkspace({
+				...options,
+				workspace: typeof options.workspace === "function" ? options.workspace() : options.workspace,
+			}),
 	};
 }
 
-async function captureGitWorkspace(options: GitWorkspaceEvidenceOptions): Promise<WorkspaceEvidenceSnapshot> {
+async function captureGitWorkspace(options: ResolvedGitWorkspaceEvidenceOptions): Promise<WorkspaceEvidenceSnapshot> {
 	const [statusAttempt, diffAttempt] = await Promise.all([
 		runGit(options, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
 		runGit(options, ["diff", "--no-ext-diff", "--binary", "--no-color", "HEAD", "--"]),
@@ -87,7 +95,7 @@ interface GitAttempt {
 	readonly error?: unknown;
 }
 
-async function runGit(options: GitWorkspaceEvidenceOptions, args: readonly string[]): Promise<GitAttempt> {
+async function runGit(options: ResolvedGitWorkspaceEvidenceOptions, args: readonly string[]): Promise<GitAttempt> {
 	const controller = new AbortController();
 	try {
 		return {
@@ -152,7 +160,7 @@ function parsePorcelainStatus(output: string): {
 }
 
 async function hashUntrackedFiles(
-	options: GitWorkspaceEvidenceOptions,
+	options: ResolvedGitWorkspaceEvidenceOptions,
 	paths: readonly string[],
 	omittedPaths: number,
 ): Promise<{ readonly complete: boolean; readonly sha256: string; readonly diagnostics: readonly string[] }> {

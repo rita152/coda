@@ -61,21 +61,33 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: ["packages/agent/test/agent-run.test.ts", "packages/agent/test/input-queues.test.ts"],
 	}),
 	capability({
-		id: "runtime.headless-agent-runtime",
+		id: "runtime.work-graph-orchestration",
 		package: "@coda/runtime",
 		status: "runtime-supported",
-		title: "Reusable headless Agent Runtime",
+		title: "Durable Work Graph orchestration",
 		summary:
-			"Instance-local Runtime assembly with atomic Prepared Run snapshots, durable Session attachment, Context Window recovery, Skills and MCP catalogs, input queues, lifecycle events, and independent parallel instances.",
+			"A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.",
 		sources: [
-			"packages/runtime/src/runtime.ts",
-			"packages/runtime/src/coding-agent-runtime.ts",
-			"packages/runtime/src/input-queue.ts",
+			"packages/runtime/src/index.ts",
+			"packages/runtime/src/work-graph/coordinator.ts",
+			"packages/runtime/src/work-graph/types.ts",
+			"packages/coding-agent/src/runtime/direct-workspace-execution.ts",
+			"packages/coding-agent/src/runtime/file-work-journal.ts",
+			"packages/coding-agent/src/runtime/git-worktree-workspace-execution.ts",
+			"packages/coding-agent/src/runtime/workspace-input-resources.ts",
+			"packages/coding-agent/src/runtime/workspace-work-coordinator.ts",
 		],
 		tests: [
-			"packages/runtime/test/runtime-isolation.test.ts",
-			"packages/runtime/test/coding-agent-runtime.test.ts",
 			"packages/runtime/test/dependency-boundaries.test.ts",
+			"packages/runtime/test/public-contract.test.ts",
+			"packages/runtime/test/work-graph.test.ts",
+			"packages/coding-agent/test/direct-workspace-execution.test.ts",
+			"packages/coding-agent/test/file-work-journal.test.ts",
+			"packages/coding-agent/test/git-worktree-work-graph.e2e.test.ts",
+			"packages/coding-agent/test/git-worktree-workspace-execution.test.ts",
+			"packages/coding-agent/test/session-work-controller.test.ts",
+			"packages/coding-agent/test/workspace-input-resources.test.ts",
+			"packages/coding-agent/test/workspace-work-sessions.test.ts",
 		],
 	}),
 	capability({
@@ -177,10 +189,10 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Durable Context Compaction",
 		summary:
-			"Auto-Compaction and `/compact [focus]` share one Tool-pair-safe implementation and persist Compaction Checkpoints before replacing the model-visible Context Window.",
+			"Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.",
 		sources: [
 			"packages/runtime/src/context-window/context-window.ts",
-			"packages/coding-agent/src/commands/core-commands.ts",
+			"packages/runtime/src/work-graph/worker-runtime.ts",
 			"packages/coding-agent/src/session/records.ts",
 		],
 		tests: [
@@ -199,12 +211,12 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		sources: [
 			"packages/runtime/src/context-window/overflow-recovery.ts",
 			"packages/coding-agent/src/interactive/run-interactive.ts",
-			"packages/coding-agent/src/runtime/workspace-session-runtimes.ts",
+			"packages/coding-agent/src/interactive/workspace-session-panes.ts",
 		],
 		tests: [
 			"packages/runtime/test/context-overflow-recovery.test.ts",
 			"packages/coding-agent/test/context-overflow-fallback.test.ts",
-			"packages/coding-agent/test/workspace-session-runtimes.test.ts",
+			"packages/coding-agent/test/workspace-session-panes.test.ts",
 		],
 	}),
 	capability({
@@ -268,7 +280,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "MCP Host",
 		summary:
 			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.",
-		sources: ["packages/mcp/src/host.ts", "packages/runtime/src/mcp/registry.ts"],
+		sources: ["packages/mcp/src/host.ts", "packages/coding-agent/src/mcp/registry.ts"],
 		tests: ["packages/mcp/test/host.test.ts", "packages/coding-agent/test/mcp/application.test.ts"],
 	}),
 	capability({
@@ -296,7 +308,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Prompt and event formats",
 		summary:
 			"Deterministic per-Run System Prompt snapshots and stable opt-in JSONL v2 Agent events with optional media data.",
-		sources: ["packages/runtime/src/prompt/prompt-builder.ts", "packages/runtime/src/coding-agent-runtime.ts"],
+		sources: ["packages/runtime/src/prompt/prompt-builder.ts", "packages/runtime/src/work-graph/worker-runtime.ts"],
 		tests: ["packages/runtime/test/prompt-builder.test.ts", "packages/coding-agent/test/application-print.test.ts"],
 	}),
 	capability({
@@ -338,11 +350,11 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "User Shell Adapter and input queues",
 		summary:
-			"Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter maps it into the Runtime-owned resource, Follow-up, and generic deferred-work FIFO.",
+			"Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.",
 		sources: [
 			"packages/coding-agent/src/interactive/user-shell.ts",
 			"packages/coding-agent/src/interactive/input-controller.ts",
-			"packages/runtime/src/input-queue.ts",
+			"packages/coding-agent/src/runtime/session-work-controller.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/user-shell.test.ts",

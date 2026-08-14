@@ -1,7 +1,7 @@
-import { AgentError, type AgentEvent, type Clock } from "@coda/agent";
+import type { AgentEvent, Clock } from "@coda/agent";
 import { resolveToolObservation } from "@coda/ai";
-import type { RuntimeInputPort } from "@coda/runtime";
 import type { Scheduler } from "@coda/tui";
+import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import { mutationFactsFromObservation } from "../tools/mutation-contract.ts";
 import { RunControl } from "./run-control.ts";
 import type {
@@ -15,7 +15,7 @@ import type {
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls", "read_tool_output", "read_session_history"]);
 
 export interface AgentRunControlBindingOptions {
-	readonly runtime: Pick<RuntimeInputPort, "cancel" | "snapshot" | "steer" | "subscribe">;
+	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "state" | "subscribe">;
 	readonly configuration: RunControlConfiguration;
 	readonly clock: Clock;
 	readonly scheduler: Scheduler;
@@ -39,21 +39,18 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 		while (completed.size > 128) completed.delete(completed.keys().next().value!);
 	};
 	const requestWrapUp = (runId: string, trigger: RunControlTrigger): void => {
-		const state = options.runtime.snapshot().agent;
+		const state = options.work.state();
 		if (state.activeRun?.id !== runId || state.status !== "running") return;
-		try {
-			options.runtime.steer(wrapUpSteering(trigger, options.configuration.graceDurationMs));
-		} catch (error) {
-			if (error instanceof AgentError && error.code === "invalid_lifecycle") return;
-			throw error;
-		}
+		void options.work
+			.deliver("steering", wrapUpSteering(trigger, options.configuration.graceDurationMs))
+			.catch(() => undefined);
 	};
 	const hardStop = (runId: string): void => {
-		const state = options.runtime.snapshot().agent;
+		const state = options.work.state();
 		if (state.activeRun?.id !== runId || state.status !== "running") return;
-		options.runtime.cancel();
+		void options.work.cancel().catch(() => undefined);
 	};
-	const detach = options.runtime.subscribe((event) => {
+	const detach = options.work.subscribe((event) => {
 		if (event.type === "run_start") {
 			const runId = String(event.runId);
 			const control = new RunControl({

@@ -27,171 +27,6 @@ afterEach(async () => {
 });
 
 describe("Context Window Compaction", () => {
-	it("lets the user compact through /compact and continues from the replacement Context Window", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-manual-compaction-"));
-		temporaryDirectories.push(workspace);
-		const oldToolResult = `old-tool-result:${"x".repeat(100_000)}`;
-		await writeFile(join(workspace, "large.txt"), oldToolResult, "utf8");
-
-		const runtime = testTimeRuntime(5_000);
-		const faux = fauxProvider({
-			runtime,
-			models: [{ id: "compactable", contextWindow: 128_000, maxTokens: 16_384 }],
-		});
-		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("read", { path: "large.txt" }, { id: "provider:read-large" }), {
-				stopReason: "toolUse",
-				timestamp: 5_000,
-			}),
-			fauxAssistantMessage("large file inspected", { timestamp: 5_000 }),
-			fauxAssistantMessage(
-				[
-					"## Objective",
-					"- Continue the file inspection task.",
-					"## Constraints",
-					"- Preserve the deployment decision.",
-					"## Decisions",
-					"- The large file was inspected.",
-					"## Completed",
-					"- Read large.txt.",
-					"## Current State",
-					"- Ready to continue.",
-					"## Next Steps",
-					"- Answer the next request.",
-					"## Relevant Files and Commands",
-					"- large.txt",
-					"## Errors and Open Questions",
-					"- None.",
-				].join("\n"),
-				{ timestamp: 5_000 },
-			),
-			(context) => {
-				const serialized = JSON.stringify(context.messages);
-				expect(serialized).toContain("<conversation-checkpoint");
-				expect(serialized).toContain("Preserve the deployment decision");
-				expect(serialized).not.toContain("old-tool-result:");
-				return fauxAssistantMessage("continued after compaction", { timestamp: 5_000 });
-			},
-		]);
-		const models = createModels({ runtime });
-		models.setProvider(faux.provider);
-		const terminal = new VirtualTerminal({ columns: 100, rows: 28 });
-		const stdout = new BufferOutput();
-		const stderr = new BufferOutput();
-		let id = 0;
-		const application = createCodingAgentApplication({
-			models,
-			settings: {
-				load: async () => ({
-					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
-				}),
-				save: async () => undefined,
-			},
-			fileSystem: createNodeFileSystem(),
-			processRunner: createNodeProcessRunner({ platform: "darwin" }),
-			terminalFactory: { create: () => terminal },
-			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
-			runtime: {
-				cwd: workspace,
-				homeDirectory: workspace,
-				platform: "darwin",
-				environment: {},
-				clock: runtime.clock,
-				idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				scheduler: createSystemScheduler(),
-			},
-		});
-
-		const running = application.run(["--interactive", "--no-color", "--no-session", "inspect the large file"]);
-		await until(() => terminal.readOutput().includes("large file inspected"));
-
-		await submit(terminal, "/compact preserve the deployment decision");
-		await until(() => terminal.readOutput().includes("Context compacted"));
-		expect(faux.state.callCount).toBe(3);
-
-		await submit(terminal, "continue");
-		await until(() => terminal.readOutput().includes("continued after compaction"));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-
-		await expect(running).resolves.toBe(0);
-		expect(stderr.value).toBe("");
-	});
-
-	it("lets the Agent recover an omitted pre-Compaction constraint from Session history", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-history-recovery-"));
-		temporaryDirectories.push(workspace);
-		const runtime = testTimeRuntime(5_500);
-		const faux = fauxProvider({
-			runtime,
-			models: [{ id: "history-recovery", contextWindow: 128_000, maxTokens: 16_384 }],
-		});
-		const exactConstraint = "Never modify generated-lock.json.";
-		faux.setResponses([
-			fauxAssistantMessage("constraint accepted", { timestamp: 5_500 }),
-			fauxAssistantMessage(validSummary("The exact protected filename was deliberately omitted."), {
-				timestamp: 5_500,
-			}),
-			(context) => {
-				expect(JSON.stringify(context.messages)).not.toContain(exactConstraint);
-				expect(context.tools?.map(({ name }) => name)).toContain("read_session_history");
-				return fauxAssistantMessage(
-					fauxToolCall("read_session_history", { limit: 20 }, { id: "provider:session-history" }),
-					{ stopReason: "toolUse", timestamp: 5_500 },
-				);
-			},
-			(context) => {
-				const result = context.messages.find(
-					(message) => message.role === "toolResult" && message.toolName === "read_session_history",
-				);
-				expect(result).toBeDefined();
-				expect(JSON.stringify(result)).toContain(exactConstraint);
-				return fauxAssistantMessage(`Recovered constraint: ${exactConstraint}`, { timestamp: 5_500 });
-			},
-		]);
-		const models = createModels({ runtime });
-		models.setProvider(faux.provider);
-		const terminal = new VirtualTerminal({ columns: 100, rows: 28 });
-		const stdout = new BufferOutput();
-		const stderr = new BufferOutput();
-		let id = 0;
-		const application = createCodingAgentApplication({
-			models,
-			settings: {
-				load: async () => ({
-					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
-				}),
-				save: async () => undefined,
-			},
-			fileSystem: createNodeFileSystem(),
-			processRunner: createNodeProcessRunner({ platform: "darwin" }),
-			terminalFactory: { create: () => terminal },
-			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
-			runtime: {
-				cwd: workspace,
-				homeDirectory: workspace,
-				platform: "darwin",
-				environment: {},
-				clock: runtime.clock,
-				idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				scheduler: createSystemScheduler(),
-			},
-		});
-
-		const running = application.run(["--interactive", "--no-color", "--no-session", exactConstraint]);
-		await until(() => terminal.readOutput().includes("constraint accepted"));
-		await submit(terminal, "/compact omit the exact constraint wording");
-		await until(() => terminal.readOutput().includes("Context compacted"));
-		await submit(terminal, "Recover my exact pre-compaction constraint from Session history.");
-		await until(() => terminal.readOutput().includes(`Recovered constraint: ${exactConstraint}`));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-
-		await expect(running).resolves.toBe(0);
-		expect(faux.state.callCount).toBe(4);
-		expect(stderr.value).toBe("");
-	});
-
 	it("auto-compacts a large Tool result before the next model call", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-auto-compaction-"));
 		temporaryDirectories.push(workspace);
@@ -251,14 +86,11 @@ describe("Context Window Compaction", () => {
 		const running = application.run(["--interactive", "--no-color", "--no-session", "inspect the large file"]);
 		await until(() => terminal.readOutput().includes("continued after automatic compaction"));
 		expect(faux.state.callCount).toBe(3);
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-
-		await expect(running).resolves.toBe(0);
+		await expect(exitWhenIdle(terminal, running)).resolves.toBe(0);
 		expect(stderr.value).toBe("");
 	});
 
-	it("resumes from the durable checkpoint while retaining the full Session transcript", async () => {
+	it("resumes from an automatically persisted checkpoint while retaining the full Session transcript", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-resumed-compaction-"));
 		temporaryDirectories.push(workspace);
 		const canonicalWorkspace = await realpath(workspace);
@@ -268,17 +100,17 @@ describe("Context Window Compaction", () => {
 		const runtime = testTimeRuntime(7_000);
 		const faux = fauxProvider({
 			runtime,
-			models: [{ id: "resumable-compactable", contextWindow: 128_000, maxTokens: 16_384 }],
+			models: [{ id: "resumable-compactable", contextWindow: 48_000, maxTokens: 12_000 }],
 		});
 		faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("read", { path: "large.txt" }, { id: "provider:resume-read" }), {
 				stopReason: "toolUse",
 				timestamp: 7_000,
 			}),
-			fauxAssistantMessage("ready to compact durably", { timestamp: 7_000 }),
 			fauxAssistantMessage(validSummary("The durable checkpoint decision was retained."), {
 				timestamp: 7_000,
 			}),
+			fauxAssistantMessage("ready after automatic durable compaction", { timestamp: 7_000 }),
 		]);
 		const models = createModels({ runtime });
 		models.setProvider(faux.provider);
@@ -320,12 +152,8 @@ describe("Context Window Compaction", () => {
 		});
 
 		const firstRun = application.run(["--interactive", "--no-color", "--session", "inspect the large file"]);
-		await until(() => terminal.readOutput().includes("ready to compact durably"));
-		await submit(terminal, "/compact retain the durable decision");
-		await until(() => terminal.readOutput().includes("Context compacted"));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await expect(firstRun).resolves.toBe(0);
+		await until(() => terminal.readOutput().includes("ready after automatic durable compaction"));
+		await expect(exitWhenIdle(terminal, firstRun)).resolves.toBe(0);
 
 		const workspaceId = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 32);
 		const [descriptor] = await sessions.list({ id: workspaceId, path: canonicalWorkspace });
@@ -344,9 +172,10 @@ describe("Context Window Compaction", () => {
 				return fauxAssistantMessage("continued from durable checkpoint", { timestamp: 7_000 });
 			},
 		]);
-		await expect(application.run(["--print", "--resume", descriptor!.id, "continue"])).resolves.toBe(0);
-		expect(stdout.value).toContain("continued from durable checkpoint");
+		const resumedExitCode = await application.run(["--print", "--resume", descriptor!.id, "continue"]);
 		expect(stderr.value).toBe("");
+		expect(resumedExitCode).toBe(0);
+		expect(stdout.value).toContain("continued from durable checkpoint");
 	});
 
 	it("compacts and retries exactly once when the Provider reports Context Overflow", async () => {
@@ -418,88 +247,7 @@ describe("Context Window Compaction", () => {
 			() => `calls=${faux.state.callCount}\n${terminal.readOutput()}`,
 		);
 		expect(faux.state.callCount).toBe(5);
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-
-		await expect(running).resolves.toBe(0);
-		expect(stderr.value).toBe("");
-	});
-
-	it("queues /compact during an active Run and commits it at the next safe point", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-queued-manual-compaction-"));
-		temporaryDirectories.push(workspace);
-		const runtime = testTimeRuntime(9_000);
-		const faux = fauxProvider({
-			runtime,
-			models: [{ id: "queued-compactable", contextWindow: 128_000, maxTokens: 16_384 }],
-		});
-		let releaseFirst!: () => void;
-		const firstReleased = new Promise<void>((resolve) => {
-			releaseFirst = resolve;
-		});
-		let firstCallStarted!: () => void;
-		const firstStarted = new Promise<void>((resolve) => {
-			firstCallStarted = resolve;
-		});
-		faux.setResponses([
-			async () => {
-				firstCallStarted();
-				await firstReleased;
-				return fauxAssistantMessage("first run finished", { timestamp: 9_000 });
-			},
-			fauxAssistantMessage(validSummary("Queued manual compaction ran only after the active call."), {
-				timestamp: 9_000,
-			}),
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain("<conversation-checkpoint");
-				return fauxAssistantMessage("continued after queued compaction", { timestamp: 9_000 });
-			},
-		]);
-		const models = createModels({ runtime });
-		models.setProvider(faux.provider);
-		const terminal = new VirtualTerminal({ columns: 100, rows: 28 });
-		const stdout = new BufferOutput();
-		const stderr = new BufferOutput();
-		let id = 0;
-		const application = createCodingAgentApplication({
-			models,
-			settings: {
-				load: async () => ({
-					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
-				}),
-				save: async () => undefined,
-			},
-			fileSystem: createNodeFileSystem(),
-			processRunner: createNodeProcessRunner({ platform: "darwin" }),
-			terminalFactory: { create: () => terminal },
-			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
-			runtime: {
-				cwd: workspace,
-				homeDirectory: workspace,
-				platform: "darwin",
-				environment: {},
-				clock: runtime.clock,
-				idGenerator: { generate: (kind) => `${kind}:${++id}` },
-				scheduler: createSystemScheduler(),
-			},
-		});
-
-		const running = application.run(["--interactive", "--no-color", "--no-session", "start work"]);
-		await firstStarted;
-		await submit(terminal, "/compact retain the active work");
-		await new Promise<void>((resolve) => setTimeout(resolve, 10));
-		expect(faux.state.callCount).toBe(1);
-		expect(terminal.readOutput()).not.toContain("Context compacted");
-
-		releaseFirst();
-		await until(() => terminal.readOutput().includes("Context compacted"));
-		expect(faux.state.callCount).toBe(2);
-		await submit(terminal, "continue");
-		await until(() => terminal.readOutput().includes("continued after queued compaction"));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-		await terminal.emit(key("c", { control: true, text: "c" }));
-
-		await expect(running).resolves.toBe(0);
+		await expect(exitWhenIdle(terminal, running)).resolves.toBe(0);
 		expect(stderr.value).toBe("");
 	});
 });
@@ -536,6 +284,20 @@ async function until(predicate: () => boolean, diagnostics?: () => string): Prom
 		await new Promise<void>((resolve) => setTimeout(resolve, 2));
 	}
 	throw new Error(`Condition did not become true${diagnostics ? `\n${diagnostics()}` : ""}`);
+}
+
+async function exitWhenIdle(terminal: VirtualTerminal, running: Promise<number>): Promise<number> {
+	const pending = Symbol("pending");
+	for (let attempt = 0; attempt < 300; attempt++) {
+		if (!terminal.started) return running;
+		await terminal.emit(key("d", { control: true, text: "d" }));
+		const result = await Promise.race([
+			running,
+			new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), 10)),
+		]);
+		if (result !== pending) return result;
+	}
+	throw new Error("Interactive Session did not become idle enough to exit");
 }
 
 function key(keyName: KeyInput["key"], overrides: Partial<KeyInput> = {}): KeyInput {

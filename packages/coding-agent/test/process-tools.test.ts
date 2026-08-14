@@ -2,7 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { createSystemScheduler, type KeyInput, VirtualTerminal } from "@coda/tui";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
@@ -10,8 +11,11 @@ import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
-	readonly isTTY = false;
+	readonly isTTY: boolean;
 	value = "";
+	constructor(isTTY = false) {
+		this.isTTY = isTTY;
+	}
 
 	write(chunk: string): void {
 		this.value += chunk;
@@ -73,6 +77,14 @@ function completionResult(stopped: boolean) {
 		timedOut: false,
 		truncated: false,
 	};
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((settle) => {
+		resolve = settle;
+	});
+	return { promise, resolve };
 }
 
 describe("process lifecycle Tools", () => {
@@ -231,4 +243,92 @@ describe("process lifecycle Tools", () => {
 		expect(stdout.value).toBe("Process lifecycle complete.\n");
 		expect(stderr.value).toBe("");
 	});
+
+	it("cancels a Work Item during a retained Process lifetime and quiesces the Process before settlement", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-process-cancel-"));
+		temporaryDirectories.push(workspace);
+		const controlled = controlledRunner();
+		const responseGate = deferred();
+		const secondCallStarted = deferred();
+		const runtime = testTimeRuntime(1_400);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("process_start", { command: "long-worker" }, { id: "start-long" }), {
+				stopReason: "toolUse",
+				timestamp: 1_400,
+			}),
+			async () => {
+				secondCallStarted.resolve();
+				await responseGate.promise;
+				return fauxAssistantMessage("unreachable after cancellation", { timestamp: 1_400 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 100, rows: 28 });
+		const stdout = new BufferOutput(true);
+		const stderr = new BufferOutput(true);
+		let nextId = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: process.platform }),
+			processSessionRunner: controlled.runner,
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: process.platform,
+				environment: { HOME: workspace, PATH: process.env.PATH, SHELL: "/bin/sh" },
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run([
+			"--interactive",
+			"--no-color",
+			"--no-session",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"start a long process",
+		]);
+		await secondCallStarted.promise;
+		expect(controlled.starts).toHaveLength(1);
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		responseGate.resolve();
+		await vi.waitFor(() => expect(controlled.stopCount()).toBe(1));
+		await expect(exitWhenIdle(terminal, running)).resolves.toBe(0);
+		expect(stderr.value).toBe("coda: Run ended with outcome aborted\n");
+	});
 });
+
+async function exitWhenIdle(terminal: VirtualTerminal, running: Promise<number>): Promise<number> {
+	const pending = Symbol("pending");
+	for (let attempt = 0; attempt < 300; attempt++) {
+		if (!terminal.started) return running;
+		await terminal.emit(key("d", { control: true, text: "d" }));
+		const result = await Promise.race([
+			running,
+			new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), 10)),
+		]);
+		if (result !== pending) return result;
+	}
+	throw new Error("Interactive Session did not become idle enough to exit");
+}
+
+function key(keyName: KeyInput["key"], overrides: Partial<KeyInput> = {}): KeyInput {
+	return {
+		type: "key",
+		key: keyName,
+		shift: false,
+		control: false,
+		alt: false,
+		meta: false,
+		action: "press",
+		...overrides,
+	};
+}

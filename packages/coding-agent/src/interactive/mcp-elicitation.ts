@@ -1,5 +1,5 @@
 import type { McpElicitationResult } from "@coda/mcp";
-import type { McpAgentElicitation } from "@coda/runtime";
+import type { OpenCodingAgentOptions } from "@coda/runtime";
 import {
 	Component,
 	type ComponentInputContext,
@@ -16,6 +16,7 @@ import {
 } from "@coda/tui";
 
 type ElicitationScalar = string | number | boolean;
+type McpAgentElicitation = Parameters<NonNullable<OpenCodingAgentOptions["mcpElicitation"]>>[0];
 
 const MAX_ELICITATION_QUEUE = 32;
 const MAX_FORM_FIELD_CHARACTERS = 16_384;

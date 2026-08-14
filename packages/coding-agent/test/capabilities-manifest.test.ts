@@ -33,10 +33,10 @@ describe("generated capability artifacts", () => {
 
 		expect(manifest.runtimeFacts.session.currentFormatVersion).toBe(CURRENT_SESSION_FORMAT_VERSION);
 		expect(manifest.runtimeFacts.tools.builtIn).toContain("read_tool_output");
-		expect(manifest.runtimeFacts.commands).toContainEqual(expect.objectContaining({ name: "compact" }));
+		expect(manifest.runtimeFacts.commands).not.toContainEqual(expect.objectContaining({ name: "compact" }));
 		expect(byId.get("coding-agent.context-compaction")).toMatchObject({
 			status: "runtime-supported",
-			details: { command: "/compact", durableRecordType: "context_compacted" },
+			details: { command: null, durableRecordType: "context_compacted" },
 		});
 		expect(byId.get("coding-agent.sessions")).toMatchObject({
 			details: { currentFormatVersion: CURRENT_SESSION_FORMAT_VERSION },

@@ -1,11 +1,13 @@
 import type { ToolExecutionContext } from "@coda/agent";
-import type { McpAgentElicitation } from "@coda/runtime";
+import type { OpenCodingAgentOptions } from "@coda/runtime";
 import { Component, createSystemScheduler, stripAnsi, type TerminalInput, Tui, VirtualTerminal } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import {
 	InteractiveMcpElicitationHandler,
 	type McpElicitationWaitListener,
 } from "../../src/interactive/mcp-elicitation.ts";
+
+type McpAgentElicitation = Parameters<NonNullable<OpenCodingAgentOptions["mcpElicitation"]>>[0];
 
 class RootComponent extends Component {
 	constructor() {

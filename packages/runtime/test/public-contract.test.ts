@@ -3,19 +3,14 @@ import { describe, expect, it } from "vitest";
 import * as publicApi from "../src/index.ts";
 
 describe("@coda/runtime public contract", () => {
-	it("exports a small construction and control surface without exposing its Agent or controllers", () => {
-		expect(Object.keys(publicApi).sort()).toEqual([
-			"CodingMcpRegistry",
-			"RuntimeInputQueue",
-			"createCodingSkillsSnapshot",
-			"isContextOverflowError",
-			"isProviderContextOverflow",
-			"openAgentRuntime",
-			"openCodingAgentRuntime",
-		]);
+	it("exports only the Work Graph construction value without exposing Worker Runtime capabilities", () => {
+		expect(Object.keys(publicApi).sort()).toEqual(["openCodingAgent"]);
 		expect(publicApi).not.toHaveProperty("Agent");
 		expect(publicApi).not.toHaveProperty("ContextWindowController");
 		expect(publicApi).not.toHaveProperty("ContextOverflowRecovery");
+		expect(publicApi).not.toHaveProperty("RuntimeInputQueue");
+		expect(publicApi).not.toHaveProperty("openAgentRuntime");
+		expect(publicApi).not.toHaveProperty("openCodingAgentRuntime");
 	});
 
 	it("depends only on headless Coda Modules", async () => {

@@ -15,7 +15,7 @@ export const DEFAULT_COMPLETION_REPAIR_ATTEMPTS = 1;
 
 export interface CodingCompletionControllerOptions {
 	readonly workspaceEvidence: CompletionWorkspaceEvidenceProvider;
-	readonly steer: (message: string) => void;
+	readonly steer: (message: string) => Promise<void> | void;
 	readonly maxRepairAttempts?: number;
 }
 
@@ -78,7 +78,7 @@ export class CodingCompletionController {
 				maxRepairAttempts: this.#maxRepairAttempts,
 			});
 			if (decision.action === "repair") {
-				this.#options.steer(decision.steering);
+				await this.#options.steer(decision.steering);
 				state.repairAttempts++;
 			}
 			return;

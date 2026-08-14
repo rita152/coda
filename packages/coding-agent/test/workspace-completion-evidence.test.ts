@@ -64,6 +64,30 @@ describe("Git completion workspace evidence", () => {
 			diagnostics: ["git_status_exit_128", "git_diff_exit_128"],
 		});
 	});
+
+	it("resolves the active Workspace placement independently for each capture", async () => {
+		const workspaces: string[] = [];
+		const runner: ProcessRunner = {
+			run: async (request) => {
+				workspaces.push(request.cwd);
+				return result("");
+			},
+		};
+		let activeWorkspace = "/worktrees/first";
+		const provider = createGitWorkspaceEvidenceProvider({
+			processRunner: runner,
+			fileSystem: createNodeFileSystem(),
+			workspace: () => activeWorkspace,
+			environment: {},
+			now: () => 50,
+		});
+
+		await provider.capture();
+		activeWorkspace = "/worktrees/second";
+		await provider.capture();
+
+		expect(workspaces).toEqual(["/worktrees/first", "/worktrees/first", "/worktrees/second", "/worktrees/second"]);
+	});
 });
 
 function result(stdout: string, exitCode = 0): ProcessRunResult {

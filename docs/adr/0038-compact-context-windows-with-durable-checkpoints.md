@@ -4,7 +4,7 @@ status: accepted
 
 # Compact Context Windows with durable checkpoints
 
-Coda has exactly two product entry points for Compaction: Auto-Compaction at a safe model-call point after a Context Window crosses its threshold, and the user-invoked `/compact [focus]` command. Both call one shared compaction implementation; trigger metadata, optional manual focus, and post-completion presentation may differ, but selection, summarization, validation, checkpoint commit, Context Window replacement, and recovery semantics may not fork.
+Coda compacts automatically at a safe model-call point after a Context Window crosses its threshold or after a Provider reports a recoverable Context Overflow. ADR-0044's closed Work Graph command algebra supersedes the former user-invoked compaction entry point: Context Window control is private to each Worker Runtime and is not exposed through an application command or compatibility alias. Both automatic triggers use one compaction implementation; selection, summarization, validation, checkpoint commit, Context Window replacement, and recovery semantics may not fork.
 
 Coda preserves the complete append-only Session history and compacts only the model-visible Context Window. A Coding Agent-owned deep module selects a Tool-pair-safe exact recent Message tail, iteratively summarizes the older active history, regenerates the current system prompt and Tool set, and durably appends a Compaction Checkpoint before activating the replacement Context Window; the checkpoint carries window identity, covered and retained Message identities, the exact replacement projection, Usage and Model metadata, and summary prompt provenance so resume never reruns compaction.
 
@@ -22,4 +22,4 @@ This supersedes ADR-0017 only for that one successful-compaction recovery path: 
 
 ## Consequences
 
-Agent state and Timeline continue to expose the complete committed transcript while model calls use a separate Context Window projection. Session schema, recovery, model-call orchestration, manual commands, and Context Overflow handling must all adopt the checkpoint, and tests must prove atomic commit, deterministic resume, safe cut points, repeated compaction, model downshift, and exactly-one overflow recovery.
+Agent state and Timeline continue to expose the complete committed transcript while model calls use a separate Context Window projection. Session schema, recovery, private Worker model-call orchestration, and Context Overflow handling must all adopt the checkpoint, and tests must prove atomic commit, deterministic resume, safe cut points, repeated compaction, model downshift, and exactly-one overflow recovery.

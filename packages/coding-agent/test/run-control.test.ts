@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { bindAgentRunControl, RunControl, RunProgressTracker } from "../src/run-control/index.ts";
 import { withRunControlEvidence } from "../src/run-evidence/run-evidence.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
-import { agentRuntimePort, createTestAgent } from "./agent-runtime-adapter.ts";
+import { agentWorkPort, createTestAgent } from "./agent-runtime-adapter.ts";
 
 interface ManualTask extends ScheduledTask {
 	readonly dueAt: number;
@@ -263,7 +263,7 @@ describe("RunControl", () => {
 			tools: [slowTool],
 		});
 		const binding = bindAgentRunControl({
-			runtime: agentRuntimePort(agent),
+			work: agentWorkPort(agent),
 			configuration: { workDurationMs: 100, graceDurationMs: 500, maxStationaryTurns: 4 },
 			clock: time,
 			scheduler: time,
@@ -334,7 +334,7 @@ describe("RunControl", () => {
 			tools: [slowTool],
 		});
 		const binding = bindAgentRunControl({
-			runtime: agentRuntimePort(agent),
+			work: agentWorkPort(agent),
 			configuration: { workDurationMs: 100, graceDurationMs: 25 },
 			clock: time,
 			scheduler: time,

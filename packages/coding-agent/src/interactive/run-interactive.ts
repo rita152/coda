@@ -1,7 +1,5 @@
-import type { AgentInput, QueueItemId } from "@coda/agent";
-import type { ModelThinkingLevel } from "@coda/ai";
-import type { CodingAgentRuntime, CodingSkillsSnapshot } from "@coda/runtime";
-import { isContextOverflowError, isProviderContextOverflow } from "@coda/runtime";
+import type { AgentInput, Immutable, QueueItemId } from "@coda/agent";
+import type { AssistantMessage, ModelThinkingLevel } from "@coda/ai";
 import {
 	type DiagnosticSink,
 	FullScreenTui,
@@ -26,9 +24,10 @@ import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../com
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { CustomProviderInput } from "../providers/types.ts";
 import type { CatalogModel } from "../runtime/model-catalog.ts";
-import { WorkspaceSessionRuntimes } from "../runtime/workspace-session-runtimes.ts";
+import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import type { Session } from "../session/types.ts";
+import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
 import type { CommandFlowNavigation } from "./command-flow-host.ts";
@@ -48,9 +47,38 @@ import {
 import type { SessionStatusLineSnapshot, StatusLineSnapshot } from "./status-line.ts";
 import { SwitchableComponent } from "./switchable-component.ts";
 import { UserShell } from "./user-shell.ts";
+import { WorkspaceSessionPanes } from "./workspace-session-panes.ts";
+
+const CONTEXT_OVERFLOW_CODES = new Set(["context_length_exceeded", "context_overflow", "context_window_exceeded"]);
+
+function isContextOverflowText(value: string): boolean {
+	const normalized = value.toLowerCase();
+	if (normalized.includes("context overflow")) return true;
+	return (
+		(normalized.includes("context length") || normalized.includes("context window")) &&
+		(normalized.includes("exceed") || normalized.includes("too long") || normalized.includes("maximum"))
+	);
+}
+
+function isProviderContextOverflow(message: Immutable<AssistantMessage>): boolean {
+	if (message.content.length > 0) return false;
+	if (
+		(message.diagnostics ?? []).some((diagnostic) => {
+			const code = diagnostic.error?.code;
+			return typeof code === "string" && CONTEXT_OVERFLOW_CODES.has(code.toLowerCase());
+		})
+	) {
+		return true;
+	}
+	return isContextOverflowText(message.errorMessage ?? "");
+}
+
+function isContextOverflowError(error: unknown): boolean {
+	return isContextOverflowText(error instanceof Error ? error.message : String(error));
+}
 
 export interface InteractiveSessionOptions {
-	readonly runtime: CodingAgentRuntime;
+	readonly work: SessionWorkController;
 	readonly session: Session;
 	readonly modelLabel: string;
 	readonly activitySummaryMode?: ActivitySummaryMode;
@@ -83,9 +111,6 @@ export interface InteractiveSessionOptions {
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
 	};
 	readonly mcpCommand?: McpCommandFlowOptions;
-	readonly compactCommand?: {
-		readonly run: (focus?: string) => Promise<string> | string;
-	};
 	readonly contextOverflowRecovery?: {
 		takeUnrecoverable(): boolean;
 	};
@@ -181,7 +206,7 @@ async function runMultiSessionInteractive(
 	});
 	let tui!: FullScreenTui;
 	let root!: SwitchableComponent;
-	let runtimes!: WorkspaceSessionRuntimes<InteractivePane>;
+	let panes!: WorkspaceSessionPanes<InteractivePane>;
 	let terminationSignal: InteractiveTerminationSignal | undefined;
 	let fatalError: unknown;
 	let suspendTask: Promise<void> | undefined;
@@ -197,10 +222,10 @@ async function runMultiSessionInteractive(
 	};
 
 	const sessionEntries = async (): Promise<readonly SessionCommandEntry[]> => {
-		const activeId = runtimes.active.id;
+		const activeId = panes.active.id;
 		const listed = [...(await sessionCommand.list())];
 		const listedIds = new Set(listed.map(({ id }) => id));
-		for (const pane of runtimes.open) {
+		for (const pane of panes.open) {
 			if (listedIds.has(pane.id)) continue;
 			listed.push(
 				Object.freeze({
@@ -211,7 +236,7 @@ async function runMultiSessionInteractive(
 			);
 		}
 		return listed.map((entry) => {
-			const open = runtimes.get(entry.id);
+			const open = panes.get(entry.id);
 			return Object.freeze({
 				...entry,
 				status:
@@ -219,7 +244,7 @@ async function runMultiSessionInteractive(
 						? "current"
 						: open?.needsAttention
 							? "needs attention"
-							: open?.options.runtime.snapshot().agent.status === "running"
+							: open?.options.work.state().status === "running"
 								? "running"
 								: "idle",
 			});
@@ -227,7 +252,7 @@ async function runMultiSessionInteractive(
 	};
 
 	const selectPane = async (sessionId: string): Promise<void> => {
-		const pane = await runtimes.focus(sessionId, async () => createPane(await sessionCommand.open(sessionId)));
+		const pane = await panes.focus(sessionId, async () => createPane(await sessionCommand.open(sessionId)));
 		root.select(pane.component);
 		pane.needsAttention = false;
 		options.mcpElicitation?.setActiveSession(pane.id);
@@ -236,11 +261,11 @@ async function runMultiSessionInteractive(
 	};
 
 	const createSession = async (): Promise<void> => {
-		const result = await runtimes.create(async () => createPane(await sessionCommand.create()));
-		root.select(result.runtime.component);
-		result.runtime.needsAttention = false;
-		options.mcpElicitation?.setActiveSession(result.runtime.id);
-		await startPane(result.runtime);
+		const result = await panes.create(async () => createPane(await sessionCommand.create()));
+		root.select(result.pane.component);
+		result.pane.needsAttention = false;
+		options.mcpElicitation?.setActiveSession(result.pane.id);
+		await startPane(result.pane);
 	};
 
 	const replaceAfterContextOverflow = async (pane: InteractivePane): Promise<void> => {
@@ -249,7 +274,7 @@ async function runMultiSessionInteractive(
 			const replacementOptions = await sessionCommand.create();
 			assertEmptyReplacementSession(pane.options, replacementOptions);
 			const replacement = createPane(replacementOptions);
-			const replaced = runtimes.replaceActive(replacement);
+			const replaced = panes.replaceActive(replacement);
 			if (replaced !== pane) throw new Error("Context Overflow replacement no longer matches the active Session");
 			root.select(replacement.component);
 			replacement.needsAttention = false;
@@ -288,7 +313,8 @@ async function runMultiSessionInteractive(
 		const failures: unknown[] = [];
 		let droppedShells = 0;
 		try {
-			droppedShells = (await pane.options.runtime.close()).droppedExternalWork;
+			droppedShells = await pane.input.close();
+			await pane.options.work.close();
 		} catch (error) {
 			failures.push(error);
 		}
@@ -320,7 +346,7 @@ async function runMultiSessionInteractive(
 			},
 		});
 		const input = new InteractiveInputController({
-			input: sessionOptions.runtime.input,
+			work: sessionOptions.work,
 			session: sessionOptions.session,
 			buildInput: sessionOptions.buildPrompt ?? (async (text) => text),
 			prepareAttachments: sessionOptions.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
@@ -339,8 +365,8 @@ async function runMultiSessionInteractive(
 			commandRegistry: options.commandRegistry,
 			seed: {
 				version: 1,
-				messages: sessionOptions.runtime.snapshot().agent.messages,
-				pendingFollowUps: sessionOptions.runtime.snapshot().agent.pendingFollowUps,
+				messages: sessionOptions.work.state().messages,
+				pendingFollowUps: input.pendingFollowUps,
 			},
 			initialAttachments: sessionOptions.initialAttachments,
 			restoredAttachments: sessionOptions.restoredAttachments,
@@ -355,7 +381,7 @@ async function runMultiSessionInteractive(
 			onFollowUp: (text, attachmentIds, composerText, references) =>
 				input.followUp(text, attachmentIds, composerText, references),
 			onUserShell: (command) => input.submitUserShell(command),
-			onCommand: async (commandId, flow, argument) => {
+			onCommand: async (commandId, flow, argument): Promise<string | undefined> => {
 				if (commandId === "core:auth") {
 					flow.open(createAuthCommandFlow(await authOptionsFor(sessionOptions)));
 					return;
@@ -443,15 +469,6 @@ async function runMultiSessionInteractive(
 					await createSession();
 					return;
 				}
-				if (commandId === "core:compact") {
-					if (!sessionOptions.compactCommand) throw new Error("Context compaction is unavailable");
-					component.setActivityOverride("command:compact", "Compacting context...", true, "active");
-					try {
-						return await sessionOptions.compactCommand.run(argument);
-					} finally {
-						component.setActivityOverride("command:compact", "", false);
-					}
-				}
 				throw new Error(`Command is not available yet: ${commandId}`);
 			},
 			onResumeFollowUps: () => input.resumeQueue(),
@@ -471,7 +488,7 @@ async function runMultiSessionInteractive(
 		acceptLatestRunEvidence(component, sessionOptions.session);
 		components.add(component);
 		let pane!: InteractivePane;
-		const detachAgent = sessionOptions.runtime.subscribe((event) => {
+		const detachAgent = sessionOptions.work.subscribe((event) => {
 			component.accept(event);
 			if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
@@ -500,7 +517,7 @@ async function runMultiSessionInteractive(
 				) {
 					if (event.failure?.kind === "runtime") pane.input.acknowledgeAgentRuntimeFailure();
 					pane.contextOverflowPending = true;
-					if (pane === runtimes.active) offerContextOverflowRecovery(pane);
+					if (pane === panes.active) offerContextOverflowRecovery(pane);
 					else pane.needsAttention = true;
 				}
 			}
@@ -530,12 +547,12 @@ async function runMultiSessionInteractive(
 	};
 
 	const initialPane = createPane(options);
-	runtimes = new WorkspaceSessionRuntimes(initialPane, {
+	panes = new WorkspaceSessionPanes(initialPane, {
 		id: (pane) => pane.id,
 		isEmpty: (pane) =>
-			pane.options.runtime.snapshot().agent.status === "idle" &&
-			pane.options.runtime.snapshot().agent.messages.length === 0 &&
-			pane.options.runtime.snapshot().agent.pendingFollowUps.length === 0,
+			pane.options.work.state().status === "idle" &&
+			pane.options.work.state().messages.length === 0 &&
+			pane.input.pendingFollowUps.length === 0,
 	});
 	root = new SwitchableComponent(initialPane.component);
 	tui = new FullScreenTui({
@@ -553,12 +570,8 @@ async function runMultiSessionInteractive(
 	const startFullScreen = () => outputScope.start(() => tui.start());
 	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const abortAll = (): void => {
-		for (const pane of runtimes.open) {
-			if (pane.options.runtime.snapshot().agent.status === "running") {
-				try {
-					pane.options.runtime.cancel();
-				} catch {}
-			}
+		for (const pane of panes.open) {
+			if (pane.options.work.state().status === "running") void pane.options.work.cancel().catch(() => undefined);
 			pane.input.cancelUserShell();
 		}
 	};
@@ -590,14 +603,14 @@ async function runMultiSessionInteractive(
 		},
 	});
 	options.mcpElicitation?.bind(tui, options.terminal, (request, sessionId, waiting) => {
-		const pane = sessionId ? runtimes.get(sessionId) : runtimes.active;
+		const pane = sessionId ? panes.get(sessionId) : panes.active;
 		if (!pane) return;
 		pane.component.setActivityOverride(
 			`mcp:${request.execution.invocationId}`,
 			`Waiting for MCP input — ${request.tool.remoteName}`,
 			waiting,
 		);
-		if (waiting && pane !== runtimes.active) pane.needsAttention = true;
+		if (waiting && pane !== panes.active) pane.needsAttention = true;
 	});
 	options.mcpElicitation?.setActiveSession(initialPane.id);
 	if (terminationSignal || fatalError !== undefined) {
@@ -611,10 +624,10 @@ async function runMultiSessionInteractive(
 		await startPane(initialPane);
 		await exited;
 		abortAll();
-		for (const pane of runtimes.open) {
+		for (const pane of panes.open) {
 			try {
 				await pane.input.discardPendingFollowUps();
-				if (pane.options.runtime.snapshot().agent.status !== "idle") await pane.options.runtime.waitForIdle();
+				if (pane.options.work.state().status !== "idle") await pane.options.work.waitForIdle();
 				await pane.input.waitForIdle();
 			} catch (error) {
 				fatalError ??= error;
@@ -626,9 +639,10 @@ async function runMultiSessionInteractive(
 		unsubscribeLifecycle?.();
 		options.mcpElicitation?.unbind();
 		let droppedShells = 0;
-		for (const pane of runtimes.open) {
+		for (const pane of panes.open) {
 			pane.detachAgent();
-			droppedShells += (await pane.options.runtime.close()).droppedExternalWork;
+			droppedShells += await pane.input.close();
+			await pane.options.work.close();
 		}
 		root.dispose();
 		await stopFullScreen();
@@ -675,7 +689,7 @@ async function runSingleSessionInteractive(
 		},
 	});
 	const inputController = new InteractiveInputController({
-		input: options.runtime.input,
+		work: options.work,
 		session: options.session,
 		buildInput: options.buildPrompt ?? (async (text) => text),
 		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
@@ -694,8 +708,8 @@ async function runSingleSessionInteractive(
 		commandRegistry: options.commandRegistry,
 		seed: {
 			version: 1,
-			messages: options.runtime.snapshot().agent.messages,
-			pendingFollowUps: options.runtime.snapshot().agent.pendingFollowUps,
+			messages: options.work.state().messages,
+			pendingFollowUps: inputController.pendingFollowUps,
 		},
 		initialAttachments: options.initialAttachments,
 		restoredAttachments: options.restoredAttachments,
@@ -710,7 +724,7 @@ async function runSingleSessionInteractive(
 		onFollowUp: (text, attachmentIds, composerText, references) =>
 			inputController.followUp(text, attachmentIds, composerText, references),
 		onUserShell: (command) => inputController.submitUserShell(command),
-		onCommand: async (commandId, flow, argument) => {
+		onCommand: async (commandId, flow, argument): Promise<string | undefined> => {
 			if (commandId === "core:auth") {
 				flow.open(createAuthCommandFlow(await authFlowOptions()));
 				return;
@@ -785,15 +799,6 @@ async function runSingleSessionInteractive(
 				await openMcpCommand(flow, argument, options.mcpCommand);
 				return;
 			}
-			if (commandId === "core:compact") {
-				if (!options.compactCommand) throw new Error("Context compaction is unavailable");
-				component.setActivityOverride("command:compact", "Compacting context...", true, "active");
-				try {
-					return await options.compactCommand.run(argument);
-				} finally {
-					component.setActivityOverride("command:compact", "", false);
-				}
-			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},
 		onResumeFollowUps: () => inputController.resumeQueue(),
@@ -829,22 +834,14 @@ async function runSingleSessionInteractive(
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
 		options.mcpElicitation?.unbind();
-		if (options.runtime.snapshot().agent.status === "running") {
-			try {
-				options.runtime.cancel();
-			} catch {}
-		}
+		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
 		resolveExit();
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
 		options.mcpElicitation?.unbind();
-		if (options.runtime.snapshot().agent.status === "running") {
-			try {
-				options.runtime.cancel();
-			} catch {}
-		}
+		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
 		resolveExit();
 	};
@@ -874,7 +871,7 @@ async function runSingleSessionInteractive(
 	if (terminationSignal || fatalError !== undefined) {
 		options.mcpElicitation?.unbind();
 	}
-	const detach = options.runtime.subscribe((event) => {
+	const detach = options.work.subscribe((event) => {
 		component.accept(event);
 		if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
 		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
@@ -888,9 +885,9 @@ async function runSingleSessionInteractive(
 			await inputController.submitInput(options.initialPrompt, options.initialAttachmentIds);
 		}
 		await exited;
-		if (options.runtime.snapshot().agent.status !== "idle") {
+		if (options.work.state().status !== "idle") {
 			try {
-				await options.runtime.waitForIdle();
+				await options.work.waitForIdle();
 			} catch (error) {
 				fatalError ??= error;
 			}
@@ -902,7 +899,8 @@ async function runSingleSessionInteractive(
 		unsubscribeLifecycle?.();
 		options.mcpElicitation?.unbind();
 		detach();
-		const droppedShells = (await options.runtime.close()).droppedExternalWork;
+		const droppedShells = await inputController.close();
+		await options.work.close();
 		await stopFullScreen();
 		if (droppedShells > 0) {
 			await options.onWarning?.(
@@ -930,10 +928,10 @@ function assertEmptyReplacementSession(
 		0,
 	);
 	if (
-		replacement.runtime.snapshot().agent.status !== "idle" ||
-		replacement.runtime.snapshot().agent.messages.length > 0 ||
-		replacement.runtime.snapshot().agent.pendingSteering.length > 0 ||
-		replacement.runtime.snapshot().agent.pendingFollowUps.length > 0 ||
+		replacement.work.state().status !== "idle" ||
+		replacement.work.state().messages.length > 0 ||
+		replacement.work.state().pendingSteering.length > 0 ||
+		replacement.work.state().pendingFollowUps.length > 0 ||
 		replacement.session.seed.messages.length > 0 ||
 		replacement.session.seed.pendingFollowUps.length > 0 ||
 		replacement.session.recoverableFollowUps.length > 0 ||

@@ -53,10 +53,11 @@ class ListenerFailureSignal extends Error {}
 
 interface RunContext {
 	readonly id: RunId;
+	readonly startedAt: number;
 	sequence: number;
 	readonly controller: AbortController;
 	readonly listenerFailures: unknown[];
-	readonly budget?: RunBudgetMeter;
+	budget?: RunBudgetMeter;
 	prepared?: PreparedRun;
 	disposePrepared?: () => Promise<void> | void;
 	toolsByName?: ReadonlyMap<string, AgentTool>;
@@ -253,6 +254,7 @@ function snapshotPreparedRun(
 	if (input.recoverFailedAttempt !== undefined && typeof input.recoverFailedAttempt !== "function") {
 		throw new AgentError("invalid_input", "PreparedRun recoverFailedAttempt must be a function");
 	}
+	if (input.runBudget !== undefined) snapshotRunBudget(input.runBudget);
 	if (input.dispose !== undefined && typeof input.dispose !== "function") {
 		throw new AgentError("invalid_input", "PreparedRun dispose must be a function");
 	}
@@ -263,6 +265,7 @@ function snapshotPreparedRun(
 		toolsByName: tools.byName,
 		...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
 		...(input.recoverFailedAttempt === undefined ? {} : { recoverFailedAttempt: input.recoverFailedAttempt }),
+		...(input.runBudget === undefined ? {} : { runBudget: snapshotRunBudget(input.runBudget) }),
 		...(input.dispose === undefined ? {} : { dispose: input.dispose }),
 	});
 }
@@ -340,7 +343,7 @@ export class Agent {
 	}
 
 	abort(): void {
-		if (!this.#activeRun || this.#runtimeState.public.status !== "running") {
+		if (!this.#activeRun) {
 			throw new AgentError("invalid_lifecycle", "Agent has no active Run to abort");
 		}
 		this.#runtimeState = reduceState(this.#runtimeState, { type: "clear_steering" });
@@ -506,13 +509,10 @@ export class Agent {
 	): Promise<RunResult> {
 		const run: RunContext = {
 			id: runId,
+			startedAt: this.#options.clock.now(),
 			sequence: 0,
 			controller: new AbortController(),
 			listenerFailures: [],
-			budget:
-				this.#options.runBudget === undefined
-					? undefined
-					: new RunBudgetMeter(this.#options.runBudget, this.#options.clock.now()),
 		};
 		this.#activeRun = run;
 		let outcome: RunOutcome = "error";
@@ -523,18 +523,23 @@ export class Agent {
 		let unexpected: unknown;
 
 		try {
+			const staticMaximumElapsed = this.#options.runBudget?.limits.maxElapsedMs;
 			const candidate = await this.#options.prepareRun(
-				deepFreeze({
+				Object.freeze({
 					runId,
 					source,
 					inputMessage,
 					...(queueItemId === undefined ? {} : { queueItemId }),
+					signal: run.controller.signal,
+					...(staticMaximumElapsed === undefined ? {} : { deadline: run.startedAt + staticMaximumElapsed }),
 				}),
 			);
 			if (typeof candidate === "object" && candidate !== null && typeof candidate.dispose === "function") {
 				run.disposePrepared = candidate.dispose;
 			}
 			const prepared = snapshotPreparedRun(candidate);
+			const runBudget = prepared.runBudget ?? this.#options.runBudget;
+			run.budget = runBudget === undefined ? undefined : new RunBudgetMeter(runBudget, run.startedAt);
 			run.prepared = prepared;
 			run.toolsByName = prepared.toolsByName;
 			await this.#emit(run, {

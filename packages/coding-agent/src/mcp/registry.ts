@@ -34,22 +34,19 @@ export class CodingMcpRegistry {
 		this.#detach = this.#host.onDidChange((snapshot) => this.#observe(snapshot));
 	}
 
-	reload(
-		definitions: readonly McpServerDefinition[],
-		context?: { readonly signal?: AbortSignal },
-	): Promise<McpHostSnapshot> {
+	reload(definitions: readonly McpServerDefinition[], context?: { readonly signal?: AbortSignal }) {
 		this.#assertOpen();
 		for (const state of this.#reconnect.values()) state.task?.cancel();
 		this.#reconnect.clear();
 		return this.#host.reload(definitions, context);
 	}
 
-	refresh(context?: { readonly signal?: AbortSignal }): Promise<McpHostSnapshot> {
+	refresh(context?: { readonly signal?: AbortSignal }) {
 		this.#assertOpen();
 		return this.#host.refresh(context);
 	}
 
-	async reconnect(serverId: string, context?: { readonly signal?: AbortSignal }): Promise<McpHostSnapshot> {
+	async reconnect(serverId: string, context?: { readonly signal?: AbortSignal }) {
 		this.#assertOpen();
 		const state = this.#reconnect.get(serverId);
 		state?.task?.cancel();

@@ -3,7 +3,7 @@ import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveInputController } from "../src/interactive/input-controller.ts";
 import type { Session } from "../src/session/types.ts";
-import { agentRuntimeInput, createTestAgent } from "./agent-runtime-adapter.ts";
+import { agentWorkPort, createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("InteractiveInputController", () => {
@@ -20,8 +20,8 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
-			session: testSession(record),
+			work: agentWorkPort(agent),
+			session: testSession(record, [], agent.state.pendingFollowUps),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
@@ -71,8 +71,8 @@ describe("InteractiveInputController", () => {
 		});
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
-			session: testSession(record),
+			work: agentWorkPort(agent),
+			session: testSession(record, [], agent.state.pendingFollowUps),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
@@ -98,6 +98,7 @@ describe("InteractiveInputController", () => {
 
 	it("appends a new submission after restored Follow-ups and explicitly resumes the FIFO queue", async () => {
 		let id = 0;
+		const restored = [{ id: "queue:restored" as QueueItemId, content: "restored" }];
 		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };
 		const runtime = testTimeRuntime(100);
 		const faux = createFauxCore({ runtime });
@@ -113,14 +114,14 @@ describe("InteractiveInputController", () => {
 			seed: {
 				version: 1,
 				messages: [],
-				pendingFollowUps: [{ id: "queue:restored" as QueueItemId, content: "restored" }],
+				pendingFollowUps: [],
 			},
 			autoDrainFollowUps: false,
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
-			session: testSession(record),
+			work: agentWorkPort(agent),
+			session: testSession(record, [], restored),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
@@ -177,7 +178,7 @@ describe("InteractiveInputController", () => {
 			return {};
 		});
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, async () => undefined),
+			work: agentWorkPort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -240,7 +241,7 @@ describe("InteractiveInputController", () => {
 				}
 				return faux.streamSimple(faux.getModel(), context, { signal, runtime });
 			},
-			autoDrainFollowUps: false,
+			autoDrainFollowUps: true,
 		});
 		agent.onEvent((event) => {
 			if (event.type === "run_start") order.push(`agent:${String(event.inputMessage.message.content)}`);
@@ -259,7 +260,7 @@ describe("InteractiveInputController", () => {
 			},
 		};
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, async () => undefined),
+			work: agentWorkPort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => {
 				if (text === "first") await firstInputGate;
@@ -287,6 +288,7 @@ describe("InteractiveInputController", () => {
 	it("reclaims a paused Follow-up into editable input and writes a durable tombstone", async () => {
 		let id = 0;
 		const queueId = "queue:paused" as QueueItemId;
+		const restored = [{ id: queueId, content: "edit me" }];
 		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
@@ -297,16 +299,18 @@ describe("InteractiveInputController", () => {
 			seed: {
 				version: 1,
 				messages: [],
-				pendingFollowUps: [{ id: queueId, content: "edit me" }],
+				pendingFollowUps: [],
 			},
 			autoDrainFollowUps: false,
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
-			session: testSession(record, [
-				{ id: "composer:paused", kind: "follow_up", text: "edit me", queueItemId: queueId },
-			]),
+			work: agentWorkPort(agent),
+			session: testSession(
+				record,
+				[{ id: "composer:paused", kind: "follow_up", text: "edit me", queueItemId: queueId }],
+				restored,
+			),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
@@ -322,6 +326,10 @@ describe("InteractiveInputController", () => {
 		let id = 0;
 		const first = "queue:first" as QueueItemId;
 		const second = "queue:second" as QueueItemId;
+		const restored = [
+			{ id: first, content: "first" },
+			{ id: second, content: "second" },
+		];
 		const agent = createTestAgent({
 			clock: { now: () => 100 },
 			idGenerator: { generate: (kind) => `${kind}:${++id}` },
@@ -332,17 +340,14 @@ describe("InteractiveInputController", () => {
 			seed: {
 				version: 1,
 				messages: [],
-				pendingFollowUps: [
-					{ id: first, content: "first" },
-					{ id: second, content: "second" },
-				],
+				pendingFollowUps: [],
 			},
 			autoDrainFollowUps: false,
 		});
 		const record = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
-			session: testSession(record),
+			work: agentWorkPort(agent),
+			session: testSession(record, [], restored),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
 			allocateId: sequenceIds(),
@@ -372,7 +377,7 @@ describe("InteractiveInputController", () => {
 			if (event.type === "run_start") order.push("run_start");
 		});
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, async () => undefined),
+			work: agentWorkPort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({
@@ -407,7 +412,7 @@ describe("InteractiveInputController", () => {
 		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
 		const commit = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, record),
+			work: agentWorkPort(agent),
 			session: testSession(record),
 			buildInput: async () => [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
 			prepareAttachments: async () => ({ commit, rollback: async () => undefined }),
@@ -434,7 +439,7 @@ describe("InteractiveInputController", () => {
 		const commit = vi.fn(async () => undefined);
 		const rollback = vi.fn(async () => undefined);
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, async () => undefined),
+			work: agentWorkPort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => ({ commit, rollback }),
@@ -460,7 +465,7 @@ describe("InteractiveInputController", () => {
 			autoDrainFollowUps: false,
 		});
 		const controller = new InteractiveInputController({
-			input: agentRuntimeInput(agent, async () => undefined),
+			work: agentWorkPort(agent),
 			session: testSession(async () => undefined),
 			buildInput: async (text) => text,
 			prepareAttachments: async () => emptyTransaction(),
@@ -494,6 +499,11 @@ function sequenceIds(): () => string {
 function testSession(
 	record: Session["record"],
 	composerSubmissions: Session["composerSubmissions"] = [],
-): Pick<Session, "composerSubmissions" | "record"> {
-	return { composerSubmissions, record };
+	pendingFollowUps: Session["seed"]["pendingFollowUps"] = [],
+): Pick<Session, "composerSubmissions" | "record" | "seed"> {
+	return {
+		composerSubmissions,
+		record,
+		seed: { version: 1, messages: [], pendingFollowUps },
+	};
 }

@@ -3,7 +3,7 @@ import type { AssistantMessage, UserMessage } from "@coda/ai";
 import type { LoadedFixture } from "./fixture-types.ts";
 import { loadFixtures } from "./fixtures.ts";
 import { FixtureRepository } from "./repository.ts";
-import { openEvaluationRuntime } from "./runtime-adapter.ts";
+import { openEvaluationWorkGraph } from "./runtime-adapter.ts";
 import { scoreFixture } from "./scoring.ts";
 import { DeterministicTimeRuntime } from "./time.ts";
 import { createEvaluationTools } from "./tools.ts";
@@ -83,7 +83,7 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		advanceTime: options.advanceTime,
 	});
 	const events: AgentEvent[] = [];
-	const runtime = await openEvaluationRuntime({
+	const workGraph = await openEvaluationWorkGraph({
 		id: options.fixture.manifest.id,
 		seed,
 		stream: options.stream,
@@ -92,19 +92,16 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		idGenerator: fixtureIdGenerator(options.fixture),
 		clock: options.clock,
 	});
-	runtime.subscribe((event) => {
-		events.push(event);
-	});
-	let runOutcome = runtime.snapshot().agent.lastRun?.outcome ?? "error";
+	let runOutcome: "success" | "error" | "aborted" = "error";
 	let runtimeFailure: string | undefined;
 	try {
-		const result = await runtime.prompt(options.fixture.manifest.prompt);
-		runOutcome = result.outcome;
+		const result = await workGraph.run(options.fixture.manifest.prompt);
+		runOutcome = result.results[0]?.run?.outcome ?? "error";
 	} catch (error) {
-		runOutcome = runtime.snapshot().agent.lastRun?.outcome ?? "error";
 		runtimeFailure =
 			error instanceof Error ? `runtime failure: ${error.message}` : `runtime failure: ${String(error)}`;
 	}
+	events.push(...workGraph.events);
 	const report = scoreFixture({
 		fixture: options.fixture,
 		repository,
@@ -113,7 +110,7 @@ async function runFixture(options: FixtureRunOptions): Promise<FixtureEvaluation
 		priceDataAvailable: options.priceDataAvailable,
 		...(runtimeFailure ? { runtimeFailure } : {}),
 	});
-	await runtime.close();
+	await workGraph.close();
 	return report;
 }
 

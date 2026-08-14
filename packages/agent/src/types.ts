@@ -394,6 +394,10 @@ export interface RunPreparation {
 	readonly source: RunSource;
 	readonly inputMessage: AgentMessage<UserMessage>;
 	readonly queueItemId?: QueueItemId;
+	/** Cancels preparation and remains the Run signal after preparation settles. */
+	readonly signal: AbortSignal;
+	/** Absolute host-clock deadline derived from the configured Run budget, when bounded. */
+	readonly deadline?: number;
 }
 
 /**
@@ -405,6 +409,8 @@ export interface PreparedRun {
 	readonly tools: readonly AgentTool[];
 	readonly systemPrompt?: string;
 	readonly recoverFailedAttempt?: FailedAttemptRecovery;
+	/** Optional per-Run budget frozen by dynamic preparation. */
+	readonly runBudget?: RunBudget;
 	readonly dispose?: () => Promise<void> | void;
 }
 

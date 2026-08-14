@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
+import { join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import { type CredentialStore, createModels, type MutableModels, type TimeRuntime } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
@@ -25,6 +26,7 @@ import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
+import { createFileWorkJournal } from "./runtime/file-work-journal.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
@@ -349,6 +351,8 @@ export function createNodeCodingAgentApplication(
 		fullScreenOutput,
 		terminalFactory,
 		sessions,
+		workJournal: ({ workspaceId }) =>
+			createFileWorkJournal(fileSystem, join(homeDirectory, ".coda", "work-journals", `${workspaceId}.jsonl`)),
 		keybindings: [],
 		diagnostics: diagnosticOutput,
 		runtime: {

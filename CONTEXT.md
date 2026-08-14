@@ -12,24 +12,60 @@ _Avoid_: Pi clone, generic agent SDK
 The user-facing collaborator that works with a developer on a local codebase through conversation and tool-mediated actions.
 _Avoid_: chatbot, AI wrapper
 
+**Work Graph**:
+A durable, Workspace-scoped orchestration of one coding objective into causally related Work Items whose independent items may proceed concurrently.
+_Avoid_: Session, transcript, Run group, task list
+
+**Work Item**:
+One independently schedulable unit in a Work Graph, owned by exactly one Worker Runtime and settled with one Work Result.
+_Avoid_: Run, Turn, subagent, thread
+
+**Worker Runtime**:
+A private Agent Runtime exclusively owned by one Work Item and attached to that Work Item's Session for its lifetime.
+_Avoid_: child Agent, shared Runtime, worker process
+
+**Work Journal**:
+The durable record of Work Graph causality, Work Item state, ownership, results, and Publication, distinct from every Work Item's conversational Session.
+_Avoid_: Session, transcript, event stream
+
+**Work Result**:
+The structured settled outcome of one Work Item, including its Run outcome, evidence, and any Workspace Artifact; assistant prose alone is not a Work Result.
+_Avoid_: final message, summary, Run
+
+**Workspace Placement**:
+The resolved Workspace root in which one Work Item executes, together with its relationship to the source Workspace state.
+_Avoid_: sandbox, current directory, process cwd
+
+**Workspace Artifact**:
+A recoverable, source-anchored representation of Workspace changes produced by one Work Item.
+_Avoid_: assistant claim, diff preview, Tool output
+
+**Publication**:
+The explicit settlement that applies one or more Workspace Artifacts to their parent Workspace Placement or reports why they were not applied.
+_Avoid_: Tool write, implicit merge, successful Run
+
+**Publication Order**:
+The immutable Workspace-wide ordinal assigned when a Work Item is accepted and enforced by the Workspace Adapter's target-local Publication sequencer.
+_Avoid_: completion order, Graph-local sibling order, merge timestamp
+
 **Agent**:
 The serial kernel that owns one in-memory transcript, model turns, Tool execution, events, cancellation, and steering queues.
 _Avoid_: Agent Runtime, Coding Agent, TUI, Session store
 
 **Agent Runtime**:
-One independently instantiable headless runtime that composes an Agent with Model and authentication selection, Run preparation, Tools, Skills and MCP snapshots, Session persistence, Context Window recovery, input queues, events, and lifecycle cleanup.
-_Avoid_: Agent, CLI application, TUI controller
+The private per-Work-Item composition of an Agent with Model and authentication selection, Run preparation, Tools, Skills and MCP snapshots, Session persistence, Context Window recovery, events, and lifecycle cleanup.
+_Avoid_: public Coding Agent Interface, Agent, CLI application, TUI controller
 
 **Prepared Run**:
 The immutable execution capability frozen exactly once before a Run starts, including its Event Stream driver, Tools, system prompt, and failed-Attempt recovery state.
 _Avoid_: desired configuration, Run Runtime Slot, live catalog
 
 **Desired Runtime Configuration**:
-The mutable selection intended for the next Run of one Agent Runtime; changes never alter its active Prepared Run.
+The mutable selection intended for the next Run of one Worker Runtime; changes never alter its active Prepared Run.
 _Avoid_: Prepared Run, global selected Model
 
 **Run**:
-One settled Agent operation beginning with accepted input and ending only after its final event observers complete.
+One settled Agent operation beginning with accepted input and ending after its serial lifecycle and fatal Session barriers; presentation observations are outside that boundary.
 _Avoid_: Session, process
 
 **Run Budget**:
@@ -72,13 +108,17 @@ _Avoid_: Session transcript, draft store, User Shell history
 The application-neutral TUI component that owns text-buffer editing, wrapping, cursor placement, paste folding, and editor key behavior without knowledge of Agents or Sessions.
 _Avoid_: Composer, prompt card
 
-**Input Queue Controller**:
-The headless Agent Runtime component that coordinates resource transactions, Agent queue mutation, durable Follow-up facts, resume, reclaim, compensation, and generic deferred work across one FIFO.
-_Avoid_: Composer controller, Agent queue, Session reducer
+**Work Item Input**:
+A serializable public command that delivers Prompt, Steering, or Follow-up content and opaque resource references to one Work Item without exposing its Worker Runtime or resource transactions.
+_Avoid_: Runtime input queue, Composer Submission, cross-Work-Item message
+
+**Worker Control**:
+An ordered, failure-isolated control projection that may submit a Work Item Input before later Agent progression, used for causal policies such as bounded completion repair after the lifecycle event is journaled.
+_Avoid_: Observation, persistence barrier, direct Agent access
 
 **Interactive Input Adapter**:
-The Coding Agent UI adapter that translates Composer and User Shell actions into Input Queue commands and projects Runtime events back into presentation state.
-_Avoid_: Input Queue Controller, Agent Runtime, Composer
+The Coding Agent UI adapter that owns local Composer/User Shell ordering, translates model-directed input into Work Item commands, and projects isolated observations into presentation state.
+_Avoid_: Work Coordinator, Worker Runtime, Composer
 
 **User Shell**:
 An explicit `!command` submitted by the user for local host execution outside model Context, Prompt History, and Session persistence.
@@ -221,7 +261,7 @@ A loss-aware transition that creates a new Context Window from a structured summ
 _Avoid_: truncation, pruning, new Session
 
 **Auto-Compaction**:
-The Coding Agent entry point that requests Compaction at a safe model-call point when the active Context Window reaches its configured threshold or no longer fits the selected Model.
+The private Worker Runtime behavior that requests Compaction at a safe model-call point when the active Context Window reaches its configured threshold or no longer fits the selected Model.
 _Avoid_: automatic truncation, background summary, retry
 
 **Compaction Checkpoint**:

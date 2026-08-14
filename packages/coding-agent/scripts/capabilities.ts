@@ -385,7 +385,7 @@ function validateRuntimeFacts(value: unknown, issues: string[]): void {
 				issues.push(`runtimeFacts.commands[${index}].arguments must be none or tail`);
 			}
 		}
-		if (!names.has("compact")) issues.push("core commands must include compact");
+		if (!names.has("follow-up")) issues.push("core commands must include follow-up");
 	}
 	validateUniqueStrings(value.modelApiProtocols, "runtimeFacts.modelApiProtocols", issues);
 	validateSortedStrings(value.aiTypeOnlyExports, "runtimeFacts.aiTypeOnlyExports", issues);

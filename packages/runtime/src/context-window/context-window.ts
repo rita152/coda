@@ -50,14 +50,6 @@ export interface CompactContextRequest {
 	readonly signal?: AbortSignal;
 }
 
-interface PendingManualCompaction {
-	focus?: string;
-	readonly waiters: Array<{
-		readonly resolve: (checkpoint: CompactionCheckpoint) => void;
-		readonly reject: (error: unknown) => void;
-	}>;
-}
-
 interface SummaryResult {
 	readonly summary: string;
 	readonly promptSha256: string;
@@ -89,7 +81,6 @@ export class ContextWindowController {
 	readonly #options: ContextWindowControllerOptions;
 	#checkpoint?: CompactionCheckpoint;
 	#operation?: Promise<CompactionCheckpoint>;
-	#pendingManual?: PendingManualCompaction;
 
 	constructor(options: ContextWindowControllerOptions) {
 		this.#options = options;
@@ -149,7 +140,6 @@ export class ContextWindowController {
 	/** Runs Auto-Compaction at a model-call safe point, then returns the projected Context. */
 	async prepare(context: Context, messages: readonly AgentMessage[], signal?: AbortSignal): Promise<Context> {
 		if (this.#operation) await this.#operation;
-		await this.flushManual(messages, signal);
 		let projected = this.#contextWithMessages(context, this.project(messages));
 		const { model } = this.#options.runtime();
 		for (
@@ -163,44 +153,6 @@ export class ContextWindowController {
 			if (estimateSerializedTokens(projected) >= beforeTokens) break;
 		}
 		return projected;
-	}
-
-	/** Queues a user request while a Run is active; otherwise compacts immediately. */
-	requestManual(
-		messages: readonly AgentMessage[],
-		options: { readonly focus?: string; readonly defer: boolean },
-	): Promise<CompactionCheckpoint> {
-		if (!options.defer && !this.#pendingManual) {
-			return this.compact({ messages, reason: "manual", focus: options.focus });
-		}
-		const promise = new Promise<CompactionCheckpoint>((resolve, reject) => {
-			if (!this.#pendingManual) this.#pendingManual = { waiters: [] };
-			const pending = this.#pendingManual;
-			pending.waiters.push({ resolve, reject });
-			const focus = normalizeFocus(options.focus);
-			if (focus) pending.focus = pending.focus ? `${pending.focus}\n${focus}` : focus;
-		});
-		if (!options.defer) void this.flushManual(messages).catch(() => undefined);
-		return promise;
-	}
-
-	/** Flushes a queued /compact request at a caller-confirmed model-call or Run-end safe point. */
-	async flushManual(messages: readonly AgentMessage[], signal?: AbortSignal): Promise<void> {
-		const pending = this.#pendingManual;
-		if (!pending) return;
-		this.#pendingManual = undefined;
-		try {
-			const checkpoint = await this.compact({
-				messages,
-				reason: "manual",
-				focus: pending.focus,
-				signal,
-			});
-			for (const waiter of pending.waiters) waiter.resolve(structuredClone(checkpoint));
-		} catch (error) {
-			for (const waiter of pending.waiters) waiter.reject(error);
-			throw error;
-		}
 	}
 
 	compact(request: CompactContextRequest): Promise<CompactionCheckpoint> {

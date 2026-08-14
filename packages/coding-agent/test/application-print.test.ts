@@ -357,6 +357,7 @@ describe("Coding Agent print mode", () => {
 				"--json",
 				"--json-mode",
 				"semantic",
+				"--trust-project",
 				"--no-run-budget",
 				"--run-control-work-ms",
 				"1000",

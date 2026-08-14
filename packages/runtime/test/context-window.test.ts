@@ -9,9 +9,9 @@ import {
 	type Message,
 	type Model,
 } from "@coda/ai";
-import type { CompactionCheckpoint } from "@coda/runtime";
 import { describe, expect, it } from "vitest";
 import { ContextWindowController } from "../src/context-window/context-window.ts";
+import type { CompactionCheckpoint } from "../src/context-window/types.ts";
 
 function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
 	const clock = typeof clockOrValue === "number" ? { now: () => clockOrValue } : clockOrValue;

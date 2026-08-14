@@ -346,11 +346,7 @@ export class ChatComponent extends Component {
 				event.source === "follow_up" ? card.queueItemId === event.queueItemId : card.kind === "prompt",
 			);
 			const index =
-				exactIndex >= 0 || event.source !== "follow_up"
-					? exactIndex
-					: this.#provisionalCards.findIndex(
-							(card) => card.kind === "follow_up" && card.queueItemId === undefined,
-						);
+				exactIndex >= 0 ? exactIndex : this.#provisionalCards.findIndex((card) => card.kind === "follow_up");
 			let provisional: ProvisionalPromptCard | undefined;
 			if (index >= 0) {
 				[provisional] = this.#provisionalCards.splice(index, 1);

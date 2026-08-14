@@ -1,7 +1,7 @@
 {
 	"name": "@coda/runtime",
 	"version": "0.1.0",
-	"description": "Reusable headless Agent Runtime for Coda",
+	"description": "Durable headless Work Graph orchestration for Coda",
 	"private": true,
 	"type": "module",
 	"sideEffects": false,
@@ -22,7 +22,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"build": "tsc -p tsconfig.build.json",
+		"build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
 		"check": "tsc --noEmit -p tsconfig.json && biome check src test vitest.config.ts",
 		"test": "vitest run",
 		"pack:dry-run": "npm pack --dry-run"

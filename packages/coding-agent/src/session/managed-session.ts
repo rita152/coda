@@ -1,5 +1,4 @@
-import type { AgentEvent, AgentMessage } from "@coda/agent";
-import type { CompactionCheckpoint } from "@coda/runtime";
+import type { AgentEvent, AgentMessage, FollowUp } from "@coda/agent";
 import {
 	projectSessionRunEvidence,
 	type RunEvidenceEnvelope,
@@ -7,6 +6,7 @@ import {
 	type RunEvidenceWorkspaceDiffSupplement,
 	supplementRunEvidenceWorkspaceDiff,
 } from "../run-evidence/run-evidence.ts";
+import type { CompactionCheckpoint } from "./compaction.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import { SessionHistoryReader } from "./session-history-reader.ts";
@@ -39,12 +39,13 @@ function identity(runtime: SessionRuntime, prefix: string): string {
 export class ManagedSession implements Session {
 	readonly #journal: SessionJournal;
 	readonly #runtime: SessionRuntime;
-	readonly #seed;
 	readonly #restored: RestoredSessionState;
 	readonly #recoverableFollowUps;
 	readonly #composerSubmissions;
 	readonly #toolInvocations: readonly SessionToolLifecycle[];
 	readonly #historyMessages: AgentMessage[];
+	readonly #pendingFollowUps = new Map<string, FollowUp>();
+	readonly #activeFollowUps = new Map<string, FollowUp>();
 	readonly #history: SessionHistoryReader;
 	readonly #liveRunEvidence = new RunEvidenceProjection();
 	readonly #runEvidence: RunEvidenceEnvelope[];
@@ -61,12 +62,13 @@ export class ManagedSession implements Session {
 		this.#journal = journal;
 		this.#runtime = runtime;
 		const reduced = reduceSession(journal.records);
-		this.#seed = structuredClone(reduced.seed);
 		this.#restored = structuredClone(reduced.restored);
 		this.#recoverableFollowUps = structuredClone(reduced.recoverableFollowUps);
 		this.#composerSubmissions = structuredClone(reduced.composerSubmissions);
 		this.#toolInvocations = structuredClone(reduced.toolInvocations);
 		this.#historyMessages = [...structuredClone(reduced.seed.messages)];
+		for (const item of reduced.seed.pendingFollowUps)
+			this.#pendingFollowUps.set(String(item.id), structuredClone(item));
 		this.#history = new SessionHistoryReader({
 			sessionId: journal.descriptor.id,
 			messages: () => this.#historyMessages,
@@ -92,7 +94,11 @@ export class ManagedSession implements Session {
 	}
 
 	get seed() {
-		return structuredClone(this.#seed);
+		return structuredClone({
+			version: 1 as const,
+			messages: this.#historyMessages,
+			pendingFollowUps: [...this.#pendingFollowUps.values()],
+		});
 	}
 
 	get restored(): RestoredSessionState {
@@ -184,6 +190,11 @@ export class ManagedSession implements Session {
 			return;
 		}
 		await this.#append(change.type, change.type === "follow_up_enqueued" ? { item: change.item } : { id: change.id });
+		if (change.type === "follow_up_enqueued") {
+			this.#pendingFollowUps.set(String(change.item.id), structuredClone(change.item));
+		} else {
+			this.#pendingFollowUps.delete(String(change.id));
+		}
 	}
 
 	async close(): Promise<void> {
@@ -204,6 +215,13 @@ export class ManagedSession implements Session {
 	}
 
 	async #recordEvent(event: AgentEvent): Promise<void> {
+		if (event.type === "run_start" && event.source === "follow_up" && event.queueItemId) {
+			const pending = this.#pendingFollowUps.get(String(event.queueItemId));
+			if (pending) {
+				this.#activeFollowUps.set(String(event.runId), pending);
+				this.#pendingFollowUps.delete(String(event.queueItemId));
+			}
+		}
 		if (event.type === "attempt_end" && event.discarded) {
 			const cost = event.candidate.message.usage.cost?.total;
 			this.#discardedModelCost =
@@ -214,6 +232,11 @@ export class ManagedSession implements Session {
 		}
 		const evidence = this.#liveRunEvidence.accept(event);
 		if (evidence) this.#runEvidence.push(evidence);
+		if (event.type === "run_end") {
+			const followUp = this.#activeFollowUps.get(String(event.runId));
+			if (followUp && event.outcome === "aborted") this.#pendingFollowUps.set(String(followUp.id), followUp);
+			this.#activeFollowUps.delete(String(event.runId));
+		}
 		if (event.type === "run_start") this.#preparedRun = undefined;
 	}
 

@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { TrustedProjectInstructions } from "@coda/runtime";
 import type { FileStatus, FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import type { Workspace } from "../workspace.ts";
+
+export interface TrustedProjectInstructions {
+	readonly path: string;
+	readonly sha256: string;
+	readonly content: string;
+}
 
 const MAX_PROJECT_INSTRUCTIONS_BYTES = 64 * 1024;
 

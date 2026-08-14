@@ -290,6 +290,12 @@ export class ProcessSessionManager {
 		return this.#snapshot(record, true, true);
 	}
 
+	async waitForSettlement(processId: string): Promise<void> {
+		const record = this.#sessions.get(processId);
+		if (!record) return;
+		await record.settled;
+	}
+
 	async retireSession(sessionId: string): Promise<void> {
 		const records = [...this.#sessions.values()].filter((record) => record.sessionId === sessionId);
 		await this.#retire(records);

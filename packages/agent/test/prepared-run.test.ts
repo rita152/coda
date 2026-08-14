@@ -81,6 +81,33 @@ describe("atomic Prepared Runs", () => {
 		expect(prepared).toBe(2);
 	});
 
+	it("passes preparation cancellation and deadline context before Run start", async () => {
+		let started!: () => void;
+		const preparationStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let receivedDeadline: number | undefined;
+		const agent = new Agent({
+			clock: { now: () => 10 },
+			idGenerator: new TestIds(),
+			runBudget: { limits: { maxElapsedMs: 50 } },
+			prepareRun: async ({ signal, deadline }) => {
+				receivedDeadline = deadline;
+				started();
+				await new Promise<void>((_resolve, reject) => {
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+				});
+				throw new Error("unreachable");
+			},
+		});
+		const run = agent.prompt("cancel during preparation");
+		await preparationStarted;
+		expect(agent.state.status).toBe("idle");
+		expect(receivedDeadline).toBe(60);
+		agent.abort();
+		await expect(run).resolves.toMatchObject({ outcome: "aborted" });
+	});
+
 	it("prepares a fresh snapshot before every queued Follow-up Run", async () => {
 		const contexts: Array<string | undefined> = [];
 		const clock = { now: () => 10 };
