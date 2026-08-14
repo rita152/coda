@@ -28,6 +28,14 @@ _Avoid_: child Agent, shared Runtime, worker process
 The durable record of Work Graph causality, Work Item state, ownership, results, and Publication, distinct from every Work Item's conversational Session.
 _Avoid_: Session, transcript, event stream
 
+**Worker Fact**:
+A bounded semantic fact required to recover Work Item orchestration or to place Worker Control after a durable lifecycle point; it is the only Worker Runtime data admitted to the Work Journal.
+_Avoid_: Worker Observation, Agent event, Session Record
+
+**Worker Observation**:
+A full-fidelity, best-effort projection of live Worker Runtime activity delivered through the Coding Agent Observation stream without entering Session or Work Journal persistence barriers.
+_Avoid_: Worker Fact, Worker Control, event log
+
 **Work Result**:
 The structured settled outcome of one Work Item, including its Run outcome, evidence, and any Workspace Artifact; assistant prose alone is not a Work Result.
 _Avoid_: final message, summary, Run

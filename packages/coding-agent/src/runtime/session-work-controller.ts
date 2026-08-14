@@ -1,16 +1,18 @@
-import type { AgentEvent, AgentInput, AgentState, Clock, IdGenerator, RunSummary } from "@coda/agent";
+import type { AgentEvent, AgentInput, AgentSeed, AgentState, Clock, IdGenerator, RunSummary } from "@coda/agent";
 import type { Api, AuthResult, Model, ThinkingLevel } from "@coda/ai";
 import type {
 	CodingAgent,
 	CodingAgentReceipt,
+	CodingAgentSnapshot,
 	DesiredRuntimeConfiguration,
+	WorkerControlEvent,
 	WorkGraphId,
 	WorkGraphResult,
 	WorkItemId,
 	WorkResult,
 	WorkspacePlacementDescriptor,
 } from "@coda/runtime";
-import type { Session } from "../session/types.ts";
+import type { Session, SessionToolLifecycle } from "../session/types.ts";
 
 export interface SessionWorkSelection {
 	readonly model: Model<Api>;
@@ -50,8 +52,45 @@ export interface SessionWorkHost {
 	release(controller: SessionWorkController): Promise<void>;
 }
 
-type AgentListener = (event: AgentEvent) => Promise<void> | void;
+export interface SessionWorkResynchronization {
+	readonly type: "resync_required";
+	readonly reason: "slow_consumer" | "upstream_resync";
+	readonly state: SessionWorkState;
+	readonly seed: AgentSeed;
+	readonly toolInvocations: readonly SessionToolLifecycle[];
+}
+
+export interface SessionWorkObserver {
+	accept(event: AgentEvent): Promise<void> | void;
+	resynchronize(snapshot: SessionWorkResynchronization): Promise<void> | void;
+}
+
+export interface SessionWorkObservationOptions {
+	readonly capacity?: number;
+}
+
+type ControlListener = (event: WorkerControlEvent) => Promise<void> | void;
 type WorkResultListener = (result: WorkResult) => Promise<void> | void;
+
+const TERMINAL_WORK_STATES: ReadonlySet<string> = new Set([
+	"succeeded",
+	"failed",
+	"canceled",
+	"interrupted",
+	"blocked",
+]);
+
+type ObservationDelivery =
+	| { readonly type: "event"; readonly event: AgentEvent }
+	| { readonly type: "resync"; readonly snapshot: SessionWorkResynchronization };
+
+interface ObservationSubscriber {
+	readonly observer: SessionWorkObserver;
+	readonly capacity: number;
+	readonly queue: ObservationDelivery[];
+	running: boolean;
+	closed: boolean;
+}
 
 function safeIdentity(value: string): string {
 	const safe = value.replace(/[^A-Za-z0-9._:-]/gu, "-").slice(0, 192);
@@ -76,16 +115,26 @@ function rejected(receipt: Extract<CodingAgentReceipt, { status: "rejected" }>):
 }
 
 async function waitForGraph(agent: CodingAgent, graphId: WorkGraphId): Promise<WorkGraphResult> {
-	for await (const observation of agent.observe({ capacity: 4_096 })) {
-		if (observation.type === "snapshot") {
-			const result = observation.snapshot.graphs.find((graph) => graph.graphId === graphId)?.result;
-			if (result) return result;
+	for (;;) {
+		let resynchronize = false;
+		for await (const observation of agent.observe({ capacity: 4_096 })) {
+			if (observation.type === "snapshot") {
+				const result = observation.snapshot.graphs.find((graph) => graph.graphId === graphId)?.result;
+				if (result) return result;
+			}
+			if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
+				return observation.result;
+			}
+			if (observation.type === "resync_required") {
+				resynchronize = true;
+				break;
+			}
+			if (observation.type === "closed") {
+				throw new Error(`Coding Agent closed before Work Graph ${graphId} settled`);
+			}
 		}
-		if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
-			return observation.result;
-		}
+		if (!resynchronize) throw new Error(`Coding Agent closed before Work Graph ${graphId} settled`);
 	}
-	throw new Error(`Coding Agent closed before Work Graph ${graphId} settled`);
 }
 
 /**
@@ -97,8 +146,8 @@ async function waitForGraph(agent: CodingAgent, graphId: WorkGraphId): Promise<W
 export class SessionWorkController {
 	readonly #host: SessionWorkHost;
 	readonly #session: Session;
-	readonly #listeners = new Set<AgentListener>();
-	readonly #controlListeners = new Set<AgentListener>();
+	readonly #observationSubscribers = new Set<ObservationSubscriber>();
+	readonly #controlListeners = new Set<ControlListener>();
 	readonly #resultListeners = new Set<WorkResultListener>();
 	readonly #runMetadata = new Map<string, PreparedWorkRunMetadata>();
 	#selection: SessionWorkSelection;
@@ -110,7 +159,6 @@ export class SessionWorkController {
 	#lastRun?: RunSummary;
 	#pendingPreparation?: PreparedWorkRunMetadata["prompt"];
 	#operation?: Promise<WorkResult>;
-	#observationTail: Promise<void> = Promise.resolve();
 	#closed = false;
 	#closeOperation?: Promise<void>;
 
@@ -283,13 +331,24 @@ export class SessionWorkController {
 		);
 	}
 
-	subscribe(listener: AgentListener): () => void {
+	subscribe(observer: SessionWorkObserver, options: SessionWorkObservationOptions = {}): () => void {
 		this.#assertOpen();
-		this.#listeners.add(listener);
-		return () => this.#listeners.delete(listener);
+		const capacity = options.capacity ?? 256;
+		if (!Number.isSafeInteger(capacity) || capacity < 1) {
+			throw new Error("Session Work Observation capacity must be a positive safe integer");
+		}
+		const subscriber: ObservationSubscriber = {
+			observer,
+			capacity,
+			queue: [],
+			running: false,
+			closed: false,
+		};
+		this.#observationSubscribers.add(subscriber);
+		return () => this.#removeObservationSubscriber(subscriber);
 	}
 
-	subscribeControl(listener: AgentListener): () => void {
+	subscribeControl(listener: ControlListener): () => void {
 		this.#assertOpen();
 		this.#controlListeners.add(listener);
 		return () => this.#controlListeners.delete(listener);
@@ -315,8 +374,8 @@ export class SessionWorkController {
 		this.#activePlacement = structuredClone(placement);
 	}
 
-	acceptWorkerEvent(event: AgentEvent): Promise<void> {
-		if (this.#closed) return Promise.resolve();
+	acceptWorkerEvent(event: AgentEvent): void {
+		if (this.#closed) return;
 		switch (event.type) {
 			case "run_start": {
 				this.#status = "running";
@@ -352,27 +411,106 @@ export class SessionWorkController {
 				});
 				break;
 		}
-		const operation = this.#observationTail.then(() => this.#notify(this.#listeners, event));
-		this.#observationTail = operation.then(
-			() => undefined,
-			() => undefined,
-		);
-		return operation;
+		for (const subscriber of this.#observationSubscribers) {
+			this.#enqueueObservation(subscriber, { type: "event", event });
+		}
 	}
 
-	acceptWorkerControlEvent(event: AgentEvent): Promise<void> {
+	acceptWorkerControlEvent(event: WorkerControlEvent): Promise<void> {
 		if (this.#closed) return Promise.resolve();
-		return this.#notify(this.#controlListeners, event);
+		return this.#notifyControl(event);
 	}
 
-	async #notify(listeners: Set<AgentListener>, event: AgentEvent): Promise<void> {
-		for (const listener of [...listeners]) {
+	resynchronize(snapshot: CodingAgentSnapshot): void {
+		if (this.#closed) return;
+		const active = snapshot.graphs
+			.flatMap((graph) => graph.items.map((item) => ({ graph, item })))
+			.find(({ item }) => item.sessionId === this.sessionId && !TERMINAL_WORK_STATES.has(item.state));
+		if (active) {
+			this.#activeGraphId = active.graph.graphId;
+			this.#activeItemId = active.item.itemId;
+			this.#activePlacement = structuredClone(active.item.placement);
+			this.#status =
+				active.item.state === "settling" ? "settling" : active.item.state === "running" ? "running" : "idle";
+		} else if (this.#activeGraphId) {
+			const graph = snapshot.graphs.find(({ graphId }) => graphId === this.#activeGraphId);
+			if (graph?.result) {
+				this.#activeGraphId = undefined;
+				this.#activeItemId = undefined;
+				this.#activePlacement = undefined;
+				this.#activeRun = undefined;
+				this.#status = "idle";
+			}
+		}
+		for (const subscriber of this.#observationSubscribers) {
+			subscriber.queue.splice(0);
+			this.#enqueueObservation(subscriber, {
+				type: "resync",
+				snapshot: this.#resynchronization("upstream_resync"),
+			});
+		}
+	}
+
+	async #notifyControl(event: WorkerControlEvent): Promise<void> {
+		for (const listener of [...this.#controlListeners]) {
 			try {
 				await listener(event);
 			} catch {
-				listeners.delete(listener);
+				this.#controlListeners.delete(listener);
 			}
 		}
+	}
+
+	#enqueueObservation(subscriber: ObservationSubscriber, delivery: ObservationDelivery): void {
+		if (subscriber.closed) return;
+		if (subscriber.queue.length >= subscriber.capacity) {
+			subscriber.queue.splice(0);
+			subscriber.queue.push({
+				type: "resync",
+				snapshot: this.#resynchronization("slow_consumer"),
+			});
+		} else {
+			subscriber.queue.push(delivery);
+		}
+		if (subscriber.running) return;
+		subscriber.running = true;
+		queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
+	}
+
+	async #drainObservationSubscriber(subscriber: ObservationSubscriber): Promise<void> {
+		try {
+			while (!subscriber.closed) {
+				const delivery = subscriber.queue.shift();
+				if (!delivery) return;
+				if (delivery.type === "event") await subscriber.observer.accept(delivery.event);
+				else await subscriber.observer.resynchronize(delivery.snapshot);
+			}
+		} catch {
+			this.#removeObservationSubscriber(subscriber);
+		} finally {
+			subscriber.running = false;
+			if (!subscriber.closed && subscriber.queue.length > 0) {
+				subscriber.running = true;
+				queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
+			}
+		}
+	}
+
+	#resynchronization(reason: SessionWorkResynchronization["reason"]): SessionWorkResynchronization {
+		return Object.freeze({
+			type: "resync_required",
+			reason,
+			state: this.state(),
+			seed: structuredClone(this.#session.seed),
+			toolInvocations: Object.freeze(structuredClone(this.#session.toolInvocations)),
+		});
+	}
+
+	#removeObservationSubscriber(subscriber: ObservationSubscriber): void {
+		if (subscriber.closed) return;
+		subscriber.closed = true;
+		subscriber.queue.splice(0);
+		this.#observationSubscribers.delete(subscriber);
 	}
 
 	#notifyResult(result: WorkResult): void {
@@ -398,7 +536,9 @@ export class SessionWorkController {
 				}
 			}
 			await this.waitForIdle();
-			this.#listeners.clear();
+			for (const subscriber of [...this.#observationSubscribers]) {
+				this.#removeObservationSubscriber(subscriber);
+			}
 			this.#controlListeners.clear();
 			this.#resultListeners.clear();
 			await this.#host.release(this);

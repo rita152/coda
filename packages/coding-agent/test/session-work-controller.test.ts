@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
+import type { CodingAgentSnapshot } from "@coda/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCoreCommandRegistry } from "../src/commands/core-commands.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
@@ -199,15 +200,95 @@ describe("Session Work Controller", () => {
 		expect(delegated.publication.state).toBe("published");
 		expect(await readFile(join(root, "delegated.txt"), "utf8")).toBe("delegated\n");
 		const observerStarted = deferred();
-		const neverSettles = new Promise<void>(() => {});
-		const detachObserver = first.subscribe(async () => {
-			observerStarted.resolve();
-			await neverSettles;
+		const observerRelease = deferred();
+		const observerResynchronized = deferred();
+		let failedObserverCalls = 0;
+		const detachFailedObserver = first.subscribe({
+			accept: () => {
+				failedObserverCalls++;
+				throw new Error("failed presentation consumer");
+			},
+			resynchronize: () => {
+				throw new Error("failed presentation consumer");
+			},
 		});
+		const detachObserver = first.subscribe(
+			{
+				accept: async () => {
+					observerStarted.resolve();
+					await observerRelease.promise;
+				},
+				resynchronize: ({ reason, seed }) => {
+					expect(reason).toBe("slow_consumer");
+					expect(seed.messages.at(-1)?.message.role).toBe("assistant");
+					observerResynchronized.resolve();
+				},
+			},
+			{ capacity: 4 },
+		);
 		const observerIsolated = await first.beginPrompt("prove the public observation projection is isolated");
+		const observerGraphId = first.state().activeGraphId;
+		if (!observerGraphId) throw new Error("Observer isolation Work Graph did not become active");
 		await observerStarted.promise;
-		await expect(observerIsolated.result).resolves.toMatchObject({ state: "succeeded" });
+		const observerResult = await observerIsolated.result;
+		expect(observerResult.state).toBe("succeeded");
+		observerRelease.resolve();
+		await observerResynchronized.promise;
+		expect(failedObserverCalls).toBe(1);
+		detachFailedObserver();
 		detachObserver();
+
+		const upstreamActive = deferred();
+		const upstreamTerminal = deferred();
+		const detachUpstreamObserver = first.subscribe({
+			accept: () => undefined,
+			resynchronize: ({ reason, state, seed }) => {
+				expect(reason).toBe("upstream_resync");
+				expect(seed.messages.at(-1)?.message.role).toBe("assistant");
+				if (state.activeGraphId === observerGraphId) upstreamActive.resolve();
+				else if (state.status === "idle") upstreamTerminal.resolve();
+			},
+		});
+		const activeItem = {
+			itemId: observerResult.itemId,
+			dependencies: [],
+			objective: "resynchronize active Work",
+			executionMode: "write",
+			state: "running",
+			desiredConfiguration: {
+				model: { provider: selection.model.provider, id: selection.model.id },
+				reasoning: "off",
+			},
+			runtimeId: observerResult.runtimeId,
+			sessionId: observerResult.sessionId,
+			placement: observerResult.placement,
+			cancellationRequested: false,
+		};
+		first.resynchronize({
+			closed: false,
+			graphs: [{ graphId: observerGraphId, items: [activeItem] }],
+		} as unknown as CodingAgentSnapshot);
+		await upstreamActive.promise;
+		expect(first.state()).toMatchObject({
+			status: "running",
+			activeGraphId: observerGraphId,
+			activeItemId: observerResult.itemId,
+			activePlacement: observerResult.placement,
+		});
+		first.resynchronize({
+			closed: false,
+			graphs: [
+				{
+					graphId: observerGraphId,
+					items: [{ ...activeItem, state: "succeeded", result: observerResult }],
+					result: {},
+				},
+			],
+		} as unknown as CodingAgentSnapshot);
+		await upstreamTerminal.promise;
+		expect(first.state().status).toBe("idle");
+		expect(first.state().activeGraphId).toBeUndefined();
+		detachUpstreamObserver();
 
 		await first.close();
 		await second.close();

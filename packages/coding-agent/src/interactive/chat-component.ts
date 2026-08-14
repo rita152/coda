@@ -177,8 +177,8 @@ interface CachedTimelineBlock {
 
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
-	readonly #timeline: SemanticTimeline;
-	readonly #activity: ActivityProjection;
+	#timeline: SemanticTimeline;
+	#activity: ActivityProjection;
 	readonly #markdown: MarkdownRenderer;
 	readonly #theme: TuiTheme;
 	readonly #viewport = new TimelineViewport();
@@ -332,6 +332,17 @@ export class ChatComponent extends Component {
 
 	acceptRunEvidence(evidence: RunEvidenceEnvelope): void {
 		this.#runEvidence = structuredClone(evidence);
+		this.invalidate();
+	}
+
+	resynchronize(seed: AgentSeed, toolInvocations: readonly SessionToolLifecycle[], running: boolean): void {
+		this.#timeline = new SemanticTimeline(seed, toolInvocations);
+		this.#activity = new ActivityProjection(this.#options.activitySummaryMode);
+		this.#running = running;
+		this.#activeFollowUp = undefined;
+		this.#provisionalCards = [];
+		this.#timelineBlockCache.clear();
+		this.#timelineAttachmentHitRegions.clear();
 		this.invalidate();
 	}
 

@@ -59,6 +59,42 @@ describe("Work Graph dependency boundaries", () => {
 		}
 	});
 
+	it("keeps Worker Facts, Observations, and Control on separate closed paths", async () => {
+		const runtimeRoot = new URL("../src/work-graph", import.meta.url).pathname;
+		const codingRuntimeRoot = new URL("../../coding-agent/src/runtime", import.meta.url).pathname;
+		const production = (
+			await Promise.all(
+				[...(await sourceFiles(runtimeRoot)), ...(await sourceFiles(codingRuntimeRoot))].map((file) =>
+					readFile(file, "utf8"),
+				),
+			)
+		).join("\n");
+		for (const obsolete of [
+			["worker", "event"].join("_"),
+			["fatal", "barrier", "failed"].join("_"),
+			["Worker", "Runtime", "Event"].join(""),
+			["control", "Worker", "Event"].join(""),
+			["observation", "Tail"].join(""),
+			["progress", "Queue"].join(""),
+		]) {
+			expect(production, obsolete).not.toContain(obsolete);
+		}
+
+		const worker = await readFile(new URL("../src/work-graph/worker-runtime.ts", import.meta.url), "utf8");
+		const ports = await readFile(new URL("../src/work-graph/ports.ts", import.meta.url), "utf8");
+		const sessionController = await readFile(
+			new URL("../../coding-agent/src/runtime/session-work-controller.ts", import.meta.url),
+			"utf8",
+		);
+		expect(worker).toMatch(/routeWorkerEvent\(event\)/u);
+		expect(worker).toMatch(/readonly commitFact: \(fact: WorkerFact,/u);
+		expect(worker).toMatch(/readonly publishObservation: \(observation: WorkerObservation,/u);
+		expect(ports).toMatch(/readonly type: "worker_fact"/u);
+		expect(ports).not.toMatch(/AgentEvent/u);
+		expect(sessionController).toMatch(/capacity \?\? 256/u);
+		expect(sessionController).toMatch(/type: "resync_required"/u);
+	});
+
 	it("routes interactive input and evaluation through the public Work Graph Seam", async () => {
 		const interactive = await readFile(
 			new URL("../../coding-agent/src/interactive/input-controller.ts", import.meta.url),

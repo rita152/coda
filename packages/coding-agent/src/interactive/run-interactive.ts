@@ -488,39 +488,49 @@ async function runMultiSessionInteractive(
 		acceptLatestRunEvidence(component, sessionOptions.session);
 		components.add(component);
 		let pane!: InteractivePane;
-		const detachAgent = sessionOptions.work.subscribe((event) => {
-			component.accept(event);
-			if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
-			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
-			if (event.type === "run_start") {
+		const detachAgent = sessionOptions.work.subscribe({
+			accept: (event) => {
+				component.accept(event);
+				if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
+				if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
+				if (event.type === "run_start") {
+					pane.contextOverflowPending = false;
+					pane.contextOverflowOffered = false;
+					pane.providerOverflowObserved = false;
+				}
+				if (
+					event.type === "attempt_end" &&
+					event.outcome === "error" &&
+					isProviderContextOverflow(event.candidate.message)
+				) {
+					pane.providerOverflowObserved = true;
+				}
+				if (event.type === "retry_scheduled" && event.reason === "context overflow compacted") {
+					pane.providerOverflowObserved = false;
+				}
+				if (event.type === "run_end") {
+					const runtimeOverflow = sessionOptions.contextOverflowRecovery?.takeUnrecoverable() ?? false;
+					if (
+						event.outcome === "error" &&
+						(pane.providerOverflowObserved ||
+							runtimeOverflow ||
+							isContextOverflowError(event.failure?.message ?? ""))
+					) {
+						if (event.failure?.kind === "runtime") pane.input.acknowledgeAgentRuntimeFailure();
+						pane.contextOverflowPending = true;
+						if (pane === panes.active) offerContextOverflowRecovery(pane);
+						else pane.needsAttention = true;
+					}
+				}
+			},
+			resynchronize: ({ seed, toolInvocations, state }) => {
+				component.resynchronize(seed, toolInvocations, state.status === "running");
+				acceptLatestRunEvidence(component, sessionOptions.session);
+				void git.refresh();
 				pane.contextOverflowPending = false;
 				pane.contextOverflowOffered = false;
 				pane.providerOverflowObserved = false;
-			}
-			if (
-				event.type === "attempt_end" &&
-				event.outcome === "error" &&
-				isProviderContextOverflow(event.candidate.message)
-			) {
-				pane.providerOverflowObserved = true;
-			}
-			if (event.type === "retry_scheduled" && event.reason === "context overflow compacted") {
-				pane.providerOverflowObserved = false;
-			}
-			if (event.type === "run_end") {
-				const runtimeOverflow = sessionOptions.contextOverflowRecovery?.takeUnrecoverable() ?? false;
-				if (
-					event.outcome === "error" &&
-					(pane.providerOverflowObserved ||
-						runtimeOverflow ||
-						isContextOverflowError(event.failure?.message ?? ""))
-				) {
-					if (event.failure?.kind === "runtime") pane.input.acknowledgeAgentRuntimeFailure();
-					pane.contextOverflowPending = true;
-					if (pane === panes.active) offerContextOverflowRecovery(pane);
-					else pane.needsAttention = true;
-				}
-			}
+			},
 		});
 		pane = {
 			id: sessionOptions.session.descriptor.id,
@@ -871,10 +881,17 @@ async function runSingleSessionInteractive(
 	if (terminationSignal || fatalError !== undefined) {
 		options.mcpElicitation?.unbind();
 	}
-	const detach = options.work.subscribe((event) => {
-		component.accept(event);
-		if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
-		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
+	const detach = options.work.subscribe({
+		accept: (event) => {
+			component.accept(event);
+			if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
+			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
+		},
+		resynchronize: ({ seed, toolInvocations, state }) => {
+			component.resynchronize(seed, toolInvocations, state.status === "running");
+			acceptLatestRunEvidence(component, options.session);
+			void git.refresh();
+		},
 	});
 	try {
 		if (!(await startFullScreen())) {

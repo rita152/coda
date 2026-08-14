@@ -1,5 +1,6 @@
 import type { AgentEvent, AgentInput } from "@coda/agent";
 import type { WorkGraphId, WorkItemId } from "./types.ts";
+import type { OpenAttemptEffect, OpenToolEffect, WorkerFact } from "./worker-fact.ts";
 
 /** Host-only input envelope. It is never appended to the model-visible transcript as metadata. */
 export interface WorkerSubmission {
@@ -11,9 +12,36 @@ export interface WorkerSubmission {
 	readonly resourceReferences: readonly string[];
 }
 
-/** Data-only Worker lifecycle events; executable Prepared Run capabilities never cross this boundary. */
-export type WorkerRuntimeEvent =
-	| AgentEvent
+type AgentEventOf<TType extends AgentEvent["type"]> = Extract<AgentEvent, { readonly type: TType }>;
+
+export type WorkerSessionEvent = AgentEventOf<
+	| "run_start"
+	| "turn_start"
+	| "attempt_start"
+	| "attempt_end"
+	| "retry_scheduled"
+	| "message_end"
+	| "tool_execution_rejected"
+	| "tool_execution_start"
+	| "tool_execution_end"
+	| "turn_end"
+	| "run_end"
+>;
+
+export type WorkerControlEvent = AgentEventOf<
+	| "run_start"
+	| "turn_start"
+	| "attempt_end"
+	| "retry_scheduled"
+	| "message_end"
+	| "tool_execution_rejected"
+	| "tool_execution_start"
+	| "tool_execution_end"
+	| "turn_end"
+	| "run_end"
+>;
+
+export type WorkerPreparationObservation =
 	| {
 			readonly type: "preparation_started";
 			readonly preparationId: string;
@@ -30,11 +58,23 @@ export type WorkerRuntimeEvent =
 	| {
 			readonly type: "prepared_run_disposed";
 			readonly preparationId: string;
-	  }
-	| {
-			readonly type: "fatal_barrier_failed";
-			readonly barrier: "session";
-			readonly failedEventType: string;
-			readonly externalEffectMayHaveOccurred: boolean;
-			readonly diagnostic: string;
 	  };
+
+/** Full-fidelity, best-effort data. It never crosses a fatal or Control seam. */
+export type WorkerObservation = AgentEvent | WorkerPreparationObservation;
+
+export interface WorkerEventDisposition {
+	readonly session?: WorkerSessionEvent;
+	readonly fact?: WorkerFact;
+	readonly control?: WorkerControlEvent;
+	readonly observation: AgentEvent;
+}
+
+export interface WorkerBarrierFailure {
+	readonly barrier: "session" | "work_journal";
+	readonly source: WorkerSessionEvent["type"] | WorkerFact["type"] | "prepare_run" | "context_compacted";
+	readonly diagnostic: string;
+	readonly openAttempts: readonly OpenAttemptEffect[];
+	readonly openTools: readonly OpenToolEffect[];
+	readonly externalEffectMayHaveOccurred: boolean;
+}

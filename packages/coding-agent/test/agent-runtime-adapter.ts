@@ -20,7 +20,15 @@ export function createTestAgent(options: TestAgentOptions): Agent {
 
 type AgentWorkPort = Pick<
 	SessionWorkController,
-	"beginPrompt" | "cancel" | "deliver" | "isBusy" | "prompt" | "state" | "subscribe" | "waitForIdle"
+	| "beginPrompt"
+	| "cancel"
+	| "deliver"
+	| "isBusy"
+	| "prompt"
+	| "state"
+	| "subscribe"
+	| "subscribeControl"
+	| "waitForIdle"
 >;
 
 const model = Object.freeze({
@@ -90,6 +98,28 @@ export function agentWorkPort(agent: Agent): AgentWorkPort {
 			}
 		},
 		waitForIdle: () => agent.waitForIdle(),
-		subscribe: (listener) => agent.onEvent(listener),
+		subscribe: (observer) => agent.onEvent((event) => observer.accept(event)),
+		subscribeControl: (listener) =>
+			agent.onEvent((event) => {
+				switch (event.type) {
+					case "run_start":
+					case "turn_start":
+					case "attempt_end":
+					case "retry_scheduled":
+					case "message_end":
+					case "tool_execution_rejected":
+					case "tool_execution_start":
+					case "tool_execution_end":
+					case "turn_end":
+					case "run_end":
+						return listener(event);
+					case "attempt_start":
+					case "message_start":
+					case "message_update":
+					case "tool_execution_progress":
+					case "run_budget_exhausted":
+						return;
+				}
+			}),
 	};
 }

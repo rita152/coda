@@ -6,6 +6,7 @@ import {
 	type QueueItemId,
 	type RunPreparation,
 	type RunResult,
+	type ToolExecutionContext,
 } from "@coda/agent";
 import type { McpToolSnapshot } from "@coda/mcp";
 import { ContextWindowController } from "../context-window/context-window.ts";
@@ -19,11 +20,25 @@ import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type {
 	OpenCodingAgentOptions,
 	WorkerSelection,
+	WorkerSessionChange,
 	WorkSessionReservation,
 	WorkspacePlacementReservation,
 } from "./ports.ts";
 import type { DesiredRuntimeConfiguration, WorkExecutionMode, WorkGraphId, WorkItemId } from "./types.ts";
-import type { WorkerRuntimeEvent, WorkerSubmission } from "./worker-protocol.ts";
+import { routeWorkerEvent } from "./worker-event-router.ts";
+import {
+	INITIAL_WORKER_FACT_PROJECTION,
+	type WorkerFact,
+	type WorkerFactProjection,
+	workerFactHasOpenEffects,
+} from "./worker-fact.ts";
+import type {
+	WorkerBarrierFailure,
+	WorkerControlEvent,
+	WorkerObservation,
+	WorkerSessionEvent,
+	WorkerSubmission,
+} from "./worker-protocol.ts";
 
 export interface PrivateWorkerRuntime {
 	readonly runtimeId: string;
@@ -35,6 +50,7 @@ export interface PrivateWorkerRuntime {
 	waitForIdle(): Promise<void>;
 	configure(configuration: DesiredRuntimeConfiguration): Promise<void>;
 	assistantText(): string | undefined;
+	barrierFailure(): WorkerBarrierFailure | undefined;
 	close(): Promise<{ readonly droppedExternalWork: number }>;
 }
 
@@ -47,12 +63,24 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function externalEffectMayHaveOccurred(eventType: string): boolean {
-	return !["run_start", "turn_start", "attempt_start"].includes(eventType);
-}
-
 function aborted(signal: AbortSignal): unknown {
 	return signal.reason ?? new DOMException("Worker preparation was canceled", "AbortError");
+}
+
+function gatedTool(tool: AgentTool, assertProgressAllowed: () => void): AgentTool {
+	return Object.freeze({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+		...(tool.constrainedSampling === undefined ? {} : { constrainedSampling: tool.constrainedSampling }),
+		replaySafety: tool.replaySafety,
+		...(tool.parallelSafe === undefined ? {} : { parallelSafe: tool.parallelSafe }),
+		execute: (arguments_: Parameters<AgentTool["execute"]>[0], context: ToolExecutionContext) => {
+			assertProgressAllowed();
+			if (context.signal.aborted) throw aborted(context.signal);
+			return tool.execute(arguments_, context);
+		},
+	});
 }
 
 async function awaitPreparation<T>(
@@ -119,7 +147,11 @@ export async function openPrivateWorkerRuntime(request: {
 	readonly session: WorkSessionReservation;
 	readonly placement: WorkspacePlacementReservation;
 	readonly coordinatorTools?: readonly AgentTool[];
-	readonly onEvent: (event: WorkerRuntimeEvent, runtimeId: string, sessionId: string) => Promise<void> | void;
+	readonly commitFact: (fact: WorkerFact, runtimeId: string, sessionId: string) => Promise<WorkerFactProjection>;
+	readonly publishObservation: (observation: WorkerObservation, runtimeId: string, sessionId: string) => void;
+	readonly controlWorker: (event: WorkerControlEvent, runtimeId: string, sessionId: string) => Promise<void> | void;
+	readonly barrierFailed: (failure: WorkerBarrierFailure, runtimeId: string, sessionId: string) => void;
+	readonly assertProgressAllowed: () => void;
 }): Promise<PrivateWorkerRuntime> {
 	const { options } = request;
 	const sessionId = String(request.session.session.id);
@@ -137,10 +169,12 @@ export async function openPrivateWorkerRuntime(request: {
 		sessionId,
 		placement: request.placement.placement,
 	};
-	const baseTools = Object.freeze([
-		...options.workspaceExecution.bindTools({ ...bindRequest, contributions: visibleContributions }),
-		...(request.coordinatorTools ?? []),
-	]);
+	const baseTools = Object.freeze(
+		[
+			...options.workspaceExecution.bindTools({ ...bindRequest, contributions: visibleContributions }),
+			...(request.coordinatorTools ?? []),
+		].map((tool) => gatedTool(tool, request.assertProgressAllowed)),
+	);
 	let desired: FrozenConfiguration = Object.freeze({
 		desired: request.configuration,
 		selection: await options.resolveConfiguration(request.configuration),
@@ -150,7 +184,42 @@ export async function openPrivateWorkerRuntime(request: {
 	const steering = new Map<QueueItemId, WorkerSubmission>();
 	const followUps = new Map<QueueItemId, WorkerSubmission>();
 	let closeOperation: Promise<{ readonly droppedExternalWork: number }> | undefined;
+	let factProjection = INITIAL_WORKER_FACT_PROJECTION;
+	let fatalFailure: WorkerBarrierFailure | undefined;
 	let agent!: Agent;
+	const publish = (observation: WorkerObservation): void => {
+		try {
+			request.publishObservation(observation, request.runtimeId, sessionId);
+		} catch {}
+	};
+	const latchFailure = (
+		barrier: WorkerBarrierFailure["barrier"],
+		source: WorkerBarrierFailure["source"],
+		error: unknown,
+	): WorkerBarrierFailure => {
+		if (fatalFailure) return fatalFailure;
+		fatalFailure = Object.freeze({
+			barrier,
+			source,
+			diagnostic: errorMessage(error),
+			openAttempts: Object.freeze(factProjection.openAttempts.map((entry) => Object.freeze({ ...entry }))),
+			openTools: Object.freeze(factProjection.openTools.map((entry) => Object.freeze({ ...entry }))),
+			externalEffectMayHaveOccurred: workerFactHasOpenEffects(factProjection),
+		});
+		try {
+			request.barrierFailed(fatalFailure, request.runtimeId, sessionId);
+		} catch {}
+		return fatalFailure;
+	};
+	const recordSessionChange = async (change: WorkerSessionChange): Promise<void> => {
+		if (fatalFailure) throw new Error(fatalFailure.diagnostic);
+		try {
+			await request.session.session.record(change);
+		} catch (error) {
+			latchFailure("session", change.type, error);
+			throw error;
+		}
+	};
 	const currentSelection = (): WorkerSelection => activeSelection ?? desired.selection;
 	const contextWindow = new ContextWindowController({
 		models: options.models,
@@ -160,7 +229,7 @@ export async function openPrivateWorkerRuntime(request: {
 			const selection = currentSelection();
 			return { model: selection.model, authSnapshot: selection.authSnapshot };
 		},
-		commit: (checkpoint) => request.session.session.record({ type: "context_compacted", checkpoint }),
+		commit: (checkpoint) => recordSessionChange({ type: "context_compacted", checkpoint }),
 		checkpoint: request.session.session.compactionCheckpoint,
 		maxOutputTokens: options.maxOutputTokens,
 	});
@@ -169,8 +238,6 @@ export async function openPrivateWorkerRuntime(request: {
 		model: () => currentSelection().model,
 		maxOutputTokens: options.maxOutputTokens,
 	});
-	const emit = (event: WorkerRuntimeEvent): Promise<void> =>
-		Promise.resolve(request.onEvent(event, request.runtimeId, sessionId));
 	const submissionFor = (preparation: RunPreparation): WorkerSubmission => {
 		const submission =
 			preparation.source === "prompt"
@@ -196,7 +263,9 @@ export async function openPrivateWorkerRuntime(request: {
 			...(skill ? [{ tool: skill, effect: "read" as const }] : []),
 			...mcpTools.map((tool) => ({ tool, effect: "unknown" as const })),
 		].filter(({ effect }) => request.mode === "write" || effect === "read");
-		return options.workspaceExecution.bindTools({ ...bindRequest, contributions: dynamic });
+		return options.workspaceExecution
+			.bindTools({ ...bindRequest, contributions: dynamic })
+			.map((tool) => gatedTool(tool, request.assertProgressAllowed));
 	};
 
 	agent = new Agent({
@@ -206,10 +275,11 @@ export async function openPrivateWorkerRuntime(request: {
 		...(request.session.session.seed ? { seed: request.session.session.seed } : {}),
 		autoDrainFollowUps: true,
 		prepareRun: async (preparation): Promise<PreparedRun> => {
+			request.assertProgressAllowed();
 			const submission = submissionFor(preparation);
 			const configuration = desired;
 			const deadline = preparationDeadline(preparation, configuration.desired, options);
-			await emit({
+			publish({
 				type: "preparation_started",
 				preparationId: submission.preparationId,
 				submissionKind: submission.kind,
@@ -248,7 +318,7 @@ export async function openPrivateWorkerRuntime(request: {
 						}),
 				);
 				await awaitPreparation(
-					request.session.session.record({
+					recordSessionChange({
 						type: "prepare_run",
 						promptVersion: prompt.version,
 						promptSha256: prompt.sha256,
@@ -257,7 +327,7 @@ export async function openPrivateWorkerRuntime(request: {
 					deadline,
 					options.clock.now,
 				);
-				await emit({
+				publish({
 					type: "preparation_settled",
 					preparationId: submission.preparationId,
 					outcome: "prepared",
@@ -279,6 +349,8 @@ export async function openPrivateWorkerRuntime(request: {
 							throw new Error(`Model is not authenticated: ${selection.model.provider}/${selection.model.id}`);
 						}
 						const prepared = await overflowRecovery.prepare(context, agent.state.messages, signal);
+						request.assertProgressAllowed();
+						if (signal.aborted) throw aborted(signal);
 						return options.models.streamSimple(selection.model, prepared.context, {
 							signal,
 							authSnapshot: selection.authSnapshot,
@@ -286,17 +358,17 @@ export async function openPrivateWorkerRuntime(request: {
 							maxTokens: prepared.reservedOutputTokens,
 						});
 					},
-					dispose: async () => {
+					dispose: () => {
 						if (disposed) return;
 						disposed = true;
 						if (activeSelection === selection) activeSelection = undefined;
 						if (preparation.queueItemId) followUps.delete(preparation.queueItemId);
-						await emit({ type: "prepared_run_disposed", preparationId: submission.preparationId });
+						publish({ type: "prepared_run_disposed", preparationId: submission.preparationId });
 					},
 				};
 				return Object.freeze(preparedRun);
 			} catch (error) {
-				await emit({
+				publish({
 					type: "preparation_settled",
 					preparationId: submission.preparationId,
 					outcome: preparation.signal.aborted ? "canceled" : "failed",
@@ -307,21 +379,50 @@ export async function openPrivateWorkerRuntime(request: {
 		},
 	});
 
-	agent.onEvent(async (event) => {
-		if (event.type === "turn_start") steering.clear();
-		try {
-			await request.session.session.accept(event);
-		} catch (error) {
-			await emit({
-				type: "fatal_barrier_failed",
-				barrier: "session",
-				failedEventType: event.type,
-				externalEffectMayHaveOccurred: externalEffectMayHaveOccurred(event.type),
-				diagnostic: errorMessage(error),
-			});
-			throw error;
+	const handleSemanticEvent = async (disposition: ReturnType<typeof routeWorkerEvent>): Promise<void> => {
+		const { observation } = disposition;
+		if (fatalFailure) {
+			publish(observation);
+			return;
 		}
-		await emit(event);
+		if (disposition.session) {
+			try {
+				await request.session.session.accept(disposition.session as WorkerSessionEvent);
+			} catch (error) {
+				latchFailure("session", disposition.session.type, error);
+				throw error;
+			}
+		}
+		if (disposition.fact) {
+			try {
+				factProjection = await request.commitFact(disposition.fact, request.runtimeId, sessionId);
+			} catch (error) {
+				latchFailure("work_journal", disposition.fact.type, error);
+				throw error;
+			}
+		}
+		publish(observation);
+		if (disposition.control) {
+			try {
+				await request.controlWorker(disposition.control, request.runtimeId, sessionId);
+			} catch {}
+		}
+		request.assertProgressAllowed();
+	};
+
+	agent.onEvent((event) => {
+		if (event.type === "turn_start") steering.clear();
+		const disposition = routeWorkerEvent(event);
+		if (
+			!fatalFailure &&
+			disposition.session === undefined &&
+			disposition.fact === undefined &&
+			disposition.control === undefined
+		) {
+			publish(disposition.observation);
+			return;
+		}
+		return handleSemanticEvent(disposition);
 	});
 
 	return Object.freeze({
@@ -329,6 +430,7 @@ export async function openPrivateWorkerRuntime(request: {
 		sessionId,
 		prompt: (submission: WorkerSubmission) => {
 			if (promptSubmission) return Promise.reject(new Error("Worker already owns an active Prompt Submission"));
+			request.assertProgressAllowed();
 			promptSubmission = submission;
 			let operation: Promise<RunResult>;
 			try {
@@ -342,10 +444,12 @@ export async function openPrivateWorkerRuntime(request: {
 			});
 		},
 		steer: (submission: WorkerSubmission) => {
+			request.assertProgressAllowed();
 			const id = agent.steer(submission.input);
 			steering.set(id, submission);
 		},
 		followUp: (submission: WorkerSubmission) => {
+			request.assertProgressAllowed();
 			const id = agent.followUp(submission.input);
 			followUps.set(id, submission);
 		},
@@ -364,6 +468,7 @@ export async function openPrivateWorkerRuntime(request: {
 			});
 		},
 		assistantText: () => latestAssistantText(agent),
+		barrierFailure: () => fatalFailure,
 		close: () => {
 			if (closeOperation) return closeOperation;
 			closeOperation = (async () => {

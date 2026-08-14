@@ -405,13 +405,14 @@ export function createWorkspaceWorkCoordinator(options: {
 						break;
 					}
 					if (observation.type === "closed") return;
+					if (observation.type === "snapshot") {
+						for (const controller of controllers.values()) controller.resynchronize(observation.snapshot);
+						continue;
+					}
 					if (observation.type !== "work_item_event") continue;
 					const event = agentEvent(observation.event);
 					if (!event) continue;
-					void controllers
-						.get(observation.sessionId)
-						?.acceptWorkerEvent(event)
-						.catch(() => undefined);
+					controllers.get(observation.sessionId)?.acceptWorkerEvent(event);
 				}
 			}
 		})().catch(() => undefined);
@@ -465,14 +466,14 @@ export function createWorkspaceWorkCoordinator(options: {
 						const owner = sessionByRun.get(String(request.execution.runId));
 						return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
 					},
-					controlWorkerEvent: ({ sessionId, placement, event }) => {
+					controlWorker: ({ sessionId, placement, event }) => {
 						if (!("runId" in event)) return;
 						const runId = String(event.runId);
 						if (event.type === "run_start") {
 							sessionByRun.set(runId, sessionId);
 							controllers.get(sessionId)?.notePlacement(placement);
 						}
-						const operation = controllers.get(sessionId)?.acceptWorkerControlEvent(event as AgentEvent);
+						const operation = controllers.get(sessionId)?.acceptWorkerControlEvent(event);
 						if (event.type === "run_end") {
 							return Promise.resolve(operation).finally(() => sessionByRun.delete(runId));
 						}

@@ -15,7 +15,7 @@ import type {
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls", "read_tool_output", "read_session_history"]);
 
 export interface AgentRunControlBindingOptions {
-	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "state" | "subscribe">;
+	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "state" | "subscribeControl">;
 	readonly configuration: RunControlConfiguration;
 	readonly clock: Clock;
 	readonly scheduler: Scheduler;
@@ -50,18 +50,22 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 		if (state.activeRun?.id !== runId || state.status !== "running") return;
 		void options.work.cancel().catch(() => undefined);
 	};
-	const detach = options.work.subscribe((event) => {
+	const beginControl = (runId: string, startedAt: number): void => {
+		active?.control.dispose();
+		const control = new RunControl({
+			configuration: options.configuration,
+			clock: options.clock,
+			scheduler: options.scheduler,
+			startedAt,
+			requestWrapUp: (trigger) => requestWrapUp(runId, trigger),
+			hardStop: () => hardStop(runId),
+		});
+		active = { runId, control };
+	};
+	const detach = options.work.subscribeControl((event) => {
 		if (event.type === "run_start") {
 			const runId = String(event.runId);
-			const control = new RunControl({
-				configuration: options.configuration,
-				clock: options.clock,
-				scheduler: options.scheduler,
-				startedAt: event.timestamp,
-				requestWrapUp: (trigger) => requestWrapUp(runId, trigger),
-				hardStop: () => hardStop(runId),
-			});
-			active = { runId, control };
+			beginControl(runId, event.timestamp);
 			return;
 		}
 		if (!active || active.runId !== String(event.runId)) return;

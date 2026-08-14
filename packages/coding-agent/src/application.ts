@@ -1909,22 +1909,34 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						return exitCode;
 					}
 					if (jsonEventWriter) {
-						agentRuntime.subscribe(async (event) => {
-							const runControl =
-								event.type === "run_start" || event.type === "run_end"
-									? runControlBinding?.reportForRun(String(event.runId))
-									: undefined;
-							await jsonEventWriter.writeAgentEvent(
-								event,
-								event.type === "run_start"
-									? (() => {
-											const prepared = agentRuntime.metadataForRun(String(event.runId));
-											if (!prepared) throw new Error(`Prepared Run ${event.runId} is unavailable`);
-											return prepared;
-										})()
-									: undefined,
-								runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
-							);
+						agentRuntime.subscribe({
+							accept: async (event) => {
+								const runControl =
+									event.type === "run_start" || event.type === "run_end"
+										? runControlBinding?.reportForRun(String(event.runId))
+										: undefined;
+								await jsonEventWriter.writeAgentEvent(
+									event,
+									event.type === "run_start"
+										? (() => {
+												const prepared = agentRuntime.metadataForRun(String(event.runId));
+												if (!prepared) throw new Error(`Prepared Run ${event.runId} is unavailable`);
+												return prepared;
+											})()
+										: undefined,
+									runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
+								);
+							},
+							resynchronize: ({ reason, state, seed, toolInvocations }) =>
+								jsonEventWriter.writeRecord({
+									schemaVersion: 2,
+									type: "resync_required",
+									reason,
+									status: state.status,
+									sessionId: agentRuntime.sessionId,
+									seed,
+									toolInvocations,
+								}),
 						});
 						agentRuntime.subscribeResult(async (result) => {
 							const runId = result.run?.runId;
@@ -1946,10 +1958,18 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 					const initialMedia = await prepareAttachments(initialAttachmentIds);
 					let initialMediaCommitted = false;
-					const detachInitialMediaCommit = agentRuntime.subscribe(async (event) => {
-						if (event.type !== "run_start" || event.source !== "prompt" || initialMediaCommitted) return;
-						await initialMedia.commit();
-						initialMediaCommitted = true;
+					const detachInitialMediaCommit = agentRuntime.subscribe({
+						accept: async (event) => {
+							if (event.type !== "run_start" || event.source !== "prompt" || initialMediaCommitted) return;
+							await initialMedia.commit();
+							initialMediaCommitted = true;
+						},
+						resynchronize: async ({ state }) => {
+							if (!initialMediaCommitted && state.activeRun?.source === "prompt") {
+								await initialMedia.commit();
+								initialMediaCommitted = true;
+							}
+						},
 					});
 					let result: Awaited<ReturnType<SessionWorkController["prompt"]>>;
 					try {

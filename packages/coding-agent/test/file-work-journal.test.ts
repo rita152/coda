@@ -25,6 +25,25 @@ function record(timestamp: number): WorkJournalRecord {
 	};
 }
 
+function workerFactRecord(): WorkJournalRecord {
+	return {
+		type: "worker_fact",
+		graphId: "graph:facts" as WorkGraphId,
+		itemId: "item:facts" as WorkItemId,
+		runtimeId: "worker:facts",
+		sessionId: "session:facts",
+		fact: {
+			type: "attempt_started",
+			runId: "run:facts",
+			turnId: "turn:facts",
+			attemptId: "attempt:facts",
+			messageId: "message:facts",
+			attempt: 1,
+			timestamp: 10,
+		},
+	};
+}
+
 describe("file Work Journal Adapter", () => {
 	it("durably appends versioned records and restores them in order", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "coda-work-journal-"));
@@ -40,8 +59,8 @@ describe("file Work Journal Adapter", () => {
 			.split("\n")
 			.map((line) => JSON.parse(line));
 		expect(lines.map(({ version, sequence }) => [version, sequence])).toEqual([
-			[1, 1],
-			[1, 2],
+			[2, 1],
+			[2, 2],
 		]);
 
 		const restored = createFileWorkJournal(fileSystem, path);
@@ -76,6 +95,57 @@ describe("file Work Journal Adapter", () => {
 		const restored = createFileWorkJournal(fileSystem, path);
 		await expect(restored.load()).resolves.toEqual({ records: [settlement], diagnostics: [] });
 		await restored.close();
+	});
+
+	it("round-trips bounded Worker Facts without full Agent event payloads", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "coda-work-journal-facts-"));
+		temporaryDirectories.push(directory);
+		const path = join(directory, "work.jsonl");
+		const fact = workerFactRecord();
+		const journal = createFileWorkJournal(createNodeFileSystem(), path);
+		await journal.append(fact);
+		await journal.close();
+		const encoded = await readFile(path, "utf8");
+		expect(encoded).toContain('"type":"worker_fact"');
+		expect(encoded).not.toMatch(
+			/candidate|message_update|tool_execution_progress|arguments|result|worker_event|fatal_barrier_failed/u,
+		);
+		const restored = createFileWorkJournal(createNodeFileSystem(), path);
+		await expect(restored.load()).resolves.toEqual({ records: [fact], diagnostics: [] });
+		await restored.close();
+	});
+
+	it("rejects hidden or unbounded payloads at both v2 codec boundaries", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "coda-work-journal-invalid-facts-"));
+		temporaryDirectories.push(directory);
+		const path = join(directory, "work.jsonl");
+		const fact = workerFactRecord();
+		if (fact.type !== "worker_fact") throw new Error("Worker Fact fixture changed type");
+		const hiddenPayload = {
+			...fact,
+			fact: { ...fact.fact, candidate: { message: "must not be persisted" } },
+		} as unknown as WorkJournalRecord;
+		const journal = createFileWorkJournal(createNodeFileSystem(), path);
+		await expect(journal.append(hiddenPayload)).rejects.toThrow("unexpected field candidate");
+		await journal.close();
+
+		const invalidEnvelope = {
+			version: 2,
+			sequence: 1,
+			record: { ...fact, event: { type: "message_update", delta: "must not be decoded" } },
+		};
+		await writeFile(path, `${JSON.stringify(invalidEnvelope)}\n`);
+		const restored = createFileWorkJournal(createNodeFileSystem(), path);
+		await expect(restored.load()).rejects.toThrow("unexpected field event");
+	});
+
+	it("rejects v1 journals explicitly without decoding or migration", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "coda-work-journal-v1-"));
+		temporaryDirectories.push(directory);
+		const path = join(directory, "work.jsonl");
+		await writeFile(path, `${JSON.stringify({ version: 1, sequence: 1, record: record(1) })}\n`);
+		const journal = createFileWorkJournal(createNodeFileSystem(), path);
+		await expect(journal.load()).rejects.toThrow("Unsupported Work Journal version 1; this build requires version 2");
 	});
 
 	it("serializes concurrent fatal-barrier appends", async () => {
@@ -152,7 +222,7 @@ describe("file Work Journal Adapter", () => {
 		await repaired.close();
 		expect(await readFile(path, "utf8")).toBe(complete);
 
-		await writeFile(path, '{"version":1,"sequence":9,"record":{"type":"cancellation_requested"}}\n');
+		await writeFile(path, '{"version":2,"sequence":9,"record":{"type":"cancellation_requested"}}\n');
 		const corrupt = createFileWorkJournal(fileSystem, path);
 		await expect(corrupt.load()).rejects.toThrow("Invalid Work Journal record envelope at sequence 1");
 	});

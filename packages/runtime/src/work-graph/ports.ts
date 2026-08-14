@@ -1,5 +1,4 @@
 import type {
-	AgentEvent,
 	AgentInput,
 	AgentSeed,
 	AgentTool,
@@ -27,7 +26,8 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
-import type { WorkerRuntimeEvent } from "./worker-protocol.ts";
+import type { WorkerFact } from "./worker-fact.ts";
+import type { WorkerControlEvent, WorkerSessionEvent } from "./worker-protocol.ts";
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
 
@@ -49,7 +49,7 @@ export interface WorkerSession {
 	readonly id: string;
 	readonly seed?: AgentSeed;
 	readonly compactionCheckpoint?: CompactionCheckpoint;
-	accept(event: AgentEvent): Promise<void> | void;
+	accept(event: WorkerSessionEvent): Promise<void> | void;
 	record(change: WorkerSessionChange): Promise<void>;
 	close(): Promise<void>;
 }
@@ -204,12 +204,12 @@ export type WorkJournalRecord =
 			readonly payload?: JsonValue;
 	  }
 	| {
-			readonly type: "worker_event";
+			readonly type: "worker_fact";
 			readonly graphId: WorkGraphId;
 			readonly itemId: WorkItemId;
 			readonly runtimeId: string;
 			readonly sessionId: string;
-			readonly event: WorkerRuntimeEvent;
+			readonly fact: WorkerFact;
 	  }
 	| {
 			readonly type: "item_result";
@@ -289,12 +289,12 @@ export interface OpenCodingAgentOptions {
 	readonly skills: WorkerSkillsSource;
 	readonly mcp: WorkerMcpSource;
 	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
-	readonly controlWorkerEvent?: (event: {
+	readonly controlWorker?: (event: {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;
 		readonly runtimeId: string;
 		readonly sessionId: string;
 		readonly placement: WorkspacePlacementDescriptor;
-		readonly event: WorkerRuntimeEvent;
+		readonly event: WorkerControlEvent;
 	}) => Promise<void> | void;
 }

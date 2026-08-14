@@ -88,7 +88,10 @@ export class InteractiveInputController {
 			});
 		}
 		this.#queuePaused = this.#deferred.length > 0;
-		this.#detach = this.#work.subscribe((event) => this.#accept(event));
+		this.#detach = this.#work.subscribe({
+			accept: (event) => this.#accept(event),
+			resynchronize: ({ state }) => this.#resynchronize(state.status),
+		});
 	}
 
 	get queuePaused(): boolean {
@@ -481,6 +484,19 @@ export class InteractiveInputController {
 			const abandoned = this.#pendingSteering.splice(0);
 			for (const pending of abandoned) await pending.transaction.rollback();
 		}
+	}
+
+	async #resynchronize(status: "idle" | "running" | "settling"): Promise<void> {
+		if (status === "running" || status === "settling") {
+			if (this.#pendingPrompt) {
+				const pending = this.#pendingPrompt;
+				this.#pendingPrompt = undefined;
+				await pending.transaction.commit();
+			}
+			for (const pending of this.#pendingSteering.splice(0)) await pending.transaction.commit();
+			return;
+		}
+		for (const pending of this.#pendingSteering.splice(0)) await pending.transaction.rollback();
 	}
 
 	async #recordComposerSubmission(

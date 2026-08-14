@@ -1,4 +1,4 @@
-import type { AgentInput, RunBudgetExhaustion, RunResult } from "@coda/agent";
+import type { AgentInput, RunResult } from "@coda/agent";
 import type { JsonValue } from "@coda/ai";
 import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
 import { MemoryWorkJournal } from "./memory-journal.ts";
@@ -6,6 +6,7 @@ import type {
 	InputResourceReservation,
 	OpenCodingAgentOptions,
 	WorkJournal,
+	WorkJournalRecord,
 	WorkSessionReservation,
 	WorkspacePlacementReservation,
 } from "./ports.ts";
@@ -40,7 +41,18 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
-import type { WorkerRuntimeEvent, WorkerSubmission } from "./worker-protocol.ts";
+import {
+	INITIAL_WORKER_FACT_PROJECTION,
+	reduceWorkerFact,
+	type WorkerFact,
+	type WorkerFactProjection,
+} from "./worker-fact.ts";
+import type {
+	WorkerBarrierFailure,
+	WorkerControlEvent,
+	WorkerObservation,
+	WorkerSubmission,
+} from "./worker-protocol.ts";
 import { openPrivateWorkerRuntime, type PrivateWorkerRuntime } from "./worker-runtime.ts";
 
 const TERMINAL_STATES = new Set<WorkItemState>(["succeeded", "failed", "canceled", "interrupted", "blocked"]);
@@ -175,10 +187,8 @@ interface ItemRecord {
 	readonly pendingInputs: PendingInput[];
 	promptInput?: WorkerSubmission;
 	droppedInputs: number;
-	modelAttempts: number;
-	toolInvocations: number;
-	totalTokens: number;
-	exhaustion?: RunBudgetExhaustion;
+	factProjection: WorkerFactProjection;
+	barrierFailure?: WorkerBarrierFailure;
 	uncertainExternalEffect: boolean;
 	active: boolean;
 	settling?: Promise<void>;
@@ -319,9 +329,7 @@ function makeItem(input: {
 		diagnostics: [],
 		pendingInputs: [],
 		droppedInputs: 0,
-		modelAttempts: 0,
-		toolInvocations: 0,
-		totalTokens: 0,
+		factProjection: INITIAL_WORKER_FACT_PROJECTION,
 		uncertainExternalEffect: false,
 		active: false,
 		resourcesReleased: false,
@@ -347,6 +355,8 @@ class WorkCoordinator implements CodingAgent {
 	#closeOperation?: Promise<CodingAgentCloseResult>;
 	#submissionTail: Promise<void> = Promise.resolve();
 	#workerControllerAttached = true;
+	#journalFailure?: unknown;
+	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
 	#acceptingBatches = 0;
 	#scheduling = false;
 	#scheduleAgain = false;
@@ -366,7 +376,6 @@ class WorkCoordinator implements CodingAgent {
 	async initialize(): Promise<void> {
 		const restored = await this.#journal.load();
 		if (restored.records.length === 0) return;
-		const openInvocations = new Map<string, Set<string>>();
 		const openPublications = new Set<string>();
 		const publicationArtifacts = new Map<string, WorkspaceArtifact>();
 		const settledTargetIdentities = new Map<string, string>();
@@ -413,25 +422,17 @@ class WorkCoordinator implements CodingAgent {
 					item.state = record.to as WorkItemState;
 					break;
 				}
-				case "worker_event": {
+				case "worker_fact": {
 					const item = this.#restoredItem(record);
-					const key = itemKey(record.graphId, record.itemId);
-					if (record.event.type === "attempt_start") item.modelAttempts++;
-					if (record.event.type === "attempt_end")
-						item.totalTokens += record.event.candidate.message.usage.totalTokens;
-					if (record.event.type === "tool_execution_start") {
-						item.toolInvocations++;
-						let invocations = openInvocations.get(key);
-						if (!invocations) {
-							invocations = new Set();
-							openInvocations.set(key, invocations);
+					item.factProjection = reduceWorkerFact(item.factProjection, record.fact);
+					if (record.fact.type === "run_started") {
+						if (item.state === "preparing") item.state = "running";
+						else if (item.state !== "running") {
+							throw new Error(
+								`Work Journal run_started state mismatch for ${record.graphId}/${record.itemId}: ${item.state}`,
+							);
 						}
-						invocations.add(String(record.event.invocation.id));
 					}
-					if (record.event.type === "tool_execution_end") {
-						openInvocations.get(key)?.delete(String(record.event.invocation.id));
-					}
-					if (record.event.type === "run_budget_exhausted") item.exhaustion = record.event.exhaustion;
 					break;
 				}
 				case "item_result": {
@@ -442,6 +443,14 @@ class WorkCoordinator implements CodingAgent {
 					}
 					item.result = immutableData(result);
 					item.state = result.state;
+					item.factProjection = Object.freeze({
+						modelAttempts: result.budget.modelAttempts,
+						toolInvocations: result.budget.toolInvocations,
+						totalTokens: result.budget.totalTokens,
+						...(result.budget.exhaustion ? { exhaustion: result.budget.exhaustion } : {}),
+						openAttempts: Object.freeze([]),
+						openTools: Object.freeze([]),
+					});
 					break;
 				}
 				case "graph_result": {
@@ -534,7 +543,8 @@ class WorkCoordinator implements CodingAgent {
 				if (item.state === "preparing" || item.state === "running" || item.state === "settling") {
 					reasons.push(`uncertain_${item.state}`);
 				}
-				if ((openInvocations.get(key)?.size ?? 0) > 0) reasons.push("unclosed_tool_invocation");
+				if (item.factProjection.openAttempts.length > 0) reasons.push("unclosed_model_attempt");
+				if (item.factProjection.openTools.length > 0) reasons.push("unclosed_tool_invocation");
 				if (openPublications.has(key)) reasons.push("unclosed_publication");
 				const targetPlacementId = item.placementDescriptor?.targetPlacementId;
 				if (targetPlacementId && uncertainPublicationTargets.has(targetPlacementId)) {
@@ -742,7 +752,7 @@ class WorkCoordinator implements CodingAgent {
 		};
 		const result = this.#makeResult(item, "interrupted", publication, artifact);
 		item.result = result;
-		await this.#journal.append({
+		await this.#appendJournal({
 			type: "recovery_interrupted",
 			graphId: graph.id,
 			itemId: item.id,
@@ -825,6 +835,16 @@ class WorkCoordinator implements CodingAgent {
 				rejection: { code: "closed", message: "Coding Agent is closing or closed" },
 			});
 		}
+		if (this.#journalFailure) {
+			return immutableData({
+				status: "rejected",
+				batchId,
+				rejection: {
+					code: "journal_failed",
+					message: `Work Journal persistence is unavailable: ${errorMessage(this.#journalFailure)}`,
+				},
+			});
+		}
 		if (!batch || !Array.isArray(batch.commands) || batch.commands.length === 0) {
 			return immutableData({
 				status: "rejected",
@@ -844,7 +864,7 @@ class WorkCoordinator implements CodingAgent {
 			await this.#commitOwnershipReservations(plan);
 			await this.#mutationFence.run(async () => {
 				this.#revalidate(plan!);
-				await this.#journal.append({
+				await this.#appendJournal({
 					type: "batch_accepted",
 					batchId,
 					acceptedAt: this.#options.clock.now(),
@@ -1477,7 +1497,7 @@ class WorkCoordinator implements CodingAgent {
 				diagnostic = errorMessage(error);
 			}
 			try {
-				await this.#journal.append({
+				await this.#appendJournal({
 					type: "input_resources_settled",
 					graphId: delivery.graph.id,
 					itemId: delivery.item.id,
@@ -1728,6 +1748,7 @@ class WorkCoordinator implements CodingAgent {
 		try {
 			do {
 				this.#scheduleAgain = false;
+				if (this.#journalFailure) continue;
 				if (this.#acceptingBatches > 0) continue;
 				await this.#refreshPendingStates();
 				while (this.#processActiveConcurrency < this.#processMaximumConcurrency) {
@@ -1769,6 +1790,7 @@ class WorkCoordinator implements CodingAgent {
 				readonly item: ItemRecord;
 		  }
 		| undefined {
+		if (this.#journalFailure) return undefined;
 		for (const graph of this.#graphOrder) {
 			if (graph.result || graph.activeConcurrency >= graph.maximumConcurrency) continue;
 			for (const item of graph.itemOrder) {
@@ -1847,7 +1869,14 @@ class WorkCoordinator implements CodingAgent {
 							],
 						}
 					: {}),
-				onEvent: (event, runtimeId, sessionId) => this.#workerEvent(graph, item, event, runtimeId, sessionId),
+				commitFact: (fact, runtimeId, sessionId) => this.#commitWorkerFact(graph, item, fact, runtimeId, sessionId),
+				publishObservation: (observation, runtimeId, sessionId) =>
+					this.#publishWorkerObservation(graph, item, observation, runtimeId, sessionId),
+				controlWorker: (event, runtimeId, sessionId) =>
+					this.#deliverWorkerControl(graph, item, event, runtimeId, sessionId),
+				barrierFailed: (failure, runtimeId, sessionId) =>
+					this.#workerBarrierFailed(graph, item, failure, runtimeId, sessionId),
+				assertProgressAllowed: () => this.#assertProgressAllowed(),
 			});
 			if (item.cancellationRequested || item.controller.signal.aborted) {
 				item.runtime.cancel();
@@ -1873,7 +1902,12 @@ class WorkCoordinator implements CodingAgent {
 			await this.#transition(graph, item, "settling");
 			this.#deactivate(graph, item);
 		} catch (error) {
-			item.diagnostics.push({ code: "worker_failed", message: errorMessage(error) });
+			const runtime = item.runtime;
+			const barrierFailure = runtime?.barrierFailure();
+			if (barrierFailure && !item.barrierFailure) {
+				this.#workerBarrierFailed(graph, item, barrierFailure, runtime!.runtimeId, runtime!.sessionId);
+			}
+			if (!barrierFailure) item.diagnostics.push({ code: "worker_failed", message: errorMessage(error) });
 			item.run = {
 				runId: `failed:${item.id}` as RunResult["runId"],
 				outcome: item.cancellationRequested ? "aborted" : "error",
@@ -1881,6 +1915,11 @@ class WorkCoordinator implements CodingAgent {
 					? {}
 					: { failure: { kind: "runtime" as const, message: errorMessage(error) } }),
 			};
+			if (this.#journalFailure) {
+				this.#deactivate(graph, item);
+				await this.#settleAfterJournalFailure(graph, item);
+				return;
+			}
 			if (!isTerminal(item.state) && item.state !== "settling") {
 				try {
 					await this.#transition(graph, item, "settling");
@@ -1895,57 +1934,148 @@ class WorkCoordinator implements CodingAgent {
 		await this.#trySettleItem(graph, item);
 	}
 
-	async #workerEvent(
+	async #settleAfterJournalFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		if (item.result) return;
+		const from = item.state;
+		const safeFailedBarrier =
+			item.barrierFailure?.barrier === "work_journal" && !item.barrierFailure.externalEffectMayHaveOccurred;
+		const terminal: WorkResult["state"] = safeFailedBarrier ? "failed" : "interrupted";
+		if (item.runtime) {
+			try {
+				const closed = await item.runtime.close();
+				item.droppedInputs += closed.droppedExternalWork;
+			} catch (error) {
+				item.diagnostics.push({ code: "worker_close_failed", message: errorMessage(error) });
+			}
+		}
+		item.state = terminal;
+		const publication: PublicationOutcome =
+			terminal === "failed" ? { state: "not_required" } : { state: "not_published", reason: "interrupted" };
+		const result = this.#makeResult(item, terminal, publication);
+		item.result = result;
+		this.#publish((sequence) => ({
+			type: "item_state_changed",
+			sequence,
+			graphId: graph.id,
+			itemId: item.id,
+			from,
+			to: terminal,
+		}));
+		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
+		await this.#releaseResources(graph, item, true);
+		await this.#afterItemTerminal(graph, item);
+	}
+
+	async #commitWorkerFact(
 		graph: GraphRecord,
 		item: ItemRecord,
-		event: WorkerRuntimeEvent,
+		fact: WorkerFact,
 		runtimeId: string,
 		sessionId: string,
-	): Promise<void> {
-		if (event.type === "run_start" && item.state === "preparing") await this.#transition(graph, item, "running");
-		const record = async (): Promise<void> => {
-			if (event.type === "fatal_barrier_failed" && event.externalEffectMayHaveOccurred) {
-				item.uncertainExternalEffect = true;
+	): Promise<WorkerFactProjection> {
+		return this.#mutationFence.run(async () => {
+			this.#assertWorkerOwnership(item, runtimeId, sessionId);
+			const nextProjection = reduceWorkerFact(item.factProjection, fact);
+			const transitionFrom = fact.type === "run_started" && item.state === "preparing" ? "preparing" : undefined;
+			if (fact.type === "run_started" && !transitionFrom && item.state !== "running") {
+				throw new Error(`Work Item ${item.id} cannot start a Run in ${item.state}`);
 			}
-			if (event.type === "attempt_start") item.modelAttempts++;
-			if (event.type === "attempt_end") item.totalTokens += event.candidate.message.usage.totalTokens;
-			if (event.type === "tool_execution_start") item.toolInvocations++;
-			if (event.type === "run_budget_exhausted") item.exhaustion = event.exhaustion;
-			try {
-				await this.#journal.append({
-					type: "worker_event",
-					graphId: graph.id,
-					itemId: item.id,
-					runtimeId,
-					sessionId,
-					event,
-				});
-			} catch (error) {
-				const externalEffectMayHaveOccurred =
-					event.type === "fatal_barrier_failed"
-						? event.externalEffectMayHaveOccurred
-						: ![
-								"preparation_started",
-								"preparation_settled",
-								"run_start",
-								"turn_start",
-								"attempt_start",
-							].includes(event.type);
-				if (externalEffectMayHaveOccurred) item.uncertainExternalEffect = true;
-				throw error;
-			}
-			this.#publish((sequence) => ({
-				type: "work_item_event",
-				sequence,
+			await this.#appendJournal({
+				type: "worker_fact",
 				graphId: graph.id,
 				itemId: item.id,
 				runtimeId,
 				sessionId,
-				event: jsonValue(event),
-			}));
-		};
-		if (event.type === "turn_end" || event.type === "run_end") await this.#mutationFence.run(record);
-		else await record();
+				fact,
+			});
+			item.factProjection = nextProjection;
+			if (transitionFrom) {
+				item.state = "running";
+				this.#publish((sequence) => ({
+					type: "item_state_changed",
+					sequence,
+					graphId: graph.id,
+					itemId: item.id,
+					from: transitionFrom,
+					to: "running",
+				}));
+			}
+			return nextProjection;
+		});
+	}
+
+	#publishWorkerObservation(
+		graph: GraphRecord,
+		item: ItemRecord,
+		observation: WorkerObservation,
+		runtimeId: string,
+		sessionId: string,
+	): void {
+		this.#assertWorkerOwnership(item, runtimeId, sessionId);
+		let event: JsonValue;
+		try {
+			event = jsonValue(observation);
+		} catch (error) {
+			this.#diagnose(
+				{
+					code: "worker_observation_dropped",
+					message: `Worker Observation projection failed: ${errorMessage(error).slice(0, 384)}`,
+				},
+				graph.id,
+				item.id,
+			);
+			return;
+		}
+		this.#publish((sequence) => ({
+			type: "work_item_event",
+			sequence,
+			graphId: graph.id,
+			itemId: item.id,
+			runtimeId,
+			sessionId,
+			event,
+		}));
+	}
+
+	#workerBarrierFailed(
+		graph: GraphRecord,
+		item: ItemRecord,
+		failure: WorkerBarrierFailure,
+		runtimeId: string,
+		sessionId: string,
+	): void {
+		this.#assertWorkerOwnership(item, runtimeId, sessionId);
+		if (item.barrierFailure) return;
+		item.barrierFailure = failure;
+		if (failure.externalEffectMayHaveOccurred) item.uncertainExternalEffect = true;
+		item.diagnostics.push({
+			code: `${failure.barrier}_barrier_failed`,
+			message: `${failure.source}: ${failure.diagnostic}`,
+		});
+		if (failure.barrier === "work_journal") {
+			this.#latchJournalFailure(new Error(failure.diagnostic));
+			return;
+		}
+		this.#diagnose(
+			{
+				code: "session_barrier_failed",
+				message: `${failure.source}: ${failure.diagnostic}`.slice(0, 512),
+			},
+			graph.id,
+			item.id,
+		);
+	}
+
+	async #deliverWorkerControl(
+		graph: GraphRecord,
+		item: ItemRecord,
+		event: WorkerControlEvent,
+		runtimeId: string,
+		sessionId: string,
+	): Promise<void> {
+		this.#assertWorkerOwnership(item, runtimeId, sessionId);
+		const controller = this.#options.controlWorker;
+		if (!controller || !this.#workerControllerAttached) return;
 		if (!item.placementDescriptor) throw new Error(`Running Work Item ${item.id} has no Workspace placement`);
 		const envelope = {
 			graphId: graph.id,
@@ -1955,23 +2085,21 @@ class WorkCoordinator implements CodingAgent {
 			placement: item.placementDescriptor,
 			event,
 		};
-		await this.#controlWorkerEvent(envelope);
-	}
-
-	async #controlWorkerEvent(
-		envelope: Parameters<NonNullable<OpenCodingAgentOptions["controlWorkerEvent"]>>[0],
-	): Promise<void> {
-		const controller = this.#options.controlWorkerEvent;
-		if (!controller || !this.#workerControllerAttached) return;
 		try {
 			await controller(envelope);
 		} catch (error) {
 			this.#workerControllerAttached = false;
 			this.#diagnose(
-				{ code: "worker_controller_detached", message: errorMessage(error) },
-				envelope.graphId,
-				envelope.itemId,
+				{ code: "worker_controller_detached", message: errorMessage(error).slice(0, 512) },
+				graph.id,
+				item.id,
 			);
+		}
+	}
+
+	#assertWorkerOwnership(item: ItemRecord, runtimeId: string, sessionId: string): void {
+		if (item.runtimeId !== runtimeId || item.sessionId !== sessionId) {
+			throw new Error(`Worker ownership changed for Work Item ${item.id}`);
 		}
 	}
 
@@ -1985,13 +2113,15 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #settleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		let terminal: WorkResult["state"] = item.uncertainExternalEffect
+		let terminal: WorkResult["state"] = this.#journalFailure
 			? "interrupted"
-			: item.cancellationRequested || item.run?.outcome === "aborted"
-				? "canceled"
-				: item.run?.outcome === "success"
-					? "succeeded"
-					: "failed";
+			: item.uncertainExternalEffect
+				? "interrupted"
+				: item.cancellationRequested || item.run?.outcome === "aborted"
+					? "canceled"
+					: item.run?.outcome === "success"
+						? "succeeded"
+						: "failed";
 		let artifact: WorkspaceArtifact | undefined;
 		let publication: PublicationOutcome = { state: "not_required" };
 		const placement = item.placement?.placement;
@@ -2038,7 +2168,7 @@ class WorkCoordinator implements CodingAgent {
 					try {
 						publicationStarted = await this.#mutationFence.run(async () => {
 							if (item.cancellationRequested || graph.cancellationRequested) return false;
-							await this.#journal.append({
+							await this.#appendJournal({
 								type: "publication",
 								graphId: graph.id,
 								itemId: item.id,
@@ -2074,7 +2204,7 @@ class WorkCoordinator implements CodingAgent {
 					}
 				}
 				try {
-					await this.#journal.append({
+					await this.#appendJournal({
 						type: "publication",
 						graphId: graph.id,
 						itemId: item.id,
@@ -2146,11 +2276,11 @@ class WorkCoordinator implements CodingAgent {
 				}
 			: undefined;
 		const budget: WorkBudgetUsage = {
-			modelAttempts: item.modelAttempts,
-			toolInvocations: item.toolInvocations,
-			totalTokens: item.totalTokens,
+			modelAttempts: item.factProjection.modelAttempts,
+			toolInvocations: item.factProjection.toolInvocations,
+			totalTokens: item.factProjection.totalTokens,
 			elapsedMs: Math.max(0, settledAt - item.acceptedAt),
-			...(item.exhaustion ? { exhaustion: item.exhaustion } : {}),
+			...(item.factProjection.exhaustion ? { exhaustion: item.factProjection.exhaustion } : {}),
 		};
 		return immutableData({
 			itemId: item.id,
@@ -2184,7 +2314,7 @@ class WorkCoordinator implements CodingAgent {
 	async #recordResult(graph: GraphRecord, item: ItemRecord, result: WorkResult): Promise<void> {
 		await this.#mutationFence.run(async () => {
 			if (item.result) return;
-			await this.#journal.append({
+			await this.#appendJournal({
 				type: "item_result",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2220,7 +2350,7 @@ class WorkCoordinator implements CodingAgent {
 			}
 		}
 		try {
-			await this.#journal.append({
+			await this.#appendJournal({
 				type: "ownership_released",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2397,12 +2527,18 @@ class WorkCoordinator implements CodingAgent {
 				settledAt: this.#options.clock.now(),
 				finalPublication,
 			});
-			await this.#journal.append({
-				type: "graph_result",
-				graphId: graph.id,
-				timestamp: result.settledAt,
-				payload: jsonValue(result),
-			});
+			if (!this.#journalFailure) {
+				try {
+					await this.#appendJournal({
+						type: "graph_result",
+						graphId: graph.id,
+						timestamp: result.settledAt,
+						payload: jsonValue(result),
+					});
+				} catch {
+					if (!this.#journalFailure) throw new Error("Work Graph result persistence failed");
+				}
+			}
 			graph.result = result;
 			this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
 			this.#notifySettlementWaiters();
@@ -2422,7 +2558,7 @@ class WorkCoordinator implements CodingAgent {
 			if (!this.#transitionPermitted(from, to)) {
 				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
 			}
-			await this.#journal.append({
+			await this.#appendJournal({
 				type: "item_transition",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2570,6 +2706,50 @@ class WorkCoordinator implements CodingAgent {
 		}));
 	}
 
+	async #appendJournal(record: WorkJournalRecord): Promise<void> {
+		if (this.#journalFailure) throw this.#journalFailure;
+		try {
+			await this.#journal.append(record);
+		} catch (error) {
+			this.#latchJournalFailure(error);
+			throw error;
+		}
+	}
+
+	#latchJournalFailure(error: unknown): void {
+		if (this.#journalFailure) return;
+		this.#journalFailure = error;
+		for (const graph of this.#graphOrder) {
+			for (const item of graph.itemOrder) {
+				if (!item.active || isTerminal(item.state)) continue;
+				if (item.state === "preparing" || item.state === "running" || item.state === "settling") {
+					this.#undurableWork.set(`${graph.id}\0${item.id}`, {
+						graphId: graph.id,
+						itemId: item.id,
+						phase: item.state,
+					});
+				}
+				if (item.factProjection.openAttempts.length > 0 || item.factProjection.openTools.length > 0) {
+					item.uncertainExternalEffect = true;
+				}
+				item.controller?.abort(error);
+				try {
+					item.runtime?.cancel();
+				} catch {}
+			}
+		}
+		this.#diagnose({
+			code: "work_journal_persistence_failed",
+			message: errorMessage(error).slice(0, 512),
+		});
+	}
+
+	#assertProgressAllowed(): void {
+		if (this.#journalFailure) {
+			throw new Error(`Work Journal persistence is unavailable: ${errorMessage(this.#journalFailure)}`);
+		}
+	}
+
 	async #close(): Promise<CodingAgentCloseResult> {
 		await this.#submissionTail;
 		const canceledGraphIds = this.#graphOrder.filter((graph) => !graph.result).map((graph) => graph.id);
@@ -2577,7 +2757,7 @@ class WorkCoordinator implements CodingAgent {
 			if (graph.result) continue;
 			try {
 				await this.#mutationFence.run(async () => {
-					await this.#journal.append({
+					await this.#appendJournal({
 						type: "cancellation_requested",
 						graphId: graph.id,
 						timestamp: this.#options.clock.now(),
@@ -2603,18 +2783,24 @@ class WorkCoordinator implements CodingAgent {
 				),
 			0,
 		);
-		const unknownWork = this.#graphOrder.flatMap((graph) =>
+		const unsettledWork = this.#graphOrder.flatMap((graph) =>
 			graph.itemOrder.flatMap((item) => {
 				if (item.state !== "preparing" && item.state !== "running" && item.state !== "settling") return [];
 				return [{ graphId: graph.id, itemId: item.id, phase: item.state } as const];
 			}),
 		);
+		const unknownWork = [
+			...this.#undurableWork.values(),
+			...unsettledWork.filter((candidate) => !this.#undurableWork.has(`${candidate.graphId}\0${candidate.itemId}`)),
+		];
 		const result: CodingAgentCloseResult = immutableData({ canceledGraphIds, droppedInputs, unknownWork });
 		const failures: unknown[] = [];
-		try {
-			await this.#journal.flush();
-		} catch (error) {
-			failures.push(error);
+		if (!this.#journalFailure) {
+			try {
+				await this.#journal.flush();
+			} catch (error) {
+				failures.push(error);
+			}
 		}
 		try {
 			await this.#options.workspaceExecution.close();
@@ -2624,7 +2810,7 @@ class WorkCoordinator implements CodingAgent {
 		try {
 			await this.#journal.close();
 		} catch (error) {
-			failures.push(error);
+			if (!this.#journalFailure) failures.push(error);
 		}
 		this.#closed = true;
 		this.#publish((sequence) => ({ type: "closed", sequence, result }));

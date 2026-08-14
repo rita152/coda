@@ -812,12 +812,12 @@ export class Agent {
 		let terminal: AssistantMessageEvent | undefined;
 		for await (const event of stream) {
 			if (event.type === "start") {
-				await this.#emit(run, { type: "message_start", turnId, attemptId, messageId });
+				this.#emitObservation(run, { type: "message_start", turnId, attemptId, messageId });
 				continue;
 			}
 			const delta = eventDelta(event);
 			if (delta) {
-				await this.#emit(run, { type: "message_update", turnId, attemptId, messageId, delta });
+				this.#emitObservation(run, { type: "message_update", turnId, attemptId, messageId, delta });
 				continue;
 			}
 			terminal = event;
@@ -1274,24 +1274,14 @@ export class Agent {
 
 	async #settleTool(run: RunContext, turnId: TurnId, entry: AcceptedTool): Promise<ToolSettlement> {
 		let acceptsProgress = true;
-		let progressFailure: unknown;
-		let progressQueue = Promise.resolve();
 		const reportProgress = (progress: ToolExecutionProgress): void => {
 			if (!acceptsProgress || run.controller.signal.aborted) return;
 			const snapshot = cloneFrozen(progress);
-			progressQueue = progressQueue.then(async () => {
-				if (run.controller.signal.aborted) return;
-				try {
-					await this.#emit(run, {
-						type: "tool_execution_progress",
-						turnId,
-						invocation: entry.invocation,
-						progress: snapshot,
-					});
-				} catch (error) {
-					progressFailure ??= error;
-					run.controller.abort();
-				}
+			this.#emitObservation(run, {
+				type: "tool_execution_progress",
+				turnId,
+				invocation: entry.invocation,
+				progress: snapshot,
 			});
 		};
 		try {
@@ -1305,8 +1295,6 @@ export class Agent {
 				reportProgress,
 			});
 			acceptsProgress = false;
-			await progressQueue;
-			if (progressFailure !== undefined) throw progressFailure;
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			const result = this.#toolResult(entry.invocation, output);
 			return {
@@ -1317,7 +1305,6 @@ export class Agent {
 			};
 		} catch (error) {
 			acceptsProgress = false;
-			await progressQueue;
 			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
 			return {
 				entry,
@@ -1376,6 +1363,34 @@ export class Agent {
 		} catch (error) {
 			run.listenerFailures.push(error);
 		}
+	}
+
+	#emitObservation(
+		run: RunContext,
+		payload: Extract<AgentEventPayload, { type: "message_start" | "message_update" | "tool_execution_progress" }>,
+	): void {
+		const event = deepFreeze({
+			...payload,
+			runId: run.id,
+			sequence: ++run.sequence,
+			timestamp: this.#options.clock.now(),
+		}) as AgentEvent;
+		this.#runtimeState = reduceState(this.#runtimeState, { type: "event", event });
+		for (const listener of [...this.#listeners]) {
+			try {
+				const result = listener(event);
+				if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+					void Promise.resolve(result).catch(() => this.#removeListener(listener));
+				}
+			} catch {
+				this.#removeListener(listener);
+			}
+		}
+	}
+
+	#removeListener(listener: AgentEventListener): void {
+		const index = this.#listeners.indexOf(listener);
+		if (index >= 0) this.#listeners.splice(index, 1);
 	}
 
 	async #dispatch(run: RunContext, payload: AgentEventPayload): Promise<void> {
