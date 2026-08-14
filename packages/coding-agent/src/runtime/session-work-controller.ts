@@ -5,6 +5,7 @@ import type {
 	CodingAgentReceipt,
 	CodingAgentSnapshot,
 	DesiredRuntimeConfiguration,
+	WorkCapacityPolicy,
 	WorkerControlEvent,
 	WorkGraphId,
 	WorkGraphResult,
@@ -48,6 +49,7 @@ export interface SessionWorkHost {
 	readonly agent: CodingAgent;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
+	readonly capacity: WorkCapacityPolicy;
 	registerSelection(selection: SessionWorkSelection): void;
 	release(controller: SessionWorkController): Promise<void>;
 }
@@ -230,7 +232,7 @@ export class SessionWorkController {
 					graphId,
 					objective: objectiveFor(input),
 					root: { itemId, executionMode: "write" },
-					maximumConcurrency: 8,
+					maximumConcurrency: this.#host.capacity.graphMaximumConcurrency,
 					configuration: this.#configuration(),
 					session: { type: "resume", sessionId: this.sessionId },
 				},

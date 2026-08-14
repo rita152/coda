@@ -1,6 +1,6 @@
 # Make scheduling fair and admission local
 
-Status: ready-for-agent
+Status: resolved
 
 Implement the fair `WorkScheduler` Module and shorten the submission critical section as described in `../spec.md`.
 
@@ -19,3 +19,4 @@ Do not alter Work Graph durable schemas or Run capability assembly. Prefer a sma
 
 ## Comments
 
+Implemented deterministic round-robin Work scheduling with one explicit process/Graph capacity policy. Resource-backed input now settles outside the mutation fence behind per-Item admission holds, preserving durable acceptance, Prompt ownership, Publication order, and shutdown joining. Added 32-Session fairness, repeatability, delegation/cancellation cap, slow settlement, unrelated progress, and close stress coverage.

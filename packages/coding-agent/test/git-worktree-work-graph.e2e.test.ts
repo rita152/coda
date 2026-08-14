@@ -197,7 +197,7 @@ describe("Git worktree Work Graph end to end", () => {
 				resolveConfiguration: () => ({ model: faux.getModel(), reasoning: "off", authSnapshot: { auth: {} } }),
 				clock: time.clock,
 				idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
-				processMaximumConcurrency: 3,
+				capacity: { processMaximumConcurrency: 3, graphMaximumConcurrency: 3 },
 				platform: process.platform,
 				interactionMode: "evaluation",
 			});

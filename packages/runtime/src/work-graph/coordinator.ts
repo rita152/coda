@@ -31,6 +31,7 @@ import type {
 	ObservationOptions,
 	PublicationOutcome,
 	WorkBudgetUsage,
+	WorkCapacityPolicy,
 	WorkDiagnostic,
 	WorkGraphId,
 	WorkGraphOutcome,
@@ -46,6 +47,7 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
+import { WorkScheduler } from "./work-scheduler.ts";
 import {
 	INITIAL_WORKER_FACT_PROJECTION,
 	reduceWorkerFact,
@@ -162,8 +164,41 @@ class MutationFence {
 	}
 }
 
+interface AdmissionTurn {
+	readonly ready: Promise<void>;
+	release(): void;
+}
+
+class AdmissionOrder {
+	#tail: Promise<void> = Promise.resolve();
+
+	reserve(): AdmissionTurn {
+		const ready = this.#tail;
+		let finish!: () => void;
+		const completed = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		this.#tail = ready.then(() => completed);
+		let released = false;
+		return {
+			ready,
+			release: () => {
+				if (released) return;
+				released = true;
+				finish();
+			},
+		};
+	}
+}
+
 interface PendingInput {
 	readonly submission: WorkerSubmission;
+}
+
+interface InputAdmission {
+	readonly deliveryId: string;
+	readonly command: DeliverWorkItemInput;
+	settlement?: { readonly outcome: "committed" | "failed"; readonly diagnostic?: string };
 }
 
 interface ItemRecord {
@@ -193,6 +228,8 @@ interface ItemRecord {
 	placementDescriptor?: WorkspacePlacementDescriptor;
 	readonly diagnostics: WorkDiagnostic[];
 	readonly pendingInputs: PendingInput[];
+	readonly inputAdmissions: InputAdmission[];
+	promptAccepted: boolean;
 	promptInput?: WorkerSubmission;
 	droppedInputs: number;
 	factProjection: WorkerFactProjection;
@@ -217,6 +254,7 @@ interface GraphRecord {
 	readonly acceptedAt: number;
 	readonly items: Map<WorkItemId, ItemRecord>;
 	readonly itemOrder: ItemRecord[];
+	nextItemOrder: number;
 	activeConcurrency: number;
 	effectiveConcurrency: number;
 	cancellationRequested: boolean;
@@ -231,7 +269,6 @@ interface DeliveryPlan {
 	readonly graph: GraphRecord;
 	readonly item: ItemRecord;
 	resource?: InputResourceReservation;
-	resourceFailure?: string;
 }
 
 interface ConfigurationPlan {
@@ -337,6 +374,8 @@ function makeItem(input: {
 		cancellationRequested: false,
 		diagnostics: [],
 		pendingInputs: [],
+		inputAdmissions: [],
+		promptAccepted: false,
 		droppedInputs: 0,
 		factProjection: INITIAL_WORKER_FACT_PROJECTION,
 		uncertainExternalEffect: false,
@@ -359,9 +398,12 @@ class WorkCoordinator implements CodingAgent {
 	readonly #sessionLeases = new Map<string, { readonly graphId: WorkGraphId; readonly itemId: WorkItemId }>();
 	readonly #quarantinedSessionIds = new Set<string>();
 	readonly #subscribers = new Set<Subscriber>();
-	readonly #processMaximumConcurrency: number;
+	readonly #capacity: WorkCapacityPolicy;
+	readonly #workScheduler: WorkScheduler;
 	readonly #mutationFence = new MutationFence();
 	readonly #graphMutationFences = new Map<WorkGraphId, MutationFence>();
+	readonly #admissionOrder = new AdmissionOrder();
+	readonly #submissions = new Set<Promise<CodingAgentReceipt>>();
 	#processActiveConcurrency = 0;
 	#nextGraphOrder = 0;
 	#nextPublicationOrder = 0;
@@ -369,12 +411,10 @@ class WorkCoordinator implements CodingAgent {
 	#closed = false;
 	#closing = false;
 	#closeOperation?: Promise<CodingAgentCloseResult>;
-	#submissionTail: Promise<void> = Promise.resolve();
 	#workerControllerAttached = true;
 	#ledgerFailure?: unknown;
 	#ledgerFailStop?: Promise<void>;
 	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
-	#acceptingBatches = 0;
 	#scheduling = false;
 	#scheduleAgain = false;
 	readonly #settlementWaiters: Array<() => void> = [];
@@ -383,11 +423,8 @@ class WorkCoordinator implements CodingAgent {
 	constructor(options: OpenCodingAgentOptions) {
 		this.#options = options;
 		this.#persistence = options.persistence ?? new MemoryWorkspacePersistence();
-		const maximum = options.processMaximumConcurrency ?? 8;
-		if (!Number.isSafeInteger(maximum) || maximum < 1) {
-			throw new Error("processMaximumConcurrency must be a positive safe integer");
-		}
-		this.#processMaximumConcurrency = maximum;
+		this.#capacity = immutableData(options.capacity);
+		this.#workScheduler = new WorkScheduler(this.#capacity);
 	}
 
 	async initialize(): Promise<void> {
@@ -451,13 +488,13 @@ class WorkCoordinator implements CodingAgent {
 						throw new Error(`Restored input resource delivery target changed: ${record.deliveryId}`);
 					}
 					pendingResourceInputs.delete(record.deliveryId);
-					if (record.outcome === "committed") this.#restoreDelivery(pending.item, pending.command);
-					else
-						recordResourceFailure(
-							record.graphId,
-							record.itemId,
-							`input_resource_commit_failed${record.diagnostic ? `:${record.diagnostic}` : ""}`,
-						);
+					const failures = this.#settleInputAdmission(
+						pending.item,
+						record.deliveryId,
+						record.outcome,
+						record.diagnostic,
+					);
+					for (const failure of failures) recordResourceFailure(record.graphId, record.itemId, failure);
 					break;
 				}
 				case "item_transition": {
@@ -688,7 +725,12 @@ class WorkCoordinator implements CodingAgent {
 		for (const definition of batch.graphs) {
 			const id = graphId(assertIdentity(definition.graphId, "graph"));
 			if (this.#graphs.has(id)) throw new Error(`Duplicate restored Work Graph: ${id}`);
-			if (!Number.isSafeInteger(definition.order) || !Number.isSafeInteger(definition.maximumConcurrency)) {
+			if (
+				!Number.isSafeInteger(definition.order) ||
+				!Number.isSafeInteger(definition.maximumConcurrency) ||
+				definition.maximumConcurrency < 1 ||
+				definition.maximumConcurrency > this.#capacity.graphMaximumConcurrency
+			) {
 				throw new Error(`Invalid restored Work Graph definition: ${id}`);
 			}
 			const graph: GraphRecord = {
@@ -700,6 +742,7 @@ class WorkCoordinator implements CodingAgent {
 				acceptedAt: definition.acceptedAt,
 				items: new Map(),
 				itemOrder: [],
+				nextItemOrder: 0,
 				activeConcurrency: 0,
 				effectiveConcurrency: 0,
 				cancellationRequested: false,
@@ -731,6 +774,7 @@ class WorkCoordinator implements CodingAgent {
 			item.placementDescriptor = immutableData(definition.placement);
 			graph.items.set(id, item);
 			graph.itemOrder.push(item);
+			graph.nextItemOrder = Math.max(graph.nextItemOrder, item.order + 1);
 		}
 		if (!Array.isArray(batch.commands)) throw new Error("Restored Work Graph batch has no command list");
 		for (const [commandIndex, command] of batch.commands.entries()) {
@@ -746,9 +790,11 @@ class WorkCoordinator implements CodingAgent {
 					const graph = this.#graphs.get(graphId(String(command.graphId)));
 					const item = graph?.items.get(itemId(String(command.itemId)));
 					if (!item) throw new Error(`Restored DeliverWorkItemInput target not found: ${command.itemId}`);
+					const deliveryId = `${batchId}:${commandIndex}`;
+					this.#restoreInputAdmission(item, command, deliveryId);
 					if ((command.resources?.length ?? 0) > 0) {
-						pendingResourceInputs.set(`${batchId}:${commandIndex}`, { graph: graph!, item, command });
-					} else this.#restoreDelivery(item, command);
+						pendingResourceInputs.set(deliveryId, { graph: graph!, item, command });
+					}
 					break;
 				}
 				case "cancel_work": {
@@ -774,12 +820,17 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	#restoreDelivery(item: ItemRecord, command: DeliverWorkItemInput): void {
-		const submission = this.#createSubmission(item, command.kind, command.input, command.resources ?? []);
+	#restoreInputAdmission(item: ItemRecord, command: DeliverWorkItemInput, deliveryId: string): void {
 		if (command.kind === "prompt") {
-			if (item.promptInput) throw new Error(`Restored Work Item has duplicate Prompt input: ${item.id}`);
-			item.promptInput = submission;
-		} else item.pendingInputs.push({ submission });
+			if (item.promptAccepted) throw new Error(`Restored Work Item has duplicate Prompt input: ${item.id}`);
+			item.promptAccepted = true;
+		}
+		item.inputAdmissions.push({
+			deliveryId,
+			command,
+			...((command.resources?.length ?? 0) === 0 ? { settlement: { outcome: "committed" as const } } : {}),
+		});
+		this.#drainInputAdmissions(item);
 	}
 
 	#restoredItem(record: { readonly graphId: WorkGraphId; readonly itemId: WorkItemId }): ItemRecord {
@@ -875,10 +926,11 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
-		const operation = this.#submissionTail.then(() => this.#submit(batch));
-		this.#submissionTail = operation.then(
-			() => undefined,
-			() => undefined,
+		const operation = this.#submit(batch);
+		this.#submissions.add(operation);
+		void operation.then(
+			() => this.#submissions.delete(operation),
+			() => this.#submissions.delete(operation),
 		);
 		return operation;
 	}
@@ -956,15 +1008,16 @@ class WorkCoordinator implements CodingAgent {
 			});
 		}
 
-		this.#acceptingBatches++;
+		const admission = this.#admissionOrder.reserve();
 		let plan: BatchPlan | undefined;
 		let durablyAccepted = false;
 		let sequence = 0;
 		try {
-			plan = this.#plan(batch, batchId);
+			plan = await this.#mutationFence.run(() => this.#plan(batch, batchId));
 			await this.#validateConfigurations(plan);
 			await this.#reserve(plan);
 			await this.#commitOwnershipReservations(plan);
+			await admission.ready;
 			await this.#mutationFence.run(() =>
 				this.#graphMutation(plan!.targetGraphId, async () => {
 					this.#revalidate(plan!);
@@ -984,14 +1037,7 @@ class WorkCoordinator implements CodingAgent {
 					durablyAccepted = true;
 					this.#accept(plan!);
 					this.#acceptOperations(plan!);
-					await this.#commitAcceptedInputResources(plan!);
-					this.#acceptResourceBackedInputs(plan!);
-					const resourceFailedItems = new Set(
-						plan!.deliveries.filter((delivery) => delivery.resourceFailure).map((delivery) => delivery.item),
-					);
-					for (const delivery of plan!.deliveries) {
-						if (!resourceFailedItems.has(delivery.item)) this.#flushPendingInputs(delivery.item);
-					}
+					this.#acceptInputAdmissions(plan!);
 					sequence = this.#publish((value) => ({
 						type: "batch_accepted",
 						sequence: value,
@@ -1007,8 +1053,8 @@ class WorkCoordinator implements CodingAgent {
 			} else if (plan) {
 				await this.#rollbackReservations(plan);
 			}
+			admission.release();
 			if (durablyAccepted && plan) {
-				this.#acceptingBatches--;
 				this.#requestSchedule();
 				return immutableData({
 					status: "accepted",
@@ -1024,11 +1070,12 @@ class WorkCoordinator implements CodingAgent {
 					: this.#ledgerFailure
 						? { code: "ledger_failed" as const, message: errorMessage(error) }
 						: { code: "graph_store_failed" as const, message: errorMessage(error), graphId: plan?.targetGraphId };
-			this.#acceptingBatches--;
 			this.#requestSchedule();
 			return immutableData({ status: "rejected", batchId, rejection });
 		}
 		if (!plan) throw new Error("Accepted command batch has no plan");
+		admission.release();
+		this.#requestSchedule();
 
 		// batch_accepted is the linearization point. Once that fatal barrier
 		// succeeds, this command can never be reported as rejected or rolled back.
@@ -1037,7 +1084,11 @@ class WorkCoordinator implements CodingAgent {
 		} catch (error) {
 			this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
 		}
-		this.#acceptingBatches--;
+		try {
+			await this.#settleAcceptedInputResources(plan);
+		} catch (error) {
+			this.#diagnose({ code: "input_resource_settlement_failed", message: errorMessage(error) });
+		}
 		this.#requestSchedule();
 		return immutableData({
 			status: "accepted",
@@ -1060,7 +1111,6 @@ class WorkCoordinator implements CodingAgent {
 		const targetGraphIds = new Set<WorkGraphId>();
 		const graphs = new Map(this.#graphs);
 		const itemViews = new Map<WorkGraphId, Map<WorkItemId, ItemRecord>>();
-		const addedCounts = new Map<WorkGraphId, number>();
 		const view = (graph: GraphRecord): Map<WorkItemId, ItemRecord> => {
 			let items = itemViews.get(graph.id);
 			if (!items) {
@@ -1141,10 +1191,14 @@ class WorkCoordinator implements CodingAgent {
 					}
 					targetGraphIds.add(id);
 					const rootId = itemId(assertIdentity(String(command.root?.itemId), "item"));
-					if (!Number.isSafeInteger(command.maximumConcurrency) || command.maximumConcurrency < 1) {
+					if (
+						!Number.isSafeInteger(command.maximumConcurrency) ||
+						command.maximumConcurrency < 1 ||
+						command.maximumConcurrency > this.#capacity.graphMaximumConcurrency
+					) {
 						throw rejected({
 							code: "invalid_command",
-							message: "maximumConcurrency must be a positive safe integer",
+							message: `maximumConcurrency must be between 1 and ${this.#capacity.graphMaximumConcurrency}`,
 							commandIndex,
 						});
 					}
@@ -1175,13 +1229,14 @@ class WorkCoordinator implements CodingAgent {
 					}
 					const graph: GraphRecord = {
 						id,
-						order: this.#nextGraphOrder + newGraphs.length,
+						order: this.#nextGraphOrder++,
 						objective,
 						rootId,
 						maximumConcurrency: command.maximumConcurrency,
 						acceptedAt: now,
 						items: new Map(),
 						itemOrder: [],
+						nextItemOrder: 1,
 						activeConcurrency: 0,
 						effectiveConcurrency: 0,
 						cancellationRequested: false,
@@ -1194,7 +1249,7 @@ class WorkCoordinator implements CodingAgent {
 						executionMode: command.root.executionMode,
 						configuration: command.configuration,
 						acceptedAt: now,
-						publicationOrder: this.#nextPublicationOrder + newItems.length,
+						publicationOrder: this.#nextPublicationOrder++,
 						runtimeId: `worker:${id}:${rootId}:${this.#options.idGenerator.generate("queue_item")}`,
 					});
 					graphs.set(id, graph);
@@ -1223,12 +1278,10 @@ class WorkCoordinator implements CodingAgent {
 							specification,
 							commandIndex,
 							items: view(graph),
-							order: graph.itemOrder.length + (addedCounts.get(graph.id) ?? 0),
 							now,
 							newItems,
 							itemIds,
 						});
-						addedCounts.set(graph.id, (addedCounts.get(graph.id) ?? 0) + 1);
 					}
 					if (!graphIds.includes(graph.id)) graphIds.push(graph.id);
 					break;
@@ -1250,7 +1303,7 @@ class WorkCoordinator implements CodingAgent {
 					}
 					if (
 						command.kind === "prompt" &&
-						(item.promptInput !== undefined ||
+						(item.promptAccepted ||
 							item.runtime !== undefined ||
 							item.state === "running" ||
 							item.state === "settling" ||
@@ -1326,7 +1379,6 @@ class WorkCoordinator implements CodingAgent {
 		readonly specification: AddWorkItemSpecification;
 		readonly commandIndex: number;
 		readonly items: Map<WorkItemId, ItemRecord>;
-		readonly order: number;
 		readonly now: number;
 		readonly newItems: NewItemPlan[];
 		readonly itemIds: WorkItemId[];
@@ -1398,14 +1450,14 @@ class WorkCoordinator implements CodingAgent {
 		const item = makeItem({
 			graphId: graph.id,
 			itemId: id,
-			order: input.order,
+			order: graph.nextItemOrder++,
 			parentId,
 			dependencies,
 			objective: assertObjective(specification.objective, "Work Item objective"),
 			executionMode: specification.executionMode,
 			configuration,
 			acceptedAt: input.now,
-			publicationOrder: this.#nextPublicationOrder + input.newItems.length,
+			publicationOrder: this.#nextPublicationOrder++,
 			runtimeId: `worker:${graph.id}:${id}:${this.#options.idGenerator.generate("queue_item")}`,
 		});
 		items.set(id, item);
@@ -1540,11 +1592,39 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	#revalidate(plan: BatchPlan): void {
+		const newGraphIds = new Set(plan.newGraphs.map(({ id }) => id));
+		for (const graph of plan.newGraphs) {
+			if (this.#graphs.has(graph.id)) {
+				throw rejected({
+					code: "duplicate_identity",
+					message: `Work Graph ${graph.id} was accepted by an earlier batch`,
+					graphId: graph.id,
+				});
+			}
+		}
 		for (const entry of plan.newItems) {
+			if (!newGraphIds.has(entry.graph.id)) {
+				if (this.#graphs.get(entry.graph.id) !== entry.graph || entry.graph.items.has(entry.item.id)) {
+					throw rejected({
+						code: "duplicate_identity",
+						message: `Work Item ${entry.item.id} was accepted by an earlier batch`,
+						graphId: entry.graph.id,
+						itemId: entry.item.id,
+					});
+				}
+			}
 			if (entry.graph.result || entry.graph.cancellationRequested) {
 				throw rejected({
 					code: "invalid_state",
 					message: `Work Graph ${entry.graph.id} settled while the batch was reserving resources`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			if (entry.item.sessionId && this.#sessionLeases.has(entry.item.sessionId)) {
+				throw rejected({
+					code: "session_leased",
+					message: `Session was leased by an earlier batch: ${entry.item.sessionId}`,
 					graphId: entry.graph.id,
 					itemId: entry.item.id,
 				});
@@ -1582,7 +1662,7 @@ class WorkCoordinator implements CodingAgent {
 			}
 			if (
 				command.kind === "prompt" &&
-				(item.promptInput !== undefined ||
+				(item.promptAccepted ||
 					item.runtime !== undefined ||
 					item.state === "preparing" ||
 					item.state === "running")
@@ -1627,34 +1707,57 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	async #commitAcceptedInputResources(plan: BatchPlan): Promise<void> {
-		for (const delivery of plan.deliveries) {
-			if ((delivery.command.resources?.length ?? 0) === 0) continue;
-			let outcome: "committed" | "failed" = "committed";
-			let diagnostic: string | undefined;
-			try {
-				if (!delivery.resource) throw new Error("Accepted input has no resource reservation");
-				await delivery.resource.commit();
-			} catch (error) {
-				outcome = "failed";
-				diagnostic = errorMessage(error);
-			}
-			try {
-				await this.#appendGraphRecord(delivery.graph.id, {
-					type: "input_resources_settled",
-					graphId: delivery.graph.id,
-					itemId: delivery.item.id,
-					deliveryId: delivery.deliveryId,
-					outcome,
-					timestamp: this.#options.clock.now(),
-					...(diagnostic ? { diagnostic } : {}),
-				});
-			} catch (error) {
-				outcome = "failed";
-				diagnostic = `Input resource settlement was not journaled: ${errorMessage(error)}`;
-			}
-			if (outcome === "failed") delivery.resourceFailure = diagnostic ?? "Input resource commit failed";
+	async #settleAcceptedInputResources(plan: BatchPlan): Promise<void> {
+		await Promise.all(
+			plan.deliveries
+				.filter(({ command }) => (command.resources?.length ?? 0) > 0)
+				.map((delivery) => this.#settleAcceptedInputResource(delivery)),
+		);
+	}
+
+	async #settleAcceptedInputResource(delivery: DeliveryPlan): Promise<void> {
+		let outcome: "committed" | "failed" = "committed";
+		let diagnostic: string | undefined;
+		try {
+			if (!delivery.resource) throw new Error("Accepted input has no resource reservation");
+			// Resource I/O is intentionally outside the Coordinator mutation fence.
+			await delivery.resource.commit();
+		} catch (error) {
+			outcome = "failed";
+			diagnostic = errorMessage(error);
 		}
+
+		let failures: readonly string[] = [];
+		try {
+			failures = await this.#mutationFence.run(() =>
+				this.#graphMutation(delivery.graph.id, async () => {
+					await this.#appendGraphRecord(delivery.graph.id, {
+						type: "input_resources_settled",
+						graphId: delivery.graph.id,
+						itemId: delivery.item.id,
+						deliveryId: delivery.deliveryId,
+						outcome,
+						timestamp: this.#options.clock.now(),
+						...(diagnostic ? { diagnostic } : {}),
+					});
+					return this.#settleInputAdmission(delivery.item, delivery.deliveryId, outcome, diagnostic);
+				}),
+			);
+		} catch (error) {
+			this.#diagnose(
+				{
+					code: "input_resource_settlement_unknown",
+					message: `Input resource settlement was not persisted: ${errorMessage(error)}`,
+				},
+				delivery.graph.id,
+				delivery.item.id,
+			);
+			return;
+		}
+
+		if (failures.length > 0) await this.#interruptForInputResourceFailure(delivery.graph, delivery.item);
+		else this.#flushPendingInputs(delivery.item);
+		this.#requestSchedule();
 	}
 
 	async #rollbackReservations(plan: BatchPlan): Promise<void> {
@@ -1701,39 +1804,62 @@ class WorkCoordinator implements CodingAgent {
 		for (const { command, item } of plan.configurations) {
 			item.desiredConfiguration = immutableData(command.configuration);
 		}
-		for (const delivery of plan.deliveries) {
-			if ((delivery.command.resources?.length ?? 0) === 0) this.#queueDelivery(delivery);
-		}
 		for (const cancellation of plan.cancellations) {
 			this.#markCancellation(cancellation.graph, cancellation.item);
 		}
 	}
 
-	#acceptResourceBackedInputs(plan: BatchPlan): void {
+	#acceptInputAdmissions(plan: BatchPlan): void {
+		const touched = new Set<ItemRecord>();
 		for (const delivery of plan.deliveries) {
-			if ((delivery.command.resources?.length ?? 0) === 0) continue;
-			if (delivery.resourceFailure) {
-				delivery.item.diagnostics.push({
-					code: "input_resource_commit_failed",
-					message: delivery.resourceFailure,
-				});
-				delivery.item.uncertainExternalEffect = true;
-				delivery.item.cancellationRequested = true;
-				continue;
-			}
-			this.#queueDelivery(delivery);
+			if (delivery.command.kind === "prompt") delivery.item.promptAccepted = true;
+			delivery.item.inputAdmissions.push({
+				deliveryId: delivery.deliveryId,
+				command: delivery.command,
+				...((delivery.command.resources?.length ?? 0) === 0
+					? { settlement: { outcome: "committed" as const } }
+					: {}),
+			});
+			touched.add(delivery.item);
 		}
+		for (const item of touched) this.#drainInputAdmissions(item);
 	}
 
-	#queueDelivery(delivery: DeliveryPlan): void {
-		const submission = this.#createSubmission(
-			delivery.item,
-			delivery.command.kind,
-			delivery.command.input,
-			delivery.command.resources ?? [],
-		);
-		if (delivery.command.kind === "prompt") delivery.item.promptInput = submission;
-		else delivery.item.pendingInputs.push({ submission });
+	#settleInputAdmission(
+		item: ItemRecord,
+		deliveryId: string,
+		outcome: "committed" | "failed",
+		diagnostic?: string,
+	): readonly string[] {
+		const admission = item.inputAdmissions.find((candidate) => candidate.deliveryId === deliveryId);
+		if (!admission) throw new Error(`Input admission not found: ${deliveryId}`);
+		if (admission.settlement) throw new Error(`Input admission already settled: ${deliveryId}`);
+		admission.settlement = { outcome, ...(diagnostic ? { diagnostic } : {}) };
+		return this.#drainInputAdmissions(item);
+	}
+
+	#drainInputAdmissions(item: ItemRecord): readonly string[] {
+		const failures: string[] = [];
+		while (item.inputAdmissions[0]?.settlement) {
+			const admission = item.inputAdmissions.shift()!;
+			const settlement = admission.settlement!;
+			if (settlement.outcome === "committed") {
+				if (!isTerminal(item.state) && !item.cancellationRequested) this.#queueDelivery(item, admission.command);
+				continue;
+			}
+			const diagnostic = settlement.diagnostic ?? "Input resource commit failed";
+			item.diagnostics.push({ code: "input_resource_commit_failed", message: diagnostic });
+			item.uncertainExternalEffect = true;
+			item.cancellationRequested = true;
+			failures.push(`input_resource_commit_failed${settlement.diagnostic ? `:${settlement.diagnostic}` : ""}`);
+		}
+		return failures;
+	}
+
+	#queueDelivery(item: ItemRecord, command: DeliverWorkItemInput): void {
+		const submission = this.#createSubmission(item, command.kind, command.input, command.resources ?? []);
+		if (command.kind === "prompt") item.promptInput = submission;
+		else item.pendingInputs.push({ submission });
 	}
 
 	#markCancellation(graph: GraphRecord, target?: ItemRecord): void {
@@ -1783,8 +1909,11 @@ class WorkCoordinator implements CodingAgent {
 	async #acceptWorkspaceGraphs(plan: BatchPlan): Promise<void> {
 		const ledger = this.#ledger;
 		if (!ledger) throw new Error("Workspace Ledger is not open");
-		const nextGraphOrder = this.#nextGraphOrder + plan.newGraphs.length;
-		const nextPublicationOrder = this.#nextPublicationOrder + plan.newItems.length;
+		// Planning reserves monotonically increasing ordinals under the mutation
+		// fence. Rejections may leave gaps, but an accepted Ledger watermark must
+		// never allocate the same ordinal a second time.
+		const nextGraphOrder = this.#nextGraphOrder;
+		const nextPublicationOrder = this.#nextPublicationOrder;
 		try {
 			await ledger.accept({
 				activeGraphs: plan.newGraphs.map((graph) => ({ graphId: graph.id, order: graph.order })),
@@ -1864,14 +1993,7 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #applyAcceptedOperations(plan: BatchPlan): Promise<void> {
-		const resourceFailedItems = new Set<ItemRecord>();
-		for (const delivery of plan.deliveries) {
-			if (!delivery.resourceFailure || resourceFailedItems.has(delivery.item)) continue;
-			resourceFailedItems.add(delivery.item);
-			await this.#interruptForInputResourceFailure(delivery);
-		}
 		for (const { command, item } of plan.configurations) {
-			if (resourceFailedItems.has(item)) continue;
 			if (item.runtime) {
 				try {
 					await item.runtime.configure(command.configuration);
@@ -1881,7 +2003,6 @@ class WorkCoordinator implements CodingAgent {
 			}
 		}
 		for (const delivery of plan.deliveries) {
-			if (resourceFailedItems.has(delivery.item)) continue;
 			this.#flushPendingInputs(delivery.item);
 		}
 		for (const cancellation of plan.cancellations) {
@@ -1889,8 +2010,7 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	async #interruptForInputResourceFailure(delivery: DeliveryPlan): Promise<void> {
-		const { graph, item } = delivery;
+	async #interruptForInputResourceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
 		item.controller?.abort(new Error("Input resource commit failed"));
 		try {
 			item.runtime?.cancel();
@@ -1975,10 +2095,17 @@ class WorkCoordinator implements CodingAgent {
 			do {
 				this.#scheduleAgain = false;
 				if (this.#ledgerFailure) continue;
-				if (this.#acceptingBatches > 0) continue;
 				await this.#refreshPendingStates();
-				while (this.#processActiveConcurrency < this.#processMaximumConcurrency) {
-					const selected = this.#nextSchedulableItem();
+				for (;;) {
+					const selected = this.#workScheduler.next({
+						activeProcessConcurrency: this.#processActiveConcurrency,
+						graphs: this.#graphOrder.map((graph) => ({
+							graphId: graph.id,
+							activeConcurrency: graph.activeConcurrency,
+							maximumConcurrency: graph.maximumConcurrency,
+							next: () => this.#nextSchedulableInGraph(graph),
+						})),
+					});
 					if (!selected) break;
 					if (selected.kind === "delegation_resume") {
 						const pending = selected.item.delegationResume;
@@ -1989,7 +2116,7 @@ class WorkCoordinator implements CodingAgent {
 						pending.resolve();
 						continue;
 					}
-					await this.#transition(selected.graph, selected.item, "preparing");
+					if (!(await this.#transition(selected.graph, selected.item, "preparing"))) continue;
 					this.#activate(selected.graph, selected.item);
 					void this.#runItem(selected.graph, selected.item).catch((error) => {
 						this.#diagnose(
@@ -2009,21 +2136,17 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	#nextSchedulableItem():
+	#nextSchedulableInGraph(graph: GraphRecord):
 		| {
 				readonly kind: "delegation_resume" | "start";
 				readonly graph: GraphRecord;
 				readonly item: ItemRecord;
 		  }
 		| undefined {
-		if (this.#ledgerFailure) return undefined;
-		for (const graph of this.#graphOrder) {
-			if (graph.result || this.#graphFailures.has(graph.id) || graph.activeConcurrency >= graph.maximumConcurrency)
-				continue;
-			for (const item of graph.itemOrder) {
-				if (item.delegationResume) return { kind: "delegation_resume", graph, item };
-				if (item.state === "ready") return { kind: "start", graph, item };
-			}
+		if (this.#ledgerFailure || this.#graphFailures.has(graph.id) || graph.result) return undefined;
+		for (const item of graph.itemOrder) {
+			if (item.delegationResume) return { kind: "delegation_resume", graph, item };
+			if (item.state === "ready" && item.inputAdmissions.length === 0) return { kind: "start", graph, item };
 		}
 		return undefined;
 	}
@@ -2062,7 +2185,7 @@ class WorkCoordinator implements CodingAgent {
 						parent.state === "running" ||
 						parent.state === "settling" ||
 						parent.state === "succeeded";
-					if (dependenciesSucceeded && parentPermits) {
+					if (dependenciesSucceeded && parentPermits && item.inputAdmissions.length === 0) {
 						await this.#transition(graph, item, "ready");
 						changed = true;
 					}
@@ -2794,71 +2917,73 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #trySettleGraph(graph: GraphRecord): Promise<void> {
-		if (graph.result || graph.itemOrder.length === 0 || this.#acceptingBatches > 0) return;
+		if (graph.result || graph.itemOrder.length === 0) return;
 		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
 		if (graph.settlement) return graph.settlement;
-		const operation = this.#graphMutation(graph.id, async () => {
-			if (graph.result || graph.itemOrder.length === 0 || this.#acceptingBatches > 0) return;
-			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
-			const root = graph.items.get(graph.rootId);
-			if (!root?.result) return;
-			const results = graph.itemOrder.map((item) => item.result!);
-			const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
-				? "interrupted"
-				: graph.cancellationRequested || root.result.state === "canceled"
-					? "canceled"
-					: root.result.state === "failed" || root.result.state === "blocked"
-						? "failed"
-						: results.some((result) => result.state !== "succeeded")
-							? "partial"
-							: "succeeded";
-			const publications = results.map((result) => result.publication.state);
-			const finalPublication = publications.includes("not_published")
-				? publications.includes("published")
-					? "mixed"
-					: "not_published"
-				: publications.includes("published")
-					? "published"
-					: "not_required";
-			let result: WorkGraphResult = immutableData({
-				durability:
-					this.#ledgerFailure ||
-					this.#graphFailures.has(graph.id) ||
-					results.some(({ durability }) => durability === "unknown")
-						? "unknown"
-						: "confirmed",
-				graphId: graph.id,
-				rootItemId: graph.rootId,
-				objective: graph.objective,
-				outcome,
-				maximumConcurrency: graph.maximumConcurrency,
-				effectiveConcurrency: graph.effectiveConcurrency,
-				results,
-				cancellationRequested: graph.cancellationRequested,
-				acceptedAt: graph.acceptedAt,
-				settledAt: this.#options.clock.now(),
-				finalPublication,
-			});
-			if (result.durability === "confirmed") {
-				try {
-					await this.#appendGraphRecord(graph.id, {
-						type: "graph_result",
-						graphId: graph.id,
-						timestamp: result.settledAt,
-						payload: jsonValue(result),
-					});
-					await this.#archiveDurableGraph(graph);
-				} catch {
-					if (!this.#ledgerFailure && !this.#graphFailures.has(graph.id)) {
-						throw new Error("Work Graph result persistence failed");
+		const operation = this.#mutationFence.run(() =>
+			this.#graphMutation(graph.id, async () => {
+				if (graph.result || graph.itemOrder.length === 0) return;
+				if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+				const root = graph.items.get(graph.rootId);
+				if (!root?.result) return;
+				const results = graph.itemOrder.map((item) => item.result!);
+				const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
+					? "interrupted"
+					: graph.cancellationRequested || root.result.state === "canceled"
+						? "canceled"
+						: root.result.state === "failed" || root.result.state === "blocked"
+							? "failed"
+							: results.some((result) => result.state !== "succeeded")
+								? "partial"
+								: "succeeded";
+				const publications = results.map((result) => result.publication.state);
+				const finalPublication = publications.includes("not_published")
+					? publications.includes("published")
+						? "mixed"
+						: "not_published"
+					: publications.includes("published")
+						? "published"
+						: "not_required";
+				let result: WorkGraphResult = immutableData({
+					durability:
+						this.#ledgerFailure ||
+						this.#graphFailures.has(graph.id) ||
+						results.some(({ durability }) => durability === "unknown")
+							? "unknown"
+							: "confirmed",
+					graphId: graph.id,
+					rootItemId: graph.rootId,
+					objective: graph.objective,
+					outcome,
+					maximumConcurrency: graph.maximumConcurrency,
+					effectiveConcurrency: graph.effectiveConcurrency,
+					results,
+					cancellationRequested: graph.cancellationRequested,
+					acceptedAt: graph.acceptedAt,
+					settledAt: this.#options.clock.now(),
+					finalPublication,
+				});
+				if (result.durability === "confirmed") {
+					try {
+						await this.#appendGraphRecord(graph.id, {
+							type: "graph_result",
+							graphId: graph.id,
+							timestamp: result.settledAt,
+							payload: jsonValue(result),
+						});
+						await this.#archiveDurableGraph(graph);
+					} catch {
+						if (!this.#ledgerFailure && !this.#graphFailures.has(graph.id)) {
+							throw new Error("Work Graph result persistence failed");
+						}
+						result = immutableData({ ...result, durability: "unknown" });
 					}
-					result = immutableData({ ...result, durability: "unknown" });
 				}
-			}
-			graph.result = result;
-			this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
-			this.#notifySettlementWaiters();
-		});
+				graph.result = result;
+				this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
+				this.#notifySettlementWaiters();
+			}),
+		);
 		graph.settlement = operation;
 		try {
 			await operation;
@@ -2867,10 +2992,21 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<void> {
-		await this.#graphMutation(graph.id, async () => {
+	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<boolean> {
+		return this.#graphMutation(graph.id, async () => {
 			const from = item.state;
-			if (from === to) return;
+			if (from === to) return false;
+			if (
+				to === "preparing" &&
+				(item.inputAdmissions.length > 0 ||
+					item.cancellationRequested ||
+					graph.cancellationRequested ||
+					graph.result !== undefined ||
+					graph.activeConcurrency >= graph.maximumConcurrency ||
+					this.#processActiveConcurrency >= this.#capacity.processMaximumConcurrency)
+			) {
+				return false;
+			}
 			if (!this.#transitionPermitted(from, to)) {
 				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
 			}
@@ -2891,6 +3027,7 @@ class WorkCoordinator implements CodingAgent {
 				from,
 				to,
 			}));
+			return true;
 		});
 	}
 
@@ -3155,7 +3292,7 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #close(): Promise<CodingAgentCloseResult> {
-		await this.#submissionTail;
+		while (this.#submissions.size > 0) await Promise.allSettled([...this.#submissions]);
 		await this.#ledgerFailStop;
 		await Promise.all(this.#graphFailStops.values());
 		const canceledGraphIds = this.#graphOrder.filter((graph) => !graph.result).map((graph) => graph.id);

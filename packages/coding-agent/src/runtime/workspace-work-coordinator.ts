@@ -10,6 +10,7 @@ import {
 	type OpenCodingAgentOptions,
 	openCodingAgent,
 	type RunModelSelection,
+	type WorkCapacityPolicy,
 	type WorkRunEvidence,
 } from "@coda/runtime";
 import type { FileSystem } from "../host/file-system.ts";
@@ -38,6 +39,12 @@ type WorkSessionStore = OpenCodingAgentOptions["sessions"];
 type WorkSessionReserveRequest = Parameters<WorkSessionStore["reserve"]>[0];
 type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tools"]>>[number];
+
+const DEFAULT_WORK_CONCURRENCY = 8;
+const DEFAULT_WORK_CAPACITY_POLICY: WorkCapacityPolicy = Object.freeze({
+	processMaximumConcurrency: DEFAULT_WORK_CONCURRENCY,
+	graphMaximumConcurrency: DEFAULT_WORK_CONCURRENCY,
+});
 
 interface SessionBinding {
 	readonly id: string;
@@ -301,6 +308,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly models: Models;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
+	readonly capacity?: WorkCapacityPolicy;
 	readonly scheduler?: OpenCodingAgentOptions["scheduler"];
 	readonly runBudget?: RunBudget;
 	readonly maxOutputTokens?: number;
@@ -314,6 +322,7 @@ export function createWorkspaceWorkCoordinator(options: {
 		context: WorkspaceExecutionFactoryContext,
 	) => WorkspaceExecution | Promise<WorkspaceExecution>;
 }): WorkspaceWorkCoordinator {
+	const capacity = options.capacity ?? DEFAULT_WORK_CAPACITY_POLICY;
 	const sessions = new WorkspaceWorkSessions({
 		...(options.resumeDurableRoot ? { resumeDurableRoot: options.resumeDurableRoot } : {}),
 	});
@@ -505,7 +514,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					},
 					clock: options.clock,
 					idGenerator: options.idGenerator,
-					processMaximumConcurrency: 8,
+					capacity,
 					...(options.scheduler ? { scheduler: options.scheduler } : {}),
 					...(options.runBudget ? { runBudget: options.runBudget } : {}),
 					...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
@@ -546,6 +555,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					agent: openedAgent,
 					clock: options.clock,
 					idGenerator: options.idGenerator,
+					capacity,
 					registerSelection,
 					release: async (controller) => {
 						if (controllers.get(controller.sessionId) !== controller) return;

@@ -474,7 +474,10 @@ async function harness(
 		}),
 		clock,
 		idGenerator: new TestIds(),
-		processMaximumConcurrency: overrides.processMaximumConcurrency ?? 8,
+		capacity: {
+			processMaximumConcurrency: overrides.processMaximumConcurrency ?? 64,
+			graphMaximumConcurrency: 64,
+		},
 		platform: "linux",
 		interactionMode: "evaluation",
 		...(overrides.controlWorker ? { controlWorker: overrides.controlWorker } : {}),
@@ -721,6 +724,7 @@ describe("Work Graph public Interface", () => {
 		child.resolve();
 		const result = await waitForGraphResult(agent, "graph:delegation-cancel");
 		expect(result.results.map(({ state }) => state)).toEqual(["canceled", "canceled"]);
+		expect(result.effectiveConcurrency).toBe(1);
 		await agent.close();
 	});
 
@@ -1650,6 +1654,8 @@ describe("Work Graph public Interface", () => {
 			],
 			{ processMaximumConcurrency: 2 },
 		);
+		const firstResult = waitForGraphResult(agent, "graph:first");
+		const secondResult = waitForGraphResult(agent, "graph:second");
 		await agent.submit({ commands: [start("graph:first", 2)] });
 		await agent.submit({
 			commands: [
@@ -1673,12 +1679,69 @@ describe("Work Graph public Interface", () => {
 		await vi.waitFor(() => expect(modelCalls).toHaveLength(4));
 		firstRoot.resolve();
 		secondRoot.resolve();
-		const [firstResult, secondResult] = await Promise.all([
-			waitForGraphResult(agent, "graph:first"),
-			waitForGraphResult(agent, "graph:second"),
-		]);
-		expect(firstResult.effectiveConcurrency).toBe(2);
-		expect(secondResult.effectiveConcurrency).toBe(1);
+		const [settledFirst, settledSecond] = await Promise.all([firstResult, secondResult]);
+		expect(settledFirst.effectiveConcurrency).toBe(2);
+		expect(settledSecond.effectiveConcurrency).toBe(1);
+		await agent.close();
+	});
+
+	it("gives 32 ready Sessions bounded progress before returning to an older hot Graph", async () => {
+		const run = deferred();
+		const hotChildren = Array.from({ length: 8 }, (_, index) => ({
+			itemId: `hot-child:${index}`,
+			parentItemId: "root",
+			objective: `hot child objective ${index}`,
+			executionMode: "read_only" as const,
+		}));
+		const { agent, modelContexts } = await harness(
+			Array.from({ length: 32 + hotChildren.length }, () => ({ gate: run.promise })),
+			{ processMaximumConcurrency: 4 },
+		);
+		const sessionStarts = Array.from({ length: 31 }, (_, index) => ({
+			...start(`graph:session:${index + 1}`, 4),
+			objective: `session objective ${index + 1}`,
+			root: {
+				itemId: "root",
+				objective: `session objective ${index + 1}`,
+				executionMode: "write" as const,
+			},
+		}));
+		const results = [
+			waitForGraphResult(agent, "graph:hot"),
+			...sessionStarts.map((_, index) => waitForGraphResult(agent, `graph:session:${index + 1}`)),
+		];
+		await agent.submit({
+			commands: [
+				{
+					...start("graph:hot", 4),
+					objective: "hot root objective",
+					root: { itemId: "root", objective: "hot root objective", executionMode: "write" },
+				},
+			],
+		});
+		for (const sessionStart of sessionStarts) await agent.submit({ commands: [sessionStart] });
+		await agent.submit({
+			commands: [{ type: "add_work_items", graphId: "graph:hot", items: hotChildren }],
+		});
+
+		await vi.waitFor(() => expect(modelContexts).toHaveLength(4));
+		expect(modelContexts[0]).toContain("hot root objective");
+		for (let session = 1; session <= 3; session++) {
+			expect(modelContexts[session]).toContain(`session objective ${session}`);
+		}
+		expect(modelContexts.slice(0, 4).join("\n")).not.toContain("hot child objective");
+
+		run.resolve();
+		const settled = await Promise.all(results);
+		expect(modelContexts).toHaveLength(32 + hotChildren.length);
+		expect(modelContexts.slice(0, 32).join("\n")).not.toContain("hot child objective");
+		for (let session = 1; session <= 31; session++) {
+			expect(modelContexts.slice(0, 32).some((context) => context.includes(`session objective ${session}`))).toBe(
+				true,
+			);
+		}
+		expect(settled[0]?.effectiveConcurrency).toBeLessThanOrEqual(4);
+		expect(settled.slice(1).every(({ effectiveConcurrency }) => effectiveConcurrency === 1)).toBe(true);
 		await agent.close();
 	});
 
@@ -1800,6 +1863,164 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 	});
 
+	it("holds only a slow resource-backed Prompt while another accepted Graph starts", async () => {
+		const resourceCommitStarted = deferred();
+		const resourceCommit = deferred();
+		const journal = new MemoryWorkspacePersistence();
+		const { agent, modelCalls, modelContexts } = await harness([{}, {}], {
+			persistence: journal,
+			resources: {
+				reserve: async () => ({
+					commit: async () => {
+						resourceCommitStarted.resolve();
+						await resourceCommit.promise;
+					},
+					rollback: () => Promise.resolve(),
+				}),
+			},
+		});
+		let slowAccepted = false;
+		const slow = agent
+			.submit({
+				batchId: "batch:slow-prompt",
+				commands: [
+					{
+						...start("graph:slow-prompt", 1),
+						objective: "fallback objective must remain held",
+						root: {
+							itemId: "root",
+							objective: "fallback objective must remain held",
+							executionMode: "write",
+						},
+					},
+					{
+						type: "deliver_work_item_input",
+						graphId: "graph:slow-prompt",
+						itemId: "root",
+						kind: "prompt",
+						input: "settled resource prompt",
+						resources: ["resource:slow"],
+					},
+				],
+			})
+			.then((receipt) => {
+				slowAccepted = true;
+				return receipt;
+			});
+		await resourceCommitStarted.promise;
+
+		await expect(agent.submit({ commands: [start("graph:unrelated", 1)] })).resolves.toMatchObject({
+			status: "accepted",
+		});
+		await waitForGraphResult(agent, "graph:unrelated");
+		expect(slowAccepted).toBe(false);
+		expect(modelCalls).toHaveLength(1);
+		expect(modelContexts.join("\n")).not.toMatch(/fallback objective must remain held|settled resource prompt/u);
+
+		resourceCommit.resolve();
+		await expect(slow).resolves.toMatchObject({ status: "accepted" });
+		await waitForGraphResult(agent, "graph:slow-prompt");
+		expect(modelCalls).toHaveLength(2);
+		expect(modelContexts.at(-1)).toContain("settled resource prompt");
+		expect(modelContexts.at(-1)).not.toContain("fallback objective must remain held");
+		expect(journal.records.map(({ type }) => type)).toContain("input_resources_settled");
+		await agent.close();
+	});
+
+	it("continues scheduling accepted Graphs while another batch reserves input resources", async () => {
+		const blocker = deferred();
+		const reservationStarted = deferred();
+		const reservation = deferred();
+		let rollbacks = 0;
+		const { agent, modelCalls } = await harness([{ gate: blocker.promise }, {}], {
+			processMaximumConcurrency: 1,
+			resources: {
+				reserve: async () => {
+					reservationStarted.resolve();
+					await reservation.promise;
+					return {
+						commit: () => Promise.resolve(),
+						rollback: async () => {
+							rollbacks++;
+						},
+					};
+				},
+			},
+		});
+		const blockerResult = waitForGraphResult(agent, "graph:reservation-blocker");
+		const unrelatedResult = waitForGraphResult(agent, "graph:reservation-unrelated");
+		await agent.submit({ commands: [start("graph:reservation-blocker", 1)] });
+		await vi.waitFor(() => expect(modelCalls).toHaveLength(1));
+		await agent.submit({ commands: [start("graph:reservation-unrelated", 1)] });
+		const delivery = agent.submit({
+			commands: [
+				{
+					type: "deliver_work_item_input",
+					graphId: "graph:reservation-blocker",
+					itemId: "root",
+					kind: "follow_up",
+					input: "too late after reservation",
+					resources: ["resource:reservation"],
+				},
+			],
+		});
+		await reservationStarted.promise;
+
+		blocker.resolve();
+		await vi.waitFor(() => expect(modelCalls).toHaveLength(2));
+		await unrelatedResult;
+		reservation.resolve();
+		await expect(delivery).resolves.toMatchObject({ status: "rejected", rejection: { code: "invalid_state" } });
+		expect(rollbacks).toBe(1);
+		await blockerResult;
+		await agent.close();
+	});
+
+	it("close joins a durably accepted submission still settling input resources", async () => {
+		const resourceCommitStarted = deferred();
+		const resourceCommit = deferred();
+		const journal = new MemoryWorkspacePersistence();
+		const { agent } = await harness([{}], {
+			persistence: journal,
+			resources: {
+				reserve: async () => ({
+					commit: async () => {
+						resourceCommitStarted.resolve();
+						await resourceCommit.promise;
+					},
+					rollback: () => Promise.resolve(),
+				}),
+			},
+		});
+		const submission = agent.submit({
+			batchId: "batch:close-settlement",
+			commands: [
+				start("graph:close-settlement", 1),
+				{
+					type: "deliver_work_item_input",
+					graphId: "graph:close-settlement",
+					itemId: "root",
+					kind: "prompt",
+					input: "settle before close",
+					resources: ["resource:close"],
+				},
+			],
+		});
+		await resourceCommitStarted.promise;
+		let closed = false;
+		const closing = agent.close().then((result) => {
+			closed = true;
+			return result;
+		});
+		await Promise.resolve();
+		expect(closed).toBe(false);
+
+		resourceCommit.resolve();
+		await expect(submission).resolves.toMatchObject({ status: "accepted" });
+		await expect(closing).resolves.toMatchObject({ unknownWork: [] });
+		expect(journal.records.some(({ type }) => type === "input_resources_settled")).toBe(true);
+	});
+
 	it("accepts durably but interrupts Work before the Model when input resource commit fails", async () => {
 		const journal = new MemoryWorkspacePersistence();
 		let rollbacks = 0;
@@ -1816,6 +2037,7 @@ describe("Work Graph public Interface", () => {
 				}),
 			},
 		});
+		const graphResult = waitForGraphResult(agent, "graph:resource-commit-fails");
 
 		const receipt = await agent.submit({
 			batchId: "batch:resource-commit-fails",
@@ -1832,7 +2054,7 @@ describe("Work Graph public Interface", () => {
 			],
 		});
 		expect(receipt).toMatchObject({ status: "accepted" });
-		const result = await waitForGraphResult(agent, "graph:resource-commit-fails");
+		const result = await graphResult;
 
 		expect(modelCalls).toEqual([]);
 		expect(rollbacks).toBe(0);
@@ -1923,6 +2145,7 @@ describe("Work Graph public Interface", () => {
 				},
 			},
 		});
+		const graphResult = waitForGraphResult(agent, "graph:resource-race");
 		await agent.submit({ commands: [start("graph:resource-race", 1)] });
 		await vi.waitFor(() => expect(modelCalls).toHaveLength(1));
 		const delivery = agent.submit({
@@ -1948,7 +2171,7 @@ describe("Work Graph public Interface", () => {
 		expect(
 			journal.records.some((record) => record.type === "batch_accepted" && record.batchId === "batch:resource-race"),
 		).toBe(false);
-		await waitForGraphResult(agent, "graph:resource-race");
+		await graphResult;
 		await agent.close();
 	});
 

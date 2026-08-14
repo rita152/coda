@@ -20,6 +20,11 @@ export type WorkItemState =
 	| "blocked";
 export type WorkGraphOutcome = "succeeded" | "partial" | "failed" | "canceled" | "interrupted";
 
+export interface WorkCapacityPolicy {
+	readonly processMaximumConcurrency: number;
+	readonly graphMaximumConcurrency: number;
+}
+
 export interface DesiredRuntimeConfiguration {
 	readonly model: {
 		readonly provider: string;

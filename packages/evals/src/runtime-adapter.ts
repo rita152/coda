@@ -200,7 +200,7 @@ export async function openEvaluationWorkGraph(options: {
 		resolveConfiguration: () => ({ model, reasoning: "off", authSnapshot: { auth: {} } }),
 		clock: options.clock,
 		idGenerator: options.idGenerator,
-		processMaximumConcurrency: 1,
+		capacity: { processMaximumConcurrency: 1, graphMaximumConcurrency: 1 },
 		platform: "linux",
 		interactionMode: "evaluation",
 	});

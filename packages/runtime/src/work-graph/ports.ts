@@ -6,6 +6,7 @@ import type { RunCapabilityHost, RunModelSelection, RunToolContribution } from "
 import type {
 	DesiredRuntimeConfiguration,
 	PublicationOutcome,
+	WorkCapacityPolicy,
 	WorkExecutionMode,
 	WorkGraphId,
 	WorkItemId,
@@ -296,7 +297,7 @@ export interface OpenCodingAgentOptions {
 	readonly runCapabilities: RunCapabilityHost;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
-	readonly processMaximumConcurrency?: number;
+	readonly capacity: WorkCapacityPolicy;
 	readonly scheduler?: RuntimeScheduler;
 	readonly runBudget?: RunBudget;
 	readonly maxOutputTokens?: number;
