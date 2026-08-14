@@ -26,7 +26,7 @@ import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
 import { selectFromTerminal } from "./interactive/prompts.ts";
 import { ProviderManager } from "./providers/provider-manager.ts";
-import { createFileWorkJournal } from "./runtime/file-work-journal.ts";
+import { createFileWorkspacePersistence } from "./runtime/file-workspace-persistence.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
@@ -351,8 +351,8 @@ export function createNodeCodingAgentApplication(
 		fullScreenOutput,
 		terminalFactory,
 		sessions,
-		workJournal: ({ workspaceId }) =>
-			createFileWorkJournal(fileSystem, join(homeDirectory, ".coda", "work-journals", `${workspaceId}.jsonl`)),
+		workspacePersistence: ({ workspaceId }) =>
+			createFileWorkspacePersistence(fileSystem, join(homeDirectory, ".coda", "workspaces", workspaceId)),
 		keybindings: [],
 		diagnostics: diagnosticOutput,
 		runtime: {

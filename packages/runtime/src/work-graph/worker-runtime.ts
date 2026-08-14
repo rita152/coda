@@ -425,7 +425,7 @@ export async function openPrivateWorkerRuntime(request: {
 				factProjection = await request.commitFact(disposition.fact, request.runtimeId, sessionId);
 			} catch (error) {
 				observations.skipAgent(String(observation.runId), observation.sequence);
-				latchFailure("work_journal", disposition.fact.type, error);
+				latchFailure("work_graph_store", disposition.fact.type, error);
 				throw error;
 			}
 		}

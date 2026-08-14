@@ -290,7 +290,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly platform: NodeJS.Platform;
 	readonly interactionMode: "interactive" | "print";
 	readonly projectInstructions?: TrustedProjectInstructions;
-	readonly journal?: OpenCodingAgentOptions["journal"];
+	readonly persistence?: OpenCodingAgentOptions["persistence"];
 	readonly resources?: OpenCodingAgentOptions["resources"];
 	readonly resumeDurableRoot?: (sessionId: string) => Promise<Session>;
 	readonly createWorkspaceExecution?: (
@@ -430,7 +430,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					workspaceExecution: activeWorkspaceExecution,
 					sessions: sessions.adapter,
 					...(options.resources ? { resources: options.resources } : {}),
-					...(options.journal ? { journal: options.journal } : {}),
+					...(options.persistence ? { persistence: options.persistence } : {}),
 					models: options.models,
 					resolveConfiguration: async (configuration) => {
 						const cached = drivers.get(driverKey(configuration.model.provider, configuration.model.id));

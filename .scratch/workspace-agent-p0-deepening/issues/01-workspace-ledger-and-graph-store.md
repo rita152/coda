@@ -1,6 +1,6 @@
 # Replace the monolithic Work Journal
 
-Status: ready-for-agent
+Status: resolved
 
 Implement the `WorkspaceLedger` and per-Graph `WorkGraphStore` architecture in `../spec.md`.
 
@@ -19,3 +19,4 @@ Do not redesign scheduler fairness or Run capability composition. Destructive sc
 
 ## Comments
 
+Replaced the monolithic Work Journal with a process-leased WorkspaceLedger and independent per-Graph stores, including active Session-owner reconciliation, terminal archive, orphan quarantine, Runtime codecs, Node layout/repair, and application composition. Shared memory/Node contracts plus Coordinator tests cover lease exclusion, independent fsync tails, Graph-local versus Workspace-fatal failures, terminal restore filtering, and ordinal/owner recovery.

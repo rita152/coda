@@ -548,7 +548,7 @@
       "summary": "A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.",
       "sources": [
         "packages/coding-agent/src/runtime/direct-workspace-execution.ts",
-        "packages/coding-agent/src/runtime/file-work-journal.ts",
+        "packages/coding-agent/src/runtime/file-workspace-persistence.ts",
         "packages/coding-agent/src/runtime/git-worktree-workspace-execution.ts",
         "packages/coding-agent/src/runtime/workspace-input-resources.ts",
         "packages/coding-agent/src/runtime/workspace-work-coordinator.ts",
@@ -558,7 +558,7 @@
       ],
       "tests": [
         "packages/coding-agent/test/direct-workspace-execution.test.ts",
-        "packages/coding-agent/test/file-work-journal.test.ts",
+        "packages/coding-agent/test/file-workspace-persistence.test.ts",
         "packages/coding-agent/test/git-worktree-work-graph.e2e.test.ts",
         "packages/coding-agent/test/git-worktree-workspace-execution.test.ts",
         "packages/coding-agent/test/session-work-controller.test.ts",

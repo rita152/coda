@@ -21,8 +21,13 @@ import {
 	type WorkResult,
 } from "../src/index.ts";
 import { createCodingSkillsSnapshot } from "../src/skills/snapshot.ts";
-import { MemoryWorkJournal } from "../src/work-graph/memory-journal.ts";
-import type { WorkJournalRecord } from "../src/work-graph/ports.ts";
+import { MemoryWorkspacePersistence } from "../src/work-graph/memory-workspace-persistence.ts";
+import type {
+	WorkGraphRecord,
+	WorkGraphStore,
+	WorkspacePersistence,
+	WorkspacePersistenceLease,
+} from "../src/work-graph/ports.ts";
 
 class TestIds implements IdGenerator {
 	#next = 0;
@@ -250,66 +255,117 @@ class MemoryWorkspaceExecution {
 	}
 }
 
-class FailOnceJournal implements NonNullable<OpenCodingAgentOptions["journal"]> {
-	readonly memory = new MemoryWorkJournal();
-	readonly attempts: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0][] = [];
-	readonly #fail: (record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]) => boolean;
+function interceptGraphStores(
+	lease: WorkspacePersistenceLease,
+	beforeAppend: (record: WorkGraphRecord) => Promise<void> | void,
+): WorkspacePersistenceLease {
+	const stores = new Map<WorkGraphId, WorkGraphStore>();
+	return Object.freeze({
+		...lease,
+		openGraph: async (graphId: WorkGraphId) => {
+			const current = stores.get(graphId);
+			if (current) return current;
+			const underlying = await lease.openGraph(graphId);
+			const store: WorkGraphStore = Object.freeze({
+				load: () => underlying.load(),
+				append: async (record: WorkGraphRecord) => {
+					await beforeAppend(record);
+					await underlying.append(record);
+				},
+				flush: () => underlying.flush(),
+				close: () => underlying.close(),
+			});
+			stores.set(graphId, store);
+			return store;
+		},
+	});
+}
+
+class FailOnceGraphPersistence implements WorkspacePersistence {
+	readonly memory = new MemoryWorkspacePersistence();
+	readonly attempts: WorkGraphRecord[] = [];
+	readonly #fail: (record: WorkGraphRecord) => boolean;
 	#failed = false;
 
-	constructor(fail: (record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]) => boolean) {
+	constructor(fail: (record: WorkGraphRecord) => boolean) {
 		this.#fail = fail;
 	}
 
-	load() {
-		return this.memory.load();
-	}
-
-	append(record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]): Promise<void> {
-		this.attempts.push(structuredClone(record));
-		if (!this.#failed && this.#fail(record)) {
-			this.#failed = true;
-			return Promise.reject(new Error("scripted fatal journal barrier"));
-		}
-		return this.memory.append(record);
-	}
-
-	flush() {
-		return this.memory.flush();
-	}
-
-	close() {
-		return this.memory.close();
+	async acquire(): Promise<WorkspacePersistenceLease> {
+		return interceptGraphStores(await this.memory.acquire(), (record) => {
+			this.attempts.push(structuredClone(record));
+			if (!this.#failed && this.#fail(record)) {
+				this.#failed = true;
+				throw new Error("scripted fatal graph barrier");
+			}
+		});
 	}
 }
 
-class GatedJournal implements NonNullable<OpenCodingAgentOptions["journal"]> {
-	readonly memory = new MemoryWorkJournal();
+class GatedGraphPersistence implements WorkspacePersistence {
+	readonly memory = new MemoryWorkspacePersistence();
 	readonly started = deferred();
 	readonly release = deferred();
-	readonly #gate: (record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]) => boolean;
+	readonly #gate: (record: WorkGraphRecord) => boolean;
 
-	constructor(gate: (record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]) => boolean) {
+	constructor(gate: (record: WorkGraphRecord) => boolean) {
 		this.#gate = gate;
 	}
 
-	load() {
-		return this.memory.load();
+	async acquire(): Promise<WorkspacePersistenceLease> {
+		return interceptGraphStores(await this.memory.acquire(), async (record) => {
+			if (this.#gate(record)) {
+				this.started.resolve();
+				await this.release.promise;
+			}
+		});
+	}
+}
+
+class PoisonedLedgerPersistence implements WorkspacePersistence {
+	readonly memory = new MemoryWorkspacePersistence();
+	readonly attempts: string[] = [];
+	readonly #fail: (operation: string, graphId?: WorkGraphId) => boolean;
+	#failure?: Error;
+
+	constructor(fail: (operation: string, graphId?: WorkGraphId) => boolean) {
+		this.#fail = fail;
 	}
 
-	async append(record: Parameters<NonNullable<OpenCodingAgentOptions["journal"]>["append"]>[0]): Promise<void> {
-		if (this.#gate(record)) {
-			this.started.resolve();
-			await this.release.promise;
-		}
-		await this.memory.append(record);
-	}
-
-	flush() {
-		return this.memory.flush();
-	}
-
-	close() {
-		return this.memory.close();
+	async acquire(): Promise<WorkspacePersistenceLease> {
+		const lease = await this.memory.acquire();
+		const ledger = lease.ledger;
+		const attempt = (operation: string, graphId?: WorkGraphId): void => {
+			this.attempts.push(graphId ? `${operation}:${graphId}` : operation);
+			if (!this.#failure && this.#fail(operation, graphId)) {
+				this.#failure = new Error("scripted Workspace Ledger failure");
+			}
+			if (this.#failure) throw this.#failure;
+		};
+		return Object.freeze({
+			...lease,
+			ledger: Object.freeze({
+				load: () => ledger.load(),
+				accept: async (acceptance: Parameters<typeof ledger.accept>[0]) => {
+					attempt("accept");
+					await ledger.accept(acceptance);
+				},
+				releaseSession: async (owner: Parameters<typeof ledger.releaseSession>[0]) => {
+					attempt("releaseSession", owner.graphId);
+					await ledger.releaseSession(owner);
+				},
+				recordTargetIdentity: async (identity: Parameters<typeof ledger.recordTargetIdentity>[0]) => {
+					attempt("recordTargetIdentity");
+					await ledger.recordTargetIdentity(identity);
+				},
+				archiveGraph: async (graphId: WorkGraphId) => {
+					attempt("archiveGraph", graphId);
+					await ledger.archiveGraph(graphId);
+				},
+				flush: () => ledger.flush(),
+				close: () => ledger.close(),
+			}),
+		});
 	}
 }
 
@@ -346,7 +402,7 @@ interface ResponsePlan {
 
 async function harness(
 	responses: readonly ResponsePlan[],
-	overrides: Partial<Pick<OpenCodingAgentOptions, "journal" | "resources">> & {
+	overrides: Partial<Pick<OpenCodingAgentOptions, "persistence" | "resources">> & {
 		readonly sessions?: MemorySessions;
 		readonly workspace?: MemoryWorkspaceExecution;
 		readonly processMaximumConcurrency?: number;
@@ -405,7 +461,7 @@ async function harness(
 		workspaceExecution: workspace.adapter,
 		sessions: sessions.adapter,
 		...(overrides.resources ? { resources: overrides.resources } : {}),
-		...(overrides.journal ? { journal: overrides.journal } : {}),
+		...(overrides.persistence ? { persistence: overrides.persistence } : {}),
 		models,
 		resolveConfiguration: (configuration) => ({
 			model: faux.getModel(configuration.model.id)!,
@@ -480,6 +536,22 @@ async function waitForGraphResult(agent: CodingAgent, graphId: string): Promise<
 		}
 		if (!resynchronize) throw new Error(`Observation stream closed before ${graphId} settled`);
 	}
+}
+
+async function waitForPersistedGraphResult(
+	persistence: MemoryWorkspacePersistence,
+	graphId: string,
+): Promise<WorkGraphResult> {
+	await vi.waitFor(() => {
+		expect(persistence.records.some((record) => record.type === "graph_result" && record.graphId === graphId)).toBe(
+			true,
+		);
+	});
+	const record = [...persistence.records]
+		.reverse()
+		.find((candidate) => candidate.type === "graph_result" && candidate.graphId === graphId);
+	if (record?.type !== "graph_result") throw new Error(`Persisted Work Graph result not found: ${graphId}`);
+	return record.payload as unknown as WorkGraphResult;
 }
 
 async function observeGraphEvents(
@@ -585,7 +657,7 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("supports nested bound delegation under a shared concurrency budget without Runtime identity escape", async () => {
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
 		const { agent, modelCalls, modelContexts } = await harness(
 			[
@@ -603,7 +675,7 @@ describe("Work Graph public Interface", () => {
 				{},
 				{},
 			],
-			{ journal, workspace, processMaximumConcurrency: 1 },
+			{ persistence: journal, workspace, processMaximumConcurrency: 1 },
 		);
 		await agent.submit({ commands: [start("graph:nested-delegation", 1)] });
 		const result = await waitForGraphResult(agent, "graph:nested-delegation");
@@ -652,11 +724,11 @@ describe("Work Graph public Interface", () => {
 
 	it("cancels observable preparation without starting a Model or leaking executable capabilities", async () => {
 		const refreshGate = deferred();
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const skills = emptySkills();
 		const controlTypes: AgentEvent["type"][] = [];
 		const { agent, modelCalls, sessions } = await harness([], {
-			journal,
+			persistence: journal,
 			controlWorker: ({ event }) => {
 				controlTypes.push(event.type);
 			},
@@ -838,7 +910,7 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("drops one unserializable Worker Observation without aborting Tool or Run settlement", async () => {
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
 		workspace.contributions = [
 			{
@@ -865,7 +937,7 @@ describe("Work Graph public Interface", () => {
 				},
 				{},
 			],
-			{ journal, workspace },
+			{ persistence: journal, workspace },
 		);
 		const dropped = (async () => {
 			for await (const observation of agent.observe({ capacity: 128 })) {
@@ -891,7 +963,7 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("bounds journal and slow-consumer memory during two large streams and 10,000 Tool progress updates per Session", async () => {
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const large = "stream-token".repeat(834);
 		const streamGate = deferred();
 		const streamControls: AgentEvent["type"][] = [];
@@ -901,7 +973,7 @@ describe("Work Graph public Interface", () => {
 				{ gate: streamGate.promise, message: fauxAssistantMessage(`second:${large}`, { timestamp: 1_000 }) },
 			],
 			{
-				journal,
+				persistence: journal,
 				processMaximumConcurrency: 2,
 				chunkCharacters: 1,
 				controlWorker: ({ event }) => {
@@ -911,7 +983,10 @@ describe("Work Graph public Interface", () => {
 		);
 		const slow = streamed.agent.observe({ capacity: 1 })[Symbol.asyncIterator]();
 		await expect(slow.next()).resolves.toMatchObject({ value: { type: "snapshot" } });
-		await streamed.agent.submit({ commands: [start("graph:stream-one", 1), start("graph:stream-two", 1)] });
+		await Promise.all([
+			streamed.agent.submit({ commands: [start("graph:stream-one", 1)] }),
+			streamed.agent.submit({ commands: [start("graph:stream-two", 1)] }),
+		]);
 		await vi.waitFor(() => expect(streamed.modelCalls).toHaveLength(2));
 		streamGate.resolve();
 		const [first, second] = await Promise.all([
@@ -935,7 +1010,7 @@ describe("Work Graph public Interface", () => {
 		);
 		await streamed.agent.close();
 
-		const progressJournal = new MemoryWorkJournal();
+		const progressJournal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
 		let progressReports = 0;
 		let progressToolsStarted = 0;
@@ -978,7 +1053,7 @@ describe("Work Graph public Interface", () => {
 				{},
 			],
 			{
-				journal: progressJournal,
+				persistence: progressJournal,
 				workspace,
 				processMaximumConcurrency: 2,
 				controlWorker: ({ event }) => {
@@ -988,9 +1063,10 @@ describe("Work Graph public Interface", () => {
 		);
 		const slowProgress = progressed.agent.observe({ capacity: 1 })[Symbol.asyncIterator]();
 		await slowProgress.next();
-		await progressed.agent.submit({
-			commands: [start("graph:progress-stress-one", 1), start("graph:progress-stress-two", 1)],
-		});
+		await Promise.all([
+			progressed.agent.submit({ commands: [start("graph:progress-stress-one", 1)] }),
+			progressed.agent.submit({ commands: [start("graph:progress-stress-two", 1)] }),
+		]);
 		const [progressOne, progressTwo] = await Promise.all([
 			waitForGraphResult(progressed.agent, "graph:progress-stress-one"),
 			waitForGraphResult(progressed.agent, "graph:progress-stress-two"),
@@ -1007,10 +1083,10 @@ describe("Work Graph public Interface", () => {
 	}, 15_000);
 
 	it("does not call the Model until attempt_started is durably appended", async () => {
-		const journal = new GatedJournal(
+		const journal = new GatedGraphPersistence(
 			(record) => record.type === "worker_fact" && record.fact.type === "attempt_started",
 		);
-		const { agent, modelCalls } = await harness([{}], { journal });
+		const { agent, modelCalls } = await harness([{}], { persistence: journal });
 		await agent.submit({ commands: [start("graph:gated-attempt", 1)] });
 		await journal.started.promise;
 		expect(modelCalls).toEqual([]);
@@ -1022,7 +1098,7 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("does not call a Tool until tool_started is durably appended", async () => {
-		const journal = new GatedJournal(
+		const journal = new GatedGraphPersistence(
 			(record) => record.type === "worker_fact" && record.fact.type === "tool_started",
 		);
 		let executions = 0;
@@ -1049,7 +1125,7 @@ describe("Work Graph public Interface", () => {
 				},
 				{},
 			],
-			{ journal, workspace },
+			{ persistence: journal, workspace },
 		);
 		await agent.submit({ commands: [start("graph:gated-tool", 1)] });
 		await journal.started.promise;
@@ -1064,7 +1140,7 @@ describe("Work Graph public Interface", () => {
 	it("treats causal Worker Control as ordered progression rather than an Observation barrier", async () => {
 		const controlStarted = deferred();
 		const controlGate = deferred();
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const controlledFacts: string[] = [];
 		const factForControl: Partial<Record<AgentEvent["type"], string>> = {
 			run_start: "run_started",
@@ -1072,7 +1148,7 @@ describe("Work Graph public Interface", () => {
 			run_end: "run_settled",
 		};
 		const { agent, modelCalls } = await harness([{}], {
-			journal,
+			persistence: journal,
 			controlWorker: async ({ event }) => {
 				const expectedFact = factForControl[event.type];
 				if (expectedFact) {
@@ -1237,8 +1313,8 @@ describe("Work Graph public Interface", () => {
 			await releaseTools.promise;
 			return [];
 		};
-		const journal = new FailOnceJournal((record) => record.type === "cancellation_requested");
-		const { agent, sessions } = await harness([], { journal, workspace });
+		const journal = new FailOnceGraphPersistence((record) => record.type === "cancellation_requested");
+		const { agent, sessions } = await harness([], { persistence: journal, workspace });
 
 		await agent.submit({ commands: [start("graph:opening-close", 1)] });
 		await toolsStarted.promise;
@@ -1391,24 +1467,21 @@ describe("Work Graph public Interface", () => {
 		const beta = deferred();
 		const graphResultStarted = deferred();
 		const releaseGraphResult = deferred();
-		const memory = new MemoryWorkJournal();
+		const memory = new MemoryWorkspacePersistence();
 		let graphResultAppends = 0;
-		const journal: NonNullable<OpenCodingAgentOptions["journal"]> = {
-			load: () => memory.load(),
-			append: async (record) => {
-				if (record.type === "graph_result") {
-					graphResultAppends++;
-					graphResultStarted.resolve();
-					await releaseGraphResult.promise;
-				}
-				await memory.append(record);
-			},
-			flush: () => memory.flush(),
-			close: () => memory.close(),
+		const journal: WorkspacePersistence = {
+			acquire: async () =>
+				interceptGraphStores(await memory.acquire(), async (record) => {
+					if (record.type === "graph_result") {
+						graphResultAppends++;
+						graphResultStarted.resolve();
+						await releaseGraphResult.promise;
+					}
+				}),
 		};
 		const { agent, modelCalls } = await harness(
 			[{ gate: root.promise }, { gate: alpha.promise }, { gate: beta.promise }],
-			{ journal },
+			{ persistence: journal },
 		);
 		const settledObservations: WorkGraphResult[] = [];
 		const observation = (async () => {
@@ -1508,6 +1581,21 @@ describe("Work Graph public Interface", () => {
 		await iterator.return?.();
 		gate.resolve();
 		await waitForGraphResult(agent, "graph:atomic");
+		await agent.close();
+	});
+
+	it("rejects a command batch that targets more than one Work Graph", async () => {
+		const persistence = new MemoryWorkspacePersistence();
+		const { agent, workspace } = await harness([], { persistence });
+		await expect(
+			agent.submit({ commands: [start("graph:batch-one"), start("graph:batch-two")] }),
+		).resolves.toMatchObject({
+			status: "rejected",
+			rejection: { code: "invalid_command", message: expect.stringContaining("exactly one Work Graph") },
+		});
+		expect(persistence.ledgerSnapshot().activeGraphs).toEqual([]);
+		expect(persistence.records).toEqual([]);
+		expect(workspace.reserved).toEqual([]);
 		await agent.close();
 	});
 
@@ -1635,11 +1723,11 @@ describe("Work Graph public Interface", () => {
 		const run = deferred();
 		let commits = 0;
 		let rollbacks = 0;
-		const journal = new FailOnceJournal(
+		const journal = new FailOnceGraphPersistence(
 			(record) => record.type === "batch_accepted" && record.batchId === "batch:resource-rejected",
 		);
 		const { agent, modelCalls } = await harness([{ gate: run.promise }], {
-			journal,
+			persistence: journal,
 			resources: {
 				reserve: async () => ({
 					commit: async () => {
@@ -1668,7 +1756,7 @@ describe("Work Graph public Interface", () => {
 			],
 		});
 
-		expect(receipt).toMatchObject({ status: "rejected", rejection: { code: "journal_failed" } });
+		expect(receipt).toMatchObject({ status: "rejected", rejection: { code: "graph_store_failed" } });
 		expect({ commits, rollbacks }).toEqual({ commits: 0, rollbacks: 1 });
 		run.resolve();
 		await waitForGraphResult(agent, "graph:resource-rejected");
@@ -1676,10 +1764,10 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("accepts durably but interrupts Work before the Model when input resource commit fails", async () => {
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		let rollbacks = 0;
 		const { agent, modelCalls } = await harness([], {
-			journal,
+			persistence: journal,
 			resources: {
 				reserve: async () => ({
 					commit: async () => {
@@ -1724,9 +1812,9 @@ describe("Work Graph public Interface", () => {
 	it("never replays accepted input whose resource settlement was not journaled before recovery", async () => {
 		const resourceCommitStarted = deferred();
 		const resourceCommit = deferred();
-		const liveJournal = new MemoryWorkJournal();
+		const liveJournal = new MemoryWorkspacePersistence();
 		const live = await harness([], {
-			journal: liveJournal,
+			persistence: liveJournal,
 			resources: {
 				reserve: async () => ({
 					commit: async () => {
@@ -1754,9 +1842,9 @@ describe("Work Graph public Interface", () => {
 		await resourceCommitStarted.promise;
 		expect(liveJournal.records.map(({ type }) => type)).toEqual(["batch_accepted"]);
 
-		const recoveredJournal = new MemoryWorkJournal(liveJournal.records);
-		const recovered = await harness([], { journal: recoveredJournal });
-		const result = await waitForGraphResult(recovered.agent, "graph:resource-recovery");
+		const recoveredJournal = new MemoryWorkspacePersistence(liveJournal.records);
+		const recovered = await harness([], { persistence: recoveredJournal });
+		const result = await waitForPersistedGraphResult(recoveredJournal, "graph:resource-recovery");
 		expect(recovered.modelCalls).toEqual([]);
 		expect(result.results[0]).toMatchObject({
 			state: "interrupted",
@@ -1780,9 +1868,9 @@ describe("Work Graph public Interface", () => {
 		const reservation = deferred();
 		let commits = 0;
 		let rollbacks = 0;
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const { agent, modelCalls } = await harness([{ gate: run.promise }], {
-			journal,
+			persistence: journal,
 			resources: {
 				reserve: async () => {
 					reservationStarted.resolve();
@@ -1829,8 +1917,8 @@ describe("Work Graph public Interface", () => {
 
 	it("never reports a durable accepted batch as rejected when later cancellation bookkeeping fails", async () => {
 		const root = deferred();
-		const journal = new FailOnceJournal((record) => record.type === "cancellation_requested");
-		const { agent } = await harness([{ gate: root.promise }], { journal });
+		const journal = new FailOnceGraphPersistence((record) => record.type === "cancellation_requested");
+		const { agent } = await harness([{ gate: root.promise }], { persistence: journal });
 		await agent.submit({ commands: [start("graph:accepted-barrier", 1)] });
 		await agent.submit({
 			commands: [
@@ -1993,12 +2081,13 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("classifies fatal journal barriers by whether an external effect may already have begun", async () => {
-		const beforeEffectJournal = new FailOnceJournal(
+		const beforeEffectJournal = new FailOnceGraphPersistence(
 			(record) => record.type === "worker_fact" && record.fact.type === "run_started",
 		);
-		const beforeEffect = await harness([], { journal: beforeEffectJournal });
+		const beforeEffect = await harness([], { persistence: beforeEffectJournal });
+		const failedResult = waitForGraphResult(beforeEffect.agent, "graph:barrier-before");
 		await beforeEffect.agent.submit({ commands: [start("graph:barrier-before")] });
-		const failed = await waitForGraphResult(beforeEffect.agent, "graph:barrier-before");
+		const failed = await failedResult;
 		expect(failed.results[0]).toMatchObject({ state: "failed", publication: { state: "not_required" } });
 		expect(beforeEffect.modelCalls).toEqual([]);
 		await beforeEffect.agent.close();
@@ -2016,7 +2105,7 @@ describe("Work Graph public Interface", () => {
 
 		const workspace = new MemoryWorkspaceExecution();
 		workspace.captureArtifacts = true;
-		const afterEffectJournal = new FailOnceJournal(
+		const afterEffectJournal = new FailOnceGraphPersistence(
 			(record) =>
 				record.type === "publication" &&
 				typeof record.payload === "object" &&
@@ -2024,9 +2113,10 @@ describe("Work Graph public Interface", () => {
 				!Array.isArray(record.payload) &&
 				record.payload.phase === "settled",
 		);
-		const afterEffect = await harness([{}], { journal: afterEffectJournal, workspace });
+		const afterEffect = await harness([{}], { persistence: afterEffectJournal, workspace });
+		const interruptedResult = waitForGraphResult(afterEffect.agent, "graph:barrier-after");
 		await afterEffect.agent.submit({ commands: [start("graph:barrier-after")] });
-		const interrupted = await waitForGraphResult(afterEffect.agent, "graph:barrier-after");
+		const interrupted = await interruptedResult;
 		expect(workspace.published).toEqual(["root"]);
 		expect(interrupted.results[0]).toMatchObject({
 			state: "interrupted",
@@ -2035,10 +2125,11 @@ describe("Work Graph public Interface", () => {
 		});
 		await afterEffect.agent.close();
 
-		const resultJournal = new FailOnceJournal((record) => record.type === "item_result");
-		const resultBarrier = await harness([{}], { journal: resultJournal });
+		const resultJournal = new FailOnceGraphPersistence((record) => record.type === "item_result");
+		const resultBarrier = await harness([{}], { persistence: resultJournal });
+		const undurableResult = waitForGraphResult(resultBarrier.agent, "graph:result-barrier");
 		await resultBarrier.agent.submit({ commands: [start("graph:result-barrier")] });
-		const undurable = await waitForGraphResult(resultBarrier.agent, "graph:result-barrier");
+		const undurable = await undurableResult;
 		expect(undurable).toMatchObject({
 			durability: "unknown",
 			results: [{ durability: "unknown", state: "interrupted" }],
@@ -2048,11 +2139,15 @@ describe("Work Graph public Interface", () => {
 			unknownWork: [{ itemId: "root", phase: "result" }],
 		});
 
+		const recoveredResultPersistence = new MemoryWorkspacePersistence(resultRecoveryRecords);
 		const recoveredResult = await harness([], {
-			journal: new MemoryWorkJournal(resultRecoveryRecords),
+			persistence: recoveredResultPersistence,
 			workspace: new MemoryWorkspaceExecution(),
 		});
-		const recoveredResultBarrier = await waitForGraphResult(recoveredResult.agent, "graph:result-barrier");
+		const recoveredResultBarrier = await waitForPersistedGraphResult(
+			recoveredResultPersistence,
+			"graph:result-barrier",
+		);
 		expect(recoveredResultBarrier).toMatchObject({
 			durability: "confirmed",
 			results: [{ durability: "confirmed", state: "interrupted" }],
@@ -2064,11 +2159,11 @@ describe("Work Graph public Interface", () => {
 	it("latches the first safe Session failure and skips all cleanup Facts and Control", async () => {
 		const sessions = new MemorySessions();
 		sessions.failAcceptEventType = "run_start";
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const controlTypes: AgentEvent["type"][] = [];
 		const { agent, modelCalls } = await harness([], {
 			sessions,
-			journal,
+			persistence: journal,
 			controlWorker: ({ event }) => {
 				controlTypes.push(event.type);
 			},
@@ -2097,9 +2192,9 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("interrupts a Work Item whose Agent settles with an open Model effect window", async () => {
-		const journal = new MemoryWorkJournal();
+		const journal = new MemoryWorkspacePersistence();
 		const { agent, modelCalls } = await harness([], {
-			journal,
+			persistence: journal,
 			modelStreamFailure: new Error("model transport vanished after dispatch"),
 		});
 		await agent.submit({ commands: [start("graph:unclosed-model-window", 1)] });
@@ -2117,7 +2212,7 @@ describe("Work Graph public Interface", () => {
 	});
 
 	it("derives Tool barrier classification from parallel open windows", async () => {
-		const firstStartFailure = new FailOnceJournal(
+		const firstStartFailure = new FailOnceGraphPersistence(
 			(record) => record.type === "worker_fact" && record.fact.type === "tool_started",
 		);
 		let firstExecutions = 0;
@@ -2143,7 +2238,7 @@ describe("Work Graph public Interface", () => {
 					}),
 				},
 			],
-			{ journal: firstStartFailure, workspace: firstWorkspace },
+			{ persistence: firstStartFailure, workspace: firstWorkspace },
 		);
 		await first.agent.submit({ commands: [start("graph:first-tool-barrier", 1)] });
 		const safelyFailed = await waitForGraphResult(first.agent, "graph:first-tool-barrier");
@@ -2155,7 +2250,7 @@ describe("Work Graph public Interface", () => {
 		});
 		await first.agent.close();
 
-		const secondStartFailure = new FailOnceJournal(
+		const secondStartFailure = new FailOnceGraphPersistence(
 			(record) =>
 				record.type === "worker_fact" &&
 				record.fact.type === "tool_started" &&
@@ -2191,7 +2286,7 @@ describe("Work Graph public Interface", () => {
 					),
 				},
 			],
-			{ journal: secondStartFailure, workspace },
+			{ persistence: secondStartFailure, workspace },
 		);
 		await parallel.agent.submit({ commands: [start("graph:parallel-tool-barrier", 1)] });
 		const interrupted = await waitForGraphResult(parallel.agent, "graph:parallel-tool-barrier");
@@ -2208,12 +2303,37 @@ describe("Work Graph public Interface", () => {
 		await parallel.agent.close();
 	});
 
-	it("fails stop the shared Work Journal while isolating a Session failure to one Work Item", async () => {
-		const delayedSecondModel = deferred();
-		const journal = new FailOnceJournal(
+	it("does not share an append or flush tail across Work Graph stores", async () => {
+		const persistence = new GatedGraphPersistence(
 			(record) =>
 				record.type === "worker_fact" &&
-				record.graphId === "graph:journal-poison" &&
+				record.graphId === "graph:slow-store" &&
+				record.fact.type === "attempt_started",
+		);
+		const { agent, modelCalls } = await harness([{}, {}], {
+			persistence,
+			processMaximumConcurrency: 2,
+		});
+		const slowResult = waitForGraphResult(agent, "graph:slow-store");
+		await agent.submit({ commands: [start("graph:slow-store", 1)] });
+		await persistence.started.promise;
+
+		const independentResult = waitForGraphResult(agent, "graph:independent-store");
+		await agent.submit({ commands: [start("graph:independent-store", 1)] });
+		expect((await independentResult).results[0]?.state).toBe("succeeded");
+		expect(modelCalls).toHaveLength(1);
+
+		persistence.release.resolve();
+		expect((await slowResult).results[0]?.state).toBe("succeeded");
+		expect(modelCalls).toHaveLength(2);
+		await agent.close();
+	});
+
+	it("isolates one Work Graph store failure and one Session failure from sibling Graphs", async () => {
+		const persistence = new FailOnceGraphPersistence(
+			(record) =>
+				record.type === "worker_fact" &&
+				record.graphId === "graph:store-poison" &&
 				record.fact.type === "tool_started",
 		);
 		let toolExecutions = 0;
@@ -2230,7 +2350,7 @@ describe("Work Graph public Interface", () => {
 				effect: "write",
 			},
 		];
-		const poisoned = await harness(
+		const isolatedStores = await harness(
 			[
 				{
 					message: fauxAssistantMessage(fauxToolCall("poison_tool", {}, { id: "tool:poison" }), {
@@ -2238,130 +2358,194 @@ describe("Work Graph public Interface", () => {
 						timestamp: 1_000,
 					}),
 				},
-				{ gate: delayedSecondModel.promise },
+				{},
+				{},
 			],
-			{ journal, workspace, processMaximumConcurrency: 2 },
+			{ persistence, workspace, processMaximumConcurrency: 2 },
 		);
 		const persistenceFailure = (async () => {
-			for await (const observation of poisoned.agent.observe({ capacity: 128 })) {
+			for await (const observation of isolatedStores.agent.observe({ capacity: 128 })) {
 				if (
 					observation.type === "diagnostic" &&
-					observation.diagnostic.code === "work_journal_persistence_failed"
+					observation.graphId === "graph:store-poison" &&
+					observation.diagnostic.code === "work_graph_persistence_failed"
 				) {
 					return;
 				}
 			}
 		})();
-		await poisoned.agent.submit({
-			commands: [start("graph:journal-poison", 1), start("graph:journal-sibling", 1)],
-		});
+		const poisonedResult = waitForGraphResult(isolatedStores.agent, "graph:store-poison");
+		await isolatedStores.agent.submit({ commands: [start("graph:store-poison", 1)] });
 		await persistenceFailure;
+		const siblingResult = waitForGraphResult(isolatedStores.agent, "graph:store-sibling");
+		await expect(isolatedStores.agent.submit({ commands: [start("graph:store-sibling", 1)] })).resolves.toMatchObject(
+			{ status: "accepted" },
+		);
+		const laterResult = waitForGraphResult(isolatedStores.agent, "graph:store-later");
+		await expect(isolatedStores.agent.submit({ commands: [start("graph:store-later", 1)] })).resolves.toMatchObject({
+			status: "accepted",
+		});
 		await expect(
-			poisoned.agent.submit({ commands: [start("graph:rejected-after-poison", 1)] }),
+			isolatedStores.agent.submit({
+				commands: [
+					{
+						type: "deliver_work_item_input",
+						graphId: "graph:store-poison",
+						itemId: "root",
+						kind: "steering",
+						input: "must reject",
+					},
+				],
+			}),
 		).resolves.toMatchObject({
 			status: "rejected",
-			rejection: { code: "journal_failed", message: expect.stringContaining("persistence is unavailable") },
+			rejection: { code: "graph_store_failed", graphId: "graph:store-poison" },
 		});
-		delayedSecondModel.resolve();
-		const poisonedResult = await waitForGraphResult(poisoned.agent, "graph:journal-poison");
-		const siblingResult = await waitForGraphResult(poisoned.agent, "graph:journal-sibling");
-		expect(poisonedResult.results[0]?.state).toBe("failed");
-		expect(siblingResult.results[0]?.state).toBe("interrupted");
+		expect((await poisonedResult).results[0]?.durability).toBe("unknown");
+		expect((await siblingResult).results[0]?.state).toBe("succeeded");
+		expect((await laterResult).results[0]?.state).toBe("succeeded");
 		expect(toolExecutions).toBe(0);
-		const closeResult = await poisoned.agent.close();
-		expect(closeResult.unknownWork.map(({ itemId }) => itemId)).toEqual(["root", "root"]);
+		await isolatedStores.agent.close();
 
 		const sessions = new MemorySessions();
 		sessions.failAcceptEventType = "run_start";
 		const isolated = await harness([{}], { sessions, processMaximumConcurrency: 2 });
-		await isolated.agent.submit({
-			commands: [start("graph:session-fails", 1), start("graph:session-succeeds", 1)],
-		});
-		const failed = await waitForGraphResult(isolated.agent, "graph:session-fails");
-		const succeeded = await waitForGraphResult(isolated.agent, "graph:session-succeeds");
+		const failedResult = waitForGraphResult(isolated.agent, "graph:session-fails");
+		const succeededResult = waitForGraphResult(isolated.agent, "graph:session-succeeds");
+		await isolated.agent.submit({ commands: [start("graph:session-fails", 1)] });
+		await isolated.agent.submit({ commands: [start("graph:session-succeeds", 1)] });
+		const [failed, succeeded] = await Promise.all([failedResult, succeededResult]);
 		expect(failed.results[0]?.state).toBe("failed");
 		expect(succeeded.results[0]?.state).toBe("succeeded");
 		expect(isolated.modelCalls).toEqual(["one"]);
 		await isolated.agent.close();
 	});
 
-	it("settles accepted but unscheduled graphs when the shared Work Journal fails", async () => {
-		const journal = new FailOnceJournal(
-			(record) =>
-				record.type === "worker_fact" &&
-				record.graphId === "graph:active-poison" &&
-				record.fact.type === "tool_started",
-		);
-		let toolExecutions = 0;
-		const workspace = new MemoryWorkspaceExecution();
-		workspace.contributions = [
-			{
-				tool: {
-					...noOpTool("poison_tool"),
-					execute: async () => {
-						toolExecutions++;
-						return { content: "unreachable" };
-					},
-				},
-				effect: "write",
+	it("retains ledger Session owners for an unreadable Graph without stalling unrelated Graphs", async () => {
+		const failedGraph = "graph:unreadable-owner" as WorkGraphId;
+		const memory = new MemoryWorkspacePersistence({
+			ledger: {
+				activeGraphs: [{ graphId: failedGraph, order: 0 }],
+				nextGraphOrder: 1,
+				nextPublicationOrder: 1,
+				sessionOwners: [{ sessionId: "session:quarantined", graphId: failedGraph, itemId: "root" as WorkItemId }],
+				targetIdentities: [],
+				diagnostics: [],
 			},
-		];
-		const { agent, modelCalls } = await harness(
-			[
-				{
-					message: fauxAssistantMessage(fauxToolCall("poison_tool", {}, { id: "tool:poison" }), {
-						stopReason: "toolUse",
-						timestamp: 1_000,
-					}),
-				},
-			],
-			{ journal, workspace, processMaximumConcurrency: 1 },
+		});
+		const persistence: WorkspacePersistence = {
+			acquire: async () => {
+				const lease = await memory.acquire();
+				return Object.freeze({
+					...lease,
+					openGraph: async (graphId: WorkGraphId) => {
+						if (graphId === failedGraph) throw new Error("injected unreadable Graph store");
+						return lease.openGraph(graphId);
+					},
+				});
+			},
+		};
+		const sessions = new MemorySessions();
+		const { agent } = await harness([{}], { persistence, sessions });
+		await expect(
+			agent.submit({
+				commands: [{ type: "cancel_work", target: { type: "graph", graphId: failedGraph } }],
+			}),
+		).resolves.toMatchObject({ status: "rejected", rejection: { code: "graph_store_failed" } });
+		await expect(
+			agent.submit({
+				commands: [
+					{
+						...start("graph:owner-reuse", 1),
+						session: { type: "resume", sessionId: "session:quarantined" },
+					},
+				],
+			}),
+		).resolves.toMatchObject({ status: "rejected", rejection: { code: "session_leased" } });
+		const unrelatedResult = waitForGraphResult(agent, "graph:owner-unrelated");
+		await expect(agent.submit({ commands: [start("graph:owner-unrelated", 1)] })).resolves.toMatchObject({
+			status: "accepted",
+		});
+		expect((await unrelatedResult).results[0]?.state).toBe("succeeded");
+		expect(memory.ledgerSnapshot().sessionOwners).toContainEqual({
+			sessionId: "session:quarantined",
+			graphId: failedGraph,
+			itemId: "root",
+		});
+		await agent.close();
+	});
+
+	it("fail-stops the Workspace when the Workspace Ledger fails", async () => {
+		const finishPoison = deferred();
+		const finishSibling = deferred();
+		const persistence = new PoisonedLedgerPersistence(
+			(operation, graphId) => operation === "archiveGraph" && graphId === "graph:ledger-poison",
 		);
-		await agent.submit({
-			commands: [start("graph:active-poison", 1), start("graph:never-scheduled", 1)],
+		const { agent } = await harness([{ gate: finishPoison.promise }, { gate: finishSibling.promise }], {
+			persistence,
+			processMaximumConcurrency: 2,
 		});
+		const ledgerFailure = (async () => {
+			for await (const observation of agent.observe({ capacity: 128 })) {
+				if (
+					observation.type === "diagnostic" &&
+					observation.diagnostic.code === "workspace_ledger_persistence_failed"
+				) {
+					return;
+				}
+			}
+		})();
+		const poisonedResult = waitForGraphResult(agent, "graph:ledger-poison");
+		const siblingResult = waitForGraphResult(agent, "graph:ledger-sibling");
+		await agent.submit({ commands: [start("graph:ledger-poison", 1)] });
+		await agent.submit({ commands: [start("graph:ledger-sibling", 1)] });
+		finishPoison.resolve();
+		await ledgerFailure;
+		await expect(agent.submit({ commands: [start("graph:ledger-rejected", 1)] })).resolves.toMatchObject({
+			status: "rejected",
+			rejection: { code: "ledger_failed", message: expect.stringContaining("Workspace Ledger") },
+		});
+		finishSibling.resolve();
+		const [poisoned, sibling] = await Promise.all([poisonedResult, siblingResult]);
+		expect(poisoned.durability).toBe("unknown");
+		expect(sibling.results[0]).toMatchObject({ durability: "unknown", state: "interrupted" });
+		expect(persistence.attempts).toContain("archiveGraph:graph:ledger-poison");
+		await agent.close();
+	});
 
-		const [active, unscheduled] = await Promise.all([
-			waitForGraphResult(agent, "graph:active-poison"),
-			waitForGraphResult(agent, "graph:never-scheduled"),
-		]);
-		expect(active.results[0]?.state).toBe("failed");
-		expect(unscheduled.results[0]).toMatchObject({
-			durability: "unknown",
-			state: "interrupted",
-			publication: { state: "not_published", reason: "interrupted" },
+	it("linearizes new Graph acceptance at the ledger index and quarantines a rejected initial segment", async () => {
+		const persistence = new PoisonedLedgerPersistence((operation) => operation === "accept");
+		const rejected = await harness([], { persistence });
+		await expect(rejected.agent.submit({ commands: [start("graph:index-failure", 1)] })).resolves.toMatchObject({
+			status: "rejected",
+			rejection: { code: "ledger_failed" },
 		});
-		expect(modelCalls).toEqual(["one"]);
-		expect(toolExecutions).toBe(0);
-		const recoveryRecords = structuredClone(journal.memory.records);
-		const closeResult = await agent.close();
-		expect(closeResult.unknownWork.map(({ phase }) => phase).sort()).toEqual(["ready", "running"]);
+		expect(persistence.memory.ledgerSnapshot().activeGraphs).toEqual([]);
+		expect(persistence.memory.graphRecords("graph:index-failure" as WorkGraphId)).toEqual([
+			expect.objectContaining({ type: "batch_accepted" }),
+		]);
+		await rejected.agent.close();
 
-		const recovered = await harness([{}], {
-			journal: new MemoryWorkJournal(recoveryRecords),
-			workspace: new MemoryWorkspaceExecution(),
-			processMaximumConcurrency: 1,
+		const nextEpoch = await harness([{}], { persistence: persistence.memory });
+		const result = waitForGraphResult(nextEpoch.agent, "graph:index-failure");
+		await expect(nextEpoch.agent.submit({ commands: [start("graph:index-failure", 1)] })).resolves.toMatchObject({
+			status: "accepted",
 		});
-		const [recoveredActive, recoveredUnscheduled] = await Promise.all([
-			waitForGraphResult(recovered.agent, "graph:active-poison"),
-			waitForGraphResult(recovered.agent, "graph:never-scheduled"),
-		]);
-		expect(recoveredActive).toMatchObject({
-			durability: "confirmed",
-			results: [{ durability: "confirmed", state: "interrupted" }],
-		});
-		expect(recoveredUnscheduled).toMatchObject({
-			durability: "confirmed",
-			results: [{ durability: "confirmed", state: "succeeded" }],
-		});
-		expect(recovered.modelCalls).toEqual(["one"]);
-		await recovered.agent.close();
+		expect((await result).results[0]?.state).toBe("succeeded");
+		expect(
+			persistence.memory
+				.graphRecords("graph:index-failure" as WorkGraphId)
+				.filter((record) => record.type === "batch_accepted"),
+		).toHaveLength(1);
+		await nextEpoch.agent.close();
 	});
 
 	it("projects active Run state only after the run_started Fact commits", async () => {
-		const journal = new GatedJournal((record) => record.type === "worker_fact" && record.fact.type === "run_started");
+		const journal = new GatedGraphPersistence(
+			(record) => record.type === "worker_fact" && record.fact.type === "run_started",
+		);
 		const model = deferred();
-		const { agent } = await harness([{ gate: model.promise }], { journal });
+		const { agent } = await harness([{ gate: model.promise }], { persistence: journal });
 		await agent.submit({ commands: [start("graph:durable-active-run", 1)] });
 		await journal.started.promise;
 
@@ -2381,10 +2565,135 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 	});
 
+	it("archives terminal Work Graphs outside active restore and default snapshots", async () => {
+		const persistence = new MemoryWorkspacePersistence();
+		const live = await harness([{}], { persistence });
+		const settled = waitForGraphResult(live.agent, "graph:archived");
+		await live.agent.submit({ commands: [start("graph:archived", 1)] });
+		expect((await settled).durability).toBe("confirmed");
+		expect(persistence.ledgerSnapshot().activeGraphs).toEqual([]);
+		const liveSnapshot = await live.agent.observe()[Symbol.asyncIterator]().next();
+		expect(liveSnapshot.value).toMatchObject({ type: "snapshot", snapshot: { graphs: [] } });
+		await live.agent.close();
+
+		const reopened = await harness([], { persistence });
+		const restoredSnapshot = await reopened.agent.observe()[Symbol.asyncIterator]().next();
+		expect(restoredSnapshot.value).toMatchObject({ type: "snapshot", snapshot: { graphs: [] } });
+		expect(reopened.modelCalls).toEqual([]);
+		await reopened.agent.close();
+
+		const lease = await persistence.acquire();
+		const historical = await lease.openHistoricalGraph("graph:archived" as WorkGraphId);
+		expect((await historical?.load())?.records.at(-1)).toMatchObject({
+			type: "graph_result",
+			graphId: "graph:archived",
+		});
+		await historical?.close();
+		await lease.close();
+	});
+
+	it("reconciles ordinal counters and Session owners from active Work Graph facts", async () => {
+		const liveGate = deferred();
+		const livePersistence = new MemoryWorkspacePersistence();
+		const live = await harness([{ gate: liveGate.promise }, {}], {
+			persistence: livePersistence,
+			processMaximumConcurrency: 1,
+		});
+		await live.agent.submit({ commands: [start("graph:ordinal-recovery", 1)] });
+		await live.agent.submit({
+			commands: [
+				{
+					type: "add_work_items",
+					graphId: "graph:ordinal-recovery",
+					items: [
+						{
+							itemId: "child",
+							parentItemId: "root",
+							objective: "recover child ownership",
+							executionMode: "read_only",
+						},
+					],
+				},
+			],
+		});
+		expect(livePersistence.ledgerSnapshot()).toMatchObject({
+			nextGraphOrder: 1,
+			nextPublicationOrder: 2,
+		});
+		const acceptedFacts = livePersistence
+			.graphRecords("graph:ordinal-recovery" as WorkGraphId)
+			.filter((record) => record.type === "batch_accepted");
+		expect(acceptedFacts).toHaveLength(2);
+
+		const recoveredPersistence = new MemoryWorkspacePersistence({
+			ledger: {
+				activeGraphs: [{ graphId: "graph:ordinal-recovery" as WorkGraphId, order: 0 }],
+				nextGraphOrder: 0,
+				nextPublicationOrder: 0,
+				sessionOwners: [],
+				targetIdentities: [],
+				diagnostics: [],
+			},
+			graphs: new Map([["graph:ordinal-recovery" as WorkGraphId, acceptedFacts]]),
+		});
+		const recoveredRoot = deferred();
+		const recoveredChild = deferred();
+		const newRoot = deferred();
+		const recovered = await harness(
+			[{ gate: recoveredRoot.promise }, { gate: recoveredChild.promise }, { gate: newRoot.promise }],
+			{ persistence: recoveredPersistence, processMaximumConcurrency: 1 },
+		);
+		expect(recoveredPersistence.ledgerSnapshot().sessionOwners).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ graphId: "graph:ordinal-recovery", itemId: "root" }),
+				expect.objectContaining({ graphId: "graph:ordinal-recovery", itemId: "child" }),
+			]),
+		);
+		await expect(recovered.agent.submit({ commands: [start("graph:after-recovery", 1)] })).resolves.toMatchObject({
+			status: "accepted",
+		});
+		const newAcceptance = recoveredPersistence
+			.graphRecords("graph:after-recovery" as WorkGraphId)
+			.find((record) => record.type === "batch_accepted");
+		expect(newAcceptance).toMatchObject({
+			payload: {
+				graphs: [{ graphId: "graph:after-recovery", order: 1 }],
+				items: [{ graphId: "graph:after-recovery", publicationOrder: 2 }],
+			},
+		});
+		await expect(
+			recovered.agent.submit({
+				commands: [
+					{
+						...start("graph:owner-conflict", 1),
+						session: { type: "resume", sessionId: "session:graph:ordinal-recovery" },
+					},
+				],
+			}),
+		).resolves.toMatchObject({ status: "rejected", rejection: { code: "session_leased" } });
+		expect(recoveredPersistence.ledgerSnapshot()).toMatchObject({
+			nextGraphOrder: 2,
+			nextPublicationOrder: 3,
+		});
+
+		const recoveredOldResult = waitForGraphResult(recovered.agent, "graph:ordinal-recovery");
+		const recoveredNewResult = waitForGraphResult(recovered.agent, "graph:after-recovery");
+		recoveredRoot.resolve();
+		recoveredChild.resolve();
+		newRoot.resolve();
+		await Promise.all([recoveredOldResult, recoveredNewResult]);
+		await recovered.agent.close();
+
+		const liveResult = waitForGraphResult(live.agent, "graph:ordinal-recovery");
+		liveGate.resolve();
+		await liveResult;
+		await live.agent.close();
+	});
+
 	it("recovers Worker Fact counters, exhaustion, and every unclosed effect window", async () => {
 		const gate = deferred();
-		const liveJournal = new MemoryWorkJournal();
-		const live = await harness([{ gate: gate.promise }], { journal: liveJournal });
+		const liveJournal = new MemoryWorkspacePersistence();
+		const live = await harness([{ gate: gate.promise }], { persistence: liveJournal });
 		await live.agent.submit({ commands: [start("graph:fact-recovery", 1)] });
 		await vi.waitFor(() =>
 			expect(
@@ -2463,9 +2772,9 @@ describe("Work Graph public Interface", () => {
 			},
 		);
 
-		const recoveredJournal = new MemoryWorkJournal(recoveryRecords);
-		const recovered = await harness([], { journal: recoveredJournal });
-		const result = await waitForGraphResult(recovered.agent, "graph:fact-recovery");
+		const recoveredJournal = new MemoryWorkspacePersistence(recoveryRecords);
+		const recovered = await harness([], { persistence: recoveredJournal });
+		const result = await waitForPersistedGraphResult(recoveredJournal, "graph:fact-recovery");
 		expect(recovered.modelCalls).toEqual([]);
 		expect(result.results[0]).toMatchObject({
 			state: "interrupted",
@@ -2494,7 +2803,7 @@ describe("Work Graph public Interface", () => {
 
 		const authoritativeRecords = liveJournal.records
 			.filter((record) => record.type !== "graph_result")
-			.map((record): WorkJournalRecord => {
+			.map((record): WorkGraphRecord => {
 				if (record.type !== "item_result") return structuredClone(record);
 				const payload = record.payload as unknown as WorkResult;
 				return {
@@ -2511,8 +2820,9 @@ describe("Work Graph public Interface", () => {
 					} as unknown as JsonValue,
 				};
 			});
-		const authoritative = await harness([], { journal: new MemoryWorkJournal(authoritativeRecords) });
-		const authoritativeResult = await waitForGraphResult(authoritative.agent, "graph:fact-recovery");
+		const authoritativePersistence = new MemoryWorkspacePersistence(authoritativeRecords);
+		const authoritative = await harness([], { persistence: authoritativePersistence });
+		const authoritativeResult = await waitForPersistedGraphResult(authoritativePersistence, "graph:fact-recovery");
 		expect(authoritativeResult.results[0]?.budget).toEqual({
 			modelAttempts: 91,
 			toolInvocations: 82,
@@ -2525,8 +2835,8 @@ describe("Work Graph public Interface", () => {
 
 	it("restores uncertain work as interrupted and never automatically replays it", async () => {
 		const gate = deferred();
-		const liveJournal = new MemoryWorkJournal();
-		const live = await harness([{ gate: gate.promise }, {}], { journal: liveJournal });
+		const liveJournal = new MemoryWorkspacePersistence();
+		const live = await harness([{ gate: gate.promise }, {}], { persistence: liveJournal });
 		await live.agent.submit({ commands: [start("graph:recovery", 1)] });
 		await live.agent.submit({
 			commands: [
@@ -2558,7 +2868,7 @@ describe("Work Graph public Interface", () => {
 				],
 			},
 		});
-		const interruptedRecords = structuredClone(liveJournal.records);
+		const interruptedRecords: WorkGraphRecord[] = structuredClone([...liveJournal.records]);
 		interruptedRecords.push({
 			type: "publication",
 			graphId: "graph:recovery" as WorkGraphId,
@@ -2574,8 +2884,8 @@ describe("Work Graph public Interface", () => {
 				},
 			},
 		});
-		const recoveredJournal = new MemoryWorkJournal(interruptedRecords);
-		const recovered = await harness([], { journal: recoveredJournal });
+		const recoveredJournal = new MemoryWorkspacePersistence(interruptedRecords);
+		const recovered = await harness([], { persistence: recoveredJournal });
 		const result = await waitForGraphResult(recovered.agent, "graph:recovery");
 		expect(recovered.modelCalls).toEqual([]);
 		expect(result.outcome).toBe("interrupted");

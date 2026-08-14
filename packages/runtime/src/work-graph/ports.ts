@@ -178,7 +178,7 @@ export interface InputResourceStore {
 	}): Promise<InputResourceReservation>;
 }
 
-export type WorkJournalRecord =
+export type WorkGraphRecord =
 	| {
 			readonly type: "batch_accepted";
 			readonly batchId: string;
@@ -253,23 +253,80 @@ export type WorkJournalRecord =
 			readonly payload: JsonValue;
 	  };
 
-export interface WorkJournalRestore {
-	readonly records: readonly WorkJournalRecord[];
+export interface WorkGraphStoreRestore {
+	readonly records: readonly WorkGraphRecord[];
 	readonly diagnostics: readonly string[];
 }
 
-export interface WorkJournal {
-	load(): Promise<WorkJournalRestore>;
-	append(record: WorkJournalRecord): Promise<void>;
+export interface WorkGraphStore {
+	load(): Promise<WorkGraphStoreRestore>;
+	append(record: WorkGraphRecord): Promise<void>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
+}
+
+export interface WorkspaceGraphIndexEntry {
+	readonly graphId: WorkGraphId;
+	readonly order: number;
+}
+
+export interface WorkspaceSessionOwner {
+	readonly sessionId: string;
+	readonly graphId: WorkGraphId;
+	readonly itemId: WorkItemId;
+}
+
+export interface WorkspaceTargetIdentity {
+	readonly targetPlacementId: string;
+	readonly targetIdentity: string;
+}
+
+export interface WorkspaceLedgerRestore {
+	readonly activeGraphs: readonly WorkspaceGraphIndexEntry[];
+	readonly nextGraphOrder: number;
+	readonly nextPublicationOrder: number;
+	readonly sessionOwners: readonly WorkspaceSessionOwner[];
+	readonly targetIdentities: readonly WorkspaceTargetIdentity[];
+	readonly diagnostics: readonly string[];
+}
+
+export interface WorkspaceLedgerAcceptance {
+	readonly activeGraphs: readonly WorkspaceGraphIndexEntry[];
+	readonly nextGraphOrder: number;
+	readonly nextPublicationOrder: number;
+	readonly sessionOwners: readonly WorkspaceSessionOwner[];
+}
+
+/** Small Workspace-global ordering and ownership record. It never stores Graph facts. */
+export interface WorkspaceLedger {
+	load(): Promise<WorkspaceLedgerRestore>;
+	accept(acceptance: WorkspaceLedgerAcceptance): Promise<void>;
+	releaseSession(owner: WorkspaceSessionOwner): Promise<void>;
+	recordTargetIdentity(identity: WorkspaceTargetIdentity): Promise<void>;
+	archiveGraph(graphId: WorkGraphId): Promise<void>;
+	flush(): Promise<void>;
+	close(): Promise<void>;
+}
+
+/** Explicit process epoch. Closing it releases every Graph store and the Workspace process lease. */
+export interface WorkspacePersistenceLease {
+	readonly epoch: string;
+	readonly ledger: WorkspaceLedger;
+	openGraph(graphId: WorkGraphId): Promise<WorkGraphStore>;
+	openHistoricalGraph(graphId: WorkGraphId): Promise<WorkGraphStore | undefined>;
+	archiveGraph(graphId: WorkGraphId): Promise<void>;
+	close(): Promise<void>;
+}
+
+export interface WorkspacePersistence {
+	acquire(): Promise<WorkspacePersistenceLease>;
 }
 
 export interface OpenCodingAgentOptions {
 	readonly workspaceExecution: WorkspaceExecution;
 	readonly sessions: WorkSessionStore;
 	readonly resources?: InputResourceStore;
-	readonly journal?: WorkJournal;
+	readonly persistence?: WorkspacePersistence;
 	readonly models: Pick<Models, "completeSimple" | "streamSimple">;
 	readonly resolveConfiguration: (
 		configuration: DesiredRuntimeConfiguration,

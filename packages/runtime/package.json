@@ -23,6 +23,10 @@
 		"./work-graph-aggregate": {
 			"types": "./dist/work-graph/work-graph-aggregate.d.ts",
 			"import": "./dist/work-graph/work-graph-aggregate.js"
+		},
+		"./workspace-persistence": {
+			"types": "./dist/workspace-persistence.d.ts",
+			"import": "./dist/workspace-persistence.js"
 		}
 	},
 	"files": [

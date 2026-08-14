@@ -117,7 +117,8 @@ export type CodingAgentRejectionCode =
 	| "session_reservation_failed"
 	| "resource_reservation_failed"
 	| "placement_reservation_failed"
-	| "journal_failed";
+	| "graph_store_failed"
+	| "ledger_failed";
 
 export interface CodingAgentRejection {
 	readonly code: CodingAgentRejectionCode;
@@ -203,7 +204,7 @@ export interface WorkDiagnostic {
 }
 
 export interface WorkResult {
-	/** Whether the terminal boundary is present in the Work Journal. */
+	/** Whether the terminal boundary is present in the Work Graph store. */
 	readonly durability: "confirmed" | "unknown";
 	readonly itemId: WorkItemId;
 	readonly parentItemId?: WorkItemId;

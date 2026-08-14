@@ -159,11 +159,11 @@ export interface CodingAgentApplicationOptions {
 	readonly keybindings?: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
 	readonly sessions?: SessionManager;
-	/** Node composition injects durable Workspace-scoped Work Journals; omitted applications use the Runtime's memory Journal. */
-	readonly workJournal?: (request: {
+	/** Node composition injects a durable, process-leased Workspace persistence Module. */
+	readonly workspacePersistence?: (request: {
 		readonly workspaceId: string;
 		readonly workspaceRoot: string;
-	}) => NonNullable<OpenCodingAgentOptions["journal"]>;
+	}) => NonNullable<OpenCodingAgentOptions["persistence"]>;
 	readonly processSessionRunner?: ProcessSessionRunner;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
@@ -1280,7 +1280,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					});
 					const inputResources = new WorkspaceInputResources();
 					processSessionManager = activeProcessSessionManager;
-					const workJournal = options.workJournal?.({ workspaceId, workspaceRoot: workspace.root });
+					const workspacePersistence = options.workspacePersistence?.({
+						workspaceId,
+						workspaceRoot: workspace.root,
+					});
 					const activeWorkCoordinator = createWorkspaceWorkCoordinator({
 						workspace,
 						fileSystem: options.fileSystem,
@@ -1310,7 +1313,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								forceUnlock: parsed.forceUnlock,
 								persistent: true,
 							}),
-						...(workJournal ? { journal: workJournal } : {}),
+						...(workspacePersistence ? { persistence: workspacePersistence } : {}),
 						...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
 					});
 					workCoordinator = activeWorkCoordinator;

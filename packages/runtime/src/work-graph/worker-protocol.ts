@@ -71,7 +71,7 @@ export interface WorkerEventDisposition {
 }
 
 export interface WorkerBarrierFailure {
-	readonly barrier: "session" | "work_journal";
+	readonly barrier: "session" | "work_graph_store";
 	readonly source: WorkerSessionEvent["type"] | WorkerFact["type"] | "prepare_run" | "context_compacted";
 	readonly diagnostic: string;
 	readonly openAttempts: readonly OpenAttemptEffect[];

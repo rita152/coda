@@ -1,14 +1,19 @@
 import type { AgentInput, RunResult } from "@coda/agent";
 import type { JsonValue } from "@coda/ai";
 import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
-import { MemoryWorkJournal } from "./memory-journal.ts";
+import { MemoryWorkspacePersistence } from "./memory-workspace-persistence.ts";
 import type {
 	InputResourceReservation,
 	OpenCodingAgentOptions,
-	WorkJournal,
-	WorkJournalRecord,
+	WorkGraphRecord,
+	WorkGraphStore,
 	WorkSessionReservation,
+	WorkspaceLedger,
+	WorkspaceLedgerRestore,
+	WorkspacePersistence,
+	WorkspacePersistenceLease,
 	WorkspacePlacementReservation,
+	WorkspaceSessionOwner,
 } from "./ports.ts";
 import type {
 	AddWorkItemSpecification,
@@ -247,6 +252,7 @@ interface NewItemPlan {
 }
 
 interface BatchPlan {
+	readonly targetGraphId: WorkGraphId;
 	readonly newGraphs: GraphRecord[];
 	readonly newItems: NewItemPlan[];
 	readonly deliveries: DeliveryPlan[];
@@ -342,13 +348,20 @@ function makeItem(input: {
 
 class WorkCoordinator implements CodingAgent {
 	readonly #options: OpenCodingAgentOptions;
-	readonly #journal: WorkJournal;
+	readonly #persistence: WorkspacePersistence;
+	#persistenceLease?: WorkspacePersistenceLease;
+	#ledger?: WorkspaceLedger;
+	readonly #graphStores = new Map<WorkGraphId, WorkGraphStore>();
+	readonly #graphFailures = new Map<WorkGraphId, unknown>();
+	readonly #graphFailStops = new Map<WorkGraphId, Promise<void>>();
 	readonly #graphs = new Map<WorkGraphId, GraphRecord>();
 	readonly #graphOrder: GraphRecord[] = [];
 	readonly #sessionLeases = new Map<string, { readonly graphId: WorkGraphId; readonly itemId: WorkItemId }>();
+	readonly #quarantinedSessionIds = new Set<string>();
 	readonly #subscribers = new Set<Subscriber>();
 	readonly #processMaximumConcurrency: number;
 	readonly #mutationFence = new MutationFence();
+	readonly #graphMutationFences = new Map<WorkGraphId, MutationFence>();
 	#processActiveConcurrency = 0;
 	#nextGraphOrder = 0;
 	#nextPublicationOrder = 0;
@@ -358,8 +371,8 @@ class WorkCoordinator implements CodingAgent {
 	#closeOperation?: Promise<CodingAgentCloseResult>;
 	#submissionTail: Promise<void> = Promise.resolve();
 	#workerControllerAttached = true;
-	#journalFailure?: unknown;
-	#journalFailStop?: Promise<void>;
+	#ledgerFailure?: unknown;
+	#ledgerFailStop?: Promise<void>;
 	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
 	#acceptingBatches = 0;
 	#scheduling = false;
@@ -369,7 +382,7 @@ class WorkCoordinator implements CodingAgent {
 
 	constructor(options: OpenCodingAgentOptions) {
 		this.#options = options;
-		this.#journal = options.journal ?? new MemoryWorkJournal();
+		this.#persistence = options.persistence ?? new MemoryWorkspacePersistence();
 		const maximum = options.processMaximumConcurrency ?? 8;
 		if (!Number.isSafeInteger(maximum) || maximum < 1) {
 			throw new Error("processMaximumConcurrency must be a positive safe integer");
@@ -378,8 +391,42 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async initialize(): Promise<void> {
-		const restored = await this.#journal.load();
-		if (restored.records.length === 0) return;
+		const lease = await this.#persistence.acquire();
+		this.#persistenceLease = lease;
+		this.#ledger = lease.ledger;
+		let ledgerRestore: WorkspaceLedgerRestore;
+		try {
+			ledgerRestore = await lease.ledger.load();
+		} catch (error) {
+			await lease.close().catch(() => undefined);
+			this.#persistenceLease = undefined;
+			this.#ledger = undefined;
+			throw error;
+		}
+		this.#nextGraphOrder = ledgerRestore.nextGraphOrder;
+		this.#nextPublicationOrder = ledgerRestore.nextPublicationOrder;
+		for (const owner of ledgerRestore.sessionOwners) {
+			this.#sessionLeases.set(owner.sessionId, { graphId: owner.graphId, itemId: owner.itemId });
+		}
+		const restoredRecords: WorkGraphRecord[] = [];
+		for (const entry of [...ledgerRestore.activeGraphs].sort((left, right) => left.order - right.order)) {
+			try {
+				const store = await lease.openGraph(entry.graphId);
+				this.#graphStores.set(entry.graphId, store);
+				const restored = await store.load();
+				for (const diagnostic of restored.diagnostics) {
+					this.#diagnose({ code: "work_graph_recovery", message: diagnostic }, entry.graphId);
+				}
+				restoredRecords.push(...restored.records);
+			} catch (error) {
+				this.#graphFailures.set(entry.graphId, error);
+				this.#diagnose(
+					{ code: "work_graph_recovery_failed", message: errorMessage(error).slice(0, 512) },
+					entry.graphId,
+				);
+			}
+		}
+		if (restoredRecords.length === 0) return;
 		const openPublications = new Set<string>();
 		const publicationArtifacts = new Map<string, WorkspaceArtifact>();
 		const settledTargetIdentities = new Map<string, string>();
@@ -392,10 +439,7 @@ class WorkCoordinator implements CodingAgent {
 			reasons.push(reason);
 			resourceRecoveryFailures.set(key, reasons);
 		};
-		for (const diagnostic of restored.diagnostics) {
-			this.#diagnose({ code: "work_journal_recovery", message: diagnostic });
-		}
-		for (const record of restored.records) {
+		for (const record of restoredRecords) {
 			switch (record.type) {
 				case "batch_accepted":
 					this.#restoreAcceptedBatch(record.payload, record.batchId, pendingResourceInputs);
@@ -420,7 +464,7 @@ class WorkCoordinator implements CodingAgent {
 					const item = this.#restoredItem(record);
 					if (item.state !== record.from) {
 						throw new Error(
-							`Work Journal transition mismatch for ${record.graphId}/${record.itemId}: expected ${item.state}, found ${record.from}`,
+							`Work Graph transition mismatch for ${record.graphId}/${record.itemId}: expected ${item.state}, found ${record.from}`,
 						);
 					}
 					item.state = record.to as WorkItemState;
@@ -433,7 +477,7 @@ class WorkCoordinator implements CodingAgent {
 						if (item.state === "preparing") item.state = "running";
 						else if (item.state !== "running") {
 							throw new Error(
-								`Work Journal run_started state mismatch for ${record.graphId}/${record.itemId}: ${item.state}`,
+								`Work Graph run_started state mismatch for ${record.graphId}/${record.itemId}: ${item.state}`,
 							);
 						}
 					}
@@ -528,12 +572,14 @@ class WorkCoordinator implements CodingAgent {
 		}
 
 		this.#graphOrder.sort((left, right) => left.order - right.order);
-		this.#nextGraphOrder = Math.max(0, ...this.#graphOrder.map((graph) => graph.order + 1));
+		this.#nextGraphOrder = Math.max(this.#nextGraphOrder, 0, ...this.#graphOrder.map((graph) => graph.order + 1));
 		for (const graph of this.#graphOrder) graph.itemOrder.sort((left, right) => left.order - right.order);
 		this.#nextPublicationOrder = Math.max(
+			this.#nextPublicationOrder,
 			0,
 			...this.#graphOrder.flatMap((graph) => graph.itemOrder.map((item) => item.publicationOrder + 1)),
 		);
+		await this.#reconcileWorkspaceSessionOwners(ledgerRestore);
 		const uncertainPublicationTargets = new Set<string>();
 		for (const graph of this.#graphOrder) {
 			for (const item of graph.itemOrder) {
@@ -543,7 +589,10 @@ class WorkCoordinator implements CodingAgent {
 			}
 		}
 		for (const graph of this.#graphOrder) {
-			if (graph.result) continue;
+			if (graph.result) {
+				await this.#archiveDurableGraph(graph);
+				continue;
+			}
 			for (const item of graph.itemOrder) {
 				if (item.result) continue;
 				const key = itemKey(graph.id, item.id);
@@ -578,6 +627,50 @@ class WorkCoordinator implements CodingAgent {
 		this.#requestSchedule();
 	}
 
+	async abortInitialization(): Promise<void> {
+		await this.#persistenceLease?.close().catch(() => undefined);
+		this.#persistenceLease = undefined;
+		this.#ledger = undefined;
+	}
+
+	async #reconcileWorkspaceSessionOwners(ledgerRestore: WorkspaceLedgerRestore): Promise<void> {
+		const durableOwners = new Map(ledgerRestore.sessionOwners.map((owner) => [owner.sessionId, owner]));
+		for (const graph of this.#graphOrder) {
+			if (graph.result) continue;
+			const expectedOwners = new Map<string, WorkspaceSessionOwner>();
+			for (const item of graph.itemOrder) {
+				if (!item.sessionId || item.resourcesReleased) continue;
+				expectedOwners.set(item.sessionId, {
+					sessionId: item.sessionId,
+					graphId: graph.id,
+					itemId: item.id,
+				});
+			}
+			for (const owner of ledgerRestore.sessionOwners.filter((candidate) => candidate.graphId === graph.id)) {
+				if (expectedOwners.has(owner.sessionId)) continue;
+				await this.#releaseWorkspaceSession(owner);
+				durableOwners.delete(owner.sessionId);
+				const current = this.#sessionLeases.get(owner.sessionId);
+				if (current?.graphId === owner.graphId && current.itemId === owner.itemId) {
+					this.#sessionLeases.delete(owner.sessionId);
+				}
+			}
+			const missing: WorkspaceSessionOwner[] = [];
+			for (const owner of expectedOwners.values()) {
+				const durable = durableOwners.get(owner.sessionId);
+				if (durable && (durable.graphId !== owner.graphId || durable.itemId !== owner.itemId)) {
+					throw new Error(`Workspace Ledger Session owner conflicts with active Work Graph: ${owner.sessionId}`);
+				}
+				if (!durable) missing.push(owner);
+				this.#sessionLeases.set(owner.sessionId, { graphId: owner.graphId, itemId: owner.itemId });
+			}
+			if (missing.length > 0) {
+				await this.#acceptWorkspaceSessionOwners(missing);
+				for (const owner of missing) durableOwners.set(owner.sessionId, owner);
+			}
+		}
+	}
+
 	#restoreAcceptedBatch(
 		value: JsonValue,
 		batchId: string,
@@ -589,7 +682,7 @@ class WorkCoordinator implements CodingAgent {
 			!Array.isArray(value.graphs) ||
 			!Array.isArray(value.items)
 		) {
-			throw new Error("Invalid accepted Work Journal batch payload");
+			throw new Error("Invalid accepted Work Graph batch payload");
 		}
 		const batch = value as unknown as PersistedBatch;
 		for (const definition of batch.graphs) {
@@ -639,7 +732,7 @@ class WorkCoordinator implements CodingAgent {
 			graph.items.set(id, item);
 			graph.itemOrder.push(item);
 		}
-		if (!Array.isArray(batch.commands)) throw new Error("Restored Work Journal batch has no command list");
+		if (!Array.isArray(batch.commands)) throw new Error("Restored Work Graph batch has no command list");
 		for (const [commandIndex, command] of batch.commands.entries()) {
 			switch (command.type) {
 				case "configure_work_item": {
@@ -722,8 +815,10 @@ class WorkCoordinator implements CodingAgent {
 					`Recovered Session identity changed from ${item.sessionId} to ${String(session.session.id)}`,
 				);
 			}
-			if (this.#sessionLeases.has(item.sessionId))
+			const currentOwner = this.#sessionLeases.get(item.sessionId);
+			if (currentOwner && (currentOwner.graphId !== graph.id || currentOwner.itemId !== item.id)) {
 				throw new Error(`Recovered Session is already leased: ${item.sessionId}`);
+			}
 			await placement.commit();
 			await session.commit();
 			item.placement = placement;
@@ -759,7 +854,7 @@ class WorkCoordinator implements CodingAgent {
 			diagnostic: reasons.join(", "),
 		};
 		const result = this.#makeResult(item, "interrupted", publication, artifact);
-		await this.#appendJournal({
+		await this.#appendGraphRecord(graph.id, {
 			type: "recovery_interrupted",
 			graphId: graph.id,
 			itemId: item.id,
@@ -843,13 +938,13 @@ class WorkCoordinator implements CodingAgent {
 				rejection: { code: "closed", message: "Coding Agent is closing or closed" },
 			});
 		}
-		if (this.#journalFailure) {
+		if (this.#ledgerFailure) {
 			return immutableData({
 				status: "rejected",
 				batchId,
 				rejection: {
-					code: "journal_failed",
-					message: `Work Journal persistence is unavailable: ${errorMessage(this.#journalFailure)}`,
+					code: "ledger_failed",
+					message: `Workspace Ledger persistence is unavailable: ${errorMessage(this.#ledgerFailure)}`,
 				},
 			});
 		}
@@ -870,33 +965,42 @@ class WorkCoordinator implements CodingAgent {
 			await this.#validateConfigurations(plan);
 			await this.#reserve(plan);
 			await this.#commitOwnershipReservations(plan);
-			await this.#mutationFence.run(async () => {
-				this.#revalidate(plan!);
-				await this.#appendJournal({
-					type: "batch_accepted",
-					batchId,
-					acceptedAt: this.#options.clock.now(),
-					payload: this.#acceptedBatchPayload(batch, plan!),
-				});
-				durablyAccepted = true;
-				this.#accept(plan!);
-				this.#acceptOperations(plan!);
-				await this.#commitAcceptedInputResources(plan!);
-				this.#acceptResourceBackedInputs(plan!);
-				const resourceFailedItems = new Set(
-					plan!.deliveries.filter((delivery) => delivery.resourceFailure).map((delivery) => delivery.item),
-				);
-				for (const delivery of plan!.deliveries) {
-					if (!resourceFailedItems.has(delivery.item)) this.#flushPendingInputs(delivery.item);
-				}
-				sequence = this.#publish((value) => ({
-					type: "batch_accepted",
-					sequence: value,
-					batchId,
-					graphIds: plan!.graphIds,
-					itemIds: plan!.itemIds,
-				}));
-			});
+			await this.#mutationFence.run(() =>
+				this.#graphMutation(plan!.targetGraphId, async () => {
+					this.#revalidate(plan!);
+					if (plan!.newGraphs.length === 0 && plan!.newItems.length > 0) {
+						await this.#acceptWorkspaceGraphs(plan!);
+					}
+					await this.#appendGraphRecord(plan!.targetGraphId, {
+						type: "batch_accepted",
+						batchId,
+						acceptedAt: this.#options.clock.now(),
+						payload: this.#acceptedBatchPayload(batch, plan!, plan!.targetGraphId),
+					});
+					if (plan!.newGraphs.length > 0) {
+						await this.#graphStores.get(plan!.targetGraphId)!.flush();
+						await this.#acceptWorkspaceGraphs(plan!);
+					}
+					durablyAccepted = true;
+					this.#accept(plan!);
+					this.#acceptOperations(plan!);
+					await this.#commitAcceptedInputResources(plan!);
+					this.#acceptResourceBackedInputs(plan!);
+					const resourceFailedItems = new Set(
+						plan!.deliveries.filter((delivery) => delivery.resourceFailure).map((delivery) => delivery.item),
+					);
+					for (const delivery of plan!.deliveries) {
+						if (!resourceFailedItems.has(delivery.item)) this.#flushPendingInputs(delivery.item);
+					}
+					sequence = this.#publish((value) => ({
+						type: "batch_accepted",
+						sequence: value,
+						batchId,
+						graphIds: plan!.graphIds,
+						itemIds: plan!.itemIds,
+					}));
+				}),
+			);
 		} catch (error) {
 			if (durablyAccepted) {
 				this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
@@ -917,7 +1021,9 @@ class WorkCoordinator implements CodingAgent {
 			const rejection =
 				error instanceof SubmissionRejection
 					? error.rejection
-					: { code: "journal_failed" as const, message: errorMessage(error) };
+					: this.#ledgerFailure
+						? { code: "ledger_failed" as const, message: errorMessage(error) }
+						: { code: "graph_store_failed" as const, message: errorMessage(error), graphId: plan?.targetGraphId };
 			this.#acceptingBatches--;
 			this.#requestSchedule();
 			return immutableData({ status: "rejected", batchId, rejection });
@@ -951,6 +1057,7 @@ class WorkCoordinator implements CodingAgent {
 		const cancellations: CancellationPlan[] = [];
 		const graphIds: WorkGraphId[] = [];
 		const itemIds: WorkItemId[] = [];
+		const targetGraphIds = new Set<WorkGraphId>();
 		const graphs = new Map(this.#graphs);
 		const itemViews = new Map<WorkGraphId, Map<WorkItemId, ItemRecord>>();
 		const addedCounts = new Map<WorkGraphId, number>();
@@ -964,6 +1071,15 @@ class WorkCoordinator implements CodingAgent {
 		};
 		const findGraph = (value: string, commandIndex: number): GraphRecord => {
 			const id = graphId(assertIdentity(value, "graph"));
+			const persistenceFailure = this.#graphFailures.get(id);
+			if (persistenceFailure) {
+				throw rejected({
+					code: "graph_store_failed",
+					message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
+					commandIndex,
+					graphId: id,
+				});
+			}
 			const graph = graphs.get(id);
 			if (!graph) {
 				throw rejected({
@@ -973,6 +1089,7 @@ class WorkCoordinator implements CodingAgent {
 					graphId: id,
 				});
 			}
+			targetGraphIds.add(id);
 			return graph;
 		};
 		const findItem = (graph: GraphRecord, value: string, commandIndex: number): ItemRecord => {
@@ -1013,6 +1130,16 @@ class WorkCoordinator implements CodingAgent {
 							graphId: id,
 						});
 					}
+					const persistenceFailure = this.#graphFailures.get(id);
+					if (persistenceFailure) {
+						throw rejected({
+							code: "graph_store_failed",
+							message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
+							commandIndex,
+							graphId: id,
+						});
+					}
+					targetGraphIds.add(id);
 					const rootId = itemId(assertIdentity(String(command.root?.itemId), "item"));
 					if (!Number.isSafeInteger(command.maximumConcurrency) || command.maximumConcurrency < 1) {
 						throw rejected({
@@ -1183,7 +1310,15 @@ class WorkCoordinator implements CodingAgent {
 			}
 		}
 		for (const [id, items] of itemViews) this.#assertAcyclic(id, items);
-		return { newGraphs, newItems, deliveries, configurations, cancellations, graphIds, itemIds };
+		if (targetGraphIds.size !== 1) {
+			throw rejected({
+				code: "invalid_command",
+				message: "One command batch must target exactly one Work Graph",
+			});
+		}
+		const targetGraphId = [...targetGraphIds][0]!;
+		if (!graphIds.includes(targetGraphId)) graphIds.push(targetGraphId);
+		return { targetGraphId, newGraphs, newItems, deliveries, configurations, cancellations, graphIds, itemIds };
 	}
 
 	#planAddedItem(input: {
@@ -1505,7 +1640,7 @@ class WorkCoordinator implements CodingAgent {
 				diagnostic = errorMessage(error);
 			}
 			try {
-				await this.#appendJournal({
+				await this.#appendGraphRecord(delivery.graph.id, {
 					type: "input_resources_settled",
 					graphId: delivery.graph.id,
 					itemId: delivery.item.id,
@@ -1556,13 +1691,9 @@ class WorkCoordinator implements CodingAgent {
 			this.#graphs.set(graph.id, graph);
 			this.#graphOrder.push(graph);
 		}
-		this.#nextGraphOrder += plan.newGraphs.length;
-		this.#nextPublicationOrder += plan.newItems.length;
 		for (const entry of plan.newItems) {
 			entry.graph.items.set(entry.item.id, entry.item);
 			entry.graph.itemOrder.push(entry.item);
-			const sessionId = entry.item.sessionId!;
-			this.#sessionLeases.set(sessionId, { graphId: entry.graph.id, itemId: entry.item.id });
 		}
 	}
 
@@ -1615,34 +1746,121 @@ class WorkCoordinator implements CodingAgent {
 		}
 	}
 
-	#acceptedBatchPayload(batch: CodingAgentCommandBatch, plan: BatchPlan): JsonValue {
+	#acceptedBatchPayload(batch: CodingAgentCommandBatch, plan: BatchPlan, targetGraphId: WorkGraphId): JsonValue {
 		return jsonValue({
 			schemaVersion: 1,
 			commands: batch.commands,
-			graphs: plan.newGraphs.map((graph) => ({
-				graphId: graph.id,
-				order: graph.order,
-				objective: graph.objective,
-				rootItemId: graph.rootId,
-				maximumConcurrency: graph.maximumConcurrency,
-				acceptedAt: graph.acceptedAt,
-			})),
-			items: plan.newItems.map(({ item }) => ({
-				graphId: item.graphId,
-				itemId: item.id,
-				order: item.order,
-				parentItemId: item.parentId,
-				dependencies: item.dependencies,
-				objective: item.objective,
-				executionMode: item.executionMode,
-				desiredConfiguration: item.desiredConfiguration,
-				acceptedAt: item.acceptedAt,
-				publicationOrder: item.publicationOrder,
-				runtimeId: item.runtimeId,
-				sessionId: item.sessionId,
-				placement: item.placementDescriptor,
-			})),
+			graphs: plan.newGraphs
+				.filter((graph) => graph.id === targetGraphId)
+				.map((graph) => ({
+					graphId: graph.id,
+					order: graph.order,
+					objective: graph.objective,
+					rootItemId: graph.rootId,
+					maximumConcurrency: graph.maximumConcurrency,
+					acceptedAt: graph.acceptedAt,
+				})),
+			items: plan.newItems
+				.filter(({ graph }) => graph.id === targetGraphId)
+				.map(({ item }) => ({
+					graphId: item.graphId,
+					itemId: item.id,
+					order: item.order,
+					parentItemId: item.parentId,
+					dependencies: item.dependencies,
+					objective: item.objective,
+					executionMode: item.executionMode,
+					desiredConfiguration: item.desiredConfiguration,
+					acceptedAt: item.acceptedAt,
+					publicationOrder: item.publicationOrder,
+					runtimeId: item.runtimeId,
+					sessionId: item.sessionId,
+					placement: item.placementDescriptor,
+				})),
 		});
+	}
+
+	async #acceptWorkspaceGraphs(plan: BatchPlan): Promise<void> {
+		const ledger = this.#ledger;
+		if (!ledger) throw new Error("Workspace Ledger is not open");
+		const nextGraphOrder = this.#nextGraphOrder + plan.newGraphs.length;
+		const nextPublicationOrder = this.#nextPublicationOrder + plan.newItems.length;
+		try {
+			await ledger.accept({
+				activeGraphs: plan.newGraphs.map((graph) => ({ graphId: graph.id, order: graph.order })),
+				nextGraphOrder,
+				nextPublicationOrder,
+				sessionOwners: plan.newItems.map(({ graph, item }) => ({
+					sessionId: item.sessionId!,
+					graphId: graph.id,
+					itemId: item.id,
+				})),
+			});
+			this.#nextGraphOrder = nextGraphOrder;
+			this.#nextPublicationOrder = nextPublicationOrder;
+			for (const { graph, item } of plan.newItems) {
+				this.#sessionLeases.set(item.sessionId!, { graphId: graph.id, itemId: item.id });
+			}
+		} catch (error) {
+			this.#latchLedgerFailure(error);
+			throw error;
+		}
+	}
+
+	async #acceptWorkspaceSessionOwners(owners: readonly WorkspaceSessionOwner[]): Promise<void> {
+		const ledger = this.#ledger;
+		if (!ledger) throw new Error("Workspace Ledger is not open");
+		try {
+			await ledger.accept({
+				activeGraphs: [],
+				nextGraphOrder: this.#nextGraphOrder,
+				nextPublicationOrder: this.#nextPublicationOrder,
+				sessionOwners: owners,
+			});
+		} catch (error) {
+			this.#latchLedgerFailure(error);
+			throw error;
+		}
+	}
+
+	async #releaseWorkspaceSession(owner: WorkspaceSessionOwner): Promise<void> {
+		try {
+			await this.#ledger?.releaseSession(owner);
+		} catch (error) {
+			this.#latchLedgerFailure(error);
+			throw error;
+		}
+	}
+
+	async #recordWorkspaceTargetIdentity(targetPlacementId: string, targetIdentity: string): Promise<void> {
+		try {
+			await this.#ledger?.recordTargetIdentity({ targetPlacementId, targetIdentity });
+		} catch (error) {
+			this.#latchLedgerFailure(error);
+			throw error;
+		}
+	}
+
+	async #archiveDurableGraph(graph: GraphRecord): Promise<void> {
+		const ledger = this.#ledger;
+		if (!ledger) throw new Error("Workspace Ledger is not open");
+		try {
+			await ledger.archiveGraph(graph.id);
+			for (const [sessionId, owner] of this.#sessionLeases) {
+				if (owner.graphId === graph.id && !this.#quarantinedSessionIds.has(sessionId)) {
+					this.#sessionLeases.delete(sessionId);
+				}
+			}
+		} catch (error) {
+			this.#latchLedgerFailure(error);
+			throw error;
+		}
+		try {
+			await this.#persistenceLease?.archiveGraph(graph.id);
+			this.#graphStores.delete(graph.id);
+		} catch (error) {
+			this.#diagnose({ code: "work_graph_archive_failed", message: errorMessage(error).slice(0, 512) }, graph.id);
+		}
 	}
 
 	async #applyAcceptedOperations(plan: BatchPlan): Promise<void> {
@@ -1756,7 +1974,7 @@ class WorkCoordinator implements CodingAgent {
 		try {
 			do {
 				this.#scheduleAgain = false;
-				if (this.#journalFailure) continue;
+				if (this.#ledgerFailure) continue;
 				if (this.#acceptingBatches > 0) continue;
 				await this.#refreshPendingStates();
 				while (this.#processActiveConcurrency < this.#processMaximumConcurrency) {
@@ -1798,9 +2016,10 @@ class WorkCoordinator implements CodingAgent {
 				readonly item: ItemRecord;
 		  }
 		| undefined {
-		if (this.#journalFailure) return undefined;
+		if (this.#ledgerFailure) return undefined;
 		for (const graph of this.#graphOrder) {
-			if (graph.result || graph.activeConcurrency >= graph.maximumConcurrency) continue;
+			if (graph.result || this.#graphFailures.has(graph.id) || graph.activeConcurrency >= graph.maximumConcurrency)
+				continue;
 			for (const item of graph.itemOrder) {
 				if (item.delegationResume) return { kind: "delegation_resume", graph, item };
 				if (item.state === "ready") return { kind: "start", graph, item };
@@ -1893,7 +2112,7 @@ class WorkCoordinator implements CodingAgent {
 						this.#deliverWorkerControl(graph, item, event, runtimeId, sessionId),
 					barrierFailed: (failure, runtimeId, sessionId) =>
 						this.#workerBarrierFailed(graph, item, failure, runtimeId, sessionId),
-					assertProgressAllowed: () => this.#assertProgressAllowed(),
+					assertProgressAllowed: () => this.#assertProgressAllowed(graph.id),
 				}),
 			);
 			item.runtimeOpening = runtimeOpening;
@@ -1943,9 +2162,9 @@ class WorkCoordinator implements CodingAgent {
 					? {}
 					: { failure: { kind: "runtime" as const, message: errorMessage(error) } }),
 			};
-			if (this.#journalFailure) {
+			if (this.#ledgerFailure || this.#graphFailures.has(graph.id)) {
 				this.#deactivate(graph, item);
-				await this.#settleAfterJournalFailure(graph, item);
+				await this.#settleAfterPersistenceFailure(graph, item);
 				return;
 			}
 			if (!isTerminal(item.state) && item.state !== "settling") {
@@ -1962,11 +2181,11 @@ class WorkCoordinator implements CodingAgent {
 		await this.#trySettleItem(graph, item);
 	}
 
-	async #settleAfterJournalFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
+	async #settleAfterPersistenceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
 		if (item.result) return;
 		const from = item.state;
 		const safeFailedBarrier =
-			item.barrierFailure?.barrier === "work_journal" && !item.barrierFailure.externalEffectMayHaveOccurred;
+			item.barrierFailure?.barrier === "work_graph_store" && !item.barrierFailure.externalEffectMayHaveOccurred;
 		const terminal: WorkResult["state"] = safeFailedBarrier ? "failed" : "interrupted";
 		await this.#teardownRuntime(item);
 		item.state = terminal;
@@ -1994,14 +2213,14 @@ class WorkCoordinator implements CodingAgent {
 		runtimeId: string,
 		sessionId: string,
 	): Promise<WorkerFactProjection> {
-		return this.#mutationFence.run(async () => {
+		return this.#graphMutation(graph.id, async () => {
 			this.#assertWorkerOwnership(item, runtimeId, sessionId);
 			const nextProjection = reduceWorkerFact(item.factProjection, fact);
 			const transitionFrom = fact.type === "run_started" && item.state === "preparing" ? "preparing" : undefined;
 			if (fact.type === "run_started" && !transitionFrom && item.state !== "running") {
 				throw new Error(`Work Item ${item.id} cannot start a Run in ${item.state}`);
 			}
-			await this.#appendJournal({
+			await this.#appendGraphRecord(graph.id, {
 				type: "worker_fact",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2084,8 +2303,8 @@ class WorkCoordinator implements CodingAgent {
 			code: `${failure.barrier}_barrier_failed`,
 			message: `${failure.source}: ${failure.diagnostic}`,
 		});
-		if (failure.barrier === "work_journal") {
-			this.#latchJournalFailure(new Error(failure.diagnostic));
+		if (failure.barrier === "work_graph_store") {
+			this.#latchGraphFailure(graph.id, new Error(failure.diagnostic));
 			return;
 		}
 		this.#diagnose(
@@ -2152,17 +2371,18 @@ class WorkCoordinator implements CodingAgent {
 				message: "Worker settled while a Model Attempt or Tool Invocation effect window remained open",
 			});
 		}
-		let terminal: WorkResult["state"] = this.#journalFailure
-			? "interrupted"
-			: item.uncertainExternalEffect
+		let terminal: WorkResult["state"] =
+			this.#ledgerFailure || this.#graphFailures.has(graph.id)
 				? "interrupted"
-				: item.cancellationRequested || item.run?.outcome === "aborted"
-					? "canceled"
-					: hasUnclosedEffects
-						? "interrupted"
-						: item.run?.outcome === "success"
-							? "succeeded"
-							: "failed";
+				: item.uncertainExternalEffect
+					? "interrupted"
+					: item.cancellationRequested || item.run?.outcome === "aborted"
+						? "canceled"
+						: hasUnclosedEffects
+							? "interrupted"
+							: item.run?.outcome === "success"
+								? "succeeded"
+								: "failed";
 		let artifact: WorkspaceArtifact | undefined;
 		let publication: PublicationOutcome = { state: "not_required" };
 		const placement = item.placement?.placement;
@@ -2207,9 +2427,9 @@ class WorkCoordinator implements CodingAgent {
 					const target = item.parentId ? graph.items.get(item.parentId)?.placement?.placement : undefined;
 					let publicationStarted = false;
 					try {
-						publicationStarted = await this.#mutationFence.run(async () => {
+						publicationStarted = await this.#graphMutation(graph.id, async () => {
 							if (item.cancellationRequested || graph.cancellationRequested) return false;
-							await this.#appendJournal({
+							await this.#appendGraphRecord(graph.id, {
 								type: "publication",
 								graphId: graph.id,
 								itemId: item.id,
@@ -2245,13 +2465,20 @@ class WorkCoordinator implements CodingAgent {
 					}
 				}
 				try {
-					await this.#appendJournal({
+					await this.#appendGraphRecord(graph.id, {
 						type: "publication",
 						graphId: graph.id,
 						itemId: item.id,
 						timestamp: this.#options.clock.now(),
 						payload: jsonValue({ phase: "settled", artifact, publication }),
 					});
+					if (
+						(publication.state === "published" || publication.state === "not_required") &&
+						publication.targetPlacementId &&
+						publication.targetIdentity
+					) {
+						await this.#recordWorkspaceTargetIdentity(publication.targetPlacementId, publication.targetIdentity);
+					}
 				} catch (error) {
 					terminal = "interrupted";
 					publication = { state: "not_published", reason: "interrupted", diagnostic: errorMessage(error) };
@@ -2347,12 +2574,12 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #recordResult(graph: GraphRecord, item: ItemRecord, result: WorkResult): Promise<void> {
-		await this.#mutationFence.run(async () => {
+		await this.#graphMutation(graph.id, async () => {
 			if (item.result) return;
 			if (result.durability !== "confirmed") {
-				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Journal`);
+				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Graph store`);
 			}
-			await this.#appendJournal({
+			await this.#appendGraphRecord(graph.id, {
 				type: "item_result",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2377,7 +2604,6 @@ class WorkCoordinator implements CodingAgent {
 				item.diagnostics.push({ code: "session_close_failed", message: errorMessage(error) });
 			}
 		}
-		if (item.sessionId && sessionReleased) this.#sessionLeases.delete(item.sessionId);
 		if (item.placement) {
 			try {
 				await this.#options.workspaceExecution.release({
@@ -2390,14 +2616,27 @@ class WorkCoordinator implements CodingAgent {
 				item.diagnostics.push({ code: "placement_release_failed", message: errorMessage(error) });
 			}
 		}
+		if (item.sessionId && !sessionReleased) {
+			this.#quarantinedSessionIds.add(item.sessionId);
+			return;
+		}
 		try {
-			await this.#appendJournal({
+			await this.#appendGraphRecord(graph.id, {
 				type: "ownership_released",
 				graphId: graph.id,
 				itemId: item.id,
 				timestamp: this.#options.clock.now(),
 				preservePlacement: preserve,
 			});
+			if (item.sessionId) {
+				await this.#releaseWorkspaceSession({
+					sessionId: item.sessionId,
+					graphId: graph.id,
+					itemId: item.id,
+				});
+				this.#sessionLeases.delete(item.sessionId);
+				this.#quarantinedSessionIds.delete(item.sessionId);
+			}
 		} catch (error) {
 			item.diagnostics.push({ code: "ownership_release_not_recorded", message: errorMessage(error) });
 		}
@@ -2558,7 +2797,7 @@ class WorkCoordinator implements CodingAgent {
 		if (graph.result || graph.itemOrder.length === 0 || this.#acceptingBatches > 0) return;
 		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
 		if (graph.settlement) return graph.settlement;
-		const operation = this.#mutationFence.run(async () => {
+		const operation = this.#graphMutation(graph.id, async () => {
 			if (graph.result || graph.itemOrder.length === 0 || this.#acceptingBatches > 0) return;
 			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
 			const root = graph.items.get(graph.rootId);
@@ -2583,7 +2822,9 @@ class WorkCoordinator implements CodingAgent {
 					: "not_required";
 			let result: WorkGraphResult = immutableData({
 				durability:
-					this.#journalFailure || results.some(({ durability }) => durability === "unknown")
+					this.#ledgerFailure ||
+					this.#graphFailures.has(graph.id) ||
+					results.some(({ durability }) => durability === "unknown")
 						? "unknown"
 						: "confirmed",
 				graphId: graph.id,
@@ -2600,14 +2841,17 @@ class WorkCoordinator implements CodingAgent {
 			});
 			if (result.durability === "confirmed") {
 				try {
-					await this.#appendJournal({
+					await this.#appendGraphRecord(graph.id, {
 						type: "graph_result",
 						graphId: graph.id,
 						timestamp: result.settledAt,
 						payload: jsonValue(result),
 					});
+					await this.#archiveDurableGraph(graph);
 				} catch {
-					if (!this.#journalFailure) throw new Error("Work Graph result persistence failed");
+					if (!this.#ledgerFailure && !this.#graphFailures.has(graph.id)) {
+						throw new Error("Work Graph result persistence failed");
+					}
 					result = immutableData({ ...result, durability: "unknown" });
 				}
 			}
@@ -2624,13 +2868,13 @@ class WorkCoordinator implements CodingAgent {
 	}
 
 	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<void> {
-		await this.#mutationFence.run(async () => {
+		await this.#graphMutation(graph.id, async () => {
 			const from = item.state;
 			if (from === to) return;
 			if (!this.#transitionPermitted(from, to)) {
 				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
 			}
-			await this.#appendJournal({
+			await this.#appendGraphRecord(graph.id, {
 				type: "item_transition",
 				graphId: graph.id,
 				itemId: item.id,
@@ -2691,7 +2935,7 @@ class WorkCoordinator implements CodingAgent {
 	#snapshot(): CodingAgentSnapshot {
 		return immutableData({
 			closed: this.#closed,
-			graphs: this.#graphOrder.map((graph) => this.#graphSnapshot(graph)),
+			graphs: this.#graphOrder.filter((graph) => !graph.result).map((graph) => this.#graphSnapshot(graph)),
 		});
 	}
 
@@ -2800,82 +3044,141 @@ class WorkCoordinator implements CodingAgent {
 		}));
 	}
 
-	async #appendJournal(record: WorkJournalRecord): Promise<void> {
-		if (this.#journalFailure) throw this.#journalFailure;
+	#graphMutation<Result>(graphId: WorkGraphId, operation: () => Promise<Result> | Result): Promise<Result> {
+		let fence = this.#graphMutationFences.get(graphId);
+		if (!fence) {
+			fence = new MutationFence();
+			this.#graphMutationFences.set(graphId, fence);
+		}
+		return fence.run(operation);
+	}
+
+	async #openGraphStore(graphId: WorkGraphId): Promise<WorkGraphStore> {
+		const current = this.#graphStores.get(graphId);
+		if (current) return current;
+		const lease = this.#persistenceLease;
+		if (!lease) throw new Error("Workspace persistence lease is not open");
+		const store = await lease.openGraph(graphId);
+		this.#graphStores.set(graphId, store);
+		return store;
+	}
+
+	async #appendGraphRecord(graphId: WorkGraphId, record: WorkGraphRecord): Promise<void> {
+		const failure = this.#graphFailures.get(graphId);
+		if (failure) throw failure;
 		try {
-			await this.#journal.append(record);
+			await (await this.#openGraphStore(graphId)).append(record);
 		} catch (error) {
-			this.#latchJournalFailure(error);
+			this.#latchGraphFailure(graphId, error);
 			throw error;
 		}
 	}
 
-	#latchJournalFailure(error: unknown): void {
-		if (this.#journalFailure) return;
-		this.#journalFailure = error;
-		for (const graph of this.#graphOrder) {
-			for (const item of graph.itemOrder) {
-				if (item.result) continue;
-				this.#undurableWork.set(`${graph.id}\0${item.id}`, {
-					graphId: graph.id,
-					itemId: item.id,
-					phase: isTerminal(item.state) ? "result" : item.state,
-				});
-				if (isTerminal(item.state)) continue;
-				if (workerFactHasOpenEffects(item.factProjection)) item.uncertainExternalEffect = true;
-				item.controller?.abort(error);
-				item.delegationResume?.reject(error);
-				item.delegationResume = undefined;
-				item.delegationWaiting = false;
-				try {
-					item.runtime?.cancel();
-				} catch {}
-			}
+	#interruptGraphForPersistence(graph: GraphRecord, error: unknown): void {
+		for (const item of graph.itemOrder) {
+			if (item.result) continue;
+			this.#undurableWork.set(`${graph.id}\0${item.id}`, {
+				graphId: graph.id,
+				itemId: item.id,
+				phase: isTerminal(item.state) ? "result" : item.state,
+			});
+			if (isTerminal(item.state)) continue;
+			if (workerFactHasOpenEffects(item.factProjection)) item.uncertainExternalEffect = true;
+			item.controller?.abort(error);
+			item.delegationResume?.reject(error);
+			item.delegationResume = undefined;
+			item.delegationWaiting = false;
+			try {
+				item.runtime?.cancel();
+			} catch {}
 		}
+	}
+
+	#latchGraphFailure(graphId: WorkGraphId, error: unknown): void {
+		if (this.#graphFailures.has(graphId)) return;
+		this.#graphFailures.set(graphId, error);
+		const graph = this.#graphs.get(graphId);
+		if (graph) this.#interruptGraphForPersistence(graph, error);
+		this.#diagnose(
+			{
+				code: "work_graph_persistence_failed",
+				message: errorMessage(error).slice(0, 512),
+			},
+			graphId,
+		);
+		if (!graph) return;
+		const failStop = this.#settleUnstartedAfterPersistenceFailure([graph]).catch((settlementError) => {
+			this.#diagnose(
+				{
+					code: "work_graph_fail_stop_settlement_failed",
+					message: errorMessage(settlementError).slice(0, 512),
+				},
+				graphId,
+			);
+		});
+		this.#graphFailStops.set(graphId, failStop);
+	}
+
+	#latchLedgerFailure(error: unknown): void {
+		if (this.#ledgerFailure) return;
+		this.#ledgerFailure = error;
+		for (const graph of this.#graphOrder) this.#interruptGraphForPersistence(graph, error);
 		this.#diagnose({
-			code: "work_journal_persistence_failed",
+			code: "workspace_ledger_persistence_failed",
 			message: errorMessage(error).slice(0, 512),
 		});
-		this.#journalFailStop = this.#settleUnstartedAfterJournalFailure().catch((settlementError) => {
+		this.#ledgerFailStop = this.#settleUnstartedAfterPersistenceFailure(this.#graphOrder).catch((settlementError) => {
 			this.#diagnose({
-				code: "journal_fail_stop_settlement_failed",
+				code: "ledger_fail_stop_settlement_failed",
 				message: errorMessage(settlementError).slice(0, 512),
 			});
 		});
 	}
 
-	async #settleUnstartedAfterJournalFailure(): Promise<void> {
+	async #settleUnstartedAfterPersistenceFailure(graphs: readonly GraphRecord[]): Promise<void> {
 		await Promise.resolve();
-		for (const graph of this.#graphOrder) {
+		for (const graph of graphs) {
 			for (const item of graph.itemOrder) {
 				if (item.state !== "pending" && item.state !== "ready") continue;
-				await this.#settleAfterJournalFailure(graph, item);
+				await this.#settleAfterPersistenceFailure(graph, item);
 			}
 			await this.#trySettleGraph(graph);
 		}
 	}
 
-	#assertProgressAllowed(): void {
-		if (this.#journalFailure) {
-			throw new Error(`Work Journal persistence is unavailable: ${errorMessage(this.#journalFailure)}`);
+	#assertProgressAllowed(graphId: WorkGraphId): void {
+		if (this.#ledgerFailure) {
+			throw new Error(`Workspace Ledger persistence is unavailable: ${errorMessage(this.#ledgerFailure)}`);
 		}
+		const graphFailure = this.#graphFailures.get(graphId);
+		if (graphFailure) throw new Error(`Work Graph persistence is unavailable: ${errorMessage(graphFailure)}`);
 	}
 
 	async #close(): Promise<CodingAgentCloseResult> {
 		await this.#submissionTail;
-		await this.#journalFailStop;
+		await this.#ledgerFailStop;
+		await Promise.all(this.#graphFailStops.values());
 		const canceledGraphIds = this.#graphOrder.filter((graph) => !graph.result).map((graph) => graph.id);
 		for (const graph of this.#graphOrder) {
 			if (graph.result) continue;
+			if (this.#graphFailures.has(graph.id) || this.#ledgerFailure) {
+				for (const item of graph.itemOrder) {
+					if (!isTerminal(item.state))
+						await this.#interruptInMemory(graph, item, this.#graphFailures.get(graph.id));
+				}
+				continue;
+			}
 			try {
-				await this.#mutationFence.run(async () => {
-					await this.#appendJournal({
-						type: "cancellation_requested",
-						graphId: graph.id,
-						timestamp: this.#options.clock.now(),
-					});
-					this.#markCancellation(graph);
-				});
+				await this.#mutationFence.run(() =>
+					this.#graphMutation(graph.id, async () => {
+						await this.#appendGraphRecord(graph.id, {
+							type: "cancellation_requested",
+							graphId: graph.id,
+							timestamp: this.#options.clock.now(),
+						});
+						this.#markCancellation(graph);
+					}),
+				);
 				await this.#applyCancellation(graph);
 			} catch (error) {
 				this.#diagnose({ code: "close_cancellation_failed", message: errorMessage(error) }, graph.id);
@@ -2907,9 +3210,17 @@ class WorkCoordinator implements CodingAgent {
 		];
 		const result: CodingAgentCloseResult = immutableData({ canceledGraphIds, droppedInputs, unknownWork });
 		const failures: unknown[] = [];
-		if (!this.#journalFailure) {
+		if (!this.#ledgerFailure) {
 			try {
-				await this.#journal.flush();
+				await this.#ledger?.flush();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		for (const [graphId, store] of this.#graphStores) {
+			if (this.#graphFailures.has(graphId)) continue;
+			try {
+				await store.flush();
 			} catch (error) {
 				failures.push(error);
 			}
@@ -2920,9 +3231,9 @@ class WorkCoordinator implements CodingAgent {
 			failures.push(error);
 		}
 		try {
-			await this.#journal.close();
+			await this.#persistenceLease?.close();
 		} catch (error) {
-			if (!this.#journalFailure) failures.push(error);
+			if (!this.#ledgerFailure && this.#graphFailures.size === 0) failures.push(error);
 		}
 		this.#closed = true;
 		this.#publish((sequence) => ({ type: "closed", sequence, result }));
@@ -2945,6 +3256,11 @@ class WorkCoordinator implements CodingAgent {
 
 export async function openCodingAgent(options: OpenCodingAgentOptions): Promise<CodingAgent> {
 	const coordinator = new WorkCoordinator(options);
-	await coordinator.initialize();
+	try {
+		await coordinator.initialize();
+	} catch (error) {
+		await coordinator.abortInitialization();
+		throw error;
+	}
 	return Object.freeze(coordinator);
 }
