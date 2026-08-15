@@ -66,6 +66,7 @@ import {
 	rollbackReservations,
 	settleAcceptedInputResources,
 } from "./work-graph-reservation.ts";
+import { WorkGraphScheduler } from "./work-graph-scheduler.ts";
 import { workerFactHasOpenEffects } from "./worker-fact.ts";
 import type { DelegateChildSpecification, WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
@@ -98,13 +99,12 @@ export class WorkGraphEngine implements CodingAgent {
 	readonly #workerLifecycle: WorkerRuntimePort;
 	readonly #publicationSequencer: PublicationSequencer;
 	readonly #admission: WorkAdmission;
+	readonly #scheduler: WorkGraphScheduler;
 	readonly #submissions = new Set<Promise<CodingAgentReceipt>>();
 	#closed = false;
 	#closing = false;
 	#closeOperation?: Promise<CodingAgentCloseResult>;
 	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
-	#scheduling = false;
-	#scheduleAgain = false;
 	readonly #settlementWaiters: Array<() => void> = [];
 	readonly #itemTerminalWaiters: Array<() => void> = [];
 
@@ -132,6 +132,35 @@ export class WorkGraphEngine implements CodingAgent {
 		this.#workerLifecycle = dependencies.workerLifecycle;
 		this.#publicationSequencer = dependencies.publicationSequencer;
 		this.#admission = options.admission;
+		this.#scheduler = new WorkGraphScheduler({
+			graphOrder: this.#graphOrder,
+			admission: this.#admission,
+			host: {
+				ledgerFailure: () => this.#durable.ledgerFailure,
+				hasGraphFailure: (graphId) => this.#durable.hasGraphFailure(graphId),
+				processActiveConcurrency: () => this.#workerLifecycle.processActiveConcurrency,
+				activate: (graph, item) => this.#workerLifecycle.activate(graph, item),
+				runItem: (graph, item) =>
+					this.#workerLifecycle.runItem(graph, item, {
+						delegate: (specifications, signal) => this.#delegate(graph, item, specifications, signal),
+						promptSubmission: () => this.#createSubmission(item, "prompt", item.objective, []),
+						transition: (to) => this.#transition(graph, item, to),
+						settleItem: () => this.#trySettleItem(graph, item),
+						settleAfterPersistenceFailure: () => this.#settleAfterPersistenceFailure(graph, item),
+						interruptInMemory: (error) => this.#interruptInMemory(graph, item, error),
+					}),
+				applyCancellation: (graph, targets) =>
+					this.#workerLifecycle.applyCancellation(targets, {
+						diagnose: (code, message, itemId) => this.#diagnose({ code, message }, graph.id, itemId),
+						finalizeUnstarted: (item) => this.#finalizeWithoutRun(graph, item, "canceled"),
+					}),
+				transition: (graph, item, to) => this.#transition(graph, item, to),
+				finalizeWithoutRun: (graph, item, terminal, blockedBy) =>
+					this.#finalizeWithoutRun(graph, item, terminal, blockedBy),
+				trySettleGraph: (graph) => this.#trySettleGraph(graph),
+				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
+			},
+		});
 	}
 
 	drainPendingInputAdmissions(item: ItemRecord): void {
@@ -143,7 +172,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	schedule(): void {
-		this.#requestSchedule();
+		this.#scheduler.request();
 	}
 
 	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
@@ -272,7 +301,7 @@ export class WorkGraphEngine implements CodingAgent {
 			}
 			admission.release();
 			if (durablyAccepted && plan) {
-				this.#requestSchedule();
+				this.#scheduler.request();
 				return immutableData({
 					status: "accepted",
 					batchId,
@@ -287,12 +316,12 @@ export class WorkGraphEngine implements CodingAgent {
 					: this.#durable.ledgerFailure
 						? { code: "ledger_failed" as const, message: errorMessage(error) }
 						: { code: "graph_store_failed" as const, message: errorMessage(error), graphId: plan?.targetGraphId };
-			this.#requestSchedule();
+			this.#scheduler.request();
 			return immutableData({ status: "rejected", batchId, rejection });
 		}
 		if (!plan) throw new Error("Accepted command batch has no plan");
 		admission.release();
-		this.#requestSchedule();
+		this.#scheduler.request();
 
 		// The atomic Fact segment plus any required Ledger index is the durable
 		// acceptance point. Later bookkeeping cannot turn it into a rejection.
@@ -311,12 +340,12 @@ export class WorkGraphEngine implements CodingAgent {
 				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
 				interruptForInputResourceFailure: (graph, item) => this.#interruptForInputResourceFailure(graph, item),
 				flushPendingInputs: (item) => this.#flushPendingInputs(item),
-				requestSchedule: () => this.#requestSchedule(),
+				requestSchedule: () => this.#scheduler.request(),
 			});
 		} catch (error) {
 			this.#diagnose({ code: "input_resource_settlement_failed", message: errorMessage(error) });
 		}
-		this.#requestSchedule();
+		this.#scheduler.request();
 		return immutableData({
 			status: "accepted",
 			batchId,
@@ -526,7 +555,7 @@ export class WorkGraphEngine implements CodingAgent {
 			this.#flushPendingInputs(delivery.item);
 		}
 		for (const cancellation of plan.cancellations) {
-			await this.#applyWorkerCancellation(cancellation.graph, cancellation.item);
+			await this.#scheduler.applyWorkerCancellation(cancellation.graph, cancellation.item);
 		}
 	}
 
@@ -563,155 +592,6 @@ export class WorkGraphEngine implements CodingAgent {
 		for (const pending of item.pendingInputs.splice(0)) {
 			if (pending.submission.kind === "steering") item.runtime.steer(pending.submission);
 			else item.runtime.followUp(pending.submission);
-		}
-	}
-
-	async #applyWorkerCancellation(graph: GraphRecord, target?: ItemRecord): Promise<void> {
-		const targets = graph.itemOrder.filter(
-			(item) => !target || item.id === target.id || this.#isDescendant(graph, item, target.id),
-		);
-		await this.#workerLifecycle.applyCancellation(targets, {
-			diagnose: (code, message, itemId) => this.#diagnose({ code, message }, graph.id, itemId),
-			finalizeUnstarted: (item) => this.#finalizeWithoutRun(graph, item, "canceled"),
-		});
-	}
-
-	#isDescendant(graph: GraphRecord, candidate: ItemRecord, ancestorId: WorkItemId): boolean {
-		let current = candidate.parentId;
-		while (current) {
-			if (current === ancestorId) return true;
-			current = graph.items.get(current)?.parentId;
-		}
-		return false;
-	}
-
-	#requestSchedule(): void {
-		if (this.#scheduling) {
-			this.#scheduleAgain = true;
-			return;
-		}
-		queueMicrotask(() => void this.#drainSchedule());
-	}
-
-	async #drainSchedule(): Promise<void> {
-		if (this.#scheduling) {
-			this.#scheduleAgain = true;
-			return;
-		}
-		this.#scheduling = true;
-		try {
-			do {
-				this.#scheduleAgain = false;
-				if (this.#durable.ledgerFailure) continue;
-				await this.#refreshPendingStates();
-				for (;;) {
-					const selected = this.#admission.select({
-						activeProcessConcurrency: this.#workerLifecycle.processActiveConcurrency,
-						graphs: this.#graphOrder.map((graph) => ({
-							graphId: graph.id,
-							activeConcurrency: graph.activeConcurrency,
-							maximumConcurrency: graph.maximumConcurrency,
-							next: () => this.#nextSchedulableInGraph(graph),
-						})),
-					});
-					if (!selected) break;
-					if (selected.kind === "delegation_resume") {
-						const pending = selected.item.delegationResume;
-						if (!pending) continue;
-						selected.item.delegationResume = undefined;
-						selected.item.delegationWaiting = false;
-						this.#workerLifecycle.activate(selected.graph, selected.item);
-						pending.resolve();
-						continue;
-					}
-					if (!(await this.#transition(selected.graph, selected.item, "preparing"))) continue;
-					this.#workerLifecycle.activate(selected.graph, selected.item);
-					void this.#workerLifecycle
-						.runItem(selected.graph, selected.item, {
-							delegate: (specifications, signal) =>
-								this.#delegate(selected.graph, selected.item, specifications, signal),
-							promptSubmission: () =>
-								this.#createSubmission(selected.item, "prompt", selected.item.objective, []),
-							transition: (to) => this.#transition(selected.graph, selected.item, to),
-							settleItem: () => this.#trySettleItem(selected.graph, selected.item),
-							settleAfterPersistenceFailure: () =>
-								this.#settleAfterPersistenceFailure(selected.graph, selected.item),
-							interruptInMemory: (error) => this.#interruptInMemory(selected.graph, selected.item, error),
-						})
-						.catch((error) => {
-							this.#diagnose(
-								{ code: "worker_lifecycle_failed", message: errorMessage(error) },
-								selected.graph.id,
-								selected.item.id,
-							);
-						});
-					await this.#refreshPendingStates();
-				}
-			} while (this.#scheduleAgain);
-		} catch (error) {
-			this.#diagnose({ code: "scheduler_failed", message: errorMessage(error) });
-		} finally {
-			this.#scheduling = false;
-			if (this.#scheduleAgain) this.#requestSchedule();
-		}
-	}
-
-	#nextSchedulableInGraph(graph: GraphRecord):
-		| {
-				readonly kind: "delegation_resume" | "start";
-				readonly graph: GraphRecord;
-				readonly item: ItemRecord;
-		  }
-		| undefined {
-		if (this.#durable.ledgerFailure || this.#durable.hasGraphFailure(graph.id) || graph.result) return undefined;
-		for (const item of graph.itemOrder) {
-			if (item.delegationResume) return { kind: "delegation_resume", graph, item };
-			if (item.state === "ready" && item.inputAdmissions.length === 0) return { kind: "start", graph, item };
-		}
-		return undefined;
-	}
-
-	async #refreshPendingStates(): Promise<void> {
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const graph of this.#graphOrder) {
-				if (graph.result) continue;
-				for (const item of graph.itemOrder) {
-					if (item.state !== "pending" && item.state !== "ready") continue;
-					if (graph.cancellationRequested || item.cancellationRequested) {
-						await this.#finalizeWithoutRun(graph, item, "canceled");
-						changed = true;
-						continue;
-					}
-					const blockedBy = item.dependencies.filter((dependencyId) => {
-						const state = graph.items.get(dependencyId)?.state;
-						return state !== undefined && isTerminal(state) && state !== "succeeded";
-					});
-					const parent = item.parentId ? graph.items.get(item.parentId) : undefined;
-					if (parent && isTerminal(parent.state) && parent.state !== "succeeded") blockedBy.push(parent.id);
-					if (blockedBy.length > 0) {
-						await this.#finalizeWithoutRun(graph, item, "blocked", blockedBy);
-						changed = true;
-						continue;
-					}
-					if (item.state !== "pending") continue;
-					const dependenciesSucceeded = item.dependencies.every(
-						(dependencyId) => graph.items.get(dependencyId)?.state === "succeeded",
-					);
-					const parentPermits =
-						!parent ||
-						parent.state === "preparing" ||
-						parent.state === "running" ||
-						parent.state === "settling" ||
-						parent.state === "succeeded";
-					if (dependenciesSucceeded && parentPermits && item.inputAdmissions.length === 0) {
-						await this.#transition(graph, item, "ready");
-						changed = true;
-					}
-				}
-				await this.#trySettleGraph(graph);
-			}
 		}
 	}
 
@@ -1036,7 +916,7 @@ export class WorkGraphEngine implements CodingAgent {
 				},
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
-			this.#requestSchedule();
+			this.#scheduler.request();
 		});
 	}
 
@@ -1046,7 +926,7 @@ export class WorkGraphEngine implements CodingAgent {
 			await this.#trySettleItem(graph, parent);
 		}
 		await this.#trySettleGraph(graph);
-		this.#requestSchedule();
+		this.#scheduler.request();
 	}
 
 	async #trySettleGraph(graph: GraphRecord): Promise<void> {
@@ -1352,7 +1232,7 @@ export class WorkGraphEngine implements CodingAgent {
 						},
 					]);
 				});
-				await this.#applyWorkerCancellation(graph);
+				await this.#scheduler.applyWorkerCancellation(graph);
 			} catch (error) {
 				this.#diagnose({ code: "close_cancellation_failed", message: errorMessage(error) }, graph.id);
 				for (const item of graph.itemOrder) {
@@ -1360,7 +1240,7 @@ export class WorkGraphEngine implements CodingAgent {
 				}
 			}
 		}
-		this.#requestSchedule();
+		this.#scheduler.request();
 		await this.#waitForGraphSettlement();
 		const droppedInputs = this.#graphOrder.reduce(
 			(total, graph) =>
