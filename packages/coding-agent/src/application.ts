@@ -36,14 +36,8 @@ import {
 	openInteractiveRuntime,
 	restoreSessionMedia,
 } from "./app/interactive-session-options.ts";
-import { JsonEventWriter } from "./app/json-event-writer.ts";
-import {
-	chatAttachment,
-	hasAgentInput,
-	pathSafeIdentity,
-	projectJsonMedia,
-	promptInput,
-} from "./app/media-attachments.ts";
+import { chatAttachment, hasAgentInput, pathSafeIdentity, promptInput } from "./app/media-attachments.ts";
+import { runPrint } from "./app/print-run.ts";
 import { createSessionPresentation } from "./app/session-presentation.ts";
 import {
 	mcpTrustDecision,
@@ -55,11 +49,7 @@ import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { SkillCommandRegistryBinding } from "./commands/skill-extensions.ts";
-import {
-	CodingCompletionController,
-	type CompletionWorkspaceEvidenceProvider,
-	createGitWorkspaceEvidenceProvider,
-} from "./completion/index.ts";
+import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
 import { collectWorkspaceDiff } from "./completion/workspace-diff.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
@@ -77,7 +67,6 @@ import { ProviderManager } from "./models/provider-manager.ts";
 import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import type { AgentRunControlBinding } from "./run-control/index.ts";
-import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import type { SessionWorkController } from "./runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
@@ -313,14 +302,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 				};
 				const mediaLibrary = createSessionMediaLibrary(session, options);
-				const jsonEventWriter =
-					parsed.output === "json"
-						? new JsonEventWriter({
-								mode: parsed.jsonEventStream,
-								output: options.io.stdout,
-								project: (value) => projectJsonMedia(value, mediaLibrary, parsed.includeMediaData),
-							})
-						: undefined;
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				let skillUiClosed = false;
@@ -661,24 +642,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							}
 						}
 					});
-					const completionController =
-						parsed.mode === "print"
-							? new CodingCompletionController({
-									workspaceEvidence:
-										options.completionWorkspaceEvidence ??
-										createGitWorkspaceEvidenceProvider({
-											processRunner: options.processRunner,
-											fileSystem: options.fileSystem,
-											workspace: () => agentRuntime.state().activePlacement?.root ?? workspace.root,
-											environment: options.runtime.environment,
-											now: () => options.runtime.clock.now(),
-										}),
-									steer: (message) => agentRuntime.deliver("steering", message),
-								})
-							: undefined;
-					if (completionController) {
-						agentRuntime.subscribeControl((event) => completionController.accept(event));
-					}
 					if (parsed.mode === "interactive") {
 						const secondaryResources = new Map<
 							string,
@@ -985,101 +948,26 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						return exitCode;
 					}
-					if (jsonEventWriter) {
-						agentRuntime.subscribe({
-							accept: async (event) => {
-								const runControl =
-									event.type === "run_start" || event.type === "run_end"
-										? runControlBinding?.reportForRun(String(event.runId))
-										: undefined;
-								await jsonEventWriter.writeAgentEvent(
-									event,
-									event.type === "run_start"
-										? (() => {
-												const prepared = agentRuntime.metadataForRun(String(event.runId));
-												if (!prepared) throw new Error(`Prepared Run ${event.runId} is unavailable`);
-												return prepared;
-											})()
-										: undefined,
-									runControlBinding ? { schemaVersion: 3, ...(runControl ? { runControl } : {}) } : undefined,
-								);
-							},
-							resynchronize: ({ reason, state, seed, toolInvocations }) =>
-								jsonEventWriter.writeRecord({
-									schemaVersion: 2,
-									type: "resync_required",
-									reason,
-									status: state.status,
-									sessionId: agentRuntime.sessionId,
-									seed,
-									toolInvocations,
-								}),
-						});
-						agentRuntime.subscribeResult(async (result) => {
-							const runId = result.run?.runId;
-							if (!runId) return;
-							await drainWorkspaceDiffSupplements(session);
-							const evidence = session.runEvidence.at(-1);
-							if (!evidence || evidence.runId !== runId) {
-								throw new Error(`Run evidence was unavailable after completed Run ${runId}`);
-							}
-							const runControl = runControlBinding?.reportForRun(runId);
-							const outputEvidence = runControl ? withRunControlEvidence(evidence, runControl) : evidence;
-							await jsonEventWriter.writeRecord(outputEvidence);
-							const disposition = completionController?.get(runId);
-							if (!disposition) {
-								throw new Error(`Completion disposition was unavailable after completed Run ${runId}`);
-							}
-							await jsonEventWriter.writeRecord(disposition);
-						});
-					}
-					const initialMedia = await prepareAttachments(initialAttachmentIds);
-					let initialMediaCommitted = false;
-					const detachInitialMediaCommit = agentRuntime.subscribe({
-						accept: async (event) => {
-							if (event.type !== "run_start" || event.source !== "prompt" || initialMediaCommitted) return;
-							await initialMedia.commit();
-							initialMediaCommitted = true;
-						},
-						resynchronize: async ({ state }) => {
-							if (!initialMediaCommitted && state.activeRun?.source === "prompt") {
-								await initialMedia.commit();
-								initialMediaCommitted = true;
-							}
-						},
+					return await runPrint({
+						work: agentRuntime,
+						session,
+						input: initialInput,
+						attachmentIds: initialAttachmentIds,
+						prepareAttachments,
+						mediaLibrary,
+						output: parsed.output,
+						jsonEventStream: parsed.jsonEventStream,
+						includeMediaData: parsed.includeMediaData,
+						io: options.io,
+						processRunner: options.processRunner,
+						fileSystem: options.fileSystem,
+						workspace: workspace.root,
+						environment: options.runtime.environment,
+						clock: options.runtime.clock,
+						completionWorkspaceEvidence: options.completionWorkspaceEvidence,
+						runControl: runControlBinding,
+						drainWorkspaceDiffSupplements,
 					});
-					let result: Awaited<ReturnType<SessionWorkController["prompt"]>>;
-					try {
-						result = await agentRuntime.prompt(initialInput, initialAttachmentIds);
-					} finally {
-						detachInitialMediaCommit();
-						if (!initialMediaCommitted) await initialMedia.rollback();
-					}
-					if (result.state !== "succeeded" || result.run?.outcome !== "success") {
-						const detail =
-							result.run?.failure?.message ??
-							result.diagnostics.at(-1)?.message ??
-							`Work ended in state ${result.state}`;
-						await options.io.stderr.write(`coda: ${detail}\n`);
-						return 1;
-					}
-					const committed = [...agentRuntime.state().messages]
-						.reverse()
-						.find(({ message }) => message.role === "assistant")?.message;
-					if (!committed || committed.role !== "assistant") throw new Error("Final Assistant Message is missing");
-					if (parsed.output === "text") await options.io.stdout.write(`${finalText(committed)}\n`);
-					const disposition = result.run ? completionController?.get(result.run.runId) : undefined;
-					if (!disposition)
-						throw new Error(`Completion disposition was unavailable after completed Run ${result.run?.runId}`);
-					if (disposition.disposition !== "verified") {
-						if (parsed.output === "text") {
-							await options.io.stderr.write(
-								`coda: completion ${disposition.disposition} (${disposition.reasons.join(", ")})\n`,
-							);
-						}
-						return 1;
-					}
-					return 0;
 				} finally {
 					runControlBinding?.dispose();
 					skillUiClosed = true;
