@@ -19,9 +19,9 @@ import { ProcessSessionManager } from "../process/process-session-manager.ts";
 import type { AgentRunControlBinding, RunControlConfiguration } from "../run-control/index.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "../runtime/workspace-input-resources.ts";
-import {
+import type {
 	createWorkspaceWorkCoordinator,
-	type WorkspaceWorkCoordinator,
+	WorkspaceWorkCoordinator,
 } from "../runtime/workspace-work-coordinator.ts";
 import type { Session, SessionManager } from "../session/types.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
@@ -280,6 +280,7 @@ export interface OpenedWorkspaceRuntime {
 }
 
 export async function openWorkspaceRuntime(input: {
+	readonly createWorkCoordinator: typeof createWorkspaceWorkCoordinator;
 	readonly options: WorkspaceSessionApplicationOptions;
 	readonly resources: WorkspaceSessionResources;
 	readonly sessions: SessionManager;
@@ -314,7 +315,7 @@ export async function openWorkspaceRuntime(input: {
 		workspaceId: input.workspaceId,
 		workspaceRoot: input.workspace.root,
 	});
-	const coordinator = createWorkspaceWorkCoordinator({
+	const coordinator = input.createWorkCoordinator({
 		workspace: input.workspace,
 		fileSystem: input.options.fileSystem,
 		processRunner: input.options.processRunner,

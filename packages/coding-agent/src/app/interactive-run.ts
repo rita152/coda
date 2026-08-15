@@ -22,7 +22,7 @@ import type { WorkspaceInputResources } from "../runtime/workspace-input-resourc
 import type { WorkspaceWorkCoordinator } from "../runtime/workspace-work-coordinator.ts";
 import { DraftSession } from "../session/draft-session.ts";
 import type { Session, SessionId, SessionManager } from "../session/types.ts";
-import type { SettingsStore, UserSettings } from "../settings/types.ts";
+import type { SettingsStore } from "../settings/types.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import { activitySummaryModeForApi } from "../ui/activity-status.ts";
@@ -41,6 +41,7 @@ import {
 	restoreSessionMedia,
 } from "./interactive-session-options.ts";
 import { chatAttachment, hasAgentInput, pathSafeIdentity, type RestoredChatMedia } from "./media-attachments.ts";
+import type { ApplicationSettingsState } from "./project-runtime.ts";
 import { createSessionPresentation } from "./session-presentation.ts";
 import { closeSecondarySessionResources, trackWorkspaceDiffs, type WorkspaceDiffTracker } from "./workspace-session.ts";
 
@@ -69,7 +70,7 @@ export interface InteractiveRunApplicationOptions {
 export interface RunInteractiveApplicationInput {
 	readonly options: InteractiveRunApplicationOptions;
 	readonly providerManager: ProviderManager;
-	readonly settings: UserSettings;
+	readonly settings: ApplicationSettingsState;
 	readonly sessions: SessionManager;
 	readonly workspace: Workspace;
 	readonly workspaceId: string;
@@ -98,7 +99,7 @@ export interface RunInteractiveApplicationInput {
 }
 
 export async function runInteractiveApplication(input: RunInteractiveApplicationInput): Promise<number> {
-	let settings = input.settings;
+	const settings = input.settings;
 	const secondaryResources = new Map<
 		string,
 		{
@@ -109,8 +110,8 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		}
 	>();
 	const saveCustomProviders = async (): Promise<void> => {
-		settings = persistCustomProviders(settings, input.providerManager.configurations);
-		await input.options.settings.save(settings);
+		settings.current = persistCustomProviders(settings.current, input.providerManager.configurations);
+		await input.options.settings.save(settings.current);
 	};
 	const updateProviderAuth = (providerId: string): Promise<void> =>
 		refreshProviderAuth({
@@ -176,12 +177,12 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		let targetRuntimeToClose: SessionWorkController | undefined;
 		let targetRunControlToDispose: AgentRunControlBinding | undefined;
 		try {
-			const targetSelection = targetSession.restored.model ?? settings.defaultModel;
+			const targetSelection = targetSession.restored.model ?? settings.current.defaultModel;
 			if (!targetSelection) throw new Error("A new Session requires a configured default Model");
 			const targetModel = findModel(input.options.models, targetSelection);
 			const targetReasoning = effectiveReasoningEffort(
 				targetModel,
-				targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
+				targetSession.restored.reasoning ?? settings.current.defaultReasoning ?? "medium",
 			);
 			const targetAuth = await input.options.models.getAuth(targetModel, { clock: input.options.runtime.clock });
 			if (!targetSession.restored.model) {
@@ -294,7 +295,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			diagnostics: input.options.diagnostics,
 			fullScreenOutput: input.options.fullScreenOutput,
 			mcpElicitation: input.mcpElicitation,
-			motion: input.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
+			motion: input.noAnimations ? "reduced" : (settings.current.ui?.motion ?? "full"),
 			commandRegistry: input.commandRegistry,
 			sessionCommand: {
 				list: async () =>

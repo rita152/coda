@@ -1,19 +1,25 @@
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
-import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
+import type { McpConnector, McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
-import { findModel, HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
-import { authenticateInteractively, promptRuntime, selectModelInteractively } from "./app/auth-flows.ts";
+import { HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import { runInteractiveApplication } from "./app/interactive-run.ts";
 import {
-	assertModelSupportsImages,
 	createAttachmentPreparer,
 	createSessionMediaLibrary,
 	restoreSessionMedia,
 } from "./app/interactive-session-options.ts";
 import { promptInput } from "./app/media-attachments.ts";
 import { runPrint } from "./app/print-run.ts";
+import {
+	authenticateInitialModel,
+	createApplicationPromptRuntime,
+	createApplicationSettingsState,
+	loadProjectSkills,
+	openProjectServices,
+	selectInitialModel,
+} from "./app/project-runtime.ts";
 import {
 	mcpTrustDecision,
 	projectTrustDecision,
@@ -30,28 +36,22 @@ import {
 	resolveWorkspaceContext,
 	trackWorkspaceDiffs,
 } from "./app/workspace-session.ts";
-import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
-import { SkillCommandRegistryBinding } from "./commands/skill-extensions.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { inspectMcpConfiguration } from "./mcp/config.ts";
-import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
-import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
 import type { AgentRunControlBinding } from "./run-control/index.ts";
+import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
-import { CodingSkillsManager } from "./skills/manager.ts";
-import { collectSkillRoots } from "./skills/roots.ts";
-import type { CodingSkillsSnapshot } from "./skills/types.ts";
-import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
+import type { SkillWatcherFactory } from "./skills/watcher.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
@@ -183,17 +183,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					providerManager.restore(settings.customProviders ?? []);
 					providersRestored = true;
 				}
-				const terminal =
-					parsed.mode === "interactive"
-						? options.terminalFactory?.create({
-								noColor: parsed.noColor || options.runtime.environment.NO_COLOR !== undefined,
-								colorScheme: parsed.colorScheme ?? settings.ui?.colorScheme ?? "auto",
-							})
-						: undefined;
-				if (parsed.mode === "interactive" && !terminal) {
-					throw new Error("Interactive mode requires an injected Terminal factory");
-				}
-				const interactiveRuntime = terminal ? promptRuntime(options, terminal) : undefined;
+				const interactiveRuntime = createApplicationPromptRuntime(options, parsed, settings);
 				const { workspace, workspaceId, session } = await openWorkspaceSession({
 					path: parsed.workspace,
 					options,
@@ -214,26 +204,19 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					mediaLibrary,
 					workspaceDiffs,
 				});
-				let skillWatcher: SkillWatcher | undefined;
-				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
-				let skillUiClosed = false;
-				let mcpRegistry: CodingMcpRegistry | undefined;
+				let closeProjectUi: (() => void) | undefined;
 				let runControlBinding: AgentRunControlBinding | undefined;
 				try {
-					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
-					if (!selection) {
-						if (!interactiveRuntime) {
-							throw new Error("Print mode requires an explicit, restored, or configured Model");
-						}
-						selection = await selectModelInteractively(options, interactiveRuntime);
-						settings = { ...settings, defaultModel: selection };
-						await options.settings.save(settings);
-					}
-					const model = findModel(options.models, selection);
-					const reasoning = effectiveReasoningEffort(
-						model,
-						parsed.reasoning ?? session.restored.reasoning ?? settings.defaultReasoning ?? "medium",
-					);
+					const initialModel = await selectInitialModel({
+						options,
+						session,
+						settings,
+						requestedModel: parsed.model,
+						requestedReasoning: parsed.reasoning,
+						interactiveRuntime,
+					});
+					settings = initialModel.settings;
+					const { model, reasoning } = initialModel;
 					const projectInstructions = await loadProjectInstructions(workspace, options.fileSystem);
 					let projectTrust = projectTrustDecision({
 						workspace: workspace.root,
@@ -277,15 +260,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
 						}
 					}
-					const skillRoots = await collectSkillRoots({
+					const projectSkills = await loadProjectSkills({
 						workspace: workspace.root,
 						homeDirectory: options.runtime.homeDirectory,
-					});
-					const skillsManager = new CodingSkillsManager({
 						fileSystem: options.fileSystem,
-						roots: skillRoots,
 					});
-					const skillsSnapshot = await skillsManager.refresh();
 					let mcpConfiguration = await inspectMcpConfiguration({
 						workspace: workspace.root,
 						fileSystem: options.fileSystem,
@@ -324,106 +303,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							);
 						}
 					}
-					if (mcpConfiguration.definitions.length > 0 && !options.mcpConnector) {
-						throw new Error("MCP Servers are configured but no MCP connector is available");
-					}
-					if (options.mcpConnector) {
-						mcpRegistry = new CodingMcpRegistry({
-							host: createMcpHost({ connector: options.mcpConnector }),
-							...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
-						});
-						workspaceResources.useMcpRegistry(mcpRegistry);
-						const mcpSnapshot = await mcpRegistry.reload(mcpConfiguration.definitions);
-						for (const server of mcpSnapshot.servers) {
-							if (server.status === "degraded") {
-								await options.io.stderr.write(
-									`coda: MCP Server ${server.id} is unavailable: ${server.error ?? "unknown error"}\n`,
-								);
-							}
-						}
-					}
-					const commandRegistry = options.commandRegistry ?? createCoreCommandRegistry();
-					skillRegistryBinding = new SkillCommandRegistryBinding(commandRegistry);
-					skillRegistryBinding.sync(skillsSnapshot);
-					if (interactiveRuntime && options.skillWatcher) {
-						skillWatcher = options.skillWatcher.watch(
-							skillRoots.map(({ path }) => path),
-							() => {
-								skillsManager.markDirty();
-								void skillsManager
-									.refresh({ rescan: false })
-									.then((snapshot) => {
-										if (!skillUiClosed) skillRegistryBinding!.sync(skillsManager.current ?? snapshot);
-									})
-									.catch((error: unknown) =>
-										maintenanceDiagnostics({
-											code: "skills.refresh-failed",
-											message: error instanceof Error ? error.message : String(error),
-										}),
-									);
-							},
-							(error) => {
-								void maintenanceDiagnostics({ code: "skills.watcher-failed", message: error.message });
-							},
-						);
-					}
-					const refreshSkills = async (): Promise<CodingSkillsSnapshot> => {
-						const snapshot = await skillsManager.refresh();
-						const current = skillsManager.current ?? snapshot;
-						skillRegistryBinding!.sync(current);
-						return current;
-					};
-					const skillsCommand = {
-						snapshot: refreshSkills,
-						refresh: refreshSkills,
-					};
-					const mcpCommandSnapshot = () => ({
-						host:
-							mcpRegistry?.snapshot() ?? Object.freeze({ revision: 0, servers: [], tools: [], diagnostics: [] }),
-						...(mcpConfiguration.workspace ? { workspace: mcpConfiguration.workspace } : {}),
+					const settingsState = createApplicationSettingsState(settings);
+					const projectServices = await openProjectServices({
+						options,
+						settings: settingsState,
+						workspace,
+						mcpConfiguration,
+						skills: projectSkills,
+						interactive: interactiveRuntime !== undefined,
+						diagnostics: maintenanceDiagnostics,
+						resources: workspaceResources,
 					});
-					const reloadMcp = async () => {
-						const latestSettings = await options.settings.load();
-						settings = {
-							...settings,
-							mcpServers: latestSettings.mcpServers,
-							workspaceMcpTrust: latestSettings.workspaceMcpTrust,
-						};
-						mcpConfiguration = await inspectMcpConfiguration({
-							workspace: workspace.root,
-							fileSystem: options.fileSystem,
-							userServers: settings.mcpServers ?? [],
-							workspaceTrust: settings.workspaceMcpTrust ?? [],
-							environment: options.runtime.environment,
-						});
-						if (!mcpRegistry) {
-							if (mcpConfiguration.definitions.length > 0) {
-								throw new Error("MCP Servers are configured but no MCP connector is available");
-							}
-							return mcpCommandSnapshot();
-						}
-						await mcpRegistry.reload(mcpConfiguration.definitions);
-						return mcpCommandSnapshot();
-					};
-					const mcpCommand = {
-						snapshot: mcpCommandSnapshot,
-						reload: reloadMcp,
-						reconnect: async (serverId: string) => {
-							if (!mcpRegistry) throw new Error("MCP is unavailable");
-							await mcpRegistry.reconnect(serverId);
-							return mcpCommandSnapshot();
-						},
-					};
-					let auth = await options.models.getAuth(model, {
+					closeProjectUi = projectServices.closeUi;
+					const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand } = projectServices;
+					const skillsManager = projectSkills.manager;
+					const skillsSnapshot = projectSkills.snapshot;
+					const auth = await authenticateInitialModel({
+						options,
+						model,
 						apiKey: parsed.apiKey,
-						clock: options.runtime.clock,
+						interactiveRuntime,
+						imageCount: parsed.imagePaths.length,
 					});
-					if (!auth && interactiveRuntime && !parsed.apiKey) {
-						await authenticateInteractively(options, model.provider, interactiveRuntime);
-						auth = await options.models.getAuth(model, { clock: options.runtime.clock });
-					}
-					if (!auth) throw new Error(`Model is not authenticated: ${model.provider}/${model.id}`);
-					assertModelSupportsImages(model, parsed.imagePaths.length);
 					const initialAttachmentIds: string[] = [];
 					for (const path of parsed.imagePaths) {
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
@@ -436,6 +337,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const primaryMcpElicitation =
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
 					const openedWorkspace = await openWorkspaceRuntime({
+						createWorkCoordinator: createWorkspaceWorkCoordinator,
 						options,
 						resources: workspaceResources,
 						sessions,
@@ -478,7 +380,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						return await runInteractiveApplication({
 							options,
 							providerManager,
-							settings,
+							settings: settingsState,
 							sessions,
 							workspace,
 							workspaceId,
@@ -528,9 +430,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					});
 				} finally {
 					runControlBinding?.dispose();
-					skillUiClosed = true;
-					skillWatcher?.dispose();
-					skillRegistryBinding?.dispose();
+					closeProjectUi?.();
 					await workspaceResources.close();
 				}
 			} catch (error) {
