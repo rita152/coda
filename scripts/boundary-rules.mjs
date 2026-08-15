@@ -41,6 +41,8 @@ export const RUNTIME_INTERNAL_IMPORTS = Object.freeze({
 	"work-graph-scheduler": Object.freeze([]),
 	"work-graph-delegation": Object.freeze([]),
 	"work-graph-persistence": Object.freeze([]),
+	"work-graph-settlement": Object.freeze([]),
+	"work-graph-lifecycle": Object.freeze(["work-graph-persistence", "work-graph-settlement"]),
 	"work-graph-engine": Object.freeze([
 		"durable-graph-store",
 		"admission-controller",
@@ -49,7 +51,7 @@ export const RUNTIME_INTERNAL_IMPORTS = Object.freeze({
 		"work-graph-submission",
 		"work-graph-scheduler",
 		"work-graph-delegation",
-		"work-graph-persistence",
+		"work-graph-lifecycle",
 	]),
 	"recovery": Object.freeze(["durable-graph-store", "session-registry"]),
 });

@@ -25,24 +25,19 @@ import type {
 	DeliverWorkItemInput,
 	ObservationOptions,
 	PublicationOutcome,
-	WorkBudgetUsage,
 	WorkCapacityPolicy,
 	WorkDiagnostic,
 	WorkGraphId,
-	WorkGraphOutcome,
-	WorkGraphResult,
 	WorkGraphSnapshot,
 	WorkItemId,
 	WorkItemInputKind,
 	WorkItemSnapshot,
 	WorkItemState,
 	WorkResult,
-	WorkRunResult,
-	WorkspaceArtifact,
 } from "./types.ts";
 import { WorkGraphDelegationController } from "./work-graph-delegation.ts";
 import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
-import { WorkGraphPersistenceController } from "./work-graph-persistence.ts";
+import { WorkGraphPersistenceController, WorkGraphSettlementController } from "./work-graph-lifecycle.ts";
 import {
 	errorMessage,
 	type GraphRecord,
@@ -67,7 +62,6 @@ import {
 	settleAcceptedInputResources,
 	validatePlanConfigurations,
 } from "./work-graph-submission.ts";
-import { workerFactHasOpenEffects } from "./worker-fact.ts";
 import type { WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
 
@@ -102,6 +96,7 @@ export class WorkGraphEngine implements CodingAgent {
 	readonly #scheduler: WorkGraphScheduler;
 	readonly #delegation: WorkGraphDelegationController;
 	readonly #persistence: WorkGraphPersistenceController;
+	readonly #settlement: WorkGraphSettlementController;
 
 	constructor(
 		options: WorkGraphEngineOptions,
@@ -140,19 +135,19 @@ export class WorkGraphEngine implements CodingAgent {
 						delegate: (specifications, signal) => this.#delegation.delegate(graph, item, specifications, signal),
 						promptSubmission: () => this.#createSubmission(item, "prompt", item.objective, []),
 						transition: (to) => this.#transition(graph, item, to),
-						settleItem: () => this.#trySettleItem(graph, item),
+						settleItem: () => this.#settlement.trySettleItem(graph, item),
 						settleAfterPersistenceFailure: () => this.#settleAfterPersistenceFailure(graph, item),
 						interruptInMemory: (error) => this.#interruptInMemory(graph, item, error),
 					}),
 				applyCancellation: (graph, targets) =>
 					this.#workerLifecycle.applyCancellation(targets, {
 						diagnose: (code, message, itemId) => this.#diagnose({ code, message }, graph.id, itemId),
-						finalizeUnstarted: (item) => this.#finalizeWithoutRun(graph, item, "canceled"),
+						finalizeUnstarted: (item) => this.#settlement.finalizeWithoutRun(graph, item, "canceled"),
 					}),
 				transition: (graph, item, to) => this.#transition(graph, item, to),
 				finalizeWithoutRun: (graph, item, terminal, blockedBy) =>
-					this.#finalizeWithoutRun(graph, item, terminal, blockedBy),
-				trySettleGraph: (graph) => this.#trySettleGraph(graph),
+					this.#settlement.finalizeWithoutRun(graph, item, terminal, blockedBy),
+				trySettleGraph: (graph) => this.#settlement.trySettleGraph(graph),
 				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
 			},
 		});
@@ -170,12 +165,29 @@ export class WorkGraphEngine implements CodingAgent {
 				applyWorkerCancellation: (graph) => this.#scheduler.applyWorkerCancellation(graph),
 				interruptInMemory: (graph, item, error) => this.#interruptInMemory(graph, item, error),
 				settleAfterPersistenceFailure: (graph, item) => this.#settleAfterPersistenceFailure(graph, item),
-				trySettleGraph: (graph) => this.#trySettleGraph(graph),
+				trySettleGraph: (graph) => this.#settlement.trySettleGraph(graph),
 				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
 				publish: (factory) => this.#publish(factory),
 				requestSchedule: () => this.#scheduler.request(),
 				closePlacement: () => this.#options.placement.close(),
 				closeObservations: () => this.#observations.closeAll(),
+			},
+		});
+		this.#settlement = new WorkGraphSettlementController({
+			durable: this.#durable,
+			tooling: this.#options.tooling,
+			worker: this.#workerLifecycle,
+			publication: this.#publicationSequencer,
+			host: {
+				now: () => this.#options.time.clock.now(),
+				graphMutation: (graphId, operation) => this.#graphMutation(graphId, operation),
+				appendGraphFacts: (graph, facts) => this.#appendGraphFacts(graph, facts),
+				archiveDurableGraph: (graph) => this.#archiveDurableGraph(graph),
+				transition: (graph, item, to) => this.#transition(graph, item, to),
+				interruptInMemory: (graph, item, error) => this.#interruptInMemory(graph, item, error),
+				afterItemTerminal: (graph, item) => this.#afterItemTerminal(graph, item),
+				publish: (factory) => this.#publish(factory),
+				notifySettlementWaiters: () => this.#persistence.notifySettlementWaiters(),
 			},
 		});
 	}
@@ -185,7 +197,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	settleGraph(graph: GraphRecord): Promise<void> {
-		return this.#trySettleGraph(graph);
+		return this.#settlement.trySettleGraph(graph);
 	}
 
 	schedule(): void {
@@ -574,7 +586,7 @@ export class WorkGraphEngine implements CodingAgent {
 			this.#diagnose({ code: "worker_cancel_failed", message: errorMessage(error) }, graph.id, item.id);
 		}
 		if (item.state === "pending" || item.state === "ready") {
-			await this.#finalizeWithoutRun(graph, item, "interrupted");
+			await this.#settlement.finalizeWithoutRun(graph, item, "interrupted");
 		}
 	}
 
@@ -613,7 +625,7 @@ export class WorkGraphEngine implements CodingAgent {
 		item.state = terminal;
 		const publication: PublicationOutcome =
 			terminal === "failed" ? { state: "not_required" } : { state: "not_published", reason: "interrupted" };
-		const result = this.#makeResult(item, terminal, publication, undefined, undefined, [], "unknown");
+		const result = this.#settlement.makeResult(item, terminal, publication, undefined, undefined, [], "unknown");
 		item.result = result;
 		this.#publish((sequence) => ({
 			type: "item_state_changed",
@@ -628,294 +640,13 @@ export class WorkGraphEngine implements CodingAgent {
 		await this.#afterItemTerminal(graph, item);
 	}
 
-	async #trySettleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		if (item.state !== "settling" || item.settling) return item.settling;
-		const children = graph.itemOrder.filter((candidate) => candidate.parentId === item.id);
-		if (children.some((child) => !isTerminal(child.state))) return;
-		const operation = this.#settleItem(graph, item).catch((error) => this.#interruptInMemory(graph, item, error));
-		item.settling = operation;
-		await operation;
-	}
-
-	async #settleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		const hasUnclosedEffects = workerFactHasOpenEffects(item.factProjection);
-		if (hasUnclosedEffects) {
-			item.diagnostics.push({
-				code: "worker_effect_window_unclosed",
-				message: "Worker settled while a Model Attempt or Tool Invocation effect window remained open",
-			});
-		}
-		let terminal: WorkResult["state"] =
-			this.#durable.ledgerFailure || this.#durable.hasGraphFailure(graph.id)
-				? "interrupted"
-				: item.uncertainExternalEffect
-					? "interrupted"
-					: item.cancellationRequested || item.run?.outcome === "aborted"
-						? "canceled"
-						: hasUnclosedEffects
-							? "interrupted"
-							: item.run?.outcome === "success"
-								? "succeeded"
-								: "failed";
-		let artifact: WorkspaceArtifact | undefined;
-		let publication: PublicationOutcome = { state: "not_required" };
-		const placement = item.placement?.placement;
-		if (!placement) {
-			terminal = "interrupted";
-			item.diagnostics.push({
-				code: "placement_missing",
-				message: "Workspace Placement was lost before settlement",
-			});
-		} else {
-			try {
-				await this.#options.tooling.quiesce({
-					graphId: graph.id,
-					itemId: item.id,
-					sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
-					placement,
-				});
-			} catch (error) {
-				terminal = "interrupted";
-				item.diagnostics.push({ code: "workspace_quiescence_interrupted", message: errorMessage(error) });
-			}
-			try {
-				artifact = await this.#options.tooling.capture({
-					graphId: graph.id,
-					itemId: item.id,
-					placement,
-					signal: item.controller?.signal ?? new AbortController().signal,
-				});
-			} catch (error) {
-				terminal = "interrupted";
-				item.diagnostics.push({ code: "artifact_capture_interrupted", message: errorMessage(error) });
-			}
-			if (artifact) {
-				const target = item.parentId ? graph.items.get(item.parentId)?.placement?.placement : undefined;
-				const settled = await this.#publicationSequencer.publish({
-					graph,
-					item,
-					artifact,
-					placement,
-					...(target ? { target } : {}),
-					signal: item.controller?.signal ?? new AbortController().signal,
-					terminal,
-				});
-				terminal = settled.terminal;
-				publication = settled.publication;
-				item.diagnostics.push(...settled.diagnostics);
-			}
-		}
-
-		const evidence = item.run && item.session ? item.session.evidence(String(item.run.runId)) : undefined;
-		if (!(await this.#workerLifecycle.teardown(item)) && terminal === "succeeded") terminal = "failed";
-		this.#workerLifecycle.deactivate(graph, item);
-		await this.#transition(graph, item, terminal);
-		const result = this.#makeResult(item, terminal, publication, artifact, evidence);
-		await this.#recordResult(graph, item, result);
-		await this.#workerLifecycle.releaseResources(
-			graph,
-			item,
-			publication.state === "not_published" || terminal === "interrupted",
-		);
-		await this.#afterItemTerminal(graph, item);
-	}
-
-	async #finalizeWithoutRun(
-		graph: GraphRecord,
-		item: ItemRecord,
-		terminal: "canceled" | "blocked" | "interrupted",
-		blockedBy: readonly WorkItemId[] = [],
-	): Promise<void> {
-		if (isTerminal(item.state)) return;
-		this.#workerLifecycle.deactivate(graph, item);
-		await this.#transition(graph, item, terminal);
-		const publication: PublicationOutcome =
-			terminal === "canceled"
-				? { state: "not_published", reason: "canceled" }
-				: terminal === "interrupted"
-					? { state: "not_published", reason: "interrupted" }
-					: { state: "not_required" };
-		const result = this.#makeResult(item, terminal, publication, undefined, undefined, blockedBy);
-		await this.#recordResult(graph, item, result);
-		await this.#workerLifecycle.releaseResources(graph, item, false);
-		await this.#afterItemTerminal(graph, item);
-	}
-
-	#makeResult(
-		item: ItemRecord,
-		state: WorkResult["state"],
-		publication: PublicationOutcome,
-		artifact?: WorkspaceArtifact,
-		evidence?: WorkResult["evidence"],
-		blockedBy: readonly WorkItemId[] = [],
-		durability: WorkResult["durability"] = "confirmed",
-	): WorkResult {
-		const settledAt = this.#options.time.clock.now();
-		const run: WorkRunResult | undefined = item.run
-			? {
-					runId: String(item.run.runId),
-					outcome: item.run.outcome,
-					...(item.run.failure ? { failure: item.run.failure } : {}),
-					...(item.runtime?.assistantText() ? { assistantText: item.runtime.assistantText() } : {}),
-				}
-			: undefined;
-		const budget: WorkBudgetUsage = {
-			modelAttempts: item.factProjection.modelAttempts,
-			toolInvocations: item.factProjection.toolInvocations,
-			totalTokens: item.factProjection.totalTokens,
-			elapsedMs: Math.max(0, settledAt - item.acceptedAt),
-			...(item.factProjection.exhaustion ? { exhaustion: item.factProjection.exhaustion } : {}),
-		};
-		return immutableData({
-			durability,
-			itemId: item.id,
-			...(item.parentId ? { parentItemId: item.parentId } : {}),
-			dependencies: item.dependencies,
-			runtimeId: item.runtimeId,
-			sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
-			state,
-			...(run ? { run } : {}),
-			...(evidence ? { evidence } : {}),
-			placement: item.placementDescriptor ??
-				item.placement?.placement ?? {
-					placementId: "placement:unknown",
-					root: "",
-					baseIdentity: "unknown",
-					kind: "memory",
-				},
-			...(artifact ? { artifact } : {}),
-			publication,
-			diagnostics: item.diagnostics,
-			timing: {
-				acceptedAt: item.acceptedAt,
-				...(item.startedAt === undefined ? {} : { startedAt: item.startedAt }),
-				settledAt,
-			},
-			budget,
-			...(blockedBy.length > 0 ? { blockedBy } : {}),
-		});
-	}
-
-	async #recordResult(graph: GraphRecord, item: ItemRecord, result: WorkResult): Promise<void> {
-		await this.#graphMutation(graph.id, async () => {
-			if (item.result) return;
-			if (result.durability !== "confirmed") {
-				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Graph store`);
-			}
-			await this.#appendGraphFacts(graph, [
-				{
-					version: WORK_GRAPH_FACT_VERSION,
-					type: "item_result_recorded",
-					graphId: graph.id,
-					itemId: item.id,
-					timestamp: result.timing.settledAt,
-					state: result.state,
-					...(result.run ? { run: result.run } : {}),
-					...(result.evidence ? { evidence: result.evidence } : {}),
-					diagnostics: result.diagnostics,
-					...(result.blockedBy ? { blockedBy: result.blockedBy } : {}),
-				},
-			]);
-			const authoritative = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!
-				.result!;
-			this.#publish((sequence) => ({
-				type: "work_item_settled",
-				sequence,
-				graphId: graph.id,
-				result: authoritative,
-			}));
-		});
-	}
-
 	async #afterItemTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
 		this.#delegation.noteItemTerminal();
 		for (const parent of graph.itemOrder.filter((candidate) => candidate.id === item.parentId)) {
-			await this.#trySettleItem(graph, parent);
+			await this.#settlement.trySettleItem(graph, parent);
 		}
-		await this.#trySettleGraph(graph);
+		await this.#settlement.trySettleGraph(graph);
 		this.#scheduler.request();
-	}
-
-	async #trySettleGraph(graph: GraphRecord): Promise<void> {
-		if (graph.result || graph.itemOrder.length === 0) return;
-		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
-		if (graph.settlement) return graph.settlement;
-		const operation = this.#graphMutation(graph.id, async () => {
-			if (graph.result || graph.itemOrder.length === 0) return;
-			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
-			const root = graph.items.get(graph.rootId);
-			if (!root?.result) return;
-			const results = graph.itemOrder.map((item) => item.result!);
-			const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
-				? "interrupted"
-				: graph.cancellationRequested || root.result.state === "canceled"
-					? "canceled"
-					: root.result.state === "failed" || root.result.state === "blocked"
-						? "failed"
-						: results.some((result) => result.state !== "succeeded")
-							? "partial"
-							: "succeeded";
-			const publications = results.map((result) => result.publication.state);
-			const finalPublication = publications.includes("not_published")
-				? publications.includes("published")
-					? "mixed"
-					: "not_published"
-				: publications.includes("published")
-					? "published"
-					: "not_required";
-			const settledAt = Math.max(this.#options.time.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0);
-			let result: WorkGraphResult = immutableData({
-				durability:
-					this.#durable.ledgerFailure ||
-					this.#durable.hasGraphFailure(graph.id) ||
-					results.some(({ durability }) => durability === "unknown")
-						? "unknown"
-						: "confirmed",
-				graphId: graph.id,
-				rootItemId: graph.rootId,
-				objective: graph.objective,
-				outcome,
-				maximumConcurrency: graph.maximumConcurrency,
-				effectiveConcurrency: graph.effectiveConcurrency,
-				results,
-				cancellationRequested: graph.cancellationRequested,
-				acceptedAt: graph.acceptedAt,
-				settledAt,
-				finalPublication,
-			});
-			if (result.durability === "confirmed") {
-				try {
-					await this.#appendGraphFacts(graph, [
-						{
-							version: WORK_GRAPH_FACT_VERSION,
-							type: "graph_result_recorded",
-							graphId: graph.id,
-							timestamp: settledAt,
-							effectiveConcurrency: graph.effectiveConcurrency,
-						},
-					]);
-					result = graph.aggregate.snapshot().graph!.result!;
-					await this.#archiveDurableGraph(graph);
-				} catch {
-					if (!this.#durable.ledgerFailure && !this.#durable.hasGraphFailure(graph.id)) {
-						throw new Error("Work Graph result persistence failed");
-					}
-					result = immutableData({ ...result, durability: "unknown" });
-				}
-			}
-			if (result.durability === "unknown") {
-				// Persistence-failure exception: no authoritative Graph projection can represent unknown durability.
-				graph.result = result;
-			}
-			this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
-			this.#persistence.notifySettlementWaiters();
-		});
-		graph.settlement = operation;
-		try {
-			await operation;
-		} finally {
-			if (graph.settlement === operation) graph.settlement = undefined;
-		}
 	}
 
 	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<boolean> {
@@ -985,7 +716,7 @@ export class WorkGraphEngine implements CodingAgent {
 		// Single-fact-source exception: persistence is unavailable, so durability is explicitly unknown.
 		item.state = "interrupted";
 		const publication: PublicationOutcome = { state: "not_published", reason: "interrupted" };
-		const result = this.#makeResult(item, "interrupted", publication, undefined, undefined, [], "unknown");
+		const result = this.#settlement.makeResult(item, "interrupted", publication, undefined, undefined, [], "unknown");
 		item.result = result;
 		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
 		await this.#workerLifecycle.releaseResources(graph, item, true);
