@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
@@ -12,14 +11,7 @@ import {
 	type Terminal,
 	type TerminalColorScheme,
 } from "@coda/tui";
-import {
-	codingAgentRunBudget,
-	finalText,
-	findModel,
-	HELP,
-	parseArguments,
-	runControlConfiguration,
-} from "./app/argument-parsing.ts";
+import { finalText, findModel, HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import {
 	authenticateInteractively,
 	persistCustomProviders,
@@ -45,18 +37,25 @@ import {
 	validateSkillPath,
 	workspaceMcpReviewText,
 } from "./app/trust-gating.ts";
+import {
+	closeSecondarySessionResources,
+	createMaintenanceDiagnostics,
+	createWorkspaceDiffTracker,
+	createWorkspaceSessionResources,
+	dispatchMaintenanceCleanup,
+	openWorkspaceRuntime,
+	openWorkspaceSession,
+	resolveWorkspaceContext,
+	trackWorkspaceDiffs,
+} from "./app/workspace-session.ts";
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { SkillCommandRegistryBinding } from "./commands/skill-extensions.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
-import { collectWorkspaceDiff } from "./completion/workspace-diff.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
-import { createWorkspace } from "./host/workspace.ts";
-import { cleanupSessionMedia } from "./maintenance/session-media.ts";
-import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { inspectMcpConfiguration } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
@@ -65,11 +64,8 @@ import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { catalogModelFromRuntime } from "./models/model-catalog.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
 import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
-import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import type { AgentRunControlBinding } from "./run-control/index.ts";
 import type { SessionWorkController } from "./runtime/session-work-controller.ts";
-import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
-import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { DraftSession } from "./session/draft-session.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import type { Session, SessionId, SessionManager } from "./session/types.ts";
@@ -89,12 +85,6 @@ import { type InteractiveSessionOptions, runInteractive } from "./ui/run-interac
 export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
 export type { ModelSelection } from "./models/model-selection.ts";
 export type { ProjectTrustRecord, SettingsStore, UserSettings } from "./settings/types.ts";
-
-const unavailableProcessSessionRunner: ProcessSessionRunner = Object.freeze({
-	start: async () => {
-		throw new Error("Process sessions require a configured ProcessSessionRunner");
-	},
-});
 
 export interface ApplicationRuntime {
 	readonly cwd: string;
@@ -182,51 +172,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				if (parsed.action === "skills-validate") {
 					return validateSkillPath(parsed.skillsPath!, options, parsed.output);
 				}
-				const maintenanceDiagnostics: DiagnosticSink =
-					options.diagnostics ??
-					((diagnostic) => options.io.stderr.write(`coda: [${diagnostic.code}] ${diagnostic.message}\n`));
-				const cleanup = async () => {
-					const [logs, media] = await Promise.all([
-						cleanupTemporaryLogs({
-							fileSystem: options.fileSystem,
-							homeDirectory: options.runtime.homeDirectory,
-							now: options.runtime.clock.now(),
-							diagnostics: maintenanceDiagnostics,
-						}),
-						cleanupSessionMedia({
-							fileSystem: options.fileSystem,
-							homeDirectory: options.runtime.homeDirectory,
-							now: options.runtime.clock.now(),
-							diagnostics: maintenanceDiagnostics,
-						}),
-					]);
-					return {
-						removed: [...logs.removed, ...media.removed],
-						retainedBytes: logs.retainedBytes + media.retainedBytes,
-					};
-				};
-				if (parsed.action === "cleanup") {
-					const result = await cleanup();
-					if (parsed.output === "json") {
-						await options.io.stdout.write(
-							`${JSON.stringify({ schemaVersion: 1, type: "cleanup", removed: result.removed.length, retainedBytes: result.retainedBytes })}\n`,
-						);
-					} else {
-						await options.io.stdout.write(
-							`Removed ${result.removed.length} unreferenced artifact${result.removed.length === 1 ? "" : "s"}; ${result.retainedBytes} bytes retained.\n`,
-						);
-					}
-					return 0;
-				}
-				void cleanup().catch(async (error: unknown) => {
-					await maintenanceDiagnostics({
-						code: "temporary-log.cleanup-failed",
-						message: error instanceof Error ? error.message : String(error),
-					});
+				const maintenanceDiagnostics = createMaintenanceDiagnostics(options);
+				const cleanupExit = dispatchMaintenanceCleanup({
+					explicit: parsed.action === "cleanup",
+					output: parsed.output,
+					options,
+					diagnostics: maintenanceDiagnostics,
 				});
+				if (cleanupExit) return await cleanupExit;
 				if (parsed.action === "sessions") {
-					const workspace = await createWorkspace(parsed.workspace ?? options.runtime.cwd, options.fileSystem);
-					const workspaceId = createHash("sha256").update(workspace.root).digest("hex").slice(0, 32);
+					const { workspace, workspaceId } = await resolveWorkspaceContext(parsed.workspace, options);
 					const descriptors = await sessions.list({ id: workspaceId, path: workspace.root });
 					if (parsed.output === "json") {
 						for (const descriptor of descriptors) {
@@ -264,87 +219,31 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					throw new Error("Interactive mode requires an injected Terminal factory");
 				}
 				const interactiveRuntime = terminal ? promptRuntime(options, terminal) : undefined;
-				const workspace = await createWorkspace(parsed.workspace ?? options.runtime.cwd, options.fileSystem);
-				const workspaceId = createHash("sha256").update(workspace.root).digest("hex").slice(0, 32);
-				const session = await sessions.open({
-					workspace: { id: workspaceId, path: workspace.root },
+				const { workspace, workspaceId, session } = await openWorkspaceSession({
+					path: parsed.workspace,
+					options,
+					sessions,
 					mode: parsed.mode,
 					resumeId: parsed.resumeId,
 					forceUnlock: parsed.forceUnlock,
 					persistent: parsed.persistSession || (parsed.mode === "interactive" && !parsed.noSession),
 				});
-				const pendingWorkspaceDiffs = new Map<string, Set<Promise<void>>>();
-				const beginWorkspaceDiffSupplement = (targetSession: Session, runId: string): Promise<void> => {
-					const operation = (async () => {
-						const diff = await collectWorkspaceDiff({
-							processRunner: options.processRunner,
-							workspace: workspace.root,
-							environment: options.runtime.environment,
-						});
-						targetSession.supplementRunEvidence(runId, diff);
-					})();
-					const key = targetSession.descriptor.id;
-					const pending = pendingWorkspaceDiffs.get(key) ?? new Set<Promise<void>>();
-					pending.add(operation);
-					pendingWorkspaceDiffs.set(key, pending);
-					const remove = () => {
-						pending.delete(operation);
-						if (pending.size === 0) pendingWorkspaceDiffs.delete(key);
-					};
-					void operation.then(remove, remove);
-					return operation;
-				};
-				const drainWorkspaceDiffSupplements = async (targetSession: Session): Promise<void> => {
-					for (;;) {
-						const pending = [...(pendingWorkspaceDiffs.get(targetSession.descriptor.id) ?? [])];
-						if (pending.length === 0) return;
-						await Promise.allSettled(pending);
-					}
-				};
+				const workspaceDiffs = createWorkspaceDiffTracker({
+					processRunner: options.processRunner,
+					workspace: workspace.root,
+					environment: options.runtime.environment,
+				});
 				const mediaLibrary = createSessionMediaLibrary(session, options);
+				const workspaceResources = createWorkspaceSessionResources({
+					session,
+					mediaLibrary,
+					workspaceDiffs,
+				});
 				let skillWatcher: SkillWatcher | undefined;
 				let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
 				let skillUiClosed = false;
 				let mcpRegistry: CodingMcpRegistry | undefined;
-				let processSessionManager: ProcessSessionManager | undefined;
 				let runControlBinding: AgentRunControlBinding | undefined;
-				let workCoordinator: ReturnType<typeof createWorkspaceWorkCoordinator> | undefined;
-				const closeRuntimeResources = async (): Promise<void> => {
-					const failures: unknown[] = [];
-					try {
-						await drainWorkspaceDiffSupplements(session);
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						if (workCoordinator) await workCoordinator.close();
-						else await session.close();
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						await drainWorkspaceDiffSupplements(session);
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						await processSessionManager?.close();
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						await mcpRegistry?.close();
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						await mediaLibrary.dispose();
-					} catch (error) {
-						failures.push(error);
-					}
-					if (failures.length === 1) throw failures[0];
-					if (failures.length > 1) throw new AggregateError(failures, "Could not close the Agent runtime");
-				};
 				try {
 					let selection = parsed.model ?? session.restored.model ?? settings.defaultModel;
 					if (!selection) {
@@ -458,6 +357,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							host: createMcpHost({ connector: options.mcpConnector }),
 							...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
 						});
+						workspaceResources.useMcpRegistry(mcpRegistry);
 						const mcpSnapshot = await mcpRegistry.reload(mcpConfiguration.definitions);
 						for (const server of mcpSnapshot.servers) {
 							if (server.status === "degraded") {
@@ -554,73 +454,38 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
 					}
 					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
-					const configuredShell = options.runtime.environment.SHELL;
-					const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
 					const interactiveMcpElicitation =
 						parsed.mode === "interactive" && !options.mcpElicitation
 							? new InteractiveMcpElicitationHandler()
 							: undefined;
 					const primaryMcpElicitation =
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
-					const activeProcessSessionManager = new ProcessSessionManager({
-						fileSystem: options.fileSystem,
-						homeDirectory: options.runtime.homeDirectory,
-						runner: options.processSessionRunner ?? unavailableProcessSessionRunner,
-						idGenerator: options.runtime.idGenerator,
-					});
-					const inputResources = new WorkspaceInputResources();
-					processSessionManager = activeProcessSessionManager;
-					const workspacePersistence = options.workspacePersistence?.({
-						workspaceId,
-						workspaceRoot: workspace.root,
-					});
-					const activeWorkCoordinator = createWorkspaceWorkCoordinator({
+					const openedWorkspace = await openWorkspaceRuntime({
+						options,
+						resources: workspaceResources,
+						sessions,
+						session,
 						workspace,
-						fileSystem: options.fileSystem,
-						processRunner: options.processRunner,
-						processSessionManager: activeProcessSessionManager,
-						shellExecutable,
-						hostRuntime: options.runtime,
+						workspaceId,
+						mode: parsed.mode,
+						forceUnlock: parsed.forceUnlock,
+						maxTurns: parsed.maxTurns,
+						disableRunBudget: parsed.disableRunBudget,
+						maxOutputTokens: parsed.maxOutputTokens,
 						skillsManager,
 						mcpRegistry,
-						models: options.models,
-						clock: options.runtime.clock,
-						idGenerator: options.runtime.idGenerator,
-						runBudget: codingAgentRunBudget(parsed.maxTurns, parsed.disableRunBudget),
-						maxOutputTokens: parsed.maxOutputTokens,
-						platform: options.runtime.platform,
-						interactionMode: parsed.mode,
 						projectInstructions,
-						resources: inputResources.adapter,
-						resumeDurableRoot: (sessionId) =>
-							sessions.open({
-								workspace: { id: workspaceId, path: workspace.root },
-								mode: parsed.mode,
-								resumeId: sessionId,
-								forceUnlock: parsed.forceUnlock,
-								persistent: true,
-							}),
-						...(workspacePersistence ? { persistence: workspacePersistence } : {}),
-						...(options.runtime.scheduler ? { scheduler: options.runtime.scheduler } : {}),
-					});
-					workCoordinator = activeWorkCoordinator;
-					await session.record({
-						type: "model_selected",
-						model: { provider: model.provider, id: model.id },
+						model,
 						reasoning,
-					});
-					const agentRuntime = await openInteractiveRuntime({
-						coordinator: activeWorkCoordinator,
-						session,
-						selection: { model, reasoning, authSnapshot: auth },
+						authSnapshot: auth,
 						mcpElicitation: primaryMcpElicitation,
+						runControl: configuredRunControl,
 					});
-					runControlBinding = bindInteractiveRunControl({
-						work: agentRuntime,
-						configuration: configuredRunControl,
-						clock: options.runtime.clock,
-						scheduler: options.runtime.scheduler,
-					});
+					const activeProcessSessionManager = openedWorkspace.processSessionManager;
+					const inputResources = openedWorkspace.inputResources;
+					const activeWorkCoordinator = openedWorkspace.coordinator;
+					const agentRuntime = openedWorkspace.work;
+					runControlBinding = openedWorkspace.runControl;
 					const initialAttachments = await Promise.all(
 						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
 					);
@@ -632,15 +497,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						inputResources,
 					});
 					const initialMessageCount = agentRuntime.state().messages.length;
-					agentRuntime.subscribeResult(async (result) => {
-						if (result.run) {
-							const supplement = beginWorkspaceDiffSupplement(session, result.run.runId);
-							if (parsed.mode === "interactive" && !agentRuntime.state().closed) {
-								void supplement.catch(() => undefined);
-							} else {
-								await supplement;
-							}
-						}
+					trackWorkspaceDiffs({
+						work: agentRuntime,
+						session,
+						mode: parsed.mode,
+						tracker: workspaceDiffs,
 					});
 					if (parsed.mode === "interactive") {
 						const secondaryResources = new Map<
@@ -761,12 +622,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								});
 								targetRunControlToDispose = targetRunControl;
 								const targetRestoredMedia = await restoreSessionMedia(targetSession, options.fileSystem);
-								targetRuntime.subscribeResult(async (result) => {
-									if (result.run) {
-										const supplement = beginWorkspaceDiffSupplement(targetSession, result.run.runId);
-										if (targetRuntime.state().closed) await supplement;
-										else void supplement.catch(() => undefined);
-									}
+								trackWorkspaceDiffs({
+									work: targetRuntime,
+									session: targetSession,
+									mode: "interactive",
+									tracker: workspaceDiffs,
 								});
 								secondaryResources.set(targetSession.descriptor.id, {
 									session: targetSession,
@@ -893,36 +753,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								initialAttachments,
 							});
 						} finally {
-							await Promise.all(
-								[...secondaryResources.values()].map(async (resource) => {
-									const failures: unknown[] = [];
-									resource.runControl?.dispose();
-									try {
-										await drainWorkspaceDiffSupplements(resource.session);
-									} catch (error) {
-										failures.push(error);
-									}
-									try {
-										await resource.work.close();
-									} catch (error) {
-										failures.push(error);
-									}
-									try {
-										await drainWorkspaceDiffSupplements(resource.session);
-									} catch (error) {
-										failures.push(error);
-									}
-									try {
-										await resource.mediaLibrary.dispose();
-									} catch (error) {
-										failures.push(error);
-									}
-									if (failures.length === 1) throw failures[0];
-									if (failures.length > 1) {
-										throw new AggregateError(failures, "Could not close an interactive Session runtime");
-									}
-								}),
-							);
+							await closeSecondarySessionResources(secondaryResources.values(), workspaceDiffs);
 						}
 						const finalWork = overflowReplacement?.work ?? agentRuntime;
 						const finalAgent = finalWork.state();
@@ -966,14 +797,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						clock: options.runtime.clock,
 						completionWorkspaceEvidence: options.completionWorkspaceEvidence,
 						runControl: runControlBinding,
-						drainWorkspaceDiffSupplements,
+						drainWorkspaceDiffSupplements: workspaceDiffs.drain,
 					});
 				} finally {
 					runControlBinding?.dispose();
 					skillUiClosed = true;
 					skillWatcher?.dispose();
 					skillRegistryBinding?.dispose();
-					await closeRuntimeResources();
+					await workspaceResources.close();
 				}
 			} catch (error) {
 				if (error instanceof InteractiveTerminationError) return error.exitCode;
