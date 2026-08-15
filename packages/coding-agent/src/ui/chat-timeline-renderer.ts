@@ -302,9 +302,9 @@ export class ChatTimelineRenderer {
 		}
 		if (input.shellRunning) {
 			return actionFooter(input.width, [
-				"Local command running • Enter queues • Alt+Up edits • Ctrl-C cancels",
-				"Enter queues • Alt+Up edits • Ctrl-C cancels",
-				"Ctrl-C cancels the command",
+				"Local command running • Enter queues • Alt+Up edits • Esc/Ctrl-C cancels",
+				"Enter queues • Alt+Up edits • Esc/Ctrl-C cancels",
+				"Esc/Ctrl-C cancels the command",
 			]);
 		}
 		if (

@@ -21,7 +21,7 @@ import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
-import { ChatComposerController } from "./chat-composer.ts";
+import { ChatComposerController, isRunCancellationInput } from "./chat-composer.ts";
 import {
 	MINIMUM_CHAT_COLUMNS,
 	MINIMUM_CHAT_ROWS,
@@ -468,6 +468,10 @@ export class ChatComponent extends Component {
 			if (!idleCtrlCPress) this.#lastIdleCtrlCAt = undefined;
 		}
 		if (input.type === "resize") return;
+		if (this.running && isRunCancellationInput(input)) {
+			this.#composer.handleInput(input, attachmentView.staged.length);
+			return;
+		}
 		if (this.#attachments.handleInput("overlay", input, attachmentProjection, attachmentPorts)) return;
 		if (this.#commandFlow.view) {
 			this.#commandFlow.handleInput(input);

@@ -270,7 +270,7 @@ export function renderTooSmall(width: number, height: number, running: boolean):
 		"Terminal too small",
 		`Resize to at least ${MINIMUM_CHAT_COLUMNS} x ${MINIMUM_CHAT_ROWS}`,
 		"",
-		running ? "Ctrl-C aborts" : "Ctrl-C twice exits",
+		running ? "Esc/Ctrl-C aborts" : "Ctrl-C twice exits",
 	].map((line) => clipAnsi(line, width));
 	return Array.from({ length: height }, (_, row) => lines[row] ?? "");
 }

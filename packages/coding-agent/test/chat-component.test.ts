@@ -351,11 +351,15 @@ describe("ChatComponent terminal input", () => {
 
 	it("shows an operable static view below the minimum terminal size", () => {
 		const component = createComponent();
-		const frame = component.render({ width: 30, height: 5, now: 0 });
+		let frame = component.render({ width: 30, height: 5, now: 0 });
 
 		expect(frame).toHaveLength(5);
 		expect(frame.join("\n")).toContain("Terminal too small");
 		expect(frame.join("\n")).toContain("Ctrl-C twice exits");
+
+		component.accept(runStartEvent());
+		frame = component.render({ width: 30, height: 5, now: 0 });
+		expect(frame.join("\n")).toContain("Esc/Ctrl-C aborts");
 	});
 
 	it("keeps manual scroll position, reports unseen updates, and lets Ctrl-End resume tail-follow", () => {
@@ -633,7 +637,7 @@ describe("ChatComponent terminal input", () => {
 		await vi.waitFor(() => expect(onOpenAttachment).toHaveBeenCalledWith("attachment:two"));
 	});
 
-	it("does not reinterpret Escape as Run cancellation", () => {
+	it("cancels an active Agent Run with Escape or Ctrl-C, even while command completion is open", () => {
 		const onAbort = vi.fn();
 		const component = createComponent({ onAbort });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
@@ -645,14 +649,18 @@ describe("ChatComponent terminal input", () => {
 			}),
 		);
 
-		component.handleInput(key("escape"), context);
+		component.handleInput(key("escape", { action: "release" }), context);
 		expect(onAbort).not.toHaveBeenCalled();
 
-		component.handleInput(key("c", { control: true }), context);
+		component.handleInput({ type: "text", text: "/model" }, context);
+		component.handleInput(key("escape"), context);
 		expect(onAbort).toHaveBeenCalledOnce();
+
+		component.handleInput(key("c", { control: true }), context);
+		expect(onAbort).toHaveBeenCalledTimes(2);
 	});
 
-	it("requires two idle Ctrl-C presses and never exits on Escape", () => {
+	it("requires two idle Ctrl-C presses and does not exit on idle Escape", () => {
 		const onExit = vi.fn();
 		const component = createComponent({ onExit });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
@@ -811,7 +819,7 @@ describe("ChatComponent terminal input", () => {
 		expect(recalled.match(/\[photo\.png\]/g)).toHaveLength(1);
 	});
 
-	it("renders live local output, queues Composer input during Shell execution, and cancels with Ctrl-C", async () => {
+	it("renders live local output, queues Composer input during Shell execution, and cancels with Escape or Ctrl-C", async () => {
 		const onFollowUp = vi.fn(() => "queue:after-shell");
 		const onAbortUserShell = vi.fn();
 		const component = createComponent({ colorLevel: 0, onFollowUp, onAbortUserShell });
@@ -821,11 +829,16 @@ describe("ChatComponent terminal input", () => {
 		let plain = stripAnsi(component.render({ width: 60, height: 14, now: 2_000 }).join("\n"));
 		expect(plain).toContain("Running printf hello (2.0s)");
 		expect(plain).toContain("└ first\n    second");
+		expect(plain).toContain("Esc/Ctrl-C cancels");
 		component.handleInput({ type: "text", text: "after shell" }, context);
 		component.handleInput(key("enter"), context);
 		await vi.waitFor(() => expect(onFollowUp).toHaveBeenCalledWith("after shell", []));
-		component.handleInput(key("c", { control: true }), context);
+		component.handleInput(key("escape", { action: "release" }), context);
+		expect(onAbortUserShell).not.toHaveBeenCalled();
+		component.handleInput(key("escape"), context);
 		expect(onAbortUserShell).toHaveBeenCalledOnce();
+		component.handleInput(key("c", { control: true }), context);
+		expect(onAbortUserShell).toHaveBeenCalledTimes(2);
 
 		component.acceptUserShell(shellSnapshot({ status: "success", output: "first\nsecond", durationMs: 2_000 }));
 		plain = stripAnsi(component.render({ width: 60, height: 14, now: 2_000 }).join("\n"));

@@ -78,6 +78,14 @@ export interface ChatComposerHost {
 	mutate(mutation: ChatComposerHostMutation): void;
 }
 
+export function isRunCancellationInput(input: TerminalInput): boolean {
+	return (
+		input.type === "key" &&
+		input.action !== "release" &&
+		((input.control && input.key === "c") || input.key === "escape")
+	);
+}
+
 export class ChatComposerController {
 	readonly #isQueuePaused?: () => boolean;
 	readonly #attachments: ChatAttachmentController;
@@ -189,10 +197,18 @@ export class ChatComposerController {
 			void this.#reclaimLatestQueuedInput();
 			return;
 		}
+		if (isRunCancellationInput(input)) {
+			if (hostView.shellRunning) {
+				this.#options.onAbortUserShell?.();
+				return;
+			}
+			if (hostView.agentRunning) {
+				this.#options.onAbort();
+				return;
+			}
+		}
 		if (input.type === "key" && input.control && input.key === "c") {
-			if (hostView.shellRunning) this.#options.onAbortUserShell?.();
-			else if (hostView.agentRunning) this.#options.onAbort();
-			else if (this.#shellMode || this.#editor.text.length > 0) {
+			if (this.#shellMode || this.#editor.text.length > 0) {
 				this.#editor.clear();
 				this.#shellMode = false;
 				this.#history.reset();

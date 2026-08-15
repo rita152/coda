@@ -244,7 +244,7 @@ describe("process lifecycle Tools", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("cancels a Work Item during a retained Process lifetime and quiesces the Process before settlement", async () => {
+	it("cancels a Work Item with Escape during a retained Process lifetime and quiesces the Process before settlement", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-process-cancel-"));
 		temporaryDirectories.push(workspace);
 		const controlled = controlledRunner();
@@ -298,7 +298,7 @@ describe("process lifecycle Tools", () => {
 		]);
 		await secondCallStarted.promise;
 		expect(controlled.starts).toHaveLength(1);
-		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("escape"));
 		responseGate.resolve();
 		await vi.waitFor(() => expect(controlled.stopCount()).toBe(1));
 		await expect(exitWhenIdle(terminal, running)).resolves.toBe(0);
