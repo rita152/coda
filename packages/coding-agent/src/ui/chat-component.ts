@@ -15,28 +15,24 @@ import {
 } from "@coda/tui";
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
-import type { CommandDefinition } from "../commands/types.ts";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { ComposerExtensionReference, ComposerSubmission } from "../session/composer-submission.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
-import { ChatComposerController, invokeChatCommand, type ProvisionalPromptCard } from "./chat-composer.ts";
+import { ChatComposerController } from "./chat-composer.ts";
 import {
-	followUpText,
 	MINIMUM_CHAT_COLUMNS,
 	MINIMUM_CHAT_ROWS,
 	renderHeader,
 	renderPreviewOverlay,
 	renderTooSmall,
-	shellActivation,
 } from "./chat-rendering.ts";
 import { ChatTimelineRenderer, IDLE_CTRL_C_CONFIRMATION_WINDOW_MS } from "./chat-timeline-renderer.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
-import { extensionReferencesFromMarkers } from "./extension-references.ts";
 import type { UserShellSubmission } from "./input-types.ts";
 import { SemanticTimeline } from "./semantic-timeline.ts";
 import type { StatusLineSnapshot } from "./status-line.ts";
@@ -168,12 +164,6 @@ export class ChatComponent extends Component {
 				this.#error = message;
 			},
 		});
-		this.#composer = new ChatComposerController({
-			isQueuePaused: options.isQueuePaused,
-			attachments: this.#attachments,
-			recoverableFollowUps: options.recoverableFollowUps,
-			restoredAttachments: options.restoredAttachments,
-		});
 		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
 			isAvailable: (command) => command.id !== "core:follow-up" || this.#running,
 		});
@@ -183,6 +173,52 @@ export class ChatComponent extends Component {
 				this.#error = error instanceof Error ? error.message : String(error);
 				this.invalidate();
 			},
+		});
+		this.#composer = new ChatComposerController({
+			isQueuePaused: options.isQueuePaused,
+			attachments: this.#attachments,
+			editor: this.#editor,
+			commands: this.#commands,
+			flow: this.#commandFlow,
+			history: this.#history,
+			options,
+			host: {
+				view: () => ({
+					running: this.running,
+					agentRunning: this.#running,
+					shellRunning: this.#shellRunning,
+					...(this.#lastIdleCtrlCAt === undefined ? {} : { lastIdleCtrlCAt: this.#lastIdleCtrlCAt }),
+				}),
+				mutate: (mutation) => {
+					switch (mutation.type) {
+						case "begin_agent_preparation":
+							this.#running = true;
+							this.#activity.beginPreparation(this.#options.clock.now());
+							return;
+						case "cancel_agent_preparation":
+							this.#running = false;
+							this.#activity.cancelPreparation();
+							return;
+						case "set_error":
+							this.#error = mutation.value;
+							return;
+						case "set_notice":
+							this.#notice = mutation.value;
+							return;
+						case "set_idle_ctrl_c":
+							this.#lastIdleCtrlCAt = mutation.value;
+							return;
+						case "jump_to_end":
+							this.#viewport.jumpToEnd();
+							return;
+						case "invalidate":
+							this.invalidate();
+							return;
+					}
+				},
+			},
+			recoverableFollowUps: options.recoverableFollowUps,
+			restoredAttachments: options.restoredAttachments,
 		});
 		this.#modelLabel = options.modelLabel;
 		this.#reasoning = options.reasoning;
@@ -484,7 +520,7 @@ export class ChatComponent extends Component {
 				return;
 			}
 			if (commandResult.type === "invoke") {
-				this.#invokeCommand(commandResult.command);
+				this.#composer.invokeCommand(commandResult.command);
 				return;
 			}
 		}
@@ -522,255 +558,7 @@ export class ChatComponent extends Component {
 			}
 		}
 		if (input.type === "key" && input.action === "release") return;
-		if (input.type === "key" && input.alt && input.key === "up") {
-			void this.#reclaimLatestQueuedInput();
-			return;
-		}
-		if (input.type === "key" && input.control && input.key === "c") {
-			if (this.#shellRunning) this.#options.onAbortUserShell?.();
-			else if (this.#running) this.#options.onAbort();
-			else if (this.#shellMode || this.#editor.text.length > 0) {
-				this.#editor.clear();
-				this.#composer.mutate({ type: "set_shell_mode", value: false });
-				this.#history.reset();
-				this.invalidate();
-			} else if (input.action === "press") {
-				const now = this.#options.clock.now();
-				const previous = this.#lastIdleCtrlCAt;
-				if (previous !== undefined && now >= previous && now - previous <= IDLE_CTRL_C_CONFIRMATION_WINDOW_MS) {
-					this.#lastIdleCtrlCAt = undefined;
-					this.#options.onExit();
-				} else {
-					this.#lastIdleCtrlCAt = now;
-					this.invalidate();
-				}
-			}
-			return;
-		}
-		if (input.type === "key" && input.key === "escape") {
-			if (this.#shellMode) {
-				if (this.#editor.text.trim().length === 0) {
-					this.#composer.mutate({ type: "set_shell_mode", value: false });
-					this.#error = undefined;
-					this.invalidate();
-				}
-				return;
-			}
-			return;
-		}
-		if (
-			input.type === "key" &&
-			input.control &&
-			input.key === "d" &&
-			!this.#shellMode &&
-			!this.running &&
-			this.#editor.text.length === 0
-		) {
-			this.#options.onExit();
-			return;
-		}
-		if (
-			!this.#shellMode &&
-			input.type === "key" &&
-			(input.key === "up" || input.key === "down") &&
-			!input.control &&
-			!input.alt &&
-			!input.meta &&
-			this.#history.navigate(input.key === "up" ? -1 : 1, this.#editor)
-		) {
-			this.invalidate();
-			return;
-		}
-
-		let editorInput: TerminalInput = input;
-		if (!this.#shellMode && this.#editor.text.length === 0) {
-			const activation = shellActivation(input);
-			if (activation) {
-				this.#composer.mutate({ type: "set_shell_mode", value: true });
-				this.#history.reset();
-				this.#error = undefined;
-				if (!activation.remainder) {
-					this.invalidate();
-					return;
-				}
-				editorInput = activation.remainder;
-			}
-		}
-		if (this.#shellMode && editorInput.type === "key" && editorInput.key === "backspace") {
-			const before = this.#editor.text;
-			const result = this.#editor.handleInput(editorInput);
-			if (result.type === "handled" && this.#editor.text === before) {
-				this.#composer.mutate({ type: "set_shell_mode", value: false });
-				this.#error = undefined;
-			} else if (this.#editor.text !== before) this.#error = undefined;
-			this.invalidate();
-			return;
-		}
-		const before = this.#editor.text;
-		const editorResult = this.#editor.handleInput(editorInput);
-		if (editorResult.type === "handled") {
-			if (!this.#shellMode && this.#editor.absorbPrefix("!")) {
-				this.#composer.mutate({ type: "set_shell_mode", value: true });
-				this.#history.reset();
-				this.#error = undefined;
-			} else if (this.#editor.text !== before) {
-				this.#history.noteTextMutation();
-				if (this.#shellMode) this.#error = undefined;
-			}
-			this.invalidate();
-			return;
-		}
-		if (editorResult.type !== "submit") return;
-		const value = editorResult.text.trim();
-		const extensionReferences = extensionReferencesFromMarkers(editorResult.markers ?? []);
-		if (this.#shellMode) {
-			if (!value) {
-				this.#error = "Prefix a command with ! to run it locally. Example: !ls";
-				this.invalidate();
-				return;
-			}
-			this.#submitUserShell(value);
-			return;
-		}
-		const commandInvocation = this.#commands.resolveSubmission(value);
-		if (commandInvocation && commandInvocation.command.id !== "core:follow-up") {
-			this.#invokeCommand(commandInvocation.command, commandInvocation.argument);
-			return;
-		}
-		if (value.length === 0 && attachmentView.staged.length === 0 && this.#hasPausedQueue) {
-			if (!this.#options.onResumeFollowUps) {
-				this.#error = "Follow-up recovery is unavailable";
-				this.invalidate();
-				return;
-			}
-			this.#running = true;
-			this.#activity.beginPreparation(this.#options.clock.now());
-			this.#error = undefined;
-			try {
-				const operation = Promise.resolve(this.#options.onResumeFollowUps());
-				void operation.catch((error: unknown) => {
-					this.#running = false;
-					this.#activity.cancelPreparation();
-					this.#error = error instanceof Error ? error.message : String(error);
-					this.invalidate();
-				});
-			} catch (error) {
-				this.#running = false;
-				this.#activity.cancelPreparation();
-				this.#error = error instanceof Error ? error.message : String(error);
-			}
-			this.invalidate();
-			return;
-		}
-		if (extensionReferences.length > 0 && !this.#options.onResolveExtensionReferences) {
-			this.#error = "Skill/MCP extension loading is unavailable";
-			this.invalidate();
-			return;
-		}
-		const composerText = value;
-		let submissionText = value.startsWith("\\!") ? value.slice(1) : value;
-		const appendsPausedQueue = !this.#running && this.#hasPausedQueue;
-		let kind: Exclude<ProvisionalPromptCard["kind"], "user_shell"> = this.#running
-			? editorResult.alternate
-				? "follow_up"
-				: "steering"
-			: this.#shellRunning
-				? "follow_up"
-				: appendsPausedQueue
-					? "follow_up"
-					: "prompt";
-		if (this.#running && /^\/follow-up\s+/iu.test(submissionText) && !submissionText.includes("\n")) {
-			kind = "follow_up";
-			submissionText = submissionText.replace(/^\/follow-up\s+/iu, "").trim();
-		}
-		if (submissionText.length === 0 && attachmentView.staged.length === 0) return;
-		const submittedAttachments = this.#attachments.mutate({
-			type: "take_submission",
-			prompt: kind === "prompt",
-		})!;
-		const submittedComposerState = this.#editor.captureState();
-		const provisional = this.#composer.mutate({
-			type: "create_provisional",
-			kind,
-			text: submissionText,
-			attachments: submittedAttachments,
-			status: kind === "steering" ? "Steering queued" : kind === "follow_up" ? "Follow-up queued" : undefined,
-		})!;
-		this.#editor.clear();
-		this.#history.reset();
-		this.#error = undefined;
-		this.#notice = undefined;
-		if (!this.running && kind === "prompt") {
-			this.#running = true;
-			this.#activity.beginPreparation(this.#options.clock.now());
-		}
-		this.#viewport.jumpToEnd();
-		this.invalidate();
-		const attachmentIds = submittedAttachments.map((attachment) => attachment.id);
-		const submitAccepted = () => {
-			try {
-				if (kind === "steering") {
-					if (!this.#options.onSteer) throw new Error("Steering is unavailable");
-					return Promise.resolve(
-						extensionReferences.length > 0
-							? this.#options.onSteer(submissionText, attachmentIds, composerText, extensionReferences)
-							: composerText === submissionText
-								? this.#options.onSteer(submissionText, attachmentIds)
-								: this.#options.onSteer(submissionText, attachmentIds, composerText),
-					);
-				}
-				if (kind === "follow_up" && !appendsPausedQueue) {
-					if (!this.#options.onFollowUp) throw new Error("Follow-up is unavailable");
-					return Promise.resolve(
-						extensionReferences.length > 0
-							? this.#options.onFollowUp(submissionText, attachmentIds, composerText, extensionReferences)
-							: composerText === submissionText
-								? this.#options.onFollowUp(submissionText, attachmentIds)
-								: this.#options.onFollowUp(submissionText, attachmentIds, composerText),
-					);
-				}
-				return Promise.resolve(
-					extensionReferences.length > 0
-						? this.#options.onSubmit(submissionText, attachmentIds, composerText, extensionReferences)
-						: composerText === submissionText
-							? this.#options.onSubmit(submissionText, attachmentIds)
-							: this.#options.onSubmit(submissionText, attachmentIds, composerText),
-				);
-			} catch (error) {
-				return Promise.reject(error);
-			}
-		};
-		const operation = (() => {
-			if (extensionReferences.length === 0) return submitAccepted();
-			try {
-				return Promise.resolve(this.#options.onResolveExtensionReferences!(extensionReferences, composerText)).then(
-					submitAccepted,
-				);
-			} catch (error) {
-				return Promise.reject(error);
-			}
-		})();
-		void operation.then(
-			(result) => {
-				if (typeof result === "object") this.#history.record(result);
-				const queueItemId = typeof result === "string" ? result : result?.queueItemId;
-				if (kind !== "prompt" && typeof queueItemId === "string") {
-					this.#composer.mutate({ type: "set_queue_item", id: provisional.id, queueItemId });
-				}
-				this.invalidate();
-			},
-			(error: unknown) => {
-				if (kind === "prompt" || appendsPausedQueue) {
-					this.#running = false;
-					this.#activity.cancelPreparation();
-				}
-				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
-				this.#attachments.mutate({ type: "restore_submission", attachments: submittedAttachments });
-				if (!this.#editor.text) this.#editor.restoreState(submittedComposerState);
-				this.#error = error instanceof Error ? error.message : String(error);
-				this.invalidate();
-			},
-		);
+		this.#composer.handleInput(input, attachmentView.staged.length);
 	}
 
 	get #hasPausedQueue(): boolean {
@@ -779,81 +567,6 @@ export class ChatComponent extends Component {
 
 	get #shellMode(): boolean {
 		return this.#composer.view().shellMode;
-	}
-
-	#submitUserShell(command: string): void {
-		const provisional = this.#composer.mutate({
-			type: "create_provisional",
-			kind: "user_shell",
-			text: `!${command}`,
-			attachments: [],
-			status: "Shell queued",
-		})!;
-		this.#editor.clear();
-		this.#composer.mutate({ type: "set_shell_mode", value: false });
-		this.#history.reset();
-		this.#error = undefined;
-		this.#viewport.jumpToEnd();
-		this.invalidate();
-		let operation: Promise<UserShellSubmission>;
-		try {
-			if (!this.#options.onUserShell) throw new Error("Local Shell mode is unavailable");
-			operation = Promise.resolve(this.#options.onUserShell(command));
-		} catch (error) {
-			operation = Promise.reject(error);
-		}
-		void operation.then(
-			(submission) => {
-				this.#composer.mutate({ type: "set_queue_item", id: provisional.id, queueItemId: submission.id });
-				this.invalidate();
-			},
-			(error: unknown) => {
-				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
-				if (!this.#editor.text) this.#editor.setText(command);
-				this.#composer.mutate({ type: "set_shell_mode", value: true });
-				this.#error = error instanceof Error ? error.message : String(error);
-				this.invalidate();
-			},
-		);
-	}
-
-	async #reclaimLatestQueuedInput(): Promise<void> {
-		const composerView = this.#composer.view();
-		const provisional = [...composerView.provisionalCards]
-			.reverse()
-			.find((card) => card.kind === "follow_up" || card.kind === "user_shell");
-		if (provisional && !provisional.queueItemId) return;
-		const recoverable = provisional ? undefined : composerView.recoverableCards.at(-1);
-		const queueItemId = provisional?.queueItemId ?? recoverable?.item.id;
-		if (!queueItemId) return;
-		try {
-			if (provisional?.kind === "user_shell") {
-				if (!this.#options.onReclaimUserShell) throw new Error("Local Shell queue recovery is unavailable");
-				await this.#options.onReclaimUserShell(queueItemId);
-			} else {
-				if (!this.#options.onReclaimFollowUp) throw new Error("Follow-up recovery is unavailable");
-				await this.#options.onReclaimFollowUp(queueItemId);
-				this.#history.retractByQueueItemId(queueItemId);
-			}
-			const text =
-				provisional?.kind === "user_shell"
-					? provisional.text.slice(1)
-					: (provisional?.text ?? (recoverable ? followUpText(recoverable.item) : ""));
-			const attachments = provisional?.attachments ?? recoverable?.attachments ?? [];
-			if (provisional) {
-				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
-			} else if (recoverable) {
-				this.#composer.mutate({ type: "remove_recoverable", card: recoverable });
-			}
-			this.#editor.setText(text);
-			this.#history.reset();
-			this.#composer.mutate({ type: "set_shell_mode", value: provisional?.kind === "user_shell" });
-			this.#attachments.mutate({ type: "reclaim", attachments });
-			this.#error = undefined;
-		} catch (error) {
-			this.#error = error instanceof Error ? error.message : String(error);
-		}
-		this.invalidate();
 	}
 
 	#attachmentProjection(): ChatAttachmentProjection {
@@ -865,25 +578,6 @@ export class ChatComponent extends Component {
 			...(composerView.activeFollowUp ? { activeFollowUp: composerView.activeFollowUp } : {}),
 		};
 	}
-
-	#invokeCommand(command: CommandDefinition, argument?: string): void {
-		invokeChatCommand({
-			command,
-			...(argument === undefined ? {} : { argument }),
-			editor: this.#editor,
-			history: this.#history,
-			flow: this.#commandFlow,
-			onCommand: this.#options.onCommand,
-			setError: (value) => {
-				this.#error = value;
-			},
-			setNotice: (value) => {
-				this.#notice = value;
-			},
-			invalidate: () => this.invalidate(),
-		});
-	}
-
 	#requestNavigationRender(context: ComponentInputContext): void {
 		this.invalidate();
 		context.requestImmediateRender();
