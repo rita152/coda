@@ -1,36 +1,19 @@
-import { createHash } from "node:crypto";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
-import {
-	createTerminalImageSurface,
-	type DiagnosticSink,
-	type Keybinding,
-	type Scheduler,
-	type Terminal,
-	type TerminalColorScheme,
-} from "@coda/tui";
-import { finalText, findModel, HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
-import {
-	authenticateInteractively,
-	persistCustomProviders,
-	promptRuntime,
-	refreshProviderAuth,
-	selectModelInteractively,
-} from "./app/auth-flows.ts";
+import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
+import { findModel, HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
+import { authenticateInteractively, promptRuntime, selectModelInteractively } from "./app/auth-flows.ts";
+import { runInteractiveApplication } from "./app/interactive-run.ts";
 import {
 	assertModelSupportsImages,
-	bindInteractiveRunControl,
 	createAttachmentPreparer,
-	createInteractiveSessionOptions,
 	createSessionMediaLibrary,
-	openInteractiveRuntime,
 	restoreSessionMedia,
 } from "./app/interactive-session-options.ts";
-import { chatAttachment, hasAgentInput, pathSafeIdentity, promptInput } from "./app/media-attachments.ts";
+import { promptInput } from "./app/media-attachments.ts";
 import { runPrint } from "./app/print-run.ts";
-import { createSessionPresentation } from "./app/session-presentation.ts";
 import {
 	mcpTrustDecision,
 	projectTrustDecision,
@@ -38,7 +21,6 @@ import {
 	workspaceMcpReviewText,
 } from "./app/trust-gating.ts";
 import {
-	closeSecondarySessionResources,
 	createMaintenanceDiagnostics,
 	createWorkspaceDiffTracker,
 	createWorkspaceSessionResources,
@@ -49,7 +31,6 @@ import {
 	trackWorkspaceDiffs,
 } from "./app/workspace-session.ts";
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
-import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import { SkillCommandRegistryBinding } from "./commands/skill-extensions.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
@@ -59,28 +40,22 @@ import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.
 import { inspectMcpConfiguration } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
-import type { MediaLibrary } from "./media/media-library.ts";
 import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
-import { catalogModelFromRuntime } from "./models/model-catalog.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
 import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
 import type { AgentRunControlBinding } from "./run-control/index.ts";
-import type { SessionWorkController } from "./runtime/session-work-controller.ts";
-import { DraftSession } from "./session/draft-session.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
-import type { Session, SessionId, SessionManager } from "./session/types.ts";
+import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
 import { CodingSkillsManager } from "./skills/manager.ts";
 import { collectSkillRoots } from "./skills/roots.ts";
 import type { CodingSkillsSnapshot } from "./skills/types.ts";
 import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
-import { activitySummaryModeForApi } from "./ui/activity-status.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
 import { confirmFromTerminal } from "./ui/prompts.ts";
-import { type InteractiveSessionOptions, runInteractive } from "./ui/run-interactive.ts";
 
 export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
 export type { ModelSelection } from "./models/model-selection.ts";
@@ -486,9 +461,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					const activeWorkCoordinator = openedWorkspace.coordinator;
 					const agentRuntime = openedWorkspace.work;
 					runControlBinding = openedWorkspace.runControl;
-					const initialAttachments = await Promise.all(
-						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
-					);
 					const restoredMedia = await restoreSessionMedia(session, options.fileSystem);
 					const prepareAttachments = createAttachmentPreparer({
 						restoredMedia,
@@ -496,7 +468,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						session,
 						inputResources,
 					});
-					const initialMessageCount = agentRuntime.state().messages.length;
 					trackWorkspaceDiffs({
 						work: agentRuntime,
 						session,
@@ -504,280 +475,36 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						tracker: workspaceDiffs,
 					});
 					if (parsed.mode === "interactive") {
-						const secondaryResources = new Map<
-							string,
-							{
-								readonly session: Session;
-								readonly work: SessionWorkController;
-								readonly mediaLibrary: MediaLibrary;
-								readonly runControl?: AgentRunControlBinding;
-							}
-						>();
-						const saveCustomProviders = async (): Promise<void> => {
-							settings = persistCustomProviders(settings, providerManager.configurations);
-							await options.settings.save(settings);
-						};
-						const updateProviderAuth = (providerId: string): Promise<void> =>
-							refreshProviderAuth({
-								providerId,
-								targets: [
-									{ work: agentRuntime, apiKey: parsed.apiKey },
-									...[...secondaryResources.values()].map(({ work }) => ({ work, apiKey: undefined })),
-								],
-								models: options.models,
-								clock: options.runtime.clock,
-							});
-						const imageSurface = createTerminalImageSurface({
-							terminal: interactiveRuntime!.terminal,
-							environment: options.runtime.environment,
-							allocateId: terminalImageIdAllocator(options.runtime.idGenerator),
-						});
-						const listModelEntries = async (): Promise<readonly ModelCommandEntry[]> => {
-							const configuredProviders = new Set(
-								(
-									await Promise.all(
-										options.models.getProviders().map(async (provider) => {
-											try {
-												return (await options.models.checkAuth(provider.id)) ? provider.id : undefined;
-											} catch {
-												return undefined;
-											}
-										}),
-									)
-								).filter((providerId): providerId is string => providerId !== undefined),
-							);
-							return options.models.getModels().map(
-								(modelEntry): ModelCommandEntry => ({
-									catalog:
-										providerManager.catalogModel(modelEntry.provider, modelEntry.id) ??
-										catalogModelFromRuntime(modelEntry),
-									auth: configuredProviders.has(modelEntry.provider)
-										? "configured"
-										: "authentication_required",
-								}),
-							);
-						};
-						const authCommand = {
-							providers: () => providerManager.authenticationEntries(),
-							updateApiKey: async (providerId: string, apiKey: string) => {
-								await providerManager.updateApiKey(providerId, apiKey);
-								await saveCustomProviders();
-								await updateProviderAuth(providerId);
-							},
-							logout: async (providerId: string) => {
-								await providerManager.logout(providerId);
-								await updateProviderAuth(providerId);
-							},
-							addCustomProvider: async (input: Parameters<ProviderManager["addCustomProvider"]>[0]) => {
-								await providerManager.addCustomProvider(input);
-								await saveCustomProviders();
-							},
-						};
-						const createSecondarySessionOptions = async (
-							targetSession: Session,
-							fresh: boolean,
-						): Promise<InteractiveSessionOptions> => {
-							const targetMcpElicitation =
-								options.mcpElicitation ?? interactiveMcpElicitation?.forSession(targetSession.descriptor.id);
-							const targetMediaLibrary = createSessionMediaLibrary(targetSession, options);
-							let targetRuntimeToClose: SessionWorkController | undefined;
-							let targetRunControlToDispose: AgentRunControlBinding | undefined;
-							try {
-								const targetSelection = targetSession.restored.model ?? settings.defaultModel;
-								if (!targetSelection) throw new Error("A new Session requires a configured default Model");
-								const targetModel = findModel(options.models, targetSelection);
-								const targetReasoning = effectiveReasoningEffort(
-									targetModel,
-									targetSession.restored.reasoning ?? settings.defaultReasoning ?? "medium",
-								);
-								const targetAuth = await options.models.getAuth(targetModel, { clock: options.runtime.clock });
-								if (!targetSession.restored.model) {
-									const initialModelSelection = {
-										type: "model_selected",
-										model: { provider: targetModel.provider, id: targetModel.id },
-										reasoning: targetReasoning,
-									} as const;
-									if (fresh && targetSession instanceof DraftSession) {
-										targetSession.stageInitialChanges([initialModelSelection]);
-									} else {
-										await targetSession.record(initialModelSelection);
-									}
-								}
-								const targetRuntime = await openInteractiveRuntime({
-									coordinator: activeWorkCoordinator,
-									session: targetSession,
-									selection: {
-										model: targetModel,
-										reasoning: targetReasoning,
-										authSnapshot: targetAuth,
-									},
-									mcpElicitation: targetMcpElicitation,
-								});
-								targetRuntimeToClose = targetRuntime;
-								const targetRunControl = bindInteractiveRunControl({
-									work: targetRuntime,
-									configuration: configuredRunControl,
-									clock: options.runtime.clock,
-									scheduler: options.runtime.scheduler,
-								});
-								targetRunControlToDispose = targetRunControl;
-								const targetRestoredMedia = await restoreSessionMedia(targetSession, options.fileSystem);
-								trackWorkspaceDiffs({
-									work: targetRuntime,
-									session: targetSession,
-									mode: "interactive",
-									tracker: workspaceDiffs,
-								});
-								secondaryResources.set(targetSession.descriptor.id, {
-									session: targetSession,
-									work: targetRuntime,
-									mediaLibrary: targetMediaLibrary,
-									...(targetRunControl ? { runControl: targetRunControl } : {}),
-								});
-								return createInteractiveSessionOptions({
-									session: targetSession,
-									work: targetRuntime,
-									mediaLibrary: targetMediaLibrary,
-									restoredMedia: targetRestoredMedia,
-									model: targetModel,
-									modelLabel: `${targetModel.provider}/${targetModel.id}`,
-									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
-									listModelEntries,
-									authCommand,
-									skillsCommand,
-									mcpCommand,
-									reasoning: targetReasoning,
-									skillsManager,
-									skillsSnapshot,
-									inputResources,
-									options,
-									workspace: workspace.root,
-									mode: { type: "secondary" },
-									onRetire: () => activeProcessSessionManager.retireSession(targetSession.descriptor.id),
-								});
-							} catch (error) {
-								targetRunControlToDispose?.dispose();
-								if (targetRuntimeToClose) await targetRuntimeToClose.close().catch(() => undefined);
-								else await targetSession.close().catch(() => undefined);
-								await targetMediaLibrary.dispose().catch(() => undefined);
-								throw error;
-							}
-						};
-						let exitCode: number;
-						let overflowReplacement: InteractiveSessionOptions | undefined;
-						const primarySessionOptions = createInteractiveSessionOptions({
+						return await runInteractiveApplication({
+							options,
+							providerManager,
+							settings,
+							sessions,
+							workspace,
+							workspaceId,
 							session,
 							work: agentRuntime,
 							mediaLibrary,
 							restoredMedia,
-							model,
-							modelLabel: `${model.provider}/${model.id}`,
-							reasoning,
-							activitySummaryMode: activitySummaryModeForApi(model.api),
-							listModelEntries,
-							authCommand,
-							skillsCommand,
-							mcpCommand,
+							inputResources,
+							processSessionManager: activeProcessSessionManager,
+							coordinator: activeWorkCoordinator,
 							skillsManager,
 							skillsSnapshot,
-							inputResources,
-							options,
-							workspace: workspace.root,
-							mode: { type: "primary", providerId: model.provider, apiKey: parsed.apiKey },
-							onRetire: () => activeProcessSessionManager.retireSession(session.descriptor.id),
+							skillsCommand,
+							mcpCommand,
+							commandRegistry,
+							model,
+							reasoning,
+							apiKey: parsed.apiKey,
+							runControl: configuredRunControl,
+							interactiveRuntime: interactiveRuntime!,
+							mcpElicitation: interactiveMcpElicitation,
+							workspaceDiffs,
+							initialInput,
+							initialAttachmentIds,
+							noAnimations: parsed.noAnimations,
 						});
-						try {
-							exitCode = await runInteractive({
-								...primarySessionOptions,
-								terminal: interactiveRuntime!.terminal,
-								clock: options.runtime.clock,
-								scheduler: interactiveRuntime!.scheduler,
-								imageSurface,
-								keybindings: options.keybindings ?? [],
-								diagnostics: options.diagnostics,
-								fullScreenOutput: options.fullScreenOutput,
-								mcpElicitation: interactiveMcpElicitation,
-								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
-								commandRegistry,
-								sessionCommand: {
-									list: async () =>
-										(await sessions.list({ id: workspaceId, path: workspace.root })).map((descriptor) => ({
-											id: descriptor.id,
-											label: descriptor.id,
-											description: new Date(descriptor.createdAt).toISOString(),
-										})),
-									open: async (sessionId) => {
-										const targetSession = await sessions.open({
-											workspace: { id: workspaceId, path: workspace.root },
-											mode: "interactive",
-											resumeId: sessionId,
-											persistent: session.descriptor.persistent,
-										});
-										return createSecondarySessionOptions(targetSession, false);
-									},
-									create: async () => {
-										const draftId = `session-${pathSafeIdentity(
-											options.runtime.idGenerator.generate("queue_item"),
-										)}` as SessionId;
-										const targetSession = new DraftSession({
-											descriptor: {
-												id: draftId,
-												workspace: { id: workspaceId, path: workspace.root },
-												createdAt: options.runtime.clock.now(),
-												persistent: session.descriptor.persistent,
-											},
-											materialize: () =>
-												sessions.open({
-													workspace: { id: workspaceId, path: workspace.root },
-													mode: "interactive",
-													persistent: session.descriptor.persistent,
-													createId: draftId,
-												}),
-										});
-										return createSecondarySessionOptions(targetSession, true);
-									},
-								},
-								onContextOverflowReplacement: (replacement) => {
-									overflowReplacement = replacement;
-								},
-								lifecycle: options.runtime.interactiveLifecycle,
-								allocateId: () => options.runtime.idGenerator.generate("queue_item"),
-								processRunner: options.processRunner,
-								platform: options.runtime.platform,
-								environment: options.runtime.environment,
-								workspace: workspace.root,
-								homePath: options.runtime.homeDirectory,
-								onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
-								initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,
-								initialAttachmentIds,
-								initialAttachments,
-							});
-						} finally {
-							await closeSecondarySessionResources(secondaryResources.values(), workspaceDiffs);
-						}
-						const finalWork = overflowReplacement?.work ?? agentRuntime;
-						const finalAgent = finalWork.state();
-						const finalPresentation = overflowReplacement?.presentation ?? createSessionPresentation(session);
-						const interactiveMessages = finalAgent.messages.slice(overflowReplacement ? 0 : initialMessageCount);
-						const finalAssistant = [...interactiveMessages]
-							.reverse()
-							.find(
-								({ message }) => message.role === "assistant" && finalText(message).trim().length > 0,
-							)?.message;
-						if (finalAssistant?.role === "assistant") {
-							await options.io.stdout.write(`${finalText(finalAssistant)}\n`);
-						}
-						if (finalPresentation.descriptor.persistent && finalPresentation.descriptor.path) {
-							await options.io.stdout.write(
-								`Session ${finalPresentation.descriptor.id} • resume with: coda --resume ${finalPresentation.descriptor.id}\n`,
-							);
-						}
-						if (finalAgent.lastRun && finalAgent.lastRun.outcome !== "success") {
-							await options.io.stderr.write(
-								`coda: ${finalAgent.lastRun.failure?.message ?? `Run ended with outcome ${finalAgent.lastRun.outcome}`}\n`,
-							);
-						}
-						return exitCode;
 					}
 					return await runPrint({
 						work: agentRuntime,
@@ -819,17 +546,3 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 const unavailableProviderDiscoveryFetch: typeof globalThis.fetch = async () => {
 	throw new Error("Custom Provider discovery requires an injected fetch adapter");
 };
-
-function terminalImageIdAllocator(idGenerator: IdGenerator): () => number {
-	const allocated = new Set<number>();
-	return () => {
-		for (let attempt = 0; attempt < 100; attempt++) {
-			const identity = idGenerator.generate("queue_item");
-			const id = createHash("sha256").update(identity).digest().readUInt32BE(0);
-			if (id === 0 || allocated.has(id)) continue;
-			allocated.add(id);
-			return id;
-		}
-		throw new Error("Could not allocate a unique terminal image ID");
-	};
-}
