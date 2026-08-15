@@ -2,8 +2,9 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { skillExtensionEntries } from "../../src/commands/skill-extensions.ts";
 import { createNodeFileSystem } from "../../src/host/node-file-system.ts";
-import { CodingSkillsManager, skillExtensionEntries } from "../../src/skills/manager.ts";
+import { CodingSkillsManager } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
 import { createSkillsCapabilitySource } from "../../src/skills/run-capability.ts";
 

@@ -1,5 +1,5 @@
 import type { ModelStream } from "@coda/agent";
-import type { Model, ThinkingLevel, TimeRuntime } from "@coda/ai";
+import { createSystemScheduler, type Model, type ThinkingLevel, type TimeRuntime } from "@coda/ai";
 import { formatHumanReport, runLiveEvaluationSuite } from "../src/index.ts";
 
 interface LiveArguments {
@@ -83,6 +83,7 @@ try {
 	const clock = { now: () => Date.now() };
 	const runtime: TimeRuntime = {
 		clock,
+		scheduler: createSystemScheduler(),
 		sleep: { wait: abortableWait },
 		random: { next: () => Math.random() },
 	};

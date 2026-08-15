@@ -3,7 +3,7 @@ import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
-import type { Workspace } from "../workspace.ts";
+import type { Workspace } from "../host/workspace.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { toolFailure } from "./failure.ts";
 import { displayPath, walkEntries } from "./search.ts";

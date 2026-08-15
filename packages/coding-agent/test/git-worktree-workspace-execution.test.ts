@@ -5,13 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentTool, ToolExecutionContext } from "@coda/agent";
 import { Type } from "@coda/ai";
-import type { OpenCodingAgentOptions, WorkGraphId, WorkItemId } from "@coda/runtime";
+import type { WorkGraphId, WorkItemId, WorkspaceExecution } from "@coda/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import { createGitWorktreeWorkspaceExecution } from "../src/runtime/git-worktree-workspace-execution.ts";
 
-type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
-type Placement = Awaited<ReturnType<WorkspaceExecution["reserve"]>>["placement"];
+type Placement = Awaited<ReturnType<WorkspaceExecution["placement"]["reserve"]>>["placement"];
 
 const executeFile = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -59,7 +58,7 @@ async function reserve(
 	parent?: Placement,
 	graph = "graph:git",
 ): Promise<Placement> {
-	const reservation = await execution.reserve({
+	const reservation = await execution.placement.reserve({
 		graphId: graph as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		...(parent ? { parentItemId: "parent" as WorkItemId, parent } : {}),
@@ -72,7 +71,7 @@ async function reserve(
 }
 
 async function capture(execution: WorkspaceExecution, placement: Placement, itemId: string, graph = "graph:git") {
-	return execution.capture({
+	return execution.tooling.capture({
 		graphId: graph as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		placement,
@@ -88,7 +87,7 @@ async function recover(
 	graph: string,
 	expectedTargetIdentity?: string,
 ): Promise<Placement> {
-	const reservation = await execution.recover({
+	const reservation = await execution.placement.recover({
 		graphId: graph as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		placement,
@@ -109,7 +108,7 @@ async function publish(
 	target?: Placement,
 	graph = "graph:git",
 ) {
-	return execution.publish({
+	return execution.publication.publish({
 		graphId: graph as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		artifact,
@@ -138,7 +137,7 @@ async function mutate(
 			return { content: "written" };
 		},
 	};
-	const [bound] = execution.bindTools({
+	const [bound] = execution.tooling.bindTools({
 		graphId: graph as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		sessionId: `session:${itemId}`,
@@ -174,20 +173,20 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		await expect(publish(execution, beta, "beta", betaArtifact)).resolves.toMatchObject({ state: "published" });
 		expect(await readFile(join(root, "alpha.txt"), "utf8")).toBe("alpha\n");
 		expect(await readFile(join(root, "beta.txt"), "utf8")).toBe("beta\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "alpha" as WorkItemId,
 			placement: alpha,
 			preserve: false,
 		});
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "beta" as WorkItemId,
 			placement: beta,
 			preserve: false,
 		});
 		await expect(stat(alpha.root)).rejects.toMatchObject({ code: "ENOENT" });
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("serializes different Work Graph roots by accepted Publication order instead of completion order", async () => {
@@ -222,19 +221,19 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		await expect(secondPublication).resolves.toMatchObject({ state: "published" });
 		expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
 		expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:first" as WorkGraphId,
 			itemId: "first-root" as WorkItemId,
 			placement: first,
 			preserve: false,
 		});
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:second" as WorkGraphId,
 			itemId: "second-root" as WorkItemId,
 			placement: second,
 			preserve: false,
 		});
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("preserves a conflicting artifact without changing the target Workspace", async () => {
@@ -251,14 +250,14 @@ describe("Git worktree Workspace Execution Adapter", () => {
 			reason: "conflict",
 		});
 		expect(await readFile(join(root, "shared.txt"), "utf8")).toBe("first\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "second" as WorkItemId,
 			placement: second,
 			preserve: true,
 		});
 		expect((await stat(second.root)).isDirectory()).toBe(true);
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("publishes nested child work into its invoking parent before parent Publication", async () => {
@@ -279,7 +278,7 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		await expect(publish(execution, parent, "parent", parentArtifact)).resolves.toMatchObject({ state: "published" });
 		expect(await readFile(join(root, "parent.txt"), "utf8")).toBe("parent\n");
 		expect(await readFile(join(root, "child.txt"), "utf8")).toBe("child\n");
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("detects target changes before Publication and leaves the recoverable artifact intact", async () => {
@@ -295,14 +294,14 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		});
 		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "changed-source" as WorkItemId,
 			placement: worktree,
 			preserve: true,
 		});
 		expect((await stat(worktree.root)).isDirectory()).toBe(true);
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("detects content changes even when Git porcelain state stays the same", async () => {
@@ -320,13 +319,13 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		});
 		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 		expect(await readFile(join(root, "shared.txt"), "utf8")).toBe("externally changed\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "same-status-change" as WorkItemId,
 			placement: worktree,
 			preserve: true,
 		});
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("does not let a later Graph reservation adopt an external target change", async () => {
@@ -346,13 +345,13 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		});
 		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
-		await execution.release({
+		await execution.placement.release({
 			graphId: "graph:first" as WorkGraphId,
 			itemId: "first-root" as WorkItemId,
 			placement: first,
 			preserve: true,
 		});
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("rejects recovery when the Publication target changed after the durable reservation", async () => {
@@ -361,7 +360,7 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		const placement = await reserve(live, "recover-root", 0, undefined, "graph:recover");
 		await writeFile(join(placement.root, "artifact.txt"), "artifact\n", "utf8");
 		const artifact = (await capture(live, placement, "recover-root", "graph:recover"))!;
-		await live.close();
+		await live.placement.close();
 		await writeFile(join(root, "external.txt"), "external\n", "utf8");
 
 		const recovered = await adapter(root, stateRoot);
@@ -372,7 +371,7 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
 		expect(artifact.reference).toBeTruthy();
 		expect((await stat(placement.root)).isDirectory()).toBe(true);
-		await recovered.close();
+		await recovered.placement.close();
 	});
 
 	it("recovers against the latest durably published target identity", async () => {
@@ -389,7 +388,7 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		if (firstPublication.state === "not_published" || !firstPublication.targetIdentity) {
 			throw new Error("First Publication did not persist a target identity");
 		}
-		await live.close();
+		await live.placement.close();
 
 		const recovered = await adapter(root, stateRoot);
 		const recoveredSecond = await recover(
@@ -405,6 +404,6 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		).resolves.toMatchObject({ state: "published" });
 		expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
 		expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
-		await recovered.close();
+		await recovered.placement.close();
 	});
 });

@@ -1,5 +1,5 @@
 import type { ProcessRunner } from "../host/process-runner.ts";
-import type { RunEvidenceWorkspaceDiffSupplement } from "./run-evidence.ts";
+import type { RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 
 const MAX_GIT_STATUS_BYTES = 512 * 1024;
 const MAX_GIT_PREFIX_BYTES = 8 * 1024;

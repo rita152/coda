@@ -6,10 +6,10 @@ import {
 	type RunEvidenceWorkspaceDiffSupplement,
 	supplementRunEvidenceWorkspaceDiff,
 } from "../run-evidence/run-evidence.ts";
+import { SessionHistoryReader } from "../session-history/reader.ts";
 import type { CompactionCheckpoint } from "./compaction.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
-import { SessionHistoryReader } from "./session-history-reader.ts";
 import type {
 	RestoredSessionState,
 	Session,

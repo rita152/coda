@@ -42,6 +42,18 @@
       "status": "compatible",
       "test": "test/create-provider.test.ts"
     },
+    "createSystemClock": {
+      "status": "deliberate-deviation",
+      "test": "test/time-runtime.ts"
+    },
+    "createSystemScheduler": {
+      "status": "deliberate-deviation",
+      "test": "test/time-runtime.ts"
+    },
+    "createSystemTimeRuntime": {
+      "status": "deliberate-deviation",
+      "test": "test/time-runtime.ts"
+    },
     "defaultProviderAuthContext": {
       "status": "deliberate-deviation",
       "test": "test/credentials.test.ts"
@@ -564,6 +576,14 @@
       "status": "compatible",
       "test": "test/public-types.consumer.ts"
     },
+    "ScheduledTask": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
+    "Scheduler": {
+      "status": "deliberate-deviation",
+      "test": "test/public-types.consumer.ts"
+    },
     "Static": {
       "status": "compatible",
       "test": "test/public-types.consumer.ts"
@@ -594,6 +614,10 @@
     },
     "TextSignatureV1": {
       "status": "compatible",
+      "test": "test/public-types.consumer.ts"
+    },
+    "SystemTimeRuntimeOptions": {
+      "status": "deliberate-deviation",
       "test": "test/public-types.consumer.ts"
     },
     "ThinkingBudgets": {
@@ -666,6 +690,9 @@
         "createFauxCore",
         "createModels",
         "createProvider",
+        "createSystemClock",
+        "createSystemScheduler",
+        "createSystemTimeRuntime",
         "defaultProviderAuthContext",
         "envApiKeyAuth",
         "estimateContextTokens",

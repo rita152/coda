@@ -1,7 +1,7 @@
 import type { Diagnostic } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import type { ApplicationIO, ApplicationOutput } from "../src/application.ts";
-import { FullScreenOutputGate, FullScreenOutputScope } from "../src/interactive/full-screen-output.ts";
+import { FullScreenOutputGate, FullScreenOutputScope } from "../src/ui/full-screen-output.ts";
 
 class BufferOutput implements ApplicationOutput {
 	readonly isTTY = true;

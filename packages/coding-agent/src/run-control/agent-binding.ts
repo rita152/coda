@@ -2,7 +2,6 @@ import type { AgentEvent, Clock } from "@coda/agent";
 import { resolveToolObservation } from "@coda/ai";
 import type { Scheduler } from "@coda/tui";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
-import { mutationFactsFromObservation } from "../tools/mutation-contract.ts";
 import { RunControl } from "./run-control.ts";
 import type {
 	RunControlConfiguration,
@@ -134,9 +133,9 @@ export function progressFactsFromAgentEvent(
 	if (successful && INSPECTION_TOOLS.has(toolName)) {
 		facts.push({ kind: "read", fingerprint: invocationFingerprint });
 	}
-	const mutation = mutationFactsFromObservation(observation.facts);
+	const mutation = mutationDeltas(observation.facts);
 	if (mutation) {
-		for (const delta of mutation.committedDelta) {
+		for (const delta of mutation) {
 			facts.push({
 				kind: "workspace_content",
 				path: delta.path,
@@ -156,6 +155,30 @@ export function progressFactsFromAgentEvent(
 		facts.push({ kind: "failure", fingerprint: `${invocationFingerprint}\u0000${observation.status}` });
 	}
 	return Object.freeze(facts);
+}
+
+function mutationDeltas(
+	facts: Readonly<Record<string, unknown>> | undefined,
+):
+	| readonly { readonly path: string; readonly beforeSha256: string | null; readonly afterSha256: string | null }[]
+	| undefined {
+	const mutation = facts?.mutation;
+	if (!mutation || typeof mutation !== "object" || Array.isArray(mutation)) return undefined;
+	const candidate = mutation as Record<string, unknown>;
+	if (candidate.schemaVersion !== 1 || !Array.isArray(candidate.committedDelta)) return undefined;
+	const deltas = candidate.committedDelta.flatMap((value) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+		const delta = value as Record<string, unknown>;
+		if (typeof delta.path !== "string" || !nullableDigest(delta.beforeSha256) || !nullableDigest(delta.afterSha256)) {
+			return [];
+		}
+		return [{ path: delta.path, beforeSha256: delta.beforeSha256, afterSha256: delta.afterSha256 }];
+	});
+	return deltas.length === candidate.committedDelta.length ? Object.freeze(deltas) : undefined;
+}
+
+function nullableDigest(value: unknown): value is string | null {
+	return value === null || (typeof value === "string" && /^[a-f0-9]{64}$/u.test(value));
 }
 
 export function normalizeVerificationCommand(command: string): string {

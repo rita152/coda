@@ -1,11 +1,5 @@
 import type { AgentEvent, ToolInvocation } from "@coda/agent";
 import { resolveToolObservation, type ToolObservation, type ToolResultMessage, type Usage } from "@coda/ai";
-import type { RunControlReport } from "../run-control/types.ts";
-import {
-	type MutationFacts,
-	mutationFactsFromObservation,
-	mutationRequestMetadata,
-} from "../tools/mutation-contract.ts";
 import {
 	RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION,
 	RUN_EVIDENCE_SCHEMA_VERSION,
@@ -13,6 +7,7 @@ import {
 	type RunEvidenceChangedPathProvenance,
 	type RunEvidenceCommand,
 	type RunEvidenceCommandV1,
+	type RunEvidenceControlReport,
 	type RunEvidenceEnvelope,
 	type RunEvidenceFailure,
 	type RunEvidenceFailureV1,
@@ -36,6 +31,7 @@ import {
 	reconcileFailures,
 	resolutionScope,
 } from "./failure-semantics.ts";
+import { type MutationFacts, mutationFactsFromObservation, mutationRequestPaths } from "./mutation-semantics.ts";
 import { resolveObservationSemantics } from "./observation-semantics.ts";
 
 export * from "./contracts.ts";
@@ -410,7 +406,7 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 	let legacyMutationPaths: readonly string[] | undefined;
 	if (arguments_) {
 		try {
-			legacyMutationPaths = mutationRequestMetadata(toolName, arguments_)?.requestedPaths;
+			legacyMutationPaths = mutationRequestPaths(toolName, arguments_);
 		} catch {
 			legacyMutationPaths = undefined;
 		}
@@ -808,7 +804,7 @@ export function supplementRunEvidenceWorkspaceDiff(
 /** Adds RunControl to JSON output without changing persisted Session evidence. */
 export function withRunControlEvidence(
 	evidence: RunEvidenceEnvelope,
-	runControl: RunControlReport,
+	runControl: RunEvidenceControlReport,
 ): RunEvidenceWithRunControlEnvelope {
 	return deepFreeze({
 		...evidence,

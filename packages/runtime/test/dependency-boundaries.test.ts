@@ -46,7 +46,7 @@ describe("Work Graph dependency boundaries", () => {
 	});
 
 	it("keeps Worker Runtime construction and executable lifecycle private", async () => {
-		const coordinator = await readFile(new URL("../src/work-graph/coordinator.ts", import.meta.url), "utf8");
+		const coordinator = await readFile(new URL("../src/work-graph/worker-lifecycle.ts", import.meta.url), "utf8");
 		const worker = await readFile(new URL("../src/work-graph/worker-runtime.ts", import.meta.url), "utf8");
 		const ports = await readFile(new URL("../src/work-graph/ports.ts", import.meta.url), "utf8");
 		const publicIndex = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
@@ -56,7 +56,9 @@ describe("Work Graph dependency boundaries", () => {
 		expect(publicIndex).not.toMatch(/worker-runtime|PreparedRun|ContextWindowController|RuntimeInput/u);
 		expect(ports).not.toMatch(/WorkerPromptPreparer|preparePrompt/u);
 		expect(ports).not.toMatch(/observeWorkerEvent/u);
-		expect(ports).toMatch(/readonly runCapabilities: RunCapabilityHost/u);
+		expect(ports).toMatch(/readonly modelProvider: RunModelProvider/u);
+		expect(ports).toMatch(/readonly capabilitySources: readonly RunCapabilitySource\[\]/u);
+		expect(ports).not.toMatch(/readonly runCapabilities:/u);
 		expect(publicIndex).toMatch(/createRunCapabilityHost/u);
 
 		for (const obsolete of ["coding-agent-runtime.ts", "runtime.ts", "input-queue.ts", "types.ts"]) {
@@ -103,21 +105,21 @@ describe("Work Graph dependency boundaries", () => {
 
 	it("routes interactive input and evaluation through the public Work Graph Seam", async () => {
 		const interactive = await readFile(
-			new URL("../../coding-agent/src/interactive/input-controller.ts", import.meta.url),
+			new URL("../../coding-agent/src/ui/input-controller.ts", import.meta.url),
 			"utf8",
 		);
 		const evaluation = await readFile(new URL("../../evals/src/runtime-adapter.ts", import.meta.url), "utf8");
 		const suite = await readFile(new URL("../../evals/src/suite.ts", import.meta.url), "utf8");
 		expect(interactive).toMatch(/SessionWorkController/u);
 		expect(interactive).not.toMatch(/RuntimeInputQueue|RuntimeInputLifecycle|@coda\/runtime/u);
-		expect(evaluation).toMatch(/openCodingAgent/u);
+		expect(evaluation).toMatch(/createHeadlessCodingAgent/u);
 		expect(evaluation).not.toMatch(/openAgentRuntime|openCodingAgentRuntime/u);
 		expect(suite).not.toMatch(/new Agent\b|openAgentRuntime|openCodingAgentRuntime/u);
 	});
 
 	it("keeps foreground focus as a Session-pane concern rather than a scheduler map", async () => {
 		const panes = await readFile(
-			new URL("../../coding-agent/src/interactive/workspace-session-panes.ts", import.meta.url),
+			new URL("../../coding-agent/src/ui/workspace-session-panes.ts", import.meta.url),
 			"utf8",
 		);
 		expect(panes).toMatch(/class WorkspaceSessionPanes/u);

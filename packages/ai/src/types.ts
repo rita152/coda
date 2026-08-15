@@ -107,10 +107,19 @@ export interface RandomSource {
 	next(): number;
 }
 
+export interface ScheduledTask {
+	cancel(): void;
+}
+
+export interface Scheduler {
+	schedule(delayMs: number, run: () => void | Promise<void>): ScheduledTask;
+}
+
 export interface TimeRuntime {
 	readonly clock: Clock;
 	readonly sleep: Sleeper;
 	readonly random: RandomSource;
+	readonly scheduler: Scheduler;
 }
 
 export interface ProviderResponse {

@@ -6,7 +6,7 @@ import {
 	SESSION_HISTORY_OUTPUT_LIMIT_BYTES,
 	type SessionHistoryCursorError,
 	SessionHistoryReader,
-} from "../src/session/session-history-reader.ts";
+} from "../src/session-history/reader.ts";
 import { createReadSessionHistoryTool } from "../src/tools/read-session-history.ts";
 import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";

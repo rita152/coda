@@ -2,7 +2,7 @@ import { join, relative, sep } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import type { Workspace } from "../workspace.ts";
+import type { Workspace } from "../host/workspace.ts";
 
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".coda", "node_modules"]);
 

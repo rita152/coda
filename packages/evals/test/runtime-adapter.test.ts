@@ -15,7 +15,12 @@ describe("Evaluation Work Graph adapter", () => {
 	it("resynchronizes after transient pressure and retains only semantic evaluation events", async () => {
 		let now = 1_000;
 		const clock = { now: () => now++ };
-		const runtime = { clock, random: { next: () => 0 }, sleep: { wait: async () => undefined } };
+		const runtime = {
+			clock,
+			random: { next: () => 0 },
+			scheduler: { schedule: () => ({ cancel: () => undefined }) },
+			sleep: { wait: async () => undefined },
+		};
 		const faux = createFauxCore({ runtime, chunkCharacters: 1 });
 		faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("progress_storm", {}, { id: "tool:progress" }), {

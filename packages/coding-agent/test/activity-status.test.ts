@@ -1,9 +1,9 @@
 import type { AgentEvent, ToolInvocation } from "@coda/agent";
 import { stripAnsi } from "@coda/tui";
 import { describe, expect, it } from "vitest";
-import { ActivityProjection, activitySummaryModeForApi, providerSummary } from "../src/interactive/activity-status.ts";
-import { renderActivityStatus, shimmerText } from "../src/interactive/activity-status-presentation.ts";
-import { createCodaTheme } from "../src/interactive/theme.ts";
+import { ActivityProjection, activitySummaryModeForApi, providerSummary } from "../src/ui/activity-status.ts";
+import { renderActivityStatus, shimmerText } from "../src/ui/activity-status-presentation.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
 
 describe("runtime activity projection", () => {
 	it("enables native summaries only for Responses-family and Anthropic Messages protocols", () => {

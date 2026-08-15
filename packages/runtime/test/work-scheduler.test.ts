@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { AdmissionController } from "../src/work-graph/admission-controller.ts";
 import type { WorkCapacityPolicy } from "../src/work-graph/types.ts";
-import { WorkScheduler } from "../src/work-graph/work-scheduler.ts";
 
 const CAPACITY: WorkCapacityPolicy = Object.freeze({
 	processMaximumConcurrency: 4,
@@ -8,13 +8,13 @@ const CAPACITY: WorkCapacityPolicy = Object.freeze({
 });
 
 function repeatableSchedule(): string[] {
-	const scheduler = new WorkScheduler(CAPACITY);
+	const scheduler = new AdmissionController(CAPACITY);
 	const queues = Array.from({ length: 32 }, (_, graph) =>
 		Array.from({ length: 4 }, (_, item) => `graph:${graph}/item:${item}`),
 	);
 	const selected: string[] = [];
 	while (selected.length < 32 * 4) {
-		const next = scheduler.next({
+		const next = scheduler.select({
 			activeProcessConcurrency: 0,
 			graphs: queues.map((queue, graph) => ({
 				graphId: `graph:${graph}`,
@@ -29,7 +29,7 @@ function repeatableSchedule(): string[] {
 	return selected;
 }
 
-describe("WorkScheduler", () => {
+describe("AdmissionController", () => {
 	it("gives 32 continuously ready Sessions bounded round-robin progress", () => {
 		const selected = repeatableSchedule();
 		expect(selected.slice(0, 32).map((entry) => entry.split("/")[0])).toEqual(
@@ -47,13 +47,13 @@ describe("WorkScheduler", () => {
 	});
 
 	it("does not let one older hot Graph starve later ready Graphs", () => {
-		const scheduler = new WorkScheduler(CAPACITY);
+		const scheduler = new AdmissionController(CAPACITY);
 		const queues = [
 			Array.from({ length: 10_000 }, (_, item) => `hot:${item}`),
 			...Array.from({ length: 31 }, (_, graph) => [`later:${graph}`]),
 		];
 		const selected = Array.from({ length: 32 }, () =>
-			scheduler.next({
+			scheduler.select({
 				activeProcessConcurrency: 0,
 				graphs: queues.map((queue, graph) => ({
 					graphId: `graph:${graph}`,
@@ -67,16 +67,16 @@ describe("WorkScheduler", () => {
 	});
 
 	it("enforces process and per-Graph capacity exactly", () => {
-		const scheduler = new WorkScheduler(CAPACITY);
+		const scheduler = new AdmissionController(CAPACITY);
 		const ready = () => "ready";
 		expect(
-			scheduler.next({
+			scheduler.select({
 				activeProcessConcurrency: CAPACITY.processMaximumConcurrency,
 				graphs: [{ graphId: "full-process", activeConcurrency: 0, maximumConcurrency: 1, next: ready }],
 			}),
 		).toBeUndefined();
 		expect(
-			scheduler.next({
+			scheduler.select({
 				activeProcessConcurrency: CAPACITY.processMaximumConcurrency - 1,
 				graphs: [{ graphId: "full-graph", activeConcurrency: 2, maximumConcurrency: 2, next: ready }],
 			}),

@@ -5,6 +5,7 @@ export function testTimeRuntime(clockOrValue: Clock | number = 0): TimeRuntime {
 	return {
 		clock,
 		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
 		sleep: { wait: async () => {} },
 	};
 }

@@ -1,8 +1,8 @@
 import type { AgentMessage, MessageId } from "@coda/agent";
 import { fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { sessionCostSnapshot } from "../src/interactive/session-status.ts";
 import { reduceSession, type SessionRecord } from "../src/session/records.ts";
+import { sessionCostSnapshot } from "../src/ui/session-status.ts";
 
 describe("session status aggregation", () => {
 	it("includes committed Messages, discarded attempts, and compaction calls", () => {

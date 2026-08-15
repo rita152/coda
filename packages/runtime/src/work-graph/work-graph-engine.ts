@@ -1,0 +1,2161 @@
+import type { AgentInput, RunBudget } from "@coda/agent";
+import type { TimeRuntime } from "@coda/ai";
+import type { RunCapabilityHost } from "../run-capabilities.ts";
+import type { DurableGraphStore } from "./durable-graph-store.ts";
+import type {
+	Identity,
+	InputResourceStore,
+	ObservationBus,
+	RunModelProvider,
+	WorkAdmission,
+	WorkerControlSink,
+	WorkSessionStore,
+	WorkspacePlacement,
+	WorkspaceTooling,
+} from "./ports.ts";
+import type { PublicationSequencer } from "./publication-sequencer.ts";
+import type { SessionLeaseRegistry } from "./session-registry.ts";
+import type {
+	AddWorkItemSpecification,
+	CodingAgent,
+	CodingAgentCloseResult,
+	CodingAgentCommandBatch,
+	CodingAgentObservation,
+	CodingAgentReceipt,
+	CodingAgentRejection,
+	CodingAgentSnapshot,
+	ConfigureWorkItem,
+	DeliverWorkItemInput,
+	DesiredRuntimeConfiguration,
+	ObservationOptions,
+	PublicationOutcome,
+	WorkBudgetUsage,
+	WorkCapacityPolicy,
+	WorkDiagnostic,
+	WorkGraphId,
+	WorkGraphOutcome,
+	WorkGraphResult,
+	WorkGraphSnapshot,
+	WorkItemId,
+	WorkItemInputKind,
+	WorkItemSnapshot,
+	WorkItemState,
+	WorkResult,
+	WorkRunResult,
+	WorkSessionTarget,
+	WorkspaceArtifact,
+} from "./types.ts";
+import { WorkGraphAggregate } from "./work-graph-aggregate.ts";
+import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
+import {
+	type DeliveryPlan,
+	errorMessage,
+	type GraphRecord,
+	type ItemRecord,
+	immutableData,
+	isTerminal,
+	makeItem,
+	type WorkGraphMirror,
+} from "./work-graph-records.ts";
+import { workerFactHasOpenEffects } from "./worker-fact.ts";
+import type { DelegateChildSpecification, WorkerRuntimePort } from "./worker-lifecycle.ts";
+import type { WorkerSubmission } from "./worker-protocol.ts";
+
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+
+function graphId(value: string): WorkGraphId {
+	return value as WorkGraphId;
+}
+
+function itemId(value: string): WorkItemId {
+	return value as WorkItemId;
+}
+
+function assertIdentity(value: unknown, kind: "graph" | "item" | "session"): string {
+	if (typeof value !== "string" || !ID_PATTERN.test(value)) {
+		throw rejected({ code: "invalid_identity", message: `Invalid ${kind} identity: ${String(value)}` });
+	}
+	return value;
+}
+
+function assertObjective(value: unknown, label: string): string {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw rejected({ code: "invalid_command", message: `${label} must not be empty` });
+	}
+	return value;
+}
+
+function assertConfiguration(configuration: DesiredRuntimeConfiguration): void {
+	if (
+		!configuration ||
+		typeof configuration !== "object" ||
+		typeof configuration.model?.provider !== "string" ||
+		configuration.model.provider.length === 0 ||
+		typeof configuration.model.id !== "string" ||
+		configuration.model.id.length === 0 ||
+		typeof configuration.reasoning !== "string"
+	) {
+		throw rejected({ code: "invalid_command", message: "Desired Runtime Configuration is invalid" });
+	}
+}
+
+class SubmissionRejection extends Error {
+	readonly rejection: CodingAgentRejection;
+
+	constructor(rejection: CodingAgentRejection) {
+		super(rejection.message);
+		this.name = "SubmissionRejection";
+		this.rejection = rejection;
+	}
+}
+
+function rejected(rejection: CodingAgentRejection): SubmissionRejection {
+	return new SubmissionRejection(rejection);
+}
+
+interface ConfigurationPlan {
+	readonly command: ConfigureWorkItem;
+	readonly graph: GraphRecord;
+	readonly item: ItemRecord;
+}
+
+interface CancellationPlan {
+	readonly graph: GraphRecord;
+	readonly item?: ItemRecord;
+}
+
+interface NewItemPlan {
+	readonly graph: GraphRecord;
+	readonly item: ItemRecord;
+	readonly sessionTarget: WorkSessionTarget;
+}
+
+interface BatchPlan {
+	readonly batchId: string;
+	readonly targetGraphId: WorkGraphId;
+	readonly newGraphs: GraphRecord[];
+	readonly newItems: NewItemPlan[];
+	readonly deliveries: DeliveryPlan[];
+	readonly configurations: ConfigurationPlan[];
+	readonly cancellations: CancellationPlan[];
+	readonly graphIds: WorkGraphId[];
+	readonly itemIds: WorkItemId[];
+}
+
+export interface WorkGraphEngineOptions {
+	readonly time: TimeRuntime;
+	readonly identity: Identity;
+	readonly modelProvider: RunModelProvider;
+	readonly runCapabilities: RunCapabilityHost;
+	readonly placement: WorkspacePlacement;
+	readonly tooling: WorkspaceTooling;
+	readonly sessions: WorkSessionStore;
+	readonly resources?: InputResourceStore;
+	readonly capacity: WorkCapacityPolicy;
+	readonly admission: WorkAdmission;
+	readonly runBudget?: RunBudget;
+	readonly maxOutputTokens?: number;
+	readonly workerControl?: WorkerControlSink;
+}
+
+export class WorkGraphEngine implements CodingAgent {
+	readonly #options: WorkGraphEngineOptions;
+	readonly #durable: DurableGraphStore<GraphRecord>;
+	readonly #graphs: Map<WorkGraphId, GraphRecord>;
+	readonly #graphOrder: GraphRecord[];
+	readonly #sessionRegistry: SessionLeaseRegistry;
+	readonly #observations: ObservationBus;
+	readonly #capacity: WorkCapacityPolicy;
+	readonly #mirror: WorkGraphMirror;
+	readonly #workerLifecycle: WorkerRuntimePort;
+	readonly #publicationSequencer: PublicationSequencer;
+	readonly #admission: WorkAdmission;
+	readonly #submissions = new Set<Promise<CodingAgentReceipt>>();
+	#closed = false;
+	#closing = false;
+	#closeOperation?: Promise<CodingAgentCloseResult>;
+	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
+	#scheduling = false;
+	#scheduleAgain = false;
+	readonly #settlementWaiters: Array<() => void> = [];
+	readonly #itemTerminalWaiters: Array<() => void> = [];
+
+	constructor(
+		options: WorkGraphEngineOptions,
+		dependencies: {
+			readonly graphs: Map<WorkGraphId, GraphRecord>;
+			readonly graphOrder: GraphRecord[];
+			readonly observations: ObservationBus;
+			readonly sessionRegistry: SessionLeaseRegistry;
+			readonly mirror: WorkGraphMirror;
+			readonly workerLifecycle: WorkerRuntimePort;
+			readonly publicationSequencer: PublicationSequencer;
+			readonly durable: DurableGraphStore<GraphRecord>;
+		},
+	) {
+		this.#options = options;
+		this.#graphs = dependencies.graphs;
+		this.#graphOrder = dependencies.graphOrder;
+		this.#durable = dependencies.durable;
+		this.#capacity = immutableData(options.capacity);
+		this.#observations = dependencies.observations;
+		this.#sessionRegistry = dependencies.sessionRegistry;
+		this.#mirror = dependencies.mirror;
+		this.#workerLifecycle = dependencies.workerLifecycle;
+		this.#publicationSequencer = dependencies.publicationSequencer;
+		this.#admission = options.admission;
+	}
+
+	drainPendingInputAdmissions(item: ItemRecord): void {
+		this.#drainInputAdmissions(item);
+	}
+
+	settleGraph(graph: GraphRecord): Promise<void> {
+		return this.#trySettleGraph(graph);
+	}
+
+	schedule(): void {
+		this.#requestSchedule();
+	}
+
+	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
+		const operation = this.#submit(batch);
+		this.#submissions.add(operation);
+		void operation.then(
+			() => this.#submissions.delete(operation),
+			() => this.#submissions.delete(operation),
+		);
+		return operation;
+	}
+
+	observe(options: ObservationOptions = {}): AsyncIterable<CodingAgentObservation> {
+		const capacity = options.capacity ?? 256;
+		const coordinator = this;
+		return Object.freeze({
+			async *[Symbol.asyncIterator]() {
+				const subscription = coordinator.#observations.subscribe(capacity);
+				yield immutableData({
+					type: "snapshot",
+					sequence: coordinator.#observations.sequence,
+					snapshot: coordinator.#snapshot(),
+				} satisfies CodingAgentObservation);
+				yield* subscription;
+			},
+		});
+	}
+
+	close(): Promise<CodingAgentCloseResult> {
+		if (this.#closeOperation) return this.#closeOperation;
+		this.#closing = true;
+		const operation = this.#close();
+		this.#closeOperation = operation;
+		return operation;
+	}
+
+	async #submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
+		const batchId =
+			typeof batch?.batchId === "string" && ID_PATTERN.test(batch.batchId)
+				? batch.batchId
+				: `batch:${this.#options.identity.generate("queue_item")}`;
+		if (this.#closing || this.#closed) {
+			return immutableData({
+				status: "rejected",
+				batchId,
+				rejection: { code: "closed", message: "Coding Agent is closing or closed" },
+			});
+		}
+		if (this.#durable.ledgerFailure) {
+			return immutableData({
+				status: "rejected",
+				batchId,
+				rejection: {
+					code: "ledger_failed",
+					message: `Workspace Ledger persistence is unavailable: ${errorMessage(this.#durable.ledgerFailure)}`,
+				},
+			});
+		}
+		if (!batch || !Array.isArray(batch.commands) || batch.commands.length === 0) {
+			return immutableData({
+				status: "rejected",
+				batchId,
+				rejection: { code: "empty_batch", message: "A command batch must contain at least one command" },
+			});
+		}
+
+		const admission = this.#admission.reserve();
+		let plan: BatchPlan | undefined;
+		let durablyAccepted = false;
+		let sequence = 0;
+		try {
+			plan = await this.#admission.mutation(() => this.#plan(batch, batchId));
+			await this.#validateConfigurations(plan);
+			await this.#reserve(plan);
+			await this.#commitOwnershipReservations(plan);
+			await admission.ready;
+			await this.#admission.mutation(() =>
+				this.#graphMutation(plan!.targetGraphId, async () => {
+					this.#revalidate(plan!);
+					const graph = plan!.newGraphs[0] ?? this.#graphs.get(plan!.targetGraphId)!;
+					if (plan!.newGraphs.length === 0 && plan!.newItems.length > 0) {
+						await this.#acceptWorkspaceGraphs(plan!);
+					}
+					await this.#appendGraphFacts(graph, this.#acceptedFacts(plan!));
+					if (plan!.newGraphs.length > 0) {
+						await this.#durable.flushGraph(plan!.targetGraphId);
+						await this.#acceptWorkspaceGraphs(plan!);
+					}
+					durablyAccepted = true;
+					this.#accept(plan!);
+					this.#acceptInputAdmissions(plan!);
+					sequence = this.#publish((value) => ({
+						type: "batch_accepted",
+						sequence: value,
+						batchId,
+						graphIds: plan!.graphIds,
+						itemIds: plan!.itemIds,
+					}));
+				}),
+			);
+		} catch (error) {
+			if (durablyAccepted) {
+				this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
+			} else if (plan) {
+				await this.#rollbackReservations(plan);
+			}
+			admission.release();
+			if (durablyAccepted && plan) {
+				this.#requestSchedule();
+				return immutableData({
+					status: "accepted",
+					batchId,
+					sequence,
+					graphIds: plan.graphIds,
+					itemIds: plan.itemIds,
+				});
+			}
+			const rejection =
+				error instanceof SubmissionRejection
+					? error.rejection
+					: this.#durable.ledgerFailure
+						? { code: "ledger_failed" as const, message: errorMessage(error) }
+						: { code: "graph_store_failed" as const, message: errorMessage(error), graphId: plan?.targetGraphId };
+			this.#requestSchedule();
+			return immutableData({ status: "rejected", batchId, rejection });
+		}
+		if (!plan) throw new Error("Accepted command batch has no plan");
+		admission.release();
+		this.#requestSchedule();
+
+		// The atomic Fact segment plus any required Ledger index is the durable
+		// acceptance point. Later bookkeeping cannot turn it into a rejection.
+		try {
+			await this.#applyAcceptedOperations(plan);
+		} catch (error) {
+			this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
+		}
+		try {
+			await this.#settleAcceptedInputResources(plan);
+		} catch (error) {
+			this.#diagnose({ code: "input_resource_settlement_failed", message: errorMessage(error) });
+		}
+		this.#requestSchedule();
+		return immutableData({
+			status: "accepted",
+			batchId,
+			sequence,
+			graphIds: plan.graphIds,
+			itemIds: plan.itemIds,
+		});
+	}
+
+	#plan(batch: CodingAgentCommandBatch, batchId: string): BatchPlan {
+		const now = this.#options.time.clock.now();
+		const newGraphs: GraphRecord[] = [];
+		const newItems: NewItemPlan[] = [];
+		const deliveries: DeliveryPlan[] = [];
+		const configurations: ConfigurationPlan[] = [];
+		const cancellations: CancellationPlan[] = [];
+		const graphIds: WorkGraphId[] = [];
+		const itemIds: WorkItemId[] = [];
+		const targetGraphIds = new Set<WorkGraphId>();
+		const graphs = new Map(this.#graphs);
+		const itemViews = new Map<WorkGraphId, Map<WorkItemId, ItemRecord>>();
+		const view = (graph: GraphRecord): Map<WorkItemId, ItemRecord> => {
+			let items = itemViews.get(graph.id);
+			if (!items) {
+				items = new Map(graph.items);
+				itemViews.set(graph.id, items);
+			}
+			return items;
+		};
+		const findGraph = (value: string, commandIndex: number): GraphRecord => {
+			const id = graphId(assertIdentity(value, "graph"));
+			const persistenceFailure = this.#durable.graphFailure(id);
+			if (persistenceFailure) {
+				throw rejected({
+					code: "graph_store_failed",
+					message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
+					commandIndex,
+					graphId: id,
+				});
+			}
+			const graph = graphs.get(id);
+			if (!graph) {
+				throw rejected({
+					code: "graph_not_found",
+					message: `Work Graph not found: ${id}`,
+					commandIndex,
+					graphId: id,
+				});
+			}
+			targetGraphIds.add(id);
+			return graph;
+		};
+		const findItem = (graph: GraphRecord, value: string, commandIndex: number): ItemRecord => {
+			const id = itemId(assertIdentity(value, "item"));
+			const item = view(graph).get(id);
+			if (!item) {
+				throw rejected({
+					code: "item_not_found",
+					message: `Work Item not found: ${id}`,
+					commandIndex,
+					graphId: graph.id,
+					itemId: id,
+				});
+			}
+			return item;
+		};
+
+		for (const [commandIndex, command] of batch.commands.entries()) {
+			if (!command || typeof command !== "object" || typeof command.type !== "string") {
+				throw rejected({
+					code: "invalid_command",
+					message: "Command must be a discriminated object",
+					commandIndex,
+				});
+			}
+			switch (command.type) {
+				case "start_work_graph": {
+					const id = graphId(
+						command.graphId === undefined
+							? `graph:${this.#options.identity.generate("queue_item")}`
+							: assertIdentity(String(command.graphId), "graph"),
+					);
+					if (graphs.has(id)) {
+						throw rejected({
+							code: "duplicate_identity",
+							message: `Duplicate Work Graph identity: ${id}`,
+							commandIndex,
+							graphId: id,
+						});
+					}
+					const persistenceFailure = this.#durable.graphFailure(id);
+					if (persistenceFailure) {
+						throw rejected({
+							code: "graph_store_failed",
+							message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
+							commandIndex,
+							graphId: id,
+						});
+					}
+					targetGraphIds.add(id);
+					const rootId = itemId(assertIdentity(String(command.root?.itemId), "item"));
+					if (
+						!Number.isSafeInteger(command.maximumConcurrency) ||
+						command.maximumConcurrency < 1 ||
+						command.maximumConcurrency > this.#capacity.graphMaximumConcurrency
+					) {
+						throw rejected({
+							code: "invalid_command",
+							message: `maximumConcurrency must be between 1 and ${this.#capacity.graphMaximumConcurrency}`,
+							commandIndex,
+						});
+					}
+					if (command.root.executionMode !== "read_only" && command.root.executionMode !== "write") {
+						throw rejected({
+							code: "invalid_command",
+							message: "Invalid Work Item execution mode",
+							commandIndex,
+						});
+					}
+					assertConfiguration(command.configuration);
+					const objective = assertObjective(command.objective, "Work Graph objective");
+					const rootObjective = assertObjective(command.root.objective ?? objective, "Root Work Item objective");
+					if (
+						!command.session ||
+						(command.session.type !== "create" && command.session.type !== "resume") ||
+						(command.session.sessionId !== undefined &&
+							!ID_PATTERN.test(assertIdentity(command.session.sessionId, "session")))
+					) {
+						throw rejected({ code: "invalid_command", message: "Invalid Session target", commandIndex });
+					}
+					if (command.session.type === "resume" && !command.session.sessionId) {
+						throw rejected({
+							code: "invalid_command",
+							message: "A resume target requires a Session identity",
+							commandIndex,
+						});
+					}
+					const graph: GraphRecord = {
+						id,
+						order: this.#durable.allocateGraphOrder(),
+						objective,
+						rootId,
+						maximumConcurrency: command.maximumConcurrency,
+						acceptedAt: now,
+						items: new Map(),
+						itemOrder: [],
+						nextItemOrder: 1,
+						activeConcurrency: 0,
+						effectiveConcurrency: 0,
+						cancellationRequested: false,
+						aggregate: WorkGraphAggregate.empty(),
+					};
+					const root = makeItem({
+						graphId: id,
+						itemId: rootId,
+						order: 0,
+						objective: rootObjective,
+						executionMode: command.root.executionMode,
+						configuration: command.configuration,
+						acceptedAt: now,
+						publicationOrder: this.#durable.allocatePublicationOrder(),
+						runtimeId: `worker:${id}:${rootId}:${this.#options.identity.generate("queue_item")}`,
+					});
+					graphs.set(id, graph);
+					view(graph).set(rootId, root);
+					newGraphs.push(graph);
+					newItems.push({ graph, item: root, sessionTarget: immutableData(command.session) });
+					graphIds.push(id);
+					itemIds.push(rootId);
+					break;
+				}
+				case "add_work_items": {
+					const graph = findGraph(String(command.graphId), commandIndex);
+					if (graph.result || graph.cancellationRequested || command.items.length === 0) {
+						throw rejected({
+							code: "invalid_state",
+							message: graph.result
+								? "Work Graph is already settled"
+								: "AddWorkItems requires an active graph and items",
+							commandIndex,
+							graphId: graph.id,
+						});
+					}
+					for (const specification of command.items) {
+						this.#planAddedItem({
+							graph,
+							specification,
+							commandIndex,
+							items: view(graph),
+							now,
+							newItems,
+							itemIds,
+						});
+					}
+					if (!graphIds.includes(graph.id)) graphIds.push(graph.id);
+					break;
+				}
+				case "deliver_work_item_input": {
+					const graph = findGraph(String(command.graphId), commandIndex);
+					const item = findItem(graph, String(command.itemId), commandIndex);
+					if (isTerminal(item.state) || item.cancellationRequested) {
+						throw rejected({
+							code: "invalid_state",
+							message: `Work Item ${item.id} cannot accept input in ${item.state}`,
+							commandIndex,
+							graphId: graph.id,
+							itemId: item.id,
+						});
+					}
+					if (!(["prompt", "steering", "follow_up"] as const).includes(command.kind)) {
+						throw rejected({ code: "invalid_command", message: "Invalid Work Item input kind", commandIndex });
+					}
+					if (
+						command.kind === "prompt" &&
+						(item.promptAccepted ||
+							item.runtime !== undefined ||
+							item.state === "running" ||
+							item.state === "settling" ||
+							deliveries.some((candidate) => candidate.item === item && candidate.command.kind === "prompt"))
+					) {
+						throw rejected({
+							code: "invalid_state",
+							message: `Work Item ${item.id} already owns its Prompt input`,
+							commandIndex,
+							graphId: graph.id,
+							itemId: item.id,
+						});
+					}
+					deliveries.push({
+						commandIndex,
+						deliveryId: `${batchId}:${commandIndex}`,
+						command: immutableData(command),
+						graph,
+						item,
+					});
+					break;
+				}
+				case "configure_work_item": {
+					const graph = findGraph(String(command.graphId), commandIndex);
+					const item = findItem(graph, String(command.itemId), commandIndex);
+					if (isTerminal(item.state) || item.cancellationRequested) {
+						throw rejected({
+							code: "invalid_state",
+							message: `Work Item ${item.id} cannot be configured in ${item.state}`,
+							commandIndex,
+							graphId: graph.id,
+							itemId: item.id,
+						});
+					}
+					assertConfiguration(command.configuration);
+					configurations.push({ command: immutableData(command), graph, item });
+					break;
+				}
+				case "cancel_work": {
+					if (command.target?.type === "graph") {
+						const graph = findGraph(String(command.target.graphId), commandIndex);
+						cancellations.push({ graph });
+					} else if (command.target?.type === "item") {
+						const graph = findGraph(String(command.target.graphId), commandIndex);
+						cancellations.push({ graph, item: findItem(graph, String(command.target.itemId), commandIndex) });
+					} else {
+						throw rejected({ code: "invalid_command", message: "Invalid cancellation target", commandIndex });
+					}
+					break;
+				}
+				default:
+					throw rejected({
+						code: "invalid_command",
+						message: `Unknown Coding Agent command: ${String((command as { type?: unknown }).type)}`,
+						commandIndex,
+					});
+			}
+		}
+		for (const [id, items] of itemViews) this.#assertAcyclic(id, items);
+		if (targetGraphIds.size !== 1) {
+			throw rejected({
+				code: "invalid_command",
+				message: "One command batch must target exactly one Work Graph",
+			});
+		}
+		const targetGraphId = [...targetGraphIds][0]!;
+		if (!graphIds.includes(targetGraphId)) graphIds.push(targetGraphId);
+		return {
+			batchId,
+			targetGraphId,
+			newGraphs,
+			newItems,
+			deliveries,
+			configurations,
+			cancellations,
+			graphIds,
+			itemIds,
+		};
+	}
+
+	#planAddedItem(input: {
+		readonly graph: GraphRecord;
+		readonly specification: AddWorkItemSpecification;
+		readonly commandIndex: number;
+		readonly items: Map<WorkItemId, ItemRecord>;
+		readonly now: number;
+		readonly newItems: NewItemPlan[];
+		readonly itemIds: WorkItemId[];
+	}): void {
+		const { graph, specification, commandIndex, items } = input;
+		const id = itemId(assertIdentity(String(specification.itemId), "item"));
+		if (items.has(id)) {
+			throw rejected({
+				code: "duplicate_identity",
+				message: `Duplicate Work Item identity: ${id}`,
+				commandIndex,
+				graphId: graph.id,
+				itemId: id,
+			});
+		}
+		const parentId = itemId(assertIdentity(String(specification.parentItemId), "item"));
+		const parent = items.get(parentId);
+		if (!parent) {
+			throw rejected({
+				code: "missing_parent",
+				message: `Parent Work Item not found: ${parentId}`,
+				commandIndex,
+				graphId: graph.id,
+				itemId: id,
+			});
+		}
+		if (parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
+			throw rejected({
+				code: "invalid_state",
+				message: `Parent Work Item ${parentId} no longer permits delegation`,
+				commandIndex,
+				graphId: graph.id,
+				itemId: id,
+			});
+		}
+		if (specification.executionMode !== "read_only" && specification.executionMode !== "write") {
+			throw rejected({ code: "invalid_command", message: "Invalid Work Item execution mode", commandIndex });
+		}
+		const dependencies: WorkItemId[] = [];
+		const seen = new Set<WorkItemId>();
+		for (const value of specification.dependencies ?? []) {
+			const dependencyId = itemId(assertIdentity(String(value), "item"));
+			if (dependencyId === id || seen.has(dependencyId)) {
+				throw rejected({
+					code: dependencyId === id ? "dependency_cycle" : "duplicate_identity",
+					message:
+						dependencyId === id
+							? `Work Item ${id} cannot depend on itself`
+							: `Duplicate dependency: ${dependencyId}`,
+					commandIndex,
+					graphId: graph.id,
+					itemId: id,
+				});
+			}
+			if (!items.has(dependencyId)) {
+				throw rejected({
+					code: "missing_dependency",
+					message: `Dependency Work Item not found or not earlier in this batch: ${dependencyId}`,
+					commandIndex,
+					graphId: graph.id,
+					itemId: id,
+				});
+			}
+			seen.add(dependencyId);
+			dependencies.push(dependencyId);
+		}
+		const configuration = specification.configuration ?? parent.desiredConfiguration;
+		assertConfiguration(configuration);
+		const item = makeItem({
+			graphId: graph.id,
+			itemId: id,
+			order: graph.nextItemOrder++,
+			parentId,
+			dependencies,
+			objective: assertObjective(specification.objective, "Work Item objective"),
+			executionMode: specification.executionMode,
+			configuration,
+			acceptedAt: input.now,
+			publicationOrder: this.#durable.allocatePublicationOrder(),
+			runtimeId: `worker:${graph.id}:${id}:${this.#options.identity.generate("queue_item")}`,
+		});
+		items.set(id, item);
+		input.newItems.push({
+			graph,
+			item,
+			sessionTarget: {
+				type: "create",
+				sessionId: `session:${graph.id}:${id}:${this.#options.identity.generate("queue_item")}`,
+			},
+		});
+		input.itemIds.push(id);
+	}
+
+	#assertAcyclic(id: WorkGraphId, items: ReadonlyMap<WorkItemId, ItemRecord>): void {
+		const visiting = new Set<WorkItemId>();
+		const visited = new Set<WorkItemId>();
+		const visit = (item: ItemRecord): void => {
+			if (visited.has(item.id)) return;
+			if (visiting.has(item.id)) {
+				throw rejected({
+					code: "dependency_cycle",
+					message: `Dependency cycle detected at Work Item ${item.id}`,
+					graphId: id,
+					itemId: item.id,
+				});
+			}
+			visiting.add(item.id);
+			for (const dependencyId of item.dependencies) {
+				const dependency = items.get(dependencyId);
+				if (dependency) visit(dependency);
+			}
+			visiting.delete(item.id);
+			visited.add(item.id);
+		};
+		for (const item of items.values()) visit(item);
+	}
+
+	async #validateConfigurations(plan: BatchPlan): Promise<void> {
+		const signal = new AbortController().signal;
+		try {
+			for (const { item } of plan.newItems) {
+				await this.#options.modelProvider.resolve(item.desiredConfiguration, signal);
+			}
+			for (const { command } of plan.configurations) {
+				await this.#options.modelProvider.resolve(command.configuration, signal);
+			}
+		} catch (error) {
+			throw rejected({
+				code: "resource_reservation_failed",
+				message: `Runtime configuration failed: ${errorMessage(error)}`,
+			});
+		}
+	}
+
+	async #reserve(plan: BatchPlan): Promise<void> {
+		const batchSessions = new Set<string>();
+		for (const entry of plan.newItems) {
+			const parent = entry.item.parentId
+				? (plan.newItems.find(
+						(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === entry.item.parentId,
+					)?.item ?? entry.graph.items.get(entry.item.parentId))
+				: undefined;
+			try {
+				entry.item.placement = await this.#options.placement.reserve({
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+					...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
+					...(parent?.placement ? { parent: parent.placement.placement } : {}),
+					mode: entry.item.executionMode,
+					sourceOrder: entry.item.order,
+					publicationOrder: entry.item.publicationOrder,
+				});
+			} catch (error) {
+				throw rejected({
+					code: "placement_reservation_failed",
+					message: `Workspace Placement reservation failed for ${entry.item.id}: ${errorMessage(error)}`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			try {
+				entry.item.session = await this.#options.sessions.reserve({
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+					...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
+					target: entry.sessionTarget,
+					placement: entry.item.placement.placement,
+				});
+			} catch (error) {
+				throw rejected({
+					code: "session_reservation_failed",
+					message: `Session reservation failed for ${entry.item.id}: ${errorMessage(error)}`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			const sessionId = assertIdentity(String(entry.item.session.session.id), "session");
+			entry.item.reservedSessionId = sessionId;
+			entry.item.reservedPlacementDescriptor = entry.item.placement.placement;
+			if (this.#sessionRegistry.has(sessionId) || batchSessions.has(sessionId)) {
+				throw rejected({
+					code: "session_leased",
+					message: `Session is already leased by another Work Item: ${sessionId}`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			batchSessions.add(sessionId);
+		}
+		for (const delivery of plan.deliveries) {
+			if ((delivery.command.resources?.length ?? 0) === 0) continue;
+			if (!this.#options.resources) {
+				throw rejected({
+					code: "resource_reservation_failed",
+					message: "Input resources were supplied but no resource store is configured",
+					graphId: delivery.graph.id,
+					itemId: delivery.item.id,
+				});
+			}
+			try {
+				delivery.resource = await this.#options.resources.reserve({
+					graphId: delivery.graph.id,
+					itemId: delivery.item.id,
+					input: delivery.command.input,
+					references: delivery.command.resources ?? [],
+				});
+			} catch (error) {
+				throw rejected({
+					code: "resource_reservation_failed",
+					message: `Input resource reservation failed: ${errorMessage(error)}`,
+					graphId: delivery.graph.id,
+					itemId: delivery.item.id,
+				});
+			}
+		}
+	}
+
+	#revalidate(plan: BatchPlan): void {
+		const newGraphIds = new Set(plan.newGraphs.map(({ id }) => id));
+		for (const graph of plan.newGraphs) {
+			if (this.#graphs.has(graph.id)) {
+				throw rejected({
+					code: "duplicate_identity",
+					message: `Work Graph ${graph.id} was accepted by an earlier batch`,
+					graphId: graph.id,
+				});
+			}
+		}
+		for (const entry of plan.newItems) {
+			if (!newGraphIds.has(entry.graph.id)) {
+				if (this.#graphs.get(entry.graph.id) !== entry.graph || entry.graph.items.has(entry.item.id)) {
+					throw rejected({
+						code: "duplicate_identity",
+						message: `Work Item ${entry.item.id} was accepted by an earlier batch`,
+						graphId: entry.graph.id,
+						itemId: entry.item.id,
+					});
+				}
+			}
+			if (entry.graph.result || entry.graph.cancellationRequested) {
+				throw rejected({
+					code: "invalid_state",
+					message: `Work Graph ${entry.graph.id} settled while the batch was reserving resources`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			if (entry.item.reservedSessionId && this.#sessionRegistry.has(entry.item.reservedSessionId)) {
+				throw rejected({
+					code: "session_leased",
+					message: `Session was leased by an earlier batch: ${entry.item.reservedSessionId}`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+			if (!entry.item.parentId) continue;
+			const parent =
+				plan.newItems.find(
+					(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === entry.item.parentId,
+				)?.item ?? entry.graph.items.get(entry.item.parentId);
+			if (!parent || parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
+				throw rejected({
+					code: "invalid_state",
+					message: `Parent Work Item ${entry.item.parentId} settled while the batch was reserving resources`,
+					graphId: entry.graph.id,
+					itemId: entry.item.id,
+				});
+			}
+		}
+		for (const delivery of plan.deliveries) {
+			const { graph, item, command, commandIndex } = delivery;
+			if (
+				graph.result ||
+				graph.cancellationRequested ||
+				item.state === "settling" ||
+				isTerminal(item.state) ||
+				item.cancellationRequested
+			) {
+				throw rejected({
+					code: "invalid_state",
+					message: `Work Item ${item.id} changed state while the batch was reserving resources`,
+					commandIndex,
+					graphId: graph.id,
+					itemId: item.id,
+				});
+			}
+			if (
+				command.kind === "prompt" &&
+				(item.promptAccepted ||
+					item.runtime !== undefined ||
+					item.state === "preparing" ||
+					item.state === "running")
+			) {
+				throw rejected({
+					code: "invalid_state",
+					message: `Work Item ${item.id} already owns its Prompt input`,
+					commandIndex,
+					graphId: graph.id,
+					itemId: item.id,
+				});
+			}
+		}
+		for (const { graph, item, command } of plan.configurations) {
+			if (
+				graph.result ||
+				graph.cancellationRequested ||
+				item.state === "settling" ||
+				isTerminal(item.state) ||
+				item.cancellationRequested
+			) {
+				throw rejected({
+					code: "invalid_state",
+					message: `Work Item ${item.id} changed state while the batch was validating configuration`,
+					graphId: graph.id,
+					itemId: item.id,
+				});
+			}
+			assertConfiguration(command.configuration);
+		}
+	}
+
+	async #commitOwnershipReservations(plan: BatchPlan): Promise<void> {
+		try {
+			for (const entry of plan.newItems) await entry.item.placement?.commit();
+			for (const entry of plan.newItems) await entry.item.session?.commit();
+		} catch (error) {
+			throw rejected({
+				code: "resource_reservation_failed",
+				message: `Reservation commit failed: ${errorMessage(error)}`,
+			});
+		}
+	}
+
+	async #settleAcceptedInputResources(plan: BatchPlan): Promise<void> {
+		await Promise.all(
+			plan.deliveries
+				.filter(({ command }) => (command.resources?.length ?? 0) > 0)
+				.map((delivery) => this.#settleAcceptedInputResource(delivery)),
+		);
+	}
+
+	async #settleAcceptedInputResource(delivery: DeliveryPlan): Promise<void> {
+		let outcome: "committed" | "failed" = "committed";
+		let diagnostic: string | undefined;
+		try {
+			if (!delivery.resource) throw new Error("Accepted input has no resource reservation");
+			// Resource I/O is intentionally outside the Coordinator mutation fence.
+			await delivery.resource.commit();
+		} catch (error) {
+			outcome = "failed";
+			diagnostic = errorMessage(error);
+		}
+
+		let failures: readonly string[] = [];
+		try {
+			failures = await this.#graphMutation(delivery.graph.id, async () => {
+				await this.#appendGraphFacts(delivery.graph, [
+					{
+						version: WORK_GRAPH_FACT_VERSION,
+						type: "input_resources_settled",
+						graphId: delivery.graph.id,
+						itemId: delivery.item.id,
+						deliveryId: delivery.deliveryId,
+						outcome,
+						timestamp: Math.max(
+							this.#options.time.clock.now(),
+							delivery.graph.aggregate.snapshot().lastTimestamp ?? 0,
+						),
+						...(outcome === "failed" ? { diagnostic: diagnostic ?? "Input resource commit failed" } : {}),
+					},
+				]);
+				return this.#settleInputAdmission(delivery.item, delivery.deliveryId, outcome, diagnostic);
+			});
+		} catch (error) {
+			this.#diagnose(
+				{
+					code: "input_resource_settlement_unknown",
+					message: `Input resource settlement was not persisted: ${errorMessage(error)}`,
+				},
+				delivery.graph.id,
+				delivery.item.id,
+			);
+			return;
+		}
+
+		if (failures.length > 0) await this.#interruptForInputResourceFailure(delivery.graph, delivery.item);
+		else this.#flushPendingInputs(delivery.item);
+		this.#requestSchedule();
+	}
+
+	async #rollbackReservations(plan: BatchPlan): Promise<void> {
+		const failures: unknown[] = [];
+		for (const delivery of [...plan.deliveries].reverse()) {
+			try {
+				await delivery.resource?.rollback();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		for (const entry of [...plan.newItems].reverse()) {
+			try {
+				await entry.item.session?.rollback();
+			} catch (error) {
+				failures.push(error);
+			}
+			try {
+				await entry.item.placement?.rollback();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (failures.length > 0) {
+			this.#diagnose({
+				code: "reservation_rollback_failed",
+				message: `${failures.length} unaccepted reservation rollback operation(s) failed`,
+			});
+		}
+	}
+
+	#accept(plan: BatchPlan): void {
+		for (const graph of plan.newGraphs) {
+			this.#graphs.set(graph.id, graph);
+			this.#graphOrder.push(graph);
+		}
+		for (const entry of plan.newItems) {
+			const state = entry.graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === entry.item.id);
+			if (!state) throw new Error(`Accepted Work Item ${entry.item.id} is absent from the Aggregate projection`);
+			this.#mirror.projectItem(entry.item, state);
+			entry.item.reservedSessionId = undefined;
+			entry.item.reservedPlacementDescriptor = undefined;
+			entry.graph.items.set(entry.item.id, entry.item);
+			entry.graph.itemOrder.push(entry.item);
+		}
+	}
+
+	#acceptInputAdmissions(plan: BatchPlan): void {
+		const touched = new Set<ItemRecord>();
+		for (const delivery of plan.deliveries) {
+			if (delivery.command.kind === "prompt") delivery.item.promptAccepted = true;
+			delivery.item.inputAdmissions.push({
+				deliveryId: delivery.deliveryId,
+				command: delivery.command,
+				...((delivery.command.resources?.length ?? 0) === 0
+					? { settlement: { outcome: "committed" as const } }
+					: {}),
+			});
+			touched.add(delivery.item);
+		}
+		for (const item of touched) this.#drainInputAdmissions(item);
+	}
+
+	#settleInputAdmission(
+		item: ItemRecord,
+		deliveryId: string,
+		outcome: "committed" | "failed",
+		diagnostic?: string,
+	): readonly string[] {
+		const admission = item.inputAdmissions.find((candidate) => candidate.deliveryId === deliveryId);
+		if (!admission) throw new Error(`Input admission not found: ${deliveryId}`);
+		if (admission.settlement) throw new Error(`Input admission already settled: ${deliveryId}`);
+		admission.settlement = { outcome, ...(diagnostic ? { diagnostic } : {}) };
+		return this.#drainInputAdmissions(item);
+	}
+
+	#drainInputAdmissions(item: ItemRecord): readonly string[] {
+		const failures: string[] = [];
+		while (item.inputAdmissions[0]?.settlement) {
+			const admission = item.inputAdmissions.shift()!;
+			const settlement = admission.settlement!;
+			if (settlement.outcome === "committed") {
+				if (!isTerminal(item.state) && !item.cancellationRequested && !item.uncertainExternalEffect) {
+					this.#queueDelivery(item, admission.command);
+				}
+				continue;
+			}
+			const diagnostic = settlement.diagnostic ?? "Input resource commit failed";
+			item.diagnostics.push({ code: "input_resource_commit_failed", message: diagnostic });
+			item.uncertainExternalEffect = true;
+			failures.push(`input_resource_commit_failed${settlement.diagnostic ? `:${settlement.diagnostic}` : ""}`);
+		}
+		return failures;
+	}
+
+	#queueDelivery(item: ItemRecord, command: DeliverWorkItemInput): void {
+		const submission = this.#createSubmission(item, command.kind, command.input, command.resources ?? []);
+		if (command.kind === "prompt") item.promptInput = submission;
+		else item.pendingInputs.push({ submission });
+	}
+
+	#itemDefinition(item: ItemRecord): WorkGraphItemDefinition {
+		const sessionId = item.sessionId ?? item.reservedSessionId;
+		const placement = item.placementDescriptor ?? item.reservedPlacementDescriptor;
+		if (!sessionId || !placement) {
+			throw new Error(`Accepted Work Item ${item.id} has incomplete ownership`);
+		}
+		return {
+			itemId: item.id,
+			order: item.order,
+			...(item.parentId ? { parentItemId: item.parentId } : {}),
+			dependencies: item.dependencies,
+			objective: item.objective,
+			executionMode: item.executionMode,
+			desiredConfiguration: item.desiredConfiguration,
+			publicationOrder: item.publicationOrder,
+			runtimeId: item.runtimeId,
+			sessionId,
+			placement,
+		};
+	}
+
+	#acceptedFacts(plan: BatchPlan): readonly WorkGraphFact[] {
+		const graph = plan.newGraphs[0] ?? this.#graphs.get(plan.targetGraphId);
+		if (!graph) throw new Error(`Accepted Work Graph is unavailable: ${plan.targetGraphId}`);
+		const timestamp = Math.max(this.#options.time.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0);
+		const facts: WorkGraphFact[] = [];
+		const root =
+			plan.newGraphs.length > 0 ? plan.newItems.find(({ item }) => item.id === graph.rootId)?.item : undefined;
+		if (plan.newGraphs.length > 0) {
+			if (!root) throw new Error(`Accepted Work Graph ${graph.id} has no root Work Item`);
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "graph_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				order: graph.order,
+				objective: graph.objective,
+				maximumConcurrency: graph.maximumConcurrency,
+				root: this.#itemDefinition(root),
+			});
+		}
+		const added = plan.newItems.filter(({ item }) => item !== root).map(({ item }) => this.#itemDefinition(item));
+		if (added.length > 0) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "items_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				items: added,
+			});
+		}
+		for (const { deliveryId, command, item } of plan.deliveries) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "input_accepted",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				deliveryId,
+				itemId: item.id,
+				kind: command.kind,
+				input: command.input,
+				resourceReferences: command.resources ?? [],
+			});
+		}
+		for (const { command, item } of plan.configurations) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "item_configuration_changed",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				itemId: item.id,
+				configuration: command.configuration,
+			});
+		}
+		for (const cancellation of plan.cancellations) {
+			facts.push({
+				version: WORK_GRAPH_FACT_VERSION,
+				type: "cancellation_requested",
+				graphId: graph.id,
+				timestamp,
+				batchId: plan.batchId,
+				target: cancellation.item ? { type: "item", itemId: cancellation.item.id } : { type: "graph" },
+			});
+		}
+		if (facts.length === 0) throw new Error(`Accepted batch ${plan.batchId} produced no Work Graph Facts`);
+		return facts;
+	}
+
+	async #acceptWorkspaceGraphs(plan: BatchPlan): Promise<void> {
+		// Planning reserves monotonically increasing ordinals under the mutation
+		// fence. Rejections may leave gaps, but an accepted Ledger watermark must
+		// never allocate the same ordinal a second time.
+		await this.#durable.accept({
+			activeGraphs: plan.newGraphs.map((graph) => ({ graphId: graph.id, order: graph.order })),
+			nextGraphOrder: this.#durable.nextGraphOrder,
+			nextPublicationOrder: this.#durable.nextPublicationOrder,
+			sessionOwners: plan.newItems.map(({ graph, item }) => ({
+				sessionId: item.reservedSessionId!,
+				graphId: graph.id,
+				itemId: item.id,
+			})),
+		});
+		for (const { graph, item } of plan.newItems) {
+			this.#sessionRegistry.claim(item.reservedSessionId!, graph.id, item.id);
+		}
+	}
+
+	async #archiveDurableGraph(graph: GraphRecord): Promise<void> {
+		await this.#durable.archiveGraph(graph.id);
+		this.#sessionRegistry.releaseGraph(graph.id);
+	}
+
+	async #applyAcceptedOperations(plan: BatchPlan): Promise<void> {
+		for (const { command, item } of plan.configurations) {
+			if (item.runtime) {
+				try {
+					await item.runtime.configure(command.configuration);
+				} catch (error) {
+					this.#diagnose({ code: "configuration_failed", message: errorMessage(error) }, item.graphId, item.id);
+				}
+			}
+		}
+		for (const delivery of plan.deliveries) {
+			this.#flushPendingInputs(delivery.item);
+		}
+		for (const cancellation of plan.cancellations) {
+			await this.#applyWorkerCancellation(cancellation.graph, cancellation.item);
+		}
+	}
+
+	async #interruptForInputResourceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		item.controller?.abort(new Error("Input resource commit failed"));
+		try {
+			item.runtime?.cancel();
+		} catch (error) {
+			this.#diagnose({ code: "worker_cancel_failed", message: errorMessage(error) }, graph.id, item.id);
+		}
+		if (item.state === "pending" || item.state === "ready") {
+			await this.#finalizeWithoutRun(graph, item, "interrupted");
+		}
+	}
+
+	#createSubmission(
+		item: ItemRecord,
+		kind: WorkItemInputKind,
+		input: AgentInput,
+		resourceReferences: readonly string[],
+	): WorkerSubmission {
+		return immutableData({
+			preparationId: `preparation:${item.graphId}:${item.id}:${this.#options.identity.generate("queue_item")}`,
+			graphId: item.graphId,
+			itemId: item.id,
+			kind,
+			input,
+			resourceReferences,
+		});
+	}
+
+	#flushPendingInputs(item: ItemRecord): void {
+		if (!item.runtime || item.state === "pending" || item.state === "ready" || item.state === "preparing") return;
+		for (const pending of item.pendingInputs.splice(0)) {
+			if (pending.submission.kind === "steering") item.runtime.steer(pending.submission);
+			else item.runtime.followUp(pending.submission);
+		}
+	}
+
+	async #applyWorkerCancellation(graph: GraphRecord, target?: ItemRecord): Promise<void> {
+		const targets = graph.itemOrder.filter(
+			(item) => !target || item.id === target.id || this.#isDescendant(graph, item, target.id),
+		);
+		await this.#workerLifecycle.applyCancellation(targets, {
+			diagnose: (code, message, itemId) => this.#diagnose({ code, message }, graph.id, itemId),
+			finalizeUnstarted: (item) => this.#finalizeWithoutRun(graph, item, "canceled"),
+		});
+	}
+
+	#isDescendant(graph: GraphRecord, candidate: ItemRecord, ancestorId: WorkItemId): boolean {
+		let current = candidate.parentId;
+		while (current) {
+			if (current === ancestorId) return true;
+			current = graph.items.get(current)?.parentId;
+		}
+		return false;
+	}
+
+	#requestSchedule(): void {
+		if (this.#scheduling) {
+			this.#scheduleAgain = true;
+			return;
+		}
+		queueMicrotask(() => void this.#drainSchedule());
+	}
+
+	async #drainSchedule(): Promise<void> {
+		if (this.#scheduling) {
+			this.#scheduleAgain = true;
+			return;
+		}
+		this.#scheduling = true;
+		try {
+			do {
+				this.#scheduleAgain = false;
+				if (this.#durable.ledgerFailure) continue;
+				await this.#refreshPendingStates();
+				for (;;) {
+					const selected = this.#admission.select({
+						activeProcessConcurrency: this.#workerLifecycle.processActiveConcurrency,
+						graphs: this.#graphOrder.map((graph) => ({
+							graphId: graph.id,
+							activeConcurrency: graph.activeConcurrency,
+							maximumConcurrency: graph.maximumConcurrency,
+							next: () => this.#nextSchedulableInGraph(graph),
+						})),
+					});
+					if (!selected) break;
+					if (selected.kind === "delegation_resume") {
+						const pending = selected.item.delegationResume;
+						if (!pending) continue;
+						selected.item.delegationResume = undefined;
+						selected.item.delegationWaiting = false;
+						this.#workerLifecycle.activate(selected.graph, selected.item);
+						pending.resolve();
+						continue;
+					}
+					if (!(await this.#transition(selected.graph, selected.item, "preparing"))) continue;
+					this.#workerLifecycle.activate(selected.graph, selected.item);
+					void this.#workerLifecycle
+						.runItem(selected.graph, selected.item, {
+							delegate: (specifications, signal) =>
+								this.#delegate(selected.graph, selected.item, specifications, signal),
+							promptSubmission: () =>
+								this.#createSubmission(selected.item, "prompt", selected.item.objective, []),
+							transition: (to) => this.#transition(selected.graph, selected.item, to),
+							settleItem: () => this.#trySettleItem(selected.graph, selected.item),
+							settleAfterPersistenceFailure: () =>
+								this.#settleAfterPersistenceFailure(selected.graph, selected.item),
+							interruptInMemory: (error) => this.#interruptInMemory(selected.graph, selected.item, error),
+						})
+						.catch((error) => {
+							this.#diagnose(
+								{ code: "worker_lifecycle_failed", message: errorMessage(error) },
+								selected.graph.id,
+								selected.item.id,
+							);
+						});
+					await this.#refreshPendingStates();
+				}
+			} while (this.#scheduleAgain);
+		} catch (error) {
+			this.#diagnose({ code: "scheduler_failed", message: errorMessage(error) });
+		} finally {
+			this.#scheduling = false;
+			if (this.#scheduleAgain) this.#requestSchedule();
+		}
+	}
+
+	#nextSchedulableInGraph(graph: GraphRecord):
+		| {
+				readonly kind: "delegation_resume" | "start";
+				readonly graph: GraphRecord;
+				readonly item: ItemRecord;
+		  }
+		| undefined {
+		if (this.#durable.ledgerFailure || this.#durable.hasGraphFailure(graph.id) || graph.result) return undefined;
+		for (const item of graph.itemOrder) {
+			if (item.delegationResume) return { kind: "delegation_resume", graph, item };
+			if (item.state === "ready" && item.inputAdmissions.length === 0) return { kind: "start", graph, item };
+		}
+		return undefined;
+	}
+
+	async #refreshPendingStates(): Promise<void> {
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const graph of this.#graphOrder) {
+				if (graph.result) continue;
+				for (const item of graph.itemOrder) {
+					if (item.state !== "pending" && item.state !== "ready") continue;
+					if (graph.cancellationRequested || item.cancellationRequested) {
+						await this.#finalizeWithoutRun(graph, item, "canceled");
+						changed = true;
+						continue;
+					}
+					const blockedBy = item.dependencies.filter((dependencyId) => {
+						const state = graph.items.get(dependencyId)?.state;
+						return state !== undefined && isTerminal(state) && state !== "succeeded";
+					});
+					const parent = item.parentId ? graph.items.get(item.parentId) : undefined;
+					if (parent && isTerminal(parent.state) && parent.state !== "succeeded") blockedBy.push(parent.id);
+					if (blockedBy.length > 0) {
+						await this.#finalizeWithoutRun(graph, item, "blocked", blockedBy);
+						changed = true;
+						continue;
+					}
+					if (item.state !== "pending") continue;
+					const dependenciesSucceeded = item.dependencies.every(
+						(dependencyId) => graph.items.get(dependencyId)?.state === "succeeded",
+					);
+					const parentPermits =
+						!parent ||
+						parent.state === "preparing" ||
+						parent.state === "running" ||
+						parent.state === "settling" ||
+						parent.state === "succeeded";
+					if (dependenciesSucceeded && parentPermits && item.inputAdmissions.length === 0) {
+						await this.#transition(graph, item, "ready");
+						changed = true;
+					}
+				}
+				await this.#trySettleGraph(graph);
+			}
+		}
+	}
+
+	async #settleAfterPersistenceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		if (item.result) return;
+		const from = item.state;
+		const safeFailedBarrier =
+			item.barrierFailure?.barrier === "work_graph_store" && !item.barrierFailure.externalEffectMayHaveOccurred;
+		const terminal: WorkResult["state"] = safeFailedBarrier ? "failed" : "interrupted";
+		await this.#workerLifecycle.teardown(item);
+		// Single-fact-source exception: persistence has failed, so this unknown-durability result cannot be projected.
+		item.state = terminal;
+		const publication: PublicationOutcome =
+			terminal === "failed" ? { state: "not_required" } : { state: "not_published", reason: "interrupted" };
+		const result = this.#makeResult(item, terminal, publication, undefined, undefined, [], "unknown");
+		item.result = result;
+		this.#publish((sequence) => ({
+			type: "item_state_changed",
+			sequence,
+			graphId: graph.id,
+			itemId: item.id,
+			from,
+			to: terminal,
+		}));
+		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
+		await this.#workerLifecycle.releaseResources(graph, item, true);
+		await this.#afterItemTerminal(graph, item);
+	}
+
+	async #trySettleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		if (item.state !== "settling" || item.settling) return item.settling;
+		const children = graph.itemOrder.filter((candidate) => candidate.parentId === item.id);
+		if (children.some((child) => !isTerminal(child.state))) return;
+		const operation = this.#settleItem(graph, item).catch((error) => this.#interruptInMemory(graph, item, error));
+		item.settling = operation;
+		await operation;
+	}
+
+	async #settleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		const hasUnclosedEffects = workerFactHasOpenEffects(item.factProjection);
+		if (hasUnclosedEffects) {
+			item.diagnostics.push({
+				code: "worker_effect_window_unclosed",
+				message: "Worker settled while a Model Attempt or Tool Invocation effect window remained open",
+			});
+		}
+		let terminal: WorkResult["state"] =
+			this.#durable.ledgerFailure || this.#durable.hasGraphFailure(graph.id)
+				? "interrupted"
+				: item.uncertainExternalEffect
+					? "interrupted"
+					: item.cancellationRequested || item.run?.outcome === "aborted"
+						? "canceled"
+						: hasUnclosedEffects
+							? "interrupted"
+							: item.run?.outcome === "success"
+								? "succeeded"
+								: "failed";
+		let artifact: WorkspaceArtifact | undefined;
+		let publication: PublicationOutcome = { state: "not_required" };
+		const placement = item.placement?.placement;
+		if (!placement) {
+			terminal = "interrupted";
+			item.diagnostics.push({
+				code: "placement_missing",
+				message: "Workspace Placement was lost before settlement",
+			});
+		} else {
+			try {
+				await this.#options.tooling.quiesce({
+					graphId: graph.id,
+					itemId: item.id,
+					sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
+					placement,
+				});
+			} catch (error) {
+				terminal = "interrupted";
+				item.diagnostics.push({ code: "workspace_quiescence_interrupted", message: errorMessage(error) });
+			}
+			try {
+				artifact = await this.#options.tooling.capture({
+					graphId: graph.id,
+					itemId: item.id,
+					placement,
+					signal: item.controller?.signal ?? new AbortController().signal,
+				});
+			} catch (error) {
+				terminal = "interrupted";
+				item.diagnostics.push({ code: "artifact_capture_interrupted", message: errorMessage(error) });
+			}
+			if (artifact) {
+				const target = item.parentId ? graph.items.get(item.parentId)?.placement?.placement : undefined;
+				const settled = await this.#publicationSequencer.publish({
+					graph,
+					item,
+					artifact,
+					placement,
+					...(target ? { target } : {}),
+					signal: item.controller?.signal ?? new AbortController().signal,
+					terminal,
+				});
+				terminal = settled.terminal;
+				publication = settled.publication;
+				item.diagnostics.push(...settled.diagnostics);
+			}
+		}
+
+		const evidence = item.run && item.session ? item.session.evidence(String(item.run.runId)) : undefined;
+		if (!(await this.#workerLifecycle.teardown(item)) && terminal === "succeeded") terminal = "failed";
+		this.#workerLifecycle.deactivate(graph, item);
+		await this.#transition(graph, item, terminal);
+		const result = this.#makeResult(item, terminal, publication, artifact, evidence);
+		await this.#recordResult(graph, item, result);
+		await this.#workerLifecycle.releaseResources(
+			graph,
+			item,
+			publication.state === "not_published" || terminal === "interrupted",
+		);
+		await this.#afterItemTerminal(graph, item);
+	}
+
+	async #finalizeWithoutRun(
+		graph: GraphRecord,
+		item: ItemRecord,
+		terminal: "canceled" | "blocked" | "interrupted",
+		blockedBy: readonly WorkItemId[] = [],
+	): Promise<void> {
+		if (isTerminal(item.state)) return;
+		this.#workerLifecycle.deactivate(graph, item);
+		await this.#transition(graph, item, terminal);
+		const publication: PublicationOutcome =
+			terminal === "canceled"
+				? { state: "not_published", reason: "canceled" }
+				: terminal === "interrupted"
+					? { state: "not_published", reason: "interrupted" }
+					: { state: "not_required" };
+		const result = this.#makeResult(item, terminal, publication, undefined, undefined, blockedBy);
+		await this.#recordResult(graph, item, result);
+		await this.#workerLifecycle.releaseResources(graph, item, false);
+		await this.#afterItemTerminal(graph, item);
+	}
+
+	#makeResult(
+		item: ItemRecord,
+		state: WorkResult["state"],
+		publication: PublicationOutcome,
+		artifact?: WorkspaceArtifact,
+		evidence?: WorkResult["evidence"],
+		blockedBy: readonly WorkItemId[] = [],
+		durability: WorkResult["durability"] = "confirmed",
+	): WorkResult {
+		const settledAt = this.#options.time.clock.now();
+		const run: WorkRunResult | undefined = item.run
+			? {
+					runId: String(item.run.runId),
+					outcome: item.run.outcome,
+					...(item.run.failure ? { failure: item.run.failure } : {}),
+					...(item.runtime?.assistantText() ? { assistantText: item.runtime.assistantText() } : {}),
+				}
+			: undefined;
+		const budget: WorkBudgetUsage = {
+			modelAttempts: item.factProjection.modelAttempts,
+			toolInvocations: item.factProjection.toolInvocations,
+			totalTokens: item.factProjection.totalTokens,
+			elapsedMs: Math.max(0, settledAt - item.acceptedAt),
+			...(item.factProjection.exhaustion ? { exhaustion: item.factProjection.exhaustion } : {}),
+		};
+		return immutableData({
+			durability,
+			itemId: item.id,
+			...(item.parentId ? { parentItemId: item.parentId } : {}),
+			dependencies: item.dependencies,
+			runtimeId: item.runtimeId,
+			sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
+			state,
+			...(run ? { run } : {}),
+			...(evidence ? { evidence } : {}),
+			placement: item.placementDescriptor ??
+				item.placement?.placement ?? {
+					placementId: "placement:unknown",
+					root: "",
+					baseIdentity: "unknown",
+					kind: "memory",
+				},
+			...(artifact ? { artifact } : {}),
+			publication,
+			diagnostics: item.diagnostics,
+			timing: {
+				acceptedAt: item.acceptedAt,
+				...(item.startedAt === undefined ? {} : { startedAt: item.startedAt }),
+				settledAt,
+			},
+			budget,
+			...(blockedBy.length > 0 ? { blockedBy } : {}),
+		});
+	}
+
+	async #recordResult(graph: GraphRecord, item: ItemRecord, result: WorkResult): Promise<void> {
+		await this.#graphMutation(graph.id, async () => {
+			if (item.result) return;
+			if (result.durability !== "confirmed") {
+				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Graph store`);
+			}
+			await this.#appendGraphFacts(graph, [
+				{
+					version: WORK_GRAPH_FACT_VERSION,
+					type: "item_result_recorded",
+					graphId: graph.id,
+					itemId: item.id,
+					timestamp: result.timing.settledAt,
+					state: result.state,
+					...(result.run ? { run: result.run } : {}),
+					...(result.evidence ? { evidence: result.evidence } : {}),
+					diagnostics: result.diagnostics,
+					...(result.blockedBy ? { blockedBy: result.blockedBy } : {}),
+				},
+			]);
+			const authoritative = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!
+				.result!;
+			this.#publish((sequence) => ({
+				type: "work_item_settled",
+				sequence,
+				graphId: graph.id,
+				result: authoritative,
+			}));
+		});
+	}
+
+	async #delegate(
+		graph: GraphRecord,
+		parent: ItemRecord,
+		specifications: readonly DelegateChildSpecification[],
+		signal: AbortSignal,
+	): Promise<readonly WorkResult[]> {
+		if (parent.executionMode !== "write" || parent.state !== "running" || parent.cancellationRequested) {
+			throw new Error(`Work Item ${parent.id} cannot delegate in ${parent.state}`);
+		}
+		if (parent.delegationWaiting) throw new Error(`Work Item ${parent.id} is already waiting on delegation`);
+		parent.delegationWaiting = true;
+		this.#workerLifecycle.deactivate(graph, parent);
+		try {
+			signal.throwIfAborted();
+			const receipt = await this.submit({
+				commands: [
+					{
+						type: "add_work_items",
+						graphId: graph.id,
+						items: specifications.map((specification) => ({
+							itemId: specification.itemId,
+							parentItemId: parent.id,
+							objective: specification.objective,
+							executionMode: specification.executionMode,
+							...(specification.dependencies ? { dependencies: specification.dependencies } : {}),
+							...(specification.configuration ? { configuration: specification.configuration } : {}),
+						})),
+					},
+				],
+			});
+			if (receipt.status === "rejected") {
+				throw new Error(`Delegation was rejected (${receipt.rejection.code}): ${receipt.rejection.message}`);
+			}
+			const delegatedIds = receipt.itemIds;
+			while (true) {
+				signal.throwIfAborted();
+				const results = delegatedIds.map((id) => graph.items.get(id)?.result);
+				if (results.every((result): result is WorkResult => result !== undefined)) {
+					return Object.freeze(results);
+				}
+				await this.#waitForItemTerminalChange(signal);
+			}
+		} finally {
+			await this.#resumeDelegatingItem(parent, signal);
+		}
+	}
+
+	#waitForItemTerminalChange(signal: AbortSignal): Promise<void> {
+		if (signal.aborted) return Promise.reject(signal.reason);
+		return new Promise<void>((resolve, reject) => {
+			const cleanup = (): void => {
+				signal.removeEventListener("abort", onAbort);
+				const index = this.#itemTerminalWaiters.indexOf(onTerminal);
+				if (index >= 0) this.#itemTerminalWaiters.splice(index, 1);
+			};
+			const onTerminal = (): void => {
+				cleanup();
+				resolve();
+			};
+			const onAbort = (): void => {
+				cleanup();
+				reject(signal.reason);
+			};
+			this.#itemTerminalWaiters.push(onTerminal);
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+	}
+
+	async #resumeDelegatingItem(item: ItemRecord, signal: AbortSignal): Promise<void> {
+		if (item.active) {
+			item.delegationWaiting = false;
+			return;
+		}
+		if (item.cancellationRequested || signal.aborted || isTerminal(item.state)) {
+			item.delegationWaiting = false;
+			return;
+		}
+		await new Promise<void>((resolve, reject) => {
+			const onAbort = (): void => {
+				if (item.delegationResume?.resolve !== onResume) return;
+				item.delegationResume = undefined;
+				item.delegationWaiting = false;
+				reject(signal.reason);
+			};
+			const onResume = (): void => {
+				signal.removeEventListener("abort", onAbort);
+				resolve();
+			};
+			item.delegationResume = {
+				resolve: onResume,
+				reject: (error) => {
+					signal.removeEventListener("abort", onAbort);
+					reject(error);
+				},
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			this.#requestSchedule();
+		});
+	}
+
+	async #afterItemTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		for (const resolve of this.#itemTerminalWaiters.splice(0)) resolve();
+		for (const parent of graph.itemOrder.filter((candidate) => candidate.id === item.parentId)) {
+			await this.#trySettleItem(graph, parent);
+		}
+		await this.#trySettleGraph(graph);
+		this.#requestSchedule();
+	}
+
+	async #trySettleGraph(graph: GraphRecord): Promise<void> {
+		if (graph.result || graph.itemOrder.length === 0) return;
+		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+		if (graph.settlement) return graph.settlement;
+		const operation = this.#graphMutation(graph.id, async () => {
+			if (graph.result || graph.itemOrder.length === 0) return;
+			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+			const root = graph.items.get(graph.rootId);
+			if (!root?.result) return;
+			const results = graph.itemOrder.map((item) => item.result!);
+			const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
+				? "interrupted"
+				: graph.cancellationRequested || root.result.state === "canceled"
+					? "canceled"
+					: root.result.state === "failed" || root.result.state === "blocked"
+						? "failed"
+						: results.some((result) => result.state !== "succeeded")
+							? "partial"
+							: "succeeded";
+			const publications = results.map((result) => result.publication.state);
+			const finalPublication = publications.includes("not_published")
+				? publications.includes("published")
+					? "mixed"
+					: "not_published"
+				: publications.includes("published")
+					? "published"
+					: "not_required";
+			const settledAt = Math.max(this.#options.time.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0);
+			let result: WorkGraphResult = immutableData({
+				durability:
+					this.#durable.ledgerFailure ||
+					this.#durable.hasGraphFailure(graph.id) ||
+					results.some(({ durability }) => durability === "unknown")
+						? "unknown"
+						: "confirmed",
+				graphId: graph.id,
+				rootItemId: graph.rootId,
+				objective: graph.objective,
+				outcome,
+				maximumConcurrency: graph.maximumConcurrency,
+				effectiveConcurrency: graph.effectiveConcurrency,
+				results,
+				cancellationRequested: graph.cancellationRequested,
+				acceptedAt: graph.acceptedAt,
+				settledAt,
+				finalPublication,
+			});
+			if (result.durability === "confirmed") {
+				try {
+					await this.#appendGraphFacts(graph, [
+						{
+							version: WORK_GRAPH_FACT_VERSION,
+							type: "graph_result_recorded",
+							graphId: graph.id,
+							timestamp: settledAt,
+							effectiveConcurrency: graph.effectiveConcurrency,
+						},
+					]);
+					result = graph.aggregate.snapshot().graph!.result!;
+					await this.#archiveDurableGraph(graph);
+				} catch {
+					if (!this.#durable.ledgerFailure && !this.#durable.hasGraphFailure(graph.id)) {
+						throw new Error("Work Graph result persistence failed");
+					}
+					result = immutableData({ ...result, durability: "unknown" });
+				}
+			}
+			if (result.durability === "unknown") {
+				// Persistence-failure exception: no authoritative Graph projection can represent unknown durability.
+				graph.result = result;
+			}
+			this.#publish((sequence) => ({ type: "work_graph_settled", sequence, result }));
+			this.#notifySettlementWaiters();
+		});
+		graph.settlement = operation;
+		try {
+			await operation;
+		} finally {
+			if (graph.settlement === operation) graph.settlement = undefined;
+		}
+	}
+
+	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<boolean> {
+		return this.#graphMutation(graph.id, async () => {
+			const from = item.state;
+			if (from === to) return false;
+			if (
+				to === "preparing" &&
+				(item.inputAdmissions.length > 0 ||
+					item.cancellationRequested ||
+					graph.cancellationRequested ||
+					graph.result !== undefined ||
+					graph.activeConcurrency >= graph.maximumConcurrency ||
+					this.#workerLifecycle.processActiveConcurrency >= this.#capacity.processMaximumConcurrency)
+			) {
+				return false;
+			}
+			if (!this.#transitionPermitted(from, to)) {
+				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
+			}
+			await this.#appendGraphFacts(graph, [
+				{
+					version: WORK_GRAPH_FACT_VERSION,
+					type: "item_transitioned",
+					graphId: graph.id,
+					itemId: item.id,
+					from,
+					to,
+					timestamp: Math.max(this.#options.time.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+				},
+			]);
+			this.#publish((sequence) => ({
+				type: "item_state_changed",
+				sequence,
+				graphId: graph.id,
+				itemId: item.id,
+				from,
+				to,
+			}));
+			return true;
+		});
+	}
+
+	#transitionPermitted(from: WorkItemState, to: WorkItemState): boolean {
+		if (isTerminal(from)) return false;
+		const allowed: Record<
+			Exclude<WorkItemState, "succeeded" | "failed" | "canceled" | "interrupted" | "blocked">,
+			readonly WorkItemState[]
+		> = {
+			pending: ["ready", "blocked", "canceled", "interrupted"],
+			ready: ["preparing", "blocked", "canceled", "interrupted"],
+			preparing: ["running", "settling", "canceled", "failed", "interrupted"],
+			running: ["settling", "canceled", "failed", "interrupted"],
+			settling: ["succeeded", "failed", "canceled", "interrupted"],
+		};
+		return allowed[from as keyof typeof allowed].includes(to);
+	}
+
+	async #interruptInMemory(graph: GraphRecord, item: ItemRecord, error: unknown): Promise<void> {
+		if (!item.result) {
+			this.#undurableWork.set(`${graph.id}\0${item.id}`, {
+				graphId: graph.id,
+				itemId: item.id,
+				phase: isTerminal(item.state) ? "result" : item.state,
+			});
+		}
+		item.controller?.abort(error);
+		try {
+			item.runtime?.cancel();
+		} catch {}
+		await this.#workerLifecycle.teardown(item);
+		this.#workerLifecycle.deactivate(graph, item);
+		// Single-fact-source exception: persistence is unavailable, so durability is explicitly unknown.
+		item.state = "interrupted";
+		const publication: PublicationOutcome = { state: "not_published", reason: "interrupted" };
+		const result = this.#makeResult(item, "interrupted", publication, undefined, undefined, [], "unknown");
+		item.result = result;
+		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
+		await this.#workerLifecycle.releaseResources(graph, item, true);
+		await this.#afterItemTerminal(graph, item);
+	}
+
+	#snapshot(): CodingAgentSnapshot {
+		return immutableData({
+			closed: this.#closed,
+			graphs: this.#graphOrder.filter((graph) => !graph.result).map((graph) => this.#graphSnapshot(graph)),
+		});
+	}
+
+	#graphSnapshot(graph: GraphRecord): WorkGraphSnapshot {
+		return {
+			graphId: graph.id,
+			objective: graph.objective,
+			rootItemId: graph.rootId,
+			maximumConcurrency: graph.maximumConcurrency,
+			activeConcurrency: graph.activeConcurrency,
+			effectiveConcurrency: graph.effectiveConcurrency,
+			cancellationRequested: graph.cancellationRequested,
+			items: graph.itemOrder.map((item) => this.#itemSnapshot(item)),
+			...(graph.result ? { result: graph.result } : {}),
+		};
+	}
+
+	#itemSnapshot(item: ItemRecord): WorkItemSnapshot {
+		const activeRun = item.factProjection.activeRun;
+		return {
+			itemId: item.id,
+			...(item.parentId ? { parentItemId: item.parentId } : {}),
+			dependencies: item.dependencies,
+			objective: item.objective,
+			executionMode: item.executionMode,
+			state: item.state,
+			desiredConfiguration: item.desiredConfiguration,
+			...(item.runtime ? { runtimeId: item.runtimeId } : {}),
+			...(activeRun ? { activeRun } : {}),
+			sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unreserved"),
+			placement: item.placementDescriptor ??
+				item.placement?.placement ?? {
+					placementId: "placement:unreserved",
+					root: "",
+					baseIdentity: "unreserved",
+					kind: "memory",
+				},
+			cancellationRequested: item.cancellationRequested,
+			...(item.result ? { result: item.result } : {}),
+		};
+	}
+
+	#publish(factory: (sequence: number) => CodingAgentObservation): number {
+		return this.#observations.publish(factory);
+	}
+
+	#diagnose(diagnostic: WorkDiagnostic, graphId?: WorkGraphId, workItemId?: WorkItemId): void {
+		this.#publish((sequence) => ({
+			type: "diagnostic",
+			sequence,
+			diagnostic,
+			...(graphId ? { graphId } : {}),
+			...(workItemId ? { itemId: workItemId } : {}),
+		}));
+	}
+
+	#graphMutation<Result>(graphId: WorkGraphId, operation: () => Promise<Result> | Result): Promise<Result> {
+		return this.#durable.mutation(graphId, operation);
+	}
+
+	async #appendGraphFacts(graph: GraphRecord, facts: readonly WorkGraphFact[]): Promise<void> {
+		await this.#durable.appendFacts(graph, facts);
+	}
+
+	async failStopGraph(graphId: WorkGraphId, error: unknown): Promise<void> {
+		const graph = this.#graphs.get(graphId);
+		if (!graph) return;
+		this.#interruptGraphForPersistence(graph, error);
+		await this.#settleUnstartedAfterPersistenceFailure([graph]);
+	}
+
+	async failStopLedger(error: unknown): Promise<void> {
+		for (const graph of this.#graphOrder) this.#interruptGraphForPersistence(graph, error);
+		await this.#settleUnstartedAfterPersistenceFailure(this.#graphOrder);
+	}
+
+	reportPersistenceDiagnostic(code: string, message: string, graphId?: WorkGraphId): void {
+		this.#diagnose({ code, message }, graphId);
+	}
+
+	#interruptGraphForPersistence(graph: GraphRecord, error: unknown): void {
+		for (const item of graph.itemOrder) {
+			if (item.result) continue;
+			this.#undurableWork.set(`${graph.id}\0${item.id}`, {
+				graphId: graph.id,
+				itemId: item.id,
+				phase: isTerminal(item.state) ? "result" : item.state,
+			});
+			if (isTerminal(item.state)) continue;
+			if (workerFactHasOpenEffects(item.factProjection)) item.uncertainExternalEffect = true;
+			item.controller?.abort(error);
+			item.delegationResume?.reject(error);
+			item.delegationResume = undefined;
+			item.delegationWaiting = false;
+			try {
+				item.runtime?.cancel();
+			} catch {}
+		}
+	}
+
+	async #settleUnstartedAfterPersistenceFailure(graphs: readonly GraphRecord[]): Promise<void> {
+		await Promise.resolve();
+		for (const graph of graphs) {
+			for (const item of graph.itemOrder) {
+				if (item.state !== "pending" && item.state !== "ready") continue;
+				await this.#settleAfterPersistenceFailure(graph, item);
+			}
+			await this.#trySettleGraph(graph);
+		}
+	}
+
+	async #close(): Promise<CodingAgentCloseResult> {
+		while (this.#submissions.size > 0) await Promise.allSettled([...this.#submissions]);
+		await this.#durable.waitForFailStops();
+		const canceledGraphIds = this.#graphOrder.filter((graph) => !graph.result).map((graph) => graph.id);
+		for (const graph of this.#graphOrder) {
+			if (graph.result) continue;
+			if (this.#durable.hasGraphFailure(graph.id) || this.#durable.ledgerFailure) {
+				for (const item of graph.itemOrder) {
+					if (!isTerminal(item.state))
+						await this.#interruptInMemory(graph, item, this.#durable.graphFailure(graph.id));
+				}
+				continue;
+			}
+			try {
+				await this.#graphMutation(graph.id, async () => {
+					await this.#appendGraphFacts(graph, [
+						{
+							version: WORK_GRAPH_FACT_VERSION,
+							type: "cancellation_requested",
+							graphId: graph.id,
+							timestamp: Math.max(this.#options.time.clock.now(), graph.aggregate.snapshot().lastTimestamp ?? 0),
+							batchId: "batch:close",
+							target: { type: "graph" },
+						},
+					]);
+				});
+				await this.#applyWorkerCancellation(graph);
+			} catch (error) {
+				this.#diagnose({ code: "close_cancellation_failed", message: errorMessage(error) }, graph.id);
+				for (const item of graph.itemOrder) {
+					if (!isTerminal(item.state)) await this.#interruptInMemory(graph, item, error);
+				}
+			}
+		}
+		this.#requestSchedule();
+		await this.#waitForGraphSettlement();
+		const droppedInputs = this.#graphOrder.reduce(
+			(total, graph) =>
+				total +
+				graph.itemOrder.reduce(
+					(count, item) => count + item.droppedInputs + item.pendingInputs.length + (item.promptInput ? 1 : 0),
+					0,
+				),
+			0,
+		);
+		const unsettledWork = this.#graphOrder.flatMap((graph) =>
+			graph.itemOrder.flatMap((item) => {
+				if (item.state !== "preparing" && item.state !== "running" && item.state !== "settling") return [];
+				return [{ graphId: graph.id, itemId: item.id, phase: item.state } as const];
+			}),
+		);
+		const unknownWork = [
+			...this.#undurableWork.values(),
+			...unsettledWork.filter((candidate) => !this.#undurableWork.has(`${candidate.graphId}\0${candidate.itemId}`)),
+		];
+		const result: CodingAgentCloseResult = immutableData({ canceledGraphIds, droppedInputs, unknownWork });
+		const failures: unknown[] = [...(await this.#durable.flush())];
+		try {
+			await this.#options.placement.close();
+		} catch (error) {
+			failures.push(error);
+		}
+		failures.push(...(await this.#durable.close()));
+		this.#closed = true;
+		this.#publish((sequence) => ({ type: "closed", sequence, result }));
+		this.#observations.closeAll();
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1) throw new AggregateError(failures, "Coding Agent close failed");
+		return result;
+	}
+
+	#waitForGraphSettlement(): Promise<void> {
+		if (this.#graphOrder.every((graph) => graph.result)) return Promise.resolve();
+		return new Promise((resolve) => this.#settlementWaiters.push(resolve));
+	}
+
+	#notifySettlementWaiters(): void {
+		if (!this.#graphOrder.every((graph) => graph.result)) return;
+		for (const resolve of this.#settlementWaiters.splice(0)) resolve();
+	}
+}

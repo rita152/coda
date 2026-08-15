@@ -2,9 +2,9 @@ import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import { createRunEvidenceToolFacts } from "../run-evidence/observation-semantics.ts";
+import { toolOutputPathForRef } from "../process/output-store.ts";
 import { toolFailure } from "./failure.ts";
-import { toolOutputPathForRef } from "./tool-output-store.ts";
+import { createRunEvidenceToolFacts } from "./run-evidence-facts.ts";
 
 const MAX_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024;
 

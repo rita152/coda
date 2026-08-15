@@ -23,33 +23,22 @@ import {
 	type Terminal,
 	type TerminalColorScheme,
 } from "@coda/tui";
+import { type JsonEventStreamMode, JsonEventWriter } from "./app/json-event-writer.ts";
+import { createSessionPresentation } from "./app/session-presentation.ts";
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
+import { SkillCommandRegistryBinding, skillIdFromCommandId } from "./commands/skill-extensions.ts";
 import {
 	CodingCompletionController,
 	type CompletionWorkspaceEvidenceProvider,
 	createGitWorkspaceEvidenceProvider,
 } from "./completion/index.ts";
-import { type JsonEventStreamMode, JsonEventWriter } from "./event-output/json-event-writer.ts";
+import { collectWorkspaceDiff } from "./completion/workspace-diff.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
-import { activitySummaryModeForApi } from "./interactive/activity-status.ts";
-import type { ChatAttachment } from "./interactive/chat-component.ts";
-import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
-import type { AttachmentTransaction } from "./interactive/input-controller.ts";
-import { InteractiveMcpElicitationHandler } from "./interactive/mcp-elicitation.ts";
-import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./interactive/process-lifecycle.ts";
-import {
-	confirmFromTerminal,
-	type PromptRuntime,
-	promptTextFromTerminal,
-	selectFromTerminal,
-} from "./interactive/prompts.ts";
-import { type InteractiveSessionOptions, runInteractive } from "./interactive/run-interactive.ts";
-import { sessionCostSnapshot } from "./interactive/session-status.ts";
-import type { SessionStatusLineSnapshot } from "./interactive/status-line.ts";
+import { createWorkspace } from "./host/workspace.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import {
@@ -60,16 +49,14 @@ import {
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
-import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./model-capabilities.ts";
-import type { ModelSelection } from "./model-selection.ts";
+import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./models/model-capabilities.ts";
+import { catalogModelFromRuntime } from "./models/model-catalog.ts";
+import type { ModelSelection } from "./models/model-selection.ts";
+import { ProviderManager } from "./models/provider-manager.ts";
+import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./models/reasoning-effort.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
-import { loadProjectInstructions } from "./project/project-context.ts";
-import { ProviderManager } from "./providers/provider-manager.ts";
-import { availableReasoningEfforts, effectiveReasoningEffort, REASONING_EFFORTS } from "./reasoning-effort.ts";
 import { type AgentRunControlBinding, bindAgentRunControl, type RunControlConfiguration } from "./run-control/index.ts";
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
-import { collectWorkspaceDiff } from "./run-evidence/workspace-diff.ts";
-import { catalogModelFromRuntime } from "./runtime/model-catalog.ts";
 import type { SessionWorkController } from "./runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
@@ -84,6 +71,7 @@ import type {
 	SessionMediaReference,
 	SessionMediaRegistration,
 } from "./session/types.ts";
+import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
 import {
 	activateExplicitSkillReferences,
@@ -92,14 +80,23 @@ import {
 	renderExplicitSkillReferences,
 	sharedSkillArguments,
 } from "./skills/context.ts";
-import { CodingSkillsManager, SkillCommandRegistryBinding, skillIdFromCommandId } from "./skills/manager.ts";
+import { CodingSkillsManager } from "./skills/manager.ts";
 import { collectSkillRoots } from "./skills/roots.ts";
 import type { CodingSkillsSnapshot } from "./skills/types.ts";
 import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
-import { createWorkspace } from "./workspace.ts";
+import { activitySummaryModeForApi } from "./ui/activity-status.ts";
+import type { ChatAttachment } from "./ui/chat-component.ts";
+import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
+import type { AttachmentTransaction } from "./ui/input-controller.ts";
+import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
+import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
+import { confirmFromTerminal, type PromptRuntime, promptTextFromTerminal, selectFromTerminal } from "./ui/prompts.ts";
+import { type InteractiveSessionOptions, runInteractive } from "./ui/run-interactive.ts";
+import { sessionCostSnapshot } from "./ui/session-status.ts";
+import type { SessionStatusLineSnapshot } from "./ui/status-line.ts";
 
 export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
-export type { ModelSelection } from "./model-selection.ts";
+export type { ModelSelection } from "./models/model-selection.ts";
 export type { ProjectTrustRecord, SettingsStore, UserSettings } from "./settings/types.ts";
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
@@ -1559,7 +1556,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								});
 								return {
 									work: targetRuntime,
-									session: targetSession,
+									presentation: createSessionPresentation(targetSession),
+									inputSession: targetSession,
 									modelLabel: `${targetModel.provider}/${targetModel.id}`,
 									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
 									statusLine: () => interactiveStatusLineSnapshot(targetRuntime, targetSession),
@@ -1686,7 +1684,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						try {
 							exitCode = await runInteractive({
 								work: agentRuntime,
-								session,
+								presentation: createSessionPresentation(session),
+								inputSession: session,
 								terminal: interactiveRuntime!.terminal,
 								clock: options.runtime.clock,
 								scheduler: interactiveRuntime!.scheduler,
@@ -1888,7 +1887,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 						const finalWork = overflowReplacement?.work ?? agentRuntime;
 						const finalAgent = finalWork.state();
-						const finalSession = overflowReplacement?.session ?? session;
+						const finalPresentation = overflowReplacement?.presentation ?? createSessionPresentation(session);
 						const interactiveMessages = finalAgent.messages.slice(overflowReplacement ? 0 : initialMessageCount);
 						const finalAssistant = [...interactiveMessages]
 							.reverse()
@@ -1898,9 +1897,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						if (finalAssistant?.role === "assistant") {
 							await options.io.stdout.write(`${finalText(finalAssistant)}\n`);
 						}
-						if (finalSession.descriptor.persistent && finalSession.descriptor.path) {
+						if (finalPresentation.descriptor.persistent && finalPresentation.descriptor.path) {
 							await options.io.stdout.write(
-								`Session ${finalSession.descriptor.id} • resume with: coda --resume ${finalSession.descriptor.id}\n`,
+								`Session ${finalPresentation.descriptor.id} • resume with: coda --resume ${finalPresentation.descriptor.id}\n`,
 							);
 						}
 						if (finalAgent.lastRun && finalAgent.lastRun.outcome !== "success") {

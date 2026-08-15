@@ -1,5 +1,5 @@
 import type { ModelCost } from "@coda/ai";
-import type { DeclaredModelMetadataValue } from "../runtime/model-metadata.ts";
+import type { DeclaredModelMetadataValue } from "../models/model-metadata.ts";
 
 export const AUTH_API_PROTOCOLS = ["openai.chatcompletions", "openai.responses", "anthropic.messages"] as const;
 

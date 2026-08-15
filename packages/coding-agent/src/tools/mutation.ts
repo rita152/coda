@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ToolExecutionContext } from "@coda/agent";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ResolvedWorkspacePath, Workspace } from "../workspace.ts";
+import type { ResolvedWorkspacePath, Workspace } from "../host/workspace.ts";
 import type { AtomicMutationWriter, MutationTargetIdentity } from "./atomic-mutation-writer.ts";
 
 export class TargetMutationCoordinator {

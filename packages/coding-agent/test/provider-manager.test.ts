@@ -1,8 +1,8 @@
 import { createModels, InMemoryCredentialStore } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
-import { ProviderManager } from "../src/providers/provider-manager.ts";
-import type { CustomProviderConfig, CustomProviderModelConfig } from "../src/providers/types.ts";
-import { effectiveReasoningEffort } from "../src/reasoning-effort.ts";
+import { ProviderManager } from "../src/models/provider-manager.ts";
+import { effectiveReasoningEffort } from "../src/models/reasoning-effort.ts";
+import type { CustomProviderConfig, CustomProviderModelConfig } from "../src/models/types.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 const USER_PRICE = {

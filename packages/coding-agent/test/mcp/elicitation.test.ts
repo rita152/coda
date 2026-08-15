@@ -1,11 +1,8 @@
 import type { ToolExecutionContext } from "@coda/agent";
 import { Component, createSystemScheduler, stripAnsi, type TerminalInput, Tui, VirtualTerminal } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
-import {
-	InteractiveMcpElicitationHandler,
-	type McpElicitationWaitListener,
-} from "../../src/interactive/mcp-elicitation.ts";
 import type { McpAgentElicitation } from "../../src/mcp/run-capability.ts";
+import { InteractiveMcpElicitationHandler, type McpElicitationWaitListener } from "../../src/ui/mcp-elicitation.ts";
 
 class RootComponent extends Component {
 	constructor() {

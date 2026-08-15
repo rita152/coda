@@ -1,6 +1,6 @@
 import type { McpHostSnapshot, McpServerSnapshot } from "@coda/mcp";
-import type { CommandFlowHost, CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
 import type { WorkspaceMcpConfigurationSnapshot } from "../mcp/config.ts";
+import type { CommandFlowMenu, CommandFlowNavigation, CommandFlowOpener } from "./flow-types.ts";
 
 export interface McpCommandSnapshot {
 	readonly host: McpHostSnapshot;
@@ -14,7 +14,7 @@ export interface McpCommandFlowOptions {
 }
 
 export async function openMcpCommand(
-	flow: CommandFlowHost,
+	flow: CommandFlowOpener,
 	argument: string | undefined,
 	options: McpCommandFlowOptions,
 ): Promise<void> {

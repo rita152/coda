@@ -22,4 +22,11 @@ describe("@coda/runtime public contract", () => {
 			"@coda/ai": "0.1.0",
 		});
 	});
+
+	it("publishes persistence as the only storage subpath", async () => {
+		const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+			exports: Record<string, unknown>;
+		};
+		expect(Object.keys(manifest.exports).sort()).toEqual([".", "./headless", "./workspace-persistence"]);
+	});
 });

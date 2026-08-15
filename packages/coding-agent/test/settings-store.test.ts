@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { FileSettingsStore } from "../src/app/file-settings-store.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
-import { FileSettingsStore } from "../src/settings/file-settings-store.ts";
 
 const temporaryDirectories: string[] = [];
 

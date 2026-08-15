@@ -1,4 +1,3 @@
-import type { JsonValue } from "@coda/ai";
 import {
 	RUN_EVIDENCE_TOOL_FACTS_VERSION,
 	type RunEvidenceObservationCompleteness,
@@ -21,46 +20,12 @@ const LIMITATION_REASONS = new Set<RunEvidenceObservationLimitationReason>([
 	"output-overflow",
 ]);
 
-export interface RunEvidenceToolFactsInput {
-	readonly completeness: RunEvidenceObservationCompleteness;
-	readonly limitationReason?: RunEvidenceObservationLimitationReason;
-	readonly paths?: readonly RunEvidenceToolFactPath[];
-	readonly omittedPaths?: RunEvidencePathOmissions;
-	readonly resolutionTarget?: RunEvidenceResolutionTarget;
-}
-
 export interface ResolvedObservationSemantics {
 	readonly completeness: RunEvidenceObservationCompleteness;
 	readonly limitationReason?: RunEvidenceObservationLimitationReason;
 	readonly paths: readonly RunEvidenceToolFactPath[];
 	readonly omittedPaths: RunEvidencePathOmissions;
 	readonly resolutionTarget?: RunEvidenceResolutionTarget;
-}
-
-/** Builds the versioned JSON fact consumed by Run Evidence. */
-export function createRunEvidenceToolFacts(input: RunEvidenceToolFactsInput): JsonValue {
-	return {
-		schemaVersion: RUN_EVIDENCE_TOOL_FACTS_VERSION,
-		completeness: input.completeness,
-		...(input.limitationReason ? { limitationReason: input.limitationReason } : {}),
-		...(input.paths ? { paths: input.paths.map(({ path, effect }) => ({ path, effect })) } : {}),
-		...(input.omittedPaths
-			? {
-					omittedPaths: {
-						inspected: nonNegativeInteger(input.omittedPaths.inspected),
-						changed: nonNegativeInteger(input.omittedPaths.changed),
-					},
-				}
-			: {}),
-		...(input.resolutionTarget
-			? {
-					resolutionTarget: {
-						kind: input.resolutionTarget.kind,
-						value: input.resolutionTarget.value,
-					},
-				}
-			: {}),
-	};
 }
 
 /** Resolves v1 facts and conservatively classifies legacy truncation. */

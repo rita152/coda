@@ -9,6 +9,27 @@
 		"coda": "./dist/bin.js"
 	},
 	"exports": {},
+	"imports": {
+		"#app/*": "./dist/app/*.js",
+		"#commands/*": "./dist/commands/*.js",
+		"#completion/*": "./dist/completion/*.js",
+		"#credentials/*": "./dist/credentials/*.js",
+		"#host/*": "./dist/host/*.js",
+		"#maintenance/*": "./dist/maintenance/*.js",
+		"#mcp/*": "./dist/mcp/*.js",
+		"#media/*": "./dist/media/*.js",
+		"#models/*": "./dist/models/*.js",
+		"#process/*": "./dist/process/*.js",
+		"#run-control/*": "./dist/run-control/*.js",
+		"#run-evidence/*": "./dist/run-evidence/*.js",
+		"#runtime/*": "./dist/runtime/*.js",
+		"#session/*": "./dist/session/*.js",
+		"#session-history/*": "./dist/session-history/*.js",
+		"#settings/*": "./dist/settings/*.js",
+		"#skills/*": "./dist/skills/*.js",
+		"#tools/*": "./dist/tools/*.js",
+		"#ui/*": "./dist/ui/*.js"
+	},
 	"files": [
 		"dist",
 		"LICENSE",

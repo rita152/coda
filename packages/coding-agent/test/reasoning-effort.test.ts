@@ -1,6 +1,6 @@
 import type { Model } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { availableReasoningEfforts, effectiveReasoningEffort } from "../src/reasoning-effort.ts";
+import { availableReasoningEfforts, effectiveReasoningEffort } from "../src/models/reasoning-effort.ts";
 
 describe("reasoning effort capabilities", () => {
 	it("exposes canonical defaults and explicit extended efforts", () => {

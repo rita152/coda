@@ -2,7 +2,7 @@ import { createProvider, envApiKeyAuth, type MutableModels, type ProviderStreams
 import { anthropicMessagesApi } from "@coda/ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@coda/ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@coda/ai/api/openai-responses.lazy";
-import type { CatalogModel } from "../runtime/model-catalog.ts";
+import type { CatalogModel } from "../models/model-catalog.ts";
 import {
 	customProviderCatalogModel,
 	discoverCustomProviderModels,

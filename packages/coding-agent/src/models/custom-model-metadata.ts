@@ -1,10 +1,10 @@
 import type { Api, Model, ModelCost, ModelCostTier } from "@coda/ai";
-import type { CatalogModel } from "../runtime/model-catalog.ts";
+import type { CatalogModel } from "../models/model-catalog.ts";
 import {
 	COMPATIBILITY_CONTEXT_WINDOW,
 	COMPATIBILITY_MAX_TOKENS,
 	modelMetadataValue,
-} from "../runtime/model-metadata.ts";
+} from "../models/model-metadata.ts";
 import type { CustomProviderConfig, CustomProviderModelConfig } from "./types.ts";
 
 const MODEL_CONFIG_KEYS = ["id", "name", "contextWindow", "maxTokens", "reasoning", "input", "price", "stale"] as const;

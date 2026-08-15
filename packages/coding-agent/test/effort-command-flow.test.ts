@@ -1,7 +1,7 @@
 import type { KeyInput } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createEffortCommandFlow } from "../src/commands/effort-flow.ts";
-import { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
+import { CommandFlowHost } from "../src/ui/command-flow-host.ts";
 
 describe("reasoning effort command flow", () => {
 	it("lists only available efforts, marks the current value, and commits a selection", () => {

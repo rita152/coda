@@ -5,7 +5,7 @@ import {
 	JsonEventWriter,
 	type JsonRunStartMetadata,
 	SEMANTIC_JSON_EVENT_STREAM_SCHEMA_VERSION,
-} from "../src/event-output/json-event-writer.ts";
+} from "../src/app/json-event-writer.ts";
 
 const RUN_START_METADATA: JsonRunStartMetadata = {
 	model: { provider: "fixture", id: "model" },

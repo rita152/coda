@@ -1,6 +1,6 @@
 import { Editor } from "@coda/tui";
 import { describe, expect, it } from "vitest";
-import { ComposerHistory } from "../src/interactive/composer-history.ts";
+import { ComposerHistory } from "../src/ui/composer-history.ts";
 
 describe("ComposerHistory", () => {
 	it("enters history only at the first visual row and restores the exact draft past newest", () => {

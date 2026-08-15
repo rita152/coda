@@ -1,8 +1,16 @@
 import type { AgentInput } from "@coda/agent";
 import type { ImageContent, SkillReferenceContent, TextContent } from "@coda/ai";
 import type { SkillActivation, SkillId } from "@coda/skills";
-import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import type { CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
+
+export interface SkillComposerReference {
+	readonly id?: string;
+	readonly commandId: string;
+	readonly source: "skill" | "mcp";
+	readonly name: string;
+	readonly start: number;
+	readonly end: number;
+}
 
 const USER_SELECTED_SKILL_CONTEXT_PATTERN =
 	/BEGIN USER-SELECTED SKILL CONTEXT[\s\S]*?END USER-SELECTED SKILL CONTEXT(?:\r?\n)*/gu;
@@ -101,7 +109,7 @@ export function renderVisibleUserText(
 /** Removes only structured Skill tokens; plain text that merely looks like a command is retained. */
 export function sharedSkillArguments(
 	composerText: string,
-	references: readonly ComposerExtensionReference[],
+	references: readonly SkillComposerReference[],
 ): string | undefined {
 	const skillReferences = references
 		.filter(({ source }) => source === "skill")
@@ -132,7 +140,7 @@ export function sharedSkillArguments(
 
 export async function activateExplicitSkillReferences(options: {
 	readonly snapshot: CodingSkillsSnapshot;
-	readonly references: readonly ComposerExtensionReference[];
+	readonly references: readonly SkillComposerReference[];
 	readonly composerText: string;
 	readonly signal?: AbortSignal;
 }): Promise<

@@ -1,8 +1,20 @@
-import type { AgentInput, AgentSeed, AgentTool, Clock, IdGenerator, RunBudget } from "@coda/agent";
+/**
+ * Runtime owns Work Graph/Item/Result, Worker Runtime, Publication, Observation,
+ * Desired Runtime Configuration, Workspace Ledger, and Work Graph Store vocabulary.
+ * Physical host knowledge crosses only the named capabilities declared here.
+ */
+import type { AgentInput, AgentSeed, AgentTool, IdGenerator, RunBudget } from "@coda/agent";
+import type { TimeRuntime } from "@coda/ai";
 import type { CompactionCheckpoint } from "../context-window/types.ts";
-import type { RuntimeScheduler } from "../retry.ts";
-import type { RunCapabilityHost, RunModelSelection, RunToolContribution } from "../run-capabilities.ts";
+import type { SystemPromptSnapshot, TrustedProjectInstructions } from "../prompt/prompt-builder.ts";
 import type {
+	ModelDriverLease,
+	RunCapabilitySource,
+	RunModelSelection,
+	RunToolContribution,
+} from "../run-capabilities.ts";
+import type {
+	CodingAgentObservation,
 	DesiredRuntimeConfiguration,
 	PublicationOutcome,
 	WorkCapacityPolicy,
@@ -14,12 +26,40 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
-import type { WorkGraphFact } from "./work-graph-fact.ts";
 import type { WorkerControlEvent, WorkerSessionEvent } from "./worker-protocol.ts";
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
 
 export type WorkerSelection = RunModelSelection;
+
+/** Owns generation of runtime identities. */
+export type Identity = IdGenerator;
+
+/** Owns immutable Observation sequencing and bounded subscriber delivery. */
+export interface ObservationBus {
+	readonly sequence: number;
+	subscribe(capacity: number): AsyncIterable<CodingAgentObservation>;
+	publish(factory: (sequence: number) => CodingAgentObservation): number;
+	closeAll(): void;
+}
+
+/** Owns Desired Runtime Configuration resolution and Model Driver leasing. */
+export interface RunModelProvider {
+	resolve(configuration: DesiredRuntimeConfiguration, signal: AbortSignal): WorkerSelection | Promise<WorkerSelection>;
+	lease(selection: WorkerSelection, signal: AbortSignal): ModelDriverLease | Promise<ModelDriverLease>;
+}
+
+/** Optional application-side sink for physical worker controls. */
+export interface WorkerControlSink {
+	accept(event: {
+		readonly graphId: WorkGraphId;
+		readonly itemId: WorkItemId;
+		readonly runtimeId: string;
+		readonly sessionId: string;
+		readonly placement: WorkspacePlacementDescriptor;
+		readonly event: WorkerControlEvent;
+	}): Promise<void> | void;
+}
 
 export type WorkerSessionChange =
 	| {
@@ -63,7 +103,7 @@ export interface WorkspacePlacementReservation {
 	rollback(): Promise<void>;
 }
 
-export interface WorkspaceExecution {
+export interface WorkspacePlacement {
 	reserve(request: {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;
@@ -84,6 +124,16 @@ export interface WorkspaceExecution {
 		/** Latest durably settled identity for the Placement's Publication target. */
 		readonly expectedTargetIdentity?: string;
 	}): Promise<WorkspacePlacementReservation>;
+	release(request: {
+		readonly graphId: WorkGraphId;
+		readonly itemId: WorkItemId;
+		readonly placement: WorkspacePlacementDescriptor;
+		readonly preserve: boolean;
+	}): Promise<void>;
+	close(): Promise<void>;
+}
+
+export interface WorkspaceTooling {
 	tools(request: {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;
@@ -110,6 +160,9 @@ export interface WorkspaceExecution {
 		readonly placement: WorkspacePlacementDescriptor;
 		readonly signal: AbortSignal;
 	}): Promise<WorkspaceArtifact | undefined>;
+}
+
+export interface WorkspacePublication {
 	publish(request: {
 		readonly graphId: WorkGraphId;
 		readonly itemId: WorkItemId;
@@ -118,13 +171,27 @@ export interface WorkspaceExecution {
 		readonly target?: WorkspacePlacementDescriptor;
 		readonly signal: AbortSignal;
 	}): Promise<PublicationOutcome>;
-	release(request: {
-		readonly graphId: WorkGraphId;
-		readonly itemId: WorkItemId;
-		readonly placement: WorkspacePlacementDescriptor;
-		readonly preserve: boolean;
-	}): Promise<void>;
-	close(): Promise<void>;
+}
+
+export interface WorkspaceExecution {
+	readonly placement: WorkspacePlacement;
+	readonly tooling: WorkspaceTooling;
+	readonly publication: WorkspacePublication;
+}
+
+/** Owns fairness state while selecting the next runnable candidate. */
+export interface WorkAdmission {
+	reserve(): { readonly ready: Promise<void>; release(): void };
+	mutation<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+	select<Candidate>(request: {
+		readonly activeProcessConcurrency: number;
+		readonly graphs: readonly {
+			readonly graphId: string;
+			readonly activeConcurrency: number;
+			readonly maximumConcurrency: number;
+			next(): Candidate | undefined;
+		}[];
+	}): Candidate | undefined;
 }
 
 export interface InputResourceReservation {
@@ -142,14 +209,15 @@ export interface InputResourceStore {
 }
 
 export interface WorkGraphStoreRestore {
-	readonly facts: readonly WorkGraphFact[];
+	/** Opaque runtime-owned replay value. Persistence adapters must not interpret it. */
+	readonly restore: unknown;
 	readonly diagnostics: readonly string[];
 }
 
 export interface WorkGraphStore {
 	load(): Promise<WorkGraphStoreRestore>;
 	/** Appends one atomic semantic segment; recovery sees all Facts or none. */
-	append(facts: readonly WorkGraphFact[]): Promise<void>;
+	append(commit: unknown): Promise<void>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 }
@@ -212,28 +280,26 @@ export interface WorkspacePersistence {
 }
 
 export interface OpenCodingAgentOptions {
-	readonly workspaceExecution: WorkspaceExecution;
+	readonly time: TimeRuntime;
+	readonly identity: Identity;
+	readonly modelProvider: RunModelProvider;
+	readonly capabilitySources: readonly RunCapabilitySource[];
+	readonly placement: WorkspacePlacement;
+	readonly tooling: WorkspaceTooling;
+	readonly publication: WorkspacePublication;
 	readonly sessions: WorkSessionStore;
 	readonly resources?: InputResourceStore;
 	readonly persistence?: WorkspacePersistence;
-	readonly resolveConfiguration: (
-		configuration: DesiredRuntimeConfiguration,
-	) => WorkerSelection | Promise<WorkerSelection>;
-	readonly runCapabilities: RunCapabilityHost;
-	readonly clock: Clock;
-	readonly idGenerator: IdGenerator;
+	readonly admission?: WorkAdmission;
+	readonly observationBus?: ObservationBus;
 	readonly capacity: WorkCapacityPolicy;
-	readonly scheduler?: RuntimeScheduler;
 	readonly runBudget?: RunBudget;
 	readonly maxOutputTokens?: number;
 	readonly platform: NodeJS.Platform;
 	readonly interactionMode: "interactive" | "print" | "evaluation";
-	readonly controlWorker?: (event: {
-		readonly graphId: WorkGraphId;
-		readonly itemId: WorkItemId;
-		readonly runtimeId: string;
-		readonly sessionId: string;
-		readonly placement: WorkspacePlacementDescriptor;
-		readonly event: WorkerControlEvent;
-	}) => Promise<void> | void;
+	readonly projectInstructions?: (
+		placement: WorkspacePlacementDescriptor,
+	) => TrustedProjectInstructions | undefined | Promise<TrustedProjectInstructions | undefined>;
+	readonly systemPrompt?: SystemPromptSnapshot;
+	readonly workerControl?: WorkerControlSink;
 }

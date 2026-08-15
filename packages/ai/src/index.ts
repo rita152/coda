@@ -47,6 +47,12 @@ export {
 } from "./models.ts";
 export type { ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions } from "./models-store.ts";
 export { type CreateProviderOptions, createProvider, type Provider, type RefreshModelsContext } from "./provider.ts";
+export {
+	createSystemClock,
+	createSystemScheduler,
+	createSystemTimeRuntime,
+	type SystemTimeRuntimeOptions,
+} from "./time.ts";
 export { resolveToolObservation } from "./tool-observation.ts";
 export type * from "./types.ts";
 export { type ContextUsageEstimate, estimateContextTokens } from "./utils/estimate.ts";

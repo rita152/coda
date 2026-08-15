@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
+import { createWorkspace, type Workspace } from "../src/host/workspace.ts";
 import type {
 	AtomicDeletionRequest,
 	AtomicMutationRequest,
@@ -12,7 +13,6 @@ import type {
 } from "../src/tools/atomic-mutation-writer.ts";
 import { TargetMutationCoordinator } from "../src/tools/mutation.ts";
 import { createPatchTool } from "../src/tools/patch.ts";
-import { createWorkspace, type Workspace } from "../src/workspace.ts";
 
 const temporaryDirectories: string[] = [];
 

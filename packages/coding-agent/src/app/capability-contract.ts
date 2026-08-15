@@ -1,5 +1,5 @@
 import { CORE_COMMANDS } from "../commands/core-commands.ts";
-import { AUTH_API_PROTOCOLS } from "../providers/types.ts";
+import { AUTH_API_PROTOCOLS } from "../models/types.ts";
 import {
 	CURRENT_SESSION_FORMAT_VERSION,
 	SESSION_RECORD_TYPES,
@@ -109,7 +109,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Model access",
 		summary:
 			"OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh.",
-		sources: ["packages/ai/src/providers/opencode-go.ts", "packages/coding-agent/src/providers/provider-manager.ts"],
+		sources: ["packages/ai/src/providers/opencode-go.ts", "packages/coding-agent/src/models/provider-manager.ts"],
 		tests: ["packages/ai/test/opencode-go-provider.test.ts", "packages/coding-agent/test/provider-manager.test.ts"],
 	}),
 	capability({
@@ -120,9 +120,9 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary:
 			"Custom Provider models retain configured context, output, image-input, reasoning, status, and tiered-cost metadata across settings, catalog refresh, selection, and runtime consumers.",
 		sources: [
-			"packages/coding-agent/src/providers/custom-model-metadata.ts",
-			"packages/coding-agent/src/runtime/model-metadata.ts",
-			"packages/coding-agent/src/settings/file-settings-store.ts",
+			"packages/coding-agent/src/models/custom-model-metadata.ts",
+			"packages/coding-agent/src/models/model-metadata.ts",
+			"packages/coding-agent/src/app/file-settings-store.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/provider-manager.test.ts",
@@ -159,7 +159,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary:
 			"The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.",
 		sources: [
-			"packages/coding-agent/src/session/session-history-reader.ts",
+			"packages/coding-agent/src/session-history/reader.ts",
 			"packages/coding-agent/src/tools/read-session-history.ts",
 			"packages/coding-agent/src/session/managed-session.ts",
 		],
@@ -212,8 +212,8 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.",
 		sources: [
 			"packages/runtime/src/context-window/overflow-recovery.ts",
-			"packages/coding-agent/src/interactive/run-interactive.ts",
-			"packages/coding-agent/src/interactive/workspace-session-panes.ts",
+			"packages/coding-agent/src/ui/run-interactive.ts",
+			"packages/coding-agent/src/ui/workspace-session-panes.ts",
 		],
 		tests: [
 			"packages/runtime/test/context-overflow-recovery.test.ts",
@@ -233,7 +233,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/src/run-evidence/failure-semantics.ts",
 			"packages/coding-agent/src/run-evidence/observation-semantics.ts",
 			"packages/coding-agent/src/run-evidence/run-evidence.ts",
-			"packages/coding-agent/src/run-evidence/workspace-diff.ts",
+			"packages/coding-agent/src/completion/workspace-diff.ts",
 			"packages/coding-agent/src/run-evidence/presentation.ts",
 			"packages/coding-agent/src/session/managed-session.ts",
 		],
@@ -355,7 +355,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Terminal experience",
 		summary:
 			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.",
-		sources: ["packages/tui/src/tui.ts", "packages/coding-agent/src/interactive/run-interactive.ts"],
+		sources: ["packages/tui/src/tui.ts", "packages/coding-agent/src/ui/run-interactive.ts"],
 		tests: ["packages/tui/test/full-screen-tui.test.ts", "packages/coding-agent/test/interactive-mode.test.ts"],
 	}),
 	capability({
@@ -366,8 +366,8 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary:
 			"Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.",
 		sources: [
-			"packages/coding-agent/src/interactive/user-shell.ts",
-			"packages/coding-agent/src/interactive/input-controller.ts",
+			"packages/coding-agent/src/ui/user-shell.ts",
+			"packages/coding-agent/src/ui/input-controller.ts",
 			"packages/coding-agent/src/runtime/session-work-controller.ts",
 		],
 		tests: [
@@ -451,7 +451,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		title: "Advanced editing",
 		summary:
 			"Autocomplete, selection, clipboard protocols, redo, durable drafts, and syntax highlighting are not implemented.",
-		sources: ["packages/tui/src/editor.ts", "packages/coding-agent/src/interactive/command-composer.ts"],
+		sources: ["packages/tui/src/editor.ts", "packages/coding-agent/src/ui/command-composer.ts"],
 		tests: ["packages/tui/test/editor.test.ts"],
 	}),
 	capability({

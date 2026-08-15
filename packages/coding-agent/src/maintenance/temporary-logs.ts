@@ -1,7 +1,10 @@
 import { join } from "node:path";
 import type { DiagnosticSink } from "@coda/tui";
 import type { DirectoryEntry, FileSystem } from "../host/file-system.ts";
-import { isFileSystemError } from "../host/file-system.ts";
+
+function isFileSystemError(error: unknown, code: string): boolean {
+	return error instanceof Error && "code" in error && (error as Error & { code?: string }).code === code;
+}
 
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024;

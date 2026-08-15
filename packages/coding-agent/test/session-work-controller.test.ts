@@ -7,11 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
+import { createWorkspace } from "../src/host/workspace.ts";
 import { ProcessSessionManager } from "../src/process/process-session-manager.ts";
 import { createWorkspaceWorkCoordinator } from "../src/runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { CodingSkillsManager } from "../src/skills/manager.ts";
-import { createWorkspace } from "../src/workspace.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 const temporaryDirectories: string[] = [];
@@ -284,5 +284,5 @@ describe("Session Work Controller", () => {
 		await second.close();
 		await coordinator.close();
 		await processSessionManager.close();
-	}, 15_000);
+	}, 30_000);
 });

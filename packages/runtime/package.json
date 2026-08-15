@@ -12,17 +12,9 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
-		"./worker-fact": {
-			"types": "./dist/work-graph/worker-fact.d.ts",
-			"import": "./dist/work-graph/worker-fact.js"
-		},
-		"./work-graph-fact": {
-			"types": "./dist/work-graph/work-graph-fact.d.ts",
-			"import": "./dist/work-graph/work-graph-fact.js"
-		},
-		"./work-graph-aggregate": {
-			"types": "./dist/work-graph/work-graph-aggregate.d.ts",
-			"import": "./dist/work-graph/work-graph-aggregate.js"
+		"./headless": {
+			"types": "./dist/headless.d.ts",
+			"import": "./dist/headless.js"
 		},
 		"./workspace-persistence": {
 			"types": "./dist/workspace-persistence.d.ts",

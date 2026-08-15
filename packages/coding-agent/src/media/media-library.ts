@@ -5,7 +5,10 @@ import type { ImageContent } from "@coda/ai";
 import { sanitizeTerminalText } from "@coda/tui";
 import sharp from "sharp";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
-import { isFileSystemError } from "../host/file-system.ts";
+
+function isFileSystemError(error: unknown, code: string): boolean {
+	return error instanceof Error && "code" in error && (error as Error & { code?: string }).code === code;
+}
 
 export interface MediaLimits {
 	readonly maxAttachments: number;

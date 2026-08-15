@@ -1,8 +1,8 @@
 import type { IdGenerator, IdKind, QueueItemId } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
-import { InteractiveInputController } from "../src/interactive/input-controller.ts";
 import type { Session } from "../src/session/types.ts";
+import { InteractiveInputController } from "../src/ui/input-controller.ts";
 import { agentWorkPort, createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 

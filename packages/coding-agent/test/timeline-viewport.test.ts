@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TimelineViewport, type ViewportBlock } from "../src/interactive/timeline-viewport.ts";
+import { TimelineViewport, type ViewportBlock } from "../src/ui/timeline-viewport.ts";
 
 function blocks(entries: ReadonlyArray<readonly [string, ...string[]]>): ViewportBlock[] {
 	return entries.map(([id, ...lines]) => ({ id, lines }));

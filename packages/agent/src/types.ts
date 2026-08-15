@@ -1,6 +1,7 @@
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	Clock,
 	Context,
 	ImageContent,
 	Message,
@@ -12,6 +13,8 @@ import type {
 	TSchema,
 	UserMessage,
 } from "@coda/ai";
+
+export type { Clock } from "@coda/ai";
 
 declare const opaqueId: unique symbol;
 
@@ -28,10 +31,6 @@ export type IdKind = "run" | "turn" | "attempt" | "message" | "tool_invocation" 
 
 export interface IdGenerator {
 	generate(kind: IdKind): string;
-}
-
-export interface Clock {
-	now(): number;
 }
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;

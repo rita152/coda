@@ -1,10 +1,10 @@
 import type { AgentTool, Clock, IdGenerator, IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type TimeRuntime, Type } from "@coda/ai";
-import type { WorkerControlEvent } from "@coda/runtime";
 import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { bindAgentRunControl, RunControl, RunProgressTracker } from "../src/run-control/index.ts";
 import { withRunControlEvidence } from "../src/run-evidence/run-evidence.ts";
+import type { SessionWorkerControlEvent } from "../src/runtime/session-work-controller.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import { agentWorkPort, createTestAgent } from "./agent-runtime-adapter.ts";
 
@@ -66,6 +66,7 @@ function timeRuntime(clock: Clock): TimeRuntime {
 	return {
 		clock,
 		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
 		sleep: { wait: async () => undefined },
 	};
 }
@@ -154,7 +155,7 @@ describe("RunControl", () => {
 		const time = new ManualTime();
 		const deliveries: string[] = [];
 		let cancellations = 0;
-		let listener!: (event: WorkerControlEvent) => Promise<void> | void;
+		let listener!: (event: SessionWorkerControlEvent) => Promise<void> | void;
 		const binding = bindAgentRunControl({
 			work: {
 				deliver: async (_kind, input) => {
@@ -183,7 +184,7 @@ describe("RunControl", () => {
 				id: "message:control",
 				message: { role: "user", content: "start", timestamp: 0 },
 			},
-		} as unknown as WorkerControlEvent);
+		} as unknown as SessionWorkerControlEvent);
 
 		await time.advanceBy(100);
 		expect(deliveries).toHaveLength(1);
@@ -195,7 +196,7 @@ describe("RunControl", () => {
 
 	it("closes the active Control when its Work Item settles without a durable run_end Control event", async () => {
 		const time = new ManualTime();
-		let listener!: (event: WorkerControlEvent) => Promise<void> | void;
+		let listener!: (event: SessionWorkerControlEvent) => Promise<void> | void;
 		let settle!: (result: import("@coda/runtime").WorkResult) => Promise<void> | void;
 		let deliveries = 0;
 		let cancellations = 0;
@@ -227,7 +228,7 @@ describe("RunControl", () => {
 			timestamp: 0,
 			source: "prompt",
 			inputMessage: { id: "message:1", message: { role: "user", content: "start", timestamp: 0 } },
-		} as unknown as WorkerControlEvent);
+		} as unknown as SessionWorkerControlEvent);
 		settle({ timing: { acceptedAt: 0, settledAt: 10 } } as import("@coda/runtime").WorkResult);
 
 		await time.advanceBy(1_000);

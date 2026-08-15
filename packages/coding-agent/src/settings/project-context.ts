@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { FileStatus, FileSystem } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import type { Workspace } from "../workspace.ts";
+import type { Workspace } from "../host/workspace.ts";
 
 export interface TrustedProjectInstructions {
 	readonly path: string;

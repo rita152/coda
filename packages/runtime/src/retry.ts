@@ -1,12 +1,5 @@
 import type { RetryOptions } from "@coda/agent";
-
-export interface RuntimeScheduledTask {
-	cancel(): void;
-}
-
-export interface RuntimeScheduler {
-	schedule(delayMs: number, run: () => void | Promise<void>): RuntimeScheduledTask;
-}
+import type { Scheduler } from "@coda/ai";
 
 const DELAYS = [2_000, 4_000, 8_000] as const;
 
@@ -16,7 +9,7 @@ function abortError(): Error {
 	return error;
 }
 
-export function createCodingAgentRetry(scheduler: RuntimeScheduler): RetryOptions {
+export function createCodingAgentRetry(scheduler: Scheduler): RetryOptions {
 	return {
 		policy: {
 			decide: async ({ attempt, transient }) => {
@@ -33,7 +26,7 @@ export function createCodingAgentRetry(scheduler: RuntimeScheduler): RetryOption
 			wait: (delayMs, signal) => {
 				if (signal.aborted) return Promise.reject(abortError());
 				return new Promise<void>((resolve, reject) => {
-					let task: RuntimeScheduledTask | undefined;
+					let task: ReturnType<Scheduler["schedule"]> | undefined;
 					let settled = false;
 					const finish = (error?: Error): void => {
 						if (settled) return;

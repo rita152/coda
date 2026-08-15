@@ -16,6 +16,7 @@ function providerError(status: number, headers: Record<string, string> = {}): Er
 const immediateRuntime: TimeRuntime = {
 	clock: { now: () => 0 },
 	random: { next: () => 0 },
+	scheduler: { schedule: () => ({ cancel: () => undefined }) },
 	sleep: { wait: async () => {} },
 };
 
@@ -25,6 +26,7 @@ describe("request-establishment retry (upstream: /packages/ai/test/provider-retr
 		const runtime: TimeRuntime = {
 			clock: { now: () => Date.parse("2026-08-08T00:00:00.000Z") },
 			random: { next: () => 0.5 },
+			scheduler: { schedule: () => ({ cancel: () => undefined }) },
 			sleep: {
 				wait: async (delayMs) => {
 					delays.push(delayMs);

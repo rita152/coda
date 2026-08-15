@@ -1,7 +1,7 @@
 import type { McpHostSnapshot } from "@coda/mcp";
 import { describe, expect, it } from "vitest";
 import { openMcpCommand } from "../../src/commands/mcp-flow.ts";
-import { CommandFlowHost } from "../../src/interactive/command-flow-host.ts";
+import { CommandFlowHost } from "../../src/ui/command-flow-host.ts";
 
 const host: McpHostSnapshot = {
 	revision: 2,

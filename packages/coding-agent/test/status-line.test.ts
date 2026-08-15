@@ -5,8 +5,8 @@ import {
 	formatStatusLineTokens,
 	renderStatusLine,
 	type StatusLineSnapshot,
-} from "../src/interactive/status-line.ts";
-import { createCodaTheme } from "../src/interactive/theme.ts";
+} from "../src/ui/status-line.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
 
 const snapshot: StatusLineSnapshot = {
 	workspacePath: "/Users/zp/Desktop/coda",

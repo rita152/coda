@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type MainTimelineBlock, spaceMainTimelineBlocks } from "../src/interactive/timeline-presentation.ts";
+import { type MainTimelineBlock, spaceMainTimelineBlocks } from "../src/ui/timeline-presentation.ts";
 
 describe("main Timeline presentation rhythm", () => {
 	it("adds one row at semantic type changes while keeping equal types compact", () => {

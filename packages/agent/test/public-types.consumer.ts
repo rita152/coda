@@ -35,6 +35,7 @@ export function composeAgent(clock: Clock, idGenerator: IdGenerator): Agent {
 	const runtime: TimeRuntime = {
 		clock,
 		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
 		sleep: { wait: async () => {} },
 	};
 	const faux = createFauxCore({ runtime });

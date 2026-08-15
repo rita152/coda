@@ -1,9 +1,9 @@
 import type { MessageId } from "@coda/agent";
 import { displayWidth, stripAnsi } from "@coda/tui";
 import { describe, expect, it } from "vitest";
-import type { TimelineToolEntry, TimelineToolState } from "../src/interactive/semantic-timeline.ts";
-import { createCodaTheme } from "../src/interactive/theme.ts";
-import { renderExplorationGroup, renderToolInvocation } from "../src/interactive/tool-presentation.ts";
+import type { TimelineToolEntry, TimelineToolState } from "../src/ui/semantic-timeline.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
+import { renderExplorationGroup, renderToolInvocation } from "../src/ui/tool-presentation.ts";
 
 describe("Tool Invocation presentation", () => {
 	it.each([

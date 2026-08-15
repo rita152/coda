@@ -1,7 +1,7 @@
 import type { KeyInput } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createSessionCommandFlow } from "../src/commands/session-flow.ts";
-import { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
+import { CommandFlowHost } from "../src/ui/command-flow-host.ts";
 
 describe("session command flow", () => {
 	it("shows only workspace sessions and switches directly to the selected runtime", () => {

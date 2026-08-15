@@ -1,7 +1,7 @@
 import type { AgentTool, ToolExecutionContext } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import type { ResolvedWorkspacePath, Workspace } from "../workspace.ts";
+import type { ResolvedWorkspacePath, Workspace } from "../host/workspace.ts";
 import type { AtomicMutationWriter, MutationTargetIdentity } from "./atomic-mutation-writer.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicDelete, atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";

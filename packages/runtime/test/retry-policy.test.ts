@@ -1,10 +1,11 @@
 import type { TurnRetryContext } from "@coda/agent";
+import type { Scheduler } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { createCodingAgentRetry, type RuntimeScheduler } from "../src/retry.ts";
+import { createCodingAgentRetry } from "../src/retry.ts";
 
 describe("Coding Agent Turn retry", () => {
 	it("uses exactly three transient retries at 2s, 4s, and 8s", async () => {
-		const scheduler: RuntimeScheduler = { schedule: () => ({ cancel: () => undefined }) };
+		const scheduler: Scheduler = { schedule: () => ({ cancel: () => undefined }) };
 		const retry = createCodingAgentRetry(scheduler);
 		const context = {
 			runId: "run-1",
@@ -35,7 +36,7 @@ describe("Coding Agent Turn retry", () => {
 
 	it("cancels a scheduled wait when the Run signal aborts", async () => {
 		let cancelled = false;
-		const scheduler: RuntimeScheduler = {
+		const scheduler: Scheduler = {
 			schedule: () => ({
 				cancel: () => {
 					cancelled = true;

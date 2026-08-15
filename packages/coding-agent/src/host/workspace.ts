@@ -1,6 +1,6 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { FileSystem } from "./host/file-system.ts";
-import { isFileSystemError } from "./host/file-system.ts";
+import type { FileSystem } from "./file-system.ts";
+import { isFileSystemError } from "./file-system.ts";
 
 export interface ResolvedWorkspacePath {
 	readonly requestedPath: string;

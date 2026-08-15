@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProcessRunner, ProcessRunRequest } from "../src/host/process-runner.ts";
-import { UserShell, type UserShellSnapshot } from "../src/interactive/user-shell.ts";
+import { UserShell, type UserShellSnapshot } from "../src/ui/user-shell.ts";
 
 describe("UserShell", () => {
 	it("uses a login Shell with the full environment and emits sanitized live output", async () => {

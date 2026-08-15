@@ -5,14 +5,14 @@ import type {
 	CodingAgentReceipt,
 	CodingAgentSnapshot,
 	DesiredRuntimeConfiguration,
+	OpenCodingAgentOptions,
 	WorkCapacityPolicy,
-	WorkerControlEvent,
 	WorkGraphId,
-	WorkGraphResult,
 	WorkItemId,
 	WorkResult,
 	WorkspacePlacementDescriptor,
 } from "@coda/runtime";
+import { waitForGraph } from "@coda/runtime/headless";
 import type { Session, SessionToolLifecycle } from "../session/types.ts";
 
 export interface SessionWorkSelection {
@@ -71,7 +71,11 @@ export interface SessionWorkObservationOptions {
 	readonly capacity?: number;
 }
 
-type ControlListener = (event: WorkerControlEvent) => Promise<void> | void;
+export type SessionWorkerControlEvent = Parameters<
+	NonNullable<OpenCodingAgentOptions["workerControl"]>["accept"]
+>[0]["event"];
+
+type ControlListener = (event: SessionWorkerControlEvent) => Promise<void> | void;
 type WorkResultListener = (result: WorkResult) => Promise<void> | void;
 
 export interface WorkerObservationIdentity {
@@ -120,29 +124,6 @@ function objectiveFor(input: AgentInput): string {
 
 function rejected(receipt: Extract<CodingAgentReceipt, { status: "rejected" }>): Error {
 	return new Error(`${receipt.rejection.code}: ${receipt.rejection.message}`);
-}
-
-async function waitForGraph(agent: CodingAgent, graphId: WorkGraphId): Promise<WorkGraphResult> {
-	for (;;) {
-		let resynchronize = false;
-		for await (const observation of agent.observe({ capacity: 4_096 })) {
-			if (observation.type === "snapshot") {
-				const result = observation.snapshot.graphs.find((graph) => graph.graphId === graphId)?.result;
-				if (result) return result;
-			}
-			if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
-				return observation.result;
-			}
-			if (observation.type === "resync_required") {
-				resynchronize = true;
-				break;
-			}
-			if (observation.type === "closed") {
-				throw new Error(`Coding Agent closed before Work Graph ${graphId} settled`);
-			}
-		}
-		if (!resynchronize) throw new Error(`Coding Agent closed before Work Graph ${graphId} settled`);
-	}
 }
 
 /**
@@ -252,7 +233,7 @@ export class SessionWorkController {
 			this.#activeRuntimeId = undefined;
 			throw rejected(receipt);
 		}
-		const operation = waitForGraph(this.#host.agent, graphId)
+		const operation = waitForGraph(this.#host.agent, graphId, { capacity: 4_096 })
 			.then((result) => {
 				const root = result.results.find((candidate) => candidate.itemId === itemId);
 				if (!root) throw new Error(`Work Graph ${graphId} has no root Work Result`);
@@ -436,7 +417,7 @@ export class SessionWorkController {
 		}
 	}
 
-	acceptWorkerControlEvent(event: WorkerControlEvent): Promise<void> {
+	acceptWorkerControlEvent(event: SessionWorkerControlEvent): Promise<void> {
 		if (this.#closed) return Promise.resolve();
 		return this.#notifyControl(event);
 	}
@@ -474,7 +455,7 @@ export class SessionWorkController {
 		}
 	}
 
-	async #notifyControl(event: WorkerControlEvent): Promise<void> {
+	async #notifyControl(event: SessionWorkerControlEvent): Promise<void> {
 		for (const listener of [...this.#controlListeners]) {
 			try {
 				await listener(event);

@@ -3,10 +3,10 @@ import type { ComponentInputContext, KeyInput, MarkdownRenderer, MouseButton } f
 import { stripAnsi } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createUnifiedCommandRegistry } from "../src/commands/unified-registry.ts";
-import { ChatComponent } from "../src/interactive/chat-component.ts";
-import type { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
-import type { UserShellSnapshot, UserShellStatus } from "../src/interactive/user-shell.ts";
 import type { ComposerExtensionReference } from "../src/session/composer-submission.ts";
+import { ChatComponent } from "../src/ui/chat-component.ts";
+import type { CommandFlowHost } from "../src/ui/command-flow-host.ts";
+import type { UserShellSnapshot, UserShellStatus } from "../src/ui/user-shell.ts";
 
 describe("ChatComponent terminal input", () => {
 	it("submits an unknown slash command as an ordinary User Prompt", async () => {

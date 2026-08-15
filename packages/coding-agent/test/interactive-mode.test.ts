@@ -5,13 +5,13 @@ import { type ApplicationOutput, createCodingAgentApplication } from "../src/app
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessRunner, ProcessRunRequest } from "../src/host/process-runner.ts";
-import { FullScreenOutputGate } from "../src/interactive/full-screen-output.ts";
+import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import { FullScreenOutputGate } from "../src/ui/full-screen-output.ts";
 import type {
 	InteractiveLifecycleHandlers,
 	InteractiveProcessLifecycle,
 	InteractiveTerminationSignal,
-} from "../src/interactive/process-lifecycle.ts";
-import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+} from "../src/ui/process-lifecycle.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {

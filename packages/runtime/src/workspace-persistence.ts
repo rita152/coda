@@ -7,6 +7,7 @@ export {
 	emptyWorkspaceLedger,
 	encodeWorkGraphEnvelope,
 	encodeWorkspaceLedger,
+	mergeWorkGraphCommits,
 } from "./work-graph/persistence-codec.ts";
 export type {
 	WorkGraphStore,
@@ -20,4 +21,3 @@ export type {
 	WorkspaceSessionOwner,
 	WorkspaceTargetIdentity,
 } from "./work-graph/ports.ts";
-export type { WorkGraphFact } from "./work-graph/work-graph-fact.ts";

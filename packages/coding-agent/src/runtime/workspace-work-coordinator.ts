@@ -1,34 +1,33 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { AgentEvent, AgentMessage, AgentSeed, Clock, IdGenerator, RunBudget } from "@coda/agent";
-import type { AuthResult, JsonValue, Models, ThinkingLevel } from "@coda/ai";
+import { type AuthResult, createSystemTimeRuntime, type JsonValue, type Models, type ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult, McpToolLease } from "@coda/mcp";
 import {
 	type CodingAgent,
-	createRunCapabilityHost,
 	type ModelDriverLease,
 	type OpenCodingAgentOptions,
 	openCodingAgent,
 	type RunModelSelection,
 	type WorkCapacityPolicy,
 	type WorkRunEvidence,
+	type WorkspaceExecution,
 } from "@coda/runtime";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
+import { createWorkspace, type Workspace } from "../host/workspace.ts";
 import type { CodingMcpRegistry } from "../mcp/registry.ts";
 import { createMcpCapabilitySource, type McpAgentElicitation } from "../mcp/run-capability.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
-import type { TrustedProjectInstructions } from "../project/project-context.ts";
 import { RunEvidenceProjection } from "../run-evidence/run-evidence.ts";
-import { SessionHistoryReader, type SessionHistoryReadPort } from "../session/session-history-reader.ts";
 import type { Session } from "../session/types.ts";
+import { SessionHistoryReader, type SessionHistoryReadPort } from "../session-history/reader.ts";
+import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import { createSkillsCapabilitySource } from "../skills/run-capability.ts";
 import { createCodingToolContributions } from "../tools/index.ts";
 import { TargetMutationCoordinator } from "../tools/mutation.ts";
-import type { Workspace } from "../workspace.ts";
-import { createWorkspace } from "../workspace.ts";
 import { createDirectWorkspaceExecution } from "./direct-workspace-execution.ts";
 import { createGitWorktreeWorkspaceExecution } from "./git-worktree-workspace-execution.ts";
 import { SessionWorkController, type SessionWorkHost, type SessionWorkSelection } from "./session-work-controller.ts";
@@ -37,8 +36,7 @@ type WorkSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["reserv
 type WorkSessionChange = Parameters<WorkSession["record"]>[0];
 type WorkSessionStore = OpenCodingAgentOptions["sessions"];
 type WorkSessionReserveRequest = Parameters<WorkSessionStore["reserve"]>[0];
-type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
-type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tools"]>>[number];
+type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
 
 const DEFAULT_WORK_CONCURRENCY = 8;
 const DEFAULT_WORK_CAPACITY_POLICY: WorkCapacityPolicy = Object.freeze({
@@ -133,6 +131,7 @@ class EphemeralWorkSession {
 	}
 }
 
+/** Rich persistent application Session implementation of runtime's opaque WorkerSession protocol. */
 export class WorkspaceWorkSessions {
 	readonly #bindings = new Map<string, SessionBinding>();
 	readonly #leases = new Set<string>();
@@ -289,7 +288,7 @@ export interface WorkspaceExecutionFactoryContext {
 		readonly graphId: string;
 		readonly itemId: string;
 		readonly sessionId: string;
-		readonly placement: Awaited<ReturnType<WorkspaceExecution["reserve"]>>["placement"];
+		readonly placement: Awaited<ReturnType<WorkspaceExecution["placement"]["reserve"]>>["placement"];
 	}) => readonly WorkspaceToolContribution[] | Promise<readonly WorkspaceToolContribution[]>;
 	readonly quiesceSession: (sessionId: string) => Promise<void>;
 	readonly direct: () => WorkspaceExecution;
@@ -309,7 +308,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly capacity?: WorkCapacityPolicy;
-	readonly scheduler?: OpenCodingAgentOptions["scheduler"];
+	readonly scheduler?: ReturnType<typeof createSystemTimeRuntime>["scheduler"];
 	readonly runBudget?: RunBudget;
 	readonly maxOutputTokens?: number;
 	readonly platform: NodeJS.Platform;
@@ -419,45 +418,54 @@ export function createWorkspaceWorkCoordinator(options: {
 	const registerSelection = (selection: SessionWorkSelection): void => {
 		drivers.set(driverKey(selection.model.provider, selection.model.id), Object.freeze({ ...selection }));
 	};
-	const runCapabilities = createRunCapabilityHost({
-		model: {
-			acquire: (selection: RunModelSelection) => {
-				if (!selection.authSnapshot) {
-					throw new Error(`Model is not authenticated: ${selection.model.provider}/${selection.model.id}`);
-				}
-				const driver = options.models.bindSimple(selection.model, selection.authSnapshot);
-				const reasoning = selection.reasoning === "off" ? undefined : selection.reasoning;
-				return Object.freeze({
-					model: driver.model,
-					revision: `${driver.model.provider}:${driver.providerGeneration}`,
-					stream: (...[context, streamOptions]: Parameters<ModelDriverLease["stream"]>) =>
-						driver.stream(context, { ...streamOptions, reasoning }),
-					complete: (...[context, streamOptions]: Parameters<ModelDriverLease["complete"]>) =>
-						driver.complete(context, { ...streamOptions, reasoning }),
-					dispose: () => undefined,
-				});
-			},
+	const modelProvider: OpenCodingAgentOptions["modelProvider"] = {
+		resolve: async (configuration) => {
+			const cached = drivers.get(driverKey(configuration.model.provider, configuration.model.id));
+			const model = cached?.model ?? options.models.getModel(configuration.model.provider, configuration.model.id);
+			if (!model) {
+				throw new Error(`Model is unavailable: ${configuration.model.provider}/${configuration.model.id}`);
+			}
+			const authSnapshot: AuthResult | undefined =
+				cached?.authSnapshot ?? (await options.models.getAuth(model, { clock: options.clock }));
+			return {
+				model,
+				reasoning: configuration.reasoning as ThinkingLevel | "off",
+				...(authSnapshot ? { authSnapshot } : {}),
+			};
 		},
-		contributors: [
-			createSkillsCapabilitySource(options.skillsManager),
-			createMcpCapabilitySource({
-				acquire: async (signal) => {
-					if (!options.mcpRegistry) return emptyMcpLease();
-					await options.mcpRegistry.refresh({ signal });
-					if (signal.aborted) throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
-					return options.mcpRegistry.acquireTools();
-				},
-				elicit: async (request) => {
-					const owner = sessionByRun.get(String(request.execution.runId));
-					return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
-				},
-			}),
-		],
-		now: options.clock.now,
-		platform: options.platform,
-		interactionMode: options.interactionMode,
-		...(options.projectInstructions ? { projectInstructions: () => options.projectInstructions } : {}),
-	});
+		lease: (selection: RunModelSelection) => {
+			if (!selection.authSnapshot) {
+				throw new Error(`Model is not authenticated: ${selection.model.provider}/${selection.model.id}`);
+			}
+			const driver = options.models.bindSimple(selection.model, selection.authSnapshot);
+			const reasoning = selection.reasoning === "off" ? undefined : selection.reasoning;
+			return Object.freeze({
+				model: driver.model,
+				revision: `${driver.model.provider}:${driver.providerGeneration}`,
+				stream: (...[context, streamOptions]: Parameters<ModelDriverLease["stream"]>) =>
+					driver.stream(context, { ...streamOptions, reasoning }),
+				complete: (...[context, streamOptions]: Parameters<ModelDriverLease["complete"]>) =>
+					driver.complete(context, { ...streamOptions, reasoning }),
+				dispose: () => undefined,
+			});
+		},
+	};
+	const capabilitySources = [
+		createSkillsCapabilitySource(options.skillsManager),
+		createMcpCapabilitySource({
+			acquire: async (signal) => {
+				if (!options.mcpRegistry) return emptyMcpLease();
+				await options.mcpRegistry.refresh({ signal });
+				if (signal.aborted) throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
+				return options.mcpRegistry.acquireTools();
+			},
+			elicit: async (request) => {
+				const owner = sessionByRun.get(String(request.execution.runId));
+				return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
+			},
+		}),
+	];
+	const systemTime = createSystemTimeRuntime();
 	const startObservationPump = (openedAgent: CodingAgent): void => {
 		if (observationPump) return;
 		observationPump = (async () => {
@@ -492,46 +500,40 @@ export function createWorkspaceWorkCoordinator(options: {
 		opening = ensureWorkspaceExecution()
 			.then((activeWorkspaceExecution) =>
 				openCodingAgent({
-					workspaceExecution: activeWorkspaceExecution,
+					placement: activeWorkspaceExecution.placement,
+					tooling: activeWorkspaceExecution.tooling,
+					publication: activeWorkspaceExecution.publication,
 					sessions: sessions.adapter,
 					...(options.resources ? { resources: options.resources } : {}),
 					...(options.persistence ? { persistence: options.persistence } : {}),
-					runCapabilities,
-					resolveConfiguration: async (configuration) => {
-						const cached = drivers.get(driverKey(configuration.model.provider, configuration.model.id));
-						const model =
-							cached?.model ?? options.models.getModel(configuration.model.provider, configuration.model.id);
-						if (!model) {
-							throw new Error(`Model is unavailable: ${configuration.model.provider}/${configuration.model.id}`);
-						}
-						const authSnapshot: AuthResult | undefined =
-							cached?.authSnapshot ?? (await options.models.getAuth(model, { clock: options.clock }));
-						return {
-							model,
-							reasoning: configuration.reasoning as ThinkingLevel | "off",
-							...(authSnapshot ? { authSnapshot } : {}),
-						};
+					modelProvider,
+					capabilitySources,
+					time: {
+						...systemTime,
+						clock: options.clock,
+						...(options.scheduler ? { scheduler: options.scheduler } : {}),
 					},
-					clock: options.clock,
-					idGenerator: options.idGenerator,
+					identity: options.idGenerator,
 					capacity,
-					...(options.scheduler ? { scheduler: options.scheduler } : {}),
 					...(options.runBudget ? { runBudget: options.runBudget } : {}),
 					...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
 					platform: options.platform,
 					interactionMode: options.interactionMode,
-					controlWorker: ({ sessionId, placement, event }) => {
-						if (!("runId" in event)) return;
-						const runId = String(event.runId);
-						if (event.type === "run_start") {
-							sessionByRun.set(runId, sessionId);
-							controllers.get(sessionId)?.notePlacement(placement);
-						}
-						const operation = controllers.get(sessionId)?.acceptWorkerControlEvent(event);
-						if (event.type === "run_end") {
-							return Promise.resolve(operation).finally(() => sessionByRun.delete(runId));
-						}
-						return operation;
+					...(options.projectInstructions ? { projectInstructions: () => options.projectInstructions } : {}),
+					workerControl: {
+						accept: ({ sessionId, placement, event }) => {
+							if (!("runId" in event)) return;
+							const runId = String(event.runId);
+							if (event.type === "run_start") {
+								sessionByRun.set(runId, sessionId);
+								controllers.get(sessionId)?.notePlacement(placement);
+							}
+							const operation = controllers.get(sessionId)?.acceptWorkerControlEvent(event);
+							if (event.type === "run_end") {
+								return Promise.resolve(operation).finally(() => sessionByRun.delete(runId));
+							}
+							return operation;
+						},
 					},
 				}),
 			)

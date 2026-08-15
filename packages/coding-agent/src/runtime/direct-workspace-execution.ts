@@ -1,10 +1,9 @@
 import type { AgentTool, ToolExecutionContext, ToolExecutionOutput } from "@coda/agent";
-import type { OpenCodingAgentOptions } from "@coda/runtime";
+import type { WorkspaceExecution } from "@coda/runtime";
 import { type WorkspaceLease, WorkspaceLeaseCoordinator } from "./workspace-concurrency.ts";
 
-type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
-type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tools"]>>[number];
-type WorkspacePlacement = Awaited<ReturnType<WorkspaceExecution["reserve"]>>["placement"];
+type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
+type WorkspacePlacement = Awaited<ReturnType<WorkspaceExecution["placement"]["reserve"]>>["placement"];
 
 export interface DirectWorkspaceToolRequest {
 	readonly graphId: string;
@@ -68,7 +67,9 @@ export function createDirectWorkspaceExecution(options: {
 			},
 		} as AgentTool);
 	};
-	const execution: WorkspaceExecution = {
+	const execution: WorkspaceExecution["placement"] &
+		WorkspaceExecution["tooling"] &
+		WorkspaceExecution["publication"] = {
 		reserve: async (request) => ({
 			placement: await placement(String(request.graphId), String(request.itemId)),
 			commit: () => Promise.resolve(),
@@ -103,5 +104,5 @@ export function createDirectWorkspaceExecution(options: {
 			return closeOperation;
 		},
 	};
-	return Object.freeze(execution);
+	return Object.freeze({ placement: execution, tooling: execution, publication: execution });
 }

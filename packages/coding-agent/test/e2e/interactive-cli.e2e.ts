@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+// boundary-exception: the cross-package terminal e2e reuses the strict virtual-screen assertion harness.
 import { StrictScreen } from "../../../tui/test/support/strict-screen.ts";
 
 const EXPECT = "/usr/bin/expect";

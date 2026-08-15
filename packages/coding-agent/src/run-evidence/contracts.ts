@@ -1,5 +1,39 @@
 import type { ToolObservation } from "@coda/ai";
-import type { RunControlReport } from "../run-control/types.ts";
+
+/** Structural copy of the versioned Run Control report embedded in evidence envelopes. */
+export interface RunEvidenceControlReport {
+	readonly schemaVersion: 1;
+	readonly phase: "running" | "wrap_up_requested" | "finalizing" | "terminal";
+	readonly reason:
+		| "work_deadline"
+		| "stagnation"
+		| "grace_deadline_exceeded"
+		| "run_ended"
+		| "work_item_settled"
+		| null;
+	readonly trigger: "work_deadline" | "stagnation" | null;
+	readonly configured: {
+		readonly workDurationMs: number;
+		readonly graceDurationMs: number;
+		readonly maxStationaryTurns: number | null;
+	};
+	readonly startedAt: number;
+	readonly workDeadlineAt: number;
+	readonly wrapUpRequestedAt: number | null;
+	readonly graceDeadlineAt: number | null;
+	readonly finalizingAt: number | null;
+	readonly terminalAt: number | null;
+	readonly progress: {
+		readonly revision: number;
+		readonly consecutiveStationaryTurns: number;
+		readonly workspaceContentCount: number;
+		readonly verificationTargetCount: number;
+		readonly requirementEvidenceCount: number;
+		readonly uniqueReadCount: number;
+		readonly uniqueFailureCount: number;
+		readonly lastProgressAt: number | null;
+	};
+}
 
 export const RUN_EVIDENCE_SCHEMA_VERSION = 3 as const;
 export const RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION = 4 as const;
@@ -261,5 +295,5 @@ export interface RunEvidenceEnvelope {
  */
 export interface RunEvidenceWithRunControlEnvelope extends Omit<RunEvidenceEnvelope, "schemaVersion"> {
 	readonly schemaVersion: typeof RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION;
-	readonly runControl: RunControlReport;
+	readonly runControl: RunEvidenceControlReport;
 }

@@ -1,8 +1,7 @@
 import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
-import type { HostProcessRuntime } from "../host/runtime.ts";
-import { hostProcessEnvironment } from "../tools/bash.ts";
-import type { Workspace } from "../workspace.ts";
+import { type HostProcessRuntime, hostProcessEnvironment } from "../host/runtime.ts";
+import type { Workspace } from "../host/workspace.ts";
 import type { ProcessSessionManager, ProcessSessionSnapshot, ProcessSessionState } from "./process-session-manager.ts";
 
 const ProcessStartParameters = Type.Object(

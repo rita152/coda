@@ -1,7 +1,7 @@
 import type { KeyInput } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createAuthCommandFlow } from "../src/commands/auth-flow.ts";
-import { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
+import { CommandFlowHost } from "../src/ui/command-flow-host.ts";
 
 describe("auth command flow", () => {
 	it("keeps OAuth visible but disabled and exposes configured providers under API key login", () => {

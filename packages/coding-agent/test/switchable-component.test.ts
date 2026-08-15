@@ -1,6 +1,6 @@
 import { Component, observeInvalidation, type RenderContext, type TerminalInput } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
-import { SwitchableComponent } from "../src/interactive/switchable-component.ts";
+import { SwitchableComponent } from "../src/ui/switchable-component.ts";
 
 class Pane extends Component {
 	readonly value: string;

@@ -4,6 +4,14 @@ Coda is a local-first terminal coding agent built first for its creator's daily 
 
 ## Language
 
+## Package and internal module ownership
+
+The package dependency direction is `ai → agent → runtime → coding-agent`, with consumers depending only toward foundations. `runtime` depends exactly on `agent` and `ai`; `evals` depends on the headless runtime product and never on `coding-agent`. The complete package DAG and public subpath allowlist are executable in `scripts/boundary-rules.mjs`.
+
+Within `runtime/work-graph`, owned state is split by mechanism: `WorkGraphMirror` owns persistent record projection; `ObservationFanOut` owns subscribers and observation sequence; `DurableGraphStore` owns persistence leases, mutation fences, failure latches, and watermarks; `SessionLeaseRegistry` owns Session ownership; `AdmissionController` owns fairness position; `WorkerLifecycle` owns private Worker Runtime execution, facts, observations, controls, cancellation, resources, and active slots; `PublicationSequencer` owns the durable Publication protocol; `WorkGraphRecovery` owns replay and ownership reconciliation; `WorkGraphEngine` owns state-machine progression and settlement; and `WorkCoordinator` only adapts the public Coding Agent contract. Persistent fields are read back from the Work Graph Aggregate after a successful Fact append.
+
+Within `coding-agent`, `app` and `runtime/workspace-work-coordinator` are the two composition roots. `ui`, `session`, `session-history`, `tools`, `models`, `skills`, `mcp`, `credentials`, `run-evidence`, `commands`, `run-control`, `completion`, `process`, `media`, `settings`, `host`, and `maintenance` are hard internal modules. UI does not import Session journal or Work Coordinator internals; Tools depend on `session-history`, not Session; Session does not depend on Tools, UI, runtime, or commands. Biome restricted imports, import-cycle detection, and the root boundary checker enforce these rules.
+
 **Coda**:
 The product as a whole, including the terminal experience and the supporting packages that make it possible.
 _Avoid_: Pi clone, generic agent SDK

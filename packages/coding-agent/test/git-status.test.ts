@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProcessRunner } from "../src/host/process-runner.ts";
-import { parseGitStatus, WorkspaceGitStatus } from "../src/interactive/git-status.ts";
+import { parseGitStatus, WorkspaceGitStatus } from "../src/ui/git-status.ts";
 
 describe("workspace Git status", () => {
 	it("parses branches, detached heads, and dirty worktrees", () => {

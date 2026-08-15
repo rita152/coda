@@ -5,9 +5,9 @@ import type { ToolExecutionContext } from "@coda/agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import type { ProcessRunner } from "../src/host/process-runner.ts";
+import { createWorkspace } from "../src/host/workspace.ts";
 import { createFindTool } from "../src/tools/find.ts";
 import { createGrepTool } from "../src/tools/grep.ts";
-import { createWorkspace } from "../src/workspace.ts";
 
 const temporaryDirectories: string[] = [];
 

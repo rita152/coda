@@ -13,12 +13,12 @@ import type {
 } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
-import type { ModelSelection } from "../model-selection.ts";
+import type { ModelSelection } from "../models/model-selection.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
+import type { SessionHistoryReadPort } from "../session-history/reader.ts";
 import type { ProjectTrustRecord } from "../settings/types.ts";
 import type { CompactionCheckpoint } from "./compaction.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
-import type { SessionHistoryReadPort } from "./session-history-reader.ts";
 
 declare const sessionIdBrand: unique symbol;
 export type SessionId = string & { readonly [sessionIdBrand]: "SessionId" };

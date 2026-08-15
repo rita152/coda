@@ -1,4 +1,4 @@
-import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
+import type { CommandFlowMenu, CommandFlowNavigation } from "./flow-types.ts";
 
 export interface ContextOverflowFlowOptions {
 	readonly openEmptySession: () => Promise<void> | void;

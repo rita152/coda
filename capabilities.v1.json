@@ -12,9 +12,9 @@
   "sources": [
     "packages/ai/compatibility/manifest.v1.json",
     "packages/coding-agent/package.json",
+    "packages/coding-agent/src/app/capability-contract.ts",
     "packages/coding-agent/src/commands/core-commands.ts",
-    "packages/coding-agent/src/providers/types.ts",
-    "packages/coding-agent/src/runtime/capability-contract.ts",
+    "packages/coding-agent/src/models/types.ts",
     "packages/coding-agent/src/session/records.ts",
     "packages/coding-agent/src/tools/contracts.ts",
     "packages/coding-agent/src/tools/mutation-contract.ts"
@@ -210,7 +210,7 @@
       "summary": "OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh.",
       "sources": [
         "packages/ai/src/providers/opencode-go.ts",
-        "packages/coding-agent/src/providers/provider-manager.ts"
+        "packages/coding-agent/src/models/provider-manager.ts"
       ],
       "tests": [
         "packages/ai/test/opencode-go-provider.test.ts",
@@ -355,8 +355,8 @@
       "title": "Context Overflow fallback",
       "summary": "After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.",
       "sources": [
-        "packages/coding-agent/src/interactive/run-interactive.ts",
-        "packages/coding-agent/src/interactive/workspace-session-panes.ts",
+        "packages/coding-agent/src/ui/run-interactive.ts",
+        "packages/coding-agent/src/ui/workspace-session-panes.ts",
         "packages/runtime/src/context-window/overflow-recovery.ts"
       ],
       "tests": [
@@ -403,9 +403,9 @@
       "title": "Custom Provider metadata",
       "summary": "Custom Provider models retain configured context, output, image-input, reasoning, status, and tiered-cost metadata across settings, catalog refresh, selection, and runtime consumers.",
       "sources": [
-        "packages/coding-agent/src/providers/custom-model-metadata.ts",
-        "packages/coding-agent/src/runtime/model-metadata.ts",
-        "packages/coding-agent/src/settings/file-settings-store.ts"
+        "packages/coding-agent/src/app/file-settings-store.ts",
+        "packages/coding-agent/src/models/custom-model-metadata.ts",
+        "packages/coding-agent/src/models/model-metadata.ts"
       ],
       "tests": [
         "packages/coding-agent/test/model-command-flow.test.ts",
@@ -420,12 +420,12 @@
       "title": "Objective Run evidence",
       "summary": "Completed Runs project bounded, sanitized evidence from lifecycle events, authoritative Tool Observations, generic mutation facts, and the final Git-visible Workspace diff, separating completeness, changed-path provenance, terminal/recovered/open failures, pending operations, retries, token usage, and price-data completeness.",
       "sources": [
+        "packages/coding-agent/src/completion/workspace-diff.ts",
         "packages/coding-agent/src/run-evidence/contracts.ts",
         "packages/coding-agent/src/run-evidence/failure-semantics.ts",
         "packages/coding-agent/src/run-evidence/observation-semantics.ts",
         "packages/coding-agent/src/run-evidence/presentation.ts",
         "packages/coding-agent/src/run-evidence/run-evidence.ts",
-        "packages/coding-agent/src/run-evidence/workspace-diff.ts",
         "packages/coding-agent/src/session/managed-session.ts"
       ],
       "tests": [
@@ -442,8 +442,8 @@
       "title": "Bounded Session history recovery",
       "summary": "The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.",
       "sources": [
+        "packages/coding-agent/src/session-history/reader.ts",
         "packages/coding-agent/src/session/managed-session.ts",
-        "packages/coding-agent/src/session/session-history-reader.ts",
         "packages/coding-agent/src/tools/read-session-history.ts"
       ],
       "tests": [
@@ -504,7 +504,7 @@
       "title": "Terminal experience",
       "summary": "Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.",
       "sources": [
-        "packages/coding-agent/src/interactive/run-interactive.ts",
+        "packages/coding-agent/src/ui/run-interactive.ts",
         "packages/tui/src/tui.ts"
       ],
       "tests": [
@@ -519,9 +519,9 @@
       "title": "User Shell Adapter and input queues",
       "summary": "Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.",
       "sources": [
-        "packages/coding-agent/src/interactive/input-controller.ts",
-        "packages/coding-agent/src/interactive/user-shell.ts",
-        "packages/coding-agent/src/runtime/session-work-controller.ts"
+        "packages/coding-agent/src/runtime/session-work-controller.ts",
+        "packages/coding-agent/src/ui/input-controller.ts",
+        "packages/coding-agent/src/ui/user-shell.ts"
       ],
       "tests": [
         "packages/coding-agent/test/interactive-input-controller.test.ts",
@@ -703,7 +703,7 @@
       "title": "Advanced editing",
       "summary": "Autocomplete, selection, clipboard protocols, redo, durable drafts, and syntax highlighting are not implemented.",
       "sources": [
-        "packages/coding-agent/src/interactive/command-composer.ts",
+        "packages/coding-agent/src/ui/command-composer.ts",
         "packages/tui/src/editor.ts"
       ],
       "tests": [

@@ -1,6 +1,6 @@
 import type { Model } from "@coda/ai";
 import { describe, expect, it, vi } from "vitest";
-import { resolveModelRuntimeCapabilities } from "../src/model-capabilities.ts";
+import { resolveModelRuntimeCapabilities } from "../src/models/model-capabilities.ts";
 
 describe("Coding Agent model runtime capabilities", () => {
 	it("fails closed instead of inferring Tool Result images from the wire Api", () => {

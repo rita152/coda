@@ -4,20 +4,24 @@ import {
 	type AgentTool,
 	type PreparedRun,
 	type QueueItemId,
+	type RunBudget,
 	type RunPreparation,
 	type RunResult,
 	type ToolExecutionContext,
 } from "@coda/agent";
+import type { TimeRuntime } from "@coda/ai";
 import { ContextWindowController } from "../context-window/context-window.ts";
 import { ContextOverflowRecovery } from "../context-window/overflow-recovery.ts";
 import { createCodingAgentRetry } from "../retry.ts";
-import type { RunCapabilityLease, RunToolContribution } from "../run-capabilities.ts";
+import type { RunCapabilityHost, RunCapabilityLease, RunToolContribution } from "../run-capabilities.ts";
 import type {
-	OpenCodingAgentOptions,
+	Identity,
+	RunModelProvider,
 	WorkerSelection,
 	WorkerSessionChange,
 	WorkSessionReservation,
 	WorkspacePlacementReservation,
+	WorkspaceTooling,
 } from "./ports.ts";
 import type { DesiredRuntimeConfiguration, WorkExecutionMode, WorkGraphId, WorkItemId } from "./types.ts";
 import { routeWorkerEvent } from "./worker-event-router.ts";
@@ -114,11 +118,21 @@ async function awaitPreparation<T>(
 function preparationDeadline(
 	preparation: RunPreparation,
 	configuration: DesiredRuntimeConfiguration,
-	options: OpenCodingAgentOptions,
+	options: WorkerRuntimeOptions,
 ): number | undefined {
 	if (preparation.deadline !== undefined) return preparation.deadline;
 	const maximum = configuration.runLimits?.maxElapsedMs ?? options.runBudget?.limits.maxElapsedMs;
-	return maximum === undefined ? undefined : options.clock.now() + maximum;
+	return maximum === undefined ? undefined : options.time.clock.now() + maximum;
+}
+
+export interface WorkerRuntimeOptions {
+	readonly time: TimeRuntime;
+	readonly identity: Identity;
+	readonly modelProvider: RunModelProvider;
+	readonly runCapabilities: RunCapabilityHost;
+	readonly tooling: WorkspaceTooling;
+	readonly runBudget?: RunBudget;
+	readonly maxOutputTokens?: number;
 }
 
 function latestAssistantText(agent: Agent): string | undefined {
@@ -134,7 +148,7 @@ function latestAssistantText(agent: Agent): string | undefined {
 }
 
 export async function openPrivateWorkerRuntime(request: {
-	readonly options: OpenCodingAgentOptions;
+	readonly options: WorkerRuntimeOptions;
 	readonly graphId: WorkGraphId;
 	readonly itemId: WorkItemId;
 	readonly runtimeId: string;
@@ -156,7 +170,7 @@ export async function openPrivateWorkerRuntime(request: {
 	request.assertProgressAllowed();
 	const sessionId = String(request.session.session.id);
 	const contributions = await awaitPreparation(
-		options.workspaceExecution.tools({
+		options.tooling.tools({
 			graphId: request.graphId,
 			itemId: request.itemId,
 			sessionId,
@@ -165,7 +179,7 @@ export async function openPrivateWorkerRuntime(request: {
 		}),
 		request.signal,
 		undefined,
-		options.clock.now,
+		options.time.clock.now,
 	);
 	const bindRequest = {
 		graphId: request.graphId,
@@ -178,16 +192,16 @@ export async function openPrivateWorkerRuntime(request: {
 		...(request.coordinatorTools ?? []).map((tool) => Object.freeze({ tool, effect: "read" as const })),
 	]);
 	const bindTools = (runContributions: readonly RunToolContribution[]): readonly AgentTool[] =>
-		options.workspaceExecution
+		options.tooling
 			.bindTools({ ...bindRequest, contributions: runContributions })
 			.map((tool) => gatedTool(tool, request.assertProgressAllowed));
 	let desired: FrozenConfiguration = Object.freeze({
 		desired: request.configuration,
 		selection: await awaitPreparation(
-			options.resolveConfiguration(request.configuration),
+			options.modelProvider.resolve(request.configuration, request.signal),
 			request.signal,
 			undefined,
-			options.clock.now,
+			options.time.clock.now,
 		),
 	});
 	let activeCapabilities: RunCapabilityLease | undefined;
@@ -232,8 +246,8 @@ export async function openPrivateWorkerRuntime(request: {
 		}
 	};
 	const contextWindow = new ContextWindowController({
-		clock: options.clock,
-		idGenerator: options.idGenerator,
+		clock: options.time.clock,
+		idGenerator: options.identity,
 		runtime: () => {
 			const capabilities = activeCapabilities;
 			if (!capabilities) throw new Error("Context Window requires an active Run capability lease");
@@ -267,9 +281,9 @@ export async function openPrivateWorkerRuntime(request: {
 		return submission;
 	};
 	agent = new Agent({
-		clock: options.clock,
-		idGenerator: options.idGenerator,
-		...(options.scheduler ? { retry: createCodingAgentRetry(options.scheduler) } : {}),
+		clock: options.time.clock,
+		idGenerator: options.identity,
+		...(options.time.scheduler ? { retry: createCodingAgentRetry(options.time.scheduler) } : {}),
 		...(request.session.session.seed ? { seed: request.session.session.seed } : {}),
 		autoDrainFollowUps: true,
 		prepareRun: async (preparation): Promise<PreparedRun> => {
@@ -303,7 +317,7 @@ export async function openPrivateWorkerRuntime(request: {
 					}),
 					preparation.signal,
 					deadline,
-					options.clock.now,
+					options.time.clock.now,
 				);
 				observations.publishPreparation({
 					type: "preparation_settled",
@@ -448,7 +462,7 @@ export async function openPrivateWorkerRuntime(request: {
 		configure: async (configuration: DesiredRuntimeConfiguration) => {
 			desired = Object.freeze({
 				desired: configuration,
-				selection: await options.resolveConfiguration(configuration),
+				selection: await options.modelProvider.resolve(configuration, request.signal),
 			});
 		},
 		assistantText: () => latestAssistantText(agent),

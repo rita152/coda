@@ -7,7 +7,7 @@ import {
 	emptyWorkspaceLedger,
 	encodeWorkGraphEnvelope,
 	encodeWorkspaceLedger,
-	type WorkGraphFact,
+	mergeWorkGraphCommits,
 	type WorkGraphStore,
 	type WorkGraphStoreRestore,
 	type WorkspaceLedger,
@@ -84,7 +84,7 @@ class FileWorkGraphStore implements WorkGraphStore {
 	readonly #mustExist: boolean;
 	readonly #readOnly: boolean;
 	#loadOperation?: Promise<void>;
-	readonly #facts: WorkGraphFact[] = [];
+	readonly #commits: unknown[] = [];
 	readonly #diagnostics: string[] = [];
 	#handle?: WritableFile;
 	#sequence = 0;
@@ -109,18 +109,19 @@ class FileWorkGraphStore implements WorkGraphStore {
 		if (this.#closed) throw new Error("Work Graph store is closed");
 		await this.#ensureLoaded();
 		return {
-			facts: Object.freeze(clone(this.#facts)),
+			restore: mergeWorkGraphCommits(clone(this.#commits)),
 			diagnostics: Object.freeze([...this.#diagnostics]),
 		};
 	}
 
-	async append(facts: readonly WorkGraphFact[]): Promise<void> {
+	async append(commit: unknown): Promise<void> {
 		if (this.#readOnly) throw new Error("Historical Work Graph store is read-only");
 		if (this.#closed) throw new Error("Work Graph store is closed");
 		await this.#ensureLoaded();
-		const durable = clone([...facts]);
+		const durable = clone(commit);
 		encodeWorkGraphEnvelope(durable, 1);
-		if (durable.some((fact) => fact.graphId !== this.#graphId)) {
+		const envelope = decodeWorkGraphEnvelope(encodeWorkGraphEnvelope(durable, 1), 1);
+		if (envelope.graphId !== this.#graphId) {
 			throw new Error(`Work Graph store ${this.#graphId} cannot append Facts for another Graph`);
 		}
 		await this.#enqueue(async () => {
@@ -129,7 +130,7 @@ class FileWorkGraphStore implements WorkGraphStore {
 			await handle.write(`${encodeWorkGraphEnvelope(durable, sequence)}\n`);
 			await handle.sync();
 			this.#sequence = sequence;
-			this.#facts.push(...durable);
+			this.#commits.push(durable);
 		});
 	}
 
@@ -183,15 +184,15 @@ class FileWorkGraphStore implements WorkGraphStore {
 		const lines = source.split("\n");
 		const hasPartialTail = lines.at(-1)?.length !== 0;
 		if (!hasPartialTail) lines.pop();
-		const facts: WorkGraphFact[] = [];
+		const commits: unknown[] = [];
 		let repaired = false;
 		for (const [index, line] of lines.entries()) {
 			try {
 				const envelope = decodeWorkGraphEnvelope(line, index + 1);
-				if (envelope.facts.some((fact) => fact.graphId !== this.#graphId)) {
+				if (envelope.graphId !== this.#graphId) {
 					throw new Error(`Work Graph store ${this.#graphId} contains Facts for another Graph`);
 				}
-				facts.push(...envelope.facts);
+				commits.push(envelope.commit);
 				this.#sequence = envelope.sequence;
 			} catch (error) {
 				if (hasPartialTail && index === lines.length - 1) {
@@ -210,7 +211,7 @@ class FileWorkGraphStore implements WorkGraphStore {
 			const encoded = lines.slice(0, this.#sequence).join("\n");
 			await this.#replace(encoded.length > 0 ? `${encoded}\n` : "");
 		}
-		this.#facts.push(...facts);
+		this.#commits.push(...commits);
 		this.#diagnostics.push(...diagnostics);
 	}
 

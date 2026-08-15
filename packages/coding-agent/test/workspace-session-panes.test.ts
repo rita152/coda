@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { WorkspaceSessionPanes } from "../src/interactive/workspace-session-panes.ts";
+import { WorkspaceSessionPanes } from "../src/ui/workspace-session-panes.ts";
 
 interface FauxPane {
 	readonly id: string;

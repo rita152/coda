@@ -1,9 +1,9 @@
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
-import { createRunEvidenceToolFacts } from "../run-evidence/observation-semantics.ts";
-import type { Workspace } from "../workspace.ts";
+import type { Workspace } from "../host/workspace.ts";
 import { toolFailure } from "./failure.ts";
+import { createRunEvidenceToolFacts } from "./run-evidence-facts.ts";
 
 const ReadParameters = Type.Object(
 	{

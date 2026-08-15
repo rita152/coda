@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentSeed } from "@coda/agent";
 import type { RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
-import { SessionHistoryReader, type SessionHistoryReadPort } from "./session-history-reader.ts";
+import { SessionHistoryReader, type SessionHistoryReadPort } from "../session-history/reader.ts";
 import type { Session, SessionChange, SessionDescriptor, SessionMediaRegistration } from "./types.ts";
 
 export interface DraftSessionOptions {

@@ -2,8 +2,8 @@ import { Editor, type KeyInput, stripAnsi } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import { CommandRegistry } from "../src/commands/registry.ts";
 import type { CommandDefinition } from "../src/commands/types.ts";
-import { CommandComposer, renderCommandPalette } from "../src/interactive/command-composer.ts";
-import { createCodaTheme } from "../src/interactive/theme.ts";
+import { CommandComposer, renderCommandPalette } from "../src/ui/command-composer.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
 
 describe("CommandComposer", () => {
 	it("exposes ranked palette items with an explicit source tag", () => {

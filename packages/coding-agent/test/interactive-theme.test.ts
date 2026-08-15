@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createCodaTheme } from "../src/interactive/theme.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
 
 describe("Coda interactive Theme", () => {
 	it("maps action surfaces independently for light, dark, unknown, and NO_COLOR terminals", () => {

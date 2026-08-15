@@ -1,8 +1,8 @@
 import type { AgentSeed, MessageId } from "@coda/agent";
 import { describe, expect, it, vi } from "vitest";
 import { DraftSession } from "../src/session/draft-session.ts";
-import { SessionHistoryReader } from "../src/session/session-history-reader.ts";
 import type { Session, SessionDescriptor, SessionId } from "../src/session/types.ts";
+import { SessionHistoryReader } from "../src/session-history/reader.ts";
 
 describe("DraftSession", () => {
 	it("stays process-local when an empty Draft closes", async () => {

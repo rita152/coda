@@ -3,15 +3,14 @@ import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { AgentTool, ToolExecutionContext, ToolExecutionOutput } from "@coda/agent";
 import type {
-	OpenCodingAgentOptions,
 	PublicationOutcome,
 	WorkspaceArtifact,
+	WorkspaceExecution,
 	WorkspacePlacementDescriptor,
 } from "@coda/runtime";
 import type { ProcessRunner, ProcessRunResult } from "../host/process-runner.ts";
 
-type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
-type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tools"]>>[number];
+type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
 
 interface PublicationTicket {
 	wait(signal: AbortSignal): Promise<void>;
@@ -273,7 +272,7 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 		}
 		return current;
 	};
-	const createPlacement = async (request: Parameters<WorkspaceExecution["reserve"]>[0]) => {
+	const createPlacement = async (request: Parameters<WorkspaceExecution["placement"]["reserve"]>[0]) => {
 		const graphId = String(request.graphId);
 		const workItemId = String(request.itemId);
 		const target = publicationTarget(request.parent);
@@ -371,7 +370,9 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 			},
 		} as AgentTool);
 	};
-	const execution: WorkspaceExecution = {
+	const execution: WorkspaceExecution["placement"] &
+		WorkspaceExecution["tooling"] &
+		WorkspaceExecution["publication"] = {
 		reserve: async (request) => {
 			const state = await createPlacement(request);
 			return {
@@ -559,5 +560,5 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 			return closeOperation;
 		},
 	};
-	return Object.freeze(execution);
+	return Object.freeze({ placement: execution, tooling: execution, publication: execution });
 }

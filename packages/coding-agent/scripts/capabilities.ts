@@ -9,7 +9,7 @@ import {
 	type CapabilityStatus,
 	CODA_CAPABILITY_CONTRACT,
 	RUNTIME_CAPABILITY_FACTS,
-} from "../src/runtime/capability-contract.ts";
+} from "../src/app/capability-contract.ts";
 
 const DEFAULT_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const MANIFEST_PATH = "capabilities.v1.json";
@@ -138,9 +138,9 @@ export async function generateCapabilityArtifacts(
 		sources: [
 			"packages/ai/compatibility/manifest.v1.json",
 			"packages/coding-agent/package.json",
+			"packages/coding-agent/src/app/capability-contract.ts",
 			"packages/coding-agent/src/commands/core-commands.ts",
-			"packages/coding-agent/src/providers/types.ts",
-			"packages/coding-agent/src/runtime/capability-contract.ts",
+			"packages/coding-agent/src/models/types.ts",
 			"packages/coding-agent/src/session/records.ts",
 			"packages/coding-agent/src/tools/contracts.ts",
 			"packages/coding-agent/src/tools/mutation-contract.ts",

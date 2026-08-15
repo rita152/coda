@@ -6,12 +6,18 @@ import type {
 } from "./ports.ts";
 import { type WorkGraphFact, WorkGraphFactCodec } from "./work-graph-fact.ts";
 
+/**
+ * Runtime owns the Work Graph fact algebra and its line format. Physical persistence
+ * adapters only store opaque restores/commits produced by this module.
+ */
+
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
 export interface WorkGraphEnvelope {
 	readonly version: 1;
 	readonly sequence: number;
-	readonly facts: readonly WorkGraphFact[];
+	readonly graphId: string;
+	readonly commit: unknown;
 }
 
 interface EncodedWorkspaceLedger {
@@ -51,11 +57,11 @@ function facts(value: unknown): readonly WorkGraphFact[] {
 	return Object.freeze(decoded);
 }
 
-export function encodeWorkGraphEnvelope(segment: readonly WorkGraphFact[], sequence: number): string {
+export function encodeWorkGraphEnvelope(commit: unknown, sequence: number): string {
 	nonNegativeInteger(sequence, "Work Graph sequence");
 	if (sequence === 0) throw new Error("Work Graph sequence must start at one");
-	const durable = facts(segment);
-	return JSON.stringify({ version: 1, sequence, facts: durable } satisfies WorkGraphEnvelope);
+	const durable = facts(commit);
+	return JSON.stringify({ version: 1, sequence, facts: durable });
 }
 
 export function decodeWorkGraphEnvelope(line: string, expectedSequence: number): WorkGraphEnvelope {
@@ -63,7 +69,25 @@ export function decodeWorkGraphEnvelope(line: string, expectedSequence: number):
 	if (!isRecord(value) || value.version !== 1 || value.sequence !== expectedSequence) {
 		throw new Error(`Invalid Work Graph record envelope at sequence ${expectedSequence}`);
 	}
-	return Object.freeze({ version: 1, sequence: expectedSequence, facts: facts(value.facts) });
+	const commit = facts(value.facts);
+	return Object.freeze({
+		version: 1,
+		sequence: expectedSequence,
+		graphId: String(commit[0]!.graphId),
+		commit,
+	});
+}
+
+/** Combines opaque line commits into the opaque replay value returned by WorkGraphStore.load(). */
+export function mergeWorkGraphCommits(commits: readonly unknown[]): unknown {
+	return Object.freeze(commits.flatMap((commit) => facts(commit)));
+}
+
+/** Internal bridge from the opaque persistence protocol to the runtime fact algebra. */
+export function decodeWorkGraphRestore(restore: unknown): readonly WorkGraphFact[] {
+	if (!Array.isArray(restore)) throw new Error("Invalid Work Graph restore");
+	if (restore.length === 0) return Object.freeze([]);
+	return facts(restore);
 }
 
 export function emptyWorkspaceLedger(): WorkspaceLedgerRestore {

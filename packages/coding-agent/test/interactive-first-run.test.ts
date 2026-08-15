@@ -12,7 +12,7 @@ import type {
 	InteractiveLifecycleHandlers,
 	InteractiveProcessLifecycle,
 	InteractiveTerminationSignal,
-} from "../src/interactive/process-lifecycle.ts";
+} from "../src/ui/process-lifecycle.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {

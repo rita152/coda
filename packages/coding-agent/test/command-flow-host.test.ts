@@ -5,8 +5,8 @@ import {
 	type CommandFlowMenu,
 	type CommandFlowNavigation,
 	renderCommandFlow,
-} from "../src/interactive/command-flow-host.ts";
-import { createCodaTheme } from "../src/interactive/theme.ts";
+} from "../src/ui/command-flow-host.ts";
+import { createCodaTheme } from "../src/ui/theme.ts";
 
 describe("CommandFlowHost", () => {
 	it("navigates nested menus with Enter and unwinds them one level at a time with Escape", () => {

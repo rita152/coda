@@ -64,6 +64,7 @@ export function testTimeRuntime(clock: Clock): TimeRuntime {
 	return {
 		clock,
 		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
 		sleep: { wait: async () => {} },
 	};
 }

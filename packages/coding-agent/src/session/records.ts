@@ -9,7 +9,7 @@ import type {
 	ToolRejectionReason,
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
-import type { ModelSelection } from "../model-selection.ts";
+import type { ModelSelection } from "../models/model-selection.ts";
 import type { CompactionCheckpoint } from "./compaction.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";

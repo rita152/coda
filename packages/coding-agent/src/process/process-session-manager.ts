@@ -11,7 +11,7 @@ import {
 	discardStoredToolOutput,
 	type StoredToolOutput,
 	type ToolOutputCapture,
-} from "../tools/tool-output-store.ts";
+} from "./output-store.ts";
 
 const DEFAULT_MAX_POLL_OUTPUT_BYTES = 50 * 1024;
 const DEFAULT_MAX_POLL_OUTPUT_LINES = 2_000;

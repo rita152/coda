@@ -1,5 +1,5 @@
 import type { ModelThinkingLevel } from "@coda/ai";
-import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
+import type { CommandFlowMenu, CommandFlowNavigation } from "./flow-types.ts";
 
 export interface EffortCommandFlowOptions {
 	readonly current: ModelThinkingLevel;

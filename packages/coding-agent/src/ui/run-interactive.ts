@@ -16,21 +16,20 @@ import {
 } from "../commands/auth-flow.ts";
 import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts";
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
+import type { CommandFlowNavigation } from "../commands/flow-types.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
 import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
-import type { CustomProviderInput } from "../providers/types.ts";
-import type { CatalogModel } from "../runtime/model-catalog.ts";
+import type { CatalogModel } from "../models/model-catalog.ts";
+import type { CustomProviderInput } from "../models/types.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { ComposerExtensionReference } from "../session/composer-submission.ts";
-import type { Session } from "../session/types.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
-import type { CommandFlowNavigation } from "./command-flow-host.ts";
 import { type FullScreenOutputGate, FullScreenOutputScope } from "./full-screen-output.ts";
 import { WorkspaceGitStatus } from "./git-status.ts";
 import {
@@ -44,6 +43,7 @@ import {
 	type InteractiveTerminationSignal,
 	interactiveSignalExitCode,
 } from "./process-lifecycle.ts";
+import type { SessionPresentation } from "./session-presentation.ts";
 import type { SessionStatusLineSnapshot, StatusLineSnapshot } from "./status-line.ts";
 import { SwitchableComponent } from "./switchable-component.ts";
 import { UserShell } from "./user-shell.ts";
@@ -79,7 +79,8 @@ function isContextOverflowError(error: unknown): boolean {
 
 export interface InteractiveSessionOptions {
 	readonly work: SessionWorkController;
-	readonly session: Session;
+	readonly presentation: SessionPresentation;
+	readonly inputSession: InteractiveInputControllerOptions["session"];
 	readonly modelLabel: string;
 	readonly activitySummaryMode?: ActivitySummaryMode;
 	readonly statusLine: () => SessionStatusLineSnapshot;
@@ -347,7 +348,7 @@ async function runMultiSessionInteractive(
 		});
 		const input = new InteractiveInputController({
 			work: sessionOptions.work,
-			session: sessionOptions.session,
+			session: sessionOptions.inputSession,
 			buildInput: sessionOptions.buildPrompt ?? (async (text) => text),
 			prepareAttachments: sessionOptions.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
 			allocateId: options.allocateId,
@@ -370,9 +371,9 @@ async function runMultiSessionInteractive(
 			},
 			initialAttachments: sessionOptions.initialAttachments,
 			restoredAttachments: sessionOptions.restoredAttachments,
-			recoverableFollowUps: sessionOptions.session.recoverableFollowUps,
-			restoredToolInvocations: sessionOptions.session.toolInvocations,
-			composerSubmissions: sessionOptions.session.composerSubmissions,
+			recoverableFollowUps: sessionOptions.presentation.recoverableFollowUps,
+			restoredToolInvocations: sessionOptions.presentation.toolInvocations,
+			composerSubmissions: sessionOptions.presentation.composerSubmissions,
 			onResolveExtensionReferences: sessionOptions.resolveExtensionReferences,
 			onSubmit: (text, attachmentIds, composerText, references) =>
 				input.submit(text, attachmentIds, composerText, references),
@@ -485,13 +486,13 @@ async function runMultiSessionInteractive(
 			},
 			onExit: resolveExit,
 		});
-		acceptLatestRunEvidence(component, sessionOptions.session);
+		acceptLatestRunEvidence(component, sessionOptions.presentation);
 		components.add(component);
 		let pane!: InteractivePane;
 		const detachAgent = sessionOptions.work.subscribe({
 			accept: (event) => {
 				component.accept(event);
-				if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.session, event.runId);
+				if (event.type === "run_end") acceptLatestRunEvidence(component, sessionOptions.presentation, event.runId);
 				if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 				if (event.type === "run_start") {
 					pane.contextOverflowPending = false;
@@ -525,7 +526,7 @@ async function runMultiSessionInteractive(
 			},
 			resynchronize: ({ seed, toolInvocations, state }) => {
 				component.resynchronize(seed, toolInvocations, state.status === "running");
-				acceptLatestRunEvidence(component, sessionOptions.session);
+				acceptLatestRunEvidence(component, sessionOptions.presentation);
 				void git.refresh();
 				pane.contextOverflowPending = false;
 				pane.contextOverflowOffered = false;
@@ -533,7 +534,7 @@ async function runMultiSessionInteractive(
 			},
 		});
 		pane = {
-			id: sessionOptions.session.descriptor.id,
+			id: sessionOptions.presentation.descriptor.id,
 			options: sessionOptions,
 			component,
 			input,
@@ -700,7 +701,7 @@ async function runSingleSessionInteractive(
 	});
 	const inputController = new InteractiveInputController({
 		work: options.work,
-		session: options.session,
+		session: options.inputSession,
 		buildInput: options.buildPrompt ?? (async (text) => text),
 		prepareAttachments: options.prepareAttachments ?? (async () => emptyAttachmentTransaction()),
 		allocateId: options.allocateId,
@@ -723,9 +724,9 @@ async function runSingleSessionInteractive(
 		},
 		initialAttachments: options.initialAttachments,
 		restoredAttachments: options.restoredAttachments,
-		recoverableFollowUps: options.session.recoverableFollowUps,
-		restoredToolInvocations: options.session.toolInvocations,
-		composerSubmissions: options.session.composerSubmissions,
+		recoverableFollowUps: options.presentation.recoverableFollowUps,
+		restoredToolInvocations: options.presentation.toolInvocations,
+		composerSubmissions: options.presentation.composerSubmissions,
 		onResolveExtensionReferences: options.resolveExtensionReferences,
 		onSubmit: (text, attachmentIds, composerText, references) =>
 			inputController.submit(text, attachmentIds, composerText, references),
@@ -825,7 +826,7 @@ async function runSingleSessionInteractive(
 		},
 		onExit: resolveExit,
 	});
-	acceptLatestRunEvidence(component, options.session);
+	acceptLatestRunEvidence(component, options.presentation);
 	components.add(component);
 	tui = new FullScreenTui({
 		terminal: options.terminal,
@@ -877,19 +878,19 @@ async function runSingleSessionInteractive(
 			waiting,
 		);
 	});
-	options.mcpElicitation?.setActiveSession(options.session.descriptor.id);
+	options.mcpElicitation?.setActiveSession(options.presentation.descriptor.id);
 	if (terminationSignal || fatalError !== undefined) {
 		options.mcpElicitation?.unbind();
 	}
 	const detach = options.work.subscribe({
 		accept: (event) => {
 			component.accept(event);
-			if (event.type === "run_end") acceptLatestRunEvidence(component, options.session, event.runId);
+			if (event.type === "run_end") acceptLatestRunEvidence(component, options.presentation, event.runId);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 		},
 		resynchronize: ({ seed, toolInvocations, state }) => {
 			component.resynchronize(seed, toolInvocations, state.status === "running");
-			acceptLatestRunEvidence(component, options.session);
+			acceptLatestRunEvidence(component, options.presentation);
 			void git.refresh();
 		},
 	});
@@ -931,12 +932,12 @@ function assertEmptyReplacementSession(
 	current: InteractiveSessionOptions,
 	replacement: InteractiveSessionOptions,
 ): void {
-	if (replacement.session.descriptor.id === current.session.descriptor.id) {
+	if (replacement.presentation.descriptor.id === current.presentation.descriptor.id) {
 		throw new Error("Context Overflow replacement must have a fresh Session identity");
 	}
 	if (
-		replacement.session.descriptor.workspace.id !== current.session.descriptor.workspace.id ||
-		replacement.session.descriptor.workspace.path !== current.session.descriptor.workspace.path
+		replacement.presentation.descriptor.workspace.id !== current.presentation.descriptor.workspace.id ||
+		replacement.presentation.descriptor.workspace.path !== current.presentation.descriptor.workspace.path
 	) {
 		throw new Error("Context Overflow replacement must belong to the same Workspace");
 	}
@@ -949,14 +950,14 @@ function assertEmptyReplacementSession(
 		replacement.work.state().messages.length > 0 ||
 		replacement.work.state().pendingSteering.length > 0 ||
 		replacement.work.state().pendingFollowUps.length > 0 ||
-		replacement.session.seed.messages.length > 0 ||
-		replacement.session.seed.pendingFollowUps.length > 0 ||
-		replacement.session.recoverableFollowUps.length > 0 ||
-		replacement.session.composerSubmissions.length > 0 ||
-		replacement.session.toolInvocations.length > 0 ||
-		replacement.session.runEvidence.length > 0 ||
-		replacement.session.compactionCheckpoint !== undefined ||
-		replacement.session.mediaReferences.size > 0 ||
+		replacement.presentation.seed.messages.length > 0 ||
+		replacement.presentation.seed.pendingFollowUps.length > 0 ||
+		replacement.presentation.recoverableFollowUps.length > 0 ||
+		replacement.presentation.composerSubmissions.length > 0 ||
+		replacement.presentation.toolInvocations.length > 0 ||
+		replacement.presentation.runEvidence.length > 0 ||
+		replacement.presentation.compactionCheckpoint !== undefined ||
+		replacement.presentation.mediaReferences.size > 0 ||
 		replacement.initialPrompt !== undefined ||
 		(replacement.initialAttachmentIds?.length ?? 0) > 0 ||
 		(replacement.initialAttachments?.length ?? 0) > 0 ||
@@ -966,8 +967,8 @@ function assertEmptyReplacementSession(
 	}
 }
 
-function acceptLatestRunEvidence(component: ChatComponent, session: Session, runId?: string): void {
-	const evidence = session.runEvidence.at(-1);
+function acceptLatestRunEvidence(component: ChatComponent, presentation: SessionPresentation, runId?: string): void {
+	const evidence = presentation.runEvidence.at(-1);
 	if (evidence && (runId === undefined || evidence.runId === runId)) component.acceptRunEvidence(evidence);
 }
 

@@ -1,6 +1,6 @@
-import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
-import type { CatalogModel, CatalogModelMetadata, CatalogValue } from "../runtime/model-catalog.ts";
-import { isCompatibilityValue } from "../runtime/model-metadata.ts";
+import type { CatalogModel, CatalogModelMetadata, CatalogValue } from "../models/model-catalog.ts";
+import { isCompatibilityValue } from "../models/model-metadata.ts";
+import type { CommandFlowMenu, CommandFlowNavigation } from "./flow-types.ts";
 
 export interface ModelCommandEntry {
 	readonly catalog: CatalogModel;

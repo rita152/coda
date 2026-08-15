@@ -12,16 +12,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	type CodingAgent,
 	type CodingAgentObservation,
-	createRunCapabilityHost,
 	type OpenCodingAgentOptions,
 	openCodingAgent,
 	type RunCapabilitySource,
 	type WorkGraphId,
 	type WorkGraphResult,
 	type WorkItemId,
+	type WorkspaceExecution,
 } from "../src/index.ts";
 import { MemoryWorkspacePersistence } from "../src/work-graph/memory-workspace-persistence.ts";
-import type { WorkGraphStore, WorkspacePersistence, WorkspacePersistenceLease } from "../src/work-graph/ports.ts";
+import { decodeWorkGraphRestore } from "../src/work-graph/persistence-codec.ts";
+import type {
+	WorkerControlSink,
+	WorkGraphStore,
+	WorkspacePersistence,
+	WorkspacePersistenceLease,
+} from "../src/work-graph/ports.ts";
 import { WorkGraphAggregate } from "../src/work-graph/work-graph-aggregate.ts";
 import type { WorkGraphFact } from "../src/work-graph/work-graph-fact.ts";
 
@@ -107,14 +113,14 @@ class MemorySessions {
 
 class MemoryWorkspaceExecution {
 	readonly reserved: string[] = [];
-	readonly recovered: Array<Parameters<OpenCodingAgentOptions["workspaceExecution"]["recover"]>[0]> = [];
+	readonly recovered: Array<Parameters<WorkspaceExecution["placement"]["recover"]>[0]> = [];
 	readonly released: string[] = [];
 	readonly rolledBack: string[] = [];
 	readonly published: string[] = [];
 	failItemId?: string;
 	captureArtifacts = false;
-	contributions: Awaited<ReturnType<OpenCodingAgentOptions["workspaceExecution"]["tools"]>> = [];
-	toolsOperation?: () => Promise<Awaited<ReturnType<OpenCodingAgentOptions["workspaceExecution"]["tools"]>>>;
+	contributions: Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>> = [];
+	toolsOperation?: () => Promise<Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>>;
 	readonly boundEffects: string[][] = [];
 	readonly boundToolNames: string[][] = [];
 	readonly #publicationOrders = new Map<string, number>();
@@ -126,12 +132,14 @@ class MemoryWorkspaceExecution {
 			active?: number;
 		}
 	>();
-	publishOperation?: OpenCodingAgentOptions["workspaceExecution"]["publish"];
+	publishOperation?: WorkspaceExecution["publication"]["publish"];
 
-	readonly adapter: OpenCodingAgentOptions["workspaceExecution"];
+	readonly adapter: WorkspaceExecution;
 
 	constructor() {
-		this.adapter = {
+		const execution: WorkspaceExecution["placement"] &
+			WorkspaceExecution["tooling"] &
+			WorkspaceExecution["publication"] = {
 			reserve: async (request) => {
 				if (request.itemId === this.failItemId) throw new Error("scripted Placement failure");
 				const target = request.parent?.placementId ?? "source";
@@ -210,6 +218,7 @@ class MemoryWorkspaceExecution {
 			},
 			close: () => Promise.resolve(),
 		};
+		this.adapter = { placement: execution, tooling: execution, publication: execution };
 	}
 
 	#registerPublication(targetId: string, order: number): void {
@@ -393,14 +402,19 @@ async function harness(
 		readonly workspace?: MemoryWorkspaceExecution;
 		readonly processMaximumConcurrency?: number;
 		readonly capabilitySource?: RunCapabilitySource;
-		readonly controlWorker?: OpenCodingAgentOptions["controlWorker"];
+		readonly controlWorker?: WorkerControlSink["accept"];
 		readonly chunkCharacters?: number;
 		readonly modelStreamFailure?: Error;
 	} = {},
 ) {
 	let now = 1_000;
 	const clock = { now: () => now++ };
-	const runtime = { clock, random: { next: () => 0 }, sleep: { wait: async () => {} } };
+	const runtime = {
+		clock,
+		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
+		sleep: { wait: async () => {} },
+	};
 	const faux = createFauxCore({
 		runtime,
 		provider: "work",
@@ -441,41 +455,38 @@ async function harness(
 	};
 	const sessions = overrides.sessions ?? new MemorySessions();
 	const workspace = overrides.workspace ?? new MemoryWorkspaceExecution();
-	const runCapabilities = createRunCapabilityHost({
-		model: {
-			acquire: (selection) => ({
-				model: selection.model,
-				revision: `test:${selection.model.id}`,
-				stream: (context, options) => stream(selection.model, context, options ?? {}),
-				complete: (context, options) => stream(selection.model, context, options ?? {}).result(),
-				dispose: () => undefined,
-			}),
-		},
-		contributors: [overrides.capabilitySource ?? emptyCapabilitySource()],
-		now: clock.now,
-		platform: "linux",
-		interactionMode: "evaluation",
-	});
-	const agent = await openCodingAgent({
-		workspaceExecution: workspace.adapter,
-		sessions: sessions.adapter,
-		...(overrides.resources ? { resources: overrides.resources } : {}),
-		...(overrides.persistence ? { persistence: overrides.persistence } : {}),
-		runCapabilities,
-		resolveConfiguration: (configuration) => ({
+	const modelProvider: OpenCodingAgentOptions["modelProvider"] = {
+		resolve: (configuration) => ({
 			model: faux.getModel(configuration.model.id)!,
 			reasoning: configuration.reasoning,
 			authSnapshot: { auth: {} },
 		}),
-		clock,
-		idGenerator: new TestIds(),
+		lease: (selection) => ({
+			model: selection.model,
+			revision: `test:${selection.model.id}`,
+			stream: (context, options) => stream(selection.model, context, options ?? {}),
+			complete: (context, options) => stream(selection.model, context, options ?? {}).result(),
+			dispose: () => undefined,
+		}),
+	};
+	const agent = await openCodingAgent({
+		placement: workspace.adapter.placement,
+		tooling: workspace.adapter.tooling,
+		publication: workspace.adapter.publication,
+		sessions: sessions.adapter,
+		...(overrides.resources ? { resources: overrides.resources } : {}),
+		...(overrides.persistence ? { persistence: overrides.persistence } : {}),
+		modelProvider,
+		capabilitySources: [overrides.capabilitySource ?? emptyCapabilitySource()],
+		time: runtime,
+		identity: new TestIds(),
 		capacity: {
 			processMaximumConcurrency: overrides.processMaximumConcurrency ?? 64,
 			graphMaximumConcurrency: 64,
 		},
 		platform: "linux",
 		interactionMode: "evaluation",
-		...(overrides.controlWorker ? { controlWorker: overrides.controlWorker } : {}),
+		...(overrides.controlWorker ? { workerControl: { accept: overrides.controlWorker } } : {}),
 	});
 	return { agent, modelCalls, toolCatalogs, modelContexts, sessions, workspace };
 }
@@ -2882,7 +2893,8 @@ describe("Work Graph public Interface", () => {
 
 		const lease = await persistence.acquire();
 		const historical = await lease.openHistoricalGraph("graph:archived" as WorkGraphId);
-		expect((await historical?.load())?.facts.at(-1)).toMatchObject({
+		const historicalRestore = await historical?.load();
+		expect(decodeWorkGraphRestore(historicalRestore?.restore).at(-1)).toMatchObject({
 			type: "graph_result_recorded",
 			graphId: "graph:archived",
 		});

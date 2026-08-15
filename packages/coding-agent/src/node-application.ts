@@ -2,10 +2,11 @@ import { randomInt, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
-import { type CredentialStore, createModels, type MutableModels, type TimeRuntime } from "@coda/ai";
+import { type CredentialStore, createModels, createSystemTimeRuntime, type MutableModels } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
 import { createSdkMcpConnector, type McpConnector } from "@coda/mcp";
 import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
+import { FileSettingsStore } from "./app/file-settings-store.ts";
 import {
 	type ApplicationIO,
 	type ApplicationOutput,
@@ -22,51 +23,21 @@ import { createNodeFileSystem } from "./host/node-file-system.ts";
 import { createNodeProcessRunner } from "./host/node-process-runner.ts";
 import { createNodeProcessSessionRunner } from "./host/node-process-session-runner.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
-import { FullScreenOutputGate } from "./interactive/full-screen-output.ts";
-import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./interactive/process-lifecycle.ts";
-import { selectFromTerminal } from "./interactive/prompts.ts";
-import { ProviderManager } from "./providers/provider-manager.ts";
+import { ProviderManager } from "./models/provider-manager.ts";
 import { createFileWorkspacePersistence } from "./runtime/file-workspace-persistence.ts";
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
 import type { SessionManager } from "./session/types.ts";
-import { FileSettingsStore } from "./settings/file-settings-store.ts";
 import { createNodeSkillWatcherFactory, type SkillWatcherFactory } from "./skills/watcher.ts";
+import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
+import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./ui/process-lifecycle.ts";
+import { selectFromTerminal } from "./ui/prompts.ts";
 
 class SystemIds implements IdGenerator {
 	generate(kind: Parameters<IdGenerator["generate"]>[0]): string {
 		return `${kind}:${randomUUID()}`;
 	}
-}
-
-function systemTimeRuntime(clock: Clock, scheduler: Scheduler): TimeRuntime {
-	return {
-		clock,
-		random: { next: () => randomInt(0, 0x1_0000_0000) / 0x1_0000_0000 },
-		sleep: {
-			wait: (delayMs, signal) =>
-				new Promise<void>((resolve, reject) => {
-					if (signal?.aborted) {
-						const error = new Error("Request aborted");
-						error.name = "AbortError";
-						reject(error);
-						return;
-					}
-					const task = scheduler.schedule(Math.max(0, delayMs), () => {
-						signal?.removeEventListener("abort", onAbort);
-						resolve();
-					});
-					const onAbort = () => {
-						task.cancel();
-						const error = new Error("Request aborted");
-						error.name = "AbortError";
-						reject(error);
-					};
-					signal?.addEventListener("abort", onAbort, { once: true });
-				}),
-		},
-	};
 }
 
 function streamOutput(stream: NodeJS.WritableStream & { readonly isTTY?: boolean }): ApplicationOutput {
@@ -194,7 +165,11 @@ export function createNodeCodingAgentApplication(
 	const idGenerator = options.idGenerator ?? new SystemIds();
 	const scheduler = options.scheduler ?? createSystemScheduler();
 	const interactiveLifecycle = options.interactiveLifecycle ?? nodeInteractiveLifecycle(platform);
-	const timeRuntime = systemTimeRuntime(clock, scheduler);
+	const timeRuntime = createSystemTimeRuntime({
+		clock,
+		scheduler,
+		random: { next: () => randomInt(0, 0x1_0000_0000) / 0x1_0000_0000 },
+	});
 	const fileSystem = options.fileSystem ?? createNodeFileSystem();
 	const processRunner = options.processRunner ?? createNodeProcessRunner({ platform });
 	const processSessionRunner = options.processSessionRunner ?? createNodeProcessSessionRunner({ platform });

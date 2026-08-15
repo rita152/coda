@@ -1,6 +1,6 @@
-import type { CommandFlowMenu, CommandFlowNavigation } from "../interactive/command-flow-host.ts";
-import { skillExtensionEntries } from "../skills/manager.ts";
 import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "../skills/types.ts";
+import type { CommandFlowMenu, CommandFlowNavigation } from "./flow-types.ts";
+import { skillExtensionEntries } from "./skill-extensions.ts";
 
 export interface SkillsCommandFlowOptions {
 	readonly snapshot: CodingSkillsSnapshot;

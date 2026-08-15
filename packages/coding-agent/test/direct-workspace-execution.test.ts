@@ -1,11 +1,10 @@
 import type { AgentTool, ToolExecutionContext, ToolExecutionOutput } from "@coda/agent";
 import { Type } from "@coda/ai";
-import type { OpenCodingAgentOptions, WorkGraphId, WorkItemId } from "@coda/runtime";
+import type { WorkGraphId, WorkItemId, WorkspaceExecution } from "@coda/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createDirectWorkspaceExecution } from "../src/runtime/direct-workspace-execution.ts";
 
-type WorkspaceExecution = OpenCodingAgentOptions["workspaceExecution"];
-type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tools"]>>[number];
+type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
 	let resolve!: () => void;
@@ -40,7 +39,7 @@ function context(): ToolExecutionContext {
 
 async function placement(execution: WorkspaceExecution, itemId: string) {
 	return (
-		await execution.reserve({
+		await execution.placement.reserve({
 			graphId: "graph:direct" as WorkGraphId,
 			itemId: itemId as WorkItemId,
 			mode: "write",
@@ -52,11 +51,11 @@ async function placement(execution: WorkspaceExecution, itemId: string) {
 
 function bind(
 	execution: WorkspaceExecution,
-	workspacePlacement: Awaited<ReturnType<WorkspaceExecution["reserve"]>>["placement"],
+	workspacePlacement: Awaited<ReturnType<WorkspaceExecution["placement"]["reserve"]>>["placement"],
 	itemId: string,
 	contributions: readonly WorkspaceToolContribution[],
 ): readonly AgentTool[] {
-	return execution.bindTools({
+	return execution.tooling.bindTools({
 		graphId: "graph:direct" as WorkGraphId,
 		itemId: itemId as WorkItemId,
 		sessionId: `session:${itemId}`,
@@ -140,7 +139,7 @@ describe("Direct Workspace Execution Adapter", () => {
 			"late_read:start",
 			"late_read:end",
 		]);
-		await execution.close();
+		await execution.placement.close();
 	});
 
 	it("retains an unknown Process lease until the background lifetime settles", async () => {
@@ -187,6 +186,6 @@ describe("Direct Workspace Execution Adapter", () => {
 		await vi.waitFor(() => expect(log).toEqual(["process:start", "process:control", "read:start"]));
 		readGate.resolve();
 		await reading;
-		await execution.close();
+		await execution.placement.close();
 	});
 });

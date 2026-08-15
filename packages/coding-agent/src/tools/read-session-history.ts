@@ -5,7 +5,7 @@ import {
 	SESSION_HISTORY_MAX_LIMIT,
 	SessionHistoryCursorError,
 	type SessionHistoryReadPort,
-} from "../session/session-history-reader.ts";
+} from "../session-history/reader.ts";
 import { toolFailure } from "./failure.ts";
 
 const ReadSessionHistoryParameters = Type.Object(

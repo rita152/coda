@@ -1,4 +1,9 @@
-import { decodeWorkspaceLedger, emptyWorkspaceLedger, encodeWorkspaceLedger } from "./persistence-codec.ts";
+import {
+	decodeWorkGraphRestore,
+	decodeWorkspaceLedger,
+	emptyWorkspaceLedger,
+	encodeWorkspaceLedger,
+} from "./persistence-codec.ts";
 import type {
 	WorkGraphStore,
 	WorkspaceLedger,
@@ -47,22 +52,27 @@ class MemoryWorkGraphStore implements WorkGraphStore {
 	load() {
 		if (this.#closed) return Promise.reject(new Error("Work Graph store is closed"));
 		return Promise.resolve({
-			facts: Object.freeze(clone(this.#memory.segments.flat())),
+			restore: Object.freeze(clone(this.#memory.segments.flat())),
 			diagnostics: Object.freeze([]),
 		});
 	}
 
-	append(facts: readonly WorkGraphFact[]): Promise<void> {
+	append(commit: unknown): Promise<void> {
 		if (this.#readOnly) return Promise.reject(new Error("Historical Work Graph store is read-only"));
 		if (this.#closed) return Promise.reject(new Error("Work Graph store is closed"));
-		if (facts.length === 0) return Promise.reject(new Error("A Work Graph segment must contain Facts"));
-		const durable = facts.map((fact) => WorkGraphFactCodec.decode(fact));
+		let durable: readonly WorkGraphFact[];
+		try {
+			durable = decodeWorkGraphRestore(commit);
+		} catch (error) {
+			return Promise.reject(error);
+		}
+		if (durable.length === 0) return Promise.reject(new Error("A Work Graph segment must contain Facts"));
 		if (durable.some((fact) => fact.graphId !== this.#graphId)) {
 			return Promise.reject(new Error(`Work Graph store ${this.#graphId} cannot append Facts for another Graph`));
 		}
 		const operation = this.#tail.then(() => {
 			if (this.#failure) throw this.#failure;
-			this.#memory.segments.push(durable);
+			this.#memory.segments.push([...durable]);
 		});
 		this.#tail = operation.catch((error) => {
 			this.#failure ??= error;

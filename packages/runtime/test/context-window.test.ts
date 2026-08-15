@@ -18,6 +18,7 @@ function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
 	return {
 		clock,
 		random: { next: () => 0 },
+		scheduler: { schedule: () => ({ cancel: () => undefined }) },
 		sleep: { wait: async () => {} },
 	};
 }

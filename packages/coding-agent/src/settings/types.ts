@@ -1,8 +1,8 @@
 import type { ThinkingLevel } from "@coda/ai";
 import type { TerminalColorScheme } from "@coda/tui";
 import type { McpServerConfiguration, WorkspaceMcpTrustRecord } from "../mcp/config.ts";
-import type { ModelSelection } from "../model-selection.ts";
-import type { CustomProviderConfig } from "../providers/types.ts";
+import type { ModelSelection } from "../models/model-selection.ts";
+import type { CustomProviderConfig } from "../models/types.ts";
 
 export interface ProjectTrustRecord {
 	readonly workspace: string;

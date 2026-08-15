@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { collectWorkspaceDiff, parseGitStatusPaths } from "../src/completion/workspace-diff.ts";
 import type { ProcessRunner } from "../src/host/process-runner.ts";
-import { collectWorkspaceDiff, parseGitStatusPaths } from "../src/run-evidence/workspace-diff.ts";
 
 describe("final Workspace diff", () => {
 	it("parses tracked, untracked, deleted, and both rename endpoints from porcelain -z", () => {

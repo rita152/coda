@@ -1,8 +1,8 @@
 import type { AgentEvent, AgentMessage, AgentSeed, MessageId, ToolInvocationId } from "@coda/agent";
 import type { AssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { SemanticTimeline } from "../src/interactive/semantic-timeline.ts";
 import type { SessionToolLifecycle } from "../src/session/types.ts";
+import { SemanticTimeline } from "../src/ui/semantic-timeline.ts";
 
 describe("SemanticTimeline", () => {
 	it("updates concurrent Tool Invocations in source order instead of completion order", () => {

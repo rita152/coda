@@ -2,9 +2,9 @@ import type { Model } from "@coda/ai";
 import type { KeyInput } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createModelCommandFlow } from "../src/commands/model-flow.ts";
-import { CommandFlowHost } from "../src/interactive/command-flow-host.ts";
-import type { CatalogModel } from "../src/runtime/model-catalog.ts";
-import { type ModelMetadataSource, modelMetadataValue } from "../src/runtime/model-metadata.ts";
+import type { CatalogModel } from "../src/models/model-catalog.ts";
+import { type ModelMetadataSource, modelMetadataValue } from "../src/models/model-metadata.ts";
+import { CommandFlowHost } from "../src/ui/command-flow-host.ts";
 
 describe("model command flow", () => {
 	it("lists a cross-provider pool truthfully and routes unauthenticated models into auth", () => {

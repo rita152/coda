@@ -2,11 +2,7 @@ import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkGraphId, WorkItemId } from "@coda/runtime";
-import {
-	MemoryWorkspacePersistence,
-	type WorkGraphFact,
-	type WorkspacePersistence,
-} from "@coda/runtime/workspace-persistence";
+import { MemoryWorkspacePersistence, type WorkspacePersistence } from "@coda/runtime/workspace-persistence";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FileSystem } from "../src/host/file-system.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
@@ -22,7 +18,7 @@ function graphId(value: string): WorkGraphId {
 	return value as WorkGraphId;
 }
 
-function fact(graph: string, timestamp: number): WorkGraphFact {
+function fact(graph: string, timestamp: number): unknown {
 	return {
 		version: 1,
 		type: "cancellation_requested",
@@ -82,14 +78,14 @@ function workspacePersistenceContract(
 				targetPlacementId: "placement:target",
 				targetIdentity: "target:fingerprint",
 			});
-			await expect(storeA.load()).resolves.toMatchObject({ facts: [fact(graphA, 1)] });
-			await expect(storeB.load()).resolves.toMatchObject({ facts: [fact(graphB, 2)] });
+			await expect(storeA.load()).resolves.toMatchObject({ restore: [fact(graphA, 1)] });
+			await expect(storeB.load()).resolves.toMatchObject({ restore: [fact(graphB, 2)] });
 
 			await first.ledger.archiveGraph(graphA);
 			await first.archiveGraph(graphA);
 			await expect(first.openGraph(graphA)).rejects.toThrow(/archived/u);
 			const historical = await first.openHistoricalGraph(graphA);
-			await expect(historical?.load()).resolves.toMatchObject({ facts: [fact(graphA, 1)] });
+			await expect(historical?.load()).resolves.toMatchObject({ restore: [fact(graphA, 1)] });
 			await historical?.close();
 			await first.close();
 
@@ -108,7 +104,7 @@ function workspacePersistenceContract(
 				targetIdentities: [{ targetPlacementId: "placement:target", targetIdentity: "target:fingerprint" }],
 			});
 			await expect((await reopened.openGraph(graphB)).load()).resolves.toMatchObject({
-				facts: [fact(graphB, 2)],
+				restore: [fact(graphB, 2)],
 			});
 			await reopened.ledger.releaseSession({
 				sessionId: "session:contract-b",
@@ -126,7 +122,7 @@ function workspacePersistenceContract(
 			const graphB = graphId("graph:contract-address-b");
 			const store = await lease.openGraph(graphA);
 			await expect(store.append([fact(graphB, 1)])).rejects.toThrow("cannot append Facts for another Graph");
-			await expect(store.load()).resolves.toMatchObject({ facts: [] });
+			await expect(store.load()).resolves.toMatchObject({ restore: [] });
 			await lease.close();
 		});
 
@@ -140,7 +136,7 @@ function workspacePersistenceContract(
 			const nextEpoch = await persistence.acquire();
 			expect((await nextEpoch.ledger.load()).activeGraphs).toEqual([]);
 			const replacement = await nextEpoch.openGraph(graph);
-			await expect(replacement.load()).resolves.toMatchObject({ facts: [] });
+			await expect(replacement.load()).resolves.toMatchObject({ restore: [] });
 			await replacement.append([fact(graph, 2)]);
 			await nextEpoch.ledger.accept({
 				activeGraphs: [{ graphId: graph, order: 0 }],
@@ -149,8 +145,8 @@ function workspacePersistenceContract(
 				sessionOwners: [],
 			});
 			const orphan = await nextEpoch.openHistoricalGraph(graph);
-			await expect(orphan?.load()).resolves.toMatchObject({ facts: [fact(graph, 1)] });
-			await expect(replacement.load()).resolves.toMatchObject({ facts: [fact(graph, 2)] });
+			await expect(orphan?.load()).resolves.toMatchObject({ restore: [fact(graph, 1)] });
+			await expect(replacement.load()).resolves.toMatchObject({ restore: [fact(graph, 2)] });
 			await orphan?.close();
 			await nextEpoch.close();
 		});
@@ -229,7 +225,7 @@ describe("Node filesystem Workspace persistence", () => {
 		await slowStarted;
 		await independentStore.append([fact(independentGraph, 2)]);
 		await independentStore.flush();
-		await expect(independentStore.load()).resolves.toMatchObject({ facts: [fact(independentGraph, 2)] });
+		await expect(independentStore.load()).resolves.toMatchObject({ restore: [fact(independentGraph, 2)] });
 		releaseSlow();
 		await pendingSlowAppend;
 		await lease.close();
@@ -267,7 +263,7 @@ describe("Node filesystem Workspace persistence", () => {
 			nextPublicationOrder: 1,
 			sessionOwners: [],
 		});
-		await expect(siblingStore.load()).resolves.toMatchObject({ facts: [fact(siblingGraph, 3)] });
+		await expect(siblingStore.load()).resolves.toMatchObject({ restore: [fact(siblingGraph, 3)] });
 		await expect(lease.close()).rejects.toThrow("injected Graph write failure");
 	});
 
@@ -316,7 +312,7 @@ describe("Node filesystem Workspace persistence", () => {
 
 		const repairedLease = await persistence.acquire();
 		await expect((await repairedLease.openGraph(graph)).load()).resolves.toEqual({
-			facts: [fact(graph, 1)],
+			restore: [fact(graph, 1)],
 			diagnostics: ["Ignored incomplete Work Graph tail at sequence 2"],
 		});
 		await repairedLease.close();

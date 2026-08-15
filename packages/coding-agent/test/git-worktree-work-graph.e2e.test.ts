@@ -5,13 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentEvent, AgentSeed, AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@coda/ai";
-import {
-	type CodingAgent,
-	createRunCapabilityHost,
-	type OpenCodingAgentOptions,
-	openCodingAgent,
-	type WorkGraphResult,
-} from "@coda/runtime";
+import { type OpenCodingAgentOptions, openCodingAgent, type WorkspaceExecution } from "@coda/runtime";
+import { waitForGraph } from "@coda/runtime/headless";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import { createGitWorktreeWorkspaceExecution } from "../src/runtime/git-worktree-workspace-execution.ts";
@@ -36,15 +31,6 @@ function environment(): Record<string, string> {
 	return Object.fromEntries(
 		Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 	);
-}
-
-async function waitForGraph(agent: CodingAgent, graphId: string): Promise<WorkGraphResult> {
-	for await (const observation of agent.observe({ capacity: 4_096 })) {
-		if (observation.type === "work_graph_settled" && observation.result.graphId === graphId) {
-			return observation.result;
-		}
-	}
-	throw new Error(`Work Graph ${graphId} did not settle`);
 }
 
 describe("Git worktree Work Graph end to end", () => {
@@ -106,12 +92,14 @@ describe("Git worktree Work Graph end to end", () => {
 				createTools: tools,
 			});
 			const publications: string[] = [];
-			const workspaceExecution: OpenCodingAgentOptions["workspaceExecution"] = {
+			const workspaceExecution: WorkspaceExecution = {
 				...gitExecution,
-				publish: async (request) => {
-					const result = await gitExecution.publish(request);
-					publications.push(String(request.itemId));
-					return result;
+				publication: {
+					publish: async (request) => {
+						const result = await gitExecution.publication.publish(request);
+						publications.push(String(request.itemId));
+						return result;
+					},
 				},
 			};
 
@@ -172,31 +160,28 @@ describe("Git worktree Work Graph end to end", () => {
 				},
 			};
 			let nextId = 0;
-			const runCapabilities = createRunCapabilityHost({
-				model: {
-					acquire: (selection) => {
-						const driver = models.bindSimple(selection.model, selection.authSnapshot ?? { auth: {} });
-						return {
-							model: driver.model,
-							revision: String(driver.providerGeneration),
-							stream: driver.stream,
-							complete: driver.complete,
-							dispose: () => undefined,
-						};
-					},
+			const modelProvider: OpenCodingAgentOptions["modelProvider"] = {
+				resolve: () => ({ model: faux.getModel(), reasoning: "off", authSnapshot: { auth: {} } }),
+				lease: (selection) => {
+					const driver = models.bindSimple(selection.model, selection.authSnapshot ?? { auth: {} });
+					return {
+						model: driver.model,
+						revision: String(driver.providerGeneration),
+						stream: driver.stream,
+						complete: driver.complete,
+						dispose: () => undefined,
+					};
 				},
-				contributors: [],
-				now: time.clock.now,
-				platform: process.platform,
-				interactionMode: "evaluation",
-			});
+			};
 			const agent = await openCodingAgent({
-				workspaceExecution,
+				placement: workspaceExecution.placement,
+				tooling: workspaceExecution.tooling,
+				publication: workspaceExecution.publication,
 				sessions,
-				runCapabilities,
-				resolveConfiguration: () => ({ model: faux.getModel(), reasoning: "off", authSnapshot: { auth: {} } }),
-				clock: time.clock,
-				idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
+				modelProvider,
+				capabilitySources: [],
+				time,
+				identity: { generate: (kind) => `${kind}:${++nextId}` },
 				capacity: { processMaximumConcurrency: 3, graphMaximumConcurrency: 3 },
 				platform: process.platform,
 				interactionMode: "evaluation",
@@ -225,7 +210,9 @@ describe("Git worktree Work Graph end to end", () => {
 			expect(completed).toEqual(["beta.txt"]);
 			expect(publications).toEqual([]);
 			alphaGate.resolve();
-			const result = await waitForGraph(agent, "graph:git-e2e");
+			const result = await waitForGraph(agent, "graph:git-e2e" as Parameters<typeof waitForGraph>[1], {
+				capacity: 4_096,
+			});
 
 			expect(completed).toEqual(["beta.txt", "alpha.txt"]);
 			expect(publications).toEqual(["alpha", "beta", "root"]);
