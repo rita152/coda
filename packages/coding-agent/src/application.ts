@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
-import type { Api, AuthPrompt, Model, MutableModels } from "@coda/ai";
+import type { MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
 import {
@@ -20,6 +20,15 @@ import {
 	parseArguments,
 	runControlConfiguration,
 } from "./app/argument-parsing.ts";
+import {
+	authenticateInteractively,
+	createEffortCommand,
+	interactiveStatusLineSnapshot,
+	persistCustomProviders,
+	promptRuntime,
+	refreshProviderAuth,
+	selectModelInteractively,
+} from "./app/auth-flows.ts";
 import { JsonEventWriter } from "./app/json-event-writer.ts";
 import {
 	chatAttachment,
@@ -62,9 +71,8 @@ import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import { MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./models/model-capabilities.ts";
 import { catalogModelFromRuntime } from "./models/model-catalog.ts";
-import type { ModelSelection } from "./models/model-selection.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
-import { availableReasoningEfforts, effectiveReasoningEffort } from "./models/reasoning-effort.ts";
+import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
 import { type AgentRunControlBinding, bindAgentRunControl } from "./run-control/index.ts";
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
@@ -91,10 +99,8 @@ import { activitySummaryModeForApi } from "./ui/activity-status.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
-import { confirmFromTerminal, type PromptRuntime, promptTextFromTerminal, selectFromTerminal } from "./ui/prompts.ts";
+import { confirmFromTerminal } from "./ui/prompts.ts";
 import { type InteractiveSessionOptions, runInteractive } from "./ui/run-interactive.ts";
-import { sessionCostSnapshot } from "./ui/session-status.ts";
-import type { SessionStatusLineSnapshot } from "./ui/status-line.ts";
 
 export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
 export type { ModelSelection } from "./models/model-selection.ts";
@@ -156,181 +162,6 @@ export interface CodingAgentApplicationOptions {
 
 export interface CodingAgentApplication {
 	run(args: readonly string[]): Promise<number>;
-}
-
-function createEffortCommand(
-	session: Session,
-	work: SessionWorkController,
-): NonNullable<InteractiveSessionOptions["effortCommand"]> {
-	return {
-		snapshot: () => ({
-			current: work.state().selection.reasoning,
-			available: availableReasoningEfforts(work.state().selection.model),
-		}),
-		select: async (effort) => {
-			const selected = work.state().selection;
-			const reasoning = effectiveReasoningEffort(selected.model, effort);
-			if (reasoning !== effort) {
-				throw new Error(
-					`Reasoning effort ${effort} is not supported by ${selected.model.provider}/${selected.model.id}`,
-				);
-			}
-			await session.record({
-				type: "model_selected",
-				model: { provider: selected.model.provider, id: selected.model.id },
-				reasoning,
-			});
-			await work.selectReasoning(reasoning);
-			return reasoning;
-		},
-	};
-}
-
-function promptRuntime(options: CodingAgentApplicationOptions, terminal: Terminal): PromptRuntime {
-	if (!options.runtime.scheduler) {
-		throw new Error("Interactive mode requires injected Terminal and Scheduler capabilities");
-	}
-	return {
-		terminal,
-		clock: options.runtime.clock,
-		scheduler: options.runtime.scheduler,
-		keybindings: options.keybindings ?? [],
-		diagnostics: options.diagnostics,
-		fullScreenOutput: options.fullScreenOutput,
-		lifecycle: options.runtime.interactiveLifecycle,
-	};
-}
-
-async function answerAuthPrompt(runtime: PromptRuntime, prompt: AuthPrompt): Promise<string> {
-	if (prompt.type === "select") {
-		const selected = await selectFromTerminal(runtime, prompt.message, prompt.options);
-		if (selected === undefined) throw new Error("Authentication was cancelled");
-		return selected;
-	}
-	const value = await promptTextFromTerminal(runtime, {
-		message: prompt.message,
-		placeholder: prompt.placeholder,
-		secret: prompt.type === "secret",
-	});
-	if (value === undefined) throw new Error("Authentication was cancelled");
-	return value;
-}
-
-async function authenticateInteractively(
-	options: CodingAgentApplicationOptions,
-	providerId: string,
-	runtime: PromptRuntime,
-): Promise<void> {
-	await options.models.login(providerId, "api_key", {
-		prompt: (prompt) => answerAuthPrompt(runtime, prompt),
-		notify: (event) => {
-			const message =
-				event.type === "auth_url"
-					? `Authenticate at ${event.url}`
-					: event.type === "device_code"
-						? `Authenticate at ${event.verificationUri} with code ${event.userCode}`
-						: event.message;
-			void options.io.stderr.write(`coda: ${message}\n`);
-		},
-	});
-}
-
-async function selectModelInteractively(
-	options: CodingAgentApplicationOptions,
-	runtime: PromptRuntime,
-): Promise<ModelSelection> {
-	let available = await options.models.getAvailable();
-	if (available.length === 0) {
-		const loginProviders = options.models
-			.getProviders()
-			.filter((provider) => provider.auth.apiKey?.login)
-			.sort((left, right) => left.id.localeCompare(right.id));
-		if (loginProviders.length === 0) throw new Error("No authenticated Models are available");
-		const providerId =
-			loginProviders.length === 1
-				? loginProviders[0]!.id
-				: await selectFromTerminal(
-						runtime,
-						"Select a Provider to authenticate",
-						loginProviders.map((provider) => ({
-							id: provider.id,
-							label: provider.name,
-							description: provider.id,
-						})),
-					);
-		if (!providerId) throw new Error("Provider selection was cancelled");
-		await authenticateInteractively(options, providerId, runtime);
-		available = await options.models.getAvailable();
-	}
-	if (available.length === 0) throw new Error("No authenticated Models are available");
-	const sorted = [...available].sort(
-		(left, right) => left.provider.localeCompare(right.provider) || left.id.localeCompare(right.id),
-	);
-	const selected = await selectFromTerminal(
-		runtime,
-		"Select a Model",
-		sorted.map((model) => ({
-			id: `${model.provider}\0${model.id}`,
-			label: `${model.provider}/${model.id}`,
-			description: `${model.name} • ${model.api}${model.reasoning ? " • reasoning" : ""}`,
-		})),
-	);
-	if (!selected) throw new Error("Model selection was cancelled");
-	const separator = selected.indexOf("\0");
-	return { provider: selected.slice(0, separator), id: selected.slice(separator + 1) };
-}
-
-function interactiveStatusLineSnapshot(work: SessionWorkController, session: Session): SessionStatusLineSnapshot {
-	const snapshot = work.state();
-	const selected = snapshot.selection;
-	const context = contextUsage(snapshot.messages, selected.model);
-	const cost = sessionCostSnapshot(
-		snapshot.messages,
-		session.compactionCheckpoint?.usage.cumulativeCost ?? 0,
-		session.discardedModelCost,
-		selected.model.cost !== undefined,
-	);
-	return {
-		modelSupportsReasoning: selected.model.reasoning,
-		context: {
-			usedTokens: context.usedTokens,
-			windowTokens: context.windowTokens,
-			estimated: context.estimated || latestUsageComesFromAnotherModel(snapshot.messages, selected.model),
-		},
-		...(cost ? { cost } : {}),
-	};
-}
-
-function contextUsage(
-	messages: import("@coda/agent").AgentState["messages"],
-	model: Model<Api>,
-): { readonly usedTokens: number; readonly windowTokens: number; readonly estimated: boolean } {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index]?.message;
-		if (message?.role !== "assistant" && message?.role !== "toolResult") continue;
-		const usage = message.usage;
-		if (!usage) continue;
-		const usedTokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-		if (usedTokens > 0) return { usedTokens, windowTokens: model.contextWindow, estimated: false };
-	}
-	const bytes = new TextEncoder().encode(JSON.stringify(messages)).byteLength;
-	return { usedTokens: Math.ceil(bytes / 4), windowTokens: model.contextWindow, estimated: true };
-}
-
-function latestUsageComesFromAnotherModel(
-	messages: import("@coda/agent").AgentState["messages"],
-	model: Model<Api>,
-): boolean {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index]?.message;
-		if (message?.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
-		const usageTokens =
-			message.usage.totalTokens ||
-			message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
-		if (usageTokens === 0) continue;
-		return message.provider !== model.provider || message.model !== model.id;
-	}
-	return false;
 }
 
 export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
@@ -894,31 +725,20 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								readonly runControl?: AgentRunControlBinding;
 							}
 						>();
-						const persistCustomProviders = async (): Promise<void> => {
-							settings = { ...settings, customProviders: providerManager.configurations };
+						const saveCustomProviders = async (): Promise<void> => {
+							settings = persistCustomProviders(settings, providerManager.configurations);
 							await options.settings.save(settings);
 						};
-						const refreshProviderAuth = async (providerId: string): Promise<void> => {
-							const targets = [
-								{ work: agentRuntime, apiKey: parsed.apiKey },
-								...[...secondaryResources.values()].map(({ work }) => ({ work, apiKey: undefined })),
-							];
-							for (const { work, apiKey } of targets) {
-								const selected = work.state().selection;
-								if (selected.model.provider !== providerId) continue;
-								const model = options.models.getModel(providerId, selected.model.id) ?? selected.model;
-								const authSnapshot = await options.models.getAuth(model, {
-									apiKey,
-									clock: options.runtime.clock,
-								});
-								await work.select({
-									...selected,
-									model,
-									reasoning: effectiveReasoningEffort(model, selected.reasoning),
-									authSnapshot,
-								});
-							}
-						};
+						const updateProviderAuth = (providerId: string): Promise<void> =>
+							refreshProviderAuth({
+								providerId,
+								targets: [
+									{ work: agentRuntime, apiKey: parsed.apiKey },
+									...[...secondaryResources.values()].map(({ work }) => ({ work, apiKey: undefined })),
+								],
+								models: options.models,
+								clock: options.runtime.clock,
+							});
 						const imageSurface = createTerminalImageSurface({
 							terminal: interactiveRuntime!.terminal,
 							environment: options.runtime.environment,
@@ -953,16 +773,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							providers: () => providerManager.authenticationEntries(),
 							updateApiKey: async (providerId: string, apiKey: string) => {
 								await providerManager.updateApiKey(providerId, apiKey);
-								await persistCustomProviders();
-								await refreshProviderAuth(providerId);
+								await saveCustomProviders();
+								await updateProviderAuth(providerId);
 							},
 							logout: async (providerId: string) => {
 								await providerManager.logout(providerId);
-								await refreshProviderAuth(providerId);
+								await updateProviderAuth(providerId);
 							},
 							addCustomProvider: async (input: Parameters<ProviderManager["addCustomProvider"]>[0]) => {
 								await providerManager.addCustomProvider(input);
-								await persistCustomProviders();
+								await saveCustomProviders();
 							},
 						};
 						const createSecondarySessionOptions = async (
