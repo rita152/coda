@@ -1,7 +1,7 @@
 import type { AgentMessage, MessageId } from "@coda/agent";
 import { fauxAssistantMessage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { reduceSession, type SessionRecord } from "../src/session/records.ts";
+import { reduceSession, type SessionRecordOf } from "../src/session/records.ts";
 import { sessionCostSnapshot } from "../src/ui/session-status.ts";
 
 describe("session status aggregation", () => {
@@ -35,7 +35,7 @@ describe("session status aggregation", () => {
 	});
 
 	it("restores discarded attempt cost from durable records", () => {
-		const record: SessionRecord = {
+		const record: SessionRecordOf<"attempt_finished"> = {
 			type: "attempt_finished",
 			recordId: "record:1",
 			sessionId: "session:1",
@@ -52,10 +52,11 @@ describe("session status aggregation", () => {
 		};
 
 		expect(reduceSession([record]).discardedModelCost).toBe(0.2);
-		expect(
-			reduceSession([{ ...record, payload: { ...(record.payload as object), usage: undefined } }])
-				.discardedModelCost,
-		).toBeUndefined();
+		const withoutUsage: SessionRecordOf<"attempt_finished"> = {
+			...record,
+			payload: { ...record.payload, usage: undefined },
+		};
+		expect(reduceSession([withoutUsage]).discardedModelCost).toBeUndefined();
 	});
 });
 

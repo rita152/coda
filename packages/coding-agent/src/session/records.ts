@@ -1,46 +1,114 @@
 import type {
-	AgentEvent,
 	AgentMessage,
 	AgentSeed,
 	CompactionCheckpoint,
 	FollowUp,
 	MessageId,
+	RunBudgetExhaustion,
 	RunFailure,
+	RunOutcome,
+	RunSource,
+	SessionEvent,
+	ToolExecutionOutcome,
+	ToolExecutionSettlement,
 	ToolInvocation,
 	ToolRejectionReason,
 } from "@coda/agent";
-import type { Message } from "@coda/ai";
+import type { AssistantMessage, Message, ThinkingLevel } from "@coda/ai";
+import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
+import type { ProjectTrustRecord } from "../settings/types.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 
-export const SESSION_RECORD_TYPES = [
-	"run_started",
-	"attempt_started",
-	"attempt_finished",
-	"retry_scheduled",
-	"message_committed",
-	"tool_started",
-	"tool_finished",
-	"turn_finished",
-	"run_finished",
-	"follow_up_enqueued",
-	"follow_up_consumed",
-	"follow_up_canceled",
-	"follow_up_reclaimed",
-	"composer_submission_recorded",
-	"composer_submission_retracted",
-	"model_selected",
-	"project_trust_changed",
-	"mcp_trust_changed",
-	"context_compacted",
-] as const;
+export interface SessionRecordPayloadMap {
+	readonly run_started: {
+		readonly source: RunSource;
+		readonly queueItemId?: string;
+		readonly promptVersion?: string;
+		readonly promptSha256?: string;
+	};
+	readonly run_budget_exhausted: { readonly exhaustion: RunBudgetExhaustion };
+	readonly attempt_started: { readonly messageId: string; readonly attempt: number };
+	readonly attempt_finished: {
+		readonly messageId: string;
+		readonly attempt: number;
+		readonly outcome: "success" | "error" | "aborted";
+		readonly discarded: boolean;
+		readonly errorMessage?: string;
+		readonly usage?: AssistantMessage["usage"];
+	};
+	readonly retry_scheduled: { readonly attempt: number; readonly delayMs: number; readonly reason: string };
+	readonly message_committed: { readonly message: AgentMessage };
+	readonly tool_started: { readonly invocation: ToolInvocation };
+	readonly tool_finished:
+		| {
+				readonly invocation: ToolInvocation;
+				readonly settlement: ToolExecutionSettlement;
+				readonly outcome: ToolExecutionOutcome;
+				readonly resultMessageId: string;
+		  }
+		| {
+				readonly invocation: ToolInvocation;
+				readonly outcome: "rejected";
+				readonly reason: ToolRejectionReason;
+				readonly resultMessageId: string;
+		  }
+		| {
+				readonly invocation: ToolInvocation;
+				readonly outcome: "interrupted";
+				readonly reason: "skipped_by_user";
+				readonly resultMessageId: string;
+		  };
+	readonly turn_finished: { readonly outcome: RunOutcome };
+	readonly run_finished:
+		| { readonly outcome: RunOutcome; readonly failure?: RunFailure }
+		| { readonly outcome: "interrupted"; readonly reason: "process_ended_before_run_finished" };
+	readonly follow_up_enqueued: { readonly item: FollowUp };
+	readonly follow_up_consumed: { readonly id: string };
+	readonly follow_up_canceled: { readonly id: string };
+	readonly follow_up_reclaimed: { readonly id: string };
+	readonly composer_submission_recorded: { readonly submission: ComposerSubmission };
+	readonly composer_submission_retracted: { readonly id: string };
+	readonly model_selected: { readonly model: ModelSelection; readonly reasoning: ThinkingLevel | "off" };
+	readonly project_trust_changed: { readonly trust: ProjectTrustRecord };
+	readonly mcp_trust_changed: { readonly trust: WorkspaceMcpTrustRecord };
+	readonly context_compacted: { readonly checkpoint: CompactionCheckpoint };
+}
 
-export type SessionRecordType = (typeof SESSION_RECORD_TYPES)[number];
+export type SessionRecordType = keyof SessionRecordPayloadMap;
 
-export const SUPPORTED_SESSION_FORMAT_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+export const SUPPORTED_SESSION_FORMAT_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 export type SessionFormatVersion = (typeof SUPPORTED_SESSION_FORMAT_VERSIONS)[number];
-export const CURRENT_SESSION_FORMAT_VERSION = 9 satisfies SessionFormatVersion;
+export const CURRENT_SESSION_FORMAT_VERSION = 10 satisfies SessionFormatVersion;
+
+/** Runtime metadata is compile-time checked against the complete payload algebra. */
+export const SESSION_RECORD_INTRODUCED_VERSIONS = Object.freeze({
+	run_started: 1,
+	run_budget_exhausted: 10,
+	attempt_started: 1,
+	attempt_finished: 1,
+	retry_scheduled: 1,
+	message_committed: 1,
+	tool_started: 1,
+	tool_finished: 1,
+	turn_finished: 1,
+	run_finished: 1,
+	follow_up_enqueued: 1,
+	follow_up_consumed: 1,
+	follow_up_canceled: 1,
+	follow_up_reclaimed: 3,
+	composer_submission_recorded: 4,
+	composer_submission_retracted: 4,
+	model_selected: 1,
+	project_trust_changed: 1,
+	mcp_trust_changed: 6,
+	context_compacted: 7,
+} satisfies Readonly<Record<SessionRecordType, SessionFormatVersion>>);
+
+export const SESSION_RECORD_TYPES = Object.freeze(
+	Object.keys(SESSION_RECORD_INTRODUCED_VERSIONS) as SessionRecordType[],
+);
 
 export interface SessionHeader {
 	readonly type: "session";
@@ -51,8 +119,7 @@ export interface SessionHeader {
 	readonly createdAt: number;
 }
 
-export interface SessionRecord {
-	readonly type: SessionRecordType;
+interface SessionRecordEnvelope {
 	readonly recordId: string;
 	readonly sessionId: string;
 	readonly sequence: number;
@@ -61,8 +128,19 @@ export interface SessionRecord {
 	readonly runId?: string;
 	readonly turnId?: string;
 	readonly attemptId?: string;
-	readonly payload: unknown;
 }
+
+export type SessionRecordOf<Type extends SessionRecordType> = Type extends SessionRecordType
+	? SessionRecordEnvelope & { readonly type: Type; readonly payload: SessionRecordPayloadMap[Type] }
+	: never;
+
+export type SessionRecord = SessionRecordOf<SessionRecordType>;
+
+export type SessionRecordInputOf<Type extends SessionRecordType> = Type extends SessionRecordType
+	? { readonly type: Type; readonly payload: SessionRecordPayloadMap[Type] }
+	: never;
+
+export type SessionRecordInput = SessionRecordInputOf<SessionRecordType>;
 
 export interface ReducedSession {
 	readonly seed: AgentSeed;
@@ -70,7 +148,7 @@ export interface ReducedSession {
 	readonly composerSubmissions: readonly ComposerSubmission[];
 	readonly restored: RestoredSessionState;
 	readonly toolInvocations: readonly SessionToolLifecycle[];
-	readonly startedTools: ReadonlyMap<string, SessionRecord>;
+	readonly startedTools: ReadonlyMap<string, SessionRecordOf<"tool_started">>;
 	readonly activeRuns: ReadonlySet<string>;
 	readonly compactionCheckpoint?: CompactionCheckpoint;
 	readonly discardedModelCost?: number;
@@ -130,11 +208,11 @@ function persistedMcpDetails(value: unknown): unknown {
 	};
 }
 
-export function messagePayload(message: AgentMessage): { readonly message: AgentMessage } {
+export function messagePayload(message: AgentMessage): SessionRecordPayloadMap["message_committed"] {
 	return { message: persistedMessage(message) };
 }
 
-export function compactionPayload(checkpoint: CompactionCheckpoint): { readonly checkpoint: CompactionCheckpoint } {
+export function compactionPayload(checkpoint: CompactionCheckpoint): SessionRecordPayloadMap["context_compacted"] {
 	return {
 		checkpoint: {
 			...structuredClone(checkpoint),
@@ -155,7 +233,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 		}
 	>();
 	const followUpRuns = new Map<string, string>();
-	const startedTools = new Map<string, SessionRecord>();
+	const startedTools = new Map<string, SessionRecordOf<"tool_started">>();
 	const toolInvocations = new Map<string, SessionToolLifecycle>();
 	const activeRuns = new Set<string>();
 	const composerSubmissions = new Map<string, ComposerSubmission>();
@@ -167,10 +245,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let discardedModelCost: number | undefined = 0;
 
 	for (const record of records) {
-		const payload = record.payload as Record<string, unknown>;
 		switch (record.type) {
 			case "message_committed": {
-				const message = payload.message as AgentMessage<Message>;
+				const message = record.payload.message as AgentMessage<Message>;
 				if (message?.id) {
 					messages.set(message.id, structuredClone(message));
 					const queueItemId = record.runId ? followUpRuns.get(record.runId) : undefined;
@@ -193,28 +270,28 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				break;
 			}
 			case "attempt_finished": {
-				if (payload.discarded !== true) break;
-				const usage = payload.usage as Extract<Message, { role: "assistant" }>["usage"] | undefined;
+				if (record.payload.discarded !== true) break;
+				const usage = record.payload.usage;
 				if (!usage || !usage.cost) discardedModelCost = undefined;
 				else if (discardedModelCost !== undefined) discardedModelCost += usage.cost.total;
 				break;
 			}
 			case "composer_submission_recorded": {
 				firstComposerSubmissionSequence ??= record.sequence;
-				const submission = payload.submission as ComposerSubmission;
+				const submission = record.payload.submission;
 				if (submission?.id) composerSubmissions.set(submission.id, structuredClone(submission));
 				break;
 			}
 			case "composer_submission_retracted":
-				if (typeof payload.id === "string") composerSubmissions.delete(payload.id);
+				composerSubmissions.delete(record.payload.id);
 				break;
 			case "follow_up_enqueued": {
-				const item = payload.item as FollowUp;
+				const item = record.payload.item;
 				if (item?.id) followUps.set(item.id, { item: structuredClone(item), state: "paused" });
 				break;
 			}
 			case "follow_up_consumed": {
-				const id = payload.id;
+				const id = record.payload.id;
 				if (typeof id === "string") {
 					const followUp = followUps.get(id);
 					if (followUp) followUp.state = "consumed";
@@ -223,23 +300,22 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 			}
 			case "follow_up_canceled":
 			case "follow_up_reclaimed":
-				if (typeof payload.id === "string") followUps.delete(payload.id);
+				followUps.delete(record.payload.id);
 				break;
 			case "model_selected":
-				model = structuredClone(payload.model as ModelSelection);
-				reasoning = payload.reasoning as RestoredSessionState["reasoning"];
+				model = structuredClone(record.payload.model);
+				reasoning = record.payload.reasoning;
 				break;
 			case "project_trust_changed":
 			case "mcp_trust_changed":
 				// Trust records are audit facts. Only current settings may authorize local content or processes.
 				break;
 			case "context_compacted": {
-				const checkpoint = payload.checkpoint as CompactionCheckpoint | undefined;
-				if (checkpoint) compactionCheckpoint = structuredClone(checkpoint);
+				compactionCheckpoint = structuredClone(record.payload.checkpoint);
 				break;
 			}
 			case "tool_started": {
-				const invocation = payload.invocation as ToolInvocation | undefined;
+				const invocation = record.payload.invocation;
 				if (typeof invocation?.id === "string") {
 					startedTools.set(invocation.id, record);
 					toolInvocations.set(invocation.id, {
@@ -252,12 +328,12 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				break;
 			}
 			case "tool_finished": {
-				const invocation = payload.invocation as ToolInvocation | undefined;
+				const invocation = record.payload.invocation;
 				if (typeof invocation?.id === "string") {
 					const started = toolInvocations.get(invocation.id);
-					const outcome = payload.outcome as SessionToolLifecycle["outcome"];
-					const settlement = payload.settlement as SessionToolLifecycle["settlement"];
-					const rejectionReason = payload.reason as ToolRejectionReason | undefined;
+					const outcome = record.payload.outcome;
+					const settlement = "settlement" in record.payload ? record.payload.settlement : undefined;
+					const rejectionReason = record.payload.outcome === "rejected" ? record.payload.reason : undefined;
 					toolInvocations.set(invocation.id, {
 						invocation: structuredClone(invocation),
 						...((record.runId ?? started?.runId) ? { runId: record.runId ?? started?.runId } : {}),
@@ -267,9 +343,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 						...(settlement ? { settlement } : {}),
 						...(outcome ? { outcome } : {}),
 						...(rejectionReason ? { rejectionReason } : {}),
-						...(typeof payload.resultMessageId === "string"
-							? { resultMessageId: payload.resultMessageId as MessageId }
-							: {}),
+						resultMessageId: record.payload.resultMessageId as MessageId,
 					});
 					startedTools.delete(invocation.id);
 				}
@@ -277,9 +351,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 			}
 			case "run_started": {
 				if (record.runId) activeRuns.add(record.runId);
-				if (record.runId && payload.source === "follow_up" && typeof payload.queueItemId === "string") {
-					followUpRuns.set(record.runId, payload.queueItemId);
-					const followUp = followUps.get(payload.queueItemId);
+				if (record.runId && record.payload.source === "follow_up" && record.payload.queueItemId) {
+					followUpRuns.set(record.runId, record.payload.queueItemId);
+					const followUp = followUps.get(record.payload.queueItemId);
 					if (followUp) followUp.state = "running";
 				}
 				break;
@@ -289,15 +363,20 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				const queueItemId = record.runId ? followUpRuns.get(record.runId) : undefined;
 				const followUp = queueItemId ? followUps.get(queueItemId) : undefined;
 				if (followUp) {
-					if (payload.outcome === "success") followUps.delete(followUp.item.id);
-					else if (payload.outcome === "error") {
+					if (record.payload.outcome === "success") followUps.delete(followUp.item.id);
+					else if (record.payload.outcome === "error") {
 						followUp.state = "failed";
-						followUp.failure = payload.failure as RunFailure | undefined;
+						followUp.failure = "failure" in record.payload ? record.payload.failure : undefined;
 					} else followUp.state = "paused";
 				}
 				if (record.runId) followUpRuns.delete(record.runId);
 				break;
 			}
+			case "run_budget_exhausted":
+			case "attempt_started":
+			case "retry_scheduled":
+			case "turn_finished":
+				break;
 		}
 	}
 	return {
@@ -333,9 +412,9 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 }
 
 export function eventRecordInputs(
-	event: AgentEvent,
+	event: SessionEvent,
 	preparedRun: { readonly promptVersion: string; readonly promptSha256: string } | undefined,
-): readonly { type: SessionRecordType; payload: unknown }[] {
+): readonly SessionRecordInput[] {
 	switch (event.type) {
 		case "run_start": {
 			const lifecycle = event.queueItemId
@@ -415,11 +494,13 @@ export function eventRecordInputs(
 			];
 		case "turn_end":
 			return [{ type: "turn_finished", payload: { outcome: event.outcome } }];
+		case "run_budget_exhausted":
+			return [{ type: "run_budget_exhausted", payload: { exhaustion: event.exhaustion } }];
 		case "run_end":
 			return [{ type: "run_finished", payload: { outcome: event.outcome, failure: event.failure } }];
-		default:
-			return [];
 	}
+	const exhaustive: never = event;
+	return exhaustive;
 }
 
 export function descriptorHeader(descriptor: SessionDescriptor): SessionHeader {

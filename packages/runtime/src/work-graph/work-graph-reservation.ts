@@ -27,11 +27,11 @@ export async function reserveBatch(
 				)?.item ?? entry.graph.items.get(entry.item.parentId))
 			: undefined;
 		try {
-			entry.item.placement = await input.placement.reserve({
+			entry.item.process.placement = await input.placement.reserve({
 				graphId: entry.graph.id,
 				itemId: entry.item.id,
 				...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
-				...(parent?.placement ? { parent: parent.placement.placement } : {}),
+				...(parent?.process.placement ? { parent: parent.process.placement.placement } : {}),
 				mode: entry.item.executionMode,
 				sourceOrder: entry.item.order,
 				publicationOrder: entry.item.publicationOrder,
@@ -45,12 +45,12 @@ export async function reserveBatch(
 			});
 		}
 		try {
-			entry.item.session = await input.sessions.reserve({
+			entry.item.process.session = await input.sessions.reserve({
 				graphId: entry.graph.id,
 				itemId: entry.item.id,
 				...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
 				target: entry.sessionTarget,
-				placement: entry.item.placement.placement,
+				placement: entry.item.process.placement.placement,
 			});
 		} catch (error) {
 			throw input.rejection.rejected({
@@ -60,9 +60,9 @@ export async function reserveBatch(
 				itemId: entry.item.id,
 			});
 		}
-		const sessionId = input.rejection.assertIdentity(String(entry.item.session.session.id), "session");
-		entry.item.reservedSessionId = sessionId;
-		entry.item.reservedPlacementDescriptor = entry.item.placement.placement;
+		const sessionId = input.rejection.assertIdentity(String(entry.item.process.session.session.id), "session");
+		entry.item.process.reservedSessionId = sessionId;
+		entry.item.process.reservedPlacementDescriptor = entry.item.process.placement.placement;
 		if (input.sessionLeases.has(sessionId) || batchSessions.has(sessionId)) {
 			throw input.rejection.rejected({
 				code: "session_leased",
@@ -106,8 +106,8 @@ export async function commitOwnershipReservations(
 	rejected: ReservationRejectionPort["rejected"],
 ): Promise<void> {
 	try {
-		for (const entry of plan.newItems) await entry.item.placement?.commit();
-		for (const entry of plan.newItems) await entry.item.session?.commit();
+		for (const entry of plan.newItems) await entry.item.process.placement?.commit();
+		for (const entry of plan.newItems) await entry.item.process.session?.commit();
 	} catch (error) {
 		throw rejected({
 			code: "resource_reservation_failed",
@@ -130,12 +130,12 @@ export async function rollbackReservations(
 	}
 	for (const entry of [...plan.newItems].reverse()) {
 		try {
-			await entry.item.session?.rollback();
+			await entry.item.process.session?.rollback();
 		} catch (error) {
 			failures.push(error);
 		}
 		try {
-			await entry.item.placement?.rollback();
+			await entry.item.process.placement?.rollback();
 		} catch (error) {
 			failures.push(error);
 		}

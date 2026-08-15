@@ -10,8 +10,8 @@ import type {
 	RunId,
 	TurnId,
 } from "@coda/agent";
-import { type Api, createSystemScheduler, type Model } from "@coda/ai";
-import type { ModelDriverLease, WorkGraphResult } from "@coda/runtime";
+import type { Api, Model } from "@coda/ai";
+import type { ModelDriverLease, RuntimeScheduler, WorkGraphResult } from "@coda/runtime";
 import { createHeadlessCodingAgent, createMemoryWorkSessionStore, waitForGraph } from "@coda/runtime/headless";
 
 const EVALUATION_EVENT_TYPES = new Set<AgentEvent["type"]>([
@@ -23,6 +23,15 @@ const EVALUATION_EVENT_TYPES = new Set<AgentEvent["type"]>([
 	"tool_execution_end",
 	"run_end",
 ]);
+
+function createEvaluationScheduler(): RuntimeScheduler {
+	return {
+		schedule(delayMs, run) {
+			const timer = setTimeout(() => void run(), Math.max(0, delayMs));
+			return { cancel: () => clearTimeout(timer) };
+		},
+	};
+}
 
 function evaluationModel(id: string): Model<Api> {
 	return Object.freeze({
@@ -97,7 +106,7 @@ export async function openEvaluationWorkGraph(options: {
 		time: {
 			clock: options.clock,
 			random: { next: Math.random },
-			scheduler: createSystemScheduler(),
+			scheduler: createEvaluationScheduler(),
 			sleep: {
 				wait: (delayMs, signal) =>
 					new Promise<void>((resolve, reject) => {

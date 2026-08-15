@@ -4,6 +4,8 @@ status: accepted
 
 # Enforce runtime and application module boundaries
 
+ADR-0049 supersedes this decision's repository-wide `@coda/ai` Time ownership clause. ADR-0050 supersedes its hand-maintained build and boundary-enforcement mechanism; the eight-package constraint and dependency direction remain accepted.
+
 Coda keeps exactly eight packages and applies the direction “applications may know foundations; foundations never know applications.” `ai` owns Provider, API, Credential, Model, Catalog, and Time vocabulary; `agent` owns the serial Agent kernel; `runtime` owns the complete headless Work Graph product; `evals` proves that product without depending on `coding-agent`; and `coding-agent` owns the physical host and application composition. In particular, `runtime` depends exactly on `agent` and `ai` and cannot know paths, processes, shells, terminals, credentials, MCP servers, Skills, or UI.
 
 The runtime Work Coordinator is a contract adapter rather than an owner of mechanisms. Work Graph records and Aggregate projection, Observation fan-out, durable Graph storage, Session leases, admission fairness, Worker lifecycle, recovery, Publication sequencing, and state-machine progression have named internal owners. Persistent Work Graph fields are projected only from `WorkGraphAggregate.snapshot()` after `DurableGraphStore.appendFacts` applies and appends a Fact segment. The only exceptions are explicitly documented process-local fail-stop settlements whose durability is `unknown`.

@@ -4,14 +4,6 @@ Coda is a local-first terminal coding agent built first for its creator's daily 
 
 ## Language
 
-## Package and internal module ownership
-
-The package dependency direction is `ai → agent → runtime → coding-agent`, with consumers depending only toward foundations. `runtime` depends exactly on `agent` and `ai`; `evals` depends on the headless runtime product and never on `coding-agent`. `agent` owns the canonical append-only Session port, semantic Session Event algebra, Compaction Checkpoint, Run-limit validation, immutable cloning, bounded Observation queue, and live Agent Event trace projection; `coding-agent/session` extends that same port with its application journal and projections. `ai` is the only owner of Context token estimation. The complete package DAG and public subpath allowlist are executable in `scripts/boundary-rules.mjs`.
-
-Within `runtime/work-graph`, owned state and policy are split by mechanism: `WorkGraphMirror` owns persistent record projection; `ObservationFanOut` owns subscribers and observation sequence; `DurableGraphStore` owns persistence leases, mutation fences, failure latches, and watermarks; `SessionLeaseRegistry` owns Session ownership; `AdmissionController` owns fairness position; `WorkerLifecycle` owns private Worker Runtime execution, facts, observations, controls, cancellation, resources, and active slots; `PublicationSequencer` owns the durable Publication protocol; `WorkGraphRecovery` owns replay and ownership reconciliation; and `work-item-transition` owns the single Work Item state machine used by live execution and Aggregate replay. `planBatch` and `revalidateBatchPlan` own pure planning and validation; the reservation functions own external-resource and Session-ownership reservation, commit, rollback, and settlement; `WorkGraphScheduler` owns capacity-aware scheduling and cancellation projection; `WorkGraphDelegationController` owns delegated-item waiting and resumption; `WorkGraphSettlementController` owns Work Result construction and item/Graph settlement; and `WorkGraphPersistenceController` owns persistence fail-stop and close. `WorkGraphEngine` composes those mechanisms while retaining the public Coding Agent contract, command acceptance and input admission, Fact append and mutation boundaries, snapshots, and process-local interruption; `WorkCoordinator` only adapts that contract. Persistent fields are read back from the Work Graph Aggregate after a successful Fact append.
-
-Within `coding-agent`, the process application and `runtime/workspace-work-coordinator` are the two composition roots. `application.ts` retains option normalization, parse/dispatch orchestration, trust-confirmation side effects, and final composition while focused `app` modules own argument parsing, trust decisions, media handling, authentication, shared interactive-Session options, print and interactive execution, Workspace Session lifecycle, and project-runtime preparation. `OpenedSessionRuntime` owns the identical per-Session startup and shutdown sequence for primary and secondary UI Sessions; Workspace lifecycle owns only shared resources. `ChatComponent` is a thin Component shell that routes presentation and input through `ChatStateController`, `ChatTimelineRenderer`, `ChatAttachmentController`, `ChatComposerController`, and the pure `chat-rendering` helpers. `ui`, `session`, `session-history`, `tools`, `models`, `skills`, `mcp`, `credentials`, `run-evidence`, `commands`, `run-control`, `completion`, `process`, `media`, `settings`, `host`, and `maintenance` are hard internal modules. UI does not import Session journal or Work Coordinator internals; Tools depend on `session-history`, not Session; Session does not depend on Tools, UI, runtime, or commands. Biome restricted imports, import-cycle detection, and the root boundary checker enforce these rules.
-
 **Coda**:
 The product as a whole, including the terminal experience and the supporting packages that make it possible.
 _Avoid_: Pi clone, generic agent SDK
@@ -209,7 +201,7 @@ Validated, immutable state used to initialize an idle Agent from a Session witho
 _Avoid_: Session log, Agent event
 
 **Session Record**:
-An immutable semantic fact appended to a Session's linear history and linked to the immediately preceding Record.
+One member of the closed, versioned semantic fact algebra appended to a Session's linear history and linked to the immediately preceding Record.
 _Avoid_: Agent event, JSON line
 
 **Run Evidence**:

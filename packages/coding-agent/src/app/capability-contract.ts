@@ -325,8 +325,13 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary:
 			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, and Compaction Checkpoints.",
 		sources: [
-			"packages/coding-agent/src/session/records.ts",
 			"packages/coding-agent/src/session/file-session-manager.ts",
+			"packages/coding-agent/src/session/records.ts",
+			"packages/coding-agent/src/session/session-codec-registry.ts",
+			"packages/coding-agent/src/session/session-journal-store.ts",
+			"packages/coding-agent/src/session/session-lease.ts",
+			"packages/coding-agent/src/session/session-recovery.ts",
+			"packages/coding-agent/src/session/session-schema.ts",
 		],
 		tests: ["packages/coding-agent/test/session-file.test.ts", "packages/coding-agent/test/session-schema.test.ts"],
 	}),

@@ -8,7 +8,7 @@ export const PACKAGE_DEPENDENCY_MATRIX = Object.freeze({
 	mcp: Object.freeze([]),
 	runtime: Object.freeze(["agent", "ai"]),
 	skills: Object.freeze([]),
-	tui: Object.freeze(["ai"]),
+	tui: Object.freeze([]),
 });
 
 export const RUNTIME_PRIVATE_SUBPATHS = Object.freeze([
@@ -29,18 +29,24 @@ export const RUNTIME_DENIED_SYMBOLS = Object.freeze([
 
 export const RUNTIME_INTERNAL_IMPORTS = Object.freeze({
 	"observation-fan-out": Object.freeze([]),
-	"durable-graph-store": Object.freeze([]),
+	"durable-graph-store": Object.freeze(["persistence-codec"]),
 	"session-registry": Object.freeze([]),
-	"publication-sequencer": Object.freeze(["durable-graph-store"]),
-	"worker-lifecycle": Object.freeze(["durable-graph-store", "worker-runtime", "delegate-tool"]),
+	"publication-sequencer": Object.freeze(["durable-graph-store", "work-graph-fact"]),
+	"worker-lifecycle": Object.freeze([
+		"durable-graph-store",
+		"worker-runtime",
+		"delegate-tool",
+		"work-graph-fact",
+		"work-graph-records",
+	]),
 	"admission-controller": Object.freeze(["durable-graph-store", "session-registry"]),
-	"work-graph-planner": Object.freeze([]),
-	"work-graph-reservation": Object.freeze([]),
+	"work-graph-planner": Object.freeze(["work-graph-aggregate", "work-graph-records"]),
+	"work-graph-reservation": Object.freeze(["work-graph-fact", "work-graph-records"]),
 	"work-graph-submission": Object.freeze(["work-graph-planner", "work-graph-reservation"]),
-	"work-graph-scheduler": Object.freeze([]),
-	"work-graph-delegation": Object.freeze([]),
-	"work-graph-persistence": Object.freeze([]),
-	"work-graph-settlement": Object.freeze([]),
+	"work-graph-scheduler": Object.freeze(["work-graph-records"]),
+	"work-graph-delegation": Object.freeze(["work-graph-records"]),
+	"work-graph-persistence": Object.freeze(["work-graph-fact", "work-graph-records", "worker-fact"]),
+	"work-graph-settlement": Object.freeze(["work-graph-fact", "work-graph-records", "worker-fact"]),
 	"work-graph-lifecycle": Object.freeze(["work-graph-persistence", "work-graph-settlement"]),
 	"work-graph-engine": Object.freeze([
 		"durable-graph-store",
@@ -48,11 +54,29 @@ export const RUNTIME_INTERNAL_IMPORTS = Object.freeze({
 		"worker-lifecycle",
 		"publication-sequencer",
 		"work-graph-submission",
+		"work-graph-planner",
+		"work-graph-reservation",
 		"work-graph-scheduler",
 		"work-graph-delegation",
 		"work-graph-lifecycle",
+		"work-graph-fact",
+		"work-graph-records",
+		"work-item-transition",
 	]),
-	"recovery": Object.freeze(["durable-graph-store", "session-registry"]),
+	"recovery": Object.freeze([
+		"durable-graph-store",
+		"session-registry",
+		"work-graph-aggregate",
+		"work-graph-fact",
+		"work-graph-records",
+	]),
+});
+
+/** Resolved value fan-out includes the barrel modules and everything they re-export. */
+export const RUNTIME_RESOLVED_FANOUT_LIMITS = Object.freeze({
+	"work-graph-engine": 13,
+	"worker-lifecycle": 5,
+	recovery: 5,
 });
 
 export const CODING_AGENT_FORBIDDEN_EDGES = Object.freeze({
@@ -119,7 +143,11 @@ const UI_SESSION_INTERNALS = new Set([
 	"file-session-manager",
 	"managed-session",
 	"records",
-	"v1-schema",
+	"session-codec-registry",
+	"session-journal-store",
+	"session-lease",
+	"session-recovery",
+	"session-schema",
 	"media-codec",
 ]);
 const UI_RUNTIME_INTERNALS = new Set([
@@ -134,12 +162,114 @@ const UI_RUNTIME_INTERNALS = new Set([
 
 const IMPORT_PATTERN = /(?:\bfrom\s*|\bimport\s*|\brequire\(\s*)["']([^"']+)["']/gu;
 const NAMED_RUNTIME_IMPORT_PATTERN = /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+["']@coda\/runtime["']/gsu;
+const MODULE_REFERENCE_PATTERN = /\b(import|export)\s+(type\s+)?(?:[^"'`;]*?\s+from\s+)?["']([^"']+)["']/gu;
 
 export function extractImportSpecifiers(source) {
 	return [...source.matchAll(IMPORT_PATTERN)].map((match) => ({
 		specifier: match[1],
 		index: match.index ?? 0,
 	}));
+}
+
+/** Extracts static value/type imports and re-exports without erasing their role. */
+export function extractModuleReferences(source) {
+	return [...source.matchAll(MODULE_REFERENCE_PATTERN)].map((match) => ({
+		specifier: match[3],
+		index: match.index ?? 0,
+		kind: match[1] === "export" ? "reexport" : "import",
+		typeOnly: match[2] !== undefined,
+	}));
+}
+
+function runtimeSiblingName(specifier) {
+	return /^\.\/([^/]+)\.ts$/u.exec(specifier)?.[1];
+}
+
+/**
+ * Validates the resolved Runtime value graph. Re-export targets stay visible and
+ * their transitive re-exports are expanded, so adding a barrel cannot lower fan-out.
+ */
+export function lintRuntimeModuleGraph(modules) {
+	const violations = [];
+	const byName = new Map(modules.map((module) => [module.name, module]));
+	const graph = new Map();
+	for (const module of modules) {
+		const references = extractModuleReferences(module.source)
+			.filter(({ typeOnly }) => !typeOnly)
+			.map((reference) => ({ ...reference, target: runtimeSiblingName(reference.specifier) }))
+			.filter(({ target }) => target && byName.has(target));
+		graph.set(module.name, references);
+	}
+
+	const expandReexports = (target, resolved, visiting) => {
+		if (resolved.has(target)) return;
+		resolved.add(target);
+		if (visiting.has(target)) return;
+		visiting.add(target);
+		for (const reference of graph.get(target) ?? []) {
+			if (reference.kind === "reexport") expandReexports(reference.target, resolved, visiting);
+		}
+		visiting.delete(target);
+	};
+
+	for (const [moduleName, allowed] of Object.entries(RUNTIME_INTERNAL_IMPORTS)) {
+		const module = byName.get(moduleName);
+		if (!module) continue;
+		const resolved = new Set();
+		for (const reference of graph.get(moduleName) ?? []) {
+			expandReexports(reference.target, resolved, new Set());
+		}
+		for (const dependency of resolved) {
+			if (allowed.includes(dependency)) continue;
+			violations.push({
+				rule: "runtime-internal-direction",
+				file: module.file,
+				line: 1,
+				message: `${moduleName} must not resolve to ${dependency}`,
+			});
+		}
+		const limit = RUNTIME_RESOLVED_FANOUT_LIMITS[moduleName] ?? 4;
+		if (resolved.size > limit) {
+			violations.push({
+				rule: "runtime-resolved-fanout",
+				file: module.file,
+				line: 1,
+				message: `${moduleName} resolves to ${resolved.size} runtime siblings (limit: ${limit})`,
+			});
+		}
+	}
+
+	const visited = new Set();
+	const active = [];
+	const activeSet = new Set();
+	const reportedCycles = new Set();
+	const visit = (moduleName) => {
+		if (activeSet.has(moduleName)) {
+			const start = active.indexOf(moduleName);
+			const cycle = [...active.slice(start), moduleName];
+			const identity = [...new Set(cycle)].sort().join("\0");
+			if (!reportedCycles.has(identity)) {
+				reportedCycles.add(identity);
+				const module = byName.get(moduleName);
+				violations.push({
+					rule: "runtime-value-cycle",
+					file: module?.file ?? moduleName,
+					line: 1,
+					message: `runtime value cycle: ${cycle.join(" -> ")}`,
+				});
+			}
+			return;
+		}
+		if (visited.has(moduleName)) return;
+		visited.add(moduleName);
+		active.push(moduleName);
+		activeSet.add(moduleName);
+		for (const reference of graph.get(moduleName) ?? []) visit(reference.target);
+		active.pop();
+		activeSet.delete(moduleName);
+	};
+	for (const moduleName of byName.keys()) visit(moduleName);
+	return violations;
 }
 
 function lineFor(source, index) {
@@ -232,14 +362,6 @@ export function lintSource({ source, file, packageName, packageRoot }) {
 						message: `${moduleName} must not import ${sibling}`,
 					});
 				}
-			}
-			if (new Set(siblingValues).size > 4) {
-				violations.push({
-					rule: "runtime-sibling-budget",
-					file,
-					line: 1,
-					message: `${moduleName} imports more than four runtime siblings`,
-				});
 			}
 		}
 	}

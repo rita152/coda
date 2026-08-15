@@ -1,7 +1,7 @@
-import type { TimeRuntime } from "@coda/ai";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
 import type {
 	ObservationBus,
+	RuntimeTime,
 	WorkSessionReservation,
 	WorkSessionStore,
 	WorkspaceLedgerRestore,
@@ -29,7 +29,7 @@ export interface RecoveryProgressionHost {
 }
 
 export interface WorkGraphRecoveryOptions {
-	readonly time: TimeRuntime;
+	readonly time: RuntimeTime;
 	readonly placement: WorkspacePlacement;
 	readonly sessions: WorkSessionStore;
 	readonly durable: DurableGraphStore<GraphRecord>;
@@ -152,7 +152,7 @@ export class WorkGraphRecovery {
 		for (const graph of this.#options.graphOrder) {
 			for (const item of graph.itemOrder) {
 				if (!openPublications.has(itemKey(graph.id, item.id))) continue;
-				const targetPlacementId = item.placementDescriptor?.targetPlacementId;
+				const targetPlacementId = item.projection.placementDescriptor?.targetPlacementId;
 				if (targetPlacementId) uncertainPublicationTargets.add(targetPlacementId);
 			}
 		}
@@ -162,28 +162,33 @@ export class WorkGraphRecovery {
 				continue;
 			}
 			for (const item of graph.itemOrder) {
-				if (item.result) continue;
+				if (item.projection.result) continue;
 				const key = itemKey(graph.id, item.id);
 				const reasons: string[] = [];
-				if (item.state === "preparing" || item.state === "running" || item.state === "settling") {
-					reasons.push(`uncertain_${item.state}`);
+				if (
+					item.projection.state === "preparing" ||
+					item.projection.state === "running" ||
+					item.projection.state === "settling"
+				) {
+					reasons.push(`uncertain_${item.projection.state}`);
 				}
-				if (item.factProjection.openAttempts.length > 0) reasons.push("unclosed_model_attempt");
-				if (item.factProjection.openTools.length > 0) reasons.push("unclosed_tool_invocation");
+				if (item.projection.factProjection.openAttempts.length > 0) reasons.push("unclosed_model_attempt");
+				if (item.projection.factProjection.openTools.length > 0) reasons.push("unclosed_tool_invocation");
 				if (openPublications.has(key)) reasons.push("unclosed_publication");
-				const targetPlacementId = item.placementDescriptor?.targetPlacementId;
+				const targetPlacementId = item.projection.placementDescriptor?.targetPlacementId;
 				if (targetPlacementId && uncertainPublicationTargets.has(targetPlacementId)) {
 					reasons.push("uncertain_publication_target");
 				}
 				reasons.push(...(resourceRecoveryFailures.get(key) ?? []));
-				if (isTerminal(item.state)) reasons.push("terminal_without_result");
+				if (isTerminal(item.projection.state)) reasons.push("terminal_without_result");
 				if (reasons.length > 0) {
 					await this.#markRecoveredInterrupted(graph, item, reasons, publicationArtifacts.get(key));
 					continue;
 				}
 				try {
 					const expectedTargetIdentity = targetPlacementId
-						? (settledTargetIdentities.get(targetPlacementId) ?? item.placementDescriptor?.targetIdentity)
+						? (settledTargetIdentities.get(targetPlacementId) ??
+							item.projection.placementDescriptor?.targetIdentity)
 						: undefined;
 					await this.#recoverOwnership(graph, item, expectedTargetIdentity);
 				} catch (error) {
@@ -201,8 +206,12 @@ export class WorkGraphRecovery {
 			if (graph.result) continue;
 			const expectedOwners = new Map<string, WorkspaceSessionOwner>();
 			for (const item of graph.itemOrder) {
-				if (!item.sessionId || item.resourcesReleased) continue;
-				expectedOwners.set(item.sessionId, { sessionId: item.sessionId, graphId: graph.id, itemId: item.id });
+				if (!item.projection.sessionId || item.projection.ownershipReleased) continue;
+				expectedOwners.set(item.projection.sessionId, {
+					sessionId: item.projection.sessionId,
+					graphId: graph.id,
+					itemId: item.id,
+				});
 			}
 			for (const owner of ledgerRestore.sessionOwners.filter((candidate) => candidate.graphId === graph.id)) {
 				if (expectedOwners.has(owner.sessionId)) continue;
@@ -235,7 +244,8 @@ export class WorkGraphRecovery {
 	}
 
 	async #recoverOwnership(graph: GraphRecord, item: ItemRecord, expectedTargetIdentity?: string): Promise<void> {
-		if (!item.sessionId || !item.placementDescriptor) throw new Error("Persisted Work ownership is incomplete");
+		if (!item.projection.sessionId || !item.projection.placementDescriptor)
+			throw new Error("Persisted Work ownership is incomplete");
 		let placement: WorkspacePlacementReservation | undefined;
 		let session: WorkSessionReservation | undefined;
 		try {
@@ -243,7 +253,7 @@ export class WorkGraphRecovery {
 				graphId: graph.id,
 				itemId: item.id,
 				...(item.parentId ? { parentItemId: item.parentId } : {}),
-				placement: item.placementDescriptor,
+				placement: item.projection.placementDescriptor,
 				mode: item.executionMode,
 				sourceOrder: item.order,
 				publicationOrder: item.publicationOrder,
@@ -253,23 +263,23 @@ export class WorkGraphRecovery {
 				graphId: graph.id,
 				itemId: item.id,
 				...(item.parentId ? { parentItemId: item.parentId } : {}),
-				target: { type: "resume", sessionId: item.sessionId },
+				target: { type: "resume", sessionId: item.projection.sessionId },
 				placement: placement.placement,
 			});
-			if (String(session.session.id) !== item.sessionId) {
+			if (String(session.session.id) !== item.projection.sessionId) {
 				throw new Error(
-					`Recovered Session identity changed from ${item.sessionId} to ${String(session.session.id)}`,
+					`Recovered Session identity changed from ${item.projection.sessionId} to ${String(session.session.id)}`,
 				);
 			}
-			const currentOwner = this.#options.sessionRegistry.owner(item.sessionId);
+			const currentOwner = this.#options.sessionRegistry.owner(item.projection.sessionId);
 			if (currentOwner && (currentOwner.graphId !== graph.id || currentOwner.itemId !== item.id)) {
-				throw new Error(`Recovered Session is already leased: ${item.sessionId}`);
+				throw new Error(`Recovered Session is already leased: ${item.projection.sessionId}`);
 			}
 			await placement.commit();
 			await session.commit();
-			item.placement = placement;
-			item.session = session;
-			this.#options.sessionRegistry.claim(item.sessionId, graph.id, item.id);
+			item.process.placement = placement;
+			item.process.session = session;
+			this.#options.sessionRegistry.claim(item.projection.sessionId, graph.id, item.id);
 		} catch (error) {
 			try {
 				await session?.rollback();
@@ -287,7 +297,7 @@ export class WorkGraphRecovery {
 		reasons: readonly string[],
 		artifact?: WorkspaceArtifact,
 	): Promise<void> {
-		const from = item.state;
+		const from = item.projection.state;
 		await this.#options.durable.appendFacts(graph, [
 			{
 				version: WORK_GRAPH_FACT_VERSION,
@@ -300,7 +310,7 @@ export class WorkGraphRecovery {
 				...(artifact ? { artifact } : {}),
 			},
 		]);
-		item.resourcesReleased = true;
+		item.process.resourcesReleased = true;
 		const state = graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === item.id)!;
 		this.#publish((sequence) => ({
 			type: "item_state_changed",

@@ -1,9 +1,12 @@
 import {
+	SESSION_RECORD_INTRODUCED_VERSIONS,
 	type SessionFormatVersion,
 	type SessionHeader,
 	type SessionRecordType,
 	SUPPORTED_SESSION_FORMAT_VERSIONS,
 } from "./records.ts";
+
+/** Validators for every supported Session journal version. */
 
 type JsonRecord = Record<string, unknown>;
 
@@ -413,11 +416,12 @@ export function isSessionRecordEnvelope(value: unknown): value is ValidSessionRe
 	);
 }
 
-export function isSessionRecordPayload(
+function validateSessionRecordPayload(
 	type: SessionRecordType,
 	payload: unknown,
-	version: SessionFormatVersion = 1,
+	version: SessionFormatVersion,
 ): boolean {
+	if (version < SESSION_RECORD_INTRODUCED_VERSIONS[type]) return false;
 	switch (type) {
 		case "run_started":
 			return (
@@ -427,6 +431,15 @@ export function isSessionRecordPayload(
 				(payload.promptVersion === undefined || isNonEmptyString(payload.promptVersion)) &&
 				(payload.promptSha256 === undefined ||
 					(typeof payload.promptSha256 === "string" && /^[a-f0-9]{64}$/.test(payload.promptSha256)))
+			);
+		case "run_budget_exhausted":
+			return (
+				version >= 10 &&
+				exactRecord(payload, ["exhaustion"]) &&
+				exactRecord(payload.exhaustion, ["limit", "maximum", "observed"]) &&
+				RUN_LIMITS.has(String(payload.exhaustion.limit)) &&
+				isFiniteNumber(payload.exhaustion.maximum) &&
+				isFiniteNumber(payload.exhaustion.observed)
 			);
 		case "attempt_started":
 			return (
@@ -557,6 +570,45 @@ export function isSessionRecordPayload(
 				version >= 7 && exactRecord(payload, ["checkpoint"]) && isCompactionCheckpoint(payload.checkpoint, version)
 			);
 	}
+	const exhaustive: never = type;
+	return exhaustive;
+}
+
+type SessionRecordPayloadValidator = (payload: unknown, version: SessionFormatVersion) => boolean;
+
+function validatorFor(type: SessionRecordType): SessionRecordPayloadValidator {
+	return (payload, version) => validateSessionRecordPayload(type, payload, version);
+}
+
+export const SESSION_RECORD_PAYLOAD_VALIDATORS = Object.freeze({
+	run_started: validatorFor("run_started"),
+	run_budget_exhausted: validatorFor("run_budget_exhausted"),
+	attempt_started: validatorFor("attempt_started"),
+	attempt_finished: validatorFor("attempt_finished"),
+	retry_scheduled: validatorFor("retry_scheduled"),
+	message_committed: validatorFor("message_committed"),
+	tool_started: validatorFor("tool_started"),
+	tool_finished: validatorFor("tool_finished"),
+	turn_finished: validatorFor("turn_finished"),
+	run_finished: validatorFor("run_finished"),
+	follow_up_enqueued: validatorFor("follow_up_enqueued"),
+	follow_up_consumed: validatorFor("follow_up_consumed"),
+	follow_up_canceled: validatorFor("follow_up_canceled"),
+	follow_up_reclaimed: validatorFor("follow_up_reclaimed"),
+	composer_submission_recorded: validatorFor("composer_submission_recorded"),
+	composer_submission_retracted: validatorFor("composer_submission_retracted"),
+	model_selected: validatorFor("model_selected"),
+	project_trust_changed: validatorFor("project_trust_changed"),
+	mcp_trust_changed: validatorFor("mcp_trust_changed"),
+	context_compacted: validatorFor("context_compacted"),
+} satisfies Readonly<Record<SessionRecordType, SessionRecordPayloadValidator>>);
+
+export function isSessionRecordPayload(
+	type: SessionRecordType,
+	payload: unknown,
+	version: SessionFormatVersion = 1,
+): boolean {
+	return SESSION_RECORD_PAYLOAD_VALIDATORS[type](payload, version);
 }
 
 function isCompactionCheckpoint(value: unknown, version: SessionFormatVersion): boolean {

@@ -1,6 +1,5 @@
-import type { TimeRuntime } from "@coda/ai";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
-import type { WorkspacePublication } from "./ports.ts";
+import type { RuntimeTime, WorkspacePublication } from "./ports.ts";
 import type {
 	PublicationOutcome,
 	WorkDiagnostic,
@@ -25,12 +24,12 @@ export interface PublicationSettlement {
 export class PublicationSequencer {
 	readonly #durable: DurableGraphStore<GraphRecord>;
 	readonly #publication: WorkspacePublication;
-	readonly #time: TimeRuntime;
+	readonly #time: RuntimeTime;
 
 	constructor(options: {
 		readonly durable: DurableGraphStore<GraphRecord>;
 		readonly publication: WorkspacePublication;
-		readonly time: TimeRuntime;
+		readonly time: RuntimeTime;
 	}) {
 		this.#durable = options.durable;
 		this.#publication = options.publication;
@@ -48,17 +47,17 @@ export class PublicationSequencer {
 	}): Promise<PublicationSettlement> {
 		const { graph, item, artifact } = request;
 		let terminal = request.terminal;
-		let publication: PublicationOutcome = item.cancellationRequested
+		let publication: PublicationOutcome = item.projection.cancellationRequested
 			? { state: "not_published", reason: "canceled" }
 			: terminal !== "succeeded"
 				? { state: "not_published", reason: terminal === "interrupted" ? "interrupted" : "failed" }
 				: { state: "not_required" };
 		const diagnostics: WorkDiagnostic[] = [];
 		let started = false;
-		if (!item.cancellationRequested && terminal === "succeeded") {
+		if (!item.projection.cancellationRequested && terminal === "succeeded") {
 			try {
 				started = await this.#durable.mutation(graph.id, async () => {
-					if (item.cancellationRequested || graph.cancellationRequested) return false;
+					if (item.projection.cancellationRequested || graph.cancellationRequested) return false;
 					await this.#durable.appendFacts(graph, [
 						{
 							version: WORK_GRAPH_FACT_VERSION,
@@ -78,7 +77,7 @@ export class PublicationSequencer {
 				diagnostics.push({ code: "publication_start_barrier_failed", message: errorMessage(error) });
 			}
 		}
-		if (!started && (item.cancellationRequested || graph.cancellationRequested)) {
+		if (!started && (item.projection.cancellationRequested || graph.cancellationRequested)) {
 			terminal = "canceled";
 			publication = { state: "not_published", reason: "canceled" };
 		}

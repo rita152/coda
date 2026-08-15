@@ -4,8 +4,8 @@
 		"includes": [
 			"packages/*/src/**/*.ts",
 			"packages/*/test/**/*.ts",
-				"packages/*/scripts/**/*.ts",
-				"packages/*/scripts/**/*.mjs",
+			"packages/*/scripts/**/*.ts",
+			"packages/*/scripts/**/*.mjs",
 			"packages/*/*.config.ts",
 			"!**/node_modules/**/*",
 			"!**/dist/**/*"
@@ -34,102 +34,5 @@
 				"noExplicitAny": "off"
 			}
 		}
-	},
-	"overrides": [
-		{
-			"includes": ["packages/coding-agent/src/ui/**/*.ts"],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": [
-											"../session/file-session-manager.ts",
-											"../session/managed-session.ts",
-											"../session/records.ts",
-											"../session/v1-schema.ts",
-											"../session/media-codec.ts",
-											"../session/compaction.ts",
-											"../session/draft-session.ts",
-											"../runtime/workspace-work-coordinator.ts",
-											"../runtime/workspace-concurrency.ts",
-											"../runtime/file-workspace-persistence.ts",
-											"../runtime/direct-workspace-execution.ts",
-											"../runtime/git-worktree-workspace-execution.ts",
-											"../runtime/capability-contract.ts",
-											"../runtime/model-catalog.ts"
-										],
-										"message": "UI may consume projections and SessionWorkController, not coordinator or journal internals."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": ["packages/coding-agent/src/tools/**/*.ts"],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": ["../session/**", "../ui/**"],
-										"message": "Tools depend on session-history and host/process ports, not Session or UI."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": ["packages/coding-agent/src/session/**/*.ts"],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": ["../tools/**", "../ui/**", "../runtime/**", "../commands/**"],
-										"message": "Session journal code must remain independent of application coordination."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		},
-		{
-			"includes": ["packages/coding-agent/src/runtime/**/*.ts"],
-			"linter": {
-				"rules": {
-					"style": {
-						"noRestrictedImports": {
-							"level": "error",
-							"options": {
-								"patterns": [
-									{
-										"group": ["../ui/**", "../commands/**", "../app/**"],
-										"message": "Workspace runtime composition must not depend on UI, commands, or the process app root."
-									}
-								]
-							}
-						}
-					}
-				}
-			}
-		}
-	]
+	}
 }

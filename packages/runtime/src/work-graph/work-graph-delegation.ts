@@ -29,11 +29,15 @@ export class WorkGraphDelegationController {
 		specifications: readonly DelegatedWorkItemSpecification[],
 		signal: AbortSignal,
 	): Promise<readonly WorkResult[]> {
-		if (parent.executionMode !== "write" || parent.state !== "running" || parent.cancellationRequested) {
-			throw new Error(`Work Item ${parent.id} cannot delegate in ${parent.state}`);
+		if (
+			parent.executionMode !== "write" ||
+			parent.projection.state !== "running" ||
+			parent.projection.cancellationRequested
+		) {
+			throw new Error(`Work Item ${parent.id} cannot delegate in ${parent.projection.state}`);
 		}
-		if (parent.delegationWaiting) throw new Error(`Work Item ${parent.id} is already waiting on delegation`);
-		parent.delegationWaiting = true;
+		if (parent.process.delegationWaiting) throw new Error(`Work Item ${parent.id} is already waiting on delegation`);
+		parent.process.delegationWaiting = true;
 		this.#host.deactivate(graph, parent);
 		try {
 			signal.throwIfAborted();
@@ -59,7 +63,7 @@ export class WorkGraphDelegationController {
 			const delegatedIds = receipt.itemIds;
 			while (true) {
 				signal.throwIfAborted();
-				const results = delegatedIds.map((id) => graph.items.get(id)?.result);
+				const results = delegatedIds.map((id) => graph.items.get(id)?.projection.result);
 				if (results.every((result): result is WorkResult => result !== undefined)) {
 					return Object.freeze(results);
 				}
@@ -96,26 +100,26 @@ export class WorkGraphDelegationController {
 	}
 
 	async #resumeDelegatingItem(item: ItemRecord, signal: AbortSignal): Promise<void> {
-		if (item.active) {
-			item.delegationWaiting = false;
+		if (item.process.active) {
+			item.process.delegationWaiting = false;
 			return;
 		}
-		if (item.cancellationRequested || signal.aborted || isTerminal(item.state)) {
-			item.delegationWaiting = false;
+		if (item.projection.cancellationRequested || signal.aborted || isTerminal(item.projection.state)) {
+			item.process.delegationWaiting = false;
 			return;
 		}
 		await new Promise<void>((resolve, reject) => {
 			const onAbort = (): void => {
-				if (item.delegationResume?.resolve !== onResume) return;
-				item.delegationResume = undefined;
-				item.delegationWaiting = false;
+				if (item.process.delegationResume?.resolve !== onResume) return;
+				item.process.delegationResume = undefined;
+				item.process.delegationWaiting = false;
 				reject(signal.reason);
 			};
 			const onResume = (): void => {
 				signal.removeEventListener("abort", onAbort);
 				resolve();
 			};
-			item.delegationResume = {
+			item.process.delegationResume = {
 				resolve: onResume,
 				reject: (error) => {
 					signal.removeEventListener("abort", onAbort);

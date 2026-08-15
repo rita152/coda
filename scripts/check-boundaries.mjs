@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 
-import { readFile, readdir } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	extractImportSpecifiers,
 	lintSource,
+	lintRuntimeModuleGraph,
 	PACKAGE_DEPENDENCY_MATRIX,
 	RUNTIME_DENIED_SYMBOLS,
 	RUNTIME_PRIVATE_SUBPATHS,
 } from "./boundary-rules.mjs";
+import { discoverWorkspacePackages, workspacePolicyDifferences } from "./workspace-graph.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagesRoot = join(repositoryRoot, "packages");
@@ -29,14 +32,49 @@ async function filesBelow(root, predicate) {
 async function inspectRepository() {
 	const violations = [];
 	const report = {};
-	for (const packageName of Object.keys(PACKAGE_DEPENDENCY_MATRIX)) {
-		const packageRoot = join(packagesRoot, packageName);
-		const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+	const workspaces = await discoverWorkspacePackages(repositoryRoot);
+	const policy = workspacePolicyDifferences(workspaces, PACKAGE_DEPENDENCY_MATRIX);
+	for (const packageName of policy.missingPolicy) {
+		violations.push({
+			rule: "workspace-policy-missing",
+			file: join(packagesRoot, packageName, "package.json"),
+			line: 1,
+			message: `${packageName} is a workspace but has no package dependency policy`,
+		});
+	}
+	for (const packageName of policy.stalePolicy) {
+		violations.push({
+			rule: "workspace-policy-stale",
+			file: join(packagesRoot, packageName, "package.json"),
+			line: 1,
+			message: `${packageName} has package dependency policy but is not a workspace`,
+		});
+	}
+	const runtimeModules = [];
+	for (const workspace of workspaces) {
+		const packageName = workspace.directoryName;
+		const packageRoot = workspace.root;
+		const manifest = workspace.manifest;
+		if (manifest.name !== `@coda/${packageName}`) {
+			violations.push({
+				rule: "workspace-manifest-name",
+				file: workspace.manifestPath,
+				line: 1,
+				message: `${packageName} must declare package name @coda/${packageName}`,
+			});
+		}
 		const files = await filesBelow(packageRoot, (path) => path.endsWith(".ts") || path.endsWith(".mjs"));
 		const codaImports = new Map();
 		let sourceLines = 0;
 		for (const file of files) {
 			const source = await readFile(file, "utf8");
+			if (packageName === "runtime" && dirname(file) === join(packageRoot, "src", "work-graph")) {
+				runtimeModules.push({
+					name: basename(file, ".ts"),
+					file,
+					source,
+				});
+			}
 			if (file.includes(`${join(packageRoot, "src")}/`) || file.startsWith(join(packageRoot, "src"))) {
 				sourceLines += source.split("\n").length;
 			}
@@ -69,10 +107,11 @@ async function inspectRepository() {
 		}
 		report[packageName] = { declared, imports: Object.fromEntries([...codaImports].sort()), sourceLines };
 	}
+	violations.push(...lintRuntimeModuleGraph(runtimeModules));
 	return { violations, report };
 }
 
-function runSelfTest() {
+async function runSelfTest() {
 	const fixtures = [
 		{
 			name: "package direction",
@@ -139,16 +178,54 @@ function runSelfTest() {
 		},
 	];
 	const failures = fixtures.filter(({ input, rule }) => !lintSource(input).some((violation) => violation.rule === rule));
+	const barrelViolations = lintRuntimeModuleGraph([
+		{
+			name: "work-graph-engine",
+			file: "/repo/packages/runtime/src/work-graph/work-graph-engine.ts",
+			source: 'import { hidden } from "./work-graph-submission.ts";\nvoid hidden;',
+		},
+		{
+			name: "work-graph-submission",
+			file: "/repo/packages/runtime/src/work-graph/work-graph-submission.ts",
+			source: 'export { hidden } from "./unexpected-owner.ts";',
+		},
+		{
+			name: "unexpected-owner",
+			file: "/repo/packages/runtime/src/work-graph/unexpected-owner.ts",
+			source: "export const hidden = true;",
+		},
+	]);
+	if (!barrelViolations.some(({ rule, message }) => rule === "runtime-internal-direction" && message.includes("unexpected-owner"))) {
+		failures.push({ name: "barrel expansion" });
+	}
+
+	const temporaryRoot = await mkdtemp(join(tmpdir(), "coda-boundary-self-test-"));
+	try {
+		await mkdir(join(temporaryRoot, "packages", "unknown"), { recursive: true });
+		await writeFile(
+			join(temporaryRoot, "package.json"),
+			JSON.stringify({ private: true, workspaces: ["packages/*"] }),
+		);
+		await writeFile(
+			join(temporaryRoot, "packages", "unknown", "package.json"),
+			JSON.stringify({ name: "@coda/unknown" }),
+		);
+		const workspaces = await discoverWorkspacePackages(temporaryRoot);
+		const policy = workspacePolicyDifferences(workspaces, PACKAGE_DEPENDENCY_MATRIX);
+		if (!policy.missingPolicy.includes("unknown")) failures.push({ name: "unknown workspace" });
+	} finally {
+		await rm(temporaryRoot, { recursive: true, force: true });
+	}
 	if (failures.length > 0) {
 		for (const failure of failures) console.error(`self-test failed: ${failure.name}`);
 		process.exitCode = 1;
 		return;
 	}
-	console.log(`Boundary self-test passed (${fixtures.length} planted violations rejected).`);
+	console.log(`Boundary self-test passed (${fixtures.length + 2} planted violations rejected).`);
 }
 
 if (process.argv.includes("--self-test")) {
-	runSelfTest();
+	await runSelfTest();
 } else {
 	const { violations, report } = await inspectRepository();
 	if (process.argv.includes("--report")) {

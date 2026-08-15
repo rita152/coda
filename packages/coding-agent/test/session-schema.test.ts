@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isSessionRecordPayload } from "../src/session/v1-schema.ts";
+import { isSessionRecordPayload } from "../src/session/session-schema.ts";
 
 describe("Session message schema", () => {
+	it("admits Run Budget exhaustion only in the format that introduced it", () => {
+		const payload = { exhaustion: { limit: "model_attempts", maximum: 3, observed: 4 } };
+		expect(isSessionRecordPayload("run_budget_exhausted", payload, 10)).toBe(true);
+		expect(isSessionRecordPayload("run_budget_exhausted", payload, 9)).toBe(false);
+	});
+
 	it("accepts structured Skill references alongside injected context", () => {
 		expect(
 			isSessionRecordPayload(

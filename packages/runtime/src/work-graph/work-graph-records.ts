@@ -54,23 +54,24 @@ export interface InputAdmission {
 	settlement?: { readonly outcome: "committed" | "failed"; readonly diagnostic?: string };
 }
 
-export interface ItemRecord {
-	readonly id: WorkItemId;
-	readonly graphId: WorkGraphId;
-	readonly order: number;
-	readonly parentId?: WorkItemId;
-	readonly dependencies: readonly WorkItemId[];
-	readonly objective: string;
-	readonly executionMode: "read_only" | "write";
-	acceptedAt: number;
-	readonly publicationOrder: number;
-	readonly runtimeId: string;
-	desiredConfiguration: DesiredRuntimeConfiguration;
-	state: WorkItemState;
-	cancellationRequested: boolean;
-	startedAt?: number;
+/** Immutable durable state replaced only by WorkGraphMirror after Aggregate application. */
+export interface ItemProjection {
+	readonly acceptedAt: number;
+	readonly desiredConfiguration: DesiredRuntimeConfiguration;
+	readonly state: WorkItemState;
+	readonly cancellationRequested: boolean;
+	readonly startedAt?: number;
+	readonly sessionId?: string;
+	readonly placementDescriptor?: WorkspacePlacementDescriptor;
+	readonly factProjection: WorkerFactProjection;
+	readonly result?: WorkResult;
+	readonly ownershipReleased: boolean;
+	readonly promptAccepted: boolean;
+}
+
+/** Process-local state. None of these fields may define restored durable state. */
+export interface ItemRuntimeState {
 	run?: RunResult;
-	result?: WorkResult;
 	runtime?: PrivateWorkerRuntimeHandle;
 	runtimeOpening?: Promise<PrivateWorkerRuntimeHandle>;
 	runtimeTeardown?: Promise<boolean>;
@@ -81,15 +82,11 @@ export interface ItemRecord {
 	reservedSessionId?: string;
 	/** Admission-owned reservation descriptor before the acceptance Fact is durable. */
 	reservedPlacementDescriptor?: WorkspacePlacementDescriptor;
-	sessionId?: string;
-	placementDescriptor?: WorkspacePlacementDescriptor;
 	readonly diagnostics: WorkDiagnostic[];
 	readonly pendingInputs: PendingInput[];
 	readonly inputAdmissions: InputAdmission[];
-	promptAccepted: boolean;
 	promptInput?: WorkerSubmission;
 	droppedInputs: number;
-	factProjection: WorkerFactProjection;
 	barrierFailure?: WorkerBarrierFailure;
 	uncertainExternalEffect: boolean;
 	active: boolean;
@@ -100,6 +97,20 @@ export interface ItemRecord {
 		readonly resolve: () => void;
 		readonly reject: (error: unknown) => void;
 	};
+}
+
+export interface ItemRecord {
+	readonly id: WorkItemId;
+	readonly graphId: WorkGraphId;
+	readonly order: number;
+	readonly parentId?: WorkItemId;
+	readonly dependencies: readonly WorkItemId[];
+	readonly objective: string;
+	readonly executionMode: "read_only" | "write";
+	readonly publicationOrder: number;
+	readonly runtimeId: string;
+	readonly projection: ItemProjection;
+	readonly process: ItemRuntimeState;
 }
 
 export interface GraphRecord {
@@ -150,22 +161,27 @@ export function makeItem(input: {
 		dependencies: Object.freeze([...(input.dependencies ?? [])]),
 		objective: input.objective,
 		executionMode: input.executionMode,
-		desiredConfiguration: immutableData(input.configuration),
-		acceptedAt: input.acceptedAt,
 		publicationOrder: input.publicationOrder,
 		runtimeId: input.runtimeId,
-		state: "pending",
-		cancellationRequested: false,
-		diagnostics: [],
-		pendingInputs: [],
-		inputAdmissions: [],
-		promptAccepted: false,
-		droppedInputs: 0,
-		factProjection: INITIAL_WORKER_FACT_PROJECTION,
-		uncertainExternalEffect: false,
-		active: false,
-		resourcesReleased: false,
-		delegationWaiting: false,
+		projection: immutableData({
+			acceptedAt: input.acceptedAt,
+			desiredConfiguration: input.configuration,
+			state: "pending",
+			cancellationRequested: false,
+			factProjection: INITIAL_WORKER_FACT_PROJECTION,
+			ownershipReleased: false,
+			promptAccepted: false,
+		}),
+		process: {
+			diagnostics: [],
+			pendingInputs: [],
+			inputAdmissions: [],
+			droppedInputs: 0,
+			uncertainExternalEffect: false,
+			active: false,
+			resourcesReleased: false,
+			delegationWaiting: false,
+		},
 	};
 }
 
@@ -214,8 +230,9 @@ export class WorkGraphMirror {
 				runtimeId: state.runtimeId,
 			});
 			this.projectItem(item, state);
+			item.process.resourcesReleased = state.ownershipReleased !== undefined;
 			if (state.result) {
-				item.diagnostics.push(...state.result.diagnostics);
+				item.process.diagnostics.push(...state.result.diagnostics);
 			} else {
 				for (const input of state.inputs) {
 					const command: DeliverWorkItemInput = {
@@ -226,7 +243,7 @@ export class WorkGraphMirror {
 						input: input.input,
 						...(input.resourceReferences.length > 0 ? { resources: input.resourceReferences } : {}),
 					};
-					item.inputAdmissions.push({
+					item.process.inputAdmissions.push({
 						deliveryId: input.deliveryId,
 						command,
 						...(input.settlement === "pending"
@@ -260,16 +277,25 @@ export class WorkGraphMirror {
 	}
 
 	projectItem(item: ItemRecord, state: WorkGraphAggregateItem): void {
-		item.acceptedAt = state.acceptedAt;
-		item.desiredConfiguration = state.desiredConfiguration;
-		item.sessionId = state.sessionId;
-		item.placementDescriptor = state.placement;
-		item.state = state.state;
-		item.cancellationRequested = state.cancellationRequested;
-		item.startedAt = state.startedAt;
-		item.factProjection = state.worker;
-		item.resourcesReleased = state.ownershipReleased !== undefined;
-		item.promptAccepted = state.inputs.some(({ kind }) => kind === "prompt");
-		item.result = state.result;
+		const mutable = item as { projection: ItemProjection };
+		mutable.projection = immutableData({
+			acceptedAt: state.acceptedAt,
+			desiredConfiguration: state.desiredConfiguration,
+			state: state.state,
+			cancellationRequested: state.cancellationRequested,
+			...(state.startedAt === undefined ? {} : { startedAt: state.startedAt }),
+			...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
+			...(state.placement === undefined ? {} : { placementDescriptor: state.placement }),
+			factProjection: state.worker,
+			...(state.result === undefined ? {} : { result: state.result }),
+			ownershipReleased: state.ownershipReleased !== undefined,
+			promptAccepted: state.inputs.some(({ kind }) => kind === "prompt"),
+		});
+	}
+
+	/** Projects one documented process-local settlement when persistence is unavailable. */
+	projectUndurableSettlement(item: ItemRecord, state: WorkResult["state"], result: WorkResult): void {
+		const mutable = item as { projection: ItemProjection };
+		mutable.projection = immutableData({ ...item.projection, state, result });
 	}
 }

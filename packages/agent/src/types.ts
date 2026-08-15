@@ -1,7 +1,6 @@
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
-	Clock,
 	Context,
 	ImageContent,
 	Message,
@@ -14,7 +13,10 @@ import type {
 	UserMessage,
 } from "@coda/ai";
 
-export type { Clock } from "@coda/ai";
+/** Agent-local host clock seam. Structurally compatible clocks need no shared owner. */
+export interface Clock {
+	now(): number;
+}
 
 declare const opaqueId: unique symbol;
 

@@ -1,5 +1,4 @@
 import type {
-	AgentEvent,
 	AgentSeed,
 	Session as AgentSession,
 	SessionChange as AgentSessionChange,
@@ -10,6 +9,7 @@ import type {
 	MessageId,
 	QueueItemId,
 	RunFailure,
+	SessionEvent,
 	ToolInvocation,
 	ToolRejectionReason,
 } from "@coda/agent";
@@ -127,7 +127,7 @@ export interface Session extends AgentSession {
 	registerMedia(registrations: readonly SessionMediaRegistration[]): void;
 	/** Adds final Workspace facts after the Agent's terminal event has projected native evidence. */
 	supplementRunEvidence(runId: string, supplement: RunEvidenceWorkspaceDiffSupplement): void;
-	accept(event: AgentEvent): Promise<void>;
+	accept(event: SessionEvent): Promise<void>;
 	record(change: SessionChange): Promise<void>;
 	close(): Promise<void>;
 }

@@ -54,7 +54,20 @@ function transientFailure(clock: Clock, tokens = 0): AssistantMessage {
 			type: "stream_error",
 			timestamp: clock.now(),
 			error: { message: message.errorMessage!, code: "ECONNRESET" },
-			details: { phase: "stream", provider: "faux", api: "faux", status: 503, retryable: true },
+			details: {
+				phase: "stream",
+				provider: "faux",
+				api: "faux",
+				status: 503,
+				retryable: true,
+				failure: {
+					phase: "stream",
+					category: "transport",
+					retryability: "retryable",
+					providerCode: "ECONNRESET",
+					httpStatus: 503,
+				},
+			},
 		},
 	];
 	return message;

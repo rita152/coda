@@ -1,5 +1,4 @@
 import type { AgentInput, RunBudget } from "@coda/agent";
-import type { TimeRuntime } from "@coda/ai";
 import type { RunCapabilityHost } from "../run-capabilities.ts";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
 import type {
@@ -7,6 +6,7 @@ import type {
 	InputResourceStore,
 	ObservationBus,
 	RunModelProvider,
+	RuntimeTime,
 	WorkAdmission,
 	WorkerControlSink,
 	WorkSessionStore,
@@ -37,7 +37,7 @@ import type {
 } from "./types.ts";
 import { WorkGraphDelegationController } from "./work-graph-delegation.ts";
 import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
-import { WorkGraphPersistenceController, WorkGraphSettlementController } from "./work-graph-lifecycle.ts";
+import { WorkGraphLifecycle } from "./work-graph-lifecycle.ts";
 import {
 	errorMessage,
 	type GraphRecord,
@@ -67,7 +67,7 @@ import type { WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
 
 export interface WorkGraphEngineOptions {
-	readonly time: TimeRuntime;
+	readonly time: RuntimeTime;
 	readonly identity: Identity;
 	readonly modelProvider: RunModelProvider;
 	readonly runCapabilities: RunCapabilityHost;
@@ -96,8 +96,7 @@ export class WorkGraphEngine implements CodingAgent {
 	readonly #admission: WorkAdmission;
 	readonly #scheduler: WorkGraphScheduler;
 	readonly #delegation: WorkGraphDelegationController;
-	readonly #persistence: WorkGraphPersistenceController;
-	readonly #settlement: WorkGraphSettlementController;
+	readonly #lifecycle: WorkGraphLifecycle;
 
 	constructor(
 		options: WorkGraphEngineOptions,
@@ -136,19 +135,19 @@ export class WorkGraphEngine implements CodingAgent {
 						delegate: (specifications, signal) => this.#delegation.delegate(graph, item, specifications, signal),
 						promptSubmission: () => this.#createSubmission(item, "prompt", item.objective, []),
 						transition: (to) => this.#transition(graph, item, to),
-						settleItem: () => this.#settlement.trySettleItem(graph, item),
+						settleItem: () => this.#lifecycle.trySettleItem(graph, item),
 						settleAfterPersistenceFailure: () => this.#settleAfterPersistenceFailure(graph, item),
 						interruptInMemory: (error) => this.#interruptInMemory(graph, item, error),
 					}),
 				applyCancellation: (graph, targets) =>
 					this.#workerLifecycle.applyCancellation(targets, {
 						diagnose: (code, message, itemId) => this.#diagnose({ code, message }, graph.id, itemId),
-						finalizeUnstarted: (item) => this.#settlement.finalizeWithoutRun(graph, item, "canceled"),
+						finalizeUnstarted: (item) => this.#lifecycle.finalizeWithoutRun(graph, item, "canceled"),
 					}),
 				transition: (graph, item, to) => this.#transition(graph, item, to),
 				finalizeWithoutRun: (graph, item, terminal, blockedBy) =>
-					this.#settlement.finalizeWithoutRun(graph, item, terminal, blockedBy),
-				trySettleGraph: (graph) => this.#settlement.trySettleGraph(graph),
+					this.#lifecycle.finalizeWithoutRun(graph, item, terminal, blockedBy),
+				trySettleGraph: (graph) => this.#lifecycle.trySettleGraph(graph),
 				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
 			},
 		});
@@ -157,38 +156,28 @@ export class WorkGraphEngine implements CodingAgent {
 			deactivate: (graph, item) => this.#workerLifecycle.deactivate(graph, item),
 			requestSchedule: () => this.#scheduler.request(),
 		});
-		this.#persistence = new WorkGraphPersistenceController({
+		this.#lifecycle = new WorkGraphLifecycle({
 			graphs: this.#graphs,
 			graphOrder: this.#graphOrder,
-			durable: this.#durable,
-			host: {
-				now: () => this.#options.time.clock.now(),
-				applyWorkerCancellation: (graph) => this.#scheduler.applyWorkerCancellation(graph),
-				interruptInMemory: (graph, item, error) => this.#interruptInMemory(graph, item, error),
-				settleAfterPersistenceFailure: (graph, item) => this.#settleAfterPersistenceFailure(graph, item),
-				trySettleGraph: (graph) => this.#settlement.trySettleGraph(graph),
-				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
-				publish: (factory) => this.#publish(factory),
-				requestSchedule: () => this.#scheduler.request(),
-				closePlacement: () => this.#options.placement.close(),
-				closeObservations: () => this.#observations.closeAll(),
-			},
-		});
-		this.#settlement = new WorkGraphSettlementController({
 			durable: this.#durable,
 			tooling: this.#options.tooling,
 			worker: this.#workerLifecycle,
 			publication: this.#publicationSequencer,
 			host: {
 				now: () => this.#options.time.clock.now(),
+				applyWorkerCancellation: (graph) => this.#scheduler.applyWorkerCancellation(graph),
+				interruptInMemory: (graph, item, error) => this.#interruptInMemory(graph, item, error),
+				settleAfterPersistenceFailure: (graph, item) => this.#settleAfterPersistenceFailure(graph, item),
+				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
+				publish: (factory) => this.#publish(factory),
+				requestSchedule: () => this.#scheduler.request(),
+				closePlacement: () => this.#options.placement.close(),
+				closeObservations: () => this.#observations.closeAll(),
 				graphMutation: (graphId, operation) => this.#graphMutation(graphId, operation),
 				appendGraphFacts: (graph, facts) => this.#appendGraphFacts(graph, facts),
 				archiveDurableGraph: (graph) => this.#archiveDurableGraph(graph),
 				transition: (graph, item, to) => this.#transition(graph, item, to),
-				interruptInMemory: (graph, item, error) => this.#interruptInMemory(graph, item, error),
 				afterItemTerminal: (graph, item) => this.#afterItemTerminal(graph, item),
-				publish: (factory) => this.#publish(factory),
-				notifySettlementWaiters: () => this.#persistence.notifySettlementWaiters(),
 			},
 		});
 	}
@@ -198,7 +187,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	settleGraph(graph: GraphRecord): Promise<void> {
-		return this.#settlement.trySettleGraph(graph);
+		return this.#lifecycle.trySettleGraph(graph);
 	}
 
 	schedule(): void {
@@ -206,7 +195,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
-		return this.#persistence.trackSubmission(this.#submit(batch));
+		return this.#lifecycle.trackSubmission(this.#submit(batch));
 	}
 
 	observe(options: ObservationOptions = {}): AsyncIterable<CodingAgentObservation> {
@@ -226,7 +215,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	close(): Promise<CodingAgentCloseResult> {
-		return this.#persistence.close();
+		return this.#lifecycle.close();
 	}
 
 	async #submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt> {
@@ -234,7 +223,7 @@ export class WorkGraphEngine implements CodingAgent {
 			typeof batch?.batchId === "string" && ID_PATTERN.test(batch.batchId)
 				? batch.batchId
 				: `batch:${this.#options.identity.generate("queue_item")}`;
-		if (this.#persistence.closing || this.#persistence.closed) {
+		if (this.#lifecycle.closing || this.#lifecycle.closed) {
 			return immutableData({
 				status: "rejected",
 				batchId,
@@ -384,8 +373,8 @@ export class WorkGraphEngine implements CodingAgent {
 			const state = entry.graph.aggregate.snapshot().graph!.items.find(({ itemId }) => itemId === entry.item.id);
 			if (!state) throw new Error(`Accepted Work Item ${entry.item.id} is absent from the Aggregate projection`);
 			this.#mirror.projectItem(entry.item, state);
-			entry.item.reservedSessionId = undefined;
-			entry.item.reservedPlacementDescriptor = undefined;
+			entry.item.process.reservedSessionId = undefined;
+			entry.item.process.reservedPlacementDescriptor = undefined;
 			entry.graph.items.set(entry.item.id, entry.item);
 			entry.graph.itemOrder.push(entry.item);
 		}
@@ -394,8 +383,7 @@ export class WorkGraphEngine implements CodingAgent {
 	#acceptInputAdmissions(plan: BatchPlan): void {
 		const touched = new Set<ItemRecord>();
 		for (const delivery of plan.deliveries) {
-			if (delivery.command.kind === "prompt") delivery.item.promptAccepted = true;
-			delivery.item.inputAdmissions.push({
+			delivery.item.process.inputAdmissions.push({
 				deliveryId: delivery.deliveryId,
 				command: delivery.command,
 				...((delivery.command.resources?.length ?? 0) === 0
@@ -413,7 +401,7 @@ export class WorkGraphEngine implements CodingAgent {
 		outcome: "committed" | "failed",
 		diagnostic?: string,
 	): readonly string[] {
-		const admission = item.inputAdmissions.find((candidate) => candidate.deliveryId === deliveryId);
+		const admission = item.process.inputAdmissions.find((candidate) => candidate.deliveryId === deliveryId);
 		if (!admission) throw new Error(`Input admission not found: ${deliveryId}`);
 		if (admission.settlement) throw new Error(`Input admission already settled: ${deliveryId}`);
 		admission.settlement = { outcome, ...(diagnostic ? { diagnostic } : {}) };
@@ -422,18 +410,22 @@ export class WorkGraphEngine implements CodingAgent {
 
 	#drainInputAdmissions(item: ItemRecord): readonly string[] {
 		const failures: string[] = [];
-		while (item.inputAdmissions[0]?.settlement) {
-			const admission = item.inputAdmissions.shift()!;
+		while (item.process.inputAdmissions[0]?.settlement) {
+			const admission = item.process.inputAdmissions.shift()!;
 			const settlement = admission.settlement!;
 			if (settlement.outcome === "committed") {
-				if (!isTerminal(item.state) && !item.cancellationRequested && !item.uncertainExternalEffect) {
+				if (
+					!isTerminal(item.projection.state) &&
+					!item.projection.cancellationRequested &&
+					!item.process.uncertainExternalEffect
+				) {
 					this.#queueDelivery(item, admission.command);
 				}
 				continue;
 			}
 			const diagnostic = settlement.diagnostic ?? "Input resource commit failed";
-			item.diagnostics.push({ code: "input_resource_commit_failed", message: diagnostic });
-			item.uncertainExternalEffect = true;
+			item.process.diagnostics.push({ code: "input_resource_commit_failed", message: diagnostic });
+			item.process.uncertainExternalEffect = true;
 			failures.push(`input_resource_commit_failed${settlement.diagnostic ? `:${settlement.diagnostic}` : ""}`);
 		}
 		return failures;
@@ -441,13 +433,13 @@ export class WorkGraphEngine implements CodingAgent {
 
 	#queueDelivery(item: ItemRecord, command: DeliverWorkItemInput): void {
 		const submission = this.#createSubmission(item, command.kind, command.input, command.resources ?? []);
-		if (command.kind === "prompt") item.promptInput = submission;
-		else item.pendingInputs.push({ submission });
+		if (command.kind === "prompt") item.process.promptInput = submission;
+		else item.process.pendingInputs.push({ submission });
 	}
 
 	#itemDefinition(item: ItemRecord): WorkGraphItemDefinition {
-		const sessionId = item.sessionId ?? item.reservedSessionId;
-		const placement = item.placementDescriptor ?? item.reservedPlacementDescriptor;
+		const sessionId = item.projection.sessionId ?? item.process.reservedSessionId;
+		const placement = item.projection.placementDescriptor ?? item.process.reservedPlacementDescriptor;
 		if (!sessionId || !placement) {
 			throw new Error(`Accepted Work Item ${item.id} has incomplete ownership`);
 		}
@@ -458,7 +450,7 @@ export class WorkGraphEngine implements CodingAgent {
 			dependencies: item.dependencies,
 			objective: item.objective,
 			executionMode: item.executionMode,
-			desiredConfiguration: item.desiredConfiguration,
+			desiredConfiguration: item.projection.desiredConfiguration,
 			publicationOrder: item.publicationOrder,
 			runtimeId: item.runtimeId,
 			sessionId,
@@ -546,13 +538,13 @@ export class WorkGraphEngine implements CodingAgent {
 			nextGraphOrder: this.#durable.nextGraphOrder,
 			nextPublicationOrder: this.#durable.nextPublicationOrder,
 			sessionOwners: plan.newItems.map(({ graph, item }) => ({
-				sessionId: item.reservedSessionId!,
+				sessionId: item.process.reservedSessionId!,
 				graphId: graph.id,
 				itemId: item.id,
 			})),
 		});
 		for (const { graph, item } of plan.newItems) {
-			this.#sessionRegistry.claim(item.reservedSessionId!, graph.id, item.id);
+			this.#sessionRegistry.claim(item.process.reservedSessionId!, graph.id, item.id);
 		}
 	}
 
@@ -563,9 +555,9 @@ export class WorkGraphEngine implements CodingAgent {
 
 	async #applyAcceptedOperations(plan: BatchPlan): Promise<void> {
 		for (const { command, item } of plan.configurations) {
-			if (item.runtime) {
+			if (item.process.runtime) {
 				try {
-					await item.runtime.configure(command.configuration);
+					await item.process.runtime.configure(command.configuration);
 				} catch (error) {
 					this.#diagnose({ code: "configuration_failed", message: errorMessage(error) }, item.graphId, item.id);
 				}
@@ -580,14 +572,14 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	async #interruptForInputResourceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		item.controller?.abort(new Error("Input resource commit failed"));
+		item.process.controller?.abort(new Error("Input resource commit failed"));
 		try {
-			item.runtime?.cancel();
+			item.process.runtime?.cancel();
 		} catch (error) {
 			this.#diagnose({ code: "worker_cancel_failed", message: errorMessage(error) }, graph.id, item.id);
 		}
-		if (item.state === "pending" || item.state === "ready") {
-			await this.#settlement.finalizeWithoutRun(graph, item, "interrupted");
+		if (item.projection.state === "pending" || item.projection.state === "ready") {
+			await this.#lifecycle.finalizeWithoutRun(graph, item, "interrupted");
 		}
 	}
 
@@ -608,26 +600,31 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	#flushPendingInputs(item: ItemRecord): void {
-		if (!item.runtime || item.state === "pending" || item.state === "ready" || item.state === "preparing") return;
-		for (const pending of item.pendingInputs.splice(0)) {
-			if (pending.submission.kind === "steering") item.runtime.steer(pending.submission);
-			else item.runtime.followUp(pending.submission);
+		if (
+			!item.process.runtime ||
+			item.projection.state === "pending" ||
+			item.projection.state === "ready" ||
+			item.projection.state === "preparing"
+		)
+			return;
+		for (const pending of item.process.pendingInputs.splice(0)) {
+			if (pending.submission.kind === "steering") item.process.runtime.steer(pending.submission);
+			else item.process.runtime.followUp(pending.submission);
 		}
 	}
 
 	async #settleAfterPersistenceFailure(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		if (item.result) return;
-		const from = item.state;
+		if (item.projection.result) return;
+		const from = item.projection.state;
 		const safeFailedBarrier =
-			item.barrierFailure?.barrier === "work_graph_store" && !item.barrierFailure.externalEffectMayHaveOccurred;
+			item.process.barrierFailure?.barrier === "work_graph_store" &&
+			!item.process.barrierFailure.externalEffectMayHaveOccurred;
 		const terminal: WorkResult["state"] = safeFailedBarrier ? "failed" : "interrupted";
 		await this.#workerLifecycle.teardown(item);
-		// Single-fact-source exception: persistence has failed, so this unknown-durability result cannot be projected.
-		item.state = terminal;
 		const publication: PublicationOutcome =
 			terminal === "failed" ? { state: "not_required" } : { state: "not_published", reason: "interrupted" };
-		const result = this.#settlement.makeResult(item, terminal, publication, undefined, undefined, [], "unknown");
-		item.result = result;
+		const result = this.#lifecycle.makeResult(item, terminal, publication, undefined, undefined, [], "unknown");
+		this.#mirror.projectUndurableSettlement(item, terminal, result);
 		this.#publish((sequence) => ({
 			type: "item_state_changed",
 			sequence,
@@ -644,20 +641,20 @@ export class WorkGraphEngine implements CodingAgent {
 	async #afterItemTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
 		this.#delegation.noteItemTerminal();
 		for (const parent of graph.itemOrder.filter((candidate) => candidate.id === item.parentId)) {
-			await this.#settlement.trySettleItem(graph, parent);
+			await this.#lifecycle.trySettleItem(graph, parent);
 		}
-		await this.#settlement.trySettleGraph(graph);
+		await this.#lifecycle.trySettleGraph(graph);
 		this.#scheduler.request();
 	}
 
 	async #transition(graph: GraphRecord, item: ItemRecord, to: WorkItemState): Promise<boolean> {
 		return this.#graphMutation(graph.id, async () => {
-			const from = item.state;
+			const from = item.projection.state;
 			if (from === to) return false;
 			if (
 				to === "preparing" &&
-				(item.inputAdmissions.length > 0 ||
-					item.cancellationRequested ||
+				(item.process.inputAdmissions.length > 0 ||
+					item.projection.cancellationRequested ||
 					graph.cancellationRequested ||
 					graph.result !== undefined ||
 					graph.activeConcurrency >= graph.maximumConcurrency ||
@@ -692,18 +689,16 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	async #interruptInMemory(graph: GraphRecord, item: ItemRecord, error: unknown): Promise<void> {
-		this.#persistence.noteUndurable(graph, item);
-		item.controller?.abort(error);
+		this.#lifecycle.noteUndurable(graph, item);
+		item.process.controller?.abort(error);
 		try {
-			item.runtime?.cancel();
+			item.process.runtime?.cancel();
 		} catch {}
 		await this.#workerLifecycle.teardown(item);
 		this.#workerLifecycle.deactivate(graph, item);
-		// Single-fact-source exception: persistence is unavailable, so durability is explicitly unknown.
-		item.state = "interrupted";
 		const publication: PublicationOutcome = { state: "not_published", reason: "interrupted" };
-		const result = this.#settlement.makeResult(item, "interrupted", publication, undefined, undefined, [], "unknown");
-		item.result = result;
+		const result = this.#lifecycle.makeResult(item, "interrupted", publication, undefined, undefined, [], "unknown");
+		this.#mirror.projectUndurableSettlement(item, "interrupted", result);
 		this.#publish((sequence) => ({ type: "work_item_settled", sequence, graphId: graph.id, result }));
 		await this.#workerLifecycle.releaseResources(graph, item, true);
 		await this.#afterItemTerminal(graph, item);
@@ -711,7 +706,7 @@ export class WorkGraphEngine implements CodingAgent {
 
 	#snapshot(): CodingAgentSnapshot {
 		return immutableData({
-			closed: this.#persistence.closed,
+			closed: this.#lifecycle.closed,
 			graphs: this.#graphOrder.filter((graph) => !graph.result).map((graph) => this.#graphSnapshot(graph)),
 		});
 	}
@@ -731,27 +726,27 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	#itemSnapshot(item: ItemRecord): WorkItemSnapshot {
-		const activeRun = item.factProjection.activeRun;
+		const activeRun = item.projection.factProjection.activeRun;
 		return {
 			itemId: item.id,
 			...(item.parentId ? { parentItemId: item.parentId } : {}),
 			dependencies: item.dependencies,
 			objective: item.objective,
 			executionMode: item.executionMode,
-			state: item.state,
-			desiredConfiguration: item.desiredConfiguration,
-			...(item.runtime ? { runtimeId: item.runtimeId } : {}),
+			state: item.projection.state,
+			desiredConfiguration: item.projection.desiredConfiguration,
+			...(item.process.runtime ? { runtimeId: item.runtimeId } : {}),
 			...(activeRun ? { activeRun } : {}),
-			sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unreserved"),
-			placement: item.placementDescriptor ??
-				item.placement?.placement ?? {
+			sessionId: item.projection.sessionId ?? String(item.process.session?.session.id ?? "session:unreserved"),
+			placement: item.projection.placementDescriptor ??
+				item.process.placement?.placement ?? {
 					placementId: "placement:unreserved",
 					root: "",
 					baseIdentity: "unreserved",
 					kind: "memory",
 				},
-			cancellationRequested: item.cancellationRequested,
-			...(item.result ? { result: item.result } : {}),
+			cancellationRequested: item.projection.cancellationRequested,
+			...(item.projection.result ? { result: item.projection.result } : {}),
 		};
 	}
 
@@ -778,14 +773,14 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	async failStopGraph(graphId: WorkGraphId, error: unknown): Promise<void> {
-		await this.#persistence.failStopGraph(graphId, error);
+		await this.#lifecycle.failStopGraph(graphId, error);
 	}
 
 	async failStopLedger(error: unknown): Promise<void> {
-		await this.#persistence.failStopLedger(error);
+		await this.#lifecycle.failStopLedger(error);
 	}
 
 	reportPersistenceDiagnostic(code: string, message: string, graphId?: WorkGraphId): void {
-		this.#persistence.reportDiagnostic(code, message, graphId);
+		this.#lifecycle.reportDiagnostic(code, message, graphId);
 	}
 }

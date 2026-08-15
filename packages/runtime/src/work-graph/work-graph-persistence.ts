@@ -99,11 +99,11 @@ export class WorkGraphPersistenceController {
 	}
 
 	noteUndurable(graph: GraphRecord, item: ItemRecord): void {
-		if (item.result) return;
+		if (item.projection.result) return;
 		this.#undurableWork.set(`${graph.id}\0${item.id}`, {
 			graphId: graph.id,
 			itemId: item.id,
-			phase: isTerminal(item.state) ? "result" : item.state,
+			phase: isTerminal(item.projection.state) ? "result" : item.projection.state,
 		});
 	}
 
@@ -114,16 +114,16 @@ export class WorkGraphPersistenceController {
 
 	#interruptGraphForPersistence(graph: GraphRecord, error: unknown): void {
 		for (const item of graph.itemOrder) {
-			if (item.result) continue;
+			if (item.projection.result) continue;
 			this.noteUndurable(graph, item);
-			if (isTerminal(item.state)) continue;
-			if (workerFactHasOpenEffects(item.factProjection)) item.uncertainExternalEffect = true;
-			item.controller?.abort(error);
-			item.delegationResume?.reject(error);
-			item.delegationResume = undefined;
-			item.delegationWaiting = false;
+			if (isTerminal(item.projection.state)) continue;
+			if (workerFactHasOpenEffects(item.projection.factProjection)) item.process.uncertainExternalEffect = true;
+			item.process.controller?.abort(error);
+			item.process.delegationResume?.reject(error);
+			item.process.delegationResume = undefined;
+			item.process.delegationWaiting = false;
 			try {
-				item.runtime?.cancel();
+				item.process.runtime?.cancel();
 			} catch {}
 		}
 	}
@@ -132,7 +132,7 @@ export class WorkGraphPersistenceController {
 		await Promise.resolve();
 		for (const graph of graphs) {
 			for (const item of graph.itemOrder) {
-				if (item.state !== "pending" && item.state !== "ready") continue;
+				if (item.projection.state !== "pending" && item.projection.state !== "ready") continue;
 				await this.#host.settleAfterPersistenceFailure(graph, item);
 			}
 			await this.#host.trySettleGraph(graph);
@@ -147,7 +147,7 @@ export class WorkGraphPersistenceController {
 			if (graph.result) continue;
 			if (this.#durable.hasGraphFailure(graph.id) || this.#durable.ledgerFailure) {
 				for (const item of graph.itemOrder) {
-					if (!isTerminal(item.state))
+					if (!isTerminal(item.projection.state))
 						await this.#host.interruptInMemory(graph, item, this.#durable.graphFailure(graph.id));
 				}
 				continue;
@@ -169,7 +169,7 @@ export class WorkGraphPersistenceController {
 			} catch (error) {
 				this.#host.diagnose({ code: "close_cancellation_failed", message: errorMessage(error) }, graph.id);
 				for (const item of graph.itemOrder) {
-					if (!isTerminal(item.state)) await this.#host.interruptInMemory(graph, item, error);
+					if (!isTerminal(item.projection.state)) await this.#host.interruptInMemory(graph, item, error);
 				}
 			}
 		}
@@ -179,15 +179,24 @@ export class WorkGraphPersistenceController {
 			(total, graph) =>
 				total +
 				graph.itemOrder.reduce(
-					(count, item) => count + item.droppedInputs + item.pendingInputs.length + (item.promptInput ? 1 : 0),
+					(count, item) =>
+						count +
+						item.process.droppedInputs +
+						item.process.pendingInputs.length +
+						(item.process.promptInput ? 1 : 0),
 					0,
 				),
 			0,
 		);
 		const unsettledWork = this.#graphOrder.flatMap((graph) =>
 			graph.itemOrder.flatMap((item) => {
-				if (item.state !== "preparing" && item.state !== "running" && item.state !== "settling") return [];
-				return [{ graphId: graph.id, itemId: item.id, phase: item.state } as const];
+				if (
+					item.projection.state !== "preparing" &&
+					item.projection.state !== "running" &&
+					item.projection.state !== "settling"
+				)
+					return [];
+				return [{ graphId: graph.id, itemId: item.id, phase: item.projection.state } as const];
 			}),
 		);
 		const unknownWork = [

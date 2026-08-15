@@ -318,10 +318,10 @@ export function planBatch(input: {
 			case "deliver_work_item_input": {
 				const graph = findGraph(String(command.graphId), commandIndex);
 				const item = findItem(graph, String(command.itemId), commandIndex);
-				if (isTerminal(item.state) || item.cancellationRequested) {
+				if (isTerminal(item.projection.state) || item.projection.cancellationRequested) {
 					throw rejected({
 						code: "invalid_state",
-						message: `Work Item ${item.id} cannot accept input in ${item.state}`,
+						message: `Work Item ${item.id} cannot accept input in ${item.projection.state}`,
 						commandIndex,
 						graphId: graph.id,
 						itemId: item.id,
@@ -332,10 +332,10 @@ export function planBatch(input: {
 				}
 				if (
 					command.kind === "prompt" &&
-					(item.promptAccepted ||
-						item.runtime !== undefined ||
-						item.state === "running" ||
-						item.state === "settling" ||
+					(item.projection.promptAccepted ||
+						item.process.runtime !== undefined ||
+						item.projection.state === "running" ||
+						item.projection.state === "settling" ||
 						deliveries.some((candidate) => candidate.item === item && candidate.command.kind === "prompt"))
 				) {
 					throw rejected({
@@ -358,10 +358,10 @@ export function planBatch(input: {
 			case "configure_work_item": {
 				const graph = findGraph(String(command.graphId), commandIndex);
 				const item = findItem(graph, String(command.itemId), commandIndex);
-				if (isTerminal(item.state) || item.cancellationRequested) {
+				if (isTerminal(item.projection.state) || item.projection.cancellationRequested) {
 					throw rejected({
 						code: "invalid_state",
-						message: `Work Item ${item.id} cannot be configured in ${item.state}`,
+						message: `Work Item ${item.id} cannot be configured in ${item.projection.state}`,
 						commandIndex,
 						graphId: graph.id,
 						itemId: item.id,
@@ -446,7 +446,11 @@ function planAddedItem(input: {
 			itemId: id,
 		});
 	}
-	if (parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
+	if (
+		parent.projection.state === "settling" ||
+		isTerminal(parent.projection.state) ||
+		parent.projection.cancellationRequested
+	) {
 		throw rejected({
 			code: "invalid_state",
 			message: `Parent Work Item ${parentId} no longer permits delegation`,
@@ -486,7 +490,7 @@ function planAddedItem(input: {
 		seen.add(dependencyId);
 		dependencies.push(dependencyId);
 	}
-	const configuration = specification.configuration ?? parent.desiredConfiguration;
+	const configuration = specification.configuration ?? parent.projection.desiredConfiguration;
 	assertConfiguration(configuration);
 	const item = makeItem({
 		graphId: graph.id,
@@ -544,7 +548,7 @@ export async function validatePlanConfigurations(
 	const signal = new AbortController().signal;
 	try {
 		for (const { item } of plan.newItems) {
-			await modelProvider.resolve(item.desiredConfiguration, signal);
+			await modelProvider.resolve(item.projection.desiredConfiguration, signal);
 		}
 		for (const { command } of plan.configurations) {
 			await modelProvider.resolve(command.configuration, signal);
@@ -597,10 +601,10 @@ export function revalidateBatchPlan(
 				itemId: entry.item.id,
 			});
 		}
-		if (entry.item.reservedSessionId && input.sessions.has(entry.item.reservedSessionId)) {
+		if (entry.item.process.reservedSessionId && input.sessions.has(entry.item.process.reservedSessionId)) {
 			throw rejected({
 				code: "session_leased",
-				message: `Session was leased by an earlier batch: ${entry.item.reservedSessionId}`,
+				message: `Session was leased by an earlier batch: ${entry.item.process.reservedSessionId}`,
 				graphId: entry.graph.id,
 				itemId: entry.item.id,
 			});
@@ -610,7 +614,12 @@ export function revalidateBatchPlan(
 			plan.newItems.find(
 				(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === entry.item.parentId,
 			)?.item ?? entry.graph.items.get(entry.item.parentId);
-		if (!parent || parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
+		if (
+			!parent ||
+			parent.projection.state === "settling" ||
+			isTerminal(parent.projection.state) ||
+			parent.projection.cancellationRequested
+		) {
 			throw rejected({
 				code: "invalid_state",
 				message: `Parent Work Item ${entry.item.parentId} settled while the batch was reserving resources`,
@@ -624,9 +633,9 @@ export function revalidateBatchPlan(
 		if (
 			graph.result ||
 			graph.cancellationRequested ||
-			item.state === "settling" ||
-			isTerminal(item.state) ||
-			item.cancellationRequested
+			item.projection.state === "settling" ||
+			isTerminal(item.projection.state) ||
+			item.projection.cancellationRequested
 		) {
 			throw rejected({
 				code: "invalid_state",
@@ -638,7 +647,10 @@ export function revalidateBatchPlan(
 		}
 		if (
 			command.kind === "prompt" &&
-			(item.promptAccepted || item.runtime !== undefined || item.state === "preparing" || item.state === "running")
+			(item.projection.promptAccepted ||
+				item.process.runtime !== undefined ||
+				item.projection.state === "preparing" ||
+				item.projection.state === "running")
 		) {
 			throw rejected({
 				code: "invalid_state",
@@ -653,9 +665,9 @@ export function revalidateBatchPlan(
 		if (
 			graph.result ||
 			graph.cancellationRequested ||
-			item.state === "settling" ||
-			isTerminal(item.state) ||
-			item.cancellationRequested
+			item.projection.state === "settling" ||
+			isTerminal(item.projection.state) ||
+			item.projection.cancellationRequested
 		) {
 			throw rejected({
 				code: "invalid_state",

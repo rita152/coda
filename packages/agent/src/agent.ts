@@ -4,6 +4,7 @@ import {
 	type Context,
 	type ImageContent,
 	type Message,
+	type NormalizedModelFailure,
 	resolveToolObservation,
 	type TextContent,
 	type ToolCall,
@@ -186,50 +187,35 @@ function normalizedToolContent(content: ToolExecutionOutput["content"]): readonl
 	return structuredClone(content) as (TextContent | ImageContent)[];
 }
 
-const RETRYABLE_TRANSPORT_CODES = new Set([
-	"ECONNABORTED",
-	"ECONNREFUSED",
-	"ECONNRESET",
-	"EHOSTUNREACH",
-	"ENETDOWN",
-	"ENETRESET",
-	"ENETUNREACH",
-	"ENOTFOUND",
-	"EPIPE",
-	"ETIMEDOUT",
-]);
-
-const RETRYABLE_ERROR_NAMES = new Set(["APIConnectionError", "APIConnectionTimeoutError", "TimeoutError"]);
+function normalizedModelFailure(value: unknown): NormalizedModelFailure | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const candidate = value as Partial<NormalizedModelFailure>;
+	if (candidate.phase !== "request" && candidate.phase !== "stream") return undefined;
+	if (
+		candidate.category !== "transport" &&
+		candidate.category !== "rate_limit" &&
+		candidate.category !== "provider" &&
+		candidate.category !== "context_overflow" &&
+		candidate.category !== "protocol" &&
+		candidate.category !== "unknown"
+	) {
+		return undefined;
+	}
+	if (
+		candidate.retryability !== "retryable" &&
+		candidate.retryability !== "non_retryable" &&
+		candidate.retryability !== "unknown"
+	) {
+		return undefined;
+	}
+	return candidate as NormalizedModelFailure;
+}
 
 function isTransientAssistantFailure(message: AgentMessage<AssistantMessage>): boolean {
-	const neverRetryCodes = new Set([
-		"auth",
-		"oauth",
-		"quota",
-		"billing",
-		"validation",
-		"invalid_request",
-		"context_overflow",
-		"context_length_exceeded",
-	]);
 	for (const diagnostic of message.message.diagnostics ?? []) {
-		const code = diagnostic.error?.code;
-		if (typeof code === "string" && neverRetryCodes.has(code.toLowerCase())) return false;
-		const status = diagnostic.details?.status;
-		if (status === 400 || status === 401 || status === 402 || status === 403 || status === 404 || status === 413) {
-			return false;
-		}
-		if (diagnostic.details?.retryable !== true) continue;
-		if (
-			status === 408 ||
-			status === 409 ||
-			status === 429 ||
-			(typeof status === "number" && status >= 500 && status <= 599)
-		) {
-			return true;
-		}
-		if (typeof code === "string" && RETRYABLE_TRANSPORT_CODES.has(code.toUpperCase())) return true;
-		if (diagnostic.error?.name && RETRYABLE_ERROR_NAMES.has(diagnostic.error.name)) return true;
+		const failure = normalizedModelFailure(diagnostic.details?.failure);
+		if (failure?.retryability === "non_retryable") return false;
+		if (failure?.retryability === "retryable") return true;
 	}
 	return false;
 }

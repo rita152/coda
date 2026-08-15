@@ -4,7 +4,6 @@
  * Physical host knowledge crosses only the named capabilities declared here.
  */
 import type { AgentInput, AgentTool, IdGenerator, RunBudget, Session } from "@coda/agent";
-import type { TimeRuntime } from "@coda/ai";
 import type { SystemPromptSnapshot, TrustedProjectInstructions } from "../prompt/prompt-builder.ts";
 import type {
 	ModelDriverLease,
@@ -28,6 +27,34 @@ import type {
 import type { WorkerControlEvent } from "./worker-protocol.ts";
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
+
+export interface RuntimeClock {
+	now(): number;
+}
+
+export interface RuntimeSleeper {
+	wait(delayMs: number, signal?: AbortSignal): Promise<void>;
+}
+
+export interface RuntimeRandomSource {
+	next(): number;
+}
+
+export interface RuntimeScheduledTask {
+	cancel(): void;
+}
+
+export interface RuntimeScheduler {
+	schedule(delayMs: number, run: () => void | Promise<void>): RuntimeScheduledTask;
+}
+
+/** Runtime-owned timing capabilities; composition roots may pass any structural adapter. */
+export interface RuntimeTime {
+	readonly clock: RuntimeClock;
+	readonly sleep: RuntimeSleeper;
+	readonly random: RuntimeRandomSource;
+	readonly scheduler: RuntimeScheduler;
+}
 
 export type WorkerSelection = RunModelSelection;
 
@@ -263,7 +290,7 @@ export interface WorkspacePersistence {
 }
 
 export interface OpenCodingAgentOptions {
-	readonly time: TimeRuntime;
+	readonly time: RuntimeTime;
 	readonly identity: Identity;
 	readonly modelProvider: RunModelProvider;
 	readonly capabilitySources: readonly RunCapabilitySource[];

@@ -11,7 +11,6 @@ import {
 	type SessionEvent,
 	type ToolExecutionContext,
 } from "@coda/agent";
-import type { TimeRuntime } from "@coda/ai";
 import { ContextWindowController } from "../context-window/context-window.ts";
 import { ContextOverflowRecovery } from "../context-window/overflow-recovery.ts";
 import { createCodingAgentRetry } from "../retry.ts";
@@ -19,6 +18,7 @@ import type { RunCapabilityHost, RunCapabilityLease, RunToolContribution } from 
 import type {
 	Identity,
 	RunModelProvider,
+	RuntimeTime,
 	WorkerSelection,
 	WorkSessionReservation,
 	WorkspacePlacementReservation,
@@ -126,7 +126,7 @@ function preparationDeadline(
 }
 
 export interface WorkerRuntimeOptions {
-	readonly time: TimeRuntime;
+	readonly time: RuntimeTime;
 	readonly identity: Identity;
 	readonly modelProvider: RunModelProvider;
 	readonly runCapabilities: RunCapabilityHost;

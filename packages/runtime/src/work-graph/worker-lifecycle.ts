@@ -1,8 +1,7 @@
 import type { RunResult, ToolExecutionContext } from "@coda/agent";
-import type { TimeRuntime } from "@coda/ai";
 import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
-import type { ObservationBus, WorkerControlSink, WorkspacePlacement } from "./ports.ts";
+import type { ObservationBus, RuntimeTime, WorkerControlSink, WorkspacePlacement } from "./ports.ts";
 import type { SessionLeaseRegistry } from "./session-registry.ts";
 import type { WorkResult } from "./types.ts";
 import { WORK_GRAPH_FACT_VERSION } from "./work-graph-fact.ts";
@@ -89,7 +88,7 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 	readonly #durable?: DurableGraphStore<GraphRecord>;
 	readonly #sessionRegistry?: SessionLeaseRegistry;
 	readonly #placement?: WorkspacePlacement;
-	readonly #time?: TimeRuntime;
+	readonly #time?: RuntimeTime;
 	readonly #observations?: ObservationBus;
 	readonly #workerControl?: WorkerControlSink;
 	readonly #runtimeOptions?: PrivateWorkerOpenRequest["options"];
@@ -102,7 +101,7 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 			readonly durable?: DurableGraphStore<GraphRecord>;
 			readonly sessionRegistry?: SessionLeaseRegistry;
 			readonly placement?: WorkspacePlacement;
-			readonly time?: TimeRuntime;
+			readonly time?: RuntimeTime;
 			readonly observations?: ObservationBus;
 			readonly workerControl?: WorkerControlSink;
 			readonly runtimeOptions?: PrivateWorkerOpenRequest["options"];
@@ -141,32 +140,32 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 	}
 
 	teardown(item: ItemRecord): Promise<boolean> {
-		if (item.runtimeTeardown) return item.runtimeTeardown;
-		if (!item.runtime && !item.runtimeOpening) return Promise.resolve(true);
-		item.runtimeTeardown = (async () => {
-			const opening = item.runtimeOpening;
+		if (item.process.runtimeTeardown) return item.process.runtimeTeardown;
+		if (!item.process.runtime && !item.process.runtimeOpening) return Promise.resolve(true);
+		item.process.runtimeTeardown = (async () => {
+			const opening = item.process.runtimeOpening;
 			if (opening) {
-				item.controller?.abort(new Error("Worker Runtime opening interrupted by teardown"));
+				item.process.controller?.abort(new Error("Worker Runtime opening interrupted by teardown"));
 				try {
-					item.runtime ??= await opening;
+					item.process.runtime ??= await opening;
 				} catch {}
-				if (item.runtimeOpening === opening) item.runtimeOpening = undefined;
+				if (item.process.runtimeOpening === opening) item.process.runtimeOpening = undefined;
 			}
-			const runtime = item.runtime;
+			const runtime = item.process.runtime;
 			if (!runtime) return true;
 			try {
 				const closed = await runtime.close();
-				item.droppedInputs += closed.droppedExternalWork;
+				item.process.droppedInputs += closed.droppedExternalWork;
 				return true;
 			} catch (error) {
-				item.diagnostics.push({
+				item.process.diagnostics.push({
 					code: "worker_close_failed",
 					message: error instanceof Error ? error.message : String(error),
 				});
 				return false;
 			}
 		})();
-		return item.runtimeTeardown;
+		return item.process.runtimeTeardown;
 	}
 
 	async releaseResources(graph: GraphRecord, item: ItemRecord, preserve: boolean): Promise<void> {
@@ -178,31 +177,31 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 			throw new Error("WorkerLifecycle resource capabilities are unavailable");
 		}
 		const runtimeReleased = await this.teardown(item);
-		if (item.resourcesReleased) return;
-		item.resourcesReleased = true;
+		if (item.process.resourcesReleased) return;
+		item.process.resourcesReleased = true;
 		let sessionReleased = runtimeReleased;
-		if (!item.runtime && item.session) {
+		if (!item.process.runtime && item.process.session) {
 			try {
-				await item.session.release();
+				await item.process.session.release();
 			} catch (error) {
 				sessionReleased = false;
-				item.diagnostics.push({ code: "session_close_failed", message: errorMessage(error) });
+				item.process.diagnostics.push({ code: "session_close_failed", message: errorMessage(error) });
 			}
 		}
-		if (item.placement) {
+		if (item.process.placement) {
 			try {
 				await placement.release({
 					graphId: graph.id,
 					itemId: item.id,
-					placement: item.placement.placement,
+					placement: item.process.placement.placement,
 					preserve,
 				});
 			} catch (error) {
-				item.diagnostics.push({ code: "placement_release_failed", message: errorMessage(error) });
+				item.process.diagnostics.push({ code: "placement_release_failed", message: errorMessage(error) });
 			}
 		}
-		if (item.sessionId && !sessionReleased) {
-			sessionRegistry.quarantine(item.sessionId);
+		if (item.projection.sessionId && !sessionReleased) {
+			sessionRegistry.quarantine(item.projection.sessionId);
 			return;
 		}
 		try {
@@ -221,26 +220,26 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 					]),
 				);
 			}
-			if (item.sessionId) {
-				await durable.releaseSession({ sessionId: item.sessionId, graphId: graph.id, itemId: item.id });
-				sessionRegistry.release(item.sessionId);
+			if (item.projection.sessionId) {
+				await durable.releaseSession({ sessionId: item.projection.sessionId, graphId: graph.id, itemId: item.id });
+				sessionRegistry.release(item.projection.sessionId);
 			}
 		} catch (error) {
-			item.diagnostics.push({ code: "ownership_release_not_recorded", message: errorMessage(error) });
+			item.process.diagnostics.push({ code: "ownership_release_not_recorded", message: errorMessage(error) });
 		}
 	}
 
 	activate(graph: GraphRecord, item: ItemRecord): void {
-		if (item.active) throw new Error(`Work Item ${item.id} already owns an execution slot`);
-		item.active = true;
+		if (item.process.active) throw new Error(`Work Item ${item.id} already owns an execution slot`);
+		item.process.active = true;
 		graph.activeConcurrency++;
 		graph.effectiveConcurrency = Math.max(graph.effectiveConcurrency, graph.activeConcurrency);
 		this.#processActiveConcurrency++;
 	}
 
 	deactivate(graph: GraphRecord, item: ItemRecord): void {
-		if (!item.active) return;
-		item.active = false;
+		if (!item.process.active) return;
+		item.process.active = false;
 		graph.activeConcurrency = Math.max(0, graph.activeConcurrency - 1);
 		this.#processActiveConcurrency = Math.max(0, this.#processActiveConcurrency - 1);
 		this.#schedule();
@@ -254,16 +253,19 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		},
 	): Promise<void> {
 		for (const item of targets) {
-			if (isTerminal(item.state)) continue;
-			item.controller?.abort(new Error("Work cancellation requested"));
+			if (isTerminal(item.projection.state)) continue;
+			item.process.controller?.abort(new Error("Work cancellation requested"));
 			try {
-				item.runtime?.cancel();
+				item.process.runtime?.cancel();
 			} catch (error) {
 				host.diagnose("worker_cancel_failed", errorMessage(error), item.id);
 			}
 		}
 		for (const item of targets) {
-			if (!isTerminal(item.state) && (item.state === "pending" || item.state === "ready")) {
+			if (
+				!isTerminal(item.projection.state) &&
+				(item.projection.state === "pending" || item.projection.state === "ready")
+			) {
 				await host.finalizeUnstarted(item);
 			}
 		}
@@ -280,9 +282,10 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		const durable = this.#requireDurable();
 		return durable.mutation(graph.id, async () => {
 			this.#assertWorkerOwnership(item, runtimeId, sessionId);
-			const transitionFrom = fact.type === "run_started" && item.state === "preparing" ? "preparing" : undefined;
-			if (fact.type === "run_started" && !transitionFrom && item.state !== "running") {
-				throw new Error(`Work Item ${item.id} cannot start a Run in ${item.state}`);
+			const transitionFrom =
+				fact.type === "run_started" && item.projection.state === "preparing" ? "preparing" : undefined;
+			if (fact.type === "run_started" && !transitionFrom && item.projection.state !== "running") {
+				throw new Error(`Work Item ${item.id} cannot start a Run in ${item.projection.state}`);
 			}
 			await durable.appendFacts(graph, [
 				{
@@ -343,10 +346,10 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		sessionId: string,
 	): void {
 		this.#assertWorkerOwnership(item, runtimeId, sessionId);
-		if (item.barrierFailure) return;
-		item.barrierFailure = failure;
-		if (failure.externalEffectMayHaveOccurred) item.uncertainExternalEffect = true;
-		item.diagnostics.push({
+		if (item.process.barrierFailure) return;
+		item.process.barrierFailure = failure;
+		if (failure.externalEffectMayHaveOccurred) item.process.uncertainExternalEffect = true;
+		item.process.diagnostics.push({
 			code: `${failure.barrier}_barrier_failed`,
 			message: `${failure.source}: ${failure.diagnostic}`,
 		});
@@ -367,14 +370,15 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		this.#assertWorkerOwnership(item, runtimeId, sessionId);
 		const controller = this.#workerControl;
 		if (!controller || !this.#workerControllerAttached) return;
-		if (!item.placementDescriptor) throw new Error(`Running Work Item ${item.id} has no Workspace placement`);
+		if (!item.projection.placementDescriptor)
+			throw new Error(`Running Work Item ${item.id} has no Workspace placement`);
 		try {
 			await controller.accept({
 				graphId: graph.id,
 				itemId: item.id,
 				runtimeId,
 				sessionId,
-				placement: item.placementDescriptor,
+				placement: item.projection.placementDescriptor,
 				event,
 			});
 		} catch (error) {
@@ -386,22 +390,22 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 	async runItem(graph: GraphRecord, item: ItemRecord, host: WorkerProgressionHost): Promise<void> {
 		const time = this.#time;
 		if (!time) throw new Error("WorkerLifecycle Time capability is unavailable");
-		item.startedAt = time.clock.now();
-		item.controller = new AbortController();
+		item.process.controller = new AbortController();
 		let runtimeOpening: ReturnType<WorkerRuntimePort["open"]> | undefined;
 		try {
-			if (!item.session || !item.placement) throw new Error("Accepted Work Item is missing reserved ownership");
-			const controller = item.controller;
+			if (!item.process.session || !item.process.placement)
+				throw new Error("Accepted Work Item is missing reserved ownership");
+			const controller = item.process.controller;
 			runtimeOpening = Promise.resolve().then(() =>
 				this.open({
 					graphId: graph.id,
 					itemId: item.id,
 					runtimeId: item.runtimeId,
 					mode: item.executionMode,
-					configuration: item.desiredConfiguration,
+					configuration: item.projection.desiredConfiguration,
 					signal: controller.signal,
-					session: item.session!,
-					placement: item.placement!,
+					session: item.process.session!,
+					placement: item.process.placement!,
 					...(item.executionMode === "write"
 						? { delegate: (specifications, context) => host.delegate(specifications, context.signal) }
 						: {}),
@@ -417,45 +421,59 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 					assertProgressAllowed: () => this.#requireDurable().assertProgressAllowed(graph.id),
 				}),
 			);
-			item.runtimeOpening = runtimeOpening;
+			item.process.runtimeOpening = runtimeOpening;
 			const runtime = await runtimeOpening;
-			item.runtime = runtime;
-			if (item.runtimeOpening === runtimeOpening) item.runtimeOpening = undefined;
-			if (item.runtimeTeardown || item.resourcesReleased || item.result || isTerminal(item.state)) {
+			item.process.runtime = runtime;
+			if (item.process.runtimeOpening === runtimeOpening) item.process.runtimeOpening = undefined;
+			if (
+				item.process.runtimeTeardown ||
+				item.process.resourcesReleased ||
+				item.projection.result ||
+				isTerminal(item.projection.state)
+			) {
 				await this.teardown(item);
 				return;
 			}
-			if (item.cancellationRequested || item.controller.signal.aborted) {
-				item.runtime.cancel();
-				item.run = { runId: `canceled:${item.id}` as RunResult["runId"], outcome: "aborted" };
+			if (item.projection.cancellationRequested || item.process.controller.signal.aborted) {
+				item.process.runtime.cancel();
+				item.process.run = { runId: `canceled:${item.id}` as RunResult["runId"], outcome: "aborted" };
 				await host.transition("settling");
 				this.deactivate(graph, item);
 				await host.settleItem();
 				return;
 			}
-			const run = item.runtime.prompt(item.promptInput ?? host.promptSubmission());
-			item.promptInput = undefined;
-			for (const pending of item.pendingInputs.splice(0)) {
-				if (pending.submission.kind === "steering") item.runtime.steer(pending.submission);
-				else item.runtime.followUp(pending.submission);
+			const run = item.process.runtime.prompt(item.process.promptInput ?? host.promptSubmission());
+			item.process.promptInput = undefined;
+			for (const pending of item.process.pendingInputs.splice(0)) {
+				if (pending.submission.kind === "steering") item.process.runtime.steer(pending.submission);
+				else item.process.runtime.followUp(pending.submission);
 			}
-			item.run = await run;
-			await item.runtime.waitForIdle();
+			item.process.run = await run;
+			await item.process.runtime.waitForIdle();
 			await host.transition("settling");
 			this.deactivate(graph, item);
 		} catch (error) {
-			if (item.runtimeOpening === runtimeOpening) item.runtimeOpening = undefined;
-			if (item.runtimeTeardown || item.resourcesReleased || item.result || isTerminal(item.state)) return;
-			const runtime = item.runtime;
+			if (item.process.runtimeOpening === runtimeOpening) item.process.runtimeOpening = undefined;
+			if (
+				item.process.runtimeTeardown ||
+				item.process.resourcesReleased ||
+				item.projection.result ||
+				isTerminal(item.projection.state)
+			) {
+				return;
+			}
+			const runtime = item.process.runtime;
 			const barrierFailure = runtime?.barrierFailure();
-			if (barrierFailure && !item.barrierFailure) {
+			if (barrierFailure && !item.process.barrierFailure) {
 				this.barrierFailed(graph, item, barrierFailure, runtime!.runtimeId, runtime!.sessionId);
 			}
-			if (!barrierFailure) item.diagnostics.push({ code: "worker_failed", message: errorMessage(error) });
-			item.run = {
+			if (!barrierFailure) item.process.diagnostics.push({ code: "worker_failed", message: errorMessage(error) });
+			item.process.run = {
 				runId: `failed:${item.id}` as RunResult["runId"],
-				outcome: item.cancellationRequested ? "aborted" : "error",
-				...(item.cancellationRequested ? {} : { failure: { kind: "runtime", message: errorMessage(error) } }),
+				outcome: item.projection.cancellationRequested ? "aborted" : "error",
+				...(item.projection.cancellationRequested
+					? {}
+					: { failure: { kind: "runtime", message: errorMessage(error) } }),
 			};
 			const durable = this.#requireDurable();
 			if (durable.ledgerFailure || durable.hasGraphFailure(graph.id)) {
@@ -463,11 +481,11 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 				await host.settleAfterPersistenceFailure();
 				return;
 			}
-			if (!isTerminal(item.state) && item.state !== "settling") {
+			if (!isTerminal(item.projection.state) && item.projection.state !== "settling") {
 				try {
 					await host.transition("settling");
 				} catch (transitionError) {
-					item.diagnostics.push({
+					item.process.diagnostics.push({
 						code: "settlement_transition_failed",
 						message: errorMessage(transitionError),
 					});
@@ -501,7 +519,7 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 	}
 
 	#assertWorkerOwnership(item: ItemRecord, runtimeId: string, sessionId: string): void {
-		if (item.runtimeId !== runtimeId || item.sessionId !== sessionId) {
+		if (item.runtimeId !== runtimeId || item.projection.sessionId !== sessionId) {
 			throw new Error(`Worker ownership changed for Work Item ${item.id}`);
 		}
 	}

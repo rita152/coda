@@ -1,7 +1,7 @@
-import type { IdGenerator, IdKind, QueueItemId } from "@coda/agent";
+import type { IdGenerator, IdKind, MessageId, QueueItemId, RunId, ToolInvocation } from "@coda/agent";
 import { describe, expect, it } from "vitest";
 import { ManagedSession, type SessionJournal } from "../src/session/managed-session.ts";
-import type { SessionRecord } from "../src/session/records.ts";
+import type { SessionRecord, SessionRecordInput } from "../src/session/records.ts";
 import type { SessionDescriptor } from "../src/session/types.ts";
 
 describe("ManagedSession", () => {
@@ -19,7 +19,10 @@ describe("ManagedSession", () => {
 					{
 						type: "message_committed",
 						payload: {
-							message: { id: "message:legacy", message: { role: "user", content: "!legacy", timestamp: 1 } },
+							message: {
+								id: "message:legacy" as MessageId,
+								message: { role: "user", content: "!legacy", timestamp: 1 },
+							},
 						},
 					},
 					{
@@ -72,7 +75,7 @@ describe("ManagedSession", () => {
 				runId: "run:failed",
 				payload: {
 					message: {
-						id: "message:failed",
+						id: "message:failed" as MessageId,
 						message: { role: "user", content: "repair me", timestamp: 10 },
 					},
 				},
@@ -152,6 +155,44 @@ describe("ManagedSession", () => {
 		expect(appended[1]?.previousRecordId).toBe(appended[0]?.recordId);
 	});
 
+	it("durably records Run Budget exhaustion as an explicit semantic fact", async () => {
+		const descriptor = {
+			id: "session:budget",
+			workspace: { id: "workspace", path: "/workspace" },
+			createdAt: 1,
+			persistent: true,
+		} as SessionDescriptor;
+		const appended: SessionRecord[] = [];
+		const session = new ManagedSession(
+			{
+				descriptor,
+				records: [],
+				append: async (record) => {
+					appended.push(record);
+				},
+				close: async () => undefined,
+			},
+			{ clock: { now: () => 10 }, idGenerator: { generate: (kind) => `${kind}:new` } },
+		);
+
+		await session.accept({
+			type: "run_budget_exhausted",
+			runId: "run:budget" as RunId,
+			sequence: 1,
+			timestamp: 9,
+			exhaustion: { limit: "model_attempts", maximum: 3, observed: 4 },
+		});
+
+		expect(appended).toMatchObject([
+			{
+				type: "run_budget_exhausted",
+				runId: "run:budget",
+				timestamp: 9,
+				payload: { exhaustion: { limit: "model_attempts", maximum: 3, observed: 4 } },
+			},
+		]);
+	});
+
 	it("projects exact Tool lifecycle identity for restored Timelines", () => {
 		const descriptor = {
 			id: "session:tools",
@@ -166,7 +207,7 @@ describe("ManagedSession", () => {
 			toolName: "write",
 			arguments: { path: "a.ts" },
 			sourceIndex: 2,
-		} as const;
+		} as unknown as ToolInvocation;
 		const session = new ManagedSession(
 			{
 				descriptor,
@@ -207,20 +248,20 @@ describe("ManagedSession", () => {
 
 function linearRecords(
 	descriptor: SessionDescriptor,
-	inputs: ReadonlyArray<Pick<SessionRecord, "type" | "payload" | "runId" | "turnId">>,
+	inputs: ReadonlyArray<SessionRecordInput & { readonly runId?: string; readonly turnId?: string }>,
 	prefix: readonly SessionRecord[] = [],
 ): SessionRecord[] {
 	let previous = prefix.at(-1)?.recordId ?? null;
 	return inputs.map((input, index) => {
 		const sequence = prefix.length + index + 1;
-		const record: SessionRecord = {
+		const record = {
 			...input,
 			recordId: `record:${sequence}`,
 			sessionId: descriptor.id,
 			sequence,
 			previousRecordId: previous,
 			timestamp: 10,
-		};
+		} as unknown as SessionRecord;
 		previous = record.recordId;
 		return record;
 	});

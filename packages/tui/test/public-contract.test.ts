@@ -33,7 +33,7 @@ describe("@coda/tui public package contract", () => {
 		expect(typeof composeWithNodeStreams).toBe("function");
 	});
 
-	it("publishes only its root entry and depends only on shared Time vocabulary", async () => {
+	it("publishes only its root entry without depending on another Coda package", async () => {
 		const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 			private: boolean;
 			exports: Record<string, unknown>;
@@ -42,8 +42,6 @@ describe("@coda/tui public package contract", () => {
 
 		expect(packageJson.private).toBe(true);
 		expect(Object.keys(packageJson.exports)).toEqual(["."]);
-		expect(Object.keys(packageJson.dependencies ?? {}).filter((name) => name.startsWith("@coda/"))).toEqual([
-			"@coda/ai",
-		]);
+		expect(Object.keys(packageJson.dependencies ?? {}).filter((name) => name.startsWith("@coda/"))).toEqual([]);
 	});
 });

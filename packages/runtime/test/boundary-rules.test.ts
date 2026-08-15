@@ -37,13 +37,16 @@ describe("repository boundary rules", () => {
 		expect(importers).toEqual(["worker-lifecycle.ts"]);
 	});
 
-	it("limits direct undurable Work Item settlement to the two documented engine exceptions", async () => {
+	it("routes the two undurable Work Item settlements through the projection owner", async () => {
 		const engine = await readFile(new URL("../src/work-graph/work-graph-engine.ts", import.meta.url), "utf8");
-		const assignments = [...engine.matchAll(/\bitem\.(?:state|result)\s*=(?!=|>)/gu)];
-		expect(assignments).toHaveLength(4);
-		expect(engine.match(/Single-fact-source exception/gu)).toHaveLength(2);
+		expect(engine).not.toMatch(/\bitem\.projection\.(?:state|result)\s*=(?!=|>)/u);
+		expect(engine.match(/projectUndurableSettlement\(/gu)).toHaveLength(2);
+		const records = await readFile(new URL("../src/work-graph/work-graph-records.ts", import.meta.url), "utf8");
+		expect(records.match(/projectUndurableSettlement\(/gu)).toHaveLength(1);
 		const recovery = await readFile(new URL("../src/work-graph/recovery.ts", import.meta.url), "utf8");
-		expect(recovery).not.toMatch(/\bitem\.(?:state|result|factProjection|cancellationRequested)\s*=(?!=|>)/u);
+		expect(recovery).not.toMatch(
+			/\bitem\.projection\.(?:state|result|factProjection|cancellationRequested)\s*=(?!=|>)/u,
+		);
 	});
 
 	it("encodes the eight-package dependency DAG", () => {
@@ -55,7 +58,7 @@ describe("repository boundary rules", () => {
 			mcp: [],
 			runtime: ["agent", "ai"],
 			skills: [],
-			tui: ["ai"],
+			tui: [],
 		});
 	});
 

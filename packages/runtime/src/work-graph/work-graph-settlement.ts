@@ -79,13 +79,13 @@ export class WorkGraphSettlementController {
 	}
 
 	async trySettleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		if (item.state !== "settling" || item.settling) return item.settling;
+		if (item.projection.state !== "settling" || item.process.settling) return item.process.settling;
 		const children = graph.itemOrder.filter((candidate) => candidate.parentId === item.id);
-		if (children.some((child) => !isTerminal(child.state))) return;
+		if (children.some((child) => !isTerminal(child.projection.state))) return;
 		const operation = this.#settleItem(graph, item).catch((error) =>
 			this.#host.interruptInMemory(graph, item, error),
 		);
-		item.settling = operation;
+		item.process.settling = operation;
 		await operation;
 	}
 
@@ -95,7 +95,7 @@ export class WorkGraphSettlementController {
 		terminal: "canceled" | "blocked" | "interrupted",
 		blockedBy: readonly WorkItemId[] = [],
 	): Promise<void> {
-		if (isTerminal(item.state)) return;
+		if (isTerminal(item.projection.state)) return;
 		this.#worker.deactivate(graph, item);
 		await this.#host.transition(graph, item, terminal);
 		const publication: PublicationOutcome =
@@ -120,20 +120,24 @@ export class WorkGraphSettlementController {
 		durability: WorkResult["durability"] = "confirmed",
 	): WorkResult {
 		const settledAt = this.#host.now();
-		const run: WorkRunResult | undefined = item.run
+		const run: WorkRunResult | undefined = item.process.run
 			? {
-					runId: String(item.run.runId),
-					outcome: item.run.outcome,
-					...(item.run.failure ? { failure: item.run.failure } : {}),
-					...(item.runtime?.assistantText() ? { assistantText: item.runtime.assistantText() } : {}),
+					runId: String(item.process.run.runId),
+					outcome: item.process.run.outcome,
+					...(item.process.run.failure ? { failure: item.process.run.failure } : {}),
+					...(item.process.runtime?.assistantText()
+						? { assistantText: item.process.runtime.assistantText() }
+						: {}),
 				}
 			: undefined;
 		const budget: WorkBudgetUsage = {
-			modelAttempts: item.factProjection.modelAttempts,
-			toolInvocations: item.factProjection.toolInvocations,
-			totalTokens: item.factProjection.totalTokens,
-			elapsedMs: Math.max(0, settledAt - item.acceptedAt),
-			...(item.factProjection.exhaustion ? { exhaustion: item.factProjection.exhaustion } : {}),
+			modelAttempts: item.projection.factProjection.modelAttempts,
+			toolInvocations: item.projection.factProjection.toolInvocations,
+			totalTokens: item.projection.factProjection.totalTokens,
+			elapsedMs: Math.max(0, settledAt - item.projection.acceptedAt),
+			...(item.projection.factProjection.exhaustion
+				? { exhaustion: item.projection.factProjection.exhaustion }
+				: {}),
 		};
 		return immutableData({
 			durability,
@@ -141,12 +145,12 @@ export class WorkGraphSettlementController {
 			...(item.parentId ? { parentItemId: item.parentId } : {}),
 			dependencies: item.dependencies,
 			runtimeId: item.runtimeId,
-			sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
+			sessionId: item.projection.sessionId ?? String(item.process.session?.session.id ?? "session:unknown"),
 			state,
 			...(run ? { run } : {}),
 			...(evidence ? { evidence } : {}),
-			placement: item.placementDescriptor ??
-				item.placement?.placement ?? {
+			placement: item.projection.placementDescriptor ??
+				item.process.placement?.placement ?? {
 					placementId: "placement:unknown",
 					root: "",
 					baseIdentity: "unknown",
@@ -154,10 +158,10 @@ export class WorkGraphSettlementController {
 				},
 			...(artifact ? { artifact } : {}),
 			publication,
-			diagnostics: item.diagnostics,
+			diagnostics: item.process.diagnostics,
 			timing: {
-				acceptedAt: item.acceptedAt,
-				...(item.startedAt === undefined ? {} : { startedAt: item.startedAt }),
+				acceptedAt: item.projection.acceptedAt,
+				...(item.projection.startedAt === undefined ? {} : { startedAt: item.projection.startedAt }),
 				settledAt,
 			},
 			budget,
@@ -167,19 +171,19 @@ export class WorkGraphSettlementController {
 
 	async trySettleGraph(graph: GraphRecord): Promise<void> {
 		if (graph.result || graph.itemOrder.length === 0) return;
-		if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+		if (graph.itemOrder.some((item) => !isTerminal(item.projection.state) || !item.projection.result)) return;
 		if (graph.settlement) return graph.settlement;
 		const operation = this.#host.graphMutation(graph.id, async () => {
 			if (graph.result || graph.itemOrder.length === 0) return;
-			if (graph.itemOrder.some((item) => !isTerminal(item.state) || !item.result)) return;
+			if (graph.itemOrder.some((item) => !isTerminal(item.projection.state) || !item.projection.result)) return;
 			const root = graph.items.get(graph.rootId);
-			if (!root?.result) return;
-			const results = graph.itemOrder.map((item) => item.result!);
+			if (!root?.projection.result) return;
+			const results = graph.itemOrder.map((item) => item.projection.result!);
 			const outcome: WorkGraphOutcome = results.some((result) => result.state === "interrupted")
 				? "interrupted"
-				: graph.cancellationRequested || root.result.state === "canceled"
+				: graph.cancellationRequested || root.projection.result.state === "canceled"
 					? "canceled"
-					: root.result.state === "failed" || root.result.state === "blocked"
+					: root.projection.result.state === "failed" || root.projection.result.state === "blocked"
 						? "failed"
 						: results.some((result) => result.state !== "succeeded")
 							? "partial"
@@ -248,9 +252,9 @@ export class WorkGraphSettlementController {
 	}
 
 	async #settleItem(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		const hasUnclosedEffects = workerFactHasOpenEffects(item.factProjection);
+		const hasUnclosedEffects = workerFactHasOpenEffects(item.projection.factProjection);
 		if (hasUnclosedEffects) {
-			item.diagnostics.push({
+			item.process.diagnostics.push({
 				code: "worker_effect_window_unclosed",
 				message: "Worker settled while a Model Attempt or Tool Invocation effect window remained open",
 			});
@@ -258,21 +262,21 @@ export class WorkGraphSettlementController {
 		let terminal: WorkResult["state"] =
 			this.#durable.ledgerFailure || this.#durable.hasGraphFailure(graph.id)
 				? "interrupted"
-				: item.uncertainExternalEffect
+				: item.process.uncertainExternalEffect
 					? "interrupted"
-					: item.cancellationRequested || item.run?.outcome === "aborted"
+					: item.projection.cancellationRequested || item.process.run?.outcome === "aborted"
 						? "canceled"
 						: hasUnclosedEffects
 							? "interrupted"
-							: item.run?.outcome === "success"
+							: item.process.run?.outcome === "success"
 								? "succeeded"
 								: "failed";
 		let artifact: WorkspaceArtifact | undefined;
 		let publication: PublicationOutcome = { state: "not_required" };
-		const placement = item.placement?.placement;
+		const placement = item.process.placement?.placement;
 		if (!placement) {
 			terminal = "interrupted";
-			item.diagnostics.push({
+			item.process.diagnostics.push({
 				code: "placement_missing",
 				message: "Workspace Placement was lost before settlement",
 			});
@@ -281,42 +285,45 @@ export class WorkGraphSettlementController {
 				await this.#tooling.quiesce({
 					graphId: graph.id,
 					itemId: item.id,
-					sessionId: item.sessionId ?? String(item.session?.session.id ?? "session:unknown"),
+					sessionId: item.projection.sessionId ?? String(item.process.session?.session.id ?? "session:unknown"),
 					placement,
 				});
 			} catch (error) {
 				terminal = "interrupted";
-				item.diagnostics.push({ code: "workspace_quiescence_interrupted", message: errorMessage(error) });
+				item.process.diagnostics.push({ code: "workspace_quiescence_interrupted", message: errorMessage(error) });
 			}
 			try {
 				artifact = await this.#tooling.capture({
 					graphId: graph.id,
 					itemId: item.id,
 					placement,
-					signal: item.controller?.signal ?? new AbortController().signal,
+					signal: item.process.controller?.signal ?? new AbortController().signal,
 				});
 			} catch (error) {
 				terminal = "interrupted";
-				item.diagnostics.push({ code: "artifact_capture_interrupted", message: errorMessage(error) });
+				item.process.diagnostics.push({ code: "artifact_capture_interrupted", message: errorMessage(error) });
 			}
 			if (artifact) {
-				const target = item.parentId ? graph.items.get(item.parentId)?.placement?.placement : undefined;
+				const target = item.parentId ? graph.items.get(item.parentId)?.process.placement?.placement : undefined;
 				const settled = await this.#publication.publish({
 					graph,
 					item,
 					artifact,
 					placement,
 					...(target ? { target } : {}),
-					signal: item.controller?.signal ?? new AbortController().signal,
+					signal: item.process.controller?.signal ?? new AbortController().signal,
 					terminal,
 				});
 				terminal = settled.terminal;
 				publication = settled.publication;
-				item.diagnostics.push(...settled.diagnostics);
+				item.process.diagnostics.push(...settled.diagnostics);
 			}
 		}
 
-		const evidence = item.run && item.session ? item.session.evidence(String(item.run.runId)) : undefined;
+		const evidence =
+			item.process.run && item.process.session
+				? item.process.session.evidence(String(item.process.run.runId))
+				: undefined;
 		if (!(await this.#worker.teardown(item)) && terminal === "succeeded") terminal = "failed";
 		this.#worker.deactivate(graph, item);
 		await this.#host.transition(graph, item, terminal);
@@ -332,7 +339,7 @@ export class WorkGraphSettlementController {
 
 	async #recordResult(graph: GraphRecord, item: ItemRecord, result: WorkResult): Promise<void> {
 		await this.#host.graphMutation(graph.id, async () => {
-			if (item.result) return;
+			if (item.projection.result) return;
 			if (result.durability !== "confirmed") {
 				throw new Error(`Undurable Work Result ${item.id} cannot enter the Work Graph store`);
 			}

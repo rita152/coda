@@ -9,7 +9,12 @@ export type * from "./auth/types.ts";
 export type {
 	AssistantMessageDiagnostic,
 	DiagnosticErrorInfo,
+	ModelFailureCategory,
+	ModelFailurePhase,
+	ModelFailureRetryability,
+	NormalizedModelFailure,
 } from "./diagnostics.ts";
+export { normalizeModelFailure } from "./diagnostics.ts";
 export { ModelsError, type ModelsErrorCode } from "./errors.ts";
 export { AssistantMessageEventStream, createAssistantMessageEventStream, EventStream } from "./event-stream.ts";
 export {

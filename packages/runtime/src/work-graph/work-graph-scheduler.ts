@@ -81,10 +81,10 @@ export class WorkGraphScheduler {
 					});
 					if (!selected) break;
 					if (selected.kind === "delegation_resume") {
-						const pending = selected.item.delegationResume;
+						const pending = selected.item.process.delegationResume;
 						if (!pending) continue;
-						selected.item.delegationResume = undefined;
-						selected.item.delegationWaiting = false;
+						selected.item.process.delegationResume = undefined;
+						selected.item.process.delegationWaiting = false;
 						this.#host.activate(selected.graph, selected.item);
 						pending.resolve();
 						continue;
@@ -112,8 +112,9 @@ export class WorkGraphScheduler {
 	#nextSchedulableInGraph(graph: GraphRecord): SchedulableCandidate | undefined {
 		if (this.#host.ledgerFailure() || this.#host.hasGraphFailure(graph.id) || graph.result) return undefined;
 		for (const item of graph.itemOrder) {
-			if (item.delegationResume) return { kind: "delegation_resume", graph, item };
-			if (item.state === "ready" && item.inputAdmissions.length === 0) return { kind: "start", graph, item };
+			if (item.process.delegationResume) return { kind: "delegation_resume", graph, item };
+			if (item.projection.state === "ready" && item.process.inputAdmissions.length === 0)
+				return { kind: "start", graph, item };
 		}
 		return undefined;
 	}
@@ -125,34 +126,36 @@ export class WorkGraphScheduler {
 			for (const graph of this.#graphOrder) {
 				if (graph.result) continue;
 				for (const item of graph.itemOrder) {
-					if (item.state !== "pending" && item.state !== "ready") continue;
-					if (graph.cancellationRequested || item.cancellationRequested) {
+					if (item.projection.state !== "pending" && item.projection.state !== "ready") continue;
+					if (graph.cancellationRequested || item.projection.cancellationRequested) {
 						await this.#host.finalizeWithoutRun(graph, item, "canceled");
 						changed = true;
 						continue;
 					}
 					const blockedBy = item.dependencies.filter((dependencyId) => {
-						const state = graph.items.get(dependencyId)?.state;
+						const state = graph.items.get(dependencyId)?.projection.state;
 						return state !== undefined && isTerminal(state) && state !== "succeeded";
 					});
 					const parent = item.parentId ? graph.items.get(item.parentId) : undefined;
-					if (parent && isTerminal(parent.state) && parent.state !== "succeeded") blockedBy.push(parent.id);
+					if (parent && isTerminal(parent.projection.state) && parent.projection.state !== "succeeded") {
+						blockedBy.push(parent.id);
+					}
 					if (blockedBy.length > 0) {
 						await this.#host.finalizeWithoutRun(graph, item, "blocked", blockedBy);
 						changed = true;
 						continue;
 					}
-					if (item.state !== "pending") continue;
+					if (item.projection.state !== "pending") continue;
 					const dependenciesSucceeded = item.dependencies.every(
-						(dependencyId) => graph.items.get(dependencyId)?.state === "succeeded",
+						(dependencyId) => graph.items.get(dependencyId)?.projection.state === "succeeded",
 					);
 					const parentPermits =
 						!parent ||
-						parent.state === "preparing" ||
-						parent.state === "running" ||
-						parent.state === "settling" ||
-						parent.state === "succeeded";
-					if (dependenciesSucceeded && parentPermits && item.inputAdmissions.length === 0) {
+						parent.projection.state === "preparing" ||
+						parent.projection.state === "running" ||
+						parent.projection.state === "settling" ||
+						parent.projection.state === "succeeded";
+					if (dependenciesSucceeded && parentPermits && item.process.inputAdmissions.length === 0) {
 						await this.#host.transition(graph, item, "ready");
 						changed = true;
 					}

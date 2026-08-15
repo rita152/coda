@@ -49,11 +49,30 @@ export class SessionMediaCodec {
 	}
 
 	async encodeRecord(record: SessionRecord): Promise<SessionRecord> {
-		return { ...record, payload: await this.#encodeValue(record.payload) };
+		return { ...record, payload: await this.#encodeValue(record.payload) } as unknown as SessionRecord;
 	}
 
 	async hydrateRecord(record: SessionRecord): Promise<SessionRecord> {
-		return { ...record, payload: await this.#hydrateValue(record.payload) };
+		return { ...record, payload: await this.#hydrateValue(record.payload) } as unknown as SessionRecord;
+	}
+
+	collectReferences(records: readonly SessionRecord[]): ReadonlyMap<string, readonly SessionMediaReference[]> {
+		const references = new Map<string, readonly SessionMediaReference[]>();
+		for (const record of records) {
+			let ownerId: string | undefined;
+			let content: unknown;
+			if (record.type === "message_committed") {
+				ownerId = record.payload.message.id;
+				content = record.payload.message.message.content;
+			} else if (record.type === "follow_up_enqueued") {
+				ownerId = String(record.payload.item.id);
+				content = record.payload.item.content;
+			}
+			if (!ownerId) continue;
+			const media = collectMediaFromValue(content);
+			if (media.length > 0) references.set(ownerId, structuredClone(media));
+		}
+		return references;
 	}
 
 	async #encodeValue(value: unknown): Promise<unknown> {
@@ -198,6 +217,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isImageContent(value: Record<string, unknown>): value is Record<string, unknown> & ImageContentLike {
 	return value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string";
+}
+
+function collectMediaFromValue(value: unknown): SessionMediaReference[] {
+	if (Array.isArray(value)) return value.flatMap(collectMediaFromValue);
+	if (!isRecord(value)) return [];
+	if (value.type === "media") return [value as unknown as SessionMediaReference];
+	return Object.values(value).flatMap(collectMediaFromValue);
 }
 
 function validateReference(value: unknown): SessionMediaReference {

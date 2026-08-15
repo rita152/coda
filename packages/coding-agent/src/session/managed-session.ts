@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentMessage, CompactionCheckpoint, FollowUp } from "@coda/agent";
+import type { AgentMessage, CompactionCheckpoint, FollowUp, SessionEvent } from "@coda/agent";
 import {
 	projectSessionRunEvidence,
 	type RunEvidenceEnvelope,
@@ -7,7 +7,7 @@ import {
 	supplementRunEvidenceWorkspaceDiff,
 } from "../run-evidence/run-evidence.ts";
 import { SessionHistoryReader } from "../session-history/reader.ts";
-import type { SessionRecord, SessionRecordType } from "./records.ts";
+import type { SessionRecord, SessionRecordOf, SessionRecordPayloadMap, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import type {
 	RestoredSessionState,
@@ -155,7 +155,7 @@ export class ManagedSession implements Session {
 		this.#runEvidence[index] = supplementRunEvidenceWorkspaceDiff(this.#runEvidence[index]!, supplement);
 	}
 
-	accept(event: AgentEvent): Promise<void> {
+	accept(event: SessionEvent): Promise<void> {
 		this.#assertOpen();
 		return this.#recordEvent(event);
 	}
@@ -217,7 +217,7 @@ export class ManagedSession implements Session {
 		if (failure !== undefined) throw failure;
 	}
 
-	async #recordEvent(event: AgentEvent): Promise<void> {
+	async #recordEvent(event: SessionEvent): Promise<void> {
 		if (event.type === "run_start" && event.source === "follow_up" && event.queueItemId) {
 			const pending = this.#pendingFollowUps.get(String(event.queueItemId));
 			if (pending) {
@@ -243,15 +243,23 @@ export class ManagedSession implements Session {
 		if (event.type === "run_start") this.#preparedRun = undefined;
 	}
 
-	#append(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
+	#append<Type extends SessionRecordType>(
+		type: Type,
+		payload: SessionRecordPayloadMap[Type],
+		event?: SessionEvent,
+	): Promise<void> {
 		const operation = this.#appendTail.then(() => this.#appendNow(type, payload, event));
 		this.#appendTail = operation;
 		return operation;
 	}
 
-	async #appendNow(type: SessionRecordType, payload: unknown, event?: AgentEvent): Promise<void> {
+	async #appendNow<Type extends SessionRecordType>(
+		type: Type,
+		payload: SessionRecordPayloadMap[Type],
+		event?: SessionEvent,
+	): Promise<void> {
 		const recordId = identity(this.#runtime, "record");
-		const record: SessionRecord = {
+		const record: SessionRecordOf<Type> = {
 			type,
 			recordId,
 			sessionId: this.descriptor.id,
@@ -262,8 +270,8 @@ export class ManagedSession implements Session {
 			turnId: event && "turnId" in event ? event.turnId : undefined,
 			attemptId: event && "attemptId" in event ? event.attemptId : undefined,
 			payload: structuredClone(payload),
-		};
-		await this.#journal.append(record);
+		} as unknown as SessionRecordOf<Type>;
+		await this.#journal.append(record as SessionRecord);
 		if (type === "message_committed") {
 			const message = (payload as { readonly message?: AgentMessage }).message;
 			if (message) this.#historyMessages.push(structuredClone(message));

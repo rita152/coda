@@ -1,6 +1,4 @@
-import type { TimeRuntime } from "@coda/ai";
-
-export class DeterministicTimeRuntime implements TimeRuntime {
+export class DeterministicTimeRuntime {
 	#time = 0;
 
 	readonly clock = {

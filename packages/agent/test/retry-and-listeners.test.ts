@@ -21,7 +21,20 @@ function transientFailure(clock: TestClock, retryable = true): AssistantMessage 
 			type: "stream_error",
 			timestamp: clock.now(),
 			error: { message: message.errorMessage!, code: retryable ? "ECONNRESET" : "auth" },
-			details: { phase: "stream", provider: "faux", api: "faux", status: retryable ? 503 : 401, retryable },
+			details: {
+				phase: "stream",
+				provider: "faux",
+				api: "faux",
+				status: retryable ? 503 : 401,
+				retryable,
+				failure: {
+					phase: "stream",
+					category: retryable ? "transport" : "provider",
+					retryability: retryable ? "retryable" : "non_retryable",
+					providerCode: retryable ? "ECONNRESET" : "auth",
+					httpStatus: retryable ? 503 : 401,
+				},
+			},
 		},
 	];
 	return message;
@@ -196,7 +209,7 @@ describe("Agent whole-turn retry", () => {
 		expect(recovered).toBe(1);
 	});
 
-	it("ignores an unrecognized failure even when a provider marks it retryable", async () => {
+	it("ignores legacy retry hints that do not carry AI-normalized failure semantics", async () => {
 		const clock = new TestClock();
 		const failure = fauxAssistantMessage("discarded partial", {
 			stopReason: "error",

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 // See THIRD_PARTY_NOTICES.md.
 
+import { normalizeModelFailure } from "./diagnostics.ts";
 import type { TimeRuntime } from "./types.ts";
 
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
@@ -30,10 +31,14 @@ function isProviderError(error: unknown): error is ProviderError {
 
 function isRetryableProviderError(error: ProviderError): boolean {
 	const shouldRetry = error.headers?.get("x-should-retry");
-	if (shouldRetry === "true") return true;
-	if (shouldRetry === "false") return false;
-	if (error.status === undefined) return true;
-	return error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
+	const retryabilityOverride = shouldRetry === "true" ? true : shouldRetry === "false" ? false : undefined;
+	return (
+		normalizeModelFailure(error, {
+			phase: "request",
+			providerRequest: true,
+			...(retryabilityOverride === undefined ? {} : { retryabilityOverride }),
+		}).retryability === "retryable"
+	);
 }
 
 function validateServerRetryDelayMs(delayMs: number, maxRetryDelayMs: number | undefined, message: string): number {
