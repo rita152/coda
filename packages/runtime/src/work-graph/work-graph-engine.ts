@@ -42,14 +42,15 @@ import type {
 } from "./types.ts";
 import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
 import {
-	assertConfiguration,
 	assertIdentity,
 	type BatchPlan,
 	createWorkGraphPlanningView,
 	ID_PATTERN,
 	planBatch,
 	rejected,
+	revalidateBatchPlan,
 	SubmissionRejection,
+	validatePlanConfigurations,
 } from "./work-graph-planner.ts";
 import {
 	type DeliveryPlan,
@@ -224,13 +225,13 @@ export class WorkGraphEngine implements CodingAgent {
 					view: createWorkGraphPlanningView(this.#graphs),
 				}),
 			);
-			await this.#validateConfigurations(plan);
+			await validatePlanConfigurations(plan, this.#options.modelProvider);
 			await this.#reserve(plan);
 			await this.#commitOwnershipReservations(plan);
 			await admission.ready;
 			await this.#admission.mutation(() =>
 				this.#graphMutation(plan!.targetGraphId, async () => {
-					this.#revalidate(plan!);
+					revalidateBatchPlan(plan!, { graphs: this.#graphs, sessions: this.#sessionRegistry });
 					const graph = plan!.newGraphs[0] ?? this.#graphs.get(plan!.targetGraphId)!;
 					if (plan!.newGraphs.length === 0 && plan!.newItems.length > 0) {
 						await this.#acceptWorkspaceGraphs(plan!);
@@ -302,23 +303,6 @@ export class WorkGraphEngine implements CodingAgent {
 			graphIds: plan.graphIds,
 			itemIds: plan.itemIds,
 		});
-	}
-
-	async #validateConfigurations(plan: BatchPlan): Promise<void> {
-		const signal = new AbortController().signal;
-		try {
-			for (const { item } of plan.newItems) {
-				await this.#options.modelProvider.resolve(item.desiredConfiguration, signal);
-			}
-			for (const { command } of plan.configurations) {
-				await this.#options.modelProvider.resolve(command.configuration, signal);
-			}
-		} catch (error) {
-			throw rejected({
-				code: "resource_reservation_failed",
-				message: `Runtime configuration failed: ${errorMessage(error)}`,
-			});
-		}
 	}
 
 	async #reserve(plan: BatchPlan): Promise<void> {
@@ -401,110 +385,6 @@ export class WorkGraphEngine implements CodingAgent {
 					itemId: delivery.item.id,
 				});
 			}
-		}
-	}
-
-	#revalidate(plan: BatchPlan): void {
-		const newGraphIds = new Set(plan.newGraphs.map(({ id }) => id));
-		for (const graph of plan.newGraphs) {
-			if (this.#graphs.has(graph.id)) {
-				throw rejected({
-					code: "duplicate_identity",
-					message: `Work Graph ${graph.id} was accepted by an earlier batch`,
-					graphId: graph.id,
-				});
-			}
-		}
-		for (const entry of plan.newItems) {
-			if (!newGraphIds.has(entry.graph.id)) {
-				if (this.#graphs.get(entry.graph.id) !== entry.graph || entry.graph.items.has(entry.item.id)) {
-					throw rejected({
-						code: "duplicate_identity",
-						message: `Work Item ${entry.item.id} was accepted by an earlier batch`,
-						graphId: entry.graph.id,
-						itemId: entry.item.id,
-					});
-				}
-			}
-			if (entry.graph.result || entry.graph.cancellationRequested) {
-				throw rejected({
-					code: "invalid_state",
-					message: `Work Graph ${entry.graph.id} settled while the batch was reserving resources`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-			if (entry.item.reservedSessionId && this.#sessionRegistry.has(entry.item.reservedSessionId)) {
-				throw rejected({
-					code: "session_leased",
-					message: `Session was leased by an earlier batch: ${entry.item.reservedSessionId}`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-			if (!entry.item.parentId) continue;
-			const parent =
-				plan.newItems.find(
-					(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === entry.item.parentId,
-				)?.item ?? entry.graph.items.get(entry.item.parentId);
-			if (!parent || parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
-				throw rejected({
-					code: "invalid_state",
-					message: `Parent Work Item ${entry.item.parentId} settled while the batch was reserving resources`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-		}
-		for (const delivery of plan.deliveries) {
-			const { graph, item, command, commandIndex } = delivery;
-			if (
-				graph.result ||
-				graph.cancellationRequested ||
-				item.state === "settling" ||
-				isTerminal(item.state) ||
-				item.cancellationRequested
-			) {
-				throw rejected({
-					code: "invalid_state",
-					message: `Work Item ${item.id} changed state while the batch was reserving resources`,
-					commandIndex,
-					graphId: graph.id,
-					itemId: item.id,
-				});
-			}
-			if (
-				command.kind === "prompt" &&
-				(item.promptAccepted ||
-					item.runtime !== undefined ||
-					item.state === "preparing" ||
-					item.state === "running")
-			) {
-				throw rejected({
-					code: "invalid_state",
-					message: `Work Item ${item.id} already owns its Prompt input`,
-					commandIndex,
-					graphId: graph.id,
-					itemId: item.id,
-				});
-			}
-		}
-		for (const { graph, item, command } of plan.configurations) {
-			if (
-				graph.result ||
-				graph.cancellationRequested ||
-				item.state === "settling" ||
-				isTerminal(item.state) ||
-				item.cancellationRequested
-			) {
-				throw rejected({
-					code: "invalid_state",
-					message: `Work Item ${item.id} changed state while the batch was validating configuration`,
-					graphId: graph.id,
-					itemId: item.id,
-				});
-			}
-			assertConfiguration(command.configuration);
 		}
 	}
 
