@@ -665,6 +665,190 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 	});
 
+	it("rejects a dependency cycle before reserving or exposing the added Work Item", async () => {
+		const run = deferred();
+		const { agent, workspace } = await harness([{ gate: run.promise }]);
+		await agent.submit({ commands: [start("graph:characterize-cycle", 1)] });
+		await waitForState(agent, "graph:characterize-cycle", "root", "running");
+		const reservedBefore = [...workspace.reserved];
+
+		await expect(
+			agent.submit({
+				commands: [
+					{
+						type: "add_work_items",
+						graphId: "graph:characterize-cycle",
+						items: [
+							{
+								itemId: "cyclic",
+								parentItemId: "root",
+								dependencies: ["cyclic"],
+								objective: "must remain invisible",
+								executionMode: "read_only",
+							},
+						],
+					},
+				],
+			}),
+		).resolves.toMatchObject({
+			status: "rejected",
+			rejection: {
+				code: "dependency_cycle",
+				commandIndex: 0,
+				graphId: "graph:characterize-cycle",
+				itemId: "cyclic",
+			},
+		});
+		expect(workspace.reserved).toEqual(reservedBefore);
+		const iterator = agent.observe()[Symbol.asyncIterator]();
+		const snapshot = (await iterator.next()).value as Extract<CodingAgentObservation, { type: "snapshot" }>;
+		expect(snapshot.snapshot.graphs[0]?.items.map(({ itemId }) => itemId)).toEqual(["root"]);
+		await iterator.return?.();
+
+		run.resolve();
+		await waitForGraphResult(agent, "graph:characterize-cycle");
+		await agent.close();
+	});
+
+	it("rejects duplicate Graph identity and an already-leased Session without exposing either Graph", async () => {
+		const run = deferred();
+		const { agent, sessions, workspace } = await harness([{ gate: run.promise }]);
+		await agent.submit({ commands: [start("graph:characterize-identity", 1)] });
+		await waitForState(agent, "graph:characterize-identity", "root", "running");
+
+		await expect(agent.submit({ commands: [start("graph:characterize-identity", 1)] })).resolves.toMatchObject({
+			status: "rejected",
+			rejection: { code: "duplicate_identity", commandIndex: 0, graphId: "graph:characterize-identity" },
+		});
+		await expect(
+			agent.submit({
+				commands: [
+					{
+						...start("graph:characterize-lease", 1),
+						session: { type: "resume", sessionId: "session:graph:characterize-identity" },
+					},
+				],
+			}),
+		).resolves.toMatchObject({
+			status: "rejected",
+			rejection: {
+				code: "session_leased",
+				graphId: "graph:characterize-lease",
+				itemId: "root",
+			},
+		});
+		expect(sessions.rolledBack).toContain("session:graph:characterize-identity");
+		expect(workspace.rolledBack.some((id) => id.includes("graph:characterize-lease"))).toBe(true);
+		const iterator = agent.observe()[Symbol.asyncIterator]();
+		const snapshot = (await iterator.next()).value as Extract<CodingAgentObservation, { type: "snapshot" }>;
+		expect(snapshot.snapshot.graphs.map(({ graphId }) => graphId)).toEqual(["graph:characterize-identity"]);
+		await iterator.return?.();
+
+		run.resolve();
+		await waitForGraphResult(agent, "graph:characterize-identity");
+		await agent.close();
+	});
+
+	it("rejects input that becomes illegal during reservation without corrupting the terminal state", async () => {
+		const run = deferred();
+		const reservationStarted = deferred();
+		const releaseReservation = deferred();
+		const persistence = new MemoryWorkspacePersistence();
+		const { agent, modelCalls } = await harness([{ gate: run.promise }], {
+			persistence,
+			resources: {
+				reserve: async () => {
+					reservationStarted.resolve();
+					await releaseReservation.promise;
+					return { commit: () => Promise.resolve(), rollback: () => Promise.resolve() };
+				},
+			},
+		});
+		const resultOperation = waitForGraphResult(agent, "graph:characterize-transition");
+		await agent.submit({ commands: [start("graph:characterize-transition", 1)] });
+		await vi.waitFor(() => expect(modelCalls).toEqual(["one"]));
+		const delivery = agent.submit({
+			batchId: "batch:characterize-transition",
+			commands: [
+				{
+					type: "deliver_work_item_input",
+					graphId: "graph:characterize-transition",
+					itemId: "root",
+					kind: "follow_up",
+					input: "must not reopen terminal work",
+					resources: ["resource:late"],
+				},
+			],
+		});
+		await reservationStarted.promise;
+		run.resolve();
+		await vi.waitFor(() => expect(persistence.facts.some((fact) => fact.type === "item_result_recorded")).toBe(true));
+		releaseReservation.resolve();
+
+		await expect(delivery).resolves.toMatchObject({ status: "rejected", rejection: { code: "invalid_state" } });
+		expect(await resultOperation).toMatchObject({ results: [{ itemId: "root", state: "succeeded" }] });
+		expect(
+			persistence.facts.some((fact) => "batchId" in fact && fact.batchId === "batch:characterize-transition"),
+		).toBe(false);
+		expect(
+			persistence.facts.filter((fact) => fact.type === "item_transitioned").map(({ from, to }) => `${from}->${to}`),
+		).toEqual(["pending->ready", "ready->preparing", "running->settling", "settling->succeeded"]);
+		await agent.close();
+	});
+
+	it("constructs blockedBy results and marks persistence-failure results with unknown durability", async () => {
+		const root = deferred();
+		const failed = deferred();
+		const blocked = await harness([{ gate: root.promise }, { gate: failed.promise, outcome: "error" }]);
+		await blocked.agent.submit({ commands: [start("graph:characterize-results", 2)] });
+		await blocked.agent.submit({
+			commands: [
+				{
+					type: "add_work_items",
+					graphId: "graph:characterize-results",
+					items: [
+						{ itemId: "failed", parentItemId: "root", objective: "fail", executionMode: "read_only" },
+						{
+							itemId: "dependent",
+							parentItemId: "root",
+							dependencies: ["failed"],
+							objective: "remain blocked",
+							executionMode: "read_only",
+						},
+					],
+				},
+			],
+		});
+		failed.resolve();
+		root.resolve();
+		const blockedResult = await waitForGraphResult(blocked.agent, "graph:characterize-results");
+		expect(blockedResult.results.find(({ itemId }) => itemId === "dependent")).toMatchObject({
+			state: "blocked",
+			blockedBy: ["failed"],
+			durability: "confirmed",
+			publication: { state: "not_required" },
+		});
+		await blocked.agent.close();
+
+		const persistence = new FailOnceGraphPersistence((fact) => fact.type === "item_result_recorded");
+		const undurable = await harness([{}], { persistence });
+		await undurable.agent.submit({ commands: [start("graph:characterize-durability", 1)] });
+		const unknown = await waitForGraphResult(undurable.agent, "graph:characterize-durability");
+		expect(unknown).toMatchObject({
+			durability: "unknown",
+			results: [
+				{
+					itemId: "root",
+					state: "interrupted",
+					durability: "unknown",
+					dependencies: [],
+					publication: { state: "not_published", reason: "interrupted" },
+				},
+			],
+		});
+		await undurable.agent.close();
+	});
+
 	it("routes built-in delegation through the deterministic bound Tool assembly", async () => {
 		const journal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
