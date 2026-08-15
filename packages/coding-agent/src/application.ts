@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import type { AgentInput, Clock, IdGenerator } from "@coda/agent";
-import type { Api, AuthPrompt, ImageContent, Model, MutableModels } from "@coda/ai";
+import type { Clock, IdGenerator } from "@coda/agent";
+import type { Api, AuthPrompt, Model, MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
 import {
@@ -21,6 +21,17 @@ import {
 	runControlConfiguration,
 } from "./app/argument-parsing.ts";
 import { JsonEventWriter } from "./app/json-event-writer.ts";
+import {
+	chatAttachment,
+	hasAgentInput,
+	openAttachmentInSystemViewer,
+	openPathInSystemViewer,
+	pathSafeIdentity,
+	prepareAttachmentTransaction,
+	projectJsonMedia,
+	promptInput,
+	restoredChatAttachments,
+} from "./app/media-attachments.ts";
 import { createSessionPresentation } from "./app/session-presentation.ts";
 import {
 	assertSkillReferencesAvailable,
@@ -40,7 +51,7 @@ import {
 } from "./completion/index.ts";
 import { collectWorkspaceDiff } from "./completion/workspace-diff.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
-import { type FileSystem, isFileSystemError } from "./host/file-system.ts";
+import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { createWorkspace } from "./host/workspace.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
@@ -48,7 +59,7 @@ import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { inspectMcpConfiguration } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
-import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
+import { MediaLibrary } from "./media/media-library.ts";
 import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./models/model-capabilities.ts";
 import { catalogModelFromRuntime } from "./models/model-catalog.ts";
 import type { ModelSelection } from "./models/model-selection.ts";
@@ -61,15 +72,8 @@ import type { SessionWorkController } from "./runtime/session-work-controller.ts
 import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { DraftSession } from "./session/draft-session.ts";
-import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
-import type {
-	Session,
-	SessionId,
-	SessionManager,
-	SessionMediaReference,
-	SessionMediaRegistration,
-} from "./session/types.ts";
+import type { Session, SessionId, SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
 import {
@@ -84,9 +88,7 @@ import { collectSkillRoots } from "./skills/roots.ts";
 import type { CodingSkillsSnapshot } from "./skills/types.ts";
 import type { SkillWatcher, SkillWatcherFactory } from "./skills/watcher.ts";
 import { activitySummaryModeForApi } from "./ui/activity-status.ts";
-import type { ChatAttachment } from "./ui/chat-component.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
-import type { AttachmentTransaction } from "./ui/input-controller.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
 import { confirmFromTerminal, type PromptRuntime, promptTextFromTerminal, selectFromTerminal } from "./ui/prompts.ts";
@@ -1530,240 +1532,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 const unavailableProviderDiscoveryFetch: typeof globalThis.fetch = async () => {
 	throw new Error("Custom Provider discovery requires an injected fetch adapter");
 };
-
-async function promptInput(
-	text: string,
-	attachmentIds: readonly string[],
-	mediaLibrary: MediaLibrary,
-	restoredContents: ReadonlyMap<string, ImageContent> = new Map(),
-): Promise<AgentInput> {
-	if (attachmentIds.length === 0) return text;
-	const content: Exclude<AgentInput, string> = [];
-	if (text.length > 0) content.push(Object.freeze({ type: "text", text }));
-	for (const attachmentId of attachmentIds) {
-		content.push(restoredContents.get(attachmentId) ?? (await mediaLibrary.modelContent(attachmentId)));
-	}
-	return content;
-}
-
-async function chatAttachment(mediaLibrary: MediaLibrary, attachmentId: string): Promise<ChatAttachment> {
-	const asset = mediaLibrary.resolve(attachmentId);
-	return Object.freeze({
-		id: attachmentId,
-		filename: asset.filename,
-		mimeType: asset.mimeType,
-		width: asset.width,
-		height: asset.height,
-		bytes: asset.bytes,
-		preview: Object.freeze({
-			png: await mediaLibrary.previewPng(attachmentId),
-			generation: asset.digest,
-			width: asset.preview.width,
-			height: asset.preview.height,
-		}),
-	});
-}
-
-function sessionMediaRegistration(asset: MediaAsset): SessionMediaRegistration {
-	return {
-		reference: {
-			type: "media",
-			digest: asset.digest,
-			filename: asset.filename,
-			mimeType: asset.mimeType,
-			width: asset.width,
-			height: asset.height,
-			bytes: asset.bytes,
-			rendition: {
-				digest: asset.modelDigest,
-				mimeType: asset.model.mimeType,
-				width: asset.model.width,
-				height: asset.model.height,
-				bytes: asset.model.bytes,
-			},
-		},
-		modelPath: asset.model.path,
-	};
-}
-
-async function prepareAttachmentTransaction(
-	attachmentIds: readonly string[],
-	mediaLibrary: MediaLibrary,
-	session: Session,
-	inputResources: WorkspaceInputResources,
-): Promise<AttachmentTransaction> {
-	if (attachmentIds.length === 0) {
-		return {
-			resources: [],
-			commit: async () => undefined,
-			rollback: async () => undefined,
-		};
-	}
-	return inputResources.register(
-		attachmentIds,
-		{
-			commit: async () => {
-				const committed = await mediaLibrary.commit(attachmentIds);
-				if (session.descriptor.persistent) {
-					session.registerMedia(committed.map(sessionMediaRegistration));
-				}
-			},
-			rollback: async () => {
-				for (const attachmentId of attachmentIds) await mediaLibrary.detach(attachmentId);
-			},
-		},
-		async () => {
-			for (const attachmentId of attachmentIds) await mediaLibrary.detach(attachmentId);
-		},
-	);
-}
-
-interface RestoredChatMedia {
-	readonly attachments: ReadonlyMap<string, readonly ChatAttachment[]>;
-	readonly contents: ReadonlyMap<string, ImageContent>;
-	readonly paths: ReadonlyMap<string, string>;
-}
-
-async function restoredChatAttachments(
-	references: ReadonlyMap<string, readonly SessionMediaReference[]>,
-	sessionPath: string | undefined,
-	fileSystem: FileSystem,
-	editableOwners: ReadonlySet<string>,
-): Promise<RestoredChatMedia> {
-	const result = new Map<string, readonly ChatAttachment[]>();
-	const contents = new Map<string, ImageContent>();
-	const paths = new Map<string, string>();
-	for (const [messageId, messageReferences] of references) {
-		const attachments: ChatAttachment[] = [];
-		for (const [index, reference] of messageReferences.entries()) {
-			let preview: ChatAttachment["preview"];
-			if (sessionPath) {
-				const previewPath = join(`${sessionPath}.media`, `${reference.digest}.preview.png`);
-				try {
-					preview = {
-						png: await fileSystem.readFile(previewPath),
-						generation: reference.digest,
-						width: reference.width,
-						height: reference.height,
-					};
-				} catch (error) {
-					if (!isFileSystemError(error, "ENOENT")) throw error;
-				}
-			}
-			const id = `restored:${messageId}:${index}:${reference.digest}`;
-			if (sessionPath && editableOwners.has(messageId)) {
-				const modelPath = sessionModelPath(sessionPath, reference);
-				const modelBytes = await fileSystem.readFile(modelPath);
-				contents.set(id, {
-					type: "image",
-					data: Buffer.from(modelBytes).toString("base64"),
-					mimeType: reference.rendition.mimeType,
-				});
-				paths.set(id, modelPath);
-			}
-			attachments.push({
-				id,
-				filename: reference.filename,
-				mimeType: reference.mimeType,
-				width: reference.width,
-				height: reference.height,
-				bytes: reference.bytes,
-				preview,
-			});
-		}
-		result.set(messageId, attachments);
-	}
-	return { attachments: result, contents, paths };
-}
-
-function sessionModelPath(sessionPath: string, reference: SessionMediaReference): string {
-	const extension = sessionMediaExtension(reference.rendition.mimeType);
-	return join(`${sessionPath}.media`, `${reference.digest}.model.${extension}`);
-}
-
-async function openAttachmentInSystemViewer(
-	mediaLibrary: MediaLibrary,
-	attachmentId: string,
-	processRunner: ProcessRunner,
-	runtime: ApplicationRuntime,
-	cwd: string,
-): Promise<void> {
-	const path = mediaLibrary.resolve(attachmentId).original.path;
-	return openPathInSystemViewer(path, processRunner, runtime, cwd);
-}
-
-async function openPathInSystemViewer(
-	path: string,
-	processRunner: ProcessRunner,
-	runtime: ApplicationRuntime,
-	cwd: string,
-): Promise<void> {
-	const command =
-		runtime.platform === "darwin"
-			? { executable: "/usr/bin/open", args: [path] }
-			: runtime.platform === "linux"
-				? { executable: "/usr/bin/xdg-open", args: [path] }
-				: undefined;
-	if (!command) throw new Error(`System image viewer is unsupported on ${runtime.platform}`);
-	const environment = Object.fromEntries(
-		Object.entries(runtime.environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
-	);
-	const result = await processRunner.run({
-		...command,
-		cwd,
-		environment,
-		signal: new AbortController().signal,
-		timeoutMs: 10_000,
-		maxOutputBytes: 64 * 1024,
-		maxOutputLines: 100,
-		overflowPath: join(runtime.homeDirectory, ".coda", "tmp", `media-open-${pathSafeIdentity(path)}.log`),
-	});
-	if (result.exitCode !== 0 || result.signal || result.timedOut) {
-		throw new Error(result.stderr.trim() || "System image viewer could not be opened");
-	}
-}
-
-function projectJsonMedia(value: unknown, mediaLibrary: MediaLibrary, includeData: boolean): unknown {
-	if (Array.isArray(value)) return value.map((entry) => projectJsonMedia(entry, mediaLibrary, includeData));
-	if (!value || typeof value !== "object") return value;
-	const record = value as Record<string, unknown>;
-	if (record.type === "image" && typeof record.data === "string" && typeof record.mimeType === "string") {
-		const bytes = Buffer.from(record.data, "base64");
-		const modelDigest = createHash("sha256").update(bytes).digest("hex");
-		const asset = mediaLibrary.describeImageContent({
-			type: "image",
-			data: record.data,
-			mimeType: record.mimeType,
-		});
-		const fallbackExtension = record.mimeType === "image/jpeg" ? "jpg" : "png";
-		return {
-			type: "media",
-			digest: asset?.digest ?? modelDigest,
-			filename: asset?.filename ?? `image-${modelDigest.slice(0, 12)}.${fallbackExtension}`,
-			mimeType: asset?.mimeType ?? record.mimeType,
-			bytes: asset?.bytes ?? bytes.byteLength,
-			...(asset ? { width: asset.width, height: asset.height } : {}),
-			rendition: {
-				digest: asset?.modelDigest ?? modelDigest,
-				mimeType: record.mimeType,
-				bytes: bytes.byteLength,
-				...(asset ? { width: asset.model.width, height: asset.model.height } : {}),
-			},
-			...(includeData ? { data: record.data } : {}),
-		};
-	}
-	return Object.fromEntries(
-		Object.entries(record).map(([key, entry]) => [key, projectJsonMedia(entry, mediaLibrary, includeData)]),
-	);
-}
-
-function hasAgentInput(input: AgentInput): boolean {
-	return typeof input === "string" ? input.trim().length > 0 : input.length > 0;
-}
-
-function pathSafeIdentity(value: string): string {
-	return value.replace(/[^a-zA-Z0-9._-]/g, "-");
-}
 
 function terminalImageIdAllocator(idGenerator: IdGenerator): () => number {
 	const allocated = new Set<number>();
