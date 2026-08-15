@@ -2,6 +2,7 @@ import type {
 	AgentEvent,
 	AgentMessage,
 	AgentSeed,
+	CompactionCheckpoint,
 	FollowUp,
 	MessageId,
 	RunFailure,
@@ -10,7 +11,6 @@ import type {
 } from "@coda/agent";
 import type { Message } from "@coda/ai";
 import type { ModelSelection } from "../models/model-selection.ts";
-import type { CompactionCheckpoint } from "./compaction.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
 import type { RecoverableFollowUp, RestoredSessionState, SessionDescriptor, SessionToolLifecycle } from "./types.ts";
 

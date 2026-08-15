@@ -143,6 +143,13 @@ describe("Session Work Controller", () => {
 			idGenerator,
 			platform: process.platform,
 			interactionMode: "print",
+			openPrivateSession: (sessionId) =>
+				sessions.open({
+					workspace: { id: "workspace:test", path: workspace.root },
+					mode: "print",
+					createId: sessionId,
+					persistent: false,
+				}),
 		});
 		const selection = {
 			model: faux.getModel(),

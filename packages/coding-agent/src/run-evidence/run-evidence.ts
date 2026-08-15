@@ -1,4 +1,10 @@
-import type { AgentEvent, ToolInvocation } from "@coda/agent";
+import {
+	type AgentEvent,
+	AgentEventTraceReducer,
+	type AgentRunTrace,
+	deepFreeze,
+	type ToolInvocation,
+} from "@coda/agent";
 import { resolveToolObservation, type ToolObservation, type ToolResultMessage, type Usage } from "@coda/ai";
 import {
 	RUN_EVIDENCE_RUN_CONTROL_SCHEMA_VERSION,
@@ -144,7 +150,7 @@ interface ProjectedToolEvidence {
 	readonly resolutionScope?: string;
 }
 
-class EvidenceReducer {
+class SessionEvidenceReducer {
 	readonly #runs = new Map<string, RunState>();
 
 	startRun(runId: string, timestamp: number): void {
@@ -242,7 +248,7 @@ class EvidenceReducer {
 
 /** Incremental, side-effect-free projection over immutable live Agent Events. */
 export class RunEvidenceProjection {
-	readonly #reducer = new EvidenceReducer();
+	readonly #trace = new AgentEventTraceReducer({ retainCompleted: false });
 
 	/**
 	 * Projects the evidence observed so far without settling or deleting the Run.
@@ -254,61 +260,64 @@ export class RunEvidenceProjection {
 		completedAt: number,
 		outcome: RunEvidenceOutcome = "success",
 	): RunEvidenceEnvelope | undefined {
-		return this.#reducer.snapshotRun(runId, {
-			outcome,
-			completedAt,
-			// A live completion snapshot has no lifecycle event sequence. This
-			// sentinel is observable only for a synthetic interrupted snapshot.
-			sequence: Number.MAX_SAFE_INTEGER,
-		});
+		const trace = this.#trace.snapshot(runId);
+		return trace
+			? projectEnvelope(runStateFromTrace(trace), {
+					outcome,
+					completedAt,
+					// A live completion snapshot has no lifecycle event sequence. This
+					// sentinel is observable only for a synthetic interrupted snapshot.
+					sequence: Number.MAX_SAFE_INTEGER,
+				})
+			: undefined;
 	}
 
 	accept(event: AgentEvent): RunEvidenceEnvelope | undefined {
-		switch (event.type) {
-			case "run_start":
-				this.#reducer.startRun(event.runId, event.timestamp);
-				break;
-			case "attempt_end":
-				this.#reducer.finishAttempt(event.runId, event.timestamp, {
-					id: event.attemptId,
-					turnId: event.turnId,
-					order: event.sequence,
-					outcome: event.outcome,
-					discarded: event.discarded,
-					usage: event.candidate.message.usage,
-					error: event.candidate.message.errorMessage,
-				});
-				break;
-			case "retry_scheduled":
-				this.#reducer.noteRetry(event.runId, event.timestamp);
-				break;
-			case "tool_execution_start":
-				this.#reducer.startTool(event.runId, event.timestamp, event.sequence, event.invocation);
-				break;
-			case "tool_execution_end":
-				this.#reducer.finishTool(event.runId, event.timestamp, event.sequence, event.invocation, {
-					settlement: event.settlement,
-					outcome: event.outcome,
-					observation: observationFromResult(event.result.message),
-				});
-				break;
-			case "tool_execution_rejected":
-				this.#reducer.finishTool(event.runId, event.timestamp, event.sequence, event.invocation, {
-					outcome: "rejected",
-					rejectionReason: event.reason,
-					observation: observationFromResult(event.result.message),
-				});
-				break;
-			case "run_end":
-				return this.#reducer.finishRun(event.runId, event.timestamp, {
-					outcome: event.outcome,
-					completedAt: event.timestamp,
-					sequence: event.sequence,
-					failure: event.failure,
-				});
-		}
-		return undefined;
+		const completed = this.#trace.accept(event);
+		if (!completed) return undefined;
+		return projectEnvelope(runStateFromTrace(completed), {
+			outcome: completed.outcome ?? "error",
+			completedAt: completed.completedAt ?? event.timestamp,
+			sequence: completed.completedSequence ?? event.sequence,
+			...(completed.failure ? { failure: completed.failure } : {}),
+		});
 	}
+}
+
+function runStateFromTrace(trace: AgentRunTrace): RunState {
+	const state = createRunState(trace.runId, trace.startedAt);
+	state.retries = trace.retryCount;
+	for (const attempt of trace.attempts) {
+		state.attempts.set(attempt.id, {
+			id: boundedText(attempt.id, MAX_ID_CHARACTERS),
+			turnId: boundedText(attempt.turnId, MAX_ID_CHARACTERS),
+			order: attempt.sequence,
+			outcome: attempt.outcome,
+			discarded: attempt.discarded,
+			usage: usageSnapshot(attempt.candidate.message.usage),
+			...(attempt.candidate.message.errorMessage
+				? { error: safeText(attempt.candidate.message.errorMessage, MAX_SUMMARY_CHARACTERS) }
+				: {}),
+		});
+	}
+	for (const completed of trace.tools) {
+		const order = completed.startedSequence ?? completed.completedSequence ?? 0;
+		const tool = toolSeed(completed.invocation, order);
+		if (!tool) continue;
+		if (completed.completedSequence !== undefined) {
+			tool.completedOrder = completed.completedSequence;
+			if (completed.settlement) tool.settlement = completed.settlement;
+			if (completed.outcome) tool.outcome = completed.outcome;
+			if (completed.rejectionReason) {
+				tool.rejectionReason = safeText(completed.rejectionReason, MAX_SUMMARY_CHARACTERS);
+			}
+			tool.observation = completed.result
+				? observationFromResult(completed.result.message)
+				: fallbackObservation(completed.outcome, completed.rejectionReason);
+		}
+		state.tools.set(tool.invocationId, tool);
+	}
+	return state;
 }
 
 /** Reconstructs completed Run evidence from existing Session facts without a cache record or migration. */
@@ -316,7 +325,7 @@ export function projectSessionRunEvidence(
 	records: readonly RunEvidenceSessionRecord[],
 ): readonly RunEvidenceEnvelope[] {
 	const observations = sessionObservations(records);
-	const reducer = new EvidenceReducer();
+	const reducer = new SessionEvidenceReducer();
 	const completed: RunEvidenceEnvelope[] = [];
 	for (const record of records) {
 		if (!record.runId) continue;
@@ -1209,11 +1218,4 @@ function isToolOutcome(value: unknown): value is NonNullable<ToolEvidence["outco
 	return (
 		value === "success" || value === "error" || value === "aborted" || value === "rejected" || value === "interrupted"
 	);
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const item of Object.values(value)) deepFreeze(item);
-	return value;
 }

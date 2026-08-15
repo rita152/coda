@@ -1,4 +1,13 @@
-import type { AgentEvent, AgentInput, AgentSeed, AgentState, Clock, IdGenerator, RunSummary } from "@coda/agent";
+import {
+	type AgentEvent,
+	type AgentInput,
+	type AgentSeed,
+	type AgentState,
+	BoundedObservationQueue,
+	type Clock,
+	type IdGenerator,
+	type RunSummary,
+} from "@coda/agent";
 import type { Api, AuthResult, Model, ThinkingLevel } from "@coda/ai";
 import type {
 	CodingAgent,
@@ -97,11 +106,7 @@ type ObservationDelivery =
 	| { readonly type: "resync"; readonly snapshot: SessionWorkResynchronization };
 
 interface ObservationSubscriber {
-	readonly observer: SessionWorkObserver;
-	readonly capacity: number;
-	readonly queue: ObservationDelivery[];
-	running: boolean;
-	closed: boolean;
+	readonly queue: BoundedObservationQueue<ObservationDelivery>;
 }
 
 function safeIdentity(value: string): string {
@@ -327,16 +332,17 @@ export class SessionWorkController {
 	subscribe(observer: SessionWorkObserver, options: SessionWorkObservationOptions = {}): () => void {
 		this.#assertOpen();
 		const capacity = options.capacity ?? 256;
-		if (!Number.isSafeInteger(capacity) || capacity < 1) {
-			throw new Error("Session Work Observation capacity must be a positive safe integer");
-		}
-		const subscriber: ObservationSubscriber = {
-			observer,
+		let subscriber: ObservationSubscriber;
+		const queue = new BoundedObservationQueue<ObservationDelivery>({
 			capacity,
-			queue: [],
-			running: false,
-			closed: false,
-		};
+			capacityName: "Session Work Observation",
+			deliver: (delivery) => {
+				if (delivery.type === "event") return observer.accept(delivery.event);
+				return observer.resynchronize(delivery.snapshot);
+			},
+			onDeliveryError: () => this.#removeObservationSubscriber(subscriber),
+		});
+		subscriber = { queue };
 		this.#observationSubscribers.add(subscriber);
 		return () => this.#removeObservationSubscriber(subscriber);
 	}
@@ -447,8 +453,7 @@ export class SessionWorkController {
 			}
 		}
 		for (const subscriber of this.#observationSubscribers) {
-			subscriber.queue.splice(0);
-			this.#enqueueObservation(subscriber, {
+			subscriber.queue.replace({
 				type: "resync",
 				snapshot: this.#resynchronization("upstream_resync"),
 			});
@@ -466,37 +471,11 @@ export class SessionWorkController {
 	}
 
 	#enqueueObservation(subscriber: ObservationSubscriber, delivery: ObservationDelivery): void {
-		if (subscriber.closed) return;
-		if (subscriber.queue.length >= subscriber.capacity) {
-			subscriber.queue.splice(0);
-			subscriber.queue.push({
+		if (!subscriber.queue.enqueue(delivery)) {
+			subscriber.queue.replace({
 				type: "resync",
 				snapshot: this.#resynchronization("slow_consumer"),
 			});
-		} else {
-			subscriber.queue.push(delivery);
-		}
-		if (subscriber.running) return;
-		subscriber.running = true;
-		queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
-	}
-
-	async #drainObservationSubscriber(subscriber: ObservationSubscriber): Promise<void> {
-		try {
-			while (!subscriber.closed) {
-				const delivery = subscriber.queue.shift();
-				if (!delivery) return;
-				if (delivery.type === "event") await subscriber.observer.accept(delivery.event);
-				else await subscriber.observer.resynchronize(delivery.snapshot);
-			}
-		} catch {
-			this.#removeObservationSubscriber(subscriber);
-		} finally {
-			subscriber.running = false;
-			if (!subscriber.closed && subscriber.queue.length > 0) {
-				subscriber.running = true;
-				queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
-			}
 		}
 	}
 
@@ -511,9 +490,8 @@ export class SessionWorkController {
 	}
 
 	#removeObservationSubscriber(subscriber: ObservationSubscriber): void {
-		if (subscriber.closed) return;
-		subscriber.closed = true;
-		subscriber.queue.splice(0);
+		if (subscriber.queue.closed) return;
+		subscriber.queue.close();
 		this.#observationSubscribers.delete(subscriber);
 	}
 

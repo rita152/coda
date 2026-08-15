@@ -1,3 +1,4 @@
+import { deepFreeze } from "@coda/agent";
 import type { RunEvidenceEnvelope, RunEvidenceFailure, RunEvidenceOperation } from "../run-evidence/contracts.ts";
 import { classifyShellCommand, sanitizeCompletionCommand } from "./completion-evidence.ts";
 import type {
@@ -113,11 +114,4 @@ function point(operation: RunEvidenceOperation, label: string): CompletionEviden
 function bounded(value: string): string {
 	const characters = Array.from(value);
 	return characters.length <= 512 ? value : `${characters.slice(0, 511).join("")}…`;
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const nested of Object.values(value)) deepFreeze(nested);
-	return value;
 }

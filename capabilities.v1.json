@@ -447,7 +447,7 @@
         "packages/coding-agent/src/tools/read-session-history.ts"
       ],
       "tests": [
-        "packages/coding-agent/test/draft-session.test.ts",
+        "packages/coding-agent/test/managed-session.test.ts",
         "packages/coding-agent/test/session-history-reader.test.ts"
       ]
     },

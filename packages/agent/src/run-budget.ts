@@ -1,16 +1,8 @@
 import type { ToolCall, Usage } from "@coda/ai";
 import { AgentError } from "./errors.ts";
 import { cloneFrozen } from "./immutable.ts";
-import type { RunBudget, RunBudgetExhaustion, RunFailure, RunLimitKind, RunLimits } from "./types.ts";
-
-const INTEGER_LIMITS = [
-	"maxTurns",
-	"maxModelAttempts",
-	"maxToolInvocations",
-	"maxElapsedMs",
-	"maxTotalTokens",
-	"maxConsecutiveEquivalentToolBatches",
-] as const satisfies readonly (keyof RunLimits)[];
+import { snapshotRunLimits } from "./run-limits.ts";
+import type { RunBudget, RunBudgetExhaustion, RunFailure, RunLimitKind } from "./types.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -22,24 +14,11 @@ export function snapshotRunBudget(input: RunBudget | undefined): RunBudget | und
 		throw new AgentError("invalid_input", "runBudget must contain a limits object");
 	}
 
-	const inputLimits = input.limits as RunLimits;
-	const limits: RunLimits = {};
-	for (const name of INTEGER_LIMITS) {
-		const value = inputLimits[name];
-		if (value === undefined) continue;
-		if (!Number.isSafeInteger(value) || value <= 0) {
-			throw new AgentError("invalid_input", `runBudget.limits.${name} must be a positive safe integer`);
-		}
-		(limits as Record<string, number>)[name] = value;
+	try {
+		return cloneFrozen({ limits: snapshotRunLimits(input.limits, "runBudget.limits") });
+	} catch (error) {
+		throw new AgentError("invalid_input", error instanceof Error ? error.message : String(error), { cause: error });
 	}
-	const maxTotalCostUsd = inputLimits.maxTotalCostUsd;
-	if (maxTotalCostUsd !== undefined) {
-		if (!Number.isFinite(maxTotalCostUsd) || maxTotalCostUsd <= 0) {
-			throw new AgentError("invalid_input", "runBudget.limits.maxTotalCostUsd must be a positive finite number");
-		}
-		(limits as { maxTotalCostUsd?: number }).maxTotalCostUsd = maxTotalCostUsd;
-	}
-	return cloneFrozen({ limits });
 }
 
 function exhaustion(limit: RunLimitKind, maximum: number, observed: number): RunBudgetExhaustion {

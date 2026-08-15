@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage, Clock, IdGenerator, MessageId } from "@coda/agent";
+import type { AgentMessage, Clock, CompactionCheckpoint, CompactionReason, IdGenerator, MessageId } from "@coda/agent";
 import {
 	type Api,
 	type AssistantMessage,
@@ -11,7 +11,6 @@ import {
 	resolveToolObservation,
 } from "@coda/ai";
 import { reserveModelOutputTokens } from "../prompt/context-budget.ts";
-import type { CompactionCheckpoint, CompactionReason } from "./types.ts";
 
 const SUMMARY_HEADINGS = [
 	"Objective",
@@ -148,10 +147,10 @@ export class ContextWindowController {
 			pass < 3 && this.canCompact(messages) && shouldAutoCompact(model, projected, this.#options.maxOutputTokens);
 			pass++
 		) {
-			const beforeTokens = estimateSerializedTokens(projected);
+			const beforeTokens = estimateContextTokens(projected).tokens;
 			await this.compact({ messages, reason: "auto", signal });
 			projected = this.#contextWithMessages(context, this.project(messages));
-			if (estimateSerializedTokens(projected) >= beforeTokens) break;
+			if (estimateContextTokens(projected).tokens >= beforeTokens) break;
 		}
 		return projected;
 	}
@@ -220,8 +219,12 @@ export class ContextWindowController {
 				maxTokens: runtime.model.maxTokens,
 			},
 			usage: {
-				beforeEstimatedTokens: estimateSerializedTokens(active.map(({ message }) => message)),
-				afterEstimatedTokens: estimateSerializedTokens(replacementHistory.map(({ message }) => message)),
+				beforeEstimatedTokens: estimateContextTokens({
+					messages: active.map(({ message }) => message as Message),
+				}).tokens,
+				afterEstimatedTokens: estimateContextTokens({
+					messages: replacementHistory.map(({ message }) => message as Message),
+				}).tokens,
 				summaryInputTokens: summarized.inputTokens,
 				summaryOutputTokens: summarized.outputTokens,
 				summaryTotalTokens: summarized.totalTokens,
@@ -267,7 +270,7 @@ export function shouldAutoCompact(model: Model<Api>, context: Context, maxOutput
 		AUTO_BUFFER_CEILING_TOKENS,
 		Math.max(AUTO_BUFFER_FLOOR_TOKENS, Math.min(Math.floor(usableInput * 0.15), Math.floor(usableInput * 0.25))),
 	);
-	return estimateSerializedTokens(context) >= Math.max(1, usableInput - buffer);
+	return estimateContextTokens(context).tokens >= Math.max(1, usableInput - buffer);
 }
 
 function splitForCompaction(
@@ -282,7 +285,9 @@ function splitForCompaction(
 	for (let index = groups.length - 1; index >= 1; index--) {
 		const group = groups[index]!;
 		if (!group.safeTail) break;
-		const tokens = estimateSerializedTokens(group.messages.map(({ message }) => message));
+		const tokens = estimateContextTokens({
+			messages: group.messages.map(({ message }) => message as Message),
+		}).tokens;
 		if (tailTokens + tokens > budget) break;
 		tailTokens += tokens;
 		tailStart = group.start;
@@ -605,25 +610,8 @@ function normalizeFocus(value: string | undefined): string | undefined {
 	return normalized.slice(0, 4_000);
 }
 
-function estimateSerializedTokens(value: unknown): number {
-	let imageCount = 0;
-	const serialized = JSON.stringify(value, (_key, entry: unknown) => {
-		if (
-			typeof entry === "object" &&
-			entry !== null &&
-			(entry as { type?: unknown }).type === "image" &&
-			typeof (entry as { data?: unknown }).data === "string"
-		) {
-			imageCount++;
-			return { type: "image", omitted: true };
-		}
-		return entry;
-	});
-	return Math.ceil(Buffer.byteLength(serialized, "utf8") / 3) + imageCount * 8_192;
-}
-
 function assertSummaryInputFits(model: Model<Api>, context: Context, outputTokens: number): void {
-	const inputTokens = estimateSerializedTokens(context);
+	const inputTokens = estimateContextTokens(context).tokens;
 	if (inputTokens + outputTokens <= model.contextWindow) return;
 	throw new Error(
 		`Context Overflow: compaction needs ${inputTokens} input tokens plus ${outputTokens} summary tokens, exceeding ${model.contextWindow}`,
@@ -632,7 +620,7 @@ function assertSummaryInputFits(model: Model<Api>, context: Context, outputToken
 
 function summaryInputFits(model: Model<Api>, prompt: string, outputTokens: number): boolean {
 	return (
-		estimateSerializedTokens({ messages: [{ role: "user", content: prompt, timestamp: 0 }] }) + outputTokens <=
+		estimateContextTokens({ messages: [{ role: "user", content: prompt, timestamp: 0 }] }).tokens + outputTokens <=
 		model.contextWindow
 	);
 }

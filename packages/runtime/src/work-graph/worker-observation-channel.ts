@@ -1,5 +1,6 @@
-import type { AgentEvent } from "@coda/agent";
-import type { WorkerObservation, WorkerPreparationObservation } from "./worker-protocol.ts";
+import { type AgentEvent, BoundedObservationQueue } from "@coda/agent";
+import type { WorkPreparationObservation } from "./types.ts";
+import type { WorkerObservation } from "./worker-protocol.ts";
 
 type PendingAgentObservation = AgentEvent | null;
 
@@ -25,20 +26,27 @@ export class WorkerObservationChannel {
 	readonly #publish: WorkerObservationChannelOptions["publish"];
 	readonly #resynchronize: WorkerObservationChannelOptions["resynchronize"];
 	readonly #pending = new Map<number, PendingAgentObservation>();
-	readonly #deliveries: Delivery[] = [];
+	readonly #deliveries: BoundedObservationQueue<Delivery>;
 	#runId?: string;
 	#nextSequence = 1;
 	#highestSequence = 0;
-	#scheduled = false;
 	#closed = false;
 
 	constructor(options: WorkerObservationChannelOptions) {
-		if (!Number.isSafeInteger(options.capacity) || options.capacity < 1) {
-			throw new Error("Worker Observation capacity must be a positive safe integer");
-		}
 		this.#capacity = options.capacity;
 		this.#publish = options.publish;
 		this.#resynchronize = options.resynchronize;
+		this.#deliveries = new BoundedObservationQueue({
+			capacity: options.capacity,
+			capacityName: "Worker Observation",
+			yieldBetweenDeliveries: true,
+			deliver: (delivery) => {
+				try {
+					if (delivery.type === "resynchronize") this.#resynchronize();
+					else this.#publish(delivery.observation);
+				} catch {}
+			},
+		});
 	}
 
 	publishSemantic(event: AgentEvent): void {
@@ -90,7 +98,7 @@ export class WorkerObservationChannel {
 		this.#promoteContiguous();
 	}
 
-	publishPreparation(observation: WorkerPreparationObservation): void {
+	publishPreparation(observation: WorkPreparationObservation): void {
 		if (this.#closed) return;
 		this.#enqueue({ type: "observation", observation });
 	}
@@ -116,10 +124,10 @@ export class WorkerObservationChannel {
 	 */
 	invalidateAndClose(): void {
 		if (this.#closed) return;
-		const invalidated = this.#pending.size > 0 || this.#deliveries.length > 0;
+		const invalidated = this.#pending.size > 0 || this.#deliveries.size > 0;
 		this.#closed = true;
 		this.#pending.clear();
-		this.#deliveries.splice(0);
+		this.#deliveries.close();
 		this.#runId = undefined;
 		if (invalidated) {
 			try {
@@ -154,39 +162,13 @@ export class WorkerObservationChannel {
 
 	#enqueue(delivery: Delivery): void {
 		if (this.#closed) return;
-		if (this.#deliveries.length >= this.#capacity) {
+		if (!this.#deliveries.enqueue(delivery)) {
 			this.#requireResynchronization();
-			return;
 		}
-		this.#deliveries.push(delivery);
-		this.#schedule();
 	}
 
 	#requireResynchronization(): void {
 		if (this.#closed) return;
-		this.#deliveries.splice(0);
-		this.#deliveries.push({ type: "resynchronize" });
-		this.#schedule();
-	}
-
-	#schedule(): void {
-		if (this.#closed || this.#scheduled) return;
-		this.#scheduled = true;
-		queueMicrotask(() => this.#drainOne());
-	}
-
-	#drainOne(): void {
-		this.#scheduled = false;
-		if (this.#closed) return;
-		const delivery = this.#deliveries.shift();
-		if (!delivery) return;
-		try {
-			if (delivery.type === "resynchronize") {
-				this.#resynchronize();
-			} else {
-				this.#publish(delivery.observation);
-			}
-		} catch {}
-		if (this.#deliveries.length > 0) this.#schedule();
+		this.#deliveries.replace({ type: "resynchronize" });
 	}
 }

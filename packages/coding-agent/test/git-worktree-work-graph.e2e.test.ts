@@ -145,16 +145,17 @@ describe("Git worktree Work Graph end to end", () => {
 						seed: { version: 1, messages: [], pendingFollowUps: [] } satisfies AgentSeed,
 						accept: (_event: AgentEvent) => undefined,
 						record: () => Promise.resolve(),
-						close: async () => {
-							if (closed) return;
-							closed = true;
-							leasedSessions.delete(id);
-						},
+					};
+					const release = async () => {
+						if (closed) return;
+						closed = true;
+						leasedSessions.delete(id);
 					};
 					return {
 						session,
 						commit: () => Promise.resolve(),
-						rollback: () => session.close(),
+						rollback: release,
+						release,
 						evidence: () => undefined,
 					};
 				},

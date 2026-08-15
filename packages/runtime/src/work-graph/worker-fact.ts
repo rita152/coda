@@ -3,12 +3,12 @@ import type {
 	RunBudget,
 	RunBudgetExhaustion,
 	RunFailure,
-	RunLimits,
 	RunOutcome,
 	RunSource,
 	ToolExecutionOutcome,
 	ToolExecutionSettlement,
 } from "@coda/agent";
+import { assertRunLimits } from "@coda/agent";
 
 const MAXIMUM_ID_LENGTH = 256;
 export const MAXIMUM_WORKER_FACT_TOOL_NAME_LENGTH = 128;
@@ -150,33 +150,13 @@ function assertExactKeys(
 	}
 }
 
-const RUN_LIMIT_KEYS = [
-	"maxTurns",
-	"maxModelAttempts",
-	"maxToolInvocations",
-	"maxElapsedMs",
-	"maxTotalTokens",
-	"maxTotalCostUsd",
-	"maxConsecutiveEquivalentToolBatches",
-] as const satisfies readonly (keyof RunLimits)[];
-
 function assertRunBudget(value: unknown, type: string): asserts value is RunBudget {
 	if (!isRecord(value)) invalid(type, "budget must be an object");
 	assertExactKeys(value, ["limits"], type);
-	if (!isRecord(value.limits)) invalid(type, "budget.limits must be an object");
-	assertExactKeys(value.limits, RUN_LIMIT_KEYS, type, RUN_LIMIT_KEYS);
-	for (const key of RUN_LIMIT_KEYS) {
-		const limit = value.limits[key];
-		if (limit === undefined) continue;
-		if (key === "maxTotalCostUsd") {
-			if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
-				invalid(type, `budget.limits.${key} must be a positive finite number`);
-			}
-			continue;
-		}
-		if (!Number.isSafeInteger(limit) || (limit as number) <= 0) {
-			invalid(type, `budget.limits.${key} must be a positive safe integer`);
-		}
+	try {
+		assertRunLimits(value.limits, "budget.limits");
+	} catch (error) {
+		invalid(type, error instanceof Error ? error.message : String(error));
 	}
 }
 

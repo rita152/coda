@@ -1,6 +1,8 @@
 import type {
 	AgentEvent,
 	AgentSeed,
+	Session as AgentSession,
+	SessionChange as AgentSessionChange,
 	Clock,
 	FollowUp,
 	IdGenerator,
@@ -17,7 +19,6 @@ import type { ModelSelection } from "../models/model-selection.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
 import type { SessionHistoryReadPort } from "../session-history/reader.ts";
 import type { ProjectTrustRecord } from "../settings/types.ts";
-import type { CompactionCheckpoint } from "./compaction.ts";
 import type { ComposerSubmission } from "./composer-submission.ts";
 
 declare const sessionIdBrand: unique symbol;
@@ -88,18 +89,14 @@ export interface OpenSessionRequest {
 	readonly workspace: SessionWorkspace;
 	readonly mode: "interactive" | "print";
 	readonly resumeId?: SessionId | string;
-	/** Preallocated identity for a new lazily materialized Session. */
+	/** Preallocated identity for a newly opened Session. */
 	readonly createId?: SessionId | string;
 	readonly forceUnlock?: boolean;
 	readonly persistent?: boolean;
 }
 
 export type SessionChange =
-	| {
-			readonly type: "prepare_run";
-			readonly promptVersion: string;
-			readonly promptSha256: string;
-	  }
+	| AgentSessionChange
 	| {
 			readonly type: "model_selected";
 			readonly model: ModelSelection;
@@ -107,7 +104,6 @@ export type SessionChange =
 	  }
 	| { readonly type: "project_trust_changed"; readonly trust: ProjectTrustRecord }
 	| { readonly type: "mcp_trust_changed"; readonly trust: WorkspaceMcpTrustRecord }
-	| { readonly type: "context_compacted"; readonly checkpoint: CompactionCheckpoint }
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }
 	| { readonly type: "composer_submission_retracted"; readonly id: string }
@@ -116,9 +112,8 @@ export type SessionChange =
 			readonly id: QueueItemId;
 	  };
 
-export interface Session {
+export interface Session extends AgentSession {
 	readonly descriptor: SessionDescriptor;
-	readonly seed: AgentSeed;
 	readonly restored: RestoredSessionState;
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly composerSubmissions: readonly ComposerSubmission[];
@@ -126,7 +121,6 @@ export interface Session {
 	readonly history: SessionHistoryReadPort;
 	/** Completed Run evidence projected from this Session's existing semantic facts. */
 	readonly runEvidence: readonly RunEvidenceEnvelope[];
-	readonly compactionCheckpoint?: CompactionCheckpoint;
 	/** Cost of discarded Model attempts, omitted when historical pricing was not recorded. */
 	readonly discardedModelCost?: number;
 	readonly mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;

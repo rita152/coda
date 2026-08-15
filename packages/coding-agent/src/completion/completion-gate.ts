@@ -1,3 +1,4 @@
+import { deepFreeze } from "@coda/agent";
 import {
 	COMPLETION_DISPOSITION_SCHEMA_VERSION,
 	type CompletionActivitySnapshot,
@@ -224,11 +225,4 @@ function validateRepairBounds(attempts: number, maxAttempts: number): void {
 		throw new Error("maxRepairAttempts must be a non-negative integer");
 	}
 	if (attempts > maxAttempts) throw new Error("repairAttempts must not exceed maxRepairAttempts");
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const nested of Object.values(value)) deepFreeze(nested);
-	return value;
 }

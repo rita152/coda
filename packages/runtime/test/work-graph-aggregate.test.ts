@@ -545,6 +545,52 @@ describe("WorkGraphAggregate", () => {
 		expect(aggregate.snapshot().graph?.result?.outcome).toBe("interrupted");
 	});
 
+	it("enters running only through run_started under the shared Work Item transition policy", () => {
+		const accepted = codecFacts()[0] as Extract<WorkGraphFact, { readonly type: "graph_accepted" }>;
+		let aggregate = WorkGraphAggregate.empty().apply(accepted);
+		aggregate = aggregate.apply({
+			version: 1,
+			type: "item_transitioned",
+			graphId,
+			timestamp: 2,
+			itemId: accepted.root.itemId,
+			from: "pending",
+			to: "ready",
+		});
+		aggregate = aggregate.apply({
+			version: 1,
+			type: "item_transitioned",
+			graphId,
+			timestamp: 3,
+			itemId: accepted.root.itemId,
+			from: "ready",
+			to: "preparing",
+		});
+		expect(() =>
+			aggregate.apply({
+				version: 1,
+				type: "item_transitioned",
+				graphId,
+				timestamp: 4,
+				itemId: accepted.root.itemId,
+				from: "preparing",
+				to: "running",
+			}),
+		).toThrow("invalid Work Item transition preparing -> running");
+		aggregate = aggregate.apply({
+			version: 1,
+			type: "worker_fact_recorded",
+			graphId,
+			timestamp: 4,
+			itemId: accepted.root.itemId,
+			runtimeId: accepted.root.runtimeId,
+			sessionId: accepted.root.sessionId,
+			fact: { type: "run_started", runId: "run:test", source: "prompt", timestamp: 4 },
+		});
+
+		expect(aggregate.snapshot().graph?.items[0]?.state).toBe("running");
+	});
+
 	it("rejects invalid order deterministically without mutating the prior aggregate", () => {
 		const accepted = codecFacts()[0] as Extract<WorkGraphFact, { readonly type: "graph_accepted" }>;
 		const aggregate = WorkGraphAggregate.empty().apply(accepted);

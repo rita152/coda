@@ -62,6 +62,7 @@ import {
 	settleAcceptedInputResources,
 	validatePlanConfigurations,
 } from "./work-graph-submission.ts";
+import { workItemTransitionPermitted } from "./work-item-transition.ts";
 import type { WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
 
@@ -664,7 +665,7 @@ export class WorkGraphEngine implements CodingAgent {
 			) {
 				return false;
 			}
-			if (!this.#transitionPermitted(from, to)) {
+			if (!workItemTransitionPermitted(from, to)) {
 				throw new Error(`Invalid Work Item transition ${item.id}: ${from} -> ${to}`);
 			}
 			await this.#appendGraphFacts(graph, [
@@ -688,21 +689,6 @@ export class WorkGraphEngine implements CodingAgent {
 			}));
 			return true;
 		});
-	}
-
-	#transitionPermitted(from: WorkItemState, to: WorkItemState): boolean {
-		if (isTerminal(from)) return false;
-		const allowed: Record<
-			Exclude<WorkItemState, "succeeded" | "failed" | "canceled" | "interrupted" | "blocked">,
-			readonly WorkItemState[]
-		> = {
-			pending: ["ready", "blocked", "canceled", "interrupted"],
-			ready: ["preparing", "blocked", "canceled", "interrupted"],
-			preparing: ["running", "settling", "canceled", "failed", "interrupted"],
-			running: ["settling", "canceled", "failed", "interrupted"],
-			settling: ["succeeded", "failed", "canceled", "interrupted"],
-		};
-		return allowed[from as keyof typeof allowed].includes(to);
 	}
 
 	async #interruptInMemory(graph: GraphRecord, item: ItemRecord, error: unknown): Promise<void> {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { AgentEvent, AgentMessage, AgentSeed, Clock, IdGenerator, RunBudget } from "@coda/agent";
-import { type AuthResult, createSystemTimeRuntime, type JsonValue, type Models, type ThinkingLevel } from "@coda/ai";
+import type { Clock, IdGenerator, RunBudget } from "@coda/agent";
+import { type AuthResult, createSystemTimeRuntime, type Models, type ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult, McpToolLease } from "@coda/mcp";
 import {
 	type CodingAgent,
@@ -10,7 +10,6 @@ import {
 	openCodingAgent,
 	type RunModelSelection,
 	type WorkCapacityPolicy,
-	type WorkRunEvidence,
 	type WorkspaceExecution,
 } from "@coda/runtime";
 import type { FileSystem } from "../host/file-system.ts";
@@ -20,9 +19,8 @@ import { createWorkspace, type Workspace } from "../host/workspace.ts";
 import type { CodingMcpRegistry } from "../mcp/registry.ts";
 import { createMcpCapabilitySource, type McpAgentElicitation } from "../mcp/run-capability.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
-import { RunEvidenceProjection } from "../run-evidence/run-evidence.ts";
 import type { Session } from "../session/types.ts";
-import { SessionHistoryReader, type SessionHistoryReadPort } from "../session-history/reader.ts";
+import type { SessionHistoryReadPort } from "../session-history/reader.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import { createSkillsCapabilitySource } from "../skills/run-capability.ts";
@@ -33,7 +31,6 @@ import { createGitWorktreeWorkspaceExecution } from "./git-worktree-workspace-ex
 import { SessionWorkController, type SessionWorkHost, type SessionWorkSelection } from "./session-work-controller.ts";
 
 type WorkSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["reserve"]>>["session"];
-type WorkSessionChange = Parameters<WorkSession["record"]>[0];
 type WorkSessionStore = OpenCodingAgentOptions["sessions"];
 type WorkSessionReserveRequest = Parameters<WorkSessionStore["reserve"]>[0];
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
@@ -44,27 +41,10 @@ const DEFAULT_WORK_CAPACITY_POLICY: WorkCapacityPolicy = Object.freeze({
 	graphMaximumConcurrency: DEFAULT_WORK_CONCURRENCY,
 });
 
-interface SessionBinding {
-	readonly id: string;
-	readonly seed: () => AgentSeed;
-	readonly compactionCheckpoint: () => WorkSession["compactionCheckpoint"];
-	readonly history: SessionHistoryReadPort;
-	readonly accept: (event: AgentEvent) => Promise<void> | void;
-	readonly record: (change: WorkSessionChange) => Promise<void>;
-	readonly evidence: (runId: string) => WorkRunEvidence | undefined;
-	readonly durable: boolean;
-	readonly ownership: "application" | "store" | "ephemeral";
-	readonly closeUnderlying?: () => Promise<void>;
+interface RegisteredSession {
+	readonly session: Session;
+	readonly ownership: "application" | "store";
 	controller?: SessionWorkController;
-}
-
-function json(value: unknown): JsonValue {
-	return JSON.parse(JSON.stringify(value)) as JsonValue;
-}
-
-function agentEvent(value: JsonValue): AgentEvent | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value) || !("runId" in value)) return undefined;
-	return value as unknown as AgentEvent;
 }
 
 function emptyMcpLease(): McpToolLease {
@@ -79,66 +59,19 @@ function emptyMcpLease(): McpToolLease {
 	});
 }
 
-class EphemeralWorkSession {
-	readonly id: string;
-	readonly #messages: AgentMessage[] = [];
-	readonly #history: SessionHistoryReader;
-	readonly #evidence = new RunEvidenceProjection();
-	readonly #completedEvidence = new Map<string, ReturnType<RunEvidenceProjection["accept"]>>();
-
-	constructor(id: string) {
-		this.id = id;
-		this.#history = new SessionHistoryReader({ sessionId: id, messages: () => this.#messages });
-	}
-
-	binding(): SessionBinding {
-		return {
-			id: this.id,
-			seed: () => ({ version: 1, messages: structuredClone(this.#messages), pendingFollowUps: [] }),
-			compactionCheckpoint: () => undefined,
-			history: this.#history,
-			accept: (event) => {
-				this.#acceptMessage(event);
-				const evidence = this.#evidence.accept(event);
-				if (evidence) this.#completedEvidence.set(String(event.runId), evidence);
-			},
-			record: () => Promise.resolve(),
-			evidence: (runId) => {
-				const result = this.#completedEvidence.get(runId);
-				return result ? { version: 1, facts: json(result) } : undefined;
-			},
-			durable: false,
-			ownership: "ephemeral",
-		};
-	}
-
-	#acceptMessage(event: AgentEvent): void {
-		switch (event.type) {
-			case "run_start":
-				this.#messages.push(structuredClone(event.inputMessage));
-				break;
-			case "turn_start":
-				this.#messages.push(...structuredClone(event.steeringMessages));
-				break;
-			case "message_end":
-				this.#messages.push(structuredClone(event.message));
-				break;
-			case "tool_execution_end":
-			case "tool_execution_rejected":
-				this.#messages.push(structuredClone(event.result));
-				break;
-		}
-	}
-}
-
-/** Rich persistent application Session implementation of runtime's opaque WorkerSession protocol. */
+/** Owns exclusive runtime leases over the application's canonical Session objects. */
 export class WorkspaceWorkSessions {
-	readonly #bindings = new Map<string, SessionBinding>();
+	readonly #bindings = new Map<string, RegisteredSession>();
 	readonly #leases = new Set<string>();
-	readonly #loads = new Map<string, Promise<SessionBinding>>();
+	readonly #loads = new Map<string, Promise<RegisteredSession>>();
+	readonly #openPrivateSession: (sessionId: string) => Promise<Session>;
 	readonly #resumeDurableRoot?: (sessionId: string) => Promise<Session>;
 
-	constructor(options: { readonly resumeDurableRoot?: (sessionId: string) => Promise<Session> } = {}) {
+	constructor(options: {
+		readonly openPrivateSession: (sessionId: string) => Promise<Session>;
+		readonly resumeDurableRoot?: (sessionId: string) => Promise<Session>;
+	}) {
+		this.#openPrivateSession = options.openPrivateSession;
 		this.#resumeDurableRoot = options.resumeDurableRoot;
 	}
 
@@ -150,7 +83,7 @@ export class WorkspaceWorkSessions {
 			if (request.target.type === "create") {
 				const id = requestedId ?? `session:${request.graphId}:${request.itemId}`;
 				if (binding) throw new Error(`Work Session identity is already registered: ${id}`);
-				binding = new EphemeralWorkSession(id).binding();
+				binding = await this.#openPrivate(id);
 				this.#bindings.set(id, binding);
 				created = true;
 			}
@@ -158,7 +91,7 @@ export class WorkspaceWorkSessions {
 			// transcript is necessarily empty and can be recreated from Journal
 			// ownership. Root Sessions remain durable application-owned records.
 			if (!binding && request.target.type === "resume" && requestedId && request.parentItemId) {
-				binding = new EphemeralWorkSession(requestedId).binding();
+				binding = await this.#openPrivate(requestedId);
 				this.#bindings.set(requestedId, binding);
 				created = true;
 			}
@@ -166,74 +99,52 @@ export class WorkspaceWorkSessions {
 				binding = await this.#loadDurableRoot(requestedId);
 			}
 			if (!binding) throw new Error(`Durable Session is not open: ${String(requestedId)}`);
-			if (this.#leases.has(binding.id)) throw new Error(`Work Session is already leased: ${binding.id}`);
-			this.#leases.add(binding.id);
+			const id = binding.session.id;
+			if (this.#leases.has(id)) throw new Error(`Work Session is already leased: ${id}`);
+			this.#leases.add(id);
 			let released = false;
 			const release = async () => {
 				if (released) return;
 				released = true;
-				this.#leases.delete(binding!.id);
+				this.#leases.delete(id);
 				if (created || binding!.ownership !== "application") {
-					if (this.#bindings.get(binding!.id) === binding) this.#bindings.delete(binding!.id);
-					await binding!.closeUnderlying?.();
+					if (this.#bindings.get(id) === binding) this.#bindings.delete(id);
+					await binding!.session.close();
 				}
 			};
-			const session: WorkSession = Object.freeze({
-				id: binding.id,
-				get seed() {
-					return binding!.seed();
-				},
-				get compactionCheckpoint() {
-					return binding!.compactionCheckpoint();
-				},
-				accept: (event: AgentEvent) => binding!.accept(event),
-				record: async (change: WorkSessionChange) => {
-					await binding!.record(change);
-					if (change.type === "prepare_run") {
-						binding!.controller?.notePreparation({
-							version: change.promptVersion,
-							sha256: change.promptSha256,
-						});
-					}
-				},
-				close: release,
-			});
 			return Object.freeze({
-				session,
+				session: binding.session as WorkSession,
 				commit: () => Promise.resolve(),
 				rollback: release,
-				evidence: (runId: string) => binding!.evidence(runId),
+				release,
+				evidence: (runId: string) => {
+					const result = [...binding!.session.runEvidence]
+						.reverse()
+						.find((candidate) => candidate.runId === runId);
+					return result ? { version: 1, facts: result } : undefined;
+				},
 			});
 		},
 	});
 
-	register(session: Session): SessionBinding {
-		const id = String(session.descriptor.id);
+	register(session: Session): RegisteredSession {
+		const id = session.id;
 		if (this.#bindings.has(id)) throw new Error(`Session is already open in this Workspace: ${id}`);
-		const binding = this.#durableBinding(session, "application");
+		const binding: RegisteredSession = { session, ownership: "application" };
 		this.#bindings.set(id, binding);
 		return binding;
 	}
 
-	#durableBinding(session: Session, ownership: "application" | "store"): SessionBinding {
-		return {
-			id: String(session.descriptor.id),
-			seed: () => ({ ...session.seed, pendingFollowUps: [] }),
-			compactionCheckpoint: () => session.compactionCheckpoint,
-			history: session.history,
-			accept: (event) => session.accept(event),
-			record: (change) => session.record(change),
-			evidence: (runId) => {
-				const result = [...session.runEvidence].reverse().find((candidate) => candidate.runId === runId);
-				return result ? { version: 1, facts: json(result) } : undefined;
-			},
-			durable: true,
-			ownership,
-			...(ownership === "store" ? { closeUnderlying: () => session.close() } : {}),
-		};
+	async #openPrivate(sessionId: string): Promise<RegisteredSession> {
+		const session = await this.#openPrivateSession(sessionId);
+		if (session.id !== sessionId) {
+			await session.close().catch(() => undefined);
+			throw new Error(`Private Session identity changed from ${sessionId} to ${session.id}`);
+		}
+		return { session, ownership: "store" };
 	}
 
-	async #loadDurableRoot(sessionId: string): Promise<SessionBinding | undefined> {
+	async #loadDurableRoot(sessionId: string): Promise<RegisteredSession | undefined> {
 		if (!this.#resumeDurableRoot) return undefined;
 		let operation = this.#loads.get(sessionId);
 		if (!operation) {
@@ -248,7 +159,7 @@ export class WorkspaceWorkSessions {
 						await session.close();
 						return existing;
 					}
-					const binding = this.#durableBinding(session, "store");
+					const binding: RegisteredSession = { session, ownership: "store" };
 					this.#bindings.set(sessionId, binding);
 					return binding;
 				})
@@ -261,13 +172,13 @@ export class WorkspaceWorkSessions {
 	history(sessionId: string): SessionHistoryReadPort {
 		const binding = this.#bindings.get(sessionId);
 		if (!binding) throw new Error(`Session history is unavailable: ${sessionId}`);
-		return binding.history;
+		return binding.session.history;
 	}
 
 	release(sessionId: string): void {
 		if (this.#leases.has(sessionId)) throw new Error(`Cannot release leased Session: ${sessionId}`);
 		const binding = this.#bindings.get(sessionId);
-		if (binding?.durable) this.#bindings.delete(sessionId);
+		if (binding?.ownership === "application") this.#bindings.delete(sessionId);
 	}
 }
 
@@ -316,6 +227,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly projectInstructions?: TrustedProjectInstructions;
 	readonly persistence?: OpenCodingAgentOptions["persistence"];
 	readonly resources?: OpenCodingAgentOptions["resources"];
+	readonly openPrivateSession: (sessionId: string) => Promise<Session>;
 	readonly resumeDurableRoot?: (sessionId: string) => Promise<Session>;
 	readonly createWorkspaceExecution?: (
 		context: WorkspaceExecutionFactoryContext,
@@ -323,6 +235,7 @@ export function createWorkspaceWorkCoordinator(options: {
 }): WorkspaceWorkCoordinator {
 	const capacity = options.capacity ?? DEFAULT_WORK_CAPACITY_POLICY;
 	const sessions = new WorkspaceWorkSessions({
+		openPrivateSession: options.openPrivateSession,
 		...(options.resumeDurableRoot ? { resumeDurableRoot: options.resumeDurableRoot } : {}),
 	});
 	const mutationCoordinator = new TargetMutationCoordinator();
@@ -483,8 +396,15 @@ export function createWorkspaceWorkCoordinator(options: {
 						continue;
 					}
 					if (observation.type !== "work_item_event") continue;
-					const event = agentEvent(observation.event);
-					if (!event) continue;
+					const event = observation.event;
+					if (event.type === "preparation_settled" && event.outcome === "prepared") {
+						controllers.get(observation.sessionId)?.notePreparation({
+							version: event.promptVersion,
+							sha256: event.promptSha256,
+						});
+						continue;
+					}
+					if (!("runId" in event)) continue;
 					controllers.get(observation.sessionId)?.acceptWorkerEvent(event, {
 						graphId: observation.graphId,
 						itemId: observation.itemId,
@@ -550,7 +470,7 @@ export function createWorkspaceWorkCoordinator(options: {
 			if (closeOperation) throw new Error("Workspace Work Coordinator is closing");
 			registerSelection(request.selection);
 			const binding = sessions.register(request.session);
-			if (request.mcpElicitation) elicitationBySession.set(binding.id, request.mcpElicitation);
+			if (request.mcpElicitation) elicitationBySession.set(binding.session.id, request.mcpElicitation);
 			try {
 				const openedAgent = await ensureAgent();
 				const host: SessionWorkHost = {
@@ -573,11 +493,11 @@ export function createWorkspaceWorkCoordinator(options: {
 					selection: request.selection,
 				});
 				binding.controller = controller;
-				controllers.set(binding.id, controller);
+				controllers.set(binding.session.id, controller);
 				return controller;
 			} catch (error) {
-				elicitationBySession.delete(binding.id);
-				sessions.release(binding.id);
+				elicitationBySession.delete(binding.session.id);
+				sessions.release(binding.session.id);
 				throw error;
 			}
 		},

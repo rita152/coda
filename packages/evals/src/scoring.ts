@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentEvent, RunOutcome } from "@coda/agent";
+import { type AgentEvent, AgentEventTraceReducer, type AgentToolTrace, type RunOutcome } from "@coda/agent";
 import type { AssistantMessage, ToolCall, ToolObservation, Usage } from "@coda/ai";
 import type { LoadedFixture } from "./fixture-types.ts";
 import { type FixtureRepository, normalizeRepositoryPath } from "./repository.ts";
@@ -24,7 +24,6 @@ interface ToolRecord {
 }
 
 interface EvaluationTrace {
-	readonly events: readonly AgentEvent[];
 	readonly turnCount: number;
 	readonly batches: readonly (readonly ToolCall[])[];
 	readonly records: readonly ToolRecord[];
@@ -57,51 +56,41 @@ function filesDigest(files: Readonly<Record<string, string>>): string {
 	return sha256(canonicalJson(files));
 }
 
-function observationStatus(
-	event: Extract<AgentEvent, { readonly type: "tool_execution_end" | "tool_execution_rejected" }>,
-) {
-	const result = event.result.message;
+function observationStatus(tool: AgentToolTrace) {
+	const result = tool.result?.message;
+	if (!result) return "error" as const;
 	if (result.role !== "toolResult") return "error" as const;
 	return result.observation?.status ?? (result.isError ? "error" : "ok");
 }
 
-function textFrom(message: AssistantMessage): string {
-	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("\n")
-		.trim();
-}
-
 function collectTrace(events: readonly AgentEvent[]): EvaluationTrace {
-	const batches: ToolCall[][] = [];
-	const records: ToolRecord[] = [];
-	const attempts: AssistantMessage[] = [];
-	let finalText = "";
-	let turnCount = 0;
-	for (const event of events) {
-		if (event.type === "turn_start") turnCount++;
-		if (event.type === "attempt_end") attempts.push(event.candidate.message as AssistantMessage);
-		if (event.type === "message_end") {
-			const message = event.message.message;
-			if (message.role !== "assistant") continue;
-			const toolCalls = message.content.filter((block) => block.type === "toolCall") as ToolCall[];
-			if (toolCalls.length > 0) batches.push(structuredClone(toolCalls));
-			const text = textFrom(message as AssistantMessage);
-			if (text.length > 0) finalText = text;
-		}
-		if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") {
-			records.push({
-				name: event.invocation.toolName,
-				arguments: event.invocation.arguments,
-				status: observationStatus(event),
-				sequence: event.sequence,
-			});
-		}
-	}
-	const timestamps = events.map((event) => event.timestamp);
-	const elapsedMs = timestamps.length === 0 ? 0 : Math.max(...timestamps) - Math.min(...timestamps);
-	return { events, turnCount, batches, records, assistantAttempts: attempts, finalText, elapsedMs };
+	const reducer = new AgentEventTraceReducer();
+	for (const event of events) reducer.accept(event);
+	const runs = reducer.traces();
+	const summary = reducer.summary();
+	const records = runs.flatMap((run) =>
+		run.tools
+			.filter((tool) => tool.completedSequence !== undefined)
+			.map((tool) => ({
+				name: tool.invocation.toolName,
+				arguments: tool.invocation.arguments,
+				status: observationStatus(tool),
+				sequence: tool.completedSequence!,
+			})),
+	);
+	return {
+		turnCount: summary.turnCount,
+		batches: runs.flatMap((run) => run.toolBatches),
+		records,
+		assistantAttempts: runs.flatMap((run) =>
+			run.attempts.map((attempt) => attempt.candidate.message as AssistantMessage),
+		),
+		finalText: [...runs].reverse().find((run) => run.finalText.length > 0)?.finalText ?? "",
+		elapsedMs:
+			summary.runStartedAt === undefined || summary.latestEventAt === undefined
+				? 0
+				: Math.max(0, summary.latestEventAt - summary.runStartedAt),
+	};
 }
 
 function changedFiles(

@@ -61,7 +61,10 @@ export interface InteractiveSessionApplicationOptions {
 
 export function createSessionMediaLibrary(
 	session: Session,
-	options: Pick<InteractiveSessionApplicationOptions, "fileSystem" | "runtime">,
+	options: {
+		readonly fileSystem: FileSystem;
+		readonly runtime: Pick<InteractiveSessionApplicationOptions["runtime"], "homeDirectory" | "idGenerator">;
+	},
 ): MediaLibrary {
 	const mediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
 	return new MediaLibrary({

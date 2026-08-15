@@ -1,3 +1,4 @@
+import { deepFreeze } from "@coda/agent";
 import type {
 	PublicationOutcome,
 	WorkBudgetUsage,
@@ -16,6 +17,7 @@ import {
 	WorkGraphFactCodec,
 	type WorkGraphItemDefinition,
 } from "./work-graph-fact.ts";
+import { isTerminalWorkItemState as isTerminal, workItemTransitionPermitted } from "./work-item-transition.ts";
 import {
 	INITIAL_WORKER_FACT_PROJECTION,
 	reduceWorkerFact,
@@ -94,21 +96,8 @@ const EMPTY_WORK_GRAPH_AGGREGATE: WorkGraphAggregateSnapshot = Object.freeze({
 	version: WORK_GRAPH_FACT_VERSION,
 });
 
-const TERMINAL_STATES = new Set<WorkItemState>(["succeeded", "failed", "canceled", "interrupted", "blocked"]);
-
-function isTerminal(state: WorkItemState): state is TerminalWorkItemState {
-	return TERMINAL_STATES.has(state);
-}
-
 function invalid(fact: WorkGraphFact, diagnostic: string): never {
 	throw new Error(`Cannot apply Work Graph Fact ${fact.type}: ${diagnostic}`);
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const entry of Object.values(value)) deepFreeze(entry);
-	return value;
 }
 
 function immutableSnapshot(value: WorkGraphAggregateSnapshot): WorkGraphAggregateSnapshot {
@@ -215,18 +204,6 @@ function assertAddedItem(
 		}
 		dependencies.add(dependencyId);
 	}
-}
-
-function transitionPermitted(from: WorkItemState, to: WorkItemState): boolean {
-	if (isTerminal(from)) return false;
-	const allowed: Record<Exclude<WorkItemState, TerminalWorkItemState>, readonly WorkItemState[]> = {
-		pending: ["ready", "blocked", "canceled", "interrupted"],
-		ready: ["preparing", "blocked", "canceled", "interrupted"],
-		preparing: ["settling", "canceled", "failed", "interrupted"],
-		running: ["settling", "canceled", "failed", "interrupted"],
-		settling: ["succeeded", "failed", "canceled", "interrupted"],
-	};
-	return allowed[from as keyof typeof allowed].includes(to);
 }
 
 function isDescendant(
@@ -433,8 +410,7 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 		case "item_transitioned": {
 			const item = requireItem(graph, fact.itemId, fact);
 			if (item.state !== fact.from) invalid(fact, `Work Item ${item.itemId} is ${item.state}, not ${fact.from}`);
-			if (fact.to === "running") invalid(fact, "running is entered only by worker_fact_recorded/run_started");
-			if (!transitionPermitted(fact.from, fact.to)) {
+			if (!workItemTransitionPermitted(fact.from, fact.to)) {
 				invalid(fact, `invalid Work Item transition ${fact.from} -> ${fact.to}`);
 			}
 			if (fact.from === "pending" && fact.to === "ready") {
@@ -479,6 +455,9 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 			if (fact.fact.type === "run_started") {
 				if (item.state !== "preparing" && item.state !== "running") {
 					invalid(fact, `Run cannot start in ${item.state}`);
+				}
+				if (item.state === "preparing" && !workItemTransitionPermitted(item.state, "running", "run_started")) {
+					invalid(fact, `invalid Work Item transition ${item.state} -> running`);
 				}
 			} else if (item.state !== "running") invalid(fact, `Worker Fact cannot be recorded in ${item.state}`);
 			const worker = reduceWorkerFact(item.worker, fact.fact);

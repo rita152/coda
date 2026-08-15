@@ -7,6 +7,8 @@ import {
 	type RunBudget,
 	type RunPreparation,
 	type RunResult,
+	type SessionChange,
+	type SessionEvent,
 	type ToolExecutionContext,
 } from "@coda/agent";
 import type { TimeRuntime } from "@coda/ai";
@@ -18,7 +20,6 @@ import type {
 	Identity,
 	RunModelProvider,
 	WorkerSelection,
-	WorkerSessionChange,
 	WorkSessionReservation,
 	WorkspacePlacementReservation,
 	WorkspaceTooling,
@@ -36,7 +37,6 @@ import type {
 	WorkerBarrierFailure,
 	WorkerControlEvent,
 	WorkerObservation,
-	WorkerSessionEvent,
 	WorkerSubmission,
 } from "./worker-protocol.ts";
 
@@ -236,7 +236,7 @@ export async function openPrivateWorkerRuntime(request: {
 		} catch {}
 		return fatalFailure;
 	};
-	const recordSessionChange = async (change: WorkerSessionChange): Promise<void> => {
+	const recordSessionChange = async (change: SessionChange): Promise<void> => {
 		if (fatalFailure) throw new Error(fatalFailure.diagnostic);
 		try {
 			await request.session.session.record(change);
@@ -284,7 +284,7 @@ export async function openPrivateWorkerRuntime(request: {
 		clock: options.time.clock,
 		idGenerator: options.identity,
 		...(options.time.scheduler ? { retry: createCodingAgentRetry(options.time.scheduler) } : {}),
-		...(request.session.session.seed ? { seed: request.session.session.seed } : {}),
+		seed: { ...request.session.session.seed, pendingFollowUps: [] },
 		autoDrainFollowUps: true,
 		prepareRun: async (preparation): Promise<PreparedRun> => {
 			request.assertProgressAllowed();
@@ -323,6 +323,8 @@ export async function openPrivateWorkerRuntime(request: {
 					type: "preparation_settled",
 					preparationId: submission.preparationId,
 					outcome: "prepared",
+					promptVersion: capabilities.prompt.version,
+					promptSha256: capabilities.prompt.sha256,
 				});
 				activeCapabilities = capabilities;
 				let disposeOperation: Promise<void> | undefined;
@@ -392,7 +394,7 @@ export async function openPrivateWorkerRuntime(request: {
 		}
 		if (disposition.session) {
 			try {
-				await request.session.session.accept(disposition.session as WorkerSessionEvent);
+				await request.session.session.accept(disposition.session as SessionEvent);
 			} catch (error) {
 				observations.skipAgent(String(observation.runId), observation.sequence);
 				latchFailure("session", disposition.session.type, error);
@@ -487,7 +489,7 @@ export async function openPrivateWorkerRuntime(request: {
 				steering.clear();
 				followUps.clear();
 				try {
-					await request.session.session.close();
+					await request.session.release();
 				} catch (error) {
 					failures.push(error);
 				}

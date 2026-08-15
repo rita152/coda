@@ -1,4 +1,4 @@
-import type { Clock } from "@coda/agent";
+import { type Clock, deepFreeze } from "@coda/agent";
 import type { ScheduledTask, Scheduler } from "@coda/tui";
 import { RunProgressTracker } from "./progress.ts";
 import type {
@@ -183,11 +183,4 @@ export class RunControl {
 		this.#graceTask?.cancel();
 		this.#graceTask = undefined;
 	}
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const item of Object.values(value)) deepFreeze(item);
-	return value;
 }

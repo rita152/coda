@@ -30,7 +30,7 @@ describe("Context Window Compaction", () => {
 	it("auto-compacts a large Tool result before the next model call", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-auto-compaction-"));
 		temporaryDirectories.push(workspace);
-		const oldToolResult = `auto-old-tool-result:${"x".repeat(100_000)}`;
+		const oldToolResult = `auto-old-tool-result:${"x".repeat(130_000)}`;
 		await writeFile(join(workspace, "large.txt"), oldToolResult, "utf8");
 
 		const runtime = testTimeRuntime(6_000);
@@ -94,7 +94,7 @@ describe("Context Window Compaction", () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-resumed-compaction-"));
 		temporaryDirectories.push(workspace);
 		const canonicalWorkspace = await realpath(workspace);
-		const oldToolResult = `resumed-old-tool-result:${"x".repeat(100_000)}`;
+		const oldToolResult = `resumed-old-tool-result:${"x".repeat(130_000)}`;
 		await writeFile(join(canonicalWorkspace, "large.txt"), oldToolResult, "utf8");
 
 		const runtime = testTimeRuntime(7_000);

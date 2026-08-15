@@ -1,4 +1,4 @@
-import type { AgentInput, RunLimits } from "@coda/agent";
+import { type AgentInput, assertRunLimits, cloneFrozen } from "@coda/agent";
 import type { JsonValue } from "@coda/ai";
 import type {
 	DesiredRuntimeConfiguration,
@@ -349,30 +349,6 @@ function assertOneOf<T extends string>(
 	}
 }
 
-const RUN_LIMIT_KEYS = [
-	"maxTurns",
-	"maxModelAttempts",
-	"maxToolInvocations",
-	"maxElapsedMs",
-	"maxTotalTokens",
-	"maxTotalCostUsd",
-	"maxConsecutiveEquivalentToolBatches",
-] as const satisfies readonly (keyof RunLimits)[];
-
-function assertRunLimits(value: unknown, type: string): void {
-	if (!isRecord(value)) invalid(type, "runLimits must be an object");
-	assertExactKeys(value, RUN_LIMIT_KEYS, type, RUN_LIMIT_KEYS);
-	for (const key of RUN_LIMIT_KEYS) {
-		const limit = value[key];
-		if (limit === undefined) continue;
-		if (key === "maxTotalCostUsd") {
-			if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
-				invalid(type, `runLimits.${key} must be a positive finite number`);
-			}
-		} else assertPositiveInteger(limit, `runLimits.${key}`, type);
-	}
-}
-
 function assertConfiguration(value: unknown, type: string): void {
 	if (!isRecord(value)) invalid(type, "configuration must be an object");
 	assertExactKeys(value, ["model", "reasoning", "runLimits"], type, ["runLimits"]);
@@ -389,7 +365,13 @@ function assertConfiguration(value: unknown, type: string): void {
 		"xhigh",
 		"max",
 	]);
-	if (value.runLimits !== undefined) assertRunLimits(value.runLimits, type);
+	if (value.runLimits !== undefined) {
+		try {
+			assertRunLimits(value.runLimits, "runLimits");
+		} catch (error) {
+			invalid(type, error instanceof Error ? error.message : String(error));
+		}
+	}
 }
 
 function assertPlacement(value: unknown, field: string, type: string): void {
@@ -724,15 +706,8 @@ export function assertWorkGraphFact(value: unknown): asserts value is WorkGraphF
 	return exhaustive;
 }
 
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const entry of Object.values(value)) deepFreeze(entry);
-	return value;
-}
-
 function immutableFact(value: WorkGraphFact): WorkGraphFact {
-	return deepFreeze(structuredClone(value));
+	return cloneFrozen(value);
 }
 
 /** Runtime-owned semantic codec; byte framing remains a host Adapter concern. */

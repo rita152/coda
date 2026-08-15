@@ -165,7 +165,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		],
 		tests: [
 			"packages/coding-agent/test/session-history-reader.test.ts",
-			"packages/coding-agent/test/draft-session.test.ts",
+			"packages/coding-agent/test/managed-session.test.ts",
 		],
 	}),
 	capability({

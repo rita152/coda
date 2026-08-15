@@ -20,7 +20,6 @@ export const RUNTIME_PRIVATE_SUBPATHS = Object.freeze([
 export const RUNTIME_DENIED_SYMBOLS = Object.freeze([
 	"WorkerFact",
 	"WorkerControlEvent",
-	"WorkerSessionEvent",
 	"WorkGraphFact",
 	"WorkGraphAggregate",
 	"WorkGraphAggregateGraph",
@@ -122,8 +121,6 @@ const UI_SESSION_INTERNALS = new Set([
 	"records",
 	"v1-schema",
 	"media-codec",
-	"compaction",
-	"draft-session",
 ]);
 const UI_RUNTIME_INTERNALS = new Set([
 	"workspace-work-coordinator",

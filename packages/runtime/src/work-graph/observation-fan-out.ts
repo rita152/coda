@@ -1,23 +1,14 @@
+import { BoundedObservationQueue, cloneFrozen } from "@coda/agent";
 import type { ObservationBus } from "./ports.ts";
 import type { CodingAgentObservation } from "./types.ts";
 
 interface Subscriber {
-	readonly capacity: number;
-	readonly queue: CodingAgentObservation[];
-	readonly waiters: Array<(value: IteratorResult<CodingAgentObservation>) => void>;
-	closed: boolean;
+	readonly queue: BoundedObservationQueue<CodingAgentObservation>;
 	resync: boolean;
 }
 
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const entry of Object.values(value)) deepFreeze(entry);
-	return value;
-}
-
 function immutableData<T>(value: T): T {
-	return deepFreeze(structuredClone(value));
+	return cloneFrozen(value) as T;
 }
 
 /** Owns bounded Observation delivery, subscriber state, and the publication sequence. */
@@ -30,14 +21,8 @@ export class ObservationFanOut implements ObservationBus {
 	}
 
 	subscribe(capacity: number): AsyncIterable<CodingAgentObservation> {
-		if (!Number.isSafeInteger(capacity) || capacity < 1) {
-			throw new Error("Observation capacity must be a positive safe integer");
-		}
 		const subscriber: Subscriber = {
-			capacity,
-			queue: [],
-			waiters: [],
-			closed: false,
+			queue: new BoundedObservationQueue({ capacity, capacityName: "Observation" }),
 			resync: false,
 		};
 		this.#subscribers.add(subscriber);
@@ -72,59 +57,38 @@ export class ObservationFanOut implements ObservationBus {
 	}
 
 	closeAll(): void {
-		for (const subscriber of this.#subscribers) {
-			subscriber.closed = true;
-			if (subscriber.queue.length === 0) {
-				for (const waiter of subscriber.waiters.splice(0)) waiter({ done: true, value: undefined });
-			}
-		}
+		for (const subscriber of this.#subscribers) subscriber.queue.close({ discard: false });
 	}
 
 	#pushObservation(subscriber: Subscriber, observation: CodingAgentObservation): void {
-		if (subscriber.closed || subscriber.resync) return;
-		const waiter = subscriber.waiters.shift();
-		if (waiter) {
-			waiter({ done: false, value: observation });
-			return;
-		}
-		if (subscriber.queue.length >= subscriber.capacity) {
-			subscriber.queue.splice(0);
+		if (subscriber.queue.closed || subscriber.resync) return;
+		if (!subscriber.queue.enqueue(observation)) {
 			subscriber.resync = true;
-			subscriber.queue.push(
+			subscriber.queue.replace(
 				immutableData({
 					type: "resync_required",
 					sequence: observation.sequence,
 					reason: "slow_consumer",
 				} satisfies CodingAgentObservation),
 			);
-			return;
 		}
-		subscriber.queue.push(observation);
 	}
 
 	#requireSubscriberResynchronization(
 		subscriber: Subscriber,
 		observation: Extract<CodingAgentObservation, { readonly type: "resync_required" }>,
 	): void {
-		if (subscriber.closed || subscriber.resync) return;
-		subscriber.queue.splice(0);
+		if (subscriber.queue.closed || subscriber.resync) return;
 		subscriber.resync = true;
-		const waiter = subscriber.waiters.shift();
-		if (waiter) waiter({ done: false, value: observation });
-		else subscriber.queue.push(observation);
+		subscriber.queue.replace(observation);
 	}
 
 	#nextObservation(subscriber: Subscriber): Promise<IteratorResult<CodingAgentObservation>> {
-		const queued = subscriber.queue.shift();
-		if (queued) return Promise.resolve({ done: false, value: queued });
-		if (subscriber.closed) return Promise.resolve({ done: true, value: undefined });
-		return new Promise((resolve) => subscriber.waiters.push(resolve));
+		return subscriber.queue.next();
 	}
 
 	#removeSubscriber(subscriber: Subscriber): void {
-		subscriber.closed = true;
+		subscriber.queue.close();
 		this.#subscribers.delete(subscriber);
-		for (const waiter of subscriber.waiters.splice(0)) waiter({ done: true, value: undefined });
-		subscriber.queue.splice(0);
 	}
 }

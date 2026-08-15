@@ -1,5 +1,4 @@
-import type { RunResult } from "@coda/agent";
-import type { JsonValue } from "@coda/ai";
+import { cloneFrozen, type RunResult } from "@coda/agent";
 import type { InputResourceReservation, WorkSessionReservation, WorkspacePlacementReservation } from "./ports.ts";
 import type {
 	DeliverWorkItemInput,
@@ -27,21 +26,8 @@ export function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-export function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const entry of Object.values(value)) deepFreeze(entry);
-	return value;
-}
-
 export function immutableData<T>(value: T): T {
-	return deepFreeze(structuredClone(value));
-}
-
-export function jsonValue(value: unknown): JsonValue {
-	const text = JSON.stringify(value);
-	if (text === undefined) return null;
-	return JSON.parse(text) as JsonValue;
+	return cloneFrozen(value) as T;
 }
 
 export interface PrivateWorkerRuntimeHandle {

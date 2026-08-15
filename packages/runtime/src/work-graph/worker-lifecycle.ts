@@ -1,12 +1,12 @@
 import type { RunResult, ToolExecutionContext } from "@coda/agent";
-import type { JsonValue, TimeRuntime } from "@coda/ai";
+import type { TimeRuntime } from "@coda/ai";
 import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
 import type { ObservationBus, WorkerControlSink, WorkspacePlacement } from "./ports.ts";
 import type { SessionLeaseRegistry } from "./session-registry.ts";
 import type { WorkResult } from "./types.ts";
 import { WORK_GRAPH_FACT_VERSION } from "./work-graph-fact.ts";
-import { errorMessage, type GraphRecord, type ItemRecord, isTerminal, jsonValue } from "./work-graph-records.ts";
+import { errorMessage, type GraphRecord, type ItemRecord, isTerminal } from "./work-graph-records.ts";
 import type { WorkerFact, WorkerFactProjection } from "./worker-fact.ts";
 import type {
 	WorkerBarrierFailure,
@@ -183,7 +183,7 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		let sessionReleased = runtimeReleased;
 		if (!item.runtime && item.session) {
 			try {
-				await item.session.session.close();
+				await item.session.release();
 			} catch (error) {
 				sessionReleased = false;
 				item.diagnostics.push({ code: "session_close_failed", message: errorMessage(error) });
@@ -319,18 +319,6 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		sessionId: string,
 	): void {
 		this.#assertWorkerOwnership(item, runtimeId, sessionId);
-		let event: JsonValue;
-		try {
-			event = jsonValue(observation);
-		} catch (error) {
-			this.#diagnose(
-				"worker_observation_dropped",
-				`Worker Observation projection failed: ${errorMessage(error).slice(0, 384)}`,
-				graph,
-				item,
-			);
-			return;
-		}
 		this.#publish((sequence) => ({
 			type: "work_item_event",
 			sequence,
@@ -338,7 +326,7 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 			itemId: item.id,
 			runtimeId,
 			sessionId,
-			event,
+			event: observation,
 		}));
 	}
 

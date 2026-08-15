@@ -69,6 +69,9 @@ export class InMemorySessionManager implements SessionManager {
 	}
 
 	#create(workspace: SessionWorkspace, requestedId?: string): MemoryJournalData {
+		const existing = requestedId ? this.#journals.get(requestedId) : undefined;
+		if (existing?.open) throw new Error(`Session is already open: ${requestedId}`);
+		if (existing && !existing.descriptor.persistent) this.#journals.delete(requestedId!);
 		const descriptor: SessionDescriptor = {
 			id: (requestedId || allocateSessionId(this.#runtime)) as SessionId,
 			workspace: structuredClone(workspace),

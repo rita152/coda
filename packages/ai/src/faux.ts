@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 // See THIRD_PARTY_NOTICES.md.
 
+import { emptyUsage } from "./api/shared.ts";
 import { createStreamDiagnostic } from "./diagnostics.ts";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "./event-stream.ts";
 import { createProvider, type Provider } from "./provider.ts";
@@ -18,23 +19,11 @@ import type {
 	ThinkingContent,
 	TimeRuntime,
 	ToolCall,
-	Usage,
 } from "./types.ts";
 
 const DEFAULT_API = "faux";
 const DEFAULT_PROVIDER = "faux";
 const DEFAULT_MODEL_ID = "faux-1";
-
-function emptyUsage(): Usage {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-}
 
 export interface FauxModelDefinition {
 	id: string;

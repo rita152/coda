@@ -3,9 +3,8 @@
  * Desired Runtime Configuration, Workspace Ledger, and Work Graph Store vocabulary.
  * Physical host knowledge crosses only the named capabilities declared here.
  */
-import type { AgentInput, AgentSeed, AgentTool, IdGenerator, RunBudget } from "@coda/agent";
+import type { AgentInput, AgentTool, IdGenerator, RunBudget, Session } from "@coda/agent";
 import type { TimeRuntime } from "@coda/ai";
-import type { CompactionCheckpoint } from "../context-window/types.ts";
 import type { SystemPromptSnapshot, TrustedProjectInstructions } from "../prompt/prompt-builder.ts";
 import type {
 	ModelDriverLease,
@@ -26,7 +25,7 @@ import type {
 	WorkspaceArtifact,
 	WorkspacePlacementDescriptor,
 } from "./types.ts";
-import type { WorkerControlEvent, WorkerSessionEvent } from "./worker-protocol.ts";
+import type { WorkerControlEvent } from "./worker-protocol.ts";
 
 export type WorkspaceEffect = "read" | "write" | "unknown";
 
@@ -61,29 +60,13 @@ export interface WorkerControlSink {
 	}): Promise<void> | void;
 }
 
-export type WorkerSessionChange =
-	| {
-			readonly type: "prepare_run";
-			readonly promptVersion: string;
-			readonly promptSha256: string;
-	  }
-	| { readonly type: "context_compacted"; readonly checkpoint: CompactionCheckpoint };
-
-export interface WorkerSession {
-	readonly id: string;
-	readonly seed?: AgentSeed;
-	readonly compactionCheckpoint?: CompactionCheckpoint;
-	accept(event: WorkerSessionEvent): Promise<void> | void;
-	record(change: WorkerSessionChange): Promise<void>;
-	close(): Promise<void>;
-}
-
 export type WorkspaceToolContribution = RunToolContribution;
 
 export interface WorkSessionReservation {
-	readonly session: WorkerSession;
+	readonly session: Session;
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
+	release(): Promise<void>;
 	evidence(runId: string): WorkRunEvidence | undefined;
 }
 

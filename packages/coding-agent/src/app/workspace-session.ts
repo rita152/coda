@@ -27,7 +27,13 @@ import type { Session, SessionManager } from "../session/types.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import { codingAgentRunBudget } from "./argument-parsing.ts";
-import { bindInteractiveRunControl, openInteractiveRuntime } from "./interactive-session-options.ts";
+import {
+	bindInteractiveRunControl,
+	createSessionMediaLibrary,
+	openInteractiveRuntime,
+	restoreSessionMedia,
+} from "./interactive-session-options.ts";
+import type { RestoredChatMedia } from "./media-attachments.ts";
 
 const unavailableProcessSessionRunner: ProcessSessionRunner = Object.freeze({
 	start: async () => {
@@ -214,11 +220,7 @@ export interface WorkspaceSessionResources {
 	close(): Promise<void>;
 }
 
-export function createWorkspaceSessionResources(input: {
-	readonly session: Session;
-	readonly mediaLibrary: MediaLibrary;
-	readonly workspaceDiffs: WorkspaceDiffTracker;
-}): WorkspaceSessionResources {
+export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 	let mcpRegistry: CodingMcpRegistry | undefined;
 	let processSessionManager: ProcessSessionManager | undefined;
 	let workCoordinator: WorkspaceWorkCoordinator | undefined;
@@ -235,18 +237,7 @@ export function createWorkspaceSessionResources(input: {
 		close: async () => {
 			const failures: unknown[] = [];
 			try {
-				await input.workspaceDiffs.drain(input.session);
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				if (workCoordinator) await workCoordinator.close();
-				else await input.session.close();
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				await input.workspaceDiffs.drain(input.session);
+				await workCoordinator?.close();
 			} catch (error) {
 				failures.push(error);
 			}
@@ -260,11 +251,6 @@ export function createWorkspaceSessionResources(input: {
 			} catch (error) {
 				failures.push(error);
 			}
-			try {
-				await input.mediaLibrary.dispose();
-			} catch (error) {
-				failures.push(error);
-			}
 			if (failures.length === 1) throw failures[0];
 			if (failures.length > 1) throw new AggregateError(failures, "Could not close the Agent runtime");
 		},
@@ -275,8 +261,6 @@ export interface OpenedWorkspaceRuntime {
 	readonly processSessionManager: ProcessSessionManager;
 	readonly inputResources: WorkspaceInputResources;
 	readonly coordinator: WorkspaceWorkCoordinator;
-	readonly work: SessionWorkController;
-	readonly runControl?: AgentRunControlBinding;
 }
 
 export async function openWorkspaceRuntime(input: {
@@ -284,7 +268,6 @@ export async function openWorkspaceRuntime(input: {
 	readonly options: WorkspaceSessionApplicationOptions;
 	readonly resources: WorkspaceSessionResources;
 	readonly sessions: SessionManager;
-	readonly session: Session;
 	readonly workspace: Workspace;
 	readonly workspaceId: string;
 	readonly mode: "interactive" | "print";
@@ -295,11 +278,6 @@ export async function openWorkspaceRuntime(input: {
 	readonly skillsManager: CodingSkillsManager;
 	readonly mcpRegistry?: CodingMcpRegistry;
 	readonly projectInstructions?: TrustedProjectInstructions;
-	readonly model: Model<Api>;
-	readonly reasoning: ThinkingLevel | "off";
-	readonly authSnapshot: AuthResult;
-	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
-	readonly runControl?: RunControlConfiguration;
 }): Promise<OpenedWorkspaceRuntime> {
 	const configuredShell = input.options.runtime.environment.SHELL;
 	const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
@@ -333,6 +311,13 @@ export async function openWorkspaceRuntime(input: {
 		interactionMode: input.mode,
 		projectInstructions: input.projectInstructions,
 		resources: inputResources.adapter,
+		openPrivateSession: (sessionId) =>
+			input.sessions.open({
+				workspace: { id: input.workspaceId, path: input.workspace.root },
+				mode: input.mode,
+				createId: sessionId,
+				persistent: false,
+			}),
 		resumeDurableRoot: (sessionId) =>
 			input.sessions.open({
 				workspace: { id: input.workspaceId, path: input.workspace.root },
@@ -345,71 +330,123 @@ export async function openWorkspaceRuntime(input: {
 		...(input.options.runtime.scheduler ? { scheduler: input.options.runtime.scheduler } : {}),
 	});
 	input.resources.useWorkCoordinator(coordinator);
-	await input.session.record({
-		type: "model_selected",
-		model: { provider: input.model.provider, id: input.model.id },
-		reasoning: input.reasoning,
-	});
-	const work = await openInteractiveRuntime({
-		coordinator,
-		session: input.session,
-		selection: { model: input.model, reasoning: input.reasoning, authSnapshot: input.authSnapshot },
-		mcpElicitation: input.mcpElicitation,
-	});
-	const runControl = bindInteractiveRunControl({
-		work,
-		configuration: input.runControl,
-		clock: input.options.runtime.clock,
-		scheduler: input.options.runtime.scheduler,
-	});
-	return {
-		processSessionManager,
-		inputResources,
-		coordinator,
-		work,
-		...(runControl ? { runControl } : {}),
-	};
+	return { processSessionManager, inputResources, coordinator };
 }
 
-export interface SecondarySessionResource {
+/** Owns the complete per-Session startup and shutdown sequence for every UI Session. */
+export interface OpenedSessionRuntime {
 	readonly session: Session;
 	readonly work: SessionWorkController;
 	readonly mediaLibrary: MediaLibrary;
+	readonly restoredMedia: RestoredChatMedia;
 	readonly runControl?: AgentRunControlBinding;
+	close(): Promise<void>;
 }
 
-export async function closeSecondarySessionResources(
-	resources: Iterable<SecondarySessionResource>,
-	workspaceDiffs: WorkspaceDiffTracker,
-): Promise<void> {
-	await Promise.all(
-		[...resources].map(async (resource) => {
-			const failures: unknown[] = [];
-			resource.runControl?.dispose();
-			try {
-				await workspaceDiffs.drain(resource.session);
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				await resource.work.close();
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				await workspaceDiffs.drain(resource.session);
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				await resource.mediaLibrary.dispose();
-			} catch (error) {
-				failures.push(error);
-			}
-			if (failures.length === 1) throw failures[0];
-			if (failures.length > 1) {
-				throw new AggregateError(failures, "Could not close an interactive Session runtime");
-			}
-		}),
-	);
+export async function openSessionRuntime(input: {
+	readonly options: {
+		readonly fileSystem: FileSystem;
+		readonly runtime: Pick<WorkspaceSessionRuntime, "homeDirectory" | "clock" | "idGenerator" | "scheduler">;
+	};
+	readonly coordinator: WorkspaceWorkCoordinator;
+	readonly session: Session;
+	readonly model: Model<Api>;
+	readonly reasoning: ThinkingLevel | "off";
+	readonly authSnapshot: AuthResult;
+	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
+	readonly runControl?: RunControlConfiguration;
+	readonly workspaceDiffs: WorkspaceDiffTracker;
+	readonly mode: "interactive" | "print";
+}): Promise<OpenedSessionRuntime> {
+	const mediaLibrary = createSessionMediaLibrary(input.session, input.options);
+	let work: SessionWorkController | undefined;
+	let runControl: AgentRunControlBinding | undefined;
+	try {
+		await input.session.record({
+			type: "model_selected",
+			model: { provider: input.model.provider, id: input.model.id },
+			reasoning: input.reasoning,
+		});
+		work = await openInteractiveRuntime({
+			coordinator: input.coordinator,
+			session: input.session,
+			selection: {
+				model: input.model,
+				reasoning: input.reasoning,
+				authSnapshot: input.authSnapshot,
+			},
+			mcpElicitation: input.mcpElicitation,
+		});
+		runControl = bindInteractiveRunControl({
+			work,
+			configuration: input.runControl,
+			clock: input.options.runtime.clock,
+			scheduler: input.options.runtime.scheduler,
+		});
+		const restoredMedia = await restoreSessionMedia(input.session, input.options.fileSystem);
+		trackWorkspaceDiffs({
+			work,
+			session: input.session,
+			mode: input.mode,
+			tracker: input.workspaceDiffs,
+		});
+		let closeOperation: Promise<void> | undefined;
+		const openedWork = work;
+		const openedRunControl = runControl;
+		return {
+			session: input.session,
+			work: openedWork,
+			mediaLibrary,
+			restoredMedia,
+			...(openedRunControl ? { runControl: openedRunControl } : {}),
+			close: () => {
+				if (closeOperation) return closeOperation;
+				closeOperation = (async () => {
+					const failures: unknown[] = [];
+					try {
+						openedRunControl?.dispose();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await input.workspaceDiffs.drain(input.session);
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await openedWork.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await input.workspaceDiffs.drain(input.session);
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await mediaLibrary.dispose();
+					} catch (error) {
+						failures.push(error);
+					}
+					if (failures.length === 1) throw failures[0];
+					if (failures.length > 1) {
+						throw new AggregateError(failures, "Could not close an interactive Session runtime");
+					}
+				})();
+				return closeOperation;
+			},
+		};
+	} catch (error) {
+		try {
+			runControl?.dispose();
+		} catch {}
+		if (work) await work.close().catch(() => undefined);
+		else await input.session.close().catch(() => undefined);
+		await mediaLibrary.dispose().catch(() => undefined);
+		throw error;
+	}
+}
+
+export async function closeSessionRuntimes(resources: Iterable<OpenedSessionRuntime>): Promise<void> {
+	await Promise.all([...resources].map((resource) => resource.close()));
 }

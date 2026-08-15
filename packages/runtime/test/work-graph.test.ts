@@ -74,6 +74,12 @@ class MemorySessions {
 				this.opened.push(id);
 				const events: AgentEvent[] = [];
 				let closed = false;
+				const release = async () => {
+					if (closed) return;
+					if (this.failClose) throw new Error("scripted Session close failure");
+					closed = true;
+					this.closed.push(id);
+				};
 				const session = {
 					id,
 					seed: Object.freeze({ version: 1, messages: [], pendingFollowUps: [] }) satisfies AgentSeed,
@@ -87,20 +93,15 @@ class MemorySessions {
 					},
 					record: (_change: unknown) =>
 						this.failRecord ? Promise.reject(new Error("scripted Session record failure")) : Promise.resolve(),
-					close: async () => {
-						if (closed) return;
-						if (this.failClose) throw new Error("scripted Session close failure");
-						closed = true;
-						this.closed.push(id);
-					},
 				};
 				return {
 					session,
 					commit: () => Promise.resolve(),
 					rollback: async () => {
 						this.rolledBack.push(id);
-						await session.close();
+						await release();
 					},
+					release,
 					evidence: (runId: string) => {
 						if (this.failEvidence) throw new Error("scripted Session evidence failure");
 						return { version: 1, facts: { runId, eventCount: events.length } };
@@ -1140,7 +1141,7 @@ describe("Work Graph public Interface", () => {
 		await expect(agent.close()).resolves.toMatchObject({ canceledGraphIds: [], unknownWork: [] });
 	});
 
-	it("drops one unserializable Worker Observation without aborting Tool or Run settlement", async () => {
+	it("delivers non-JSON Worker Observations without serialization adapters", async () => {
 		const journal = new MemoryWorkspacePersistence();
 		const workspace = new MemoryWorkspaceExecution();
 		workspace.contributions = [
@@ -1170,21 +1171,21 @@ describe("Work Graph public Interface", () => {
 			],
 			{ persistence: journal, workspace },
 		);
-		const dropped = (async () => {
+		const observed = (async () => {
 			for await (const observation of agent.observe({ capacity: 128 })) {
-				if (observation.type === "diagnostic" && observation.diagnostic.code === "worker_observation_dropped") {
+				if (observation.type === "work_item_event" && observation.event.type === "tool_execution_progress") {
 					return observation;
 				}
 			}
-			throw new Error("Observation stream closed before the projection failure was diagnosed");
+			throw new Error("Observation stream closed before Tool progress was observed");
 		})();
 		await agent.submit({ commands: [start("graph:unserializable-observation", 1)] });
 		const result = await waitForGraphResult(agent, "graph:unserializable-observation");
 		expect(result.results[0]?.state).toBe("succeeded");
-		await expect(dropped).resolves.toMatchObject({
-			diagnostic: {
-				code: "worker_observation_dropped",
-				message: expect.stringContaining("projection failed"),
+		await expect(observed).resolves.toMatchObject({
+			event: {
+				type: "tool_execution_progress",
+				progress: { progress: 1, unsupported: 1n },
 			},
 		});
 		expect(

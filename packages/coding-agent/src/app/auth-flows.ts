@@ -1,5 +1,12 @@
 import type { AgentState, Clock } from "@coda/agent";
-import type { Api, AuthPrompt, Model, MutableModels } from "@coda/ai";
+import {
+	type Api,
+	type AuthPrompt,
+	estimateContextTokens,
+	type Message,
+	type Model,
+	type MutableModels,
+} from "@coda/ai";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal } from "@coda/tui";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
@@ -177,16 +184,14 @@ export function contextUsage(
 	messages: AgentState["messages"],
 	model: Model<Api>,
 ): { readonly usedTokens: number; readonly windowTokens: number; readonly estimated: boolean } {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index]?.message;
-		if (message?.role !== "assistant" && message?.role !== "toolResult") continue;
-		const usage = message.usage;
-		if (!usage) continue;
-		const usedTokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-		if (usedTokens > 0) return { usedTokens, windowTokens: model.contextWindow, estimated: false };
-	}
-	const bytes = new TextEncoder().encode(JSON.stringify(messages)).byteLength;
-	return { usedTokens: Math.ceil(bytes / 4), windowTokens: model.contextWindow, estimated: true };
+	const estimate = estimateContextTokens({
+		messages: messages.map(({ message }) => message as Message),
+	});
+	return {
+		usedTokens: estimate.tokens,
+		windowTokens: model.contextWindow,
+		estimated: estimate.lastUsageIndex === null || estimate.trailingTokens > 0,
+	};
 }
 
 export function latestUsageComesFromAnotherModel(messages: AgentState["messages"], model: Model<Api>): boolean {

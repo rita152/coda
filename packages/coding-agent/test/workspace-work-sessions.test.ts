@@ -13,7 +13,17 @@ const placement = {
 
 describe("Workspace Work Sessions", () => {
 	it("recreates an empty private child Session during pending Work recovery", async () => {
-		const sessions = new WorkspaceWorkSessions();
+		const time = testTimeRuntime(100);
+		let nextId = 0;
+		const manager = new InMemorySessionManager({
+			clock: time.clock,
+			idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
+		});
+		const workspace = { id: "workspace", path: "/workspace" };
+		const sessions = new WorkspaceWorkSessions({
+			openPrivateSession: (sessionId) =>
+				manager.open({ workspace, mode: "print", createId: sessionId, persistent: false }),
+		});
 		const created = await sessions.adapter.reserve({
 			graphId: "graph:recovery" as WorkGraphId,
 			itemId: "child" as WorkItemId,
@@ -22,7 +32,7 @@ describe("Workspace Work Sessions", () => {
 			placement,
 		});
 		await created.commit();
-		await created.session.close();
+		await created.release();
 
 		const recovered = await sessions.adapter.reserve({
 			graphId: "graph:recovery" as WorkGraphId,
@@ -33,11 +43,25 @@ describe("Workspace Work Sessions", () => {
 		});
 		expect(recovered.session.id).toBe("session:child");
 		expect(recovered.session.seed?.messages).toEqual([]);
-		await recovered.session.close();
+		await recovered.release();
 	});
 
 	it("does not fabricate a missing durable root Session", async () => {
-		const sessions = new WorkspaceWorkSessions();
+		const time = testTimeRuntime(100);
+		let nextId = 0;
+		const manager = new InMemorySessionManager({
+			clock: time.clock,
+			idGenerator: { generate: (kind) => `${kind}:${++nextId}` },
+		});
+		const sessions = new WorkspaceWorkSessions({
+			openPrivateSession: (sessionId) =>
+				manager.open({
+					workspace: { id: "workspace", path: "/workspace" },
+					mode: "print",
+					createId: sessionId,
+					persistent: false,
+				}),
+		});
 		await expect(
 			sessions.adapter.reserve({
 				graphId: "graph:root" as WorkGraphId,
@@ -65,6 +89,8 @@ describe("Workspace Work Sessions", () => {
 		await original.close();
 		let loads = 0;
 		const sessions = new WorkspaceWorkSessions({
+			openPrivateSession: (sessionId) =>
+				manager.open({ workspace, mode: "print", createId: sessionId, persistent: false }),
 			resumeDurableRoot: async (sessionId) => {
 				loads++;
 				return manager.open({ workspace, mode: "print", resumeId: sessionId, persistent: true });
@@ -86,7 +112,7 @@ describe("Workspace Work Sessions", () => {
 		expect(attempts.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
 		expect(attempts.filter(({ status }) => status === "rejected")).toHaveLength(1);
 		expect(accepted?.value.session.id).toBe("session-root");
-		await accepted?.value.session.close();
+		await accepted?.value.release();
 
 		const reopened = await manager.open({ workspace, mode: "print", resumeId: "session-root", persistent: true });
 		expect(reopened.descriptor.id).toBe("session-root");

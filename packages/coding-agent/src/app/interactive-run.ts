@@ -16,11 +16,10 @@ import { catalogModelFromRuntime } from "../models/model-catalog.ts";
 import type { ProviderManager } from "../models/provider-manager.ts";
 import { effectiveReasoningEffort } from "../models/reasoning-effort.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
-import type { AgentRunControlBinding, RunControlConfiguration } from "../run-control/index.ts";
+import type { RunControlConfiguration } from "../run-control/index.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { WorkspaceInputResources } from "../runtime/workspace-input-resources.ts";
 import type { WorkspaceWorkCoordinator } from "../runtime/workspace-work-coordinator.ts";
-import { DraftSession } from "../session/draft-session.ts";
 import type { Session, SessionId, SessionManager } from "../session/types.ts";
 import type { SettingsStore } from "../settings/types.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
@@ -33,17 +32,16 @@ import type { PromptRuntime } from "../ui/prompts.ts";
 import { type InteractiveSessionOptions, runInteractive } from "../ui/run-interactive.ts";
 import { finalText, findModel } from "./argument-parsing.ts";
 import { persistCustomProviders, refreshProviderAuth } from "./auth-flows.ts";
-import {
-	bindInteractiveRunControl,
-	createInteractiveSessionOptions,
-	createSessionMediaLibrary,
-	openInteractiveRuntime,
-	restoreSessionMedia,
-} from "./interactive-session-options.ts";
+import { createInteractiveSessionOptions } from "./interactive-session-options.ts";
 import { chatAttachment, hasAgentInput, pathSafeIdentity, type RestoredChatMedia } from "./media-attachments.ts";
 import type { ApplicationSettingsState } from "./project-runtime.ts";
 import { createSessionPresentation } from "./session-presentation.ts";
-import { closeSecondarySessionResources, trackWorkspaceDiffs, type WorkspaceDiffTracker } from "./workspace-session.ts";
+import {
+	closeSessionRuntimes,
+	type OpenedSessionRuntime,
+	openSessionRuntime,
+	type WorkspaceDiffTracker,
+} from "./workspace-session.ts";
 
 export interface InteractiveRunApplicationOptions {
 	readonly models: MutableModels;
@@ -100,15 +98,7 @@ export interface RunInteractiveApplicationInput {
 
 export async function runInteractiveApplication(input: RunInteractiveApplicationInput): Promise<number> {
 	const settings = input.settings;
-	const secondaryResources = new Map<
-		string,
-		{
-			readonly session: Session;
-			readonly work: SessionWorkController;
-			readonly mediaLibrary: MediaLibrary;
-			readonly runControl?: AgentRunControlBinding;
-		}
-	>();
+	const secondaryResources = new Map<string, OpenedSessionRuntime>();
 	const saveCustomProviders = async (): Promise<void> => {
 		settings.current = persistCustomProviders(settings.current, input.providerManager.configurations);
 		await input.options.settings.save(settings.current);
@@ -167,15 +157,10 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			await saveCustomProviders();
 		},
 	};
-	const createSecondarySessionOptions = async (
-		targetSession: Session,
-		fresh: boolean,
-	): Promise<InteractiveSessionOptions> => {
+	const createSecondarySessionOptions = async (targetSession: Session): Promise<InteractiveSessionOptions> => {
 		const targetMcpElicitation =
 			input.options.mcpElicitation ?? input.mcpElicitation?.forSession(targetSession.descriptor.id);
-		const targetMediaLibrary = createSessionMediaLibrary(targetSession, input.options);
-		let targetRuntimeToClose: SessionWorkController | undefined;
-		let targetRunControlToDispose: AgentRunControlBinding | undefined;
+		let targetRuntime: OpenedSessionRuntime | undefined;
 		try {
 			const targetSelection = targetSession.restored.model ?? settings.current.defaultModel;
 			if (!targetSelection) throw new Error("A new Session requires a configured default Model");
@@ -185,54 +170,26 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				targetSession.restored.reasoning ?? settings.current.defaultReasoning ?? "medium",
 			);
 			const targetAuth = await input.options.models.getAuth(targetModel, { clock: input.options.runtime.clock });
-			if (!targetSession.restored.model) {
-				const initialModelSelection = {
-					type: "model_selected",
-					model: { provider: targetModel.provider, id: targetModel.id },
-					reasoning: targetReasoning,
-				} as const;
-				if (fresh && targetSession instanceof DraftSession) {
-					targetSession.stageInitialChanges([initialModelSelection]);
-				} else {
-					await targetSession.record(initialModelSelection);
-				}
+			if (!targetAuth) {
+				throw new Error(`Model is not authenticated: ${targetModel.provider}/${targetModel.id}`);
 			}
-			const targetRuntime = await openInteractiveRuntime({
+			targetRuntime = await openSessionRuntime({
+				options: input.options,
 				coordinator: input.coordinator,
 				session: targetSession,
-				selection: {
-					model: targetModel,
-					reasoning: targetReasoning,
-					authSnapshot: targetAuth,
-				},
+				model: targetModel,
+				reasoning: targetReasoning,
+				authSnapshot: targetAuth,
 				mcpElicitation: targetMcpElicitation,
-			});
-			targetRuntimeToClose = targetRuntime;
-			const targetRunControl = bindInteractiveRunControl({
-				work: targetRuntime,
-				configuration: input.runControl,
-				clock: input.options.runtime.clock,
-				scheduler: input.options.runtime.scheduler,
-			});
-			targetRunControlToDispose = targetRunControl;
-			const targetRestoredMedia = await restoreSessionMedia(targetSession, input.options.fileSystem);
-			trackWorkspaceDiffs({
-				work: targetRuntime,
-				session: targetSession,
+				runControl: input.runControl,
+				workspaceDiffs: input.workspaceDiffs,
 				mode: "interactive",
-				tracker: input.workspaceDiffs,
 			});
-			secondaryResources.set(targetSession.descriptor.id, {
+			const sessionOptions = createInteractiveSessionOptions({
 				session: targetSession,
-				work: targetRuntime,
-				mediaLibrary: targetMediaLibrary,
-				...(targetRunControl ? { runControl: targetRunControl } : {}),
-			});
-			return createInteractiveSessionOptions({
-				session: targetSession,
-				work: targetRuntime,
-				mediaLibrary: targetMediaLibrary,
-				restoredMedia: targetRestoredMedia,
+				work: targetRuntime.work,
+				mediaLibrary: targetRuntime.mediaLibrary,
+				restoredMedia: targetRuntime.restoredMedia,
 				model: targetModel,
 				modelLabel: `${targetModel.provider}/${targetModel.id}`,
 				activitySummaryMode: activitySummaryModeForApi(targetModel.api),
@@ -249,11 +206,11 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				mode: { type: "secondary" },
 				onRetire: () => input.processSessionManager.retireSession(targetSession.descriptor.id),
 			});
+			secondaryResources.set(targetSession.descriptor.id, targetRuntime);
+			return sessionOptions;
 		} catch (error) {
-			targetRunControlToDispose?.dispose();
-			if (targetRuntimeToClose) await targetRuntimeToClose.close().catch(() => undefined);
+			if (targetRuntime) await targetRuntime.close().catch(() => undefined);
 			else await targetSession.close().catch(() => undefined);
-			await targetMediaLibrary.dispose().catch(() => undefined);
 			throw error;
 		}
 	};
@@ -311,28 +268,19 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 						resumeId: sessionId,
 						persistent: input.session.descriptor.persistent,
 					});
-					return createSecondarySessionOptions(targetSession, false);
+					return createSecondarySessionOptions(targetSession);
 				},
 				create: async () => {
 					const draftId = `session-${pathSafeIdentity(
 						input.options.runtime.idGenerator.generate("queue_item"),
 					)}` as SessionId;
-					const targetSession = new DraftSession({
-						descriptor: {
-							id: draftId,
-							workspace: { id: input.workspaceId, path: input.workspace.root },
-							createdAt: input.options.runtime.clock.now(),
-							persistent: input.session.descriptor.persistent,
-						},
-						materialize: () =>
-							input.sessions.open({
-								workspace: { id: input.workspaceId, path: input.workspace.root },
-								mode: "interactive",
-								persistent: input.session.descriptor.persistent,
-								createId: draftId,
-							}),
+					const targetSession = await input.sessions.open({
+						workspace: { id: input.workspaceId, path: input.workspace.root },
+						mode: "interactive",
+						persistent: input.session.descriptor.persistent,
+						createId: draftId,
 					});
-					return createSecondarySessionOptions(targetSession, true);
+					return createSecondarySessionOptions(targetSession);
 				},
 			},
 			onContextOverflowReplacement: (replacement) => {
@@ -351,7 +299,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			initialAttachments,
 		});
 	} finally {
-		await closeSecondarySessionResources(secondaryResources.values(), input.workspaceDiffs);
+		await closeSessionRuntimes(secondaryResources.values());
 	}
 	const finalWork = overflowReplacement?.work ?? input.work;
 	const finalAgent = finalWork.state();

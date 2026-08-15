@@ -1,4 +1,4 @@
-import type { AgentMessage, MessageId } from "@coda/agent";
+import type { AgentMessage, CompactionCheckpoint, MessageId } from "@coda/agent";
 import {
 	type AssistantMessage,
 	type Context,
@@ -11,7 +11,6 @@ import {
 } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import { ContextWindowController } from "../src/context-window/context-window.ts";
-import type { CompactionCheckpoint } from "../src/context-window/types.ts";
 
 function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
 	const clock = typeof clockOrValue === "number" ? { now: () => clockOrValue } : clockOrValue;
@@ -142,7 +141,7 @@ describe("ContextWindowController", () => {
 		const firstMessages = [user("message:u1", "initial"), assistant("message:a1", "done")];
 		const first = await controller.compact({ messages: firstMessages, reason: "manual" });
 		fixture.select("small");
-		const allMessages = [...firstMessages, user("message:u2", `downshift-large-input:${"z".repeat(40_000)}`)];
+		const allMessages = [...firstMessages, user("message:u2", `downshift-large-input:${"z".repeat(50_000)}`)];
 		const context: Context = {
 			messages: allMessages.map(({ message }) => structuredClone(message) as Message),
 		};

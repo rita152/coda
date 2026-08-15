@@ -5,11 +5,7 @@ import type { OpenCodingAgentOptions } from "@coda/runtime";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
 import { HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import { runInteractiveApplication } from "./app/interactive-run.ts";
-import {
-	createAttachmentPreparer,
-	createSessionMediaLibrary,
-	restoreSessionMedia,
-} from "./app/interactive-session-options.ts";
+import { createAttachmentPreparer } from "./app/interactive-session-options.ts";
 import { promptInput } from "./app/media-attachments.ts";
 import { runPrint } from "./app/print-run.ts";
 import {
@@ -31,10 +27,11 @@ import {
 	createWorkspaceDiffTracker,
 	createWorkspaceSessionResources,
 	dispatchMaintenanceCleanup,
+	type OpenedSessionRuntime,
+	openSessionRuntime,
 	openWorkspaceRuntime,
 	openWorkspaceSession,
 	resolveWorkspaceContext,
-	trackWorkspaceDiffs,
 } from "./app/workspace-session.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
@@ -45,7 +42,6 @@ import { inspectMcpConfiguration } from "./mcp/config.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
-import type { AgentRunControlBinding } from "./run-control/index.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import type { SessionManager } from "./session/types.ts";
@@ -198,14 +194,27 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					workspace: workspace.root,
 					environment: options.runtime.environment,
 				});
-				const mediaLibrary = createSessionMediaLibrary(session, options);
-				const workspaceResources = createWorkspaceSessionResources({
-					session,
-					mediaLibrary,
-					workspaceDiffs,
-				});
+				const workspaceResources = createWorkspaceSessionResources();
 				let closeProjectUi: (() => void) | undefined;
-				let runControlBinding: AgentRunControlBinding | undefined;
+				let sessionRuntime: OpenedSessionRuntime | undefined;
+				const closeRuntime = async (): Promise<void> => {
+					const failures: unknown[] = [];
+					try {
+						if (sessionRuntime) await sessionRuntime.close();
+						else await session.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					try {
+						await workspaceResources.close();
+					} catch (error) {
+						failures.push(error);
+					}
+					if (failures.length === 1) throw failures[0];
+					if (failures.length > 1) {
+						throw new AggregateError(failures, "Could not close the application runtime");
+					}
+				};
 				try {
 					const initialModel = await selectInitialModel({
 						options,
@@ -325,11 +334,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						interactiveRuntime,
 						imageCount: parsed.imagePaths.length,
 					});
-					const initialAttachmentIds: string[] = [];
-					for (const path of parsed.imagePaths) {
-						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
-					}
-					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
 					const interactiveMcpElicitation =
 						parsed.mode === "interactive" && !options.mcpElicitation
 							? new InteractiveMcpElicitationHandler()
@@ -341,7 +345,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						options,
 						resources: workspaceResources,
 						sessions,
-						session,
 						workspace,
 						workspaceId,
 						mode: parsed.mode,
@@ -352,29 +355,35 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						skillsManager,
 						mcpRegistry,
 						projectInstructions,
+					});
+					const activeProcessSessionManager = openedWorkspace.processSessionManager;
+					const inputResources = openedWorkspace.inputResources;
+					const activeWorkCoordinator = openedWorkspace.coordinator;
+					sessionRuntime = await openSessionRuntime({
+						options,
+						coordinator: activeWorkCoordinator,
+						session,
 						model,
 						reasoning,
 						authSnapshot: auth,
 						mcpElicitation: primaryMcpElicitation,
 						runControl: configuredRunControl,
+						workspaceDiffs,
+						mode: parsed.mode,
 					});
-					const activeProcessSessionManager = openedWorkspace.processSessionManager;
-					const inputResources = openedWorkspace.inputResources;
-					const activeWorkCoordinator = openedWorkspace.coordinator;
-					const agentRuntime = openedWorkspace.work;
-					runControlBinding = openedWorkspace.runControl;
-					const restoredMedia = await restoreSessionMedia(session, options.fileSystem);
+					const agentRuntime = sessionRuntime.work;
+					const mediaLibrary = sessionRuntime.mediaLibrary;
+					const restoredMedia = sessionRuntime.restoredMedia;
+					const initialAttachmentIds: string[] = [];
+					for (const path of parsed.imagePaths) {
+						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
+					}
+					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
 					const prepareAttachments = createAttachmentPreparer({
 						restoredMedia,
 						mediaLibrary,
 						session,
 						inputResources,
-					});
-					trackWorkspaceDiffs({
-						work: agentRuntime,
-						session,
-						mode: parsed.mode,
-						tracker: workspaceDiffs,
 					});
 					if (parsed.mode === "interactive") {
 						return await runInteractiveApplication({
@@ -425,13 +434,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						environment: options.runtime.environment,
 						clock: options.runtime.clock,
 						completionWorkspaceEvidence: options.completionWorkspaceEvidence,
-						runControl: runControlBinding,
+						runControl: sessionRuntime.runControl,
 						drainWorkspaceDiffSupplements: workspaceDiffs.drain,
 					});
 				} finally {
-					runControlBinding?.dispose();
 					closeProjectUi?.();
-					await workspaceResources.close();
+					await closeRuntime();
 				}
 			} catch (error) {
 				if (error instanceof InteractiveTerminationError) return error.exitCode;

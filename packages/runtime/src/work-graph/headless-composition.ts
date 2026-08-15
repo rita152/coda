@@ -1,14 +1,7 @@
-import type { AgentEvent, AgentSeed, AgentTool } from "@coda/agent";
+import type { AgentEvent, AgentSeed, AgentTool, Session, SessionChange, SessionEvent } from "@coda/agent";
 import { openCodingAgent } from "./open-coding-agent.ts";
-import type {
-	OpenCodingAgentOptions,
-	WorkerSession,
-	WorkerSessionChange,
-	WorkSessionStore,
-	WorkspaceExecution,
-} from "./ports.ts";
+import type { OpenCodingAgentOptions, WorkSessionStore, WorkspaceExecution } from "./ports.ts";
 import type { CodingAgent, WorkGraphId, WorkGraphResult } from "./types.ts";
-import type { WorkerSessionEvent } from "./worker-protocol.ts";
 
 export interface WaitForGraphOptions {
 	readonly capacity?: number;
@@ -93,9 +86,9 @@ export function createNullWorkspaceExecution(): WorkspaceExecution {
 	return createMemoryWorkspaceExecution({ root: "/workspace", baseIdentity: "workspace:null" });
 }
 
-export interface MemoryWorkSession extends WorkerSession {
+export interface MemoryWorkSession extends Session {
 	readonly events: readonly AgentEvent[];
-	readonly changes: readonly WorkerSessionChange[];
+	readonly changes: readonly SessionChange[];
 }
 
 export interface MemoryWorkSessionStore extends WorkSessionStore {
@@ -111,17 +104,17 @@ export function createMemoryWorkSessionStore(seeds: readonly MemoryWorkSessionSe
 	const sessions = new Map<string, MemoryWorkSession>();
 	const createSession = (id: string, seed?: AgentSeed): MemoryWorkSession => {
 		const events: AgentEvent[] = [];
-		const changes: WorkerSessionChange[] = [];
+		const changes: SessionChange[] = [];
+		const initialSeed: AgentSeed = seed ?? { version: 1, messages: [], pendingFollowUps: [] };
 		const session: MemoryWorkSession = {
 			id,
-			...(seed ? { seed } : {}),
-			accept: (event: WorkerSessionEvent) => {
+			seed: initialSeed,
+			accept: (event: SessionEvent) => {
 				events.push(structuredClone(event));
 			},
-			record: async (change: WorkerSessionChange) => {
+			record: async (change: SessionChange) => {
 				changes.push(structuredClone(change));
 			},
-			close: async () => undefined,
 			get events() {
 				return Object.freeze(structuredClone(events));
 			},
@@ -152,8 +145,9 @@ export function createMemoryWorkSessionStore(seeds: readonly MemoryWorkSessionSe
 					sessions.set(id, session);
 				},
 				rollback: async () => {
-					if (!committed) await session.close();
+					if (!committed) return;
 				},
+				release: async () => undefined,
 				evidence: () => undefined,
 			};
 		},

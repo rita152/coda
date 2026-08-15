@@ -1,4 +1,4 @@
-import type { ActiveRun, AgentInput, RunBudgetExhaustion, RunFailure, RunLimits } from "@coda/agent";
+import type { ActiveRun, AgentEvent, AgentInput, RunBudgetExhaustion, RunFailure, RunLimits } from "@coda/agent";
 import type { JsonValue, ThinkingLevel } from "@coda/ai";
 
 declare const workIdentity: unique symbol;
@@ -156,8 +156,34 @@ export interface WorkRunResult {
 
 export interface WorkRunEvidence {
 	readonly version: number;
-	readonly facts: JsonValue;
+	/** Opaque application evidence; the Work Graph codec validates JSON compatibility before persistence. */
+	readonly facts: unknown;
 }
+
+export type WorkPreparationObservation =
+	| {
+			readonly type: "preparation_started";
+			readonly preparationId: string;
+			readonly submissionKind: "prompt" | "steering" | "follow_up";
+			readonly resourceReferences: readonly string[];
+			readonly deadline?: number;
+	  }
+	| {
+			readonly type: "preparation_settled";
+			readonly preparationId: string;
+			readonly outcome: "prepared";
+			readonly promptVersion: string;
+			readonly promptSha256: string;
+	  }
+	| {
+			readonly type: "preparation_settled";
+			readonly preparationId: string;
+			readonly outcome: "canceled" | "failed";
+			readonly diagnostic: string;
+	  }
+	| { readonly type: "prepared_run_disposed"; readonly preparationId: string };
+
+export type WorkItemEvent = AgentEvent | WorkPreparationObservation;
 
 export interface WorkspacePlacementDescriptor {
 	readonly placementId: string;
@@ -305,7 +331,7 @@ export type CodingAgentObservation =
 			readonly itemId: WorkItemId;
 			readonly runtimeId: string;
 			readonly sessionId: string;
-			readonly event: JsonValue;
+			readonly event: WorkItemEvent;
 	  }
 	| {
 			readonly type: "work_item_settled";

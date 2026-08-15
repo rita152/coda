@@ -6,8 +6,19 @@ import { baseOptions, TestIds, withPreparedRun } from "./helpers.ts";
 import { composeAgent, consumeRun } from "./public-types.consumer.ts";
 
 describe("@coda/agent public package contract", () => {
-	it("exports only the Milestone 1 runtime values from the root", () => {
-		expect(Object.keys(publicApi).sort()).toEqual(["Agent", "AgentError", "prepareStaticRun"]);
+	it("exports the Agent kernel and its shared runtime primitives from the root", () => {
+		expect(Object.keys(publicApi).sort()).toEqual([
+			"Agent",
+			"AgentError",
+			"AgentEventTraceReducer",
+			"BoundedObservationQueue",
+			"RUN_LIMIT_KEYS",
+			"assertRunLimits",
+			"cloneFrozen",
+			"deepFreeze",
+			"prepareStaticRun",
+			"snapshotRunLimits",
+		]);
 		expect(typeof composeAgent).toBe("function");
 		expect(typeof consumeRun).toBe("function");
 	});

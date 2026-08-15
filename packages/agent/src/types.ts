@@ -68,6 +68,43 @@ export interface AgentSeed {
 	readonly pendingFollowUps: readonly FollowUp[];
 }
 
+export type CompactionReason = "manual" | "auto" | "overflow";
+
+/** Durable replacement Context Window committed without deleting the Session transcript. */
+export interface CompactionCheckpoint {
+	readonly version: 1;
+	readonly windowId: string;
+	readonly previousWindowId?: string;
+	readonly reason: CompactionReason;
+	readonly summary: string;
+	readonly focus?: string;
+	readonly coveredThroughMessageId: MessageId;
+	readonly coveredMessageIds: readonly MessageId[];
+	readonly retainedMessageIds: readonly MessageId[];
+	readonly replacementHistory: readonly AgentMessage[];
+	readonly model: {
+		readonly provider: string;
+		readonly id: string;
+		readonly contextWindow: number;
+		readonly maxTokens: number;
+	};
+	readonly usage: {
+		readonly beforeEstimatedTokens: number;
+		readonly afterEstimatedTokens: number;
+		readonly summaryInputTokens: number;
+		readonly summaryOutputTokens: number;
+		readonly summaryTotalTokens: number;
+		readonly summaryCost?: number;
+		readonly cumulativeCost?: number;
+	};
+	readonly summaryPrompt: {
+		readonly version: "1";
+		readonly sha256: string;
+		readonly calls: number;
+	};
+	readonly createdAt: number;
+}
+
 export type RunSource = "prompt" | "follow_up";
 export type RunOutcome = "success" | "error" | "aborted";
 
@@ -357,6 +394,30 @@ export type AgentObservationEvent = Extract<
 >;
 
 export type AgentSemanticEvent = Exclude<AgentEvent, AgentObservationEvent>;
+
+/** The semantic Agent event stream durably appended by every Session implementation. */
+export type SessionEvent = AgentSemanticEvent;
+
+/** Runtime-owned Session changes shared by every durable and in-memory Session. */
+export type SessionChange =
+	| {
+			readonly type: "prepare_run";
+			readonly promptVersion: string;
+			readonly promptSha256: string;
+	  }
+	| { readonly type: "context_compacted"; readonly checkpoint: CompactionCheckpoint };
+
+/**
+ * The single append-only Session interface used by Agent Runtime callers.
+ * Reservation/release ownership deliberately lives outside this interface.
+ */
+export interface Session {
+	readonly id: string;
+	readonly seed: AgentSeed;
+	readonly compactionCheckpoint?: CompactionCheckpoint;
+	accept(event: SessionEvent): Promise<void> | void;
+	record(change: SessionChange): Promise<void>;
+}
 
 export type AgentSemanticEventListener = (event: AgentSemanticEvent) => unknown;
 

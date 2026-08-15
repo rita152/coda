@@ -1,6 +1,6 @@
-import type { AgentEvent } from "@coda/agent";
+import type { AgentEvent, SessionEvent } from "@coda/agent";
 import { MAXIMUM_WORKER_FACT_TOOL_NAME_LENGTH, type WorkerFact } from "./worker-fact.ts";
-import type { WorkerControlEvent, WorkerEventDisposition, WorkerSessionEvent } from "./worker-protocol.ts";
+import type { WorkerControlEvent, WorkerEventDisposition } from "./worker-protocol.ts";
 
 function assertNever(value: never): never {
 	throw new Error(`Unhandled Agent event: ${String((value as { type?: unknown }).type)}`);
@@ -18,7 +18,7 @@ function totalTokens(event: Extract<AgentEvent, { readonly type: "attempt_end" }
 	return value;
 }
 
-function session(event: WorkerSessionEvent): WorkerSessionEvent {
+function session(event: SessionEvent): SessionEvent {
 	return event;
 }
 
@@ -29,7 +29,7 @@ function control(event: WorkerControlEvent): WorkerControlEvent {
 function disposition(
 	event: AgentEvent,
 	options: {
-		readonly session?: WorkerSessionEvent;
+		readonly session?: SessionEvent;
 		readonly fact?: WorkerFact;
 		readonly control?: WorkerControlEvent;
 	} = {},

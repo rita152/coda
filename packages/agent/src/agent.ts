@@ -15,6 +15,7 @@ import {
 import { AgentError } from "./errors.ts";
 import { isPersistenceSafeId } from "./identities.ts";
 import { cloneFrozen, deepFreeze } from "./immutable.ts";
+import { BoundedObservationQueue } from "./observation-queue.ts";
 import { initialRuntimeState, type RuntimeState, reduceState } from "./reducer.ts";
 import { RunBudgetMeter, runBudgetFailure, snapshotRunBudget } from "./run-budget.ts";
 import { validateAgentSeed } from "./seed.ts";
@@ -60,11 +61,7 @@ type ObservationDelivery =
 	| { readonly type: "resynchronize"; readonly runId: RunId; readonly sequence: number };
 
 interface ObservationSubscriber {
-	readonly observer: AgentObservationObserver;
-	readonly capacity: number;
-	readonly queue: ObservationDelivery[];
-	running: boolean;
-	closed: boolean;
+	readonly queue: BoundedObservationQueue<ObservationDelivery>;
 }
 
 interface RunContext {
@@ -324,16 +321,22 @@ export class Agent {
 
 	subscribeObservations(observer: AgentObservationObserver, options: AgentObservationOptions = {}): () => void {
 		const capacity = options.capacity ?? 256;
-		if (!Number.isSafeInteger(capacity) || capacity < 1) {
-			throw new AgentError("invalid_input", "Agent Observation capacity must be a positive safe integer");
-		}
-		const subscriber: ObservationSubscriber = {
-			observer,
+		let subscriber: ObservationSubscriber;
+		const queue = new BoundedObservationQueue<ObservationDelivery>({
 			capacity,
-			queue: [],
-			running: false,
-			closed: false,
-		};
+			capacityName: "Agent Observation",
+			deliver: (delivery) => {
+				if (delivery.type === "event") return observer.accept(delivery.event);
+				return observer.resynchronize({
+					reason: "slow_consumer",
+					runId: delivery.runId,
+					sequence: delivery.sequence,
+					state: this.#runtimeState.public,
+				});
+			},
+			onDeliveryError: () => this.#removeObservationSubscriber(subscriber),
+		});
+		subscriber = { queue };
 		this.#observationSubscribers.add(subscriber);
 		return () => this.#removeObservationSubscriber(subscriber);
 	}
@@ -1416,48 +1419,14 @@ export class Agent {
 	}
 
 	#enqueueObservation(subscriber: ObservationSubscriber, event: AgentObservationEvent): void {
-		if (subscriber.closed) return;
-		if (subscriber.queue.length >= subscriber.capacity) {
-			subscriber.queue.splice(0);
-			subscriber.queue.push({ type: "resynchronize", runId: event.runId, sequence: event.sequence });
-		} else {
-			subscriber.queue.push({ type: "event", event });
-		}
-		if (subscriber.running) return;
-		subscriber.running = true;
-		queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
-	}
-
-	async #drainObservationSubscriber(subscriber: ObservationSubscriber): Promise<void> {
-		try {
-			while (!subscriber.closed) {
-				const delivery = subscriber.queue.shift();
-				if (!delivery) return;
-				if (delivery.type === "event") await subscriber.observer.accept(delivery.event);
-				else {
-					await subscriber.observer.resynchronize({
-						reason: "slow_consumer",
-						runId: delivery.runId,
-						sequence: delivery.sequence,
-						state: this.#runtimeState.public,
-					});
-				}
-			}
-		} catch {
-			this.#removeObservationSubscriber(subscriber);
-		} finally {
-			subscriber.running = false;
-			if (!subscriber.closed && subscriber.queue.length > 0) {
-				subscriber.running = true;
-				queueMicrotask(() => void this.#drainObservationSubscriber(subscriber));
-			}
+		if (!subscriber.queue.enqueue({ type: "event", event })) {
+			subscriber.queue.replace({ type: "resynchronize", runId: event.runId, sequence: event.sequence });
 		}
 	}
 
 	#removeObservationSubscriber(subscriber: ObservationSubscriber): void {
-		if (subscriber.closed) return;
-		subscriber.closed = true;
-		subscriber.queue.splice(0);
+		if (subscriber.queue.closed) return;
+		subscriber.queue.close();
 		this.#observationSubscribers.delete(subscriber);
 	}
 

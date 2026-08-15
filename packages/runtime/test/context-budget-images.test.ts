@@ -20,7 +20,7 @@ describe("multimodal context budgeting", () => {
 	it("budgets image content by a conservative image allowance rather than base64 text length", () => {
 		const faux = fauxProvider({
 			runtime: testTimeRuntime(),
-			models: [{ id: "vision", contextWindow: 20_000, maxTokens: 1_000 }],
+			models: [{ id: "vision", contextWindow: 4_000, maxTokens: 1_000 }],
 		});
 		const model = faux.getModel();
 		const hugeBase64 = "a".repeat(1_000_000);

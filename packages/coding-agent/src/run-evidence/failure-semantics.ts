@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { deepFreeze } from "@coda/agent";
 import type { RunEvidenceFailure, RunEvidenceRecoveredFailure } from "./contracts.ts";
 
 export type FailureResolutionEvent =
@@ -73,11 +74,4 @@ export function normalizeRunEvidenceCommand(command: string): string {
 
 export function resolutionScope(kind: string, value: string): string {
 	return `${kind}:v1:${createHash("sha256").update(value).digest("hex")}`;
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const item of Object.values(value)) deepFreeze(item);
-	return value;
 }

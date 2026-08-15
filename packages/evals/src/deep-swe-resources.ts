@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
+import { type AgentEventSummary, AgentEventTraceReducer } from "@coda/agent";
 
 export const DEEP_SWE_REPORT_RECOVERY_METADATA_KEY = "coda_report_recovery_v1";
 
@@ -44,8 +45,6 @@ export interface DeepSweJsonlReduction {
 	readonly invalidToolCallCount: number;
 }
 
-const MAX_BUDGET_EXHAUSTION_LIMITS = 32;
-
 function record(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -61,14 +60,6 @@ function nonNegativeInteger(value: unknown): number | undefined {
 	return number !== undefined && Number.isInteger(number) ? number : undefined;
 }
 
-function timestampMs(value: unknown): number | undefined {
-	const numeric = nonNegativeNumber(value);
-	if (numeric !== undefined) return numeric;
-	if (typeof value !== "string" || value.length === 0) return undefined;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function unavailableResource(source: DeepSweResourceSource = "missing"): DeepSweTrialResourceTotal {
 	return { knownTotal: null, status: "unavailable", source };
 }
@@ -81,141 +72,46 @@ function coverageStatus(value: unknown): DeepSweCoverageStatus | undefined {
 	return value === "complete" || value === "partial" || value === "unavailable" ? value : undefined;
 }
 
-interface TerminalUsageTotals {
-	inputTokens: number;
-	inputObservedAttempts: number;
-	cacheTokens: number;
-	cacheObservedAttempts: number;
-	outputTokens: number;
-	outputObservedAttempts: number;
-	knownCostUsd: number;
-	pricedAttempts: number;
-	unpricedAttempts: number;
-	attemptEnds: number;
-}
-
-function createTerminalUsageTotals(): TerminalUsageTotals {
-	return {
-		inputTokens: 0,
-		inputObservedAttempts: 0,
-		cacheTokens: 0,
-		cacheObservedAttempts: 0,
-		outputTokens: 0,
-		outputObservedAttempts: 0,
-		knownCostUsd: 0,
-		pricedAttempts: 0,
-		unpricedAttempts: 0,
-		attemptEnds: 0,
-	};
-}
-
 /** Constant-space reducer for semantic or legacy raw Coda event streams. */
 export class DeepSweEventResourceReducer {
-	readonly #usage = createTerminalUsageTotals();
-	readonly #budgetExhaustionLimits = new Set<string>();
+	readonly #trace = new AgentEventTraceReducer({ retainDetails: false });
 	#runEvidenceResources: DeepSweRecoveredTrialResources | undefined;
-	#turnCount = 0;
-	#sawRunStart = false;
-	#runStartedAt: number | undefined;
-	#latestEventAt: number | undefined;
-	#lengthTruncationCount = 0;
-	#toolRejectionCount = 0;
-	#invalidToolCallCount = 0;
 
 	accept(value: unknown): void {
+		this.#trace.accept(value);
 		const event = record(value);
 		if (!event) return;
-		const timestamp = timestampMs(event.timestamp);
-		if (timestamp !== undefined) {
-			this.#latestEventAt = Math.max(this.#latestEventAt ?? timestamp, timestamp);
-		}
-
-		switch (event.type) {
-			case "run_start":
-				this.#sawRunStart = true;
-				if (timestamp !== undefined) this.#runStartedAt = timestamp;
-				break;
-			case "turn_start":
-				this.#turnCount++;
-				break;
-			case "attempt_end":
-				this.#acceptAttemptEnd(event);
-				break;
-			case "run_evidence":
-				this.#runEvidenceResources = this.#resourcesFromRunEvidence(event);
-				break;
-			case "run_budget_exhausted": {
-				const limit = record(event.exhaustion)?.limit;
-				if (typeof limit === "string" && this.#budgetExhaustionLimits.size < MAX_BUDGET_EXHAUSTION_LIMITS) {
-					this.#budgetExhaustionLimits.add(limit);
-				}
-				break;
-			}
-			case "tool_execution_rejected":
-				this.#toolRejectionCount++;
-				if (event.reason === "invalid") this.#invalidToolCallCount++;
-				break;
-		}
+		if (event.type === "run_evidence") this.#runEvidenceResources = this.#resourcesFromRunEvidence(event);
 	}
 
 	finish(): DeepSweJsonlReduction {
+		const summary = this.#trace.summary();
 		return {
 			schemaVersion: 1,
-			resources: this.#runEvidenceResources ?? this.#partialTerminalResources(),
-			lengthTruncationCount: this.#lengthTruncationCount,
-			budgetExhaustionLimits: [...this.#budgetExhaustionLimits],
-			toolRejectionCount: this.#toolRejectionCount,
-			invalidToolCallCount: this.#invalidToolCallCount,
+			resources: this.#runEvidenceResources ?? this.#partialTerminalResources(summary),
+			lengthTruncationCount: summary.lengthTruncationCount,
+			budgetExhaustionLimits: summary.budgetExhaustionLimits,
+			toolRejectionCount: summary.toolRejectionCount,
+			invalidToolCallCount: summary.invalidToolCallCount,
 		};
 	}
 
-	#acceptAttemptEnd(event: Record<string, unknown>): void {
-		this.#usage.attemptEnds++;
-		const message = record(record(event.candidate)?.message);
-		if (message?.stopReason === "length") this.#lengthTruncationCount++;
-		const usage = record(message?.usage);
-		const input = nonNegativeNumber(usage?.input);
-		const cacheRead = nonNegativeNumber(usage?.cacheRead);
-		const cacheWrite = nonNegativeNumber(usage?.cacheWrite);
-		const knownInputComponents = [input, cacheRead, cacheWrite].filter(
-			(component): component is number => component !== undefined,
-		);
-		if (knownInputComponents.length > 0) {
-			this.#usage.inputTokens += knownInputComponents.reduce((sum, component) => sum + component, 0);
-			this.#usage.inputObservedAttempts++;
-		}
-		if (cacheRead !== undefined) {
-			this.#usage.cacheTokens += cacheRead;
-			this.#usage.cacheObservedAttempts++;
-		}
-		const output = nonNegativeNumber(usage?.output);
-		if (output !== undefined) {
-			this.#usage.outputTokens += output;
-			this.#usage.outputObservedAttempts++;
-		}
-		const costTotal = nonNegativeNumber(record(usage?.cost)?.total);
-		if (costTotal === undefined) this.#usage.unpricedAttempts++;
-		else {
-			this.#usage.knownCostUsd += costTotal;
-			this.#usage.pricedAttempts++;
-		}
-	}
-
-	#partialTerminalResources(): DeepSweRecoveredTrialResources {
-		const usage = this.#usage;
+	#partialTerminalResources(summary: AgentEventSummary): DeepSweRecoveredTrialResources {
+		const usage = summary.usage;
 		const agentElapsedMs =
-			this.#runStartedAt !== undefined && this.#latestEventAt !== undefined
-				? Math.max(0, this.#latestEventAt - this.#runStartedAt)
+			summary.runStartedAt !== undefined && summary.latestEventAt !== undefined
+				? Math.max(0, summary.latestEventAt - summary.runStartedAt)
 				: undefined;
-		const sawTerminalResources = usage.attemptEnds > 0 || this.#turnCount > 0 || this.#sawRunStart;
+		const sawTerminalResources =
+			usage.attemptCount > 0 || summary.turnCount > 0 || summary.runStartedAt !== undefined;
 		return {
 			inputTokens:
 				usage.inputObservedAttempts > 0
-					? partialResource(usage.inputTokens)
+					? partialResource(usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)
 					: unavailableResource(sawTerminalResources ? "terminal_events" : "missing"),
 			cacheTokens:
-				usage.cacheObservedAttempts > 0
-					? partialResource(usage.cacheTokens)
+				usage.cacheReadObservedAttempts > 0
+					? partialResource(usage.cacheReadTokens)
 					: unavailableResource(sawTerminalResources ? "terminal_events" : "missing"),
 			outputTokens:
 				usage.outputObservedAttempts > 0
@@ -225,11 +121,11 @@ export class DeepSweEventResourceReducer {
 				knownTotalUsd: usage.pricedAttempts > 0 ? usage.knownCostUsd : null,
 				status: usage.pricedAttempts > 0 ? "partial" : "unavailable",
 				source: sawTerminalResources ? "terminal_events" : "missing",
-				pricedAttempts: usage.attemptEnds > 0 ? usage.pricedAttempts : null,
-				unpricedAttempts: usage.attemptEnds > 0 ? usage.unpricedAttempts : null,
-				attemptCoverage: usage.attemptEnds > 0 ? "partial" : "unavailable",
+				pricedAttempts: usage.attemptCount > 0 ? usage.pricedAttempts : null,
+				unpricedAttempts: usage.attemptCount > 0 ? usage.unpricedAttempts : null,
+				attemptCoverage: usage.attemptCount > 0 ? "partial" : "unavailable",
 			},
-			turnCount: sawTerminalResources ? partialResource(this.#turnCount) : unavailableResource(),
+			turnCount: sawTerminalResources ? partialResource(summary.turnCount) : unavailableResource(),
 			agentElapsedMs:
 				agentElapsedMs !== undefined
 					? partialResource(agentElapsedMs)
@@ -238,6 +134,7 @@ export class DeepSweEventResourceReducer {
 	}
 
 	#resourcesFromRunEvidence(event: Record<string, unknown>): DeepSweRecoveredTrialResources {
+		const summary = this.#trace.summary();
 		const usage = record(event.usage);
 		const input = nonNegativeNumber(usage?.inputTokens);
 		const cacheRead = nonNegativeNumber(usage?.cacheReadTokens);
@@ -274,9 +171,10 @@ export class DeepSweEventResourceReducer {
 				attemptCoverage:
 					pricedAttempts !== undefined && unpricedAttempts !== undefined ? "complete" : "unavailable",
 			},
-			turnCount: this.#sawRunStart
-				? { knownTotal: this.#turnCount, status: "complete", source: "terminal_events" }
-				: unavailableResource("terminal_events"),
+			turnCount:
+				summary.runStartedAt !== undefined
+					? { knownTotal: summary.turnCount, status: "complete", source: "terminal_events" }
+					: unavailableResource("terminal_events"),
 			agentElapsedMs:
 				elapsedMs !== undefined
 					? { knownTotal: elapsedMs, status: "complete", source: terminalSource }

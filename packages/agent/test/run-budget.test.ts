@@ -5,6 +5,7 @@ import {
 	AgentError,
 	type AgentEvent,
 	type AgentTool,
+	assertRunLimits,
 	type Clock,
 	type RunBudget,
 	type RunLimits,
@@ -120,6 +121,9 @@ describe("Agent RunBudget", () => {
 		] satisfies RunLimits[]) {
 			expect(() => new Agent({ ...baseOptions([]), runBudget: budget(limits) })).toThrowError(AgentError);
 		}
+		expect(() => assertRunLimits({ maxTurns: 1, maxFutureLimit: 2 })).toThrow(
+			"runLimits has unexpected field maxFutureLimit",
+		);
 	});
 
 	it("ends after the maximum number of complete Turns", async () => {

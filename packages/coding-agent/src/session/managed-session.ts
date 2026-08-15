@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentMessage, FollowUp } from "@coda/agent";
+import type { AgentEvent, AgentMessage, CompactionCheckpoint, FollowUp } from "@coda/agent";
 import {
 	projectSessionRunEvidence,
 	type RunEvidenceEnvelope,
@@ -7,7 +7,6 @@ import {
 	supplementRunEvidenceWorkspaceDiff,
 } from "../run-evidence/run-evidence.ts";
 import { SessionHistoryReader } from "../session-history/reader.ts";
-import type { CompactionCheckpoint } from "./compaction.ts";
 import type { SessionRecord, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
 import type {
@@ -91,6 +90,10 @@ export class ManagedSession implements Session {
 
 	get descriptor(): SessionDescriptor {
 		return this.#journal.descriptor;
+	}
+
+	get id(): string {
+		return this.#journal.descriptor.id;
 	}
 
 	get seed() {

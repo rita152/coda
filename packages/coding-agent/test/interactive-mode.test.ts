@@ -811,7 +811,7 @@ describe("interactive TUI mode", () => {
 		await expect(running).resolves.toBe(0);
 	});
 
-	it("keeps an empty /new Session as an unmaterialized process-local Draft", async () => {
+	it("keeps the current empty Session when /new does not need another pane", async () => {
 		const runtime = testTimeRuntime(3_800);
 		const faux = fauxProvider({ runtime });
 		const models = createModels({ runtime });

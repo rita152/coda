@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@coda/agent";
+import { type AgentEvent, deepFreeze } from "@coda/agent";
 import type { CompletionTemporalSnapshot } from "./types.ts";
 
 const MAX_COMMAND_CHARACTERS = 512;
@@ -111,11 +111,4 @@ function normalizeCommand(command: string): string {
 
 function bounded(value: string, limit: number): string {
 	return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}…`;
-}
-
-function deepFreeze<T>(value: T): T {
-	if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-	Object.freeze(value);
-	for (const nested of Object.values(value)) deepFreeze(nested);
-	return value;
 }
