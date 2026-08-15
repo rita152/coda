@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@coda/ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
+import type { McpConnection, McpConnector } from "@coda/mcp";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
-import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
+import { type ApplicationOutput, createCodingAgentApplication, type UserSettings } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import { FileSessionManager } from "../src/session/file-session-manager.ts";
@@ -180,9 +181,75 @@ describe("Coding Agent image attachments", () => {
 		await expect(fixture.application.run(["--print", "--resume", descriptor!.id, "continue"])).resolves.toBe(0);
 		expect(resumedImageData).toMatch(/^[a-zA-Z0-9+/]+=*$/);
 	});
+
+	it("generates a deterministic fallback filename for JSON media not owned by the Media Library", async () => {
+		const imageBytes = Buffer.from("connector-owned-image");
+		const data = imageBytes.toString("base64");
+		const digest = createHash("sha256").update(imageBytes).digest("hex");
+		const connection: McpConnection = {
+			info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+			listTools: async () => [
+				{
+					name: "screenshot",
+					description: "Return a connector-owned image",
+					inputSchema: { type: "object", properties: {} },
+				},
+			],
+			callTool: async () => ({ isError: false, content: [{ type: "image", data, mimeType: "image/jpeg" }] }),
+			close: async () => undefined,
+		};
+		const fixture = await setup({
+			mcpConnector: { connect: async () => connection },
+			settings: {
+				mcpServers: [{ id: "screens", transport: { kind: "http", url: "https://screens.example.test/mcp" } }],
+			},
+		});
+		fixture.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("mcp__screens__screenshot", {}, { id: "connector-image" }), {
+				stopReason: "toolUse",
+				timestamp: 100,
+			}),
+			fauxAssistantMessage("image received", { timestamp: 101 }),
+		]);
+
+		await expect(
+			fixture.application.run(["--print", "--json", "--model", fixture.model, "capture image"]),
+		).resolves.toBe(0);
+		const events = fixture.stdout.value
+			.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		const media = events.map(findMedia).find((value) => value !== undefined);
+		expect(media).toMatchObject({
+			type: "media",
+			digest,
+			filename: `image-${digest.slice(0, 12)}.jpg`,
+			mimeType: "image/jpeg",
+			bytes: imageBytes.byteLength,
+			rendition: { digest, mimeType: "image/jpeg", bytes: imageBytes.byteLength },
+		});
+		expect(media).not.toHaveProperty("data");
+	});
 });
 
-async function setup(options: { modelInput?: ("text" | "image")[]; persistentSessions?: boolean } = {}) {
+function findMedia(value: unknown): Record<string, unknown> | undefined {
+	if (Array.isArray(value)) return value.map(findMedia).find((entry) => entry !== undefined);
+	if (!value || typeof value !== "object") return undefined;
+	const record = value as Record<string, unknown>;
+	if (record.type === "media") return record;
+	return Object.values(record)
+		.map(findMedia)
+		.find((entry) => entry !== undefined);
+}
+
+async function setup(
+	options: {
+		modelInput?: ("text" | "image")[];
+		persistentSessions?: boolean;
+		mcpConnector?: McpConnector;
+		settings?: UserSettings;
+	} = {},
+) {
 	const root = await mkdtemp(join(tmpdir(), "coda-application-media-"));
 	temporaryDirectories.push(root);
 	const runtime = testTimeRuntime(100);
@@ -212,7 +279,8 @@ async function setup(options: { modelInput?: ("text" | "image")[]; persistentSes
 		: undefined;
 	const application = createCodingAgentApplication({
 		models,
-		settings: { load: async () => ({}), save: async () => undefined },
+		...(options.mcpConnector ? { mcpConnector: options.mcpConnector } : {}),
+		settings: { load: async () => options.settings ?? {}, save: async () => undefined },
 		fileSystem: createNodeFileSystem(),
 		processRunner: createNodeProcessRunner({ platform: "darwin" }),
 		sessions,

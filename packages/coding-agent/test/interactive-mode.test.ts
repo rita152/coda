@@ -1,11 +1,24 @@
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createModels, createProvider, fauxAssistantMessage, fauxProvider, lazyStream } from "@coda/ai";
+import type { McpConnection, McpConnector } from "@coda/mcp";
 import { createSystemScheduler, type KeyInput, stripAnsi, VirtualTerminal } from "@coda/tui";
-import { describe, expect, it, vi } from "vitest";
-import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type ApplicationOutput, createCodingAgentApplication, type UserSettings } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessRunner, ProcessRunRequest } from "../src/host/process-runner.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
+import type {
+	OpenSessionRequest,
+	Session,
+	SessionChange,
+	SessionDescriptor,
+	SessionManager,
+	SessionWorkspace,
+} from "../src/session/types.ts";
 import { FullScreenOutputGate } from "../src/ui/full-screen-output.ts";
 import type {
 	InteractiveLifecycleHandlers,
@@ -20,6 +33,42 @@ class BufferOutput implements ApplicationOutput {
 
 	write(chunk: string): void {
 		this.value += chunk;
+	}
+}
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+class RecordingSessionManager implements SessionManager {
+	readonly changes: SessionChange[] = [];
+	readonly #delegate: InMemorySessionManager;
+
+	constructor(delegate: InMemorySessionManager) {
+		this.#delegate = delegate;
+	}
+
+	async open(request: OpenSessionRequest): Promise<Session> {
+		const session = await this.#delegate.open(request);
+		const changes = this.changes;
+		return new Proxy(session, {
+			get(target, property) {
+				if (property === "record") {
+					return async (change: SessionChange) => {
+						changes.push(structuredClone(change));
+						await target.record(change);
+					};
+				}
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+	}
+
+	list(workspace: SessionWorkspace): Promise<readonly SessionDescriptor[]> {
+		return this.#delegate.list(workspace);
 	}
 }
 
@@ -924,6 +973,160 @@ describe("interactive TUI mode", () => {
 		expect(terminal.stopCalls).toBe(2);
 		expect(stdout.value).toBe("");
 		expect(stderr.value).toBe("suspended\nresumed\n");
+	});
+
+	it("fails closed on untrusted project instructions, then records the exact interactively confirmed trust", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-interactive-project-trust-"));
+		temporaryDirectories.push(root);
+		const workspace = await realpath(root);
+		const instructions = "# Characterized project instructions\n";
+		const instructionsPath = join(workspace, "AGENTS.md");
+		await writeFile(instructionsPath, instructions, "utf8");
+		const sha256 = createHash("sha256").update(instructions).digest("hex");
+		const runtime = testTimeRuntime(4_200);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 100, rows: 30 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const idGenerator = { generate: (kind: string) => `${kind}:${++id}` };
+		const sessions = new RecordingSessionManager(new InMemorySessionManager({ clock: runtime.clock, idGenerator }));
+		let settings: UserSettings = {
+			defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+			projectTrust: [
+				{ workspace: "zzz-workspace", path: "/zzz/AGENTS.md", sha256: "z".repeat(64) },
+				{ workspace, path: instructionsPath, sha256: "0".repeat(64) },
+				{ workspace: "aaa-workspace", path: "/aaa/AGENTS.md", sha256: "a".repeat(64) },
+			],
+		};
+		const save = vi.fn(async (value: UserSettings) => {
+			settings = structuredClone(value);
+		});
+		const application = createCodingAgentApplication({
+			models,
+			sessions,
+			settings: { load: async () => structuredClone(settings), save },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: root,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator,
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		await expect(application.run(["--print", "inspect project"])).resolves.toBe(1);
+		expect(stderr.value).toContain("AGENTS.md is untrusted or changed");
+		expect(faux.state.callCount).toBe(0);
+		expect(sessions.changes.filter(({ type }) => type === "project_trust_changed")).toEqual([]);
+
+		stderr.value = "";
+		const running = application.run(["--interactive", "--no-session"]);
+		await until(() => terminal.readOutput().includes("Trust this project instruction file?"));
+		await terminal.emit(key("down"));
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes(`${faux.getModel().provider}/${faux.getModel().id}`));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await expect(running).resolves.toBe(0);
+
+		const trust = { workspace, path: instructionsPath, sha256 };
+		expect(sessions.changes.filter(({ type }) => type === "project_trust_changed")).toEqual([
+			{ type: "project_trust_changed", trust },
+		]);
+		expect(settings.projectTrust).toEqual(
+			[
+				{ workspace: "zzz-workspace", path: "/zzz/AGENTS.md", sha256: "z".repeat(64) },
+				{ workspace: "aaa-workspace", path: "/aaa/AGENTS.md", sha256: "a".repeat(64) },
+				trust,
+			].sort((left, right) => left.workspace.localeCompare(right.workspace)),
+		);
+		expect(save).toHaveBeenCalledTimes(1);
+		expect(stderr.value).toBe("");
+	});
+
+	it("omits untrusted Workspace MCP Servers and records the exact explicitly trusted hash", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-interactive-mcp-trust-"));
+		temporaryDirectories.push(root);
+		const workspace = await realpath(root);
+		await mkdir(join(workspace, ".coda"), { recursive: true });
+		const configuration = `${JSON.stringify({
+			version: 1,
+			servers: [{ id: "workspace-docs", transport: { kind: "http", url: "https://docs.example.test/mcp" } }],
+		})}\n`;
+		const configurationPath = join(workspace, ".coda", "mcp.json");
+		await writeFile(configurationPath, configuration, "utf8");
+		const sha256 = createHash("sha256").update(configuration).digest("hex");
+		const runtime = testTimeRuntime(4_300);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			fauxAssistantMessage("without workspace MCP", { timestamp: 4_300 }),
+			fauxAssistantMessage("with workspace MCP", { timestamp: 4_301 }),
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const idGenerator = { generate: (kind: string) => `${kind}:${++id}` };
+		const sessions = new RecordingSessionManager(new InMemorySessionManager({ clock: runtime.clock, idGenerator }));
+		let settings: UserSettings = {
+			defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+		};
+		const connection: McpConnection = {
+			info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+			listTools: async () => [],
+			callTool: async () => ({ isError: false, content: [] }),
+			close: async () => undefined,
+		};
+		const connect = vi.fn(async () => connection);
+		const connector: McpConnector = { connect };
+		const application = createCodingAgentApplication({
+			models,
+			mcpConnector: connector,
+			sessions,
+			settings: {
+				load: async () => structuredClone(settings),
+				save: async (value) => {
+					settings = structuredClone(value);
+				},
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: root,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator,
+			},
+		});
+
+		await expect(application.run(["--print", "inspect MCP"])).resolves.toBe(0);
+		expect(stderr.value).toContain(`Workspace MCP configuration ${sha256} is untrusted; its Servers were omitted`);
+		expect(connect).not.toHaveBeenCalled();
+		expect(sessions.changes.filter(({ type }) => type === "mcp_trust_changed")).toEqual([]);
+
+		stdout.value = "";
+		stderr.value = "";
+		await expect(application.run(["--print", "--trust-project-mcp", "inspect MCP"])).resolves.toBe(0);
+		const trust = { workspace, path: configurationPath, sha256 };
+		expect(settings.workspaceMcpTrust).toEqual([trust]);
+		expect(sessions.changes.filter(({ type }) => type === "mcp_trust_changed")).toEqual([
+			{ type: "mcp_trust_changed", trust },
+		]);
+		expect(connect).toHaveBeenCalledTimes(1);
+		expect(stderr.value).toBe("");
 	});
 });
 
