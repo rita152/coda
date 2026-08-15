@@ -22,6 +22,7 @@ import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
+import { invokeChatCommand } from "./chat-composer.ts";
 import {
 	followUpText,
 	MINIMUM_CHAT_COLUMNS,
@@ -981,34 +982,21 @@ export class ChatComponent extends Component {
 	}
 
 	#invokeCommand(command: CommandDefinition, argument?: string): void {
-		this.#editor.clear();
-		this.#history.reset();
-		this.#error = undefined;
-		this.#notice = undefined;
-		const operation = (() => {
-			try {
-				if (!this.#options.onCommand) throw new Error(`${command.title} is unavailable`);
-				return Promise.resolve(
-					argument === undefined
-						? this.#options.onCommand(command.id, this.#commandFlow)
-						: this.#options.onCommand(command.id, this.#commandFlow, argument),
-				);
-			} catch (error) {
-				return Promise.reject(error);
-			}
-		})();
-		void operation.then(
-			(notice) => {
-				this.#notice = notice || undefined;
-				this.invalidate();
+		invokeChatCommand({
+			command,
+			...(argument === undefined ? {} : { argument }),
+			editor: this.#editor,
+			history: this.#history,
+			flow: this.#commandFlow,
+			onCommand: this.#options.onCommand,
+			setError: (value) => {
+				this.#error = value;
 			},
-			(error: unknown) => {
-				this.#notice = undefined;
-				this.#error = error instanceof Error ? error.message : String(error);
-				this.invalidate();
+			setNotice: (value) => {
+				this.#notice = value;
 			},
-		);
-		this.invalidate();
+			invalidate: () => this.invalidate(),
+		});
 	}
 
 	#requestNavigationRender(context: ComponentInputContext): void {
