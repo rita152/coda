@@ -204,7 +204,8 @@ describe("Git worktree Work Graph end to end", () => {
 			});
 
 			await bothStarted.promise;
-			expect(started).toEqual(["alpha.txt", "beta.txt"]);
+			// Independent worktrees may enter Tool execution in either order; both must start before either gate opens.
+			expect([...started].sort()).toEqual(["alpha.txt", "beta.txt"]);
 			betaGate.resolve();
 			await betaCompleted.promise;
 			expect(completed).toEqual(["beta.txt"]);
