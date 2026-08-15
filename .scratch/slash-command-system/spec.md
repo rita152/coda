@@ -1,6 +1,11 @@
 # Unified Slash Command System
 
-Status: Implemented and verified
+Status: implemented
+
+Subsequent Runtime, Skill, and MCP work replaced parts of the ownership and
+deferred-capability text below. Current behavior is documented in
+[`packages/coding-agent/README.md`](../../packages/coding-agent/README.md) and
+the generated capability manifest.
 
 ## Objective
 

@@ -1,5 +1,15 @@
 # CLI runtime activity status
 
+Status: implemented
+
+Historical implementation record. Implementation and verification completed on
+2026-08-12. Current behavior is enforced by
+[`activity-status.test.ts`](../../packages/coding-agent/test/activity-status.test.ts)
+and the private Worker Runtime contracts. The design below retains the former
+manual-Compaction status; current Compaction is automatic and private as
+specified by
+[`ADR-0038`](../../docs/adr/0038-compact-context-windows-with-durable-checkpoints.md).
+
 ## Goal
 
 Show the focused Session's current Coda runtime activity in one left-aligned row immediately above the Composer. The row supplies evidence that work is progressing; it never labels a Run as stuck or suspected-stuck.

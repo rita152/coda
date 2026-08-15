@@ -1,7 +1,7 @@
 # Preserve complete Tool steps in ATIF and paged evidence
 
 Type: bug
-Status: ready-for-agent
+Status: resolved
 Priority: P1
 
 Generate a diagnostically complete ATIF trajectory from semantic terminal events and write large, redacted Tool payloads/results to a streamable `tool-evidence.jsonl` artifact. Keep compact RunEvidence bounded; link trajectory steps to evidence by stable invocation ID/reference.
@@ -18,3 +18,7 @@ Generate a diagnostically complete ATIF trajectory from semantic terminal events
 ## Ownership and dependencies
 
 Prefer new `packages/evals/pier/coda_trajectory.py`. Rebase onto 04's artifact lifecycle and consume 06's semantic stream. Keep `coda_agent.py` integration small; do not solve this by increasing `MAX_COMMANDS`.
+
+## Comments
+
+Resolved in `a5614f3`: semantic terminal events now produce ATIF-v1.7 trajectories with complete Tool steps and stable references into the bounded, redacted `tool-evidence.jsonl` sidecar.

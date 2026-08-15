@@ -1,7 +1,7 @@
 # Finalize timeout artifacts transactionally
 
 Type: bug
-Status: ready-for-agent
+Status: resolved
 Priority: P0
 
 Split the Pier adapter into run and idempotent finalize phases. Create adapter status before launch, update it atomically, and salvage workspace changes, partial terminal events, usage, trajectory, and evidence on internal timeout or external cancellation. Re-raise timeout after bounded cleanup so infrastructure status stays honest.
@@ -18,3 +18,7 @@ Split the Pier adapter into run and idempotent finalize phases. Create adapter s
 ## Ownership
 
 Own `packages/evals/pier/coda_agent.py` and preferably extract `coda_trial_artifacts.py` plus fixture tests. Issue 07 must integrate through this module after rebase. Do not depend on a paid Pier run.
+
+## Comments
+
+Resolved in `abd60b8`: the Pier adapter writes pre-launch status and uses one idempotent finalization path to salvage patches, terminal events, usage, and partial trajectories.

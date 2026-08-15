@@ -2,19 +2,18 @@
 
 Headless, in-memory Agent runtime for Coda. It owns model turns, immutable
 events, Tool execution, cancellation, Steering/Follow-up queues, validated idle
-Seeds, and optional whole-turn retry.
+Seeds, a neutral append-only Session contract, and optional whole-turn retry.
 
-The package depends only on `@coda/ai`. It does not know about terminals,
-filesystems, shells, credentials, settings, sessions, or coding-agent policy.
-
-Status: private Milestone 1 package.
+The private package depends only on `@coda/ai`. It does not know about
+terminals, filesystems, shells, credentials, settings, Session storage, or
+Coding Agent policy.
 
 ## Runtime boundary
 
-- A caller injects the model stream, Clock, IdGenerator, Tool implementations,
-  and PolicyGate.
-- The System Prompt may be a string or a factory evaluated exactly once per
-  Run, so callers can freeze Run-scoped context without exposing their policy.
+- A caller injects a Clock, IdGenerator, and one `prepareRun` function.
+  Preparation runs exactly once and freezes the Model stream, Tools, System
+  Prompt, failed-Attempt recovery, optional budget, and disposal capability for
+  that Run.
 - `Agent.prompt()` settles only after the final `run_end` listeners complete and
   the Agent is idle. `waitForIdle()` observes the same operation boundary.
 - Steering is consumed together at the next safe model-call boundary. Follow-up
@@ -31,13 +30,13 @@ Status: private Milestone 1 package.
 - Whole-turn retry is disabled unless both a `TurnRetryPolicy` and cancellable
   `RetryDelay` capability are supplied.
 
-The public package has one root entry. Reducer, dispatch, scheduling, and Seed
+The package has one root entry. Reducer, dispatch, scheduling, and Seed
 validation internals are deliberately not exported.
 
 ## Package boundary
 
-Session repositories, durable operations, Context Compaction, filesystem and
-Shell access, coding Tools, Model selection, Credentials, settings, and terminal
-UI do not belong to `@coda/agent`. The upper `@coda/coding-agent` package now
-implements the durable Session and Context Compaction capabilities while this
-package remains an in-memory Agent runtime.
+Physical Session repositories, Context Window and Compaction policy, filesystem
+and Shell access, coding Tools, Model selection, Credentials, settings, and
+terminal UI do not belong to `@coda/agent`. `@coda/runtime` owns Worker Runtime
+composition, Session attachment, and Context Window orchestration;
+`@coda/coding-agent` supplies durable Session and host Adapters.

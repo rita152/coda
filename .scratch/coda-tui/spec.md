@@ -1,6 +1,10 @@
 # `@coda/tui` Initial Design Spec
 
-Status: Milestone 1 and the full-screen visual-refresh milestone are implemented and verified
+Status: implemented
+
+Current package behavior is documented in
+[`packages/tui/README.md`](../../packages/tui/README.md). The acceptance text
+below describes the initial design frontier and is not a current status page.
 
 ## Objective
 

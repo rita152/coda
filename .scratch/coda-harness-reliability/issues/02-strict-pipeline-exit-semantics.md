@@ -1,7 +1,7 @@
 # Enforce strict pipeline exit semantics
 
 Type: bug
-Status: ready-for-agent
+Status: resolved
 Priority: P0
 
 Make the Bash Tool preserve upstream pipeline failure mechanically. Execute through an explicitly supported shell dialect with pipefail enabled and record the effective mode in observation facts. Do not assume every `$SHELL` accepts Bash flags.
@@ -17,3 +17,7 @@ Make the Bash Tool preserve upstream pipeline failure mechanically. Execute thro
 ## Ownership
 
 Own `packages/coding-agent/src/tools/bash.ts` and Bash Tool tests. Keep changes to shell selection small and avoid `coda_agent.py` unless strictly necessary. None of the four audited agents enables pipefail by default (Grok even excludes it while restoring zsh options), so this is a Coda-owned safety design rather than a parity port.
+
+## Comments
+
+Resolved in `d61c9ca`: supported Shell pipelines use explicit pipefail semantics and expose the effective dialect and pipeline status mode in Tool observations.

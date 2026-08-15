@@ -1,5 +1,11 @@
 # DeepSWE evaluation runner
 
+Status: implemented
+
+Current operation is documented in
+[`packages/evals/README.md`](../../packages/evals/README.md). Campaign artifacts
+and later harness-reliability changes remain separate historical evidence.
+
 ## Goal
 
 Extend `@coda/evals` with a reproducible, paid opt-in DeepSWE runner that evaluates the Coda Coding Agent through

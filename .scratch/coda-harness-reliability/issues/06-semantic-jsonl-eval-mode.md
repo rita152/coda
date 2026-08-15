@@ -1,7 +1,7 @@
 # Add a semantic JSONL evaluation mode
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 Priority: P1
 
 Extract a `JsonEventWriter` and add an explicit semantic/eval stream that omits token-level `message_update` deltas while retaining authoritative lifecycle, terminal message, Tool, and evidence events. Preserve existing raw `--json` behavior for compatibility; make DeepSWE choose semantic mode explicitly.
@@ -17,3 +17,7 @@ Extract a `JsonEventWriter` and add an explicit semantic/eval stream that omits 
 ## Ownership
 
 Prefer new `packages/coding-agent/src/event-output/*`, with a thin `application.ts` integration. Only add the minimum adapter flag so issue 04 can rebase cleanly. Pi's JSON projector is a useful compatibility reference.
+
+## Comments
+
+Resolved in `da8c5a9`: `--json-mode semantic` omits transient deltas while retaining terminal lifecycle, Tool, Message, and evidence records; raw JSON v2 remains available.

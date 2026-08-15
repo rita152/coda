@@ -1,6 +1,13 @@
 # `@coda/ai` Milestone 1 Compatibility Spec
 
-Status: Implemented and verified offline 2026-08-08 — paid smoke remains unverified
+Status: implemented
+
+Historical compatibility implementation record. Offline verification completed
+on 2026-08-08; the paid smoke remains intentionally unverified. The maintained
+profile is [`manifest.v1.json`](../../packages/ai/compatibility/manifest.v1.json),
+with its readable projection in the
+[`@coda/ai` compatibility README](../../packages/ai/compatibility/README.md).
+The acceptance text below records the frozen implementation baseline.
 
 ## Objective
 

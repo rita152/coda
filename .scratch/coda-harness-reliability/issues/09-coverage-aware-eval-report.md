@@ -1,7 +1,7 @@
 # Make DeepSWE reports coverage-aware
 
 Type: bug
-Status: ready-for-agent
+Status: resolved
 Priority: P1
 
 Upgrade the report schema so missing resource values are never silently treated as real zeros. Distinguish job wall time from cumulative trial/agent time and recover partial usage/cost from terminal events with a streaming reducer.
@@ -18,3 +18,7 @@ Upgrade the report schema so missing resource values are never silently treated 
 ## Ownership and dependencies
 
 Own `packages/evals/src/deep-swe.ts`, `deep-swe-cli.ts`, and tests; avoid adapter edits. Issue 10 rebases onto this schema, and issue 03 rebases any config wiring afterward.
+
+## Comments
+
+Resolved in `51cae6c`: DeepSWE report v3 separates wall and cumulative time, records resource coverage, and recovers partial usage from terminal events without inventing zeroes.

@@ -1,6 +1,12 @@
 # Parallel Work Orchestration
 
-Status: accepted
+Status: implemented
+
+Current behavior is summarized by
+[`ADR-0044`](../../docs/adr/0044-orchestrate-parallel-work-above-agent-runtimes.md),
+its refinements, and the [`@coda/runtime` README](../../packages/runtime/README.md).
+Implementation and verification completed on 2026-08-14. The design below is
+retained as implementation history.
 
 ## Goal
 

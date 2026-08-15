@@ -1,6 +1,10 @@
 # Agent Skills Loading and Product Integration
 
-Status: Confirmed, revised 2026-08-10
+Status: implemented
+
+Current package behavior is documented in
+[`packages/skills/README.md`](../../packages/skills/README.md); later product
+selection and Run-lease decisions are recorded in the ADRs.
 
 ## Objective
 

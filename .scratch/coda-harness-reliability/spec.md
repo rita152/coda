@@ -1,6 +1,11 @@
 # Coda Harness Reliability
 
-Status: Ready for parallel implementation on 2026-08-13
+Status: implemented
+
+The durable integration outcome is recorded in
+[`packages/evals/docs/harness-reliability-integration.md`](../../packages/evals/docs/harness-reliability-integration.md).
+Implementation and verification completed on 2026-08-13. The plan below is
+retained as implementation history.
 
 ## Objective
 

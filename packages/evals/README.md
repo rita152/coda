@@ -1,8 +1,9 @@
 # `@coda/evals`
 
-`@coda/evals` is Coda's private behavioral Agent evaluation harness. It runs the real `@coda/agent` Interface
-against deterministic in-memory fixture repositories and `@coda/ai` Faux Model trajectories. Nothing in the
-production package graph depends on this package.
+`@coda/evals` is Coda's private behavioral Agent evaluation harness. It runs the
+real headless `@coda/runtime` Work Graph Interface with the `@coda/agent` kernel,
+deterministic in-memory fixture repositories, and `@coda/ai` Faux Model
+trajectories. Nothing in the production package graph depends on this package.
 
 ## Offline gate
 

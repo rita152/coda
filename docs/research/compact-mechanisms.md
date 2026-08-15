@@ -2,6 +2,11 @@
 
 研究日期：2026-08-11。以下结论基于本地源码快照：Coda `a8a7b06413a6`、Codex `f93109615ff2`、Pi `958c13f25080`、OpenCode `bc2d3df05f88`、grok-build `393430ee4934`。
 
+> 历史快照：Coda 随后已经实现持久化 Context Compaction。现行契约见
+> [`ADR-0038`](../adr/0038-compact-context-windows-with-durable-checkpoints.md)
+> 与 [`@coda/runtime` README](../../packages/runtime/README.md)；下文关于 Coda
+> “当前没有 compaction”的陈述只描述上述研究快照。
+
 ## 结论
 
 - Coda 当前**没有 compaction**。它只有 fail-closed 的 context-capacity guard：调用前估算完整请求，真实 provider 请求前再次检查，若超限就失败；provider 报告的 overflow 也被归一化为不可重试错误。源码和 ADR 都明确要求不得静默截断、丢弃或总结历史（`docs/adr/0028-fail-closed-on-context-overflow.md:5-7`，`packages/coding-agent/src/prompt/context-budget.ts:9-35`，`packages/ai/src/diagnostics.ts:36-92`）。

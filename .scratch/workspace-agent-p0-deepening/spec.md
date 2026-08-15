@@ -1,6 +1,12 @@
 # Workspace Agent P0 Deepening
 
-Status: accepted
+Status: implemented
+
+The durable outcome is recorded in
+[`ADR-0046`](../../docs/adr/0046-deepen-workspace-agent-orchestration.md) and the
+[`@coda/runtime` README](../../packages/runtime/README.md). Implementation and
+verification completed on 2026-08-14. The design below is retained as
+implementation history.
 
 ## Goal
 

@@ -1,6 +1,10 @@
 # Coda TUI Visual Refresh
 
-Status: Implemented and verified
+Status: implemented
+
+Current terminal behavior is documented in
+[`packages/tui/README.md`](../../packages/tui/README.md) and the generated
+capability manifest. The design below is retained as implementation history.
 
 ## Objective
 

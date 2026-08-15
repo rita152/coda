@@ -1,7 +1,7 @@
 # Add two-phase deadline and convergence control
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 Priority: P0
 
 Add an independent `RunControl` safety envelope that remains active when `--no-run-budget` disables the economic budget. It has a work deadline, one finalization steering, a grace/hard-stop deadline, and conservative progress/stagnation signals.
@@ -18,3 +18,7 @@ Add an independent `RunControl` safety envelope that remains active when `--no-r
 ## Ownership and dependencies
 
 Prefer new `packages/coding-agent/src/run-control/*`. Rebase onto 01/04/06/09 before the thin CLI/eval wiring. Pi's `shouldStopAfterTurn` is a useful safe-boundary pattern. No paid evaluation.
+
+## Comments
+
+Resolved in `6318943`: RunControl now provides independent work and grace phases, bounded finalization Steering, stationary-Turn control, and explicit terminal reporting.

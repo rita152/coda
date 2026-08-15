@@ -18,6 +18,25 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 
+## Lifecycle and authority
+
+- A feature spec uses exactly one status: `active` while scoped work remains and
+  `implemented` after that work is complete. Keep dates, verification notes, and
+  historical labels in prose rather than in the `Status:` value.
+- A spec and its open issues are requirements only while the spec is `active`.
+- When an issue lands, set its `Status:` to `resolved` and append concise
+  implementation and verification evidence under `## Comments`.
+- When every issue in an effort is resolved, set the spec status to
+  `implemented` and link its durable outcome (an ADR, package README, generated
+  capability, or test contract).
+- Put a short historical banner before an implemented spec's requirements. New
+  work after that boundary gets a new feature directory instead of reopening or
+  extending the historical spec.
+- Resolved specs and issues are historical implementation records. For current
+  runtime behavior, verify code and tests first, then the generated capability
+  manifest, package README, and accepted ADRs. Do not silently refresh old
+  acceptance text into a second current specification.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).

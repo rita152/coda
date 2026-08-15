@@ -265,7 +265,7 @@ The exact-revision Skill body, base directory, arguments, and bounded resource r
 _Avoid_: script execution, Skill Catalog, Tool execution
 
 **Prompt Builder**:
-The versioned Coding Agent component that deterministically assembles one Run's system prompt from runtime capabilities, Workspace facts, and trusted project instructions.
+The versioned private Worker Runtime component that deterministically assembles one Run's System Prompt from Run Capability contributions, Workspace facts, and trusted project instructions.
 _Avoid_: Provider prompt, Agent global prompt
 
 **Capability Manifest**:

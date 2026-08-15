@@ -1,6 +1,13 @@
 # Worker Fact and Observation Isolation
 
-Status: accepted
+Status: implemented
+
+Current behavior is recorded by
+[`ADR-0045`](../../docs/adr/0045-persist-worker-facts-not-worker-observations.md),
+[`ADR-0046`](../../docs/adr/0046-deepen-workspace-agent-orchestration.md), and
+the [`@coda/runtime` README](../../packages/runtime/README.md). Implementation
+and verification completed on 2026-08-14. The design below is retained as
+implementation history.
 
 ## Goal
 

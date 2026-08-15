@@ -1,6 +1,10 @@
 # `@coda/ai` Milestone 1 Compatibility Matrix
 
-Status: Confirmed — Milestone 1 compatibility baseline
+> Historical compatibility audit for the Milestone 1 implementation. The
+> maintained executable profile is
+> [`packages/ai/compatibility/manifest.v1.json`](../../packages/ai/compatibility/manifest.v1.json),
+> with its readable projection in the
+> [`@coda/ai` compatibility README](../../packages/ai/compatibility/README.md).
 
 ## Baseline
 
@@ -9,7 +13,8 @@ Status: Confirmed — Milestone 1 compatibility baseline
 - Source commit: `958c13f25080b59d4b736193f972a8502a7a2f8b`
 - Scope: selected root exports plus the OpenCode Go Provider and its three Api adapters
 
-This matrix defines a selected compatibility profile. It does not claim that `@coda/ai` is a package-wide drop-in replacement.
+This matrix records the selected implementation baseline. It does not claim
+that `@coda/ai` is a package-wide drop-in replacement.
 
 ## Selected root type surface
 

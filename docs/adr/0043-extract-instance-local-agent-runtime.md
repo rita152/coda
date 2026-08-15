@@ -4,6 +4,12 @@ status: accepted
 
 # Extract an instance-local Agent Runtime behind atomic Run preparation
 
+ADR-0044 supersedes this decision's public per-Runtime Interface, input queue,
+and caller-composition clauses with the Workspace-scoped Work Graph Interface.
+Atomic Prepared Runs, private serial Worker Runtimes, dependency direction, and
+instance-local desired configuration remain accepted and are deepened by
+ADR-0046.
+
 `@coda/agent` remains a serial Agent kernel and replaces its split stream, Tool factory, system-prompt factory, and pre-Run hook with one `prepareRun` Interface that returns an immutable Prepared Run. Preparation occurs exactly once before `run_start`; the Prepared Run is disposed in settlement cleanup. Desired Runtime Configuration may change concurrently but can affect only later Runs.
 
 A new `@coda/runtime` package owns the reusable headless Agent Runtime Module: Agent construction, per-Run Model/authentication and Tool/prompt/catalog snapshots, Session attachment, Context Window and overflow recovery, input commands, event routing, and lifecycle cleanup. Each instance owns stable Runtime and Session identities and serializes its own Runs; no process-global or workspace-global selected/active pointer is permitted. Multiple instances may execute concurrently.

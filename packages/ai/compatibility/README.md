@@ -2,6 +2,9 @@
 
 `@coda/ai@0.1.0` follows a selected compatibility profile derived from `@earendil-works/pi-ai@0.84.1` at commit `958c13f25080b59d4b736193f972a8502a7a2f8b`. This is not a whole-package drop-in compatibility claim.
 
+“Milestone 1” names this frozen compatibility baseline; it is not the status of
+the Coda product as a whole.
+
 The exact root type names, root runtime names, allowed subpaths, statuses, and conformance tests are versioned in [`manifest.v1.json`](./manifest.v1.json).
 
 ## Compatible surface

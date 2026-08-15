@@ -1,7 +1,7 @@
 # Add an evidence-backed completion gate
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 Priority: P0
 
 Separate lifecycle success from task completion. Introduce a small `CodingCompletionGate` module and a versioned `CompletionDisposition` (`verified | partial | blocked | unverified`) for print/JSON/eval runs. The gate consumes terminal candidate, public RunEvidence, final workspace diff/status, and bounded repair count; it must never parse “Done” or claim equivalence with the hidden verifier.
@@ -18,3 +18,7 @@ Separate lifecycle success from task completion. Introduce a small `CodingComple
 ## Ownership and dependencies
 
 Prefer new `packages/coding-agent/src/completion/*`; keep `application.ts` integration thin. Rebase onto issues 06 and 08. Do not duplicate event reduction or failure reconciliation. Use deterministic fake-model tests; no provider calls.
+
+## Comments
+
+Resolved in `0c7a892`: print and JSON Runs now emit a versioned, evidence-backed completion disposition with bounded repair and independent lifecycle semantics.

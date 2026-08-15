@@ -17,7 +17,7 @@ The package is a workspace leaf. It does not know about Models, Agents, Sessions
 
 `FullScreenTui` is the explicit application composition seam. `Tui` remains available for generic components and uses the same full-screen lifecycle; there is no regular inline renderer.
 
-General mouse UI, clipboard protocols, autocomplete, selection, redo, durable drafts, syntax highlighting, Sixel, iTerm2 graphics, and multiplexer image passthrough remain outside this milestone. The structured mouse input surface supports application-owned wheel navigation and attachment hit regions.
+General mouse UI, clipboard protocols, autocomplete, selection, redo, durable drafts, syntax highlighting, Sixel, iTerm2 graphics, and multiplexer image passthrough remain outside the current package scope. The structured mouse input surface supports application-owned wheel navigation and attachment hit regions.
 
 ## Composition
 

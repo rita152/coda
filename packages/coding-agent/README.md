@@ -1,12 +1,15 @@
 # `@coda/coding-agent`
 
 Coda's private terminal Coding Agent application. It composes `@coda/ai`,
-`@coda/tui`, and `@coda/agent` while owning application policy and all host
-integration.
+`@coda/agent`, `@coda/runtime`, `@coda/tui`, `@coda/skills`, and `@coda/mcp`.
+The package owns CLI and terminal policy, host Adapters, durable Session storage,
+Model configuration, Credentials, and application presentation; the headless
+Work Graph and Worker Runtime policies live in `@coda/runtime`.
 
-Status: private Milestone 1 plus full-screen visual-refresh implementation.
-
-This package is a CLI application, not an application SDK. Its npm export map is intentionally empty; composition seams under `src/` are private and may change without compatibility guarantees.
+This package is a CLI application, not an application SDK. Its npm export map is
+intentionally empty; composition seams under `src/` are private and may change
+without compatibility guarantees. The generated [Capabilities](#capabilities)
+section below is the current product-status inventory.
 
 ## Local use
 
@@ -22,7 +25,8 @@ use macOS Keychain service `coda.cli.credentials.v1` or Linux Secret Service via
 `secret-tool`; they are never written to settings or Session files. If Secret
 Service is unavailable, Coda reports that Credentials remain process-local.
 
-One-shot mode writes only the final assistant text to stdout:
+Text print mode writes only the final assistant text to stdout; JSON print mode
+writes the event stream described below:
 
 ```sh
 coda --print --model opencode-go/<model-id> "explain this repository"
@@ -205,10 +209,10 @@ Use `/mcp status`, `/mcp doctor`, `/mcp inspect`, `/mcp reload`, and
 `/mcp reconnect` for read-only inspection and operational control.
 
 The macOS pseudo-terminal E2E test launches the built CLI with an isolated home
-and Workspace, then verifies full-screen entry, input, resize, signal exit,
-Prompt-card geometry, multiline Editor input, Timeline wheel navigation, resize, signal exit,
-protocol cleanup, cooked-mode restoration, and a post-exit shell sentinel
-without making a model request:
+and Workspace, then verifies full-screen entry, Prompt-card geometry, multiline
+Editor input, Timeline wheel navigation, resize and signal handling, protocol
+cleanup, cooked-mode restoration, and a post-exit shell sentinel without making
+a model request:
 
 ```sh
 npm run test:e2e

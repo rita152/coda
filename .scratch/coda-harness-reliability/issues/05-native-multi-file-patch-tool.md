@@ -1,7 +1,7 @@
 # Add an atomic multi-file patch Tool
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 Priority: P1
 
 Add a structured, multi-hunk/multi-file native patch Tool so common edits use Coda's atomic mutation path and emit mutation facts. Centralize mutation metadata so evidence, presentation, and capability manifests do not each hard-code `edit | write | patch` independently.
@@ -18,3 +18,7 @@ Add a structured, multi-hunk/multi-file native patch Tool so common edits use Co
 ## Ownership and dependencies
 
 Rebase onto issue 08's evidence contract and issue 01's Tool registry state. Study Codex/OpenCode/Grok Build apply-patch parser, preflight, and diff tracking; do not copy code without license/architecture review.
+
+## Comments
+
+Resolved in `e50e358`: the native `patch` Tool supports structured multi-file mutation, preflight and race checks, bounded presentation, and generic mutation evidence.

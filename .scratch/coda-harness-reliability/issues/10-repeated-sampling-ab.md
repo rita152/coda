@@ -1,7 +1,7 @@
 # Support repeated samples and paired harness comparison
 
 Type: task
-Status: ready-for-agent
+Status: resolved
 Priority: P1
 
 Make attempt count configurable and make summary/compare aggregate every trial instead of selecting the first trial per task. Provide an experiment design that can distinguish repeated same-revision variability from harness treatment effects.
@@ -18,3 +18,7 @@ Make attempt count configurable and make summary/compare aggregate every trial i
 ## Ownership and dependencies
 
 Rebase onto issue 09's report schema and any issue 03 config changes. Own DeepSWE experiment configuration, aggregation, comparison, docs, and deterministic tests. Do not start a paid evaluation.
+
+## Comments
+
+Resolved in `e0abcf1`: DeepSWE supports repeated trials, explicit paid-trial confirmation, per-task sampling statistics, and identity-paired compatible A/B comparisons.

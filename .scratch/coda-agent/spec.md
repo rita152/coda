@@ -1,6 +1,10 @@
 # `@coda/agent` Initial Design Spec
 
-Status: Milestone 1 implemented
+Status: implemented
+
+Current package behavior is documented in
+[`packages/agent/README.md`](../../packages/agent/README.md). The acceptance text
+below describes the initial design frontier and is not a current status page.
 
 ## Objective
 

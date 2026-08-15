@@ -1,6 +1,8 @@
 # `@coda/ai`
 
-Provider-neutral model access for Coda. Milestone 1 implements a deliberately selected Pi AI compatibility profile; it is not a claim that the whole Pi package can be replaced directly.
+Provider-neutral model access for Coda. The package implements a deliberately
+selected, versioned Pi AI compatibility profile; it is not a claim that the
+whole Pi package can be replaced directly.
 
 ## Runtime capability
 
@@ -11,7 +13,10 @@ Provider-neutral model access for Coda. Milestone 1 implements a deliberately se
 - injected `CredentialStore`; this package does not persist credentials
 - static, committed model catalog with explicit fail-closed refresh
 
-OAuth, deferred responses, other Providers, the legacy `/compat` registry, image generation, and Agent/tool execution are outside Milestone 1 runtime support. Some of their types remain available to preserve the selected public type closure.
+OAuth, deferred responses, other built-in Providers, the legacy `/compat`
+registry, image generation, and Agent/Tool execution are outside the current
+package runtime. Some of their types remain available to preserve the selected
+public type closure.
 
 ## Development
 

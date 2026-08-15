@@ -4,8 +4,8 @@ Private MCP client runtime for Coda. The package is a deep protocol module: it
 owns MCP negotiation, stdio and Streamable HTTP transports, Tool discovery and
 subscriptions, calls, MRTR, Schema validation, bounded result normalization,
 and connection recovery. Product configuration, trust, credentials,
-Run snapshots, Session state, and UI remain in
-`@coda/coding-agent`.
+Session state, and UI remain in `@coda/coding-agent`; `@coda/runtime` owns the
+per-Run capability lease that retains an acquired MCP connection generation.
 
 The canonical protocol is MCP `2026-07-28`. The official TypeScript SDK is
 exact-pinned at `2.0.0`; callers must still choose `2026-07-28`, `auto`, or
@@ -35,7 +35,7 @@ dispatch. It does not decide whether a Server is trusted, authorize a Tool
 invocation, inherit process credentials, persist protocol state, or render
 Elicitation. Those are Host responsibilities.
 
-The first milestone intentionally excludes Resources, Prompts, complete OAuth,
+The current scope excludes Resources, Prompts, complete OAuth,
 Roots, Sampling, Logging, and legacy HTTP+SSE.
 
 ## Verification
@@ -44,4 +44,4 @@ Roots, Sampling, Logging, and legacy HTTP+SSE.
 for `2026-07-28`. The harness is exact-pinned at `0.2.0-alpha.10`; the gate has
 no expected-failure baseline. Product-level tests separately cover both legacy
 protocol versions, transport faults, bounded projection, trust, redaction, and
-Run snapshot behavior.
+Run lease lifetime behavior.

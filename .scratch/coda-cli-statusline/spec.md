@@ -1,5 +1,13 @@
 # CLI Session statusline
 
+Status: implemented
+
+Historical implementation record. Implementation and verification completed on
+2026-08-12. Current rendering is enforced by
+[`status-line.test.ts`](../../packages/coding-agent/test/status-line.test.ts).
+The example below retains the retired `Workspace / On Request` label; the
+current first row contains only Workspace and Git state.
+
 ## Goal
 
 Place a compact, ambient two-row statusline directly below the Composer so the focused Session always exposes its Workspace, Git state, cumulative cost, current model-visible Context, Model, Provider, and effective Reasoning effort.

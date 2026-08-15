@@ -1,6 +1,11 @@
 # `@coda/coding-agent` Initial Design Spec
 
-Status: Milestone 1 core and the TUI visual-refresh milestone are implemented and verified
+Status: implemented
+
+Current runtime facts come from [`capabilities.v1.json`](../../capabilities.v1.json)
+and [`packages/coding-agent/README.md`](../../packages/coding-agent/README.md).
+The acceptance text below records the initial design frontier and intentionally
+retains superseded versions and ownership decisions as history.
 
 ## Objective
 
