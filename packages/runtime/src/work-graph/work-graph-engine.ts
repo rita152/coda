@@ -53,7 +53,6 @@ import {
 	validatePlanConfigurations,
 } from "./work-graph-planner.ts";
 import {
-	type DeliveryPlan,
 	errorMessage,
 	type GraphRecord,
 	type ItemRecord,
@@ -61,6 +60,12 @@ import {
 	isTerminal,
 	type WorkGraphMirror,
 } from "./work-graph-records.ts";
+import {
+	commitOwnershipReservations,
+	reserveBatch,
+	rollbackReservations,
+	settleAcceptedInputResources,
+} from "./work-graph-reservation.ts";
 import { workerFactHasOpenEffects } from "./worker-fact.ts";
 import type { DelegateChildSpecification, WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
@@ -226,8 +231,14 @@ export class WorkGraphEngine implements CodingAgent {
 				}),
 			);
 			await validatePlanConfigurations(plan, this.#options.modelProvider);
-			await this.#reserve(plan);
-			await this.#commitOwnershipReservations(plan);
+			await reserveBatch(plan, {
+				placement: this.#options.placement,
+				sessions: this.#options.sessions,
+				...(this.#options.resources ? { resources: this.#options.resources } : {}),
+				sessionLeases: this.#sessionRegistry,
+				rejection: { assertIdentity, rejected },
+			});
+			await commitOwnershipReservations(plan, rejected);
 			await admission.ready;
 			await this.#admission.mutation(() =>
 				this.#graphMutation(plan!.targetGraphId, async () => {
@@ -257,7 +268,7 @@ export class WorkGraphEngine implements CodingAgent {
 			if (durablyAccepted) {
 				this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
 			} else if (plan) {
-				await this.#rollbackReservations(plan);
+				await rollbackReservations(plan, (diagnostic) => this.#diagnose(diagnostic));
 			}
 			admission.release();
 			if (durablyAccepted && plan) {
@@ -291,7 +302,17 @@ export class WorkGraphEngine implements CodingAgent {
 			this.#diagnose({ code: "accepted_operation_failed", message: errorMessage(error) });
 		}
 		try {
-			await this.#settleAcceptedInputResources(plan);
+			await settleAcceptedInputResources(plan, {
+				now: () => this.#options.time.clock.now(),
+				graphMutation: (graphId, operation) => this.#graphMutation(graphId, operation),
+				appendGraphFacts: (graph, facts) => this.#appendGraphFacts(graph, facts),
+				settleInputAdmission: (item, deliveryId, outcome, diagnostic) =>
+					this.#settleInputAdmission(item, deliveryId, outcome, diagnostic),
+				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
+				interruptForInputResourceFailure: (graph, item) => this.#interruptForInputResourceFailure(graph, item),
+				flushPendingInputs: (item) => this.#flushPendingInputs(item),
+				requestSchedule: () => this.#requestSchedule(),
+			});
 		} catch (error) {
 			this.#diagnose({ code: "input_resource_settlement_failed", message: errorMessage(error) });
 		}
@@ -303,187 +324,6 @@ export class WorkGraphEngine implements CodingAgent {
 			graphIds: plan.graphIds,
 			itemIds: plan.itemIds,
 		});
-	}
-
-	async #reserve(plan: BatchPlan): Promise<void> {
-		const batchSessions = new Set<string>();
-		for (const entry of plan.newItems) {
-			const parent = entry.item.parentId
-				? (plan.newItems.find(
-						(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === entry.item.parentId,
-					)?.item ?? entry.graph.items.get(entry.item.parentId))
-				: undefined;
-			try {
-				entry.item.placement = await this.#options.placement.reserve({
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-					...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
-					...(parent?.placement ? { parent: parent.placement.placement } : {}),
-					mode: entry.item.executionMode,
-					sourceOrder: entry.item.order,
-					publicationOrder: entry.item.publicationOrder,
-				});
-			} catch (error) {
-				throw rejected({
-					code: "placement_reservation_failed",
-					message: `Workspace Placement reservation failed for ${entry.item.id}: ${errorMessage(error)}`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-			try {
-				entry.item.session = await this.#options.sessions.reserve({
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-					...(entry.item.parentId ? { parentItemId: entry.item.parentId } : {}),
-					target: entry.sessionTarget,
-					placement: entry.item.placement.placement,
-				});
-			} catch (error) {
-				throw rejected({
-					code: "session_reservation_failed",
-					message: `Session reservation failed for ${entry.item.id}: ${errorMessage(error)}`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-			const sessionId = assertIdentity(String(entry.item.session.session.id), "session");
-			entry.item.reservedSessionId = sessionId;
-			entry.item.reservedPlacementDescriptor = entry.item.placement.placement;
-			if (this.#sessionRegistry.has(sessionId) || batchSessions.has(sessionId)) {
-				throw rejected({
-					code: "session_leased",
-					message: `Session is already leased by another Work Item: ${sessionId}`,
-					graphId: entry.graph.id,
-					itemId: entry.item.id,
-				});
-			}
-			batchSessions.add(sessionId);
-		}
-		for (const delivery of plan.deliveries) {
-			if ((delivery.command.resources?.length ?? 0) === 0) continue;
-			if (!this.#options.resources) {
-				throw rejected({
-					code: "resource_reservation_failed",
-					message: "Input resources were supplied but no resource store is configured",
-					graphId: delivery.graph.id,
-					itemId: delivery.item.id,
-				});
-			}
-			try {
-				delivery.resource = await this.#options.resources.reserve({
-					graphId: delivery.graph.id,
-					itemId: delivery.item.id,
-					input: delivery.command.input,
-					references: delivery.command.resources ?? [],
-				});
-			} catch (error) {
-				throw rejected({
-					code: "resource_reservation_failed",
-					message: `Input resource reservation failed: ${errorMessage(error)}`,
-					graphId: delivery.graph.id,
-					itemId: delivery.item.id,
-				});
-			}
-		}
-	}
-
-	async #commitOwnershipReservations(plan: BatchPlan): Promise<void> {
-		try {
-			for (const entry of plan.newItems) await entry.item.placement?.commit();
-			for (const entry of plan.newItems) await entry.item.session?.commit();
-		} catch (error) {
-			throw rejected({
-				code: "resource_reservation_failed",
-				message: `Reservation commit failed: ${errorMessage(error)}`,
-			});
-		}
-	}
-
-	async #settleAcceptedInputResources(plan: BatchPlan): Promise<void> {
-		await Promise.all(
-			plan.deliveries
-				.filter(({ command }) => (command.resources?.length ?? 0) > 0)
-				.map((delivery) => this.#settleAcceptedInputResource(delivery)),
-		);
-	}
-
-	async #settleAcceptedInputResource(delivery: DeliveryPlan): Promise<void> {
-		let outcome: "committed" | "failed" = "committed";
-		let diagnostic: string | undefined;
-		try {
-			if (!delivery.resource) throw new Error("Accepted input has no resource reservation");
-			// Resource I/O is intentionally outside the Coordinator mutation fence.
-			await delivery.resource.commit();
-		} catch (error) {
-			outcome = "failed";
-			diagnostic = errorMessage(error);
-		}
-
-		let failures: readonly string[] = [];
-		try {
-			failures = await this.#graphMutation(delivery.graph.id, async () => {
-				await this.#appendGraphFacts(delivery.graph, [
-					{
-						version: WORK_GRAPH_FACT_VERSION,
-						type: "input_resources_settled",
-						graphId: delivery.graph.id,
-						itemId: delivery.item.id,
-						deliveryId: delivery.deliveryId,
-						outcome,
-						timestamp: Math.max(
-							this.#options.time.clock.now(),
-							delivery.graph.aggregate.snapshot().lastTimestamp ?? 0,
-						),
-						...(outcome === "failed" ? { diagnostic: diagnostic ?? "Input resource commit failed" } : {}),
-					},
-				]);
-				return this.#settleInputAdmission(delivery.item, delivery.deliveryId, outcome, diagnostic);
-			});
-		} catch (error) {
-			this.#diagnose(
-				{
-					code: "input_resource_settlement_unknown",
-					message: `Input resource settlement was not persisted: ${errorMessage(error)}`,
-				},
-				delivery.graph.id,
-				delivery.item.id,
-			);
-			return;
-		}
-
-		if (failures.length > 0) await this.#interruptForInputResourceFailure(delivery.graph, delivery.item);
-		else this.#flushPendingInputs(delivery.item);
-		this.#requestSchedule();
-	}
-
-	async #rollbackReservations(plan: BatchPlan): Promise<void> {
-		const failures: unknown[] = [];
-		for (const delivery of [...plan.deliveries].reverse()) {
-			try {
-				await delivery.resource?.rollback();
-			} catch (error) {
-				failures.push(error);
-			}
-		}
-		for (const entry of [...plan.newItems].reverse()) {
-			try {
-				await entry.item.session?.rollback();
-			} catch (error) {
-				failures.push(error);
-			}
-			try {
-				await entry.item.placement?.rollback();
-			} catch (error) {
-				failures.push(error);
-			}
-		}
-		if (failures.length > 0) {
-			this.#diagnose({
-				code: "reservation_rollback_failed",
-				message: `${failures.length} unaccepted reservation rollback operation(s) failed`,
-			});
-		}
 	}
 
 	#accept(plan: BatchPlan): void {
