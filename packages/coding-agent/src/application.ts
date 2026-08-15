@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
@@ -22,28 +22,30 @@ import {
 } from "./app/argument-parsing.ts";
 import {
 	authenticateInteractively,
-	createEffortCommand,
-	interactiveStatusLineSnapshot,
 	persistCustomProviders,
 	promptRuntime,
 	refreshProviderAuth,
 	selectModelInteractively,
 } from "./app/auth-flows.ts";
+import {
+	assertModelSupportsImages,
+	bindInteractiveRunControl,
+	createAttachmentPreparer,
+	createInteractiveSessionOptions,
+	createSessionMediaLibrary,
+	openInteractiveRuntime,
+	restoreSessionMedia,
+} from "./app/interactive-session-options.ts";
 import { JsonEventWriter } from "./app/json-event-writer.ts";
 import {
 	chatAttachment,
 	hasAgentInput,
-	openAttachmentInSystemViewer,
-	openPathInSystemViewer,
 	pathSafeIdentity,
-	prepareAttachmentTransaction,
 	projectJsonMedia,
 	promptInput,
-	restoredChatAttachments,
 } from "./app/media-attachments.ts";
 import { createSessionPresentation } from "./app/session-presentation.ts";
 import {
-	assertSkillReferencesAvailable,
 	mcpTrustDecision,
 	projectTrustDecision,
 	validateSkillPath,
@@ -68,13 +70,13 @@ import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
 import { inspectMcpConfiguration } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
-import { MediaLibrary } from "./media/media-library.ts";
-import { type ModelCapabilityResolver, resolveModelRuntimeCapabilities } from "./models/model-capabilities.ts";
+import type { MediaLibrary } from "./media/media-library.ts";
+import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { catalogModelFromRuntime } from "./models/model-catalog.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
 import { effectiveReasoningEffort } from "./models/reasoning-effort.ts";
 import { ProcessSessionManager } from "./process/process-session-manager.ts";
-import { type AgentRunControlBinding, bindAgentRunControl } from "./run-control/index.ts";
+import type { AgentRunControlBinding } from "./run-control/index.ts";
 import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import type { SessionWorkController } from "./runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
@@ -84,13 +86,6 @@ import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import type { Session, SessionId, SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
-import {
-	activateExplicitSkillReferences,
-	prependSkillContext,
-	renderExplicitSkillContext,
-	renderExplicitSkillReferences,
-	sharedSkillArguments,
-} from "./skills/context.ts";
 import { CodingSkillsManager } from "./skills/manager.ts";
 import { collectSkillRoots } from "./skills/roots.ts";
 import type { CodingSkillsSnapshot } from "./skills/types.ts";
@@ -317,29 +312,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						await Promise.allSettled(pending);
 					}
 				};
-				const mediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
-				const mediaLibrary = new MediaLibrary({
-					fileSystem: options.fileSystem,
-					stagingDirectory: join(
-						options.runtime.homeDirectory,
-						".coda",
-						"tmp",
-						"media",
-						pathSafeIdentity(session.descriptor.id),
-						mediaToken,
-					),
-					mediaDirectory: session.descriptor.path
-						? `${session.descriptor.path}.media`
-						: join(
-								options.runtime.homeDirectory,
-								".coda",
-								"tmp",
-								"media",
-								pathSafeIdentity(session.descriptor.id),
-								"committed",
-							),
-					idGenerator: options.runtime.idGenerator,
-				});
+				const mediaLibrary = createSessionMediaLibrary(session, options);
 				const jsonEventWriter =
 					parsed.output === "json"
 						? new JsonEventWriter({
@@ -594,9 +567,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						auth = await options.models.getAuth(model, { clock: options.runtime.clock });
 					}
 					if (!auth) throw new Error(`Model is not authenticated: ${model.provider}/${model.id}`);
-					if (parsed.imagePaths.length > 0 && !model.input.includes("image")) {
-						throw new Error(`Model does not support image input: ${model.provider}/${model.id}`);
-					}
+					assertModelSupportsImages(model, parsed.imagePaths.length);
 					const initialAttachmentIds: string[] = [];
 					for (const path of parsed.imagePaths) {
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
@@ -657,35 +628,28 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						model: { provider: model.provider, id: model.id },
 						reasoning,
 					});
-					const agentRuntime = await activeWorkCoordinator.open({
+					const agentRuntime = await openInteractiveRuntime({
+						coordinator: activeWorkCoordinator,
 						session,
 						selection: { model, reasoning, authSnapshot: auth },
 						mcpElicitation: primaryMcpElicitation,
 					});
-					runControlBinding = configuredRunControl
-						? bindAgentRunControl({
-								work: agentRuntime,
-								configuration: configuredRunControl,
-								clock: options.runtime.clock,
-								scheduler: options.runtime.scheduler!,
-							})
-						: undefined;
+					runControlBinding = bindInteractiveRunControl({
+						work: agentRuntime,
+						configuration: configuredRunControl,
+						clock: options.runtime.clock,
+						scheduler: options.runtime.scheduler,
+					});
 					const initialAttachments = await Promise.all(
 						initialAttachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId)),
 					);
-					const restoredMedia = await restoredChatAttachments(
-						session.mediaReferences,
-						session.descriptor.path,
-						options.fileSystem,
-						new Set(session.recoverableFollowUps.map(({ item }) => item.id)),
-					);
-					const prepareAttachments = (attachmentIds: readonly string[]) =>
-						prepareAttachmentTransaction(
-							attachmentIds.filter((id) => !restoredMedia.contents.has(id)),
-							mediaLibrary,
-							session,
-							inputResources,
-						);
+					const restoredMedia = await restoreSessionMedia(session, options.fileSystem);
+					const prepareAttachments = createAttachmentPreparer({
+						restoredMedia,
+						mediaLibrary,
+						session,
+						inputResources,
+					});
 					const initialMessageCount = agentRuntime.state().messages.length;
 					agentRuntime.subscribeResult(async (result) => {
 						if (result.run) {
@@ -791,29 +755,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						): Promise<InteractiveSessionOptions> => {
 							const targetMcpElicitation =
 								options.mcpElicitation ?? interactiveMcpElicitation?.forSession(targetSession.descriptor.id);
-							const targetMediaToken = pathSafeIdentity(options.runtime.idGenerator.generate("queue_item"));
-							const targetMediaLibrary = new MediaLibrary({
-								fileSystem: options.fileSystem,
-								stagingDirectory: join(
-									options.runtime.homeDirectory,
-									".coda",
-									"tmp",
-									"media",
-									pathSafeIdentity(targetSession.descriptor.id),
-									targetMediaToken,
-								),
-								mediaDirectory: targetSession.descriptor.path
-									? `${targetSession.descriptor.path}.media`
-									: join(
-											options.runtime.homeDirectory,
-											".coda",
-											"tmp",
-											"media",
-											pathSafeIdentity(targetSession.descriptor.id),
-											"committed",
-										),
-								idGenerator: options.runtime.idGenerator,
-							});
+							const targetMediaLibrary = createSessionMediaLibrary(targetSession, options);
 							let targetRuntimeToClose: SessionWorkController | undefined;
 							let targetRunControlToDispose: AgentRunControlBinding | undefined;
 							try {
@@ -837,7 +779,8 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										await targetSession.record(initialModelSelection);
 									}
 								}
-								const targetRuntime = await activeWorkCoordinator.open({
+								const targetRuntime = await openInteractiveRuntime({
+									coordinator: activeWorkCoordinator,
 									session: targetSession,
 									selection: {
 										model: targetModel,
@@ -847,28 +790,14 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									mcpElicitation: targetMcpElicitation,
 								});
 								targetRuntimeToClose = targetRuntime;
-								const targetRunControl = configuredRunControl
-									? bindAgentRunControl({
-											work: targetRuntime,
-											configuration: configuredRunControl,
-											clock: options.runtime.clock,
-											scheduler: options.runtime.scheduler!,
-										})
-									: undefined;
+								const targetRunControl = bindInteractiveRunControl({
+									work: targetRuntime,
+									configuration: configuredRunControl,
+									clock: options.runtime.clock,
+									scheduler: options.runtime.scheduler,
+								});
 								targetRunControlToDispose = targetRunControl;
-								const targetRestoredMedia = await restoredChatAttachments(
-									targetSession.mediaReferences,
-									targetSession.descriptor.path,
-									options.fileSystem,
-									new Set(targetSession.recoverableFollowUps.map(({ item }) => item.id)),
-								);
-								const targetPrepareAttachments = (attachmentIds: readonly string[]) =>
-									prepareAttachmentTransaction(
-										attachmentIds.filter((id) => !targetRestoredMedia.contents.has(id)),
-										targetMediaLibrary,
-										targetSession,
-										inputResources,
-									);
+								const targetRestoredMedia = await restoreSessionMedia(targetSession, options.fileSystem);
 								targetRuntime.subscribeResult(async (result) => {
 									if (result.run) {
 										const supplement = beginWorkspaceDiffSupplement(targetSession, result.run.runId);
@@ -882,123 +811,27 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									mediaLibrary: targetMediaLibrary,
 									...(targetRunControl ? { runControl: targetRunControl } : {}),
 								});
-								return {
+								return createInteractiveSessionOptions({
+									session: targetSession,
 									work: targetRuntime,
-									presentation: createSessionPresentation(targetSession),
-									inputSession: targetSession,
+									mediaLibrary: targetMediaLibrary,
+									restoredMedia: targetRestoredMedia,
+									model: targetModel,
 									modelLabel: `${targetModel.provider}/${targetModel.id}`,
 									activitySummaryMode: activitySummaryModeForApi(targetModel.api),
-									statusLine: () => interactiveStatusLineSnapshot(targetRuntime, targetSession),
-									modelCommand: {
-										currentKey: () =>
-											`${targetRuntime.state().selection.model.provider}/${targetRuntime.state().selection.model.id}`,
-										list: listModelEntries,
-										select: async (selected) => {
-											const authSnapshot = await options.models.getAuth(selected.runtime, {
-												clock: options.runtime.clock,
-											});
-											if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
-											const nextReasoning = effectiveReasoningEffort(
-												selected.runtime,
-												targetRuntime.state().selection.reasoning,
-											);
-											await targetSession.record({
-												type: "model_selected",
-												model: { provider: selected.providerId, id: selected.id },
-												reasoning: nextReasoning,
-											});
-											await targetRuntime.select({
-												model: selected.runtime,
-												reasoning: nextReasoning,
-												authSnapshot,
-											});
-											return {
-												modelLabel: selected.key,
-												reasoning: nextReasoning,
-												activitySummaryMode: activitySummaryModeForApi(selected.runtime.api),
-											};
-										},
-										authenticate: (providerId) => {
-											throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
-										},
-									},
-									effortCommand: createEffortCommand(targetSession, targetRuntime),
+									listModelEntries,
 									authCommand,
 									skillsCommand,
 									mcpCommand,
 									reasoning: targetReasoning,
-									restoredAttachments: targetRestoredMedia.attachments,
-									resolveExtensionReferences: async (references) => {
-										const snapshot = await skillsManager.refresh({ rescan: false });
-										assertSkillReferencesAvailable(snapshot, references);
-									},
-									buildPrompt: async (text, attachmentIds, inputContext) => {
-										const selectedModel = targetRuntime.state().selection.model;
-										if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
-											throw new Error(
-												`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
-											);
-										}
-										const skillReferences = inputContext.references.filter(
-											({ source }) => source === "skill",
-										);
-										if (skillReferences.length === 0) {
-											return promptInput(
-												text,
-												attachmentIds,
-												targetMediaLibrary,
-												targetRestoredMedia.contents,
-											);
-										}
-										const snapshot = skillsManager.current ?? skillsSnapshot;
-										assertSkillReferencesAvailable(snapshot, inputContext.references);
-										const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
-										const input = await promptInput(
-											taskText,
-											attachmentIds,
-											targetMediaLibrary,
-											targetRestoredMedia.contents,
-										);
-										const activations = await activateExplicitSkillReferences({
-											snapshot,
-											references: skillReferences,
-											composerText: inputContext.composerText,
-										});
-										const prepared = prependSkillContext(
-											input,
-											renderExplicitSkillContext(activations),
-											renderExplicitSkillReferences(activations),
-										);
-										return prepared;
-									},
-									prepareAttachments: targetPrepareAttachments,
-									onDetach: (attachmentId) =>
-										targetRestoredMedia.contents.has(attachmentId)
-											? Promise.resolve()
-											: targetMediaLibrary.detach(attachmentId),
-									onOpenAttachment: (attachmentId) => {
-										const restoredPath = targetRestoredMedia.paths.get(attachmentId);
-										return restoredPath
-											? openPathInSystemViewer(
-													restoredPath,
-													options.processRunner,
-													options.runtime,
-													workspace.root,
-												)
-											: openAttachmentInSystemViewer(
-													targetMediaLibrary,
-													attachmentId,
-													options.processRunner,
-													options.runtime,
-													workspace.root,
-												);
-									},
-									toolResultImagesSupported: resolveModelRuntimeCapabilities(
-										targetModel,
-										options.modelCapabilities,
-									).toolResultImages,
+									skillsManager,
+									skillsSnapshot,
+									inputResources,
+									options,
+									workspace: workspace.root,
+									mode: { type: "secondary" },
 									onRetire: () => activeProcessSessionManager.retireSession(targetSession.descriptor.id),
-								};
+								});
 							} catch (error) {
 								targetRunControlToDispose?.dispose();
 								if (targetRuntimeToClose) await targetRuntimeToClose.close().catch(() => undefined);
@@ -1009,11 +842,30 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						};
 						let exitCode: number;
 						let overflowReplacement: InteractiveSessionOptions | undefined;
+						const primarySessionOptions = createInteractiveSessionOptions({
+							session,
+							work: agentRuntime,
+							mediaLibrary,
+							restoredMedia,
+							model,
+							modelLabel: `${model.provider}/${model.id}`,
+							reasoning,
+							activitySummaryMode: activitySummaryModeForApi(model.api),
+							listModelEntries,
+							authCommand,
+							skillsCommand,
+							mcpCommand,
+							skillsManager,
+							skillsSnapshot,
+							inputResources,
+							options,
+							workspace: workspace.root,
+							mode: { type: "primary", providerId: model.provider, apiKey: parsed.apiKey },
+							onRetire: () => activeProcessSessionManager.retireSession(session.descriptor.id),
+						});
 						try {
 							exitCode = await runInteractive({
-								work: agentRuntime,
-								presentation: createSessionPresentation(session),
-								inputSession: session,
+								...primarySessionOptions,
 								terminal: interactiveRuntime!.terminal,
 								clock: options.runtime.clock,
 								scheduler: interactiveRuntime!.scheduler,
@@ -1022,49 +874,6 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								diagnostics: options.diagnostics,
 								fullScreenOutput: options.fullScreenOutput,
 								mcpElicitation: interactiveMcpElicitation,
-								modelLabel: `${model.provider}/${model.id}`,
-								activitySummaryMode: activitySummaryModeForApi(model.api),
-								statusLine: () => interactiveStatusLineSnapshot(agentRuntime, session),
-								modelCommand: {
-									currentKey: () =>
-										`${agentRuntime.state().selection.model.provider}/${agentRuntime.state().selection.model.id}`,
-									list: listModelEntries,
-									select: async (selected) => {
-										const authSnapshot = await options.models.getAuth(selected.runtime, {
-											apiKey: selected.providerId === model.provider ? parsed.apiKey : undefined,
-											clock: options.runtime.clock,
-										});
-										if (!authSnapshot) throw new Error(`Model is not authenticated: ${selected.key}`);
-										const nextReasoning = effectiveReasoningEffort(
-											selected.runtime,
-											agentRuntime.state().selection.reasoning,
-										);
-										await session.record({
-											type: "model_selected",
-											model: { provider: selected.providerId, id: selected.id },
-											reasoning: nextReasoning,
-										});
-										await agentRuntime.select({
-											model: selected.runtime,
-											reasoning: nextReasoning,
-											authSnapshot,
-										});
-										return {
-											modelLabel: selected.key,
-											reasoning: nextReasoning,
-											activitySummaryMode: activitySummaryModeForApi(selected.runtime.api),
-										};
-									},
-									authenticate: (providerId) => {
-										throw new Error(`Provider requires authentication: ${providerId}; use /auth`);
-									},
-								},
-								effortCommand: createEffortCommand(session, agentRuntime),
-								authCommand,
-								skillsCommand,
-								mcpCommand,
-								onRetire: () => activeProcessSessionManager.retireSession(session.descriptor.id),
-								reasoning,
 								motion: parsed.noAnimations ? "reduced" : (settings.ui?.motion ?? "full"),
 								commandRegistry,
 								sessionCommand: {
@@ -1116,70 +925,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								workspace: workspace.root,
 								homePath: options.runtime.homeDirectory,
 								onWarning: (message) => options.io.stderr.write(`coda: ${message}\n`),
-								toolResultImagesSupported: resolveModelRuntimeCapabilities(model, options.modelCapabilities)
-									.toolResultImages,
 								initialPrompt: hasAgentInput(initialInput) ? initialInput : undefined,
 								initialAttachmentIds,
 								initialAttachments,
-								restoredAttachments: restoredMedia.attachments,
-								resolveExtensionReferences: async (references) => {
-									const snapshot = await skillsManager.refresh({ rescan: false });
-									assertSkillReferencesAvailable(snapshot, references);
-								},
-								buildPrompt: async (text, attachmentIds, inputContext) => {
-									const selectedModel = agentRuntime.state().selection.model;
-									if (attachmentIds.length > 0 && !selectedModel.input.includes("image")) {
-										throw new Error(
-											`Model does not support image input: ${selectedModel.provider}/${selectedModel.id}`,
-										);
-									}
-									const skillReferences = inputContext.references.filter(({ source }) => source === "skill");
-									if (skillReferences.length === 0) {
-										return promptInput(text, attachmentIds, mediaLibrary, restoredMedia.contents);
-									}
-									const snapshot = skillsManager.current ?? skillsSnapshot;
-									assertSkillReferencesAvailable(snapshot, inputContext.references);
-									const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
-									const input = await promptInput(
-										taskText,
-										attachmentIds,
-										mediaLibrary,
-										restoredMedia.contents,
-									);
-									const activations = await activateExplicitSkillReferences({
-										snapshot,
-										references: skillReferences,
-										composerText: inputContext.composerText,
-									});
-									const prepared = prependSkillContext(
-										input,
-										renderExplicitSkillContext(activations),
-										renderExplicitSkillReferences(activations),
-									);
-									return prepared;
-								},
-								prepareAttachments,
-								onDetach: (attachmentId) =>
-									restoredMedia.contents.has(attachmentId)
-										? Promise.resolve()
-										: mediaLibrary.detach(attachmentId),
-								onOpenAttachment: (attachmentId) => {
-									const restoredPath = restoredMedia.paths.get(attachmentId);
-									return restoredPath
-										? openPathInSystemViewer(
-												restoredPath,
-												options.processRunner,
-												options.runtime,
-												workspace.root,
-											)
-										: openAttachmentInSystemViewer(
-												mediaLibrary,
-												attachmentId,
-												options.processRunner,
-												options.runtime,
-												workspace.root,
-											);
-								},
 							});
 						} finally {
 							await Promise.all(
