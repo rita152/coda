@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentSeed, FollowUp } from "@coda/agent";
+import type { AgentEvent, AgentSeed } from "@coda/agent";
 import {
 	type Clock,
 	type ColorLevel,
@@ -22,7 +22,7 @@ import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
-import { invokeChatCommand } from "./chat-composer.ts";
+import { ChatComposerController, invokeChatCommand, type ProvisionalPromptCard } from "./chat-composer.ts";
 import {
 	followUpText,
 	MINIMUM_CHAT_COLUMNS,
@@ -121,23 +121,6 @@ export interface ChatComponentOptions {
 	) => Promise<string | undefined> | string | void;
 }
 
-interface ProvisionalPromptCard {
-	readonly id: string;
-	readonly kind: "prompt" | "steering" | "follow_up" | "user_shell";
-	readonly text: string;
-	readonly attachments: readonly ChatAttachment[];
-	readonly queueItemId?: string;
-	readonly status?: string;
-}
-
-interface RecoverablePromptCard {
-	readonly item: FollowUp;
-	readonly state: "paused" | "failed";
-	readonly attachments: readonly ChatAttachment[];
-	readonly messageId?: string;
-	readonly failure?: string;
-}
-
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
 	#timeline: SemanticTimeline;
@@ -156,17 +139,13 @@ export class ChatComponent extends Component {
 	#lastDockRows = 5;
 	#running = false;
 	#shellRunning = false;
-	#shellMode = false;
 	#transcriptMode = false;
 	#lastIdleCtrlCAt?: number;
 	#error?: string;
 	#notice?: string;
 	#runEvidence?: RunEvidenceEnvelope;
 	readonly #attachments: ChatAttachmentController;
-	#provisionalCards: ProvisionalPromptCard[] = [];
-	#recoverableCards: RecoverablePromptCard[] = [];
-	#activeFollowUp?: RecoverablePromptCard;
-	#nextProvisionalId = 0;
+	readonly #composer: ChatComposerController;
 	#modelLabel: string;
 	#reasoning: string;
 
@@ -189,6 +168,12 @@ export class ChatComponent extends Component {
 				this.#error = message;
 			},
 		});
+		this.#composer = new ChatComposerController({
+			isQueuePaused: options.isQueuePaused,
+			attachments: this.#attachments,
+			recoverableFollowUps: options.recoverableFollowUps,
+			restoredAttachments: options.restoredAttachments,
+		});
 		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
 			isAvailable: (command) => command.id !== "core:follow-up" || this.#running,
 		});
@@ -210,15 +195,6 @@ export class ChatComponent extends Component {
 			toolResultImagesSupported: options.toolResultImagesSupported ?? false,
 			statusLine: options.statusLine,
 		});
-		this.#recoverableCards = (options.recoverableFollowUps ?? []).map((recoverable) =>
-			Object.freeze({
-				item: recoverable.item,
-				state: recoverable.state,
-				attachments: Object.freeze([...(options.restoredAttachments?.get(recoverable.item.id) ?? [])]),
-				...(recoverable.messageId ? { messageId: recoverable.messageId } : {}),
-				...(recoverable.failure ? { failure: recoverable.failure.message } : {}),
-			}),
-		);
 	}
 
 	get running(): boolean {
@@ -296,8 +272,7 @@ export class ChatComponent extends Component {
 		this.#timeline = new SemanticTimeline(seed, toolInvocations);
 		this.#activity = new ActivityProjection(this.#options.activitySummaryMode);
 		this.#running = running;
-		this.#activeFollowUp = undefined;
-		this.#provisionalCards = [];
+		this.#composer.project({ type: "resynchronize" });
 		this.#timelineRenderer.resetTimelineCaches();
 		this.invalidate();
 	}
@@ -307,62 +282,7 @@ export class ChatComponent extends Component {
 		if (event.type === "run_start") {
 			this.#attachments.mutate({ type: "accept_run_start", messageId: event.inputMessage.id });
 		}
-		if (event.type === "run_start") {
-			const exactIndex = this.#provisionalCards.findIndex((card) =>
-				event.source === "follow_up" ? card.queueItemId === event.queueItemId : card.kind === "prompt",
-			);
-			const index =
-				exactIndex >= 0 ? exactIndex : this.#provisionalCards.findIndex((card) => card.kind === "follow_up");
-			let provisional: ProvisionalPromptCard | undefined;
-			if (index >= 0) {
-				[provisional] = this.#provisionalCards.splice(index, 1);
-				if (event.source === "follow_up" && provisional && provisional.attachments.length > 0) {
-					this.#attachments.mutate({
-						type: "associate_message",
-						messageId: event.inputMessage.id,
-						attachments: provisional.attachments,
-					});
-				}
-			}
-			if (event.source === "follow_up" && event.queueItemId) {
-				const recoveryIndex = this.#recoverableCards.findIndex((card) => card.item.id === event.queueItemId);
-				const recovered = recoveryIndex >= 0 ? this.#recoverableCards.splice(recoveryIndex, 1)[0] : undefined;
-				const active = provisional
-					? {
-							item: { id: event.queueItemId, content: provisional.text },
-							state: "paused" as const,
-							attachments: provisional.attachments,
-							messageId: event.inputMessage.id,
-						}
-					: recovered
-						? { ...recovered, messageId: event.inputMessage.id }
-						: undefined;
-				if (active) {
-					this.#activeFollowUp = Object.freeze(active);
-					if (active.attachments.length > 0) {
-						this.#attachments.mutate({
-							type: "associate_message",
-							messageId: event.inputMessage.id,
-							attachments: active.attachments,
-						});
-					}
-				}
-			}
-		}
-		if (event.type === "turn_start") {
-			for (const message of event.steeringMessages) {
-				const index = this.#provisionalCards.findIndex((card) => card.kind === "steering");
-				if (index < 0) break;
-				const [card] = this.#provisionalCards.splice(index, 1);
-				if (card && card.attachments.length > 0) {
-					this.#attachments.mutate({
-						type: "associate_message",
-						messageId: message.id,
-						attachments: card.attachments,
-					});
-				}
-			}
-		}
+		this.#composer.project({ type: "before_agent_event", event });
 		const mutation = this.#timeline.accept(event);
 		switch (event.type) {
 			case "run_start":
@@ -372,39 +292,12 @@ export class ChatComponent extends Component {
 				break;
 			case "run_end":
 				this.#running = false;
-				if (this.#activeFollowUp) {
-					if (event.outcome !== "success") {
-						this.#recoverableCards.push(
-							Object.freeze({
-								...this.#activeFollowUp,
-								state: event.outcome === "error" ? "failed" : "paused",
-								...(event.failure?.message ? { failure: event.failure.message } : {}),
-							}),
-						);
-					}
-					this.#activeFollowUp = undefined;
-				}
-				if (event.outcome !== "success") {
-					const paused = this.#provisionalCards.filter(
-						(card) => card.kind === "follow_up" && card.queueItemId !== undefined,
-					);
-					for (const card of paused) {
-						this.#recoverableCards.push(
-							Object.freeze({
-								item: { id: card.queueItemId as FollowUp["id"], content: card.text },
-								state: "paused",
-								attachments: card.attachments,
-							}),
-						);
-					}
-					const pausedIds = new Set(paused.map(({ id }) => id));
-					this.#provisionalCards = this.#provisionalCards.filter((card) => !pausedIds.has(card.id));
-				}
 				if (event.outcome === "error") {
 					this.#error = event.failure?.message ?? "Run failed";
 				}
 				break;
 		}
+		this.#composer.project({ type: "after_agent_event", event });
 		if (mutation.changed) this.#viewport.noteUpdate();
 		this.invalidate();
 	}
@@ -415,17 +308,8 @@ export class ChatComponent extends Component {
 			// A resumed mixed queue may optimistically mark an Agent Run as pending before
 			// discovering that its next item is a local Shell command.
 			this.#running = false;
-			const exact = this.#provisionalCards.findIndex(
-				(card) => card.kind === "user_shell" && card.queueItemId === snapshot.id,
-			);
-			const index =
-				exact >= 0
-					? exact
-					: this.#provisionalCards.findIndex(
-							(card) => card.kind === "user_shell" && card.queueItemId === undefined,
-						);
-			if (index >= 0) this.#provisionalCards.splice(index, 1);
 		}
+		this.#composer.project({ type: "user_shell", snapshot });
 		this.#shellRunning = snapshot.status === "running";
 		this.#timeline.acceptUserShell(snapshot);
 		this.#viewport.noteUpdate();
@@ -436,6 +320,7 @@ export class ChatComponent extends Component {
 		if (width < MINIMUM_CHAT_COLUMNS || height < MINIMUM_CHAT_ROWS)
 			return renderTooSmall(width, height, this.running);
 
+		const composerView = this.#composer.view();
 		const attachmentProjection = this.#attachmentProjection();
 		const attachmentView = this.#attachments.view(attachmentProjection);
 		const focusedAttachmentTarget = attachmentView.focusedTarget;
@@ -493,9 +378,9 @@ export class ChatComponent extends Component {
 			width,
 			now,
 			timeline: this.#timeline,
-			provisionalCards: this.#provisionalCards,
-			recoverableCards: this.#recoverableCards,
-			activeFollowUp: this.#activeFollowUp,
+			provisionalCards: composerView.provisionalCards,
+			recoverableCards: composerView.recoverableCards,
+			activeFollowUp: composerView.activeFollowUp,
 			messageAttachments: attachmentView.messageAttachments,
 			transcriptMode: this.#transcriptMode,
 			error: this.#error,
@@ -646,7 +531,7 @@ export class ChatComponent extends Component {
 			else if (this.#running) this.#options.onAbort();
 			else if (this.#shellMode || this.#editor.text.length > 0) {
 				this.#editor.clear();
-				this.#shellMode = false;
+				this.#composer.mutate({ type: "set_shell_mode", value: false });
 				this.#history.reset();
 				this.invalidate();
 			} else if (input.action === "press") {
@@ -665,7 +550,7 @@ export class ChatComponent extends Component {
 		if (input.type === "key" && input.key === "escape") {
 			if (this.#shellMode) {
 				if (this.#editor.text.trim().length === 0) {
-					this.#shellMode = false;
+					this.#composer.mutate({ type: "set_shell_mode", value: false });
 					this.#error = undefined;
 					this.invalidate();
 				}
@@ -701,7 +586,7 @@ export class ChatComponent extends Component {
 		if (!this.#shellMode && this.#editor.text.length === 0) {
 			const activation = shellActivation(input);
 			if (activation) {
-				this.#shellMode = true;
+				this.#composer.mutate({ type: "set_shell_mode", value: true });
 				this.#history.reset();
 				this.#error = undefined;
 				if (!activation.remainder) {
@@ -715,7 +600,7 @@ export class ChatComponent extends Component {
 			const before = this.#editor.text;
 			const result = this.#editor.handleInput(editorInput);
 			if (result.type === "handled" && this.#editor.text === before) {
-				this.#shellMode = false;
+				this.#composer.mutate({ type: "set_shell_mode", value: false });
 				this.#error = undefined;
 			} else if (this.#editor.text !== before) this.#error = undefined;
 			this.invalidate();
@@ -725,7 +610,7 @@ export class ChatComponent extends Component {
 		const editorResult = this.#editor.handleInput(editorInput);
 		if (editorResult.type === "handled") {
 			if (!this.#shellMode && this.#editor.absorbPrefix("!")) {
-				this.#shellMode = true;
+				this.#composer.mutate({ type: "set_shell_mode", value: true });
 				this.#history.reset();
 				this.#error = undefined;
 			} else if (this.#editor.text !== before) {
@@ -804,14 +689,13 @@ export class ChatComponent extends Component {
 			prompt: kind === "prompt",
 		})!;
 		const submittedComposerState = this.#editor.captureState();
-		const provisional: ProvisionalPromptCard = Object.freeze({
-			id: `provisional:${++this.#nextProvisionalId}`,
+		const provisional = this.#composer.mutate({
+			type: "create_provisional",
 			kind,
 			text: submissionText,
-			attachments: Object.freeze(submittedAttachments),
+			attachments: submittedAttachments,
 			status: kind === "steering" ? "Steering queued" : kind === "follow_up" ? "Follow-up queued" : undefined,
-		});
-		this.#provisionalCards.push(provisional);
+		})!;
 		this.#editor.clear();
 		this.#history.reset();
 		this.#error = undefined;
@@ -871,9 +755,7 @@ export class ChatComponent extends Component {
 				if (typeof result === "object") this.#history.record(result);
 				const queueItemId = typeof result === "string" ? result : result?.queueItemId;
 				if (kind !== "prompt" && typeof queueItemId === "string") {
-					this.#provisionalCards = this.#provisionalCards.map((card) =>
-						card.id === provisional.id ? Object.freeze({ ...card, queueItemId }) : card,
-					);
+					this.#composer.mutate({ type: "set_queue_item", id: provisional.id, queueItemId });
 				}
 				this.invalidate();
 			},
@@ -882,7 +764,7 @@ export class ChatComponent extends Component {
 					this.#running = false;
 					this.#activity.cancelPreparation();
 				}
-				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
+				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
 				this.#attachments.mutate({ type: "restore_submission", attachments: submittedAttachments });
 				if (!this.#editor.text) this.#editor.restoreState(submittedComposerState);
 				this.#error = error instanceof Error ? error.message : String(error);
@@ -892,20 +774,23 @@ export class ChatComponent extends Component {
 	}
 
 	get #hasPausedQueue(): boolean {
-		return this.#options.isQueuePaused?.() ?? this.#recoverableCards.some((card) => card.state === "paused");
+		return this.#composer.view().hasPausedQueue;
+	}
+
+	get #shellMode(): boolean {
+		return this.#composer.view().shellMode;
 	}
 
 	#submitUserShell(command: string): void {
-		const provisional: ProvisionalPromptCard = Object.freeze({
-			id: `provisional:${++this.#nextProvisionalId}`,
+		const provisional = this.#composer.mutate({
+			type: "create_provisional",
 			kind: "user_shell",
 			text: `!${command}`,
-			attachments: Object.freeze([]),
+			attachments: [],
 			status: "Shell queued",
-		});
-		this.#provisionalCards.push(provisional);
+		})!;
 		this.#editor.clear();
-		this.#shellMode = false;
+		this.#composer.mutate({ type: "set_shell_mode", value: false });
 		this.#history.reset();
 		this.#error = undefined;
 		this.#viewport.jumpToEnd();
@@ -919,15 +804,13 @@ export class ChatComponent extends Component {
 		}
 		void operation.then(
 			(submission) => {
-				this.#provisionalCards = this.#provisionalCards.map((card) =>
-					card.id === provisional.id ? Object.freeze({ ...card, queueItemId: submission.id }) : card,
-				);
+				this.#composer.mutate({ type: "set_queue_item", id: provisional.id, queueItemId: submission.id });
 				this.invalidate();
 			},
 			(error: unknown) => {
-				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
+				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
 				if (!this.#editor.text) this.#editor.setText(command);
-				this.#shellMode = true;
+				this.#composer.mutate({ type: "set_shell_mode", value: true });
 				this.#error = error instanceof Error ? error.message : String(error);
 				this.invalidate();
 			},
@@ -935,11 +818,12 @@ export class ChatComponent extends Component {
 	}
 
 	async #reclaimLatestQueuedInput(): Promise<void> {
-		const provisional = [...this.#provisionalCards]
+		const composerView = this.#composer.view();
+		const provisional = [...composerView.provisionalCards]
 			.reverse()
 			.find((card) => card.kind === "follow_up" || card.kind === "user_shell");
 		if (provisional && !provisional.queueItemId) return;
-		const recoverable = provisional ? undefined : this.#recoverableCards.at(-1);
+		const recoverable = provisional ? undefined : composerView.recoverableCards.at(-1);
 		const queueItemId = provisional?.queueItemId ?? recoverable?.item.id;
 		if (!queueItemId) return;
 		try {
@@ -957,13 +841,13 @@ export class ChatComponent extends Component {
 					: (provisional?.text ?? (recoverable ? followUpText(recoverable.item) : ""));
 			const attachments = provisional?.attachments ?? recoverable?.attachments ?? [];
 			if (provisional) {
-				this.#provisionalCards = this.#provisionalCards.filter((card) => card.id !== provisional.id);
-			} else {
-				this.#recoverableCards = this.#recoverableCards.filter((card) => card !== recoverable);
+				this.#composer.mutate({ type: "remove_provisional", id: provisional.id });
+			} else if (recoverable) {
+				this.#composer.mutate({ type: "remove_recoverable", card: recoverable });
 			}
 			this.#editor.setText(text);
 			this.#history.reset();
-			this.#shellMode = provisional?.kind === "user_shell";
+			this.#composer.mutate({ type: "set_shell_mode", value: provisional?.kind === "user_shell" });
 			this.#attachments.mutate({ type: "reclaim", attachments });
 			this.#error = undefined;
 		} catch (error) {
@@ -973,11 +857,12 @@ export class ChatComponent extends Component {
 	}
 
 	#attachmentProjection(): ChatAttachmentProjection {
+		const composerView = this.#composer.view();
 		return {
 			timelineEntries: this.#timeline.entries,
-			provisionalCards: this.#provisionalCards,
-			recoverableCards: this.#recoverableCards,
-			...(this.#activeFollowUp ? { activeFollowUp: this.#activeFollowUp } : {}),
+			provisionalCards: composerView.provisionalCards,
+			recoverableCards: composerView.recoverableCards,
+			...(composerView.activeFollowUp ? { activeFollowUp: composerView.activeFollowUp } : {}),
 		};
 	}
 
