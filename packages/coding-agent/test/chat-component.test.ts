@@ -966,6 +966,53 @@ describe("ChatComponent terminal input", () => {
 		expect(onResumeFollowUps).toHaveBeenCalledOnce();
 	});
 
+	it("returns an errored active Follow-up to the recoverable card", async () => {
+		const onReclaimFollowUp = vi.fn(async () => undefined);
+		const component = createComponent({
+			colorLevel: 0,
+			onFollowUp: () => "queue:failed-active",
+			onReclaimFollowUp,
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: { id: "user-1", message: { role: "user", content: "start", timestamp: 1 } },
+			}),
+		);
+		component.handleInput({ type: "text", text: "repair after this" }, context);
+		component.handleInput(key("enter", { alt: true }), context);
+		await vi.waitFor(() =>
+			expect(component.render({ width: 60, height: 16, now: 0 }).join("\n")).toContain("Follow-up queued"),
+		);
+		component.accept(event({ type: "run_end", outcome: "success" }));
+		component.accept(
+			event({
+				type: "run_start",
+				source: "follow_up",
+				queueItemId: "queue:failed-active",
+				inputMessage: {
+					id: "user-follow-up",
+					message: { role: "user", content: "repair after this", timestamp: 2 },
+				},
+			}),
+		);
+
+		component.accept(
+			event({
+				type: "run_end",
+				outcome: "error",
+				failure: { kind: "runtime", message: "repair failed" },
+			}),
+		);
+
+		const failed = stripAnsi(component.render({ width: 60, height: 16, now: 0 }).join("\n"));
+		expect(failed).toContain("Failed: repair failed");
+		component.handleInput(key("up", { alt: true }), context);
+		await vi.waitFor(() => expect(onReclaimFollowUp).toHaveBeenCalledWith("queue:failed-active"));
+	});
+
 	it("reconciles consumed Steering and Follow-up cards without duplicate User Prompts", async () => {
 		const component = createComponent({
 			colorLevel: 0,
@@ -1230,6 +1277,23 @@ describe("ChatComponent terminal input", () => {
 		await vi.waitFor(() =>
 			expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).not.toContain("[photo.png]"),
 		);
+	});
+
+	it("closes an image modal with either q or Escape", () => {
+		const component = createComponent({ imagePreviewSupported: true });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		component.handleInput(key("tab"), context);
+
+		component.handleInput(key("enter"), context);
+		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("Image preview");
+		component.handleInput(key("q"), context);
+		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).not.toContain("Image preview");
+
+		component.handleInput(key("enter"), context);
+		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("Image preview");
+		component.handleInput(key("escape"), context);
+		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).not.toContain("Image preview");
 	});
 
 	it("limits mouse hover and click handling to attachment label hit regions", async () => {
