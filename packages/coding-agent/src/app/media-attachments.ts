@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { extname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentInput } from "@coda/agent";
 import type { ImageContent } from "@coda/ai";
 import { type FileSystem, isFileSystemError } from "../host/file-system.ts";
@@ -42,6 +43,117 @@ export async function chatAttachment(mediaLibrary: MediaLibrary, attachmentId: s
 			height: asset.preview.height,
 		}),
 	});
+}
+
+const IMAGE_PATH_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+
+/**
+ * Recognizes the path-shaped paste emitted by terminals when files are dropped.
+ * Ordinary prose and relative paths stay in the Composer as text.
+ */
+export function pastedImagePaths(text: string): readonly string[] | undefined {
+	const value = text.trim();
+	if (!value || value.includes("\0")) return undefined;
+	const words = shellWords(value);
+	if (words) {
+		const paths = words.map(normalizePastedPath);
+		if (paths.every((path): path is string => path !== undefined && isSupportedImagePath(path))) {
+			return Object.freeze(paths);
+		}
+		if (words.slice(1).some((word) => isAbsolutePastedPath(word))) return undefined;
+	}
+	const literal = normalizePastedPath(value);
+	return literal && isSupportedImagePath(literal) ? Object.freeze([literal]) : undefined;
+}
+
+export function ingestPastedImages(
+	text: string,
+	mediaLibrary: MediaLibrary,
+): Promise<readonly ChatAttachment[]> | undefined {
+	const paths = pastedImagePaths(text);
+	if (!paths) return undefined;
+	return ingestImagePaths(paths, mediaLibrary);
+}
+
+async function ingestImagePaths(
+	paths: readonly string[],
+	mediaLibrary: MediaLibrary,
+): Promise<readonly ChatAttachment[]> {
+	const attachmentIds: string[] = [];
+	try {
+		for (const path of paths) attachmentIds.push((await mediaLibrary.ingestPath(path)).id);
+		return Object.freeze(
+			await Promise.all(attachmentIds.map((attachmentId) => chatAttachment(mediaLibrary, attachmentId))),
+		);
+	} catch (error) {
+		await Promise.all(attachmentIds.map((attachmentId) => mediaLibrary.detach(attachmentId)));
+		throw error;
+	}
+}
+
+function isSupportedImagePath(path: string): boolean {
+	return isAbsolute(path) && IMAGE_PATH_EXTENSIONS.has(extname(path).toLowerCase());
+}
+
+function isAbsolutePastedPath(value: string): boolean {
+	const path = normalizePastedPath(value);
+	return path !== undefined && isAbsolute(path);
+}
+
+function normalizePastedPath(value: string): string | undefined {
+	if (value.startsWith("file://")) {
+		try {
+			return fileURLToPath(value);
+		} catch {
+			return undefined;
+		}
+	}
+	return value;
+}
+
+function shellWords(value: string): readonly string[] | undefined {
+	const words: string[] = [];
+	let word = "";
+	let quote: "'" | '"' | undefined;
+	let escaped = false;
+	let started = false;
+	for (const character of value) {
+		if (escaped) {
+			word += character;
+			escaped = false;
+			started = true;
+			continue;
+		}
+		if (character === "\\" && quote !== "'") {
+			escaped = true;
+			started = true;
+			continue;
+		}
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else word += character;
+			started = true;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			started = true;
+			continue;
+		}
+		if (/\s/u.test(character)) {
+			if (started) {
+				words.push(word);
+				word = "";
+				started = false;
+			}
+			continue;
+		}
+		word += character;
+		started = true;
+	}
+	if (escaped || quote) return undefined;
+	if (started) words.push(word);
+	return words.length > 0 ? Object.freeze(words) : undefined;
 }
 
 function sessionMediaRegistration(asset: MediaAsset): SessionMediaRegistration {

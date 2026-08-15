@@ -37,16 +37,24 @@ describe("TerminalImageSurface", () => {
 
 		await surface.reconcile([placement]);
 		const first = terminal.takeOutput();
-		expect(first).toContain("a=T,f=100,t=d,i=41");
+		expect(first).toContain("a=t,f=100,t=d,i=41");
+		expect(first).not.toContain("a=T");
 		expect(first).toContain("AQIDBA==");
 		expect(first).toContain("\x1b[3;4H");
-		expect(first).toContain("a=p,i=41,p=41,c=20,r=8");
+		expect(first).toContain("a=p,i=41,p=41,c=20,r=8,q=2,z=1,C=1");
+
+		await surface.reconcile([placement]);
+		const stable = terminal.takeOutput();
+		expect(stable).not.toContain("a=t");
+		expect(stable).not.toContain("a=d");
+		expect(stable).toContain("a=p,i=41,p=41,c=20,r=8,q=2,z=1,C=1");
 
 		await surface.reconcile([{ ...placement, row: 4 }]);
 		const moved = terminal.takeOutput();
-		expect(moved).not.toContain("a=T");
-		expect(moved).toContain("a=d,d=p,i=41");
+		expect(moved).not.toContain("a=t");
+		expect(moved).not.toContain("a=d");
 		expect(moved).toContain("\x1b[5;4H");
+		expect(moved).toContain("a=p,i=41,p=41,c=20,r=8,q=2,z=1,C=1");
 
 		await surface.reconcile([]);
 		expect(terminal.takeOutput()).toContain("a=d,d=I,i=41");

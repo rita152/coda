@@ -31,6 +31,7 @@ describe("MediaLibrary", () => {
 		expect(asset.mimeType).toBe("image/jpeg");
 		expect([asset.width, asset.height]).toEqual([3_000, 1_000]);
 		expect(asset.preview.mimeType).toBe("image/png");
+		expect([asset.preview.width, asset.preview.height]).toEqual([3_000, 1_000]);
 		expect(asset.model.width).toBeLessThanOrEqual(2_000);
 		expect(asset.model.height).toBeLessThanOrEqual(2_000);
 		expect(asset.model.bytes).toBeLessThanOrEqual(4.5 * 1024 * 1024);
@@ -50,9 +51,11 @@ describe("MediaLibrary", () => {
 
 		const first = await fixture.library.ingestPath(source);
 		const second = await fixture.library.ingestPath(source);
+		const previewBytes = await readFile(fixture.library.resolve(first.id).preview.path);
 		expect(first.filename).toBe("image.png");
 		expect(second.filename).toBe("image (2).png");
 		expect(first.digest).toBe(second.digest);
+		expect(previewBytes).toEqual(bytes);
 
 		const originalPath = fixture.library.resolve(first.id).original.path;
 		await fixture.library.detach(first.id);

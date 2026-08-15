@@ -122,6 +122,7 @@ export interface InteractiveSessionOptions {
 	readonly restoredAttachments?: ReadonlyMap<string, readonly ChatAttachment[]>;
 	readonly buildPrompt?: InteractiveInputControllerOptions["buildInput"];
 	readonly prepareAttachments?: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
+	readonly onPasteAttachments?: (text: string) => Promise<readonly ChatAttachment[]> | undefined;
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly toolResultImagesSupported?: boolean;
@@ -476,6 +477,7 @@ async function runMultiSessionInteractive(
 			isQueuePaused: () => input.queuePaused,
 			onReclaimFollowUp: (queueItemId) => input.reclaimFollowUp(queueItemId as QueueItemId),
 			onReclaimUserShell: (id) => input.reclaimUserShell(id),
+			onPasteAttachments: sessionOptions.onPasteAttachments,
 			onDetach: sessionOptions.onDetach,
 			onOpenAttachment: sessionOptions.onOpenAttachment,
 			imagePreviewSupported: options.imageSurface?.capability !== null,
@@ -816,6 +818,7 @@ async function runSingleSessionInteractive(
 		isQueuePaused: () => inputController.queuePaused,
 		onReclaimFollowUp: (queueItemId) => inputController.reclaimFollowUp(queueItemId as QueueItemId),
 		onReclaimUserShell: (id) => inputController.reclaimUserShell(id),
+		onPasteAttachments: options.onPasteAttachments,
 		onDetach: options.onDetach,
 		onOpenAttachment: options.onOpenAttachment,
 		imagePreviewSupported: options.imageSurface?.capability !== null,

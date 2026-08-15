@@ -33,6 +33,7 @@ import { type ActivitySummaryMode, activitySummaryModeForApi } from "../ui/activ
 import type { InteractiveSessionOptions } from "../ui/run-interactive.ts";
 import { createEffortCommand, interactiveStatusLineSnapshot } from "./auth-flows.ts";
 import {
+	ingestPastedImages,
 	openAttachmentInSystemViewer,
 	openPathInSystemViewer,
 	pathSafeIdentity,
@@ -206,8 +207,9 @@ export function createAttachmentPreparer(
 
 function createMediaHandlers(
 	input: Pick<CreateInteractiveSessionOptionsInput, "restoredMedia" | "mediaLibrary" | "options" | "workspace">,
-): Pick<InteractiveSessionOptions, "onDetach" | "onOpenAttachment"> {
+): Pick<InteractiveSessionOptions, "onDetach" | "onOpenAttachment" | "onPasteAttachments"> {
 	return {
+		onPasteAttachments: (text) => ingestPastedImages(text, input.mediaLibrary),
 		onDetach: (attachmentId) =>
 			input.restoredMedia.contents.has(attachmentId) ? Promise.resolve() : input.mediaLibrary.detach(attachmentId),
 		onOpenAttachment: (attachmentId) => {

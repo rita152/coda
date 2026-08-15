@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentSeed, MessageId } from "@coda/agent";
 import type { ComponentInputContext, KeyInput, MarkdownRenderer, MouseButton } from "@coda/tui";
-import { stripAnsi } from "@coda/tui";
+import { setComponentFocused, stripAnsi } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import { createUnifiedCommandRegistry } from "../src/commands/unified-registry.ts";
 import type { ComposerExtensionReference } from "../src/session/composer-submission.ts";
@@ -37,6 +37,41 @@ describe("ChatComponent terminal input", () => {
 		component.handleInput(key("enter"), context);
 
 		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("/attach /tmp/photo.png", []));
+	});
+
+	it("stages a recognized pasted image as a filename chip instead of inserting its absolute path", async () => {
+		const onSubmit = vi.fn();
+		const onPasteAttachments = vi.fn(() =>
+			Promise.resolve([attachment("attachment:dropped", "reference image.png")]),
+		);
+		const component = createComponent({ onPasteAttachments, onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "paste", text: "/tmp/reference image.png" }, context);
+
+		await vi.waitFor(() => {
+			const frame = component.render({ width: 80, height: 12, now: 0 }).join("\n");
+			expect(frame).toContain("[reference image.png]");
+			expect(frame).not.toContain("/tmp/reference image.png");
+		});
+		component.handleInput({ type: "text", text: "describe it" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() =>
+			expect(onSubmit).toHaveBeenCalledWith("reference image.png describe it", ["attachment:dropped"]),
+		);
+	});
+
+	it("keeps ordinary pasted text in the Composer when it is not an image path", async () => {
+		const onSubmit = vi.fn();
+		const onPasteAttachments = vi.fn(() => undefined);
+		const component = createComponent({ onPasteAttachments, onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "paste", text: "ordinary pasted text" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("ordinary pasted text", []));
 	});
 
 	it("inserts printable text carried by a normalized KeyInput", () => {
@@ -311,6 +346,36 @@ describe("ChatComponent terminal input", () => {
 		expect(onSubmit).toHaveBeenCalledWith("Use /review", [], "Use /review", references);
 	});
 
+	it("keeps extension offsets aligned after removing attachment display brackets", async () => {
+		const onResolveExtensionReferences = vi.fn(
+			async (_references: readonly ComposerExtensionReference[]) => undefined,
+		);
+		const onSubmit = vi.fn(async () => undefined);
+		const component = createComponent({
+			onResolveExtensionReferences,
+			onSubmit,
+			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		component.handleInput({ type: "text", text: "Use /rev" }, context);
+
+		component.handleInput(key("enter"), context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onResolveExtensionReferences).toHaveBeenCalledOnce());
+		const references = onResolveExtensionReferences.mock.calls[0]![0];
+		expect(references).toMatchObject([
+			{ commandId: "skill:review", source: "skill", name: "review", start: 14, end: 21 },
+		]);
+		expect(onSubmit).toHaveBeenCalledWith(
+			"photo.png Use /review",
+			["attachment:one"],
+			"photo.png Use /review",
+			references,
+		);
+	});
+
 	it("restores the exact draft when extension reference resolution fails", async () => {
 		const onSubmit = vi.fn();
 		const component = createComponent({
@@ -578,9 +643,32 @@ describe("ChatComponent terminal input", () => {
 		expect(plain).toContain(`${"─".repeat(40)}\n[photo.png]\ndescribe this\n${"─".repeat(40)}`);
 	});
 
+	it("renders a committed inline attachment filename only once with display brackets", () => {
+		const component = createComponent({
+			colorLevel: 0,
+			initialAttachments: [attachment("attachment:one", "photo.png")],
+		});
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: {
+					id: "user-1",
+					message: { role: "user", content: "photo.png", timestamp: 1 },
+				},
+			}),
+		);
+
+		const plain = stripAnsi(component.render({ width: 40, height: 12, now: 0 }).join("\n"));
+		expect(plain.match(/\[photo\.png\]/g)).toHaveLength(1);
+		expect(plain).toContain(`${"─".repeat(40)}\n[photo.png]\n${"─".repeat(40)}`);
+		expect(plain).not.toContain("\nphoto.png\n");
+	});
+
 	it("keeps committed User-card attachments operable by keyboard and mouse", async () => {
 		const onOpenAttachment = vi.fn(async () => undefined);
 		const component = createComponent({
+			colorLevel: 1,
 			initialAttachments: [attachment("attachment:one", "photo.png")],
 			imagePreviewSupported: true,
 			onOpenAttachment,
@@ -605,15 +693,25 @@ describe("ChatComponent terminal input", () => {
 
 		component.render({ width: 80, height: 20, now: 0 });
 		component.handleInput(key("tab"), context);
-		const focused = component.render({ width: 80, height: 20, now: 0 }).join("\n");
-		expect(focused).toContain("32×24");
+		let focused = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		expect(focused).not.toContain("32×24");
+		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(0);
+		component.handleInput(key("enter"), context);
+		focused = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		expect(focused).not.toContain("32×24");
+		expect(focused).not.toContain("┌ Image preview");
 		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(1);
+		component.handleInput(key("q"), context);
 
 		const labelRow = component
 			.render({ width: 80, height: 20, now: 0 })
 			.findIndex((line) => stripAnsi(line).includes("[photo.png]"));
 		component.handleInput(mouse("move", 2, labelRow), context);
-		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("32×24");
+		focused = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		expect(focused).toContain("\x1b[36m[photo.png]\x1b[0m");
+		expect(stripAnsi(focused)).not.toContain("›");
+		expect(stripAnsi(focused)).not.toContain("32×24");
+		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(0);
 
 		const external = createComponent({
 			initialAttachments: [attachment("attachment:two", "external.png")],
@@ -816,7 +914,9 @@ describe("ChatComponent terminal input", () => {
 		const recalled = stripAnsi(component.render({ width: 60, height: 14, now: 0 }).join("\n"));
 		expect(recalled).toContain("! echo queued");
 		expect(recalled).toContain("Shell mode");
-		expect(recalled.match(/\[photo\.png\]/g)).toHaveLength(1);
+		expect(recalled).not.toContain("[photo.png]");
+		component.handleInput(key("c", { control: true }), context);
+		expect(stripAnsi(component.render({ width: 60, height: 14, now: 0 }).join("\n"))).toContain("[photo.png]");
 	});
 
 	it("renders live local output, queues Composer input during Shell execution, and cancels with Escape or Ctrl-C", async () => {
@@ -1216,7 +1316,7 @@ describe("ChatComponent terminal input", () => {
 		expect(reduced.animationInterval({ width: 80, height: 24, now: 0 })).toBe(1_000);
 	});
 
-	it("stages externally resolved attachments as filename chips and submits their stable identities", async () => {
+	it("stages attachments as inline filename elements and submits their stable identities", async () => {
 		const onSubmit = vi.fn(async () => undefined);
 		const component = createComponent({ onSubmit });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
@@ -1226,23 +1326,104 @@ describe("ChatComponent terminal input", () => {
 
 		component.handleInput({ type: "text", text: "describe this" }, context);
 		component.handleInput(key("enter"), context);
-		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("describe this", ["attachment:one"]));
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("photo.png describe this", ["attachment:one"]));
 		await vi.waitFor(() => {
 			const frame = component.render({ width: 80, height: 12, now: 0 }).join("\n");
 			expect(frame.match(/\[photo\.png\]/g)).toHaveLength(1);
-			expect(frame).toContain("[photo.png]\ndescribe this");
+			expect(frame).toContain("[photo.png] describe this");
 		});
+
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: {
+					id: "user-attachment",
+					message: { role: "user", content: "photo.png describe this", timestamp: 1 },
+				},
+			}),
+		);
+		const committed = stripAnsi(component.render({ width: 80, height: 12, now: 0 }).join("\n"));
+		expect(committed.match(/\[photo\.png\]/g)).toHaveLength(1);
+		expect(committed).toContain("[photo.png] describe this");
+		expect(committed).not.toContain("\nphoto.png describe this\n");
 	});
 
-	it("wraps composer attachments to two rows and reports hidden overflow", () => {
+	it("wraps inline filename elements naturally with Composer text", () => {
 		const component = createComponent();
-		for (let index = 0; index < 6; index++) {
-			component.stageAttachment(attachment(`attachment:${index + 1}`, `long-photo-${index + 1}.png`));
-		}
+		component.handleInput({ type: "text", text: "compare" }, { requestImmediateRender: vi.fn() });
+		component.stageAttachment(attachment("attachment:one", "long-photo-one.png"));
+		component.handleInput({ type: "text", text: "with" }, { requestImmediateRender: vi.fn() });
+		component.stageAttachment(attachment("attachment:two", "long-photo-two.png"));
 
 		const plain = stripAnsi(component.render({ width: 40, height: 14, now: 0 }).join("\n"));
-		expect(plain).toContain("… +3");
-		expect(plain.split("\n").filter((line) => line.includes("long-photo-") || line.includes("… +"))).toHaveLength(2);
+		expect(plain).toContain("compare [long-photo-one.png] with");
+		expect(plain).toContain("[long-photo-two.png]");
+		expect(plain).not.toContain("… +");
+	});
+
+	it("inserts each dropped filename at the current prompt position", async () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({ onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "compare" }, context);
+		component.stageAttachment(attachment("attachment:a", "a.png"));
+		component.handleInput({ type: "text", text: "with" }, context);
+		component.stageAttachment(attachment("attachment:b", "b.png"));
+		component.handleInput({ type: "text", text: "please" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() =>
+			expect(onSubmit).toHaveBeenCalledWith("compare a.png with b.png please", ["attachment:a", "attachment:b"]),
+		);
+		component.accept(
+			event({
+				type: "run_start",
+				source: "prompt",
+				inputMessage: {
+					id: "user-comparison",
+					message: { role: "user", content: "compare a.png with b.png please", timestamp: 1 },
+				},
+			}),
+		);
+		const committed = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
+		expect(committed.match(/\[a\.png\]/g)).toHaveLength(1);
+		expect(committed.match(/\[b\.png\]/g)).toHaveLength(1);
+		expect(committed).toContain("compare [a.png] with [b.png] please");
+	});
+
+	it("submits attachment filenames without display brackets while preserving ordinary brackets", async () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({ onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.handleInput({ type: "text", text: "Keep [manual] and inspect" }, context);
+		component.stageAttachment(attachment("attachment:one", "/private/tmp/photo.png"));
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() =>
+			expect(onSubmit).toHaveBeenCalledWith("Keep [manual] and inspect photo.png", ["attachment:one"]),
+		);
+		const frame = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
+		expect(frame).toContain("Keep [manual] and inspect [photo.png]");
+		expect(frame).not.toContain("/private/tmp");
+	});
+
+	it("removes an inline filename element and its upload together", async () => {
+		const onSubmit = vi.fn();
+		const onDetach = vi.fn(async () => undefined);
+		const component = createComponent({ onDetach, onSubmit });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+
+		component.handleInput(key("backspace"), context);
+		component.handleInput(key("backspace"), context);
+		component.handleInput({ type: "text", text: "text only" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("text only", []));
+		await vi.waitFor(() => expect(onDetach).toHaveBeenCalledWith("attachment:one"));
 	});
 
 	it("retains text and attachments when submission is rejected", async () => {
@@ -1272,17 +1453,27 @@ describe("ChatComponent terminal input", () => {
 			imagePreviewSupported: true,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		setComponentFocused(component, true);
 		component.stageAttachment(attachment("attachment:one", "photo.png"));
 
-		component.handleInput(key("tab"), context);
-		let frame = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		let lines = component.render({ width: 80, height: 20, now: 0 });
+		let frame = lines.join("\n");
 		expect(frame).toContain("photo.png");
-		expect(frame).toContain("32×24");
-		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(1);
+		expect(frame).not.toContain("32×24");
+		const cursor = component.cursorPlacement();
+		expect(cursor).toBeDefined();
+		expect(stripAnsi(lines[cursor!.row] ?? "")).toContain("[photo.png]");
+		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(0);
 
+		component.handleInput(key("tab"), context);
+		component.render({ width: 80, height: 20, now: 0 });
 		component.handleInput(key("enter"), context);
-		frame = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		lines = component.render({ width: 80, height: 20, now: 0 });
+		frame = lines.join("\n");
 		expect(frame).toContain("Image preview");
+		expect(frame).not.toContain("32×24");
+		expect(frame).not.toContain("┌ Image preview");
+		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(1);
 
 		component.handleInput(key("q"), context);
 		component.handleInput(key("delete"), context);
@@ -1309,23 +1500,68 @@ describe("ChatComponent terminal input", () => {
 		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).not.toContain("Image preview");
 	});
 
-	it("limits mouse hover and click handling to attachment label hit regions", async () => {
+	it("limits mouse hover to label highlighting and opens unsupported previews only on click", async () => {
 		const onOpenAttachment = vi.fn(async () => undefined);
 		const component = createComponent({
+			colorLevel: 1,
 			onOpenAttachment,
 			imagePreviewSupported: false,
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 		component.stageAttachment(attachment("attachment:one", "photo.png"));
-		component.render({ width: 80, height: 20, now: 0 });
+		const labelRow = component
+			.render({ width: 80, height: 20, now: 0 })
+			.findIndex((line) => stripAnsi(line).includes("[photo.png]"));
+		expect(labelRow).toBeGreaterThanOrEqual(0);
 
-		component.handleInput(mouse("move", 2, 14), context);
-		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("32×24");
-		component.handleInput(mouse("release", 2, 14, "left"), context);
+		component.handleInput(mouse("move", 2, labelRow), context);
+		let frame = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		expect(frame).toContain("\x1b[1;36m[photo.png]\x1b[0m");
+		expect(stripAnsi(frame)).not.toContain("›");
+		expect(stripAnsi(frame)).not.toContain("32×24");
+		expect(stripAnsi(frame)).not.toContain("Enter opens viewer");
+		expect(component.imagePlacements({ width: 80, height: 20, now: 0 })).toHaveLength(0);
+		component.handleInput(mouse("release", 2, labelRow, "left"), context);
 		await vi.waitFor(() => expect(onOpenAttachment).toHaveBeenCalledWith("attachment:one"));
 
 		component.handleInput(mouse("move", 40, 1), context);
-		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).not.toContain("32×24");
+		frame = component.render({ width: 80, height: 20, now: 0 }).join("\n");
+		expect(frame).not.toContain("\x1b[1;36m[photo.png]\x1b[0m");
+	});
+
+	it("keeps keyboard input in the Composer after mouse hover", async () => {
+		const onSubmit = vi.fn();
+		const component = createComponent({ onSubmit, imagePreviewSupported: true });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		const labelRow = component
+			.render({ width: 80, height: 20, now: 0 })
+			.findIndex((line) => stripAnsi(line).includes("[photo.png]"));
+		expect(labelRow).toBeGreaterThanOrEqual(0);
+		component.handleInput(mouse("move", 2, labelRow), context);
+
+		component.handleInput({ type: "text", text: "describe it" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("photo.png describe it", ["attachment:one"]));
+	});
+
+	it("opens the terminal image modal when a previewable attachment label is clicked", () => {
+		const onOpenAttachment = vi.fn(async () => undefined);
+		const component = createComponent({ onOpenAttachment, imagePreviewSupported: true });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "look at" }, context);
+		component.stageAttachment(attachment("attachment:one", "photo.png"));
+		const lines = component.render({ width: 80, height: 20, now: 0 });
+		const labelRow = lines.findIndex((line) => stripAnsi(line).includes("[photo.png]"));
+		const labelColumn = stripAnsi(lines[labelRow] ?? "").indexOf("[photo.png]");
+		expect(labelRow).toBeGreaterThanOrEqual(0);
+		expect(labelColumn).toBeGreaterThanOrEqual(0);
+
+		component.handleInput(mouse("release", labelColumn + 1, labelRow, "left"), context);
+
+		expect(component.render({ width: 80, height: 20, now: 0 }).join("\n")).toContain("Image preview");
+		expect(onOpenAttachment).not.toHaveBeenCalled();
 	});
 });
 

@@ -80,6 +80,58 @@ describe("Editor", () => {
 		expect(editor.markers).toEqual([{ id: "reference:1", start: 11, end: 18, value: { source: "skill" } }]);
 	});
 
+	it("renders marker hit regions in the same wrapped text flow", () => {
+		const editor = new Editor();
+		editor.setText("compare [reference.png] with this");
+		editor.addMarker({
+			id: "attachment:1",
+			start: 8,
+			end: 23,
+			value: { kind: "attachment" },
+			atomic: true,
+		});
+
+		const frame = editor.render({
+			width: 40,
+			height: 20,
+			focused: true,
+			cursorMode: "native",
+			styleBorder: (value) => value,
+		});
+
+		expect(frame.lines.slice(1, -1)).toEqual(["compare [reference.png] with this"]);
+		expect(frame.markerRegions).toEqual([
+			{
+				id: "attachment:1",
+				row: 1,
+				start: 8,
+				end: 23,
+				value: { kind: "attachment" },
+			},
+		]);
+	});
+
+	it("moves across and deletes atomic markers as one editor element", () => {
+		const editor = new Editor();
+		editor.setText("[photo.png]");
+		editor.addMarker({
+			id: "attachment:1",
+			start: 0,
+			end: 11,
+			value: { kind: "attachment" },
+			atomic: true,
+		});
+
+		editor.handleInput(key("left"));
+		expect(editor.cursorOffset).toBe(0);
+		editor.handleInput(key("right"));
+		expect(editor.cursorOffset).toBe(11);
+		editor.handleInput(key("backspace"));
+
+		expect(editor.text).toBe("");
+		expect(editor.markers).toEqual([]);
+	});
+
 	it("preserves markers in captured Editor state", () => {
 		const editor = new Editor();
 		editor.setText("/review");

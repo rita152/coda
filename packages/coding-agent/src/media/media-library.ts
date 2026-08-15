@@ -272,15 +272,17 @@ export class MediaLibrary {
 			throw new Error(`Image exceeds the ${this.#limits.maxPixels} decoded-pixel limit`);
 		}
 
-		const previewBytes = await sharp(bytes, {
-			animated: false,
-			failOn: "error",
-			limitInputPixels: this.#limits.maxPixels,
-		})
-			.rotate()
-			.resize({ width: 1_600, height: 1_200, fit: "inside", withoutEnlargement: true })
-			.png({ compressionLevel: 9 })
-			.toBuffer();
+		const previewBytes =
+			mimeType === "image/png" && (metadata.orientation === undefined || metadata.orientation === 1)
+				? Buffer.from(bytes)
+				: await sharp(bytes, {
+						animated: false,
+						failOn: "error",
+						limitInputPixels: this.#limits.maxPixels,
+					})
+						.rotate()
+						.png({ compressionLevel: 9 })
+						.toBuffer();
 		const model = await this.#createModelRendition(bytes, metadata.hasAlpha === true);
 		const modelDigest = createHash("sha256").update(model.bytes).digest("hex");
 		const previewMetadata = await sharp(previewBytes).metadata();

@@ -6,10 +6,12 @@ import {
 	type ComponentInputContext,
 	type CursorPlacement,
 	createMarkdownRenderer,
+	displayWidth,
 	Editor,
 	type ImagePlacement,
 	type MarkdownRenderer,
 	type RenderContext,
+	sliceAnsi,
 	type TerminalAppearance,
 	type TerminalInput,
 } from "@coda/tui";
@@ -20,9 +22,14 @@ import type { ComposerExtensionReference, ComposerSubmission } from "../session/
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
-import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
+import {
+	attachmentIdFromMarkerValue,
+	ChatAttachmentController,
+	type ChatAttachmentProjection,
+} from "./chat-attachments.ts";
 import { ChatComposerController, isRunCancellationInput } from "./chat-composer.ts";
 import {
+	attachmentTargetKey,
 	MINIMUM_CHAT_COLUMNS,
 	MINIMUM_CHAT_ROWS,
 	renderHeader,
@@ -87,6 +94,7 @@ export interface ChatComponentOptions {
 	readonly onUserShell?: (command: string) => Promise<UserShellSubmission> | UserShellSubmission;
 	readonly onReclaimUserShell?: (id: string) => Promise<void> | void;
 	readonly onAbortUserShell?: () => void;
+	readonly onPasteAttachments?: (text: string) => Promise<readonly ChatAttachment[]> | undefined;
 	readonly onDetach?: (attachmentId: string) => Promise<void>;
 	readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
 	readonly onResumeFollowUps?: () => Promise<void> | void;
@@ -143,7 +151,7 @@ export class ChatComponent extends Component {
 		this.#history = new ComposerHistory(options.composerSubmissions);
 		this.#theme = createCodaTheme(options.colorLevel ?? 0, options.appearance);
 		this.#attachments = new ChatAttachmentController({
-			theme: this.#theme,
+			editor: this.#editor,
 			imagePreviewSupported: options.imagePreviewSupported ?? false,
 			initialAttachments: options.initialAttachments,
 			restoredAttachments: options.restoredAttachments,
@@ -323,9 +331,11 @@ export class ChatComponent extends Component {
 		const attachmentProjection = this.#attachmentProjection();
 		const attachmentView = this.#attachments.view(attachmentProjection);
 		const focusedAttachmentTarget = attachmentView.focusedTarget;
+		const keyboardAttachmentFocused =
+			focusedAttachmentTarget !== undefined && attachmentView.focusOrigin === "keyboard";
 		const editorFocused =
 			this.focused &&
-			focusedAttachmentTarget === undefined &&
+			!keyboardAttachmentFocused &&
 			!attachmentView.imageModal &&
 			this.#commandFlow.view === undefined;
 		const editorFrame = this.#editor.render({
@@ -339,11 +349,32 @@ export class ChatComponent extends Component {
 					: this.#theme.styleEditorBorder(stateView.reasoning, editorFocused, value),
 			...(this.#shellMode ? { prefix: this.#theme.style("error", "! ") } : {}),
 		});
-		const attachmentLayout = this.#attachments.layout(width);
-		const attachmentRows = attachmentLayout.lines.length;
+		const composerAttachmentRegions = editorFrame.markerRegions.flatMap((region) => {
+			const attachmentId = attachmentIdFromMarkerValue(region.value);
+			if (!attachmentId) return [];
+			const composerIndex = attachmentView.staged.findIndex(({ id }) => id === attachmentId);
+			if (composerIndex < 0) return [];
+			return [
+				{
+					...region,
+					targetKey: attachmentTargetKey("composer", attachmentId, composerIndex),
+				},
+			];
+		});
+		const editorLines = [...editorFrame.lines];
+		for (const region of [...composerAttachmentRegions].sort(
+			(left, right) => right.row - left.row || right.start - left.start,
+		)) {
+			if (region.targetKey !== attachmentView.focusKey) continue;
+			const line = editorLines[region.row] ?? "";
+			const before = sliceAnsi(line, 0, region.start);
+			const selected = sliceAnsi(line, region.start, region.end - region.start);
+			const after = sliceAnsi(line, region.end, Math.max(0, displayWidth(line) - region.end));
+			editorLines[region.row] = `${before}${this.#theme.styleOnSurface("selection", "accent", selected)}${after}`;
+		}
 		const flowView = this.#commandFlow.view;
 		const palette = !flowView && !this.#shellMode ? this.#commands.palette : undefined;
-		const maximumDrawerItems = Math.max(0, Math.min(6, height - editorFrame.lines.length - attachmentRows - 5));
+		const maximumDrawerItems = Math.max(0, Math.min(6, height - editorLines.length - 5));
 		const drawerLines =
 			maximumDrawerItems === 0
 				? []
@@ -359,7 +390,7 @@ export class ChatComponent extends Component {
 			width,
 			now,
 			imageModal: attachmentView.imageModal,
-			focusedAttachmentSource: focusedAttachmentTarget?.source,
+			focusedAttachmentSource: keyboardAttachmentFocused ? focusedAttachmentTarget.source : undefined,
 			shellMode: this.#shellMode,
 			unreadUpdates: this.#viewport.unreadUpdates,
 			transcriptMode: this.#transcriptMode,
@@ -370,7 +401,7 @@ export class ChatComponent extends Component {
 			modelLabel: stateView.modelLabel,
 			reasoning: stateView.reasoning,
 		});
-		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + footerLines.length;
+		const dockRows = editorLines.length + drawerRows + activityRows + footerLines.length;
 		this.#lastDockRows = dockRows;
 		const viewportHeight = height - 1 - dockRows;
 		const blocks = this.#timelineRenderer.renderViewportBlocks({
@@ -393,7 +424,7 @@ export class ChatComponent extends Component {
 		const transcript = [...viewport.lines];
 		while (transcript.length < viewportHeight) transcript.push("");
 
-		const attachmentRow = height - dockRows + drawerRows;
+		const editorRow = 1 + viewportHeight + drawerRows + activityRows;
 		this.#attachments.setHitRegions([
 			...viewport.sourceRows.flatMap((source, row) =>
 				this.#timelineRenderer
@@ -401,12 +432,11 @@ export class ChatComponent extends Component {
 					.filter((region) => region.row === source.lineOffset)
 					.map((region) => ({ ...region, row: 1 + row })),
 			),
-			...attachmentLayout.regions.map((region) => ({
+			...composerAttachmentRegions.map((region) => ({
 				...region,
-				row: attachmentRow + region.row,
+				row: editorRow + region.row,
 			})),
 		]);
-		const editorRow = 1 + viewportHeight + drawerRows + attachmentRows + activityRows;
 		this.#lastCursor = editorFrame.cursor
 			? {
 					row: editorRow + editorFrame.cursor.row,
@@ -418,7 +448,6 @@ export class ChatComponent extends Component {
 			renderHeader(width, this.#transcriptMode),
 			...transcript,
 			...drawerLines,
-			...attachmentLayout.lines,
 			...(activity
 				? [
 						renderActivityStatus(activity, {
@@ -429,11 +458,11 @@ export class ChatComponent extends Component {
 						}),
 					]
 				: []),
-			...editorFrame.lines,
+			...editorLines,
 			...footerLines,
 		];
 		const preview = this.#attachments.preview({ width, height, now }, this.#lastDockRows, attachmentProjection);
-		return preview ? renderPreviewOverlay(frame, preview.geometry, preview.attachment, width) : frame;
+		return preview ? renderPreviewOverlay(frame, preview.geometry, width) : frame;
 	}
 
 	override cursorPlacement(): CursorPlacement | undefined {
@@ -470,6 +499,7 @@ export class ChatComponent extends Component {
 		if (input.type === "resize") return;
 		if (this.running && isRunCancellationInput(input)) {
 			this.#composer.handleInput(input, attachmentView.staged.length);
+			this.#attachments.reconcileEditor();
 			return;
 		}
 		if (this.#attachments.handleInput("overlay", input, attachmentProjection, attachmentPorts)) return;
@@ -478,16 +508,21 @@ export class ChatComponent extends Component {
 			this.invalidate();
 			return;
 		}
+		if (!this.#shellMode && input.type === "paste" && this.#handlePastedAttachments(input.text)) return;
 		if (!this.#shellMode) {
 			const before = this.#editor.text;
 			const commandResult = this.#commands.handleInput(input);
 			if (commandResult.type === "handled") {
-				if (this.#editor.text !== before) this.#history.noteTextMutation();
+				if (this.#editor.text !== before) {
+					this.#history.noteTextMutation();
+					this.#attachments.reconcileEditor();
+				}
 				this.invalidate();
 				return;
 			}
 			if (commandResult.type === "invoke") {
 				this.#composer.invokeCommand(commandResult.command);
+				this.#attachments.reconcileEditor();
 				return;
 			}
 		}
@@ -526,6 +561,40 @@ export class ChatComponent extends Component {
 		}
 		if (input.type === "key" && input.action === "release") return;
 		this.#composer.handleInput(input, attachmentView.staged.length);
+		this.#attachments.reconcileEditor();
+	}
+
+	#handlePastedAttachments(text: string): boolean {
+		if (!this.#options.onPasteAttachments) return false;
+		let operation: Promise<readonly ChatAttachment[]> | undefined;
+		try {
+			operation = this.#options.onPasteAttachments(text);
+		} catch (error) {
+			this.#state.mutate({ type: "set_error", value: error instanceof Error ? error.message : String(error) });
+			this.invalidate();
+			return true;
+		}
+		if (!operation) return false;
+		const insertionOffset = this.#editor.cursorOffset;
+		this.#state.mutate({ type: "set_error", value: undefined });
+		void operation.then(
+			(attachments) => {
+				for (const [index, attachment] of attachments.entries()) {
+					this.#attachments.mutate({
+						type: "stage",
+						attachment,
+						...(index === 0 ? { at: insertionOffset } : {}),
+					});
+				}
+				this.#state.mutate({ type: "set_error", value: undefined });
+				this.invalidate();
+			},
+			(error: unknown) => {
+				this.#state.mutate({ type: "set_error", value: error instanceof Error ? error.message : String(error) });
+				this.invalidate();
+			},
+		);
+		return true;
 	}
 
 	get #hasPausedQueue(): boolean {

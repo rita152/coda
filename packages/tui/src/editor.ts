@@ -25,11 +25,23 @@ export interface EditorCursorPlacement {
 export interface EditorFrame {
 	readonly lines: readonly string[];
 	readonly cursor?: EditorCursorPlacement;
+	readonly markerRegions: readonly EditorMarkerRegion[];
 }
 
 /** A logical range that follows non-overlapping edits and is removed when its text is edited. */
 export interface EditorMarker<T = unknown> {
 	readonly id: string;
+	readonly start: number;
+	readonly end: number;
+	readonly value: T;
+	/** Treats the marked range as one cursor-navigation and deletion unit. */
+	readonly atomic?: boolean;
+}
+
+/** A visible marker segment in an Editor frame, expressed in terminal cells. */
+export interface EditorMarkerRegion<T = unknown> {
+	readonly id: string;
+	readonly row: number;
 	readonly start: number;
 	readonly end: number;
 	readonly value: T;
@@ -141,7 +153,7 @@ export class Editor {
 	}
 
 	canMoveVertical(direction: -1 | 1): boolean {
-		const points = editorCursorPoints(this.#text, this.#lastRenderWidth);
+		const points = editorCursorPoints(this.#text, this.#lastRenderWidth, this.#markers);
 		const current = points.find((point) => point.offset === this.#cursor);
 		if (!current) return false;
 		const lastRow = points.at(-1)?.row ?? 0;
@@ -356,7 +368,7 @@ export class Editor {
 		const contentWidth = options.width - prefixWidth;
 		this.#lastRenderWidth = contentWidth;
 		this.#lastRenderHeight = options.height;
-		const layout = layoutEditorText(this.#text, this.#cursor, contentWidth);
+		const layout = layoutEditorText(this.#text, this.#cursor, contentWidth, this.#markers);
 		const content = [...layout.lines];
 		if (options.focused && options.cursorMode === "software") {
 			const line = content[layout.cursorRow] ?? "";
@@ -381,8 +393,19 @@ export class Editor {
 			const absoluteIndex = this.#scrollTop + visibleIndex;
 			return `${absoluteIndex === 0 ? prefix : blankPrefix}${line}`;
 		});
+		const markerRegions = layoutMarkerRegions(this.#text, this.#markers, layout.points)
+			.filter((region) => region.row >= this.#scrollTop && region.row < this.#scrollTop + visibleRows)
+			.map((region) =>
+				Object.freeze({
+					...region,
+					row: region.row - this.#scrollTop + 1,
+					start: region.start + prefixWidth,
+					end: region.end + prefixWidth,
+				}),
+			);
 		return {
 			lines: Object.freeze([topBorder, ...visibleContent, bottomBorder]),
+			markerRegions: Object.freeze(markerRegions),
 			cursor: options.focused
 				? Object.freeze({
 						row: layout.cursorRow - this.#scrollTop + 1,
@@ -402,7 +425,7 @@ export class Editor {
 	}
 
 	#moveVertical(delta: -1 | 1): void {
-		const points = editorCursorPoints(this.#text, this.#lastRenderWidth);
+		const points = editorCursorPoints(this.#text, this.#lastRenderWidth, this.#markers);
 		const current = points.find((point) => point.offset === this.#cursor);
 		if (!current) return;
 		this.#preferredColumn ??= current.column;
@@ -421,6 +444,10 @@ export class Editor {
 	}
 
 	#previousBoundary(offset: number): number {
+		const atomic = [...this.#markers]
+			.reverse()
+			.find((marker) => marker.atomic && offset > marker.start && offset <= marker.end);
+		if (atomic) return atomic.start;
 		for (const marker of this.#pastes.keys()) {
 			const start = offset - marker.length;
 			if (start >= 0 && this.#text.slice(start, offset) === marker) return start;
@@ -429,6 +456,8 @@ export class Editor {
 	}
 
 	#nextBoundary(offset: number): number {
+		const atomic = this.#markers.find((marker) => marker.atomic && offset >= marker.start && offset < marker.end);
+		if (atomic) return atomic.end;
 		for (const marker of this.#pastes.keys()) {
 			if (this.#text.startsWith(marker, offset)) return offset + marker.length;
 		}
@@ -572,6 +601,7 @@ function renderScrollBorder(width: number, direction: "↑" | "↓", hiddenRows:
 
 interface EditorTextLayout {
 	readonly lines: readonly string[];
+	readonly points: readonly EditorCursorPoint[];
 	readonly cursorRow: number;
 	readonly cursorColumn: number;
 	readonly cursorOffset: number;
@@ -585,17 +615,29 @@ interface EditorCursorPoint {
 	readonly lineOffset: number;
 }
 
-function editorCursorPoints(value: string, width: number): readonly EditorCursorPoint[] {
-	return buildVisualEditorLayout(value, width).points;
+function editorCursorPoints(
+	value: string,
+	width: number,
+	markers: readonly EditorMarker[] = [],
+): readonly EditorCursorPoint[] {
+	return buildVisualEditorLayout(value, width, markers).points.filter(
+		(point) => !markers.some((marker) => marker.atomic && point.offset > marker.start && point.offset < marker.end),
+	);
 }
 
-function layoutEditorText(value: string, cursor: number, width: number): EditorTextLayout {
-	const layout = buildVisualEditorLayout(value, width);
+function layoutEditorText(
+	value: string,
+	cursor: number,
+	width: number,
+	markers: readonly EditorMarker[] = [],
+): EditorTextLayout {
+	const layout = buildVisualEditorLayout(value, width, markers);
 	const point = layout.points.find((candidate) => candidate.offset === cursor) ?? layout.points[0]!;
 	const nextBoundary = nextGraphemeBoundary(value, cursor);
 	const candidate = value.slice(cursor, nextBoundary);
 	return Object.freeze({
 		lines: layout.lines,
+		points: layout.points,
 		cursorRow: point.row,
 		cursorColumn: point.column,
 		cursorOffset: point.lineOffset,
@@ -603,12 +645,53 @@ function layoutEditorText(value: string, cursor: number, width: number): EditorT
 	});
 }
 
+function layoutMarkerRegions(
+	value: string,
+	markers: readonly EditorMarker[],
+	points: readonly EditorCursorPoint[],
+): EditorMarkerRegion[] {
+	const pointByOffset = new Map(points.map((point) => [point.offset, point]));
+	const regions: EditorMarkerRegion[] = [];
+	for (const marker of markers) {
+		let active: EditorMarkerRegion | undefined;
+		const markedText = value.slice(marker.start, marker.end);
+		for (const segment of graphemeSegmenter.segment(markedText)) {
+			if (/^[\r\n]+$/u.test(segment.segment)) {
+				active = undefined;
+				continue;
+			}
+			const offset = marker.start + segment.index;
+			const point = pointByOffset.get(offset);
+			if (!point) continue;
+			const end = point.column + displayWidth(segment.segment);
+			if (active && active.row === point.row && active.end === point.column) {
+				active = Object.freeze({ ...active, end });
+				regions[regions.length - 1] = active;
+				continue;
+			}
+			active = Object.freeze({
+				id: marker.id,
+				row: point.row,
+				start: point.column,
+				end,
+				value: marker.value,
+			});
+			regions.push(active);
+		}
+	}
+	return regions;
+}
+
 interface VisualEditorLayout {
 	readonly lines: readonly string[];
 	readonly points: readonly EditorCursorPoint[];
 }
 
-function buildVisualEditorLayout(value: string, width: number): VisualEditorLayout {
+function buildVisualEditorLayout(
+	value: string,
+	width: number,
+	markers: readonly EditorMarker[] = [],
+): VisualEditorLayout {
 	const lines = [""];
 	const points = new Map<number, EditorCursorPoint>();
 	let row = 0;
@@ -619,7 +702,17 @@ function buildVisualEditorLayout(value: string, width: number): VisualEditorLayo
 	setPoint(0);
 
 	for (const word of wordSegmenter.segment(value)) {
-		const canWrapAsWord = !/^\s+$/u.test(word.segment) && !/[\r\n]/u.test(word.segment);
+		const atomic = markers.find((marker) => marker.atomic && word.index >= marker.start && word.index < marker.end);
+		if (atomic?.start === word.index) {
+			const atomicWidth = displayWidth(value.slice(atomic.start, atomic.end));
+			if (atomicWidth <= width && column > 0 && column + atomicWidth > width) {
+				row++;
+				column = 0;
+				lines.push("");
+				setPoint(word.index);
+			}
+		}
+		const canWrapAsWord = !atomic && !/^\s+$/u.test(word.segment) && !/[\r\n]/u.test(word.segment);
 		const wordWidth = displayWidth(word.segment);
 		if (canWrapAsWord && wordWidth <= width && column > 0 && column + wordWidth > width) {
 			row++;

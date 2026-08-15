@@ -27,6 +27,7 @@ export {
 	type EditorFrame,
 	type EditorInputResult,
 	type EditorMarker,
+	type EditorMarkerRegion,
 	type EditorRenderOptions,
 	type EditorState,
 } from "./editor.ts";

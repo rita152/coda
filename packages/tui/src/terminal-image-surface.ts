@@ -110,11 +110,11 @@ class KittyImageSurface implements TerminalImageSurface {
 				output += kittyCommand(`a=d,d=I,i=${record.id},q=2`);
 				record.generation = placement.generation;
 				output += transmitPng(record.id, placement.png);
-			} else {
-				output += kittyCommand(`a=d,d=p,i=${record.id},q=2`);
 			}
 			output += `\x1b[${placement.row + 1};${placement.column + 1}H`;
-			output += kittyCommand(`a=p,i=${record.id},p=${record.id},c=${placement.width},r=${placement.height},q=2,z=1`);
+			output += kittyCommand(
+				`a=p,i=${record.id},p=${record.id},c=${placement.width},r=${placement.height},q=2,z=1,C=1`,
+			);
 		}
 		if (!output) return;
 		this.#terminal.write(`${output}\x1b[?25l`);
@@ -162,7 +162,7 @@ function transmitPng(id: number, png: Uint8Array): string {
 	for (let offset = 0; offset < encoded.length; offset += CHUNK_SIZE) {
 		const chunk = encoded.slice(offset, offset + CHUNK_SIZE);
 		const more = offset + CHUNK_SIZE < encoded.length ? 1 : 0;
-		const parameters = offset === 0 ? `a=T,f=100,t=d,i=${id},q=2,m=${more}` : `m=${more}`;
+		const parameters = offset === 0 ? `a=t,f=100,t=d,i=${id},q=2,m=${more}` : `m=${more}`;
 		output += kittyCommand(parameters, chunk);
 	}
 	return output;

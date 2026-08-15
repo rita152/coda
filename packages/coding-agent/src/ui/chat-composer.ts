@@ -2,7 +2,7 @@ import type { AgentEvent, FollowUp } from "@coda/agent";
 import type { Editor, TerminalInput } from "@coda/tui";
 import type { CommandDefinition } from "../commands/types.ts";
 import type { RecoverableFollowUp } from "../session/types.ts";
-import type { ChatAttachmentController } from "./chat-attachments.ts";
+import { type ChatAttachmentController, normalizeAttachmentElements } from "./chat-attachments.ts";
 import type { ChatAttachment, ChatComponentOptions } from "./chat-component.ts";
 import { followUpText, shellActivation } from "./chat-rendering.ts";
 import { IDLE_CTRL_C_CONFIRMATION_WINDOW_MS } from "./chat-timeline-renderer.ts";
@@ -211,6 +211,7 @@ export class ChatComposerController {
 			if (this.#shellMode || this.#editor.text.length > 0) {
 				this.#editor.clear();
 				this.#shellMode = false;
+				this.#attachments.restoreInlineElements();
 				this.#history.reset();
 				this.#host.mutate({ type: "invalidate" });
 			} else if (input.action === "press") {
@@ -230,6 +231,7 @@ export class ChatComposerController {
 			if (this.#shellMode) {
 				if (this.#editor.text.trim().length === 0) {
 					this.#shellMode = false;
+					this.#attachments.restoreInlineElements();
 					this.#host.mutate({ type: "set_error", value: undefined });
 					this.#host.mutate({ type: "invalidate" });
 				}
@@ -262,9 +264,10 @@ export class ChatComposerController {
 		}
 
 		let editorInput: TerminalInput = input;
-		if (!this.#shellMode && this.#editor.text.length === 0) {
+		if (!this.#shellMode && (this.#editor.text.length === 0 || this.#attachments.hasOnlyInlineElements())) {
 			const activation = shellActivation(input);
 			if (activation) {
+				this.#attachments.suspendInlineElements();
 				this.#shellMode = true;
 				this.#history.reset();
 				this.#host.mutate({ type: "set_error", value: undefined });
@@ -280,6 +283,7 @@ export class ChatComposerController {
 			const result = this.#editor.handleInput(editorInput);
 			if (result.type === "handled" && this.#editor.text === before) {
 				this.#shellMode = false;
+				this.#attachments.restoreInlineElements();
 				this.#host.mutate({ type: "set_error", value: undefined });
 			} else if (this.#editor.text !== before) {
 				this.#host.mutate({ type: "set_error", value: undefined });
@@ -302,8 +306,10 @@ export class ChatComposerController {
 			return;
 		}
 		if (editorResult.type !== "submit") return;
-		const value = editorResult.text.trim();
-		const extensionReferences = extensionReferencesFromMarkers(editorResult.markers ?? []);
+		const displayText = editorResult.text.trim();
+		const normalized = normalizeAttachmentElements(displayText, editorResult.markers ?? []);
+		const value = normalized.text;
+		const extensionReferences = extensionReferencesFromMarkers(normalized.markers);
 		if (this.#shellMode) {
 			if (!value) {
 				this.#host.mutate({
@@ -356,6 +362,7 @@ export class ChatComposerController {
 		}
 		const composerText = value;
 		let submissionText = value.startsWith("\\!") ? value.slice(1) : value;
+		let provisionalText = displayText.startsWith("\\!") ? displayText.slice(1) : displayText;
 		const appendsPausedQueue = !hostView.agentRunning && this.view().hasPausedQueue;
 		let kind: Exclude<ProvisionalPromptCard["kind"], "user_shell"> = hostView.agentRunning
 			? editorResult.alternate
@@ -369,6 +376,7 @@ export class ChatComposerController {
 		if (hostView.agentRunning && /^\/follow-up\s+/iu.test(submissionText) && !submissionText.includes("\n")) {
 			kind = "follow_up";
 			submissionText = submissionText.replace(/^\/follow-up\s+/iu, "").trim();
+			provisionalText = provisionalText.replace(/^\/follow-up\s+/iu, "").trim();
 		}
 		if (submissionText.length === 0 && stagedAttachmentCount === 0) return;
 		const submittedAttachments = this.#attachments.mutate({
@@ -379,7 +387,7 @@ export class ChatComposerController {
 		const provisional = this.mutate({
 			type: "create_provisional",
 			kind,
-			text: submissionText,
+			text: provisionalText,
 			attachments: submittedAttachments,
 			status: kind === "steering" ? "Steering queued" : kind === "follow_up" ? "Follow-up queued" : undefined,
 		})!;
@@ -485,6 +493,7 @@ export class ChatComposerController {
 		})!;
 		this.#editor.clear();
 		this.#shellMode = false;
+		this.#attachments.restoreInlineElements();
 		this.#history.reset();
 		this.#host.mutate({ type: "set_error", value: undefined });
 		this.#host.mutate({ type: "jump_to_end" });
@@ -503,6 +512,7 @@ export class ChatComposerController {
 			},
 			(error: unknown) => {
 				this.mutate({ type: "remove_provisional", id: provisional.id });
+				this.#attachments.suspendInlineElements();
 				if (!this.#editor.text) this.#editor.setText(command);
 				this.#shellMode = true;
 				this.#host.mutate({
@@ -541,6 +551,7 @@ export class ChatComposerController {
 			} else if (recoverable) {
 				this.mutate({ type: "remove_recoverable", card: recoverable });
 			}
+			if (provisional?.kind === "user_shell") this.#attachments.suspendInlineElements();
 			this.#editor.setText(text);
 			this.#history.reset();
 			this.#shellMode = provisional?.kind === "user_shell";

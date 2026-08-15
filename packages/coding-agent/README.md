@@ -36,6 +36,14 @@ coda --print --json --json-mode semantic "emit compact terminal events for evalu
 coda --no-tui "use print mode even when stdin and stdout are terminals"
 ```
 
+In the interactive TUI, dropping an absolute PNG, JPEG, GIF, or WebP path into
+the Composer stages the image for upload and inserts an atomic `[filename]` at
+the current edit position instead of exposing the path. The brackets are only
+presentation: submitted Prompt text contains `filename`, while the image is
+sent through its Attachment identity. Hover only highlights the element. Click
+it to open a borderless, full-resolution terminal preview when Kitty graphics
+are available; unsupported terminals open the image in the system viewer.
+
 `--json` retains the raw JSONL v2 contract, including incremental message and
 Tool progress events. `--json-mode semantic` omits those transient deltas while
 retaining Run, Turn, Attempt, terminal Message, Tool lifecycle, and Run Evidence
