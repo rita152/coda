@@ -40,6 +40,7 @@ import type {
 	WorkRunResult,
 	WorkspaceArtifact,
 } from "./types.ts";
+import { WorkGraphDelegationController } from "./work-graph-delegation.ts";
 import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
 import {
 	assertIdentity,
@@ -68,7 +69,7 @@ import {
 } from "./work-graph-reservation.ts";
 import { WorkGraphScheduler } from "./work-graph-scheduler.ts";
 import { workerFactHasOpenEffects } from "./worker-fact.ts";
-import type { DelegateChildSpecification, WorkerRuntimePort } from "./worker-lifecycle.ts";
+import type { WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
 
 export interface WorkGraphEngineOptions {
@@ -100,13 +101,13 @@ export class WorkGraphEngine implements CodingAgent {
 	readonly #publicationSequencer: PublicationSequencer;
 	readonly #admission: WorkAdmission;
 	readonly #scheduler: WorkGraphScheduler;
+	readonly #delegation: WorkGraphDelegationController;
 	readonly #submissions = new Set<Promise<CodingAgentReceipt>>();
 	#closed = false;
 	#closing = false;
 	#closeOperation?: Promise<CodingAgentCloseResult>;
 	readonly #undurableWork = new Map<string, CodingAgentCloseResult["unknownWork"][number]>();
 	readonly #settlementWaiters: Array<() => void> = [];
-	readonly #itemTerminalWaiters: Array<() => void> = [];
 
 	constructor(
 		options: WorkGraphEngineOptions,
@@ -142,7 +143,7 @@ export class WorkGraphEngine implements CodingAgent {
 				activate: (graph, item) => this.#workerLifecycle.activate(graph, item),
 				runItem: (graph, item) =>
 					this.#workerLifecycle.runItem(graph, item, {
-						delegate: (specifications, signal) => this.#delegate(graph, item, specifications, signal),
+						delegate: (specifications, signal) => this.#delegation.delegate(graph, item, specifications, signal),
 						promptSubmission: () => this.#createSubmission(item, "prompt", item.objective, []),
 						transition: (to) => this.#transition(graph, item, to),
 						settleItem: () => this.#trySettleItem(graph, item),
@@ -160,6 +161,11 @@ export class WorkGraphEngine implements CodingAgent {
 				trySettleGraph: (graph) => this.#trySettleGraph(graph),
 				diagnose: (diagnostic, graphId, itemId) => this.#diagnose(diagnostic, graphId, itemId),
 			},
+		});
+		this.#delegation = new WorkGraphDelegationController({
+			submit: (batch) => this.submit(batch),
+			deactivate: (graph, item) => this.#workerLifecycle.deactivate(graph, item),
+			requestSchedule: () => this.#scheduler.request(),
 		});
 	}
 
@@ -820,108 +826,8 @@ export class WorkGraphEngine implements CodingAgent {
 		});
 	}
 
-	async #delegate(
-		graph: GraphRecord,
-		parent: ItemRecord,
-		specifications: readonly DelegateChildSpecification[],
-		signal: AbortSignal,
-	): Promise<readonly WorkResult[]> {
-		if (parent.executionMode !== "write" || parent.state !== "running" || parent.cancellationRequested) {
-			throw new Error(`Work Item ${parent.id} cannot delegate in ${parent.state}`);
-		}
-		if (parent.delegationWaiting) throw new Error(`Work Item ${parent.id} is already waiting on delegation`);
-		parent.delegationWaiting = true;
-		this.#workerLifecycle.deactivate(graph, parent);
-		try {
-			signal.throwIfAborted();
-			const receipt = await this.submit({
-				commands: [
-					{
-						type: "add_work_items",
-						graphId: graph.id,
-						items: specifications.map((specification) => ({
-							itemId: specification.itemId,
-							parentItemId: parent.id,
-							objective: specification.objective,
-							executionMode: specification.executionMode,
-							...(specification.dependencies ? { dependencies: specification.dependencies } : {}),
-							...(specification.configuration ? { configuration: specification.configuration } : {}),
-						})),
-					},
-				],
-			});
-			if (receipt.status === "rejected") {
-				throw new Error(`Delegation was rejected (${receipt.rejection.code}): ${receipt.rejection.message}`);
-			}
-			const delegatedIds = receipt.itemIds;
-			while (true) {
-				signal.throwIfAborted();
-				const results = delegatedIds.map((id) => graph.items.get(id)?.result);
-				if (results.every((result): result is WorkResult => result !== undefined)) {
-					return Object.freeze(results);
-				}
-				await this.#waitForItemTerminalChange(signal);
-			}
-		} finally {
-			await this.#resumeDelegatingItem(parent, signal);
-		}
-	}
-
-	#waitForItemTerminalChange(signal: AbortSignal): Promise<void> {
-		if (signal.aborted) return Promise.reject(signal.reason);
-		return new Promise<void>((resolve, reject) => {
-			const cleanup = (): void => {
-				signal.removeEventListener("abort", onAbort);
-				const index = this.#itemTerminalWaiters.indexOf(onTerminal);
-				if (index >= 0) this.#itemTerminalWaiters.splice(index, 1);
-			};
-			const onTerminal = (): void => {
-				cleanup();
-				resolve();
-			};
-			const onAbort = (): void => {
-				cleanup();
-				reject(signal.reason);
-			};
-			this.#itemTerminalWaiters.push(onTerminal);
-			signal.addEventListener("abort", onAbort, { once: true });
-		});
-	}
-
-	async #resumeDelegatingItem(item: ItemRecord, signal: AbortSignal): Promise<void> {
-		if (item.active) {
-			item.delegationWaiting = false;
-			return;
-		}
-		if (item.cancellationRequested || signal.aborted || isTerminal(item.state)) {
-			item.delegationWaiting = false;
-			return;
-		}
-		await new Promise<void>((resolve, reject) => {
-			const onAbort = (): void => {
-				if (item.delegationResume?.resolve !== onResume) return;
-				item.delegationResume = undefined;
-				item.delegationWaiting = false;
-				reject(signal.reason);
-			};
-			const onResume = (): void => {
-				signal.removeEventListener("abort", onAbort);
-				resolve();
-			};
-			item.delegationResume = {
-				resolve: onResume,
-				reject: (error) => {
-					signal.removeEventListener("abort", onAbort);
-					reject(error);
-				},
-			};
-			signal.addEventListener("abort", onAbort, { once: true });
-			this.#scheduler.request();
-		});
-	}
-
 	async #afterItemTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
-		for (const resolve of this.#itemTerminalWaiters.splice(0)) resolve();
+		this.#delegation.noteItemTerminal();
 		for (const parent of graph.itemOrder.filter((candidate) => candidate.id === item.parentId)) {
 			await this.#trySettleItem(graph, parent);
 		}
