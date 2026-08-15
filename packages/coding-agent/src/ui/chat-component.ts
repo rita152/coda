@@ -18,7 +18,7 @@ import type { CommandRegistry } from "../commands/registry.ts";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { ComposerExtensionReference, ComposerSubmission } from "../session/composer-submission.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
-import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
+import type { ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import { ChatAttachmentController, type ChatAttachmentProjection } from "./chat-attachments.ts";
 import { ChatComposerController } from "./chat-composer.ts";
@@ -29,12 +29,12 @@ import {
 	renderPreviewOverlay,
 	renderTooSmall,
 } from "./chat-rendering.ts";
-import { ChatTimelineRenderer, IDLE_CTRL_C_CONFIRMATION_WINDOW_MS } from "./chat-timeline-renderer.ts";
+import { ChatStateController } from "./chat-state.ts";
+import { ChatTimelineRenderer } from "./chat-timeline-renderer.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
 import type { UserShellSubmission } from "./input-types.ts";
-import { SemanticTimeline } from "./semantic-timeline.ts";
 import type { StatusLineSnapshot } from "./status-line.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
 import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
@@ -119,8 +119,7 @@ export interface ChatComponentOptions {
 
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
-	#timeline: SemanticTimeline;
-	#activity: ActivityProjection;
+	readonly #state: ChatStateController;
 	readonly #markdown: MarkdownRenderer;
 	readonly #theme: TuiTheme;
 	readonly #timelineRenderer: ChatTimelineRenderer;
@@ -133,23 +132,14 @@ export class ChatComponent extends Component {
 	readonly #history: ComposerHistory;
 	#lastCursor?: CursorPlacement;
 	#lastDockRows = 5;
-	#running = false;
-	#shellRunning = false;
 	#transcriptMode = false;
 	#lastIdleCtrlCAt?: number;
-	#error?: string;
-	#notice?: string;
-	#runEvidence?: RunEvidenceEnvelope;
 	readonly #attachments: ChatAttachmentController;
 	readonly #composer: ChatComposerController;
-	#modelLabel: string;
-	#reasoning: string;
 
 	constructor(options: ChatComponentOptions) {
 		super({ focusable: true });
 		this.#options = options;
-		this.#timeline = new SemanticTimeline(options.seed, options.restoredToolInvocations);
-		this.#activity = new ActivityProjection(options.activitySummaryMode);
 		this.#history = new ComposerHistory(options.composerSubmissions);
 		this.#theme = createCodaTheme(options.colorLevel ?? 0, options.appearance);
 		this.#attachments = new ChatAttachmentController({
@@ -161,16 +151,50 @@ export class ChatComponent extends Component {
 			onOpenAttachment: options.onOpenAttachment,
 			invalidate: () => this.invalidate(),
 			reportError: (message) => {
-				this.#error = message;
+				this.#state.mutate({ type: "set_error", value: message });
+			},
+		});
+		this.#state = new ChatStateController({
+			modelLabel: options.modelLabel,
+			reasoning: options.reasoning,
+			clock: options.clock,
+			activitySummaryMode: options.activitySummaryMode,
+			motion: options.motion ?? "full",
+			colorLevel: this.#theme.colorLevel,
+			seed: options.seed,
+			restoredToolInvocations: options.restoredToolInvocations,
+			host: {
+				mutate: (mutation) => {
+					switch (mutation.type) {
+						case "accept_run_start_attachment":
+							this.#attachments.mutate({ type: "accept_run_start", messageId: mutation.messageId });
+							return;
+						case "project_composer":
+							this.#composer.project(mutation.projection);
+							return;
+						case "note_timeline_update":
+							this.#viewport.noteUpdate();
+							return;
+						case "reset_timeline_caches":
+							this.#timelineRenderer.resetTimelineCaches();
+							return;
+						case "invalidate":
+							this.invalidate();
+							return;
+					}
+				},
 			},
 		});
 		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
-			isAvailable: (command) => command.id !== "core:follow-up" || this.#running,
+			isAvailable: (command) => command.id !== "core:follow-up" || this.#state.view().agentRunning,
 		});
 		this.#commandFlow = new CommandFlowHost({
 			onChange: () => this.invalidate(),
 			onError: (error) => {
-				this.#error = error instanceof Error ? error.message : String(error);
+				this.#state.mutate({
+					type: "set_error",
+					value: error instanceof Error ? error.message : String(error),
+				});
 				this.invalidate();
 			},
 		});
@@ -183,27 +207,28 @@ export class ChatComponent extends Component {
 			history: this.#history,
 			options,
 			host: {
-				view: () => ({
-					running: this.running,
-					agentRunning: this.#running,
-					shellRunning: this.#shellRunning,
-					...(this.#lastIdleCtrlCAt === undefined ? {} : { lastIdleCtrlCAt: this.#lastIdleCtrlCAt }),
-				}),
+				view: () => {
+					const stateView = this.#state.view();
+					return {
+						running: stateView.running,
+						agentRunning: stateView.agentRunning,
+						shellRunning: stateView.shellRunning,
+						...(this.#lastIdleCtrlCAt === undefined ? {} : { lastIdleCtrlCAt: this.#lastIdleCtrlCAt }),
+					};
+				},
 				mutate: (mutation) => {
 					switch (mutation.type) {
 						case "begin_agent_preparation":
-							this.#running = true;
-							this.#activity.beginPreparation(this.#options.clock.now());
+							this.#state.mutate({ type: "begin_agent_preparation" });
 							return;
 						case "cancel_agent_preparation":
-							this.#running = false;
-							this.#activity.cancelPreparation();
+							this.#state.mutate({ type: "cancel_agent_preparation" });
 							return;
 						case "set_error":
-							this.#error = mutation.value;
+							this.#state.mutate({ type: "set_error", value: mutation.value });
 							return;
 						case "set_notice":
-							this.#notice = mutation.value;
+							this.#state.mutate({ type: "set_notice", value: mutation.value });
 							return;
 						case "set_idle_ctrl_c":
 							this.#lastIdleCtrlCAt = mutation.value;
@@ -220,8 +245,6 @@ export class ChatComponent extends Component {
 			recoverableFollowUps: options.recoverableFollowUps,
 			restoredAttachments: options.restoredAttachments,
 		});
-		this.#modelLabel = options.modelLabel;
-		this.#reasoning = options.reasoning;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
 		this.#timelineRenderer = new ChatTimelineRenderer({
 			markdown: this.#markdown,
@@ -234,19 +257,20 @@ export class ChatComponent extends Component {
 	}
 
 	get running(): boolean {
-		return this.#running || this.#shellRunning;
+		return this.#state.view().running;
 	}
 
 	setModelPresentation(modelLabel: string, reasoning: string, activitySummaryMode?: ActivitySummaryMode): void {
-		this.#modelLabel = modelLabel;
-		this.#reasoning = reasoning;
-		if (activitySummaryMode) this.#activity.setSummaryMode(activitySummaryMode);
-		this.invalidate();
+		this.#state.mutate({
+			type: "set_model_presentation",
+			modelLabel,
+			reasoning,
+			...(activitySummaryMode ? { activitySummaryMode } : {}),
+		});
 	}
 
 	setReasoning(reasoning: string): void {
-		this.#reasoning = reasoning;
-		this.invalidate();
+		this.#state.mutate({ type: "set_reasoning", reasoning });
 	}
 
 	openCommandFlow(screen: CommandFlowScreen): void {
@@ -256,106 +280,45 @@ export class ChatComponent extends Component {
 	insertSkillReference(commandId: string): void {
 		this.#commands.insertSkillReference(commandId);
 		this.#history.noteTextMutation();
-		this.#error = undefined;
+		this.#state.mutate({ type: "set_error", value: undefined });
 		this.invalidate();
 	}
 
 	stageAttachment(attachment: ChatAttachment): void {
 		this.#attachments.mutate({ type: "stage", attachment });
-		this.#error = undefined;
+		this.#state.mutate({ type: "set_error", value: undefined });
 		this.invalidate();
 	}
 
 	override animationInterval(context: RenderContext): number | undefined {
-		if (context.width < MINIMUM_CHAT_COLUMNS || context.height < MINIMUM_CHAT_ROWS) return undefined;
-		const intervals: number[] = [];
-		const activity = this.#activity.status(context.now);
-		if (activity) {
-			intervals.push(1_000);
-			if (
-				(this.#options.motion ?? "full") === "full" &&
-				activity.motion === "active" &&
-				this.#theme.colorLevel > 0
-			) {
-				intervals.push(32);
-			}
-		}
-		if (
-			(this.#options.motion ?? "full") === "full" &&
-			activity?.motion !== "waiting" &&
-			this.#timeline.hasActiveTools
-		) {
-			intervals.push(this.#theme.colorLevel === 3 ? 80 : 600);
-		}
-		if (this.#lastIdleCtrlCAt !== undefined) {
-			const remaining = IDLE_CTRL_C_CONFIRMATION_WINDOW_MS - (context.now - this.#lastIdleCtrlCAt);
-			if (remaining > 0) intervals.push(remaining);
-		}
-		return intervals.length > 0 ? Math.min(...intervals) : undefined;
+		return this.#state.animationInterval(context, this.#lastIdleCtrlCAt);
 	}
 
 	setActivityOverride(key: string, text: string, present: boolean, motion: "active" | "waiting" = "waiting"): void {
-		this.#activity.setOverride(key, text, present, this.#options.clock.now(), motion);
-		this.invalidate();
+		this.#state.mutate({ type: "set_activity_override", key, text, present, motion });
 	}
 
 	acceptRunEvidence(evidence: RunEvidenceEnvelope): void {
-		this.#runEvidence = structuredClone(evidence);
-		this.invalidate();
+		this.#state.mutate({ type: "accept_run_evidence", evidence });
 	}
 
 	resynchronize(seed: AgentSeed, toolInvocations: readonly SessionToolLifecycle[], running: boolean): void {
-		this.#timeline = new SemanticTimeline(seed, toolInvocations);
-		this.#activity = new ActivityProjection(this.#options.activitySummaryMode);
-		this.#running = running;
-		this.#composer.project({ type: "resynchronize" });
-		this.#timelineRenderer.resetTimelineCaches();
-		this.invalidate();
+		this.#state.mutate({ type: "resynchronize", seed, toolInvocations, running });
 	}
 
 	accept(event: AgentEvent): void {
-		this.#activity.accept(event);
-		if (event.type === "run_start") {
-			this.#attachments.mutate({ type: "accept_run_start", messageId: event.inputMessage.id });
-		}
-		this.#composer.project({ type: "before_agent_event", event });
-		const mutation = this.#timeline.accept(event);
-		switch (event.type) {
-			case "run_start":
-				this.#running = true;
-				this.#notice = undefined;
-				this.#runEvidence = undefined;
-				break;
-			case "run_end":
-				this.#running = false;
-				if (event.outcome === "error") {
-					this.#error = event.failure?.message ?? "Run failed";
-				}
-				break;
-		}
-		this.#composer.project({ type: "after_agent_event", event });
-		if (mutation.changed) this.#viewport.noteUpdate();
-		this.invalidate();
+		this.#state.project({ type: "agent_event", event });
 	}
 
 	acceptUserShell(snapshot: UserShellSnapshot): void {
-		this.#activity.acceptUserShell(snapshot, this.#options.clock.now());
-		if (snapshot.status === "running") {
-			// A resumed mixed queue may optimistically mark an Agent Run as pending before
-			// discovering that its next item is a local Shell command.
-			this.#running = false;
-		}
-		this.#composer.project({ type: "user_shell", snapshot });
-		this.#shellRunning = snapshot.status === "running";
-		this.#timeline.acceptUserShell(snapshot);
-		this.#viewport.noteUpdate();
-		this.invalidate();
+		this.#state.project({ type: "user_shell", snapshot });
 	}
 
 	render({ width, height, now }: RenderContext): string[] {
 		if (width < MINIMUM_CHAT_COLUMNS || height < MINIMUM_CHAT_ROWS)
 			return renderTooSmall(width, height, this.running);
 
+		const stateView = this.#state.view(now);
 		const composerView = this.#composer.view();
 		const attachmentProjection = this.#attachmentProjection();
 		const attachmentView = this.#attachments.view(attachmentProjection);
@@ -373,7 +336,7 @@ export class ChatComponent extends Component {
 			styleBorder: (value) =>
 				this.#shellMode
 					? this.#theme.style("error", value)
-					: this.#theme.styleEditorBorder(this.#reasoning, editorFocused, value),
+					: this.#theme.styleEditorBorder(stateView.reasoning, editorFocused, value),
 			...(this.#shellMode ? { prefix: this.#theme.style("error", "! ") } : {}),
 		});
 		const attachmentLayout = this.#attachments.layout(width);
@@ -390,7 +353,7 @@ export class ChatComponent extends Component {
 						? renderCommandPalette(palette, width, maximumDrawerItems, this.#theme)
 						: [];
 		const drawerRows = drawerLines.length;
-		const activity = this.#activity.status(now);
+		const activity = stateView.activity;
 		const activityRows = activity ? 1 : 0;
 		const footerLines = this.#timelineRenderer.renderFooter({
 			width,
@@ -400,12 +363,12 @@ export class ChatComponent extends Component {
 			shellMode: this.#shellMode,
 			unreadUpdates: this.#viewport.unreadUpdates,
 			transcriptMode: this.#transcriptMode,
-			running: this.#running,
+			running: stateView.agentRunning,
 			hasPausedQueue: this.#hasPausedQueue,
-			shellRunning: this.#shellRunning,
+			shellRunning: stateView.shellRunning,
 			lastIdleCtrlCAt: this.#lastIdleCtrlCAt,
-			modelLabel: this.#modelLabel,
-			reasoning: this.#reasoning,
+			modelLabel: stateView.modelLabel,
+			reasoning: stateView.reasoning,
 		});
 		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + footerLines.length;
 		this.#lastDockRows = dockRows;
@@ -413,15 +376,15 @@ export class ChatComponent extends Component {
 		const blocks = this.#timelineRenderer.renderViewportBlocks({
 			width,
 			now,
-			timeline: this.#timeline,
+			timeline: stateView.timeline,
 			provisionalCards: composerView.provisionalCards,
 			recoverableCards: composerView.recoverableCards,
 			activeFollowUp: composerView.activeFollowUp,
 			messageAttachments: attachmentView.messageAttachments,
 			transcriptMode: this.#transcriptMode,
-			error: this.#error,
-			notice: this.#notice,
-			runEvidence: this.#runEvidence,
+			error: stateView.error,
+			notice: stateView.notice,
+			runEvidence: stateView.runEvidence,
 			attachmentFocusKey: attachmentView.focusKey,
 		});
 		this.#lastViewportBlocks = blocks;
@@ -572,7 +535,7 @@ export class ChatComponent extends Component {
 	#attachmentProjection(): ChatAttachmentProjection {
 		const composerView = this.#composer.view();
 		return {
-			timelineEntries: this.#timeline.entries,
+			timelineEntries: this.#state.view().timeline.entries,
 			provisionalCards: composerView.provisionalCards,
 			recoverableCards: composerView.recoverableCards,
 			...(composerView.activeFollowUp ? { activeFollowUp: composerView.activeFollowUp } : {}),
