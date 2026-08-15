@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { AgentInput, Clock, IdGenerator } from "@coda/agent";
 import type { Api, AuthPrompt, ImageContent, Model, MutableModels } from "@coda/ai";
 import { createMcpHost, type McpConnector, type McpElicitationResult } from "@coda/mcp";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
-import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import {
 	createTerminalImageSurface,
 	type DiagnosticSink,
 	type Keybinding,
 	type Scheduler,
-	sanitizeTerminalText,
 	type Terminal,
 	type TerminalColorScheme,
 } from "@coda/tui";
@@ -24,10 +22,17 @@ import {
 } from "./app/argument-parsing.ts";
 import { JsonEventWriter } from "./app/json-event-writer.ts";
 import { createSessionPresentation } from "./app/session-presentation.ts";
+import {
+	assertSkillReferencesAvailable,
+	mcpTrustDecision,
+	projectTrustDecision,
+	validateSkillPath,
+	workspaceMcpReviewText,
+} from "./app/trust-gating.ts";
 import { createCoreCommandRegistry } from "./commands/core-commands.ts";
 import type { ModelCommandEntry } from "./commands/model-flow.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
-import { SkillCommandRegistryBinding, skillIdFromCommandId } from "./commands/skill-extensions.ts";
+import { SkillCommandRegistryBinding } from "./commands/skill-extensions.ts";
 import {
 	CodingCompletionController,
 	type CompletionWorkspaceEvidenceProvider,
@@ -40,11 +45,7 @@ import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.
 import { createWorkspace } from "./host/workspace.ts";
 import { cleanupSessionMedia } from "./maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "./maintenance/temporary-logs.ts";
-import {
-	inspectMcpConfiguration,
-	type WorkspaceMcpConfigurationSnapshot,
-	type WorkspaceMcpTrustRecord,
-} from "./mcp/config.ts";
+import { inspectMcpConfiguration } from "./mcp/config.ts";
 import { CodingMcpRegistry } from "./mcp/registry.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import { type MediaAsset, MediaLibrary } from "./media/media-library.ts";
@@ -59,7 +60,6 @@ import { withRunControlEvidence } from "./run-evidence/run-evidence.ts";
 import type { SessionWorkController } from "./runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "./runtime/workspace-input-resources.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
-import type { ComposerExtensionReference } from "./session/composer-submission.ts";
 import { DraftSession } from "./session/draft-session.ts";
 import { sessionMediaExtension } from "./session/media-codec.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
@@ -331,99 +331,6 @@ function latestUsageComesFromAnotherModel(
 	return false;
 }
 
-function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapshot): string {
-	const serverPreview = snapshot.servers.slice(0, 50).map((server) => {
-		const target =
-			server.transport.kind === "stdio"
-				? `${server.transport.command} ${(server.transport.args ?? []).join(" ")}`.trim()
-				: server.transport.url;
-		return `- ${server.id} (${server.transport.kind}): ${target}`;
-	});
-	return sanitizeTerminalText(
-		[
-			"Trust this Workspace MCP configuration?",
-			`Path: ${snapshot.path}`,
-			`SHA-256: ${snapshot.sha256}`,
-			`Servers: ${snapshot.serverCount}`,
-			"The exact file hash is stored separately from AGENTS.md and Skills trust; any change requires review again.",
-			"Trusting a stdio Server allows Coda to launch its configured executable and call its Tools.",
-			"HTTP credentials are resolved outside this file and are never shown here.",
-			"",
-			...serverPreview,
-			...(snapshot.servers.length > serverPreview.length ? ["… (Server preview truncated)"] : []),
-		].join("\n"),
-	);
-}
-
-async function validateSkillPath(
-	path: string,
-	options: Pick<CodingAgentApplicationOptions, "fileSystem" | "io" | "runtime">,
-	output: "json" | "text",
-): Promise<number> {
-	const requested = isAbsolute(path) ? path : resolve(options.runtime.cwd, path);
-	const canonical = await options.fileSystem.realpath(requested);
-	const status = await options.fileSystem.stat(canonical);
-	const skillFile = status.kind === "directory" ? join(canonical, "SKILL.md") : canonical;
-	if (status.kind !== "directory" && status.kind !== "file") {
-		throw new Error(`Skill validation path is not a regular file or directory: ${path}`);
-	}
-	if (status.kind === "file" && basename(skillFile) !== "SKILL.md") {
-		throw new Error("Skill validation file must be named exactly SKILL.md");
-	}
-	const skillStatus = await options.fileSystem.stat(skillFile);
-	if (skillStatus.kind !== "file") throw new Error(`Skill manifest is not a regular file: ${skillFile}`);
-	if (skillStatus.size > DEFAULT_SKILL_LIMITS.maxSkillFileBytes) {
-		throw new Error(`SKILL.md exceeds the ${DEFAULT_SKILL_LIMITS.maxSkillFileBytes}-byte limit`);
-	}
-	const bytes = await options.fileSystem.readFile(skillFile);
-	if (bytes.byteLength > DEFAULT_SKILL_LIMITS.maxSkillFileBytes) {
-		throw new Error(`SKILL.md exceeds the ${DEFAULT_SKILL_LIMITS.maxSkillFileBytes}-byte limit`);
-	}
-	let text: string;
-	try {
-		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-	} catch {
-		throw new Error("SKILL.md is not valid UTF-8");
-	}
-	const result = validateAgentSkill({
-		text,
-		directoryName: basename(dirname(skillFile)),
-		path: skillFile,
-	});
-	const validationLine = (value: string) => sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
-	if (output === "json") {
-		await options.io.stdout.write(
-			`${JSON.stringify({ schemaVersion: 1, type: "skill_validation", path: skillFile, valid: result.valid, diagnostics: result.diagnostics })}\n`,
-		);
-	} else {
-		await options.io.stdout.write(
-			`${result.valid ? "Valid Agent Skill" : "Invalid Agent Skill"}: ${validationLine(skillFile)}\n`,
-		);
-		for (const diagnostic of result.diagnostics) {
-			await options.io.stdout.write(
-				`${validationLine(`[${diagnostic.severity}] ${diagnostic.code}${diagnostic.field ? ` (${diagnostic.field})` : ""}: ${diagnostic.message}`)}\n`,
-			);
-		}
-	}
-	return result.valid ? 0 : 1;
-}
-
-function assertSkillReferencesAvailable(
-	snapshot: CodingSkillsSnapshot,
-	references: readonly ComposerExtensionReference[],
-): void {
-	for (const reference of references) {
-		if (reference.source !== "skill") {
-			throw new Error(`Extension reference loading is unavailable for source: ${reference.source}`);
-		}
-		const id = skillIdFromCommandId(reference.commandId);
-		const resolved = id ? snapshot.byId.get(id) : undefined;
-		if (!resolved) {
-			throw new Error(`Selected Skill is no longer available: ${reference.name}`);
-		}
-	}
-}
-
 export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
 	const fullScreenOutput = providedOptions.fullScreenOutput ?? new FullScreenOutputGate(providedOptions.io);
 	const options: CodingAgentApplicationOptions = {
@@ -667,15 +574,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						parsed.reasoning ?? session.restored.reasoning ?? settings.defaultReasoning ?? "medium",
 					);
 					const projectInstructions = await loadProjectInstructions(workspace, options.fileSystem);
-					const trustedProject = projectInstructions
-						? (settings.projectTrust ?? []).some(
-								(entry) =>
-									entry.workspace === workspace.root &&
-									entry.path === projectInstructions.path &&
-									entry.sha256 === projectInstructions.sha256,
-							)
-						: false;
-					if (projectInstructions && !trustedProject) {
+					let projectTrust = projectTrustDecision({
+						workspace: workspace.root,
+						...(projectInstructions ? { instructions: projectInstructions } : {}),
+						settings,
+						authorized: false,
+					});
+					if (projectInstructions && !projectTrust.trusted) {
 						const trustedInteractively =
 							!parsed.trustProject && interactiveRuntime
 								? await confirmFromTerminal(
@@ -694,32 +599,22 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										].join("\n"),
 									)
 								: false;
-						if (!parsed.trustProject && !trustedInteractively) {
+						projectTrust = projectTrustDecision({
+							workspace: workspace.root,
+							instructions: projectInstructions,
+							settings,
+							authorized: parsed.trustProject || trustedInteractively,
+						});
+						if (!projectTrust.trusted) {
 							throw new Error(
 								`AGENTS.md is untrusted or changed (${projectInstructions.sha256}); pass --trust-project after review`,
 							);
 						}
-						const retained = (settings.projectTrust ?? []).filter((entry) => entry.workspace !== workspace.root);
-						settings = {
-							...settings,
-							projectTrust: [
-								...retained,
-								{
-									workspace: workspace.root,
-									path: projectInstructions.path,
-									sha256: projectInstructions.sha256,
-								},
-							].sort((left, right) => left.workspace.localeCompare(right.workspace)),
-						};
-						await options.settings.save(settings);
-						await session.record({
-							type: "project_trust_changed",
-							trust: {
-								workspace: workspace.root,
-								path: projectInstructions.path,
-								sha256: projectInstructions.sha256,
-							},
-						});
+						if (projectTrust.updatedSettings && projectTrust.trustRecord) {
+							settings = projectTrust.updatedSettings;
+							await options.settings.save(settings);
+							await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
+						}
 					}
 					const skillRoots = await collectSkillRoots({
 						workspace: workspace.root,
@@ -745,21 +640,16 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 										workspaceMcpReviewText(mcpConfiguration.workspace),
 									)
 								: false;
-						if (parsed.trustProjectMcp || trustedInteractively) {
-							const trust: WorkspaceMcpTrustRecord = {
-								workspace: workspace.root,
-								path: mcpConfiguration.workspace.path,
-								sha256: mcpConfiguration.workspace.sha256,
-							};
-							settings = {
-								...settings,
-								workspaceMcpTrust: [
-									...(settings.workspaceMcpTrust ?? []).filter((entry) => entry.workspace !== workspace.root),
-									trust,
-								].sort((left, right) => left.workspace.localeCompare(right.workspace)),
-							};
+						const mcpTrust = mcpTrustDecision({
+							workspace: workspace.root,
+							snapshot: mcpConfiguration.workspace,
+							settings,
+							authorized: parsed.trustProjectMcp || trustedInteractively,
+						});
+						if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
+							settings = mcpTrust.updatedSettings;
 							await options.settings.save(settings);
-							await session.record({ type: "mcp_trust_changed", trust });
+							await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
 							mcpConfiguration = await inspectMcpConfiguration({
 								workspace: workspace.root,
 								fileSystem: options.fileSystem,
@@ -767,7 +657,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								workspaceTrust: settings.workspaceMcpTrust ?? [],
 								environment: options.runtime.environment,
 							});
-						} else if (!interactiveRuntime) {
+						} else if (!mcpTrust.trusted && !interactiveRuntime) {
 							await options.io.stderr.write(
 								`coda: Workspace MCP configuration ${mcpConfiguration.workspace.sha256} is untrusted; its Servers were omitted\n`,
 							);
