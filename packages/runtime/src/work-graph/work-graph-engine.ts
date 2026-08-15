@@ -16,17 +16,13 @@ import type {
 import type { PublicationSequencer } from "./publication-sequencer.ts";
 import type { SessionLeaseRegistry } from "./session-registry.ts";
 import type {
-	AddWorkItemSpecification,
 	CodingAgent,
 	CodingAgentCloseResult,
 	CodingAgentCommandBatch,
 	CodingAgentObservation,
 	CodingAgentReceipt,
-	CodingAgentRejection,
 	CodingAgentSnapshot,
-	ConfigureWorkItem,
 	DeliverWorkItemInput,
-	DesiredRuntimeConfiguration,
 	ObservationOptions,
 	PublicationOutcome,
 	WorkBudgetUsage,
@@ -42,11 +38,19 @@ import type {
 	WorkItemState,
 	WorkResult,
 	WorkRunResult,
-	WorkSessionTarget,
 	WorkspaceArtifact,
 } from "./types.ts";
-import { WorkGraphAggregate } from "./work-graph-aggregate.ts";
 import { WORK_GRAPH_FACT_VERSION, type WorkGraphFact, type WorkGraphItemDefinition } from "./work-graph-fact.ts";
+import {
+	assertConfiguration,
+	assertIdentity,
+	type BatchPlan,
+	createWorkGraphPlanningView,
+	ID_PATTERN,
+	planBatch,
+	rejected,
+	SubmissionRejection,
+} from "./work-graph-planner.ts";
 import {
 	type DeliveryPlan,
 	errorMessage,
@@ -54,93 +58,11 @@ import {
 	type ItemRecord,
 	immutableData,
 	isTerminal,
-	makeItem,
 	type WorkGraphMirror,
 } from "./work-graph-records.ts";
 import { workerFactHasOpenEffects } from "./worker-fact.ts";
 import type { DelegateChildSpecification, WorkerRuntimePort } from "./worker-lifecycle.ts";
 import type { WorkerSubmission } from "./worker-protocol.ts";
-
-const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
-
-function graphId(value: string): WorkGraphId {
-	return value as WorkGraphId;
-}
-
-function itemId(value: string): WorkItemId {
-	return value as WorkItemId;
-}
-
-function assertIdentity(value: unknown, kind: "graph" | "item" | "session"): string {
-	if (typeof value !== "string" || !ID_PATTERN.test(value)) {
-		throw rejected({ code: "invalid_identity", message: `Invalid ${kind} identity: ${String(value)}` });
-	}
-	return value;
-}
-
-function assertObjective(value: unknown, label: string): string {
-	if (typeof value !== "string" || value.trim().length === 0) {
-		throw rejected({ code: "invalid_command", message: `${label} must not be empty` });
-	}
-	return value;
-}
-
-function assertConfiguration(configuration: DesiredRuntimeConfiguration): void {
-	if (
-		!configuration ||
-		typeof configuration !== "object" ||
-		typeof configuration.model?.provider !== "string" ||
-		configuration.model.provider.length === 0 ||
-		typeof configuration.model.id !== "string" ||
-		configuration.model.id.length === 0 ||
-		typeof configuration.reasoning !== "string"
-	) {
-		throw rejected({ code: "invalid_command", message: "Desired Runtime Configuration is invalid" });
-	}
-}
-
-class SubmissionRejection extends Error {
-	readonly rejection: CodingAgentRejection;
-
-	constructor(rejection: CodingAgentRejection) {
-		super(rejection.message);
-		this.name = "SubmissionRejection";
-		this.rejection = rejection;
-	}
-}
-
-function rejected(rejection: CodingAgentRejection): SubmissionRejection {
-	return new SubmissionRejection(rejection);
-}
-
-interface ConfigurationPlan {
-	readonly command: ConfigureWorkItem;
-	readonly graph: GraphRecord;
-	readonly item: ItemRecord;
-}
-
-interface CancellationPlan {
-	readonly graph: GraphRecord;
-	readonly item?: ItemRecord;
-}
-
-interface NewItemPlan {
-	readonly graph: GraphRecord;
-	readonly item: ItemRecord;
-	readonly sessionTarget: WorkSessionTarget;
-}
-
-interface BatchPlan {
-	readonly batchId: string;
-	readonly targetGraphId: WorkGraphId;
-	readonly newGraphs: GraphRecord[];
-	readonly newItems: NewItemPlan[];
-	readonly deliveries: DeliveryPlan[];
-	readonly configurations: ConfigurationPlan[];
-	readonly cancellations: CancellationPlan[];
-	readonly graphIds: WorkGraphId[];
-	readonly itemIds: WorkItemId[];
-}
 
 export interface WorkGraphEngineOptions {
 	readonly time: TimeRuntime;
@@ -287,7 +209,21 @@ export class WorkGraphEngine implements CodingAgent {
 		let durablyAccepted = false;
 		let sequence = 0;
 		try {
-			plan = await this.#admission.mutation(() => this.#plan(batch, batchId));
+			plan = await this.#admission.mutation(() =>
+				planBatch({
+					batch,
+					batchId,
+					now: this.#options.time.clock.now(),
+					identity: this.#options.identity,
+					capacity: this.#capacity,
+					durable: {
+						graphFailure: (graphId) => this.#durable.graphFailure(graphId),
+						allocateGraphOrder: () => this.#durable.allocateGraphOrder(),
+						allocatePublicationOrder: () => this.#durable.allocatePublicationOrder(),
+					},
+					view: createWorkGraphPlanningView(this.#graphs),
+				}),
+			);
 			await this.#validateConfigurations(plan);
 			await this.#reserve(plan);
 			await this.#commitOwnershipReservations(plan);
@@ -366,414 +302,6 @@ export class WorkGraphEngine implements CodingAgent {
 			graphIds: plan.graphIds,
 			itemIds: plan.itemIds,
 		});
-	}
-
-	#plan(batch: CodingAgentCommandBatch, batchId: string): BatchPlan {
-		const now = this.#options.time.clock.now();
-		const newGraphs: GraphRecord[] = [];
-		const newItems: NewItemPlan[] = [];
-		const deliveries: DeliveryPlan[] = [];
-		const configurations: ConfigurationPlan[] = [];
-		const cancellations: CancellationPlan[] = [];
-		const graphIds: WorkGraphId[] = [];
-		const itemIds: WorkItemId[] = [];
-		const targetGraphIds = new Set<WorkGraphId>();
-		const graphs = new Map(this.#graphs);
-		const itemViews = new Map<WorkGraphId, Map<WorkItemId, ItemRecord>>();
-		const view = (graph: GraphRecord): Map<WorkItemId, ItemRecord> => {
-			let items = itemViews.get(graph.id);
-			if (!items) {
-				items = new Map(graph.items);
-				itemViews.set(graph.id, items);
-			}
-			return items;
-		};
-		const findGraph = (value: string, commandIndex: number): GraphRecord => {
-			const id = graphId(assertIdentity(value, "graph"));
-			const persistenceFailure = this.#durable.graphFailure(id);
-			if (persistenceFailure) {
-				throw rejected({
-					code: "graph_store_failed",
-					message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
-					commandIndex,
-					graphId: id,
-				});
-			}
-			const graph = graphs.get(id);
-			if (!graph) {
-				throw rejected({
-					code: "graph_not_found",
-					message: `Work Graph not found: ${id}`,
-					commandIndex,
-					graphId: id,
-				});
-			}
-			targetGraphIds.add(id);
-			return graph;
-		};
-		const findItem = (graph: GraphRecord, value: string, commandIndex: number): ItemRecord => {
-			const id = itemId(assertIdentity(value, "item"));
-			const item = view(graph).get(id);
-			if (!item) {
-				throw rejected({
-					code: "item_not_found",
-					message: `Work Item not found: ${id}`,
-					commandIndex,
-					graphId: graph.id,
-					itemId: id,
-				});
-			}
-			return item;
-		};
-
-		for (const [commandIndex, command] of batch.commands.entries()) {
-			if (!command || typeof command !== "object" || typeof command.type !== "string") {
-				throw rejected({
-					code: "invalid_command",
-					message: "Command must be a discriminated object",
-					commandIndex,
-				});
-			}
-			switch (command.type) {
-				case "start_work_graph": {
-					const id = graphId(
-						command.graphId === undefined
-							? `graph:${this.#options.identity.generate("queue_item")}`
-							: assertIdentity(String(command.graphId), "graph"),
-					);
-					if (graphs.has(id)) {
-						throw rejected({
-							code: "duplicate_identity",
-							message: `Duplicate Work Graph identity: ${id}`,
-							commandIndex,
-							graphId: id,
-						});
-					}
-					const persistenceFailure = this.#durable.graphFailure(id);
-					if (persistenceFailure) {
-						throw rejected({
-							code: "graph_store_failed",
-							message: `Work Graph persistence is unavailable: ${errorMessage(persistenceFailure)}`,
-							commandIndex,
-							graphId: id,
-						});
-					}
-					targetGraphIds.add(id);
-					const rootId = itemId(assertIdentity(String(command.root?.itemId), "item"));
-					if (
-						!Number.isSafeInteger(command.maximumConcurrency) ||
-						command.maximumConcurrency < 1 ||
-						command.maximumConcurrency > this.#capacity.graphMaximumConcurrency
-					) {
-						throw rejected({
-							code: "invalid_command",
-							message: `maximumConcurrency must be between 1 and ${this.#capacity.graphMaximumConcurrency}`,
-							commandIndex,
-						});
-					}
-					if (command.root.executionMode !== "read_only" && command.root.executionMode !== "write") {
-						throw rejected({
-							code: "invalid_command",
-							message: "Invalid Work Item execution mode",
-							commandIndex,
-						});
-					}
-					assertConfiguration(command.configuration);
-					const objective = assertObjective(command.objective, "Work Graph objective");
-					const rootObjective = assertObjective(command.root.objective ?? objective, "Root Work Item objective");
-					if (
-						!command.session ||
-						(command.session.type !== "create" && command.session.type !== "resume") ||
-						(command.session.sessionId !== undefined &&
-							!ID_PATTERN.test(assertIdentity(command.session.sessionId, "session")))
-					) {
-						throw rejected({ code: "invalid_command", message: "Invalid Session target", commandIndex });
-					}
-					if (command.session.type === "resume" && !command.session.sessionId) {
-						throw rejected({
-							code: "invalid_command",
-							message: "A resume target requires a Session identity",
-							commandIndex,
-						});
-					}
-					const graph: GraphRecord = {
-						id,
-						order: this.#durable.allocateGraphOrder(),
-						objective,
-						rootId,
-						maximumConcurrency: command.maximumConcurrency,
-						acceptedAt: now,
-						items: new Map(),
-						itemOrder: [],
-						nextItemOrder: 1,
-						activeConcurrency: 0,
-						effectiveConcurrency: 0,
-						cancellationRequested: false,
-						aggregate: WorkGraphAggregate.empty(),
-					};
-					const root = makeItem({
-						graphId: id,
-						itemId: rootId,
-						order: 0,
-						objective: rootObjective,
-						executionMode: command.root.executionMode,
-						configuration: command.configuration,
-						acceptedAt: now,
-						publicationOrder: this.#durable.allocatePublicationOrder(),
-						runtimeId: `worker:${id}:${rootId}:${this.#options.identity.generate("queue_item")}`,
-					});
-					graphs.set(id, graph);
-					view(graph).set(rootId, root);
-					newGraphs.push(graph);
-					newItems.push({ graph, item: root, sessionTarget: immutableData(command.session) });
-					graphIds.push(id);
-					itemIds.push(rootId);
-					break;
-				}
-				case "add_work_items": {
-					const graph = findGraph(String(command.graphId), commandIndex);
-					if (graph.result || graph.cancellationRequested || command.items.length === 0) {
-						throw rejected({
-							code: "invalid_state",
-							message: graph.result
-								? "Work Graph is already settled"
-								: "AddWorkItems requires an active graph and items",
-							commandIndex,
-							graphId: graph.id,
-						});
-					}
-					for (const specification of command.items) {
-						this.#planAddedItem({
-							graph,
-							specification,
-							commandIndex,
-							items: view(graph),
-							now,
-							newItems,
-							itemIds,
-						});
-					}
-					if (!graphIds.includes(graph.id)) graphIds.push(graph.id);
-					break;
-				}
-				case "deliver_work_item_input": {
-					const graph = findGraph(String(command.graphId), commandIndex);
-					const item = findItem(graph, String(command.itemId), commandIndex);
-					if (isTerminal(item.state) || item.cancellationRequested) {
-						throw rejected({
-							code: "invalid_state",
-							message: `Work Item ${item.id} cannot accept input in ${item.state}`,
-							commandIndex,
-							graphId: graph.id,
-							itemId: item.id,
-						});
-					}
-					if (!(["prompt", "steering", "follow_up"] as const).includes(command.kind)) {
-						throw rejected({ code: "invalid_command", message: "Invalid Work Item input kind", commandIndex });
-					}
-					if (
-						command.kind === "prompt" &&
-						(item.promptAccepted ||
-							item.runtime !== undefined ||
-							item.state === "running" ||
-							item.state === "settling" ||
-							deliveries.some((candidate) => candidate.item === item && candidate.command.kind === "prompt"))
-					) {
-						throw rejected({
-							code: "invalid_state",
-							message: `Work Item ${item.id} already owns its Prompt input`,
-							commandIndex,
-							graphId: graph.id,
-							itemId: item.id,
-						});
-					}
-					deliveries.push({
-						commandIndex,
-						deliveryId: `${batchId}:${commandIndex}`,
-						command: immutableData(command),
-						graph,
-						item,
-					});
-					break;
-				}
-				case "configure_work_item": {
-					const graph = findGraph(String(command.graphId), commandIndex);
-					const item = findItem(graph, String(command.itemId), commandIndex);
-					if (isTerminal(item.state) || item.cancellationRequested) {
-						throw rejected({
-							code: "invalid_state",
-							message: `Work Item ${item.id} cannot be configured in ${item.state}`,
-							commandIndex,
-							graphId: graph.id,
-							itemId: item.id,
-						});
-					}
-					assertConfiguration(command.configuration);
-					configurations.push({ command: immutableData(command), graph, item });
-					break;
-				}
-				case "cancel_work": {
-					if (command.target?.type === "graph") {
-						const graph = findGraph(String(command.target.graphId), commandIndex);
-						cancellations.push({ graph });
-					} else if (command.target?.type === "item") {
-						const graph = findGraph(String(command.target.graphId), commandIndex);
-						cancellations.push({ graph, item: findItem(graph, String(command.target.itemId), commandIndex) });
-					} else {
-						throw rejected({ code: "invalid_command", message: "Invalid cancellation target", commandIndex });
-					}
-					break;
-				}
-				default:
-					throw rejected({
-						code: "invalid_command",
-						message: `Unknown Coding Agent command: ${String((command as { type?: unknown }).type)}`,
-						commandIndex,
-					});
-			}
-		}
-		for (const [id, items] of itemViews) this.#assertAcyclic(id, items);
-		if (targetGraphIds.size !== 1) {
-			throw rejected({
-				code: "invalid_command",
-				message: "One command batch must target exactly one Work Graph",
-			});
-		}
-		const targetGraphId = [...targetGraphIds][0]!;
-		if (!graphIds.includes(targetGraphId)) graphIds.push(targetGraphId);
-		return {
-			batchId,
-			targetGraphId,
-			newGraphs,
-			newItems,
-			deliveries,
-			configurations,
-			cancellations,
-			graphIds,
-			itemIds,
-		};
-	}
-
-	#planAddedItem(input: {
-		readonly graph: GraphRecord;
-		readonly specification: AddWorkItemSpecification;
-		readonly commandIndex: number;
-		readonly items: Map<WorkItemId, ItemRecord>;
-		readonly now: number;
-		readonly newItems: NewItemPlan[];
-		readonly itemIds: WorkItemId[];
-	}): void {
-		const { graph, specification, commandIndex, items } = input;
-		const id = itemId(assertIdentity(String(specification.itemId), "item"));
-		if (items.has(id)) {
-			throw rejected({
-				code: "duplicate_identity",
-				message: `Duplicate Work Item identity: ${id}`,
-				commandIndex,
-				graphId: graph.id,
-				itemId: id,
-			});
-		}
-		const parentId = itemId(assertIdentity(String(specification.parentItemId), "item"));
-		const parent = items.get(parentId);
-		if (!parent) {
-			throw rejected({
-				code: "missing_parent",
-				message: `Parent Work Item not found: ${parentId}`,
-				commandIndex,
-				graphId: graph.id,
-				itemId: id,
-			});
-		}
-		if (parent.state === "settling" || isTerminal(parent.state) || parent.cancellationRequested) {
-			throw rejected({
-				code: "invalid_state",
-				message: `Parent Work Item ${parentId} no longer permits delegation`,
-				commandIndex,
-				graphId: graph.id,
-				itemId: id,
-			});
-		}
-		if (specification.executionMode !== "read_only" && specification.executionMode !== "write") {
-			throw rejected({ code: "invalid_command", message: "Invalid Work Item execution mode", commandIndex });
-		}
-		const dependencies: WorkItemId[] = [];
-		const seen = new Set<WorkItemId>();
-		for (const value of specification.dependencies ?? []) {
-			const dependencyId = itemId(assertIdentity(String(value), "item"));
-			if (dependencyId === id || seen.has(dependencyId)) {
-				throw rejected({
-					code: dependencyId === id ? "dependency_cycle" : "duplicate_identity",
-					message:
-						dependencyId === id
-							? `Work Item ${id} cannot depend on itself`
-							: `Duplicate dependency: ${dependencyId}`,
-					commandIndex,
-					graphId: graph.id,
-					itemId: id,
-				});
-			}
-			if (!items.has(dependencyId)) {
-				throw rejected({
-					code: "missing_dependency",
-					message: `Dependency Work Item not found or not earlier in this batch: ${dependencyId}`,
-					commandIndex,
-					graphId: graph.id,
-					itemId: id,
-				});
-			}
-			seen.add(dependencyId);
-			dependencies.push(dependencyId);
-		}
-		const configuration = specification.configuration ?? parent.desiredConfiguration;
-		assertConfiguration(configuration);
-		const item = makeItem({
-			graphId: graph.id,
-			itemId: id,
-			order: graph.nextItemOrder++,
-			parentId,
-			dependencies,
-			objective: assertObjective(specification.objective, "Work Item objective"),
-			executionMode: specification.executionMode,
-			configuration,
-			acceptedAt: input.now,
-			publicationOrder: this.#durable.allocatePublicationOrder(),
-			runtimeId: `worker:${graph.id}:${id}:${this.#options.identity.generate("queue_item")}`,
-		});
-		items.set(id, item);
-		input.newItems.push({
-			graph,
-			item,
-			sessionTarget: {
-				type: "create",
-				sessionId: `session:${graph.id}:${id}:${this.#options.identity.generate("queue_item")}`,
-			},
-		});
-		input.itemIds.push(id);
-	}
-
-	#assertAcyclic(id: WorkGraphId, items: ReadonlyMap<WorkItemId, ItemRecord>): void {
-		const visiting = new Set<WorkItemId>();
-		const visited = new Set<WorkItemId>();
-		const visit = (item: ItemRecord): void => {
-			if (visited.has(item.id)) return;
-			if (visiting.has(item.id)) {
-				throw rejected({
-					code: "dependency_cycle",
-					message: `Dependency cycle detected at Work Item ${item.id}`,
-					graphId: id,
-					itemId: item.id,
-				});
-			}
-			visiting.add(item.id);
-			for (const dependencyId of item.dependencies) {
-				const dependency = items.get(dependencyId);
-				if (dependency) visit(dependency);
-			}
-			visiting.delete(item.id);
-			visited.add(item.id);
-		};
-		for (const item of items.values()) visit(item);
 	}
 
 	async #validateConfigurations(plan: BatchPlan): Promise<void> {

@@ -35,11 +35,13 @@ export const RUNTIME_INTERNAL_IMPORTS = Object.freeze({
 	"publication-sequencer": Object.freeze(["durable-graph-store"]),
 	"worker-lifecycle": Object.freeze(["durable-graph-store", "worker-runtime", "delegate-tool"]),
 	"admission-controller": Object.freeze(["durable-graph-store", "session-registry"]),
+	"work-graph-planner": Object.freeze([]),
 	"work-graph-engine": Object.freeze([
 		"durable-graph-store",
 		"admission-controller",
 		"worker-lifecycle",
 		"publication-sequencer",
+		"work-graph-planner",
 	]),
 	"recovery": Object.freeze(["durable-graph-store", "session-registry"]),
 });
