@@ -15,19 +15,16 @@ import {
 	sanitizeTerminalText,
 	type TerminalAppearance,
 	type TerminalInput,
-	wrapAnsi,
 } from "@coda/tui";
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import type { CommandDefinition } from "../commands/types.ts";
-import { renderRunEvidenceSummary } from "../run-evidence/presentation.ts";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { ComposerExtensionReference, ComposerSubmission } from "../session/composer-submission.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
 import { ActivityProjection, type ActivitySummaryMode } from "./activity-status.ts";
 import { renderActivityStatus } from "./activity-status-presentation.ts";
 import {
-	actionFooter,
 	attachmentTargetKey,
 	followUpText,
 	type LocalAttachmentHitRegion,
@@ -35,33 +32,22 @@ import {
 	MINIMUM_CHAT_ROWS,
 	type PreviewGeometry,
 	previewGeometry,
-	recoverableStatus,
 	renderHeader,
 	renderPreviewOverlay,
-	renderTimelineEntry,
 	renderTooSmall,
-	renderUserCard,
 	shellActivation,
 } from "./chat-rendering.ts";
+import { ChatTimelineRenderer, IDLE_CTRL_C_CONFIRMATION_WINDOW_MS } from "./chat-timeline-renderer.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
 import { extensionReferencesFromMarkers } from "./extension-references.ts";
 import type { UserShellSubmission } from "./input-types.ts";
-import { SemanticTimeline, type TimelineEntry } from "./semantic-timeline.ts";
-import { renderStatusLine, type StatusLineSnapshot } from "./status-line.ts";
+import { SemanticTimeline } from "./semantic-timeline.ts";
+import type { StatusLineSnapshot } from "./status-line.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
-import {
-	type MainTimelineBlock,
-	type MainTimelineContentType,
-	spaceMainTimelineBlocks,
-	timelineEntryContentType,
-} from "./timeline-presentation.ts";
 import { TimelineViewport, type ViewportBlock } from "./timeline-viewport.ts";
-import { isExplorationTool, renderExplorationGroup } from "./tool-presentation.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
-
-const IDLE_CTRL_C_CONFIRMATION_WINDOW_MS = 500;
 
 export interface ChatAttachmentPreview {
 	readonly png: Uint8Array;
@@ -171,37 +157,16 @@ interface AttachmentHitRegion {
 	readonly end: number;
 }
 
-interface CachedTimelineBlock {
-	readonly entry: TimelineEntry;
-	readonly width: number;
-	readonly transcriptMode: boolean;
-	readonly toolResultImagesSupported: boolean;
-	readonly attachments?: readonly ChatAttachment[];
-	readonly status?: string;
-	readonly attachmentFocusKey?: string;
-	readonly lines: readonly string[];
-	readonly regions: readonly LocalAttachmentHitRegion[];
-}
-
 export class ChatComponent extends Component {
 	readonly #options: ChatComponentOptions;
 	#timeline: SemanticTimeline;
 	#activity: ActivityProjection;
 	readonly #markdown: MarkdownRenderer;
 	readonly #theme: TuiTheme;
+	readonly #timelineRenderer: ChatTimelineRenderer;
 	readonly #viewport = new TimelineViewport();
 	#lastViewportBlocks: readonly ViewportBlock[] = [];
 	#lastViewportHeight = 0;
-	#cachedViewportBlocks?: {
-		readonly entries: readonly TimelineEntry[];
-		readonly width: number;
-		readonly transcriptMode: boolean;
-		readonly error?: string;
-		readonly notice?: string;
-		readonly runEvidence?: RunEvidenceEnvelope;
-		readonly attachmentFocusKey?: string;
-		readonly blocks: readonly ViewportBlock[];
-	};
 	readonly #editor = new Editor();
 	readonly #commands: CommandComposer;
 	readonly #commandFlow: CommandFlowHost;
@@ -220,8 +185,6 @@ export class ChatComponent extends Component {
 	#attachmentFocusKey?: string;
 	#attachmentFocusOrigin?: "keyboard" | "mouse";
 	#attachmentHitRegions: AttachmentHitRegion[] = [];
-	#timelineAttachmentHitRegions = new Map<string, readonly LocalAttachmentHitRegion[]>();
-	readonly #timelineBlockCache = new Map<string, CachedTimelineBlock>();
 	#imageModal = false;
 	#nextRunAttachments?: readonly ChatAttachment[];
 	readonly #messageAttachments = new Map<string, readonly ChatAttachment[]>();
@@ -252,6 +215,14 @@ export class ChatComponent extends Component {
 		this.#modelLabel = options.modelLabel;
 		this.#reasoning = options.reasoning;
 		this.#markdown = options.markdownRenderer ?? createMarkdownRenderer({ colorLevel: options.colorLevel ?? 0 });
+		this.#timelineRenderer = new ChatTimelineRenderer({
+			markdown: this.#markdown,
+			theme: this.#theme,
+			motion: options.motion ?? "full",
+			imagePreviewSupported: options.imagePreviewSupported ?? false,
+			toolResultImagesSupported: options.toolResultImagesSupported ?? false,
+			statusLine: options.statusLine,
+		});
 		this.#nextRunAttachments = options.initialAttachments;
 		for (const [messageId, attachments] of options.restoredAttachments ?? []) {
 			this.#messageAttachments.set(messageId, [...attachments]);
@@ -349,8 +320,7 @@ export class ChatComponent extends Component {
 		this.#running = running;
 		this.#activeFollowUp = undefined;
 		this.#provisionalCards = [];
-		this.#timelineBlockCache.clear();
-		this.#timelineAttachmentHitRegions.clear();
+		this.#timelineRenderer.resetTimelineCaches();
 		this.invalidate();
 	}
 
@@ -475,9 +445,10 @@ export class ChatComponent extends Component {
 		if (width < MINIMUM_CHAT_COLUMNS || height < MINIMUM_CHAT_ROWS)
 			return renderTooSmall(width, height, this.running);
 
+		const focusedAttachmentTarget = this.#focusedAttachmentTarget;
 		const editorFocused =
 			this.focused &&
-			this.#focusedAttachmentTarget === undefined &&
+			focusedAttachmentTarget === undefined &&
 			!this.#imageModal &&
 			this.#commandFlow.view === undefined;
 		const editorFrame = this.#editor.render({
@@ -507,11 +478,38 @@ export class ChatComponent extends Component {
 		const drawerRows = drawerLines.length;
 		const activity = this.#activity.status(now);
 		const activityRows = activity ? 1 : 0;
-		const footerLines = this.#renderFooter(width, now);
+		const footerLines = this.#timelineRenderer.renderFooter({
+			width,
+			now,
+			imageModal: this.#imageModal,
+			focusedAttachmentSource: focusedAttachmentTarget?.source,
+			shellMode: this.#shellMode,
+			unreadUpdates: this.#viewport.unreadUpdates,
+			transcriptMode: this.#transcriptMode,
+			running: this.#running,
+			hasPausedQueue: this.#hasPausedQueue,
+			shellRunning: this.#shellRunning,
+			lastIdleCtrlCAt: this.#lastIdleCtrlCAt,
+			modelLabel: this.#modelLabel,
+			reasoning: this.#reasoning,
+		});
 		const dockRows = editorFrame.lines.length + attachmentRows + drawerRows + activityRows + footerLines.length;
 		this.#lastDockRows = dockRows;
 		const viewportHeight = height - 1 - dockRows;
-		const blocks = this.#renderViewportBlocks(width, now);
+		const blocks = this.#timelineRenderer.renderViewportBlocks({
+			width,
+			now,
+			timeline: this.#timeline,
+			provisionalCards: this.#provisionalCards,
+			recoverableCards: this.#recoverableCards,
+			activeFollowUp: this.#activeFollowUp,
+			messageAttachments: this.#messageAttachments,
+			transcriptMode: this.#transcriptMode,
+			error: this.#error,
+			notice: this.#notice,
+			runEvidence: this.#runEvidence,
+			attachmentFocusKey: this.#attachmentFocusKey,
+		});
 		this.#lastViewportBlocks = blocks;
 		this.#lastViewportHeight = viewportHeight;
 		const viewport = this.#viewport.layout(blocks, viewportHeight);
@@ -521,7 +519,8 @@ export class ChatComponent extends Component {
 		const attachmentRow = height - dockRows + drawerRows;
 		this.#attachmentHitRegions = [
 			...viewport.sourceRows.flatMap((source, row) =>
-				(this.#timelineAttachmentHitRegions.get(source.blockId) ?? [])
+				this.#timelineRenderer
+					.attachmentHitRegions(source.blockId)
 					.filter((region) => region.row === source.lineOffset)
 					.map((region) => ({ ...region, row: 1 + row })),
 			),
@@ -1219,268 +1218,6 @@ export class ChatComponent extends Component {
 		const attachment = this.#focusedAttachment;
 		if (!attachment) return undefined;
 		return previewGeometry(context.width, context.height, this.#lastDockRows, attachment, this.#imageModal);
-	}
-
-	#renderViewportBlocks(width: number, now: number): readonly ViewportBlock[] {
-		const entries = this.#timeline.entries;
-		const cache = this.#cachedViewportBlocks;
-		if (
-			!this.#timeline.hasActiveTools &&
-			this.#provisionalCards.length === 0 &&
-			this.#recoverableCards.length === 0 &&
-			!this.#activeFollowUp &&
-			cache?.entries === entries &&
-			cache.width === width &&
-			cache.transcriptMode === this.#transcriptMode &&
-			cache.error === this.#error &&
-			cache.notice === this.#notice &&
-			cache.runEvidence === this.#runEvidence &&
-			cache.attachmentFocusKey === this.#attachmentFocusKey
-		) {
-			return cache.blocks;
-		}
-		this.#timelineAttachmentHitRegions = new Map();
-		const presentationBlocks: MainTimelineBlock[] = [];
-		const appendBlock = (block: ViewportBlock, contentType: MainTimelineContentType): void => {
-			presentationBlocks.push({ ...block, contentType });
-		};
-		for (let index = 0; index < entries.length; index++) {
-			const entry = entries[index];
-			if (!entry) continue;
-			if (!this.#transcriptMode && entry.kind === "tool" && isExplorationTool(entry)) {
-				const group = [entry];
-				while (index + 1 < entries.length) {
-					const candidate = entries[index + 1];
-					if (candidate?.kind !== "tool" || !isExplorationTool(candidate) || candidate.turnId !== entry.turnId) {
-						break;
-					}
-					group.push(candidate);
-					index++;
-				}
-				appendBlock(
-					{
-						id: `exploration:${entry.id}`,
-						lines: renderExplorationGroup(group, {
-							width,
-							now,
-							transcript: false,
-							theme: this.#theme,
-							motion: this.#options.motion ?? "full",
-						}),
-					},
-					"exploration",
-				);
-				continue;
-			}
-			const recovery =
-				entry.kind === "user"
-					? (this.#recoverableCards.find((card) => card.messageId === entry.messageId) ??
-						(this.#activeFollowUp?.messageId === entry.messageId ? this.#activeFollowUp : undefined))
-					: undefined;
-			const rendered = this.#renderTimelineBlock(entry, recovery, width, now);
-			this.#timelineAttachmentHitRegions.set(entry.id, rendered.regions);
-			appendBlock({ id: entry.id, lines: rendered.lines }, timelineEntryContentType(entry));
-		}
-		for (const card of this.#provisionalCards) {
-			const layout = renderUserCard(
-				card.text,
-				width,
-				this.#theme,
-				card.attachments,
-				card.status,
-				card.id,
-				this.#attachmentFocusKey,
-			);
-			this.#timelineAttachmentHitRegions.set(card.id, layout.regions);
-			appendBlock({ id: card.id, lines: layout.lines }, card.kind === "user_shell" ? "user_shell" : "user");
-		}
-		for (const card of this.#recoverableCards) {
-			if (card.messageId) continue;
-			const blockId = `recoverable:${card.item.id}`;
-			const layout = renderUserCard(
-				followUpText(card.item),
-				width,
-				this.#theme,
-				card.attachments,
-				recoverableStatus(card),
-				blockId,
-				this.#attachmentFocusKey,
-			);
-			this.#timelineAttachmentHitRegions.set(blockId, layout.regions);
-			appendBlock({ id: blockId, lines: layout.lines }, "user");
-		}
-		if (this.#error) {
-			appendBlock(
-				{
-					id: "run-error",
-					lines: wrapAnsi(this.#theme.style("error", `Error: ${sanitizeTerminalText(this.#error)}`), width),
-				},
-				"error",
-			);
-		}
-		if (this.#runEvidence) {
-			appendBlock(
-				{
-					id: `run-evidence:${this.#runEvidence.runId}`,
-					lines: renderRunEvidenceSummary(this.#runEvidence, width).map((line) =>
-						this.#theme.style("muted", line),
-					),
-				},
-				"evidence",
-			);
-		}
-		if (this.#notice) {
-			appendBlock(
-				{
-					id: "command-notice",
-					lines: wrapAnsi(this.#theme.style("success", sanitizeTerminalText(this.#notice)), width),
-				},
-				"notice",
-			);
-		}
-		const blocks: readonly ViewportBlock[] = this.#transcriptMode
-			? presentationBlocks
-			: spaceMainTimelineBlocks(presentationBlocks);
-		const snapshot = Object.freeze([...blocks]);
-		if (
-			!this.#timeline.hasActiveTools &&
-			this.#provisionalCards.length === 0 &&
-			this.#recoverableCards.length === 0 &&
-			!this.#activeFollowUp
-		) {
-			this.#cachedViewportBlocks = Object.freeze({
-				entries,
-				width,
-				transcriptMode: this.#transcriptMode,
-				error: this.#error,
-				notice: this.#notice,
-				runEvidence: this.#runEvidence,
-				attachmentFocusKey: this.#attachmentFocusKey,
-				blocks: snapshot,
-			});
-		}
-		return snapshot;
-	}
-
-	#renderTimelineBlock(
-		entry: TimelineEntry,
-		recovery: RecoverablePromptCard | undefined,
-		width: number,
-		now: number,
-	): CachedTimelineBlock {
-		const attachments =
-			entry.kind === "user"
-				? (this.#messageAttachments.get(entry.messageId) ?? recovery?.attachments ?? [])
-				: undefined;
-		const status = recovery
-			? this.#activeFollowUp === recovery
-				? "Running"
-				: recoverableStatus(recovery)
-			: undefined;
-		const attachmentFocusKey = this.#attachmentFocusKey?.startsWith(`${entry.id}\u0000`)
-			? this.#attachmentFocusKey
-			: undefined;
-		const toolResultImagesSupported = this.#options.toolResultImagesSupported ?? false;
-		const animated =
-			entry.kind === "tool" && entry.state === "running" && (this.#options.motion ?? "full") === "full";
-		const cached = this.#timelineBlockCache.get(entry.id);
-		if (
-			!animated &&
-			cached?.entry === entry &&
-			cached.width === width &&
-			cached.transcriptMode === this.#transcriptMode &&
-			cached.toolResultImagesSupported === toolResultImagesSupported &&
-			cached.attachments === attachments &&
-			cached.status === status &&
-			cached.attachmentFocusKey === attachmentFocusKey
-		) {
-			return cached;
-		}
-		const layout =
-			entry.kind === "user"
-				? renderUserCard(entry.text, width, this.#theme, attachments, status, entry.id, attachmentFocusKey)
-				: {
-						lines: renderTimelineEntry(
-							entry,
-							width,
-							this.#transcriptMode,
-							this.#markdown,
-							this.#theme,
-							now,
-							this.#options.motion ?? "full",
-							toolResultImagesSupported,
-						),
-						regions: [],
-					};
-		const rendered = Object.freeze({
-			entry,
-			width,
-			transcriptMode: this.#transcriptMode,
-			toolResultImagesSupported,
-			attachments,
-			status,
-			attachmentFocusKey,
-			lines: layout.lines,
-			regions: layout.regions,
-		});
-		this.#timelineBlockCache.set(entry.id, rendered);
-		return rendered;
-	}
-
-	#renderFooter(width: number, now: number): readonly string[] {
-		if (this.#imageModal) return actionFooter(width, ["Image preview • Esc/q closes"]);
-		const attachmentTarget = this.#focusedAttachmentTarget;
-		if (attachmentTarget) {
-			const canDetach = attachmentTarget.source === "composer";
-			return this.#options.imagePreviewSupported
-				? actionFooter(width, [
-						`Attachment • Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
-						`Enter expands${canDetach ? " • Delete detaches" : ""} • Tab returns`,
-						"Enter expands • Tab returns",
-					])
-				: actionFooter(width, [
-						`Attachment • Enter opens system viewer${canDetach ? " • Delete detaches" : ""} • Tab returns to editor`,
-						`Enter opens viewer${canDetach ? " • Delete detaches" : ""} • Tab returns`,
-						"Enter opens viewer • Tab returns",
-					]);
-		}
-		if (this.#shellMode) return actionFooter(width, [this.#theme.style("error", "Shell mode")]);
-		const unread = this.#viewport.unreadUpdates;
-		if (unread > 0) return actionFooter(width, [`down ${unread} update${unread === 1 ? "" : "s"} - Ctrl+End`]);
-		if (this.#transcriptMode) {
-			return actionFooter(width, [
-				"Transcript • PgUp/PgDn scroll • Esc closes • Ctrl+End latest",
-				"Transcript • PgUp/PgDn • Esc closes",
-				"Transcript • Esc closes",
-			]);
-		}
-		if (!this.#running && this.#hasPausedQueue) {
-			return actionFooter(width, [
-				"Paused queue • Enter resumes • Alt+Up edits latest • typing appends",
-				"Enter resumes • Alt+Up edits • typing appends",
-				"Enter resumes • Alt+Up edits",
-			]);
-		}
-		if (this.#shellRunning) {
-			return actionFooter(width, [
-				"Local command running • Enter queues • Alt+Up edits • Ctrl-C cancels",
-				"Enter queues • Alt+Up edits • Ctrl-C cancels",
-				"Ctrl-C cancels the command",
-			]);
-		}
-		if (
-			this.#lastIdleCtrlCAt !== undefined &&
-			now >= this.#lastIdleCtrlCAt &&
-			now - this.#lastIdleCtrlCAt < IDLE_CTRL_C_CONFIRMATION_WINDOW_MS
-		) {
-			return actionFooter(width, ["Press Ctrl-C again to exit"]);
-		}
-		return renderStatusLine(
-			this.#options.statusLine(),
-			{ modelLabel: this.#modelLabel, reasoning: this.#reasoning },
-			width,
-			this.#theme,
-		);
 	}
 
 	#invokeCommand(command: CommandDefinition, argument?: string): void {
