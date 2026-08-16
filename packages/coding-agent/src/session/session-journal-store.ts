@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
 import type { DirectoryEntry, FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
-import type { SessionFormatVersion, SessionHeader } from "./records.ts";
+import type { SessionFormatVersion, SessionHeader, SessionRecord } from "./records.ts";
 
 export class SessionJournalAppender {
 	#handle: WritableFile | undefined;
@@ -60,13 +60,39 @@ export class SessionJournalStore {
 		}
 	}
 
-	async create(path: string, header: SessionHeader): Promise<void> {
-		await this.#writeNew(path, `${JSON.stringify(header)}\n`);
-		await this.#fileSystem.setMode(path, 0o600);
-	}
-
 	async openAppender(path: string): Promise<SessionJournalAppender> {
 		return new SessionJournalAppender(await this.#fileSystem.open(path, "a", 0o600));
+	}
+
+	async assertAvailable(path: string): Promise<void> {
+		if (await this.#exists(path)) throw new Error(`Session already exists: ${path}`);
+	}
+
+	/** Atomically publishes a new journal only after it contains retained Session activity. */
+	async materialize(
+		path: string,
+		header: SessionHeader,
+		records: readonly SessionRecord[],
+	): Promise<SessionJournalAppender> {
+		await this.assertAvailable(path);
+		const token = safeIdentity(this.#idGenerator.generate("queue_item"));
+		const temporaryPath = `${path}.materialize-${token}.tmp`;
+		let handle: WritableFile | undefined;
+		let installed = false;
+		try {
+			handle = await this.#fileSystem.open(temporaryPath, "wx", 0o600);
+			await handle.write(`${[header, ...records].map((value) => JSON.stringify(value)).join("\n")}\n`);
+			await handle.sync();
+			await handle.close();
+			handle = undefined;
+			await this.#fileSystem.rename(temporaryPath, path);
+			installed = true;
+			await this.#fileSystem.setMode(path, 0o600);
+		} finally {
+			await handle?.close().catch(() => undefined);
+			if (!installed) await this.#removeIfPresent(temporaryPath);
+		}
+		return this.openAppender(path);
 	}
 
 	async installMigration(input: {

@@ -7,6 +7,9 @@ export function createSessionPresentation(session: Session): SessionPresentation
 		get descriptor() {
 			return session.descriptor;
 		},
+		get hasRetainedActivity() {
+			return session.hasRetainedActivity;
+		},
 		get seed() {
 			return session.seed;
 		},

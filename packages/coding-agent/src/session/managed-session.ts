@@ -9,6 +9,7 @@ import {
 import { SessionHistoryReader } from "../session-history/reader.ts";
 import type { SessionRecord, SessionRecordOf, SessionRecordPayloadMap, SessionRecordType } from "./records.ts";
 import { compactionPayload, eventRecordInputs, reduceSession } from "./records.ts";
+import { hasRetainedSessionActivity, isProvisionalSessionRecord } from "./session-lifecycle.ts";
 import type {
 	RestoredSessionState,
 	Session,
@@ -51,6 +52,7 @@ export class ManagedSession implements Session {
 	readonly #mediaReferences: ReadonlyMap<string, readonly SessionMediaReference[]>;
 	#compactionCheckpoint?: CompactionCheckpoint;
 	#discardedModelCost?: number;
+	#hasRetainedActivity: boolean;
 	#sequence: number;
 	#previousRecordId: string | null;
 	#closed = false;
@@ -77,6 +79,7 @@ export class ManagedSession implements Session {
 			? structuredClone(reduced.compactionCheckpoint)
 			: undefined;
 		this.#discardedModelCost = reduced.discardedModelCost;
+		this.#hasRetainedActivity = hasRetainedSessionActivity(journal.records);
 		this.#mediaReferences = new Map(
 			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
 				messageId,
@@ -94,6 +97,10 @@ export class ManagedSession implements Session {
 
 	get id(): string {
 		return this.#journal.descriptor.id;
+	}
+
+	get hasRetainedActivity(): boolean {
+		return this.#hasRetainedActivity;
 	}
 
 	get seed() {
@@ -272,6 +279,7 @@ export class ManagedSession implements Session {
 			payload: structuredClone(payload),
 		} as unknown as SessionRecordOf<Type>;
 		await this.#journal.append(record as SessionRecord);
+		if (!isProvisionalSessionRecord(record as SessionRecord)) this.#hasRetainedActivity = true;
 		if (type === "message_committed") {
 			const message = (payload as { readonly message?: AgentMessage }).message;
 			if (message) this.#historyMessages.push(structuredClone(message));

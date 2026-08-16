@@ -5,6 +5,7 @@ import type { McpElicitationResult } from "@coda/mcp";
 import { createTerminalImageSurface, type DiagnosticSink, type Keybinding, type Scheduler } from "@coda/tui";
 import type { ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
+import { sessionCommandEntryFromSummary } from "../commands/session-flow.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
@@ -21,6 +22,7 @@ import type { RunControlConfiguration } from "../run-control/index.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { WorkspaceInputResources } from "../runtime/workspace-input-resources.ts";
 import type { WorkspaceWorkCoordinator } from "../runtime/workspace-work-coordinator.ts";
+import { summarizeSessionRecords } from "../session/session-summary.ts";
 import type { Session, SessionId, SessionManager } from "../session/types.ts";
 import type { SettingsStore } from "../settings/types.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
@@ -258,12 +260,26 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			commandRegistry: input.commandRegistry,
 			fileMentionSearch,
 			sessionCommand: {
-				list: async () =>
-					(await input.sessions.list({ id: input.workspaceId, path: input.workspace.root })).map((descriptor) => ({
-						id: descriptor.id,
-						label: descriptor.id,
-						description: new Date(descriptor.createdAt).toISOString(),
-					})),
+				list: async () => {
+					const workspace = { id: input.workspaceId, path: input.workspace.root };
+					const summaries = input.sessions.listSummaries
+						? await input.sessions.listSummaries(workspace)
+						: (await input.sessions.list(workspace)).map((descriptor) => summarizeSessionRecords(descriptor, []));
+					const models = new Map(
+						input.options.models.getModels().map((model) => [`${model.provider}/${model.id}`, model] as const),
+					);
+					const now = input.options.runtime.clock.now();
+					return summaries.map((summary) => {
+						const selected = summary.model;
+						const runtime = selected ? models.get(`${selected.provider}/${selected.id}`) : undefined;
+						return sessionCommandEntryFromSummary(
+							selected && !selected.api && runtime
+								? { ...summary, model: { ...selected, api: runtime.api } }
+								: summary,
+							now,
+						);
+					});
+				},
 				open: async (sessionId) => {
 					const targetSession = await input.sessions.open({
 						workspace: { id: input.workspaceId, path: input.workspace.root },
@@ -314,7 +330,11 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 	if (finalAssistant?.role === "assistant") {
 		await input.options.io.stdout.write(`${finalText(finalAssistant)}\n`);
 	}
-	if (finalPresentation.descriptor.persistent && finalPresentation.descriptor.path) {
+	if (
+		finalPresentation.hasRetainedActivity &&
+		finalPresentation.descriptor.persistent &&
+		finalPresentation.descriptor.path
+	) {
 		await input.options.io.stdout.write(
 			`Session ${finalPresentation.descriptor.id} • resume with: coda --resume ${finalPresentation.descriptor.id}\n`,
 		);

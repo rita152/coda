@@ -1,4 +1,4 @@
-import { type KeyInput, stripAnsi } from "@coda/tui";
+import { displayWidth, type KeyInput, stripAnsi } from "@coda/tui";
 import { describe, expect, it, vi } from "vitest";
 import {
 	CommandFlowHost,
@@ -150,6 +150,66 @@ describe("CommandFlowHost", () => {
 
 		expect(host.view?.query).toBe("BE");
 		expect(host.view?.items.map(({ id, selected }) => ({ id, selected }))).toEqual([{ id: "beta", selected: true }]);
+	});
+
+	it("renders Session menus as full-width Codex-style title and metadata rows", () => {
+		const host = new CommandFlowHost();
+		host.open({
+			id: "session",
+			title: "Switch session",
+			filterable: true,
+			presentation: "sessions",
+			emptyMessage: "No sessions yet",
+			items: [
+				{
+					id: "session-12345678",
+					label: "Implement a readable session picker",
+					description: "15m ago · openai/gpt-5 · OpenAI Responses · 2 prompts",
+					status: "current",
+				},
+			],
+		});
+
+		const rendered = renderCommandFlow(host.view!, 96, 6, createCodaTheme(0)).map(stripAnsi);
+
+		expect(rendered).toEqual([
+			"  Switch session · type to search",
+			"❯ Implement a readable session picker",
+			"  current · 15m ago · openai/gpt-5 · OpenAI Responses · 2 prompts",
+		]);
+	});
+
+	it("keeps Session titles readable on narrow terminals and renders a useful empty state", () => {
+		const host = new CommandFlowHost();
+		host.open({
+			id: "session",
+			title: "Switch session",
+			filterable: true,
+			presentation: "sessions",
+			emptyMessage: "No sessions yet",
+			items: [
+				{
+					id: "session-1",
+					label: "Readable title",
+					description: "15m ago · anthropic/claude · Anthropic Messages · 1 prompt",
+					status: "idle",
+				},
+			],
+		});
+
+		const rendered = renderCommandFlow(host.view!, 40, 4, createCodaTheme(0)).map(stripAnsi);
+		expect(rendered[1]).toBe("❯ Readable title");
+		expect(rendered.every((line) => displayWidth(line) <= 40)).toBe(true);
+
+		host.open({
+			id: "session",
+			title: "Switch session",
+			filterable: true,
+			presentation: "sessions",
+			emptyMessage: "No sessions yet",
+			items: [],
+		});
+		expect(renderCommandFlow(host.view!, 40, 4, createCodaTheme(0)).map(stripAnsi)).toContain("  No sessions yet");
 	});
 
 	it("captures a secret prompt without exposing its value in the render view", () => {

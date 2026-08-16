@@ -8,7 +8,9 @@ import { descriptorHeader, type SessionRecord } from "./records.ts";
 import { SessionCodecRegistry } from "./session-codec-registry.ts";
 import { type SessionJournalAppender, SessionJournalStore } from "./session-journal-store.ts";
 import { type ProcessInspector, SessionLease, type SessionLockOwner } from "./session-lease.ts";
+import { hasRetainedSessionActivity, isProvisionalSessionRecord } from "./session-lifecycle.ts";
 import { type InterruptedToolRecovery, SessionRecovery } from "./session-recovery.ts";
+import { summarizeSessionRecords } from "./session-summary.ts";
 import type {
 	OpenSessionRequest,
 	Session,
@@ -17,6 +19,7 @@ import type {
 	SessionManager,
 	SessionMediaReference,
 	SessionRuntime,
+	SessionSummary,
 	SessionWorkspace,
 } from "./types.ts";
 
@@ -30,6 +33,11 @@ export interface FileSessionManagerOptions extends SessionRuntime {
 	readonly processInspector: ProcessInspector;
 	readonly diagnostics?: DiagnosticSink;
 	readonly interruptedToolRecovery?: InterruptedToolRecovery;
+}
+
+interface ListedSessionJournal {
+	readonly descriptor: SessionDescriptor;
+	readonly records: readonly SessionRecord[];
 }
 
 /** Composes the journal, codec, lease, media, and recovery Session subsystems. */
@@ -87,6 +95,7 @@ export class FileSessionManager implements SessionManager {
 		});
 		await lease.acquire(request);
 		let appender: SessionJournalAppender | undefined;
+		const provisionalRecords: SessionRecord[] = [];
 		try {
 			let descriptor: SessionDescriptor;
 			let records: readonly SessionRecord[];
@@ -112,6 +121,7 @@ export class FileSessionManager implements SessionManager {
 					path,
 				};
 			} else {
+				await this.#store.assertAvailable(path);
 				descriptor = {
 					id: sessionId,
 					workspace: { ...request.workspace },
@@ -119,24 +129,34 @@ export class FileSessionManager implements SessionManager {
 					persistent: true,
 					path,
 				};
-				await this.#store.create(path, descriptorHeader(descriptor));
 				records = [];
 			}
 
-			appender = await this.#store.openAppender(path);
+			if (request.resumeId) appender = await this.#store.openAppender(path);
+			const append = async (record: SessionRecord): Promise<void> => {
+				const encoded = await mediaCodec.encodeRecord(record);
+				if (appender) {
+					await appender.append(encoded);
+					return;
+				}
+				provisionalRecords.push(encoded);
+				if (isProvisionalSessionRecord(record)) return;
+				appender = await this.#store.materialize(path, descriptorHeader(descriptor), provisionalRecords);
+				provisionalRecords.length = 0;
+			};
 			records = await this.#recovery.recover({
 				records,
 				sessionId,
 				path,
 				mode: request.mode,
-				append: async (record) => appender!.append(await mediaCodec.encodeRecord(record)),
+				append,
 			});
 			const journal: SessionJournal = {
 				descriptor,
 				records,
 				mediaReferences,
 				registerMedia: (registrations) => mediaCodec.register(registrations),
-				append: async (record) => appender!.append(await mediaCodec.encodeRecord(record)),
+				append,
 				close: async () => {
 					let failure: unknown;
 					try {
@@ -162,6 +182,20 @@ export class FileSessionManager implements SessionManager {
 	}
 
 	async list(workspace: SessionWorkspace): Promise<readonly SessionDescriptor[]> {
+		return (await this.#listJournals(workspace))
+			.filter(({ records }) => hasRetainedSessionActivity(records))
+			.map(({ descriptor }) => descriptor)
+			.sort((left, right) => right.createdAt - left.createdAt);
+	}
+
+	async listSummaries(workspace: SessionWorkspace): Promise<readonly SessionSummary[]> {
+		return (await this.#listJournals(workspace))
+			.filter(({ records }) => hasRetainedSessionActivity(records))
+			.map(({ descriptor, records }) => summarizeSessionRecords(descriptor, records))
+			.sort((left, right) => right.updatedAt - left.updatedAt);
+	}
+
+	async #listJournals(workspace: SessionWorkspace): Promise<readonly ListedSessionJournal[]> {
 		const directory = this.#workspaceDirectory(workspace);
 		let entries: readonly DirectoryEntry[];
 		try {
@@ -170,19 +204,22 @@ export class FileSessionManager implements SessionManager {
 			if (isFileSystemError(error, "ENOENT")) return [];
 			throw error;
 		}
-		const descriptors: SessionDescriptor[] = [];
+		const journals: ListedSessionJournal[] = [];
 		for (const entry of entries) {
 			if (entry.kind !== "file" || !entry.name.endsWith(".jsonl")) continue;
 			const path = join(directory, entry.name);
 			try {
 				const parsed = await this.#codecs.read(path);
 				if (parsed.header.workspaceId !== workspace.id || parsed.header.workspacePath !== workspace.path) continue;
-				descriptors.push({
-					id: parsed.header.sessionId as SessionId,
-					workspace: { ...workspace },
-					createdAt: parsed.header.createdAt,
-					persistent: true,
-					path,
+				journals.push({
+					descriptor: {
+						id: parsed.header.sessionId as SessionId,
+						workspace: { ...workspace },
+						createdAt: parsed.header.createdAt,
+						persistent: true,
+						path,
+					},
+					records: parsed.records,
 				});
 			} catch (error) {
 				await this.#diagnostics?.({
@@ -192,7 +229,7 @@ export class FileSessionManager implements SessionManager {
 				});
 			}
 		}
-		return descriptors.sort((left, right) => right.createdAt - left.createdAt);
+		return journals;
 	}
 
 	#workspaceDirectory(workspace: SessionWorkspace): string {

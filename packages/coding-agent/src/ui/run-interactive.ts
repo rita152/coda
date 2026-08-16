@@ -20,7 +20,11 @@ import type { CommandFlowNavigation } from "../commands/flow-types.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
-import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
+import {
+	createSessionCommandFlow,
+	type SessionCommandEntry,
+	sessionCommandEntryFromSummary,
+} from "../commands/session-flow.ts";
 import { createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { WorkspaceFileSearch } from "../host/workspace-file-search.ts";
@@ -28,6 +32,7 @@ import type { CatalogModel } from "../models/model-catalog.ts";
 import type { CustomProviderInput } from "../models/types.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { ComposerExtensionReference } from "../session/composer-submission.ts";
+import { summarizeSessionMessages } from "../session/session-summary.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { ActivitySummaryMode } from "./activity-status.ts";
 import { type ChatAttachment, ChatComponent } from "./chat-component.ts";
@@ -231,11 +236,21 @@ async function runMultiSessionInteractive(
 		const listedIds = new Set(listed.map(({ id }) => id));
 		for (const pane of panes.open) {
 			if (listedIds.has(pane.id)) continue;
+			const state = pane.options.work.state();
+			const model = state.selection.model;
 			listed.push(
 				Object.freeze({
-					id: pane.id,
-					label: pane.id,
-					description: "Open in this CLI",
+					...sessionCommandEntryFromSummary(
+						summarizeSessionMessages(
+							pane.options.presentation.descriptor,
+							state.messages,
+							pane.options.presentation.composerSubmissions,
+							{
+								model: { provider: model.provider, id: model.id, api: model.api },
+							},
+						),
+						options.clock.now(),
+					),
 				}),
 			);
 		}

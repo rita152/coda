@@ -5,6 +5,7 @@ import {
 	Component,
 	type ComponentInputContext,
 	type CursorPlacement,
+	clipAnsi,
 	createMarkdownRenderer,
 	displayWidth,
 	Editor,
@@ -327,6 +328,22 @@ export class ChatComponent extends Component {
 	render({ width, height, now }: RenderContext): string[] {
 		if (width < MINIMUM_CHAT_COLUMNS || height < MINIMUM_CHAT_ROWS)
 			return renderTooSmall(width, height, this.running);
+		const flowView = this.#commandFlow.view;
+		if (flowView?.presentation === "sessions") {
+			const bodyHeight = Math.max(0, height - 2);
+			const body = [...renderCommandFlow(flowView, width, Math.max(0, bodyHeight - 1), this.#theme)];
+			while (body.length < bodyHeight) body.push("");
+			this.#lastCursor = undefined;
+			this.#lastDockRows = height;
+			this.#lastViewportBlocks = [];
+			this.#lastViewportHeight = 0;
+			this.#attachments.setHitRegions([]);
+			return [
+				renderHeader(width, this.#transcriptMode),
+				...body.slice(0, bodyHeight),
+				this.#theme.style("muted", clipAnsi("  enter to switch   esc to close   ↑↓ navigate", width)),
+			];
+		}
 
 		const stateView = this.#state.view(now);
 		const composerView = this.#composer.view();
@@ -374,7 +391,6 @@ export class ChatComponent extends Component {
 			const after = sliceAnsi(line, region.end, Math.max(0, displayWidth(line) - region.end));
 			editorLines[region.row] = `${before}${this.#theme.styleOnSurface("selection", "accent", selected)}${after}`;
 		}
-		const flowView = this.#commandFlow.view;
 		const fileMentionPalette = !flowView && !this.#shellMode ? this.#fileMentions?.palette : undefined;
 		const commandPalette = !flowView && !this.#shellMode && !fileMentionPalette ? this.#commands.palette : undefined;
 		const maximumDrawerItems = Math.max(0, Math.min(6, height - editorLines.length - 5));

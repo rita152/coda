@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, createProvider, fauxAssistantMessage, fauxProvider, lazyStream } from "@coda/ai";
@@ -10,6 +10,7 @@ import { type ApplicationOutput, createCodingAgentApplication, type UserSettings
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessRunner, ProcessRunRequest } from "../src/host/process-runner.ts";
+import { FileSessionManager } from "../src/session/file-session-manager.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
 import type {
 	OpenSessionRequest,
@@ -456,6 +457,63 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("");
 	});
 
+	it("does not publish or advertise a persistent Session before user-directed activity", async () => {
+		const root = await mkdtemp(join(tmpdir(), "coda-interactive-provisional-session-"));
+		temporaryDirectories.push(root);
+		const workspace = join(root, "workspace");
+		await mkdir(workspace);
+		const canonicalWorkspace = await realpath(workspace);
+		const runtime = testTimeRuntime(1_425);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const idGenerator = { generate: (kind: string) => `${kind}:${++id}` };
+		const application = createCodingAgentApplication({
+			models,
+			sessions: new FileSessionManager({
+				fileSystem: createNodeFileSystem(),
+				homeDirectory: root,
+				clock: runtime.clock,
+				idGenerator,
+				owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+				processInspector: { status: async () => "alive" },
+			}),
+			settings: {
+				load: async () => ({ defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id } }),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: canonicalWorkspace,
+				homeDirectory: root,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator,
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color"]);
+		await until(() => terminal.started);
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await terminal.emit(key("c", { control: true, text: "c" }));
+		await expect(running).resolves.toBe(0);
+
+		const workspaceId = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 32);
+		const entries = await readdir(join(root, ".coda", "sessions", workspaceId));
+		expect(entries.filter((entry) => entry.endsWith(".jsonl") || entry.endsWith(".lock"))).toEqual([]);
+		expect(stdout.value).toBe("");
+		expect(stderr.value).toBe("");
+	});
+
 	it("freezes a newly built System Prompt snapshot for each submitted Run", async () => {
 		let now = 2_000;
 		const prompts: Array<string | undefined> = [];
@@ -796,7 +854,8 @@ describe("interactive TUI mode", () => {
 		terminal.clearOutput();
 		await terminal.emit({ type: "text", text: "/session" });
 		await terminal.emit(key("enter"));
-		await until(() => terminal.readOutput().includes("Session"));
+		await until(() => terminal.readOutput().includes("Switch session"));
+		expect(stripAnsi(terminal.readOutput())).toContain("first");
 		await terminal.emit(key("enter"));
 		await new Promise<void>((resolve) => setTimeout(resolve, 50));
 		expect(terminal.readOutput()).toContain("first");

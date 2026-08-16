@@ -282,6 +282,43 @@ describe("ChatComponent terminal input", () => {
 		expect(frame).toContain("opencode-go/model");
 	});
 
+	it("opens the Session picker as a full-screen Codex-style page", () => {
+		const component = createComponent({
+			colorLevel: 0,
+			onCommand: (_commandId, flow) => {
+				flow.open({
+					id: "session",
+					title: "Switch session",
+					filterable: true,
+					presentation: "sessions",
+					items: [
+						{
+							id: "session-1",
+							label: "Implement the Session picker",
+							description: "15m ago · openai/gpt-5 · OpenAI Responses · 2 prompts",
+							status: "current",
+						},
+					],
+				});
+			},
+		});
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/session" }, context);
+		component.handleInput(key("enter"), context);
+
+		const frame = component.render({ width: 80, height: 12, now: 0 }).map(stripAnsi);
+
+		expect(frame).toHaveLength(12);
+		expect(frame.slice(0, 4)).toEqual([
+			"Coda",
+			"  Switch session · type to search",
+			"❯ Implement the Session picker",
+			"  current · 15m ago · openai/gpt-5 · OpenAI Responses · 2 prompts",
+		]);
+		expect(frame.at(-1)).toBe("  enter to switch   esc to close   ↑↓ navigate");
+		expect(frame).not.toContain("─".repeat(80));
+	});
+
 	it("shows and inserts a Skill only through an explicit $ mention", () => {
 		const onCommand = vi.fn();
 		const component = createComponent({

@@ -7,7 +7,7 @@ import type {
 	CommandFlowScreen,
 	CommandFlowView,
 } from "../commands/flow-types.ts";
-import { renderCommandList } from "./command-list.ts";
+import { renderCommandList, renderDetailedCommandList } from "./command-list.ts";
 import type { TuiTheme } from "./theme.ts";
 
 export type {
@@ -67,6 +67,8 @@ export class CommandFlowHost {
 		return Object.freeze({
 			breadcrumb,
 			menuId: current.screen.id,
+			presentation: current.screen.presentation,
+			emptyMessage: current.screen.emptyMessage,
 			...(current.screen.filterable ? { query: current.query } : {}),
 			items: Object.freeze(
 				items.map((item, index) => Object.freeze({ ...item, selected: index === current.selectedIndex })),
@@ -196,9 +198,15 @@ export function renderCommandFlow(
 ): readonly string[] {
 	const availableWidth = Math.max(0, Math.floor(width));
 	if (availableWidth === 0) return Object.freeze([]);
-	const breadcrumb = sanitizeTerminalText(
-		`${view.breadcrumb.join(" › ")}${view.query ? ` · ${view.query}` : ""}`,
-	).replace(/[\r\n]+/gu, " ");
+	const search =
+		view.presentation === "sessions"
+			? view.query
+				? ` · search: ${view.query}`
+				: " · type to search"
+			: view.query
+				? ` · ${view.query}`
+				: "";
+	const breadcrumb = sanitizeTerminalText(`${view.breadcrumb.join(" › ")}${search}`).replace(/[\r\n]+/gu, " ");
 	const heading = theme.style("muted", clipAnsi(`  ${breadcrumb}`, availableWidth));
 	if (view.prompt) {
 		const value = view.prompt.displayValue || view.prompt.placeholder || "";
@@ -207,18 +215,33 @@ export function renderCommandFlow(
 			clipAnsi(`  ${view.prompt.label}: ${sanitizeTerminalText(value).replace(/[\r\n]+/gu, " ")}`, availableWidth),
 		]);
 	}
-	const rows = renderCommandList(
-		view.items.map((item) => ({
-			primary: item.label,
-			description: item.disabledReason ?? item.status ?? item.description,
-			descriptionTone: item.disabledReason ? ("warning" as const) : ("muted" as const),
-			selected: item.selected,
-		})),
-		availableWidth,
-		maxItems,
-		theme,
-		"No matching options",
-	);
+	const rows =
+		view.presentation === "sessions"
+			? renderDetailedCommandList(
+					view.items.map((item) => ({
+						primary: item.label,
+						description: item.description,
+						status: item.status,
+						disabledReason: item.disabledReason,
+						selected: item.selected,
+					})),
+					availableWidth,
+					maxItems,
+					theme,
+					view.query ? "No matching sessions" : (view.emptyMessage ?? "No sessions yet"),
+				)
+			: renderCommandList(
+					view.items.map((item) => ({
+						primary: item.label,
+						description: item.disabledReason ?? item.status ?? item.description,
+						descriptionTone: item.disabledReason ? ("warning" as const) : ("muted" as const),
+						selected: item.selected,
+					})),
+					availableWidth,
+					maxItems,
+					theme,
+					view.emptyMessage ?? "No matching options",
+				);
 	return Object.freeze([heading, ...rows]);
 }
 
@@ -227,7 +250,7 @@ function visibleItems(frame: CommandFlowFrame): readonly CommandFlowMenuItem[] {
 	const query = normalize(frame.query);
 	if (!frame.screen.filterable || query.length === 0) return frame.screen.items;
 	return frame.screen.items.filter((item) => {
-		const value = normalize(`${item.label} ${item.description ?? ""} ${item.status ?? ""}`);
+		const value = normalize(`${item.id} ${item.label} ${item.description ?? ""} ${item.status ?? ""}`);
 		return value.includes(query) || isSubsequence(query, value);
 	});
 }

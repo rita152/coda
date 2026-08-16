@@ -1,6 +1,8 @@
 import { ManagedSession, type SessionJournal } from "./managed-session.ts";
 import type { SessionHeader, SessionRecord } from "./records.ts";
 import { descriptorHeader } from "./records.ts";
+import { hasRetainedSessionActivity } from "./session-lifecycle.ts";
+import { summarizeSessionRecords } from "./session-summary.ts";
 import type {
 	OpenSessionRequest,
 	Session,
@@ -8,6 +10,7 @@ import type {
 	SessionId,
 	SessionManager,
 	SessionRuntime,
+	SessionSummary,
 	SessionWorkspace,
 } from "./types.ts";
 
@@ -62,10 +65,24 @@ export class InMemorySessionManager implements SessionManager {
 		return [...this.#journals.values()]
 			.filter(
 				(data) =>
-					data.descriptor.workspace.id === workspace.id && data.descriptor.workspace.path === workspace.path,
+					data.descriptor.workspace.id === workspace.id &&
+					data.descriptor.workspace.path === workspace.path &&
+					hasRetainedSessionActivity(data.records),
 			)
 			.map((data) => structuredClone(data.descriptor))
 			.sort((left, right) => right.createdAt - left.createdAt);
+	}
+
+	async listSummaries(workspace: SessionWorkspace): Promise<readonly SessionSummary[]> {
+		return [...this.#journals.values()]
+			.filter(
+				(data) =>
+					data.descriptor.workspace.id === workspace.id &&
+					data.descriptor.workspace.path === workspace.path &&
+					hasRetainedSessionActivity(data.records),
+			)
+			.map((data) => summarizeSessionRecords(data.descriptor, data.records))
+			.sort((left, right) => right.updatedAt - left.updatedAt);
 	}
 
 	#create(workspace: SessionWorkspace, requestedId?: string): MemoryJournalData {

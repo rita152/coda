@@ -18,6 +18,8 @@ export interface CommandFlowMenu {
 	readonly id: string;
 	readonly title: string;
 	readonly filterable?: boolean;
+	readonly presentation?: "default" | "sessions";
+	readonly emptyMessage?: string;
 	readonly items: readonly CommandFlowMenuItem[];
 }
 
@@ -44,6 +46,8 @@ export interface CommandFlowViewItem extends CommandFlowMenuItem {
 export interface CommandFlowView {
 	readonly breadcrumb: readonly string[];
 	readonly menuId: string;
+	readonly presentation?: CommandFlowMenu["presentation"];
+	readonly emptyMessage?: string;
 	readonly query?: string;
 	readonly items: readonly CommandFlowViewItem[];
 	readonly prompt?: {

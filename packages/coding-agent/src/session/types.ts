@@ -13,7 +13,7 @@ import type {
 	ToolInvocation,
 	ToolRejectionReason,
 } from "@coda/agent";
-import type { ThinkingLevel } from "@coda/ai";
+import type { Api, ThinkingLevel } from "@coda/ai";
 import type { WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
 import type { RunEvidenceEnvelope, RunEvidenceWorkspaceDiffSupplement } from "../run-evidence/run-evidence.ts";
@@ -35,6 +35,20 @@ export interface SessionDescriptor {
 	readonly createdAt: number;
 	readonly persistent: boolean;
 	readonly path?: string;
+}
+
+export interface SessionSummaryModel extends ModelSelection {
+	/** Protocol observed on the latest completed Assistant Message, when one exists. */
+	readonly api?: Api;
+}
+
+/** Lightweight, Provider-neutral metadata for Session pickers and indexes. */
+export interface SessionSummary {
+	readonly descriptor: SessionDescriptor;
+	readonly title: string;
+	readonly updatedAt: number;
+	readonly promptCount: number;
+	readonly model?: SessionSummaryModel;
 }
 
 export interface RestoredSessionState {
@@ -114,6 +128,8 @@ export type SessionChange =
 
 export interface Session extends AgentSession {
 	readonly descriptor: SessionDescriptor;
+	/** True after semantic activity makes this Session discoverable and resumable history. */
+	readonly hasRetainedActivity: boolean;
 	readonly restored: RestoredSessionState;
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly composerSubmissions: readonly ComposerSubmission[];
@@ -135,6 +151,8 @@ export interface Session extends AgentSession {
 export interface SessionManager {
 	open(request: OpenSessionRequest): Promise<Session>;
 	list(workspace: SessionWorkspace): Promise<readonly SessionDescriptor[]>;
+	/** Rich listing is optional so external SessionManager adapters retain the minimal foundation port. */
+	listSummaries?(workspace: SessionWorkspace): Promise<readonly SessionSummary[]>;
 }
 
 export interface SessionRuntime {

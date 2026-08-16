@@ -13,6 +13,11 @@ export interface CommandListItem {
 	readonly selected: boolean;
 }
 
+export interface DetailedCommandListItem extends CommandListItem {
+	readonly status?: string;
+	readonly disabledReason?: string;
+}
+
 /**
  * Render the shared Pi-style command list without a surrounding panel.
  * The caller controls whether the list sits above or below its input.
@@ -51,6 +56,52 @@ export function renderCommandList(
 	}
 
 	return Object.freeze(lines);
+}
+
+/** Renders Codex-style two-line records with a full-width title and compact metadata. */
+export function renderDetailedCommandList(
+	items: readonly DetailedCommandListItem[],
+	width: number,
+	maxLines: number,
+	theme: TuiTheme,
+	emptyMessage = "No matching options",
+): readonly string[] {
+	const availableWidth = Math.max(0, Math.floor(width));
+	const lineLimit = Math.max(0, Math.floor(maxLines));
+	if (availableWidth === 0 || lineLimit === 0) return Object.freeze([]);
+	if (items.length === 0) {
+		return Object.freeze([theme.style("muted", clipAnsi(`  ${emptyMessage}`, availableWidth))]);
+	}
+
+	const selectedIndex = Math.max(
+		0,
+		items.findIndex(({ selected }) => selected),
+	);
+	const maximumWithoutPosition = Math.max(1, Math.floor(lineLimit / 2));
+	const showPosition = items.length > maximumWithoutPosition && lineLimit >= 3;
+	const itemLimit = Math.max(1, Math.floor((lineLimit - (showPosition ? 1 : 0)) / 2));
+	const start = Math.max(
+		0,
+		Math.min(selectedIndex - Math.floor(itemLimit / 2), Math.max(0, items.length - itemLimit)),
+	);
+	const end = Math.min(start + itemLimit, items.length);
+	const lines: string[] = [];
+	for (const item of items.slice(start, end)) {
+		const prefix = item.selected ? "❯ " : "  ";
+		const title = clipAnsi(singleLine(item.primary), Math.max(0, availableWidth - displayWidth(prefix)));
+		const titleLine = clipAnsi(`${prefix}${title}`, availableWidth);
+		lines.push(item.selected ? theme.style("accent", titleLine) : titleLine);
+
+		if (lines.length >= lineLimit) break;
+		const metadata = [item.disabledReason, item.status, item.description].filter(isPresent).join(" · ");
+		const metadataLine = clipAnsi(`  ${singleLine(metadata)}`, availableWidth);
+		lines.push(theme.style(item.disabledReason ? "warning" : "muted", metadataLine));
+	}
+
+	if (showPosition && lines.length < lineLimit) {
+		lines.push(theme.style("muted", clipAnsi(`  (${selectedIndex + 1}/${items.length})`, availableWidth)));
+	}
+	return Object.freeze(lines.slice(0, lineLimit));
 }
 
 function renderCommandListItem(
@@ -99,4 +150,8 @@ function singleLine(value: string): string {
 	return sanitizeTerminalText(value)
 		.replace(/[\r\n]+/gu, " ")
 		.trim();
+}
+
+function isPresent(value: string | undefined): value is string {
+	return value !== undefined && value.length > 0;
 }

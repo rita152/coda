@@ -16,6 +16,25 @@ afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
+async function installEmptyJournal(session: Awaited<ReturnType<FileSessionManager["open"]>>): Promise<string> {
+	const { descriptor } = session;
+	const path = descriptor.path!;
+	await session.close();
+	await writeFile(
+		path,
+		`${JSON.stringify({
+			type: "session",
+			version: 10,
+			sessionId: descriptor.id,
+			workspaceId: descriptor.workspace.id,
+			workspacePath: descriptor.workspace.path,
+			createdAt: descriptor.createdAt,
+		})}\n`,
+		{ mode: 0o600 },
+	);
+	return path;
+}
+
 describe("JSONL File Session", () => {
 	it("accepts a preallocated identity when materializing a new Session", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-preallocated-"));
@@ -40,6 +59,162 @@ describe("JSONL File Session", () => {
 		expect(session.descriptor.id).toBe("session-preallocated");
 		expect(session.descriptor.path).toContain("session-preallocated.jsonl");
 		await session.close();
+	});
+
+	it("does not let a provisional identity overwrite an existing journal", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-provisional-collision-"));
+		temporaryDirectories.push(homeDirectory);
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const directory = join(homeDirectory, ".coda", "sessions", workspace.id);
+		await mkdir(directory, { recursive: true });
+		const path = join(directory, "session-existing.jsonl");
+		const original = `${JSON.stringify({
+			type: "session",
+			version: 10,
+			sessionId: "session-existing",
+			workspaceId: workspace.id,
+			workspacePath: workspace.path,
+			createdAt: 1_166,
+		})}\n`;
+		await writeFile(path, original, { mode: 0o600 });
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_166 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+
+		await expect(
+			manager.open({ workspace, mode: "interactive", persistent: true, createId: "session-existing" }),
+		).rejects.toThrow("Session already exists");
+		expect(await readFile(path, "utf8")).toBe(original);
+		await expect(access(`${path}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("keeps a setup-only persistent Session provisional and out of history", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-provisional-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_167 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const session = await manager.open({ workspace, mode: "interactive", persistent: true });
+		const path = session.descriptor.path!;
+
+		await session.record({
+			type: "model_selected",
+			model: { provider: "openai", id: "gpt-test" },
+			reasoning: "off",
+		});
+
+		expect(session.hasRetainedActivity).toBe(false);
+		await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await manager.list(workspace)).toEqual([]);
+		expect(await manager.listSummaries(workspace)).toEqual([]);
+		await session.close();
+		await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+		await expect(access(`${path}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("materializes buffered setup records when the first Composer Submission is accepted", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-materialize-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_168 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const session = await manager.open({ workspace, mode: "interactive", persistent: true });
+		const path = session.descriptor.path!;
+		await session.record({
+			type: "model_selected",
+			model: { provider: "openai", id: "gpt-test" },
+			reasoning: "high",
+		});
+		await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: { id: "submission:materialize", kind: "prompt", text: "Persist this conversation" },
+		});
+
+		expect(session.hasRetainedActivity).toBe(true);
+		const lines = (await readFile(path, "utf8"))
+			.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		expect(lines.map(({ type }) => type)).toEqual(["session", "model_selected", "composer_submission_recorded"]);
+		expect(await manager.listSummaries(workspace)).toEqual([
+			expect.objectContaining({
+				title: "Persist this conversation",
+				promptCount: 1,
+				model: { provider: "openai", id: "gpt-test" },
+			}),
+		]);
+		await session.close();
+	});
+
+	it("hides legacy setup-only journals without making direct resume destructive", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-hidden-legacy-"));
+		temporaryDirectories.push(homeDirectory);
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const directory = join(homeDirectory, ".coda", "sessions", workspace.id);
+		await mkdir(directory, { recursive: true });
+		const sessionId = "session-legacy-setup-only";
+		const path = join(directory, `${sessionId}.jsonl`);
+		await writeFile(
+			path,
+			`${[
+				JSON.stringify({
+					type: "session",
+					version: 10,
+					sessionId,
+					workspaceId: workspace.id,
+					workspacePath: workspace.path,
+					createdAt: 1_169,
+				}),
+				JSON.stringify({
+					type: "model_selected",
+					recordId: "record:legacy-setup-only",
+					sessionId,
+					sequence: 1,
+					previousRecordId: null,
+					timestamp: 1_169,
+					payload: { model: { provider: "anthropic", id: "claude-test" }, reasoning: "off" },
+				}),
+			].join("\n")}\n`,
+			{ mode: 0o600 },
+		);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_170 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+
+		expect(await manager.list(workspace)).toEqual([]);
+		expect(await manager.listSummaries(workspace)).toEqual([]);
+		const resumed = await manager.open({ workspace, mode: "interactive", resumeId: sessionId });
+		expect(resumed.restored).toMatchObject({ model: { provider: "anthropic", id: "claude-test" } });
+		await resumed.close();
+		await expect(access(path)).resolves.toBeUndefined();
 	});
 
 	it("round-trips Composer extension references through the current validated JSONL journal", async () => {
@@ -74,6 +249,14 @@ describe("JSONL File Session", () => {
 		});
 		const sessionId = session.descriptor.id;
 		await session.close();
+		expect(await manager.listSummaries({ id: "workspace-hash", path: "/canonical/workspace" })).toEqual([
+			expect.objectContaining({
+				title: "Use /review",
+				updatedAt: 1_170,
+				promptCount: 1,
+				descriptor: expect.objectContaining({ id: sessionId }),
+			}),
+		]);
 
 		const restored = await manager.open({
 			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
@@ -459,8 +642,7 @@ describe("JSONL File Session", () => {
 			mode: "interactive",
 		});
 		const sessionId = created.descriptor.id;
-		const path = created.descriptor.path!;
-		await created.close();
+		const path = await installEmptyJournal(created);
 		await appendFile(
 			path,
 			`${JSON.stringify({
@@ -523,8 +705,7 @@ describe("JSONL File Session", () => {
 			mode: "interactive",
 		});
 		const sessionId = created.descriptor.id;
-		const path = created.descriptor.path!;
-		await created.close();
+		const path = await installEmptyJournal(created);
 		const records = [
 			{
 				type: "run_started",
@@ -633,8 +814,7 @@ describe("JSONL File Session", () => {
 			mode: "interactive",
 		});
 		const sessionId = created.descriptor.id;
-		const path = created.descriptor.path!;
-		await created.close();
+		const path = await installEmptyJournal(created);
 		await appendFile(
 			path,
 			`${JSON.stringify({
@@ -725,8 +905,7 @@ describe("JSONL File Session", () => {
 			mode: "interactive",
 		});
 		const sessionId = created.descriptor.id;
-		const path = created.descriptor.path!;
-		await created.close();
+		const path = await installEmptyJournal(created);
 		await appendFile(
 			path,
 			`${JSON.stringify({

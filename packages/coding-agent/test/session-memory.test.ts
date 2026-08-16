@@ -6,6 +6,29 @@ import { createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("Session facade", () => {
+	it("keeps setup-only Sessions resumable but out of discoverable history", async () => {
+		let id = 0;
+		const manager = new InMemorySessionManager({
+			clock: { now: () => 990 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+		});
+		const workspace = { id: "workspace-id", path: "/workspace" };
+		const session = await manager.open({ workspace, mode: "interactive" });
+		await session.record({
+			type: "model_selected",
+			model: { provider: "openai", id: "gpt-test" },
+			reasoning: "off",
+		});
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		expect(await manager.list(workspace)).toEqual([]);
+		expect(await manager.listSummaries(workspace)).toEqual([]);
+		const resumed = await manager.open({ workspace, mode: "interactive", resumeId: sessionId });
+		expect(resumed.restored.model).toEqual({ provider: "openai", id: "gpt-test" });
+		await resumed.close();
+	});
+
 	it("restores Composer submission history independently from Agent Messages", async () => {
 		let id = 0;
 		const manager = new InMemorySessionManager({

@@ -1,4 +1,12 @@
-import type { OpenSessionRequest, Session, SessionDescriptor, SessionManager, SessionWorkspace } from "./types.ts";
+import { summarizeSessionRecords } from "./session-summary.ts";
+import type {
+	OpenSessionRequest,
+	Session,
+	SessionDescriptor,
+	SessionManager,
+	SessionSummary,
+	SessionWorkspace,
+} from "./types.ts";
 
 export class SessionManagerRouter implements SessionManager {
 	readonly #memory: SessionManager;
@@ -15,5 +23,10 @@ export class SessionManagerRouter implements SessionManager {
 
 	list(workspace: SessionWorkspace): Promise<readonly SessionDescriptor[]> {
 		return this.#persistent.list(workspace);
+	}
+
+	async listSummaries(workspace: SessionWorkspace): Promise<readonly SessionSummary[]> {
+		if (this.#persistent.listSummaries) return this.#persistent.listSummaries(workspace);
+		return (await this.#persistent.list(workspace)).map((descriptor) => summarizeSessionRecords(descriptor, []));
 	}
 }
