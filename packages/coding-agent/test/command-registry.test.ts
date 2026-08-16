@@ -23,9 +23,23 @@ describe("CommandRegistry", () => {
 		registry.register(command("core:inspect", "inspect", "core"));
 		registry.register(command("skill:inspect", "inspect", "skill"));
 
-		expect(registry.search("inspect", { location: "token_boundary" }).map(({ command: match }) => match.id)).toEqual([
-			"skill:inspect",
-		]);
+		expect(
+			registry.search("inspect", { location: "token_boundary", trigger: "$" }).map(({ command: match }) => match.id),
+		).toEqual(["skill:inspect"]);
+	});
+
+	it("keeps Skill mentions out of Slash queries", () => {
+		const registry = new CommandRegistry();
+		registry.register(command("core:model", "model", "core"));
+		registry.register(command("skill:model", "model", "skill"));
+		registry.register(command("mcp:module", "module", "mcp"));
+
+		expect(
+			registry.search("mo", { location: "composer_start", trigger: "/" }).map(({ command: match }) => match.id),
+		).toEqual(["core:model", "mcp:module"]);
+		expect(
+			registry.search("mo", { location: "composer_start", trigger: "$" }).map(({ command: match }) => match.id),
+		).toEqual(["skill:model"]);
 	});
 });
 

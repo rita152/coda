@@ -21,8 +21,9 @@ import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { createSessionCommandFlow, type SessionCommandEntry } from "../commands/session-flow.ts";
-import { createSkillSelectionCommandFlow, createSkillsCommandFlow } from "../commands/skills-flow.ts";
+import { createSkillsCommandFlow } from "../commands/skills-flow.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
+import type { WorkspaceFileSearch } from "../host/workspace-file-search.ts";
 import type { CatalogModel } from "../models/model-catalog.ts";
 import type { CustomProviderInput } from "../models/types.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
@@ -150,6 +151,7 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
+	readonly fileMentionSearch?: WorkspaceFileSearch;
 	readonly sessionCommand?: InteractiveSessionCommand;
 	readonly onContextOverflowReplacement?: (replacement: InteractiveSessionOptions) => Promise<void> | void;
 	readonly lifecycle?: InteractiveProcessLifecycle;
@@ -365,6 +367,7 @@ async function runMultiSessionInteractive(
 			appearance: options.terminal.capabilities.appearance,
 			motion: options.motion,
 			commandRegistry: options.commandRegistry,
+			fileMentionSearch: options.fileMentionSearch,
 			seed: {
 				version: 1,
 				messages: sessionOptions.work.state().messages,
@@ -436,19 +439,6 @@ async function runMultiSessionInteractive(
 						createSkillsCommandFlow({
 							snapshot: await sessionOptions.skillsCommand.snapshot(),
 							onRefresh: sessionOptions.skillsCommand.refresh,
-						}),
-					);
-					return;
-				}
-				if (commandId === "core:skill") {
-					if (!sessionOptions.skillsCommand) throw new Error("Skill selection is unavailable");
-					flow.open(
-						createSkillSelectionCommandFlow({
-							snapshot: await sessionOptions.skillsCommand.snapshot(),
-							onSelect: (selectedCommandId, navigation) => {
-								component.insertSkillReference(selectedCommandId);
-								navigation.close();
-							},
 						}),
 					);
 					return;
@@ -719,6 +709,7 @@ async function runSingleSessionInteractive(
 		appearance: options.terminal.capabilities.appearance,
 		motion: options.motion,
 		commandRegistry: options.commandRegistry,
+		fileMentionSearch: options.fileMentionSearch,
 		seed: {
 			version: 1,
 			messages: options.work.state().messages,
@@ -790,19 +781,6 @@ async function runSingleSessionInteractive(
 					createSkillsCommandFlow({
 						snapshot: await options.skillsCommand.snapshot(),
 						onRefresh: options.skillsCommand.refresh,
-					}),
-				);
-				return;
-			}
-			if (commandId === "core:skill") {
-				if (!options.skillsCommand) throw new Error("Skill selection is unavailable");
-				flow.open(
-					createSkillSelectionCommandFlow({
-						snapshot: await options.skillsCommand.snapshot(),
-						onSelect: (selectedCommandId, navigation) => {
-							component.insertSkillReference(selectedCommandId);
-							navigation.close();
-						},
 					}),
 				);
 				return;

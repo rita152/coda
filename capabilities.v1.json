@@ -95,15 +95,9 @@
         "arguments": "none"
       },
       {
-        "name": "skill",
-        "aliases": [],
-        "visible": true,
-        "arguments": "none"
-      },
-      {
         "name": "skills",
         "aliases": [],
-        "visible": false,
+        "visible": true,
         "arguments": "none"
       },
       {
@@ -507,16 +501,20 @@
     },
     {
       "id": "coding-agent.terminal",
-      "package": "@coda/tui",
+      "package": "@coda/coding-agent",
       "status": "runtime-supported",
       "title": "Terminal experience",
-      "summary": "Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.",
+      "summary": "Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill mention, and Workspace-scoped `@` file mention completion, plus background Session activity.",
       "sources": [
+        "packages/coding-agent/src/host/workspace-file-search.ts",
+        "packages/coding-agent/src/ui/file-mention-composer.ts",
         "packages/coding-agent/src/ui/run-interactive.ts",
         "packages/tui/src/tui.ts"
       ],
       "tests": [
+        "packages/coding-agent/test/file-mention-composer.test.ts",
         "packages/coding-agent/test/interactive-mode.test.ts",
+        "packages/coding-agent/test/workspace-file-search.test.ts",
         "packages/tui/test/full-screen-tui.test.ts"
       ]
     },

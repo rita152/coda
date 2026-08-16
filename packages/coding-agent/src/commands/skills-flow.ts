@@ -1,43 +1,9 @@
 import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "../skills/types.ts";
 import type { CommandFlowMenu, CommandFlowNavigation } from "./flow-types.ts";
-import { skillExtensionEntries } from "./skill-extensions.ts";
 
 export interface SkillsCommandFlowOptions {
 	readonly snapshot: CodingSkillsSnapshot;
 	readonly onRefresh: () => Promise<CodingSkillsSnapshot>;
-}
-
-export interface SkillSelectionCommandFlowOptions {
-	readonly snapshot: CodingSkillsSnapshot;
-	readonly onSelect: (commandId: string, navigation: CommandFlowNavigation) => Promise<void> | void;
-}
-
-/** Lists every discovered Skill for insertion into the Composer. */
-export function createSkillSelectionCommandFlow(options: SkillSelectionCommandFlowOptions): CommandFlowMenu {
-	const entries = skillExtensionEntries(options.snapshot);
-	return Object.freeze({
-		id: "skill-selection",
-		title: "Select Skill",
-		filterable: true,
-		items: Object.freeze(
-			entries.length > 0
-				? entries.map((entry) =>
-						Object.freeze({
-							id: `skill:${entry.id}`,
-							label: `$${entry.name}`,
-							description: [entry.title, entry.description].filter(Boolean).join(" • "),
-							onSelect: (navigation: CommandFlowNavigation) => options.onSelect(`skill:${entry.id}`, navigation),
-						}),
-					)
-				: [
-						Object.freeze({
-							id: "none",
-							label: "No available Skills",
-							disabledReason: "No Skills were discovered in the configured Skill roots",
-						}),
-					],
-		),
-	});
 }
 
 function reopen(

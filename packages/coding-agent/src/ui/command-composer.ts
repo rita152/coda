@@ -6,7 +6,7 @@ import {
 	resolveCommandInvocation,
 } from "../commands/parser.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
-import type { CommandDefinition, CommandMatch, CommandSource } from "../commands/types.ts";
+import { type CommandDefinition, type CommandMatch, type CommandSource, commandTrigger } from "../commands/types.ts";
 import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import { renderCommandList } from "./command-list.ts";
 import { addExtensionReference, extensionReferencesFromMarkers } from "./extension-references.ts";
@@ -54,22 +54,6 @@ export class CommandComposer {
 		return extensionReferencesFromMarkers(this.#editor.markers);
 	}
 
-	/** Inserts a selected Skill as a visible mention while retaining its structured command identity. */
-	insertSkillReference(commandId: string): void {
-		const command = this.#registry.findById(commandId);
-		if (!command || command.source !== "skill" || command.kind !== "extension") {
-			throw new Error(`Unknown Skill command: ${commandId}`);
-		}
-		const start = this.#editor.cursorOffset;
-		const prefix = start > 0 && !/\s/u.test(this.#editor.text[start - 1] ?? "") ? " " : "";
-		const token = `$${command.name}`;
-		this.#editor.replaceRange(start, start, `${prefix}${token} `);
-		addExtensionReference(this.#editor, command, start + prefix.length, start + prefix.length + token.length);
-		this.#selectionKey = undefined;
-		this.#dismissedKey = undefined;
-		this.#rawPromptSignature = this.#editorSignature();
-	}
-
 	get palette(): CommandPalette | undefined {
 		const active = this.#activePalette();
 		if (!active) return undefined;
@@ -79,7 +63,7 @@ export class CommandComposer {
 				active.matches.map(({ command }, index) =>
 					Object.freeze({
 						commandId: command.id,
-						label: `/${command.name}`,
+						label: `${commandTrigger(command.source)}${command.name}`,
 						sourceTag: `<${command.source}>` as const,
 						title: command.title,
 						selected: index === this.#selectedIndex,
@@ -125,14 +109,14 @@ export class CommandComposer {
 		}
 		const match = active.matches[this.#selectedIndex]!;
 		if (input.key === "tab") {
-			const token = `/${match.command.name}`;
+			const token = `${commandTrigger(match.command.source)}${match.command.name}`;
 			this.#preferredCommandId = match.command.id;
 			this.#editor.replaceRange(active.query.range.start, active.query.range.end, token);
 			return { type: "handled" };
 		}
 		if (input.shift) return { type: "unhandled" };
 		if (match.command.kind === "extension") {
-			const token = `/${match.command.name}`;
+			const token = `${commandTrigger(match.command.source)}${match.command.name}`;
 			this.#editor.replaceRange(active.query.range.start, active.query.range.end, `${token} `);
 			addExtensionReference(
 				this.#editor,
@@ -159,7 +143,7 @@ export class CommandComposer {
 			return undefined;
 		}
 		const matches = this.#registry
-			.search(query.query, { location: query.location })
+			.search(query.query, { location: query.location, trigger: query.trigger })
 			.filter(({ command }) => this.#isAvailable(command));
 		if (matches.length === 0) {
 			this.#selectionKey = undefined;

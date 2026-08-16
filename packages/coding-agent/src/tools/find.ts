@@ -4,9 +4,9 @@ import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../host/workspace.ts";
+import { displayWorkspacePath, walkWorkspaceEntries } from "../host/workspace-walker.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { toolFailure } from "./failure.ts";
-import { displayPath, walkEntries } from "./search.ts";
 
 const FindParameters = Type.Object(
 	{
@@ -103,7 +103,7 @@ export function createFindTool(options: {
 					const status = await fileSystem.stat(resolved.canonicalPath);
 					if (status.kind !== "file" && status.kind !== "directory") continue;
 					if (kind !== "any" && status.kind !== kind) continue;
-					const value = `${displayPath(workspace, resolved.canonicalPath)}${status.kind === "directory" ? "/" : ""}`;
+					const value = `${displayWorkspacePath(workspace, resolved.canonicalPath)}${status.kind === "directory" ? "/" : ""}`;
 					matches.push(value);
 				}
 				matches.sort((left, right) => left.localeCompare(right));
@@ -119,7 +119,7 @@ export function createFindTool(options: {
 					},
 				};
 			}
-			const entries = await walkEntries(workspace, fileSystem, requestedRoot, context);
+			const entries = await walkWorkspaceEntries(workspace, fileSystem, requestedRoot, { signal: context.signal });
 			const matchAgainstPath = arguments_.pattern.includes("/");
 			const matches = entries.filter((entry) => {
 				if (kind !== "any" && entry.kind !== kind) return false;

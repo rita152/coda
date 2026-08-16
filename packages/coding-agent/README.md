@@ -44,6 +44,12 @@ sent through its Attachment identity. Hover only highlights the element. Click
 it to open a borderless, full-resolution terminal preview when Kitty graphics
 are available; unsupported terminals open the image in the system viewer.
 
+Typing `@` at the beginning of the Composer, or typing ` @` after existing
+Prompt text, opens file completion scoped to the current Workspace. Candidates
+are relative file paths; Tab or Enter inserts the selected `@path` followed by
+a space. Coda excludes `.git`, `.coda`, and `node_modules` directories and does
+not follow symbolic links outside the Workspace.
+
 `--json` retains the raw JSONL v2 contract, including incremental message and
 Tool progress events. `--json-mode semantic` omits those transient deltas while
 retaining Run, Turn, Attempt, terminal Message, Tool lifecycle, and Run Evidence
@@ -123,9 +129,7 @@ configuration fields.
 The Composer's borderless upper list exposes the core Slash commands:
 
 <!-- coda:core-commands:start -->
-Visible core commands are `/auth`, `/model`, `/effort`, `/skill`, `/mcp`, `/session`, `/new`, and `/follow-up`.
-
-Hidden compatibility or management names are `/skills`.
+Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/session`, `/new`, and `/follow-up`.
 <!-- coda:core-commands:end -->
 
 Selector commands open nested menus and do not accept
@@ -144,10 +148,11 @@ or Session.
 Local Agent Skills are discovered only from `<Workspace>/.agents/skills` and
 `~/.agents/skills`; Coda does not scan client-specific or ancestor directories.
 The project root has deterministic precedence over the global root. Global Skills
-are user-managed, and project Skills are shown directly in `/skill` for the user
-to select. Coda does not make a separate Skill safety decision. Explicit Composer
-Skill references are user-selected context; model-selected Skills use the `skill`
-Tool to load exact-revision instructions.
+are user-managed, and typing `$` shows project and global Skills for explicit
+selection. Coda does not make a separate Skill safety decision. Explicit
+Composer Skill references are user-selected context; model-selected Skills use
+the `skill` Tool to load exact-revision instructions. `/skills` remains the sole
+Skill management command.
 
 ## MCP Servers
 
@@ -256,7 +261,7 @@ This status block is generated from executable runtime contracts. See the
 - **Bounded Session history recovery** (@coda/coding-agent) — The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.
 - **Durable Sessions** (@coda/coding-agent) — Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, and Compaction Checkpoints. Current Session format: v10.
 - **Agent Skills** (@coda/skills) — Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.
-- **Terminal experience** (@coda/tui) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.
+- **Terminal experience** (@coda/coding-agent) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill mention, and Workspace-scoped `@` file mention completion, plus background Session activity.
 - **User Shell Adapter and input queues** (@coda/coding-agent) — Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.
 - **Offline Agent evaluation harness** (@coda/evals) — Deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, latency, tokens, and price data without network access.
 - **Durable Work Graph orchestration** (@coda/runtime) — A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.

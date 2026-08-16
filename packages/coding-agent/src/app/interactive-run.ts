@@ -9,6 +9,7 @@ import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../host/workspace.ts";
+import { createWorkspaceFileSearch } from "../host/workspace-file-search.ts";
 import type { McpAgentElicitation } from "../mcp/run-capability.ts";
 import type { MediaLibrary } from "../media/media-library.ts";
 import type { ModelCapabilityResolver } from "../models/model-capabilities.ts";
@@ -98,6 +99,7 @@ export interface RunInteractiveApplicationInput {
 
 export async function runInteractiveApplication(input: RunInteractiveApplicationInput): Promise<number> {
 	const settings = input.settings;
+	const fileMentionSearch = createWorkspaceFileSearch(input.workspace, input.options.fileSystem);
 	const secondaryResources = new Map<string, OpenedSessionRuntime>();
 	const saveCustomProviders = async (): Promise<void> => {
 		settings.current = persistCustomProviders(settings.current, input.providerManager.configurations);
@@ -254,6 +256,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			mcpElicitation: input.mcpElicitation,
 			motion: input.noAnimations ? "reduced" : (settings.current.ui?.motion ?? "full"),
 			commandRegistry: input.commandRegistry,
+			fileMentionSearch,
 			sessionCommand: {
 				list: async () =>
 					(await input.sessions.list({ id: input.workspaceId, path: input.workspace.root })).map((descriptor) => ({

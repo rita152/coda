@@ -17,6 +17,7 @@ import {
 } from "@coda/tui";
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
+import type { WorkspaceFileSearch } from "../host/workspace-file-search.ts";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { ComposerExtensionReference, ComposerSubmission } from "../session/composer-submission.ts";
 import type { RecoverableFollowUp, SessionToolLifecycle } from "../session/types.ts";
@@ -41,6 +42,7 @@ import { ChatTimelineRenderer } from "./chat-timeline-renderer.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
+import { FileMentionComposer, renderFileMentionPalette } from "./file-mention-composer.ts";
 import type { UserShellSubmission } from "./input-types.ts";
 import type { StatusLineSnapshot } from "./status-line.ts";
 import { createCodaTheme, type TuiTheme } from "./theme.ts";
@@ -117,6 +119,7 @@ export interface ChatComponentOptions {
 	readonly motion?: "full" | "reduced";
 	readonly activitySummaryMode?: ActivitySummaryMode;
 	readonly commandRegistry?: CommandRegistry;
+	readonly fileMentionSearch?: WorkspaceFileSearch;
 	readonly onCommand?: (
 		commandId: string,
 		flow: CommandFlowHost,
@@ -136,6 +139,7 @@ export class ChatComponent extends Component {
 	#lastViewportHeight = 0;
 	readonly #editor = new Editor();
 	readonly #commands: CommandComposer;
+	readonly #fileMentions?: FileMentionComposer;
 	readonly #commandFlow: CommandFlowHost;
 	readonly #history: ComposerHistory;
 	#lastCursor?: CursorPlacement;
@@ -196,6 +200,11 @@ export class ChatComponent extends Component {
 		this.#commands = new CommandComposer(options.commandRegistry ?? createCoreCommandRegistry(), this.#editor, {
 			isAvailable: (command) => command.id !== "core:follow-up" || this.#state.view().agentRunning,
 		});
+		this.#fileMentions = options.fileMentionSearch
+			? new FileMentionComposer(this.#editor, options.fileMentionSearch, {
+					invalidate: () => this.invalidate(),
+				})
+			: undefined;
 		this.#commandFlow = new CommandFlowHost({
 			onChange: () => this.invalidate(),
 			onError: (error) => {
@@ -285,13 +294,6 @@ export class ChatComponent extends Component {
 		this.#commandFlow.open(screen);
 	}
 
-	insertSkillReference(commandId: string): void {
-		this.#commands.insertSkillReference(commandId);
-		this.#history.noteTextMutation();
-		this.#state.mutate({ type: "set_error", value: undefined });
-		this.invalidate();
-	}
-
 	stageAttachment(attachment: ChatAttachment): void {
 		this.#attachments.mutate({ type: "stage", attachment });
 		this.#state.mutate({ type: "set_error", value: undefined });
@@ -373,16 +375,19 @@ export class ChatComponent extends Component {
 			editorLines[region.row] = `${before}${this.#theme.styleOnSurface("selection", "accent", selected)}${after}`;
 		}
 		const flowView = this.#commandFlow.view;
-		const palette = !flowView && !this.#shellMode ? this.#commands.palette : undefined;
+		const fileMentionPalette = !flowView && !this.#shellMode ? this.#fileMentions?.palette : undefined;
+		const commandPalette = !flowView && !this.#shellMode && !fileMentionPalette ? this.#commands.palette : undefined;
 		const maximumDrawerItems = Math.max(0, Math.min(6, height - editorLines.length - 5));
 		const drawerLines =
 			maximumDrawerItems === 0
 				? []
 				: flowView
 					? renderCommandFlow(flowView, width, maximumDrawerItems, this.#theme)
-					: palette
-						? renderCommandPalette(palette, width, maximumDrawerItems, this.#theme)
-						: [];
+					: fileMentionPalette
+						? renderFileMentionPalette(fileMentionPalette, width, maximumDrawerItems, this.#theme)
+						: commandPalette
+							? renderCommandPalette(commandPalette, width, maximumDrawerItems, this.#theme)
+							: [];
 		const drawerRows = drawerLines.length;
 		const activity = stateView.activity;
 		const activityRows = activity ? 1 : 0;
@@ -511,6 +516,14 @@ export class ChatComponent extends Component {
 		if (!this.#shellMode && input.type === "paste" && this.#handlePastedAttachments(input.text)) return;
 		if (!this.#shellMode) {
 			const before = this.#editor.text;
+			const fileMentionResult = this.#fileMentions?.handleInput(input);
+			if (fileMentionResult?.type === "handled") {
+				if (this.#editor.text !== before) {
+					this.#history.noteTextMutation();
+					this.#attachments.reconcileEditor();
+				}
+				return;
+			}
 			const commandResult = this.#commands.handleInput(input);
 			if (commandResult.type === "handled") {
 				if (this.#editor.text !== before) {

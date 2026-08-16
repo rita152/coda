@@ -6,7 +6,7 @@ import { CommandComposer, renderCommandPalette } from "../src/ui/command-compose
 import { createCodaTheme } from "../src/ui/theme.ts";
 
 describe("CommandComposer", () => {
-	it("exposes ranked palette items with an explicit source tag", () => {
+	it("separates Slash commands from explicit Skill mentions", () => {
 		const registry = new CommandRegistry();
 		registry.register(command({ id: "skill:model", name: "model", source: "skill" }));
 		registry.register(command({ id: "core:model", name: "model", source: "core" }));
@@ -23,12 +23,16 @@ describe("CommandComposer", () => {
 				title: "model",
 				selected: true,
 			},
+		]);
+
+		editor.setText("$mo");
+		expect(composer.palette?.items).toEqual([
 			{
 				commandId: "skill:model",
-				label: "/model",
+				label: "$model",
 				sourceTag: "<skill>",
 				title: "model",
-				selected: false,
+				selected: true,
 			},
 		]);
 	});
@@ -45,21 +49,20 @@ describe("CommandComposer", () => {
 		expect(editor.cursorOffset).toBe(6);
 	});
 
-	it("keeps a same-name Extension selection after Tab and inserts its reference only on Enter", () => {
+	it("completes an explicit Skill mention with Tab and inserts its reference only on Enter", () => {
 		const registry = new CommandRegistry();
-		registry.register(command({ id: "core:model", name: "model", source: "core" }));
 		registry.register(command({ id: "skill:model", name: "model", source: "skill" }));
 		const editor = new Editor();
-		editor.setText("/mo");
+		editor.setText("$mo");
 		const composer = new CommandComposer(registry, editor);
-		composer.handleInput(key("down"));
 
 		expect(composer.handleInput(key("tab"))).toEqual({ type: "handled" });
-		expect(editor.text).toBe("/model");
+		expect(editor.text).toBe("$model");
 		expect(composer.extensionReferences).toEqual([]);
 		expect(composer.palette?.items.find(({ selected }) => selected)?.commandId).toBe("skill:model");
 
 		expect(composer.handleInput(key("enter"))).toEqual({ type: "handled" });
+		expect(editor.text).toBe("$model ");
 		expect(composer.extensionReferences).toMatchObject([{ commandId: "skill:model", source: "skill" }]);
 	});
 
@@ -79,15 +82,13 @@ describe("CommandComposer", () => {
 
 	it("inserts an extension reference on Enter and keeps the Composer open", () => {
 		const registry = new CommandRegistry();
-		registry.register(command({ id: "core:review", name: "review", source: "core" }));
 		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));
 		const editor = new Editor();
-		editor.setText("Please /rev");
+		editor.setText("Please $rev");
 		const composer = new CommandComposer(registry, editor);
-		composer.handleInput(key("down"));
 
 		expect(composer.handleInput(key("enter"))).toEqual({ type: "handled" });
-		expect(editor.text).toBe("Please /review ");
+		expect(editor.text).toBe("Please $review ");
 		expect(editor.cursorOffset).toBe(editor.text.length);
 		expect(composer.extensionReferences).toEqual([
 			{
@@ -101,31 +102,11 @@ describe("CommandComposer", () => {
 		]);
 	});
 
-	it("inserts a selected Skill as a Codex-style $ mention with a structured reference", () => {
-		const registry = new CommandRegistry();
-		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));
-		const editor = new Editor();
-		const composer = new CommandComposer(registry, editor);
-
-		composer.insertSkillReference("skill:review");
-
-		expect(editor.text).toBe("$review ");
-		expect(composer.extensionReferences).toMatchObject([
-			{
-				commandId: "skill:review",
-				source: "skill",
-				name: "review",
-				start: 0,
-				end: "$review".length,
-			},
-		]);
-	});
-
 	it("invalidates an edited extension token and restores its identity on undo", () => {
 		const registry = new CommandRegistry();
 		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));
 		const editor = new Editor();
-		editor.setText("/rev");
+		editor.setText("$rev");
 		const composer = new CommandComposer(registry, editor);
 		composer.handleInput(key("enter"));
 		const reference = composer.extensionReferences[0]!;
@@ -144,7 +125,7 @@ describe("CommandComposer", () => {
 		registry.register(command({ id: "skill:review", name: "review", source: "skill" }));
 		registry.register(command({ id: "mcp:search", name: "search", source: "mcp" }));
 		const editor = new Editor();
-		editor.setText("Use /rev");
+		editor.setText("Use $rev");
 		const composer = new CommandComposer(registry, editor);
 		composer.handleInput(key("enter"));
 		editor.handleInput({ type: "text", text: "then /sea" });
@@ -156,33 +137,18 @@ describe("CommandComposer", () => {
 		]);
 	});
 
-	it("remembers a selected same-name extension as a raw prompt instead of invoking core", () => {
-		const registry = new CommandRegistry();
-		registry.register(command({ id: "core:model", name: "model", source: "core" }));
-		registry.register(command({ id: "skill:model", name: "model", source: "skill" }));
-		const editor = new Editor();
-		editor.setText("/mo");
-		const composer = new CommandComposer(registry, editor);
-
-		composer.handleInput(key("down"));
-		composer.handleInput(key("enter"));
-
-		expect(editor.text).toBe("/model ");
-		expect(composer.resolveSubmission("/model")).toBeUndefined();
-	});
-
 	it("moves the highlighted palette item with arrow keys", () => {
 		const registry = new CommandRegistry();
-		registry.register(command({ id: "core:model", name: "model", source: "core" }));
 		registry.register(command({ id: "skill:model", name: "model", source: "skill" }));
+		registry.register(command({ id: "skill:module", name: "module", source: "skill" }));
 		const editor = new Editor();
-		editor.setText("/mo");
+		editor.setText("$mo");
 		const composer = new CommandComposer(registry, editor);
 
 		expect(composer.handleInput(key("down"))).toEqual({ type: "handled" });
 		expect(composer.palette?.items.map(({ commandId, selected }) => ({ commandId, selected }))).toEqual([
-			{ commandId: "core:model", selected: false },
-			{ commandId: "skill:model", selected: true },
+			{ commandId: "skill:model", selected: false },
+			{ commandId: "skill:module", selected: true },
 		]);
 	});
 

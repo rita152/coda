@@ -355,13 +355,23 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 	}),
 	capability({
 		id: "coding-agent.terminal",
-		package: "@coda/tui",
+		package: "@coda/coding-agent",
 		status: "runtime-supported",
 		title: "Terminal experience",
 		summary:
-			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash completion, and background Session activity.",
-		sources: ["packages/tui/src/tui.ts", "packages/coding-agent/src/ui/run-interactive.ts"],
-		tests: ["packages/tui/test/full-screen-tui.test.ts", "packages/coding-agent/test/interactive-mode.test.ts"],
+			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill mention, and Workspace-scoped `@` file mention completion, plus background Session activity.",
+		sources: [
+			"packages/tui/src/tui.ts",
+			"packages/coding-agent/src/ui/run-interactive.ts",
+			"packages/coding-agent/src/ui/file-mention-composer.ts",
+			"packages/coding-agent/src/host/workspace-file-search.ts",
+		],
+		tests: [
+			"packages/tui/test/full-screen-tui.test.ts",
+			"packages/coding-agent/test/interactive-mode.test.ts",
+			"packages/coding-agent/test/file-mention-composer.test.ts",
+			"packages/coding-agent/test/workspace-file-search.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.user-shell-and-queues",

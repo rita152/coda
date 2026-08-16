@@ -3,9 +3,10 @@ import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../host/workspace.ts";
+import { displayWorkspacePath, walkWorkspaceFiles } from "../host/workspace-walker.ts";
 import { runOptionalSearchExecutable, type SearchExecutableRuntime } from "./external-search.ts";
 import { toolFailure } from "./failure.ts";
-import { displayPath, readSearchableText, walkFiles } from "./search.ts";
+import { readSearchableText } from "./search.ts";
 
 const GrepParameters = Type.Object(
 	{
@@ -110,7 +111,7 @@ export function createGrepTool(options: {
 						currentLine.length > MAX_LINE_CHARACTERS
 							? `${currentLine.slice(0, MAX_LINE_CHARACTERS)}…`
 							: currentLine;
-					const result = `${displayPath(workspace, resolved.canonicalPath)}:${lineNumber}:${reportedColumn}:${visibleLine}`;
+					const result = `${displayWorkspacePath(workspace, resolved.canonicalPath)}:${lineNumber}:${reportedColumn}:${visibleLine}`;
 					if (matches.length >= limit || visibleCharacters + result.length + 1 > MAX_VISIBLE_CHARACTERS) {
 						truncated = true;
 						break;
@@ -124,7 +125,9 @@ export function createGrepTool(options: {
 					details: { count: matches.length, truncated, engine: "rg" },
 				};
 			}
-			const files = await walkFiles(workspace, fileSystem, arguments_.path ?? ".", context);
+			const files = await walkWorkspaceFiles(workspace, fileSystem, arguments_.path ?? ".", {
+				signal: context.signal,
+			});
 			const matches: string[] = [];
 			let visibleCharacters = 0;
 			let truncated = false;

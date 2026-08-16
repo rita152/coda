@@ -1,9 +1,10 @@
-import type {
-	CommandDefinition,
-	CommandMatch,
-	CommandMatchKind,
-	CommandSearchOptions,
-	CommandSource,
+import {
+	type CommandDefinition,
+	type CommandMatch,
+	type CommandMatchKind,
+	type CommandSearchOptions,
+	type CommandSource,
+	commandTrigger,
 } from "./types.ts";
 
 const SOURCE_PRIORITY: Readonly<Record<CommandSource, number>> = Object.freeze({
@@ -34,10 +35,6 @@ export class CommandRegistry {
 		return () => {
 			if (this.#commands.get(command.id) === registered) this.#commands.delete(command.id);
 		};
-	}
-
-	findById(id: string): CommandDefinition | undefined {
-		return this.#commands.get(id)?.command;
 	}
 
 	search(query: string, options: CommandSearchOptions = { location: "composer_start" }): readonly CommandMatch[] {
@@ -81,7 +78,10 @@ export class CommandRegistry {
 }
 
 function isEligible(command: CommandDefinition, options: CommandSearchOptions): boolean {
-	return options.location === "composer_start" || command.triggerScope === "token_boundary";
+	return (
+		(options.trigger === undefined || commandTrigger(command.source) === options.trigger) &&
+		(options.location === "composer_start" || command.triggerScope === "token_boundary")
+	);
 }
 
 function matchKind(value: string, query: string): CommandMatchKind | undefined {

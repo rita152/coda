@@ -10,23 +10,23 @@ describe("core commands", () => {
 			"auth",
 			"model",
 			"effort",
-			"skill",
+			"skills",
 			"mcp",
 			"session",
 			"new",
 			"follow-up",
 		]);
-		expect(resolveCommandInvocation(registry, "/skill")?.command.id).toBe("core:skill");
+		expect(resolveCommandInvocation(registry, "/skill")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/effort")?.command.id).toBe("core:effort");
 		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 		expect(resolveCommandInvocation(registry, "/legacy")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/attach image.png")).toBeUndefined();
 	});
 
-	it("keeps the Skills management command out of the /skill picker while preserving exact access", () => {
+	it("offers /skills in completion as the only Skill command entry", () => {
 		const registry = createCoreCommandRegistry();
 
-		expect(registry.search("skill").map(({ command }) => command.name)).toEqual(["skill"]);
+		expect(registry.search("ski").map(({ command }) => command.name)).toEqual(["skills"]);
 		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 	});
 });

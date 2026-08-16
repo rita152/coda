@@ -1,14 +1,14 @@
 import type { SkillId } from "@coda/skills";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import type { CommandRegistry } from "./registry.ts";
-import { registerSlashExtension, type SlashExtensionEntry } from "./unified-registry.ts";
+import { type CommandExtensionEntry, registerCommandExtension } from "./unified-registry.ts";
 
-function slashCompatible(name: string): boolean {
-	return name.length > 0 && !/[\s/]/u.test(name);
+function triggerCompatible(name: string): boolean {
+	return name.length > 0 && !/[\s$]/u.test(name);
 }
 
 /** Projects Skills into stable Composer entries without coupling Skills state to Commands. */
-export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly SlashExtensionEntry[] {
+export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly CommandExtensionEntry[] {
 	const shortAliasByName = new Map<string, SkillId>();
 	for (const entry of snapshot.resolved) {
 		if (!shortAliasByName.has(entry.candidate.metadata.name)) {
@@ -19,7 +19,7 @@ export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly 
 		snapshot.resolved.flatMap((entry) => {
 			const surfaceWinner = shortAliasByName.get(entry.candidate.metadata.name) === entry.candidate.id;
 			const name = surfaceWinner ? entry.candidate.metadata.name : entry.qualifiedName;
-			if (!slashCompatible(name)) return [];
+			if (!triggerCompatible(name)) return [];
 			const id = String(entry.candidate.id).replace(/^skill:/u, "");
 			return [
 				Object.freeze({
@@ -51,7 +51,7 @@ export class SkillCommandRegistryBinding {
 		const next: (() => void)[] = [];
 		try {
 			for (const entry of skillExtensionEntries(snapshot)) {
-				next.push(registerSlashExtension(this.#registry, "skill", entry));
+				next.push(registerCommandExtension(this.#registry, "skill", entry));
 			}
 			this.#dispose = Object.freeze(next);
 		} catch (error) {

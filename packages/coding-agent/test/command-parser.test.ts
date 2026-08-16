@@ -3,20 +3,36 @@ import { parseCommandQuery, resolveCommandInvocation } from "../src/commands/par
 import { CommandRegistry } from "../src/commands/registry.ts";
 
 describe("parseCommandQuery", () => {
-	it("distinguishes Composer-start commands from inline Extension boundaries", () => {
+	it("distinguishes Slash commands from explicit Skill mentions", () => {
 		expect(parseCommandQuery("/mo", 3)).toEqual({
 			location: "composer_start",
+			trigger: "/",
 			query: "mo",
 			range: { start: 0, end: 3 },
 		});
 		expect(parseCommandQuery("use /sk now", 7)).toEqual({
 			location: "token_boundary",
+			trigger: "/",
 			query: "sk",
 			range: { start: 4, end: 7 },
 		});
+		expect(parseCommandQuery("use $sk", 7)).toEqual({
+			location: "token_boundary",
+			trigger: "$",
+			query: "sk",
+			range: { start: 4, end: 7 },
+		});
+		expect(parseCommandQuery("($review", 8)).toEqual({
+			location: "token_boundary",
+			trigger: "$",
+			query: "review",
+			range: { start: 1, end: 8 },
+		});
 		expect(parseCommandQuery("use/path", 8)).toBeUndefined();
+		expect(parseCommandQuery("use$skill", 9)).toBeUndefined();
 		expect(parseCommandQuery(" /model", 7)).toEqual({
 			location: "token_boundary",
+			trigger: "/",
 			query: "model",
 			range: { start: 1, end: 7 },
 		});

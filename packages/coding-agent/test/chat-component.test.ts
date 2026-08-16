@@ -217,6 +217,15 @@ describe("ChatComponent terminal input", () => {
 		expect(plain).not.toContain("Tab complete • Enter open • Esc close");
 	});
 
+	it("offers the sole /skills management command from a partial Slash query", () => {
+		const component = createComponent({ colorLevel: 0 });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "/ski" }, context);
+
+		const frame = stripAnsi(component.render({ width: 48, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("→ /skills <core>");
+	});
+
 	it("routes Tab to slash completion before the Editor", () => {
 		const component = createComponent({ colorLevel: 0 });
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
@@ -227,6 +236,27 @@ describe("ChatComponent terminal input", () => {
 		const frame = stripAnsi(component.render({ width: 48, height: 12, now: 0 }).join("\n"));
 		expect(frame).toContain("/model");
 		expect(frame).not.toContain("\n/mo\n");
+	});
+
+	it("searches and completes Workspace files from an inline space-at trigger", async () => {
+		const searchSession = vi.fn(async (query: string) => (query === "ma" ? ["src/main.ts"] : []));
+		const fileMentionSearch = { startSession: vi.fn(() => searchSession) };
+		const component = createComponent({ colorLevel: 0, fileMentionSearch });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+		component.handleInput({ type: "text", text: "Review @ma" }, context);
+
+		await vi.waitFor(() => {
+			const frame = stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"));
+			expect(frame).toContain("→ @src/main.ts");
+		});
+		expect(fileMentionSearch.startSession).toHaveBeenCalledOnce();
+		expect(searchSession).toHaveBeenCalledWith("ma");
+
+		component.handleInput(key("enter"), context);
+		component.handleInput({ type: "text", text: "carefully" }, context);
+
+		const frame = stripAnsi(component.render({ width: 80, height: 12, now: 0 }).join("\n"));
+		expect(frame).toContain("Review @src/main.ts carefully");
 	});
 
 	it("opens a core command flow in the same upper drawer on Enter", () => {
@@ -252,42 +282,23 @@ describe("ChatComponent terminal input", () => {
 		expect(frame).toContain("opencode-go/model");
 	});
 
-	it("opens /skill as a picker and writes the selected Skill mention into the Composer", () => {
-		let component!: ChatComponent;
-		const onCommand = vi.fn((commandId: string, flow: CommandFlowHost) => {
-			expect(commandId).toBe("core:skill");
-			flow.open({
-				id: "skill-selection",
-				title: "Select Skill",
-				items: [
-					{
-						id: "review",
-						label: "$review",
-						onSelect: (navigation) => {
-							component.insertSkillReference("skill:review");
-							navigation.close();
-						},
-					},
-				],
-			});
-		});
-		component = createComponent({
+	it("shows and inserts a Skill only through an explicit $ mention", () => {
+		const onCommand = vi.fn();
+		const component = createComponent({
 			colorLevel: 0,
 			onCommand,
 			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 
-		component.handleInput({ type: "text", text: "/skill" }, context);
-		component.handleInput(key("enter"), context);
-		expect(onCommand).toHaveBeenCalledOnce();
-		expect(stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"))).toContain("Select Skill");
+		component.handleInput({ type: "text", text: "$rev" }, context);
+		expect(stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"))).toContain("→ $review <skill>");
 
 		component.handleInput(key("enter"), context);
 
 		const frame = stripAnsi(component.render({ width: 56, height: 12, now: 0 }).join("\n"));
 		expect(frame).toContain("$review");
-		expect(frame).not.toContain("Select Skill");
+		expect(onCommand).not.toHaveBeenCalled();
 	});
 
 	it("submits exact slash text as a raw prompt after the palette is dismissed", async () => {
@@ -312,14 +323,14 @@ describe("ChatComponent terminal input", () => {
 			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput({ type: "text", text: "Use $rev" }, context);
 		component.handleInput(key("enter"), context);
 
 		component.handleInput(key("enter"), context);
 
 		expect(onSubmit).not.toHaveBeenCalled();
 		const frame = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
-		expect(frame).toContain("Use /review");
+		expect(frame).toContain("Use $review");
 		expect(frame).toContain("Skill/MCP extension loading is unavailable");
 	});
 
@@ -334,7 +345,7 @@ describe("ChatComponent terminal input", () => {
 			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput({ type: "text", text: "Use $rev" }, context);
 		component.handleInput(key("enter"), context);
 		component.handleInput(key("enter"), context);
 
@@ -343,7 +354,7 @@ describe("ChatComponent terminal input", () => {
 		expect(references).toMatchObject([
 			{ commandId: "skill:review", source: "skill", name: "review", start: 4, end: 11 },
 		]);
-		expect(onSubmit).toHaveBeenCalledWith("Use /review", [], "Use /review", references);
+		expect(onSubmit).toHaveBeenCalledWith("Use $review", [], "Use $review", references);
 	});
 
 	it("keeps extension offsets aligned after removing attachment display brackets", async () => {
@@ -358,7 +369,7 @@ describe("ChatComponent terminal input", () => {
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
 		component.stageAttachment(attachment("attachment:one", "photo.png"));
-		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput({ type: "text", text: "Use $rev" }, context);
 
 		component.handleInput(key("enter"), context);
 		component.handleInput(key("enter"), context);
@@ -369,9 +380,9 @@ describe("ChatComponent terminal input", () => {
 			{ commandId: "skill:review", source: "skill", name: "review", start: 14, end: 21 },
 		]);
 		expect(onSubmit).toHaveBeenCalledWith(
-			"photo.png Use /review",
+			"photo.png Use $review",
 			["attachment:one"],
-			"photo.png Use /review",
+			"photo.png Use $review",
 			references,
 		);
 	});
@@ -387,14 +398,14 @@ describe("ChatComponent terminal input", () => {
 			commandRegistry: createUnifiedCommandRegistry({ skills: [{ id: "review", name: "review" }] }),
 		});
 		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
-		component.handleInput({ type: "text", text: "Use /rev" }, context);
+		component.handleInput({ type: "text", text: "Use $rev" }, context);
 		component.handleInput(key("enter"), context);
 		component.handleInput({ type: "text", text: "carefully" }, context);
 		component.handleInput(key("enter"), context);
 
 		await vi.waitFor(() => {
 			const frame = stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"));
-			expect(frame).toContain("Use /review carefully");
+			expect(frame).toContain("Use $review carefully");
 			expect(frame).toContain("Skill changed before activation");
 		});
 		expect(onSubmit).not.toHaveBeenCalled();

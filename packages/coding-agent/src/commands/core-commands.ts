@@ -24,18 +24,10 @@ export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
-		id: "core:skill",
-		name: "skill",
-		title: "Select Skill",
-		description: "Insert a Skill reference into the Composer",
-		kind: "control",
-	}),
-	coreCommand({
 		id: "core:skills",
 		name: "skills",
 		title: "Skills",
 		description: "Inspect and refresh local Skills",
-		visibleInPalette: false,
 		kind: "control",
 	}),
 	coreCommand({
