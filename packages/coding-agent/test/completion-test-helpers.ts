@@ -39,8 +39,6 @@ export function completionRunEvidence(overrides: Partial<CompletionRunEvidence> 
 		recoveredFailures: [],
 		pendingOperations: [],
 		openFailures: [],
-		toolIssues: [],
-		unresolvedFailures: [],
 		usage: {
 			attempts: 0,
 			retries: 0,
@@ -65,12 +63,10 @@ export function completionRunEvidence(overrides: Partial<CompletionRunEvidence> 
 			operations: 0,
 			commands: 0,
 			observationLimitations: 0,
-			toolIssues: 0,
 			terminalFailures: 0,
 			recoveredFailures: 0,
 			pendingOperations: 0,
 			openFailures: 0,
-			unresolvedFailures: 0,
 		},
 		...overrides,
 	};

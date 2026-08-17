@@ -54,7 +54,7 @@ export interface StopHookOutcome extends HookContinueOutcome {
  */
 export interface LifecycleHookHost {
 	sessionStart(
-		context: LifecycleHookSessionContext & { readonly source: "startup" | "resume" | "clear" | "compact" },
+		context: LifecycleHookSessionContext & { readonly source: "startup" | "resume" | "compact" },
 	): Promise<HookContinueOutcome>;
 	sessionEnd(context: Omit<LifecycleHookSessionContext, "model"> & { readonly reason: "other" }): Promise<void>;
 	userPromptSubmit(
@@ -77,12 +77,8 @@ export interface LifecycleHookHost {
 			readonly toolResponse: ToolExecutionOutput | { readonly error: string };
 		},
 	): Promise<PostToolUseHookOutcome>;
-	preCompact(
-		context: LifecycleHookTurnContext & { readonly trigger: "manual" | "auto" },
-	): Promise<HookContinueOutcome>;
-	postCompact(
-		context: LifecycleHookTurnContext & { readonly trigger: "manual" | "auto" },
-	): Promise<HookContinueOutcome>;
+	preCompact(context: LifecycleHookTurnContext & { readonly trigger: "auto" }): Promise<HookContinueOutcome>;
+	postCompact(context: LifecycleHookTurnContext & { readonly trigger: "auto" }): Promise<HookContinueOutcome>;
 	stop(
 		context: LifecycleHookTurnContext & {
 			readonly stopHookActive: boolean;

@@ -90,7 +90,6 @@ function hookToolFailure(reason: string, event: "PreToolUse" | "PostToolUse"): T
 		content: reason,
 		observation: { status: "error", truncated: false, facts: { code: "hook_blocked", event } },
 		details: { status: "failed", hookEvent: event, reason },
-		isError: true,
 	};
 }
 
@@ -99,7 +98,6 @@ function hookToolReplacement(reason: string): ToolExecutionOutput {
 		content: reason,
 		observation: { status: "ok", truncated: false, facts: { code: "hook_replaced", event: "PostToolUse" } },
 		details: { status: "completed", hookEvent: "PostToolUse", replaced: true, reason },
-		isError: false,
 	};
 }
 
@@ -366,20 +364,20 @@ export async function openPrivateWorkerRuntime(request: {
 		commit: (checkpoint) => recordSessionChange({ type: "context_compacted", checkpoint }),
 		checkpoint: request.session.session.compactionCheckpoint,
 		maxOutputTokens: options.maxOutputTokens,
-		beforeCompact: async ({ reason }) => {
+		beforeCompact: async () => {
 			if (!options.lifecycleHooks || !activeHookTurnId) return;
 			const outcome = await options.lifecycleHooks.preCompact({
 				...lifecycleContext(activeHookTurnId),
-				trigger: reason === "manual" ? "manual" : "auto",
+				trigger: "auto",
 			});
 			if (!outcome.continue) throw new Error(outcome.reason ?? "PreCompact hook stopped compaction");
 		},
-		afterCompact: async (_checkpoint, { reason }) => {
+		afterCompact: async () => {
 			if (!options.lifecycleHooks || !activeHookTurnId) return;
 			const context = lifecycleContext(activeHookTurnId);
 			const outcome = await options.lifecycleHooks.postCompact({
 				...context,
-				trigger: reason === "manual" ? "manual" : "auto",
+				trigger: "auto",
 			});
 			if (!outcome.continue) throw new Error(outcome.reason ?? "PostCompact hook stopped the active turn");
 			const started = await options.lifecycleHooks.sessionStart({ ...context, source: "compact" });

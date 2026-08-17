@@ -57,7 +57,6 @@ describe("Lifecycle Hook application integration", () => {
 				expect(latest, JSON.stringify(latest)).toMatchObject({
 					role: "toolResult",
 					toolCallId: "hook-tool",
-					isError: false,
 					content: [{ type: "text", text: "post-hook replacement" }],
 				});
 				return fauxAssistantMessage("hooks complete", { timestamp: 1_000 });

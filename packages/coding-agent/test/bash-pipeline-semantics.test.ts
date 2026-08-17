@@ -69,7 +69,6 @@ function conversation(
 		expect(result, testCase.command).toMatchObject({
 			role: "toolResult",
 			toolCallId: `pipeline-${index}`,
-			isError: testCase.status !== "ok",
 			...(testCase.content ? { content: [{ type: "text", text: expect.stringContaining(testCase.content) }] } : {}),
 			observation: {
 				status: testCase.status,

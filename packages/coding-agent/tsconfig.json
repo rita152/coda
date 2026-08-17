@@ -1,29 +1,7 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
-		"noEmit": true,
-		"paths": {
-			"#app/*": ["./src/app/*"],
-			"#commands/*": ["./src/commands/*"],
-			"#completion/*": ["./src/completion/*"],
-			"#credentials/*": ["./src/credentials/*"],
-			"#host/*": ["./src/host/*"],
-			"#hooks/*": ["./src/hooks/*"],
-			"#maintenance/*": ["./src/maintenance/*"],
-			"#mcp/*": ["./src/mcp/*"],
-			"#media/*": ["./src/media/*"],
-			"#models/*": ["./src/models/*"],
-			"#process/*": ["./src/process/*"],
-			"#run-control/*": ["./src/run-control/*"],
-			"#run-evidence/*": ["./src/run-evidence/*"],
-			"#runtime/*": ["./src/runtime/*"],
-			"#session/*": ["./src/session/*"],
-			"#session-history/*": ["./src/session-history/*"],
-			"#settings/*": ["./src/settings/*"],
-			"#skills/*": ["./src/skills/*"],
-			"#tools/*": ["./src/tools/*"],
-			"#ui/*": ["./src/ui/*"]
-		}
+		"noEmit": true
 	},
 	"include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest*.config.ts"]
 }

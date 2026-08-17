@@ -41,7 +41,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-tool-1",
 					toolName: "read",
-					isError: false,
 					content: [{ type: "text", text: "first line\nsecond line\n" }],
 				});
 				return fauxAssistantMessage("I read the file.", { timestamp: 300 });
@@ -100,7 +99,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-tool-windowed",
 					toolName: "read",
-					isError: false,
 					content: [{ type: "text", text: "third\nfourth\n" }],
 					observation: {
 						status: "ok",
@@ -195,7 +193,6 @@ describe("read Tool", () => {
 			observations: {
 				counts: { complete: 0, windowed: 2, "recoverable-overflow": 0, "lossy-overflow": 0 },
 			},
-			toolIssues: [],
 		});
 		expect(events.at(-1)).toMatchObject({
 			schemaVersion: 1,
@@ -222,7 +219,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-tool-sensitive",
 					toolName: "read",
-					isError: false,
 					content: [{ type: "text", text: "SECRET=do-not-leak\n" }],
 				});
 				return fauxAssistantMessage("The dotfile is readable under this profile.", { timestamp: 400 });
@@ -283,7 +279,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-read-missing",
 					toolName: "read",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("File does not exist") }],
 					details: { status: "failed", code: "not_found", path: expect.stringContaining("/missing.txt") },
 				});
@@ -297,7 +292,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-read-directory",
 					toolName: "read",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path is not a file") }],
 					details: { status: "failed", code: "not_file", path: expect.any(String) },
 				});
@@ -311,7 +305,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-read-binary",
 					toolName: "read",
-					isError: true,
 					content: [{ type: "text", text: "read supports UTF-8 text files only" }],
 					details: { status: "failed", code: "invalid_utf8", path: expect.stringContaining("/binary.dat") },
 				});
@@ -325,7 +318,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-read-large",
 					toolName: "read",
-					isError: true,
 					content: [{ type: "text", text: "Text file exceeds the 2 MiB read limit" }],
 					details: {
 						status: "failed",
@@ -344,7 +336,6 @@ describe("read Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-read-nul",
 					toolName: "read",
-					isError: true,
 					content: [{ type: "text", text: "read supports text files only" }],
 					details: { status: "failed", code: "not_text", path: expect.stringContaining("/nul.txt") },
 				});

@@ -99,7 +99,6 @@ describe("anthropic-messages adapter (upstream: packages/ai/test/anthropic-sse-p
 						toolName: "bash",
 						content: [{ type: "text", text: "command returned zero" }],
 						observation: { status: "error", truncated: false, facts: { exitCode: 0 } },
-						isError: false,
 						timestamp: 1,
 					},
 				],

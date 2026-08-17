@@ -84,7 +84,6 @@ describe("SessionHistoryReader", () => {
 						unsupportedLegacyFact: "discarded",
 						credential: "credential-secret",
 					},
-					isError: true,
 					timestamp: 12,
 				},
 			},
@@ -146,32 +145,34 @@ describe("SessionHistoryReader", () => {
 		await resumed.close();
 	});
 
-	it("synthesizes bounded authoritative observations for legacy Tool Results", () => {
-		const legacy: AgentMessage = {
-			id: "message:legacy-tool" as MessageId,
+	it("projects authoritative observations from Tool Results", () => {
+		const message: AgentMessage = {
+			id: "message:tool" as MessageId,
 			message: {
 				role: "toolResult",
 				toolCallId: "provider:legacy",
 				toolName: "read",
-				content: [{ type: "text", text: "partial legacy output" }],
-				details: {
-					code: "legacy_partial",
+				content: [{ type: "text", text: "partial output" }],
+				observation: {
+					status: "error",
 					truncated: true,
+					facts: { code: "partial_read" },
 					outputRef: "tool-output:v1:legacy",
+				},
+				details: {
 					internal: "not-an-observation-fact",
 				},
-				isError: true,
 				timestamp: 13,
 			},
 		};
-		const reader = new SessionHistoryReader({ sessionId: "session:legacy", messages: () => [legacy] });
+		const reader = new SessionHistoryReader({ sessionId: "session:history", messages: () => [message] });
 
 		expect(reader.read().messages[0]).toMatchObject({
 			role: "toolResult",
 			observation: {
 				status: "error",
 				truncated: true,
-				facts: { code: "legacy_partial" },
+				facts: { code: "partial_read" },
 				outputRef: "tool-output:v1:legacy",
 			},
 		});

@@ -3,7 +3,6 @@ export {
 	createHeadlessCodingAgent,
 	createMemoryWorkSessionStore,
 	createMemoryWorkspaceExecution,
-	createNullWorkspaceExecution,
 	type MemoryWorkSession,
 	type MemoryWorkSessionSeed,
 	type MemoryWorkSessionStore,

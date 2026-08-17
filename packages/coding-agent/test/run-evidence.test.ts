@@ -2,7 +2,6 @@ import type { AgentEvent, IdGenerator, IdKind } from "@coda/agent";
 import { createFauxCore, fauxAssistantMessage, type ToolObservation, type Usage } from "@coda/ai";
 import { describe, expect, it } from "vitest";
 import {
-	projectRunEvidenceV1,
 	projectSessionRunEvidence,
 	RunEvidenceProjection,
 	supplementRunEvidenceWorkspaceDiff,
@@ -83,11 +82,7 @@ describe("RunEvidence projection", () => {
 			terminalFailures: [expect.objectContaining({ id: "attempt:1", kind: "attempt" })],
 			recoveredFailures: [expect.objectContaining({ id: "attempt:1", recoveredById: "attempt:2" })],
 			openFailures: [],
-			unresolvedFailures: [],
 		});
-		const legacy = projectRunEvidenceV1(evidence!);
-		expect(legacy).toMatchObject({ schemaVersion: 1, unresolvedFailures: [] });
-		expect(legacy).not.toHaveProperty("terminalFailures");
 		const json = JSON.stringify(evidence);
 		expect(json).not.toContain("malicious Assistant prose");
 		expect(json).not.toContain("super-secret");
@@ -113,7 +108,32 @@ describe("RunEvidence projection", () => {
 		projection.accept(toolEnd(grep, observation("ok"), 220));
 		projection.accept(toolEnd(read, observation("ok", { truncated: true, outputRef: "opaque:ref" }), 230));
 		projection.accept(toolStart(write, 231));
-		projection.accept(toolEnd(write, observation("ok"), 235));
+		projection.accept(
+			toolEnd(
+				write,
+				observation("ok", {
+					facts: {
+						mutation: {
+							schemaVersion: 1,
+							atomicity: "single-file",
+							attemptedPaths: ["src/changed.ts"],
+							committedPaths: ["src/changed.ts"],
+							committedDelta: [
+								{
+									path: "src/changed.ts",
+									operation: "update",
+									beforeSha256: null,
+									afterSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									previousBytes: 0,
+									bytes: 1,
+								},
+							],
+						},
+					},
+				}),
+				235,
+			),
+		);
 		projection.accept(toolStart(bash, 240));
 		projection.accept(
 			toolEnd(
@@ -135,20 +155,10 @@ describe("RunEvidence projection", () => {
 		expect(evidence.commands[0]?.command).toContain("Authorization: [REDACTED]");
 		expect(evidence.commands[0]?.command).toContain("--token [REDACTED]");
 		expect(evidence.commands[0]?.command).toContain("https://[REDACTED]@example.test");
-		expect(evidence.toolIssues).toEqual([
-			expect.objectContaining({
-				invocationId: "invocation:read",
-				status: "ok",
-				truncated: true,
-				outputRecoverable: true,
-			}),
-			expect.objectContaining({
-				invocationId: "invocation:bash",
-				status: "error",
-				reason: "exit_7",
-			}),
-		]);
-		expect(evidence.unresolvedFailures).toEqual([
+		expect(
+			evidence.observations.counts.windowed + evidence.observations.counts["recoverable-overflow"],
+		).toBeGreaterThan(0);
+		expect(evidence.openFailures).toEqual([
 			expect.objectContaining({ kind: "tool", id: "invocation:bash", status: "error" }),
 		]);
 		const json = JSON.stringify(evidence);
@@ -247,7 +257,9 @@ describe("RunEvidence projection", () => {
 			}),
 			expect.objectContaining({ invocationId: lossy.id, completeness: "lossy-overflow" }),
 		]);
-		expect(evidence.toolIssues.map(({ invocationId }) => invocationId)).toEqual([recoverable.id, lossy.id]);
+		expect(evidence.observations.limitations.map(({ invocationId }) => invocationId)).toEqual(
+			expect.arrayContaining([recoverable.id, lossy.id]),
+		);
 		expect(evidence.paths).toMatchObject({
 			inspected: ["src/page.ts", "src"],
 			changed: ["src/changed.ts"],
@@ -307,7 +319,6 @@ describe("RunEvidence projection", () => {
 			expect.objectContaining({ id: failedEdit.id, resolutionKey: expect.any(String) }),
 			expect.objectContaining({ id: failedCommand.id, resolutionKey: expect.any(String) }),
 		]);
-		expect(evidence.unresolvedFailures).toEqual(evidence.openFailures);
 		expect(evidence.commands.find(({ invocationId }) => invocationId === normalizedFailure.id)?.commandKey).toBe(
 			evidence.commands.find(({ invocationId }) => invocationId === normalizedSuccess.id)?.commandKey,
 		);
@@ -330,7 +341,6 @@ describe("RunEvidence projection", () => {
 		]);
 		expect(evidence.terminalFailures).toEqual([]);
 		expect(evidence.openFailures).toEqual([]);
-		expect(evidence.toolIssues).toEqual([]);
 		expect(evidence.observations.counts).toEqual({
 			complete: 0,
 			windowed: 0,
@@ -362,8 +372,6 @@ describe("RunEvidence projection", () => {
 		expect(evidence.omitted.recoveredFailures).toBe(6);
 		expect(evidence.openFailures).toHaveLength(64);
 		expect(evidence.omitted.openFailures).toBe(6);
-		expect(evidence.unresolvedFailures).toHaveLength(64);
-		expect(evidence.omitted.unresolvedFailures).toBe(6);
 	});
 
 	it("unions generic partial mutation facts with final Workspace provenance", () => {
@@ -424,11 +432,6 @@ describe("RunEvidence projection", () => {
 		expect(supplemented.openFailures).toEqual([
 			expect.objectContaining({ kind: "tool", id: mutation.id, status: "error" }),
 		]);
-		expect(projectRunEvidenceV1(supplemented).paths).toEqual({
-			inspected: [],
-			changed: ["native.txt", "shell.txt"],
-			omitted: { inspected: 0, changed: 0 },
-		});
 	});
 
 	it("keeps an aborted Run objective without treating cancellation as a Model failure", () => {
@@ -449,8 +452,7 @@ describe("RunEvidence projection", () => {
 		const evidence = projection.accept(event({ type: "run_end", outcome: "aborted", timestamp: 325 }))!;
 
 		expect(evidence).toMatchObject({ outcome: "aborted", elapsedMs: 25, paths: { inspected: [] } });
-		expect(evidence.toolIssues).toEqual([expect.objectContaining({ status: "aborted", reason: "aborted" })]);
-		expect(evidence.unresolvedFailures).toEqual([expect.objectContaining({ kind: "tool", status: "aborted" })]);
+		expect(evidence.openFailures).toEqual([expect.objectContaining({ kind: "tool", status: "aborted" })]);
 	});
 
 	it("bounds paths and commands and reports exact omission counts", () => {
@@ -479,7 +481,32 @@ describe("RunEvidence projection", () => {
 		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 810 }));
 		const write = invocation("write:live", "write", { path: "src/live.ts", content: "value" }, 0);
 		projection.accept(toolStart(write, 820));
-		projection.accept(toolEnd(write, observation("ok"), 830));
+		projection.accept(
+			toolEnd(
+				write,
+				observation("ok", {
+					facts: {
+						mutation: {
+							schemaVersion: 1,
+							atomicity: "single-file",
+							attemptedPaths: ["src/live.ts"],
+							committedPaths: ["src/live.ts"],
+							committedDelta: [
+								{
+									path: "src/live.ts",
+									operation: "update",
+									beforeSha256: null,
+									afterSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+									previousBytes: 0,
+									bytes: 1,
+								},
+							],
+						},
+					},
+				}),
+				830,
+			),
+		);
 
 		const live = projection.snapshot("run:test", 840);
 		expect(live).toMatchObject({
@@ -557,7 +584,7 @@ describe("RunEvidence projection", () => {
 				runId: "run:historical",
 				outcome: "interrupted",
 				elapsedMs: 15,
-				unresolvedFailures: [
+				openFailures: [
 					expect.objectContaining({ status: "interrupted", summary: "Process ended before Run finished" }),
 				],
 			}),
@@ -684,7 +711,6 @@ function toolResult(tool: ReturnType<typeof invocation>, value: ToolObservation,
 			toolName: tool.toolName,
 			content: [{ type: "text" as const, text: output }],
 			observation: value,
-			isError: value.status !== "ok",
 			timestamp: 0,
 		},
 	};

@@ -28,6 +28,5 @@ export function toolFailure<TDetails extends Record<string, unknown>>(
 		content,
 		observation: { status: "error", truncated: false, ...(facts ? { facts } : {}) },
 		details: { ...details, status: "failed" },
-		isError: true,
 	};
 }

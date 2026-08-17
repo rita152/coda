@@ -126,7 +126,7 @@ export interface RunEvidenceObservationSummary {
 	readonly omittedLimitations: number;
 }
 
-export interface RunEvidenceCommandV1 {
+export interface RunEvidenceCommand {
 	readonly invocationId: string;
 	readonly command: string;
 	readonly status: ToolObservation["status"];
@@ -134,36 +134,16 @@ export interface RunEvidenceCommandV1 {
 	readonly signal: string | null;
 	readonly timedOut: boolean;
 	readonly truncated: boolean;
-}
-
-export interface RunEvidenceCommand extends RunEvidenceCommandV1 {
 	readonly sequence: number;
 	readonly completeness: RunEvidenceObservationCompleteness;
 	readonly commandKey: string;
 }
 
-export interface RunEvidenceToolIssueV1 {
-	readonly invocationId: string;
-	readonly toolName: string;
-	readonly status: ToolObservation["status"];
-	readonly settlement: "returned" | "threw" | "aborted" | null;
-	readonly truncated: boolean;
-	readonly outputRecoverable: boolean;
-	readonly reason: string | null;
-}
-
-export interface RunEvidenceToolIssue extends RunEvidenceToolIssueV1 {
-	readonly completeness: RunEvidenceObservationCompleteness;
-}
-
-export interface RunEvidenceFailureV1 {
+export interface RunEvidenceFailure {
 	readonly kind: "attempt" | "tool" | "run";
 	readonly id: string;
 	readonly status: "error" | "aborted" | "interrupted";
 	readonly summary: string;
-}
-
-export interface RunEvidenceFailure extends RunEvidenceFailureV1 {
 	readonly sequence: number;
 	/** Null means no later success can safely resolve this failure. */
 	readonly resolutionKey: string | null;
@@ -197,13 +177,15 @@ export interface RunEvidenceUsage {
 	};
 }
 
-export interface RunEvidencePathsV1 {
+export interface RunEvidencePaths {
 	readonly inspected: readonly string[];
 	readonly changed: readonly string[];
 	readonly omitted: {
 		readonly inspected: number;
 		readonly changed: number;
 	};
+	readonly changedWithProvenance: readonly RunEvidenceChangedPath[];
+	readonly workspaceDiff: RunEvidenceWorkspaceDiff;
 }
 
 export interface RunEvidenceChangedPath {
@@ -222,39 +204,7 @@ export interface RunEvidenceWorkspaceDiffSupplement {
 	readonly omitted?: number;
 }
 
-export interface RunEvidencePaths extends RunEvidencePathsV1 {
-	readonly changedWithProvenance: readonly RunEvidenceChangedPath[];
-	readonly workspaceDiff: RunEvidenceWorkspaceDiff;
-}
-
-/** Strict v1 shape available to readers that have not adopted v2 semantics. */
-export interface RunEvidenceV1Projection {
-	readonly schemaVersion: 1;
-	readonly type: "run_evidence";
-	readonly runId: string;
-	readonly outcome: RunEvidenceOutcome;
-	readonly startedAt: number;
-	readonly completedAt: number;
-	readonly elapsedMs: number;
-	readonly paths: RunEvidencePathsV1;
-	readonly commands: readonly RunEvidenceCommandV1[];
-	readonly toolIssues: readonly RunEvidenceToolIssueV1[];
-	readonly unresolvedFailures: readonly RunEvidenceFailureV1[];
-	readonly usage: RunEvidenceUsage;
-	readonly omitted: {
-		readonly commands: number;
-		readonly toolIssues: number;
-		readonly unresolvedFailures: number;
-	};
-}
-
-/**
- * Stable v3 JSONL envelope emitted after one completed Run.
- *
- * The v1 field names remain in place for tolerant readers; strict v1 consumers can
- * use `projectRunEvidenceV1` while migrating to explicit failure/completeness and
- * changed-path provenance categories.
- */
+/** Stable v3 JSONL envelope emitted after one completed Run. */
 export interface RunEvidenceEnvelope {
 	readonly schemaVersion: typeof RUN_EVIDENCE_SCHEMA_VERSION;
 	readonly type: "run_evidence";
@@ -271,21 +221,15 @@ export interface RunEvidenceEnvelope {
 	readonly recoveredFailures: readonly RunEvidenceRecoveredFailure[];
 	readonly pendingOperations: readonly RunEvidencePendingOperation[];
 	readonly openFailures: readonly RunEvidenceFailure[];
-	/** v1 compatibility projection. New consumers should use observations and terminal/open failures. */
-	readonly toolIssues: readonly RunEvidenceToolIssue[];
-	/** v1 compatibility projection of openFailures. */
-	readonly unresolvedFailures: readonly RunEvidenceFailure[];
 	readonly usage: RunEvidenceUsage;
 	readonly omitted: {
 		readonly operations: number;
 		readonly commands: number;
 		readonly observationLimitations: number;
-		readonly toolIssues: number;
 		readonly terminalFailures: number;
 		readonly recoveredFailures: number;
 		readonly pendingOperations: number;
 		readonly openFailures: number;
-		readonly unresolvedFailures: number;
 	};
 }
 

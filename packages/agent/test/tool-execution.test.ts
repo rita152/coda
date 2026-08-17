@@ -71,7 +71,7 @@ describe("Agent Tool execution", () => {
 			"provider:invalid",
 			"provider:valid",
 		]);
-		expect(toolResults.map(({ isError }) => isError ?? false)).toEqual([true, true, false]);
+		expect(toolResults.map(({ observation }) => observation?.status !== "ok")).toEqual([true, true, false]);
 		expect(contexts).toHaveLength(2);
 		expect(contexts[1]?.messages.map(({ role }) => role)).toEqual([
 			"user",
@@ -169,7 +169,6 @@ describe("Agent Tool execution", () => {
 			content: `Path does not exist: ${path}`,
 			observation: { status: "error", truncated: false, facts: { code: "not_found" } },
 			details: { status: "failed", code: "not_found", path },
-			isError: false,
 		}));
 		const calls = fauxAssistantMessage([fauxToolCall("missing", { path: "src" }, { id: "call:missing" })], {
 			stopReason: "toolUse",
@@ -195,7 +194,6 @@ describe("Agent Tool execution", () => {
 						role: "toolResult",
 						toolCallId: "call:missing",
 						observation: { status: "error", truncated: false, facts: { code: "not_found" } },
-						isError: true,
 					},
 				},
 			},
@@ -204,7 +202,6 @@ describe("Agent Tool execution", () => {
 		expect(contexts[1]?.messages.at(-1)).toMatchObject({
 			role: "toolResult",
 			toolCallId: "call:missing",
-			isError: true,
 		});
 	});
 

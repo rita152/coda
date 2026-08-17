@@ -173,7 +173,6 @@ describe("optional search executables", () => {
 		expect(result).toMatchObject({
 			content: "rg search timed out",
 			details: { status: "failed", code: "timeout", engine: "rg" },
-			isError: true,
 		});
 	});
 
@@ -204,7 +203,6 @@ describe("optional search executables", () => {
 		expect(result).toMatchObject({
 			content: "fd search failed: bad query",
 			details: { status: "failed", code: "search_failed", engine: "fd", exitCode: 2 },
-			isError: true,
 		});
 	});
 });

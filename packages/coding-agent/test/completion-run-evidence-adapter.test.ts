@@ -32,7 +32,6 @@ describe("completion RunEvidence adapter", () => {
 				commands: [command("tool:test", 20, "npm test", true)],
 				terminalFailures: [failure],
 				openFailures: [failure],
-				unresolvedFailures: [failure],
 			}),
 		);
 
@@ -115,7 +114,7 @@ describe("completion RunEvidence adapter", () => {
 		};
 		const activity = completionActivityFromRunEvidence(
 			temporal(),
-			evidence({ terminalFailures: [historical], openFailures: [], unresolvedFailures: [] }),
+			evidence({ terminalFailures: [historical], openFailures: [] }),
 		);
 
 		expect(activity.openFailures).toEqual([]);
@@ -216,8 +215,6 @@ function evidence(overrides: Partial<CompletionRunEvidence> = {}): CompletionRun
 		recoveredFailures: [],
 		pendingOperations: [],
 		openFailures: [],
-		toolIssues: [],
-		unresolvedFailures: [],
 		usage: {
 			attempts: 0,
 			retries: 0,
@@ -242,12 +239,10 @@ function evidence(overrides: Partial<CompletionRunEvidence> = {}): CompletionRun
 			operations: 0,
 			commands: 0,
 			observationLimitations: 0,
-			toolIssues: 0,
 			terminalFailures: 0,
 			recoveredFailures: 0,
 			pendingOperations: 0,
 			openFailures: 0,
-			unresolvedFailures: 0,
 		},
 		...overrides,
 	};

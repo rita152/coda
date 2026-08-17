@@ -102,7 +102,6 @@ describe("Agent Seed", () => {
 							toolCallId: "missing-call",
 							toolName: "read",
 							content: [{ type: "text", text: "no source" }],
-							isError: false,
 							timestamp: 1,
 						} satisfies ToolResultMessage,
 					},

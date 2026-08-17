@@ -60,7 +60,7 @@ function observationStatus(tool: AgentToolTrace) {
 	const result = tool.result?.message;
 	if (!result) return "error" as const;
 	if (result.role !== "toolResult") return "error" as const;
-	return result.observation?.status ?? (result.isError ? "error" : "ok");
+	return result.observation?.status ?? "ok";
 }
 
 function collectTrace(events: readonly AgentEvent[]): EvaluationTrace {

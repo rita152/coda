@@ -378,7 +378,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 	}
 
 	async sessionStart(
-		context: LifecycleHookSessionContext & { readonly source: "startup" | "resume" | "clear" | "compact" },
+		context: LifecycleHookSessionContext & { readonly source: "startup" | "resume" | "compact" },
 	): Promise<HookContinueOutcome> {
 		const existing = this.#sessions.get(context.sessionId);
 		const resolved = {
@@ -515,15 +515,11 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 		};
 	}
 
-	async preCompact(
-		context: LifecycleHookTurnContext & { readonly trigger: "manual" | "auto" },
-	): Promise<HookContinueOutcome> {
+	async preCompact(context: LifecycleHookTurnContext & { readonly trigger: "auto" }): Promise<HookContinueOutcome> {
 		return this.#compact("PreCompact", context);
 	}
 
-	async postCompact(
-		context: LifecycleHookTurnContext & { readonly trigger: "manual" | "auto" },
-	): Promise<HookContinueOutcome> {
+	async postCompact(context: LifecycleHookTurnContext & { readonly trigger: "auto" }): Promise<HookContinueOutcome> {
 		return this.#compact("PostCompact", context);
 	}
 
@@ -565,7 +561,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 
 	async #compact(
 		event: "PreCompact" | "PostCompact",
-		context: LifecycleHookTurnContext & { readonly trigger: "manual" | "auto" },
+		context: LifecycleHookTurnContext & { readonly trigger: "auto" },
 	): Promise<HookContinueOutcome> {
 		const resolved = this.#resolved(context);
 		const parsed = await this.#dispatch(event, resolved, [context.trigger], {

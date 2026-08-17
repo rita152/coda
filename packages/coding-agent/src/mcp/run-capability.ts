@@ -93,7 +93,6 @@ function createMcpTools(options: {
 								hasStructuredContent: projection.details.hasStructuredContent,
 							},
 						},
-						isError: projection.isError,
 						details: Object.freeze({
 							kind: "mcp" as const,
 							catalogRevision: options.lease.revision,

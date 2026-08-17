@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { renderRunEvidenceSummary } from "../src/run-evidence/presentation.ts";
-import {
-	projectRunEvidenceV1,
-	RUN_EVIDENCE_SCHEMA_VERSION,
-	type RunEvidenceEnvelope,
-} from "../src/run-evidence/run-evidence.ts";
+import { RUN_EVIDENCE_SCHEMA_VERSION, type RunEvidenceEnvelope } from "../src/run-evidence/run-evidence.ts";
 
 describe("Run evidence interactive presentation", () => {
 	it("presents concise aggregate evidence without projecting paths or commands", () => {
 		const lines = renderRunEvidenceSummary(evidence(), 260);
 
 		expect(lines).toEqual([
-			"Evidence · 2 inspected · 1 changed · 1 command · 1 windowed · 1 recoverable overflow · 1 lossy overflow · 2 Tool issues · 1 recovered failure · 1 open failure · 1 pending operation · 12.3k tokens · $0.04 known · 2.5s",
+			"Evidence · 2 inspected · 1 changed · 1 command · 1 windowed · 1 recoverable overflow · 1 lossy overflow · 1 recovered failure · 1 open failure · 1 pending operation · 12.3k tokens · $0.04 known · 2.5s",
 		]);
 		expect(lines.join("\n")).not.toContain("malicious");
 		expect(lines.join("\n")).not.toContain("secret");
@@ -32,18 +28,15 @@ describe("Run evidence interactive presentation", () => {
 					limitations: [value.observations.limitations[0]!],
 					omittedLimitations: 0,
 				},
-				toolIssues: [],
 				terminalFailures: [],
 				recoveredFailures: [],
 				pendingOperations: [],
 				openFailures: [],
-				unresolvedFailures: [],
 			},
 			160,
 		);
 
 		expect(lines.join(" ")).toContain("1 windowed");
-		expect(lines.join(" ")).toContain("0 Tool issues");
 		expect(lines.join(" ")).not.toContain("overflow");
 	});
 
@@ -77,14 +70,6 @@ describe("Run evidence interactive presentation", () => {
 
 		expect(lines.join(" ")).toContain("Evidence (aborted)");
 		expect(lines.join(" ")).toContain("cost unavailable");
-	});
-
-	it("keeps the strict v1 compatibility projection readable", () => {
-		const lines = renderRunEvidenceSummary(projectRunEvidenceV1(evidence()), 160);
-
-		expect(lines.join(" ")).toContain("2 Tool issues");
-		expect(lines.join(" ")).toContain("1 open failure");
-		expect(lines.join(" ")).not.toContain("recoverable overflow");
 	});
 });
 
@@ -145,28 +130,6 @@ function evidence(): RunEvidenceEnvelope {
 				completeness: "recoverable-overflow",
 			},
 		],
-		toolIssues: [
-			{
-				invocationId: "tool:1",
-				toolName: "bash",
-				status: "error",
-				settlement: "returned",
-				truncated: true,
-				outputRecoverable: true,
-				completeness: "recoverable-overflow",
-				reason: "exit_1",
-			},
-			{
-				invocationId: "tool:2",
-				toolName: "find",
-				status: "ok",
-				settlement: "returned",
-				truncated: true,
-				outputRecoverable: false,
-				completeness: "lossy-overflow",
-				reason: "output_truncated",
-			},
-		],
 		terminalFailures: [openFailure],
 		recoveredFailures: [
 			{
@@ -178,7 +141,6 @@ function evidence(): RunEvidenceEnvelope {
 		],
 		pendingOperations: [{ invocationId: "tool:pending", toolName: "read", startedSequence: 13, target: null }],
 		openFailures: [openFailure],
-		unresolvedFailures: [openFailure],
 		usage: {
 			attempts: 2,
 			retries: 1,
@@ -203,12 +165,10 @@ function evidence(): RunEvidenceEnvelope {
 			operations: 0,
 			commands: 0,
 			observationLimitations: 2,
-			toolIssues: 0,
 			terminalFailures: 0,
 			recoveredFailures: 0,
 			pendingOperations: 0,
 			openFailures: 0,
-			unresolvedFailures: 0,
 		},
 	};
 }

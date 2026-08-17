@@ -118,7 +118,6 @@ def result_message(
                 "timedOut": timed_out,
                 "truncated": truncated,
             },
-            "isError": status != "ok",
             "timestamp": 1_700_000_000_500 + index,
         },
     }

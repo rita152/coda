@@ -275,7 +275,6 @@ function toolEntry(
 				toolName,
 				content: [{ type: "text", text: content }],
 				details,
-				isError: state === "failed",
 				timestamp: 500,
 			},
 		},

@@ -41,7 +41,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-write-1",
 					toolName: "write",
-					isError: false,
 				});
 				return fauxAssistantMessage("The file was created.", { timestamp: 700 });
 			},
@@ -104,7 +103,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-write-nested",
 					toolName: "write",
-					isError: false,
 				});
 				return fauxAssistantMessage("The nested file was created.", { timestamp: 750 });
 			},
@@ -180,7 +178,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-1",
 					toolName: "edit",
-					isError: false,
 					details: { replacements: 1 },
 				});
 				return fauxAssistantMessage("The edit was applied.", { timestamp: 800 });
@@ -257,7 +254,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-patch-1",
 					toolName: "patch",
-					isError: false,
 					observation: {
 						status: "ok",
 						facts: {
@@ -353,7 +349,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-missing",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("File does not exist") }],
 					details: { status: "failed", code: "not_found", path: expect.stringContaining("/missing.txt") },
 				});
@@ -371,7 +366,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-no-match",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: "Expected oldText was not found" }],
 					details: {
 						status: "failed",
@@ -393,7 +387,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-ambiguous",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Expected oldText is not unique") }],
 					details: {
 						status: "failed",
@@ -416,7 +409,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-directory",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path is not a file") }],
 					details: { status: "failed", code: "not_file", path: expect.stringContaining("/directory") },
 				});
@@ -434,7 +426,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-large",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: "Text file exceeds the 2 MiB edit limit" }],
 					details: {
 						status: "failed",
@@ -457,7 +448,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-binary",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: "edit supports UTF-8 text files only" }],
 					details: { status: "failed", code: "invalid_utf8", path: expect.stringContaining("/binary.dat") },
 				});
@@ -475,7 +465,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-edit-nul",
 					toolName: "edit",
-					isError: true,
 					content: [{ type: "text", text: "edit supports text files only" }],
 					details: { status: "failed", code: "not_text", path: expect.stringContaining("/nul.txt") },
 				});
@@ -489,7 +478,6 @@ describe("mutation Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-write-directory",
 					toolName: "write",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path is not a file") }],
 					details: { status: "failed", code: "not_file", path: expect.stringContaining("/directory") },
 				});

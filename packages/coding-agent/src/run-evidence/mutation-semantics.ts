@@ -17,20 +17,6 @@ export interface MutationFacts {
 	readonly committedDelta: readonly MutationDelta[];
 }
 
-export function mutationRequestPaths(
-	toolName: string,
-	arguments_: Readonly<Record<string, unknown>>,
-): readonly string[] | undefined {
-	if (toolName === "write" || toolName === "edit") {
-		return typeof arguments_.path === "string" && arguments_.path.length > 0 ? [arguments_.path] : undefined;
-	}
-	if (toolName !== "patch" || typeof arguments_.patch !== "string") return undefined;
-	const paths = [...arguments_.patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gmu)].map((match) =>
-		match[1]!.trim(),
-	);
-	return paths.length > 0 ? Object.freeze(paths) : undefined;
-}
-
 /** Reads the generic mutation wire fact without depending on Tool implementations. */
 export function mutationFactsFromObservation(
 	facts: Readonly<Record<string, JsonValue>> | undefined,

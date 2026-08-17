@@ -638,7 +638,6 @@ describe("ChatComponent terminal input", () => {
 						toolCallId: "provider-read",
 						toolName: "read",
 						content: [{ type: "text", text: "contents" }],
-						isError: false,
 						timestamp: 2,
 					},
 				},

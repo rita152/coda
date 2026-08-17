@@ -38,7 +38,6 @@ describe("bash Tool", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolCallId: "bypass-bash",
-					isError: false,
 					content: [{ type: "text", text: "allowed" }],
 				});
 				return fauxAssistantMessage("Compound command executed.", { timestamp: 880 });
@@ -103,7 +102,6 @@ describe("bash Tool", () => {
 					role: "toolResult",
 					toolCallId: "provider-bash-1",
 					toolName: "bash",
-					isError: false,
 					observation: { status: "ok", truncated: false, facts: { exitCode: 0 } },
 					content: [{ type: "text", text: `${canonicalWorkspace}|inherited-value` }],
 					details: { exitCode: 0, timedOut: false, truncated: false },
@@ -173,7 +171,6 @@ describe("bash Tool", () => {
 				const result = context.messages.at(-1);
 				expect(result).toMatchObject({
 					role: "toolResult",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("three\nfour") }],
 					observation: {
 						status: "error",
@@ -199,7 +196,6 @@ describe("bash Tool", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolName: "read_tool_output",
-					isError: false,
 					content: [{ type: "text", text: expect.stringContaining("one\ntwo\nthree\nfour") }],
 				});
 				return fauxAssistantMessage(
@@ -215,7 +211,6 @@ describe("bash Tool", () => {
 				const result = context.messages.at(-1);
 				expect(result).toMatchObject({
 					role: "toolResult",
-					isError: false,
 					observation: {
 						status: "ok",
 						truncated: true,

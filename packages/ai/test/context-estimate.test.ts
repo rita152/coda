@@ -11,7 +11,6 @@ describe("Context token estimation", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "output" }],
 			observation: { status: "error", truncated: false, facts: { exitCode: 7 } },
-			isError: true,
 			timestamp: 1,
 		};
 

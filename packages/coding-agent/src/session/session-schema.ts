@@ -301,8 +301,8 @@ function isToolResultMessage(value: unknown, version: SessionFormatVersion): boo
 	return (
 		exactRecord(
 			value,
-			["role", "toolCallId", "toolName", "content", "isError", "timestamp"],
-			["details", "usage", "addedToolNames", ...(version >= 8 ? ["observation"] : [])],
+			["role", "toolCallId", "toolName", "content", "timestamp"],
+			["details", "usage", "addedToolNames", "isError", ...(version >= 8 ? ["observation"] : [])],
 		) &&
 		value.role === "toolResult" &&
 		isNonEmptyString(value.toolCallId) &&
@@ -311,10 +311,11 @@ function isToolResultMessage(value: unknown, version: SessionFormatVersion): boo
 		value.content.every(
 			(entry) => isTextContent(entry) || (version === 1 ? isImageContent(entry) : isMediaReference(entry)),
 		) &&
-		typeof value.isError === "boolean" &&
+		(value.isError === undefined || typeof value.isError === "boolean") &&
 		isFiniteNumber(value.timestamp) &&
 		(value.observation === undefined || (version >= 8 && isToolObservation(value.observation))) &&
-		(value.observation === undefined ||
+		(value.isError === undefined ||
+			value.observation === undefined ||
 			(isRecord(value.observation) && value.isError === (value.observation.status !== "ok"))) &&
 		(value.details === undefined || isJsonValue(value.details)) &&
 		(value.usage === undefined || isUsage(value.usage)) &&

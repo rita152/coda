@@ -361,14 +361,11 @@ export interface ToolResultMessage<TDetails = any> {
 	toolCallId: string;
 	toolName: string;
 	content: (TextContent | ImageContent)[];
-	/** Present on new Messages; legacy Sessions are normalized at their consumption boundary. */
 	observation?: ToolObservation;
 	/** Host presentation/audit metadata. Api Adapters must not project this field automatically. */
 	details?: TDetails;
 	usage?: Usage;
 	addedToolNames?: string[];
-	/** Compatibility projection; new Messages derive this from observation.status. */
-	isError: boolean;
 	timestamp: number;
 }
 

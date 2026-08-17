@@ -106,7 +106,6 @@ describe("process lifecycle Tools", () => {
 				expect(result).toMatchObject({
 					role: "toolResult",
 					toolName: "process_start",
-					isError: false,
 					observation: { status: "ok", facts: { state: "running", processId: expect.any(String) } },
 				});
 				if (!result || result.role !== "toolResult") throw new Error("Expected process_start result");
@@ -127,7 +126,6 @@ describe("process lifecycle Tools", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolName: "process_write",
-					isError: false,
 				});
 				return fauxAssistantMessage(
 					fauxToolCall("process_poll", { processId: firstProcessId }, { id: "poll-one" }),
@@ -138,7 +136,6 @@ describe("process lifecycle Tools", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolName: "process_poll",
-					isError: false,
 					observation: { status: "ok", truncated: false, facts: { state: "completed", exitCode: 0 } },
 					content: [{ type: "text", text: expect.stringContaining("inherited|allowed\nhello") }],
 				});
@@ -162,7 +159,6 @@ describe("process lifecycle Tools", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolName: "process_stop",
-					isError: false,
 					observation: { status: "ok", facts: { state: "stopped", signal: "SIGTERM" } },
 				});
 				return fauxAssistantMessage(
@@ -174,7 +170,6 @@ describe("process lifecycle Tools", () => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
 					toolName: "process_poll",
-					isError: true,
 					observation: { status: "error", facts: { state: "stale" } },
 				});
 				return fauxAssistantMessage(

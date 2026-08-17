@@ -811,7 +811,6 @@ describe("JSONL File Session", () => {
 		expect(resumed.seed.messages.at(-1)?.message).toMatchObject({
 			role: "toolResult",
 			toolCallId: "provider:crashed",
-			isError: true,
 			details: { interrupted: true, recovery: "skipped", sideEffects: "unknown" },
 		});
 		await resumed.close();

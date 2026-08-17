@@ -94,7 +94,6 @@ export function createBashTool(options: {
 							outputRefComplete: false,
 						},
 					},
-					isError: true,
 					details: {
 						exitCode: 2,
 						signal: null,
@@ -200,7 +199,6 @@ export function createBashTool(options: {
 					facts,
 					...(stored ? { outputRef: stored.outputRef } : {}),
 				},
-				isError: status !== "ok",
 				details: {
 					exitCode: result.exitCode,
 					signal: result.signal,

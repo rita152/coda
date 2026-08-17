@@ -136,7 +136,6 @@ describe("openai-responses adapter (upstream: packages/ai/test/openai-responses-
 						toolName: "bash",
 						content: [{ type: "text", text: "command returned zero" }],
 						observation: { status: "error", truncated: false, facts: { exitCode: 0 } },
-						isError: false,
 						timestamp: 1,
 					},
 				],

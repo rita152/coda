@@ -81,11 +81,6 @@ export function createMemoryWorkspaceExecution(options: MemoryWorkspaceExecution
 	return Object.freeze({ placement: Object.freeze(placement), tooling: Object.freeze(tooling), publication });
 }
 
-/** Safe no-host Workspace capabilities for tests and headless consumers. */
-export function createNullWorkspaceExecution(): WorkspaceExecution {
-	return createMemoryWorkspaceExecution({ root: "/workspace", baseIdentity: "workspace:null" });
-}
-
 export interface MemoryWorkSession extends Session {
 	readonly events: readonly AgentEvent[];
 	readonly changes: readonly SessionChange[];

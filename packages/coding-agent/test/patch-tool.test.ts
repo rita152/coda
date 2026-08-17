@@ -46,7 +46,7 @@ describe("native patch Tool", () => {
 
 		const output = await runPatch(harness, patch, "patch:complete");
 
-		expect(output.isError).toBeUndefined();
+		expect(output.observation?.status).toBe("ok");
 		expect(output).toMatchObject({
 			observation: {
 				status: "ok",
@@ -95,7 +95,6 @@ describe("native patch Tool", () => {
 		const output = await runPatch(harness, patch, "patch:preflight");
 
 		expect(output).toMatchObject({
-			isError: true,
 			observation: {
 				status: "error",
 				facts: { mutation: { attemptedPaths: ["first.txt", "second.txt"], committedPaths: [] } },
@@ -124,7 +123,6 @@ describe("native patch Tool", () => {
 		const output = await runPatch(harness, patch, "patch:ambiguous-preflight");
 
 		expect(output).toMatchObject({
-			isError: true,
 			details: { phase: "preflight", committedPaths: [], notAppliedPaths: ["first.txt", "second.txt"] },
 		});
 		expect(output.content).toContain("precondition is ambiguous");
@@ -155,7 +153,6 @@ describe("native patch Tool", () => {
 		expect(output.content).toContain("Patch partially applied: 1 of 2 files committed atomically");
 		expect(output.content).toContain("No cross-file rollback was attempted");
 		expect(output).toMatchObject({
-			isError: true,
 			observation: {
 				status: "error",
 				facts: {
@@ -199,7 +196,6 @@ describe("native patch Tool", () => {
 		const output = await runPatch(harness, patch, "patch:identity-race");
 
 		expect(output).toMatchObject({
-			isError: true,
 			details: {
 				code: "partial_application",
 				committedPaths: ["first.txt"],

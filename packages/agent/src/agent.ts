@@ -1177,7 +1177,6 @@ export class Agent {
 				facts: { reason },
 			},
 			details: { status: "rejected", reason },
-			isError: true,
 		});
 		const payload = {
 			type: "tool_execution_rejected",
@@ -1337,7 +1336,6 @@ export class Agent {
 					content: `Tool "${entry.call.name}" failed: ${errorMessage(error)}`,
 					observation: { status: "error", truncated: false },
 					details: { status: "failed", error: { message: errorMessage(error) } },
-					isError: true,
 				}),
 			};
 		}
@@ -1352,7 +1350,6 @@ export class Agent {
 				content: `Tool "${entry.call.name}" was aborted`,
 				observation: { status: "aborted", truncated: false },
 				details: { status: "aborted" },
-				isError: true,
 			}),
 		};
 	}
@@ -1368,7 +1365,6 @@ export class Agent {
 				content: normalizedToolContent(output.content),
 				observation,
 				details: structuredClone(output.details),
-				isError: observation.status !== "ok",
 				timestamp: this.#options.clock.now(),
 			},
 		});

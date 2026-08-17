@@ -44,7 +44,6 @@ describe("MCP Session redaction", () => {
 						toolCallId: "provider-call",
 						toolName: invocation.toolName,
 						content: [{ type: "text", text: "done" }],
-						isError: false,
 						timestamp: 1,
 						details: {
 							kind: "mcp",

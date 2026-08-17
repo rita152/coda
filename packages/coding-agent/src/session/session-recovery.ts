@@ -67,8 +67,8 @@ export class SessionRecovery {
 								text: "Interrupted Tool Invocation was skipped during Session recovery; prior side effects are unknown.",
 							},
 						],
+						observation: { status: "error", truncated: false, facts: { recovery: "skipped" } },
 						details: { interrupted: true, recovery: "skipped", sideEffects: "unknown" },
-						isError: true,
 						timestamp: this.#runtime.clock.now(),
 					},
 				};

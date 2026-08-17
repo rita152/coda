@@ -323,7 +323,6 @@ describe("Coding Agent print mode", () => {
 					role: "toolResult",
 					toolCallId: "controlled-read",
 					toolName: "read",
-					isError: false,
 				});
 				return fauxAssistantMessage("controlled output", { timestamp: 127 });
 			},
@@ -524,8 +523,6 @@ describe("Coding Agent print mode", () => {
 			outcome: "success",
 			paths: { inspected: [], changed: [] },
 			commands: [],
-			toolIssues: [],
-			unresolvedFailures: [],
 		});
 		expect(events.at(-1)).toMatchObject({
 			schemaVersion: 1,
@@ -633,7 +630,6 @@ describe("Coding Agent print mode", () => {
 					expect(context.messages.at(-1)).toMatchObject({
 						role: "toolResult",
 						toolName: "bash",
-						isError: false,
 					});
 					return fauxAssistantMessage("Shell mutation complete.", { timestamp: 215 });
 				},

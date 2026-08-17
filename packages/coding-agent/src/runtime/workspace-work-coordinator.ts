@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { Clock, IdGenerator, RunBudget } from "@coda/agent";
-import { type AuthResult, createSystemTimeRuntime, type Models, type ThinkingLevel } from "@coda/ai";
+import type { AuthResult, Models, ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult, McpToolLease } from "@coda/mcp";
 import {
 	type CodingAgent,
@@ -10,6 +10,8 @@ import {
 	type OpenCodingAgentOptions,
 	openCodingAgent,
 	type RunModelSelection,
+	type RuntimeScheduler,
+	type RuntimeTime,
 	type WorkCapacityPolicy,
 	type WorkspaceExecution,
 } from "@coda/runtime";
@@ -220,7 +222,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
 	readonly capacity?: WorkCapacityPolicy;
-	readonly scheduler?: ReturnType<typeof createSystemTimeRuntime>["scheduler"];
+	readonly scheduler?: RuntimeScheduler;
 	readonly runBudget?: RunBudget;
 	readonly maxOutputTokens?: number;
 	readonly platform: NodeJS.Platform;
@@ -380,7 +382,7 @@ export function createWorkspaceWorkCoordinator(options: {
 			},
 		}),
 	];
-	const systemTime = createSystemTimeRuntime();
+	const systemTime = createWorkspaceRuntimeTime(options.clock, options.scheduler);
 	const startObservationPump = (openedAgent: CodingAgent): void => {
 		if (observationPump) return;
 		observationPump = (async () => {
@@ -430,11 +432,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					...(options.persistence ? { persistence: options.persistence } : {}),
 					modelProvider,
 					capabilitySources,
-					time: {
-						...systemTime,
-						clock: options.clock,
-						...(options.scheduler ? { scheduler: options.scheduler } : {}),
-					},
+					time: systemTime,
 					identity: options.idGenerator,
 					capacity,
 					...(options.runBudget ? { runBudget: options.runBudget } : {}),
@@ -572,4 +570,56 @@ export function createWorkspaceWorkCoordinator(options: {
 			return closeOperation;
 		},
 	});
+}
+
+function createWorkspaceRuntimeTime(clock: Clock, scheduler?: RuntimeScheduler): RuntimeTime {
+	const resolvedScheduler =
+		scheduler ??
+		({
+			schedule(delayMs, run) {
+				const timer = setTimeout(
+					() => {
+						void run();
+					},
+					Math.max(0, delayMs),
+				);
+				return { cancel: () => clearTimeout(timer) };
+			},
+		} satisfies RuntimeScheduler);
+	return {
+		clock,
+		scheduler: resolvedScheduler,
+		random: { next: () => Math.random() },
+		sleep: {
+			wait: (delayMs, signal) =>
+				new Promise<void>((resolve, reject) => {
+					if (signal?.aborted) {
+						reject(abortError());
+						return;
+					}
+					let settled = false;
+					let task: ReturnType<RuntimeScheduler["schedule"]> | undefined;
+					const onAbort = (): void => {
+						task?.cancel();
+						finish(abortError());
+					};
+					const finish = (error?: Error): void => {
+						if (settled) return;
+						settled = true;
+						signal?.removeEventListener("abort", onAbort);
+						if (error) reject(error);
+						else resolve();
+					};
+					task = resolvedScheduler.schedule(delayMs, () => finish());
+					signal?.addEventListener("abort", onAbort, { once: true });
+					if (signal?.aborted) onAbort();
+				}),
+		},
+	};
+}
+
+function abortError(): Error {
+	const error = new Error("Request aborted");
+	error.name = "AbortError";
+	return error;
 }

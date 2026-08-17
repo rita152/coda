@@ -7,14 +7,7 @@
 import { emptyUsage } from "./api/shared.ts";
 import { createStreamDiagnostic } from "./diagnostics.ts";
 import { AssistantMessageEventStream } from "./event-stream.ts";
-import type {
-	AssistantMessage,
-	AssistantMessageEvent,
-	Model,
-	ProviderStreams,
-	StreamOptions,
-	TimeRuntime,
-} from "./types.ts";
+import type { AssistantMessage, AssistantMessageEvent, Model, ProviderStreams, TimeRuntime } from "./types.ts";
 
 interface LazyStreamOptions {
 	runtime: TimeRuntime;
@@ -120,8 +113,4 @@ export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: Laz
 		};
 	}
 	return api;
-}
-
-export function streamOptionsForLazy(options: StreamOptions): LazyStreamOptions {
-	return options;
 }

@@ -1,4 +1,4 @@
-import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
+import type { ToolExecutionOutput } from "@coda/agent";
 import type { WorkspaceExecution } from "@coda/runtime";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
@@ -24,20 +24,6 @@ import { createWriteTool } from "./write.ts";
 export { BUILT_IN_CODING_TOOL_NAMES } from "./contracts.ts";
 
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
-
-export function createCodingTools(options: {
-	readonly workspace: Workspace;
-	readonly fileSystem: FileSystem;
-	readonly processRunner: ProcessRunner;
-	readonly processSessionManager: ProcessSessionManager;
-	readonly shellExecutable: string;
-	readonly runtime: HostProcessRuntime;
-	readonly sessionHistory: SessionHistoryReadPort;
-	readonly sessionId: string;
-	readonly mutationCoordinator: TargetMutationCoordinator;
-}): readonly AgentTool[] {
-	return createCodingToolContributions(options).map(({ tool }) => tool);
-}
 
 export function createCodingToolContributions(options: {
 	readonly workspace: Workspace;

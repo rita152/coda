@@ -12,11 +12,9 @@ import {
 	type RunEvidenceChangedPath,
 	type RunEvidenceChangedPathProvenance,
 	type RunEvidenceCommand,
-	type RunEvidenceCommandV1,
 	type RunEvidenceControlReport,
 	type RunEvidenceEnvelope,
 	type RunEvidenceFailure,
-	type RunEvidenceFailureV1,
 	type RunEvidenceObservationCompleteness,
 	type RunEvidenceObservationLimitation,
 	type RunEvidenceOperation,
@@ -24,10 +22,7 @@ import {
 	type RunEvidenceOutcome,
 	type RunEvidencePendingOperation,
 	type RunEvidenceResolutionTarget,
-	type RunEvidenceToolIssue,
-	type RunEvidenceToolIssueV1,
 	type RunEvidenceUsage,
-	type RunEvidenceV1Projection,
 	type RunEvidenceWithRunControlEnvelope,
 	type RunEvidenceWorkspaceDiffSupplement,
 } from "./contracts.ts";
@@ -37,7 +32,7 @@ import {
 	reconcileFailures,
 	resolutionScope,
 } from "./failure-semantics.ts";
-import { type MutationFacts, mutationFactsFromObservation, mutationRequestPaths } from "./mutation-semantics.ts";
+import { type MutationFacts, mutationFactsFromObservation } from "./mutation-semantics.ts";
 import { resolveObservationSemantics } from "./observation-semantics.ts";
 
 export * from "./contracts.ts";
@@ -47,7 +42,6 @@ const MAX_PATHS = 50;
 const MAX_OPERATIONS = 128;
 const MAX_COMMANDS = 32;
 const MAX_OBSERVATION_LIMITATIONS = 64;
-const MAX_TOOL_ISSUES = 64;
 const MAX_FAILURES = 64;
 const MAX_PENDING_OPERATIONS = 64;
 const MAX_PATH_CHARACTERS = 256;
@@ -114,7 +108,6 @@ interface ToolEvidence {
 	readonly pathKind?: "inspected" | "changed";
 	readonly path?: string;
 	readonly resolutionTarget?: RunEvidenceResolutionTarget;
-	readonly legacyMutationPaths?: readonly string[];
 	readonly command?: string;
 	readonly rawCommand?: string;
 	settlement?: "returned" | "threw" | "aborted";
@@ -412,20 +405,12 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 				? "."
 				: undefined
 		: undefined;
-	let legacyMutationPaths: readonly string[] | undefined;
-	if (arguments_) {
-		try {
-			legacyMutationPaths = mutationRequestPaths(toolName, arguments_);
-		} catch {
-			legacyMutationPaths = undefined;
-		}
-	}
-	const mutationTarget = legacyMutationPaths
-		? {
-				kind: legacyMutationPaths.length === 1 ? ("path" as const) : ("opaque" as const),
-				value: legacyMutationPaths.length === 1 ? legacyMutationPaths[0]! : JSON.stringify(legacyMutationPaths),
-			}
-		: undefined;
+	const mutationPath =
+		(toolName === "write" || toolName === "edit") &&
+		typeof arguments_?.path === "string" &&
+		arguments_.path.length > 0
+			? arguments_.path
+			: undefined;
 	return {
 		invocationId: boundedText(invocation.id, MAX_ID_CHARACTERS),
 		toolName,
@@ -437,12 +422,9 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 					resolutionTarget: { kind: "path" as const, value: requestedPath },
 				}
 			: {}),
-		...(legacyMutationPaths
+		...(mutationPath !== undefined
 			? {
-					legacyMutationPaths: Object.freeze(
-						legacyMutationPaths.map((path) => safeText(path, MAX_PATH_CHARACTERS)),
-					),
-					resolutionTarget: mutationTarget,
+					resolutionTarget: { kind: "path" as const, value: mutationPath },
 				}
 			: {}),
 		...(toolName === "bash" && typeof arguments_?.command === "string"
@@ -528,7 +510,6 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 	const operations: RunEvidenceOperation[] = [];
 	const commands: RunEvidenceCommand[] = [];
 	const observationLimitations: RunEvidenceObservationLimitation[] = [];
-	const toolIssues: RunEvidenceToolIssue[] = [];
 	const terminalFailures: RunEvidenceFailure[] = [];
 	const resolutionEvents: FailureResolutionEvent[] = [];
 	const observationCounts: Record<RunEvidenceObservationCompleteness, number> = {
@@ -593,21 +574,6 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 					timedOut: observation.timedOut,
 					truncated: observation.truncated,
 					completeness: observation.completeness,
-				}),
-			);
-		}
-		if (isToolIssue(projected)) {
-			const reason = toolIssueReason(tool, observation);
-			toolIssues.push(
-				deepFreeze({
-					invocationId: tool.invocationId,
-					toolName: tool.toolName,
-					status: observation.status,
-					settlement: tool.settlement ?? null,
-					truncated: observation.truncated,
-					outputRecoverable: observation.outputRecoverable,
-					completeness: observation.completeness,
-					reason,
 				}),
 			);
 		}
@@ -690,7 +656,6 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 	const boundedOperations = boundedList(operations, MAX_OPERATIONS);
 	const boundedCommands = boundedList(commands, MAX_COMMANDS);
 	const boundedLimitations = boundedList(observationLimitations, MAX_OBSERVATION_LIMITATIONS);
-	const boundedIssues = boundedList(toolIssues, MAX_TOOL_ISSUES);
 	const boundedTerminalFailures = boundedList(terminalFailures, MAX_FAILURES);
 	const boundedRecoveredFailures = boundedList(recoveredFailures, MAX_FAILURES);
 	const boundedPendingOperations = boundedList(pendingOperations, MAX_PENDING_OPERATIONS);
@@ -720,50 +685,19 @@ function projectEnvelope(state: RunState, finished: FinishedRun): RunEvidenceEnv
 			omittedLimitations: boundedLimitations.omitted,
 		},
 		commands: boundedCommands.values,
-		toolIssues: boundedIssues.values,
 		terminalFailures: boundedTerminalFailures.values,
 		recoveredFailures: boundedRecoveredFailures.values,
 		pendingOperations: boundedPendingOperations.values,
 		openFailures: boundedOpenFailures.values,
-		unresolvedFailures: boundedOpenFailures.values,
 		usage: projectUsage(attempts, state.retries),
 		omitted: {
 			operations: boundedOperations.omitted,
 			commands: boundedCommands.omitted,
 			observationLimitations: boundedLimitations.omitted,
-			toolIssues: boundedIssues.omitted,
 			terminalFailures: boundedTerminalFailures.omitted,
 			recoveredFailures: boundedRecoveredFailures.omitted,
 			pendingOperations: boundedPendingOperations.omitted,
 			openFailures: boundedOpenFailures.omitted,
-			unresolvedFailures: boundedOpenFailures.omitted,
-		},
-	});
-}
-
-/** Produces the strict v1 compatibility shape retained by existing summary readers. */
-export function projectRunEvidenceV1(evidence: RunEvidenceEnvelope): RunEvidenceV1Projection {
-	return deepFreeze({
-		schemaVersion: 1 as const,
-		type: evidence.type,
-		runId: evidence.runId,
-		outcome: evidence.outcome,
-		startedAt: evidence.startedAt,
-		completedAt: evidence.completedAt,
-		elapsedMs: evidence.elapsedMs,
-		paths: {
-			inspected: evidence.paths.inspected,
-			changed: evidence.paths.changed,
-			omitted: evidence.paths.omitted,
-		},
-		commands: evidence.commands.map(commandV1),
-		toolIssues: evidence.toolIssues.map(toolIssueV1),
-		unresolvedFailures: evidence.unresolvedFailures.map(failureV1),
-		usage: evidence.usage,
-		omitted: {
-			commands: evidence.omitted.commands,
-			toolIssues: evidence.omitted.toolIssues,
-			unresolvedFailures: evidence.omitted.unresolvedFailures,
 		},
 	});
 }
@@ -873,30 +807,21 @@ function operationPaths(
 		effect: "changed" as const,
 		provenance: "tool-observation" as const,
 	}));
-	const legacyMutationPaths =
-		!observation.mutation && observation.status === "ok"
-			? (tool.legacyMutationPaths ?? []).map((path) => ({
-					path,
-					effect: "changed" as const,
-					provenance: "invocation-argument" as const,
-				}))
-			: [];
 	const fallbackPath =
 		observation.status === "ok" && tool.path && tool.pathKind
 			? [{ path: tool.path, effect: tool.pathKind, provenance: "invocation-argument" as const }]
 			: [];
-	const paths = [
-		...declared,
-		...nativeMutationPaths,
-		...legacyMutationPaths,
-		...(declared.length ? [] : fallbackPath),
-	];
+	const paths = [...declared, ...nativeMutationPaths, ...(declared.length ? [] : fallbackPath)];
 	const unique = new Map(paths.map((path) => [`${path.effect}\0${path.path}`, path]));
 	return deepFreeze([...unique.values()]);
 }
 
 function operationMutation(tool: ToolEvidence, observation: ObservationEvidence): RunEvidenceOperation["mutation"] {
-	const attemptedPaths = observation.mutation?.attemptedPaths ?? tool.legacyMutationPaths;
+	const attemptedPaths =
+		observation.mutation?.attemptedPaths ??
+		((tool.toolName === "write" || tool.toolName === "edit") && tool.resolutionTarget?.kind === "path"
+			? [tool.resolutionTarget.value]
+			: undefined);
 	if (!attemptedPaths) return undefined;
 	return deepFreeze({
 		attemptedPaths: attemptedPaths.map((path) => safeText(path, MAX_PATH_CHARACTERS)),
@@ -917,15 +842,6 @@ function projectPendingOperation(tool: ToolEvidence): RunEvidencePendingOperatio
 		startedSequence: tool.order,
 		target,
 	});
-}
-
-function isToolIssue(projected: ProjectedToolEvidence): boolean {
-	return (
-		projected.failure !== undefined ||
-		projected.tool.settlement === "aborted" ||
-		projected.observation.completeness === "recoverable-overflow" ||
-		projected.observation.completeness === "lossy-overflow"
-	);
 }
 
 function toolFailureStatus(
@@ -963,34 +879,6 @@ function successResolutionScopes(projected: ProjectedToolEvidence): readonly str
 		scopes.push(resolutionScope("tool-target", [projected.tool.toolName, target.kind, target.value].join("\0")));
 	}
 	return Object.freeze(scopes);
-}
-
-function commandV1(command: RunEvidenceCommand): RunEvidenceCommandV1 {
-	return {
-		invocationId: command.invocationId,
-		command: command.command,
-		status: command.status,
-		exitCode: command.exitCode,
-		signal: command.signal,
-		timedOut: command.timedOut,
-		truncated: command.truncated,
-	};
-}
-
-function toolIssueV1(issue: RunEvidenceToolIssue): RunEvidenceToolIssueV1 {
-	return {
-		invocationId: issue.invocationId,
-		toolName: issue.toolName,
-		status: issue.status,
-		settlement: issue.settlement,
-		truncated: issue.truncated,
-		outputRecoverable: issue.outputRecoverable,
-		reason: issue.reason,
-	};
-}
-
-function failureV1(failure: RunEvidenceFailure): RunEvidenceFailureV1 {
-	return { kind: failure.kind, id: failure.id, status: failure.status, summary: failure.summary };
 }
 
 function projectUsage(attempts: readonly AttemptEvidence[], retries: number): RunEvidenceUsage {

@@ -70,7 +70,7 @@ export interface AgentSeed {
 	readonly pendingFollowUps: readonly FollowUp[];
 }
 
-export type CompactionReason = "manual" | "auto" | "overflow";
+export type CompactionReason = "auto" | "overflow";
 
 /** Durable replacement Context Window committed without deleting the Session transcript. */
 export interface CompactionCheckpoint {
@@ -79,7 +79,6 @@ export interface CompactionCheckpoint {
 	readonly previousWindowId?: string;
 	readonly reason: CompactionReason;
 	readonly summary: string;
-	readonly focus?: string;
 	readonly coveredThroughMessageId: MessageId;
 	readonly coveredMessageIds: readonly MessageId[];
 	readonly retainedMessageIds: readonly MessageId[];
@@ -194,8 +193,6 @@ export interface ToolExecutionOutput<TDetails = unknown> {
 	readonly observation?: ToolObservation;
 	/** Host-only presentation/audit metadata, not a model semantic channel. */
 	readonly details?: TDetails;
-	/** @deprecated Compatibility input. New Tools should set observation.status. */
-	readonly isError?: boolean;
 }
 
 export interface ToolExecutionProgress {

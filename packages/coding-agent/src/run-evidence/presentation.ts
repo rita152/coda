@@ -1,42 +1,28 @@
-import type { RunEvidenceEnvelope, RunEvidenceV1Projection } from "./run-evidence.ts";
-
-type ReadableRunEvidence = RunEvidenceEnvelope | RunEvidenceV1Projection;
+import type { RunEvidenceEnvelope } from "./run-evidence.ts";
 
 /** Renders an untrusted-text-free aggregate that packs into the available terminal width. */
-export function renderRunEvidenceSummary(evidence: ReadableRunEvidence, width: number): readonly string[] {
+export function renderRunEvidenceSummary(evidence: RunEvidenceEnvelope, width: number): readonly string[] {
 	const inspected = evidence.paths.inspected.length + evidence.paths.omitted.inspected;
 	const changed = evidence.paths.changed.length + evidence.paths.omitted.changed;
 	const commands = evidence.commands.length + evidence.omitted.commands;
-	const issues = evidence.toolIssues.length + evidence.omitted.toolIssues;
-	const open =
-		evidence.schemaVersion !== 1
-			? evidence.openFailures.length + evidence.omitted.openFailures
-			: evidence.unresolvedFailures.length + evidence.omitted.unresolvedFailures;
-	const recovered =
-		evidence.schemaVersion !== 1 ? evidence.recoveredFailures.length + evidence.omitted.recoveredFailures : 0;
-	const pending =
-		evidence.schemaVersion !== 1 ? evidence.pendingOperations.length + evidence.omitted.pendingOperations : 0;
-	const observationSegments =
-		evidence.schemaVersion !== 1
-			? [
-					evidence.observations.counts.windowed > 0
-						? count(evidence.observations.counts.windowed, "windowed")
-						: undefined,
-					evidence.observations.counts["recoverable-overflow"] > 0
-						? count(evidence.observations.counts["recoverable-overflow"], "recoverable overflow")
-						: undefined,
-					evidence.observations.counts["lossy-overflow"] > 0
-						? count(evidence.observations.counts["lossy-overflow"], "lossy overflow")
-						: undefined,
-				].filter((segment): segment is string => segment !== undefined)
-			: [];
+	const open = evidence.openFailures.length + evidence.omitted.openFailures;
+	const recovered = evidence.recoveredFailures.length + evidence.omitted.recoveredFailures;
+	const pending = evidence.pendingOperations.length + evidence.omitted.pendingOperations;
+	const observationSegments = [
+		evidence.observations.counts.windowed > 0 ? count(evidence.observations.counts.windowed, "windowed") : undefined,
+		evidence.observations.counts["recoverable-overflow"] > 0
+			? count(evidence.observations.counts["recoverable-overflow"], "recoverable overflow")
+			: undefined,
+		evidence.observations.counts["lossy-overflow"] > 0
+			? count(evidence.observations.counts["lossy-overflow"], "lossy overflow")
+			: undefined,
+	].filter((segment): segment is string => segment !== undefined);
 	const segments = [
 		evidence.outcome === "success" ? "Evidence" : `Evidence (${evidence.outcome})`,
 		count(inspected, "inspected"),
 		count(changed, "changed"),
 		count(commands, "command"),
 		...observationSegments,
-		count(issues, "Tool issue"),
 		...(recovered > 0 ? [count(recovered, "recovered failure")] : []),
 		count(open, "open failure"),
 		...(pending > 0 ? [count(pending, "pending operation")] : []),
@@ -58,7 +44,7 @@ function formatTokens(value: number): string {
 	return `${compactNumber(tokens / 1_000_000)}m tokens`;
 }
 
-function formatCost(evidence: ReadableRunEvidence): string {
+function formatCost(evidence: RunEvidenceEnvelope): string {
 	const { cost } = evidence.usage;
 	if (cost.status === "unavailable") return "cost unavailable";
 	const amount = cost.status === "complete" ? (cost.totalUsd ?? 0) : cost.knownTotalUsd;

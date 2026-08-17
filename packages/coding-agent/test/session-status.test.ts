@@ -16,7 +16,6 @@ describe("session status aggregation", () => {
 					toolName: "deferred",
 					content: [{ type: "text", text: "done" }],
 					usage: usage(0.1),
-					isError: false,
 					timestamp: 0,
 				},
 			},

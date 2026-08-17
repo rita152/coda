@@ -14,7 +14,6 @@ function result(overrides: Partial<ToolResultMessage> = {}): ToolResultMessage {
 		toolCallId: "call:1",
 		toolName: "bash",
 		content: [{ type: "text", text: "inner output" }],
-		isError: false,
 		timestamp: 1,
 		...overrides,
 	};
@@ -29,7 +28,6 @@ describe("Tool observation projection", () => {
 			outputRef: "tool-output:v1:abc",
 		};
 		const message = result({
-			isError: false,
 			details: { status: "success", truncated: false, exitCode: 0 },
 			observation,
 		});
@@ -46,9 +44,8 @@ describe("Tool observation projection", () => {
 		});
 	});
 
-	it("synthesizes a bounded observation for legacy Session messages", () => {
-		const legacy = result({
-			isError: true,
+	it("defaults a missing observation to success without reading details", () => {
+		const missing = result({
 			details: {
 				truncated: true,
 				exitCode: 1,
@@ -56,11 +53,10 @@ describe("Tool observation projection", () => {
 			},
 		});
 
-		expect(resolveToolObservation(legacy)).toEqual({
-			status: "error",
-			truncated: true,
-			facts: { exitCode: 1 },
+		expect(resolveToolObservation(missing)).toEqual({
+			status: "ok",
+			truncated: false,
 		});
-		expect(modelToolResultText(legacy)).not.toContain("SECRET_NAME");
+		expect(modelToolResultText(missing)).not.toContain("SECRET_NAME");
 	});
 });

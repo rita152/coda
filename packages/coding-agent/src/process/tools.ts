@@ -67,7 +67,6 @@ function snapshotOutput(snapshot: ProcessSessionSnapshot, includeOutput: boolean
 			facts: snapshotFacts(snapshot),
 			...(snapshot.outputRef ? { outputRef: snapshot.outputRef } : {}),
 		},
-		isError: status !== "ok",
 		details: snapshot,
 	};
 }
@@ -114,7 +113,6 @@ export function createProcessTools(options: {
 							code: "launch_failed",
 						},
 					},
-					isError: true,
 					details: { state: "failed", code: "launch_failed", error: message },
 				};
 			}
@@ -152,7 +150,6 @@ export function createProcessTools(options: {
 					truncated: false,
 					facts: snapshotFacts(result.snapshot),
 				},
-				isError: true,
 				details: { ...result.snapshot, writeAccepted: false, reason: result.reason },
 			};
 		},

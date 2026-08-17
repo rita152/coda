@@ -36,10 +36,10 @@ describe("ContextWindowController", () => {
 
 		await controller.compact({
 			messages: [user("message:u1", "question"), assistant("message:a1", "answer")],
-			reason: "manual",
+			reason: "auto",
 		});
 
-		expect(order).toEqual(["before:manual", "commit", "after:manual:true"]);
+		expect(order).toEqual(["before:auto", "commit", "after:auto:true"]);
 	});
 
 	it("does not activate a checkpoint when the durable commit fails", async () => {
@@ -52,7 +52,7 @@ describe("ContextWindowController", () => {
 			},
 		});
 
-		await expect(controller.compact({ messages, reason: "manual" })).rejects.toThrow("journal unavailable");
+		await expect(controller.compact({ messages, reason: "auto" })).rejects.toThrow("journal unavailable");
 		expect(controller.checkpoint).toBeUndefined();
 		expect(controller.project(messages)).toEqual(messages);
 	});
@@ -89,7 +89,6 @@ describe("ContextWindowController", () => {
 					content: [{ type: "text", text: `discarded-result:${"x".repeat(100_000)}` }],
 					observation: { status: "error", truncated: true, facts: { code: "partial_read" } },
 					details: { internal: "SECRET_PRESENTATION_DETAIL" },
-					isError: true,
 					timestamp: 10_000,
 				},
 			},
@@ -102,7 +101,7 @@ describe("ContextWindowController", () => {
 			},
 		});
 
-		const checkpoint = await controller.compact({ messages, reason: "manual", focus: "keep file state" });
+		const checkpoint = await controller.compact({ messages, reason: "auto" });
 
 		expect(committed).toEqual(checkpoint);
 		expect(checkpoint.coveredMessageIds).toEqual(["message:u1", "message:a-tool", "message:tool-result"]);
@@ -129,14 +128,14 @@ describe("ContextWindowController", () => {
 		const committed: CompactionCheckpoint[] = [];
 		const controller = fixture.controller({ commit: async (checkpoint) => void committed.push(checkpoint) });
 		const firstMessages = [user("message:u1", "initial request"), assistant("message:a1", "initial answer")];
-		const first = await controller.compact({ messages: firstMessages, reason: "manual" });
+		const first = await controller.compact({ messages: firstMessages, reason: "auto" });
 		const allMessages = [
 			...firstMessages,
 			user("message:u2", "continue"),
 			assistant("message:a2", `new-large-state:${"y".repeat(100_000)}`),
 		];
 
-		const second = await controller.compact({ messages: allMessages, reason: "manual" });
+		const second = await controller.compact({ messages: allMessages, reason: "auto" });
 
 		expect(committed).toHaveLength(2);
 		expect(second.previousWindowId).toBe(first.windowId);
@@ -158,7 +157,7 @@ describe("ContextWindowController", () => {
 		]);
 		const controller = fixture.controller({ commit: async () => undefined });
 		const firstMessages = [user("message:u1", "initial"), assistant("message:a1", "done")];
-		const first = await controller.compact({ messages: firstMessages, reason: "manual" });
+		const first = await controller.compact({ messages: firstMessages, reason: "auto" });
 		fixture.select("small");
 		const allMessages = [...firstMessages, user("message:u2", `downshift-large-input:${"z".repeat(50_000)}`)];
 		const context: Context = {
@@ -197,7 +196,7 @@ describe("ContextWindowController", () => {
 		const old = assistant("message:a1", "old answer", usage(90_000, 0.9));
 		const compacted = [user("message:u1", "old question"), old];
 
-		await controller.compact({ messages: compacted, reason: "manual" });
+		await controller.compact({ messages: compacted, reason: "auto" });
 		const estimated = controller.usage({ systemPrompt: "system" }, compacted);
 		const fresh = assistant("message:a2", "fresh answer", usage(4_000, 0.04));
 		const authoritative = controller.usage({ systemPrompt: "system" }, [...compacted, fresh]);
@@ -216,7 +215,7 @@ describe("ContextWindowController", () => {
 
 		const checkpoint = await controller.compact({
 			messages: [user("message:u1", "question"), assistant("message:a1", "answer")],
-			reason: "manual",
+			reason: "auto",
 		});
 
 		expect(checkpoint.usage).toMatchObject({ summaryCost: 0.25, cumulativeCost: 0.25 });

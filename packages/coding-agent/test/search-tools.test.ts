@@ -43,7 +43,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-grep-1",
 					toolName: "grep",
-					isError: false,
 				});
 				const serialized = JSON.stringify(result);
 				expect(serialized).toContain("src/one.ts:2:7:const needle = true;");
@@ -104,7 +103,7 @@ describe("search Tools", () => {
 			}),
 			(context) => {
 				const result = context.messages.at(-1);
-				expect(result).toMatchObject({ role: "toolResult", toolName: "find", isError: false });
+				expect(result).toMatchObject({ role: "toolResult", toolName: "find", observation: { status: "ok" } });
 				expect(result?.content).toEqual([{ type: "text", text: "src/nested/three.ts\nsrc/one.ts" }]);
 				return fauxAssistantMessage(fauxToolCall("ls", { path: "src" }, { id: "provider-ls-1" }), {
 					stopReason: "toolUse",
@@ -113,7 +112,7 @@ describe("search Tools", () => {
 			},
 			(context) => {
 				const result = context.messages.at(-1);
-				expect(result).toMatchObject({ role: "toolResult", toolName: "ls", isError: false });
+				expect(result).toMatchObject({ role: "toolResult", toolName: "ls", observation: { status: "ok" } });
 				expect(result?.content).toEqual([{ type: "text", text: "nested/\none.ts\ntwo.md" }]);
 				return fauxAssistantMessage("Directory search complete.", { timestamp: 600 });
 			},
@@ -172,7 +171,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-ls-missing",
 					toolName: "ls",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Directory does not exist") }],
 					details: { status: "failed", code: "not_found", path: expect.stringContaining("/src") },
 				});
@@ -186,7 +184,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-find-missing",
 					toolName: "find",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path does not exist") }],
 					details: { status: "failed", code: "not_found", path: expect.stringContaining("/generated") },
 				});
@@ -200,7 +197,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-grep-missing",
 					toolName: "grep",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path does not exist") }],
 					details: { status: "failed", code: "not_found", path: expect.stringContaining("/build") },
 				});
@@ -214,7 +210,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-grep-invalid",
 					toolName: "grep",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Invalid search pattern") }],
 					details: { status: "failed", code: "invalid_pattern", pattern: "[" },
 				});
@@ -228,7 +223,6 @@ describe("search Tools", () => {
 					role: "toolResult",
 					toolCallId: "provider-ls-file",
 					toolName: "ls",
-					isError: true,
 					content: [{ type: "text", text: expect.stringContaining("Path is not a directory") }],
 					details: { status: "failed", code: "not_directory", path: expect.stringContaining("/plain.txt") },
 				});

@@ -794,15 +794,15 @@ def populate_context(
         "changed_paths": paths.get("changed")
         if isinstance(paths.get("changed"), list)
         else [],
-        "tool_issue_count": len(evidence.get("toolIssues", []))
-        if isinstance(evidence.get("toolIssues"), list)
+        "tool_issue_count": len(_mapping(evidence.get("observations")).get("limitations", []))
+        if isinstance(_mapping(evidence.get("observations")).get("limitations"), list)
         else 0,
         "tool_rejection_count": len(rejected),
         "invalid_tool_call_count": sum(
             1 for event in rejected if event.get("reason") == "invalid"
         ),
-        "unresolved_failure_count": len(evidence.get("unresolvedFailures", []))
-        if isinstance(evidence.get("unresolvedFailures"), list)
+        "unresolved_failure_count": len(evidence.get("openFailures", []))
+        if isinstance(evidence.get("openFailures"), list)
         else 0,
         "length_truncation_count": sum(
             1
