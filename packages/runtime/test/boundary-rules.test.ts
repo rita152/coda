@@ -49,14 +49,16 @@ describe("repository boundary rules", () => {
 		);
 	});
 
-	it("encodes the eight-package dependency DAG", () => {
+	it("encodes the package dependency DAG", () => {
 		expect(PACKAGE_DEPENDENCY_MATRIX).toEqual({
 			ai: [],
 			agent: ["ai"],
-			"coding-agent": ["agent", "ai", "mcp", "runtime", "skills", "tui"],
+			"coding-agent": ["agent", "ai", "mcp", "permission", "runtime", "sandbox", "skills", "tui"],
 			evals: ["agent", "ai", "runtime"],
 			mcp: [],
+			permission: [],
 			runtime: ["agent", "ai"],
+			sandbox: [],
 			skills: [],
 			tui: [],
 		});

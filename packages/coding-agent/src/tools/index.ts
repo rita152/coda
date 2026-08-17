@@ -1,5 +1,6 @@
 import type { ToolExecutionOutput } from "@coda/agent";
 import type { WorkspaceExecution } from "@coda/runtime";
+import type { ProcessConfinement } from "@coda/sandbox";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
@@ -35,6 +36,9 @@ export function createCodingToolContributions(options: {
 	readonly sessionHistory: SessionHistoryReadPort;
 	readonly sessionId: string;
 	readonly mutationCoordinator: TargetMutationCoordinator;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 }): readonly WorkspaceToolContribution[] {
 	const mutations = options.mutationCoordinator;
 	const mutationWriter = createAtomicMutationWriter(options.fileSystem);
@@ -65,6 +69,7 @@ export function createCodingToolContributions(options: {
 			shellExecutable: options.shellExecutable,
 			runtime: options.runtime,
 			sessionId: options.sessionId,
+			...(options.wrapScript ? { wrapScript: options.wrapScript } : {}),
 		}),
 	];
 	for (const [index, expectedName] of BUILT_IN_CODING_TOOL_NAMES.entries()) {

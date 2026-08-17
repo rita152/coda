@@ -1,5 +1,7 @@
 import type { AgentInput, Immutable, QueueItemId } from "@coda/agent";
 import type { AssistantMessage, ModelThinkingLevel } from "@coda/ai";
+import type { ApprovalPolicy } from "@coda/permission";
+import type { ProcessConfinement, SandboxMode } from "@coda/sandbox";
 import {
 	type DiagnosticSink,
 	FullScreenTui,
@@ -7,6 +9,7 @@ import {
 	type Scheduler,
 	type Terminal,
 	type TerminalImageSurface,
+	type Tui,
 } from "@coda/tui";
 import {
 	type AuthCommandFlowOptions,
@@ -16,10 +19,11 @@ import {
 } from "../commands/auth-flow.ts";
 import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts";
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
-import type { CommandFlowNavigation } from "../commands/flow-types.ts";
+import type { CommandFlowNavigation, CommandFlowOpener } from "../commands/flow-types.ts";
 import { createHooksCommandFlow, type HooksCommandFlowOptions } from "../commands/hooks-flow.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
+import { createPermissionsCommandFlow, type PermissionPreset } from "../commands/permissions-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import {
 	createSessionCommandFlow,
@@ -84,6 +88,19 @@ function isContextOverflowError(error: unknown): boolean {
 	return isContextOverflowText(error instanceof Error ? error.message : String(error));
 }
 
+function openPermissionsCommand(
+	flow: CommandFlowOpener,
+	command: InteractiveSessionOptions["permissionsCommand"],
+): void {
+	if (!command) throw new Error("Permissions management is unavailable");
+	flow.open(
+		createPermissionsCommandFlow({
+			current: command.snapshot(),
+			onSelect: (preset) => command.apply(preset),
+		}),
+	);
+}
+
 export interface InteractiveSessionOptions {
 	readonly work: SessionWorkController;
 	readonly presentation: SessionPresentation;
@@ -120,6 +137,13 @@ export interface InteractiveSessionOptions {
 	};
 	readonly mcpCommand?: McpCommandFlowOptions;
 	readonly hooksCommand?: HooksCommandFlowOptions;
+	readonly permissionsCommand?: {
+		readonly snapshot: () => {
+			readonly approvalPolicy: ApprovalPolicy;
+			readonly sandboxMode: SandboxMode;
+		};
+		readonly apply: (preset: PermissionPreset) => Promise<void> | void;
+	};
 	readonly contextOverflowRecovery?: {
 		takeUnrecoverable(): boolean;
 	};
@@ -156,6 +180,7 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
+	readonly commandPermission?: { bind(tui: Tui, terminal: Terminal): void; unbind(): void };
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
 	readonly fileMentionSearch?: WorkspaceFileSearch;
@@ -164,6 +189,9 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly lifecycle?: InteractiveProcessLifecycle;
 	readonly allocateId: (kind: "composer_submission" | "user_shell") => string;
 	readonly processRunner: ProcessRunner;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 	readonly platform: NodeJS.Platform;
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly workspace: string;
@@ -361,6 +389,7 @@ async function runMultiSessionInteractive(
 			workspace: options.workspace,
 			environment: options.environment,
 			clock: options.clock,
+			...(options.wrapScript ? { wrapScript: options.wrapScript } : {}),
 			onUpdate: (snapshot) => {
 				component.acceptUserShell(snapshot);
 				if (snapshot.status !== "running") void git.refresh();
@@ -468,6 +497,10 @@ async function runMultiSessionInteractive(
 				if (commandId === "core:hooks") {
 					if (!sessionOptions.hooksCommand) throw new Error("Hooks inspection is unavailable");
 					flow.open(createHooksCommandFlow(sessionOptions.hooksCommand));
+					return;
+				}
+				if (commandId === "core:permissions") {
+					openPermissionsCommand(flow, sessionOptions.permissionsCommand);
 					return;
 				}
 				if (commandId === "core:session") {
@@ -602,12 +635,14 @@ async function runMultiSessionInteractive(
 	};
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		abortAll();
 		resolveExit();
@@ -627,6 +662,7 @@ async function runMultiSessionInteractive(
 			});
 		},
 	});
+	options.commandPermission?.bind(tui, options.terminal);
 	options.mcpElicitation?.bind(tui, options.terminal, (request, sessionId, waiting) => {
 		const pane = sessionId ? panes.get(sessionId) : panes.active;
 		if (!pane) return;
@@ -639,6 +675,7 @@ async function runMultiSessionInteractive(
 	});
 	options.mcpElicitation?.setActiveSession(initialPane.id);
 	if (terminationSignal || fatalError !== undefined) {
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 	}
 	try {
@@ -662,12 +699,12 @@ async function runMultiSessionInteractive(
 		return terminationSignal ? interactiveSignalExitCode(terminationSignal) : 0;
 	} finally {
 		unsubscribeLifecycle?.();
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		let droppedShells = 0;
 		for (const pane of panes.open) {
 			pane.detachAgent();
 			droppedShells += await pane.input.close();
-			await pane.options.work.close();
 		}
 		root.dispose();
 		await stopFullScreen();
@@ -708,6 +745,7 @@ async function runSingleSessionInteractive(
 		workspace: options.workspace,
 		environment: options.environment,
 		clock: options.clock,
+		...(options.wrapScript ? { wrapScript: options.wrapScript } : {}),
 		onUpdate: (snapshot) => {
 			component.acceptUserShell(snapshot);
 			if (snapshot.status !== "running") void git.refresh();
@@ -812,6 +850,15 @@ async function runSingleSessionInteractive(
 				await openMcpCommand(flow, argument, options.mcpCommand);
 				return;
 			}
+			if (commandId === "core:hooks") {
+				if (!options.hooksCommand) throw new Error("Hooks inspection is unavailable");
+				flow.open(createHooksCommandFlow(options.hooksCommand));
+				return;
+			}
+			if (commandId === "core:permissions") {
+				openPermissionsCommand(flow, options.permissionsCommand);
+				return;
+			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},
 		onResumeFollowUps: () => inputController.resumeQueue(),
@@ -847,6 +894,7 @@ async function runSingleSessionInteractive(
 	const stopFullScreen = () => outputScope.stop(() => tui.stop());
 	const requestTermination = (signal: InteractiveTerminationSignal): void => {
 		terminationSignal ??= signal;
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
@@ -854,6 +902,7 @@ async function runSingleSessionInteractive(
 	};
 	const requestFatalExit = (error: unknown): void => {
 		fatalError ??= error;
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
@@ -874,6 +923,7 @@ async function runSingleSessionInteractive(
 			});
 		},
 	});
+	options.commandPermission?.bind(tui, options.terminal);
 	options.mcpElicitation?.bind(tui, options.terminal, (request, _sessionId, waiting) => {
 		component.setActivityOverride(
 			`mcp:${request.execution.invocationId}`,
@@ -883,6 +933,7 @@ async function runSingleSessionInteractive(
 	});
 	options.mcpElicitation?.setActiveSession(options.presentation.descriptor.id);
 	if (terminationSignal || fatalError !== undefined) {
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 	}
 	const detach = options.work.subscribe({
@@ -918,10 +969,10 @@ async function runSingleSessionInteractive(
 		return terminationSignal ? interactiveSignalExitCode(terminationSignal) : 0;
 	} finally {
 		unsubscribeLifecycle?.();
+		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
 		detach();
 		const droppedShells = await inputController.close();
-		await options.work.close();
 		await stopFullScreen();
 		if (droppedShells > 0) {
 			await options.onWarning?.(
@@ -987,6 +1038,7 @@ function statusLineSnapshot(
 	session: InteractiveSessionOptions,
 	git: WorkspaceGitStatus,
 ): StatusLineSnapshot {
+	const permissions = session.permissionsCommand?.snapshot();
 	return {
 		...session.statusLine(),
 		workspacePath: run.workspace,
@@ -994,5 +1046,6 @@ function statusLineSnapshot(
 			? { homePath: run.homePath ?? run.environment.HOME ?? run.environment.USERPROFILE }
 			: {}),
 		...(git.snapshot ? { git: git.snapshot } : {}),
+		...(permissions ? { permissions } : {}),
 	};
 }

@@ -54,6 +54,24 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
+			permission: {
+				approvalPolicy: "untrusted",
+				enabled: true,
+				remembered: [
+					{
+						key: 'bash\0{"command":"npm test"}',
+						decision: "allow",
+						scope: "workspace",
+						workspace: "/workspace",
+					},
+				],
+			},
+			sandbox: {
+				mode: "workspace-write",
+				enabled: true,
+				allowedDomains: ["registry.npmjs.org"],
+				deniedDomains: ["evil.test"],
+			},
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 
@@ -88,6 +106,24 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
+			permission: {
+				approvalPolicy: "untrusted",
+				enabled: true,
+				remembered: [
+					{
+						key: 'bash\0{"command":"npm test"}',
+						decision: "allow",
+						scope: "workspace",
+						workspace: "/workspace",
+					},
+				],
+			},
+			sandbox: {
+				mode: "workspace-write",
+				enabled: true,
+				allowedDomains: ["registry.npmjs.org"],
+				deniedDomains: ["evil.test"],
+			},
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 		const settingsPath = join(homeDirectory, ".coda", "settings.json");
@@ -123,6 +159,24 @@ describe("FileSettingsStore", () => {
 				},
 			],
 			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
+			permission: {
+				approvalPolicy: "untrusted",
+				enabled: true,
+				remembered: [
+					{
+						key: 'bash\0{"command":"npm test"}',
+						decision: "allow",
+						scope: "workspace",
+						workspace: "/workspace",
+					},
+				],
+			},
+			sandbox: {
+				mode: "workspace-write",
+				enabled: true,
+				allowedDomains: ["registry.npmjs.org"],
+				deniedDomains: ["evil.test"],
+			},
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 		expect((await stat(join(homeDirectory, ".coda"))).mode & 0o777).toBe(0o700);

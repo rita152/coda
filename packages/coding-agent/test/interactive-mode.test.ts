@@ -772,6 +772,68 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("");
 	});
 
+	it("applies /permissions Full Access after confirmation and persists the preset", async () => {
+		const runtime = testTimeRuntime(3_660);
+		const faux = fauxProvider({ runtime });
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const terminal = new VirtualTerminal({ columns: 140, rows: 24 });
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let saved: UserSettings | undefined;
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			settings: {
+				load: async () => ({
+					defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+				}),
+				save: async (value) => {
+					saved = value;
+				},
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			terminalFactory: { create: () => terminal },
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: "/tmp",
+				homeDirectory: "/home/test",
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				scheduler: createSystemScheduler(),
+			},
+		});
+
+		const running = application.run(["--interactive", "--no-color", "--no-session"]);
+		await until(() => terminal.started && terminal.readOutput().includes(`${faux.getModel().provider}/`));
+		await terminal.emit({ type: "text", text: "/permissions" });
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes("Update Model Permissions"));
+		await terminal.emit(key("down"));
+		await terminal.emit(key("down"));
+		await terminal.emit(key("enter"));
+		await until(() => terminal.readOutput().includes("Enable full access?"));
+		terminal.clearOutput();
+		await terminal.emit(key("enter"));
+		await until(() => {
+			const output = terminal.readOutput();
+			return output.includes("Full Access") && !output.includes("Enable full access?");
+		});
+		expect(terminal.readOutput()).not.toContain("Permissions updated to");
+		expect(terminal.readOutput()).not.toContain("Ask for approval · Full Access");
+
+		await terminal.emit(key("c", { text: "c", control: true }));
+		await terminal.emit(key("c", { text: "c", control: true }));
+
+		await expect(running).resolves.toBe(0);
+		expect(saved?.permission?.approvalPolicy).toBe("never");
+		expect(saved?.sandbox?.mode).toBe("danger-full-access");
+		expect(stderr.value).toBe("");
+	});
+
 	it("keeps the former Session running while /new and /session change foreground focus", async () => {
 		const runtime = testTimeRuntime(3_750);
 		const faux = fauxProvider({ runtime });

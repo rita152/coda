@@ -1,6 +1,8 @@
 import { isAbsolute, join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
+import { APPROVAL_POLICIES, type ApprovalPolicy, type RememberedCommandPermission } from "@coda/permission";
+import { SANDBOX_MODES, type SandboxMode } from "@coda/sandbox";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { parseMcpServerConfigurations } from "../mcp/config.ts";
@@ -41,6 +43,8 @@ function validateSettings(value: unknown): UserSettings {
 			"mcpServers",
 			"workspaceMcpTrust",
 			"hookTrust",
+			"permission",
+			"sandbox",
 			"ui",
 		])
 	) {
@@ -171,6 +175,85 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain duplicate Workspace MCP Trust records");
 		}
 	}
+	let permission: UserSettings["permission"];
+	if (value.permission !== undefined) {
+		if (!isRecord(value.permission) || !hasOnlyKeys(value.permission, ["approvalPolicy", "enabled", "remembered"])) {
+			throw new Error("Coda settings contain invalid Command Permission settings");
+		}
+		if (value.permission.enabled !== undefined && typeof value.permission.enabled !== "boolean") {
+			throw new Error("Coda settings contain invalid Command Permission settings");
+		}
+		if (
+			value.permission.approvalPolicy !== undefined &&
+			(typeof value.permission.approvalPolicy !== "string" ||
+				!(APPROVAL_POLICIES as readonly string[]).includes(value.permission.approvalPolicy))
+		) {
+			throw new Error("Coda settings contain invalid Command Permission settings");
+		}
+		let remembered: readonly RememberedCommandPermission[] | undefined;
+		if (value.permission.remembered !== undefined) {
+			if (!Array.isArray(value.permission.remembered)) {
+				throw new Error("Coda settings contain invalid Command Permission settings");
+			}
+			remembered = value.permission.remembered.map((entry) => {
+				if (
+					!isRecord(entry) ||
+					!hasOnlyKeys(entry, ["key", "decision", "reason", "scope", "workspace"]) ||
+					typeof entry.key !== "string" ||
+					entry.key.length === 0 ||
+					(entry.decision !== "allow" && entry.decision !== "deny") ||
+					(entry.reason !== undefined && typeof entry.reason !== "string") ||
+					(entry.scope !== "session" && entry.scope !== "workspace" && entry.scope !== "user") ||
+					(entry.workspace !== undefined && typeof entry.workspace !== "string")
+				) {
+					throw new Error("Coda settings contain invalid Command Permission settings");
+				}
+				return {
+					key: entry.key,
+					decision: entry.decision,
+					...(typeof entry.reason === "string" ? { reason: entry.reason } : {}),
+					scope: entry.scope,
+					...(typeof entry.workspace === "string" ? { workspace: entry.workspace } : {}),
+				};
+			});
+		}
+		permission = {
+			...(value.permission.approvalPolicy !== undefined
+				? { approvalPolicy: value.permission.approvalPolicy as ApprovalPolicy }
+				: {}),
+			...(value.permission.enabled !== undefined ? { enabled: value.permission.enabled } : {}),
+			...(remembered ? { remembered } : {}),
+		};
+	}
+	let sandbox: UserSettings["sandbox"];
+	if (value.sandbox !== undefined) {
+		if (
+			!isRecord(value.sandbox) ||
+			!hasOnlyKeys(value.sandbox, ["mode", "enabled", "allowedDomains", "deniedDomains"]) ||
+			(value.sandbox.mode !== undefined &&
+				(typeof value.sandbox.mode !== "string" ||
+					!(SANDBOX_MODES as readonly string[]).includes(value.sandbox.mode))) ||
+			(value.sandbox.enabled !== undefined && typeof value.sandbox.enabled !== "boolean") ||
+			(value.sandbox.allowedDomains !== undefined &&
+				(!Array.isArray(value.sandbox.allowedDomains) ||
+					value.sandbox.allowedDomains.some((entry) => typeof entry !== "string" || entry.length === 0))) ||
+			(value.sandbox.deniedDomains !== undefined &&
+				(!Array.isArray(value.sandbox.deniedDomains) ||
+					value.sandbox.deniedDomains.some((entry) => typeof entry !== "string" || entry.length === 0)))
+		) {
+			throw new Error("Coda settings contain invalid Process Confinement settings");
+		}
+		sandbox = {
+			...(value.sandbox.mode !== undefined ? { mode: value.sandbox.mode as SandboxMode } : {}),
+			...(value.sandbox.enabled !== undefined ? { enabled: value.sandbox.enabled } : {}),
+			...(value.sandbox.allowedDomains
+				? { allowedDomains: [...(value.sandbox.allowedDomains as readonly string[])] }
+				: {}),
+			...(value.sandbox.deniedDomains
+				? { deniedDomains: [...(value.sandbox.deniedDomains as readonly string[])] }
+				: {}),
+		};
+	}
 	let hookTrust: UserSettings["hookTrust"];
 	if (value.hookTrust !== undefined) {
 		if (!Array.isArray(value.hookTrust)) {
@@ -219,6 +302,8 @@ function validateSettings(value: unknown): UserSettings {
 		...(mcpServers ? { mcpServers } : {}),
 		...(workspaceMcpTrust ? { workspaceMcpTrust } : {}),
 		...(hookTrust ? { hookTrust } : {}),
+		...(permission ? { permission } : {}),
+		...(sandbox ? { sandbox } : {}),
 		...(ui ? { ui } : {}),
 	};
 }

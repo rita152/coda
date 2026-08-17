@@ -170,7 +170,23 @@ _Avoid_: Tool, plugin, event listener
 
 **Hook Handler Trust**:
 The decision to execute one exact Lifecycle Hook handler revision; changing the handler invalidates the decision without disabling unrelated handlers.
+
+**Command Permission**:
+The decision to allow, deny, or ask before one Tool Invocation executes, independent of Hook Handler Trust and of whether the later process is confined.
+_Avoid_: approval, shell permission, Project Trust
+
+**Approval Policy**:
+The Command Permission rule that chooses when a Tool Invocation may ask: untrusted, on-request, or never.
+_Avoid_: permission enabled flag, permission mode, YOLO as the name of this rule
+
+**Process Confinement**:
+OS-level restriction of one spawned Shell process tree's filesystem and network access, applied only to descendant processes.
+_Avoid_: sandbox when referring to Workspace Placement or worktrees
 _Avoid_: Project Trust, configuration-file trust, shell permission
+
+**Process Confinement Mode**:
+The Process Confinement rule that chooses writable scope: read-only, workspace-write, or danger-full-access.
+_Avoid_: sandbox mode when referring to Workspace Placement; permission profile
 
 **MCP Host**:
 The Coding Agent facility that discovers and invokes Tools offered by configured external MCP Servers.

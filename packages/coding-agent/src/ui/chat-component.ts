@@ -291,6 +291,10 @@ export class ChatComponent extends Component {
 		this.#state.mutate({ type: "set_reasoning", reasoning });
 	}
 
+	setNotice(value: string | undefined): void {
+		this.#state.mutate({ type: "set_notice", value });
+	}
+
 	openCommandFlow(screen: CommandFlowScreen): void {
 		this.#commandFlow.open(screen);
 	}

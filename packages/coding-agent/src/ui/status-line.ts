@@ -1,6 +1,7 @@
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { clipAnsi, displayWidth, sanitizeTerminalText, sliceAnsi } from "@coda/tui";
-import type { TuiTheme } from "./theme.ts";
+import { type PermissionsCommandState, permissionStatusLabel } from "../commands/permissions-flow.ts";
+import type { ThemeTone, TuiTheme } from "./theme.ts";
 
 export interface GitStatusSnapshot {
 	readonly branch?: string;
@@ -29,6 +30,7 @@ export interface StatusLineSnapshot extends SessionStatusLineSnapshot {
 	readonly workspacePath: string;
 	readonly homePath?: string;
 	readonly git?: GitStatusSnapshot;
+	readonly permissions?: PermissionsCommandState;
 }
 
 export interface StatusLinePresentation {
@@ -79,10 +81,22 @@ function selectWorkspaceRow(snapshot: StatusLineSnapshot, width: number, theme: 
 		styled(theme, "muted", value),
 	);
 	const branch = gitPresentation(snapshot.git, theme);
+	const permission = permissionPresentation(snapshot.permissions, theme);
 	const withBranch = paths.map((path) => joinRendered([path, branch], " "));
 
 	for (const left of withBranch) {
-		if (fits(left, undefined, width)) return { left };
+		if (fits(left, permission, width)) return { left, right: permission };
+	}
+	for (const path of paths) {
+		if (fits(path, permission, width)) return { left: path, right: permission };
+	}
+	if (permission && fits(undefined, permission, width)) {
+		const shortest = paths.at(-1);
+		const reserved = displayWidth(permission.plain) + 2;
+		if (shortest && width - reserved > 1) {
+			return { left: truncateRendered(shortest, width - reserved, theme, "muted"), right: permission };
+		}
+		return { right: permission };
 	}
 	if (branch) {
 		for (const path of [...paths].reverse()) {
@@ -91,6 +105,19 @@ function selectWorkspaceRow(snapshot: StatusLineSnapshot, width: number, theme: 
 	}
 	const compact = withBranch.at(-1) ?? paths.at(-1);
 	return compact ? { left: truncateRendered(compact, width, theme, "muted") } : {};
+}
+
+function permissionPresentation(
+	permissions: PermissionsCommandState | undefined,
+	theme: TuiTheme,
+): RenderedText | undefined {
+	if (!permissions) return undefined;
+	const label = permissionStatusLabel(permissions);
+	return styled(theme, permissionTone(label), label);
+}
+
+function permissionTone(label: string): ThemeTone {
+	return label === "Full Access" || label.includes("Full Access") || label.includes("Untrusted") ? "warning" : "muted";
 }
 
 function selectUsageRow(

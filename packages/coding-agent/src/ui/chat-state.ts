@@ -164,6 +164,7 @@ export class ChatStateController {
 				return;
 			case "set_notice":
 				this.#notice = mutation.value;
+				this.#host.mutate({ type: "invalidate" });
 				return;
 		}
 	}

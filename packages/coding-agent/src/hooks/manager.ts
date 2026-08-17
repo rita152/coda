@@ -48,6 +48,7 @@ interface ParsedOutput {
 	readonly feedback?: string;
 	readonly continuation?: string;
 	readonly warning?: string;
+	readonly permissionAsk?: boolean;
 }
 
 export interface CommandLifecycleHookHostOptions {
@@ -56,6 +57,7 @@ export interface CommandLifecycleHookHostOptions {
 	readonly shellExecutable: string;
 	readonly platform: NodeJS.Platform;
 	readonly environment: Readonly<Record<string, string | undefined>>;
+	readonly permissionMode?: "default" | "bypassPermissions";
 	readonly diagnostic?: (diagnostic: { readonly code: string; readonly message: string }) => Promise<void> | void;
 }
 
@@ -209,7 +211,14 @@ function parseSuccessfulOutput(event: LifecycleHookEventName, stdout: string): P
 						invalid = "PreToolUse hook returned permissionDecision:deny without a non-empty reason";
 					}
 				} else if (permissionDecision === "ask") {
-					invalid = "PreToolUse hook returned unsupported permissionDecision:ask";
+					return {
+						continue: true,
+						permissionAsk: true,
+						...(nonEmpty(specific?.permissionDecisionReason)
+							? { reason: nonEmpty(specific.permissionDecisionReason) }
+							: {}),
+						...warningFields(common.warning, invalidSpecific),
+					};
 				} else if (permissionDecision !== undefined) {
 					invalid = `PreToolUse hook returned unsupported permissionDecision:${String(permissionDecision)}`;
 				} else if (specific?.permissionDecisionReason !== undefined) {
@@ -340,6 +349,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 	readonly #shellExecutable: string;
 	readonly #platform: NodeJS.Platform;
 	readonly #environment: Readonly<Record<string, string>>;
+	readonly #permissionMode: "default" | "bypassPermissions";
 	readonly #diagnostic?: CommandLifecycleHookHostOptions["diagnostic"];
 	readonly #sessions = new Map<string, SessionMetadata>();
 	readonly #asyncCounts = new Map<string, number>();
@@ -353,6 +363,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 		this.#runner = options.processRunner;
 		this.#shellExecutable = options.shellExecutable;
 		this.#platform = options.platform;
+		this.#permissionMode = options.permissionMode ?? "bypassPermissions";
 		this.#environment = Object.freeze(
 			Object.fromEntries(
 				Object.entries(options.environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -393,7 +404,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 		const parsed = await this.#dispatch("SessionStart", resolved, [context.source], {
 			...commonInput(resolved, "SessionStart"),
 			model: context.model,
-			permission_mode: "bypassPermissions",
+			permission_mode: this.#permissionMode,
 			source: context.source,
 		});
 		this.#queueContext(context.sessionId, parsed);
@@ -432,7 +443,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 			...commonInput(resolved, "UserPromptSubmit"),
 			turn_id: context.turnId,
 			model: context.model,
-			permission_mode: "bypassPermissions",
+			permission_mode: this.#permissionMode,
 			prompt: inputText(context.prompt),
 		});
 		this.#queueContext(context.sessionId, parsed);
@@ -463,7 +474,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 				...commonInput(resolved, "PreToolUse"),
 				turn_id: context.turnId,
 				model: context.model,
-				permission_mode: "bypassPermissions",
+				permission_mode: this.#permissionMode,
 				tool_name: context.toolName,
 				tool_input: context.toolInput,
 				tool_use_id: context.toolUseId,
@@ -475,10 +486,12 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 			.filter((output) => output.updatedInput !== undefined)
 			.sort((left, right) => left.completionOrder - right.completionOrder)
 			.at(-1);
+		const asked = parsed.find((output) => output.permissionAsk);
 		return {
 			continue: stopped === undefined,
-			...(stopped?.reason ? { reason: stopped.reason } : {}),
+			...(stopped?.reason ? { reason: stopped.reason } : asked?.reason ? { reason: asked.reason } : {}),
 			...(updated?.updatedInput ? { updatedInput: updated.updatedInput } : {}),
+			...(asked && stopped === undefined ? { permissionAsk: true } : {}),
 			additionalContext: Object.freeze(
 				parsed.flatMap((output) => (output.additionalContext ? [output.additionalContext] : [])),
 			),
@@ -495,7 +508,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 				...commonInput(resolved, "PostToolUse"),
 				turn_id: context.turnId,
 				model: context.model,
-				permission_mode: "bypassPermissions",
+				permission_mode: this.#permissionMode,
 				tool_name: context.toolName,
 				tool_input: context.toolInput,
 				tool_response: context.toolResponse,
@@ -529,7 +542,7 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 			...commonInput(resolved, "Stop"),
 			turn_id: context.turnId,
 			model: context.model,
-			permission_mode: "bypassPermissions",
+			permission_mode: this.#permissionMode,
 			stop_hook_active: context.stopHookActive,
 			last_assistant_message: context.lastAssistantMessage ?? null,
 		});

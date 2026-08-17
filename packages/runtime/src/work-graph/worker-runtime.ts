@@ -126,6 +126,9 @@ function gatedTool(
 				toolUseId: String(context.invocationId),
 				toolInput: arguments_ as Readonly<Record<string, unknown>>,
 			});
+			if (pre.permissionAsk) {
+				return hookToolFailure(pre.reason ?? "Command Permission ask was not resolved", "PreToolUse");
+			}
 			if (!pre.continue) return hookToolFailure(pre.reason ?? "PreToolUse hook stopped execution", "PreToolUse");
 			let effectiveArguments = arguments_;
 			if (pre.updatedInput) {

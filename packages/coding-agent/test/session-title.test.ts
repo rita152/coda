@@ -179,6 +179,37 @@ describe("Session Title generation", () => {
 		dispose();
 	});
 
+	it("settles quietly when the Session closes while the title side call is in flight", async () => {
+		const session = titleSession();
+		const listeners: Array<(event: { readonly type: string; readonly source?: string }) => void> = [];
+		let finish!: (message: ReturnType<typeof fauxAssistantMessage>) => void;
+		const { done, dispose } = subscribeSessionTitleGeneration({
+			session,
+			complete: () =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+			subscribe: (observer) => {
+				listeners.push((event) => {
+					void observer.accept(event as never);
+				});
+				return () => undefined;
+			},
+		});
+
+		listeners[0]!({
+			type: "run_start",
+			source: "prompt",
+			inputMessage: { message: { content: "Please implement a readable session picker" } },
+		} as never);
+		listeners[0]!({ type: "run_end" });
+		session.close();
+		dispose();
+		finish(fauxAssistantMessage("Readable session picker", { timestamp: 1_000 }));
+		await expect(done).resolves.toBeUndefined();
+		expect(session.records).toEqual([]);
+	});
+
 	it("settles without generating when the first Prompt never starts", async () => {
 		const session = titleSession();
 		const { done, dispose } = subscribeSessionTitleGeneration({
@@ -195,12 +226,18 @@ describe("Session Title generation", () => {
 function titleSession(): Pick<Session, "title" | "record"> & {
 	title: string | undefined;
 	readonly records: Array<{ readonly type: string; readonly title: string }>;
+	close(): void;
 } {
 	const records: Array<{ readonly type: string; readonly title: string }> = [];
+	let closed = false;
 	const session = {
 		title: undefined as string | undefined,
 		records,
+		close() {
+			closed = true;
+		},
 		record: async (change: { readonly type: string; readonly title?: string }) => {
+			if (closed) throw new Error("Session is closed");
 			if (change.type !== "session_title_set" || !change.title) return;
 			records.push({ type: change.type, title: change.title });
 			session.title = change.title;

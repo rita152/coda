@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@coda/ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseArguments } from "../src/app/argument-parsing.ts";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
@@ -80,6 +81,16 @@ describe("application argument parsing", () => {
 			],
 			[["--session", "--no-session"], "--no-session cannot be combined with --session or --resume"],
 			[["--no-session", "--resume", "session:1"], "--resume cannot be combined with --no-session"],
+			[["--sandbox", "--no-sandbox"], "--sandbox and --no-sandbox cannot be combined"],
+			[["--no-permission", "--strict-permissions"], "--no-permission and --strict-permissions cannot be combined"],
+			[
+				["--ask-for-approval", "untrusted", "--no-permission"],
+				"--ask-for-approval and --no-permission cannot be combined",
+			],
+			[
+				["--sandbox", "read-only", "--yolo"],
+				"--sandbox cannot be combined with --dangerously-bypass-approvals-and-sandbox",
+			],
 		];
 
 		for (const [args, message] of cases) {
@@ -152,3 +163,27 @@ async function setup(options: { stdinTTY: boolean; stdoutTTY: boolean; stdinText
 	});
 	return { application, faux, model, stdout, stderr, readAll };
 }
+
+describe("approval and sandbox flags", () => {
+	const io = {
+		stdin: { isTTY: true, readAll: async () => "" },
+		stdout: { isTTY: true, write: () => undefined },
+		stderr: { isTTY: true, write: () => undefined },
+	};
+
+	it("parses Codex approval and sandbox modes, including bare --sandbox as workspace-write", async () => {
+		await expect(
+			parseArguments(["--ask-for-approval", "untrusted", "--sandbox", "read-only"], io),
+		).resolves.toMatchObject({
+			approvalPolicy: "untrusted",
+			sandboxMode: "read-only",
+		});
+		await expect(parseArguments(["-a", "never", "-s"], io)).resolves.toMatchObject({
+			approvalPolicy: "never",
+			sandboxMode: "workspace-write",
+		});
+		await expect(parseArguments(["--yolo"], io)).resolves.toMatchObject({
+			bypassApprovalsAndSandbox: true,
+		});
+	});
+});

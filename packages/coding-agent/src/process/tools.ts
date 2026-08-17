@@ -1,5 +1,6 @@
 import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
+import type { ProcessConfinement } from "@coda/sandbox";
 import { type HostProcessRuntime, hostProcessEnvironment } from "../host/runtime.ts";
 import type { Workspace } from "../host/workspace.ts";
 import type { ProcessSessionManager, ProcessSessionSnapshot, ProcessSessionState } from "./process-session-manager.ts";
@@ -77,6 +78,9 @@ export function createProcessTools(options: {
 	readonly shellExecutable: string;
 	readonly runtime: HostProcessRuntime;
 	readonly sessionId: string;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 }): readonly AgentTool[] {
 	const start: AgentTool<typeof ProcessStartParameters> = {
 		name: "process_start",
@@ -87,12 +91,26 @@ export function createProcessTools(options: {
 		execute: async (arguments_, context): Promise<ToolExecutionOutput> => {
 			const environment = hostProcessEnvironment(options.runtime);
 			try {
+				const confined = options.wrapScript
+					? await options.wrapScript({
+							command: arguments_.command,
+							shell: options.shellExecutable,
+							cwd: options.workspace.root,
+							environment,
+							commandId: String(context.invocationId),
+						})
+					: undefined;
+				const spawn = confined ?? {
+					executable: options.shellExecutable,
+					args: ["-c", arguments_.command] as const,
+					environment,
+				};
 				const snapshot = await options.manager.start(
 					{
-						executable: options.shellExecutable,
-						args: ["-c", arguments_.command],
+						executable: spawn.executable,
+						args: [...spawn.args],
 						cwd: options.workspace.root,
-						environment,
+						environment: spawn.environment,
 						signal: context.signal,
 						timeoutMs: arguments_.timeoutMs ?? 3_600_000,
 					},

@@ -1,5 +1,6 @@
-import type { AgentTool } from "@coda/agent";
+import type { AgentTool, ToolExecutionOutput } from "@coda/agent";
 import { type JsonValue, Type } from "@coda/ai";
+import type { ProcessConfinement } from "@coda/sandbox";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import { type HostProcessRuntime, hostProcessEnvironment } from "../host/runtime.ts";
@@ -67,6 +68,9 @@ export function createBashTool(options: {
 	readonly processRunner: ProcessRunner;
 	readonly shellExecutable: string;
 	readonly runtime: HostProcessRuntime;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 }): AgentTool<typeof BashParameters> {
 	return {
 		name: "bash",
@@ -74,7 +78,7 @@ export function createBashTool(options: {
 			"Run one non-interactive Shell command directly on the host. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status.",
 		parameters: BashParameters,
 		replaySafety: "never",
-		execute: async (arguments_, context) => {
+		execute: async (arguments_, context): Promise<ToolExecutionOutput> => {
 			const shellExecution = planShellExecution(options.shellExecutable, arguments_.command);
 			if (shellExecution.kind === "reject") {
 				return {
@@ -110,6 +114,50 @@ export function createBashTool(options: {
 				};
 			}
 			const environment = hostProcessEnvironment(options.runtime);
+			let executable = shellExecution.shell;
+			let args = shellExecution.args;
+			let spawnEnvironment = environment;
+			if (options.wrapScript) {
+				try {
+					const confined = await options.wrapScript({
+						command: arguments_.command,
+						shell: shellExecution.shell,
+						cwd: options.workspace.root,
+						environment,
+						commandId: String(context.invocationId),
+					});
+					if (confined) {
+						executable = confined.executable;
+						args = confined.args;
+						spawnEnvironment = confined.environment;
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						content: message,
+						observation: {
+							status: "error",
+							truncated: false,
+							facts: {
+								shellExecutionFactsVersion: SHELL_EXECUTION_FACTS_VERSION,
+								exitCode: 2,
+								exitCodeScope: "coda-shell-policy",
+								confinementFailed: true,
+								outputRefAvailable: false,
+								outputRefComplete: false,
+							},
+						},
+						details: {
+							exitCode: 2,
+							signal: null,
+							timedOut: false,
+							truncated: false,
+							cwd: options.workspace.root,
+							confinementFailed: true,
+						},
+					};
+				}
+			}
 			const capture = await createToolOutputCapture(
 				options.fileSystem,
 				options.runtime.homeDirectory,
@@ -120,10 +168,10 @@ export function createBashTool(options: {
 			let observedStderr = false;
 			try {
 				result = await options.processRunner.run({
-					executable: shellExecution.shell,
-					args: shellExecution.args,
+					executable,
+					args: [...args],
 					cwd: options.workspace.root,
-					environment,
+					environment: spawnEnvironment,
 					signal: context.signal,
 					timeoutMs: arguments_.timeoutMs ?? 120_000,
 					maxOutputBytes: 50 * 1024,

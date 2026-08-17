@@ -119,6 +119,20 @@ describe("ChatComponent terminal input", () => {
 		expect(frame.at(-1)).toContain("provider/model(off)");
 	});
 
+	it("shows the current permission mode on the status line below the Composer", () => {
+		const component = createComponent({
+			statusLine: () => ({
+				...defaultStatusLine(),
+				permissions: { approvalPolicy: "on-request", sandboxMode: "workspace-write" },
+			}),
+		});
+		const frame = component.render({ width: 80, height: 12, now: 0 });
+
+		expect(frame.at(-2)).toMatch(/~\/coda \(main\) +Ask for approval$/u);
+		expect(frame.at(-1)).toContain("$1.23 · 128k/1m");
+		expect(frame.join("\n")).not.toContain("Permissions updated to");
+	});
+
 	it("shows the focused Run activity immediately above the Composer and hides it after Run end", () => {
 		const component = createComponent({
 			activitySummaryMode: "native",

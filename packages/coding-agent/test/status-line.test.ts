@@ -34,6 +34,42 @@ describe("status line presentation", () => {
 		expect(lines.every((line) => displayWidth(line) <= 80)).toBe(true);
 	});
 
+	it("pins the current permission mode to the right of the workspace row", () => {
+		const lines = renderStatusLine(
+			{
+				...snapshot,
+				permissions: { approvalPolicy: "on-request", sandboxMode: "workspace-write" },
+			},
+			{
+				modelLabel: "opencode-go/deepseek-v4-flash",
+				reasoning: "max",
+			},
+			80,
+			createCodaTheme(0),
+		);
+
+		expect(lines[0]).toMatch(/^~\/Desktop\/coda \(main\*\) +Ask for approval$/u);
+		expect(lines[1]).toMatch(/^\$1\.23 · 128k\/1m +opencode-go\/deepseek-v4-flash\(max\)$/u);
+	});
+
+	it("warns when the status line shows Full Access", () => {
+		const colored = renderStatusLine(
+			{
+				...snapshot,
+				permissions: { approvalPolicy: "never", sandboxMode: "danger-full-access" },
+			},
+			{
+				modelLabel: "opencode-go/deepseek-v4-flash",
+				reasoning: "max",
+			},
+			80,
+			createCodaTheme(1),
+		);
+
+		expect(colored[0]).toContain("\x1b[33mFull Access\x1b[0m");
+		expect(stripAnsi(colored[0])).toMatch(/Full Access$/u);
+	});
+
 	it("drops cost, parent path, and provider before higher-priority content", () => {
 		const lines = renderStatusLine(
 			snapshot,

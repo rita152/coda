@@ -15,6 +15,7 @@ import {
 	type WorkCapacityPolicy,
 	type WorkspaceExecution,
 } from "@coda/runtime";
+import type { ProcessConfinement } from "@coda/sandbox";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
@@ -236,6 +237,9 @@ export function createWorkspaceWorkCoordinator(options: {
 		context: WorkspaceExecutionFactoryContext,
 	) => WorkspaceExecution | Promise<WorkspaceExecution>;
 	readonly lifecycleHooks?: LifecycleHookHost;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 }): WorkspaceWorkCoordinator {
 	const capacity = options.capacity ?? DEFAULT_WORK_CAPACITY_POLICY;
 	const sessions = new WorkspaceWorkSessions({
@@ -269,6 +273,7 @@ export function createWorkspaceWorkCoordinator(options: {
 			sessionHistory: sessions.history(request.sessionId),
 			sessionId: request.sessionId,
 			mutationCoordinator,
+			...(options.wrapScript ? { wrapScript: options.wrapScript } : {}),
 		});
 	const quiesceSession = (sessionId: string) => options.processSessionManager.retireSession(sessionId);
 	const direct = () =>

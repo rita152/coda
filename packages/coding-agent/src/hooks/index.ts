@@ -1,5 +1,7 @@
 export { hookReviewText, inspectHookConfiguration, trustAllHooks } from "./config.ts";
 export { CommandLifecycleHookHost } from "./manager.ts";
+export type { CommandPermissionAsk } from "./permission-host.ts";
+export { PermissionLifecycleHookHost } from "./permission-host.ts";
 export type {
 	ConfiguredCommandHook,
 	HookConfigurationSnapshot,

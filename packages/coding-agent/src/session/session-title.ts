@@ -105,7 +105,13 @@ async function recordSessionTitle(
 ): Promise<void> {
 	if (session.title) return;
 	const title = await generateSessionTitle({ excerpt, complete });
-	if (title) await session.record({ type: "session_title_set", title });
+	if (!title) return;
+	try {
+		await session.record({ type: "session_title_set", title });
+	} catch (error) {
+		if (error instanceof Error && error.message === "Session is closed") return;
+		throw error;
+	}
 }
 
 function titleCompleteOptions(model: Pick<Model<Api>, "reasoning" | "thinkingLevelMap" | "maxTokens">): {

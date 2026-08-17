@@ -1,10 +1,13 @@
 import type { Immutable, RunBudget } from "@coda/agent";
 import type { Api, AssistantMessage, Model, Models, ThinkingLevel } from "@coda/ai";
+import type { ApprovalPolicy } from "@coda/permission";
+import type { SandboxMode } from "@coda/sandbox";
 import type { TerminalColorScheme } from "@coda/tui";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
 import { REASONING_EFFORTS } from "../models/reasoning-effort.ts";
 import type { RunControlConfiguration } from "../run-control/index.ts";
+import { isApprovalPolicy, isSandboxMode } from "./approval-sandbox.ts";
 import type { JsonEventStreamMode } from "./json-event-writer.ts";
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
@@ -41,6 +44,12 @@ export interface ParsedArguments {
 	readonly trustProject: boolean;
 	readonly trustProjectMcp: boolean;
 	readonly trustHooks: boolean;
+	readonly sandboxMode?: SandboxMode;
+	readonly noSandbox: boolean;
+	readonly approvalPolicy?: ApprovalPolicy;
+	readonly noPermission: boolean;
+	readonly strictPermissions: boolean;
+	readonly bypassApprovalsAndSandbox: boolean;
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
@@ -81,6 +90,12 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 	let trustProject = false;
 	let trustProjectMcp = false;
 	let trustHooks = false;
+	let sandboxMode: SandboxMode | undefined;
+	let noSandbox = false;
+	let approvalPolicy: ApprovalPolicy | undefined;
+	let noPermission = false;
+	let strictPermissions = false;
+	let bypassApprovalsAndSandbox = false;
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
@@ -233,6 +248,67 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 			trustHooks = true;
 			continue;
 		}
+		if (argument === "--sandbox" || argument === "-s") {
+			if (noSandbox) throw new Error("--sandbox and --no-sandbox cannot be combined");
+			if (bypassApprovalsAndSandbox) {
+				throw new Error("--sandbox cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			const value = args[index + 1];
+			if (value && isSandboxMode(value)) {
+				index++;
+				sandboxMode = value;
+			} else {
+				sandboxMode = "workspace-write";
+			}
+			continue;
+		}
+		if (argument === "--no-sandbox") {
+			if (sandboxMode !== undefined) throw new Error("--sandbox and --no-sandbox cannot be combined");
+			if (bypassApprovalsAndSandbox) {
+				throw new Error("--no-sandbox cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			noSandbox = true;
+			continue;
+		}
+		if (argument === "--ask-for-approval" || argument === "--approval-mode" || argument === "-a") {
+			if (noPermission) throw new Error("--ask-for-approval and --no-permission cannot be combined");
+			if (bypassApprovalsAndSandbox) {
+				throw new Error("--ask-for-approval cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			const value = args[++index];
+			if (!value || !isApprovalPolicy(value)) {
+				throw new Error("--ask-for-approval requires untrusted, on-request, or never");
+			}
+			approvalPolicy = value;
+			continue;
+		}
+		if (argument === "--no-permission") {
+			if (approvalPolicy !== undefined) throw new Error("--ask-for-approval and --no-permission cannot be combined");
+			if (strictPermissions) throw new Error("--no-permission and --strict-permissions cannot be combined");
+			if (bypassApprovalsAndSandbox) {
+				throw new Error("--no-permission cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			noPermission = true;
+			continue;
+		}
+		if (argument === "--strict-permissions") {
+			if (noPermission) throw new Error("--no-permission and --strict-permissions cannot be combined");
+			if (bypassApprovalsAndSandbox) {
+				throw new Error("--strict-permissions cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			strictPermissions = true;
+			continue;
+		}
+		if (argument === "--dangerously-bypass-approvals-and-sandbox" || argument === "--yolo") {
+			if (sandboxMode !== undefined || noSandbox) {
+				throw new Error("--sandbox cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			if (approvalPolicy !== undefined || noPermission || strictPermissions) {
+				throw new Error("--ask-for-approval cannot be combined with --dangerously-bypass-approvals-and-sandbox");
+			}
+			bypassApprovalsAndSandbox = true;
+			continue;
+		}
 		if (argument === "--session") {
 			if (noSession) throw new Error("--session and --no-session cannot be combined");
 			persistSession = true;
@@ -312,6 +388,12 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 		trustProject,
 		trustProjectMcp,
 		trustHooks,
+		sandboxMode,
+		noSandbox,
+		approvalPolicy,
+		noPermission,
+		strictPermissions,
+		bypassApprovalsAndSandbox,
 		persistSession,
 		noSession,
 		noColor,
@@ -371,6 +453,15 @@ Workspace:
       --trust-project            Trust the current root AGENTS.md hash
       --trust-project-mcp        Trust the exact current Workspace MCP configuration
       --trust-hooks              Trust all exact Hook handler hashes after review
+      --sandbox, -s [mode]       Process Confinement: read-only|workspace-write|danger-full-access
+      --no-sandbox               Alias for --sandbox danger-full-access
+      --ask-for-approval, -a     Command Permission: untrusted|on-request|never
+      --approval-mode            Alias for --ask-for-approval
+      --no-permission            Alias for --ask-for-approval never
+      --strict-permissions       Deny unresolved Command Permission asks in print mode
+      --yolo                     Never ask and disable Process Confinement
+      --dangerously-bypass-approvals-and-sandbox
+                                 Alias for --yolo
 
 Session:
       --session                  Persist this Session (print mode is memory-only by default)

@@ -223,6 +223,41 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		],
 	}),
 	capability({
+		id: "coding-agent.command-permission",
+		package: "@coda/permission",
+		status: "runtime-supported",
+		title: "Command Permission",
+		summary:
+			"A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session.",
+		sources: [
+			"packages/permission/src/policy.ts",
+			"packages/coding-agent/src/hooks/permission-host.ts",
+			"packages/coding-agent/src/commands/permissions-flow.ts",
+			"packages/runtime/src/lifecycle-hooks.ts",
+		],
+		tests: [
+			"packages/permission/test/policy.test.ts",
+			"packages/permission/test/command-safety.test.ts",
+			"packages/coding-agent/test/command-permission.test.ts",
+			"packages/coding-agent/test/approval-sandbox.test.ts",
+			"packages/coding-agent/test/permissions-command-flow.test.ts",
+		],
+	}),
+	capability({
+		id: "coding-agent.process-confinement",
+		package: "@coda/sandbox",
+		status: "runtime-supported",
+		title: "Process Confinement",
+		summary:
+			"A leaf wrapScript seam confines Bash, User Shell, and Process Session scripts through Anthropic Sandbox Runtime in read-only or workspace-write mode. danger-full-access leaves the process on the host. File Tools, hook handlers, and credential helpers stay on the host.",
+		sources: [
+			"packages/sandbox/src/confinement.ts",
+			"packages/sandbox/src/anthropic-engine.ts",
+			"packages/coding-agent/src/tools/bash.ts",
+		],
+		tests: ["packages/sandbox/test/confinement.test.ts", "packages/coding-agent/test/process-confinement.test.ts"],
+	}),
+	capability({
 		id: "coding-agent.overflow-fallback",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",
@@ -491,7 +526,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "deferred",
 		title: "Permission and delegated-worker Hooks",
 		summary:
-			"PermissionRequest, SubagentStart, and SubagentStop are recognized configuration events but remain inert until Coda owns permission and delegated-worker lifecycle capabilities.",
+			"PermissionRequest remains a deferred hook event. Command Permission now resolves ask on PreToolUse. SubagentStart and SubagentStop stay inert until delegated-worker lifecycle exists.",
 		sources: ["packages/runtime/src/lifecycle-hooks.ts", "packages/coding-agent/src/hooks/config.ts"],
 		tests: ["packages/coding-agent/test/hooks.test.ts"],
 	}),

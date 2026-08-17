@@ -1,8 +1,23 @@
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import type { McpConnector, McpElicitationResult } from "@coda/mcp";
+import { createCommandPermissionPolicy } from "@coda/permission";
 import type { OpenCodingAgentOptions } from "@coda/runtime";
+import {
+	createAnthropicSandboxEngine,
+	openProcessConfinement,
+	type ProcessConfinement,
+	processConfinementActive,
+} from "@coda/sandbox";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
+import {
+	commandPermissionOptionsFor,
+	createLiveWrapScript,
+	createPermissionsCommand,
+	replaceProcessConfinement,
+	resolveApprovalPolicy,
+	resolveSandboxMode,
+} from "./app/approval-sandbox.ts";
 import { HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import { runInteractiveApplication } from "./app/interactive-run.ts";
 import { createAttachmentPreparer } from "./app/interactive-session-options.ts";
@@ -35,7 +50,14 @@ import {
 } from "./app/workspace-session.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
-import { CommandLifecycleHookHost, hookReviewText, inspectHookConfiguration, trustAllHooks } from "./hooks/index.ts";
+import {
+	CommandLifecycleHookHost,
+	type CommandPermissionAsk,
+	hookReviewText,
+	inspectHookConfiguration,
+	PermissionLifecycleHookHost,
+	trustAllHooks,
+} from "./hooks/index.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
@@ -50,6 +72,7 @@ import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
 import type { SkillWatcherFactory } from "./skills/watcher.ts";
+import { InteractiveCommandPermissionHandler } from "./ui/command-permission.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
@@ -99,10 +122,15 @@ export interface CodingAgentApplicationOptions {
 		readonly workspaceRoot: string;
 	}) => NonNullable<OpenCodingAgentOptions["persistence"]>;
 	readonly processSessionRunner?: ProcessSessionRunner;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 	readonly modelCapabilities?: ModelCapabilityResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
 	readonly mcpConnector?: McpConnector;
 	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
+	readonly commandPermissionAsk?: CommandPermissionAsk;
+	readonly processConfinement?: ProcessConfinement;
 	/** Private deterministic seam for completion-gate integration tests. */
 	readonly completionWorkspaceEvidence?: CompletionWorkspaceEvidenceProvider;
 }
@@ -358,16 +386,149 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 					}
 					const configuredShell = options.runtime.environment.SHELL;
-					const lifecycleHooks = new CommandLifecycleHookHost({
+					const approvalPolicy = resolveApprovalPolicy({
+						cli: parsed.approvalPolicy,
+						noPermission: parsed.noPermission,
+						bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
+						settings: settings.permission,
+					});
+					const sandboxModeState = {
+						current: resolveSandboxMode({
+							cli: parsed.sandboxMode,
+							noSandbox: parsed.noSandbox,
+							bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
+							settings: settings.sandbox,
+						}),
+					};
+					const sandboxMode = sandboxModeState.current;
+					const settingsState = createApplicationSettingsState(settings);
+					const persistSettings = async (next: typeof settings): Promise<void> => {
+						settings = next;
+						settingsState.current = next;
+						await options.settings.save(next);
+					};
+					const permissionActive = parsed.mode === "interactive" || parsed.strictPermissions === true;
+					const commandHooks = new CommandLifecycleHookHost({
 						configuration: hookConfiguration,
 						processRunner: options.processRunner,
 						shellExecutable: configuredShell?.startsWith("/") ? configuredShell : "/bin/sh",
 						platform: options.runtime.platform,
 						environment: options.runtime.environment,
+						permissionMode: permissionActive ? "default" : "bypassPermissions",
 						diagnostic: maintenanceDiagnostics,
 					});
+					const interactivePermission =
+						parsed.mode === "interactive" && !options.commandPermissionAsk
+							? new InteractiveCommandPermissionHandler()
+							: undefined;
+					const permissionPolicy = createCommandPermissionPolicy(
+						commandPermissionOptionsFor(
+							approvalPolicy,
+							sandboxMode,
+							workspace.root,
+							(settings.permission?.remembered ?? []).filter(
+								(record) =>
+									record.scope === "user" ||
+									(record.scope === "workspace" && record.workspace === workspace.root),
+							),
+						),
+					);
+					const lifecycleHooks = new PermissionLifecycleHookHost({
+						inner: commandHooks,
+						policy: permissionPolicy,
+						ask:
+							options.commandPermissionAsk ??
+							(interactivePermission
+								? (request) => interactivePermission.request(request)
+								: parsed.strictPermissions
+									? async () => ({
+											action: "deny",
+											reason: "Command Permission requires an interactive Session",
+										})
+									: undefined),
+						onRemember: async (record) => {
+							if (record.scope !== "user" && record.scope !== "workspace") return;
+							const retained = (settings.permission?.remembered ?? []).filter(
+								(entry) => entry.key !== record.key || entry.workspace !== record.workspace,
+							);
+							await persistSettings({
+								...settings,
+								permission: {
+									...settings.permission,
+									approvalPolicy: permissionPolicy.snapshot().approvalPolicy,
+									remembered: [...retained, record],
+								},
+							});
+						},
+					});
 					workspaceResources.useLifecycleHooks(lifecycleHooks);
-					const settingsState = createApplicationSettingsState(settings);
+					const confinementHolder: { current?: ProcessConfinement } = {
+						current: options.processConfinement,
+					};
+					const ownsConfinement = options.wrapScript === undefined && options.processConfinement === undefined;
+					if (!confinementHolder.current && ownsConfinement && processConfinementActive(sandboxMode)) {
+						try {
+							confinementHolder.current = await openProcessConfinement({
+								platform: options.runtime.platform,
+								config: {
+									workspace: workspace.root,
+									mode: sandboxMode,
+									...(settings.sandbox?.allowedDomains
+										? { allowedDomains: settings.sandbox.allowedDomains }
+										: {}),
+									...(settings.sandbox?.deniedDomains
+										? { deniedDomains: settings.sandbox.deniedDomains }
+										: {}),
+								},
+								engine: createAnthropicSandboxEngine(),
+							});
+						} catch (error) {
+							await maintenanceDiagnostics({
+								code: "sandbox.unavailable",
+								message: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					if (confinementHolder.current) workspaceResources.useProcessConfinement(confinementHolder.current);
+					const wrapScript = options.wrapScript ?? createLiveWrapScript(confinementHolder);
+					const sessionOptions = {
+						...options,
+						wrapScript,
+					};
+					const permissionsCommand = createPermissionsCommand({
+						policy: permissionPolicy,
+						workspace: workspace.root,
+						sandboxMode: sandboxModeState,
+						settings: () => settings,
+						persist: persistSettings,
+						...(ownsConfinement
+							? {
+									replaceConfinement: async (mode) => {
+										try {
+											await replaceProcessConfinement({
+												holder: confinementHolder,
+												mode,
+												workspace: workspace.root,
+												platform: options.runtime.platform,
+												engine: createAnthropicSandboxEngine(),
+												resources: workspaceResources,
+												...(settings.sandbox?.allowedDomains
+													? { allowedDomains: settings.sandbox.allowedDomains }
+													: {}),
+												...(settings.sandbox?.deniedDomains
+													? { deniedDomains: settings.sandbox.deniedDomains }
+													: {}),
+											});
+										} catch (error) {
+											await maintenanceDiagnostics({
+												code: "sandbox.unavailable",
+												message: error instanceof Error ? error.message : String(error),
+											});
+										}
+									},
+								}
+							: {}),
+					});
 					const projectServices = await openProjectServices({
 						options,
 						settings: settingsState,
@@ -377,7 +538,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						interactive: interactiveRuntime !== undefined,
 						diagnostics: maintenanceDiagnostics,
 						resources: workspaceResources,
-						hooks: lifecycleHooks,
+						hooks: commandHooks,
 					});
 					closeProjectUi = projectServices.closeUi;
 					const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand, hooksCommand } = projectServices;
@@ -398,7 +559,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
 					const openedWorkspace = await openWorkspaceRuntime({
 						createWorkCoordinator: createWorkspaceWorkCoordinator,
-						options,
+						options: sessionOptions,
 						resources: workspaceResources,
 						sessions,
 						workspace,
@@ -444,7 +605,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					});
 					if (parsed.mode === "interactive") {
 						return await runInteractiveApplication({
-							options,
+							options: {
+								...options,
+								wrapScript: sessionOptions.wrapScript,
+								...(interactivePermission ? { commandPermission: interactivePermission } : {}),
+							},
 							providerManager,
 							settings: settingsState,
 							sessions,
@@ -462,6 +627,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							skillsCommand,
 							mcpCommand,
 							hooksCommand,
+							permissionsCommand,
 							commandRegistry,
 							model,
 							reasoning,

@@ -270,6 +270,7 @@ describe("process lifecycle Tools", () => {
 			fileSystem: createNodeFileSystem(),
 			processRunner: createNodeProcessRunner({ platform: process.platform }),
 			processSessionRunner: controlled.runner,
+			commandPermissionAsk: async () => ({ action: "allow" }),
 			terminalFactory: { create: () => terminal },
 			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
 			runtime: {

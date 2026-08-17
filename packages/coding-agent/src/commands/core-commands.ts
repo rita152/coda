@@ -46,6 +46,13 @@ export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:permissions",
+		name: "permissions",
+		title: "Permissions",
+		description: "Choose what Coda is allowed to do",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:session",
 		name: "session",
 		title: "Session",

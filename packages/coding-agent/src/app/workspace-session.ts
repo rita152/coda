@@ -4,6 +4,7 @@ import type { Clock, IdGenerator } from "@coda/agent";
 import type { Api, AuthResult, Model, Models, ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult } from "@coda/mcp";
 import type { LifecycleHookHost, OpenCodingAgentOptions } from "@coda/runtime";
+import type { ProcessConfinement } from "@coda/sandbox";
 import type { DiagnosticSink, Scheduler } from "@coda/tui";
 import { collectWorkspaceDiff } from "../completion/workspace-diff.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
@@ -57,6 +58,9 @@ export interface WorkspaceSessionApplicationOptions {
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
 	readonly processSessionRunner?: ProcessSessionRunner;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 	readonly runtime: WorkspaceSessionRuntime;
 	readonly workspacePersistence?: (request: {
 		readonly workspaceId: string;
@@ -219,6 +223,7 @@ export interface WorkspaceSessionResources {
 	useProcessSessionManager(manager: ProcessSessionManager): void;
 	useWorkCoordinator(coordinator: WorkspaceWorkCoordinator): void;
 	useLifecycleHooks(hooks: LifecycleHookHost): void;
+	useProcessConfinement(confinement: { close(): Promise<void> }): void;
 	close(): Promise<void>;
 }
 
@@ -227,6 +232,7 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 	let processSessionManager: ProcessSessionManager | undefined;
 	let workCoordinator: WorkspaceWorkCoordinator | undefined;
 	let lifecycleHooks: LifecycleHookHost | undefined;
+	let processConfinement: { close(): Promise<void> } | undefined;
 	return {
 		useMcpRegistry: (registry) => {
 			mcpRegistry = registry;
@@ -239,6 +245,9 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 		},
 		useLifecycleHooks: (hooks) => {
 			lifecycleHooks = hooks;
+		},
+		useProcessConfinement: (confinement) => {
+			processConfinement = confinement;
 		},
 		close: async () => {
 			const failures: unknown[] = [];
@@ -259,6 +268,11 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 			}
 			try {
 				await lifecycleHooks?.close();
+			} catch (error) {
+				failures.push(error);
+			}
+			try {
+				await processConfinement?.close();
 			} catch (error) {
 				failures.push(error);
 			}
@@ -324,6 +338,7 @@ export async function openWorkspaceRuntime(input: {
 		interactionMode: input.mode,
 		projectInstructions: input.projectInstructions,
 		lifecycleHooks: input.lifecycleHooks,
+		...(input.options.wrapScript ? { wrapScript: input.options.wrapScript } : {}),
 		resources: inputResources.adapter,
 		openPrivateSession: (sessionId) =>
 			input.sessions.open({

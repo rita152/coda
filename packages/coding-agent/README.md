@@ -129,7 +129,7 @@ configuration fields.
 The Composer's borderless upper list exposes the core Slash commands:
 
 <!-- coda:core-commands:start -->
-Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/session`, `/new`, and `/follow-up`.
+Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/permissions`, `/session`, `/new`, and `/follow-up`.
 <!-- coda:core-commands:end -->
 
 Selector commands open nested menus and do not accept
@@ -138,8 +138,11 @@ trailing arguments; `/mcp` instead accepts `status`, `doctor`, `inspect`,
 `/effort` lists the Reasoning Effort levels supported by the current Model and
 applies the selected level to future Runs in the Session. The selection is
 translated for OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses.
-`/follow-up` is available only for a running Session, while unknown Slash text is
-submitted as ordinary Prompt text.
+`/permissions` opens Codex's Update Model Permissions presets — Read Only, Ask
+for approval, and Full Access — and applies the selected Approval Policy and
+Process Confinement Mode to the current Session. Full Access asks for
+confirmation first. `/follow-up` is available only for a running Session, while
+unknown Slash text is submitted as ordinary Prompt text.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
 `coda skills validate <path>` for strict Agent Skills validation without a Model
@@ -166,9 +169,14 @@ configuration diagnostics.
 
 The implemented events are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PostToolUse`, `PreCompact`, `PostCompact`, `Stop`, and `SessionEnd`.
-`PermissionRequest`, `SubagentStart`, and `SubagentStop` are deliberately
-recognized but not executed because Coda does not yet own those lifecycle
-capabilities.
+Command Permission hangs on `PreToolUse` and can resolve a hook
+`permissionDecision:ask` before the runtime sees the outcome. Approval Policy
+is `untrusted`, `on-request`, or `never` (`--ask-for-approval`). `/permissions`
+changes that policy together with Process Confinement Mode for the current
+Session. Print mode bypasses unresolved asks unless `--strict-permissions` is
+set.
+`PermissionRequest`, `SubagentStart`, and `SubagentStop` remain recognized
+configuration events but are not executed.
 
 ```json
 {
@@ -312,6 +320,7 @@ This status block is generated from executable runtime contracts. See the
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, and opt-in whole-Turn retry.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
 - **Built-in Tools** (@coda/coding-agent) — Workspace-relative and absolute-path reading, search, atomic single-file and structured multi-file mutation, direct host Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `grep`, `find`, `ls`, `patch`, `edit`, `write`, `bash`, `process_start`, `process_poll`, `process_write`, and `process_stop`.
+- **Command Permission** (@coda/permission) — A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session.
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
@@ -319,6 +328,7 @@ This status block is generated from executable runtime contracts. See the
 - **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
 - **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.
+- **Process Confinement** (@coda/sandbox) — A leaf wrapScript seam confines Bash, User Shell, and Process Session scripts through Anthropic Sandbox Runtime in read-only or workspace-write mode. danger-full-access leaves the process on the host. File Tools, hook handlers, and credential helpers stay on the host.
 - **Long-running process Sessions** (@coda/coding-agent) — Process-local background Shell Sessions execute directly on the host and support bounded start, poll, stdin, stop, and recoverable omitted output.
 - **Prompt and event formats** (@coda/coding-agent) — Deterministic per-Run System Prompt snapshots and stable opt-in JSONL v2 Agent events with optional media data.
 - **Custom Provider metadata** (@coda/coding-agent) — Custom Provider models retain configured context, output, image-input, reasoning, status, and tiered-cost metadata across settings, catalog refresh, selection, and runtime consumers.
@@ -344,7 +354,7 @@ This status block is generated from executable runtime contracts. See the
 
 - **Deferred model responses** (@coda/ai) — Fetching or cancelling deferred Provider responses has type-level representation but no supported OpenCode Go runtime implementation.
 - **Additional AI runtimes** (@coda/ai) — Complete OAuth, image generation, Providers beyond OpenCode Go or explicit custom Providers, and Browser or Bun entries are not implemented.
-- **Permission and delegated-worker Hooks** (@coda/coding-agent) — PermissionRequest, SubagentStart, and SubagentStop are recognized configuration events but remain inert until Coda owns permission and delegated-worker lifecycle capabilities.
+- **Permission and delegated-worker Hooks** (@coda/coding-agent) — PermissionRequest remains a deferred hook event. Command Permission now resolves ask on PreToolUse. SubagentStart and SubagentStop stay inert until delegated-worker lifecycle exists.
 - **Remote application interfaces** (@coda/coding-agent) — RPC, client/server mode, and a public Coding Agent SDK are not implemented.
 - **Advanced editing** (@coda/tui) — Autocomplete, selection, clipboard protocols, redo, durable drafts, and syntax highlighting are not implemented.
 - **Additional MCP primitives** (@coda/mcp) — Resources, Prompts, Roots, Sampling, Logging, complete OAuth, and legacy HTTP+SSE transport are outside the current MCP Host.
@@ -353,6 +363,6 @@ This status block is generated from executable runtime contracts. See the
 - **Additional terminal input and image protocols** (@coda/tui) — General mouse UI, Sixel, iTerm2 graphics, multiplexer image passthrough, and a generic terminal-image protocol are not implemented.
 <!-- coda:capabilities:end -->
 
-Model File Tools accept Workspace-relative or explicit absolute paths. Model `bash`, `process_start`, native search helpers, and file mutation workers execute directly on the host as the current user; Shell and background processes inherit Coda's complete process environment. Long-running processes use opaque process-local identities with `process_poll`, `process_write`, and `process_stop`; they cannot be restored as live after restart.
+Model File Tools accept Workspace-relative or explicit absolute paths. Model `bash`, `process_start`, native search helpers, and file mutation workers execute as the current user; Shell and background processes inherit Coda's complete process environment. `--sandbox read-only|workspace-write|danger-full-access` or `settings.sandbox.mode` confines Bash, User Shell, and Process Session scripts through Process Confinement; File Tools, hook handlers, and credential helpers stay on the host. Bare `--sandbox` selects workspace-write. Danger-full-access leaves those scripts on the host. Long-running processes use opaque process-local identities with `process_poll`, `process_write`, and `process_stop`; they cannot be restored as live after restart.
 
-Explicit interactive `!command` remains a separate direct-user entry point. It inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation.
+Explicit interactive `!command` remains a separate direct-user entry point. It inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation. When Process Confinement is enabled, User Shell scripts use the same `wrapScript` seam.

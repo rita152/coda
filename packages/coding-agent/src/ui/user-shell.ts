@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import type { ProcessConfinement } from "@coda/sandbox";
 import type { ProcessRunner, ProcessRunResult } from "../host/process-runner.ts";
 
 const USER_SHELL_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -31,6 +32,9 @@ export interface UserShellOptions {
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly clock: { now(): number };
 	readonly onUpdate: (snapshot: UserShellSnapshot) => void;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 }
 
 /** Runs one explicit user-authorized local Shell command and owns its bounded live transcript. */
@@ -87,12 +91,21 @@ export class UserShell {
 			const environment = definedEnvironment(this.#options.environment);
 			const configuredShell = environment.SHELL;
 			const executable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
-			const execute = (candidate: string) =>
-				this.#options.processRunner.run({
-					executable: candidate,
-					args: ["-lc", command],
+			const execute = async (candidate: string) => {
+				const confined = this.#options.wrapScript
+					? await this.#options.wrapScript({
+							command,
+							shell: candidate,
+							cwd: this.#options.workspace,
+							environment,
+						})
+					: undefined;
+				const spawn = confined ?? { executable: candidate, args: ["-lc", command] as const, environment };
+				return this.#options.processRunner.run({
+					executable: spawn.executable,
+					args: [...spawn.args],
 					cwd: this.#options.workspace,
-					environment,
+					environment: spawn.environment,
 					signal: controller.signal,
 					timeoutMs: USER_SHELL_TIMEOUT_MS,
 					maxOutputBytes: USER_SHELL_MAX_OUTPUT_BYTES,
@@ -111,6 +124,7 @@ export class UserShell {
 						);
 					},
 				});
+			};
 			let result: ProcessRunResult;
 			try {
 				result = await execute(executable);

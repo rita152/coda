@@ -243,11 +243,10 @@ describe("CommandLifecycleHookHost", () => {
 				toolUseId: "tool-ask",
 				toolInput: { command: "pwd" },
 			}),
-		).toMatchObject({ continue: true });
+		).toMatchObject({ continue: true, permissionAsk: true });
 		expect(await hooks.stop({ ...turn, stopHookActive: false })).toEqual({ continue: true });
 		expect(diagnostics).toEqual([
 			"UserPromptSubmit hook returned decision:block without a non-empty reason",
-			"PreToolUse hook returned unsupported permissionDecision:ask",
 			"Stop hook returned decision:block without a non-empty reason",
 		]);
 	});

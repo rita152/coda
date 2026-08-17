@@ -3,10 +3,12 @@ import { dirname, extname, relative, resolve, sep } from "node:path";
 export const PACKAGE_DEPENDENCY_MATRIX = Object.freeze({
 	ai: Object.freeze([]),
 	agent: Object.freeze(["ai"]),
-	"coding-agent": Object.freeze(["agent", "ai", "mcp", "runtime", "skills", "tui"]),
+	"coding-agent": Object.freeze(["agent", "ai", "mcp", "permission", "runtime", "sandbox", "skills", "tui"]),
 	evals: Object.freeze(["agent", "ai", "runtime"]),
 	mcp: Object.freeze([]),
+	permission: Object.freeze([]),
 	runtime: Object.freeze(["agent", "ai"]),
+	sandbox: Object.freeze([]),
 	skills: Object.freeze([]),
 	tui: Object.freeze([]),
 });

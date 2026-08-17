@@ -276,6 +276,7 @@ async function createFixture(
 		fileSystem: createNodeFileSystem(),
 		processRunner: createNodeProcessRunner({ platform: "darwin" }),
 		processSessionRunner,
+		commandPermissionAsk: async () => ({ action: "allow" }),
 		terminalFactory: { create: () => terminal },
 		io: { stdin: { isTTY, readAll: async () => "" }, stdout, stderr },
 		runtime: {

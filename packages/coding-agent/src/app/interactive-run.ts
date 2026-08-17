@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AgentInput, Clock, IdGenerator } from "@coda/agent";
 import type { Api, Model, MutableModels, ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult } from "@coda/mcp";
+import type { ProcessConfinement } from "@coda/sandbox";
 import { createTerminalImageSurface, type DiagnosticSink, type Keybinding, type Scheduler } from "@coda/tui";
 import type { ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
@@ -28,11 +29,13 @@ import type { SettingsStore } from "../settings/types.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import { activitySummaryModeForApi } from "../ui/activity-status.ts";
+import type { InteractiveCommandPermissionHandler } from "../ui/command-permission.ts";
 import type { FullScreenOutputGate } from "../ui/full-screen-output.ts";
 import type { InteractiveMcpElicitationHandler } from "../ui/mcp-elicitation.ts";
 import type { InteractiveProcessLifecycle } from "../ui/process-lifecycle.ts";
 import type { PromptRuntime } from "../ui/prompts.ts";
 import { type InteractiveSessionOptions, runInteractive } from "../ui/run-interactive.ts";
+import type { PermissionsCommand } from "./approval-sandbox.ts";
 import { finalText, findModel } from "./argument-parsing.ts";
 import { persistCustomProviders, refreshProviderAuth } from "./auth-flows.ts";
 import { createInteractiveSessionOptions } from "./interactive-session-options.ts";
@@ -51,6 +54,10 @@ export interface InteractiveRunApplicationOptions {
 	readonly settings: SettingsStore;
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
+	readonly wrapScript?: (
+		request: Parameters<ProcessConfinement["wrapScript"]>[0],
+	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
+	readonly commandPermission?: InteractiveCommandPermissionHandler;
 	readonly io: Pick<ApplicationIO, "stdout" | "stderr">;
 	readonly keybindings?: readonly Keybinding[];
 	readonly diagnostics?: DiagnosticSink;
@@ -87,6 +94,7 @@ export interface RunInteractiveApplicationInput {
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
 	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
+	readonly permissionsCommand: PermissionsCommand;
 	readonly commandRegistry: CommandRegistry;
 	readonly model: Model<Api>;
 	readonly reasoning: ThinkingLevel | "off";
@@ -203,6 +211,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				skillsCommand: input.skillsCommand,
 				mcpCommand: input.mcpCommand,
 				hooksCommand: input.hooksCommand,
+				permissionsCommand: input.permissionsCommand,
 				reasoning: targetReasoning,
 				skillsManager: input.skillsManager,
 				skillsSnapshot: input.skillsSnapshot,
@@ -236,6 +245,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		skillsCommand: input.skillsCommand,
 		mcpCommand: input.mcpCommand,
 		hooksCommand: input.hooksCommand,
+		permissionsCommand: input.permissionsCommand,
 		skillsManager: input.skillsManager,
 		skillsSnapshot: input.skillsSnapshot,
 		inputResources: input.inputResources,
@@ -311,6 +321,8 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			lifecycle: input.options.runtime.interactiveLifecycle,
 			allocateId: () => input.options.runtime.idGenerator.generate("queue_item"),
 			processRunner: input.options.processRunner,
+			...(input.options.wrapScript === undefined ? {} : { wrapScript: input.options.wrapScript }),
+			...(input.options.commandPermission ? { commandPermission: input.options.commandPermission } : {}),
 			platform: input.options.runtime.platform,
 			environment: input.options.runtime.environment,
 			workspace: input.workspace.root,

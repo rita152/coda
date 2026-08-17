@@ -1,4 +1,6 @@
 import type { ThinkingLevel } from "@coda/ai";
+import type { ApprovalPolicy, RememberedCommandPermission } from "@coda/permission";
+import type { SandboxMode } from "@coda/sandbox";
 import type { TerminalColorScheme } from "@coda/tui";
 import type { HookTrustRecord } from "../hooks/types.ts";
 import type { McpServerConfiguration, WorkspaceMcpTrustRecord } from "../mcp/config.ts";
@@ -19,6 +21,17 @@ export interface UserSettings {
 	readonly mcpServers?: readonly McpServerConfiguration[];
 	readonly workspaceMcpTrust?: readonly WorkspaceMcpTrustRecord[];
 	readonly hookTrust?: readonly HookTrustRecord[];
+	readonly permission?: {
+		readonly approvalPolicy?: ApprovalPolicy;
+		readonly enabled?: boolean;
+		readonly remembered?: readonly RememberedCommandPermission[];
+	};
+	readonly sandbox?: {
+		readonly mode?: SandboxMode;
+		readonly enabled?: boolean;
+		readonly allowedDomains?: readonly string[];
+		readonly deniedDomains?: readonly string[];
+	};
 	readonly ui?: {
 		readonly motion?: "full" | "reduced";
 		readonly colorScheme?: TerminalColorScheme;

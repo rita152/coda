@@ -13,12 +13,14 @@ describe("core commands", () => {
 			"skills",
 			"mcp",
 			"hooks",
+			"permissions",
 			"session",
 			"new",
 			"follow-up",
 		]);
 		expect(resolveCommandInvocation(registry, "/skill")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/effort")?.command.id).toBe("core:effort");
+		expect(resolveCommandInvocation(registry, "/permissions")?.command.id).toBe("core:permissions");
 		expect(resolveCommandInvocation(registry, "/skills")?.command.id).toBe("core:skills");
 		expect(resolveCommandInvocation(registry, "/legacy")).toBeUndefined();
 		expect(resolveCommandInvocation(registry, "/attach image.png")).toBeUndefined();

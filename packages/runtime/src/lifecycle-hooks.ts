@@ -37,6 +37,8 @@ export interface UserPromptSubmitHookOutcome extends HookContinueOutcome {
 export interface PreToolUseHookOutcome extends HookContinueOutcome {
 	readonly updatedInput?: Readonly<Record<string, unknown>>;
 	readonly additionalContext?: readonly string[];
+	/** Unresolved ask. Runtime fail-closes unless an application adapter resolves it. */
+	readonly permissionAsk?: boolean;
 }
 
 export interface PostToolUseHookOutcome extends HookContinueOutcome {
